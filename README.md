@@ -31,6 +31,10 @@
 > **This project is currently in active development and considered experimental.**  
 > APIs are subject to change without notice. Use with caution in production environments.
 
+`httpx.zig` is a comprehensive, high-performance HTTP library designed for building robust networked applications. It features a modern API with support for all major HTTP versions, connection pooling, and express-style server routing.
+
+**⭐️ If you build with `httpx.zig`, make sure to give it a star! ⭐️**
+
 > [!NOTE]
 > **Custom HTTP/2 & HTTP/3 Implementation:** Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support.
 > httpx.zig implements these protocols **entirely from scratch**, including:
@@ -39,9 +43,6 @@
 > - **QPACK** header compression (RFC 9204) for HTTP/3
 > - **QUIC** transport framing (RFC 9000) for HTTP/3
 
-`httpx.zig` is a comprehensive, high-performance HTTP library designed for building robust networked applications. It features a modern API with support for all major HTTP versions, connection pooling, and express-style server routing.
-
-**⭐️ If you build with `httpx.zig`, make sure to give it a star! ⭐️**
 
 ---
 
