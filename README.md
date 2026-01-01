@@ -1,5 +1,9 @@
 <div align="center">
 
+ 
+ <img  alt="httpx.zig cover image" src="https://github.com/user-attachments/assets/9ecf8417-4d58-419a-8665-49d5f0eb0573" />
+
+
 # httpx.zig
 
 <a href="https://muhammad-fiaz.github.io/httpx.zig/"><img src="https://img.shields.io/badge/docs-muhammad--fiaz.github.io-blue" alt="Documentation"></a>
@@ -14,7 +18,7 @@
 <a href="https://github.com/sponsors/muhammad-fiaz"><img src="https://img.shields.io/badge/Sponsor-💖-pink?style=social&logo=github" alt="GitHub Sponsors"></a>
 
 
-<p><em>A production-ready, high-performance HTTP client and server library for Zig supporting HTTP/1.1, HTTP/2, and HTTP/3.</em></p>
+<p><em>A production-ready, high-performance HTTP client and server library for Zig </em></p>
 
 <b>📚 <a href="https://muhammad-fiaz.github.io/httpx.zig/">Documentation</a> |
 <a href="https://muhammad-fiaz.github.io/httpx.zig/api/client">API Reference</a> |
