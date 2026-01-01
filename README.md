@@ -13,9 +13,6 @@
 <a href="https://pay.muhammadfiaz.com"><img src="https://img.shields.io/badge/Sponsor-pay.muhammadfiaz.com-ff69b4?style=flat&logo=heart" alt="Sponsor"></a>
 <a href="https://github.com/sponsors/muhammad-fiaz"><img src="https://img.shields.io/badge/Sponsor-💖-pink?style=social&logo=github" alt="GitHub Sponsors"></a>
 
-> [!WARNING]
-> **This project is currently in active development and considered experimental.**  
-> APIs are subject to change without notice. Use with caution in production environments.
 
 <p><em>A production-ready, high-performance HTTP client and server library for Zig supporting HTTP/1.1, HTTP/2, and HTTP/3.</em></p>
 
@@ -25,6 +22,10 @@
 <a href="CONTRIBUTING.md">Contributing</a></b>
 
 </div>
+
+> [!WARNING]
+> **This project is currently in active development and considered experimental.**  
+> APIs are subject to change without notice. Use with caution in production environments.
 
 `httpx.zig` is a comprehensive, high-performance HTTP library designed for building robust networked applications. It features a modern API with support for all major HTTP versions, connection pooling, and express-style server routing.
 
