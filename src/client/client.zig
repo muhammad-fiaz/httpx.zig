@@ -197,7 +197,7 @@ pub const Client = struct {
                 if (policy.retry_on_connection_error and can_retry_method and attempt < policy.max_retries) {
                     attempt += 1;
                     const delay_ms = policy.calculateDelay(attempt);
-                    if (delay_ms > 0) std.time.sleep(delay_ms * std.time.ns_per_ms);
+                    if (delay_ms > 0) std.Thread.sleep(delay_ms * std.time.ns_per_ms);
                     continue;
                 }
                 return err;
@@ -207,7 +207,7 @@ pub const Client = struct {
                 res.deinit();
                 attempt += 1;
                 const delay_ms = policy.calculateDelay(attempt);
-                if (delay_ms > 0) std.time.sleep(delay_ms * std.time.ns_per_ms);
+                if (delay_ms > 0) std.Thread.sleep(delay_ms * std.time.ns_per_ms);
                 continue;
             }
 
@@ -290,6 +290,7 @@ pub const Client = struct {
 
         const w = try session.getWriter();
         try w.writeAll(request_data);
+        try session.flushWriter();
 
         const r = try session.getReader();
         return self.readResponseFromIo(r);
@@ -316,15 +317,18 @@ pub const Client = struct {
         var parser = Parser.initResponse(self.allocator);
         defer parser.deinit();
 
-        var buf: [16 * 1024]u8 = undefined;
         while (!parser.isComplete()) {
-            var iov = [_][]u8{buf[0..]};
-            const n = r.readVec(&iov) catch |err| switch (err) {
-                error.EndOfStream => 0,
-                else => return err,
+            // Ensure at least 1 byte is available in the reader's buffer.
+            // The TLS reader decrypts records into its internal buffer.
+            _ = r.peek(1) catch |err| switch (err) {
+                error.EndOfStream => break,
+                error.ReadFailed => return err,
             };
-            if (n == 0) break;
-            _ = try parser.feed(buf[0..n]);
+            // Feed all buffered decrypted data to the parser.
+            const buffered = r.buffer[r.seek..r.end];
+            if (buffered.len == 0) break;
+            _ = try parser.feed(buffered);
+            r.seek += buffered.len;
         }
 
         parser.finishEof();

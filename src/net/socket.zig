@@ -74,50 +74,74 @@ pub const SocketIoReader = struct {
         return @fieldParentPtr("reader", r);
     }
 
-    fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
-        var total: usize = 0;
-
-        while (total < limit.toInt(usize)) {
-            const max_to_read = @min(r.buffer.len, limit.toInt(usize) - total);
-            var iov = [_][]u8{r.buffer[0..max_to_read]};
-            const n = readVec(r, &iov) catch |err| switch (err) {
-                error.EndOfStream => break,
-                else => return err,
-            };
-            if (n == 0) break;
-
-            try w.writeAll(r.buffer[0..n]);
-            total += n;
-        }
-
-        return total;
-    }
-
-    fn discard(r: *Io.Reader, limit: Io.Limit) Io.Reader.StreamRemainingError!usize {
-        var total: usize = 0;
-
-        while (total < limit.toInt(usize)) {
-            const max_to_read = @min(r.buffer.len, limit.toInt(usize) - total);
-            var iov = [_][]u8{r.buffer[0..max_to_read]};
-            const n = readVec(r, &iov) catch |err| switch (err) {
-                error.EndOfStream => break,
-                else => return err,
-            };
-            if (n == 0) break;
-            total += n;
-        }
-
-        return total;
-    }
-
-    fn readVec(r: *Io.Reader, bufs: [][]u8) Io.Reader.Error!usize {
-        const p = parent(r);
-        if (bufs.len == 0) return 0;
-        const buf = bufs[0];
-        const n = p.socket.recv(buf) catch return error.ReadFailed;
-        if (n == 0) return error.EndOfStream;
+    fn stream(io_r: *Io.Reader, io_w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+        const dest = limit.slice(try io_w.writableSliceGreedy(1));
+        var bufs: [1][]u8 = .{dest};
+        const n = try readVec(io_r, &bufs);
+        io_w.advance(n);
         return n;
     }
+
+    fn readVec(io_r: *Io.Reader, data: [][]u8) Io.Reader.Error!usize {
+        const p = parent(io_r);
+        if (is_windows) {
+            const windows = std.os.windows;
+            var iovecs: [max_buffers_len]windows.ws2_32.WSABUF = undefined;
+            const bufs_n, const data_size = try io_r.writableVectorWsa(&iovecs, data);
+            const bufs = iovecs[0..bufs_n];
+            if (bufs.len == 0 or bufs[0].len == 0) return 0;
+
+            var flags: u32 = 0;
+            var overlapped: windows.OVERLAPPED = std.mem.zeroes(windows.OVERLAPPED);
+            var n: u32 = undefined;
+
+            if (windows.ws2_32.WSARecv(
+                p.socket.handle,
+                bufs.ptr,
+                @intCast(bufs.len),
+                &n,
+                &flags,
+                &overlapped,
+                null,
+            ) == windows.ws2_32.SOCKET_ERROR) {
+                switch (windows.ws2_32.WSAGetLastError()) {
+                    .WSA_IO_PENDING => {
+                        var result_flags: u32 = undefined;
+                        if (windows.ws2_32.WSAGetOverlappedResult(
+                            p.socket.handle,
+                            &overlapped,
+                            &n,
+                            windows.TRUE,
+                            &result_flags,
+                        ) == windows.FALSE) return error.ReadFailed;
+                    },
+                    else => return error.ReadFailed,
+                }
+            }
+
+            if (n == 0) return error.EndOfStream;
+            if (n > data_size) {
+                io_r.end += n - data_size;
+                return data_size;
+            }
+            return n;
+        } else {
+            var bufs: [max_buffers_len][]u8 = undefined;
+            const bufs_n, const data_size = try io_r.writableVector(&bufs, data);
+            const real_bufs = bufs[0..bufs_n];
+            if (real_bufs.len == 0 or real_bufs[0].len == 0) return 0;
+
+            const n = p.socket.recv(real_bufs[0]) catch return error.ReadFailed;
+            if (n == 0) return error.EndOfStream;
+            if (n > data_size) {
+                io_r.end += n - data_size;
+                return data_size;
+            }
+            return n;
+        }
+    }
+
+    const max_buffers_len = 8;
 
     fn rebase(_: *Io.Reader, _: usize) Io.Reader.RebaseError!void {
         // Sockets are not seekable; nothing to do.
@@ -125,7 +149,6 @@ pub const SocketIoReader = struct {
 
     const vtable: Io.Reader.VTable = .{
         .stream = stream,
-        .discard = discard,
         .readVec = readVec,
         .rebase = rebase,
     };
@@ -153,37 +176,43 @@ pub const SocketIoWriter = struct {
         return @fieldParentPtr("writer", w);
     }
 
-    fn drain(w: *Io.Writer, bufs: []const []const u8, start_index: usize) Io.Writer.Error!usize {
+    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
         const p = parent(w);
-        var i: usize = start_index;
-        while (i < bufs.len and bufs[i].len == 0) : (i += 1) {}
-        if (i >= bufs.len) return 0;
+        const buffered = w.buffered();
+        var total_sent: usize = 0;
 
-        const n = p.socket.send(bufs[i]) catch return error.WriteFailed;
-        return n;
-    }
-
-    fn sendFile(w: *Io.Writer, file_reader: *std.fs.File.Reader, limit: Io.Limit) Io.Writer.FileAllError!usize {
-        const p = parent(w);
-
-        var total: usize = 0;
-        while (total < limit.toInt(usize)) {
-            const remaining = limit.toInt(usize) - total;
-            const chunk_len = @min(w.buffer.len, remaining);
-            if (chunk_len == 0) break;
-
-            const n_read = file_reader.read(w.buffer[0..chunk_len]) catch return error.ReadFailed;
-            if (n_read == 0) break;
-
-            p.socket.sendAll(w.buffer[0..n_read]) catch return error.WriteFailed;
-            total += n_read;
+        // 1. Send existing buffered data.
+        if (buffered.len > 0) {
+            p.socket.sendAll(buffered) catch return error.WriteFailed;
+            total_sent += buffered.len;
         }
 
-        return total;
+        // 2. Send the non-splat data slices.
+        for (data[0 .. data.len - 1]) |bytes| {
+            if (bytes.len > 0) {
+                p.socket.sendAll(bytes) catch return error.WriteFailed;
+                total_sent += bytes.len;
+            }
+        }
+
+        // 3. Send the last element (pattern) repeated `splat` times.
+        const pattern = data[data.len - 1];
+        if (pattern.len > 0) {
+            for (0..splat) |_| {
+                p.socket.sendAll(pattern) catch return error.WriteFailed;
+                total_sent += pattern.len;
+            }
+        }
+
+        return w.consume(total_sent);
     }
 
-    fn flush(_: *Io.Writer) Io.Writer.Error!void {
-        // No-op for blocking sockets.
+    fn sendFile(_: *Io.Writer, _: *std.fs.File.Reader, _: Io.Limit) Io.Writer.FileError!usize {
+        return error.Unimplemented;
+    }
+
+    fn flush(w: *Io.Writer) Io.Writer.Error!void {
+        return Io.Writer.defaultFlush(w);
     }
 
     fn rebase(_: *Io.Writer, _: usize, _: usize) Io.Writer.Error!void {

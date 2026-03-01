@@ -136,6 +136,8 @@ pub const Response = response.Response;
 pub const ResponseBuilder = response.ResponseBuilder;
 
 pub const Socket = socket.Socket;
+pub const SocketIoReader = socket.SocketIoReader;
+pub const SocketIoWriter = socket.SocketIoWriter;
 pub const TcpListener = socket.TcpListener;
 pub const UdpSocket = socket.UdpSocket;
 

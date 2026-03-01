@@ -18,7 +18,7 @@ pub fn resolve(hostname: []const u8, port: u16) !net.Address {
     }
 
     if (parseIp6(hostname)) |ip6| {
-        return net.Address.initIp6(ip6, 0, port);
+        return net.Address.initIp6(ip6, port, 0, 0);
     }
 
     const list = try net.getAddressList(std.heap.page_allocator, hostname, port);

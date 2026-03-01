@@ -159,10 +159,10 @@ pub const TlsSession = struct {
         const sock = self.socket orelse return error.MissingTransport;
 
         // Allocate buffers once per session.
-        if (self.net_read_buf == null) self.net_read_buf = try self.allocator.alloc(u8, 16 * 1024);
-        if (self.net_write_buf == null) self.net_write_buf = try self.allocator.alloc(u8, 16 * 1024);
-
         const min_tls_buf = tls.Client.min_buffer_len;
+        if (self.net_read_buf == null) self.net_read_buf = try self.allocator.alloc(u8, @max(16 * 1024, min_tls_buf));
+        if (self.net_write_buf == null) self.net_write_buf = try self.allocator.alloc(u8, @max(16 * 1024, min_tls_buf));
+
         if (self.tls_read_buf == null) self.tls_read_buf = try self.allocator.alloc(u8, min_tls_buf);
         if (self.tls_write_buf == null) self.tls_write_buf = try self.allocator.alloc(u8, min_tls_buf);
 
@@ -226,6 +226,14 @@ pub const TlsSession = struct {
     pub fn getWriter(self: *Self) !*std.Io.Writer {
         const c = if (self.client) |*c| c else return error.NotConnected;
         return &c.writer;
+    }
+
+    /// Flushes the TLS writer and the underlying network output writer.
+    /// Must be called after writing data to ensure it is actually sent.
+    pub fn flushWriter(self: *Self) !void {
+        const c = if (self.client) |*c| c else return error.NotConnected;
+        try c.writer.flush(); // Encrypt pending plaintext into output
+        try c.output.flush(); // Send encrypted data to socket
     }
 
     /// Returns the negotiated ALPN protocol.

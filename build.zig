@@ -45,6 +45,7 @@ pub fn build(b: *std.Build) void {
         if (target.result.os.tag == .windows) {
             exe.linkSystemLibrary("ws2_32");
             exe.linkSystemLibrary("mswsock");
+            exe.linkLibC();
         }
 
         const install_exe = b.addInstallArtifact(exe, .{});
@@ -75,6 +76,7 @@ pub fn build(b: *std.Build) void {
         if (target.result.os.tag == .windows) {
             exe.linkSystemLibrary("ws2_32");
             exe.linkSystemLibrary("mswsock");
+            exe.linkLibC();
         }
 
         const install_exe = b.addInstallArtifact(exe, .{});
@@ -102,6 +104,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows) {
         tests.linkSystemLibrary("ws2_32");
         tests.linkSystemLibrary("mswsock");
+        tests.linkLibC();
     }
 
     const run_tests = b.addRunArtifact(tests);
@@ -124,6 +127,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .windows) {
         bench_exe.linkSystemLibrary("ws2_32");
         bench_exe.linkSystemLibrary("mswsock");
+        bench_exe.linkLibC();
     }
 
     const install_bench = b.addInstallArtifact(bench_exe, .{});
