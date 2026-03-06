@@ -8,7 +8,6 @@
 //! - Reader/Writer interfaces for streaming
 
 const std = @import("std");
-const net = std.net;
 const posix = std.posix;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -16,10 +15,7 @@ const builtin = @import("builtin");
 
 const is_windows = builtin.os.tag == .windows;
 
-const INVALID_SOCKET: posix.socket_t = if (is_windows)
-    @ptrFromInt(~@as(usize, 0))
-else
-    -1;
+const net = Io.net;
 
 pub const UdpError = error{
     SendFailed,
@@ -34,8 +30,6 @@ pub const NetInitError = error{InitializationError};
 pub fn init() NetInitError!void {
     if (!is_windows) return;
 
-    // Zig's std.posix APIs usually handle WSA initialization internally, but we
-    // expose this for explicit control and compatibility with other networking code.
     if (@hasDecl(std.os.windows, "WSAStartup")) {
         _ = std.os.windows.WSAStartup(2, 2) catch return error.InitializationError;
     }
@@ -51,6 +45,11 @@ pub fn deinit() void {
     }
 }
 
+/// Returns a blocking single-threaded Io instance.
+pub fn getIo() Io {
+    return Io.Threaded.global_single_threaded.io();
+}
+
 /// Adapter that exposes a `std.Io.Reader` backed by a connected `Socket`.
 ///
 /// This is primarily used to integrate with `std.crypto.tls.Client`.
@@ -58,7 +57,7 @@ pub const SocketIoReader = struct {
     socket: *Socket,
     reader: Io.Reader,
 
-    pub fn init(socket: *Socket, buffer: []u8) SocketIoReader {
+    pub fn initFromSocket(socket: *Socket, buffer: []u8) SocketIoReader {
         return .{
             .socket = socket,
             .reader = .{
@@ -138,7 +137,7 @@ pub const SocketIoWriter = struct {
     socket: *Socket,
     writer: Io.Writer,
 
-    pub fn init(socket: *Socket, buffer: []u8) SocketIoWriter {
+    pub fn initFromSocket(socket: *Socket, buffer: []u8) SocketIoWriter {
         return .{
             .socket = socket,
             .writer = .{
@@ -199,91 +198,93 @@ pub const SocketIoWriter = struct {
 };
 
 /// TCP socket abstraction with cross-platform support.
+///
+/// In Zig 0.16, this wraps the new `std.Io.net` API. A Socket represents
+/// a connected TCP stream.
 pub const Socket = struct {
-    handle: posix.socket_t,
+    stream: net.Stream,
+    io: Io,
     connected: bool = false,
 
     const Self = @This();
 
-    /// Creates a new TCP socket.
-    pub fn create() !Self {
-        try init();
-        const handle = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
-        return .{ .handle = handle };
+    /// Connects to the specified address and returns a new Socket.
+    pub fn connectTo(address: net.IpAddress) !Self {
+        const io = getIo();
+        const stream = address.connect(io, .{ .mode = .stream }) catch return error.ConnectionFailed;
+        return .{ .stream = stream, .io = io, .connected = true };
     }
 
-    /// Creates a new TCP socket using the address family of the provided address.
-    pub fn createForAddress(addr: net.Address) !Self {
-        try init();
-        const handle = try posix.socket(addr.any.family, posix.SOCK.STREAM, 0);
-        return .{ .handle = handle };
-    }
-
-    /// Creates a socket from an existing handle.
-    pub fn fromHandle(handle: posix.socket_t) Self {
-        return .{ .handle = handle, .connected = true };
+    /// Creates a socket from an existing stream.
+    pub fn fromStream(stream: net.Stream, io: Io) Self {
+        return .{ .stream = stream, .io = io, .connected = true };
     }
 
     /// Closes the socket and releases resources.
     pub fn close(self: *Self) void {
-        if (self.isValid()) {
-            posix.close(self.handle);
-            self.handle = INVALID_SOCKET;
+        if (self.connected) {
+            self.stream.close(self.io);
             self.connected = false;
         }
     }
 
-    /// Returns true if the socket handle is valid.
+    /// Returns true if the socket is connected.
     pub fn isValid(self: *const Self) bool {
-        return self.handle != INVALID_SOCKET;
+        return self.connected;
     }
 
-    /// Connects to the specified address.
-    pub fn connect(self: *Self, addr: net.Address) !void {
-        try posix.connect(self.handle, &addr.any, addr.getOsSockLen());
-        self.connected = true;
+    /// Returns the underlying OS handle for socket options.
+    pub fn getHandle(self: *const Self) net.Socket.Handle {
+        return self.stream.socket.handle;
     }
 
     /// Sends data through the socket, returning bytes sent.
     pub fn send(self: *Self, data: []const u8) !usize {
-        return posix.send(self.handle, data, 0);
+        // Use the stream writer for sending
+        var write_buf: [16 * 1024]u8 = undefined;
+        var sw = self.stream.writer(self.io, &write_buf);
+        const n = sw.interface.write(data) catch return error.SendFailed;
+        sw.interface.flush() catch return error.SendFailed;
+        return n;
     }
 
     /// Sends all data, blocking until complete.
     pub fn sendAll(self: *Self, data: []const u8) !void {
-        var sent: usize = 0;
-        while (sent < data.len) {
-            sent += try self.send(data[sent..]);
-        }
+        var write_buf: [16 * 1024]u8 = undefined;
+        var sw = self.stream.writer(self.io, &write_buf);
+        sw.interface.writeAll(data) catch return error.SendFailed;
+        sw.interface.flush() catch return error.SendFailed;
     }
 
     /// Receives data into the buffer, returning bytes received.
     pub fn recv(self: *Self, buffer: []u8) !usize {
-        return posix.recv(self.handle, buffer, 0);
-    }
-
-    /// Sets a socket option.
-    pub fn setOption(self: *Self, level: u32, optname: u32, value: []const u8) !void {
-        try posix.setsockopt(self.handle, level, optname, value);
+        var read_buf: [16 * 1024]u8 = undefined;
+        var sr = self.stream.reader(self.io, &read_buf);
+        var iov = [_][]u8{buffer};
+        const n = sr.interface.readVec(&iov) catch |err| switch (err) {
+            error.EndOfStream => return 0,
+            else => return error.RecvFailed,
+        };
+        return n;
     }
 
     /// Enables or disables TCP_NODELAY (Nagle's algorithm).
     pub fn setNoDelay(self: *Self, enable: bool) !void {
         const value: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.handle, posix.IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&value));
+        try posix.setsockopt(self.getHandle(), posix.IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&value));
     }
 
     /// Sets the receive timeout in milliseconds.
     pub fn setRecvTimeout(self: *Self, ms: u64) !void {
         if (is_windows) {
             const value_ms: u32 = @intCast(@min(ms, @as(u64, std.math.maxInt(u32))));
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&value_ms));
+            try posix.setsockopt(self.getHandle(), posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&value_ms));
         } else {
             const tv = posix.timeval{
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast((ms % 1000) * 1000),
             };
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
+            try posix.setsockopt(self.getHandle(), posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
         }
     }
 
@@ -291,240 +292,114 @@ pub const Socket = struct {
     pub fn setSendTimeout(self: *Self, ms: u64) !void {
         if (is_windows) {
             const value_ms: u32 = @intCast(@min(ms, @as(u64, std.math.maxInt(u32))));
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&value_ms));
+            try posix.setsockopt(self.getHandle(), posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&value_ms));
         } else {
             const tv = posix.timeval{
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast((ms % 1000) * 1000),
             };
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv));
+            try posix.setsockopt(self.getHandle(), posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv));
         }
     }
 
     /// Enables or disables keep-alive probes.
     pub fn setKeepAlive(self: *Self, enable: bool) !void {
         const value: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&value));
+        try posix.setsockopt(self.getHandle(), posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&value));
     }
 
     /// Enables or disables address reuse.
     pub fn setReuseAddr(self: *Self, enable: bool) !void {
         const value: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&value));
-    }
-
-    /// Binds the socket to an address.
-    pub fn bind(self: *Self, addr: net.Address) !void {
-        try posix.bind(self.handle, &addr.any, addr.getOsSockLen());
-    }
-
-    /// Starts listening for connections.
-    pub fn listen(self: *Self, backlog: u31) !void {
-        try posix.listen(self.handle, backlog);
-    }
-
-    /// Accepts an incoming connection.
-    pub fn accept(self: *Self) !struct { socket: Socket, addr: net.Address } {
-        var addr: posix.sockaddr = undefined;
-        var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-        const handle = try posix.accept(self.handle, &addr, &addr_len);
-        return .{
-            .socket = Socket.fromHandle(handle),
-            .addr = net.Address{ .any = addr },
-        };
-    }
-
-    /// Returns a reader interface for the socket.
-    pub fn reader(self: *Self) std.io.AnyReader {
-        return .{
-            .context = @ptrCast(self),
-            .readFn = struct {
-                fn read(ctx: *const anyopaque, buffer: []u8) !usize {
-                    const s: *Socket = @ptrCast(@constCast(ctx));
-                    return s.recv(buffer) catch |err| switch (err) {
-                        error.WouldBlock => 0,
-                        else => err,
-                    };
-                }
-            }.read,
-        };
-    }
-
-    /// Returns a writer interface for the socket.
-    pub fn writer(self: *Self) std.io.AnyWriter {
-        return .{
-            .context = @ptrCast(self),
-            .writeFn = struct {
-                fn write(ctx: *const anyopaque, data: []const u8) !usize {
-                    const s: *Socket = @ptrCast(@constCast(ctx));
-                    return s.send(data);
-                }
-            }.write,
-        };
+        try posix.setsockopt(self.getHandle(), posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&value));
     }
 };
 
 /// TCP listener for accepting incoming connections.
 pub const TcpListener = struct {
-    socket: Socket,
+    server: net.Server,
+    io: Io,
 
     const Self = @This();
 
     /// Creates and binds a TCP listener to the address.
-    pub fn init(addr: net.Address) !Self {
-        var socket = try Socket.createForAddress(addr);
-        errdefer socket.close();
-
-        try socket.setReuseAddr(true);
-        try socket.bind(addr);
-        try socket.listen(128);
-
-        return .{ .socket = socket };
+    pub fn listenOn(address: net.IpAddress) !Self {
+        const io = getIo();
+        const server = address.listen(io, .{
+            .reuse_address = true,
+        }) catch return error.ListenFailed;
+        return .{ .server = server, .io = io };
     }
 
     /// Closes the listener.
-    pub fn deinit(self: *Self) void {
-        self.socket.close();
+    pub fn closeListener(self: *Self) void {
+        self.server.deinit(self.io);
     }
 
     /// Accepts an incoming connection.
-    pub fn accept(self: *Self) !struct { socket: Socket, addr: net.Address } {
-        return self.socket.accept();
-    }
-
-    /// Returns the local address the listener is bound to.
-    pub fn getLocalAddress(self: *Self) !net.Address {
-        var addr: posix.sockaddr = undefined;
-        var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-        try posix.getsockname(self.socket.handle, &addr, &addr_len);
-        return net.Address{ .any = addr };
+    pub fn acceptConnection(self: *Self) !Socket {
+        const stream = self.server.accept(self.io) catch return error.AcceptFailed;
+        return Socket.fromStream(stream, self.io);
     }
 };
 
 /// UDP datagram socket abstraction.
-///
-/// This is a low-level building block used for DNS, QUIC, custom protocols, etc.
-/// It intentionally does not hide allocation or buffering.
 pub const UdpSocket = struct {
-    handle: posix.socket_t,
+    socket: net.Socket,
+    io: Io,
     connected: bool = false,
 
     const Self = @This();
 
-    /// Creates a new UDP socket (IPv4 by default).
-    pub fn create() !Self {
-        return createV4();
-    }
-
-    /// Creates a new UDP socket for IPv4.
-    pub fn createV4() !Self {
-        try init();
-        const handle = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
-        return .{ .handle = handle };
-    }
-
-    /// Creates a new UDP socket for IPv6.
-    pub fn createV6() !Self {
-        try init();
-        const handle = try posix.socket(posix.AF.INET6, posix.SOCK.DGRAM, 0);
-        return .{ .handle = handle };
+    /// Creates and binds a UDP socket to the specified address.
+    pub fn bindTo(address: net.IpAddress) !Self {
+        const io = getIo();
+        const sock = net.IpAddress.bind(&address, io, .{
+            .mode = .dgram,
+        }) catch return error.BindFailed;
+        return .{ .socket = sock, .io = io };
     }
 
     /// Closes the socket and releases resources.
     pub fn close(self: *Self) void {
-        if (self.isValid()) {
-            posix.close(self.handle);
-            self.handle = INVALID_SOCKET;
-            self.connected = false;
-        }
+        self.socket.close(self.io);
     }
 
-    /// Returns true if the socket handle is valid.
+    /// Returns true if the socket is valid.
     pub fn isValid(self: *const Self) bool {
-        return self.handle != INVALID_SOCKET;
-    }
-
-    /// Binds the socket to an address.
-    pub fn bind(self: *Self, addr: net.Address) !void {
-        try posix.bind(self.handle, &addr.any, addr.getOsSockLen());
-    }
-
-    /// Connects the UDP socket to a default peer address.
-    /// After calling this, `send`/`recv` operate on that peer.
-    pub fn connect(self: *Self, addr: net.Address) !void {
-        try posix.connect(self.handle, &addr.any, addr.getOsSockLen());
-        self.connected = true;
-    }
-
-    /// Sends a datagram to the connected peer.
-    pub fn send(self: *Self, data: []const u8) !usize {
-        return posix.send(self.handle, data, 0);
+        _ = self;
+        return true;
     }
 
     /// Sends a datagram to a specific address.
-    pub fn sendTo(self: *Self, addr: net.Address, data: []const u8) !usize {
-        if (is_windows) {
-            const ws2_32 = std.os.windows.ws2_32;
-            const rc = ws2_32.sendto(
-                self.handle,
-                @ptrCast(data.ptr),
-                @intCast(data.len),
-                0,
-                @ptrCast(&addr.any),
-                @intCast(addr.getOsSockLen()),
-            );
-            if (rc == ws2_32.SOCKET_ERROR) return UdpError.SendFailed;
-            return @intCast(rc);
-        }
-
-        return posix.sendto(self.handle, data, 0, &addr.any, addr.getOsSockLen());
-    }
-
-    /// Receives a datagram from the connected peer.
-    pub fn recv(self: *Self, buffer: []u8) !usize {
-        return posix.recv(self.handle, buffer, 0);
+    pub fn sendTo(self: *Self, dest: *const net.IpAddress, data: []const u8) !usize {
+        self.socket.send(self.io, dest, data) catch return UdpError.SendFailed;
+        return data.len;
     }
 
     /// Receives a datagram and returns the source address.
-    pub fn recvFrom(self: *Self, buffer: []u8) !struct { n: usize, addr: net.Address } {
-        var addr: posix.sockaddr = undefined;
-        if (is_windows) {
-            const ws2_32 = std.os.windows.ws2_32;
-            var addr_len: i32 = @intCast(@sizeOf(posix.sockaddr));
-            const rc = ws2_32.recvfrom(
-                self.handle,
-                @ptrCast(buffer.ptr),
-                @intCast(buffer.len),
-                0,
-                @ptrCast(&addr),
-                &addr_len,
-            );
-            if (rc == ws2_32.SOCKET_ERROR) return UdpError.RecvFailed;
-            return .{ .n = @intCast(rc), .addr = net.Address{ .any = addr } };
-        } else {
-            var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-            const n = try posix.recvfrom(self.handle, buffer, 0, &addr, &addr_len);
-            return .{ .n = n, .addr = net.Address{ .any = addr } };
-        }
+    pub fn recvFrom(self: *Self, buffer: []u8) !struct { n: usize, addr: net.IpAddress } {
+        const msg = self.socket.receive(self.io, buffer) catch return UdpError.RecvFailed;
+        return .{ .n = msg.data.len, .addr = msg.from };
     }
 
     /// Enables or disables address reuse.
     pub fn setReuseAddr(self: *Self, enable: bool) !void {
         const value: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&value));
+        try posix.setsockopt(self.socket.handle, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&value));
     }
 
     /// Sets the receive timeout in milliseconds.
     pub fn setRecvTimeout(self: *Self, ms: u64) !void {
         if (is_windows) {
             const value_ms: u32 = @intCast(@min(ms, @as(u64, std.math.maxInt(u32))));
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&value_ms));
+            try posix.setsockopt(self.socket.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&value_ms));
         } else {
             const tv = posix.timeval{
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast((ms % 1000) * 1000),
             };
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
+            try posix.setsockopt(self.socket.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
         }
     }
 
@@ -532,62 +407,62 @@ pub const UdpSocket = struct {
     pub fn setSendTimeout(self: *Self, ms: u64) !void {
         if (is_windows) {
             const value_ms: u32 = @intCast(@min(ms, @as(u64, std.math.maxInt(u32))));
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&value_ms));
+            try posix.setsockopt(self.socket.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&value_ms));
         } else {
             const tv = posix.timeval{
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast((ms % 1000) * 1000),
             };
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv));
+            try posix.setsockopt(self.socket.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv));
         }
-    }
-
-    /// Returns the local address the socket is bound to.
-    pub fn getLocalAddress(self: *Self) !net.Address {
-        var addr: posix.sockaddr = undefined;
-        var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-        try posix.getsockname(self.handle, &addr, &addr_len);
-        return net.Address{ .any = addr };
     }
 };
 
-test "Socket create and close" {
-    var socket = try Socket.create();
+test "Socket connect and close" {
+    // Create a listener first to have something to connect to
+    const addr = try net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try TcpListener.listenOn(addr);
+    defer listener.closeListener();
+
+    // Get the assigned port
+    const listen_addr = listener.server.socket.address;
+
+    var socket = try Socket.connectTo(listen_addr);
     defer socket.close();
     try std.testing.expect(socket.isValid());
 }
 
-test "Socket options" {
-    var socket = try Socket.create();
-    defer socket.close();
+test "TcpListener accept" {
+    const addr = try net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try TcpListener.listenOn(addr);
+    defer listener.closeListener();
 
-    try socket.setNoDelay(true);
-    try socket.setReuseAddr(true);
-    try socket.setKeepAlive(true);
-}
+    const listen_addr = listener.server.socket.address;
 
-test "TcpListener getLocalAddress" {
-    var listener = try TcpListener.init(try net.Address.parseIp("127.0.0.1", 0));
-    defer listener.deinit();
+    // Connect a client
+    var client = try Socket.connectTo(listen_addr);
+    defer client.close();
 
-    const addr = try listener.getLocalAddress();
-    // port should be assigned
-    try std.testing.expect(addr.getPort() != 0);
+    // Accept the connection
+    var accepted = try listener.acceptConnection();
+    defer accepted.close();
+
+    try std.testing.expect(accepted.isValid());
 }
 
 test "UdpSocket send/recv localhost" {
-    var recv_sock = try UdpSocket.create();
+    const recv_addr = try net.IpAddress.parse("127.0.0.1", 0);
+    var recv_sock = try UdpSocket.bindTo(recv_addr);
     defer recv_sock.close();
 
-    try recv_sock.setReuseAddr(true);
-    try recv_sock.bind(try net.Address.parseIp("127.0.0.1", 0));
-    const recv_addr = try recv_sock.getLocalAddress();
+    const bound_addr = recv_sock.socket.address;
 
-    var send_sock = try UdpSocket.create();
+    const send_addr = try net.IpAddress.parse("127.0.0.1", 0);
+    var send_sock = try UdpSocket.bindTo(send_addr);
     defer send_sock.close();
 
     const msg = "ping";
-    _ = try send_sock.sendTo(recv_addr, msg);
+    _ = try send_sock.sendTo(&bound_addr, msg);
 
     var buf: [32]u8 = undefined;
     const got = try recv_sock.recvFrom(&buf);

@@ -12,7 +12,6 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const net = std.net;
 
 const types = @import("../core/types.zig");
 const Request = @import("../core/request.zig").Request;
@@ -210,19 +209,20 @@ pub const Server = struct {
 
     /// Starts the server and begins accepting connections.
     pub fn listen(self: *Self) !void {
-        const addr = try net.Address.parseIp(self.config.host, self.config.port);
-        self.listener = try TcpListener.init(addr);
+        const net = std.Io.net;
+        const addr = try net.IpAddress.parse(self.config.host, self.config.port);
+        self.listener = try TcpListener.listenOn(addr);
         self.running = true;
 
         std.debug.print("Server listening on {s}:{d}\n", .{ self.config.host, self.config.port });
 
         while (self.running) {
-            const conn = self.listener.?.accept() catch |err| {
+            var conn = self.listener.?.acceptConnection() catch |err| {
                 std.debug.print("Accept error: {}\n", .{err});
                 continue;
             };
 
-            self.handleConnection(conn.socket) catch |err| {
+            self.handleConnection(&conn) catch |err| {
                 std.debug.print("Handler error: {}\n", .{err});
             };
         }
@@ -238,8 +238,7 @@ pub const Server = struct {
     }
 
     /// Handles a single connection.
-    fn handleConnection(self: *Self, socket: Socket) !void {
-        var sock = socket;
+    fn handleConnection(self: *Self, sock: *Socket) !void {
         defer sock.close();
 
         var buffer: [8192]u8 = undefined;
@@ -281,10 +280,10 @@ pub const Server = struct {
         var response = if (route_result) |r|
             r.handler(&ctx) catch |err| {
                 std.debug.print("Handler error: {}\n", .{err});
-                return self.sendError(&sock, 500);
+                return self.sendError(sock, 500);
             }
         else
-            return self.sendError(&sock, 404);
+            return self.sendError(sock, 404);
 
         defer response.deinit();
 

@@ -56,15 +56,15 @@ pub const AlpnProtocol = struct {
 /// Manages the socket reader/writer, protocol versioning, and keep-alive state.
 pub const Http1Connection = struct {
     allocator: Allocator,
-    reader: std.io.AnyReader,
-    writer: std.io.AnyWriter,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
     version: types.Version = .HTTP_1_1,
     keep_alive: bool = true,
 
     const Self = @This();
 
     /// Creates a new HTTP/1.x connection.
-    pub fn init(allocator: Allocator, reader: std.io.AnyReader, writer: std.io.AnyWriter) Self {
+    pub fn init(allocator: Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer) Self {
         return .{
             .allocator = allocator,
             .reader = reader,
@@ -149,7 +149,11 @@ pub const Http1Connection = struct {
         const body = try self.allocator.alloc(u8, @intCast(length));
         var read: usize = 0;
         while (read < length) {
-            const n = try self.reader.read(body[read..]);
+            var iov = [_][]u8{body[read..]};
+            const n = self.reader.readVec(&iov) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
             if (n == 0) break;
             read += n;
         }
@@ -172,7 +176,11 @@ pub const Http1Connection = struct {
 
             var read: usize = 0;
             while (read < chunk_size) {
-                const n = try self.reader.read(chunk[read..]);
+                var iov = [_][]u8{chunk[read..]};
+                const n = self.reader.readVec(&iov) catch |err| switch (err) {
+                    error.EndOfStream => return error.UnexpectedEof,
+                    else => return err,
+                };
                 if (n == 0) return error.UnexpectedEof;
                 read += n;
             }
@@ -191,7 +199,8 @@ pub const Http1Connection = struct {
         var buf: [4096]u8 = undefined;
 
         while (true) {
-            const n = self.reader.read(&buf) catch |err| switch (err) {
+            var iov = [_][]u8{buf[0..]};
+            const n = self.reader.readVec(&iov) catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => return err,
             };
@@ -206,12 +215,12 @@ pub const Http1Connection = struct {
     fn readLine(self: *Self, buf: []u8) ![]const u8 {
         var i: usize = 0;
         while (i < buf.len - 1) {
-            const byte = self.reader.readByte() catch |err| switch (err) {
+            const byte = self.readOneByte() catch |err| switch (err) {
                 error.EndOfStream => break,
                 else => return err,
             };
             if (byte == '\r') {
-                const next = self.reader.readByte() catch '\n';
+                const next = self.readOneByte() catch '\n';
                 if (next == '\n') break;
                 buf[i] = byte;
                 i += 1;
@@ -225,6 +234,14 @@ pub const Http1Connection = struct {
             }
         }
         return buf[0..i];
+    }
+
+    fn readOneByte(self: *Self) !u8 {
+        var byte_buf: [1]u8 = undefined;
+        var iov = [_][]u8{byte_buf[0..]};
+        const n = try self.reader.readVec(&iov);
+        if (n == 0) return error.EndOfStream;
+        return byte_buf[0];
     }
 
     /// Indicates whether the persistent connection should remain open.
@@ -322,8 +339,8 @@ pub const Http2ErrorCode = enum(u32) {
 /// Manages the state of an HTTP/2 connection, including HPack context and streams.
 pub const Http2Connection = struct {
     allocator: Allocator,
-    reader: std.io.AnyReader,
-    writer: std.io.AnyWriter,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
     next_stream_id: u31 = 1,
     settings: Http2ConnectionSettings = .{},
     peer_settings: Http2ConnectionSettings = .{},
@@ -349,7 +366,7 @@ pub const Http2Connection = struct {
     };
 
     /// Initializes a new HTTP/2 connection state.
-    pub fn init(allocator: Allocator, reader: std.io.AnyReader, writer: std.io.AnyWriter) Self {
+    pub fn init(allocator: Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer) Self {
         return .{
             .allocator = allocator,
             .reader = reader,
@@ -384,7 +401,7 @@ pub const Http2Connection = struct {
 
     pub fn readFrame(self: *Self, allocator: Allocator, max_payload_size: usize) !Frame {
         var hdr_bytes: [9]u8 = undefined;
-        try self.reader.readNoEof(&hdr_bytes);
+        try self.reader.readSliceAll(&hdr_bytes);
         const header = Http2FrameHeader.parse(hdr_bytes);
         const len: usize = @intCast(header.length);
         if (len > max_payload_size) return error.FrameTooLarge;
@@ -392,7 +409,7 @@ pub const Http2Connection = struct {
         const payload = try allocator.alloc(u8, len);
         errdefer allocator.free(payload);
         if (len > 0) {
-            try self.reader.readNoEof(payload);
+            try self.reader.readSliceAll(payload);
         }
         return .{ .header = header, .payload = payload };
     }
@@ -593,8 +610,9 @@ pub const Http3FrameHeader = struct {
 
 /// Formats a request object into HTTP/1.x wire format.
 pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
-    var buffer = std.ArrayListUnmanaged(u8){};
-    const writer = buffer.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    const writer = &aw.writer;
 
     const method_str = req.method.toString();
     try writer.print("{s} {s}", .{ method_str, req.uri.path });
@@ -612,13 +630,14 @@ pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
         try writer.writeAll(body);
     }
 
-    return buffer.toOwnedSlice(allocator);
+    return try aw.toOwnedSlice();
 }
 
 /// Formats a response object into HTTP/1.x wire format.
 pub fn formatResponse(resp: *const Response, allocator: Allocator) ![]u8 {
-    var buffer = std.ArrayListUnmanaged(u8){};
-    const writer = buffer.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    const writer = &aw.writer;
 
     try writer.print("{s} {d} {s}\r\n", .{
         resp.version.toString(),
@@ -635,7 +654,7 @@ pub fn formatResponse(resp: *const Response, allocator: Allocator) ![]u8 {
         try writer.writeAll(body);
     }
 
-    return buffer.toOwnedSlice(allocator);
+    return try aw.toOwnedSlice();
 }
 
 /// Determines the highest supported HTTP version based on ALPN negotiation string.

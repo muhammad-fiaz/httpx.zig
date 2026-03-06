@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const builtin = @import("builtin");
 const Socket = @import("../net/socket.zig").Socket;
 const SocketIoReader = @import("../net/socket.zig").SocketIoReader;
@@ -166,8 +167,8 @@ pub const TlsSession = struct {
         if (self.tls_read_buf == null) self.tls_read_buf = try self.allocator.alloc(u8, min_tls_buf);
         if (self.tls_write_buf == null) self.tls_write_buf = try self.allocator.alloc(u8, min_tls_buf);
 
-        const net_in = SocketIoReader.init(sock, self.net_read_buf.?);
-        const net_out = SocketIoWriter.init(sock, self.net_write_buf.?);
+        const net_in = SocketIoReader.initFromSocket(sock, self.net_read_buf.?);
+        const net_out = SocketIoWriter.initFromSocket(sock, self.net_write_buf.?);
         self.net_in = net_in;
         self.net_out = net_out;
 
@@ -176,9 +177,10 @@ pub const TlsSession = struct {
 
         // System CA bundle (cross-platform); optional if verification is disabled.
         if (verify) {
+            const io = @import("../net/socket.zig").getIo();
             var bundle: std.crypto.Certificate.Bundle = .{};
             errdefer bundle.deinit(self.allocator);
-            try bundle.rescan(self.allocator);
+            try bundle.rescan(self.allocator, io, Io.Timestamp.now(io, .realtime));
             self.ca_bundle = bundle;
         }
 

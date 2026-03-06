@@ -43,8 +43,8 @@ pub fn build(b: *std.Build) void {
         exe.root_module.addImport("httpx", httpx_module);
 
         if (target.result.os.tag == .windows) {
-            exe.linkSystemLibrary("ws2_32");
-            exe.linkSystemLibrary("mswsock");
+            exe.root_module.linkSystemLibrary("ws2_32", .{});
+            exe.root_module.linkSystemLibrary("mswsock", .{});
         }
 
         const install_exe = b.addInstallArtifact(exe, .{});
@@ -73,8 +73,8 @@ pub fn build(b: *std.Build) void {
         exe.root_module.addImport("httpx", httpx_module);
 
         if (target.result.os.tag == .windows) {
-            exe.linkSystemLibrary("ws2_32");
-            exe.linkSystemLibrary("mswsock");
+            exe.root_module.linkSystemLibrary("ws2_32", .{});
+            exe.root_module.linkSystemLibrary("mswsock", .{});
         }
 
         const install_exe = b.addInstallArtifact(exe, .{});
@@ -100,8 +100,8 @@ pub fn build(b: *std.Build) void {
     });
 
     if (target.result.os.tag == .windows) {
-        tests.linkSystemLibrary("ws2_32");
-        tests.linkSystemLibrary("mswsock");
+        tests.root_module.linkSystemLibrary("ws2_32", .{});
+        tests.root_module.linkSystemLibrary("mswsock", .{});
     }
 
     const run_tests = b.addRunArtifact(tests);
@@ -122,8 +122,8 @@ pub fn build(b: *std.Build) void {
     bench_exe.root_module.addImport("httpx", httpx_module);
 
     if (target.result.os.tag == .windows) {
-        bench_exe.linkSystemLibrary("ws2_32");
-        bench_exe.linkSystemLibrary("mswsock");
+        bench_exe.root_module.linkSystemLibrary("ws2_32", .{});
+        bench_exe.root_module.linkSystemLibrary("mswsock", .{});
     }
 
     const install_bench = b.addInstallArtifact(bench_exe, .{});
@@ -160,8 +160,8 @@ pub fn build(b: *std.Build) void {
         });
 
         if (t.os_tag == .windows) {
-            lib_cross.linkSystemLibrary("ws2_32");
-            lib_cross.linkSystemLibrary("mswsock");
+            lib_cross.root_module.linkSystemLibrary("ws2_32", .{});
+            lib_cross.root_module.linkSystemLibrary("mswsock", .{});
         }
 
         // Just build the artifact to verify it compiles
@@ -179,8 +179,8 @@ pub fn build(b: *std.Build) void {
     });
 
     if (target.result.os.tag == .windows) {
-        lib.linkSystemLibrary("ws2_32");
-        lib.linkSystemLibrary("mswsock");
+        lib.root_module.linkSystemLibrary("ws2_32", .{});
+        lib.root_module.linkSystemLibrary("mswsock", .{});
     }
 
     b.installArtifact(lib);

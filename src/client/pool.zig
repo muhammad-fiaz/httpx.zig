@@ -9,7 +9,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const net = std.net;
 
 const Socket = @import("../net/socket.zig").Socket;
 const address_mod = @import("../net/address.zig");
@@ -140,9 +139,8 @@ pub const ConnectionPool = struct {
 
         const addr = try address_mod.resolve(host, port);
 
-        var socket = try Socket.createForAddress(addr);
+        var socket = try Socket.connectTo(addr);
         errdefer socket.close();
-        try socket.connect(addr);
 
         const now = std.time.milliTimestamp();
 
@@ -219,8 +217,18 @@ test "ConnectionPool config" {
 }
 
 test "Connection health check" {
+    // Create a listener so we can get a connected socket
+    const socket_mod = @import("../net/socket.zig");
+    const net = std.Io.net;
+    const addr = try net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try socket_mod.TcpListener.listenOn(addr);
+    defer listener.closeListener();
+
+    const listen_addr = listener.server.socket.address;
+    const sock = try Socket.connectTo(listen_addr);
+
     var conn = Connection{
-        .socket = try Socket.create(),
+        .socket = sock,
         .host = "localhost",
         .port = 8080,
         .created_at = std.time.milliTimestamp(),

@@ -9,7 +9,6 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const net = std.net;
 
 const types = @import("../core/types.zig");
 const Headers = @import("../core/headers.zig").Headers;
@@ -226,7 +225,7 @@ pub const Client = struct {
             // TLS pooling requires keeping a live TLS session; not implemented yet.
             const addr = try address_mod.resolve(host, port);
 
-            var socket = try Socket.createForAddress(addr);
+            var socket = try Socket.connectTo(addr);
             defer socket.close();
 
             if (self.config.timeouts.read_ms > 0) {
@@ -235,8 +234,6 @@ pub const Client = struct {
             if (self.config.timeouts.write_ms > 0) {
                 try socket.setSendTimeout(self.config.timeouts.write_ms);
             }
-
-            try socket.connect(addr);
 
             return self.executeTlsHttp(&socket, host, request_data);
         }
@@ -264,7 +261,7 @@ pub const Client = struct {
 
         const addr = try address_mod.resolve(host, port);
 
-        var socket = try Socket.createForAddress(addr);
+        var socket = try Socket.connectTo(addr);
         defer socket.close();
 
         if (self.config.timeouts.read_ms > 0) {
@@ -273,8 +270,6 @@ pub const Client = struct {
         if (self.config.timeouts.write_ms > 0) {
             try socket.setSendTimeout(self.config.timeouts.write_ms);
         }
-
-        try socket.connect(addr);
 
         try socket.sendAll(request_data);
         return self.readResponseFromTcp(&socket);
