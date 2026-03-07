@@ -9,6 +9,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const Io = std.Io;
 
 const types = @import("../core/types.zig");
 const Headers = @import("../core/headers.zig").Headers;
@@ -26,6 +27,7 @@ const Parser = @import("../protocol/parser.zig").Parser;
 const TlsConfig = @import("../tls/tls.zig").TlsConfig;
 const TlsSession = @import("../tls/tls.zig").TlsSession;
 const ConnectionPool = @import("pool.zig").ConnectionPool;
+const getIo = @import("../net/socket.zig").getIo;
 
 /// HTTP client configuration.
 pub const ClientConfig = struct {
@@ -196,7 +198,7 @@ pub const Client = struct {
                 if (policy.retry_on_connection_error and can_retry_method and attempt < policy.max_retries) {
                     attempt += 1;
                     const delay_ms = policy.calculateDelay(attempt);
-                    if (delay_ms > 0) std.time.sleep(delay_ms * std.time.ns_per_ms);
+                    if (delay_ms > 0) Io.sleep(getIo(), .fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
                     continue;
                 }
                 return err;
@@ -206,7 +208,7 @@ pub const Client = struct {
                 res.deinit();
                 attempt += 1;
                 const delay_ms = policy.calculateDelay(attempt);
-                if (delay_ms > 0) std.time.sleep(delay_ms * std.time.ns_per_ms);
+                if (delay_ms > 0) Io.sleep(getIo(), .fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
                 continue;
             }
 

@@ -11,6 +11,7 @@
 //! - Body parsing
 
 const std = @import("std");
+const Io = std.Io;
 const Context = @import("server.zig").Context;
 const Response = @import("../core/response.zig").Response;
 const types = @import("../core/types.zig");
@@ -85,9 +86,9 @@ pub fn logger() Middleware {
         .name = "logger",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                const start = std.time.milliTimestamp();
+                const start = nowMs();
                 const response = try next(ctx);
-                const duration = std.time.milliTimestamp() - start;
+                const duration = nowMs() - start;
 
                 std.debug.print("{s} {s} - {d}ms\n", .{
                     ctx.request.method.toString(),
@@ -99,6 +100,11 @@ pub fn logger() Middleware {
             }
         }.handler,
     };
+}
+
+fn nowMs() i64 {
+    const io = Io.Threaded.global_single_threaded.io();
+    return Io.Timestamp.now(io, .awake).toMilliseconds();
 }
 
 /// Creates compression middleware.

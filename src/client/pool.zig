@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 const Socket = @import("../net/socket.zig").Socket;
 const address_mod = @import("../net/address.zig");
@@ -33,13 +34,13 @@ pub const Connection = struct {
     /// Marks the connection as in use.
     pub fn acquire(self: *Self) void {
         self.in_use = true;
-        self.last_used = std.time.milliTimestamp();
+        self.last_used = nowMs();
     }
 
     /// Releases the connection back to the pool.
     pub fn release(self: *Self) void {
         self.in_use = false;
-        self.last_used = std.time.milliTimestamp();
+        self.last_used = nowMs();
         self.requests_made += 1;
     }
 
@@ -47,7 +48,7 @@ pub const Connection = struct {
     pub fn isHealthy(self: *const Self, max_idle_ms: i64) bool {
         if (self.in_use) return false;
         if (!self.socket.isValid()) return false;
-        const idle_time = std.time.milliTimestamp() - self.last_used;
+        const idle_time = nowMs() - self.last_used;
         return idle_time < max_idle_ms;
     }
 
@@ -56,7 +57,7 @@ pub const Connection = struct {
         if (self.in_use) return false;
         if (!self.socket.isValid()) return true;
         if (self.requests_made >= max_requests_per_connection) return true;
-        const idle_time = std.time.milliTimestamp() - self.last_used;
+        const idle_time = nowMs() - self.last_used;
         return idle_time >= idle_timeout_ms;
     }
 
@@ -142,7 +143,7 @@ pub const ConnectionPool = struct {
         var socket = try Socket.connectTo(addr);
         errdefer socket.close();
 
-        const now = std.time.milliTimestamp();
+        const now = nowMs();
 
         try self.connections.append(self.allocator, .{
             .socket = socket,
@@ -196,6 +197,11 @@ pub const ConnectionPool = struct {
     }
 };
 
+fn nowMs() i64 {
+    const io = Io.Threaded.global_single_threaded.io();
+    return Io.Timestamp.now(io, .awake).toMilliseconds();
+}
+
 test "ConnectionPool initialization" {
     const allocator = std.testing.allocator;
     var pool = ConnectionPool.init(allocator);
@@ -231,8 +237,8 @@ test "Connection health check" {
         .socket = sock,
         .host = "localhost",
         .port = 8080,
-        .created_at = std.time.milliTimestamp(),
-        .last_used = std.time.milliTimestamp(),
+        .created_at = nowMs(),
+        .last_used = nowMs(),
     };
     defer conn.socket.close();
 

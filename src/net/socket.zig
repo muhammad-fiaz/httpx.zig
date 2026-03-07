@@ -75,9 +75,10 @@ pub const SocketIoReader = struct {
 
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
         var total: usize = 0;
+        const lim = limit.toInt() orelse std.math.maxInt(usize);
 
-        while (total < limit.toInt(usize)) {
-            const max_to_read = @min(r.buffer.len, limit.toInt(usize) - total);
+        while (total < lim) {
+            const max_to_read = @min(r.buffer.len, lim - total);
             var iov = [_][]u8{r.buffer[0..max_to_read]};
             const n = readVec(r, &iov) catch |err| switch (err) {
                 error.EndOfStream => break,
@@ -92,11 +93,12 @@ pub const SocketIoReader = struct {
         return total;
     }
 
-    fn discard(r: *Io.Reader, limit: Io.Limit) Io.Reader.StreamRemainingError!usize {
+    fn discard(r: *Io.Reader, limit: Io.Limit) Io.Reader.Error!usize {
         var total: usize = 0;
+        const lim = limit.toInt() orelse std.math.maxInt(usize);
 
-        while (total < limit.toInt(usize)) {
-            const max_to_read = @min(r.buffer.len, limit.toInt(usize) - total);
+        while (total < lim) {
+            const max_to_read = @min(r.buffer.len, lim - total);
             var iov = [_][]u8{r.buffer[0..max_to_read]};
             const n = readVec(r, &iov) catch |err| switch (err) {
                 error.EndOfStream => break,
@@ -162,16 +164,17 @@ pub const SocketIoWriter = struct {
         return n;
     }
 
-    fn sendFile(w: *Io.Writer, file_reader: *std.fs.File.Reader, limit: Io.Limit) Io.Writer.FileAllError!usize {
+    fn sendFile(w: *Io.Writer, file_reader: *std.Io.File.Reader, limit: Io.Limit) Io.Writer.FileAllError!usize {
         const p = parent(w);
 
         var total: usize = 0;
-        while (total < limit.toInt(usize)) {
-            const remaining = limit.toInt(usize) - total;
+        const lim = limit.toInt() orelse std.math.maxInt(usize);
+        while (total < lim) {
+            const remaining = lim - total;
             const chunk_len = @min(w.buffer.len, remaining);
             if (chunk_len == 0) break;
 
-            const n_read = file_reader.read(w.buffer[0..chunk_len]) catch return error.ReadFailed;
+            const n_read = file_reader.interface.readSliceShort(w.buffer[0..chunk_len]) catch return error.ReadFailed;
             if (n_read == 0) break;
 
             p.socket.sendAll(w.buffer[0..n_read]) catch return error.WriteFailed;

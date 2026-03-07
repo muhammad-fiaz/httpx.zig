@@ -174,21 +174,26 @@ pub const TlsSession = struct {
 
         const verify = self.config.verify_mode != .none;
         const verify_host = verify and self.config.verify_hostname;
+        const io = @import("../net/socket.zig").getIo();
 
         // System CA bundle (cross-platform); optional if verification is disabled.
         if (verify) {
-            const io = @import("../net/socket.zig").getIo();
             var bundle: std.crypto.Certificate.Bundle = .{};
             errdefer bundle.deinit(self.allocator);
-            try bundle.rescan(self.allocator, io, Io.Timestamp.now(io, .realtime));
+            try bundle.rescan(self.allocator, io, Io.Timestamp.now(io, .real));
             self.ca_bundle = bundle;
         }
 
         const sni_host = self.config.server_name orelse hostname;
+        var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
+        io.random(&entropy);
+        const realtime_now_seconds = Io.Timestamp.now(io, .real).toSeconds();
 
         const client = try tls.Client.init(&self.net_in.?.reader, &self.net_out.?.writer, .{
             .host = if (verify_host) .{ .explicit = sni_host } else .{ .no_verification = {} },
             .ca = if (verify) .{ .bundle = self.ca_bundle.? } else .{ .no_verification = {} },
+            .entropy = &entropy,
+            .realtime_now_seconds = realtime_now_seconds,
             .ssl_key_log = null,
             .allow_truncation_attacks = false,
             .write_buffer = self.tls_write_buf.?,
