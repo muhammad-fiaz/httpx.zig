@@ -28,7 +28,8 @@ pub fn main() !void {
 
     std.debug.print("=== Request/Response Interceptors Example ===\n\n", .{});
 
-    var client = httpx.Client.initWithConfig(allocator, .{
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = httpx.Client.initWithConfig(allocator, io, .{
         .user_agent = "httpx.zig-interceptor-demo/1.0",
         .follow_redirects = true,
     });

@@ -379,7 +379,8 @@ test "RequestSpec" {
 
 test "allSettled empty" {
     const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = Client.init(allocator, io);
     defer client.deinit();
 
     const results = try allSettled(allocator, &client, &.{});

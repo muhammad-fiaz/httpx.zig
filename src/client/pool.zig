@@ -79,6 +79,7 @@ pub const PoolConfig = struct {
 /// HTTP connection pool.
 pub const ConnectionPool = struct {
     allocator: Allocator,
+    io: Io,
     config: PoolConfig,
     connections: std.ArrayListUnmanaged(Connection) = .empty,
     hosts_owned: std.ArrayListUnmanaged([]u8) = .empty,
@@ -86,14 +87,15 @@ pub const ConnectionPool = struct {
     const Self = @This();
 
     /// Creates a new connection pool.
-    pub fn init(allocator: Allocator) Self {
-        return initWithConfig(allocator, .{});
+    pub fn init(allocator: Allocator, io: Io) Self {
+        return initWithConfig(allocator, io, .{});
     }
 
     /// Creates a connection pool with custom configuration.
-    pub fn initWithConfig(allocator: Allocator, config: PoolConfig) Self {
+    pub fn initWithConfig(allocator: Allocator, io: Io, config: PoolConfig) Self {
         return .{
             .allocator = allocator,
+            .io = io,
             .config = config,
         };
     }
@@ -138,7 +140,7 @@ pub const ConnectionPool = struct {
         const host_owned = try self.allocator.dupe(u8, host);
         try self.hosts_owned.append(self.allocator, host_owned);
 
-        const addr = try address_mod.resolve(host, port);
+        const addr = try address_mod.resolve(self.io, host, port);
 
         var socket = try Socket.connectTo(addr);
         errdefer socket.close();
@@ -204,7 +206,8 @@ fn nowMs() i64 {
 
 test "ConnectionPool initialization" {
     const allocator = std.testing.allocator;
-    var pool = ConnectionPool.init(allocator);
+    const io = Io.Threaded.global_single_threaded.io();
+    var pool = ConnectionPool.init(allocator, io);
     defer pool.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), pool.totalCount());
@@ -212,7 +215,8 @@ test "ConnectionPool initialization" {
 
 test "ConnectionPool config" {
     const allocator = std.testing.allocator;
-    var pool = ConnectionPool.initWithConfig(allocator, .{
+    const io = Io.Threaded.global_single_threaded.io();
+    var pool = ConnectionPool.initWithConfig(allocator, io, .{
         .max_connections = 50,
         .max_per_host = 10,
     });

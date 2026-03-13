@@ -10,19 +10,26 @@
 const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
-const Allocator = std.mem.Allocator;
-const socket_mod = @import("socket.zig");
 
 /// Resolves a hostname to a network address.
-pub fn resolve(hostname: []const u8, port: u16) !net.IpAddress {
-    // Try parsing as literal IP first.
-    if (net.IpAddress.parse(hostname, port)) |addr| {
-        return addr;
+pub fn resolve(io: Io, hostname: []const u8, port: u16) !net.IpAddress {
+    const host_name: net.HostName = .{ .bytes = hostname };
+    var canonical_name_buffer: [net.HostName.max_len]u8 = undefined;
+    var buffer: [32]net.HostName.LookupResult = undefined;
+    var resolved: Io.Queue(net.HostName.LookupResult) = .init(&buffer);
+    host_name.lookup(io, &resolved, .{
+        .port = port,
+        .canonical_name_buffer = &canonical_name_buffer,
+    }) catch return error.DnsResolutionFailed;
+
+    while (resolved.getOne(io)) |result| {
+        switch (result) {
+            .address => |addr| return addr,
+            .canonical_name => continue,
+        }
     } else |_| {}
 
-    // Fall back to DNS resolution via Io.
-    const io = socket_mod.getIo();
-    return net.IpAddress.resolve(io, hostname, port) catch return error.DnsResolutionFailed;
+    return error.DnsResolutionFailed;
 }
 
 /// Parses an IPv4 address string (e.g., "192.168.1.1").

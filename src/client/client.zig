@@ -27,7 +27,6 @@ const Parser = @import("../protocol/parser.zig").Parser;
 const TlsConfig = @import("../tls/tls.zig").TlsConfig;
 const TlsSession = @import("../tls/tls.zig").TlsSession;
 const ConnectionPool = @import("pool.zig").ConnectionPool;
-const getIo = @import("../net/socket.zig").getIo;
 
 /// HTTP client configuration.
 pub const ClientConfig = struct {
@@ -72,6 +71,7 @@ pub const Interceptor = struct {
 /// HTTP Client.
 pub const Client = struct {
     allocator: Allocator,
+    io: Io,
     config: ClientConfig,
     interceptors: std.ArrayListUnmanaged(Interceptor) = .empty,
     cookies: std.StringHashMapUnmanaged([]const u8) = .{},
@@ -80,16 +80,17 @@ pub const Client = struct {
     const Self = @This();
 
     /// Creates a new HTTP client with default configuration.
-    pub fn init(allocator: Allocator) Self {
-        return initWithConfig(allocator, .{});
+    pub fn init(allocator: Allocator, io: Io) Self {
+        return initWithConfig(allocator, io, .{});
     }
 
     /// Creates a new HTTP client with custom configuration.
-    pub fn initWithConfig(allocator: Allocator, config: ClientConfig) Self {
+    pub fn initWithConfig(allocator: Allocator, io: Io, config: ClientConfig) Self {
         return .{
             .allocator = allocator,
+            .io = io,
             .config = config,
-            .pool = ConnectionPool.initWithConfig(allocator, .{
+            .pool = ConnectionPool.initWithConfig(allocator, io, .{
                 .max_connections = config.pool_max_connections,
                 .max_per_host = config.pool_max_per_host,
             }),
@@ -198,7 +199,7 @@ pub const Client = struct {
                 if (policy.retry_on_connection_error and can_retry_method and attempt < policy.max_retries) {
                     attempt += 1;
                     const delay_ms = policy.calculateDelay(attempt);
-                    if (delay_ms > 0) Io.sleep(getIo(), .fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
+                    if (delay_ms > 0) Io.sleep(self.io, .fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
                     continue;
                 }
                 return err;
@@ -208,7 +209,7 @@ pub const Client = struct {
                 res.deinit();
                 attempt += 1;
                 const delay_ms = policy.calculateDelay(attempt);
-                if (delay_ms > 0) Io.sleep(getIo(), .fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
+                if (delay_ms > 0) Io.sleep(self.io, .fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
                 continue;
             }
 
@@ -225,7 +226,7 @@ pub const Client = struct {
 
         if (req.uri.isTls()) {
             // TLS pooling requires keeping a live TLS session; not implemented yet.
-            const addr = try address_mod.resolve(host, port);
+            const addr = try address_mod.resolve(self.io, host, port);
 
             var socket = try Socket.connectTo(addr);
             defer socket.close();
@@ -261,7 +262,7 @@ pub const Client = struct {
             return res;
         }
 
-        const addr = try address_mod.resolve(host, port);
+        const addr = try address_mod.resolve(self.io, host, port);
 
         var socket = try Socket.connectTo(addr);
         defer socket.close();
@@ -433,7 +434,8 @@ fn parseResponse(allocator: Allocator, data: []const u8) !Response {
 
 test "Client initialization" {
     const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
+    const io = Io.Threaded.global_single_threaded.io();
+    var client = Client.init(allocator, io);
     defer client.deinit();
 
     try std.testing.expectEqualStrings("httpx.zig/0.0.1", client.config.user_agent);
@@ -441,7 +443,8 @@ test "Client initialization" {
 
 test "Client with config" {
     const allocator = std.testing.allocator;
-    var client = Client.initWithConfig(allocator, .{
+    const io = Io.Threaded.global_single_threaded.io();
+    var client = Client.initWithConfig(allocator, io, .{
         .base_url = "https://api.example.com",
         .user_agent = "TestClient/1.0",
     });

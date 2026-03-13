@@ -23,11 +23,11 @@ The `Client` struct is the main entry point for making requests. It manages conn
 const httpx = @import("httpx");
 
 // Initialize with default configuration
-var client = httpx.Client.init(allocator);
+var client = httpx.Client.init(allocator, io);
 defer client.deinit();
 
 // Initialize with custom configuration
-var client = httpx.Client.initWithConfig(allocator, .{
+var client = httpx.Client.initWithConfig(allocator, io, .{
     .base_url = "https://api.example.com",
     .user_agent = "my-app/1.0",
 });
@@ -80,7 +80,7 @@ pub fn request(self: *Self, method: Method, url: []const u8, options: RequestOpt
 ```zig
 const httpx = @import("httpx");
 
-var client = httpx.Client.init(allocator);
+var client = httpx.Client.init(allocator, io);
 defer client.deinit();
 
 // Simple GET

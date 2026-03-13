@@ -276,7 +276,7 @@ See [TLS API](/api/tls) for more details on TLS configuration and certificate ha
 
 ```zig
 // Standard HTTP uses TCP
-var client = httpx.Client.init(allocator);
+var client = httpx.Client.init(allocator, io);
 defer client.deinit();
 
 const response = try client.get("http://example.com/api", .{});
