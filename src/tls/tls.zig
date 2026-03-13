@@ -160,10 +160,11 @@ pub const TlsSession = struct {
         const sock = self.socket orelse return error.MissingTransport;
 
         // Allocate buffers once per session.
-        if (self.net_read_buf == null) self.net_read_buf = try self.allocator.alloc(u8, 16 * 1024);
-        if (self.net_write_buf == null) self.net_write_buf = try self.allocator.alloc(u8, 16 * 1024);
-
+        // Network I/O buffers must be at least tls.Client.min_buffer_len so
+        // that the TLS client can always buffer a full ciphertext record.
         const min_tls_buf = tls.Client.min_buffer_len;
+        if (self.net_read_buf == null) self.net_read_buf = try self.allocator.alloc(u8, min_tls_buf);
+        if (self.net_write_buf == null) self.net_write_buf = try self.allocator.alloc(u8, min_tls_buf);
         if (self.tls_read_buf == null) self.tls_read_buf = try self.allocator.alloc(u8, min_tls_buf);
         if (self.tls_write_buf == null) self.tls_write_buf = try self.allocator.alloc(u8, min_tls_buf);
 
