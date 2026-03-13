@@ -12,7 +12,8 @@ pub fn main() !void {
 
     std.debug.print("=== Simple GET Request Example ===\n\n", .{});
 
-    var client = httpx.Client.init(allocator);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = httpx.Client.init(allocator, io);
     defer client.deinit();
 
     std.debug.print("Creating GET request to httpbin.org...\n", .{});

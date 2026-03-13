@@ -155,7 +155,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
  
     // Create client
-    var client = httpx.Client.init(allocator);
+    var client = httpx.Client.init(allocator, io);
     defer client.deinit();
  
     // Simple GET request

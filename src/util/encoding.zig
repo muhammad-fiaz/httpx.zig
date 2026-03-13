@@ -133,8 +133,9 @@ pub const PercentEncoding = struct {
 
     /// Encodes a string for use in URLs.
     pub fn encode(allocator: Allocator, input: []const u8) ![]u8 {
-        var result = std.ArrayListUnmanaged(u8){};
-        const writer = result.writer(allocator);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        errdefer aw.deinit();
+        const writer = &aw.writer;
 
         for (input) |c| {
             if (std.mem.indexOfScalar(u8, unreserved, c) != null) {
@@ -144,7 +145,7 @@ pub const PercentEncoding = struct {
             }
         }
 
-        return result.toOwnedSlice(allocator);
+        return try aw.toOwnedSlice();
     }
 
     /// Decodes a percent-encoded string.
@@ -175,8 +176,9 @@ pub const PercentEncoding = struct {
 
 /// Encodes key-value pairs as application/x-www-form-urlencoded.
 pub fn encodeFormData(allocator: Allocator, params: []const struct { []const u8, []const u8 }) ![]u8 {
-    var result = std.ArrayListUnmanaged(u8){};
-    const writer = result.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    const writer = &aw.writer;
 
     for (params, 0..) |param, idx| {
         if (idx > 0) try writer.writeByte('&');
@@ -187,7 +189,7 @@ pub fn encodeFormData(allocator: Allocator, params: []const struct { []const u8,
         try writer.print("{s}={s}", .{ key, value });
     }
 
-    return result.toOwnedSlice(allocator);
+    return try aw.toOwnedSlice();
 }
 
 test "Base64 encode" {

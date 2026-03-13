@@ -58,7 +58,7 @@
 //! const httpx = @import("httpx");
 //!
 //! // Client usage
-//! var client = httpx.Client.init(allocator);
+//! var client = httpx.Client.init(allocator, io);
 //! defer client.deinit();
 //! const response = try client.get("https://api.example.com/users", .{});
 //!
@@ -247,15 +247,15 @@ pub fn allSettled(allocator: std.mem.Allocator, client: *Client, specs: []const 
 }
 
 /// Convenience function to create a GET request.
-pub fn get(allocator: std.mem.Allocator, url: []const u8) !Response {
-    var c = Client.init(allocator);
+pub fn get(allocator: std.mem.Allocator, io: std.Io, url: []const u8) !Response {
+    var c = Client.init(allocator, io);
     defer c.deinit();
     return c.get(url, .{});
 }
 
 /// Convenience function to create a POST request with JSON body.
-pub fn postJson(allocator: std.mem.Allocator, url: []const u8, body: []const u8) !Response {
-    var c = Client.init(allocator);
+pub fn postJson(allocator: std.mem.Allocator, io: std.Io, url: []const u8, body: []const u8) !Response {
+    var c = Client.init(allocator, io);
     defer c.deinit();
     return c.post(url, .{ .json = body });
 }

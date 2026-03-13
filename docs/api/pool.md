@@ -10,11 +10,11 @@ The `ConnectionPool` manages reusable TCP connections to optimize performance. W
 const httpx = @import("httpx");
 
 // Initialize with default configuration
-var pool = httpx.ConnectionPool.init(allocator);
+var pool = httpx.ConnectionPool.init(allocator, io);
 defer pool.deinit();
 
 // Initialize with custom configuration
-var pool = httpx.ConnectionPool.initWithConfig(allocator, .{
+var pool = httpx.ConnectionPool.initWithConfig(allocator, io, .{
     .max_connections = 100,
     .max_per_host = 10,
 });

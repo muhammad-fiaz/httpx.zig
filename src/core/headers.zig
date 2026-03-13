@@ -220,10 +220,10 @@ pub const Headers = struct {
 
     /// Serializes headers to an allocated string.
     pub fn toSlice(self: *const Self, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
-        const writer = buffer.writer(allocator);
-        try self.serialize(writer);
-        return buffer.toOwnedSlice(allocator);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        errdefer aw.deinit();
+        try self.serialize(&aw.writer);
+        return try aw.toOwnedSlice();
     }
 };
 

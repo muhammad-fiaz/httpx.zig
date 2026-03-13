@@ -8,27 +8,28 @@
 //! - Address formatting
 
 const std = @import("std");
-const net = std.net;
-const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const net = Io.net;
 
 /// Resolves a hostname to a network address.
-pub fn resolve(hostname: []const u8, port: u16) !net.Address {
-    if (parseIp4(hostname)) |ip4| {
-        return net.Address.initIp4(ip4, port);
-    }
+pub fn resolve(io: Io, hostname: []const u8, port: u16) !net.IpAddress {
+    const host_name: net.HostName = .{ .bytes = hostname };
+    var canonical_name_buffer: [net.HostName.max_len]u8 = undefined;
+    var buffer: [32]net.HostName.LookupResult = undefined;
+    var resolved: Io.Queue(net.HostName.LookupResult) = .init(&buffer);
+    host_name.lookup(io, &resolved, .{
+        .port = port,
+        .canonical_name_buffer = &canonical_name_buffer,
+    }) catch return error.DnsResolutionFailed;
 
-    if (parseIp6(hostname)) |ip6| {
-        return net.Address.initIp6(ip6, 0, port);
-    }
+    while (resolved.getOne(io)) |result| {
+        switch (result) {
+            .address => |addr| return addr,
+            .canonical_name => continue,
+        }
+    } else |_| {}
 
-    const list = try net.getAddressList(std.heap.page_allocator, hostname, port);
-    defer list.deinit();
-
-    if (list.addrs.len == 0) {
-        return error.DnsResolutionFailed;
-    }
-
-    return list.addrs[0];
+    return error.DnsResolutionFailed;
 }
 
 /// Parses an IPv4 address string (e.g., "192.168.1.1").
@@ -176,11 +177,6 @@ pub fn parseHostPort(str: []const u8, default_port: u16) !struct { host: []const
     }
 
     return .{ .host = str, .port = default_port };
-}
-
-/// Formats a network address as a string.
-pub fn formatAddress(addr: net.Address, allocator: Allocator) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{}", .{addr});
 }
 
 /// Returns true if the string looks like an IP address (not a hostname).

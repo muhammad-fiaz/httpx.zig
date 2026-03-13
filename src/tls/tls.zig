@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const builtin = @import("builtin");
 const Socket = @import("../net/socket.zig").Socket;
 const SocketIoReader = @import("../net/socket.zig").SocketIoReader;
@@ -159,34 +160,41 @@ pub const TlsSession = struct {
         const sock = self.socket orelse return error.MissingTransport;
 
         // Allocate buffers once per session.
-        if (self.net_read_buf == null) self.net_read_buf = try self.allocator.alloc(u8, 16 * 1024);
-        if (self.net_write_buf == null) self.net_write_buf = try self.allocator.alloc(u8, 16 * 1024);
-
+        // Network I/O buffers must be at least tls.Client.min_buffer_len so
+        // that the TLS client can always buffer a full ciphertext record.
         const min_tls_buf = tls.Client.min_buffer_len;
+        if (self.net_read_buf == null) self.net_read_buf = try self.allocator.alloc(u8, min_tls_buf);
+        if (self.net_write_buf == null) self.net_write_buf = try self.allocator.alloc(u8, min_tls_buf);
         if (self.tls_read_buf == null) self.tls_read_buf = try self.allocator.alloc(u8, min_tls_buf);
         if (self.tls_write_buf == null) self.tls_write_buf = try self.allocator.alloc(u8, min_tls_buf);
 
-        const net_in = SocketIoReader.init(sock, self.net_read_buf.?);
-        const net_out = SocketIoWriter.init(sock, self.net_write_buf.?);
+        const net_in = SocketIoReader.initFromSocket(sock, self.net_read_buf.?);
+        const net_out = SocketIoWriter.initFromSocket(sock, self.net_write_buf.?);
         self.net_in = net_in;
         self.net_out = net_out;
 
         const verify = self.config.verify_mode != .none;
         const verify_host = verify and self.config.verify_hostname;
+        const io = @import("../net/socket.zig").getIo();
 
         // System CA bundle (cross-platform); optional if verification is disabled.
         if (verify) {
             var bundle: std.crypto.Certificate.Bundle = .{};
             errdefer bundle.deinit(self.allocator);
-            try bundle.rescan(self.allocator);
+            try bundle.rescan(self.allocator, io, Io.Timestamp.now(io, .real));
             self.ca_bundle = bundle;
         }
 
         const sni_host = self.config.server_name orelse hostname;
+        var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
+        io.random(&entropy);
+        const realtime_now_seconds = Io.Timestamp.now(io, .real).toSeconds();
 
         const client = try tls.Client.init(&self.net_in.?.reader, &self.net_out.?.writer, .{
             .host = if (verify_host) .{ .explicit = sni_host } else .{ .no_verification = {} },
             .ca = if (verify) .{ .bundle = self.ca_bundle.? } else .{ .no_verification = {} },
+            .entropy = &entropy,
+            .realtime_now_seconds = realtime_now_seconds,
             .ssl_key_log = null,
             .allow_truncation_attacks = false,
             .write_buffer = self.tls_write_buf.?,

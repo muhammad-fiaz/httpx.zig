@@ -31,7 +31,7 @@ fn addAuthToken(req: *httpx.Request, ctx: ?*anyopaque) !void {
 }
 
 // Usage
-var client = httpx.Client.init(allocator);
+var client = httpx.Client.init(allocator, io);
 try client.addInterceptor(.{
     .request_fn = addAuthToken,
     // response_fn can be null

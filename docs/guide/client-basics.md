@@ -7,7 +7,7 @@ The `httpx.zig` client supports all standard HTTP methods and provides convenien
 For simple usage, create a client with the default configuration:
 
 ```zig
-var client = httpx.Client.init(allocator);
+var client = httpx.Client.init(allocator, io);
 defer client.deinit();
 ```
 
@@ -23,7 +23,7 @@ const config = httpx.ClientConfig{
     },
     .http2_enabled = false,
 };
-var client = httpx.Client.initWithConfig(allocator, config);
+var client = httpx.Client.initWithConfig(allocator, io, config);
 defer client.deinit();
 ```
 

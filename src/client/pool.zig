@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const net = std.net;
+const Io = std.Io;
 
 const Socket = @import("../net/socket.zig").Socket;
 const address_mod = @import("../net/address.zig");
@@ -34,13 +34,13 @@ pub const Connection = struct {
     /// Marks the connection as in use.
     pub fn acquire(self: *Self) void {
         self.in_use = true;
-        self.last_used = std.time.milliTimestamp();
+        self.last_used = nowMs();
     }
 
     /// Releases the connection back to the pool.
     pub fn release(self: *Self) void {
         self.in_use = false;
-        self.last_used = std.time.milliTimestamp();
+        self.last_used = nowMs();
         self.requests_made += 1;
     }
 
@@ -48,7 +48,7 @@ pub const Connection = struct {
     pub fn isHealthy(self: *const Self, max_idle_ms: i64) bool {
         if (self.in_use) return false;
         if (!self.socket.isValid()) return false;
-        const idle_time = std.time.milliTimestamp() - self.last_used;
+        const idle_time = nowMs() - self.last_used;
         return idle_time < max_idle_ms;
     }
 
@@ -57,7 +57,7 @@ pub const Connection = struct {
         if (self.in_use) return false;
         if (!self.socket.isValid()) return true;
         if (self.requests_made >= max_requests_per_connection) return true;
-        const idle_time = std.time.milliTimestamp() - self.last_used;
+        const idle_time = nowMs() - self.last_used;
         return idle_time >= idle_timeout_ms;
     }
 
@@ -79,6 +79,7 @@ pub const PoolConfig = struct {
 /// HTTP connection pool.
 pub const ConnectionPool = struct {
     allocator: Allocator,
+    io: Io,
     config: PoolConfig,
     connections: std.ArrayListUnmanaged(Connection) = .empty,
     hosts_owned: std.ArrayListUnmanaged([]u8) = .empty,
@@ -86,14 +87,15 @@ pub const ConnectionPool = struct {
     const Self = @This();
 
     /// Creates a new connection pool.
-    pub fn init(allocator: Allocator) Self {
-        return initWithConfig(allocator, .{});
+    pub fn init(allocator: Allocator, io: Io) Self {
+        return initWithConfig(allocator, io, .{});
     }
 
     /// Creates a connection pool with custom configuration.
-    pub fn initWithConfig(allocator: Allocator, config: PoolConfig) Self {
+    pub fn initWithConfig(allocator: Allocator, io: Io, config: PoolConfig) Self {
         return .{
             .allocator = allocator,
+            .io = io,
             .config = config,
         };
     }
@@ -138,13 +140,12 @@ pub const ConnectionPool = struct {
         const host_owned = try self.allocator.dupe(u8, host);
         try self.hosts_owned.append(self.allocator, host_owned);
 
-        const addr = try address_mod.resolve(host, port);
+        const addr = try address_mod.resolve(self.io, host, port);
 
-        var socket = try Socket.createForAddress(addr);
+        var socket = try Socket.connectTo(addr);
         errdefer socket.close();
-        try socket.connect(addr);
 
-        const now = std.time.milliTimestamp();
+        const now = nowMs();
 
         try self.connections.append(self.allocator, .{
             .socket = socket,
@@ -198,9 +199,15 @@ pub const ConnectionPool = struct {
     }
 };
 
+fn nowMs() i64 {
+    const io = Io.Threaded.global_single_threaded.io();
+    return Io.Timestamp.now(io, .awake).toMilliseconds();
+}
+
 test "ConnectionPool initialization" {
     const allocator = std.testing.allocator;
-    var pool = ConnectionPool.init(allocator);
+    const io = Io.Threaded.global_single_threaded.io();
+    var pool = ConnectionPool.init(allocator, io);
     defer pool.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), pool.totalCount());
@@ -208,7 +215,8 @@ test "ConnectionPool initialization" {
 
 test "ConnectionPool config" {
     const allocator = std.testing.allocator;
-    var pool = ConnectionPool.initWithConfig(allocator, .{
+    const io = Io.Threaded.global_single_threaded.io();
+    var pool = ConnectionPool.initWithConfig(allocator, io, .{
         .max_connections = 50,
         .max_per_host = 10,
     });
@@ -219,12 +227,22 @@ test "ConnectionPool config" {
 }
 
 test "Connection health check" {
+    // Create a listener so we can get a connected socket
+    const socket_mod = @import("../net/socket.zig");
+    const net = std.Io.net;
+    const addr = try net.IpAddress.parse("127.0.0.1", 0);
+    var listener = try socket_mod.TcpListener.listenOn(addr);
+    defer listener.closeListener();
+
+    const listen_addr = listener.server.socket.address;
+    const sock = try Socket.connectTo(listen_addr);
+
     var conn = Connection{
-        .socket = try Socket.create(),
+        .socket = sock,
         .host = "localhost",
         .port = 8080,
-        .created_at = std.time.milliTimestamp(),
-        .last_used = std.time.milliTimestamp(),
+        .created_at = nowMs(),
+        .last_used = nowMs(),
     };
     defer conn.socket.close();
 

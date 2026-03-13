@@ -77,16 +77,11 @@ pub const Buffer = struct {
         return result;
     }
 
-    /// Returns a writer interface for the buffer.
-    pub fn writer(self: *Self) Writer {
-        return .{ .context = self };
-    }
-
-    pub const Writer = std.io.Writer(*Self, error{OutOfMemory}, write);
-
-    fn write(self: *Self, bytes: []const u8) error{OutOfMemory}!usize {
-        self.append(bytes) catch return error.OutOfMemory;
-        return bytes.len;
+    /// Returns the data as an owned slice and resets.
+    pub fn toOwnedSliceAllocating(self: *Self) ![]u8 {
+        const result = try self.allocator.dupe(u8, self.data[0..self.len]);
+        self.clear();
+        return result;
     }
 };
 
