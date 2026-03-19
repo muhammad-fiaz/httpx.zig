@@ -1,26 +1,55 @@
 //! httpx.zig Benchmarks
 //!
-//! Performance benchmarks for the HTTP library.
+//! Performance benchmarks for core httpx.zig operations.
 
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn benchmark(name: []const u8, iterations: usize, func: *const fn () void) void {
-    const start = std.time.nanoTimestamp();
+const BenchConfig = struct {
+    iterations: usize,
+    warmup_iterations: usize,
+    rounds: usize,
+};
 
-    for (0..iterations) |_| {
+fn runBenchmark(name: []const u8, cfg: BenchConfig, func: *const fn () void) void {
+    for (0..cfg.warmup_iterations) |_| {
         func();
     }
 
-    const end = std.time.nanoTimestamp();
-    const elapsed_ns = @as(u64, @intCast(end - start));
-    const per_op_ns = elapsed_ns / iterations;
-    const ops_per_sec = if (per_op_ns > 0) 1_000_000_000 / per_op_ns else 0;
+    var min_ns: u64 = std.math.maxInt(u64);
+    var max_ns: u64 = 0;
+    var total_ns: u128 = 0;
 
-    std.debug.print("  {s}: {d} ops, {d}ns/op, {d} ops/sec\n", .{
+    for (0..cfg.rounds) |_| {
+        const start = std.time.nanoTimestamp();
+        for (0..cfg.iterations) |_| {
+            func();
+        }
+        const end = std.time.nanoTimestamp();
+
+        const elapsed_ns = @as(u64, @intCast(end - start));
+        min_ns = @min(min_ns, elapsed_ns);
+        max_ns = @max(max_ns, elapsed_ns);
+        total_ns += elapsed_ns;
+    }
+
+    const avg_ns = @as(u64, @intCast(total_ns / cfg.rounds));
+    const min_ns_per_op = @as(f64, @floatFromInt(min_ns)) / @as(f64, @floatFromInt(cfg.iterations));
+    const avg_ns_per_op = @as(f64, @floatFromInt(avg_ns)) / @as(f64, @floatFromInt(cfg.iterations));
+    const max_ns_per_op = @as(f64, @floatFromInt(max_ns)) / @as(f64, @floatFromInt(cfg.iterations));
+
+    const ops_per_sec = if (avg_ns_per_op > 0.0)
+        @as(u64, @intFromFloat(1_000_000_000.0 / avg_ns_per_op))
+    else
+        0;
+
+    std.debug.print("  {s: <22} rounds={d} iters={d} min={d:.2}ns/op avg={d:.2}ns/op max={d:.2}ns/op throughput={d} ops/sec\n", .{
         name,
-        iterations,
-        per_op_ns,
+        cfg.rounds,
+        cfg.iterations,
+        min_ns_per_op,
+        avg_ns_per_op,
+        max_ns_per_op,
         ops_per_sec,
     });
 }
@@ -56,6 +85,12 @@ fn benchBase64Encode() void {
     bench_allocator.free(encoded);
 }
 
+fn benchBase64Decode() void {
+    const encoded = "SGVsbG8sIFdvcmxkISBUaGlzIGlzIGEgdGVzdCBzdHJpbmcgZm9yIGJhc2U2NCBlbmNvZGluZy4=";
+    const decoded = httpx.Base64.decode(bench_allocator, encoded) catch return;
+    bench_allocator.free(decoded);
+}
+
 fn benchJsonBuilder() void {
     var builder = httpx.json.JsonBuilder.init(bench_allocator);
     defer builder.deinit();
@@ -81,6 +116,15 @@ fn benchRequestBuild() void {
     defer request.deinit();
 
     request.headers.set("Accept", "application/json") catch {};
+    request.addQueryParam("page", "1") catch {};
+}
+
+fn benchResponseBuilders() void {
+    var text_resp = httpx.Response.fromText(bench_allocator, 200, "ok") catch return;
+    defer text_resp.deinit();
+
+    var json_resp = httpx.Response.fromJson(bench_allocator, 200, .{ .ok = true, .source = "bench" }) catch return;
+    defer json_resp.deinit();
 }
 
 fn benchHttp2FrameHeader() void {
@@ -105,23 +149,34 @@ pub fn main() !void {
     bench_allocator = gpa.allocator();
 
     std.debug.print("=== httpx.zig Benchmarks ===\n\n", .{});
+    std.debug.print("Host: {s}-{s} ({s})\n\n", .{
+        @tagName(@import("builtin").cpu.arch),
+        @tagName(@import("builtin").os.tag),
+        @tagName(@import("builtin").mode),
+    });
+
+    const core_cfg = BenchConfig{ .iterations = 200_000, .warmup_iterations = 5_000, .rounds = 5 };
+    const heavy_cfg = BenchConfig{ .iterations = 100_000, .warmup_iterations = 2_000, .rounds = 5 };
+    const parser_cfg = BenchConfig{ .iterations = 1_000_000, .warmup_iterations = 20_000, .rounds = 5 };
 
     std.debug.print("Core Operations:\n", .{});
-    benchmark("headers_parse", 100_000, benchHeadersParse);
-    benchmark("uri_parse", 100_000, benchUriParse);
-    benchmark("status_lookup", 1_000_000, benchStatusLookup);
-    benchmark("method_lookup", 1_000_000, benchMethodLookup);
+    runBenchmark("headers_parse", core_cfg, benchHeadersParse);
+    runBenchmark("uri_parse", core_cfg, benchUriParse);
+    runBenchmark("status_lookup", parser_cfg, benchStatusLookup);
+    runBenchmark("method_lookup", parser_cfg, benchMethodLookup);
 
     std.debug.print("\nEncoding:\n", .{});
-    benchmark("base64_encode", 100_000, benchBase64Encode);
-    benchmark("json_builder", 100_000, benchJsonBuilder);
+    runBenchmark("base64_encode", heavy_cfg, benchBase64Encode);
+    runBenchmark("base64_decode", heavy_cfg, benchBase64Decode);
+    runBenchmark("json_builder", heavy_cfg, benchJsonBuilder);
 
     std.debug.print("\nRequest Building:\n", .{});
-    benchmark("request_build", 50_000, benchRequestBuild);
+    runBenchmark("request_build", heavy_cfg, benchRequestBuild);
+    runBenchmark("response_builders", heavy_cfg, benchResponseBuilders);
 
     std.debug.print("\nHTTP/2 & HTTP/3:\n", .{});
-    benchmark("h2_frame_header", 1_000_000, benchHttp2FrameHeader);
-    benchmark("h3_varint_encode", 10_000_000, benchVarIntEncoding);
+    runBenchmark("h2_frame_header", parser_cfg, benchHttp2FrameHeader);
+    runBenchmark("h3_varint_encode", BenchConfig{ .iterations = 5_000_000, .warmup_iterations = 50_000, .rounds = 5 }, benchVarIntEncoding);
 
     std.debug.print("\n=== Benchmark Complete ===\n", .{});
 }

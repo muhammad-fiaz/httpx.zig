@@ -26,13 +26,11 @@
 
 </div>
 
-> [!WARNING]
+> [!NOTE]
 > **This project aims to be production-ready and is actively maintained.**  
 > It is still a new project and not yet widely adopted. Feel free to use it in your projects.
 
-`httpx.zig` is a comprehensive, high-performance HTTP library designed for building robust networked applications. It features a modern API with support for all major HTTP versions, connection pooling, and pattern-based server routing.
-
-`httpx.zig` is an HTTP library layer for Zig (client + server primitives), not a full web framework. You explicitly build your own website servers and APIs on top of the provided HTTP server and client components.
+`httpx.zig` is a comprehensive, high-performance HTTP library for building robust networked applications in Zig, with modern client and server primitives, support for major HTTP versions, connection pooling, and pattern-based routing. You can build your own APIs and website servers directly on top of these components; see the runnable examples in the repository: [examples/](https://github.com/muhammad-fiaz/httpx.zig/tree/main/examples), [examples/static_files.zig](https://github.com/muhammad-fiaz/httpx.zig/blob/main/examples/static_files.zig), and [examples/multi_page_website.zig](https://github.com/muhammad-fiaz/httpx.zig/blob/main/examples/multi_page_website.zig).
 
 Related Zig projects:
 
@@ -222,16 +220,17 @@ pub fn main() !void {
 }
 ```
 
-    ### Simplified API Aliases
+### Simplified API Aliases
 
-    ```zig
-    // Top-level aliases for concise client code
-    var response = try httpx.fetch(allocator, "https://httpbin.org/get");
-    defer response.deinit();
+```zig
+// Top-level aliases for concise client code.
+// Reuses the same allocator declared above.
+var response = try httpx.fetch(allocator, "https://httpbin.org/get");
+defer response.deinit();
 
-    var by_method = try httpx.send(allocator, .GET, "https://httpbin.org/headers", .{});
-    defer by_method.deinit();
-    ```
+var by_method = try httpx.send(allocator, .GET, "https://httpbin.org/headers", .{});
+defer by_method.deinit();
+```
  
 ### Server Usage
  
@@ -297,7 +296,25 @@ Run benchmarks:
 ```bash
 zig build bench
 ```
-> Note: Benchmark results will vary based on hardware and network conditions.
+> [!NOTE]
+> Benchmark results will vary based on hardware and network conditions.
+> The benchmark suite reports multiple rounds with min/avg/max and throughput to improve result quality.
+
+Latest benchmark snapshot (`x86_64-windows`, `ReleaseFast`):
+
+| Benchmark | Avg (ns/op) | Throughput (ops/sec) |
+|-----------|-------------|----------------------|
+| headers_parse | 44755.50 | 22343 |
+| uri_parse | 93.72 | 10669580 |
+| status_lookup | 2.05 | 487291439 |
+| method_lookup | 13.97 | 71576530 |
+| base64_encode | 13861.42 | 72142 |
+| base64_decode | 13912.25 | 71879 |
+| json_builder | 14178.73 | 70528 |
+| request_build | 35754.42 | 27968 |
+| response_builders | 51674.39 | 19351 |
+| h2_frame_header | 2.08 | 481398752 |
+| h3_varint_encode | 2.47 | 404809787 |
  
 ## Contributing
  
