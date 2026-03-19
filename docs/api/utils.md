@@ -2,6 +2,22 @@
 
 Common utilities for buffer management and encoding.
 
+## Shared Helpers
+
+`httpx.common` provides reusable helpers used across client/server/core modules.
+
+- `queryValue(query, key)`: Get a query parameter value from a raw query string.
+- `parseSetCookiePair(set_cookie)`: Parse the first `name=value` pair from a `Set-Cookie` header value.
+
+Root-level aliases are also available:
+
+- `httpx.queryValue(...)`
+- `httpx.parseSetCookiePair(...)`
+
+Compatibility note:
+
+- `httpx.utils` remains available as an alias to `httpx.common`.
+
 ## Buffers
 
 ### `Buffer`

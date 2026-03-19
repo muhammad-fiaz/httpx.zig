@@ -40,7 +40,7 @@
 //! - Cookie handling
 //!
 //! ### Server Features
-//! - Express-style routing with path parameters
+//! - Pattern-based routing with path parameters
 //! - Middleware stack (CORS, logging, rate limiting, etc.)
 //! - Static file serving
 //! - JSON response helpers
@@ -100,6 +100,8 @@ pub const middleware = @import("server/middleware.zig");
 pub const buffer = @import("util/buffer.zig");
 pub const encoding = @import("util/encoding.zig");
 pub const json = @import("util/json.zig");
+pub const common = @import("util/common.zig");
+pub const utils = common;
 
 pub const executor = @import("concurrency/executor.zig");
 pub const concurrency = @import("concurrency/pool.zig");
@@ -193,15 +195,20 @@ pub const RequestOptions = client_mod.RequestOptions;
 pub const Interceptor = client_mod.Interceptor;
 pub const RequestInterceptor = client_mod.RequestInterceptor;
 pub const ResponseInterceptor = client_mod.ResponseInterceptor;
+pub const HttpClient = Client;
+pub const ReqOptions = RequestOptions;
 
 pub const ConnectionPool = pool.ConnectionPool;
 pub const PoolConfig = pool.PoolConfig;
 pub const Connection = pool.Connection;
+pub const PoolStats = pool.PoolStats;
 
 pub const Server = server_mod.Server;
 pub const ServerConfig = server_mod.ServerConfig;
 pub const Context = server_mod.Context;
 pub const Handler = server_mod.Handler;
+pub const HttpServer = Server;
+pub const Ctx = Context;
 
 pub const Router = router.Router;
 pub const RouteGroup = router.RouteGroup;
@@ -223,12 +230,19 @@ pub const FixedBuffer = buffer.FixedBuffer;
 pub const Base64 = encoding.Base64;
 pub const Hex = encoding.Hex;
 pub const PercentEncoding = encoding.PercentEncoding;
+pub const CookiePair = common.CookiePair;
 
 pub const TlsConfig = tls.TlsConfig;
 pub const TlsSession = tls.TlsSession;
 
 pub const VERSION = meta.version;
 pub const DEFAULT_USER_AGENT = meta.default_user_agent;
+
+/// Returns a query parameter value from a raw query string.
+pub const queryValue = common.queryValue;
+
+/// Parses the first name/value pair from a Set-Cookie header value.
+pub const parseSetCookiePair = common.parseSetCookiePair;
 
 /// Executes all requests in parallel and returns a result per request.
 pub fn all(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult {
@@ -257,11 +271,70 @@ pub fn get(allocator: std.mem.Allocator, url: []const u8) !Response {
     return c.get(url, .{});
 }
 
+/// Convenience alias for GET requests.
+pub fn fetch(allocator: std.mem.Allocator, url: []const u8) !Response {
+    return get(allocator, url);
+}
+
+/// Convenience function to create a request with an explicit method.
+pub fn send(
+    allocator: std.mem.Allocator,
+    method: Method,
+    url: []const u8,
+    req_options: RequestOptions,
+) !Response {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.request(method, url, req_options);
+}
+
 /// Convenience function to create a POST request with JSON body.
 pub fn postJson(allocator: std.mem.Allocator, url: []const u8, body: []const u8) !Response {
     var c = Client.init(allocator);
     defer c.deinit();
     return c.post(url, .{ .json = body });
+}
+
+/// Convenience function to create a POST request.
+pub fn post(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.post(url, req_options);
+}
+
+/// Convenience function to create a PUT request.
+pub fn put(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.put(url, req_options);
+}
+
+/// Convenience function to create a DELETE request.
+pub fn del(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.delete(url, req_options);
+}
+
+/// Convenience function to create a PATCH request.
+pub fn patch(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.patch(url, req_options);
+}
+
+/// Convenience function to create a HEAD request.
+pub fn head(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.head(url, req_options);
+}
+
+/// Convenience function to create an OPTIONS request.
+pub fn options(allocator: std.mem.Allocator, url: []const u8, options_in: RequestOptions) !Response {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.options(url, options_in);
 }
 
 test "core types" {
@@ -322,6 +395,14 @@ test "encoding" {
 
 test "json" {
     _ = json;
+}
+
+test "common" {
+    _ = common;
+}
+
+test "utils alias" {
+    _ = utils;
 }
 
 test "socket" {

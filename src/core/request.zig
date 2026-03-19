@@ -16,6 +16,7 @@ const types = @import("types.zig");
 const Headers = @import("headers.zig").Headers;
 const HeaderName = @import("headers.zig").HeaderName;
 const Uri = @import("uri.zig").Uri;
+const PercentEncoding = @import("../util/encoding.zig").PercentEncoding;
 
 /// HTTP request representation.
 pub const Request = struct {
@@ -27,6 +28,7 @@ pub const Request = struct {
     body: ?[]const u8 = null,
     body_owned: bool = false,
     custom_method: ?[]const u8 = null,
+    query_owned: bool = false,
     context: ?*anyopaque = null,
 
     const Self = @This();
@@ -56,6 +58,11 @@ pub const Request = struct {
                 self.allocator.free(b);
             }
         }
+        if (self.query_owned) {
+            if (self.uri.query) |q| {
+                self.allocator.free(q);
+            }
+        }
     }
 
     /// Sets the request body with ownership.
@@ -82,6 +89,31 @@ pub const Request = struct {
     /// Sets a request header.
     pub fn setHeader(self: *Self, name: []const u8, value: []const u8) !void {
         try self.headers.set(name, value);
+    }
+
+    /// Appends a URL query parameter to the request URI.
+    ///
+    /// The key and value are percent-encoded before being added.
+    pub fn addQueryParam(self: *Self, key: []const u8, value: []const u8) !void {
+        const enc_key = try PercentEncoding.encode(self.allocator, key);
+        defer self.allocator.free(enc_key);
+        const enc_value = try PercentEncoding.encode(self.allocator, value);
+        defer self.allocator.free(enc_value);
+
+        const previous = self.uri.query;
+        const next_query = if (previous) |q|
+            try std.fmt.allocPrint(self.allocator, "{s}&{s}={s}", .{ q, enc_key, enc_value })
+        else
+            try std.fmt.allocPrint(self.allocator, "{s}={s}", .{ enc_key, enc_value });
+
+        if (self.query_owned) {
+            if (previous) |q| {
+                self.allocator.free(q);
+            }
+        }
+
+        self.uri.query = next_query;
+        self.query_owned = true;
     }
 
     /// Returns the host from the URI.
@@ -254,4 +286,19 @@ test "Request serialization" {
     defer allocator.free(serialized);
 
     try std.testing.expect(mem.startsWith(u8, serialized, "GET /api HTTP/1.1\r\n"));
+}
+
+test "Request addQueryParam" {
+    const allocator = std.testing.allocator;
+    var request = try Request.init(allocator, .GET, "https://example.com/search");
+    defer request.deinit();
+
+    try request.addQueryParam("q", "zig lang");
+    try request.addQueryParam("page", "1");
+
+    try std.testing.expectEqualStrings("q=zig%20lang&page=1", request.uri.query.?);
+
+    const serialized = try request.toSlice(allocator);
+    defer allocator.free(serialized);
+    try std.testing.expect(mem.indexOf(u8, serialized, "GET /search?q=zig%20lang&page=1 HTTP/1.1") != null);
 }

@@ -37,7 +37,10 @@ pub fn build(b: *std.Build) void {
         .{ .name = "streaming", .path = "examples/streaming.zig" },
         .{ .name = "interceptors", .path = "examples/interceptors.zig" },
         .{ .name = "connection_pool", .path = "examples/connection_pool.zig" },
+        .{ .name = "cookies_demo", .path = "examples/cookies_demo.zig" },
+        .{ .name = "simplified_api_aliases", .path = "examples/simplified_api_aliases.zig", .skip_run_all = true },
         .{ .name = "static_files", .path = "examples/static_files.zig", .skip_run_all = true },
+        .{ .name = "multi_page_website", .path = "examples/multi_page_website.zig", .skip_run_all = true },
         .{ .name = "http2_example", .path = "examples/http2_example.zig" },
         .{ .name = "http3_example", .path = "examples/http3_example.zig" },
     };

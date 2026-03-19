@@ -51,6 +51,18 @@ pub fn cleanup(self: *Self) void
 - `activeCount() usize`: Number of connections currently in use.
 - `totalCount() usize`: Total connections managed by the pool.
 - `idleCount() usize`: Number of available connections.
+- `hostConnectionCount(host, port) usize`: Connections tracked for a specific host/port.
+- `stats() PoolStats`: Snapshot of total/active/idle counters.
+
+### PoolStats
+
+```zig
+pub const PoolStats = struct {
+    total: usize,
+    active: usize,
+    idle: usize,
+};
+```
 
 ## PoolConfig
 

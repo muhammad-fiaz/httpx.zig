@@ -76,6 +76,13 @@ pub const PoolConfig = struct {
     health_check_interval_ms: i64 = 30_000,
 };
 
+/// Snapshot statistics for the connection pool.
+pub const PoolStats = struct {
+    total: usize,
+    active: usize,
+    idle: usize,
+};
+
 /// HTTP connection pool.
 pub const ConnectionPool = struct {
     allocator: Allocator,
@@ -196,6 +203,24 @@ pub const ConnectionPool = struct {
     pub fn idleCount(self: *const Self) usize {
         return self.totalCount() - self.activeCount();
     }
+
+    /// Returns the number of connections tracked for a specific host/port pair.
+    pub fn hostConnectionCount(self: *const Self, host: []const u8, port: u16) usize {
+        var count: usize = 0;
+        for (self.connections.items) |conn| {
+            if (std.mem.eql(u8, conn.host, host) and conn.port == port) {
+                count += 1;
+            }
+        }
+        return count;
+    }
+
+    /// Returns a snapshot of total/active/idle pool counts.
+    pub fn stats(self: *const Self) PoolStats {
+        const total = self.totalCount();
+        const active = self.activeCount();
+        return .{ .total = total, .active = active, .idle = total - active };
+    }
 };
 
 test "ConnectionPool initialization" {
@@ -232,4 +257,16 @@ test "Connection health check" {
 
     conn.in_use = true;
     try std.testing.expect(!conn.isHealthy(60_000));
+}
+
+test "ConnectionPool stats helpers" {
+    const allocator = std.testing.allocator;
+    var pool = ConnectionPool.init(allocator);
+    defer pool.deinit();
+
+    const s = pool.stats();
+    try std.testing.expectEqual(@as(usize, 0), s.total);
+    try std.testing.expectEqual(@as(usize, 0), s.active);
+    try std.testing.expectEqual(@as(usize, 0), s.idle);
+    try std.testing.expectEqual(@as(usize, 0), pool.hostConnectionCount("example.com", 443));
 }

@@ -1,6 +1,6 @@
 //! HTTP Router Implementation for httpx.zig
 //!
-//! Express-style routing with path parameter support:
+//! Pattern-based routing with path parameter support:
 //!
 //! - Static path matching (/users, /api/posts)
 //! - Dynamic parameters (/users/:id, /posts/:postId/comments/:commentId)
@@ -110,7 +110,35 @@ pub const Router = struct {
         return null;
     }
 
-    fn matchRoute(self: *Self, route: Route, path: []const u8, params: *[16]RouteParam) ?usize {
+    /// Returns the list of allowed methods for a given path.
+    ///
+    /// The method list is deduplicated and written into `out_methods`.
+    /// The returned value is the number of methods written.
+    pub fn allowedMethods(self: *const Self, path: []const u8, out_methods: *[16]types.Method) usize {
+        var params_buf: [16]RouteParam = undefined;
+        var count: usize = 0;
+
+        for (self.routes.items) |route| {
+            if (self.matchRoute(route, path, &params_buf) == null) continue;
+
+            var exists = false;
+            for (out_methods[0..count]) |existing| {
+                if (existing == route.method) {
+                    exists = true;
+                    break;
+                }
+            }
+
+            if (!exists and count < out_methods.len) {
+                out_methods[count] = route.method;
+                count += 1;
+            }
+        }
+
+        return count;
+    }
+
+    fn matchRoute(self: *const Self, route: Route, path: []const u8, params: *[16]RouteParam) ?usize {
         _ = self;
         var path_iter = mem.splitScalar(u8, path, '/');
         var param_idx: usize = 0;

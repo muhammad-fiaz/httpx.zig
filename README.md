@@ -27,12 +27,19 @@
 </div>
 
 > [!WARNING]
-> **This project is currently in active development and considered experimental.**  
-> APIs are subject to change without notice. Use with caution in production environments.
+> **This project aims to be production-ready and is actively maintained.**  
+> It is still a new project and not yet widely adopted. Feel free to use it in your projects.
 
-`httpx.zig` is a comprehensive, high-performance HTTP library designed for building robust networked applications. It features a modern API with support for all major HTTP versions, connection pooling, and express-style server routing.
+`httpx.zig` is a comprehensive, high-performance HTTP library designed for building robust networked applications. It features a modern API with support for all major HTTP versions, connection pooling, and pattern-based server routing.
 
-If you build with httpx.zig, make sure to give it a star.
+`httpx.zig` is an HTTP library layer for Zig (client + server primitives), not a full web framework. You explicitly build your own website servers and APIs on top of the provided HTTP server and client components.
+
+Related Zig projects:
+
+- For API framework support, check out [api.zig](https://github.com/muhammad-fiaz/api.zig).
+- For web framework support, check out [zix](https://github.com/muhammad-fiaz/zix).
+
+⭐ If you build with httpx.zig, make sure to give it a star. ⭐
 
 > [!NOTE]
 > **Custom HTTP/2 & HTTP/3 Implementation:** Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support.
@@ -54,16 +61,19 @@ If you build with httpx.zig, make sure to give it a star.
 | **Header Compression** | HPACK (RFC 7541) for HTTP/2 and QPACK (RFC 9204) for HTTP/3. | https://muhammad-fiaz.github.io/httpx.zig/guide/http2 |
 | **Stream Multiplexing** | HTTP/2 stream state machine with flow control and priority handling. | https://muhammad-fiaz.github.io/httpx.zig/api/protocol |
 | **Connection Pooling** | Automatic reuse of TCP connections with keep-alive and health checking. | https://muhammad-fiaz.github.io/httpx.zig/guide/pooling |
-| **Express-style Routing** | Intuitive server routing with dynamic path parameters and groups. | https://muhammad-fiaz.github.io/httpx.zig/guide/routing |
+| **Pool Introspection** | Built-in connection pool stats and per-host connection counts. | https://muhammad-fiaz.github.io/httpx.zig/api/pool |
+| **Pattern-based Routing** | Intuitive server routing with dynamic path parameters and groups. | https://muhammad-fiaz.github.io/httpx.zig/guide/routing |
 | **Middleware Stack** | Built-in middleware for CORS, Logging, Rate Limiting, customized Auth, and more. | https://muhammad-fiaz.github.io/httpx.zig/guide/middleware |
 | **Concurrency** | Parallel request patterns (`race`, `all`, `any`) and async task execution. | https://muhammad-fiaz.github.io/httpx.zig/guide/concurrency |
 | **Interceptors** | Global hooks to modify requests and responses (e.g., Auth injection). | https://muhammad-fiaz.github.io/httpx.zig/guide/interceptors |
 | **Smart Retries** | Configurable retry policies with exponential backoff. | https://muhammad-fiaz.github.io/httpx.zig/api/client |
 | **JSON and HTML** | Helpers for easy JSON serialization and HTML response generation. | https://muhammad-fiaz.github.io/httpx.zig/api/core |
+| **Core Convenience APIs** | Request query-param helpers and response constructors for redirect/text/json. | https://muhammad-fiaz.github.io/httpx.zig/api/core |
 | **TLS/SSL** | Secure connections via TLS 1.3 support. | https://muhammad-fiaz.github.io/httpx.zig/api/tls |
 | **Static Files** | Efficient static file serving capabilities. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **Security** | Security headers (Helmet) and safe defaults. | https://muhammad-fiaz.github.io/httpx.zig/api/middleware |
 | **No External Dependencies** | Pure Zig implementation for maximum portability and ease of build. | https://muhammad-fiaz.github.io/httpx.zig/guide/installation |
+| **Shared Common Helpers** | Reusable query and cookie parsing helpers for app and library code. | https://muhammad-fiaz.github.io/httpx.zig/api/utils |
 
 </details>
 
@@ -123,7 +133,7 @@ zig build -Dtarget=i386-windows
 ### Method 1: Zig Fetch (Recommended Stable Release)
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.2.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.3.tar.gz
 ```
 
 ### Method 2: Zig Fetch (Nightly/Main)
@@ -139,7 +149,7 @@ Add this dependency entry to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.2.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.3.tar.gz",
         .hash = "...", // Run zig fetch --save <url> to auto-fill this.
     },
 },
@@ -205,8 +215,23 @@ pub fn main() !void {
         .json = "{\"name\": \"John\"}",
     });
     defer post_response.deinit();
+
+    // Cookie jar helpers
+    try client.setCookie("session", "abc123");
+    _ = client.getCookie("session");
 }
 ```
+
+    ### Simplified API Aliases
+
+    ```zig
+    // Top-level aliases for concise client code
+    var response = try httpx.fetch(allocator, "https://httpbin.org/get");
+    defer response.deinit();
+
+    var by_method = try httpx.send(allocator, .GET, "https://httpbin.org/headers", .{});
+    defer by_method.deinit();
+    ```
  
 ### Server Usage
  
@@ -245,15 +270,20 @@ pub fn main() !void {
  
 ## Examples
  
-The `examples/` directory contains comprehensive examples for all features:
+The `examples/` directory contains comprehensive examples for all major features:
  
-- **Basic**: `simple_get.zig`, `post_json.zig`
+- **Basic Client**: `simple_get.zig`, `post_json.zig`
 - **JSON Parse**: `simple_get_deserialize.zig` (GET + typed JSON deserialization)
 - **Advanced Client**: `custom_headers.zig`, `connection_pool.zig`, `interceptors.zig`
+- **Cookies**: `cookies_demo.zig`
+- **Simplified API**: `simplified_api_aliases.zig`
 - **Concurrency**: `concurrent_requests.zig` (Parallel/Race/All patterns)
-- **Server**: `simple_server.zig`, `router_example.zig`, `static_files.zig`
-- **Middleware**: `middleware_example.zig`
 - **Streaming**: `streaming.zig`
+- **Server Core**: `simple_server.zig`, `router_example.zig`, `middleware_example.zig`
+- **Static Assets Demo**: `static_files.zig` (file-based static routes + directory-based wildcard mounts for CSS/JS/images)
+- **Website Demo**: `multi_page_website.zig` (full multi-page website serving `index/about/contact` with static assets)
+- **Protocol Demos**: `http2_example.zig`, `http3_example.zig`
+- **Networking Utility**: `udp_local.zig`
  
 To run an example:
 ```bash

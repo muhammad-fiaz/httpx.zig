@@ -2,7 +2,7 @@
 //!
 //! Production-ready HTTP server with comprehensive features:
 //!
-//! - Express-style routing with path parameters
+//! - Pattern-based routing with path parameters
 //! - Middleware stack support
 //! - Context-based request handling
 //! - JSON response helpers
@@ -26,6 +26,7 @@ const Socket = @import("../net/socket.zig").Socket;
 const TcpListener = @import("../net/socket.zig").TcpListener;
 const Router = @import("router.zig").Router;
 const Middleware = @import("middleware.zig").Middleware;
+const common = @import("../util/common.zig");
 
 /// Server configuration.
 pub const ServerConfig = struct {
@@ -74,9 +75,8 @@ pub const Context = struct {
 
     /// Returns a query parameter by name.
     pub fn query(self: *const Self, name: []const u8) ?[]const u8 {
-        _ = self;
-        _ = name;
-        return null;
+        const query_str = self.request.uri.query orelse return null;
+        return common.queryValue(query_str, name);
     }
 
     /// Returns a request header by name.
@@ -208,6 +208,16 @@ pub const Server = struct {
         try self.route(.PATCH, path, handler);
     }
 
+    /// Registers a HEAD route.
+    pub fn head(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.route(.HEAD, path, handler);
+    }
+
+    /// Registers an OPTIONS route.
+    pub fn options(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.route(.OPTIONS, path, handler);
+    }
+
     /// Starts the server and begins accepting connections.
     pub fn listen(self: *Self) !void {
         const addr = try net.Address.parseIp(self.config.host, self.config.port);
@@ -242,56 +252,109 @@ pub const Server = struct {
         var sock = socket;
         defer sock.close();
 
-        var buffer: [8192]u8 = undefined;
-        var parser = Parser.init(self.allocator);
-        defer parser.deinit();
-
-        while (!parser.isComplete()) {
-            const n = try sock.recv(&buffer);
-            if (n == 0) return;
-            _ = try parser.feed(buffer[0..n]);
-        }
-
-        var req = try Request.init(
-            self.allocator,
-            parser.method orelse .GET,
-            parser.path orelse "/",
-        );
-        defer req.deinit();
-
-        for (parser.headers.entries.items) |h| {
-            try req.headers.append(h.name, h.value);
-        }
-
-        if (parser.getBody().len > 0) {
-            req.body = parser.getBody();
-        }
-
-        var ctx = Context.init(self.allocator, &req);
-        defer ctx.deinit();
-
-        const route_result = self.router.find(req.method, req.uri.path);
-
-        if (route_result) |r| {
-            for (r.params) |p| {
-                try ctx.params.put(p.name, p.value);
+        var first_request = true;
+        while (self.running) {
+            const timeout_ms = if (first_request) self.config.request_timeout_ms else self.config.keep_alive_timeout_ms;
+            if (timeout_ms > 0) {
+                try sock.setRecvTimeout(timeout_ms);
             }
-        }
 
-        var response = if (route_result) |r|
-            r.handler(&ctx) catch |err| {
-                std.debug.print("Handler error: {}\n", .{err});
-                return self.sendError(&sock, 500);
+            var buffer: [8192]u8 = undefined;
+            var parser = Parser.init(self.allocator);
+            defer parser.deinit();
+
+            while (!parser.isComplete()) {
+                const n = try sock.recv(&buffer);
+                if (n == 0) return;
+                _ = try parser.feed(buffer[0..n]);
+                if (parser.getBody().len > self.config.max_body_size) {
+                    try self.sendError(&sock, 413);
+                    return;
+                }
             }
-        else
-            return self.sendError(&sock, 404);
 
-        defer response.deinit();
+            var req = try Request.init(
+                self.allocator,
+                parser.method orelse .GET,
+                parser.path orelse "/",
+            );
+            defer req.deinit();
+            req.version = parser.version;
 
-        const formatted = try http.formatResponse(&response, self.allocator);
-        defer self.allocator.free(formatted);
+            for (parser.headers.entries.items) |h| {
+                try req.headers.append(h.name, h.value);
+            }
 
-        try sock.sendAll(formatted);
+            if (parser.getBody().len > 0) {
+                req.body = parser.getBody();
+            }
+
+            var ctx = Context.init(self.allocator, &req);
+            defer ctx.deinit();
+
+            var suppress_body = false;
+            var route_result = self.router.find(req.method, req.uri.path);
+
+            // If HEAD is not explicitly registered, fall back to GET semantics
+            // and suppress the response body.
+            if (route_result == null and req.method == .HEAD) {
+                route_result = self.router.find(.GET, req.uri.path);
+                suppress_body = route_result != null;
+            }
+
+            if (route_result) |r| {
+                for (r.params) |p| {
+                    try ctx.params.put(p.name, p.value);
+                }
+            }
+
+            var response: Response = undefined;
+            if (route_result) |r| {
+                response = r.handler(&ctx) catch |err| {
+                    std.debug.print("Handler error: {}\n", .{err});
+                    return self.sendError(&sock, 500);
+                };
+            } else {
+                var allow_methods: [16]types.Method = undefined;
+                const allow_count = self.router.allowedMethods(req.uri.path, &allow_methods);
+
+                if (req.method == .OPTIONS and allow_count > 0) {
+                    response = Response.init(self.allocator, 204);
+                    try self.setAllowHeader(&response.headers, allow_methods[0..allow_count]);
+                } else if (allow_count > 0) {
+                    response = Response.init(self.allocator, 405);
+                    try self.setAllowHeader(&response.headers, allow_methods[0..allow_count]);
+                } else {
+                    return self.sendError(&sock, 404);
+                }
+            }
+
+            defer response.deinit();
+
+            if (suppress_body) {
+                if (response.body_owned) {
+                    if (response.body) |body| self.allocator.free(body);
+                    response.body_owned = false;
+                }
+                response.body = null;
+            }
+
+            const request_wants_keep_alive = req.headers.isKeepAlive(req.version);
+            const keep_alive = self.config.keep_alive and request_wants_keep_alive;
+            if (!keep_alive) {
+                try response.headers.set(HeaderName.CONNECTION, "close");
+            }
+
+            try self.ensureContentLengthHeader(&response);
+
+            const formatted = try http.formatResponse(&response, self.allocator);
+            defer self.allocator.free(formatted);
+
+            try sock.sendAll(formatted);
+
+            if (!keep_alive) return;
+            first_request = false;
+        }
     }
 
     /// Sends an error response.
@@ -299,10 +362,47 @@ pub const Server = struct {
         var resp = Response.init(self.allocator, code);
         defer resp.deinit();
 
+        try self.ensureContentLengthHeader(&resp);
+
         const formatted = try http.formatResponse(&resp, self.allocator);
         defer self.allocator.free(formatted);
 
         try socket.sendAll(formatted);
+    }
+
+    fn ensureContentLengthHeader(self: *Self, response: *Response) !void {
+        _ = self;
+        if (response.headers.get(HeaderName.CONTENT_LENGTH) != null) return;
+        if (response.headers.isChunked()) return;
+
+        const body_len: usize = if (response.body) |b| b.len else 0;
+        var len_buf: [32]u8 = undefined;
+        const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;
+        try response.headers.set(HeaderName.CONTENT_LENGTH, len_str);
+    }
+
+    /// Sets the `Allow` header for automatic OPTIONS and 405 responses.
+    fn setAllowHeader(self: *Self, headers: *Headers, methods: []const types.Method) !void {
+        var allow = std.ArrayListUnmanaged(u8){};
+        defer allow.deinit(self.allocator);
+        const writer = allow.writer(self.allocator);
+
+        var first = true;
+        var has_options = false;
+
+        for (methods) |m| {
+            if (m == .OPTIONS) has_options = true;
+            if (!first) try writer.writeAll(", ");
+            first = false;
+            try writer.writeAll(m.toString());
+        }
+
+        if (!has_options) {
+            if (!first) try writer.writeAll(", ");
+            try writer.writeAll("OPTIONS");
+        }
+
+        try headers.set("Allow", allow.items);
     }
 };
 
@@ -336,4 +436,51 @@ test "Server with config" {
 
     try std.testing.expectEqual(@as(u16, 3000), server.config.port);
     try std.testing.expectEqualStrings("0.0.0.0", server.config.host);
+}
+
+test "Context query parsing" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .GET, "/search?q=zig&lang=en");
+    defer req.deinit();
+
+    var ctx = Context.init(allocator, &req);
+    defer ctx.deinit();
+
+    try std.testing.expectEqualStrings("zig", ctx.query("q").?);
+    try std.testing.expectEqualStrings("en", ctx.query("lang").?);
+    try std.testing.expect(ctx.query("missing") == null);
+}
+
+test "Router allowed methods for path" {
+    const allocator = std.testing.allocator;
+    var server = Server.init(allocator);
+    defer server.deinit();
+
+    const handler = struct {
+        fn h(_: *Context) anyerror!Response {
+            return error.TestUnexpectedResult;
+        }
+    }.h;
+
+    try server.get("/users/:id", handler);
+    try server.put("/users/:id", handler);
+    try server.delete("/users/:id", handler);
+
+    var methods: [16]types.Method = undefined;
+    const count = server.router.allowedMethods("/users/42", &methods);
+
+    try std.testing.expect(count >= 3);
+
+    var has_get = false;
+    var has_put = false;
+    var has_delete = false;
+    for (methods[0..count]) |m| {
+        if (m == .GET) has_get = true;
+        if (m == .PUT) has_put = true;
+        if (m == .DELETE) has_delete = true;
+    }
+
+    try std.testing.expect(has_get);
+    try std.testing.expect(has_put);
+    try std.testing.expect(has_delete);
 }

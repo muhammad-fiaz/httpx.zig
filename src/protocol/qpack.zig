@@ -400,7 +400,7 @@ pub fn encodeInsertCountIncrement(increment: u64, out: *std.ArrayListUnmanaged(u
 /// Header entry type for encoding
 pub const HeaderEntry = struct { name: []const u8, value: []const u8 };
 
-/// Encodes headers using QPACK (simplified: static table only, no blocking).
+/// Encodes headers using QPACK.
 pub fn encodeHeaders(
     ctx: *QpackContext,
     headers: []const HeaderEntry,
@@ -409,12 +409,23 @@ pub fn encodeHeaders(
     var out = std.ArrayListUnmanaged(u8){};
     errdefer out.deinit(allocator);
 
-    // Required Insert Count = 0 (we don't use dynamic table references)
-    try out.append(allocator, 0);
+    // Required Insert Count
+    var ric_buf: [10]u8 = undefined;
+    const ric_len = try encodeInteger(ctx.dynamic_table.insert_count, 8, &ric_buf);
+    try out.appendSlice(allocator, ric_buf[0..ric_len]);
     // Delta Base = 0
     try out.append(allocator, 0);
 
     for (headers) |header| {
+        if (findDynamicNameValue(&ctx.dynamic_table, header.name, header.value)) |dynamic_index| {
+            // Indexed Field Line (dynamic, pre-base)
+            var buf: [10]u8 = undefined;
+            const n = try encodeInteger(dynamic_index, 6, &buf);
+            buf[0] |= 0x80; // 10xxxxxx prefix (dynamic)
+            try out.appendSlice(allocator, buf[0..n]);
+            continue;
+        }
+
         // Try to find in static table first
         if (StaticTable.findNameValue(header.name, header.value)) |index| {
             // Indexed Field Line (static)
@@ -422,6 +433,13 @@ pub fn encodeHeaders(
             const n = try encodeInteger(index, 6, &buf);
             buf[0] |= 0xC0; // 11xxxxxx prefix (static)
             try out.appendSlice(allocator, buf[0..n]);
+        } else if (findDynamicName(&ctx.dynamic_table, header.name)) |dynamic_name_index| {
+            // Literal Field Line With Name Reference (dynamic)
+            var buf: [10]u8 = undefined;
+            const n = try encodeInteger(dynamic_name_index, 4, &buf);
+            buf[0] |= 0x40; // 0100xxxx prefix (dynamic)
+            try out.appendSlice(allocator, buf[0..n]);
+            try encodeString(header.value, true, allocator, &out);
         } else if (StaticTable.findName(header.name)) |name_index| {
             // Literal Field Line With Name Reference (static)
             var buf: [10]u8 = undefined;
@@ -437,7 +455,6 @@ pub fn encodeHeaders(
         }
     }
 
-    _ = ctx; // Context not needed for static-only encoding
     return out.toOwnedSlice(allocator);
 }
 
@@ -466,14 +483,19 @@ pub fn decodeHeaders(
 
     // Required Insert Count (encoded)
     const ric_result = try decodeInteger(data, 8);
+    const required_insert_count = ric_result.value;
     var offset = ric_result.len;
 
     // Delta Base
     if (offset >= data.len) return error.InvalidHeaderBlock;
+    const delta_is_negative = (data[offset] & 0x80) != 0;
     const db_result = try decodeInteger(data[offset..], 7);
     offset += db_result.len;
+    const base = try computeBase(required_insert_count, db_result.value, delta_is_negative);
 
-    _ = ctx; // Context not needed for static-only decoding
+    if (required_insert_count > ctx.dynamic_table.insert_count) {
+        return error.DynamicTableNotSupported;
+    }
 
     while (offset < data.len) {
         const first = data[offset];
@@ -491,8 +513,11 @@ pub fn decodeHeaders(
                     .value = try allocator.dupe(u8, entry.value),
                 });
             } else {
-                // Dynamic table reference (not fully implemented)
-                return error.DynamicTableNotSupported;
+                const entry = try resolvePreBaseEntry(ctx, base, idx_result.value);
+                try headers.append(allocator, .{
+                    .name = try allocator.dupe(u8, entry.name),
+                    .value = try allocator.dupe(u8, entry.value),
+                });
             }
         } else if (first & 0x40 != 0) {
             // Literal Field Line With Name Reference
@@ -505,7 +530,8 @@ pub fn decodeHeaders(
                 const entry = StaticTable.get(@intCast(idx_result.value)) orelse return error.InvalidIndex;
                 name = try allocator.dupe(u8, entry.name);
             } else {
-                return error.DynamicTableNotSupported;
+                const entry = try resolvePreBaseEntry(ctx, base, idx_result.value);
+                name = try allocator.dupe(u8, entry.name);
             }
             errdefer allocator.free(name);
 
@@ -524,13 +550,78 @@ pub fn decodeHeaders(
             offset += value_result.len;
 
             try headers.append(allocator, .{ .name = name_result.value, .value = value_result.value });
+        } else if (first & 0x10 != 0) {
+            // Indexed Field Line With Post-Base Index
+            const idx_result = try decodeInteger(data[offset..], 4);
+            offset += idx_result.len;
+
+            const entry = try resolvePostBaseEntry(ctx, base, idx_result.value);
+            try headers.append(allocator, .{
+                .name = try allocator.dupe(u8, entry.name),
+                .value = try allocator.dupe(u8, entry.value),
+            });
         } else {
-            // Indexed Field Line With Post-Base Index (not implemented)
-            return error.NotImplemented;
+            // Literal Field Line With Post-Base Name Reference
+            const idx_result = try decodeInteger(data[offset..], 3);
+            offset += idx_result.len;
+
+            const entry = try resolvePostBaseEntry(ctx, base, idx_result.value);
+            const name = try allocator.dupe(u8, entry.name);
+            errdefer allocator.free(name);
+
+            const value_result = try decodeString(data[offset..], allocator);
+            offset += value_result.len;
+
+            try headers.append(allocator, .{ .name = name, .value = value_result.value });
         }
     }
 
     return headers.toOwnedSlice(allocator);
+}
+
+fn computeBase(required_insert_count: u64, delta_base: u64, delta_is_negative: bool) !u64 {
+    if (delta_is_negative) {
+        if (required_insert_count == 0 or delta_base >= required_insert_count) {
+            return error.InvalidHeaderBlock;
+        }
+        return required_insert_count - delta_base - 1;
+    }
+    return required_insert_count + delta_base;
+}
+
+fn resolvePreBaseEntry(ctx: *const QpackContext, base: u64, relative_index: u64) !StaticTable.Entry {
+    if (relative_index >= base) return error.InvalidIndex;
+    const absolute_index = base - relative_index - 1;
+    return ctx.dynamic_table.getAbsolute(absolute_index) orelse error.InvalidIndex;
+}
+
+fn resolvePostBaseEntry(ctx: *const QpackContext, base: u64, post_base_index: u64) !StaticTable.Entry {
+    const absolute_index = base + post_base_index;
+    return ctx.dynamic_table.getAbsolute(absolute_index) orelse error.InvalidIndex;
+}
+
+fn findDynamicNameValue(table: *const DynamicTable, name: []const u8, value: []const u8) ?u64 {
+    var i: usize = table.entries.items.len;
+    while (i > 0) {
+        i -= 1;
+        const entry = table.entries.items[i];
+        if (std.ascii.eqlIgnoreCase(entry.name, name) and mem.eql(u8, entry.value, value)) {
+            return @intCast(table.entries.items.len - 1 - i);
+        }
+    }
+    return null;
+}
+
+fn findDynamicName(table: *const DynamicTable, name: []const u8) ?u64 {
+    var i: usize = table.entries.items.len;
+    while (i > 0) {
+        i -= 1;
+        const entry = table.entries.items[i];
+        if (std.ascii.eqlIgnoreCase(entry.name, name)) {
+            return @intCast(table.entries.items.len - 1 - i);
+        }
+    }
+    return null;
 }
 
 test "QPACK static table lookup" {
@@ -570,4 +661,59 @@ test "QPACK simple header encoding" {
     defer allocator.free(encoded);
 
     try std.testing.expect(encoded.len > 0);
+}
+
+test "QPACK decode dynamic indexed field" {
+    const allocator = std.testing.allocator;
+    var ctx = QpackContext.initWithCapacity(allocator, 4096);
+    defer ctx.deinit();
+
+    try ctx.dynamic_table.add("x-dyn", "one");
+
+    var block = std.ArrayListUnmanaged(u8){};
+    defer block.deinit(allocator);
+    try block.append(allocator, 1); // Required Insert Count
+    try block.append(allocator, 0); // Delta Base
+    try block.append(allocator, 0x80); // Indexed Field Line, dynamic index 0
+
+    const decoded = try decodeHeaders(&ctx, block.items, allocator);
+    defer {
+        for (decoded) |h| {
+            allocator.free(h.name);
+            allocator.free(h.value);
+        }
+        allocator.free(decoded);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.len);
+    try std.testing.expectEqualStrings("x-dyn", decoded[0].name);
+    try std.testing.expectEqualStrings("one", decoded[0].value);
+}
+
+test "QPACK decode post-base indexed field" {
+    const allocator = std.testing.allocator;
+    var ctx = QpackContext.initWithCapacity(allocator, 4096);
+    defer ctx.deinit();
+
+    try ctx.dynamic_table.add("x-a", "v1"); // absolute index 0
+    try ctx.dynamic_table.add("x-b", "v2"); // absolute index 1
+
+    var block = std.ArrayListUnmanaged(u8){};
+    defer block.deinit(allocator);
+    try block.append(allocator, 1); // Required Insert Count
+    try block.append(allocator, 0); // Delta Base => base = 1
+    try block.append(allocator, 0x10); // Indexed Field Line With Post-Base Index = 0
+
+    const decoded = try decodeHeaders(&ctx, block.items, allocator);
+    defer {
+        for (decoded) |h| {
+            allocator.free(h.name);
+            allocator.free(h.value);
+        }
+        allocator.free(decoded);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), decoded.len);
+    try std.testing.expectEqualStrings("x-b", decoded[0].name);
+    try std.testing.expectEqualStrings("v2", decoded[0].value);
 }

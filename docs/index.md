@@ -25,7 +25,7 @@ features:
   - title: Robust Client
     details: Connection pooling, automatic retries, interceptors, and typed API.
   - title: Powerful Server
-    details: Express-style routing, middleware support, and context-based handling.
+    details: Pattern-based routing, middleware support, and context-based handling.
   - title: Concurrent
     details: Async task executor and parallel request patterns (all, any, race).
   - title: TLS Security
@@ -41,7 +41,7 @@ Choose one of these installation methods:
 1. Stable release (recommended)
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.2.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.3.tar.gz
 ```
 
 2. Nightly/main branch
@@ -55,11 +55,20 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.2.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.3.tar.gz",
     .hash = "...",
   },
 },
 ```
+
+::: tip Release maturity
+httpx.zig is built with production-readiness as a core goal. It is still a relatively new project, so adoption is growing. You can use it in real projects while tracking changelogs between releases.
+:::
+
+## Related Zig Projects
+
+- For API framework support, check out [api.zig](https://github.com/muhammad-fiaz/api.zig).
+- For web framework support, check out [zix](https://github.com/muhammad-fiaz/zix).
 
 For full setup details, including local path dependencies and `build.zig` wiring, see `/guide/installation`.
 
@@ -105,15 +114,20 @@ Available examples (see the `/examples` folder):
 - `simple_get_deserialize.zig`: GET request with typed JSON deserialization
 - `post_json.zig`: JSON POST
 - `custom_headers.zig`: request headers
+- `interceptors.zig`: request/response interception hooks
 - `middleware_example.zig`: middleware chain
 - `router_example.zig`: router + handlers
 - `simple_server.zig`: basic HTTP server
 - `streaming.zig`: streaming request/response bodies
 - `concurrent_requests.zig`: concurrency patterns
 - `connection_pool.zig`: keep-alive pooling
-- `static_files.zig`: static file server
+- `cookies_demo.zig`: cookie jar management
+- `simplified_api_aliases.zig`: simplified top-level/client aliases
+- `static_files.zig`: file-based static routes and directory-based wildcard mounts for CSS/JS/images
+- `multi_page_website.zig`: full multi-page website serving index/about/contact with static assets
 - `http2_example.zig`: HTTP/2 HPACK compression and stream management
 - `http3_example.zig`: HTTP/3 QPACK compression and QUIC framing
+- `udp_local.zig`: UDP local networking utility
 
 ## Configuration
 

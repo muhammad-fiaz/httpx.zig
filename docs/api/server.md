@@ -1,6 +1,6 @@
 # Server API
 
-The `httpx.zig` server module provides a robust, Express-inspired HTTP server with middleware support, routing, and proper context handling. Supports HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 protocols.
+The `httpx.zig` server module provides a robust HTTP server with middleware support, routing, and proper context handling. Supports HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 protocols.
 
 ## Protocol Support
 
@@ -8,8 +8,8 @@ The `httpx.zig` server module provides a robust, Express-inspired HTTP server wi
 |----------|--------|----------|
 | HTTP/1.0 | ✅ Full | Basic request/response |
 | HTTP/1.1 | ✅ Full | Keep-Alive, chunked transfer, pipelining |
-| HTTP/2 | ✅ Full | Multiplexing, HPACK, server push, flow control |
-| HTTP/3 | ✅ Full | QUIC transport, QPACK, 0-RTT |
+| HTTP/2 | ⚠️ Partial | Protocol primitives available; high-level server currently handles HTTP/1.x requests |
+| HTTP/3 | ⚠️ Partial | Protocol primitives available; high-level server currently handles HTTP/1.x requests |
 
 ## Server
 
@@ -40,12 +40,10 @@ var server = httpx.Server.initWithConfig(allocator, .{
 | `port` | `u16` | `8080` | Port to listen on. |
 | `max_body_size` | `usize` | `10MB` | Max request body size. |
 | `request_timeout_ms` | `u64` | `30000` | Timeout for request processing. |
+| `keep_alive_timeout_ms` | `u64` | `60000` | Timeout for keep-alive requests. |
 | `keep_alive` | `bool` | `true` | Enable HTTP Keep-Alive. |
 | `max_connections` | `u32` | `1000` | Max concurrent connections. |
-| `http2_enabled` | `bool` | `false` | Enable HTTP/2 support |
-| `http3_enabled` | `bool` | `false` | Enable HTTP/3 support |
-| `tls_cert_path` | `?[]const u8` | `null` | Path to TLS certificate |
-| `tls_key_path` | `?[]const u8` | `null` | Path to TLS private key |
+| `threads` | `u32` | `0` | Reserved for future thread configuration. |
 
 ### Methods
 
@@ -137,7 +135,6 @@ try api.put("/users/:id", updateUser);
 try api.delete("/users/:id", deleteUser);
 
 var admin = server.router.group("/admin");
-try admin.use(httpx.middleware.auth());
 try admin.get("/dashboard", adminDashboard);
 ```
 
@@ -164,7 +161,7 @@ The `Context` struct is passed to every route handler and middleware. It wraps t
 | `response` | `ResponseBuilder` | Response builder |
 | `allocator` | `Allocator` | Request-scoped allocator |
 | `params` | `StringMap` | URL path parameters |
-| `state` | `?*anyopaque` | User-defined state |
+| `data` | `StringMap(*anyopaque)` | User-defined request-scoped data |
 
 ### Request Accessors
 
@@ -173,8 +170,6 @@ The `Context` struct is passed to every route handler and middleware. It wraps t
 | `param(name)` | Get URL path parameter (`:id`, `:name`) |
 | `query(name)` | Get query string parameter |
 | `header(name)` | Get request header value |
-| `body()` | Get request body |
-| `jsonBody(T)` | Parse body as JSON type T |
 
 ### Response Helpers
 
@@ -189,8 +184,6 @@ These methods allow fluent response chaining.
 | `html(data)` | Send HTML response |
 | `file(path)` | Stream a file |
 | `redirect(url, code)` | Send redirect |
-| `send(data)` | Send raw bytes |
-| `noContent()` | 204 No Content |
 
 ### Example Context Usage
 
@@ -269,38 +262,55 @@ fn riskyHandler(ctx: *httpx.Context) !httpx.Response {
 
 ## Static Files
 
-Serve static files from a directory.
+You can return files directly from handlers with `ctx.file(path)`:
 
 ```zig
-// Serve files from ./public at /static/*
-try server.static("/static", "./public");
-
-// Or use middleware
-try server.use(httpx.middleware.staticFiles(.{
-    .root = "./public",
-    .prefix = "/static",
-    .index = "index.html",
-    .cache_control = "public, max-age=3600",
-}));
+fn logo(ctx: *httpx.Context) !httpx.Response {
+    return ctx.file("examples/multi_page_site/site/assets/images/httpx.zig-transparent.png");
+}
 ```
+
+For explicit website assets, combine a site root with wildcard routing:
+
+```zig
+const site_root = "examples/multi_page_site/site";
+
+fn assets(ctx: *httpx.Context) !httpx.Response {
+    const prefix = "/assets/";
+    if (!std.mem.startsWith(u8, ctx.request.uri.path, prefix)) {
+        return ctx.status(400).text("Invalid asset route");
+    }
+    const asset = ctx.request.uri.path[prefix.len..];
+    if (asset.len == 0) return ctx.status(400).text("Missing asset path");
+    if (std.mem.indexOf(u8, asset, "..") != null) return ctx.status(400).text("Invalid asset path");
+
+    var buf: [1024]u8 = undefined;
+    const full = std.fmt.bufPrint(&buf, "{s}/assets/{s}", .{ site_root, asset }) catch {
+        return ctx.status(414).text("Path too long");
+    };
+    return ctx.file(full);
+}
+
+try server.get("/assets/*", assets);
+```
+
+This keeps HTML/CSS/JS/image files explicit and avoids ad-hoc runtime asset folders.
+
+For runnable demos:
+
+- `examples/static_files.zig`: explicit file routes (`/logo`, `/styles.css`, `/app.js`) plus directory wildcard routes (`/assets/*`, `/images/*`).
+- `examples/multi_page_website.zig`: full website pages (`/`, `/about`, `/contact`) with static assets from `/static/*`.
 
 ## Error Handling
 
-```zig
-// Global error handler
-server.setErrorHandler(fn(ctx: *httpx.Context, err: anyerror) !httpx.Response {
-    std.debug.print("Error: {}\n", .{err});
-    return ctx.status(500).json(.{
-        .error = "Internal Server Error",
-    });
-});
+Handle route-level errors in handlers and return explicit status codes as needed:
 
-// Per-route error handling
+```zig
 fn handler(ctx: *httpx.Context) !httpx.Response {
     const result = riskyOperation() catch |err| switch (err) {
         error.NotFound => return ctx.status(404).json(.{ .error = "Not Found" }),
         error.Unauthorized => return ctx.status(401).json(.{ .error = "Unauthorized" }),
-        else => return err,
+        else => return ctx.status(500).json(.{ .error = "Internal Server Error" }),
     };
     return ctx.json(result);
 }

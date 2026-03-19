@@ -1,6 +1,6 @@
 //! Router Example
 //!
-//! Demonstrates Express-style routing with path parameters.
+//! Demonstrates pattern-based routing with path parameters.
 
 const std = @import("std");
 const httpx = @import("httpx");

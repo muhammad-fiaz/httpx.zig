@@ -9,12 +9,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-fn stringifyJsonAlloc(allocator: Allocator, value: anytype, options: std.json.StringifyOptions) ![]u8 {
-    var list = std.ArrayList(u8).init(allocator);
-    errdefer list.deinit();
-
-    try std.json.stringify(value, options, list.writer());
-    return list.toOwnedSlice();
+fn stringifyJsonAlloc(allocator: Allocator, value: anytype, options: std.json.Stringify.Options) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, value, options);
 }
 
 /// JSON utility functions.

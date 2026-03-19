@@ -1,6 +1,6 @@
 # Routing
 
-The `httpx.zig` server uses an intuitive, Express-style routing mechanism.
+The `httpx.zig` server uses an intuitive, pattern-based routing mechanism.
 
 ## Basic Routing
 

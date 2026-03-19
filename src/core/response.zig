@@ -17,12 +17,8 @@ const Headers = @import("headers.zig").Headers;
 const HeaderName = @import("headers.zig").HeaderName;
 const Status = @import("status.zig").Status;
 
-fn stringifyJsonAlloc(allocator: Allocator, value: anytype, options: std.json.StringifyOptions) ![]u8 {
-    var list = std.ArrayList(u8).init(allocator);
-    errdefer list.deinit();
-
-    try std.json.stringify(value, options, list.writer());
-    return list.toOwnedSlice();
+fn stringifyJsonAlloc(allocator: Allocator, value: anytype, options: std.json.Stringify.Options) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, value, options);
 }
 /// HTTP response representation.
 pub const Response = struct {
@@ -103,6 +99,41 @@ pub const Response = struct {
     /// Returns a specific header value.
     pub fn header(self: *const Self, name: []const u8) ?[]const u8 {
         return self.headers.get(name);
+    }
+
+    /// Creates a redirect response and sets the `Location` header.
+    pub fn redirect(allocator: Allocator, status_code: u16, redirect_to: []const u8) !Self {
+        var resp = Self.init(allocator, status_code);
+        try resp.headers.set(HeaderName.LOCATION, redirect_to);
+        return resp;
+    }
+
+    /// Creates a plain-text response with Content-Type and Content-Length set.
+    pub fn fromText(allocator: Allocator, status_code: u16, text_body: []const u8) !Self {
+        var resp = Self.init(allocator, status_code);
+        try resp.headers.set(HeaderName.CONTENT_TYPE, "text/plain; charset=utf-8");
+        resp.body = try allocator.dupe(u8, text_body);
+        resp.body_owned = true;
+
+        var len_buf: [32]u8 = undefined;
+        const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{text_body.len}) catch unreachable;
+        try resp.headers.set(HeaderName.CONTENT_LENGTH, len_str);
+        return resp;
+    }
+
+    /// Creates a JSON response from a serializable value.
+    pub fn fromJson(allocator: Allocator, status_code: u16, value: anytype) !Self {
+        var resp = Self.init(allocator, status_code);
+        try resp.headers.set(HeaderName.CONTENT_TYPE, "application/json");
+        resp.body = try stringifyJsonAlloc(allocator, value, .{});
+        resp.body_owned = true;
+
+        if (resp.body) |b| {
+            var len_buf: [32]u8 = undefined;
+            const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{b.len}) catch unreachable;
+            try resp.headers.set(HeaderName.CONTENT_LENGTH, len_str);
+        }
+        return resp;
     }
 
     /// Serializes the response to HTTP/1.1 wire format.
@@ -264,4 +295,27 @@ test "Response serialization" {
     defer allocator.free(serialized);
 
     try std.testing.expect(mem.startsWith(u8, serialized, "HTTP/1.1 200 OK\r\n"));
+}
+
+test "Response redirect constructor" {
+    const allocator = std.testing.allocator;
+    var response = try Response.redirect(allocator, 302, "https://example.com/new");
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 302), response.status.code);
+    try std.testing.expectEqualStrings("https://example.com/new", response.location().?);
+}
+
+test "Response fromText and fromJson constructors" {
+    const allocator = std.testing.allocator;
+
+    var text_resp = try Response.fromText(allocator, 200, "hello");
+    defer text_resp.deinit();
+    try std.testing.expectEqualStrings("text/plain; charset=utf-8", text_resp.contentType().?);
+    try std.testing.expectEqualStrings("hello", text_resp.text().?);
+
+    var json_resp = try Response.fromJson(allocator, 201, .{ .ok = true });
+    defer json_resp.deinit();
+    try std.testing.expectEqualStrings("application/json", json_resp.contentType().?);
+    try std.testing.expect(json_resp.text() != null);
 }

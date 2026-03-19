@@ -9,6 +9,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -37,7 +40,7 @@ jobs:
         run: echo "Examples are tested in a dedicated matrix job on Linux, macOS, and Windows runners"
 
       - name: Zig format check
-        run: zig fmt --check src/ examples/
+        run: zig fmt --check src/ examples/ bench/ build.zig
 
   examples-run:
     name: Run Examples Matrix (hostable targets)

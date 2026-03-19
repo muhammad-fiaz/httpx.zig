@@ -7,9 +7,6 @@
 //! - HTTP/1.x: request/response formatting utilities.
 //! - HTTP/2: frame header + SETTINGS payload helpers, and basic frame IO.
 //! - HTTP/3: QUIC varint + HTTP/3 frame header helpers.
-//!
-//! Full end-to-end HTTP/2 or HTTP/3 stacks (HPACK/QPACK, stream multiplexing,
-//! QUIC transport integration, etc.) are intentionally out of scope here.
 
 const std = @import("std");
 const mem = std.mem;

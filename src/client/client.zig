@@ -28,6 +28,7 @@ const Parser = @import("../protocol/parser.zig").Parser;
 const TlsConfig = @import("../tls/tls.zig").TlsConfig;
 const TlsSession = @import("../tls/tls.zig").TlsSession;
 const ConnectionPool = @import("pool.zig").ConnectionPool;
+const common = @import("../util/common.zig");
 
 /// HTTP client configuration.
 pub const ClientConfig = struct {
@@ -118,6 +119,16 @@ pub const Client = struct {
         return self.requestInternal(method, url, reqOpts, 0);
     }
 
+    /// Alias for request() with a shorter name for application code.
+    pub fn send(self: *Self, method: types.Method, url: []const u8, reqOpts: RequestOptions) !Response {
+        return self.request(method, url, reqOpts);
+    }
+
+    /// Alias for GET requests in fetch-style client code.
+    pub fn fetch(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
+        return self.get(url, reqOpts);
+    }
+
     fn requestInternal(self: *Self, method: types.Method, url: []const u8, reqOpts: RequestOptions, depth: u32) !Response {
         const full_url = if (self.config.base_url) |base|
             try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base, url })
@@ -150,13 +161,16 @@ pub const Client = struct {
             try req.setJson(json_body);
         }
 
+        try self.attachCookies(&req);
+
         for (self.interceptors.items) |interceptor| {
             if (interceptor.request_fn) |f| {
                 try f(&req, interceptor.context);
             }
         }
 
-        var response = try self.executeRequest(&req);
+        var response = try self.executeRequest(&req, reqOpts.timeout_ms);
+        try self.storeCookies(&response);
 
         for (self.interceptors.items) |interceptor| {
             if (interceptor.response_fn) |f| {
@@ -188,13 +202,13 @@ pub const Client = struct {
     }
 
     /// Executes the actual HTTP request.
-    fn executeRequest(self: *Self, req: *Request) !Response {
+    fn executeRequest(self: *Self, req: *Request, timeout_override_ms: ?u64) !Response {
         const policy = self.config.retry_policy;
         const can_retry_method = (!policy.retry_only_idempotent) or req.method.isIdempotent();
 
         var attempt: u32 = 0;
         while (true) {
-            var res = self.executeRequestOnce(req) catch |err| {
+            var res = self.executeRequestOnce(req, timeout_override_ms) catch |err| {
                 if (policy.retry_on_connection_error and can_retry_method and attempt < policy.max_retries) {
                     attempt += 1;
                     const delay_ms = policy.calculateDelay(attempt);
@@ -216,9 +230,11 @@ pub const Client = struct {
         }
     }
 
-    fn executeRequestOnce(self: *Self, req: *Request) !Response {
+    fn executeRequestOnce(self: *Self, req: *Request, timeout_override_ms: ?u64) !Response {
         const host = req.uri.host orelse return error.InvalidUri;
         const port = req.uri.effectivePort();
+        const timeout_ms = timeout_override_ms orelse self.config.timeouts.read_ms;
+        const write_timeout_ms = timeout_override_ms orelse self.config.timeouts.write_ms;
 
         const request_data = try http.formatRequest(req, self.allocator);
         defer self.allocator.free(request_data);
@@ -230,11 +246,11 @@ pub const Client = struct {
             var socket = try Socket.createForAddress(addr);
             defer socket.close();
 
-            if (self.config.timeouts.read_ms > 0) {
-                try socket.setRecvTimeout(self.config.timeouts.read_ms);
+            if (timeout_ms > 0) {
+                try socket.setRecvTimeout(timeout_ms);
             }
-            if (self.config.timeouts.write_ms > 0) {
-                try socket.setSendTimeout(self.config.timeouts.write_ms);
+            if (write_timeout_ms > 0) {
+                try socket.setSendTimeout(write_timeout_ms);
             }
 
             try socket.connect(addr);
@@ -247,11 +263,11 @@ pub const Client = struct {
             errdefer conn.close();
             defer self.pool.releaseConnection(conn);
 
-            if (self.config.timeouts.read_ms > 0) {
-                try conn.socket.setRecvTimeout(self.config.timeouts.read_ms);
+            if (timeout_ms > 0) {
+                try conn.socket.setRecvTimeout(timeout_ms);
             }
-            if (self.config.timeouts.write_ms > 0) {
-                try conn.socket.setSendTimeout(self.config.timeouts.write_ms);
+            if (write_timeout_ms > 0) {
+                try conn.socket.setSendTimeout(write_timeout_ms);
             }
             try conn.socket.setKeepAlive(true);
 
@@ -268,11 +284,11 @@ pub const Client = struct {
         var socket = try Socket.createForAddress(addr);
         defer socket.close();
 
-        if (self.config.timeouts.read_ms > 0) {
-            try socket.setRecvTimeout(self.config.timeouts.read_ms);
+        if (timeout_ms > 0) {
+            try socket.setRecvTimeout(timeout_ms);
         }
-        if (self.config.timeouts.write_ms > 0) {
-            try socket.setSendTimeout(self.config.timeouts.write_ms);
+        if (write_timeout_ms > 0) {
+            try socket.setSendTimeout(write_timeout_ms);
         }
 
         try socket.connect(addr);
@@ -301,9 +317,12 @@ pub const Client = struct {
         defer parser.deinit();
 
         var buf: [16 * 1024]u8 = undefined;
+        var total_read: usize = 0;
         while (!parser.isComplete()) {
             const n = try socket.recv(&buf);
             if (n == 0) break;
+            total_read += n;
+            if (total_read > self.config.max_response_size) return error.ResponseTooLarge;
             _ = try parser.feed(buf[0..n]);
         }
 
@@ -318,6 +337,7 @@ pub const Client = struct {
         defer parser.deinit();
 
         var buf: [16 * 1024]u8 = undefined;
+        var total_read: usize = 0;
         while (!parser.isComplete()) {
             var iov = [_][]u8{buf[0..]};
             const n = r.readVec(&iov) catch |err| switch (err) {
@@ -325,6 +345,8 @@ pub const Client = struct {
                 else => return err,
             };
             if (n == 0) break;
+            total_read += n;
+            if (total_read > self.config.max_response_size) return error.ResponseTooLarge;
             _ = try parser.feed(buf[0..n]);
         }
 
@@ -374,6 +396,86 @@ pub const Client = struct {
         return std.fmt.allocPrint(self.allocator, "{s}://{s}:{d}{s}{s}", .{ scheme, host, port, prefix, location });
     }
 
+    fn attachCookies(self: *Self, req: *Request) !void {
+        if (self.cookies.count() == 0) return;
+
+        var list = std.ArrayListUnmanaged(u8){};
+        defer list.deinit(self.allocator);
+        const writer = list.writer(self.allocator);
+
+        var it = self.cookies.iterator();
+        var first = true;
+        while (it.next()) |entry| {
+            if (!first) try writer.writeAll("; ");
+            first = false;
+            try writer.print("{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+        }
+
+        if (list.items.len > 0) {
+            try req.headers.set(HeaderName.COOKIE, list.items);
+        }
+    }
+
+    fn storeCookies(self: *Self, res: *const Response) !void {
+        const values = try res.headers.getAll(HeaderName.SET_COOKIE, self.allocator);
+        defer self.allocator.free(values);
+
+        for (values) |set_cookie| {
+            const pair = common.parseSetCookiePair(set_cookie) orelse continue;
+            try self.setCookie(pair.name, pair.value);
+        }
+    }
+
+    /// Adds or replaces a cookie in the in-memory client cookie jar.
+    pub fn setCookie(self: *Self, name: []const u8, value: []const u8) !void {
+        if (self.cookies.fetchRemove(name)) |removed| {
+            self.allocator.free(removed.key);
+            self.allocator.free(removed.value);
+        }
+
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+        const owned_value = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(owned_value);
+
+        try self.cookies.put(self.allocator, owned_name, owned_value);
+    }
+
+    /// Returns a cookie value from the in-memory cookie jar.
+    pub fn getCookie(self: *const Self, name: []const u8) ?[]const u8 {
+        return self.cookies.get(name);
+    }
+
+    /// Removes a cookie from the in-memory cookie jar.
+    pub fn removeCookie(self: *Self, name: []const u8) bool {
+        if (self.cookies.fetchRemove(name)) |removed| {
+            self.allocator.free(removed.key);
+            self.allocator.free(removed.value);
+            return true;
+        }
+        return false;
+    }
+
+    /// Clears all cookies from the in-memory cookie jar.
+    pub fn clearCookies(self: *Self) void {
+        var it = self.cookies.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.cookies.clearRetainingCapacity();
+    }
+
+    /// Returns true if a cookie with the given name exists in the jar.
+    pub fn hasCookie(self: *const Self, name: []const u8) bool {
+        return self.cookies.contains(name);
+    }
+
+    /// Returns the number of cookies currently stored in the jar.
+    pub fn cookieCount(self: *const Self) usize {
+        return self.cookies.count();
+    }
+
     /// GET request convenience method.
     pub fn get(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
         return self.request(.GET, url, reqOpts);
@@ -407,6 +509,11 @@ pub const Client = struct {
     /// OPTIONS request convenience method.
     pub fn httpOptions(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
         return self.request(.OPTIONS, url, reqOpts);
+    }
+
+    /// Alias for httpOptions() with conventional method naming.
+    pub fn options(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
+        return self.httpOptions(url, reqOpts);
     }
 };
 
@@ -463,4 +570,84 @@ test "Response parsing" {
 
     try std.testing.expectEqual(@as(u16, 200), response.status.code);
     try std.testing.expectEqualStrings("application/json", response.headers.get("Content-Type").?);
+}
+
+test "Client stores Set-Cookie headers" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator);
+    defer client.deinit();
+
+    var response = Response.init(allocator, 200);
+    defer response.deinit();
+
+    try response.headers.append("Set-Cookie", "session=abc123; Path=/; HttpOnly");
+    try response.headers.append("Set-Cookie", "theme=dark; Path=/");
+
+    try client.storeCookies(&response);
+
+    try std.testing.expectEqualStrings("abc123", client.cookies.get("session").?);
+    try std.testing.expectEqualStrings("dark", client.cookies.get("theme").?);
+}
+
+test "Client attaches Cookie header from jar" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator);
+    defer client.deinit();
+
+    try client.setCookie("session", "abc123");
+    try client.setCookie("theme", "dark");
+
+    var request = try Request.init(allocator, .GET, "https://example.com/");
+    defer request.deinit();
+
+    try client.attachCookies(&request);
+
+    const cookie_header = request.headers.get("Cookie") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(mem.indexOf(u8, cookie_header, "session=abc123") != null);
+    try std.testing.expect(mem.indexOf(u8, cookie_header, "theme=dark") != null);
+}
+
+test "Client cookie jar public API" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator);
+    defer client.deinit();
+
+    try client.setCookie("session", "abc123");
+    try std.testing.expectEqualStrings("abc123", client.getCookie("session").?);
+
+    const removed = client.removeCookie("session");
+    try std.testing.expect(removed);
+    try std.testing.expect(client.getCookie("session") == null);
+
+    try client.setCookie("theme", "dark");
+    try client.setCookie("lang", "en");
+    client.clearCookies();
+    try std.testing.expectEqual(@as(usize, 0), client.cookies.count());
+}
+
+test "Client send/fetch/options aliases" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator);
+    defer client.deinit();
+
+    // Compile-time alias checks through function pointer assignment.
+    const send_ptr: *const fn (*Client, types.Method, []const u8, RequestOptions) anyerror!Response = Client.send;
+    const fetch_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.fetch;
+    const options_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.options;
+    _ = send_ptr;
+    _ = fetch_ptr;
+    _ = options_ptr;
+}
+
+test "Client hasCookie and cookieCount" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator);
+    defer client.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), client.cookieCount());
+    try std.testing.expect(!client.hasCookie("session"));
+
+    try client.setCookie("session", "abc123");
+    try std.testing.expectEqual(@as(usize, 1), client.cookieCount());
+    try std.testing.expect(client.hasCookie("session"));
 }

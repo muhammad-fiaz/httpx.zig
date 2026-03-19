@@ -2,6 +2,53 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.0.3] - 2026-03-20
+
+### Added
+
+- Server routing behavior improvements:
+  - Automatic `HEAD` fallback to matching `GET` route handlers (without a response body).
+  - Automatic `OPTIONS` responses for matched paths with an `Allow` header.
+  - `405 Method Not Allowed` responses with `Allow` header when path exists for other methods.
+- Router utility for method discovery on a path via `allowedMethods`.
+- Server test coverage for allowed-method discovery.
+- QPACK protocol support improvements:
+  - Dynamic-table and post-base header references in header block decoding.
+  - Dynamic-table-aware header block encoding paths.
+- QUIC protocol decode helpers for ACK, CONNECTION_CLOSE, and transport-parameter blocks.
+- Protocol test coverage for new QPACK and QUIC decode paths.
+- Public client cookie-jar APIs: `setCookie`, `getCookie`, `removeCookie`, and `clearCookies`.
+- Additional client cookie-jar helpers: `hasCookie` and `cookieCount`.
+- Simplified client aliases:
+  - Client methods: `send`, `fetch`, `options`.
+  - Root-level helpers: `fetch`, `send`, `post`, `put`, `del`, `patch`, `head`, `options`.
+- New runnable examples:
+  - `examples/cookies_demo.zig`
+  - `examples/simplified_api_aliases.zig`
+- Core convenience APIs:
+  - `Request.addQueryParam(...)` for safe query-string appends.
+  - `Response.redirect(...)`, `Response.fromText(...)`, `Response.fromJson(...)`.
+- Connection pool introspection APIs:
+  - `ConnectionPool.hostConnectionCount(...)`
+  - `ConnectionPool.stats()` with `PoolStats` export.
+- Shared utility module: `src/util/common.zig` (`queryValue`, `parseSetCookiePair`) reused by client/server code paths.
+
+### Changed
+
+- Bumped project version to `0.0.3`.
+- Updated default User-Agent version to `httpx.zig/0.0.3`.
+- Updated install references and release metadata across README and VitePress docs to `0.0.3`.
+- Updated README project status note to reflect production-readiness goals for a newer project.
+- Updated API docs to align with current implementation details (response fields/methods and server config/context tables).
+- Included client cookie jar handling and Set-Cookie persistence details in release notes.
+- Removed Express-style framework comparisons across maintained docs and source comments.
+- Improved code reuse by centralizing repeated query/cookie parsing logic into shared utility helpers.
+- Expanded static assets example coverage and docs:
+  - `examples/static_files.zig` now demonstrates file-based static routes and directory-based wildcard mounts for CSS/JS/images, with redirects and safe path handling.
+  - `examples/multi_page_website.zig` provides a dedicated multi-page website server demo for full page routing plus static asset serving.
+  - README/docs example catalogs now list all runnable examples, including protocol and UDP demos.
+  - Client API docs now explicitly document optional interceptor callbacks.
+
 ## [0.0.2] - 2026-03-20
 
 ### Added

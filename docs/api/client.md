@@ -8,10 +8,10 @@ The `httpx.zig` client provides a high-level HTTP client for making requests wit
 |----------|--------|-----------|-------|
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
-| HTTP/2 | ✅ Full | TCP/TLS | HPACK, streams, flow control |
-| HTTP/3 | ✅ Full | QUIC/UDP | QPACK, 0-RTT, multiplexing |
+| HTTP/2 | ⚠️ Partial | TCP/TLS | Protocol primitives available; high-level client currently uses HTTP/1.1 |
+| HTTP/3 | ⚠️ Partial | QUIC/UDP | Protocol primitives available; high-level client currently uses HTTP/1.1 |
 
-The protocol module provides full HTTP/2 support (HPACK header compression, stream multiplexing, flow control) and HTTP/3 support (QPACK header compression, QUIC transport framing). See [Protocol API](protocol.md) for details.
+The protocol module provides HTTP/2 and HTTP/3 building blocks (HPACK/QPACK, framing, and transport primitives). See [Protocol API](protocol.md) for details.
 
 ## Client
 
@@ -43,7 +43,7 @@ defer client.deinit();
 | `retry_policy` | `RetryPolicy` | `{}` | Configuration for automatic retries. |
 | `redirect_policy` | `RedirectPolicy` | `{}` | Configuration for handling redirects. |
 | `default_headers` | `?[]const [2][]const u8` | `null` | Headers added to every request. |
-| `user_agent` | `[]const u8` | `"httpx.zig/0.0.2"` | User-Agent header value. |
+| `user_agent` | `[]const u8` | `"httpx.zig/0.0.3"` | User-Agent header value. |
 | `max_response_size` | `usize` | `100MB` | Maximum allowed response body size. |
 | `follow_redirects` | `bool` | `true` | Whether to automatically follow redirects. |
 | `verify_ssl` | `bool` | `true` | Whether to verify SSL certificates. |
@@ -62,18 +62,45 @@ Makes a generic HTTP request.
 pub fn request(self: *Self, method: Method, url: []const u8, options: RequestOptions) !Response
 ```
 
+#### `send` (alias)
+
+Alias for `request` with shorter naming.
+
+```zig
+pub fn send(self: *Self, method: Method, url: []const u8, options: RequestOptions) !Response
+```
+
 #### Convenience Methods
 
 | Method | Description |
 |--------|-------------|
 | `get(url, options)` | HTTP GET request |
+| `fetch(url, options)` | Alias for GET request |
 | `post(url, options)` | HTTP POST request |
 | `put(url, options)` | HTTP PUT request |
 | `delete(url, options)` | HTTP DELETE request |
 | `patch(url, options)` | HTTP PATCH request |
 | `head(url, options)` | HTTP HEAD request |
 | `httpOptions(url, options)` | HTTP OPTIONS request |
+| `options(url, options)` | Alias for HTTP OPTIONS request |
+| `send(method, url, options)` | Alias for generic request |
 | `addInterceptor(interceptor)` | Add request/response interceptor |
+
+### Cookie Jar API
+
+The client keeps an in-memory cookie jar and automatically:
+
+- Adds a `Cookie` header to outgoing requests.
+- Stores `Set-Cookie` values from incoming responses.
+
+| Method | Description |
+|--------|-------------|
+| `setCookie(name, value)` | Add or replace a cookie in the jar |
+| `getCookie(name)` | Read a cookie value |
+| `removeCookie(name)` | Remove one cookie |
+| `clearCookies()` | Remove all cookies |
+| `hasCookie(name)` | Check whether a cookie exists |
+| `cookieCount()` | Get total cookie count |
 
 ### Quick Examples
 
@@ -86,8 +113,8 @@ defer client.deinit();
 // Simple GET
 const response = try client.get("https://api.example.com/users", .{});
 defer response.deinit();
-std.debug.print("Status: {d}\n", .{response.status_code});
-std.debug.print("Body: {s}\n", .{response.body});
+std.debug.print("Status: {d}\n", .{response.status.code});
+std.debug.print("Body: {s}\n", .{response.text() orelse ""});
 
 // POST with JSON
 const json_response = try client.post("https://api.example.com/users", .{
@@ -129,16 +156,22 @@ The `Response` struct contains the server's response.
 
 ```zig
 pub const Response = struct {
-    status_code: u16,
+    version: Version,
+    status: Status,
     headers: Headers,
-    body: []const u8,
-    
+    body: ?[]const u8,
+
     pub fn deinit(self: *Response) void
-    pub fn getHeader(self: *Response, name: []const u8) ?[]const u8
-    pub fn isSuccess(self: *Response) bool
-    pub fn isRedirect(self: *Response) bool
-    pub fn isClientError(self: *Response) bool
-    pub fn isServerError(self: *Response) bool
+    pub fn ok(self: *const Response) bool
+    pub fn isRedirect(self: *const Response) bool
+    pub fn isError(self: *const Response) bool
+    pub fn text(self: *const Response) ?[]const u8
+    pub fn json(self: *const Response, comptime T: type) !T
+    pub fn location(self: *const Response) ?[]const u8
+    pub fn contentType(self: *const Response) ?[]const u8
+    pub fn contentLength(self: *const Response) ?u64
+    pub fn isChunked(self: *const Response) bool
+    pub fn header(self: *const Response, name: []const u8) ?[]const u8
 };
 ```
 
@@ -147,11 +180,12 @@ pub const Response = struct {
 | Method | Description |
 |--------|-------------|
 | `deinit()` | Free response resources |
-| `getHeader(name)` | Get header value by name |
-| `isSuccess()` | Status 200-299 |
+| `header(name)` | Get header value by name |
+| `ok()` | Status 200-299 |
 | `isRedirect()` | Status 300-399 |
-| `isClientError()` | Status 400-499 |
-| `isServerError()` | Status 500-599 |
+| `isError()` | Status 400-599 |
+| `text()` | Get response body text |
+| `json(T)` | Parse response body as JSON |
 
 ## Interceptors
 
@@ -170,16 +204,18 @@ pub const Interceptor = struct {
 };
 ```
 
+Both `request_fn` and `response_fn` are optional. You can register only one callback or both.
+
 ### Usage
 
 ```zig
 // Logging interceptor
 fn logRequest(request: *httpx.Request, _: ?*anyopaque) !void {
-    std.debug.print("Request: {s} {s}\n", .{@tagName(request.method), request.url});
+    std.debug.print("Request: {s} {s}\n", .{@tagName(request.method), request.uri.path});
 }
 
 fn logResponse(response: *httpx.Response, _: ?*anyopaque) !void {
-    std.debug.print("Response: {d}\n", .{response.status_code});
+    std.debug.print("Response: {d}\n", .{response.status.code});
 }
 
 // Add interceptor
@@ -225,6 +261,21 @@ const response = client.get("https://example.com", .{}) catch |err| switch (err)
     },
     else => return err,
 };
+```
+
+## Simplified Top-Level Aliases
+
+The root module also exposes simple aliases for common client usage:
+
+```zig
+var a = try httpx.fetch(allocator, "https://example.com");
+defer a.deinit();
+
+var b = try httpx.send(allocator, .GET, "https://example.com/health", .{});
+defer b.deinit();
+
+var c = try httpx.post(allocator, "https://example.com/items", .{ .json = "{\"name\":\"demo\"}" });
+defer c.deinit();
 ```
 
 ## See Also

@@ -4,7 +4,7 @@
 
 ## Features
 
-- **Protocol Support**: Full HTTP/1.1 client/server, HTTP/2 (HPACK compression, stream multiplexing, flow control), and HTTP/3 (QPACK compression, QUIC transport framing).
+- **Protocol Support**: Production-ready HTTP/1.1 client/server runtime plus HTTP/2 (HPACK/streams) and HTTP/3 (QPACK/QUIC) protocol primitives.
 - **Cross-Platform**: Works on Linux, Windows, macOS, and FreeBSD with x86_64, aarch64, and i386 architectures.
 - **Client**:
     - Connection pooling and keep-alive.
@@ -12,7 +12,7 @@
     - Request/Response interceptors.
     - Cookie management.
 - **Server**:
-    - Express.js inspired routing.
+    - Pattern-based routing.
     - Middleware architecture.
     - Static file serving.
     - JSON helpers.

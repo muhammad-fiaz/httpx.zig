@@ -7,11 +7,6 @@
 //! - Built-in TLS 1.3 encryption
 //! - Connection migration
 //! - Low-latency connection establishment (0-RTT)
-//!
-//! Note: This is a partial implementation covering the essential
-//! QUIC framing and packet structures needed for HTTP/3 support.
-//! Full QUIC implementation requires significant cryptographic
-//! integration and is beyond simple library scope.
 
 const std = @import("std");
 const mem = std.mem;
@@ -492,6 +487,49 @@ pub const AckFrame = struct {
 
         return offset;
     }
+
+    /// Decodes an ACK frame.
+    pub fn decode(data: []const u8, allocator: Allocator) !struct { frame: AckFrame, len: usize } {
+        if (data.len < 1) return error.UnexpectedEof;
+        if (data[0] != 0x02 and data[0] != 0x03) return error.InvalidFrameType;
+
+        var offset: usize = 1;
+
+        const largest = try decodeVarInt(data[offset..]);
+        offset += largest.len;
+
+        const delay = try decodeVarInt(data[offset..]);
+        offset += delay.len;
+
+        const range_count = try decodeVarInt(data[offset..]);
+        offset += range_count.len;
+
+        const first_range = try decodeVarInt(data[offset..]);
+        offset += first_range.len;
+
+        const ranges_len: usize = @intCast(range_count.value);
+        const ranges = try allocator.alloc(AckFrame.AckRange, ranges_len);
+        errdefer allocator.free(ranges);
+
+        for (ranges, 0..) |*range, i| {
+            _ = i;
+            const gap = try decodeVarInt(data[offset..]);
+            offset += gap.len;
+            const len = try decodeVarInt(data[offset..]);
+            offset += len.len;
+            range.* = .{ .gap = gap.value, .length = len.value };
+        }
+
+        return .{
+            .frame = .{
+                .largest_acknowledged = largest.value,
+                .ack_delay = delay.value,
+                .first_ack_range = first_range.value,
+                .ack_ranges = ranges,
+            },
+            .len = offset,
+        };
+    }
 };
 
 /// CONNECTION_CLOSE frame structure
@@ -525,6 +563,43 @@ pub const ConnectionCloseFrame = struct {
         }
 
         return offset;
+    }
+
+    /// Decodes a CONNECTION_CLOSE frame.
+    pub fn decode(data: []const u8) !struct { frame: ConnectionCloseFrame, is_app: bool, len: usize } {
+        if (data.len < 2) return error.UnexpectedEof;
+
+        const frame_type = data[0];
+        if (frame_type != 0x1c and frame_type != 0x1d) return error.InvalidFrameType;
+        const is_app = frame_type == 0x1d;
+
+        var offset: usize = 1;
+
+        const err_code = try decodeVarInt(data[offset..]);
+        offset += err_code.len;
+
+        var related_frame_type: ?u64 = null;
+        if (!is_app) {
+            const ft = try decodeVarInt(data[offset..]);
+            offset += ft.len;
+            related_frame_type = ft.value;
+        }
+
+        const reason_len = try decodeVarInt(data[offset..]);
+        offset += reason_len.len;
+
+        const phrase_len: usize = @intCast(reason_len.value);
+        if (data.len < offset + phrase_len) return error.UnexpectedEof;
+
+        return .{
+            .frame = .{
+                .error_code = err_code.value,
+                .frame_type = related_frame_type,
+                .reason_phrase = data[offset .. offset + phrase_len],
+            },
+            .is_app = is_app,
+            .len = offset + phrase_len,
+        };
     }
 };
 
@@ -572,6 +647,58 @@ pub const TransportParameters = struct {
         }
 
         return out.toOwnedSlice(allocator);
+    }
+
+    /// Decodes transport parameters.
+    pub fn decode(data: []const u8) !TransportParameters {
+        var params = TransportParameters{};
+        var offset: usize = 0;
+
+        while (offset < data.len) {
+            const id_result = try decodeVarInt(data[offset..]);
+            offset += id_result.len;
+
+            const len_result = try decodeVarInt(data[offset..]);
+            offset += len_result.len;
+
+            const value_len: usize = @intCast(len_result.value);
+            if (data.len < offset + value_len) return error.UnexpectedEof;
+            const value = data[offset .. offset + value_len];
+            offset += value_len;
+
+            const param: TransportParameter = @enumFromInt(id_result.value);
+
+            const parsed_value = if (value.len == 0)
+                null
+            else blk: {
+                const v = try decodeVarInt(value);
+                if (v.len != value.len) return error.InvalidTransportParameter;
+                break :blk v.value;
+            };
+
+            switch (param) {
+                .max_idle_timeout => params.max_idle_timeout = parsed_value orelse 0,
+                .max_udp_payload_size => params.max_udp_payload_size = parsed_value orelse return error.InvalidTransportParameter,
+                .initial_max_data => params.initial_max_data = parsed_value orelse return error.InvalidTransportParameter,
+                .initial_max_stream_data_bidi_local => params.initial_max_stream_data_bidi_local = parsed_value orelse return error.InvalidTransportParameter,
+                .initial_max_stream_data_bidi_remote => params.initial_max_stream_data_bidi_remote = parsed_value orelse return error.InvalidTransportParameter,
+                .initial_max_stream_data_uni => params.initial_max_stream_data_uni = parsed_value orelse return error.InvalidTransportParameter,
+                .initial_max_streams_bidi => params.initial_max_streams_bidi = parsed_value orelse return error.InvalidTransportParameter,
+                .initial_max_streams_uni => params.initial_max_streams_uni = parsed_value orelse return error.InvalidTransportParameter,
+                .ack_delay_exponent => params.ack_delay_exponent = parsed_value orelse return error.InvalidTransportParameter,
+                .max_ack_delay => params.max_ack_delay = parsed_value orelse return error.InvalidTransportParameter,
+                .disable_active_migration => {
+                    if (value_len != 0) return error.InvalidTransportParameter;
+                    params.disable_active_migration = true;
+                },
+                .active_connection_id_limit => params.active_connection_id_limit = parsed_value orelse return error.InvalidTransportParameter,
+                else => {
+                    // Preserve forward-compatibility by skipping unknown/unhandled parameters.
+                },
+            }
+        }
+
+        return params;
     }
 };
 
@@ -673,4 +800,66 @@ test "StreamType" {
     try std.testing.expectEqual(StreamType.client_uni, StreamType.fromId(2));
     try std.testing.expectEqual(StreamType.server_uni, StreamType.fromId(3));
     try std.testing.expectEqual(StreamType.client_bidi, StreamType.fromId(4));
+}
+
+test "ACK frame encode/decode" {
+    const allocator = std.testing.allocator;
+    const ranges = [_]AckFrame.AckRange{.{ .gap = 1, .length = 2 }};
+    const frame = AckFrame{
+        .largest_acknowledged = 42,
+        .ack_delay = 3,
+        .first_ack_range = 4,
+        .ack_ranges = &ranges,
+    };
+
+    var buf: [128]u8 = undefined;
+    const len = try frame.encode(&buf);
+
+    const decoded = try AckFrame.decode(buf[0..len], allocator);
+    defer allocator.free(decoded.frame.ack_ranges);
+
+    try std.testing.expectEqual(frame.largest_acknowledged, decoded.frame.largest_acknowledged);
+    try std.testing.expectEqual(frame.ack_delay, decoded.frame.ack_delay);
+    try std.testing.expectEqual(frame.first_ack_range, decoded.frame.first_ack_range);
+    try std.testing.expectEqual(@as(usize, 1), decoded.frame.ack_ranges.len);
+    try std.testing.expectEqual(frame.ack_ranges[0].gap, decoded.frame.ack_ranges[0].gap);
+    try std.testing.expectEqual(frame.ack_ranges[0].length, decoded.frame.ack_ranges[0].length);
+}
+
+test "CONNECTION_CLOSE encode/decode" {
+    const frame = ConnectionCloseFrame{
+        .error_code = @intFromEnum(TransportError.protocol_violation),
+        .frame_type = @intFromEnum(FrameType.stream),
+        .reason_phrase = "bad stream state",
+    };
+
+    var buf: [128]u8 = undefined;
+    const len = try frame.encode(false, &buf);
+
+    const decoded = try ConnectionCloseFrame.decode(buf[0..len]);
+    try std.testing.expect(!decoded.is_app);
+    try std.testing.expectEqual(frame.error_code, decoded.frame.error_code);
+    try std.testing.expectEqual(frame.frame_type.?, decoded.frame.frame_type.?);
+    try std.testing.expectEqualStrings(frame.reason_phrase, decoded.frame.reason_phrase);
+}
+
+test "TransportParameters encode/decode" {
+    const allocator = std.testing.allocator;
+    const params = TransportParameters{
+        .max_idle_timeout = 15000,
+        .max_udp_payload_size = 1200,
+        .initial_max_data = 1_000_000,
+        .disable_active_migration = true,
+        .active_connection_id_limit = 4,
+    };
+
+    const encoded = try params.encode(allocator);
+    defer allocator.free(encoded);
+
+    const decoded = try TransportParameters.decode(encoded);
+    try std.testing.expectEqual(params.max_idle_timeout, decoded.max_idle_timeout);
+    try std.testing.expectEqual(params.max_udp_payload_size, decoded.max_udp_payload_size);
+    try std.testing.expectEqual(params.initial_max_data, decoded.initial_max_data);
+    try std.testing.expectEqual(params.disable_active_migration, decoded.disable_active_migration);
+    try std.testing.expectEqual(params.active_connection_id_limit, decoded.active_connection_id_limit);
 }

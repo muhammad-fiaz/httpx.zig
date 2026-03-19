@@ -29,6 +29,8 @@ defer client.deinit();
 
 ## Making Requests
 
+You can use either the full client methods (`request`, `get`, `post`, etc.) or simplified aliases (`send`, `fetch`, `options`).
+
 ### GET
 
 ```zig
@@ -63,6 +65,33 @@ _ = try client.delete("/users/1", .{});
 
 // HEAD
 const head_res = try client.head("/large-file", .{});
+
+// Alias helpers
+const fetch_res = try client.fetch("/users", .{});
+const opt_res = try client.options("/users", .{});
+```
+
+## Cookie Jar
+
+The client automatically stores `Set-Cookie` values and sends a `Cookie` header on subsequent requests.
+
+```zig
+try client.setCookie("session", "abc123");
+if (client.getCookie("session")) |session| {
+    std.debug.print("session={s}\n", .{session});
+}
+_ = client.removeCookie("session");
+client.clearCookies();
+```
+
+For top-level convenience in smaller programs, use aliases from the root module:
+
+```zig
+var res = try httpx.fetch(allocator, "https://httpbin.org/get");
+defer res.deinit();
+
+var custom = try httpx.send(allocator, .GET, "https://httpbin.org/headers", .{});
+defer custom.deinit();
 ```
 
 ## Request Options

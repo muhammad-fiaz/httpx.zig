@@ -16,6 +16,11 @@ Usually constructed via `RequestBuilder` or internally by the server.
   - `headers`: `Headers` struct
   - `body`: `?[]const u8`
 
+- **Selected methods**:
+  - `setBody(body)`: Set request body and Content-Length.
+  - `setJson(body)`: Set JSON body and Content-Type.
+  - `addQueryParam(key, value)`: Append a percent-encoded query parameter.
+
 ### `httpx.RequestBuilder`
 
 A fluent builder for creating requests.
@@ -50,6 +55,9 @@ Represents an HTTP response.
   - `isError()`: Returns true if status is 4xx or 5xx.
   - `json(T)`: Parses body as JSON.
   - `text()`: Returns body as string.
+  - `redirect(status_code, location)`: Build redirect response with `Location` header.
+  - `fromText(status_code, body)`: Build text response with headers.
+  - `fromJson(status_code, value)`: Build JSON response with headers.
 
 ### `httpx.ResponseBuilder`
 

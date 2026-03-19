@@ -1,7 +1,7 @@
 .{
     .fingerprint = 0xa924bc2e7af6a8f2,
     .name = .httpx,
-    .version = "0.0.2",
+    .version = "0.0.3",
     .minimum_zig_version = "0.15.0",
     .dependencies = .{},
     .paths = .{

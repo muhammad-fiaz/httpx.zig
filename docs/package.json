@@ -1,6 +1,6 @@
 {
   "name": "httpx-zig-docs",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Documentation for httpx.zig",
   "scripts": {
     "docs:dev": "vitepress dev",
