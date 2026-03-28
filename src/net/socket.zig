@@ -44,6 +44,22 @@ fn toPosixShutdownHow(mode: ShutdownMode) posix.ShutdownHow {
     };
 }
 
+fn tcpNoDelayOption() u32 {
+    return switch (builtin.os.tag) {
+        .linux,
+        .windows,
+        .macos,
+        .ios,
+        .tvos,
+        .watchos,
+        .visionos,
+        .emscripten,
+        .serenity,
+        => posix.TCP.NODELAY,
+        else => 1,
+    };
+}
+
 /// Initializes the platform networking subsystem.
 ///
 /// On Windows this calls `WSAStartup`; on other platforms it is a no-op.
@@ -366,7 +382,7 @@ pub const Socket = struct {
     /// Enables or disables TCP_NODELAY (Nagle's algorithm).
     pub fn setNoDelay(self: *Self, enable: bool) !void {
         const value: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.handle, posix.IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&value));
+        try posix.setsockopt(self.handle, posix.IPPROTO.TCP, tcpNoDelayOption(), std.mem.asBytes(&value));
     }
 
     /// Sets the receive timeout in milliseconds.
@@ -494,11 +510,8 @@ pub const Socket = struct {
             .context = @ptrCast(self),
             .readFn = struct {
                 fn read(ctx: *const anyopaque, buffer: []u8) !usize {
-                    const s: *Socket = @ptrCast(@constCast(ctx));
-                    return s.recv(buffer) catch |err| switch (err) {
-                        error.WouldBlock => 0,
-                        else => err,
-                    };
+                    const s: *Socket = @ptrCast(@alignCast(@constCast(ctx)));
+                    return s.recv(buffer);
                 }
             }.read,
         };
@@ -510,7 +523,7 @@ pub const Socket = struct {
             .context = @ptrCast(self),
             .writeFn = struct {
                 fn write(ctx: *const anyopaque, data: []const u8) !usize {
-                    const s: *Socket = @ptrCast(@constCast(ctx));
+                    const s: *Socket = @ptrCast(@alignCast(@constCast(ctx)));
                     return s.send(data);
                 }
             }.write,

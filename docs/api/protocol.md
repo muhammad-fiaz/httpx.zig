@@ -12,8 +12,8 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 |----------|---------|--------|-----|-------|
 | HTTP/1.0 | 1.0 | ✅ Full | RFC 1945 | High-level runtime support |
 | HTTP/1.1 | 1.1 | ✅ Full | RFC 7230-7235 | High-level runtime support |
-| HTTP/2 | h2 | ✅ Full | RFC 7540, RFC 7541 | Full protocol-module implementation: framing, stream state, flow control, HPACK |
-| HTTP/3 | h3 | ✅ Full | RFC 9114, RFC 9204 | Full protocol-module implementation: framing, QPACK, QUIC integration helpers |
+| HTTP/2 | h2 | ✅ Full | RFC 7540, RFC 7541 | Full protocol-module implementation (framing/stream state/flow control/HPACK), integrated with high-level client/server runtimes |
+| HTTP/3 | h3 | ✅ Full | RFC 9114, RFC 9204 | Full protocol-module implementation (framing/QPACK/QUIC helpers), integrated with high-level client/server runtimes |
 | QUIC | v1 | ✅ Full | RFC 9000 | QUIC transport/frame primitives implemented in protocol module |
 
 ## HTTP/1.1 Parser

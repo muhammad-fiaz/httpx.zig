@@ -1,6 +1,6 @@
 # HTTP/3 Protocol
 
-httpx.zig provides a complete, from-scratch implementation of HTTP/3 (RFC 9114) including QPACK header compression (RFC 9204) and QUIC transport framing (RFC 9000). This guide covers all HTTP/3 features available in the library.
+httpx.zig provides a complete, from-scratch implementation of HTTP/3 protocol primitives (RFC 9114) including QPACK header compression (RFC 9204) and QUIC transport framing (RFC 9000), plus high-level client/server runtime paths.
 
 ::: warning Custom Implementation
 Zig's standard library does not provide HTTP/3 or QUIC support. **httpx.zig implements these protocols entirely from scratch**, following RFC 9114, RFC 9204, and RFC 9000 specifications.
@@ -8,22 +8,70 @@ Zig's standard library does not provide HTTP/3 or QUIC support. **httpx.zig impl
 
 ## Platform Support
 
-HTTP/3 support works on all platforms:
+HTTP/3 support is validated across Linux, Windows, and macOS targets:
 
 | Platform | Architecture | Status |
 |----------|--------------|--------|
-| Linux    | x86_64, aarch64, i386, arm | ✅ |
-| Windows  | x86_64, aarch64, i386, arm | ✅ |
-| macOS    | x86_64, aarch64, i386, arm | ✅ |
-| FreeBSD  | x86_64, aarch64, i386, arm | ✅ |
+| Linux    | x86_64, aarch64, x86 | ✅ |
+| Windows  | x86_64, aarch64, x86 | ✅ |
+| macOS    | x86_64, aarch64, x86 | ✅ |
 
 ## Features
 
+- **High-level Client Runtime** - `Client` can execute requests over HTTP/3 when `http3_enabled = true`
+- **High-level Server Runtime** - `Server` can serve routes over HTTP/3 when `http3_enabled = true`
 - **QPACK Header Compression** - Full RFC 9204 implementation with 99-entry static table
 - **QUIC Transport Framing** - All QUIC frame types (STREAM, CRYPTO, ACK, etc.)
 - **Variable-Length Integers** - QUIC varint encoding/decoding
 - **Connection IDs** - Full connection ID management
 - **Transport Parameters** - QUIC transport parameter encoding
+
+## High-level Client Usage
+
+Enable HTTP/3 in `ClientConfig`:
+
+```zig
+var client = httpx.Client.initWithConfig(allocator, .{
+    .http3_enabled = true,
+    .http3_settings = .{
+        .qpack_max_table_capacity = 4096,
+        .qpack_blocked_streams = 16,
+        .max_field_section_size = 8192,
+    },
+});
+defer client.deinit();
+
+var response = try client.get("http://127.0.0.1:8080/runtime", .{});
+defer response.deinit();
+
+std.debug.print("version={s} status={d}\n", .{ response.version.toString(), response.status.code });
+```
+
+::: warning Interoperability Note
+The current HTTP/3 runtime paths use UDP + QUIC stream framing primitives directly. Interoperability with endpoints that require full TLS-in-QUIC handshake negotiation may vary by deployment requirements.
+:::
+
+## High-level Server Usage
+
+Enable HTTP/3 in `ServerConfig`:
+
+```zig
+var server = httpx.Server.initWithConfig(allocator, .{
+    .host = "127.0.0.1",
+    .port = 8080,
+    .http3_enabled = true,
+    .http2_enabled = false,
+});
+defer server.deinit();
+
+try server.get("/h3", struct {
+    fn handler(ctx: *httpx.Context) !httpx.Response {
+        return ctx.text("hello from http3 server runtime");
+    }
+}.handler);
+
+try server.listen();
+```
 
 ## QPACK vs HPACK
 
@@ -312,11 +360,14 @@ defer allocator.free(encoded);
 
 ## Running the Example
 
-The full HTTP/3 example can be run with:
+Run the low-level protocol and high-level runtime HTTP/3 examples with:
 
 ```bash
 zig build example-http3_example
 ./zig-out/bin/http3_example
+
+zig build run-http3_client_runtime
+zig build run-http3_server_runtime
 ```
 
 ## See Also

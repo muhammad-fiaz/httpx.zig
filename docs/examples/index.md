@@ -34,6 +34,10 @@ zig build example-http3_example -Dtarget=aarch64-macos
 - [Static Files](/examples/static-files): Serve assets with content types.
 - [Multi Page Website](/examples/multi-page-website): Serve multiple HTML pages.
 - [HTTP/2 Example](/examples/http2-example): HTTP/2 framing and stream primitives.
+- [HTTP/2 Client Runtime](/examples/http2-client-runtime): End-to-end high-level HTTP/2 client request against a local loopback server.
+- [HTTP/2 Server Runtime](/examples/http2-server-runtime): End-to-end high-level HTTP/2 server route consumed by a local HTTP/2 client.
 - [HTTP/3 Example](/examples/http3-example): HTTP/3, QPACK, and QUIC primitives.
+- [HTTP/3 Client Runtime](/examples/http3-client-runtime): End-to-end high-level HTTP/3 client request against a local UDP loopback server.
+- [HTTP/3 Server Runtime](/examples/http3-server-runtime): End-to-end high-level HTTP/3 server route consumed by a local HTTP/3 client over UDP.
 - [TCP Local](/examples/tcp-local): Local TCP listener/client round trip.
 - [UDP Local](/examples/udp-local): Local UDP transport demo.

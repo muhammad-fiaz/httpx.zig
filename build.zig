@@ -44,6 +44,10 @@ pub fn build(b: *std.Build) void {
         .{ .name = "static_files", .path = "examples/static_files.zig", .skip_run_all = true },
         .{ .name = "multi_page_website", .path = "examples/multi_page_website.zig", .skip_run_all = true },
         .{ .name = "http2_example", .path = "examples/http2_example.zig" },
+        .{ .name = "http2_client_runtime", .path = "examples/http2_client_runtime.zig" },
+        .{ .name = "http2_server_runtime", .path = "examples/http2_server_runtime.zig" },
+        .{ .name = "http3_client_runtime", .path = "examples/http3_client_runtime.zig" },
+        .{ .name = "http3_server_runtime", .path = "examples/http3_server_runtime.zig" },
         .{ .name = "http3_example", .path = "examples/http3_example.zig" },
     };
 

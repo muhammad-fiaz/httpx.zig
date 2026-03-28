@@ -5,11 +5,11 @@ This guide covers all supported installation methods for `httpx.zig`.
 ## Requirements
 
 - **Zig Version**: 0.15.0 or later (tested on 0.15.2)
-- **Operating System**: Windows, Linux, macOS, or FreeBSD
+- **Operating System**: Windows, Linux, or macOS
 
 ## Platform Support
 
-httpx.zig supports all major platforms and architectures:
+httpx.zig supports Linux, Windows, and macOS across 32-bit and 64-bit builds:
 
 ### Operating Systems
 
@@ -18,7 +18,6 @@ httpx.zig supports all major platforms and architectures:
 | Linux | Full support | All major distributions |
 | Windows | Full support | Windows 10/11, Server 2019+ |
 | macOS | Full support | macOS 11+ (Big Sur and later) |
-| FreeBSD | Full support | FreeBSD 13+ |
 
 ### Architectures
 
@@ -26,8 +25,7 @@ httpx.zig supports all major platforms and architectures:
 |--------------|-------|---------|-------|
 | x86_64 (64-bit) | Yes | Yes | Yes |
 | aarch64 (ARM64) | Yes | Yes | Yes |
-| i386 (32-bit) | Yes | Yes | Yes |
-| arm (32-bit) | Yes | Yes | Yes |
+| x86 (32-bit) | Yes | Yes | Yes |
 
 ::: tip Cross-Compilation
 Zig makes cross-compilation easy. You can build for any supported target from any host:

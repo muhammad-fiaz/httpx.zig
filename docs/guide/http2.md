@@ -1,6 +1,6 @@
 # HTTP/2 Protocol
 
-httpx.zig provides a complete, from-scratch implementation of HTTP/2 (RFC 7540) including HPACK header compression (RFC 7541). This guide covers all HTTP/2 features available in the library.
+httpx.zig provides a complete, from-scratch implementation of HTTP/2 (RFC 7540) including HPACK header compression (RFC 7541). This guide covers high-level client/server runtime usage and low-level HTTP/2 protocol features.
 
 ::: warning Custom Implementation
 Zig's standard library does not provide HTTP/2 support. **httpx.zig implements HTTP/2 entirely from scratch**, following RFC 7540 and RFC 7541 specifications.
@@ -8,22 +8,68 @@ Zig's standard library does not provide HTTP/2 support. **httpx.zig implements H
 
 ## Platform Support
 
-HTTP/2 support works on all platforms:
+HTTP/2 support is validated across Linux, Windows, and macOS targets:
 
 | Platform | Architecture | Status |
 |----------|--------------|--------|
-| Linux    | x86_64, aarch64, i386, arm | ✅ |
-| Windows  | x86_64, aarch64, i386, arm | ✅ |
-| macOS    | x86_64, aarch64, i386, arm | ✅ |
-| FreeBSD  | x86_64, aarch64, i386, arm | ✅ |
+| Linux    | x86_64, aarch64, x86 | ✅ |
+| Windows  | x86_64, aarch64, x86 | ✅ |
+| macOS    | x86_64, aarch64, x86 | ✅ |
 
 ## Features
 
+- **High-level Client Runtime** - `Client` can execute requests over HTTP/2 when `http2_enabled = true`
+- **High-level Server Runtime** - `Server` can serve routes over HTTP/2 when `http2_enabled = true`
 - **HPACK Header Compression** - Full RFC 7541 implementation with static and dynamic tables
 - **Stream Multiplexing** - Multiple concurrent streams over a single connection
 - **Flow Control** - Per-stream and connection-level flow control with WINDOW_UPDATE
 - **Stream Priority** - Dependency-based prioritization
 - **Frame Encoding/Decoding** - All HTTP/2 frame types supported
+
+## High-level Client Usage
+
+Enable HTTP/2 in `ClientConfig`:
+
+```zig
+var client = httpx.Client.initWithConfig(allocator, .{
+    .http2_enabled = true,
+    .http2_settings = .{
+        .max_frame_size = 16 * 1024,
+        .max_concurrent_streams = 100,
+    },
+});
+defer client.deinit();
+
+var res = try client.get("https://example.com/", .{});
+defer res.deinit();
+
+std.debug.print("version={s} status={d}\n", .{ res.version.toString(), res.status.code });
+```
+
+::: warning TLS Negotiation Note
+The current Zig stdlib TLS API used by httpx.zig does not yet expose ALPN selection in the high-level client path. The HTTP/2 runtime sends HTTP/2 frames directly; endpoints that strictly require ALPN negotiation may reject the connection.
+:::
+
+## High-level Server Usage
+
+Enable HTTP/2 in `ServerConfig`:
+
+```zig
+var server = httpx.Server.initWithConfig(allocator, .{
+    .host = "127.0.0.1",
+    .port = 8080,
+    .http2_enabled = true,
+});
+defer server.deinit();
+
+try server.get("/h2", struct {
+    fn handler(ctx: *httpx.Context) !httpx.Response {
+        return ctx.text("hello from http2 server runtime");
+    }
+}.handler);
+
+try server.listen();
+```
 
 ## HPACK Header Compression
 
@@ -291,11 +337,14 @@ HTTP/2 defines error codes for RST_STREAM and GOAWAY frames:
 
 ## Running the Example
 
-The full HTTP/2 example can be run with:
+Run the low-level protocol and high-level runtime HTTP/2 examples with:
 
 ```bash
 zig build example-http2_example
 ./zig-out/bin/http2_example
+
+zig build run-http2_client_runtime
+zig build run-http2_server_runtime
 ```
 
 ## See Also

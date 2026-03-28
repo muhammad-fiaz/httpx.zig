@@ -1,7 +1,8 @@
 //! httpx.zig - Production-Ready HTTP Library for Zig
 //!
 //! A comprehensive HTTP client and server library with production-ready HTTP/1.x
-//! runtime support and HTTP/2/HTTP/3 protocol primitives.
+//! runtime support, high-level HTTP/2 client runtime support, and HTTP/2/HTTP/3
+//! protocol primitives.
 //!
 //! ## Important Note
 //!
@@ -17,8 +18,8 @@
 //!
 //! - **HTTP/1.0**: Basic request-response semantics
 //! - **HTTP/1.1**: Persistent connections, chunked transfer, pipelining
-//! - **HTTP/2**: HPACK compression and framing primitives for advanced integrations
-//! - **HTTP/3**: QPACK compression and QUIC framing primitives for advanced integrations
+//! - **HTTP/2**: High-level client runtime path plus HPACK/framing primitives
+//! - **HTTP/3**: High-level client runtime path plus QPACK/QUIC framing primitives
 //!
 //! ## Platform Support
 //!

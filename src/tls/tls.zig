@@ -7,8 +7,11 @@
 //!
 //! - This is a thin wrapper around the stdlib TLS implementation.
 //! - ALPN negotiation is not currently surfaced by `std.crypto.tls.Client` in a
-//!   way this library uses for HTTP/2/HTTP/3 protocol selection.
-//! - The higher-level HTTP client currently speaks HTTP/1.1 over TLS.
+//!   way this library uses for strict HTTP/2 protocol selection.
+//! - The higher-level HTTP client supports HTTP/1.1 and an HTTP/2 runtime path
+//!   over TLS, but strict ALPN-dependent server negotiation is not yet exposed.
+//! - The high-level HTTP/3 runtime path uses UDP + QUIC framing primitives and
+//!   does not go through this TLS wrapper.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

@@ -1,6 +1,6 @@
 # Client API
 
-The `httpx.zig` client provides a high-level HTTP client for making requests over HTTP/1.0 and HTTP/1.1. HTTPS is supported via Zig's standard library TLS (`std.crypto.tls`). HTTP/2 and HTTP/3 primitives are available in the protocol module.
+The `httpx.zig` client provides a high-level HTTP client for making requests over HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3. HTTPS is supported via Zig's standard library TLS (`std.crypto.tls`) for HTTP/1.x and HTTP/2.
 
 ## Protocol Support
 
@@ -8,8 +8,10 @@ The `httpx.zig` client provides a high-level HTTP client for making requests ove
 |----------|--------|-----------|-------|
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
-| HTTP/2 | ✅ Full | TCP/TLS | Full protocol-module support (framing/HPACK/streams) with advanced integration paths |
-| HTTP/3 | ✅ Full | QUIC/UDP | Full protocol-module support (framing/QPACK/QUIC) with advanced integration paths |
+| HTTP/2 | ✅ Client Runtime + Primitives | TCP/TLS | High-level client request execution path plus full framing/HPACK/stream primitives |
+| HTTP/3 | ✅ Client Runtime + Primitives | QUIC/UDP | High-level client runtime over UDP + QUIC/HTTP3/QPACK primitives (suitable for local/integration endpoints) |
+
+HTTP/3 runtime mode is available in the high-level client and uses QUIC packet/stream framing primitives directly. Interoperability with endpoints that require full TLS-in-QUIC handshake negotiation may vary depending on deployment expectations.
 
 The protocol module provides HTTP/2 and HTTP/3 building blocks (HPACK/QPACK, framing, and transport primitives). See [Protocol API](protocol.md) for details.
 
@@ -47,8 +49,10 @@ defer client.deinit();
 | `max_response_size` | `usize` | `100MB` | Maximum allowed response body size. |
 | `follow_redirects` | `bool` | `true` | Whether to automatically follow redirects. |
 | `verify_ssl` | `bool` | `true` | Whether to verify SSL certificates. |
-| `http2_enabled` | `bool` | `false` | Enable HTTP/2 protocol (requires ALPN negotiation). See [HPACK](protocol.md#hpack-header-compression) for header compression. |
-| `http3_enabled` | `bool` | `false` | Enable HTTP/3 protocol (requires QUIC transport). See [QPACK](protocol.md#qpack-header-compression) and [QUIC](protocol.md#quic-transport). |
+| `http2_enabled` | `bool` | `false` | Enable high-level HTTP/2 execution path for client requests. |
+| `http3_enabled` | `bool` | `false` | Enable high-level HTTP/3 execution path over UDP/QUIC stream framing. |
+| `http2_settings` | `Http2Settings` | `{}` | HTTP/2 SETTINGS values sent during connection setup (`header_table_size`, `max_frame_size`, etc.). |
+| `http3_settings` | `Http3Settings` | `{}` | HTTP/3/QPACK settings sent on the control stream (`max_field_section_size`, `qpack_max_table_capacity`, `qpack_blocked_streams`, etc.). |
 | `pool_max_connections` | `u32` | `20` | Maximum connections in the pool. |
 | `pool_max_per_host` | `u32` | `5` | Maximum connections to a single host. |
 

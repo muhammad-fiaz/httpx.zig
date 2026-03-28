@@ -21,11 +21,19 @@ const config = httpx.ClientConfig{
         .connect_ms = 5000,
         .read_ms = 10000,
     },
-    .http2_enabled = false,
+    .http2_enabled = true,
+    .http2_settings = .{
+        .max_frame_size = 16 * 1024,
+    },
 };
 var client = httpx.Client.initWithConfig(allocator, config);
 defer client.deinit();
 ```
+
+## Protocol Selection
+
+- Set `.http2_enabled = true` to use the high-level HTTP/2 request path.
+- Set `.http3_enabled = true` to use the high-level HTTP/3 request path over UDP + QUIC/HTTP3/QPACK primitives.
 
 ## Making Requests
 

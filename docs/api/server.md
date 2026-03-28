@@ -1,6 +1,6 @@
 # Server API
 
-The `httpx.zig` server module provides a robust HTTP server with middleware support, routing, and proper context handling. The high-level runtime supports HTTP/1.0 and HTTP/1.1. HTTP/2 and HTTP/3 primitives are available in the protocol module.
+The `httpx.zig` server module provides a robust HTTP server with middleware support, routing, and proper context handling. The high-level runtime supports HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3.
 
 ## Protocol Support
 
@@ -8,8 +8,8 @@ The `httpx.zig` server module provides a robust HTTP server with middleware supp
 |----------|--------|----------|
 | HTTP/1.0 | ✅ Full | Basic request/response |
 | HTTP/1.1 | ✅ Full | Keep-Alive, chunked transfer, pipelining |
-| HTTP/2 | ✅ Full | Full protocol-module support (framing/HPACK/streams) with advanced integration paths |
-| HTTP/3 | ✅ Full | Full protocol-module support (framing/QPACK/QUIC) with advanced integration paths |
+| HTTP/2 | ✅ Full | High-level server runtime over TCP plus full framing/HPACK/stream primitives |
+| HTTP/3 | ✅ Full | High-level server runtime over UDP plus full HTTP/3/QPACK/QUIC primitives |
 
 ## Server
 
@@ -44,6 +44,26 @@ var server = httpx.Server.initWithConfig(allocator, .{
 | `keep_alive` | `bool` | `true` | Enable HTTP Keep-Alive. |
 | `max_connections` | `u32` | `1000` | Max concurrent connections. |
 | `threads` | `u32` | `0` | Reserved for future thread configuration. |
+| `http2_enabled` | `bool` | `false` | Enable HTTP/2 server runtime path. |
+| `http3_enabled` | `bool` | `false` | Enable HTTP/3 server runtime path (UDP transport). |
+| `http2_settings` | `Http2Settings` | `{}` | HTTP/2 SETTINGS frame defaults and limits. |
+| `http3_settings` | `Http3Settings` | `{}` | HTTP/3 SETTINGS defaults (QPACK/field section limits). |
+
+### HTTP/2 and HTTP/3 Runtime Configuration
+
+```zig
+var server = httpx.Server.initWithConfig(allocator, .{
+    .host = "127.0.0.1",
+    .port = 8080,
+    .http2_enabled = true,
+    .http3_enabled = false,
+    .http2_settings = .{
+        .max_concurrent_streams = 100,
+        .initial_window_size = 65_535,
+    },
+});
+defer server.deinit();
+```
 
 ### Methods
 

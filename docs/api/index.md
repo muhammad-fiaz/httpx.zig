@@ -58,5 +58,6 @@ The root module re-exports core types and convenience helpers so most apps can i
 ## Explicit Support Notes
 
 - HTTP/1.0 and HTTP/1.1 are production runtime paths in the high-level client/server API.
-- HTTP/2 and HTTP/3 are fully implemented protocol primitives and can be integrated through protocol/network layers.
-- Cross-platform support is maintained for Linux, Windows, macOS, and BSD-family targets.
+- HTTP/2 has high-level client and server runtime paths plus full protocol primitives (HPACK/framing/streams).
+- HTTP/3 has high-level client and server runtime paths over UDP/QUIC stream framing, plus full protocol primitives (QPACK/HTTP3/QUIC framing).
+- Cross-platform validation is maintained for Linux, Windows, and macOS targets across 32-bit/64-bit build matrices.

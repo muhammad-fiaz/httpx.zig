@@ -4,7 +4,7 @@ import llmstxt from "vitepress-plugin-llms";
 // Site configuration
 export const SITE_URL = "https://muhammad-fiaz.github.io/httpx.zig";
 export const SITE_NAME = "httpx.zig";
-export const SITE_DESCRIPTION = "Production-ready HTTP/1.x client and server library for Zig with TLS (HTTPS), plus HTTP/2 and HTTP/3 protocol utilities.";
+export const SITE_DESCRIPTION = "Production-ready HTTP client and server library for Zig with HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 runtime support plus protocol primitives.";
 
 // Google Analytics and Google Tag Manager IDs
 export const GA_ID = "G-6BVYCRK57P";
@@ -345,7 +345,11 @@ gtag('config', '${GA_ID}');`,
           { text: "Static Files", link: "/examples/static-files" },
           { text: "Multi Page Website", link: "/examples/multi-page-website" },
           { text: "HTTP/2 Example", link: "/examples/http2-example" },
+          { text: "HTTP/2 Client Runtime", link: "/examples/http2-client-runtime" },
+          { text: "HTTP/2 Server Runtime", link: "/examples/http2-server-runtime" },
           { text: "HTTP/3 Example", link: "/examples/http3-example" },
+          { text: "HTTP/3 Client Runtime", link: "/examples/http3-client-runtime" },
+          { text: "HTTP/3 Server Runtime", link: "/examples/http3-server-runtime" },
           { text: "TCP Local", link: "/examples/tcp-local" },
           { text: "UDP Local", link: "/examples/udp-local" },
         ],

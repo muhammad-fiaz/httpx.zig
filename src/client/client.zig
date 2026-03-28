@@ -1,10 +1,11 @@
 //! HTTP Client Implementation for httpx.zig
 //!
-//! HTTP/1.1 client over TCP with optional TLS (HTTPS).
+//! HTTP/1.1, HTTP/2, and HTTP/3 client runtime support.
 //!
 //! Notes:
-//! - HTTP/2 and HTTP/3 types exist in `src/protocol/http.zig`, but this client
-//!   currently speaks HTTP/1.1.
+//! - HTTP/2 runtime is supported with direct frame exchange.
+//! - HTTP/3 runtime uses UDP + QUIC/HTTP3/QPACK primitives for local/integration
+//!   endpoints. Full TLS-in-QUIC interoperability is still evolving.
 
 const std = @import("std");
 const mem = std.mem;
@@ -20,10 +21,15 @@ const Request = @import("../core/request.zig").Request;
 const Response = @import("../core/response.zig").Response;
 const Status = @import("../core/status.zig").Status;
 const Socket = @import("../net/socket.zig").Socket;
+const UdpSocket = @import("../net/socket.zig").UdpSocket;
 const SocketIoReader = @import("../net/socket.zig").SocketIoReader;
 const SocketIoWriter = @import("../net/socket.zig").SocketIoWriter;
 const address_mod = @import("../net/address.zig");
 const http = @import("../protocol/http.zig");
+const hpack = @import("../protocol/hpack.zig");
+const h2stream = @import("../protocol/stream.zig");
+const qpack = @import("../protocol/qpack.zig");
+const quic = @import("../protocol/quic.zig");
 const Parser = @import("../protocol/parser.zig").Parser;
 const TlsConfig = @import("../tls/tls.zig").TlsConfig;
 const TlsSession = @import("../tls/tls.zig").TlsSession;
@@ -43,6 +49,8 @@ pub const ClientConfig = struct {
     verify_ssl: bool = true,
     http2_enabled: bool = false,
     http3_enabled: bool = false,
+    http2_settings: types.Http2Settings = .{},
+    http3_settings: types.Http3Settings = .{},
     keep_alive: bool = true,
     pool_max_connections: u32 = 20,
     pool_max_per_host: u32 = 5,
@@ -257,6 +265,17 @@ pub const Client = struct {
         const timeout_ms = timeout_override_ms orelse self.config.timeouts.read_ms;
         const write_timeout_ms = timeout_override_ms orelse self.config.timeouts.write_ms;
 
+        const wants_http2 = self.config.http2_enabled or req.version == .HTTP_2;
+        const wants_http3 = self.config.http3_enabled or req.version == .HTTP_3;
+
+        if (wants_http3) {
+            return self.executeRequestHttp3(req, host, port, timeout_ms, write_timeout_ms);
+        }
+
+        if (wants_http2) {
+            return self.executeRequestHttp2(req, host, port, timeout_ms, write_timeout_ms);
+        }
+
         const request_data = try http.formatRequest(req, self.allocator);
         defer self.allocator.free(request_data);
 
@@ -316,6 +335,583 @@ pub const Client = struct {
 
         try socket.sendAll(request_data);
         return self.readResponseFromTcp(&socket);
+    }
+
+    fn executeRequestHttp2(
+        self: *Self,
+        req: *Request,
+        host: []const u8,
+        port: u16,
+        timeout_ms: u64,
+        write_timeout_ms: u64,
+    ) !Response {
+        const addr = try address_mod.resolve(host, port);
+
+        var socket = try Socket.createForAddress(addr);
+        defer socket.close();
+
+        if (timeout_ms > 0) {
+            try socket.setRecvTimeout(timeout_ms);
+        }
+        if (write_timeout_ms > 0) {
+            try socket.setSendTimeout(write_timeout_ms);
+        }
+
+        try socket.connect(addr);
+
+        if (req.uri.isTls()) {
+            const tls_cfg = if (self.config.verify_ssl) TlsConfig.init(self.allocator) else TlsConfig.insecure(self.allocator);
+            var session = TlsSession.init(tls_cfg);
+            defer session.deinit();
+            session.attachSocket(&socket);
+            try session.handshake(host);
+
+            var transport = TlsHttp2Transport{ .session = &session };
+            return self.executeHttp2WithTransport(req, &transport);
+        }
+
+        var transport = SocketHttp2Transport{ .socket = &socket };
+        return self.executeHttp2WithTransport(req, &transport);
+    }
+
+    fn executeRequestHttp3(
+        self: *Self,
+        req: *Request,
+        host: []const u8,
+        port: u16,
+        timeout_ms: u64,
+        write_timeout_ms: u64,
+    ) !Response {
+        const addr = try address_mod.resolve(host, port);
+
+        var socket = try UdpSocket.createForAddress(addr);
+        defer socket.close();
+
+        if (timeout_ms > 0) {
+            try socket.setRecvTimeout(timeout_ms);
+        }
+        if (write_timeout_ms > 0) {
+            try socket.setSendTimeout(write_timeout_ms);
+        }
+
+        try socket.connect(addr);
+
+        var transport = UdpHttp3Transport{ .socket = &socket };
+        return self.executeHttp3WithTransport(req, &transport);
+    }
+
+    fn executeHttp3WithTransport(self: *Self, req: *Request, transport: anytype) !Response {
+        var qpack_encoder = qpack.QpackContext.initWithCapacity(
+            self.allocator,
+            clampU64ToUsize(self.config.http3_settings.qpack_max_table_capacity),
+        );
+        defer qpack_encoder.deinit();
+        qpack_encoder.max_blocked_streams = self.config.http3_settings.qpack_blocked_streams;
+
+        var qpack_decoder = qpack.QpackContext.initWithCapacity(
+            self.allocator,
+            clampU64ToUsize(self.config.http3_settings.qpack_max_table_capacity),
+        );
+        defer qpack_decoder.deinit();
+        qpack_decoder.max_blocked_streams = self.config.http3_settings.qpack_blocked_streams;
+
+        var path_buf: ?[]u8 = null;
+        defer if (path_buf) |buf| self.allocator.free(buf);
+        const path = if (req.uri.query) |q| blk: {
+            path_buf = try std.fmt.allocPrint(self.allocator, "{s}?{s}", .{ req.uri.path, q });
+            break :blk path_buf.?;
+        } else req.uri.path;
+
+        var authority_buf: ?[]u8 = null;
+        defer if (authority_buf) |buf| self.allocator.free(buf);
+        const authority = try buildAuthority(self.allocator, req, &authority_buf);
+
+        var header_entries = std.ArrayListUnmanaged(qpack.HeaderEntry){};
+        defer header_entries.deinit(self.allocator);
+
+        var owned_header_names = std.ArrayListUnmanaged([]u8){};
+        defer {
+            for (owned_header_names.items) |name| self.allocator.free(name);
+            owned_header_names.deinit(self.allocator);
+        }
+
+        const method_value = if (req.method == .CUSTOM)
+            (req.custom_method orelse "CUSTOM")
+        else
+            req.method.toString();
+
+        try header_entries.append(self.allocator, .{ .name = ":method", .value = method_value });
+        try header_entries.append(self.allocator, .{ .name = ":path", .value = path });
+        try header_entries.append(self.allocator, .{ .name = ":scheme", .value = if (req.uri.isTls()) "https" else "http" });
+        try header_entries.append(self.allocator, .{ .name = ":authority", .value = authority });
+
+        for (req.headers.entries.items) |entry| {
+            if (isConnectionSpecificHeader(entry.name) or std.ascii.eqlIgnoreCase(entry.name, HeaderName.HOST)) {
+                continue;
+            }
+            if (entry.name.len > 0 and entry.name[0] == ':') continue;
+
+            const lowered_name = try dupLowerAscii(self.allocator, entry.name);
+            try owned_header_names.append(self.allocator, lowered_name);
+            try header_entries.append(self.allocator, .{ .name = lowered_name, .value = entry.value });
+        }
+
+        const headers_block = try qpack.encodeHeaders(&qpack_encoder, header_entries.items, self.allocator);
+        defer self.allocator.free(headers_block);
+
+        var request_stream_payload = std.ArrayListUnmanaged(u8){};
+        defer request_stream_payload.deinit(self.allocator);
+        try appendHttp3Frame(&request_stream_payload, self.allocator, .headers, headers_block);
+
+        if (req.body) |body| {
+            if (body.len > 0) {
+                try appendHttp3Frame(&request_stream_payload, self.allocator, .data, body);
+            }
+        }
+
+        var settings_payload = std.ArrayListUnmanaged(u8){};
+        defer settings_payload.deinit(self.allocator);
+        try encodeHttp3SettingsPayload(self.config.http3_settings, self.allocator, &settings_payload);
+
+        var control_stream_payload = std.ArrayListUnmanaged(u8){};
+        defer control_stream_payload.deinit(self.allocator);
+        try appendVarIntToList(&control_stream_payload, self.allocator, @intFromEnum(quic.Http3StreamType.control));
+        try appendHttp3Frame(&control_stream_payload, self.allocator, .settings, settings_payload.items);
+
+        var session = Http3QuicSession.initClient();
+
+        // Client control stream (id=2) and request stream (id=0).
+        try self.sendHttp3StreamData(transport, &session, 2, false, control_stream_payload.items);
+        try self.sendHttp3StreamData(transport, &session, 0, true, request_stream_payload.items);
+
+        var response_stream_payload = std.ArrayListUnmanaged(u8){};
+        defer response_stream_payload.deinit(self.allocator);
+
+        var peer_control_payload = std.ArrayListUnmanaged(u8){};
+        defer peer_control_payload.deinit(self.allocator);
+
+        var read_buf: [64 * 1024]u8 = undefined;
+        var got_response_fin = false;
+
+        var packet_counter: usize = 0;
+        while (!got_response_fin) {
+            packet_counter += 1;
+            if (packet_counter > 10_000) return error.ProtocolError;
+
+            const n = try transport.recvDatagram(&read_buf);
+            if (n == 0) continue;
+
+            const incoming = try decodeHttp3StreamDatagram(read_buf[0..n], &session);
+
+            if (incoming.stream_id == 0) {
+                if (response_stream_payload.items.len + incoming.data.len > self.config.max_response_size) {
+                    return error.ResponseTooLarge;
+                }
+                try response_stream_payload.appendSlice(self.allocator, incoming.data);
+                if (incoming.fin) {
+                    got_response_fin = true;
+                }
+            } else if (incoming.stream_id == 3) {
+                if (peer_control_payload.items.len + incoming.data.len > self.config.max_response_size) {
+                    return error.ResponseTooLarge;
+                }
+                try peer_control_payload.appendSlice(self.allocator, incoming.data);
+            }
+        }
+
+        if (peer_control_payload.items.len > 0) {
+            try parseHttp3ControlStream(peer_control_payload.items);
+        }
+
+        var response_headers = Headers.init(self.allocator);
+        defer response_headers.deinit();
+
+        var response_body = std.ArrayListUnmanaged(u8){};
+        defer response_body.deinit(self.allocator);
+
+        var status_code: ?u16 = null;
+        try self.parseHttp3ResponseFrames(
+            &qpack_decoder,
+            response_stream_payload.items,
+            &status_code,
+            &response_headers,
+            &response_body,
+        );
+
+        const final_status = status_code orelse return error.InvalidResponse;
+
+        var response = Response.init(self.allocator, final_status);
+        errdefer response.deinit();
+        response.version = .HTTP_3;
+
+        response.headers.deinit();
+        response.headers = response_headers;
+        response_headers = Headers.init(self.allocator);
+
+        if (response_body.items.len > 0) {
+            response.body = try response_body.toOwnedSlice(self.allocator);
+            response.body_owned = true;
+        }
+
+        return response;
+    }
+
+    fn sendHttp3StreamData(
+        self: *Self,
+        transport: anytype,
+        session: *Http3QuicSession,
+        stream_id: u64,
+        fin: bool,
+        payload: []const u8,
+    ) !void {
+        const max_chunk_size: usize = 1200;
+
+        var offset: usize = 0;
+        var sent_any = false;
+
+        while (offset < payload.len or !sent_any) {
+            const chunk_len = if (offset < payload.len)
+                @min(max_chunk_size, payload.len - offset)
+            else
+                0;
+
+            const chunk = payload[offset .. offset + chunk_len];
+            const chunk_fin = fin and (offset + chunk_len == payload.len);
+
+            const frame_storage = try self.allocator.alloc(u8, chunk_len + 64);
+            defer self.allocator.free(frame_storage);
+
+            const stream_frame = quic.StreamFrame{
+                .stream_id = stream_id,
+                .offset = @intCast(offset),
+                .length = @intCast(chunk_len),
+                .fin = chunk_fin,
+                .data = chunk,
+            };
+
+            const frame_len = try stream_frame.encode(frame_storage);
+
+            var packet = std.ArrayListUnmanaged(u8){};
+            defer packet.deinit(self.allocator);
+
+            try appendHttp3PacketHeader(&packet, self.allocator, session);
+            try packet.appendSlice(self.allocator, frame_storage[0..frame_len]);
+
+            try transport.sendDatagram(packet.items);
+
+            sent_any = true;
+            offset += chunk_len;
+
+            if (payload.len == 0) break;
+        }
+    }
+
+    fn parseHttp3ResponseFrames(
+        self: *Self,
+        qpack_decoder: *qpack.QpackContext,
+        payload: []const u8,
+        status_code: *?u16,
+        response_headers: *Headers,
+        response_body: *std.ArrayListUnmanaged(u8),
+    ) !void {
+        var offset: usize = 0;
+
+        while (offset < payload.len) {
+            const header_decoded = http.Http3FrameHeader.decode(payload[offset..]) catch return error.InvalidResponse;
+            offset += header_decoded.len;
+
+            const frame_len: usize = @intCast(header_decoded.header.length);
+            if (payload.len < offset + frame_len) return error.InvalidResponse;
+
+            const frame_payload = payload[offset .. offset + frame_len];
+            offset += frame_len;
+
+            switch (header_decoded.header.frame_type) {
+                @intFromEnum(http.Http3FrameType.headers) => {
+                    const decoded_headers = try qpack.decodeHeaders(qpack_decoder, frame_payload, self.allocator);
+                    defer {
+                        for (decoded_headers) |h| {
+                            self.allocator.free(h.name);
+                            self.allocator.free(h.value);
+                        }
+                        self.allocator.free(decoded_headers);
+                    }
+
+                    for (decoded_headers) |h| {
+                        if (h.name.len > 0 and h.name[0] == ':') {
+                            if (mem.eql(u8, h.name, ":status")) {
+                                status_code.* = std.fmt.parseInt(u16, h.value, 10) catch return error.InvalidResponse;
+                            }
+                            continue;
+                        }
+
+                        if (isConnectionSpecificHeader(h.name)) continue;
+                        try response_headers.append(h.name, h.value);
+                    }
+                },
+                @intFromEnum(http.Http3FrameType.data) => {
+                    if (response_body.items.len + frame_payload.len > self.config.max_response_size) {
+                        return error.ResponseTooLarge;
+                    }
+                    try response_body.appendSlice(self.allocator, frame_payload);
+                },
+                @intFromEnum(http.Http3FrameType.settings) => {
+                    _ = try parseHttp3SettingsPayload(frame_payload);
+                },
+                @intFromEnum(http.Http3FrameType.goaway) => {},
+                else => {
+                    // Unknown/unsupported frame types are ignored for forward compatibility.
+                },
+            }
+        }
+    }
+
+    fn executeHttp2WithTransport(self: *Self, req: *Request, transport: anytype) !Response {
+        var stream_manager = h2stream.StreamManager.init(self.allocator, true);
+        defer stream_manager.deinit();
+
+        try transport.writeAll(http.HTTP2_PREFACE);
+
+        var settings_payload = std.ArrayListUnmanaged(u8){};
+        defer settings_payload.deinit(self.allocator);
+
+        const local_settings = toConnectionSettings(self.config.http2_settings);
+        try http.encodeSettingsPayload(local_settings, self.allocator, &settings_payload);
+        try writeHttp2Frame(transport, .settings, 0, 0, settings_payload.items);
+
+        const request_stream = try stream_manager.createStream();
+        try request_stream.open();
+
+        var path_buf: ?[]u8 = null;
+        defer if (path_buf) |buf| self.allocator.free(buf);
+        const path = if (req.uri.query) |q| blk: {
+            path_buf = try std.fmt.allocPrint(self.allocator, "{s}?{s}", .{ req.uri.path, q });
+            break :blk path_buf.?;
+        } else req.uri.path;
+
+        var authority_buf: ?[]u8 = null;
+        defer if (authority_buf) |buf| self.allocator.free(buf);
+        const authority = try buildAuthority(self.allocator, req, &authority_buf);
+
+        var header_entries = std.ArrayListUnmanaged(hpack.HeaderEntry){};
+        defer header_entries.deinit(self.allocator);
+
+        var owned_header_names = std.ArrayListUnmanaged([]u8){};
+        defer {
+            for (owned_header_names.items) |name| self.allocator.free(name);
+            owned_header_names.deinit(self.allocator);
+        }
+
+        const method_value = if (req.method == .CUSTOM)
+            (req.custom_method orelse "CUSTOM")
+        else
+            req.method.toString();
+
+        try header_entries.append(self.allocator, .{ .name = ":method", .value = method_value });
+        try header_entries.append(self.allocator, .{ .name = ":path", .value = path });
+        try header_entries.append(self.allocator, .{ .name = ":scheme", .value = if (req.uri.isTls()) "https" else "http" });
+        try header_entries.append(self.allocator, .{ .name = ":authority", .value = authority });
+
+        for (req.headers.entries.items) |entry| {
+            if (isConnectionSpecificHeader(entry.name) or std.ascii.eqlIgnoreCase(entry.name, HeaderName.HOST)) {
+                continue;
+            }
+            if (entry.name.len > 0 and entry.name[0] == ':') continue;
+
+            const lowered_name = try dupLowerAscii(self.allocator, entry.name);
+            try owned_header_names.append(self.allocator, lowered_name);
+            try header_entries.append(self.allocator, .{ .name = lowered_name, .value = entry.value });
+        }
+
+        const headers_payload = try h2stream.buildHeadersFramePayload(
+            &stream_manager,
+            header_entries.items,
+            null,
+            self.allocator,
+        );
+        defer self.allocator.free(headers_payload.payload);
+
+        const has_body = req.body != null and req.body.?.len > 0;
+        const headers_flags: u8 = headers_payload.flags | @as(u8, if (has_body) 0 else 0x01);
+        try writeHttp2Frame(transport, .headers, headers_flags, request_stream.id, headers_payload.payload);
+
+        if (has_body) {
+            const body = req.body.?;
+            var offset: usize = 0;
+            while (offset < body.len) {
+                const chunk_len = @min(body.len - offset, @as(usize, local_settings.max_frame_size));
+                const is_last = offset + chunk_len == body.len;
+                const chunk_flags: u8 = if (is_last) 0x01 else 0;
+                try writeHttp2Frame(
+                    transport,
+                    .data,
+                    chunk_flags,
+                    request_stream.id,
+                    body[offset .. offset + chunk_len],
+                );
+                offset += chunk_len;
+            }
+            request_stream.sendEndStream();
+        } else {
+            request_stream.sendEndStream();
+        }
+
+        var response_headers = Headers.init(self.allocator);
+        defer response_headers.deinit();
+
+        var body = std.ArrayListUnmanaged(u8){};
+        defer body.deinit(self.allocator);
+
+        var pending_headers_block = std.ArrayListUnmanaged(u8){};
+        defer pending_headers_block.deinit(self.allocator);
+
+        var pending_headers_flags: u8 = 0;
+        var waiting_continuation = false;
+
+        var status_code: ?u16 = null;
+        var response_done = false;
+
+        var peer_settings = http.Http2Connection.Http2ConnectionSettings{};
+
+        var frame_counter: usize = 0;
+        while (!response_done) {
+            frame_counter += 1;
+            if (frame_counter > 10_000) return error.ProtocolError;
+
+            const frame = self.readHttp2Frame(transport) catch |err| switch (err) {
+                error.UnexpectedEof => return error.InvalidResponse,
+                else => return err,
+            };
+            defer self.allocator.free(frame.payload);
+
+            switch (frame.header.frame_type) {
+                .settings => {
+                    if (frame.header.stream_id != 0) return error.ProtocolError;
+                    const is_ack = (frame.header.flags & 0x01) != 0;
+                    if (!is_ack) {
+                        try http.applySettingsPayload(&peer_settings, frame.payload);
+                        try writeHttp2Frame(transport, .settings, 0x01, 0, &.{});
+                    }
+                },
+                .ping => {
+                    if (frame.header.stream_id != 0) return error.ProtocolError;
+                    const is_ack = (frame.header.flags & 0x01) != 0;
+                    if (!is_ack) {
+                        if (frame.payload.len != 8) return error.ProtocolError;
+                        try writeHttp2Frame(transport, .ping, 0x01, 0, frame.payload);
+                    }
+                },
+                .goaway => {
+                    if (status_code == null) return error.ProtocolError;
+                },
+                .window_update, .priority, .push_promise => {},
+                .rst_stream => {
+                    if (frame.header.stream_id == request_stream.id) return error.StreamError;
+                },
+                .headers => {
+                    if (frame.header.stream_id != request_stream.id) continue;
+                    if (waiting_continuation) return error.ProtocolError;
+
+                    if ((frame.header.flags & 0x04) != 0) {
+                        try applyResponseHeaderBlock(
+                            self,
+                            &stream_manager,
+                            frame.payload,
+                            frame.header.flags,
+                            &status_code,
+                            &response_headers,
+                        );
+                        if ((frame.header.flags & 0x01) != 0) {
+                            response_done = true;
+                            request_stream.receiveEndStream();
+                        }
+                    } else {
+                        pending_headers_flags = frame.header.flags;
+                        try pending_headers_block.appendSlice(self.allocator, frame.payload);
+                        waiting_continuation = true;
+                    }
+                },
+                .continuation => {
+                    if (frame.header.stream_id != request_stream.id) continue;
+                    if (!waiting_continuation) return error.ProtocolError;
+
+                    try pending_headers_block.appendSlice(self.allocator, frame.payload);
+                    if ((frame.header.flags & 0x04) != 0) {
+                        try applyResponseHeaderBlock(
+                            self,
+                            &stream_manager,
+                            pending_headers_block.items,
+                            pending_headers_flags,
+                            &status_code,
+                            &response_headers,
+                        );
+                        pending_headers_block.clearRetainingCapacity();
+                        waiting_continuation = false;
+
+                        if ((pending_headers_flags & 0x01) != 0) {
+                            response_done = true;
+                            request_stream.receiveEndStream();
+                        }
+                    }
+                },
+                .data => {
+                    if (frame.header.stream_id != request_stream.id) continue;
+
+                    var data_slice = frame.payload;
+                    if ((frame.header.flags & 0x08) != 0) {
+                        if (frame.payload.len == 0) return error.ProtocolError;
+                        const pad_len = frame.payload[0];
+                        if (frame.payload.len < @as(usize, pad_len) + 1) return error.ProtocolError;
+                        data_slice = frame.payload[1 .. frame.payload.len - pad_len];
+                    }
+
+                    if (body.items.len + data_slice.len > self.config.max_response_size) return error.ResponseTooLarge;
+                    try body.appendSlice(self.allocator, data_slice);
+
+                    if ((frame.header.flags & 0x01) != 0) {
+                        response_done = true;
+                        request_stream.receiveEndStream();
+                    }
+                },
+            }
+        }
+
+        if (waiting_continuation) return error.InvalidResponse;
+
+        const final_status = status_code orelse return error.InvalidResponse;
+
+        var response = Response.init(self.allocator, final_status);
+        errdefer response.deinit();
+        response.version = .HTTP_2;
+
+        response.headers.deinit();
+        response.headers = response_headers;
+        response_headers = Headers.init(self.allocator);
+
+        if (body.items.len > 0) {
+            response.body = try body.toOwnedSlice(self.allocator);
+            response.body_owned = true;
+        }
+
+        return response;
+    }
+
+    fn readHttp2Frame(self: *Self, transport: anytype) !struct { header: http.Http2FrameHeader, payload: []u8 } {
+        var header_bytes: [9]u8 = undefined;
+        try transport.readNoEof(&header_bytes);
+        const header = http.Http2FrameHeader.parse(header_bytes);
+
+        const payload_len: usize = @intCast(header.length);
+        if (payload_len > self.config.max_response_size) return error.FrameTooLarge;
+
+        const payload = try self.allocator.alloc(u8, payload_len);
+        errdefer self.allocator.free(payload);
+
+        if (payload_len > 0) {
+            try transport.readNoEof(payload);
+        }
+
+        return .{ .header = header, .payload = payload };
     }
 
     fn executeTlsHttp(self: *Self, socket: *Socket, host: []const u8, request_data: []const u8) !Response {
@@ -573,6 +1169,344 @@ fn parseResponse(allocator: Allocator, data: []const u8) !Response {
     return res;
 }
 
+const SocketHttp2Transport = struct {
+    socket: *Socket,
+
+    fn writeAll(self: *SocketHttp2Transport, data: []const u8) !void {
+        try self.socket.sendAll(data);
+    }
+
+    fn readNoEof(self: *SocketHttp2Transport, out: []u8) !void {
+        var read: usize = 0;
+        while (read < out.len) {
+            const n = try self.socket.recv(out[read..]);
+            if (n == 0) return error.UnexpectedEof;
+            read += n;
+        }
+    }
+};
+
+const TlsHttp2Transport = struct {
+    session: *TlsSession,
+
+    fn writeAll(self: *TlsHttp2Transport, data: []const u8) !void {
+        var written: usize = 0;
+        while (written < data.len) {
+            const n = try self.session.write(data[written..]);
+            if (n == 0) return error.UnexpectedEof;
+            written += n;
+        }
+    }
+
+    fn readNoEof(self: *TlsHttp2Transport, out: []u8) !void {
+        var read: usize = 0;
+        while (read < out.len) {
+            const n = try self.session.read(out[read..]);
+            if (n == 0) return error.UnexpectedEof;
+            read += n;
+        }
+    }
+};
+
+const UdpHttp3Transport = struct {
+    socket: *UdpSocket,
+
+    fn sendDatagram(self: *UdpHttp3Transport, data: []const u8) !void {
+        const sent = try self.socket.send(data);
+        if (sent != data.len) return error.ShortWrite;
+    }
+
+    fn recvDatagram(self: *UdpHttp3Transport, out: []u8) !usize {
+        return self.socket.recv(out);
+    }
+};
+
+const Http3QuicSession = struct {
+    local_cid: quic.ConnectionId,
+    peer_cid: quic.ConnectionId,
+    next_packet_number: u64 = 0,
+    sent_initial: bool = false,
+
+    fn initClient() Http3QuicSession {
+        return .{
+            .local_cid = quic.ConnectionId.random(),
+            .peer_cid = quic.ConnectionId.random(),
+        };
+    }
+};
+
+const DecodedHttp3StreamDatagram = struct {
+    stream_id: u64,
+    fin: bool,
+    data: []const u8,
+};
+
+const H3_SETTING_QPACK_MAX_TABLE_CAPACITY: u64 = 0x01;
+const H3_SETTING_MAX_FIELD_SECTION_SIZE: u64 = 0x06;
+const H3_SETTING_QPACK_BLOCKED_STREAMS: u64 = 0x07;
+const H3_SETTING_ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
+const H3_SETTING_H3_DATAGRAM: u64 = 0x33;
+
+fn clampU64ToUsize(v: u64) usize {
+    return @intCast(@min(v, @as(u64, std.math.maxInt(usize))));
+}
+
+fn appendVarIntToList(out: *std.ArrayListUnmanaged(u8), allocator: Allocator, value: u64) !void {
+    var tmp: [8]u8 = undefined;
+    const n = try http.encodeVarInt(value, &tmp);
+    try out.appendSlice(allocator, tmp[0..n]);
+}
+
+fn appendHttp3Frame(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: Allocator,
+    frame_type: http.Http3FrameType,
+    payload: []const u8,
+) !void {
+    var hdr_buf: [32]u8 = undefined;
+    const hdr_len = try (http.Http3FrameHeader{
+        .frame_type = @intFromEnum(frame_type),
+        .length = @intCast(payload.len),
+    }).encode(&hdr_buf);
+    try out.appendSlice(allocator, hdr_buf[0..hdr_len]);
+    try out.appendSlice(allocator, payload);
+}
+
+fn appendHttp3Setting(out: *std.ArrayListUnmanaged(u8), allocator: Allocator, id: u64, value: u64) !void {
+    try appendVarIntToList(out, allocator, id);
+    try appendVarIntToList(out, allocator, value);
+}
+
+fn encodeHttp3SettingsPayload(
+    settings: types.Http3Settings,
+    allocator: Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+) !void {
+    try appendHttp3Setting(out, allocator, H3_SETTING_QPACK_MAX_TABLE_CAPACITY, settings.qpack_max_table_capacity);
+    try appendHttp3Setting(out, allocator, H3_SETTING_MAX_FIELD_SECTION_SIZE, settings.max_field_section_size);
+    try appendHttp3Setting(out, allocator, H3_SETTING_QPACK_BLOCKED_STREAMS, settings.qpack_blocked_streams);
+    if (settings.enable_connect_protocol) {
+        try appendHttp3Setting(out, allocator, H3_SETTING_ENABLE_CONNECT_PROTOCOL, 1);
+    }
+    if (settings.enable_datagrams) {
+        try appendHttp3Setting(out, allocator, H3_SETTING_H3_DATAGRAM, 1);
+    }
+}
+
+fn parseHttp3SettingsPayload(payload: []const u8) !types.Http3Settings {
+    var parsed = types.Http3Settings{
+        .max_field_section_size = 0,
+        .qpack_max_table_capacity = 0,
+        .qpack_blocked_streams = 0,
+        .enable_connect_protocol = false,
+        .enable_datagrams = false,
+    };
+
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        const id_result = try http.decodeVarInt(payload[offset..]);
+        offset += id_result.len;
+
+        const value_result = try http.decodeVarInt(payload[offset..]);
+        offset += value_result.len;
+
+        switch (id_result.value) {
+            H3_SETTING_QPACK_MAX_TABLE_CAPACITY => parsed.qpack_max_table_capacity = value_result.value,
+            H3_SETTING_MAX_FIELD_SECTION_SIZE => parsed.max_field_section_size = value_result.value,
+            H3_SETTING_QPACK_BLOCKED_STREAMS => parsed.qpack_blocked_streams = value_result.value,
+            H3_SETTING_ENABLE_CONNECT_PROTOCOL => parsed.enable_connect_protocol = value_result.value != 0,
+            H3_SETTING_H3_DATAGRAM => parsed.enable_datagrams = value_result.value != 0,
+            else => {},
+        }
+    }
+
+    return parsed;
+}
+
+fn parseHttp3ControlStream(stream_data: []const u8) !void {
+    if (stream_data.len == 0) return error.ProtocolError;
+
+    var offset: usize = 0;
+    const stream_type = try http.decodeVarInt(stream_data[offset..]);
+    offset += stream_type.len;
+
+    if (stream_type.value != @intFromEnum(quic.Http3StreamType.control)) {
+        return error.ProtocolError;
+    }
+
+    var saw_settings = false;
+
+    while (offset < stream_data.len) {
+        const frame = http.Http3FrameHeader.decode(stream_data[offset..]) catch return error.ProtocolError;
+        offset += frame.len;
+
+        const payload_len: usize = @intCast(frame.header.length);
+        if (stream_data.len < offset + payload_len) return error.ProtocolError;
+
+        const payload = stream_data[offset .. offset + payload_len];
+        offset += payload_len;
+
+        if (frame.header.frame_type == @intFromEnum(http.Http3FrameType.settings)) {
+            _ = try parseHttp3SettingsPayload(payload);
+            saw_settings = true;
+        }
+    }
+
+    if (!saw_settings) return error.ProtocolError;
+}
+
+fn appendHttp3PacketHeader(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: Allocator,
+    session: *Http3QuicSession,
+) !void {
+    var hdr_buf: [128]u8 = undefined;
+
+    const hdr_len = if (!session.sent_initial) blk: {
+        const long_header = quic.LongHeader{
+            .packet_type = .initial,
+            .version = .v1,
+            .dcid = session.peer_cid,
+            .scid = session.local_cid,
+        };
+        const n = try long_header.encode(&hdr_buf);
+        session.sent_initial = true;
+        break :blk n;
+    } else blk: {
+        const short_header = quic.ShortHeader{ .dcid = session.peer_cid };
+        break :blk try short_header.encode(&hdr_buf);
+    };
+
+    try out.appendSlice(allocator, hdr_buf[0..hdr_len]);
+
+    var pn_buf: [8]u8 = undefined;
+    const pn_len = try quic.encodeVarInt(session.next_packet_number, &pn_buf);
+    session.next_packet_number += 1;
+    try out.appendSlice(allocator, pn_buf[0..pn_len]);
+}
+
+fn decodeHttp3StreamDatagram(datagram: []const u8, session: *Http3QuicSession) !DecodedHttp3StreamDatagram {
+    if (datagram.len == 0) return error.InvalidResponse;
+
+    var offset: usize = 0;
+
+    if ((datagram[0] & 0x80) != 0) {
+        const long_decoded = try quic.LongHeader.decode(datagram);
+        offset = long_decoded.len;
+        if (long_decoded.header.scid.len > 0) {
+            session.peer_cid = long_decoded.header.scid;
+        }
+    } else {
+        const short_decoded = try quic.ShortHeader.decode(datagram, session.local_cid.len);
+        offset = short_decoded.len;
+    }
+
+    const packet_number = try quic.decodeVarInt(datagram[offset..]);
+    _ = packet_number.value;
+    offset += packet_number.len;
+
+    if (offset >= datagram.len) return error.InvalidResponse;
+    if (!quic.FrameType.isStream(@as(u64, datagram[offset]))) return error.ProtocolError;
+
+    const stream_decoded = try quic.StreamFrame.decode(datagram[offset..]);
+    if (stream_decoded.len != datagram[offset..].len) return error.ProtocolError;
+
+    return .{
+        .stream_id = stream_decoded.frame.stream_id,
+        .fin = stream_decoded.frame.fin,
+        .data = stream_decoded.frame.data,
+    };
+}
+
+fn toConnectionSettings(settings: types.Http2Settings) http.Http2Connection.Http2ConnectionSettings {
+    return .{
+        .header_table_size = settings.header_table_size,
+        .enable_push = settings.enable_push,
+        .max_concurrent_streams = settings.max_concurrent_streams,
+        .initial_window_size = settings.initial_window_size,
+        .max_frame_size = settings.max_frame_size,
+        .max_header_list_size = settings.max_header_list_size,
+    };
+}
+
+fn buildAuthority(allocator: Allocator, req: *const Request, authority_buf: *?[]u8) ![]const u8 {
+    const host = req.uri.host orelse return error.InvalidUri;
+    const explicit_port = req.uri.port orelse return host;
+    const default_port: u16 = if (req.uri.isTls()) 443 else 80;
+
+    if (explicit_port == default_port) return host;
+
+    authority_buf.* = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, explicit_port });
+    return authority_buf.*.?;
+}
+
+fn dupLowerAscii(allocator: Allocator, input: []const u8) ![]u8 {
+    const out = try allocator.dupe(u8, input);
+    for (out) |*c| {
+        c.* = std.ascii.toLower(c.*);
+    }
+    return out;
+}
+
+fn isConnectionSpecificHeader(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, HeaderName.CONNECTION) or
+        std.ascii.eqlIgnoreCase(name, HeaderName.UPGRADE) or
+        std.ascii.eqlIgnoreCase(name, HeaderName.TRANSFER_ENCODING) or
+        std.ascii.eqlIgnoreCase(name, "Keep-Alive") or
+        std.ascii.eqlIgnoreCase(name, "Proxy-Connection") or
+        std.ascii.eqlIgnoreCase(name, "HTTP2-Settings");
+}
+
+fn writeHttp2Frame(
+    transport: anytype,
+    frame_type: http.Http2FrameType,
+    flags: u8,
+    stream_id: u31,
+    payload: []const u8,
+) !void {
+    const header = http.Http2FrameHeader{
+        .length = @intCast(payload.len),
+        .frame_type = frame_type,
+        .flags = flags,
+        .stream_id = stream_id,
+    };
+    const raw_header = header.serialize();
+    try transport.writeAll(&raw_header);
+    if (payload.len > 0) {
+        try transport.writeAll(payload);
+    }
+}
+
+fn applyResponseHeaderBlock(
+    self: *Client,
+    stream_manager: *h2stream.StreamManager,
+    header_block: []const u8,
+    flags: u8,
+    status_code: *?u16,
+    response_headers: *Headers,
+) !void {
+    const parsed = try h2stream.parseHeadersFramePayload(stream_manager, header_block, flags, self.allocator);
+    defer {
+        for (parsed.headers) |header| {
+            self.allocator.free(header.name);
+            self.allocator.free(header.value);
+        }
+        self.allocator.free(parsed.headers);
+    }
+
+    for (parsed.headers) |header| {
+        if (header.name.len > 0 and header.name[0] == ':') {
+            if (mem.eql(u8, header.name, ":status")) {
+                status_code.* = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidResponse;
+            }
+            continue;
+        }
+
+        if (isConnectionSpecificHeader(header.name)) continue;
+        try response_headers.append(header.name, header.value);
+    }
+}
+
 test "Client initialization" {
     const allocator = std.testing.allocator;
     var client = Client.init(allocator);
@@ -698,4 +1632,248 @@ test "Client retry classifier avoids TLS/protocol retries" {
     try std.testing.expect(!Client.isRetryableRequestError(error.InvalidResponse));
     try std.testing.expect(!Client.isRetryableRequestError(error.ProtocolError));
     try std.testing.expect(Client.isRetryableRequestError(error.ConnectionReset));
+}
+
+test "Client HTTP/2 runtime parses headers and data" {
+    const allocator = std.testing.allocator;
+
+    var client = Client.initWithConfig(allocator, .{ .http2_enabled = true });
+    defer client.deinit();
+
+    var req = try Request.init(allocator, .GET, "http://example.com/resource");
+    defer req.deinit();
+
+    var server_stream_manager = h2stream.StreamManager.init(allocator, false);
+    defer server_stream_manager.deinit();
+
+    const server_headers = [_]hpack.HeaderEntry{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-type", .value = "text/plain" },
+    };
+
+    const headers_payload = try h2stream.buildHeadersFramePayload(
+        &server_stream_manager,
+        &server_headers,
+        null,
+        allocator,
+    );
+    defer allocator.free(headers_payload.payload);
+
+    var read_bytes = std.ArrayListUnmanaged(u8){};
+    defer read_bytes.deinit(allocator);
+
+    var server_settings = std.ArrayListUnmanaged(u8){};
+    defer server_settings.deinit(allocator);
+    try http.encodeSettingsPayload(.{}, allocator, &server_settings);
+
+    try appendFrameBytes(allocator, &read_bytes, .settings, 0, 0, server_settings.items);
+    try appendFrameBytes(allocator, &read_bytes, .headers, headers_payload.flags, 1, headers_payload.payload);
+    try appendFrameBytes(allocator, &read_bytes, .data, 0x01, 1, "hello");
+
+    var transport = FakeHttp2Transport.init(allocator, read_bytes.items);
+    defer transport.deinit();
+
+    var response = try client.executeHttp2WithTransport(&req, &transport);
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status.code);
+    try std.testing.expectEqual(types.Version.HTTP_2, response.version);
+    try std.testing.expectEqualStrings("text/plain", response.headers.get("content-type").?);
+    try std.testing.expectEqualStrings("hello", response.text().?);
+
+    try std.testing.expect(mem.startsWith(u8, transport.writes.items, http.HTTP2_PREFACE));
+}
+
+test "Client HTTP/3 runtime parses headers and data" {
+    const allocator = std.testing.allocator;
+
+    var client = Client.initWithConfig(allocator, .{ .http3_enabled = true, .http2_enabled = false });
+    defer client.deinit();
+
+    var req = try Request.init(allocator, .GET, "http://example.com/resource");
+    defer req.deinit();
+
+    var server_qpack = qpack.QpackContext.init(allocator);
+    defer server_qpack.deinit();
+
+    const server_headers = [_]qpack.HeaderEntry{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-type", .value = "text/plain" },
+    };
+
+    const encoded_server_headers = try qpack.encodeHeaders(&server_qpack, &server_headers, allocator);
+    defer allocator.free(encoded_server_headers);
+
+    var response_stream_payload = std.ArrayListUnmanaged(u8){};
+    defer response_stream_payload.deinit(allocator);
+    try appendHttp3Frame(&response_stream_payload, allocator, .headers, encoded_server_headers);
+    try appendHttp3Frame(&response_stream_payload, allocator, .data, "hello-h3");
+
+    var server_settings = std.ArrayListUnmanaged(u8){};
+    defer server_settings.deinit(allocator);
+    try encodeHttp3SettingsPayload(.{}, allocator, &server_settings);
+
+    var control_stream_payload = std.ArrayListUnmanaged(u8){};
+    defer control_stream_payload.deinit(allocator);
+    try appendVarIntToList(&control_stream_payload, allocator, @intFromEnum(quic.Http3StreamType.control));
+    try appendHttp3Frame(&control_stream_payload, allocator, .settings, server_settings.items);
+
+    const client_cid = try quic.ConnectionId.init(&[_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 });
+    const server_cid = try quic.ConnectionId.init(&[_]u8{ 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8 });
+
+    const control_datagram = try buildHttp3DatagramForTest(
+        allocator,
+        client_cid,
+        server_cid,
+        1,
+        3,
+        0,
+        false,
+        control_stream_payload.items,
+    );
+    defer allocator.free(control_datagram);
+
+    const response_datagram = try buildHttp3DatagramForTest(
+        allocator,
+        client_cid,
+        server_cid,
+        2,
+        0,
+        0,
+        true,
+        response_stream_payload.items,
+    );
+    defer allocator.free(response_datagram);
+
+    const reads = [_][]const u8{ control_datagram, response_datagram };
+    var transport = FakeHttp3Transport.init(allocator, &reads);
+    defer transport.deinit();
+
+    var response = try client.executeHttp3WithTransport(&req, &transport);
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status.code);
+    try std.testing.expectEqual(types.Version.HTTP_3, response.version);
+    try std.testing.expectEqualStrings("text/plain", response.headers.get("content-type").?);
+    try std.testing.expectEqualStrings("hello-h3", response.text().?);
+    try std.testing.expect(transport.writes.items.len >= 2);
+}
+
+const FakeHttp2Transport = struct {
+    allocator: Allocator,
+    reads: []const u8,
+    read_index: usize = 0,
+    writes: std.ArrayListUnmanaged(u8) = .{},
+
+    fn init(allocator: Allocator, reads: []const u8) FakeHttp2Transport {
+        return .{ .allocator = allocator, .reads = reads };
+    }
+
+    fn deinit(self: *FakeHttp2Transport) void {
+        self.writes.deinit(self.allocator);
+    }
+
+    fn writeAll(self: *FakeHttp2Transport, data: []const u8) !void {
+        try self.writes.appendSlice(self.allocator, data);
+    }
+
+    fn readNoEof(self: *FakeHttp2Transport, out: []u8) !void {
+        if (self.read_index + out.len > self.reads.len) return error.UnexpectedEof;
+        @memcpy(out, self.reads[self.read_index .. self.read_index + out.len]);
+        self.read_index += out.len;
+    }
+};
+
+const FakeHttp3Transport = struct {
+    allocator: Allocator,
+    reads: []const []const u8,
+    read_index: usize = 0,
+    writes: std.ArrayListUnmanaged([]u8) = .{},
+
+    fn init(allocator: Allocator, reads: []const []const u8) FakeHttp3Transport {
+        return .{ .allocator = allocator, .reads = reads };
+    }
+
+    fn deinit(self: *FakeHttp3Transport) void {
+        for (self.writes.items) |packet| {
+            self.allocator.free(packet);
+        }
+        self.writes.deinit(self.allocator);
+    }
+
+    fn sendDatagram(self: *FakeHttp3Transport, data: []const u8) !void {
+        const copy = try self.allocator.dupe(u8, data);
+        try self.writes.append(self.allocator, copy);
+    }
+
+    fn recvDatagram(self: *FakeHttp3Transport, out: []u8) !usize {
+        if (self.read_index >= self.reads.len) return error.UnexpectedEof;
+        const packet = self.reads[self.read_index];
+        self.read_index += 1;
+
+        if (out.len < packet.len) return error.BufferTooSmall;
+        @memcpy(out[0..packet.len], packet);
+        return packet.len;
+    }
+};
+
+fn buildHttp3DatagramForTest(
+    allocator: Allocator,
+    dcid: quic.ConnectionId,
+    scid: quic.ConnectionId,
+    packet_number: u64,
+    stream_id: u64,
+    stream_offset: u64,
+    fin: bool,
+    payload: []const u8,
+) ![]u8 {
+    const frame_storage = try allocator.alloc(u8, payload.len + 64);
+    defer allocator.free(frame_storage);
+
+    const stream_frame = quic.StreamFrame{
+        .stream_id = stream_id,
+        .offset = stream_offset,
+        .length = @intCast(payload.len),
+        .fin = fin,
+        .data = payload,
+    };
+    const frame_len = try stream_frame.encode(frame_storage);
+
+    var packet = std.ArrayListUnmanaged(u8){};
+    errdefer packet.deinit(allocator);
+
+    var header_buf: [128]u8 = undefined;
+    const header_len = try (quic.LongHeader{
+        .packet_type = .initial,
+        .version = .v1,
+        .dcid = dcid,
+        .scid = scid,
+    }).encode(&header_buf);
+    try packet.appendSlice(allocator, header_buf[0..header_len]);
+
+    var packet_number_buf: [8]u8 = undefined;
+    const packet_number_len = try quic.encodeVarInt(packet_number, &packet_number_buf);
+    try packet.appendSlice(allocator, packet_number_buf[0..packet_number_len]);
+
+    try packet.appendSlice(allocator, frame_storage[0..frame_len]);
+    return packet.toOwnedSlice(allocator);
+}
+
+fn appendFrameBytes(
+    allocator: Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    frame_type: http.Http2FrameType,
+    flags: u8,
+    stream_id: u31,
+    payload: []const u8,
+) !void {
+    const header = http.Http2FrameHeader{
+        .length = @intCast(payload.len),
+        .frame_type = frame_type,
+        .flags = flags,
+        .stream_id = stream_id,
+    };
+    const raw = header.serialize();
+    try out.appendSlice(allocator, &raw);
+    try out.appendSlice(allocator, payload);
 }

@@ -4,7 +4,7 @@ layout: home
 hero:
   name: httpx.zig
   text: Production-Ready HTTP Library for Zig
-  tagline: Production-ready HTTP/1.x runtime plus HTTP/2/HTTP/3 protocol primitives
+  tagline: Production-ready HTTP/1.x/2/3 client and server runtime, plus protocol primitives
   image:
     src: /logo.png
     alt: httpx.zig
@@ -21,7 +21,7 @@ hero:
 
 features:
   - title: All HTTP Versions
-    details: Full HTTP/1.0 and HTTP/1.1 runtime support, plus HTTP/2 (HPACK/framing) and HTTP/3 (QPACK/QUIC) primitives.
+    details: Full HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 client/server runtime support, plus full protocol primitives.
   - title: Robust Client
     details: Connection pooling, automatic retries, interceptors, and typed API.
   - title: Powerful Server
@@ -88,19 +88,18 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 |----------|--------|-----------|-------|
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
-| HTTP/2 | ✅ Full | TCP/TLS | Full protocol-module support (framing/HPACK/streams) with advanced integration paths |
-| HTTP/3 | ✅ Full | QUIC/UDP | Full protocol-module support (framing/QPACK/QUIC) with advanced integration paths |
+| HTTP/2 | ✅ Client + Server Runtime + Primitives | TCP/TLS | High-level client/server execution paths plus full framing/HPACK/stream primitives |
+| HTTP/3 | ✅ Client + Server Runtime + Primitives | QUIC/UDP | High-level client/server runtime over UDP + QUIC/HTTP3/QPACK primitives |
 
 ## Platform Support
 
-httpx.zig is fully cross-platform:
+httpx.zig is validated across Linux, Windows, and macOS:
 
-| Platform | x86_64 | aarch64 | i386 | arm |
-|----------|--------|---------|------|-----|
-| Linux    | ✅     | ✅      | ✅   | ✅  |
-| Windows  | ✅     | ✅      | ✅   | ✅  |
-| macOS    | ✅     | ✅      | ✅   | ✅  |
-| FreeBSD  | ✅     | ✅      | ✅   | ✅  |
+| Platform | x86_64 | aarch64 | x86 |
+|----------|--------|---------|-----|
+| Linux    | ✅     | ✅      | ✅  |
+| Windows  | ✅     | ✅      | ✅  |
+| macOS    | ✅     | ✅      | ✅  |
 
 ## Examples
 
@@ -128,7 +127,11 @@ Available examples (see the `/examples` folder):
 - `static_files.zig`: file-based static routes and directory-based wildcard mounts for CSS/JS/images
 - `multi_page_website.zig`: full multi-page website serving index/about/contact with static assets
 - `http2_example.zig`: HTTP/2 HPACK compression and stream management
+- `http2_client_runtime.zig`: local end-to-end high-level HTTP/2 client runtime demo
+- `http2_server_runtime.zig`: local end-to-end high-level HTTP/2 server runtime demo
 - `http3_example.zig`: HTTP/3 QPACK compression and QUIC framing
+- `http3_client_runtime.zig`: local end-to-end high-level HTTP/3 client runtime demo
+- `http3_server_runtime.zig`: local end-to-end high-level HTTP/3 server runtime demo
 - `tcp_local.zig`: local TCP listener/client round trip
 - `udp_local.zig`: UDP local networking utility
 

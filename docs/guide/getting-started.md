@@ -4,8 +4,8 @@
 
 ## Features
 
-- **Protocol Support**: Production-ready HTTP/1.1 client/server runtime plus HTTP/2 (HPACK/streams) and HTTP/3 (QPACK/QUIC) protocol primitives.
-- **Cross-Platform**: Works on Linux, Windows, macOS, and FreeBSD with x86_64, aarch64, and i386 architectures.
+- **Protocol Support**: Production-ready HTTP/1.0/1.1/2/3 client/server runtime paths plus full HTTP/2 and HTTP/3 protocol primitives.
+- **Cross-Platform**: Validated on Linux, Windows, and macOS with x86_64, aarch64, and x86 architectures.
 - **Client**:
     - Connection pooling and keep-alive.
     - Automatic retries with exponential backoff.
@@ -27,7 +27,7 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 ## Requirements
 
 - **Zig Version**: 0.15.0 or later (tested on 0.15.2)
-- **Operating System**: Windows, Linux, macOS, or FreeBSD
+- **Operating System**: Windows, Linux, or macOS
 
 ## Platform Support
 
@@ -38,7 +38,6 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 | Linux    | ✅ Full | All major distributions (Ubuntu, Debian, Fedora, Arch, etc.) |
 | Windows  | ✅ Full | Windows 10/11, Server 2019+ |
 | macOS    | ✅ Full | macOS 11+ (Big Sur and later) |
-| FreeBSD  | ✅ Full | FreeBSD 13+ |
 
 ### Architectures
 
@@ -46,8 +45,7 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 |--------------|-------|---------|-------|-------|
 | x86_64 (64-bit) | ✅ | ✅ | ✅ | Primary development target |
 | aarch64 (ARM64) | ✅ | ✅ | ✅ | Apple Silicon, AWS Graviton, Raspberry Pi 4+ |
-| i386 (32-bit) | ✅ | ✅ | ✅ | Legacy x86 support |
-| arm (32-bit) | ✅ | ✅ | ✅ | Raspberry Pi 3 and earlier, ARM Cortex |
+| x86 (32-bit) | ✅ | ✅ | ✅ | Legacy x86 support |
 
 ### Cross-Compilation
 
@@ -63,8 +61,8 @@ zig build -Dtarget=aarch64-linux
 # Build for Windows x86_64
 zig build -Dtarget=x86_64-windows
 
-# Build for Windows i386 (32-bit)
-zig build -Dtarget=i386-windows
+# Build for Windows x86 (32-bit)
+zig build -Dtarget=x86-windows
 
 # Build for macOS ARM64 (Apple Silicon)
 zig build -Dtarget=aarch64-macos

@@ -27,6 +27,39 @@ All notable changes to this project are documented in this file.
   - Root network aliases: `netInit`, `netDeinit`, `resolveAllAddresses`, `parseAndResolveAddress`, `isIpAddress`, `isIp4Address`, `isIp6Address`
 - Added/expanded networking tests for new TCP/UDP/address helper APIs.
 - Added/updated network API docs for host-based connect/bind/send and address utility coverage.
+- Added high-level HTTP/2 client runtime support in `src/client/client.zig`:
+  - HTTP/2 preface + SETTINGS handshake
+  - HPACK HEADERS request encoding from high-level `Request`
+  - DATA frame request body streaming
+  - Response HEADERS/DATA decode into high-level `Response`
+  - SETTINGS ACK, PING ACK, and CONTINUATION handling
+- Added high-level HTTP/3 client runtime support in `src/client/client.zig`:
+  - UDP transport execution path for HTTP/3 requests
+  - QUIC long/short header packet exchange with STREAM frame transport
+  - HTTP/3 control/request stream framing with SETTINGS, HEADERS, and DATA handling
+  - QPACK request header encoding and response header decoding into high-level `Response`
+- Added high-level HTTP/2 server runtime support in `src/server/server.zig`:
+  - HTTP/2 request handling path with SETTINGS/HEADERS/DATA/ACK processing
+  - Route execution + response serialization through HTTP/2 HEADERS/DATA frames
+  - Shared high-level route/middleware execution across HTTP/1.x and HTTP/2 paths
+- Added high-level HTTP/3 server runtime support in `src/server/server.zig`:
+  - UDP listener and request handling path for HTTP/3 transactions
+  - QUIC STREAM packet decoding with HTTP/3 control/request stream handling
+  - QPACK header decode/encode integration for high-level route responses
+- Added HTTP/2/HTTP/3 client protocol configuration fields in `ClientConfig`:
+  - `http2_settings`
+  - `http3_settings`
+- Added HTTP/2/HTTP/3 server protocol configuration fields in `ServerConfig`:
+  - `http2_enabled`
+  - `http3_enabled`
+  - `http2_settings`
+  - `http3_settings`
+- Added HTTP/2 runtime integration tests with an in-memory frame transport.
+- Added HTTP/3 runtime integration tests with in-memory datagram transport.
+- Added new runnable `examples/http2_client_runtime.zig` demonstrating end-to-end high-level HTTP/2 client execution against a local loopback server.
+- Added new runnable `examples/http3_client_runtime.zig` demonstrating end-to-end high-level HTTP/3 client execution against a local UDP loopback server.
+- Added new runnable `examples/http2_server_runtime.zig` demonstrating end-to-end high-level HTTP/2 server runtime behavior against a local client.
+- Added new runnable `examples/http3_server_runtime.zig` demonstrating end-to-end high-level HTTP/3 server runtime behavior over local UDP.
 
 ### Changed
 
@@ -39,6 +72,11 @@ All notable changes to this project are documented in this file.
 - Updated README/docs/install references and docs metadata to `0.0.7`.
 - Updated benchmarks to use top-level varint alias (`httpx.encodeVarInt`).
 - Updated CORS middleware factory to use `comptime` config capture for nested-handler compile compatibility.
+- Updated README and docs protocol support descriptions to reflect:
+  - high-level HTTP/2 client and server runtime support
+  - high-level HTTP/3 client and server runtime support over UDP + QUIC/HTTP3/QPACK primitives
+- Updated docs examples index/sidebar and added dedicated pages for HTTP/2 and HTTP/3 server runtime examples.
+- Updated validation/support wording to the explicitly validated Linux/Windows/macOS 32-bit and 64-bit build matrix.
 
 ### Fixed
 
@@ -46,9 +84,12 @@ All notable changes to this project are documented in this file.
 - Fixed UDP local example address output formatting for Zig 0.15 by using explicit `{f}` formatter.
 - Implemented missing client alias methods `Client.del(...)` and `Client.opts(...)` to match documented API coverage.
 - Fixed x86-windows cross-target link failure by using target-safe UDP/TCP receive paths in `src/net/socket.zig`.
+- Fixed `Socket.reader()`/`Socket.writer()` adapter casting for alignment-safe `anyopaque` conversion on Zig 0.15.
+- Fixed `Socket.reader()` adapter error handling by removing a non-existent `error.WouldBlock` branch.
 - Fixed client retry behavior to fail fast on TLS/protocol parse errors (instead of retrying deterministic failures), resolving [Issue #11](https://github.com/muhammad-fiaz/httpx.zig/issues/11) where requests could appear hung.
 - Fixed Zig 0.15.2 TLS PEM parsing compatibility by using allocator-aware `ArrayList` APIs.
 - Fixed HTTP response parser test fixture by including explicit `Content-Length` in the test response.
+- Fixed cross-target BSD-family compile compatibility for TCP_NODELAY socket options by adding a portable fallback when `std.posix.TCP.NODELAY` is unavailable.
 
 ## [0.0.6] - 2026-03-24
 

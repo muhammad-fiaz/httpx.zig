@@ -271,7 +271,7 @@ pub const ShortHeader = struct {
     pub fn decode(data: []const u8, dcid_len: u8) !struct { header: ShortHeader, len: usize } {
         if (data.len < 1 + dcid_len) return error.UnexpectedEof;
 
-        var header = ShortHeader{};
+        var header = ShortHeader{ .dcid = .{} };
         var offset: usize = 0;
 
         // First byte
