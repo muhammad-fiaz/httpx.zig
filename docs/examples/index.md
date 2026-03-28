@@ -9,6 +9,13 @@ This section contains practical `httpx.zig` demo programs for client, server, mi
 3. Run the matching command from the `Run` section.
 4. Verify behavior with the checklist.
 
+For non-host targets, compile (without running) by adding `-Dtarget=...`:
+
+```bash
+zig build example-tcp_local -Dtarget=x86_64-linux
+zig build example-http3_example -Dtarget=aarch64-macos
+```
+
 ## Available Examples
 
 - [Simple Get](/examples/simple-get): Basic GET request and response handling.
@@ -28,4 +35,5 @@ This section contains practical `httpx.zig` demo programs for client, server, mi
 - [Multi Page Website](/examples/multi-page-website): Serve multiple HTML pages.
 - [HTTP/2 Example](/examples/http2-example): HTTP/2 framing and stream primitives.
 - [HTTP/3 Example](/examples/http3-example): HTTP/3, QPACK, and QUIC primitives.
+- [TCP Local](/examples/tcp-local): Local TCP listener/client round trip.
 - [UDP Local](/examples/udp-local): Local UDP transport demo.

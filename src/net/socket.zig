@@ -13,6 +13,7 @@ const posix = std.posix;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
+const address = @import("address.zig");
 
 const is_windows = builtin.os.tag == .windows;
 
@@ -27,6 +28,21 @@ pub const UdpError = error{
 };
 
 pub const NetInitError = error{InitializationError};
+
+/// Shutdown direction for a connected TCP socket.
+pub const ShutdownMode = enum {
+    recv,
+    send,
+    both,
+};
+
+fn toPosixShutdownHow(mode: ShutdownMode) posix.ShutdownHow {
+    return switch (mode) {
+        .recv => .recv,
+        .send => .send,
+        .both => .both,
+    };
+}
 
 /// Initializes the platform networking subsystem.
 ///
@@ -155,14 +171,36 @@ pub const SocketIoWriter = struct {
         return @fieldParentPtr("writer", w);
     }
 
-    fn drain(w: *Io.Writer, bufs: []const []const u8, start_index: usize) Io.Writer.Error!usize {
+    fn drain(w: *Io.Writer, bufs: []const []const u8, splat: usize) Io.Writer.Error!usize {
         const p = parent(w);
-        var i: usize = start_index;
-        while (i < bufs.len and bufs[i].len == 0) : (i += 1) {}
-        if (i >= bufs.len) return 0;
+        var total_sent: usize = 0;
 
-        const n = p.socket.send(bufs[i]) catch return error.WriteFailed;
-        return n;
+        const buffered = w.buffered();
+        // std.debug.print("drain called: buffered.len={}, bufs.len={}, splat={}\n", .{buffered.len, bufs.len, splat});
+        if (buffered.len > 0) {
+            const num = p.socket.send(buffered) catch return error.WriteFailed;
+            total_sent += num;
+            if (num < buffered.len) return w.consume(total_sent);
+        }
+
+        const data_bufs = bufs[0 .. bufs.len - 1];
+        for (data_bufs) |bytes| {
+            if (bytes.len == 0) continue;
+            const num = p.socket.send(bytes) catch return error.WriteFailed;
+            total_sent += num;
+            if (num < bytes.len) return w.consume(total_sent);
+        }
+
+        const pattern = bufs[bufs.len - 1];
+        if (pattern.len > 0 and splat > 0) {
+            var i: usize = 0;
+            while (i < splat) : (i += 1) {
+                const num = p.socket.send(pattern) catch return error.WriteFailed;
+                total_sent += num;
+                if (num < pattern.len) return w.consume(total_sent);
+            }
+        }
+        return w.consume(total_sent);
     }
 
     fn sendFile(w: *Io.Writer, file_reader: *std.fs.File.Reader, limit: Io.Limit) Io.Writer.FileAllError!usize {
@@ -185,8 +223,8 @@ pub const SocketIoWriter = struct {
         return total;
     }
 
-    fn flush(_: *Io.Writer) Io.Writer.Error!void {
-        // No-op for blocking sockets.
+    fn flush(w: *Io.Writer) Io.Writer.Error!void {
+        return std.Io.Writer.defaultFlush(w);
     }
 
     fn rebase(_: *Io.Writer, _: usize, _: usize) Io.Writer.Error!void {
@@ -214,8 +252,20 @@ pub const Socket = struct {
 
     /// Creates a new TCP socket.
     pub fn create() !Self {
+        return createV4();
+    }
+
+    /// Creates a new IPv4 TCP socket.
+    pub fn createV4() !Self {
         try init();
         const handle = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+        return .{ .handle = handle };
+    }
+
+    /// Creates a new IPv6 TCP socket.
+    pub fn createV6() !Self {
+        try init();
+        const handle = try posix.socket(posix.AF.INET6, posix.SOCK.STREAM, 0);
         return .{ .handle = handle };
     }
 
@@ -251,9 +301,26 @@ pub const Socket = struct {
         self.connected = true;
     }
 
+    /// Resolves and connects to `host:port`.
+    pub fn connectHost(self: *Self, host: []const u8, port: u16) !void {
+        const addr = try address.resolve(host, port);
+        try self.connect(addr);
+    }
+
+    /// Parses and connects an endpoint like `host:port`.
+    pub fn connectEndpoint(self: *Self, endpoint: []const u8, default_port: u16) !void {
+        const parsed = try address.parseHostPort(endpoint, default_port);
+        try self.connectHost(parsed.host, parsed.port);
+    }
+
     /// Sends data through the socket, returning bytes sent.
     pub fn send(self: *Self, data: []const u8) !usize {
         return posix.send(self.handle, data, 0);
+    }
+
+    /// Compatibility alias for stream-style write APIs.
+    pub fn write(self: *Self, data: []const u8) !usize {
+        return self.send(data);
     }
 
     /// Sends all data, blocking until complete.
@@ -264,9 +331,31 @@ pub const Socket = struct {
         }
     }
 
+    /// Compatibility alias for stream-style write-all APIs.
+    pub fn writeAll(self: *Self, data: []const u8) !void {
+        return self.sendAll(data);
+    }
+
     /// Receives data into the buffer, returning bytes received.
     pub fn recv(self: *Self, buffer: []u8) !usize {
+        if (is_windows) {
+            const ws2_32 = std.os.windows.ws2_32;
+            const rc = ws2_32.recv(
+                self.handle,
+                @ptrCast(buffer.ptr),
+                @intCast(buffer.len),
+                0,
+            );
+            if (rc == ws2_32.SOCKET_ERROR) return error.RecvFailed;
+            return @intCast(rc);
+        }
+
         return posix.recv(self.handle, buffer, 0);
+    }
+
+    /// Compatibility alias for stream-style read APIs.
+    pub fn read(self: *Self, buffer: []u8) !usize {
+        return self.recv(buffer);
     }
 
     /// Sets a socket option.
@@ -294,6 +383,12 @@ pub const Socket = struct {
         }
     }
 
+    /// Sets the receive buffer size in bytes.
+    pub fn setRecvBufferSize(self: *Self, bytes: usize) !void {
+        const value: i32 = @intCast(@min(bytes, @as(usize, std.math.maxInt(i32))));
+        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVBUF, std.mem.asBytes(&value));
+    }
+
     /// Sets the send timeout in milliseconds.
     pub fn setSendTimeout(self: *Self, ms: u64) !void {
         if (is_windows) {
@@ -306,6 +401,12 @@ pub const Socket = struct {
             };
             try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv));
         }
+    }
+
+    /// Sets the send buffer size in bytes.
+    pub fn setSendBufferSize(self: *Self, bytes: usize) !void {
+        const value: i32 = @intCast(@min(bytes, @as(usize, std.math.maxInt(i32))));
+        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&value));
     }
 
     /// Enables or disables keep-alive probes.
@@ -323,6 +424,12 @@ pub const Socket = struct {
     /// Binds the socket to an address.
     pub fn bind(self: *Self, addr: net.Address) !void {
         try posix.bind(self.handle, &addr.any, addr.getOsSockLen());
+    }
+
+    /// Resolves and binds to `host:port`.
+    pub fn bindHost(self: *Self, host: []const u8, port: u16) !void {
+        const addr = try address.resolve(host, port);
+        try self.bind(addr);
     }
 
     /// Starts listening for connections.
@@ -343,6 +450,42 @@ pub const Socket = struct {
             .socket = Socket.fromHandle(handle),
             .addr = net.Address{ .any = addr },
         };
+    }
+
+    /// Shuts down one or both halves of the connection.
+    pub fn shutdown(self: *Self, mode: ShutdownMode) !void {
+        try posix.shutdown(self.handle, toPosixShutdownHow(mode));
+    }
+
+    /// Shuts down the receive direction.
+    pub fn shutdownRead(self: *Self) !void {
+        try self.shutdown(.recv);
+    }
+
+    /// Shuts down the send direction.
+    pub fn shutdownWrite(self: *Self) !void {
+        try self.shutdown(.send);
+    }
+
+    /// Shuts down both directions.
+    pub fn shutdownBoth(self: *Self) !void {
+        try self.shutdown(.both);
+    }
+
+    /// Returns the local address the socket is bound to.
+    pub fn getLocalAddress(self: *Self) !net.Address {
+        var addr: posix.sockaddr = undefined;
+        var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
+        try posix.getsockname(self.handle, &addr, &addr_len);
+        return net.Address{ .any = addr };
+    }
+
+    /// Returns the connected peer address.
+    pub fn getPeerAddress(self: *Self) !net.Address {
+        var addr: posix.sockaddr = undefined;
+        var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
+        try posix.getpeername(self.handle, &addr, &addr_len);
+        return net.Address{ .any = addr };
     }
 
     /// Returns a reader interface for the socket.
@@ -386,6 +529,12 @@ pub const TcpListener = struct {
         return initWithBacklog(addr, 128);
     }
 
+    /// Resolves and creates a TCP listener for `host:port`.
+    pub fn initHost(host: []const u8, port: u16) !Self {
+        const addr = try address.resolve(host, port);
+        return Self.init(addr);
+    }
+
     /// Creates and binds a TCP listener to the address with explicit backlog.
     pub fn initWithBacklog(addr: net.Address, backlog: u31) !Self {
         var socket = try Socket.createForAddress(addr);
@@ -396,6 +545,12 @@ pub const TcpListener = struct {
         try socket.listen(backlog);
 
         return .{ .socket = socket };
+    }
+
+    /// Resolves and creates a TCP listener for `host:port` with explicit backlog.
+    pub fn initHostWithBacklog(host: []const u8, port: u16, backlog: u31) !Self {
+        const addr = try address.resolve(host, port);
+        return initWithBacklog(addr, backlog);
     }
 
     /// Closes the listener.
@@ -446,6 +601,13 @@ pub const UdpSocket = struct {
         return .{ .handle = handle };
     }
 
+    /// Creates a UDP socket using the address family of the provided address.
+    pub fn createForAddress(addr: net.Address) !Self {
+        try init();
+        const handle = try posix.socket(addr.any.family, posix.SOCK.DGRAM, 0);
+        return .{ .handle = handle };
+    }
+
     /// Closes the socket and releases resources.
     pub fn close(self: *Self) void {
         if (self.isValid()) {
@@ -465,6 +627,12 @@ pub const UdpSocket = struct {
         try posix.bind(self.handle, &addr.any, addr.getOsSockLen());
     }
 
+    /// Resolves and binds to `host:port`.
+    pub fn bindHost(self: *Self, host: []const u8, port: u16) !void {
+        const addr = try address.resolve(host, port);
+        try self.bind(addr);
+    }
+
     /// Connects the UDP socket to a default peer address.
     /// After calling this, `send`/`recv` operate on that peer.
     pub fn connect(self: *Self, addr: net.Address) !void {
@@ -472,9 +640,26 @@ pub const UdpSocket = struct {
         self.connected = true;
     }
 
+    /// Resolves and connects to `host:port`.
+    pub fn connectHost(self: *Self, host: []const u8, port: u16) !void {
+        const addr = try address.resolve(host, port);
+        try self.connect(addr);
+    }
+
+    /// Parses and connects an endpoint like `host:port`.
+    pub fn connectEndpoint(self: *Self, endpoint: []const u8, default_port: u16) !void {
+        const parsed = try address.parseHostPort(endpoint, default_port);
+        try self.connectHost(parsed.host, parsed.port);
+    }
+
     /// Sends a datagram to the connected peer.
     pub fn send(self: *Self, data: []const u8) !usize {
         return posix.send(self.handle, data, 0);
+    }
+
+    /// Compatibility alias for stream-style write APIs.
+    pub fn write(self: *Self, data: []const u8) !usize {
+        return self.send(data);
     }
 
     /// Sends a datagram to a specific address.
@@ -496,15 +681,38 @@ pub const UdpSocket = struct {
         return posix.sendto(self.handle, data, 0, &addr.any, addr.getOsSockLen());
     }
 
+    /// Resolves destination host and sends a datagram.
+    pub fn sendToHost(self: *Self, host: []const u8, port: u16, data: []const u8) !usize {
+        const addr = try address.resolve(host, port);
+        return self.sendTo(addr, data);
+    }
+
     /// Receives a datagram from the connected peer.
     pub fn recv(self: *Self, buffer: []u8) !usize {
+        if (is_windows) {
+            const ws2_32 = std.os.windows.ws2_32;
+            const rc = ws2_32.recv(
+                self.handle,
+                @ptrCast(buffer.ptr),
+                @intCast(buffer.len),
+                0,
+            );
+            if (rc == ws2_32.SOCKET_ERROR) return UdpError.RecvFailed;
+            return @intCast(rc);
+        }
+
         return posix.recv(self.handle, buffer, 0);
+    }
+
+    /// Compatibility alias for stream-style read APIs.
+    pub fn read(self: *Self, buffer: []u8) !usize {
+        return self.recv(buffer);
     }
 
     /// Receives a datagram and returns the source address.
     pub fn recvFrom(self: *Self, buffer: []u8) !struct { n: usize, addr: net.Address } {
         var addr: posix.sockaddr = undefined;
-        if (is_windows) {
+        if (comptime builtin.os.tag == .windows) {
             const ws2_32 = std.os.windows.ws2_32;
             var addr_len: i32 = @intCast(@sizeOf(posix.sockaddr));
             const rc = ws2_32.recvfrom(
@@ -530,6 +738,12 @@ pub const UdpSocket = struct {
         try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&value));
     }
 
+    /// Enables or disables UDP broadcast.
+    pub fn setBroadcast(self: *Self, enable: bool) !void {
+        const value: u32 = if (enable) 1 else 0;
+        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.BROADCAST, std.mem.asBytes(&value));
+    }
+
     /// Sets the receive timeout in milliseconds.
     pub fn setRecvTimeout(self: *Self, ms: u64) !void {
         if (is_windows) {
@@ -542,6 +756,12 @@ pub const UdpSocket = struct {
             };
             try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
         }
+    }
+
+    /// Sets the receive buffer size in bytes.
+    pub fn setRecvBufferSize(self: *Self, bytes: usize) !void {
+        const value: i32 = @intCast(@min(bytes, @as(usize, std.math.maxInt(i32))));
+        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVBUF, std.mem.asBytes(&value));
     }
 
     /// Sets the send timeout in milliseconds.
@@ -558,11 +778,25 @@ pub const UdpSocket = struct {
         }
     }
 
+    /// Sets the send buffer size in bytes.
+    pub fn setSendBufferSize(self: *Self, bytes: usize) !void {
+        const value: i32 = @intCast(@min(bytes, @as(usize, std.math.maxInt(i32))));
+        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&value));
+    }
+
     /// Returns the local address the socket is bound to.
     pub fn getLocalAddress(self: *Self) !net.Address {
         var addr: posix.sockaddr = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
         try posix.getsockname(self.handle, &addr, &addr_len);
+        return net.Address{ .any = addr };
+    }
+
+    /// Returns the connected peer address.
+    pub fn getPeerAddress(self: *Self) !net.Address {
+        var addr: posix.sockaddr = undefined;
+        var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
+        try posix.getpeername(self.handle, &addr, &addr_len);
         return net.Address{ .any = addr };
     }
 };
@@ -608,4 +842,105 @@ test "UdpSocket send/recv localhost" {
     var buf: [32]u8 = undefined;
     const got = try recv_sock.recvFrom(&buf);
     try std.testing.expectEqualStrings(msg, buf[0..got.n]);
+}
+
+test "Socket read/writeAll compatibility aliases" {
+    const ThreadCtx = struct {
+        listener: *TcpListener,
+    };
+
+    const server = struct {
+        fn run(ctx: *ThreadCtx) void {
+            var accepted = ctx.listener.accept() catch return;
+            defer accepted.socket.close();
+
+            var in_buf: [16]u8 = undefined;
+            const n = accepted.socket.read(&in_buf) catch return;
+            if (std.mem.eql(u8, in_buf[0..n], "ping")) {
+                accepted.socket.writeAll("pong") catch return;
+            }
+        }
+    }.run;
+
+    var listener = try TcpListener.init(try net.Address.parseIp("127.0.0.1", 0));
+    defer listener.deinit();
+
+    const addr = try listener.getLocalAddress();
+    var ctx = ThreadCtx{ .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, server, .{&ctx});
+    defer thread.join();
+
+    var client = try Socket.createForAddress(addr);
+    defer client.close();
+
+    try client.connect(addr);
+    try client.writeAll("ping");
+
+    var out_buf: [16]u8 = undefined;
+    const n = try client.read(&out_buf);
+    try std.testing.expectEqualStrings("pong", out_buf[0..n]);
+}
+
+test "Socket helper API compile checks" {
+    const create_v4_ptr: *const fn () anyerror!Socket = Socket.createV4;
+    const create_v6_ptr: *const fn () anyerror!Socket = Socket.createV6;
+    const connect_host_ptr: *const fn (*Socket, []const u8, u16) anyerror!void = Socket.connectHost;
+    const connect_endpoint_ptr: *const fn (*Socket, []const u8, u16) anyerror!void = Socket.connectEndpoint;
+    const bind_host_ptr: *const fn (*Socket, []const u8, u16) anyerror!void = Socket.bindHost;
+    const shutdown_ptr: *const fn (*Socket, ShutdownMode) anyerror!void = Socket.shutdown;
+    const shutdown_read_ptr: *const fn (*Socket) anyerror!void = Socket.shutdownRead;
+    const shutdown_write_ptr: *const fn (*Socket) anyerror!void = Socket.shutdownWrite;
+    const shutdown_both_ptr: *const fn (*Socket) anyerror!void = Socket.shutdownBoth;
+    const local_addr_ptr: *const fn (*Socket) anyerror!net.Address = Socket.getLocalAddress;
+    const peer_addr_ptr: *const fn (*Socket) anyerror!net.Address = Socket.getPeerAddress;
+    const recv_buf_ptr: *const fn (*Socket, usize) anyerror!void = Socket.setRecvBufferSize;
+    const send_buf_ptr: *const fn (*Socket, usize) anyerror!void = Socket.setSendBufferSize;
+
+    _ = create_v4_ptr;
+    _ = create_v6_ptr;
+    _ = connect_host_ptr;
+    _ = connect_endpoint_ptr;
+    _ = bind_host_ptr;
+    _ = shutdown_ptr;
+    _ = shutdown_read_ptr;
+    _ = shutdown_write_ptr;
+    _ = shutdown_both_ptr;
+    _ = local_addr_ptr;
+    _ = peer_addr_ptr;
+    _ = recv_buf_ptr;
+    _ = send_buf_ptr;
+}
+
+test "TcpListener host helper compile checks" {
+    const init_host_ptr: *const fn ([]const u8, u16) anyerror!TcpListener = TcpListener.initHost;
+    const init_host_backlog_ptr: *const fn ([]const u8, u16, u31) anyerror!TcpListener = TcpListener.initHostWithBacklog;
+
+    _ = init_host_ptr;
+    _ = init_host_backlog_ptr;
+}
+
+test "UdpSocket helper API compile checks" {
+    const create_for_addr_ptr: *const fn (net.Address) anyerror!UdpSocket = UdpSocket.createForAddress;
+    const bind_host_ptr: *const fn (*UdpSocket, []const u8, u16) anyerror!void = UdpSocket.bindHost;
+    const connect_host_ptr: *const fn (*UdpSocket, []const u8, u16) anyerror!void = UdpSocket.connectHost;
+    const connect_endpoint_ptr: *const fn (*UdpSocket, []const u8, u16) anyerror!void = UdpSocket.connectEndpoint;
+    const write_ptr: *const fn (*UdpSocket, []const u8) anyerror!usize = UdpSocket.write;
+    const read_ptr: *const fn (*UdpSocket, []u8) anyerror!usize = UdpSocket.read;
+    const send_to_host_ptr: *const fn (*UdpSocket, []const u8, u16, []const u8) anyerror!usize = UdpSocket.sendToHost;
+    const peer_addr_ptr: *const fn (*UdpSocket) anyerror!net.Address = UdpSocket.getPeerAddress;
+    const broadcast_ptr: *const fn (*UdpSocket, bool) anyerror!void = UdpSocket.setBroadcast;
+    const recv_buf_ptr: *const fn (*UdpSocket, usize) anyerror!void = UdpSocket.setRecvBufferSize;
+    const send_buf_ptr: *const fn (*UdpSocket, usize) anyerror!void = UdpSocket.setSendBufferSize;
+
+    _ = create_for_addr_ptr;
+    _ = bind_host_ptr;
+    _ = connect_host_ptr;
+    _ = connect_endpoint_ptr;
+    _ = write_ptr;
+    _ = read_ptr;
+    _ = send_to_host_ptr;
+    _ = peer_addr_ptr;
+    _ = broadcast_ptr;
+    _ = recv_buf_ptr;
+    _ = send_buf_ptr;
 }

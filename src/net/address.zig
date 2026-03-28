@@ -31,6 +31,38 @@ pub fn resolve(hostname: []const u8, port: u16) !net.Address {
     return list.addrs[0];
 }
 
+/// Resolves a hostname to all candidate addresses. Caller must free the returned slice.
+pub fn resolveAll(allocator: Allocator, hostname: []const u8, port: u16) ![]net.Address {
+    if (parseIp4(hostname)) |ip4| {
+        var addrs = try allocator.alloc(net.Address, 1);
+        addrs[0] = net.Address.initIp4(ip4, port);
+        return addrs;
+    }
+
+    if (parseIp6(hostname)) |ip6| {
+        var addrs = try allocator.alloc(net.Address, 1);
+        addrs[0] = net.Address.initIp6(ip6, port, 0, 0);
+        return addrs;
+    }
+
+    const list = try net.getAddressList(allocator, hostname, port);
+    defer list.deinit();
+
+    if (list.addrs.len == 0) {
+        return error.DnsResolutionFailed;
+    }
+
+    const addrs = try allocator.alloc(net.Address, list.addrs.len);
+    @memcpy(addrs, list.addrs);
+    return addrs;
+}
+
+/// Parses "host:port" and resolves to a concrete address.
+pub fn parseAndResolve(host_port: []const u8, default_port: u16) !net.Address {
+    const parsed = try parseHostPort(host_port, default_port);
+    return try resolve(parsed.host, parsed.port);
+}
+
 /// Parses an IPv4 address string (e.g., "192.168.1.1").
 fn parseIp4(str: []const u8) ?[4]u8 {
     var result: [4]u8 = undefined;

@@ -17,9 +17,16 @@ Common utilities for buffer management and encoding.
 Root-level aliases are also available:
 
 - `httpx.queryValue(...)`
+- `httpx.parseQueryValue(...)`
 - `httpx.parseSetCookiePair(...)`
+- `httpx.parseCookiePair(...)`
 - `httpx.CookieOptions`
 - `httpx.SameSite`
+
+Protocol utility aliases are also available at root-level:
+
+- `httpx.encodeVarInt(...)`
+- `httpx.decodeVarInt(...)`
 
 Compatibility note:
 

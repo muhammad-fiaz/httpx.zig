@@ -48,7 +48,7 @@ zig build -Dtarget=aarch64-macos
 Use the latest tagged release for reproducible builds:
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.6.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz
 ```
 
 ## Method 2: Zig Fetch (Nightly/Main)
@@ -69,7 +69,7 @@ You can also add the dependency manually:
     .version = "0.1.0",
     .dependencies = .{
         .httpx = .{
-            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.6.tar.gz",
+            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz",
             .hash = "...", // Run zig fetch --save <url> to auto-fill this.
         },
     },
@@ -125,9 +125,6 @@ pub fn build(b: *std.Build) void {
 }
 ```
 
-If your Zig template generated `.optimization = optimize` for dependency args, that also works.
-`httpx.zig` accepts both `.optimize` and `.optimization` for Zig 0.15.x compatibility.
-
 ## Import in your code
 
 ```zig
@@ -145,3 +142,50 @@ pub fn main() !void {
     _ = try client.get("https://httpbin.org/get", .{});
 }
 ```
+
+## Validation and Target Matrix
+
+Run these commands from the repository root to verify functionality:
+
+```bash
+# Host tests and runnable examples
+zig build test
+zig build run-all-examples
+
+# Cross-target library compile matrix
+zig build build-all-targets
+```
+
+To validate Linux runtime behavior (not only cross-compilation), build Linux-target artifacts and execute them on Linux/WSL:
+
+```bash
+# Build Linux artifacts
+zig build test -Dtarget=x86_64-linux
+zig build example-udp_local -Dtarget=x86_64-linux
+
+# Run on Linux/WSL
+./zig-out/bin/test
+./zig-out/bin/udp_local
+```
+
+To compile tests or examples for a specific target:
+
+```bash
+# Cross-target test artifact build
+zig build test -Dtarget=x86-windows
+
+# Cross-target example build
+zig build example-udp_local -Dtarget=aarch64-macos
+```
+
+For client requests against external endpoints, prefer explicit timeout and error handling:
+
+```zig
+var res = client.get("https://example.com", .{ .timeout_ms = 10_000 }) catch |err| {
+    std.debug.print("request failed: {s}\n", .{@errorName(err)});
+    return;
+};
+defer res.deinit();
+```
+
+`httpx.zig` uses `build-all-targets` as the all-targets validation step.

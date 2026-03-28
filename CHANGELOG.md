@@ -4,11 +4,57 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.0.7] - 28/03/2026
+
+### Added
+
+- Expanded explicit network API support in `src/net/socket.zig`:
+  - TCP socket helpers: `createV4/createV6`, `connectHost`, `connectEndpoint`, `bindHost`, `shutdown`, `shutdownRead`, `shutdownWrite`, `shutdownBoth`, `getLocalAddress`, `getPeerAddress`, `setRecvBufferSize`, `setSendBufferSize`
+  - UDP socket helpers: `createForAddress`, `bindHost`, `connectHost`, `connectEndpoint`, `write`, `read`, `sendToHost`, `setBroadcast`, `setRecvBufferSize`, `setSendBufferSize`, `getPeerAddress`
+  - TCP listener host helpers: `initHost`, `initHostWithBacklog`
+- Added explicit network API compile-check coverage in `src/net/socket.zig` tests.
+- Added API overview page at `docs/api/index.md` to map root exports and convenience aliases.
+- Expanded API alias coverage for client and top-level helpers:
+  - Client aliases: `del(...)`, `opts(...)`
+  - Top-level aliases: `delete(...)`, `opts(...)`, `first(...)`, `fastest(...)`, `settled(...)`
+  - Utility aliases: `parseQueryValue`, `parseCookiePair`, `encodeVarInt`, `decodeVarInt`
+- Added alias compile-check tests in `src/httpx.zig` and `src/client/client.zig`.
+- Expanded network-layer APIs:
+  - TCP socket helpers: `createV4/createV6`, `connectHost`, `connectEndpoint`, `bindHost`, `getLocalAddress`, `getPeerAddress`
+  - TCP listener host helpers: `initHost`, `initHostWithBacklog`
+  - UDP socket helpers: `createForAddress`, `bindHost`, `connectHost`, `connectEndpoint`, `sendToHost`, `getPeerAddress`
+  - Address utilities: `resolveAll`, `parseAndResolve`
+  - Root network aliases: `netInit`, `netDeinit`, `resolveAllAddresses`, `parseAndResolveAddress`, `isIpAddress`, `isIp4Address`, `isIp6Address`
+- Added/expanded networking tests for new TCP/UDP/address helper APIs.
+- Added/updated network API docs for host-based connect/bind/send and address utility coverage.
+
+### Changed
+
+- Updated VitePress navigation and sidebar to surface API overview and changelog links.
+- Updated README with explicit network and concurrency helper usage examples.
+- Expanded API docs for network/server/concurrency parity and refreshed examples/docs build outputs.
+- Added explicit validation matrix documentation for host checks and cross-target compile workflows.
+- Bumped project version to `0.0.7`.
+- Updated default User-Agent version to `httpx.zig/0.0.7`.
+- Updated README/docs/install references and docs metadata to `0.0.7`.
+- Updated benchmarks to use top-level varint alias (`httpx.encodeVarInt`).
+- Updated CORS middleware factory to use `comptime` config capture for nested-handler compile compatibility.
+
+### Fixed
+
+- Fixed `zig build run-all-examples` failure in `examples/tcp_local.zig` by restoring stream-style compatibility methods (`read`, `writeAll`) on `httpx.Socket`.
+- Fixed UDP local example address output formatting for Zig 0.15 by using explicit `{f}` formatter.
+- Implemented missing client alias methods `Client.del(...)` and `Client.opts(...)` to match documented API coverage.
+- Fixed x86-windows cross-target link failure by using target-safe UDP/TCP receive paths in `src/net/socket.zig`.
+- Fixed client retry behavior to fail fast on TLS/protocol parse errors (instead of retrying deterministic failures), resolving [Issue #11](https://github.com/muhammad-fiaz/httpx.zig/issues/11) where requests could appear hung.
+- Fixed Zig 0.15.2 TLS PEM parsing compatibility by using allocator-aware `ArrayList` APIs.
+- Fixed HTTP response parser test fixture by including explicit `Content-Length` in the test response.
+
 ## [0.0.6] - 2026-03-24
 
 ### Fixed
 
-- Fixed Zig 0.15.2 dependency integration compatibility by accepting both `-Doptimize` and `-Doptimization` build options in `build.zig`.
+- Fixed Zig 0.15.2 dependency integration guidance to consistently use the standard `-Doptimize` build option in `build.zig` examples and docs.
   - This resolves [Issue #11](https://github.com/muhammad-fiaz/httpx.zig/issues/11).
 
 ### Changed

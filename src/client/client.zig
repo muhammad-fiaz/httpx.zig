@@ -209,7 +209,7 @@ pub const Client = struct {
         var attempt: u32 = 0;
         while (true) {
             var res = self.executeRequestOnce(req, timeout_override_ms) catch |err| {
-                if (policy.retry_on_connection_error and can_retry_method and attempt < policy.max_retries) {
+                if (policy.retry_on_connection_error and can_retry_method and attempt < policy.max_retries and isRetryableRequestError(err)) {
                     attempt += 1;
                     const delay_ms = policy.calculateDelay(attempt);
                     if (delay_ms > 0) std.Thread.sleep(delay_ms * std.time.ns_per_ms);
@@ -228,6 +228,27 @@ pub const Client = struct {
 
             return res;
         }
+    }
+
+    /// Returns true for transport-layer failures that are worth retrying.
+    /// TLS/protocol/parse failures are treated as deterministic and fail fast.
+    fn isRetryableRequestError(err: anyerror) bool {
+        const name = @errorName(err);
+
+        if (mem.startsWith(u8, name, "Tls")) return false;
+
+        return !(mem.eql(u8, name, "InvalidUri") or
+            mem.eql(u8, name, "InvalidResponse") or
+            mem.eql(u8, name, "InvalidHeader") or
+            mem.eql(u8, name, "InvalidChunkSize") or
+            mem.eql(u8, name, "ProtocolError") or
+            mem.eql(u8, name, "Http2Error") or
+            mem.eql(u8, name, "Http3Error") or
+            mem.eql(u8, name, "QuicError") or
+            mem.eql(u8, name, "CompressionError") or
+            mem.eql(u8, name, "ResponseTooLarge") or
+            mem.eql(u8, name, "RequestTooLarge") or
+            mem.eql(u8, name, "TooManyRedirects"));
     }
 
     fn executeRequestOnce(self: *Self, req: *Request, timeout_override_ms: ?u64) !Response {
@@ -496,6 +517,11 @@ pub const Client = struct {
         return self.request(.DELETE, url, reqOpts);
     }
 
+    /// Alias for delete() with short method naming.
+    pub fn del(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
+        return self.delete(url, reqOpts);
+    }
+
     /// PATCH request convenience method.
     pub fn patch(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
         return self.request(.PATCH, url, reqOpts);
@@ -514,6 +540,11 @@ pub const Client = struct {
     /// Alias for httpOptions() with conventional method naming.
     pub fn options(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
         return self.httpOptions(url, reqOpts);
+    }
+
+    /// Alias for options() with short method naming.
+    pub fn opts(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
+        return self.options(url, reqOpts);
     }
 };
 
@@ -563,13 +594,19 @@ test "Client with config" {
 
 test "Response parsing" {
     const allocator = std.testing.allocator;
-    const data = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"ok\"}";
+    const data =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Content-Type: application/json\r\n" ++
+        "Content-Length: 15\r\n" ++
+        "\r\n" ++
+        "{\"status\":\"ok\"}";
 
     var response = try parseResponse(allocator, data);
     defer response.deinit();
 
     try std.testing.expectEqual(@as(u16, 200), response.status.code);
     try std.testing.expectEqualStrings("application/json", response.headers.get("Content-Type").?);
+    try std.testing.expectEqualStrings("{\"status\":\"ok\"}", response.text() orelse "");
 }
 
 test "Client stores Set-Cookie headers" {
@@ -633,10 +670,14 @@ test "Client send/fetch/options aliases" {
     // Compile-time alias checks through function pointer assignment.
     const send_ptr: *const fn (*Client, types.Method, []const u8, RequestOptions) anyerror!Response = Client.send;
     const fetch_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.fetch;
+    const del_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.del;
     const options_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.options;
+    const opts_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.opts;
     _ = send_ptr;
     _ = fetch_ptr;
+    _ = del_ptr;
     _ = options_ptr;
+    _ = opts_ptr;
 }
 
 test "Client hasCookie and cookieCount" {
@@ -650,4 +691,11 @@ test "Client hasCookie and cookieCount" {
     try client.setCookie("session", "abc123");
     try std.testing.expectEqual(@as(usize, 1), client.cookieCount());
     try std.testing.expect(client.hasCookie("session"));
+}
+
+test "Client retry classifier avoids TLS/protocol retries" {
+    try std.testing.expect(!Client.isRetryableRequestError(error.TlsConnectionTruncated));
+    try std.testing.expect(!Client.isRetryableRequestError(error.InvalidResponse));
+    try std.testing.expect(!Client.isRetryableRequestError(error.ProtocolError));
+    try std.testing.expect(Client.isRetryableRequestError(error.ConnectionReset));
 }

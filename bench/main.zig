@@ -140,7 +140,7 @@ fn benchHttp2FrameHeader() void {
 
 fn benchVarIntEncoding() void {
     var buf: [8]u8 = undefined;
-    _ = httpx.http.encodeVarInt(494878333, &buf) catch 0;
+    _ = httpx.encodeVarInt(494878333, &buf) catch 0;
 }
 
 pub fn main() !void {

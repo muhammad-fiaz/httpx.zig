@@ -18,6 +18,7 @@
     - JSON helpers.
 - **Concurrency**: Built-in thread pool and async primitives (`all`, `any`, `race`).
 - **Security**: TLS/SSL support (via `std.crypto` or system libraries) with custom CA handling.
+- **Explicit Root Helpers**: Top-level aliases for requests (`fetch/send/...`), concurrency (`first/fastest/settled`), and networking (`resolveAddress`, `parseAndResolveAddress`, `netInit/netDeinit`).
 
 ::: warning Custom HTTP/2 & HTTP/3 Implementation
 Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx.zig implements these protocols entirely from scratch**, including HPACK (RFC 7541), QPACK (RFC 9204), HTTP/2 framing (RFC 7540), and QUIC transport (RFC 9000).
@@ -78,3 +79,4 @@ zig build -Dtarget=x86_64-macos
 - Learn how to make [Basic Requests](/guide/client-basics) with the client.
 - Set up a simple [Server](/guide/routing).
 - Explore [HTTP/2](/guide/http2) and [HTTP/3](/guide/http3) protocol support.
+- Review [API Overview](/api/) for explicit root exports and aliases.

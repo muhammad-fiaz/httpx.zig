@@ -41,7 +41,7 @@ Choose one of these installation methods:
 1. Stable release (recommended)
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.6.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz
 ```
 
 2. Nightly/main branch
@@ -55,7 +55,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.6.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz",
     .hash = "...",
   },
 },
@@ -129,8 +129,43 @@ Available examples (see the `/examples` folder):
 - `multi_page_website.zig`: full multi-page website serving index/about/contact with static assets
 - `http2_example.zig`: HTTP/2 HPACK compression and stream management
 - `http3_example.zig`: HTTP/3 QPACK compression and QUIC framing
+- `tcp_local.zig`: local TCP listener/client round trip
 - `udp_local.zig`: UDP local networking utility
 
 ## Configuration
 
 Client configuration lives on `ClientConfig` (timeouts, redirects, retries, TLS verification, keep-alive/pooling).
+
+For a full explicit export map (root aliases + API groups), see [API Overview](/api/).
+
+## Validation
+
+Use these commands to validate host runtime behavior and cross-target compatibility:
+
+```bash
+zig build test
+zig build run-all-examples
+zig build build-all-targets
+```
+
+To validate Linux runtime behavior (not just compile checks), build Linux artifacts and run them from Linux/WSL:
+
+```bash
+zig build test -Dtarget=x86_64-linux
+zig build example-tcp_local -Dtarget=x86_64-linux
+
+./zig-out/bin/test
+./zig-out/bin/tcp_local
+```
+
+For production client code, prefer explicit timeout + error handling so failures surface immediately:
+
+```zig
+var response = client.get(url, .{ .timeout_ms = 10_000 }) catch |err| {
+  std.debug.print("request failed: {s}\n", .{@errorName(err)});
+  return;
+};
+defer response.deinit();
+```
+
+For detailed target-matrix instructions, see [Installation](/guide/installation#validation-and-target-matrix).

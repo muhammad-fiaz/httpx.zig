@@ -125,6 +125,27 @@ fn listUsers(ctx: *httpx.Context) !httpx.Response {
 }
 ```
 
+## Explicit Server Types
+
+### `SseEvent`
+
+Used by `ctx.sse(events)` for Server-Sent Events responses.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `data` | `[]const u8` | Event payload body (required) |
+| `event` | `?[]const u8` | Optional SSE event name |
+| `id` | `?[]const u8` | Optional event id |
+| `retry_ms` | `?u32` | Optional client reconnect hint |
+
+### `PreRouteHook`
+
+Hook signature used by `server.preRoute(...)`:
+
+```zig
+pub const PreRouteHook = *const fn (*Context) anyerror!void;
+```
+
 ### Route Groups
 
 Organize routes with a common prefix.

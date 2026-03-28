@@ -43,7 +43,7 @@ defer client.deinit();
 | `retry_policy` | `RetryPolicy` | `{}` | Configuration for automatic retries. |
 | `redirect_policy` | `RedirectPolicy` | `{}` | Configuration for handling redirects. |
 | `default_headers` | `?[]const [2][]const u8` | `null` | Headers added to every request. |
-| `user_agent` | `[]const u8` | `"httpx.zig/0.0.6"` | User-Agent header value. |
+| `user_agent` | `[]const u8` | `"httpx.zig/0.0.7"` | User-Agent header value. |
 | `max_response_size` | `usize` | `100MB` | Maximum allowed response body size. |
 | `follow_redirects` | `bool` | `true` | Whether to automatically follow redirects. |
 | `verify_ssl` | `bool` | `true` | Whether to verify SSL certificates. |
@@ -70,6 +70,13 @@ Alias for `request` with shorter naming.
 pub fn send(self: *Self, method: Method, url: []const u8, options: RequestOptions) !Response
 ```
 
+#### Short aliases
+
+```zig
+pub fn del(self: *Self, url: []const u8, options: RequestOptions) !Response
+pub fn opts(self: *Self, url: []const u8, options: RequestOptions) !Response
+```
+
 #### Convenience Methods
 
 | Method | Description |
@@ -79,10 +86,12 @@ pub fn send(self: *Self, method: Method, url: []const u8, options: RequestOption
 | `post(url, options)` | HTTP POST request |
 | `put(url, options)` | HTTP PUT request |
 | `delete(url, options)` | HTTP DELETE request |
+| `del(url, options)` | Alias for HTTP DELETE request |
 | `patch(url, options)` | HTTP PATCH request |
 | `head(url, options)` | HTTP HEAD request |
 | `httpOptions(url, options)` | HTTP OPTIONS request |
 | `options(url, options)` | Alias for HTTP OPTIONS request |
+| `opts(url, options)` | Alias for HTTP OPTIONS request |
 | `send(method, url, options)` | Alias for generic request |
 | `addInterceptor(interceptor)` | Add request/response interceptor |
 
@@ -290,6 +299,12 @@ defer b.deinit();
 
 var c = try httpx.post(allocator, "https://example.com/items", .{ .json = "{\"name\":\"demo\"}" });
 defer c.deinit();
+
+var d = try httpx.delete(allocator, "https://example.com/items/42", .{});
+defer d.deinit();
+
+var e = try httpx.opts(allocator, "https://example.com/items", .{});
+defer e.deinit();
 ```
 
 ## See Also

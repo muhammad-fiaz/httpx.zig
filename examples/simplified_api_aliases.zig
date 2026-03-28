@@ -33,4 +33,12 @@ pub fn main() !void {
     var resp_d = try client.options("https://httpbin.org/get", .{});
     defer resp_d.deinit();
     std.debug.print("client.options status: {d}\n", .{resp_d.status.code});
+
+    var resp_e = try client.del("https://httpbin.org/delete", .{});
+    defer resp_e.deinit();
+    std.debug.print("client.del status: {d}\n", .{resp_e.status.code});
+
+    var resp_f = try client.opts("https://httpbin.org/get", .{});
+    defer resp_f.deinit();
+    std.debug.print("client.opts status: {d}\n", .{resp_f.status.code});
 }

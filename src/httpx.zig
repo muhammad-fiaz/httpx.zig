@@ -141,6 +141,11 @@ pub const ResponseBuilder = response.ResponseBuilder;
 pub const Socket = socket.Socket;
 pub const TcpListener = socket.TcpListener;
 pub const UdpSocket = socket.UdpSocket;
+pub const ShutdownMode = socket.ShutdownMode;
+pub const TcpSocket = Socket;
+pub const DatagramSocket = UdpSocket;
+pub const netInit = socket.init;
+pub const netDeinit = socket.deinit;
 
 pub const Parser = parser.Parser;
 
@@ -244,11 +249,44 @@ pub const TlsSession = tls.TlsSession;
 pub const VERSION = meta.version;
 pub const DEFAULT_USER_AGENT = meta.default_user_agent;
 
+/// Resolves a hostname to a network address.
+pub const resolveAddress = address.resolve;
+
+/// Parses "host:port" style address strings.
+pub const parseHostAndPort = address.parseHostPort;
+
+/// Resolves a hostname to all candidate addresses.
+pub const resolveAllAddresses = address.resolveAll;
+
+/// Parses "host:port" and resolves to a concrete address.
+pub const parseAndResolveAddress = address.parseAndResolve;
+
+/// Returns true if input is an IPv4/IPv6 literal.
+pub const isIpAddress = address.isIpAddress;
+
+/// Returns true if input is an IPv4 literal.
+pub const isIp4Address = address.isIp4Address;
+
+/// Returns true if input is an IPv6 literal.
+pub const isIp6Address = address.isIp6Address;
+
 /// Returns a query parameter value from a raw query string.
 pub const queryValue = common.queryValue;
 
+/// Alias for queryValue().
+pub const parseQueryValue = common.queryValue;
+
 /// Parses the first name/value pair from a Set-Cookie header value.
 pub const parseSetCookiePair = common.parseSetCookiePair;
+
+/// Alias for parseSetCookiePair().
+pub const parseCookiePair = common.parseSetCookiePair;
+
+/// HTTP/3 varint encode alias.
+pub const encodeVarInt = http.encodeVarInt;
+
+/// HTTP/3 varint decode alias.
+pub const decodeVarInt = http.decodeVarInt;
 
 /// Executes all requests in parallel and returns a result per request.
 pub fn all(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult {
@@ -268,6 +306,21 @@ pub fn race(allocator: std.mem.Allocator, client: *Client, specs: []const Reques
 /// Executes all requests in parallel and returns a settled result for each one.
 pub fn allSettled(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult {
     return concurrency.allSettled(allocator, client, specs);
+}
+
+/// Alias for any() for first-success semantics.
+pub fn first(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) !?Response {
+    return any(allocator, client, specs);
+}
+
+/// Alias for race() for first-completion semantics.
+pub fn fastest(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) !RequestResult {
+    return race(allocator, client, specs);
+}
+
+/// Alias for allSettled() returning settled outcomes.
+pub fn settled(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult {
+    return allSettled(allocator, client, specs);
 }
 
 /// Convenience function to create a GET request.
@@ -322,6 +375,11 @@ pub fn del(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOp
     return c.delete(url, req_options);
 }
 
+/// Convenience alias for DELETE requests.
+pub fn delete(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
+    return del(allocator, url, req_options);
+}
+
 /// Convenience function to create a PATCH request.
 pub fn patch(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
     var c = Client.init(allocator);
@@ -341,6 +399,42 @@ pub fn options(allocator: std.mem.Allocator, url: []const u8, options_in: Reques
     var c = Client.init(allocator);
     defer c.deinit();
     return c.options(url, options_in);
+}
+
+/// Convenience alias for OPTIONS requests.
+pub fn opts(allocator: std.mem.Allocator, url: []const u8, options_in: RequestOptions) !Response {
+    return options(allocator, url, options_in);
+}
+
+test "top-level alias compile checks" {
+    const delete_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = delete;
+    const opts_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = opts;
+    const first_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror!?Response = first;
+    const fastest_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror!RequestResult = fastest;
+    const settled_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror![]RequestResult = settled;
+    const resolve_addr_ptr: *const fn ([]const u8, u16) anyerror!std.net.Address = resolveAddress;
+    const resolve_all_addr_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror![]std.net.Address = resolveAllAddresses;
+    const parse_host_port_ptr = parseHostAndPort;
+    const parse_and_resolve_ptr: *const fn ([]const u8, u16) anyerror!std.net.Address = parseAndResolveAddress;
+    const is_ip_ptr: *const fn ([]const u8) bool = isIpAddress;
+    const is_ip4_ptr: *const fn ([]const u8) bool = isIp4Address;
+    const is_ip6_ptr: *const fn ([]const u8) bool = isIp6Address;
+    const net_init_ptr: *const fn () anyerror!void = netInit;
+    const net_deinit_ptr: *const fn () void = netDeinit;
+    _ = delete_ptr;
+    _ = opts_ptr;
+    _ = first_ptr;
+    _ = fastest_ptr;
+    _ = settled_ptr;
+    _ = resolve_addr_ptr;
+    _ = resolve_all_addr_ptr;
+    _ = parse_host_port_ptr;
+    _ = parse_and_resolve_ptr;
+    _ = is_ip_ptr;
+    _ = is_ip4_ptr;
+    _ = is_ip6_ptr;
+    _ = net_init_ptr;
+    _ = net_deinit_ptr;
 }
 
 test "core types" {

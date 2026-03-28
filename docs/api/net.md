@@ -1,323 +1,220 @@
 # Network API
 
-Low-level networking abstractions for TCP, UDP, and socket operations. This module provides cross-platform socket wrappers that work on all supported platforms (Linux, Windows, macOS, FreeBSD) and architectures (x86_64, aarch64, i386, arm).
+Low-level networking primitives for TCP and UDP across Linux, Windows, macOS, and BSD-family targets.
 
 ## Platform Support
 
-| Platform | TCP | UDP | TLS | Unix Sockets |
-|----------|-----|-----|-----|--------------|
-| Linux | ✅ | ✅ | ✅ | ✅ |
-| Windows | ✅ | ✅ | ✅ | ❌ |
-| macOS | ✅ | ✅ | ✅ | ✅ |
-| FreeBSD | ✅ | ✅ | ✅ | ✅ |
+| Platform | TCP | UDP | TLS |
+|----------|-----|-----|-----|
+| Linux | ✅ | ✅ | ✅ |
+| Windows | ✅ | ✅ | ✅ |
+| macOS | ✅ | ✅ | ✅ |
+| FreeBSD/NetBSD/OpenBSD | ✅ | ✅ | ✅ |
 
-## TCP Socket
+## TCP Socket (`httpx.Socket`)
 
-Cross-platform TCP socket wrapper for reliable, ordered, connection-oriented communication.
+Cross-platform stream socket abstraction.
 
-### Creating a TCP Socket
+Canonical low-level I/O methods are `send(...)`, `sendAll(...)`, and `recv(...)`.
+For stream-style ergonomics, compatibility aliases `write(...)`, `writeAll(...)`, and `read(...)` are also available.
+
+### Basic Usage
 
 ```zig
+const std = @import("std");
 const httpx = @import("httpx");
 
-// Create a TCP socket
-var socket = try httpx.Socket.create(.tcp);
+var socket = try httpx.Socket.create();
 defer socket.close();
 
-// Connect to a server
-const addr = try std.net.Address.parseIp4("93.184.216.34", 80);
+const addr = try std.net.Address.parseIp("93.184.216.34", 80);
 try socket.connect(addr);
 
-// Send data
-const sent = try socket.send("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+try socket.writeAll("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
 
-// Receive response
-var buffer: [4096]u8 = undefined;
-const received = try socket.recv(&buffer);
-std.debug.print("Received: {s}\n", .{buffer[0..received]});
+var buf: [4096]u8 = undefined;
+const n = try socket.read(&buf);
+std.debug.print("{s}\n", .{buf[0..n]});
 ```
 
-### Socket Structure
-
-```zig
-pub const Socket = struct {
-    handle: posix.socket_t,
-    connected: bool,
-    
-    pub fn create(protocol: Protocol) !Socket
-    pub fn connect(self: *Socket, addr: net.Address) !void
-    pub fn send(self: *Socket, data: []const u8) !usize
-    pub fn sendAll(self: *Socket, data: []const u8) !void
-    pub fn recv(self: *Socket, buffer: []u8) !usize
-    pub fn close(self: *Socket) void
-};
-```
-
-### TCP Socket Methods
+### Methods
 
 | Method | Description |
 |--------|-------------|
-| `create(protocol)` | Creates a new socket (TCP or UDP) |
-| `connect(addr)` | Connects to a remote address |
-| `send(data)` | Sends data, returns bytes sent |
-| `sendAll(data)` | Reliably sends all data |
-| `recv(buffer)` | Receives data into buffer |
-| `close()` | Closes the connection |
+| `create()` | Create IPv4 TCP socket |
+| `createV4()` / `createV6()` | Create explicit IPv4/IPv6 TCP socket |
+| `createForAddress(addr)` | Create TCP socket matching address family |
+| `connect(addr)` | Connect to remote endpoint |
+| `connectHost(host, port)` | Resolve and connect |
+| `connectEndpoint(endpoint, default_port)` | Parse `host:port` and connect |
+| `send(data)` / `write(data)` | Send bytes |
+| `sendAll(data)` / `writeAll(data)` | Send all bytes |
+| `recv(buffer)` / `read(buffer)` | Receive bytes |
+| `setOption(level, optname, value)` | Set raw socket option bytes |
+| `shutdown(mode)` | Shutdown one or both halves (`recv`, `send`, `both`) |
+| `shutdownRead()` / `shutdownWrite()` / `shutdownBoth()` | Convenience shutdown helpers |
+| `bindHost(host, port)` | Resolve and bind local endpoint |
+| `getLocalAddress()` | Return local bound/ephemeral address |
+| `getPeerAddress()` | Return currently connected peer address |
+| `close()` | Close socket |
 
-### TCP Socket Options
+### Shutdown Modes
+
+`httpx.ShutdownMode` values:
+
+- `recv`
+- `send`
+- `both`
+
+### Socket Options
+
+| Method | Description |
+|--------|-------------|
+| `setNoDelay(enable)` | TCP_NODELAY (disable Nagle when true) |
+| `setKeepAlive(enable)` | SO_KEEPALIVE |
+| `setReuseAddr(enable)` | SO_REUSEADDR |
+| `setRecvTimeout(ms)` | SO_RCVTIMEO |
+| `setSendTimeout(ms)` | SO_SNDTIMEO |
+| `setRecvBufferSize(bytes)` | SO_RCVBUF |
+| `setSendBufferSize(bytes)` | SO_SNDBUF |
+
+## TCP Listener (`httpx.TcpListener`)
+
+Server-side listener for accepting inbound TCP connections.
 
 ```zig
-// Disable Nagle's algorithm for low-latency
-try socket.setNoDelay(true);
-
-// Set receive timeout (milliseconds)
-try socket.setRecvTimeout(5000);
-
-// Set send timeout (milliseconds)  
-try socket.setSendTimeout(5000);
-
-// Enable TCP Keep-Alive
-try socket.setKeepAlive(true);
-
-// Set socket buffer sizes
-try socket.setRecvBufferSize(65536);
-try socket.setSendBufferSize(65536);
-```
-
-## TCP Listener
-
-Server-side TCP listener for accepting incoming connections.
-
-### Basic TCP Server
-
-```zig
+const std = @import("std");
 const httpx = @import("httpx");
 
-// Create and bind listener
-const addr = try std.net.Address.parseIp4("0.0.0.0", 8080);
-var listener = try httpx.TcpListener.init(addr);
+var listener = try httpx.TcpListener.init(try std.net.Address.parseIp("127.0.0.1", 8080));
 defer listener.deinit();
 
-std.debug.print("Listening on port 8080...\n", .{});
-
-// Accept connections in a loop
-while (true) {
-    const conn = try listener.accept();
-    defer conn.socket.close();
-    
-    std.debug.print("Client connected from {}\n", .{conn.addr});
-    
-    // Handle client...
-    var buffer: [1024]u8 = undefined;
-    const n = try conn.socket.recv(&buffer);
-    _ = try conn.socket.send("HTTP/1.1 200 OK\r\n\r\nHello!");
-}
+const accepted = try listener.accept();
+defer accepted.socket.close();
 ```
-
-### TcpListener Methods
 
 | Method | Description |
 |--------|-------------|
-| `init(addr)` | Creates listener bound to address |
-| `accept()` | Accepts incoming connection |
-| `getLocalAddress()` | Returns bound address |
-| `deinit()` | Closes the listener |
+| `init(addr)` | Bind/listen with default backlog |
+| `initWithBacklog(addr, backlog)` | Bind/listen with explicit backlog |
+| `initHost(host, port)` | Resolve host and bind/listen with default backlog |
+| `initHostWithBacklog(host, port, backlog)` | Resolve host and bind/listen with custom backlog |
+| `accept()` | Accept connection and return `{ socket, addr }` |
+| `getLocalAddress()` | Return bound local address |
+| `deinit()` | Close listener |
 
-## UDP Socket
+## Socket I/O Adapters
 
-Cross-platform UDP datagram socket for connectionless communication. Use UDP for:
+For TLS and low-level stream integration, the socket module also provides:
 
-- Low-latency applications (gaming, VoIP)
-- DNS queries
-- QUIC transport (HTTP/3)
-- Broadcast/multicast
-- Custom binary protocols
+- `httpx.socket.SocketIoReader`
+- `httpx.socket.SocketIoWriter`
 
-### Basic UDP Communication
+These adapters bridge `httpx.Socket` to Zig's `std.Io.Reader` / `std.Io.Writer` interfaces.
 
-```zig
-const httpx = @import("httpx");
+## UDP Socket (`httpx.UdpSocket`)
 
-// Create UDP socket
-var sock = try httpx.UdpSocket.create();
-defer sock.close();
+Connectionless datagram abstraction (used by DNS/QUIC/custom protocols).
 
-// Bind to local address
-try sock.bind(try std.net.Address.parseIp4("0.0.0.0", 0));
-const local = try sock.getLocalAddress();
-std.debug.print("Bound to port {}\n", .{local.getPort()});
+Canonical datagram I/O methods are `send(...)` and `recv(...)`.
+For stream-style consistency across examples, compatibility aliases `write(...)` and `read(...)` are also available.
 
-// Send datagram
-const dest = try std.net.Address.parseIp4("127.0.0.1", 9000);
-_ = try sock.sendTo(dest, "Hello UDP!");
-
-// Receive datagram
-var buffer: [1024]u8 = undefined;
-const result = try sock.recvFrom(&buffer);
-std.debug.print("Received {d} bytes from {}\n", .{result.n, result.addr});
-```
-
-### UDP Echo Server
+### Basic Usage
 
 ```zig
-const httpx = @import("httpx");
-
-var sock = try httpx.UdpSocket.create();
-defer sock.close();
-
-try sock.bind(try std.net.Address.parseIp4("0.0.0.0", 9000));
-std.debug.print("UDP server listening on port 9000\n", .{});
-
-var buffer: [1024]u8 = undefined;
-while (true) {
-    const result = try sock.recvFrom(&buffer);
-    std.debug.print("Received: {s}\n", .{buffer[0..result.n]});
-    
-    // Echo back
-    _ = try sock.sendTo(result.addr, buffer[0..result.n]);
-}
-```
-
-### UdpSocket Methods
-
-| Method | Description |
-|--------|-------------|
-| `create()` | Creates IPv4 UDP socket |
-| `createV4()` | Creates IPv4 UDP socket |
-| `createV6()` | Creates IPv6 UDP socket |
-| `bind(addr)` | Binds to local address |
-| `connect(addr)` | Sets default destination |
-| `send(data)` | Sends to connected address |
-| `sendTo(addr, data)` | Sends to specific address |
-| `recv(buffer)` | Receives from connected peer |
-| `recvFrom(buffer)` | Receives with sender address |
-| `getLocalAddress()` | Returns bound address |
-| `close()` | Closes the socket |
-
-### UDP Socket Options
-
-```zig
-// Allow address reuse (for multiple listeners)
-try sock.setReuseAddr(true);
-
-// Set receive timeout
-try sock.setRecvTimeout(5000);
-
-// Set send timeout
-try sock.setSendTimeout(5000);
-
-// Enable broadcast
-try sock.setBroadcast(true);
-```
-
-## Address Resolution
-
-### Parsing IP Addresses
-
-```zig
-// IPv4
-const ipv4 = try std.net.Address.parseIp4("192.168.1.1", 8080);
-
-// IPv6
-const ipv6 = try std.net.Address.parseIp6("::1", 8080);
-
-// Auto-detect
-const addr = try std.net.Address.resolveIp("example.com", 80);
-```
-
-### Address Structure
-
-```zig
-pub const Address = union(enum) {
-    ipv4: std.net.Ip4Address,
-    ipv6: std.net.Ip6Address,
-    
-    pub fn getPort(self: Address) u16
-    pub fn format(...) 
-};
-```
-
-## TLS Integration
-
-For secure connections (HTTPS, TLS), httpx.zig uses Zig's standard library TLS (`std.crypto.tls`). The socket module provides I/O adapters for seamless TLS integration.
-
-### TLS Client Example
-
-```zig
-const httpx = @import("httpx");
 const std = @import("std");
+const httpx = @import("httpx");
 
-// Create TCP socket
-var socket = try httpx.Socket.create(.tcp);
-defer socket.close();
+var recv_sock = try httpx.UdpSocket.create();
+defer recv_sock.close();
+try recv_sock.bind(try std.net.Address.parseIp("127.0.0.1", 0));
 
-// Connect to server
-const addr = try std.net.Address.resolveIp("example.com", 443);
-try socket.connect(addr);
+const recv_addr = try recv_sock.getLocalAddress();
 
-// Wrap with TLS
-var tls_client = try std.crypto.tls.Client.init(socket.reader(), socket.writer(), .{
-    .host = "example.com",
-});
+var send_sock = try httpx.UdpSocket.create();
+defer send_sock.close();
+_ = try send_sock.sendTo(recv_addr, "ping");
 
-// Send HTTPS request
-try tls_client.writer().writeAll("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
-
-// Read response
-var buffer: [4096]u8 = undefined;
-const n = try tls_client.reader().read(&buffer);
+var buf: [64]u8 = undefined;
+const result = try recv_sock.recvFrom(&buf);
+std.debug.print("{s}\n", .{buf[0..result.n]});
 ```
 
-See [TLS API](/api/tls) for more details on TLS configuration and certificate handling.
+### Methods
 
-## Use with HTTP Protocols
+| Method | Description |
+|--------|-------------|
+| `create()` / `createV4()` / `createV6()` | Create UDP socket |
+| `createForAddress(addr)` | Create UDP socket matching address family |
+| `bind(addr)` | Bind local address |
+| `bindHost(host, port)` | Resolve and bind local endpoint |
+| `connect(addr)` | Set default peer |
+| `connectHost(host, port)` | Resolve and set default peer |
+| `connectEndpoint(endpoint, default_port)` | Parse `host:port` and connect |
+| `send(data)` / `write(data)` | Send to connected peer |
+| `sendTo(addr, data)` | Send datagram to specific peer |
+| `sendToHost(host, port, data)` | Resolve destination and send datagram |
+| `recv(buffer)` / `read(buffer)` | Receive from connected peer |
+| `recvFrom(buffer)` | Receive datagram + source address |
+| `getLocalAddress()` | Return bound local address |
+| `getPeerAddress()` | Return currently connected peer address |
+| `close()` | Close socket |
 
-### HTTP/1.1 over TCP
+### UDP Options
+
+| Method | Description |
+|--------|-------------|
+| `setReuseAddr(enable)` | SO_REUSEADDR |
+| `setBroadcast(enable)` | SO_BROADCAST |
+| `setRecvTimeout(ms)` | SO_RCVTIMEO |
+| `setSendTimeout(ms)` | SO_SNDTIMEO |
+| `setRecvBufferSize(bytes)` | SO_RCVBUF |
+| `setSendBufferSize(bytes)` | SO_SNDBUF |
+
+## Address Utilities
+
+`httpx.address` contains host/address helpers. At the root, aliases are also available:
+
+- `httpx.resolveAddress(host, port)`
+- `httpx.resolveAllAddresses(allocator, host, port)`
+- `httpx.parseHostAndPort(input, default_port)`
+- `httpx.parseAndResolveAddress(input, default_port)`
+- `httpx.isIpAddress(input)` / `httpx.isIp4Address(input)` / `httpx.isIp6Address(input)`
+
+Root-level network lifecycle aliases are also available:
+
+- `httpx.netInit()`
+- `httpx.netDeinit()`
 
 ```zig
-// Standard HTTP uses TCP
-var client = httpx.Client.init(allocator);
-defer client.deinit();
+const httpx = @import("httpx");
 
-const response = try client.get("http://example.com/api", .{});
+const addr = try httpx.resolveAddress("example.com", 443);
+const parsed = try httpx.parseHostAndPort("localhost:8080", 80);
 ```
 
-### HTTP/3 over UDP (QUIC)
+## Convenience Aliases
 
-HTTP/3 uses QUIC transport over UDP. See the [Protocol API](/api/protocol) for QUIC framing:
+At the root module:
 
-```zig
-// QUIC uses UDP for transport
-var udp = try httpx.UdpSocket.create();
-defer udp.close();
+- `httpx.TcpSocket` is an alias for `httpx.Socket`
+- `httpx.DatagramSocket` is an alias for `httpx.UdpSocket`
 
-// QUIC packet handling (see protocol module)
-const packet = try httpx.quic.LongHeader.decode(data);
-```
+## Examples
+
+- [TCP Local](/examples/tcp-local)
+- [UDP Local](/examples/udp-local)
 
 ## Error Handling
 
-Network operations can fail for various reasons:
-
 ```zig
-const result = socket.connect(addr) catch |err| switch (err) {
-    error.ConnectionRefused => {
-        std.debug.print("Server not accepting connections\n", .{});
-        return;
-    },
-    error.NetworkUnreachable => {
-        std.debug.print("Network is down\n", .{});
-        return;
-    },
-    error.TimedOut => {
-        std.debug.print("Connection timed out\n", .{});
-        return;
-    },
+socket.connect(addr) catch |err| switch (err) {
+    error.ConnectionRefused => std.debug.print("connection refused\n", .{}),
+    error.NetworkUnreachable => std.debug.print("network unreachable\n", .{}),
+    error.TimedOut => std.debug.print("timeout\n", .{}),
     else => return err,
 };
 ```
-
-### Common Errors
 
 | Error | Description |
 |-------|-------------|

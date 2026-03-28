@@ -64,7 +64,7 @@ pub const CorsConfig = struct {
 };
 
 /// Creates CORS middleware.
-pub fn cors(config: CorsConfig) Middleware {
+pub fn cors(comptime config: CorsConfig) Middleware {
     return .{
         .name = "cors",
         .handler = struct {

@@ -281,11 +281,11 @@ pub fn parsePemCertificate(allocator: Allocator, pem_data: []const u8) ![]const 
     base64_block = std.mem.trim(u8, base64_block, " \t\r\n");
 
     // Remove all whitespace/newlines from the base64 body.
-    var compact = std.ArrayList(u8).init(allocator);
-    defer compact.deinit();
+    var compact = std.ArrayList(u8).empty;
+    defer compact.deinit(allocator);
     for (base64_block) |ch| {
         if (ch == '\r' or ch == '\n' or ch == '\t' or ch == ' ') continue;
-        try compact.append(ch);
+        try compact.append(allocator, ch);
     }
 
     const decoder = std.base64.standard.Decoder;

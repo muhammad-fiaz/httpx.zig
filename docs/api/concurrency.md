@@ -11,6 +11,12 @@ These functions are available under `httpx.concurrency.*` and also as top-level 
 - `httpx.race`
 - `httpx.allSettled`
 
+Additional top-level aliases:
+
+- `httpx.first` (alias for `httpx.any`)
+- `httpx.fastest` (alias for `httpx.race`)
+- `httpx.settled` (alias for `httpx.allSettled`)
+
 ### `all`
 
 Executes multiple requests in parallel and waits for all to complete.
@@ -45,6 +51,36 @@ Executes multiple requests and returns the result of the first one to complete (
 ```zig
 pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec) !RequestResult
 ```
+
+### Top-Level Alias Signatures
+
+```zig
+pub fn first(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?Response
+pub fn fastest(allocator: Allocator, client: *Client, specs: []const RequestSpec) !RequestResult
+pub fn settled(allocator: Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult
+```
+
+## BatchBuilder
+
+Use `httpx.BatchBuilder` to compose request batches fluently.
+
+```zig
+var builder = httpx.BatchBuilder.init(allocator);
+defer builder.deinit();
+
+_ = try builder.get("https://api.example.com/users");
+_ = try builder.post("https://api.example.com/users", "{\"name\":\"demo\"}");
+```
+
+| Method | Description |
+|--------|-------------|
+| `get(url)` | Add GET request |
+| `post(url, body)` | Add POST request |
+| `put(url, body)` | Add PUT request |
+| `delete(url)` | Add DELETE request |
+| `add(spec)` | Add explicit `RequestSpec` |
+| `count()` | Number of queued requests |
+| `clear()` | Remove queued requests |
 
 ## Executor
 
@@ -90,6 +126,23 @@ Runs all pending tasks synchronously (useful for testing).
 
 ```zig
 pub fn runAll(self: *Self) void
+```
+
+#### `start` / `stop`
+
+Start and stop worker threads explicitly.
+
+```zig
+pub fn start(self: *Self) !void
+pub fn stop(self: *Self) void
+```
+
+#### `pendingCount`
+
+Returns a snapshot count of queued tasks.
+
+```zig
+pub fn pendingCount(self: *const Self) usize
 ```
 
 ## Types

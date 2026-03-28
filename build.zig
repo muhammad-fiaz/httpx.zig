@@ -14,10 +14,8 @@ fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.Resolved
 /// Supports HTTP/1.1, HTTP/2, HTTP/3 with TLS, connection pooling, and more.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    // Zig ecosystem templates are split between .optimize and .optimization
-    // for dependency arguments. Support both so dependent projects build cleanly.
-    const optimize_alias = b.option(std.builtin.OptimizeMode, "optimization", "Compatibility alias for -Doptimize");
-    const optimize = optimize_alias orelse b.standardOptimizeOption(.{});
+
+    const optimize = b.standardOptimizeOption(.{});
 
     const httpx_module = b.createModule(.{
         .root_source_file = b.path("src/httpx.zig"),
@@ -33,6 +31,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "post_json", .path = "examples/post_json.zig" },
         .{ .name = "concurrent_requests", .path = "examples/concurrent_requests.zig" },
         .{ .name = "custom_headers", .path = "examples/custom_headers.zig" },
+        .{ .name = "tcp_local", .path = "examples/tcp_local.zig" },
         .{ .name = "udp_local", .path = "examples/udp_local.zig" },
         .{ .name = "simple_server", .path = "examples/simple_server.zig", .skip_run_all = true },
         .{ .name = "router_example", .path = "examples/router_example.zig", .skip_run_all = true },

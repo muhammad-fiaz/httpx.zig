@@ -1,6 +1,6 @@
 # UDP Local
 
-Run the local UDP transport helper flow.
+Run a local UDP send/receive round trip over loopback.
 
 ## Demo Program
 
@@ -9,15 +9,22 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var recv_sock = try httpx.UdpSocket.create();
+    defer recv_sock.close();
 
-    var transport = try httpx.QuicTransport.init(allocator);
-    defer transport.deinit();
+    try recv_sock.setReuseAddr(true);
+    try recv_sock.bind(try std.net.Address.parseIp("127.0.0.1", 0));
+    const recv_addr = try recv_sock.getLocalAddress();
 
-    try transport.bind("127.0.0.1", 4444);
-    std.debug.print("udp local transport bound on 127.0.0.1:4444\n", .{});
+    var send_sock = try httpx.UdpSocket.create();
+    defer send_sock.close();
+
+    _ = try send_sock.sendTo(recv_addr, "hello over udp");
+
+    var buf: [256]u8 = undefined;
+    const got = try recv_sock.recvFrom(&buf);
+    std.debug.print("Recv: {s}\n", .{buf[0..got.n]});
+    std.debug.print("From: {f}\n", .{got.addr});
 }
 ```
 
@@ -30,4 +37,5 @@ zig build run-udp_local
 ## What to Verify
 
 - UDP bind succeeds on local interface.
-- Transport deinitializes cleanly.
+- Datagram is sent and received on loopback.
+- Both sockets close cleanly.

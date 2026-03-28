@@ -136,7 +136,7 @@ zig build -Dtarget=i386-windows
 ### Method 1: Zig Fetch (Recommended Stable Release)
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.6.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz
 ```
 
 ### Method 2: Zig Fetch (Nightly/Main)
@@ -152,7 +152,7 @@ Add this dependency entry to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.6.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz",
         .hash = "...", // Run zig fetch --save <url> to auto-fill this.
     },
 },
@@ -187,9 +187,6 @@ const httpx_dep = b.dependency("httpx", .{
 });
 exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 ```
-
-If your Zig template generated `.optimization = optimize` instead, that now works too.
-`httpx.zig` accepts both names for compatibility across Zig 0.15.x project templates.
 
 ## Quick Start
 
@@ -238,6 +235,55 @@ defer response.deinit();
 
 var by_method = try httpx.send(allocator, .GET, "https://httpbin.org/headers", .{});
 defer by_method.deinit();
+
+// Additional aliases
+var del_res = try httpx.delete(allocator, "https://httpbin.org/delete", .{});
+defer del_res.deinit();
+
+var opts_res = try httpx.opts(allocator, "https://httpbin.org/get", .{});
+defer opts_res.deinit();
+```
+
+### Explicit Network Helpers
+
+```zig
+// Network lifecycle (optional explicit init/deinit)
+try httpx.netInit();
+defer httpx.netDeinit();
+
+// Address helpers
+const one = try httpx.resolveAddress("example.com", 443);
+_ = one;
+
+const parsed = try httpx.parseHostAndPort("localhost:8080", 80);
+_ = parsed;
+
+const final_addr = try httpx.parseAndResolveAddress("127.0.0.1:9000", 80);
+_ = final_addr;
+
+const is_ip = httpx.isIpAddress("::1");
+_ = is_ip;
+```
+
+### Explicit Concurrency Helpers
+
+```zig
+const specs = [_]httpx.RequestSpec{
+    .{ .method = .GET, .url = "https://httpbin.org/get" },
+    .{ .method = .GET, .url = "https://httpbin.org/headers" },
+};
+
+var client_for_concurrency = httpx.Client.init(allocator);
+defer client_for_concurrency.deinit();
+
+var all_results = try httpx.all(allocator, &client_for_concurrency, &specs);
+defer {
+    for (all_results) |*r| r.deinit();
+    allocator.free(all_results);
+}
+
+var first_ok = try httpx.first(allocator, &client_for_concurrency, &specs);
+if (first_ok) |*resp| resp.deinit();
 ```
  
 ### Server Usage
@@ -290,12 +336,59 @@ The `examples/` directory contains comprehensive examples for all major features
 - **Static Assets Demo**: `static_files.zig` (file-based static routes + directory-based wildcard mounts for CSS/JS/images)
 - **Website Demo**: `multi_page_website.zig` (full multi-page website serving `index/about/contact` with static assets)
 - **Protocol Demos**: `http2_example.zig`, `http3_example.zig`
-- **Networking Utility**: `udp_local.zig`
+- **Networking Utility**: `tcp_local.zig`, `udp_local.zig`
  
 To run an example:
 ```bash
 zig build run-simple_get
 ```
+
+## Validation Matrix
+
+Validate host functionality and cross-target compatibility with these commands:
+
+```bash
+# Host runtime validation
+zig build test
+zig build run-all-examples
+
+# Cross-target library compile validation
+zig build build-all-targets
+```
+
+To validate Linux runtime behavior (not just compilation), run Linux-target artifacts from a Linux shell (or WSL):
+
+```bash
+# Build Linux test/example artifacts
+zig build test -Dtarget=x86_64-linux
+zig build example-tcp_local -Dtarget=x86_64-linux
+
+# Run on Linux/WSL
+./zig-out/bin/test
+./zig-out/bin/tcp_local
+```
+
+If a remote endpoint appears to stall, set a per-request timeout and print errors explicitly:
+
+```zig
+var response = client.get(url, .{ .timeout_ms = 10_000 }) catch |err| {
+    std.debug.print("request failed: {s}\n", .{@errorName(err)});
+    return;
+};
+defer response.deinit();
+```
+
+For explicit cross-target test and example compilation, pass `-Dtarget=...`:
+
+```bash
+# Example: compile tests for 32-bit Windows
+zig build test -Dtarget=x86-windows
+
+# Example: compile an example for macOS ARM64
+zig build example-tcp_local -Dtarget=aarch64-macos
+```
+
+> Note: this project exposes `build-all-targets` as a build step. Use `zig build build-all-targets`.
  
 ## Performance
  
