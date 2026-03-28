@@ -44,12 +44,6 @@ pub const SseEvent = struct {
     retry_ms: ?u32 = null,
 };
 
-const H3_SETTING_QPACK_MAX_TABLE_CAPACITY: u64 = 0x01;
-const H3_SETTING_MAX_FIELD_SECTION_SIZE: u64 = 0x06;
-const H3_SETTING_QPACK_BLOCKED_STREAMS: u64 = 0x07;
-const H3_SETTING_ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
-const H3_SETTING_H3_DATAGRAM: u64 = 0x33;
-
 /// Pre-route hook called after parsing the request and before route matching.
 pub const PreRouteHook = *const fn (*Context) anyerror!void;
 
@@ -616,7 +610,7 @@ pub const Server = struct {
                                 continue;
                             }
 
-                            if (isConnectionSpecificHeader(header.name)) continue;
+                            if (common.isConnectionSpecificHeader(header.name)) continue;
                             try request_headers.append(header.name, header.value);
                         }
                     } else {
@@ -671,7 +665,7 @@ pub const Server = struct {
                                 continue;
                             }
 
-                            if (isConnectionSpecificHeader(header.name)) continue;
+                            if (common.isConnectionSpecificHeader(header.name)) continue;
                             try request_headers.append(header.name, header.value);
                         }
 
@@ -783,10 +777,10 @@ pub const Server = struct {
         try response_headers.append(self.allocator, .{ .name = ":status", .value = status_str });
 
         for (response.headers.entries.items) |entry| {
-            if (isConnectionSpecificHeader(entry.name)) continue;
+            if (common.isConnectionSpecificHeader(entry.name)) continue;
             if (entry.name.len > 0 and entry.name[0] == ':') continue;
 
-            const lowered = try dupLowerAscii(self.allocator, entry.name);
+            const lowered = try common.dupLowerAscii(self.allocator, entry.name);
             try owned_header_names.append(self.allocator, lowered);
             try response_headers.append(self.allocator, .{ .name = lowered, .value = entry.value });
         }
@@ -895,7 +889,7 @@ pub const Server = struct {
 
         var qpack_ctx = qpack.QpackContext.initWithCapacity(
             self.allocator,
-            clampU64ToUsize(self.config.http3_settings.qpack_max_table_capacity),
+            common.clampU64ToUsize(self.config.http3_settings.qpack_max_table_capacity),
         );
         defer qpack_ctx.deinit();
 
@@ -942,7 +936,7 @@ pub const Server = struct {
                         continue;
                     }
 
-                    if (isConnectionSpecificHeader(header.name)) continue;
+                    if (common.isConnectionSpecificHeader(header.name)) continue;
                     try request_headers.append(header.name, header.value);
                 }
             } else if (frame.header.frame_type == @intFromEnum(http.Http3FrameType.data)) {
@@ -1004,7 +998,7 @@ pub const Server = struct {
 
         var qpack_ctx = qpack.QpackContext.initWithCapacity(
             self.allocator,
-            clampU64ToUsize(self.config.http3_settings.qpack_max_table_capacity),
+            common.clampU64ToUsize(self.config.http3_settings.qpack_max_table_capacity),
         );
         defer qpack_ctx.deinit();
 
@@ -1024,10 +1018,10 @@ pub const Server = struct {
         try response_headers.append(self.allocator, .{ .name = ":status", .value = status_str });
 
         for (response.headers.entries.items) |entry| {
-            if (isConnectionSpecificHeader(entry.name)) continue;
+            if (common.isConnectionSpecificHeader(entry.name)) continue;
             if (entry.name.len > 0 and entry.name[0] == ':') continue;
 
-            const lowered = try dupLowerAscii(self.allocator, entry.name);
+            const lowered = try common.dupLowerAscii(self.allocator, entry.name);
             try owned_header_names.append(self.allocator, lowered);
             try response_headers.append(self.allocator, .{ .name = lowered, .value = entry.value });
         }
@@ -1037,19 +1031,19 @@ pub const Server = struct {
 
         var response_stream_payload = std.ArrayListUnmanaged(u8){};
         defer response_stream_payload.deinit(self.allocator);
-        try appendHttp3FramePayload(&response_stream_payload, self.allocator, .headers, encoded_headers);
+        try http.appendHttp3Frame(&response_stream_payload, self.allocator, .headers, encoded_headers);
         if (response.body) |body| {
-            try appendHttp3FramePayload(&response_stream_payload, self.allocator, .data, body);
+            try http.appendHttp3Frame(&response_stream_payload, self.allocator, .data, body);
         }
 
         var settings_payload = std.ArrayListUnmanaged(u8){};
         defer settings_payload.deinit(self.allocator);
-        try encodeHttp3SettingsPayload(self.config.http3_settings, self.allocator, &settings_payload);
+        try http.encodeHttp3SettingsPayload(self.config.http3_settings, self.allocator, &settings_payload);
 
         var control_stream_payload = std.ArrayListUnmanaged(u8){};
         defer control_stream_payload.deinit(self.allocator);
-        try appendVarIntToList(&control_stream_payload, self.allocator, @intFromEnum(quic.Http3StreamType.control));
-        try appendHttp3FramePayload(&control_stream_payload, self.allocator, .settings, settings_payload.items);
+        try http.appendVarInt(&control_stream_payload, self.allocator, @intFromEnum(quic.Http3StreamType.control));
+        try http.appendHttp3Frame(&control_stream_payload, self.allocator, .settings, settings_payload.items);
 
         const server_cid = quic.ConnectionId.random();
 
@@ -1232,74 +1226,6 @@ fn readNoEofSocket(socket: *Socket, out: []u8) !void {
     }
 }
 
-fn dupLowerAscii(allocator: Allocator, input: []const u8) ![]u8 {
-    const out = try allocator.dupe(u8, input);
-    for (out) |*c| {
-        c.* = std.ascii.toLower(c.*);
-    }
-    return out;
-}
-
-fn isConnectionSpecificHeader(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, HeaderName.CONNECTION) or
-        std.ascii.eqlIgnoreCase(name, HeaderName.UPGRADE) or
-        std.ascii.eqlIgnoreCase(name, HeaderName.TRANSFER_ENCODING) or
-        std.ascii.eqlIgnoreCase(name, "Keep-Alive") or
-        std.ascii.eqlIgnoreCase(name, "Proxy-Connection") or
-        std.ascii.eqlIgnoreCase(name, "HTTP2-Settings");
-}
-
-fn clampU64ToUsize(v: u64) usize {
-    return @intCast(@min(v, @as(u64, std.math.maxInt(usize))));
-}
-
-fn appendVarIntToList(out: *std.ArrayListUnmanaged(u8), allocator: Allocator, value: u64) !void {
-    var tmp: [8]u8 = undefined;
-    const n = try http.encodeVarInt(value, &tmp);
-    try out.appendSlice(allocator, tmp[0..n]);
-}
-
-fn appendHttp3FramePayload(
-    out: *std.ArrayListUnmanaged(u8),
-    allocator: Allocator,
-    frame_type: http.Http3FrameType,
-    payload: []const u8,
-) !void {
-    var hdr_buf: [32]u8 = undefined;
-    const hdr_len = try (http.Http3FrameHeader{
-        .frame_type = @intFromEnum(frame_type),
-        .length = @intCast(payload.len),
-    }).encode(&hdr_buf);
-
-    try out.appendSlice(allocator, hdr_buf[0..hdr_len]);
-    try out.appendSlice(allocator, payload);
-}
-
-fn encodeHttp3SettingsPayload(
-    settings: types.Http3Settings,
-    allocator: Allocator,
-    out: *std.ArrayListUnmanaged(u8),
-) !void {
-    try appendVarIntToList(out, allocator, H3_SETTING_QPACK_MAX_TABLE_CAPACITY);
-    try appendVarIntToList(out, allocator, settings.qpack_max_table_capacity);
-
-    try appendVarIntToList(out, allocator, H3_SETTING_MAX_FIELD_SECTION_SIZE);
-    try appendVarIntToList(out, allocator, settings.max_field_section_size);
-
-    try appendVarIntToList(out, allocator, H3_SETTING_QPACK_BLOCKED_STREAMS);
-    try appendVarIntToList(out, allocator, settings.qpack_blocked_streams);
-
-    if (settings.enable_connect_protocol) {
-        try appendVarIntToList(out, allocator, H3_SETTING_ENABLE_CONNECT_PROTOCOL);
-        try appendVarIntToList(out, allocator, 1);
-    }
-
-    if (settings.enable_datagrams) {
-        try appendVarIntToList(out, allocator, H3_SETTING_H3_DATAGRAM);
-        try appendVarIntToList(out, allocator, 1);
-    }
-}
-
 fn parseHttp3ControlStream(stream_data: []const u8) !void {
     if (stream_data.len == 0) return error.ProtocolError;
 
@@ -1319,7 +1245,10 @@ fn parseHttp3ControlStream(stream_data: []const u8) !void {
         const payload_len: usize = @intCast(frame.header.length);
         if (stream_data.len < offset + payload_len) return error.ProtocolError;
 
+        const payload = stream_data[offset .. offset + payload_len];
+
         if (frame.header.frame_type == @intFromEnum(http.Http3FrameType.settings)) {
+            _ = try http.parseHttp3SettingsPayload(payload);
             saw_settings = true;
         }
 

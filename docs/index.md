@@ -99,7 +99,7 @@ httpx.zig is validated across Linux, Windows, and macOS:
 |----------|--------|---------|-----|
 | Linux    | ✅     | ✅      | ✅  |
 | Windows  | ✅     | ✅      | ✅  |
-| macOS    | ✅     | ✅      | ✅  |
+| macOS    | ✅     | ✅      | ❌  |
 
 ## Examples
 

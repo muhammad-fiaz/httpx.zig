@@ -109,7 +109,7 @@ Before using `httpx.zig`, ensure you have the following:
 |----------|-----------------|-----------------|--------------|
 | **Linux** | Yes | Yes | Yes |
 | **Windows** | Yes | Yes | Yes |
-| **macOS** | Yes | Yes (Apple Silicon) | Yes |
+| **macOS** | Yes | Yes (Apple Silicon) | No |
 
 ### Cross-Compilation
 

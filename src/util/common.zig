@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const mem = std.mem;
+const HeaderName = @import("../core/headers.zig").HeaderName;
 
 /// Parsed cookie name/value pair from a Set-Cookie header value.
 pub const CookiePair = struct {
@@ -131,6 +132,30 @@ pub fn mimeTypeFromPath(path: []const u8) []const u8 {
     if (mem.eql(u8, ext, ".pdf")) return "application/pdf";
 
     return "application/octet-stream";
+}
+
+/// Clamps a u64 value to the platform usize maximum.
+pub fn clampU64ToUsize(v: u64) usize {
+    return @intCast(@min(v, @as(u64, std.math.maxInt(usize))));
+}
+
+/// Returns a lowercased copy of ASCII input bytes.
+pub fn dupLowerAscii(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    const out = try allocator.dupe(u8, input);
+    for (out) |*c| {
+        c.* = std.ascii.toLower(c.*);
+    }
+    return out;
+}
+
+/// Returns true for connection-specific headers that must not be forwarded in H2/H3.
+pub fn isConnectionSpecificHeader(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, HeaderName.CONNECTION) or
+        std.ascii.eqlIgnoreCase(name, HeaderName.UPGRADE) or
+        std.ascii.eqlIgnoreCase(name, HeaderName.TRANSFER_ENCODING) or
+        std.ascii.eqlIgnoreCase(name, "Keep-Alive") or
+        std.ascii.eqlIgnoreCase(name, "Proxy-Connection") or
+        std.ascii.eqlIgnoreCase(name, "HTTP2-Settings");
 }
 
 test "queryValue parses normal and key-only params" {

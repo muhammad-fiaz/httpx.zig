@@ -588,6 +588,96 @@ pub const Http3FrameHeader = struct {
     }
 };
 
+/// HTTP/3 SETTINGS identifiers used on control streams.
+pub const Http3SettingId = enum(u64) {
+    qpack_max_table_capacity = 0x01,
+    max_field_section_size = 0x06,
+    qpack_blocked_streams = 0x07,
+    enable_connect_protocol = 0x08,
+    h3_datagram = 0x33,
+};
+
+/// Appends a QUIC varint into an unmanaged byte list.
+pub fn appendVarInt(out: *std.ArrayListUnmanaged(u8), allocator: Allocator, value: u64) !void {
+    var tmp: [8]u8 = undefined;
+    const n = try encodeVarInt(value, &tmp);
+    try out.appendSlice(allocator, tmp[0..n]);
+}
+
+/// Appends a complete HTTP/3 frame (header + payload) into an unmanaged byte list.
+pub fn appendHttp3Frame(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: Allocator,
+    frame_type: Http3FrameType,
+    payload: []const u8,
+) !void {
+    var hdr_buf: [32]u8 = undefined;
+    const hdr_len = try (Http3FrameHeader{
+        .frame_type = @intFromEnum(frame_type),
+        .length = @intCast(payload.len),
+    }).encode(&hdr_buf);
+
+    try out.appendSlice(allocator, hdr_buf[0..hdr_len]);
+    try out.appendSlice(allocator, payload);
+}
+
+/// Encodes HTTP/3 SETTINGS payload from high-level configuration values.
+pub fn encodeHttp3SettingsPayload(
+    settings: types.Http3Settings,
+    allocator: Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+) !void {
+    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.qpack_max_table_capacity));
+    try appendVarInt(out, allocator, settings.qpack_max_table_capacity);
+
+    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.max_field_section_size));
+    try appendVarInt(out, allocator, settings.max_field_section_size);
+
+    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.qpack_blocked_streams));
+    try appendVarInt(out, allocator, settings.qpack_blocked_streams);
+
+    if (settings.enable_connect_protocol) {
+        try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.enable_connect_protocol));
+        try appendVarInt(out, allocator, 1);
+    }
+
+    if (settings.enable_datagrams) {
+        try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.h3_datagram));
+        try appendVarInt(out, allocator, 1);
+    }
+}
+
+/// Parses HTTP/3 SETTINGS payload into high-level configuration values.
+pub fn parseHttp3SettingsPayload(payload: []const u8) !types.Http3Settings {
+    var parsed = types.Http3Settings{
+        .max_field_section_size = 0,
+        .qpack_max_table_capacity = 0,
+        .qpack_blocked_streams = 0,
+        .enable_connect_protocol = false,
+        .enable_datagrams = false,
+    };
+
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        const id_result = try decodeVarInt(payload[offset..]);
+        offset += id_result.len;
+
+        const value_result = try decodeVarInt(payload[offset..]);
+        offset += value_result.len;
+
+        switch (id_result.value) {
+            @intFromEnum(Http3SettingId.qpack_max_table_capacity) => parsed.qpack_max_table_capacity = value_result.value,
+            @intFromEnum(Http3SettingId.max_field_section_size) => parsed.max_field_section_size = value_result.value,
+            @intFromEnum(Http3SettingId.qpack_blocked_streams) => parsed.qpack_blocked_streams = value_result.value,
+            @intFromEnum(Http3SettingId.enable_connect_protocol) => parsed.enable_connect_protocol = value_result.value != 0,
+            @intFromEnum(Http3SettingId.h3_datagram) => parsed.enable_datagrams = value_result.value != 0,
+            else => {},
+        }
+    }
+
+    return parsed;
+}
+
 /// Formats a request object into HTTP/1.x wire format.
 pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
     var buffer = std.ArrayListUnmanaged(u8){};
