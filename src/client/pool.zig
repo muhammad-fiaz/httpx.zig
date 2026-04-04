@@ -9,10 +9,25 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const net = std.net;
+const builtin = @import("builtin");
 
 const Socket = @import("../net/socket.zig").Socket;
 const address_mod = @import("../net/address.zig");
+
+fn milliTimestamp() i64 {
+    if (builtin.os.tag == .windows) {
+        return @intCast(getTickCount64());
+    } else {
+        var ts: std.os.linux.timespec = undefined;
+        _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+        return @as(i64, ts.sec) * 1000 + @divFloor(@as(i64, ts.usec), 1000000);
+    }
+}
+
+extern "kernel32" fn GetTickCount64() callconv(.c) u64;
+fn getTickCount64() u64 {
+    return GetTickCount64();
+}
 
 pub const PoolError = error{
     PoolExhausted,
@@ -34,13 +49,13 @@ pub const Connection = struct {
     /// Marks the connection as in use.
     pub fn acquire(self: *Self) void {
         self.in_use = true;
-        self.last_used = std.time.milliTimestamp();
+        self.last_used = milliTimestamp();
     }
 
     /// Releases the connection back to the pool.
     pub fn release(self: *Self) void {
         self.in_use = false;
-        self.last_used = std.time.milliTimestamp();
+        self.last_used = milliTimestamp();
         self.requests_made += 1;
     }
 
@@ -48,7 +63,7 @@ pub const Connection = struct {
     pub fn isHealthy(self: *const Self, max_idle_ms: i64) bool {
         if (self.in_use) return false;
         if (!self.socket.isValid()) return false;
-        const idle_time = std.time.milliTimestamp() - self.last_used;
+        const idle_time = milliTimestamp() - self.last_used;
         return idle_time < max_idle_ms;
     }
 
@@ -57,7 +72,7 @@ pub const Connection = struct {
         if (self.in_use) return false;
         if (!self.socket.isValid()) return true;
         if (self.requests_made >= max_requests_per_connection) return true;
-        const idle_time = std.time.milliTimestamp() - self.last_used;
+        const idle_time = milliTimestamp() - self.last_used;
         return idle_time >= idle_timeout_ms;
     }
 
@@ -151,7 +166,7 @@ pub const ConnectionPool = struct {
         errdefer socket.close();
         try socket.connect(addr);
 
-        const now = std.time.milliTimestamp();
+        const now = milliTimestamp();
 
         try self.connections.append(self.allocator, .{
             .socket = socket,
@@ -248,8 +263,8 @@ test "Connection health check" {
         .socket = try Socket.create(),
         .host = "localhost",
         .port = 8080,
-        .created_at = std.time.milliTimestamp(),
-        .last_used = std.time.milliTimestamp(),
+        .created_at = milliTimestamp(),
+        .last_used = milliTimestamp(),
     };
     defer conn.socket.close();
 

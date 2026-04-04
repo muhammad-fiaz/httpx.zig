@@ -8,7 +8,8 @@
 //! - Reader/Writer interfaces for streaming
 
 const std = @import("std");
-const net = std.net;
+const compat = @import("compat.zig");
+const net = compat;
 const posix = std.posix;
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -36,7 +37,7 @@ pub const ShutdownMode = enum {
     both,
 };
 
-fn toPosixShutdownHow(mode: ShutdownMode) posix.ShutdownHow {
+fn toPosixShutdownHow(mode: ShutdownMode) compat.ShutdownHow {
     return switch (mode) {
         .recv => .recv,
         .send => .send,
@@ -66,11 +67,22 @@ fn tcpNoDelayOption() u32 {
 pub fn init() NetInitError!void {
     if (!is_windows) return;
 
-    // Zig's std.posix APIs usually handle WSA initialization internally, but we
-    // expose this for explicit control and compatibility with other networking code.
-    if (@hasDecl(std.os.windows, "WSAStartup")) {
-        _ = std.os.windows.WSAStartup(2, 2) catch return error.InitializationError;
-    }
+    const WSADATA = extern struct {
+        wVersion: u16,
+        wHighVersion: u16,
+        iMaxSockets: u16,
+        iMaxUdpDg: u16,
+        lpVendorInfo: ?[*]u8,
+        szDescription: [257]u8,
+        szSystemStatus: [129]u8,
+    };
+    const WSAStartup = struct {
+        extern "ws2_32" fn WSAStartup(wVersionRequested: u16, lpWSAData: *WSADATA) callconv(.c) c_int;
+    }.WSAStartup;
+
+    var wsa_data: WSADATA = undefined;
+    const result = WSAStartup(0x0202, &wsa_data); // Request version 2.2
+    if (result != 0) return error.InitializationError;
 }
 
 /// Deinitializes the platform networking subsystem.
@@ -78,9 +90,10 @@ pub fn init() NetInitError!void {
 /// On Windows this calls `WSACleanup`; on other platforms it is a no-op.
 pub fn deinit() void {
     if (!is_windows) return;
-    if (@hasDecl(std.os.windows, "WSACleanup")) {
-        _ = std.os.windows.WSACleanup() catch return;
-    }
+    const WSACleanup = struct {
+        extern "ws2_32" fn WSACleanup() callconv(.c) c_int;
+    }.WSACleanup;
+    _ = WSACleanup();
 }
 
 /// Adapter that exposes a `std.Io.Reader` backed by a connected `Socket`.
@@ -219,7 +232,7 @@ pub const SocketIoWriter = struct {
         return w.consume(total_sent);
     }
 
-    fn sendFile(w: *Io.Writer, file_reader: *std.fs.File.Reader, limit: Io.Limit) Io.Writer.FileAllError!usize {
+    fn sendFile(w: *Io.Writer, file_reader: *Io.File.Reader, limit: Io.Limit) Io.Writer.FileAllError!usize {
         const p = parent(w);
 
         var total: usize = 0;
@@ -229,7 +242,8 @@ pub const SocketIoWriter = struct {
             const chunk_len = @min(w.buffer.len, remaining);
             if (chunk_len == 0) break;
 
-            const n_read = file_reader.file.read(w.buffer[0..chunk_len]) catch return error.ReadFailed;
+            var iov = [_][]u8{w.buffer[0..chunk_len]};
+            const n_read = file_reader.interface.readVec(&iov) catch return error.ReadFailed;
             if (n_read == 0) break;
 
             p.socket.sendAll(w.buffer[0..n_read]) catch return error.WriteFailed;
@@ -274,21 +288,22 @@ pub const Socket = struct {
     /// Creates a new IPv4 TCP socket.
     pub fn createV4() !Self {
         try init();
-        const handle = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+        const handle = try compat.socketCreate(posix.AF.INET, posix.SOCK.STREAM, 0);
         return .{ .handle = handle };
     }
 
     /// Creates a new IPv6 TCP socket.
     pub fn createV6() !Self {
         try init();
-        const handle = try posix.socket(posix.AF.INET6, posix.SOCK.STREAM, 0);
+        const handle = try compat.socketCreate(posix.AF.INET6, posix.SOCK.STREAM, 0);
         return .{ .handle = handle };
     }
 
     /// Creates a new TCP socket using the address family of the provided address.
     pub fn createForAddress(addr: net.Address) !Self {
         try init();
-        const handle = try posix.socket(addr.any.family, posix.SOCK.STREAM, 0);
+        const sa_in: *align(1) const struct { family: u16 } = @ptrCast(&addr.any);
+        const handle = try compat.socketCreate(sa_in.family, posix.SOCK.STREAM, 0);
         return .{ .handle = handle };
     }
 
@@ -300,7 +315,7 @@ pub const Socket = struct {
     /// Closes the socket and releases resources.
     pub fn close(self: *Self) void {
         if (self.isValid()) {
-            posix.close(self.handle);
+            compat.socketClose(self.handle);
             self.handle = INVALID_SOCKET;
             self.connected = false;
         }
@@ -313,7 +328,7 @@ pub const Socket = struct {
 
     /// Connects to the specified address.
     pub fn connect(self: *Self, addr: net.Address) !void {
-        try posix.connect(self.handle, &addr.any, addr.getOsSockLen());
+        try compat.socketConnect(self.handle, &addr.any, addr.getOsSockLen());
         self.connected = true;
     }
 
@@ -331,7 +346,7 @@ pub const Socket = struct {
 
     /// Sends data through the socket, returning bytes sent.
     pub fn send(self: *Self, data: []const u8) !usize {
-        return posix.send(self.handle, data, 0);
+        return compat.socketSend(self.handle, data, 0);
     }
 
     /// Compatibility alias for stream-style write APIs.
@@ -354,19 +369,7 @@ pub const Socket = struct {
 
     /// Receives data into the buffer, returning bytes received.
     pub fn recv(self: *Self, buffer: []u8) !usize {
-        if (is_windows) {
-            const ws2_32 = std.os.windows.ws2_32;
-            const rc = ws2_32.recv(
-                self.handle,
-                @ptrCast(buffer.ptr),
-                @intCast(buffer.len),
-                0,
-            );
-            if (rc == ws2_32.SOCKET_ERROR) return error.RecvFailed;
-            return @intCast(rc);
-        }
-
-        return posix.recv(self.handle, buffer, 0);
+        return compat.socketRecv(self.handle, buffer, 0);
     }
 
     /// Compatibility alias for stream-style read APIs.
@@ -376,70 +379,70 @@ pub const Socket = struct {
 
     /// Sets a socket option.
     pub fn setOption(self: *Self, level: u32, optname: u32, value: []const u8) !void {
-        try posix.setsockopt(self.handle, level, optname, value);
+        try compat.setsockoptCompat(self.handle, @intCast(level), optname, value);
     }
 
     /// Enables or disables TCP_NODELAY (Nagle's algorithm).
     pub fn setNoDelay(self: *Self, enable: bool) !void {
         const value: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.handle, posix.IPPROTO.TCP, tcpNoDelayOption(), std.mem.asBytes(&value));
+        try compat.setsockoptCompat(self.handle, posix.IPPROTO.TCP, tcpNoDelayOption(), std.mem.asBytes(&value));
     }
 
     /// Sets the receive timeout in milliseconds.
     pub fn setRecvTimeout(self: *Self, ms: u64) !void {
         if (is_windows) {
             const value_ms: u32 = @intCast(@min(ms, @as(u64, std.math.maxInt(u32))));
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&value_ms));
+            try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&value_ms));
         } else {
             const tv = posix.timeval{
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast((ms % 1000) * 1000),
             };
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
+            try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
         }
     }
 
     /// Sets the receive buffer size in bytes.
     pub fn setRecvBufferSize(self: *Self, bytes: usize) !void {
         const value: i32 = @intCast(@min(bytes, @as(usize, std.math.maxInt(i32))));
-        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVBUF, std.mem.asBytes(&value));
+        try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.RCVBUF, std.mem.asBytes(&value));
     }
 
     /// Sets the send timeout in milliseconds.
     pub fn setSendTimeout(self: *Self, ms: u64) !void {
         if (is_windows) {
             const value_ms: u32 = @intCast(@min(ms, @as(u64, std.math.maxInt(u32))));
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&value_ms));
+            try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&value_ms));
         } else {
             const tv = posix.timeval{
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast((ms % 1000) * 1000),
             };
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv));
+            try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv));
         }
     }
 
     /// Sets the send buffer size in bytes.
     pub fn setSendBufferSize(self: *Self, bytes: usize) !void {
         const value: i32 = @intCast(@min(bytes, @as(usize, std.math.maxInt(i32))));
-        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&value));
+        try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&value));
     }
 
     /// Enables or disables keep-alive probes.
     pub fn setKeepAlive(self: *Self, enable: bool) !void {
         const value: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&value));
+        try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&value));
     }
 
     /// Enables or disables address reuse.
     pub fn setReuseAddr(self: *Self, enable: bool) !void {
         const value: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&value));
+        try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&value));
     }
 
     /// Binds the socket to an address.
     pub fn bind(self: *Self, addr: net.Address) !void {
-        try posix.bind(self.handle, &addr.any, addr.getOsSockLen());
+        try compat.socketBind(self.handle, &addr.any, addr.getOsSockLen());
     }
 
     /// Resolves and binds to `host:port`.
@@ -450,18 +453,14 @@ pub const Socket = struct {
 
     /// Starts listening for connections.
     pub fn listen(self: *Self, backlog: u31) !void {
-        try posix.listen(self.handle, backlog);
+        try compat.socketListen(self.handle, backlog);
     }
 
     /// Accepts an incoming connection.
     pub fn accept(self: *Self) !AcceptResult {
         var addr: posix.sockaddr = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-        const accept_params_len = comptime @typeInfo(@TypeOf(posix.accept)).@"fn".params.len;
-        const handle = if (accept_params_len == 4)
-            try posix.accept(self.handle, &addr, &addr_len, 0)
-        else
-            try posix.accept(self.handle, &addr, &addr_len);
+        const handle = try compat.socketAccept(self.handle, &addr, &addr_len);
         return .{
             .socket = Socket.fromHandle(handle),
             .addr = net.Address{ .any = addr },
@@ -470,7 +469,7 @@ pub const Socket = struct {
 
     /// Shuts down one or both halves of the connection.
     pub fn shutdown(self: *Self, mode: ShutdownMode) !void {
-        try posix.shutdown(self.handle, toPosixShutdownHow(mode));
+        try compat.socketShutdown(self.handle, toPosixShutdownHow(mode));
     }
 
     /// Shuts down the receive direction.
@@ -492,7 +491,7 @@ pub const Socket = struct {
     pub fn getLocalAddress(self: *Self) !net.Address {
         var addr: posix.sockaddr = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-        try posix.getsockname(self.handle, &addr, &addr_len);
+        try compat.socketGetsockname(self.handle, &addr, &addr_len);
         return net.Address{ .any = addr };
     }
 
@@ -500,7 +499,7 @@ pub const Socket = struct {
     pub fn getPeerAddress(self: *Self) !net.Address {
         var addr: posix.sockaddr = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-        try posix.getpeername(self.handle, &addr, &addr_len);
+        try compat.socketGetpeername(self.handle, &addr, &addr_len);
         return net.Address{ .any = addr };
     }
 
@@ -580,7 +579,7 @@ pub const TcpListener = struct {
     pub fn getLocalAddress(self: *Self) !net.Address {
         var addr: posix.sockaddr = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-        try posix.getsockname(self.socket.handle, &addr, &addr_len);
+        try compat.socketGetsockname(self.socket.handle, &addr, &addr_len);
         return net.Address{ .any = addr };
     }
 };
@@ -603,28 +602,29 @@ pub const UdpSocket = struct {
     /// Creates a new UDP socket for IPv4.
     pub fn createV4() !Self {
         try init();
-        const handle = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
+        const handle = try compat.socketCreate(posix.AF.INET, posix.SOCK.DGRAM, 0);
         return .{ .handle = handle };
     }
 
     /// Creates a new UDP socket for IPv6.
     pub fn createV6() !Self {
         try init();
-        const handle = try posix.socket(posix.AF.INET6, posix.SOCK.DGRAM, 0);
+        const handle = try compat.socketCreate(posix.AF.INET6, posix.SOCK.DGRAM, 0);
         return .{ .handle = handle };
     }
 
     /// Creates a UDP socket using the address family of the provided address.
     pub fn createForAddress(addr: net.Address) !Self {
         try init();
-        const handle = try posix.socket(addr.any.family, posix.SOCK.DGRAM, 0);
+        const sa_in: *align(1) const struct { family: u16 } = @ptrCast(&addr.any);
+        const handle = try compat.socketCreate(sa_in.family, posix.SOCK.DGRAM, 0);
         return .{ .handle = handle };
     }
 
     /// Closes the socket and releases resources.
     pub fn close(self: *Self) void {
         if (self.isValid()) {
-            posix.close(self.handle);
+            compat.socketClose(self.handle);
             self.handle = INVALID_SOCKET;
             self.connected = false;
         }
@@ -637,7 +637,7 @@ pub const UdpSocket = struct {
 
     /// Binds the socket to an address.
     pub fn bind(self: *Self, addr: net.Address) !void {
-        try posix.bind(self.handle, &addr.any, addr.getOsSockLen());
+        try compat.socketBind(self.handle, &addr.any, addr.getOsSockLen());
     }
 
     /// Resolves and binds to `host:port`.
@@ -649,7 +649,7 @@ pub const UdpSocket = struct {
     /// Connects the UDP socket to a default peer address.
     /// After calling this, `send`/`recv` operate on that peer.
     pub fn connect(self: *Self, addr: net.Address) !void {
-        try posix.connect(self.handle, &addr.any, addr.getOsSockLen());
+        try compat.socketConnect(self.handle, &addr.any, addr.getOsSockLen());
         self.connected = true;
     }
 
@@ -667,7 +667,7 @@ pub const UdpSocket = struct {
 
     /// Sends a datagram to the connected peer.
     pub fn send(self: *Self, data: []const u8) !usize {
-        return posix.send(self.handle, data, 0);
+        return compat.socketSend(self.handle, data, 0);
     }
 
     /// Compatibility alias for stream-style write APIs.
@@ -677,21 +677,7 @@ pub const UdpSocket = struct {
 
     /// Sends a datagram to a specific address.
     pub fn sendTo(self: *Self, addr: net.Address, data: []const u8) !usize {
-        if (is_windows) {
-            const ws2_32 = std.os.windows.ws2_32;
-            const rc = ws2_32.sendto(
-                self.handle,
-                @ptrCast(data.ptr),
-                @intCast(data.len),
-                0,
-                @ptrCast(&addr.any),
-                @intCast(addr.getOsSockLen()),
-            );
-            if (rc == ws2_32.SOCKET_ERROR) return UdpError.SendFailed;
-            return @intCast(rc);
-        }
-
-        return posix.sendto(self.handle, data, 0, &addr.any, addr.getOsSockLen());
+        return compat.socketSendTo(self.handle, data, 0, &addr.any, addr.getOsSockLen());
     }
 
     /// Resolves destination host and sends a datagram.
@@ -702,19 +688,7 @@ pub const UdpSocket = struct {
 
     /// Receives a datagram from the connected peer.
     pub fn recv(self: *Self, buffer: []u8) !usize {
-        if (is_windows) {
-            const ws2_32 = std.os.windows.ws2_32;
-            const rc = ws2_32.recv(
-                self.handle,
-                @ptrCast(buffer.ptr),
-                @intCast(buffer.len),
-                0,
-            );
-            if (rc == ws2_32.SOCKET_ERROR) return UdpError.RecvFailed;
-            return @intCast(rc);
-        }
-
-        return posix.recv(self.handle, buffer, 0);
+        return compat.socketRecv(self.handle, buffer, 0);
     }
 
     /// Compatibility alias for stream-style read APIs.
@@ -726,17 +700,9 @@ pub const UdpSocket = struct {
     pub fn recvFrom(self: *Self, buffer: []u8) !struct { n: usize, addr: net.Address } {
         var addr: posix.sockaddr = undefined;
         if (comptime builtin.os.tag == .windows) {
-            const ws2_32 = std.os.windows.ws2_32;
-            var addr_len: i32 = @intCast(@sizeOf(posix.sockaddr));
-            const rc = ws2_32.recvfrom(
-                self.handle,
-                @ptrCast(buffer.ptr),
-                @intCast(buffer.len),
-                0,
-                @ptrCast(&addr),
-                &addr_len,
-            );
-            if (rc == ws2_32.SOCKET_ERROR) return UdpError.RecvFailed;
+            var addr_len: c_int = @intCast(@sizeOf(posix.sockaddr));
+            const rc = compat.ws2RecvFrom(self.handle, buffer.ptr, @intCast(buffer.len), 0, &addr, &addr_len);
+            if (rc < 0) return UdpError.RecvFailed;
             return .{ .n = @intCast(rc), .addr = net.Address{ .any = addr } };
         } else {
             while (true) {
@@ -752,8 +718,6 @@ pub const UdpSocket = struct {
                     .TIMEDOUT => return error.ConnectionTimedOut,
                     .NOMEM => return error.SystemResources,
                     .NOTCONN => return error.SocketNotConnected,
-                    // Closing the socket from another thread while blocked in recvfrom
-                    // is a valid shutdown path for the HTTP/3 server loop.
                     .BADF, .NOTSOCK, .FAULT, .INVAL => return UdpError.RecvFailed,
                     else => return UdpError.RecvFailed,
                 }
@@ -764,60 +728,60 @@ pub const UdpSocket = struct {
     /// Enables or disables address reuse.
     pub fn setReuseAddr(self: *Self, enable: bool) !void {
         const value: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&value));
+        try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&value));
     }
 
     /// Enables or disables UDP broadcast.
     pub fn setBroadcast(self: *Self, enable: bool) !void {
         const value: u32 = if (enable) 1 else 0;
-        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.BROADCAST, std.mem.asBytes(&value));
+        try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.BROADCAST, std.mem.asBytes(&value));
     }
 
     /// Sets the receive timeout in milliseconds.
     pub fn setRecvTimeout(self: *Self, ms: u64) !void {
         if (is_windows) {
             const value_ms: u32 = @intCast(@min(ms, @as(u64, std.math.maxInt(u32))));
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&value_ms));
+            try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&value_ms));
         } else {
             const tv = posix.timeval{
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast((ms % 1000) * 1000),
             };
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
+            try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv));
         }
     }
 
     /// Sets the receive buffer size in bytes.
     pub fn setRecvBufferSize(self: *Self, bytes: usize) !void {
         const value: i32 = @intCast(@min(bytes, @as(usize, std.math.maxInt(i32))));
-        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.RCVBUF, std.mem.asBytes(&value));
+        try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.RCVBUF, std.mem.asBytes(&value));
     }
 
     /// Sets the send timeout in milliseconds.
     pub fn setSendTimeout(self: *Self, ms: u64) !void {
         if (is_windows) {
             const value_ms: u32 = @intCast(@min(ms, @as(u64, std.math.maxInt(u32))));
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&value_ms));
+            try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&value_ms));
         } else {
             const tv = posix.timeval{
                 .sec = @intCast(ms / 1000),
                 .usec = @intCast((ms % 1000) * 1000),
             };
-            try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv));
+            try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv));
         }
     }
 
     /// Sets the send buffer size in bytes.
     pub fn setSendBufferSize(self: *Self, bytes: usize) !void {
         const value: i32 = @intCast(@min(bytes, @as(usize, std.math.maxInt(i32))));
-        try posix.setsockopt(self.handle, posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&value));
+        try compat.setsockoptCompat(self.handle, posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&value));
     }
 
     /// Returns the local address the socket is bound to.
     pub fn getLocalAddress(self: *Self) !net.Address {
         var addr: posix.sockaddr = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-        try posix.getsockname(self.handle, &addr, &addr_len);
+        try compat.socketGetsockname(self.handle, &addr, &addr_len);
         return net.Address{ .any = addr };
     }
 
@@ -825,7 +789,7 @@ pub const UdpSocket = struct {
     pub fn getPeerAddress(self: *Self) !net.Address {
         var addr: posix.sockaddr = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-        try posix.getpeername(self.handle, &addr, &addr_len);
+        try compat.socketGetpeername(self.handle, &addr, &addr_len);
         return net.Address{ .any = addr };
     }
 };

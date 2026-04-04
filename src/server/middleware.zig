@@ -69,7 +69,7 @@ pub fn cors(comptime config: CorsConfig) Middleware {
         .name = "cors",
         .handler = struct {
             fn methodList(allocator: std.mem.Allocator, methods: []const types.Method) ![]u8 {
-                var out = std.ArrayListUnmanaged(u8){};
+                var out = std.ArrayListUnmanaged(u8).empty;
                 errdefer out.deinit(allocator);
                 const writer = out.writer(allocator);
 
@@ -81,7 +81,7 @@ pub fn cors(comptime config: CorsConfig) Middleware {
             }
 
             fn headerList(allocator: std.mem.Allocator, headers_in: []const []const u8) ![]u8 {
-                var out = std.ArrayListUnmanaged(u8){};
+                var out = std.ArrayListUnmanaged(u8).empty;
                 errdefer out.deinit(allocator);
                 const writer = out.writer(allocator);
 
@@ -288,3 +288,4 @@ test "Helmet middleware" {
     const mw = helmet();
     try std.testing.expectEqualStrings("helmet", mw.name);
 }
+

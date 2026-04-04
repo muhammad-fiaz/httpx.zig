@@ -185,7 +185,7 @@ pub const Context = struct {
 
     /// Sends one-shot Server-Sent Events payload.
     pub fn sse(self: *Self, events: []const SseEvent) !Response {
-        var payload = std.ArrayListUnmanaged(u8){};
+        var payload = std.ArrayListUnmanaged(u8).empty;
         defer payload.deinit(self.allocator);
         const writer = payload.writer(self.allocator);
 
@@ -509,7 +509,7 @@ pub const Server = struct {
         var request_headers = Headers.init(self.allocator);
         defer request_headers.deinit();
 
-        var request_body = std.ArrayListUnmanaged(u8){};
+        var request_body = std.ArrayListUnmanaged(u8).empty;
         defer request_body.deinit(self.allocator);
 
         var method_raw: []const u8 = "GET";
@@ -531,7 +531,7 @@ pub const Server = struct {
         var request_stream_id: ?u31 = null;
         var request_done = false;
 
-        var pending_headers_block = std.ArrayListUnmanaged(u8){};
+        var pending_headers_block = std.ArrayListUnmanaged(u8).empty;
         defer pending_headers_block.deinit(self.allocator);
         var pending_headers_flags: u8 = 0;
         var waiting_continuation = false;
@@ -761,10 +761,10 @@ pub const Server = struct {
     ) !void {
         try self.ensureContentLengthHeader(response);
 
-        var response_headers = std.ArrayListUnmanaged(hpack.HeaderEntry){};
+        var response_headers = std.ArrayListUnmanaged(hpack.HeaderEntry).empty;
         defer response_headers.deinit(self.allocator);
 
-        var owned_header_names = std.ArrayListUnmanaged([]u8){};
+        var owned_header_names = std.ArrayListUnmanaged([]u8).empty;
         defer {
             for (owned_header_names.items) |name| {
                 self.allocator.free(name);
@@ -823,10 +823,10 @@ pub const Server = struct {
     }
 
     fn handleHttp3Transaction(self: *Self, peer_addr: net.Address, first_datagram: []const u8) !void {
-        var control_stream_payload = std.ArrayListUnmanaged(u8){};
+        var control_stream_payload = std.ArrayListUnmanaged(u8).empty;
         defer control_stream_payload.deinit(self.allocator);
 
-        var request_stream_payload = std.ArrayListUnmanaged(u8){};
+        var request_stream_payload = std.ArrayListUnmanaged(u8).empty;
         defer request_stream_payload.deinit(self.allocator);
 
         var request_stream_id: ?u64 = null;
@@ -868,7 +868,7 @@ pub const Server = struct {
         var request_headers = Headers.init(self.allocator);
         defer request_headers.deinit();
 
-        var request_body = std.ArrayListUnmanaged(u8){};
+        var request_body = std.ArrayListUnmanaged(u8).empty;
         defer request_body.deinit(self.allocator);
 
         var method_raw: []const u8 = "GET";
@@ -1002,10 +1002,10 @@ pub const Server = struct {
         );
         defer qpack_ctx.deinit();
 
-        var response_headers = std.ArrayListUnmanaged(qpack.HeaderEntry){};
+        var response_headers = std.ArrayListUnmanaged(qpack.HeaderEntry).empty;
         defer response_headers.deinit(self.allocator);
 
-        var owned_header_names = std.ArrayListUnmanaged([]u8){};
+        var owned_header_names = std.ArrayListUnmanaged([]u8).empty;
         defer {
             for (owned_header_names.items) |name| {
                 self.allocator.free(name);
@@ -1029,18 +1029,18 @@ pub const Server = struct {
         const encoded_headers = try qpack.encodeHeaders(&qpack_ctx, response_headers.items, self.allocator);
         defer self.allocator.free(encoded_headers);
 
-        var response_stream_payload = std.ArrayListUnmanaged(u8){};
+        var response_stream_payload = std.ArrayListUnmanaged(u8).empty;
         defer response_stream_payload.deinit(self.allocator);
         try http.appendHttp3Frame(&response_stream_payload, self.allocator, .headers, encoded_headers);
         if (response.body) |body| {
             try http.appendHttp3Frame(&response_stream_payload, self.allocator, .data, body);
         }
 
-        var settings_payload = std.ArrayListUnmanaged(u8){};
+        var settings_payload = std.ArrayListUnmanaged(u8).empty;
         defer settings_payload.deinit(self.allocator);
         try http.encodeHttp3SettingsPayload(self.config.http3_settings, self.allocator, &settings_payload);
 
-        var control_stream_payload = std.ArrayListUnmanaged(u8){};
+        var control_stream_payload = std.ArrayListUnmanaged(u8).empty;
         defer control_stream_payload.deinit(self.allocator);
         try http.appendVarInt(&control_stream_payload, self.allocator, @intFromEnum(quic.Http3StreamType.control));
         try http.appendHttp3Frame(&control_stream_payload, self.allocator, .settings, settings_payload.items);
@@ -1157,7 +1157,7 @@ pub const Server = struct {
 
     /// Sets the `Allow` header for automatic OPTIONS and 405 responses.
     fn setAllowHeader(self: *Self, headers: *Headers, methods: []const types.Method) !void {
-        var allow = std.ArrayListUnmanaged(u8){};
+        var allow = std.ArrayListUnmanaged(u8).empty;
         defer allow.deinit(self.allocator);
         const writer = allow.writer(self.allocator);
 
@@ -1315,7 +1315,7 @@ fn buildHttp3Datagram(
     };
     const frame_len = try stream_frame.encode(frame_storage);
 
-    var packet = std.ArrayListUnmanaged(u8){};
+    var packet = std.ArrayListUnmanaged(u8).empty;
     errdefer packet.deinit(allocator);
 
     var header_buf: [128]u8 = undefined;
@@ -1336,7 +1336,7 @@ fn buildHttp3Datagram(
 }
 
 fn trailerHeaderNames(allocator: Allocator, headers: *const Headers) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
     const writer = out.writer(allocator);
 
@@ -1470,3 +1470,5 @@ test "Server any() registers all methods" {
     try std.testing.expect(server.router.find(.TRACE, "/wild") != null);
     try std.testing.expect(server.router.find(.CONNECT, "/wild") != null);
 }
+
+

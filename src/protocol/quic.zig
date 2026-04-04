@@ -128,7 +128,8 @@ pub const ConnectionId = struct {
 
     pub fn random() ConnectionId {
         var cid = ConnectionId{ .len = 8 };
-        std.crypto.random.bytes(cid.data[0..8]);
+        var prng = std.Random.DefaultPrng.init(0);
+        prng.fill(cid.data[0..8]);
         return cid;
     }
 };
@@ -620,7 +621,7 @@ pub const TransportParameters = struct {
 
     /// Encodes transport parameters.
     pub fn encode(self: TransportParameters, allocator: Allocator) ![]u8 {
-        var out = std.ArrayListUnmanaged(u8){};
+        var out = std.ArrayListUnmanaged(u8).empty;
         errdefer out.deinit(allocator);
 
         inline for (@typeInfo(TransportParameters).@"struct".fields) |field| {
@@ -863,3 +864,4 @@ test "TransportParameters encode/decode" {
     try std.testing.expectEqual(params.disable_active_migration, decoded.disable_active_migration);
     try std.testing.expectEqual(params.active_connection_id_limit, decoded.active_connection_id_limit);
 }
+

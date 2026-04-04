@@ -133,14 +133,13 @@ pub const PercentEncoding = struct {
 
     /// Encodes a string for use in URLs.
     pub fn encode(allocator: Allocator, input: []const u8) ![]u8 {
-        var result = std.ArrayListUnmanaged(u8){};
-        const writer = result.writer(allocator);
+        var result = std.ArrayListUnmanaged(u8).empty;
 
         for (input) |c| {
             if (std.mem.indexOfScalar(u8, unreserved, c) != null) {
-                try writer.writeByte(c);
+                try result.append(allocator, c);
             } else {
-                try writer.print("%{X:0>2}", .{c});
+                try result.print(allocator, "%{X:0>2}", .{c});
             }
         }
 
@@ -149,7 +148,7 @@ pub const PercentEncoding = struct {
 
     /// Decodes a percent-encoded string.
     pub fn decode(allocator: Allocator, input: []const u8) ![]u8 {
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayListUnmanaged(u8).empty;
 
         var i: usize = 0;
         while (i < input.len) {
@@ -175,16 +174,15 @@ pub const PercentEncoding = struct {
 
 /// Encodes key-value pairs as application/x-www-form-urlencoded.
 pub fn encodeFormData(allocator: Allocator, params: []const struct { []const u8, []const u8 }) ![]u8 {
-    var result = std.ArrayListUnmanaged(u8){};
-    const writer = result.writer(allocator);
+    var result = std.ArrayListUnmanaged(u8).empty;
 
     for (params, 0..) |param, idx| {
-        if (idx > 0) try writer.writeByte('&');
+        if (idx > 0) try result.append(allocator, '&');
         const key = try PercentEncoding.encode(allocator, param[0]);
         defer allocator.free(key);
         const value = try PercentEncoding.encode(allocator, param[1]);
         defer allocator.free(value);
-        try writer.print("{s}={s}", .{ key, value });
+        try result.print(allocator, "{s}={s}", .{ key, value });
     }
 
     return result.toOwnedSlice(allocator);
@@ -261,3 +259,4 @@ test "Form data encoding" {
 
     try std.testing.expect(std.mem.indexOf(u8, encoded, "name=John%20Doe") != null);
 }
+

@@ -168,7 +168,7 @@ pub const DynamicEntry = struct {
 /// QPACK dynamic table with Required Insert Count tracking
 pub const DynamicTable = struct {
     allocator: Allocator,
-    entries: std.ArrayListUnmanaged(DynamicEntry) = .{},
+    entries: std.ArrayListUnmanaged(DynamicEntry) = .empty,
     current_size: usize = 0,
     max_size: usize = 0, // Default 0, set via SETTINGS
     /// Number of entries ever inserted (used for absolute indexing)
@@ -406,7 +406,7 @@ pub fn encodeHeaders(
     headers: []const HeaderEntry,
     allocator: Allocator,
 ) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
 
     // Required Insert Count
@@ -470,7 +470,7 @@ pub fn decodeHeaders(
     data: []const u8,
     allocator: Allocator,
 ) ![]DecodedHeader {
-    var headers = std.ArrayListUnmanaged(DecodedHeader){};
+    var headers = std.ArrayListUnmanaged(DecodedHeader).empty;
     errdefer {
         for (headers.items) |h| {
             allocator.free(h.name);
@@ -670,7 +670,7 @@ test "QPACK decode dynamic indexed field" {
 
     try ctx.dynamic_table.add("x-dyn", "one");
 
-    var block = std.ArrayListUnmanaged(u8){};
+    var block = std.ArrayListUnmanaged(u8).empty;
     defer block.deinit(allocator);
     try block.append(allocator, 1); // Required Insert Count
     try block.append(allocator, 0); // Delta Base
@@ -698,7 +698,7 @@ test "QPACK decode post-base indexed field" {
     try ctx.dynamic_table.add("x-a", "v1"); // absolute index 0
     try ctx.dynamic_table.add("x-b", "v2"); // absolute index 1
 
-    var block = std.ArrayListUnmanaged(u8){};
+    var block = std.ArrayListUnmanaged(u8).empty;
     defer block.deinit(allocator);
     try block.append(allocator, 1); // Required Insert Count
     try block.append(allocator, 0); // Delta Base => base = 1
@@ -717,3 +717,5 @@ test "QPACK decode post-base indexed field" {
     try std.testing.expectEqualStrings("x-b", decoded[0].name);
     try std.testing.expectEqualStrings("v2", decoded[0].value);
 }
+
+

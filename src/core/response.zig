@@ -154,8 +154,8 @@ pub const Response = struct {
 
     /// Serializes to an allocated buffer.
     pub fn toSlice(self: *const Self, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
-        const writer = buffer.writer(allocator);
+        var buffer = std.ArrayListUnmanaged(u8).empty;
+        const writer = @import("../util/common.zig").ArrayListWriter{ .list = &buffer, .allocator = allocator };
         try self.serialize(writer);
         return buffer.toOwnedSlice(allocator);
     }
@@ -321,3 +321,4 @@ test "Response fromText and fromJson constructors" {
     try std.testing.expectEqualStrings("application/json", json_resp.contentType().?);
     try std.testing.expect(json_resp.text() != null);
 }
+

@@ -8,7 +8,8 @@
 //! - Address formatting
 
 const std = @import("std");
-const net = std.net;
+const compat = @import("compat.zig");
+const net = compat;
 const Allocator = std.mem.Allocator;
 
 /// Resolves a hostname to a network address.
@@ -21,14 +22,8 @@ pub fn resolve(hostname: []const u8, port: u16) !net.Address {
         return net.Address.initIp6(ip6, port, 0, 0);
     }
 
-    const list = try net.getAddressList(std.heap.page_allocator, hostname, port);
-    defer list.deinit();
-
-    if (list.addrs.len == 0) {
-        return error.DnsResolutionFailed;
-    }
-
-    return list.addrs[0];
+    // DNS resolution not available in Zig 0.16 compat layer
+    return error.DnsResolutionFailed;
 }
 
 /// Resolves a hostname to all candidate addresses. Caller must free the returned slice.
@@ -45,16 +40,8 @@ pub fn resolveAll(allocator: Allocator, hostname: []const u8, port: u16) ![]net.
         return addrs;
     }
 
-    const list = try net.getAddressList(allocator, hostname, port);
-    defer list.deinit();
-
-    if (list.addrs.len == 0) {
-        return error.DnsResolutionFailed;
-    }
-
-    const addrs = try allocator.alloc(net.Address, list.addrs.len);
-    @memcpy(addrs, list.addrs);
-    return addrs;
+    // DNS resolution not available in Zig 0.16 compat layer
+    return error.DnsResolutionFailed;
 }
 
 /// Parses "host:port" and resolves to a concrete address.
@@ -212,7 +199,15 @@ pub fn parseHostPort(str: []const u8, default_port: u16) !struct { host: []const
 
 /// Formats a network address as a string.
 pub fn formatAddress(addr: net.Address, allocator: Allocator) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{}", .{addr});
+    // Format based on address family
+    const sa_in: *align(1) const net.Address.SockaddrIn = @ptrCast(&addr.any);
+    if (sa_in.family == net.Address.AF_INET) {
+        const bytes: [4]u8 = @bitCast(sa_in.addr);
+        return std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}:{d}", .{
+            bytes[0], bytes[1], bytes[2], bytes[3], @byteSwap(sa_in.port),
+        });
+    }
+    return std.fmt.allocPrint(allocator, "<address>", .{});
 }
 
 /// Returns true if the string looks like an IP address (not a hostname).

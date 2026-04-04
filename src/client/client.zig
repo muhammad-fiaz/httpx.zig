@@ -10,7 +10,22 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const net = std.net;
+const builtin = @import("builtin");
+
+fn sleepMs(ms: u64) void {
+    if (builtin.os.tag == .windows) {
+        const kernel32 = struct {
+            extern "kernel32" fn Sleep(dwMilliseconds: u32) callconv(.c) void;
+        };
+        kernel32.Sleep(@intCast(@min(ms, std.math.maxInt(u32))));
+    } else {
+        // Busy-wait fallback for non-Windows platforms
+        var i: u64 = 0;
+        while (i < ms * 1000) : (i += 1) {
+            std.Thread.yield() catch {};
+        }
+    }
+}
 
 const types = @import("../core/types.zig");
 const meta = @import("../core/meta.zig");
@@ -220,7 +235,7 @@ pub const Client = struct {
                 if (policy.retry_on_connection_error and can_retry_method and attempt < policy.max_retries and isRetryableRequestError(err)) {
                     attempt += 1;
                     const delay_ms = policy.calculateDelay(attempt);
-                    if (delay_ms > 0) std.Thread.sleep(delay_ms * std.time.ns_per_ms);
+                    if (delay_ms > 0) sleepMs(delay_ms);
                     continue;
                 }
                 return err;
@@ -230,7 +245,7 @@ pub const Client = struct {
                 res.deinit();
                 attempt += 1;
                 const delay_ms = policy.calculateDelay(attempt);
-                if (delay_ms > 0) std.Thread.sleep(delay_ms * std.time.ns_per_ms);
+                if (delay_ms > 0) sleepMs(delay_ms);
                 continue;
             }
 
@@ -426,10 +441,10 @@ pub const Client = struct {
         defer if (authority_buf) |buf| self.allocator.free(buf);
         const authority = try buildAuthority(self.allocator, req, &authority_buf);
 
-        var header_entries = std.ArrayListUnmanaged(qpack.HeaderEntry){};
+        var header_entries = std.ArrayListUnmanaged(qpack.HeaderEntry).empty;
         defer header_entries.deinit(self.allocator);
 
-        var owned_header_names = std.ArrayListUnmanaged([]u8){};
+        var owned_header_names = std.ArrayListUnmanaged([]u8).empty;
         defer {
             for (owned_header_names.items) |name| self.allocator.free(name);
             owned_header_names.deinit(self.allocator);
@@ -459,7 +474,7 @@ pub const Client = struct {
         const headers_block = try qpack.encodeHeaders(&qpack_encoder, header_entries.items, self.allocator);
         defer self.allocator.free(headers_block);
 
-        var request_stream_payload = std.ArrayListUnmanaged(u8){};
+        var request_stream_payload = std.ArrayListUnmanaged(u8).empty;
         defer request_stream_payload.deinit(self.allocator);
         try http.appendHttp3Frame(&request_stream_payload, self.allocator, .headers, headers_block);
 
@@ -469,11 +484,11 @@ pub const Client = struct {
             }
         }
 
-        var settings_payload = std.ArrayListUnmanaged(u8){};
+        var settings_payload = std.ArrayListUnmanaged(u8).empty;
         defer settings_payload.deinit(self.allocator);
         try http.encodeHttp3SettingsPayload(self.config.http3_settings, self.allocator, &settings_payload);
 
-        var control_stream_payload = std.ArrayListUnmanaged(u8){};
+        var control_stream_payload = std.ArrayListUnmanaged(u8).empty;
         defer control_stream_payload.deinit(self.allocator);
         try http.appendVarInt(&control_stream_payload, self.allocator, @intFromEnum(quic.Http3StreamType.control));
         try http.appendHttp3Frame(&control_stream_payload, self.allocator, .settings, settings_payload.items);
@@ -484,10 +499,10 @@ pub const Client = struct {
         try self.sendHttp3StreamData(transport, &session, 2, false, control_stream_payload.items);
         try self.sendHttp3StreamData(transport, &session, 0, true, request_stream_payload.items);
 
-        var response_stream_payload = std.ArrayListUnmanaged(u8){};
+        var response_stream_payload = std.ArrayListUnmanaged(u8).empty;
         defer response_stream_payload.deinit(self.allocator);
 
-        var peer_control_payload = std.ArrayListUnmanaged(u8){};
+        var peer_control_payload = std.ArrayListUnmanaged(u8).empty;
         defer peer_control_payload.deinit(self.allocator);
 
         var read_buf: [64 * 1024]u8 = undefined;
@@ -526,7 +541,7 @@ pub const Client = struct {
         var response_headers = Headers.init(self.allocator);
         defer response_headers.deinit();
 
-        var response_body = std.ArrayListUnmanaged(u8){};
+        var response_body = std.ArrayListUnmanaged(u8).empty;
         defer response_body.deinit(self.allocator);
 
         var status_code: ?u16 = null;
@@ -591,7 +606,7 @@ pub const Client = struct {
 
             const frame_len = try stream_frame.encode(frame_storage);
 
-            var packet = std.ArrayListUnmanaged(u8){};
+            var packet = std.ArrayListUnmanaged(u8).empty;
             defer packet.deinit(self.allocator);
 
             try appendHttp3PacketHeader(&packet, self.allocator, session);
@@ -672,7 +687,7 @@ pub const Client = struct {
 
         try transport.writeAll(http.HTTP2_PREFACE);
 
-        var settings_payload = std.ArrayListUnmanaged(u8){};
+        var settings_payload = std.ArrayListUnmanaged(u8).empty;
         defer settings_payload.deinit(self.allocator);
 
         const local_settings = toConnectionSettings(self.config.http2_settings);
@@ -693,10 +708,10 @@ pub const Client = struct {
         defer if (authority_buf) |buf| self.allocator.free(buf);
         const authority = try buildAuthority(self.allocator, req, &authority_buf);
 
-        var header_entries = std.ArrayListUnmanaged(hpack.HeaderEntry){};
+        var header_entries = std.ArrayListUnmanaged(hpack.HeaderEntry).empty;
         defer header_entries.deinit(self.allocator);
 
-        var owned_header_names = std.ArrayListUnmanaged([]u8){};
+        var owned_header_names = std.ArrayListUnmanaged([]u8).empty;
         defer {
             for (owned_header_names.items) |name| self.allocator.free(name);
             owned_header_names.deinit(self.allocator);
@@ -759,10 +774,10 @@ pub const Client = struct {
         var response_headers = Headers.init(self.allocator);
         defer response_headers.deinit();
 
-        var body = std.ArrayListUnmanaged(u8){};
+        var body = std.ArrayListUnmanaged(u8).empty;
         defer body.deinit(self.allocator);
 
-        var pending_headers_block = std.ArrayListUnmanaged(u8){};
+        var pending_headers_block = std.ArrayListUnmanaged(u8).empty;
         defer pending_headers_block.deinit(self.allocator);
 
         var pending_headers_flags: u8 = 0;
@@ -1016,16 +1031,15 @@ pub const Client = struct {
     fn attachCookies(self: *Self, req: *Request) !void {
         if (self.cookies.count() == 0) return;
 
-        var list = std.ArrayListUnmanaged(u8){};
+        var list = std.ArrayListUnmanaged(u8).empty;
         defer list.deinit(self.allocator);
-        const writer = list.writer(self.allocator);
 
         var it = self.cookies.iterator();
         var first = true;
         while (it.next()) |entry| {
-            if (!first) try writer.writeAll("; ");
+            if (!first) try list.appendSlice(self.allocator, "; ");
             first = false;
-            try writer.print("{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+            try list.print(self.allocator, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
         }
 
         if (list.items.len > 0) {
@@ -1560,10 +1574,10 @@ test "Client HTTP/2 runtime parses headers and data" {
     );
     defer allocator.free(headers_payload.payload);
 
-    var read_bytes = std.ArrayListUnmanaged(u8){};
+    var read_bytes = std.ArrayListUnmanaged(u8).empty;
     defer read_bytes.deinit(allocator);
 
-    var server_settings = std.ArrayListUnmanaged(u8){};
+    var server_settings = std.ArrayListUnmanaged(u8).empty;
     defer server_settings.deinit(allocator);
     try http.encodeSettingsPayload(.{}, allocator, &server_settings);
 
@@ -1605,16 +1619,16 @@ test "Client HTTP/3 runtime parses headers and data" {
     const encoded_server_headers = try qpack.encodeHeaders(&server_qpack, &server_headers, allocator);
     defer allocator.free(encoded_server_headers);
 
-    var response_stream_payload = std.ArrayListUnmanaged(u8){};
+    var response_stream_payload = std.ArrayListUnmanaged(u8).empty;
     defer response_stream_payload.deinit(allocator);
     try http.appendHttp3Frame(&response_stream_payload, allocator, .headers, encoded_server_headers);
     try http.appendHttp3Frame(&response_stream_payload, allocator, .data, "hello-h3");
 
-    var server_settings = std.ArrayListUnmanaged(u8){};
+    var server_settings = std.ArrayListUnmanaged(u8).empty;
     defer server_settings.deinit(allocator);
     try http.encodeHttp3SettingsPayload(.{}, allocator, &server_settings);
 
-    var control_stream_payload = std.ArrayListUnmanaged(u8){};
+    var control_stream_payload = std.ArrayListUnmanaged(u8).empty;
     defer control_stream_payload.deinit(allocator);
     try http.appendVarInt(&control_stream_payload, allocator, @intFromEnum(quic.Http3StreamType.control));
     try http.appendHttp3Frame(&control_stream_payload, allocator, .settings, server_settings.items);
@@ -1664,7 +1678,7 @@ const FakeHttp2Transport = struct {
     allocator: Allocator,
     reads: []const u8,
     read_index: usize = 0,
-    writes: std.ArrayListUnmanaged(u8) = .{},
+    writes: std.ArrayListUnmanaged(u8) = .empty,
 
     fn init(allocator: Allocator, reads: []const u8) FakeHttp2Transport {
         return .{ .allocator = allocator, .reads = reads };
@@ -1689,7 +1703,7 @@ const FakeHttp3Transport = struct {
     allocator: Allocator,
     reads: []const []const u8,
     read_index: usize = 0,
-    writes: std.ArrayListUnmanaged([]u8) = .{},
+    writes: std.ArrayListUnmanaged([]u8) = .empty,
 
     fn init(allocator: Allocator, reads: []const []const u8) FakeHttp3Transport {
         return .{ .allocator = allocator, .reads = reads };
@@ -1740,7 +1754,7 @@ fn buildHttp3DatagramForTest(
     };
     const frame_len = try stream_frame.encode(frame_storage);
 
-    var packet = std.ArrayListUnmanaged(u8){};
+    var packet = std.ArrayListUnmanaged(u8).empty;
     errdefer packet.deinit(allocator);
 
     var header_buf: [128]u8 = undefined;
@@ -1778,3 +1792,6 @@ fn appendFrameBytes(
     try out.appendSlice(allocator, &raw);
     try out.appendSlice(allocator, payload);
 }
+
+
+

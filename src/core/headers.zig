@@ -116,7 +116,7 @@ pub const Headers = struct {
 
     /// Returns all values for a header name.
     pub fn getAll(self: *const Self, name: []const u8, allocator: Allocator) ![][]const u8 {
-        var values = std.ArrayListUnmanaged([]const u8){};
+        var values = std.ArrayListUnmanaged([]const u8).empty;
         for (self.entries.items) |entry| {
             if (eqlIgnoreCase(entry.name, name)) {
                 try values.append(allocator, entry.value);
@@ -220,7 +220,7 @@ pub const Headers = struct {
 
     /// Serializes headers to an allocated string.
     pub fn toSlice(self: *const Self, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
+        var buffer = std.ArrayListUnmanaged(u8).empty;
         const writer = buffer.writer(allocator);
         try self.serialize(writer);
         return buffer.toOwnedSlice(allocator);
@@ -296,3 +296,5 @@ test "Headers keep-alive detection" {
     try headers.set("Connection", "keep-alive");
     try std.testing.expect(headers.isKeepAlive(.HTTP_1_0));
 }
+
+

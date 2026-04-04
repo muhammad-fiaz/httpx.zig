@@ -109,8 +109,7 @@ pub const JsonBuilder = struct {
     /// Writes an integer value.
     pub fn number(self: *Self, value: anytype) !void {
         try self.maybeComma();
-        const writer = self.buffer.writer(self.allocator);
-        try writer.print("{d}", .{value});
+        try self.buffer.print(self.allocator, "{d}", .{value});
         self.needs_comma = true;
     }
 

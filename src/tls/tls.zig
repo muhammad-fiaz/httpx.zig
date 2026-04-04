@@ -115,6 +115,8 @@ pub const TlsSession = struct {
     net_out: ?SocketIoWriter = null,
 
     ca_bundle: ?std.crypto.Certificate.Bundle = null,
+    ca_lock: std.Io.RwLock = std.Io.RwLock.init,
+    tls_io: ?std.Io.Threaded = null,
     client: ?std.crypto.tls.Client = null,
 
     const Self = @This();
@@ -136,6 +138,11 @@ pub const TlsSession = struct {
         if (self.ca_bundle) |*bundle| {
             bundle.deinit(self.allocator);
             self.ca_bundle = null;
+        }
+
+        if (self.tls_io) |*io_impl| {
+            io_impl.deinit();
+            self.tls_io = null;
         }
 
         if (self.net_read_buf) |buf| self.allocator.free(buf);
@@ -179,18 +186,37 @@ pub const TlsSession = struct {
         const verify_host = verify and self.config.verify_hostname;
 
         // System CA bundle (cross-platform); optional if verification is disabled.
+        // NOTE: In Zig 0.16, Bundle.rescan requires an Io context.
         if (verify) {
-            var bundle: std.crypto.Certificate.Bundle = .{};
+            var bundle: std.crypto.Certificate.Bundle = .empty;
             errdefer bundle.deinit(self.allocator);
-            try bundle.rescan(self.allocator);
+            self.tls_io = std.Io.Threaded.init(self.allocator, .{});
+            const io = self.tls_io.?.io();
+            const now = std.Io.Timestamp.now(io, .real);
+            try bundle.rescan(self.allocator, io, now);
             self.ca_bundle = bundle;
         }
 
         const sni_host = self.config.server_name orelse hostname;
 
+        const io = self.tls_io.?.io();
+        const now = std.Io.Timestamp.now(io, .real);
+
+        // Generate entropy for TLS handshake
+        var entropy: [std.crypto.tls.Client.Options.entropy_len]u8 = undefined;
+        var prng = std.Random.DefaultPrng.init(@as(u64, @truncate(@as(u96, @bitCast(now.nanoseconds)))));
+        prng.fill(&entropy);
+
         const client = try tls.Client.init(&self.net_in.?.reader, &self.net_out.?.writer, .{
             .host = if (verify_host) .{ .explicit = sni_host } else .{ .no_verification = {} },
-            .ca = if (verify) .{ .bundle = self.ca_bundle.? } else .{ .no_verification = {} },
+            .ca = if (verify) .{ .bundle = .{
+                .gpa = self.allocator,
+                .io = io,
+                .lock = &self.ca_lock,
+                .bundle = &self.ca_bundle.?,
+            } } else .{ .no_verification = {} },
+            .entropy = &entropy,
+            .realtime_now = now,
             .ssl_key_log = null,
             .allow_truncation_attacks = false,
             .write_buffer = self.tls_write_buf.?,

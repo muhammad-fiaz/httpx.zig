@@ -413,10 +413,11 @@ test "top-level alias compile checks" {
     const first_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror!?Response = first;
     const fastest_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror!RequestResult = fastest;
     const settled_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror![]RequestResult = settled;
-    const resolve_addr_ptr: *const fn ([]const u8, u16) anyerror!std.net.Address = resolveAddress;
-    const resolve_all_addr_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror![]std.net.Address = resolveAllAddresses;
+    const NetAddress = @import("net/compat.zig").Address;
+    const resolve_addr_ptr: *const fn ([]const u8, u16) anyerror!NetAddress = resolveAddress;
+    const resolve_all_addr_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror![]NetAddress = resolveAllAddresses;
     const parse_host_port_ptr = parseHostAndPort;
-    const parse_and_resolve_ptr: *const fn ([]const u8, u16) anyerror!std.net.Address = parseAndResolveAddress;
+    const parse_and_resolve_ptr: *const fn ([]const u8, u16) anyerror!NetAddress = parseAndResolveAddress;
     const is_ip_ptr: *const fn ([]const u8) bool = isIpAddress;
     const is_ip4_ptr: *const fn ([]const u8) bool = isIp4Address;
     const is_ip6_ptr: *const fn ([]const u8) bool = isIp6Address;

@@ -15,6 +15,12 @@ const Client = @import("../client/client.zig").Client;
 const Response = @import("../core/response.zig").Response;
 const types = @import("../core/types.zig");
 
+fn spinLock(m: *std.atomic.Mutex) void {
+    while (!m.tryLock()) {
+        Thread.yield() catch {};
+    }
+}
+
 /// Request specification for batch operations.
 pub const RequestSpec = struct {
     method: types.Method = .GET,
@@ -168,8 +174,7 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?
         spec: RequestSpec,
         winner: *std.atomic.Value(bool),
         result: *?Response,
-        mutex: *Thread.Mutex,
-        cond: *Thread.Condition,
+        mutex: *std.atomic.Mutex,
         remaining: *std.atomic.Value(usize),
 
         fn run(self: *@This()) void {
@@ -178,28 +183,21 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?
 
             if (rr == .success and rr.success.status.isSuccess()) {
                 if (!self.winner.swap(true, .acq_rel)) {
-                    self.mutex.lock();
+                    spinLock(self.mutex);
                     self.result.* = rr.success;
                     // transfer ownership to caller
                     rr = .{ .err = error.UnusedResult };
-                    self.cond.signal();
                     self.mutex.unlock();
                 }
             }
 
-            const prev = self.remaining.fetchSub(1, .acq_rel);
-            if (prev == 1) {
-                self.mutex.lock();
-                self.cond.signal();
-                self.mutex.unlock();
-            }
+            _ = self.remaining.fetchSub(1, .acq_rel);
         }
     };
 
     var winner = std.atomic.Value(bool).init(false);
     var remaining = std.atomic.Value(usize).init(specs.len);
-    var mutex = Thread.Mutex{};
-    var cond = Thread.Condition{};
+    var mutex = std.atomic.Mutex.unlocked;
     var result: ?Response = null;
 
     var threads = try std.heap.page_allocator.alloc(Thread, specs.len);
@@ -222,19 +220,16 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?
             .winner = &winner,
             .result = &result,
             .mutex = &mutex,
-            .cond = &cond,
             .remaining = &remaining,
         };
         threads[i] = try Thread.spawn(.{}, WorkerCtx.run, .{&ctxs[i]});
         spawned += 1;
     }
 
-    // Wait until a success is found or all workers complete.
-    mutex.lock();
+    // Spin-wait until a success is found or all workers complete.
     while (!winner.load(.acquire) and remaining.load(.acquire) != 0) {
-        cond.wait(&mutex);
+        Thread.yield() catch {};
     }
-    mutex.unlock();
 
     for (threads[0..spawned]) |t| t.join();
 
@@ -252,17 +247,15 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec) !
         spec: RequestSpec,
         winner: *std.atomic.Value(bool),
         result: *RequestResult,
-        mutex: *Thread.Mutex,
-        cond: *Thread.Condition,
+        mutex: *std.atomic.Mutex,
         remaining: *std.atomic.Value(usize),
 
         fn run(self: *@This()) void {
             var rr = executeSpec(self.client, self.spec);
 
             if (!self.winner.swap(true, .acq_rel)) {
-                self.mutex.lock();
+                spinLock(self.mutex);
                 self.result.* = rr;
-                self.cond.signal();
                 self.mutex.unlock();
                 // ownership transferred to caller
                 rr = .{ .err = error.UnusedResult };
@@ -270,19 +263,13 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec) !
 
             rr.deinit();
 
-            const prev = self.remaining.fetchSub(1, .acq_rel);
-            if (prev == 1) {
-                self.mutex.lock();
-                self.cond.signal();
-                self.mutex.unlock();
-            }
+            _ = self.remaining.fetchSub(1, .acq_rel);
         }
     };
 
     var winner = std.atomic.Value(bool).init(false);
     var remaining = std.atomic.Value(usize).init(specs.len);
-    var mutex = Thread.Mutex{};
-    var cond = Thread.Condition{};
+    var mutex = std.atomic.Mutex.unlocked;
     var result: RequestResult = .{ .err = error.NoRequests };
 
     var threads = try std.heap.page_allocator.alloc(Thread, specs.len);
@@ -305,18 +292,16 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec) !
             .winner = &winner,
             .result = &result,
             .mutex = &mutex,
-            .cond = &cond,
             .remaining = &remaining,
         };
         threads[i] = try Thread.spawn(.{}, WorkerCtx.run, .{&ctxs[i]});
         spawned += 1;
     }
 
-    mutex.lock();
+    // Spin-wait until a winner is found or all workers complete.
     while (!winner.load(.acquire) and remaining.load(.acquire) != 0) {
-        cond.wait(&mutex);
+        Thread.yield() catch {};
     }
-    mutex.unlock();
 
     for (threads[0..spawned]) |t| t.join();
 
@@ -386,3 +371,6 @@ test "allSettled empty" {
     defer allocator.free(results);
     try std.testing.expectEqual(@as(usize, 0), results.len);
 }
+
+
+

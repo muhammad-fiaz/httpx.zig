@@ -74,7 +74,7 @@ pub const Router = struct {
     }
 
     fn parsePattern(self: *Self, pattern: []const u8) ![]const Segment {
-        var segments = std.ArrayListUnmanaged(Segment){};
+        var segments = std.ArrayListUnmanaged(Segment).empty;
 
         var iter = mem.splitScalar(u8, pattern, '/');
         while (iter.next()) |part| {
@@ -195,7 +195,7 @@ pub const RouteGroup = struct {
 
     /// Adds a route to the group.
     pub fn add(self: *Self, method: types.Method, path: []const u8, handler: Handler) !void {
-        var full_path = std.ArrayListUnmanaged(u8){};
+        var full_path = std.ArrayListUnmanaged(u8).empty;
         defer full_path.deinit(self.router.allocator);
 
         try full_path.appendSlice(self.router.allocator, self.prefix);
@@ -275,3 +275,5 @@ test "Router multiple parameters" {
     try std.testing.expectEqualStrings("postId", result.?.params[1].name);
     try std.testing.expectEqualStrings("99", result.?.params[1].value);
 }
+
+

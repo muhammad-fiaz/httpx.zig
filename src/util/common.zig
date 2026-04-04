@@ -4,6 +4,25 @@ const std = @import("std");
 const mem = std.mem;
 const HeaderName = @import("../core/headers.zig").HeaderName;
 
+/// Writer adapter for ArrayListUnmanaged(u8) that provides the same interface
+/// as the old `.writer()` method removed in Zig 0.16.
+pub const ArrayListWriter = struct {
+    list: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+
+    pub fn print(self: ArrayListWriter, comptime fmt: []const u8, args: anytype) !void {
+        try self.list.print(self.allocator, fmt, args);
+    }
+
+    pub fn writeAll(self: ArrayListWriter, data: []const u8) !void {
+        try self.list.appendSlice(self.allocator, data);
+    }
+
+    pub fn writeByte(self: ArrayListWriter, byte: u8) !void {
+        try self.list.append(self.allocator, byte);
+    }
+};
+
 /// Parsed cookie name/value pair from a Set-Cookie header value.
 pub const CookiePair = struct {
     name: []const u8,
@@ -84,29 +103,28 @@ pub fn cookieValue(cookie_header: []const u8, name: []const u8) ?[]const u8 {
 
 /// Builds a Set-Cookie header value with common RFC 6265 attributes.
 pub fn buildSetCookieHeader(allocator: std.mem.Allocator, name: []const u8, value: []const u8, options: CookieOptions) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
-    const writer = out.writer(allocator);
 
-    try writer.print("{s}={s}", .{ name, value });
+    try out.print(allocator, "{s}={s}", .{ name, value });
 
     if (options.path) |path| {
-        try writer.print("; Path={s}", .{path});
+        try out.print(allocator, "; Path={s}", .{path});
     }
     if (options.domain) |domain| {
-        try writer.print("; Domain={s}", .{domain});
+        try out.print(allocator, "; Domain={s}", .{domain});
     }
     if (options.max_age) |max_age| {
-        try writer.print("; Max-Age={d}", .{max_age});
+        try out.print(allocator, "; Max-Age={d}", .{max_age});
     }
     if (options.same_site) |same_site| {
-        try writer.print("; SameSite={s}", .{same_site.toHeaderValue()});
+        try out.print(allocator, "; SameSite={s}", .{same_site.toHeaderValue()});
     }
     if (options.secure) {
-        try writer.writeAll("; Secure");
+        try out.appendSlice(allocator, "; Secure");
     }
     if (options.http_only) {
-        try writer.writeAll("; HttpOnly");
+        try out.appendSlice(allocator, "; HttpOnly");
     }
 
     return out.toOwnedSlice(allocator);
@@ -206,3 +224,4 @@ test "mimeTypeFromPath maps known extensions" {
     try std.testing.expectEqualStrings("image/png", mimeTypeFromPath("logo.png"));
     try std.testing.expectEqualStrings("application/octet-stream", mimeTypeFromPath("archive.bin"));
 }
+

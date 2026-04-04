@@ -157,8 +157,8 @@ pub const Request = struct {
 
     /// Serializes to an allocated buffer.
     pub fn toSlice(self: *const Self, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
-        const writer = buffer.writer(allocator);
+        var buffer = std.ArrayListUnmanaged(u8).empty;
+        const writer = @import("../util/common.zig").ArrayListWriter{ .list = &buffer, .allocator = allocator };
         try self.serialize(writer);
         return buffer.toOwnedSlice(allocator);
     }
@@ -302,3 +302,4 @@ test "Request addQueryParam" {
     defer allocator.free(serialized);
     try std.testing.expect(mem.indexOf(u8, serialized, "GET /search?q=zig%20lang&page=1 HTTP/1.1") != null);
 }
+
