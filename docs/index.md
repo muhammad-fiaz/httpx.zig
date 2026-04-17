@@ -23,39 +23,52 @@ features:
   - title: All HTTP Versions
     details: Full HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 client/server runtime support, plus full protocol primitives.
   - title: Robust Client
-    details: Connection pooling, automatic retries, interceptors, and typed API.
+    details: Connection pooling, automatic retries, interceptors, typed API, and default-safe chainable config/option overrides.
   - title: Powerful Server
-    details: Pattern-based routing, middleware support, and context-based handling.
+    details: Pattern-based routing, middleware support, context-based handling, ETag-aware static file helpers, and explicit port conflict startup strategies.
   - title: Concurrent
     details: Async task executor and parallel request patterns (all, any, race).
   - title: TLS Security
     details: Secure connections with TLS 1.2/1.3, custom CAs, and verification policies.
   - title: Low-level Control
     details: Direct access to sockets, buffers, protocol parsers, and HPACK/QPACK compression.
+  - title: MIME Ready
+    details: Case-insensitive MIME detection for common web/document/media/font/archive formats with explicit fallback override.
 ---
 
 ## Install
 
+::: warning v0.0.8 major update from 0.0.7
+`v0.0.8` is a major update from `0.0.7` (Zig `0.16.0` baseline, expanded config builders, runtime/API updates, and docs refresh).
+If you are upgrading from `0.0.7`, review `/CHANGELOG` first and refresh your dependency pin/hash.
+:::
+
 Choose one of these installation methods:
 
-1. Stable release (recommended)
+1. Latest release (0.0.8)
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz
+```
+
+2. Previous stable release (0.0.7)
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz
 ```
 
-2. Nightly/main branch
+3. Nightly/main branch
 
 ```bash
 zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig
 ```
 
-3. Manual dependency entry in `build.zig.zon`
+4. Manual dependency entry in `build.zig.zon`
 
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz",
     .hash = "...",
   },
 },

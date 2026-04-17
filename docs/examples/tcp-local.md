@@ -26,7 +26,7 @@ fn serverThread(ctx: *ServerCtx) void {
 }
 
 pub fn main() !void {
-    var listener = try httpx.TcpListener.init(try std.net.Address.parseIp("127.0.0.1", 0));
+    var listener = try httpx.TcpListener.init(try httpx.Address.parseIp("127.0.0.1", 0));
     defer listener.deinit();
 
     const addr = try listener.getLocalAddress();

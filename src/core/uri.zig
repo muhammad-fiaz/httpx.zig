@@ -11,6 +11,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const list_writer = @import("../util/list_writer.zig");
 
 /// Parsed URI structure per RFC 3986.
 pub const Uri = struct {
@@ -117,8 +118,8 @@ pub const Uri = struct {
 
     /// Reconstructs the full URI string.
     pub fn format(self: Self, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
-        const writer = buffer.writer(allocator);
+        var buffer = std.ArrayList(u8).empty;
+        const writer = list_writer.init(allocator, &buffer);
 
         if (self.scheme) |s| try writer.print("{s}://", .{s});
         if (self.userinfo) |u| try writer.print("{s}@", .{u});
@@ -133,8 +134,8 @@ pub const Uri = struct {
 
     /// Returns the authority component (userinfo@host:port).
     pub fn authority(self: Self, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
-        const writer = buffer.writer(allocator);
+        var buffer = std.ArrayList(u8).empty;
+        const writer = list_writer.init(allocator, &buffer);
 
         if (self.userinfo) |u| try writer.print("{s}@", .{u});
         if (self.host) |h| try writer.print("{s}", .{h});
@@ -149,8 +150,8 @@ const unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567
 
 /// Percent-encodes a string for URI inclusion.
 pub fn encode(allocator: Allocator, input: []const u8) ![]u8 {
-    var result = std.ArrayListUnmanaged(u8){};
-    const writer = result.writer(allocator);
+    var result = std.ArrayList(u8).empty;
+    const writer = list_writer.init(allocator, &result);
 
     for (input) |c| {
         if (mem.indexOfScalar(u8, unreserved, c) != null) {
@@ -165,7 +166,7 @@ pub fn encode(allocator: Allocator, input: []const u8) ![]u8 {
 
 /// Decodes a percent-encoded string.
 pub fn decode(allocator: Allocator, input: []const u8) ![]u8 {
-    var result = std.ArrayListUnmanaged(u8){};
+    var result = std.ArrayList(u8).empty;
 
     var i: usize = 0;
     while (i < input.len) {
@@ -190,8 +191,8 @@ pub fn decode(allocator: Allocator, input: []const u8) ![]u8 {
 
 /// Encodes query parameters as a query string.
 pub fn encodeQueryParams(allocator: Allocator, params: []const struct { []const u8, []const u8 }) ![]u8 {
-    var result = std.ArrayListUnmanaged(u8){};
-    const writer = result.writer(allocator);
+    var result = std.ArrayList(u8).empty;
+    const writer = list_writer.init(allocator, &result);
 
     for (params, 0..) |param, idx| {
         if (idx > 0) try writer.writeByte('&');

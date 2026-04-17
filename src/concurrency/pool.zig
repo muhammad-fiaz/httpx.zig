@@ -11,6 +11,13 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Thread = std.Thread;
 
+fn defaultIo() std.Io {
+    return if (@import("builtin").is_test)
+        std.testing.io
+    else
+        std.Io.Threaded.global_single_threaded.io();
+}
+
 const Client = @import("../client/client.zig").Client;
 const Response = @import("../core/response.zig").Response;
 const types = @import("../core/types.zig");
@@ -20,7 +27,11 @@ pub const RequestSpec = struct {
     method: types.Method = .GET,
     url: []const u8,
     body: ?[]const u8 = null,
+    json: ?[]const u8 = null,
     headers: ?[]const [2][]const u8 = null,
+    timeout_ms: ?u64 = null,
+    follow_redirects: ?bool = null,
+    version: ?types.Version = null,
 };
 
 /// Result of a parallel request.
@@ -50,7 +61,7 @@ pub const RequestResult = union(enum) {
 /// Batch request builder for parallel execution.
 pub const BatchBuilder = struct {
     allocator: Allocator,
-    requests: std.ArrayListUnmanaged(RequestSpec) = .empty,
+    requests: std.ArrayList(RequestSpec) = .empty,
 
     const Self = @This();
 
@@ -73,6 +84,12 @@ pub const BatchBuilder = struct {
     /// Adds a POST request to the batch.
     pub fn post(self: *Self, url: []const u8, body: ?[]const u8) !*Self {
         try self.requests.append(self.allocator, .{ .method = .POST, .url = url, .body = body });
+        return self;
+    }
+
+    /// Adds a POST request with a JSON body to the batch.
+    pub fn postJson(self: *Self, url: []const u8, json: []const u8) !*Self {
+        try self.requests.append(self.allocator, .{ .method = .POST, .url = url, .json = json });
         return self;
     }
 
@@ -155,6 +172,20 @@ pub fn allSettled(allocator: Allocator, client: *Client, specs: []const RequestS
     return all(allocator, client, specs);
 }
 
+/// Counts successful request results.
+pub fn successfulCount(results: []const RequestResult) usize {
+    var count: usize = 0;
+    for (results) |result| {
+        if (result == .success) count += 1;
+    }
+    return count;
+}
+
+/// Counts failed request results.
+pub fn errorCount(results: []const RequestResult) usize {
+    return results.len - successfulCount(results);
+}
+
 /// Executes all requests and returns the first successful response.
 pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?Response {
     _ = allocator;
@@ -168,8 +199,8 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?
         spec: RequestSpec,
         winner: *std.atomic.Value(bool),
         result: *?Response,
-        mutex: *Thread.Mutex,
-        cond: *Thread.Condition,
+        mutex: *std.Io.Mutex,
+        cond: *std.Io.Condition,
         remaining: *std.atomic.Value(usize),
 
         fn run(self: *@This()) void {
@@ -178,28 +209,30 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?
 
             if (rr == .success and rr.success.status.isSuccess()) {
                 if (!self.winner.swap(true, .acq_rel)) {
-                    self.mutex.lock();
+                    const io = defaultIo();
+                    self.mutex.lock(io) catch unreachable;
                     self.result.* = rr.success;
                     // transfer ownership to caller
                     rr = .{ .err = error.UnusedResult };
-                    self.cond.signal();
-                    self.mutex.unlock();
+                    self.cond.signal(io);
+                    self.mutex.unlock(io);
                 }
             }
 
             const prev = self.remaining.fetchSub(1, .acq_rel);
             if (prev == 1) {
-                self.mutex.lock();
-                self.cond.signal();
-                self.mutex.unlock();
+                const io = defaultIo();
+                self.mutex.lock(io) catch unreachable;
+                self.cond.signal(io);
+                self.mutex.unlock(io);
             }
         }
     };
 
     var winner = std.atomic.Value(bool).init(false);
     var remaining = std.atomic.Value(usize).init(specs.len);
-    var mutex = Thread.Mutex{};
-    var cond = Thread.Condition{};
+    var mutex: std.Io.Mutex = .init;
+    var cond: std.Io.Condition = .init;
     var result: ?Response = null;
 
     var threads = try std.heap.page_allocator.alloc(Thread, specs.len);
@@ -230,11 +263,12 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?
     }
 
     // Wait until a success is found or all workers complete.
-    mutex.lock();
+    const any_io = defaultIo();
+    mutex.lock(any_io) catch unreachable;
     while (!winner.load(.acquire) and remaining.load(.acquire) != 0) {
-        cond.wait(&mutex);
+        cond.wait(any_io, &mutex) catch unreachable;
     }
-    mutex.unlock();
+    mutex.unlock(any_io);
 
     for (threads[0..spawned]) |t| t.join();
 
@@ -252,18 +286,19 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec) !
         spec: RequestSpec,
         winner: *std.atomic.Value(bool),
         result: *RequestResult,
-        mutex: *Thread.Mutex,
-        cond: *Thread.Condition,
+        mutex: *std.Io.Mutex,
+        cond: *std.Io.Condition,
         remaining: *std.atomic.Value(usize),
 
         fn run(self: *@This()) void {
             var rr = executeSpec(self.client, self.spec);
 
             if (!self.winner.swap(true, .acq_rel)) {
-                self.mutex.lock();
+                const io = defaultIo();
+                self.mutex.lock(io) catch unreachable;
                 self.result.* = rr;
-                self.cond.signal();
-                self.mutex.unlock();
+                self.cond.signal(io);
+                self.mutex.unlock(io);
                 // ownership transferred to caller
                 rr = .{ .err = error.UnusedResult };
             }
@@ -272,17 +307,18 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec) !
 
             const prev = self.remaining.fetchSub(1, .acq_rel);
             if (prev == 1) {
-                self.mutex.lock();
-                self.cond.signal();
-                self.mutex.unlock();
+                const io = defaultIo();
+                self.mutex.lock(io) catch unreachable;
+                self.cond.signal(io);
+                self.mutex.unlock(io);
             }
         }
     };
 
     var winner = std.atomic.Value(bool).init(false);
     var remaining = std.atomic.Value(usize).init(specs.len);
-    var mutex = Thread.Mutex{};
-    var cond = Thread.Condition{};
+    var mutex: std.Io.Mutex = .init;
+    var cond: std.Io.Condition = .init;
     var result: RequestResult = .{ .err = error.NoRequests };
 
     var threads = try std.heap.page_allocator.alloc(Thread, specs.len);
@@ -312,11 +348,12 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec) !
         spawned += 1;
     }
 
-    mutex.lock();
+    const race_io = defaultIo();
+    mutex.lock(race_io) catch unreachable;
     while (!winner.load(.acquire) and remaining.load(.acquire) != 0) {
-        cond.wait(&mutex);
+        cond.wait(race_io, &mutex) catch unreachable;
     }
-    mutex.unlock();
+    mutex.unlock(race_io);
 
     for (threads[0..spawned]) |t| t.join();
 
@@ -326,7 +363,11 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec) !
 fn executeSpec(client: *Client, spec: RequestSpec) RequestResult {
     const result = client.request(spec.method, spec.url, .{
         .body = spec.body,
+        .json = spec.json,
         .headers = spec.headers,
+        .timeout_ms = spec.timeout_ms,
+        .follow_redirects = spec.follow_redirects,
+        .version = spec.version,
     });
 
     if (result) |response| {
@@ -343,8 +384,9 @@ test "BatchBuilder" {
 
     _ = try builder.get("https://api.example.com/users");
     _ = try builder.post("https://api.example.com/users", "{\"name\":\"test\"}");
+    _ = try builder.postJson("https://api.example.com/users", "{\"name\":\"json\"}");
 
-    try std.testing.expectEqual(@as(usize, 2), builder.count());
+    try std.testing.expectEqual(@as(usize, 3), builder.count());
 }
 
 test "BatchBuilder clear" {
@@ -371,10 +413,16 @@ test "RequestSpec" {
         .method = .POST,
         .url = "https://api.example.com",
         .body = "{\"key\":\"value\"}",
+        .timeout_ms = 2_000,
+        .follow_redirects = false,
+        .version = .HTTP_2,
     };
 
     try std.testing.expectEqual(types.Method.POST, spec.method);
     try std.testing.expect(spec.body != null);
+    try std.testing.expectEqual(@as(u64, 2_000), spec.timeout_ms.?);
+    try std.testing.expect(!spec.follow_redirects.?);
+    try std.testing.expectEqual(types.Version.HTTP_2, spec.version.?);
 }
 
 test "allSettled empty" {
@@ -385,4 +433,14 @@ test "allSettled empty" {
     const results = try allSettled(allocator, &client, &.{});
     defer allocator.free(results);
     try std.testing.expectEqual(@as(usize, 0), results.len);
+}
+
+test "RequestResult summary helpers" {
+    const results = [_]RequestResult{
+        .{ .err = error.OutOfMemory },
+        .{ .err = error.ConnectionRefused },
+    };
+
+    try std.testing.expectEqual(@as(usize, 0), successfulCount(&results));
+    try std.testing.expectEqual(@as(usize, 2), errorCount(&results));
 }

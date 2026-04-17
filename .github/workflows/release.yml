@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       - name: Run Tests
         run: zig build test
 
@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
       
       - name: Build Library
         run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
@@ -80,7 +80,7 @@ jobs:
 
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Calculate Hash
         id: calc_hash

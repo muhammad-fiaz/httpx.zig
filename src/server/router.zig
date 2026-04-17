@@ -44,7 +44,7 @@ const Segment = union(enum) {
 /// HTTP Router with path parameter support.
 pub const Router = struct {
     allocator: Allocator,
-    routes: std.ArrayListUnmanaged(Route) = .empty,
+    routes: std.ArrayList(Route) = .empty,
     not_found_handler: ?Handler = null,
 
     const Self = @This();
@@ -73,8 +73,58 @@ pub const Router = struct {
         });
     }
 
+    /// Adds a GET route.
+    pub fn get(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.GET, path, handler);
+    }
+
+    /// Adds a POST route.
+    pub fn post(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.POST, path, handler);
+    }
+
+    /// Adds a PUT route.
+    pub fn put(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.PUT, path, handler);
+    }
+
+    /// Adds a DELETE route.
+    pub fn delete(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.DELETE, path, handler);
+    }
+
+    /// Alias for delete().
+    pub fn del(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.delete(path, handler);
+    }
+
+    /// Adds a PATCH route.
+    pub fn patch(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.PATCH, path, handler);
+    }
+
+    /// Adds a HEAD route.
+    pub fn head(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.HEAD, path, handler);
+    }
+
+    /// Adds an OPTIONS route.
+    pub fn options(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.OPTIONS, path, handler);
+    }
+
+    /// Adds a TRACE route.
+    pub fn trace(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.TRACE, path, handler);
+    }
+
+    /// Adds a CONNECT route.
+    pub fn connect(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.CONNECT, path, handler);
+    }
+
     fn parsePattern(self: *Self, pattern: []const u8) ![]const Segment {
-        var segments = std.ArrayListUnmanaged(Segment){};
+        var segments = std.ArrayList(Segment).empty;
 
         var iter = mem.splitScalar(u8, pattern, '/');
         while (iter.next()) |part| {
@@ -195,7 +245,7 @@ pub const RouteGroup = struct {
 
     /// Adds a route to the group.
     pub fn add(self: *Self, method: types.Method, path: []const u8, handler: Handler) !void {
-        var full_path = std.ArrayListUnmanaged(u8){};
+        var full_path = std.ArrayList(u8).empty;
         defer full_path.deinit(self.router.allocator);
 
         try full_path.appendSlice(self.router.allocator, self.prefix);
@@ -222,6 +272,36 @@ pub const RouteGroup = struct {
     /// Adds a DELETE route.
     pub fn delete(self: *Self, path: []const u8, handler: Handler) !void {
         try self.add(.DELETE, path, handler);
+    }
+
+    /// Alias for delete().
+    pub fn del(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.delete(path, handler);
+    }
+
+    /// Adds a PATCH route.
+    pub fn patch(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.PATCH, path, handler);
+    }
+
+    /// Adds a HEAD route.
+    pub fn head(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.HEAD, path, handler);
+    }
+
+    /// Adds an OPTIONS route.
+    pub fn options(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.OPTIONS, path, handler);
+    }
+
+    /// Adds a TRACE route.
+    pub fn trace(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.TRACE, path, handler);
+    }
+
+    /// Adds a CONNECT route.
+    pub fn connect(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.add(.CONNECT, path, handler);
     }
 };
 
@@ -274,4 +354,57 @@ test "Router multiple parameters" {
     try std.testing.expectEqualStrings("42", result.?.params[0].value);
     try std.testing.expectEqualStrings("postId", result.?.params[1].name);
     try std.testing.expectEqualStrings("99", result.?.params[1].value);
+}
+
+test "Router convenience methods and group helpers" {
+    const allocator = std.testing.allocator;
+    var router = Router.init(allocator);
+    defer router.deinit();
+
+    const handler = struct {
+        fn h(_: *@import("server.zig").Context) anyerror!@import("../core/response.zig").Response {
+            unreachable;
+        }
+    }.h;
+
+    try router.get("/get", handler);
+    try router.post("/post", handler);
+    try router.put("/put", handler);
+    try router.del("/del", handler);
+    try router.patch("/patch", handler);
+    try router.head("/head", handler);
+    try router.options("/options", handler);
+    try router.trace("/trace", handler);
+    try router.connect("/connect", handler);
+
+    try std.testing.expect(router.find(.GET, "/get") != null);
+    try std.testing.expect(router.find(.POST, "/post") != null);
+    try std.testing.expect(router.find(.PUT, "/put") != null);
+    try std.testing.expect(router.find(.DELETE, "/del") != null);
+    try std.testing.expect(router.find(.PATCH, "/patch") != null);
+    try std.testing.expect(router.find(.HEAD, "/head") != null);
+    try std.testing.expect(router.find(.OPTIONS, "/options") != null);
+    try std.testing.expect(router.find(.TRACE, "/trace") != null);
+    try std.testing.expect(router.find(.CONNECT, "/connect") != null);
+
+    var api = router.group("/api");
+    try api.get("/users", handler);
+    try api.post("/users", handler);
+    try api.put("/users/:id", handler);
+    try api.del("/users/:id", handler);
+    try api.patch("/users/:id", handler);
+    try api.head("/users/:id", handler);
+    try api.options("/users/:id", handler);
+    try api.trace("/diag", handler);
+    try api.connect("/tunnel", handler);
+
+    try std.testing.expect(router.find(.GET, "/api/users") != null);
+    try std.testing.expect(router.find(.POST, "/api/users") != null);
+    try std.testing.expect(router.find(.PUT, "/api/users/1") != null);
+    try std.testing.expect(router.find(.DELETE, "/api/users/1") != null);
+    try std.testing.expect(router.find(.PATCH, "/api/users/1") != null);
+    try std.testing.expect(router.find(.HEAD, "/api/users/1") != null);
+    try std.testing.expect(router.find(.OPTIONS, "/api/users/1") != null);
+    try std.testing.expect(router.find(.TRACE, "/api/diag") != null);
+    try std.testing.expect(router.find(.CONNECT, "/api/tunnel") != null);
 }

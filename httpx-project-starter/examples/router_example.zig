@@ -10,7 +10,7 @@ fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -19,14 +19,19 @@ pub fn main() !void {
     var router = httpx.Router.init(allocator);
     defer router.deinit();
 
-    try router.add(.GET, "/", indexHandler);
-    try router.add(.GET, "/users", indexHandler);
-    try router.add(.GET, "/users/:id", indexHandler);
-    try router.add(.GET, "/users/:userId/posts/:postId", indexHandler);
-    try router.add(.POST, "/users", indexHandler);
-    try router.add(.PUT, "/users/:id", indexHandler);
-    try router.add(.DELETE, "/users/:id", indexHandler);
-    try router.add(.GET, "/static/*", indexHandler);
+    try router.get("/", indexHandler);
+    try router.get("/users", indexHandler);
+    try router.get("/users/:id", indexHandler);
+    try router.get("/users/:userId/posts/:postId", indexHandler);
+    try router.post("/users", indexHandler);
+    try router.put("/users/:id", indexHandler);
+    try router.delete("/users/:id", indexHandler);
+    try router.patch("/users/:id", indexHandler);
+    try router.head("/users/:id", indexHandler);
+    try router.options("/users/:id", indexHandler);
+    try router.trace("/debug", indexHandler);
+    try router.connect("/tunnel", indexHandler);
+    try router.get("/static/*", indexHandler);
 
     std.debug.print("Registered Routes:\n", .{});
     std.debug.print("  GET    /\n", .{});
@@ -36,6 +41,11 @@ pub fn main() !void {
     std.debug.print("  POST   /users\n", .{});
     std.debug.print("  PUT    /users/:id\n", .{});
     std.debug.print("  DELETE /users/:id\n", .{});
+    std.debug.print("  PATCH  /users/:id\n", .{});
+    std.debug.print("  HEAD   /users/:id\n", .{});
+    std.debug.print("  OPTIONS /users/:id\n", .{});
+    std.debug.print("  TRACE  /debug\n", .{});
+    std.debug.print("  CONNECT /tunnel\n", .{});
     std.debug.print("  GET    /static/*\n", .{});
 
     std.debug.print("\nRoute Matching Tests:\n", .{});
@@ -59,12 +69,28 @@ pub fn main() !void {
     if (router.find(.PATCH, "/users/1")) |_| {
         std.debug.print("  PATCH /users/1 -> matched!\n", .{});
     } else {
-        std.debug.print("  PATCH /users/1 -> not found (expected)\n", .{});
+        std.debug.print("  PATCH /users/1 -> not found\n", .{});
+    }
+
+    if (router.find(.TRACE, "/debug")) |_| {
+        std.debug.print("  TRACE /debug -> matched!\n", .{});
+    }
+
+    if (router.find(.CONNECT, "/tunnel")) |_| {
+        std.debug.print("  CONNECT /tunnel -> matched!\n", .{});
     }
 
     std.debug.print("\nRoute groups for API versioning:\n", .{});
     var api_v1 = router.group("/api/v1");
-    _ = &api_v1;
+    try api_v1.get("/users", indexHandler);
+    try api_v1.post("/posts", indexHandler);
+    try api_v1.patch("/users/:id", indexHandler);
+    try api_v1.options("/users/:id", indexHandler);
+    try api_v1.trace("/diag", indexHandler);
+    try api_v1.connect("/tunnel", indexHandler);
     std.debug.print("  /api/v1/users\n", .{});
     std.debug.print("  /api/v1/posts\n", .{});
+    std.debug.print("  /api/v1/users/:id (PATCH, OPTIONS)\n", .{});
+    std.debug.print("  /api/v1/diag (TRACE)\n", .{});
+    std.debug.print("  /api/v1/tunnel (CONNECT)\n", .{});
 }

@@ -207,7 +207,7 @@ gtag('config', '${GA_ID}');`,
           "priceCurrency": "USD"
         },
         "downloadUrl": "https://github.com/muhammad-fiaz/httpx.zig",
-        "softwareVersion": "0.0.7",
+        "softwareVersion": "0.0.8",
         "license": "https://opensource.org/licenses/MIT"
       });
     } else {
@@ -360,6 +360,7 @@ gtag('config', '${GA_ID}');`,
           { text: "API Overview", link: "/api/" },
           { text: "Client API", link: "/api/client" },
           { text: "Server API", link: "/api/server" },
+          { text: "Router API", link: "/api/router" },
           { text: "Middleware API", link: "/api/middleware" },
           { text: "Core API", link: "/api/core" },
           { text: "Pool API", link: "/api/pool" },

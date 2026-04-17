@@ -11,9 +11,19 @@
 //! - Body parsing
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Context = @import("server.zig").Context;
 const Response = @import("../core/response.zig").Response;
 const types = @import("../core/types.zig");
+const list_writer = @import("../util/list_writer.zig");
+
+fn nowMillis() i64 {
+    const io = if (builtin.is_test)
+        std.testing.io
+    else
+        std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Timestamp.now(io, .real).toMilliseconds();
+}
 
 /// Middleware function type.
 pub const Middleware = struct {
@@ -69,9 +79,9 @@ pub fn cors(comptime config: CorsConfig) Middleware {
         .name = "cors",
         .handler = struct {
             fn methodList(allocator: std.mem.Allocator, methods: []const types.Method) ![]u8 {
-                var out = std.ArrayListUnmanaged(u8){};
+                var out = std.ArrayList(u8).empty;
                 errdefer out.deinit(allocator);
-                const writer = out.writer(allocator);
+                const writer = list_writer.init(allocator, &out);
 
                 for (methods, 0..) |m, i| {
                     if (i > 0) try writer.writeAll(", ");
@@ -81,9 +91,9 @@ pub fn cors(comptime config: CorsConfig) Middleware {
             }
 
             fn headerList(allocator: std.mem.Allocator, headers_in: []const []const u8) ![]u8 {
-                var out = std.ArrayListUnmanaged(u8){};
+                var out = std.ArrayList(u8).empty;
                 errdefer out.deinit(allocator);
-                const writer = out.writer(allocator);
+                const writer = list_writer.init(allocator, &out);
 
                 for (headers_in, 0..) |h, i| {
                     if (i > 0) try writer.writeAll(", ");
@@ -145,9 +155,9 @@ pub fn logger() Middleware {
         .name = "logger",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                const start = std.time.milliTimestamp();
+                const start = nowMillis();
                 const response = try next(ctx);
-                const duration = std.time.milliTimestamp() - start;
+                const duration = nowMillis() - start;
 
                 std.debug.print("{s} {s} - {d}ms\n", .{
                     ctx.request.method.toString(),

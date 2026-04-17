@@ -11,6 +11,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const list_writer = @import("../util/list_writer.zig");
 
 const types = @import("types.zig");
 const Headers = @import("headers.zig").Headers;
@@ -154,8 +155,8 @@ pub const Response = struct {
 
     /// Serializes to an allocated buffer.
     pub fn toSlice(self: *const Self, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
-        const writer = buffer.writer(allocator);
+        var buffer = std.ArrayList(u8).empty;
+        const writer = list_writer.init(allocator, &buffer);
         try self.serialize(writer);
         return buffer.toOwnedSlice(allocator);
     }

@@ -4,8 +4,13 @@ This guide covers all supported installation methods for `httpx.zig`.
 
 ## Requirements
 
-- **Zig Version**: 0.15.0 or later (tested on 0.15.2)
+- **Zig Version**: 0.16.0 or later
 - **Operating System**: Windows, Linux, or macOS
+
+::: warning v0.0.8 major update from 0.0.7
+`v0.0.8` is a major update from `0.0.7`.
+If you are migrating an existing project, review `/CHANGELOG` and refresh dependency pin/hash values before building.
+:::
 
 ## Platform Support
 
@@ -41,15 +46,23 @@ zig build -Dtarget=aarch64-macos
 ```
 :::
 
-## Method 1: Zig Fetch (Recommended Stable Release)
+## Method 1: Zig Fetch (Latest Release 0.0.8)
 
 Use the latest tagged release for reproducible builds:
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz
+```
+
+## Method 2: Zig Fetch (Previous Stable 0.0.7)
+
+Use the previous stable tag when you need to pin to the prior release:
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz
 ```
 
-## Method 2: Zig Fetch (Nightly/Main)
+## Method 3: Zig Fetch (Nightly/Main)
 
 Use the Git URL if you want the latest commits from main:
 
@@ -57,7 +70,7 @@ Use the Git URL if you want the latest commits from main:
 zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```
 
-## Method 3: Manual `build.zig.zon` Configuration
+## Method 4: Manual `build.zig.zon` Configuration
 
 You can also add the dependency manually:
 
@@ -67,7 +80,7 @@ You can also add the dependency manually:
     .version = "0.1.0",
     .dependencies = .{
         .httpx = .{
-            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz",
+            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz",
             .hash = "...", // Run zig fetch --save <url> to auto-fill this.
         },
     },
@@ -77,7 +90,7 @@ You can also add the dependency manually:
 }
 ```
 
-## Method 4: Local Source Checkout
+## Method 5: Local Source Checkout
 
 Clone and build directly:
 
@@ -130,7 +143,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

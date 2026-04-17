@@ -11,6 +11,7 @@
     - Automatic retries with exponential backoff.
     - Request/Response interceptors.
     - Cookie management.
+    - Optional chainable config/option builders (`ClientConfig.defaults().with...`, `RequestOptions.defaults().with...`) when you want explicit overrides.
 - **Server**:
     - Pattern-based routing.
     - Middleware architecture.
@@ -18,7 +19,7 @@
     - JSON helpers.
 - **Concurrency**: Built-in thread pool and async primitives (`all`, `any`, `race`).
 - **Security**: TLS/SSL support (via `std.crypto` or system libraries) with custom CA handling.
-- **Explicit Root Helpers**: Top-level aliases for requests (`fetch/send/...`), concurrency (`first/fastest/settled`), and networking (`resolveAddress`, `parseAndResolveAddress`, `netInit/netDeinit`).
+- **Explicit Root Helpers**: Top-level aliases for requests (`fetch/send/...`), concurrency (`first/fastest/settled`), networking (`resolveAddress`, `parseAndResolveAddress`, `netInit/netDeinit`), and MIME detection (`mimeTypeFromPath`, `mimeTypeFromPathOr`, `mimeTypeFromPathWith`) with external mapping support via `MimeMapping`/`MimeRegistry`.
 
 ::: warning Custom HTTP/2 & HTTP/3 Implementation
 Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx.zig implements these protocols entirely from scratch**, including HPACK (RFC 7541), QPACK (RFC 9204), HTTP/2 framing (RFC 7540), and QUIC transport (RFC 9000).
@@ -26,8 +27,12 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 
 ## Requirements
 
-- **Zig Version**: 0.15.0 or later (tested on 0.15.2)
+- **Zig Version**: 0.16.0 or later
 - **Operating System**: Windows, Linux, or macOS
+
+::: warning v0.0.8 major update from 0.0.7
+If you are upgrading from `0.0.7`, treat `v0.0.8` as a major update and review `/CHANGELOG` before migration.
+:::
 
 ## Platform Support
 

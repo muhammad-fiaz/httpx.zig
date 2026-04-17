@@ -8,8 +8,11 @@
 //! - Address formatting
 
 const std = @import("std");
-const net = std.net;
+const net = @import("compat.zig");
 const Allocator = std.mem.Allocator;
+
+pub const Address = net.Address;
+pub const AddressList = net.AddressList;
 
 /// Resolves a hostname to a network address.
 pub fn resolve(hostname: []const u8, port: u16) !net.Address {
@@ -21,7 +24,7 @@ pub fn resolve(hostname: []const u8, port: u16) !net.Address {
         return net.Address.initIp6(ip6, port, 0, 0);
     }
 
-    const list = try net.getAddressList(std.heap.page_allocator, hostname, port);
+    var list = try net.getAddressList(std.heap.page_allocator, hostname, port);
     defer list.deinit();
 
     if (list.addrs.len == 0) {
@@ -45,7 +48,7 @@ pub fn resolveAll(allocator: Allocator, hostname: []const u8, port: u16) ![]net.
         return addrs;
     }
 
-    const list = try net.getAddressList(allocator, hostname, port);
+    var list = try net.getAddressList(allocator, hostname, port);
     defer list.deinit();
 
     if (list.addrs.len == 0) {
@@ -212,7 +215,10 @@ pub fn parseHostPort(str: []const u8, default_port: u16) !struct { host: []const
 
 /// Formats a network address as a string.
 pub fn formatAddress(addr: net.Address, allocator: Allocator) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{}", .{addr});
+    var buf: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try addr.format(&writer);
+    return try allocator.dupe(u8, writer.buffered());
 }
 
 /// Returns true if the string looks like an IP address (not a hostname).

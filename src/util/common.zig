@@ -2,6 +2,8 @@
 
 const std = @import("std");
 const mem = std.mem;
+const list_writer = @import("list_writer.zig");
+const mime = @import("mime.zig");
 const HeaderName = @import("../core/headers.zig").HeaderName;
 
 /// Parsed cookie name/value pair from a Set-Cookie header value.
@@ -32,6 +34,10 @@ pub const CookieOptions = struct {
     http_only: bool = true,
     same_site: ?SameSite = .lax,
 };
+
+pub const MimeMapping = mime.MimeMapping;
+pub const MimeRegistry = mime.MimeRegistry;
+pub const defaultMimeMappings = mime.default_mappings;
 
 /// Returns a query parameter value from a raw query string.
 ///
@@ -84,9 +90,9 @@ pub fn cookieValue(cookie_header: []const u8, name: []const u8) ?[]const u8 {
 
 /// Builds a Set-Cookie header value with common RFC 6265 attributes.
 pub fn buildSetCookieHeader(allocator: std.mem.Allocator, name: []const u8, value: []const u8, options: CookieOptions) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    const writer = out.writer(allocator);
+    const writer = list_writer.init(allocator, &out);
 
     try writer.print("{s}={s}", .{ name, value });
 
@@ -114,24 +120,17 @@ pub fn buildSetCookieHeader(allocator: std.mem.Allocator, name: []const u8, valu
 
 /// Returns a best-effort MIME type for a file path extension.
 pub fn mimeTypeFromPath(path: []const u8) []const u8 {
-    const ext = std.fs.path.extension(path);
-    if (ext.len == 0) return "application/octet-stream";
+    return mime.resolve(path);
+}
 
-    if (mem.eql(u8, ext, ".html") or mem.eql(u8, ext, ".htm")) return "text/html; charset=utf-8";
-    if (mem.eql(u8, ext, ".css")) return "text/css; charset=utf-8";
-    if (mem.eql(u8, ext, ".js")) return "application/javascript; charset=utf-8";
-    if (mem.eql(u8, ext, ".json")) return "application/json";
-    if (mem.eql(u8, ext, ".txt")) return "text/plain; charset=utf-8";
-    if (mem.eql(u8, ext, ".svg")) return "image/svg+xml";
-    if (mem.eql(u8, ext, ".png")) return "image/png";
-    if (mem.eql(u8, ext, ".jpg") or mem.eql(u8, ext, ".jpeg")) return "image/jpeg";
-    if (mem.eql(u8, ext, ".gif")) return "image/gif";
-    if (mem.eql(u8, ext, ".webp")) return "image/webp";
-    if (mem.eql(u8, ext, ".ico")) return "image/x-icon";
-    if (mem.eql(u8, ext, ".xml")) return "application/xml";
-    if (mem.eql(u8, ext, ".pdf")) return "application/pdf";
+/// Returns a best-effort MIME type for a file path extension or a custom fallback.
+pub fn mimeTypeFromPathOr(path: []const u8, fallback: []const u8) []const u8 {
+    return mime.resolveOr(path, fallback);
+}
 
-    return "application/octet-stream";
+/// Returns a MIME type using caller-provided mappings and fallback.
+pub fn mimeTypeFromPathWith(path: []const u8, mappings: []const MimeMapping, fallback: []const u8) []const u8 {
+    return mime.resolveWith(path, mappings, fallback);
 }
 
 /// Clamps a u64 value to the platform usize maximum.
@@ -205,4 +204,25 @@ test "mimeTypeFromPath maps known extensions" {
     try std.testing.expectEqualStrings("application/json", mimeTypeFromPath("api.json"));
     try std.testing.expectEqualStrings("image/png", mimeTypeFromPath("logo.png"));
     try std.testing.expectEqualStrings("application/octet-stream", mimeTypeFromPath("archive.bin"));
+}
+
+test "mimeTypeFromPath handles case-insensitive extensions" {
+    try std.testing.expectEqualStrings("image/webp", mimeTypeFromPath("cover.WEBP"));
+    try std.testing.expectEqualStrings("application/wasm", mimeTypeFromPath("runtime.WaSm"));
+}
+
+test "mimeTypeFromPathOr supports custom fallback" {
+    try std.testing.expectEqualStrings("application/x-custom", mimeTypeFromPathOr("asset.unknownext", "application/x-custom"));
+    try std.testing.expectEqualStrings("application/manifest+json", mimeTypeFromPathOr("site.webmanifest", "application/octet-stream"));
+}
+
+test "mimeTypeFromPathWith supports external mappings" {
+    const custom = [_]MimeMapping{
+        .{ .ext = ".zig", .mime = "text/x-zig" },
+        .{ .ext = ".tmpl", .mime = "text/x-template" },
+    };
+
+    try std.testing.expectEqualStrings("text/x-zig", mimeTypeFromPathWith("main.zig", &custom, "application/octet-stream"));
+    try std.testing.expectEqualStrings("text/x-template", mimeTypeFromPathWith("view.TMPL", &custom, "application/octet-stream"));
+    try std.testing.expectEqualStrings("application/octet-stream", mimeTypeFromPathWith("asset.unknown", &custom, "application/octet-stream"));
 }

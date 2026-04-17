@@ -2,7 +2,7 @@
 <img src="https://github.com/user-attachments/assets/ae3e1cc2-41f8-4326-b757-c9afcf6c8fea" alt="httpx.zig logo" width="400" />
 
 <a href="https://muhammad-fiaz.github.io/httpx.zig/"><img src="https://img.shields.io/badge/docs-muhammad--fiaz.github.io-blue" alt="Documentation"></a>
-<a href="https://ziglang.org/"><img src="https://img.shields.io/badge/Zig-0.15.2-orange.svg?logo=zig" alt="Zig Version"></a>
+<a href="https://ziglang.org/"><img src="https://img.shields.io/badge/Zig-0.16.0-orange.svg?logo=zig" alt="Zig Version"></a>
 <a href="https://github.com/muhammad-fiaz/httpx.zig"><img src="https://img.shields.io/github/stars/muhammad-fiaz/httpx.zig" alt="GitHub stars"></a>
 <a href="https://github.com/muhammad-fiaz/httpx.zig/issues"><img src="https://img.shields.io/github/issues/muhammad-fiaz/httpx.zig" alt="GitHub issues"></a>
 <a href="https://github.com/muhammad-fiaz/httpx.zig/pulls"><img src="https://img.shields.io/github/issues-pr/muhammad-fiaz/httpx.zig" alt="GitHub pull requests"></a>
@@ -39,6 +39,12 @@
 ⭐ If you build with httpx.zig, make sure to give it a star. ⭐
 
 
+> [!WARNING]
+> `v0.0.8` is a major update from `0.0.7`.
+> It introduces Zig `0.16.0` baseline updates, expanded config/option builders, runtime/API refinements, and broader utility/docs coverage.
+> If you are migrating from `0.0.7`, review the changelog and refresh your install pin/hash before upgrading.
+
+
 > [!NOTE]
 > **Project maturity:** This project aims to be production-ready and is actively maintained. It is still a new project and not yet widely adopted. Feel free to use it in your projects.
 >
@@ -65,12 +71,14 @@
 | **Connection Pooling** | Automatic reuse of TCP connections with keep-alive and health checking. | https://muhammad-fiaz.github.io/httpx.zig/guide/pooling |
 | **Pool Introspection** | Built-in connection pool stats and per-host connection counts. | https://muhammad-fiaz.github.io/httpx.zig/api/pool |
 | **Pattern-based Routing** | Intuitive server routing with dynamic path parameters and groups. | https://muhammad-fiaz.github.io/httpx.zig/guide/routing |
+| **Port Conflict Handling** | Explicit startup strategy to fail fast or auto-increment to the next free port. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **Middleware Stack** | Built-in middleware for CORS, Logging, Rate Limiting, customized Auth, and more. | https://muhammad-fiaz.github.io/httpx.zig/guide/middleware |
 | **Pre-Route and Global Handlers** | `preRoute(...)` hooks and `global(...)` fallback handlers for complete request lifecycle control. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **Unified Any-Method Routing** | `any(path, handler)` to register all standard HTTP methods on one endpoint. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **Concurrency** | Parallel request patterns (`race`, `all`, `any`) and async task execution. | https://muhammad-fiaz.github.io/httpx.zig/guide/concurrency |
 | **Interceptors** | Global hooks to modify requests and responses (e.g., Auth injection). | https://muhammad-fiaz.github.io/httpx.zig/guide/interceptors |
 | **Smart Retries** | Configurable retry policies with exponential backoff. | https://muhammad-fiaz.github.io/httpx.zig/api/client |
+| **Config Builder Helpers** | Chainable optional customization helpers for `ClientConfig` and `RequestOptions` (defaults remain implicit). | https://muhammad-fiaz.github.io/httpx.zig/api/client |
 | **JSON and HTML** | Helpers for easy JSON serialization and HTML response generation. | https://muhammad-fiaz.github.io/httpx.zig/api/core |
 | **Core Convenience APIs** | Request query-param helpers and response constructors for redirect/text/json. | https://muhammad-fiaz.github.io/httpx.zig/api/core |
 | **TLS/SSL** | Secure connections via TLS 1.3 support. | https://muhammad-fiaz.github.io/httpx.zig/api/tls |
@@ -79,7 +87,7 @@
 | **Cookie APIs** | First-class request/response cookie helpers for both client and server contexts. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **Security** | Security headers (Helmet) and safe defaults. | https://muhammad-fiaz.github.io/httpx.zig/api/middleware |
 | **No External Dependencies** | Pure Zig implementation for maximum portability and ease of build. | https://muhammad-fiaz.github.io/httpx.zig/guide/installation |
-| **Shared Common Helpers** | Reusable query and cookie parsing helpers for app and library code. | https://muhammad-fiaz.github.io/httpx.zig/api/utils |
+| **Shared Common Helpers** | Reusable query/cookie helpers plus MIME resolution with explicit fallback and external mapping support. | https://muhammad-fiaz.github.io/httpx.zig/api/utils |
 
 </details>
 
@@ -96,7 +104,7 @@ Before using `httpx.zig`, ensure you have the following:
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| **Zig** | 0.15.0+ | Download from [ziglang.org](https://ziglang.org/download/) |
+| **Zig** | 0.16.0+ | Download from [ziglang.org](https://ziglang.org/download/) |
 | **Operating System** | Windows 10+, Linux, macOS | Cross-platform networking support |
 
 ---
@@ -135,38 +143,44 @@ zig build -Dtarget=x86-windows
 
 ## Installation
 
-### Method 1: Zig Fetch (Recommended Stable Release)
+### Method 1: Zig Fetch (Latest Release 0.0.8)
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz
+```
+
+### Method 2: Zig Fetch (Previous Stable 0.0.7)
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz
 ```
 
-### Method 2: Zig Fetch (Nightly/Main)
+### Method 3: Zig Fetch (Nightly/Main)
 
 ```bash
 zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```
 
-### Method 3: Project Starter Template (Quick Start)
+### Method 4: Project Starter Template (Quick Start)
 
 Get started quickly with a pre-configured project template:
 
 **[Download Project Starter Example](https://download-directory.github.io/?url=https://github.com/muhammad-fiaz/httpx.zig/tree/main/httpx-project-starter)**
 
-### Method 4: Manual `build.zig.zon` Configuration
+### Method 5: Manual `build.zig.zon` Configuration
 
 Add this dependency entry to your `build.zig.zon`:
 
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz",
         .hash = "...", // Run zig fetch --save <url> to auto-fill this.
     },
 },
 ```
 
-### Method 5: Local Source Checkout
+### Method 6: Local Source Checkout
 
 ```bash
 git clone https://github.com/muhammad-fiaz/httpx.zig.git
@@ -205,16 +219,17 @@ const std = @import("std");
 const httpx = @import("httpx");
  
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
  
-    // Create client
-    var client = httpx.Client.init(allocator);
+    // Create client with implicit defaults.
+    // Use explicit ClientConfig overrides only when you need to change defaults.
+    var client = httpx.Client.initForBaseUrl(allocator, "https://httpbin.org");
     defer client.deinit();
  
-    // Simple GET request
-    var response = try client.get("https://httpbin.org/get", .{});
+    // Simple GET request (request defaults are implicit)
+    var response = try client.get("/get", .{});
     defer response.deinit();
  
     if (response.ok()) {
@@ -222,14 +237,20 @@ pub fn main() !void {
     }
  
     // POST with JSON
-    var post_response = try client.post("https://httpbin.org/post", .{
-        .json = "{\"name\": \"John\"}",
-    });
+    var post_response = try client.post(
+        "/post",
+        .{ .json = "{\"name\": \"John\"}" },
+    );
     defer post_response.deinit();
 
     // Cookie jar helpers
     try client.setCookie("session", "abc123");
     _ = client.getCookie("session");
+
+    // Pool stats/maintenance helpers (optional)
+    client.cleanupIdleConnections();
+    const pool_stats = client.poolStats();
+    _ = pool_stats;
 }
 ```
 
@@ -241,6 +262,7 @@ pub fn main() !void {
 var response = try httpx.fetch(allocator, "https://httpbin.org/get");
 defer response.deinit();
 
+// Defaults are implicit; pass .{} for default request options.
 var by_method = try httpx.send(allocator, .GET, "https://httpbin.org/headers", .{});
 defer by_method.deinit();
 
@@ -250,6 +272,10 @@ defer del_res.deinit();
 
 var opts_res = try httpx.opts(allocator, "https://httpbin.org/get", .{});
 defer opts_res.deinit();
+
+// Optional explicit override (only when needed)
+var timed = try httpx.send(allocator, .GET, "https://httpbin.org/headers", .{ .timeout_ms = 10_000 });
+defer timed.deinit();
 ```
 
 ### Explicit Network Helpers
@@ -277,8 +303,8 @@ _ = is_ip;
 
 ```zig
 const specs = [_]httpx.RequestSpec{
-    .{ .method = .GET, .url = "https://httpbin.org/get" },
-    .{ .method = .GET, .url = "https://httpbin.org/headers" },
+    .{ .method = .GET, .url = "https://httpbin.org/get", .timeout_ms = 5_000 },
+    .{ .method = .GET, .url = "https://httpbin.org/headers", .version = .HTTP_2 },
 };
 
 var client_for_concurrency = httpx.Client.init(allocator);
@@ -289,6 +315,11 @@ defer {
     for (all_results) |*r| r.deinit();
     allocator.free(all_results);
 }
+
+const ok_count = httpx.successfulCount(all_results);
+const err_count = httpx.errorCount(all_results);
+_ = ok_count;
+_ = err_count;
 
 var first_ok = try httpx.first(allocator, &client_for_concurrency, &specs);
 if (first_ok) |*resp| resp.deinit();
@@ -309,11 +340,16 @@ fn htmlHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 }
  
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
  
-    var server = httpx.Server.init(allocator);
+    var server = httpx.Server.initWithConfig(allocator, .{
+        .host = "127.0.0.1",
+        .port = 8080,
+        .port_conflict = .increment,
+        .max_port_tries = 32,
+    });
     defer server.deinit();
  
     // Add middleware
@@ -326,8 +362,29 @@ pub fn main() !void {
  
     // Start server
     try server.listen();
+
+    // Effective port after startup (useful when port_conflict = .increment)
+    std.debug.print("Listening on {d}\n", .{server.listeningPort()});
 }
 ```
+
+### Server Port Conflict Handling
+
+```zig
+var server = httpx.Server.initWithConfig(allocator, .{
+    .host = "127.0.0.1",
+    .port = 8080,
+    .port_conflict = .increment, // try 8081, 8082, ... when 8080 is occupied
+    .max_port_tries = 32,
+});
+defer server.deinit();
+
+try server.listen();
+```
+
+- `port_conflict = .fail`: fail immediately if the configured port cannot be bound.
+- `port_conflict = .increment`: retry subsequent ports until success or `max_port_tries` is exhausted.
+- `server.listeningPort()`: returns the effective bound port.
  
 ## Examples
  

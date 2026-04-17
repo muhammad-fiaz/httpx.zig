@@ -16,6 +16,8 @@ Additional top-level aliases:
 - `httpx.first` (alias for `httpx.any`)
 - `httpx.fastest` (alias for `httpx.race`)
 - `httpx.settled` (alias for `httpx.allSettled`)
+- `httpx.successfulCount` (count `RequestResult.success` items)
+- `httpx.errorCount` (count `RequestResult.err` items)
 
 ### `all`
 
@@ -58,6 +60,8 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec) !
 pub fn first(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?Response
 pub fn fastest(allocator: Allocator, client: *Client, specs: []const RequestSpec) !RequestResult
 pub fn settled(allocator: Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult
+pub fn successfulCount(results: []const RequestResult) usize
+pub fn errorCount(results: []const RequestResult) usize
 ```
 
 ## BatchBuilder
@@ -70,12 +74,14 @@ defer builder.deinit();
 
 _ = try builder.get("https://api.example.com/users");
 _ = try builder.post("https://api.example.com/users", "{\"name\":\"demo\"}");
+_ = try builder.postJson("https://api.example.com/users", "{\"name\":\"json\"}");
 ```
 
 | Method | Description |
 |--------|-------------|
 | `get(url)` | Add GET request |
 | `post(url, body)` | Add POST request |
+| `postJson(url, json)` | Add POST request with JSON body |
 | `put(url, body)` | Add PUT request |
 | `delete(url)` | Add DELETE request |
 | `add(spec)` | Add explicit `RequestSpec` |
@@ -128,6 +134,14 @@ Runs all pending tasks synchronously (useful for testing).
 pub fn runAll(self: *Self) void
 ```
 
+#### `executeAll`
+
+Submits a slice of `Task` values in order.
+
+```zig
+pub fn executeAll(self: *Self, tasks: []const Task) !void
+```
+
 #### `start` / `stop`
 
 Start and stop worker threads explicitly.
@@ -143,6 +157,15 @@ Returns a snapshot count of queued tasks.
 
 ```zig
 pub fn pendingCount(self: *const Self) usize
+```
+
+#### `isRunning` and `queueCapacity`
+
+Inspect executor thread state and configured queue limit.
+
+```zig
+pub fn isRunning(self: *const Self) bool
+pub fn queueCapacity(self: *const Self) usize
 ```
 
 ## Types
@@ -174,9 +197,15 @@ pub const RequestSpec = struct {
     method: Method = .GET,
     url: []const u8,
     body: ?[]const u8 = null,
+    json: ?[]const u8 = null,
     headers: ?[]const [2][]const u8 = null,
+    timeout_ms: ?u64 = null,
+    follow_redirects: ?bool = null,
+    version: ?Version = null,
 };
 ```
+
+All `RequestSpec` fields beyond `url` are optional customizations.
 
 ### `RequestResult`
 

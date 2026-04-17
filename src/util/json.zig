@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const list_writer = @import("list_writer.zig");
 
 fn stringifyJsonAlloc(allocator: Allocator, value: anytype, options: std.json.Stringify.Options) ![]u8 {
     return std.json.Stringify.valueAlloc(allocator, value, options);
@@ -45,7 +46,7 @@ pub const Json = struct {
 /// Dynamic JSON builder for constructing JSON objects.
 pub const JsonBuilder = struct {
     allocator: Allocator,
-    buffer: std.ArrayListUnmanaged(u8) = .empty,
+    buffer: std.ArrayList(u8) = .empty,
     depth: usize = 0,
     needs_comma: bool = false,
 
@@ -109,7 +110,7 @@ pub const JsonBuilder = struct {
     /// Writes an integer value.
     pub fn number(self: *Self, value: anytype) !void {
         try self.maybeComma();
-        const writer = self.buffer.writer(self.allocator);
+        const writer = list_writer.init(self.allocator, &self.buffer);
         try writer.print("{d}", .{value});
         self.needs_comma = true;
     }

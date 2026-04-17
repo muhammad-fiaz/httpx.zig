@@ -6,12 +6,20 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
+fn sleepMs(ms: i64) void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(ms), .real) catch {};
+}
+
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const port = try pickFreeUdpPort();
+    const port = pickFreeUdpPort() catch |err| {
+        std.debug.print("Skipping HTTP/3 server runtime example: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -27,7 +35,7 @@ pub fn main() !void {
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server});
     defer server_thread.join();
 
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    sleepMs(50);
 
     var client = httpx.Client.initWithConfig(allocator, .{
         .http3_enabled = true,
@@ -39,7 +47,11 @@ pub fn main() !void {
     const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/h3-server", .{port});
     defer allocator.free(url);
 
-    var response = try client.get(url, .{ .timeout_ms = 5000 });
+    var response = client.get(url, .{ .timeout_ms = 5000 }) catch |err| {
+        std.debug.print("Skipping HTTP/3 server runtime example: {s}\n", .{@errorName(err)});
+        server.stop();
+        return;
+    };
     defer response.deinit();
 
     std.debug.print("\n=== HTTP/3 Server Runtime Example ===\n", .{});
@@ -66,7 +78,7 @@ fn pickFreeUdpPort() !u16 {
     var socket = try httpx.UdpSocket.create();
     defer socket.close();
 
-    try socket.bind(try std.net.Address.parseIp("127.0.0.1", 0));
+    try socket.bind(try httpx.Address.parseIp("127.0.0.1", 0));
     const addr = try socket.getLocalAddress();
     return addr.getPort();
 }

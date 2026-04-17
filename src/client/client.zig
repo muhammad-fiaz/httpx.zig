@@ -10,7 +10,6 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const net = std.net;
 
 const types = @import("../core/types.zig");
 const meta = @import("../core/meta.zig");
@@ -34,7 +33,23 @@ const Parser = @import("../protocol/parser.zig").Parser;
 const TlsConfig = @import("../tls/tls.zig").TlsConfig;
 const TlsSession = @import("../tls/tls.zig").TlsSession;
 const ConnectionPool = @import("pool.zig").ConnectionPool;
+const PoolStats = @import("pool.zig").PoolStats;
 const common = @import("../util/common.zig");
+const list_writer = @import("../util/list_writer.zig");
+
+fn defaultIo() std.Io {
+    return if (@import("builtin").is_test)
+        std.testing.io
+    else
+        std.Io.Threaded.global_single_threaded.io();
+}
+
+fn sleepMs(ms: u64) void {
+    const io = defaultIo();
+    const max_i64_u64: u64 = @intCast(std.math.maxInt(i64));
+    const dur = std.Io.Duration.fromMilliseconds(@intCast(@min(ms, max_i64_u64)));
+    std.Io.sleep(io, dur, .real) catch {};
+}
 
 /// HTTP client configuration.
 pub const ClientConfig = struct {
@@ -54,15 +69,199 @@ pub const ClientConfig = struct {
     keep_alive: bool = true,
     pool_max_connections: u32 = 20,
     pool_max_per_host: u32 = 5,
+
+    /// Returns default client configuration.
+    pub fn defaults() ClientConfig {
+        return .{};
+    }
+
+    /// Returns default configuration with a base URL.
+    pub fn forBaseUrl(base_url: []const u8) ClientConfig {
+        return .{ .base_url = base_url };
+    }
+
+    /// Returns a copy with a new base URL.
+    pub fn withBaseUrl(self: ClientConfig, base_url: ?[]const u8) ClientConfig {
+        var out = self;
+        out.base_url = base_url;
+        return out;
+    }
+
+    /// Returns a copy with new timeout settings.
+    pub fn withTimeouts(self: ClientConfig, timeouts: types.Timeouts) ClientConfig {
+        var out = self;
+        out.timeouts = timeouts;
+        return out;
+    }
+
+    /// Returns a copy with a new retry policy.
+    pub fn withRetryPolicy(self: ClientConfig, retry_policy: types.RetryPolicy) ClientConfig {
+        var out = self;
+        out.retry_policy = retry_policy;
+        return out;
+    }
+
+    /// Returns a copy with a new redirect policy.
+    pub fn withRedirectPolicy(self: ClientConfig, redirect_policy: types.RedirectPolicy) ClientConfig {
+        var out = self;
+        out.redirect_policy = redirect_policy;
+        return out;
+    }
+
+    /// Returns a copy with default request headers applied to every request.
+    pub fn withDefaultHeaders(self: ClientConfig, headers: ?[]const [2][]const u8) ClientConfig {
+        var out = self;
+        out.default_headers = headers;
+        return out;
+    }
+
+    /// Returns a copy with a custom User-Agent.
+    pub fn withUserAgent(self: ClientConfig, user_agent: []const u8) ClientConfig {
+        var out = self;
+        out.user_agent = user_agent;
+        return out;
+    }
+
+    /// Returns a copy with client-level redirect-follow behavior.
+    pub fn withFollowRedirects(self: ClientConfig, follow_redirects: bool) ClientConfig {
+        var out = self;
+        out.follow_redirects = follow_redirects;
+        return out;
+    }
+
+    /// Returns a copy with protocol runtime toggles.
+    pub fn withProtocols(self: ClientConfig, http2_enabled: bool, http3_enabled: bool) ClientConfig {
+        var out = self;
+        out.http2_enabled = http2_enabled;
+        out.http3_enabled = http3_enabled;
+        return out;
+    }
+
+    /// Returns a copy with explicit HTTP/2 settings.
+    pub fn withHttp2Settings(self: ClientConfig, settings: types.Http2Settings) ClientConfig {
+        var out = self;
+        out.http2_settings = settings;
+        return out;
+    }
+
+    /// Returns a copy with explicit HTTP/3 settings.
+    pub fn withHttp3Settings(self: ClientConfig, settings: types.Http3Settings) ClientConfig {
+        var out = self;
+        out.http3_settings = settings;
+        return out;
+    }
+
+    /// Returns a copy with SSL verification behavior.
+    pub fn withSslVerification(self: ClientConfig, verify_ssl: bool) ClientConfig {
+        var out = self;
+        out.verify_ssl = verify_ssl;
+        return out;
+    }
+
+    /// Returns a copy with keep-alive enablement.
+    pub fn withKeepAlive(self: ClientConfig, keep_alive: bool) ClientConfig {
+        var out = self;
+        out.keep_alive = keep_alive;
+        return out;
+    }
+
+    /// Returns a copy with maximum response-size limit.
+    pub fn withMaxResponseSize(self: ClientConfig, max_response_size: usize) ClientConfig {
+        var out = self;
+        out.max_response_size = max_response_size;
+        return out;
+    }
+
+    /// Returns a copy with connection-pool limits.
+    pub fn withPoolLimits(self: ClientConfig, max_connections: u32, max_per_host: u32) ClientConfig {
+        var out = self;
+        out.pool_max_connections = max_connections;
+        out.pool_max_per_host = max_per_host;
+        return out;
+    }
 };
 
 /// Per-request options.
 pub const RequestOptions = struct {
     headers: ?[]const [2][]const u8 = null,
+    query_params: ?[]const [2][]const u8 = null,
     body: ?[]const u8 = null,
     json: ?[]const u8 = null,
+    form_fields: ?[]const [2][]const u8 = null,
     timeout_ms: ?u64 = null,
     follow_redirects: ?bool = null,
+    version: ?types.Version = null,
+
+    /// Returns default request options.
+    pub fn defaults() RequestOptions {
+        return .{};
+    }
+
+    /// Returns a copy with request headers.
+    pub fn withHeaders(self: RequestOptions, headers: []const [2][]const u8) RequestOptions {
+        var out = self;
+        out.headers = headers;
+        return out;
+    }
+
+    /// Returns a copy with query parameters to append to the request URL.
+    pub fn withQueryParams(self: RequestOptions, query_params: []const [2][]const u8) RequestOptions {
+        var out = self;
+        out.query_params = query_params;
+        return out;
+    }
+
+    /// Returns a copy with a raw request body.
+    pub fn withBody(self: RequestOptions, body: []const u8) RequestOptions {
+        var out = self;
+        out.body = body;
+        return out;
+    }
+
+    /// Returns a copy with a JSON request body.
+    pub fn withJson(self: RequestOptions, json: []const u8) RequestOptions {
+        var out = self;
+        out.json = json;
+        return out;
+    }
+
+    /// Returns a copy with form fields encoded as application/x-www-form-urlencoded.
+    pub fn withFormUrlEncoded(self: RequestOptions, form_fields: []const [2][]const u8) RequestOptions {
+        var out = self;
+        out.form_fields = form_fields;
+        return out;
+    }
+
+    /// Returns a copy with a per-request timeout.
+    pub fn withTimeoutMs(self: RequestOptions, timeout_ms: u64) RequestOptions {
+        var out = self;
+        out.timeout_ms = timeout_ms;
+        return out;
+    }
+
+    /// Returns a copy with an explicit redirect-follow policy.
+    pub fn withFollowRedirects(self: RequestOptions, follow_redirects: bool) RequestOptions {
+        var out = self;
+        out.follow_redirects = follow_redirects;
+        return out;
+    }
+
+    /// Returns a copy with an explicit HTTP version for this request.
+    pub fn withVersion(self: RequestOptions, version: types.Version) RequestOptions {
+        var out = self;
+        out.version = version;
+        return out;
+    }
+
+    /// Returns a copy that forces this request through the HTTP/2 runtime path.
+    pub fn withHttp2(self: RequestOptions) RequestOptions {
+        return self.withVersion(.HTTP_2);
+    }
+
+    /// Returns a copy that forces this request through the HTTP/3 runtime path.
+    pub fn withHttp3(self: RequestOptions) RequestOptions {
+        return self.withVersion(.HTTP_3);
+    }
 };
 
 /// Request interceptor function type.
@@ -82,7 +281,7 @@ pub const Interceptor = struct {
 pub const Client = struct {
     allocator: Allocator,
     config: ClientConfig,
-    interceptors: std.ArrayListUnmanaged(Interceptor) = .empty,
+    interceptors: std.ArrayList(Interceptor) = .empty,
     cookies: std.StringHashMapUnmanaged([]const u8) = .{},
     pool: ConnectionPool,
 
@@ -105,6 +304,11 @@ pub const Client = struct {
         };
     }
 
+    /// Creates a new client with default settings and a base URL.
+    pub fn initForBaseUrl(allocator: Allocator, base_url: []const u8) Self {
+        return initWithConfig(allocator, ClientConfig.forBaseUrl(base_url));
+    }
+
     /// Releases all allocated resources.
     pub fn deinit(self: *Self) void {
         self.interceptors.deinit(self.allocator);
@@ -120,6 +324,21 @@ pub const Client = struct {
     /// Adds an interceptor to the client.
     pub fn addInterceptor(self: *Self, interceptor: Interceptor) !void {
         try self.interceptors.append(self.allocator, interceptor);
+    }
+
+    /// Removes idle or exhausted pooled connections based on pool policy.
+    pub fn cleanupIdleConnections(self: *Self) void {
+        self.pool.cleanup();
+    }
+
+    /// Returns a snapshot of total/active/idle pooled connection counts.
+    pub fn poolStats(self: *const Self) PoolStats {
+        return self.pool.stats();
+    }
+
+    /// Returns how many pooled connections are tracked for a host/port.
+    pub fn hostPoolConnectionCount(self: *const Self, host: []const u8, port: u16) usize {
+        return self.pool.hostConnectionCount(host, port);
     }
 
     /// Makes an HTTP request.
@@ -147,6 +366,10 @@ pub const Client = struct {
         var req = try Request.init(self.allocator, method, full_url);
         defer req.deinit();
 
+        if (reqOpts.version) |version| {
+            req.version = version;
+        }
+
         try req.headers.set(HeaderName.USER_AGENT, self.config.user_agent);
 
         if (self.config.default_headers) |hdrs| {
@@ -161,12 +384,16 @@ pub const Client = struct {
             }
         }
 
-        if (reqOpts.body) |body| {
-            try req.setBody(body);
+        if (reqOpts.query_params) |params| {
+            try req.addQueryParams(params);
         }
 
-        if (reqOpts.json) |json_body| {
+        if (reqOpts.body) |body| {
+            try req.setBody(body);
+        } else if (reqOpts.json) |json_body| {
             try req.setJson(json_body);
+        } else if (reqOpts.form_fields) |fields| {
+            try req.setFormUrlEncoded(fields);
         }
 
         try self.attachCookies(&req);
@@ -220,7 +447,7 @@ pub const Client = struct {
                 if (policy.retry_on_connection_error and can_retry_method and attempt < policy.max_retries and isRetryableRequestError(err)) {
                     attempt += 1;
                     const delay_ms = policy.calculateDelay(attempt);
-                    if (delay_ms > 0) std.Thread.sleep(delay_ms * std.time.ns_per_ms);
+                    if (delay_ms > 0) sleepMs(delay_ms);
                     continue;
                 }
                 return err;
@@ -230,7 +457,7 @@ pub const Client = struct {
                 res.deinit();
                 attempt += 1;
                 const delay_ms = policy.calculateDelay(attempt);
-                if (delay_ms > 0) std.Thread.sleep(delay_ms * std.time.ns_per_ms);
+                if (delay_ms > 0) sleepMs(delay_ms);
                 continue;
             }
 
@@ -426,10 +653,10 @@ pub const Client = struct {
         defer if (authority_buf) |buf| self.allocator.free(buf);
         const authority = try buildAuthority(self.allocator, req, &authority_buf);
 
-        var header_entries = std.ArrayListUnmanaged(qpack.HeaderEntry){};
+        var header_entries = std.ArrayList(qpack.HeaderEntry).empty;
         defer header_entries.deinit(self.allocator);
 
-        var owned_header_names = std.ArrayListUnmanaged([]u8){};
+        var owned_header_names = std.ArrayList([]u8).empty;
         defer {
             for (owned_header_names.items) |name| self.allocator.free(name);
             owned_header_names.deinit(self.allocator);
@@ -459,7 +686,7 @@ pub const Client = struct {
         const headers_block = try qpack.encodeHeaders(&qpack_encoder, header_entries.items, self.allocator);
         defer self.allocator.free(headers_block);
 
-        var request_stream_payload = std.ArrayListUnmanaged(u8){};
+        var request_stream_payload = std.ArrayList(u8).empty;
         defer request_stream_payload.deinit(self.allocator);
         try http.appendHttp3Frame(&request_stream_payload, self.allocator, .headers, headers_block);
 
@@ -469,11 +696,11 @@ pub const Client = struct {
             }
         }
 
-        var settings_payload = std.ArrayListUnmanaged(u8){};
+        var settings_payload = std.ArrayList(u8).empty;
         defer settings_payload.deinit(self.allocator);
         try http.encodeHttp3SettingsPayload(self.config.http3_settings, self.allocator, &settings_payload);
 
-        var control_stream_payload = std.ArrayListUnmanaged(u8){};
+        var control_stream_payload = std.ArrayList(u8).empty;
         defer control_stream_payload.deinit(self.allocator);
         try http.appendVarInt(&control_stream_payload, self.allocator, @intFromEnum(quic.Http3StreamType.control));
         try http.appendHttp3Frame(&control_stream_payload, self.allocator, .settings, settings_payload.items);
@@ -484,10 +711,10 @@ pub const Client = struct {
         try self.sendHttp3StreamData(transport, &session, 2, false, control_stream_payload.items);
         try self.sendHttp3StreamData(transport, &session, 0, true, request_stream_payload.items);
 
-        var response_stream_payload = std.ArrayListUnmanaged(u8){};
+        var response_stream_payload = std.ArrayList(u8).empty;
         defer response_stream_payload.deinit(self.allocator);
 
-        var peer_control_payload = std.ArrayListUnmanaged(u8){};
+        var peer_control_payload = std.ArrayList(u8).empty;
         defer peer_control_payload.deinit(self.allocator);
 
         var read_buf: [64 * 1024]u8 = undefined;
@@ -526,7 +753,7 @@ pub const Client = struct {
         var response_headers = Headers.init(self.allocator);
         defer response_headers.deinit();
 
-        var response_body = std.ArrayListUnmanaged(u8){};
+        var response_body = std.ArrayList(u8).empty;
         defer response_body.deinit(self.allocator);
 
         var status_code: ?u16 = null;
@@ -591,7 +818,7 @@ pub const Client = struct {
 
             const frame_len = try stream_frame.encode(frame_storage);
 
-            var packet = std.ArrayListUnmanaged(u8){};
+            var packet = std.ArrayList(u8).empty;
             defer packet.deinit(self.allocator);
 
             try appendHttp3PacketHeader(&packet, self.allocator, session);
@@ -612,7 +839,7 @@ pub const Client = struct {
         payload: []const u8,
         status_code: *?u16,
         response_headers: *Headers,
-        response_body: *std.ArrayListUnmanaged(u8),
+        response_body: *std.ArrayList(u8),
     ) !void {
         var offset: usize = 0;
 
@@ -672,7 +899,7 @@ pub const Client = struct {
 
         try transport.writeAll(http.HTTP2_PREFACE);
 
-        var settings_payload = std.ArrayListUnmanaged(u8){};
+        var settings_payload = std.ArrayList(u8).empty;
         defer settings_payload.deinit(self.allocator);
 
         const local_settings = toConnectionSettings(self.config.http2_settings);
@@ -693,10 +920,10 @@ pub const Client = struct {
         defer if (authority_buf) |buf| self.allocator.free(buf);
         const authority = try buildAuthority(self.allocator, req, &authority_buf);
 
-        var header_entries = std.ArrayListUnmanaged(hpack.HeaderEntry){};
+        var header_entries = std.ArrayList(hpack.HeaderEntry).empty;
         defer header_entries.deinit(self.allocator);
 
-        var owned_header_names = std.ArrayListUnmanaged([]u8){};
+        var owned_header_names = std.ArrayList([]u8).empty;
         defer {
             for (owned_header_names.items) |name| self.allocator.free(name);
             owned_header_names.deinit(self.allocator);
@@ -759,10 +986,10 @@ pub const Client = struct {
         var response_headers = Headers.init(self.allocator);
         defer response_headers.deinit();
 
-        var body = std.ArrayListUnmanaged(u8){};
+        var body = std.ArrayList(u8).empty;
         defer body.deinit(self.allocator);
 
-        var pending_headers_block = std.ArrayListUnmanaged(u8){};
+        var pending_headers_block = std.ArrayList(u8).empty;
         defer pending_headers_block.deinit(self.allocator);
 
         var pending_headers_flags: u8 = 0;
@@ -813,11 +1040,13 @@ pub const Client = struct {
                     if (waiting_continuation) return error.ProtocolError;
 
                     if ((frame.header.flags & 0x04) != 0) {
+                        const expect_initial_headers = status_code == null;
                         try applyResponseHeaderBlock(
                             self,
                             &stream_manager,
                             frame.payload,
                             frame.header.flags,
+                            expect_initial_headers,
                             &status_code,
                             &response_headers,
                         );
@@ -837,11 +1066,13 @@ pub const Client = struct {
 
                     try pending_headers_block.appendSlice(self.allocator, frame.payload);
                     if ((frame.header.flags & 0x04) != 0) {
+                        const expect_initial_headers = status_code == null;
                         try applyResponseHeaderBlock(
                             self,
                             &stream_manager,
                             pending_headers_block.items,
                             pending_headers_flags,
+                            expect_initial_headers,
                             &status_code,
                             &response_headers,
                         );
@@ -867,6 +1098,14 @@ pub const Client = struct {
 
                     if (body.items.len + data_slice.len > self.config.max_response_size) return error.ResponseTooLarge;
                     try body.appendSlice(self.allocator, data_slice);
+
+                    if (frame.payload.len > 0) {
+                        // Keep stream and connection windows replenished while consuming DATA.
+                        const window_increment: u31 = @intCast(frame.payload.len);
+                        const window_update = h2stream.buildWindowUpdatePayload(window_increment);
+                        try writeHttp2Frame(transport, .window_update, 0, request_stream.id, &window_update);
+                        try writeHttp2Frame(transport, .window_update, 0, 0, &window_update);
+                    }
 
                     if ((frame.header.flags & 0x01) != 0) {
                         response_done = true;
@@ -1016,9 +1255,9 @@ pub const Client = struct {
     fn attachCookies(self: *Self, req: *Request) !void {
         if (self.cookies.count() == 0) return;
 
-        var list = std.ArrayListUnmanaged(u8){};
+        var list = std.ArrayList(u8).empty;
         defer list.deinit(self.allocator);
-        const writer = list.writer(self.allocator);
+        const writer = list_writer.init(self.allocator, &list);
 
         var it = self.cookies.iterator();
         var first = true;
@@ -1126,6 +1365,16 @@ pub const Client = struct {
     /// HEAD request convenience method.
     pub fn head(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
         return self.request(.HEAD, url, reqOpts);
+    }
+
+    /// TRACE request convenience method.
+    pub fn trace(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
+        return self.request(.TRACE, url, reqOpts);
+    }
+
+    /// CONNECT request convenience method.
+    pub fn connect(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
+        return self.request(.CONNECT, url, reqOpts);
     }
 
     /// OPTIONS request convenience method.
@@ -1274,7 +1523,7 @@ fn parseHttp3ControlStream(stream_data: []const u8) !void {
 }
 
 fn appendHttp3PacketHeader(
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
     allocator: Allocator,
     session: *Http3QuicSession,
 ) !void {
@@ -1383,6 +1632,7 @@ fn applyResponseHeaderBlock(
     stream_manager: *h2stream.StreamManager,
     header_block: []const u8,
     flags: u8,
+    expect_initial_headers: bool,
     status_code: *?u16,
     response_headers: *Headers,
 ) !void {
@@ -1395,16 +1645,28 @@ fn applyResponseHeaderBlock(
         self.allocator.free(parsed.headers);
     }
 
+    var saw_status = false;
+
     for (parsed.headers) |header| {
         if (header.name.len > 0 and header.name[0] == ':') {
             if (mem.eql(u8, header.name, ":status")) {
+                if (!expect_initial_headers or status_code.* != null or saw_status) {
+                    return error.ProtocolError;
+                }
                 status_code.* = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidResponse;
+                saw_status = true;
+            } else {
+                return error.ProtocolError;
             }
             continue;
         }
 
         if (common.isConnectionSpecificHeader(header.name)) continue;
         try response_headers.append(header.name, header.value);
+    }
+
+    if (expect_initial_headers and !saw_status and status_code.* == null) {
+        return error.InvalidResponse;
     }
 }
 
@@ -1425,6 +1687,91 @@ test "Client with config" {
     defer client.deinit();
 
     try std.testing.expectEqualStrings("https://api.example.com", client.config.base_url.?);
+}
+
+test "Client initForBaseUrl helper" {
+    const allocator = std.testing.allocator;
+    var client = Client.initForBaseUrl(allocator, "https://api.example.com");
+    defer client.deinit();
+
+    try std.testing.expectEqualStrings("https://api.example.com", client.config.base_url.?);
+}
+
+test "ClientConfig builder helpers" {
+    const default_headers = [_][2][]const u8{
+        .{ "Accept", "application/json" },
+    };
+
+    const cfg = ClientConfig.defaults()
+        .withBaseUrl("https://api.example.com")
+        .withTimeouts(types.Timeouts.fast())
+        .withRetryPolicy(types.RetryPolicy.noRetry())
+        .withRedirectPolicy(types.RedirectPolicy.strict())
+        .withDefaultHeaders(&default_headers)
+        .withUserAgent("MyClient/1.0")
+        .withFollowRedirects(false)
+        .withProtocols(true, false)
+        .withHttp2Settings(.{ .max_concurrent_streams = 42 })
+        .withHttp3Settings(.{ .enable_datagrams = true })
+        .withSslVerification(false)
+        .withKeepAlive(false)
+        .withMaxResponseSize(1024)
+        .withPoolLimits(64, 16);
+
+    try std.testing.expectEqualStrings("https://api.example.com", cfg.base_url.?);
+    try std.testing.expectEqual(@as(u64, 5_000), cfg.timeouts.connect_ms);
+    try std.testing.expectEqual(@as(u32, 0), cfg.retry_policy.max_retries);
+    try std.testing.expect(cfg.redirect_policy.preserve_method);
+    try std.testing.expect(cfg.default_headers != null);
+    try std.testing.expectEqual(@as(usize, 1), cfg.default_headers.?.len);
+    try std.testing.expectEqualStrings("MyClient/1.0", cfg.user_agent);
+    try std.testing.expect(!cfg.follow_redirects);
+    try std.testing.expect(cfg.http2_enabled);
+    try std.testing.expect(!cfg.http3_enabled);
+    try std.testing.expectEqual(@as(u32, 42), cfg.http2_settings.max_concurrent_streams);
+    try std.testing.expect(cfg.http3_settings.enable_datagrams);
+    try std.testing.expect(!cfg.verify_ssl);
+    try std.testing.expect(!cfg.keep_alive);
+    try std.testing.expectEqual(@as(usize, 1024), cfg.max_response_size);
+    try std.testing.expectEqual(@as(u32, 64), cfg.pool_max_connections);
+    try std.testing.expectEqual(@as(u32, 16), cfg.pool_max_per_host);
+}
+
+test "RequestOptions builder helpers" {
+    const headers = [_][2][]const u8{
+        .{ "Authorization", "Bearer test" },
+        .{ "Accept", "application/json" },
+    };
+    const query_params = [_][2][]const u8{
+        .{ "page", "1" },
+        .{ "sort", "desc" },
+    };
+    const form_fields = [_][2][]const u8{
+        .{ "email", "user@example.com" },
+    };
+
+    const opts = RequestOptions.defaults()
+        .withHeaders(&headers)
+        .withQueryParams(&query_params)
+        .withJson("{\"ok\":true}")
+        .withFormUrlEncoded(&form_fields)
+        .withTimeoutMs(2_500)
+        .withFollowRedirects(false)
+        .withVersion(.HTTP_2);
+
+    try std.testing.expect(opts.headers != null);
+    try std.testing.expectEqual(@as(usize, 2), opts.headers.?.len);
+    try std.testing.expect(opts.query_params != null);
+    try std.testing.expectEqual(@as(usize, 2), opts.query_params.?.len);
+    try std.testing.expectEqualStrings("{\"ok\":true}", opts.json.?);
+    try std.testing.expect(opts.form_fields != null);
+    try std.testing.expectEqual(@as(usize, 1), opts.form_fields.?.len);
+    try std.testing.expectEqual(@as(u64, 2_500), opts.timeout_ms.?);
+    try std.testing.expect(!opts.follow_redirects.?);
+    try std.testing.expectEqual(types.Version.HTTP_2, opts.version.?);
+
+    const h3 = RequestOptions.defaults().withHttp3();
+    try std.testing.expectEqual(types.Version.HTTP_3, h3.version.?);
 }
 
 test "Response parsing" {
@@ -1506,11 +1853,15 @@ test "Client send/fetch/options aliases" {
     const send_ptr: *const fn (*Client, types.Method, []const u8, RequestOptions) anyerror!Response = Client.send;
     const fetch_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.fetch;
     const del_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.del;
+    const trace_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.trace;
+    const connect_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.connect;
     const options_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.options;
     const opts_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.opts;
     _ = send_ptr;
     _ = fetch_ptr;
     _ = del_ptr;
+    _ = trace_ptr;
+    _ = connect_ptr;
     _ = options_ptr;
     _ = opts_ptr;
 }
@@ -1526,6 +1877,19 @@ test "Client hasCookie and cookieCount" {
     try client.setCookie("session", "abc123");
     try std.testing.expectEqual(@as(usize, 1), client.cookieCount());
     try std.testing.expect(client.hasCookie("session"));
+}
+
+test "Client pool helpers" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator);
+    defer client.deinit();
+
+    client.cleanupIdleConnections();
+    const stats = client.poolStats();
+    try std.testing.expectEqual(@as(usize, 0), stats.total);
+    try std.testing.expectEqual(@as(usize, 0), stats.active);
+    try std.testing.expectEqual(@as(usize, 0), stats.idle);
+    try std.testing.expectEqual(@as(usize, 0), client.hostPoolConnectionCount("example.com", 443));
 }
 
 test "Client retry classifier avoids TLS/protocol retries" {
@@ -1552,6 +1916,10 @@ test "Client HTTP/2 runtime parses headers and data" {
         .{ .name = "content-type", .value = "text/plain" },
     };
 
+    const server_trailers = [_]hpack.HeaderEntry{
+        .{ .name = "etag", .value = "W/\"demo\"" },
+    };
+
     const headers_payload = try h2stream.buildHeadersFramePayload(
         &server_stream_manager,
         &server_headers,
@@ -1560,16 +1928,25 @@ test "Client HTTP/2 runtime parses headers and data" {
     );
     defer allocator.free(headers_payload.payload);
 
-    var read_bytes = std.ArrayListUnmanaged(u8){};
+    const trailers_payload = try h2stream.buildHeadersFramePayload(
+        &server_stream_manager,
+        &server_trailers,
+        null,
+        allocator,
+    );
+    defer allocator.free(trailers_payload.payload);
+
+    var read_bytes = std.ArrayList(u8).empty;
     defer read_bytes.deinit(allocator);
 
-    var server_settings = std.ArrayListUnmanaged(u8){};
+    var server_settings = std.ArrayList(u8).empty;
     defer server_settings.deinit(allocator);
     try http.encodeSettingsPayload(.{}, allocator, &server_settings);
 
     try appendFrameBytes(allocator, &read_bytes, .settings, 0, 0, server_settings.items);
     try appendFrameBytes(allocator, &read_bytes, .headers, headers_payload.flags, 1, headers_payload.payload);
-    try appendFrameBytes(allocator, &read_bytes, .data, 0x01, 1, "hello");
+    try appendFrameBytes(allocator, &read_bytes, .data, 0x00, 1, "hello");
+    try appendFrameBytes(allocator, &read_bytes, .headers, trailers_payload.flags | 0x01, 1, trailers_payload.payload);
 
     var transport = FakeHttp2Transport.init(allocator, read_bytes.items);
     defer transport.deinit();
@@ -1580,9 +1957,11 @@ test "Client HTTP/2 runtime parses headers and data" {
     try std.testing.expectEqual(@as(u16, 200), response.status.code);
     try std.testing.expectEqual(types.Version.HTTP_2, response.version);
     try std.testing.expectEqualStrings("text/plain", response.headers.get("content-type").?);
+    try std.testing.expectEqualStrings("W/\"demo\"", response.headers.get("etag").?);
     try std.testing.expectEqualStrings("hello", response.text().?);
 
     try std.testing.expect(mem.startsWith(u8, transport.writes.items, http.HTTP2_PREFACE));
+    try std.testing.expect(countWrittenHttp2Frames(transport.writes.items, .window_update) >= 2);
 }
 
 test "Client HTTP/3 runtime parses headers and data" {
@@ -1605,16 +1984,16 @@ test "Client HTTP/3 runtime parses headers and data" {
     const encoded_server_headers = try qpack.encodeHeaders(&server_qpack, &server_headers, allocator);
     defer allocator.free(encoded_server_headers);
 
-    var response_stream_payload = std.ArrayListUnmanaged(u8){};
+    var response_stream_payload = std.ArrayList(u8).empty;
     defer response_stream_payload.deinit(allocator);
     try http.appendHttp3Frame(&response_stream_payload, allocator, .headers, encoded_server_headers);
     try http.appendHttp3Frame(&response_stream_payload, allocator, .data, "hello-h3");
 
-    var server_settings = std.ArrayListUnmanaged(u8){};
+    var server_settings = std.ArrayList(u8).empty;
     defer server_settings.deinit(allocator);
     try http.encodeHttp3SettingsPayload(.{}, allocator, &server_settings);
 
-    var control_stream_payload = std.ArrayListUnmanaged(u8){};
+    var control_stream_payload = std.ArrayList(u8).empty;
     defer control_stream_payload.deinit(allocator);
     try http.appendVarInt(&control_stream_payload, allocator, @intFromEnum(quic.Http3StreamType.control));
     try http.appendHttp3Frame(&control_stream_payload, allocator, .settings, server_settings.items);
@@ -1664,7 +2043,7 @@ const FakeHttp2Transport = struct {
     allocator: Allocator,
     reads: []const u8,
     read_index: usize = 0,
-    writes: std.ArrayListUnmanaged(u8) = .{},
+    writes: std.ArrayList(u8) = .empty,
 
     fn init(allocator: Allocator, reads: []const u8) FakeHttp2Transport {
         return .{ .allocator = allocator, .reads = reads };
@@ -1689,7 +2068,7 @@ const FakeHttp3Transport = struct {
     allocator: Allocator,
     reads: []const []const u8,
     read_index: usize = 0,
-    writes: std.ArrayListUnmanaged([]u8) = .{},
+    writes: std.ArrayList([]u8) = .empty,
 
     fn init(allocator: Allocator, reads: []const []const u8) FakeHttp3Transport {
         return .{ .allocator = allocator, .reads = reads };
@@ -1740,7 +2119,7 @@ fn buildHttp3DatagramForTest(
     };
     const frame_len = try stream_frame.encode(frame_storage);
 
-    var packet = std.ArrayListUnmanaged(u8){};
+    var packet = std.ArrayList(u8).empty;
     errdefer packet.deinit(allocator);
 
     var header_buf: [128]u8 = undefined;
@@ -1762,7 +2141,7 @@ fn buildHttp3DatagramForTest(
 
 fn appendFrameBytes(
     allocator: Allocator,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
     frame_type: http.Http2FrameType,
     flags: u8,
     stream_id: u31,
@@ -1777,4 +2156,31 @@ fn appendFrameBytes(
     const raw = header.serialize();
     try out.appendSlice(allocator, &raw);
     try out.appendSlice(allocator, payload);
+}
+
+fn countWrittenHttp2Frames(data: []const u8, frame_type: http.Http2FrameType) usize {
+    var count: usize = 0;
+    var offset: usize = if (mem.startsWith(u8, data, http.HTTP2_PREFACE))
+        http.HTTP2_PREFACE.len
+    else
+        0;
+
+    while (offset + 9 <= data.len) {
+        const length =
+            (@as(usize, data[offset]) << 16) |
+            (@as(usize, data[offset + 1]) << 8) |
+            @as(usize, data[offset + 2]);
+        const raw_type = data[offset + 3];
+        offset += 9;
+
+        if (offset + length > data.len) break;
+
+        if (raw_type == @intFromEnum(frame_type)) {
+            count += 1;
+        }
+
+        offset += length;
+    }
+
+    return count;
 }

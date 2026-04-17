@@ -5,8 +5,13 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
+fn nowMillis() i64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Timestamp.now(io, .real).toMilliseconds();
+}
+
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -36,8 +41,8 @@ pub fn main() !void {
         .socket = undefined,
         .host = "api.example.com",
         .port = 443,
-        .created_at = std.time.milliTimestamp(),
-        .last_used = std.time.milliTimestamp(),
+        .created_at = nowMillis(),
+        .last_used = nowMillis(),
     };
     std.debug.print("  Connection to {s}:{d}\n", .{ conn.host, conn.port });
     std.debug.print("  Is healthy (60s timeout): {}\n", .{conn.isHealthy(60_000)});

@@ -13,13 +13,15 @@ fn health(ctx: *httpx.Context) anyerror!httpx.Response {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
         .port = 8080,
+        .port_conflict = .increment,
+        .max_port_tries = 32,
         .max_connections = 1000,
         .keep_alive = true,
     });
@@ -40,4 +42,5 @@ zig build run-simple_server
 
 - `GET /health` returns JSON response.
 - Server starts without route registration errors.
-- Browser request to `http://127.0.0.1:8080/health` returns immediately.
+- If `8080` is occupied, server startup can automatically move to the next port based on config.
+- Browser request to `http://127.0.0.1:<effective-port>/health` returns immediately.

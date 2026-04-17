@@ -6,7 +6,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -29,10 +29,10 @@ pub fn main() !void {
     defer req.deinit();
 
     if (client.getCookie("session")) |session| {
-        var cookie_buf = std.ArrayListUnmanaged(u8){};
+        var cookie_buf = std.ArrayList(u8).empty;
         defer cookie_buf.deinit(allocator);
-        const writer = cookie_buf.writer(allocator);
-        try writer.print("session={s}", .{session});
+        try cookie_buf.appendSlice(allocator, "session=");
+        try cookie_buf.appendSlice(allocator, session);
         try req.headers.set(httpx.HeaderName.COOKIE, cookie_buf.items);
     }
 

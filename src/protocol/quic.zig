@@ -11,10 +11,17 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const net = std.net;
 const posix = std.posix;
+const builtin = @import("builtin");
 
 const http = @import("http.zig");
+
+fn defaultIo() std.Io {
+    return if (builtin.is_test)
+        std.testing.io
+    else
+        std.Io.Threaded.global_single_threaded.io();
+}
 
 /// QUIC version identifiers
 pub const Version = enum(u32) {
@@ -128,7 +135,7 @@ pub const ConnectionId = struct {
 
     pub fn random() ConnectionId {
         var cid = ConnectionId{ .len = 8 };
-        std.crypto.random.bytes(cid.data[0..8]);
+        defaultIo().random(cid.data[0..8]);
         return cid;
     }
 };
@@ -620,7 +627,7 @@ pub const TransportParameters = struct {
 
     /// Encodes transport parameters.
     pub fn encode(self: TransportParameters, allocator: Allocator) ![]u8 {
-        var out = std.ArrayListUnmanaged(u8){};
+        var out = std.ArrayList(u8).empty;
         errdefer out.deinit(allocator);
 
         inline for (@typeInfo(TransportParameters).@"struct".fields) |field| {

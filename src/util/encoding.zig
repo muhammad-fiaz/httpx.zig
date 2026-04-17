@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const list_writer = @import("list_writer.zig");
 
 /// Base64 encoding and decoding per RFC 4648.
 pub const Base64 = struct {
@@ -133,8 +134,8 @@ pub const PercentEncoding = struct {
 
     /// Encodes a string for use in URLs.
     pub fn encode(allocator: Allocator, input: []const u8) ![]u8 {
-        var result = std.ArrayListUnmanaged(u8){};
-        const writer = result.writer(allocator);
+        var result = std.ArrayList(u8).empty;
+        const writer = list_writer.init(allocator, &result);
 
         for (input) |c| {
             if (std.mem.indexOfScalar(u8, unreserved, c) != null) {
@@ -149,7 +150,7 @@ pub const PercentEncoding = struct {
 
     /// Decodes a percent-encoded string.
     pub fn decode(allocator: Allocator, input: []const u8) ![]u8 {
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayList(u8).empty;
 
         var i: usize = 0;
         while (i < input.len) {
@@ -175,8 +176,8 @@ pub const PercentEncoding = struct {
 
 /// Encodes key-value pairs as application/x-www-form-urlencoded.
 pub fn encodeFormData(allocator: Allocator, params: []const struct { []const u8, []const u8 }) ![]u8 {
-    var result = std.ArrayListUnmanaged(u8){};
-    const writer = result.writer(allocator);
+    var result = std.ArrayList(u8).empty;
+    const writer = list_writer.init(allocator, &result);
 
     for (params, 0..) |param, idx| {
         if (idx > 0) try writer.writeByte('&');

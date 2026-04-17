@@ -11,8 +11,29 @@ Common utilities for buffer management and encoding.
 - `cookieValue(cookie_header, name)`: Read a cookie value from a request `Cookie` header.
 - `buildSetCookieHeader(allocator, name, value, options)`: Build a `Set-Cookie` header value with RFC 6265 style attributes.
 - `mimeTypeFromPath(path)`: Resolve a best-effort MIME type from file extension for static/file responses.
+- `mimeTypeFromPathOr(path, fallback)`: Resolve MIME from extension with explicit custom fallback.
+- `mimeTypeFromPathWith(path, mappings, fallback)`: Resolve MIME using caller-provided external mappings.
+- `MimeMapping`: Extension to MIME pair type for external mapping lists.
+- `MimeRegistry`: Reusable MIME resolver for custom mapping sets.
+- `defaultMimeMappings`: Built-in mapping table exported for extension/composition.
 - `CookieOptions`: Cookie attributes (`Path`, `Domain`, `Max-Age`, `SameSite`, `Secure`, `HttpOnly`).
 - `SameSite`: Enum values `lax`, `strict`, `none`.
+
+`mimeTypeFromPath(...)` is case-insensitive and includes common web/document/media/font/archive formats (`html`, `css`, `js`, `json`, `wasm`, `svg`, `png`, `jpg`, `webp`, `pdf`, `zip`, `woff2`, `mp4`, `mp3`, and more).
+
+MIME helpers are actively used by server file/static response paths (for example `Context.file(...)`), so they are required functionality and should not be removed.
+
+External MIME extension example:
+
+```zig
+const custom = [_]httpx.MimeMapping{
+	.{ .ext = ".geojson", .mime = "application/geo+json" },
+	.{ .ext = ".glb", .mime = "model/gltf-binary" },
+};
+
+const fallback = httpx.mimeTypeFromPath(path);
+const content_type = httpx.mimeTypeFromPathWith(path, &custom, fallback);
+```
 
 Root-level aliases are also available:
 
@@ -20,6 +41,12 @@ Root-level aliases are also available:
 - `httpx.parseQueryValue(...)`
 - `httpx.parseSetCookiePair(...)`
 - `httpx.parseCookiePair(...)`
+- `httpx.mimeTypeFromPath(...)`
+- `httpx.mimeTypeFromPathOr(...)`
+- `httpx.mimeTypeFromPathWith(...)`
+- `httpx.MimeMapping`
+- `httpx.MimeRegistry`
+- `httpx.defaultMimeMappings`
 - `httpx.CookieOptions`
 - `httpx.SameSite`
 

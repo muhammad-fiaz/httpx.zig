@@ -4,9 +4,9 @@ const builtin = @import("builtin");
 fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     if (target.result.os.tag == .windows) {
         // Winsock symbols are provided by these system libraries on Windows.
-        compile.linkSystemLibrary("ws2_32");
-        compile.linkSystemLibrary("mswsock");
-        compile.linkLibC();
+        compile.root_module.linkSystemLibrary("ws2_32", .{});
+        compile.root_module.linkSystemLibrary("mswsock", .{});
+        compile.root_module.linkSystemLibrary("c", .{});
     }
 }
 

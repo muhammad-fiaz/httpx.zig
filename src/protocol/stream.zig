@@ -57,9 +57,9 @@ pub const Stream = struct {
     recv_window: i32 = 65535,
 
     /// Buffered data waiting to be sent (when send_window is insufficient).
-    send_buffer: std.ArrayListUnmanaged(u8) = .{},
+    send_buffer: std.ArrayList(u8) = .empty,
     /// Buffered received data.
-    recv_buffer: std.ArrayListUnmanaged(u8) = .{},
+    recv_buffer: std.ArrayList(u8) = .empty,
 
     /// Whether we've sent END_STREAM.
     end_stream_sent: bool = false,
@@ -293,7 +293,7 @@ pub fn buildHeadersFramePayload(
     priority: ?StreamPriority,
     allocator: Allocator,
 ) !struct { payload: []u8, flags: u8 } {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
 
     var flags: u8 = 0;

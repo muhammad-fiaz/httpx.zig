@@ -37,6 +37,8 @@ var client = httpx.Client.initWithConfig(allocator, .{
         .qpack_max_table_capacity = 4096,
         .qpack_blocked_streams = 16,
         .max_field_section_size = 8192,
+        .enable_connect_protocol = true,
+        .enable_datagrams = false,
     },
 });
 defer client.deinit();
@@ -45,6 +47,13 @@ var response = try client.get("http://127.0.0.1:8080/runtime", .{});
 defer response.deinit();
 
 std.debug.print("version={s} status={d}\n", .{ response.version.toString(), response.status.code });
+```
+
+You can also force HTTP/3 on a single request (without changing other client defaults):
+
+```zig
+var response = try client.get("http://127.0.0.1:8080/runtime", httpx.RequestOptions.defaults().withHttp3());
+defer response.deinit();
 ```
 
 ::: warning Interoperability Note
@@ -103,7 +112,7 @@ if (idx) |index| {
 ### QPACK Encoding
 
 ```zig
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+var gpa: std.heap.DebugAllocator(.{}) = .init;
 defer _ = gpa.deinit();
 const allocator = gpa.allocator();
 

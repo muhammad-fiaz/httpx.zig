@@ -9,7 +9,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -28,16 +28,29 @@ pub fn main() !void {
     var e = try httpx.opts(allocator, "https://httpbin.org/get", .{});
     defer e.deinit();
 
+    var f = try httpx.trace(allocator, "https://httpbin.org/trace", .{});
+    defer f.deinit();
+
+    var g = try httpx.connect(allocator, "https://httpbin.org/anything", .{});
+    defer g.deinit();
+
     var client = httpx.Client.init(allocator);
     defer client.deinit();
 
-    var f = try client.del("https://httpbin.org/delete", .{});
-    defer f.deinit();
+    var h = try client.del("https://httpbin.org/delete", .{});
+    defer h.deinit();
 
-    var g = try client.opts("https://httpbin.org/get", .{});
-    defer g.deinit();
+    var i = try client.opts("https://httpbin.org/get", .{});
+    defer i.deinit();
 
-    std.debug.print("statuses: {d}, {d}, {d}, {d}, {d}, {d}, {d}\n", .{ a.status.code, b.status.code, c.status.code, d.status.code, e.status.code, f.status.code, g.status.code });
+    var j = try client.connect("https://httpbin.org/anything", .{});
+    defer j.deinit();
+
+    // Optional explicit override only when needed.
+    var timed = try client.get("https://httpbin.org/get", .{ .timeout_ms = 10_000 });
+    defer timed.deinit();
+
+    std.debug.print("statuses: {d}, {d}, {d}, {d}, {d}, {d}, {d}, {d}, {d}, {d}, {d}\n", .{ a.status.code, b.status.code, c.status.code, d.status.code, e.status.code, f.status.code, g.status.code, h.status.code, i.status.code, j.status.code, timed.status.code });
 }
 ```
 
@@ -50,5 +63,5 @@ zig build run-simplified_api_aliases
 ## What to Verify
 
 - Alias helpers behave the same as direct client methods.
-- Both top-level and client shortcut aliases are available (`delete/del`, `options/opts`).
+- Both top-level and client shortcut aliases are available (`delete/del`, `options/opts`, `trace`, `connect`).
 - Request/response lifecycle remains correct with deinit calls.

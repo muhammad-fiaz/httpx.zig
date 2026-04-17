@@ -7,12 +7,21 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
+fn sleepMs(ms: i64) void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(ms), .real) catch {};
+}
+
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var listener = try httpx.TcpListener.init(try std.net.Address.parseIp("127.0.0.1", 0));
+    const listen_addr = try httpx.Address.parseIp("127.0.0.1", 0);
+    var listener = httpx.TcpListener.init(listen_addr) catch |err| {
+        std.debug.print("Skipping HTTP/2 client runtime example: {s}\n", .{@errorName(err)});
+        return;
+    };
     defer listener.deinit();
 
     const addr = try listener.getLocalAddress();
@@ -30,7 +39,10 @@ pub fn main() !void {
     const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/runtime", .{port});
     defer allocator.free(url);
 
-    var response = try client.get(url, .{});
+    var response = client.get(url, .{}) catch |err| {
+        std.debug.print("Skipping HTTP/2 client runtime example: {s}\n", .{@errorName(err)});
+        return;
+    };
     defer response.deinit();
 
     std.debug.print("\n=== HTTP/2 Client Runtime Example ===\n", .{});
@@ -168,7 +180,7 @@ fn runServer(listener: *httpx.TcpListener) !void {
 
     // Allow a graceful close so queued response bytes are delivered reliably.
     accepted.socket.shutdownWrite() catch {};
-    std.Thread.sleep(25 * std.time.ns_per_ms);
+    sleepMs(25);
 }
 
 fn readNoEofSocket(socket: *httpx.Socket, out: []u8) !void {

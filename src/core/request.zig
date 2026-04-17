@@ -11,6 +11,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const list_writer = @import("../util/list_writer.zig");
 
 const types = @import("types.zig");
 const Headers = @import("headers.zig").Headers;
@@ -86,6 +87,15 @@ pub const Request = struct {
         try self.setBody(body);
     }
 
+    /// Sets the request body as application/x-www-form-urlencoded.
+    pub fn setFormUrlEncoded(self: *Self, fields: []const [2][]const u8) !void {
+        const encoded = try encodeFormFields(self.allocator, fields);
+        defer self.allocator.free(encoded);
+
+        try self.headers.set(HeaderName.CONTENT_TYPE, "application/x-www-form-urlencoded");
+        try self.setBody(encoded);
+    }
+
     /// Sets a request header.
     pub fn setHeader(self: *Self, name: []const u8, value: []const u8) !void {
         try self.headers.set(name, value);
@@ -114,6 +124,13 @@ pub const Request = struct {
 
         self.uri.query = next_query;
         self.query_owned = true;
+    }
+
+    /// Appends multiple URL query parameters to the request URI.
+    pub fn addQueryParams(self: *Self, params: []const [2][]const u8) !void {
+        for (params) |param| {
+            try self.addQueryParam(param[0], param[1]);
+        }
     }
 
     /// Returns the host from the URI.
@@ -157,8 +174,8 @@ pub const Request = struct {
 
     /// Serializes to an allocated buffer.
     pub fn toSlice(self: *const Self, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
-        const writer = buffer.writer(allocator);
+        var buffer = std.ArrayList(u8).empty;
+        const writer = list_writer.init(allocator, &buffer);
         try self.serialize(writer);
         return buffer.toOwnedSlice(allocator);
     }
@@ -243,6 +260,26 @@ pub const RequestBuilder = struct {
     }
 };
 
+fn encodeFormFields(allocator: Allocator, fields: []const [2][]const u8) ![]u8 {
+    var encoded = std.ArrayList(u8).empty;
+    const writer = list_writer.init(allocator, &encoded);
+
+    for (fields, 0..) |field, idx| {
+        if (idx > 0) {
+            try writer.writeByte('&');
+        }
+
+        const enc_key = try PercentEncoding.encode(allocator, field[0]);
+        defer allocator.free(enc_key);
+        const enc_value = try PercentEncoding.encode(allocator, field[1]);
+        defer allocator.free(enc_value);
+
+        try writer.print("{s}={s}", .{ enc_key, enc_value });
+    }
+
+    return encoded.toOwnedSlice(allocator);
+}
+
 test "Request initialization" {
     const allocator = std.testing.allocator;
     var request = try Request.init(allocator, .GET, "https://example.com/api");
@@ -301,4 +338,31 @@ test "Request addQueryParam" {
     const serialized = try request.toSlice(allocator);
     defer allocator.free(serialized);
     try std.testing.expect(mem.indexOf(u8, serialized, "GET /search?q=zig%20lang&page=1 HTTP/1.1") != null);
+}
+
+test "Request addQueryParams" {
+    const allocator = std.testing.allocator;
+    var request = try Request.init(allocator, .GET, "https://example.com/search");
+    defer request.deinit();
+
+    try request.addQueryParams(&.{
+        .{ "q", "zig lang" },
+        .{ "sort", "desc" },
+    });
+
+    try std.testing.expectEqualStrings("q=zig%20lang&sort=desc", request.uri.query.?);
+}
+
+test "Request setFormUrlEncoded" {
+    const allocator = std.testing.allocator;
+    var request = try Request.init(allocator, .POST, "https://example.com/form");
+    defer request.deinit();
+
+    try request.setFormUrlEncoded(&.{
+        .{ "name", "Jane Doe" },
+        .{ "city", "New York" },
+    });
+
+    try std.testing.expectEqualStrings("application/x-www-form-urlencoded", request.headers.get(HeaderName.CONTENT_TYPE).?);
+    try std.testing.expectEqualStrings("name=Jane%20Doe&city=New%20York", request.body.?);
 }

@@ -25,7 +25,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Build sample project (Linux)
         working-directory: httpx-project-starter
@@ -86,7 +86,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Install Multilib (Linux x86 runtime)
         if: runner.os == 'Linux' && matrix.linux_setup == 'x86'
@@ -147,7 +147,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Build for ${{ matrix.target }} (build-only)
         run: zig build --cache-dir .zig-cache --global-cache-dir .zig-global-cache -Dtarget=${{ matrix.target }} -Doptimize=Debug

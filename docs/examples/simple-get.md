@@ -9,14 +9,15 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var client = httpx.Client.init(allocator);
+    var client = httpx.Client.initForBaseUrl(allocator, "https://httpbin.org");
     defer client.deinit();
 
-    var res = try client.get("https://httpbin.org/get", .{});
+    // Request defaults are implicit when using .{}
+    var res = try client.get("/get", .{});
     defer res.deinit();
 
     std.debug.print("status={d}\n", .{res.status.code});
@@ -34,3 +35,4 @@ zig build run-simple_get
 
 - Successful HTTP status code.
 - Non-empty response body text.
+- Defaults are implicit unless explicitly overridden.

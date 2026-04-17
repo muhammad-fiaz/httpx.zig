@@ -3,6 +3,101 @@
 All notable changes to this project are documented in this file.
 
 
+## [0.0.8] - 18-04-2026
+
+### Added
+
+- Added Zig 0.16 compatibility adapters:
+  - `src/net/compat.zig` to provide address resolution/parsing compatibility helpers.
+  - `src/util/any_io.zig` for lightweight reader/writer adapters.
+  - `src/util/list_writer.zig` for allocator-backed list writer helpers.
+- Added explicit server port conflict configuration in `ServerConfig`:
+  - `port_conflict` with `.fail` / `.increment` strategies.
+  - `max_port_tries` to bound auto-increment attempts.
+- Added `Server.listeningPort()` to expose the effective bound port after startup.
+- Added user-friendly client config builders in `ClientConfig`:
+  - `defaults()`, `forBaseUrl(...)`, `withBaseUrl(...)`
+  - `withTimeouts(...)`, `withRetryPolicy(...)`, `withRedirectPolicy(...)`
+  - `withUserAgent(...)`, `withProtocols(...)`, `withPoolLimits(...)`
+- Added request option builders in `RequestOptions`:
+  - `defaults()`, `withHeaders(...)`, `withBody(...)`, `withJson(...)`, `withTimeoutMs(...)`, `withFollowRedirects(...)`
+- Added per-request protocol selection in `RequestOptions`:
+  - `version` field
+  - `withVersion(...)`, `withHttp2()`, `withHttp3()` helpers
+- Added `Client.initForBaseUrl(...)` for concise base-URL client creation.
+- Added expanded MIME helpers:
+  - broader extension coverage in `mimeTypeFromPath(...)`
+  - explicit fallback override via `mimeTypeFromPathOr(...)`
+- Added `Context.fileWithOptions(path, options)` with production-oriented static response controls:
+  - `cache_control`
+  - `add_etag`
+  - `add_nosniff`
+  - `conditional_get` (`If-None-Match` -> `304 Not Modified`)
+- Added `FileResponseOptions` export in `src/httpx.zig`.
+- Added richer request body/query helpers in `src/core/request.zig`:
+  - `Request.setFormUrlEncoded(...)`
+  - `Request.addQueryParams(...)`
+- Added header convenience utilities in `src/core/headers.zig`:
+  - `getOr(...)`
+  - `appendIfMissing(...)`
+  - `mergeFrom(...)`
+- Added additional `ClientConfig` optional customization helpers:
+  - `withDefaultHeaders(...)`
+  - `withFollowRedirects(...)`
+- Added additional `RequestOptions` optional customization helpers:
+  - `query_params` + `withQueryParams(...)`
+  - `form_fields` + `withFormUrlEncoded(...)`
+- Added client pool inspection/maintenance helpers in `src/client/client.zig`:
+  - `cleanupIdleConnections()`
+  - `poolStats()`
+  - `hostPoolConnectionCount(...)`
+- Added concurrency enhancements in `src/concurrency/pool.zig`:
+  - extended `RequestSpec` with `json`, `timeout_ms`, `follow_redirects`, and `version`
+  - `BatchBuilder.postJson(...)`
+  - `successfulCount(...)` and `errorCount(...)`
+- Added executor convenience helpers in `src/concurrency/executor.zig`:
+  - `executeAll(...)`
+  - `isRunning()`
+  - `queueCapacity()`
+- Added server context response helpers in `src/server/server.zig`:
+  - `Context.download(...)`
+  - `Context.noContent()`
+- Added root exports/helpers in `src/httpx.zig`:
+  - `TaskFn`, `ExecutorConfig`
+  - `httpx.successfulCount(...)`, `httpx.errorCount(...)`
+- Added additional `ClientConfig` builder helpers:
+  - `withHttp2Settings(...)`
+  - `withHttp3Settings(...)`
+  - `withSslVerification(...)`
+  - `withKeepAlive(...)`
+  - `withMaxResponseSize(...)`
+- Added root-level MIME utility aliases in `src/httpx.zig`:
+  - `httpx.mimeTypeFromPath(...)`
+  - `httpx.mimeTypeFromPathOr(...)`
+
+### Changed
+
+- Bumped project version to `0.0.8`.
+- Updated minimum Zig version to `0.16.0` in package metadata.
+- Migrated deprecated `std.ArrayListUnmanaged` usage to `std.ArrayList` across source, tests, examples, and starter templates.
+- Updated examples and benchmark allocator setup to `std.heap.DebugAllocator(.{})` for Zig 0.16 compatibility.
+- Updated docs and metadata to reflect `0.0.8` and Zig `0.16.0` support.
+- Updated CI/release workflows and issue templates to target Zig `0.16.0`.
+- Updated server/runtime docs and examples to include explicit port-conflict startup behavior.
+- Updated README, API docs, guide docs, and runnable examples (including starter template copies) to document and demonstrate the new client config/request-option builder syntax.
+- Updated `Context.file(...)` and `Context.fileAs(...)` to route through `fileWithOptions(...)`.
+- Updated server runtime to suppress response bodies for all `HEAD` requests.
+- Updated server `Content-Length` auto-injection to skip status classes that must not carry a body (`1xx`, `204`, `304`).
+- Updated static file example and API docs to demonstrate ETag-aware static serving and Zig 0.16-compatible usage patterns.
+- Updated utilities/docs to include broader, case-insensitive MIME mapping behavior and fallback override usage.
+- Updated README and API/guide docs to mark config/request option builders consistently as optional customization while keeping defaults implicit.
+
+### Fixed
+
+- Removed remaining Zig 0.15-only API patterns from examples/runtime paths (`std.net.Address.parseIp`, `std.Thread.sleep`, deprecated ArrayList aliases).
+- Fixed stale docs install snippets to avoid pointing at unpublished release tags.
+- Fixed server startup behavior on occupied ports by supporting bounded auto-increment retry mode.
+
 ## [0.0.7] - 28/03/2026
 
 ### Added
@@ -162,7 +257,7 @@ All notable changes to this project are documented in this file.
 - Updated default User-Agent to `httpx.zig/0.0.4`.
 - Updated README and VitePress docs install/version references to `0.0.4`.
 
-## [0.0.3] - 2026-03-20
+## [0.0.3] - 17-04-2026
 
 ### Added
 

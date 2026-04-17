@@ -80,7 +80,7 @@ HPACK provides efficient header compression using static and dynamic tables.
 ```zig
 const httpx = @import("httpx");
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+var gpa: std.heap.DebugAllocator(.{}) = .init;
 defer _ = gpa.deinit();
 const allocator = gpa.allocator();
 

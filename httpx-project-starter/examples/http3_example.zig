@@ -14,7 +14,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -94,7 +94,7 @@ fn qpackExample(allocator: std.mem.Allocator) !void {
     }
 
     // Demonstrate encoder stream instructions
-    var encoder_stream = std.ArrayListUnmanaged(u8){};
+    var encoder_stream = std.ArrayList(u8).empty;
     defer encoder_stream.deinit(allocator);
 
     try httpx.qpack.encodeSetCapacity(4096, &encoder_stream, allocator);
@@ -275,3 +275,4 @@ fn http3FrameExample(allocator: std.mem.Allocator) !void {
 
     std.debug.print("\n", .{});
 }
+

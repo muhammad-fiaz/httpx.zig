@@ -124,7 +124,7 @@ pub const DynamicEntry = struct {
 /// HPACK dynamic table with FIFO eviction
 pub const DynamicTable = struct {
     allocator: Allocator,
-    entries: std.ArrayListUnmanaged(DynamicEntry) = .{},
+    entries: std.ArrayList(DynamicEntry) = .empty,
     current_size: usize = 0,
     max_size: usize = 4096, // Default per RFC 7541
 
@@ -300,7 +300,7 @@ pub fn decodeInteger(data: []const u8, prefix_bits: u4) !struct { value: u64, le
 }
 
 /// Encodes a string (with optional Huffman encoding).
-pub fn encodeString(str: []const u8, use_huffman: bool, allocator: Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+pub fn encodeString(str: []const u8, use_huffman: bool, allocator: Allocator, out: *std.ArrayList(u8)) !void {
     if (use_huffman) {
         const encoded = try HuffmanCodec.encode(str, allocator);
         defer allocator.free(encoded);
@@ -405,7 +405,7 @@ pub const HuffmanCodec = struct {
 
     /// Encodes data using Huffman coding.
     pub fn encode(data: []const u8, allocator: Allocator) ![]u8 {
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayList(u8).empty;
         errdefer result.deinit(allocator);
 
         var bit_buffer: u64 = 0;
@@ -436,7 +436,7 @@ pub const HuffmanCodec = struct {
 
     /// Decodes Huffman-encoded data.
     pub fn decode(data: []const u8, allocator: Allocator) ![]u8 {
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayList(u8).empty;
         errdefer result.deinit(allocator);
 
         var bit_buffer: u64 = 0;
@@ -488,7 +488,7 @@ pub fn encodeHeaders(
     headers: []const HeaderEntry,
     allocator: Allocator,
 ) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
 
     for (headers) |header| {
@@ -531,7 +531,7 @@ pub fn decodeHeaders(
     data: []const u8,
     allocator: Allocator,
 ) ![]DecodedHeader {
-    var headers = std.ArrayListUnmanaged(DecodedHeader){};
+    var headers = std.ArrayList(DecodedHeader).empty;
     errdefer {
         for (headers.items) |h| {
             allocator.free(h.name);

@@ -8,14 +8,15 @@ const httpx = @import("httpx");
 
 const site_root = "examples/multi_page_site/site";
 
-fn demoPort(allocator: std.mem.Allocator) !u16 {
-    var env_map = try std.process.getEnvMap(allocator);
-    defer env_map.deinit();
+fn demoPort(environ: std.process.Environ, allocator: std.mem.Allocator) !u16 {
+    const value = environ.getAlloc(allocator, "HTTPX_DEMO_PORT") catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return 3000,
+        error.InvalidWtf8 => return 3000,
+        else => return err,
+    };
+    defer allocator.free(value);
 
-    if (env_map.get("HTTPX_DEMO_PORT")) |value| {
-        return std.fmt.parseInt(u16, value, 10) catch 8090;
-    }
-    return 8090;
+    return std.fmt.parseInt(u16, value, 10) catch 3000;
 }
 
 fn contentTypeForPath(path: []const u8) []const u8 {
@@ -38,20 +39,8 @@ fn serveRelativePath(ctx: *httpx.Context, rel_path: []const u8) anyerror!httpx.R
         return ctx.status(414).text("Path too long");
     };
 
-    const f = std.fs.cwd().openFile(full_path, .{}) catch {
-        return ctx.status(404).text("Not Found");
-    };
-    defer f.close();
-
-    const stat = try f.stat();
-    const body = try ctx.allocator.alloc(u8, @intCast(stat.size));
-    _ = try f.readAll(body);
-
-    var resp = httpx.Response.init(ctx.allocator, 200);
-    try resp.headers.set("Content-Type", contentTypeForPath(rel_path));
+    var resp = try ctx.fileAs(full_path, contentTypeForPath(rel_path));
     try resp.headers.set("Cache-Control", "no-cache");
-    resp.body = body;
-    resp.body_owned = true;
     return resp;
 }
 
@@ -94,11 +83,11 @@ fn redirectHomeHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.redirect("/", 302);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    const port = try demoPort(allocator);
+    const port = try demoPort(init.minimal.environ, allocator);
 
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",

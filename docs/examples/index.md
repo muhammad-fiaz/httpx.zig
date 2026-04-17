@@ -31,7 +31,7 @@ zig build example-http3_example -Dtarget=aarch64-macos
 - [Router Example](/examples/router-example): Route params and grouped endpoints.
 - [Middleware Example](/examples/middleware-example): Chain middleware with shared behavior.
 - [Streaming](/examples/streaming): Stream data responses.
-- [Static Files](/examples/static-files): Serve assets with content types.
+- [Static Files](/examples/static-files): Serve assets with content types, ETag headers, and conditional GET (`If-None-Match`) support.
 - [Multi Page Website](/examples/multi-page-website): Serve multiple HTML pages.
 - [HTTP/2 Example](/examples/http2-example): HTTP/2 framing and stream primitives.
 - [HTTP/2 Client Runtime](/examples/http2-client-runtime): End-to-end high-level HTTP/2 client request against a local loopback server.

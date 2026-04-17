@@ -6,14 +6,21 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     std.debug.print("=== Simple GET Request Example ===\n\n", .{});
 
-    var client = httpx.Client.init(allocator);
+    const cfg = httpx.ClientConfig.forBaseUrl("https://httpbin.org")
+        .withTimeouts(httpx.Timeouts.fast())
+        .withPoolLimits(16, 4);
+    var client = httpx.Client.initWithConfig(allocator, cfg);
     defer client.deinit();
+
+    const req_opts = httpx.RequestOptions.defaults()
+        .withTimeoutMs(5_000)
+        .withFollowRedirects(true);
 
     std.debug.print("Creating GET request to httpbin.org...\n", .{});
 
@@ -29,6 +36,11 @@ pub fn main() !void {
     std.debug.print("\nRequest:\n", .{});
     std.debug.print("--------\n", .{});
     std.debug.print("{s}\n", .{serialized});
+
+    std.debug.print("\nClient config preview:\n", .{});
+    std.debug.print("  base_url: {s}\n", .{client.config.base_url orelse "(none)"});
+    std.debug.print("  connect timeout: {d}ms\n", .{client.config.timeouts.connect_ms});
+    std.debug.print("  request timeout override: {d}ms\n", .{req_opts.timeout_ms orelse 0});
 
     std.debug.print("\nDemo complete! (Network request skipped for offline demo)\n", .{});
     std.debug.print("\nHTTP Method Properties:\n", .{});

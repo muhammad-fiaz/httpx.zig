@@ -19,7 +19,9 @@ Usually constructed via `RequestBuilder` or internally by the server.
 - **Selected methods**:
   - `setBody(body)`: Set request body and Content-Length.
   - `setJson(body)`: Set JSON body and Content-Type.
+  - `setFormUrlEncoded(fields)`: Set form body and Content-Type.
   - `addQueryParam(key, value)`: Append a percent-encoded query parameter.
+  - `addQueryParams(fields)`: Append multiple query parameters.
 
 ### `httpx.RequestBuilder`
 
@@ -80,8 +82,11 @@ A wrapper around an insertion-ordered String HashMap (or list) for HTTP headers.
 
 - **Methods**:
   - `get(name)`: Get first value.
+  - `getOr(name, fallback)`: Get first value or fallback.
   - `set(name, value)`: Set/Overwrite value.
   - `append(name, value)`: Append value (for multi-value headers).
+  - `appendIfMissing(name, value)`: Append only when missing.
+  - `mergeFrom(other, overwrite)`: Merge another header collection.
   - `remove(name)`: Remove header.
 
 ## URI

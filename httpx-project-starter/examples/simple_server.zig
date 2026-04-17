@@ -24,7 +24,7 @@ fn userHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -33,6 +33,8 @@ pub fn main() !void {
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
         .port = 8080,
+        .port_conflict = .increment,
+        .max_port_tries = 32,
         .max_connections = 1000,
         .keep_alive = true,
     });
@@ -46,6 +48,8 @@ pub fn main() !void {
     std.debug.print("Server Configuration:\n", .{});
     std.debug.print("  Host: {s}\n", .{server.config.host});
     std.debug.print("  Port: {d}\n", .{server.config.port});
+    std.debug.print("  Port conflict strategy: {s}\n", .{@tagName(server.config.port_conflict)});
+    std.debug.print("  Max port tries: {d}\n", .{server.config.max_port_tries});
     std.debug.print("  Max connections: {d}\n", .{server.config.max_connections});
     std.debug.print("  Keep-alive: {}\n", .{server.config.keep_alive});
 
@@ -55,7 +59,9 @@ pub fn main() !void {
     std.debug.print("  GET  /users/:id    -> userHandler\n", .{});
     std.debug.print("  POST /users        -> helloHandler\n", .{});
 
-    std.debug.print("\nServer is running at http://127.0.0.1:8080\n", .{});
+    std.debug.print("\nServer startup will auto-increment port if 8080 is occupied.\n", .{});
+    std.debug.print("Preferred URL: http://127.0.0.1:8080\n", .{});
+    std.debug.print("Effective bound port can be read with server.listeningPort() after startup.\n", .{});
     std.debug.print("Try: /, /api/status, /users/123\n", .{});
 
     try server.listen();

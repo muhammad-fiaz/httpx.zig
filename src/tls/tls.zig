@@ -20,6 +20,13 @@ const Socket = @import("../net/socket.zig").Socket;
 const SocketIoReader = @import("../net/socket.zig").SocketIoReader;
 const SocketIoWriter = @import("../net/socket.zig").SocketIoWriter;
 
+fn defaultIo() std.Io {
+    return if (builtin.is_test)
+        std.testing.io
+    else
+        std.Io.Threaded.global_single_threaded.io();
+}
+
 /// Minimum TLS version configuration.
 pub const TlsVersion = enum {
     tls_1_0,
@@ -115,6 +122,7 @@ pub const TlsSession = struct {
     net_out: ?SocketIoWriter = null,
 
     ca_bundle: ?std.crypto.Certificate.Bundle = null,
+    ca_bundle_lock: std.Io.RwLock = .init,
     client: ?std.crypto.tls.Client = null,
 
     const Self = @This();
@@ -174,27 +182,41 @@ pub const TlsSession = struct {
         const net_out = SocketIoWriter.init(sock, self.net_write_buf.?);
         self.net_in = net_in;
         self.net_out = net_out;
+        const io = defaultIo();
 
         const verify = self.config.verify_mode != .none;
         const verify_host = verify and self.config.verify_hostname;
 
         // System CA bundle (cross-platform); optional if verification is disabled.
         if (verify) {
-            var bundle: std.crypto.Certificate.Bundle = .{};
+            var bundle: std.crypto.Certificate.Bundle = .empty;
             errdefer bundle.deinit(self.allocator);
-            try bundle.rescan(self.allocator);
+            try bundle.rescan(self.allocator, io, std.Io.Timestamp.now(io, .real));
             self.ca_bundle = bundle;
         }
 
         const sni_host = self.config.server_name orelse hostname;
+        var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
+        io.random(&entropy);
+        const ca_bundle_ptr: ?*std.crypto.Certificate.Bundle = if (self.ca_bundle) |*b| b else null;
 
         const client = try tls.Client.init(&self.net_in.?.reader, &self.net_out.?.writer, .{
             .host = if (verify_host) .{ .explicit = sni_host } else .{ .no_verification = {} },
-            .ca = if (verify) .{ .bundle = self.ca_bundle.? } else .{ .no_verification = {} },
+            .ca = if (verify)
+                .{ .bundle = .{
+                    .gpa = self.allocator,
+                    .io = io,
+                    .lock = &self.ca_bundle_lock,
+                    .bundle = ca_bundle_ptr.?,
+                } }
+            else
+                .{ .no_verification = {} },
             .ssl_key_log = null,
             .allow_truncation_attacks = false,
             .write_buffer = self.tls_write_buf.?,
             .read_buffer = self.tls_read_buf.?,
+            .entropy = &entropy,
+            .realtime_now = std.Io.Timestamp.now(io, .real),
             .alert = null,
         });
 

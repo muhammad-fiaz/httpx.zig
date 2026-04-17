@@ -11,6 +11,18 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Thread = std.Thread;
 
+fn defaultIo() std.Io {
+    return if (@import("builtin").is_test)
+        std.testing.io
+    else
+        std.Io.Threaded.global_single_threaded.io();
+}
+
+fn sleepNs(ns: i96) void {
+    const io = defaultIo();
+    std.Io.sleep(io, std.Io.Duration.fromNanoseconds(ns), .real) catch {};
+}
+
 pub const ExecutorError = error{
     TaskQueueFull,
 };
@@ -36,11 +48,11 @@ pub const ExecutorConfig = struct {
 pub const Executor = struct {
     allocator: Allocator,
     config: ExecutorConfig,
-    tasks: std.ArrayListUnmanaged(Task) = .empty,
+    tasks: std.ArrayList(Task) = .empty,
     running: bool = false,
     threads: []Thread = &.{},
-    mutex: Thread.Mutex = .{},
-    cond: Thread.Condition = .{},
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
 
     const Self = @This();
 
@@ -73,8 +85,9 @@ pub const Executor = struct {
 
     /// Submits a task for execution.
     pub fn submit(self: *Self, task: Task) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        const io = defaultIo();
+        self.mutex.lock(io) catch unreachable;
+        defer self.mutex.unlock(io);
 
         if (self.tasks.items.len >= self.config.task_queue_size) {
             return ExecutorError.TaskQueueFull;
@@ -87,6 +100,13 @@ pub const Executor = struct {
     /// Submits a function for execution.
     pub fn execute(self: *Self, func: TaskFn, context: ?*anyopaque) !void {
         try self.submit(.{ .func = func, .context = context });
+    }
+
+    /// Submits multiple tasks for execution.
+    pub fn executeAll(self: *Self, tasks: []const Task) !void {
+        for (tasks) |task| {
+            try self.submit(task);
+        }
     }
 
     /// Starts the executor threads.
@@ -104,10 +124,11 @@ pub const Executor = struct {
     /// Stops all executor threads.
     pub fn stop(self: *Self) void {
         if (!self.running) return;
-        self.mutex.lock();
+        const io = defaultIo();
+        self.mutex.lock(io) catch unreachable;
         self.running = false;
         self.cond.broadcast();
-        self.mutex.unlock();
+        self.mutex.unlock(io);
 
         for (self.threads) |thread| thread.join();
     }
@@ -118,18 +139,29 @@ pub const Executor = struct {
         return self.tasks.items.len;
     }
 
+    /// Returns true when worker threads are running.
+    pub fn isRunning(self: *const Self) bool {
+        return self.running;
+    }
+
+    /// Returns configured maximum queue capacity.
+    pub fn queueCapacity(self: *const Self) usize {
+        return self.config.task_queue_size;
+    }
+
     /// Runs all tasks synchronously.
     pub fn runAll(self: *Self) void {
         while (true) {
-            self.mutex.lock();
+            const io = defaultIo();
+            self.mutex.lock(io) catch unreachable;
             if (self.tasks.items.len == 0) {
-                self.mutex.unlock();
+                self.mutex.unlock(io);
                 break;
             }
             const idx = self.tasks.items.len - 1;
             const task = self.tasks.items[idx];
             self.tasks.items.len = idx;
-            self.mutex.unlock();
+            self.mutex.unlock(io);
 
             task.func(task.context);
         }
@@ -137,19 +169,20 @@ pub const Executor = struct {
 
     fn workerLoop(self: *Self) void {
         while (true) {
-            self.mutex.lock();
+            const io = defaultIo();
+            self.mutex.lock(io) catch unreachable;
             while (self.running and self.tasks.items.len == 0) {
-                self.cond.wait(&self.mutex);
+                self.cond.wait(io, &self.mutex) catch unreachable;
             }
             if (!self.running) {
-                self.mutex.unlock();
+                self.mutex.unlock(io);
                 break;
             }
 
             const idx = self.tasks.items.len - 1;
             const task = self.tasks.items[idx];
             self.tasks.items.len = idx;
-            self.mutex.unlock();
+            self.mutex.unlock(io);
 
             task.func(task.context);
         }
@@ -168,7 +201,7 @@ pub fn Future(comptime T: type) type {
         /// Waits for the future to complete.
         pub fn wait(self: *Self) !T {
             while (!self.completed) {
-                std.time.sleep(1_000_000);
+                sleepNs(1_000_000);
             }
             if (self.error_val) |err| {
                 return err;
@@ -229,4 +262,32 @@ test "Future" {
 
     try std.testing.expect(future.isDone());
     try std.testing.expectEqual(@as(i32, 42), future.get().?);
+}
+
+test "Executor executeAll and helpers" {
+    const allocator = std.testing.allocator;
+    var exec = Executor.initWithConfig(allocator, .{ .task_queue_size = 8 });
+    defer exec.deinit();
+
+    try std.testing.expect(!exec.isRunning());
+    try std.testing.expectEqual(@as(usize, 8), exec.queueCapacity());
+
+    var counter: u32 = 0;
+    const Counter = struct {
+        fn increment(ctx: ?*anyopaque) void {
+            const c: *u32 = @ptrCast(@alignCast(ctx.?));
+            c.* += 1;
+        }
+    };
+
+    const tasks = [_]Task{
+        .{ .func = Counter.increment, .context = &counter },
+        .{ .func = Counter.increment, .context = &counter },
+    };
+
+    try exec.executeAll(&tasks);
+    try std.testing.expectEqual(@as(usize, 2), exec.pendingCount());
+
+    exec.runAll();
+    try std.testing.expectEqual(@as(u32, 2), counter);
 }

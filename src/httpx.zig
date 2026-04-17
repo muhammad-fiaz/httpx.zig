@@ -1,8 +1,8 @@
 //! httpx.zig - Production-Ready HTTP Library for Zig
 //!
 //! A comprehensive HTTP client and server library with production-ready HTTP/1.x
-//! runtime support, high-level HTTP/2 client runtime support, and HTTP/2/HTTP/3
-//! protocol primitives.
+//! runtime support, high-level HTTP/2 and HTTP/3 client/server runtime support,
+//! and HTTP/2/HTTP/3 protocol primitives.
 //!
 //! ## Important Note
 //!
@@ -18,8 +18,8 @@
 //!
 //! - **HTTP/1.0**: Basic request-response semantics
 //! - **HTTP/1.1**: Persistent connections, chunked transfer, pipelining
-//! - **HTTP/2**: High-level client runtime path plus HPACK/framing primitives
-//! - **HTTP/3**: High-level client runtime path plus QPACK/QUIC framing primitives
+//! - **HTTP/2**: High-level client/server runtime paths plus HPACK/framing primitives
+//! - **HTTP/3**: High-level client/server runtime paths plus QPACK/QUIC framing primitives
 //!
 //! ## Platform Support
 //!
@@ -101,6 +101,7 @@ pub const middleware = @import("server/middleware.zig");
 pub const buffer = @import("util/buffer.zig");
 pub const encoding = @import("util/encoding.zig");
 pub const json = @import("util/json.zig");
+pub const mime = @import("util/mime.zig");
 pub const common = @import("util/common.zig");
 pub const utils = common;
 
@@ -113,6 +114,8 @@ pub const BatchBuilder = concurrency.BatchBuilder;
 
 pub const Executor = executor.Executor;
 pub const Task = executor.Task;
+pub const TaskFn = executor.TaskFn;
+pub const ExecutorConfig = executor.ExecutorConfig;
 
 pub const Method = types.Method;
 pub const Version = types.Version;
@@ -142,6 +145,8 @@ pub const ResponseBuilder = response.ResponseBuilder;
 pub const Socket = socket.Socket;
 pub const TcpListener = socket.TcpListener;
 pub const UdpSocket = socket.UdpSocket;
+pub const Address = address.Address;
+pub const AddressList = address.AddressList;
 pub const ShutdownMode = socket.ShutdownMode;
 pub const TcpSocket = Socket;
 pub const DatagramSocket = UdpSocket;
@@ -213,12 +218,14 @@ pub const PoolStats = pool.PoolStats;
 
 pub const Server = server_mod.Server;
 pub const ServerConfig = server_mod.ServerConfig;
+pub const PortConflictStrategy = server_mod.PortConflictStrategy;
 pub const Context = server_mod.Context;
 pub const Handler = server_mod.Handler;
 pub const CookieOptions = server_mod.CookieOptions;
 pub const SameSite = server_mod.SameSite;
 pub const SseEvent = server_mod.SseEvent;
 pub const PreRouteHook = server_mod.PreRouteHook;
+pub const FileResponseOptions = server_mod.FileResponseOptions;
 pub const HttpServer = Server;
 pub const Ctx = Context;
 
@@ -243,6 +250,9 @@ pub const Base64 = encoding.Base64;
 pub const Hex = encoding.Hex;
 pub const PercentEncoding = encoding.PercentEncoding;
 pub const CookiePair = common.CookiePair;
+pub const MimeMapping = mime.MimeMapping;
+pub const MimeRegistry = mime.MimeRegistry;
+pub const defaultMimeMappings = mime.default_mappings;
 
 pub const TlsConfig = tls.TlsConfig;
 pub const TlsSession = tls.TlsSession;
@@ -283,6 +293,15 @@ pub const parseSetCookiePair = common.parseSetCookiePair;
 /// Alias for parseSetCookiePair().
 pub const parseCookiePair = common.parseSetCookiePair;
 
+/// Returns a best-effort MIME type from file extension.
+pub const mimeTypeFromPath = common.mimeTypeFromPath;
+
+/// Returns a MIME type from file extension with a custom fallback.
+pub const mimeTypeFromPathOr = common.mimeTypeFromPathOr;
+
+/// Returns a MIME type using caller-provided mappings and fallback.
+pub const mimeTypeFromPathWith = common.mimeTypeFromPathWith;
+
 /// HTTP/3 varint encode alias.
 pub const encodeVarInt = http.encodeVarInt;
 
@@ -307,6 +326,16 @@ pub fn race(allocator: std.mem.Allocator, client: *Client, specs: []const Reques
 /// Executes all requests in parallel and returns a settled result for each one.
 pub fn allSettled(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult {
     return concurrency.allSettled(allocator, client, specs);
+}
+
+/// Counts successful results returned by all/allSettled.
+pub fn successfulCount(results: []const RequestResult) usize {
+    return concurrency.successfulCount(results);
+}
+
+/// Counts failed results returned by all/allSettled.
+pub fn errorCount(results: []const RequestResult) usize {
+    return concurrency.errorCount(results);
 }
 
 /// Alias for any() for first-success semantics.
@@ -395,6 +424,20 @@ pub fn head(allocator: std.mem.Allocator, url: []const u8, req_options: RequestO
     return c.head(url, req_options);
 }
 
+/// Convenience function to create a TRACE request.
+pub fn trace(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.trace(url, req_options);
+}
+
+/// Convenience function to create a CONNECT request.
+pub fn connect(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.connect(url, req_options);
+}
+
 /// Convenience function to create an OPTIONS request.
 pub fn options(allocator: std.mem.Allocator, url: []const u8, options_in: RequestOptions) !Response {
     var c = Client.init(allocator);
@@ -409,20 +452,27 @@ pub fn opts(allocator: std.mem.Allocator, url: []const u8, options_in: RequestOp
 
 test "top-level alias compile checks" {
     const delete_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = delete;
+    const trace_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = trace;
+    const connect_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = connect;
     const opts_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = opts;
     const first_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror!?Response = first;
     const fastest_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror!RequestResult = fastest;
     const settled_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror![]RequestResult = settled;
-    const resolve_addr_ptr: *const fn ([]const u8, u16) anyerror!std.net.Address = resolveAddress;
-    const resolve_all_addr_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror![]std.net.Address = resolveAllAddresses;
+    const resolve_addr_ptr: *const fn ([]const u8, u16) anyerror!address.Address = resolveAddress;
+    const resolve_all_addr_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror![]address.Address = resolveAllAddresses;
     const parse_host_port_ptr = parseHostAndPort;
-    const parse_and_resolve_ptr: *const fn ([]const u8, u16) anyerror!std.net.Address = parseAndResolveAddress;
+    const parse_and_resolve_ptr: *const fn ([]const u8, u16) anyerror!address.Address = parseAndResolveAddress;
     const is_ip_ptr: *const fn ([]const u8) bool = isIpAddress;
     const is_ip4_ptr: *const fn ([]const u8) bool = isIp4Address;
     const is_ip6_ptr: *const fn ([]const u8) bool = isIp6Address;
+    const mime_ptr: *const fn ([]const u8) []const u8 = mimeTypeFromPath;
+    const mime_or_ptr: *const fn ([]const u8, []const u8) []const u8 = mimeTypeFromPathOr;
+    const mime_with_ptr: *const fn ([]const u8, []const common.MimeMapping, []const u8) []const u8 = mimeTypeFromPathWith;
     const net_init_ptr: *const fn () anyerror!void = netInit;
     const net_deinit_ptr: *const fn () void = netDeinit;
     _ = delete_ptr;
+    _ = trace_ptr;
+    _ = connect_ptr;
     _ = opts_ptr;
     _ = first_ptr;
     _ = fastest_ptr;
@@ -434,6 +484,9 @@ test "top-level alias compile checks" {
     _ = is_ip_ptr;
     _ = is_ip4_ptr;
     _ = is_ip6_ptr;
+    _ = mime_ptr;
+    _ = mime_or_ptr;
+    _ = mime_with_ptr;
     _ = net_init_ptr;
     _ = net_deinit_ptr;
 }

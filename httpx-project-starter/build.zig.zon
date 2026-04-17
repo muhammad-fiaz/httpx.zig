@@ -1,8 +1,8 @@
 .{
-    .fingerprint = 0x1ba62e93f873416d,
+    .fingerprint = 0x1ba62e938387f31f,
     .name = .httpx_project_starter,
     .version = "0.0.7",
-    .minimum_zig_version = "0.15.0",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .httpx = .{
             .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz",

@@ -10,40 +10,26 @@ const httpx = @import("httpx");
 
 const site_root = "examples/multi_page_site/site";
 const assets_root = "examples/multi_page_site/site/assets";
+const custom_mime_mappings = [_]httpx.MimeMapping{
+    .{ .ext = ".geojson", .mime = "application/geo+json" },
+    .{ .ext = ".glb", .mime = "model/gltf-binary" },
+};
 
-fn demoPort(allocator: std.mem.Allocator) !u16 {
-    var env_map = try std.process.getEnvMap(allocator);
-    defer env_map.deinit();
+fn demoPort(environ: std.process.Environ, allocator: std.mem.Allocator) !u16 {
+    const value = environ.getAlloc(allocator, "HTTPX_DEMO_PORT") catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return 8080,
+        error.InvalidWtf8 => return 8080,
+        else => return err,
+    };
+    defer allocator.free(value);
 
-    if (env_map.get("HTTPX_DEMO_PORT")) |value| {
-        return std.fmt.parseInt(u16, value, 10) catch 8080;
-    }
-    return 8080;
-}
-
-fn contentTypeForPath(path: []const u8) []const u8 {
-    if (std.mem.endsWith(u8, path, ".html")) return "text/html; charset=utf-8";
-    if (std.mem.endsWith(u8, path, ".css")) return "text/css; charset=utf-8";
-    if (std.mem.endsWith(u8, path, ".js")) return "application/javascript; charset=utf-8";
-    if (std.mem.endsWith(u8, path, ".png")) return "image/png";
-    if (std.mem.endsWith(u8, path, ".jpg") or std.mem.endsWith(u8, path, ".jpeg")) return "image/jpeg";
-    if (std.mem.endsWith(u8, path, ".svg")) return "image/svg+xml";
-    return "application/octet-stream";
+    return std.fmt.parseInt(u16, value, 10) catch 8080;
 }
 
 fn serveFileWithType(ctx: *httpx.Context, path: []const u8) anyerror!httpx.Response {
-    const f = std.fs.cwd().openFile(path, .{}) catch return ctx.status(404).text("Not Found");
-    defer f.close();
-
-    const stat = try f.stat();
-    const body = try ctx.allocator.alloc(u8, @intCast(stat.size));
-    _ = try f.readAll(body);
-
-    var resp = httpx.Response.init(ctx.allocator, 200);
-    try resp.headers.set("Content-Type", contentTypeForPath(path));
-    resp.body = body;
-    resp.body_owned = true;
-    return resp;
+    const fallback = httpx.mimeTypeFromPath(path);
+    const content_type = httpx.mimeTypeFromPathWith(path, &custom_mime_mappings, fallback);
+    return ctx.fileAs(path, content_type);
 }
 
 fn serveSitePath(ctx: *httpx.Context, rel_path: []const u8) anyerror!httpx.Response {
@@ -153,14 +139,14 @@ fn redirectHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.redirect("/", 302);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     std.debug.print("=== Static File Server Example ===\n\n", .{});
 
-    const port = try demoPort(allocator);
+    const port = try demoPort(init.minimal.environ, allocator);
 
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",

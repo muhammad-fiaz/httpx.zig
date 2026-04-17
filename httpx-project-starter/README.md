@@ -1,7 +1,8 @@
 # httpx Project Starter
 
-The `httpx-project-starter` folder is a standalone Zig starter project configured in `build.zig.zon` to use the tagged `httpx.zig` release archive.
-It works both inside and outside this repository.
+The `httpx-project-starter` folder is a standalone Zig starter project pinned to the tagged `httpx.zig` `0.0.7` release in `build.zig.zon`.
+
+Known limitation: with Zig `0.16`, the published `httpx.zig` `0.0.7` package build script currently uses an older build API and fails during dependency evaluation. The pin is intentionally kept at `0.0.7` for now.
 
 ## Download Starter Only (Quick Start)
 
@@ -18,8 +19,10 @@ This downloads only the `httpx-project-starter` folder from the `httpx.zig` repo
 - POST request with JSON body.
 - Cookie jar helpers.
 - Custom headers request.
+- Optional customization builder helpers for `ClientConfig` and `RequestOptions` (defaults remain implicit).
 - Client alias methods (`fetch`, `options`, `del`).
 - Top-level helpers (`httpx.fetch`, `httpx.postJson`).
+- MIME helper usage (`mimeTypeFromPath`, `mimeTypeFromPathOr`, `mimeTypeFromPathWith`) for static/file responses.
 - Request build and wire serialization.
 - Connection pool configuration and stats.
 

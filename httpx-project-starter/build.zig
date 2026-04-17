@@ -3,9 +3,9 @@ const std = @import("std");
 fn linkPlatformLibs(exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     if (target.result.os.tag == .windows) {
         // Winsock symbols are required on Windows for std.net/httpx networking.
-        exe.linkSystemLibrary("ws2_32");
-        exe.linkSystemLibrary("mswsock");
-        exe.linkLibC();
+        exe.root_module.linkSystemLibrary("ws2_32", .{});
+        exe.root_module.linkSystemLibrary("mswsock", .{});
+        exe.root_module.linkSystemLibrary("c", .{});
     }
 }
 

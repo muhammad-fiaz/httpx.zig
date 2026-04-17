@@ -11,23 +11,31 @@ var client = httpx.Client.init(allocator);
 defer client.deinit();
 ```
 
-For more control, use `ClientConfig`:
+For more control, use `ClientConfig`.
+Defaults remain implicit unless you explicitly override fields:
 
 ```zig
-const config = httpx.ClientConfig{
-    .base_url = "https://api.github.com",
-    .user_agent = "MyApp/1.0",
-    .timeouts = .{
+const config = httpx.ClientConfig.defaults()
+    .withBaseUrl("https://api.github.com")
+    .withUserAgent("MyApp/1.0")
+    .withTimeouts(.{
         .connect_ms = 5000,
         .read_ms = 10000,
-    },
-    .http2_enabled = true,
-    .http2_settings = .{
-        .max_frame_size = 16 * 1024,
-    },
-};
+    })
+    .withProtocols(true, false)
+    .withHttp2Settings(.{ .max_concurrent_streams = 100 })
+    .withHttp3Settings(.{ .qpack_blocked_streams = 16 })
+    .withSslVerification(true)
+    .withKeepAlive(true)
+    .withMaxResponseSize(32 * 1024 * 1024)
+    .withPoolLimits(64, 16);
+
 var client = httpx.Client.initWithConfig(allocator, config);
 defer client.deinit();
+
+// Equivalent shortcut when you only need a base URL:
+var api = httpx.Client.initForBaseUrl(allocator, "https://api.github.com");
+defer api.deinit();
 ```
 
 ## Protocol Selection
@@ -64,15 +72,28 @@ var response = client.get("https://httpbin.org/get", .{
 defer response.deinit();
 ```
 
+Optional: the same request using `RequestOptions` builder helpers:
+
+```zig
+const opts = httpx.RequestOptions.defaults()
+    .withTimeoutMs(10_000)
+    .withHttp2()
+    .withFollowRedirects(true);
+
+var response = try client.get("https://httpbin.org/get", opts);
+defer response.deinit();
+```
+
 ### POST JSON
 
 You can easily send JSON using the `.json` option, which automatically sets the `Content-Type` header to `application/json`.
 
 ```zig
 const body = "{\"name\": \"Alice\", \"role\": \"admin\"}";
-const response = try client.post("https://httpbin.org/post", .{
-    .json = body,
-});
+const response = try client.post(
+    "https://httpbin.org/post",
+    .{ .json = body },
+);
 defer response.deinit();
 ```
 
@@ -130,13 +151,18 @@ The second argument to request methods is `RequestOptions`:
 
 ```zig
 pub const RequestOptions = struct {
-    headers: ?[]const [2][]const u8 = null, // Custom headers
-    body: ?[]const u8 = null,              // Raw body
-    json: ?[]const u8 = null,              // JSON body
-    timeout_ms: ?u64 = null,               // Request-specific timeout
-    follow_redirects: ?bool = null,        // Override redirect policy
+    headers: ?[]const [2][]const u8 = null,    // Custom headers
+    query_params: ?[]const [2][]const u8 = null, // Optional URL query params
+    body: ?[]const u8 = null,                  // Raw body (highest precedence)
+    json: ?[]const u8 = null,                  // JSON body
+    form_fields: ?[]const [2][]const u8 = null, // x-www-form-urlencoded body
+    timeout_ms: ?u64 = null,                   // Request-specific timeout
+    follow_redirects: ?bool = null,            // Override redirect policy
+    version: ?httpx.Version = null,            // Optional per-request protocol override
 };
 ```
+
+All fields are optional customizations. Passing `.{}` keeps defaults implicit.
 
 ## Response Handling
 

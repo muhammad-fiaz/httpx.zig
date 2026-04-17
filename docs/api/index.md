@@ -10,7 +10,29 @@ The root module re-exports core types and convenience helpers so most apps can i
 
 - `httpx.fetch(allocator, url)`
 - `httpx.send(allocator, method, url, options)`
-- `httpx.get/post/put/delete/del/patch/head/options/opts(...)`
+- `httpx.get/post/put/delete/del/patch/head/trace/connect/options/opts(...)`
+
+### Optional Client Builder Helpers
+
+- `httpx.ClientConfig.defaults().withDefaultHeaders(...)`
+- `httpx.ClientConfig.defaults().withFollowRedirects(...)`
+- `httpx.ClientConfig.defaults().withHttp2Settings(...)`
+- `httpx.ClientConfig.defaults().withHttp3Settings(...)`
+- `httpx.ClientConfig.defaults().withSslVerification(...)`
+- `httpx.ClientConfig.defaults().withKeepAlive(...)`
+- `httpx.ClientConfig.defaults().withMaxResponseSize(...)`
+- `httpx.RequestOptions.defaults().withQueryParams(...)`
+- `httpx.RequestOptions.defaults().withFormUrlEncoded(...)`
+- `httpx.RequestOptions.defaults().withVersion(...)`
+- `httpx.RequestOptions.defaults().withHttp2()`
+- `httpx.RequestOptions.defaults().withHttp3()`
+
+### Server Types
+
+- `httpx.Server`
+- `httpx.ServerConfig`
+- `httpx.PortConflictStrategy`
+- `httpx.FileResponseOptions`
 
 ### Concurrency Helpers
 
@@ -21,6 +43,8 @@ The root module re-exports core types and convenience helpers so most apps can i
 - `httpx.first(...)` (alias for `any`)
 - `httpx.fastest(...)` (alias for `race`)
 - `httpx.settled(...)` (alias for `allSettled`)
+- `httpx.successfulCount(...)`
+- `httpx.errorCount(...)`
 - `httpx.BatchBuilder`
 
 ### Network Helpers
@@ -38,6 +62,11 @@ The root module re-exports core types and convenience helpers so most apps can i
 - `httpx.parseQueryValue(...)`
 - `httpx.parseSetCookiePair(...)`
 - `httpx.parseCookiePair(...)`
+- `httpx.mimeTypeFromPath(...)`
+- `httpx.mimeTypeFromPathOr(...)`
+- `httpx.mimeTypeFromPathWith(...)`
+- `httpx.MimeMapping` / `httpx.MimeRegistry`
+- `httpx.defaultMimeMappings`
 - `httpx.encodeVarInt(...)`
 - `httpx.decodeVarInt(...)`
 

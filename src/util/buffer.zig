@@ -82,12 +82,28 @@ pub const Buffer = struct {
         return .{ .context = self };
     }
 
-    pub const Writer = std.io.Writer(*Self, error{OutOfMemory}, write);
+    pub const Writer = struct {
+        context: *Self,
 
-    fn write(self: *Self, bytes: []const u8) error{OutOfMemory}!usize {
-        self.append(bytes) catch return error.OutOfMemory;
-        return bytes.len;
-    }
+        pub fn write(self: Writer, bytes: []const u8) error{OutOfMemory}!usize {
+            self.context.append(bytes) catch return error.OutOfMemory;
+            return bytes.len;
+        }
+
+        pub fn writeAll(self: Writer, bytes: []const u8) error{OutOfMemory}!void {
+            _ = try self.write(bytes);
+        }
+
+        pub fn writeByte(self: Writer, byte: u8) error{OutOfMemory}!void {
+            self.context.appendByte(byte) catch return error.OutOfMemory;
+        }
+
+        pub fn print(self: Writer, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
+            var buf: [4096]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, fmt, args) catch return error.OutOfMemory;
+            try self.writeAll(text);
+        }
+    };
 };
 
 /// Circular buffer for streaming data with fixed capacity.

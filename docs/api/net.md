@@ -27,7 +27,7 @@ const httpx = @import("httpx");
 var socket = try httpx.Socket.create();
 defer socket.close();
 
-const addr = try std.net.Address.parseIp("93.184.216.34", 80);
+const addr = try httpx.Address.parseIp("93.184.216.34", 80);
 try socket.connect(addr);
 
 try socket.writeAll("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n");
@@ -86,7 +86,7 @@ Server-side listener for accepting inbound TCP connections.
 const std = @import("std");
 const httpx = @import("httpx");
 
-var listener = try httpx.TcpListener.init(try std.net.Address.parseIp("127.0.0.1", 8080));
+var listener = try httpx.TcpListener.init(try httpx.Address.parseIp("127.0.0.1", 8080));
 defer listener.deinit();
 
 const accepted = try listener.accept();
@@ -127,7 +127,7 @@ const httpx = @import("httpx");
 
 var recv_sock = try httpx.UdpSocket.create();
 defer recv_sock.close();
-try recv_sock.bind(try std.net.Address.parseIp("127.0.0.1", 0));
+try recv_sock.bind(try httpx.Address.parseIp("127.0.0.1", 0));
 
 const recv_addr = try recv_sock.getLocalAddress();
 

@@ -11,6 +11,11 @@ const BenchConfig = struct {
     rounds: usize,
 };
 
+fn nowNanos() i96 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Timestamp.now(io, .awake).toNanoseconds();
+}
+
 fn runBenchmark(name: []const u8, cfg: BenchConfig, func: *const fn () void) void {
     for (0..cfg.warmup_iterations) |_| {
         func();
@@ -21,11 +26,11 @@ fn runBenchmark(name: []const u8, cfg: BenchConfig, func: *const fn () void) voi
     var total_ns: u128 = 0;
 
     for (0..cfg.rounds) |_| {
-        const start = std.time.nanoTimestamp();
+        const start = nowNanos();
         for (0..cfg.iterations) |_| {
             func();
         }
-        const end = std.time.nanoTimestamp();
+        const end = nowNanos();
 
         const elapsed_ns = @as(u64, @intCast(end - start));
         min_ns = @min(min_ns, elapsed_ns);
@@ -144,7 +149,7 @@ fn benchVarIntEncoding() void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     bench_allocator = gpa.allocator();
 

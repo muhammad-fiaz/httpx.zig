@@ -12,7 +12,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const net = std.net;
+const net = @import("../net/compat.zig");
 
 const types = @import("../core/types.zig");
 const Request = @import("../core/request.zig").Request;
@@ -32,9 +32,30 @@ const UdpSocket = @import("../net/socket.zig").UdpSocket;
 const Router = @import("router.zig").Router;
 const Middleware = @import("middleware.zig").Middleware;
 const common = @import("../util/common.zig");
+const list_writer = @import("../util/list_writer.zig");
+
+fn defaultIo() std.Io {
+    return if (@import("builtin").is_test)
+        std.testing.io
+    else
+        std.Io.Threaded.global_single_threaded.io();
+}
+
+fn sleepMs(ms: i64) void {
+    const io = defaultIo();
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(ms), .real) catch {};
+}
 
 pub const CookieOptions = common.CookieOptions;
 pub const SameSite = common.SameSite;
+
+/// Strategy for handling bind conflicts on startup.
+pub const PortConflictStrategy = enum {
+    /// Fail immediately when the configured port is unavailable.
+    fail,
+    /// Retry on subsequent ports (`port + 1`, `port + 2`, ...) until a free port is found.
+    increment,
+};
 
 /// SSE event payload used by `Context.sse`.
 pub const SseEvent = struct {
@@ -51,6 +72,8 @@ pub const PreRouteHook = *const fn (*Context) anyerror!void;
 pub const ServerConfig = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 8080,
+    port_conflict: PortConflictStrategy = .fail,
+    max_port_tries: u16 = 32,
     max_body_size: usize = 10 * 1024 * 1024,
     request_timeout_ms: u64 = 30_000,
     keep_alive_timeout_ms: u64 = 60_000,
@@ -61,6 +84,15 @@ pub const ServerConfig = struct {
     http3_enabled: bool = false,
     http2_settings: types.Http2Settings = .{},
     http3_settings: types.Http3Settings = .{},
+};
+
+/// File-serving options used by `Context.fileWithOptions`.
+pub const FileResponseOptions = struct {
+    content_type: ?[]const u8 = null,
+    cache_control: ?[]const u8 = null,
+    add_etag: bool = true,
+    add_nosniff: bool = true,
+    conditional_get: bool = true,
 };
 
 /// Request context passed to handlers.
@@ -156,14 +188,85 @@ pub const Context = struct {
 
     /// Sends a file response.
     pub fn file(self: *Self, path: []const u8) !Response {
-        const f = std.fs.cwd().openFile(path, .{}) catch return self.status(404).text("Not Found");
-        defer f.close();
+        return self.fileWithOptions(path, .{});
+    }
 
-        const stat = try f.stat();
-        const content = try self.allocator.alloc(u8, @intCast(stat.size));
-        _ = try f.readAll(content);
+    /// Sends a file response with an explicit content type override.
+    pub fn fileAs(self: *Self, path: []const u8, content_type: []const u8) !Response {
+        return self.fileWithOptions(path, .{ .content_type = content_type });
+    }
 
-        _ = try self.response.header(HeaderName.CONTENT_TYPE, common.mimeTypeFromPath(path));
+    /// Sends a file as an attachment download.
+    pub fn download(self: *Self, path: []const u8, filename: ?[]const u8) !Response {
+        var response = try self.file(path);
+
+        if (filename) |name| {
+            const disposition = try std.fmt.allocPrint(self.allocator, "attachment; filename=\"{s}\"", .{name});
+            defer self.allocator.free(disposition);
+            try response.headers.set(HeaderName.CONTENT_DISPOSITION, disposition);
+        } else {
+            try response.headers.set(HeaderName.CONTENT_DISPOSITION, "attachment");
+        }
+
+        return response;
+    }
+
+    /// Sends a file response with production-oriented static-file options.
+    pub fn fileWithOptions(self: *Self, path: []const u8, options: FileResponseOptions) !Response {
+        const io = defaultIo();
+        var f = std.Io.Dir.cwd().openFile(io, path, .{}) catch return self.status(404).text("Not Found");
+        defer f.close(io);
+
+        const stat = try f.stat(io);
+        const content_type = options.content_type orelse common.mimeTypeFromPath(path);
+
+        var content_len_buf: [32]u8 = undefined;
+        const content_len = std.fmt.bufPrint(&content_len_buf, "{d}", .{stat.size}) catch unreachable;
+        _ = try self.response.header(HeaderName.CONTENT_LENGTH, content_len);
+        _ = try self.response.header(HeaderName.CONTENT_TYPE, content_type);
+
+        if (options.cache_control) |cache_control| {
+            _ = try self.response.header(HeaderName.CACHE_CONTROL, cache_control);
+        }
+
+        if (options.add_nosniff) {
+            _ = try self.response.header(HeaderName.X_CONTENT_TYPE_OPTIONS, "nosniff");
+        }
+
+        var etag_value: ?[]u8 = null;
+        defer if (etag_value) |etag| self.allocator.free(etag);
+
+        if (options.add_etag) {
+            etag_value = try buildStaticEtag(self.allocator, path, stat);
+            _ = try self.response.header(HeaderName.ETAG, etag_value.?);
+
+            if (options.conditional_get) {
+                if (self.request.headers.get(HeaderName.IF_NONE_MATCH)) |if_none_match| {
+                    if (ifNoneMatchMatches(if_none_match, etag_value.?)) {
+                        _ = self.response.status(304);
+                        return self.response.build();
+                    }
+                }
+            }
+        }
+
+        if (self.request.method == .HEAD) {
+            return self.response.build();
+        }
+
+        if (stat.size > @as(u64, std.math.maxInt(usize))) {
+            return error.ResponseTooLarge;
+        }
+
+        const content_len_usize: usize = @intCast(stat.size);
+        const content = try self.allocator.alloc(u8, content_len_usize);
+        defer self.allocator.free(content);
+
+        const read_n = try f.readPositionalAll(io, content, 0);
+        if (read_n != content_len_usize) {
+            return error.UnexpectedEof;
+        }
+
         _ = self.response.body(content);
         return self.response.build();
     }
@@ -185,9 +288,9 @@ pub const Context = struct {
 
     /// Sends one-shot Server-Sent Events payload.
     pub fn sse(self: *Self, events: []const SseEvent) !Response {
-        var payload = std.ArrayListUnmanaged(u8){};
+        var payload = std.ArrayList(u8).empty;
         defer payload.deinit(self.allocator);
-        const writer = payload.writer(self.allocator);
+        const writer = list_writer.init(self.allocator, &payload);
 
         for (events) |evt| {
             if (evt.id) |id| try writer.print("id: {s}\n", .{id});
@@ -220,6 +323,12 @@ pub const Context = struct {
         _ = try self.response.header(HeaderName.LOCATION, url);
         return self.response.build();
     }
+
+    /// Sends a 204 No Content response.
+    pub fn noContent(self: *Self) !Response {
+        _ = self.response.status(204);
+        return self.response.build();
+    }
 };
 
 /// Handler function type.
@@ -230,8 +339,8 @@ pub const Server = struct {
     allocator: Allocator,
     config: ServerConfig,
     router: Router,
-    middleware: std.ArrayListUnmanaged(Middleware) = .empty,
-    pre_route_hooks: std.ArrayListUnmanaged(PreRouteHook) = .empty,
+    middleware: std.ArrayList(Middleware) = .empty,
+    pre_route_hooks: std.ArrayList(PreRouteHook) = .empty,
     global_handler: ?Handler = null,
     listener: ?TcpListener = null,
     udp_socket: ?UdpSocket = null,
@@ -248,6 +357,7 @@ pub const Server = struct {
     pub fn initWithConfig(allocator: Allocator, config: ServerConfig) Self {
         var cfg = config;
         if (cfg.max_connections == 0) cfg.max_connections = 1000;
+        if (cfg.max_port_tries == 0) cfg.max_port_tries = 1;
         if (cfg.request_timeout_ms == 0) cfg.request_timeout_ms = 30_000;
         if (cfg.keep_alive_timeout_ms == 0) cfg.keep_alive_timeout_ms = 60_000;
 
@@ -322,6 +432,16 @@ pub const Server = struct {
         try self.route(.OPTIONS, path, handler);
     }
 
+    /// Registers a TRACE route.
+    pub fn trace(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.route(.TRACE, path, handler);
+    }
+
+    /// Registers a CONNECT route.
+    pub fn connect(self: *Self, path: []const u8, handler: Handler) !void {
+        try self.route(.CONNECT, path, handler);
+    }
+
     /// Registers a handler for all standard HTTP methods on a path.
     pub fn any(self: *Self, path: []const u8, handler: Handler) !void {
         try self.route(.GET, path, handler);
@@ -344,11 +464,86 @@ pub const Server = struct {
         return self.listenTcp();
     }
 
+    /// Returns the effective server port (useful when `port_conflict = .increment`).
+    pub fn listeningPort(self: *const Self) u16 {
+        return self.config.port;
+    }
+
+    fn maxPortBindAttempts(self: *const Self) u16 {
+        return if (self.config.port_conflict == .increment)
+            @max(self.config.max_port_tries, 1)
+        else
+            1;
+    }
+
+    fn portCandidate(base: u16, attempt: u16) ?u16 {
+        const candidate_u32 = @as(u32, base) + @as(u32, attempt);
+        if (candidate_u32 > std.math.maxInt(u16)) return null;
+        return @intCast(candidate_u32);
+    }
+
+    fn bindTcpListener(self: *Self, backlog: u31) !void {
+        const attempts = self.maxPortBindAttempts();
+        var attempt: u16 = 0;
+
+        while (attempt < attempts) : (attempt += 1) {
+            const candidate_port = portCandidate(self.config.port, attempt) orelse return error.PortRangeExhausted;
+            const addr = try net.Address.parseIp(self.config.host, candidate_port);
+
+            const listener = TcpListener.initWithBacklog(addr, backlog) catch |err| switch (err) {
+                error.AddressInUse, error.BindFailed => {
+                    if (self.config.port_conflict == .increment and attempt + 1 < attempts) {
+                        continue;
+                    }
+                    return err;
+                },
+                else => return err,
+            };
+
+            self.listener = listener;
+            self.config.port = candidate_port;
+            return;
+        }
+
+        return error.PortRangeExhausted;
+    }
+
+    fn bindUdpSocket(self: *Self) !void {
+        const attempts = self.maxPortBindAttempts();
+        var attempt: u16 = 0;
+
+        while (attempt < attempts) : (attempt += 1) {
+            const candidate_port = portCandidate(self.config.port, attempt) orelse return error.PortRangeExhausted;
+            const addr = try net.Address.parseIp(self.config.host, candidate_port);
+
+            var socket = try UdpSocket.createForAddress(addr);
+            if (socket.bind(addr)) {
+                if (self.config.request_timeout_ms > 0) {
+                    socket.setRecvTimeout(self.config.request_timeout_ms) catch |err| {
+                        socket.close();
+                        return err;
+                    };
+                }
+
+                self.udp_socket = socket;
+                self.config.port = candidate_port;
+                return;
+            } else |err| {
+                socket.close();
+                if (self.config.port_conflict == .increment and attempt + 1 < attempts) {
+                    continue;
+                }
+                return err;
+            }
+        }
+
+        return error.PortRangeExhausted;
+    }
+
     fn listenTcp(self: *Self) !void {
-        const addr = try net.Address.parseIp(self.config.host, self.config.port);
         const backlog_u32: u32 = @max(self.config.max_connections, 1);
         const backlog: u31 = @intCast(@min(backlog_u32, @as(u32, std.math.maxInt(u31))));
-        self.listener = try TcpListener.initWithBacklog(addr, backlog);
+        try self.bindTcpListener(backlog);
         self.running = true;
 
         std.debug.print("Server listening on {s}:{d}\n", .{ self.config.host, self.config.port });
@@ -366,15 +561,7 @@ pub const Server = struct {
     }
 
     fn listenHttp3(self: *Self) !void {
-        const addr = try net.Address.parseIp(self.config.host, self.config.port);
-
-        var socket = try UdpSocket.createForAddress(addr);
-        try socket.bind(addr);
-        if (self.config.request_timeout_ms > 0) {
-            try socket.setRecvTimeout(self.config.request_timeout_ms);
-        }
-
-        self.udp_socket = socket;
+        try self.bindUdpSocket();
         self.running = true;
 
         std.debug.print("Server listening (HTTP/3) on {s}:{d}\n", .{ self.config.host, self.config.port });
@@ -509,7 +696,7 @@ pub const Server = struct {
         var request_headers = Headers.init(self.allocator);
         defer request_headers.deinit();
 
-        var request_body = std.ArrayListUnmanaged(u8){};
+        var request_body = std.ArrayList(u8).empty;
         defer request_body.deinit(self.allocator);
 
         var method_raw: []const u8 = "GET";
@@ -531,7 +718,7 @@ pub const Server = struct {
         var request_stream_id: ?u31 = null;
         var request_done = false;
 
-        var pending_headers_block = std.ArrayListUnmanaged(u8){};
+        var pending_headers_block = std.ArrayList(u8).empty;
         defer pending_headers_block.deinit(self.allocator);
         var pending_headers_flags: u8 = 0;
         var waiting_continuation = false;
@@ -694,6 +881,26 @@ pub const Server = struct {
                     }
                     try request_body.appendSlice(self.allocator, data_slice);
 
+                    if (frame.payload.len > 0) {
+                        // Replenish stream and connection receive windows as DATA is consumed.
+                        const window_increment: u31 = @intCast(frame.payload.len);
+                        const window_update = h2stream.buildWindowUpdatePayload(window_increment);
+
+                        try conn.writeFrame(.{
+                            .length = @intCast(window_update.len),
+                            .frame_type = .window_update,
+                            .flags = 0,
+                            .stream_id = request_stream_id.?,
+                        }, &window_update);
+
+                        try conn.writeFrame(.{
+                            .length = @intCast(window_update.len),
+                            .frame_type = .window_update,
+                            .flags = 0,
+                            .stream_id = 0,
+                        }, &window_update);
+                    }
+
                     if ((frame.header.flags & 0x01) != 0) {
                         request_done = true;
                     }
@@ -749,7 +956,7 @@ pub const Server = struct {
 
         // Give the peer time to drain queued bytes before teardown.
         sock.shutdownWrite() catch {};
-        std.Thread.sleep(25 * std.time.ns_per_ms);
+        sleepMs(25);
     }
 
     fn sendHttp2Response(
@@ -761,10 +968,10 @@ pub const Server = struct {
     ) !void {
         try self.ensureContentLengthHeader(response);
 
-        var response_headers = std.ArrayListUnmanaged(hpack.HeaderEntry){};
+        var response_headers = std.ArrayList(hpack.HeaderEntry).empty;
         defer response_headers.deinit(self.allocator);
 
-        var owned_header_names = std.ArrayListUnmanaged([]u8){};
+        var owned_header_names = std.ArrayList([]u8).empty;
         defer {
             for (owned_header_names.items) |name| {
                 self.allocator.free(name);
@@ -823,10 +1030,10 @@ pub const Server = struct {
     }
 
     fn handleHttp3Transaction(self: *Self, peer_addr: net.Address, first_datagram: []const u8) !void {
-        var control_stream_payload = std.ArrayListUnmanaged(u8){};
+        var control_stream_payload = std.ArrayList(u8).empty;
         defer control_stream_payload.deinit(self.allocator);
 
-        var request_stream_payload = std.ArrayListUnmanaged(u8){};
+        var request_stream_payload = std.ArrayList(u8).empty;
         defer request_stream_payload.deinit(self.allocator);
 
         var request_stream_id: ?u64 = null;
@@ -868,7 +1075,7 @@ pub const Server = struct {
         var request_headers = Headers.init(self.allocator);
         defer request_headers.deinit();
 
-        var request_body = std.ArrayListUnmanaged(u8){};
+        var request_body = std.ArrayList(u8).empty;
         defer request_body.deinit(self.allocator);
 
         var method_raw: []const u8 = "GET";
@@ -1002,10 +1209,10 @@ pub const Server = struct {
         );
         defer qpack_ctx.deinit();
 
-        var response_headers = std.ArrayListUnmanaged(qpack.HeaderEntry){};
+        var response_headers = std.ArrayList(qpack.HeaderEntry).empty;
         defer response_headers.deinit(self.allocator);
 
-        var owned_header_names = std.ArrayListUnmanaged([]u8){};
+        var owned_header_names = std.ArrayList([]u8).empty;
         defer {
             for (owned_header_names.items) |name| {
                 self.allocator.free(name);
@@ -1029,18 +1236,18 @@ pub const Server = struct {
         const encoded_headers = try qpack.encodeHeaders(&qpack_ctx, response_headers.items, self.allocator);
         defer self.allocator.free(encoded_headers);
 
-        var response_stream_payload = std.ArrayListUnmanaged(u8){};
+        var response_stream_payload = std.ArrayList(u8).empty;
         defer response_stream_payload.deinit(self.allocator);
         try http.appendHttp3Frame(&response_stream_payload, self.allocator, .headers, encoded_headers);
         if (response.body) |body| {
             try http.appendHttp3Frame(&response_stream_payload, self.allocator, .data, body);
         }
 
-        var settings_payload = std.ArrayListUnmanaged(u8){};
+        var settings_payload = std.ArrayList(u8).empty;
         defer settings_payload.deinit(self.allocator);
         try http.encodeHttp3SettingsPayload(self.config.http3_settings, self.allocator, &settings_payload);
 
-        var control_stream_payload = std.ArrayListUnmanaged(u8){};
+        var control_stream_payload = std.ArrayList(u8).empty;
         defer control_stream_payload.deinit(self.allocator);
         try http.appendVarInt(&control_stream_payload, self.allocator, @intFromEnum(quic.Http3StreamType.control));
         try http.appendHttp3Frame(&control_stream_payload, self.allocator, .settings, settings_payload.items);
@@ -1120,7 +1327,7 @@ pub const Server = struct {
             }
         }
 
-        if (suppress_body) {
+        if (suppress_body or req.method == .HEAD) {
             if (response.body_owned) {
                 if (response.body) |body| self.allocator.free(body);
                 response.body_owned = false;
@@ -1148,6 +1355,12 @@ pub const Server = struct {
         _ = self;
         if (response.headers.get(HeaderName.CONTENT_LENGTH) != null) return;
         if (response.headers.isChunked()) return;
+        if ((response.status.code >= 100 and response.status.code < 200) or
+            response.status.code == 204 or
+            response.status.code == 304)
+        {
+            return;
+        }
 
         const body_len: usize = if (response.body) |b| b.len else 0;
         var len_buf: [32]u8 = undefined;
@@ -1157,9 +1370,9 @@ pub const Server = struct {
 
     /// Sets the `Allow` header for automatic OPTIONS and 405 responses.
     fn setAllowHeader(self: *Self, headers: *Headers, methods: []const types.Method) !void {
-        var allow = std.ArrayListUnmanaged(u8){};
+        var allow = std.ArrayList(u8).empty;
         defer allow.deinit(self.allocator);
-        const writer = allow.writer(self.allocator);
+        const writer = list_writer.init(self.allocator, &allow);
 
         var first = true;
         var has_options = false;
@@ -1315,7 +1528,7 @@ fn buildHttp3Datagram(
     };
     const frame_len = try stream_frame.encode(frame_storage);
 
-    var packet = std.ArrayListUnmanaged(u8){};
+    var packet = std.ArrayList(u8).empty;
     errdefer packet.deinit(allocator);
 
     var header_buf: [128]u8 = undefined;
@@ -1336,9 +1549,9 @@ fn buildHttp3Datagram(
 }
 
 fn trailerHeaderNames(allocator: Allocator, headers: *const Headers) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    const writer = out.writer(allocator);
+    const writer = list_writer.init(allocator, &out);
 
     var first = true;
     for (headers.entries.items) |h| {
@@ -1348,6 +1561,48 @@ fn trailerHeaderNames(allocator: Allocator, headers: *const Headers) ![]u8 {
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+fn buildStaticEtag(allocator: Allocator, path: []const u8, stat: anytype) ![]u8 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(path);
+
+    const size_u64: u64 = @intCast(stat.size);
+    hasher.update(mem.asBytes(&size_u64));
+
+    const Stat = @TypeOf(stat);
+    if (@hasField(Stat, "mtime")) {
+        const mtime = stat.mtime;
+        hasher.update(mem.asBytes(&mtime));
+    } else if (@hasField(Stat, "mtime_ns")) {
+        const mtime_ns = stat.mtime_ns;
+        hasher.update(mem.asBytes(&mtime_ns));
+    }
+
+    const digest = hasher.final();
+    return std.fmt.allocPrint(allocator, "W/\"{x}-{x}\"", .{ size_u64, digest });
+}
+
+fn normalizeEtagToken(token: []const u8) []const u8 {
+    var trimmed = mem.trim(u8, token, " \t");
+    if (mem.startsWith(u8, trimmed, "W/")) {
+        trimmed = mem.trim(u8, trimmed[2..], " \t");
+    }
+    return trimmed;
+}
+
+fn ifNoneMatchMatches(if_none_match_header: []const u8, etag: []const u8) bool {
+    const normalized_target = normalizeEtagToken(etag);
+    var values = mem.splitScalar(u8, if_none_match_header, ',');
+
+    while (values.next()) |raw_value| {
+        const token = mem.trim(u8, raw_value, " \t");
+        if (token.len == 0) continue;
+        if (mem.eql(u8, token, "*")) return true;
+        if (mem.eql(u8, normalizeEtagToken(token), normalized_target)) return true;
+    }
+
+    return false;
 }
 
 test "Server initialization" {
@@ -1368,6 +1623,43 @@ test "Context response helpers" {
 
     _ = ctx.status(201);
     try std.testing.expectEqual(@as(u16, 201), ctx.response.status_code);
+}
+
+test "Context fileAs helper compile check" {
+    const file_as_ptr: *const fn (*Context, []const u8, []const u8) anyerror!Response = Context.fileAs;
+    _ = file_as_ptr;
+}
+
+test "Context fileWithOptions helper compile check" {
+    const file_with_options_ptr: *const fn (*Context, []const u8, FileResponseOptions) anyerror!Response = Context.fileWithOptions;
+    _ = file_with_options_ptr;
+}
+
+test "Context download helper compile check" {
+    const download_ptr: *const fn (*Context, []const u8, ?[]const u8) anyerror!Response = Context.download;
+    _ = download_ptr;
+}
+
+test "Context noContent helper" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .GET, "/empty");
+    defer req.deinit();
+
+    var ctx = Context.init(allocator, &req);
+    defer ctx.deinit();
+
+    var response = try ctx.noContent();
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 204), response.status.code);
+    try std.testing.expect(response.body == null);
+}
+
+test "If-None-Match helper supports weak tags and lists" {
+    try std.testing.expect(ifNoneMatchMatches("W/\"abc\"", "\"abc\""));
+    try std.testing.expect(ifNoneMatchMatches("\"def\", W/\"abc\"", "\"abc\""));
+    try std.testing.expect(ifNoneMatchMatches("*", "\"abc\""));
+    try std.testing.expect(!ifNoneMatchMatches("\"def\"", "\"abc\""));
 }
 
 test "Server with config" {
@@ -1469,4 +1761,135 @@ test "Server any() registers all methods" {
     try std.testing.expect(server.router.find(.POST, "/wild") != null);
     try std.testing.expect(server.router.find(.TRACE, "/wild") != null);
     try std.testing.expect(server.router.find(.CONNECT, "/wild") != null);
+}
+
+test "Server trace/connect helpers register routes" {
+    const allocator = std.testing.allocator;
+    var server = Server.init(allocator);
+    defer server.deinit();
+
+    const handler = struct {
+        fn h(_: *Context) anyerror!Response {
+            return error.TestUnexpectedResult;
+        }
+    }.h;
+
+    try server.trace("/diag", handler);
+    try server.connect("/tunnel", handler);
+
+    try std.testing.expect(server.router.find(.TRACE, "/diag") != null);
+    try std.testing.expect(server.router.find(.CONNECT, "/tunnel") != null);
+}
+
+fn reserveTcpPort() !struct { listener: TcpListener, port: u16 } {
+    const addr = try net.Address.parseIp("127.0.0.1", 0);
+    var listener = try TcpListener.init(addr);
+    const local = try listener.getLocalAddress();
+    return .{ .listener = listener, .port = local.getPort() };
+}
+
+fn reserveUdpPort() !struct { socket: UdpSocket, port: u16 } {
+    const addr = try net.Address.parseIp("127.0.0.1", 0);
+    var socket = try UdpSocket.createForAddress(addr);
+    errdefer socket.close();
+    try socket.bind(addr);
+    const local = try socket.getLocalAddress();
+    return .{ .socket = socket, .port = local.getPort() };
+}
+
+test "Server port conflict strategy fail for TCP" {
+    const allocator = std.testing.allocator;
+
+    var reserved = reserveTcpPort() catch |err| switch (err) {
+        error.SetSockOptFailed => return error.SkipZigTest,
+        else => return err,
+    };
+    defer reserved.listener.deinit();
+
+    var server = Server.initWithConfig(allocator, .{
+        .host = "127.0.0.1",
+        .port = reserved.port,
+        .port_conflict = .fail,
+        .max_port_tries = 8,
+    });
+    defer server.deinit();
+
+    const backlog_u32: u32 = @max(server.config.max_connections, 1);
+    const backlog: u31 = @intCast(@min(backlog_u32, @as(u32, std.math.maxInt(u31))));
+
+    _ = server.bindTcpListener(backlog) catch |err| {
+        try std.testing.expect(err == error.AddressInUse or err == error.BindFailed);
+        return;
+    };
+
+    return error.TestUnexpectedResult;
+}
+
+test "Server port conflict strategy increment for TCP" {
+    const allocator = std.testing.allocator;
+
+    var reserved = reserveTcpPort() catch |err| switch (err) {
+        error.SetSockOptFailed => return error.SkipZigTest,
+        else => return err,
+    };
+    defer reserved.listener.deinit();
+
+    var server = Server.initWithConfig(allocator, .{
+        .host = "127.0.0.1",
+        .port = reserved.port,
+        .port_conflict = .increment,
+        .max_port_tries = 32,
+    });
+    defer server.deinit();
+
+    const backlog_u32: u32 = @max(server.config.max_connections, 1);
+    const backlog: u31 = @intCast(@min(backlog_u32, @as(u32, std.math.maxInt(u31))));
+    try server.bindTcpListener(backlog);
+
+    try std.testing.expect(server.listener != null);
+    try std.testing.expect(server.config.port != reserved.port);
+}
+
+test "Server port conflict strategy fail for HTTP/3 UDP" {
+    const allocator = std.testing.allocator;
+
+    var reserved = try reserveUdpPort();
+    defer reserved.socket.close();
+
+    var server = Server.initWithConfig(allocator, .{
+        .host = "127.0.0.1",
+        .port = reserved.port,
+        .http3_enabled = true,
+        .port_conflict = .fail,
+        .max_port_tries = 8,
+    });
+    defer server.deinit();
+
+    _ = server.bindUdpSocket() catch |err| {
+        try std.testing.expect(err == error.AddressInUse or err == error.BindFailed);
+        return;
+    };
+
+    return error.TestUnexpectedResult;
+}
+
+test "Server port conflict strategy increment for HTTP/3 UDP" {
+    const allocator = std.testing.allocator;
+
+    var reserved = try reserveUdpPort();
+    defer reserved.socket.close();
+
+    var server = Server.initWithConfig(allocator, .{
+        .host = "127.0.0.1",
+        .port = reserved.port,
+        .http3_enabled = true,
+        .port_conflict = .increment,
+        .max_port_tries = 32,
+    });
+    defer server.deinit();
+
+    try server.bindUdpSocket();
+
+    try std.testing.expect(server.udp_socket != null);
+    try std.testing.expect(server.config.port != reserved.port);
 }

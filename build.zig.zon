@@ -1,8 +1,8 @@
 .{
     .fingerprint = 0xa924bc2e7af6a8f2,
     .name = .httpx,
-    .version = "0.0.7",
-    .minimum_zig_version = "0.15.0",
+    .version = "0.0.8",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{
         "build.zig",

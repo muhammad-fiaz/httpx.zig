@@ -1,25 +1,24 @@
 # Router API
 
-The `Router` provides route registration, parameterized paths, route groups, and middleware attachment for building expressive HTTP routes in `httpx.zig`.
+The Router provides method-based route registration, parameterized path matching, wildcard matching, and prefixed route groups.
 
 ## Overview
 
-- Supports static routes (e.g., `/about`) and parameterized routes (e.g., `/users/:id`).
-- Path parameters are captured and available via `ctx.param("name")`.
-- Route groups allow shared prefixes and middleware.
-- Middleware attached to a router or route executes in registration order.
+- Static path matching, for example `/users`.
+- Parameter matching with `:name`, for example `/users/:id`.
+- Wildcard catch-all matching with `*`, for example `/static/*`.
+- Route groups that prepend a common path prefix.
 
 ## Route Registration
 
 ```zig
-// Register routes on the main server router
 try server.get("/", homePage);
 try server.get("/users", listUsers);
 try server.get("/users/:id", getUser);
 try server.post("/users", createUser);
 ```
 
-### Methods
+### Router Methods
 
 | Method | Description |
 |--------|-------------|
@@ -27,86 +26,54 @@ try server.post("/users", createUser);
 | `post(path, handler)` | Register a POST route |
 | `put(path, handler)` | Register a PUT route |
 | `delete(path, handler)` | Register a DELETE route |
+| `del(path, handler)` | Alias for DELETE |
 | `patch(path, handler)` | Register a PATCH route |
 | `head(path, handler)` | Register a HEAD route |
 | `options(path, handler)` | Register an OPTIONS route |
-| `route(method, path, handler)` | Register for any HTTP method |
+| `trace(path, handler)` | Register a TRACE route |
+| `connect(path, handler)` | Register a CONNECT route |
+| `add(method, path, handler)` | Register any method explicitly |
 
 ## Parameterized Paths
 
-- Define parameters with `:name` (single segment) or `*name` (wildcard rest-of-path, optional).
-- Parameters are provided as strings via `ctx.param("name")`.
+- Use `:name` for single-segment parameters.
+- Use `*` for wildcard catch-all matching.
 
 ```zig
-try server.get("/files/*path", func(ctx: *httpx.Context) !httpx.Response {
-    const requested = ctx.param("path") orelse "";
-    return ctx.text(requested);
-});
+try server.get("/users/:id", getUser);
+try server.get("/static/*", staticHandler);
 ```
 
 ## Route Groups
 
-Group routes under a common prefix and attach middleware to the group.
+Use groups to avoid repeating a common prefix.
 
 ```zig
 var api = server.router.group("/api/v1");
-try api.use(httpx.middleware.auth());
-try api.get("/users", listUsers);
-try api.post("/users", createUser);
+try api.get("/users", listUsers);      // /api/v1/users
+try api.post("/users", createUser);    // /api/v1/users
+try api.patch("/users/:id", patchUser); // /api/v1/users/:id
+try api.trace("/diag", diagnostics);   // /api/v1/diag
 ```
 
-A group's middleware runs before the route's middleware and handler.
+RouteGroup exposes the same method helpers as Router: `get/post/put/delete/del/patch/head/options/trace/connect` plus `add`.
 
-## Middleware Interaction
+## Allowed Methods
 
-- Middleware may be registered globally (`server.use()`), per-group (`group.use()`), or per-route via helper wrappers.
-- Middleware receive the same `*Context` passed to handlers and may short-circuit the chain by returning a response.
+When a route path exists for multiple methods, you can query which methods are valid for a concrete path:
 
 ```zig
-// Logging middleware
-fn logger(next: httpx.Handler) httpx.Handler {
-    return fn (ctx: *httpx.Context) anyerror!httpx.Response {
-        std.debug.print("{} {}\n", .{ctx.request.method_name(), ctx.request.path});
-        return next(ctx);
-    };
-}
-
-try server.use(logger);
+var methods: [16]httpx.Method = undefined;
+const n = server.router.allowedMethods("/users/42", &methods);
+_ = n;
 ```
 
-## Route Parameters & Validation
+## Middleware Note
 
-- `ctx.param("id")` returns `?[]const u8` for path parameters.
-- Use helper validators in your handler to parse numeric IDs or validate formats.
-
-```zig
-fn getUser(ctx: *httpx.Context) !httpx.Response {
-    const id_str = ctx.param("id") orelse return ctx.status(400).json(.{ .error = "missing id" });
-    const id = std.fmt.parseInt(u32, id_str, 10) catch return ctx.status(400).json(.{ .error = "invalid id" });
-    // ...
-}
-```
-
-## Route Listing & Introspection
-
-The router exposes helpers to list registered routes (useful for debugging and generating documentation).
-
-```zig
-for (server.router.listRoutes()) |r| {
-    std.debug.print("{s} {s}\n", .{ r.method, r.path });
-}
-```
-
-## Error Handling
-
-- When no route matches, the router invokes the configured `NotFound` handler (`server.router.setNotFound()`).
-- If a handler returns an error, the server's error handler is invoked if configured.
-
-## Performance
-
-- The router uses linear or trie-based matching depending on configuration and path complexity. Typical route lookup is O(k) where k is the number of path segments.
+Middleware is configured at the Server level via `server.use(...)` and runs before route handlers.
 
 ## See Also
-- [Server API](/api/server) - Server integration and examples
-- [Middleware API](/api/middleware) - Built-in middleware helpers
+
+- [Server API](/api/server)
+- [Middleware API](/api/middleware)
 

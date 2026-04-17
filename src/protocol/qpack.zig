@@ -168,7 +168,7 @@ pub const DynamicEntry = struct {
 /// QPACK dynamic table with Required Insert Count tracking
 pub const DynamicTable = struct {
     allocator: Allocator,
-    entries: std.ArrayListUnmanaged(DynamicEntry) = .{},
+    entries: std.ArrayList(DynamicEntry) = .empty,
     current_size: usize = 0,
     max_size: usize = 0, // Default 0, set via SETTINGS
     /// Number of entries ever inserted (used for absolute indexing)
@@ -312,7 +312,7 @@ pub const EncoderInstruction = enum {
 };
 
 /// Encodes a Set Dynamic Table Capacity instruction.
-pub fn encodeSetCapacity(capacity: u64, out: *std.ArrayListUnmanaged(u8), allocator: Allocator) !void {
+pub fn encodeSetCapacity(capacity: u64, out: *std.ArrayList(u8), allocator: Allocator) !void {
     var buf: [10]u8 = undefined;
     const len = try encodeInteger(capacity, 5, &buf);
     buf[0] |= 0x20; // 001xxxxx prefix
@@ -324,7 +324,7 @@ pub fn encodeInsertNameRef(
     is_static: bool,
     name_index: u64,
     value: []const u8,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
     allocator: Allocator,
 ) !void {
     var buf: [10]u8 = undefined;
@@ -339,7 +339,7 @@ pub fn encodeInsertNameRef(
 pub fn encodeInsertLiteral(
     name: []const u8,
     value: []const u8,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
     allocator: Allocator,
 ) !void {
     var buf: [10]u8 = undefined;
@@ -356,7 +356,7 @@ pub fn encodeInsertLiteral(
 }
 
 /// Encodes a Duplicate instruction.
-pub fn encodeDuplicate(index: u64, out: *std.ArrayListUnmanaged(u8), allocator: Allocator) !void {
+pub fn encodeDuplicate(index: u64, out: *std.ArrayList(u8), allocator: Allocator) !void {
     var buf: [10]u8 = undefined;
     const len = try encodeInteger(index, 5, &buf);
     // 000xxxxx prefix (already 0)
@@ -374,7 +374,7 @@ pub const DecoderInstruction = enum {
 };
 
 /// Encodes a Section Acknowledgment instruction.
-pub fn encodeSectionAck(stream_id: u64, out: *std.ArrayListUnmanaged(u8), allocator: Allocator) !void {
+pub fn encodeSectionAck(stream_id: u64, out: *std.ArrayList(u8), allocator: Allocator) !void {
     var buf: [10]u8 = undefined;
     const len = try encodeInteger(stream_id, 7, &buf);
     buf[0] |= 0x80; // 1xxxxxxx prefix
@@ -382,7 +382,7 @@ pub fn encodeSectionAck(stream_id: u64, out: *std.ArrayListUnmanaged(u8), alloca
 }
 
 /// Encodes a Stream Cancellation instruction.
-pub fn encodeStreamCancel(stream_id: u64, out: *std.ArrayListUnmanaged(u8), allocator: Allocator) !void {
+pub fn encodeStreamCancel(stream_id: u64, out: *std.ArrayList(u8), allocator: Allocator) !void {
     var buf: [10]u8 = undefined;
     const len = try encodeInteger(stream_id, 6, &buf);
     buf[0] |= 0x40; // 01xxxxxx prefix
@@ -390,7 +390,7 @@ pub fn encodeStreamCancel(stream_id: u64, out: *std.ArrayListUnmanaged(u8), allo
 }
 
 /// Encodes an Insert Count Increment instruction.
-pub fn encodeInsertCountIncrement(increment: u64, out: *std.ArrayListUnmanaged(u8), allocator: Allocator) !void {
+pub fn encodeInsertCountIncrement(increment: u64, out: *std.ArrayList(u8), allocator: Allocator) !void {
     var buf: [10]u8 = undefined;
     const len = try encodeInteger(increment, 6, &buf);
     // 00xxxxxx prefix (already 0)
@@ -406,7 +406,7 @@ pub fn encodeHeaders(
     headers: []const HeaderEntry,
     allocator: Allocator,
 ) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
 
     // Required Insert Count
@@ -470,7 +470,7 @@ pub fn decodeHeaders(
     data: []const u8,
     allocator: Allocator,
 ) ![]DecodedHeader {
-    var headers = std.ArrayListUnmanaged(DecodedHeader){};
+    var headers = std.ArrayList(DecodedHeader).empty;
     errdefer {
         for (headers.items) |h| {
             allocator.free(h.name);
@@ -670,7 +670,7 @@ test "QPACK decode dynamic indexed field" {
 
     try ctx.dynamic_table.add("x-dyn", "one");
 
-    var block = std.ArrayListUnmanaged(u8){};
+    var block = std.ArrayList(u8).empty;
     defer block.deinit(allocator);
     try block.append(allocator, 1); // Required Insert Count
     try block.append(allocator, 0); // Delta Base
@@ -698,7 +698,7 @@ test "QPACK decode post-base indexed field" {
     try ctx.dynamic_table.add("x-a", "v1"); // absolute index 0
     try ctx.dynamic_table.add("x-b", "v2"); // absolute index 1
 
-    var block = std.ArrayListUnmanaged(u8){};
+    var block = std.ArrayList(u8).empty;
     defer block.deinit(allocator);
     try block.append(allocator, 1); // Required Insert Count
     try block.append(allocator, 0); // Delta Base => base = 1

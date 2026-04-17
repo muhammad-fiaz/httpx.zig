@@ -12,6 +12,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const list_writer = @import("../util/list_writer.zig");
 const types = @import("types.zig");
 
 /// Standard HTTP header name constants.
@@ -67,7 +68,7 @@ pub const Header = struct {
 /// HTTP headers collection with case-insensitive lookups.
 pub const Headers = struct {
     allocator: Allocator,
-    entries: std.ArrayListUnmanaged(Header) = .empty,
+    entries: std.ArrayList(Header) = .empty,
     max_headers: usize = 100,
 
     const Self = @This();
@@ -100,6 +101,14 @@ pub const Headers = struct {
         });
     }
 
+    /// Appends a header only when no value exists for the same name.
+    /// Returns true when a new header entry is appended.
+    pub fn appendIfMissing(self: *Self, name: []const u8, value: []const u8) !bool {
+        if (self.contains(name)) return false;
+        try self.append(name, value);
+        return true;
+    }
+
     /// Sets a header, replacing any existing values with the same name.
     pub fn set(self: *Self, name: []const u8, value: []const u8) !void {
         self.removeAll(name);
@@ -114,9 +123,14 @@ pub const Headers = struct {
         return null;
     }
 
+    /// Retrieves the first value for a header name or returns a fallback.
+    pub fn getOr(self: *const Self, name: []const u8, fallback: []const u8) []const u8 {
+        return self.get(name) orelse fallback;
+    }
+
     /// Returns all values for a header name.
     pub fn getAll(self: *const Self, name: []const u8, allocator: Allocator) ![][]const u8 {
-        var values = std.ArrayListUnmanaged([]const u8){};
+        var values = std.ArrayList([]const u8).empty;
         for (self.entries.items) |entry| {
             if (eqlIgnoreCase(entry.name, name)) {
                 try values.append(allocator, entry.value);
@@ -189,6 +203,20 @@ pub const Headers = struct {
         return new_headers;
     }
 
+    /// Merges headers from another collection.
+    ///
+    /// When `overwrite` is true, destination values are replaced per header name.
+    /// Otherwise, existing destination values are preserved.
+    pub fn mergeFrom(self: *Self, other: *const Self, overwrite: bool) !void {
+        for (other.entries.items) |entry| {
+            if (overwrite) {
+                try self.set(entry.name, entry.value);
+            } else {
+                _ = try self.appendIfMissing(entry.name, entry.value);
+            }
+        }
+    }
+
     /// Parses Content-Length header value.
     pub fn getContentLength(self: *const Self) ?u64 {
         const value = self.get(HeaderName.CONTENT_LENGTH) orelse return null;
@@ -220,8 +248,8 @@ pub const Headers = struct {
 
     /// Serializes headers to an allocated string.
     pub fn toSlice(self: *const Self, allocator: Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
-        const writer = buffer.writer(allocator);
+        var buffer = std.ArrayList(u8).empty;
+        const writer = list_writer.init(allocator, &buffer);
         try self.serialize(writer);
         return buffer.toOwnedSlice(allocator);
     }
@@ -295,4 +323,35 @@ test "Headers keep-alive detection" {
 
     try headers.set("Connection", "keep-alive");
     try std.testing.expect(headers.isKeepAlive(.HTTP_1_0));
+}
+
+test "Headers appendIfMissing and getOr" {
+    const allocator = std.testing.allocator;
+    var headers = Headers.init(allocator);
+    defer headers.deinit();
+
+    try std.testing.expect(try headers.appendIfMissing("X-Trace-Id", "abc"));
+    try std.testing.expect(!(try headers.appendIfMissing("x-trace-id", "def")));
+    try std.testing.expectEqualStrings("abc", headers.getOr("X-Trace-Id", "none"));
+    try std.testing.expectEqualStrings("none", headers.getOr("X-Missing", "none"));
+}
+
+test "Headers mergeFrom" {
+    const allocator = std.testing.allocator;
+
+    var dst = Headers.init(allocator);
+    defer dst.deinit();
+    try dst.set("Accept", "application/json");
+
+    var src = Headers.init(allocator);
+    defer src.deinit();
+    try src.set("Accept", "text/plain");
+    try src.set("X-Mode", "test");
+
+    try dst.mergeFrom(&src, false);
+    try std.testing.expectEqualStrings("application/json", dst.get("Accept").?);
+    try std.testing.expectEqualStrings("test", dst.get("X-Mode").?);
+
+    try dst.mergeFrom(&src, true);
+    try std.testing.expectEqualStrings("text/plain", dst.get("Accept").?);
 }

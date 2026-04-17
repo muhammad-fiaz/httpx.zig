@@ -6,7 +6,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -31,7 +31,12 @@ pub fn main() !void {
     }
 
     // Client aliases.
-    var client: httpx.HttpClient = httpx.HttpClient.init(allocator);
+    const client_config = httpx.ClientConfig.defaults()
+        .withTimeouts(httpx.Timeouts.fast())
+        .withRetryPolicy(httpx.RetryPolicy.noRetry())
+        .withPoolLimits(32, 8);
+
+    var client: httpx.HttpClient = httpx.HttpClient.initWithConfig(allocator, client_config);
     defer client.deinit();
 
     if (client.fetch("https://httpbin.org/anything", .{})) |resp_c| {
@@ -64,5 +69,21 @@ pub fn main() !void {
         std.debug.print("client.opts status: {d}\n", .{response.status.code});
     } else |err| {
         std.debug.print("client.opts error: {s}\n", .{@errorName(err)});
+    }
+
+    if (httpx.trace(allocator, "https://httpbin.org/trace", .{})) |resp_g| {
+        var response = resp_g;
+        defer response.deinit();
+        std.debug.print("trace status: {d}\n", .{response.status.code});
+    } else |err| {
+        std.debug.print("trace error: {s}\n", .{@errorName(err)});
+    }
+
+    if (client.connect("https://httpbin.org/anything", .{})) |resp_h| {
+        var response = resp_h;
+        defer response.deinit();
+        std.debug.print("client.connect status: {d}\n", .{response.status.code});
+    } else |err| {
+        std.debug.print("client.connect error: {s}\n", .{@errorName(err)});
     }
 }

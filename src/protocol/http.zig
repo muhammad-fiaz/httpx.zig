@@ -19,6 +19,8 @@ const HeaderName = @import("../core/headers.zig").HeaderName;
 const Request = @import("../core/request.zig").Request;
 const Response = @import("../core/response.zig").Response;
 const Status = @import("../core/status.zig").Status;
+const any_io = @import("../util/any_io.zig");
+const list_writer = @import("../util/list_writer.zig");
 
 /// HTTP protocol version negotiation result.
 pub const NegotiatedProtocol = enum {
@@ -53,15 +55,15 @@ pub const AlpnProtocol = struct {
 /// Manages the socket reader/writer, protocol versioning, and keep-alive state.
 pub const Http1Connection = struct {
     allocator: Allocator,
-    reader: std.io.AnyReader,
-    writer: std.io.AnyWriter,
+    reader: any_io.AnyReader,
+    writer: any_io.AnyWriter,
     version: types.Version = .HTTP_1_1,
     keep_alive: bool = true,
 
     const Self = @This();
 
     /// Creates a new HTTP/1.x connection.
-    pub fn init(allocator: Allocator, reader: std.io.AnyReader, writer: std.io.AnyWriter) Self {
+    pub fn init(allocator: Allocator, reader: any_io.AnyReader, writer: any_io.AnyWriter) Self {
         return .{
             .allocator = allocator,
             .reader = reader,
@@ -155,7 +157,7 @@ pub const Http1Connection = struct {
 
     /// Decodes a chunked transfer encoded body.
     fn readChunkedBody(self: *Self) ![]u8 {
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayList(u8).empty;
         var line_buf: [256]u8 = undefined;
 
         while (true) {
@@ -184,7 +186,7 @@ pub const Http1Connection = struct {
 
     /// Reads all remaining data until the connection is closed by the peer.
     fn readUntilClose(self: *Self) ![]u8 {
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayList(u8).empty;
         var buf: [4096]u8 = undefined;
 
         while (true) {
@@ -319,8 +321,8 @@ pub const Http2ErrorCode = enum(u32) {
 /// Manages the state of an HTTP/2 connection, including HPack context and streams.
 pub const Http2Connection = struct {
     allocator: Allocator,
-    reader: std.io.AnyReader,
-    writer: std.io.AnyWriter,
+    reader: any_io.AnyReader,
+    writer: any_io.AnyWriter,
     next_stream_id: u31 = 1,
     settings: Http2ConnectionSettings = .{},
     peer_settings: Http2ConnectionSettings = .{},
@@ -346,7 +348,7 @@ pub const Http2Connection = struct {
     };
 
     /// Initializes a new HTTP/2 connection state.
-    pub fn init(allocator: Allocator, reader: std.io.AnyReader, writer: std.io.AnyWriter) Self {
+    pub fn init(allocator: Allocator, reader: any_io.AnyReader, writer: any_io.AnyWriter) Self {
         return .{
             .allocator = allocator,
             .reader = reader,
@@ -362,7 +364,7 @@ pub const Http2Connection = struct {
 
     /// Transmits the local settings to the peer.
     fn sendSettings(self: *Self) !void {
-        var payload = std.ArrayListUnmanaged(u8){};
+        var payload = std.ArrayList(u8).empty;
         defer payload.deinit(self.allocator);
 
         try encodeSettingsPayload(self.settings, self.allocator, &payload);
@@ -403,7 +405,7 @@ pub const Http2Connection = struct {
     }
 };
 
-pub fn encodeSettingsPayload(settings: Http2Connection.Http2ConnectionSettings, allocator: Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+pub fn encodeSettingsPayload(settings: Http2Connection.Http2ConnectionSettings, allocator: Allocator, out: *std.ArrayList(u8)) !void {
     // Each setting is 6 bytes: 16-bit ID + 32-bit value.
     var buf: [6]u8 = undefined;
 
@@ -598,7 +600,7 @@ pub const Http3SettingId = enum(u64) {
 };
 
 /// Appends a QUIC varint into an unmanaged byte list.
-pub fn appendVarInt(out: *std.ArrayListUnmanaged(u8), allocator: Allocator, value: u64) !void {
+pub fn appendVarInt(out: *std.ArrayList(u8), allocator: Allocator, value: u64) !void {
     var tmp: [8]u8 = undefined;
     const n = try encodeVarInt(value, &tmp);
     try out.appendSlice(allocator, tmp[0..n]);
@@ -606,7 +608,7 @@ pub fn appendVarInt(out: *std.ArrayListUnmanaged(u8), allocator: Allocator, valu
 
 /// Appends a complete HTTP/3 frame (header + payload) into an unmanaged byte list.
 pub fn appendHttp3Frame(
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
     allocator: Allocator,
     frame_type: Http3FrameType,
     payload: []const u8,
@@ -625,7 +627,7 @@ pub fn appendHttp3Frame(
 pub fn encodeHttp3SettingsPayload(
     settings: types.Http3Settings,
     allocator: Allocator,
-    out: *std.ArrayListUnmanaged(u8),
+    out: *std.ArrayList(u8),
 ) !void {
     try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.qpack_max_table_capacity));
     try appendVarInt(out, allocator, settings.qpack_max_table_capacity);
@@ -680,8 +682,8 @@ pub fn parseHttp3SettingsPayload(payload: []const u8) !types.Http3Settings {
 
 /// Formats a request object into HTTP/1.x wire format.
 pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
-    var buffer = std.ArrayListUnmanaged(u8){};
-    const writer = buffer.writer(allocator);
+    var buffer = std.ArrayList(u8).empty;
+    const writer = list_writer.init(allocator, &buffer);
 
     const method_str = req.method.toString();
     try writer.print("{s} {s}", .{ method_str, req.uri.path });
@@ -704,8 +706,8 @@ pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
 
 /// Formats a response object into HTTP/1.x wire format.
 pub fn formatResponse(resp: *const Response, allocator: Allocator) ![]u8 {
-    var buffer = std.ArrayListUnmanaged(u8){};
-    const writer = buffer.writer(allocator);
+    var buffer = std.ArrayList(u8).empty;
+    const writer = list_writer.init(allocator, &buffer);
 
     try writer.print("{s} {d} {s}\r\n", .{
         resp.version.toString(),
@@ -727,9 +729,9 @@ pub fn formatResponse(resp: *const Response, allocator: Allocator) ![]u8 {
 
 /// Encodes payload using HTTP/1.1 chunked transfer format with optional trailers.
 pub fn encodeChunkedBody(body: []const u8, trailers: ?*const Headers, allocator: Allocator) ![]u8 {
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    const writer = out.writer(allocator);
+    const writer = list_writer.init(allocator, &out);
 
     const chunk_size: usize = 4096;
     var offset: usize = 0;
@@ -863,7 +865,7 @@ test "HTTP/2 SETTINGS payload encode/decode" {
         .max_header_list_size = 9000,
     };
 
-    var payload = std.ArrayListUnmanaged(u8){};
+    var payload = std.ArrayList(u8).empty;
     defer payload.deinit(allocator);
     try encodeSettingsPayload(settings_in, allocator, &payload);
 

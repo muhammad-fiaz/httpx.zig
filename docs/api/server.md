@@ -28,6 +28,8 @@ defer server.deinit();
 var server = httpx.Server.initWithConfig(allocator, .{
     .port = 3000,
     .host = "0.0.0.0",
+    .port_conflict = .increment,
+    .max_port_tries = 32,
     .max_body_size = 1048576, // 1MB
 });
 ```
@@ -38,6 +40,8 @@ var server = httpx.Server.initWithConfig(allocator, .{
 |-------|------|---------|-------------|
 | `host` | `[]const u8` | `"127.0.0.1"` | Interface to bind to. |
 | `port` | `u16` | `8080` | Port to listen on. |
+| `port_conflict` | `PortConflictStrategy` | `.fail` | Startup behavior when the preferred port is occupied (`.fail` or `.increment`). |
+| `max_port_tries` | `u16` | `32` | Number of port candidates to try (including the initial port) when `port_conflict = .increment`. |
 | `max_body_size` | `usize` | `10MB` | Max request body size. |
 | `request_timeout_ms` | `u64` | `30000` | Timeout for request processing. |
 | `keep_alive_timeout_ms` | `u64` | `60000` | Timeout for keep-alive requests. |
@@ -48,6 +52,8 @@ var server = httpx.Server.initWithConfig(allocator, .{
 | `http3_enabled` | `bool` | `false` | Enable HTTP/3 server runtime path (UDP transport). |
 | `http2_settings` | `Http2Settings` | `{}` | HTTP/2 SETTINGS frame defaults and limits. |
 | `http3_settings` | `Http3Settings` | `{}` | HTTP/3 SETTINGS defaults (QPACK/field section limits). |
+
+All `ServerConfig` fields are optional customizations. Omitted fields use the built-in defaults.
 
 ### HTTP/2 and HTTP/3 Runtime Configuration
 
@@ -65,6 +71,23 @@ var server = httpx.Server.initWithConfig(allocator, .{
 defer server.deinit();
 ```
 
+### Port Conflict Handling
+
+```zig
+var server = httpx.Server.initWithConfig(allocator, .{
+    .host = "127.0.0.1",
+    .port = 8080,
+    .port_conflict = .increment,
+    .max_port_tries = 32,
+});
+defer server.deinit();
+
+try server.listen();
+```
+
+- `.fail`: return an error immediately if bind fails.
+- `.increment`: try `port + 1`, `port + 2`, ... until success or attempts are exhausted.
+
 ### Methods
 
 #### `listen`
@@ -73,6 +96,15 @@ Starts the server. This method blocks.
 
 ```zig
 try server.listen();
+```
+
+#### `listeningPort`
+
+Returns the effective bound port (useful with `port_conflict = .increment`).
+
+```zig
+const p = server.listeningPort();
+_ = p;
 ```
 
 #### `stop`
@@ -101,8 +133,10 @@ try server.use(httpx.middleware.logger());
 | `delete(path, handler)` | Register DELETE route |
 | `patch(path, handler)` | Register PATCH route |
 | `head(path, handler)` | Register HEAD route |
+| `trace(path, handler)` | Register TRACE route |
+| `connect(path, handler)` | Register CONNECT route |
 | `options(path, handler)` | Register OPTIONS route |
-| `any(path, handler)` | Register all standard methods on the same path |
+| `any(path, handler)` | Register GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS/TRACE/CONNECT on the same path |
 | `preRoute(hook)` | Register a pre-route hook (runs before route matching) |
 | `global(handler)` | Register fallback handler for unmatched routes |
 | `route(method, path, handler)` | Register any method |
@@ -113,7 +147,7 @@ try server.use(httpx.middleware.logger());
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -230,9 +264,39 @@ These methods allow fluent response chaining.
 | `text(data)` | Send plain text |
 | `html(data)` | Send HTML response |
 | `file(path)` | Serve a file with extension-based content type |
+| `fileAs(path, content_type)` | Serve a file with explicit content-type override |
+| `download(path, filename)` | Serve a file as an attachment download |
+| `fileWithOptions(path, options)` | Serve a file with cache/security/conditional-request controls |
 | `chunked(data, trailers)` | Send chunked transfer body with optional trailers |
 | `sse(events)` | Send Server-Sent Events payload |
 | `redirect(url, code)` | Send redirect |
+| `noContent()` | Send `204 No Content` |
+
+### FileResponseOptions
+
+`Context.fileWithOptions(path, options)` accepts `FileResponseOptions`:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `content_type` | `?[]const u8` | `null` | Override MIME type (otherwise extension-based lookup is used). |
+| `cache_control` | `?[]const u8` | `null` | Optional `Cache-Control` response header. |
+| `add_etag` | `bool` | `true` | Emit an `ETag` header for static responses. |
+| `add_nosniff` | `bool` | `true` | Emit `X-Content-Type-Options: nosniff`. |
+| `conditional_get` | `bool` | `true` | Evaluate `If-None-Match` and return `304 Not Modified` when matched. |
+
+All `FileResponseOptions` fields are optional customizations; omitted fields use implicit defaults.
+
+Example:
+
+```zig
+fn asset(ctx: *httpx.Context) !httpx.Response {
+    return ctx.fileWithOptions("public/app.js", .{
+        .cache_control = "public, max-age=300",
+        .add_etag = true,
+        .conditional_get = true,
+    });
+}
+```
 
 ### Example Context Usage
 
@@ -318,6 +382,8 @@ fn logo(ctx: *httpx.Context) !httpx.Response {
     return ctx.file("examples/multi_page_site/site/assets/images/httpx.zig-transparent.png");
 }
 ```
+
+`ctx.file(...)` and `ctx.fileAs(...)` both route through `ctx.fileWithOptions(...)`, so static responses can include ETag/conditional handling and `nosniff` headers by default.
 
 For explicit website assets, combine a site root with wildcard routing:
 
