@@ -40,8 +40,8 @@
 
 
 > [!WARNING]
-> `v0.0.8` is a major update from `0.0.7`.
-> It introduces Zig `0.16.0` baseline updates, expanded config/option builders, runtime/API refinements, and broader utility/docs coverage.
+> `v0.1.0` is a major update from `0.0.7`.
+> It introduces built-in auth/content helpers, expanded top-level aliases, runtime/API refinements, and broader utility/docs coverage.
 > If you are migrating from `0.0.7`, review the changelog and refresh your install pin/hash before upgrading.
 
 
@@ -143,10 +143,10 @@ zig build -Dtarget=x86-windows
 
 ## Installation
 
-### Method 1: Zig Fetch (Latest Release 0.0.8)
+### Method 1: Zig Fetch (Latest Release 0.1.0)
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz
 ```
 
 ### Method 2: Zig Fetch (Previous Stable 0.0.7)
@@ -168,7 +168,7 @@ Add this dependency entry to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz",
         .hash = "...", // Run zig fetch --save <url> to auto-fill this.
     },
 },

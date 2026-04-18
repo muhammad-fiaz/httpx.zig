@@ -20,8 +20,15 @@ Usually constructed via `RequestBuilder` or internally by the server.
   - `setBody(body)`: Set request body and Content-Length.
   - `setJson(body)`: Set JSON body and Content-Type.
   - `setFormUrlEncoded(fields)`: Set form body and Content-Type.
+  - `setBearerAuth(token)`: Set `Authorization: Bearer <token>`.
+  - `setBasicAuth(username, password)`: Set `Authorization: Basic ...`.
   - `addQueryParam(key, value)`: Append a percent-encoded query parameter.
   - `addQueryParams(fields)`: Append multiple query parameters.
+  - `hasContentType(media_type)`: Match request Content-Type ignoring parameters.
+  - `isJsonContent()`: True when Content-Type is `application/json`.
+  - `isFormContent()`: True when Content-Type is `application/x-www-form-urlencoded`.
+  - `accepts(media_type)`: True when Accept header allows a media type.
+  - `acceptsJson()`: True when Accept allows `application/json`.
 
 ### `httpx.RequestBuilder`
 

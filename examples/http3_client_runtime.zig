@@ -22,21 +22,12 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var server_socket = httpx.UdpSocket.create() catch |err| {
-        std.debug.print("Skipping HTTP/3 client runtime example: {s}\n", .{@errorName(err)});
-        return;
-    };
+    var server_socket = try httpx.UdpSocket.create();
     defer server_socket.close();
 
-    server_socket.setReuseAddr(true) catch |err| {
-        std.debug.print("Skipping HTTP/3 client runtime example: {s}\n", .{@errorName(err)});
-        return;
-    };
+    try server_socket.setReuseAddr(true);
     const listen_addr = try httpx.Address.parseIp("127.0.0.1", 0);
-    server_socket.bind(listen_addr) catch |err| {
-        std.debug.print("Skipping HTTP/3 client runtime example: {s}\n", .{@errorName(err)});
-        return;
-    };
+    try server_socket.bind(listen_addr);
 
     const local_addr = try server_socket.getLocalAddress();
     const port = local_addr.getPort();
@@ -59,10 +50,7 @@ pub fn main() !void {
     const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/runtime", .{port});
     defer allocator.free(url);
 
-    var response = client.get(url, .{}) catch |err| {
-        std.debug.print("Skipping HTTP/3 client runtime example: {s}\n", .{@errorName(err)});
-        return;
-    };
+    var response = try client.get(url, .{});
     defer response.deinit();
 
     std.debug.print("\n=== HTTP/3 Client Runtime Example ===\n", .{});

@@ -17,6 +17,7 @@ const types = @import("types.zig");
 const Headers = @import("headers.zig").Headers;
 const HeaderName = @import("headers.zig").HeaderName;
 const Uri = @import("uri.zig").Uri;
+const Base64 = @import("../util/encoding.zig").Base64;
 const PercentEncoding = @import("../util/encoding.zig").PercentEncoding;
 
 /// HTTP request representation.
@@ -87,6 +88,27 @@ pub const Request = struct {
         try self.setBody(body);
     }
 
+    /// Sets the Authorization header using a Bearer token.
+    pub fn setBearerAuth(self: *Self, token: []const u8) !void {
+        const auth_value = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{token});
+        defer self.allocator.free(auth_value);
+        try self.headers.set(HeaderName.AUTHORIZATION, auth_value);
+    }
+
+    /// Sets the Authorization header using HTTP Basic authentication.
+    pub fn setBasicAuth(self: *Self, username: []const u8, password: []const u8) !void {
+        const credentials = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ username, password });
+        defer self.allocator.free(credentials);
+
+        const encoded = try Base64.encode(self.allocator, credentials);
+        defer self.allocator.free(encoded);
+
+        const auth_value = try std.fmt.allocPrint(self.allocator, "Basic {s}", .{encoded});
+        defer self.allocator.free(auth_value);
+
+        try self.headers.set(HeaderName.AUTHORIZATION, auth_value);
+    }
+
     /// Sets the request body as application/x-www-form-urlencoded.
     pub fn setFormUrlEncoded(self: *Self, fields: []const [2][]const u8) !void {
         const encoded = try encodeFormFields(self.allocator, fields);
@@ -146,6 +168,34 @@ pub const Request = struct {
     /// Returns true if the request uses TLS.
     pub fn isTls(self: *const Self) bool {
         return self.uri.isTls();
+    }
+
+    /// Returns true if the request Content-Type matches the expected media type.
+    pub fn hasContentType(self: *const Self, expected: []const u8) bool {
+        const raw = self.headers.get(HeaderName.CONTENT_TYPE) orelse return false;
+        const media = normalizeMediaType(raw);
+        return std.ascii.eqlIgnoreCase(media, expected);
+    }
+
+    /// Returns true if request Content-Type is application/json.
+    pub fn isJsonContent(self: *const Self) bool {
+        return self.hasContentType("application/json");
+    }
+
+    /// Returns true if request Content-Type is application/x-www-form-urlencoded.
+    pub fn isFormContent(self: *const Self) bool {
+        return self.hasContentType("application/x-www-form-urlencoded");
+    }
+
+    /// Returns true if the request Accept header allows the given media type.
+    pub fn accepts(self: *const Self, media_type: []const u8) bool {
+        const accept = self.headers.get(HeaderName.ACCEPT) orelse return false;
+        return acceptsMediaType(accept, media_type);
+    }
+
+    /// Returns true if the request Accept header allows application/json.
+    pub fn acceptsJson(self: *const Self) bool {
+        return self.accepts("application/json");
     }
 
     /// Serializes the request to HTTP/1.1 wire format.
@@ -280,6 +330,41 @@ fn encodeFormFields(allocator: Allocator, fields: []const [2][]const u8) ![]u8 {
     return encoded.toOwnedSlice(allocator);
 }
 
+fn normalizeMediaType(raw: []const u8) []const u8 {
+    const semicolon = mem.indexOfScalar(u8, raw, ';') orelse raw.len;
+    return mem.trim(u8, raw[0..semicolon], " \t");
+}
+
+fn splitMediaType(media: []const u8) ?struct { typ: []const u8, sub: []const u8 } {
+    const slash = mem.indexOfScalar(u8, media, '/') orelse return null;
+    if (slash == 0 or slash + 1 >= media.len) return null;
+
+    const typ = mem.trim(u8, media[0..slash], " \t");
+    const sub = mem.trim(u8, media[slash + 1 ..], " \t");
+    if (typ.len == 0 or sub.len == 0) return null;
+
+    return .{ .typ = typ, .sub = sub };
+}
+
+fn acceptsMediaType(accept_header: []const u8, target_media: []const u8) bool {
+    const target = splitMediaType(target_media) orelse return false;
+
+    var parts = mem.splitScalar(u8, accept_header, ',');
+    while (parts.next()) |part_raw| {
+        const media = normalizeMediaType(mem.trim(u8, part_raw, " \t"));
+        if (media.len == 0) continue;
+        if (std.ascii.eqlIgnoreCase(media, "*/*")) return true;
+
+        const candidate = splitMediaType(media) orelse continue;
+        const type_match = std.ascii.eqlIgnoreCase(candidate.typ, target.typ) or std.ascii.eqlIgnoreCase(candidate.typ, "*");
+        const subtype_match = std.ascii.eqlIgnoreCase(candidate.sub, target.sub) or std.ascii.eqlIgnoreCase(candidate.sub, "*");
+
+        if (type_match and subtype_match) return true;
+    }
+
+    return false;
+}
+
 test "Request initialization" {
     const allocator = std.testing.allocator;
     var request = try Request.init(allocator, .GET, "https://example.com/api");
@@ -365,4 +450,32 @@ test "Request setFormUrlEncoded" {
 
     try std.testing.expectEqualStrings("application/x-www-form-urlencoded", request.headers.get(HeaderName.CONTENT_TYPE).?);
     try std.testing.expectEqualStrings("name=Jane%20Doe&city=New%20York", request.body.?);
+}
+
+test "Request auth helpers set Authorization header" {
+    const allocator = std.testing.allocator;
+    var request = try Request.init(allocator, .GET, "https://example.com");
+    defer request.deinit();
+
+    try request.setBearerAuth("demo-token");
+    try std.testing.expectEqualStrings("Bearer demo-token", request.headers.get(HeaderName.AUTHORIZATION).?);
+
+    try request.setBasicAuth("demo", "pass");
+    try std.testing.expectEqualStrings("Basic ZGVtbzpwYXNz", request.headers.get(HeaderName.AUTHORIZATION).?);
+}
+
+test "Request content and accept helpers" {
+    const allocator = std.testing.allocator;
+    var request = try Request.init(allocator, .POST, "https://example.com/submit");
+    defer request.deinit();
+
+    try request.headers.set(HeaderName.CONTENT_TYPE, "application/json; charset=utf-8");
+    try request.headers.set(HeaderName.ACCEPT, "application/json, text/*;q=0.8");
+
+    try std.testing.expect(request.hasContentType("application/json"));
+    try std.testing.expect(request.isJsonContent());
+    try std.testing.expect(!request.isFormContent());
+    try std.testing.expect(request.acceptsJson());
+    try std.testing.expect(request.accepts("text/plain"));
+    try std.testing.expect(!request.accepts("image/png"));
 }

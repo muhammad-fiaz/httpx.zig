@@ -149,6 +149,26 @@ var custom_alloc = try httpx.sendWithAllocator(allocator, .GET, "https://httpbin
 defer custom_alloc.deinit();
 ```
 
+## Auth Helpers
+
+Use built-in request auth helpers instead of manually building `Authorization` headers:
+
+```zig
+const bearer_opts = httpx.RequestOptions.defaults()
+    .withBearerToken("demo-token")
+    .withHeaders(&.{.{ "Accept", "application/json" }});
+
+var bearer_res = try client.get("/protected", bearer_opts);
+defer bearer_res.deinit();
+
+const basic_opts = httpx.RequestOptions.defaults()
+    .withBasicAuth("demo", "pass")
+    .withHeaders(&.{.{ "Accept", "application/json" }});
+
+var basic_res = try client.get("/admin", basic_opts);
+defer basic_res.deinit();
+```
+
 ## Request Options
 
 The second argument to request methods is `RequestOptions`:
@@ -160,6 +180,8 @@ pub const RequestOptions = struct {
     body: ?[]const u8 = null,                  // Raw body (highest precedence)
     json: ?[]const u8 = null,                  // JSON body
     form_fields: ?[]const [2][]const u8 = null, // x-www-form-urlencoded body
+    bearer_token: ?[]const u8 = null,          // Authorization: Bearer <token>
+    basic_auth: ?httpx.BasicAuth = null,       // Authorization: Basic ...
     timeout_ms: ?u64 = null,                   // Request-specific timeout
     follow_redirects: ?bool = null,            // Override redirect policy
     version: ?httpx.Version = null,            // Optional per-request protocol override

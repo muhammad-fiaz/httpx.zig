@@ -38,17 +38,17 @@ features:
 
 ## Install
 
-::: warning v0.0.8 major update from 0.0.7
-`v0.0.8` is a major update from `0.0.7` (Zig `0.16.0` baseline, expanded config builders, runtime/API updates, and docs refresh).
+::: warning v0.1.0 major update from 0.0.7
+`v0.1.0` is a major update from `0.0.7` (built-in auth/content helpers, expanded alias coverage, runtime/API updates, and docs refresh).
 If you are upgrading from `0.0.7`, review `/CHANGELOG` first and refresh your dependency pin/hash.
 :::
 
 Choose one of these installation methods:
 
-1. Latest release (0.0.8)
+1. Latest release (0.1.0)
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz
 ```
 
 2. Previous stable release (0.0.7)
@@ -68,7 +68,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz",
     .hash = "...",
   },
 },

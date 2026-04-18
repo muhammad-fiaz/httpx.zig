@@ -24,9 +24,12 @@ The root module re-exports core types and convenience helpers so most apps can i
 - `httpx.ClientConfig.defaults().withMaxResponseSize(...)`
 - `httpx.RequestOptions.defaults().withQueryParams(...)`
 - `httpx.RequestOptions.defaults().withFormUrlEncoded(...)`
+- `httpx.RequestOptions.defaults().withBearerToken(...)`
+- `httpx.RequestOptions.defaults().withBasicAuth(...)`
 - `httpx.RequestOptions.defaults().withVersion(...)`
 - `httpx.RequestOptions.defaults().withHttp2()`
 - `httpx.RequestOptions.defaults().withHttp3()`
+- `httpx.BasicAuth`
 
 ### Server Types
 

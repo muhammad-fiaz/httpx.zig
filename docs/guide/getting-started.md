@@ -30,8 +30,8 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 - **Zig Version**: 0.16.0 or later
 - **Operating System**: Windows, Linux, or macOS
 
-::: warning v0.0.8 major update from 0.0.7
-If you are upgrading from `0.0.7`, treat `v0.0.8` as a major update and review `/CHANGELOG` before migration.
+::: warning v0.1.0 major update from 0.0.7
+If you are upgrading from `0.0.7`, treat `v0.1.0` as a major update and review `/CHANGELOG` before migration.
 :::
 
 ## Platform Support

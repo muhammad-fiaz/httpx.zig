@@ -66,7 +66,7 @@ defer client.deinit();
 | `retry_policy` | `RetryPolicy` | `{}` | Configuration for automatic retries. |
 | `redirect_policy` | `RedirectPolicy` | `{}` | Configuration for handling redirects. |
 | `default_headers` | `?[]const [2][]const u8` | `null` | Headers added to every request. |
-| `user_agent` | `[]const u8` | `"httpx.zig/0.0.8"` | User-Agent header value. |
+| `user_agent` | `[]const u8` | `"httpx.zig/0.1.0"` | User-Agent header value. |
 | `max_response_size` | `usize` | `100MB` | Maximum allowed response body size. |
 | `follow_redirects` | `bool` | `true` | Whether to automatically follow redirects. |
 | `verify_ssl` | `bool` | `true` | Whether to verify SSL certificates. |
@@ -202,6 +202,14 @@ const auth_response = try client.get("https://api.example.com/protected", .{
 });
 defer auth_response.deinit();
 
+// Built-in auth helpers
+const bearer_opts = httpx.RequestOptions.defaults()
+    .withBearerToken("token123")
+    .withHeaders(&.{.{ "Accept", "application/json" }});
+
+const bearer_response = try client.get("https://api.example.com/protected", bearer_opts);
+defer bearer_response.deinit();
+
 // With timeout
 const timeout_response = try client.get("https://slow-api.com/data", .{
     .timeout_ms = 30000, // 30 seconds
@@ -221,6 +229,7 @@ For complete copy/paste demos, see these example pages:
 - [Connection Pool](/examples/connection-pool)
 - [Interceptors](/examples/interceptors)
 - [Cookies Demo](/examples/cookies-demo)
+- [HTTP Auth Helpers](/examples/http-auth-helpers)
 - [Simplified API Aliases](/examples/simplified-api-aliases)
 
 ### Request Options (`RequestOptions`)
@@ -234,6 +243,8 @@ Per-request overrides for configuration.
 | `body` | `?[]const u8` | `null` | Raw request body. |
 | `json` | `?[]const u8` | `null` | JSON string body (sets Content-Type). |
 | `form_fields` | `?[]const [2][]const u8` | `null` | Form fields encoded as `application/x-www-form-urlencoded`. |
+| `bearer_token` | `?[]const u8` | `null` | Sets `Authorization: Bearer <token>`. |
+| `basic_auth` | `?BasicAuth` | `null` | Sets `Authorization: Basic ...` using username/password credentials. |
 | `timeout_ms` | `?u64` | `null` | Request-specific timeout. |
 | `follow_redirects` | `?bool` | `null` | Override client redirect setting. |
 | `version` | `?Version` | `null` | Force a request over a specific protocol runtime (`.HTTP_1_1`, `.HTTP_2`, `.HTTP_3`). |
@@ -246,11 +257,17 @@ When multiple body-style fields are provided, precedence is:
 2. `json`
 3. `form_fields`
 
+Authentication helper precedence when both are set directly in a literal:
+
+1. `basic_auth`
+2. `bearer_token` (applied last)
+
 Optional builder helpers are available for concise per-request setup when you want explicit overrides:
 
 ```zig
 const opts = httpx.RequestOptions.defaults()
     .withHeaders(&.{ .{ "Accept", "application/json" } })
+    .withBearerToken("demo-token")
     .withQueryParams(&.{ .{ "page", "1" } })
     .withTimeoutMs(10_000)
     .withHttp2()
@@ -268,6 +285,8 @@ Available helpers:
 - `withBody(body)`
 - `withJson(json)`
 - `withFormUrlEncoded(fields)`
+- `withBearerToken(token)`
+- `withBasicAuth(username, password)`
 - `withTimeoutMs(ms)`
 - `withFollowRedirects(bool)`
 - `withVersion(version)`

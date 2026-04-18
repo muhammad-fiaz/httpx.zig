@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-pub const version = "0.0.8";
+pub const version = "0.1.0";
 pub const user_agent_prefix = "httpx.zig/";
 pub const default_user_agent = user_agent_prefix ++ version;
 

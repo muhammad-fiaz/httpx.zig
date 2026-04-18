@@ -207,7 +207,7 @@ gtag('config', '${GA_ID}');`,
           "priceCurrency": "USD"
         },
         "downloadUrl": "https://github.com/muhammad-fiaz/httpx.zig",
-        "softwareVersion": "0.0.8",
+        "softwareVersion": "0.1.0",
         "license": "https://opensource.org/licenses/MIT"
       });
     } else {
@@ -331,6 +331,7 @@ gtag('config', '${GA_ID}');`,
           { text: "All Examples", link: "/examples/" },
           { text: "Simple GET", link: "/examples/simple-get" },
           { text: "Simple GET Deserialize", link: "/examples/simple-get-deserialize" },
+          { text: "HTTP Auth Helpers", link: "/examples/http-auth-helpers" },
           { text: "POST JSON", link: "/examples/post-json" },
           { text: "Custom Headers", link: "/examples/custom-headers" },
           { text: "Concurrent Requests", link: "/examples/concurrent-requests" },

@@ -248,7 +248,14 @@ The `Context` struct is passed to every route handler and middleware. It wraps t
 | `param(name)` | Get URL path parameter (`:id`, `:name`) |
 | `query(name)` | Get query string parameter |
 | `header(name)` | Get request header value |
+| `authorization()` | Get raw `Authorization` header value |
+| `bearerToken()` | Parse `Authorization: Bearer <token>` |
 | `cookie(name)` | Get request cookie value by name |
+| `hasContentType(media_type)` | Match request `Content-Type` (ignores parameters) |
+| `isJson()` | True when request `Content-Type` is `application/json` |
+| `isFormUrlEncoded()` | True when request `Content-Type` is `application/x-www-form-urlencoded` |
+| `accepts(media_type)` | True when request `Accept` allows a media type |
+| `acceptsJson()` | True when request `Accept` allows `application/json` |
 
 ### Response Helpers
 

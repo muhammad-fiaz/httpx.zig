@@ -20,6 +20,7 @@ zig build example-http3_example -Dtarget=aarch64-macos
 
 - [Simple Get](/examples/simple-get): Basic GET request and response handling.
 - [Simple Get Deserialize](/examples/simple-get-deserialize): Parse JSON into typed structs.
+- [HTTP Auth Helpers](/examples/http-auth-helpers): Use built-in Bearer and Basic auth request helpers against a local loopback server.
 - [Post JSON](/examples/post-json): Send JSON payloads with POST.
 - [Custom Headers](/examples/custom-headers): Attach auth and custom metadata headers.
 - [Concurrent Requests](/examples/concurrent-requests): Execute multiple requests in parallel.

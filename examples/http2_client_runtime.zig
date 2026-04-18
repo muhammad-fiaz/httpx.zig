@@ -18,10 +18,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     const listen_addr = try httpx.Address.parseIp("127.0.0.1", 0);
-    var listener = httpx.TcpListener.init(listen_addr) catch |err| {
-        std.debug.print("Skipping HTTP/2 client runtime example: {s}\n", .{@errorName(err)});
-        return;
-    };
+    var listener = try httpx.TcpListener.init(listen_addr);
     defer listener.deinit();
 
     const addr = try listener.getLocalAddress();
@@ -39,10 +36,7 @@ pub fn main() !void {
     const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/runtime", .{port});
     defer allocator.free(url);
 
-    var response = client.get(url, .{}) catch |err| {
-        std.debug.print("Skipping HTTP/2 client runtime example: {s}\n", .{@errorName(err)});
-        return;
-    };
+    var response = try client.get(url, .{});
     defer response.deinit();
 
     std.debug.print("\n=== HTTP/2 Client Runtime Example ===\n", .{});

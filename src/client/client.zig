@@ -181,6 +181,12 @@ pub const ClientConfig = struct {
     }
 };
 
+/// Basic authentication credentials used by per-request options.
+pub const BasicAuth = struct {
+    username: []const u8,
+    password: []const u8,
+};
+
 /// Per-request options.
 pub const RequestOptions = struct {
     headers: ?[]const [2][]const u8 = null,
@@ -188,6 +194,8 @@ pub const RequestOptions = struct {
     body: ?[]const u8 = null,
     json: ?[]const u8 = null,
     form_fields: ?[]const [2][]const u8 = null,
+    bearer_token: ?[]const u8 = null,
+    basic_auth: ?BasicAuth = null,
     timeout_ms: ?u64 = null,
     follow_redirects: ?bool = null,
     version: ?types.Version = null,
@@ -229,6 +237,24 @@ pub const RequestOptions = struct {
     pub fn withFormUrlEncoded(self: RequestOptions, form_fields: []const [2][]const u8) RequestOptions {
         var out = self;
         out.form_fields = form_fields;
+        return out;
+    }
+
+    /// Returns a copy that sets `Authorization: Bearer <token>` for this request.
+    /// This clears any previously set basic-auth credentials in the options copy.
+    pub fn withBearerToken(self: RequestOptions, token: []const u8) RequestOptions {
+        var out = self;
+        out.bearer_token = token;
+        out.basic_auth = null;
+        return out;
+    }
+
+    /// Returns a copy that sets `Authorization: Basic ...` for this request.
+    /// This clears any previously set bearer token in the options copy.
+    pub fn withBasicAuth(self: RequestOptions, username: []const u8, password: []const u8) RequestOptions {
+        var out = self;
+        out.basic_auth = .{ .username = username, .password = password };
+        out.bearer_token = null;
         return out;
     }
 
@@ -394,6 +420,13 @@ pub const Client = struct {
             try req.setJson(json_body);
         } else if (reqOpts.form_fields) |fields| {
             try req.setFormUrlEncoded(fields);
+        }
+
+        if (reqOpts.basic_auth) |basic| {
+            try req.setBasicAuth(basic.username, basic.password);
+        }
+        if (reqOpts.bearer_token) |token| {
+            try req.setBearerAuth(token);
         }
 
         try self.attachCookies(&req);
@@ -1755,6 +1788,7 @@ test "RequestOptions builder helpers" {
         .withQueryParams(&query_params)
         .withJson("{\"ok\":true}")
         .withFormUrlEncoded(&form_fields)
+        .withBearerToken("token-123")
         .withTimeoutMs(2_500)
         .withFollowRedirects(false)
         .withVersion(.HTTP_2);
@@ -1766,9 +1800,17 @@ test "RequestOptions builder helpers" {
     try std.testing.expectEqualStrings("{\"ok\":true}", opts.json.?);
     try std.testing.expect(opts.form_fields != null);
     try std.testing.expectEqual(@as(usize, 1), opts.form_fields.?.len);
+    try std.testing.expectEqualStrings("token-123", opts.bearer_token.?);
+    try std.testing.expect(opts.basic_auth == null);
     try std.testing.expectEqual(@as(u64, 2_500), opts.timeout_ms.?);
     try std.testing.expect(!opts.follow_redirects.?);
     try std.testing.expectEqual(types.Version.HTTP_2, opts.version.?);
+
+    const basic = RequestOptions.defaults().withBasicAuth("demo", "pass");
+    try std.testing.expect(basic.basic_auth != null);
+    try std.testing.expectEqualStrings("demo", basic.basic_auth.?.username);
+    try std.testing.expectEqualStrings("pass", basic.basic_auth.?.password);
+    try std.testing.expect(basic.bearer_token == null);
 
     const h3 = RequestOptions.defaults().withHttp3();
     try std.testing.expectEqual(types.Version.HTTP_3, h3.version.?);

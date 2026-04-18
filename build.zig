@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
     const examples = [_]struct { name: []const u8, path: []const u8, skip_run_all: bool = false }{
         .{ .name = "simple_get", .path = "examples/simple_get.zig" },
         .{ .name = "simple_get_deserialize", .path = "examples/simple_get_deserialize.zig" },
+        .{ .name = "http_auth_helpers", .path = "examples/http_auth_helpers.zig" },
         .{ .name = "post_json", .path = "examples/post_json.zig" },
         .{ .name = "concurrent_requests", .path = "examples/concurrent_requests.zig" },
         .{ .name = "custom_headers", .path = "examples/custom_headers.zig" },

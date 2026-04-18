@@ -139,6 +139,44 @@ pub const Context = struct {
         return self.request.headers.get(name);
     }
 
+    /// Returns the raw Authorization header value.
+    pub fn authorization(self: *const Self) ?[]const u8 {
+        return self.request.headers.get(HeaderName.AUTHORIZATION);
+    }
+
+    /// Returns Bearer token bytes when Authorization is `Bearer <token>`.
+    pub fn bearerToken(self: *const Self) ?[]const u8 {
+        const raw = self.authorization() orelse return null;
+        if (raw.len < 7) return null;
+        if (!std.ascii.eqlIgnoreCase(raw[0..7], "Bearer ")) return null;
+        return mem.trim(u8, raw[7..], " \t");
+    }
+
+    /// Returns true when request Content-Type matches the expected media type.
+    pub fn hasContentType(self: *const Self, expected: []const u8) bool {
+        return self.request.hasContentType(expected);
+    }
+
+    /// Returns true when request Content-Type is application/json.
+    pub fn isJson(self: *const Self) bool {
+        return self.request.isJsonContent();
+    }
+
+    /// Returns true when request Content-Type is application/x-www-form-urlencoded.
+    pub fn isFormUrlEncoded(self: *const Self) bool {
+        return self.request.isFormContent();
+    }
+
+    /// Returns true when request Accept allows the given media type.
+    pub fn accepts(self: *const Self, media_type: []const u8) bool {
+        return self.request.accepts(media_type);
+    }
+
+    /// Returns true when request Accept allows application/json.
+    pub fn acceptsJson(self: *const Self) bool {
+        return self.request.acceptsJson();
+    }
+
     /// Returns a parsed cookie value by name from the request Cookie header.
     pub fn cookie(self: *const Self, name: []const u8) ?[]const u8 {
         const cookie_header = self.request.headers.get(HeaderName.COOKIE) orelse return null;
@@ -550,6 +588,7 @@ pub const Server = struct {
 
         while (self.running) {
             const conn = self.listener.?.accept() catch |err| {
+                if (!self.running) break;
                 std.debug.print("Accept error: {}\n", .{err});
                 continue;
             };
@@ -1708,6 +1747,28 @@ test "Context cookie helpers" {
     const all_set_cookies = try ctx.response.headers.getAll(HeaderName.SET_COOKIE, allocator);
     defer allocator.free(all_set_cookies);
     try std.testing.expect(all_set_cookies.len >= 2);
+}
+
+test "Context auth and media helpers" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .POST, "/api");
+    defer req.deinit();
+
+    try req.headers.set(HeaderName.AUTHORIZATION, "Bearer demo-token");
+    try req.headers.set(HeaderName.CONTENT_TYPE, "application/json; charset=utf-8");
+    try req.headers.set(HeaderName.ACCEPT, "application/json, text/*;q=0.8");
+
+    var ctx = Context.init(allocator, &req);
+    defer ctx.deinit();
+
+    try std.testing.expectEqualStrings("Bearer demo-token", ctx.authorization().?);
+    try std.testing.expectEqualStrings("demo-token", ctx.bearerToken().?);
+    try std.testing.expect(ctx.hasContentType("application/json"));
+    try std.testing.expect(ctx.isJson());
+    try std.testing.expect(!ctx.isFormUrlEncoded());
+    try std.testing.expect(ctx.acceptsJson());
+    try std.testing.expect(ctx.accepts("text/plain"));
+    try std.testing.expect(!ctx.accepts("image/png"));
 }
 
 test "Router allowed methods for path" {

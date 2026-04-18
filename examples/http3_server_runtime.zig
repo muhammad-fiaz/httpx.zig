@@ -16,10 +16,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const port = pickFreeUdpPort() catch |err| {
-        std.debug.print("Skipping HTTP/3 server runtime example: {s}\n", .{@errorName(err)});
-        return;
-    };
+    const port = try pickFreeUdpPort();
 
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -34,6 +31,7 @@ pub fn main() !void {
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server});
     defer server_thread.join();
+    defer server.stop();
 
     sleepMs(50);
 
@@ -47,19 +45,13 @@ pub fn main() !void {
     const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/h3-server", .{port});
     defer allocator.free(url);
 
-    var response = client.get(url, .{ .timeout_ms = 5000 }) catch |err| {
-        std.debug.print("Skipping HTTP/3 server runtime example: {s}\n", .{@errorName(err)});
-        server.stop();
-        return;
-    };
+    var response = try client.get(url, .{ .timeout_ms = 5000 });
     defer response.deinit();
 
     std.debug.print("\n=== HTTP/3 Server Runtime Example ===\n", .{});
     std.debug.print("Response version: {s}\n", .{response.version.toString()});
     std.debug.print("Status: {d}\n", .{response.status.code});
     std.debug.print("Body: {s}\n", .{response.text() orelse ""});
-
-    server.stop();
 }
 
 fn handleH3(ctx: *httpx.Context) anyerror!httpx.Response {

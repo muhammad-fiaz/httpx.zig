@@ -3,7 +3,7 @@
 All notable changes to this project are documented in this file.
 
 
-## [0.0.8] - 18-04-2026
+## [0.1.0] - 18-04-2026
 
 ### Added
 
@@ -37,6 +37,11 @@ All notable changes to this project are documented in this file.
 - Added richer request body/query helpers in `src/core/request.zig`:
   - `Request.setFormUrlEncoded(...)`
   - `Request.addQueryParams(...)`
+- Added request auth/content helpers in `src/core/request.zig`:
+  - `Request.setBearerAuth(...)`
+  - `Request.setBasicAuth(...)`
+  - `Request.hasContentType(...)`, `Request.isJsonContent()`, `Request.isFormContent()`
+  - `Request.accepts(...)`, `Request.acceptsJson()`
 - Added header convenience utilities in `src/core/headers.zig`:
   - `getOr(...)`
   - `appendIfMissing(...)`
@@ -47,10 +52,16 @@ All notable changes to this project are documented in this file.
 - Added additional `RequestOptions` optional customization helpers:
   - `query_params` + `withQueryParams(...)`
   - `form_fields` + `withFormUrlEncoded(...)`
+  - `bearer_token` + `withBearerToken(...)`
+  - `basic_auth` + `withBasicAuth(...)`
 - Added client pool inspection/maintenance helpers in `src/client/client.zig`:
   - `cleanupIdleConnections()`
   - `poolStats()`
   - `hostPoolConnectionCount(...)`
+- Added server context request helpers in `src/server/server.zig`:
+  - `Context.authorization()`, `Context.bearerToken()`
+  - `Context.hasContentType(...)`, `Context.isJson()`, `Context.isFormUrlEncoded()`
+  - `Context.accepts(...)`, `Context.acceptsJson()`
 - Added concurrency enhancements in `src/concurrency/pool.zig`:
   - extended `RequestSpec` with `json`, `timeout_ms`, `follow_redirects`, and `version`
   - `BatchBuilder.postJson(...)`
@@ -74,14 +85,15 @@ All notable changes to this project are documented in this file.
 - Added root-level MIME utility aliases in `src/httpx.zig`:
   - `httpx.mimeTypeFromPath(...)`
   - `httpx.mimeTypeFromPathOr(...)`
+- Added `examples/http_auth_helpers.zig` and docs page `docs/examples/http-auth-helpers.md` for built-in Bearer/Basic auth helper usage.
 
 ### Changed
 
-- Bumped project version to `0.0.8`.
+- Bumped project version to `0.1.0`.
 - Updated minimum Zig version to `0.16.0` in package metadata.
 - Migrated deprecated `std.ArrayListUnmanaged` usage to `std.ArrayList` across source, tests, and examples.
 - Updated examples and benchmark allocator setup to `std.heap.DebugAllocator(.{})` for Zig 0.16 compatibility.
-- Updated docs and metadata to reflect `0.0.8` and Zig `0.16.0` support.
+- Updated docs and metadata to reflect `0.1.0` and Zig `0.16.0` support.
 - Updated CI/release workflows and issue templates to target Zig `0.16.0`.
 - Updated server/runtime docs and examples to include explicit port-conflict startup behavior.
 - Updated README, API docs, guide docs, and runnable examples to document and demonstrate the new client config/request-option builder syntax.

@@ -25,10 +25,7 @@ pub fn main() !void {
     std.debug.print("=== TCP Local Send/Recv Example ===\n\n", .{});
 
     const listen_addr = try httpx.Address.parseIp("127.0.0.1", 0);
-    var listener = httpx.TcpListener.init(listen_addr) catch |err| {
-        std.debug.print("Skipping TCP local demo: {s}\n", .{@errorName(err)});
-        return;
-    };
+    var listener = try httpx.TcpListener.init(listen_addr);
     defer listener.deinit();
 
     const addr = try listener.getLocalAddress();
@@ -37,26 +34,14 @@ pub fn main() !void {
     const thread = try std.Thread.spawn(.{}, serverThread, .{&ctx});
     defer thread.join();
 
-    var client = httpx.Socket.createForAddress(addr) catch |err| {
-        std.debug.print("Skipping TCP local demo: {s}\n", .{@errorName(err)});
-        return;
-    };
+    var client = try httpx.Socket.createForAddress(addr);
     defer client.close();
 
-    client.connect(addr) catch |err| {
-        std.debug.print("Skipping TCP local demo: {s}\n", .{@errorName(err)});
-        return;
-    };
-    client.writeAll("ping") catch |err| {
-        std.debug.print("Skipping TCP local demo: {s}\n", .{@errorName(err)});
-        return;
-    };
+    try client.connect(addr);
+    try client.writeAll("ping");
 
     var out_buf: [64]u8 = undefined;
-    const n = client.read(&out_buf) catch |err| {
-        std.debug.print("Skipping TCP local demo: {s}\n", .{@errorName(err)});
-        return;
-    };
+    const n = try client.read(&out_buf);
 
     std.debug.print("Sent: ping\n", .{});
     std.debug.print("Recv: {s}\n", .{out_buf[0..n]});

@@ -7,8 +7,8 @@ This guide covers all supported installation methods for `httpx.zig`.
 - **Zig Version**: 0.16.0 or later
 - **Operating System**: Windows, Linux, or macOS
 
-::: warning v0.0.8 major update from 0.0.7
-`v0.0.8` is a major update from `0.0.7`.
+::: warning v0.1.0 major update from 0.0.7
+`v0.1.0` is a major update from `0.0.7`.
 If you are migrating an existing project, review `/CHANGELOG` and refresh dependency pin/hash values before building.
 :::
 
@@ -46,12 +46,12 @@ zig build -Dtarget=aarch64-macos
 ```
 :::
 
-## Method 1: Zig Fetch (Latest Release 0.0.8)
+## Method 1: Zig Fetch (Latest Release 0.1.0)
 
 Use the latest tagged release for reproducible builds:
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz
 ```
 
 ## Method 2: Zig Fetch (Previous Stable 0.0.7)
@@ -80,7 +80,7 @@ You can also add the dependency manually:
     .version = "0.1.0",
     .dependencies = .{
         .httpx = .{
-            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.8.tar.gz",
+            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz",
             .hash = "...", // Run zig fetch --save <url> to auto-fill this.
         },
     },
