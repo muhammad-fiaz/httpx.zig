@@ -79,24 +79,27 @@ All notable changes to this project are documented in this file.
 
 - Bumped project version to `0.0.8`.
 - Updated minimum Zig version to `0.16.0` in package metadata.
-- Migrated deprecated `std.ArrayListUnmanaged` usage to `std.ArrayList` across source, tests, examples, and starter templates.
+- Migrated deprecated `std.ArrayListUnmanaged` usage to `std.ArrayList` across source, tests, and examples.
 - Updated examples and benchmark allocator setup to `std.heap.DebugAllocator(.{})` for Zig 0.16 compatibility.
 - Updated docs and metadata to reflect `0.0.8` and Zig `0.16.0` support.
 - Updated CI/release workflows and issue templates to target Zig `0.16.0`.
 - Updated server/runtime docs and examples to include explicit port-conflict startup behavior.
-- Updated README, API docs, guide docs, and runnable examples (including starter template copies) to document and demonstrate the new client config/request-option builder syntax.
+- Updated README, API docs, guide docs, and runnable examples to document and demonstrate the new client config/request-option builder syntax.
 - Updated `Context.file(...)` and `Context.fileAs(...)` to route through `fileWithOptions(...)`.
 - Updated server runtime to suppress response bodies for all `HEAD` requests.
 - Updated server `Content-Length` auto-injection to skip status classes that must not carry a body (`1xx`, `204`, `304`).
 - Updated static file example and API docs to demonstrate ETag-aware static serving and Zig 0.16-compatible usage patterns.
 - Updated utilities/docs to include broader, case-insensitive MIME mapping behavior and fallback override usage.
 - Updated README and API/guide docs to mark config/request option builders consistently as optional customization while keeping defaults implicit.
+- Updated `examples/simplified_api_aliases.zig` and docs to run alias calls against a local loopback server by default, with optional live mode via `HTTPX_EXAMPLE_ONLINE=1`.
+- Removed bundled `httpx-project-starter` template directory and related repository references.
 
 ### Fixed
 
 - Removed remaining Zig 0.15-only API patterns from examples/runtime paths (`std.net.Address.parseIp`, `std.Thread.sleep`, deprecated ArrayList aliases).
 - Fixed stale docs install snippets to avoid pointing at unpublished release tags.
 - Fixed server startup behavior on occupied ports by supporting bounded auto-increment retry mode.
+- Fixed IPv4 byte-order conversion in `src/net/compat.zig`, resolving intermittent local loopback `BindFailed`/`ConnectFailed` in local TCP/UDP and HTTP/2/HTTP/3 runtime examples.
 
 ## [0.0.7] - 28/03/2026
 

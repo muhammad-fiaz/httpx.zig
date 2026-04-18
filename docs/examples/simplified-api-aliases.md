@@ -2,55 +2,64 @@
 
 Use concise top-level aliases for common client operations.
 
+This example defaults to a local loopback mode that starts a tiny in-process server and executes alias calls against it, so the demo stays deterministic without external internet.
+Set `HTTPX_EXAMPLE_ONLINE=1` to run the same alias calls against live `httpbin` endpoints.
+
 ## Demo Program
+
+The full runnable source is in `examples/simplified_api_aliases.zig`.
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const live_mode = shouldUseLiveNetwork(init.minimal.environ, allocator);
 
-    var a = try httpx.fetch(allocator, "https://httpbin.org/get");
-    defer a.deinit();
+    if (live_mode) {
+        const urls = DemoUrls{
+            .fetch = "https://httpbin.org/anything",
+            .get = "https://httpbin.org/get",
+            .delete = "https://httpbin.org/delete",
+            .trace = "https://httpbin.org/trace",
+            .connect = "https://httpbin.org/anything",
+            .post = "https://httpbin.org/post",
+        };
+        runAliasCalls(allocator, urls);
+        return;
+    }
 
-    var b = try httpx.send(allocator, .GET, "https://httpbin.org/headers", .{});
-    defer b.deinit();
+    const port = try pickFreeTcpPort();
+    var server = httpx.Server.initWithConfig(allocator, .{
+        .host = "127.0.0.1",
+        .port = port,
+        .port_conflict = .fail,
+        .keep_alive = false,
+        .request_timeout_ms = 10_000,
+    });
+    defer server.deinit();
 
-    var c = try httpx.post(allocator, "https://httpbin.org/post", .{ .json = "{\"ok\":true}" });
-    defer c.deinit();
+    try server.get("/get", okHandler);
+    try server.get("/anything", okHandler);
+    try server.post("/post", okHandler);
+    try server.delete("/delete", okHandler);
+    try server.options("/get", okHandler);
+    try server.trace("/trace", okHandler);
+    try server.connect("/anything", okHandler);
 
-    var d = try httpx.delete(allocator, "https://httpbin.org/delete", .{});
-    defer d.deinit();
+    const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server});
+    defer server_thread.join();
 
-    var e = try httpx.opts(allocator, "https://httpbin.org/get", .{});
-    defer e.deinit();
+    sleepMs(50);
 
-    var f = try httpx.trace(allocator, "https://httpbin.org/trace", .{});
-    defer f.deinit();
+    const urls = try buildLocalUrls(allocator, port);
+    defer freeLocalUrls(allocator, urls);
 
-    var g = try httpx.connect(allocator, "https://httpbin.org/anything", .{});
-    defer g.deinit();
-
-    var client = httpx.Client.init(allocator);
-    defer client.deinit();
-
-    var h = try client.del("https://httpbin.org/delete", .{});
-    defer h.deinit();
-
-    var i = try client.opts("https://httpbin.org/get", .{});
-    defer i.deinit();
-
-    var j = try client.connect("https://httpbin.org/anything", .{});
-    defer j.deinit();
-
-    // Optional explicit override only when needed.
-    var timed = try client.get("https://httpbin.org/get", .{ .timeout_ms = 10_000 });
-    defer timed.deinit();
-
-    std.debug.print("statuses: {d}, {d}, {d}, {d}, {d}, {d}, {d}, {d}, {d}, {d}, {d}\n", .{ a.status.code, b.status.code, c.status.code, d.status.code, e.status.code, f.status.code, g.status.code, h.status.code, i.status.code, j.status.code, timed.status.code });
+    runAliasCalls(allocator, urls);
+    server.stop();
 }
 ```
 
@@ -60,8 +69,18 @@ pub fn main() !void {
 zig build run-simplified_api_aliases
 ```
 
+Live network mode:
+
+```powershell
+$env:HTTPX_EXAMPLE_ONLINE = "1"
+zig build run-simplified_api_aliases
+```
+
+```bash
+HTTPX_EXAMPLE_ONLINE=1 zig build run-simplified_api_aliases
+```
+
 ## What to Verify
 
-- Alias helpers behave the same as direct client methods.
-- Both top-level and client shortcut aliases are available (`delete/del`, `options/opts`, `trace`, `connect`).
-- Request/response lifecycle remains correct with deinit calls.
+- Default run prints successful status codes for top-level and client alias methods against loopback.
+- Live mode executes the same alias set against `httpbin`.

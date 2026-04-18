@@ -161,13 +161,7 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```
 
-### Method 4: Project Starter Template (Quick Start)
-
-Get started quickly with a pre-configured project template:
-
-**[Download Project Starter Example](https://download-directory.github.io/?url=https://github.com/muhammad-fiaz/httpx.zig/tree/main/httpx-project-starter)**
-
-### Method 5: Manual `build.zig.zon` Configuration
+### Method 4: Manual `build.zig.zon` Configuration
 
 Add this dependency entry to your `build.zig.zon`:
 
@@ -180,7 +174,7 @@ Add this dependency entry to your `build.zig.zon`:
 },
 ```
 
-### Method 6: Local Source Checkout
+### Method 5: Local Source Checkout
 
 ```bash
 git clone https://github.com/muhammad-fiaz/httpx.zig.git
@@ -258,23 +252,23 @@ pub fn main() !void {
 
 ```zig
 // Top-level aliases for concise client code.
-// Reuses the same allocator declared above.
-var response = try httpx.fetch(allocator, "https://httpbin.org/get");
+// Allocator is implicit by default.
+var response = try httpx.fetch("https://httpbin.org/get");
 defer response.deinit();
 
 // Defaults are implicit; pass .{} for default request options.
-var by_method = try httpx.send(allocator, .GET, "https://httpbin.org/headers", .{});
+var by_method = try httpx.send(.GET, "https://httpbin.org/headers", .{});
 defer by_method.deinit();
 
 // Additional aliases
-var del_res = try httpx.delete(allocator, "https://httpbin.org/delete", .{});
+var del_res = try httpx.delete("https://httpbin.org/delete", .{});
 defer del_res.deinit();
 
-var opts_res = try httpx.opts(allocator, "https://httpbin.org/get", .{});
+var opts_res = try httpx.opts("https://httpbin.org/get", .{});
 defer opts_res.deinit();
 
 // Optional explicit override (only when needed)
-var timed = try httpx.send(allocator, .GET, "https://httpbin.org/headers", .{ .timeout_ms = 10_000 });
+var timed = try httpx.sendWithAllocator(allocator, .GET, "https://httpbin.org/headers", .{ .timeout_ms = 10_000 });
 defer timed.deinit();
 ```
 

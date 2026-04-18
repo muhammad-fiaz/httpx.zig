@@ -8,9 +8,10 @@ The root module re-exports core types and convenience helpers so most apps can i
 
 ### Client Helpers
 
-- `httpx.fetch(allocator, url)`
-- `httpx.send(allocator, method, url, options)`
+- `httpx.fetch(url)`
+- `httpx.send(method, url, options)`
 - `httpx.get/post/put/delete/del/patch/head/trace/connect/options/opts(...)`
+- Explicit allocator overrides: `httpx.fetchWithAllocator(...)`, `httpx.sendWithAllocator(...)`, and `*WithAllocator` variants for each alias.
 
 ### Optional Client Builder Helpers
 

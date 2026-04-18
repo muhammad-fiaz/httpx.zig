@@ -10,10 +10,6 @@ build
 *.lib
 *.exe
 httpx.lib
-httpx-project-starter/zig-pkg/
-httpx-project-starter/.zig-cache/
-httpx-project-starter/zig-out/
-
 # IDEs
 .vscode/
 .idea/

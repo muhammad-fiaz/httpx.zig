@@ -27,14 +27,6 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Build sample project (Linux)
-        working-directory: httpx-project-starter
-        run: zig build --cache-dir .zig-cache --global-cache-dir .zig-global-cache --summary all
-
-      - name: Run sample project (Linux)
-        working-directory: httpx-project-starter
-        run: zig build --cache-dir .zig-cache --global-cache-dir .zig-global-cache run --summary all
-
       - name: Run Zig tests
         run: zig build --cache-dir .zig-cache --global-cache-dir .zig-global-cache test --summary all
 
@@ -48,7 +40,7 @@ jobs:
         run: echo "Examples are tested in a dedicated matrix job on Linux, macOS, and Windows runners"
 
       - name: Zig format check
-        run: zig fmt --check src/ examples/ bench/ build.zig httpx-project-starter/build.zig httpx-project-starter/src/ httpx-project-starter/examples/
+        run: zig fmt --check src/ examples/ bench/ build.zig
 
   examples-run:
     name: Run Examples Matrix (hostable targets)

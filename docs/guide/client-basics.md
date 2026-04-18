@@ -138,11 +138,15 @@ client.clearCookies();
 For top-level convenience in smaller programs, use aliases from the root module:
 
 ```zig
-var res = try httpx.fetch(allocator, "https://httpbin.org/get");
+var res = try httpx.fetch("https://httpbin.org/get");
 defer res.deinit();
 
-var custom = try httpx.send(allocator, .GET, "https://httpbin.org/headers", .{});
+var custom = try httpx.send(.GET, "https://httpbin.org/headers", .{});
 defer custom.deinit();
+
+// Optional explicit allocator override.
+var custom_alloc = try httpx.sendWithAllocator(allocator, .GET, "https://httpbin.org/headers", .{ .timeout_ms = 10_000 });
+defer custom_alloc.deinit();
 ```
 
 ## Request Options

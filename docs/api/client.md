@@ -392,26 +392,30 @@ const response = client.get("https://example.com", .{}) catch |err| switch (err)
 The root module also exposes simple aliases for common client usage:
 
 ```zig
-var a = try httpx.fetch(allocator, "https://example.com");
+var a = try httpx.fetch("https://example.com");
 defer a.deinit();
 
-var b = try httpx.send(allocator, .GET, "https://example.com/health", .{});
+var b = try httpx.send(.GET, "https://example.com/health", .{});
 defer b.deinit();
 
-var c = try httpx.post(allocator, "https://example.com/items", .{ .json = "{\"name\":\"demo\"}" });
+var c = try httpx.post("https://example.com/items", .{ .json = "{\"name\":\"demo\"}" });
 defer c.deinit();
 
-var d = try httpx.delete(allocator, "https://example.com/items/42", .{});
+var d = try httpx.delete("https://example.com/items/42", .{});
 defer d.deinit();
 
-var e = try httpx.opts(allocator, "https://example.com/items", .{});
+var e = try httpx.opts("https://example.com/items", .{});
 defer e.deinit();
 
-var f = try httpx.trace(allocator, "https://example.com/trace", .{});
+var f = try httpx.trace("https://example.com/trace", .{});
 defer f.deinit();
 
-var g = try httpx.connect(allocator, "https://example.com/tunnel", .{});
+var g = try httpx.connect("https://example.com/tunnel", .{});
 defer g.deinit();
+
+// Optional explicit allocator override
+var h = try httpx.sendWithAllocator(allocator, .GET, "https://example.com/health", .{ .timeout_ms = 10_000 });
+defer h.deinit();
 ```
 
 ## See Also

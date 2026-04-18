@@ -18,6 +18,52 @@ const any_io = @import("../util/any_io.zig");
 
 const is_windows = builtin.os.tag == .windows;
 
+const winsock = if (is_windows) struct {
+    const SOCKET = usize;
+    const SOCKET_ERROR: i32 = -1;
+    const INVALID_SOCKET: SOCKET = ~@as(usize, 0);
+
+    const WSAEINTR = 10004;
+    const WSAEWOULDBLOCK = 10035;
+    const WSAEADDRINUSE = 10048;
+    const WSAENOBUFS = 10055;
+    const WSAENOTCONN = 10057;
+    const WSAETIMEDOUT = 10060;
+    const WSAECONNREFUSED = 10061;
+    const WSAECONNRESET = 10054;
+
+    const WSADATA = extern struct {
+        wVersion: u16,
+        wHighVersion: u16,
+        szDescription: [257]u8,
+        szSystemStatus: [129]u8,
+        iMaxSockets: u16,
+        iMaxUdpDg: u16,
+        lpVendorInfo: ?[*:0]u8,
+    };
+
+    extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSADATA) callconv(.winapi) i32;
+    extern "ws2_32" fn WSACleanup() callconv(.winapi) i32;
+    extern "ws2_32" fn WSAGetLastError() callconv(.winapi) i32;
+
+    extern "ws2_32" fn closesocket(s: SOCKET) callconv(.winapi) i32;
+    extern "ws2_32" fn socket(af: i32, sock_type: i32, protocol: i32) callconv(.winapi) SOCKET;
+    extern "ws2_32" fn connect(s: SOCKET, name: *const posix.sockaddr, namelen: i32) callconv(.winapi) i32;
+    extern "ws2_32" fn bind(s: SOCKET, name: *const posix.sockaddr, namelen: i32) callconv(.winapi) i32;
+    extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(.winapi) i32;
+    extern "ws2_32" fn accept(s: SOCKET, addr: ?*posix.sockaddr, addrlen: ?*i32) callconv(.winapi) SOCKET;
+    extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: i32, flags: i32) callconv(.winapi) i32;
+    extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: i32, flags: i32) callconv(.winapi) i32;
+    extern "ws2_32" fn sendto(s: SOCKET, buf: [*]const u8, len: i32, flags: i32, to: ?*const posix.sockaddr, tolen: i32) callconv(.winapi) i32;
+    extern "ws2_32" fn recvfrom(s: SOCKET, buf: [*]u8, len: i32, flags: i32, from: ?*posix.sockaddr, fromlen: ?*i32) callconv(.winapi) i32;
+    extern "ws2_32" fn shutdown(s: SOCKET, how: i32) callconv(.winapi) i32;
+    extern "ws2_32" fn setsockopt(s: SOCKET, level: i32, optname: i32, optval: [*]const u8, optlen: i32) callconv(.winapi) i32;
+    extern "ws2_32" fn getsockname(s: SOCKET, name: *posix.sockaddr, namelen: *i32) callconv(.winapi) i32;
+    extern "ws2_32" fn getpeername(s: SOCKET, name: *posix.sockaddr, namelen: *i32) callconv(.winapi) i32;
+} else struct {};
+
+var winsock_initialized: bool = false;
+
 const INVALID_SOCKET: posix.socket_t = if (is_windows)
     @ptrFromInt(~@as(usize, 0))
 else
@@ -39,7 +85,20 @@ fn isNegativeResult(rc: anytype) bool {
     return false;
 }
 
+fn toWinsockSocket(sock: posix.socket_t) usize {
+    if (@typeInfo(posix.socket_t) == .pointer) {
+        return @intFromPtr(sock);
+    }
+    return @as(usize, @intCast(sock));
+}
+
 fn posixSocket(domain: anytype, sock_type: anytype, protocol: anytype) !posix.socket_t {
+    if (is_windows) {
+        const rc = winsock.socket(@intCast(domain), @intCast(sock_type), @intCast(protocol));
+        if (rc == winsock.INVALID_SOCKET) return error.SocketOpenFailed;
+        return toSocketHandle(rc);
+    }
+
     const rc = posix.system.socket(domain, sock_type, protocol);
     switch (posix.errno(rc)) {
         .SUCCESS => return toSocketHandle(rc),
@@ -48,6 +107,12 @@ fn posixSocket(domain: anytype, sock_type: anytype, protocol: anytype) !posix.so
 }
 
 fn posixConnect(sock: posix.socket_t, addr_ptr: *const posix.sockaddr, addr_len: posix.socklen_t) !void {
+    if (is_windows) {
+        const rc = winsock.connect(toWinsockSocket(sock), addr_ptr, @intCast(addr_len));
+        if (rc == winsock.SOCKET_ERROR) return error.ConnectFailed;
+        return;
+    }
+
     const rc = posix.system.connect(sock, addr_ptr, addr_len);
     if (isNegativeResult(rc)) return error.ConnectFailed;
     switch (posix.errno(rc)) {
@@ -57,6 +122,17 @@ fn posixConnect(sock: posix.socket_t, addr_ptr: *const posix.sockaddr, addr_len:
 }
 
 fn posixBind(sock: posix.socket_t, addr_ptr: *const posix.sockaddr, addr_len: posix.socklen_t) !void {
+    if (is_windows) {
+        const rc = winsock.bind(toWinsockSocket(sock), addr_ptr, @intCast(addr_len));
+        if (rc == winsock.SOCKET_ERROR) {
+            switch (winsock.WSAGetLastError()) {
+                winsock.WSAEADDRINUSE => return error.AddressInUse,
+                else => return error.BindFailed,
+            }
+        }
+        return;
+    }
+
     const rc = posix.system.bind(sock, addr_ptr, addr_len);
     switch (posix.errno(rc)) {
         .SUCCESS => return,
@@ -66,6 +142,12 @@ fn posixBind(sock: posix.socket_t, addr_ptr: *const posix.sockaddr, addr_len: po
 }
 
 fn posixListen(sock: posix.socket_t, backlog: u31) !void {
+    if (is_windows) {
+        const rc = winsock.listen(toWinsockSocket(sock), @intCast(backlog));
+        if (rc == winsock.SOCKET_ERROR) return error.ListenFailed;
+        return;
+    }
+
     const rc = posix.system.listen(sock, @intCast(backlog));
     if (isNegativeResult(rc)) return error.ListenFailed;
     switch (posix.errno(rc)) {
@@ -75,6 +157,14 @@ fn posixListen(sock: posix.socket_t, backlog: u31) !void {
 }
 
 fn posixAccept(sock: posix.socket_t, addr_ptr: *posix.sockaddr, addr_len: *posix.socklen_t) !posix.socket_t {
+    if (is_windows) {
+        var raw_len: i32 = @intCast(addr_len.*);
+        const rc = winsock.accept(toWinsockSocket(sock), addr_ptr, &raw_len);
+        if (rc == winsock.INVALID_SOCKET) return error.AcceptFailed;
+        addr_len.* = @intCast(raw_len);
+        return toSocketHandle(rc);
+    }
+
     const rc = posix.system.accept(sock, addr_ptr, addr_len);
     switch (posix.errno(rc)) {
         .SUCCESS => return toSocketHandle(rc),
@@ -83,7 +173,14 @@ fn posixAccept(sock: posix.socket_t, addr_ptr: *posix.sockaddr, addr_len: *posix
 }
 
 fn posixSend(sock: posix.socket_t, data: []const u8, flags: u32) !usize {
-    const rc = posix.system.send(sock, data.ptr, data.len, @intCast(flags));
+    if (is_windows) {
+        const send_len: i32 = std.math.cast(i32, data.len) orelse return error.SendFailed;
+        const rc = winsock.send(toWinsockSocket(sock), data.ptr, send_len, @intCast(flags));
+        if (rc == winsock.SOCKET_ERROR) return error.SendFailed;
+        return @intCast(rc);
+    }
+
+    const rc = posix.system.sendto(sock, data.ptr, data.len, @intCast(flags), null, 0);
     if (isNegativeResult(rc)) return error.SendFailed;
     switch (posix.errno(rc)) {
         .SUCCESS => return @intCast(rc),
@@ -92,7 +189,14 @@ fn posixSend(sock: posix.socket_t, data: []const u8, flags: u32) !usize {
 }
 
 fn posixRecv(sock: posix.socket_t, buffer: []u8, flags: u32) !usize {
-    const rc = posix.system.recv(sock, buffer.ptr, buffer.len, @intCast(flags));
+    if (is_windows) {
+        const recv_len: i32 = std.math.cast(i32, buffer.len) orelse return error.RecvFailed;
+        const rc = winsock.recv(toWinsockSocket(sock), buffer.ptr, recv_len, @intCast(flags));
+        if (rc == winsock.SOCKET_ERROR) return error.RecvFailed;
+        return @intCast(rc);
+    }
+
+    const rc = posix.system.recvfrom(sock, buffer.ptr, buffer.len, @intCast(flags), null, null);
     if (isNegativeResult(rc)) return error.RecvFailed;
     switch (posix.errno(rc)) {
         .SUCCESS => return @intCast(rc),
@@ -101,6 +205,13 @@ fn posixRecv(sock: posix.socket_t, buffer: []u8, flags: u32) !usize {
 }
 
 fn posixSendTo(sock: posix.socket_t, data: []const u8, flags: u32, addr_ptr: *const posix.sockaddr, addr_len: posix.socklen_t) !usize {
+    if (is_windows) {
+        const send_len: i32 = std.math.cast(i32, data.len) orelse return error.SendFailed;
+        const rc = winsock.sendto(toWinsockSocket(sock), data.ptr, send_len, @intCast(flags), addr_ptr, @intCast(addr_len));
+        if (rc == winsock.SOCKET_ERROR) return error.SendFailed;
+        return @intCast(rc);
+    }
+
     const rc = posix.system.sendto(sock, data.ptr, data.len, @intCast(flags), addr_ptr, addr_len);
     if (isNegativeResult(rc)) return error.SendFailed;
     switch (posix.errno(rc)) {
@@ -110,6 +221,12 @@ fn posixSendTo(sock: posix.socket_t, data: []const u8, flags: u32, addr_ptr: *co
 }
 
 fn posixShutdown(sock: posix.socket_t, how: c_int) !void {
+    if (is_windows) {
+        const rc = winsock.shutdown(toWinsockSocket(sock), @intCast(how));
+        if (rc == winsock.SOCKET_ERROR) return error.ShutdownFailed;
+        return;
+    }
+
     const rc = posix.system.shutdown(sock, how);
     if (isNegativeResult(rc)) return error.ShutdownFailed;
     switch (posix.errno(rc)) {
@@ -119,6 +236,13 @@ fn posixShutdown(sock: posix.socket_t, how: c_int) !void {
 }
 
 fn posixSetSockOpt(sock: posix.socket_t, level: i32, optname: u32, value: []const u8) !void {
+    if (is_windows) {
+        const value_len: i32 = std.math.cast(i32, value.len) orelse return error.SetSockOptFailed;
+        const rc = winsock.setsockopt(toWinsockSocket(sock), level, @intCast(optname), value.ptr, value_len);
+        if (rc == winsock.SOCKET_ERROR) return error.SetSockOptFailed;
+        return;
+    }
+
     const rc = posix.system.setsockopt(sock, level, optname, value.ptr, @intCast(value.len));
     if (isNegativeResult(rc)) return error.SetSockOptFailed;
     switch (posix.errno(rc)) {
@@ -128,6 +252,14 @@ fn posixSetSockOpt(sock: posix.socket_t, level: i32, optname: u32, value: []cons
 }
 
 fn posixGetSockName(sock: posix.socket_t, addr_ptr: *posix.sockaddr, addr_len: *posix.socklen_t) !void {
+    if (is_windows) {
+        var raw_len: i32 = @intCast(addr_len.*);
+        const rc = winsock.getsockname(toWinsockSocket(sock), addr_ptr, &raw_len);
+        if (rc == winsock.SOCKET_ERROR) return error.GetSockNameFailed;
+        addr_len.* = @intCast(raw_len);
+        return;
+    }
+
     const rc = posix.system.getsockname(sock, addr_ptr, addr_len);
     if (isNegativeResult(rc)) return error.GetSockNameFailed;
     switch (posix.errno(rc)) {
@@ -137,6 +269,14 @@ fn posixGetSockName(sock: posix.socket_t, addr_ptr: *posix.sockaddr, addr_len: *
 }
 
 fn posixGetPeerName(sock: posix.socket_t, addr_ptr: *posix.sockaddr, addr_len: *posix.socklen_t) !void {
+    if (is_windows) {
+        var raw_len: i32 = @intCast(addr_len.*);
+        const rc = winsock.getpeername(toWinsockSocket(sock), addr_ptr, &raw_len);
+        if (rc == winsock.SOCKET_ERROR) return error.GetPeerNameFailed;
+        addr_len.* = @intCast(raw_len);
+        return;
+    }
+
     const rc = posix.system.getpeername(sock, addr_ptr, addr_len);
     if (isNegativeResult(rc)) return error.GetPeerNameFailed;
     switch (posix.errno(rc)) {
@@ -147,11 +287,7 @@ fn posixGetPeerName(sock: posix.socket_t, addr_ptr: *posix.sockaddr, addr_len: *
 
 fn posixClose(sock: posix.socket_t) void {
     if (is_windows) {
-        if (@hasDecl(posix.system, "closesocket")) {
-            _ = posix.system.closesocket(sock);
-        } else {
-            _ = posix.system.close(sock);
-        }
+        _ = winsock.closesocket(toWinsockSocket(sock));
     } else {
         _ = posix.system.close(sock);
     }
@@ -201,11 +337,15 @@ fn tcpNoDelayOption() u32 {
 pub fn init() NetInitError!void {
     if (!is_windows) return;
 
-    // Zig's std.posix APIs usually handle WSA initialization internally, but we
-    // expose this for explicit control and compatibility with other networking code.
-    if (@hasDecl(std.os.windows, "WSAStartup")) {
-        _ = std.os.windows.WSAStartup(2, 2) catch return error.InitializationError;
+    if (winsock_initialized) return;
+
+    var wsa_data: winsock.WSADATA = undefined;
+    const version_2_2: u16 = (@as(u16, 2) << 8) | 2;
+    if (winsock.WSAStartup(version_2_2, &wsa_data) != 0) {
+        return error.InitializationError;
     }
+
+    winsock_initialized = true;
 }
 
 /// Deinitializes the platform networking subsystem.
@@ -213,9 +353,9 @@ pub fn init() NetInitError!void {
 /// On Windows this calls `WSACleanup`; on other platforms it is a no-op.
 pub fn deinit() void {
     if (!is_windows) return;
-    if (@hasDecl(std.os.windows, "WSACleanup")) {
-        _ = std.os.windows.WSACleanup() catch return;
-    }
+    if (!winsock_initialized) return;
+    _ = winsock.WSACleanup();
+    winsock_initialized = false;
 }
 
 /// Adapter that exposes a `std.Io.Reader` backed by a connected `Socket`.
@@ -821,12 +961,27 @@ pub const UdpSocket = struct {
         var addr: posix.sockaddr = undefined;
         while (true) {
             var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-            const rc = posix.system.recvfrom(self.handle, buffer.ptr, buffer.len, 0, &addr, &addr_len);
+            if (is_windows) {
+                const recv_len: i32 = std.math.cast(i32, buffer.len) orelse return UdpError.RecvFailed;
+                var raw_len: i32 = @intCast(addr_len);
+                const rc = winsock.recvfrom(toWinsockSocket(self.handle), buffer.ptr, recv_len, 0, &addr, &raw_len);
+                if (rc == winsock.SOCKET_ERROR) {
+                    switch (winsock.WSAGetLastError()) {
+                        winsock.WSAEINTR => continue,
+                        winsock.WSAEWOULDBLOCK => return error.WouldBlock,
+                        winsock.WSAECONNREFUSED => return error.ConnectionRefused,
+                        winsock.WSAECONNRESET => return error.ConnectionResetByPeer,
+                        winsock.WSAETIMEDOUT => return error.ConnectionTimedOut,
+                        winsock.WSAENOBUFS => return error.SystemResources,
+                        winsock.WSAENOTCONN => return error.SocketNotConnected,
+                        else => return UdpError.RecvFailed,
+                    }
+                }
 
-            if (isNegativeResult(rc)) {
-                return UdpError.RecvFailed;
+                return .{ .n = @intCast(rc), .addr = net.Address{ .any = addr } };
             }
 
+            const rc = posix.system.recvfrom(self.handle, buffer.ptr, buffer.len, 0, &addr, &addr_len);
             switch (posix.errno(rc)) {
                 .SUCCESS => return .{ .n = @intCast(rc), .addr = net.Address{ .any = addr } },
                 .INTR => continue,
