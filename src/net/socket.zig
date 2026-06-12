@@ -148,6 +148,18 @@ pub const SocketIoReader = struct {
         const p = parent(r);
         if (bufs.len == 0) return 0;
         const buf = bufs[0];
+
+        // Zig 0.15 fillUnbuffered passes .{""} (empty buffer) to signal
+        // "fill the reader's own buffer instead". We must honor that.
+        if (buf.len == 0) {
+            const dest = r.buffer[r.end..];
+            if (dest.len == 0) return 0;
+            const n = p.socket.recv(dest) catch return error.ReadFailed;
+            if (n == 0) return error.EndOfStream;
+            r.end += n;
+            return 0;
+        }
+
         const n = p.socket.recv(buf) catch return error.ReadFailed;
         if (n == 0) return error.EndOfStream;
         return n;
