@@ -52,6 +52,7 @@ var server = httpx.Server.initWithConfig(allocator, .{
 | `http3_enabled` | `bool` | `false` | Enable HTTP/3 server runtime path (UDP transport). |
 | `http2_settings` | `Http2Settings` | `{}` | HTTP/2 SETTINGS frame defaults and limits. |
 | `http3_settings` | `Http3Settings` | `{}` | HTTP/3 SETTINGS defaults (QPACK/field section limits). |
+| `log_fn` | `?LogFn` | `null` | Optional server log callback. Leave unset to disable server-side logging output. |
 
 All `ServerConfig` fields are optional customizations. Omitted fields use the built-in defaults.
 
@@ -122,6 +123,30 @@ Adds a middleware to the global stack.
 ```zig
 try server.use(httpx.middleware.logger());
 ```
+
+### Logging
+
+Server-side logging is opt-in. You can attach a custom log sink with `ServerConfig.log_fn`, or skip the logger middleware entirely to disable request logs.
+
+```zig
+const std = @import("std");
+const httpx = @import("httpx");
+const allocator = std.heap.page_allocator;
+
+const CustomLogger = struct {
+    fn log(level: httpx.LogLevel, message: []const u8) void {
+        std.debug.print("[{s}] {s}", .{ @tagName(level), message });
+    }
+};
+
+var server = httpx.Server.initWithConfig(allocator, .{
+    .log_fn = CustomLogger.log,
+});
+
+try server.use(httpx.middleware.loggerWithConfig(.{ .log_fn = CustomLogger.log }));
+```
+
+If you want no request logging, omit `httpx.middleware.logger()` and leave `log_fn = null`.
 
 ### Routing Methods
 

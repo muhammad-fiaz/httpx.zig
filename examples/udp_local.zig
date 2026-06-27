@@ -30,5 +30,5 @@ pub fn main() !void {
 
     std.debug.print("Sent: {s}\n", .{msg});
     std.debug.print("Recv: {s}\n", .{buf[0..got.n]});
-    std.debug.print("From: {f}\n", .{got.addr});
+    std.debug.print("From: {}\n", .{got.addr});
 }

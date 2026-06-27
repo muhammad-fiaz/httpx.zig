@@ -19,13 +19,12 @@ pub fn main() !void {
 
     const listen_addr = try httpx.Address.parseIp("127.0.0.1", 0);
     var listener = try httpx.TcpListener.init(listen_addr);
-    defer listener.deinit();
-
     const addr = try listener.getLocalAddress();
     const port = addr.getPort();
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&listener});
     defer server_thread.join();
+    defer listener.deinit();
 
     var client = httpx.Client.initWithConfig(allocator, .{
         .http2_enabled = true,

@@ -52,6 +52,7 @@ export default defineConfig({
     ["meta", { property: "og:image:width", content: "1200" }],
     ["meta", { property: "og:image:height", content: "630" }],
     ["meta", { property: "og:image:alt", content: "httpx.zig - High Performance Zig HTTP Library" }],
+    ["meta", { property: "og:image:secure_url", content: `${SITE_URL}/cover.png` }],
     ["meta", { property: "og:site_name", content: SITE_NAME }],
     ["meta", { property: "og:locale", content: "en_US" }],
 
@@ -61,6 +62,8 @@ export default defineConfig({
     ["meta", { name: "twitter:title", content: SITE_NAME }],
     ["meta", { name: "twitter:description", content: SITE_DESCRIPTION }],
     ["meta", { name: "twitter:image", content: `${SITE_URL}/cover.png` }],
+    ["meta", { name: "twitter:image:alt", content: "httpx.zig - High Performance Zig HTTP Library" }],
+    ["meta", { name: "twitter:site", content: "@muhammadfiaz_" }],
     ["meta", { name: "twitter:creator", content: "@muhammadfiaz_" }],
 
     // Canonical URL
@@ -338,6 +341,7 @@ gtag('config', '${GA_ID}');`,
           { text: "Connection Pool", link: "/examples/connection-pool" },
           { text: "Interceptors", link: "/examples/interceptors" },
           { text: "Cookies Demo", link: "/examples/cookies-demo" },
+          { text: "Proxy Example", link: "/examples/proxy-example" },
           { text: "Simplified API Aliases", link: "/examples/simplified-api-aliases" },
           { text: "Simple Server", link: "/examples/simple-server" },
           { text: "Router Example", link: "/examples/router-example" },

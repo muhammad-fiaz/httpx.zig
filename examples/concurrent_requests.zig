@@ -1,9 +1,20 @@
 //! Concurrent Requests Example
 //!
-//! Demonstrates executing multiple HTTP requests in parallel.
+//! Demonstrates:
+//! 1. Running concurrent HTTP requests in parallel using different concurrency modes.
+//! 2. Single-threaded, Multi-threaded, and Explicit Executor workers.
 
 const std = @import("std");
 const httpx = @import("httpx");
+
+fn sleepMs(ms: i64) void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(ms), .real) catch {};
+}
+
+fn helloHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.text("Hello!");
+}
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -12,33 +23,72 @@ pub fn main() !void {
 
     std.debug.print("=== Concurrent Requests Example ===\n\n", .{});
 
+    const port = 45235;
+
+    // 1. Start a local loopback mock server
+    var server = httpx.Server.initWithConfig(allocator, .{
+        .host = "127.0.0.1",
+        .port = port,
+        .keep_alive = false,
+    });
+    defer server.deinit();
+    try server.get("/data", helloHandler);
+
+    const server_thread = try server.listenInBackground();
+    defer server_thread.join();
+    defer server.stop();
+
+    sleepMs(20);
+
+    // 2. Build a batch of requests
     var builder = httpx.concurrency.BatchBuilder.init(allocator);
     defer builder.deinit();
 
-    _ = try builder.get("https://httpbin.org/get");
-    _ = try builder.get("https://httpbin.org/delay/1");
-    _ = try builder.get("https://httpbin.org/headers");
-    _ = try builder.post("https://httpbin.org/post", "{\"event\":\"page_view\"}");
+    _ = try builder.get("http://127.0.0.1:45235/data");
+    _ = try builder.get("http://127.0.0.1:45235/data");
+    _ = try builder.get("http://127.0.0.1:45235/data");
 
-    std.debug.print("Batch contains {d} requests:\n", .{builder.count()});
-    for (builder.requests.items, 0..) |req, i| {
-        std.debug.print("  {d}. {s} {s}\n", .{ i + 1, req.method.toString(), req.url });
+    var client = httpx.Client.initWithConfig(allocator, .{});
+    defer client.deinit();
+
+    // 3. Mode: multi_thread (implicit background workers)
+    std.debug.print("Executing batch of {d} requests via multi_thread mode (implicit workers)...\n", .{builder.count()});
+    const mt_results = try httpx.all(allocator, &client, builder.requests.items, .{
+        .mode = .multi_thread,
+        .workers = 2,
+    });
+    defer {
+        for (mt_results) |*r| r.deinit();
+        allocator.free(mt_results);
     }
+    std.debug.print("Successful results: {d}/{d}\n\n", .{ httpx.successfulCount(mt_results), mt_results.len });
 
-    std.debug.print("\nRequest specifications:\n", .{});
-    const specs = [_]httpx.concurrency.RequestSpec{
-        .{ .method = .GET, .url = "https://api1.example.com/data" },
-        .{ .method = .GET, .url = "https://api2.example.com/data" },
-        .{ .method = .POST, .url = "https://api3.example.com/data", .body = "{}" },
-    };
-
-    for (specs, 0..) |spec, i| {
-        std.debug.print("  Spec {d}: {s} {s}", .{ i + 1, spec.method.toString(), spec.url });
-        if (spec.body) |body| {
-            std.debug.print(" (body: {d} bytes)", .{body.len});
-        }
-        std.debug.print("\n", .{});
+    // 4. Mode: single_thread (sequential execution on calling thread)
+    std.debug.print("Executing batch of {d} requests via single_thread mode (sequential)...\n", .{builder.count()});
+    const st_results = try httpx.all(allocator, &client, builder.requests.items, .{
+        .mode = .single_thread,
+    });
+    defer {
+        for (st_results) |*r| r.deinit();
+        allocator.free(st_results);
     }
+    std.debug.print("Successful results: {d}/{d}\n\n", .{ httpx.successfulCount(st_results), st_results.len });
 
-    std.debug.print("\nDemo complete! (Network requests skipped for offline demo)\n", .{});
+    // 5. Mode: explicit_workers (explicit Executor thread pool)
+    std.debug.print("Executing batch of {d} requests via explicit_workers mode...\n", .{builder.count()});
+    var exec = httpx.Executor.initWithConfig(allocator, .{ .num_threads = 3 });
+    defer exec.deinit();
+    try exec.start();
+
+    const ex_results = try httpx.all(allocator, &client, builder.requests.items, .{
+        .mode = .explicit_workers,
+        .executor = &exec,
+    });
+    defer {
+        for (ex_results) |*r| r.deinit();
+        allocator.free(ex_results);
+    }
+    std.debug.print("Successful results: {d}/{d}\n\n", .{ httpx.successfulCount(ex_results), ex_results.len });
+
+    std.debug.print("Demo complete!\n", .{});
 }

@@ -94,3 +94,12 @@ The root module re-exports core types and convenience helpers so most apps can i
 - HTTP/2 has high-level client and server runtime paths plus full protocol primitives (HPACK/framing/streams).
 - HTTP/3 has high-level client and server runtime paths over UDP/QUIC stream framing, plus full protocol primitives (QPACK/HTTP3/QUIC framing).
 - Cross-platform validation is maintained for Linux/Windows (x86, x86_64, aarch64) and macOS (x86_64, aarch64) build matrices.
+
+## Customization and Callbacks
+
+- Client interceptors for request/response hooks: `addInterceptor(...)`
+- Server logging sinks via `ServerConfig.log_fn`
+- Middleware logger customization via `loggerWithConfig(.{ .log_fn = ... })`
+- Request and response JSON helpers: `RequestOptions.withJson(...)`, `Response.json(T)`
+- Socket and UDP primitives: `Socket`, `UdpSocket`, `SocketIoReader`, `SocketIoWriter`
+- Custom middleware structs with `handler` functions

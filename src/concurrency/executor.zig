@@ -94,7 +94,7 @@ pub const Executor = struct {
         }
 
         try self.tasks.append(self.allocator, task);
-        self.cond.signal();
+        self.cond.signal(io);
     }
 
     /// Submits a function for execution.
@@ -127,7 +127,7 @@ pub const Executor = struct {
         const io = defaultIo();
         self.mutex.lock(io) catch unreachable;
         self.running = false;
-        self.cond.broadcast();
+        self.cond.broadcast(io);
         self.mutex.unlock(io);
 
         for (self.threads) |thread| thread.join();
@@ -230,6 +230,16 @@ test "Executor initialization" {
     defer exec.deinit();
 
     try std.testing.expect(exec.config.num_threads > 0);
+}
+
+test "Executor initWithConfig applies explicit overrides" {
+    const allocator = std.testing.allocator;
+    var exec = Executor.initWithConfig(allocator, .{ .num_threads = 2, .task_queue_size = 8, .idle_timeout_ms = 1234 });
+    defer exec.deinit();
+
+    try std.testing.expectEqual(@as(u32, 2), exec.config.num_threads);
+    try std.testing.expectEqual(@as(usize, 8), exec.config.task_queue_size);
+    try std.testing.expectEqual(@as(u64, 1234), exec.config.idle_timeout_ms);
 }
 
 test "Executor task submission" {

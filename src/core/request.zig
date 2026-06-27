@@ -97,13 +97,7 @@ pub const Request = struct {
 
     /// Sets the Authorization header using HTTP Basic authentication.
     pub fn setBasicAuth(self: *Self, username: []const u8, password: []const u8) !void {
-        const credentials = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ username, password });
-        defer self.allocator.free(credentials);
-
-        const encoded = try Base64.encode(self.allocator, credentials);
-        defer self.allocator.free(encoded);
-
-        const auth_value = try std.fmt.allocPrint(self.allocator, "Basic {s}", .{encoded});
+        const auth_value = try Base64.formatBasicAuth(self.allocator, username, password);
         defer self.allocator.free(auth_value);
 
         try self.headers.set(HeaderName.AUTHORIZATION, auth_value);

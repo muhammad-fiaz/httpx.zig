@@ -149,8 +149,13 @@ pub fn cors(comptime config: CorsConfig) Middleware {
     };
 }
 
-/// Creates logging middleware.
-pub fn logger() Middleware {
+/// Logger middleware options.
+pub const LoggerConfig = struct {
+    log_fn: ?@import("server.zig").LogFn = null,
+};
+
+/// Creates logging middleware with config.
+pub fn loggerWithConfig(comptime config: LoggerConfig) Middleware {
     return .{
         .name = "logger",
         .handler = struct {
@@ -159,16 +164,28 @@ pub fn logger() Middleware {
                 const response = try next(ctx);
                 const duration = nowMillis() - start;
 
-                std.debug.print("{s} {s} - {d}ms\n", .{
+                var buf: [1024]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "{s} {s} - {d}ms\n", .{
                     ctx.request.method.toString(),
                     ctx.request.uri.path,
                     duration,
-                });
+                }) catch "[Logger format failed or message too long]";
+
+                if (config.log_fn) |f| {
+                    f(.info, msg);
+                } else {
+                    std.debug.print("{s}", .{msg});
+                }
 
                 return response;
             }
         }.handler,
     };
+}
+
+/// Creates logging middleware.
+pub fn logger() Middleware {
+    return loggerWithConfig(.{});
 }
 
 /// Creates compression middleware.
@@ -277,6 +294,42 @@ pub fn requestId() Middleware {
     };
 }
 
+/// Creates reverse proxy middleware that forwards requests to target_url.
+pub fn reverseProxy(comptime target_url: []const u8) Middleware {
+    return .{
+        .name = "reverse_proxy",
+        .handler = struct {
+            fn handler(ctx: *Context, next: Next) anyerror!Response {
+                _ = next;
+                const client_mod = @import("../client/client.zig");
+                var client = client_mod.Client.init(ctx.allocator);
+                defer client.deinit();
+
+                const path = ctx.request.uri.path;
+                const query_str = ctx.request.uri.query;
+                const full_target = if (query_str) |q|
+                    try std.fmt.allocPrint(ctx.allocator, "{s}{s}?{s}", .{ target_url, path, q })
+                else
+                    try std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ target_url, path });
+                defer ctx.allocator.free(full_target);
+
+                var headers_list = std.ArrayList([2][]const u8).empty;
+                defer headers_list.deinit(ctx.allocator);
+                for (ctx.request.headers.entries.items) |h| {
+                    if (std.ascii.eqlIgnoreCase(h.name, "host")) continue;
+                    try headers_list.append(ctx.allocator, .{ h.name, h.value });
+                }
+
+                var req_opts = client_mod.RequestOptions.defaults();
+                req_opts.headers = headers_list.items;
+                req_opts.body = ctx.request.body;
+
+                return client.request(ctx.request.method, full_target, req_opts);
+            }
+        }.handler,
+    };
+}
+
 test "Middleware creation" {
     const mw = logger();
     try std.testing.expectEqualStrings("logger", mw.name);
@@ -297,4 +350,42 @@ test "Rate limit middleware" {
 test "Helmet middleware" {
     const mw = helmet();
     try std.testing.expectEqualStrings("helmet", mw.name);
+}
+
+test "Reverse proxy middleware creation" {
+    const mw = reverseProxy("http://127.0.0.1:9090");
+    try std.testing.expectEqualStrings("reverse_proxy", mw.name);
+}
+
+test "loggerWithConfig middleware" {
+    const CustomLogger = struct {
+        var logged: bool = false;
+        fn log_fn(level: @import("server.zig").LogLevel, message: []const u8) void {
+            _ = level;
+            if (std.mem.indexOf(u8, message, "GET /test") != null) {
+                logged = true;
+            }
+        }
+    };
+
+    const mw = loggerWithConfig(.{ .log_fn = CustomLogger.log_fn });
+    try std.testing.expectEqualStrings("logger", mw.name);
+
+    var req = try @import("../core/request.zig").Request.init(std.testing.allocator, .GET, "/test");
+    defer req.deinit();
+
+    var ctx = Context.init(std.testing.allocator, &req);
+    defer ctx.deinit();
+
+    const NextMock = struct {
+        fn next(c: *Context) anyerror!Response {
+            _ = c;
+            return Response.init(std.testing.allocator);
+        }
+    };
+
+    var res = try mw.handler(&ctx, NextMock.next);
+    defer res.deinit();
+
+    try std.testing.expect(CustomLogger.logged);
 }

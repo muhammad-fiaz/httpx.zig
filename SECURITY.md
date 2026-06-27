@@ -7,10 +7,10 @@ supported with security updates.
 
 | Version  | Supported |
 | -------- | --------- |
-| 0.1.0    | :white_check_mark: |
-| < 0.1.0  | :x: |
+| 0.1.1    | :white_check_mark: |
+| < 0.1.1  | :x: |
 
-Versions below 0.1.0 are considered end-of-life and will not receive
+Versions below 0.1.1 are considered end-of-life and will not receive
 security fixes or updates.
 
 ---
@@ -59,7 +59,7 @@ When reporting a vulnerability, please include:
   - Credit will be given upon request
 
 - Declined:
-  - Issues affecting unsupported versions (< 0.1.0)
+  - Issues affecting unsupported versions (< 0.1.1)
   - Expected or documented behavior
   - Issues already fixed in a newer release
 

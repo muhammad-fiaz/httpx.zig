@@ -38,37 +38,50 @@ features:
 
 ## Install
 
-::: warning v0.1.0 major update from 0.0.7
-`v0.1.0` is a major update from `0.0.7` (built-in auth/content helpers, expanded alias coverage, runtime/API updates, and docs refresh).
+::: warning v0.1.1 release and Zig 0.15 deprecation
+`v0.1.1` is the current release and targets Zig `0.16.0+`.
+`v0.1.0` is the previous stable release for the immediate prior `0.1.x` line.
+Zig `0.15` support is legacy and remains available only through `0.0.7`.
+The HTTPS/TLS reader fix for Zig `0.16` empty-buffer reads is included in this release.
 If you are upgrading from `0.0.7`, review `/CHANGELOG` first and refresh your dependency pin/hash.
 :::
 
 Choose one of these installation methods:
 
-1. Latest release (0.1.0)
+1. Latest release (0.1.1)
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.1.tar.gz
+```
+
+2. Previous stable release (0.1.0)
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz
 ```
 
-2. Previous stable release (0.0.7)
+3. Legacy Zig 0.15 support (0.0.7)
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz
 ```
 
-3. Nightly/main branch
+::: warning Zig 0.15 deprecation
+Zig `0.15` is deprecated. It uses an older API surface and is only retained in `0.0.7`.
+:::
+
+4. Nightly/main branch
 
 ```bash
 zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig
 ```
 
-4. Manual dependency entry in `build.zig.zon`
+5. Manual dependency entry in `build.zig.zon`
 
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.1.tar.gz",
     .hash = "...",
   },
 },

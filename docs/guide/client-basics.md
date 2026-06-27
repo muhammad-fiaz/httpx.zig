@@ -138,7 +138,7 @@ client.clearCookies();
 For top-level convenience in smaller programs, use aliases from the root module:
 
 ```zig
-var res = try httpx.fetch("https://httpbin.org/get");
+var res = try httpx.fetch("https://httpbin.org/get", .{});
 defer res.deinit();
 
 var custom = try httpx.send(.GET, "https://httpbin.org/headers", .{});
@@ -189,6 +189,23 @@ pub const RequestOptions = struct {
 ```
 
 All fields are optional customizations. Passing `.{}` keeps defaults implicit.
+
+## Proxy Configuration
+
+Configure forward proxies when initializing the client:
+
+```zig
+const config = httpx.ClientConfig.defaults()
+    .withProxy(.{
+        .host = "127.0.0.1",
+        .port = 8080,
+        .username = "user",  // Optional authentication
+        .password = "pass",  // Optional authentication
+    });
+
+var client = httpx.Client.initWithConfig(allocator, config);
+defer client.deinit();
+```
 
 ## Response Handling
 

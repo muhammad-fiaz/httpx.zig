@@ -3,6 +3,30 @@
 All notable changes to this project are documented in this file.
 
 
+## [0.1.1] - 27-06-2026
+
+### Added
+- Added client-side forward proxy support (supporting HTTP/HTTPS proxies, custom proxy authentication, CONNECT tunnels for TLS/HTTP2, and absolute URLs for HTTP/1.x) for the request tracked in [Issue #15](https://github.com/muhammad-fiaz/httpx.zig/issues/15).
+- Added server-side reverse proxy middleware `reverseProxy(comptime target_url: []const u8)` to forward incoming requests to backends.
+- Added Zig 0.15 deprecation warnings in documentation.
+- Added three execution modes for client-side requests (`single_thread`, `multi_thread` with dynamic background workers, and `explicit_workers` using an existing thread pool).
+- Added `Server.listenInBackground()` to spin up the server event loop asynchronously in one call.
+- Added customizable logging support via `ServerConfig.log_fn` and `loggerWithConfig()` middleware to support integrating custom logging frameworks.
+
+### Changed
+- Bumped project version to `0.1.1`.
+- Cleaned up redundant and duplicate aliases to simplify the public API surface (removed type aliases `HttpClient`, `ReqOptions`, `HttpServer`, `Ctx`, utility function aliases `parseQueryValue`, `parseCookiePair`, `utils`, and client alias `httpOptions`).
+- Updated minimum Zig version to `0.16.0`.
+- Updated concurrent request functions (`all`, `allSettled`, `any`, `race`, `first`, `fastest`, `settled`) to accept a `ConcurrencyConfig`.
+- Aligned top-level package request wrappers (`get`, `getWithAllocator`, `fetch`, `fetchWithAllocator`) to accept `RequestOptions` for consistency with all other HTTP verb wrappers.
+- Expanded documentation coverage for client/server/network/protocol/sockets, proxy support, JSON helpers, logging callbacks, and the new `0.1.0` install path.
+
+### Fixed
+- Fixed HTTPS client TLS handshakes on Zig `0.16` by honoring `std.Io.Reader.fillUnbuffered`'s empty-buffer `readVec` contract in `src/net/socket.zig`, resolving `error.TlsConnectionTruncated` on simple GET requests. This addresses [Issue #14](https://github.com/muhammad-fiaz/httpx.zig/issues/14).
+- Fixed thread join hangs and socket/listener deinitialization sequence deadlocks in all runtime examples on scope exit.
+- Added comprehensive end-to-end runnable `proxy_example` demonstrating client forward proxying and server reverse proxy middleware.
+- Added unit tests for client-side proxy request formatting and base64 proxy authentication encoding.
+
 ## [0.1.0] - 18-04-2026
 
 ### Added

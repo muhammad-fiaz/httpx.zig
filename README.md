@@ -40,8 +40,10 @@
 
 
 > [!WARNING]
-> `v0.1.0` is a major update from `0.0.7`.
-> It introduces built-in auth/content helpers, expanded top-level aliases, runtime/API refinements, and broader utility/docs coverage.
+> `v0.1.1` is the current release and targets Zig `0.16.0+`.
+> `v0.1.0` is the previous stable release for the immediate prior `0.1.x` line.
+> Zig `0.15` support is legacy and remains available only through `0.0.7`.
+> This release includes the HTTPS/TLS reader fix for Zig `0.16` empty-buffer reads that caused `error.TlsConnectionTruncated` on simple GET requests.
 > If you are migrating from `0.0.7`, review the changelog and refresh your install pin/hash before upgrading.
 
 
@@ -76,7 +78,10 @@
 | **Pre-Route and Global Handlers** | `preRoute(...)` hooks and `global(...)` fallback handlers for complete request lifecycle control. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **Unified Any-Method Routing** | `any(path, handler)` to register all standard HTTP methods on one endpoint. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **Concurrency** | Parallel request patterns (`race`, `all`, `any`) and async task execution. | https://muhammad-fiaz.github.io/httpx.zig/guide/concurrency |
+| **Socket APIs** | Cross-platform TCP/UDP socket helpers, listener wrappers, and TLS stream adapters. | https://muhammad-fiaz.github.io/httpx.zig/api/net |
+| **Proxy Support** | Client-side forward proxy routing and server-side reverse proxy middleware. | https://muhammad-fiaz.github.io/httpx.zig/examples/proxy-example |
 | **Interceptors** | Global hooks to modify requests and responses (e.g., Auth injection). | https://muhammad-fiaz.github.io/httpx.zig/guide/interceptors |
+| **Logging Hooks** | Server log callbacks plus logger middleware customization for structured output. | https://muhammad-fiaz.github.io/httpx.zig/api/middleware |
 | **Smart Retries** | Configurable retry policies with exponential backoff. | https://muhammad-fiaz.github.io/httpx.zig/api/client |
 | **Config Builder Helpers** | Chainable optional customization helpers for `ClientConfig` and `RequestOptions` (defaults remain implicit). | https://muhammad-fiaz.github.io/httpx.zig/api/client |
 | **JSON and HTML** | Helpers for easy JSON serialization and HTML response generation. | https://muhammad-fiaz.github.io/httpx.zig/api/core |
@@ -143,38 +148,49 @@ zig build -Dtarget=x86-windows
 
 ## Installation
 
-### Method 1: Zig Fetch (Latest Release 0.1.0)
+### Method 1: Zig Fetch (Latest Release 0.1.1)
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.1.tar.gz
+```
+
+### Method 2: Zig Fetch (Previous Stable 0.1.0)
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz
 ```
 
-### Method 2: Zig Fetch (Previous Stable 0.0.7)
+### Method 3: Zig Fetch (Legacy Zig 0.15 Support - 0.0.7)
+
+For Zig version 0.15 support, use this version:
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz
 ```
 
-### Method 3: Zig Fetch (Nightly/Main)
+> [!WARNING]
+> Zig `0.15` is deprecated. It uses an older API surface and is only retained in `0.0.7`.
+
+### Method 4: Zig Fetch (Nightly/Main)
 
 ```bash
 zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```
 
-### Method 4: Manual `build.zig.zon` Configuration
+### Method 5: Manual `build.zig.zon` Configuration
 
 Add this dependency entry to your `build.zig.zon`:
 
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.1.tar.gz",
         .hash = "...", // Run zig fetch --save <url> to auto-fill this.
     },
 },
 ```
 
-### Method 5: Local Source Checkout
+### Method 6: Local Source Checkout
 
 ```bash
 git clone https://github.com/muhammad-fiaz/httpx.zig.git
@@ -304,7 +320,7 @@ const specs = [_]httpx.RequestSpec{
 var client_for_concurrency = httpx.Client.init(allocator);
 defer client_for_concurrency.deinit();
 
-var all_results = try httpx.all(allocator, &client_for_concurrency, &specs);
+var all_results = try httpx.all(allocator, &client_for_concurrency, &specs, .{});
 defer {
     for (all_results) |*r| r.deinit();
     allocator.free(all_results);
@@ -315,7 +331,7 @@ const err_count = httpx.errorCount(all_results);
 _ = ok_count;
 _ = err_count;
 
-var first_ok = try httpx.first(allocator, &client_for_concurrency, &specs);
+var first_ok = try httpx.first(allocator, &client_for_concurrency, &specs, .{});
 if (first_ok) |*resp| resp.deinit();
 ```
  

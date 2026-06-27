@@ -29,7 +29,7 @@ pub fn main() !void {
 
     try server.get("/h3-server", handleH3);
 
-    const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server});
+    const server_thread = try server.listenInBackground();
     defer server_thread.join();
     defer server.stop();
 
@@ -58,13 +58,6 @@ fn handleH3(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.text("hello from http3 server runtime");
 }
 
-fn serverThreadMain(server: *httpx.Server) void {
-    server.listen() catch |err| {
-        if (server.running) {
-            std.debug.print("http3 server runtime error: {s}\n", .{@errorName(err)});
-        }
-    };
-}
 
 fn pickFreeUdpPort() !u16 {
     var socket = try httpx.UdpSocket.create();

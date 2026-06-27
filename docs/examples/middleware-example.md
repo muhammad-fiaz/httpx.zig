@@ -19,6 +19,10 @@ fn secure(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.json(.{ .message = "secure route" });
 }
 
+fn logMessage(level: httpx.LogLevel, message: []const u8) void {
+    std.debug.print("[{s}] {s}", .{ @tagName(level), message });
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -27,7 +31,7 @@ pub fn main() !void {
     var server = httpx.Server.init(allocator);
     defer server.deinit();
 
-    try server.use(httpx.logger());
+    try server.use(httpx.middleware.loggerWithConfig(.{ .log_fn = logMessage }));
     try server.use(httpx.cors(.{}));
     try server.use(.{ .name = "auth", .handler = auth });
 

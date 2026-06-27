@@ -66,7 +66,7 @@ defer client.deinit();
 | `retry_policy` | `RetryPolicy` | `{}` | Configuration for automatic retries. |
 | `redirect_policy` | `RedirectPolicy` | `{}` | Configuration for handling redirects. |
 | `default_headers` | `?[]const [2][]const u8` | `null` | Headers added to every request. |
-| `user_agent` | `[]const u8` | `"httpx.zig/0.1.0"` | User-Agent header value. |
+| `user_agent` | `[]const u8` | `"httpx.zig/0.1.1"` | User-Agent header value. |
 | `max_response_size` | `usize` | `100MB` | Maximum allowed response body size. |
 | `follow_redirects` | `bool` | `true` | Whether to automatically follow redirects. |
 | `verify_ssl` | `bool` | `true` | Whether to verify SSL certificates. |
@@ -77,6 +77,7 @@ defer client.deinit();
 | `keep_alive` | `bool` | `true` | Reuse TCP connections when possible. |
 | `pool_max_connections` | `u32` | `20` | Maximum connections in the pool. |
 | `pool_max_per_host` | `u32` | `5` | Maximum connections to a single host. |
+| `proxy` | `?Proxy` | `null` | Optional forward proxy configuration for client requests. |
 
 If you do not set a field, the implicit default value is used. Builder helpers only override the fields you call.
 
@@ -100,6 +101,7 @@ If you do not set a field, the implicit default value is used. Builder helpers o
 | `withKeepAlive(enabled)` | Toggle keep-alive connection reuse. |
 | `withMaxResponseSize(bytes)` | Override maximum response body size. |
 | `withPoolLimits(max_connections, max_per_host)` | Override pool sizing limits. |
+| `withProxy(proxy_or_null)` | Configure or clear a forward proxy. |
 
 ### Client Initialization Helpers
 
@@ -148,8 +150,7 @@ pub fn opts(self: *Self, url: []const u8, options: RequestOptions) !Response
 | `head(url, options)` | HTTP HEAD request |
 | `trace(url, options)` | HTTP TRACE request |
 | `connect(url, options)` | HTTP CONNECT request |
-| `httpOptions(url, options)` | HTTP OPTIONS request |
-| `options(url, options)` | Alias for HTTP OPTIONS request |
+| `options(url, options)` | HTTP OPTIONS request |
 | `opts(url, options)` | Alias for HTTP OPTIONS request |
 | `send(method, url, options)` | Alias for generic request |
 | `addInterceptor(interceptor)` | Add request/response interceptor |

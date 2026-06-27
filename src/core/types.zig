@@ -383,6 +383,14 @@ pub const Http3Settings = struct {
     enable_datagrams: bool = false,
 };
 
+/// Proxy configuration settings.
+pub const Proxy = struct {
+    host: []const u8,
+    port: u16,
+    username: ?[]const u8 = null,
+    password: ?[]const u8 = null,
+};
+
 test "Method.fromString" {
     try std.testing.expectEqual(Method.GET, Method.fromString("GET").?);
     try std.testing.expectEqual(Method.POST, Method.fromString("POST").?);

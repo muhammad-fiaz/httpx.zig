@@ -17,6 +17,8 @@ try server.use(httpx.middleware.rateLimit(.{
 }));
 ```
 
+Logging is opt-in. Use `httpx.middleware.loggerWithConfig(.{ .log_fn = ... })` to send logs to a custom sink, or omit the logger middleware to disable request logging.
+
 ## Built-in Middleware
 
 `httpx.zig` includes:

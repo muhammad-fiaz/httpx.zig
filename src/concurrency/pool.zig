@@ -122,44 +122,132 @@ pub const BatchBuilder = struct {
     }
 };
 
+pub const ConcurrencyMode = enum {
+    single_thread,
+    multi_thread,
+    explicit_workers,
+};
+
+pub const ConcurrencyConfig = struct {
+    mode: ConcurrencyMode = .multi_thread,
+    workers: ?u32 = null,
+    executor: ?*@import("executor.zig").Executor = null,
+};
+
 /// Executes all requests and waits for all to complete.
-pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult {
+pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
     var results = try allocator.alloc(RequestResult, specs.len);
     errdefer allocator.free(results);
 
     if (specs.len == 0) return results;
 
-    const WorkerCtx = struct {
-        client: *Client,
-        spec: RequestSpec,
-        out: *RequestResult,
+    switch (config.mode) {
+        .single_thread => {
+            for (specs, 0..) |spec, i| {
+                results[i] = executeSpec(client, spec);
+            }
+        },
+        .multi_thread => {
+            const workers_count = @max(1, @min(config.workers orelse specs.len, specs.len));
+            var next_spec_idx = std.atomic.Value(usize).init(0);
 
-        fn run(self: *@This()) void {
-            self.out.* = executeSpec(self.client, self.spec);
-        }
-    };
+            const Worker = struct {
+                client: *Client,
+                specs: []const RequestSpec,
+                results: []RequestResult,
+                next_idx: *std.atomic.Value(usize),
 
-    var threads = try allocator.alloc(Thread, specs.len);
-    defer allocator.free(threads);
+                fn run(self: *@This()) void {
+                    while (true) {
+                        const idx = self.next_idx.fetchAdd(1, .acq_rel);
+                        if (idx >= self.specs.len) break;
+                        self.results[idx] = executeSpec(self.client, self.specs[idx]);
+                    }
+                }
+            };
 
-    var ctxs = try allocator.alloc(WorkerCtx, specs.len);
-    defer allocator.free(ctxs);
+            var threads = try allocator.alloc(Thread, workers_count);
+            defer allocator.free(threads);
 
-    var spawned: usize = 0;
-    errdefer {
-        var i: usize = 0;
-        while (i < spawned) : (i += 1) {
-            threads[i].join();
-        }
+            var workers = try allocator.alloc(Worker, workers_count);
+            defer allocator.free(workers);
+
+            var spawned: usize = 0;
+            errdefer {
+                var i: usize = 0;
+                while (i < spawned) : (i += 1) {
+                    threads[i].join();
+                }
+            }
+
+            for (0..workers_count) |i| {
+                workers[i] = .{
+                    .client = client,
+                    .specs = specs,
+                    .results = results,
+                    .next_idx = &next_spec_idx,
+                };
+                threads[i] = try Thread.spawn(.{}, Worker.run, .{&workers[i]});
+                spawned += 1;
+            }
+
+            for (threads[0..spawned]) |t| {
+                t.join();
+            }
+        },
+        .explicit_workers => {
+            const exec = config.executor orelse return error.MissingExecutor;
+            var remaining = std.atomic.Value(usize).init(specs.len);
+            var mutex: std.Io.Mutex = .init;
+            var cond: std.Io.Condition = .init;
+
+            const TaskCtx = struct {
+                client: *Client,
+                spec: RequestSpec,
+                out: *RequestResult,
+                remaining: *std.atomic.Value(usize),
+                mutex: *std.Io.Mutex,
+                cond: *std.Io.Condition,
+
+                fn run(ctx_ptr: ?*anyopaque) void {
+                    const self: *@This() = @ptrCast(@alignCast(ctx_ptr.?));
+                    self.out.* = executeSpec(self.client, self.spec);
+                    const prev = self.remaining.fetchSub(1, .acq_rel);
+                    if (prev == 1) {
+                        const io = defaultIo();
+                        self.mutex.lock(io) catch unreachable;
+                        self.cond.signal(io);
+                        self.mutex.unlock(io);
+                    }
+                }
+            };
+
+            var ctxs = try allocator.alloc(TaskCtx, specs.len);
+            defer allocator.free(ctxs);
+
+            for (specs, 0..) |spec, i| {
+                ctxs[i] = .{
+                    .client = client,
+                    .spec = spec,
+                    .out = &results[i],
+                    .remaining = &remaining,
+                    .mutex = &mutex,
+                    .cond = &cond,
+                };
+                try exec.submit(.{
+                    .func = TaskCtx.run,
+                    .context = &ctxs[i],
+                });
+            }
+
+            const io = defaultIo();
+            mutex.lock(io) catch unreachable;
+            while (remaining.load(.acquire) > 0) {
+                cond.wait(io, &mutex) catch unreachable;
+            }
+            mutex.unlock(io);
+        },
     }
-
-    for (specs, 0..) |spec, i| {
-        ctxs[i] = .{ .client = client, .spec = spec, .out = &results[i] };
-        threads[i] = try Thread.spawn(.{}, WorkerCtx.run, .{&ctxs[i]});
-        spawned += 1;
-    }
-
-    for (threads[0..spawned]) |t| t.join();
 
     return results;
 }
@@ -168,8 +256,8 @@ pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec) ![
 ///
 /// Unlike `all`, this never fails due to a request error; request failures are
 /// represented as `RequestResult.err` values.
-pub fn allSettled(allocator: Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult {
-    return all(allocator, client, specs);
+pub fn allSettled(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
+    return all(allocator, client, specs, config);
 }
 
 /// Counts successful request results.
@@ -187,177 +275,364 @@ pub fn errorCount(results: []const RequestResult) usize {
 }
 
 /// Executes all requests and returns the first successful response.
-pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?Response {
-    _ = allocator;
-
+pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !?Response {
     if (specs.len == 0) return null;
 
-    // NOTE: This function assumes `client` (and its allocator) are safe to use
-    // concurrently. If you pass a non-thread-safe allocator, behavior is undefined.
-    const WorkerCtx = struct {
-        client: *Client,
-        spec: RequestSpec,
-        winner: *std.atomic.Value(bool),
-        result: *?Response,
-        mutex: *std.Io.Mutex,
-        cond: *std.Io.Condition,
-        remaining: *std.atomic.Value(usize),
-
-        fn run(self: *@This()) void {
-            var rr = executeSpec(self.client, self.spec);
-            defer rr.deinit();
-
-            if (rr == .success and rr.success.status.isSuccess()) {
-                if (!self.winner.swap(true, .acq_rel)) {
-                    const io = defaultIo();
-                    self.mutex.lock(io) catch unreachable;
-                    self.result.* = rr.success;
-                    // transfer ownership to caller
-                    rr = .{ .err = error.UnusedResult };
-                    self.cond.signal(io);
-                    self.mutex.unlock(io);
+    switch (config.mode) {
+        .single_thread => {
+            for (specs) |spec| {
+                var r = executeSpec(client, spec);
+                if (r == .success and r.success.status.isSuccess()) {
+                    const res = r.success;
+                    r = .{ .err = error.UnusedResult };
+                    return res;
                 }
+                r.deinit();
+            }
+            return null;
+        },
+        .multi_thread => {
+            const workers_count = @max(1, @min(config.workers orelse specs.len, specs.len));
+            var next_spec_idx = std.atomic.Value(usize).init(0);
+            var winner = std.atomic.Value(bool).init(false);
+            var remaining = std.atomic.Value(usize).init(specs.len);
+            var mutex: std.Io.Mutex = .init;
+            var cond: std.Io.Condition = .init;
+            var result: ?Response = null;
+
+            const Worker = struct {
+                client: *Client,
+                specs: []const RequestSpec,
+                next_idx: *std.atomic.Value(usize),
+                winner: *std.atomic.Value(bool),
+                result: *?Response,
+                mutex: *std.Io.Mutex,
+                cond: *std.Io.Condition,
+                remaining: *std.atomic.Value(usize),
+
+                fn run(self: *@This()) void {
+                    while (true) {
+                        if (self.winner.load(.acquire)) break;
+                        const idx = self.next_idx.fetchAdd(1, .acq_rel);
+                        if (idx >= self.specs.len) break;
+
+                        var rr = executeSpec(self.client, self.specs[idx]);
+                        defer rr.deinit();
+
+                        if (rr == .success and rr.success.status.isSuccess()) {
+                            if (!self.winner.swap(true, .acq_rel)) {
+                                const io = defaultIo();
+                                self.mutex.lock(io) catch unreachable;
+                                self.result.* = rr.success;
+                                rr = .{ .err = error.UnusedResult }; // transfer ownership
+                                self.cond.signal(io);
+                                self.mutex.unlock(io);
+                                break;
+                            }
+                        }
+
+                        const prev = self.remaining.fetchSub(1, .acq_rel);
+                        if (prev == 1) {
+                            const io = defaultIo();
+                            self.mutex.lock(io) catch unreachable;
+                            self.cond.signal(io);
+                            self.mutex.unlock(io);
+                        }
+                    }
+                }
+            };
+
+            var threads = try allocator.alloc(Thread, workers_count);
+            defer allocator.free(threads);
+
+            var workers = try allocator.alloc(Worker, workers_count);
+            defer allocator.free(workers);
+
+            var spawned: usize = 0;
+            errdefer {
+                var i: usize = 0;
+                while (i < spawned) : (i += 1) threads[i].join();
+                if (result) |*r| r.deinit();
             }
 
-            const prev = self.remaining.fetchSub(1, .acq_rel);
-            if (prev == 1) {
-                const io = defaultIo();
-                self.mutex.lock(io) catch unreachable;
-                self.cond.signal(io);
-                self.mutex.unlock(io);
+            for (0..workers_count) |i| {
+                workers[i] = .{
+                    .client = client,
+                    .specs = specs,
+                    .next_idx = &next_spec_idx,
+                    .winner = &winner,
+                    .result = &result,
+                    .mutex = &mutex,
+                    .cond = &cond,
+                    .remaining = &remaining,
+                };
+                threads[i] = try Thread.spawn(.{}, Worker.run, .{&workers[i]});
+                spawned += 1;
             }
-        }
-    };
 
-    var winner = std.atomic.Value(bool).init(false);
-    var remaining = std.atomic.Value(usize).init(specs.len);
-    var mutex: std.Io.Mutex = .init;
-    var cond: std.Io.Condition = .init;
-    var result: ?Response = null;
+            const any_io = defaultIo();
+            mutex.lock(any_io) catch unreachable;
+            while (!winner.load(.acquire) and remaining.load(.acquire) > (specs.len - spawned)) {
+                cond.wait(any_io, &mutex) catch unreachable;
+            }
+            mutex.unlock(any_io);
 
-    var threads = try std.heap.page_allocator.alloc(Thread, specs.len);
-    defer std.heap.page_allocator.free(threads);
+            for (threads[0..spawned]) |t| t.join();
 
-    var ctxs = try std.heap.page_allocator.alloc(WorkerCtx, specs.len);
-    defer std.heap.page_allocator.free(ctxs);
+            return result;
+        },
+        .explicit_workers => {
+            const exec = config.executor orelse return error.MissingExecutor;
+            var winner = std.atomic.Value(bool).init(false);
+            var remaining = std.atomic.Value(usize).init(specs.len);
+            var mutex: std.Io.Mutex = .init;
+            var cond: std.Io.Condition = .init;
+            var result: ?Response = null;
 
-    var spawned: usize = 0;
-    errdefer {
-        var i: usize = 0;
-        while (i < spawned) : (i += 1) threads[i].join();
-        if (result) |*r| r.deinit();
+            const TaskCtx = struct {
+                client: *Client,
+                spec: RequestSpec,
+                winner: *std.atomic.Value(bool),
+                result: *?Response,
+                mutex: *std.Io.Mutex,
+                cond: *std.Io.Condition,
+                remaining: *std.atomic.Value(usize),
+
+                fn run(ctx_ptr: ?*anyopaque) void {
+                    const self: *@This() = @ptrCast(@alignCast(ctx_ptr.?));
+                    if (self.winner.load(.acquire)) {
+                        _ = self.remaining.fetchSub(1, .acq_rel);
+                        return;
+                    }
+
+                    var rr = executeSpec(self.client, self.spec);
+                    defer rr.deinit();
+
+                    if (rr == .success and rr.success.status.isSuccess()) {
+                        if (!self.winner.swap(true, .acq_rel)) {
+                            const io = defaultIo();
+                            self.mutex.lock(io) catch unreachable;
+                            self.result.* = rr.success;
+                            rr = .{ .err = error.UnusedResult };
+                            self.cond.signal(io);
+                            self.mutex.unlock(io);
+                        }
+                    }
+
+                    const prev = self.remaining.fetchSub(1, .acq_rel);
+                    if (prev == 1) {
+                        const io = defaultIo();
+                        self.mutex.lock(io) catch unreachable;
+                        self.cond.signal(io);
+                        self.mutex.unlock(io);
+                    }
+                }
+            };
+
+            var ctxs = try allocator.alloc(TaskCtx, specs.len);
+            defer allocator.free(ctxs);
+
+            for (specs, 0..) |spec, i| {
+                ctxs[i] = .{
+                    .client = client,
+                    .spec = spec,
+                    .winner = &winner,
+                    .result = &result,
+                    .mutex = &mutex,
+                    .cond = &cond,
+                    .remaining = &remaining,
+                };
+                try exec.submit(.{
+                    .func = TaskCtx.run,
+                    .context = &ctxs[i],
+                });
+            }
+
+            const io = defaultIo();
+            mutex.lock(io) catch unreachable;
+            while (!winner.load(.acquire) and remaining.load(.acquire) > 0) {
+                cond.wait(io, &mutex) catch unreachable;
+            }
+            mutex.unlock(io);
+
+            return result;
+        },
     }
-
-    for (specs, 0..) |spec, i| {
-        ctxs[i] = .{
-            .client = client,
-            .spec = spec,
-            .winner = &winner,
-            .result = &result,
-            .mutex = &mutex,
-            .cond = &cond,
-            .remaining = &remaining,
-        };
-        threads[i] = try Thread.spawn(.{}, WorkerCtx.run, .{&ctxs[i]});
-        spawned += 1;
-    }
-
-    // Wait until a success is found or all workers complete.
-    const any_io = defaultIo();
-    mutex.lock(any_io) catch unreachable;
-    while (!winner.load(.acquire) and remaining.load(.acquire) != 0) {
-        cond.wait(any_io, &mutex) catch unreachable;
-    }
-    mutex.unlock(any_io);
-
-    for (threads[0..spawned]) |t| t.join();
-
-    return result;
 }
 
 /// Executes all requests and returns the first to complete.
-pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec) !RequestResult {
-    _ = allocator;
-
+pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !RequestResult {
     if (specs.len == 0) return .{ .err = error.NoRequests };
 
-    const WorkerCtx = struct {
-        client: *Client,
-        spec: RequestSpec,
-        winner: *std.atomic.Value(bool),
-        result: *RequestResult,
-        mutex: *std.Io.Mutex,
-        cond: *std.Io.Condition,
-        remaining: *std.atomic.Value(usize),
+    switch (config.mode) {
+        .single_thread => {
+            return executeSpec(client, specs[0]);
+        },
+        .multi_thread => {
+            const workers_count = @max(1, @min(config.workers orelse specs.len, specs.len));
+            var next_spec_idx = std.atomic.Value(usize).init(0);
+            var winner = std.atomic.Value(bool).init(false);
+            var remaining = std.atomic.Value(usize).init(specs.len);
+            var mutex: std.Io.Mutex = .init;
+            var cond: std.Io.Condition = .init;
+            var result: RequestResult = .{ .err = error.NoRequests };
 
-        fn run(self: *@This()) void {
-            var rr = executeSpec(self.client, self.spec);
+            const Worker = struct {
+                client: *Client,
+                specs: []const RequestSpec,
+                next_idx: *std.atomic.Value(usize),
+                winner: *std.atomic.Value(bool),
+                result: *RequestResult,
+                mutex: *std.Io.Mutex,
+                cond: *std.Io.Condition,
+                remaining: *std.atomic.Value(usize),
 
-            if (!self.winner.swap(true, .acq_rel)) {
-                const io = defaultIo();
-                self.mutex.lock(io) catch unreachable;
-                self.result.* = rr;
-                self.cond.signal(io);
-                self.mutex.unlock(io);
-                // ownership transferred to caller
-                rr = .{ .err = error.UnusedResult };
+                fn run(self: *@This()) void {
+                    while (true) {
+                        if (self.winner.load(.acquire)) break;
+                        const idx = self.next_idx.fetchAdd(1, .acq_rel);
+                        if (idx >= self.specs.len) break;
+
+                        var rr = executeSpec(self.client, self.specs[idx]);
+
+                        if (!self.winner.swap(true, .acq_rel)) {
+                            const io = defaultIo();
+                            self.mutex.lock(io) catch unreachable;
+                            self.result.* = rr;
+                            rr = .{ .err = error.UnusedResult };
+                            self.cond.signal(io);
+                            self.mutex.unlock(io);
+                            break;
+                        }
+
+                        rr.deinit();
+
+                        const prev = self.remaining.fetchSub(1, .acq_rel);
+                        if (prev == 1) {
+                            const io = defaultIo();
+                            self.mutex.lock(io) catch unreachable;
+                            self.cond.signal(io);
+                            self.mutex.unlock(io);
+                        }
+                    }
+                }
+            };
+
+            var threads = try allocator.alloc(Thread, workers_count);
+            defer allocator.free(threads);
+
+            var workers = try allocator.alloc(Worker, workers_count);
+            defer allocator.free(workers);
+
+            var spawned: usize = 0;
+            errdefer {
+                var i: usize = 0;
+                while (i < spawned) : (i += 1) threads[i].join();
+                result.deinit();
             }
 
-            rr.deinit();
-
-            const prev = self.remaining.fetchSub(1, .acq_rel);
-            if (prev == 1) {
-                const io = defaultIo();
-                self.mutex.lock(io) catch unreachable;
-                self.cond.signal(io);
-                self.mutex.unlock(io);
+            for (0..workers_count) |i| {
+                workers[i] = .{
+                    .client = client,
+                    .specs = specs,
+                    .next_idx = &next_spec_idx,
+                    .winner = &winner,
+                    .result = &result,
+                    .mutex = &mutex,
+                    .cond = &cond,
+                    .remaining = &remaining,
+                };
+                threads[i] = try Thread.spawn(.{}, Worker.run, .{&workers[i]});
+                spawned += 1;
             }
-        }
-    };
 
-    var winner = std.atomic.Value(bool).init(false);
-    var remaining = std.atomic.Value(usize).init(specs.len);
-    var mutex: std.Io.Mutex = .init;
-    var cond: std.Io.Condition = .init;
-    var result: RequestResult = .{ .err = error.NoRequests };
+            const race_io = defaultIo();
+            mutex.lock(race_io) catch unreachable;
+            while (!winner.load(.acquire) and remaining.load(.acquire) > (specs.len - spawned)) {
+                cond.wait(race_io, &mutex) catch unreachable;
+            }
+            mutex.unlock(race_io);
 
-    var threads = try std.heap.page_allocator.alloc(Thread, specs.len);
-    defer std.heap.page_allocator.free(threads);
+            for (threads[0..spawned]) |t| t.join();
 
-    var ctxs = try std.heap.page_allocator.alloc(WorkerCtx, specs.len);
-    defer std.heap.page_allocator.free(ctxs);
+            return result;
+        },
+        .explicit_workers => {
+            const exec = config.executor orelse return error.MissingExecutor;
+            var winner = std.atomic.Value(bool).init(false);
+            var remaining = std.atomic.Value(usize).init(specs.len);
+            var mutex: std.Io.Mutex = .init;
+            var cond: std.Io.Condition = .init;
+            var result: RequestResult = .{ .err = error.NoRequests };
 
-    var spawned: usize = 0;
-    errdefer {
-        var i: usize = 0;
-        while (i < spawned) : (i += 1) threads[i].join();
-        result.deinit();
+            const TaskCtx = struct {
+                client: *Client,
+                spec: RequestSpec,
+                winner: *std.atomic.Value(bool),
+                result: *RequestResult,
+                mutex: *std.Io.Mutex,
+                cond: *std.Io.Condition,
+                remaining: *std.atomic.Value(usize),
+
+                fn run(ctx_ptr: ?*anyopaque) void {
+                    const self: *@This() = @ptrCast(@alignCast(ctx_ptr.?));
+                    if (self.winner.load(.acquire)) {
+                        _ = self.remaining.fetchSub(1, .acq_rel);
+                        return;
+                    }
+
+                    var rr = executeSpec(self.client, self.spec);
+
+                    if (!self.winner.swap(true, .acq_rel)) {
+                        const io = defaultIo();
+                        self.mutex.lock(io) catch unreachable;
+                        self.result.* = rr;
+                        rr = .{ .err = error.UnusedResult };
+                        self.cond.signal(io);
+                        self.mutex.unlock(io);
+                    }
+
+                    rr.deinit();
+
+                    const prev = self.remaining.fetchSub(1, .acq_rel);
+                    if (prev == 1) {
+                        const io = defaultIo();
+                        self.mutex.lock(io) catch unreachable;
+                        self.cond.signal(io);
+                        self.mutex.unlock(io);
+                    }
+                }
+            };
+
+            var ctxs = try allocator.alloc(TaskCtx, specs.len);
+            defer allocator.free(ctxs);
+
+            for (specs, 0..) |spec, i| {
+                ctxs[i] = .{
+                    .client = client,
+                    .spec = spec,
+                    .winner = &winner,
+                    .result = &result,
+                    .mutex = &mutex,
+                    .cond = &cond,
+                    .remaining = &remaining,
+                };
+                try exec.submit(.{
+                    .func = TaskCtx.run,
+                    .context = &ctxs[i],
+                });
+            }
+
+            const io = defaultIo();
+            mutex.lock(io) catch unreachable;
+            while (!winner.load(.acquire) and remaining.load(.acquire) > 0) {
+                cond.wait(io, &mutex) catch unreachable;
+            }
+            mutex.unlock(io);
+
+            return result;
+        },
     }
-
-    for (specs, 0..) |spec, i| {
-        ctxs[i] = .{
-            .client = client,
-            .spec = spec,
-            .winner = &winner,
-            .result = &result,
-            .mutex = &mutex,
-            .cond = &cond,
-            .remaining = &remaining,
-        };
-        threads[i] = try Thread.spawn(.{}, WorkerCtx.run, .{&ctxs[i]});
-        spawned += 1;
-    }
-
-    const race_io = defaultIo();
-    mutex.lock(race_io) catch unreachable;
-    while (!winner.load(.acquire) and remaining.load(.acquire) != 0) {
-        cond.wait(race_io, &mutex) catch unreachable;
-    }
-    mutex.unlock(race_io);
-
-    for (threads[0..spawned]) |t| t.join();
-
-    return result;
 }
 
 fn executeSpec(client: *Client, spec: RequestSpec) RequestResult {
@@ -430,7 +705,7 @@ test "allSettled empty" {
     var client = Client.init(allocator);
     defer client.deinit();
 
-    const results = try allSettled(allocator, &client, &.{});
+    const results = try allSettled(allocator, &client, &.{}, .{});
     defer allocator.free(results);
     try std.testing.expectEqual(@as(usize, 0), results.len);
 }
@@ -444,3 +719,43 @@ test "RequestResult summary helpers" {
     try std.testing.expectEqual(@as(usize, 0), successfulCount(&results));
     try std.testing.expectEqual(@as(usize, 2), errorCount(&results));
 }
+
+test "ConcurrencyConfig modes execution" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator);
+    defer client.deinit();
+
+    const specs = [_]RequestSpec{
+        .{ .method = .GET, .url = "http://127.0.0.1:0" },
+        .{ .method = .GET, .url = "http://127.0.0.1:0" },
+    };
+
+    // 1. Test single_thread mode
+    const st_results = try all(allocator, &client, &specs, .{ .mode = .single_thread });
+    defer allocator.free(st_results);
+    try std.testing.expectEqual(specs.len, st_results.len);
+    for (st_results) |r| {
+        try std.testing.expect(!r.isSuccess());
+    }
+
+    // 2. Test multi_thread mode (implicit workers)
+    const mt_results = try all(allocator, &client, &specs, .{ .mode = .multi_thread, .workers = 2 });
+    defer allocator.free(mt_results);
+    try std.testing.expectEqual(specs.len, mt_results.len);
+    for (mt_results) |r| {
+        try std.testing.expect(!r.isSuccess());
+    }
+
+    // 3. Test explicit_workers mode
+    var exec = @import("executor.zig").Executor.initWithConfig(allocator, .{ .num_threads = 2 });
+    defer exec.deinit();
+    try exec.start();
+
+    const ex_results = try all(allocator, &client, &specs, .{ .mode = .explicit_workers, .executor = &exec });
+    defer allocator.free(ex_results);
+    try std.testing.expectEqual(specs.len, ex_results.len);
+    for (ex_results) |r| {
+        try std.testing.expect(!r.isSuccess());
+    }
+}
+

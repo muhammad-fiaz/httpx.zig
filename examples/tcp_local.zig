@@ -26,13 +26,12 @@ pub fn main() !void {
 
     const listen_addr = try httpx.Address.parseIp("127.0.0.1", 0);
     var listener = try httpx.TcpListener.init(listen_addr);
-    defer listener.deinit();
-
     const addr = try listener.getLocalAddress();
 
     var ctx = ServerCtx{ .listener = &listener };
     const thread = try std.Thread.spawn(.{}, serverThread, .{&ctx});
     defer thread.join();
+    defer listener.deinit();
 
     var client = try httpx.Socket.createForAddress(addr);
     defer client.close();

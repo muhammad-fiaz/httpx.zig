@@ -44,13 +44,6 @@ fn okHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.text("ok");
 }
 
-fn serverThreadMain(server: *httpx.Server) void {
-    server.listen() catch |err| {
-        if (server.running) {
-            std.debug.print("local demo server error: {s}\n", .{@errorName(err)});
-        }
-    };
-}
 
 fn buildLocalUrls(allocator: std.mem.Allocator, port: u16) !DemoUrls {
     return .{
@@ -86,7 +79,7 @@ fn runAliasCalls(allocator: std.mem.Allocator, urls: DemoUrls) void {
     const request_timeout: u64 = 5_000;
 
     // Compile-time alias checks so this demo validates the API surface.
-    const fetch_ptr: *const fn ([]const u8) anyerror!httpx.Response = httpx.fetch;
+    const fetch_ptr: *const fn ([]const u8, httpx.RequestOptions) anyerror!httpx.Response = httpx.fetch;
     const send_ptr: *const fn (httpx.Method, []const u8, httpx.RequestOptions) anyerror!httpx.Response = httpx.send;
     const delete_ptr: *const fn ([]const u8, httpx.RequestOptions) anyerror!httpx.Response = httpx.delete;
     const opts_ptr: *const fn ([]const u8, httpx.RequestOptions) anyerror!httpx.Response = httpx.opts;
@@ -106,7 +99,7 @@ fn runAliasCalls(allocator: std.mem.Allocator, urls: DemoUrls) void {
         .json = "{\"ok\":true}",
     }));
 
-    printResult("httpx.fetch", httpx.fetch(urls.fetch));
+    printResult("httpx.fetch", httpx.fetch(urls.fetch, .{}));
     printResult("httpx.send(GET)", httpx.send(.GET, urls.get, .{}));
     printResult("httpx.delete", httpx.delete(urls.delete, .{}));
     printResult("httpx.opts", httpx.opts(urls.get, .{}));
@@ -119,7 +112,7 @@ fn runAliasCalls(allocator: std.mem.Allocator, urls: DemoUrls) void {
         .withRetryPolicy(httpx.RetryPolicy.noRetry())
         .withPoolLimits(32, 8);
 
-    var client: httpx.HttpClient = httpx.HttpClient.initWithConfig(allocator, client_config);
+    var client = httpx.Client.initWithConfig(allocator, client_config);
     defer client.deinit();
 
     printResult("client.fetch", client.fetch(urls.fetch, .{ .timeout_ms = request_timeout }));
@@ -170,8 +163,9 @@ pub fn main(init: std.process.Init) !void {
     try server.trace("/trace", okHandler);
     try server.connect("/anything", okHandler);
 
-    const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server});
+    const server_thread = try server.listenInBackground();
     defer server_thread.join();
+    defer server.stop();
 
     sleepMs(50);
     std.debug.print("Local demo server: http://127.0.0.1:{d}\n", .{port});
@@ -180,5 +174,4 @@ pub fn main(init: std.process.Init) !void {
     defer freeLocalUrls(allocator, urls);
 
     runAliasCalls(allocator, urls);
-    server.stop();
 }

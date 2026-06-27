@@ -55,13 +55,6 @@ fn basicHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.json(.{ .kind = "basic", .ok = true });
 }
 
-fn serverThreadMain(server: *httpx.Server) void {
-    server.listen() catch |err| {
-        if (server.running) {
-            std.debug.print("auth demo server error: {s}\n", .{@errorName(err)});
-        }
-    };
-}
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -82,7 +75,7 @@ pub fn main() !void {
     try server.get("/auth/bearer", bearerHandler);
     try server.get("/auth/basic", basicHandler);
 
-    const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server});
+    const server_thread = try server.listenInBackground();
     defer server_thread.join();
     defer server.stop();
 

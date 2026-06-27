@@ -68,6 +68,15 @@ pub const SseEvent = struct {
 /// Pre-route hook called after parsing the request and before route matching.
 pub const PreRouteHook = *const fn (*Context) anyerror!void;
 
+pub const LogLevel = enum {
+    debug,
+    info,
+    warn,
+    err,
+};
+
+pub const LogFn = *const fn (level: LogLevel, message: []const u8) void;
+
 /// Server configuration.
 pub const ServerConfig = struct {
     host: []const u8 = "127.0.0.1",
@@ -84,6 +93,7 @@ pub const ServerConfig = struct {
     http3_enabled: bool = false,
     http2_settings: types.Http2Settings = .{},
     http3_settings: types.Http3Settings = .{},
+    log_fn: ?LogFn = null,
 };
 
 /// File-serving options used by `Context.fileWithOptions`.
@@ -502,6 +512,35 @@ pub const Server = struct {
         return self.listenTcp();
     }
 
+    /// Spawns a background thread to run the server's listening loop.
+    /// The caller is responsible for joining the returned Thread.
+    pub fn listenInBackground(self: *Self) !std.Thread {
+        return std.Thread.spawn(.{}, struct {
+            fn run(s: *Self) void {
+                s.listen() catch |err| {
+                    if (s.running) {
+                        s.log(.err, "server error: {s}\n", .{@errorName(err)});
+                    }
+                };
+            }
+        }.run, .{self});
+    }
+
+    /// Logs a formatted message. If config.log_fn is provided, delegates to it.
+    /// Otherwise, prints to stderr.
+    pub fn log(self: *const Self, level: LogLevel, comptime format: []const u8, args: anytype) void {
+        if (self.config.log_fn) |log_fn| {
+            var buf: [1024]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, format, args)) |msg| {
+                log_fn(level, msg);
+            } else |_| {
+                log_fn(level, "[Log format failed or message too long]");
+            }
+        } else {
+            std.debug.print(format, args);
+        }
+    }
+
     /// Returns the effective server port (useful when `port_conflict = .increment`).
     pub fn listeningPort(self: *const Self) u16 {
         return self.config.port;
@@ -584,17 +623,17 @@ pub const Server = struct {
         try self.bindTcpListener(backlog);
         self.running = true;
 
-        std.debug.print("Server listening on {s}:{d}\n", .{ self.config.host, self.config.port });
+        self.log(.info, "Server listening on {s}:{d}\n", .{ self.config.host, self.config.port });
 
         while (self.running) {
             const conn = self.listener.?.accept() catch |err| {
                 if (!self.running) break;
-                std.debug.print("Accept error: {}\n", .{err});
+                self.log(.err, "Accept error: {}\n", .{err});
                 continue;
             };
 
             self.handleConnection(conn.socket) catch |err| {
-                std.debug.print("Handler error: {}\n", .{err});
+                self.log(.err, "Handler error: {}\n", .{err});
             };
         }
     }
@@ -603,19 +642,19 @@ pub const Server = struct {
         try self.bindUdpSocket();
         self.running = true;
 
-        std.debug.print("Server listening (HTTP/3) on {s}:{d}\n", .{ self.config.host, self.config.port });
+        self.log(.info, "Server listening (HTTP/3) on {s}:{d}\n", .{ self.config.host, self.config.port });
 
         var recv_buf: [64 * 1024]u8 = undefined;
 
         while (self.running) {
             const incoming = self.udp_socket.?.recvFrom(&recv_buf) catch |err| {
                 if (!self.running) break;
-                std.debug.print("HTTP/3 recv error: {}\n", .{err});
+                self.log(.err, "HTTP/3 recv error: {}\n", .{err});
                 continue;
             };
 
             self.handleHttp3Transaction(incoming.addr, recv_buf[0..incoming.n]) catch |err| {
-                std.debug.print("HTTP/3 handler error: {}\n", .{err});
+                self.log(.err, "HTTP/3 handler error: {}\n", .{err});
             };
         }
     }
@@ -680,7 +719,7 @@ pub const Server = struct {
             }
 
             var response = self.executeServerRequest(&req) catch |err| {
-                std.debug.print("Handler error: {}\n", .{err});
+                self.log(.err, "Handler error: {}\n", .{err});
                 return self.sendError(&sock, 500);
             };
 
@@ -1650,6 +1689,12 @@ test "Server initialization" {
     defer server.deinit();
 
     try std.testing.expectEqual(@as(u16, 8080), server.config.port);
+    try std.testing.expectEqualStrings("127.0.0.1", server.config.host);
+    try std.testing.expectEqual(@as(u32, 1000), server.config.max_connections);
+    try std.testing.expectEqual(@as(u64, 30_000), server.config.request_timeout_ms);
+    try std.testing.expectEqual(@as(u64, 60_000), server.config.keep_alive_timeout_ms);
+    try std.testing.expectEqual(@as(u32, 0), server.config.threads);
+    try std.testing.expect(server.config.keep_alive);
 }
 
 test "Context response helpers" {
@@ -1953,4 +1998,22 @@ test "Server port conflict strategy increment for HTTP/3 UDP" {
 
     try std.testing.expect(server.udp_socket != null);
     try std.testing.expect(server.config.port != reserved.port);
+}
+
+test "Server custom log callback" {
+    const allocator = std.testing.allocator;
+    const CustomLogger = struct {
+        var logged: bool = false;
+        fn log_fn(level: LogLevel, message: []const u8) void {
+            if (level == .info and std.mem.indexOf(u8, message, "test log message") != null) {
+                logged = true;
+            }
+        }
+    };
+
+    const server = Server.initWithConfig(allocator, .{
+        .log_fn = CustomLogger.log_fn,
+    });
+    server.log(.info, "this is a {s} message", .{"test log message"});
+    try std.testing.expect(CustomLogger.logged);
 }

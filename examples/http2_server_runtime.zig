@@ -28,7 +28,7 @@ pub fn main() !void {
 
     try server.get("/h2-server", handleH2);
 
-    const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server});
+    const server_thread = try server.listenInBackground();
     defer server_thread.join();
     defer server.stop();
 
@@ -56,13 +56,6 @@ fn handleH2(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.text("hello from http2 server runtime");
 }
 
-fn serverThreadMain(server: *httpx.Server) void {
-    server.listen() catch |err| {
-        if (server.running) {
-            std.debug.print("http2 server runtime error: {s}\n", .{@errorName(err)});
-        }
-    };
-}
 
 fn pickFreeTcpPort() !u16 {
     var listener = try httpx.TcpListener.init(try httpx.Address.parseIp("127.0.0.1", 0));

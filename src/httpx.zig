@@ -103,7 +103,6 @@ pub const encoding = @import("util/encoding.zig");
 pub const json = @import("util/json.zig");
 pub const mime = @import("util/mime.zig");
 pub const common = @import("util/common.zig");
-pub const utils = common;
 
 pub const executor = @import("concurrency/executor.zig");
 pub const concurrency = @import("concurrency/pool.zig");
@@ -111,6 +110,8 @@ pub const concurrency = @import("concurrency/pool.zig");
 pub const RequestSpec = concurrency.RequestSpec;
 pub const RequestResult = concurrency.RequestResult;
 pub const BatchBuilder = concurrency.BatchBuilder;
+pub const ConcurrencyConfig = concurrency.ConcurrencyConfig;
+pub const ConcurrencyMode = concurrency.ConcurrencyMode;
 
 pub const Executor = executor.Executor;
 pub const Task = executor.Task;
@@ -126,6 +127,7 @@ pub const RetryPolicy = types.RetryPolicy;
 pub const RedirectPolicy = types.RedirectPolicy;
 pub const Http2Settings = types.Http2Settings;
 pub const Http3Settings = types.Http3Settings;
+pub const Proxy = types.Proxy;
 
 pub const Headers = headers.Headers;
 pub const HeaderName = headers.HeaderName;
@@ -209,8 +211,6 @@ pub const BasicAuth = client_mod.BasicAuth;
 pub const Interceptor = client_mod.Interceptor;
 pub const RequestInterceptor = client_mod.RequestInterceptor;
 pub const ResponseInterceptor = client_mod.ResponseInterceptor;
-pub const HttpClient = Client;
-pub const ReqOptions = RequestOptions;
 
 pub const ConnectionPool = pool.ConnectionPool;
 pub const PoolConfig = pool.PoolConfig;
@@ -219,6 +219,8 @@ pub const PoolStats = pool.PoolStats;
 
 pub const Server = server_mod.Server;
 pub const ServerConfig = server_mod.ServerConfig;
+pub const LogLevel = server_mod.LogLevel;
+pub const LogFn = server_mod.LogFn;
 pub const PortConflictStrategy = server_mod.PortConflictStrategy;
 pub const Context = server_mod.Context;
 pub const Handler = server_mod.Handler;
@@ -227,8 +229,6 @@ pub const SameSite = server_mod.SameSite;
 pub const SseEvent = server_mod.SseEvent;
 pub const PreRouteHook = server_mod.PreRouteHook;
 pub const FileResponseOptions = server_mod.FileResponseOptions;
-pub const HttpServer = Server;
-pub const Ctx = Context;
 
 pub const Router = router.Router;
 pub const RouteGroup = router.RouteGroup;
@@ -238,10 +238,13 @@ pub const Middleware = middleware.Middleware;
 pub const Next = middleware.Next;
 pub const cors = middleware.cors;
 pub const logger = middleware.logger;
+pub const LoggerConfig = middleware.LoggerConfig;
+pub const loggerWithConfig = middleware.loggerWithConfig;
 pub const compression = middleware.compression;
 pub const rateLimit = middleware.rateLimit;
 pub const basicAuth = middleware.basicAuth;
 pub const helmet = middleware.helmet;
+pub const reverseProxy = middleware.reverseProxy;
 
 pub const Buffer = buffer.Buffer;
 pub const RingBuffer = buffer.RingBuffer;
@@ -286,14 +289,8 @@ pub const isIp6Address = address.isIp6Address;
 /// Returns a query parameter value from a raw query string.
 pub const queryValue = common.queryValue;
 
-/// Alias for queryValue().
-pub const parseQueryValue = common.queryValue;
-
 /// Parses the first name/value pair from a Set-Cookie header value.
 pub const parseSetCookiePair = common.parseSetCookiePair;
-
-/// Alias for parseSetCookiePair().
-pub const parseCookiePair = common.parseSetCookiePair;
 
 /// Returns a best-effort MIME type from file extension.
 pub const mimeTypeFromPath = common.mimeTypeFromPath;
@@ -311,23 +308,23 @@ pub const encodeVarInt = http.encodeVarInt;
 pub const decodeVarInt = http.decodeVarInt;
 
 /// Executes all requests in parallel and returns a result per request.
-pub fn all(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult {
-    return concurrency.all(allocator, client, specs);
+pub fn all(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
+    return concurrency.all(allocator, client, specs, config);
 }
 
 /// Executes all requests in parallel and returns the first 2xx response (if any).
-pub fn any(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) !?Response {
-    return concurrency.any(allocator, client, specs);
+pub fn any(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !?Response {
+    return concurrency.any(allocator, client, specs, config);
 }
 
 /// Executes all requests in parallel and returns the first completion (success or error).
-pub fn race(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) !RequestResult {
-    return concurrency.race(allocator, client, specs);
+pub fn race(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !RequestResult {
+    return concurrency.race(allocator, client, specs, config);
 }
 
 /// Executes all requests in parallel and returns a settled result for each one.
-pub fn allSettled(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult {
-    return concurrency.allSettled(allocator, client, specs);
+pub fn allSettled(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
+    return concurrency.allSettled(allocator, client, specs, config);
 }
 
 /// Counts successful results returned by all/allSettled.
@@ -341,40 +338,40 @@ pub fn errorCount(results: []const RequestResult) usize {
 }
 
 /// Alias for any() for first-success semantics.
-pub fn first(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) !?Response {
-    return any(allocator, client, specs);
+pub fn first(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !?Response {
+    return any(allocator, client, specs, config);
 }
 
 /// Alias for race() for first-completion semantics.
-pub fn fastest(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) !RequestResult {
-    return race(allocator, client, specs);
+pub fn fastest(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !RequestResult {
+    return race(allocator, client, specs, config);
 }
 
 /// Alias for allSettled() returning settled outcomes.
-pub fn settled(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult {
-    return allSettled(allocator, client, specs);
+pub fn settled(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
+    return allSettled(allocator, client, specs, config);
 }
 
 /// Convenience function to create a GET request.
-pub fn get(url: []const u8) !Response {
-    return getWithAllocator(default_alias_allocator, url);
+pub fn get(url: []const u8, req_options: RequestOptions) !Response {
+    return getWithAllocator(default_alias_allocator, url, req_options);
 }
 
 /// Convenience function to create a GET request with an explicit allocator.
-pub fn getWithAllocator(allocator: std.mem.Allocator, url: []const u8) !Response {
+pub fn getWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
     var c = Client.init(allocator);
     defer c.deinit();
-    return c.get(url, .{});
+    return c.get(url, req_options);
 }
 
 /// Convenience alias for GET requests.
-pub fn fetch(url: []const u8) !Response {
-    return get(url);
+pub fn fetch(url: []const u8, req_options: RequestOptions) !Response {
+    return get(url, req_options);
 }
 
 /// Convenience alias for GET requests with an explicit allocator.
-pub fn fetchWithAllocator(allocator: std.mem.Allocator, url: []const u8) !Response {
-    return getWithAllocator(allocator, url);
+pub fn fetchWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
+    return getWithAllocator(allocator, url, req_options);
 }
 
 /// Convenience function to create a request with an explicit method.
@@ -523,10 +520,10 @@ pub fn optsWithAllocator(allocator: std.mem.Allocator, url: []const u8, options_
 }
 
 test "top-level alias compile checks" {
-    const get_ptr: *const fn ([]const u8) anyerror!Response = get;
-    const get_alloc_ptr: *const fn (std.mem.Allocator, []const u8) anyerror!Response = getWithAllocator;
-    const fetch_ptr: *const fn ([]const u8) anyerror!Response = fetch;
-    const fetch_alloc_ptr: *const fn (std.mem.Allocator, []const u8) anyerror!Response = fetchWithAllocator;
+    const get_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = get;
+    const get_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = getWithAllocator;
+    const fetch_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = fetch;
+    const fetch_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = fetchWithAllocator;
     const post_json_ptr: *const fn ([]const u8, []const u8) anyerror!Response = postJson;
     const post_json_alloc_ptr: *const fn (std.mem.Allocator, []const u8, []const u8) anyerror!Response = postJsonWithAllocator;
     const send_ptr: *const fn (Method, []const u8, RequestOptions) anyerror!Response = send;
@@ -551,9 +548,9 @@ test "top-level alias compile checks" {
     const options_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = optionsWithAllocator;
     const opts_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = opts;
     const opts_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = optsWithAllocator;
-    const first_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror!?Response = first;
-    const fastest_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror!RequestResult = fastest;
-    const settled_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec) anyerror![]RequestResult = settled;
+    const first_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec, ConcurrencyConfig) anyerror!?Response = first;
+    const fastest_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec, ConcurrencyConfig) anyerror!RequestResult = fastest;
+    const settled_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec, ConcurrencyConfig) anyerror![]RequestResult = settled;
     const resolve_addr_ptr: *const fn ([]const u8, u16) anyerror!address.Address = resolveAddress;
     const resolve_all_addr_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror![]address.Address = resolveAllAddresses;
     const parse_host_port_ptr = parseHostAndPort;
@@ -673,10 +670,6 @@ test "json" {
 
 test "common" {
     _ = common;
-}
-
-test "utils alias" {
-    _ = utils;
 }
 
 test "socket" {

@@ -1153,6 +1153,45 @@ test "Socket read/writeAll compatibility aliases" {
     try std.testing.expectEqualStrings("pong", out_buf[0..n]);
 }
 
+test "SocketIoReader readVec fills internal buffer for empty input" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const ThreadCtx = struct {
+        listener: *TcpListener,
+    };
+    const payload = "hello";
+
+    const server = struct {
+        fn run(ctx: *ThreadCtx) void {
+            var accepted = ctx.listener.accept() catch return;
+            defer accepted.socket.close();
+
+            accepted.socket.writeAll(payload) catch return;
+        }
+    }.run;
+
+    var listener = try TcpListener.init(try net.Address.parseIp("127.0.0.1", 0));
+    defer listener.deinit();
+
+    const addr = try listener.getLocalAddress();
+    var ctx = ThreadCtx{ .listener = &listener };
+    const thread = try std.Thread.spawn(.{}, server, .{&ctx});
+    defer thread.join();
+
+    var client = try Socket.createForAddress(addr);
+    defer client.close();
+
+    try client.connect(addr);
+
+    var scratch: [32]u8 = undefined;
+    var io_reader = SocketIoReader.init(&client, scratch[0..]);
+    var empty_iov = [_][]u8{.{}};
+
+    const n = try SocketIoReader.readVec(&io_reader.reader, &empty_iov);
+    try std.testing.expectEqual(@as(usize, 0), n);
+    try std.testing.expectEqual(payload.len, io_reader.reader.end);
+    try std.testing.expectEqual(@as(usize, 0), io_reader.reader.seek);
+}
+
 test "Socket helper API compile checks" {
     const create_v4_ptr: *const fn () anyerror!Socket = Socket.createV4;
     const create_v6_ptr: *const fn () anyerror!Socket = Socket.createV6;

@@ -69,6 +69,7 @@ pub const ClientConfig = struct {
     keep_alive: bool = true,
     pool_max_connections: u32 = 20,
     pool_max_per_host: u32 = 5,
+    proxy: ?types.Proxy = null,
 
     /// Returns default client configuration.
     pub fn defaults() ClientConfig {
@@ -78,6 +79,13 @@ pub const ClientConfig = struct {
     /// Returns default configuration with a base URL.
     pub fn forBaseUrl(base_url: []const u8) ClientConfig {
         return .{ .base_url = base_url };
+    }
+
+    /// Returns a copy with a proxy configured.
+    pub fn withProxy(self: ClientConfig, proxy: ?types.Proxy) ClientConfig {
+        var out = self;
+        out.proxy = proxy;
+        return out;
     }
 
     /// Returns a copy with a new base URL.
@@ -519,6 +527,65 @@ pub const Client = struct {
             mem.eql(u8, name, "TooManyRedirects"));
     }
 
+    fn formatProxyRequest(self: *Self, req: *const Request, proxy: types.Proxy) ![]u8 {
+        var buffer = std.ArrayList(u8).empty;
+        const writer = list_writer.init(self.allocator, &buffer);
+
+        const method_str = req.method.toString();
+        // Construct absolute URI
+        try writer.print("{s} http://{s}:{d}{s}", .{ method_str, req.uri.host orelse "", req.uri.effectivePort(), req.uri.path });
+        if (req.uri.query) |q| {
+            try writer.print("?{s}", .{q});
+        }
+        try writer.print(" {s}\r\n", .{req.version.toString()});
+
+        for (req.headers.entries.items) |h| {
+            try writer.print("{s}: {s}\r\n", .{ h.name, h.value });
+        }
+
+        if (proxy.username) |user| {
+            const pass = proxy.password orelse "";
+            const auth_val = try @import("../util/encoding.zig").Base64.formatBasicAuth(self.allocator, user, pass);
+            defer self.allocator.free(auth_val);
+            try writer.print("Proxy-Authorization: {s}\r\n", .{auth_val});
+        }
+
+        try writer.writeAll("\r\n");
+
+        if (req.body) |body| {
+            try writer.writeAll(body);
+        }
+
+        return buffer.toOwnedSlice(self.allocator);
+    }
+
+    fn establishProxyTlsTunnel(self: *Self, socket: *Socket, target_host: []const u8, target_port: u16, proxy: types.Proxy) !void {
+        var buffer = std.ArrayList(u8).empty;
+        const writer = list_writer.init(self.allocator, &buffer);
+
+        try writer.print("CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n", .{ target_host, target_port, target_host, target_port });
+
+        if (proxy.username) |user| {
+            const pass = proxy.password orelse "";
+            const auth_val = try @import("../util/encoding.zig").Base64.formatBasicAuth(self.allocator, user, pass);
+            defer self.allocator.free(auth_val);
+            try writer.print("Proxy-Authorization: {s}\r\n", .{auth_val});
+        }
+        try writer.writeAll("\r\n");
+
+        const connect_req = try buffer.toOwnedSlice(self.allocator);
+        defer self.allocator.free(connect_req);
+
+        try socket.sendAll(connect_req);
+
+        var response = try self.readResponseFromTcp(socket);
+        defer response.deinit();
+
+        if (response.status.code < 200 or response.status.code >= 300) {
+            return error.ProxyConnectionFailed;
+        }
+    }
+
     fn executeRequestOnce(self: *Self, req: *Request, timeout_override_ms: ?u64) !Response {
         const host = req.uri.host orelse return error.InvalidUri;
         const port = req.uri.effectivePort();
@@ -529,6 +596,7 @@ pub const Client = struct {
         const wants_http3 = self.config.http3_enabled or req.version == .HTTP_3;
 
         if (wants_http3) {
+            if (self.config.proxy != null) return error.ProxyNotSupported;
             return self.executeRequestHttp3(req, host, port, timeout_ms, write_timeout_ms);
         }
 
@@ -536,12 +604,22 @@ pub const Client = struct {
             return self.executeRequestHttp2(req, host, port, timeout_ms, write_timeout_ms);
         }
 
-        const request_data = try http.formatRequest(req, self.allocator);
+        var request_data: []u8 = undefined;
+        if (self.config.proxy) |proxy| {
+            if (!req.uri.isTls()) {
+                request_data = try self.formatProxyRequest(req, proxy);
+            } else {
+                request_data = try http.formatRequest(req, self.allocator);
+            }
+        } else {
+            request_data = try http.formatRequest(req, self.allocator);
+        }
         defer self.allocator.free(request_data);
 
         if (req.uri.isTls()) {
-            // TLS pooling requires keeping a live TLS session; not implemented yet.
-            const addr = try address_mod.resolve(host, port);
+            const connect_host = if (self.config.proxy) |p| p.host else host;
+            const connect_port = if (self.config.proxy) |p| p.port else port;
+            const addr = try address_mod.resolve(connect_host, connect_port);
 
             var socket = try Socket.createForAddress(addr);
             defer socket.close();
@@ -555,11 +633,15 @@ pub const Client = struct {
 
             try socket.connect(addr);
 
+            if (self.config.proxy) |proxy| {
+                try self.establishProxyTlsTunnel(&socket, host, port, proxy);
+            }
+
             return self.executeTlsHttp(&socket, host, request_data);
         }
 
         if (self.config.keep_alive) {
-            var conn = try self.pool.getConnection(host, port);
+            var conn = try self.pool.getConnection(host, port, self.config.proxy);
             errdefer conn.close();
             defer self.pool.releaseConnection(conn);
 
@@ -579,7 +661,9 @@ pub const Client = struct {
             return res;
         }
 
-        const addr = try address_mod.resolve(host, port);
+        const connect_host = if (self.config.proxy) |p| p.host else host;
+        const connect_port = if (self.config.proxy) |p| p.port else port;
+        const addr = try address_mod.resolve(connect_host, connect_port);
 
         var socket = try Socket.createForAddress(addr);
         defer socket.close();
@@ -605,7 +689,9 @@ pub const Client = struct {
         timeout_ms: u64,
         write_timeout_ms: u64,
     ) !Response {
-        const addr = try address_mod.resolve(host, port);
+        const connect_host = if (self.config.proxy) |p| p.host else host;
+        const connect_port = if (self.config.proxy) |p| p.port else port;
+        const addr = try address_mod.resolve(connect_host, connect_port);
 
         var socket = try Socket.createForAddress(addr);
         defer socket.close();
@@ -618,6 +704,10 @@ pub const Client = struct {
         }
 
         try socket.connect(addr);
+
+        if (self.config.proxy) |proxy| {
+            try self.establishProxyTlsTunnel(&socket, host, port, proxy);
+        }
 
         if (req.uri.isTls()) {
             const tls_cfg = if (self.config.verify_ssl) TlsConfig.init(self.allocator) else TlsConfig.insecure(self.allocator);
@@ -1411,13 +1501,8 @@ pub const Client = struct {
     }
 
     /// OPTIONS request convenience method.
-    pub fn httpOptions(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.request(.OPTIONS, url, reqOpts);
-    }
-
-    /// Alias for httpOptions() with conventional method naming.
     pub fn options(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.httpOptions(url, reqOpts);
+        return self.request(.OPTIONS, url, reqOpts);
     }
 
     /// Alias for options() with short method naming.
@@ -1730,6 +1815,19 @@ test "Client initForBaseUrl helper" {
     try std.testing.expectEqualStrings("https://api.example.com", client.config.base_url.?);
 }
 
+test "Client initialization defaults" {
+    const allocator = std.testing.allocator;
+    var client = Client.init(allocator);
+    defer client.deinit();
+
+    try std.testing.expect(client.config.base_url == null);
+    try std.testing.expect(client.config.keep_alive);
+    try std.testing.expect(client.config.follow_redirects);
+    try std.testing.expect(client.config.verify_ssl);
+    try std.testing.expectEqual(@as(u32, 20), client.config.pool_max_connections);
+    try std.testing.expectEqual(@as(u32, 5), client.config.pool_max_per_host);
+}
+
 test "ClientConfig builder helpers" {
     const default_headers = [_][2][]const u8{
         .{ "Accept", "application/json" },
@@ -1749,7 +1847,8 @@ test "ClientConfig builder helpers" {
         .withSslVerification(false)
         .withKeepAlive(false)
         .withMaxResponseSize(1024)
-        .withPoolLimits(64, 16);
+        .withPoolLimits(64, 16)
+        .withProxy(.{ .host = "127.0.0.1", .port = 8080 });
 
     try std.testing.expectEqualStrings("https://api.example.com", cfg.base_url.?);
     try std.testing.expectEqual(@as(u64, 5_000), cfg.timeouts.connect_ms);
@@ -1768,6 +1867,9 @@ test "ClientConfig builder helpers" {
     try std.testing.expectEqual(@as(usize, 1024), cfg.max_response_size);
     try std.testing.expectEqual(@as(u32, 64), cfg.pool_max_connections);
     try std.testing.expectEqual(@as(u32, 16), cfg.pool_max_per_host);
+    try std.testing.expect(cfg.proxy != null);
+    try std.testing.expectEqualStrings("127.0.0.1", cfg.proxy.?.host);
+    try std.testing.expectEqual(@as(u16, 8080), cfg.proxy.?.port);
 }
 
 test "RequestOptions builder helpers" {
@@ -2225,4 +2327,26 @@ fn countWrittenHttp2Frames(data: []const u8, frame_type: http.Http2FrameType) us
     }
 
     return count;
+}
+
+test "Client proxy request formatting" {
+    const allocator = std.testing.allocator;
+    var client = Client.initWithConfig(allocator, .{});
+    defer client.deinit();
+
+    var req = try Request.init(allocator, .GET, "http://example.com/api/v1/users?active=true");
+    defer req.deinit();
+    try req.headers.set("Accept", "application/json");
+
+    const formatted = try client.formatProxyRequest(&req, .{
+        .host = "127.0.0.1",
+        .port = 8080,
+        .username = "user",
+        .password = "pass",
+    });
+    defer allocator.free(formatted);
+
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "GET http://example.com:80/api/v1/users?active=true HTTP/1.1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "Accept: application/json\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n") != null);
 }

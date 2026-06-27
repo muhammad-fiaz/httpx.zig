@@ -13,6 +13,8 @@ const builtin = @import("builtin");
 
 const Socket = @import("../net/socket.zig").Socket;
 const address_mod = @import("../net/address.zig");
+const types = @import("../core/types.zig");
+const Proxy = types.Proxy;
 
 fn nowMillis() i64 {
     const io = if (builtin.is_test)
@@ -127,7 +129,7 @@ pub const ConnectionPool = struct {
     }
 
     /// Gets or creates a connection to the specified host.
-    pub fn getConnection(self: *Self, host: []const u8, port: u16) !*Connection {
+    pub fn getConnection(self: *Self, host: []const u8, port: u16, proxy: ?Proxy) !*Connection {
         for (self.connections.items) |*conn| {
             if (std.mem.eql(u8, conn.host, host) and conn.port == port) {
                 if (conn.isHealthy(self.config.idle_timeout_ms) and conn.requests_made < self.config.max_requests_per_connection) {
@@ -145,15 +147,17 @@ pub const ConnectionPool = struct {
         }
         if (host_count >= self.config.max_per_host) return PoolError.PoolExhaustedForHost;
 
-        return self.createConnection(host, port);
+        return self.createConnection(host, port, proxy);
     }
 
     /// Creates a new connection.
-    fn createConnection(self: *Self, host: []const u8, port: u16) !*Connection {
+    fn createConnection(self: *Self, host: []const u8, port: u16, proxy: ?Proxy) !*Connection {
         const host_owned = try self.allocator.dupe(u8, host);
         try self.hosts_owned.append(self.allocator, host_owned);
 
-        const addr = try address_mod.resolve(host, port);
+        const connect_host = if (proxy) |p| p.host else host;
+        const connect_port = if (proxy) |p| p.port else port;
+        const addr = try address_mod.resolve(connect_host, connect_port);
 
         var socket = try Socket.createForAddress(addr);
         errdefer socket.close();

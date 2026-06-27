@@ -23,8 +23,6 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var server_socket = try httpx.UdpSocket.create();
-    defer server_socket.close();
-
     try server_socket.setReuseAddr(true);
     const listen_addr = try httpx.Address.parseIp("127.0.0.1", 0);
     try server_socket.bind(listen_addr);
@@ -34,6 +32,7 @@ pub fn main() !void {
 
     const server_thread = try std.Thread.spawn(.{}, serverThreadMain, .{&server_socket});
     defer server_thread.join();
+    defer server_socket.close();
 
     var client = httpx.Client.initWithConfig(allocator, .{
         .http3_enabled = true,

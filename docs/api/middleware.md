@@ -20,11 +20,31 @@ try server.use(httpx.middleware.cors(.{}));
 
 ### `logger`
 
-Logs request method, path, and detailed timing information to `std.debug`.
+Logs request method, path, and detailed timing information to `std.debug` by default.
 
 ```zig
 server.use(httpx.middleware.logger());
 ```
+
+To route logs into your own sink, use `loggerWithConfig`:
+
+```zig
+const httpx = @import("httpx");
+const std = @import("std");
+const allocator = std.heap.page_allocator;
+
+var server = httpx.Server.init(allocator);
+const CustomLogger = struct {
+    fn log(level: httpx.LogLevel, message: []const u8) void {
+        _ = level;
+        std.debug.print("{s}", .{message});
+    }
+};
+
+server.use(httpx.middleware.loggerWithConfig(.{ .log_fn = CustomLogger.log }));
+```
+
+To disable request logging, simply do not install the logger middleware.
 
 ### `cors`
 

@@ -27,6 +27,7 @@ zig build example-http3_example -Dtarget=aarch64-macos
 - [Connection Pool](/examples/connection-pool): Reuse pooled connections efficiently.
 - [Interceptors](/examples/interceptors): Apply request and response interceptors.
 - [Cookies Demo](/examples/cookies-demo): Manage cookie jar values in client flows.
+- [Proxy and Reverse Proxy](/examples/proxy-example): Configure client forward proxies and register reverse proxy middleware.
 - [Simplified API Aliases](/examples/simplified-api-aliases): Use short top-level helper APIs with local loopback success mode by default.
 - [Simple Server](/examples/simple-server): Start a minimal HTTP server.
 - [Router Example](/examples/router-example): Route params and grouped endpoints.

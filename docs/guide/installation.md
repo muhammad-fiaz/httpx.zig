@@ -7,9 +7,12 @@ This guide covers all supported installation methods for `httpx.zig`.
 - **Zig Version**: 0.16.0 or later
 - **Operating System**: Windows, Linux, or macOS
 
-::: warning v0.1.0 major update from 0.0.7
-`v0.1.0` is a major update from `0.0.7`.
-If you are migrating an existing project, review `/CHANGELOG` and refresh dependency pin/hash values before building.
+::: warning v0.1.1 release and Zig 0.15 deprecation
+`v0.1.1` is the current release and targets Zig `0.16.0+`.
+`v0.1.0` is the previous stable release for the immediate prior `0.1.x` line.
+Zig `0.15` support is legacy and remains available only through `0.0.7`.
+The HTTPS/TLS reader fix for Zig `0.16` empty-buffer reads is included in this release.
+If you are upgrading from `0.0.7`, review `/CHANGELOG` first and refresh your dependency pin/hash.
 :::
 
 ## Platform Support
@@ -46,23 +49,35 @@ zig build -Dtarget=aarch64-macos
 ```
 :::
 
-## Method 1: Zig Fetch (Latest Release 0.1.0)
+## Method 1: Zig Fetch (Latest Release 0.1.1)
 
 Use the latest tagged release for reproducible builds:
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.1.tar.gz
+```
+
+## Method 2: Zig Fetch (Previous Stable 0.1.0)
+
+Use the previous stable `0.1.0` release if you want the last `0.1.x` tag before `0.1.1`:
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz
 ```
 
-## Method 2: Zig Fetch (Previous Stable 0.0.7)
+## Method 3: Zig Fetch (Legacy Zig 0.15 Support - 0.0.7)
 
-Use the previous stable tag when you need to pin to the prior release:
+For Zig version 0.15 support, use this version:
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz
 ```
 
-## Method 3: Zig Fetch (Nightly/Main)
+::: warning Zig 0.15 deprecation
+Zig `0.15` support is deprecated; use `0.0.7` if you need the older API surface.
+:::
+
+## Method 4: Zig Fetch (Nightly/Main)
 
 Use the Git URL if you want the latest commits from main:
 
@@ -70,17 +85,17 @@ Use the Git URL if you want the latest commits from main:
 zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```
 
-## Method 4: Manual `build.zig.zon` Configuration
+## Method 5: Manual `build.zig.zon` Configuration
 
 You can also add the dependency manually:
 
 ```zig
 .{
     .name = "my-project",
-    .version = "0.1.0",
+    .version = "0.1.1",
     .dependencies = .{
         .httpx = .{
-            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.0.tar.gz",
+            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.1.tar.gz",
             .hash = "...", // Run zig fetch --save <url> to auto-fill this.
         },
     },
@@ -90,7 +105,7 @@ You can also add the dependency manually:
 }
 ```
 
-## Method 5: Local Source Checkout
+## Method 6: Local Source Checkout
 
 Clone and build directly:
 
