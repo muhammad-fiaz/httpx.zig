@@ -17,10 +17,12 @@ pub const TlsConfig = struct {
     ca_path: ?[]const u8 = null,
     cert_file: ?[]const u8 = null,
     key_file: ?[]const u8 = null,
-    // ALPN protocols for protocol negotiation (h2 for HTTP/2, h3 for HTTP/3).
+    // ALPN protocols for protocol negotiation ("h2" for HTTP/2, "http/1.1").
     alpn_protocols: []const []const u8 = &.{ "http/1.1" },
     cipher_suites: ?[]const u8 = null,
     server_name: ?[]const u8 = null,
+    allow_truncation_attacks: bool = true,
+    force_h2: bool = false,
 };
 ```
 
@@ -40,6 +42,22 @@ Creates a configuration that skips verification (useful for testing).
 
 ```zig
 pub fn insecure(allocator: Allocator) Self
+```
+
+#### `withH2`
+
+Creates a configuration advertising HTTP/2 ALPN protocols (`"h2"`, `"http/1.1"`).
+
+```zig
+pub fn withH2(allocator: Allocator) Self
+```
+
+#### `insecureWithH2`
+
+Creates an unverified configuration advertising HTTP/2 ALPN protocols.
+
+```zig
+pub fn insecureWithH2(allocator: Allocator) Self
 ```
 
 ## TlsSession

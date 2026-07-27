@@ -52,12 +52,12 @@ pub const WsOpcode = enum(u4) {
 
     /// Returns true for control opcodes (close, ping, pong).
     pub fn isControl(self: WsOpcode) bool {
-        return @intFromEnum(self) >= 0x8;
+        return @backingInt(self) >= 0x8;
     }
 
     /// Returns true for data opcodes (text, binary, continuation).
     pub fn isData(self: WsOpcode) bool {
-        return @intFromEnum(self) < 0x8;
+        return @backingInt(self) < 0x8;
     }
 };
 
@@ -175,7 +175,7 @@ pub fn wsEncodeFrame(
     const frame = try allocator.alloc(u8, header_size + payload.len);
     errdefer allocator.free(frame);
 
-    frame[0] = (@as(u8, if (fin) 0x80 else 0x00)) | @as(u8, @intFromEnum(opcode));
+    frame[0] = (@as(u8, if (fin) 0x80 else 0x00)) | @as(u8, @backingInt(opcode));
 
     var offset: usize = 2;
     if (payload.len < 126) {
@@ -235,7 +235,7 @@ pub fn wsPongFrame(allocator: Allocator, data: []const u8) ![]u8 {
 
 /// Encodes a close frame with optional code and reason.
 pub fn wsCloseFrame(allocator: Allocator, code: WsCloseCode, reason: []const u8) ![]u8 {
-    const code_u16: u16 = @intFromEnum(code);
+    const code_u16: u16 = @backingInt(code);
     var payload_buf: [125]u8 = undefined;
     payload_buf[0] = @intCast((code_u16 >> 8) & 0xFF);
     payload_buf[1] = @intCast(code_u16 & 0xFF);
@@ -254,7 +254,7 @@ pub fn wsDecodeFrame(allocator: Allocator, data: []const u8) !WsDecodeResult {
     if (data.len < 2) return error.NeedMoreData;
 
     const fin = (data[0] & 0x80) != 0;
-    const opcode: WsOpcode = @enumFromInt(data[0] & 0x0F);
+    const opcode: WsOpcode = @fromBackingInt(@intCast(data[0] & 0x0F));
     const masked = (data[1] & 0x80) != 0;
     var len: u64 = data[1] & 0x7F;
     var offset: usize = 2;

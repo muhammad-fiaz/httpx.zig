@@ -134,6 +134,7 @@ fn runServer(listener: *httpx.TcpListener) !void {
                 }
             },
             .window_update, .priority, .continuation, .push_promise, .goaway, .rst_stream => {},
+            _ => {},
         }
     }
 

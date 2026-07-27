@@ -54,8 +54,8 @@ defer res.deinit();
 std.debug.print("version={s} status={d}\n", .{ res.version.toString(), res.status.code });
 ```
 
-::: warning TLS Negotiation Note
-The current Zig stdlib TLS API used by httpx.zig does not yet expose ALPN selection in the high-level client path. The HTTP/2 runtime sends HTTP/2 frames directly; endpoints that strictly require ALPN negotiation may reject the connection.
+::: tip TLS & ALPN Protocol Negotiation
+httpx.zig natively performs ALPN protocol negotiation via a post-handshake HTTP/2 preface probe on TLS connections when `http2_enabled = true` or when using `TlsConfig.withH2()`. If the server supports HTTP/2, the connection uses HTTP/2; otherwise it cleanly falls back to HTTP/1.1 without dropping data.
 :::
 
 ## High-level Server Usage

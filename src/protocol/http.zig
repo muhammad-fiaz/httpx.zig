@@ -165,7 +165,11 @@ pub const Http1Connection = struct {
             _ = try self.readLine(&line_buf);
         }
 
-        _ = try self.readLine(&line_buf);
+        // Read trailers until empty line (CRLF) per RFC 7230 §4.1
+        while (true) {
+            const trailer_line = try self.readLine(&line_buf);
+            if (trailer_line.len == 0) break;
+        }
         return result.toOwnedSlice(self.allocator);
     }
 
@@ -226,6 +230,9 @@ fn parseStatusLine(line: []const u8) !u16 {
 }
 
 /// HTTP/2 frame types as defined in RFC 7540.
+///
+/// Non-exhaustive: any u8 is valid. Unknown/extension/GREASE frame types
+/// (>= 0x0A) MUST be ignored by the receiver per RFC 7540 §4.1.
 pub const Http2FrameType = enum(u8) {
     data = 0x0,
     headers = 0x1,
@@ -237,6 +244,7 @@ pub const Http2FrameType = enum(u8) {
     goaway = 0x7,
     window_update = 0x8,
     continuation = 0x9,
+    _,
 };
 
 /// Represents the 9-byte header standard for all HTTP/2 frames.
@@ -252,7 +260,7 @@ pub const Http2FrameHeader = struct {
         buf[0] = @intCast((self.length >> 16) & 0xFF);
         buf[1] = @intCast((self.length >> 8) & 0xFF);
         buf[2] = @intCast(self.length & 0xFF);
-        buf[3] = @intFromEnum(self.frame_type);
+        buf[3] = @backingInt(self.frame_type);
         buf[4] = self.flags;
         buf[5] = @intCast((self.stream_id >> 24) & 0x7F);
         buf[6] = @intCast((self.stream_id >> 16) & 0xFF);
@@ -265,7 +273,7 @@ pub const Http2FrameHeader = struct {
     pub fn parse(data: [9]u8) Http2FrameHeader {
         return .{
             .length = (@as(u24, data[0]) << 16) | (@as(u24, data[1]) << 8) | data[2],
-            .frame_type = @enumFromInt(data[3]),
+            .frame_type = @fromBackingInt(@intCast(data[3])),
             .flags = data[4],
             .stream_id = (@as(u31, data[5] & 0x7F) << 24) | (@as(u31, data[6]) << 16) | (@as(u31, data[7]) << 8) | data[8],
         };
@@ -276,6 +284,9 @@ pub const Http2FrameHeader = struct {
 pub const HTTP2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 /// Configuration parameters for HTTP/2 connections.
+///
+/// Non-exhaustive: any u16 is valid. Unknown/unsupported SETTINGS identifiers
+/// MUST be ignored by the receiver per RFC 7540 §6.5.2.
 pub const Http2Settings = enum(u16) {
     header_table_size = 0x1,
     enable_push = 0x2,
@@ -283,6 +294,9 @@ pub const Http2Settings = enum(u16) {
     initial_window_size = 0x4,
     max_frame_size = 0x5,
     max_header_list_size = 0x6,
+    // 0x7 is reserved; 0x8 = ENABLE_CONNECT_PROTOCOL (RFC 8441);
+    // 0x9 = ENABLE_PUSH (deprecated alt); higher values are extensions/GREASE.
+    _,
 };
 
 /// Standard error codes for HTTP/2 stream and connection termination.
@@ -395,32 +409,32 @@ pub fn encodeSettingsPayload(settings: Http2Connection.Http2ConnectionSettings, 
     var buf: [6]u8 = undefined;
 
     // HEADER_TABLE_SIZE (0x1)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.header_table_size));
+    writeU16BE(&buf, @backingInt(Http2Settings.header_table_size));
     writeU32BE(buf[2..6], settings.header_table_size);
     try out.appendSlice(allocator, &buf);
 
     // ENABLE_PUSH (0x2)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.enable_push));
+    writeU16BE(&buf, @backingInt(Http2Settings.enable_push));
     writeU32BE(buf[2..6], if (settings.enable_push) 1 else 0);
     try out.appendSlice(allocator, &buf);
 
     // MAX_CONCURRENT_STREAMS (0x3)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.max_concurrent_streams));
+    writeU16BE(&buf, @backingInt(Http2Settings.max_concurrent_streams));
     writeU32BE(buf[2..6], settings.max_concurrent_streams);
     try out.appendSlice(allocator, &buf);
 
     // INITIAL_WINDOW_SIZE (0x4)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.initial_window_size));
+    writeU16BE(&buf, @backingInt(Http2Settings.initial_window_size));
     writeU32BE(buf[2..6], settings.initial_window_size);
     try out.appendSlice(allocator, &buf);
 
     // MAX_FRAME_SIZE (0x5)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.max_frame_size));
+    writeU16BE(&buf, @backingInt(Http2Settings.max_frame_size));
     writeU32BE(buf[2..6], settings.max_frame_size);
     try out.appendSlice(allocator, &buf);
 
     // MAX_HEADER_LIST_SIZE (0x6)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.max_header_list_size));
+    writeU16BE(&buf, @backingInt(Http2Settings.max_header_list_size));
     writeU32BE(buf[2..6], settings.max_header_list_size);
     try out.appendSlice(allocator, &buf);
 }
@@ -433,13 +447,25 @@ pub fn applySettingsPayload(settings: *Http2Connection.Http2ConnectionSettings, 
         const id = readU16BE(payload[i..][0..2]);
         const value = readU32BE(payload[i..][2..6]);
 
-        switch (@as(Http2Settings, @enumFromInt(id))) {
+        // RFC 7540 §6.5.2: An endpoint MUST ignore and discard any SETTINGS
+        // parameter with an identifier it does not understand.
+        switch (@as(Http2Settings, @fromBackingInt(@intCast(id)))) {
             .header_table_size => settings.header_table_size = value,
             .enable_push => settings.enable_push = (value != 0),
             .max_concurrent_streams => settings.max_concurrent_streams = value,
-            .initial_window_size => settings.initial_window_size = value,
-            .max_frame_size => settings.max_frame_size = value,
+            .initial_window_size => {
+                // RFC 7540 §6.9.2: INITIAL_WINDOW_SIZE must not exceed 2^31-1.
+                if (value > 0x7FFFFFFF) return error.FlowControlError;
+                settings.initial_window_size = value;
+            },
+            .max_frame_size => {
+                // RFC 7540 §6.5.2: MAX_FRAME_SIZE must be in range 2^14..2^24-1.
+                if (value < 16384 or value > 16777215) return error.ProtocolError;
+                settings.max_frame_size = value;
+            },
             .max_header_list_size => settings.max_header_list_size = value,
+            // RFC 7540 §6.5.2: Unknown/unsupported identifiers MUST be ignored.
+            _ => {},
         }
     }
 }
@@ -602,7 +628,7 @@ pub fn appendHttp3Frame(
 ) !void {
     var hdr_buf: [32]u8 = undefined;
     const hdr_len = try (Http3FrameHeader{
-        .frame_type = @intFromEnum(frame_type),
+        .frame_type = @backingInt(frame_type),
         .length = @intCast(payload.len),
     }).encode(&hdr_buf);
 
@@ -616,22 +642,22 @@ pub fn encodeHttp3SettingsPayload(
     allocator: Allocator,
     out: *std.ArrayList(u8),
 ) !void {
-    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.qpack_max_table_capacity));
+    try appendVarInt(out, allocator, @backingInt(Http3SettingId.qpack_max_table_capacity));
     try appendVarInt(out, allocator, settings.qpack_max_table_capacity);
 
-    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.max_field_section_size));
+    try appendVarInt(out, allocator, @backingInt(Http3SettingId.max_field_section_size));
     try appendVarInt(out, allocator, settings.max_field_section_size);
 
-    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.qpack_blocked_streams));
+    try appendVarInt(out, allocator, @backingInt(Http3SettingId.qpack_blocked_streams));
     try appendVarInt(out, allocator, settings.qpack_blocked_streams);
 
     if (settings.enable_connect_protocol) {
-        try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.enable_connect_protocol));
+        try appendVarInt(out, allocator, @backingInt(Http3SettingId.enable_connect_protocol));
         try appendVarInt(out, allocator, 1);
     }
 
     if (settings.enable_datagrams) {
-        try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.h3_datagram));
+        try appendVarInt(out, allocator, @backingInt(Http3SettingId.h3_datagram));
         try appendVarInt(out, allocator, 1);
     }
 }
@@ -655,11 +681,11 @@ pub fn parseHttp3SettingsPayload(payload: []const u8) !types.Http3Settings {
         offset += value_result.len;
 
         switch (id_result.value) {
-            @intFromEnum(Http3SettingId.qpack_max_table_capacity) => parsed.qpack_max_table_capacity = value_result.value,
-            @intFromEnum(Http3SettingId.max_field_section_size) => parsed.max_field_section_size = value_result.value,
-            @intFromEnum(Http3SettingId.qpack_blocked_streams) => parsed.qpack_blocked_streams = value_result.value,
-            @intFromEnum(Http3SettingId.enable_connect_protocol) => parsed.enable_connect_protocol = value_result.value != 0,
-            @intFromEnum(Http3SettingId.h3_datagram) => parsed.enable_datagrams = value_result.value != 0,
+            @backingInt(Http3SettingId.qpack_max_table_capacity) => parsed.qpack_max_table_capacity = value_result.value,
+            @backingInt(Http3SettingId.max_field_section_size) => parsed.max_field_section_size = value_result.value,
+            @backingInt(Http3SettingId.qpack_blocked_streams) => parsed.qpack_blocked_streams = value_result.value,
+            @backingInt(Http3SettingId.enable_connect_protocol) => parsed.enable_connect_protocol = value_result.value != 0,
+            @backingInt(Http3SettingId.h3_datagram) => parsed.enable_datagrams = value_result.value != 0,
             else => {},
         }
     }
@@ -800,6 +826,55 @@ test "HTTP/2 frame header serialization" {
     try std.testing.expectEqual(header.length, parsed.length);
     try std.testing.expectEqual(header.frame_type, parsed.frame_type);
     try std.testing.expectEqual(header.stream_id, parsed.stream_id);
+}
+
+test "HTTP/2 non-exhaustive frame type: unknown value does not panic" {
+    // RFC 7540 §4.1: unknown frame types MUST be ignored.
+    // Verify @enumFromInt does not panic for values >= 0x0A.
+    const unknown_type: u8 = 0xFF; // GREASE/extension type
+    const ft: Http2FrameType = @fromBackingInt(@intCast(unknown_type));
+    // The tag integer should round-trip correctly.
+    try std.testing.expectEqual(unknown_type, @backingInt(ft));
+}
+
+test "HTTP/2 non-exhaustive SETTINGS: unknown identifier is silently ignored" {
+    // RFC 7540 §6.5.2: unrecognised SETTINGS identifiers MUST be ignored.
+    // Build a SETTINGS payload with a known id (INITIAL_WINDOW_SIZE=0x4)
+    // followed by an unknown id (ENABLE_CONNECT_PROTOCOL=0x8).
+    var payload: [12]u8 = undefined;
+    // INITIAL_WINDOW_SIZE = 65535
+    payload[0] = 0x00;
+    payload[1] = 0x04;
+    payload[2] = 0x00;
+    payload[3] = 0x00;
+    payload[4] = 0xFF;
+    payload[5] = 0xFF;
+    // ENABLE_CONNECT_PROTOCOL (0x0008) = 1  — unknown to this library
+    payload[6] = 0x00;
+    payload[7] = 0x08;
+    payload[8] = 0x00;
+    payload[9] = 0x00;
+    payload[10] = 0x00;
+    payload[11] = 0x01;
+
+    var settings = Http2Connection.Http2ConnectionSettings{};
+    try applySettingsPayload(&settings, &payload);
+
+    // Known setting must be applied.
+    try std.testing.expectEqual(@as(u32, 65535), settings.initial_window_size);
+    // No panic and no error from the unknown setting.
+}
+
+test "HTTP/2 applySettingsPayload rejects invalid initial window size" {
+    var payload: [6]u8 = undefined;
+    payload[0] = 0x00;
+    payload[1] = 0x04; // INITIAL_WINDOW_SIZE
+    payload[2] = 0xFF;
+    payload[3] = 0xFF;
+    payload[4] = 0xFF;
+    payload[5] = 0xFF; // > 2^31-1
+    var settings = Http2Connection.Http2ConnectionSettings{};
+    try std.testing.expectError(error.FlowControlError, applySettingsPayload(&settings, &payload));
 }
 
 test "Protocol negotiation" {

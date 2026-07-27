@@ -531,7 +531,7 @@ pub fn parseWindowUpdatePayload(payload: []const u8) !u31 {
 
 /// Builds an RST_STREAM frame payload.
 pub fn buildRstStreamPayload(error_code: http.Http2ErrorCode) [4]u8 {
-    const code = @intFromEnum(error_code);
+    const code = @backingInt(error_code);
     var buf: [4]u8 = undefined;
     buf[0] = @intCast((code >> 24) & 0xFF);
     buf[1] = @intCast((code >> 16) & 0xFF);
@@ -547,7 +547,7 @@ pub fn parseRstStreamPayload(payload: []const u8) !http.Http2ErrorCode {
         (@as(u32, payload[1]) << 16) |
         (@as(u32, payload[2]) << 8) |
         payload[3];
-    return @enumFromInt(code);
+    return @fromBackingInt(@intCast(code));
 }
 
 /// Builds a PRIORITY frame payload.
@@ -579,7 +579,7 @@ pub fn parsePriorityPayload(payload: []const u8) !StreamPriority {
 
 /// Builds a GOAWAY frame payload.
 pub fn buildGoawayPayload(last_stream_id: u31, error_code: http.Http2ErrorCode, debug_data: ?[]const u8, allocator: Allocator) ![]u8 {
-    const code = @intFromEnum(error_code);
+    const code = @backingInt(error_code);
     const debug_len = if (debug_data) |d| d.len else 0;
     const payload = try allocator.alloc(u8, 8 + debug_len);
     errdefer allocator.free(payload);
@@ -614,12 +614,12 @@ pub fn parseGoawayPayload(payload: []const u8, allocator: Allocator) !struct {
             (@as(u32, payload[2]) << 8) |
             payload[3],
     );
-    const error_code: http.Http2ErrorCode = @enumFromInt(
+    const error_code: http.Http2ErrorCode = @fromBackingInt(@intCast(
         (@as(u32, payload[4]) << 24) |
             (@as(u32, payload[5]) << 16) |
             (@as(u32, payload[6]) << 8) |
             payload[7],
-    );
+    ));
 
     const debug_data = if (payload.len > 8)
         try allocator.dupe(u8, payload[8..])
@@ -828,12 +828,12 @@ test "buildGoawayFrame produces correct wire format" {
     );
     try std.testing.expectEqual(@as(u31, 5), last_stream_id);
 
-    const error_code: http.Http2ErrorCode = @enumFromInt(
+    const error_code: http.Http2ErrorCode = @fromBackingInt(@intCast(
         (@as(u32, payload[4]) << 24) |
             (@as(u32, payload[5]) << 16) |
             (@as(u32, payload[6]) << 8) |
             payload[7],
-    );
+    ));
     try std.testing.expectEqual(http.Http2ErrorCode.no_error, error_code);
     try std.testing.expectEqualStrings("debug info", payload[8..]);
 }

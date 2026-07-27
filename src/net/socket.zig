@@ -841,6 +841,26 @@ pub const Socket = struct {
         try posixSetSockOpt(self.handle, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&value));
     }
 
+    /// Enables or disables port reuse (SO_REUSEPORT).
+    pub fn setReusePort(self: *Self, enable: bool) !void {
+        const value: u32 = if (enable) 1 else 0;
+        const optname: u32 = if (builtin.os.tag == .linux or builtin.os.tag == .macos) 15 else posix.SO.REUSEADDR;
+        try posixSetSockOpt(self.handle, posix.SOL.SOCKET, optname, std.mem.asBytes(&value));
+    }
+
+    /// Sets SO_LINGER option on socket.
+    pub fn setLinger(self: *Self, onoff: bool, linger_sec: u16) !void {
+        const LingerStruct = extern struct {
+            l_onoff: c_int,
+            l_linger: c_int,
+        };
+        const l = LingerStruct{
+            .l_onoff = if (onoff) 1 else 0,
+            .l_linger = @intCast(linger_sec),
+        };
+        try posixSetSockOpt(self.handle, posix.SOL.SOCKET, posix.SO.LINGER, std.mem.asBytes(&l));
+    }
+
     /// Binds the socket to an address.
     pub fn bind(self: *Self, addr: net.Address) !void {
         try posixBind(self.handle, &addr.any, addr.getOsSockLen());

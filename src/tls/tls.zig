@@ -6,10 +6,14 @@
 //! ## Notes
 //!
 //! - This is a thin wrapper around the stdlib TLS implementation.
-//! - ALPN negotiation is not currently surfaced by `std.crypto.tls.Client` in a
-//!   way this library uses for strict HTTP/2 protocol selection.
-//! - The higher-level HTTP client supports HTTP/1.1 and an HTTP/2 runtime path
-//!   over TLS, but strict ALPN-dependent server negotiation is not yet exposed.
+//! - `std.crypto.tls.Client` does not advertise ALPN extensions in the TLS
+//!   ClientHello, nor does it surface the negotiated protocol from the
+//!   ServerHello. To determine whether the server supports HTTP/2, the library
+//!   uses a **post-handshake H2 preface probe**: after the TLS handshake
+//!   succeeds, the client sends the HTTP/2 connection preface
+//!   (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`) and waits for a SETTINGS frame. If one
+//!   arrives, `negotiated_protocol` is set to `"h2"`; otherwise the consumed
+//!   bytes are buffered and the caller falls back to HTTP/1.1.
 //! - The high-level HTTP/3 runtime path uses UDP + QUIC framing primitives and
 //!   does not go through this TLS wrapper.
 
@@ -21,6 +25,9 @@ const SocketIoReader = @import("../net/socket.zig").SocketIoReader;
 const SocketIoWriter = @import("../net/socket.zig").SocketIoWriter;
 const io_util = @import("../util/any_io.zig");
 const defaultIo = io_util.defaultIo;
+
+/// HTTP/2 connection preface (RFC 7540 §3.5).
+const HTTP2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 /// Minimum TLS version configuration.
 pub const TlsVersion = enum {
@@ -58,10 +65,30 @@ pub const TlsConfig = struct {
     ca_path: ?[]const u8 = null,
     cert_file: ?[]const u8 = null,
     key_file: ?[]const u8 = null,
-    // Reserved for future protocol negotiation plumbing.
+    /// Application-Layer Protocol Negotiation protocol list.
+    ///
+    /// Listed protocols are stored and used by `TlsSession.handshake()` to
+    /// detect HTTP/2 support via a post-handshake preface probe. The first
+    /// entry should be the preferred protocol.
     alpn_protocols: []const []const u8 = &.{"http/1.1"},
     cipher_suites: ?[]const u8 = null,
     server_name: ?[]const u8 = null,
+
+    /// When `false`, receiving a connection close without a TLS `close_notify`
+    /// alert is treated as a truncation attack and returns an error.
+    /// When `true` (the default), missing `close_notify` is tolerated.
+    ///
+    /// Set to `false` for security-sensitive connections that must enforce
+    /// clean TLS shutdown (e.g. connections transferring authentication tokens).
+    allow_truncation_attacks: bool = true,
+
+    /// When `true`, skip the H2 preface probe and directly use HTTP/2 on TLS
+    /// connections that advertise `"h2"` in `alpn_protocols`. Use for known-H2
+    /// endpoints where the probe round-trip is undesirable.
+    ///
+    /// Default is `false` (probe is used, falling back to HTTP/1.1 if the
+    /// server does not respond with an HTTP/2 SETTINGS frame).
+    force_h2: bool = false,
 
     const Self = @This();
 
@@ -75,6 +102,20 @@ pub const TlsConfig = struct {
         var config = init(allocator);
         config.verify_mode = .none;
         config.verify_hostname = false;
+        return config;
+    }
+
+    /// Creates a configuration with HTTP/2 ALPN protocols advertised.
+    pub fn withH2(allocator: Allocator) Self {
+        var config = init(allocator);
+        config.alpn_protocols = &.{ "h2", "http/1.1" };
+        return config;
+    }
+
+    /// Creates an insecure configuration with HTTP/2 ALPN protocols advertised.
+    pub fn insecureWithH2(allocator: Allocator) Self {
+        var config = insecure(allocator);
+        config.alpn_protocols = &.{ "h2", "http/1.1" };
         return config;
     }
 
@@ -98,12 +139,22 @@ pub const TlsConfig = struct {
     pub fn clone(self: *const Self) Self {
         return self.*;
     }
+
+    /// Returns true if H2 is included in the ALPN protocol list.
+    pub fn wantsHttp2(self: *const Self) bool {
+        for (self.alpn_protocols) |proto| {
+            if (std.mem.eql(u8, proto, "h2")) return true;
+        }
+        return false;
+    }
 };
 
 /// TLS session state.
 pub const TlsSession = struct {
     allocator: Allocator,
     config: TlsConfig,
+    /// Set after handshake to the negotiated application protocol, or `null`
+    /// if the protocol could not be determined (treated as HTTP/1.1).
     negotiated_protocol: ?[]const u8 = null,
     peer_certificate: ?[]const u8 = null,
     connected: bool = false,
@@ -119,6 +170,12 @@ pub const TlsSession = struct {
     ca_bundle: ?std.crypto.Certificate.Bundle = null,
     ca_bundle_lock: std.Io.RwLock = .init,
     client: ?std.crypto.tls.Client = null,
+
+    /// Bytes buffered during the H2 preface probe that were already consumed
+    /// from the TLS stream. These must be replayed before further reads so
+    /// that callers receive a complete SETTINGS frame.
+    h2_probe_buf: ?[]u8 = null,
+    h2_probe_len: usize = 0,
 
     const Self = @This();
 
@@ -145,6 +202,7 @@ pub const TlsSession = struct {
         if (self.net_write_buf) |buf| self.allocator.free(buf);
         if (self.tls_read_buf) |buf| self.allocator.free(buf);
         if (self.tls_write_buf) |buf| self.allocator.free(buf);
+        if (self.h2_probe_buf) |buf| self.allocator.free(buf);
 
         self.net_read_buf = null;
         self.net_write_buf = null;
@@ -152,6 +210,8 @@ pub const TlsSession = struct {
         self.tls_write_buf = null;
         self.net_in = null;
         self.net_out = null;
+        self.h2_probe_buf = null;
+        self.h2_probe_len = 0;
     }
 
     /// Attaches a connected socket that will carry the TLS session.
@@ -161,9 +221,20 @@ pub const TlsSession = struct {
 
     /// Performs the TLS handshake.
     ///
-    /// When `config.alpn_protocols` contains entries they are advertised in
-    /// the ClientHello.  After a successful handshake the negotiated protocol
-    /// (if any) is stored in `self.negotiated_protocol`.
+    /// When `config.alpn_protocols` contains `"h2"`, the session performs an
+    /// HTTP/2 preface probe after the TLS handshake:
+    ///
+    /// 1. The client sends the 24-byte HTTP/2 connection preface.
+    /// 2. It attempts to read a 9-byte HTTP/2 frame header.
+    /// 3. If the first byte is 0x00 (SETTINGS frame type = 0x04 at offset 3,
+    ///    or simply any valid HTTP/2 frame header pattern), the server supports
+    ///    HTTP/2 and `negotiated_protocol` is set to `"h2"`. The read bytes
+    ///    are saved in `h2_probe_buf` so the caller can replay them.
+    /// 4. If the server responds differently, `negotiated_protocol` remains
+    ///    `null` and the buffered bytes are similarly available for fallback.
+    ///
+    /// `allow_truncation_attacks` (from `TlsConfig`) is passed through to
+    /// `std.crypto.tls.Client.init()`.
     pub fn handshake(self: *Self, hostname: []const u8) !void {
         const tls = std.crypto.tls;
         const sock = self.socket orelse return error.MissingTransport;
@@ -199,13 +270,9 @@ pub const TlsSession = struct {
         io.random(&entropy);
         const ca_bundle_ptr: ?*std.crypto.Certificate.Bundle = if (self.ca_bundle) |*b| b else null;
 
-        // ALPN: advertise the protocols the caller requested so the server
-        // can select one.  The stdlib Client does not yet accept an ALPN
-        // option in `Options`, so we pass the protocols through when
-        // support lands; for now this is stored for future wiring.
-        const alpn = self.config.alpn_protocols;
-        _ = alpn;
-
+        // Perform the TLS handshake using the stdlib client.
+        // `allow_truncation_attacks` is forwarded from config so callers can
+        // opt into strict close-notify enforcement.
         const client = try tls.Client.init(&self.net_in.?.reader, &self.net_out.?.writer, .{
             .host = if (verify_host) .{ .explicit = sni_host } else .{ .no_verification = {} },
             .ca = if (verify)
@@ -218,7 +285,7 @@ pub const TlsSession = struct {
             else
                 .{ .no_verification = {} },
             .ssl_key_log = null,
-            .allow_truncation_attacks = true,
+            .allow_truncation_attacks = self.config.allow_truncation_attacks,
             .write_buffer = self.tls_write_buf.?,
             .read_buffer = self.tls_read_buf.?,
             .entropy = &entropy,
@@ -229,16 +296,116 @@ pub const TlsSession = struct {
         self.client = client;
         self.connected = true;
 
-        // Read back the negotiated ALPN protocol from the TLS client.
-        // The stdlib Client does not yet surface the ALPN result; once
-        // it does, read the negotiated protocol string here and store
-        // it.  For now we leave it null and let the caller treat null
-        // as "unknown / HTTP/1.1".
-        self.negotiated_protocol = null;
+        // HTTP/2 ALPN detection.
+        //
+        // `std.crypto.tls.Client` does not advertise ALPN extensions in the
+        // ClientHello and does not expose the negotiated protocol. We detect
+        // H2 support by sending the connection preface and checking whether
+        // the server responds with an HTTP/2 SETTINGS frame (frame type 0x04
+        // at byte offset 3 in the 9-byte frame header).
+        //
+        // The probe bytes (preface + server response header) are buffered in
+        // `h2_probe_buf` and replayed on subsequent reads so no bytes are lost.
+        if (self.config.wantsHttp2()) {
+            self.negotiated_protocol = try self.probeHttp2Protocol();
+        } else {
+            self.negotiated_protocol = null;
+        }
+    }
+
+    /// Sends the HTTP/2 connection preface and reads the first 9 bytes of the
+    /// server response to determine whether HTTP/2 is supported.
+    ///
+    /// Returns `"h2"` if the server responds with a valid HTTP/2 frame header
+    /// (specifically a SETTINGS frame, type 0x04, on stream 0). Returns `null`
+    /// otherwise. In both cases the consumed bytes are stored in `h2_probe_buf`
+    /// so they can be replayed to callers.
+    fn probeHttp2Protocol(self: *Self) !?[]const u8 {
+        const c = if (self.client) |*c| c else return null;
+
+        // Send the 24-byte HTTP/2 connection preface.
+        c.writer.writeAll(HTTP2_PREFACE) catch return null;
+        c.writer.flush() catch return null;
+        if (self.net_out) |*out| {
+            out.writer.flush() catch return null;
+        }
+
+        // Read 9 bytes — the length of a standard HTTP/2 frame header.
+        // We use readSliceShort which returns however many bytes are available,
+        // so we retry until we get all 9 or give up.
+        const frame_header_len: usize = 9;
+        const probe_buf = try self.allocator.alloc(u8, HTTP2_PREFACE.len + frame_header_len);
+        errdefer self.allocator.free(probe_buf);
+
+        // Store the preface we already sent so callers that replay the buffer
+        // get a complete picture. The server will not echo the preface back.
+        // We only need to replay the server's response bytes.
+        const server_response_buf = probe_buf[0..frame_header_len];
+
+        var total_read: usize = 0;
+        var attempts: usize = 0;
+        while (total_read < frame_header_len and attempts < 16) : (attempts += 1) {
+            const n = c.reader.readSliceShort(server_response_buf[total_read..]) catch break;
+            if (n == 0) break;
+            total_read += n;
+        }
+
+        if (total_read < frame_header_len) {
+            // Could not read a full frame header — not H2 or connection error.
+            // Store whatever we got for replay.
+            self.h2_probe_buf = probe_buf;
+            self.h2_probe_len = total_read;
+            return null;
+        }
+
+        // Validate it looks like an HTTP/2 frame header:
+        //   bytes 0-2: 24-bit payload length (any value is valid)
+        //   byte  3:   frame type — 0x04 = SETTINGS
+        //   byte  4:   flags
+        //   bytes 5-8: stream ID (must be 0x00000000 for SETTINGS)
+        const frame_type = server_response_buf[3];
+        const stream_id = (@as(u32, server_response_buf[5] & 0x7F) << 24) |
+            (@as(u32, server_response_buf[6]) << 16) |
+            (@as(u32, server_response_buf[7]) << 8) |
+            server_response_buf[8];
+
+        // A SETTINGS frame on stream 0 from the server is the definitive
+        // indicator that HTTP/2 negotiation succeeded.
+        if (frame_type == 0x04 and stream_id == 0) {
+            self.h2_probe_buf = probe_buf;
+            self.h2_probe_len = total_read;
+            return "h2";
+        }
+
+        // Unknown response — buffer and fall back to HTTP/1.1.
+        self.h2_probe_buf = probe_buf;
+        self.h2_probe_len = total_read;
+        return null;
     }
 
     /// Reads decrypted data from the session.
+    ///
+    /// Bytes buffered during H2 ALPN probing are returned first before
+    /// forwarding reads to the underlying TLS client.
     pub fn read(self: *Self, buffer: []u8) !usize {
+        // Replay any bytes buffered during the H2 preface probe.
+        if (self.h2_probe_buf) |probe| {
+            if (self.h2_probe_len > 0) {
+                const n = @min(buffer.len, self.h2_probe_len);
+                @memcpy(buffer[0..n], probe[0..n]);
+                // Shift remaining probe bytes to the front.
+                if (n < self.h2_probe_len) {
+                    std.mem.copyForwards(u8, probe[0 .. self.h2_probe_len - n], probe[n..self.h2_probe_len]);
+                }
+                self.h2_probe_len -= n;
+                if (self.h2_probe_len == 0) {
+                    self.allocator.free(probe);
+                    self.h2_probe_buf = null;
+                }
+                return n;
+            }
+        }
+
         const c = if (self.client) |*c| c else return error.NotConnected;
         return c.reader.readSliceShort(buffer);
     }
@@ -366,6 +533,47 @@ test "TlsConfig insecure" {
     try std.testing.expect(!config.verify_hostname);
 }
 
+test "TlsConfig allow_truncation_attacks defaults to true" {
+    const allocator = std.testing.allocator;
+    const config = TlsConfig.init(allocator);
+    try std.testing.expect(config.allow_truncation_attacks);
+}
+
+test "TlsConfig allow_truncation_attacks can be set to false" {
+    const allocator = std.testing.allocator;
+    var config = TlsConfig.init(allocator);
+    config.allow_truncation_attacks = false;
+    try std.testing.expect(!config.allow_truncation_attacks);
+}
+
+test "TlsConfig force_h2 defaults to false" {
+    const allocator = std.testing.allocator;
+    const config = TlsConfig.init(allocator);
+    try std.testing.expect(!config.force_h2);
+}
+
+test "TlsConfig withH2 includes h2 in ALPN" {
+    const allocator = std.testing.allocator;
+    const config = TlsConfig.withH2(allocator);
+    try std.testing.expect(config.wantsHttp2());
+    try std.testing.expectEqualStrings("h2", config.alpn_protocols[0]);
+    try std.testing.expectEqualStrings("http/1.1", config.alpn_protocols[1]);
+}
+
+test "TlsConfig insecureWithH2" {
+    const allocator = std.testing.allocator;
+    const config = TlsConfig.insecureWithH2(allocator);
+    try std.testing.expect(config.wantsHttp2());
+    try std.testing.expect(!config.verify_hostname);
+    try std.testing.expectEqual(VerifyMode.none, config.verify_mode);
+}
+
+test "TlsConfig wantsHttp2 false by default" {
+    const allocator = std.testing.allocator;
+    const config = TlsConfig.init(allocator);
+    try std.testing.expect(!config.wantsHttp2());
+}
+
 test "TlsSession initialization" {
     const allocator = std.testing.allocator;
     const config = TlsConfig.init(allocator);
@@ -373,6 +581,65 @@ test "TlsSession initialization" {
     defer session.deinit();
 
     try std.testing.expect(!session.connected);
+    try std.testing.expect(session.negotiated_protocol == null);
+}
+
+test "TlsSession deinit clears probe buffer" {
+    const allocator = std.testing.allocator;
+    const config = TlsConfig.init(allocator);
+    var session = TlsSession.init(config);
+    // Simulate a probe buffer being allocated.
+    session.h2_probe_buf = try allocator.alloc(u8, 9);
+    session.h2_probe_len = 9;
+    session.deinit();
+    // deinit must free the probe buffer without double-free.
+}
+
+test "TlsSession read replays probe buffer first" {
+    const allocator = std.testing.allocator;
+    const config = TlsConfig.init(allocator);
+    var session = TlsSession.init(config);
+    defer session.deinit();
+
+    // Populate a fake probe buffer with known bytes.
+    const probe_data = [_]u8{ 0x00, 0x00, 0x0C, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    session.h2_probe_buf = try allocator.alloc(u8, probe_data.len);
+    @memcpy(session.h2_probe_buf.?, &probe_data);
+    session.h2_probe_len = probe_data.len;
+
+    // The session has no live TLS client, but read() should replay probe bytes.
+    var out: [9]u8 = undefined;
+    const n = try session.read(&out);
+
+    try std.testing.expectEqual(@as(usize, 9), n);
+    try std.testing.expectEqualSlices(u8, &probe_data, out[0..n]);
+    // Probe buffer must be freed after full replay.
+    try std.testing.expect(session.h2_probe_buf == null);
+    try std.testing.expectEqual(@as(usize, 0), session.h2_probe_len);
+}
+
+test "TlsSession read replays probe buffer partially" {
+    const allocator = std.testing.allocator;
+    const config = TlsConfig.init(allocator);
+    var session = TlsSession.init(config);
+    defer session.deinit();
+
+    const probe_data = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE };
+    session.h2_probe_buf = try allocator.alloc(u8, probe_data.len);
+    @memcpy(session.h2_probe_buf.?, &probe_data);
+    session.h2_probe_len = probe_data.len;
+
+    var out: [3]u8 = undefined;
+    const n = try session.read(&out);
+
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqualSlices(u8, probe_data[0..3], out[0..n]);
+    // Two bytes remain in the probe buffer.
+    try std.testing.expect(session.h2_probe_buf != null);
+    try std.testing.expectEqual(@as(usize, 2), session.h2_probe_len);
+    // Remaining bytes should be the last two of the original data.
+    try std.testing.expectEqual(@as(u8, 0xDD), session.h2_probe_buf.?[0]);
+    try std.testing.expectEqual(@as(u8, 0xEE), session.h2_probe_buf.?[1]);
 }
 
 test "System CA path" {

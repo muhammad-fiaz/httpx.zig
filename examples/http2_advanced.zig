@@ -23,6 +23,7 @@ pub fn main() !void {
     try goawayAndRstStreamExample(allocator);
     try hpackSecurityExample(allocator);
     try trailerExample(allocator);
+    try tlsAndAlpnExample(allocator);
 
     std.debug.print("\n=== All HTTP/2 advanced examples completed ===\n", .{});
 }
@@ -243,6 +244,24 @@ fn trailerExample(allocator: std.mem.Allocator) !void {
     std.debug.print("\nTrailers are sent as HEADERS frames after all DATA frames\n", .{});
     std.debug.print("  with the END_STREAM flag set. This signals that no more\n", .{});
     std.debug.print("  data will be sent on this stream.\n", .{});
+
+    std.debug.print("\n", .{});
+}
+
+/// Demonstrates TlsConfig ALPN and allow_truncation_attacks configuration.
+fn tlsAndAlpnExample(allocator: std.mem.Allocator) !void {
+    std.debug.print("--- TLS Config & ALPN Negotiation ---\n", .{});
+
+    const tls_cfg = httpx.tls.TlsConfig.withH2(allocator);
+    std.debug.print("TlsConfig.withH2():\n", .{});
+    std.debug.print("  wantsHttp2: {s}\n", .{if (tls_cfg.wantsHttp2()) "true" else "false"});
+    std.debug.print("  allow_truncation_attacks: {s}\n", .{if (tls_cfg.allow_truncation_attacks) "true" else "false"});
+    std.debug.print("  primary ALPN protocol: {s}\n", .{tls_cfg.alpn_protocols[0]});
+
+    var strict_cfg = httpx.tls.TlsConfig.init(allocator);
+    strict_cfg.allow_truncation_attacks = false;
+    std.debug.print("\nStrict TlsConfig:\n", .{});
+    std.debug.print("  allow_truncation_attacks: {s}\n", .{if (strict_cfg.allow_truncation_attacks) "true" else "false"});
 
     std.debug.print("\n", .{});
 }

@@ -108,6 +108,9 @@ pub const common = @import("util/common.zig");
 pub const multipart = @import("util/multipart.zig");
 pub const metrics_mod = @import("util/metrics.zig");
 pub const session_mod = @import("util/session.zig");
+pub const compression_util = @import("util/compression.zig");
+pub const dns = @import("net/dns.zig");
+pub const sse = @import("util/sse.zig");
 
 pub const executor = @import("concurrency/executor.zig");
 pub const concurrency = @import("concurrency/pool.zig");

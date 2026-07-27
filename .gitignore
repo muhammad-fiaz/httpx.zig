@@ -35,3 +35,4 @@ docs/pnpm-lock.yaml
 docs/yarn.lock
 docs/bun.lockb
 docs/bun.lock
+zig-pkg

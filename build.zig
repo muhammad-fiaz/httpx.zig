@@ -17,9 +17,18 @@ pub fn build(b: *std.Build) void {
 
     const optimize = b.standardOptimizeOption(.{});
 
+    const zstd_dep = b.lazyDependency("zstd", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const httpx_module = b.createModule(.{
         .root_source_file = b.path("src/httpx.zig"),
     });
+
+    if (zstd_dep) |zstd| {
+        httpx_module.addImport("zstd", zstd.module("zstd"));
+    }
 
     _ = b.addModule("httpx", .{
         .root_source_file = b.path("src/httpx.zig"),
@@ -102,10 +111,6 @@ pub fn build(b: *std.Build) void {
         linkPlatformLibs(exe, target);
 
         const install_exe = b.addInstallArtifact(exe, .{});
-        // Fully serialize: each example's COMPILE step depends on the previous
-        // example's RUN step having completed. This prevents the Zig compiler
-        // from being launched in parallel for multiple examples, which would
-        // exhaust memory and cause exit code 253 crashes.
         if (previous_run_step) |prev| {
             exe.step.dependOn(prev);
             install_exe.step.dependOn(prev);

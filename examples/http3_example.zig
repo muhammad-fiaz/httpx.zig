@@ -198,7 +198,7 @@ fn quicFrameExample(_: std.mem.Allocator) !void {
 
     // CONNECTION_CLOSE frame
     const close_frame = httpx.quic.ConnectionCloseFrame{
-        .error_code = @intFromEnum(httpx.quic.TransportError.no_error),
+        .error_code = @backingInt(httpx.quic.TransportError.no_error),
         .frame_type = null,
         .reason_phrase = "graceful shutdown",
     };

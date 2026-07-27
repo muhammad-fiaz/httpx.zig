@@ -489,6 +489,9 @@ pub const Client = struct {
         }
 
         try req.headers.set(HeaderName.USER_AGENT, self.config.user_agent);
+        if (!req.headers.contains("Accept-Encoding")) {
+            try req.headers.set("Accept-Encoding", "gzip, deflate");
+        }
 
         if (self.config.default_headers) |hdrs| {
             for (hdrs) |h| {
@@ -870,9 +873,13 @@ pub const Client = struct {
         }
 
         if (req.uri.isTls()) {
-            var tls_cfg = if (verify_ssl) TlsConfig.init(self.allocator) else TlsConfig.insecure(self.allocator);
-            tls_cfg.alpn_protocols = &.{ "h2", "http/1.1" };
-            var session = TlsSession.init(tls_cfg);
+            // Use the withH2 / insecureWithH2 helpers so that the H2 ALPN
+            // preface probe is enabled automatically.
+            const tls_session_cfg = if (verify_ssl)
+                TlsConfig.withH2(self.allocator)
+            else
+                TlsConfig.insecureWithH2(self.allocator);
+            var session = TlsSession.init(tls_session_cfg);
             defer session.deinit();
             session.attachSocket(&socket);
             try session.handshake(host);
@@ -1031,7 +1038,7 @@ pub const Client = struct {
 
         var control_stream_payload = std.ArrayList(u8).empty;
         defer control_stream_payload.deinit(self.allocator);
-        try http.appendVarInt(&control_stream_payload, self.allocator, @intFromEnum(quic.Http3StreamType.control));
+        try http.appendVarInt(&control_stream_payload, self.allocator, @backingInt(quic.Http3StreamType.control));
         try http.appendHttp3Frame(&control_stream_payload, self.allocator, .settings, settings_payload.items);
 
         // Send MAX_DATA and MAX_STREAM_DATA to advertise our flow control limits
@@ -1204,7 +1211,7 @@ pub const Client = struct {
             offset += frame_len;
 
             switch (header_decoded.header.frame_type) {
-                @intFromEnum(http.Http3FrameType.headers) => {
+                @backingInt(http.Http3FrameType.headers) => {
                     const decoded_headers = try qpack.decodeHeaders(qpack_decoder, frame_payload, self.allocator);
                     defer {
                         for (decoded_headers) |h| {
@@ -1226,28 +1233,28 @@ pub const Client = struct {
                         try response_headers.append(h.name, h.value);
                     }
                 },
-                @intFromEnum(http.Http3FrameType.data) => {
+                @backingInt(http.Http3FrameType.data) => {
                     if (response_body.items.len + frame_payload.len > self.config.max_response_size) {
                         return error.ResponseTooLarge;
                     }
                     try response_body.appendSlice(self.allocator, frame_payload);
                 },
-                @intFromEnum(http.Http3FrameType.settings) => {
+                @backingInt(http.Http3FrameType.settings) => {
                     _ = try http.parseHttp3SettingsPayload(frame_payload);
                 },
-                @intFromEnum(http.Http3FrameType.goaway) => {
+                @backingInt(http.Http3FrameType.goaway) => {
                     // Gracefully handle GOAWAY: finish current stream processing
                     if (status_code.* != null) {
                         got_response_fin.* = true;
                     }
                 },
-                @intFromEnum(http.Http3FrameType.max_data) => {
+                @backingInt(http.Http3FrameType.max_data) => {
                     if (frame_payload.len > 0) {
                         const val = try http.decodeVarInt(frame_payload);
                         conn_max_data.* = val.value;
                     }
                 },
-                @intFromEnum(http.Http3FrameType.max_stream_data) => {
+                @backingInt(http.Http3FrameType.max_stream_data) => {
                     if (frame_payload.len > 0) {
                         // stream_id varint + data_limit varint; update the relevant stream
                         const sid = try http.decodeVarInt(frame_payload);
@@ -1257,6 +1264,130 @@ pub const Client = struct {
                 },
                 else => {
                     // Unknown/unsupported frame types are ignored for forward compatibility.
+                },
+            }
+        }
+    }
+
+    /// A frame buffered during the H2 body-upload flow-control pump phase.
+    /// Freed by the caller after replaying in the response loop.
+    const EarlyH2Frame = struct {
+        header: http.Http2FrameHeader,
+        payload: []u8,
+
+        fn deinit(self: *EarlyH2Frame, allocator: Allocator) void {
+            allocator.free(self.payload);
+        }
+    };
+
+    /// A frame read by the H2 response loop — wraps either a freshly-read frame
+    /// (owned) or a replayed early frame (not owned by this value).
+    const H2Frame = struct {
+        header: http.Http2FrameHeader,
+        payload: []u8,
+        from_early_buf: bool,
+    };
+
+    /// Pumps incoming HTTP/2 frames until the send window is positive.
+    ///
+    /// Called when `request_stream.send_window` or
+    /// `stream_manager.connection_send_window` reaches zero mid-body upload.
+    /// Processes WINDOW_UPDATE, SETTINGS, and PING frames to grow the send window.
+    /// Early response frames (HEADERS/DATA/CONTINUATION) are appended to
+    /// `early_frames` so the response loop can replay them without data loss.
+    ///
+    /// Returns `error.GoAway` if the server sends GOAWAY, or
+    /// `error.StreamError` if the server resets the request stream.
+    /// Returns `error.ProtocolError` if more than 10,000 frames are processed
+    /// without the window being granted.
+    fn pumpUntilSendWindow(
+        self: *Client,
+        transport: anytype,
+        stream_manager: *h2stream.StreamManager,
+        request_stream: *h2stream.Stream,
+        peer_max_frame_size: *u32,
+        early_frames: *std.ArrayList(EarlyH2Frame),
+    ) !void {
+        var pump_counter: usize = 0;
+        while (request_stream.send_window <= 0 or stream_manager.connection_send_window <= 0) {
+            pump_counter += 1;
+            if (pump_counter > 10_000) return error.ProtocolError;
+
+            var hdr_bytes: [9]u8 = undefined;
+            try transport.readNoEof(&hdr_bytes);
+            const fhdr = http.Http2FrameHeader.parse(hdr_bytes);
+
+            const payload_len: usize = @intCast(fhdr.length);
+            if (payload_len > self.config.max_response_size) return error.FrameTooLarge;
+
+            const payload = try self.allocator.alloc(u8, payload_len);
+            errdefer self.allocator.free(payload);
+            if (payload_len > 0) try transport.readNoEof(payload);
+
+            switch (fhdr.frame_type) {
+                .window_update => {
+                    if (payload.len != 4) {
+                        self.allocator.free(payload);
+                        return error.ProtocolError;
+                    }
+                    const increment = ((@as(u32, payload[0] & 0x7F) << 24) |
+                        (@as(u32, payload[1]) << 16) |
+                        (@as(u32, payload[2]) << 8) |
+                        payload[3]);
+                    self.allocator.free(payload);
+                    if (increment == 0) return error.ProtocolError;
+                    if (fhdr.stream_id == 0) {
+                        // Connection-level WINDOW_UPDATE.
+                        stream_manager.connection_send_window += @intCast(increment);
+                    } else if (fhdr.stream_id == request_stream.id) {
+                        // Stream-level WINDOW_UPDATE.
+                        request_stream.send_window += @intCast(increment);
+                    }
+                    // If both windows are positive now, we can stop pumping.
+                },
+                .settings => {
+                    const is_ack = (fhdr.flags & 0x01) != 0;
+                    if (!is_ack and fhdr.stream_id == 0) {
+                        var peer_settings = http.Http2Connection.Http2ConnectionSettings{};
+                        http.applySettingsPayload(&peer_settings, payload) catch {};
+                        stream_manager.applyPeerSettings(peer_settings) catch {};
+                        peer_max_frame_size.* = peer_settings.max_frame_size;
+                        // Send SETTINGS ACK.
+                        writeHttp2Frame(transport, .settings, 0x01, 0, &.{}) catch {};
+                    }
+                    self.allocator.free(payload);
+                },
+                .ping => {
+                    const is_ack = (fhdr.flags & 0x01) != 0;
+                    if (!is_ack and fhdr.stream_id == 0 and payload.len == 8) {
+                        writeHttp2Frame(transport, .ping, 0x01, 0, payload) catch {};
+                    }
+                    self.allocator.free(payload);
+                },
+                .goaway => {
+                    self.allocator.free(payload);
+                    return error.GoAway;
+                },
+                .rst_stream => {
+                    if (fhdr.stream_id == request_stream.id) {
+                        self.allocator.free(payload);
+                        return error.StreamError;
+                    }
+                    self.allocator.free(payload);
+                },
+                .priority => {
+                    self.allocator.free(payload);
+                },
+                .headers, .data, .continuation, .push_promise => {
+                    // Early response frame — buffer for replay in the response loop.
+                    try early_frames.append(self.allocator, .{
+                        .header = fhdr,
+                        .payload = payload,
+                    });
+                },
+                // RFC 7540 §4.1: Unknown frame types MUST be ignored.
+                _ => {
+                    self.allocator.free(payload);
                 },
             }
         }
@@ -1335,14 +1466,39 @@ pub const Client = struct {
 
         var peer_max_frame_size: u32 = local_settings.max_frame_size;
 
+        // Buffered early-response frames received during the body upload phase
+        // (when we pump for WINDOW_UPDATE). These are replayed at the start of
+        // the response loop so no frames are dropped.
+        var early_frames = std.ArrayList(EarlyH2Frame).empty;
+        defer {
+            for (early_frames.items) |*ef| ef.deinit(self.allocator);
+            early_frames.deinit(self.allocator);
+        }
+
         if (has_body) {
             const body = req.body.?;
             var offset: usize = 0;
             while (offset < body.len) {
+                // If either the stream or connection send window is exhausted,
+                // pump incoming frames until we get enough WINDOW_UPDATE credit
+                // rather than immediately failing with FlowControlError.
                 if (request_stream.send_window <= 0 or stream_manager.connection_send_window <= 0) {
-                    return error.FlowControlError;
+                    try pumpUntilSendWindow(
+                        self,
+                        transport,
+                        &stream_manager,
+                        request_stream,
+                        &peer_max_frame_size,
+                        &early_frames,
+                    );
                 }
-                const max_chunk = @min(@as(usize, @intCast(request_stream.send_window)), @as(usize, @intCast(stream_manager.connection_send_window)));
+                const window_stream = @as(i64, request_stream.send_window);
+                const window_conn = @as(i64, stream_manager.connection_send_window);
+                if (window_stream <= 0 or window_conn <= 0) return error.FlowControlError;
+                const max_chunk = @min(
+                    @as(usize, @intCast(window_stream)),
+                    @as(usize, @intCast(window_conn)),
+                );
                 const chunk_len = @min(body.len - offset, max_chunk, @as(usize, @intCast(peer_max_frame_size)));
                 const is_last = offset + chunk_len == body.len;
                 const chunk_flags: u8 = if (is_last) 0x01 else 0;
@@ -1383,26 +1539,44 @@ pub const Client = struct {
 
         var peer_settings = http.Http2Connection.Http2ConnectionSettings{};
 
+        // Replay buffered early-response frames collected during body upload
+        // (pumpUntilSendWindow may have buffered them).  We process them first
+        // so the loop below sees a logically complete frame stream.
+        var early_frame_idx: usize = 0;
+
         var frame_counter: usize = 0;
         while (!response_done) {
             frame_counter += 1;
             if (frame_counter > 10_000) return error.ProtocolError;
 
-            const frame = self.readHttp2Frame(transport) catch |err| switch (err) {
-                error.UnexpectedEof => {
-                    // RFC 7540 section 6.8: a server may close the connection
-                    // after sending the final frame. If we already received a
-                    // complete response (END_STREAM seen, status code present),
-                    // treat the clean close as end-of-response rather than error.
-                    if (got_end_stream and status_code != null) {
-                        response_done = true;
-                        continue;
-                    }
-                    return error.InvalidResponse;
-                },
-                else => return err,
+            // Consume buffered early frames before reading from the transport.
+            const frame: H2Frame = blk: {
+                if (early_frame_idx < early_frames.items.len) {
+                    const ef = &early_frames.items[early_frame_idx];
+                    early_frame_idx += 1;
+                    break :blk H2Frame{
+                        .header = ef.header,
+                        .payload = ef.payload,
+                        .from_early_buf = true,
+                    };
+                }
+                break :blk self.readHttp2Frame(transport) catch |err| switch (err) {
+                    error.UnexpectedEof => {
+                        // RFC 7540 §6.8: a server may close the connection
+                        // after sending the final frame. If we already received a
+                        // complete response (END_STREAM seen, status code present),
+                        // treat the clean close as end-of-response rather than error.
+                        if (got_end_stream and status_code != null) {
+                            response_done = true;
+                            continue;
+                        }
+                        return error.InvalidResponse;
+                    },
+                    else => return err,
+                };
             };
-            defer self.allocator.free(frame.payload);
+            // Only free payload for frames we allocated ourselves (not early buf replays).
+            defer if (!frame.from_early_buf) self.allocator.free(frame.payload);
 
             switch (frame.header.frame_type) {
                 .settings => {
@@ -1500,6 +1674,12 @@ pub const Client = struct {
                         if ((frame.header.flags & 0x01) != 0) {
                             got_end_stream = true;
                             request_stream.receiveEndStream();
+                            // Fix: terminate the response loop immediately when
+                            // END_STREAM is set on a HEADERS frame and we have
+                            // a status code. Without this, the loop keeps
+                            // reading frames from keep-alive servers until the
+                            // recv timeout fires (causing a hang or ProtocolError).
+                            if (status_code != null) response_done = true;
                         }
                     } else {
                         pending_headers_flags = frame.header.flags;
@@ -1553,6 +1733,8 @@ pub const Client = struct {
                             if ((pending_headers_flags & 0x01) != 0) {
                                 got_end_stream = true;
                                 request_stream.receiveEndStream();
+                                // Fix: terminate on END_STREAM from CONTINUATION.
+                                if (status_code != null) response_done = true;
                             }
                         }
                     }
@@ -1585,8 +1767,15 @@ pub const Client = struct {
                     if ((frame.header.flags & 0x01) != 0) {
                         got_end_stream = true;
                         request_stream.receiveEndStream();
+                        // Fix: terminate the response loop immediately when
+                        // END_STREAM is set on a DATA frame and we have a
+                        // status code. Without this, the loop keeps reading
+                        // from keep-alive servers until the recv timeout fires.
+                        if (status_code != null) response_done = true;
                     }
                 },
+                // RFC 7540 §4.1: Unknown frame types MUST be ignored.
+                _ => {},
             }
         }
 
@@ -1615,7 +1804,7 @@ pub const Client = struct {
         return response;
     }
 
-    fn readHttp2Frame(self: *Self, transport: anytype) !struct { header: http.Http2FrameHeader, payload: []u8 } {
+    fn readHttp2Frame(self: *Self, transport: anytype) !H2Frame {
         var header_bytes: [9]u8 = undefined;
         try transport.readNoEof(&header_bytes);
         const header = http.Http2FrameHeader.parse(header_bytes);
@@ -1630,7 +1819,7 @@ pub const Client = struct {
             try transport.readNoEof(payload);
         }
 
-        return .{ .header = header, .payload = payload };
+        return .{ .header = header, .payload = payload, .from_early_buf = false };
     }
 
     fn executeTlsHttp(self: *Self, socket: *Socket, host: []const u8, request_data: []const u8, verify_ssl: bool) !Response {
@@ -1707,7 +1896,20 @@ pub const Client = struct {
         parser.headers = Headers.init(parser.allocator);
 
         if (parser.getBody().len > 0) {
-            res.body = try parser.allocator.dupe(u8, parser.getBody());
+            const raw_body = parser.getBody();
+            if (res.headers.get(HeaderName.CONTENT_ENCODING)) |encoding_str| {
+                if (@import("../util/compression.zig").ContentEncoding.fromString(encoding_str)) |enc| {
+                    if (enc != .identity) {
+                        const decompressed = @import("../util/compression.zig").decompress(parser.allocator, enc, raw_body) catch |err| {
+                            return err;
+                        };
+                        res.body = decompressed;
+                        res.body_owned = true;
+                        return res;
+                    }
+                }
+            }
+            res.body = try parser.allocator.dupe(u8, raw_body);
             res.body_owned = true;
         }
 
@@ -2024,7 +2226,7 @@ fn parseHttp3ControlStream(stream_data: []const u8) !void {
     const stream_type = try http.decodeVarInt(stream_data[offset..]);
     offset += stream_type.len;
 
-    if (stream_type.value != @intFromEnum(quic.Http3StreamType.control)) {
+    if (stream_type.value != @backingInt(quic.Http3StreamType.control)) {
         return error.ProtocolError;
     }
 
@@ -2040,7 +2242,7 @@ fn parseHttp3ControlStream(stream_data: []const u8) !void {
         const payload = stream_data[offset .. offset + payload_len];
         offset += payload_len;
 
-        if (frame.header.frame_type == @intFromEnum(http.Http3FrameType.settings)) {
+        if (frame.header.frame_type == @backingInt(http.Http3FrameType.settings)) {
             _ = try http.parseHttp3SettingsPayload(payload);
             saw_settings = true;
         }
