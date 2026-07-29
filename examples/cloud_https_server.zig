@@ -44,7 +44,6 @@ const httpx = @import("httpx");
 /// ---------------------------------------------------------------------------
 /// Route Handlers
 /// ---------------------------------------------------------------------------
-
 /// Root endpoint returning service metadata as JSON.
 fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.json(.{
