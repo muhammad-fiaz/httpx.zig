@@ -214,7 +214,7 @@ gtag('config', '${GA_ID}');`,
           "priceCurrency": "USD"
         },
         "downloadUrl": "https://github.com/muhammad-fiaz/httpx.zig",
-        "softwareVersion": "0.1.3",
+        "softwareVersion": "0.1.4",
         "license": "https://opensource.org/licenses/MIT"
       });
     } else {
@@ -377,6 +377,7 @@ gtag('config', '${GA_ID}');`,
           { text: "Metrics & Observability", link: "/examples/metrics-example" },
           { text: "Unix Domain Sockets", link: "/examples/unix-socket-example" },
           { text: "Health Check Probes", link: "/examples/health-check-example" },
+          { text: "Cloud HTTPS Server", link: "/examples/cloud-https-server" },
           { text: "Request-Response Customization", link: "/examples/request-response-customization" },
         ],
       },

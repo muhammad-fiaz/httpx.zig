@@ -35,8 +35,9 @@
 > [!NOTE]
 > **Project maturity:** This project aims to be production-ready and is actively maintained. It is still a new project and not yet widely adopted. Feel free to use it in your projects.
 >
-> **Custom HTTP/2 & HTTP/3 implementation:** Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support.
+> **Custom HTTP/2, HTTP/3, and TLS implementation:** Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN support.
 > httpx.zig implements these protocols **entirely from scratch**, including:
+> - **TLS** with ALPN negotiation — client and server advertise `["h2", "http/1.1"]` during the TLS handshake; the negotiated protocol is inspected to automatically select HTTP/2 or HTTP/1.1; fallback to HTTP/1.1 if ALPN is unavailable
 > - **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
 > - **HTTP/2** ALPN negotiation, CONTINUATION frames, SETTINGS enforcement, GOAWAY/RST_STREAM, trailers, and connection pooling
 > - **HTTP/2** stream multiplexing, flow control, and connection preface timeout (RFC 7540)
@@ -122,8 +123,11 @@ Before using `httpx.zig`, ensure you have the following:
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| **Zig** | 0.16.0+ | Download from [ziglang.org](https://ziglang.org/download/) |
+| **Zig** | **0.16.0** (recommended) | Download from [ziglang.org](https://ziglang.org/download/) |
 | **Operating System** | Windows 10+, Linux, macOS | Cross-platform networking support |
+
+> [!IMPORTANT]
+> **Zig 0.16.0 is required.** This project currently targets Zig 0.16.0 (stable). Zig 0.17.0 is in development (dev branch, not yet a stable release) and introduces several minor breaking changes from 0.16.0. Migration to 0.17.0 will happen once it is officially released as a stable version. Please use Zig 0.16.0 for all builds.
 
 ---
 
@@ -163,10 +167,10 @@ zig build -Dtarget=x86-windows
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.1.3)**
+**Latest Release (v0.1.4)**
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.3.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.4.tar.gz
 ```
 
 **Previous Stable Release (v0.1.2)**
@@ -176,7 +180,7 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 ```
 
 > [!WARNING]
-> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.1.3**.
+> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.1.4**.
 
 ### Method 2: Zig Fetch (Main Branch)
 
@@ -193,7 +197,7 @@ Add the dependency to your `build.zig.zon` file.
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.3.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.4.tar.gz",
         .hash = "...", // Run `zig fetch --save <url>` to generate the hash.
     },
 },

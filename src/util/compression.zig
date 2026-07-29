@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const root = @import("root");
+const zstd = @import("zstd");
 
 pub const ContentEncoding = enum {
     gzip,
@@ -60,44 +60,20 @@ fn decompressFlate(allocator: Allocator, data: []const u8, container: std.compre
 }
 
 fn decompressZstd(allocator: Allocator, data: []const u8) ![]u8 {
-    if (@hasDecl(root, "zstd")) {
-        const zstd = root.zstd;
-        const content_size = zstd.c.ZSTD_getFrameContentSize(data.ptr, data.len);
-        const ZSTD_CONTENTSIZE_ERROR: u64 = std.math.maxInt(u64) - 1;
-        const ZSTD_CONTENTSIZE_UNKNOWN: u64 = std.math.maxInt(u64);
+    const content_size = switch (zstd.getFrameContentSize(data)) {
+        .known => |size| size,
+        .unknown, .@"error" => return error.DecompressionFailed,
+    };
 
-        if (content_size == ZSTD_CONTENTSIZE_ERROR or content_size == ZSTD_CONTENTSIZE_UNKNOWN) {
-            return error.DecompressionFailed;
-        }
-
-        const dest_buffer = try allocator.alloc(u8, content_size);
-        errdefer allocator.free(dest_buffer);
-
-        const dSize = zstd.c.ZSTD_decompress(dest_buffer.ptr, content_size, data.ptr, data.len);
-        if (zstd.c.ZSTD_isError(dSize) != 0) {
-            return error.DecompressionFailed;
-        }
-
-        return dest_buffer[0..dSize];
-    }
-    return error.ZstdNotSupported;
+    return zstd.decompress(allocator, data, @intCast(content_size)) catch {
+        return error.DecompressionFailed;
+    };
 }
 
 pub fn compressZstd(allocator: Allocator, data: []const u8) ![]u8 {
-    if (@hasDecl(root, "zstd")) {
-        const zstd = root.zstd;
-        const dest_size = zstd.c.ZSTD_compressBound(data.len);
-        const dest_buffer = try allocator.alloc(u8, dest_size);
-        errdefer allocator.free(dest_buffer);
-
-        const cSize = zstd.c.ZSTD_compress(dest_buffer.ptr, dest_size, data.ptr, data.len, 1);
-        if (zstd.c.ZSTD_isError(cSize) != 0) {
-            return error.CompressionFailed;
-        }
-
-        return allocator.realloc(dest_buffer, cSize) catch dest_buffer[0..cSize];
-    }
-    return error.ZstdNotSupported;
+    return zstd.compress(allocator, data, 1) catch {
+        return error.CompressionFailed;
+    };
 }
 
 test "compression gzip decompression" {

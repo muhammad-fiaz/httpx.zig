@@ -53,4 +53,5 @@ zig build example-http3_example -Dtarget=aarch64-macos
 - [Metrics and Observability](/examples/metrics-example): Aggregate total requests, status codes, latency times, and success rates.
 - [Unix Domain Sockets](/examples/unix-socket-example): Bind servers and connect clients over AF_UNIX sockets.
 - [Health Check Probes](/examples/health-check-example): Configure liveness and readiness probe middlewares.
+- [Cloud HTTPS Server](/examples/cloud-https-server): Production cloud deployment with TLS, middleware, and health checks.
 - [Request Response Customization](/examples/request-response-customization): Customize request properties and response headers.

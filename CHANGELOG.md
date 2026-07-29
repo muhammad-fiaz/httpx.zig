@@ -3,35 +3,31 @@
 All notable changes to this project are documented in this file.
 
 
-## [0.1.3] - 28-07-2026
+## [0.1.4] - 12-07-2026
 
 ### Added
-- TLS: Configurable `allow_truncation_attacks` field on `TlsConfig` (defaulting to `true`). Callers can set `allow_truncation_attacks = false` to treat missing TLS `close_notify` as a truncation attack error.
-- TLS: Native HTTP/2 ALPN detection via post-handshake connection preface probe. Automatically negotiates HTTP/2 or falls back to HTTP/1.1 without external library dependencies.
-- HTTP/2: Send-side flow control wait handling (`pumpUntilSendWindow`). When send windows are exhausted mid-upload, the client pumps incoming frames (WINDOW_UPDATE, SETTINGS, PING) and buffers early response frames instead of failing immediately with `error.FlowControlError`.
-- HTTP/2: Non-exhaustive `Http2FrameType` (`enum(u8)`) and `Http2Settings` (`enum(u16)`). Unknown/extension/GREASE frame types (>= 0x0A) and unrecognised SETTINGS identifiers (such as `ENABLE_CONNECT_PROTOCOL` 0x8) are ignored according to RFC 7540 §4.1 and §6.5.2 instead of panicking `@enumFromInt`.
+- HTTP/2: ALPN negotiation — client and server now advertise `["h2", "http/1.1"]` during the TLS handshake. The client inspects the negotiated protocol after the handshake and automatically selects HTTP/2 or HTTP/1.1 accordingly; if ALPN is unavailable the connection falls back to HTTP/1.1.
 - HTTP/2: CONTINUATION frame sending — header blocks that exceed `MAX_FRAME_SIZE` are automatically split across HEADERS + CONTINUATION frames.
 - HTTP/2: SETTINGS enforcement — peer `MAX_CONCURRENT_STREAMS`, `MAX_FRAME_SIZE`, and `INITIAL_WINDOW_SIZE` values are now parsed and enforced. DATA frames are chunked to respect the peer's max frame size; send windows are checked before sending data.
-- HTTP/2: GOAWAY and RST_STREAM sending — both client and server handle incoming RST_STREAM gracefully and can send RST_STREAM to cancel individual streams without tearing down the entire connection.
+- HTTP/2: GOAWAY and RST_STREAM sending — the server sends GOAWAY with `no_error` on clean shutdown or `internal_error` on handler failure. Both client and server handle incoming RST_STREAM gracefully and can send RST_STREAM to cancel individual streams without tearing down the entire connection.
 - HTTP/2: HPACK `Without Indexing` and `Never Indexed` header representations — new `encodeHeaderWithoutIndexing` and `encodeHeaderNeverIndexed` functions ensure volatile headers (e.g. `Authorization`, `Cookie`) are encoded without dynamic table insertion, preventing HPACK bomb attacks and accidental cache pollution.
 - HTTP/2: Connection pooling — HTTP/2 connections are now pooled and reused across requests. A new `Http2Connection` wrapper manages the TLS session, HPACK contexts, stream manager, and connection-level flow control state.
 - HTTP/2: Trailer support — servers can send HTTP/2 trailers via `sendHttp2Trailers()` (HEADERS frame with END_STREAM after DATA). Clients decode incoming trailers after END_STREAM and attach them to the `Response.trailers` field.
 - HTTP/2: Connection preface timeout — the client and server now detect if the peer never sends its initial SETTINGS frame after the connection preface, preventing indefinite hangs.
-- HTTP/3: QPACK decoder stream decode functions — added `decodeSectionAck`, `decodeStreamCancel`, `decodeInsertCountIncrement`, and `decodeSetCapacity` for decoding decoder stream instructions; added `decodeInsertWithNameRef`, `decodeInsertLiteral`, `decodeDuplicate`, and `decodeEncoderDataSetCapacity` for decoding encoder stream instructions.
+- HTTP/3: QPACK decoder stream decode functions — added `decodeSectionAck`, `decodeStreamCancel`, `decodeInsertCountIncrement`, and `decodeSetCapacity` for decoding decoder stream instructions; added `decodeInsertWithNameRef`, `decodeInsertLiteral`, `decodeDuplicate`, and `decodeEncoderDataSetCapacity` for decoding encoder stream instructions (13 new tests).
 - HTTP/3: Flow control frame handling — MAX_DATA and MAX_STREAM_DATA frames are now parsed and processed. Connection-level and per-stream flow control windows are tracked and enforced when sending DATA.
 - HTTP/3: GOAWAY and CONNECTION_CLOSE — both client and server handle incoming GOAWAY gracefully and can send GOAWAY or CONNECTION_CLOSE (transport and application variants) on unrecoverable errors.
 - HTTP/3: Stream cancellation — RESET_STREAM and STOP_SENDING frames can be sent to cancel individual streams without tearing down the connection.
-- New unit tests and example programs covering `TlsConfig`, `Http2Settings`, `Http3Settings`, `pumpUntilSendWindow`, and ALPN protocol negotiation.
-
-### Fixed
-- Fixed HTTP/2 client engine over-reading past response completion when receiving `END_STREAM` on HEADERS, CONTINUATION, or DATA frames. `response_done` is now set immediately upon `END_STREAM` when a status code is present, preventing hangs on persistent connections.
-- Fixed HTTPS responses larger than ~16 KB (one TLS record) causing an infinite loop at 100% CPU. The `SocketIoReader.rebase` vtable function was a no-op, so after the internal buffer was fully consumed the reader never reclaimed buffer space.
-- Fixed `Host` request header omitting non-default port numbers. `Request.init` now includes the port in the `Host` header when it differs from the scheme default (80 for HTTP, 443 for HTTPS).
-- Fixed `encodeInsertLiteral` in `qpack.zig` where the length field was encoding the original string length instead of the Huffman-encoded byte count.
+- New unit tests: `canOpenStream respects max_concurrent_streams`, `validateFrameSize catches oversized frames`, `applyPeerSettings updates max_concurrent_streams and window size`, `buildGoawayFrame produces correct wire format`, `buildRstStreamFrame produces correct wire format`, `HTTP/2 SETTINGS payload roundtrip with custom values`, `RESET_STREAM frame encode/decode`, `STOP_SENDING frame encode/decode`, `RESET_STREAM rejects wrong frame type`, `STOP_SENDING rejects wrong frame type`.
+- New examples: `http2_advanced.zig` (SETTINGS enforcement, GOAWAY/RST_STREAM, HPACK security, trailers) and `http3_advanced.zig` (QPACK stream instructions, QUIC stream cancellation, transport parameters).
 
 ### Changed
-- Bumped project version to `0.1.3` in `build.zig.zon`.
+- Bumped project version to `0.1.4`.
 
+### Fixed
+- Fixed HTTPS responses larger than ~16 KB (one TLS record) causing an infinite loop at 100% CPU. The `SocketIoReader.rebase` vtable function was a no-op, so after the internal buffer was fully consumed the reader never reclaimed buffer space and `readVec` kept returning zero bytes. `rebase` now compacts unread data to the front of the buffer, matching the standard library's `defaultRebase` behavior ([Issue #21](https://github.com/muhammad-fiaz/httpx.zig/issues/21)).
+- Fixed `Host` request header omitting non-default port numbers. `Request.init` now includes the port in the `Host` header when it differs from the scheme default (80 for HTTP, 443 for HTTPS), matching RFC 7230 semantics and aligning with the existing `buildAuthority` logic used by HTTP/2 ([Issue #22](https://github.com/muhammad-fiaz/httpx.zig/issues/22)).
+- Fixed `encodeInsertLiteral` in `qpack.zig` where the length field was encoding the original string length instead of the Huffman-encoded byte count, causing corrupted encoder stream output.
 
 
 ## [0.1.2] - 07-07-2026

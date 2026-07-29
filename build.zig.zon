@@ -1,12 +1,12 @@
 .{
     .fingerprint = 0xa924bc2e7af6a8f2,
     .name = .httpx,
-    .version = "0.1.3",
+    .version = "0.1.4",
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zstd = .{
-            .url = "git+https://github.com/muhammad-fiaz/zstd.zig.git?ref=1.6.0#b22feda350698f1d4fe0c8c1c62305fd9a2e85b2",
-            .hash = "zstd-1.6.0-biH4jPHXMgByS-WuwAUII5ZFigXUcBX8kMeqMsP_oIVl",
+            .url = "https://github.com/muhammad-fiaz/zstd.zig/archive/refs/tags/0.0.1.tar.gz",
+            .hash = "zstd-0.0.1-biH4jJ_KMgDBpUCoVlLqLK9JeyTgO8vFXurQl_ECstYN",
         },
     },
     .paths = .{

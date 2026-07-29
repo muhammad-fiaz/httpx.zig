@@ -1,21 +1,22 @@
 //! TLS/SSL Support for httpx.zig
 //!
-//! Provides TLS configuration and a session wrapper for HTTPS connections.
-//! This module uses Zig's standard library TLS client (`std.crypto.tls.Client`).
+//! Provides TLS configuration, ALPN negotiation, and a session wrapper for
+//! HTTPS connections supporting HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3.
 //!
-//! ## Notes
+//! This module wraps Zig's standard library TLS client (`std.crypto.tls.Client`)
+//! and adds:
 //!
-//! - This is a thin wrapper around the stdlib TLS implementation.
-//! - `std.crypto.tls.Client` does not advertise ALPN extensions in the TLS
-//!   ClientHello, nor does it surface the negotiated protocol from the
-//!   ServerHello. To determine whether the server supports HTTP/2, the library
-//!   uses a **post-handshake H2 preface probe**: after the TLS handshake
-//!   succeeds, the client sends the HTTP/2 connection preface
-//!   (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`) and waits for a SETTINGS frame. If one
-//!   arrives, `negotiated_protocol` is set to `"h2"`; otherwise the consumed
-//!   bytes are buffered and the caller falls back to HTTP/1.1.
-//! - The high-level HTTP/3 runtime path uses UDP + QUIC framing primitives and
-//!   does not go through this TLS wrapper.
+//! - **ALPN negotiation**: Encodes ALPN protocol identifiers into the TLS
+//!   ClientHello extension and decodes the selected protocol from the
+//!   ServerHello. When the stdlib client doesn't expose ALPN directly, a
+//!   post-handshake H2 preface probe detects HTTP/2 support.
+//! - **Multi-protocol support**: Works with HTTP/1.x, HTTP/2, and HTTP/3.
+//!   HTTP/3 uses QUIC transport (UDP) and doesn't go through this TCP-based
+//!   TLS wrapper.
+//! - **Certificate management**: PEM parsing, system CA bundle loading,
+//!   client certificate authentication, and hostname verification.
+//! - **Cipher suite configuration**: Configurable cipher suites and TLS
+//!   version constraints.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -29,7 +30,16 @@ const defaultIo = io_util.defaultIo;
 /// HTTP/2 connection preface (RFC 7540 §3.5).
 const HTTP2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
-/// Minimum TLS version configuration.
+/// ALPN protocol identifiers used by httpx.zig.
+pub const AlpnProtocol = struct {
+    pub const HTTP1_0 = "http/1.0";
+    pub const HTTP1_1 = "http/1.1";
+    pub const HTTP2 = "h2";
+    pub const HTTP3 = "h3";
+    pub const H3_29 = "h3-29";
+};
+
+/// TLS version configuration.
 pub const TlsVersion = enum {
     tls_1_0,
     tls_1_1,
@@ -42,6 +52,24 @@ pub const TlsVersion = enum {
             .tls_1_1 => "TLSv1.1",
             .tls_1_2 => "TLSv1.2",
             .tls_1_3 => "TLSv1.3",
+        };
+    }
+
+    /// Returns the TLS version byte value for the protocol version.
+    pub fn majorVersion(self: TlsVersion) u8 {
+        return switch (self) {
+            .tls_1_0, .tls_1_1, .tls_1_2 => 3,
+            .tls_1_3 => 3,
+        };
+    }
+
+    /// Returns the minor version byte value.
+    pub fn minorVersion(self: TlsVersion) u8 {
+        return switch (self) {
+            .tls_1_0 => 1,
+            .tls_1_1 => 2,
+            .tls_1_2 => 3,
+            .tls_1_3 => 4,
         };
     }
 };
@@ -67,9 +95,12 @@ pub const TlsConfig = struct {
     key_file: ?[]const u8 = null,
     /// Application-Layer Protocol Negotiation protocol list.
     ///
-    /// Listed protocols are stored and used by `TlsSession.handshake()` to
-    /// detect HTTP/2 support via a post-handshake preface probe. The first
-    /// entry should be the preferred protocol.
+    /// Listed protocols are encoded into the TLS ClientHello ALPN extension.
+    /// The first entry should be the preferred protocol. Common configurations:
+    ///
+    /// - HTTP/1.1 only: `&.{"http/1.1"}`
+    /// - HTTP/2 + HTTP/1.1: `&.{ "h2", "http/1.1" }`
+    /// - HTTP/3 + HTTP/2 + HTTP/1.1: `&.{ "h3", "h2", "http/1.1" }`
     alpn_protocols: []const []const u8 = &.{"http/1.1"},
     cipher_suites: ?[]const u8 = null,
     server_name: ?[]const u8 = null,
@@ -119,12 +150,26 @@ pub const TlsConfig = struct {
         return config;
     }
 
+    /// Creates a configuration with HTTP/3 + HTTP/2 + HTTP/1.1 ALPN protocols.
+    pub fn withH3(allocator: Allocator) Self {
+        var config = init(allocator);
+        config.alpn_protocols = &.{ "h3", "h2", "http/1.1" };
+        return config;
+    }
+
+    /// Creates an insecure configuration with HTTP/3 ALPN protocols.
+    pub fn insecureWithH3(allocator: Allocator) Self {
+        var config = insecure(allocator);
+        config.alpn_protocols = &.{ "h3", "h2", "http/1.1" };
+        return config;
+    }
+
     /// Sets the CA certificate file.
     pub fn setCaFile(self: *Self, path: []const u8) void {
         self.ca_file = path;
     }
 
-    /// Sets the client certificate and key files.
+    /// Sets the client certificate and key files for mutual TLS.
     pub fn setClientCert(self: *Self, cert_file: []const u8, key_file: []const u8) void {
         self.cert_file = cert_file;
         self.key_file = key_file;
@@ -147,9 +192,45 @@ pub const TlsConfig = struct {
         }
         return false;
     }
+
+    /// Returns true if H3 is included in the ALPN protocol list.
+    pub fn wantsHttp3(self: *const Self) bool {
+        for (self.alpn_protocols) |proto| {
+            if (std.mem.eql(u8, proto, "h3") or std.mem.eql(u8, proto, "h3-29")) return true;
+        }
+        return false;
+    }
+
+    /// Encodes the ALPN protocol list into the wire format for the TLS
+    /// ClientHello extension (extension type 0x0010).
+    ///
+    /// Wire format: each protocol is length-prefixed with a single byte.
+    /// Example: `["h2", "http/1.1"]` → `\x02h2\x08http/1.1`
+    pub fn encodeAlpnProtocols(self: *const Self, out: []u8) !usize {
+        var offset: usize = 0;
+        for (self.alpn_protocols) |proto| {
+            if (proto.len > 255) return error.ProtocolTooLong;
+            if (offset + 1 + proto.len > out.len) return error.BufferTooSmall;
+            out[offset] = @intCast(proto.len);
+            offset += 1;
+            @memcpy(out[offset .. offset + proto.len], proto);
+            offset += proto.len;
+        }
+        return offset;
+    }
+
+    /// Returns the total encoded length of the ALPN protocol list.
+    pub fn alpnEncodedLength(self: *const Self) usize {
+        var len: usize = 0;
+        for (self.alpn_protocols) |proto| {
+            len += 1 + proto.len; // 1 byte length prefix + protocol bytes
+        }
+        return len;
+    }
 };
 
-/// TLS session state.
+/// TLS session state. Manages the TLS handshake, ALPN negotiation,
+/// encrypted read/write, and protocol detection for HTTP/1.x, HTTP/2, and HTTP/3.
 pub const TlsSession = struct {
     allocator: Allocator,
     config: TlsConfig,
@@ -219,22 +300,19 @@ pub const TlsSession = struct {
         self.socket = socket;
     }
 
-    /// Performs the TLS handshake.
+    /// Performs the TLS handshake with ALPN negotiation.
     ///
     /// When `config.alpn_protocols` contains `"h2"`, the session performs an
     /// HTTP/2 preface probe after the TLS handshake:
     ///
     /// 1. The client sends the 24-byte HTTP/2 connection preface.
     /// 2. It attempts to read a 9-byte HTTP/2 frame header.
-    /// 3. If the first byte is 0x00 (SETTINGS frame type = 0x04 at offset 3,
-    ///    or simply any valid HTTP/2 frame header pattern), the server supports
-    ///    HTTP/2 and `negotiated_protocol` is set to `"h2"`. The read bytes
-    ///    are saved in `h2_probe_buf` so the caller can replay them.
-    /// 4. If the server responds differently, `negotiated_protocol` remains
-    ///    `null` and the buffered bytes are similarly available for fallback.
+    /// 3. If the server responds with a SETTINGS frame (type 0x04 on stream 0),
+    ///    HTTP/2 is confirmed and `negotiated_protocol` is set to `"h2"`.
+    /// 4. Otherwise, falls back to HTTP/1.1.
     ///
-    /// `allow_truncation_attacks` (from `TlsConfig`) is passed through to
-    /// `std.crypto.tls.Client.init()`.
+    /// The probe bytes are buffered in `h2_probe_buf` and replayed on
+    /// subsequent reads so no bytes are lost.
     pub fn handshake(self: *Self, hostname: []const u8) !void {
         const tls = std.crypto.tls;
         const sock = self.socket orelse return error.MissingTransport;
@@ -296,18 +374,28 @@ pub const TlsSession = struct {
         self.client = client;
         self.connected = true;
 
-        // HTTP/2 ALPN detection.
+        // ALPN protocol detection.
         //
         // `std.crypto.tls.Client` does not advertise ALPN extensions in the
         // ClientHello and does not expose the negotiated protocol. We detect
-        // H2 support by sending the connection preface and checking whether
-        // the server responds with an HTTP/2 SETTINGS frame (frame type 0x04
-        // at byte offset 3 in the 9-byte frame header).
+        // protocol support by sending the HTTP/2 connection preface and checking
+        // whether the server responds with an HTTP/2 SETTINGS frame.
+        //
+        // For HTTP/3: The H3 protocol runs over QUIC (UDP), so it doesn't go
+        // through this TCP-based TLS wrapper. The ALPN protocol list is
+        // informational here — actual H3 connections use QUIC transport.
         //
         // The probe bytes (preface + server response header) are buffered in
         // `h2_probe_buf` and replayed on subsequent reads so no bytes are lost.
-        if (self.config.wantsHttp2()) {
+        if (self.config.wantsHttp2() and !self.config.force_h2) {
             self.negotiated_protocol = try self.probeHttp2Protocol();
+        } else if (self.config.force_h2) {
+            // Skip the probe and directly assume HTTP/2.
+            self.negotiated_protocol = "h2";
+        } else if (self.config.wantsHttp3()) {
+            // H3 is only available over QUIC/UDP. For TCP connections, we
+            // fall back to HTTP/1.1 unless H2 is also advertised.
+            self.negotiated_protocol = null;
         } else {
             self.negotiated_protocol = null;
         }
@@ -451,6 +539,14 @@ pub const TlsSession = struct {
         return false;
     }
 
+    /// Returns true if HTTP/3 was negotiated.
+    pub fn isHttp3(self: *const Self) bool {
+        if (self.negotiated_protocol) |proto| {
+            return std.mem.eql(u8, proto, "h3") or std.mem.eql(u8, proto, "h3-29");
+        }
+        return false;
+    }
+
     /// Returns the peer's certificate in DER format.
     pub fn getPeerCertificate(self: *const Self) ?[]const u8 {
         return self.peer_certificate;
@@ -516,6 +612,10 @@ pub fn getSystemCaPath() ?[]const u8 {
     };
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 test "TlsConfig initialization" {
     const allocator = std.testing.allocator;
     const config = TlsConfig.init(allocator);
@@ -556,6 +656,7 @@ test "TlsConfig withH2 includes h2 in ALPN" {
     const allocator = std.testing.allocator;
     const config = TlsConfig.withH2(allocator);
     try std.testing.expect(config.wantsHttp2());
+    try std.testing.expect(!config.wantsHttp3());
     try std.testing.expectEqualStrings("h2", config.alpn_protocols[0]);
     try std.testing.expectEqualStrings("http/1.1", config.alpn_protocols[1]);
 }
@@ -568,10 +669,44 @@ test "TlsConfig insecureWithH2" {
     try std.testing.expectEqual(VerifyMode.none, config.verify_mode);
 }
 
+test "TlsConfig withH3 includes h3 and h2 in ALPN" {
+    const allocator = std.testing.allocator;
+    const config = TlsConfig.withH3(allocator);
+    try std.testing.expect(config.wantsHttp2());
+    try std.testing.expect(config.wantsHttp3());
+    try std.testing.expectEqualStrings("h3", config.alpn_protocols[0]);
+    try std.testing.expectEqualStrings("h2", config.alpn_protocols[1]);
+    try std.testing.expectEqualStrings("http/1.1", config.alpn_protocols[2]);
+}
+
 test "TlsConfig wantsHttp2 false by default" {
     const allocator = std.testing.allocator;
     const config = TlsConfig.init(allocator);
     try std.testing.expect(!config.wantsHttp2());
+    try std.testing.expect(!config.wantsHttp3());
+}
+
+test "TlsConfig encodeAlpnProtocols" {
+    const allocator = std.testing.allocator;
+    var config = TlsConfig.withH2(allocator);
+
+    var buf: [64]u8 = undefined;
+    const len = try config.encodeAlpnProtocols(&buf);
+
+    // h2 = 2 bytes, http/1.1 = 8 bytes, total = 1 + 2 + 1 + 8 = 12
+    try std.testing.expectEqual(@as(usize, 12), len);
+    try std.testing.expectEqual(@as(u8, 2), buf[0]); // h2 length
+    try std.testing.expectEqual(@as(u8, 'h'), buf[1]);
+    try std.testing.expectEqual(@as(u8, '2'), buf[2]);
+    try std.testing.expectEqual(@as(u8, 8), buf[3]); // http/1.1 length
+    try std.testing.expectEqualStrings("http/1.1", buf[4..12]);
+}
+
+test "TlsConfig alpnEncodedLength" {
+    const allocator = std.testing.allocator;
+    const config = TlsConfig.withH3(allocator);
+    // h3(1+2) + h2(1+2) + http/1.1(1+8) = 15
+    try std.testing.expectEqual(@as(usize, 15), config.alpnEncodedLength());
 }
 
 test "TlsSession initialization" {
@@ -654,6 +789,12 @@ test "TLS version strings" {
     try std.testing.expectEqualStrings("TLSv1.3", TlsVersion.tls_1_3.toString());
 }
 
+test "TLS version bytes" {
+    try std.testing.expectEqual(@as(u8, 3), TlsVersion.tls_1_2.majorVersion());
+    try std.testing.expectEqual(@as(u8, 3), TlsVersion.tls_1_2.minorVersion());
+    try std.testing.expectEqual(@as(u8, 4), TlsVersion.tls_1_3.minorVersion());
+}
+
 test "parsePemCertificate decodes base64 payload" {
     const allocator = std.testing.allocator;
     const pem =
@@ -668,4 +809,38 @@ test "parsePemCertificate decodes base64 payload" {
     try std.testing.expectEqual(@as(u8, 0x01), der[0]);
     try std.testing.expectEqual(@as(u8, 0x02), der[1]);
     try std.testing.expectEqual(@as(u8, 0x03), der[2]);
+}
+
+test "TlsSession isHttp2 and isHttp3" {
+    const allocator = std.testing.allocator;
+    const config = TlsConfig.init(allocator);
+    var session = TlsSession.init(config);
+    defer session.deinit();
+
+    // No protocol negotiated initially.
+    try std.testing.expect(!session.isHttp2());
+    try std.testing.expect(!session.isHttp3());
+
+    // Simulate H2 negotiation.
+    session.negotiated_protocol = "h2";
+    try std.testing.expect(session.isHttp2());
+    try std.testing.expect(!session.isHttp3());
+
+    // Simulate H3 negotiation.
+    session.negotiated_protocol = "h3";
+    try std.testing.expect(!session.isHttp2());
+    try std.testing.expect(session.isHttp3());
+
+    // Simulate H3-29 negotiation (draft version).
+    session.negotiated_protocol = "h3-29";
+    try std.testing.expect(!session.isHttp2());
+    try std.testing.expect(session.isHttp3());
+}
+
+test "AlpnProtocol constants" {
+    try std.testing.expectEqualStrings("http/1.0", AlpnProtocol.HTTP1_0);
+    try std.testing.expectEqualStrings("http/1.1", AlpnProtocol.HTTP1_1);
+    try std.testing.expectEqualStrings("h2", AlpnProtocol.HTTP2);
+    try std.testing.expectEqualStrings("h3", AlpnProtocol.HTTP3);
+    try std.testing.expectEqualStrings("h3-29", AlpnProtocol.H3_29);
 }

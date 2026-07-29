@@ -10,6 +10,9 @@ const HeaderName = @import("../core/headers.zig").HeaderName;
 /// Returns the canonical `std.Io` for the current execution context.
 pub const defaultIo = io_util.defaultIo;
 
+/// Returns a real thread-safe `std.Io` suitable for multi-threaded code.
+pub const threadIo = io_util.threadIo;
+
 /// Sleeps for `ms` milliseconds using the canonical IO (`u64`, clamped to `i64.max`).
 pub const sleepMs = io_util.sleepMs;
 

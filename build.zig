@@ -70,6 +70,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "request_response_customization", .path = "examples/request_response_customization.zig" },
         .{ .name = "unix_socket_example", .path = "examples/unix_socket_example.zig" },
         .{ .name = "async_server_example", .path = "examples/async_server_example.zig" },
+        .{ .name = "cloud_https_server", .path = "examples/cloud_https_server.zig" },
     };
 
     inline for (examples) |example| {
@@ -132,6 +133,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    if (zstd_dep) |zstd| {
+        tests.root_module.addImport("zstd", zstd.module("zstd"));
+    }
     linkPlatformLibs(tests, target);
 
     const run_tests = b.addRunArtifact(tests);

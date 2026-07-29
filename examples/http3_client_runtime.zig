@@ -134,7 +134,7 @@ fn runServer(server_socket: *httpx.UdpSocket) !void {
 
     var server_control_data = std.ArrayList(u8).empty;
     defer server_control_data.deinit(allocator);
-    try appendVarInt(&server_control_data, allocator, @backingInt(httpx.quic.Http3StreamType.control));
+    try appendVarInt(&server_control_data, allocator, @intFromEnum(httpx.quic.Http3StreamType.control));
     try appendHttp3Frame(&server_control_data, allocator, .settings, settings_payload.items);
 
     const server_cid = try httpx.quic.ConnectionId.init(&[_]u8{ 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8 });
@@ -267,7 +267,7 @@ fn appendHttp3Frame(
 ) !void {
     var frame_header_buf: [32]u8 = undefined;
     const frame_header_len = try (httpx.http.Http3FrameHeader{
-        .frame_type = @backingInt(frame_type),
+        .frame_type = @intFromEnum(frame_type),
         .length = @intCast(payload.len),
     }).encode(&frame_header_buf);
 
@@ -302,7 +302,7 @@ fn validateControlStream(control_stream_data: []const u8) !void {
     const stream_type = try httpx.http.decodeVarInt(control_stream_data[offset..]);
     offset += stream_type.len;
 
-    if (stream_type.value != @backingInt(httpx.quic.Http3StreamType.control)) {
+    if (stream_type.value != @intFromEnum(httpx.quic.Http3StreamType.control)) {
         return error.ProtocolError;
     }
 
@@ -315,7 +315,7 @@ fn validateControlStream(control_stream_data: []const u8) !void {
         if (control_stream_data.len < offset + frame_len) return error.ProtocolError;
         offset += frame_len;
 
-        if (header.header.frame_type == @backingInt(httpx.http.Http3FrameType.settings)) {
+        if (header.header.frame_type == @intFromEnum(httpx.http.Http3FrameType.settings)) {
             saw_settings = true;
         }
     }
@@ -340,7 +340,7 @@ fn validateRequestStream(request_stream_data: []const u8, allocator: std.mem.All
         const frame_payload = request_stream_data[offset .. offset + frame_len];
         offset += frame_len;
 
-        if (header.header.frame_type == @backingInt(httpx.http.Http3FrameType.headers)) {
+        if (header.header.frame_type == @intFromEnum(httpx.http.Http3FrameType.headers)) {
             const decoded = try httpx.qpack.decodeHeaders(&qpack_ctx, frame_payload, allocator);
             defer {
                 for (decoded) |h| {

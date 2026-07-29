@@ -1470,15 +1470,15 @@ pub const Server = struct {
                 const payload = control_stream_payload.items[cs_offset .. cs_offset + plen];
                 cs_offset += plen;
 
-                if (frame.header.frame_type == @backingInt(http.Http3FrameType.settings)) {
+                if (frame.header.frame_type == @intFromEnum(http.Http3FrameType.settings)) {
                     _ = try http.parseHttp3SettingsPayload(payload);
                     saw_settings = true;
-                } else if (frame.header.frame_type == @backingInt(http.Http3FrameType.max_data)) {
+                } else if (frame.header.frame_type == @intFromEnum(http.Http3FrameType.max_data)) {
                     if (payload.len > 0) {
                         const val = try http.decodeVarInt(payload);
                         conn_max_data = val.value;
                     }
-                } else if (frame.header.frame_type == @backingInt(http.Http3FrameType.max_stream_data)) {
+                } else if (frame.header.frame_type == @intFromEnum(http.Http3FrameType.max_stream_data)) {
                     if (payload.len > 0) {
                         const sid = try http.decodeVarInt(payload);
                         const data_limit = try http.decodeVarInt(payload[sid.len..]);
@@ -1530,7 +1530,7 @@ pub const Server = struct {
             const frame_payload = request_stream_payload.items[offset .. offset + payload_len];
             offset += payload_len;
 
-            if (frame.header.frame_type == @backingInt(http.Http3FrameType.headers)) {
+            if (frame.header.frame_type == @intFromEnum(http.Http3FrameType.headers)) {
                 const decoded_headers = try qpack.decodeHeaders(&qpack_ctx, frame_payload, self.allocator);
                 defer {
                     for (decoded_headers) |header| {
@@ -1565,7 +1565,7 @@ pub const Server = struct {
                     if (common.isConnectionSpecificHeader(header.name)) continue;
                     try request_headers.append(header.name, header.value);
                 }
-            } else if (frame.header.frame_type == @backingInt(http.Http3FrameType.data)) {
+            } else if (frame.header.frame_type == @intFromEnum(http.Http3FrameType.data)) {
                 if (request_body.items.len + frame_payload.len > self.config.max_body_size) {
                     return error.RequestTooLarge;
                 }
@@ -1602,7 +1602,7 @@ pub const Server = struct {
 
         var response = self.executeServerRequest(&req) catch {
             // Send CONNECTION_CLOSE (application) on unrecoverable handler error
-            self.sendHttp3ConnectionCloseApp(peer_addr, dst_cid, @backingInt(http.Http3ErrorCode.internal_error), "handler error") catch {};
+            self.sendHttp3ConnectionCloseApp(peer_addr, dst_cid, @intFromEnum(http.Http3ErrorCode.internal_error), "handler error") catch {};
             var internal = Response.init(self.allocator, status_mod.StatusCode.INTERNAL_SERVER_ERROR);
             defer internal.deinit();
             internal.version = .HTTP_3;
@@ -1672,7 +1672,7 @@ pub const Server = struct {
 
         var control_stream_payload = std.ArrayList(u8).empty;
         defer control_stream_payload.deinit(self.allocator);
-        try http.appendVarInt(&control_stream_payload, self.allocator, @backingInt(quic.Http3StreamType.control));
+        try http.appendVarInt(&control_stream_payload, self.allocator, @intFromEnum(quic.Http3StreamType.control));
         try http.appendHttp3Frame(&control_stream_payload, self.allocator, .settings, settings_payload.items);
 
         // Send MAX_DATA and MAX_STREAM_DATA to advertise our flow control limits
@@ -1734,7 +1734,7 @@ pub const Server = struct {
 
         var control_stream_payload = std.ArrayList(u8).empty;
         defer control_stream_payload.deinit(self.allocator);
-        try http.appendVarInt(&control_stream_payload, self.allocator, @backingInt(quic.Http3StreamType.control));
+        try http.appendVarInt(&control_stream_payload, self.allocator, @intFromEnum(quic.Http3StreamType.control));
         try http.appendHttp3Frame(&control_stream_payload, self.allocator, .goaway, goaway_payload.items);
 
         const server_cid = quic.ConnectionId.random();
@@ -2093,7 +2093,7 @@ fn parseHttp3ControlStream(stream_data: []const u8) !void {
     const stream_type = try http.decodeVarInt(stream_data[offset..]);
     offset += stream_type.len;
 
-    if (stream_type.value != @backingInt(quic.Http3StreamType.control)) {
+    if (stream_type.value != @intFromEnum(quic.Http3StreamType.control)) {
         return error.ProtocolError;
     }
 
@@ -2107,7 +2107,7 @@ fn parseHttp3ControlStream(stream_data: []const u8) !void {
 
         const payload = stream_data[offset .. offset + payload_len];
 
-        if (frame.header.frame_type == @backingInt(http.Http3FrameType.settings)) {
+        if (frame.header.frame_type == @intFromEnum(http.Http3FrameType.settings)) {
             _ = try http.parseHttp3SettingsPayload(payload);
             saw_settings = true;
         }

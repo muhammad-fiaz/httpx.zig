@@ -260,7 +260,7 @@ pub const Http2FrameHeader = struct {
         buf[0] = @intCast((self.length >> 16) & 0xFF);
         buf[1] = @intCast((self.length >> 8) & 0xFF);
         buf[2] = @intCast(self.length & 0xFF);
-        buf[3] = @backingInt(self.frame_type);
+        buf[3] = @intFromEnum(self.frame_type);
         buf[4] = self.flags;
         buf[5] = @intCast((self.stream_id >> 24) & 0x7F);
         buf[6] = @intCast((self.stream_id >> 16) & 0xFF);
@@ -273,7 +273,7 @@ pub const Http2FrameHeader = struct {
     pub fn parse(data: [9]u8) Http2FrameHeader {
         return .{
             .length = (@as(u24, data[0]) << 16) | (@as(u24, data[1]) << 8) | data[2],
-            .frame_type = @fromBackingInt(@intCast(data[3])),
+            .frame_type = @as(Http2FrameType, @enumFromInt(data[3])),
             .flags = data[4],
             .stream_id = (@as(u31, data[5] & 0x7F) << 24) | (@as(u31, data[6]) << 16) | (@as(u31, data[7]) << 8) | data[8],
         };
@@ -409,32 +409,32 @@ pub fn encodeSettingsPayload(settings: Http2Connection.Http2ConnectionSettings, 
     var buf: [6]u8 = undefined;
 
     // HEADER_TABLE_SIZE (0x1)
-    writeU16BE(&buf, @backingInt(Http2Settings.header_table_size));
+    writeU16BE(&buf, @intFromEnum(Http2Settings.header_table_size));
     writeU32BE(buf[2..6], settings.header_table_size);
     try out.appendSlice(allocator, &buf);
 
     // ENABLE_PUSH (0x2)
-    writeU16BE(&buf, @backingInt(Http2Settings.enable_push));
+    writeU16BE(&buf, @intFromEnum(Http2Settings.enable_push));
     writeU32BE(buf[2..6], if (settings.enable_push) 1 else 0);
     try out.appendSlice(allocator, &buf);
 
     // MAX_CONCURRENT_STREAMS (0x3)
-    writeU16BE(&buf, @backingInt(Http2Settings.max_concurrent_streams));
+    writeU16BE(&buf, @intFromEnum(Http2Settings.max_concurrent_streams));
     writeU32BE(buf[2..6], settings.max_concurrent_streams);
     try out.appendSlice(allocator, &buf);
 
     // INITIAL_WINDOW_SIZE (0x4)
-    writeU16BE(&buf, @backingInt(Http2Settings.initial_window_size));
+    writeU16BE(&buf, @intFromEnum(Http2Settings.initial_window_size));
     writeU32BE(buf[2..6], settings.initial_window_size);
     try out.appendSlice(allocator, &buf);
 
     // MAX_FRAME_SIZE (0x5)
-    writeU16BE(&buf, @backingInt(Http2Settings.max_frame_size));
+    writeU16BE(&buf, @intFromEnum(Http2Settings.max_frame_size));
     writeU32BE(buf[2..6], settings.max_frame_size);
     try out.appendSlice(allocator, &buf);
 
     // MAX_HEADER_LIST_SIZE (0x6)
-    writeU16BE(&buf, @backingInt(Http2Settings.max_header_list_size));
+    writeU16BE(&buf, @intFromEnum(Http2Settings.max_header_list_size));
     writeU32BE(buf[2..6], settings.max_header_list_size);
     try out.appendSlice(allocator, &buf);
 }
@@ -449,7 +449,7 @@ pub fn applySettingsPayload(settings: *Http2Connection.Http2ConnectionSettings, 
 
         // RFC 7540 §6.5.2: An endpoint MUST ignore and discard any SETTINGS
         // parameter with an identifier it does not understand.
-        switch (@as(Http2Settings, @fromBackingInt(@intCast(id)))) {
+        switch (@as(Http2Settings, @enumFromInt(id))) {
             .header_table_size => settings.header_table_size = value,
             .enable_push => settings.enable_push = (value != 0),
             .max_concurrent_streams => settings.max_concurrent_streams = value,
@@ -628,7 +628,7 @@ pub fn appendHttp3Frame(
 ) !void {
     var hdr_buf: [32]u8 = undefined;
     const hdr_len = try (Http3FrameHeader{
-        .frame_type = @backingInt(frame_type),
+        .frame_type = @intFromEnum(frame_type),
         .length = @intCast(payload.len),
     }).encode(&hdr_buf);
 
@@ -642,22 +642,22 @@ pub fn encodeHttp3SettingsPayload(
     allocator: Allocator,
     out: *std.ArrayList(u8),
 ) !void {
-    try appendVarInt(out, allocator, @backingInt(Http3SettingId.qpack_max_table_capacity));
+    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.qpack_max_table_capacity));
     try appendVarInt(out, allocator, settings.qpack_max_table_capacity);
 
-    try appendVarInt(out, allocator, @backingInt(Http3SettingId.max_field_section_size));
+    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.max_field_section_size));
     try appendVarInt(out, allocator, settings.max_field_section_size);
 
-    try appendVarInt(out, allocator, @backingInt(Http3SettingId.qpack_blocked_streams));
+    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.qpack_blocked_streams));
     try appendVarInt(out, allocator, settings.qpack_blocked_streams);
 
     if (settings.enable_connect_protocol) {
-        try appendVarInt(out, allocator, @backingInt(Http3SettingId.enable_connect_protocol));
+        try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.enable_connect_protocol));
         try appendVarInt(out, allocator, 1);
     }
 
     if (settings.enable_datagrams) {
-        try appendVarInt(out, allocator, @backingInt(Http3SettingId.h3_datagram));
+        try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.h3_datagram));
         try appendVarInt(out, allocator, 1);
     }
 }
@@ -681,11 +681,11 @@ pub fn parseHttp3SettingsPayload(payload: []const u8) !types.Http3Settings {
         offset += value_result.len;
 
         switch (id_result.value) {
-            @backingInt(Http3SettingId.qpack_max_table_capacity) => parsed.qpack_max_table_capacity = value_result.value,
-            @backingInt(Http3SettingId.max_field_section_size) => parsed.max_field_section_size = value_result.value,
-            @backingInt(Http3SettingId.qpack_blocked_streams) => parsed.qpack_blocked_streams = value_result.value,
-            @backingInt(Http3SettingId.enable_connect_protocol) => parsed.enable_connect_protocol = value_result.value != 0,
-            @backingInt(Http3SettingId.h3_datagram) => parsed.enable_datagrams = value_result.value != 0,
+            @intFromEnum(Http3SettingId.qpack_max_table_capacity) => parsed.qpack_max_table_capacity = value_result.value,
+            @intFromEnum(Http3SettingId.max_field_section_size) => parsed.max_field_section_size = value_result.value,
+            @intFromEnum(Http3SettingId.qpack_blocked_streams) => parsed.qpack_blocked_streams = value_result.value,
+            @intFromEnum(Http3SettingId.enable_connect_protocol) => parsed.enable_connect_protocol = value_result.value != 0,
+            @intFromEnum(Http3SettingId.h3_datagram) => parsed.enable_datagrams = value_result.value != 0,
             else => {},
         }
     }
@@ -832,9 +832,9 @@ test "HTTP/2 non-exhaustive frame type: unknown value does not panic" {
     // RFC 7540 §4.1: unknown frame types MUST be ignored.
     // Verify @enumFromInt does not panic for values >= 0x0A.
     const unknown_type: u8 = 0xFF; // GREASE/extension type
-    const ft: Http2FrameType = @fromBackingInt(@intCast(unknown_type));
+    const ft: Http2FrameType = @enumFromInt(unknown_type);
     // The tag integer should round-trip correctly.
-    try std.testing.expectEqual(unknown_type, @backingInt(ft));
+    try std.testing.expectEqual(unknown_type, @intFromEnum(ft));
 }
 
 test "HTTP/2 non-exhaustive SETTINGS: unknown identifier is silently ignored" {
