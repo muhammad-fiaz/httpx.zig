@@ -515,13 +515,47 @@ pub const Server = struct {
     }
 
     /// Starts the server and begins accepting connections.
+    ///
+    /// When both `http2_enabled` and `http3_enabled` are set, the server
+    /// binds a TCP listener (for HTTP/1.1 and HTTP/2) and a UDP socket (for
+    /// HTTP/3 over QUIC) and runs both accept loops concurrently.
     pub fn listen(self: *Self) !void {
         if (self.config.unix_path) |path| {
             return self.listenUnix(path);
         }
 
         if (self.config.http3_enabled) {
-            return self.listenHttp3();
+            // Ensure TCP listener is bound for HTTP/1.1 and HTTP/2.
+            if (self.listener == null) {
+                const backlog_u32: u32 = @max(self.config.max_connections, 1);
+                const backlog: u31 = @intCast(@min(backlog_u32, @as(u32, std.math.maxInt(u31))));
+                try self.bindTcpListener(backlog);
+            }
+            // Also bind UDP for HTTP/3.
+            try self.bindUdpSocket();
+            self.running = true;
+
+            self.log(.info, "Server listening on {s}:{d} (HTTP/1.1 + HTTP/2) and {s}:{d} (HTTP/3 QUIC)\n", .{
+                self.config.host,
+                self.config.port,
+                self.config.host,
+                self.config.port,
+            });
+
+            // Spawn TCP accept loop in a separate thread.
+            const tcp_thread = try std.Thread.spawn(.{}, struct {
+                fn run(s: *Self) void {
+                    s.listenTcpAcceptLoop() catch |err| {
+                        if (s.running) {
+                            s.log(.err, "TCP accept error: {}\n", .{err});
+                        }
+                    };
+                }
+            }.run, .{self});
+            defer tcp_thread.join();
+
+            // Run HTTP/3 UDP recv loop in the current thread.
+            return self.listenHttp3AcceptLoop();
         }
 
         return self.listenTcp();
@@ -530,15 +564,75 @@ pub const Server = struct {
     /// Spawns a background thread to run the server's listening loop.
     /// The caller is responsible for joining the returned Thread.
     pub fn listenInBackground(self: *Self) !std.Thread {
-        if (self.config.unix_path == null and !self.config.http3_enabled and self.listener == null) {
-            const backlog_u32: u32 = @max(self.config.max_connections, 1);
-            const backlog: u31 = @intCast(@min(backlog_u32, @as(u32, std.math.maxInt(u31))));
-            try self.bindTcpListener(backlog);
-        } else if (self.config.unix_path) |path| {
+        if (self.config.unix_path) |path| {
             if (self.unix_listener == null) {
                 const unix_mod = @import("../net/unix.zig");
                 self.unix_listener = try unix_mod.UnixListener.init(path);
             }
+            return std.Thread.spawn(.{}, struct {
+                fn run(s: *Self) void {
+                    s.listen() catch |err| {
+                        if (s.running) {
+                            s.log(.err, "server error: {s}\n", .{@errorName(err)});
+                        }
+                    };
+                }
+            }.run, .{self});
+        }
+
+        if (self.config.http3_enabled) {
+            // Bind TCP listener for HTTP/1.1 and HTTP/2.
+            if (self.listener == null) {
+                const backlog_u32: u32 = @max(self.config.max_connections, 1);
+                const backlog: u31 = @intCast(@min(backlog_u32, @as(u32, std.math.maxInt(u31))));
+                try self.bindTcpListener(backlog);
+            }
+            // Bind UDP socket for HTTP/3 over QUIC.
+            try self.bindUdpSocket();
+            self.running = true;
+
+            if (self.executor) |*e| {
+                try e.start();
+            }
+
+            self.log(.info, "Server listening on {s}:{d} (HTTP/1.1 + HTTP/2) and {s}:{d} (HTTP/3 QUIC)\n", .{
+                self.config.host,
+                self.config.port,
+                self.config.host,
+                self.config.port,
+            });
+
+            // Spawn TCP accept loop in a background thread.
+            const tcp_thread = try std.Thread.spawn(.{}, struct {
+                fn run(s: *Self) void {
+                    s.listenTcpAcceptLoop() catch |err| {
+                        if (s.running) {
+                            s.log(.err, "TCP accept error: {}\n", .{err});
+                        }
+                    };
+                }
+            }.run, .{self});
+
+            // Run HTTP/3 UDP recv loop in a background thread too, then
+            // return the TCP thread handle so the caller can join it.
+            _ = try std.Thread.spawn(.{}, struct {
+                fn run(s: *Self) void {
+                    s.listenHttp3AcceptLoop() catch |err| {
+                        if (s.running) {
+                            s.log(.err, "HTTP/3 accept error: {}\n", .{err});
+                        }
+                    };
+                }
+            }.run, .{self});
+
+            return tcp_thread;
+        }
+
+        // Standard HTTP/1.1 + HTTP/2 path.
+        if (self.listener == null) {
+            const backlog_u32: u32 = @max(self.config.max_connections, 1);
+            const backlog: u31 = @intCast(@min(backlog_u32, @as(u32, std.math.maxInt(u31))));
+            try self.bindTcpListener(backlog);
         }
         return std.Thread.spawn(.{}, struct {
             fn run(s: *Self) void {
@@ -658,6 +752,13 @@ pub const Server = struct {
 
         self.log(.info, "Server listening on {s}:{d}\n", .{ self.config.host, self.config.port });
 
+        try self.listenTcpAcceptLoop();
+    }
+
+    /// TCP accept loop — accepts connections and dispatches to handler.
+    /// Called from `listenTcp` (standalone) or from a background thread when
+    /// running alongside HTTP/3.
+    fn listenTcpAcceptLoop(self: *Self) !void {
         while (self.running) {
             const conn = self.listener.?.accept() catch |err| {
                 if (!self.running) break;
@@ -710,6 +811,14 @@ pub const Server = struct {
         self.running = true;
 
         self.log(.info, "Server listening (HTTP/3) on {s}:{d}\n", .{ self.config.host, self.config.port });
+
+        try self.listenHttp3AcceptLoop();
+    }
+
+    /// HTTP/3 UDP recv loop — receives QUIC packets and dispatches to handler.
+    /// Called from `listenHttp3` (standalone) or from the current thread when
+    /// running alongside TCP.
+    fn listenHttp3AcceptLoop(self: *Self) !void {
 
         var recv_buf: [64 * 1024]u8 = undefined;
 
@@ -808,13 +917,41 @@ pub const Server = struct {
 
     /// Handles a single connection.
     fn handleConnection(self: *Self, socket: Socket) !void {
-        if (self.config.http2_enabled) {
-            return self.handleHttp2Connection(socket);
-        }
-
         var sock = socket;
         defer sock.close();
 
+        if (self.config.http2_enabled) {
+            // Read the first bytes to detect the HTTP/2 connection preface.
+            // If the client sends the 24-byte preface, handle as HTTP/2;
+            // otherwise those bytes are the start of an HTTP/1.1 request.
+            var probe: [http.HTTP2_PREFACE.len]u8 = undefined;
+            var total: usize = 0;
+            while (total < probe.len) {
+                const n = sock.recv(probe[total..]) catch break;
+                if (n == 0) return;
+                total += n;
+            }
+
+            if (total == probe.len and mem.eql(u8, &probe, http.HTTP2_PREFACE)) {
+                return self.handleHttp2Connection(sock);
+            }
+
+            // Not HTTP/2 — handle as HTTP/1.1 with the already-read prefix.
+            return self.handleHttp1WithPrefix(sock, probe[0..total]);
+        }
+
+        return self.handleHttp1Connection(sock);
+    }
+
+    /// Handles an HTTP/1.1 connection from scratch (no prefix bytes).
+    fn handleHttp1Connection(self: *Self, sock: Socket) !void {
+        return self.handleHttp1WithPrefix(sock, &.{});
+    }
+
+    /// Handles an HTTP/1.1 connection where `prefix` bytes have already been
+    /// read from the socket (e.g. during HTTP/2 preface detection).
+    fn handleHttp1WithPrefix(self: *Self, socket: Socket, prefix: []const u8) !void {
+        var sock = socket;
         var first_request = true;
         while (self.running) {
             const timeout_ms = if (first_request) self.config.request_timeout_ms else self.config.keep_alive_timeout_ms;
@@ -825,6 +962,17 @@ pub const Server = struct {
             var buffer: [8192]u8 = undefined;
             var parser = Parser.init(self.allocator);
             defer parser.deinit();
+
+            // If prefix bytes were provided, feed them first.
+            if (!first_request or prefix.len == 0) {
+                // No prefix or subsequent request — normal read path.
+            } else if (prefix.len > 0) {
+                _ = try parser.feed(prefix);
+                if (parser.getBody().len > self.config.max_body_size) {
+                    try self.sendError(&sock, 413);
+                    return;
+                }
+            }
 
             while (!parser.isComplete()) {
                 const n = try sock.recv(&buffer);
@@ -881,15 +1029,11 @@ pub const Server = struct {
         var sock = socket;
         defer sock.close();
 
-        // Set recv timeout before reading the connection preface and
-        // initial SETTINGS frame so a silent peer does not hang us.
+        // The HTTP/2 connection preface has already been consumed by
+        // handleConnection(). Set recv timeout for subsequent reads.
         if (self.config.request_timeout_ms > 0) {
             try sock.setRecvTimeout(self.config.request_timeout_ms);
         }
-
-        var preface: [http.HTTP2_PREFACE.len]u8 = undefined;
-        try readNoEofSocket(&sock, &preface);
-        if (!mem.eql(u8, &preface, http.HTTP2_PREFACE)) return error.ProtocolError;
 
         var conn = http.Http2Connection.init(
             self.allocator,

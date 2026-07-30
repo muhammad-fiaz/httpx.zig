@@ -3,7 +3,12 @@
 All notable changes to this project are documented in this file.
 
 
-## [0.1.4] - 12-07-2026
+## [0.1.4] - 30-07-2026
+
+### Added
+
+
+## [0.1.3] - 12-07-2026
 
 ### Added
 - HTTP/2: ALPN negotiation — client and server now advertise `["h2", "http/1.1"]` during the TLS handshake. The client inspects the negotiated protocol after the handshake and automatically selects HTTP/2 or HTTP/1.1 accordingly; if ALPN is unavailable the connection falls back to HTTP/1.1.
@@ -22,7 +27,7 @@ All notable changes to this project are documented in this file.
 - New examples: `http2_advanced.zig` (SETTINGS enforcement, GOAWAY/RST_STREAM, HPACK security, trailers) and `http3_advanced.zig` (QPACK stream instructions, QUIC stream cancellation, transport parameters).
 
 ### Changed
-- Bumped project version to `0.1.4`.
+- Bumped project version to `0.1.3`.
 
 ### Fixed
 - Fixed HTTPS responses larger than ~16 KB (one TLS record) causing an infinite loop at 100% CPU. The `SocketIoReader.rebase` vtable function was a no-op, so after the internal buffer was fully consumed the reader never reclaimed buffer space and `readVec` kept returning zero bytes. `rebase` now compacts unread data to the front of the buffer, matching the standard library's `defaultRebase` behavior ([Issue #21](https://github.com/muhammad-fiaz/httpx.zig/issues/21)).
