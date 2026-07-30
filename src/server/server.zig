@@ -819,7 +819,6 @@ pub const Server = struct {
     /// Called from `listenHttp3` (standalone) or from the current thread when
     /// running alongside TCP.
     fn listenHttp3AcceptLoop(self: *Self) !void {
-
         var recv_buf: [64 * 1024]u8 = undefined;
 
         while (self.running) {
