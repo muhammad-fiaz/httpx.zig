@@ -1,6 +1,6 @@
 # Client API
 
-The `httpx.zig` client provides a high-level HTTP client for making requests over HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3. HTTPS is supported via Zig's standard library TLS (`std.crypto.tls`) for HTTP/1.x and HTTP/2.
+The `httpx.zig` client provides a high-level HTTP client for making requests over HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3. HTTPS is supported via a fully custom TLS 1.2/1.3 implementation built on `std.crypto` primitives (AES-GCM, ChaCha20-Poly1305, X25519, P-256, P-384, HKDF, SHA-256/384/512) with ALPN negotiation for HTTP/2 and HTTP/3.
 
 ## Protocol Support
 

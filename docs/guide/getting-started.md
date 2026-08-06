@@ -18,7 +18,7 @@
     - Static file serving.
     - JSON helpers.
 - **Concurrency**: Built-in thread pool and async primitives (`all`, `any`, `race`).
-- **Security**: TLS/SSL support (via `std.crypto` or system libraries) with custom CA handling.
+- **Security**: Custom TLS 1.2/1.3 implementation with ALPN negotiation, ECDSA certificate verification, and custom CA handling.
 - **Explicit Root Helpers**: Top-level aliases for requests (`fetch/send/...`), concurrency (`first/fastest/settled`), networking (`resolveAddress`, `parseAndResolveAddress`, `netInit/netDeinit`), and MIME detection (`mimeTypeFromPath`, `mimeTypeFromPathOr`, `mimeTypeFromPathWith`) with external mapping support via `MimeMapping`.
 
 ::: warning Custom HTTP/2 & HTTP/3 Implementation
@@ -35,7 +35,7 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 `v0.1.2` is the previous stable release for the immediate prior `0.1.x` line.
 Zig `0.15` support is legacy and remains available only through `0.0.7`.
 The HTTPS/TLS reader fix for Zig `0.16` empty-buffer reads is included in this release.
-If you are upgrading from `0.0.7`, review `/CHANGELOG` before migration.
+If you are upgrading from `0.0.7`, review the GitHub Releases page for migration notes.
 :::
 
 ## Platform Support

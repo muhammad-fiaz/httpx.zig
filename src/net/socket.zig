@@ -483,7 +483,7 @@ pub fn deinit() void {
 
 /// Adapter that exposes a `std.Io.Reader` backed by a connected `Socket`.
 ///
-/// This is primarily used to integrate with `std.crypto.tls.Client`.
+/// This is used to integrate with the custom TLS implementation in `tls.zig`.
 pub const SocketIoReader = struct {
     socket: *Socket,
     reader: Io.Reader,
@@ -576,7 +576,7 @@ pub const SocketIoReader = struct {
 
 /// Adapter that exposes a `std.Io.Writer` backed by a connected `Socket`.
 ///
-/// This is primarily used to integrate with `std.crypto.tls.Client`.
+/// This is used to integrate with the custom TLS implementation in `tls.zig`.
 pub const SocketIoWriter = struct {
     socket: *Socket,
     writer: Io.Writer,

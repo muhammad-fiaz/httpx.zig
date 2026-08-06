@@ -77,4 +77,4 @@ If your change affects behavior, update the relevant files under `docs/` and API
 - `0.0.1` is the initial release.
 - `0.0.2` includes compatibility fixes and maintenance updates.
 
-For release history, see [CHANGELOG.md](CHANGELOG.md).
+For release history, see [GitHub Releases](https://github.com/muhammad-fiaz/httpx.zig/releases).

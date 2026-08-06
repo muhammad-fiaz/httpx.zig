@@ -289,7 +289,7 @@ gtag('config', '${GA_ID}');`,
       { text: "Guide", link: "/guide/getting-started" },
       { text: "API", link: "/api/" },
       { text: "Examples", link: "/examples/" },
-      { text: "Changelog", link: "https://github.com/muhammad-fiaz/httpx.zig/blob/main/CHANGELOG.md" },
+      { text: "Releases", link: "https://github.com/muhammad-fiaz/httpx.zig/releases" },
       {
         text: "Support",
         items: [

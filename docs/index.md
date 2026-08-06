@@ -65,7 +65,7 @@ Benchmark target: `x86_64-windows`, `ReleaseFast`.
 `v0.1.2` is the previous stable release for the immediate prior `0.1.x` line.
 Zig `0.15` support is legacy and remains available only through `0.0.7`.
 The HTTPS/TLS reader fix for Zig `0.16` empty-buffer reads is included in this release.
-If you are upgrading from `0.0.7`, review `/CHANGELOG` first and refresh your dependency pin/hash.
+If you are upgrading from `0.0.7`, review the GitHub Releases page for migration notes.
 :::
 
 Choose one of these installation methods:
