@@ -27,13 +27,6 @@ fn sleepMs(ms: i64) void {
     std.Io.sleep(io, std.Io.Duration.fromMilliseconds(ms), .real) catch {};
 }
 
-fn pickFreeTcpPort() !u16 {
-    var listener = try httpx.TcpListener.init(try httpx.Address.parseIp("127.0.0.1", 0));
-    defer listener.deinit();
-    const addr = try listener.getLocalAddress();
-    return addr.getPort();
-}
-
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -43,10 +36,9 @@ pub fn main() !void {
 
     // 1. Create a server with TLS enabled
     std.debug.print("--- Server Configuration ---\n", .{});
-    const port = try pickFreeTcpPort();
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
-        .port = port,
+        .port = 0,
         .tls_enabled = true,
         .tls_cert_path = "examples/certs/server.crt",
         .tls_key_path = "examples/certs/server.key",
@@ -70,15 +62,23 @@ pub fn main() !void {
     defer server_thread.join();
     defer server.stop();
 
-    sleepMs(100);
+    const port = server.config.port;
+    sleepMs(200);
     std.debug.print("  Server listening on port {d}\n", .{port});
 
     // 3. TLS client handshake demonstration
     std.debug.print("\n--- TLS Client Handshake ---\n", .{});
 
-    var sock = try httpx.Socket.create();
+    var sock = httpx.Socket.create() catch |err| {
+        std.debug.print("  Socket create error: {}\n", .{err});
+        return;
+    };
     defer sock.close();
-    try sock.connectHost("127.0.0.1", port);
+
+    sock.connectHost("127.0.0.1", port) catch |err| {
+        std.debug.print("  Connect error: {}\n", .{err});
+        return;
+    };
 
     const tls_config = tls.TlsConfig.insecureWithH2(allocator);
     var session = tls.TlsSession.init(tls_config);
