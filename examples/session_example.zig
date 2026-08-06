@@ -91,7 +91,13 @@ pub fn main() !void {
     sleepMs(100); // wait for TTL to pass
 
     std.debug.print("After expiry  - exists: {}\n", .{short_store.exists(&short_sid)});
-    std.debug.print("After expiry  - get:    {?s}\n", .{short_store.get(&short_sid, "temp")});
+    const expired_val = short_store.get(&short_sid, "temp");
+    if (expired_val) |v| {
+        defer allocator.free(v);
+        std.debug.print("After expiry  - get:    {s}\n", .{v});
+    } else {
+        std.debug.print("After expiry  - get:    null\n", .{});
+    }
 
     _ = short_store.create() catch {};
     _ = short_store.create() catch {};

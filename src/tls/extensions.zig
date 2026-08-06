@@ -24,7 +24,7 @@ pub const max_alpn_protocols = 16;
 pub const max_alpn_proto_len = 255;
 
 /// Calculates the number of bytes needed to encode the ALPN
-/// protocol list (the `ProtocolNameList` value field only  -- 
+/// protocol list (the `ProtocolNameList` value field only  --
 /// not including the outer extension type/length header).
 ///
 /// Wire format (for a list of N protocols):
@@ -258,7 +258,8 @@ pub const psk_modes_ext: [8]u8 = blk: {
     mem.writeIntBig(u16, b[2..4], 2);
     b[4] = 1; // list length
     b[5] = @intFromEnum(tls.PskKeyExchangeMode.psk_dhe_ke);
-    b[6] = 0; b[7] = 0; // padding to fill the array (not sent)
+    b[6] = 0;
+    b[7] = 0; // padding to fill the array (not sent)
     break :blk b;
 };
 
@@ -280,8 +281,7 @@ test "ALPN encode-decode round-trip" {
     const protocols: []const []const u8 = &.{ "h2", "http/1.1" };
     const written = try writeAlpnExtension(&buf, protocols);
     // The extension starts with type (2) + data-len (2).
-    try t.expectEqual(@as(u16, @intFromEnum(tls.ExtensionType.application_layer_protocol_negotiation)),
-        mem.readInt(u16, buf[0..2], .big));
+    try t.expectEqual(@as(u16, @intFromEnum(tls.ExtensionType.application_layer_protocol_negotiation)), mem.readInt(u16, buf[0..2], .big));
     // Parse back the extension data (skip type+data-len header = 4 bytes).
     const ext_data_len = mem.readInt(u16, buf[2..4], .big);
     var decoded: [max_alpn_protocols][]const u8 = undefined;

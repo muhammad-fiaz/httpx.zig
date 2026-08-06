@@ -125,8 +125,6 @@ pub fn KeySchedule(comptime HashType: type) type {
         ) [Hmac.mac_length]u8 {
             return tls.hmac(Hmac, transcript_hash, finished_key);
         }
-
-
     };
 }
 
@@ -135,12 +133,8 @@ pub fn KeySchedule(comptime HashType: type) type {
 const HmacSha256 = crypto.auth.hmac.Hmac(Sha256);
 const HmacSha384 = crypto.auth.hmac.Hmac(Sha384);
 
-
 pub const KeyScheduleSha256 = KeySchedule(Sha256);
 pub const KeyScheduleSha384 = KeySchedule(Sha384);
-
-
-
 
 // Tests
 
@@ -152,7 +146,10 @@ test "KeySchedule SHA-256 early secret" {
     // non-zero (a crypto sanity check).
     var all_zero = true;
     for (ks.early_secret) |b| {
-        if (b != 0) { all_zero = false; break; }
+        if (b != 0) {
+            all_zero = false;
+            break;
+        }
     }
     try t.expect(!all_zero);
 }

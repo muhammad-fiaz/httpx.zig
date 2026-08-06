@@ -767,8 +767,6 @@ pub fn encodeChunkedBody(body: []const u8, trailers: ?*const Headers, allocator:
     return out.toOwnedSlice(allocator);
 }
 
-
-
 /// Determines the highest supported HTTP version based on ALPN negotiation string.
 pub fn negotiateVersion(alpn: ?[]const u8) NegotiatedProtocol {
     if (alpn) |protocol| {
@@ -954,8 +952,6 @@ test "encodeChunkedBody includes final chunk and trailers" {
     try std.testing.expect(mem.indexOf(u8, chunked, "5\r\nhello\r\n") != null);
     try std.testing.expect(mem.endsWith(u8, chunked, "0\r\nX-Checksum: abc123\r\n\r\n"));
 }
-
-
 
 test "HTTP/2 SETTINGS payload roundtrip with custom values" {
     const allocator = std.testing.allocator;

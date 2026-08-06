@@ -312,7 +312,18 @@ pub const Parser = struct {
         return line_end + 2;
     }
 
+    fn noBodyByStatus(self: *const Self) bool {
+        if (self.status_code) |code| {
+            return (code >= 100 and code < 200) or code == 204 or code == 304;
+        }
+        return false;
+    }
+
     fn determineBodyState(self: *Self) void {
+        if (!self.expect_body or self.noBodyByStatus()) {
+            self.state = .complete;
+            return;
+        }
         if (self.chunked) {
             self.state = .chunk_size;
         } else if (self.content_length) |len| {
@@ -321,7 +332,7 @@ pub const Parser = struct {
             } else {
                 self.state = .complete;
             }
-        } else if (self.mode == .response and self.expect_body) {
+        } else if (self.mode == .response) {
             self.state = .body;
         } else {
             self.state = .complete;

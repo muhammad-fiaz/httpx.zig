@@ -952,7 +952,7 @@ pub const Server = struct {
             else if (self.config.http2_enabled)
                 &.{ "h2", "http/1.1" }
             else
-                &.{ "http/1.1" };
+                &.{"http/1.1"};
 
             var tls_conn = tls_mod.acceptServer(self.allocator, &sock, alpn_protos) catch |err| {
                 self.log(.err, "TLS accept failed: {}\n", .{err});
@@ -2569,8 +2569,6 @@ const Http3IncomingDatagram = struct {
     data: []const u8,
     client_scid: ?quic.ConnectionId = null,
 };
-
-
 
 fn decodeHttp3IncomingDatagram(datagram: []const u8) !Http3IncomingDatagram {
     if (datagram.len == 0) return error.ProtocolError;

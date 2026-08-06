@@ -2092,8 +2092,6 @@ pub const Client = struct {
     }
 };
 
-
-
 const SocketHttp2Transport = struct {
     socket: *Socket,
 

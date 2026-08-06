@@ -119,5 +119,3 @@ fn connectSocks5hTunnel(socket: *Socket, target_host: []const u8, target_port: u
 pub fn establishSocks5hTunnel(socket: *Socket, target_host: []const u8, target_port: u16, proxy: types.Proxy) !void {
     try connectSocks5hTunnel(socket, target_host, target_port, proxy);
 }
-
-

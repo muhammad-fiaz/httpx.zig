@@ -62,7 +62,7 @@ pub fn parseSseStream(
         } else if (std.mem.indexOfScalar(u8, trimmed, ':')) |colon_pos| {
             const field_name = trimmed[0..colon_pos];
             const field_value = if (colon_pos + 1 < trimmed.len)
-                std.mem.trimLeft(u8, trimmed[colon_pos + 1 .. trimmed.len], &.{ ' ' })
+                std.mem.trimLeft(u8, trimmed[colon_pos + 1 .. trimmed.len], &.{' '})
             else
                 "";
 

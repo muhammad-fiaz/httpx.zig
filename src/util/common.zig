@@ -216,5 +216,3 @@ test "buildSetCookieHeader includes options" {
     try std.testing.expect(mem.indexOf(u8, set_cookie, "Secure") != null);
     try std.testing.expect(mem.indexOf(u8, set_cookie, "HttpOnly") != null);
 }
-
-

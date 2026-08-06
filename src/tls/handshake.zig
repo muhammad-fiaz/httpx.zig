@@ -13,7 +13,6 @@ const crypto = std.crypto;
 const tls = std.crypto.tls;
 const errors = @import("errors.zig");
 
-
 // Shared HMAC types
 
 pub const HmacSha256 = crypto.auth.hmac.Hmac(crypto.hash.sha2.Sha256);
@@ -27,8 +26,6 @@ pub fn writeHandshakeHeader(msg_type: tls.HandshakeType, length: u24, out: *[Han
     out[0] = @intFromEnum(msg_type);
     std.mem.writeInt(u24, out[1..4], length, .big);
 }
-
-
 
 // Key Exchange
 

@@ -105,23 +105,15 @@ pub fn main() !void {
     defer del_resp.deinit();
     std.debug.print("  DELETE -> {d}\n", .{del_resp.status.code});
 
-    // HEAD may trigger RecvFailed if server keeps connection alive but client
-    // reads response before server sends body - use Connection: close
-    if (client.head(base_url, .{})) |head_resp| {
-        var r = head_resp;
-        defer r.deinit();
-        std.debug.print("  HEAD   -> {d}\n", .{r.status.code});
-    } else |err| {
-        std.debug.print("  HEAD   -> (error: {})\n", .{err});
-    }
+    // HEAD returns headers only (no body) per RFC 9110
+    var head_resp = try client.head(base_url, .{});
+    defer head_resp.deinit();
+    std.debug.print("  HEAD   -> {d}\n", .{head_resp.status.code});
 
-    if (client.options(base_url, .{})) |opts_resp| {
-        var r = opts_resp;
-        defer r.deinit();
-        std.debug.print("  OPTIONS -> {d}\n", .{r.status.code});
-    } else |err| {
-        std.debug.print("  OPTIONS -> (error: {})\n", .{err});
-    }
+    // OPTIONS returns 204 No Content with Allow header
+    var opts_resp = try client.options(base_url, .{});
+    defer opts_resp.deinit();
+    std.debug.print("  OPTIONS -> {d}\n", .{opts_resp.status.code});
 
     // 5. Convenience functions
     std.debug.print("\n--- Convenience Functions ---\n", .{});

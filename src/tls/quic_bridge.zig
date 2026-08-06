@@ -182,7 +182,7 @@ test "QuicCryptoBridge init" {
 }
 
 test "deriveInitialKeys produces non-zero keys" {
-    const cid = [_]u8{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+    const cid = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
     const keys = deriveInitialKeys(&cid);
     var all_zero = true;
     for (keys.key) |b| {
@@ -232,7 +232,7 @@ test "deriveInitialKeys different connection IDs produce different keys" {
 }
 
 test "deriveInitialKeys produces 16-byte key" {
-    const cid = [_]u8{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+    const cid = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
     const keys = deriveInitialKeys(&cid);
     try std.testing.expectEqual(@as(usize, 16), keys.key.len);
     try std.testing.expectEqual(@as(usize, 12), keys.iv.len);

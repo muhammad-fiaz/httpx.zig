@@ -469,8 +469,10 @@ pub const TlsSession = struct {
         // Send ChangeCipherSpec (for middlebox compatibility) + Finished
         const ccs = [_]u8{
             @intFromEnum(tls.ContentType.change_cipher_spec),
-            0x03, 0x01,
-            0x00, 0x01,
+            0x03,
+            0x01,
+            0x00,
+            0x01,
             0x01,
         };
         _ = socket.send(&ccs) catch return error.WriteFailed;
