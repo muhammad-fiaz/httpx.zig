@@ -151,7 +151,7 @@ fn sendBytes(fd: posix.socket_t, data: []const u8) !usize {
         if (rc < 0) return error.WriteFailed;
         return @intCast(rc);
     } else {
-        const rc = posix.system.sendto(fd, data.ptr, data.len, 0, null, 0);
+        const rc = posix.system.sendto(fd, data.ptr, data.len, posix.MSG.NOSIGNAL, null, 0);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             else => return error.WriteFailed,
