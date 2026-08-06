@@ -120,12 +120,4 @@ pub fn establishSocks5hTunnel(socket: *Socket, target_host: []const u8, target_p
     try connectSocks5hTunnel(socket, target_host, target_port, proxy);
 }
 
-/// Connects a socket to a proxy and performs a SOCKS5h tunnel when requested.
-pub fn connectThroughProxy(socket: *Socket, target_host: []const u8, target_port: u16, proxy: types.Proxy) !void {
-    const proxy_addr = try address_mod.resolve(proxy.host, proxy.port);
-    try socket.connect(proxy_addr);
 
-    if (proxy.kind == .socks5h) {
-        try connectSocks5hTunnel(socket, target_host, target_port, proxy);
-    }
-}

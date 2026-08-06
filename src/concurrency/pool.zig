@@ -41,7 +41,7 @@ pub const RequestResult = union(enum) {
     }
 
     pub fn getResponse(self: *RequestResult) ?*Response {
-        switch (self) {
+        switch (self.*) {
             .success => |*r| return r,
             .err => return null,
         }

@@ -86,7 +86,7 @@ server.use(httpx.middleware.helmet());
 Handles `Accept-Encoding` negotiation and compresses response bodies.
 
 ```zig
-server.use(httpx.middleware.compression());
+server.use(httpx.compressionMiddleware());
 ```
 
 ### `requestId`

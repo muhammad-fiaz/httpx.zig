@@ -28,7 +28,7 @@ Logging is opt-in. Use `httpx.middleware.loggerWithConfig(.{ .log_fn = ... })` t
 - **RateLimit**: Simple in-memory rate limiting.
 - **BasicAuth**: RFC 7617 Basic Authentication.
 - **Helmet**: Security headers.
-- **Compression**: Helper for content encoding.
+- **Compression**: Response compression middleware (gzip, deflate, br, zstd) via `httpx.compressionMiddleware()`.
 - **RequestId**: Injects `X-Request-ID`.
 
 ## Writing Custom Middleware
@@ -58,3 +58,13 @@ try server.use(.{
     .handler = MyMiddleware.handler 
 });
 ```
+
+## Compression Middleware
+
+Use `httpx.compressionMiddleware()` to enable automatic response compression. The middleware negotiates the best encoding based on the client's `Accept-Encoding` header and compresses the response body before sending.
+
+```zig
+try server.use(httpx.compressionMiddleware());
+```
+
+This enables gzip, deflate, brotli, and zstd compression. The middleware reads the incoming `Accept-Encoding` header and applies the first mutually supported encoding.

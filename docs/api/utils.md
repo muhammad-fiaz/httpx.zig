@@ -274,3 +274,74 @@ defer allocator.free(s);
 - `beginObject()` / `endObject()`
 - `beginArray()` / `endArray()`
 - `key(name)` / `string(val)` / `number(val)` / `boolean(val)` / `nullValue()`
+
+## Compression
+
+Content-Encoding negotiation, compression, and decompression for gzip, deflate, Brotli, and Zstd.
+
+### `ContentEncoding`
+
+Enum representing supported Content-Encoding values.
+
+| Variant | Description |
+|---------|-------------|
+| `.gzip` | gzip (RFC 1952) |
+| `.deflate` | DEFLATE (RFC 1951) |
+| `.br` | Brotli (RFC 7932) |
+| `.zstd` | Zstandard |
+| `.identity` | No encoding (pass-through) |
+
+### `ContentEncoding` Constants and Methods
+
+| Member | Description |
+|--------|-------------|
+| `ContentEncoding.ALL` | Array of all supported encodings: `[_]ContentEncoding{ .gzip, .deflate, .br, .zstd, .identity }` |
+| `toString()` | Convert to wire-format string (e.g., `.gzip` → `"gzip"`) |
+| `fromString(str)` | Parse from a string; returns `?ContentEncoding` (case-insensitive) |
+| `buildAcceptEncoding(encodings)` | Build an `Accept-Encoding` header value from a slice of encodings |
+
+### `httpx.decompress()`
+
+```zig
+pub fn decompress(allocator: Allocator, encoding: ContentEncoding, data: []const u8) ![]u8
+```
+
+Decompresses body content based on the provided `Content-Encoding`. The caller owns the returned slice.
+
+### `httpx.compress()`
+
+```zig
+pub fn compress(allocator: Allocator, encoding: ContentEncoding, data: []const u8) ![]u8
+```
+
+Compresses data using the specified encoding. The caller owns the returned slice.
+
+Root-level aliases: `httpx.ContentEncoding`, `httpx.decompress`, `httpx.compress`.
+
+## SSE (Server-Sent Events)
+
+### `sse.Event`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `data` | `[]const u8` | (required) | Event payload body |
+| `event` | `?[]const u8` | `null` | Optional SSE event name |
+| `id` | `?[]const u8` | `null` | Optional event id |
+| `retry_ms` | `?u32` | `null` | Optional client reconnect hint |
+
+#### `Event.format(allocator)`
+
+Serializes an SSE event to wire format. Caller owns the returned slice.
+
+### `parseSseStream(allocator, data, on_event)`
+
+Parses a raw SSE stream, invoking the callback for each complete event. Returns the number of events parsed.
+
+```zig
+fn onEvent(event: sse.Event) void {
+    std.debug.print("event: {s}\n", .{event.data});
+}
+const count = httpx.parseSseStream(allocator, raw_data, onEvent);
+```
+
+Root-level alias: `httpx.parseSseStream(...)`.

@@ -8,6 +8,10 @@
             .url = "https://github.com/muhammad-fiaz/zstd.zig/archive/refs/tags/0.0.1.tar.gz",
             .hash = "zstd-0.0.1-biH4jJ_KMgDBpUCoVlLqLK9JeyTgO8vFXurQl_ECstYN",
         },
+        .brotli = .{
+            .url = "https://github.com/muhammad-fiaz/brotli.zig/archive/refs/tags/0.0.1.tar.gz",
+            .hash = "brotli-0.0.1-utAAyFafJQAO-8c5LCoUD5ZhEmMfSZx72MonfJipzynD",
+        },
     },
     .paths = .{
         "build.zig",

@@ -6,7 +6,7 @@
 //! The protocol begins with an HTTP/1.1 upgrade handshake, then switches to a
 //! binary framing protocol for bidirectional messaging.
 //!
-//! ## Clean flat API — no double-namespace
+//! ## Clean flat API -- no double-namespace
 //!
 //! ```zig
 //! const httpx = @import("httpx");
@@ -18,7 +18,7 @@
 //!     defer allocator.free(accept);
 //! }
 //!
-//! // Encode a text frame (server → client, no mask)
+//! // Encode a text frame (server -> client, no mask)
 //! const frame = try httpx.wsEncodeFrame(allocator, .text, "hello", true, false, .{0,0,0,0});
 //! defer allocator.free(frame);
 //!
@@ -35,7 +35,7 @@ const Request = @import("../core/request.zig").Request;
 
 // Constants
 
-/// WebSocket magic GUID from RFC 6455 §1.3.
+/// WebSocket magic GUID from RFC 6455 1.3.
 pub const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 // Types
@@ -66,7 +66,7 @@ pub const WsFrame = struct {
     /// Whether this is the final fragment of a message.
     fin: bool,
     opcode: WsOpcode,
-    /// Whether the payload was masked (required for client→server).
+    /// Whether the payload was masked (required for client->server).
     masked: bool,
     /// Decoded (unmasked) payload bytes.
     payload: []u8,
@@ -77,7 +77,7 @@ pub const WsFrame = struct {
     }
 };
 
-/// WebSocket close status codes per RFC 6455 §7.4.
+/// WebSocket close status codes per RFC 6455 7.4.
 pub const WsCloseCode = enum(u16) {
     normal = 1000,
     going_away = 1001,
@@ -119,7 +119,7 @@ pub fn wsExtractKey(req: *const Request) ?[]const u8 {
     return req.headers.get("Sec-WebSocket-Key");
 }
 
-/// Computes `Sec-WebSocket-Accept` from the client's key (RFC 6455 §1.3).
+/// Computes `Sec-WebSocket-Accept` from the client's key (RFC 6455 1.3).
 ///
 /// Caller owns the returned slice; free with the same allocator.
 pub fn wsAcceptKey(client_key: []const u8, allocator: Allocator) ![]u8 {
@@ -155,7 +155,7 @@ pub fn wsUpgradeHeaders(client_key: []const u8, allocator: Allocator) ![]u8 {
 /// - `opcode`: frame type (text, binary, ping, pong, close, continuation)
 /// - `payload`: raw bytes to send
 /// - `fin`: true for the final (or only) fragment
-/// - `masked`: true for client→server frames (RFC 6455 requires masking)
+/// - `masked`: true for client->server frames (RFC 6455 requires masking)
 /// - `mask_key`: 4-byte key; only used when `masked` is true
 ///
 /// Caller owns the returned slice.
@@ -324,7 +324,7 @@ pub const MessageAssemblerConfig = struct {
 /// Tracks continuation frames across multiple WebSocket frames and
 /// reassembles them into complete messages.
 ///
-/// Handles the fragmentation protocol defined in RFC 6455 §5.4:
+/// Handles the fragmentation protocol defined in RFC 6455 5.4:
 ///   - A fragmented message starts with a data frame with FIN=0 and a non-continuation opcode.
 ///   - Continuation frames (opcode 0x0) carry the remaining fragments.
 ///   - The final fragment has FIN=1.
@@ -482,14 +482,14 @@ pub fn decodeMessage(
 
 // Tests
 
-test "wsAcceptKey — RFC 6455 test vector" {
+test "wsAcceptKey -- RFC 6455 test vector" {
     const allocator = std.testing.allocator;
     const result = try wsAcceptKey("dGhlIHNhbXBsZSBub25jZQ==", allocator);
     defer allocator.free(result);
     try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", result);
 }
 
-test "wsEncodeFrame / wsDecodeFrame roundtrip — text" {
+test "wsEncodeFrame / wsDecodeFrame roundtrip -- text" {
     const allocator = std.testing.allocator;
     const payload = "Hello, WebSocket!";
     const enc = try wsEncodeFrame(allocator, .text, payload, true, false, .{ 0, 0, 0, 0 });
@@ -501,7 +501,7 @@ test "wsEncodeFrame / wsDecodeFrame roundtrip — text" {
     try std.testing.expectEqualStrings(payload, r.frame.payload);
 }
 
-test "wsEncodeFrame / wsDecodeFrame — masked" {
+test "wsEncodeFrame / wsDecodeFrame -- masked" {
     const allocator = std.testing.allocator;
     const enc = try wsEncodeFrame(allocator, .text, "Hi", true, true, .{ 0x37, 0xfa, 0x21, 0x3d });
     defer allocator.free(enc);
@@ -510,7 +510,7 @@ test "wsEncodeFrame / wsDecodeFrame — masked" {
     try std.testing.expectEqualStrings("Hi", r.frame.payload);
 }
 
-test "wsEncodeFrame — extended 16-bit length" {
+test "wsEncodeFrame -- extended 16-bit length" {
     const allocator = std.testing.allocator;
     var big: [200]u8 = undefined;
     @memset(&big, 0xAB);
@@ -541,7 +541,7 @@ test "wsCloseFrame" {
     try std.testing.expectEqual(WsOpcode.close, r.frame.opcode);
 }
 
-test "isWebSocketUpgrade — valid" {
+test "isWebSocketUpgrade -- valid" {
     const allocator = std.testing.allocator;
     var req = try @import("../core/request.zig").Request.init(allocator, .GET, "/ws");
     defer req.deinit();
@@ -551,7 +551,7 @@ test "isWebSocketUpgrade — valid" {
     try std.testing.expect(isWebSocketUpgrade(&req));
 }
 
-test "isWebSocketUpgrade — invalid (missing key)" {
+test "isWebSocketUpgrade -- invalid (missing key)" {
     const allocator = std.testing.allocator;
     var req = try @import("../core/request.zig").Request.init(allocator, .GET, "/ws");
     defer req.deinit();
@@ -568,7 +568,7 @@ test "WsOpcode classification" {
     try std.testing.expect(WsOpcode.close.isControl());
 }
 
-test "MessageAssembler — single unfragmented text frame" {
+test "MessageAssembler -- single unfragmented text frame" {
     const allocator = std.testing.allocator;
     var assembler = MessageAssembler.init(allocator, .{});
     defer assembler.deinit();
@@ -585,7 +585,7 @@ test "MessageAssembler — single unfragmented text frame" {
     msg.?.deinit();
 }
 
-test "MessageAssembler — fragmented text across 3 frames" {
+test "MessageAssembler -- fragmented text across 3 frames" {
     const allocator = std.testing.allocator;
     var assembler = MessageAssembler.init(allocator, .{});
     defer assembler.deinit();
@@ -611,7 +611,7 @@ test "MessageAssembler — fragmented text across 3 frames" {
     msg.?.deinit();
 }
 
-test "MessageAssembler — control frame interleaved with fragments" {
+test "MessageAssembler -- control frame interleaved with fragments" {
     const allocator = std.testing.allocator;
     var assembler = MessageAssembler.init(allocator, .{});
     defer assembler.deinit();
@@ -641,7 +641,7 @@ test "MessageAssembler — control frame interleaved with fragments" {
     msg.?.deinit();
 }
 
-test "MessageAssembler — unexpected continuation without initial opcode" {
+test "MessageAssembler -- unexpected continuation without initial opcode" {
     const allocator = std.testing.allocator;
     var assembler = MessageAssembler.init(allocator, .{});
     defer assembler.deinit();
@@ -653,7 +653,7 @@ test "MessageAssembler — unexpected continuation without initial opcode" {
     try std.testing.expectError(error.UnexpectedContinuation, assembler.feed(r.frame));
 }
 
-test "MessageAssembler — unexpected opcode during fragmentation" {
+test "MessageAssembler -- unexpected opcode during fragmentation" {
     const allocator = std.testing.allocator;
     var assembler = MessageAssembler.init(allocator, .{});
     defer assembler.deinit();
@@ -670,7 +670,7 @@ test "MessageAssembler — unexpected opcode during fragmentation" {
     try std.testing.expectError(error.UnexpectedOpcode, assembler.feed(r2.frame));
 }
 
-test "MessageAssembler — message too large" {
+test "MessageAssembler -- message too large" {
     const allocator = std.testing.allocator;
     var assembler = MessageAssembler.init(allocator, .{ .max_message_size = 10 });
     defer assembler.deinit();
@@ -687,7 +687,7 @@ test "MessageAssembler — message too large" {
     try std.testing.expectError(error.MessageTooLarge, assembler.feed(r2.frame));
 }
 
-test "MessageAssembler — reset clears state" {
+test "MessageAssembler -- reset clears state" {
     const allocator = std.testing.allocator;
     var assembler = MessageAssembler.init(allocator, .{});
     defer assembler.deinit();

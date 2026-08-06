@@ -54,7 +54,7 @@ pub const ParsedParts = struct {
 
 /// Extracts the boundary value from a `Content-Type` header.
 ///
-/// `"multipart fictional-data; boundary=abc123"` → `"abc123"`
+/// `"multipart fictional-data; boundary=abc123"` -> `"abc123"`
 ///
 /// Returns null if no boundary is present.
 pub fn extractBoundary(content_type: []const u8) ?[]const u8 {
@@ -173,6 +173,29 @@ fn extractParamValue(header_value: []const u8, param: []const u8) ?[]const u8 {
     return null;
 }
 
+/// Escapes `"` characters in a string by replacing each with `\"`.
+/// Caller owns the returned slice.
+fn escapeQuote(allocator: Allocator, input: []const u8) ![]const u8 {
+    var count: usize = 0;
+    for (input) |c| {
+        if (c == '"') count += 1;
+    }
+    if (count == 0) return input;
+    var result = try allocator.alloc(u8, input.len + count);
+    var i: usize = 0;
+    for (input) |c| {
+        if (c == '"') {
+            result[i] = '\\';
+            result[i + 1] = '"';
+            i += 2;
+        } else {
+            result[i] = c;
+            i += 1;
+        }
+    }
+    return result;
+}
+
 /// Builds a multipart/form-data body incrementally.
 pub const MultipartBuilder = struct {
     allocator: Allocator,
@@ -198,7 +221,9 @@ pub const MultipartBuilder = struct {
 
     /// Appends a text field part.
     pub fn addField(self: *Self, name: []const u8, value: []const u8) !void {
-        try self.buf.print(self.allocator, "--{s}\r\nContent-Disposition: form-data; name=\"{s}\"\r\n\r\n{s}\r\n", .{ self.boundary, name, value });
+        const escaped_name = try escapeQuote(self.allocator, name);
+        defer if (escaped_name.ptr != name.ptr) self.allocator.free(escaped_name);
+        try self.buf.print(self.allocator, "--{s}\r\nContent-Disposition: form-data; name=\"{s}\"\r\n\r\n{s}\r\n", .{ self.boundary, escaped_name, value });
     }
 
     /// Appends a file upload part.
@@ -209,7 +234,11 @@ pub const MultipartBuilder = struct {
         content_type: []const u8,
         data: []const u8,
     ) !void {
-        try self.buf.print(self.allocator, "--{s}\r\nContent-Disposition: form-data; name=\"{s}\"; filename=\"{s}\"\r\nContent-Type: {s}\r\n\r\n", .{ self.boundary, name, filename, content_type });
+        const escaped_name = try escapeQuote(self.allocator, name);
+        defer if (escaped_name.ptr != name.ptr) self.allocator.free(escaped_name);
+        const escaped_filename = try escapeQuote(self.allocator, filename);
+        defer if (escaped_filename.ptr != filename.ptr) self.allocator.free(escaped_filename);
+        try self.buf.print(self.allocator, "--{s}\r\nContent-Disposition: form-data; name=\"{s}\"; filename=\"{s}\"\r\nContent-Type: {s}\r\n\r\n", .{ self.boundary, escaped_name, escaped_filename, content_type });
         try self.buf.appendSlice(self.allocator, data);
         try self.buf.appendSlice(self.allocator, "\r\n");
     }
@@ -228,19 +257,19 @@ pub const MultipartBuilder = struct {
 
 // Tests
 
-test "extractBoundary — simple" {
+test "extractBoundary -- simple" {
     const b = extractBoundary("multipart/form-data; boundary=----Bound123");
     try std.testing.expect(b != null);
     try std.testing.expectEqualStrings("----Bound123", b.?);
 }
 
-test "extractBoundary — quoted" {
+test "extractBoundary -- quoted" {
     const b = extractBoundary("multipart/form-data; boundary=\"----Bound 456\"");
     try std.testing.expect(b != null);
     try std.testing.expectEqualStrings("----Bound 456", b.?);
 }
 
-test "extractBoundary — missing" {
+test "extractBoundary -- missing" {
     try std.testing.expect(extractBoundary("text/plain") == null);
 }
 

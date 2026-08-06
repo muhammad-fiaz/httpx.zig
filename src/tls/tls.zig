@@ -1,846 +1,1124 @@
-//! TLS/SSL Support for httpx.zig
+//! High-level TLS Connection & Server Accept engine
 //!
-//! Provides TLS configuration, ALPN negotiation, and a session wrapper for
-//! HTTPS connections supporting HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3.
+//! Public API for httpx.zig TLS support:
 //!
-//! This module wraps Zig's standard library TLS client (`std.crypto.tls.Client`)
-//! and adds:
-//!
-//! - **ALPN negotiation**: Encodes ALPN protocol identifiers into the TLS
-//!   ClientHello extension and decodes the selected protocol from the
-//!   ServerHello. When the stdlib client doesn't expose ALPN directly, a
-//!   post-handshake H2 preface probe detects HTTP/2 support.
-//! - **Multi-protocol support**: Works with HTTP/1.x, HTTP/2, and HTTP/3.
-//!   HTTP/3 uses QUIC transport (UDP) and doesn't go through this TCP-based
-//!   TLS wrapper.
-//! - **Certificate management**: PEM parsing, system CA bundle loading,
-//!   client certificate authentication, and hostname verification.
-//! - **Cipher suite configuration**: Configurable cipher suites and TLS
-//!   version constraints.
+//! - `TlsConfig`  --  configuration (ALPN, verification, etc.)
+//! - `Connection`  --  established TLS session with read/write
+//! - `connectClient()`  --  perform a full TLS 1.2/1.3 client handshake
+//! - `acceptServer()`  --  perform a full TLS 1.2/1.3 server accept
+//! - `TlsSession`  --  lightweight session wrapper (backward-compatible)
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
-const builtin = @import("builtin");
+const mem = std.mem;
+const Allocator = mem.Allocator;
+const crypto = std.crypto;
+const tls = std.crypto.tls;
+
 const Socket = @import("../net/socket.zig").Socket;
-const SocketIoReader = @import("../net/socket.zig").SocketIoReader;
-const SocketIoWriter = @import("../net/socket.zig").SocketIoWriter;
-const io_util = @import("../util/any_io.zig");
-const defaultIo = io_util.defaultIo;
 
-/// HTTP/2 connection preface (RFC 7540 §3.5).
-const HTTP2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+const alpn = @import("alpn.zig");
+const errors = @import("errors.zig");
+const record = @import("record.zig");
+const handshake_12 = @import("handshake_12.zig");
+const handshake_13 = @import("handshake_13.zig");
+const cipher_suites = @import("cipher_suites.zig");
+const crypto_utils = @import("crypto_utils.zig");
+const any_io = @import("../util/any_io.zig");
 
-/// ALPN protocol identifiers used by httpx.zig.
-pub const AlpnProtocol = struct {
-    pub const HTTP1_0 = "http/1.0";
-    pub const HTTP1_1 = "http/1.1";
-    pub const HTTP2 = "h2";
-    pub const HTTP3 = "h3";
-    pub const H3_29 = "h3-29";
-};
+// Connection  --  represents an established TLS session
 
-/// TLS version configuration.
-pub const TlsVersion = enum {
-    tls_1_0,
-    tls_1_1,
-    tls_1_2,
-    tls_1_3,
+pub const Connection = struct {
+    allocator: Allocator,
+    socket: *Socket,
+    negotiated_alpn: alpn.NegotiatedAlpn = .{},
+    tls_version: tls.ProtocolVersion = .tls_1_2,
+    is_server: bool = false,
+    connected: bool = false,
 
-    pub fn toString(self: TlsVersion) []const u8 {
-        return switch (self) {
-            .tls_1_0 => "TLSv1.0",
-            .tls_1_1 => "TLSv1.1",
-            .tls_1_2 => "TLSv1.2",
-            .tls_1_3 => "TLSv1.3",
+    // Cipher state for application data
+    app_write_key: ?[32]u8 = null,
+    app_write_iv: ?[12]u8 = null,
+    app_read_key: ?[32]u8 = null,
+    app_read_iv: ?[12]u8 = null,
+
+    // Sequence numbers
+    write_seq: u64 = 0,
+    read_seq: u64 = 0,
+
+    cipher_suite: ?tls.CipherSuite = null,
+    read_buf: [record.max_record_len]u8 = undefined,
+    read_buf_len: usize = 0,
+    read_buf_pos: usize = 0,
+
+    pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
+        return self.negotiated_alpn.get();
+    }
+
+    pub fn isHttp2(self: *const Connection) bool {
+        return self.negotiated_alpn.isHttp2Result();
+    }
+
+    pub fn isHttp3(self: *const Connection) bool {
+        return self.negotiated_alpn.isHttp3Result();
+    }
+
+    pub fn tlsVersion(self: *const Connection) tls.ProtocolVersion {
+        return self.tls_version;
+    }
+
+    /// Send an alert and close the connection.
+    pub fn sendAlert(self: *Connection, level: tls.Alert.Level, desc: tls.Alert.Description) void {
+        var buf: [7]u8 = undefined;
+        buf[0] = @intFromEnum(tls.ContentType.alert);
+        buf[1] = 0x03;
+        buf[2] = 0x03;
+        buf[3] = 0;
+        buf[4] = 2;
+        buf[5] = @intFromEnum(level);
+        buf[6] = @intFromEnum(desc);
+        _ = self.socket.send(buf[0..7]) catch {};
+    }
+
+    /// Send close_notify alert.
+    pub fn closeNotify(self: *Connection) void {
+        self.sendAlert(.warning, .close_notify);
+    }
+
+    /// Returns a reader interface for reading from the TLS connection.
+    pub fn reader(self: *Connection) any_io.AnyReader {
+        return .{
+            .context = @ptrCast(self),
+            .readFn = struct {
+                fn read(ctx: *anyopaque, buffer: []u8) anyerror!usize {
+                    const c: *Connection = @ptrCast(@alignCast(ctx));
+                    return c.read(buffer);
+                }
+            }.read,
         };
     }
 
-    /// Returns the TLS version byte value for the protocol version.
-    pub fn majorVersion(self: TlsVersion) u8 {
-        return switch (self) {
-            .tls_1_0, .tls_1_1, .tls_1_2 => 3,
-            .tls_1_3 => 3,
+    /// Returns a writer interface for writing to the TLS connection.
+    pub fn writer(self: *Connection) any_io.AnyWriter {
+        return .{
+            .context = @ptrCast(self),
+            .writeFn = struct {
+                fn write(ctx: *anyopaque, data: []const u8) anyerror!usize {
+                    const c: *Connection = @ptrCast(@alignCast(ctx));
+                    return c.write(data);
+                }
+            }.write,
         };
     }
 
-    /// Returns the minor version byte value.
-    pub fn minorVersion(self: TlsVersion) u8 {
-        return switch (self) {
-            .tls_1_0 => 1,
-            .tls_1_1 => 2,
-            .tls_1_2 => 3,
-            .tls_1_3 => 4,
-        };
+    /// Write application data over the TLS connection.
+    pub fn write(self: *Connection, data: []const u8) !usize {
+        const socket = self.socket;
+        const version = self.tls_version;
+        const key = self.app_write_key orelse return error.TlsHandshakeNotComplete;
+        const iv = self.app_write_iv orelse return error.TlsHandshakeNotComplete;
+        const cs = self.cipher_suite orelse return error.TlsHandshakeNotComplete;
+
+        switch (version) {
+            .tls_1_3 => {
+                var hdr: [record.record_header_len]u8 = undefined;
+                const hdr_val = record.RecordHeader{
+                    .content_type = .application_data,
+                    .version = .tls_1_2,
+                    .length = @intCast(data.len + 16),
+                };
+                hdr_val.format(&hdr);
+
+                const nonce = record.nonceTls13(&iv, self.write_seq);
+
+                var out_buf: [record.record_header_len + record.max_plaintext_len + 256]u8 = undefined;
+                @memcpy(out_buf[0..record.record_header_len], &hdr);
+
+                const enc_len = switch (cs) {
+                    .AES_128_GCM_SHA256 => blk: {
+                        var k: [16]u8 = undefined;
+                        @memcpy(&k, key[0..16]);
+                        const enc = try record.encryptTls13(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record.record_header_len..], data, &hdr, &nonce, &k);
+                        break :blk enc.len;
+                    },
+                    .AES_256_GCM_SHA384 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        const enc = try record.encryptTls13(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record.record_header_len..], data, &hdr, &nonce, &k);
+                        break :blk enc.len;
+                    },
+                    .CHACHA20_POLY1305_SHA256 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        const enc = try record.encryptTls13(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record.record_header_len..], data, &hdr, &nonce, &k);
+                        break :blk enc.len;
+                    },
+                    else => return error.TlsUnsupportedCipherSuite,
+                };
+
+                const total = record.record_header_len + enc_len;
+                _ = socket.send(out_buf[0..total]) catch return error.WriteFailed;
+                self.write_seq += 1;
+                return data.len;
+            },
+            .tls_1_2 => {
+                var hdr: [record.record_header_len]u8 = undefined;
+                const hdr_val = record.RecordHeader{
+                    .content_type = .application_data,
+                    .version = .tls_1_2,
+                    .length = @intCast(12 + data.len + 16),
+                };
+                hdr_val.format(&hdr);
+
+                var out_buf: [record.record_header_len + 32 + record.max_plaintext_len + 256]u8 = undefined;
+                @memcpy(out_buf[0..record.record_header_len], &hdr);
+
+                const enc_len = switch (cs) {
+                    .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
+                        var k: [16]u8 = undefined;
+                        @memcpy(&k, key[0..16]);
+                        const enc = try record.encryptTls12(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record.record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        break :blk enc.len;
+                    },
+                    .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        const enc = try record.encryptTls12(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record.record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        break :blk enc.len;
+                    },
+                    .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        const enc = try record.encryptTls12(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record.record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        break :blk enc.len;
+                    },
+                    else => return error.TlsUnsupportedCipherSuite,
+                };
+
+                const total = record.record_header_len + enc_len;
+                _ = socket.send(out_buf[0..total]) catch return error.WriteFailed;
+                self.write_seq += 1;
+                return data.len;
+            },
+            else => return error.TlsUnsupportedCipherSuite,
+        }
+    }
+
+    pub fn writeAll(self: *Connection, data: []const u8) !void {
+        var written: usize = 0;
+        while (written < data.len) {
+            const n = try self.write(data[written..]);
+            if (n == 0) return error.WriteFailed;
+            written += n;
+        }
+    }
+
+    pub fn flush(_: *Connection) !void {}
+
+    /// Read application data from the TLS connection.
+    pub fn read(self: *Connection, buf: []u8) !usize {
+        const socket = self.socket;
+        const version = self.tls_version;
+        const key = self.app_read_key orelse return error.TlsHandshakeNotComplete;
+        const iv = self.app_read_iv orelse return error.TlsHandshakeNotComplete;
+        const cs = self.cipher_suite orelse return error.TlsHandshakeNotComplete;
+
+        if (self.read_buf_pos < self.read_buf_len) {
+            const available = self.read_buf_len - self.read_buf_pos;
+            const to_copy = @min(available, buf.len);
+            @memcpy(buf[0..to_copy], self.read_buf[self.read_buf_pos..][0..to_copy]);
+            self.read_buf_pos += to_copy;
+            return to_copy;
+        }
+
+        var total: usize = 0;
+        while (total < 5) {
+            const n = socket.recv(self.read_buf[total..5]) catch return error.ReadFailed;
+            if (n == 0) return error.TlsConnectionTruncated;
+            total += n;
+        }
+
+        const length = mem.readInt(u16, self.read_buf[3..5], .big);
+        if (length > record.max_ciphertext_len) return error.TlsRecordOverflow;
+
+        while (total < 5 + length) {
+            const n = socket.recv(self.read_buf[total..][0 .. 5 + length - total]) catch return error.ReadFailed;
+            if (n == 0) return error.TlsConnectionTruncated;
+            total += n;
+        }
+
+        const record_body = self.read_buf[5..][0..length];
+
+        switch (version) {
+            .tls_1_3 => {
+                const nonce = record.nonceTls13(&iv, self.read_seq);
+
+                const plaintext = switch (cs) {
+                    .AES_128_GCM_SHA256 => blk: {
+                        var k: [16]u8 = undefined;
+                        @memcpy(&k, key[0..16]);
+                        break :blk try record.decryptTls13(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], &nonce, &k);
+                    },
+                    .AES_256_GCM_SHA384 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        break :blk try record.decryptTls13(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], &nonce, &k);
+                    },
+                    .CHACHA20_POLY1305_SHA256 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        break :blk try record.decryptTls13(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], &nonce, &k);
+                    },
+                    else => return error.TlsUnsupportedCipherSuite,
+                };
+
+                self.read_seq += 1;
+
+                if (plaintext.len == 0) return 0;
+                const data_len = plaintext.len - 1;
+                const to_copy = @min(data_len, buf.len);
+                @memcpy(buf[0..to_copy], plaintext[0..to_copy]);
+                return to_copy;
+            },
+            .tls_1_2 => {
+                const plaintext = switch (cs) {
+                    .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
+                        var k: [16]u8 = undefined;
+                        @memcpy(&k, key[0..16]);
+                        break :blk try record.decryptTls12(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                    },
+                    .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        break :blk try record.decryptTls12(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                    },
+                    .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        break :blk try record.decryptTls12(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                    },
+                    else => return error.TlsUnsupportedCipherSuite,
+                };
+
+                self.read_seq += 1;
+                const to_copy = @min(plaintext.len, buf.len);
+                @memcpy(buf[0..to_copy], plaintext[0..to_copy]);
+
+                if (plaintext.len > to_copy) {
+                    @memcpy(self.read_buf[0 .. plaintext.len - to_copy], plaintext[to_copy..]);
+                    self.read_buf_len = plaintext.len - to_copy;
+                    self.read_buf_pos = 0;
+                } else {
+                    self.read_buf_len = 0;
+                    self.read_buf_pos = 0;
+                }
+
+                return to_copy;
+            },
+            else => return error.TlsUnsupportedCipherSuite,
+        }
     }
 };
 
-/// TLS verification mode.
-pub const VerifyMode = enum {
-    none,
-    peer,
-    fail_if_no_peer_cert,
-    client_once,
-};
+// TlsConfig  --  TLS connection configuration
 
-/// TLS configuration for clients and servers.
 pub const TlsConfig = struct {
     allocator: Allocator,
-    min_version: TlsVersion = .tls_1_2,
-    max_version: TlsVersion = .tls_1_3,
-    verify_mode: VerifyMode = .peer,
-    verify_hostname: bool = true,
-    ca_file: ?[]const u8 = null,
-    ca_path: ?[]const u8 = null,
-    cert_file: ?[]const u8 = null,
-    key_file: ?[]const u8 = null,
-    /// Application-Layer Protocol Negotiation protocol list.
-    ///
-    /// Listed protocols are encoded into the TLS ClientHello ALPN extension.
-    /// The first entry should be the preferred protocol. Common configurations:
-    ///
-    /// - HTTP/1.1 only: `&.{"http/1.1"}`
-    /// - HTTP/2 + HTTP/1.1: `&.{ "h2", "http/1.1" }`
-    /// - HTTP/3 + HTTP/2 + HTTP/1.1: `&.{ "h3", "h2", "http/1.1" }`
     alpn_protocols: []const []const u8 = &.{"http/1.1"},
-    cipher_suites: ?[]const u8 = null,
-    server_name: ?[]const u8 = null,
+    verify_server: bool = true,
+    ca_bundle_path: ?[]const u8 = null,
 
-    /// When `false`, receiving a connection close without a TLS `close_notify`
-    /// alert is treated as a truncation attack and returns an error.
-    /// When `true` (the default), missing `close_notify` is tolerated.
-    ///
-    /// Set to `false` for security-sensitive connections that must enforce
-    /// clean TLS shutdown (e.g. connections transferring authentication tokens).
-    allow_truncation_attacks: bool = true,
-
-    /// When `true`, skip the H2 preface probe and directly use HTTP/2 on TLS
-    /// connections that advertise `"h2"` in `alpn_protocols`. Use for known-H2
-    /// endpoints where the probe round-trip is undesirable.
-    ///
-    /// Default is `false` (probe is used, falling back to HTTP/1.1 if the
-    /// server does not respond with an HTTP/2 SETTINGS frame).
-    force_h2: bool = false,
-
-    const Self = @This();
-
-    /// Creates a default TLS configuration.
-    pub fn init(allocator: Allocator) Self {
+    pub fn init(allocator: Allocator) TlsConfig {
         return .{ .allocator = allocator };
     }
 
-    /// Creates a configuration that skips certificate verification.
-    pub fn insecure(allocator: Allocator) Self {
-        var config = init(allocator);
-        config.verify_mode = .none;
-        config.verify_hostname = false;
-        return config;
+    pub fn insecure(allocator: Allocator) TlsConfig {
+        return .{
+            .allocator = allocator,
+            .verify_server = false,
+        };
     }
 
-    /// Creates a configuration with HTTP/2 ALPN protocols advertised.
-    pub fn withH2(allocator: Allocator) Self {
-        var config = init(allocator);
-        config.alpn_protocols = &.{ "h2", "http/1.1" };
-        return config;
+    pub fn withH2(allocator: Allocator) TlsConfig {
+        return .{
+            .allocator = allocator,
+            .alpn_protocols = &.{ "h2", "http/1.1" },
+        };
     }
 
-    /// Creates an insecure configuration with HTTP/2 ALPN protocols advertised.
-    pub fn insecureWithH2(allocator: Allocator) Self {
-        var config = insecure(allocator);
-        config.alpn_protocols = &.{ "h2", "http/1.1" };
-        return config;
+    pub fn insecureWithH2(allocator: Allocator) TlsConfig {
+        return .{
+            .allocator = allocator,
+            .alpn_protocols = &.{ "h2", "http/1.1" },
+            .verify_server = false,
+        };
     }
 
-    /// Creates a configuration with HTTP/3 + HTTP/2 + HTTP/1.1 ALPN protocols.
-    pub fn withH3(allocator: Allocator) Self {
-        var config = init(allocator);
-        config.alpn_protocols = &.{ "h3", "h2", "http/1.1" };
-        return config;
+    pub fn withH3(allocator: Allocator) TlsConfig {
+        return .{
+            .allocator = allocator,
+            .alpn_protocols = &.{ "h3", "h2", "http/1.1" },
+        };
     }
 
-    /// Creates an insecure configuration with HTTP/3 ALPN protocols.
-    pub fn insecureWithH3(allocator: Allocator) Self {
-        var config = insecure(allocator);
-        config.alpn_protocols = &.{ "h3", "h2", "http/1.1" };
-        return config;
+    pub fn insecureWithH3(allocator: Allocator) TlsConfig {
+        return .{
+            .allocator = allocator,
+            .alpn_protocols = &.{ "h3", "h2", "http/1.1" },
+            .verify_server = false,
+        };
     }
 
-    /// Sets the CA certificate file.
-    pub fn setCaFile(self: *Self, path: []const u8) void {
-        self.ca_file = path;
-    }
-
-    /// Sets the client certificate and key files for mutual TLS.
-    pub fn setClientCert(self: *Self, cert_file: []const u8, key_file: []const u8) void {
-        self.cert_file = cert_file;
-        self.key_file = key_file;
-    }
-
-    /// Sets the server name for SNI.
-    pub fn setServerName(self: *Self, name: []const u8) void {
-        self.server_name = name;
-    }
-
-    /// Creates a copy of the configuration.
-    pub fn clone(self: *const Self) Self {
-        return self.*;
-    }
-
-    /// Returns true if H2 is included in the ALPN protocol list.
-    pub fn wantsHttp2(self: *const Self) bool {
+    pub fn wantsHttp2(self: TlsConfig) bool {
         for (self.alpn_protocols) |proto| {
             if (std.mem.eql(u8, proto, "h2")) return true;
         }
         return false;
     }
-
-    /// Returns true if H3 is included in the ALPN protocol list.
-    pub fn wantsHttp3(self: *const Self) bool {
-        for (self.alpn_protocols) |proto| {
-            if (std.mem.eql(u8, proto, "h3") or std.mem.eql(u8, proto, "h3-29")) return true;
-        }
-        return false;
-    }
-
-    /// Encodes the ALPN protocol list into the wire format for the TLS
-    /// ClientHello extension (extension type 0x0010).
-    ///
-    /// Wire format: each protocol is length-prefixed with a single byte.
-    /// Example: `["h2", "http/1.1"]` → `\x02h2\x08http/1.1`
-    pub fn encodeAlpnProtocols(self: *const Self, out: []u8) !usize {
-        var offset: usize = 0;
-        for (self.alpn_protocols) |proto| {
-            if (proto.len > 255) return error.ProtocolTooLong;
-            if (offset + 1 + proto.len > out.len) return error.BufferTooSmall;
-            out[offset] = @intCast(proto.len);
-            offset += 1;
-            @memcpy(out[offset .. offset + proto.len], proto);
-            offset += proto.len;
-        }
-        return offset;
-    }
-
-    /// Returns the total encoded length of the ALPN protocol list.
-    pub fn alpnEncodedLength(self: *const Self) usize {
-        var len: usize = 0;
-        for (self.alpn_protocols) |proto| {
-            len += 1 + proto.len; // 1 byte length prefix + protocol bytes
-        }
-        return len;
-    }
 };
 
-/// TLS session state. Manages the TLS handshake, ALPN negotiation,
-/// encrypted read/write, and protocol detection for HTTP/1.x, HTTP/2, and HTTP/3.
+// TlsSession  --  lightweight session wrapper (backward-compatible)
+
 pub const TlsSession = struct {
-    allocator: Allocator,
     config: TlsConfig,
-    /// Set after handshake to the negotiated application protocol, or `null`
-    /// if the protocol could not be determined (treated as HTTP/1.1).
-    negotiated_protocol: ?[]const u8 = null,
-    peer_certificate: ?[]const u8 = null,
-    connected: bool = false,
+    negotiated_alpn: alpn.NegotiatedAlpn = .{},
+    tls_version: ?tls.ProtocolVersion = null,
     socket: ?*Socket = null,
+    cipher_suite: ?tls.CipherSuite = null,
 
-    net_read_buf: ?[]u8 = null,
-    net_write_buf: ?[]u8 = null,
-    tls_read_buf: ?[]u8 = null,
-    tls_write_buf: ?[]u8 = null,
-    net_in: ?SocketIoReader = null,
-    net_out: ?SocketIoWriter = null,
+    // Application traffic keys for encrypted data exchange
+    app_write_key: ?[32]u8 = null,
+    app_write_iv: ?[12]u8 = null,
+    app_read_key: ?[32]u8 = null,
+    app_read_iv: ?[12]u8 = null,
+    write_seq: u64 = 0,
+    read_seq: u64 = 0,
 
-    ca_bundle: ?std.crypto.Certificate.Bundle = null,
-    ca_bundle_lock: std.Io.RwLock = .init,
-    client: ?std.crypto.tls.Client = null,
+    // Internal read buffer for TLS record reassembly
+    read_buf: [record.max_record_len]u8 = undefined,
+    read_buf_len: usize = 0,
+    read_buf_pos: usize = 0,
 
-    /// Bytes buffered during the H2 preface probe that were already consumed
-    /// from the TLS stream. These must be replayed before further reads so
-    /// that callers receive a complete SETTINGS frame.
-    h2_probe_buf: ?[]u8 = null,
-    h2_probe_len: usize = 0,
-
-    const Self = @This();
-
-    /// Creates a new TLS session with the given configuration.
-    pub fn init(config: TlsConfig) Self {
-        return .{
-            .allocator = config.allocator,
-            .config = config,
-        };
+    /// Legacy accessor: returns negotiated protocol string or null.
+    pub fn negotiatedProtocol(self: *const TlsSession) ?[]const u8 {
+        return self.negotiated_alpn.get();
     }
 
-    /// Releases session resources.
-    pub fn deinit(self: *Self) void {
-        if (self.client != null) {
-            self.client = null;
-        }
-
-        if (self.ca_bundle) |*bundle| {
-            bundle.deinit(self.allocator);
-            self.ca_bundle = null;
-        }
-
-        if (self.net_read_buf) |buf| self.allocator.free(buf);
-        if (self.net_write_buf) |buf| self.allocator.free(buf);
-        if (self.tls_read_buf) |buf| self.allocator.free(buf);
-        if (self.tls_write_buf) |buf| self.allocator.free(buf);
-        if (self.h2_probe_buf) |buf| self.allocator.free(buf);
-
-        self.net_read_buf = null;
-        self.net_write_buf = null;
-        self.tls_read_buf = null;
-        self.tls_write_buf = null;
-        self.net_in = null;
-        self.net_out = null;
-        self.h2_probe_buf = null;
-        self.h2_probe_len = 0;
+    pub fn init(config: TlsConfig) TlsSession {
+        return .{ .config = config };
     }
 
-    /// Attaches a connected socket that will carry the TLS session.
-    pub fn attachSocket(self: *Self, socket: *Socket) void {
+    pub fn deinit(self: *TlsSession) void {
+        // Zero out key material to prevent leaking secrets
+        if (self.app_write_key) |*k| @memset(k, 0);
+        if (self.app_write_iv) |*k| @memset(k, 0);
+        if (self.app_read_key) |*k| @memset(k, 0);
+        if (self.app_read_iv) |*k| @memset(k, 0);
+        self.read_buf_len = 0;
+        self.read_buf_pos = 0;
+    }
+
+    pub fn attachSocket(self: *TlsSession, socket: *Socket) void {
         self.socket = socket;
     }
 
-    /// Performs the TLS handshake with ALPN negotiation.
-    ///
-    /// When `config.alpn_protocols` contains `"h2"`, the session performs an
-    /// HTTP/2 preface probe after the TLS handshake:
-    ///
-    /// 1. The client sends the 24-byte HTTP/2 connection preface.
-    /// 2. It attempts to read a 9-byte HTTP/2 frame header.
-    /// 3. If the server responds with a SETTINGS frame (type 0x04 on stream 0),
-    ///    HTTP/2 is confirmed and `negotiated_protocol` is set to `"h2"`.
-    /// 4. Otherwise, falls back to HTTP/1.1.
-    ///
-    /// The probe bytes are buffered in `h2_probe_buf` and replayed on
-    /// subsequent reads so no bytes are lost.
-    pub fn handshake(self: *Self, hostname: []const u8) !void {
-        const tls = std.crypto.tls;
-        const sock = self.socket orelse return error.MissingTransport;
-        const min_tls_buf = tls.Client.min_buffer_len;
-        const net_buf_len: usize = @max(16 * 1024, min_tls_buf);
+    /// Perform the TLS handshake with the server.
+    pub fn handshake(self: *TlsSession, host: []const u8) !void {
+        const socket = self.socket orelse return error.TlsMissingTransport;
 
-        // Allocate buffers once per session.
-        if (self.net_read_buf == null) self.net_read_buf = try self.allocator.alloc(u8, net_buf_len);
-        if (self.net_write_buf == null) self.net_write_buf = try self.allocator.alloc(u8, net_buf_len);
-
-        if (self.tls_read_buf == null) self.tls_read_buf = try self.allocator.alloc(u8, min_tls_buf);
-        if (self.tls_write_buf == null) self.tls_write_buf = try self.allocator.alloc(u8, min_tls_buf);
-
-        const net_in = SocketIoReader.init(sock, self.net_read_buf.?);
-        const net_out = SocketIoWriter.init(sock, self.net_write_buf.?);
-        self.net_in = net_in;
-        self.net_out = net_out;
-        const io = defaultIo();
-
-        const verify = self.config.verify_mode != .none;
-        const verify_host = verify and self.config.verify_hostname;
-
-        // System CA bundle (cross-platform); optional if verification is disabled.
-        if (verify) {
-            var bundle: std.crypto.Certificate.Bundle = .empty;
-            errdefer bundle.deinit(self.allocator);
-            try bundle.rescan(self.allocator, io, std.Io.Timestamp.now(io, .real));
-            self.ca_bundle = bundle;
-        }
-
-        const sni_host = self.config.server_name orelse hostname;
-        var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
-        io.random(&entropy);
-        const ca_bundle_ptr: ?*std.crypto.Certificate.Bundle = if (self.ca_bundle) |*b| b else null;
-
-        // Perform the TLS handshake using the stdlib client.
-        // `allow_truncation_attacks` is forwarded from config so callers can
-        // opt into strict close-notify enforcement.
-        const client = try tls.Client.init(&self.net_in.?.reader, &self.net_out.?.writer, .{
-            .host = if (verify_host) .{ .explicit = sni_host } else .{ .no_verification = {} },
-            .ca = if (verify)
-                .{ .bundle = .{
-                    .gpa = self.allocator,
-                    .io = io,
-                    .lock = &self.ca_bundle_lock,
-                    .bundle = ca_bundle_ptr.?,
-                } }
-            else
-                .{ .no_verification = {} },
-            .ssl_key_log = null,
-            .allow_truncation_attacks = self.config.allow_truncation_attacks,
-            .write_buffer = self.tls_write_buf.?,
-            .read_buffer = self.tls_read_buf.?,
-            .entropy = &entropy,
-            .realtime_now = std.Io.Timestamp.now(io, .real),
-            .alert = null,
-        });
-
-        self.client = client;
-        self.connected = true;
-
-        // ALPN protocol detection.
-        //
-        // `std.crypto.tls.Client` does not advertise ALPN extensions in the
-        // ClientHello and does not expose the negotiated protocol. We detect
-        // protocol support by sending the HTTP/2 connection preface and checking
-        // whether the server responds with an HTTP/2 SETTINGS frame.
-        //
-        // For HTTP/3: The H3 protocol runs over QUIC (UDP), so it doesn't go
-        // through this TCP-based TLS wrapper. The ALPN protocol list is
-        // informational here — actual H3 connections use QUIC transport.
-        //
-        // The probe bytes (preface + server response header) are buffered in
-        // `h2_probe_buf` and replayed on subsequent reads so no bytes are lost.
-        if (self.config.wantsHttp2() and !self.config.force_h2) {
-            self.negotiated_protocol = try self.probeHttp2Protocol();
-        } else if (self.config.force_h2) {
-            // Skip the probe and directly assume HTTP/2.
-            self.negotiated_protocol = "h2";
-        } else if (self.config.wantsHttp3()) {
-            // H3 is only available over QUIC/UDP. For TCP connections, we
-            // fall back to HTTP/1.1 unless H2 is also advertised.
-            self.negotiated_protocol = null;
-        } else {
-            self.negotiated_protocol = null;
-        }
+        // Try TLS 1.3 first, then fall back to TLS 1.2
+        self.handshakeTls13(socket, host) catch |err| switch (err) {
+            error.TlsProtocolVersion, error.TlsIllegalParameter, error.TlsUnsupportedCipherSuite => {
+                // Server doesn't support TLS 1.3, try TLS 1.2
+                try self.handshakeTls12(socket, host);
+            },
+            else => return err,
+        };
     }
 
-    /// Sends the HTTP/2 connection preface and reads the first 9 bytes of the
-    /// server response to determine whether HTTP/2 is supported.
-    ///
-    /// Returns `"h2"` if the server responds with a valid HTTP/2 frame header
-    /// (specifically a SETTINGS frame, type 0x04, on stream 0). Returns `null`
-    /// otherwise. In both cases the consumed bytes are stored in `h2_probe_buf`
-    /// so they can be replayed to callers.
-    fn probeHttp2Protocol(self: *Self) !?[]const u8 {
-        const c = if (self.client) |*c| c else return null;
+    fn handshakeTls13(self: *TlsSession, socket: *Socket, host: []const u8) !void {
+        var client = handshake_13.Handshake13Client.init(self.config.allocator, host);
 
-        // Send the 24-byte HTTP/2 connection preface.
-        c.writer.writeAll(HTTP2_PREFACE) catch return null;
-        c.writer.flush() catch return null;
-        if (self.net_out) |*out| {
-            out.writer.flush() catch return null;
-        }
+        // Build and send ClientHello
+        var buf: [4096]u8 = undefined;
+        const ch_len = try client.buildClientHello(&buf, self.config.alpn_protocols);
+        _ = socket.send(buf[0..ch_len]) catch return error.WriteFailed;
 
-        // Read 9 bytes — the length of a standard HTTP/2 frame header.
-        // We use readSliceShort which returns however many bytes are available,
-        // so we retry until we get all 9 or give up.
-        const frame_header_len: usize = 9;
-        const probe_buf = try self.allocator.alloc(u8, HTTP2_PREFACE.len + frame_header_len);
-        errdefer self.allocator.free(probe_buf);
+        // Read ServerHello
+        const sh_data = try readTlsRecord(socket, &buf);
+        try client.processServerHello(sh_data);
 
-        // Store the preface we already sent so callers that replay the buffer
-        // get a complete picture. The server will not echo the preface back.
-        // We only need to replay the server's response bytes.
-        const server_response_buf = probe_buf[0..frame_header_len];
+        // Read EncryptedExtensions
+        const ee_data = try readTlsRecord(socket, &buf);
+        try client.processEncryptedExtensions(ee_data);
 
-        var total_read: usize = 0;
-        var attempts: usize = 0;
-        while (total_read < frame_header_len and attempts < 16) : (attempts += 1) {
-            const n = c.reader.readSliceShort(server_response_buf[total_read..]) catch break;
-            if (n == 0) break;
-            total_read += n;
-        }
+        // Read Certificate
+        const cert_data = try readTlsRecord(socket, &buf);
+        try client.processCertificate(cert_data);
 
-        if (total_read < frame_header_len) {
-            // Could not read a full frame header — not H2 or connection error.
-            // Store whatever we got for replay.
-            self.h2_probe_buf = probe_buf;
-            self.h2_probe_len = total_read;
-            return null;
-        }
+        // Read CertificateVerify
+        const cv_data = try readTlsRecord(socket, &buf);
+        try client.processCertificateVerify(cv_data);
 
-        // Validate it looks like an HTTP/2 frame header:
-        //   bytes 0-2: 24-bit payload length (any value is valid)
-        //   byte  3:   frame type — 0x04 = SETTINGS
-        //   byte  4:   flags
-        //   bytes 5-8: stream ID (must be 0x00000000 for SETTINGS)
-        const frame_type = server_response_buf[3];
-        const stream_id = (@as(u32, server_response_buf[5] & 0x7F) << 24) |
-            (@as(u32, server_response_buf[6]) << 16) |
-            (@as(u32, server_response_buf[7]) << 8) |
-            server_response_buf[8];
+        // Read server Finished
+        const sf_data = try readTlsRecord(socket, &buf);
 
-        // A SETTINGS frame on stream 0 from the server is the definitive
-        // indicator that HTTP/2 negotiation succeeded.
-        if (frame_type == 0x04 and stream_id == 0) {
-            self.h2_probe_buf = probe_buf;
-            self.h2_probe_len = total_read;
-            return "h2";
-        }
+        // Build our Finished
+        var fin_buf: [256]u8 = undefined;
+        const fin_len = try client.processServerFinishedAndBuildClientFinished(sf_data, &fin_buf);
 
-        // Unknown response — buffer and fall back to HTTP/1.1.
-        self.h2_probe_buf = probe_buf;
-        self.h2_probe_len = total_read;
-        return null;
+        // Send ChangeCipherSpec (for middlebox compatibility) + Finished
+        const ccs = [_]u8{
+            @intFromEnum(tls.ContentType.change_cipher_spec),
+            0x03, 0x01,
+            0x00, 0x01,
+            0x01,
+        };
+        _ = socket.send(&ccs) catch return error.WriteFailed;
+        _ = socket.send(fin_buf[0..fin_len]) catch return error.WriteFailed;
+
+        // Extract application traffic keys
+        self.app_write_key = client.getClientAppKey();
+        self.app_write_iv = client.getClientAppIv();
+        self.app_read_key = client.getServerAppKey();
+        self.app_read_iv = client.getServerAppIv();
+        self.tls_version = .tls_1_3;
+        self.cipher_suite = client.cipher_suite;
+        self.negotiated_alpn = client.negotiated_alpn;
     }
 
-    /// Reads decrypted data from the session.
-    ///
-    /// Bytes buffered during H2 ALPN probing are returned first before
-    /// forwarding reads to the underlying TLS client.
-    pub fn read(self: *Self, buffer: []u8) !usize {
-        // Replay any bytes buffered during the H2 preface probe.
-        if (self.h2_probe_buf) |probe| {
-            if (self.h2_probe_len > 0) {
-                const n = @min(buffer.len, self.h2_probe_len);
-                @memcpy(buffer[0..n], probe[0..n]);
-                // Shift remaining probe bytes to the front.
-                if (n < self.h2_probe_len) {
-                    std.mem.copyForwards(u8, probe[0 .. self.h2_probe_len - n], probe[n..self.h2_probe_len]);
-                }
-                self.h2_probe_len -= n;
-                if (self.h2_probe_len == 0) {
-                    self.allocator.free(probe);
-                    self.h2_probe_buf = null;
-                }
-                return n;
+    fn handshakeTls12(self: *TlsSession, socket: *Socket, host: []const u8) !void {
+        var client = handshake_12.Handshake12Client.init(self.config.allocator);
+
+        // Build and send ClientHello
+        var buf: [4096]u8 = undefined;
+        const ch_len = try client.buildClientHello(&buf, host, self.config.alpn_protocols);
+        _ = socket.send(buf[0..ch_len]) catch return error.WriteFailed;
+
+        // Read ServerHello
+        const sh_data = try readTlsRecord(socket, &buf);
+        try client.processServerHello(sh_data);
+
+        // Read Certificate
+        const cert_data = try readTlsRecord(socket, &buf);
+        try client.processCertificate(cert_data);
+
+        // Read ServerKeyExchange
+        const ske_data = try readTlsRecord(socket, &buf);
+        try client.processServerKeyExchange(ske_data);
+
+        // Read ServerHelloDone
+        const shd_data = try readTlsRecord(socket, &buf);
+        try client.processServerHelloDone(shd_data);
+
+        // Build and send ClientKeyExchange + ChangeCipherSpec + Finished
+        var out_buf: [4096]u8 = undefined;
+        const cke_len = try client.buildClientKeyExchangeAndFinished(&out_buf);
+        _ = socket.send(out_buf[0..cke_len]) catch return error.WriteFailed;
+
+        // Read server ChangeCipherSpec + Finished
+        const sfin_data = try readTlsRecord(socket, &buf);
+        try client.processServerFinished(sfin_data);
+
+        self.tls_version = .tls_1_2;
+        self.cipher_suite = client.cipher_suite;
+        self.negotiated_alpn = client.negotiated_alpn;
+
+        // Derive application traffic keys for TLS 1.2
+        if (client.cipher_suite) |cs| {
+            const shared_secret = client.key_exchange.getSharedSecret() orelse return error.TlsKeyExchangeFailed;
+            if (cs == .ECDHE_RSA_WITH_AES_256_GCM_SHA384) {
+                const HmacType = @import("handshake.zig").HmacSha384;
+                const master_secret = @import("handshake.zig").deriveMasterSecret(HmacType, shared_secret, &client.client_random, &client.server_random);
+                const key_block = @import("handshake.zig").deriveKeyBlock(HmacType, &master_secret, &client.server_random, &client.client_random, 2 * 16 + 2 * 4);
+                var wk: [32]u8 = [_]u8{0} ** 32;
+                var rk: [32]u8 = [_]u8{0} ** 32;
+                @memcpy(wk[0..16], key_block[0..16]);
+                @memcpy(rk[0..16], key_block[16..32]);
+                self.app_write_key = wk;
+                self.app_read_key = rk;
+                self.app_write_iv = key_block[32..36].* ++ [_]u8{0} ** 8;
+                self.app_read_iv = key_block[36..40].* ++ [_]u8{0} ** 8;
+            } else {
+                const HmacType = @import("handshake.zig").HmacSha256;
+                const master_secret = @import("handshake.zig").deriveMasterSecret(HmacType, shared_secret, &client.client_random, &client.server_random);
+                const key_block = @import("handshake.zig").deriveKeyBlock(HmacType, &master_secret, &client.server_random, &client.client_random, 2 * 16 + 2 * 4);
+                var wk: [32]u8 = [_]u8{0} ** 32;
+                var rk: [32]u8 = [_]u8{0} ** 32;
+                @memcpy(wk[0..16], key_block[0..16]);
+                @memcpy(rk[0..16], key_block[16..32]);
+                self.app_write_key = wk;
+                self.app_read_key = rk;
+                self.app_write_iv = key_block[32..36].* ++ [_]u8{0} ** 8;
+                self.app_read_iv = key_block[36..40].* ++ [_]u8{0} ** 8;
             }
         }
-
-        const c = if (self.client) |*c| c else return error.NotConnected;
-        return c.reader.readSliceShort(buffer);
     }
 
-    /// Writes data to be encrypted and sent.
-    pub fn write(self: *Self, data: []const u8) !usize {
-        const c = if (self.client) |*c| c else return error.NotConnected;
-        try c.writer.writeAll(data);
-        return data.len;
+    pub fn isHttp2(self: *const TlsSession) bool {
+        return self.negotiated_alpn.isHttp2Result();
     }
 
-    /// Flushes any buffered encrypted data to the underlying transport.
-    pub fn flush(self: *Self) !void {
-        const c = if (self.client) |*c| c else return error.NotConnected;
-        try c.writer.flush();
-        if (self.net_out) |*out| {
-            try out.writer.flush();
+    pub fn isHttp3(self: *const TlsSession) bool {
+        return self.negotiated_alpn.isHttp3Result();
+    }
+
+    /// Write application data over the TLS connection.
+    /// After the handshake completes, encrypts the data using the
+    /// negotiated AEAD cipher and sends it as a TLS record.
+    pub fn write(self: *TlsSession, data: []const u8) !usize {
+        const socket = self.socket orelse return 0;
+        const version = self.tls_version orelse return error.TlsHandshakeNotComplete;
+        const key = self.app_write_key orelse return error.TlsHandshakeNotComplete;
+        const iv = self.app_write_iv orelse return error.TlsHandshakeNotComplete;
+        const cs = self.cipher_suite orelse return error.TlsHandshakeNotComplete;
+
+        switch (version) {
+            .tls_1_3 => {
+                // Build record header for AAD
+                var hdr: [record.record_header_len]u8 = undefined;
+                const hdr_val = record.RecordHeader{
+                    .content_type = .application_data,
+                    .version = .tls_1_2,
+                    .length = @intCast(data.len + 16), // 16 = AES-GCM/ChaCha20 tag length
+                };
+                hdr_val.format(&hdr);
+
+                const nonce = record.nonceTls13(&iv, self.write_seq);
+
+                // Encrypt using the negotiated cipher
+                var out_buf: [record.record_header_len + record.max_plaintext_len + 256]u8 = undefined;
+                @memcpy(out_buf[0..record.record_header_len], &hdr);
+
+                const enc_len = switch (cs) {
+                    .AES_128_GCM_SHA256 => blk: {
+                        var k: [16]u8 = undefined;
+                        @memcpy(&k, key[0..16]);
+                        const enc = try record.encryptTls13(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record.record_header_len..], data, &hdr, &nonce, &k);
+                        break :blk enc.len;
+                    },
+                    .AES_256_GCM_SHA384 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        const enc = try record.encryptTls13(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record.record_header_len..], data, &hdr, &nonce, &k);
+                        break :blk enc.len;
+                    },
+                    .CHACHA20_POLY1305_SHA256 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        const enc = try record.encryptTls13(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record.record_header_len..], data, &hdr, &nonce, &k);
+                        break :blk enc.len;
+                    },
+                    else => return error.TlsUnsupportedCipherSuite,
+                };
+
+                const total = record.record_header_len + enc_len;
+                _ = socket.send(out_buf[0..total]) catch return error.WriteFailed;
+                self.write_seq += 1;
+                return data.len;
+            },
+            .tls_1_2 => {
+                // TLS 1.2: explicit IV prepended to ciphertext
+                var hdr: [record.record_header_len]u8 = undefined;
+                const hdr_val = record.RecordHeader{
+                    .content_type = .application_data,
+                    .version = .tls_1_2,
+                    .length = @intCast(12 + data.len + 16), // explicit_iv + plaintext + tag
+                };
+                hdr_val.format(&hdr);
+
+                var out_buf: [record.record_header_len + 32 + record.max_plaintext_len + 256]u8 = undefined;
+                @memcpy(out_buf[0..record.record_header_len], &hdr);
+
+                const enc_len = switch (cs) {
+                    .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
+                        var k: [16]u8 = undefined;
+                        @memcpy(&k, key[0..16]);
+                        const enc = try record.encryptTls12(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record.record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        break :blk enc.len;
+                    },
+                    .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        const enc = try record.encryptTls12(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record.record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        break :blk enc.len;
+                    },
+                    .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        const enc = try record.encryptTls12(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record.record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        break :blk enc.len;
+                    },
+                    else => return error.TlsUnsupportedCipherSuite,
+                };
+
+                const total = record.record_header_len + enc_len;
+                _ = socket.send(out_buf[0..total]) catch return error.WriteFailed;
+                self.write_seq += 1;
+                return data.len;
+            },
+            else => return error.TlsUnsupportedCipherSuite,
         }
     }
 
-    /// Returns an I/O reader for decrypted TLS payload.
-    pub fn getReader(self: *Self) !*std.Io.Reader {
-        const c = if (self.client) |*c| c else return error.NotConnected;
-        return &c.reader;
+    pub fn flush(_: *TlsSession) !void {
+        // No-op: socket sends are immediate
     }
 
-    /// Returns an I/O writer for TLS-encrypted payload.
-    pub fn getWriter(self: *Self) !*std.Io.Writer {
-        const c = if (self.client) |*c| c else return error.NotConnected;
-        return &c.writer;
-    }
-
-    /// Returns the negotiated ALPN protocol.
-    pub fn getAlpnProtocol(self: *const Self) ?[]const u8 {
-        return self.negotiated_protocol;
-    }
-
-    /// Returns true if HTTP/2 was negotiated.
-    pub fn isHttp2(self: *const Self) bool {
-        if (self.negotiated_protocol) |proto| {
-            return std.mem.eql(u8, proto, "h2");
+    pub fn writeAll(self: *TlsSession, data: []const u8) !void {
+        var written: usize = 0;
+        while (written < data.len) {
+            const n = try self.write(data[written..]);
+            if (n == 0) return error.WriteFailed;
+            written += n;
         }
-        return false;
     }
 
-    /// Returns true if HTTP/3 was negotiated.
-    pub fn isHttp3(self: *const Self) bool {
-        if (self.negotiated_protocol) |proto| {
-            return std.mem.eql(u8, proto, "h3") or std.mem.eql(u8, proto, "h3-29");
+    /// Read application data from the TLS connection.
+    /// Reads a TLS record from the socket, decrypts it, and copies
+    /// the plaintext into `buf`. Returns the number of bytes read.
+    pub fn read(self: *TlsSession, buf: []u8) !usize {
+        const socket = self.socket orelse return 0;
+        const version = self.tls_version orelse return error.TlsHandshakeNotComplete;
+        const key = self.app_read_key orelse return error.TlsHandshakeNotComplete;
+        const iv = self.app_read_iv orelse return error.TlsHandshakeNotComplete;
+        const cs = self.cipher_suite orelse return error.TlsHandshakeNotComplete;
+
+        // Return buffered data if available
+        if (self.read_buf_pos < self.read_buf_len) {
+            const available = self.read_buf_len - self.read_buf_pos;
+            const to_copy = @min(available, buf.len);
+            @memcpy(buf[0..to_copy], self.read_buf[self.read_buf_pos..][0..to_copy]);
+            self.read_buf_pos += to_copy;
+            return to_copy;
         }
-        return false;
-    }
 
-    /// Returns the peer's certificate in DER format.
-    pub fn getPeerCertificate(self: *const Self) ?[]const u8 {
-        return self.peer_certificate;
-    }
+        // Read a complete TLS record
+        // Read 5-byte record header
+        var total: usize = 0;
+        while (total < 5) {
+            const n = socket.recv(self.read_buf[total..5]) catch return error.ReadFailed;
+            if (n == 0) return error.TlsConnectionTruncated;
+            total += n;
+        }
 
-    /// Closes the TLS session.
-    pub fn close(self: *Self) void {
-        self.connected = false;
-        self.client = null;
+        const length = mem.readInt(u16, self.read_buf[3..5], .big);
+        if (length > record.max_ciphertext_len) return error.TlsRecordOverflow;
+
+        // Read record body
+        while (total < 5 + length) {
+            const n = socket.recv(self.read_buf[total..][0 .. 5 + length - total]) catch return error.ReadFailed;
+            if (n == 0) return error.TlsConnectionTruncated;
+            total += n;
+        }
+
+        const record_body = self.read_buf[5..][0..length];
+
+        // Decrypt based on TLS version
+        switch (version) {
+            .tls_1_3 => {
+                // For TLS 1.3, the content type is inside the encrypted payload
+                const nonce = record.nonceTls13(&iv, self.read_seq);
+
+                const plaintext = switch (cs) {
+                    .AES_128_GCM_SHA256 => blk: {
+                        var k: [16]u8 = undefined;
+                        @memcpy(&k, key[0..16]);
+                        break :blk try record.decryptTls13(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], &nonce, &k);
+                    },
+                    .AES_256_GCM_SHA384 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        break :blk try record.decryptTls13(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], &nonce, &k);
+                    },
+                    .CHACHA20_POLY1305_SHA256 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        break :blk try record.decryptTls13(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], &nonce, &k);
+                    },
+                    else => return error.TlsUnsupportedCipherSuite,
+                };
+
+                self.read_seq += 1;
+
+                // TLS 1.3: last byte of plaintext is the real content type
+                // For application_data, we just return the data before the content type byte
+                if (plaintext.len == 0) return 0;
+                const data_len = plaintext.len - 1;
+                const to_copy = @min(data_len, buf.len);
+                @memcpy(buf[0..to_copy], plaintext[0..to_copy]);
+                return to_copy;
+            },
+            .tls_1_2 => {
+                // For TLS 1.2, the record body is: explicit_iv || ciphertext || tag
+                const plaintext = switch (cs) {
+                    .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
+                        var k: [16]u8 = undefined;
+                        @memcpy(&k, key[0..16]);
+                        break :blk try record.decryptTls12(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                    },
+                    .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        break :blk try record.decryptTls12(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                    },
+                    .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => blk: {
+                        var k: [32]u8 = undefined;
+                        @memcpy(&k, key[0..32]);
+                        break :blk try record.decryptTls12(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                    },
+                    else => return error.TlsUnsupportedCipherSuite,
+                };
+
+                self.read_seq += 1;
+                const to_copy = @min(plaintext.len, buf.len);
+                @memcpy(buf[0..to_copy], plaintext[0..to_copy]);
+
+                // Buffer any remaining data
+                if (plaintext.len > to_copy) {
+                    @memcpy(self.read_buf[0 .. plaintext.len - to_copy], plaintext[to_copy..]);
+                    self.read_buf_len = plaintext.len - to_copy;
+                    self.read_buf_pos = 0;
+                } else {
+                    self.read_buf_len = 0;
+                    self.read_buf_pos = 0;
+                }
+
+                return to_copy;
+            },
+            else => return error.TlsUnsupportedCipherSuite,
+        }
     }
 };
 
-/// Certificate verification result.
-pub const VerifyResult = enum {
-    ok,
-    expired,
-    not_yet_valid,
-    revoked,
-    hostname_mismatch,
-    self_signed,
-    invalid_ca,
-    invalid_signature,
-    unknown_error,
-};
+// Server-side accept
 
-/// Parses a PEM-encoded certificate.
-pub fn parsePemCertificate(allocator: Allocator, pem_data: []const u8) ![]const u8 {
-    const begin_marker = "-----BEGIN CERTIFICATE-----";
-    const end_marker = "-----END CERTIFICATE-----";
-
-    const start = std.mem.indexOf(u8, pem_data, begin_marker) orelse return error.InvalidPem;
-    const end = std.mem.indexOf(u8, pem_data, end_marker) orelse return error.InvalidPem;
-
-    if (end <= start + begin_marker.len) return error.InvalidPem;
-
-    var base64_block = pem_data[start + begin_marker.len .. end];
-    base64_block = std.mem.trim(u8, base64_block, " \t\r\n");
-
-    // Remove all whitespace/newlines from the base64 body.
-    var compact = std.ArrayList(u8).empty;
-    defer compact.deinit(allocator);
-    for (base64_block) |ch| {
-        if (ch == '\r' or ch == '\n' or ch == '\t' or ch == ' ') continue;
-        try compact.append(allocator, ch);
-    }
-
-    const decoder = std.base64.standard.Decoder;
-    const out_len = try decoder.calcSizeForSlice(compact.items);
-    const out = try allocator.alloc(u8, out_len);
-    errdefer allocator.free(out);
-    _ = decoder.decode(out, compact.items) catch return error.InvalidPem;
-    return out;
-}
-
-/// Returns the system's default CA certificate path.
-pub fn getSystemCaPath() ?[]const u8 {
-    return switch (builtin.os.tag) {
-        .linux => "/etc/ssl/certs/ca-certificates.crt",
-        .macos => "/etc/ssl/cert.pem",
-        .windows => null,
-        .freebsd, .netbsd, .openbsd => "/etc/ssl/cert.pem",
-        else => null,
+pub fn acceptServer(
+    allocator: Allocator,
+    socket: *Socket,
+    server_alpn: []const []const u8,
+) !Connection {
+    var conn = Connection{
+        .allocator = allocator,
+        .socket = socket,
+        .is_server = true,
+        .connected = true,
     };
+
+    // Perform TLS accept
+    var buf: [4096]u8 = undefined;
+
+    // Read ClientHello
+    const ch_data = try readTlsRecord(socket, &buf);
+
+    // Determine if TLS 1.3 or 1.2 based on supported_versions extension
+    const is_tls13 = detectTls13(ch_data);
+
+    if (is_tls13) {
+        var server = handshake_13.Handshake13Server.init(allocator);
+        server.alpn_protocols = server_alpn;
+        try server.processClientHello(ch_data);
+
+        var out_buf: [4096]u8 = undefined;
+        const out_len = try server.buildServerHelloAndEncryptedHandshake(&out_buf);
+        _ = socket.send(out_buf[0..out_len]) catch return error.WriteFailed;
+
+        // Read client ChangeCipherSpec
+        _ = try readTlsRecord(socket, &buf);
+
+        // Read client Finished
+        const cf_data = try readTlsRecord(socket, &buf);
+        try server.processClientFinished(cf_data);
+
+        conn.tls_version = .tls_1_3;
+        conn.cipher_suite = server.cipher_suite;
+        conn.negotiated_alpn = server.negotiated_alpn;
+
+        // Derive application traffic keys for server role
+        // Server writes with server_app_secret, reads with client_app_secret
+        conn.app_write_key = server.getServerAppKey();
+        conn.app_write_iv = server.getServerAppIv();
+        conn.app_read_key = server.getClientAppKey();
+        conn.app_read_iv = server.getClientAppIv();
+    } else {
+        var server = handshake_12.Handshake12Server.init(allocator);
+        server.alpn_protocols = server_alpn;
+        try server.processClientHello(ch_data);
+
+        // Build and send ServerHello + Certificate + ServerKeyExchange + ServerHelloDone
+        var out_buf: [4096]u8 = undefined;
+        var off: usize = 0;
+
+        off += try server.buildServerHello(out_buf[off..]);
+        off += try server.buildCertificate(out_buf[off..]);
+        off += try server.buildServerKeyExchange(out_buf[off..]);
+        off += try server.buildServerHelloDone(out_buf[off..]);
+
+        _ = socket.send(out_buf[0..off]) catch return error.WriteFailed;
+
+        // Read ClientKeyExchange
+        const cke_data = try readTlsRecord(socket, &buf);
+        try server.processClientKeyExchange(cke_data);
+
+        // Read ChangeCipherSpec
+        _ = try readTlsRecord(socket, &buf);
+
+        // Read client Finished
+        const cf_data = try readTlsRecord(socket, &buf);
+        try server.processClientFinished(cf_data);
+
+        // Build and send ChangeCipherSpec + Finished
+        var fin_buf: [1024]u8 = undefined;
+        const fin_len = try server.buildChangeCipherSpecAndFinished(&fin_buf);
+        _ = socket.send(fin_buf[0..fin_len]) catch return error.WriteFailed;
+
+        conn.tls_version = .tls_1_2;
+        conn.cipher_suite = server.cipher_suite;
+        conn.negotiated_alpn = server.negotiated_alpn;
+
+        // Derive application traffic keys for TLS 1.2 server role
+        const cs = server.cipher_suite;
+        {
+            const shared_secret = server.key_exchange.getSharedSecret() orelse return error.TlsKeyExchangeFailed;
+            if (cs == .ECDHE_RSA_WITH_AES_256_GCM_SHA384) {
+                const HmacType = @import("handshake.zig").HmacSha384;
+                const master_secret = @import("handshake.zig").deriveMasterSecret(HmacType, shared_secret, &server.client_random, &server.server_random);
+                const key_block = @import("handshake.zig").deriveKeyBlock(HmacType, &master_secret, &server.server_random, &server.client_random, 2 * 16 + 2 * 4);
+                var wk: [32]u8 = [_]u8{0} ** 32;
+                var rk: [32]u8 = [_]u8{0} ** 32;
+                // Server writes where client reads (first block = server write key)
+                @memcpy(rk[0..16], key_block[0..16]);
+                @memcpy(wk[0..16], key_block[16..32]);
+                conn.app_write_key = wk;
+                conn.app_read_key = rk;
+                conn.app_write_iv = key_block[32..36].* ++ [_]u8{0} ** 8;
+                conn.app_read_iv = key_block[36..40].* ++ [_]u8{0} ** 8;
+            } else {
+                const HmacType = @import("handshake.zig").HmacSha256;
+                const master_secret = @import("handshake.zig").deriveMasterSecret(HmacType, shared_secret, &server.client_random, &server.server_random);
+                const key_block = @import("handshake.zig").deriveKeyBlock(HmacType, &master_secret, &server.server_random, &server.client_random, 2 * 16 + 2 * 4);
+                var wk: [32]u8 = [_]u8{0} ** 32;
+                var rk: [32]u8 = [_]u8{0} ** 32;
+                @memcpy(rk[0..16], key_block[0..16]);
+                @memcpy(wk[0..16], key_block[16..32]);
+                conn.app_write_key = wk;
+                conn.app_read_key = rk;
+                conn.app_write_iv = key_block[32..36].* ++ [_]u8{0} ** 8;
+                conn.app_read_iv = key_block[36..40].* ++ [_]u8{0} ** 8;
+            }
+        }
+    }
+
+    return conn;
 }
 
-// ---------------------------------------------------------------------------
+// Client-side connect
+
+pub fn connectClient(
+    allocator: Allocator,
+    socket: *Socket,
+    config: *const TlsConfig,
+    host: []const u8,
+) !Connection {
+    var conn = Connection{
+        .allocator = allocator,
+        .socket = socket,
+        .is_server = false,
+        .connected = true,
+    };
+
+    var session = TlsSession.init(config.*);
+    session.socket = socket;
+    try session.handshake(host);
+
+    conn.tls_version = session.tls_version orelse .tls_1_2;
+    conn.app_write_key = session.app_write_key;
+    conn.app_write_iv = session.app_write_iv;
+    conn.app_read_key = session.app_read_key;
+    conn.app_read_iv = session.app_read_iv;
+
+    // Copy negotiated ALPN
+    conn.negotiated_alpn = session.negotiated_alpn;
+
+    return conn;
+}
+
+// Internal helpers
+
+/// Read a complete TLS record from the socket and return the record body.
+fn readTlsRecord(socket: *Socket, buf: *[4096]u8) ![]const u8 {
+    // Read 5-byte record header
+    var total: usize = 0;
+    while (total < 5) {
+        const n = socket.recv(buf[total..5]) catch return error.ReadFailed;
+        if (n == 0) return error.TlsConnectionTruncated;
+        total += n;
+    }
+
+    const length = mem.readInt(u16, buf[3..5], .big);
+    if (length > record.max_ciphertext_len) return error.TlsRecordOverflow;
+
+    // Read record body
+    while (total < 5 + length) {
+        const n = socket.recv(buf[total..][0 .. 5 + length - total]) catch return error.ReadFailed;
+        if (n == 0) return error.TlsConnectionTruncated;
+        total += n;
+    }
+
+    return buf[5..][0..length];
+}
+
+/// Detect if a ClientHello indicates TLS 1.3 by checking the supported_versions extension.
+fn detectTls13(client_hello: []const u8) bool {
+    // Simple heuristic: look for the supported_versions extension with 0x0304
+    if (client_hello.len < 42) return false;
+    var off: usize = 4 + 2 + 32 + 1; // skip type + len + version + random + session_id_len
+    if (off >= client_hello.len) return false;
+    const session_id_len = client_hello[off];
+    off += 1 + session_id_len;
+
+    // Skip cipher suites
+    if (off + 2 > client_hello.len) return false;
+    const cs_len = mem.readInt(u16, client_hello[off..][0..2], .big);
+    off += 2 + cs_len;
+
+    // Skip compression
+    if (off >= client_hello.len) return false;
+    const comp_len = client_hello[off];
+    off += 1 + comp_len;
+
+    // Parse extensions
+    if (off + 2 > client_hello.len) return false;
+    const ext_len = mem.readInt(u16, client_hello[off..][0..2], .big);
+    off += 2;
+    const ext_end = @min(off + ext_len, client_hello.len);
+
+    while (off + 4 <= ext_end) {
+        const ext_type = mem.readInt(u16, client_hello[off..][0..2], .big);
+        const ext_data_len = mem.readInt(u16, client_hello[off + 2 ..][0..2], .big);
+        off += 4;
+        if (ext_type == @intFromEnum(tls.ExtensionType.supported_versions)) {
+            // Check if TLS 1.3 is listed
+            var voff: usize = off;
+            if (voff + 1 <= ext_end) {
+                _ = client_hello[voff];
+                voff += 1;
+                while (voff + 2 <= off + ext_data_len) {
+                    const ver = mem.readInt(u16, client_hello[voff..][0..2], .big);
+                    if (ver == @intFromEnum(tls.ProtocolVersion.tls_1_3)) return true;
+                    voff += 2;
+                }
+            }
+        }
+        off += ext_data_len;
+    }
+
+    return false;
+}
+
 // Tests
-// ---------------------------------------------------------------------------
 
-test "TlsConfig initialization" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.init(allocator);
-
-    try std.testing.expectEqual(TlsVersion.tls_1_2, config.min_version);
-    try std.testing.expectEqual(TlsVersion.tls_1_3, config.max_version);
-    try std.testing.expect(config.verify_hostname);
-}
-
-test "TlsConfig insecure" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.insecure(allocator);
-
-    try std.testing.expectEqual(VerifyMode.none, config.verify_mode);
-    try std.testing.expect(!config.verify_hostname);
-}
-
-test "TlsConfig allow_truncation_attacks defaults to true" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.init(allocator);
-    try std.testing.expect(config.allow_truncation_attacks);
-}
-
-test "TlsConfig allow_truncation_attacks can be set to false" {
-    const allocator = std.testing.allocator;
-    var config = TlsConfig.init(allocator);
-    config.allow_truncation_attacks = false;
-    try std.testing.expect(!config.allow_truncation_attacks);
-}
-
-test "TlsConfig force_h2 defaults to false" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.init(allocator);
-    try std.testing.expect(!config.force_h2);
-}
-
-test "TlsConfig withH2 includes h2 in ALPN" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.withH2(allocator);
-    try std.testing.expect(config.wantsHttp2());
-    try std.testing.expect(!config.wantsHttp3());
+test "TlsConfig withH2 sets correct ALPN" {
+    const config = TlsConfig.withH2(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), config.alpn_protocols.len);
     try std.testing.expectEqualStrings("h2", config.alpn_protocols[0]);
     try std.testing.expectEqualStrings("http/1.1", config.alpn_protocols[1]);
 }
 
-test "TlsConfig insecureWithH2" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.insecureWithH2(allocator);
-    try std.testing.expect(config.wantsHttp2());
-    try std.testing.expect(!config.verify_hostname);
-    try std.testing.expectEqual(VerifyMode.none, config.verify_mode);
+test "TlsConfig insecure disables verification" {
+    const config = TlsConfig.insecure(std.testing.allocator);
+    try std.testing.expect(!config.verify_server);
 }
 
-test "TlsConfig withH3 includes h3 and h2 in ALPN" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.withH3(allocator);
-    try std.testing.expect(config.wantsHttp2());
-    try std.testing.expect(config.wantsHttp3());
+test "TlsSession init" {
+    const session = TlsSession.init(TlsConfig.init(std.testing.allocator));
+    try std.testing.expect(session.negotiated_alpn.get() == null);
+    try std.testing.expect(session.tls_version == null);
+}
+
+test "TlsConfig withH3 sets correct ALPN" {
+    const config = TlsConfig.withH3(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), config.alpn_protocols.len);
     try std.testing.expectEqualStrings("h3", config.alpn_protocols[0]);
     try std.testing.expectEqualStrings("h2", config.alpn_protocols[1]);
     try std.testing.expectEqualStrings("http/1.1", config.alpn_protocols[2]);
 }
 
-test "TlsConfig wantsHttp2 false by default" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.init(allocator);
-    try std.testing.expect(!config.wantsHttp2());
-    try std.testing.expect(!config.wantsHttp3());
+test "TlsConfig insecureWithH2" {
+    const config = TlsConfig.insecureWithH2(std.testing.allocator);
+    try std.testing.expect(!config.verify_server);
+    try std.testing.expectEqual(@as(usize, 2), config.alpn_protocols.len);
 }
 
-test "TlsConfig encodeAlpnProtocols" {
-    const allocator = std.testing.allocator;
-    var config = TlsConfig.withH2(allocator);
-
-    var buf: [64]u8 = undefined;
-    const len = try config.encodeAlpnProtocols(&buf);
-
-    // h2 = 2 bytes, http/1.1 = 8 bytes, total = 1 + 2 + 1 + 8 = 12
-    try std.testing.expectEqual(@as(usize, 12), len);
-    try std.testing.expectEqual(@as(u8, 2), buf[0]); // h2 length
-    try std.testing.expectEqual(@as(u8, 'h'), buf[1]);
-    try std.testing.expectEqual(@as(u8, '2'), buf[2]);
-    try std.testing.expectEqual(@as(u8, 8), buf[3]); // http/1.1 length
-    try std.testing.expectEqualStrings("http/1.1", buf[4..12]);
+test "TlsConfig insecureWithH3" {
+    const config = TlsConfig.insecureWithH3(std.testing.allocator);
+    try std.testing.expect(!config.verify_server);
+    try std.testing.expectEqual(@as(usize, 3), config.alpn_protocols.len);
+    try std.testing.expectEqualStrings("h3", config.alpn_protocols[0]);
 }
 
-test "TlsConfig alpnEncodedLength" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.withH3(allocator);
-    // h3(1+2) + h2(1+2) + http/1.1(1+8) = 15
-    try std.testing.expectEqual(@as(usize, 15), config.alpnEncodedLength());
+test "TlsConfig init defaults" {
+    const config = TlsConfig.init(std.testing.allocator);
+    try std.testing.expect(config.verify_server);
+    try std.testing.expectEqual(@as(usize, 1), config.alpn_protocols.len);
+    try std.testing.expectEqualStrings("http/1.1", config.alpn_protocols[0]);
 }
 
-test "TlsSession initialization" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.init(allocator);
-    var session = TlsSession.init(config);
-    defer session.deinit();
-
-    try std.testing.expect(!session.connected);
-    try std.testing.expect(session.negotiated_protocol == null);
+test "Connection struct field defaults" {
+    // Verify Connection struct default values at compile time.
+    const defaults = Connection{
+        .allocator = undefined,
+        .socket = undefined,
+    };
+    try std.testing.expect(!defaults.is_server);
+    try std.testing.expect(!defaults.connected);
+    try std.testing.expect(defaults.tls_version == .tls_1_2);
+    try std.testing.expect(defaults.negotiated_alpn.get() == null);
 }
 
-test "TlsSession deinit clears probe buffer" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.init(allocator);
-    var session = TlsSession.init(config);
-    // Simulate a probe buffer being allocated.
-    session.h2_probe_buf = try allocator.alloc(u8, 9);
-    session.h2_probe_len = 9;
+test "TlsSession deinit zeros key material" {
+    var session = TlsSession.init(TlsConfig.init(std.testing.allocator));
+    session.app_write_key = [_]u8{0xAB} ** 32;
+    session.app_read_key = [_]u8{0xCD} ** 32;
     session.deinit();
-    // deinit must free the probe buffer without double-free.
-}
-
-test "TlsSession read replays probe buffer first" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.init(allocator);
-    var session = TlsSession.init(config);
-    defer session.deinit();
-
-    // Populate a fake probe buffer with known bytes.
-    const probe_data = [_]u8{ 0x00, 0x00, 0x0C, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00 };
-    session.h2_probe_buf = try allocator.alloc(u8, probe_data.len);
-    @memcpy(session.h2_probe_buf.?, &probe_data);
-    session.h2_probe_len = probe_data.len;
-
-    // The session has no live TLS client, but read() should replay probe bytes.
-    var out: [9]u8 = undefined;
-    const n = try session.read(&out);
-
-    try std.testing.expectEqual(@as(usize, 9), n);
-    try std.testing.expectEqualSlices(u8, &probe_data, out[0..n]);
-    // Probe buffer must be freed after full replay.
-    try std.testing.expect(session.h2_probe_buf == null);
-    try std.testing.expectEqual(@as(usize, 0), session.h2_probe_len);
-}
-
-test "TlsSession read replays probe buffer partially" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.init(allocator);
-    var session = TlsSession.init(config);
-    defer session.deinit();
-
-    const probe_data = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE };
-    session.h2_probe_buf = try allocator.alloc(u8, probe_data.len);
-    @memcpy(session.h2_probe_buf.?, &probe_data);
-    session.h2_probe_len = probe_data.len;
-
-    var out: [3]u8 = undefined;
-    const n = try session.read(&out);
-
-    try std.testing.expectEqual(@as(usize, 3), n);
-    try std.testing.expectEqualSlices(u8, probe_data[0..3], out[0..n]);
-    // Two bytes remain in the probe buffer.
-    try std.testing.expect(session.h2_probe_buf != null);
-    try std.testing.expectEqual(@as(usize, 2), session.h2_probe_len);
-    // Remaining bytes should be the last two of the original data.
-    try std.testing.expectEqual(@as(u8, 0xDD), session.h2_probe_buf.?[0]);
-    try std.testing.expectEqual(@as(u8, 0xEE), session.h2_probe_buf.?[1]);
-}
-
-test "System CA path" {
-    const path = getSystemCaPath();
-    if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
-        try std.testing.expect(path != null);
+    // deinit zeros the key material, but the optional fields remain set
+    if (session.app_write_key) |k| {
+        for (k) |b| try std.testing.expectEqual(@as(u8, 0), b);
+    }
+    if (session.app_read_key) |k| {
+        for (k) |b| try std.testing.expectEqual(@as(u8, 0), b);
     }
 }
 
-test "TLS version strings" {
-    try std.testing.expectEqualStrings("TLSv1.2", TlsVersion.tls_1_2.toString());
-    try std.testing.expectEqualStrings("TLSv1.3", TlsVersion.tls_1_3.toString());
-}
-
-test "TLS version bytes" {
-    try std.testing.expectEqual(@as(u8, 3), TlsVersion.tls_1_2.majorVersion());
-    try std.testing.expectEqual(@as(u8, 3), TlsVersion.tls_1_2.minorVersion());
-    try std.testing.expectEqual(@as(u8, 4), TlsVersion.tls_1_3.minorVersion());
-}
-
-test "parsePemCertificate decodes base64 payload" {
-    const allocator = std.testing.allocator;
-    const pem =
-        "-----BEGIN CERTIFICATE-----\n" ++
-        "AQID\n" ++
-        "-----END CERTIFICATE-----\n";
-
-    const der = try parsePemCertificate(allocator, pem);
-    defer allocator.free(der);
-
-    try std.testing.expectEqual(@as(usize, 3), der.len);
-    try std.testing.expectEqual(@as(u8, 0x01), der[0]);
-    try std.testing.expectEqual(@as(u8, 0x02), der[1]);
-    try std.testing.expectEqual(@as(u8, 0x03), der[2]);
-}
-
-test "TlsSession isHttp2 and isHttp3" {
-    const allocator = std.testing.allocator;
-    const config = TlsConfig.init(allocator);
-    var session = TlsSession.init(config);
-    defer session.deinit();
-
-    // No protocol negotiated initially.
+test "TlsSession isHttp2/isHttp3" {
+    var session = TlsSession.init(TlsConfig.init(std.testing.allocator));
     try std.testing.expect(!session.isHttp2());
     try std.testing.expect(!session.isHttp3());
-
-    // Simulate H2 negotiation.
-    session.negotiated_protocol = "h2";
+    session.negotiated_alpn.set("h2");
     try std.testing.expect(session.isHttp2());
     try std.testing.expect(!session.isHttp3());
-
-    // Simulate H3 negotiation.
-    session.negotiated_protocol = "h3";
-    try std.testing.expect(!session.isHttp2());
-    try std.testing.expect(session.isHttp3());
-
-    // Simulate H3-29 negotiation (draft version).
-    session.negotiated_protocol = "h3-29";
-    try std.testing.expect(!session.isHttp2());
-    try std.testing.expect(session.isHttp3());
 }
 
-test "AlpnProtocol constants" {
-    try std.testing.expectEqualStrings("http/1.0", AlpnProtocol.HTTP1_0);
-    try std.testing.expectEqualStrings("http/1.1", AlpnProtocol.HTTP1_1);
-    try std.testing.expectEqualStrings("h2", AlpnProtocol.HTTP2);
-    try std.testing.expectEqualStrings("h3", AlpnProtocol.HTTP3);
-    try std.testing.expectEqualStrings("h3-29", AlpnProtocol.H3_29);
+test "TlsSession negotiatedProtocol returns null initially" {
+    const session = TlsSession.init(TlsConfig.init(std.testing.allocator));
+    try std.testing.expect(session.negotiatedProtocol() == null);
+}
+
+test "TlsSession negotiatedProtocol returns protocol after set" {
+    var session = TlsSession.init(TlsConfig.init(std.testing.allocator));
+    session.negotiated_alpn.set("h3");
+    const proto = session.negotiatedProtocol();
+    try std.testing.expect(proto != null);
+    try std.testing.expectEqualStrings("h3", proto.?);
+}
+
+test "detectTls13 returns false for short data" {
+    try std.testing.expect(!detectTls13(&[_]u8{0}));
+}
+
+test "detectTls13 returns false for no supported_versions extension" {
+    // Minimal ClientHello that won't have supported_versions
+    var buf: [50]u8 = [_]u8{0} ** 50;
+    buf[0] = 1; // session_id_len = 1
+    buf[1] = 0x33; // random placeholder byte
+    try std.testing.expect(!detectTls13(&buf));
 }

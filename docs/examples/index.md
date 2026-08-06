@@ -27,14 +27,16 @@ zig build example-http3_example -Dtarget=aarch64-macos
 - [Connection Pool](/examples/connection-pool): Reuse pooled connections efficiently.
 - [Interceptors](/examples/interceptors): Apply request and response interceptors.
 - [Cookies Demo](/examples/cookies-demo): Manage cookie jar values in client flows.
+- [Logging Callback](/examples/logging-callback): Set up custom logging functions for both server and client.
 - [Proxy and Reverse Proxy](/examples/proxy-example): Configure client forward proxies, including SOCKS5h tunnels, and register reverse proxy middleware.
-- [SOCKS5h Proxy](/examples/socks5h-proxy): Understand remote DNS resolution through a SOCKS5h proxy.
+- [SOCKS5h Proxy](/examples/socks5-proxy): Route requests through a SOCKS5h proxy with remote DNS resolution.
 - [Simplified API Aliases](/examples/simplified-api-aliases): Use short top-level helper APIs with local loopback success mode by default.
 - [Simple Server](/examples/simple-server): Start a minimal HTTP server.
 - [Thread Pool / Async Server](/examples/async-server-example): Start a concurrent HTTP server with thread pool connection dispatching.
 - [Router Example](/examples/router-example): Route params and grouped endpoints.
 - [Middleware Example](/examples/middleware-example): Chain middleware with shared behavior.
 - [Streaming](/examples/streaming): Stream data responses.
+- [SSE Example](/examples/sse-example): Server-Sent Events formatting and streaming from server to client.
 - [Static Files](/examples/static-files): Serve assets with content types, ETag headers, and conditional GET (`If-None-Match`) support.
 - [Multi Page Website](/examples/multi-page-website): Serve multiple HTML pages.
 - [HTTP/2 Example](/examples/http2-example): HTTP/2 framing and stream primitives.
@@ -48,10 +50,20 @@ zig build example-http3_example -Dtarget=aarch64-macos
 - [TCP Local](/examples/tcp-local): Local TCP listener/client round trip.
 - [UDP Local](/examples/udp-local): Local UDP transport demo.
 - [WebSocket Example](/examples/websocket-example): Read upgrade headers, handshake keys, and process frame inputs.
+- [WebSocket Server](/examples/websocket-server): WebSocket handshake detection, frame encoding/decoding, and bidirectional messaging.
 - [Multipart Form Data](/examples/multipart-example): Build and parse multipart payloads with text fields and file uploads.
 - [Session Store](/examples/session-example): Set/get session data, evict sessions on TTL, and integrate with servers.
 - [Metrics and Observability](/examples/metrics-example): Aggregate total requests, status codes, latency times, and success rates.
 - [Unix Domain Sockets](/examples/unix-socket-example): Bind servers and connect clients over AF_UNIX sockets.
 - [Health Check Probes](/examples/health-check-example): Configure liveness and readiness probe middlewares.
 - [Cloud HTTPS Server](/examples/cloud-https-server): Production cloud deployment with TLS, middleware, and health checks.
+- [TLS Server](/examples/tls-server): Custom TLS server with ALPN negotiation.
+- [HTTPS Client](/examples/https-client): HTTPS client with custom TLS configuration.
 - [Request Response Customization](/examples/request-response-customization): Customize request properties and response headers.
+- [Compression](/examples/compression-example): Gzip, deflate, brotli, and zstd compression/decompression.
+- [HTTP Methods](/examples/http-methods): GET, POST, PUT, DELETE, HEAD, OPTIONS.
+- [Retry](/examples/retry-example): Retry with exponential backoff.
+- [DNS Resolution](/examples/dns-example): DNS cache and resolution.
+- [Redirect](/examples/redirect-example): Redirect following and policy.
+- [Batch Concurrent](/examples/batch-concurrent): Batch concurrent requests.
+- [Reverse Proxy Middleware](/examples/reverse-proxy-middleware): Server-side reverse proxy.

@@ -27,24 +27,6 @@ pub fn main() !void {
     std.debug.print("=== Unix Domain Socket Example ===\n\n", .{});
     std.debug.print("Platform: {s}\n", .{@tagName(builtin.os.tag)});
 
-    // Unix domain sockets (AF_UNIX) require Windows 10 build 17061+ with
-    // Developer Mode enabled. On most Windows builds the Winsock AF_UNIX
-    // socket creation fails inside the server's background thread which
-    // causes an unhandled panic. Skip gracefully at compile-time.
-    if (comptime builtin.os.tag == .windows) {
-        std.debug.print(
-            \\Unix domain sockets require Windows 10 build 17061+ with Developer Mode.
-            \\AF_UNIX is not available on this Windows build. Skipping example.
-            \\
-            \\To run this example: enable Developer Mode in Windows Settings,
-            \\or run on Linux/macOS where AF_UNIX is always available.
-            \\
-            \\=== Unix Domain Socket Example Skipped (Windows) ===
-            \\
-        , .{});
-        return;
-    }
-
     const io = std.Io.Threaded.global_single_threaded.io();
     const ts = std.Io.Timestamp.now(io, .real).toMilliseconds();
     var socket_path_buf: [64]u8 = undefined;
@@ -73,10 +55,9 @@ pub fn main() !void {
         std.debug.print("\nServer failed to start: {s}\n", .{@errorName(err)});
         if (builtin.os.tag == .windows) {
             std.debug.print("On Windows, AF_UNIX requires Windows 10 build 17061+ with Developer Mode enabled.\n", .{});
-            std.debug.print("Skipping Unix domain socket example.\n", .{});
-        } else {
-            std.debug.print("Skipping.\n", .{});
+            std.debug.print("Enable Developer Mode in Windows Settings, or run on Linux/macOS.\n", .{});
         }
+        std.debug.print("=== Unix Domain Socket Example Skipped (bind failed) ===\n", .{});
         return;
     };
     defer thread.join();
@@ -95,11 +76,7 @@ pub fn main() !void {
     std.debug.print("Sending GET request over Unix socket...\n", .{});
     var resp = client.get("http://localhost/ipc-status", .{}) catch |err| {
         std.debug.print("Request failed: {s}\n", .{@errorName(err)});
-        if (builtin.os.tag == .windows) {
-            std.debug.print("Windows AF_UNIX requires build 17061+. Skipping.\n", .{});
-        } else {
-            std.debug.print("Skipping.\n", .{});
-        }
+        std.debug.print("=== Unix Domain Socket Example Skipped (request failed) ===\n", .{});
         return;
     };
     defer resp.deinit();

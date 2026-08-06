@@ -44,15 +44,23 @@ pub fn main() !void {
     try store.set(&sid, "role", "admin");
     try store.set(&sid, "username", "alice");
 
-    std.debug.print("user_id:  {s}\n", .{store.get(&sid, "user_id").?});
-    std.debug.print("role:     {s}\n", .{store.get(&sid, "role").?});
-    std.debug.print("username: {s}\n", .{store.get(&sid, "username").?});
+    const user_id = store.get(&sid, "user_id").?;
+    defer allocator.free(user_id);
+    const role = store.get(&sid, "role").?;
+    defer allocator.free(role);
+    const username = store.get(&sid, "username").?;
+    defer allocator.free(username);
+    std.debug.print("user_id:  {s}\n", .{user_id});
+    std.debug.print("role:     {s}\n", .{role});
+    std.debug.print("username: {s}\n", .{username});
     std.debug.print("exists:   {}\n", .{store.exists(&sid)});
     std.debug.print("count:    {d}\n\n", .{store.count()});
 
     // Overwrite a value
     try store.set(&sid, "role", "superadmin");
-    std.debug.print("role (updated): {s}\n\n", .{store.get(&sid, "role").?});
+    const updated_role = store.get(&sid, "role").?;
+    defer allocator.free(updated_role);
+    std.debug.print("role (updated): {s}\n\n", .{updated_role});
 
     // 2. Multiple sessions
     std.debug.print("--- Multiple Sessions ---\n", .{});
@@ -127,6 +135,7 @@ pub fn main() !void {
             const cookie_header = ctx.cookie("sid") orelse return ctx.status(401).json(.{ .err = "no session" });
             const user = Globals.session_store.get(cookie_header, "user") orelse
                 return ctx.status(401).json(.{ .err = "session not found" });
+            defer ctx.allocator.free(user);
             return ctx.json(.{ .user = user, .authenticated = true });
         }
     }.h);

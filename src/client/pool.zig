@@ -12,16 +12,11 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 
 const Socket = @import("../net/socket.zig").Socket;
-const io_util = @import("../util/any_io.zig");
 const address_mod = @import("../net/address.zig");
 const types = @import("../core/types.zig");
 const proxy_mod = @import("proxy.zig");
+const common = @import("../util/common.zig");
 const Proxy = types.Proxy;
-
-fn nowMillis() i64 {
-    const io = io_util.defaultIo();
-    return std.Io.Timestamp.now(io, .real).toMilliseconds();
-}
 
 pub const PoolError = error{
     PoolExhausted,
@@ -43,13 +38,13 @@ pub const Connection = struct {
     /// Marks the connection as in use.
     pub fn acquire(self: *Self) void {
         self.in_use = true;
-        self.last_used = nowMillis();
+        self.last_used = common.nowMillis();
     }
 
     /// Releases the connection back to the pool.
     pub fn release(self: *Self) void {
         self.in_use = false;
-        self.last_used = nowMillis();
+        self.last_used = common.nowMillis();
         self.requests_made += 1;
     }
 
@@ -57,7 +52,7 @@ pub const Connection = struct {
     pub fn isHealthy(self: *const Self, max_idle_ms: i64) bool {
         if (self.in_use) return false;
         if (!self.socket.isValid()) return false;
-        const idle_time = nowMillis() - self.last_used;
+        const idle_time = common.nowMillis() - self.last_used;
         return idle_time < max_idle_ms;
     }
 
@@ -66,7 +61,7 @@ pub const Connection = struct {
         if (self.in_use) return false;
         if (!self.socket.isValid()) return true;
         if (self.requests_made >= max_requests_per_connection) return true;
-        const idle_time = nowMillis() - self.last_used;
+        const idle_time = common.nowMillis() - self.last_used;
         return idle_time >= idle_timeout_ms;
     }
 
@@ -152,7 +147,7 @@ pub const ConnectionPool = struct {
 
         const connect_host = if (proxy) |p| p.host else host;
         const connect_port = if (proxy) |p| p.port else port;
-        const addr = try address_mod.resolve(connect_host, connect_port);
+        const addr = try address_mod.resolve(self.allocator, connect_host, connect_port);
 
         var socket = try Socket.createForAddress(addr);
         errdefer socket.close();
@@ -164,7 +159,7 @@ pub const ConnectionPool = struct {
             }
         }
 
-        const now = nowMillis();
+        const now = common.nowMillis();
 
         try self.connections.append(self.allocator, .{
             .socket = socket,
@@ -263,8 +258,8 @@ test "Connection health check" {
         .socket = try Socket.create(),
         .host = "localhost",
         .port = 8080,
-        .created_at = nowMillis(),
-        .last_used = nowMillis(),
+        .created_at = common.nowMillis(),
+        .last_used = common.nowMillis(),
     };
     defer conn.socket.close();
 

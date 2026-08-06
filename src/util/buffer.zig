@@ -3,7 +3,6 @@
 //! Provides high-performance buffer implementations for HTTP message handling:
 //!
 //! - `Buffer`: Growable dynamic buffer for building messages
-//! - `RingBuffer`: Circular buffer for streaming data
 //! - `FixedBuffer`: Stack-allocated fixed-size buffer
 
 const std = @import("std");
@@ -106,89 +105,6 @@ pub const Buffer = struct {
     };
 };
 
-/// Circular buffer for streaming data with fixed capacity.
-pub const RingBuffer = struct {
-    allocator: Allocator,
-    data: []u8,
-    read_pos: usize = 0,
-    write_pos: usize = 0,
-    count: usize = 0,
-
-    const Self = @This();
-
-    /// Creates a new ring buffer with the specified capacity.
-    pub fn init(allocator: Allocator, capacity: usize) !Self {
-        return .{
-            .allocator = allocator,
-            .data = try allocator.alloc(u8, capacity),
-        };
-    }
-
-    /// Releases the buffer memory.
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.data);
-    }
-
-    /// Writes bytes to the buffer, returning the number written.
-    pub fn writeBytes(self: *Self, bytes: []const u8) !usize {
-        const space = self.data.len - self.count;
-        const to_write = @min(bytes.len, space);
-
-        for (bytes[0..to_write]) |byte| {
-            self.data[self.write_pos] = byte;
-            self.write_pos = (self.write_pos + 1) % self.data.len;
-            self.count += 1;
-        }
-
-        return to_write;
-    }
-
-    /// Reads bytes from the buffer into the provided slice.
-    pub fn readBytes(self: *Self, buffer: []u8) usize {
-        const to_read = @min(buffer.len, self.count);
-
-        for (buffer[0..to_read]) |*b| {
-            b.* = self.data[self.read_pos];
-            self.read_pos = (self.read_pos + 1) % self.data.len;
-            self.count -= 1;
-        }
-
-        return to_read;
-    }
-
-    /// Returns the number of bytes available to read.
-    pub fn getAvailable(self: *const Self) usize {
-        return self.count;
-    }
-
-    /// Returns the total buffer capacity.
-    pub fn getCapacity(self: *const Self) usize {
-        return self.data.len;
-    }
-
-    /// Returns the amount of free space in the buffer.
-    pub fn getFreeSpace(self: *const Self) usize {
-        return self.data.len - self.count;
-    }
-
-    /// Returns true if the buffer is empty.
-    pub fn isEmpty(self: *const Self) bool {
-        return self.count == 0;
-    }
-
-    /// Returns true if the buffer is full.
-    pub fn isFull(self: *const Self) bool {
-        return self.count == self.data.len;
-    }
-
-    /// Clears all data from the buffer.
-    pub fn clear(self: *Self) void {
-        self.read_pos = 0;
-        self.write_pos = 0;
-        self.count = 0;
-    }
-};
-
 /// Fixed-size buffer for stack allocation without heap usage.
 pub fn FixedBuffer(comptime size: usize) type {
     return struct {
@@ -248,33 +164,6 @@ test "Buffer growth" {
     try buf.append("12345678901234567890");
     try std.testing.expectEqual(@as(usize, 20), buf.len);
     try std.testing.expect(buf.capacity >= 20);
-}
-
-test "RingBuffer operations" {
-    const allocator = std.testing.allocator;
-    var ring = try RingBuffer.init(allocator, 8);
-    defer ring.deinit();
-
-    _ = try ring.writeBytes("hello");
-    try std.testing.expectEqual(@as(usize, 5), ring.getAvailable());
-
-    var out: [10]u8 = undefined;
-    const n = ring.readBytes(&out);
-    try std.testing.expectEqual(@as(usize, 5), n);
-    try std.testing.expectEqualStrings("hello", out[0..n]);
-}
-
-test "RingBuffer wraparound" {
-    const allocator = std.testing.allocator;
-    var ring = try RingBuffer.init(allocator, 4);
-    defer ring.deinit();
-
-    _ = try ring.writeBytes("ab");
-    var out: [2]u8 = undefined;
-    _ = ring.readBytes(&out);
-    _ = try ring.writeBytes("cdef");
-
-    try std.testing.expectEqual(@as(usize, 4), ring.getAvailable());
 }
 
 test "FixedBuffer operations" {

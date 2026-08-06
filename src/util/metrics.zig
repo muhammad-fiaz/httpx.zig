@@ -99,7 +99,7 @@ pub const Metrics = struct {
         }
 
         _ = self.latency_total_ns.fetchAdd(latency_ns, .monotonic);
-        // Update min (relaxed – best effort, not strictly atomic min)
+        // Update min (relaxed -- best effort, not strictly atomic min)
         const old_min = self.latency_min_ns.load(.monotonic);
         if (latency_ns < old_min) {
             _ = self.latency_min_ns.cmpxchgWeak(old_min, latency_ns, .monotonic, .monotonic);

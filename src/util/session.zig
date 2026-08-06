@@ -6,7 +6,7 @@
 //! ## Features
 //! - Thread-safe insert/get/delete via mutex
 //! - Automatic TTL-based expiry
-//! - Session ID generation using std.crypto.random
+//! - Session ID generation using std.Io random
 //! - Per-session arbitrary string key/value data
 //!
 //! ## Usage
@@ -171,15 +171,21 @@ pub const SessionStore = struct {
     }
 
     /// Gets a value from the session. Returns null if not found or expired.
+    /// Caller owns the returned slice and must free it with the allocator.
     pub fn get(self: *Self, hex_id: []const u8, key: []const u8) ?[]const u8 {
         self.lock();
         defer self.unlock();
 
         const raw = parseId(hex_id) orelse return null;
         const entry = self.sessions.getPtr(raw) orelse return null;
-        if (entry.isExpired(nowMs(), self.config.ttl_ms)) return null;
+        if (entry.isExpired(nowMs(), self.config.ttl_ms)) {
+            entry.deinit();
+            _ = self.sessions.remove(raw);
+            return null;
+        }
         entry.last_accessed_ms = nowMs();
-        return entry.data.get(key);
+        const value = entry.data.get(key) orelse return null;
+        return self.allocator.dupe(u8, value) catch null;
     }
 
     /// Deletes a session.
@@ -201,7 +207,12 @@ pub const SessionStore = struct {
 
         const raw = parseId(hex_id) orelse return false;
         const entry = self.sessions.getPtr(raw) orelse return false;
-        return !entry.isExpired(nowMs(), self.config.ttl_ms);
+        if (entry.isExpired(nowMs(), self.config.ttl_ms)) {
+            entry.deinit();
+            _ = self.sessions.remove(raw);
+            return false;
+        }
+        return true;
     }
 
     /// Removes all expired sessions. Call periodically for cleanup.
@@ -245,6 +256,7 @@ test "SessionStore create and get" {
     try store.set(&id, "user", "alice");
     const val = store.get(&id, "user");
     try std.testing.expect(val != null);
+    defer allocator.free(val.?);
     try std.testing.expectEqualStrings("alice", val.?);
 
     store.delete(&id);

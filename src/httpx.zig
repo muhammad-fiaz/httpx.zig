@@ -106,11 +106,15 @@ pub const json = @import("util/json.zig");
 pub const mime = @import("util/mime.zig");
 pub const common = @import("util/common.zig");
 pub const multipart = @import("util/multipart.zig");
-pub const metrics_mod = @import("util/metrics.zig");
-pub const session_mod = @import("util/session.zig");
-pub const compression_util = @import("util/compression.zig");
+pub const metrics = @import("util/metrics.zig");
+pub const session = @import("util/session.zig");
+pub const compression = @import("util/compression.zig");
+pub const ContentEncoding = compression.ContentEncoding;
+pub const decompress = compression.decompress;
+pub const compress = compression.compress;
 pub const dns = @import("net/dns.zig");
 pub const sse = @import("util/sse.zig");
+pub const parseSseStream = sse.parseSseStream;
 
 pub const executor = @import("concurrency/executor.zig");
 pub const concurrency = @import("concurrency/pool.zig");
@@ -210,7 +214,6 @@ pub const QuicTransportParameters = quic.TransportParameters;
 pub const formatRequest = http.formatRequest;
 pub const formatResponse = http.formatResponse;
 pub const encodeChunkedBody = http.encodeChunkedBody;
-pub const isH2cUpgradeRequest = http.isH2cUpgradeRequest;
 pub const negotiateVersion = http.negotiateVersion;
 
 pub const Client = client_mod.Client;
@@ -249,7 +252,7 @@ pub const cors = middleware.cors;
 pub const logger = middleware.logger;
 pub const LoggerConfig = middleware.LoggerConfig;
 pub const loggerWithConfig = middleware.loggerWithConfig;
-pub const compression = middleware.compression;
+pub const compressionMiddleware = middleware.compressionMiddleware;
 pub const rateLimit = middleware.rateLimit;
 pub const basicAuth = middleware.basicAuth;
 pub const helmet = middleware.helmet;
@@ -262,7 +265,7 @@ pub const ReadinessConfig = middleware.ReadinessConfig;
 pub const RateLimitConfig = middleware.RateLimitConfig;
 pub const CorsConfig = middleware.CorsConfig;
 
-// WebSocket exports (flat API — no httpx.websocket.WebSocket.X redundancy)
+// WebSocket exports (flat API -- no httpx.websocket.WebSocket.X redundancy)
 pub const WsOpcode = websocket.WsOpcode;
 pub const WsFrame = websocket.WsFrame;
 pub const WsCloseCode = websocket.WsCloseCode;
@@ -288,22 +291,21 @@ pub const extractMultipartBoundary = multipart.extractBoundary;
 pub const parseMultipart = multipart.parse;
 
 // Metrics exports
-pub const Metrics = metrics_mod.Metrics;
-pub const MetricsSnapshot = metrics_mod.MetricsSnapshot;
-pub const MetricsEvent = metrics_mod.MetricsEvent;
-pub const MetricsCallbackFn = metrics_mod.MetricsCallbackFn;
+pub const Metrics = metrics.Metrics;
+pub const MetricsSnapshot = metrics.MetricsSnapshot;
+pub const MetricsEvent = metrics.MetricsEvent;
+pub const MetricsCallbackFn = metrics.MetricsCallbackFn;
 
 // Session exports
-pub const SessionStore = session_mod.SessionStore;
-pub const SessionConfig = session_mod.SessionConfig;
-pub const SESSION_ID_LEN = session_mod.SESSION_ID_LEN;
+pub const SessionStore = session.SessionStore;
+pub const SessionConfig = session.SessionConfig;
+pub const SESSION_ID_LEN = session.SESSION_ID_LEN;
 
 // Unix socket exports
 pub const UnixSocket = unix.UnixSocket;
 pub const UnixListener = unix.UnixListener;
 pub const UnixClient = unix.UnixClient;
 pub const Buffer = buffer.Buffer;
-pub const RingBuffer = buffer.RingBuffer;
 pub const FixedBuffer = buffer.FixedBuffer;
 
 pub const Base64 = encoding.Base64;
@@ -615,10 +617,10 @@ test "top-level alias compile checks" {
     const first_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec, ConcurrencyConfig) anyerror!?Response = first;
     const fastest_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec, ConcurrencyConfig) anyerror!RequestResult = fastest;
     const settled_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec, ConcurrencyConfig) anyerror![]RequestResult = settled;
-    const resolve_addr_ptr: *const fn ([]const u8, u16) anyerror!address.Address = resolveAddress;
+    const resolve_addr_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror!address.Address = resolveAddress;
     const resolve_all_addr_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror![]address.Address = resolveAllAddresses;
     const parse_host_port_ptr = parseHostAndPort;
-    const parse_and_resolve_ptr: *const fn ([]const u8, u16) anyerror!address.Address = parseAndResolveAddress;
+    const parse_and_resolve_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror!address.Address = parseAndResolveAddress;
     const is_ip_ptr: *const fn ([]const u8) bool = isIpAddress;
     const is_ip4_ptr: *const fn ([]const u8) bool = isIp4Address;
     const is_ip6_ptr: *const fn ([]const u8) bool = isIp6Address;

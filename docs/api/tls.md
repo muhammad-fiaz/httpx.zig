@@ -21,7 +21,7 @@ pub const TlsConfig = struct {
     alpn_protocols: []const []const u8 = &.{ "http/1.1" },
     cipher_suites: ?[]const u8 = null,
     server_name: ?[]const u8 = null,
-    allow_truncation_attacks: bool = true,
+    verify_server: bool = false,
     force_h2: bool = false,
 };
 ```

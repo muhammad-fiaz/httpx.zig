@@ -100,14 +100,6 @@ pub const Uri = struct {
         return false;
     }
 
-    /// Returns true if this is a WebSocket URI.
-    pub fn isWebSocket(self: Self) bool {
-        if (self.scheme) |s| {
-            return mem.eql(u8, s, "ws") or mem.eql(u8, s, "wss");
-        }
-        return false;
-    }
-
     /// Builds the request path including query string.
     pub fn requestPath(self: Self, allocator: Allocator) ![]u8 {
         if (self.query) |q| {
@@ -184,23 +176,6 @@ pub fn decode(allocator: Allocator, input: []const u8) ![]u8 {
             try result.append(allocator, input[i]);
         }
         i += 1;
-    }
-
-    return result.toOwnedSlice(allocator);
-}
-
-/// Encodes query parameters as a query string.
-pub fn encodeQueryParams(allocator: Allocator, params: []const struct { []const u8, []const u8 }) ![]u8 {
-    var result = std.ArrayList(u8).empty;
-    const writer = list_writer.init(allocator, &result);
-
-    for (params, 0..) |param, idx| {
-        if (idx > 0) try writer.writeByte('&');
-        const key = try encode(allocator, param[0]);
-        defer allocator.free(key);
-        const value = try encode(allocator, param[1]);
-        defer allocator.free(value);
-        try writer.print("{s}={s}", .{ key, value });
     }
 
     return result.toOwnedSlice(allocator);

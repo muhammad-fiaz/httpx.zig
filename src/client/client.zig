@@ -38,6 +38,8 @@ const PoolStats = @import("pool.zig").PoolStats;
 const common = @import("../util/common.zig");
 const list_writer = @import("../util/list_writer.zig");
 const io_util = @import("../util/any_io.zig");
+const server_mod = @import("../server/server.zig");
+const LogFn = server_mod.LogFn;
 
 const defaultIo = io_util.defaultIo;
 const sleepMs = io_util.sleepMs;
@@ -69,6 +71,7 @@ pub const ClientConfig = struct {
     pool_max_per_host: u32 = 5,
     proxy: ?types.Proxy = null,
     unix_socket_path: ?[]const u8 = null,
+    log_fn: ?LogFn = null,
 
     /// Returns default client configuration.
     pub fn defaults() ClientConfig {
@@ -141,6 +144,12 @@ pub const ClientConfig = struct {
         var out = self;
         out.unix_socket_path = path;
         return out;
+    }
+
+    pub fn withLogFn(self: ClientConfig, log_fn: LogFn) ClientConfig {
+        var config = self;
+        config.log_fn = log_fn;
+        return config;
     }
 
     /// Returns a copy with protocol runtime toggles.
@@ -439,6 +448,19 @@ pub const Client = struct {
         self.pool.deinit();
     }
 
+    /// Logs a formatted message. If config.log_fn is provided, delegates to it.
+    /// Otherwise, falls back to stderr.
+    pub fn log(self: *const Self, level: server_mod.LogLevel, comptime format: []const u8, args: anytype) void {
+        if (self.config.log_fn) |log_fn| {
+            var buf: [1024]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, format, args)) |msg| {
+                log_fn(level, msg);
+            } else |_| {
+                log_fn(level, "[Log format failed or message too long]");
+            }
+        }
+    }
+
     /// Adds an interceptor to the client.
     pub fn addInterceptor(self: *Self, interceptor: Interceptor) !void {
         try self.interceptors.append(self.allocator, interceptor);
@@ -490,7 +512,7 @@ pub const Client = struct {
 
         try req.headers.set(HeaderName.USER_AGENT, self.config.user_agent);
         if (!req.headers.contains("Accept-Encoding")) {
-            try req.headers.set("Accept-Encoding", "gzip, deflate");
+            try req.headers.set("Accept-Encoding", "gzip, deflate, br, zstd, identity");
         }
 
         if (self.config.default_headers) |hdrs| {
@@ -691,7 +713,7 @@ pub const Client = struct {
 
         try socket.sendAll(connect_req);
 
-        var response = try self.readResponseFromTcp(socket);
+        var response = try self.readResponseFromTcp(socket, true);
         defer response.deinit();
 
         if (response.status.code < 200 or response.status.code >= 300) {
@@ -734,7 +756,7 @@ pub const Client = struct {
             defer self.allocator.free(request_data);
 
             try socket.sendAll(request_data);
-            return self.readResponseFromTcp(&socket);
+            return self.readResponseFromTcp(&socket, req.method.hasResponseBody());
         }
 
         const host = req.uri.host orelse return error.InvalidUri;
@@ -743,8 +765,16 @@ pub const Client = struct {
         const wants_http2 = self.config.http2_enabled or req.version == .HTTP_2;
         const wants_http3 = self.config.http3_enabled or req.version == .HTTP_3;
 
+        // HTTP/3 takes priority, but falls back to HTTP/2 when a proxy is
+        // configured (QUIC does not support standard HTTP proxies).
         if (wants_http3) {
-            if (proxy != null) return error.ProxyNotSupported;
+            if (proxy != null) {
+                // Fall back to HTTP/2 if also enabled; otherwise return error.
+                if (wants_http2) {
+                    return self.executeRequestHttp2(req, host, port, timeouts, reqOpts);
+                }
+                return error.ProxyNotSupported;
+            }
             return self.executeRequestHttp3(req, host, port, timeouts, reqOpts);
         }
 
@@ -767,7 +797,7 @@ pub const Client = struct {
         if (req.uri.isTls()) {
             const connect_host = if (proxy) |p| p.host else host;
             const connect_port = if (proxy) |p| p.port else port;
-            const addr = try address_mod.resolve(connect_host, connect_port);
+            const addr = try address_mod.resolve(self.allocator, connect_host, connect_port);
 
             var socket = try Socket.createForAddress(addr);
             defer socket.close();
@@ -806,7 +836,7 @@ pub const Client = struct {
             try conn.socket.setKeepAlive(true);
 
             try conn.socket.sendAll(request_data);
-            var res = try self.readResponseFromTcp(&conn.socket);
+            var res = try self.readResponseFromTcp(&conn.socket, req.method.hasResponseBody());
             if (!res.headers.isKeepAlive(.HTTP_1_1)) {
                 conn.close();
             }
@@ -815,7 +845,7 @@ pub const Client = struct {
 
         const connect_host = if (proxy) |p| p.host else host;
         const connect_port = if (proxy) |p| p.port else port;
-        const addr = try address_mod.resolve(connect_host, connect_port);
+        const addr = try address_mod.resolve(self.allocator, connect_host, connect_port);
 
         var socket = try Socket.createForAddress(addr);
         defer socket.close();
@@ -836,7 +866,7 @@ pub const Client = struct {
         }
 
         try socket.sendAll(request_data);
-        return self.readResponseFromTcp(&socket);
+        return self.readResponseFromTcp(&socket, req.method.hasResponseBody());
     }
 
     fn executeRequestHttp2(
@@ -852,13 +882,13 @@ pub const Client = struct {
 
         const connect_host = if (proxy) |p| p.host else host;
         const connect_port = if (proxy) |p| p.port else port;
-        const addr = try address_mod.resolve(connect_host, connect_port);
+        const addr = try address_mod.resolve(self.allocator, connect_host, connect_port);
 
         var socket = try Socket.createForAddress(addr);
         defer socket.close();
 
         // Do not set SO_RCVTIMEO / SO_SNDTIMEO on sockets used for
-        // TLS — the TLS layer performs multi-step record I/O and a
+        // TLS -- the TLS layer performs multi-step record I/O and a
         // per-recv timeout fires mid-handshake.  The connect timeout
         // is handled separately by connectWithTimeout.
 
@@ -873,12 +903,20 @@ pub const Client = struct {
         }
 
         if (req.uri.isTls()) {
-            // Use the withH2 / insecureWithH2 helpers so that the H2 ALPN
-            // preface probe is enabled automatically.
-            const tls_session_cfg = if (verify_ssl)
-                TlsConfig.withH2(self.allocator)
-            else
-                TlsConfig.insecureWithH2(self.allocator);
+            // Build ALPN list based on enabled protocols.
+            // When both HTTP/2 and HTTP/3 are enabled, advertise all three.
+            const tls_session_cfg = blk: {
+                if (self.config.http3_enabled and self.config.http2_enabled) {
+                    break :blk if (verify_ssl)
+                        TlsConfig.withH3(self.allocator)
+                    else
+                        TlsConfig.insecureWithH3(self.allocator);
+                } else if (verify_ssl) {
+                    break :blk TlsConfig.withH2(self.allocator);
+                } else {
+                    break :blk TlsConfig.insecureWithH2(self.allocator);
+                }
+            };
             var session = TlsSession.init(tls_session_cfg);
             defer session.deinit();
             session.attachSocket(&socket);
@@ -890,11 +928,22 @@ pub const Client = struct {
                 try socket.setRecvTimeout(timeouts.read_ms);
             }
 
-            const negotiated = http.negotiateVersion(session.negotiated_protocol);
+            const negotiated = http.negotiateVersion(session.negotiatedProtocol());
             switch (negotiated) {
                 .http_2 => {
                     var transport = TlsHttp2Transport{ .session = &session };
                     return self.executeHttp2WithTransport(req, &transport);
+                },
+                .http_3 => {
+                    // Server selected h3 via ALPN.  For TLS-based connections
+                    // (TCP), HTTP/3 negotiation means the server prefers QUIC
+                    // but we are on a TCP socket.  Attempt to upgrade via
+                    // Alt-Svc or fall back to HTTP/2 if available.
+                    if (self.config.http2_enabled) {
+                        var transport = TlsHttp2Transport{ .session = &session };
+                        return self.executeHttp2WithTransport(req, &transport);
+                    }
+                    return error.UnsupportedHttpVersion;
                 },
                 .http_1_1, .http_1_0 => {
                     // Server selected http/1.1 via ALPN (or ALPN was
@@ -903,14 +952,11 @@ pub const Client = struct {
                     const request_data = try http.formatRequest(req, self.allocator);
                     defer self.allocator.free(request_data);
 
-                    const w = try session.getWriter();
-                    try w.writeAll(request_data);
+                    try session.writeAll(request_data);
                     try session.flush();
 
-                    const r = try session.getReader();
-                    return self.readResponseFromIo(r);
+                    return self.readResponseFromTls(&session, req.method.hasResponseBody());
                 },
-                else => return error.UnsupportedHttpVersion,
             }
         }
 
@@ -934,7 +980,7 @@ pub const Client = struct {
         reqOpts: RequestOptions,
     ) !Response {
         _ = reqOpts;
-        const addr = try address_mod.resolve(host, port);
+        const addr = try address_mod.resolve(self.allocator, host, port);
 
         var socket = try UdpSocket.createForAddress(addr);
         defer socket.close();
@@ -975,14 +1021,8 @@ pub const Client = struct {
 
         var path_buf: ?[]u8 = null;
         defer if (path_buf) |buf| self.allocator.free(buf);
-        const path = if (req.uri.query) |q| blk: {
-            path_buf = try std.fmt.allocPrint(self.allocator, "{s}?{s}", .{ req.uri.path, q });
-            break :blk path_buf.?;
-        } else req.uri.path;
-
         var authority_buf: ?[]u8 = null;
         defer if (authority_buf) |buf| self.allocator.free(buf);
-        const authority = try buildAuthority(self.allocator, req, &authority_buf);
 
         var header_entries = std.ArrayList(qpack.HeaderEntry).empty;
         defer header_entries.deinit(self.allocator);
@@ -993,26 +1033,7 @@ pub const Client = struct {
             owned_header_names.deinit(self.allocator);
         }
 
-        const method_value = if (req.method == .CUSTOM)
-            (req.custom_method orelse "CUSTOM")
-        else
-            req.method.toString();
-
-        try header_entries.append(self.allocator, .{ .name = ":method", .value = method_value });
-        try header_entries.append(self.allocator, .{ .name = ":path", .value = path });
-        try header_entries.append(self.allocator, .{ .name = ":scheme", .value = if (req.uri.isTls()) "https" else "http" });
-        try header_entries.append(self.allocator, .{ .name = ":authority", .value = authority });
-
-        for (req.headers.entries.items) |entry| {
-            if (common.isConnectionSpecificHeader(entry.name) or std.ascii.eqlIgnoreCase(entry.name, HeaderName.HOST)) {
-                continue;
-            }
-            if (entry.name.len > 0 and entry.name[0] == ':') continue;
-
-            const lowered_name = try common.dupLowerAscii(self.allocator, entry.name);
-            try owned_header_names.append(self.allocator, lowered_name);
-            try header_entries.append(self.allocator, .{ .name = lowered_name, .value = entry.value });
-        }
+        try buildPseudoHeaders(self.allocator, req, &header_entries, &owned_header_names, &path_buf, &authority_buf);
 
         const headers_block = try qpack.encodeHeaders(&qpack_encoder, header_entries.items, self.allocator);
         defer self.allocator.free(headers_block);
@@ -1280,7 +1301,7 @@ pub const Client = struct {
         }
     };
 
-    /// A frame read by the H2 response loop — wraps either a freshly-read frame
+    /// A frame read by the H2 response loop -- wraps either a freshly-read frame
     /// (owned) or a replayed early frame (not owned by this value).
     const H2Frame = struct {
         header: http.Http2FrameHeader,
@@ -1349,18 +1370,18 @@ pub const Client = struct {
                     const is_ack = (fhdr.flags & 0x01) != 0;
                     if (!is_ack and fhdr.stream_id == 0) {
                         var peer_settings = http.Http2Connection.Http2ConnectionSettings{};
-                        http.applySettingsPayload(&peer_settings, payload) catch {};
-                        stream_manager.applyPeerSettings(peer_settings) catch {};
+                        http.applySettingsPayload(&peer_settings, payload) catch return error.Http2ProtocolError;
+                        stream_manager.applyPeerSettings(peer_settings) catch return error.Http2ProtocolError;
                         peer_max_frame_size.* = peer_settings.max_frame_size;
                         // Send SETTINGS ACK.
-                        writeHttp2Frame(transport, .settings, 0x01, 0, &.{}) catch {};
+                        writeHttp2Frame(transport, .settings, 0x01, 0, &.{}) catch return error.WriteFailed;
                     }
                     self.allocator.free(payload);
                 },
                 .ping => {
                     const is_ack = (fhdr.flags & 0x01) != 0;
                     if (!is_ack and fhdr.stream_id == 0 and payload.len == 8) {
-                        writeHttp2Frame(transport, .ping, 0x01, 0, payload) catch {};
+                        writeHttp2Frame(transport, .ping, 0x01, 0, payload) catch return error.WriteFailed;
                     }
                     self.allocator.free(payload);
                 },
@@ -1379,13 +1400,13 @@ pub const Client = struct {
                     self.allocator.free(payload);
                 },
                 .headers, .data, .continuation, .push_promise => {
-                    // Early response frame — buffer for replay in the response loop.
+                    // Early response frame -- buffer for replay in the response loop.
                     try early_frames.append(self.allocator, .{
                         .header = fhdr,
                         .payload = payload,
                     });
                 },
-                // RFC 7540 §4.1: Unknown frame types MUST be ignored.
+                // RFC 7540 4.1: Unknown frame types MUST be ignored.
                 _ => {
                     self.allocator.free(payload);
                 },
@@ -1411,14 +1432,8 @@ pub const Client = struct {
 
         var path_buf: ?[]u8 = null;
         defer if (path_buf) |buf| self.allocator.free(buf);
-        const path = if (req.uri.query) |q| blk: {
-            path_buf = try std.fmt.allocPrint(self.allocator, "{s}?{s}", .{ req.uri.path, q });
-            break :blk path_buf.?;
-        } else req.uri.path;
-
         var authority_buf: ?[]u8 = null;
         defer if (authority_buf) |buf| self.allocator.free(buf);
-        const authority = try buildAuthority(self.allocator, req, &authority_buf);
 
         var header_entries = std.ArrayList(hpack.HeaderEntry).empty;
         defer header_entries.deinit(self.allocator);
@@ -1429,26 +1444,7 @@ pub const Client = struct {
             owned_header_names.deinit(self.allocator);
         }
 
-        const method_value = if (req.method == .CUSTOM)
-            (req.custom_method orelse "CUSTOM")
-        else
-            req.method.toString();
-
-        try header_entries.append(self.allocator, .{ .name = ":method", .value = method_value });
-        try header_entries.append(self.allocator, .{ .name = ":path", .value = path });
-        try header_entries.append(self.allocator, .{ .name = ":scheme", .value = if (req.uri.isTls()) "https" else "http" });
-        try header_entries.append(self.allocator, .{ .name = ":authority", .value = authority });
-
-        for (req.headers.entries.items) |entry| {
-            if (common.isConnectionSpecificHeader(entry.name) or std.ascii.eqlIgnoreCase(entry.name, HeaderName.HOST)) {
-                continue;
-            }
-            if (entry.name.len > 0 and entry.name[0] == ':') continue;
-
-            const lowered_name = try common.dupLowerAscii(self.allocator, entry.name);
-            try owned_header_names.append(self.allocator, lowered_name);
-            try header_entries.append(self.allocator, .{ .name = lowered_name, .value = entry.value });
-        }
+        try buildPseudoHeaders(self.allocator, req, &header_entries, &owned_header_names, &path_buf, &authority_buf);
 
         const has_body = req.body != null and req.body.?.len > 0;
         const headers_frames = try h2stream.buildHeadersAndContinuations(
@@ -1562,7 +1558,7 @@ pub const Client = struct {
                 }
                 break :blk self.readHttp2Frame(transport) catch |err| switch (err) {
                     error.UnexpectedEof => {
-                        // RFC 7540 §6.8: a server may close the connection
+                        // RFC 7540 6.8: a server may close the connection
                         // after sending the final frame. If we already received a
                         // complete response (END_STREAM seen, status code present),
                         // treat the clean close as end-of-response rather than error.
@@ -1774,7 +1770,7 @@ pub const Client = struct {
                         if (status_code != null) response_done = true;
                     }
                 },
-                // RFC 7540 §4.1: Unknown frame types MUST be ignored.
+                // RFC 7540 4.1: Unknown frame types MUST be ignored.
                 _ => {},
             }
         }
@@ -1830,22 +1826,37 @@ pub const Client = struct {
         session.attachSocket(socket);
         try session.handshake(host);
 
-        const w = try session.getWriter();
-        try w.writeAll(request_data);
+        // Use encrypted write/read (TLS record layer)
+        try session.writeAll(request_data);
         try session.flush();
 
-        const r = try session.getReader();
-        return self.readResponseFromIo(r);
-    }
-
-    fn readResponseFromTcp(self: *Self, socket: *Socket) !Response {
+        var buf: [16 * 1024]u8 = undefined;
+        var total_read: usize = 0;
         var parser = Parser.initResponse(self.allocator);
         defer parser.deinit();
+
+        while (!parser.isComplete()) {
+            const n = try session.read(&buf);
+            if (n == 0) break;
+            total_read += n;
+            if (total_read > self.config.max_response_size) return error.ResponseTooLarge;
+            _ = try parser.feed(buf[0..n]);
+        }
+
+        parser.finishEof();
+        if (!parser.isComplete()) return error.InvalidResponse;
+        return self.responseFromParser(&parser);
+    }
+
+    fn readResponseFromReadFn(self: *Self, reader: anytype, readFn: *const fn (@TypeOf(reader), []u8) anyerror!usize, expect_body: bool) !Response {
+        var parser = Parser.initResponse(self.allocator);
+        defer parser.deinit();
+        parser.expect_body = expect_body;
 
         var buf: [16 * 1024]u8 = undefined;
         var total_read: usize = 0;
         while (!parser.isComplete()) {
-            const n = try socket.recv(&buf);
+            const n = try readFn(reader, &buf);
             if (n == 0) break;
             total_read += n;
             if (total_read > self.config.max_response_size) return error.ResponseTooLarge;
@@ -1856,6 +1867,14 @@ pub const Client = struct {
 
         if (!parser.isComplete()) return error.InvalidResponse;
         return self.responseFromParser(&parser);
+    }
+
+    fn readResponseFromTcp(self: *Self, socket: *Socket, expect_body: bool) !Response {
+        return self.readResponseFromReadFn(socket, Socket.recv, expect_body);
+    }
+
+    fn readResponseFromTls(self: *Self, session: *TlsSession, expect_body: bool) !Response {
+        return self.readResponseFromReadFn(session, TlsSession.read, expect_body);
     }
 
     fn readResponseFromIo(self: *Self, r: *std.Io.Reader) !Response {
@@ -2073,30 +2092,7 @@ pub const Client = struct {
     }
 };
 
-/// Parses an HTTP response from raw data.
-fn parseResponse(allocator: Allocator, data: []const u8) !Response {
-    var parser = Parser.initResponse(allocator);
-    defer parser.deinit();
 
-    _ = try parser.feed(data);
-    if (!parser.isComplete()) return error.InvalidResponse;
-
-    const code = parser.status_code orelse return error.InvalidResponse;
-    var res = Response.init(allocator, code);
-    errdefer res.deinit();
-
-    // Move headers ownership from parser to response.
-    res.headers.deinit();
-    res.headers = parser.headers;
-    parser.headers = Headers.init(allocator);
-
-    if (parser.getBody().len > 0) {
-        res.body = try allocator.dupe(u8, parser.getBody());
-        res.body_owned = true;
-    }
-
-    return res;
-}
 
 const SocketHttp2Transport = struct {
     socket: *Socket,
@@ -2172,6 +2168,7 @@ fn sendHttp3ResetStream(
     stream_id: u64,
     error_code: u64,
     final_size: u64,
+    allocator: Allocator,
 ) !void {
     var frame_buf: [64]u8 = undefined;
     const frame = quic.ResetStreamFrame{
@@ -2182,10 +2179,10 @@ fn sendHttp3ResetStream(
     const frame_len = try frame.encode(&frame_buf);
 
     var packet = std.ArrayList(u8).empty;
-    defer packet.deinit(std.heap.page_allocator);
+    defer packet.deinit(allocator);
 
-    try appendHttp3PacketHeader(&packet, std.heap.page_allocator, session);
-    try packet.appendSlice(std.heap.page_allocator, frame_buf[0..frame_len]);
+    try appendHttp3PacketHeader(&packet, allocator, session);
+    try packet.appendSlice(allocator, frame_buf[0..frame_len]);
 
     try transport.sendDatagram(packet.items);
 }
@@ -2196,6 +2193,7 @@ fn sendHttp3StopSending(
     session: *Http3QuicSession,
     stream_id: u64,
     error_code: u64,
+    allocator: Allocator,
 ) !void {
     var frame_buf: [64]u8 = undefined;
     const frame = quic.StopSendingFrame{
@@ -2205,10 +2203,10 @@ fn sendHttp3StopSending(
     const frame_len = try frame.encode(&frame_buf);
 
     var packet = std.ArrayList(u8).empty;
-    defer packet.deinit(std.heap.page_allocator);
+    defer packet.deinit(allocator);
 
-    try appendHttp3PacketHeader(&packet, std.heap.page_allocator, session);
-    try packet.appendSlice(std.heap.page_allocator, frame_buf[0..frame_len]);
+    try appendHttp3PacketHeader(&packet, allocator, session);
+    try packet.appendSlice(allocator, frame_buf[0..frame_len]);
 
     try transport.sendDatagram(packet.items);
 }
@@ -2334,6 +2332,43 @@ fn buildAuthority(allocator: Allocator, req: *const Request, authority_buf: *?[]
 
     authority_buf.* = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, explicit_port });
     return authority_buf.*.?;
+}
+
+fn buildPseudoHeaders(
+    allocator: Allocator,
+    req: *Request,
+    header_entries: anytype,
+    owned_header_names: anytype,
+    path_buf: *?[]u8,
+    authority_buf: *?[]u8,
+) !void {
+    const path = if (req.uri.query) |q| blk: {
+        path_buf.* = try std.fmt.allocPrint(allocator, "{s}?{s}", .{ req.uri.path, q });
+        break :blk path_buf.*.?;
+    } else req.uri.path;
+
+    const authority = try buildAuthority(allocator, req, authority_buf);
+
+    const method_value = if (req.method == .CUSTOM)
+        (req.custom_method orelse "CUSTOM")
+    else
+        req.method.toString();
+
+    try header_entries.append(allocator, .{ .name = ":method", .value = method_value });
+    try header_entries.append(allocator, .{ .name = ":path", .value = path });
+    try header_entries.append(allocator, .{ .name = ":scheme", .value = if (req.uri.isTls()) "https" else "http" });
+    try header_entries.append(allocator, .{ .name = ":authority", .value = authority });
+
+    for (req.headers.entries.items) |entry| {
+        if (common.isConnectionSpecificHeader(entry.name) or std.ascii.eqlIgnoreCase(entry.name, HeaderName.HOST)) {
+            continue;
+        }
+        if (entry.name.len > 0 and entry.name[0] == ':') continue;
+
+        const lowered_name = try common.dupLowerAscii(allocator, entry.name);
+        try owned_header_names.append(allocator, lowered_name);
+        try header_entries.append(allocator, .{ .name = lowered_name, .value = entry.value });
+    }
 }
 
 fn writeHttp2Frame(
@@ -2527,23 +2562,6 @@ test "RequestOptions builder helpers" {
 
     const h3 = RequestOptions.defaults().withHttp3();
     try std.testing.expectEqual(types.Version.HTTP_3, h3.version.?);
-}
-
-test "Response parsing" {
-    const allocator = std.testing.allocator;
-    const data =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Content-Type: application/json\r\n" ++
-        "Content-Length: 15\r\n" ++
-        "\r\n" ++
-        "{\"status\":\"ok\"}";
-
-    var response = try parseResponse(allocator, data);
-    defer response.deinit();
-
-    try std.testing.expectEqual(@as(u16, 200), response.status.code);
-    try std.testing.expectEqualStrings("application/json", response.headers.get("Content-Type").?);
-    try std.testing.expectEqualStrings("{\"status\":\"ok\"}", response.text() orelse "");
 }
 
 test "Client stores Set-Cookie headers" {

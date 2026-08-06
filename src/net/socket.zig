@@ -735,7 +735,7 @@ pub const Socket = struct {
 
     /// Resolves and connects to `host:port`.
     pub fn connectHost(self: *Self, host: []const u8, port: u16) !void {
-        const addr = try address.resolve(host, port);
+        const addr = try address.resolve(std.heap.page_allocator, host, port);
         try self.connect(addr);
     }
 
@@ -868,7 +868,7 @@ pub const Socket = struct {
 
     /// Resolves and binds to `host:port`.
     pub fn bindHost(self: *Self, host: []const u8, port: u16) !void {
-        const addr = try address.resolve(host, port);
+        const addr = try address.resolve(std.heap.page_allocator, host, port);
         try self.bind(addr);
     }
 
@@ -964,7 +964,7 @@ pub const TcpListener = struct {
 
     /// Resolves and creates a TCP listener for `host:port`.
     pub fn initHost(host: []const u8, port: u16) !Self {
-        const addr = try address.resolve(host, port);
+        const addr = try address.resolve(std.heap.page_allocator, host, port);
         return Self.init(addr);
     }
 
@@ -982,7 +982,7 @@ pub const TcpListener = struct {
 
     /// Resolves and creates a TCP listener for `host:port` with explicit backlog.
     pub fn initHostWithBacklog(host: []const u8, port: u16, backlog: u31) !Self {
-        const addr = try address.resolve(host, port);
+        const addr = try address.resolve(std.heap.page_allocator, host, port);
         return initWithBacklog(addr, backlog);
     }
 
@@ -1062,7 +1062,7 @@ pub const UdpSocket = struct {
 
     /// Resolves and binds to `host:port`.
     pub fn bindHost(self: *Self, host: []const u8, port: u16) !void {
-        const addr = try address.resolve(host, port);
+        const addr = try address.resolve(std.heap.page_allocator, host, port);
         try self.bind(addr);
     }
 
@@ -1075,7 +1075,7 @@ pub const UdpSocket = struct {
 
     /// Resolves and connects to `host:port`.
     pub fn connectHost(self: *Self, host: []const u8, port: u16) !void {
-        const addr = try address.resolve(host, port);
+        const addr = try address.resolve(std.heap.page_allocator, host, port);
         try self.connect(addr);
     }
 
@@ -1102,7 +1102,7 @@ pub const UdpSocket = struct {
 
     /// Resolves destination host and sends a datagram.
     pub fn sendToHost(self: *Self, host: []const u8, port: u16, data: []const u8) !usize {
-        const addr = try address.resolve(host, port);
+        const addr = try address.resolve(std.heap.page_allocator, host, port);
         return self.sendTo(addr, data);
     }
 

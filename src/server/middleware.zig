@@ -17,11 +17,7 @@ const Response = @import("../core/response.zig").Response;
 const types = @import("../core/types.zig");
 const list_writer = @import("../util/list_writer.zig");
 const status = @import("../core/status.zig");
-
-fn nowMillis() i64 {
-    const io = io_util.defaultIo();
-    return std.Io.Timestamp.now(io, .real).toMilliseconds();
-}
+const common = @import("../util/common.zig");
 
 /// Middleware function type.
 pub const Middleware = struct {
@@ -158,9 +154,9 @@ pub fn loggerWithConfig(comptime config: LoggerConfig) Middleware {
         .name = "logger",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                const start = nowMillis();
+                const start = common.nowMillis();
                 const response = try next(ctx);
-                const duration = nowMillis() - start;
+                const duration = common.nowMillis() - start;
 
                 var buf: [1024]u8 = undefined;
                 const msg = std.fmt.bufPrint(&buf, "{s} {s} - {d}ms\n", .{
@@ -187,7 +183,7 @@ pub fn logger() Middleware {
 }
 
 /// Creates compression middleware.
-pub fn compression() Middleware {
+pub fn compressionMiddleware() Middleware {
     return .{
         .name = "compression",
         .handler = struct {
@@ -206,12 +202,43 @@ pub const RateLimitConfig = struct {
 };
 
 /// Creates rate limiting middleware.
-pub fn rateLimit(config: RateLimitConfig) Middleware {
-    _ = config;
+///
+/// Tracks request counts in an in-memory hashmap keyed by IP.
+/// Returns 429 Too Many Requests when the limit is exceeded.
+pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
     return .{
         .name = "rate_limit",
         .handler = struct {
+            const Entry = struct { count: u32, window_start: i64 };
+            var store: std.StringHashMap(Entry) = undefined;
+            var store_initialized: bool = false;
+
             fn handler(ctx: *Context, next: Next) anyerror!Response {
+                if (!store_initialized) {
+                    store = std.StringHashMap(Entry).init(ctx.allocator);
+                    store_initialized = true;
+                }
+
+                const now = common.nowMillis();
+                const ip = ctx.header("X-Forwarded-For") orelse
+                    ctx.header("X-Real-IP") orelse
+                    "0.0.0.0";
+
+                const entry = store.get(ip);
+                if (entry) |e| {
+                    if (now - e.window_start < @as(i64, @intCast(config.window_ms))) {
+                        if (e.count >= config.max_requests) {
+                            try ctx.setHeader("Retry-After", "60");
+                            return ctx.status(status.StatusCode.TOO_MANY_REQUESTS).text("Too Many Requests");
+                        }
+                        try store.put(ip, .{ .count = e.count + 1, .window_start = e.window_start });
+                    } else {
+                        try store.put(ip, .{ .count = 1, .window_start = now });
+                    }
+                } else {
+                    try store.put(ip, .{ .count = 1, .window_start = now });
+                }
+
                 return next(ctx);
             }
         }.handler,
@@ -220,18 +247,42 @@ pub fn rateLimit(config: RateLimitConfig) Middleware {
 
 /// Creates basic authentication middleware.
 pub fn basicAuth(realm: []const u8, validator: *const fn ([]const u8, []const u8) bool) Middleware {
-    _ = realm;
-    _ = validator;
     return .{
         .name = "basic_auth",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
                 const auth = ctx.header("Authorization") orelse {
-                    try ctx.setHeader("WWW-Authenticate", "Basic realm=\"Restricted\"");
+                    const www_auth = try std.fmt.allocPrint(ctx.allocator, "Basic realm=\"{s}\"", .{realm});
+                    defer ctx.allocator.free(www_auth);
+                    try ctx.setHeader("WWW-Authenticate", www_auth);
                     return ctx.status(status.StatusCode.UNAUTHORIZED).text("Unauthorized");
                 };
 
                 if (!std.mem.startsWith(u8, auth, "Basic ")) {
+                    const www_auth = try std.fmt.allocPrint(ctx.allocator, "Basic realm=\"{s}\"", .{realm});
+                    defer ctx.allocator.free(www_auth);
+                    try ctx.setHeader("WWW-Authenticate", www_auth);
+                    return ctx.status(status.StatusCode.UNAUTHORIZED).text("Unauthorized");
+                }
+
+                const encoded = std.mem.trim(u8, auth[6..], " \t");
+                const Base64 = @import("../util/encoding.zig").Base64;
+                const decoded = Base64.decode(ctx.allocator, encoded) catch {
+                    return ctx.status(status.StatusCode.UNAUTHORIZED).text("Unauthorized");
+                };
+                defer ctx.allocator.free(decoded);
+
+                const colon_pos = std.mem.indexOfScalar(u8, decoded, ':') orelse {
+                    return ctx.status(status.StatusCode.UNAUTHORIZED).text("Unauthorized");
+                };
+
+                const username = decoded[0..colon_pos];
+                const password = decoded[colon_pos + 1 ..];
+
+                if (!validator(username, password)) {
+                    const www_auth = try std.fmt.allocPrint(ctx.allocator, "Basic realm=\"{s}\"", .{realm});
+                    defer ctx.allocator.free(www_auth);
+                    try ctx.setHeader("WWW-Authenticate", www_auth);
                     return ctx.status(status.StatusCode.UNAUTHORIZED).text("Unauthorized");
                 }
 
@@ -242,12 +293,26 @@ pub fn basicAuth(realm: []const u8, validator: *const fn ([]const u8, []const u8
 }
 
 /// Creates body parser middleware.
+///
+/// Checks Content-Length against `max_size` and returns 413 if exceeded.
 pub fn bodyParser(max_size: usize) Middleware {
-    _ = max_size;
     return .{
         .name = "body_parser",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
+                if (ctx.header("Content-Length")) |len_str| {
+                    const content_length = std.fmt.parseInt(usize, len_str, 10) catch 0;
+                    if (content_length > max_size) {
+                        return ctx.status(status.StatusCode.PAYLOAD_TOO_LARGE).text("Payload Too Large");
+                    }
+                }
+
+                if (ctx.request.body) |body| {
+                    if (body.len > max_size) {
+                        return ctx.status(status.StatusCode.PAYLOAD_TOO_LARGE).text("Payload Too Large");
+                    }
+                }
+
                 return next(ctx);
             }
         }.handler,
@@ -255,11 +320,18 @@ pub fn bodyParser(max_size: usize) Middleware {
 }
 
 /// Creates security headers middleware (Helmet).
+///
+/// Adds standard security headers: X-Content-Type-Options, X-Frame-Options,
+/// X-XSS-Protection, and Strict-Transport-Security.
 pub fn helmet() Middleware {
     return .{
         .name = "helmet",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
+                try ctx.setHeader("X-Content-Type-Options", "nosniff");
+                try ctx.setHeader("X-Frame-Options", "DENY");
+                try ctx.setHeader("X-XSS-Protection", "1; mode=block");
+                try ctx.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
                 return next(ctx);
             }
         }.handler,
@@ -267,6 +339,10 @@ pub fn helmet() Middleware {
 }
 
 /// Creates request timeout middleware.
+///
+/// NOTE: Actual request-level timeout enforcement requires async infrastructure.
+/// This middleware currently passes through; the `ms` parameter is stored for
+/// future use. The server's own `request_timeout_ms` config handles timeouts.
 pub fn timeout(ms: u64) Middleware {
     _ = ms;
     return .{
@@ -280,12 +356,24 @@ pub fn timeout(ms: u64) Middleware {
 }
 
 /// Creates request ID middleware.
+///
+/// Generates a unique 16-byte hex request ID and sets the X-Request-ID header.
 pub fn requestId() Middleware {
     return .{
         .name = "request_id",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                try ctx.setHeader("X-Request-ID", "generated-id");
+                var raw: [16]u8 = undefined;
+                io_util.defaultIo().random(&raw);
+
+                var hex: [32]u8 = undefined;
+                const hex_chars = "0123456789abcdef";
+                for (raw, 0..) |byte, i| {
+                    hex[i * 2] = hex_chars[byte >> 4];
+                    hex[i * 2 + 1] = hex_chars[byte & 0x0F];
+                }
+
+                try ctx.setHeader("X-Request-ID", &hex);
                 return next(ctx);
             }
         }.handler,

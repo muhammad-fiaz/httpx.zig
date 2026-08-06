@@ -90,6 +90,7 @@ defer client.deinit();
 | `pool_max_per_host` | `u32` | `5` | Maximum connections to a single host. |
 | `proxy` | `?Proxy` | `null` | Optional forward proxy configuration for client requests. Use `.kind = .socks5h` for SOCKS5h tunneling; the default kind is HTTP. |
 | `unix_socket_path` | `?[]const u8` | `null` | Optional Unix Domain Socket (AF_UNIX) path for client connections. |
+| `log_fn` | `?LogFn` | `null` | Optional logging callback. When set, `Client.log()` delegates formatted messages to this function. Leave unset to disable client-side logging. |
 
 If you do not set a field, the implicit default value is used. Builder helpers only override the fields you call.
 
@@ -147,6 +148,7 @@ defer res.deinit();
 | `withPoolLimits(max_connections, max_per_host)` | Override pool sizing limits. |
 | `withProxy(proxy_or_null)` | Configure or clear a forward proxy. Set `.kind = .socks5h` for SOCKS5h tunneling. |
 | `withUnixSocket(path_or_null)` | Configure or clear a Unix Domain Socket (AF_UNIX) connection path. |
+| `withLogFn(log_fn)` | Set a custom logging callback for client-side log output. |
 
 ### Client Initialization Helpers
 
@@ -202,6 +204,7 @@ pub fn opts(self: *Self, url: []const u8, options: RequestOptions) !Response
 | `cleanupIdleConnections()` | Evict idle/exhausted pooled connections |
 | `poolStats()` | Snapshot total/active/idle pool counts |
 | `hostPoolConnectionCount(host, port)` | Count pooled connections for one host:port |
+| `log(level, format, args)` | Log a formatted message. If `config.log_fn` is set, delegates to it. |
 
 ### Cookie Jar API
 

@@ -162,14 +162,6 @@ pub const JsonBuilder = struct {
     }
 };
 
-/// Parses a JSON path expression (e.g., "data.items[0].name").
-pub fn getPath(allocator: Allocator, json_str: []const u8, path: []const u8) !?[]const u8 {
-    _ = allocator;
-    _ = json_str;
-    _ = path;
-    return null;
-}
-
 test "JsonBuilder object" {
     const allocator = std.testing.allocator;
     var builder = JsonBuilder.init(allocator);

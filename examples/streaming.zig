@@ -39,13 +39,12 @@ pub fn main() !void {
 
     std.debug.print("\nBuffer utilities for streaming:\n", .{});
 
-    var ring = try httpx.buffer.RingBuffer.init(allocator, 1024);
-    defer ring.deinit();
+    var buf = try httpx.buffer.Buffer.init(allocator, 1024);
+    defer buf.deinit();
 
-    _ = try ring.writeBytes("Streaming data...");
-    std.debug.print("  Ring buffer capacity: {d}\n", .{ring.getCapacity()});
-    std.debug.print("  Bytes available: {d}\n", .{ring.getAvailable()});
-    std.debug.print("  Free space: {d}\n", .{ring.getFreeSpace()});
+    try buf.append("Streaming data...");
+    std.debug.print("  Buffer capacity: {d}\n", .{buf.capacity});
+    std.debug.print("  Bytes available: {d}\n", .{buf.len});
 
     var fixed = httpx.buffer.FixedBuffer(256){};
     try fixed.append("Fixed buffer data");

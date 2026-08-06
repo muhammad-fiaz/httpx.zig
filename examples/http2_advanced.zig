@@ -255,13 +255,13 @@ fn tlsAndAlpnExample(allocator: std.mem.Allocator) !void {
     const tls_cfg = httpx.tls.TlsConfig.withH2(allocator);
     std.debug.print("TlsConfig.withH2():\n", .{});
     std.debug.print("  wantsHttp2: {s}\n", .{if (tls_cfg.wantsHttp2()) "true" else "false"});
-    std.debug.print("  allow_truncation_attacks: {s}\n", .{if (tls_cfg.allow_truncation_attacks) "true" else "false"});
+    std.debug.print("  verify_server: {s}\n", .{if (tls_cfg.verify_server) "true" else "false"});
     std.debug.print("  primary ALPN protocol: {s}\n", .{tls_cfg.alpn_protocols[0]});
 
     var strict_cfg = httpx.tls.TlsConfig.init(allocator);
-    strict_cfg.allow_truncation_attacks = false;
-    std.debug.print("\nStrict TlsConfig:\n", .{});
-    std.debug.print("  allow_truncation_attacks: {s}\n", .{if (strict_cfg.allow_truncation_attacks) "true" else "false"});
+    strict_cfg.verify_server = false;
+    std.debug.print("\nInsecure TlsConfig:\n", .{});
+    std.debug.print("  verify_server: {s}\n", .{if (strict_cfg.verify_server) "true" else "false"});
 
     std.debug.print("\n", .{});
 }

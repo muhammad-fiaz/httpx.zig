@@ -15,7 +15,7 @@ pub const Address = net.Address;
 pub const AddressList = net.AddressList;
 
 /// Resolves a hostname to a network address.
-pub fn resolve(hostname: []const u8, port: u16) !net.Address {
+pub fn resolve(allocator: Allocator, hostname: []const u8, port: u16) !net.Address {
     if (parseIp4(hostname)) |ip4| {
         return net.Address.initIp4(ip4, port);
     }
@@ -24,7 +24,7 @@ pub fn resolve(hostname: []const u8, port: u16) !net.Address {
         return net.Address.initIp6(ip6, port, 0, 0);
     }
 
-    var list = try net.getAddressList(std.heap.page_allocator, hostname, port);
+    var list = try net.getAddressList(allocator, hostname, port);
     defer list.deinit();
 
     if (list.addrs.len == 0) {
@@ -61,9 +61,9 @@ pub fn resolveAll(allocator: Allocator, hostname: []const u8, port: u16) ![]net.
 }
 
 /// Parses "host:port" and resolves to a concrete address.
-pub fn parseAndResolve(host_port: []const u8, default_port: u16) !net.Address {
+pub fn parseAndResolve(allocator: Allocator, host_port: []const u8, default_port: u16) !net.Address {
     const parsed = try parseHostPort(host_port, default_port);
-    return try resolve(parsed.host, parsed.port);
+    return try resolve(allocator, parsed.host, parsed.port);
 }
 
 /// Parses an IPv4 address string (e.g., "192.168.1.1").

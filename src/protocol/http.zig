@@ -11,7 +11,6 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const builtin = @import("builtin");
 
 const types = @import("../core/types.zig");
 const Headers = @import("../core/headers.zig").Headers;
@@ -165,7 +164,7 @@ pub const Http1Connection = struct {
             _ = try self.readLine(&line_buf);
         }
 
-        // Read trailers until empty line (CRLF) per RFC 7230 §4.1
+        // Read trailers until empty line (CRLF) per RFC 7230 4.1
         while (true) {
             const trailer_line = try self.readLine(&line_buf);
             if (trailer_line.len == 0) break;
@@ -232,7 +231,7 @@ fn parseStatusLine(line: []const u8) !u16 {
 /// HTTP/2 frame types as defined in RFC 7540.
 ///
 /// Non-exhaustive: any u8 is valid. Unknown/extension/GREASE frame types
-/// (>= 0x0A) MUST be ignored by the receiver per RFC 7540 §4.1.
+/// (>= 0x0A) MUST be ignored by the receiver per RFC 7540 4.1.
 pub const Http2FrameType = enum(u8) {
     data = 0x0,
     headers = 0x1,
@@ -286,7 +285,7 @@ pub const HTTP2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 /// Configuration parameters for HTTP/2 connections.
 ///
 /// Non-exhaustive: any u16 is valid. Unknown/unsupported SETTINGS identifiers
-/// MUST be ignored by the receiver per RFC 7540 §6.5.2.
+/// MUST be ignored by the receiver per RFC 7540 6.5.2.
 pub const Http2Settings = enum(u16) {
     header_table_size = 0x1,
     enable_push = 0x2,
@@ -447,24 +446,24 @@ pub fn applySettingsPayload(settings: *Http2Connection.Http2ConnectionSettings, 
         const id = readU16BE(payload[i..][0..2]);
         const value = readU32BE(payload[i..][2..6]);
 
-        // RFC 7540 §6.5.2: An endpoint MUST ignore and discard any SETTINGS
+        // RFC 7540 6.5.2: An endpoint MUST ignore and discard any SETTINGS
         // parameter with an identifier it does not understand.
         switch (@as(Http2Settings, @enumFromInt(id))) {
             .header_table_size => settings.header_table_size = value,
             .enable_push => settings.enable_push = (value != 0),
             .max_concurrent_streams => settings.max_concurrent_streams = value,
             .initial_window_size => {
-                // RFC 7540 §6.9.2: INITIAL_WINDOW_SIZE must not exceed 2^31-1.
+                // RFC 7540 6.9.2: INITIAL_WINDOW_SIZE must not exceed 2^31-1.
                 if (value > 0x7FFFFFFF) return error.FlowControlError;
                 settings.initial_window_size = value;
             },
             .max_frame_size => {
-                // RFC 7540 §6.5.2: MAX_FRAME_SIZE must be in range 2^14..2^24-1.
+                // RFC 7540 6.5.2: MAX_FRAME_SIZE must be in range 2^14..2^24-1.
                 if (value < 16384 or value > 16777215) return error.ProtocolError;
                 settings.max_frame_size = value;
             },
             .max_header_list_size => settings.max_header_list_size = value,
-            // RFC 7540 §6.5.2: Unknown/unsupported identifiers MUST be ignored.
+            // RFC 7540 6.5.2: Unknown/unsupported identifiers MUST be ignored.
             _ => {},
         }
     }
@@ -768,23 +767,14 @@ pub fn encodeChunkedBody(body: []const u8, trailers: ?*const Headers, allocator:
     return out.toOwnedSlice(allocator);
 }
 
-/// Returns true if request headers represent an HTTP/1.1 h2c upgrade attempt.
-pub fn isH2cUpgradeRequest(headers: *const Headers) bool {
-    const upgrade = headers.get(HeaderName.UPGRADE) orelse return false;
-    if (!std.ascii.eqlIgnoreCase(upgrade, "h2c")) return false;
 
-    const connection = headers.get(HeaderName.CONNECTION) orelse return false;
-    if (mem.indexOf(u8, connection, "Upgrade") == null and mem.indexOf(u8, connection, "upgrade") == null) {
-        return false;
-    }
-
-    return headers.get("HTTP2-Settings") != null;
-}
 
 /// Determines the highest supported HTTP version based on ALPN negotiation string.
 pub fn negotiateVersion(alpn: ?[]const u8) NegotiatedProtocol {
     if (alpn) |protocol| {
-        if (mem.eql(u8, protocol, AlpnProtocol.HTTP_3)) return .http_3;
+        // Match exact "h3" or any draft like "h3-29", "h3-30", etc.
+        if (mem.eql(u8, protocol, AlpnProtocol.HTTP_3) or
+            mem.startsWith(u8, protocol, "h3-")) return .http_3;
         if (mem.eql(u8, protocol, AlpnProtocol.HTTP_2)) return .http_2;
         if (mem.eql(u8, protocol, AlpnProtocol.HTTP_1_1)) return .http_1_1;
     }
@@ -829,7 +819,7 @@ test "HTTP/2 frame header serialization" {
 }
 
 test "HTTP/2 non-exhaustive frame type: unknown value does not panic" {
-    // RFC 7540 §4.1: unknown frame types MUST be ignored.
+    // RFC 7540 4.1: unknown frame types MUST be ignored.
     // Verify @enumFromInt does not panic for values >= 0x0A.
     const unknown_type: u8 = 0xFF; // GREASE/extension type
     const ft: Http2FrameType = @enumFromInt(unknown_type);
@@ -838,7 +828,7 @@ test "HTTP/2 non-exhaustive frame type: unknown value does not panic" {
 }
 
 test "HTTP/2 non-exhaustive SETTINGS: unknown identifier is silently ignored" {
-    // RFC 7540 §6.5.2: unrecognised SETTINGS identifiers MUST be ignored.
+    // RFC 7540 6.5.2: unrecognised SETTINGS identifiers MUST be ignored.
     // Build a SETTINGS payload with a known id (INITIAL_WINDOW_SIZE=0x4)
     // followed by an unknown id (ENABLE_CONNECT_PROTOCOL=0x8).
     var payload: [12]u8 = undefined;
@@ -849,7 +839,7 @@ test "HTTP/2 non-exhaustive SETTINGS: unknown identifier is silently ignored" {
     payload[3] = 0x00;
     payload[4] = 0xFF;
     payload[5] = 0xFF;
-    // ENABLE_CONNECT_PROTOCOL (0x0008) = 1  — unknown to this library
+    // ENABLE_CONNECT_PROTOCOL (0x0008) = 1  -- unknown to this library
     payload[6] = 0x00;
     payload[7] = 0x08;
     payload[8] = 0x00;
@@ -965,17 +955,7 @@ test "encodeChunkedBody includes final chunk and trailers" {
     try std.testing.expect(mem.endsWith(u8, chunked, "0\r\nX-Checksum: abc123\r\n\r\n"));
 }
 
-test "isH2cUpgradeRequest detects valid h2c headers" {
-    const allocator = std.testing.allocator;
-    var headers = Headers.init(allocator);
-    defer headers.deinit();
 
-    try headers.set(HeaderName.UPGRADE, "h2c");
-    try headers.set(HeaderName.CONNECTION, "Upgrade, HTTP2-Settings");
-    try headers.set("HTTP2-Settings", "AAMAAABkAAQCAAAAAAIAAAAA");
-
-    try std.testing.expect(isH2cUpgradeRequest(&headers));
-}
 
 test "HTTP/2 SETTINGS payload roundtrip with custom values" {
     const allocator = std.testing.allocator;
