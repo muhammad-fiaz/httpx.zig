@@ -298,7 +298,7 @@ fn posixSend(sock: posix.socket_t, data: []const u8, flags: u32) !usize {
     }
 
     while (true) {
-        const rc = posix.system.sendto(sock, data.ptr, data.len, @intCast(flags), null, 0);
+        const rc = posix.system.sendto(sock, data.ptr, data.len, @intCast(flags | posix.MSG.NOSIGNAL), null, 0);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
@@ -334,7 +334,7 @@ fn posixSendTo(sock: posix.socket_t, data: []const u8, flags: u32, addr_ptr: *co
     }
 
     while (true) {
-        const rc = posix.system.sendto(sock, data.ptr, data.len, @intCast(flags), addr_ptr, addr_len);
+        const rc = posix.system.sendto(sock, data.ptr, data.len, @intCast(flags | posix.MSG.NOSIGNAL), addr_ptr, addr_len);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
