@@ -35,6 +35,7 @@ pub const ServerTlsConfig = struct {
     pub fn deinit(self: *ServerTlsConfig) void {
         if (self.allocator) |a| {
             for (self.cert_chain_der) |cert| a.free(cert);
+            a.free(self.cert_chain_der);
             if (self.key_der) |k| a.free(k);
         }
     }
@@ -1328,6 +1329,24 @@ pub fn acceptServer(
         const fin_len = try server.buildFinished(&out_buf);
         try sendTls13EncryptedHandshake(socket, out_buf[0..fin_len], &server_hs_key, &server_hs_iv, &conn.hs_write_seq, server.cipher_suite);
 
+        // Derive master secret and application traffic secrets BEFORE reading client Finished.
+        // Per RFC 8446 §7.1, app traffic secrets use Hash(ClientHello...ServerFinished),
+        // which does NOT include the client's Finished.
+        if (server.hash_is_384) {
+            const sf_hash = server.transcript.peek()[0..48];
+            server.ks384.deriveMasterSecret();
+            server.ks384.deriveApplicationTrafficSecrets(sf_hash);
+        } else {
+            const sf_hash = server.transcript.peek()[0..32];
+            server.ks256.deriveMasterSecret();
+            server.ks256.deriveApplicationTrafficSecrets(sf_hash);
+        }
+
+        conn.app_write_key = server.getServerAppKey();
+        conn.app_write_iv = server.getServerAppIv();
+        conn.app_read_key = server.getClientAppKey();
+        conn.app_read_iv = server.getClientAppIv();
+
         // Read client ChangeCipherSpec (unencrypted)
         _ = try readTlsRecord(socket, &buf);
 
@@ -1340,12 +1359,6 @@ pub fn acceptServer(
         conn.tls_version = .tls_1_3;
         conn.cipher_suite = server.cipher_suite;
         conn.negotiated_alpn = server.negotiated_alpn;
-
-        // Derive application traffic keys for server role
-        conn.app_write_key = server.getServerAppKey();
-        conn.app_write_iv = server.getServerAppIv();
-        conn.app_read_key = server.getClientAppKey();
-        conn.app_read_iv = server.getClientAppIv();
     } else {
         var server = handshake_12.Handshake12Server.init(allocator);
         server.alpn_protocols = server_alpn;

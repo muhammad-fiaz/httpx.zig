@@ -465,10 +465,9 @@ pub const Handshake13Client = struct {
         handshake_mod.writeHandshakeHeader(.finished, verify_data_len, out[0..4]);
         @memcpy(out[4..][0..verify_data_len], &client_finished);
 
-        // Update transcript with our Finished BEFORE deriving app keys
-        self.transcript.update(out[0..total_finished_len]);
-
-        // Derive application traffic secrets
+        // Derive application traffic secrets BEFORE adding our Finished to transcript.
+        // Per RFC 8446 §7.1, app traffic secrets use Hash(ClientHello...ServerFinished),
+        // which does NOT include the client's Finished.
         const handshake_hash = if (self.hash_is_384) self.transcript.peek()[0..48] else self.transcript.peek()[0..32];
 
         if (self.hash_is_384) {
@@ -478,6 +477,9 @@ pub const Handshake13Client = struct {
             self.ks256.deriveMasterSecret();
             self.ks256.deriveApplicationTrafficSecrets(handshake_hash);
         }
+
+        // Now update transcript with our Finished (for any subsequent hash computations)
+        self.transcript.update(out[0..total_finished_len]);
 
         self.state = .connected;
         return total_finished_len;
@@ -605,6 +607,11 @@ pub const Handshake13Server = struct {
     pub fn processClientHello(self: *Handshake13Server, data: []const u8) errors.TlsError!void {
         if (data.len < 42) return error.TlsDecodeError;
 
+        // Initialize key exchange early so we have our own key pairs
+        var entropy: [96]u8 = undefined;
+        tlsRandom(&entropy);
+        self.key_exchange = try handshake_mod.KeyExchange.init(&entropy);
+
         var off: usize = 4;
 
         // Client version
@@ -634,13 +641,14 @@ pub const Handshake13Server = struct {
             const cs_val = mem.readInt(u16, data[off..][0..2], .big);
             off += 2;
             const cs: tls.CipherSuite = @enumFromInt(cs_val);
-            if (cipher_suites_mod.isTls13Only(cs)) {
+            if (!found_cs and cipher_suites_mod.isTls13Only(cs)) {
                 self.cipher_suite = cs;
                 found_cs = true;
-                break;
             }
         }
         if (!found_cs) return error.TlsUnsupportedCipherSuite;
+        // Skip any remaining cipher suite bytes
+        off = cs_list_end;
         // Update hash algorithm based on negotiated cipher suite
         self.hash_is_384 = (self.cipher_suite == .AES_256_GCM_SHA384);
         if (self.hash_is_384) {
@@ -713,11 +721,6 @@ pub const Handshake13Server = struct {
 
         // Generate server random
         tlsRandom(&self.server_random);
-
-        // Initialize key exchange for our response
-        var entropy: [96]u8 = undefined;
-        tlsRandom(&entropy);
-        self.key_exchange = try handshake_mod.KeyExchange.init(&entropy);
 
         self.transcript.update(data);
         self.state = .wait_finished;

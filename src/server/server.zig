@@ -843,7 +843,12 @@ pub const Server = struct {
             };
         } else {
             self.handleConnection(socket) catch |err| {
-                self.log(.err, "Handler error: {}\n", .{err});
+                // TlsConnectionTruncated and EndOfStream are normal client disconnections,
+                // not errors — don't pollute stderr with them.
+                switch (err) {
+                    error.TlsConnectionTruncated, error.EndOfStream, error.ConnectionReset => {},
+                    else => self.log(.err, "Handler error: {}\n", .{err}),
+                }
             };
         }
     }

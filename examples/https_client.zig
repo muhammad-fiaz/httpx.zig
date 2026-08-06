@@ -3,17 +3,37 @@
 //! Demonstrates making an HTTPS request using the built-in TLS 1.2/1.3
 //! implementation. The TLS handshake negotiates ALPN for HTTP/1.1 or HTTP/2
 //! automatically.
+//!
+//! Set HTTPX_EXAMPLE_ONLINE=1 to run a live request against example.com.
+//! By default runs in offline mode to avoid external network dependencies in CI.
 
 const std = @import("std");
 const httpx = @import("httpx");
 const tls = httpx.tls;
 
-pub fn main() !void {
+fn shouldUseLiveNetwork(environ: std.process.Environ, allocator: std.mem.Allocator) bool {
+    const value = environ.getAlloc(allocator, "HTTPX_EXAMPLE_ONLINE") catch |err| switch (err) {
+        error.EnvironmentVariableMissing => return false,
+        error.InvalidWtf8 => return false,
+        else => return false,
+    };
+    defer allocator.free(value);
+    return std.mem.eql(u8, value, "1");
+}
+
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const go_online = shouldUseLiveNetwork(init.minimal.environ, allocator);
 
     std.debug.print("=== HTTPS Client Example ===\n\n", .{});
+
+    if (!go_online) {
+        std.debug.print("Offline mode: set HTTPX_EXAMPLE_ONLINE=1 to run a live request.\n\n", .{});
+        printOfflineDemo();
+        return;
+    }
 
     // 1. Configure TLS — withH2 enables ALPN for both h2 and http/1.1
     const tls_config = tls.TlsConfig.insecureWithH2(allocator);
