@@ -12,17 +12,19 @@ The TLS module provides a fully custom TLS 1.2/1.3 implementation built entirely
 | AES-128-GCM | ✅ | ✅ |
 | AES-256-GCM | ✅ | ✅ |
 | ChaCha20-Poly1305 | ✅ | ✅ |
-| Certificate verification | ✅ | ✅ |
-| ECDSA signature verification | ✅ | ✅ |
+| Certificate loading (PEM) | ✅ | ✅ |
+| Certificate chain serialization | ✅ | ✅ |
 | ALPN negotiation | ✅ | ✅ |
 | SNI extension | ✅ | ✅ |
 | Custom CA trust store | ✅ | ✅ |
+| Handshake message encryption | -- | ✅ |
+| Cipher suite selection from client list | -- | ✅ |
 | QUIC-TLS bridge | -- | ✅ |
 
 ## Architecture
 
 ```
-tls.zig              -- High-level Connection, TlsConfig, TlsSession
+tls.zig              -- High-level Connection, TlsConfig, TlsSession, ServerTlsConfig
 ├── handshake.zig    -- Shared handshake engine, KeyExchange (X25519/P-256/P-384)
 ├── handshake_12.zig -- TLS 1.2 client+server state machine
 ├── handshake_13.zig -- TLS 1.3 client+server state machine
@@ -39,62 +41,69 @@ tls.zig              -- High-level Connection, TlsConfig, TlsSession
 └── trust_store.zig  -- CA trust store management
 ```
 
-## TlsConfig
+## TlsConfig (Client)
 
-Configuration for TLS contexts.
+Configuration for TLS client connections.
 
 ```zig
 pub const TlsConfig = struct {
     allocator: Allocator,
-    min_version: TlsVersion = .tls_1_2,
-    max_version: TlsVersion = .tls_1_3,
-    verify_mode: VerifyMode = .peer,
-    verify_hostname: bool = true,
-    ca_file: ?[]const u8 = null,
-    ca_path: ?[]const u8 = null,
-    cert_file: ?[]const u8 = null,
-    key_file: ?[]const u8 = null,
-    alpn_protocols: []const []const u8 = &.{ "http/1.1" },
-    cipher_suites: ?[]const u8 = null,
-    server_name: ?[]const u8 = null,
-    verify_server: bool = false,
-    force_h2: bool = false,
+    alpn_protocols: []const []const u8 = &.{"http/1.1"},
+    verify_server: bool = true,
+    ca_bundle_path: ?[]const u8 = null,
 };
 ```
 
-### Methods
+### Factory Methods
 
-#### `init`
+| Method | Description |
+|--------|-------------|
+| `init(allocator)` | Default config (verify server, HTTP/1.1 only) |
+| `insecure(allocator)` | Skip server verification |
+| `withH2(allocator)` | Advertise h2 + http/1.1 ALPN |
+| `insecureWithH2(allocator)` | Insecure + h2 ALPN |
+| `withH3(allocator)` | Advertise h3 + h2 + http/1.1 ALPN |
+| `insecureWithH3(allocator)` | Insecure + h3 ALPN |
 
-Creates a default configuration (safe defaults).
+## ServerTlsConfig
 
-```zig
-pub fn init(allocator: Allocator) Self
-```
-
-#### `insecure`
-
-Creates a configuration that skips verification (useful for testing).
-
-```zig
-pub fn insecure(allocator: Allocator) Self
-```
-
-#### `withH2`
-
-Creates a configuration advertising HTTP/2 ALPN protocols (`"h2"`, `"http/1.1"`).
+Configuration for TLS server connections. Holds loaded certificate chain and private key in DER format.
 
 ```zig
-pub fn withH2(allocator: Allocator) Self
+pub const ServerTlsConfig = struct {
+    cert_chain_der: []const []const u8 = &.{},
+    key_der: ?[]const u8 = null,
+    allocator: ?Allocator = null,
+};
 ```
 
-#### `insecureWithH2`
-
-Creates an unverified configuration advertising HTTP/2 ALPN protocols.
+### Loading from PEM Files
 
 ```zig
-pub fn insecureWithH2(allocator: Allocator) Self
+const server_tls = try tls.loadServerTlsConfig(allocator,
+    "examples/certs/server.crt",
+    "examples/certs/server.key",
+);
+defer server_tls.deinit();
 ```
+
+## Server Configuration
+
+Enable TLS on the server via `ServerConfig`:
+
+```zig
+var server = httpx.Server.initWithConfig(allocator, .{
+    .host = "127.0.0.1",
+    .port = 8443,
+    .tls_enabled = true,
+    .tls_cert_path = "examples/certs/server.crt",
+    .tls_key_path = "examples/certs/server.key",
+    .tls_alpn_protocols = &.{ "h2", "http/1.1" },
+    .http2_enabled = true,
+});
+```
+
+The server automatically loads the certificate chain and private key on the first TLS connection. ALPN negotiation selects between HTTP/1.1 and HTTP/2 based on the client's offer.
 
 ## Connection
 
@@ -108,14 +117,14 @@ pub const Connection = struct {
     tls_version: ProtocolVersion,
     is_server: bool,
     connected: bool,
-
-    // Application traffic keys
     app_write_key: ?[32]u8,
     app_write_iv: ?[12]u8,
     app_read_key: ?[32]u8,
     app_read_iv: ?[12]u8,
     write_seq: u64,
     read_seq: u64,
+    hs_write_seq: u64,
+    hs_read_seq: u64,
     cipher_suite: ?CipherSuite,
 };
 ```
@@ -140,13 +149,8 @@ pub const Connection = struct {
 Perform a full TLS 1.2 or 1.3 client handshake:
 
 ```zig
-const connection = try tls.connectClient(allocator, socket, .{
-    .server_name = "example.com",
-    .alpn_protocols = &.{ "h2", "http/1.1" },
-    .verify_mode = .peer,
-    .verify_hostname = true,
-});
-defer connection.deinit();
+const connection = try tls.connectClient(allocator, socket, &config, "example.com");
+defer connection.closeNotify();
 ```
 
 ## Server Handshake
@@ -154,12 +158,8 @@ defer connection.deinit();
 Accept a TLS connection on the server side:
 
 ```zig
-const connection = try tls.acceptServer(allocator, socket, .{
-    .cert_file = "server.crt",
-    .key_file = "server.key",
-    .alpn_protocols = &.{ "h2", "http/1.1" },
-});
-defer connection.deinit();
+const connection = try tls.acceptServer(allocator, socket, alpn_protocols, server_tls_config);
+defer connection.closeNotify();
 ```
 
 ## ALPN Negotiation
@@ -167,15 +167,6 @@ defer connection.deinit();
 The ALPN module provides protocol negotiation between client and server:
 
 ```zig
-const alpn = @import("httpx").alpn;
-
-// Server-side: select from client's offered protocols
-const negotiated = alpn.serverNegotiate(
-    &.{ "h2", "http/1.1" },  // server preference order
-    &.{ "http/1.1", "h2" },  // client offer
-);
-// Returns "h2" (server preference wins)
-
 // Protocol detection
 try std.testing.expect(alpn.isHttp2("h2"));
 try std.testing.expect(alpn.isHttp3("h3"));
@@ -194,9 +185,6 @@ const cert = try cert_verify.parseCertificate(der_bytes);
 
 // Verify hostname against certificate
 try cert_verify.verifyHostname(&cert, "example.com");
-
-// Verify a certificate chain against a CA bundle
-try cert_verify.verifyChain(&certs, ca_bundle, now_sec);
 ```
 
 ## Trust Store
@@ -221,15 +209,7 @@ try store.addCert(der_bytes);
 
 ## Types
 
-### `TlsVersion`
-
-Enum: `.tls_1_0`, `.tls_1_1`, `.tls_1_2`, `.tls_1_3`.
-
-### `VerifyMode`
-
-Enum: `.none`, `.peer`, `.fail_if_no_peer_cert`, `.client_once`.
-
-### `CipherSuite`
+### CipherSuite
 
 Supported cipher suites:
 
@@ -251,7 +231,6 @@ Supported elliptic curves for key exchange:
 | `x25519` | Default, fastest |
 | `secp256r1` | NIST P-256 |
 | `secp384r1` | NIST P-384 |
-| `x25519_ml_kem768` | Post-quantum hybrid |
 
 ### Error Set
 
@@ -265,5 +244,8 @@ All TLS errors are unified in `TlsError`:
 | `TlsHostnameMismatch` | Hostname doesn't match certificate |
 | `TlsHandshakeFailure` | No acceptable parameters negotiated |
 | `TlsUnsupportedCipherSuite` | Unsupported cipher suite |
+| `TlsInvalidPem` | PEM decoding failed |
+| `TlsNoCertificates` | No certificates found in PEM file |
+| `TlsInvalidPrivateKey` | Private key PEM decoding failed |
 
 See `errors.zig` for the full error set.

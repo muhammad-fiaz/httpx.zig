@@ -2,7 +2,7 @@
 //!
 //! Demonstrates the custom TLS server implementation built from scratch.
 //! Shows how to:
-//! - Configure a server with TLS enabled
+//! - Configure a server with TLS enabled using cert/key PEM files
 //! - Accept TLS connections with ALPN negotiation
 //! - Handle HTTP/1.1 and HTTP/2 over TLS
 //! - Connect a TLS client to the server
@@ -48,6 +48,8 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = port,
         .tls_enabled = true,
+        .tls_cert_path = "examples/certs/server.crt",
+        .tls_key_path = "examples/certs/server.key",
         .tls_alpn_protocols = &.{ "h2", "http/1.1" },
         .http2_enabled = true,
         .keep_alive = true,
@@ -58,6 +60,8 @@ pub fn main() !void {
     try server.get("/hello", helloHandler);
 
     std.debug.print("  TLS: enabled (custom implementation)\n", .{});
+    std.debug.print("  Cert: examples/certs/server.crt\n", .{});
+    std.debug.print("  Key:  examples/certs/server.key\n", .{});
     std.debug.print("  ALPN: h2, http/1.1\n", .{});
     std.debug.print("  HTTP/2: enabled\n", .{});
 
@@ -95,8 +99,7 @@ pub fn main() !void {
 
     const request = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
     session.writeAll(request) catch |err| {
-        std.debug.print("  Write error: {} (TLS record layer may need refinement)\n", .{err});
-        std.debug.print("\n=== TLS Server Example Complete (partial — TLS record I/O in progress) ===\n", .{});
+        std.debug.print("  Write error: {}\n", .{err});
         return;
     };
     std.debug.print("  Sent: GET /hello\r\n", .{});
@@ -105,7 +108,6 @@ pub fn main() !void {
     var response_buf: [4096]u8 = undefined;
     const n = session.read(&response_buf) catch |err| {
         std.debug.print("  Read error: {}\n", .{err});
-        std.debug.print("\n=== TLS Server Example Complete (partial — TLS record I/O in progress) ===\n", .{});
         return;
     };
     if (n > 0) {

@@ -36,7 +36,7 @@
 >
 > **Custom HTTP/2, HTTP/3, and TLS implementation:** Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN support.
 > httpx.zig implements these protocols **entirely from scratch**, including:
-> - **TLS** with ALPN negotiation — client and server advertise `["h2", "http/1.1"]` during the TLS handshake; the negotiated protocol is inspected to automatically select HTTP/2 or HTTP/1.1; fallback to HTTP/1.1 if ALPN is unavailable
+> - **TLS 1.2 and 1.3** with full handshake support (RFC 5246 / RFC 8446) — ECDHE key exchange (X25519, P-256, P-384), AEAD cipher suites (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305), ALPN negotiation (RFC 7301) for automatic HTTP/2 and HTTP/3 protocol selection with HTTP/1.1 fallback, handshake message encryption (TLS 1.3), X.509 certificate parsing, and custom record-layer encryption/decryption
 > - **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
 > - **HTTP/2** ALPN negotiation, CONTINUATION frames, SETTINGS enforcement, GOAWAY/RST_STREAM, trailers, and connection pooling
 > - **HTTP/2** stream multiplexing, flow control, and connection preface timeout (RFC 7540)
@@ -94,7 +94,7 @@
 | **Config Builder Helpers** | Chainable optional customization helpers for `ClientConfig` and `RequestOptions` (defaults remain implicit). | https://muhammad-fiaz.github.io/httpx.zig/api/client |
 | **JSON and HTML** | Helpers for easy JSON serialization and HTML response generation. | https://muhammad-fiaz.github.io/httpx.zig/api/core |
 | **Core Convenience APIs** | Request query-param helpers and response constructors for redirect/text/json. | https://muhammad-fiaz.github.io/httpx.zig/api/core |
-| **TLS/SSL** | Secure connections via TLS 1.2 and 1.3 with ALPN protocol negotiation for HTTP/2, including custom record-layer encryption/decryption. | https://muhammad-fiaz.github.io/httpx.zig/api/tls |
+| **TLS/SSL** | Full TLS 1.2 and 1.3 with ALPN (RFC 7301), ECDHE key exchange (X25519, P-256, P-384), AEAD ciphers (AES-128/256-GCM, ChaCha20-Poly1305), handshake encryption, X.509 certificate parsing, PEM cert/key loading for servers, and custom record-layer encryption/decryption. | https://muhammad-fiaz.github.io/httpx.zig/api/tls |
 | **Static Files** | Efficient static file serving capabilities. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **Streaming and Realtime** | Chunked transfer responses with optional trailers and SSE response helpers. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **HTTP/3 Flow Control** | MAX_DATA and MAX_STREAM_DATA frame handling with connection-level and per-stream flow control windows. | https://muhammad-fiaz.github.io/httpx.zig/examples/http3-advanced |
@@ -422,7 +422,7 @@ try server.listen();
  
 ## Examples
 
-The `examples/` directory contains **35 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
+The `examples/` directory contains **49 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
 
 **Client:**
 - [`simple_get`](examples/simple_get.zig) - Basic GET requests
@@ -432,21 +432,34 @@ The `examples/` directory contains **35 comprehensive, runnable examples** demon
 - [`http_auth_helpers`](examples/http_auth_helpers.zig) - Bearer and Basic auth helpers
 - [`connection_pool`](examples/connection_pool.zig) - Connection pooling and stats
 - [`proxy_example`](examples/proxy_example.zig) - HTTP forward proxy and SOCKS5h
+- [`socks5_proxy`](examples/socks5_proxy.zig) - SOCKS5 proxy tunneling
 - [`interceptors`](examples/interceptors.zig) - Request/response interceptors
 - [`cookies_demo`](examples/cookies_demo.zig) - Cookie jar management
 - [`concurrent_requests`](examples/concurrent_requests.zig) - Parallel request patterns
+- [`batch_concurrent`](examples/batch_concurrent.zig) - Batch concurrent requests
 - [`simplified_api_aliases`](examples/simplified_api_aliases.zig) - Top-level API aliases
+- [`http_methods`](examples/http_methods.zig) - HTTP method helpers
+- [`https_client`](examples/https_client.zig) - HTTPS client with TLS
+- [`redirect_example`](examples/redirect_example.zig) - Redirect handling
+- [`retry_example`](examples/retry_example.zig) - Retry with backoff
+- [`dns_example`](examples/dns_example.zig) - DNS resolution
+- [`compression_example`](examples/compression_example.zig) - gzip/deflate/brotli/zstd
 
 **Server:**
 - [`simple_server`](examples/simple_server.zig) - Minimal HTTP server
+- [`tls_server`](examples/tls_server.zig) - TLS-enabled server
+- [`cloud_https_server`](examples/cloud_https_server.zig) - Cloud HTTPS server
 - [`router_example`](examples/router_example.zig) - Pattern-based routing
 - [`middleware_example`](examples/middleware_example.zig) - Middleware stack
 - [`static_files`](examples/static_files.zig) - Static file serving
 - [`multi_page_website`](examples/multi_page_website.zig) - Multi-page web app
 - [`streaming`](examples/streaming.zig) - Chunked transfer and SSE
+- [`sse_example`](examples/sse_example.zig) - Server-Sent Events
 - [`health_check_example`](examples/health_check_example.zig) - Liveness/readiness probes
 - [`request_response_customization`](examples/request_response_customization.zig) - Request/response customization
 - [`async_server_example`](examples/async_server_example.zig) - Thread pool concurrency
+- [`logging_callback`](examples/logging_callback.zig) - Logging callbacks
+- [`reverse_proxy_middleware`](examples/reverse_proxy_middleware.zig) - Reverse proxy middleware
 
 **Protocol:**
 - [`http2_example`](examples/http2_example.zig) - HTTP/2 protocol primitives
@@ -459,7 +472,8 @@ The `examples/` directory contains **35 comprehensive, runnable examples** demon
 - [`http3_advanced`](examples/http3_advanced.zig) - QPACK stream instructions, QUIC cancellation, transport parameters
 
 **Advanced Capabilities:**
-- [`websocket_example`](examples/websocket_example.zig) - RFC 6455 WebSockets
+- [`websocket_example`](examples/websocket_example.zig) - RFC 6455 WebSocket client
+- [`websocket_server`](examples/websocket_server.zig) - WebSocket server
 - [`multipart_example`](examples/multipart_example.zig) - RFC 2046 multipart form data
 - [`session_example`](examples/session_example.zig) - TTL-based session store
 - [`metrics_example`](examples/metrics_example.zig) - Observability metrics

@@ -401,6 +401,7 @@ pub const Server = struct {
     unix_listener: ?@import("../net/unix.zig").UnixListener = null,
     running: bool = false,
     executor: ?Executor = null,
+    server_tls_config: ?tls_mod.ServerTlsConfig = null,
 
     const Self = @This();
 
@@ -440,6 +441,7 @@ pub const Server = struct {
         if (self.executor) |*e| {
             e.deinit();
         }
+        if (self.server_tls_config) |*tc| tc.deinit();
     }
 
     /// Adds middleware to the server.
@@ -954,7 +956,19 @@ pub const Server = struct {
             else
                 &.{"http/1.1"};
 
-            var tls_conn = tls_mod.acceptServer(self.allocator, &sock, alpn_protos) catch |err| {
+            // Load TLS cert/key if not already loaded
+            if (self.server_tls_config == null) {
+                if (self.config.tls_cert_path) |cert_path| {
+                    if (self.config.tls_key_path) |key_path| {
+                        self.server_tls_config = tls_mod.loadServerTlsConfig(self.allocator, cert_path, key_path) catch |err| {
+                            self.log(.err, "Failed to load TLS cert/key: {}\n", .{err});
+                            return;
+                        };
+                    }
+                }
+            }
+
+            var tls_conn = tls_mod.acceptServer(self.allocator, &sock, alpn_protos, self.server_tls_config) catch |err| {
                 self.log(.err, "TLS accept failed: {}\n", .{err});
                 return;
             };

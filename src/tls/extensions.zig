@@ -186,10 +186,9 @@ pub fn writeSupportedVersionsClient(out: []u8) errors.TlsError!usize {
 
 /// Named groups we advertise, in preference order.
 pub const preferred_groups = [_]tls.NamedGroup{
-    .x25519_ml_kem768,
+    .x25519,
     .secp256r1,
     .secp384r1,
-    .x25519,
 };
 
 /// Returns the byte length of a `supported_groups` extension.

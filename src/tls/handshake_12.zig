@@ -351,7 +351,17 @@ pub const Handshake12Client = struct {
                 const master_secret = handshake.deriveMasterSecret(HmacType, shared_secret, &self.client_random, &self.server_random);
                 self.master_secret = master_secret;
 
-                // Compute Finished verify_data
+                // --- ChangeCipherSpec record (must be sent BEFORE Finished) ---
+                const ccs_record = [_]u8{
+                    @intFromEnum(tls.ContentType.change_cipher_spec),
+                    0x03, 0x01, // version TLS 1.0 (CCS is always 0x0301)
+                    0x00, 0x01, // length = 1
+                    0x01, // change_cipher_spec
+                };
+                @memcpy(out[off..][0..ccs_record.len], &ccs_record);
+                off += ccs_record.len;
+
+                // Client Finished handshake message
                 const transcript_hash = self.transcript.peek();
                 const digest_len = self.transcript.digestLen();
                 const verify_data = handshake.tls12FinishedVerifyData(
@@ -361,28 +371,16 @@ pub const Handshake12Client = struct {
                     "client finished",
                 );
 
-                // Client Finished handshake message
                 handshake.writeHandshakeHeader(.finished, 12, out[off..][0..4]);
                 const finished_off = off + 4;
                 @memcpy(out[finished_off..][0..12], &verify_data);
                 off = finished_off + 12;
 
-                // Update transcript with Finished
-                self.transcript.update(out[finished_off - 16 ..][0..16]);
+                // Update transcript with Finished (header + verify_data = 16 bytes)
+                self.transcript.update(out[off - 16 ..][0..16]);
             },
             else => return error.TlsUnsupportedCipherSuite,
         }
-
-        // --- ChangeCipherSpec record ---
-        // Write CCS as a separate record
-        const ccs_record = [_]u8{
-            @intFromEnum(tls.ContentType.change_cipher_spec),
-            0x03, 0x01, // version TLS 1.2
-            0x00, 0x01, // length = 1
-            0x01, // change_cipher_spec
-        };
-        @memcpy(out[off..][0..ccs_record.len], &ccs_record);
-        off += ccs_record.len;
 
         self.state = .connected;
         return off;
@@ -451,6 +449,9 @@ pub const Handshake12Server = struct {
 
     server_name: ?[]const u8 = null,
     alpn_protocols: []const []const u8 = &.{},
+
+    // Server certificate chain (DER-encoded)
+    cert_chain_der: []const []const u8 = &.{},
 
     pub fn init(allocator: mem.Allocator) Handshake12Server {
         var tr: transcript_mod.TranscriptHash = .{};
@@ -598,16 +599,43 @@ pub const Handshake12Server = struct {
     pub fn buildCertificate(self: *Handshake12Server, out: []u8) errors.TlsError!usize {
         if (out.len < 7) return error.TlsBufferTooSmall;
 
-        // For now, send an empty certificate chain.
-        // A real implementation would load the server certificate and chain.
-        handshake.writeHandshakeHeader(.certificate, 3, out[0..4]);
-        // Certificate list length = 0
-        out[4] = 0;
-        out[5] = 0;
-        out[6] = 0;
+        var off: usize = 0;
 
-        self.transcript.update(out[0..7]);
-        return 7;
+        // Handshake header (type + 3-byte length, filled in later)
+        off += 4;
+
+        // Calculate total certificate list length
+        var cert_list_len: usize = 0;
+        for (self.cert_chain_der) |cert_der| {
+            // Each entry: 3-byte length + cert_der
+            cert_list_len += 3 + cert_der.len;
+        }
+
+        // Write certificate list length (3 bytes)
+        out[off] = @intCast((cert_list_len >> 16) & 0xFF);
+        out[off + 1] = @intCast((cert_list_len >> 8) & 0xFF);
+        out[off + 2] = @intCast(cert_list_len & 0xFF);
+        off += 3;
+
+        // Write each certificate
+        for (self.cert_chain_der) |cert_der| {
+            // Certificate length (3 bytes)
+            out[off] = @intCast((cert_der.len >> 16) & 0xFF);
+            out[off + 1] = @intCast((cert_der.len >> 8) & 0xFF);
+            out[off + 2] = @intCast(cert_der.len & 0xFF);
+            off += 3;
+
+            // Certificate data
+            if (off + cert_der.len > out.len) return error.TlsBufferTooSmall;
+            @memcpy(out[off..][0..cert_der.len], cert_der);
+            off += cert_der.len;
+        }
+
+        const body_len: u24 = @intCast(off - 4);
+        handshake.writeHandshakeHeader(.certificate, body_len, out[0..4]);
+
+        self.transcript.update(out[0..off]);
+        return off;
     }
 
     /// Build ServerKeyExchange (ECDHE). Returns bytes written to `out`.

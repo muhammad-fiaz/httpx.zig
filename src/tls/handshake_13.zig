@@ -300,6 +300,8 @@ pub const Handshake13Client = struct {
             }
         }
 
+        self.transcript.update(data);
+
         // Derive handshake secrets
         const shared_secret = self.key_exchange.getSharedSecret() orelse return error.TlsKeyExchangeFailed;
 
@@ -313,7 +315,6 @@ pub const Handshake13Client = struct {
             self.ks256.deriveHandshakeTrafficSecrets(hello_hash);
         }
 
-        self.transcript.update(data);
         self.state = .wait_ee;
     }
 
@@ -459,9 +460,13 @@ pub const Handshake13Client = struct {
         };
 
         // Build Finished handshake message
-        if (out.len < 4 + verify_data_len) return error.TlsBufferTooSmall;
+        const total_finished_len: usize = 4 + verify_data_len;
+        if (out.len < total_finished_len) return error.TlsBufferTooSmall;
         handshake_mod.writeHandshakeHeader(.finished, verify_data_len, out[0..4]);
         @memcpy(out[4..][0..verify_data_len], &client_finished);
+
+        // Update transcript with our Finished BEFORE deriving app keys
+        self.transcript.update(out[0..total_finished_len]);
 
         // Derive application traffic secrets
         const handshake_hash = if (self.hash_is_384) self.transcript.peek()[0..48] else self.transcript.peek()[0..32];
@@ -474,9 +479,8 @@ pub const Handshake13Client = struct {
             self.ks256.deriveApplicationTrafficSecrets(handshake_hash);
         }
 
-        self.transcript.update(out[0..16]);
         self.state = .connected;
-        return 16;
+        return total_finished_len;
     }
 
     /// Get the client application traffic key for sending application data.
@@ -516,6 +520,42 @@ pub const Handshake13Client = struct {
             return self.ks256.deriveIv(self.ks256.server_app_secret, 12);
         }
     }
+
+    /// Get the client handshake traffic key for encrypting Finished.
+    pub fn getClientHsKey(self: *const Handshake13Client) ?[32]u8 {
+        if (self.hash_is_384) {
+            return self.ks384.deriveKey(self.ks384.client_hs_secret, 32);
+        } else {
+            return self.ks256.deriveKey(self.ks256.client_hs_secret, 32);
+        }
+    }
+
+    /// Get the client handshake traffic IV.
+    pub fn getClientHsIv(self: *const Handshake13Client) ?[12]u8 {
+        if (self.hash_is_384) {
+            return self.ks384.deriveIv(self.ks384.client_hs_secret, 12);
+        } else {
+            return self.ks256.deriveIv(self.ks256.client_hs_secret, 12);
+        }
+    }
+
+    /// Get the server handshake traffic key for decrypting server messages.
+    pub fn getServerHsKey(self: *const Handshake13Client) ?[32]u8 {
+        if (self.hash_is_384) {
+            return self.ks384.deriveKey(self.ks384.server_hs_secret, 32);
+        } else {
+            return self.ks256.deriveKey(self.ks256.server_hs_secret, 32);
+        }
+    }
+
+    /// Get the server handshake traffic IV.
+    pub fn getServerHsIv(self: *const Handshake13Client) ?[12]u8 {
+        if (self.hash_is_384) {
+            return self.ks384.deriveIv(self.ks384.server_hs_secret, 12);
+        } else {
+            return self.ks256.deriveIv(self.ks256.server_hs_secret, 12);
+        }
+    }
 };
 
 // TLS 1.3 state machine (server role)
@@ -540,6 +580,9 @@ pub const Handshake13Server = struct {
 
     server_name: ?[]const u8 = null,
     alpn_protocols: []const []const u8 = &.{},
+
+    // Server certificate chain (DER-encoded)
+    cert_chain_der: []const []const u8 = &.{},
 
     // Key schedule
     ks256: key_schedule.KeyScheduleSha256 = .{},
@@ -580,11 +623,29 @@ pub const Handshake13Server = struct {
         @memcpy(self.legacy_session_id[0..session_id_len], data[off..][0..session_id_len]);
         off += session_id_len;
 
-        // Cipher suites
+        // Cipher suites — select first one we support
         if (off + 2 > data.len) return error.TlsDecodeError;
         const cs_list_len = mem.readInt(u16, data[off..][0..2], .big);
         off += 2;
-        off += cs_list_len;
+        const cs_list_end = off + cs_list_len;
+        if (cs_list_end > data.len) return error.TlsDecodeError;
+        var found_cs = false;
+        while (off + 2 <= cs_list_end) {
+            const cs_val = mem.readInt(u16, data[off..][0..2], .big);
+            off += 2;
+            const cs: tls.CipherSuite = @enumFromInt(cs_val);
+            if (cipher_suites_mod.isTls13Only(cs)) {
+                self.cipher_suite = cs;
+                found_cs = true;
+                break;
+            }
+        }
+        if (!found_cs) return error.TlsUnsupportedCipherSuite;
+        // Update hash algorithm based on negotiated cipher suite
+        self.hash_is_384 = (self.cipher_suite == .AES_256_GCM_SHA384);
+        if (self.hash_is_384) {
+            self.transcript.initAlgorithm(.sha384);
+        }
 
         // Compression methods
         if (off >= data.len) return error.TlsDecodeError;
@@ -662,6 +723,15 @@ pub const Handshake13Server = struct {
         self.state = .wait_finished;
     }
 
+    /// Initialize the key schedule. Must be called before buildServerHello.
+    pub fn initKeySchedule(self: *Handshake13Server) void {
+        if (self.hash_is_384) {
+            self.ks384.deriveEarlySecret(null);
+        } else {
+            self.ks256.deriveEarlySecret(null);
+        }
+    }
+
     /// Build ServerHello + EncryptedExtensions + Certificate + CertificateVerify + Finished.
     /// Returns total bytes written to `out`.
     pub fn buildServerHelloAndEncryptedHandshake(
@@ -672,11 +742,12 @@ pub const Handshake13Server = struct {
 
         var off: usize = 0;
 
-        // Determine hash
-        self.hash_is_384 = false;
-
-        // Initialize key schedule
-        self.ks256.deriveEarlySecret(null);
+        // Initialize key schedule based on negotiated cipher suite
+        if (self.hash_is_384) {
+            self.ks384.deriveEarlySecret(null);
+        } else {
+            self.ks256.deriveEarlySecret(null);
+        }
 
         // --- ServerHello ---
         off += try self.buildServerHello(out[off..]);
@@ -708,7 +779,7 @@ pub const Handshake13Server = struct {
         return off;
     }
 
-    fn buildServerHello(self: *Handshake13Server, out: []u8) errors.TlsError!usize {
+    pub fn buildServerHello(self: *Handshake13Server, out: []u8) errors.TlsError!usize {
         if (out.len < 256) return error.TlsBufferTooSmall;
 
         var off: usize = 0;
@@ -774,7 +845,7 @@ pub const Handshake13Server = struct {
         return off;
     }
 
-    fn buildEncryptedExtensions(self: *Handshake13Server, out: []u8) errors.TlsError!usize {
+    pub fn buildEncryptedExtensions(self: *Handshake13Server, out: []u8) errors.TlsError!usize {
         var off: usize = 0;
         out[0] = @intFromEnum(tls.HandshakeType.encrypted_extensions);
         off += 4;
@@ -799,7 +870,7 @@ pub const Handshake13Server = struct {
         return off;
     }
 
-    fn buildCertificate(self: *Handshake13Server, out: []u8) errors.TlsError!usize {
+    pub fn buildCertificate(self: *Handshake13Server, out: []u8) errors.TlsError!usize {
         var off: usize = 0;
         out[0] = @intFromEnum(tls.HandshakeType.certificate);
         off += 4;
@@ -808,11 +879,36 @@ pub const Handshake13Server = struct {
         out[off] = 0;
         off += 1;
 
-        // Certificate list length = 0 (empty for now)
-        out[off] = 0;
-        out[off + 1] = 0;
-        out[off + 2] = 0;
+        // Calculate total certificate list length
+        var cert_list_len: usize = 0;
+        for (self.cert_chain_der) |cert_der| {
+            // Each entry: 3-byte length + 2-byte extensions_length (0) + cert_der
+            cert_list_len += 3 + 2 + cert_der.len;
+        }
+
+        // Write certificate list length (3 bytes)
+        out[off] = @intCast((cert_list_len >> 16) & 0xFF);
+        out[off + 1] = @intCast((cert_list_len >> 8) & 0xFF);
+        out[off + 2] = @intCast(cert_list_len & 0xFF);
         off += 3;
+
+        // Write each certificate
+        for (self.cert_chain_der) |cert_der| {
+            // Certificate length (3 bytes)
+            out[off] = @intCast((cert_der.len >> 16) & 0xFF);
+            out[off + 1] = @intCast((cert_der.len >> 8) & 0xFF);
+            out[off + 2] = @intCast(cert_der.len & 0xFF);
+            off += 3;
+
+            // Certificate data
+            if (off + cert_der.len > out.len) return error.TlsBufferTooSmall;
+            @memcpy(out[off..][0..cert_der.len], cert_der);
+            off += cert_der.len;
+
+            // Extensions length = 0 (2 bytes, no extensions)
+            mem.writeInt(u16, out[off..][0..2], 0, .big);
+            off += 2;
+        }
 
         const body_len: u24 = @intCast(off - 4);
         handshake_mod.writeHandshakeHeader(.certificate, body_len, out[0..4]);
@@ -821,7 +917,7 @@ pub const Handshake13Server = struct {
         return off;
     }
 
-    fn buildCertificateVerify(self: *Handshake13Server, out: []u8) errors.TlsError!usize {
+    pub fn buildCertificateVerify(self: *Handshake13Server, out: []u8) errors.TlsError!usize {
         var off: usize = 0;
         out[0] = @intFromEnum(tls.HandshakeType.certificate_verify);
         off += 4;
@@ -841,7 +937,7 @@ pub const Handshake13Server = struct {
         return off;
     }
 
-    fn buildFinished(self: *Handshake13Server, out: []u8) errors.TlsError!usize {
+    pub fn buildFinished(self: *Handshake13Server, out: []u8) errors.TlsError!usize {
         var off: usize = 0;
         out[0] = @intFromEnum(tls.HandshakeType.finished);
         off += 4;
@@ -913,6 +1009,42 @@ pub const Handshake13Server = struct {
             return self.ks384.deriveIv(self.ks384.client_app_secret, 12);
         } else {
             return self.ks256.deriveIv(self.ks256.client_app_secret, 12);
+        }
+    }
+
+    /// Get the server handshake traffic key for encrypting handshake messages.
+    pub fn getServerHsKey(self: *const Handshake13Server) ?[32]u8 {
+        if (self.hash_is_384) {
+            return self.ks384.deriveKey(self.ks384.server_hs_secret, 32);
+        } else {
+            return self.ks256.deriveKey(self.ks256.server_hs_secret, 32);
+        }
+    }
+
+    /// Get the server handshake traffic IV.
+    pub fn getServerHsIv(self: *const Handshake13Server) ?[12]u8 {
+        if (self.hash_is_384) {
+            return self.ks384.deriveIv(self.ks384.server_hs_secret, 12);
+        } else {
+            return self.ks256.deriveIv(self.ks256.server_hs_secret, 12);
+        }
+    }
+
+    /// Get the client handshake traffic key for decrypting client Finished.
+    pub fn getClientHsKey(self: *const Handshake13Server) ?[32]u8 {
+        if (self.hash_is_384) {
+            return self.ks384.deriveKey(self.ks384.client_hs_secret, 32);
+        } else {
+            return self.ks256.deriveKey(self.ks256.client_hs_secret, 32);
+        }
+    }
+
+    /// Get the client handshake traffic IV.
+    pub fn getClientHsIv(self: *const Handshake13Server) ?[12]u8 {
+        if (self.hash_is_384) {
+            return self.ks384.deriveIv(self.ks384.client_hs_secret, 12);
+        } else {
+            return self.ks256.deriveIv(self.ks256.client_hs_secret, 12);
         }
     }
 };
