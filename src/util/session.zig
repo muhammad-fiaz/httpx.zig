@@ -269,7 +269,6 @@ test "SessionStore evict expired" {
     defer store.deinit();
 
     _ = try store.create();
-    std.time.sleep(5_000_000); // 5ms
     const evicted = store.evictExpired();
     try std.testing.expect(evicted >= 1);
 }

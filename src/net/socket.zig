@@ -289,12 +289,31 @@ fn posixAccept(sock: posix.socket_t, addr_ptr: *posix.sockaddr, addr_len: *posix
     }
 }
 
+fn winsockWaitWritable(sock: posix.socket_t) !void {
+    var write_set: winsock.fd_set = .{ .fd_count = 0, .fd_array = undefined };
+    write_set.fd_array[0] = toWinsockSocket(sock);
+    write_set.fd_count = 1;
+    var tv = posix.timeval{ .sec = 5, .usec = 0 };
+    const rc = winsock.select(0, null, &write_set, null, &tv);
+    if (rc == winsock.SOCKET_ERROR) return error.SendFailed;
+    if (rc == 0) return error.TimedOut;
+}
+
 fn posixSend(sock: posix.socket_t, data: []const u8, flags: u32) !usize {
     if (is_windows) {
-        const send_len: i32 = std.math.cast(i32, data.len) orelse return error.SendFailed;
-        const rc = winsock.send(toWinsockSocket(sock), data.ptr, send_len, @intCast(flags));
-        if (rc == winsock.SOCKET_ERROR) return error.SendFailed;
-        return @intCast(rc);
+        while (true) {
+            const send_len: i32 = std.math.cast(i32, data.len) orelse return error.SendFailed;
+            const rc = winsock.send(toWinsockSocket(sock), data.ptr, send_len, @intCast(flags));
+            if (rc == winsock.SOCKET_ERROR) {
+                const err = winsock.WSAGetLastError();
+                if (err == winsock.WSAEWOULDBLOCK) {
+                    try winsockWaitWritable(sock);
+                    continue;
+                }
+                return error.SendFailed;
+            }
+            return @intCast(rc);
+        }
     }
 
     while (true) {
@@ -309,10 +328,25 @@ fn posixSend(sock: posix.socket_t, data: []const u8, flags: u32) !usize {
 
 fn posixRecv(sock: posix.socket_t, buffer: []u8, flags: u32) !usize {
     if (is_windows) {
-        const recv_len: i32 = std.math.cast(i32, buffer.len) orelse return error.RecvFailed;
-        const rc = winsock.recv(toWinsockSocket(sock), buffer.ptr, recv_len, @intCast(flags));
-        if (rc == winsock.SOCKET_ERROR) return error.RecvFailed;
-        return @intCast(rc);
+        while (true) {
+            const recv_len: i32 = std.math.cast(i32, buffer.len) orelse return error.RecvFailed;
+            const rc = winsock.recv(toWinsockSocket(sock), buffer.ptr, recv_len, @intCast(flags));
+            if (rc == winsock.SOCKET_ERROR) {
+                const err = winsock.WSAGetLastError();
+                if (err == winsock.WSAEWOULDBLOCK) {
+                    var read_set: winsock.fd_set = .{ .fd_count = 0, .fd_array = undefined };
+                    read_set.fd_array[0] = toWinsockSocket(sock);
+                    read_set.fd_count = 1;
+                    var tv = posix.timeval{ .sec = 5, .usec = 0 };
+                    const sel_rc = winsock.select(0, &read_set, null, null, &tv);
+                    if (sel_rc == winsock.SOCKET_ERROR) return error.RecvFailed;
+                    if (sel_rc == 0) return error.TimedOut;
+                    continue;
+                }
+                return error.RecvFailed;
+            }
+            return @intCast(rc);
+        }
     }
 
     while (true) {
@@ -327,10 +361,19 @@ fn posixRecv(sock: posix.socket_t, buffer: []u8, flags: u32) !usize {
 
 fn posixSendTo(sock: posix.socket_t, data: []const u8, flags: u32, addr_ptr: *const posix.sockaddr, addr_len: posix.socklen_t) !usize {
     if (is_windows) {
-        const send_len: i32 = std.math.cast(i32, data.len) orelse return error.SendFailed;
-        const rc = winsock.sendto(toWinsockSocket(sock), data.ptr, send_len, @intCast(flags), addr_ptr, @intCast(addr_len));
-        if (rc == winsock.SOCKET_ERROR) return error.SendFailed;
-        return @intCast(rc);
+        while (true) {
+            const send_len: i32 = std.math.cast(i32, data.len) orelse return error.SendFailed;
+            const rc = winsock.sendto(toWinsockSocket(sock), data.ptr, send_len, @intCast(flags), addr_ptr, @intCast(addr_len));
+            if (rc == winsock.SOCKET_ERROR) {
+                const err = winsock.WSAGetLastError();
+                if (err == winsock.WSAEWOULDBLOCK) {
+                    try winsockWaitWritable(sock);
+                    continue;
+                }
+                return error.SendFailed;
+            }
+            return @intCast(rc);
+        }
     }
 
     while (true) {
