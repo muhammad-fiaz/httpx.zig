@@ -345,10 +345,11 @@ pub const RedirectPolicy = struct {
 
     /// Returns the appropriate method to use after a redirect.
     pub fn getRedirectMethod(self: RedirectPolicy, status: u16, original: Method) Method {
+        // 303 See Other always changes to GET per RFC 7231, regardless of policy
+        if (status == status_mod.StatusCode.SEE_OTHER) return .GET;
         if (self.preserve_method) return original;
         return switch (status) {
             status_mod.StatusCode.MOVED_PERMANENTLY, status_mod.StatusCode.FOUND => .GET,
-            status_mod.StatusCode.SEE_OTHER => .GET,
             status_mod.StatusCode.TEMPORARY_REDIRECT, status_mod.StatusCode.PERMANENT_REDIRECT => original,
             else => original,
         };
@@ -438,6 +439,20 @@ test "RetryPolicy.calculateDelay" {
 
 test "RedirectPolicy.getRedirectMethod" {
     const policy = RedirectPolicy{};
+    // Default: 301/302/303 change POST to GET
     try std.testing.expectEqual(Method.GET, policy.getRedirectMethod(301, .POST));
+    try std.testing.expectEqual(Method.GET, policy.getRedirectMethod(302, .POST));
+    try std.testing.expectEqual(Method.GET, policy.getRedirectMethod(303, .POST));
+    // Default: 307/308 preserve method
     try std.testing.expectEqual(Method.POST, policy.getRedirectMethod(307, .POST));
+    try std.testing.expectEqual(Method.POST, policy.getRedirectMethod(308, .POST));
+
+    // Strict: preserves method for 301/302/307/308
+    const strict = RedirectPolicy.strict();
+    try std.testing.expectEqual(Method.POST, strict.getRedirectMethod(301, .POST));
+    try std.testing.expectEqual(Method.POST, strict.getRedirectMethod(302, .POST));
+    try std.testing.expectEqual(Method.POST, strict.getRedirectMethod(307, .POST));
+    try std.testing.expectEqual(Method.POST, strict.getRedirectMethod(308, .POST));
+    // Strict: 303 ALWAYS changes to GET per RFC 7231
+    try std.testing.expectEqual(Method.GET, strict.getRedirectMethod(303, .POST));
 }
