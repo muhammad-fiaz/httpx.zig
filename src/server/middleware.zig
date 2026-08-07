@@ -208,8 +208,8 @@ pub fn compressionMiddlewareWithConfig(comptime config: CompressionConfig) Middl
                     if (compression_util.compress(ctx.allocator, encoding, body)) |compressed| {
                         new_resp.body = compressed;
                         new_resp.body_owned = true;
-                        if (ctx.setHeader("Content-Encoding", encoding.toString())) |_| {}
-                        if (ctx.setHeader("Vary", "Accept-Encoding")) |_| {}
+                        ctx.setHeader("Content-Encoding", encoding.toString()) catch {};
+                        ctx.setHeader("Vary", "Accept-Encoding") catch {};
                     } else |_| {}
                     return new_resp;
                 }
