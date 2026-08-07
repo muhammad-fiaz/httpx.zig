@@ -14,7 +14,7 @@ for (httpx.ContentEncoding.ALL) |enc| {
 const decompressed = try httpx.decompress(allocator, .identity, original);
 
 // Enable compression middleware on the server
-try server.use(httpx.compressionMiddleware());
+try server.use(httpx.middleware.compression());
 
 // Client advertises supported encodings
 var req = try httpx.Request.init(allocator, .GET, "http://127.0.0.1/data");

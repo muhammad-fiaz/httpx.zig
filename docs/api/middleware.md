@@ -98,7 +98,7 @@ body exceeds the minimum size threshold (default: 1024 bytes) and no
 `Content-Encoding` header is already set.
 
 ```zig
-server.use(httpx.middleware.compressionMiddleware());
+server.use(httpx.middleware.compression());
 ```
 
 With explicit configuration:

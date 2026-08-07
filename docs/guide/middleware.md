@@ -28,7 +28,7 @@ Logging is opt-in. Use `httpx.middleware.loggerWithConfig(.{ .log_fn = ... })` t
 - **RateLimit**: Simple in-memory rate limiting.
 - **BasicAuth**: RFC 7617 Basic Authentication.
 - **Helmet**: Security headers.
-- **Compression**: Response compression middleware (gzip, deflate, br, zstd) via `httpx.middleware.compressionMiddleware()`. Compresses responses larger than 1KB by default, preferring brotli > zstd > gzip > deflate.
+- **Compression**: Response compression middleware (gzip, deflate, br, zstd) via `httpx.middleware.compression()`. Compresses responses larger than 1KB by default, preferring brotli > zstd > gzip > deflate.
 - **Timeout**: Application-level per-request timeout enforcement via `httpx.middleware.timeout(ms)`. Stores a deadline and returns 408 if exceeded.
 - **RequestId**: Injects `X-Request-ID`.
 
@@ -62,10 +62,10 @@ try server.use(.{
 
 ## Compression Middleware
 
-Use `httpx.middleware.compressionMiddleware()` to enable automatic response compression. The middleware negotiates the best encoding based on the client's `Accept-Encoding` header and compresses the response body before sending.
+Use `httpx.middleware.compression()` to enable automatic response compression. The middleware negotiates the best encoding based on the client's `Accept-Encoding` header and compresses the response body before sending.
 
 ```zig
-try server.use(httpx.middleware.compressionMiddleware());
+try server.use(httpx.middleware.compression());
 ```
 
 This enables gzip, deflate, brotli, and zstd compression. The middleware:

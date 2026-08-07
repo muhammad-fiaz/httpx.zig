@@ -58,7 +58,7 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.use(httpx.compressionMiddleware());
+    try server.use(httpx.middleware.compression());
     try server.get("/data", compressHandler);
 
     std.debug.print("  Compression middleware enabled\n", .{});

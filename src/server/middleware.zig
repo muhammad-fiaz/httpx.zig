@@ -18,7 +18,7 @@ const types = @import("../core/types.zig");
 const list_writer = @import("../util/list_writer.zig");
 const status = @import("../core/status.zig");
 const common = @import("../util/common.zig");
-const compression = @import("../util/compression.zig");
+const compression_util = @import("../util/compression.zig");
 
 /// Middleware function type.
 pub const Middleware = struct {
@@ -176,14 +176,12 @@ pub fn logger() Middleware {
 }
 
 /// Creates compression middleware.
-///
-/// Inspects the request's Accept-Encoding header and compresses the response
-/// body using the first supported encoding. Only compresses when the response
-/// body is larger than the `min_bytes` threshold and no explicit
-/// Content-Encoding is already set.
-pub fn compressionMiddleware() Middleware {
+pub fn compression() Middleware {
     return compressionMiddlewareWithConfig(.{});
 }
+
+/// Alias for `compression()`.
+pub const compressionMiddleware = compression;
 
 /// Configuration for compression middleware.
 pub const CompressionConfig = struct {
@@ -207,7 +205,7 @@ pub fn compressionMiddlewareWithConfig(comptime config: CompressionConfig) Middl
                     const encoding = pickEncoding(accept) orelse return resp;
 
                     var new_resp = resp;
-                    if (compression.compress(ctx.allocator, encoding, body)) |compressed| {
+                    if (compression_util.compress(ctx.allocator, encoding, body)) |compressed| {
                         new_resp.body = compressed;
                         new_resp.body_owned = true;
                         if (ctx.setHeader("Content-Encoding", encoding.toString())) |_| {}
@@ -218,7 +216,7 @@ pub fn compressionMiddlewareWithConfig(comptime config: CompressionConfig) Middl
                 return resp;
             }
 
-            fn pickEncoding(accept: []const u8) ?compression.ContentEncoding {
+            fn pickEncoding(accept: []const u8) ?compression_util.ContentEncoding {
                 if (std.ascii.indexOfIgnoreCase(accept, "br") != null) return .br;
                 if (std.ascii.indexOfIgnoreCase(accept, "zstd") != null) return .zstd;
                 if (std.ascii.indexOfIgnoreCase(accept, "gzip") != null) return .gzip;
