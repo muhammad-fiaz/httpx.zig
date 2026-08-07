@@ -118,7 +118,7 @@ pub fn loadCertChain(allocator: Allocator, path: []const u8) ![]const []const u8
             count += 1;
             // Skip past this cert's end marker
             if (std.mem.indexOf(u8, pem[search_pos..], "-----END CERTIFICATE-----")) |end_pos| {
-                search_pos += end_pos + 27; // len("-----END CERTIFICATE-----")
+                search_pos += end_pos + 25; // len("-----END CERTIFICATE-----")
             } else {
                 break;
             }
@@ -136,7 +136,7 @@ pub fn loadCertChain(allocator: Allocator, path: []const u8) ![]const []const u8
         const begin_pos = std.mem.indexOf(u8, pem[search_pos..], "-----BEGIN CERTIFICATE-----") orelse break;
         const cert_start = search_pos + begin_pos;
         const end_pos = std.mem.indexOf(u8, pem[cert_start..], "-----END CERTIFICATE-----") orelse break;
-        const cert_end = cert_start + end_pos + 27;
+        const cert_end = cert_start + end_pos + 25;
         certs[cert_idx] = try pemDecode(allocator, pem[cert_start..cert_end]);
         search_pos = cert_end;
         cert_idx += 1;
@@ -168,7 +168,7 @@ pub fn loadPrivateKey(allocator: Allocator, path: []const u8) ![]const u8 {
 
     const end_marker = if (is_pkcs1) "-----END RSA PRIVATE KEY-----" else "-----END PRIVATE KEY-----";
     const end_pos = std.mem.indexOf(u8, pem[final_start..], end_marker) orelse return error.TlsInvalidPrivateKey;
-    const key_end = final_start + end_pos;
+    const key_end = final_start + end_pos + end_marker.len;
 
     return pemDecode(allocator, pem[final_start..key_end]);
 }
