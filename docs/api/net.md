@@ -4,12 +4,12 @@ Low-level networking primitives for TCP and UDP across Linux, Windows, macOS, an
 
 ## Platform Support
 
-| Platform | TCP | UDP | TLS |
-|----------|-----|-----|-----|
-| Linux | ✅ | ✅ | ✅ |
-| Windows | ✅ | ✅ | ✅ |
-| macOS | ✅ | ✅ | ✅ |
-| FreeBSD/NetBSD/OpenBSD | ✅ | ✅ | ✅ |
+| Platform | TCP | UDP | TLS | Notes |
+|----------|-----|-----|-----|-------|
+| Linux | ✅ | ✅ | ✅ | `MSG_NOSIGNAL` prevents SIGPIPE on broken connections |
+| Windows | ✅ | ✅ | ✅ | `WSAEWOULDBLOCK` handled via `select()` retry for large sends |
+| macOS | ✅ | ✅ | ✅ | `MSG_NOSIGNAL` prevents SIGPIPE on broken connections |
+| FreeBSD/NetBSD/OpenBSD | ✅ | ✅ | ✅ | |
 
 ## TCP Socket (`httpx.Socket`)
 

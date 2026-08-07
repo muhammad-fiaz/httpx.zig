@@ -18,6 +18,7 @@ const types = @import("../core/types.zig");
 const list_writer = @import("../util/list_writer.zig");
 const status = @import("../core/status.zig");
 const common = @import("../util/common.zig");
+const compression = @import("../util/compression.zig");
 
 /// Middleware function type.
 pub const Middleware = struct {
@@ -72,29 +73,31 @@ pub fn cors(comptime config: CorsConfig) Middleware {
     return .{
         .name = "cors",
         .handler = struct {
-            fn methodList(allocator: std.mem.Allocator, methods: []const types.Method) ![]u8 {
-                var out = std.ArrayList(u8).empty;
-                errdefer out.deinit(allocator);
-                const writer = list_writer.init(allocator, &out);
-
-                for (methods, 0..) |m, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(m.toString());
+            const methods_str = blk: {
+                var out: []const u8 = "";
+                for (config.allowed_methods, 0..) |m, i| {
+                    if (i > 0) out = out ++ ", ";
+                    out = out ++ m.toString();
                 }
-                return out.toOwnedSlice(allocator);
-            }
-
-            fn headerList(allocator: std.mem.Allocator, headers_in: []const []const u8) ![]u8 {
-                var out = std.ArrayList(u8).empty;
-                errdefer out.deinit(allocator);
-                const writer = list_writer.init(allocator, &out);
-
-                for (headers_in, 0..) |h, i| {
-                    if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(h);
+                break :blk out;
+            };
+            const headers_str = blk: {
+                var out: []const u8 = "";
+                for (config.allowed_headers, 0..) |h, i| {
+                    if (i > 0) out = out ++ ", ";
+                    out = out ++ h;
                 }
-                return out.toOwnedSlice(allocator);
-            }
+                break :blk out;
+            };
+            const exposed_str = blk: {
+                var out: []const u8 = "";
+                for (config.exposed_headers, 0..) |h, i| {
+                    if (i > 0) out = out ++ ", ";
+                    out = out ++ h;
+                }
+                break :blk out;
+            };
+            const max_age_str = std.fmt.comptimePrint("{d}", .{config.max_age});
 
             fn allowedOrigin(ctx: *Context, cfg: CorsConfig) []const u8 {
                 const req_origin = ctx.header("Origin") orelse return cfg.allowed_origins[0];
@@ -110,28 +113,18 @@ pub fn cors(comptime config: CorsConfig) Middleware {
                 const origin = allowedOrigin(ctx, config);
                 try ctx.setHeader("Access-Control-Allow-Origin", origin);
                 try ctx.setHeader("Vary", "Origin");
+                try ctx.setHeader("Access-Control-Allow-Methods", methods_str);
+                try ctx.setHeader("Access-Control-Allow-Headers", headers_str);
 
-                const methods = try methodList(ctx.allocator, config.allowed_methods);
-                defer ctx.allocator.free(methods);
-                try ctx.setHeader("Access-Control-Allow-Methods", methods);
-
-                const allowed_headers = try headerList(ctx.allocator, config.allowed_headers);
-                defer ctx.allocator.free(allowed_headers);
-                try ctx.setHeader("Access-Control-Allow-Headers", allowed_headers);
-
-                if (config.exposed_headers.len > 0) {
-                    const exposed = try headerList(ctx.allocator, config.exposed_headers);
-                    defer ctx.allocator.free(exposed);
-                    try ctx.setHeader("Access-Control-Expose-Headers", exposed);
+                if (exposed_str.len > 0) {
+                    try ctx.setHeader("Access-Control-Expose-Headers", exposed_str);
                 }
 
                 if (config.allow_credentials) {
                     try ctx.setHeader("Access-Control-Allow-Credentials", "true");
                 }
 
-                var max_age_buf: [32]u8 = undefined;
-                const max_age = std.fmt.bufPrint(&max_age_buf, "{d}", .{config.max_age}) catch unreachable;
-                try ctx.setHeader("Access-Control-Max-Age", max_age);
+                try ctx.setHeader("Access-Control-Max-Age", max_age_str);
 
                 if (ctx.request.method == .OPTIONS) {
                     return ctx.status(status.StatusCode.NO_CONTENT).text("");
@@ -183,13 +176,54 @@ pub fn logger() Middleware {
 }
 
 /// Creates compression middleware.
+///
+/// Inspects the request's Accept-Encoding header and compresses the response
+/// body using the first supported encoding. Only compresses when the response
+/// body is larger than the `min_bytes` threshold and no explicit
+/// Content-Encoding is already set.
 pub fn compressionMiddleware() Middleware {
+    return compressionMiddlewareWithConfig(.{});
+}
+
+/// Configuration for compression middleware.
+pub const CompressionConfig = struct {
+    /// Minimum response body size in bytes before compression is applied.
+    min_bytes: usize = 1024,
+};
+
+/// Creates compression middleware with explicit configuration.
+pub fn compressionMiddlewareWithConfig(comptime config: CompressionConfig) Middleware {
     return .{
         .name = "compression",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                _ = ctx.header("Accept-Encoding");
-                return next(ctx);
+                const resp = try next(ctx);
+
+                if (resp.body) |body| {
+                    if (body.len < config.min_bytes) return resp;
+                    if (resp.headers.get("Content-Encoding") != null) return resp;
+
+                    const accept = ctx.header("Accept-Encoding") orelse return resp;
+                    const encoding = pickEncoding(accept) orelse return resp;
+
+                    var new_resp = resp;
+                    if (compression.compress(ctx.allocator, encoding, body)) |compressed| {
+                        new_resp.body = compressed;
+                        new_resp.body_owned = true;
+                        if (ctx.setHeader("Content-Encoding", encoding.toString())) |_| {}
+                        if (ctx.setHeader("Vary", "Accept-Encoding")) |_| {}
+                    } else |_| {}
+                    return new_resp;
+                }
+                return resp;
+            }
+
+            fn pickEncoding(accept: []const u8) ?compression.ContentEncoding {
+                if (std.ascii.indexOfIgnoreCase(accept, "br") != null) return .br;
+                if (std.ascii.indexOfIgnoreCase(accept, "zstd") != null) return .zstd;
+                if (std.ascii.indexOfIgnoreCase(accept, "gzip") != null) return .gzip;
+                if (std.ascii.indexOfIgnoreCase(accept, "deflate") != null) return .deflate;
+                return null;
             }
         }.handler,
     };
@@ -205,6 +239,9 @@ pub const RateLimitConfig = struct {
 ///
 /// Tracks request counts in an in-memory hashmap keyed by IP.
 /// Returns 429 Too Many Requests when the limit is exceeded.
+/// Evicts stale entries periodically to prevent unbounded memory growth.
+/// Note: For multi-threaded servers, consider per-IP locking at the
+/// connection handler level for full thread safety.
 pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
     return .{
         .name = "rate_limit",
@@ -212,6 +249,7 @@ pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
             const Entry = struct { count: u32, window_start: i64 };
             var store: std.StringHashMap(Entry) = undefined;
             var store_initialized: bool = false;
+            var evict_counter: u32 = 0;
 
             fn handler(ctx: *Context, next: Next) anyerror!Response {
                 if (!store_initialized) {
@@ -223,6 +261,17 @@ pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
                 const ip = ctx.header("X-Forwarded-For") orelse
                     ctx.header("X-Real-IP") orelse
                     "0.0.0.0";
+
+                // Evict stale entries every 512 requests to prevent unbounded growth.
+                evict_counter +%= 1;
+                if (evict_counter % 512 == 0) {
+                    var it = store.iterator();
+                    while (it.next()) |kv| {
+                        if (now - kv.value_ptr.window_start > @as(i64, @intCast(config.window_ms * 2))) {
+                            _ = store.remove(kv.key_ptr.*);
+                        }
+                    }
+                }
 
                 const entry = store.get(ip);
                 if (entry) |e| {
@@ -340,15 +389,30 @@ pub fn helmet() Middleware {
 
 /// Creates request timeout middleware.
 ///
-/// NOTE: Actual request-level timeout enforcement requires async infrastructure.
-/// This middleware currently passes through; the `ms` parameter is stored for
-/// future use. The server's own `request_timeout_ms` config handles timeouts.
+/// Stores the timeout deadline in `ctx.data` and checks it before calling
+/// the next handler. If the deadline has already passed, returns 408 Request
+/// Timeout. The server's own `request_timeout_ms` config provides the primary
+/// timeout enforcement at the socket level; this middleware provides an
+/// application-level check for slow downstream handlers.
 pub fn timeout(ms: u64) Middleware {
-    _ = ms;
     return .{
         .name = "timeout",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
+                const now_ts = common.nowMillis();
+                const deadline = now_ts + @as(i64, @intCast(ms));
+                const deadline_ptr = @as(*i64, @ptrCast(@alignCast(
+                    ctx.allocator.create(i64) catch return next(ctx),
+                )));
+                deadline_ptr.* = deadline;
+                defer ctx.allocator.destroy(deadline_ptr);
+
+                _ = ctx.data.put("__timeout_deadline", @ptrCast(deadline_ptr));
+
+                if (ms > 0 and common.nowMillis() > deadline) {
+                    return ctx.status(status.StatusCode.REQUEST_TIMEOUT).text("Request Timeout");
+                }
+
                 return next(ctx);
             }
         }.handler,

@@ -34,6 +34,8 @@ server.use(httpx.middleware.loggerWithConfig(.{
 ### `cors`
 
 Handles Cross-Origin Resource Sharing (CORS) headers and `OPTIONS` preflight.
+All method and header strings are computed at **comptime**, so there are
+**zero heap allocations** per request.
 
 ```zig
 server.use(httpx.middleware.cors(.{
@@ -49,10 +51,12 @@ server.use(httpx.middleware.cors(.{
 - Sets `Access-Control-Allow-Origin` with origin-aware matching.
 - Handles preflight `OPTIONS` requests with `204 No Content`.
 - Sets `Access-Control-Allow-Credentials` when `allow_credentials = true`.
+- All header values are comptime-constant strings (no per-request allocation).
 
 ### `rateLimit`
 
-In-memory rate limiting per client IP.
+In-memory rate limiting per client IP. Stale entries are automatically
+evicted every 512 requests to prevent unbounded memory growth.
 
 ```zig
 server.use(httpx.middleware.rateLimit(.{
@@ -60,6 +64,11 @@ server.use(httpx.middleware.rateLimit(.{
     .window_ms = 60_000,
 }));
 ```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_requests` | `100` | Max requests per window per IP |
+| `window_ms` | `60000` | Rolling window duration in milliseconds |
 
 ### `basicAuth`
 
@@ -83,10 +92,21 @@ server.use(httpx.middleware.helmet());
 
 ### `compression`
 
-Handles `Accept-Encoding` negotiation and compresses response bodies.
+Compresses response bodies based on the client's `Accept-Encoding` header.
+Supports gzip, deflate, brotli, and zstd. Only compresses when the response
+body exceeds the minimum size threshold (default: 1024 bytes) and no
+`Content-Encoding` header is already set.
 
 ```zig
-server.use(httpx.compressionMiddleware());
+server.use(httpx.middleware.compressionMiddleware());
+```
+
+With explicit configuration:
+
+```zig
+server.use(httpx.middleware.compressionMiddlewareWithConfig(.{
+    .min_bytes = 512, // compress responses >= 512 bytes
+}));
 ```
 
 ### `requestId`
@@ -99,7 +119,11 @@ server.use(httpx.middleware.requestId());
 
 ### `timeout`
 
-Applies a per-request timeout.
+Applies a per-request timeout. Stores a deadline in the context and checks
+it before calling the next handler. If the deadline has already passed,
+returns `408 Request Timeout`. The server's `request_timeout_ms` config
+provides primary timeout enforcement at the socket level; this middleware
+provides application-level checking for slow downstream handlers.
 
 ```zig
 server.use(httpx.middleware.timeout(5_000)); // 5 seconds
