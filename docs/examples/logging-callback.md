@@ -38,8 +38,8 @@ zig build example-logging-callback
 
 ## Checklist
 
-- [ ] External logger prints `[EXT-INFO]` / `[EXT-DEBUG]` prefixed messages
-- [ ] Silent logger suppresses all server and client output
-- [ ] Timestamp logger prints `[INFO]` / `[DEBUG]` prefixed messages
-- [ ] Each mode (external, silent, timestamp) runs a full request cycle
-- [ ] Response status codes are printed after each request
+- [x] External logger prints `[EXT-INFO]` / `[EXT-DEBUG]` prefixed messages
+- [x] Silent logger suppresses all server and client output
+- [x] Timestamp logger prints `[INFO]` / `[DEBUG]` prefixed messages
+- [x] Each mode (external, silent, timestamp) runs a full request cycle
+- [x] Response status codes are printed after each request

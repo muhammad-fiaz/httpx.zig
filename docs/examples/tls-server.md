@@ -31,11 +31,11 @@ zig build run-tls_server
 
 ## Checklist
 
-- [ ] Server starts with TLS enabled
-- [ ] Certificate and key PEM files are loaded
-- [ ] TLS handshake completes successfully
-- [ ] ALPN negotiates h2 or http/1.1
-- [ ] HTTP/2 is detected via ALPN
-- [ ] HTTP request over TLS returns 200 OK
-- [ ] Supports TLS 1.2 and 1.3 cipher suites
-- [ ] Record-level fragmentation works correctly
+- [x] Server starts with TLS enabled
+- [x] Certificate and key PEM files are loaded
+- [x] TLS handshake completes successfully
+- [x] ALPN negotiates h2 or http/1.1
+- [x] HTTP/2 is detected via ALPN
+- [x] HTTP request over TLS returns 200 OK
+- [x] Supports TLS 1.2 and 1.3 cipher suites
+- [x] Record-level fragmentation works correctly

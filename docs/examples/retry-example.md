@@ -30,10 +30,10 @@ zig build example-retry-example
 
 ## Checklist
 
-- [ ] Default retry policy has sensible defaults
-- [ ] `RetryPolicy.noRetry()` disables all retries
-- [ ] `RetryPolicy.aggressive()` uses higher retry counts
-- [ ] Exponential backoff doubles delay each attempt
-- [ ] `calculateDelay` returns correct backoff values
-- [ ] `shouldRetryStatus` checks against configured status list
-- [ ] Status 429 (rate limit) triggers retry
+- [x] Default retry policy has sensible defaults
+- [x] `RetryPolicy.noRetry()` disables all retries
+- [x] `RetryPolicy.aggressive()` uses higher retry counts
+- [x] Exponential backoff doubles delay each attempt
+- [x] `calculateDelay` returns correct backoff values
+- [x] `shouldRetryStatus` checks against configured status list
+- [x] Status 429 (rate limit) triggers retry

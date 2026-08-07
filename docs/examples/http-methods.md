@@ -40,9 +40,9 @@ zig build example-http-methods
 
 ## Checklist
 
-- [ ] All 9 methods print their properties (idempotent, safe, hasBody, hasResponse)
-- [ ] Method parsing handles standard and unknown methods
-- [ ] Server accepts GET, POST, PUT, PATCH, DELETE routes
-- [ ] Client sends each method and prints status code
-- [ ] HEAD and OPTIONS requests complete successfully
-- [ ] Convenience function summary prints at the end
+- [x] All 9 methods print their properties (idempotent, safe, hasBody, hasResponse)
+- [x] Method parsing handles standard and unknown methods
+- [x] Server accepts GET, POST, PUT, PATCH, DELETE routes
+- [x] Client sends each method and prints status code
+- [x] HEAD and OPTIONS requests complete successfully
+- [x] Convenience function summary prints at the end

@@ -33,8 +33,8 @@ zig build example-batch-concurrent
 
 ## Checklist
 
-- [ ] `httpx.all()` returns all results and reports successful count
-- [ ] `httpx.any()` returns the first 2xx response (or null)
-- [ ] `httpx.race()` returns whichever request finishes first
-- [ ] `httpx.allSettled()` returns all outcomes with no thrown errors
-- [ ] Convenience aliases print: `first()`, `fastest()`, `settled()`
+- [x] `httpx.all()` returns all results and reports successful count
+- [x] `httpx.any()` returns the first 2xx response (or null)
+- [x] `httpx.race()` returns whichever request finishes first
+- [x] `httpx.allSettled()` returns all outcomes with no thrown errors
+- [x] Convenience aliases print: `first()`, `fastest()`, `settled()`

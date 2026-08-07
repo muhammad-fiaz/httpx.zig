@@ -33,11 +33,11 @@ zig build example-websocket-server
 
 ## Checklist
 
-- [ ] `isWebSocketUpgrade` detects upgrade request
-- [ ] `wsExtractKey` extracts `Sec-WebSocket-Key` header
-- [ ] `wsAcceptKey` computes correct accept hash
-- [ ] Text frames encode/decode roundtrip correctly
-- [ ] Binary frames encode/decode roundtrip correctly
-- [ ] Masked frames decode to unmasked payload
-- [ ] Ping/Pong/Close control frames work
-- [ ] Large payloads (>125 bytes) use extended length encoding
+- [x] `isWebSocketUpgrade` detects upgrade request
+- [x] `wsExtractKey` extracts `Sec-WebSocket-Key` header
+- [x] `wsAcceptKey` computes correct accept hash
+- [x] Text frames encode/decode roundtrip correctly
+- [x] Binary frames encode/decode roundtrip correctly
+- [x] Masked frames decode to unmasked payload
+- [x] Ping/Pong/Close control frames work
+- [x] Large payloads (>125 bytes) use extended length encoding

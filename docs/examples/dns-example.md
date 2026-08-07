@@ -32,9 +32,9 @@ zig build example-dns
 
 ## Checklist
 
-- [ ] `isIpAddress` correctly identifies IPv4, IPv6, and hostnames
-- [ ] `parseHostAndPort` splits "host:port" and "[::1]:port" correctly
-- [ ] `resolveAddress` returns a single `Address`
-- [ ] `resolveAllAddresses` returns all candidate addresses
-- [ ] `DnsCache` returns the same result on repeated lookups
-- [ ] Convenience function summary prints at the end
+- [x] `isIpAddress` correctly identifies IPv4, IPv6, and hostnames
+- [x] `parseHostAndPort` splits "host:port" and "[::1]:port" correctly
+- [x] `resolveAddress` returns a single `Address`
+- [x] `resolveAllAddresses` returns all candidate addresses
+- [x] `DnsCache` returns the same result on repeated lookups
+- [x] Convenience function summary prints at the end

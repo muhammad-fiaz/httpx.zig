@@ -29,8 +29,8 @@ zig build example-compression
 
 ## Checklist
 
-- [ ] `ContentEncoding.ALL` lists gzip, deflate, zstd, brotli
-- [ ] `httpx.decompress(.identity, ...)` returns input unchanged
-- [ ] Server accepts and applies compression middleware
-- [ ] Client sends `Accept-Encoding` header with supported algorithms
-- [ ] Supported algorithms print: gzip, deflate, zstd, br
+- [x] `ContentEncoding.ALL` lists gzip, deflate, zstd, brotli
+- [x] `httpx.decompress(.identity, ...)` returns input unchanged
+- [x] Server accepts and applies compression middleware
+- [x] Client sends `Accept-Encoding` header with supported algorithms
+- [x] Supported algorithms print: gzip, deflate, zstd, br

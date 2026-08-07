@@ -27,9 +27,9 @@ zig build example-redirect-example
 
 ## Checklist
 
-- [ ] Default policy follows redirects, changes POST→GET for 301/302/303
-- [ ] `RedirectPolicy.noFollow()` disables following
-- [ ] `RedirectPolicy.strict()` preserves original HTTP method
-- [ ] 307/308 always preserve the method
-- [ ] 301/302 change POST to GET under default policy
-- [ ] 303 always changes to GET regardless of policy
+- [x] Default policy follows redirects, changes POST→GET for 301/302/303
+- [x] `RedirectPolicy.noFollow()` disables following
+- [x] `RedirectPolicy.strict()` preserves original HTTP method
+- [x] 307/308 always preserve the method
+- [x] 301/302 change POST to GET under default policy
+- [x] 303 always changes to GET regardless of policy

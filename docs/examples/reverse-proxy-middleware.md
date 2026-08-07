@@ -24,9 +24,9 @@ zig build example-reverse-proxy-middleware
 
 ## Checklist
 
-- [ ] Backend server starts and handles `/api/data`
-- [ ] Proxy forwards requests to backend transparently
-- [ ] `reverseProxyRuntime()` accepts target URL at runtime
-- [ ] Response body is proxied unchanged
-- [ ] Status code is forwarded correctly
-- [ ] Use cases: API gateway, microservice proxy, load balancer
+- [x] Backend server starts and handles `/api/data`
+- [x] Proxy forwards requests to backend transparently
+- [x] `reverseProxyRuntime()` accepts target URL at runtime
+- [x] Response body is proxied unchanged
+- [x] Status code is forwarded correctly
+- [x] Use cases: API gateway, microservice proxy, load balancer

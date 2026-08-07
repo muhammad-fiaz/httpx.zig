@@ -37,9 +37,9 @@ zig build example-https-client
 
 ## Checklist
 
-- [ ] TLS config created with ALPN (h2, http/1.1)
-- [ ] Socket connects to `example.com:443`
-- [ ] TLS handshake completes (or offline demo prints cipher suites)
-- [ ] ALPN protocol is printed if negotiated
-- [ ] HTTP response is read and printed (first 512 bytes)
-- [ ] Session closes gracefully with `close_notify`
+- [x] TLS config created with ALPN (h2, http/1.1)
+- [x] Socket connects to `example.com:443`
+- [x] TLS handshake completes (or offline demo prints cipher suites)
+- [x] ALPN protocol is printed if negotiated
+- [x] HTTP response is read and printed (first 512 bytes)
+- [x] Session closes gracefully with `close_notify`

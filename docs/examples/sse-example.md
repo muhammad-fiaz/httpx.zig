@@ -31,8 +31,8 @@ zig build example-sse-example
 
 ## Checklist
 
-- [ ] SSE events are formatted in W3C wire format (`event:`, `id:`, `data:`)
-- [ ] Multi-line data is split correctly
-- [ ] Retry events include `retry:` field
-- [ ] Server returns proper `Content-Type: text/event-stream`
-- [ ] Client receives all events in order
+- [x] SSE events are formatted in W3C wire format (`event:`, `id:`, `data:`)
+- [x] Multi-line data is split correctly
+- [x] Retry events include `retry:` field
+- [x] Server returns proper `Content-Type: text/event-stream`
+- [x] Client receives all events in order
