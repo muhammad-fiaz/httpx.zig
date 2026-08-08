@@ -17,12 +17,12 @@ pub fn build(b: *std.Build) void {
 
     const optimize = b.standardOptimizeOption(.{});
 
-    const zstd_dep = b.lazyDependency("zstd", .{
+    const zstd_dep = b.dependency("zstd", .{
         .target = target,
         .optimize = optimize,
     });
 
-    const brotli_dep = b.lazyDependency("brotli", .{
+    const brotli_dep = b.dependency("brotli", .{
         .target = target,
         .optimize = optimize,
     });
@@ -33,13 +33,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/httpx.zig"),
     });
 
-    if (zstd_dep) |zstd| {
-        httpx_module.addImport("zstd", zstd.module("zstd"));
-    }
-
-    if (brotli_dep) |brotli| {
-        httpx_module.addImport("brotli", brotli.module("brotli"));
-    }
+    httpx_module.addImport("zstd", zstd_dep.module("zstd"));
+    httpx_module.addImport("brotli", brotli_dep.module("brotli"));
 
     const examples = [_]struct { name: []const u8, path: []const u8, skip_run_all: bool = false }{
         .{ .name = "simple_get", .path = "examples/simple_get.zig" },
@@ -153,12 +148,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    if (zstd_dep) |zstd| {
-        tests.root_module.addImport("zstd", zstd.module("zstd"));
-    }
-    if (brotli_dep) |brotli| {
-        tests.root_module.addImport("brotli", brotli.module("brotli"));
-    }
+    tests.root_module.addImport("zstd", zstd_dep.module("zstd"));
+    tests.root_module.addImport("brotli", brotli_dep.module("brotli"));
     linkPlatformLibs(tests, target);
 
     const run_tests = b.addRunArtifact(tests);
@@ -211,12 +202,8 @@ pub fn build(b: *std.Build) void {
             .target = target_cross,
             .optimize = optimize,
         });
-        if (zstd_dep) |zstd| {
-            root_module_cross.addImport("zstd", zstd.module("zstd"));
-        }
-        if (brotli_dep) |brotli| {
-            root_module_cross.addImport("brotli", brotli.module("brotli"));
-        }
+        root_module_cross.addImport("zstd", zstd_dep.module("zstd"));
+        root_module_cross.addImport("brotli", brotli_dep.module("brotli"));
         const lib_cross = b.addLibrary(.{
             .name = "httpx",
             .linkage = .static,
@@ -233,12 +220,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    if (zstd_dep) |zstd| {
-        lib_root_module.addImport("zstd", zstd.module("zstd"));
-    }
-    if (brotli_dep) |brotli| {
-        lib_root_module.addImport("brotli", brotli.module("brotli"));
-    }
+    lib_root_module.addImport("zstd", zstd_dep.module("zstd"));
+    lib_root_module.addImport("brotli", brotli_dep.module("brotli"));
 
     const lib = b.addLibrary(.{
         .name = "httpx",
