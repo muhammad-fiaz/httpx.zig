@@ -2868,4 +2868,3 @@ test "RequestOptions explicit timeout resolution" {
     try std.testing.expectEqual(@as(u64, 222), t_struct.read_ms);
     try std.testing.expectEqual(@as(u64, 333), t_struct.write_ms);
 }
-

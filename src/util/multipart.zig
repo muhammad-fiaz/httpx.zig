@@ -33,7 +33,6 @@
 //! - When doing multi-part chunked uploads, split the file at the call site
 //!   (loop over 64 KB slices) and send each slice as a separate HTTP request.
 
-
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
@@ -48,7 +47,6 @@ const Allocator = mem.Allocator;
 /// Use `MultipartBuilder.addFileChunked` or split large files at the call
 /// site and issue one request per `MAX_RECOMMENDED_CHUNK`-sized slice.
 pub const MAX_RECOMMENDED_CHUNK: usize = 65536;
-
 
 /// A single parsed multipart part (field or file).
 pub const Part = struct {
@@ -403,4 +401,3 @@ test "MultipartBuilder addFileChunked + parse roundtrip" {
     try std.testing.expectEqual(large_data.len, r.parts[0].data.len);
     try std.testing.expectEqualSlices(u8, large_data, r.parts[0].data);
 }
-
