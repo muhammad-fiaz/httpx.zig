@@ -7,8 +7,8 @@ This guide covers all supported installation methods for `httpx.zig`.
 - **Zig Version**: 0.16.0 or later
 - **Operating System**: Windows, Linux, or macOS
 
-::: warning v0.1.4 release and Zig 0.15 deprecation
-`v0.1.4` is the current release and targets Zig `0.16.0+`.
+::: warning v0.1.5 release and Zig 0.15 deprecation
+`v0.1.5` is the current release and targets Zig `0.16.0+`.
 `v0.1.2` is the previous stable release for the immediate prior `0.1.x` line.
 Zig `0.15` support is legacy and remains available only through `0.0.7`.
 The HTTPS/TLS reader fix for Zig `0.16` empty-buffer reads is included in this release.
@@ -49,20 +49,20 @@ zig build -Dtarget=aarch64-macos
 ```
 :::
 
-## Method 1: Zig Fetch (Latest Release 0.1.4)
+## Method 1: Zig Fetch (Latest Release 0.1.5)
 
 Use the latest tagged release for reproducible builds:
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.4.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.5.tar.gz
 ```
 
-## Method 2: Zig Fetch (Previous Stable 0.1.2)
+## Method 2: Zig Fetch (Previous Stable 0.1.4)
 
-Use the previous stable `0.1.2` release if you want the last `0.1.x` tag before `0.1.4`:
+Use the previous stable `0.1.4` release if you want the last `0.1.x` tag before `0.1.5`:
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.2.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.4.tar.gz
 ```
 
 ## Method 3: Zig Fetch (Legacy Zig 0.15 Support - 0.0.7)
@@ -92,10 +92,10 @@ You can also add the dependency manually:
 ```zig
 .{
     .name = "my-project",
-    .version = "0.1.4",
+    .version = "0.1.5",
     .dependencies = .{
         .httpx = .{
-            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.4.tar.gz",
+            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.5.tar.gz",
             .hash = "...", // Run zig fetch --save <url> to auto-fill this.
         },
     },

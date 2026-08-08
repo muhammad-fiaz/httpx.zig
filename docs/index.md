@@ -60,8 +60,8 @@ Benchmark target: `x86_64-windows`, `ReleaseFast`.
 
 ## Install
 
-::: warning v0.1.4 release and Zig 0.15 deprecation
-`v0.1.4` is the current release and targets Zig `0.16.0+`.
+::: warning v0.1.5 release and Zig 0.15 deprecation
+`v0.1.5` is the current release and targets Zig `0.16.0+`.
 `v0.1.2` is the previous stable release for the immediate prior `0.1.x` line.
 Zig `0.15` support is legacy and remains available only through `0.0.7`.
 The HTTPS/TLS reader fix for Zig `0.16` empty-buffer reads is included in this release.
@@ -70,10 +70,10 @@ If you are upgrading from `0.0.7`, review the GitHub Releases page for migration
 
 Choose one of these installation methods:
 
-1. Latest release (0.1.4)
+1. Latest release (0.1.5)
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.4.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.5.tar.gz
 ```
 
 2. Previous stable release (0.1.2)
@@ -103,7 +103,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.4.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.5.tar.gz",
     .hash = "...",
   },
 },
