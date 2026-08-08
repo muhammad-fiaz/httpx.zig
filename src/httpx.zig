@@ -289,6 +289,10 @@ pub const MultipartPart = multipart.Part;
 pub const MultipartParsed = multipart.ParsedParts;
 pub const extractMultipartBoundary = multipart.extractBoundary;
 pub const parseMultipart = multipart.parse;
+/// Safe per-part data limit for multipart uploads on Windows (64 KB).
+/// See `multipart.MAX_RECOMMENDED_CHUNK` for details.
+pub const MultipartMaxChunk = multipart.MAX_RECOMMENDED_CHUNK;
+
 
 // Metrics exports
 pub const Metrics = metrics.Metrics;

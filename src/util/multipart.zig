@@ -20,10 +20,35 @@
 //!     std.debug.print("field={s} size={d}\n", .{ part.name, part.data.len });
 //! }
 //! ```
+//!
+//! ## Large File Uploads (Windows)
+//!
+//! On Windows the Winsock kernel send buffer is typically 8–64 KB. Sending a
+//! single large multipart body (assembled entirely in memory) through one
+//! `winsock.send()` call can cause the upload to hang or fail after a few
+//! parts (see issue #26).  To avoid this:
+//!
+//! - Keep each part's `data` slice under `MAX_RECOMMENDED_CHUNK` (64 KB) when
+//!   possible, or use `addFileChunked` which writes large blobs in small pieces.
+//! - When doing multi-part chunked uploads, split the file at the call site
+//!   (loop over 64 KB slices) and send each slice as a separate HTTP request.
+
 
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+
+/// Recommended maximum byte size for a single multipart file part's data.
+///
+/// Windows Winsock's kernel send buffer is typically 8–64 KB. Assembling a
+/// multipart body larger than this limit and sending it as one request may
+/// cause `winsock.send()` to block or return `WSAEWOULDBLOCK`, making the
+/// upload appear to hang after a few parts (issue #26).
+///
+/// Use `MultipartBuilder.addFileChunked` or split large files at the call
+/// site and issue one request per `MAX_RECOMMENDED_CHUNK`-sized slice.
+pub const MAX_RECOMMENDED_CHUNK: usize = 65536;
+
 
 /// A single parsed multipart part (field or file).
 pub const Part = struct {
@@ -243,6 +268,34 @@ pub const MultipartBuilder = struct {
         try self.buf.appendSlice(self.allocator, "\r\n");
     }
 
+    /// Appends a file upload part, writing `data` in `MAX_RECOMMENDED_CHUNK`-sized
+    /// slices to avoid allocating one giant buffer.
+    ///
+    /// Prefer this over `addFile` when `data.len` may exceed `MAX_RECOMMENDED_CHUNK`
+    /// (64 KB). On Windows, assembling a single multipart body larger than the
+    /// Winsock kernel send buffer (~8–64 KB) and sending it all at once can cause
+    /// uploads to hang after a few parts (issue #26).
+    pub fn addFileChunked(
+        self: *Self,
+        name: []const u8,
+        filename: []const u8,
+        content_type: []const u8,
+        data: []const u8,
+    ) !void {
+        const escaped_name = try escapeQuote(self.allocator, name);
+        defer if (escaped_name.ptr != name.ptr) self.allocator.free(escaped_name);
+        const escaped_filename = try escapeQuote(self.allocator, filename);
+        defer if (escaped_filename.ptr != filename.ptr) self.allocator.free(escaped_filename);
+        try self.buf.print(self.allocator, "--{s}\r\nContent-Disposition: form-data; name=\"{s}\"; filename=\"{s}\"\r\nContent-Type: {s}\r\n\r\n", .{ self.boundary, escaped_name, escaped_filename, content_type });
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const end = @min(offset + MAX_RECOMMENDED_CHUNK, data.len);
+            try self.buf.appendSlice(self.allocator, data[offset..end]);
+            offset = end;
+        }
+        try self.buf.appendSlice(self.allocator, "\r\n");
+    }
+
     /// Finalizes and returns the complete body. Caller owns the result.
     pub fn build(self: *Self) ![]u8 {
         try self.buf.print(self.allocator, "--{s}--\r\n", .{self.boundary});
@@ -322,3 +375,32 @@ test "MultipartBuilder contentType" {
     defer allocator.free(ct);
     try std.testing.expectEqualStrings("multipart/form-data; boundary=MyBound", ct);
 }
+
+test "MultipartBuilder addFileChunked + parse roundtrip" {
+    const allocator = std.testing.allocator;
+    const boundary = "ChunkedBound777";
+
+    var b = MultipartBuilder.init(allocator, boundary);
+    defer b.deinit();
+
+    // Create a 150KB dummy file data to exceed MAX_RECOMMENDED_CHUNK (64KB)
+    const large_data = try allocator.alloc(u8, 150 * 1024);
+    defer allocator.free(large_data);
+    @memset(large_data, 0x42); // 'B'
+
+    try b.addFileChunked("big_file", "large.bin", "application/octet-stream", large_data);
+
+    const body = try b.build();
+    defer allocator.free(body);
+
+    var r = try parse(allocator, body, boundary);
+    defer r.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), r.parts.len);
+    try std.testing.expectEqualStrings("big_file", r.parts[0].name);
+    try std.testing.expectEqualStrings("large.bin", r.parts[0].filename.?);
+    try std.testing.expectEqualStrings("application/octet-stream", r.parts[0].content_type);
+    try std.testing.expectEqual(large_data.len, r.parts[0].data.len);
+    try std.testing.expectEqualSlices(u8, large_data, r.parts[0].data);
+}
+

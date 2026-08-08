@@ -241,6 +241,10 @@ pub const RequestOptions = struct {
     bearer_token: ?[]const u8 = null,
     basic_auth: ?BasicAuth = null,
     timeout_ms: ?u64 = null,
+    connect_timeout_ms: ?u64 = null,
+    read_timeout_ms: ?u64 = null,
+    write_timeout_ms: ?u64 = null,
+    timeouts: ?types.Timeouts = null,
     follow_redirects: ?bool = null,
     version: ?types.Version = null,
     multipart_fields: ?[]const MultipartField = null,
@@ -358,10 +362,38 @@ pub const RequestOptions = struct {
         return out;
     }
 
-    /// Returns a copy with a per-request timeout.
+    /// Returns a copy with a per-request uniform timeout across connect/read/write phases.
     pub fn withTimeoutMs(self: RequestOptions, timeout_ms: u64) RequestOptions {
         var out = self;
         out.timeout_ms = timeout_ms;
+        return out;
+    }
+
+    /// Returns a copy with explicit per-phase timeouts struct.
+    pub fn withTimeouts(self: RequestOptions, timeouts: types.Timeouts) RequestOptions {
+        var out = self;
+        out.timeouts = timeouts;
+        return out;
+    }
+
+    /// Returns a copy with explicit connect phase timeout in milliseconds.
+    pub fn withConnectTimeoutMs(self: RequestOptions, connect_timeout_ms: u64) RequestOptions {
+        var out = self;
+        out.connect_timeout_ms = connect_timeout_ms;
+        return out;
+    }
+
+    /// Returns a copy with explicit read phase timeout in milliseconds.
+    pub fn withReadTimeoutMs(self: RequestOptions, read_timeout_ms: u64) RequestOptions {
+        var out = self;
+        out.read_timeout_ms = read_timeout_ms;
+        return out;
+    }
+
+    /// Returns a copy with explicit write phase timeout in milliseconds.
+    pub fn withWriteTimeoutMs(self: RequestOptions, write_timeout_ms: u64) RequestOptions {
+        var out = self;
+        out.write_timeout_ms = write_timeout_ms;
         return out;
     }
 
@@ -721,19 +753,36 @@ pub const Client = struct {
         }
     }
 
-    fn resolveRequestTimeouts(self: *const Self, timeout_override_ms: ?u64) RequestTimeouts {
-        if (timeout_override_ms) |ms| {
-            return .{ .connect_ms = ms, .read_ms = ms, .write_ms = ms };
+    fn resolveRequestTimeouts(self: *const Self, req_opts: RequestOptions) RequestTimeouts {
+        var connect_ms = self.config.timeouts.connect_ms;
+        var read_ms = self.config.timeouts.read_ms;
+        var write_ms = self.config.timeouts.write_ms;
+
+        if (req_opts.timeouts) |t| {
+            connect_ms = t.connect_ms;
+            read_ms = t.read_ms;
+            write_ms = t.write_ms;
         }
+
+        if (req_opts.timeout_ms) |ms| {
+            connect_ms = ms;
+            read_ms = ms;
+            write_ms = ms;
+        }
+
+        if (req_opts.connect_timeout_ms) |c_ms| connect_ms = c_ms;
+        if (req_opts.read_timeout_ms) |r_ms| read_ms = r_ms;
+        if (req_opts.write_timeout_ms) |w_ms| write_ms = w_ms;
+
         return .{
-            .connect_ms = self.config.timeouts.connect_ms,
-            .read_ms = self.config.timeouts.read_ms,
-            .write_ms = self.config.timeouts.write_ms,
+            .connect_ms = connect_ms,
+            .read_ms = read_ms,
+            .write_ms = write_ms,
         };
     }
 
     fn executeRequestOnce(self: *Self, req: *Request, reqOpts: RequestOptions) !Response {
-        const timeouts = self.resolveRequestTimeouts(reqOpts.timeout_ms);
+        const timeouts = self.resolveRequestTimeouts(reqOpts);
         const proxy = reqOpts.proxy orelse self.config.proxy;
         const keep_alive = reqOpts.keep_alive orelse self.config.keep_alive;
         const verify_ssl = reqOpts.verify_ssl orelse self.config.verify_ssl;
@@ -2772,3 +2821,51 @@ test "RequestOptions per-request overrides" {
     try std.testing.expectEqual(false, opts.keep_alive.?);
     try std.testing.expectEqualStrings("/tmp/test.sock", opts.unix_socket_path.?);
 }
+
+test "RequestOptions explicit timeout resolution" {
+    const allocator = std.testing.allocator;
+    var client = Client.initWithConfig(allocator, .{
+        .timeouts = .{
+            .connect_ms = 5000,
+            .read_ms = 10000,
+            .write_ms = 15000,
+        },
+    });
+    defer client.deinit();
+
+    // Default fallback
+    const t_def = client.resolveRequestTimeouts(.{});
+    try std.testing.expectEqual(@as(u64, 5000), t_def.connect_ms);
+    try std.testing.expectEqual(@as(u64, 10000), t_def.read_ms);
+    try std.testing.expectEqual(@as(u64, 15000), t_def.write_ms);
+
+    // Uniform timeout_ms override
+    const t_uni = client.resolveRequestTimeouts(RequestOptions.defaults().withTimeoutMs(2000));
+    try std.testing.expectEqual(@as(u64, 2000), t_uni.connect_ms);
+    try std.testing.expectEqual(@as(u64, 2000), t_uni.read_ms);
+    try std.testing.expectEqual(@as(u64, 2000), t_uni.write_ms);
+
+    // Explicit per-phase timeout overrides
+    const t_exp = client.resolveRequestTimeouts(
+        RequestOptions.defaults()
+            .withConnectTimeoutMs(100)
+            .withReadTimeoutMs(200)
+            .withWriteTimeoutMs(300),
+    );
+    try std.testing.expectEqual(@as(u64, 100), t_exp.connect_ms);
+    try std.testing.expectEqual(@as(u64, 200), t_exp.read_ms);
+    try std.testing.expectEqual(@as(u64, 300), t_exp.write_ms);
+
+    // Explicit timeouts struct override
+    const t_struct = client.resolveRequestTimeouts(
+        RequestOptions.defaults().withTimeouts(.{
+            .connect_ms = 111,
+            .read_ms = 222,
+            .write_ms = 333,
+        }),
+    );
+    try std.testing.expectEqual(@as(u64, 111), t_struct.connect_ms);
+    try std.testing.expectEqual(@as(u64, 222), t_struct.read_ms);
+    try std.testing.expectEqual(@as(u64, 333), t_struct.write_ms);
+}
+

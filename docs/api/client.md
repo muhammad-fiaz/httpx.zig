@@ -77,7 +77,7 @@ defer client.deinit();
 | `retry_policy` | `RetryPolicy` | `{}` | Configuration for automatic retries. |
 | `redirect_policy` | `RedirectPolicy` | `{}` | Configuration for handling redirects. |
 | `default_headers` | `?[]const [2][]const u8` | `null` | Headers added to every request. |
-| `user_agent` | `[]const u8` | `"httpx.zig/0.1.4"` | User-Agent header value. |
+| `user_agent` | `[]const u8` | `"httpx.zig/0.1.5"` | User-Agent header value. |
 | `max_response_size` | `usize` | `100MB` | Maximum allowed response body size. |
 | `follow_redirects` | `bool` | `true` | Whether to automatically follow redirects. |
 | `verify_ssl` | `bool` | `true` | Whether to verify SSL certificates. |
@@ -294,7 +294,11 @@ Per-request overrides for configuration.
 | `form_fields` | `?[]const [2][]const u8` | `null` | Form fields encoded as `application/x-www-form-urlencoded`. |
 | `bearer_token` | `?[]const u8` | `null` | Sets `Authorization: Bearer <token>`. |
 | `basic_auth` | `?BasicAuth` | `null` | Sets `Authorization: Basic ...` using username/password credentials. |
-| `timeout_ms` | `?u64` | `null` | Request-specific timeout override for connect, read, and write phases. |
+| `timeout_ms` | `?u64` | `null` | Request-specific uniform timeout override across connect, read, and write phases. |
+| `connect_timeout_ms` | `?u64` | `null` | Request-specific connect phase timeout override (ms). |
+| `read_timeout_ms` | `?u64` | `null` | Request-specific read phase timeout override (ms). |
+| `write_timeout_ms` | `?u64` | `null` | Request-specific write phase timeout override (ms). |
+| `timeouts` | `?Timeouts` | `null` | Explicit request-specific `Timeouts` struct override. |
 | `follow_redirects` | `?bool` | `null` | Override client redirect setting. |
 | `version` | `?Version` | `null` | Force a request over a specific protocol runtime (`.HTTP_1_1`, `.HTTP_2`, `.HTTP_3`). |
 | `proxy` | `?Proxy` | `null` | Per-request forward proxy override. |
@@ -343,6 +347,10 @@ Available helpers:
 - `withBearerToken(token)`
 - `withBasicAuth(username, password)`
 - `withTimeoutMs(ms)`
+- `withConnectTimeoutMs(ms)`
+- `withReadTimeoutMs(ms)`
+- `withWriteTimeoutMs(ms)`
+- `withTimeouts(timeouts)`
 - `withFollowRedirects(bool)`
 - `withVersion(version)`
 - `withHttp2()`
@@ -351,6 +359,44 @@ Available helpers:
 - `withSslVerification(bool)`
 - `withKeepAlive(bool)`
 - `withUnixSocket(path)`
+- `withMultipartFields(fields)`
+- `withMultipartFiles(files)`
+- `withMultipartBoundary(boundary)`
+
+### Multipart File Uploads
+
+Use `withMultipartFields` and `withMultipartFiles` to send `multipart/form-data` bodies.
+The client automatically assembles the body and sets the `Content-Type` header.
+
+```zig
+const fields = [_]httpx.MultipartField{
+    .{ .name = "user",  .value = "alice" },
+    .{ .name = "part",  .value = "1" },
+};
+const files = [_]httpx.MultipartFile{
+    .{ .name = "file", .filename = "data.bin", .data = chunk_slice },
+};
+
+const opts = httpx.RequestOptions.defaults()
+    .withMultipartFields(&fields)
+    .withMultipartFiles(&files);
+
+var resp = try client.post("https://example.com/upload", opts);
+defer resp.deinit();
+```
+
+> **Windows — buffer limit (issue #26)**
+>
+> On Windows the Winsock kernel send buffer is typically 8–64 KB. When sending
+> large multipart data as a single body, `winsock.send()` may stall.
+>
+> httpx.zig 0.1.5+ automatically caps each send call to 64 KB, so most uploads
+> now work without application changes. For extra safety—especially for payloads
+> larger than a few hundred KB—keep each `MultipartFile.data` slice under
+> `httpx.MultipartMaxChunk` (64 KB) and issue one request per slice.
+> See the [Multipart Guide](../guide/multipart.md#large-file-uploads--windows-compatibility)
+> for a complete resumable upload example.
+
 
 ## Response
 

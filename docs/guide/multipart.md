@@ -201,3 +201,74 @@ pub fn main() !void {
     try server.listen();
 }
 ```
+## Large File Uploads & Windows Compatibility
+
+> **Windows users:** a known limitation of Winsock (issue [#26](https://github.com/muhammad-fiaz/httpx.zig/issues/26)) can
+> cause multipart uploads to hang after a few parts when the combined request body
+> exceeds ~64 KB. The root cause is that a single `winsock.send()` call with a
+> buffer larger than the kernel send buffer (~8–64 KB) triggers `WSAEWOULDBLOCK`,
+> which previously caused the upload loop to stall.
+
+**httpx.zig 0.1.5+** fixes the socket layer to cap each individual `send()` call
+at 64 KB automatically, and increases the writability timeout from 5 s to 30 s.
+No application-level changes are required for most users.
+
+For large file data passed as a single slice, you can also use
+`MultipartBuilder.addFileChunked`, which writes `data` internally in
+`MAX_RECOMMENDED_CHUNK` (64 KB) blocks:
+
+```zig
+const large_bytes: []const u8 = ...; // e.g. @embedFile("big.bin")
+
+var builder = httpx.MultipartBuilder.init(allocator, "myBound");
+defer builder.deinit();
+
+try builder.addField("description", "large upload");
+// Writes internally in ≤64 KB slices — safe on all platforms.
+try builder.addFileChunked("file", "big.bin", "application/octet-stream", large_bytes);
+
+const body = try builder.build();
+defer allocator.free(body);
+```
+
+### Resumable / Chunked Upload Pattern
+
+When implementing a server-side chunked upload protocol (e.g. `TUS`), split the
+file yourself at the call site and send each slice as a separate POST request.
+Use `httpx.MultipartMaxChunk` (64 KB) as the slice size:
+
+```zig
+const chunk_size = httpx.MultipartMaxChunk; // 65 536 bytes
+
+var offset: usize = 0;
+var part: usize = 1;
+while (offset < file_bytes.len) {
+    const end = @min(offset + chunk_size, file_bytes.len);
+    const slice = file_bytes[offset..end];
+
+    const part_str = try std.fmt.allocPrint(allocator, "{d}", .{part});
+    defer allocator.free(part_str);
+
+    const fields = [_]httpx.MultipartField{
+        .{ .name = "part", .value = part_str },
+    };
+    const files = [_]httpx.MultipartFile{
+        .{ .name = "data", .filename = "chunk.bin", .data = slice },
+    };
+
+    const opts = httpx.RequestOptions.defaults()
+        .withMultipartFields(&fields)
+        .withMultipartFiles(&files);
+
+    var resp = try client.post(upload_url, opts);
+    defer resp.deinit();
+
+    offset = end;
+    part += 1;
+}
+```
+
+This pattern sends each chunk as a separate HTTP request, which:
+- Keeps each request body well under the 64 KB socket limit
+- Allows for retry of individual failed parts
+- Works reliably on Windows, Linux, and macOS

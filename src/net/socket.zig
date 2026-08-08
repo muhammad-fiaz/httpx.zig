@@ -289,11 +289,21 @@ fn posixAccept(sock: posix.socket_t, addr_ptr: *posix.sockaddr, addr_len: *posix
     }
 }
 
+/// Maximum bytes passed to a single `winsock.send()` call.
+///
+/// Windows Winsock may return WSAEWOULDBLOCK or WSAENOBUFS when a single
+/// blocking send exceeds the kernel send buffer (typically 8–64 KB). Capping
+/// each send to 64 KB keeps individual calls within the buffer and prevents
+/// the upload loop from hanging on large multipart payloads (issue #26).
+const MAX_WINSOCK_SEND_CHUNK: usize = 65536;
+
 fn winsockWaitWritable(sock: posix.socket_t) !void {
     var write_set: winsock.fd_set = .{ .fd_count = 0, .fd_array = undefined };
     write_set.fd_array[0] = toWinsockSocket(sock);
     write_set.fd_count = 1;
-    var tv = posix.timeval{ .sec = 5, .usec = 0 };
+    // 30-second timeout matches the default client write_ms so that large
+    // multipart uploads do not time out prematurely on slow connections.
+    var tv = posix.timeval{ .sec = 30, .usec = 0 };
     const rc = winsock.select(0, null, &write_set, null, &tv);
     if (rc == winsock.SOCKET_ERROR) return error.SendFailed;
     if (rc == 0) return error.TimedOut;
@@ -301,9 +311,14 @@ fn winsockWaitWritable(sock: posix.socket_t) !void {
 
 fn posixSend(sock: posix.socket_t, data: []const u8, flags: u32) !usize {
     if (is_windows) {
+        // Cap the individual send to MAX_WINSOCK_SEND_CHUNK bytes.
+        // Passing the full (potentially multi-MB) slice in a single winsock.send()
+        // can trigger WSAEWOULDBLOCK or WSAENOBUFS on Windows even for blocking
+        // sockets once the kernel send buffer fills (issue #26).
+        const chunk = data[0..@min(data.len, MAX_WINSOCK_SEND_CHUNK)];
         while (true) {
-            const send_len: i32 = std.math.cast(i32, data.len) orelse return error.SendFailed;
-            const rc = winsock.send(toWinsockSocket(sock), data.ptr, send_len, @intCast(flags));
+            const send_len: i32 = std.math.cast(i32, chunk.len) orelse return error.SendFailed;
+            const rc = winsock.send(toWinsockSocket(sock), chunk.ptr, send_len, @intCast(flags));
             if (rc == winsock.SOCKET_ERROR) {
                 const err = winsock.WSAGetLastError();
                 if (err == winsock.WSAEWOULDBLOCK) {

@@ -105,7 +105,7 @@
 | **No External Dependencies** | Pure Zig implementation for maximum portability and ease of build. Compression uses bundled brotli and zstd packages. | https://muhammad-fiaz.github.io/httpx.zig/guide/installation |
 | **Shared Common Helpers** | Reusable query/cookie helpers plus MIME resolution with explicit fallback and external mapping support. | https://muhammad-fiaz.github.io/httpx.zig/api/utils |
 | **WebSockets** | RFC 6455 upgrade checks, handshake accept key computations, and frame encoding/decoding. | https://muhammad-fiaz.github.io/httpx.zig/examples/websocket-example |
-| **Multipart Form Data** | RFC 2046 multipart body builder and parser for text fields and file uploads. | https://muhammad-fiaz.github.io/httpx.zig/examples/multipart-example |
+| **Multipart Form Data** | RFC 2046 multipart body builder (`addFile`, `addFileChunked`) and parser for text fields and large file uploads. Windows-safe: each `winsock.send()` is capped at 64 KB to prevent upload hangs (fix for issue [#26](https://github.com/muhammad-fiaz/httpx.zig/issues/26)). | https://muhammad-fiaz.github.io/httpx.zig/examples/multipart-example |
 | **Session Management** | TTL-based secure in-memory session store and cookie integration. | https://muhammad-fiaz.github.io/httpx.zig/examples/session-example |
 | **Observability & Metrics** | Real-time traffic counters, per-class status tracking, and latency measuring. | https://muhammad-fiaz.github.io/httpx.zig/examples/metrics-example |
 | **Unix Domain Sockets** | High-performance client-server IPC over AF_UNIX sockets. Available on Linux, macOS, and Windows 10 build 17061+ (requires Developer Mode). | https://muhammad-fiaz.github.io/httpx.zig/examples/unix-socket-example |
@@ -170,20 +170,20 @@ zig build -Dtarget=x86-windows
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.1.4)**
+**Latest Release (v0.1.5)**
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.5.tar.gz
+```
+
+**Previous Stable Release (v0.1.4)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.4.tar.gz
 ```
 
-**Previous Stable Release (v0.1.3)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.3.tar.gz
-```
-
 > [!WARNING]
-> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.1.4**.
+> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.1.5**.
 
 ### Method 2: Zig Fetch (Main Branch)
 
@@ -200,7 +200,7 @@ Add the dependency to your `build.zig.zon` file.
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.4.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.5.tar.gz",
         .hash = "...", // Run `zig fetch --save <url>` to generate the hash.
     },
 },
@@ -565,6 +565,29 @@ Benchmark target: `x86_64-windows`, `ReleaseFast`.
 | h2_frame_header | 1.58 | 632095269 |
 | h3_varint_encode | 1.88 | 531229946 |
  
+## Bug Fixes
+
+### v0.1.5 — Multipart upload hang on Windows (issue [#26](https://github.com/muhammad-fiaz/httpx.zig/issues/26))
+
+Sending multipart file data larger than ~13 KB caused the upload to hang after a
+few parts on Windows. Root cause: `posixSend` passed the entire remaining buffer
+to a single `winsock.send()` call, which exceeded the kernel send buffer (~8–64 KB)
+and triggered `WSAEWOULDBLOCK` under a 5-second select timeout.
+
+**Fix:**
+- `src/net/socket.zig`: Each individual `winsock.send()` call is now capped to
+  **64 KB** (`MAX_WINSOCK_SEND_CHUNK`). The `sendAll` loop correctly retries until
+  all bytes are sent.
+- `src/net/socket.zig`: `winsockWaitWritable` timeout raised from 5 s → **30 s**
+  (matches the default client `write_ms`).
+- `src/util/multipart.zig`: New `MultipartBuilder.addFileChunked` method and
+  `MAX_RECOMMENDED_CHUNK` constant exported as `httpx.MultipartMaxChunk`.
+
+No application changes are required. Existing code using `withMultipartFiles`
+or `MultipartBuilder.addFile` now works correctly for arbitrarily large payloads.
+
+---
+
 ## Contributing
  
 Contributions are welcome! Please:
