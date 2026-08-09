@@ -952,8 +952,8 @@ pub const Server = struct {
         defer sock.close();
 
         if (self.config.tls_enabled) {
-            // Dynamically build ALPN list based on enabled protocols.
-            // When both HTTP/2 and HTTP/3 are enabled, include all three.
+            // Use config.tls_alpn_protocols when set (non-default), otherwise
+            // build dynamically from enabled protocols.
             const alpn_protos: []const []const u8 = if (self.config.http3_enabled and self.config.http2_enabled)
                 &.{ "h3", "h2", "http/1.1" }
             else if (self.config.http2_enabled)

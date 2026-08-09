@@ -854,6 +854,10 @@ pub const Handshake13Server = struct {
         out[0] = @intFromEnum(tls.HandshakeType.encrypted_extensions);
         off += 4;
 
+        // Reserve 2-byte extension data length field
+        const ext_len_offset = off;
+        off += 2;
+
         var ext_written: usize = 0;
 
         // ALPN extension (if negotiated)
@@ -862,9 +866,8 @@ pub const Handshake13Server = struct {
             ext_written += try extensions_mod.writeAlpnExtension(out[off + ext_written ..], &proto_list);
         }
 
-        // Extension data length
-        mem.writeInt(u16, out[off..][0..2], @intCast(ext_written), .big);
-        off += 2;
+        // Fill in the extension data length
+        mem.writeInt(u16, out[ext_len_offset..][0..2], @intCast(ext_written), .big);
         off += ext_written;
 
         const body_len: u24 = @intCast(off - 4);
