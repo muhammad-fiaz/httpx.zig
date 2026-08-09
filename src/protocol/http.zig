@@ -503,10 +503,13 @@ pub const Http3FrameType = enum(u64) {
 };
 
 /// Configuration parameters for HTTP/3 connections.
+/// This is the canonical definition; see also `types.Http3Settings`.
 pub const Http3Settings = struct {
-    max_field_section_size: u64 = 0,
-    qpack_max_table_capacity: u64 = 0,
-    qpack_blocked_streams: u64 = 0,
+    max_field_section_size: u64 = 8192,
+    qpack_max_table_capacity: u64 = 4096,
+    qpack_blocked_streams: u64 = 100,
+    enable_connect_protocol: bool = true,
+    enable_datagrams: bool = false,
 };
 
 /// Standard error codes for HTTP/3 stream and connection errors.

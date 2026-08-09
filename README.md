@@ -423,7 +423,7 @@ try server.listen();
  
 ## Examples
 
-The `examples/` directory contains **49 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
+The `examples/` directory contains **56 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
 
 **Client:**
 - [`simple_get`](examples/simple_get.zig) - Basic GET requests
@@ -471,6 +471,13 @@ The `examples/` directory contains **49 comprehensive, runnable examples** demon
 - [`http3_client_runtime`](examples/http3_client_runtime.zig) - HTTP/3 client runtime
 - [`http3_server_runtime`](examples/http3_server_runtime.zig) - HTTP/3 server runtime
 - [`http3_advanced`](examples/http3_advanced.zig) - QPACK stream instructions, QUIC cancellation, transport parameters
+
+**TLS:**
+- [`tls_https_get`](examples/tls_https_get.zig) - Simple HTTPS GET via local TLS server (HTTP/1.1 + HTTP/2 + HTTP/3)
+- [`tls_config_options`](examples/tls_config_options.zig) - TLS configuration options and ALPN negotiation
+- [`tls_handshake_details`](examples/tls_handshake_details.zig) - TLS handshake info and cipher suites
+- [`tls_custom_ca`](examples/tls_custom_ca.zig) - Custom CA certificate verification with self-signed certs
+- [`tls_mtls`](examples/tls_mtls.zig) - Mutual TLS (mTLS) client certificate authentication
 
 **Advanced Capabilities:**
 - [`websocket_example`](examples/websocket_example.zig) - RFC 6455 WebSocket client

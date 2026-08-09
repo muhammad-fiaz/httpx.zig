@@ -1200,6 +1200,18 @@ pub const Client = struct {
         response_headers = Headers.init(self.allocator);
 
         if (response_body.items.len > 0) {
+            // Decompress body based on Content-Encoding header (HTTP/3).
+            if (response_headers.get(HeaderName.CONTENT_ENCODING)) |encoding_str| {
+                if (@import("../util/compression.zig").ContentEncoding.fromString(encoding_str)) |enc| {
+                    if (enc != .identity) {
+                        if (@import("../util/compression.zig").decompress(self.allocator, enc, response_body.items)) |decompressed| {
+                            response.body = decompressed;
+                            response.body_owned = true;
+                            return response;
+                        } else |_| {}
+                    }
+                }
+            }
             response.body = try response_body.toOwnedSlice(self.allocator);
             response.body_owned = true;
         }
@@ -1842,6 +1854,18 @@ pub const Client = struct {
         }
 
         if (body.items.len > 0) {
+            // Decompress body based on Content-Encoding header (HTTP/2).
+            if (response_headers.get(HeaderName.CONTENT_ENCODING)) |encoding_str| {
+                if (@import("../util/compression.zig").ContentEncoding.fromString(encoding_str)) |enc| {
+                    if (enc != .identity) {
+                        if (@import("../util/compression.zig").decompress(self.allocator, enc, body.items)) |decompressed| {
+                            response.body = decompressed;
+                            response.body_owned = true;
+                            return response;
+                        } else |_| {}
+                    }
+                }
+            }
             response.body = try body.toOwnedSlice(self.allocator);
             response.body_owned = true;
         }

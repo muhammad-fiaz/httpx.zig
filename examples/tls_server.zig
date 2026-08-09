@@ -4,7 +4,7 @@
 //! Shows how to:
 //! - Configure a server with TLS enabled using cert/key PEM files
 //! - Accept TLS connections with ALPN negotiation
-//! - Handle HTTP/1.1 and HTTP/2 over TLS
+//! - Handle HTTP/1.1, HTTP/2, and HTTP/3 over TLS
 //! - Connect a TLS client to the server
 
 const std = @import("std");
@@ -42,7 +42,7 @@ pub fn main() !void {
         .tls_enabled = true,
         .tls_cert_path = "examples/certs/server.crt",
         .tls_key_path = "examples/certs/server.key",
-        .tls_alpn_protocols = &.{ "h2", "http/1.1" },
+        .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
         .http2_enabled = true,
         .keep_alive = true,
     });
@@ -54,8 +54,9 @@ pub fn main() !void {
     std.debug.print("  TLS: enabled (custom implementation)\n", .{});
     std.debug.print("  Cert: examples/certs/server.crt\n", .{});
     std.debug.print("  Key:  examples/certs/server.key\n", .{});
-    std.debug.print("  ALPN: h2, http/1.1\n", .{});
+    std.debug.print("  ALPN: h3, h2, http/1.1\n", .{});
     std.debug.print("  HTTP/2: enabled\n", .{});
+    std.debug.print("  HTTP/3: enabled\n", .{});
 
     // 2. Start the TLS server in background
     const server_thread = try server.listenInBackground();

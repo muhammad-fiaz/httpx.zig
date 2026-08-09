@@ -5,8 +5,8 @@ Demonstrates a raw TLS 1.2/1.3 handshake using the built-in TLS implementation, 
 ## Demo Program
 
 ```zig
-// Configure TLS with ALPN for h2 + http/1.1
-const tls_config = tls.TlsConfig.insecureWithH2(allocator);
+// Configure TLS with ALPN for h3 + h2 + http/1.1
+const tls_config = tls.TlsConfig.insecureWithH3(allocator);
 
 // Connect to the server
 const address = httpx.address.resolve(allocator, host, port);
@@ -37,7 +37,7 @@ zig build example-https-client
 
 ## Checklist
 
-- [x] TLS config created with ALPN (h2, http/1.1)
+- [x] TLS config created with ALPN (h3, h2, http/1.1)
 - [x] Socket connects to `example.com:443`
 - [x] TLS handshake completes (or offline demo prints cipher suites)
 - [x] ALPN protocol is printed if negotiated

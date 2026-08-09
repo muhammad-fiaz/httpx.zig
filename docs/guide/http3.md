@@ -87,6 +87,10 @@ try server.get("/h3", struct {
 try server.listen();
 ```
 
+::: tip ALPN Default
+When `http3_enabled = true`, the server automatically includes `"h3"` in the ALPN protocols list. The default `tls_alpn_protocols` is `&.{ "h3", "h2", "http/1.1" }`, so clients can negotiate HTTP/3, HTTP/2, or HTTP/1.1 automatically.
+:::
+
 ## QPACK vs HPACK
 
 QPACK is designed for HTTP/3's out-of-order delivery:

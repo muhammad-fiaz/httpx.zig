@@ -150,6 +150,9 @@ pub const Handshake12Client = struct {
 
     /// Process a ServerHello message from the server.
     pub fn processServerHello(self: *Handshake12Client, data: []const u8) errors.TlsError!void {
+        // Minimum: handshake_type(1) + length(3) + version(2) + random(32) + session_id_len(1) + cipher_suite(2) + compression(1) = 42
+        // But session_id can be up to 32 bytes, so we need at least 42 + session_id_len.
+        // We validate incrementally below.
         if (data.len < 42) return error.TlsDecodeError;
 
         var off: usize = 0;
@@ -168,7 +171,9 @@ pub const Handshake12Client = struct {
 
         // Session ID echo
         const session_id_len = data[off];
-        off += 1 + session_id_len;
+        off += 1;
+        if (off + session_id_len + 2 + 1 > data.len) return error.TlsDecodeError;
+        off += session_id_len;
 
         // Cipher suite
         if (off + 2 > data.len) return error.TlsDecodeError;
@@ -464,6 +469,7 @@ pub const Handshake12Server = struct {
 
     /// Process a ClientHello from the client.
     pub fn processClientHello(self: *Handshake12Server, data: []const u8) errors.TlsError!void {
+        // Minimum: handshake_type(1) + length(3) + version(2) + random(32) + session_id_len(1) + cs_len(2) + comp_len(1) = 42
         if (data.len < 42) return error.TlsDecodeError;
 
         var off: usize = 4; // skip handshake type + length
@@ -479,7 +485,9 @@ pub const Handshake12Server = struct {
 
         // Session ID
         const session_id_len = data[off];
-        off += 1 + session_id_len;
+        off += 1;
+        if (off + session_id_len > data.len) return error.TlsDecodeError;
+        off += session_id_len;
 
         // Cipher suites
         if (off + 2 > data.len) return error.TlsDecodeError;

@@ -118,10 +118,15 @@ pub const Handshake13Client = struct {
         const suites = cipher_suites_mod.preferred_suites;
         var cs_count: u16 = 0;
         for (suites) |s| {
-            if (cipher_suites_mod.isTls13Only(s)) {
-                mem.writeInt(u16, out[off..][0..2], @intFromEnum(s), .big);
-                off += 2;
-                cs_count += 1;
+            // Only offer widely-supported TLS 1.3 cipher suites.
+            // AEGIS suites are excluded because many servers don't support them yet.
+            switch (s) {
+                .AES_128_GCM_SHA256, .AES_256_GCM_SHA384, .CHACHA20_POLY1305_SHA256 => {
+                    mem.writeInt(u16, out[off..][0..2], @intFromEnum(s), .big);
+                    off += 2;
+                    cs_count += 1;
+                },
+                else => {},
             }
         }
         mem.writeInt(u16, out[cs_off..][0..2], cs_count * 2, .big);
@@ -183,9 +188,10 @@ pub const Handshake13Client = struct {
         off += 2;
 
         // Placeholder for extension data length
+        const ext_len_off = off;
         off += 2;
 
-        // x25519 key share
+        // x25519 key share (most widely supported)
         const x25519_pub = self.key_exchange.getPublicKey(tls.NamedGroup.x25519) catch return error.TlsKeyExchangeFailed;
         mem.writeInt(u16, out[off..][0..2], @intFromEnum(tls.NamedGroup.x25519), .big);
         off += 2;
@@ -194,7 +200,7 @@ pub const Handshake13Client = struct {
         @memcpy(out[off..][0..x25519_pub.len], x25519_pub);
         off += x25519_pub.len;
 
-        // secp256r1 key share
+        // secp256r1 key share (widely supported fallback)
         const p256_pub = self.key_exchange.getPublicKey(tls.NamedGroup.secp256r1) catch return error.TlsKeyExchangeFailed;
         mem.writeInt(u16, out[off..][0..2], @intFromEnum(tls.NamedGroup.secp256r1), .big);
         off += 2;
@@ -203,25 +209,17 @@ pub const Handshake13Client = struct {
         @memcpy(out[off..][0..p256_pub.len], p256_pub);
         off += p256_pub.len;
 
-        // secp384r1 key share
-        const p384_pub = self.key_exchange.getPublicKey(tls.NamedGroup.secp384r1) catch return error.TlsKeyExchangeFailed;
-        mem.writeInt(u16, out[off..][0..2], @intFromEnum(tls.NamedGroup.secp384r1), .big);
-        off += 2;
-        mem.writeInt(u16, out[off..][0..2], @intCast(p384_pub.len), .big);
-        off += 2;
-        @memcpy(out[off..][0..p384_pub.len], p384_pub);
-        off += p384_pub.len;
-
         // Fill extension data length
         const ext_data_len: u16 = @intCast(off - 4);
-        mem.writeInt(u16, out[2..][0..2], ext_data_len, .big);
+        mem.writeInt(u16, out[ext_len_off..][0..2], ext_data_len, .big);
 
         return off;
     }
 
     /// Process a ServerHello from the server.
     pub fn processServerHello(self: *Handshake13Client, data: []const u8) errors.TlsError!void {
-        if (data.len < 42) return error.TlsDecodeError;
+        // Minimum: handshake_type(1) + length(3) + version(2) + random(32) + session_id_len(1) + session_id(32) + cipher_suite(2) + compression(1) = 74
+        if (data.len < 74) return error.TlsDecodeError;
 
         var off: usize = 4; // skip handshake type + length
 
@@ -243,6 +241,7 @@ pub const Handshake13Client = struct {
         const session_id_len = data[off];
         off += 1;
         if (session_id_len != 32) return error.TlsIllegalParameter;
+        if (off + 32 > data.len) return error.TlsDecodeError;
         if (mem.eql(u8, data[off..][0..32], &self.legacy_session_id) == false) return error.TlsIllegalParameter;
         off += 32;
 
@@ -605,6 +604,7 @@ pub const Handshake13Server = struct {
 
     /// Process a ClientHello message.
     pub fn processClientHello(self: *Handshake13Server, data: []const u8) errors.TlsError!void {
+        // Minimum: handshake_type(1) + length(3) + version(2) + random(32) + session_id_len(1) + cs_len(2) + comp_len(1) = 42
         if (data.len < 42) return error.TlsDecodeError;
 
         // Initialize key exchange early so we have our own key pairs
@@ -627,6 +627,7 @@ pub const Handshake13Server = struct {
         const session_id_len = data[off];
         off += 1;
         if (session_id_len > 32) return error.TlsIllegalParameter;
+        if (off + session_id_len > data.len) return error.TlsDecodeError;
         @memcpy(self.legacy_session_id[0..session_id_len], data[off..][0..session_id_len]);
         off += session_id_len;
 

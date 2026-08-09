@@ -98,12 +98,17 @@ var server = httpx.Server.initWithConfig(allocator, .{
     .tls_enabled = true,
     .tls_cert_path = "examples/certs/server.crt",
     .tls_key_path = "examples/certs/server.key",
-    .tls_alpn_protocols = &.{ "h2", "http/1.1" },
+    .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
     .http2_enabled = true,
+    .http3_enabled = true,
 });
 ```
 
-The server automatically loads the certificate chain and private key on the first TLS connection. ALPN negotiation selects between HTTP/1.1 and HTTP/2 based on the client's offer.
+::: tip ALPN Default
+The default `tls_alpn_protocols` is `&.{ "h3", "h2", "http/1.1" }`, so clients can negotiate HTTP/3, HTTP/2, or HTTP/1.1 automatically.
+:::
+
+The server automatically loads the certificate chain and private key on the first TLS connection. ALPN negotiation selects between HTTP/1.1, HTTP/2, and HTTP/3 based on the client's offer.
 
 ## Connection
 

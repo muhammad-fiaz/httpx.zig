@@ -1,6 +1,7 @@
 //! Simple GET Request Example
 //!
 //! Demonstrates making a basic HTTP GET request using httpx.zig.
+//! Shows both request building and actual network execution.
 
 const std = @import("std");
 const httpx = @import("httpx");
@@ -12,18 +13,8 @@ pub fn main() !void {
 
     std.debug.print("=== Simple GET Request Example ===\n\n", .{});
 
-    const cfg = httpx.ClientConfig.forBaseUrl("https://httpbin.org")
-        .withTimeouts(httpx.Timeouts.fast())
-        .withPoolLimits(16, 4);
-    var client = httpx.Client.initWithConfig(allocator, cfg);
-    defer client.deinit();
-
-    const req_opts = httpx.RequestOptions.defaults()
-        .withTimeoutMs(5_000)
-        .withFollowRedirects(true);
-
-    std.debug.print("Creating GET request to httpbin.org...\n", .{});
-
+    // 1. Build a request manually
+    std.debug.print("--- Request Building ---\n", .{});
     var request = try httpx.Request.init(allocator, .GET, "https://httpbin.org/get");
     defer request.deinit();
 
@@ -33,18 +24,37 @@ pub fn main() !void {
     const serialized = try httpx.formatRequest(&request, allocator);
     defer allocator.free(serialized);
 
-    std.debug.print("\nRequest:\n", .{});
-    std.debug.print("--------\n", .{});
     std.debug.print("{s}\n", .{serialized});
 
-    std.debug.print("\nClient config preview:\n", .{});
-    std.debug.print("  base_url: {s}\n", .{client.config.base_url orelse "(none)"});
-    std.debug.print("  connect timeout: {d}ms\n", .{client.config.timeouts.connect_ms});
-    std.debug.print("  request timeout override: {d}ms\n", .{req_opts.timeout_ms orelse 0});
+    // 2. Create a client and send the request
+    std.debug.print("--- Sending Request ---\n", .{});
+    var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
+        .withTimeouts(httpx.Timeouts.fast())
+        .withRetryPolicy(httpx.RetryPolicy.noRetry()));
+    defer client.deinit();
 
-    std.debug.print("\nDemo complete! (Network request skipped for offline demo)\n", .{});
+    var response = client.get("https://httpbin.org/get", .{
+        .timeout_ms = 10_000,
+    }) catch |err| {
+        std.debug.print("Request failed: {} (network may be unavailable)\n", .{err});
+        std.debug.print("\nHTTP Method Properties:\n", .{});
+        std.debug.print("  GET is idempotent: {}\n", .{httpx.Method.GET.isIdempotent()});
+        std.debug.print("  GET is safe: {}\n", .{httpx.Method.GET.isSafe()});
+        std.debug.print("  GET has request body: {}\n", .{httpx.Method.GET.hasRequestBody()});
+        std.debug.print("\n=== Simple GET Request Example Complete ===\n", .{});
+        return;
+    };
+    defer response.deinit();
+
+    std.debug.print("Status: {d}\n", .{response.status.code});
+    const body = response.body orelse "";
+    std.debug.print("Body length: {d} bytes\n", .{body.len});
+    std.debug.print("Body preview: {s}\n", .{if (body.len > 120) body[0..120] else body});
+
     std.debug.print("\nHTTP Method Properties:\n", .{});
     std.debug.print("  GET is idempotent: {}\n", .{httpx.Method.GET.isIdempotent()});
     std.debug.print("  GET is safe: {}\n", .{httpx.Method.GET.isSafe()});
     std.debug.print("  GET has request body: {}\n", .{httpx.Method.GET.hasRequestBody()});
+
+    std.debug.print("\n=== Simple GET Request Example Complete ===\n", .{});
 }

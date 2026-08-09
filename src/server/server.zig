@@ -95,7 +95,7 @@ pub const ServerConfig = struct {
     tls_enabled: bool = false,
     tls_cert_path: ?[]const u8 = null,
     tls_key_path: ?[]const u8 = null,
-    tls_alpn_protocols: []const []const u8 = &.{ "h2", "http/1.1" },
+    tls_alpn_protocols: []const []const u8 = &.{ "h3", "h2", "http/1.1" },
 };
 
 /// File-serving options used by `Context.fileWithOptions`.

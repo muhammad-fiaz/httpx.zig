@@ -39,6 +39,8 @@ pub fn main() !void {
         .max_connections = 10000,
         .threads = 4,
         .http2_enabled = true,
+        .http3_enabled = true,
+        .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
         .keep_alive = true,
     });
     defer server.deinit();

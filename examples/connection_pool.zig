@@ -1,13 +1,18 @@
 //! Connection Pool Example
 //!
-//! Demonstrates HTTP connection pooling for reusing connections.
+//! Demonstrates HTTP connection pooling by making multiple requests
+//! to a local server and showing connection reuse behavior.
 
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn nowMillis() i64 {
+fn sleepMs(ms: i64) void {
     const io = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Timestamp.now(io, .real).toMilliseconds();
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(ms), .real) catch {};
+}
+
+fn poolHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.json(.{ .status = "ok" });
 }
 
 pub fn main() !void {
@@ -17,35 +22,93 @@ pub fn main() !void {
 
     std.debug.print("=== Connection Pool Example ===\n\n", .{});
 
-    var pool = httpx.pool.ConnectionPool.initWithConfig(allocator, .{
-        .max_connections = 20,
-        .max_per_host = 5,
-        .idle_timeout_ms = 60_000,
-        .max_requests_per_connection = 1000,
+    // 1. Start a local server to demonstrate pooling
+    std.debug.print("--- Starting Local Server ---\n", .{});
+    var server = httpx.Server.initWithConfig(allocator, .{
+        .host = "127.0.0.1",
+        .port = 0,
     });
-    defer pool.deinit();
+    defer server.deinit();
 
-    std.debug.print("Pool Configuration:\n", .{});
-    std.debug.print("  Max connections: {d}\n", .{pool.config.max_connections});
-    std.debug.print("  Max per host: {d}\n", .{pool.config.max_per_host});
-    std.debug.print("  Idle timeout: {d}ms\n", .{pool.config.idle_timeout_ms});
-    std.debug.print("  Max requests/connection: {d}\n", .{pool.config.max_requests_per_connection});
+    try server.get("/pool/status", poolHandler);
+    try server.get("/pool/data", poolHandler);
 
-    std.debug.print("\nPool Statistics:\n", .{});
-    std.debug.print("  Total connections: {d}\n", .{pool.totalCount()});
-    std.debug.print("  Active connections: {d}\n", .{pool.activeCount()});
-    std.debug.print("  Idle connections: {d}\n", .{pool.idleCount()});
+    const server_thread = try server.listenInBackground();
+    defer server_thread.join();
+    defer server.stop();
 
-    std.debug.print("\nConnection health checking:\n", .{});
-    const conn = httpx.pool.Connection{
-        .socket = undefined,
-        .host = "api.example.com",
-        .port = 443,
-        .created_at = nowMillis(),
-        .last_used = nowMillis(),
+    sleepMs(200);
+    const port = server.config.port;
+    std.debug.print("  Server listening on port {d}\n\n", .{port});
+
+    // 2. Create a client with pool configuration
+    var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
+        .withTimeouts(httpx.Timeouts.fast())
+        .withRetryPolicy(httpx.RetryPolicy.noRetry())
+        .withPoolLimits(20, 5));
+    defer client.deinit();
+
+    const base_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port});
+    defer allocator.free(base_url);
+
+    // 3. Show initial pool state
+    std.debug.print("--- Initial Pool State ---\n", .{});
+    var stats = client.poolStats();
+    std.debug.print("  Total connections: {d}\n", .{stats.total});
+    std.debug.print("  Active connections: {d}\n", .{stats.active});
+    std.debug.print("  Idle connections: {d}\n\n", .{stats.idle});
+
+    // 4. Make first request (creates new connection)
+    std.debug.print("--- First Request (new connection) ---\n", .{});
+    const url1 = try std.fmt.allocPrint(allocator, "{s}/pool/status", .{base_url});
+    defer allocator.free(url1);
+
+    var resp1 = client.get(url1, .{}) catch |err| {
+        std.debug.print("Request failed: {}\n", .{err});
+        return;
     };
-    std.debug.print("  Connection to {s}:{d}\n", .{ conn.host, conn.port });
-    std.debug.print("  Is healthy (60s timeout): {}\n", .{conn.isHealthy(60_000)});
+    defer resp1.deinit();
 
-    std.debug.print("\nDemo complete!\n", .{});
+    std.debug.print("  Status: {d}\n", .{resp1.status.code});
+    stats = client.poolStats();
+    std.debug.print("  Pool total: {d}, active: {d}, idle: {d}\n\n", .{ stats.total, stats.active, stats.idle });
+
+    // 5. Make second request (reuses connection from pool)
+    std.debug.print("--- Second Request (reuses connection) ---\n", .{});
+    const url2 = try std.fmt.allocPrint(allocator, "{s}/pool/data", .{base_url});
+    defer allocator.free(url2);
+
+    var resp2 = client.get(url2, .{}) catch |err| {
+        std.debug.print("Request failed: {}\n", .{err});
+        return;
+    };
+    defer resp2.deinit();
+
+    std.debug.print("  Status: {d}\n", .{resp2.status.code});
+    stats = client.poolStats();
+    std.debug.print("  Pool total: {d}, active: {d}, idle: {d}\n\n", .{ stats.total, stats.active, stats.idle });
+
+    // 6. Multiple concurrent requests
+    std.debug.print("--- Multiple Concurrent Requests ---\n", .{});
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        const url = try std.fmt.allocPrint(allocator, "{s}/pool/status", .{base_url});
+        defer allocator.free(url);
+
+        var resp = client.get(url, .{}) catch |err| {
+            std.debug.print("  Request {d} failed: {}\n", .{ i + 1, err });
+            continue;
+        };
+        defer resp.deinit();
+        std.debug.print("  Request {d}: status {d}\n", .{ i + 1, resp.status.code });
+    }
+
+    stats = client.poolStats();
+    std.debug.print("\n--- Final Pool State ---\n", .{});
+    std.debug.print("  Total connections: {d}\n", .{stats.total});
+    std.debug.print("  Active connections: {d}\n", .{stats.active});
+    std.debug.print("  Idle connections: {d}\n", .{stats.idle});
+    std.debug.print("  Host connections (127.0.0.1:{d}): {d}\n", .{ port, client.hostPoolConnectionCount("127.0.0.1", port) });
+
+    std.debug.print("\n=== Connection Pool Example Complete ===\n", .{});
 }

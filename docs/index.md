@@ -194,6 +194,11 @@ Available examples (see the `/examples` folder):
 - `http3_server_runtime.zig`: local end-to-end high-level HTTP/3 server runtime demo
 - `http2_advanced.zig`: HTTP/2 production features (SETTINGS enforcement, GOAWAY/RST_STREAM, HPACK security, trailers)
 - `http3_advanced.zig`: HTTP/3 production features (QPACK stream instructions, QUIC stream cancellation, transport parameters)
+- `tls_https_get.zig`: Simple HTTPS GET via local TLS server (HTTP/1.1 + HTTP/2 + HTTP/3)
+- `tls_config_options.zig`: TLS configuration constructors and ALPN negotiation
+- `tls_handshake_details.zig`: TLS handshake info and cipher suites
+- `tls_custom_ca.zig`: Custom CA certificate verification with self-signed certs
+- `tls_mtls.zig`: Mutual TLS client certificate authentication
 - `tcp_local.zig`: local TCP listener/client round trip
 - `udp_local.zig`: UDP local networking utility (prints human-readable `ip:port` for source address)
 - `unix_socket_example.zig`: Unix domain socket IPC client/server (Linux, macOS; Windows 10 build 17061+ only)

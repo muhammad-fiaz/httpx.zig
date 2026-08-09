@@ -86,6 +86,11 @@ pub fn build(b: *std.Build) void {
         .{ .name = "redirect_example", .path = "examples/redirect_example.zig" },
         .{ .name = "batch_concurrent", .path = "examples/batch_concurrent.zig" },
         .{ .name = "reverse_proxy_middleware", .path = "examples/reverse_proxy_middleware.zig" },
+        .{ .name = "tls_https_get", .path = "examples/tls_https_get.zig" },
+        .{ .name = "tls_config_options", .path = "examples/tls_config_options.zig" },
+        .{ .name = "tls_handshake_details", .path = "examples/tls_handshake_details.zig" },
+        .{ .name = "tls_custom_ca", .path = "examples/tls_custom_ca.zig" },
+        .{ .name = "tls_mtls", .path = "examples/tls_mtls.zig" },
     };
 
     inline for (examples) |example| {

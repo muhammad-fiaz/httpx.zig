@@ -59,6 +59,11 @@ zig build example-http3_example -Dtarget=aarch64-macos
 - [Cloud HTTPS Server](/examples/cloud-https-server): Production cloud deployment with TLS, middleware, and health checks.
 - [TLS Server](/examples/tls-server): Custom TLS server with ALPN negotiation.
 - [HTTPS Client](/examples/https-client): HTTPS client with custom TLS configuration.
+- [TLS HTTPS GET](/examples/tls-https-get): Simple HTTPS GET via local TLS server (HTTP/1.1 + HTTP/2 + HTTP/3).
+- [TLS Configuration Options](/examples/tls-config-options): TLS configuration constructors and ALPN negotiation.
+- [TLS Handshake Details](/examples/tls-handshake-details): TLS handshake info and cipher suites.
+- [TLS Custom CA](/examples/tls-custom-ca): Custom CA certificate verification with self-signed certs.
+- [TLS mTLS](/examples/tls-mtls): Mutual TLS client certificate authentication.
 - [Request Response Customization](/examples/request-response-customization): Customize request properties and response headers.
 - [Compression](/examples/compression-example): Gzip, deflate, brotli, and zstd compression/decompression.
 - [HTTP Methods](/examples/http-methods): GET, POST, PUT, DELETE, HEAD, OPTIONS.

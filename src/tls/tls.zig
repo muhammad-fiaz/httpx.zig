@@ -599,7 +599,7 @@ pub const TlsSession = struct {
 
         // Try TLS 1.3 first, then fall back to TLS 1.2
         self.handshakeTls13(socket, host) catch |err| switch (err) {
-            error.TlsProtocolVersion, error.TlsIllegalParameter, error.TlsUnsupportedCipherSuite => {
+            error.TlsProtocolVersion, error.TlsIllegalParameter, error.TlsUnsupportedCipherSuite, error.TlsHandshakeFailure, error.TlsCloseNotify, error.TlsUnexpectedMessage, error.TlsDecodeError => {
                 // Server doesn't support TLS 1.3, try TLS 1.2
                 try self.handshakeTls12(socket, host);
             },
@@ -625,6 +625,29 @@ pub const TlsSession = struct {
 
         // Read ServerHello (unencrypted)
         const sh_data = try readTlsRecord(socket, &buf);
+
+        // Check the record content type before processing as ServerHello.
+        // buf[0] is the TLS content type byte from the 5-byte record header.
+        switch (buf[0]) {
+            @intFromEnum(tls.ContentType.handshake) => {}, // expected — proceed
+            @intFromEnum(tls.ContentType.alert) => {
+                // Server sent a TLS Alert instead of ServerHello
+                if (sh_data.len >= 2) {
+                    const alert_desc: std.crypto.tls.Alert.Description = @enumFromInt(sh_data[1]);
+                    return errors.fromAlert(alert_desc);
+                }
+                return error.TlsHandshakeFailure;
+            },
+            @intFromEnum(tls.ContentType.change_cipher_spec) => {
+                // Unexpected CCS during TLS 1.3 ServerHello
+                return error.TlsUnexpectedMessage;
+            },
+            else => {
+                // Any other content type is unexpected
+                return error.TlsUnexpectedMessage;
+            },
+        }
+
         try client.processServerHello(sh_data);
 
         // Derive handshake keys for decrypting server messages
@@ -700,6 +723,22 @@ pub const TlsSession = struct {
 
         // Read ServerHello
         const sh_data = try readTlsRecord(socket, &buf);
+
+        // Check the record content type before processing as ServerHello.
+        switch (buf[0]) {
+            @intFromEnum(tls.ContentType.handshake) => {}, // expected — proceed
+            @intFromEnum(tls.ContentType.alert) => {
+                if (sh_data.len >= 2) {
+                    const alert_desc: std.crypto.tls.Alert.Description = @enumFromInt(sh_data[1]);
+                    return errors.fromAlert(alert_desc);
+                }
+                return error.TlsHandshakeFailure;
+            },
+            else => {
+                return error.TlsUnexpectedMessage;
+            },
+        }
+
         try client.processServerHello(sh_data);
 
         // Read Certificate
