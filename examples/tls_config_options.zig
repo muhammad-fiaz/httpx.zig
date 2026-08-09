@@ -57,7 +57,7 @@ pub fn main() !void {
     // 5. Custom config
     {
         std.debug.print("--- 5. Custom TlsConfig ---\n", .{});
-        const alpn = [_][]const u8{ "h2" };
+        const alpn = [_][]const u8{"h2"};
         const config = tls.TlsConfig{
             .allocator = allocator,
             .alpn_protocols = &alpn,
