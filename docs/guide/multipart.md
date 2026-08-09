@@ -209,7 +209,7 @@ pub fn main() !void {
 > buffer larger than the kernel send buffer (~8–64 KB) triggers `WSAEWOULDBLOCK`,
 > which previously caused the upload loop to stall.
 
-**httpx.zig 0.1.5+** fixes the socket layer to cap each individual `send()` call
+**httpx.zig 0.1.6+** fixes the socket layer to cap each individual `send()` call
 at 64 KB automatically, and increases the writability timeout from 5 s to 30 s.
 No application-level changes are required for most users.
 

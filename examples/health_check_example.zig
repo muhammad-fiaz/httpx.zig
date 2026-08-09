@@ -45,7 +45,7 @@ pub fn main() !void {
     // paths before any route handler or other middleware runs.
     try server.use(httpx.healthCheck(.{
         .path = "/health",
-        .body = "{\"status\":\"ok\",\"version\":\"0.1.5\"}",
+        .body = "{\"status\":\"ok\",\"version\":\"0.1.6\"}",
         .status = 200,
     }));
     try server.use(httpx.readinessProbe(.{

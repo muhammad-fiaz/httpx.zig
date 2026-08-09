@@ -170,10 +170,10 @@ zig build -Dtarget=x86-windows
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.1.5)**
+**Latest Release (v0.1.6)**
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.5.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.6.tar.gz
 ```
 
 **Previous Stable Release (v0.1.4)**
@@ -183,7 +183,7 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 ```
 
 > [!WARNING]
-> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.1.5**.
+> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.1.6**.
 
 ### Method 2: Zig Fetch (Main Branch)
 
@@ -200,7 +200,7 @@ Add the dependency to your `build.zig.zon` file.
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.5.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.6.tar.gz",
         .hash = "...", // Run `zig fetch --save <url>` to generate the hash.
     },
 },
@@ -573,6 +573,8 @@ Benchmark target: `x86_64-windows`, `ReleaseFast`.
 | h3_varint_encode | 1.88 | 531229946 |
  
 ## Bug Fixes
+
+### v0.1.6 — TLS ALPN bugfix, new TLS examples, HTTP/3 ALPN support
 
 ### v0.1.5 — Multipart upload hang on Windows (issue [#26](https://github.com/muhammad-fiaz/httpx.zig/issues/26))
 
