@@ -605,7 +605,7 @@ pub const TlsSession = struct {
 
         // Try TLS 1.3 first, then fall back to TLS 1.2
         self.handshakeTls13(socket, host) catch |err| switch (err) {
-            error.TlsProtocolVersion, error.TlsIllegalParameter, error.TlsUnsupportedCipherSuite, error.TlsHandshakeFailure, error.TlsCloseNotify, error.TlsUnexpectedMessage, error.TlsDecodeError, error.TlsConnectionTruncated, error.ReadFailed => {
+            error.TlsProtocolVersion, error.TlsIllegalParameter, error.TlsUnsupportedCipherSuite, error.TlsHandshakeFailure, error.TlsCloseNotify, error.TlsUnexpectedMessage, error.TlsDecodeError, error.TlsConnectionTruncated, error.ReadFailed, error.TlsInsufficientSecurity, error.TlsInternalError, error.TlsDecryptError, error.TlsBadCertificate, error.TlsUnsupportedCertificate, error.TlsCertificateRevoked, error.TlsCertificateExpired, error.TlsCertificateUnknown, error.TlsUnknownCa, error.TlsAccessDenied, error.TlsNoApplicationProtocol, error.TlsInappropriateFallback => {
                 // Server doesn't support TLS 1.3 or closed the connection.
                 // If we have a reconnect callback, use a fresh socket for TLS 1.2.
                 if (self.reconnect_fn) |reconnect| {
@@ -737,35 +737,19 @@ pub const TlsSession = struct {
         _ = socket.send(record_buf[0 .. 5 + ch_len]) catch return error.WriteFailed;
 
         // Read ServerHello
-        const sh_data = try readTlsRecord(socket, &buf);
-
-        // Check the record content type before processing as ServerHello.
-        switch (buf[0]) {
-            @intFromEnum(tls.ContentType.handshake) => {}, // expected — proceed
-            @intFromEnum(tls.ContentType.alert) => {
-                if (sh_data.len >= 2) {
-                    const alert_desc: std.crypto.tls.Alert.Description = @enumFromInt(sh_data[1]);
-                    return errors.fromAlert(alert_desc);
-                }
-                return error.TlsHandshakeFailure;
-            },
-            else => {
-                return error.TlsUnexpectedMessage;
-            },
-        }
-
+        const sh_data = try readHandshakeRecord(socket, &buf);
         try client.processServerHello(sh_data);
 
         // Read Certificate
-        const cert_data = try readTlsRecord(socket, &buf);
+        const cert_data = try readHandshakeRecord(socket, &buf);
         try client.processCertificate(cert_data);
 
         // Read ServerKeyExchange
-        const ske_data = try readTlsRecord(socket, &buf);
+        const ske_data = try readHandshakeRecord(socket, &buf);
         try client.processServerKeyExchange(ske_data);
 
         // Read ServerHelloDone
-        const shd_data = try readTlsRecord(socket, &buf);
+        const shd_data = try readHandshakeRecord(socket, &buf);
         try client.processServerHelloDone(shd_data);
 
         // Build and send ClientKeyExchange + ChangeCipherSpec + Finished
@@ -802,7 +786,7 @@ pub const TlsSession = struct {
         _ = socket.send(rec[0 .. 5 + fin_msg_len]) catch return error.WriteFailed;
 
         // Read server ChangeCipherSpec + Finished
-        const sfin_data = try readTlsRecord(socket, &buf);
+        const sfin_data = try readHandshakeRecord(socket, &buf);
         try client.processServerFinished(sfin_data);
 
         self.tls_version = .tls_1_2;
@@ -1481,6 +1465,23 @@ fn readTlsRecord(socket: *Socket, buf: *[4096]u8) ![]const u8 {
     }
 
     return buf[5..][0..length];
+}
+
+/// Read a TLS record during handshake and handle Alert content type.
+fn readHandshakeRecord(socket: *Socket, buf: *[4096]u8) ![]const u8 {
+    const data = try readTlsRecord(socket, buf);
+    switch (buf[0]) {
+        @intFromEnum(tls.ContentType.handshake) => return data,
+        @intFromEnum(tls.ContentType.alert) => {
+            if (data.len >= 2) {
+                const alert_desc: std.crypto.tls.Alert.Description = @enumFromInt(data[1]);
+                return errors.fromAlert(alert_desc);
+            }
+            return error.TlsHandshakeFailure;
+        },
+        @intFromEnum(tls.ContentType.change_cipher_spec) => return data,
+        else => return error.TlsUnexpectedMessage,
+    }
 }
 
 /// Detect if a ClientHello indicates TLS 1.3 by checking the supported_versions extension.
