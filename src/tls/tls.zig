@@ -549,6 +549,12 @@ pub const TlsSession = struct {
     socket: ?*Socket = null,
     cipher_suite: ?tls.CipherSuite = null,
 
+    /// Optional reconnect callback for TLS version fallback.
+    /// When TLS 1.3 fails and the server has closed the connection,
+    /// this callback creates a fresh TCP socket for the TLS 1.2 retry.
+    reconnect_fn: ?*const fn (ctx: ?*anyopaque) ?*Socket = null,
+    reconnect_ctx: ?*anyopaque = null,
+
     // Handshake traffic keys for TLS 1.3 encrypted handshake messages
     hs_write_key: ?[32]u8 = null,
     hs_write_iv: ?[12]u8 = null,
@@ -599,8 +605,17 @@ pub const TlsSession = struct {
 
         // Try TLS 1.3 first, then fall back to TLS 1.2
         self.handshakeTls13(socket, host) catch |err| switch (err) {
-            error.TlsProtocolVersion, error.TlsIllegalParameter, error.TlsUnsupportedCipherSuite, error.TlsHandshakeFailure, error.TlsCloseNotify, error.TlsUnexpectedMessage, error.TlsDecodeError => {
-                // Server doesn't support TLS 1.3, try TLS 1.2
+            error.TlsProtocolVersion, error.TlsIllegalParameter, error.TlsUnsupportedCipherSuite, error.TlsHandshakeFailure, error.TlsCloseNotify, error.TlsUnexpectedMessage, error.TlsDecodeError, error.TlsConnectionTruncated, error.ReadFailed => {
+                // Server doesn't support TLS 1.3 or closed the connection.
+                // If we have a reconnect callback, use a fresh socket for TLS 1.2.
+                if (self.reconnect_fn) |reconnect| {
+                    if (reconnect(self.reconnect_ctx)) |new_socket| {
+                        self.socket = new_socket;
+                        try self.handshakeTls12(new_socket, host);
+                        return;
+                    }
+                }
+                // No reconnect callback or it failed — try TLS 1.2 on existing socket
                 try self.handshakeTls12(socket, host);
             },
             else => return err,

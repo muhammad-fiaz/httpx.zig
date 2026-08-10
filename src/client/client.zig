@@ -868,7 +868,7 @@ pub const Client = struct {
                 }
             }
 
-            return self.executeTlsHttp(&socket, host, request_data, verify_ssl);
+            return self.executeTlsHttp(&socket, host, port, request_data, verify_ssl);
         }
 
         if (keep_alive) {
@@ -1891,12 +1891,57 @@ pub const Client = struct {
         return .{ .header = header, .payload = payload, .from_early_buf = false };
     }
 
-    fn executeTlsHttp(self: *Self, socket: *Socket, host: []const u8, request_data: []const u8, verify_ssl: bool) !Response {
+    /// Context for TLS version fallback reconnection.
+    /// When TLS 1.3 fails and the server closes the TCP connection,
+    /// the reconnect callback creates a fresh socket for the TLS 1.2 retry.
+    const ReconnectContext = struct {
+        allocator: Allocator,
+        host: []const u8,
+        port: u16,
+        socket: ?*Socket = null,
+    };
+
+    fn reconnectCallback(ctx_ptr: ?*anyopaque) ?*Socket {
+        const ctx: *ReconnectContext = @ptrCast(@alignCast(ctx_ptr.?));
+        // Create a fresh socket and connect to the same host:port
+        const socket = ctx.allocator.create(Socket) catch return null;
+        socket.* = Socket.create() catch {
+            ctx.allocator.destroy(socket);
+            return null;
+        };
+        socket.connectHost(ctx.host, ctx.port) catch {
+            socket.close();
+            ctx.allocator.destroy(socket);
+            return null;
+        };
+        socket.setNoDelay(true) catch {};
+        ctx.socket = socket;
+        return socket;
+    }
+
+    fn executeTlsHttp(self: *Self, socket: *Socket, host: []const u8, port: u16, request_data: []const u8, verify_ssl: bool) !Response {
         const tls_cfg = if (verify_ssl) TlsConfig.init(self.allocator) else TlsConfig.insecure(self.allocator);
+
+        // Set up reconnect context for TLS version fallback.
+        // When TLS 1.3 fails and the server closes the connection,
+        // we need a fresh TCP socket for the TLS 1.2 retry.
+        var reconnect_ctx = ReconnectContext{
+            .allocator = self.allocator,
+            .host = host,
+            .port = port,
+            .socket = null,
+        };
+        // Ensure reconnect socket is cleaned up on any error
+        errdefer if (reconnect_ctx.socket) |s| {
+            s.close();
+            self.allocator.destroy(s);
+        };
 
         var session = TlsSession.init(tls_cfg);
         defer session.deinit();
         session.attachSocket(socket);
+        session.reconnect_fn = reconnectCallback;
+        session.reconnect_ctx = &reconnect_ctx;
         try session.handshake(host);
 
         // Use encrypted write/read (TLS record layer)
@@ -1918,6 +1963,16 @@ pub const Client = struct {
 
         parser.finishEof();
         if (!parser.isComplete()) return error.InvalidResponse;
+
+        // Clean up reconnect socket if it was allocated.
+        // The caller's `defer socket.close()` handles the original socket.
+        // session.deinit() does not close the socket, so we must clean up
+        // any heap-allocated reconnect socket here.
+        if (reconnect_ctx.socket) |s| {
+            s.close();
+            self.allocator.destroy(s);
+        }
+
         return self.responseFromParser(&parser);
     }
 
