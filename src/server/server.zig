@@ -922,6 +922,8 @@ pub const Server = struct {
     }
 
     fn listenUnix(self: *Self, path: []const u8) !void {
+        try std.Io.sleep(defaultIo(), .fromNanoseconds(1), .real);
+
         if (self.unix_listener == null) {
             const unix_mod = @import("../net/unix.zig");
             self.unix_listener = try unix_mod.UnixListener.init(path);
