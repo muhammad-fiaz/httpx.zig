@@ -28,6 +28,10 @@ pub const DnsCache = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        const io = threadIo();
+        self.lock.lock(io) catch unreachable;
+        defer self.lock.unlock(io);
+
         var it = self.entries.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -37,37 +41,80 @@ pub const DnsCache = struct {
 
     pub fn resolve(self: *Self, host: []const u8, port: u16) !net.Address {
         const now_ms = @import("../util/common.zig").nowMillis();
+        const io = threadIo();
 
-        // Check cache
+        // 1. Check cache under lock
         {
-            self.lock.lock(threadIo()) catch unreachable;
-            defer self.lock.unlock(threadIo());
-
+            self.lock.lock(io) catch unreachable;
             if (self.entries.get(host)) |entry| {
                 if (now_ms < entry.expires_at_ms) {
                     var addr = entry.address;
+                    self.lock.unlock(io);
                     addr.setPort(port);
                     return addr;
                 }
             }
+            self.lock.unlock(io);
         }
 
-        // Cache miss — resolve and store
+        // 2. Cache miss — resolve without holding the lock
         const addr = try address_mod.resolve(self.allocator, host, port);
 
+        // 3. Store in cache using getOrPut to avoid key leakage on refresh
         {
-            self.lock.lock(threadIo()) catch unreachable;
-            defer self.lock.unlock(threadIo());
+            self.lock.lock(io) catch unreachable;
+            defer self.lock.unlock(io);
 
-            const key = try self.allocator.dupe(u8, host);
-            self.entries.put(self.allocator, key, .{
+            const gop = try self.entries.getOrPut(self.allocator, host);
+            if (!gop.found_existing) {
+                gop.key_ptr.* = try self.allocator.dupe(u8, host);
+            }
+            gop.value_ptr.* = .{
                 .address = addr,
                 .expires_at_ms = now_ms + self.default_ttl_ms,
-            }) catch {
-                self.allocator.free(key);
             };
         }
 
         return addr;
+    }
+
+    /// Removes expired entries from the cache.
+    pub fn prune(self: *Self) void {
+        const now_ms = @import("../util/common.zig").nowMillis();
+        const io = threadIo();
+        self.lock.lock(io) catch unreachable;
+        defer self.lock.unlock(io);
+
+        var it = self.entries.iterator();
+        while (it.next()) |entry| {
+            if (now_ms >= entry.value_ptr.expires_at_ms) {
+                const key = entry.key_ptr.*;
+                if (self.entries.fetchRemove(key)) |removed| {
+                    self.allocator.free(removed.key);
+                }
+            }
+        }
+    }
+
+    /// Clears all entries from the cache.
+    pub fn clear(self: *Self) void {
+        const io = threadIo();
+        self.lock.lock(io) catch unreachable;
+        defer self.lock.unlock(io);
+
+        var it = self.entries.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.entries.clearRetainingCapacity();
+    }
+
+    /// Returns the number of cached DNS entries.
+    pub fn count(self: *Self) usize {
+        const io = threadIo();
+        self.lock.lock(io) catch unreachable;
+        defer self.lock.unlock(io);
+
+        return self.entries.count();
     }
 };

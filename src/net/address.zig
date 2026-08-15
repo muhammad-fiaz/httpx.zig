@@ -37,13 +37,13 @@ pub fn resolve(allocator: Allocator, hostname: []const u8, port: u16) !net.Addre
 /// Resolves a hostname to all candidate addresses. Caller must free the returned slice.
 pub fn resolveAll(allocator: Allocator, hostname: []const u8, port: u16) ![]net.Address {
     if (parseIp4(hostname)) |ip4| {
-        var addrs = try allocator.alloc(net.Address, 1);
+        const addrs = try allocator.alloc(net.Address, 1);
         addrs[0] = net.Address.initIp4(ip4, port);
         return addrs;
     }
 
     if (parseIp6(hostname)) |ip6| {
-        var addrs = try allocator.alloc(net.Address, 1);
+        const addrs = try allocator.alloc(net.Address, 1);
         addrs[0] = net.Address.initIp6(ip6, port, 0, 0);
         return addrs;
     }
@@ -96,12 +96,9 @@ fn parseIp4(str: []const u8) ?[4]u8 {
 
 /// Parses an IPv6 address string.
 fn parseIp6(str: []const u8) ?[16]u8 {
-    // Minimal IPv6 parser supporting RFC5952-style hex groups with optional "::" abbreviation.
-    // Zone IDs ("%eth0") are intentionally not supported.
     if (str.len < 2 or str.len > 39) return null;
     if (std.mem.indexOfScalar(u8, str, '%') != null) return null;
 
-    // Address cannot start or end with a single ':'
     if ((str[0] == ':' and str.len > 1 and str[1] != ':') or
         (str.len >= 2 and str[str.len - 2] != ':' and str[str.len - 1] == ':'))
     {
@@ -116,7 +113,6 @@ fn parseIp6(str: []const u8) ?[16]u8 {
     while (i < str.len) {
         if (group_count >= 8) return null;
 
-        // Handle abbreviation
         if (str[i] == ':') {
             if (i + 1 < str.len and str[i + 1] == ':') {
                 if (abbreviated_at != null) return null;
@@ -125,12 +121,10 @@ fn parseIp6(str: []const u8) ?[16]u8 {
                 if (i >= str.len) break;
                 continue;
             }
-            // single ':' separator
             i += 1;
             continue;
         }
 
-        // Parse up to 4 hex digits
         var value: u16 = 0;
         var digits: usize = 0;
         while (i < str.len) : (i += 1) {
@@ -150,18 +144,12 @@ fn parseIp6(str: []const u8) ?[16]u8 {
 
         groups[group_count] = value;
         group_count += 1;
-
-        if (i < str.len and str[i] == ':') {
-            // Loop will handle separator/abbrev
-        }
     }
 
-    // Expand abbreviation to 8 groups if present
     if (group_count != 8) {
         const at = abbreviated_at orelse return null;
         const tail = group_count - at;
 
-        // Move tail groups to the end
         var dst: isize = 7;
         var src: isize = @intCast(group_count - 1);
         var moved: usize = 0;
@@ -170,13 +158,11 @@ fn parseIp6(str: []const u8) ?[16]u8 {
             dst -= 1;
             src -= 1;
         }
-        // Zero fill between at and the start of moved tail
         var z: usize = at;
         while (z <= @as(usize, @intCast(dst))) : (z += 1) {
             groups[z] = 0;
         }
     } else if (abbreviated_at != null) {
-        // "::" with exactly 8 groups is not valid
         return null;
     }
 

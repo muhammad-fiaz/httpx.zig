@@ -4,7 +4,7 @@
 //!
 //! This module focuses on protocol wire-format framing/types and helpers:
 //!
-//! - HTTP/1.x: request/response formatting utilities.
+//! - HTTP/1.x: request/response formatting utilities and chunked body codec.
 //! - HTTP/2: frame header + SETTINGS payload helpers, and basic frame IO.
 //! - HTTP/3: QUIC varint + HTTP/3 frame header helpers.
 
@@ -39,11 +39,6 @@ pub const NegotiatedProtocol = enum {
 };
 
 /// Standard Application-Layer Protocol Negotiation (ALPN) identifiers.
-///
-/// These strings obey the IANA registry for ALPN protocol IDs used in TLS handshakes:
-/// - "http/1.1": HTTP/1.1
-/// - "h2": HTTP/2 over TLS
-/// - "h3": HTTP/3 over QUIC
 pub const AlpnProtocol = struct {
     pub const HTTP_1_1 = "http/1.1";
     pub const HTTP_2 = "h2";
@@ -51,7 +46,6 @@ pub const AlpnProtocol = struct {
 };
 
 /// HTTP/1.x connection handler for request/response exchange.
-/// Manages the socket reader/writer, protocol versioning, and keep-alive state.
 pub const Http1Connection = struct {
     allocator: Allocator,
     reader: any_io.AnyReader,
@@ -83,7 +77,7 @@ pub const Http1Connection = struct {
         try self.writer.writeAll(formatted);
     }
 
-    /// parse and construct the response object from the network stream.
+    /// Parses and constructs the response object from the network stream.
     fn readResponse(self: *Self) !Response {
         var line_buf: [8192]u8 = undefined;
 
@@ -145,8 +139,14 @@ pub const Http1Connection = struct {
         var line_buf: [256]u8 = undefined;
 
         while (true) {
-            const size_line = try self.readLine(&line_buf);
-            const chunk_size = try std.fmt.parseInt(usize, size_line, 16);
+            const raw_size_line = try self.readLine(&line_buf);
+            const size_line = if (mem.indexOfScalar(u8, raw_size_line, ';')) |sc|
+                raw_size_line[0..sc]
+            else
+                raw_size_line;
+
+            const trimmed_size = mem.trim(u8, size_line, " \t");
+            const chunk_size = try std.fmt.parseInt(usize, trimmed_size, 16);
 
             if (chunk_size == 0) break;
 
@@ -215,7 +215,7 @@ pub const Http1Connection = struct {
     }
 
     /// Indicates whether the persistent connection should remain open.
-    pub fn shouldKeepAlive(self: *const Self) bool {
+    pub inline fn shouldKeepAlive(self: *const Self) bool {
         return self.keep_alive;
     }
 };
@@ -229,9 +229,6 @@ fn parseStatusLine(line: []const u8) !u16 {
 }
 
 /// HTTP/2 frame types as defined in RFC 7540.
-///
-/// Non-exhaustive: any u8 is valid. Unknown/extension/GREASE frame types
-/// (>= 0x0A) MUST be ignored by the receiver per RFC 7540 4.1.
 pub const Http2FrameType = enum(u8) {
     data = 0x0,
     headers = 0x1,
@@ -283,9 +280,6 @@ pub const Http2FrameHeader = struct {
 pub const HTTP2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 /// Configuration parameters for HTTP/2 connections.
-///
-/// Non-exhaustive: any u16 is valid. Unknown/unsupported SETTINGS identifiers
-/// MUST be ignored by the receiver per RFC 7540 6.5.2.
 pub const Http2Settings = enum(u16) {
     header_table_size = 0x1,
     enable_push = 0x2,
@@ -293,8 +287,6 @@ pub const Http2Settings = enum(u16) {
     initial_window_size = 0x4,
     max_frame_size = 0x5,
     max_header_list_size = 0x6,
-    // 0x7 is reserved; 0x8 = ENABLE_CONNECT_PROTOCOL (RFC 8441);
-    // 0x9 = ENABLE_PUSH (deprecated alt); higher values are extensions/GREASE.
     _,
 };
 
@@ -316,7 +308,7 @@ pub const Http2ErrorCode = enum(u32) {
     http_1_1_required = 0xd,
 };
 
-/// Manages the state of an HTTP/2 connection, including HPack context and streams.
+/// Manages the state of an HTTP/2 connection.
 pub const Http2Connection = struct {
     allocator: Allocator,
     reader: any_io.AnyReader,
@@ -404,7 +396,7 @@ pub const Http2Connection = struct {
 };
 
 pub fn encodeSettingsPayload(settings: Http2Connection.Http2ConnectionSettings, allocator: Allocator, out: *std.ArrayList(u8)) !void {
-    // Each setting is 6 bytes: 16-bit ID + 32-bit value.
+    try out.ensureTotalCapacity(allocator, 36);
     var buf: [6]u8 = undefined;
 
     // HEADER_TABLE_SIZE (0x1)
@@ -446,46 +438,41 @@ pub fn applySettingsPayload(settings: *Http2Connection.Http2ConnectionSettings, 
         const id = readU16BE(payload[i..][0..2]);
         const value = readU32BE(payload[i..][2..6]);
 
-        // RFC 7540 6.5.2: An endpoint MUST ignore and discard any SETTINGS
-        // parameter with an identifier it does not understand.
         switch (@as(Http2Settings, @enumFromInt(id))) {
             .header_table_size => settings.header_table_size = value,
             .enable_push => settings.enable_push = (value != 0),
             .max_concurrent_streams => settings.max_concurrent_streams = value,
             .initial_window_size => {
-                // RFC 7540 6.9.2: INITIAL_WINDOW_SIZE must not exceed 2^31-1.
                 if (value > 0x7FFFFFFF) return error.FlowControlError;
                 settings.initial_window_size = value;
             },
             .max_frame_size => {
-                // RFC 7540 6.5.2: MAX_FRAME_SIZE must be in range 2^14..2^24-1.
                 if (value < 16384 or value > 16777215) return error.ProtocolError;
                 settings.max_frame_size = value;
             },
             .max_header_list_size => settings.max_header_list_size = value,
-            // RFC 7540 6.5.2: Unknown/unsupported identifiers MUST be ignored.
             _ => {},
         }
     }
 }
 
-fn writeU16BE(buf: *[6]u8, v: u16) void {
+inline fn writeU16BE(buf: *[6]u8, v: u16) void {
     buf[0] = @intCast((v >> 8) & 0xFF);
     buf[1] = @intCast(v & 0xFF);
 }
 
-fn readU16BE(buf: []const u8) u16 {
+inline fn readU16BE(buf: []const u8) u16 {
     return (@as(u16, buf[0]) << 8) | buf[1];
 }
 
-fn writeU32BE(buf: []u8, v: u32) void {
+inline fn writeU32BE(buf: []u8, v: u32) void {
     buf[0] = @intCast((v >> 24) & 0xFF);
     buf[1] = @intCast((v >> 16) & 0xFF);
     buf[2] = @intCast((v >> 8) & 0xFF);
     buf[3] = @intCast(v & 0xFF);
 }
 
-fn readU32BE(buf: []const u8) u32 {
+inline fn readU32BE(buf: []const u8) u32 {
     return (@as(u32, buf[0]) << 24) | (@as(u32, buf[1]) << 16) | (@as(u32, buf[2]) << 8) | buf[3];
 }
 
@@ -641,6 +628,7 @@ pub fn encodeHttp3SettingsPayload(
     allocator: Allocator,
     out: *std.ArrayList(u8),
 ) !void {
+    try out.ensureTotalCapacity(allocator, 32);
     try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.qpack_max_table_capacity));
     try appendVarInt(out, allocator, settings.qpack_max_table_capacity);
 
@@ -743,6 +731,7 @@ pub fn formatResponse(resp: *const Response, allocator: Allocator) ![]u8 {
 pub fn encodeChunkedBody(body: []const u8, trailers: ?*const Headers, allocator: Allocator) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, body.len + (body.len / 4096 + 1) * 16 + 32);
     const writer = list_writer.init(allocator, &out);
 
     const chunk_size: usize = 4096;
@@ -770,7 +759,6 @@ pub fn encodeChunkedBody(body: []const u8, trailers: ?*const Headers, allocator:
 /// Determines the highest supported HTTP version based on ALPN negotiation string.
 pub fn negotiateVersion(alpn: ?[]const u8) NegotiatedProtocol {
     if (alpn) |protocol| {
-        // Match exact "h3" or any draft like "h3-29", "h3-30", etc.
         if (mem.eql(u8, protocol, AlpnProtocol.HTTP_3) or
             mem.startsWith(u8, protocol, "h3-")) return .http_3;
         if (mem.eql(u8, protocol, AlpnProtocol.HTTP_2)) return .http_2;
@@ -817,27 +805,19 @@ test "HTTP/2 frame header serialization" {
 }
 
 test "HTTP/2 non-exhaustive frame type: unknown value does not panic" {
-    // RFC 7540 4.1: unknown frame types MUST be ignored.
-    // Verify @enumFromInt does not panic for values >= 0x0A.
-    const unknown_type: u8 = 0xFF; // GREASE/extension type
+    const unknown_type: u8 = 0xFF;
     const ft: Http2FrameType = @enumFromInt(unknown_type);
-    // The tag integer should round-trip correctly.
     try std.testing.expectEqual(unknown_type, @intFromEnum(ft));
 }
 
 test "HTTP/2 non-exhaustive SETTINGS: unknown identifier is silently ignored" {
-    // RFC 7540 6.5.2: unrecognised SETTINGS identifiers MUST be ignored.
-    // Build a SETTINGS payload with a known id (INITIAL_WINDOW_SIZE=0x4)
-    // followed by an unknown id (ENABLE_CONNECT_PROTOCOL=0x8).
     var payload: [12]u8 = undefined;
-    // INITIAL_WINDOW_SIZE = 65535
     payload[0] = 0x00;
     payload[1] = 0x04;
     payload[2] = 0x00;
     payload[3] = 0x00;
     payload[4] = 0xFF;
     payload[5] = 0xFF;
-    // ENABLE_CONNECT_PROTOCOL (0x0008) = 1  -- unknown to this library
     payload[6] = 0x00;
     payload[7] = 0x08;
     payload[8] = 0x00;
@@ -848,19 +828,17 @@ test "HTTP/2 non-exhaustive SETTINGS: unknown identifier is silently ignored" {
     var settings = Http2Connection.Http2ConnectionSettings{};
     try applySettingsPayload(&settings, &payload);
 
-    // Known setting must be applied.
     try std.testing.expectEqual(@as(u32, 65535), settings.initial_window_size);
-    // No panic and no error from the unknown setting.
 }
 
 test "HTTP/2 applySettingsPayload rejects invalid initial window size" {
     var payload: [6]u8 = undefined;
     payload[0] = 0x00;
-    payload[1] = 0x04; // INITIAL_WINDOW_SIZE
+    payload[1] = 0x04;
     payload[2] = 0xFF;
     payload[3] = 0xFF;
     payload[4] = 0xFF;
-    payload[5] = 0xFF; // > 2^31-1
+    payload[5] = 0xFF;
     var settings = Http2Connection.Http2ConnectionSettings{};
     try std.testing.expectError(error.FlowControlError, applySettingsPayload(&settings, &payload));
 }

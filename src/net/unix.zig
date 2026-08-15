@@ -15,11 +15,10 @@ const is_windows = builtin.os.tag == .windows;
 
 const is_unix_available = switch (builtin.os.tag) {
     .linux, .macos, .ios, .tvos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => true,
-    .windows => true, // Windows 10 1803+ supports AF_UNIX
+    .windows => true,
     else => false,
 };
 
-// Winsock declarations for Windows support
 const winsock = if (is_windows) struct {
     extern "ws2_32" fn socket(af: i32, sock_type: i32, protocol: i32) callconv(.winapi) posix.socket_t;
     extern "ws2_32" fn closesocket(s: posix.socket_t) callconv(.winapi) i32;
@@ -61,15 +60,11 @@ fn closesocket(fd: posix.socket_t) void {
     }
 }
 
-// On Windows, INVALID_SOCKET is ULONG_PTR(~0) which equals maxInt(usize)
 const WIN_INVALID_SOCKET: usize = ~@as(usize, 0);
 
 fn createSocket() !posix.socket_t {
     if (is_windows) {
-        // AF_UNIX = 1 on Windows (same as POSIX); SOCK_STREAM = 1
-        // WSAStartup must have been called by socket.zig init() already.
         const fd = winsock.socket(1, 1, 0);
-        // Compare via integer since posix.socket_t is a pointer on Windows
         const fd_int = if (@typeInfo(posix.socket_t) == .pointer)
             @intFromPtr(fd)
         else
@@ -115,7 +110,6 @@ fn acceptConnection(fd: posix.socket_t, addr: *posix.sockaddr.un, len: *posix.so
     if (is_windows) {
         var len_i32: i32 = @intCast(len.*);
         const client_fd = winsock.accept(fd, @ptrCast(addr), &len_i32);
-        // Compare via integer since posix.socket_t is a pointer on Windows
         const client_int = if (@typeInfo(posix.socket_t) == .pointer)
             @intFromPtr(client_fd)
         else
@@ -124,10 +118,13 @@ fn acceptConnection(fd: posix.socket_t, addr: *posix.sockaddr.un, len: *posix.so
         len.* = @intCast(len_i32);
         return client_fd;
     } else {
-        const rc = posix.system.accept(fd, @ptrCast(addr), len);
-        switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            else => return error.AcceptFailed,
+        while (true) {
+            const rc = posix.system.accept(fd, @ptrCast(addr), len);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                else => return error.AcceptFailed,
+            }
         }
     }
 }
@@ -137,10 +134,13 @@ fn connectSocket(fd: posix.socket_t, addr: *const posix.sockaddr.un) !void {
         const rc = winsock.connect(fd, @ptrCast(addr), @sizeOf(posix.sockaddr.un));
         if (rc != 0) return error.ConnectFailed;
     } else {
-        const rc = posix.system.connect(fd, @ptrCast(addr), @sizeOf(posix.sockaddr.un));
-        switch (posix.errno(rc)) {
-            .SUCCESS => {},
-            else => return error.ConnectFailed,
+        while (true) {
+            const rc = posix.system.connect(fd, @ptrCast(addr), @sizeOf(posix.sockaddr.un));
+            switch (posix.errno(rc)) {
+                .SUCCESS => return,
+                .INTR => continue,
+                else => return error.ConnectFailed,
+            }
         }
     }
 }
@@ -151,10 +151,13 @@ fn sendBytes(fd: posix.socket_t, data: []const u8) !usize {
         if (rc < 0) return error.WriteFailed;
         return @intCast(rc);
     } else {
-        const rc = posix.system.sendto(fd, data.ptr, data.len, posix.MSG.NOSIGNAL, null, 0);
-        switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            else => return error.WriteFailed,
+        while (true) {
+            const rc = posix.system.sendto(fd, data.ptr, data.len, posix.MSG.NOSIGNAL, null, 0);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                else => return error.WriteFailed,
+            }
         }
     }
 }
@@ -165,10 +168,13 @@ fn recvBytes(fd: posix.socket_t, buf: []u8) !usize {
         if (rc < 0) return error.ReadFailed;
         return @intCast(rc);
     } else {
-        const rc = posix.system.recvfrom(fd, buf.ptr, buf.len, 0, null, null);
-        switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
-            else => return error.ReadFailed,
+        while (true) {
+            const rc = posix.system.recvfrom(fd, buf.ptr, buf.len, 0, null, null);
+            switch (posix.errno(rc)) {
+                .SUCCESS => return @intCast(rc),
+                .INTR => continue,
+                else => return error.ReadFailed,
+            }
         }
     }
 }
@@ -189,6 +195,7 @@ pub const UnixSocket = struct {
         var sent: usize = 0;
         while (sent < data.len) {
             const n = try sendBytes(self.fd, data[sent..]);
+            if (n == 0) return error.WriteFailed;
             sent += n;
         }
     }
@@ -228,7 +235,6 @@ pub const UnixListener = struct {
         if (!is_unix_available) return error.UnsupportedPlatform;
         if (path.len >= MAX_PATH_LEN) return error.PathTooLong;
 
-        // Remove stale socket file
         {
             const io = defaultIo();
             const cwd = std.Io.Dir.cwd();
@@ -322,7 +328,6 @@ test "Unix domain socket integration - Client & Server" {
     defer t.join();
     defer server.stop();
 
-    // Give the server a moment to start
     const dur = std.Io.Duration.fromMilliseconds(50);
     std.Io.sleep(io, dur, .real) catch {};
 

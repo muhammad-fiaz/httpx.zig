@@ -46,6 +46,7 @@ pub const Router = struct {
     allocator: Allocator,
     routes: std.ArrayList(Route) = .empty,
     not_found_handler: ?Handler = null,
+    params_buf: [16]RouteParam = undefined,
 
     const Self = @This();
 
@@ -150,15 +151,13 @@ pub const Router = struct {
 
     /// Finds a matching route for the given method and path.
     pub fn find(self: *Self, method: types.Method, path: []const u8) ?struct { handler: Handler, params: []const RouteParam } {
-        var params_buf: [16]RouteParam = undefined;
-
         for (self.routes.items) |route| {
             if (route.method != method) continue;
 
-            if (self.matchRoute(route, path, &params_buf)) |param_count| {
+            if (self.matchRoute(route, path, &self.params_buf)) |param_count| {
                 return .{
                     .handler = route.handler,
-                    .params = params_buf[0..param_count],
+                    .params = self.params_buf[0..param_count],
                 };
             }
         }
@@ -167,15 +166,12 @@ pub const Router = struct {
     }
 
     /// Returns the list of allowed methods for a given path.
-    ///
-    /// The method list is deduplicated and written into `out_methods`.
-    /// The returned value is the number of methods written.
     pub fn allowedMethods(self: *const Self, path: []const u8, out_methods: *[16]types.Method) usize {
-        var params_buf: [16]RouteParam = undefined;
+        var temp_buf: [16]RouteParam = undefined;
         var count: usize = 0;
 
         for (self.routes.items) |route| {
-            if (self.matchRoute(route, path, &params_buf) == null) continue;
+            if (self.matchRoute(route, path, &temp_buf) == null) continue;
 
             var exists = false;
             for (out_methods[0..count]) |existing| {
@@ -251,13 +247,14 @@ pub const RouteGroup = struct {
 
     /// Adds a route to the group.
     pub fn add(self: *Self, method: types.Method, path: []const u8, handler: Handler) !void {
-        var full_path = std.ArrayList(u8).empty;
-        defer full_path.deinit(self.router.allocator);
-
-        try full_path.appendSlice(self.router.allocator, self.prefix);
-        try full_path.appendSlice(self.router.allocator, path);
-
-        try self.router.add(method, full_path.items, handler);
+        var stack_buf: [512]u8 = undefined;
+        if (std.fmt.bufPrint(&stack_buf, "{s}{s}", .{ self.prefix, path })) |full_path| {
+            try self.router.add(method, full_path, handler);
+        } else |_| {
+            const full_path = try std.fmt.allocPrint(self.router.allocator, "{s}{s}", .{ self.prefix, path });
+            defer self.router.allocator.free(full_path);
+            try self.router.add(method, full_path, handler);
+        }
     }
 
     /// Adds a GET route.

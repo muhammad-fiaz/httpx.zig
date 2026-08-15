@@ -1,13 +1,13 @@
 //! HTTP Headers Implementation for httpx.zig
 //!
-//! Provides a high-performance, case-insensitive HTTP header storage with
+//! Provides high-performance, case-insensitive HTTP header storage with
 //! multi-value support per RFC 7230. Features include:
 //!
 //! - Case-insensitive header name lookups
 //! - Multiple values per header name (e.g., Set-Cookie)
+//! - In-place updates to minimize heap churn
+//! - CRLF injection prevention
 //! - Efficient serialization for wire format
-//! - Common header name constants for compile-time optimization
-//! - Memory-safe ownership model with automatic cleanup
 
 const std = @import("std");
 const mem = std.mem;
@@ -16,7 +16,6 @@ const list_writer = @import("../util/list_writer.zig");
 const types = @import("types.zig");
 
 /// Standard HTTP header name constants.
-/// Using these constants enables compile-time string interning.
 pub const HeaderName = struct {
     pub const ACCEPT = "Accept";
     pub const ACCEPT_CHARSET = "Accept-Charset";
@@ -91,9 +90,14 @@ pub const Headers = struct {
 
     /// Appends a header, allowing multiple values for the same name.
     pub fn append(self: *Self, name: []const u8, value: []const u8) !void {
+        if (mem.indexOfAny(u8, name, "\r\n\x00") != null or mem.indexOfAny(u8, value, "\r\n\x00") != null) {
+            return error.InvalidHeader;
+        }
+
         const owned_name = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(owned_name);
         const owned_value = try self.allocator.dupe(u8, value);
+
         try self.entries.append(self.allocator, .{
             .name = owned_name,
             .value = owned_value,
@@ -111,14 +115,53 @@ pub const Headers = struct {
 
     /// Sets a header, replacing any existing values with the same name.
     pub fn set(self: *Self, name: []const u8, value: []const u8) !void {
-        self.removeAll(name);
-        try self.append(name, value);
+        if (mem.indexOfAny(u8, name, "\r\n\x00") != null or mem.indexOfAny(u8, value, "\r\n\x00") != null) {
+            return error.InvalidHeader;
+        }
+
+        var first_idx: ?usize = null;
+        var i: usize = 0;
+
+        while (i < self.entries.items.len) {
+            if (std.ascii.eqlIgnoreCase(self.entries.items[i].name, name)) {
+                if (first_idx == null) {
+                    first_idx = i;
+                    i += 1;
+                } else {
+                    const entry = self.entries.orderedRemove(i);
+                    if (entry.owned) {
+                        self.allocator.free(entry.name);
+                        self.allocator.free(entry.value);
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+
+        if (first_idx) |idx| {
+            const entry = &self.entries.items[idx];
+            if (entry.owned) {
+                self.allocator.free(entry.value);
+            }
+            entry.value = try self.allocator.dupe(u8, value);
+            entry.owned = true;
+        } else {
+            const owned_name = try self.allocator.dupe(u8, name);
+            errdefer self.allocator.free(owned_name);
+            const owned_value = try self.allocator.dupe(u8, value);
+            try self.entries.append(self.allocator, .{
+                .name = owned_name,
+                .value = owned_value,
+                .owned = true,
+            });
+        }
     }
 
     /// Retrieves the first value for a header name (case-insensitive).
     pub fn get(self: *const Self, name: []const u8) ?[]const u8 {
         for (self.entries.items) |entry| {
-            if (eqlIgnoreCase(entry.name, name)) return entry.value;
+            if (std.ascii.eqlIgnoreCase(entry.name, name)) return entry.value;
         }
         return null;
     }
@@ -132,7 +175,7 @@ pub const Headers = struct {
     pub fn getAll(self: *const Self, name: []const u8, allocator: Allocator) ![][]const u8 {
         var values = std.ArrayList([]const u8).empty;
         for (self.entries.items) |entry| {
-            if (eqlIgnoreCase(entry.name, name)) {
+            if (std.ascii.eqlIgnoreCase(entry.name, name)) {
                 try values.append(allocator, entry.value);
             }
         }
@@ -147,7 +190,7 @@ pub const Headers = struct {
     /// Removes the first occurrence of a header.
     pub fn remove(self: *Self, name: []const u8) bool {
         for (self.entries.items, 0..) |entry, i| {
-            if (eqlIgnoreCase(entry.name, name)) {
+            if (std.ascii.eqlIgnoreCase(entry.name, name)) {
                 if (entry.owned) {
                     self.allocator.free(entry.name);
                     self.allocator.free(entry.value);
@@ -163,7 +206,7 @@ pub const Headers = struct {
     pub fn removeAll(self: *Self, name: []const u8) void {
         var i: usize = 0;
         while (i < self.entries.items.len) {
-            if (eqlIgnoreCase(self.entries.items[i].name, name)) {
+            if (std.ascii.eqlIgnoreCase(self.entries.items[i].name, name)) {
                 const entry = self.entries.orderedRemove(i);
                 if (entry.owned) {
                     self.allocator.free(entry.name);
@@ -197,6 +240,7 @@ pub const Headers = struct {
     /// Creates a deep copy of the headers.
     pub fn clone(self: *const Self, allocator: Allocator) !Headers {
         var new_headers = Headers.init(allocator);
+        try new_headers.entries.ensureTotalCapacity(allocator, self.entries.items.len);
         for (self.entries.items) |entry| {
             try new_headers.append(entry.name, entry.value);
         }
@@ -204,9 +248,6 @@ pub const Headers = struct {
     }
 
     /// Merges headers from another collection.
-    ///
-    /// When `overwrite` is true, destination values are replaced per header name.
-    /// Otherwise, existing destination values are preserved.
     pub fn mergeFrom(self: *Self, other: *const Self, overwrite: bool) !void {
         for (other.entries.items) |entry| {
             if (overwrite) {
@@ -220,7 +261,7 @@ pub const Headers = struct {
     /// Parses Content-Length header value.
     pub fn getContentLength(self: *const Self) ?u64 {
         const value = self.get(HeaderName.CONTENT_LENGTH) orelse return null;
-        return std.fmt.parseInt(u64, value, 10) catch null;
+        return std.fmt.parseInt(u64, mem.trim(u8, value, " \t"), 10) catch null;
     }
 
     /// Returns true if Transfer-Encoding includes chunked.
@@ -249,20 +290,12 @@ pub const Headers = struct {
     /// Serializes headers to an allocated string.
     pub fn toSlice(self: *const Self, allocator: Allocator) ![]u8 {
         var buffer = std.ArrayList(u8).empty;
+        try buffer.ensureTotalCapacity(allocator, self.entries.items.len * 32);
         const writer = list_writer.init(allocator, &buffer);
         try self.serialize(writer);
         return buffer.toOwnedSlice(allocator);
     }
 };
-
-/// Case-insensitive string comparison for ASCII.
-fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |ca, cb| {
-        if (std.ascii.toLower(ca) != std.ascii.toLower(cb)) return false;
-    }
-    return true;
-}
 
 test "Headers basic operations" {
     const allocator = std.testing.allocator;

@@ -1,11 +1,11 @@
-//! Concurrent Request Patterns for httpx.zig
-//!
-//! Provides parallel request execution patterns:
-//!
-//! - `all`: Execute all requests, wait for all to complete
-//! - `any`: Execute all requests, return first successful
-//! - `race`: Execute all requests, return first to complete
-//! - Batch request building
+// //! Concurrent Request Patterns for httpx.zig
+// //!
+// //! Provides parallel request execution patterns:
+// //!
+// //! - `all`: Execute all requests, wait for all to complete
+// //! - `any`: Execute all requests, return first successful
+// //! - `race`: Execute all requests, return first to complete
+// //! - Batch request building
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -18,6 +18,7 @@ const threadIo = io_util.threadIo;
 const Client = @import("../client/client.zig").Client;
 const Response = @import("../core/response.zig").Response;
 const types = @import("../core/types.zig");
+const Executor = @import("executor.zig").Executor;
 
 /// Request specification for batch operations.
 pub const RequestSpec = struct {
@@ -36,11 +37,11 @@ pub const RequestResult = union(enum) {
     success: Response,
     err: anyerror,
 
-    pub fn isSuccess(self: RequestResult) bool {
+    pub inline fn isSuccess(self: RequestResult) bool {
         return self == .success;
     }
 
-    pub fn getResponse(self: *RequestResult) ?*Response {
+    pub inline fn getResponse(self: *RequestResult) ?*Response {
         switch (self.*) {
             .success => |*r| return r,
             .err => return null,
@@ -67,14 +68,33 @@ pub const BatchBuilder = struct {
         return .{ .allocator = allocator };
     }
 
+    /// Creates a batch builder with pre-allocated capacity.
+    pub fn initCapacity(allocator: Allocator, capacity: usize) !Self {
+        return .{
+            .allocator = allocator,
+            .requests = try std.ArrayList(RequestSpec).initCapacity(allocator, capacity),
+        };
+    }
+
     /// Releases builder resources.
     pub fn deinit(self: *Self) void {
         self.requests.deinit(self.allocator);
     }
 
+    /// Ensures capacity for at least `additional_count` more requests.
+    pub fn ensureUnusedCapacity(self: *Self, additional_count: usize) !void {
+        try self.requests.ensureUnusedCapacity(self.allocator, additional_count);
+    }
+
     /// Adds a GET request to the batch.
     pub fn get(self: *Self, url: []const u8) !*Self {
         try self.requests.append(self.allocator, .{ .method = .GET, .url = url });
+        return self;
+    }
+
+    /// Adds a HEAD request to the batch.
+    pub fn head(self: *Self, url: []const u8) !*Self {
+        try self.requests.append(self.allocator, .{ .method = .HEAD, .url = url });
         return self;
     }
 
@@ -96,6 +116,12 @@ pub const BatchBuilder = struct {
         return self;
     }
 
+    /// Adds a PATCH request to the batch.
+    pub fn patch(self: *Self, url: []const u8, body: ?[]const u8) !*Self {
+        try self.requests.append(self.allocator, .{ .method = .PATCH, .url = url, .body = body });
+        return self;
+    }
+
     /// Adds a DELETE request to the batch.
     pub fn delete(self: *Self, url: []const u8) !*Self {
         try self.requests.append(self.allocator, .{ .method = .DELETE, .url = url });
@@ -108,12 +134,17 @@ pub const BatchBuilder = struct {
         return self;
     }
 
+    /// Returns the slice of request specifications.
+    pub inline fn getSpecs(self: *const Self) []const RequestSpec {
+        return self.requests.items;
+    }
+
     /// Returns the number of requests in the batch.
-    pub fn count(self: *const Self) usize {
+    pub inline fn count(self: *const Self) usize {
         return self.requests.items.len;
     }
 
-    /// Clears all requests from the batch.
+    /// Clears all requests from the batch, retaining allocated memory.
     pub fn clear(self: *Self) void {
         self.requests.clearRetainingCapacity();
     }
@@ -128,12 +159,15 @@ pub const ConcurrencyMode = enum {
 pub const ConcurrencyConfig = struct {
     mode: ConcurrencyMode = .multi_thread,
     workers: ?u32 = null,
-    executor: ?*@import("executor.zig").Executor = null,
+    executor: ?*Executor = null,
 };
+
+/// Maximum workers stack-allocated before falling back to heap.
+const STACK_WORKERS_MAX = 16;
 
 /// Executes all requests and waits for all to complete.
 pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
-    var results = try allocator.alloc(RequestResult, specs.len);
+    const results = try allocator.alloc(RequestResult, specs.len);
     errdefer allocator.free(results);
 
     if (specs.len == 0) return results;
@@ -145,7 +179,7 @@ pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
             }
         },
         .multi_thread => {
-            const workers_count = @max(1, @min(config.workers orelse specs.len, specs.len));
+            const workers_count = @max(1, @min(config.workers orelse @as(u32, @intCast(specs.len)), @as(u32, @intCast(specs.len))));
             var next_spec_idx = std.atomic.Value(usize).init(0);
 
             const Worker = struct {
@@ -163,18 +197,24 @@ pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
                 }
             };
 
-            var threads = try allocator.alloc(Thread, workers_count);
-            defer allocator.free(threads);
+            var stack_threads: [STACK_WORKERS_MAX]Thread = undefined;
+            var stack_workers: [STACK_WORKERS_MAX]Worker = undefined;
 
-            var workers = try allocator.alloc(Worker, workers_count);
-            defer allocator.free(workers);
+            const threads = if (workers_count <= STACK_WORKERS_MAX)
+                stack_threads[0..workers_count]
+            else
+                try allocator.alloc(Thread, workers_count);
+            defer if (workers_count > STACK_WORKERS_MAX) allocator.free(threads);
+
+            const workers = if (workers_count <= STACK_WORKERS_MAX)
+                stack_workers[0..workers_count]
+            else
+                try allocator.alloc(Worker, workers_count);
+            defer if (workers_count > STACK_WORKERS_MAX) allocator.free(workers);
 
             var spawned: usize = 0;
             errdefer {
-                var i: usize = 0;
-                while (i < spawned) : (i += 1) {
-                    threads[i].join();
-                }
+                for (threads[0..spawned]) |t| t.join();
             }
 
             for (0..workers_count) |i| {
@@ -219,7 +259,7 @@ pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
                 }
             };
 
-            var ctxs = try allocator.alloc(TaskCtx, specs.len);
+            const ctxs = try allocator.alloc(TaskCtx, specs.len);
             defer allocator.free(ctxs);
 
             for (specs, 0..) |spec, i| {
@@ -253,7 +293,7 @@ pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
 ///
 /// Unlike `all`, this never fails due to a request error; request failures are
 /// represented as `RequestResult.err` values.
-pub fn allSettled(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
+pub inline fn allSettled(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
     return all(allocator, client, specs, config);
 }
 
@@ -267,11 +307,11 @@ pub fn successfulCount(results: []const RequestResult) usize {
 }
 
 /// Counts failed request results.
-pub fn errorCount(results: []const RequestResult) usize {
+pub inline fn errorCount(results: []const RequestResult) usize {
     return results.len - successfulCount(results);
 }
 
-/// Executes all requests and returns the first successful response.
+/// Executes all requests and returns the first successful response (alias for `first`).
 pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !?Response {
     if (specs.len == 0) return null;
 
@@ -289,7 +329,7 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
             return null;
         },
         .multi_thread => {
-            const workers_count = @max(1, @min(config.workers orelse specs.len, specs.len));
+            const workers_count = @max(1, @min(config.workers orelse @as(u32, @intCast(specs.len)), @as(u32, @intCast(specs.len))));
             var next_spec_idx = std.atomic.Value(usize).init(0);
             var winner = std.atomic.Value(bool).init(false);
             var remaining = std.atomic.Value(usize).init(specs.len);
@@ -314,7 +354,6 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
                         if (idx >= self.specs.len) break;
 
                         var rr = executeSpec(self.client, self.specs[idx]);
-                        defer rr.deinit();
 
                         if (rr == .success and rr.success.status.isSuccess()) {
                             if (!self.winner.swap(true, .acq_rel)) {
@@ -324,9 +363,12 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
                                 rr = .{ .err = error.UnusedResult }; // transfer ownership
                                 self.cond.signal(io);
                                 self.mutex.unlock(io);
+                                _ = self.remaining.fetchSub(1, .acq_rel);
                                 break;
                             }
                         }
+
+                        rr.deinit();
 
                         const prev = self.remaining.fetchSub(1, .acq_rel);
                         if (prev == 1) {
@@ -339,16 +381,24 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
                 }
             };
 
-            var threads = try allocator.alloc(Thread, workers_count);
-            defer allocator.free(threads);
+            var stack_threads: [STACK_WORKERS_MAX]Thread = undefined;
+            var stack_workers: [STACK_WORKERS_MAX]Worker = undefined;
 
-            var workers = try allocator.alloc(Worker, workers_count);
-            defer allocator.free(workers);
+            const threads = if (workers_count <= STACK_WORKERS_MAX)
+                stack_threads[0..workers_count]
+            else
+                try allocator.alloc(Thread, workers_count);
+            defer if (workers_count > STACK_WORKERS_MAX) allocator.free(threads);
+
+            const workers = if (workers_count <= STACK_WORKERS_MAX)
+                stack_workers[0..workers_count]
+            else
+                try allocator.alloc(Worker, workers_count);
+            defer if (workers_count > STACK_WORKERS_MAX) allocator.free(workers);
 
             var spawned: usize = 0;
             errdefer {
-                var i: usize = 0;
-                while (i < spawned) : (i += 1) threads[i].join();
+                for (threads[0..spawned]) |t| t.join();
                 if (result) |*r| r.deinit();
             }
 
@@ -369,7 +419,7 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
 
             const any_io = threadIo();
             mutex.lock(any_io) catch unreachable;
-            while (!winner.load(.acquire) and remaining.load(.acquire) > (specs.len - spawned)) {
+            while (!winner.load(.acquire) and remaining.load(.acquire) > 0) {
                 cond.wait(any_io, &mutex) catch unreachable;
             }
             mutex.unlock(any_io);
@@ -398,12 +448,17 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
                 fn run(ctx_ptr: ?*anyopaque) void {
                     const self: *@This() = @ptrCast(@alignCast(ctx_ptr.?));
                     if (self.winner.load(.acquire)) {
-                        _ = self.remaining.fetchSub(1, .acq_rel);
+                        const prev = self.remaining.fetchSub(1, .acq_rel);
+                        if (prev == 1) {
+                            const io = threadIo();
+                            self.mutex.lock(io) catch unreachable;
+                            self.cond.signal(io);
+                            self.mutex.unlock(io);
+                        }
                         return;
                     }
 
                     var rr = executeSpec(self.client, self.spec);
-                    defer rr.deinit();
 
                     if (rr == .success and rr.success.status.isSuccess()) {
                         if (!self.winner.swap(true, .acq_rel)) {
@@ -416,6 +471,8 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
                         }
                     }
 
+                    rr.deinit();
+
                     const prev = self.remaining.fetchSub(1, .acq_rel);
                     if (prev == 1) {
                         const io = threadIo();
@@ -426,7 +483,7 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
                 }
             };
 
-            var ctxs = try allocator.alloc(TaskCtx, specs.len);
+            const ctxs = try allocator.alloc(TaskCtx, specs.len);
             defer allocator.free(ctxs);
 
             for (specs, 0..) |spec, i| {
@@ -457,7 +514,12 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
     }
 }
 
-/// Executes all requests and returns the first to complete.
+/// Executes all requests and returns the first successful response (alias for `any`).
+pub inline fn first(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !?Response {
+    return any(allocator, client, specs, config);
+}
+
+/// Executes all requests and returns the first to complete (success or error).
 pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !RequestResult {
     if (specs.len == 0) return .{ .err = error.NoRequests };
 
@@ -466,7 +528,7 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, c
             return executeSpec(client, specs[0]);
         },
         .multi_thread => {
-            const workers_count = @max(1, @min(config.workers orelse specs.len, specs.len));
+            const workers_count = @max(1, @min(config.workers orelse @as(u32, @intCast(specs.len)), @as(u32, @intCast(specs.len))));
             var next_spec_idx = std.atomic.Value(usize).init(0);
             var winner = std.atomic.Value(bool).init(false);
             var remaining = std.atomic.Value(usize).init(specs.len);
@@ -499,6 +561,7 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, c
                             rr = .{ .err = error.UnusedResult };
                             self.cond.signal(io);
                             self.mutex.unlock(io);
+                            _ = self.remaining.fetchSub(1, .acq_rel);
                             break;
                         }
 
@@ -515,16 +578,24 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, c
                 }
             };
 
-            var threads = try allocator.alloc(Thread, workers_count);
-            defer allocator.free(threads);
+            var stack_threads: [STACK_WORKERS_MAX]Thread = undefined;
+            var stack_workers: [STACK_WORKERS_MAX]Worker = undefined;
 
-            var workers = try allocator.alloc(Worker, workers_count);
-            defer allocator.free(workers);
+            const threads = if (workers_count <= STACK_WORKERS_MAX)
+                stack_threads[0..workers_count]
+            else
+                try allocator.alloc(Thread, workers_count);
+            defer if (workers_count > STACK_WORKERS_MAX) allocator.free(threads);
+
+            const workers = if (workers_count <= STACK_WORKERS_MAX)
+                stack_workers[0..workers_count]
+            else
+                try allocator.alloc(Worker, workers_count);
+            defer if (workers_count > STACK_WORKERS_MAX) allocator.free(workers);
 
             var spawned: usize = 0;
             errdefer {
-                var i: usize = 0;
-                while (i < spawned) : (i += 1) threads[i].join();
+                for (threads[0..spawned]) |t| t.join();
                 result.deinit();
             }
 
@@ -545,7 +616,7 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, c
 
             const race_io = threadIo();
             mutex.lock(race_io) catch unreachable;
-            while (!winner.load(.acquire) and remaining.load(.acquire) > (specs.len - spawned)) {
+            while (!winner.load(.acquire) and remaining.load(.acquire) > 0) {
                 cond.wait(race_io, &mutex) catch unreachable;
             }
             mutex.unlock(race_io);
@@ -574,7 +645,13 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, c
                 fn run(ctx_ptr: ?*anyopaque) void {
                     const self: *@This() = @ptrCast(@alignCast(ctx_ptr.?));
                     if (self.winner.load(.acquire)) {
-                        _ = self.remaining.fetchSub(1, .acq_rel);
+                        const prev = self.remaining.fetchSub(1, .acq_rel);
+                        if (prev == 1) {
+                            const io = threadIo();
+                            self.mutex.lock(io) catch unreachable;
+                            self.cond.signal(io);
+                            self.mutex.unlock(io);
+                        }
                         return;
                     }
 
@@ -601,7 +678,7 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, c
                 }
             };
 
-            var ctxs = try allocator.alloc(TaskCtx, specs.len);
+            const ctxs = try allocator.alloc(TaskCtx, specs.len);
             defer allocator.free(ctxs);
 
             for (specs, 0..) |spec, i| {
@@ -632,7 +709,7 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, c
     }
 }
 
-fn executeSpec(client: *Client, spec: RequestSpec) RequestResult {
+inline fn executeSpec(client: *Client, spec: RequestSpec) RequestResult {
     const result = client.request(spec.method, spec.url, .{
         .body = spec.body,
         .json = spec.json,
@@ -657,8 +734,12 @@ test "BatchBuilder" {
     _ = try builder.get("https://api.example.com/users");
     _ = try builder.post("https://api.example.com/users", "{\"name\":\"test\"}");
     _ = try builder.postJson("https://api.example.com/users", "{\"name\":\"json\"}");
+    _ = try builder.put("https://api.example.com/users/1", "{\"name\":\"put\"}");
+    _ = try builder.patch("https://api.example.com/users/1", "{\"name\":\"patch\"}");
+    _ = try builder.delete("https://api.example.com/users/1");
 
-    try std.testing.expectEqual(@as(usize, 3), builder.count());
+    try std.testing.expectEqual(@as(usize, 6), builder.count());
+    try std.testing.expectEqual(@as(usize, 6), builder.getSpecs().len);
 }
 
 test "BatchBuilder clear" {
@@ -676,6 +757,7 @@ test "BatchBuilder clear" {
 test "RequestResult" {
     var success_result = RequestResult{ .err = error.OutOfMemory };
     try std.testing.expect(!success_result.isSuccess());
+    try std.testing.expect(success_result.getResponse() == null);
 
     success_result.deinit();
 }
@@ -749,7 +831,7 @@ test "ConcurrencyConfig modes execution" {
     }
 
     // 3. Test explicit_workers mode
-    var exec = @import("executor.zig").Executor.initWithConfig(allocator, .{ .num_threads = 2 });
+    var exec = Executor.initWithConfig(allocator, .{ .num_threads = 2 });
     defer exec.deinit();
     try exec.start();
 

@@ -1,3 +1,5 @@
+//! POSIX and std.Io Network Address Compatibility Layer for httpx.zig
+
 const std = @import("std");
 const posix = std.posix;
 const Io = std.Io;
@@ -106,7 +108,6 @@ fn fromIpAddress(ip: Io.net.IpAddress) Address {
             out.in = std.mem.zeroes(posix.sockaddr.in);
             out.in.family = @intCast(posix.AF.INET);
             out.in.port = std.mem.nativeToBig(u16, ip4.port);
-            // Keep sockaddr.in.addr in network byte order in memory on little-endian hosts.
             const net_addr = std.mem.readInt(u32, &ip4.bytes, .big);
             out.in.addr = std.mem.bigToNative(u32, net_addr);
             break :blk out;
