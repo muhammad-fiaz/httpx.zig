@@ -19,6 +19,7 @@ pub const ExecutorError = error{
     AlreadyRunning,
     NotRunning,
     WorkerSpawnFailed,
+    Timeout,
 };
 
 /// Task function type.
@@ -158,22 +159,24 @@ pub const Executor = struct {
         try self.submit(.{ .func = func, .context = context });
     }
 
-    /// Submits multiple tasks for execution.
+    /// Submits multiple tasks atomically for execution.
     pub fn executeAll(self: *Self, tasks: []const Task) !void {
+        if (tasks.len == 0) return;
+
         const io = threadIo();
         self.mutex.lock(io) catch unreachable;
         defer self.mutex.unlock(io);
 
-        for (tasks) |task| {
-            if (self.tasks.len >= self.config.task_queue_size) {
-                return ExecutorError.TaskQueueFull;
-            }
-            try self.tasks.pushBack(self.allocator, task);
+        if (self.tasks.len + tasks.len > self.config.task_queue_size) {
+            return ExecutorError.TaskQueueFull;
         }
 
-        if (tasks.len > 0) {
-            self.cond.broadcast(io);
+        try self.tasks.ensureUnusedCapacity(self.allocator, tasks.len);
+        for (tasks) |task| {
+            self.tasks.pushBackAssumeCapacity(task);
         }
+
+        self.cond.broadcast(io);
     }
 
     /// Starts the executor threads.
@@ -295,7 +298,7 @@ pub fn Future(comptime T: type) type {
 
         const Self = @This();
 
-        /// Sets the successful result of the future.
+        /// Sets the successful result of the future and unblocks waiters.
         pub fn setResult(self: *Self, val: T) void {
             self.result = val;
             self.completed.store(true, .release);
@@ -303,7 +306,7 @@ pub fn Future(comptime T: type) type {
             self.event.set(io);
         }
 
-        /// Sets an error on the future.
+        /// Sets an error on the future and unblocks waiters.
         pub fn setError(self: *Self, err: anyerror) void {
             self.error_val = err;
             self.completed.store(true, .release);
@@ -312,10 +315,30 @@ pub fn Future(comptime T: type) type {
         }
 
         /// Waits for the future to complete and returns the result.
+        /// Propagates any cancellation/wait errors and guarantees the future completed before returning.
         pub fn wait(self: *Self) !T {
-            if (!self.completed.load(.acquire)) {
-                const io = threadIo();
-                self.event.wait(io) catch {};
+            const io = threadIo();
+            while (!self.completed.load(.acquire)) {
+                try self.event.wait(io);
+            }
+            if (self.error_val) |err| {
+                return err;
+            }
+            return self.result.?;
+        }
+
+        /// Waits for the future to complete within the specified timeout in milliseconds.
+        pub fn waitTimeout(self: *Self, timeout_ms: u64) !T {
+            const io = threadIo();
+            const timeout = std.Io.Timeout{
+                .duration = std.Io.Duration.fromMilliseconds(timeout_ms),
+                .clock = .awake,
+            };
+            while (!self.completed.load(.acquire)) {
+                self.event.waitTimeout(io, timeout) catch |err| {
+                    if (self.completed.load(.acquire)) break;
+                    return err;
+                };
             }
             if (self.error_val) |err| {
                 return err;
@@ -329,6 +352,14 @@ pub fn Future(comptime T: type) type {
                 return self.result;
             }
             return null;
+        }
+
+        /// Resets the future to an uncompleted state for reuse.
+        pub fn reset(self: *Self) void {
+            self.result = null;
+            self.error_val = null;
+            self.completed.store(false, .release);
+            self.event.reset();
         }
 
         /// Returns true if the future has completed.
@@ -399,6 +430,22 @@ test "Future error" {
     try std.testing.expectError(error.ConnectionReset, future.wait());
 }
 
+test "Future reset" {
+    var future = Future(i32){};
+
+    future.setResult(100);
+    try std.testing.expect(future.isDone());
+    try std.testing.expectEqual(@as(i32, 100), try future.wait());
+
+    future.reset();
+    try std.testing.expect(!future.isDone());
+    try std.testing.expect(future.get() == null);
+
+    future.setResult(200);
+    try std.testing.expect(future.isDone());
+    try std.testing.expectEqual(@as(i32, 200), try future.wait());
+}
+
 test "Executor executeAll and helpers" {
     const allocator = std.testing.allocator;
     var exec = Executor.initWithConfig(allocator, .{ .task_queue_size = 8 });
@@ -444,7 +491,6 @@ test "Executor trySubmit" {
     try exec.trySubmit(.{ .func = Counter.increment, .context = &counter });
     try exec.trySubmit(.{ .func = Counter.increment, .context = &counter });
 
-    // third submission should fail with TaskQueueFull
     const err = exec.trySubmit(.{ .func = Counter.increment, .context = &counter });
     try std.testing.expectError(error.TaskQueueFull, err);
 

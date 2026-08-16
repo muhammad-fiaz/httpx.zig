@@ -79,19 +79,26 @@ pub const DnsCache = struct {
     }
 
     /// Removes expired entries from the cache.
+    /// Collects expired keys before removing to avoid skipping entries during iteration.
     pub fn prune(self: *Self) void {
         const now_ms = @import("../util/common.zig").nowMillis();
         const io = threadIo();
         self.lock.lock(io) catch unreachable;
         defer self.lock.unlock(io);
 
+        var expired_keys = std.ArrayList([]const u8).empty;
+        defer expired_keys.deinit(self.allocator);
+
         var it = self.entries.iterator();
         while (it.next()) |entry| {
             if (now_ms >= entry.value_ptr.expires_at_ms) {
-                const key = entry.key_ptr.*;
-                if (self.entries.fetchRemove(key)) |removed| {
-                    self.allocator.free(removed.key);
-                }
+                expired_keys.append(self.allocator, entry.key_ptr.*) catch break;
+            }
+        }
+
+        for (expired_keys.items) |key| {
+            if (self.entries.fetchRemove(key)) |removed| {
+                self.allocator.free(removed.key);
             }
         }
     }
