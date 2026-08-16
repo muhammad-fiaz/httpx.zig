@@ -4,15 +4,17 @@
 //!
 //! - CORS (Cross-Origin Resource Sharing)
 //! - Logging and request timing
-//! - Rate limiting
+//! - Thread-safe Rate limiting
 //! - Basic authentication
 //! - Security headers (Helmet)
-//! - Response compression
-//! - Body parsing
+//! - Response compression (gzip, deflate, br, zstd)
+//! - Body parsing and payload limits
+//! - Reverse proxying and health check probes
 
 const std = @import("std");
 const Context = @import("server.zig").Context;
 const io_util = @import("../util/any_io.zig");
+const threadIo = io_util.threadIo;
 const Response = @import("../core/response.zig").Response;
 const types = @import("../core/types.zig");
 const list_writer = @import("../util/list_writer.zig");
@@ -185,7 +187,6 @@ pub const compressionMiddleware = compression;
 
 /// Configuration for compression middleware.
 pub const CompressionConfig = struct {
-    /// Minimum response body size in bytes before compression is applied.
     min_bytes: usize = 1024,
 };
 
@@ -233,57 +234,58 @@ pub const RateLimitConfig = struct {
     window_ms: u64 = 60_000,
 };
 
-/// Creates rate limiting middleware.
-///
-/// Tracks request counts in an in-memory hashmap keyed by IP.
-/// Returns 429 Too Many Requests when the limit is exceeded.
-/// Evicts stale entries periodically to prevent unbounded memory growth.
-/// Note: For multi-threaded servers, consider per-IP locking at the
-/// connection handler level for full thread safety.
+/// Creates thread-safe rate limiting middleware.
 pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
     return .{
         .name = "rate_limit",
         .handler = struct {
             const Entry = struct { count: u32, window_start: i64 };
-            var store: std.StringHashMap(Entry) = undefined;
-            var store_initialized: bool = false;
+            var store: std.StringHashMapUnmanaged(Entry) = .{};
+            var lock: std.Io.Mutex = .init;
             var evict_counter: u32 = 0;
 
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                if (!store_initialized) {
-                    store = std.StringHashMap(Entry).init(ctx.allocator);
-                    store_initialized = true;
-                }
-
                 const now = common.nowMillis();
                 const ip = ctx.header("X-Forwarded-For") orelse
                     ctx.header("X-Real-IP") orelse
                     "0.0.0.0";
 
-                // Evict stale entries every 512 requests to prevent unbounded growth.
+                const io = threadIo();
+                lock.lock(io) catch unreachable;
+                defer lock.unlock(io);
+
                 evict_counter +%= 1;
                 if (evict_counter % 512 == 0) {
                     var it = store.iterator();
                     while (it.next()) |kv| {
                         if (now - kv.value_ptr.window_start > @as(i64, @intCast(config.window_ms * 2))) {
-                            _ = store.remove(kv.key_ptr.*);
+                            const key = kv.key_ptr.*;
+                            if (store.fetchRemove(key)) |removed| {
+                                std.heap.page_allocator.free(removed.key);
+                            }
                         }
                     }
                 }
 
-                const entry = store.get(ip);
-                if (entry) |e| {
-                    if (now - e.window_start < @as(i64, @intCast(config.window_ms))) {
-                        if (e.count >= config.max_requests) {
+                const gop = store.getOrPut(std.heap.page_allocator, ip) catch return next(ctx);
+                if (gop.found_existing) {
+                    if (now - gop.value_ptr.window_start < @as(i64, @intCast(config.window_ms))) {
+                        if (gop.value_ptr.count >= config.max_requests) {
                             try ctx.setHeader("Retry-After", "60");
                             return ctx.status(status.StatusCode.TOO_MANY_REQUESTS).text("Too Many Requests");
                         }
-                        try store.put(ip, .{ .count = e.count + 1, .window_start = e.window_start });
+                        gop.value_ptr.count += 1;
                     } else {
-                        try store.put(ip, .{ .count = 1, .window_start = now });
+                        gop.value_ptr.count = 1;
+                        gop.value_ptr.window_start = now;
                     }
                 } else {
-                    try store.put(ip, .{ .count = 1, .window_start = now });
+                    const owned_ip = std.heap.page_allocator.dupe(u8, ip) catch {
+                        _ = store.remove(ip);
+                        return next(ctx);
+                    };
+                    gop.key_ptr.* = owned_ip;
+                    gop.value_ptr.* = .{ .count = 1, .window_start = now };
                 }
 
                 return next(ctx);
@@ -340,8 +342,6 @@ pub fn basicAuth(realm: []const u8, validator: *const fn ([]const u8, []const u8
 }
 
 /// Creates body parser middleware.
-///
-/// Checks Content-Length against `max_size` and returns 413 if exceeded.
 pub fn bodyParser(max_size: usize) Middleware {
     return .{
         .name = "body_parser",
@@ -367,9 +367,6 @@ pub fn bodyParser(max_size: usize) Middleware {
 }
 
 /// Creates security headers middleware (Helmet).
-///
-/// Adds standard security headers: X-Content-Type-Options, X-Frame-Options,
-/// X-XSS-Protection, and Strict-Transport-Security.
 pub fn helmet() Middleware {
     return .{
         .name = "helmet",
@@ -386,12 +383,6 @@ pub fn helmet() Middleware {
 }
 
 /// Creates request timeout middleware.
-///
-/// Stores the timeout deadline in `ctx.data` and checks it before calling
-/// the next handler. If the deadline has already passed, returns 408 Request
-/// Timeout. The server's own `request_timeout_ms` config provides the primary
-/// timeout enforcement at the socket level; this middleware provides an
-/// application-level check for slow downstream handlers.
 pub fn timeout(ms: u64) Middleware {
     return .{
         .name = "timeout",
@@ -418,8 +409,6 @@ pub fn timeout(ms: u64) Middleware {
 }
 
 /// Creates request ID middleware.
-///
-/// Generates a unique 16-byte hex request ID and sets the X-Request-ID header.
 pub fn requestId() Middleware {
     return .{
         .name = "request_id",
@@ -442,6 +431,25 @@ pub fn requestId() Middleware {
     };
 }
 
+fn buildProxyTargetUrl(allocator: std.mem.Allocator, target_base: []const u8, path: []const u8, query: ?[]const u8) ![]u8 {
+    const base_has_slash = std.mem.endsWith(u8, target_base, "/");
+    const path_has_slash = std.mem.startsWith(u8, path, "/");
+
+    const effective_path = if (base_has_slash and path_has_slash)
+        path[1..]
+    else if (!base_has_slash and !path_has_slash)
+        path
+    else
+        path;
+
+    const joiner = if (!base_has_slash and !path_has_slash) "/" else "";
+
+    if (query) |q| {
+        return std.fmt.allocPrint(allocator, "{s}{s}{s}?{s}", .{ target_base, joiner, effective_path, q });
+    }
+    return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ target_base, joiner, effective_path });
+}
+
 /// Creates reverse proxy middleware that forwards requests to target_url.
 pub fn reverseProxy(comptime target_url: []const u8) Middleware {
     return .{
@@ -453,12 +461,7 @@ pub fn reverseProxy(comptime target_url: []const u8) Middleware {
                 var client = client_mod.Client.init(ctx.allocator);
                 defer client.deinit();
 
-                const path = ctx.request.uri.path;
-                const query_str = ctx.request.uri.query;
-                const full_target = if (query_str) |q|
-                    try std.fmt.allocPrint(ctx.allocator, "{s}{s}?{s}", .{ target_url, path, q })
-                else
-                    try std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ target_url, path });
+                const full_target = try buildProxyTargetUrl(ctx.allocator, target_url, ctx.request.uri.path, ctx.request.uri.query);
                 defer ctx.allocator.free(full_target);
 
                 var headers_list = std.ArrayList([2][]const u8).empty;
@@ -479,7 +482,6 @@ pub fn reverseProxy(comptime target_url: []const u8) Middleware {
 }
 
 /// Creates reverse proxy middleware with a runtime-known target URL.
-/// The target_url slice must remain valid for the lifetime of the middleware.
 pub fn reverseProxyRuntime(target_url: []const u8) Middleware {
     const State = struct {
         var url: []const u8 = "";
@@ -494,12 +496,7 @@ pub fn reverseProxyRuntime(target_url: []const u8) Middleware {
                 var client = client_mod.Client.init(ctx.allocator);
                 defer client.deinit();
 
-                const path = ctx.request.uri.path;
-                const query_str = ctx.request.uri.query;
-                const full_target = if (query_str) |q|
-                    try std.fmt.allocPrint(ctx.allocator, "{s}{s}?{s}", .{ State.url, path, q })
-                else
-                    try std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ State.url, path });
+                const full_target = try buildProxyTargetUrl(ctx.allocator, State.url, ctx.request.uri.path, ctx.request.uri.query);
                 defer ctx.allocator.free(full_target);
 
                 var headers_list = std.ArrayList([2][]const u8).empty;
@@ -581,18 +578,12 @@ test "loggerWithConfig middleware" {
 
 /// Health check configuration.
 pub const HealthConfig = struct {
-    /// Path to serve the health check on.
     path: []const u8 = "/health",
-    /// Optional custom status body (JSON-encodable string).
     body: []const u8 = "{\"status\":\"ok\"}",
-    /// HTTP status code to return.
     status: u16 = status.StatusCode.OK,
 };
 
 /// Creates a health check endpoint middleware.
-///
-/// Intercepts requests to the configured path and returns a health status
-/// response without passing to downstream handlers.
 pub fn healthCheck(comptime config: HealthConfig) Middleware {
     return .{
         .name = "health_check",
@@ -612,9 +603,7 @@ pub fn healthCheck(comptime config: HealthConfig) Middleware {
 
 /// Readiness probe configuration for Kubernetes-style health checks.
 pub const ReadinessConfig = struct {
-    /// Path to serve the readiness check on.
     path: []const u8 = "/ready",
-    /// Custom body to return.
     body: []const u8 = "{\"ready\":true}",
 };
 

@@ -97,7 +97,7 @@ pub const Stream = struct {
     }
 
     /// Checks if sending data is allowed in current state.
-    pub fn canSend(self: *const Self) bool {
+    pub inline fn canSend(self: *const Self) bool {
         return switch (self.state) {
             .open, .half_closed_remote => true,
             else => false,
@@ -105,7 +105,7 @@ pub const Stream = struct {
     }
 
     /// Checks if receiving data is allowed in current state.
-    pub fn canReceive(self: *const Self) bool {
+    pub inline fn canReceive(self: *const Self) bool {
         return switch (self.state) {
             .open, .half_closed_local => true,
             else => false,
@@ -139,7 +139,7 @@ pub const Stream = struct {
     }
 
     /// Closes the stream due to RST_STREAM or error.
-    pub fn reset(self: *Self) void {
+    pub inline fn reset(self: *Self) void {
         self.state = .closed;
     }
 
@@ -207,10 +207,12 @@ pub const StreamManager = struct {
     /// Creates a new stream with the next available ID.
     pub fn createStream(self: *Self) !*Stream {
         const id = if (self.is_client) blk: {
+            if (self.next_client_stream_id > 0x7FFFFFFD) return error.StreamIdExhausted;
             const id = self.next_client_stream_id;
             self.next_client_stream_id += 2;
             break :blk id;
         } else blk: {
+            if (self.next_server_stream_id > 0x7FFFFFFC) return error.StreamIdExhausted;
             const id = self.next_server_stream_id;
             self.next_server_stream_id += 2;
             break :blk id;
@@ -221,7 +223,7 @@ pub const StreamManager = struct {
     }
 
     /// Gets an existing stream by ID.
-    pub fn getStream(self: *Self, id: u31) ?*Stream {
+    pub inline fn getStream(self: *Self, id: u31) ?*Stream {
         return self.streams.getPtr(id);
     }
 
@@ -231,13 +233,12 @@ pub const StreamManager = struct {
             return stream;
         }
 
-        // Validate stream ID based on initiator
         const is_client_stream = (id % 2 == 1);
         if (self.is_client and is_client_stream) {
-            return error.InvalidStreamId; // Server cannot create client streams
+            return error.InvalidStreamId;
         }
         if (!self.is_client and !is_client_stream) {
-            return error.InvalidStreamId; // Client cannot create server streams
+            return error.InvalidStreamId;
         }
 
         try self.streams.put(self.allocator, id, Stream.init(id));
@@ -266,12 +267,12 @@ pub const StreamManager = struct {
     }
 
     /// Checks if a new stream can be opened within the concurrent streams limit.
-    pub fn canOpenStream(self: *const Self) bool {
+    pub inline fn canOpenStream(self: *const Self) bool {
         return self.activeStreamCount() < self.max_concurrent_streams;
     }
 
     /// Validates that a frame's payload length does not exceed the peer's max frame size.
-    pub fn validateFrameSize(self: *const Self, frame_length: usize) !void {
+    pub inline fn validateFrameSize(self: *const Self, frame_length: usize) !void {
         if (frame_length > self.peer_settings.max_frame_size) return error.FrameTooLarge;
     }
 
@@ -321,10 +322,8 @@ pub fn buildHeadersFramePayload(
 
     var flags: u8 = 0;
 
-    // Optional priority block (5 bytes)
     if (priority) |p| {
         flags |= 0x20; // PRIORITY flag
-
         var dep: u32 = p.dependency;
         if (p.exclusive) dep |= 0x80000000;
 
@@ -332,30 +331,19 @@ pub fn buildHeadersFramePayload(
         try out.append(allocator, @intCast((dep >> 16) & 0xFF));
         try out.append(allocator, @intCast((dep >> 8) & 0xFF));
         try out.append(allocator, @intCast(dep & 0xFF));
-        try out.append(allocator, p.weight -% 1); // Weight is 1-256, encoded as 0-255
+        try out.append(allocator, p.weight -% 1);
     }
 
-    // HPACK-encoded headers
     const encoded_headers = try hpack.encodeHeaders(&stream_manager.hpack_ctx, headers, allocator);
     defer allocator.free(encoded_headers);
     try out.appendSlice(allocator, encoded_headers);
 
-    // END_HEADERS flag (we don't use CONTINUATION for now)
-    flags |= 0x04;
+    flags |= 0x04; // END_HEADERS
 
     return .{ .payload = try out.toOwnedSlice(allocator), .flags = flags };
 }
 
 /// Builds a HEADERS frame with optional CONTINUATION frames for sending.
-///
-/// If the HPACK-encoded header block fits in a single frame (size <= max_frame_size - 9),
-/// returns a single complete HEADERS frame with END_HEADERS set.
-///
-/// If it exceeds max_frame_size - 9, splits across a HEADERS frame (without END_HEADERS)
-/// followed by one or more CONTINUATION frames, with the final one having END_HEADERS.
-///
-/// Returns a flat buffer of complete HTTP/2 frames (9-byte headers + payloads)
-/// ready to be written to the wire with a single write call.
 pub fn buildHeadersAndContinuations(
     stream_manager: *StreamManager,
     stream_id: u31,
@@ -365,7 +353,6 @@ pub fn buildHeadersAndContinuations(
     end_stream: bool,
     allocator: Allocator,
 ) ![]u8 {
-    // Build the priority block (5 bytes if present)
     var priority_payload = std.ArrayList(u8).empty;
     defer priority_payload.deinit(allocator);
 
@@ -379,16 +366,12 @@ pub fn buildHeadersAndContinuations(
         try priority_payload.append(allocator, p.weight -% 1);
     }
 
-    // HPACK-encode the headers
     const encoded_headers = try hpack.encodeHeaders(&stream_manager.hpack_ctx, headers, allocator);
     defer allocator.free(encoded_headers);
 
-    // max_fragment_size accounts for potential priority block overhead in the first frame,
-    // ensuring no frame payload exceeds max_frame_size.
-    const max_fragment_size: usize = if (max_frame_size > 9) @intCast(max_frame_size - 9) else 0;
+    const max_fragment_size: usize = @intCast(@max(16384, max_frame_size));
 
-    // If the HPACK-encoded header block fits in one frame, send as single HEADERS frame
-    if (encoded_headers.len <= max_fragment_size) {
+    if (priority_payload.items.len + encoded_headers.len <= max_fragment_size) {
         var flags: u8 = 0x04; // END_HEADERS
         if (end_stream) flags |= 0x01; // END_STREAM
 
@@ -410,7 +393,6 @@ pub fn buildHeadersAndContinuations(
         return try result.toOwnedSlice(allocator);
     }
 
-    // CONTINUATION required: build full payload then split across frames
     var full_payload = std.ArrayList(u8).empty;
     defer full_payload.deinit(allocator);
     try full_payload.appendSlice(allocator, priority_payload.items);
@@ -419,10 +401,9 @@ pub fn buildHeadersAndContinuations(
     var result = std.ArrayList(u8).empty;
     errdefer result.deinit(allocator);
 
-    // First frame: HEADERS without END_HEADERS, with first chunk of payload
     const first_chunk_len = @min(full_payload.items.len, max_fragment_size);
     {
-        const first_flags: u8 = if (end_stream) 0x01 else 0; // END_STREAM only, no END_HEADERS
+        const first_flags: u8 = if (end_stream) 0x01 else 0;
         const frame_header = http.Http2FrameHeader{
             .length = @intCast(first_chunk_len),
             .frame_type = .headers,
@@ -434,12 +415,11 @@ pub fn buildHeadersAndContinuations(
         try result.appendSlice(allocator, full_payload.items[0..first_chunk_len]);
     }
 
-    // CONTINUATION frames for remaining payload
     var offset = first_chunk_len;
     while (offset < full_payload.items.len) {
         const chunk_len = @min(full_payload.items.len - offset, max_fragment_size);
         const is_last = (offset + chunk_len) == full_payload.items.len;
-        const cont_flags: u8 = if (is_last) 0x04 else 0; // END_HEADERS on last CONTINUATION
+        const cont_flags: u8 = if (is_last) 0x04 else 0;
 
         const frame_header = http.Http2FrameHeader{
             .length = @intCast(chunk_len),
@@ -467,7 +447,6 @@ pub fn parseHeadersFramePayload(
     var offset: usize = 0;
     var priority: ?StreamPriority = null;
 
-    // Check for PADDED flag (0x08)
     var pad_length: usize = 0;
     if (flags & 0x08 != 0) {
         if (payload.len < 1) return error.InvalidFrame;
@@ -475,7 +454,6 @@ pub fn parseHeadersFramePayload(
         offset += 1;
     }
 
-    // Check for PRIORITY flag (0x20)
     if (flags & 0x20 != 0) {
         if (payload.len < offset + 5) return error.InvalidFrame;
         const dep_raw = (@as(u32, payload[offset]) << 24) |
@@ -490,9 +468,8 @@ pub fn parseHeadersFramePayload(
         offset += 5;
     }
 
-    // Remaining is HPACK block (minus padding)
+    if (payload.len < offset + pad_length) return error.InvalidFrame;
     const header_block_len = payload.len - offset - pad_length;
-    if (header_block_len > payload.len - offset) return error.InvalidFrame;
 
     const headers = try hpack.decodeHeaders(
         &stream_manager.hpack_ctx,
@@ -525,7 +502,7 @@ pub fn parseWindowUpdatePayload(payload: []const u8) !u31 {
         (@as(u32, payload[1]) << 16) |
         (@as(u32, payload[2]) << 8) |
         payload[3];
-    if (increment == 0) return error.ProtocolError; // WINDOW_UPDATE with 0 is protocol error
+    if (increment == 0) return error.ProtocolError;
     return @intCast(increment);
 }
 
@@ -634,7 +611,7 @@ pub fn parseGoawayPayload(payload: []const u8, allocator: Allocator) !struct {
 }
 
 /// Builds a PING frame payload.
-pub fn buildPingPayload(opaque_data: [8]u8) [8]u8 {
+pub inline fn buildPingPayload(opaque_data: [8]u8) [8]u8 {
     return opaque_data;
 }
 
@@ -786,11 +763,9 @@ test "applyPeerSettings updates max_concurrent_streams and window size" {
     var manager = StreamManager.init(allocator, true);
     defer manager.deinit();
 
-    // Create a stream so we can check its send_window
     const stream = try manager.createStream();
     try std.testing.expectEqual(@as(i32, 65535), stream.send_window);
 
-    // Apply new settings with different initial_window_size
     const new_settings = http.Http2Connection.Http2ConnectionSettings{
         .max_concurrent_streams = 50,
         .initial_window_size = 32768,
@@ -800,7 +775,6 @@ test "applyPeerSettings updates max_concurrent_streams and window size" {
 
     try std.testing.expectEqual(@as(u32, 50), manager.max_concurrent_streams);
     try std.testing.expectEqual(@as(u32, 32768), manager.peer_settings.initial_window_size);
-    // Stream send_window should be adjusted: 65535 + (32768 - 65535) = 32768
     try std.testing.expectEqual(@as(i32, 32768), stream.send_window);
 }
 
@@ -809,16 +783,13 @@ test "buildGoawayFrame produces correct wire format" {
     const frame = try buildGoawayFrame(5, .no_error, "debug info", allocator);
     defer allocator.free(frame);
 
-    // 9-byte frame header + 4 (last_stream_id) + 4 (error_code) + 10 (debug_data) = 27
     try std.testing.expectEqual(@as(usize, 27), frame.len);
 
-    // Parse the frame header
     const header = http.Http2FrameHeader.parse(frame[0..9].*);
     try std.testing.expectEqual(@as(u24, 18), header.length);
     try std.testing.expectEqual(http.Http2FrameType.goaway, header.frame_type);
     try std.testing.expectEqual(@as(u31, 0), header.stream_id);
 
-    // Parse the GOAWAY payload directly from frame bytes
     const payload = frame[9..];
     const last_stream_id: u31 = @intCast(
         (@as(u32, payload[0] & 0x7F) << 24) |
@@ -841,7 +812,6 @@ test "buildGoawayFrame produces correct wire format" {
 test "buildRstStreamFrame produces correct wire format" {
     const frame = buildRstStreamFrame(3, .cancel);
 
-    // 13 bytes total: 9-byte header + 4-byte error code
     try std.testing.expectEqual(@as(usize, 13), frame.len);
 
     const header = http.Http2FrameHeader.parse(frame[0..9].*);

@@ -18,6 +18,7 @@ const Headers = @import("headers.zig").Headers;
 const HeaderName = @import("headers.zig").HeaderName;
 const Status = @import("status.zig").Status;
 const json_util = @import("../util/json.zig");
+
 /// HTTP response representation.
 pub const Response = struct {
     allocator: Allocator,
@@ -53,22 +54,22 @@ pub const Response = struct {
     }
 
     /// Returns true if the response indicates success (2xx).
-    pub fn ok(self: *const Self) bool {
+    pub inline fn ok(self: *const Self) bool {
         return self.status.isSuccess();
     }
 
     /// Returns true if the response is a redirect (3xx).
-    pub fn isRedirect(self: *const Self) bool {
+    pub inline fn isRedirect(self: *const Self) bool {
         return self.status.isRedirect();
     }
 
     /// Returns true if the response is an error (4xx or 5xx).
-    pub fn isError(self: *const Self) bool {
+    pub inline fn isError(self: *const Self) bool {
         return self.status.isError();
     }
 
     /// Returns the response body as text.
-    pub fn text(self: *const Self) ?[]const u8 {
+    pub inline fn text(self: *const Self) ?[]const u8 {
         return self.body;
     }
 
@@ -80,35 +81,33 @@ pub const Response = struct {
     }
 
     /// Parses the response body as JSON into the given type, using leaky parsing.
-    /// Useful for types that do not own internal allocated slices or maps, or where the
-    /// memory will be handled separately.
     pub fn jsonLeaky(self: *const Self, comptime T: type, options: std.json.ParseOptions) !T {
         const body = self.body orelse return error.NoBody;
         return std.json.parseFromSliceLeaky(T, self.allocator, body, options);
     }
 
     /// Returns the Location header value for redirects.
-    pub fn location(self: *const Self) ?[]const u8 {
+    pub inline fn location(self: *const Self) ?[]const u8 {
         return self.headers.get(HeaderName.LOCATION);
     }
 
     /// Returns the Content-Type header value.
-    pub fn contentType(self: *const Self) ?[]const u8 {
+    pub inline fn contentType(self: *const Self) ?[]const u8 {
         return self.headers.get(HeaderName.CONTENT_TYPE);
     }
 
     /// Returns the Content-Length header value.
-    pub fn contentLength(self: *const Self) ?u64 {
+    pub inline fn contentLength(self: *const Self) ?u64 {
         return self.headers.getContentLength();
     }
 
     /// Returns true if the response uses chunked transfer encoding.
-    pub fn isChunked(self: *const Self) bool {
+    pub inline fn isChunked(self: *const Self) bool {
         return self.headers.isChunked();
     }
 
     /// Returns a specific header value.
-    pub fn header(self: *const Self, name: []const u8) ?[]const u8 {
+    pub inline fn header(self: *const Self, name: []const u8) ?[]const u8 {
         return self.headers.get(name);
     }
 
@@ -269,7 +268,6 @@ pub const ResponseBuilder = struct {
 
         if (self.body_data) |b| {
             if (self.body_owned) {
-                // Transfer ownership for allocated JSON payloads.
                 response.body = b;
                 response.body_owned = true;
                 self.body_data = null;
@@ -302,10 +300,10 @@ test "Response initialization" {
 test "Response status checks" {
     const allocator = std.testing.allocator;
 
-    var ok = Response.init(allocator, 200);
-    defer ok.deinit();
-    try std.testing.expect(ok.ok());
-    try std.testing.expect(!ok.isError());
+    var ok_res = Response.init(allocator, 200);
+    defer ok_res.deinit();
+    try std.testing.expect(ok_res.ok());
+    try std.testing.expect(!ok_res.isError());
 
     var redirect = Response.init(allocator, 301);
     defer redirect.deinit();

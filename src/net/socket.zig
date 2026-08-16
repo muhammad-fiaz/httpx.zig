@@ -79,6 +79,8 @@ const INVALID_SOCKET: posix.socket_t = if (is_windows)
 else
     -1;
 
+const MSG_NOSIGNAL_FLAG: u32 = if (@hasDecl(posix.MSG, "NOSIGNAL")) posix.MSG.NOSIGNAL else 0;
+
 fn toSocketHandle(raw: anytype) posix.socket_t {
     if (@TypeOf(raw) == posix.socket_t) return raw;
     if (@typeInfo(posix.socket_t) == .pointer) {
@@ -111,7 +113,15 @@ fn posixSocket(domain: anytype, sock_type: anytype, protocol: anytype) !posix.so
 
     const rc = posix.system.socket(domain, sock_type, protocol);
     switch (posix.errno(rc)) {
-        .SUCCESS => return toSocketHandle(rc),
+        .SUCCESS => {
+            const handle = toSocketHandle(rc);
+            // On macOS / BSD, disable SIGPIPE via socket option
+            if (comptime builtin.os.tag == .macos or builtin.os.tag == .ios or builtin.os.tag == .freebsd) {
+                const value: u32 = 1;
+                _ = posix.system.setsockopt(handle, posix.SOL.SOCKET, 0x1022, std.mem.asBytes(&value).ptr, @sizeOf(u32));
+            }
+            return handle;
+        },
         else => return error.SocketOpenFailed,
     }
 }
@@ -211,7 +221,7 @@ fn posixConnectWithTimeout(sock: posix.socket_t, addr_ptr: *const posix.sockaddr
     }
 
     try setSocketNonBlocking(sock, true);
-    errdefer setSocketNonBlocking(sock, true) catch {};
+    errdefer setSocketNonBlocking(sock, false) catch {};
 
     if (is_windows) {
         const rc = winsock.connect(toWinsockSocket(sock), addr_ptr, @intCast(addr_len));
@@ -282,27 +292,22 @@ fn posixAccept(sock: posix.socket_t, addr_ptr: *posix.sockaddr, addr_len: *posix
         return toSocketHandle(rc);
     }
 
-    const rc = posix.system.accept(sock, addr_ptr, addr_len);
-    switch (posix.errno(rc)) {
-        .SUCCESS => return toSocketHandle(rc),
-        else => return error.AcceptFailed,
+    while (true) {
+        const rc = posix.system.accept(sock, addr_ptr, addr_len);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return toSocketHandle(rc),
+            .INTR => continue,
+            else => return error.AcceptFailed,
+        }
     }
 }
 
-/// Maximum bytes passed to a single `winsock.send()` call.
-///
-/// Windows Winsock may return WSAEWOULDBLOCK or WSAENOBUFS when a single
-/// blocking send exceeds the kernel send buffer (typically 8–64 KB). Capping
-/// each send to 64 KB keeps individual calls within the buffer and prevents
-/// the upload loop from hanging on large multipart payloads (issue #26).
 const MAX_WINSOCK_SEND_CHUNK: usize = 65536;
 
 fn winsockWaitWritable(sock: posix.socket_t) !void {
     var write_set: winsock.fd_set = .{ .fd_count = 0, .fd_array = undefined };
     write_set.fd_array[0] = toWinsockSocket(sock);
     write_set.fd_count = 1;
-    // 30-second timeout matches the default client write_ms so that large
-    // multipart uploads do not time out prematurely on slow connections.
     var tv = posix.timeval{ .sec = 30, .usec = 0 };
     const rc = winsock.select(0, null, &write_set, null, &tv);
     if (rc == winsock.SOCKET_ERROR) return error.SendFailed;
@@ -311,10 +316,6 @@ fn winsockWaitWritable(sock: posix.socket_t) !void {
 
 fn posixSend(sock: posix.socket_t, data: []const u8, flags: u32) !usize {
     if (is_windows) {
-        // Cap the individual send to MAX_WINSOCK_SEND_CHUNK bytes.
-        // Passing the full (potentially multi-MB) slice in a single winsock.send()
-        // can trigger WSAEWOULDBLOCK or WSAENOBUFS on Windows even for blocking
-        // sockets once the kernel send buffer fills (issue #26).
         const chunk = data[0..@min(data.len, MAX_WINSOCK_SEND_CHUNK)];
         while (true) {
             const send_len: i32 = std.math.cast(i32, chunk.len) orelse return error.SendFailed;
@@ -332,7 +333,7 @@ fn posixSend(sock: posix.socket_t, data: []const u8, flags: u32) !usize {
     }
 
     while (true) {
-        const rc = posix.system.sendto(sock, data.ptr, data.len, @intCast(flags | posix.MSG.NOSIGNAL), null, 0);
+        const rc = posix.system.sendto(sock, data.ptr, data.len, @intCast(flags | MSG_NOSIGNAL_FLAG), null, 0);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
@@ -392,7 +393,7 @@ fn posixSendTo(sock: posix.socket_t, data: []const u8, flags: u32, addr_ptr: *co
     }
 
     while (true) {
-        const rc = posix.system.sendto(sock, data.ptr, data.len, @intCast(flags | posix.MSG.NOSIGNAL), addr_ptr, addr_len);
+        const rc = posix.system.sendto(sock, data.ptr, data.len, @intCast(flags | MSG_NOSIGNAL_FLAG), addr_ptr, addr_len);
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
@@ -513,8 +514,6 @@ fn tcpNoDelayOption() u32 {
 }
 
 /// Initializes the platform networking subsystem.
-///
-/// On Windows this calls `WSAStartup`; on other platforms it is a no-op.
 pub fn init() NetInitError!void {
     if (!is_windows) return;
 
@@ -530,8 +529,6 @@ pub fn init() NetInitError!void {
 }
 
 /// Deinitializes the platform networking subsystem.
-///
-/// On Windows this calls `WSACleanup`; on other platforms it is a no-op.
 pub fn deinit() void {
     if (!is_windows) return;
     if (!winsock_initialized) return;
@@ -540,8 +537,6 @@ pub fn deinit() void {
 }
 
 /// Adapter that exposes a `std.Io.Reader` backed by a connected `Socket`.
-///
-/// This is used to integrate with the custom TLS implementation in `tls.zig`.
 pub const SocketIoReader = struct {
     socket: *Socket,
     reader: Io.Reader,
@@ -633,8 +628,6 @@ pub const SocketIoReader = struct {
 };
 
 /// Adapter that exposes a `std.Io.Writer` backed by a connected `Socket`.
-///
-/// This is used to integrate with the custom TLS implementation in `tls.zig`.
 pub const SocketIoWriter = struct {
     socket: *Socket,
     writer: Io.Writer,
@@ -659,28 +652,29 @@ pub const SocketIoWriter = struct {
         var total_sent: usize = 0;
 
         const buffered = w.buffered();
-        // std.debug.print("drain called: buffered.len={}, bufs.len={}, splat={}\n", .{buffered.len, bufs.len, splat});
         if (buffered.len > 0) {
             const num = p.socket.send(buffered) catch return error.WriteFailed;
             total_sent += num;
             if (num < buffered.len) return w.consume(total_sent);
         }
 
-        const data_bufs = bufs[0 .. bufs.len - 1];
-        for (data_bufs) |bytes| {
-            if (bytes.len == 0) continue;
-            const num = p.socket.send(bytes) catch return error.WriteFailed;
-            total_sent += num;
-            if (num < bytes.len) return w.consume(total_sent);
-        }
-
-        const pattern = bufs[bufs.len - 1];
-        if (pattern.len > 0 and splat > 0) {
-            var i: usize = 0;
-            while (i < splat) : (i += 1) {
-                const num = p.socket.send(pattern) catch return error.WriteFailed;
+        if (bufs.len > 0) {
+            const data_bufs = bufs[0 .. bufs.len - 1];
+            for (data_bufs) |bytes| {
+                if (bytes.len == 0) continue;
+                const num = p.socket.send(bytes) catch return error.WriteFailed;
                 total_sent += num;
-                if (num < pattern.len) return w.consume(total_sent);
+                if (num < bytes.len) return w.consume(total_sent);
+            }
+
+            const pattern = bufs[bufs.len - 1];
+            if (pattern.len > 0 and splat > 0) {
+                var i: usize = 0;
+                while (i < splat) : (i += 1) {
+                    const num = p.socket.send(pattern) catch return error.WriteFailed;
+                    total_sent += num;
+                    if (num < pattern.len) return w.consume(total_sent);
+                }
             }
         }
         return w.consume(total_sent);
@@ -785,7 +779,6 @@ pub const Socket = struct {
     }
 
     /// Connects to the specified address with a connect-phase timeout in milliseconds.
-    /// A timeout of `0` disables the connect timeout and uses a blocking connect.
     pub fn connectWithTimeout(self: *Self, addr: net.Address, timeout_ms: u64) !void {
         try posixConnectWithTimeout(self.handle, &addr.any, addr.getOsSockLen(), timeout_ms);
         self.connected = true;
@@ -817,7 +810,9 @@ pub const Socket = struct {
     pub fn sendAll(self: *Self, data: []const u8) !void {
         var sent: usize = 0;
         while (sent < data.len) {
-            sent += try self.send(data[sent..]);
+            const n = try self.send(data[sent..]);
+            if (n == 0) return error.SendFailed;
+            sent += n;
         }
     }
 
@@ -838,7 +833,7 @@ pub const Socket = struct {
 
     /// Sets a socket option.
     pub fn setOption(self: *Self, level: u32, optname: u32, value: []const u8) !void {
-        try posixSetSockOpt(self.handle, level, optname, value);
+        try posixSetSockOpt(self.handle, @intCast(level), optname, value);
     }
 
     /// Enables or disables TCP_NODELAY (Nagle's algorithm).
@@ -1064,9 +1059,6 @@ pub const TcpListener = struct {
 };
 
 /// UDP datagram socket abstraction.
-///
-/// This is a low-level building block used for DNS, QUIC, custom protocols, etc.
-/// It intentionally does not hide allocation or buffering.
 pub const UdpSocket = struct {
     handle: posix.socket_t,
     connected: bool = false,
@@ -1125,7 +1117,6 @@ pub const UdpSocket = struct {
     }
 
     /// Connects the UDP socket to a default peer address.
-    /// After calling this, `send`/`recv` operate on that peer.
     pub fn connect(self: *Self, addr: net.Address) !void {
         try posixConnect(self.handle, &addr.any, addr.getOsSockLen());
         self.connected = true;
@@ -1209,8 +1200,6 @@ pub const UdpSocket = struct {
                 .TIMEDOUT => return error.ConnectionTimedOut,
                 .NOMEM => return error.SystemResources,
                 .NOTCONN => return error.SocketNotConnected,
-                // Closing the socket from another thread while blocked in recvfrom
-                // is a valid shutdown path for the HTTP/3 server loop.
                 .BADF, .NOTSOCK, .FAULT, .INVAL => return UdpError.RecvFailed,
                 else => return UdpError.RecvFailed,
             }
@@ -1309,7 +1298,6 @@ test "TcpListener getLocalAddress" {
     defer listener.deinit();
 
     const addr = try listener.getLocalAddress();
-    // port should be assigned
     try std.testing.expect(addr.getPort() != 0);
 }
 

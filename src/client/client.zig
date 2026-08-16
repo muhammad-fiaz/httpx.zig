@@ -345,7 +345,6 @@ pub const RequestOptions = struct {
     }
 
     /// Returns a copy that sets `Authorization: Bearer <token>` for this request.
-    /// This clears any previously set basic-auth credentials in the options copy.
     pub fn withBearerToken(self: RequestOptions, token: []const u8) RequestOptions {
         var out = self;
         out.bearer_token = token;
@@ -354,7 +353,6 @@ pub const RequestOptions = struct {
     }
 
     /// Returns a copy that sets `Authorization: Basic ...` for this request.
-    /// This clears any previously set bearer token in the options copy.
     pub fn withBasicAuth(self: RequestOptions, username: []const u8, password: []const u8) RequestOptions {
         var out = self;
         out.basic_auth = .{ .username = username, .password = password };
@@ -481,7 +479,6 @@ pub const Client = struct {
     }
 
     /// Logs a formatted message. If config.log_fn is provided, delegates to it.
-    /// Otherwise, falls back to stderr.
     pub fn log(self: *const Self, level: server_mod.LogLevel, comptime format: []const u8, args: anytype) void {
         if (self.config.log_fn) |log_fn| {
             var buf: [1024]u8 = undefined;
@@ -532,8 +529,8 @@ pub const Client = struct {
         const full_url = if (self.config.base_url) |base|
             try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base, url })
         else
-            try self.allocator.dupe(u8, url);
-        defer self.allocator.free(full_url);
+            url;
+        defer if (self.config.base_url != null) self.allocator.free(full_url);
 
         var req = try Request.init(self.allocator, method, full_url);
         defer req.deinit();
@@ -583,7 +580,6 @@ pub const Client = struct {
             if (reqOpts.multipart_files) |files| {
                 for (files) |file| {
                     const resolved_mime = file.content_type orelse common.mimeTypeFromPathOr(file.filename, "application/octet-stream");
-
                     try builder.addFile(file.name, file.filename, resolved_mime, file.data);
                 }
             }
@@ -644,7 +640,7 @@ pub const Client = struct {
         return response;
     }
 
-    /// Executes the actual HTTP request.
+    /// Executes the actual HTTP request with retry handling.
     fn executeRequest(self: *Self, req: *Request, reqOpts: RequestOptions) !Response {
         const policy = self.config.retry_policy;
         const can_retry_method = (!policy.retry_only_idempotent) or req.method.isIdempotent();
@@ -674,10 +670,8 @@ pub const Client = struct {
     }
 
     /// Returns true for transport-layer failures that are worth retrying.
-    /// TLS/protocol/parse failures are treated as deterministic and fail fast.
     fn isRetryableRequestError(err: anyerror) bool {
         const name = @errorName(err);
-
         if (mem.startsWith(u8, name, "Tls")) return false;
 
         return !(mem.eql(u8, name, "InvalidUri") or
@@ -699,7 +693,6 @@ pub const Client = struct {
         const writer = list_writer.init(self.allocator, &buffer);
 
         const method_str = req.method.toString();
-        // Construct absolute URI
         try writer.print("{s} http://{s}:{d}{s}", .{ method_str, req.uri.host orelse "", req.uri.effectivePort(), req.uri.path });
         if (req.uri.query) |q| {
             try writer.print("?{s}", .{q});
@@ -727,6 +720,8 @@ pub const Client = struct {
     }
 
     fn establishProxyTlsTunnel(self: *Self, socket: *Socket, target_host: []const u8, target_port: u16, proxy: types.Proxy) !void {
+        if (mem.indexOfAny(u8, target_host, "\r\n\x00") != null) return error.InvalidUri;
+
         var buffer = std.ArrayList(u8).empty;
         const writer = list_writer.init(self.allocator, &buffer);
 
@@ -814,11 +809,8 @@ pub const Client = struct {
         const wants_http2 = self.config.http2_enabled or req.version == .HTTP_2;
         const wants_http3 = self.config.http3_enabled or req.version == .HTTP_3;
 
-        // HTTP/3 takes priority, but falls back to HTTP/2 when a proxy is
-        // configured (QUIC does not support standard HTTP proxies).
         if (wants_http3) {
             if (proxy != null) {
-                // Fall back to HTTP/2 if also enabled; otherwise return error.
                 if (wants_http2) {
                     return self.executeRequestHttp2(req, host, port, timeouts, reqOpts);
                 }
@@ -851,13 +843,7 @@ pub const Client = struct {
             var socket = try Socket.createForAddress(addr);
             defer socket.close();
 
-            // Do not set SO_RCVTIMEO / SO_SNDTIMEO on TLS sockets.
-            // The TLS layer performs multi-step record I/O; a per-recv
-            // timeout fires mid-handshake and kills the TLS state
-            // machine.  The connect timeout is handled separately by
-            // connectWithTimeout (which uses poll).
             try socket.setNoDelay(true);
-
             try socket.connectWithTimeout(addr, timeouts.connect_ms);
 
             if (proxy) |p| {
@@ -884,8 +870,16 @@ pub const Client = struct {
             }
             try conn.socket.setKeepAlive(true);
 
-            try conn.socket.sendAll(request_data);
-            var res = try self.readResponseFromTcp(&conn.socket, req.method.hasResponseBody());
+            conn.socket.sendAll(request_data) catch |send_err| {
+                conn.close();
+                return send_err;
+            };
+
+            var res = self.readResponseFromTcp(&conn.socket, req.method.hasResponseBody()) catch |read_err| {
+                conn.close();
+                return read_err;
+            };
+
             if (!res.headers.isKeepAlive(.HTTP_1_1)) {
                 conn.close();
             }
@@ -936,11 +930,6 @@ pub const Client = struct {
         var socket = try Socket.createForAddress(addr);
         defer socket.close();
 
-        // Do not set SO_RCVTIMEO / SO_SNDTIMEO on sockets used for
-        // TLS -- the TLS layer performs multi-step record I/O and a
-        // per-recv timeout fires mid-handshake.  The connect timeout
-        // is handled separately by connectWithTimeout.
-
         try socket.connectWithTimeout(addr, timeouts.connect_ms);
 
         if (proxy) |p| {
@@ -952,8 +941,6 @@ pub const Client = struct {
         }
 
         if (req.uri.isTls()) {
-            // Build ALPN list based on enabled protocols.
-            // When both HTTP/2 and HTTP/3 are enabled, advertise all three.
             const tls_session_cfg = blk: {
                 if (self.config.http3_enabled and self.config.http2_enabled) {
                     break :blk if (verify_ssl)
@@ -971,8 +958,6 @@ pub const Client = struct {
             session.attachSocket(&socket);
             try session.handshake(host);
 
-            // Set recv timeout after TLS handshake completes so the
-            // HTTP/2 preface exchange does not hang indefinitely.
             if (timeouts.read_ms > 0) {
                 try socket.setRecvTimeout(timeouts.read_ms);
             }
@@ -984,10 +969,6 @@ pub const Client = struct {
                     return self.executeHttp2WithTransport(req, &transport);
                 },
                 .http_3 => {
-                    // Server selected h3 via ALPN.  For TLS-based connections
-                    // (TCP), HTTP/3 negotiation means the server prefers QUIC
-                    // but we are on a TCP socket.  Attempt to upgrade via
-                    // Alt-Svc or fall back to HTTP/2 if available.
                     if (self.config.http2_enabled) {
                         var transport = TlsHttp2Transport{ .session = &session };
                         return self.executeHttp2WithTransport(req, &transport);
@@ -995,9 +976,6 @@ pub const Client = struct {
                     return error.UnsupportedHttpVersion;
                 },
                 .http_1_1, .http_1_0 => {
-                    // Server selected http/1.1 via ALPN (or ALPN was
-                    // unavailable).  Fall back to HTTP/1.1 over the
-                    // already-established TLS session.
                     const request_data = try http.formatRequest(req, self.allocator);
                     defer self.allocator.free(request_data);
 
@@ -1011,8 +989,6 @@ pub const Client = struct {
 
         var transport = SocketHttp2Transport{ .socket = &socket };
 
-        // Set recv timeout for the HTTP/2 preface exchange so we
-        // do not hang if the server never responds.
         if (timeouts.read_ms > 0) {
             try socket.setRecvTimeout(timeouts.read_ms);
         }
@@ -1062,10 +1038,9 @@ pub const Client = struct {
         defer qpack_decoder.deinit();
         qpack_decoder.max_blocked_streams = self.config.http3_settings.qpack_blocked_streams;
 
-        // HTTP/3 flow control state
-        var conn_max_data: u64 = 10 * 1024 * 1024; // 10 MB default
+        var conn_max_data: u64 = 10 * 1024 * 1024;
         var conn_data_sent: u64 = 0;
-        var stream_max_data: u64 = 1024 * 1024; // 1 MB default per stream
+        var stream_max_data: u64 = 1024 * 1024;
         var stream_data_sent: u64 = 0;
 
         var path_buf: ?[]u8 = null;
@@ -1093,7 +1068,6 @@ pub const Client = struct {
 
         if (req.body) |body| {
             if (body.len > 0) {
-                // Check connection and stream flow control limits
                 if (conn_data_sent + body.len > conn_max_data) return error.FlowControlError;
                 if (stream_data_sent + body.len > stream_max_data) return error.FlowControlError;
                 try http.appendHttp3Frame(&request_stream_payload, self.allocator, .data, body);
@@ -1111,7 +1085,6 @@ pub const Client = struct {
         try http.appendVarInt(&control_stream_payload, self.allocator, @intFromEnum(quic.Http3StreamType.control));
         try http.appendHttp3Frame(&control_stream_payload, self.allocator, .settings, settings_payload.items);
 
-        // Send MAX_DATA and MAX_STREAM_DATA to advertise our flow control limits
         {
             var max_data_payload = std.ArrayList(u8).empty;
             defer max_data_payload.deinit(self.allocator);
@@ -1121,14 +1094,13 @@ pub const Client = struct {
         {
             var max_stream_data_payload = std.ArrayList(u8).empty;
             defer max_stream_data_payload.deinit(self.allocator);
-            try http.appendVarInt(&max_stream_data_payload, self.allocator, 0); // stream_id 0
+            try http.appendVarInt(&max_stream_data_payload, self.allocator, 0);
             try http.appendVarInt(&max_stream_data_payload, self.allocator, stream_max_data);
             try http.appendHttp3Frame(&control_stream_payload, self.allocator, .max_stream_data, max_stream_data_payload.items);
         }
 
         var session = Http3QuicSession.initClient();
 
-        // Client control stream (id=2) and request stream (id=0).
         try self.sendHttp3StreamData(transport, &session, 2, false, control_stream_payload.items);
         try self.sendHttp3StreamData(transport, &session, 0, true, request_stream_payload.items);
 
@@ -1141,13 +1113,15 @@ pub const Client = struct {
         var read_buf: [64 * 1024]u8 = undefined;
         var got_response_fin = false;
 
-        var packet_counter: usize = 0;
+        var empty_streak: usize = 0;
         while (!got_response_fin) {
-            packet_counter += 1;
-            if (packet_counter > 10_000) return error.ProtocolError;
-
             const n = try transport.recvDatagram(&read_buf);
-            if (n == 0) continue;
+            if (n == 0) {
+                empty_streak += 1;
+                if (empty_streak > 10_000) return error.ProtocolError;
+                continue;
+            }
+            empty_streak = 0;
 
             const incoming = try decodeHttp3StreamDatagram(read_buf[0..n], &session);
 
@@ -1313,7 +1287,6 @@ pub const Client = struct {
                     _ = try http.parseHttp3SettingsPayload(frame_payload);
                 },
                 @intFromEnum(http.Http3FrameType.goaway) => {
-                    // Gracefully handle GOAWAY: finish current stream processing
                     if (status_code.* != null) {
                         got_response_fin.* = true;
                     }
@@ -1326,21 +1299,16 @@ pub const Client = struct {
                 },
                 @intFromEnum(http.Http3FrameType.max_stream_data) => {
                     if (frame_payload.len > 0) {
-                        // stream_id varint + data_limit varint; update the relevant stream
                         const sid = try http.decodeVarInt(frame_payload);
                         const data_limit = try http.decodeVarInt(frame_payload[sid.len..]);
                         stream_max_data.* = data_limit.value;
                     }
                 },
-                else => {
-                    // Unknown/unsupported frame types are ignored for forward compatibility.
-                },
+                else => {},
             }
         }
     }
 
-    /// A frame buffered during the H2 body-upload flow-control pump phase.
-    /// Freed by the caller after replaying in the response loop.
     const EarlyH2Frame = struct {
         header: http.Http2FrameHeader,
         payload: []u8,
@@ -1350,26 +1318,12 @@ pub const Client = struct {
         }
     };
 
-    /// A frame read by the H2 response loop -- wraps either a freshly-read frame
-    /// (owned) or a replayed early frame (not owned by this value).
     const H2Frame = struct {
         header: http.Http2FrameHeader,
         payload: []u8,
         from_early_buf: bool,
     };
 
-    /// Pumps incoming HTTP/2 frames until the send window is positive.
-    ///
-    /// Called when `request_stream.send_window` or
-    /// `stream_manager.connection_send_window` reaches zero mid-body upload.
-    /// Processes WINDOW_UPDATE, SETTINGS, and PING frames to grow the send window.
-    /// Early response frames (HEADERS/DATA/CONTINUATION) are appended to
-    /// `early_frames` so the response loop can replay them without data loss.
-    ///
-    /// Returns `error.GoAway` if the server sends GOAWAY, or
-    /// `error.StreamError` if the server resets the request stream.
-    /// Returns `error.ProtocolError` if more than 10,000 frames are processed
-    /// without the window being granted.
     fn pumpUntilSendWindow(
         self: *Client,
         transport: anytype,
@@ -1407,13 +1361,10 @@ pub const Client = struct {
                     self.allocator.free(payload);
                     if (increment == 0) return error.ProtocolError;
                     if (fhdr.stream_id == 0) {
-                        // Connection-level WINDOW_UPDATE.
                         stream_manager.connection_send_window += @intCast(increment);
                     } else if (fhdr.stream_id == request_stream.id) {
-                        // Stream-level WINDOW_UPDATE.
                         request_stream.send_window += @intCast(increment);
                     }
-                    // If both windows are positive now, we can stop pumping.
                 },
                 .settings => {
                     const is_ack = (fhdr.flags & 0x01) != 0;
@@ -1422,7 +1373,6 @@ pub const Client = struct {
                         http.applySettingsPayload(&peer_settings, payload) catch return error.Http2ProtocolError;
                         stream_manager.applyPeerSettings(peer_settings) catch return error.Http2ProtocolError;
                         peer_max_frame_size.* = peer_settings.max_frame_size;
-                        // Send SETTINGS ACK.
                         writeHttp2Frame(transport, .settings, 0x01, 0, &.{}) catch return error.WriteFailed;
                     }
                     self.allocator.free(payload);
@@ -1449,13 +1399,11 @@ pub const Client = struct {
                     self.allocator.free(payload);
                 },
                 .headers, .data, .continuation, .push_promise => {
-                    // Early response frame -- buffer for replay in the response loop.
                     try early_frames.append(self.allocator, .{
                         .header = fhdr,
                         .payload = payload,
                     });
                 },
-                // RFC 7540 4.1: Unknown frame types MUST be ignored.
                 _ => {
                     self.allocator.free(payload);
                 },
@@ -1511,9 +1459,6 @@ pub const Client = struct {
 
         var peer_max_frame_size: u32 = local_settings.max_frame_size;
 
-        // Buffered early-response frames received during the body upload phase
-        // (when we pump for WINDOW_UPDATE). These are replayed at the start of
-        // the response loop so no frames are dropped.
         var early_frames = std.ArrayList(EarlyH2Frame).empty;
         defer {
             for (early_frames.items) |*ef| ef.deinit(self.allocator);
@@ -1524,9 +1469,6 @@ pub const Client = struct {
             const body = req.body.?;
             var offset: usize = 0;
             while (offset < body.len) {
-                // If either the stream or connection send window is exhausted,
-                // pump incoming frames until we get enough WINDOW_UPDATE credit
-                // rather than immediately failing with FlowControlError.
                 if (request_stream.send_window <= 0 or stream_manager.connection_send_window <= 0) {
                     try pumpUntilSendWindow(
                         self,
@@ -1583,18 +1525,10 @@ pub const Client = struct {
         var got_end_stream = false;
 
         var peer_settings = http.Http2Connection.Http2ConnectionSettings{};
-
-        // Replay buffered early-response frames collected during body upload
-        // (pumpUntilSendWindow may have buffered them).  We process them first
-        // so the loop below sees a logically complete frame stream.
         var early_frame_idx: usize = 0;
 
-        var frame_counter: usize = 0;
+        var non_progress_counter: usize = 0;
         while (!response_done) {
-            frame_counter += 1;
-            if (frame_counter > 10_000) return error.ProtocolError;
-
-            // Consume buffered early frames before reading from the transport.
             const frame: H2Frame = blk: {
                 if (early_frame_idx < early_frames.items.len) {
                     const ef = &early_frames.items[early_frame_idx];
@@ -1607,10 +1541,6 @@ pub const Client = struct {
                 }
                 break :blk self.readHttp2Frame(transport) catch |err| switch (err) {
                     error.UnexpectedEof => {
-                        // RFC 7540 6.8: a server may close the connection
-                        // after sending the final frame. If we already received a
-                        // complete response (END_STREAM seen, status code present),
-                        // treat the clean close as end-of-response rather than error.
                         if (got_end_stream and status_code != null) {
                             response_done = true;
                             continue;
@@ -1620,11 +1550,13 @@ pub const Client = struct {
                     else => return err,
                 };
             };
-            // Only free payload for frames we allocated ourselves (not early buf replays).
             defer if (!frame.from_early_buf) self.allocator.free(frame.payload);
 
             switch (frame.header.frame_type) {
                 .settings => {
+                    non_progress_counter += 1;
+                    if (non_progress_counter > 5_000) return error.ProtocolError;
+
                     if (frame.header.stream_id != 0) return error.ProtocolError;
                     const is_ack = (frame.header.flags & 0x01) != 0;
                     if (!is_ack) {
@@ -1635,6 +1567,9 @@ pub const Client = struct {
                     }
                 },
                 .ping => {
+                    non_progress_counter += 1;
+                    if (non_progress_counter > 5_000) return error.ProtocolError;
+
                     if (frame.header.stream_id != 0) return error.ProtocolError;
                     const is_ack = (frame.header.flags & 0x01) != 0;
                     if (!is_ack) {
@@ -1669,6 +1604,7 @@ pub const Client = struct {
                     }
                 },
                 .headers => {
+                    non_progress_counter = 0;
                     if (frame.header.stream_id != request_stream.id) continue;
 
                     if (got_end_stream) {
@@ -1719,11 +1655,6 @@ pub const Client = struct {
                         if ((frame.header.flags & 0x01) != 0) {
                             got_end_stream = true;
                             request_stream.receiveEndStream();
-                            // Fix: terminate the response loop immediately when
-                            // END_STREAM is set on a HEADERS frame and we have
-                            // a status code. Without this, the loop keeps
-                            // reading frames from keep-alive servers until the
-                            // recv timeout fires (causing a hang or ProtocolError).
                             if (status_code != null) response_done = true;
                         }
                     } else {
@@ -1733,6 +1664,7 @@ pub const Client = struct {
                     }
                 },
                 .continuation => {
+                    non_progress_counter = 0;
                     if (frame.header.stream_id != request_stream.id) continue;
                     if (!waiting_continuation) return error.ProtocolError;
 
@@ -1778,15 +1710,14 @@ pub const Client = struct {
                             if ((pending_headers_flags & 0x01) != 0) {
                                 got_end_stream = true;
                                 request_stream.receiveEndStream();
-                                // Fix: terminate on END_STREAM from CONTINUATION.
                                 if (status_code != null) response_done = true;
                             }
                         }
                     }
                 },
                 .data => {
+                    non_progress_counter = 0;
                     if (frame.header.stream_id != request_stream.id) continue;
-
                     if (got_end_stream) continue;
 
                     if (frame.header.length > local_settings.max_frame_size) return error.FrameTooLarge;
@@ -1812,14 +1743,9 @@ pub const Client = struct {
                     if ((frame.header.flags & 0x01) != 0) {
                         got_end_stream = true;
                         request_stream.receiveEndStream();
-                        // Fix: terminate the response loop immediately when
-                        // END_STREAM is set on a DATA frame and we have a
-                        // status code. Without this, the loop keeps reading
-                        // from keep-alive servers until the recv timeout fires.
                         if (status_code != null) response_done = true;
                     }
                 },
-                // RFC 7540 4.1: Unknown frame types MUST be ignored.
                 _ => {},
             }
         }
@@ -1875,7 +1801,6 @@ pub const Client = struct {
         session.attachSocket(socket);
         try session.handshake(host);
 
-        // Use encrypted write/read (TLS record layer)
         try session.writeAll(request_data);
         try session.flush();
 
@@ -1958,7 +1883,6 @@ pub const Client = struct {
         var res = Response.init(parser.allocator, code);
         errdefer res.deinit();
 
-        // Move headers ownership from parser to response.
         res.headers.deinit();
         res.headers = parser.headers;
         parser.headers = Headers.init(parser.allocator);
@@ -1985,7 +1909,6 @@ pub const Client = struct {
     }
 
     fn resolveRedirectUrl(self: *Self, base: Uri, location: []const u8) ![]u8 {
-        // Absolute URL.
         if (mem.indexOf(u8, location, "://") != null) {
             return self.allocator.dupe(u8, location);
         }
@@ -1998,7 +1921,6 @@ pub const Client = struct {
             return std.fmt.allocPrint(self.allocator, "{s}://{s}:{d}{s}", .{ scheme, host, port, location });
         }
 
-        // Relative to current path.
         const base_path = base.path;
         const slash = mem.lastIndexOfScalar(u8, base_path, '/') orelse 0;
         const prefix = base_path[0 .. slash + 1];
@@ -2010,6 +1932,7 @@ pub const Client = struct {
 
         var list = std.ArrayList(u8).empty;
         defer list.deinit(self.allocator);
+        try list.ensureTotalCapacity(self.allocator, 128);
         const writer = list_writer.init(self.allocator, &list);
 
         var it = self.cookies.iterator();
@@ -2037,17 +1960,17 @@ pub const Client = struct {
 
     /// Adds or replaces a cookie in the in-memory client cookie jar.
     pub fn setCookie(self: *Self, name: []const u8, value: []const u8) !void {
-        if (self.cookies.fetchRemove(name)) |removed| {
-            self.allocator.free(removed.key);
-            self.allocator.free(removed.value);
+        const gop = try self.cookies.getOrPut(self.allocator, name);
+        if (gop.found_existing) {
+            self.allocator.free(gop.value_ptr.*);
+            gop.value_ptr.* = try self.allocator.dupe(u8, value);
+        } else {
+            const owned_name = try self.allocator.dupe(u8, name);
+            errdefer self.allocator.free(owned_name);
+            const owned_value = try self.allocator.dupe(u8, value);
+            gop.key_ptr.* = owned_name;
+            gop.value_ptr.* = owned_value;
         }
-
-        const owned_name = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(owned_name);
-        const owned_value = try self.allocator.dupe(u8, value);
-        errdefer self.allocator.free(owned_value);
-
-        try self.cookies.put(self.allocator, owned_name, owned_value);
     }
 
     /// Returns a cookie value from the in-memory cookie jar.
@@ -2208,7 +2131,6 @@ const Http3QuicSession = struct {
     }
 };
 
-/// Sends a QUIC RESET_STREAM frame to cancel a stream.
 fn sendHttp3ResetStream(
     transport: anytype,
     session: *Http3QuicSession,
@@ -2234,7 +2156,6 @@ fn sendHttp3ResetStream(
     try transport.sendDatagram(packet.items);
 }
 
-/// Sends a QUIC STOP_SENDING frame to tell the peer to stop sending on a stream.
 fn sendHttp3StopSending(
     transport: anytype,
     session: *Http3QuicSession,
@@ -2669,7 +2590,6 @@ test "Client send/fetch/options aliases" {
     var client = Client.init(allocator);
     defer client.deinit();
 
-    // Compile-time alias checks through function pointer assignment.
     const send_ptr: *const fn (*Client, types.Method, []const u8, RequestOptions) anyerror!Response = Client.send;
     const fetch_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.fetch;
     const del_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.del;
@@ -2833,19 +2753,16 @@ test "RequestOptions explicit timeout resolution" {
     });
     defer client.deinit();
 
-    // Default fallback
     const t_def = client.resolveRequestTimeouts(.{});
     try std.testing.expectEqual(@as(u64, 5000), t_def.connect_ms);
     try std.testing.expectEqual(@as(u64, 10000), t_def.read_ms);
     try std.testing.expectEqual(@as(u64, 15000), t_def.write_ms);
 
-    // Uniform timeout_ms override
     const t_uni = client.resolveRequestTimeouts(RequestOptions.defaults().withTimeoutMs(2000));
     try std.testing.expectEqual(@as(u64, 2000), t_uni.connect_ms);
     try std.testing.expectEqual(@as(u64, 2000), t_uni.read_ms);
     try std.testing.expectEqual(@as(u64, 2000), t_uni.write_ms);
 
-    // Explicit per-phase timeout overrides
     const t_exp = client.resolveRequestTimeouts(
         RequestOptions.defaults()
             .withConnectTimeoutMs(100)
@@ -2856,7 +2773,6 @@ test "RequestOptions explicit timeout resolution" {
     try std.testing.expectEqual(@as(u64, 200), t_exp.read_ms);
     try std.testing.expectEqual(@as(u64, 300), t_exp.write_ms);
 
-    // Explicit timeouts struct override
     const t_struct = client.resolveRequestTimeouts(
         RequestOptions.defaults().withTimeouts(.{
             .connect_ms = 111,

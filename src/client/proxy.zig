@@ -22,16 +22,17 @@ fn writeSocksPort(socket: *Socket, port: u16) !void {
 }
 
 fn connectSocks5hTunnel(socket: *Socket, target_host: []const u8, target_port: u16, proxy: types.Proxy) !void {
+    // 1. Initial Greeting / Negotiation
     var greeting: [4]u8 = undefined;
     greeting[0] = 0x05;
     if (proxy.username) |_| {
         greeting[1] = 0x02;
-        greeting[2] = 0x00;
-        greeting[3] = 0x02;
+        greeting[2] = 0x00; // No auth
+        greeting[3] = 0x02; // Username/Password
         try socket.sendAll(greeting[0..4]);
     } else {
         greeting[1] = 0x01;
-        greeting[2] = 0x00;
+        greeting[2] = 0x00; // No auth
         try socket.sendAll(greeting[0..3]);
     }
 
@@ -39,18 +40,23 @@ fn connectSocks5hTunnel(socket: *Socket, target_host: []const u8, target_port: u
     try readNoEof(socket, &method_reply);
     if (method_reply[0] != 0x05 or method_reply[1] == 0xff) return error.ProxyConnectionFailed;
 
+    // 2. Authentication if required
     if (method_reply[1] == 0x02) {
         const username = proxy.username orelse return error.ProxyConnectionFailed;
         const password = proxy.password orelse "";
         if (username.len > 255 or password.len > 255) return error.ProxyConnectionFailed;
 
-        var auth_header: [2]u8 = .{ 0x01, @intCast(username.len) };
-        try socket.sendAll(&auth_header);
-        try socket.sendAll(username);
+        var auth_buf: [516]u8 = undefined;
+        auth_buf[0] = 0x01; // Version
+        auth_buf[1] = @intCast(username.len);
+        @memcpy(auth_buf[2 .. 2 + username.len], username);
 
-        var password_len: [1]u8 = .{@intCast(password.len)};
-        try socket.sendAll(&password_len);
-        try socket.sendAll(password);
+        const pass_offset = 2 + username.len;
+        auth_buf[pass_offset] = @intCast(password.len);
+        @memcpy(auth_buf[pass_offset + 1 .. pass_offset + 1 + password.len], password);
+
+        const total_auth_len = pass_offset + 1 + password.len;
+        try socket.sendAll(auth_buf[0..total_auth_len]);
 
         var auth_reply: [2]u8 = undefined;
         try readNoEof(socket, &auth_reply);
@@ -59,33 +65,50 @@ fn connectSocks5hTunnel(socket: *Socket, target_host: []const u8, target_port: u
         return error.ProxyConnectionFailed;
     }
 
+    // 3. Connect Request
     if (address_mod.isIpAddress(target_host)) {
         const ip = try compat.Address.parseIp(target_host, target_port);
         const ip_addr = ip.toIpAddress();
         switch (ip_addr) {
             .ip4 => |ip4| {
-                var header: [4]u8 = .{ 0x05, 0x01, 0x00, 0x01 };
-                try socket.sendAll(&header);
-                try socket.sendAll(&ip4.bytes);
+                var req_buf: [10]u8 = undefined;
+                req_buf[0] = 0x05; // SOCKS5
+                req_buf[1] = 0x01; // CONNECT
+                req_buf[2] = 0x00; // Reserved
+                req_buf[3] = 0x01; // IPv4
+                @memcpy(req_buf[4..8], &ip4.bytes);
+                mem.writeInt(u16, req_buf[8..10][0..2], target_port, .big);
+                try socket.sendAll(&req_buf);
             },
             .ip6 => |ip6| {
-                var header: [4]u8 = .{ 0x05, 0x01, 0x00, 0x04 };
-                try socket.sendAll(&header);
-                try socket.sendAll(&ip6.bytes);
+                var req_buf: [22]u8 = undefined;
+                req_buf[0] = 0x05; // SOCKS5
+                req_buf[1] = 0x01; // CONNECT
+                req_buf[2] = 0x00; // Reserved
+                req_buf[3] = 0x04; // IPv6
+                @memcpy(req_buf[4..20], &ip6.bytes);
+                mem.writeInt(u16, req_buf[20..22][0..2], target_port, .big);
+                try socket.sendAll(&req_buf);
             },
         }
     } else {
         if (target_host.len > 255) return error.ProxyConnectionFailed;
-        var header: [4]u8 = .{ 0x05, 0x01, 0x00, 0x03 };
-        try socket.sendAll(&header);
 
-        var host_len: [1]u8 = .{@intCast(target_host.len)};
-        try socket.sendAll(&host_len);
-        try socket.sendAll(target_host);
+        var req_buf: [262]u8 = undefined;
+        req_buf[0] = 0x05; // SOCKS5
+        req_buf[1] = 0x01; // CONNECT
+        req_buf[2] = 0x00; // Reserved
+        req_buf[3] = 0x03; // Domain name
+        req_buf[4] = @intCast(target_host.len);
+        @memcpy(req_buf[5 .. 5 + target_host.len], target_host);
+
+        const port_offset = 5 + target_host.len;
+        mem.writeInt(u16, req_buf[port_offset..][0..2], target_port, .big);
+
+        try socket.sendAll(req_buf[0 .. port_offset + 2]);
     }
 
-    try writeSocksPort(socket, target_port);
-
+    // 4. Connect Response
     var reply_head: [4]u8 = undefined;
     try readNoEof(socket, &reply_head);
     if (reply_head[0] != 0x05 or reply_head[1] != 0x00) return error.ProxyConnectionFailed;

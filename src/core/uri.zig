@@ -3,7 +3,7 @@
 //! Implements URI parsing according to RFC 3986 with support for:
 //!
 //! - Full URI parsing (scheme, userinfo, host, port, path, query, fragment)
-//! - Percent-encoding and decoding
+//! - High-speed percent-encoding and decoding with lookup tables
 //! - Path normalization
 //! - Query string building
 //! - Automatic port detection for common schemes
@@ -137,38 +137,60 @@ pub const Uri = struct {
     }
 };
 
-/// Characters that don't need percent encoding in URIs.
-const unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+const HEX_CHARS = "0123456789ABCDEF";
+
+const UNRESERVED_TABLE: [256]bool = blk: {
+    var table = [_]bool{false} ** 256;
+    for ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~") |c| {
+        table[c] = true;
+    }
+    break :blk table;
+};
 
 /// Percent-encodes a string for URI inclusion.
 pub fn encode(allocator: Allocator, input: []const u8) ![]u8 {
     var result = std.ArrayList(u8).empty;
+    try result.ensureTotalCapacity(allocator, input.len + input.len / 2);
     const writer = list_writer.init(allocator, &result);
 
     for (input) |c| {
-        if (mem.indexOfScalar(u8, unreserved, c) != null) {
+        if (UNRESERVED_TABLE[c]) {
             try writer.writeByte(c);
         } else {
-            try writer.print("%{X:0>2}", .{c});
+            try writer.writeByte('%');
+            try writer.writeByte(HEX_CHARS[c >> 4]);
+            try writer.writeByte(HEX_CHARS[c & 0x0F]);
         }
     }
 
     return result.toOwnedSlice(allocator);
 }
 
+inline fn hexVal(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
 /// Decodes a percent-encoded string.
 pub fn decode(allocator: Allocator, input: []const u8) ![]u8 {
     var result = std.ArrayList(u8).empty;
+    try result.ensureTotalCapacity(allocator, input.len);
 
     var i: usize = 0;
     while (i < input.len) {
         if (input[i] == '%' and i + 2 < input.len) {
-            const hex = input[i + 1 .. i + 3];
-            if (std.fmt.parseInt(u8, hex, 16)) |byte| {
+            const h1 = hexVal(input[i + 1]);
+            const h2 = hexVal(input[i + 2]);
+            if (h1 != null and h2 != null) {
+                const byte = (h1.? << 4) | h2.?;
                 try result.append(allocator, byte);
                 i += 3;
                 continue;
-            } else |_| {}
+            }
         }
         if (input[i] == '+') {
             try result.append(allocator, ' ');

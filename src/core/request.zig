@@ -44,9 +44,14 @@ pub const Request = struct {
             const default_port: u16 = if (uri.isTls()) 443 else 80;
             if (uri.port) |port| {
                 if (port != default_port) {
-                    const host_with_port = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
-                    defer allocator.free(host_with_port);
-                    try headers.set(HeaderName.HOST, host_with_port);
+                    var host_buf: [260]u8 = undefined;
+                    if (std.fmt.bufPrint(&host_buf, "{s}:{d}", .{ host, port })) |host_with_port| {
+                        try headers.set(HeaderName.HOST, host_with_port);
+                    } else |_| {
+                        const host_with_port = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
+                        defer allocator.free(host_with_port);
+                        try headers.set(HeaderName.HOST, host_with_port);
+                    }
                 } else {
                     try headers.set(HeaderName.HOST, host);
                 }
@@ -101,16 +106,20 @@ pub const Request = struct {
 
     /// Sets the Authorization header using a Bearer token.
     pub fn setBearerAuth(self: *Self, token: []const u8) !void {
-        const auth_value = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{token});
-        defer self.allocator.free(auth_value);
-        try self.headers.set(HeaderName.AUTHORIZATION, auth_value);
+        var auth_buf: [512]u8 = undefined;
+        if (std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token})) |val| {
+            try self.headers.set(HeaderName.AUTHORIZATION, val);
+        } else |_| {
+            const auth_value = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{token});
+            defer self.allocator.free(auth_value);
+            try self.headers.set(HeaderName.AUTHORIZATION, auth_value);
+        }
     }
 
     /// Sets the Authorization header using HTTP Basic authentication.
     pub fn setBasicAuth(self: *Self, username: []const u8, password: []const u8) !void {
         const auth_value = try Base64.formatBasicAuth(self.allocator, username, password);
         defer self.allocator.free(auth_value);
-
         try self.headers.set(HeaderName.AUTHORIZATION, auth_value);
     }
 
@@ -124,13 +133,11 @@ pub const Request = struct {
     }
 
     /// Sets a request header.
-    pub fn setHeader(self: *Self, name: []const u8, value: []const u8) !void {
+    pub inline fn setHeader(self: *Self, name: []const u8, value: []const u8) !void {
         try self.headers.set(name, value);
     }
 
     /// Appends a URL query parameter to the request URI.
-    ///
-    /// The key and value are percent-encoded before being added.
     pub fn addQueryParam(self: *Self, key: []const u8, value: []const u8) !void {
         const enc_key = try PercentEncoding.encode(self.allocator, key);
         defer self.allocator.free(enc_key);
@@ -161,17 +168,17 @@ pub const Request = struct {
     }
 
     /// Returns the host from the URI.
-    pub fn getHost(self: *const Self) ?[]const u8 {
+    pub inline fn getHost(self: *const Self) ?[]const u8 {
         return self.uri.host;
     }
 
     /// Returns the effective port.
-    pub fn getPort(self: *const Self) u16 {
+    pub inline fn getPort(self: *const Self) u16 {
         return self.uri.effectivePort();
     }
 
     /// Returns true if the request uses TLS.
-    pub fn isTls(self: *const Self) bool {
+    pub inline fn isTls(self: *const Self) bool {
         return self.uri.isTls();
     }
 
@@ -183,12 +190,12 @@ pub const Request = struct {
     }
 
     /// Returns true if request Content-Type is application/json.
-    pub fn isJsonContent(self: *const Self) bool {
+    pub inline fn isJsonContent(self: *const Self) bool {
         return self.hasContentType("application/json");
     }
 
     /// Returns true if request Content-Type is application/x-www-form-urlencoded.
-    pub fn isFormContent(self: *const Self) bool {
+    pub inline fn isFormContent(self: *const Self) bool {
         return self.hasContentType("application/x-www-form-urlencoded");
     }
 
@@ -199,7 +206,7 @@ pub const Request = struct {
     }
 
     /// Returns true if the request Accept header allows application/json.
-    pub fn acceptsJson(self: *const Self) bool {
+    pub inline fn acceptsJson(self: *const Self) bool {
         return self.accepts("application/json");
     }
 
