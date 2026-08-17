@@ -202,13 +202,13 @@ pub fn opts(self: *Self, url: []const u8, options: RequestOptions) !Response
 | `options(url, options)` | HTTP OPTIONS request |
 | `opts(url, options)` | Alias for HTTP OPTIONS request |
 | `send(method, url, options)` | Alias for generic request |
-| `getJson(url, options, T, parse_opts)` | Zero-copy JSON GET, returns `JsonBorrowedResult(T)` |
-| `getJsonBorrowed(url, options, T, parse_opts)` | Alias for getJson |
-| `postJsonAndParse(url, options, json_body, T, parse_opts)` | POST JSON and parse response |
-| `postJsonBorrowed(url, options, json_body, T, parse_opts)` | Alias for postJsonAndParse |
-| `putJson(url, options, json_body, T, parse_opts)` | PUT JSON and parse response |
-| `patchJson(url, options, json_body, T, parse_opts)` | PATCH JSON and parse response |
-| `deleteJson(url, options, T, parse_opts)` | DELETE and parse JSON response |
+| `getJson(T, url, parse_opts)` | Zero-copy JSON GET, returns `JsonBorrowedResult(T)` |
+| `getJsonBorrowed(T, url)` | JSON GET with default parse options |
+| `postJsonAndParse(T, url, body, parse_opts)` | POST JSON and parse response |
+| `postJsonBorrowed(T, url, body)` | POST JSON with default parse options |
+| `putJson(T, url, body, parse_opts)` | PUT JSON and parse response |
+| `patchJson(T, url, body, parse_opts)` | PATCH JSON and parse response |
+| `deleteJson(T, url, parse_opts)` | DELETE and parse JSON response |
 | `addInterceptor(interceptor)` | Add request/response interceptor |
 | `cleanupIdleConnections()` | Evict idle/exhausted pooled connections |
 | `poolStats()` | Snapshot total/active/idle pool counts |
@@ -588,6 +588,11 @@ All top-level aliases:
 | `httpx.fetch(url, opts)` | Alias for GET |
 | `httpx.send(method, url, opts)` | Generic request |
 | `httpx.postJson(url, json)` | POST with JSON body |
+| `httpx.getJson(T, url, parse_opts)` | GET and parse JSON response |
+| `httpx.putJson(T, url, body, parse_opts)` | PUT and parse JSON response |
+| `httpx.patchJson(T, url, body, parse_opts)` | PATCH and parse JSON response |
+| `httpx.deleteJson(T, url, parse_opts)` | DELETE and parse JSON response |
+| `httpx.postJsonAndParse(T, url, body, parse_opts)` | POST and parse JSON response |
 | `httpx.getWithAllocator(...)` | GET with explicit allocator |
 | `httpx.postWithAllocator(...)` | POST with explicit allocator |
 | `httpx.putWithAllocator(...)` | PUT with explicit allocator |
