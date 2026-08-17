@@ -252,247 +252,174 @@ exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 
 ## Quick Start
 
+### One-Liner Requests
+
+```zig
+const httpx = @import("httpx");
+
+// GET — simplest possible request
+var resp = try httpx.get("https://httpbun.com/get", .{});
+defer resp.deinit();
+
+// POST JSON
+var post = try httpx.post("https://httpbun.com/post", .{ .json = "{\"name\":\"Alice\"}" });
+defer post.deinit();
+
+// Other methods
+var del = try httpx.delete("https://httpbun.com/delete", .{});
+defer del.deinit();
+var patch = try httpx.patch("https://httpbun.com/patch", .{ .json = "{\"x\":1}" });
+defer patch.deinit();
+var head = try httpx.head("https://httpbun.com/get", .{});
+defer head.deinit();
+```
+
 ### Client Usage
- 
+
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
- 
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
- 
-    // Create client with implicit defaults.
-    // Use explicit ClientConfig overrides only when you need to change defaults.
-    var client = httpx.Client.initForBaseUrl(allocator, "https://httpbun.com");
+
+    // Create client
+    var client = httpx.createClientWithConfig(allocator, .{
+        .base_url = "https://httpbun.com",
+    });
     defer client.deinit();
- 
-    // Simple GET request (request defaults are implicit)
+
+    // GET
     var response = try client.get("/get", .{});
     defer response.deinit();
- 
-    if (response.ok()) {
-        std.debug.print("Response: {s}\n", .{response.text() orelse ""});
 
-        // Parse response as JSON (safely managed via std.json.Parsed)
-        const User = struct { id: u32, name: []const u8 };
-        if (response.json(User, .{})) |parsed| {
-            defer parsed.deinit();
-            std.debug.print("User: {s}\n", .{parsed.value.name});
-        } else |_| {}
-    }
- 
-    // POST with JSON
-    var post_response = try client.post(
-        "/post",
-        .{ .json = "{\"name\": \"John\"}" },
-    );
-    defer post_response.deinit();
+    // POST JSON
+    var post = try client.post("/post", .{ .json = "{\"name\":\"John\"}" });
+    defer post.deinit();
 
-    // Cookie jar helpers
-    try client.setCookie("session", "abc123");
-    _ = client.getCookie("session");
-
-    // Pool stats/maintenance helpers (optional)
-    client.cleanupIdleConnections();
-    const pool_stats = client.poolStats();
-    _ = pool_stats;
+    // Parse JSON response
+    const User = struct { id: u32, name: []const u8 };
+    if (response.json(User, .{})) |parsed| {
+        defer parsed.deinit();
+        std.debug.print("User: {s}\n", .{parsed.value.name});
+    } else |_| {}
 }
 ```
 
 ### Simplified API Aliases
 
 ```zig
-// Top-level aliases for concise client code.
-// Allocator is implicit by default.
-var response = try httpx.fetch("https://httpbun.com/get", .{});
-defer response.deinit();
+// All HTTP methods as top-level functions
+var r1 = try httpx.get("https://httpbun.com/get", .{});
+var r2 = try httpx.post("https://httpbun.com/post", .{ .json = "{}" });
+var r3 = try httpx.put("https://httpbun.com/put", .{});
+var r4 = try httpx.del("https://httpbun.com/delete", .{});
+var r5 = try httpx.patch("https://httpbun.com/patch", .{});
+var r6 = try httpx.head("https://httpbun.com/head", .{});
+var r7 = try httpx.opts("https://httpbun.com/options", .{});
+var r8 = try httpx.trace("https://httpbun.com/trace", .{});
 
-// Defaults are implicit; pass .{} for default request options.
-var by_method = try httpx.send(.GET, "https://httpbun.com/headers", .{});
-defer by_method.deinit();
+// fetch = alias for get
+var r9 = try httpx.fetch("https://httpbun.com/get", .{});
 
-// Additional aliases
-var del_res = try httpx.delete("https://httpbun.com/delete", .{});
-defer del_res.deinit();
+// send with explicit method
+var r10 = try httpx.send(.GET, "https://httpbun.com/get", .{});
 
-var opts_res = try httpx.opts("https://httpbun.com/get", .{});
-defer opts_res.deinit();
+// With explicit allocator
+var r11 = try httpx.sendWithAllocator(allocator, .POST, "https://httpbun.com/post", .{ .json = "{}" });
 
-// Optional explicit override (only when needed)
-var timed = try httpx.sendWithAllocator(allocator, .GET, "https://httpbun.com/headers", .{ .timeout_ms = 10_000 });
-defer timed.deinit();
+// JSON helpers
+const User = struct { id: u32, name: []const u8 };
+const result = try httpx.getJson(User, "https://api.example.com/user/1", .{});
+defer result.response.deinit();
+defer result.value.deinit();
+
+const created = try httpx.postJsonAndParse(User, "https://api.example.com/users", .{}, .{ .name = "Alice" }, .{});
+defer created.response.deinit();
+defer created.value.deinit();
 ```
 
-### Explicit Network Helpers
+### Concurrency
 
 ```zig
-// Network lifecycle (optional explicit init/deinit)
-try httpx.netInit();
-defer httpx.netDeinit();
+// Parallel requests — run all, first, or fastest
+var client = httpx.createClient();
+defer client.deinit();
 
-// Address helpers
-const one = try httpx.resolveAddress("example.com", 443);
-_ = one;
-
-const parsed = try httpx.parseHostAndPort("localhost:8080", 80);
-_ = parsed;
-
-const final_addr = try httpx.parseAndResolveAddress("127.0.0.1:9000", 80);
-_ = final_addr;
-
-const is_ip = httpx.isIpAddress("::1");
-_ = is_ip;
-```
-
-### Explicit Concurrency Helpers
-
-```zig
 const specs = [_]httpx.RequestSpec{
-    .{ .method = .GET, .url = "https://httpbun.com/get", .timeout_ms = 5_000 },
-    .{ .method = .GET, .url = "https://httpbun.com/headers", .version = .HTTP_2 },
+    .{ .method = .GET, .url = "https://httpbun.com/get" },
+    .{ .method = .GET, .url = "https://httpbun.com/headers" },
 };
 
-var client_for_concurrency = httpx.Client.init(allocator);
-defer client_for_concurrency.deinit();
+// all: wait for every request
+var results = try httpx.all(allocator, &client, &specs, .{});
+defer { for (results) |*r| r.deinit(); allocator.free(results); }
 
-var all_results = try httpx.all(allocator, &client_for_concurrency, &specs, .{});
-defer {
-    for (all_results) |*r| r.deinit();
-    allocator.free(all_results);
-}
+// first: return first 2xx response
+var ok = try httpx.first(allocator, &client, &specs, .{});
+if (ok) |*resp| resp.deinit();
 
-const ok_count = httpx.successfulCount(all_results);
-const err_count = httpx.errorCount(all_results);
-_ = ok_count;
-_ = err_count;
-
-var first_ok = try httpx.first(allocator, &client_for_concurrency, &specs, .{});
-if (first_ok) |*resp| resp.deinit();
+// fastest: return first to complete (success or error)
+var fast = try httpx.fastest(allocator, &client, &specs, .{});
+fast.deinit();
 ```
- 
-### Server Usage
- 
+
+### Server
+
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
- 
-fn helloHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    return ctx.json(.{ .message = "Hello, World!" });
+
+fn hello(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.json(.{ .message = "Hello!" });
 }
- 
-fn htmlHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    return ctx.html("<h1>Hello from httpx.zig!</h1>");
+
+fn page(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.html("<h1>Welcome</h1>");
 }
- 
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
- 
-    var server = httpx.Server.initWithConfig(allocator, .{
-        .host = "127.0.0.1",
-        .port = 8080,
-        .port_conflict = .increment,
-        .max_port_tries = 32,
-    });
+
+    // One-shot server — one line
+    try httpx.serve("/hello", hello);
+    // OR full control:
+    var server = httpx.createServer();
     defer server.deinit();
- 
-    // Add middleware
     try server.use(httpx.logger());
     try server.use(httpx.cors(.{}));
- 
-    // Register routes
-    try server.get("/", helloHandler);
-    try server.get("/page", htmlHandler);
- 
-    // Start server
+    try server.use(httpx.helmet());
+    try server.use(httpx.rateLimit(.{ .max_requests = 100 }));
+    try server.get("/hello", hello);
+    try server.get("/page", page);
     try server.listen();
-
-    // Effective port after startup (useful when port_conflict = .increment)
-    std.debug.print("Listening on {d}\n", .{server.listeningPort()});
 }
 ```
 
-### Server Port Conflict Handling
+### Middleware
 
 ```zig
-var server = httpx.Server.initWithConfig(allocator, .{
-    .host = "127.0.0.1",
-    .port = 8080,
-    .port_conflict = .increment, // try 8081, 8082, ... when 8080 is occupied
-    .max_port_tries = 32,
-});
-defer server.deinit();
-
-try server.listen();
+try server.use(httpx.cors(.{ .allow_origins = &.{"*"} }));
+try server.use(httpx.logger());
+try server.use(httpx.helmet());
+try server.use(httpx.rateLimit(.{ .max_requests = 100 }));
+try server.use(httpx.basicAuth("admin", myValidator));
+try server.use(httpx.csrf(.{}));
+try server.use(httpx.bodyParser(1024 * 1024));
+try server.use(httpx.requestTimeout(30_000));
+try server.use(httpx.requestId());
 ```
 
-- `port_conflict = .fail`: fail immediately if the configured port cannot be bound.
-- `port_conflict = .increment`: retry subsequent ports until success or `max_port_tries` is exhausted.
-- `server.listeningPort()`: returns the effective bound port.
-
-### Server Logging
-
-HTTPX uses [tint.zig](https://github.com/muhammad-fiaz/hint.zig) for colored console output internally. Server logs appear as `HTTPX [INFO] Server listening on ...` with cyan+green coloring.
+### Network Helpers
 
 ```zig
-var server = httpx.Server.initWithConfig(allocator, .{
-    .host = "127.0.0.1",
-    .port = 8080,
-    .log_level = .info, // Filter: .debug, .info, .warn, .err
-});
-```
-
-To disable all server logs:
-```zig
-var server = httpx.Server.initWithConfig(allocator, .{
-    .log_level = .err, // Only show errors (or use custom .log_fn)
-});
-```
-
-To provide a custom logger (e.g., for structured logging or silencing):
-```zig
-var server = httpx.Server.initWithConfig(allocator, .{
-    .log_fn = &struct {
-        fn log_fn(level: httpx.LogLevel, message: []const u8) void {
-            // Custom handling: write to file, JSON structured, etc.
-            std.debug.print("[{s}] {s}\n", .{ @tagName(level), message });
-        }
-    }.log_fn,
-});
-```
-
-### JSON API
-
-HTTPX provides type-safe JSON request/response methods with zero-copy borrowed parsing:
-
-```zig
-// Fetch and parse typed response (zero-copy, arena-free)
-const Repo = struct { name: []const u8, stars: u32 };
-const result = try httpx.getJson(allocator, "https://api.github.com/repos/ziglang/zig", .{}, Repo, .{});
-defer result.response.deinit();
-std.debug.print("Repo: {s}\n", .{result.value.name});
-
-// Reusable client with JSON methods
-var client = httpx.Client.init(allocator);
-defer client.deinit();
-
-const user = try client.getJson("https://api.example.com/user/1", .{}, User, .{});
-defer user.response.deinit();
-defer user.value.deinit();
-
-// POST JSON and parse response
-const result2 = try httpx.postJsonAndParse(allocator, "https://api.example.com/users", .{}, .{ .name = "Alice" }, User, .{});
-defer result2.response.deinit();
-
-// Response.json for manual fetch-then-parse
-var resp = try httpx.get(allocator, "https://httpbun.com/get", .{});
-defer resp.deinit();
-if (resp.json(MyStruct, .{ .ignore_unknown_fields = true })) |parsed| {
-    defer parsed.deinit();
-}
+const addr = try httpx.resolveAddress("example.com", 443);
+const parsed = try httpx.parseHostAndPort("localhost:8080", 80);
+const resolved = try httpx.parseAndResolveAddress("127.0.0.1:9000", 80);
+const is_ip = httpx.isIpAddress("::1"); // true
 ```
  
 ## Examples

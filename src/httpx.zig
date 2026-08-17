@@ -269,6 +269,8 @@ pub const compressionMiddlewareWithConfig = middleware.compressionMiddlewareWith
 pub const rateLimit = middleware.rateLimit;
 pub const basicAuth = middleware.basicAuth;
 pub const helmet = middleware.helmet;
+pub const helmetWithConfig = middleware.helmetWithConfig;
+pub const csrf = middleware.csrf;
 pub const reverseProxy = middleware.reverseProxy;
 pub const reverseProxyRuntime = middleware.reverseProxyRuntime;
 pub const healthCheck = middleware.healthCheck;
@@ -277,6 +279,12 @@ pub const HealthConfig = middleware.HealthConfig;
 pub const ReadinessConfig = middleware.ReadinessConfig;
 pub const RateLimitConfig = middleware.RateLimitConfig;
 pub const CorsConfig = middleware.CorsConfig;
+pub const HelmetConfig = middleware.HelmetConfig;
+pub const CsrfConfig = middleware.CsrfConfig;
+pub const CompressionConfig = middleware.CompressionConfig;
+pub const bodyParser = middleware.bodyParser;
+pub const requestTimeout = middleware.timeout;
+pub const requestId = middleware.requestId;
 
 // WebSocket exports (flat API -- no httpx.websocket.WebSocket.X redundancy)
 pub const WsOpcode = websocket.WsOpcode;
@@ -432,6 +440,42 @@ pub fn fastest(allocator: std.mem.Allocator, client: *Client, specs: []const Req
 /// Alias for allSettled() returning settled outcomes.
 pub fn settled(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
     return allSettled(allocator, client, specs, config);
+}
+
+/// Creates a new Client with the default page allocator.
+pub fn createClient() Client {
+    return Client.init(default_alias_allocator);
+}
+
+/// Creates a new Client with the given allocator.
+pub fn createClientWithConfig(allocator: std.mem.Allocator, config: ClientConfig) Client {
+    return Client.initWithConfig(allocator, config);
+}
+
+/// Creates a new Server with the default page allocator.
+pub fn createServer() Server {
+    return Server.init(default_alias_allocator);
+}
+
+/// Creates a new Server with the given allocator and config.
+pub fn createServerWithConfig(allocator: std.mem.Allocator, config: ServerConfig) Server {
+    return Server.initWithConfig(allocator, config);
+}
+
+/// One-shot: creates a server, registers a GET route, and listens.
+pub fn serve(path: []const u8, handler: Handler) !void {
+    var s = createServer();
+    defer s.deinit();
+    try s.get(path, handler);
+    try s.listen();
+}
+
+/// One-shot: creates a server with config, registers a GET route, and listens.
+pub fn serveWithConfig(allocator: std.mem.Allocator, config: ServerConfig, path: []const u8, handler: Handler) !void {
+    var s = createServerWithConfig(allocator, config);
+    defer s.deinit();
+    try s.get(path, handler);
+    try s.listen();
 }
 
 /// Convenience function to create a GET request.
