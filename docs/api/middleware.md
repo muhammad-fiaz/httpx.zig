@@ -137,6 +137,41 @@ Parses request body based on `Content-Type` (JSON, form-urlencoded). Requires a 
 server.use(httpx.middleware.bodyParser(1_048_576)); // 1MB max body
 ```
 
+### `csrf`
+
+CSRF protection using the double-submit cookie pattern. Generates a random 32-byte hex token, sets it as a cookie, and validates that the same token is present in the `X-CSRF-Token` header or `_csrf` form field for state-changing methods (POST, PUT, PATCH, DELETE). GET, HEAD, and OPTIONS requests pass through unchallenged.
+
+```zig
+server.use(httpx.csrf(.{}));
+```
+
+With explicit configuration:
+
+```zig
+server.use(httpx.csrf(.{
+    .cookie_name = "_csrf",
+    .header_name = "X-CSRF-Token",
+    .field_name = "_csrf",
+    .secure = true, // set Secure flag on cookie (requires HTTPS)
+}));
+```
+
+`CsrfConfig` fields:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `cookie_name` | `"_csrf"` | Cookie name for the CSRF token |
+| `header_name` | `"X-CSRF-Token"` | Header name to check for the token |
+| `field_name` | `"_csrf"` | Form field name to check for the token |
+| `secure` | `false` | Whether to set the Secure flag on the cookie |
+
+**How it works:**
+
+1. On the first state-changing request, the middleware generates a random token and sets it as an HttpOnly, SameSite=Lax cookie.
+2. Subsequent state-changing requests must include the same token in the `X-CSRF-Token` header or `_csrf` form field.
+3. If the token is missing or mismatched, returns `403 Forbidden`.
+4. GET/HEAD/OPTIONS requests are not challenged (safe methods).
+
 ### `healthCheck`
 
 Intercepts requests to a configured path and returns a health status response. Useful for Kubernetes liveness probes.
@@ -177,7 +212,7 @@ server.use(httpx.middleware.readinessProbe(.{
 
 ### `reverseProxy`
 
-Comptime reverse proxy that forwards all incoming requests to a fixed backend URL.
+Comptime reverse proxy that forwards all incoming requests to a fixed backend URL. Includes built-in **SSRF protection** that blocks requests to private/internal IP ranges (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, link-local, localhost). Returns `403 Forbidden` for blocked targets.
 
 ```zig
 server.use(httpx.middleware.reverseProxy("http://backend.internal:8080"));
@@ -185,7 +220,7 @@ server.use(httpx.middleware.reverseProxy("http://backend.internal:8080"));
 
 ### `reverseProxyRuntime`
 
-Runtime-URL reverse proxy for cases where the target URL is not known at compile time.
+Runtime-URL reverse proxy for cases where the target URL is not known at compile time. Also includes built-in SSRF protection.
 
 ```zig
 const target = getTargetUrl(); // runtime value

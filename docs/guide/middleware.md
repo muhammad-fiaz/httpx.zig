@@ -25,12 +25,17 @@ Logging is opt-in. Use `httpx.middleware.loggerWithConfig(.{ .log_fn = ... })` t
 
 - **Logger**: Logs request timing and status.
 - **CORS**: Configures Cross-Origin Resource Sharing headers.
-- **RateLimit**: Simple in-memory rate limiting.
+- **RateLimit**: Simple in-memory rate limiting (thread-safe with mutex).
 - **BasicAuth**: RFC 7617 Basic Authentication.
-- **Helmet**: Security headers.
+- **Helmet**: Security headers (X-Content-Type-Options, X-Frame-Options, X-XSS-Protection, HSTS).
 - **Compression**: Response compression middleware (gzip, deflate, br, zstd) via `httpx.middleware.compression()`. Compresses responses larger than 1KB by default, preferring brotli > zstd > gzip > deflate.
 - **Timeout**: Application-level per-request timeout enforcement via `httpx.middleware.timeout(ms)`. Stores a deadline and returns 408 if exceeded.
 - **RequestId**: Injects `X-Request-ID`.
+- **BodyParser**: Validates Content-Length and body size against a maximum limit.
+- **CSRF**: Double-submit cookie pattern for state-changing requests (POST/PUT/PATCH/DELETE).
+- **Reverse Proxy**: Comptime and runtime reverse proxy with built-in SSRF protection (blocks private IPs).
+- **Health Check**: Liveness probe middleware for Kubernetes deployments.
+- **Readiness Probe**: Readiness probe middleware for Kubernetes deployments.
 
 ## Writing Custom Middleware
 
@@ -91,3 +96,30 @@ try server.use(httpx.middleware.timeout(5_000)); // 5 second timeout
 ```
 
 If the deadline has passed before the handler runs, returns `408 Request Timeout` immediately.
+
+## CSRF Protection
+
+Use `httpx.csrf(.{})` to protect state-changing requests from cross-site request forgery:
+
+```zig
+try server.use(httpx.csrf(.{}));
+```
+
+The middleware uses the double-submit cookie pattern:
+1. On the first POST/PUT/PATCH/DELETE request, generates a random token and sets it as a cookie.
+2. Subsequent requests must include the token in the `X-CSRF-Token` header or `_csrf` form field.
+3. GET/HEAD/OPTIONS requests are not challenged.
+
+## SSRF Protection in Reverse Proxy
+
+The `reverseProxy` and `reverseProxyRuntime` middlewares include built-in SSRF protection that blocks requests targeting private/internal IP ranges:
+
+- `localhost`, `0.0.0.0`, `127.0.0.1`, `::1`
+- `127.0.0.0/8` (loopback)
+- `10.0.0.0/8` (private Class A)
+- `172.16.0.0/12` (private Class B)
+- `192.168.0.0/16` (private Class C)
+- `169.254.0.0/16` (link-local)
+- `198.18.0.0/15` (benchmarking)
+
+Blocked requests return `403 Forbidden`.

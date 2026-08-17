@@ -60,6 +60,7 @@ pub const ClientConfig = struct {
     default_headers: ?[]const [2][]const u8 = null,
     user_agent: []const u8 = meta.default_user_agent,
     max_response_size: usize = 100 * 1024 * 1024,
+    max_request_size: usize = 10 * 1024 * 1024,
     follow_redirects: bool = true,
     verify_ssl: bool = true,
     http2_enabled: bool = false,
@@ -603,6 +604,13 @@ pub const Client = struct {
             const ct = try builder.contentType();
             defer self.allocator.free(ct);
             try req.headers.set(HeaderName.CONTENT_TYPE, ct);
+        }
+
+        // Enforce request size limit.
+        if (req.body) |body| {
+            if (body.len > self.config.max_request_size) {
+                return error.RequestTooLarge;
+            }
         }
 
         if (reqOpts.basic_auth) |basic| {

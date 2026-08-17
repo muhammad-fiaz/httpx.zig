@@ -426,6 +426,7 @@ pub const Server = struct {
     unix_listener: ?@import("../net/unix.zig").UnixListener = null,
     running: bool = false,
     active_connections: std.ArrayList(Socket) = .empty,
+    active_conn_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     executor: ?Executor = null,
     executor_connections: std.ArrayList(Socket) = .empty,
     executor_conn_mutex: std.Io.Mutex = .init,
@@ -909,6 +910,16 @@ pub const Server = struct {
     /// Dispatches a socket connection to the executor thread pool, or handles
     /// it directly on the current thread when no executor is configured.
     fn dispatchToExecutor(self: *Self, socket: Socket) void {
+        // Enforce connection limit.
+        const current = self.active_conn_count.load(.monotonic);
+        if (current >= self.config.max_connections) {
+            dbg.log("SERVER", "connection limit reached ({d}/{d})", .{ current, self.config.max_connections });
+            var s = socket;
+            s.close();
+            return;
+        }
+        _ = self.active_conn_count.fetchAdd(1, .monotonic);
+
         if (self.executor) |*e| {
             dbg.log("SERVER", "dispatching to executor thread pool", .{});
             const ConnJob = struct {
@@ -932,6 +943,7 @@ pub const Server = struct {
                         }
                     }
                     ctx.server.executor_conn_mutex.unlock(io);
+                    _ = ctx.server.active_conn_count.fetchSub(1, .monotonic);
                     ctx.server.allocator.destroy(ctx);
                 }
             };
@@ -993,6 +1005,7 @@ pub const Server = struct {
                 if (i < self.active_connections.items.len) {
                     _ = self.active_connections.swapRemove(i);
                 }
+                _ = self.active_conn_count.fetchSub(1, .monotonic);
                 return;
             }
         }
@@ -1051,6 +1064,7 @@ pub const Server = struct {
             s.close();
         }
         self.active_connections.clearRetainingCapacity();
+        self.active_conn_count.store(0, .monotonic);
         // Close executor-tracked sockets so worker threads unblock from recv().
         {
             const io = defaultIo();

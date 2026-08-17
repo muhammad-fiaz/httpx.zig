@@ -108,9 +108,20 @@ pub const common = @import("util/common.zig");
 pub const multipart = @import("util/multipart.zig");
 pub const metrics = @import("util/metrics.zig");
 pub const session = @import("util/session.zig");
+pub const list_writer = @import("util/list_writer.zig");
 pub const ContentEncoding = @import("util/compression.zig").ContentEncoding;
 pub const decompress = @import("util/compression.zig").decompress;
 pub const compress = @import("util/compression.zig").compress;
+pub const compression_stream = @import("util/stream.zig");
+pub const StreamingCompressor = compression_stream.StreamingCompressor;
+pub const StreamingDecompressor = compression_stream.StreamingDecompressor;
+pub const cache = @import("util/cache.zig");
+pub const CacheControl = cache.CacheControl;
+pub const HttpCache = cache.HttpCache;
+pub const CacheEntry = cache.CacheEntry;
+pub const ConditionalGet = cache.ConditionalGet;
+pub const buffer_pool = @import("util/buffer_pool.zig");
+pub const BufferPool = buffer_pool.BufferPool;
 pub const dns = @import("net/dns.zig");
 pub const sse = @import("util/sse.zig");
 pub const debug = @import("util/debug.zig");
@@ -844,4 +855,16 @@ test "socket" {
 
 test "address" {
     _ = address;
+}
+
+test "compression_stream" {
+    _ = compression_stream;
+}
+
+test "cache" {
+    _ = cache;
+}
+
+test "buffer_pool" {
+    _ = buffer_pool;
 }

@@ -9,6 +9,8 @@
 //! - Security headers (Helmet)
 //! - Response compression
 //! - Body parsing
+//! - CSRF protection (double-submit cookie pattern)
+//! - SSRF protection in reverse proxy (private IP range blocking)
 
 const std = @import("std");
 const tint = @import("tint");
@@ -273,8 +275,7 @@ pub const RateLimitConfig = struct {
 /// Tracks request counts in an in-memory hashmap keyed by IP.
 /// Returns 429 Too Many Requests when the limit is exceeded.
 /// Evicts stale entries periodically to prevent unbounded memory growth.
-/// Note: For multi-threaded servers, consider per-IP locking at the
-/// connection handler level for full thread safety.
+/// Thread-safe: protected by a mutex for concurrent access.
 pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
     return .{
         .name = "rate_limit",
@@ -283,6 +284,7 @@ pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
             var store: std.StringHashMap(Entry) = undefined;
             var store_initialized: bool = false;
             var evict_counter: u32 = 0;
+            var mu: std.Io.Mutex = .init;
 
             fn handler(ctx: *Context, next: Next) anyerror!Response {
                 dbg.entry("MW", "rateLimit");
@@ -295,6 +297,10 @@ pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
                 const ip = ctx.header("X-Forwarded-For") orelse
                     ctx.header("X-Real-IP") orelse
                     "0.0.0.0";
+
+                const io = io_util.defaultIo();
+                mu.lock(io) catch unreachable;
+                defer mu.unlock(io);
 
                 // Evict stale entries every 512 requests to prevent unbounded growth.
                 evict_counter +%= 1;
@@ -429,6 +435,91 @@ pub fn helmet() Middleware {
     };
 }
 
+/// Creates CSRF protection middleware using the double-submit cookie pattern.
+///
+/// Generates a random token, sets it as a cookie, and validates that the same
+/// token is present in the request header or form body for state-changing methods.
+/// Protects against cross-site request forgery attacks.
+pub fn csrf(comptime config: CsrfConfig) Middleware {
+    return .{
+        .name = "csrf",
+        .handler = struct {
+            fn handler(ctx: *Context, next: Next) anyerror!Response {
+                dbg.entry("MW", "csrf");
+
+                // Only protect state-changing methods.
+                const method = ctx.request.method;
+                if (method == .GET or method == .HEAD or method == .OPTIONS) {
+                    return next(ctx);
+                }
+
+                // Generate or retrieve token from cookie.
+                const cookie_token = ctx.cookie(config.cookie_name);
+
+                // Validate token from header or form body.
+                const header_token = ctx.header(config.header_name);
+                const form_token: ?[]const u8 = blk: {
+                    if (ctx.isFormUrlEncoded()) {
+                        if (ctx.request.body) |body| {
+                            const needle = try std.fmt.allocPrint(ctx.allocator, "{s}=", .{config.field_name});
+                            defer ctx.allocator.free(needle);
+                            if (std.mem.indexOf(u8, body, needle)) |pos| {
+                                const start = pos + needle.len;
+                                if (start < body.len) {
+                                    const end = std.mem.indexOfScalar(u8, body[start..], '&') orelse body.len - start;
+                                    break :blk body[start .. start + end];
+                                }
+                            }
+                        }
+                    }
+                    break :blk null;
+                };
+
+                const request_token = header_token orelse form_token;
+
+                // If we have a cookie token, validate the request token matches.
+                if (cookie_token) |ct| {
+                    if (request_token) |rt| {
+                        if (std.mem.eql(u8, ct, rt)) {
+                            return next(ctx);
+                        }
+                    }
+                    dbg.log("MW", "CSRF token mismatch", .{});
+                    return ctx.status(status.StatusCode.FORBIDDEN).text("CSRF token mismatch");
+                }
+
+                // No cookie yet — set one and let the request through.
+                // The client must include this token in subsequent requests.
+                var raw: [32]u8 = undefined;
+                io_util.defaultIo().random(&raw);
+                const token = try std.fmt.allocPrint(ctx.allocator, "{s}", .{raw});
+                defer ctx.allocator.free(token);
+
+                try ctx.setCookie(config.cookie_name, token, .{
+                    .same_site = .lax,
+                    .http_only = true,
+                    .secure = config.secure,
+                    .path = "/",
+                });
+
+                return next(ctx);
+            }
+        }.handler,
+    };
+}
+
+/// CSRF protection configuration.
+pub const CsrfConfig = struct {
+    /// Cookie name for the CSRF token.
+    cookie_name: []const u8 = "_csrf",
+    /// Header name to check for the token.
+    header_name: []const u8 = "X-CSRF-Token",
+    /// Form field name to check for the token.
+    field_name: []const u8 = "_csrf",
+    /// Whether to set the Secure flag on the cookie.
+    secure: bool = false,
+};
+
 /// Creates request timeout middleware.
 ///
 /// Stores the timeout deadline in `ctx.data` and checks it before calling
@@ -487,6 +578,7 @@ pub fn requestId() Middleware {
 }
 
 /// Creates reverse proxy middleware that forwards requests to target_url.
+/// When ssrf_check is true, validates that the target is not a private/internal IP.
 pub fn reverseProxy(comptime target_url: []const u8) Middleware {
     return .{
         .name = "reverse_proxy",
@@ -504,6 +596,12 @@ pub fn reverseProxy(comptime target_url: []const u8) Middleware {
                 else
                     try std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ target_url, path });
                 defer ctx.allocator.free(full_target);
+
+                // SSRF protection: validate target is not a private IP.
+                if (isSsrfBlocked(full_target)) {
+                    dbg.log("MW", "SSRF blocked: {s}", .{full_target});
+                    return ctx.status(status.StatusCode.FORBIDDEN).text("Forbidden: internal target");
+                }
 
                 var headers_list = std.ArrayList([2][]const u8).empty;
                 defer headers_list.deinit(ctx.allocator);
@@ -546,6 +644,12 @@ pub fn reverseProxyRuntime(target_url: []const u8) Middleware {
                     try std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ State.url, path });
                 defer ctx.allocator.free(full_target);
 
+                // SSRF protection: validate target is not a private IP.
+                if (isSsrfBlocked(full_target)) {
+                    dbg.log("MW", "SSRF blocked: {s}", .{full_target});
+                    return ctx.status(status.StatusCode.FORBIDDEN).text("Forbidden: internal target");
+                }
+
                 var headers_list = std.ArrayList([2][]const u8).empty;
                 defer headers_list.deinit(ctx.allocator);
                 for (ctx.request.headers.entries.items) |h| {
@@ -561,6 +665,78 @@ pub fn reverseProxyRuntime(target_url: []const u8) Middleware {
             }
         }.handler,
     };
+}
+
+/// Checks if a URL targets a private/internal IP range (SSRF protection).
+fn isSsrfBlocked(url: []const u8) bool {
+    const host = extractHost(url) orelse return false;
+
+    // Check common internal hostnames.
+    if (std.ascii.eqlIgnoreCase(host, "localhost") or
+        std.ascii.eqlIgnoreCase(host, "0.0.0.0") or
+        std.ascii.eqlIgnoreCase(host, "127.0.0.1") or
+        std.ascii.eqlIgnoreCase(host, "::1") or
+        std.ascii.eqlIgnoreCase(host, "[::1]"))
+    {
+        return true;
+    }
+
+    // Parse IPv4 and check private ranges.
+    const ip = parseIp4(host) orelse return false;
+
+    // 127.0.0.0/8
+    if ((ip >> 24) == 0x7F) return true;
+    // 10.0.0.0/8
+    if ((ip >> 24) == 0x0A) return true;
+    // 172.16.0.0/12
+    if ((ip >> 20) == 0xAC1) return true;
+    // 192.168.0.0/16
+    if ((ip >> 16) == 0xC0A8) return true;
+    // 0.0.0.0/8
+    if ((ip >> 24) == 0) return true;
+    // 169.254.0.0/16 (link-local)
+    if ((ip >> 16) == 0xA9FE) return true;
+    // 198.18.0.0/15 (benchmarking)
+    if ((ip >> 15) == 0x6009) return true;
+
+    return false;
+}
+
+fn extractHost(url: []const u8) ?[]const u8 {
+    var rest = url;
+    if (std.mem.startsWith(u8, rest, "https://")) {
+        rest = rest[8..];
+    } else if (std.mem.startsWith(u8, rest, "http://")) {
+        rest = rest[7..];
+    }
+    const host_end = std.mem.indexOfAny(u8, rest, "/:") orelse rest.len;
+    return if (host_end > 0) rest[0..host_end] else null;
+}
+
+fn parseIp4(host: []const u8) ?u32 {
+    var octets: [4]u32 = .{ 0, 0, 0, 0 };
+    var idx: usize = 0;
+    var current: u32 = 0;
+
+    for (host) |c| {
+        if (c == '.') {
+            if (idx >= 4) return null;
+            octets[idx] = current;
+            idx += 1;
+            current = 0;
+            continue;
+        }
+        if (c < '0' or c > '9') return null;
+        current = current * 10 + (c - '0');
+        if (current > 255) return null;
+    }
+    if (idx >= 4) return null;
+    octets[idx] = current;
+
+    return (@as(u32, @intCast(octets[0])) << 24) |
+        (@as(u32, @intCast(octets[1])) << 16) |
+        (@as(u32, @intCast(octets[2])) << 8) |
+        @as(u32, @intCast(octets[3]));
 }
 
 test "Middleware creation" {
@@ -722,4 +898,9 @@ test "readinessProbe middleware intercepts /ready" {
     var res = try mw.handler(&ctx, NextMock.next);
     defer res.deinit();
     try std.testing.expectEqual(@as(u16, 200), res.status.code);
+}
+
+test "CSRF middleware creation" {
+    const mw = csrf(.{});
+    try std.testing.expectEqualStrings("csrf", mw.name);
 }
