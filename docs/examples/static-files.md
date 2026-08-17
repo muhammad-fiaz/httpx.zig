@@ -50,7 +50,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-static_files
+zig build run-all-static_files
 ```
 
 ## What to Verify

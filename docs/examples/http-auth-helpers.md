@@ -48,7 +48,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-http_auth_helpers
+zig build run-all-http_auth_helpers
 ```
 
 ## What to Verify

@@ -77,8 +77,6 @@ pub fn main() !void {
     defer server.deinit();
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
     sleepMs(100);
 
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
@@ -107,4 +105,7 @@ pub fn main() !void {
     std.debug.print("  308 Permanent Redirect   - follow, preserve method\n", .{});
 
     std.debug.print("\n=== Redirect Following Example Complete ===\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

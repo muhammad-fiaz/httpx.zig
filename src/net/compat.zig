@@ -3,6 +3,7 @@ const posix = std.posix;
 const Io = std.Io;
 const io_util = @import("../util/any_io.zig");
 const defaultIo = io_util.defaultIo;
+const dbg = @import("../util/debug.zig");
 
 pub const Ip4Address = Io.net.Ip4Address;
 pub const Ip6Address = Io.net.Ip6Address;
@@ -126,17 +127,28 @@ fn fromIpAddress(ip: Io.net.IpAddress) Address {
 
 /// Parses an IPv4/IPv6 address and applies a port.
 pub fn parseIp(text: []const u8, port: u16) !Address {
-    return Address.parseIp(text, port);
+    dbg.entry("NET", "parseIp");
+    dbg.logUrl("NET", "parseIp", text);
+    const result = Address.parseIp(text, port) catch |err| {
+        dbg.exitErr("NET", "parseIp", err);
+        return err;
+    };
+    dbg.exit("NET", "parseIp");
+    return result;
 }
 
 /// Resolves a host name to one or more IP addresses.
 pub fn getAddressList(allocator: std.mem.Allocator, host: []const u8, port: u16) !AddressList {
+    dbg.entry("NET", "getAddressList");
     if (parseIp(host, port)) |ip| {
+        dbg.log("NET", "getAddressList: IP literal {s}", .{host});
         const addrs = try allocator.alloc(Address, 1);
         addrs[0] = ip;
+        dbg.exit("NET", "getAddressList");
         return .{ .addrs = addrs, .allocator = allocator };
     } else |_| {}
 
+    dbg.log("NET", "getAddressList: DNS lookup {s}:{d}", .{ host, port });
     const io = defaultIo();
     const host_name: Io.net.HostName = try .init(host);
 
@@ -157,8 +169,12 @@ pub fn getAddressList(allocator: std.mem.Allocator, host: []const u8, port: u16)
         error.Closed => {},
     }
 
-    if (addrs.items.len == 0) return error.DnsResolutionFailed;
+    if (addrs.items.len == 0) {
+        dbg.exitErr("NET", "getAddressList", error.DnsResolutionFailed);
+        return error.DnsResolutionFailed;
+    }
 
+    dbg.exit("NET", "getAddressList");
     return .{ .addrs = try addrs.toOwnedSlice(allocator), .allocator = allocator };
 }
 

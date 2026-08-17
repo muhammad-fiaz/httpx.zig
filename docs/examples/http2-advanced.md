@@ -63,7 +63,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-http2_advanced
+zig build run-all-http2_advanced
 ```
 
 ## What to Verify

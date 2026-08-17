@@ -10,22 +10,27 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const list_writer = @import("list_writer.zig");
+const dbg = @import("debug.zig");
 
 /// Base64 encoding and decoding per RFC 4648.
 pub const Base64 = struct {
     /// Encodes data to standard Base64.
     pub fn encode(allocator: Allocator, data: []const u8) ![]u8 {
+        dbg.entry("ENC", "Base64.encode");
         const len = std.base64.standard.Encoder.calcSize(data.len);
         const result = try allocator.alloc(u8, len);
         _ = std.base64.standard.Encoder.encode(result, data);
+        dbg.exit("ENC", "Base64.encode");
         return result;
     }
 
     /// Decodes Base64 data.
     pub fn decode(allocator: Allocator, data: []const u8) ![]u8 {
+        dbg.entry("ENC", "Base64.decode");
         const len = try std.base64.standard.Decoder.calcSizeForSlice(data);
         const result = try allocator.alloc(u8, len);
         try std.base64.standard.Decoder.decode(result, data);
+        dbg.exit("ENC", "Base64.decode");
         return result;
     }
 
@@ -78,6 +83,7 @@ pub const PercentEncoding = struct {
 
     /// Encodes a string for use in URLs.
     pub fn encode(allocator: Allocator, input: []const u8) ![]u8 {
+        dbg.entry("ENC", "PercentEncoding.encode");
         var result = std.ArrayList(u8).empty;
         const writer = list_writer.init(allocator, &result);
 
@@ -89,11 +95,13 @@ pub const PercentEncoding = struct {
             }
         }
 
+        dbg.exit("ENC", "PercentEncoding.encode");
         return result.toOwnedSlice(allocator);
     }
 
     /// Decodes a percent-encoded string.
     pub fn decode(allocator: Allocator, input: []const u8) ![]u8 {
+        dbg.entry("ENC", "PercentEncoding.decode");
         var result = std.ArrayList(u8).empty;
 
         var i: usize = 0;
@@ -114,12 +122,13 @@ pub const PercentEncoding = struct {
             i += 1;
         }
 
+        dbg.exit("ENC", "PercentEncoding.decode");
         return result.toOwnedSlice(allocator);
     }
 };
 
 /// Encodes key-value pairs as application/x-www-form-urlencoded.
-pub fn encodeFormData(allocator: Allocator, params: []const struct { []const u8, []const u8 }) ![]u8 {
+pub fn encodeFormData(allocator: Allocator, params: []const [2][]const u8) ![]u8 {
     var result = std.ArrayList(u8).empty;
     const writer = list_writer.init(allocator, &result);
 

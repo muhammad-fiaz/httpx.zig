@@ -187,9 +187,6 @@ pub fn main() !void {
     std.debug.print("  GET /go-home        -> redirect('/')\n", .{});
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
-
     sleepMs(100);
 
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
@@ -212,4 +209,7 @@ pub fn main() !void {
     }
 
     std.debug.print("\nStatic file routes verified!\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

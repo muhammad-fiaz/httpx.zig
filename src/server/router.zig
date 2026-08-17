@@ -12,6 +12,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const types = @import("../core/types.zig");
+const dbg = @import("../util/debug.zig");
 
 /// Route parameter extracted from the URL.
 pub const RouteParam = struct {
@@ -25,8 +26,7 @@ pub const RouteMatch = struct {
     params: []const RouteParam,
 };
 
-/// Handler function type.
-pub const Handler = *const fn (*@import("server.zig").Context) anyerror!@import("../core/response.zig").Response;
+pub const Handler = @import("server.zig").Handler;
 
 const Route = struct {
     method: types.Method,
@@ -65,6 +65,7 @@ pub const Router = struct {
 
     /// Adds a route to the router.
     pub fn add(self: *Self, method: types.Method, pattern: []const u8, handler: Handler) !void {
+        dbg.log("ROUTER", "register {s} {s}", .{ method.toString(), pattern });
         const dup_pattern = try self.allocator.dupe(u8, pattern);
         errdefer self.allocator.free(dup_pattern);
 
@@ -156,6 +157,7 @@ pub const Router = struct {
             if (route.method != method) continue;
 
             if (self.matchRoute(route, path, &params_buf)) |param_count| {
+                dbg.log("ROUTER", "matched {s} {s}", .{ method.toString(), path });
                 return .{
                     .handler = route.handler,
                     .params = params_buf[0..param_count],
@@ -163,6 +165,7 @@ pub const Router = struct {
             }
         }
 
+        dbg.log("ROUTER", "no match for {s} {s}", .{ method.toString(), path });
         return null;
     }
 

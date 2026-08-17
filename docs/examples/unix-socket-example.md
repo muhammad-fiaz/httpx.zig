@@ -1,6 +1,6 @@
 # Unix Domain Socket Example
 
-Demonates how to perform Inter-Process Communication (IPC) using HTTP over Unix domain sockets (AF_UNIX) for fast, zero-overhead same-machine messaging.
+Demonstrates how to perform Inter-Process Communication (IPC) using HTTP over Unix domain sockets (AF_UNIX) for fast, zero-overhead same-machine messaging.
 
 ## Features Covered
 
@@ -54,5 +54,5 @@ pub fn main() !void {
 Run the pre-configured Unix Socket example:
 
 ```bash
-zig build run-unix_socket_example
+zig build run-all-unix_socket_example
 ```

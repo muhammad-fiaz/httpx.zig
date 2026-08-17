@@ -4,7 +4,7 @@
 //! implementation. The TLS handshake negotiates ALPN for HTTP/1.1 or HTTP/2
 //! automatically.
 //!
-//! Set HTTPX_EXAMPLE_ONLINE=1 to run a live request against example.com.
+//! Set HTTPX_EXAMPLE_ONLINE=1 to run a live request against httpbun.com.
 //! By default runs in offline mode to avoid external network dependencies in CI.
 
 const std = @import("std");
@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("TLS config: ALPN = h2, http/1.1 (insecure mode for demo)\n", .{});
 
     // 2. Connect to server
-    const host = "example.com";
+    const host = "httpbun.com";
     const port: u16 = 443;
     std.debug.print("Connecting to {s}:{d}...\n", .{ host, port });
 
@@ -85,7 +85,7 @@ pub fn main(init: std.process.Init) !void {
     // 4. Send HTTP request over the encrypted channel
     const request =
         "GET / HTTP/1.1\r\n" ++
-        "Host: example.com\r\n" ++
+        "Host: httpbun.com\r\n" ++
         "Connection: close\r\n" ++
         "Accept: text/html\r\n" ++
         "\r\n";

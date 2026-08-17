@@ -5,6 +5,7 @@ const Socket = @import("../net/socket.zig").Socket;
 const types = @import("../core/types.zig");
 const address_mod = @import("../net/address.zig");
 const compat = @import("../net/compat.zig");
+const dbg = @import("../util/debug.zig");
 
 fn readNoEof(socket: *Socket, out: []u8) !void {
     var read: usize = 0;
@@ -117,5 +118,8 @@ fn connectSocks5hTunnel(socket: *Socket, target_host: []const u8, target_port: u
 
 /// Establishes a SOCKS5h tunnel to the target host and port.
 pub fn establishSocks5hTunnel(socket: *Socket, target_host: []const u8, target_port: u16, proxy: types.Proxy) !void {
+    dbg.entry("PROXY", "establishSocks5hTunnel");
+    dbg.log("PROXY", "target={s}:{d}", .{ target_host, target_port });
+    defer dbg.exit("PROXY", "establishSocks5hTunnel");
     try connectSocks5hTunnel(socket, target_host, target_port, proxy);
 }

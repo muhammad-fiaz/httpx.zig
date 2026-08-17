@@ -74,9 +74,6 @@ pub fn main() !void {
     try server.get("/redirect", redirectHandler);
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
-
     sleepMs(50);
 
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
@@ -152,4 +149,7 @@ pub fn main() !void {
         redirect_response.isRedirect(),
         redirect_response.location().?,
     });
+
+    server.stop();
+    server_thread.join();
 }

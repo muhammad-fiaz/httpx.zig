@@ -35,7 +35,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-simple_server
+zig build run-all-simple_server
 ```
 
 ## What to Verify

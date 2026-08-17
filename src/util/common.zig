@@ -6,6 +6,7 @@ const list_writer = @import("list_writer.zig");
 const mime = @import("mime.zig");
 const io_util = @import("any_io.zig");
 const HeaderName = @import("../core/headers.zig").HeaderName;
+const dbg = @import("debug.zig");
 
 /// Returns the canonical `std.Io` for the current execution context.
 pub const defaultIo = io_util.defaultIo;
@@ -89,6 +90,51 @@ pub fn parseSetCookiePair(set_cookie: []const u8) ?CookiePair {
     if (name.len == 0) return null;
 
     return .{ .name = name, .value = value };
+}
+
+/// Parsed cookie with domain attribute from a Set-Cookie header.
+pub const ParsedCookie = struct {
+    name: []const u8,
+    value: []const u8,
+    domain: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+    secure: bool = false,
+    http_only: bool = false,
+};
+
+/// Parses a Set-Cookie header value extracting name, value, and key attributes.
+pub fn parseSetCookie(set_cookie: []const u8) ?ParsedCookie {
+    dbg.entry("COMMON", "parseSetCookie");
+    const pair_part = parseSetCookiePair(set_cookie) orelse {
+        dbg.exit("COMMON", "parseSetCookie");
+        return null;
+    };
+    var result = ParsedCookie{
+        .name = pair_part.name,
+        .value = pair_part.value,
+    };
+
+    // Parse attributes after the semicolon
+    var it = mem.splitScalar(u8, set_cookie, ';');
+    _ = it.next(); // skip the name=value part
+
+    while (it.next()) |attr| {
+        const trimmed = mem.trim(u8, attr, " \t");
+        if (trimmed.len == 0) continue;
+
+        if (mem.startsWith(u8, trimmed, "Domain=") or mem.startsWith(u8, trimmed, "domain=")) {
+            result.domain = mem.trim(u8, trimmed[7..], " \t");
+        } else if (mem.startsWith(u8, trimmed, "Path=") or mem.startsWith(u8, trimmed, "path=")) {
+            result.path = mem.trim(u8, trimmed[5..], " \t");
+        } else if (std.ascii.eqlIgnoreCase(trimmed, "Secure")) {
+            result.secure = true;
+        } else if (std.ascii.eqlIgnoreCase(trimmed, "HttpOnly")) {
+            result.http_only = true;
+        }
+    }
+
+    dbg.exit("COMMON", "parseSetCookie");
+    return result;
 }
 
 /// Returns a cookie value from a Cookie header string.

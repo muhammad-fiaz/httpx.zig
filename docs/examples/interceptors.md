@@ -29,7 +29,7 @@ pub fn main() !void {
         .response_fn = onResponse,
     });
 
-    var res = try client.get("https://httpbin.org/get", .{});
+    var res = try client.get("https://httpbun.com/get", .{});
     defer res.deinit();
 }
 ```
@@ -37,7 +37,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-interceptors
+zig build run-all-interceptors
 ```
 
 ## What to Verify

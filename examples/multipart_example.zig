@@ -76,7 +76,7 @@ pub fn main() !void {
     // 4. HTTP request integration
     std.debug.print("\n--- HTTP Request Integration ---\n", .{});
 
-    var request = try httpx.Request.init(allocator, .POST, "https://example.com/upload");
+    var request = try httpx.Request.init(allocator, .POST, "http://httpbun.com/upload");
     defer request.deinit();
 
     // Build a fresh body for the request

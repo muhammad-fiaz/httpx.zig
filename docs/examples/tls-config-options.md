@@ -53,5 +53,5 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build example-tls_config_options
+zig build run-all-tls_config_options
 ```

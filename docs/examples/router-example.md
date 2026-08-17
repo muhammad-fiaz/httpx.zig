@@ -14,7 +14,7 @@ fn getUser(ctx: *httpx.Context) anyerror!httpx.Response {
 }
 
 fn createUser(ctx: *httpx.Context) anyerror!httpx.Response {
-    return httpx.Response.fromText(ctx.allocator, "created", 201);
+    return httpx.Response.fromText(ctx.allocator, 201, "created");
 }
 
 pub fn main() !void {
@@ -34,7 +34,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-router_example
+zig build run-all-router_example
 ```
 
 ## What to Verify

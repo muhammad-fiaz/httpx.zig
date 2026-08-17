@@ -45,8 +45,6 @@ pub fn main() !void {
     try backend_server.get("/data", mockBackendHandler);
 
     const backend_thread = try backend_server.listenInBackground();
-    defer backend_thread.join();
-    defer backend_server.stop();
     sleepMs(100);
 
     std.debug.print("Backend server on port {d}\n", .{backend_port});
@@ -108,4 +106,7 @@ pub fn main() !void {
     std.debug.print("  SOCKS5:  DNS resolved locally (by client)\n", .{});
     std.debug.print("  SOCKS5h: DNS resolved remotely (by proxy)\n", .{});
     std.debug.print("  Use SOCKS5h when you want the proxy to handle DNS.\n", .{});
+
+    backend_server.stop();
+    backend_thread.join();
 }

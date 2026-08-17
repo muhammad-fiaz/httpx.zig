@@ -67,5 +67,5 @@ pub fn main() !void {
 Run the pre-configured multipart example:
 
 ```bash
-zig build run-multipart_example
+zig build run-all-multipart_example
 ```

@@ -111,9 +111,6 @@ pub fn main() !void {
     std.debug.print("Routes: page routes + /logo (file route) + /static/* (directory route)\n", .{});
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
-
     sleepMs(100);
 
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
@@ -138,4 +135,7 @@ pub fn main() !void {
     std.debug.print("GET /about -> status: {d}\n", .{resp2.status.code});
 
     std.debug.print("\nAll pages served successfully!\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

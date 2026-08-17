@@ -20,13 +20,13 @@ pub fn main() !void {
 
     // Record some sample traffic data
     m.recordRequest();
-    m.recordResponse(200, 512, 1200); // status, bytes, latency_us
+    m.recordResponse(200, 512, 1200); // status, bytes, latency_ns
     m.recordResponse(500, 64, 4500);
 
     const snap = m.snapshot();
     std.debug.print("Total Requests: {d}\n", .{snap.total_requests});
     std.debug.print("Success Rate:   {d:.1}%\n", .{snap.successRate() * 100.0});
-    std.debug.print("Avg Latency:    {d:.2}ms\n", .{snap.avgLatencyMs()});
+    std.debug.print("Avg Latency:    {d:.2}ms\n", .{snap.avg_latency_ns});
 }
 ```
 
@@ -35,5 +35,5 @@ pub fn main() !void {
 Run the pre-configured metrics example:
 
 ```bash
-zig build run-metrics_example
+zig build run-all-metrics_example
 ```

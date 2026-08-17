@@ -12,6 +12,7 @@ const posix = std.posix;
 const io_util = @import("../util/any_io.zig");
 const defaultIo = io_util.defaultIo;
 const is_windows = builtin.os.tag == .windows;
+const dbg = @import("../util/debug.zig");
 
 const is_unix_available = switch (builtin.os.tag) {
     .linux, .macos, .ios, .tvos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => true,
@@ -21,6 +22,8 @@ const is_unix_available = switch (builtin.os.tag) {
 
 // Winsock declarations for Windows support
 const winsock = if (is_windows) struct {
+    extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSADATA) callconv(.winapi) i32;
+    extern "ws2_32" fn WSACleanup() callconv(.winapi) i32;
     extern "ws2_32" fn socket(af: i32, sock_type: i32, protocol: i32) callconv(.winapi) posix.socket_t;
     extern "ws2_32" fn closesocket(s: posix.socket_t) callconv(.winapi) i32;
     extern "ws2_32" fn bind(s: posix.socket_t, name: *const posix.sockaddr, namelen: i32) callconv(.winapi) i32;
@@ -29,10 +32,32 @@ const winsock = if (is_windows) struct {
     extern "ws2_32" fn connect(s: posix.socket_t, name: *const posix.sockaddr, namelen: i32) callconv(.winapi) i32;
     extern "ws2_32" fn send(s: posix.socket_t, buf: [*]const u8, len: i32, flags: i32) callconv(.winapi) i32;
     extern "ws2_32" fn recv(s: posix.socket_t, buf: [*]u8, len: i32, flags: i32) callconv(.winapi) i32;
+
+    const WSADATA = extern struct {
+        wVersion: u16,
+        wHighVersion: u16,
+        iMaxSockets: u16,
+        iMaxUdpDg: u16,
+        lpVendorInfo: ?[*]u8,
+        szDescription: [257]u8,
+        szSystemStatus: [129]u8,
+    };
+
     const INVALID_SOCKET: posix.socket_t = if (is_windows)
         @as(posix.socket_t, @ptrFromInt(std.math.maxInt(usize)))
     else
         -1;
+
+    var wsa_initialized: bool = false;
+
+    fn ensureWsaStartup() !void {
+        if (wsa_initialized) return;
+        var wsa_data: WSADATA = undefined;
+        // Request Winsock 2.2 (0x0202)
+        const rc = WSAStartup(0x0202, &wsa_data);
+        if (rc != 0) return error.SocketCreateFailed;
+        wsa_initialized = true;
+    }
 } else struct {};
 
 const AF_UNIX: u32 = if (is_windows) 1 else posix.AF.UNIX;
@@ -53,6 +78,24 @@ pub const UnixSocketError = error{
 /// Maximum path length for a Unix socket path.
 pub const MAX_PATH_LEN = 108;
 
+/// Static storage for resolved Windows Unix socket paths.
+/// Used by UnixListener.init to store absolute paths when the input is relative.
+var resolved_path_storage: [std.fs.max_path_bytes]u8 = undefined;
+
+/// On Windows, build a short socket path to avoid exceeding the
+/// 108-byte AF_UNIX sockaddr limit.
+fn windowsShortPath(name: []const u8) ![]const u8 {
+    // On Windows, AF_UNIX paths must be short. Use a fixed short prefix.
+    // The full resolved path must fit in 108 bytes (MAX_PATH_LEN).
+    // We use the name directly if it's already short enough.
+    if (name.len + 1 >= MAX_PATH_LEN) return error.PathTooLong;
+
+    const buf = &resolved_path_storage;
+    // Copy just the name (short) into the static buffer
+    @memcpy(buf[0..name.len], name);
+    return buf[0..name.len];
+}
+
 fn closesocket(fd: posix.socket_t) void {
     if (is_windows) {
         _ = winsock.closesocket(fd);
@@ -66,8 +109,9 @@ const WIN_INVALID_SOCKET: usize = ~@as(usize, 0);
 
 fn createSocket() !posix.socket_t {
     if (is_windows) {
+        // Ensure Winsock is initialized for AF_UNIX support
+        try winsock.ensureWsaStartup();
         // AF_UNIX = 1 on Windows (same as POSIX); SOCK_STREAM = 1
-        // WSAStartup must have been called by socket.zig init() already.
         const fd = winsock.socket(1, 1, 0);
         // Compare via integer since posix.socket_t is a pointer on Windows
         const fd_int = if (@typeInfo(posix.socket_t) == .pointer)
@@ -224,15 +268,27 @@ pub const UnixListener = struct {
 
     /// Binds and listens on a Unix socket path.
     /// Removes any existing socket file at the path first.
+    /// On Windows, relative paths are resolved to short temp-dir paths.
     pub fn init(path: []const u8) !Self {
-        if (!is_unix_available) return error.UnsupportedPlatform;
-        if (path.len >= MAX_PATH_LEN) return error.PathTooLong;
+        dbg.entry("UNIX", "UnixListener.init");
+        if (!is_unix_available) {
+            dbg.exitErr("UNIX", "UnixListener.init", error.UnsupportedPlatform);
+            return error.UnsupportedPlatform;
+        }
+
+        // On Windows, use short temp-dir paths to avoid exceeding AF_UNIX limit
+        const resolved_path: []const u8 = if (is_windows)
+            try windowsShortPath(path)
+        else
+            path;
+
+        if (resolved_path.len >= MAX_PATH_LEN) return error.PathTooLong;
 
         // Remove stale socket file
         {
             const io = defaultIo();
             const cwd = std.Io.Dir.cwd();
-            cwd.deleteFile(io, path) catch {};
+            cwd.deleteFile(io, resolved_path) catch {};
         }
 
         const fd = try createSocket();
@@ -240,48 +296,71 @@ pub const UnixListener = struct {
 
         var addr = std.mem.zeroes(posix.sockaddr.un);
         addr.family = @intCast(AF_UNIX);
-        @memcpy(addr.path[0..path.len], path);
+        @memcpy(addr.path[0..resolved_path.len], resolved_path);
 
         try bindSocket(fd, &addr);
         try listenSocket(fd, 128);
 
-        return .{ .fd = fd, .path = path };
+        dbg.log("UNIX", "listening on {s}", .{resolved_path});
+        dbg.exit("UNIX", "UnixListener.init");
+        return .{ .fd = fd, .path = resolved_path };
     }
 
     /// Accepts an incoming connection.
     pub fn accept(self: *Self) !UnixAccepted {
+        dbg.entry("UNIX", "UnixListener.accept");
         var addr = std.mem.zeroes(posix.sockaddr.un);
         var len: posix.socklen_t = @sizeOf(posix.sockaddr.un);
-        const client_fd = try acceptConnection(self.fd, &addr, &len);
+        const client_fd = acceptConnection(self.fd, &addr, &len) catch |err| {
+            dbg.exitErr("UNIX", "UnixListener.accept", err);
+            return err;
+        };
+        dbg.exit("UNIX", "UnixListener.accept");
         return .{ .socket = .{ .fd = client_fd } };
     }
 
     /// Closes the listener and removes the socket file.
     pub fn deinit(self: *Self) void {
+        dbg.entry("UNIX", "UnixListener.deinit");
         closesocket(self.fd);
         {
             const io = defaultIo();
             const cwd = std.Io.Dir.cwd();
             cwd.deleteFile(io, self.path) catch {};
         }
+        dbg.exit("UNIX", "UnixListener.deinit");
     }
 };
 
 /// A Unix domain socket client.
 pub const UnixClient = struct {
     /// Connects to a Unix socket path and returns a socket.
+    /// On Windows, relative paths are resolved to short temp-dir paths.
     pub fn connect(path: []const u8) !UnixSocket {
-        if (!is_unix_available) return error.UnsupportedPlatform;
-        if (path.len >= MAX_PATH_LEN) return error.PathTooLong;
+        dbg.entry("UNIX", "UnixClient.connect");
+        if (!is_unix_available) {
+            dbg.exitErr("UNIX", "UnixClient.connect", error.UnsupportedPlatform);
+            return error.UnsupportedPlatform;
+        }
+
+        // On Windows, use short temp-dir paths to avoid exceeding AF_UNIX limit
+        const resolved_path: []const u8 = if (is_windows)
+            try windowsShortPath(path)
+        else
+            path;
+
+        if (resolved_path.len >= MAX_PATH_LEN) return error.PathTooLong;
 
         const fd = try createSocket();
         errdefer closesocket(fd);
 
         var addr = std.mem.zeroes(posix.sockaddr.un);
         addr.family = @intCast(AF_UNIX);
-        @memcpy(addr.path[0..path.len], path);
+        @memcpy(addr.path[0..resolved_path.len], resolved_path);
 
         try connectSocket(fd, &addr);
+        dbg.log("UNIX", "connected to {s}", .{resolved_path});
+        dbg.exit("UNIX", "UnixClient.connect");
         return .{ .fd = fd };
     }
 };

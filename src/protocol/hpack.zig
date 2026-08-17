@@ -13,6 +13,7 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
+const dbg = @import("../util/debug.zig");
 
 /// HPACK static table entries (RFC 7541 Appendix A)
 /// Index 1-61 are pre-defined header name/value pairs
@@ -553,6 +554,8 @@ pub fn encodeHeaders(
     headers: []const HeaderEntry,
     allocator: Allocator,
 ) ![]u8 {
+    dbg.entry("HPACK", "encodeHeaders");
+    dbg.log("HPACK", "header_count={d}", .{headers.len});
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
 
@@ -609,6 +612,8 @@ pub fn decodeHeaders(
     data: []const u8,
     allocator: Allocator,
 ) ![]DecodedHeader {
+    dbg.entry("HPACK", "decodeHeaders");
+    dbg.log("HPACK", "data_len={d}", .{data.len});
     var headers = std.ArrayList(DecodedHeader).empty;
     errdefer {
         for (headers.items) |h| {
@@ -755,7 +760,7 @@ test "HPACK context combined lookup" {
 test "Huffman encode/decode roundtrip" {
     const allocator = std.testing.allocator;
 
-    const original = "www.example.com";
+    const original = "www.httpbun.com";
     const encoded = try HuffmanCodec.encode(original, allocator);
     defer allocator.free(encoded);
 

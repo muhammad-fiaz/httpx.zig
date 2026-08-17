@@ -12,6 +12,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const list_writer = @import("../util/list_writer.zig");
+const dbg = @import("../util/debug.zig");
 
 const types = @import("types.zig");
 const Headers = @import("headers.zig").Headers;
@@ -19,6 +20,7 @@ const HeaderName = @import("headers.zig").HeaderName;
 const Uri = @import("uri.zig").Uri;
 const Base64 = @import("../util/encoding.zig").Base64;
 const PercentEncoding = @import("../util/encoding.zig").PercentEncoding;
+const encodeFormData = @import("../util/encoding.zig").encodeFormData;
 
 /// HTTP request representation.
 pub const Request = struct {
@@ -37,6 +39,8 @@ pub const Request = struct {
 
     /// Creates a new request with the given method and URL.
     pub fn init(allocator: Allocator, method: types.Method, url: []const u8) !Self {
+        dbg.entry("REQ", "Request.init");
+        dbg.log("REQ", "method={} url={s}", .{ method, url });
         const uri = try Uri.parse(url);
         var headers = Headers.init(allocator);
 
@@ -55,6 +59,7 @@ pub const Request = struct {
             }
         }
 
+        dbg.exit("REQ", "Request.init");
         return .{
             .allocator = allocator,
             .method = method,
@@ -80,6 +85,7 @@ pub const Request = struct {
 
     /// Sets the request body with ownership.
     pub fn setBody(self: *Self, body: []const u8) !void {
+        dbg.entry("REQ", "Request.setBody");
         if (self.body_owned) {
             if (self.body) |b| {
                 self.allocator.free(b);
@@ -91,32 +97,39 @@ pub const Request = struct {
         var len_buf: [32]u8 = undefined;
         const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body.len}) catch unreachable;
         try self.headers.set(HeaderName.CONTENT_LENGTH, len_str);
+        dbg.exit("REQ", "Request.setBody");
     }
 
     /// Sets the request body as JSON with appropriate headers.
     pub fn setJson(self: *Self, body: []const u8) !void {
+        dbg.entry("REQ", "Request.setJson");
         try self.headers.set(HeaderName.CONTENT_TYPE, "application/json");
         try self.setBody(body);
+        dbg.exit("REQ", "Request.setJson");
     }
 
     /// Sets the Authorization header using a Bearer token.
     pub fn setBearerAuth(self: *Self, token: []const u8) !void {
+        dbg.entry("REQ", "Request.setBearerAuth");
         const auth_value = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{token});
         defer self.allocator.free(auth_value);
         try self.headers.set(HeaderName.AUTHORIZATION, auth_value);
+        dbg.exit("REQ", "Request.setBearerAuth");
     }
 
     /// Sets the Authorization header using HTTP Basic authentication.
     pub fn setBasicAuth(self: *Self, username: []const u8, password: []const u8) !void {
+        dbg.entry("REQ", "Request.setBasicAuth");
         const auth_value = try Base64.formatBasicAuth(self.allocator, username, password);
         defer self.allocator.free(auth_value);
 
         try self.headers.set(HeaderName.AUTHORIZATION, auth_value);
+        dbg.exit("REQ", "Request.setBasicAuth");
     }
 
     /// Sets the request body as application/x-www-form-urlencoded.
     pub fn setFormUrlEncoded(self: *Self, fields: []const [2][]const u8) !void {
-        const encoded = try encodeFormFields(self.allocator, fields);
+        const encoded = try encodeFormData(self.allocator, fields);
         defer self.allocator.free(encoded);
 
         try self.headers.set(HeaderName.CONTENT_TYPE, "application/x-www-form-urlencoded");
@@ -182,9 +195,10 @@ pub const Request = struct {
         return std.ascii.eqlIgnoreCase(media, expected);
     }
 
-    /// Returns true if request Content-Type is application/json.
+    /// Returns true if request Content-Type is JSON (handles charset, +json suffix, etc.).
     pub fn isJsonContent(self: *const Self) bool {
-        return self.hasContentType("application/json");
+        const ct = self.headers.get(HeaderName.CONTENT_TYPE) orelse return false;
+        return @import("../util/json.zig").isJsonContentType(ct);
     }
 
     /// Returns true if request Content-Type is application/x-www-form-urlencoded.
@@ -301,6 +315,7 @@ pub const RequestBuilder = struct {
     pub fn build(self: *Self) !Request {
         const url = self.url orelse return error.MissingUrl;
         var request = try Request.init(self.allocator, self.method, url);
+        errdefer request.deinit();
         request.version = self.version;
 
         for (self.headers.entries.items) |h| {
@@ -314,26 +329,6 @@ pub const RequestBuilder = struct {
         return request;
     }
 };
-
-fn encodeFormFields(allocator: Allocator, fields: []const [2][]const u8) ![]u8 {
-    var encoded = std.ArrayList(u8).empty;
-    const writer = list_writer.init(allocator, &encoded);
-
-    for (fields, 0..) |field, idx| {
-        if (idx > 0) {
-            try writer.writeByte('&');
-        }
-
-        const enc_key = try PercentEncoding.encode(allocator, field[0]);
-        defer allocator.free(enc_key);
-        const enc_value = try PercentEncoding.encode(allocator, field[1]);
-        defer allocator.free(enc_value);
-
-        try writer.print("{s}={s}", .{ enc_key, enc_value });
-    }
-
-    return encoded.toOwnedSlice(allocator);
-}
 
 fn normalizeMediaType(raw: []const u8) []const u8 {
     const semicolon = mem.indexOfScalar(u8, raw, ';') orelse raw.len;
@@ -372,16 +367,16 @@ fn acceptsMediaType(accept_header: []const u8, target_media: []const u8) bool {
 
 test "Request initialization" {
     const allocator = std.testing.allocator;
-    var request = try Request.init(allocator, .GET, "https://example.com/api");
+    var request = try Request.init(allocator, .GET, "http://httpbun.com/api");
     defer request.deinit();
 
     try std.testing.expectEqual(types.Method.GET, request.method);
-    try std.testing.expectEqualStrings("example.com", request.uri.host.?);
+    try std.testing.expectEqualStrings("httpbun.com", request.uri.host.?);
 }
 
 test "Request with body" {
     const allocator = std.testing.allocator;
-    var request = try Request.init(allocator, .POST, "https://example.com/api");
+    var request = try Request.init(allocator, .POST, "http://httpbun.com/api");
     defer request.deinit();
 
     try request.setJson("{\"key\":\"value\"}");
@@ -394,7 +389,7 @@ test "Request builder" {
     var builder = RequestBuilder.init(allocator);
     defer builder.deinit();
 
-    _ = builder.setMethod(.POST).setUrl("https://example.com/api");
+    _ = builder.setMethod(.POST).setUrl("http://httpbun.com/api");
     _ = try builder.addHeader("X-Custom", "value");
     _ = builder.setBody("test body");
 
@@ -406,7 +401,7 @@ test "Request builder" {
 
 test "Request serialization" {
     const allocator = std.testing.allocator;
-    var request = try Request.init(allocator, .GET, "https://example.com/api");
+    var request = try Request.init(allocator, .GET, "http://httpbun.com/api");
     defer request.deinit();
 
     const serialized = try request.toSlice(allocator);
@@ -417,7 +412,7 @@ test "Request serialization" {
 
 test "Request addQueryParam" {
     const allocator = std.testing.allocator;
-    var request = try Request.init(allocator, .GET, "https://example.com/search");
+    var request = try Request.init(allocator, .GET, "http://httpbun.com/search");
     defer request.deinit();
 
     try request.addQueryParam("q", "zig lang");
@@ -432,7 +427,7 @@ test "Request addQueryParam" {
 
 test "Request addQueryParams" {
     const allocator = std.testing.allocator;
-    var request = try Request.init(allocator, .GET, "https://example.com/search");
+    var request = try Request.init(allocator, .GET, "http://httpbun.com/search");
     defer request.deinit();
 
     try request.addQueryParams(&.{
@@ -445,7 +440,7 @@ test "Request addQueryParams" {
 
 test "Request setFormUrlEncoded" {
     const allocator = std.testing.allocator;
-    var request = try Request.init(allocator, .POST, "https://example.com/form");
+    var request = try Request.init(allocator, .POST, "http://httpbun.com/form");
     defer request.deinit();
 
     try request.setFormUrlEncoded(&.{
@@ -459,7 +454,7 @@ test "Request setFormUrlEncoded" {
 
 test "Request auth helpers set Authorization header" {
     const allocator = std.testing.allocator;
-    var request = try Request.init(allocator, .GET, "https://example.com");
+    var request = try Request.init(allocator, .GET, "http://httpbun.com");
     defer request.deinit();
 
     try request.setBearerAuth("demo-token");
@@ -471,7 +466,7 @@ test "Request auth helpers set Authorization header" {
 
 test "Request content and accept helpers" {
     const allocator = std.testing.allocator;
-    var request = try Request.init(allocator, .POST, "https://example.com/submit");
+    var request = try Request.init(allocator, .POST, "http://httpbun.com/submit");
     defer request.deinit();
 
     try request.headers.set(HeaderName.CONTENT_TYPE, "application/json; charset=utf-8");

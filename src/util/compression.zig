@@ -11,6 +11,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zstd = @import("zstd");
 const brotli = @import("brotli");
+const dbg = @import("debug.zig");
 
 pub const ContentEncoding = enum {
     gzip,
@@ -53,6 +54,7 @@ pub const ContentEncoding = enum {
 /// Decompresses body content based on the provided Content-Encoding.
 /// The caller owns the returned slice.
 pub fn decompress(allocator: Allocator, encoding: ContentEncoding, data: []const u8) ![]u8 {
+    dbg.entry("COMP", "decompress");
     switch (encoding) {
         .identity => return allocator.dupe(u8, data),
         .gzip => return decompressGzip(allocator, data),
@@ -65,6 +67,7 @@ pub fn decompress(allocator: Allocator, encoding: ContentEncoding, data: []const
 /// Compresses data using the specified encoding.
 /// The caller owns the returned slice.
 pub fn compress(allocator: Allocator, encoding: ContentEncoding, data: []const u8) ![]u8 {
+    dbg.entry("COMP", "compress");
     switch (encoding) {
         .identity => return allocator.dupe(u8, data),
         .gzip => return compressGzip(allocator, data),

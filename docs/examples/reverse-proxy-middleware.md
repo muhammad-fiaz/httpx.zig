@@ -19,7 +19,7 @@ var resp = try client.get(proxy_url, .{});
 ## Run
 
 ```
-zig build example-reverse-proxy-middleware
+zig build run-all-reverse_proxy_middleware
 ```
 
 ## Checklist

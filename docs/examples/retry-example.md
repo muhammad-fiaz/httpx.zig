@@ -25,7 +25,7 @@ const should = custom.shouldRetryStatus(503); // true
 ## Run
 
 ```
-zig build example-retry-example
+zig build run-all-retry_example
 ```
 
 ## Checklist

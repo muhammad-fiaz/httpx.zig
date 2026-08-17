@@ -31,7 +31,7 @@ const offline_sample_json =
     \\    "X-Amzn-Trace-Id": "Root=1-offline-demo"
     \\  },
     \\  "origin": "127.0.0.1",
-    \\  "url": "https://httpbin.org/get"
+    \\  "url": "http://httpbun.com/get"
     \\}
 ;
 
@@ -83,9 +83,9 @@ pub fn main(init: std.process.Init) !void {
     var client = httpx.Client.initWithConfig(allocator, client_config);
     defer client.deinit();
 
-    std.debug.print("Making GET request to https://postman-echo.com/get...\n", .{});
+    std.debug.print("Making GET request to http://httpbun.com/get...\n", .{});
 
-    var response = client.request(.GET, "https://postman-echo.com/get", .{
+    var response = client.request(.GET, "http://httpbun.com/get", .{
         .timeout_ms = 5_000,
         .headers = &.{
             .{ "Accept", "application/json" },

@@ -20,7 +20,7 @@ const httpx = @import("httpx");
 ## Run
 
 ```bash
-zig build run-request_response_customization
+zig build run-all-request_response_customization
 ```
 
 ## What to Verify

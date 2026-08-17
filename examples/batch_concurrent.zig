@@ -40,8 +40,6 @@ pub fn main() !void {
     try server.get("/data", helloHandler);
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
     sleepMs(100);
 
     const base_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/data", .{port});
@@ -138,4 +136,7 @@ pub fn main() !void {
     std.debug.print("  httpx.settled() = httpx.allSettled() - all outcomes\n", .{});
 
     std.debug.print("\n=== Batch / Race / AllSettled Example Complete ===\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

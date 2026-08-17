@@ -15,7 +15,7 @@ const formatted = try event.format(allocator);
 
 // Server handler returning SSE response
 fn sseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    const events = [_]httpx.SseEvent{
+    const events = [_]httpx.sse.Event{
         .{ .event = "message", .id = "1", .data = "Hello, SSE!" },
         .{ .event = "update", .id = "2", .data = "Second event" },
     };
@@ -26,7 +26,7 @@ fn sseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 ## Run
 
 ```
-zig build example-sse-example
+zig build run-all-sse_example
 ```
 
 ## Checklist

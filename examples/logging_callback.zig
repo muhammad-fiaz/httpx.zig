@@ -72,8 +72,6 @@ pub fn main() !void {
     try server1.get("/hello", handler);
 
     const server_thread1 = try server1.listenInBackground();
-    defer server_thread1.join();
-    defer server1.stop();
 
     sleepMs(100);
 
@@ -104,8 +102,6 @@ pub fn main() !void {
     try server2.get("/hello", handler);
 
     const server_thread2 = try server2.listenInBackground();
-    defer server_thread2.join();
-    defer server2.stop();
 
     sleepMs(100);
 
@@ -136,8 +132,6 @@ pub fn main() !void {
     try server3.get("/hello", handler);
 
     const server_thread3 = try server3.listenInBackground();
-    defer server_thread3.join();
-    defer server3.stop();
 
     sleepMs(100);
 
@@ -156,4 +150,11 @@ pub fn main() !void {
     std.debug.print("  Response status: {d}\n\n", .{resp3.status.code});
 
     std.debug.print("=== Logging Callback Example Complete ===\n", .{});
+
+    server3.stop();
+    server_thread3.join();
+    server2.stop();
+    server_thread2.join();
+    server1.stop();
+    server_thread1.join();
 }

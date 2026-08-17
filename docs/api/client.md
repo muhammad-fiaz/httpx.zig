@@ -86,6 +86,7 @@ defer client.deinit();
 | `http2_settings` | `Http2Settings` | `{}` | HTTP/2 SETTINGS values sent during connection setup (`header_table_size`, `max_frame_size`, etc.). |
 | `http3_settings` | `Http3Settings` | `{}` | HTTP/3/QPACK settings sent on the control stream (`max_field_section_size`, `qpack_max_table_capacity`, `qpack_blocked_streams`, etc.). |
 | `keep_alive` | `bool` | `true` | Reuse TCP connections when possible. |
+| `allow_push` | `bool` | `true` | Accept HTTP/2 server push (PUSH_PROMISE) from the server. |
 | `pool_max_connections` | `u32` | `20` | Maximum connections in the pool. |
 | `pool_max_per_host` | `u32` | `5` | Maximum connections to a single host. |
 | `proxy` | `?Proxy` | `null` | Optional forward proxy configuration for client requests. Use `.kind = .socks5h` for SOCKS5h tunneling; the default kind is HTTP. |
@@ -144,6 +145,7 @@ defer res.deinit();
 | `withHttp3Settings(settings)` | Override HTTP/3 SETTINGS values. |
 | `withSslVerification(enabled)` | Toggle TLS certificate verification. |
 | `withKeepAlive(enabled)` | Toggle keep-alive connection reuse. |
+| `withAllowPush(enabled)` | Toggle HTTP/2 server push acceptance. |
 | `withMaxResponseSize(bytes)` | Override maximum response body size. |
 | `withPoolLimits(max_connections, max_per_host)` | Override pool sizing limits. |
 | `withProxy(proxy_or_null)` | Configure or clear a forward proxy. Set `.kind = .socks5h` for SOCKS5h tunneling. |
@@ -200,6 +202,13 @@ pub fn opts(self: *Self, url: []const u8, options: RequestOptions) !Response
 | `options(url, options)` | HTTP OPTIONS request |
 | `opts(url, options)` | Alias for HTTP OPTIONS request |
 | `send(method, url, options)` | Alias for generic request |
+| `getJson(url, options, T, parse_opts)` | Zero-copy JSON GET, returns `JsonBorrowedResult(T)` |
+| `getJsonBorrowed(url, options, T, parse_opts)` | Alias for getJson |
+| `postJsonAndParse(url, options, json_body, T, parse_opts)` | POST JSON and parse response |
+| `postJsonBorrowed(url, options, json_body, T, parse_opts)` | Alias for postJsonAndParse |
+| `putJson(url, options, json_body, T, parse_opts)` | PUT JSON and parse response |
+| `patchJson(url, options, json_body, T, parse_opts)` | PATCH JSON and parse response |
+| `deleteJson(url, options, T, parse_opts)` | DELETE and parse JSON response |
 | `addInterceptor(interceptor)` | Add request/response interceptor |
 | `cleanupIdleConnections()` | Evict idle/exhausted pooled connections |
 | `poolStats()` | Snapshot total/active/idle pool counts |
@@ -210,8 +219,10 @@ pub fn opts(self: *Self, url: []const u8, options: RequestOptions) !Response
 
 The client keeps an in-memory cookie jar and automatically:
 
-- Adds a `Cookie` header to outgoing requests.
-- Stores `Set-Cookie` values from incoming responses.
+- Adds a `Cookie` header to outgoing requests (domain-filtered per RFC 6265).
+- Stores `Set-Cookie` values from incoming responses with domain association.
+- Cookies with a `Domain` attribute are only sent to matching hosts.
+- Cookies without a `Domain` attribute are sent to all hosts.
 
 | Method | Description |
 |--------|-------------|
@@ -272,6 +283,7 @@ For complete copy/paste demos, see these example pages:
 
 - [Simple Get](/examples/simple-get)
 - [Simple Get Deserialize](/examples/simple-get-deserialize)
+- [JSON API](/examples/json-api-example) - getJson, postJsonAndParse, Response.json, server ctx.jsonBody + ctx.json
 - [Post JSON](/examples/post-json)
 - [Custom Headers](/examples/custom-headers)
 - [Concurrent Requests](/examples/concurrent-requests)
@@ -436,6 +448,9 @@ pub const Response = struct {
 | `text()` | Get response body text |
 | `json(T, options)` | Parse response body as JSON, returning `std.json.Parsed(T)` |
 | `jsonLeaky(T, options)` | Parse response body as JSON directly into type `T` (leaky) |
+| `jsonBorrowed(T, parse_opts)` | Zero-copy JSON parsing returning `JsonBorrowedResult(T)` |
+| `jsonValue(parse_opts)` | Parse body as dynamic `std.json.Value` with `ParsedJson` |
+| `isJson()` | Returns true if body exists and Content-Type is JSON |
 
 ## Interceptors
 
@@ -530,19 +545,63 @@ defer c.deinit();
 var d = try httpx.delete("https://example.com/items/42", .{});
 defer d.deinit();
 
-var e = try httpx.opts("https://example.com/items", .{});
+var e = try httpx.put("https://example.com/items", .{ .json = "{\"name\":\"updated\"}" });
 defer e.deinit();
 
-var f = try httpx.trace("https://example.com/trace", .{});
+var f = try httpx.patch("https://example.com/items", .{ .json = "{\"name\":\"patched\"}" });
 defer f.deinit();
 
-var g = try httpx.connect("https://example.com/tunnel", .{});
+var g = try httpx.head("https://example.com/items", .{});
 defer g.deinit();
 
-// Optional explicit allocator override
-var h = try httpx.sendWithAllocator(allocator, .GET, "https://example.com/health", .{ .timeout_ms = 10_000 });
+var h = try httpx.opts("https://example.com/items", .{});
 defer h.deinit();
+
+var i = try httpx.trace("https://example.com/trace", .{});
+defer i.deinit();
+
+var j = try httpx.connect("https://example.com/tunnel", .{});
+defer j.deinit();
+
+// Optional explicit allocator override
+var k = try httpx.sendWithAllocator(allocator, .GET, "https://example.com/health", .{ .timeout_ms = 10_000 });
+defer k.deinit();
+
+// JSON POST convenience
+var l = try httpx.postJson("https://api.example.com/data", "{\"key\":\"value\"}");
+defer l.deinit();
 ```
+
+All top-level aliases:
+
+| Function | Description |
+|----------|-------------|
+| `httpx.get(url, opts)` | HTTP GET |
+| `httpx.post(url, opts)` | HTTP POST |
+| `httpx.put(url, opts)` | HTTP PUT |
+| `httpx.delete(url, opts)` / `httpx.del(...)` | HTTP DELETE |
+| `httpx.patch(url, opts)` | HTTP PATCH |
+| `httpx.head(url, opts)` | HTTP HEAD |
+| `httpx.options(url, opts)` / `httpx.opts(...)` | HTTP OPTIONS |
+| `httpx.trace(url, opts)` | HTTP TRACE |
+| `httpx.connect(url, opts)` | HTTP CONNECT |
+| `httpx.fetch(url, opts)` | Alias for GET |
+| `httpx.send(method, url, opts)` | Generic request |
+| `httpx.postJson(url, json)` | POST with JSON body |
+| `httpx.getWithAllocator(...)` | GET with explicit allocator |
+| `httpx.postWithAllocator(...)` | POST with explicit allocator |
+| `httpx.putWithAllocator(...)` | PUT with explicit allocator |
+| `httpx.delWithAllocator(...)` | DELETE with explicit allocator |
+| `httpx.deleteWithAllocator(...)` | DELETE with explicit allocator |
+| `httpx.patchWithAllocator(...)` | PATCH with explicit allocator |
+| `httpx.headWithAllocator(...)` | HEAD with explicit allocator |
+| `httpx.optionsWithAllocator(...)` | OPTIONS with explicit allocator |
+| `httpx.optsWithAllocator(...)` | OPTIONS with explicit allocator |
+| `httpx.traceWithAllocator(...)` | TRACE with explicit allocator |
+| `httpx.connectWithAllocator(...)` | CONNECT with explicit allocator |
+| `httpx.fetchWithAllocator(...)` | GET with explicit allocator |
+| `httpx.sendWithAllocator(...)` | Generic with explicit allocator |
+| `httpx.postJsonWithAllocator(...)` | JSON POST with explicit allocator |
 
 ## See Also
 

@@ -20,6 +20,8 @@ const Response = @import("../core/response.zig").Response;
 const Status = @import("../core/status.zig").Status;
 const any_io = @import("../util/any_io.zig");
 const list_writer = @import("../util/list_writer.zig");
+const alpn = @import("../tls/alpn.zig");
+const dbg = @import("../util/debug.zig");
 
 /// HTTP protocol version negotiation result.
 pub const NegotiatedProtocol = enum {
@@ -40,15 +42,9 @@ pub const NegotiatedProtocol = enum {
 
 /// Standard Application-Layer Protocol Negotiation (ALPN) identifiers.
 ///
-/// These strings obey the IANA registry for ALPN protocol IDs used in TLS handshakes:
-/// - "http/1.1": HTTP/1.1
-/// - "h2": HTTP/2 over TLS
-/// - "h3": HTTP/3 over QUIC
-pub const AlpnProtocol = struct {
-    pub const HTTP_1_1 = "http/1.1";
-    pub const HTTP_2 = "h2";
-    pub const HTTP_3 = "h3";
-};
+/// Re-exported from `tls.alpn.Protocol` — the single source of truth for
+/// ALPN protocol identifiers across the codebase.
+pub const AlpnProtocol = alpn.Protocol;
 
 /// HTTP/1.x connection handler for request/response exchange.
 /// Manages the socket reader/writer, protocol versioning, and keep-alive state.
@@ -63,6 +59,7 @@ pub const Http1Connection = struct {
 
     /// Creates a new HTTP/1.x connection.
     pub fn init(allocator: Allocator, reader: any_io.AnyReader, writer: any_io.AnyWriter) Self {
+        dbg.entry("HTTP", "Http1Connection.init");
         return .{
             .allocator = allocator,
             .reader = reader,
@@ -88,9 +85,12 @@ pub const Http1Connection = struct {
         var line_buf: [8192]u8 = undefined;
 
         const status_line = try self.readLine(&line_buf);
-        const status_code = try parseStatusLine(status_line);
+        const parsed = try parseStatusLine(status_line);
 
-        var response = Response.init(self.allocator, status_code);
+        var response = Response.init(self.allocator, parsed.status);
+        if (types.Version.fromString(parsed.version)) |v| {
+            response.version = v;
+        }
         errdefer response.deinit();
 
         while (true) {
@@ -221,11 +221,12 @@ pub const Http1Connection = struct {
 };
 
 /// Parses the status line of an HTTP response (e.g., "HTTP/1.1 200 OK").
-fn parseStatusLine(line: []const u8) !u16 {
+fn parseStatusLine(line: []const u8) !struct { version: []const u8, status: u16 } {
     var parts = mem.splitScalar(u8, line, ' ');
-    _ = parts.next();
+    const version = parts.next() orelse return error.InvalidResponse;
     const status_str = parts.next() orelse return error.InvalidResponse;
-    return std.fmt.parseInt(u16, status_str, 10) catch error.InvalidResponse;
+    const status_num = std.fmt.parseInt(u16, status_str, 10) catch return error.InvalidResponse;
+    return .{ .version = version, .status = status_num };
 }
 
 /// HTTP/2 frame types as defined in RFC 7540.
@@ -347,6 +348,7 @@ pub const Http2Connection = struct {
 
     /// Initializes a new HTTP/2 connection state.
     pub fn init(allocator: Allocator, reader: any_io.AnyReader, writer: any_io.AnyWriter) Self {
+        dbg.entry("HTTP", "Http2Connection.init");
         return .{
             .allocator = allocator,
             .reader = reader,
@@ -356,6 +358,7 @@ pub const Http2Connection = struct {
 
     /// Initiates the HTTP/2 session by sending the preface and initial settings.
     pub fn handshake(self: *Self) !void {
+        dbg.entry("HTTP", "Http2Connection.handshake");
         try self.writer.writeAll(HTTP2_PREFACE);
         try self.sendSettings();
     }
@@ -695,9 +698,11 @@ pub fn parseHttp3SettingsPayload(payload: []const u8) !types.Http3Settings {
     return parsed;
 }
 
-/// Formats a request object into HTTP/1.x wire format.
-pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
-    var buffer = std.ArrayList(u8).empty;
+    /// Formats a request object into HTTP/1.x wire format.
+    pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
+        dbg.entry("HTTP", "formatRequest");
+        dbg.log("HTTP", "method={s} path={s}", .{ req.method.toString(), req.uri.path });
+        var buffer = std.ArrayList(u8).empty;
     const writer = list_writer.init(allocator, &buffer);
 
     const method_str = req.method.toString();
@@ -719,9 +724,11 @@ pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
     return buffer.toOwnedSlice(allocator);
 }
 
-/// Formats a response object into HTTP/1.x wire format.
-pub fn formatResponse(resp: *const Response, allocator: Allocator) ![]u8 {
-    var buffer = std.ArrayList(u8).empty;
+    /// Formats a response object into HTTP/1.x wire format.
+    pub fn formatResponse(resp: *const Response, allocator: Allocator) ![]u8 {
+        dbg.entry("HTTP", "formatResponse");
+        dbg.log("HTTP", "status={d}", .{resp.status.code});
+        var buffer = std.ArrayList(u8).empty;
     const writer = list_writer.init(allocator, &buffer);
 
     try writer.print("{s} {d} {s}\r\n", .{
@@ -770,21 +777,64 @@ pub fn encodeChunkedBody(body: []const u8, trailers: ?*const Headers, allocator:
     return out.toOwnedSlice(allocator);
 }
 
+/// Streaming chunked transfer encoding writer.
+/// Wraps an underlying writer and produces chunked HTTP/1.1 transfer encoding.
+/// Call `writeChunk` to emit individual data chunks, then `finish` to send
+/// the final zero-length chunk and optional trailers.
+pub fn ChunkedWriter(comptime WriterType: type) type {
+    return struct {
+        underlying: WriterType,
+
+        const Self = @This();
+
+        pub fn init(underlying: WriterType) Self {
+            return .{ .underlying = underlying };
+        }
+
+        /// Writes a single chunk of data with proper framing.
+        /// Data is not buffered - each call produces a complete chunk on the wire.
+        pub fn writeChunk(self: *Self, data: []const u8) !void {
+            if (data.len == 0) return;
+            // Write chunk size in hex + CRLF
+            var size_buf: [20]u8 = undefined;
+            const size_str = std.fmt.bufPrint(&size_buf, "{x}", .{data.len}) catch return error.Overflow;
+            try self.underlying.writeAll(size_str);
+            try self.underlying.writeAll("\r\n");
+            // Write chunk data
+            try self.underlying.writeAll(data);
+            // Write trailing CRLF
+            try self.underlying.writeAll("\r\n");
+        }
+
+        /// Finishes the chunked encoding by writing the zero-length chunk
+        /// and optional trailer headers.
+        pub fn finish(self: *Self, trailers: ?*const Headers) !void {
+            try self.underlying.writeAll("0\r\n");
+            if (trailers) |trailer_headers| {
+                for (trailer_headers.entries.items) |h| {
+                    try self.underlying.print("{s}: {s}\r\n", .{ h.name, h.value });
+                }
+            }
+            try self.underlying.writeAll("\r\n");
+        }
+    };
+}
+
 /// Determines the highest supported HTTP version based on ALPN negotiation string.
-pub fn negotiateVersion(alpn: ?[]const u8) NegotiatedProtocol {
-    if (alpn) |protocol| {
-        // Match exact "h3" or any draft like "h3-29", "h3-30", etc.
-        if (mem.eql(u8, protocol, AlpnProtocol.HTTP_3) or
+pub fn negotiateVersion(alpn_str: ?[]const u8) NegotiatedProtocol {
+    if (alpn_str) |protocol| {
+        if (mem.eql(u8, protocol, AlpnProtocol.HTTP3) or
             mem.startsWith(u8, protocol, "h3-")) return .http_3;
-        if (mem.eql(u8, protocol, AlpnProtocol.HTTP_2)) return .http_2;
-        if (mem.eql(u8, protocol, AlpnProtocol.HTTP_1_1)) return .http_1_1;
+        if (mem.eql(u8, protocol, AlpnProtocol.HTTP2)) return .http_2;
+        if (mem.eql(u8, protocol, AlpnProtocol.HTTP1_1)) return .http_1_1;
+        if (mem.eql(u8, protocol, AlpnProtocol.HTTP1_0)) return .http_1_0;
     }
     return .http_1_1;
 }
 
 test "HTTP/1.1 request formatting" {
     const allocator = std.testing.allocator;
-    var request = try Request.init(allocator, .GET, "https://example.com/api/users");
+    var request = try Request.init(allocator, .GET, "http://httpbun.com/api/users");
     defer request.deinit();
 
     const formatted = try formatRequest(&request, allocator);
@@ -877,10 +927,11 @@ test "Protocol negotiation" {
 
 test "Status line parsing" {
     const status = try parseStatusLine("HTTP/1.1 200 OK");
-    try std.testing.expectEqual(@as(u16, 200), status);
+    try std.testing.expectEqual(@as(u16, 200), status.status);
+    try std.testing.expectEqualStrings("HTTP/1.1", status.version);
 
     const redirect = try parseStatusLine("HTTP/1.1 301 Moved Permanently");
-    try std.testing.expectEqual(@as(u16, 301), redirect);
+    try std.testing.expectEqual(@as(u16, 301), redirect.status);
 }
 
 test "VarInt encoding" {
@@ -979,4 +1030,59 @@ test "HTTP/2 SETTINGS payload roundtrip with custom values" {
     try std.testing.expectEqual(@as(u32, 65535), decoded.initial_window_size);
     try std.testing.expectEqual(@as(u32, 32768), decoded.max_frame_size);
     try std.testing.expectEqual(@as(u32, 65535), decoded.max_header_list_size);
+}
+
+test "ChunkedWriter -- single chunk" {
+    const allocator = std.testing.allocator;
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    var cw = ChunkedWriter(list_writer.ListWriter).init(list_writer.init(allocator, &buf));
+    try cw.writeChunk("hello");
+    try cw.finish(null);
+
+    try std.testing.expectEqualStrings("5\r\nhello\r\n0\r\n\r\n", buf.items);
+}
+
+test "ChunkedWriter -- multiple chunks" {
+    const allocator = std.testing.allocator;
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    var cw = ChunkedWriter(list_writer.ListWriter).init(list_writer.init(allocator, &buf));
+    try cw.writeChunk("hel");
+    try cw.writeChunk("lo ");
+    try cw.writeChunk("world");
+    try cw.finish(null);
+
+    try std.testing.expectEqualStrings("3\r\nhel\r\n3\r\nlo \r\n5\r\nworld\r\n0\r\n\r\n", buf.items);
+}
+
+test "ChunkedWriter -- with trailers" {
+    const allocator = std.testing.allocator;
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    var cw = ChunkedWriter(list_writer.ListWriter).init(list_writer.init(allocator, &buf));
+    try cw.writeChunk("data");
+
+    var trailers = Headers.init(allocator);
+    defer trailers.deinit();
+    try trailers.append("X-Checksum", "abc123");
+
+    try cw.finish(&trailers);
+
+    try std.testing.expectEqualStrings("4\r\ndata\r\n0\r\nX-Checksum: abc123\r\n\r\n", buf.items);
+}
+
+test "ChunkedWriter -- empty chunk is no-op" {
+    const allocator = std.testing.allocator;
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+
+    var cw = ChunkedWriter(list_writer.ListWriter).init(list_writer.init(allocator, &buf));
+    try cw.writeChunk("");
+    try cw.finish(null);
+
+    try std.testing.expectEqualStrings("0\r\n\r\n", buf.items);
 }

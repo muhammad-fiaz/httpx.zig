@@ -9,6 +9,7 @@
 //! - Semantic helper methods for common checks
 
 const std = @import("std");
+const dbg = @import("../util/debug.zig");
 
 /// Common HTTP status code constants.
 pub const StatusCode = struct {
@@ -89,6 +90,8 @@ pub const Status = struct {
 
     /// Creates a status from a numeric code with the standard reason phrase.
     pub fn fromCode(code: u16) Self {
+        dbg.entry("STATUS", "fromCode");
+        defer dbg.exit("STATUS", "fromCode");
         return .{ .code = code, .phrase = reasonPhrase(code) };
     }
 

@@ -64,10 +64,13 @@ Represents an HTTP response.
   - `isError()`: Returns true if status is 4xx or 5xx.
   - `json(T, options)`: Parses body as JSON, returning `std.json.Parsed(T)`.
   - `jsonLeaky(T, options)`: Leaky parsing directly into type `T`.
+  - `jsonBorrowed(T, parse_opts)`: Zero-copy JSON parsing returning `JsonBorrowedResult(T)`.
+  - `jsonValue(parse_opts)`: Parse body as dynamic `std.json.Value` with `ParsedJson`.
+  - `isJson()`: Returns true if body exists and Content-Type is JSON.
   - `text()`: Returns body as string.
-  - `redirect(status_code, location)`: Build redirect response with `Location` header.
-  - `fromText(status_code, body)`: Build text response with headers.
-  - `fromJson(status_code, value)`: Build JSON response with headers.
+  - `redirect(allocator, status_code, location)`: Static: build redirect response with `Location` header.
+  - `fromText(allocator, status_code, body)`: Static: build text response with headers.
+  - `fromJson(allocator, status_code, value)`: Static: build JSON response with headers.
 
 ### `httpx.ResponseBuilder`
 
@@ -106,9 +109,11 @@ const uri = try httpx.Uri.parse("https://user:pass@example.com:8080/path?query=1
 ```
 
 - **Fields**:
-  - `scheme`: `http` or `https`
-  - `host`: Hostname or IP
-  - `port`: Explicit port or null
-  - `path`: Resource path
-  - `query`: Query string
-  - `fragment`: Fragment identifier
+  - `scheme`: `?[]const u8` — `http`, `https`, or null
+  - `userinfo`: `?[]const u8` — User info before `@`, or null
+  - `host`: `?[]const u8` — Hostname or IP, or null
+  - `port`: `?u16` — Explicit port or null
+  - `path`: `[]const u8` — Resource path (defaults to `/`)
+  - `query`: `?[]const u8` — Query string, or null
+  - `fragment`: `?[]const u8` — Fragment identifier, or null
+  - `raw`: `[]const u8` — Original unparsed URI string

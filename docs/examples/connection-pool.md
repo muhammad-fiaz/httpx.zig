@@ -20,7 +20,7 @@ pub fn main() !void {
     defer client.deinit();
 
     inline for (0..5) |_| {
-        var res = try client.get("https://httpbin.org/get", .{});
+        var res = try client.get("https://httpbun.com/get", .{});
         defer res.deinit();
         std.debug.print("status={d}, len={?d}\n", .{ res.status.code, res.contentLength() });
     }
@@ -30,7 +30,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-connection_pool
+zig build run-all-connection_pool
 ```
 
 ## What to Verify

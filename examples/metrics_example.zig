@@ -23,6 +23,33 @@ fn pickFreeTcpPort() !u16 {
     return (try listener.getLocalAddress()).getPort();
 }
 
+fn printSnapshot(snap: *const httpx.MetricsSnapshot) void {
+    std.debug.print(
+        "Metrics Snapshot:\n" ++
+        "  Requests:   {d}\n" ++
+        "  Responses:  {d}  (2xx={d} 3xx={d} 4xx={d} 5xx={d})\n" ++
+        "  Errors:     {d}\n" ++
+        "  Active:     {d} connections\n" ++
+        "  Bytes In:   {d}  Out: {d}\n" ++
+        "  Latency:    avg={d}ns  min={d}ns  max={d}ns\n",
+        .{
+            snap.totalRequests(),
+            snap.totalResponses(),
+            snap.responses2xx(),
+            snap.responses3xx(),
+            snap.responses4xx(),
+            snap.responses5xx(),
+            snap.errors(),
+            snap.activeConnections(),
+            snap.bytesReceived(),
+            snap.bytesSent(),
+            snap.avgLatencyNs(),
+            snap.minLatencyNs(),
+            snap.maxLatencyNs(),
+        },
+    );
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -38,7 +65,7 @@ pub fn main() !void {
     // Simulate 10 requests
     for (0..10) |_| m.recordRequest();
 
-    // 6 × 200 OK, 2 × 404, 2 × 500
+    // 6 x 200 OK, 2 x 404, 2 x 500
     for (0..6) |i| m.recordResponse(200, 512 + i * 100, 1000 + i * 200);
     for (0..2) |_| m.recordResponse(404, 128, 300);
     for (0..2) |_| m.recordResponse(500, 64, 5000);
@@ -52,7 +79,7 @@ pub fn main() !void {
     m.connectionClosed();
 
     const snap = m.snapshot();
-    snap.print();
+    printSnapshot(&snap);
 
     std.debug.print("Error rate:   {d:.1}%\n", .{snap.errorRate() * 100.0});
     std.debug.print("Success rate: {d:.1}%\n\n", .{snap.successRate() * 100.0});
@@ -62,7 +89,7 @@ pub fn main() !void {
     m.reset();
     const after_reset = m.snapshot();
     std.debug.print("After reset - requests: {d}, responses: {d}\n\n", .{
-        after_reset.total_requests, after_reset.total_responses,
+        after_reset.totalRequests(), after_reset.totalResponses(),
     });
 
     // 3. Live server integration
@@ -88,8 +115,6 @@ pub fn main() !void {
     }.h);
 
     const t = try server.listenInBackground();
-    defer t.join();
-    defer server.stop();
     sleepMs(100);
 
     // Record metrics alongside real requests
@@ -121,11 +146,14 @@ pub fn main() !void {
     live.connectionClosed();
 
     const live_snap = live.snapshot();
-    live_snap.print();
+    printSnapshot(&live_snap);
 
-    std.debug.print("2xx responses: {d}\n", .{live_snap.responses_2xx});
-    std.debug.print("5xx responses: {d}\n", .{live_snap.responses_5xx});
-    std.debug.print("Active conns:  {d}\n", .{live_snap.active_connections});
+    std.debug.print("2xx responses: {d}\n", .{live_snap.responses2xx()});
+    std.debug.print("5xx responses: {d}\n", .{live_snap.responses5xx()});
+    std.debug.print("Active conns:  {d}\n", .{live_snap.activeConnections()});
 
     std.debug.print("\n=== Metrics Example Complete ===\n", .{});
+
+    server.stop();
+    t.join();
 }

@@ -30,7 +30,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-cookies_demo
+zig build run-all-cookies_demo
 ```
 
 ## What to Verify

@@ -12,7 +12,7 @@ pub fn main() !void {
 
     std.debug.print("=== POST JSON Request Example ===\n\n", .{});
 
-    var request = try httpx.Request.init(allocator, .POST, "https://httpbin.org/post");
+    var request = try httpx.Request.init(allocator, .POST, "http://httpbun.com/post");
     defer request.deinit();
 
     const json_body =

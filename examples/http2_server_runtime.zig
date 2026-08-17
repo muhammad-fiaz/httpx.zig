@@ -29,9 +29,6 @@ pub fn main() !void {
     try server.get("/h2-server", handleH2);
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
-
     sleepMs(100);
 
     var client = httpx.Client.initWithConfig(allocator, .{
@@ -50,6 +47,9 @@ pub fn main() !void {
     std.debug.print("Response version: {s}\n", .{response.version.toString()});
     std.debug.print("Status: {d}\n", .{response.status.code});
     std.debug.print("Body: {s}\n", .{response.text() orelse ""});
+
+    server.stop();
+    server_thread.join();
 }
 
 fn handleH2(ctx: *httpx.Context) anyerror!httpx.Response {

@@ -70,8 +70,6 @@ pub fn main() !void {
     std.debug.print("  POST /users        -> helloHandler\n", .{});
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
 
     sleepMs(100);
 
@@ -103,4 +101,7 @@ pub fn main() !void {
     std.debug.print("GET /users/123 -> status: {d}, body: {s}\n", .{ resp3.status.code, resp3.text() orelse "" });
 
     std.debug.print("\nAll routes verified!\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

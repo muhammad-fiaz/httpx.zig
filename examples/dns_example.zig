@@ -19,7 +19,7 @@ pub fn main() !void {
         "127.0.0.1",
         "::1",
         "192.168.1.1",
-        "example.com",
+        "httpbun.com",
         "localhost",
         "10.0.0.1",
         "2001:db8::1",
@@ -38,7 +38,7 @@ pub fn main() !void {
     const host_ports = [_][]const u8{
         "127.0.0.1:8080",
         "[::1]:443",
-        "example.com:80",
+        "httpbun.com:80",
     };
     for (host_ports) |hp| {
         const parsed = httpx.parseHostAndPort(hp, 0) catch null;

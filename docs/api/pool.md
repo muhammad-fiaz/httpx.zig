@@ -66,6 +66,7 @@ pub fn cleanup(self: *Self) void
 | `idleCount()` | `usize` | Available (not in-use) connections |
 | `hostConnectionCount(host, port)` | `usize` | Connections for a specific host:port |
 | `stats()` | `PoolStats` | Snapshot of total/active/idle counters |
+| `closeConnection(conn)` | `void` | Close and remove a specific connection from the pool |
 
 ## PoolConfig
 
@@ -99,6 +100,8 @@ pub const Connection = struct {
     socket: Socket,
     host: []const u8,
     port: u16,
+    proxy_host: ?[]const u8 = null,
+    proxy_port: ?u16 = null,
     in_use: bool,
     created_at: i64,    // Unix timestamp (ms) when created
     last_used: i64,     // Unix timestamp (ms) of last acquire/release
@@ -114,6 +117,7 @@ pub const Connection = struct {
 | `release()` | `void` | Return to pool, increment `requests_made`, update `last_used` |
 | `isHealthy(max_idle_ms)` | `bool` | True when socket is valid and idle time < `max_idle_ms` |
 | `shouldEvict(idle_timeout_ms, max_requests)` | `bool` | True when socket is invalid, idle time exceeded, or request limit reached |
+| `matches(host, port, proxy)` | `bool` | True when connection matches the given host/port/proxy tuple |
 | `close()` | `void` | Close the underlying socket |
 
 ### Lifecycle

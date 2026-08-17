@@ -133,12 +133,12 @@ pub fn main(init: std.process.Init) !void {
 
     if (live_mode) {
         const urls = DemoUrls{
-            .fetch = "https://httpbin.org/anything",
-            .get = "https://httpbin.org/get",
-            .delete = "https://httpbin.org/delete",
-            .trace = "https://httpbin.org/trace",
-            .connect = "https://httpbin.org/anything",
-            .post = "https://httpbin.org/post",
+            .fetch = "http://httpbun.com/anything",
+            .get = "http://httpbun.com/get",
+            .delete = "http://httpbun.com/delete",
+            .trace = "http://httpbun.com/trace",
+            .connect = "http://httpbun.com/anything",
+            .post = "http://httpbun.com/post",
         };
         runAliasCalls(allocator, urls);
         return;
@@ -163,9 +163,6 @@ pub fn main(init: std.process.Init) !void {
     try server.connect("/anything", okHandler);
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
-
     sleepMs(100);
     std.debug.print("Local demo server: http://127.0.0.1:{d}\n", .{port});
 
@@ -173,4 +170,7 @@ pub fn main(init: std.process.Init) !void {
     defer freeLocalUrls(allocator, urls);
 
     runAliasCalls(allocator, urls);
+
+    server.stop();
+    server_thread.join();
 }

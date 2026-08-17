@@ -43,8 +43,6 @@ pub fn main() !void {
     try backend_server.get("/backend-data", mockBackendHandler);
 
     const backend_thread = try backend_server.listenInBackground();
-    defer backend_thread.join();
-    defer backend_server.stop();
 
     sleepMs(100);
 
@@ -89,8 +87,6 @@ pub fn main() !void {
     }.handler);
 
     const proxy_thread = try proxy_server.listenInBackground();
-    defer proxy_thread.join();
-    defer proxy_server.stop();
 
     sleepMs(100);
 
@@ -116,4 +112,9 @@ pub fn main() !void {
 
     std.debug.print("Proxy response status: {d}\n", .{response.status.code});
     std.debug.print("Proxy response body: {s}\n", .{response.text() orelse ""});
+
+    proxy_server.stop();
+    proxy_thread.join();
+    backend_server.stop();
+    backend_thread.join();
 }

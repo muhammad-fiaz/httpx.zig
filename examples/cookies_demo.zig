@@ -25,7 +25,7 @@ pub fn main() !void {
     std.debug.print("Removed theme cookie: {}\n", .{removed});
 
     // Build and serialize a request to demonstrate attached cookies.
-    var req = try httpx.Request.init(allocator, .GET, "https://example.com/account");
+    var req = try httpx.Request.init(allocator, .GET, "http://httpbun.com/account");
     defer req.deinit();
 
     if (client.getCookie("session")) |session| {

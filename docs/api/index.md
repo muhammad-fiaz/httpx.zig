@@ -56,7 +56,7 @@ The root module re-exports core types and convenience helpers so most apps can i
 ### Network Helpers
 
 - `httpx.netInit()` / `httpx.netDeinit()`
-- `httpx.resolveAddress(host, port)`
+- `httpx.resolveAddress(allocator, host, port)`
 - `httpx.resolveAllAddresses(allocator, host, port)`
 - `httpx.parseHostAndPort(input, default_port)`
 - `httpx.parseAndResolveAddress(input, default_port)`
@@ -65,9 +65,7 @@ The root module re-exports core types and convenience helpers so most apps can i
 ### Utility Aliases
 
 - `httpx.queryValue(...)`
-- `httpx.parseQueryValue(...)`
 - `httpx.parseSetCookiePair(...)`
-- `httpx.parseCookiePair(...)`
 - `httpx.mimeTypeFromPath(...)`
 - `httpx.mimeTypeFromPathOr(...)`
 - `httpx.mimeTypeFromPathWith(...)`

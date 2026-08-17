@@ -38,6 +38,7 @@ const PoolStats = @import("pool.zig").PoolStats;
 const common = @import("../util/common.zig");
 const list_writer = @import("../util/list_writer.zig");
 const io_util = @import("../util/any_io.zig");
+const dbg = @import("../util/debug.zig");
 const server_mod = @import("../server/server.zig");
 const LogFn = server_mod.LogFn;
 
@@ -452,6 +453,8 @@ pub const Client = struct {
 
     /// Creates a new HTTP client with custom configuration.
     pub fn initWithConfig(allocator: Allocator, config: ClientConfig) Self {
+        dbg.entry("CLIENT", "initWithConfig");
+        defer dbg.exit("CLIENT", "initWithConfig");
         return .{
             .allocator = allocator,
             .config = config,
@@ -470,6 +473,8 @@ pub const Client = struct {
 
     /// Releases all allocated resources.
     pub fn deinit(self: *Self) void {
+        dbg.entry("CLIENT", "deinit");
+        defer dbg.exit("CLIENT", "deinit");
         self.interceptors.deinit(self.allocator);
         var it = self.cookies.iterator();
         while (it.next()) |entry| {
@@ -504,12 +509,12 @@ pub const Client = struct {
     }
 
     /// Returns a snapshot of total/active/idle pooled connection counts.
-    pub fn poolStats(self: *const Self) PoolStats {
+    pub fn poolStats(self: *Self) PoolStats {
         return self.pool.stats();
     }
 
     /// Returns how many pooled connections are tracked for a host/port.
-    pub fn hostPoolConnectionCount(self: *const Self, host: []const u8, port: u16) usize {
+    pub fn hostPoolConnectionCount(self: *Self, host: []const u8, port: u16) usize {
         return self.pool.hostConnectionCount(host, port);
     }
 
@@ -529,6 +534,9 @@ pub const Client = struct {
     }
 
     fn requestInternal(self: *Self, method: types.Method, url: []const u8, reqOpts: RequestOptions, depth: u32) !Response {
+        dbg.entry("CLIENT", "requestInternal");
+        dbg.log("CLIENT", "method={s} url={s} depth={d}", .{ @tagName(method), url, depth });
+        defer dbg.exit("CLIENT", "requestInternal");
         const full_url = if (self.config.base_url) |base|
             try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base, url })
         else
@@ -613,7 +621,7 @@ pub const Client = struct {
         }
 
         var response = try self.executeRequest(&req, reqOpts);
-        try self.storeCookies(&response);
+        try self.storeCookies(&response, req.uri.host orelse "");
 
         for (self.interceptors.items) |interceptor| {
             if (interceptor.response_fn) |f| {
@@ -646,6 +654,8 @@ pub const Client = struct {
 
     /// Executes the actual HTTP request.
     fn executeRequest(self: *Self, req: *Request, reqOpts: RequestOptions) !Response {
+        dbg.entry("CLIENT", "executeRequest");
+        defer dbg.exit("CLIENT", "executeRequest");
         const policy = self.config.retry_policy;
         const can_retry_method = (!policy.retry_only_idempotent) or req.method.isIdempotent();
 
@@ -654,6 +664,7 @@ pub const Client = struct {
             var res = self.executeRequestOnce(req, reqOpts) catch |err| {
                 if (policy.retry_on_connection_error and can_retry_method and attempt < policy.max_retries and isRetryableRequestError(err)) {
                     attempt += 1;
+                    dbg.log("CLIENT", "retry attempt={d} after error", .{attempt});
                     const delay_ms = policy.calculateDelay(attempt);
                     if (delay_ms > 0) sleepMs(delay_ms);
                     continue;
@@ -727,6 +738,8 @@ pub const Client = struct {
     }
 
     fn establishProxyTlsTunnel(self: *Self, socket: *Socket, target_host: []const u8, target_port: u16, proxy: types.Proxy) !void {
+        dbg.entry("CLIENT", "establishProxyTlsTunnel");
+        defer dbg.exit("CLIENT", "establishProxyTlsTunnel");
         var buffer = std.ArrayList(u8).empty;
         const writer = list_writer.init(self.allocator, &buffer);
 
@@ -782,6 +795,8 @@ pub const Client = struct {
     }
 
     fn executeRequestOnce(self: *Self, req: *Request, reqOpts: RequestOptions) !Response {
+        dbg.entry("CLIENT", "executeRequestOnce");
+        defer dbg.exit("CLIENT", "executeRequestOnce");
         const timeouts = self.resolveRequestTimeouts(reqOpts);
         const proxy = reqOpts.proxy orelse self.config.proxy;
         const keep_alive = reqOpts.keep_alive orelse self.config.keep_alive;
@@ -844,9 +859,11 @@ pub const Client = struct {
         defer self.allocator.free(request_data);
 
         if (req.uri.isTls()) {
-            const connect_host = if (proxy) |p| p.host else host;
-            const connect_port = if (proxy) |p| p.port else port;
-            const addr = try address_mod.resolve(self.allocator, connect_host, connect_port);
+            dbg.log("CLIENT", "TLS path for {s}:{d}", .{ host, port });
+        dbg.log("CLIENT", "direct path for {s}:{d}", .{ host, port });
+        const connect_host = if (proxy) |p| p.host else host;
+        const connect_port = if (proxy) |p| p.port else port;
+        const addr = try address_mod.resolve(self.allocator, connect_host, connect_port);
 
             var socket = try Socket.createForAddress(addr);
             defer socket.close();
@@ -872,6 +889,7 @@ pub const Client = struct {
         }
 
         if (keep_alive) {
+            dbg.log("CLIENT", "pool path for {s}:{d}", .{ host, port });
             var conn = try self.pool.getConnection(host, port, proxy, timeouts.connect_ms);
             errdefer conn.close();
             defer self.pool.releaseConnection(conn);
@@ -886,8 +904,8 @@ pub const Client = struct {
 
             try conn.socket.sendAll(request_data);
             var res = try self.readResponseFromTcp(&conn.socket, req.method.hasResponseBody());
-            if (!res.headers.isKeepAlive(.HTTP_1_1)) {
-                conn.close();
+            if (!res.headers.isKeepAlive(res.version)) {
+                self.pool.closeConnection(conn);
             }
             return res;
         }
@@ -926,6 +944,8 @@ pub const Client = struct {
         timeouts: RequestTimeouts,
         reqOpts: RequestOptions,
     ) !Response {
+        dbg.entry("CLIENT", "executeRequestHttp2");
+        defer dbg.exit("CLIENT", "executeRequestHttp2");
         const proxy = reqOpts.proxy orelse self.config.proxy;
         const verify_ssl = reqOpts.verify_ssl orelse self.config.verify_ssl;
 
@@ -1028,6 +1048,8 @@ pub const Client = struct {
         timeouts: RequestTimeouts,
         reqOpts: RequestOptions,
     ) !Response {
+        dbg.entry("CLIENT", "executeRequestHttp3");
+        defer dbg.exit("CLIENT", "executeRequestHttp3");
         _ = reqOpts;
         const addr = try address_mod.resolve(self.allocator, host, port);
 
@@ -1201,7 +1223,7 @@ pub const Client = struct {
 
         if (response_body.items.len > 0) {
             // Decompress body based on Content-Encoding header (HTTP/3).
-            if (response_headers.get(HeaderName.CONTENT_ENCODING)) |encoding_str| {
+            if (response.headers.get(HeaderName.CONTENT_ENCODING)) |encoding_str| {
                 if (@import("../util/compression.zig").ContentEncoding.fromString(encoding_str)) |enc| {
                     if (enc != .identity) {
                         if (@import("../util/compression.zig").decompress(self.allocator, enc, response_body.items)) |decompressed| {
@@ -1814,8 +1836,8 @@ pub const Client = struct {
                     if (body.items.len + data_slice.len > self.config.max_response_size) return error.ResponseTooLarge;
                     try body.appendSlice(self.allocator, data_slice);
 
-                    if (frame.payload.len > 0) {
-                        const window_increment: u31 = @intCast(frame.payload.len);
+                    if (data_slice.len > 0) {
+                        const window_increment: u31 = @intCast(data_slice.len);
                         const window_update = h2stream.buildWindowUpdatePayload(window_increment);
                         try writeHttp2Frame(transport, .window_update, 0, request_stream.id, &window_update);
                         try writeHttp2Frame(transport, .window_update, 0, 0, &window_update);
@@ -1920,6 +1942,9 @@ pub const Client = struct {
     }
 
     fn executeTlsHttp(self: *Self, socket: *Socket, host: []const u8, port: u16, request_data: []const u8, verify_ssl: bool) !Response {
+        dbg.entry("CLIENT", "executeTlsHttp");
+        dbg.log("CLIENT", "host={s} port={d} verify_ssl={s}", .{ host, port, if (verify_ssl) "true" else "false" });
+        defer dbg.exit("CLIENT", "executeTlsHttp");
         const tls_cfg = if (verify_ssl) TlsConfig.init(self.allocator) else TlsConfig.insecure(self.allocator);
 
         // Set up reconnect context for TLS version fallback.
@@ -1998,6 +2023,8 @@ pub const Client = struct {
     }
 
     fn readResponseFromTcp(self: *Self, socket: *Socket, expect_body: bool) !Response {
+        dbg.entry("CLIENT", "readResponseFromTcp");
+        defer dbg.exit("CLIENT", "readResponseFromTcp");
         return self.readResponseFromReadFn(socket, Socket.recv, expect_body);
     }
 
@@ -2069,6 +2096,12 @@ pub const Client = struct {
             return self.allocator.dupe(u8, location);
         }
 
+        // Protocol-relative URL: //httpbun.com/path
+        if (location.len > 1 and location[0] == '/' and location[1] == '/') {
+            const scheme = base.scheme orelse "http";
+            return std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ scheme, location });
+        }
+
         const scheme = base.scheme orelse "http";
         const host = base.host orelse return error.InvalidUri;
         const port = base.effectivePort();
@@ -2085,7 +2118,11 @@ pub const Client = struct {
     }
 
     fn attachCookies(self: *Self, req: *Request) !void {
+        dbg.entry("CLIENT", "attachCookies");
+        defer dbg.exit("CLIENT", "attachCookies");
         if (self.cookies.count() == 0) return;
+
+        const req_host = req.uri.host orelse return;
 
         var list = std.ArrayList(u8).empty;
         defer list.deinit(self.allocator);
@@ -2094,9 +2131,24 @@ pub const Client = struct {
         var it = self.cookies.iterator();
         var first = true;
         while (it.next()) |entry| {
-            if (!first) try writer.writeAll("; ");
-            first = false;
-            try writer.print("{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
+            const name = entry.key_ptr.*;
+            const value = entry.value_ptr.*;
+            // Cookie keys are stored as "domain|name" for domain-aware storage.
+            // If there's no '|' separator, it's a legacy cookie that matches all domains.
+            if (mem.lastIndexOfScalar(u8, name, '|')) |pipe| {
+                const cookie_domain = name[0..pipe];
+                const cookie_name = name[pipe + 1 ..];
+                // Only send cookies whose domain matches the request host
+                if (!domainMatches(req_host, cookie_domain)) continue;
+                if (!first) try writer.writeAll("; ");
+                first = false;
+                try writer.print("{s}={s}", .{ cookie_name, value });
+            } else {
+                // Legacy cookie without domain - send to all hosts
+                if (!first) try writer.writeAll("; ");
+                first = false;
+                try writer.print("{s}={s}", .{ name, value });
+            }
         }
 
         if (list.items.len > 0) {
@@ -2104,24 +2156,64 @@ pub const Client = struct {
         }
     }
 
-    fn storeCookies(self: *Self, res: *const Response) !void {
+    /// Returns true if `host` matches `cookie_domain`.
+    /// A cookie with domain ".httpbun.com" matches "www.httpbun.com" and "httpbun.com".
+    fn domainMatches(host: []const u8, cookie_domain: []const u8) bool {
+        // Exact match
+        if (std.mem.eql(u8, host, cookie_domain)) return true;
+        // Subdomain match: host must end with "." + cookie_domain
+        if (cookie_domain.len > 0 and cookie_domain[0] == '.') {
+            return std.mem.endsWith(u8, host, cookie_domain);
+        }
+        // Implicit dot: "httpbun.com" matches "www.httpbun.com"
+        if (host.len > cookie_domain.len + 1) {
+            const suffix = host[host.len - cookie_domain.len ..];
+            if (std.mem.eql(u8, suffix, cookie_domain)) {
+                return host[host.len - cookie_domain.len - 1] == '.';
+            }
+        }
+        return false;
+    }
+
+    fn storeCookies(self: *Self, res: *const Response, request_host: []const u8) !void {
+        dbg.entry("CLIENT", "storeCookies");
+        defer dbg.exit("CLIENT", "storeCookies");
         const values = try res.headers.getAll(HeaderName.SET_COOKIE, self.allocator);
         defer self.allocator.free(values);
 
         for (values) |set_cookie| {
-            const pair = common.parseSetCookiePair(set_cookie) orelse continue;
-            try self.setCookie(pair.name, pair.value);
+            const parsed = common.parseSetCookie(set_cookie) orelse continue;
+            // Use the cookie's domain if present, otherwise fall back to the request host
+            const domain = parsed.domain orelse request_host;
+            // Store as "domain|name" key
+            const key = try std.fmt.allocPrint(self.allocator, "{s}|{s}", .{ domain, parsed.name });
+            errdefer self.allocator.free(key);
+            const owned_value = try self.allocator.dupe(u8, parsed.value);
+            errdefer self.allocator.free(owned_value);
+
+            if (self.cookies.fetchRemove(key)) |removed| {
+                self.allocator.free(removed.key);
+                self.allocator.free(removed.value);
+            }
+            try self.cookies.put(self.allocator, key, owned_value);
         }
     }
 
     /// Adds or replaces a cookie in the in-memory client cookie jar.
+    /// The cookie is stored with domain association using "domain|name" format.
     pub fn setCookie(self: *Self, name: []const u8, value: []const u8) !void {
-        if (self.cookies.fetchRemove(name)) |removed| {
+        // If name already contains a domain prefix, use it as-is
+        const key = if (mem.lastIndexOfScalar(u8, name, '|') != null)
+            name
+        else
+            name; // Legacy: no domain, matches all hosts
+
+        if (self.cookies.fetchRemove(key)) |removed| {
             self.allocator.free(removed.key);
             self.allocator.free(removed.value);
         }
 
-        const owned_name = try self.allocator.dupe(u8, name);
+        const owned_name = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(owned_name);
         const owned_value = try self.allocator.dupe(u8, value);
         errdefer self.allocator.free(owned_value);
@@ -2218,7 +2310,93 @@ pub const Client = struct {
     pub fn opts(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
         return self.options(url, reqOpts);
     }
+
+    /// GET request that parses the JSON response into type T.
+    /// Returns both the response and parsed value. Caller deinit's both.
+    pub fn getJson(self: *Self, comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+        const response = try self.get(url, .{ .headers = &.{.{ "Accept", "application/json" }} });
+        const value = try response.jsonBorrowed(T, parse_opts);
+        return .{ .response = response, .value = value };
+    }
+
+    /// GET request with zero-copy JSON parse. Returns both the response and
+    /// parsed value. The response must outlive the parsed value.
+    pub fn getJsonBorrowed(self: *Self, comptime T: type, url: []const u8) !JsonBorrowedResult(T) {
+        const response = try self.get(url, .{ .headers = &.{.{ "Accept", "application/json" }} });
+        const value = try response.jsonBorrowed(T, .{});
+        return .{ .response = response, .value = value };
+    }
+
+    /// POST JSON body and parse the response as type T.
+    /// Returns both the response and parsed value. Caller deinit's both.
+    pub fn postJsonAndParse(self: *Self, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+        const response = try self.post(url, .{ .json = body });
+        const value = try response.jsonBorrowed(T, parse_opts);
+        return .{ .response = response, .value = value };
+    }
+
+    /// POST JSON body with zero-copy parse. Caller must keep response alive.
+    pub fn postJsonBorrowed(self: *Self, comptime T: type, url: []const u8, body: []const u8) !JsonBorrowedResult(T) {
+        const response = try self.post(url, .{ .json = body });
+        const value = try response.jsonBorrowed(T, .{});
+        return .{ .response = response, .value = value };
+    }
+
+    /// PUT JSON body and parse the response as type T.
+    /// Returns both the response and parsed value. Caller deinit's both.
+    pub fn putJson(self: *Self, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+        const response = try self.put(url, .{ .json = body });
+        const value = try response.jsonBorrowed(T, parse_opts);
+        return .{ .response = response, .value = value };
+    }
+
+    /// PUT JSON body with zero-copy parse.
+    pub fn putJsonBorrowed(self: *Self, comptime T: type, url: []const u8, body: []const u8) !JsonBorrowedResult(T) {
+        const response = try self.put(url, .{ .json = body });
+        const value = try response.jsonBorrowed(T, .{});
+        return .{ .response = response, .value = value };
+    }
+
+    /// PATCH JSON body and parse the response as type T.
+    /// Returns both the response and parsed value. Caller deinit's both.
+    pub fn patchJson(self: *Self, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+        const response = try self.patch(url, .{ .json = body });
+        const value = try response.jsonBorrowed(T, parse_opts);
+        return .{ .response = response, .value = value };
+    }
+
+    /// PATCH JSON body with zero-copy parse.
+    pub fn patchJsonBorrowed(self: *Self, comptime T: type, url: []const u8, body: []const u8) !JsonBorrowedResult(T) {
+        const response = try self.patch(url, .{ .json = body });
+        const value = try response.jsonBorrowed(T, .{});
+        return .{ .response = response, .value = value };
+    }
+
+    /// DELETE request that parses the JSON response as type T.
+    /// Returns both the response and parsed value. Caller deinit's both.
+    pub fn deleteJson(self: *Self, comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+        const response = try self.delete(url, .{ .headers = &.{.{ "Accept", "application/json" }} });
+        const value = try response.jsonBorrowed(T, parse_opts);
+        return .{ .response = response, .value = value };
+    }
+
+    /// DELETE request with zero-copy JSON parse.
+    pub fn deleteJsonBorrowed(self: *Self, comptime T: type, url: []const u8) !JsonBorrowedResult(T) {
+        const response = try self.delete(url, .{ .headers = &.{.{ "Accept", "application/json" }} });
+        const value = try response.jsonBorrowed(T, .{});
+        return .{ .response = response, .value = value };
+    }
 };
+
+/// Result of a zero-copy JSON parse. Holds both the response (which owns the
+/// body buffer) and the parsed value (which borrows string slices from it).
+/// The caller must keep `response` alive while using `value`, then deinit both.
+pub fn JsonBorrowedResult(comptime T: type) type {
+    return struct {
+        response: Response,
+        value: T,
+    };
+}
 
 const SocketHttp2Transport = struct {
     socket: *Socket,
@@ -2571,20 +2749,20 @@ test "Client initialization" {
 test "Client with config" {
     const allocator = std.testing.allocator;
     var client = Client.initWithConfig(allocator, .{
-        .base_url = "https://api.example.com",
+        .base_url = "http://httpbun.com",
         .user_agent = "TestClient/1.0",
     });
     defer client.deinit();
 
-    try std.testing.expectEqualStrings("https://api.example.com", client.config.base_url.?);
+    try std.testing.expectEqualStrings("http://httpbun.com", client.config.base_url.?);
 }
 
 test "Client initForBaseUrl helper" {
     const allocator = std.testing.allocator;
-    var client = Client.initForBaseUrl(allocator, "https://api.example.com");
+    var client = Client.initForBaseUrl(allocator, "http://httpbun.com");
     defer client.deinit();
 
-    try std.testing.expectEqualStrings("https://api.example.com", client.config.base_url.?);
+    try std.testing.expectEqualStrings("http://httpbun.com", client.config.base_url.?);
 }
 
 test "Client initialization defaults" {
@@ -2606,7 +2784,7 @@ test "ClientConfig builder helpers" {
     };
 
     const cfg = ClientConfig.defaults()
-        .withBaseUrl("https://api.example.com")
+        .withBaseUrl("http://httpbun.com")
         .withTimeouts(types.Timeouts.fast())
         .withRetryPolicy(types.RetryPolicy.noRetry())
         .withRedirectPolicy(types.RedirectPolicy.strict())
@@ -2622,7 +2800,7 @@ test "ClientConfig builder helpers" {
         .withPoolLimits(64, 16)
         .withProxy(.{ .host = "127.0.0.1", .port = 8080 });
 
-    try std.testing.expectEqualStrings("https://api.example.com", cfg.base_url.?);
+    try std.testing.expectEqualStrings("http://httpbun.com", cfg.base_url.?);
     try std.testing.expectEqual(@as(u64, 5_000), cfg.timeouts.connect_ms);
     try std.testing.expectEqual(@as(u32, 0), cfg.retry_policy.max_retries);
     try std.testing.expect(cfg.redirect_policy.preserve_method);
@@ -2701,10 +2879,10 @@ test "Client stores Set-Cookie headers" {
     try response.headers.append("Set-Cookie", "session=abc123; Path=/; HttpOnly");
     try response.headers.append("Set-Cookie", "theme=dark; Path=/");
 
-    try client.storeCookies(&response);
+    try client.storeCookies(&response, "httpbun.com");
 
-    try std.testing.expectEqualStrings("abc123", client.cookies.get("session").?);
-    try std.testing.expectEqualStrings("dark", client.cookies.get("theme").?);
+    try std.testing.expectEqualStrings("abc123", client.cookies.get("httpbun.com|session").?);
+    try std.testing.expectEqualStrings("dark", client.cookies.get("httpbun.com|theme").?);
 }
 
 test "Client attaches Cookie header from jar" {
@@ -2715,7 +2893,7 @@ test "Client attaches Cookie header from jar" {
     try client.setCookie("session", "abc123");
     try client.setCookie("theme", "dark");
 
-    var request = try Request.init(allocator, .GET, "https://example.com/");
+    var request = try Request.init(allocator, .GET, "http://httpbun.com/");
     defer request.deinit();
 
     try client.attachCookies(&request);
@@ -2788,7 +2966,7 @@ test "Client pool helpers" {
     try std.testing.expectEqual(@as(usize, 0), stats.total);
     try std.testing.expectEqual(@as(usize, 0), stats.active);
     try std.testing.expectEqual(@as(usize, 0), stats.idle);
-    try std.testing.expectEqual(@as(usize, 0), client.hostPoolConnectionCount("example.com", 443));
+    try std.testing.expectEqual(@as(usize, 0), client.hostPoolConnectionCount("httpbun.com", 443));
 }
 
 test "Client retry classifier avoids TLS/protocol retries" {
@@ -2803,7 +2981,7 @@ test "Client proxy request formatting" {
     var client = Client.initWithConfig(allocator, .{});
     defer client.deinit();
 
-    var req = try Request.init(allocator, .GET, "http://example.com/api/v1/users?active=true");
+    var req = try Request.init(allocator, .GET, "http://httpbun.com/api/v1/users?active=true");
     defer req.deinit();
     try req.headers.set("Accept", "application/json");
 
@@ -2815,7 +2993,7 @@ test "Client proxy request formatting" {
     });
     defer allocator.free(formatted);
 
-    try std.testing.expect(std.mem.indexOf(u8, formatted, "GET http://example.com:80/api/v1/users?active=true HTTP/1.1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, formatted, "GET http://httpbun.com:80/api/v1/users?active=true HTTP/1.1\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, formatted, "Accept: application/json\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, formatted, "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n") != null);
 }

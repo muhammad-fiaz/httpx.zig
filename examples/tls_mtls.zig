@@ -19,9 +19,9 @@ pub fn main() !void {
     std.debug.print("=== Mutual TLS (mTLS) Example ===\n\n", .{});
 
     // Load client certificate and key (using the same dummy certs for demo)
-    const client_cert = @embedFile("certs/server.crt");
-    const client_key = @embedFile("certs/server.key");
-    const ca_cert = @embedFile("certs/server.crt");
+    const client_cert = @embedFile("certs/server_ec.crt");
+    const client_key = @embedFile("certs/server_ec.key");
+    const ca_cert = @embedFile("certs/server_ec.crt");
 
     std.debug.print("Client certificate: {d} bytes\n", .{client_cert.len});
     std.debug.print("Client key:         {d} bytes\n", .{client_key.len});
@@ -32,11 +32,11 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .tls_enabled = true,
-        .tls_cert_path = "examples/certs/server.crt",
-        .tls_key_path = "examples/certs/server.key",
+        .tls_cert_path = "examples/certs/server_ec.crt",
+        .tls_key_path = "examples/certs/server_ec.key",
         .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
         .http2_enabled = true,
-        .http3_enabled = true,
+        .http3_enabled = false,
         .keep_alive = true,
     });
     defer server.deinit();
@@ -44,8 +44,6 @@ pub fn main() !void {
     try server.get("/mtls", handler);
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
     sleepMs(200);
 
     const port = server.config.port;
@@ -92,4 +90,7 @@ pub fn main() !void {
     std.debug.print("  - gRPC service-to-service\n", .{});
 
     std.debug.print("\n=== Example complete ===\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

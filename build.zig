@@ -27,6 +27,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const tint_dep = b.dependency("tint", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create the public module that will be exported as "httpx" to consumers.
     // Dependencies must be added here so they propagate to downstream packages.
     const httpx_module = b.addModule("httpx", .{
@@ -35,19 +40,21 @@ pub fn build(b: *std.Build) void {
 
     httpx_module.addImport("zstd", zstd_dep.module("zstd"));
     httpx_module.addImport("brotli", brotli_dep.module("brotli"));
+    httpx_module.addImport("tint", tint_dep.module("tint"));
 
     const examples = [_]struct { name: []const u8, path: []const u8, skip_run_all: bool = false }{
         .{ .name = "simple_get", .path = "examples/simple_get.zig" },
         .{ .name = "simple_get_deserialize", .path = "examples/simple_get_deserialize.zig" },
+        .{ .name = "json_api_example", .path = "examples/json_api_example.zig" },
         .{ .name = "http_auth_helpers", .path = "examples/http_auth_helpers.zig" },
         .{ .name = "post_json", .path = "examples/post_json.zig" },
         .{ .name = "concurrent_requests", .path = "examples/concurrent_requests.zig" },
         .{ .name = "custom_headers", .path = "examples/custom_headers.zig" },
         .{ .name = "tcp_local", .path = "examples/tcp_local.zig" },
         .{ .name = "udp_local", .path = "examples/udp_local.zig" },
-        .{ .name = "simple_server", .path = "examples/simple_server.zig" },
+        .{ .name = "simple_server", .path = "examples/simple_server.zig"},
         .{ .name = "router_example", .path = "examples/router_example.zig" },
-        .{ .name = "middleware_example", .path = "examples/middleware_example.zig" },
+        .{ .name = "middleware_example", .path = "examples/middleware_example.zig"},
         .{ .name = "streaming", .path = "examples/streaming.zig" },
         .{ .name = "interceptors", .path = "examples/interceptors.zig" },
         .{ .name = "connection_pool", .path = "examples/connection_pool.zig" },
@@ -56,7 +63,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "socks5_proxy", .path = "examples/socks5_proxy.zig" },
         .{ .name = "simplified_api_aliases", .path = "examples/simplified_api_aliases.zig" },
         .{ .name = "static_files", .path = "examples/static_files.zig" },
-        .{ .name = "multi_page_website", .path = "examples/multi_page_website.zig" },
+        .{ .name = "multi_page_website", .path = "examples/multi_page_website.zig"},
         .{ .name = "http2_example", .path = "examples/http2_example.zig" },
         .{ .name = "http2_client_runtime", .path = "examples/http2_client_runtime.zig" },
         .{ .name = "http2_server_runtime", .path = "examples/http2_server_runtime.zig" },
@@ -77,7 +84,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "https_client", .path = "examples/https_client.zig" },
         .{ .name = "sse_example", .path = "examples/sse_example.zig" },
         .{ .name = "websocket_server", .path = "examples/websocket_server.zig" },
-        .{ .name = "tls_server", .path = "examples/tls_server.zig" },
+        .{ .name = "tls_server", .path = "examples/tls_server.zig"},
         .{ .name = "compression_example", .path = "examples/compression_example.zig" },
         .{ .name = "http_methods", .path = "examples/http_methods.zig" },
         .{ .name = "logging_callback", .path = "examples/logging_callback.zig" },
@@ -85,7 +92,9 @@ pub fn build(b: *std.Build) void {
         .{ .name = "dns_example", .path = "examples/dns_example.zig" },
         .{ .name = "redirect_example", .path = "examples/redirect_example.zig" },
         .{ .name = "batch_concurrent", .path = "examples/batch_concurrent.zig" },
-        .{ .name = "reverse_proxy_middleware", .path = "examples/reverse_proxy_middleware.zig" },
+        .{ .name = "pre_route_example", .path = "examples/pre_route_example.zig" },
+        .{ .name = "readiness_probe_example", .path = "examples/readiness_probe_example.zig"},
+        .{ .name = "reverse_proxy_middleware", .path = "examples/reverse_proxy_middleware.zig"},
         .{ .name = "tls_https_get", .path = "examples/tls_https_get.zig" },
         .{ .name = "tls_config_options", .path = "examples/tls_config_options.zig" },
         .{ .name = "tls_handshake_details", .path = "examples/tls_handshake_details.zig" },
@@ -155,6 +164,7 @@ pub fn build(b: *std.Build) void {
     });
     tests.root_module.addImport("zstd", zstd_dep.module("zstd"));
     tests.root_module.addImport("brotli", brotli_dep.module("brotli"));
+    tests.root_module.addImport("tint", tint_dep.module("tint"));
     linkPlatformLibs(tests, target);
 
     const run_tests = b.addRunArtifact(tests);
@@ -209,6 +219,7 @@ pub fn build(b: *std.Build) void {
         });
         root_module_cross.addImport("zstd", zstd_dep.module("zstd"));
         root_module_cross.addImport("brotli", brotli_dep.module("brotli"));
+        root_module_cross.addImport("tint", tint_dep.module("tint"));
         const lib_cross = b.addLibrary(.{
             .name = "httpx",
             .linkage = .static,
@@ -227,6 +238,7 @@ pub fn build(b: *std.Build) void {
     });
     lib_root_module.addImport("zstd", zstd_dep.module("zstd"));
     lib_root_module.addImport("brotli", brotli_dep.module("brotli"));
+    lib_root_module.addImport("tint", tint_dep.module("tint"));
 
     const lib = b.addLibrary(.{
         .name = "httpx",

@@ -28,7 +28,7 @@ const masked = try httpx.wsEncodeFrame(allocator, .text, "payload", true, true, 
 ## Run
 
 ```
-zig build example-websocket-server
+zig build run-all-websocket_server
 ```
 
 ## Checklist

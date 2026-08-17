@@ -95,8 +95,6 @@ pub fn main() !void {
     defer server.deinit();
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
     sleepMs(100);
 
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
@@ -116,4 +114,7 @@ pub fn main() !void {
     std.debug.print("  - Jitter: add random variance to prevent thundering herd\n", .{});
     std.debug.print("  - Idempotent-only: only retry safe/idempotent methods\n", .{});
     std.debug.print("  - Status-based: retry on specific HTTP error codes\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

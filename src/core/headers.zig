@@ -14,6 +14,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const list_writer = @import("../util/list_writer.zig");
 const types = @import("types.zig");
+const dbg = @import("../util/debug.zig");
 
 /// Standard HTTP header name constants.
 /// Using these constants enables compile-time string interning.
@@ -94,6 +95,7 @@ pub const Headers = struct {
         const owned_name = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(owned_name);
         const owned_value = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(owned_value);
         try self.entries.append(self.allocator, .{
             .name = owned_name,
             .value = owned_value,
@@ -111,12 +113,14 @@ pub const Headers = struct {
 
     /// Sets a header, replacing any existing values with the same name.
     pub fn set(self: *Self, name: []const u8, value: []const u8) !void {
+        if (dbg.isEnabled()) dbg.log("HDR", "set {s}: {s}", .{ name, value });
         self.removeAll(name);
         try self.append(name, value);
     }
 
     /// Retrieves the first value for a header name (case-insensitive).
     pub fn get(self: *const Self, name: []const u8) ?[]const u8 {
+        if (dbg.isEnabled()) dbg.log("HDR", "get {s}", .{name});
         for (self.entries.items) |entry| {
             if (eqlIgnoreCase(entry.name, name)) return entry.value;
         }
@@ -141,6 +145,7 @@ pub const Headers = struct {
 
     /// Returns true if the header exists.
     pub fn contains(self: *const Self, name: []const u8) bool {
+        if (dbg.isEnabled()) dbg.log("HDR", "contains {s}", .{name});
         return self.get(name) != null;
     }
 
@@ -226,15 +231,15 @@ pub const Headers = struct {
     /// Returns true if Transfer-Encoding includes chunked.
     pub fn isChunked(self: *const Self) bool {
         const value = self.get(HeaderName.TRANSFER_ENCODING) orelse return false;
-        return mem.indexOf(u8, value, "chunked") != null;
+        return std.ascii.indexOfIgnoreCase(value, "chunked") != null;
     }
 
     /// Determines if connection should be kept alive based on headers and version.
     pub fn isKeepAlive(self: *const Self, version: types.Version) bool {
         const conn = self.get(HeaderName.CONNECTION);
         if (conn) |c| {
-            if (mem.indexOf(u8, c, "close") != null) return false;
-            if (mem.indexOf(u8, c, "keep-alive") != null) return true;
+            if (std.ascii.indexOfIgnoreCase(c, "close") != null) return false;
+            if (std.ascii.indexOfIgnoreCase(c, "keep-alive") != null) return true;
         }
         return version == .HTTP_1_1 or version == .HTTP_2 or version == .HTTP_3;
     }

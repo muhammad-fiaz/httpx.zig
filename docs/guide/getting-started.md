@@ -32,7 +32,7 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 
 ::: warning v0.1.6 release and Zig 0.15 deprecation
 `v0.1.6` is the current release and targets Zig `0.16.0+`.
-`v0.1.2` is the previous stable release for the immediate prior `0.1.x` line.
+`v0.1.5` is the previous stable release for the immediate prior `0.1.x` line.
 Zig `0.15` support is legacy and remains available only through `0.0.7`.
 The HTTPS/TLS reader fix for Zig `0.16` empty-buffer reads is included in this release.
 If you are upgrading from `0.0.7`, review the GitHub Releases page for migration notes.

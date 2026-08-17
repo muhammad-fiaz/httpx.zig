@@ -45,8 +45,6 @@ pub fn main() !void {
             continue;
         };
         defer server.deinit();
-        defer t.join();
-        defer server.stop();
 
         sleepMs(100);
         std.debug.print("  Server listening on port {d}\n", .{port});
@@ -69,6 +67,9 @@ pub fn main() !void {
         std.debug.print("Response version: {s}\n", .{response.version.toString()});
         std.debug.print("Status: {d}\n", .{response.status.code});
         std.debug.print("Body: {s}\n", .{response.text() orelse ""});
+
+        server.stop();
+        t.join();
         return;
     }
 }

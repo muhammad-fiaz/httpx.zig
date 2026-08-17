@@ -50,7 +50,7 @@ You can use either the full client methods (`request`, `get`, `post`, etc.) or s
 ### GET
 
 ```zig
-const response = try client.get("https://httpbin.org/get", .{});
+const response = try client.get("https://httpbun.com/get", .{});
 defer response.deinit();
 
 if (response.status.isSuccess()) {
@@ -63,7 +63,7 @@ if (response.status.isSuccess()) {
 For external endpoints, prefer an explicit per-request timeout and `catch` handler so errors are visible immediately:
 
 ```zig
-var response = client.get("https://httpbin.org/get", .{
+var response = client.get("https://httpbun.com/get", .{
     .timeout_ms = 10_000,
 }) catch |err| {
     std.debug.print("request failed: {s}\n", .{@errorName(err)});
@@ -80,7 +80,7 @@ const opts = httpx.RequestOptions.defaults()
     .withHttp2()
     .withFollowRedirects(true);
 
-var response = try client.get("https://httpbin.org/get", opts);
+var response = try client.get("https://httpbun.com/get", opts);
 defer response.deinit();
 ```
 
@@ -91,7 +91,7 @@ You can easily send JSON using the `.json` option, which automatically sets the 
 ```zig
 const body = "{\"name\": \"Alice\", \"role\": \"admin\"}";
 const response = try client.post(
-    "https://httpbin.org/post",
+    "https://httpbun.com/post",
     .{ .json = body },
 );
 defer response.deinit();
@@ -124,7 +124,7 @@ _ = opt_short;
 
 ## Cookie Jar
 
-The client automatically stores `Set-Cookie` values and sends a `Cookie` header on subsequent requests.
+The client automatically stores `Set-Cookie` values and sends a `Cookie` header on subsequent requests. Cookies are domain-aware per RFC 6265 — cookies with a `Domain` attribute are only sent to matching hosts.
 
 ```zig
 try client.setCookie("session", "abc123");
@@ -138,14 +138,14 @@ client.clearCookies();
 For top-level convenience in smaller programs, use aliases from the root module:
 
 ```zig
-var res = try httpx.fetch("https://httpbin.org/get", .{});
+var res = try httpx.fetch("https://httpbun.com/get", .{});
 defer res.deinit();
 
-var custom = try httpx.send(.GET, "https://httpbin.org/headers", .{});
+var custom = try httpx.send(.GET, "https://httpbun.com/headers", .{});
 defer custom.deinit();
 
 // Optional explicit allocator override.
-var custom_alloc = try httpx.sendWithAllocator(allocator, .GET, "https://httpbin.org/headers", .{ .timeout_ms = 10_000 });
+var custom_alloc = try httpx.sendWithAllocator(allocator, .GET, "https://httpbun.com/headers", .{ .timeout_ms = 10_000 });
 defer custom_alloc.deinit();
 ```
 

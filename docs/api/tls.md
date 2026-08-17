@@ -7,16 +7,17 @@ The TLS module provides a fully custom TLS 1.2/1.3 implementation built entirely
 | Feature | TLS 1.2 | TLS 1.3 |
 |---------|---------|---------|
 | X25519 key exchange | ✅ | ✅ |
-| P-256 key exchange | ✅ | ✅ |
-| P-384 key exchange | ✅ | ✅ |
+| P-256 key exchange | -- | ✅ |
+| P-384 key exchange | -- | ✅ |
+| X25519+ML-KEM768 post-quantum hybrid | -- | ✅ |
 | AES-128-GCM | ✅ | ✅ |
 | AES-256-GCM | ✅ | ✅ |
 | ChaCha20-Poly1305 | ✅ | ✅ |
+| ECDSA P-256 certificate signing | -- | ✅ |
 | Certificate loading (PEM) | ✅ | ✅ |
-| Certificate chain serialization | ✅ | ✅ |
+| Certificate chain verification | ✅ | ✅ |
 | ALPN negotiation | ✅ | ✅ |
 | SNI extension | ✅ | ✅ |
-| Custom CA trust store | ✅ | ✅ |
 | Handshake message encryption | -- | ✅ |
 | Cipher suite selection from client list | -- | ✅ |
 | QUIC-TLS bridge | -- | ✅ |
@@ -24,21 +25,11 @@ The TLS module provides a fully custom TLS 1.2/1.3 implementation built entirely
 ## Architecture
 
 ```
-tls.zig              -- High-level Connection, TlsConfig, TlsSession, ServerTlsConfig
-├── handshake.zig    -- Shared handshake engine, KeyExchange (X25519/P-256/P-384)
-├── handshake_12.zig -- TLS 1.2 client+server state machine
-├── handshake_13.zig -- TLS 1.3 client+server state machine
-├── record.zig       -- Record-layer AEAD encrypt/decrypt (TLS 1.2 explicit IV, TLS 1.3 implicit nonce)
-├── extensions.zig   -- Extension encoding: SNI, ALPN, supported_versions, key_share, supported_groups, signature_algorithms, psk_key_exchange_modes
-├── cipher_suites.zig-- Cipher suite registry and wire encoding
-├── transcript.zig   -- Runtime-dispatched handshake transcript hash (SHA-256/384/512)
-├── key_schedule.zig -- TLS 1.3 HKDF-based key schedule
-├── cert_verify.zig  -- Certificate chain verification, ECDSA signing/verification, hostname verification
+tls.zig              -- High-level Connection, TlsConfig, TlsSession, record-layer AEAD encrypt/decrypt
+├── client.zig       -- TLS 1.2/1.3 client handshake, KeyExchange (X25519/P-256/P-384), cipher suite negotiation
+├── server.zig       -- TLS 1.2/1.3 server handshake, ServerHello, cipher selection
 ├── alpn.zig         -- ALPN protocol negotiation
-├── errors.zig       -- Unified TLS error set and alert conversion
-├── quic_bridge.zig  -- QUIC-TLS 1.3 bridge for HTTP/3
-├── crypto_utils.zig -- Shared crypto utilities
-└── trust_store.zig  -- CA trust store management
+└── errors.zig       -- Unified TLS error set and alert conversion
 ```
 
 ## TlsConfig (Client)
@@ -74,6 +65,7 @@ pub const ServerTlsConfig = struct {
     cert_chain_der: []const []const u8 = &.{},
     key_der: ?[]const u8 = null,
     allocator: ?Allocator = null,
+    ecdsa_keypair: ?crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair = null,
 };
 ```
 
@@ -81,8 +73,8 @@ pub const ServerTlsConfig = struct {
 
 ```zig
 const server_tls = try tls.loadServerTlsConfig(allocator,
-    "examples/certs/server.crt",
-    "examples/certs/server.key",
+    "examples/certs/server_ec.crt",
+    "examples/certs/server_ec.key",
 );
 defer server_tls.deinit();
 ```
@@ -96,8 +88,8 @@ var server = httpx.Server.initWithConfig(allocator, .{
     .host = "127.0.0.1",
     .port = 8443,
     .tls_enabled = true,
-    .tls_cert_path = "examples/certs/server.crt",
-    .tls_key_path = "examples/certs/server.key",
+    .tls_cert_path = "examples/certs/server_ec.crt",
+    .tls_key_path = "examples/certs/server_ec.key",
     .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
     .http2_enabled = true,
     .http3_enabled = true,
@@ -180,37 +172,29 @@ try std.testing.expect(alpn.isHttp1x("http/1.1"));
 
 ## Certificate Verification
 
-The cert_verify module handles X.509 certificate chain verification:
+Certificate verification uses `std.crypto.Certificate.Chain` for chain validation and hostname verification. During the TLS handshake, the client:
+
+1. Parses each DER certificate in the chain
+2. Verifies signatures using the issuer's public key
+3. Checks certificate validity periods
+4. Verifies the hostname matches the certificate's Subject Alternative Names
+5. Downloads root certificates from the configured CA bundle when needed
 
 ```zig
-const cert_verify = @import("httpx").cert_verify;
-
-// Parse a DER certificate
-const cert = try cert_verify.parseCertificate(der_bytes);
-
-// Verify hostname against certificate
-try cert_verify.verifyHostname(&cert, "example.com");
+// During handshake, certificate chain is verified automatically
+const connection = try tls.connectClient(allocator, socket, &config, "example.com");
+// If verification fails, returns error.TlsCertificateNotVerified or related errors
 ```
 
-## Trust Store
+### Certificate-Related Errors
 
-Manage trusted CA certificates:
-
-```zig
-const trust_store = @import("httpx").TrustStore;
-
-var store = trust_store.TrustStore.init();
-defer store.deinit(allocator);
-
-// Load system trust store
-try store.loadSystem(allocator);
-
-// Load a PEM file
-try store.loadPem(allocator, pem_data);
-
-// Add a single DER certificate
-try store.addCert(der_bytes);
-```
+| Error | Description |
+|-------|-------------|
+| `TlsCertificateExpired` | Certificate validity period has expired |
+| `TlsCertificateNotYetValid` | Certificate validity period has not yet started |
+| `TlsCertificateNotVerified` | Certificate chain was not verified (no trusted root found) |
+| `TlsHostnameMismatch` | Hostname doesn't match certificate |
+| `TlsBadCertificate` | Certificate is malformed or invalid |
 
 ## Types
 
@@ -234,8 +218,9 @@ Supported elliptic curves for key exchange:
 | Group | Notes |
 |-------|-------|
 | `x25519` | Default, fastest |
-| `secp256r1` | NIST P-256 |
-| `secp384r1` | NIST P-384 |
+| `secp256r1` | NIST P-256 (TLS 1.3 only) |
+| `secp384r1` | NIST P-384 (TLS 1.3 only) |
+| `x25519_ml_kem768` | Post-quantum hybrid (TLS 1.3 only) |
 
 ### Error Set
 
@@ -249,8 +234,13 @@ All TLS errors are unified in `TlsError`:
 | `TlsHostnameMismatch` | Hostname doesn't match certificate |
 | `TlsHandshakeFailure` | No acceptable parameters negotiated |
 | `TlsUnsupportedCipherSuite` | Unsupported cipher suite |
+
+**PEM Loading Errors** (returned by `loadCertChain`/`loadPrivateKey`, not part of unified `TlsError`):
+
+| Error | Description |
+|-------|-------------|
 | `TlsInvalidPem` | PEM decoding failed |
 | `TlsNoCertificates` | No certificates found in PEM file |
 | `TlsInvalidPrivateKey` | Private key PEM decoding failed |
 
-See `errors.zig` for the full error set.
+See `errors.zig` for the full `TlsError` set.

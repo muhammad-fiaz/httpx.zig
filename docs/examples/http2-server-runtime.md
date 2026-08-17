@@ -33,7 +33,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-http2_server_runtime
+zig build run-all-http2_server_runtime
 ```
 
 ## What to Verify

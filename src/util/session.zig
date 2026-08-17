@@ -32,6 +32,8 @@ const Allocator = std.mem.Allocator;
 const io_util = @import("any_io.zig");
 const defaultIo = io_util.defaultIo;
 const threadIo = io_util.threadIo;
+const common = @import("common.zig");
+const dbg = @import("debug.zig");
 
 pub const SESSION_ID_LEN = 32;
 pub const DEFAULT_TTL_MS: u64 = 30 * 60 * 1000; // 30 minutes
@@ -80,11 +82,6 @@ pub const Session = struct {
     }
 };
 
-fn nowMs() i64 {
-    const io = defaultIo();
-    return std.Io.Timestamp.now(io, .real).toMilliseconds();
-}
-
 /// Thread-safe in-memory session store.
 pub const SessionStore = struct {
     allocator: Allocator,
@@ -114,6 +111,8 @@ pub const SessionStore = struct {
 
     /// Creates a new SessionStore.
     pub fn init(allocator: Allocator, config: SessionConfig) Self {
+        dbg.entry("SESSION", "SessionStore.init");
+        dbg.exit("SESSION", "SessionStore.init");
         return .{
             .allocator = allocator,
             .config = config,
@@ -138,7 +137,7 @@ pub const SessionStore = struct {
         var raw: [SESSION_ID_LEN]u8 = undefined;
         defaultIo().random(&raw);
 
-        const session = Session.init(self.allocator, raw, nowMs());
+        const session = Session.init(self.allocator, raw, common.nowMillis());
         try self.sessions.put(raw, session);
 
         return std.fmt.bytesToHex(raw, .lower);
@@ -153,12 +152,13 @@ pub const SessionStore = struct {
 
     /// Sets a key/value pair in the session. Value is duplicated.
     pub fn set(self: *Self, hex_id: []const u8, key: []const u8, value: []const u8) !void {
+        dbg.entry("SESSION", "SessionStore.set");
         self.lock();
         defer self.unlock();
 
         const raw = parseId(hex_id) orelse return error.InvalidSessionId;
         const entry = self.sessions.getPtr(raw) orelse return error.SessionNotFound;
-        if (entry.isExpired(nowMs(), self.config.ttl_ms)) {
+        if (entry.isExpired(common.nowMillis(), self.config.ttl_ms)) {
             entry.deinit();
             _ = self.sessions.remove(raw);
             return error.SessionExpired;
@@ -167,7 +167,8 @@ pub const SessionStore = struct {
         const duped = try self.allocator.dupe(u8, value);
         const old = try entry.data.fetchPut(key, duped);
         if (old) |o| self.allocator.free(o.value);
-        entry.last_accessed_ms = nowMs();
+        entry.last_accessed_ms = common.nowMillis();
+        dbg.exit("SESSION", "SessionStore.set");
     }
 
     /// Gets a value from the session. Returns null if not found or expired.
@@ -178,18 +179,19 @@ pub const SessionStore = struct {
 
         const raw = parseId(hex_id) orelse return null;
         const entry = self.sessions.getPtr(raw) orelse return null;
-        if (entry.isExpired(nowMs(), self.config.ttl_ms)) {
+        if (entry.isExpired(common.nowMillis(), self.config.ttl_ms)) {
             entry.deinit();
             _ = self.sessions.remove(raw);
             return null;
         }
-        entry.last_accessed_ms = nowMs();
+        entry.last_accessed_ms = common.nowMillis();
         const value = entry.data.get(key) orelse return null;
         return self.allocator.dupe(u8, value) catch null;
     }
 
     /// Deletes a session.
     pub fn delete(self: *Self, hex_id: []const u8) void {
+        dbg.entry("SESSION", "SessionStore.delete");
         self.lock();
         defer self.unlock();
 
@@ -198,6 +200,7 @@ pub const SessionStore = struct {
             entry.deinit();
         }
         _ = self.sessions.remove(raw);
+        dbg.exit("SESSION", "SessionStore.delete");
     }
 
     /// Returns true if the session exists and is not expired.
@@ -207,7 +210,7 @@ pub const SessionStore = struct {
 
         const raw = parseId(hex_id) orelse return false;
         const entry = self.sessions.getPtr(raw) orelse return false;
-        if (entry.isExpired(nowMs(), self.config.ttl_ms)) {
+        if (entry.isExpired(common.nowMillis(), self.config.ttl_ms)) {
             entry.deinit();
             _ = self.sessions.remove(raw);
             return false;
@@ -220,7 +223,7 @@ pub const SessionStore = struct {
         self.lock();
         defer self.unlock();
 
-        const now = nowMs();
+        const now = common.nowMillis();
         var to_remove = std.ArrayList([SESSION_ID_LEN]u8).empty;
         defer to_remove.deinit(self.allocator);
 

@@ -14,6 +14,7 @@ const Thread = std.Thread;
 
 const io_util = @import("../util/any_io.zig");
 const threadIo = io_util.threadIo;
+const dbg = @import("../util/debug.zig");
 
 const Client = @import("../client/client.zig").Client;
 const Response = @import("../core/response.zig").Response;
@@ -133,6 +134,8 @@ pub const ConcurrencyConfig = struct {
 
 /// Executes all requests and waits for all to complete.
 pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
+    dbg.entry("BATCH", "all");
+    dbg.log("BATCH", "request count: {d}", .{specs.len});
     var results = try allocator.alloc(RequestResult, specs.len);
     errdefer allocator.free(results);
 
@@ -254,6 +257,8 @@ pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
 /// Unlike `all`, this never fails due to a request error; request failures are
 /// represented as `RequestResult.err` values.
 pub fn allSettled(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
+    dbg.entry("BATCH", "allSettled");
+    dbg.log("BATCH", "request count: {d}", .{specs.len});
     return all(allocator, client, specs, config);
 }
 
@@ -273,6 +278,8 @@ pub fn errorCount(results: []const RequestResult) usize {
 
 /// Executes all requests and returns the first successful response.
 pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !?Response {
+    dbg.entry("BATCH", "any");
+    dbg.log("BATCH", "request count: {d}", .{specs.len});
     if (specs.len == 0) return null;
 
     switch (config.mode) {
@@ -459,6 +466,8 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
 
 /// Executes all requests and returns the first to complete.
 pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !RequestResult {
+    dbg.entry("BATCH", "race");
+    dbg.log("BATCH", "request count: {d}", .{specs.len});
     if (specs.len == 0) return .{ .err = error.NoRequests };
 
     switch (config.mode) {
@@ -654,9 +663,9 @@ test "BatchBuilder" {
     var builder = BatchBuilder.init(allocator);
     defer builder.deinit();
 
-    _ = try builder.get("https://api.example.com/users");
-    _ = try builder.post("https://api.example.com/users", "{\"name\":\"test\"}");
-    _ = try builder.postJson("https://api.example.com/users", "{\"name\":\"json\"}");
+    _ = try builder.get("http://httpbun.com/users");
+    _ = try builder.post("http://httpbun.com/users", "{\"name\":\"test\"}");
+    _ = try builder.postJson("http://httpbun.com/users", "{\"name\":\"json\"}");
 
     try std.testing.expectEqual(@as(usize, 3), builder.count());
 }
@@ -666,7 +675,7 @@ test "BatchBuilder clear" {
     var builder = BatchBuilder.init(allocator);
     defer builder.deinit();
 
-    _ = try builder.get("https://example.com");
+    _ = try builder.get("http://httpbun.com");
     try std.testing.expectEqual(@as(usize, 1), builder.count());
 
     builder.clear();
@@ -683,7 +692,7 @@ test "RequestResult" {
 test "RequestSpec" {
     const spec = RequestSpec{
         .method = .POST,
-        .url = "https://api.example.com",
+        .url = "http://httpbun.com",
         .body = "{\"key\":\"value\"}",
         .timeout_ms = 2_000,
         .follow_redirects = false,

@@ -8,6 +8,7 @@
 //! provide compile-time string conversion for maximum performance.
 
 const std = @import("std");
+const dbg = @import("../util/debug.zig");
 const status_mod = @import("status.zig");
 
 /// HTTP request methods as defined in RFC 7231 and RFC 5789.
@@ -26,6 +27,10 @@ pub const Method = enum {
 
     /// Converts the method to its canonical string representation.
     pub fn toString(self: Method) []const u8 {
+        if (!@inComptime()) dbg.entry("TYPE", "Method.toString");
+        defer {
+            if (!@inComptime()) dbg.exit("TYPE", "Method.toString");
+        }
         return switch (self) {
             .GET => "GET",
             .POST => "POST",
@@ -104,6 +109,10 @@ pub const Version = enum {
 
     /// Returns the canonical string representation of the version.
     pub fn toString(self: Version) []const u8 {
+        if (!@inComptime()) dbg.entry("TYPE", "Version.toString");
+        defer {
+            if (!@inComptime()) dbg.exit("TYPE", "Version.toString");
+        }
         return switch (self) {
             .HTTP_1_0 => "HTTP/1.0",
             .HTTP_1_1 => "HTTP/1.1",
@@ -209,6 +218,7 @@ pub const ContentType = enum {
     }
 
     /// Parses a MIME type string into a ContentType enum.
+    /// Matches the base MIME type, ignoring parameters (e.g., "; charset=utf-8").
     pub fn fromString(str: []const u8) ?ContentType {
         const types = [_]struct { name: []const u8, ct: ContentType }{
             .{ .name = "text/plain", .ct = .text_plain },
@@ -227,7 +237,11 @@ pub const ContentType = enum {
             .{ .name = "image/svg+xml", .ct = .image_svg },
         };
         for (types) |t| {
-            if (std.mem.startsWith(u8, str, t.name)) return t.ct;
+            if (std.mem.startsWith(u8, str, t.name)) {
+                // Match exactly, or match up to a ';' parameter separator
+                if (str.len == t.name.len) return t.ct;
+                if (str.len > t.name.len and str[t.name.len] == ';') return t.ct;
+            }
         }
         return null;
     }

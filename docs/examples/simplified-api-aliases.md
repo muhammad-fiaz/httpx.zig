@@ -21,12 +21,12 @@ pub fn main(init: std.process.Init) !void {
 
     if (live_mode) {
         const urls = DemoUrls{
-            .fetch = "https://httpbin.org/anything",
-            .get = "https://httpbin.org/get",
-            .delete = "https://httpbin.org/delete",
-            .trace = "https://httpbin.org/trace",
-            .connect = "https://httpbin.org/anything",
-            .post = "https://httpbin.org/post",
+            .fetch = "https://httpbun.com/anything",
+            .get = "https://httpbun.com/get",
+            .delete = "https://httpbun.com/delete",
+            .trace = "https://httpbun.com/trace",
+            .connect = "https://httpbun.com/anything",
+            .post = "https://httpbun.com/post",
         };
         runAliasCalls(allocator, urls);
         return;
@@ -66,18 +66,18 @@ pub fn main(init: std.process.Init) !void {
 ## Run
 
 ```bash
-zig build run-simplified_api_aliases
+zig build run-all-simplified_api_aliases
 ```
 
 Live network mode:
 
 ```powershell
 $env:HTTPX_EXAMPLE_ONLINE = "1"
-zig build run-simplified_api_aliases
+zig build run-all-simplified_api_aliases
 ```
 
 ```bash
-HTTPX_EXAMPLE_ONLINE=1 zig build run-simplified_api_aliases
+HTTPX_EXAMPLE_ONLINE=1 zig build run-all-simplified_api_aliases
 ```
 
 ## What to Verify

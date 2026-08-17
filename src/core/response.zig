@@ -12,6 +12,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const list_writer = @import("../util/list_writer.zig");
+const dbg = @import("../util/debug.zig");
 
 const types = @import("types.zig");
 const Headers = @import("headers.zig").Headers;
@@ -32,6 +33,8 @@ pub const Response = struct {
 
     /// Creates a new response with the given status code.
     pub fn init(allocator: Allocator, status_code: u16) Self {
+        dbg.entry("RESP", "Response.init");
+        dbg.log("RESP", "status={d}", .{status_code});
         return .{
             .allocator = allocator,
             .status = Status.fromCode(status_code),
@@ -69,22 +72,47 @@ pub const Response = struct {
 
     /// Returns the response body as text.
     pub fn text(self: *const Self) ?[]const u8 {
+        dbg.entry("RESP", "Response.text");
+        dbg.exit("RESP", "Response.text");
         return self.body;
     }
 
     /// Parses the response body as JSON into the given type.
     /// The caller must call `deinit()` on the returned `std.json.Parsed(T)`.
     pub fn json(self: *const Self, comptime T: type, options: std.json.ParseOptions) !std.json.Parsed(T) {
+        dbg.entry("RESP", "Response.json");
         const body = self.body orelse return error.NoBody;
-        return std.json.parseFromSlice(T, self.allocator, body, options);
+        const result = std.json.parseFromSlice(T, self.allocator, body, options);
+        dbg.exit("RESP", "Response.json");
+        return result;
     }
 
     /// Parses the response body as JSON into the given type, using leaky parsing.
-    /// Useful for types that do not own internal allocated slices or maps, or where the
-    /// memory will be handled separately.
+    /// Strings borrow from the response body buffer. The response must outlive
+    /// the returned value.
     pub fn jsonLeaky(self: *const Self, comptime T: type, options: std.json.ParseOptions) !T {
         const body = self.body orelse return error.NoBody;
         return std.json.parseFromSliceLeaky(T, self.allocator, body, options);
+    }
+
+    /// Zero-copy parse: returns T with strings pointing into the response body.
+    /// The response must outlive the returned value.
+    pub fn jsonBorrowed(self: *const Self, comptime T: type, options: std.json.ParseOptions) !T {
+        const body = self.body orelse return error.NoBody;
+        return std.json.parseFromSliceLeaky(T, self.allocator, body, options);
+    }
+
+    /// Parses the response body as a dynamic JSON value.
+    /// The caller must call `deinit()` on the returned `ParsedJson`.
+    pub fn jsonValue(self: *const Self) !json_util.ParsedJson {
+        const body = self.body orelse return error.NoBody;
+        return json_util.Json.parseValue(self.allocator, body);
+    }
+
+    /// Returns true if the Content-Type header indicates JSON.
+    pub fn isJson(self: *const Self) bool {
+        const ct = self.contentType() orelse return false;
+        return json_util.isJsonContentType(ct);
     }
 
     /// Returns the Location header value for redirects.
@@ -262,6 +290,7 @@ pub const ResponseBuilder = struct {
     /// Builds the final response.
     pub fn build(self: *Self) !Response {
         var response = Response.init(self.allocator, self.status_code);
+        errdefer response.deinit();
 
         for (self.headers.entries.items) |h| {
             try response.headers.append(h.name, h.value);
@@ -358,11 +387,11 @@ test "Response serialization" {
 
 test "Response redirect constructor" {
     const allocator = std.testing.allocator;
-    var response = try Response.redirect(allocator, 302, "https://example.com/new");
+    var response = try Response.redirect(allocator, 302, "http://httpbun.com/new");
     defer response.deinit();
 
     try std.testing.expectEqual(@as(u16, 302), response.status.code);
-    try std.testing.expectEqualStrings("https://example.com/new", response.location().?);
+    try std.testing.expectEqualStrings("http://httpbun.com/new", response.location().?);
 }
 
 test "Response fromText and fromJson constructors" {

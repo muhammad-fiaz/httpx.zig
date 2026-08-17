@@ -33,7 +33,7 @@ var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults(
 ## Run
 
 ```
-zig build example-logging-callback
+zig build run-all-logging_callback
 ```
 
 ## Checklist
@@ -43,3 +43,17 @@ zig build example-logging-callback
 - [x] Timestamp logger prints `[INFO]` / `[DEBUG]` prefixed messages
 - [x] Each mode (external, silent, timestamp) runs a full request cycle
 - [x] Response status codes are printed after each request
+
+### Disabling Logs with log_level
+
+To suppress all logs except errors:
+
+```zig
+var server = httpx.Server.initWithConfig(allocator, .{
+    .host = "127.0.0.1",
+    .port = 8080,
+    .log_level = .err, // Only show errors
+});
+```
+
+Available levels: `.debug`, `.info`, `.warn`, `.err`. Messages below the configured level are silently dropped.

@@ -31,7 +31,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-udp_local
+zig build run-all-udp_local
 ```
 
 ## What to Verify

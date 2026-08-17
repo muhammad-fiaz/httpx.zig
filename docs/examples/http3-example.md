@@ -22,7 +22,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-http3_example
+zig build run-all-http3_example
 ```
 
 ## What to Verify

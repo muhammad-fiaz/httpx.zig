@@ -52,8 +52,14 @@ var server = httpx.Server.initWithConfig(allocator, .{
 | `http3_enabled` | `bool` | `false` | Enable HTTP/3 server runtime path (UDP transport). |
 | `http2_settings` | `Http2Settings` | `{}` | HTTP/2 SETTINGS frame defaults and limits. |
 | `http3_settings` | `Http3Settings` | `{}` | HTTP/3 SETTINGS defaults (QPACK/field section limits). |
-| `log_fn` | `?LogFn` | `null` | Optional server log callback. Leave unset to disable server-side logging output. |
+| `log_fn` | `?LogFn` | `null` | Optional server log callback. Leave unset to use tint.zig colored output to stderr. |
+| `log_level` | `LogLevel` | `.info` | Minimum log level: `.debug`, `.info`, `.warn`, `.err`. Messages below this are silently dropped. |
 | `unix_path` | `?[]const u8` | `null` | Optional Unix Domain Socket (AF_UNIX) path to bind and listen on. |
+| `tls_enabled` | `bool` | `false` | Enable TLS for the server. Requires `tls_cert_path` and `tls_key_path`. |
+| `tls_cert_path` | `?[]const u8` | `null` | Path to the TLS certificate file (PEM format). Required when `tls_enabled = true`. |
+| `tls_key_path` | `?[]const u8` | `null` | Path to the TLS private key file (PEM format). Required when `tls_enabled = true`. |
+| `tls_alpn_protocols` | `[]const []const u8` | `&.{ "h3", "h2", "http/1.1" }` | ALPN protocol list for TLS negotiation (e.g., `&.{"h2", "http/1.1"}`). |
+| `enable_push` | `bool` | `true` | Enable HTTP/2 server push (PUSH_PROMISE) support. |
 
 All `ServerConfig` fields are optional customizations. Omitted fields use the built-in defaults.
 
@@ -100,6 +106,18 @@ Starts the server. This method blocks.
 try server.listen();
 ```
 
+#### `listenInBackground`
+
+Starts the server in a background thread. Returns a thread handle that can be joined.
+
+```zig
+const thread = try server.listenInBackground();
+// Server is now running in the background
+// ...
+server.stop(); // Stop when done
+thread.join(); // Wait for the thread to finish
+```
+
 #### `listeningPort`
 
 Returns the effective bound port (useful with `port_conflict = .increment`).
@@ -127,13 +145,25 @@ try server.use(httpx.middleware.logger());
 
 ### Logging
 
-Server-side logging is opt-in. You can attach a custom log sink with `ServerConfig.log_fn`, or skip the logger middleware entirely to disable request logs.
+By default, HTTPX uses tint.zig for colored console output. Server logs appear as `HTTPX [INFO] Server listening on ...` with colored formatting based on log level.
 
+**Default (tint.zig colored output):**
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
-const allocator = std.heap.page_allocator;
+var server = httpx.Server.initWithConfig(allocator, .{
+    .host = "127.0.0.1",
+    .port = 8080,
+});
+```
 
+**Disable all logs:**
+```zig
+var server = httpx.Server.initWithConfig(allocator, .{
+    .log_level = .err, // Only show errors (or .err + custom .log_fn)
+});
+```
+
+**Custom logger (structured logging):**
+```zig
 const CustomLogger = struct {
     fn log(level: httpx.LogLevel, message: []const u8) void {
         std.debug.print("[{s}] {s}", .{ @tagName(level), message });
@@ -143,7 +173,10 @@ const CustomLogger = struct {
 var server = httpx.Server.initWithConfig(allocator, .{
     .log_fn = CustomLogger.log,
 });
+```
 
+**Custom logger for middleware:**
+```zig
 try server.use(httpx.middleware.loggerWithConfig(.{ .log_fn = CustomLogger.log }));
 ```
 
@@ -279,6 +312,10 @@ The `Context` struct is passed to every route handler and middleware. It wraps t
 | `cookie(name)` | Get request cookie value by name |
 | `hasContentType(media_type)` | Match request `Content-Type` (ignores parameters) |
 | `isJson()` | True when request `Content-Type` is `application/json` |
+| `jsonBody(T, opts)` | Parse request body as typed JSON, returning `std.json.Parsed(T)`. Caller must `defer parsed.deinit()`. |
+| `jsonBodyLeaky(T, opts)` | Parse request body as typed JSON directly into `T` (leaky, no arena). |
+| `jsonValue(opts)` | Parse request body as dynamic `std.json.Value`, returning `ParsedJson`. |
+| `requireJson()` | Return error if Content-Type is not JSON. |
 | `isFormUrlEncoded()` | True when request `Content-Type` is `application/x-www-form-urlencoded` |
 | `accepts(media_type)` | True when request `Accept` allows a media type |
 | `acceptsJson()` | True when request `Accept` allows `application/json` |

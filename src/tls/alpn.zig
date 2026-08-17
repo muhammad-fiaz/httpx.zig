@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const mem = std.mem;
+const dbg = @import("../util/debug.zig");
 
 // Well-known protocol identifiers
 
@@ -35,11 +36,16 @@ pub fn serverNegotiate(
     server_preference: []const []const u8,
     client_offer: []const []const u8,
 ) ?[]const u8 {
+    dbg.log("ALPN", "serverNegotiate: server={d}, client={d}", .{ server_preference.len, client_offer.len });
     for (server_preference) |sp| {
         for (client_offer) |co| {
-            if (mem.eql(u8, sp, co)) return sp;
+            if (mem.eql(u8, sp, co)) {
+                dbg.log("ALPN", "negotiated: {s}", .{sp});
+                return sp;
+            }
         }
     }
+    dbg.log("ALPN", "no match found", .{});
     return null;
 }
 

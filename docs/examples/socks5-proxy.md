@@ -28,7 +28,7 @@ defer response.deinit();
 ## Run
 
 ```
-zig build example-socks5_proxy
+zig build run-all-socks5_proxy
 ```
 
 ## What to Verify

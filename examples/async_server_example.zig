@@ -60,8 +60,6 @@ pub fn main() !void {
     std.debug.print("  GET  /async   -> asyncTaskHandler (simulates slow workload)\n", .{});
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
 
     sleepMs(100);
 
@@ -87,4 +85,7 @@ pub fn main() !void {
     std.debug.print("GET /async -> status: {d}, body: {s}\n", .{ resp2.status.code, resp2.text() orelse "" });
 
     std.debug.print("\nThread pool demo complete!\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

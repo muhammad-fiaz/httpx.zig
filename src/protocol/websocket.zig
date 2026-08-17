@@ -32,6 +32,7 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const Request = @import("../core/request.zig").Request;
+const dbg = @import("../util/debug.zig");
 
 // Constants
 
@@ -167,6 +168,7 @@ pub fn wsEncodeFrame(
     masked: bool,
     mask_key: [4]u8,
 ) ![]u8 {
+    dbg.entry("WS", "wsEncodeFrame");
     const ext_len_bytes: usize =
         if (payload.len < 126) 0 else if (payload.len < 65536) 2 else 8;
     const mask_bytes: usize = if (masked) 4 else 0;
@@ -251,6 +253,7 @@ pub fn wsCloseFrame(allocator: Allocator, code: WsCloseCode, reason: []const u8)
 /// Returns `error.NeedMoreData` if `data` is incomplete.
 /// The returned `WsFrame.payload` is allocated; call `frame.deinit()` when done.
 pub fn wsDecodeFrame(allocator: Allocator, data: []const u8) !WsDecodeResult {
+    dbg.entry("WS", "wsDecodeFrame");
     if (data.len < 2) return error.NeedMoreData;
 
     const fin = (data[0] & 0x80) != 0;

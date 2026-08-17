@@ -61,7 +61,7 @@
 //! // Client usage
 //! var client = httpx.Client.init(allocator);
 //! defer client.deinit();
-//! const response = try client.get("https://api.example.com/users", .{});
+//! const response = try client.get("http://httpbun.com/users", .{});
 //!
 //! // Server usage
 //! var server = httpx.Server.init(allocator);
@@ -113,6 +113,7 @@ pub const decompress = @import("util/compression.zig").decompress;
 pub const compress = @import("util/compression.zig").compress;
 pub const dns = @import("net/dns.zig");
 pub const sse = @import("util/sse.zig");
+pub const debug = @import("util/debug.zig");
 pub const parseSseStream = sse.parseSseStream;
 
 pub const executor = @import("concurrency/executor.zig");
@@ -222,6 +223,7 @@ pub const BasicAuth = client_mod.BasicAuth;
 pub const Interceptor = client_mod.Interceptor;
 pub const RequestInterceptor = client_mod.RequestInterceptor;
 pub const ResponseInterceptor = client_mod.ResponseInterceptor;
+pub const JsonBorrowedResult = client_mod.JsonBorrowedResult;
 
 pub const ConnectionPool = pool.ConnectionPool;
 pub const PoolConfig = pool.PoolConfig;
@@ -472,6 +474,93 @@ pub fn postJsonWithAllocator(allocator: std.mem.Allocator, url: []const u8, body
     return c.post(url, .{ .json = body });
 }
 
+/// Convenience function to GET a URL and parse the JSON response into type T.
+/// Returns both the response and parsed value. Caller deinit's both.
+pub fn getJson(comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+    return getJsonWithAllocator(default_alias_allocator, T, url, parse_opts);
+}
+
+/// Convenience function to GET a URL and parse JSON with an explicit allocator.
+pub fn getJsonWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.getJson(T, url, parse_opts);
+}
+
+/// Convenience function to POST JSON and parse the response as type T.
+/// Returns both the response and parsed value. Caller deinit's both.
+pub fn postJsonAndParse(comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+    return postJsonAndParseWithAllocator(default_alias_allocator, T, url, body, parse_opts);
+}
+
+/// Convenience function to POST JSON and parse the response with an explicit allocator.
+pub fn postJsonAndParseWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.postJsonAndParse(T, url, body, parse_opts);
+}
+
+/// Convenience function to PUT JSON and parse the response as type T.
+pub fn putJson(comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+    return putJsonWithAllocator(default_alias_allocator, T, url, body, parse_opts);
+}
+
+/// Convenience function to PUT JSON and parse the response with an explicit allocator.
+pub fn putJsonWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.putJson(T, url, body, parse_opts);
+}
+
+/// Convenience function to PATCH JSON and parse the response as type T.
+pub fn patchJson(comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+    return patchJsonWithAllocator(default_alias_allocator, T, url, body, parse_opts);
+}
+
+/// Convenience function to PATCH JSON and parse the response with an explicit allocator.
+pub fn patchJsonWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.patchJson(T, url, body, parse_opts);
+}
+
+/// Convenience function to DELETE and parse the JSON response as type T.
+pub fn deleteJson(comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+    return deleteJsonWithAllocator(default_alias_allocator, T, url, parse_opts);
+}
+
+/// Convenience function to DELETE and parse the JSON response with an explicit allocator.
+pub fn deleteJsonWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.deleteJson(T, url, parse_opts);
+}
+
+/// Zero-copy: GET and parse JSON with strings borrowing from the response body.
+/// The response must outlive the parsed value.
+pub fn getJsonBorrowed(comptime T: type, url: []const u8) !JsonBorrowedResult(T) {
+    return getJsonBorrowedWithAllocator(default_alias_allocator, T, url);
+}
+
+/// Zero-copy: GET with explicit allocator.
+pub fn getJsonBorrowedWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8) !JsonBorrowedResult(T) {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.getJsonBorrowed(T, url);
+}
+
+/// Zero-copy: POST JSON and parse response with strings borrowing from the body.
+pub fn postJsonBorrowed(comptime T: type, url: []const u8, body: []const u8) !JsonBorrowedResult(T) {
+    return postJsonBorrowedWithAllocator(default_alias_allocator, T, url, body);
+}
+
+/// Zero-copy: POST with explicit allocator.
+pub fn postJsonBorrowedWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, body: []const u8) !JsonBorrowedResult(T) {
+    var c = Client.init(allocator);
+    defer c.deinit();
+    return c.postJsonBorrowed(T, url, body);
+}
+
 /// Convenience function to create a POST request.
 pub fn post(url: []const u8, req_options: RequestOptions) !Response {
     return postWithAllocator(default_alias_allocator, url, req_options);
@@ -595,6 +684,10 @@ test "top-level alias compile checks" {
     const fetch_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = fetchWithAllocator;
     const post_json_ptr: *const fn ([]const u8, []const u8) anyerror!Response = postJson;
     const post_json_alloc_ptr: *const fn (std.mem.Allocator, []const u8, []const u8) anyerror!Response = postJsonWithAllocator;
+    const get_json_ptr = &getJson;
+    const get_json_alloc_ptr = &getJsonWithAllocator;
+    const post_json_parse_ptr = &postJsonAndParse;
+    const post_json_parse_alloc_ptr = &postJsonAndParseWithAllocator;
     const send_ptr: *const fn (Method, []const u8, RequestOptions) anyerror!Response = send;
     const send_alloc_ptr: *const fn (std.mem.Allocator, Method, []const u8, RequestOptions) anyerror!Response = sendWithAllocator;
     const post_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = post;
@@ -638,6 +731,10 @@ test "top-level alias compile checks" {
     _ = fetch_alloc_ptr;
     _ = post_json_ptr;
     _ = post_json_alloc_ptr;
+    _ = get_json_ptr;
+    _ = get_json_alloc_ptr;
+    _ = post_json_parse_ptr;
+    _ = post_json_parse_alloc_ptr;
     _ = send_ptr;
     _ = send_alloc_ptr;
     _ = post_ptr;

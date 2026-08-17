@@ -28,7 +28,7 @@ pub fn main() !void {
     );
     defer client.deinit();
 
-    var resp = try client.get("https://httpbin.org/get", .{});
+    var resp = try client.get("https://httpbun.com/get", .{});
     defer resp.deinit();
 }
 ```

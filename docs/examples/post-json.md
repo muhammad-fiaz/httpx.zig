@@ -16,7 +16,7 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator);
     defer client.deinit();
 
-    var res = try client.post("https://httpbin.org/post", .{
+    var res = try client.post("https://httpbun.com/post", .{
         .json = "{\"name\":\"httpx\",\"kind\":\"demo\"}",
     });
     defer res.deinit();
@@ -29,7 +29,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-post_json
+zig build run-all-post_json
 ```
 
 ## What to Verify

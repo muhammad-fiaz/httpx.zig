@@ -34,9 +34,6 @@ pub fn main() !void {
     try server.get("/pool/data", poolHandler);
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
-
     sleepMs(200);
     const port = server.config.port;
     std.debug.print("  Server listening on port {d}\n\n", .{port});
@@ -111,4 +108,7 @@ pub fn main() !void {
     std.debug.print("  Host connections (127.0.0.1:{d}): {d}\n", .{ port, client.hostPoolConnectionCount("127.0.0.1", port) });
 
     std.debug.print("\n=== Connection Pool Example Complete ===\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

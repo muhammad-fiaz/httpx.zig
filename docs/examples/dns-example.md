@@ -27,7 +27,7 @@ const cached = try cache.resolve("127.0.0.1", 80);
 ## Run
 
 ```
-zig build example-dns
+zig build run-all-dns_example
 ```
 
 ## Checklist

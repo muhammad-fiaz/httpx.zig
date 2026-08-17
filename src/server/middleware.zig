@@ -11,6 +11,7 @@
 //! - Body parsing
 
 const std = @import("std");
+const tint = @import("tint");
 const Context = @import("server.zig").Context;
 const io_util = @import("../util/any_io.zig");
 const Response = @import("../core/response.zig").Response;
@@ -19,6 +20,7 @@ const list_writer = @import("../util/list_writer.zig");
 const status = @import("../core/status.zig");
 const common = @import("../util/common.zig");
 const compression_util = @import("../util/compression.zig");
+const dbg = @import("../util/debug.zig");
 
 /// Middleware function type.
 pub const Middleware = struct {
@@ -110,6 +112,7 @@ pub fn cors(comptime config: CorsConfig) Middleware {
             }
 
             fn handler(ctx: *Context, next: Next) anyerror!Response {
+                dbg.entry("MW", "cors");
                 const origin = allowedOrigin(ctx, config);
                 try ctx.setHeader("Access-Control-Allow-Origin", origin);
                 try ctx.setHeader("Vary", "Origin");
@@ -130,7 +133,9 @@ pub fn cors(comptime config: CorsConfig) Middleware {
                     return ctx.status(status.StatusCode.NO_CONTENT).text("");
                 }
 
-                return next(ctx);
+                const resp = try next(ctx);
+                dbg.exit("MW", "cors");
+                return resp;
             }
         }.handler,
     };
@@ -147,21 +152,51 @@ pub fn loggerWithConfig(comptime config: LoggerConfig) Middleware {
         .name = "logger",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
+                dbg.log("MW", "logger {s} {s}", .{ ctx.request.method.toString(), ctx.request.uri.path });
                 const start = common.nowMillis();
                 const response = try next(ctx);
                 const duration = common.nowMillis() - start;
 
-                var buf: [1024]u8 = undefined;
-                const msg = std.fmt.bufPrint(&buf, "{s} {s} - {d}ms\n", .{
-                    ctx.request.method.toString(),
-                    ctx.request.uri.path,
-                    duration,
-                }) catch "[Logger format failed or message too long]";
-
                 if (config.log_fn) |f| {
+                    var buf: [1024]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&buf, "{s} {s} - {d}ms\n", .{
+                        ctx.request.method.toString(),
+                        ctx.request.uri.path,
+                        duration,
+                    }) catch "[Logger format failed or message too long]";
                     f(.info, msg);
                 } else {
-                    std.debug.print("{s}", .{msg});
+                    const method_style = switch (ctx.request.method) {
+                        .GET => tint.style(.{ .fg = .{ .ansi4 = .bright_green } }),
+                        .POST => tint.style(.{ .fg = .{ .ansi4 = .bright_blue } }),
+                        .PUT, .PATCH => tint.style(.{ .fg = .{ .ansi4 = .bright_yellow } }),
+                        .DELETE => tint.style(.{ .fg = .{ .ansi4 = .bright_red } }),
+                        else => tint.style(.{ .fg = .{ .ansi4 = .white } }),
+                    };
+                    const dur_style = if (duration > 1000)
+                        tint.style(.{ .fg = .{ .ansi4 = .bright_red }, .bold = true })
+                    else if (duration > 500)
+                        tint.style(.{ .fg = .{ .ansi4 = .bright_yellow } })
+                    else
+                        tint.style(.{ .fg = .{ .ansi4 = .bright_black }, .dim = true });
+
+                    const app_style = tint.style(.{ .fg = .{ .ansi4 = .bright_cyan }, .bold = true });
+                    std.debug.print(
+                        "{s}HTTPX{s} {s}{s}{s} {s}{s}{s} - {s}{d}ms{s}\n",
+                        .{
+                            app_style.toAnsi(),
+                            tint.reset,
+                            method_style.toAnsi(),
+                            ctx.request.method.toString(),
+                            tint.reset,
+                            tint.style(.{}).toAnsi(),
+                            ctx.request.uri.path,
+                            tint.reset,
+                            dur_style.toAnsi(),
+                            duration,
+                            tint.reset,
+                        },
+                    );
                 }
 
                 return response;
@@ -250,6 +285,7 @@ pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
             var evict_counter: u32 = 0;
 
             fn handler(ctx: *Context, next: Next) anyerror!Response {
+                dbg.entry("MW", "rateLimit");
                 if (!store_initialized) {
                     store = std.StringHashMap(Entry).init(ctx.allocator);
                     store_initialized = true;
@@ -275,6 +311,7 @@ pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
                 if (entry) |e| {
                     if (now - e.window_start < @as(i64, @intCast(config.window_ms))) {
                         if (e.count >= config.max_requests) {
+                            dbg.log("MW", "rate limit exceeded for {s}", .{ip});
                             try ctx.setHeader("Retry-After", "60");
                             return ctx.status(status.StatusCode.TOO_MANY_REQUESTS).text("Too Many Requests");
                         }
@@ -298,7 +335,9 @@ pub fn basicAuth(realm: []const u8, validator: *const fn ([]const u8, []const u8
         .name = "basic_auth",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
+                dbg.entry("MW", "basicAuth");
                 const auth = ctx.header("Authorization") orelse {
+                    dbg.log("MW", "basicAuth failed: no Authorization header", .{});
                     const www_auth = try std.fmt.allocPrint(ctx.allocator, "Basic realm=\"{s}\"", .{realm});
                     defer ctx.allocator.free(www_auth);
                     try ctx.setHeader("WWW-Authenticate", www_auth);
@@ -306,6 +345,7 @@ pub fn basicAuth(realm: []const u8, validator: *const fn ([]const u8, []const u8
                 };
 
                 if (!std.mem.startsWith(u8, auth, "Basic ")) {
+                    dbg.log("MW", "basicAuth failed: not Basic prefix", .{});
                     const www_auth = try std.fmt.allocPrint(ctx.allocator, "Basic realm=\"{s}\"", .{realm});
                     defer ctx.allocator.free(www_auth);
                     try ctx.setHeader("WWW-Authenticate", www_auth);
@@ -315,11 +355,13 @@ pub fn basicAuth(realm: []const u8, validator: *const fn ([]const u8, []const u8
                 const encoded = std.mem.trim(u8, auth[6..], " \t");
                 const Base64 = @import("../util/encoding.zig").Base64;
                 const decoded = Base64.decode(ctx.allocator, encoded) catch {
+                    dbg.log("MW", "basicAuth failed: bad base64", .{});
                     return ctx.status(status.StatusCode.UNAUTHORIZED).text("Unauthorized");
                 };
                 defer ctx.allocator.free(decoded);
 
                 const colon_pos = std.mem.indexOfScalar(u8, decoded, ':') orelse {
+                    dbg.log("MW", "basicAuth failed: missing colon", .{});
                     return ctx.status(status.StatusCode.UNAUTHORIZED).text("Unauthorized");
                 };
 
@@ -327,12 +369,14 @@ pub fn basicAuth(realm: []const u8, validator: *const fn ([]const u8, []const u8
                 const password = decoded[colon_pos + 1 ..];
 
                 if (!validator(username, password)) {
+                    dbg.log("MW", "basicAuth failed: invalid credentials", .{});
                     const www_auth = try std.fmt.allocPrint(ctx.allocator, "Basic realm=\"{s}\"", .{realm});
                     defer ctx.allocator.free(www_auth);
                     try ctx.setHeader("WWW-Authenticate", www_auth);
                     return ctx.status(status.StatusCode.UNAUTHORIZED).text("Unauthorized");
                 }
 
+                dbg.log("MW", "basicAuth success for user {s}", .{username});
                 return next(ctx);
             }
         }.handler,

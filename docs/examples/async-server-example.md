@@ -50,7 +50,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-async_server_example
+zig build run-all-async_server_example
 ```
 
 ## What to Verify

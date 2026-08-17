@@ -23,6 +23,7 @@
 
 const std = @import("std");
 const Atomic = std.atomic.Value;
+const dbg = @import("debug.zig");
 
 /// Event payload for metrics callbacks.
 pub const MetricsEvent = union(enum) {
@@ -86,6 +87,7 @@ pub const Metrics = struct {
 
     /// Records a received response with status code, bytes received, and latency.
     pub fn recordResponse(self: *Self, status: u16, bytes: u64, latency_ns: u64) void {
+        dbg.entry("METRIC", "recordResponse");
         _ = self.total_responses.fetchAdd(1, .monotonic);
         _ = self.bytes_received.fetchAdd(bytes, .monotonic);
 
@@ -111,6 +113,7 @@ pub const Metrics = struct {
         }
 
         if (self.callback) |cb| cb(.{ .response = .{ .status = status, .bytes = bytes, .latency_ns = latency_ns } });
+        dbg.exit("METRIC", "recordResponse");
     }
 
     /// Records bytes sent.
@@ -165,7 +168,7 @@ pub const Metrics = struct {
             .total_requests = self.total_requests.load(.monotonic),
             .total_responses = total,
             .active_connections = self.active_connections.load(.monotonic),
-            .errors = self.errors.load(.monotonic),
+            .total_errors = self.errors.load(.monotonic),
             .bytes_sent = self.bytes_sent.load(.monotonic),
             .bytes_received = self.bytes_received.load(.monotonic),
             .responses_2xx = self.responses_2xx.load(.monotonic),
@@ -180,11 +183,12 @@ pub const Metrics = struct {
 };
 
 /// Point-in-time metrics snapshot (non-atomic, copyable).
+/// All values are returned via fields and getters. No internal printing.
 pub const MetricsSnapshot = struct {
     total_requests: u64,
     total_responses: u64,
     active_connections: i64,
-    errors: u64,
+    total_errors: u64,
     bytes_sent: u64,
     bytes_received: u64,
     responses_2xx: u64,
@@ -195,44 +199,86 @@ pub const MetricsSnapshot = struct {
     min_latency_ns: u64,
     max_latency_ns: u64,
 
-    /// Prints a human-readable summary to stderr.
-    pub fn print(self: *const MetricsSnapshot) void {
-        std.debug.print(
-            \\Metrics Snapshot:
-            \\  Requests:   {d}
-            \\  Responses:  {d}  (2xx={d} 3xx={d} 4xx={d} 5xx={d})
-            \\  Errors:     {d}
-            \\  Active:     {d} connections
-            \\  Bytes In:   {d}  Out: {d}
-            \\  Latency:    avg={d}ns  min={d}ns  max={d}ns
-            \\
-        , .{
-            self.total_requests,
-            self.total_responses,
-            self.responses_2xx,
-            self.responses_3xx,
-            self.responses_4xx,
-            self.responses_5xx,
-            self.errors,
-            self.active_connections,
-            self.bytes_received,
-            self.bytes_sent,
-            self.avg_latency_ns,
-            self.min_latency_ns,
-            self.max_latency_ns,
-        });
+    pub fn totalRequests(self: *const MetricsSnapshot) u64 {
+        return self.total_requests;
     }
 
-    /// Returns the error rate as a value between 0.0 and 1.0.
+    pub fn totalResponses(self: *const MetricsSnapshot) u64 {
+        return self.total_responses;
+    }
+
+    pub fn activeConnections(self: *const MetricsSnapshot) i64 {
+        return self.active_connections;
+    }
+
+    pub fn errors(self: *const MetricsSnapshot) u64 {
+        return self.total_errors;
+    }
+
+    pub fn bytesSent(self: *const MetricsSnapshot) u64 {
+        return self.bytes_sent;
+    }
+
+    pub fn bytesReceived(self: *const MetricsSnapshot) u64 {
+        return self.bytes_received;
+    }
+
+    pub fn responses2xx(self: *const MetricsSnapshot) u64 {
+        return self.responses_2xx;
+    }
+
+    pub fn responses3xx(self: *const MetricsSnapshot) u64 {
+        return self.responses_3xx;
+    }
+
+    pub fn responses4xx(self: *const MetricsSnapshot) u64 {
+        return self.responses_4xx;
+    }
+
+    pub fn responses5xx(self: *const MetricsSnapshot) u64 {
+        return self.responses_5xx;
+    }
+
+    pub fn avgLatencyNs(self: *const MetricsSnapshot) u64 {
+        return self.avg_latency_ns;
+    }
+
+    pub fn minLatencyNs(self: *const MetricsSnapshot) u64 {
+        return self.min_latency_ns;
+    }
+
+    pub fn maxLatencyNs(self: *const MetricsSnapshot) u64 {
+        return self.max_latency_ns;
+    }
+
     pub fn errorRate(self: *const MetricsSnapshot) f64 {
         if (self.total_requests == 0) return 0.0;
-        return @as(f64, @floatFromInt(self.errors)) / @as(f64, @floatFromInt(self.total_requests));
+        return @as(f64, @floatFromInt(self.total_errors)) / @as(f64, @floatFromInt(self.total_requests));
     }
 
-    /// Returns the success rate (2xx / total_responses).
     pub fn successRate(self: *const MetricsSnapshot) f64 {
         if (self.total_responses == 0) return 0.0;
         return @as(f64, @floatFromInt(self.responses_2xx)) / @as(f64, @floatFromInt(self.total_responses));
+    }
+
+    pub fn redirectRate(self: *const MetricsSnapshot) f64 {
+        if (self.total_responses == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.responses_3xx)) / @as(f64, @floatFromInt(self.total_responses));
+    }
+
+    pub fn clientErrorRate(self: *const MetricsSnapshot) f64 {
+        if (self.total_responses == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.responses_4xx)) / @as(f64, @floatFromInt(self.total_responses));
+    }
+
+    pub fn serverErrorRate(self: *const MetricsSnapshot) f64 {
+        if (self.total_responses == 0) return 0.0;
+        return @as(f64, @floatFromInt(self.responses_5xx)) / @as(f64, @floatFromInt(self.total_responses));
+    }
+
+    pub fn throughputBytesPerResponse(self: *const MetricsSnapshot) u64 {
+        if (self.total_responses == 0) return 0;
+        return self.bytes_received / self.total_responses;
     }
 };
 
@@ -250,7 +296,7 @@ test "Metrics basic operations" {
     try std.testing.expectEqual(@as(u64, 2), snap.total_responses);
     try std.testing.expectEqual(@as(u64, 1), snap.responses_2xx);
     try std.testing.expectEqual(@as(u64, 1), snap.responses_4xx);
-    try std.testing.expectEqual(@as(u64, 1), snap.errors);
+    try std.testing.expectEqual(@as(u64, 1), snap.total_errors);
     try std.testing.expectEqual(@as(i64, 1), snap.active_connections);
     try std.testing.expectEqual(@as(u64, 640), snap.bytes_received);
     try std.testing.expectEqual(@as(u64, 750), snap.avg_latency_ns);

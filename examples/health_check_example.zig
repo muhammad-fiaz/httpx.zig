@@ -63,8 +63,6 @@ pub fn main() !void {
     }.h);
 
     const t = try server.listenInBackground();
-    defer t.join();
-    defer server.stop();
     sleepMs(100);
 
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
@@ -104,4 +102,7 @@ pub fn main() !void {
     std.debug.print("readinessProbe: {s}\n", .{httpx.readinessProbe(.{}).name});
 
     std.debug.print("\n=== Health Check Example Complete ===\n", .{});
+
+    server.stop();
+    t.join();
 }

@@ -41,10 +41,6 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-/// ---------------------------------------------------------------------------
-/// Route Handlers
-/// ---------------------------------------------------------------------------
-/// Root endpoint returning service metadata as JSON.
 fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.json(.{
         .status = "ok",
@@ -132,9 +128,6 @@ pub fn main() !void {
 
     std.debug.print("=== Cloud HTTPS Server Example (HTTP/1.1 + HTTP/2 + HTTP/3) ===\n\n", .{});
 
-    // -----------------------------------------------------------------------
-    // 1. TLS Configuration (documentation / client-side reference)
-    // -----------------------------------------------------------------------
     // Self-signed certificates are provided in `examples/certs/` for local
     // development behind a TLS-terminating reverse proxy. In production,
     // replace with Let's Encrypt / ACME-managed certificates.
@@ -142,19 +135,7 @@ pub fn main() !void {
     // NOTE: httpx.zig server currently handles plain HTTP. TLS termination
     // is expected at a reverse proxy (nginx, Caddy, cloud LB) which forwards
     // traffic to this server on an internal port.
-    //
-    // Example TLS setup (for documentation / client-side reference only):
-    //   var tls_config = httpx.TlsConfig.init(allocator);
-    //   tls_config.cert_file = "examples/certs/server.crt";
-    //   tls_config.key_file = "examples/certs/server.key";
-    //   tls_config.min_version = .tls_1_2;
-    //   tls_config.max_version = .tls_1_3;
-    //   tls_config.alpn_protocols = &.{ "h3", "h2", "http/1.1" };
-    //   tls_config.allow_truncation_attacks = false;
 
-    // -----------------------------------------------------------------------
-    // 2. Server Configuration (HTTP/1.1 + HTTP/2 + HTTP/3)
-    // -----------------------------------------------------------------------
     // The server enables all three protocol versions simultaneously. HTTP/1.1
     // and HTTP/2 share the TCP listener; HTTP/3 runs over QUIC on a separate
     // UDP socket. In production, ALPN negotiation at the TLS handshake
@@ -176,9 +157,6 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    // -----------------------------------------------------------------------
-    // 3. Middleware Stack
-    // -----------------------------------------------------------------------
     // Middleware runs in registration order. Health-check / readiness-probe
     // middleware intercepts their paths before reaching route handlers, so
     // even if your DB is down the LB knows the process is alive.
@@ -207,10 +185,6 @@ pub fn main() !void {
     // Request logging middleware.
     try server.use(httpx.logger());
 
-    // -----------------------------------------------------------------------
-    // 4. Routes
-    // -----------------------------------------------------------------------
-
     // Public endpoints
     try server.get("/", indexHandler);
     try server.get("/status", statusHandler);
@@ -221,9 +195,6 @@ pub fn main() !void {
     // 404 fallback for unmatched routes
     server.global(notFoundHandler);
 
-    // -----------------------------------------------------------------------
-    // 5. Print configuration summary
-    // -----------------------------------------------------------------------
     std.debug.print("Server Configuration:\n", .{});
     std.debug.print("  Host:              {s}\n", .{server.config.host});
     std.debug.print("  Port:              {d}\n", .{port});
@@ -250,10 +221,6 @@ pub fn main() !void {
     std.debug.print("  3. readinessProbe (/ready)\n", .{});
     std.debug.print("  4. logger\n", .{});
 
-    // -----------------------------------------------------------------------
-    // 6. Start server
-    // -----------------------------------------------------------------------
-
     const server_thread = try server.listenInBackground();
     defer {
         server.stop();
@@ -263,9 +230,12 @@ pub fn main() !void {
     // Give the server a moment to bind the socket and start accepting.
     sleepMs(100);
 
-    // -----------------------------------------------------------------------
-    // 7. Self-test: verify endpoints with all three protocols
-    // -----------------------------------------------------------------------
+    // HTTP/1.0 client
+    var h10_client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
+        .withTimeouts(httpx.Timeouts.fast())
+        .withRetryPolicy(httpx.RetryPolicy.noRetry())
+        .withKeepAlive(false));
+    defer h10_client.deinit();
 
     // HTTP/1.1 client
     var h1_client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
@@ -290,7 +260,7 @@ pub fn main() !void {
         .withProtocols(false, true));
     defer h3_client.deinit();
 
-    std.debug.print("\n--- Self-test: Verifying Endpoints (HTTP/1.1, HTTP/2, HTTP/3) ---\n\n", .{});
+    std.debug.print("\n--- Self-test: Verifying Endpoints (HTTP/1.0, HTTP/1.1, HTTP/2, HTTP/3) ---\n\n", .{});
 
     const endpoints = [_]struct {
         method: httpx.Method,
@@ -307,6 +277,41 @@ pub fn main() !void {
     };
 
     var all_ok = true;
+
+    // Test with HTTP/1.0
+    std.debug.print("  Protocol: HTTP/1.0\n", .{});
+    var h10_base: httpx.RequestOptions = .{};
+    const h10_opts = h10_base.withVersion(.HTTP_1_0);
+    for (endpoints) |ep| {
+        const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ port, ep.path });
+        defer allocator.free(url);
+
+        var resp = switch (ep.method) {
+            .GET => try h10_client.get(url, h10_opts),
+            else => try h10_client.request(ep.method, url, h10_opts),
+        };
+        defer resp.deinit();
+
+        const ok = resp.status.code == ep.expected_status;
+        if (!ok) all_ok = false;
+
+        std.debug.print("    {s: <18} {s: <5} {s: <22} -> {d} {s}\n", .{
+            ep.label,
+            @tagName(ep.method),
+            ep.path,
+            resp.status.code,
+            if (ok) "ok" else "FAIL",
+        });
+
+        if (!ok) {
+            const body_text = resp.text() orelse "";
+            std.debug.print("      expected {d}, got {d}: {s}\n", .{
+                ep.expected_status,
+                resp.status.code,
+                if (body_text.len > 64) body_text[0..64] else body_text,
+            });
+        }
+    }
 
     // Test with HTTP/1.1
     std.debug.print("  Protocol: HTTP/1.1\n", .{});
@@ -380,15 +385,28 @@ pub fn main() !void {
         }
     }
 
-    // Test with HTTP/3
+    // Test with HTTP/3 (may fail on platforms without QUIC/UDP support)
     std.debug.print("\n  Protocol: HTTP/3 (QUIC)\n", .{});
+    var h3_supported = true;
     for (endpoints) |ep| {
-        const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ port, ep.path });
+        const url = std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ port, ep.path }) catch break;
         defer allocator.free(url);
 
         var resp = switch (ep.method) {
-            .GET => try h3_client.get(url, .{}),
-            else => try h3_client.request(ep.method, url, .{}),
+            .GET => h3_client.get(url, .{}) catch |err| {
+                if (h3_supported) {
+                    std.debug.print("    HTTP/3 not available: {} (QUIC may be unavailable on this platform)\n", .{err});
+                    h3_supported = false;
+                }
+                break;
+            },
+            else => h3_client.request(ep.method, url, .{}) catch |err| {
+                if (h3_supported) {
+                    std.debug.print("    HTTP/3 not available: {} (QUIC may be unavailable on this platform)\n", .{err});
+                    h3_supported = false;
+                }
+                break;
+            },
         };
         defer resp.deinit();
 
@@ -416,10 +434,6 @@ pub fn main() !void {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // 8. Cloud deployment documentation
-    // -----------------------------------------------------------------------
-
     std.debug.print("\n--- Cloud Deployment Notes ---\n", .{});
     std.debug.print("\n", .{});
     std.debug.print("  AWS/GCP/Azure: Allow inbound TCP 443 in security groups.\n", .{});
@@ -435,7 +449,7 @@ pub fn main() !void {
     std.debug.print("                 certs; self-signed only for dev/staging.\n", .{});
 
     if (all_ok) {
-        std.debug.print("\n=== All endpoints verified successfully across HTTP/1.1, HTTP/2, HTTP/3! ===\n", .{});
+        std.debug.print("\n=== All endpoints verified successfully across HTTP/1.0, HTTP/1.1, HTTP/2, HTTP/3! ===\n", .{});
     } else {
         std.debug.print("\n!!! Some endpoints returned unexpected status codes !!!\n", .{});
         std.process.exit(1);

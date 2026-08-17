@@ -148,13 +148,14 @@ std.debug.print("Encoded {d} headers into {d} bytes\n", .{headers.len, encoded.l
 QPACK uses separate streams for encoder/decoder instructions:
 
 ```zig
-var encoder = httpx.qpack.EncoderStream.init();
+var out = std.ArrayList(u8).empty;
+defer out.deinit(allocator);
 
 // Set Dynamic Table Capacity
-const cap_instruction = encoder.setDynamicTableCapacity(4096);
+try httpx.qpack.encodeSetCapacity(4096, &out, allocator);
 
-// Insert With Name Reference
-const insert_instruction = encoder.insertWithNameReference(17, "POST"); // :method=POST
+// Insert With Name Reference (static table, index 17 = :method, value = "POST")
+try httpx.qpack.encodeInsertNameRef(true, 17, "POST", &out, allocator);
 ```
 
 ## QUIC Packet Structure
@@ -378,19 +379,14 @@ defer allocator.free(encoded);
 
 ## Flow Control
 
-HTTP/3 uses MAX_DATA and MAX_STREAM_DATA frames for flow control:
+HTTP/3 uses MAX_DATA and MAX_STREAM_DATA frames for flow control. These are defined as frame types (`max_data = 0x10`, `max_stream_data = 0x11`) and are handled internally by the connection. Flow control limits are configured via transport parameters:
 
 ```zig
-// Connection-level flow control
-// Server sends MAX_DATA to increase the client's send window
-const max_data_frame = httpx.quic.MaxDataFrame{
-    .maximum_data = 10485760, // 10MB
-};
-
-// Per-stream flow control
-const max_stream_data_frame = httpx.quic.MaxStreamDataFrame{
-    .stream_id = 4,
-    .maximum_stream_data = 1048576, // 1MB per stream
+const params = httpx.quic.TransportParameters{
+    .initial_max_data = 10 * 1024 * 1024,           // 10MB connection-level
+    .initial_max_stream_data_bidi_local = 1024 * 1024,  // 1MB per stream
+    .initial_max_stream_data_bidi_remote = 1024 * 1024,
+    .initial_max_stream_data_uni = 1024 * 1024,
 };
 ```
 
@@ -423,14 +419,14 @@ Cancel individual streams without tearing down the connection:
 // RESET_STREAM: abruptly terminates a send stream
 const reset = httpx.quic.ResetStreamFrame{
     .stream_id = 4,
-    .error_code = @intFromEnum(httpx.quic.StreamError.cancel),
+    .error_code = 0x06, // application error (user-defined)
     .final_size = 1024,
 };
 
 // STOP_SENDING: ask the peer to stop sending on a receive stream
 const stop = httpx.quic.StopSendingFrame{
     .stream_id = 8,
-    .error_code = @intFromEnum(httpx.quic.StreamError.cancel),
+    .error_code = 0x01, // application error (user-defined)
 };
 ```
 
@@ -457,12 +453,12 @@ const capacity = try httpx.qpack.decodeSetCapacity(data);
 Run the low-level protocol, high-level runtime, and advanced HTTP/3 examples with:
 
 ```bash
-zig build example-http3_example
+zig build run-all-http3_example
 ./zig-out/bin/http3_example
 
-zig build run-http3_client_runtime
-zig build run-http3_server_runtime
-zig build run-http3_advanced
+zig build run-all-http3_client_runtime
+zig build run-all-http3_server_runtime
+zig build run-all-http3_advanced
 ```
 
 ## See Also

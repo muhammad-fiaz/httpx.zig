@@ -30,7 +30,8 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
     const ts = std.Io.Timestamp.now(io, .real).toMilliseconds();
     var socket_path_buf: [64]u8 = undefined;
-    const socket_path = try std.fmt.bufPrint(&socket_path_buf, "httpx-ipc-{d}.sock", .{ts});
+    // Use short name to stay within Windows AF_UNIX 108-byte limit
+    const socket_path = try std.fmt.bufPrint(&socket_path_buf, "hx-{d}", .{ts});
 
     // 1. Initialize and configure HTTP Server on Unix Socket
     std.debug.print("Initializing server on: {s}...\n", .{socket_path});
@@ -54,16 +55,12 @@ pub fn main() !void {
     const thread = server.listenInBackground() catch |err| {
         std.debug.print("\nServer failed to start: {s}\n", .{@errorName(err)});
         if (builtin.os.tag == .windows) {
-            std.debug.print("On Windows, AF_UNIX requires Windows 10 build 17061+ with Developer Mode enabled.\n", .{});
-            std.debug.print("Enable Developer Mode in Windows Settings, or run on Linux/macOS.\n", .{});
+            std.debug.print("Windows AF_UNIX socket paths have stricter address-length limitations.\n", .{});
+            std.debug.print("Use a shorter socket path or run on Linux/macOS.\n", .{});
         }
         std.debug.print("=== Unix Domain Socket Example Skipped (bind failed) ===\n", .{});
         return;
     };
-    defer thread.join();
-    defer server.stop();
-
-    // Give server a moment to bind and listen
     sleepMs(50);
 
     // 3. Initialize HTTP Client with unix_socket_path
@@ -86,4 +83,7 @@ pub fn main() !void {
     std.debug.print("Response Body:\n{s}\n", .{resp.text().?});
 
     std.debug.print("\n=== Unix Domain Socket Example Complete ===\n", .{});
+
+    server.stop();
+    thread.join();
 }

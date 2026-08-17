@@ -26,9 +26,9 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Load client certificate and key (using the same dummy certs for demo)
-    const client_cert = @embedFile("certs/server.crt");
-    const client_key = @embedFile("certs/server.key");
-    const ca_cert = @embedFile("certs/server.crt");
+    const client_cert = @embedFile("certs/server_ec.crt");
+    const client_key = @embedFile("certs/server_ec.key");
+    const ca_cert = @embedFile("certs/server_ec.crt");
 
     std.debug.print("Client certificate: {d} bytes\n", .{client_cert.len});
     std.debug.print("Client key:         {d} bytes\n", .{client_key.len});
@@ -39,11 +39,11 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .tls_enabled = true,
-        .tls_cert_path = "examples/certs/server.crt",
-        .tls_key_path = "examples/certs/server.key",
+        .tls_cert_path = "examples/certs/server_ec.crt",
+        .tls_key_path = "examples/certs/server_ec.key",
         .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
         .http2_enabled = true,
-        .http3_enabled = true,
+        .http3_enabled = false,
         .keep_alive = true,
     });
     defer server.deinit();
@@ -79,7 +79,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build example-tls_mtls
+zig build run-all-tls_mtls
 ```
 
 ## mTLS Flow

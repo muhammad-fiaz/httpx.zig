@@ -35,7 +35,7 @@ var resp = try client.options(url, .{});
 ## Run
 
 ```
-zig build example-http-methods
+zig build run-all-http_methods
 ```
 
 ## Checklist

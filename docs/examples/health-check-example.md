@@ -23,14 +23,14 @@ pub fn main() !void {
     defer server.deinit();
 
     // Register health check middleware
-    try server.use(httpx.healthCheck(.{
+    try server.use(httpx.middleware.healthCheck(.{
         .path = "/health",
         .body = "{\"status\":\"ok\"}",
         .status = 200,
     }));
 
     // Register readiness probe middleware
-    try server.use(httpx.readinessProbe(.{
+    try server.use(httpx.middleware.readinessProbe(.{
         .path = "/ready",
         .body = "{\"ready\":true,\"db\":true}",
     }));
@@ -46,5 +46,5 @@ pub fn main() !void {
 Run the pre-configured health check example:
 
 ```bash
-zig build run-health_check_example
+zig build run-all-health_check_example
 ```

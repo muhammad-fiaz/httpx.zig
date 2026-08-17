@@ -15,6 +15,7 @@ const Allocator = mem.Allocator;
 const types = @import("../core/types.zig");
 const Headers = @import("../core/headers.zig").Headers;
 const Status = @import("../core/status.zig").Status;
+const dbg = @import("../util/debug.zig");
 
 /// Parser state machine states.
 pub const ParserState = enum {
@@ -61,11 +62,20 @@ pub const Parser = struct {
     /// When false, the parser will not enter body state for responses.
     /// Used for HEAD responses which have no body.
     expect_body: bool = true,
+    /// Maximum body size in bytes. 0 means unlimited. Prevents memory exhaustion.
+    max_body_size: usize = 100 * 1024 * 1024,
+    /// Whether Connection: close was seen.
+    connection_close: bool = false,
+    /// Whether Connection: keep-alive was seen.
+    connection_keep_alive: bool = false,
+    /// Whether Transfer-Encoding header was seen (for conflict detection).
+    transfer_encoding_seen: bool = false,
 
     const Self = @This();
 
     /// Creates a new parser instance.
     pub fn init(allocator: Allocator) Self {
+        dbg.entry("PARSE", "Parser.init");
         return .{
             .allocator = allocator,
             .headers = Headers.init(allocator),
@@ -74,6 +84,7 @@ pub const Parser = struct {
 
     /// Creates a parser for parsing responses.
     pub fn initResponse(allocator: Allocator) Self {
+        dbg.entry("PARSE", "Parser.initResponse");
         var p = init(allocator);
         p.mode = .response;
         p.state = .status_line;
@@ -117,6 +128,10 @@ pub const Parser = struct {
                 .chunk_trailer => try self.parseChunkTrailer(remaining),
                 .complete, .err => break,
             };
+        }
+
+        if (self.state == .complete) {
+            dbg.log("PARSE", "parse complete consumed={d}", .{consumed});
         }
 
         return consumed;
@@ -164,6 +179,18 @@ pub const Parser = struct {
         self.chunk_crlf_read = 0;
         self.header_bytes = 0;
         self.header_count = 0;
+        self.connection_close = false;
+        self.connection_keep_alive = false;
+        self.transfer_encoding_seen = false;
+    }
+
+    /// Returns whether the connection should be kept alive based on parsed headers
+    /// and HTTP version. Implements RFC 7230 Section 6.3 semantics.
+    pub fn isKeepAlive(self: *const Self) bool {
+        if (self.connection_close) return false;
+        if (self.connection_keep_alive) return true;
+        // HTTP/1.1 defaults to keep-alive; HTTP/1.0 defaults to close.
+        return self.version == .HTTP_1_1;
     }
 
     fn checkLineBufferLimit(self: *Self) !void {
@@ -269,6 +296,8 @@ pub const Parser = struct {
     }
 
     fn parseHeaders(self: *Self, data: []const u8) !usize {
+        var lower_buf: [256]u8 = undefined; // For case-insensitive comparison buffers
+
         const line_end = mem.indexOf(u8, data, "\r\n") orelse {
             try self.line_buffer.appendSlice(self.allocator, data);
             try self.checkLineBufferLimit();
@@ -300,10 +329,79 @@ pub const Parser = struct {
             self.header_count += 1;
 
             if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-                self.content_length = std.fmt.parseInt(u64, value, 10) catch null;
+                // RFC 7230 3.3.3: If Transfer-Encoding is present, Content-Length
+                // must be silently ignored.
+                if (self.transfer_encoding_seen) {
+                    // Skip parsing this header entirely.
+                } else {
+                    // Content-Length may be a comma-separated list of integers,
+                    // all of which must be identical.
+                    var cl_iter = std.mem.splitScalar(u8, value, ',');
+                    while (cl_iter.next()) |cl_part| {
+                        const trimmed = std.mem.trim(u8, cl_part, " \t");
+                        if (trimmed.len == 0) continue;
+                        const cl = std.fmt.parseInt(u64, trimmed, 10) catch {
+                            self.state = .err;
+                            return error.InvalidContentLength;
+                        };
+                        if (self.content_length) |existing| {
+                            if (existing != cl) {
+                                // RFC 7230: conflicting Content-Length values are an error.
+                                self.state = .err;
+                                return error.InvalidContentLength;
+                            }
+                        } else {
+                            self.content_length = cl;
+                        }
+                    }
+                }
             } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-                if (mem.indexOf(u8, value, "chunked") != null) {
+                // RFC 7230 3.3.1: Transfer-Encoding is not allowed in HTTP/1.0.
+                if (self.version == .HTTP_1_0) {
+                    self.state = .err;
+                    return error.InvalidChunkEncoding;
+                }
+                // RFC 7230 3.3.1: Only chunked is supported as the last transfer-coding.
+                // Reject if "chunked" is not the last coding in the list.
+                const lower_value = std.ascii.lowerString(&lower_buf, value);
+                if (std.mem.lastIndexOf(u8, lower_value, "chunked")) |pos| {
+                    // Check that nothing meaningful comes after "chunked"
+                    const after = std.mem.trim(u8, lower_value[pos + 7 ..], " \t");
+                    if (after.len > 0 and after[0] != ',') {
+                        self.state = .err;
+                        return error.InvalidChunkEncoding;
+                    }
+                    // Check that chunked is the LAST coding (no codings after the comma following chunked)
+                    var coding_iter = std.mem.splitScalar(u8, lower_value, ',');
+                    var last_was_chunked = false;
+                    while (coding_iter.next()) |coding| {
+                        const trimmed_coding = std.mem.trim(u8, coding, " \t");
+                        if (std.mem.eql(u8, trimmed_coding, "chunked")) {
+                            last_was_chunked = true;
+                        } else if (last_was_chunked) {
+                            // chunked is not the last coding
+                            self.state = .err;
+                            return error.InvalidChunkEncoding;
+                        }
+                    }
                     self.chunked = true;
+                } else {
+                    // Non-chunked Transfer-Encoding is not supported.
+                    self.state = .err;
+                    return error.InvalidChunkEncoding;
+                }
+                self.transfer_encoding_seen = true;
+                if (self.content_length != null) {
+                    // RFC 7230: Content-Length must be ignored when Transfer-Encoding
+                    // is present. We clear it to avoid confusion.
+                    self.content_length = null;
+                }
+            } else if (std.ascii.eqlIgnoreCase(name, "connection")) {
+                if (std.ascii.indexOfIgnoreCase(value, "close") != null) {
+                    self.connection_close = true;
+                }
+                if (std.ascii.indexOfIgnoreCase(value, "keep-alive") != null) {
+                    self.connection_keep_alive = true;
                 }
             }
         }
@@ -343,6 +441,11 @@ pub const Parser = struct {
         if (self.content_length) |len| {
             const remaining = len - self.bytes_read;
             const to_read = @min(data.len, @as(usize, @intCast(remaining)));
+            // Enforce body size limit
+            if (self.max_body_size > 0 and self.body_buffer.items.len + to_read > self.max_body_size) {
+                self.state = .err;
+                return error.BodyTooLarge;
+            }
             try self.body_buffer.appendSlice(self.allocator, data[0..to_read]);
             self.bytes_read += to_read;
 
@@ -352,6 +455,11 @@ pub const Parser = struct {
             return to_read;
         }
 
+        // EOF-delimited body: enforce body size limit
+        if (self.max_body_size > 0 and self.body_buffer.items.len + data.len > self.max_body_size) {
+            self.state = .err;
+            return error.BodyTooLarge;
+        }
         try self.body_buffer.appendSlice(self.allocator, data);
         return data.len;
     }
@@ -394,6 +502,12 @@ pub const Parser = struct {
     fn parseChunkData(self: *Self, data: []const u8) !usize {
         const remaining = self.current_chunk_size - self.bytes_read;
         const to_read = @min(data.len, remaining);
+
+        // Enforce body size limit
+        if (self.max_body_size > 0 and self.body_buffer.items.len + to_read > self.max_body_size) {
+            self.state = .err;
+            return error.BodyTooLarge;
+        }
 
         try self.body_buffer.appendSlice(self.allocator, data[0..to_read]);
         self.bytes_read += to_read;
@@ -463,7 +577,7 @@ test "Parser request line" {
     var parser = Parser.init(allocator);
     defer parser.deinit();
 
-    const data = "GET /api/users HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    const data = "GET /api/users HTTP/1.1\r\nHost: httpbun.com\r\n\r\n";
     _ = try parser.feed(data);
 
     try std.testing.expect(parser.isComplete());
@@ -528,10 +642,10 @@ test "Parser headers" {
     var parser = Parser.init(allocator);
     defer parser.deinit();
 
-    const data = "GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: test\r\n\r\n";
+    const data = "GET / HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: test\r\n\r\n";
     _ = try parser.feed(data);
 
-    try std.testing.expectEqualStrings("example.com", parser.headers.get("Host").?);
+    try std.testing.expectEqualStrings("httpbun.com", parser.headers.get("Host").?);
     try std.testing.expectEqualStrings("test", parser.headers.get("User-Agent").?);
 }
 
@@ -546,4 +660,210 @@ test "Parser reset" {
     parser.reset();
     try std.testing.expect(!parser.isComplete());
     try std.testing.expect(parser.method == null);
+}
+
+test "Parser Content-Length comma-separated list (identical values)" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    // RFC 7230 3.3.3 errata: comma-separated Content-Length values that are identical
+    const data = "HTTP/1.1 200 OK\r\nContent-Length: 5, 5\r\n\r\nHello";
+    _ = try parser.feed(data);
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expectEqual(@as(?u64, 5), parser.content_length);
+    try std.testing.expectEqualStrings("Hello", parser.getBody());
+}
+
+test "Parser Content-Length comma-separated list (conflicting values)" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    // RFC 7230 3.3.3: conflicting Content-Length values must be rejected.
+    const data = "HTTP/1.1 200 OK\r\nContent-Length: 5, 10\r\n\r\nHello";
+    const result = parser.feed(data);
+
+    try std.testing.expectError(error.InvalidContentLength, result);
+}
+
+test "Parser Transfer-Encoding on HTTP/1.0 is rejected" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    // RFC 7230 3.3.1: Transfer-Encoding is not allowed in HTTP/1.0.
+    const data = "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n0\r\n\r\n";
+    const result = parser.feed(data);
+
+    try std.testing.expectError(error.InvalidChunkEncoding, result);
+}
+
+test "Parser Transfer-Encoding non-chunked is rejected" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    // Non-chunked Transfer-Encoding (e.g., gzip) is not supported.
+    const data = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\n";
+    const result = parser.feed(data);
+
+    try std.testing.expectError(error.InvalidChunkEncoding, result);
+}
+
+test "Parser Transfer-Encoding not last coding is rejected" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    // chunked must be the last transfer coding
+    const data = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\n\r\n";
+    const result = parser.feed(data);
+
+    try std.testing.expectError(error.InvalidChunkEncoding, result);
+}
+
+test "Parser Content-Length ignored when Transfer-Encoding present" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    // When Transfer-Encoding is present, Content-Length must be ignored per RFC 7230.
+    const data = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 999\r\n\r\n5\r\nHello\r\n0\r\n\r\n";
+    _ = try parser.feed(data);
+
+    try std.testing.expect(parser.isComplete());
+    // Content-Length should be cleared
+    try std.testing.expect(parser.content_length == null);
+    try std.testing.expectEqualStrings("Hello", parser.getBody());
+}
+
+test "Parser Connection header tracking" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    const data = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    _ = try parser.feed(data);
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expect(parser.connection_close);
+    try std.testing.expect(!parser.isKeepAlive());
+}
+
+test "Parser HTTP/1.1 default keep-alive" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    const data = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    _ = try parser.feed(data);
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expect(parser.isKeepAlive());
+}
+
+test "Parser HTTP/1.0 default close" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    const data = "HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n";
+    _ = try parser.feed(data);
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expect(!parser.isKeepAlive());
+}
+
+test "Parser HTTP/1.0 with Connection: keep-alive" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    const data = "HTTP/1.0 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
+    _ = try parser.feed(data);
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expect(parser.connection_keep_alive);
+    try std.testing.expect(parser.isKeepAlive());
+}
+
+test "Parser body size limit exceeded" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+    parser.max_body_size = 5; // Only allow 5 bytes
+
+    const data = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789";
+    const result = parser.feed(data);
+
+    try std.testing.expectError(error.BodyTooLarge, result);
+}
+
+test "Parser body size limit chunked" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+    parser.max_body_size = 3; // Only allow 3 bytes
+
+    const data = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n0\r\n\r\n";
+    const result = parser.feed(data);
+
+    try std.testing.expectError(error.BodyTooLarge, result);
+}
+
+test "Parser body size limit 0 means unlimited" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+    parser.max_body_size = 0; // Unlimited
+
+    const data = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n0123456789";
+    _ = try parser.feed(data);
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expectEqualStrings("0123456789", parser.getBody());
+}
+
+test "Parser reset clears new fields" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    const data = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    _ = try parser.feed(data);
+
+    try std.testing.expect(parser.connection_close);
+
+    parser.reset();
+    try std.testing.expect(!parser.connection_close);
+    try std.testing.expect(!parser.connection_keep_alive);
+    try std.testing.expect(!parser.transfer_encoding_seen);
+}
+
+test "Parser case-insensitive Content-Length" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    const data = "HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nHello";
+    _ = try parser.feed(data);
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expectEqual(@as(?u64, 5), parser.content_length);
+    try std.testing.expectEqualStrings("Hello", parser.getBody());
+}
+
+test "Parser multiple Content-Length with spaces" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    // With spaces around the comma
+    const data = "HTTP/1.1 200 OK\r\nContent-Length: 5 , 5\r\n\r\nHello";
+    _ = try parser.feed(data);
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expectEqual(@as(?u64, 5), parser.content_length);
 }

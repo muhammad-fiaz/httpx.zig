@@ -62,7 +62,7 @@ Benchmark target: `x86_64-windows`, `ReleaseFast`.
 
 ::: warning v0.1.6 release and Zig 0.15 deprecation
 `v0.1.6` is the current release and targets Zig `0.16.0+`.
-`v0.1.2` is the previous stable release for the immediate prior `0.1.x` line.
+`v0.1.5` is the previous stable release for the immediate prior `0.1.x` line.
 Zig `0.15` support is legacy and remains available only through `0.0.7`.
 The HTTPS/TLS reader fix for Zig `0.16` empty-buffer reads is included in this release.
 If you are upgrading from `0.0.7`, review the GitHub Releases page for migration notes.
@@ -76,10 +76,10 @@ Choose one of these installation methods:
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.6.tar.gz
 ```
 
-2. Previous stable release (0.1.2)
+2. Previous stable release (0.1.5)
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.2.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.5.tar.gz
 ```
 
 3. Legacy Zig 0.15 support (0.0.7)
@@ -166,13 +166,14 @@ httpx.zig is validated across Linux, Windows, and macOS:
 All examples are runnable from the repo root:
 
 ```bash
-zig build run-simple_get
+zig build run-all-simple_get
 ```
 
 Available examples (see the `/examples` folder):
 
 - `simple_get.zig`: minimal GET
 - `simple_get_deserialize.zig`: GET request with typed JSON deserialization
+- `json_api_example.zig`: JSON API: getJson, postJsonAndParse, Response.json, server ctx.jsonBody + ctx.json
 - `post_json.zig`: JSON POST
 - `custom_headers.zig`: request headers
 - `interceptors.zig`: request/response interception hooks
@@ -209,6 +210,7 @@ Available examples (see the `/examples` folder):
 - `health_check_example.zig`: liveness and readiness probe middleware
 - `proxy_example.zig`: HTTP proxy and SOCKS5h tunneling
 - `async_server_example.zig`: server thread pool concurrency and request handling on background workers
+- `logging_callback.zig`: custom logging, silent mode, and log_level filtering
 - `request_response_customization.zig`: request and response builder patterns
 - `http_auth_helpers.zig`: Bearer and Basic auth helpers
 
@@ -235,7 +237,7 @@ To validate Linux runtime behavior (not just compile checks), build Linux artifa
 
 ```bash
 zig build test -Dtarget=x86_64-linux
-zig build example-tcp_local -Dtarget=x86_64-linux
+zig build run-all-tcp_local -Dtarget=x86_64-linux
 
 ./zig-out/bin/test
 ./zig-out/bin/tcp_local

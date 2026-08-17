@@ -10,6 +10,7 @@
 //! - Cross-platform (Linux, Windows, macOS)
 
 const std = @import("std");
+const tint = @import("tint");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const net = @import("../net/compat.zig");
@@ -38,6 +39,7 @@ const common = @import("../util/common.zig");
 const list_writer = @import("../util/list_writer.zig");
 const io_util = @import("../util/any_io.zig");
 const Executor = @import("../concurrency/executor.zig").Executor;
+const dbg = @import("../util/debug.zig");
 
 const defaultIo = io_util.defaultIo;
 const sleepMs = io_util.sleepMsI;
@@ -53,13 +55,7 @@ pub const PortConflictStrategy = enum {
     increment,
 };
 
-/// SSE event payload used by `Context.sse`.
-pub const SseEvent = struct {
-    data: []const u8,
-    event: ?[]const u8 = null,
-    id: ?[]const u8 = null,
-    retry_ms: ?u32 = null,
-};
+pub const SseEvent = @import("../util/sse.zig").Event;
 
 /// Pre-route hook called after parsing the request and before route matching.
 pub const PreRouteHook = *const fn (*Context) anyerror!void;
@@ -91,6 +87,7 @@ pub const ServerConfig = struct {
     http2_settings: types.Http2Settings = .{},
     http3_settings: types.Http3Settings = .{},
     log_fn: ?LogFn = null,
+    log_level: LogLevel = .info,
     unix_path: ?[]const u8 = null,
     tls_enabled: bool = false,
     tls_cert_path: ?[]const u8 = null,
@@ -371,6 +368,34 @@ pub const Context = struct {
         return self.response.build();
     }
 
+    /// Parses the request body as JSON into the given type.
+    /// The caller must call `deinit()` on the returned `std.json.Parsed(T)`.
+    pub fn jsonBody(self: *const Self, comptime T: type, options: std.json.ParseOptions) !std.json.Parsed(T) {
+        const body = self.request.body orelse return error.NoBody;
+        return std.json.parseFromSlice(T, self.allocator, body, options);
+    }
+
+    /// Parses the request body as JSON into the given type using leaky allocation.
+    pub fn jsonBodyLeaky(self: *const Self, comptime T: type, options: std.json.ParseOptions) !T {
+        const body = self.request.body orelse return error.NoBody;
+        return std.json.parseFromSliceLeaky(T, self.allocator, body, options);
+    }
+
+    /// Parses the request body as a dynamic JSON value.
+    /// The caller must call `deinit()` on the returned `ParsedJson`.
+    pub fn jsonValue(self: *const Self) !@import("../util/json.zig").ParsedJson {
+        const body = self.request.body orelse return error.NoBody;
+        return @import("../util/json.zig").Json.parseValue(self.allocator, body);
+    }
+
+    /// Returns 415 Unsupported Media Type if the request Content-Type is not JSON.
+    /// Use this to guard handlers that require JSON input.
+    pub fn requireJson(self: *const Self) !void {
+        if (!self.isJson()) {
+            return error.JsonContentTypeRequired;
+        }
+    }
+
     /// Sends a redirect response.
     pub fn redirect(self: *Self, url: []const u8, code: u16) !Response {
         _ = self.response.status(code);
@@ -400,7 +425,10 @@ pub const Server = struct {
     udp_socket: ?UdpSocket = null,
     unix_listener: ?@import("../net/unix.zig").UnixListener = null,
     running: bool = false,
+    active_connections: std.ArrayList(Socket) = .empty,
     executor: ?Executor = null,
+    executor_connections: std.ArrayList(Socket) = .empty,
+    executor_conn_mutex: std.Io.Mutex = .init,
     server_tls_config: ?tls_mod.ServerTlsConfig = null,
 
     const Self = @This();
@@ -412,6 +440,8 @@ pub const Server = struct {
 
     /// Creates a server with custom configuration.
     pub fn initWithConfig(allocator: Allocator, config: ServerConfig) Self {
+        dbg.entry("SERVER", "initWithConfig");
+        defer dbg.exit("SERVER", "initWithConfig");
         var cfg = config;
         if (cfg.max_connections == 0) cfg.max_connections = 1000;
         if (cfg.max_port_tries == 0) cfg.max_port_tries = 1;
@@ -433,9 +463,13 @@ pub const Server = struct {
 
     /// Releases all server resources.
     pub fn deinit(self: *Self) void {
+        dbg.entry("SERVER", "deinit");
+        defer dbg.exit("SERVER", "deinit");
         self.router.deinit();
         self.middleware.deinit(self.allocator);
         self.pre_route_hooks.deinit(self.allocator);
+        self.active_connections.deinit(self.allocator);
+        self.executor_connections.deinit(self.allocator);
         if (self.listener) |*l| l.deinit();
         if (self.udp_socket) |*u| u.close();
         if (self.executor) |*e| {
@@ -539,16 +573,28 @@ pub const Server = struct {
                 const backlog: u31 = @intCast(@min(backlog_u32, @as(u32, std.math.maxInt(u31))));
                 try self.bindTcpListener(backlog);
             }
-            // Also bind UDP for HTTP/3.
-            try self.bindUdpSocket();
+            // Also bind UDP for HTTP/3 (graceful fallback).
+            const udp_ok = blk: {
+                self.bindUdpSocket() catch |err| {
+                    self.log(.warn, "HTTP/3 UDP bind failed: {} — falling back to HTTP/1.1 + HTTP/2\n", .{err});
+                    break :blk false;
+                };
+                break :blk true;
+            };
             self.running = true;
 
-            self.log(.info, "Server listening on {s}:{d} (HTTP/1.1 + HTTP/2) and {s}:{d} (HTTP/3 QUIC)\n", .{
-                self.config.host,
-                self.config.port,
-                self.config.host,
-                self.config.port,
-            });
+            if (udp_ok) {
+                self.log(.info, "Server listening on {s}:{d} (HTTP/1.1 + HTTP/2 + HTTP/3)\n", .{
+                    self.config.host,
+                    self.config.port,
+                });
+            } else {
+                self.config.http3_enabled = false;
+                self.log(.info, "Server listening on {s}:{d} (HTTP/1.1 + HTTP/2)\n", .{
+                    self.config.host,
+                    self.config.port,
+                });
+            }
 
             // Spawn TCP accept loop in a separate thread.
             const tcp_thread = try std.Thread.spawn(.{}, struct {
@@ -562,8 +608,13 @@ pub const Server = struct {
             }.run, .{self});
             defer tcp_thread.join();
 
-            // Run HTTP/3 UDP recv loop in the current thread.
-            return self.listenHttp3AcceptLoop();
+            // Run HTTP/3 UDP recv loop only if UDP socket was bound.
+            if (udp_ok) {
+                return self.listenHttp3AcceptLoop();
+            }
+            // Otherwise wait for the TCP thread.
+            tcp_thread.join();
+            return;
         }
 
         return self.listenTcp();
@@ -595,20 +646,33 @@ pub const Server = struct {
                 const backlog: u31 = @intCast(@min(backlog_u32, @as(u32, std.math.maxInt(u31))));
                 try self.bindTcpListener(backlog);
             }
-            // Bind UDP socket for HTTP/3 over QUIC.
-            try self.bindUdpSocket();
+            // Bind UDP socket for HTTP/3 over QUIC (graceful fallback if bind fails).
+            const udp_ok = blk: {
+                self.bindUdpSocket() catch |err| {
+                    self.log(.warn, "HTTP/3 UDP bind failed: {} — falling back to HTTP/1.1 + HTTP/2\n", .{err});
+                    break :blk false;
+                };
+                break :blk true;
+            };
+
             self.running = true;
 
             if (self.executor) |*e| {
                 try e.start();
             }
 
-            self.log(.info, "Server listening on {s}:{d} (HTTP/1.1 + HTTP/2) and {s}:{d} (HTTP/3 QUIC)\n", .{
-                self.config.host,
-                self.config.port,
-                self.config.host,
-                self.config.port,
-            });
+            if (udp_ok) {
+                self.log(.info, "Server listening on {s}:{d} (HTTP/1.1 + HTTP/2 + HTTP/3)\n", .{
+                    self.config.host,
+                    self.config.port,
+                });
+            } else {
+                self.config.http3_enabled = false;
+                self.log(.info, "Server listening on {s}:{d} (HTTP/1.1 + HTTP/2)\n", .{
+                    self.config.host,
+                    self.config.port,
+                });
+            }
 
             // Spawn TCP accept loop in a background thread.
             const tcp_thread = try std.Thread.spawn(.{}, struct {
@@ -621,17 +685,18 @@ pub const Server = struct {
                 }
             }.run, .{self});
 
-            // Run HTTP/3 UDP recv loop in a background thread too, then
-            // return the TCP thread handle so the caller can join it.
-            _ = try std.Thread.spawn(.{}, struct {
-                fn run(s: *Self) void {
-                    s.listenHttp3AcceptLoop() catch |err| {
-                        if (s.running) {
-                            s.log(.err, "HTTP/3 accept error: {}\n", .{err});
-                        }
-                    };
-                }
-            }.run, .{self});
+            // Run HTTP/3 UDP recv loop only if UDP socket was successfully bound.
+            if (udp_ok) {
+                _ = try std.Thread.spawn(.{}, struct {
+                    fn run(s: *Self) void {
+                        s.listenHttp3AcceptLoop() catch |err| {
+                            if (s.running) {
+                                s.log(.err, "HTTP/3 accept error: {}\n", .{err});
+                            }
+                        };
+                    }
+                }.run, .{self});
+            }
 
             return tcp_thread;
         }
@@ -654,8 +719,10 @@ pub const Server = struct {
     }
 
     /// Logs a formatted message. If config.log_fn is provided, delegates to it.
-    /// Otherwise, prints to stderr.
+    /// Otherwise, prints to stderr with tint.zig coloring based on log level.
+    /// Messages below config.log_level are silently dropped.
     pub fn log(self: *const Self, level: LogLevel, comptime format: []const u8, args: anytype) void {
+        if (@intFromEnum(level) < @intFromEnum(self.config.log_level)) return;
         if (self.config.log_fn) |log_fn| {
             var buf: [1024]u8 = undefined;
             if (std.fmt.bufPrint(&buf, format, args)) |msg| {
@@ -664,7 +731,23 @@ pub const Server = struct {
                 log_fn(level, "[Log format failed or message too long]");
             }
         } else {
-            std.debug.print(format, args);
+            const level_style = switch (level) {
+                .debug => tint.style(.{ .fg = .{ .ansi4 = .bright_black }, .dim = true }),
+                .info => tint.style(.{ .fg = .{ .ansi4 = .bright_green } }),
+                .warn => tint.style(.{ .fg = .{ .ansi4 = .bright_yellow }, .bold = true }),
+                .err => tint.style(.{ .fg = .{ .ansi4 = .bright_red }, .bold = true }),
+            };
+            const prefix = switch (level) {
+                .debug => "DEBUG",
+                .info => "INFO",
+                .warn => "WARN",
+                .err => "ERROR",
+            };
+            const app_style = tint.style(.{ .fg = .{ .ansi4 = .bright_cyan }, .bold = true });
+            std.debug.print(
+                "{s}HTTPX{s} {s}[{s}]{s} " ++ format ++ "\n",
+                .{ app_style.toAnsi(), tint.reset, level_style.toAnsi(), prefix, tint.reset } ++ args,
+            );
         }
     }
 
@@ -747,6 +830,8 @@ pub const Server = struct {
     }
 
     fn listenTcp(self: *Self) !void {
+        dbg.entry("SERVER", "listenTcp");
+        defer dbg.exit("SERVER", "listenTcp");
         if (self.listener == null) {
             const backlog_u32: u32 = @max(self.config.max_connections, 1);
             const backlog: u31 = @intCast(@min(backlog_u32, @as(u32, std.math.maxInt(u31))));
@@ -760,6 +845,7 @@ pub const Server = struct {
 
         self.log(.info, "Server listening on {s}:{d}\n", .{ self.config.host, self.config.port });
 
+        dbg.log("SERVER", "accept loop starting on {s}:{d}", .{ self.config.host, self.config.port });
         try self.listenTcpAcceptLoop();
     }
 
@@ -767,13 +853,25 @@ pub const Server = struct {
     /// Called from `listenTcp` (standalone) or from a background thread when
     /// running alongside HTTP/3.
     fn listenTcpAcceptLoop(self: *Self) !void {
+        dbg.entry("SERVER", "listenTcpAcceptLoop");
+        defer dbg.exit("SERVER", "listenTcpAcceptLoop");
         while (self.running) {
-            const conn = self.listener.?.accept() catch |err| {
+            // Wait for the listener socket to be readable (connection pending)
+            // with a 500ms timeout so we can re-check self.running for clean
+            // shutdown. On Windows, closesocket() from another thread may not
+            // unblock a blocking accept().
+            if (self.listener) |*l| {
+                if (!l.socket.waitReadable(500)) continue;
+            } else break;
+            // Re-check after waitReadable — stop() may have nulled the
+            // listener during the 500ms wait.
+            if (!self.running or self.listener == null) break;
+            const conn = self.listener.?.accept() catch {
                 if (!self.running) break;
-                self.log(.err, "Accept error: {}\n", .{err});
                 continue;
             };
 
+            dbg.log("SERVER", "accepted connection", .{});
             self.dispatchToExecutor(conn.socket);
         }
     }
@@ -812,14 +910,28 @@ pub const Server = struct {
     /// it directly on the current thread when no executor is configured.
     fn dispatchToExecutor(self: *Self, socket: Socket) void {
         if (self.executor) |*e| {
+            dbg.log("SERVER", "dispatching to executor thread pool", .{});
             const ConnJob = struct {
                 server: *Self,
                 socket: Socket,
                 fn run(ctx_ptr: ?*anyopaque) void {
                     const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr.?));
                     ctx.server.handleConnection(ctx.socket) catch |err| {
-                        ctx.server.log(.err, "Handler error: {}\n", .{err});
+                        switch (err) {
+                            error.TlsConnectionTruncated, error.EndOfStream, error.ConnectionReset, error.RecvFailed, error.SendFailed => {},
+                            else => ctx.server.log(.err, "Handler error: {}\n", .{err}),
+                        }
                     };
+                    // Remove from executor tracking.
+                    const io = defaultIo();
+                    ctx.server.executor_conn_mutex.lock(io) catch unreachable;
+                    for (ctx.server.executor_connections.items, 0..) |*s, i| {
+                        if (s.handle == ctx.socket.handle) {
+                            _ = ctx.server.executor_connections.orderedRemove(i);
+                            break;
+                        }
+                    }
+                    ctx.server.executor_conn_mutex.unlock(io);
                     ctx.server.allocator.destroy(ctx);
                 }
             };
@@ -832,24 +944,53 @@ pub const Server = struct {
                 .server = self,
                 .socket = socket,
             };
+            // Track in executor connections so stop() can close it.
+            {
+                const io = defaultIo();
+                self.executor_conn_mutex.lock(io) catch unreachable;
+                self.executor_connections.append(self.allocator, socket) catch {};
+                self.executor_conn_mutex.unlock(io);
+            }
             e.submit(.{
                 .func = ConnJob.run,
                 .context = job_ctx,
             }) catch |err| {
                 self.log(.err, "Executor submission failed: {s}\n", .{@errorName(err)});
+                {
+                    const io = defaultIo();
+                    self.executor_conn_mutex.lock(io) catch unreachable;
+                    for (self.executor_connections.items, 0..) |*s, i| {
+                        if (s.handle == socket.handle) {
+                            _ = self.executor_connections.orderedRemove(i);
+                            break;
+                        }
+                    }
+                    self.executor_conn_mutex.unlock(io);
+                }
                 var s = socket;
                 s.close();
                 self.allocator.destroy(job_ctx);
             };
         } else {
+            self.active_connections.append(self.allocator, socket) catch {};
             self.handleConnection(socket) catch |err| {
                 // TlsConnectionTruncated and EndOfStream are normal client disconnections,
                 // not errors — don't pollute stderr with them.
                 switch (err) {
-                    error.TlsConnectionTruncated, error.EndOfStream, error.ConnectionReset => {},
+                    error.TlsConnectionTruncated, error.EndOfStream, error.ConnectionReset, error.RecvFailed, error.SendFailed => {},
                     else => self.log(.err, "Handler error: {}\n", .{err}),
                 }
             };
+            self.removeFromActive(socket);
+        }
+    }
+
+    fn removeFromActive(self: *Self, socket: Socket) void {
+        for (self.active_connections.items, 0..) |*s, i| {
+            if (s.handle == socket.handle) {
+                _ = self.active_connections.orderedRemove(i);
+                return;
+            }
         }
     }
 
@@ -900,9 +1041,25 @@ pub const Server = struct {
 
     /// Stops the server.
     pub fn stop(self: *Self) void {
+        dbg.entry("SERVER", "stop");
         self.running = false;
+        for (self.active_connections.items) |*s| {
+            s.close();
+        }
+        self.active_connections.clearRetainingCapacity();
+        // Close executor-tracked sockets so worker threads unblock from recv().
+        {
+            const io = defaultIo();
+            self.executor_conn_mutex.lock(io) catch unreachable;
+            for (self.executor_connections.items) |*s| {
+                s.close();
+            }
+            self.executor_connections.clearRetainingCapacity();
+            self.executor_conn_mutex.unlock(io);
+        }
         if (self.listener) |*l| {
-            l.socket.shutdownBoth() catch {};
+            // Close the socket first to immediately unblock any pending accept() on Windows.
+            // shutdown() alone may not unblock a blocking accept() on all platforms.
             l.deinit();
             self.listener = null;
         }
@@ -948,10 +1105,11 @@ pub const Server = struct {
 
     /// Handles a single connection.
     fn handleConnection(self: *Self, socket: Socket) !void {
+        dbg.entry("SERVER", "handleConnection");
         var sock = socket;
-        defer sock.close();
 
         if (self.config.tls_enabled) {
+            dbg.log("SERVER", "TLS enabled, negotiating", .{});
             // Use config.tls_alpn_protocols when set (non-default), otherwise
             // build dynamically from enabled protocols.
             const alpn_protos: []const []const u8 = if (self.config.http3_enabled and self.config.http2_enabled)
@@ -991,8 +1149,10 @@ pub const Server = struct {
                 return;
             }
             if (alpn.isHttp2(alpn_protocol) and self.config.http2_enabled) {
+                dbg.log("SERVER", "ALPN negotiated HTTP/2 over TLS", .{});
                 return self.handleHttp2WithTls(&tls_conn);
             }
+            dbg.log("SERVER", "TLS fallback to HTTP/1.1", .{});
             return self.handleHttp1WithTls(&tls_conn);
         }
 
@@ -1009,6 +1169,7 @@ pub const Server = struct {
             }
 
             if (total == probe.len and mem.eql(u8, &probe, http.HTTP2_PREFACE)) {
+                dbg.log("SERVER", "detected HTTP/2 connection preface", .{});
                 return self.handleHttp2Connection(sock);
             }
 
@@ -1027,6 +1188,8 @@ pub const Server = struct {
     /// Handles an HTTP/1.1 connection where `prefix` bytes have already been
     /// read from the socket (e.g. during HTTP/2 preface detection).
     fn handleHttp1WithPrefix(self: *Self, socket: Socket, prefix: []const u8) !void {
+        dbg.entry("SERVER", "handleHttp1WithPrefix");
+        defer dbg.exit("SERVER", "handleHttp1WithPrefix");
         var sock = socket;
         var first_request = true;
         while (self.running) {
@@ -1052,7 +1215,10 @@ pub const Server = struct {
 
             while (!parser.isComplete()) {
                 const n = try sock.recv(&buffer);
-                if (n == 0) return;
+                if (n == 0) {
+                    dbg.log("SERVER", "recv returned 0, client disconnected", .{});
+                    return;
+                }
                 _ = try parser.feed(buffer[0..n]);
                 if (parser.getBody().len > self.config.max_body_size) {
                     try self.sendError(&sock, 413);
@@ -1085,6 +1251,7 @@ pub const Server = struct {
 
             const request_wants_keep_alive = req.headers.isKeepAlive(req.version);
             const keep_alive = self.config.keep_alive and request_wants_keep_alive;
+            dbg.log("SERVER", "HTTP/1.1 keep-alive={}", .{keep_alive});
             if (!keep_alive) {
                 try response.headers.set(HeaderName.CONNECTION, "close");
             }
@@ -1096,6 +1263,8 @@ pub const Server = struct {
 
             try sock.sendAll(formatted);
 
+            dbg.log("SERVER", "response sent {d}", .{response.status.code});
+
             if (!keep_alive) return;
             first_request = false;
         }
@@ -1103,6 +1272,8 @@ pub const Server = struct {
 
     /// Handles an HTTP/1.1 connection over TLS.
     fn handleHttp1WithTls(self: *Self, tls_conn: *tls_mod.Connection) !void {
+        dbg.entry("SERVER", "handleHttp1WithTls");
+        defer dbg.exit("SERVER", "handleHttp1WithTls");
         var first_request = true;
         while (self.running) {
             const timeout_ms = if (first_request) self.config.request_timeout_ms else self.config.keep_alive_timeout_ms;
@@ -1117,7 +1288,10 @@ pub const Server = struct {
                     self.log(.err, "TLS read error: {}\n", .{err});
                     return;
                 };
-                if (n == 0) return;
+                if (n == 0) {
+                    dbg.log("SERVER", "TLS recv returned 0, client disconnected", .{});
+                    return;
+                }
                 _ = try parser.feed(read_buf[0..n]);
                 if (parser.getBody().len > self.config.max_body_size) {
                     try self.sendTlsError(tls_conn, 413);
@@ -1164,6 +1338,8 @@ pub const Server = struct {
                 return;
             };
 
+            dbg.log("SERVER", "TLS response sent {d}", .{response.status.code});
+
             if (!keep_alive) return;
             first_request = false;
         }
@@ -1171,6 +1347,8 @@ pub const Server = struct {
 
     /// Handles an HTTP/2 connection over TLS.
     fn handleHttp2WithTls(self: *Self, tls_conn: *tls_mod.Connection) !void {
+        dbg.entry("SERVER", "handleHttp2WithTls");
+        defer dbg.exit("SERVER", "handleHttp2WithTls");
         // The TLS handshake has already been completed.
         if (self.config.request_timeout_ms > 0) {
             // TLS connections don't have socket-level timeouts, but we can
@@ -1213,7 +1391,7 @@ pub const Server = struct {
 
         var authority_raw: ?[]const u8 = null;
         var authority_owned = false;
-        defer if (authority_owned) self.allocator.free(authority_raw.?);
+        defer if (authority_owned and authority_raw != null) self.allocator.free(authority_raw.?);
 
         var request_stream_id: ?u31 = null;
         var request_done = false;
@@ -1376,8 +1554,8 @@ pub const Server = struct {
                     }
                     try request_body.appendSlice(self.allocator, data_slice);
 
-                    if (frame.payload.len > 0) {
-                        const window_increment: u31 = @intCast(frame.payload.len);
+                    if (data_slice.len > 0) {
+                        const window_increment: u31 = @intCast(data_slice.len);
                         const window_update = h2stream.buildWindowUpdatePayload(window_increment);
 
                         try conn.writeFrame(.{
@@ -1480,6 +1658,8 @@ pub const Server = struct {
     }
 
     fn handleHttp2Connection(self: *Self, socket: Socket) !void {
+        dbg.entry("SERVER", "handleHttp2Connection");
+        defer dbg.exit("SERVER", "handleHttp2Connection");
         var sock = socket;
         defer sock.close();
 
@@ -1525,7 +1705,7 @@ pub const Server = struct {
 
         var authority_raw: ?[]const u8 = null;
         var authority_owned = false;
-        defer if (authority_owned) self.allocator.free(authority_raw.?);
+        defer if (authority_owned and authority_raw != null) self.allocator.free(authority_raw.?);
 
         var request_stream_id: ?u31 = null;
         var request_done = false;
@@ -1688,9 +1868,9 @@ pub const Server = struct {
                     }
                     try request_body.appendSlice(self.allocator, data_slice);
 
-                    if (frame.payload.len > 0) {
+                    if (data_slice.len > 0) {
                         // Replenish stream and connection receive windows as DATA is consumed.
-                        const window_increment: u31 = @intCast(frame.payload.len);
+                        const window_increment: u31 = @intCast(data_slice.len);
                         const window_update = h2stream.buildWindowUpdatePayload(window_increment);
 
                         try conn.writeFrame(.{
@@ -2095,7 +2275,7 @@ pub const Server = struct {
 
         var authority_raw: ?[]const u8 = null;
         var authority_owned = false;
-        defer if (authority_owned) self.allocator.free(authority_raw.?);
+        defer if (authority_owned and authority_raw != null) self.allocator.free(authority_raw.?);
 
         var qpack_ctx = qpack.QpackContext.initWithCapacity(
             self.allocator,
@@ -2419,6 +2599,7 @@ pub const Server = struct {
     }
 
     fn executeServerRequest(self: *Self, req: *Request) !Response {
+        dbg.log("SERVER", "executeRequest {s} {s}", .{ req.method.toString(), req.uri.path });
         var ctx = Context.init(self.allocator, req);
         ctx.server = self;
         defer ctx.deinit();
@@ -2499,6 +2680,7 @@ pub const Server = struct {
 
     /// Sends an error response.
     fn sendError(self: *Self, socket: *Socket, code: u16) !void {
+        dbg.log("SERVER", "sendError status={d}", .{code});
         var resp = Response.init(self.allocator, code);
         defer resp.deinit();
 

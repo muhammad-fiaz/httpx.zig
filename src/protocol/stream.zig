@@ -16,6 +16,7 @@ const Allocator = mem.Allocator;
 
 const http = @import("http.zig");
 const hpack = @import("hpack.zig");
+const dbg = @import("../util/debug.zig");
 
 /// HTTP/2 Stream States as per RFC 7540 Section 5.1
 pub const StreamState = enum {
@@ -116,8 +117,14 @@ pub const Stream = struct {
     pub fn sendEndStream(self: *Self) void {
         self.end_stream_sent = true;
         switch (self.state) {
-            .open => self.state = .half_closed_local,
-            .half_closed_remote => self.state = .closed,
+            .open => {
+                self.state = .half_closed_local;
+                dbg.log("STREAM", "stream {d} -> half_closed_local (sent END_STREAM)", .{self.id});
+            },
+            .half_closed_remote => {
+                self.state = .closed;
+                dbg.log("STREAM", "stream {d} -> closed (sent END_STREAM)", .{self.id});
+            },
             else => {},
         }
     }
@@ -126,34 +133,46 @@ pub const Stream = struct {
     pub fn receiveEndStream(self: *Self) void {
         self.end_stream_received = true;
         switch (self.state) {
-            .open => self.state = .half_closed_remote,
-            .half_closed_local => self.state = .closed,
+            .open => {
+                self.state = .half_closed_remote;
+                dbg.log("STREAM", "stream {d} -> half_closed_remote (recv END_STREAM)", .{self.id});
+            },
+            .half_closed_local => {
+                self.state = .closed;
+                dbg.log("STREAM", "stream {d} -> closed (recv END_STREAM)", .{self.id});
+            },
             else => {},
         }
     }
 
     /// Opens the stream (transitions from idle to open).
     pub fn open(self: *Self) !void {
+        dbg.entry("STREAM", "Stream.open");
         if (self.state != .idle) return error.InvalidStreamState;
         self.state = .open;
+        dbg.log("STREAM", "stream {d} -> open", .{self.id});
     }
 
     /// Closes the stream due to RST_STREAM or error.
     pub fn reset(self: *Self) void {
+        dbg.entry("STREAM", "Stream.reset");
         self.state = .closed;
+        dbg.log("STREAM", "stream {d} -> closed (reset)", .{self.id});
     }
 
     /// Updates the send window by delta (can be negative for data sent).
     pub fn updateSendWindow(self: *Self, delta: i32) !void {
         const new_window = @as(i64, self.send_window) + delta;
-        if (new_window > 2147483647) return error.FlowControlError;
+        if (new_window > std.math.maxInt(i32)) return error.FlowControlError;
+        if (new_window < std.math.minInt(i32)) return error.FlowControlError;
         self.send_window = @intCast(new_window);
     }
 
     /// Updates the receive window by delta.
     pub fn updateRecvWindow(self: *Self, delta: i32) !void {
         const new_window = @as(i64, self.recv_window) + delta;
-        if (new_window > 2147483647) return error.FlowControlError;
+        if (new_window > std.math.maxInt(i32)) return error.FlowControlError;
+        if (new_window < std.math.minInt(i32)) return error.FlowControlError;
         self.recv_window = @intCast(new_window);
     }
 };
@@ -288,14 +307,16 @@ pub const StreamManager = struct {
     /// Updates connection-level send window.
     pub fn updateConnectionSendWindow(self: *Self, delta: i32) !void {
         const new_window = @as(i64, self.connection_send_window) + delta;
-        if (new_window > 2147483647) return error.FlowControlError;
+        if (new_window > std.math.maxInt(i32)) return error.FlowControlError;
+        if (new_window < std.math.minInt(i32)) return error.FlowControlError;
         self.connection_send_window = @intCast(new_window);
     }
 
     /// Updates connection-level receive window.
     pub fn updateConnectionRecvWindow(self: *Self, delta: i32) !void {
         const new_window = @as(i64, self.connection_recv_window) + delta;
-        if (new_window > 2147483647) return error.FlowControlError;
+        if (new_window > std.math.maxInt(i32)) return error.FlowControlError;
+        if (new_window < std.math.minInt(i32)) return error.FlowControlError;
         self.connection_recv_window = @intCast(new_window);
     }
 
@@ -491,8 +512,8 @@ pub fn parseHeadersFramePayload(
     }
 
     // Remaining is HPACK block (minus padding)
+    if (pad_length > payload.len - offset) return error.InvalidFrame;
     const header_block_len = payload.len - offset - pad_length;
-    if (header_block_len > payload.len - offset) return error.InvalidFrame;
 
     const headers = try hpack.decodeHeaders(
         &stream_manager.hpack_ctx,

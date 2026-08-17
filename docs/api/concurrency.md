@@ -24,7 +24,7 @@ Additional top-level aliases:
 Executes multiple requests in parallel and waits for all to complete.
 
 ```zig
-pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult
+pub fn all(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult
 ```
 
 ### `allSettled`
@@ -35,7 +35,7 @@ Executes multiple requests in parallel and returns a result for **each** request
 - Failed requests are returned as `RequestResult.err`.
 
 ```zig
-pub fn allSettled(allocator: Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult
+pub fn allSettled(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult
 ```
 
 ### `any`
@@ -43,7 +43,7 @@ pub fn allSettled(allocator: Allocator, client: *Client, specs: []const RequestS
 Executes multiple requests and returns the first **successful (2xx)** response.
 
 ```zig
-pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?Response
+pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !?Response
 ```
 
 ### `race`
@@ -51,15 +51,15 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?
 Executes multiple requests and returns the result of the first one to complete (success or error).
 
 ```zig
-pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec) !RequestResult
+pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !RequestResult
 ```
 
 ### Top-Level Alias Signatures
 
 ```zig
-pub fn first(allocator: Allocator, client: *Client, specs: []const RequestSpec) !?Response
-pub fn fastest(allocator: Allocator, client: *Client, specs: []const RequestSpec) !RequestResult
-pub fn settled(allocator: Allocator, client: *Client, specs: []const RequestSpec) ![]RequestResult
+pub fn first(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !?Response
+pub fn fastest(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !RequestResult
+pub fn settled(allocator: Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult
 pub fn successfulCount(results: []const RequestResult) usize
 pub fn errorCount(results: []const RequestResult) usize
 ```

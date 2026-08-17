@@ -43,5 +43,5 @@ pub fn main() !void {
 Run the pre-configured session example:
 
 ```bash
-zig build run-session_example
+zig build run-all-session_example
 ```

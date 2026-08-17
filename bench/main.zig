@@ -76,7 +76,7 @@ fn benchHeadersParse() void {
 }
 
 fn benchUriParse() void {
-    _ = httpx.Uri.parse("https://api.example.com:8080/users/123?page=1&limit=10#section") catch {};
+    _ = httpx.Uri.parse("http://httpbun.com:8080/users/123?page=1&limit=10#section") catch {};
 }
 
 fn benchStatusLookup() void {
@@ -118,7 +118,7 @@ fn benchMethodLookup() void {
 }
 
 fn benchRequestBuild() void {
-    var request = httpx.Request.init(bench_allocator, .GET, "https://api.example.com/users") catch return;
+    var request = httpx.Request.init(bench_allocator, .GET, "http://httpbun.com/users") catch return;
     defer request.deinit();
 
     request.headers.set("Accept", "application/json") catch {};
@@ -126,7 +126,7 @@ fn benchRequestBuild() void {
 }
 
 fn benchProxyRequestBuild() void {
-    var request = httpx.Request.init(bench_allocator, .GET, "https://api.example.com/users") catch return;
+    var request = httpx.Request.init(bench_allocator, .GET, "http://httpbun.com/users") catch return;
     defer request.deinit();
 
     const proxy = httpx.Proxy{

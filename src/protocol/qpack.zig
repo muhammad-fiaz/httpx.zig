@@ -17,6 +17,7 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 
 const hpack = @import("hpack.zig");
+const dbg = @import("../util/debug.zig");
 
 /// QPACK static table entries (RFC 9204 Appendix A)
 /// Index 0-98 are pre-defined header name/value pairs
@@ -591,6 +592,8 @@ pub fn encodeHeaders(
     headers: []const HeaderEntry,
     allocator: Allocator,
 ) ![]u8 {
+    dbg.entry("QPACK", "encodeHeaders");
+    dbg.log("QPACK", "header_count={d}", .{headers.len});
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
 
@@ -655,6 +658,8 @@ pub fn decodeHeaders(
     data: []const u8,
     allocator: Allocator,
 ) ![]DecodedHeader {
+    dbg.entry("QPACK", "decodeHeaders");
+    dbg.log("QPACK", "data_len={d}", .{data.len});
     var headers = std.ArrayList(DecodedHeader).empty;
     errdefer {
         for (headers.items) |h| {
@@ -693,16 +698,18 @@ pub fn decodeHeaders(
 
             if (is_static) {
                 const entry = StaticTable.get(@intCast(idx_result.value)) orelse return error.InvalidIndex;
-                try headers.append(allocator, .{
-                    .name = try allocator.dupe(u8, entry.name),
-                    .value = try allocator.dupe(u8, entry.value),
-                });
+                const name = try allocator.dupe(u8, entry.name);
+                errdefer allocator.free(name);
+                const value = try allocator.dupe(u8, entry.value);
+                errdefer allocator.free(value);
+                try headers.append(allocator, .{ .name = name, .value = value });
             } else {
                 const entry = try resolvePreBaseEntry(ctx, base, idx_result.value);
-                try headers.append(allocator, .{
-                    .name = try allocator.dupe(u8, entry.name),
-                    .value = try allocator.dupe(u8, entry.value),
-                });
+                const name = try allocator.dupe(u8, entry.name);
+                errdefer allocator.free(name);
+                const value = try allocator.dupe(u8, entry.value);
+                errdefer allocator.free(value);
+                try headers.append(allocator, .{ .name = name, .value = value });
             }
         } else if (first & 0x40 != 0) {
             // Literal Field Line With Name Reference
@@ -721,6 +728,7 @@ pub fn decodeHeaders(
             errdefer allocator.free(name);
 
             const value_result = try decodeString(data[offset..], allocator);
+            errdefer allocator.free(value_result.value);
             offset += value_result.len;
 
             try headers.append(allocator, .{ .name = name, .value = value_result.value });
@@ -729,9 +737,11 @@ pub fn decodeHeaders(
             offset += 1; // Skip prefix byte
 
             const name_result = try decodeString(data[offset..], allocator);
+            errdefer allocator.free(name_result.value);
             offset += name_result.len;
 
             const value_result = try decodeString(data[offset..], allocator);
+            errdefer allocator.free(value_result.value);
             offset += value_result.len;
 
             try headers.append(allocator, .{ .name = name_result.value, .value = value_result.value });
@@ -741,10 +751,11 @@ pub fn decodeHeaders(
             offset += idx_result.len;
 
             const entry = try resolvePostBaseEntry(ctx, base, idx_result.value);
-            try headers.append(allocator, .{
-                .name = try allocator.dupe(u8, entry.name),
-                .value = try allocator.dupe(u8, entry.value),
-            });
+            const name = try allocator.dupe(u8, entry.name);
+            errdefer allocator.free(name);
+            const value = try allocator.dupe(u8, entry.value);
+            errdefer allocator.free(value);
+            try headers.append(allocator, .{ .name = name, .value = value });
         } else {
             // Literal Field Line With Post-Base Name Reference
             const idx_result = try decodeInteger(data[offset..], 3);
@@ -755,6 +766,7 @@ pub fn decodeHeaders(
             errdefer allocator.free(name);
 
             const value_result = try decodeString(data[offset..], allocator);
+            errdefer allocator.free(value_result.value);
             offset += value_result.len;
 
             try headers.append(allocator, .{ .name = name, .value = value_result.value });

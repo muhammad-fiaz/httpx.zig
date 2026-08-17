@@ -56,7 +56,7 @@ fn qpackExample(allocator: std.mem.Allocator) !void {
         .{ .name = ":method", .value = "GET" },
         .{ .name = ":path", .value = "/api/v3/resources" },
         .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":authority", .value = "api.example.com" },
+        .{ .name = ":authority", .value = "httpbun.com" },
         .{ .name = "accept", .value = "application/json" },
         .{ .name = "accept-encoding", .value = "gzip, deflate, br" },
     };

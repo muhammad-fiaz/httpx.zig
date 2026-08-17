@@ -23,8 +23,8 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .tls_enabled = true,
-        .tls_cert_path = "examples/certs/server.crt",
-        .tls_key_path = "examples/certs/server.key",
+        .tls_cert_path = "examples/certs/server_ec.crt",
+        .tls_key_path = "examples/certs/server_ec.key",
         .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
         .http2_enabled = true,
         .http3_enabled = true,
@@ -35,8 +35,6 @@ pub fn main() !void {
     try server.get("/hello", handler);
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
     sleepMs(200);
 
     const port = server.config.port;
@@ -81,4 +79,7 @@ pub fn main() !void {
     std.debug.print("  x25519, secp256r1 (P-256), secp384r1 (P-384)\n", .{});
 
     std.debug.print("\n=== Example complete ===\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

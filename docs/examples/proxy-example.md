@@ -63,7 +63,7 @@ pub fn main() !void {
     });
     defer proxy_server.deinit();
 
-    try proxy_server.use(httpx.reverseProxy("http://127.0.0.1:45233"));
+    try proxy_server.use(httpx.middleware.reverseProxy("http://127.0.0.1:45233"));
 
     const proxy_thread = try std.Thread.spawn(.{}, struct {
         fn run(server: *httpx.Server) void {
@@ -98,7 +98,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-proxy_example
+zig build run-all-proxy_example
 ```
 
 ## What to Verify

@@ -12,14 +12,15 @@ This section contains practical `httpx.zig` demo programs for client, server, mi
 For non-host targets, compile (without running) by adding `-Dtarget=...`:
 
 ```bash
-zig build example-tcp_local -Dtarget=x86_64-linux
-zig build example-http3_example -Dtarget=aarch64-macos
+zig build run-all-tcp_local -Dtarget=x86_64-linux
+zig build run-all-http3_example -Dtarget=aarch64-macos
 ```
 
 ## Available Examples
 
 - [Simple Get](/examples/simple-get): Basic GET request and response handling.
 - [Simple Get Deserialize](/examples/simple-get-deserialize): Parse JSON into typed structs.
+- `json_api_example.zig`: JSON API: getJson, postJsonAndParse, Response.json, server ctx.jsonBody + ctx.json
 - [HTTP Auth Helpers](/examples/http-auth-helpers): Use built-in Bearer and Basic auth request helpers against a local loopback server.
 - [Post JSON](/examples/post-json): Send JSON payloads with POST.
 - [Custom Headers](/examples/custom-headers): Attach auth and custom metadata headers.

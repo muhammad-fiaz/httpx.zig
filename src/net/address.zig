@@ -10,27 +10,36 @@
 const std = @import("std");
 const net = @import("compat.zig");
 const Allocator = std.mem.Allocator;
+const dbg = @import("../util/debug.zig");
 
 pub const Address = net.Address;
 pub const AddressList = net.AddressList;
 
 /// Resolves a hostname to a network address.
 pub fn resolve(allocator: Allocator, hostname: []const u8, port: u16) !net.Address {
+    dbg.entry("ADDR", "resolve");
     if (parseIp4(hostname)) |ip4| {
+        dbg.log("ADDR", "resolved IPv4 literal {s}", .{hostname});
+        dbg.exit("ADDR", "resolve");
         return net.Address.initIp4(ip4, port);
     }
 
     if (parseIp6(hostname)) |ip6| {
+        dbg.log("ADDR", "resolved IPv6 literal {s}", .{hostname});
+        dbg.exit("ADDR", "resolve");
         return net.Address.initIp6(ip6, port, 0, 0);
     }
 
+    dbg.log("ADDR", "DNS lookup for {s}:{d}", .{ hostname, port });
     var list = try net.getAddressList(allocator, hostname, port);
     defer list.deinit();
 
     if (list.addrs.len == 0) {
+        dbg.exitErr("ADDR", "resolve", error.DnsResolutionFailed);
         return error.DnsResolutionFailed;
     }
 
+    dbg.exit("ADDR", "resolve");
     return list.addrs[0];
 }
 
@@ -159,21 +168,28 @@ fn parseIp6(str: []const u8) ?[16]u8 {
     // Expand abbreviation to 8 groups if present
     if (group_count != 8) {
         const at = abbreviated_at orelse return null;
-        const tail = group_count - at;
+        const tail = if (group_count > at) group_count - at else 0;
 
-        // Move tail groups to the end
-        var dst: isize = 7;
-        var src: isize = @intCast(group_count - 1);
-        var moved: usize = 0;
-        while (moved < tail) : (moved += 1) {
-            groups[@intCast(dst)] = groups[@intCast(src)];
-            dst -= 1;
-            src -= 1;
-        }
-        // Zero fill between at and the start of moved tail
-        var z: usize = at;
-        while (z <= @as(usize, @intCast(dst))) : (z += 1) {
-            groups[z] = 0;
+        if (tail > 0) {
+            // Move tail groups to the end
+            var dst: isize = 7;
+            var src: isize = @intCast(group_count - 1);
+            var moved: usize = 0;
+            while (moved < tail) : (moved += 1) {
+                groups[@intCast(dst)] = groups[@intCast(src)];
+                dst -= 1;
+                src -= 1;
+            }
+            // Zero fill between at and the start of moved tail
+            var z: usize = at;
+            while (z <= @as(usize, @intCast(dst))) : (z += 1) {
+                groups[z] = 0;
+            }
+        } else {
+            // All zeros (e.g. "::")
+            for (&groups) |*g| {
+                g.* = 0;
+            }
         }
     } else if (abbreviated_at != null) {
         // "::" with exactly 8 groups is not valid
@@ -237,14 +253,14 @@ pub fn isIp6Address(str: []const u8) bool {
 }
 
 test "parseHostPort basic" {
-    const result = try parseHostPort("example.com:8080", 80);
-    try std.testing.expectEqualStrings("example.com", result.host);
+    const result = try parseHostPort("httpbun.com:8080", 80);
+    try std.testing.expectEqualStrings("httpbun.com", result.host);
     try std.testing.expectEqual(@as(u16, 8080), result.port);
 }
 
 test "parseHostPort default port" {
-    const result = try parseHostPort("example.com", 443);
-    try std.testing.expectEqualStrings("example.com", result.host);
+    const result = try parseHostPort("httpbun.com", 443);
+    try std.testing.expectEqualStrings("httpbun.com", result.host);
     try std.testing.expectEqual(@as(u16, 443), result.port);
 }
 
@@ -286,12 +302,12 @@ test "parseIp4 localhost" {
 }
 
 test "parseIp4 invalid" {
-    try std.testing.expect(parseIp4("example.com") == null);
+    try std.testing.expect(parseIp4("httpbun.com") == null);
     try std.testing.expect(parseIp4("256.1.1.1") == null);
     try std.testing.expect(parseIp4("1.2.3") == null);
 }
 
 test "isIpAddress" {
     try std.testing.expect(isIpAddress("192.168.1.1"));
-    try std.testing.expect(!isIpAddress("example.com"));
+    try std.testing.expect(!isIpAddress("httpbun.com"));
 }

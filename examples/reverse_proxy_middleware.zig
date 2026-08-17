@@ -50,8 +50,6 @@ pub fn main() !void {
     try backend.get("/health", healthHandler);
 
     const backend_thread = try backend.listenInBackground();
-    defer backend_thread.join();
-    defer backend.stop();
     sleepMs(100);
 
     std.debug.print("  Backend on port {d}\n", .{backend_port});
@@ -71,8 +69,6 @@ pub fn main() !void {
     try proxy.use(httpx.reverseProxyRuntime(backend_url));
 
     const proxy_thread = try proxy.listenInBackground();
-    defer proxy_thread.join();
-    defer proxy.stop();
     sleepMs(100);
 
     std.debug.print("  Proxy on port {d} -> backend {d}\n", .{ proxy_port, backend_port });
@@ -89,8 +85,6 @@ pub fn main() !void {
     try rt_proxy.use(httpx.reverseProxyRuntime(backend_url));
 
     const rt_proxy_thread = try rt_proxy.listenInBackground();
-    defer rt_proxy_thread.join();
-    defer rt_proxy.stop();
     sleepMs(100);
 
     std.debug.print("  Runtime proxy on port {d} -> backend {d}\n", .{ rt_proxy_port, backend_port });
@@ -119,4 +113,11 @@ pub fn main() !void {
     std.debug.print("  Use case: API gateway, microservice proxy, load balancer\n", .{});
 
     std.debug.print("\n=== Reverse Proxy Middleware Example Complete ===\n", .{});
+
+    rt_proxy.stop();
+    rt_proxy_thread.join();
+    proxy.stop();
+    proxy_thread.join();
+    backend.stop();
+    backend_thread.join();
 }

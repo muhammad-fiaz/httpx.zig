@@ -9,7 +9,7 @@ This guide covers all supported installation methods for `httpx.zig`.
 
 ::: warning v0.1.6 release and Zig 0.15 deprecation
 `v0.1.6` is the current release and targets Zig `0.16.0+`.
-`v0.1.2` is the previous stable release for the immediate prior `0.1.x` line.
+`v0.1.5` is the previous stable release for the immediate prior `0.1.x` line.
 Zig `0.15` support is legacy and remains available only through `0.0.7`.
 The HTTPS/TLS reader fix for Zig `0.16` empty-buffer reads is included in this release.
 If you are upgrading from `0.0.7`, review the GitHub Releases page for migration notes.
@@ -57,12 +57,12 @@ Use the latest tagged release for reproducible builds:
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.6.tar.gz
 ```
 
-## Method 2: Zig Fetch (Previous Stable 0.1.4)
+## Method 2: Zig Fetch (Previous Stable 0.1.5)
 
 Use the previous stable `0.1.5` release if you want the last `0.1.x` tag before `0.1.6`:
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.4.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.5.tar.gz
 ```
 
 ## Method 3: Zig Fetch (Legacy Zig 0.15 Support - 0.0.7)
@@ -165,7 +165,7 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator);
     defer client.deinit();
 
-    _ = try client.get("https://httpbin.org/get", .{});
+    _ = try client.get("https://httpbun.com/get", .{});
 }
 ```
 
@@ -187,7 +187,7 @@ To validate Linux runtime behavior (not only cross-compilation), build Linux-tar
 ```bash
 # Build Linux artifacts
 zig build test -Dtarget=x86_64-linux
-zig build example-udp_local -Dtarget=x86_64-linux
+zig build run-all-udp_local -Dtarget=x86_64-linux
 
 # Run on Linux/WSL
 ./zig-out/bin/test
@@ -201,7 +201,7 @@ To compile tests or examples for a specific target:
 zig build test -Dtarget=x86-windows
 
 # Cross-target example build
-zig build example-udp_local -Dtarget=aarch64-macos
+zig build run-all-udp_local -Dtarget=aarch64-macos
 ```
 
 For client requests against external endpoints, prefer explicit timeout and error handling:

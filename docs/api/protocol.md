@@ -33,11 +33,12 @@ const bytes_consumed = try parser.feed(incoming_data);
 
 // Check if parsing is complete
 if (parser.isComplete()) {
-    const method = parser.getMethod();
-    const path = parser.getPath();
-    const headers = parser.getHeaders();
     const body = parser.getBody();
+    // For responses: const status = parser.getStatus();
 }
+
+// Check keep-alive for connection management
+if (parser.isKeepAlive()) { ... }
 
 // Reset for next request
 parser.reset();
@@ -47,13 +48,14 @@ parser.reset();
 
 | Method | Description |
 |--------|-------------|
-| `init(allocator)` | Creates a new parser |
+| `init(allocator)` | Creates a new request parser |
+| `initResponse(allocator)` | Creates a new response parser |
 | `feed(data)` | Feeds data, returns bytes consumed |
 | `isComplete()` | Returns true when message is complete |
-| `getMethod()` | Returns HTTP method string |
-| `getPath()` | Returns request path |
-| `getHeaders()` | Returns parsed headers |
-| `getBody()` | Returns message body |
+| `isError()` | Returns true if parser encountered an error |
+| `getBody()` | Returns message body slice |
+| `getStatus()` | Returns parsed `Status` (response parser only) |
+| `isKeepAlive()` | Returns true if connection should be kept alive |
 | `reset()` | Resets for next message |
 | `finishEof()` | Marks complete on connection close |
 
@@ -458,7 +460,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Connect
-    var socket = try httpx.Socket.create(.tcp);
+    var socket = try httpx.Socket.create();
     defer socket.close();
     
     const addr = try std.net.Address.resolveIp("example.com", 443);

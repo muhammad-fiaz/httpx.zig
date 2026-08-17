@@ -43,9 +43,6 @@ pub fn main() !void {
     try server.get("/data", helloHandler);
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
-
     sleepMs(100);
 
     // 2. Build a batch of requests
@@ -105,4 +102,7 @@ pub fn main() !void {
     std.debug.print("Successful results: {d}/{d}\n\n", .{ httpx.successfulCount(ex_results), ex_results.len });
 
     std.debug.print("Demo complete!\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

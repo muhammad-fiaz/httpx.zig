@@ -36,7 +36,7 @@
 >
 > **Custom HTTP/2, HTTP/3, and TLS implementation:** Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN support.
 > httpx.zig implements these protocols **entirely from scratch**, including:
-> - **TLS 1.2 and 1.3** with full handshake support (RFC 5246 / RFC 8446) — ECDHE key exchange (X25519, P-256, P-384), AEAD cipher suites (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305), ALPN negotiation (RFC 7301) for automatic HTTP/2 and HTTP/3 protocol selection with HTTP/1.1 fallback, handshake message encryption (TLS 1.3), X.509 certificate parsing, and custom record-layer encryption/decryption
+> - **TLS 1.2 and 1.3** with full handshake support (RFC 5246 / RFC 8446) — key exchange: X25519 (TLS 1.2/1.3), P-256 and P-384 (TLS 1.3), X25519+ML-KEM768 post-quantum hybrid (TLS 1.3); AEAD cipher suites (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305); ALPN negotiation (RFC 7301) for automatic HTTP/2 and HTTP/3 protocol selection with HTTP/1.1 fallback; handshake message encryption (TLS 1.3); X.509 certificate parsing and verification; custom record-layer encryption/decryption
 > - **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
 > - **HTTP/2** ALPN negotiation, CONTINUATION frames, SETTINGS enforcement, GOAWAY/RST_STREAM, trailers, and connection pooling
 > - **HTTP/2** stream multiplexing, flow control, and connection preface timeout (RFC 7540)
@@ -53,7 +53,6 @@
 - For **spinners/loading/progress bar** support, check out **[loaders.zig](https://github.com/muhammad-fiaz/loaders.zig)**.
 - For **MCP** support, check out **[mcp.zig](https://github.com/muhammad-fiaz/mcp.zig)**.
 - For **args parsing** support, check out **[args.zig](https://github.com/muhammad-fiaz/args.zig)**.
-- For **HTTP client/server** support, check out **[httpx.zig](https://github.com/muhammad-fiaz/httpx.zig)**.
 - For **API framework** support, check out **[api.zig](https://github.com/muhammad-fiaz/api.zig)**.
 - For **web framework** support, check out **[zix](https://github.com/muhammad-fiaz/zix)**.
 - For **archive/compression** support, check out **[archive.zig](https://github.com/muhammad-fiaz/archive.zig)**.
@@ -66,6 +65,9 @@
 - For **numerical computing** support, check out **[num.zig](https://github.com/muhammad-fiaz/num.zig)**.
 - For **logging** support, check out **[logly.zig](https://github.com/muhammad-fiaz/logly.zig)**.
 - For **data validation and serialization** support, check out **[zigantic](https://github.com/muhammad-fiaz/zigantic)**.
+- For **UUID** support, check out **[uuid.zig](https://github.com/muhammad-fiaz/uuid.zig)**.
+- For **key-value database** support, check out **[zkv.zig](https://github.com/muhammad-fiaz/zkv.zig)**.
+- For **terminal color & text styles** support, check out **[hint.zig](https://github.com/muhammad-fiaz/hint.zig)**.
 
 ---
 
@@ -89,11 +91,12 @@
 | **Socket APIs** | Cross-platform TCP/UDP socket helpers, listener wrappers, and TLS stream adapters. | https://muhammad-fiaz.github.io/httpx.zig/api/net |
 | **Proxy Support** | Client-side HTTP forward proxy routing, SOCKS5h tunneling, and server-side reverse proxy middleware. | https://muhammad-fiaz.github.io/httpx.zig/examples/proxy-example |
 | **Interceptors** | Global hooks to modify requests and responses (e.g., Auth injection). | https://muhammad-fiaz.github.io/httpx.zig/guide/interceptors |
-| **Logging Hooks** | Server log callbacks plus logger middleware customization for structured output. | https://muhammad-fiaz.github.io/httpx.zig/api/middleware |
+| **Logging Hooks** | Server log callbacks plus logger middleware customization for structured output. Internal logging uses tint.zig for colored output; configurable via `log_level` and `log_fn`. | https://muhammad-fiaz.github.io/httpx.zig/api/middleware |
 | **Smart Retries** | Configurable retry policies with exponential backoff. | https://muhammad-fiaz.github.io/httpx.zig/api/client |
 | **Cross-Platform Sockets** | Robust Windows socket handling with `WSAEWOULDBLOCK` retry via `select()`, plus `MSG_NOSIGNAL` on Linux/macOS to prevent SIGPIPE crashes. | https://muhammad-fiaz.github.io/httpx.zig/api/net |
 | **Config Builder Helpers** | Chainable optional customization helpers for `ClientConfig` and `RequestOptions` (defaults remain implicit). | https://muhammad-fiaz.github.io/httpx.zig/api/client |
 | **JSON and HTML** | Helpers for easy JSON serialization and HTML response generation. | https://muhammad-fiaz.github.io/httpx.zig/api/core |
+| **Zero-Copy JSON** | Type-safe JSON methods (`getJson`, `postJsonAndParse`, `Response.json`, `ctx.jsonBody`) with zero-copy borrowed parsing — no arena required. | https://muhammad-fiaz.github.io/httpx.zig/api/core |
 | **Core Convenience APIs** | Request query-param helpers and response constructors for redirect/text/json. | https://muhammad-fiaz.github.io/httpx.zig/api/core |
 | **TLS/SSL** | Full TLS 1.2 and 1.3 with ALPN (RFC 7301), ECDHE key exchange (X25519, P-256, P-384), AEAD ciphers (AES-128/256-GCM, ChaCha20-Poly1305), handshake encryption, X.509 certificate parsing, PEM cert/key loading for servers, and custom record-layer encryption/decryption. | https://muhammad-fiaz.github.io/httpx.zig/api/tls |
 | **Static Files** | Efficient static file serving capabilities. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
@@ -102,7 +105,7 @@
 | **Stream Cancellation** | RESET_STREAM and STOP_SENDING frames for graceful HTTP/3 stream teardown without connection disruption. | https://muhammad-fiaz.github.io/httpx.zig/examples/http3-advanced |
 | **Cookie APIs** | First-class request/response cookie helpers for both client and server contexts. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **Security** | Security headers (Helmet) and safe defaults. | https://muhammad-fiaz.github.io/httpx.zig/api/middleware |
-| **No External Dependencies** | Pure Zig implementation for maximum portability and ease of build. Compression uses bundled brotli and zstd packages. | https://muhammad-fiaz.github.io/httpx.zig/guide/installation |
+| **Minimal Dependencies** | Pure Zig core implementation for maximum portability. Compression uses bundled brotli and zstd packages. | https://muhammad-fiaz.github.io/httpx.zig/guide/installation |
 | **Shared Common Helpers** | Reusable query/cookie helpers plus MIME resolution with explicit fallback and external mapping support. | https://muhammad-fiaz.github.io/httpx.zig/api/utils |
 | **WebSockets** | RFC 6455 upgrade checks, handshake accept key computations, and frame encoding/decoding. | https://muhammad-fiaz.github.io/httpx.zig/examples/websocket-example |
 | **Multipart Form Data** | RFC 2046 multipart body builder (`addFile`, `addFileChunked`) and parser for text fields and large file uploads. Windows-safe: each `winsock.send()` is capped at 64 KB to prevent upload hangs (fix for issue [#26](https://github.com/muhammad-fiaz/httpx.zig/issues/26)). | https://muhammad-fiaz.github.io/httpx.zig/examples/multipart-example |
@@ -176,10 +179,10 @@ zig build -Dtarget=x86-windows
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.6.tar.gz
 ```
 
-**Previous Stable Release (v0.1.4)**
+**Previous Stable Release (v0.1.5)**
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.4.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.5.tar.gz
 ```
 
 > [!WARNING]
@@ -253,7 +256,7 @@ pub fn main() !void {
  
     // Create client with implicit defaults.
     // Use explicit ClientConfig overrides only when you need to change defaults.
-    var client = httpx.Client.initForBaseUrl(allocator, "https://httpbin.org");
+    var client = httpx.Client.initForBaseUrl(allocator, "https://httpbun.com");
     defer client.deinit();
  
     // Simple GET request (request defaults are implicit)
@@ -294,22 +297,22 @@ pub fn main() !void {
 ```zig
 // Top-level aliases for concise client code.
 // Allocator is implicit by default.
-var response = try httpx.fetch("https://httpbin.org/get", .{});
+var response = try httpx.fetch("https://httpbun.com/get", .{});
 defer response.deinit();
 
 // Defaults are implicit; pass .{} for default request options.
-var by_method = try httpx.send(.GET, "https://httpbin.org/headers", .{});
+var by_method = try httpx.send(.GET, "https://httpbun.com/headers", .{});
 defer by_method.deinit();
 
 // Additional aliases
-var del_res = try httpx.delete("https://httpbin.org/delete", .{});
+var del_res = try httpx.delete("https://httpbun.com/delete", .{});
 defer del_res.deinit();
 
-var opts_res = try httpx.opts("https://httpbin.org/get", .{});
+var opts_res = try httpx.opts("https://httpbun.com/get", .{});
 defer opts_res.deinit();
 
 // Optional explicit override (only when needed)
-var timed = try httpx.sendWithAllocator(allocator, .GET, "https://httpbin.org/headers", .{ .timeout_ms = 10_000 });
+var timed = try httpx.sendWithAllocator(allocator, .GET, "https://httpbun.com/headers", .{ .timeout_ms = 10_000 });
 defer timed.deinit();
 ```
 
@@ -338,8 +341,8 @@ _ = is_ip;
 
 ```zig
 const specs = [_]httpx.RequestSpec{
-    .{ .method = .GET, .url = "https://httpbin.org/get", .timeout_ms = 5_000 },
-    .{ .method = .GET, .url = "https://httpbin.org/headers", .version = .HTTP_2 },
+    .{ .method = .GET, .url = "https://httpbun.com/get", .timeout_ms = 5_000 },
+    .{ .method = .GET, .url = "https://httpbun.com/headers", .version = .HTTP_2 },
 };
 
 var client_for_concurrency = httpx.Client.init(allocator);
@@ -420,14 +423,77 @@ try server.listen();
 - `port_conflict = .fail`: fail immediately if the configured port cannot be bound.
 - `port_conflict = .increment`: retry subsequent ports until success or `max_port_tries` is exhausted.
 - `server.listeningPort()`: returns the effective bound port.
+
+### Server Logging
+
+HTTPX uses [tint.zig](https://github.com/muhammad-fiaz/hint.zig) for colored console output internally. Server logs appear as `HTTPX [INFO] Server listening on ...` with cyan+green coloring.
+
+```zig
+var server = httpx.Server.initWithConfig(allocator, .{
+    .host = "127.0.0.1",
+    .port = 8080,
+    .log_level = .info, // Filter: .debug, .info, .warn, .err
+});
+```
+
+To disable all server logs:
+```zig
+var server = httpx.Server.initWithConfig(allocator, .{
+    .log_level = .err, // Only show errors (or use custom .log_fn)
+});
+```
+
+To provide a custom logger (e.g., for structured logging or silencing):
+```zig
+var server = httpx.Server.initWithConfig(allocator, .{
+    .log_fn = &struct {
+        fn log_fn(level: httpx.LogLevel, message: []const u8) void {
+            // Custom handling: write to file, JSON structured, etc.
+            std.debug.print("[{s}] {s}\n", .{ @tagName(level), message });
+        }
+    }.log_fn,
+});
+```
+
+### JSON API
+
+HTTPX provides type-safe JSON request/response methods with zero-copy borrowed parsing:
+
+```zig
+// Fetch and parse typed response (zero-copy, arena-free)
+const Repo = struct { name: []const u8, stars: u32 };
+const result = try httpx.getJson(allocator, "https://api.github.com/repos/ziglang/zig", .{}, Repo, .{});
+defer result.response.deinit();
+std.debug.print("Repo: {s}\n", .{result.value.name});
+
+// Reusable client with JSON methods
+var client = httpx.Client.init(allocator);
+defer client.deinit();
+
+const user = try client.getJson("https://api.example.com/user/1", .{}, User, .{});
+defer user.response.deinit();
+defer user.value.deinit();
+
+// POST JSON and parse response
+const result2 = try httpx.postJsonAndParse(allocator, "https://api.example.com/users", .{}, .{ .name = "Alice" }, User, .{});
+defer result2.response.deinit();
+
+// Response.json for manual fetch-then-parse
+var resp = try httpx.get(allocator, "https://httpbun.com/get", .{});
+defer resp.deinit();
+if (resp.json(MyStruct, .{ .ignore_unknown_fields = true })) |parsed| {
+    defer parsed.deinit();
+}
+```
  
 ## Examples
 
-The `examples/` directory contains **56 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
+The `examples/` directory contains **57 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
 
 **Client:**
 - [`simple_get`](examples/simple_get.zig) - Basic GET requests
 - [`simple_get_deserialize`](examples/simple_get_deserialize.zig) - GET with JSON deserialization
+- [`json_api_example`](examples/json_api_example.zig) - JSON API: getJson, postJsonAndParse, Response.json, server ctx.jsonBody + ctx.json
 - [`post_json`](examples/post_json.zig) - POST with JSON body
 - [`custom_headers`](examples/custom_headers.zig) - Custom header management
 - [`http_auth_helpers`](examples/http_auth_helpers.zig) - Bearer and Basic auth helpers
@@ -457,9 +523,11 @@ The `examples/` directory contains **56 comprehensive, runnable examples** demon
 - [`streaming`](examples/streaming.zig) - Chunked transfer and SSE
 - [`sse_example`](examples/sse_example.zig) - Server-Sent Events
 - [`health_check_example`](examples/health_check_example.zig) - Liveness/readiness probes
+- [`readiness_probe_example`](examples/readiness_probe_example.zig) - Readiness probe and health check middleware
+- [`pre_route_example`](examples/pre_route_example.zig) - Pre-route hooks and global handler
 - [`request_response_customization`](examples/request_response_customization.zig) - Request/response customization
 - [`async_server_example`](examples/async_server_example.zig) - Thread pool concurrency
-- [`logging_callback`](examples/logging_callback.zig) - Logging callbacks
+- [`logging_callback`](examples/logging_callback.zig) - Custom logging, silent mode, and log_level filtering
 - [`reverse_proxy_middleware`](examples/reverse_proxy_middleware.zig) - Reverse proxy middleware
 
 **Protocol:**
@@ -491,9 +559,9 @@ The `examples/` directory contains **56 comprehensive, runnable examples** demon
 
 To run any example:
 ```bash
-zig build run-<example_name>
-# e.g., zig build run-simple_get
-# e.g., zig build run-websocket_example
+zig build run-all-<example_name>
+# e.g., zig build run-all-simple_get
+# e.g., zig build run-all-websocket_example
 ```
 
 ## Validation Matrix
@@ -574,7 +642,33 @@ Benchmark target: `x86_64-windows`, `ReleaseFast`.
  
 ## Bug Fixes
 
-### v0.1.6 — TLS ALPN bugfix, new TLS examples, HTTP/3 ALPN support
+### v0.1.6 — TLS 1.3 fixes, ECDSA certs, connection pool, cookie domain awareness
+
+**TLS 1.3 Fixes:**
+- Fixed TLS 1.3 key extraction: `TlsSession` now correctly copies handshake keys to application keys after `ServerHello`/`Finished`
+- Fixed TLS 1.3 inner plaintext: `TlsSession.write()` now appends `0x17` (application_data) content type byte per RFC 8446 Section 5.1
+- Added ECDSA P-256 certificate signing for TLS 1.3 `CertificateVerify` and TLS 1.2 `ServerKeyExchange`
+- DER parser for ECDSA keys (`scanDerForEcKey`)
+- `loadPrivateKey` updated for SEC1 EC key format
+- `user_canceled` alert handled gracefully (treated as clean close)
+- Sequence number overflow guard for TLS 1.3 key updates
+
+**Connection Pool:**
+- Thread-safe pool access using atomic spinlock
+- Proxy-aware connection matching (`proxy_host`/`proxy_port` fields)
+- `closeConnection()` method for stale connection removal
+- Client removes stale connections from pool on error
+
+**Cookie Handling:**
+- Domain-aware cookie storage per RFC 6265
+- Cookies with `Domain` attribute only sent to matching hosts
+- `parseSetCookie()` extracts Domain, Path, Secure, HttpOnly from Set-Cookie headers
+- Protocol-relative URL redirect support (`//example.com/path`)
+
+**Other:**
+- All TLS debug prints removed
+- All 343 tests pass; all examples build and run
+- Documentation fully updated for v0.1.6
 
 ### v0.1.5 — Multipart upload hang on Windows (issue [#26](https://github.com/muhammad-fiaz/httpx.zig/issues/26))
 

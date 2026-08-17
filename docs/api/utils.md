@@ -8,6 +8,7 @@ Common utilities for buffer management, encoding, multipart, metrics, and sessio
 
 - `queryValue(query, key)`: Get a query parameter value from a raw query string.
 - `parseSetCookiePair(set_cookie)`: Parse the first `name=value` pair from a `Set-Cookie` header value.
+- `parseSetCookie(set_cookie)`: Parse a `Set-Cookie` header extracting name, value, Domain, Path, Secure, and HttpOnly attributes.
 - `cookieValue(cookie_header, name)`: Read a cookie value from a request `Cookie` header.
 - `buildSetCookieHeader(allocator, name, value, options)`: Build a `Set-Cookie` header value with RFC 6265 style attributes.
 - `mimeTypeFromPath(path)`: Resolve a best-effort MIME type from file extension.
@@ -210,16 +211,6 @@ Dynamic, growable byte buffer.
 - `clear()` — reset without deallocating
 - `deinit()` — release memory
 
-### `RingBuffer`
-
-Circular buffer for streaming data.
-
-- `init(allocator, size)` — create ring buffer
-- `writeBytes(bytes)` — write bytes, returns bytes written
-- `readBytes(buf)` — read available bytes
-- `getAvailable()` — bytes available to read
-- `getFreeSpace()` — bytes available to write
-
 ### `FixedBuffer`
 
 Stack-allocated fixed-size buffer with no heap allocation.
@@ -332,6 +323,22 @@ Root-level aliases: `httpx.ContentEncoding`, `httpx.decompress`, `httpx.compress
 #### `Event.format(allocator)`
 
 Serializes an SSE event to wire format. Caller owns the returned slice.
+
+### `SseWriter(WriterType)`
+
+Streaming SSE writer that emits events to any writer interface. Useful for server-side SSE endpoints that push events over a connection.
+
+| Method | Description |
+|--------|-------------|
+| `init(underlying)` | Create a writer wrapping the given underlying writer |
+| `sendEvent(event)` | Send a complete SSE event (id, event, retry, data) |
+| `sendComment(comment)` | Send a comment line (used as keep-alive) |
+| `sendNamed(name, data)` | Send a named event with data |
+| `sendData(data)` | Send a plain data event (no event name) |
+| `sendWithId(data, id)` | Send an event with an ID for Last-Event-ID tracking |
+
+Fields:
+- `last_event_id: ?[]const u8` — tracks the last event ID sent
 
 ### `parseSseStream(allocator, data, on_event)`
 

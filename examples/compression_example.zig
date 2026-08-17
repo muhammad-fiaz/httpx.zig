@@ -71,9 +71,6 @@ pub fn main() !void {
     std.debug.print("  Client uses decompress() to decode\n", .{});
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
-
     sleepMs(100);
 
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
@@ -94,4 +91,7 @@ pub fn main() !void {
     std.debug.print("  deflate: Raw flate compression\n", .{});
     std.debug.print("  zstd:    Modern high-performance compression\n", .{});
     std.debug.print("  br:      Brotli high-ratio compression\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

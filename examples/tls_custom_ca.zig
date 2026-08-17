@@ -19,7 +19,7 @@ pub fn main() !void {
     std.debug.print("=== Custom CA Certificate ===\n\n", .{});
 
     // Load CA cert (self-signed, used as both server cert and CA)
-    const ca_pem = @embedFile("certs/server.crt");
+    const ca_pem = @embedFile("certs/server_ec.crt");
     std.debug.print("Loaded CA cert: {d} bytes\n\n", .{ca_pem.len});
 
     // 1. Start local TLS server with self-signed cert (HTTP/1.1 + HTTP/2 + HTTP/3)
@@ -27,8 +27,8 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .tls_enabled = true,
-        .tls_cert_path = "examples/certs/server.crt",
-        .tls_key_path = "examples/certs/server.key",
+        .tls_cert_path = "examples/certs/server_ec.crt",
+        .tls_key_path = "examples/certs/server_ec.key",
         .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
         .http2_enabled = true,
         .http3_enabled = true,
@@ -39,8 +39,6 @@ pub fn main() !void {
     try server.get("/secure", handler);
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
     sleepMs(200);
 
     const port = server.config.port;
@@ -77,4 +75,7 @@ pub fn main() !void {
     std.debug.print("  3. Pass to TLS config for certificate verification\n", .{});
 
     std.debug.print("\n=== Example complete ===\n", .{});
+
+    server.stop();
+    server_thread.join();
 }

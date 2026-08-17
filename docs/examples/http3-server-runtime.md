@@ -34,7 +34,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-http3_server_runtime
+zig build run-all-http3_server_runtime
 ```
 
 ## What to Verify

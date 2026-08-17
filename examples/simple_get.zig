@@ -15,11 +15,11 @@ pub fn main() !void {
 
     // 1. Build a request manually
     std.debug.print("--- Request Building ---\n", .{});
-    var request = try httpx.Request.init(allocator, .GET, "https://httpbin.org/get");
+    var request = try httpx.Request.init(allocator, .GET, "http://httpbun.com/get");
     defer request.deinit();
 
     try request.headers.set("Accept", "application/json");
-    try request.headers.set("User-Agent", "httpx.zig/1.0");
+    try request.headers.set("User-Agent", httpx.DEFAULT_USER_AGENT);
 
     const serialized = try httpx.formatRequest(&request, allocator);
     defer allocator.free(serialized);
@@ -33,7 +33,7 @@ pub fn main() !void {
         .withRetryPolicy(httpx.RetryPolicy.noRetry()));
     defer client.deinit();
 
-    var response = client.get("https://httpbin.org/get", .{
+    var response = client.get("http://httpbun.com/get", .{
         .timeout_ms = 10_000,
     }) catch |err| {
         std.debug.print("Request failed: {} (network may be unavailable)\n", .{err});
@@ -49,7 +49,7 @@ pub fn main() !void {
     std.debug.print("Status: {d}\n", .{response.status.code});
     const body = response.body orelse "";
     std.debug.print("Body length: {d} bytes\n", .{body.len});
-    std.debug.print("Body preview: {s}\n", .{if (body.len > 120) body[0..120] else body});
+    std.debug.print("Body:\n{s}\n", .{body});
 
     std.debug.print("\nHTTP Method Properties:\n", .{});
     std.debug.print("  GET is idempotent: {}\n", .{httpx.Method.GET.isIdempotent()});

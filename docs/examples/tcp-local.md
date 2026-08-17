@@ -50,7 +50,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-tcp_local
+zig build run-all-tcp_local
 ```
 
 ## What to Verify

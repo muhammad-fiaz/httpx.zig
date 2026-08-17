@@ -49,9 +49,9 @@ fn hpackExample(allocator: std.mem.Allocator) !void {
         .{ .name = ":method", .value = "GET" },
         .{ .name = ":path", .value = "/api/users" },
         .{ .name = ":scheme", .value = "https" },
-        .{ .name = ":authority", .value = "api.example.com" },
+        .{ .name = ":authority", .value = "httpbun.com" },
         .{ .name = "accept", .value = "application/json" },
-        .{ .name = "user-agent", .value = "httpx.zig/1.0" },
+        .{ .name = "user-agent", .value = httpx.DEFAULT_USER_AGENT },
     };
 
     // Encode headers using HPACK

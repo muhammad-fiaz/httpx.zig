@@ -22,7 +22,7 @@ const strict_method = strict.getRedirectMethod(301, .POST);
 ## Run
 
 ```
-zig build example-redirect-example
+zig build run-all-redirect_example
 ```
 
 ## Checklist

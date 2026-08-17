@@ -32,7 +32,7 @@ const n = session.read(&buf);
 ## Run
 
 ```
-zig build example-https-client
+zig build run-all-https_client
 ```
 
 ## Checklist

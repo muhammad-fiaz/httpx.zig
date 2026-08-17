@@ -32,7 +32,7 @@ pub fn main() !void {
     defer server.deinit();
 
     try server.use(httpx.middleware.loggerWithConfig(.{ .log_fn = logMessage }));
-    try server.use(httpx.cors(.{}));
+    try server.use(httpx.middleware.cors(.{}));
     try server.use(.{ .name = "auth", .handler = auth });
 
     try server.get("/secure", secure);
@@ -43,7 +43,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-middleware_example
+zig build run-all-middleware_example
 ```
 
 ## What to Verify

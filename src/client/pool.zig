@@ -6,6 +6,7 @@
 //! - Per-host connection limits
 //! - Automatic connection health checking
 //! - Idle connection timeout and cleanup
+//! - Thread-safe access via mutex
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -16,6 +17,7 @@ const address_mod = @import("../net/address.zig");
 const types = @import("../core/types.zig");
 const proxy_mod = @import("proxy.zig");
 const common = @import("../util/common.zig");
+const dbg = @import("../util/debug.zig");
 const Proxy = types.Proxy;
 
 pub const PoolError = error{
@@ -28,6 +30,8 @@ pub const Connection = struct {
     socket: Socket,
     host: []const u8,
     port: u16,
+    proxy_host: ?[]const u8 = null,
+    proxy_port: ?u16 = null,
     in_use: bool = false,
     created_at: i64,
     last_used: i64,
@@ -65,6 +69,22 @@ pub const Connection = struct {
         return idle_time >= idle_timeout_ms;
     }
 
+    /// Returns true if this connection matches the given host/port/proxy.
+    pub fn matches(self: *const Self, host: []const u8, port: u16, proxy: ?Proxy) bool {
+        if (!std.mem.eql(u8, self.host, host) or self.port != port) return false;
+        if (proxy) |p| {
+            if (self.proxy_host) |ph| {
+                if (!std.mem.eql(u8, ph, p.host)) return false;
+                if (self.proxy_port != p.port) return false;
+            } else {
+                return false;
+            }
+        } else if (self.proxy_host != null) {
+            return false;
+        }
+        return true;
+    }
+
     /// Closes the underlying socket.
     pub fn close(self: *Self) void {
         self.socket.close();
@@ -88,13 +108,24 @@ pub const PoolStats = struct {
     idle: usize,
 };
 
-/// HTTP connection pool.
+/// HTTP connection pool with thread-safe access.
 pub const ConnectionPool = struct {
     allocator: Allocator,
     config: PoolConfig,
     connections: std.ArrayList(Connection) = .empty,
+    lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     const Self = @This();
+
+    fn acquireLock(self: *Self) void {
+        while (self.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            std.Thread.yield() catch {};
+        }
+    }
+
+    fn releaseLock(self: *Self) void {
+        self.lock.store(0, .release);
+    }
 
     /// Creates a new connection pool.
     pub fn init(allocator: Allocator) Self {
@@ -103,6 +134,8 @@ pub const ConnectionPool = struct {
 
     /// Creates a connection pool with custom configuration.
     pub fn initWithConfig(allocator: Allocator, config: PoolConfig) Self {
+        dbg.entry("POOL", "initWithConfig");
+        defer dbg.exit("POOL", "initWithConfig");
         return .{
             .allocator = allocator,
             .config = config,
@@ -111,29 +144,42 @@ pub const ConnectionPool = struct {
 
     /// Releases all pool resources.
     pub fn deinit(self: *Self) void {
+        dbg.entry("POOL", "deinit");
+        defer dbg.exit("POOL", "deinit");
+        self.acquireLock();
+        defer self.releaseLock();
         for (self.connections.items) |*conn| {
             conn.close();
             self.allocator.free(conn.host);
+            if (conn.proxy_host) |ph| self.allocator.free(ph);
         }
         self.connections.deinit(self.allocator);
     }
 
     /// Gets or creates a connection to the specified host.
     pub fn getConnection(self: *Self, host: []const u8, port: u16, proxy: ?Proxy, connect_timeout_ms: u64) !*Connection {
+        dbg.entry("POOL", "getConnection");
+        defer dbg.exit("POOL", "getConnection");
+        dbg.log("POOL", "acquiring lock...", .{});
+        self.acquireLock();
+        dbg.log("POOL", "lock acquired", .{});
+        defer self.releaseLock();
+
         for (self.connections.items) |*conn| {
-            if (std.mem.eql(u8, conn.host, host) and conn.port == port) {
+            if (conn.matches(host, port, proxy)) {
                 if (conn.isHealthy(self.config.idle_timeout_ms) and conn.requests_made < self.config.max_requests_per_connection) {
+                    dbg.log("POOL", "reusing connection to {s}:{d}", .{ host, port });
                     conn.acquire();
                     return conn;
                 }
             }
         }
 
-        if (self.totalCount() >= self.config.max_connections) return PoolError.PoolExhausted;
+        if (self.totalCountLocked() >= self.config.max_connections) return PoolError.PoolExhausted;
 
         var host_count: u32 = 0;
         for (self.connections.items) |conn| {
-            if (std.mem.eql(u8, conn.host, host) and conn.port == port) host_count += 1;
+            if (conn.matches(host, port, proxy)) host_count += 1;
         }
         if (host_count >= self.config.max_per_host) return PoolError.PoolExhaustedForHost;
 
@@ -142,6 +188,8 @@ pub const ConnectionPool = struct {
 
     /// Creates a new connection.
     fn createConnection(self: *Self, host: []const u8, port: u16, proxy: ?Proxy, connect_timeout_ms: u64) !*Connection {
+        dbg.entry("POOL", "createConnection");
+        defer dbg.exit("POOL", "createConnection");
         const host_owned = try self.allocator.dupe(u8, host);
         errdefer self.allocator.free(host_owned);
 
@@ -161,32 +209,63 @@ pub const ConnectionPool = struct {
 
         const now = common.nowMillis();
 
-        try self.connections.append(self.allocator, .{
+        const proxy_host_owned: ?[]const u8 = if (proxy) |p| try self.allocator.dupe(u8, p.host) else null;
+
+        self.connections.append(self.allocator, .{
             .socket = socket,
             .host = host_owned,
             .port = port,
+            .proxy_host = proxy_host_owned,
+            .proxy_port = if (proxy) |p| p.port else null,
             .in_use = true,
             .created_at = now,
             .last_used = now,
-        });
+        }) catch {
+            if (proxy_host_owned) |ph| self.allocator.free(ph);
+            return error.OutOfMemory;
+        };
 
         return &self.connections.items[self.connections.items.len - 1];
     }
 
     /// Releases a connection back to the pool.
     pub fn releaseConnection(self: *Self, conn: *Connection) void {
-        _ = self;
+        dbg.entry("POOL", "releaseConnection");
+        defer dbg.exit("POOL", "releaseConnection");
+        self.acquireLock();
+        defer self.releaseLock();
         conn.release();
+    }
+
+    /// Marks a connection as closed and removes it from the pool.
+    pub fn closeConnection(self: *Self, conn: *Connection) void {
+        dbg.entry("POOL", "closeConnection");
+        defer dbg.exit("POOL", "closeConnection");
+        self.acquireLock();
+        defer self.releaseLock();
+        conn.close();
+        self.allocator.free(conn.host);
+        if (conn.proxy_host) |ph| self.allocator.free(ph);
+        // Find and remove the connection
+        for (self.connections.items, 0..) |*c, i| {
+            if (std.meta.eql(c.socket, conn.socket)) {
+                _ = self.connections.orderedRemove(i);
+                return;
+            }
+        }
     }
 
     /// Removes idle connections that have exceeded the timeout.
     pub fn cleanup(self: *Self) void {
+        self.acquireLock();
+        defer self.releaseLock();
         var i: usize = 0;
         while (i < self.connections.items.len) {
             const conn = &self.connections.items[i];
             if (conn.shouldEvict(self.config.idle_timeout_ms, self.config.max_requests_per_connection)) {
                 conn.close();
                 self.allocator.free(conn.host);
+                if (conn.proxy_host) |ph| self.allocator.free(ph);
                 _ = self.connections.orderedRemove(i);
             } else {
                 i += 1;
@@ -195,7 +274,9 @@ pub const ConnectionPool = struct {
     }
 
     /// Returns the number of active connections.
-    pub fn activeCount(self: *const Self) usize {
+    pub fn activeCount(self: *Self) usize {
+        self.acquireLock();
+        defer self.releaseLock();
         var count: usize = 0;
         for (self.connections.items) |conn| {
             if (conn.in_use) count += 1;
@@ -204,17 +285,19 @@ pub const ConnectionPool = struct {
     }
 
     /// Returns the total number of connections.
-    pub fn totalCount(self: *const Self) usize {
+    fn totalCountLocked(self: *Self) usize {
         return self.connections.items.len;
     }
 
-    /// Returns the number of idle connections.
-    pub fn idleCount(self: *const Self) usize {
-        return self.totalCount() - self.activeCount();
+    fn idleCountLocked(self: *Self) usize {
+        var active: usize = 0;
+        for (self.connections.items) |conn| {
+            if (conn.in_use) active += 1;
+        }
+        return self.connections.items.len - active;
     }
 
-    /// Returns the number of connections tracked for a specific host/port pair.
-    pub fn hostConnectionCount(self: *const Self, host: []const u8, port: u16) usize {
+    fn hostConnectionCountLocked(self: *Self, host: []const u8, port: u16) usize {
         var count: usize = 0;
         for (self.connections.items) |conn| {
             if (std.mem.eql(u8, conn.host, host) and conn.port == port) {
@@ -224,11 +307,37 @@ pub const ConnectionPool = struct {
         return count;
     }
 
-    /// Returns a snapshot of total/active/idle pool counts.
-    pub fn stats(self: *const Self) PoolStats {
-        const total = self.totalCount();
-        const active = self.activeCount();
+    fn statsLocked(self: *Self) PoolStats {
+        var active: usize = 0;
+        for (self.connections.items) |conn| {
+            if (conn.in_use) active += 1;
+        }
+        const total = self.connections.items.len;
         return .{ .total = total, .active = active, .idle = total - active };
+    }
+
+    pub fn totalCount(self: *Self) usize {
+        self.acquireLock();
+        defer self.releaseLock();
+        return self.totalCountLocked();
+    }
+
+    pub fn idleCount(self: *Self) usize {
+        self.acquireLock();
+        defer self.releaseLock();
+        return self.idleCountLocked();
+    }
+
+    pub fn hostConnectionCount(self: *Self, host: []const u8, port: u16) usize {
+        self.acquireLock();
+        defer self.releaseLock();
+        return self.hostConnectionCountLocked(host, port);
+    }
+
+    pub fn stats(self: *Self) PoolStats {
+        self.acquireLock();
+        defer self.releaseLock();
+        return self.statsLocked();
     }
 };
 
@@ -278,5 +387,5 @@ test "ConnectionPool stats helpers" {
     try std.testing.expectEqual(@as(usize, 0), s.total);
     try std.testing.expectEqual(@as(usize, 0), s.active);
     try std.testing.expectEqual(@as(usize, 0), s.idle);
-    try std.testing.expectEqual(@as(usize, 0), pool.hostConnectionCount("example.com", 443));
+    try std.testing.expectEqual(@as(usize, 0), pool.hostConnectionCount("httpbun.com", 443));
 }

@@ -57,7 +57,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-http3_advanced
+zig build run-all-http3_advanced
 ```
 
 ## What to Verify

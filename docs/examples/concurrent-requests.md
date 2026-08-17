@@ -91,7 +91,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-concurrent_requests
+zig build run-all-concurrent_requests
 ```
 
 ## What to Verify

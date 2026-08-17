@@ -84,7 +84,7 @@ server.use(httpx.middleware.basicAuth("My Realm", validate));
 
 ### `helmet`
 
-Adds security headers: `X-Frame-Options`, `X-Content-Type-Options`, `X-XSS-Protection`, `Strict-Transport-Security`, and `Referrer-Policy`.
+Adds security headers: `X-Frame-Options`, `X-Content-Type-Options`, `X-XSS-Protection`, and `Strict-Transport-Security`.
 
 ```zig
 server.use(httpx.middleware.helmet());
@@ -131,10 +131,10 @@ server.use(httpx.middleware.timeout(5_000)); // 5 seconds
 
 ### `bodyParser`
 
-Parses request body based on `Content-Type` (JSON, form-urlencoded).
+Parses request body based on `Content-Type` (JSON, form-urlencoded). Requires a maximum body size limit in bytes.
 
 ```zig
-server.use(httpx.middleware.bodyParser());
+server.use(httpx.middleware.bodyParser(1_048_576)); // 1MB max body
 ```
 
 ### `healthCheck`
@@ -165,7 +165,6 @@ Intercepts requests to a configured readiness path. Useful for Kubernetes readin
 server.use(httpx.middleware.readinessProbe(.{
     .path = "/ready",
     .body = "{\"ready\":true}",
-    .status = 200,
 }));
 ```
 
@@ -175,7 +174,6 @@ server.use(httpx.middleware.readinessProbe(.{
 |-------|---------|-------------|
 | `path` | `"/ready"` | Path to intercept |
 | `body` | `"{\"ready\":true}"` | Response body |
-| `status` | `200` | HTTP status code |
 
 ### `reverseProxy`
 
@@ -203,7 +201,7 @@ pub fn timingMiddleware() httpx.Middleware {
     return .{
         .name = "timing",
         .handler = struct {
-            fn handler(ctx: *httpx.Context, next: httpx.NextFn) anyerror!httpx.Response {
+            fn handler(ctx: *httpx.Context, next: httpx.Next) anyerror!httpx.Response {
                 const t0 = std.time.nanoTimestamp();
                 const resp = try next(ctx);
                 const elapsed_ms = @divTrunc(std.time.nanoTimestamp() - t0, 1_000_000);

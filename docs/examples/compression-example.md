@@ -24,7 +24,7 @@ try req.headers.set("Accept-Encoding", "gzip, deflate, zstd");
 ## Run
 
 ```
-zig build example-compression
+zig build run-all-compression_example
 ```
 
 ## Checklist

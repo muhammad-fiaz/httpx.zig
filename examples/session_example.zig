@@ -147,8 +147,6 @@ pub fn main() !void {
     }.h);
 
     const t = try server.listenInBackground();
-    defer t.join();
-    defer server.stop();
     sleepMs(100);
 
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
@@ -171,4 +169,7 @@ pub fn main() !void {
     std.debug.print("GET  /profile -> {d} {s}\n", .{ profile_resp.status.code, profile_resp.text().? });
 
     std.debug.print("\n=== Session Example Complete ===\n", .{});
+
+    server.stop();
+    t.join();
 }

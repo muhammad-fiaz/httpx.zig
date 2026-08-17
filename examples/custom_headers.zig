@@ -18,7 +18,7 @@ pub fn main() !void {
     try headers.set(httpx.HeaderName.CONTENT_TYPE, "application/json");
     try headers.set(httpx.HeaderName.AUTHORIZATION, "Bearer token123");
     try headers.set(httpx.HeaderName.ACCEPT, "application/json");
-    try headers.set(httpx.HeaderName.USER_AGENT, "httpx.zig/1.0");
+    try headers.set(httpx.HeaderName.USER_AGENT, httpx.DEFAULT_USER_AGENT);
     try headers.append("X-Custom-Header", "custom-value");
     try headers.append("X-Request-ID", "req-12345");
 

@@ -12,6 +12,8 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const list_writer = @import("../util/list_writer.zig");
+const PercentEncoding = @import("../util/encoding.zig").PercentEncoding;
+const dbg = @import("../util/debug.zig");
 
 /// Parsed URI structure per RFC 3986.
 pub const Uri = struct {
@@ -28,6 +30,8 @@ pub const Uri = struct {
 
     /// Parses a URI string into its components.
     pub fn parse(uri_string: []const u8) !Self {
+        dbg.entry("URI", "Uri.parse");
+        dbg.log("URI", "input={s}", .{uri_string});
         var uri = Self{ .raw = uri_string };
         var remaining = uri_string;
 
@@ -76,6 +80,7 @@ pub const Uri = struct {
             uri.host = remaining;
         }
 
+        dbg.exit("URI", "Uri.parse");
         return uri;
     }
 
@@ -137,54 +142,18 @@ pub const Uri = struct {
     }
 };
 
-/// Characters that don't need percent encoding in URIs.
-const unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-
 /// Percent-encodes a string for URI inclusion.
-pub fn encode(allocator: Allocator, input: []const u8) ![]u8 {
-    var result = std.ArrayList(u8).empty;
-    const writer = list_writer.init(allocator, &result);
-
-    for (input) |c| {
-        if (mem.indexOfScalar(u8, unreserved, c) != null) {
-            try writer.writeByte(c);
-        } else {
-            try writer.print("%{X:0>2}", .{c});
-        }
-    }
-
-    return result.toOwnedSlice(allocator);
-}
+/// Delegates to the canonical PercentEncoding implementation.
+pub const encode = PercentEncoding.encode;
 
 /// Decodes a percent-encoded string.
-pub fn decode(allocator: Allocator, input: []const u8) ![]u8 {
-    var result = std.ArrayList(u8).empty;
-
-    var i: usize = 0;
-    while (i < input.len) {
-        if (input[i] == '%' and i + 2 < input.len) {
-            const hex = input[i + 1 .. i + 3];
-            if (std.fmt.parseInt(u8, hex, 16)) |byte| {
-                try result.append(allocator, byte);
-                i += 3;
-                continue;
-            } else |_| {}
-        }
-        if (input[i] == '+') {
-            try result.append(allocator, ' ');
-        } else {
-            try result.append(allocator, input[i]);
-        }
-        i += 1;
-    }
-
-    return result.toOwnedSlice(allocator);
-}
+/// Delegates to the canonical PercentEncoding implementation.
+pub const decode = PercentEncoding.decode;
 
 test "URI parsing basic" {
-    const uri = try Uri.parse("https://example.com/path");
-    try std.testing.expectEqualStrings("https", uri.scheme.?);
-    try std.testing.expectEqualStrings("example.com", uri.host.?);
+    const uri = try Uri.parse("http://httpbun.com/path");
+    try std.testing.expectEqualStrings("http", uri.scheme.?);
+    try std.testing.expectEqualStrings("httpbun.com", uri.host.?);
     try std.testing.expectEqualStrings("/path", uri.path);
 }
 
@@ -195,24 +164,24 @@ test "URI parsing with port" {
 }
 
 test "URI parsing with query and fragment" {
-    const uri = try Uri.parse("https://example.com/search?q=test#results");
+    const uri = try Uri.parse("http://httpbun.com/search?q=test#results");
     try std.testing.expectEqualStrings("q=test", uri.query.?);
     try std.testing.expectEqualStrings("results", uri.fragment.?);
 }
 
 test "URI effective port" {
-    const https = try Uri.parse("https://example.com/");
+    const https = try Uri.parse("https://httpbun.com/");
     try std.testing.expectEqual(@as(u16, 443), https.effectivePort());
 
-    const http = try Uri.parse("http://example.com/");
+    const http = try Uri.parse("http://httpbun.com/");
     try std.testing.expectEqual(@as(u16, 80), http.effectivePort());
 }
 
 test "URI TLS detection" {
-    const https = try Uri.parse("https://example.com/");
+    const https = try Uri.parse("https://httpbun.com/");
     try std.testing.expect(https.isTls());
 
-    const http = try Uri.parse("http://example.com/");
+    const http = try Uri.parse("http://httpbun.com/");
     try std.testing.expect(!http.isTls());
 }
 

@@ -3,7 +3,7 @@
 Parse JSON responses into typed Zig structs.
 
 This example now defaults to an offline-safe path so it completes quickly even in restricted network environments.
-Set `HTTPX_EXAMPLE_ONLINE=1` when you want to run a live request to `https://httpbin.org/get`.
+Set `HTTPX_EXAMPLE_ONLINE=1` when you want to run a live request to `https://httpbun.com/get`.
 
 ## Demo Program
 
@@ -35,7 +35,7 @@ const offline_sample_json =
     \\    "X-Amzn-Trace-Id": "Root=1-offline-demo"
     \\  },
     \\  "origin": "127.0.0.1",
-    \\  "url": "https://httpbin.org/get"
+    \\  "url": "https://httpbun.com/get"
     \\}
 ;
 
@@ -63,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
         .withRetryPolicy(httpx.RetryPolicy.noRetry()));
     defer client.deinit();
 
-    var res = try client.request(.GET, "https://httpbin.org/get", .{ .timeout_ms = 5_000 });
+    var res = try client.request(.GET, "https://httpbun.com/get", .{ .timeout_ms = 5_000 });
     defer res.deinit();
 
     // Use response.json() helper for clean automatic JSON deserialization
@@ -76,18 +76,18 @@ pub fn main(init: std.process.Init) !void {
 ## Run
 
 ```bash
-zig build run-simple_get_deserialize
+zig build run-all-simple_get_deserialize
 ```
 
 Live network mode:
 
 ```powershell
 $env:HTTPX_EXAMPLE_ONLINE = "1"
-zig build run-simple_get_deserialize
+zig build run-all-simple_get_deserialize
 ```
 
 ```bash
-HTTPX_EXAMPLE_ONLINE=1 zig build run-simple_get_deserialize
+HTTPX_EXAMPLE_ONLINE=1 zig build run-all-simple_get_deserialize
 ```
 
 ## What to Verify

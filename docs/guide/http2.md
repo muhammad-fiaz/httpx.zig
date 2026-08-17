@@ -349,20 +349,17 @@ When header blocks exceed `MAX_FRAME_SIZE`, httpx.zig automatically splits them 
 
 ```zig
 // Headers are automatically split when they exceed max_frame_size
-const result = try httpx.stream.buildHeadersAndContinuations(
+const frames = try httpx.stream.buildHeadersAndContinuations(
     &stream_manager,
+    1, // stream_id
     &headers,
-    .{
-        .max_frame_size = 16384,
-        .stream_id = 1,
-    },
+    null, // priority (optional)
+    16384, // max_frame_size
+    false, // end_stream
     allocator,
 );
-defer {
-    allocator.free(result.headers_payload);
-    for (result.continuation_payloads) |p| allocator.free(p.payload);
-    allocator.free(result.continuation_payloads);
-}
+defer allocator.free(frames);
+// frames is a flat buffer of complete HTTP/2 frames ready to write
 ```
 
 ## SETTINGS Enforcement
@@ -384,9 +381,9 @@ if (!manager.canOpenStream()) {
 }
 
 // Validate frame sizes
-if (!manager.validateFrameSize(frame_length)) {
-    std.debug.print("Frame too large for peer\n", .{});
-}
+manager.validateFrameSize(frame_length) catch |err| {
+    std.debug.print("Frame too large for peer: {}\n", .{err});
+};
 ```
 
 ## GOAWAY and RST_STREAM
@@ -404,7 +401,7 @@ const goaway = try httpx.stream.buildGoawayFrame(
 defer allocator.free(goaway);
 
 // Build RST_STREAM frame to cancel a specific stream
-const rst = httpx.stream.buildRstStreamFrame(.cancel);
+const rst = httpx.stream.buildRstStreamFrame(1, .cancel);
 ```
 
 ## HPACK Security: Without Indexing / Never Indexed
@@ -413,16 +410,18 @@ For volatile headers like `Authorization` and `Cookie`, use non-indexing represe
 
 ```zig
 // Without Indexing: don't add to dynamic table
-const encoded = try httpx.hpack.encodeHeaderWithoutIndexing(
-    &ctx, "Authorization", "Bearer token123", allocator,
+var out = std.ArrayList(u8).empty;
+defer out.deinit(allocator);
+try httpx.hpack.encodeHeaderWithoutIndexing(
+    null, "Authorization", "Bearer token123", allocator, &out,
 );
-defer allocator.free(encoded);
 
 // Never Indexed: explicitly tell decoder to never index
-const encoded = try httpx.hpack.encodeHeaderNeverIndexed(
-    &ctx, "Cookie", "session=abc123", allocator,
+var out2 = std.ArrayList(u8).empty;
+defer out2.deinit(allocator);
+try httpx.hpack.encodeHeaderNeverIndexed(
+    null, "Cookie", "session=abc123", allocator, &out2,
 );
-defer allocator.free(encoded);
 ```
 
 ::: tip Security Note
@@ -455,12 +454,12 @@ Both client and server detect if the peer never sends its initial SETTINGS frame
 Run the low-level protocol, high-level runtime, and advanced HTTP/2 examples with:
 
 ```bash
-zig build example-http2_example
+zig build run-all-http2_example
 ./zig-out/bin/http2_example
 
-zig build run-http2_client_runtime
-zig build run-http2_server_runtime
-zig build run-http2_advanced
+zig build run-all-http2_client_runtime
+zig build run-all-http2_server_runtime
+zig build run-all-http2_advanced
 ```
 
 ## See Also

@@ -72,6 +72,9 @@ std.debug.print("{s}\n", .{buf[0..n]});
 |--------|-------------|
 | `setNoDelay(enable)` | TCP_NODELAY (disable Nagle when true) |
 | `setKeepAlive(enable)` | SO_KEEPALIVE |
+| `setKeepAliveIdle(seconds)` | TCP_KEEPIDLE (Linux) / TCP_KEEPALIVE (macOS) — idle time before first probe |
+| `setKeepAliveInterval(seconds)` | TCP_KEEPINTVL (Linux) — seconds between probes |
+| `setKeepAliveCount(count)` | TCP_KEEPCNT (Linux) — number of probes before declaring dead |
 | `setReuseAddr(enable)` | SO_REUSEADDR |
 | `setRecvTimeout(ms)` | SO_RCVTIMEO |
 | `setSendTimeout(ms)` | SO_SNDTIMEO |

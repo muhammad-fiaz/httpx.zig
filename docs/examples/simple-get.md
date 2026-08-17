@@ -13,7 +13,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var client = httpx.Client.initForBaseUrl(allocator, "https://httpbin.org");
+    var client = httpx.Client.initForBaseUrl(allocator, "https://httpbun.com");
     defer client.deinit();
 
     // Request defaults are implicit when using .{}
@@ -28,7 +28,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-simple_get
+zig build run-all-simple_get
 ```
 
 ## What to Verify

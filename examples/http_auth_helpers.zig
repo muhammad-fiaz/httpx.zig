@@ -75,8 +75,6 @@ pub fn main() !void {
     try server.get("/auth/basic", basicHandler);
 
     const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
 
     sleepMs(100);
 
@@ -116,4 +114,7 @@ pub fn main() !void {
     defer req.deinit();
     try req.setBearerAuth("demo-token");
     std.debug.print("Manual request Authorization: {s}\n", .{req.headers.get(httpx.HeaderName.AUTHORIZATION).?});
+
+    server.stop();
+    server_thread.join();
 }

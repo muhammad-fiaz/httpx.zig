@@ -26,7 +26,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Load CA cert (self-signed, used as both server cert and CA)
-    const ca_pem = @embedFile("certs/server.crt");
+    const ca_pem = @embedFile("certs/server_ec.crt");
     std.debug.print("Loaded CA cert: {d} bytes\n", .{ca_pem.len});
 
     // Start local TLS server with self-signed cert
@@ -34,8 +34,8 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .tls_enabled = true,
-        .tls_cert_path = "examples/certs/server.crt",
-        .tls_key_path = "examples/certs/server.key",
+        .tls_cert_path = "examples/certs/server_ec.crt",
+        .tls_key_path = "examples/certs/server_ec.key",
         .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
         .http2_enabled = true,
         .http3_enabled = true,
@@ -71,7 +71,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build example-tls_custom_ca
+zig build run-all-tls_custom_ca
 ```
 
 ## Production CA Workflow

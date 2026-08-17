@@ -30,7 +30,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-http2_example
+zig build run-all-http2_example
 ```
 
 ## What to Verify

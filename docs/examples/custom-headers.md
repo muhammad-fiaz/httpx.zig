@@ -16,7 +16,7 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator);
     defer client.deinit();
 
-    var res = try client.get("https://httpbin.org/headers", .{
+    var res = try client.get("https://httpbun.com/headers", .{
         .headers = &.{
             .{ "Authorization", "Bearer demo-token" },
             .{ "X-Request-ID", "req-001" },
@@ -33,7 +33,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-custom_headers
+zig build run-all-custom_headers
 ```
 
 ## What to Verify

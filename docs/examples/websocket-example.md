@@ -51,5 +51,5 @@ pub fn main() !void {
 Run the pre-configured WebSocket example:
 
 ```bash
-zig build run-websocket_example
+zig build run-all-websocket_example
 ```
