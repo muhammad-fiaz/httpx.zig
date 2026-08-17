@@ -24,9 +24,9 @@ pub fn main() !void {
     m.recordResponse(500, 64, 4500);
 
     const snap = m.snapshot();
-    std.debug.print("Total Requests: {d}\n", .{snap.total_requests});
+    std.debug.print("Total Requests: {d}\n", .{snap.totalRequests()});
     std.debug.print("Success Rate:   {d:.1}%\n", .{snap.successRate() * 100.0});
-    std.debug.print("Avg Latency:    {d:.2}ms\n", .{snap.avg_latency_ns});
+    std.debug.print("Avg Latency:    {d}ns\n", .{snap.avgLatencyNs()});
 }
 ```
 

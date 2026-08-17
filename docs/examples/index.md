@@ -20,7 +20,7 @@ zig build run-all-http3_example -Dtarget=aarch64-macos
 
 - [Simple Get](/examples/simple-get): Basic GET request and response handling.
 - [Simple Get Deserialize](/examples/simple-get-deserialize): Parse JSON into typed structs.
-- `json_api_example.zig`: JSON API: getJson, postJsonAndParse, Response.json, server ctx.jsonBody + ctx.json
+- [`json_api_example`](examples/json_api_example.zig): JSON API: getJson, postJsonAndParse, Response.json, server ctx.jsonBody + ctx.json
 - [HTTP Auth Helpers](/examples/http-auth-helpers): Use built-in Bearer and Basic auth request helpers against a local loopback server.
 - [Post JSON](/examples/post-json): Send JSON payloads with POST.
 - [Custom Headers](/examples/custom-headers): Attach auth and custom metadata headers.
@@ -57,6 +57,8 @@ zig build run-all-http3_example -Dtarget=aarch64-macos
 - [Metrics and Observability](/examples/metrics-example): Aggregate total requests, status codes, latency times, and success rates.
 - [Unix Domain Sockets](/examples/unix-socket-example): Bind servers and connect clients over AF_UNIX sockets.
 - [Health Check Probes](/examples/health-check-example): Configure liveness and readiness probe middlewares.
+- [Readiness Probe](/examples/readiness-probe-example): Readiness probe and health check middleware integration.
+- [Pre-Route Hooks](/examples/pre-route-example): Pre-route hooks and global handler patterns.
 - [Cloud HTTPS Server](/examples/cloud-https-server): Production cloud deployment with TLS, middleware, and health checks.
 - [TLS Server](/examples/tls-server): Custom TLS server with ALPN negotiation.
 - [HTTPS Client](/examples/https-client): HTTPS client with custom TLS configuration.

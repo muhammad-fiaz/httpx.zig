@@ -69,7 +69,7 @@ std.debug.print("success_rate={d:.2}\n", .{snap.successRate()});
 | `total_requests` | `u64` | Total recorded requests |
 | `total_responses` | `u64` | Total recorded responses |
 | `active_connections` | `i64` | Current open connections |
-| `errors` | `u64` | Total errors |
+| `total_errors` | `u64` | Total errors |
 | `bytes_sent` | `u64` | Total bytes sent |
 | `bytes_received` | `u64` | Total bytes received |
 | `responses_2xx` | `u64` | 2xx response count |
@@ -84,9 +84,16 @@ std.debug.print("success_rate={d:.2}\n", .{snap.successRate()});
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `errorRate()` | `f64` | `errors / total_requests`, 0.0 if no requests |
+| `totalRequests()` | `u64` | Return `total_requests` |
+| `totalResponses()` | `u64` | Return `total_responses` |
+| `activeConnections()` | `i64` | Return `active_connections` |
+| `errors()` | `u64` | Return `total_errors` |
+| `errorRate()` | `f64` | `total_errors / total_requests`, 0.0 if no requests |
 | `successRate()` | `f64` | `responses_2xx / total_responses`, 0.0 if no responses |
-| `print()` | `void` | Print a human-readable summary to stderr |
+| `redirectRate()` | `f64` | `responses_3xx / total_responses` |
+| `clientErrorRate()` | `f64` | `responses_4xx / total_responses` |
+| `serverErrorRate()` | `f64` | `responses_5xx / total_responses` |
+| `throughputBytesPerResponse()` | `u64` | Average bytes per response |
 
 ## Custom Callbacks
 
@@ -137,7 +144,7 @@ fn metricsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.json(.{
         .requests = snap.total_requests,
         .responses = snap.total_responses,
-        .errors = snap.errors,
+        .errors = snap.total_errors,
         .success_rate = snap.successRate(),
         .error_rate = snap.errorRate(),
         .avg_latency_ms = snap.avg_latency_ns / 1_000_000,
@@ -167,7 +174,6 @@ fn apiHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 
 fn metricsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     const snap = metrics.snapshot();
-    snap.print();
     return ctx.json(.{
         .requests = snap.total_requests,
         .success_rate = snap.successRate(),
