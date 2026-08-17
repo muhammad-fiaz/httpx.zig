@@ -112,6 +112,7 @@ pub const Context = struct {
     params: std.StringHashMap([]const u8),
     data: std.StringHashMap(*anyopaque),
     server: ?*Server = null,
+    remote_ip: ?[]const u8 = null,
 
     const Self = @This();
 
@@ -193,6 +194,12 @@ pub const Context = struct {
         return common.cookieValue(cookie_header, name);
     }
 
+    /// Returns the connection IP address, if available.
+    /// Used by rate limiting middleware to identify the client.
+    pub fn connectionIp(self: *const Self) []const u8 {
+        return self.remote_ip orelse "0.0.0.0";
+    }
+
     /// Sets the response status code.
     pub fn status(self: *Self, code: u16) *Self {
         _ = self.response.status(code);
@@ -260,6 +267,7 @@ pub const Context = struct {
     }
 
     /// Sends a file response with production-oriented static-file options.
+    /// Supports Range requests (RFC 7233) for partial content (206) and range validation (416).
     pub fn fileWithOptions(self: *Self, path: []const u8, options: FileResponseOptions) !Response {
         if (mem.indexOf(u8, path, "..") != null) {
             return self.status(status_mod.StatusCode.FORBIDDEN).text("Forbidden: Path Traversal Detected");
@@ -271,10 +279,8 @@ pub const Context = struct {
         const stat = try f.stat(io);
         const content_type = options.content_type orelse common.mimeTypeFromPath(path);
 
-        var content_len_buf: [32]u8 = undefined;
-        const content_len = std.fmt.bufPrint(&content_len_buf, "{d}", .{stat.size}) catch unreachable;
-        _ = try self.response.header(HeaderName.CONTENT_LENGTH, content_len);
         _ = try self.response.header(HeaderName.CONTENT_TYPE, content_type);
+        _ = try self.response.header(HeaderName.ACCEPT_RANGES, "bytes");
 
         if (options.cache_control) |cache_control| {
             _ = try self.response.header(HeaderName.CACHE_CONTROL, cache_control);
@@ -302,6 +308,9 @@ pub const Context = struct {
         }
 
         if (self.request.method == .HEAD) {
+            var len_buf: [32]u8 = undefined;
+            const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{stat.size}) catch unreachable;
+            _ = try self.response.header(HeaderName.CONTENT_LENGTH, len_str);
             return self.response.build();
         }
 
@@ -309,12 +318,108 @@ pub const Context = struct {
             return error.ResponseTooLarge;
         }
 
-        const content_len_usize: usize = @intCast(stat.size);
-        const content = try self.allocator.alloc(u8, content_len_usize);
+        const file_size: usize = @intCast(stat.size);
+
+        // Parse Range header for partial content support.
+        if (self.request.headers.get("Range")) |range_header| {
+            return self.serveRangeRequest(f, io, range_header, file_size);
+        }
+
+        // Full content response.
+        var len_buf: [32]u8 = undefined;
+        const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{file_size}) catch unreachable;
+        _ = try self.response.header(HeaderName.CONTENT_LENGTH, len_str);
+
+        const content = try self.allocator.alloc(u8, file_size);
         defer self.allocator.free(content);
 
         const read_n = try f.readPositionalAll(io, content, 0);
-        if (read_n != content_len_usize) {
+        if (read_n != file_size) {
+            return error.UnexpectedEof;
+        }
+
+        _ = self.response.body(content);
+        return self.response.build();
+    }
+
+    /// Handles Range request for partial content (206) and range validation (416).
+    fn serveRangeRequest(
+        self: *Self,
+        f: std.Io.File,
+        io: anytype,
+        range_header: []const u8,
+        file_size: usize,
+    ) !Response {
+        // Parse "bytes=START-END" or "bytes=START-" or "bytes=-SUFFIX"
+        const range_value = mem.trim(u8, range_header, " \t\r\n");
+        if (!mem.startsWith(u8, range_value, "bytes=")) {
+            return self.status(status_mod.StatusCode.RANGE_NOT_SATISFIABLE).text("Invalid Range");
+        }
+        const range_spec = range_value[6..];
+
+        var start: usize = 0;
+        var end: usize = file_size -| 1;
+        var is_suffix = false;
+
+        if (mem.startsWith(u8, range_spec, "-")) {
+            // Suffix range: bytes=-500 (last 500 bytes)
+            is_suffix = true;
+            const suffix_len = std.fmt.parseInt(usize, range_spec[1..], 10) catch {
+                return self.status(status_mod.StatusCode.RANGE_NOT_SATISFIABLE).text("Invalid Range");
+            };
+            if (suffix_len == 0) {
+                return self.status(status_mod.StatusCode.RANGE_NOT_SATISFIABLE).text("Invalid Range");
+            }
+            start = if (file_size > suffix_len) file_size - suffix_len else 0;
+            end = file_size -| 1;
+        } else if (mem.endsWith(u8, range_spec, "-")) {
+            // Open-ended range: bytes=100-
+            const start_str = range_spec[0 .. range_spec.len - 1];
+            start = std.fmt.parseInt(usize, start_str, 10) catch {
+                return self.status(status_mod.StatusCode.RANGE_NOT_SATISFIABLE).text("Invalid Range");
+            };
+            end = file_size -| 1;
+        } else {
+            // Explicit range: bytes=100-200
+            var parts = mem.splitScalar(u8, range_spec, '-');
+            const start_str = parts.next() orelse {
+                return self.status(status_mod.StatusCode.RANGE_NOT_SATISFIABLE).text("Invalid Range");
+            };
+            const end_str = parts.next() orelse {
+                return self.status(status_mod.StatusCode.RANGE_NOT_SATISFIABLE).text("Invalid Range");
+            };
+            start = std.fmt.parseInt(usize, start_str, 10) catch {
+                return self.status(status_mod.StatusCode.RANGE_NOT_SATISFIABLE).text("Invalid Range");
+            };
+            end = std.fmt.parseInt(usize, end_str, 10) catch {
+                return self.status(status_mod.StatusCode.RANGE_NOT_SATISFIABLE).text("Invalid Range");
+            };
+        }
+
+        // Validate range.
+        if (start >= file_size or end >= file_size or start > end) {
+            return self.status(status_mod.StatusCode.RANGE_NOT_SATISFIABLE).text("Range Not Satisfiable");
+        }
+
+        const content_length = end - start + 1;
+
+        // Set 206 Partial Content headers.
+        _ = self.response.status(status_mod.StatusCode.PARTIAL_CONTENT);
+
+        var cl_buf: [64]u8 = undefined;
+        const content_range = std.fmt.bufPrint(&cl_buf, "bytes {d}-{d}/{d}", .{ start, end, file_size }) catch unreachable;
+        _ = try self.response.header("Content-Range", content_range);
+
+        var len_buf: [32]u8 = undefined;
+        const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{content_length}) catch unreachable;
+        _ = try self.response.header(HeaderName.CONTENT_LENGTH, len_str);
+
+        // Read the requested range.
+        const content = try self.allocator.alloc(u8, content_length);
+        defer self.allocator.free(content);
+
+        const read_n = try f.readPositionalAll(io, content, start);
+        if (read_n != content_length) {
             return error.UnexpectedEof;
         }
 
@@ -431,6 +536,7 @@ pub const Server = struct {
     executor_connections: std.ArrayList(Socket) = .empty,
     executor_conn_mutex: std.Io.Mutex = .init,
     server_tls_config: ?tls_mod.ServerTlsConfig = null,
+    last_activity_ms: i64 = 0,
 
     const Self = @This();
 
@@ -1300,12 +1406,20 @@ pub const Server = struct {
         var first_request = true;
         while (self.running) {
             const timeout_ms = if (first_request) self.config.request_timeout_ms else self.config.keep_alive_timeout_ms;
-            _ = timeout_ms;
 
             var parser = Parser.init(self.allocator);
             defer parser.deinit();
 
             while (!parser.isComplete()) {
+                // Enforce timeout by checking elapsed time.
+                if (timeout_ms > 0) {
+                    const elapsed = common.nowMillis() -| self.last_activity_ms;
+                    if (elapsed > @as(i64, @intCast(timeout_ms))) {
+                        dbg.log("SERVER", "TLS request timeout after {d}ms", .{elapsed});
+                        return error.TimedOut;
+                    }
+                }
+
                 var read_buf: [4096]u8 = undefined;
                 const n = tls_conn.read(&read_buf) catch |err| {
                     self.log(.err, "TLS read error: {}\n", .{err});
@@ -1315,6 +1429,7 @@ pub const Server = struct {
                     dbg.log("SERVER", "TLS recv returned 0, client disconnected", .{});
                     return;
                 }
+                self.last_activity_ms = common.nowMillis();
                 _ = try parser.feed(read_buf[0..n]);
                 if (parser.getBody().len > self.config.max_body_size) {
                     try self.sendTlsError(tls_conn, 413);

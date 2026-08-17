@@ -225,7 +225,7 @@ fn posixConnectWithTimeout(sock: posix.socket_t, addr_ptr: *const posix.sockaddr
     }
 
     try setSocketNonBlocking(sock, true);
-    errdefer setSocketNonBlocking(sock, true) catch {};
+    errdefer setSocketNonBlocking(sock, false) catch {};
 
     if (is_windows) {
         const rc = winsock.connect(toWinsockSocket(sock), addr_ptr, @intCast(addr_len));

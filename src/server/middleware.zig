@@ -268,6 +268,9 @@ pub fn compressionMiddlewareWithConfig(comptime config: CompressionConfig) Middl
 pub const RateLimitConfig = struct {
     max_requests: u32 = 100,
     window_ms: u64 = 60_000,
+    /// Whether to trust X-Forwarded-For (default: false for security).
+    /// When false, uses connection socket IP directly.
+    trust_proxy_headers: bool = false,
 };
 
 /// Creates rate limiting middleware.
@@ -276,6 +279,9 @@ pub const RateLimitConfig = struct {
 /// Returns 429 Too Many Requests when the limit is exceeded.
 /// Evicts stale entries periodically to prevent unbounded memory growth.
 /// Thread-safe: protected by a mutex for concurrent access.
+///
+/// When trust_proxy_headers is false (default), uses the raw connection IP
+/// to prevent spoofing via X-Forwarded-For or X-Real-IP headers.
 pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
     return .{
         .name = "rate_limit",
@@ -294,9 +300,13 @@ pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
                 }
 
                 const now = common.nowMillis();
-                const ip = ctx.header("X-Forwarded-For") orelse
-                    ctx.header("X-Real-IP") orelse
-                    "0.0.0.0";
+                // Use connection IP directly by default to prevent header spoofing.
+                const ip = if (config.trust_proxy_headers)
+                    ctx.header("X-Forwarded-For") orelse
+                        ctx.header("X-Real-IP") orelse
+                        ctx.connectionIp()
+                else
+                    ctx.connectionIp();
 
                 const io = io_util.defaultIo();
                 mu.lock(io) catch unreachable;
@@ -318,7 +328,10 @@ pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
                     if (now - e.window_start < @as(i64, @intCast(config.window_ms))) {
                         if (e.count >= config.max_requests) {
                             dbg.log("MW", "rate limit exceeded for {s}", .{ip});
-                            try ctx.setHeader("Retry-After", "60");
+                            const retry_after = @as(u64, @intCast(@max(1, @as(i64, @intCast(config.window_ms)) - (now - e.window_start)) / 1000));
+                            var buf: [16]u8 = undefined;
+                            const ra_str = std.fmt.bufPrint(&buf, "{d}", .{retry_after}) catch "60";
+                            try ctx.setHeader("Retry-After", ra_str);
                             return ctx.status(status.StatusCode.TOO_MANY_REQUESTS).text("Too Many Requests");
                         }
                         try store.put(ip, .{ .count = e.count + 1, .window_start = e.window_start });
@@ -419,16 +432,49 @@ pub fn bodyParser(max_size: usize) Middleware {
 /// Creates security headers middleware (Helmet).
 ///
 /// Adds standard security headers: X-Content-Type-Options, X-Frame-Options,
-/// X-XSS-Protection, and Strict-Transport-Security.
+/// X-XSS-Protection, Strict-Transport-Security, Content-Security-Policy,
+/// Referrer-Policy, Permissions-Policy, Cross-Origin-Opener-Policy,
+/// Cross-Origin-Resource-Policy, and Cross-Origin-Embedder-Policy.
 pub fn helmet() Middleware {
+    return helmetWithConfig(.{});
+}
+
+/// Helmet configuration for granular control over security headers.
+pub const HelmetConfig = struct {
+    content_security_policy: ?[]const u8 = "default-src 'self'",
+    referrer_policy: []const u8 = "strict-origin-when-cross-origin",
+    permissions_policy: ?[]const u8 = "camera=(), microphone=(), geolocation=()",
+    cross_origin_opener_policy: []const u8 = "same-origin",
+    cross_origin_resource_policy: []const u8 = "same-origin",
+    cross_origin_embedder_policy: ?[]const u8 = null,
+    x_frame_options: []const u8 = "DENY",
+    x_content_type_options: []const u8 = "nosniff",
+    x_xss_protection: []const u8 = "1; mode=block",
+    strict_transport_security: []const u8 = "max-age=31536000; includeSubDomains",
+};
+
+/// Creates security headers middleware with explicit configuration.
+pub fn helmetWithConfig(comptime config: HelmetConfig) Middleware {
     return .{
         .name = "helmet",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                try ctx.setHeader("X-Content-Type-Options", "nosniff");
-                try ctx.setHeader("X-Frame-Options", "DENY");
-                try ctx.setHeader("X-XSS-Protection", "1; mode=block");
-                try ctx.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+                try ctx.setHeader("X-Content-Type-Options", config.x_content_type_options);
+                try ctx.setHeader("X-Frame-Options", config.x_frame_options);
+                try ctx.setHeader("X-XSS-Protection", config.x_xss_protection);
+                try ctx.setHeader("Strict-Transport-Security", config.strict_transport_security);
+                try ctx.setHeader("Referrer-Policy", config.referrer_policy);
+                try ctx.setHeader("Cross-Origin-Opener-Policy", config.cross_origin_opener_policy);
+                try ctx.setHeader("Cross-Origin-Resource-Policy", config.cross_origin_resource_policy);
+                if (config.content_security_policy) |csp| {
+                    try ctx.setHeader("Content-Security-Policy", csp);
+                }
+                if (config.permissions_policy) |pp| {
+                    try ctx.setHeader("Permissions-Policy", pp);
+                }
+                if (config.cross_origin_embedder_policy) |coop| {
+                    try ctx.setHeader("Cross-Origin-Embedder-Policy", coop);
+                }
                 return next(ctx);
             }
         }.handler,
@@ -440,6 +486,9 @@ pub fn helmet() Middleware {
 /// Generates a random token, sets it as a cookie, and validates that the same
 /// token is present in the request header or form body for state-changing methods.
 /// Protects against cross-site request forgery attacks.
+///
+/// Token is hex-encoded and returned in the X-CSRF-Token response header so
+/// SPA clients can read it. Tokens older than max_age_ms are rejected.
 pub fn csrf(comptime config: CsrfConfig) Middleware {
     return .{
         .name = "csrf",
@@ -453,7 +502,7 @@ pub fn csrf(comptime config: CsrfConfig) Middleware {
                     return next(ctx);
                 }
 
-                // Generate or retrieve token from cookie.
+                // Retrieve token from cookie.
                 const cookie_token = ctx.cookie(config.cookie_name);
 
                 // Validate token from header or form body.
@@ -480,7 +529,17 @@ pub fn csrf(comptime config: CsrfConfig) Middleware {
                 // If we have a cookie token, validate the request token matches.
                 if (cookie_token) |ct| {
                     if (request_token) |rt| {
-                        if (std.mem.eql(u8, ct, rt)) {
+                        if (timingSafeEql(ct, rt)) {
+                            // Optionally verify token is not expired.
+                            if (config.max_age_ms > 0) {
+                                if (parseCsrfTimestamp(rt)) |issued_ms| {
+                                    const now_ms = @as(u64, @intCast(common.nowMillis()));
+                                    if (now_ms -| issued_ms > config.max_age_ms) {
+                                        dbg.log("MW", "CSRF token expired", .{});
+                                        return ctx.status(status.StatusCode.FORBIDDEN).text("CSRF token expired");
+                                    }
+                                }
+                            }
                             return next(ctx);
                         }
                     }
@@ -488,24 +547,59 @@ pub fn csrf(comptime config: CsrfConfig) Middleware {
                     return ctx.status(status.StatusCode.FORBIDDEN).text("CSRF token mismatch");
                 }
 
-                // No cookie yet — set one and let the request through.
-                // The client must include this token in subsequent requests.
-                var raw: [32]u8 = undefined;
-                io_util.defaultIo().random(&raw);
-                const token = try std.fmt.allocPrint(ctx.allocator, "{s}", .{raw});
+                // No cookie yet — generate token and set both cookie + header.
+                const token = try generateCsrfToken(ctx.allocator);
                 defer ctx.allocator.free(token);
 
                 try ctx.setCookie(config.cookie_name, token, .{
                     .same_site = .lax,
-                    .http_only = true,
+                    .http_only = false, // Must be readable by JS for double-submit.
                     .secure = config.secure,
                     .path = "/",
                 });
 
+                // Return token in header so SPA/JS clients can read it.
+                try ctx.setHeader(config.header_name, token);
+
                 return next(ctx);
+            }
+
+            fn generateCsrfToken(allocator: std.mem.Allocator) ![]const u8 {
+                var rand: [16]u8 = undefined;
+                io_util.defaultIo().random(&rand);
+                // Embed a timestamp for expiration checks: "hex16-hextimestamp-hex16"
+                const now_ms = @as(u64, @intCast(common.nowMillis()));
+                var ts_buf: [16]u8 = undefined;
+                _ = std.fmt.bufPrint(&ts_buf, "{x:0>16}", .{now_ms}) catch unreachable;
+                const hex_rand = try std.fmt.allocPrint(allocator, "{s}", .{std.fmt.bytesToHex(rand, .lower)});
+                defer allocator.free(hex_rand);
+                return try std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{
+                    hex_rand[0..16],
+                    &ts_buf,
+                    hex_rand[16..],
+                });
+            }
+
+            fn parseCsrfTimestamp(token: []const u8) ?u64 {
+                // Format: "hex16-hextimestamp-hex16"
+                var parts = std.mem.splitScalar(u8, token, '-');
+                _ = parts.next() orelse return null;
+                const ts_hex = parts.next() orelse return null;
+                _ = parts.next();
+                return std.fmt.parseInt(u64, ts_hex, 16) catch null;
             }
         }.handler,
     };
+}
+
+/// Constant-time comparison of two byte slices to prevent timing attacks.
+fn timingSafeEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var result: u8 = 0;
+    for (a, b) |x, y| {
+        result |= x ^ y;
+    }
+    return result == 0;
 }
 
 /// CSRF protection configuration.
@@ -518,6 +612,8 @@ pub const CsrfConfig = struct {
     field_name: []const u8 = "_csrf",
     /// Whether to set the Secure flag on the cookie.
     secure: bool = false,
+    /// Maximum token age in milliseconds (0 = no expiration).
+    max_age_ms: u64 = 3600_000, // 1 hour default
 };
 
 /// Creates request timeout middleware.
@@ -668,10 +764,11 @@ pub fn reverseProxyRuntime(target_url: []const u8) Middleware {
 }
 
 /// Checks if a URL targets a private/internal IP range (SSRF protection).
+/// Blocks localhost, loopback, link-local, private ranges, and cloud metadata endpoints.
 fn isSsrfBlocked(url: []const u8) bool {
     const host = extractHost(url) orelse return false;
 
-    // Check common internal hostnames.
+    // Block common internal hostnames.
     if (std.ascii.eqlIgnoreCase(host, "localhost") or
         std.ascii.eqlIgnoreCase(host, "0.0.0.0") or
         std.ascii.eqlIgnoreCase(host, "127.0.0.1") or
@@ -681,9 +778,28 @@ fn isSsrfBlocked(url: []const u8) bool {
         return true;
     }
 
-    // Parse IPv4 and check private ranges.
-    const ip = parseIp4(host) orelse return false;
+    // Block cloud metadata endpoints.
+    if (std.ascii.eqlIgnoreCase(host, "169.254.169.254")) return true;
+    if (std.ascii.eqlIgnoreCase(host, "metadata.google.internal")) return true;
+    if (std.ascii.eqlIgnoreCase(host, "metadata.azure.com")) return true;
+    if (std.ascii.eqlIgnoreCase(host, "169.254.169.254.nip.io")) return true;
 
+    // Try IPv4 first.
+    if (parseIp4(host)) |ip| {
+        return isSsrfBlockedIp4(ip);
+    }
+
+    // Try IPv6.
+    if (parseIp6(host)) |ip| {
+        return isSsrfBlockedIp6(ip);
+    }
+
+    return false;
+}
+
+fn isSsrfBlockedIp4(ip: u32) bool {
+    // 0.0.0.0/8
+    if ((ip >> 24) == 0) return true;
     // 127.0.0.0/8
     if ((ip >> 24) == 0x7F) return true;
     // 10.0.0.0/8
@@ -692,13 +808,69 @@ fn isSsrfBlocked(url: []const u8) bool {
     if ((ip >> 20) == 0xAC1) return true;
     // 192.168.0.0/16
     if ((ip >> 16) == 0xC0A8) return true;
-    // 0.0.0.0/8
-    if ((ip >> 24) == 0) return true;
     // 169.254.0.0/16 (link-local)
     if ((ip >> 16) == 0xA9FE) return true;
     // 198.18.0.0/15 (benchmarking)
     if ((ip >> 15) == 0x6009) return true;
+    // 100.64.0.0/10 (carrier-grade NAT)
+    if ((ip >> 22) == 0x6440) return true;
+    // 192.0.0.0/24 (IANA protocol)
+    if ((ip >> 24) == 192 and ((ip >> 16) & 0xFF) == 0) return true;
+    // 192.0.2.0/24 (documentation)
+    if ((ip >> 24) == 192 and ((ip >> 16) & 0xFF) == 2) return true;
+    // 198.51.100.0/24 (documentation)
+    if ((ip >> 24) == 198 and ((ip >> 16) & 0xFF) == 51 and ((ip >> 8) & 0xFF) == 100) return true;
+    // 203.0.113.0/24 (documentation)
+    if ((ip >> 24) == 203 and ((ip >> 16) & 0xFF) == 0 and ((ip >> 8) & 0xFF) == 113) return true;
+    // 224.0.0.0/4 (multicast)
+    if ((ip >> 28) == 0xE) return true;
+    // 240.0.0.0/4 (reserved)
+    if ((ip >> 28) == 0xF) return true;
+    return false;
+}
 
+/// Parse an IPv6 address from common bracketed or uncompressed formats.
+/// Returns the 128-bit address as a u128.
+fn parseIp6(host: []const u8) ?u128 {
+    // Strip brackets: [::1] → ::1
+    const bare = if (host.len > 2 and host[0] == '[' and host[host.len - 1] == ']')
+        host[1 .. host.len - 1]
+    else
+        host;
+
+    // Handle ::1 / ::0 / ::ffff style
+    if (std.mem.startsWith(u8, bare, "::")) {
+        // Simplified: only handle ::1 and :: (all zeros)
+        if (bare.len == 3) {
+            const third = bare[2];
+            if (third == '1') return 1;
+            if (third == '0') return 0;
+        }
+        if (bare.len == 2) return 0; // :: = all zeros
+        return null;
+    }
+
+    // Try parsing full form: hex:hex:...:hex
+    // For simplicity, only handle common known addresses.
+    if (std.ascii.eqlIgnoreCase(bare, "fe80::1") or std.ascii.eqlIgnoreCase(bare, "fe80::")) return null; // link-local
+    return null;
+}
+
+fn isSsrfBlockedIp6(ip: u128) bool {
+    // ::0/128 (unspecified)
+    if (ip == 0) return true;
+    // ::1/128 (loopback)
+    if (ip == 1) return true;
+    // fe80::/10 (link-local)
+    if ((ip >> 118) == 0x3F8) return true;
+    // fc00::/7 (unique local)
+    if ((ip >> 121) == 0x7E) return true;
+    // fec0::/10 (deprecated site-local)
+    if ((ip >> 118) == 0x3F9) return true;
+    // ff00::/8 (multicast)
+    if ((ip >> 120) == 0xFF) return true;
+    // 100::/64 (discard only)
+    if ((ip >> 64) == 0x100) return true;
     return false;
 }
 

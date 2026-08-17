@@ -317,13 +317,27 @@ pub const RetryPolicy = struct {
     retry_on_status: []const u16 = &[_]u16{ 429, 500, 502, 503, 504 },
     retry_on_connection_error: bool = true,
     retry_only_idempotent: bool = true,
+    /// Jitter factor (0.0 = no jitter, 1.0 = full jitter). Default 0.3 for decorrelated jitter.
+    jitter: f64 = 0.3,
 
-    /// Calculates the delay for a given retry attempt using exponential backoff.
+    /// Calculates the delay for a given retry attempt using exponential backoff with jitter.
     pub fn calculateDelay(self: RetryPolicy, attempt: u32) u64 {
         if (attempt == 0) return 0;
         const multiplier = std.math.pow(f64, self.backoff_multiplier, @as(f64, @floatFromInt(attempt - 1)));
-        const delay = @as(u64, @intFromFloat(@as(f64, @floatFromInt(self.initial_delay_ms)) * multiplier));
-        return @min(delay, self.max_delay_ms);
+        const base_delay = @as(u64, @intFromFloat(@as(f64, @floatFromInt(self.initial_delay_ms)) * multiplier));
+        const clamped = @min(base_delay, self.max_delay_ms);
+
+        // Apply decorrelated jitter: delay = random(base * (1 - jitter), base * (1 + jitter))
+        if (self.jitter > 0.0) {
+            var rand_bytes: [8]u8 = undefined;
+            @import("../util/any_io.zig").defaultIo().random(&rand_bytes);
+            const rand_val = @as(f64, @floatFromInt(@as(u64, @bitCast(rand_bytes)))) / @as(f64, @floatFromInt(std.math.maxInt(u64)));
+            const jitter_range = @as(f64, @floatFromInt(clamped)) * self.jitter;
+            const jitter_offset = jitter_range * (2.0 * rand_val - 1.0); // [-jitter_range, +jitter_range]
+            const result = @as(i64, @intFromFloat(@as(f64, @floatFromInt(clamped)) + jitter_offset));
+            return @intCast(@max(0, @min(result, @as(i64, @intCast(self.max_delay_ms)))));
+        }
+        return clamped;
     }
 
     /// Returns true if the given status code should trigger a retry.
@@ -445,10 +459,18 @@ test "ContentType.fromString" {
 }
 
 test "RetryPolicy.calculateDelay" {
-    const policy = RetryPolicy{};
+    const policy = RetryPolicy{ .jitter = 0.0 }; // No jitter for deterministic test
     try std.testing.expectEqual(@as(u64, 0), policy.calculateDelay(0));
     try std.testing.expectEqual(@as(u64, 1000), policy.calculateDelay(1));
     try std.testing.expectEqual(@as(u64, 2000), policy.calculateDelay(2));
+}
+
+test "RetryPolicy.calculateDelay with jitter" {
+    const policy = RetryPolicy{ .jitter = 0.5 };
+    try std.testing.expectEqual(@as(u64, 0), policy.calculateDelay(0));
+    const delay = policy.calculateDelay(1);
+    // With 0.5 jitter, delay should be in range [500, 1500]
+    try std.testing.expect(delay >= 500 and delay <= 1500);
 }
 
 test "RedirectPolicy.getRedirectMethod" {

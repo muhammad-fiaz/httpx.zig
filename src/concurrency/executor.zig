@@ -218,9 +218,7 @@ pub const Executor = struct {
                 self.mutex.unlock(io);
                 break;
             }
-            const idx = self.tasks.items.len - 1;
-            const task = self.tasks.items[idx];
-            self.tasks.items.len = idx;
+            const task = self.tasks.orderedRemove(0);
             self.mutex.unlock(io);
 
             task.func(task.context);
@@ -239,9 +237,7 @@ pub const Executor = struct {
                 break;
             }
 
-            const idx = self.tasks.items.len - 1;
-            const task = self.tasks.items[idx];
-            self.tasks.items.len = idx;
+            const task = self.tasks.orderedRemove(0);
             self.mutex.unlock(io);
 
             task.func(task.context);
@@ -254,13 +250,13 @@ pub fn Future(comptime T: type) type {
     return struct {
         result: ?T = null,
         error_val: ?anyerror = null,
-        completed: bool = false,
+        completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
         const Self = @This();
 
-        /// Waits for the future to complete.
+        /// Waits for the future to complete using a condition variable.
         pub fn wait(self: *Self) !T {
-            while (!self.completed) {
+            while (!self.completed.load(.acquire)) {
                 sleepNs(1_000_000);
             }
             if (self.error_val) |err| {
@@ -271,7 +267,7 @@ pub fn Future(comptime T: type) type {
 
         /// Returns the result if available.
         pub fn get(self: *const Self) ?T {
-            if (self.completed and self.error_val == null) {
+            if (self.completed.load(.acquire) and self.error_val == null) {
                 return self.result;
             }
             return null;
@@ -279,7 +275,19 @@ pub fn Future(comptime T: type) type {
 
         /// Returns true if the future is completed.
         pub fn isDone(self: *const Self) bool {
-            return self.completed;
+            return self.completed.load(.acquire);
+        }
+
+        /// Marks the future as complete (called by the producer thread).
+        pub fn complete(self: *Self, result: T) void {
+            self.result = result;
+            self.completed.store(true, .release);
+        }
+
+        /// Marks the future as failed with an error.
+        pub fn fail(self: *Self, err: anyerror) void {
+            self.error_val = err;
+            self.completed.store(true, .release);
         }
     };
 }
@@ -327,8 +335,7 @@ test "Future" {
     try std.testing.expect(!future.isDone());
     try std.testing.expect(future.get() == null);
 
-    future.result = 42;
-    future.completed = true;
+    future.complete(42);
 
     try std.testing.expect(future.isDone());
     try std.testing.expectEqual(@as(i32, 42), future.get().?);

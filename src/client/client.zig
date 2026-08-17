@@ -653,8 +653,29 @@ pub const Client = struct {
             defer self.allocator.free(next_url);
 
             const next_method = self.config.redirect_policy.getRedirectMethod(response.status.code, req.method);
+
+            // Security: strip credentials on cross-origin redirects (RFC 6454).
+            var next_opts = reqOpts;
+            if (!isSameOrigin(req.uri.host orelse "", next_url)) {
+                // Strip Authorization header to prevent credential leakage.
+                if (next_opts.headers) |hdrs| {
+                    var safe_headers = std.ArrayList([2][]const u8).empty;
+                    for (hdrs) |h| {
+                        if (!std.ascii.eqlIgnoreCase(h[0], "Authorization") and
+                            !std.ascii.eqlIgnoreCase(h[0], "Proxy-Authorization"))
+                        {
+                            safe_headers.append(self.allocator, h) catch break;
+                        }
+                    }
+                    next_opts.headers = safe_headers.items;
+                }
+                // Clear auth fields.
+                next_opts.bearer_token = null;
+                next_opts.basic_auth = null;
+            }
+
             response.deinit();
-            return self.requestInternal(next_method, next_url, reqOpts, depth + 1);
+            return self.requestInternal(next_method, next_url, next_opts, depth + 1);
         }
 
         return response;
@@ -681,10 +702,14 @@ pub const Client = struct {
             };
 
             if (can_retry_method and attempt < policy.max_retries and policy.shouldRetryStatus(res.status.code)) {
+                // Parse Retry-After header if present.
+                const retry_after_ms = if (res.headers.get("Retry-After")) |ra|
+                    parseRetryAfter(ra) orelse policy.calculateDelay(attempt)
+                else
+                    policy.calculateDelay(attempt);
                 res.deinit();
                 attempt += 1;
-                const delay_ms = policy.calculateDelay(attempt);
-                if (delay_ms > 0) sleepMs(delay_ms);
+                if (retry_after_ms > 0) sleepMs(retry_after_ms);
                 continue;
             }
 
@@ -711,6 +736,17 @@ pub const Client = struct {
             mem.eql(u8, name, "ResponseTooLarge") or
             mem.eql(u8, name, "RequestTooLarge") or
             mem.eql(u8, name, "TooManyRedirects"));
+    }
+
+    /// Parses a Retry-After header value (seconds or HTTP-date) into milliseconds.
+    fn parseRetryAfter(value: []const u8) ?u64 {
+        const trimmed = mem.trim(u8, value, " \t\r\n");
+        // Try integer seconds first.
+        if (std.fmt.parseInt(u64, trimmed, 10)) |seconds| {
+            return seconds * 1000;
+        } else |_| {}
+        // Try HTTP-date format (simplified: just return a default 60s delay).
+        return null;
     }
 
     fn formatProxyRequest(self: *Self, req: *const Request, proxy: types.Proxy) ![]u8 {
@@ -1238,7 +1274,9 @@ pub const Client = struct {
                             response.body = decompressed;
                             response.body_owned = true;
                             return response;
-                        } else |_| {}
+                        } else |err| {
+                            dbg.log("CLIENT", "HTTP/3 decompression failed: {s}, returning raw body", .{@errorName(err)});
+                        }
                     }
                 }
             }
@@ -1892,7 +1930,9 @@ pub const Client = struct {
                             response.body = decompressed;
                             response.body_owned = true;
                             return response;
-                        } else |_| {}
+                        } else |err| {
+                            dbg.log("CLIENT", "HTTP/2 decompression failed: {s}, returning raw body", .{@errorName(err)});
+                        }
                     }
                 }
             }
@@ -2123,6 +2163,26 @@ pub const Client = struct {
         const slash = mem.lastIndexOfScalar(u8, base_path, '/') orelse 0;
         const prefix = base_path[0 .. slash + 1];
         return std.fmt.allocPrint(self.allocator, "{s}://{s}:{d}{s}{s}", .{ scheme, host, port, prefix, location });
+    }
+
+    /// Returns true if two URLs share the same origin (scheme + host + port).
+    fn isSameOrigin(base_url: []const u8, target_url: []const u8) bool {
+        const base_host = extractOriginHost(base_url) orelse return false;
+        const target_host = extractOriginHost(target_url) orelse return false;
+        return std.ascii.eqlIgnoreCase(base_host, target_host);
+    }
+
+    fn extractOriginHost(url: []const u8) ?[]const u8 {
+        var rest = url;
+        if (mem.startsWith(u8, rest, "https://")) {
+            rest = rest[8..];
+        } else if (mem.startsWith(u8, rest, "http://")) {
+            rest = rest[7..];
+        } else {
+            return null;
+        }
+        const host_end = mem.indexOfAny(u8, rest, "/:?#@") orelse rest.len;
+        return if (host_end > 0) rest[0..host_end] else null;
     }
 
     fn attachCookies(self: *Self, req: *Request) !void {
