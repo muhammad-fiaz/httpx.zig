@@ -860,10 +860,10 @@ pub const Client = struct {
 
         if (req.uri.isTls()) {
             dbg.log("CLIENT", "TLS path for {s}:{d}", .{ host, port });
-        dbg.log("CLIENT", "direct path for {s}:{d}", .{ host, port });
-        const connect_host = if (proxy) |p| p.host else host;
-        const connect_port = if (proxy) |p| p.port else port;
-        const addr = try address_mod.resolve(self.allocator, connect_host, connect_port);
+            dbg.log("CLIENT", "direct path for {s}:{d}", .{ host, port });
+            const connect_host = if (proxy) |p| p.host else host;
+            const connect_port = if (proxy) |p| p.port else port;
+            const addr = try address_mod.resolve(self.allocator, connect_host, connect_port);
 
             var socket = try Socket.createForAddress(addr);
             defer socket.close();

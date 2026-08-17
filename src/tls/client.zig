@@ -252,7 +252,7 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
         .secp256r1,
     })) ++ tls.extension(.psk_key_exchange_modes, array(u8, tls.PskKeyExchangeMode, .{
         .psk_dhe_ke,
-    }    )) ++ tls.extension(
+    })) ++ tls.extension(
         .key_share,
         int(u16, @intFromEnum(tls.NamedGroup.x25519)) ++
             array(u16, u8, key_share.x25519_kp.public_key) ++

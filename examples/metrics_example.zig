@@ -26,12 +26,12 @@ fn pickFreeTcpPort() !u16 {
 fn printSnapshot(snap: *const httpx.MetricsSnapshot) void {
     std.debug.print(
         "Metrics Snapshot:\n" ++
-        "  Requests:   {d}\n" ++
-        "  Responses:  {d}  (2xx={d} 3xx={d} 4xx={d} 5xx={d})\n" ++
-        "  Errors:     {d}\n" ++
-        "  Active:     {d} connections\n" ++
-        "  Bytes In:   {d}  Out: {d}\n" ++
-        "  Latency:    avg={d}ns  min={d}ns  max={d}ns\n",
+            "  Requests:   {d}\n" ++
+            "  Responses:  {d}  (2xx={d} 3xx={d} 4xx={d} 5xx={d})\n" ++
+            "  Errors:     {d}\n" ++
+            "  Active:     {d} connections\n" ++
+            "  Bytes In:   {d}  Out: {d}\n" ++
+            "  Latency:    avg={d}ns  min={d}ns  max={d}ns\n",
         .{
             snap.totalRequests(),
             snap.totalResponses(),

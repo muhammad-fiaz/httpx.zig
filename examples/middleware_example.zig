@@ -21,7 +21,7 @@ pub fn main() !void {
 
     try server.use(httpx.logger());
     try server.use(httpx.cors(.{
-        .allowed_origins = &.{ "http://httpbun.com" },
+        .allowed_origins = &.{"http://httpbun.com"},
         .allowed_methods = &.{ .GET, .POST, .PUT, .DELETE },
         .allow_credentials = true,
     }));

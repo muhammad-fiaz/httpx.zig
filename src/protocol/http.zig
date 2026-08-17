@@ -698,11 +698,11 @@ pub fn parseHttp3SettingsPayload(payload: []const u8) !types.Http3Settings {
     return parsed;
 }
 
-    /// Formats a request object into HTTP/1.x wire format.
-    pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
-        dbg.entry("HTTP", "formatRequest");
-        dbg.log("HTTP", "method={s} path={s}", .{ req.method.toString(), req.uri.path });
-        var buffer = std.ArrayList(u8).empty;
+/// Formats a request object into HTTP/1.x wire format.
+pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
+    dbg.entry("HTTP", "formatRequest");
+    dbg.log("HTTP", "method={s} path={s}", .{ req.method.toString(), req.uri.path });
+    var buffer = std.ArrayList(u8).empty;
     const writer = list_writer.init(allocator, &buffer);
 
     const method_str = req.method.toString();
@@ -724,11 +724,11 @@ pub fn parseHttp3SettingsPayload(payload: []const u8) !types.Http3Settings {
     return buffer.toOwnedSlice(allocator);
 }
 
-    /// Formats a response object into HTTP/1.x wire format.
-    pub fn formatResponse(resp: *const Response, allocator: Allocator) ![]u8 {
-        dbg.entry("HTTP", "formatResponse");
-        dbg.log("HTTP", "status={d}", .{resp.status.code});
-        var buffer = std.ArrayList(u8).empty;
+/// Formats a response object into HTTP/1.x wire format.
+pub fn formatResponse(resp: *const Response, allocator: Allocator) ![]u8 {
+    dbg.entry("HTTP", "formatResponse");
+    dbg.log("HTTP", "status={d}", .{resp.status.code});
+    var buffer = std.ArrayList(u8).empty;
     const writer = list_writer.init(allocator, &buffer);
 
     try writer.print("{s} {d} {s}\r\n", .{
