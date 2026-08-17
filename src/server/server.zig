@@ -648,6 +648,7 @@ pub const Server = struct {
                 try self.bindTcpListener(backlog);
             }
             // Bind UDP socket for HTTP/3 over QUIC (graceful fallback if bind fails).
+            const tcp_port = self.config.port;
             const udp_ok = blk: {
                 self.bindUdpSocket() catch |err| {
                     self.log(.warn, "HTTP/3 UDP bind failed: {} — falling back to HTTP/1.1 + HTTP/2\n", .{err});
@@ -655,6 +656,10 @@ pub const Server = struct {
                 };
                 break :blk true;
             };
+            // Restore TCP port — UDP bind may overwrite config.port with a different
+            // ephemeral port when port=0, but the TCP port is the canonical one the
+            // client connects to.
+            self.config.port = tcp_port;
 
             self.running = true;
 

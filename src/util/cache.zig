@@ -90,18 +90,18 @@ pub fn parseExpires(header_value: []const u8) ?i64 {
     // Parse month at positions 8-10
     const month_str = trimmed[8..11];
     const month: u32 = if (std.ascii.eqlIgnoreCase(month_str, "jan")) 1 //
-    else if (std.ascii.eqlIgnoreCase(month_str, "feb")) 2 //
-    else if (std.ascii.eqlIgnoreCase(month_str, "mar")) 3 //
-    else if (std.ascii.eqlIgnoreCase(month_str, "apr")) 4 //
-    else if (std.ascii.eqlIgnoreCase(month_str, "may")) 5 //
-    else if (std.ascii.eqlIgnoreCase(month_str, "jun")) 6 //
-    else if (std.ascii.eqlIgnoreCase(month_str, "jul")) 7 //
-    else if (std.ascii.eqlIgnoreCase(month_str, "aug")) 8 //
-    else if (std.ascii.eqlIgnoreCase(month_str, "sep")) 9 //
-    else if (std.ascii.eqlIgnoreCase(month_str, "oct")) 10 //
-    else if (std.ascii.eqlIgnoreCase(month_str, "nov")) 11 //
-    else if (std.ascii.eqlIgnoreCase(month_str, "dec")) 12 //
-    else return null;
+        else if (std.ascii.eqlIgnoreCase(month_str, "feb")) 2 //
+        else if (std.ascii.eqlIgnoreCase(month_str, "mar")) 3 //
+        else if (std.ascii.eqlIgnoreCase(month_str, "apr")) 4 //
+        else if (std.ascii.eqlIgnoreCase(month_str, "may")) 5 //
+        else if (std.ascii.eqlIgnoreCase(month_str, "jun")) 6 //
+        else if (std.ascii.eqlIgnoreCase(month_str, "jul")) 7 //
+        else if (std.ascii.eqlIgnoreCase(month_str, "aug")) 8 //
+        else if (std.ascii.eqlIgnoreCase(month_str, "sep")) 9 //
+        else if (std.ascii.eqlIgnoreCase(month_str, "oct")) 10 //
+        else if (std.ascii.eqlIgnoreCase(month_str, "nov")) 11 //
+        else if (std.ascii.eqlIgnoreCase(month_str, "dec")) 12 //
+        else return null;
 
     // Parse year at positions 12-15
     const year = std.fmt.parseInt(u32, trimmed[12..16], 10) catch return null;
