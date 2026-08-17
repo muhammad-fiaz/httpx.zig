@@ -310,35 +310,60 @@ pub fn main() !void {
 
 ### Simplified API Aliases
 
+Every alias has a `*WithAllocator` variant for explicit allocator control.
+
 ```zig
-// All HTTP methods as top-level functions
-var r1 = try httpx.get("https://httpbun.com/get", .{});
-var r2 = try httpx.post("https://httpbun.com/post", .{ .json = "{}" });
-var r3 = try httpx.put("https://httpbun.com/put", .{});
-var r4 = try httpx.del("https://httpbun.com/delete", .{});
-var r5 = try httpx.patch("https://httpbun.com/patch", .{});
-var r6 = try httpx.head("https://httpbun.com/head", .{});
-var r7 = try httpx.opts("https://httpbun.com/options", .{});
-var r8 = try httpx.trace("https://httpbun.com/trace", .{});
+// ── HTTP Methods ──
+var r = try httpx.get(url, .{});                  // GET
+var r = try httpx.post(url, .{ .json = "{}" });   // POST
+var r = try httpx.put(url, .{});                   // PUT
+var r = try httpx.del(url, .{});                   // DELETE (short)
+var r = try httpx.delete(url, .{});                // DELETE (full name)
+var r = try httpx.patch(url, .{ .json = "{}" });  // PATCH
+var r = try httpx.head(url, .{});                  // HEAD
+var r = try httpx.opts(url, .{});                  // OPTIONS (short)
+var r = try httpx.options(url, .{});               // OPTIONS (full name)
+var r = try httpx.trace(url, .{});                 // TRACE
+var r = try httpx.connect(url, .{});               // CONNECT
+var r = try httpx.fetch(url, .{});                 // alias for GET
+var r = try httpx.send(.GET, url, .{});            // explicit method
 
-// fetch = alias for get
-var r9 = try httpx.fetch("https://httpbun.com/get", .{});
+// ── JSON Methods ──
+const T = struct { id: u32 };
+const r = try httpx.getJson(T, url, .{});                         // GET + parse
+const r = try httpx.postJson(url, "{\"x\":1}");                    // POST raw JSON
+const r = try httpx.postJsonAndParse(T, url, body, .{});           // POST + parse
+const r = try httpx.putJson(T, url, body, .{});                    // PUT + parse
+const r = try httpx.patchJson(T, url, body, .{});                  // PATCH + parse
+const r = try httpx.deleteJson(T, url, .{});                       // DELETE + parse
+const r = try httpx.getJsonBorrowed(T, url);                       // zero-copy GET
+const r = try httpx.postJsonBorrowed(T, url, body);                // zero-copy POST
 
-// send with explicit method
-var r10 = try httpx.send(.GET, "https://httpbun.com/get", .{});
+// ── Client Shorthand ──
+var client = httpx.createClient();                                  // page_allocator
+var client = httpx.createClientWithConfig(alloc, .{ .base_url = "..." });
 
-// With explicit allocator
-var r11 = try httpx.sendWithAllocator(allocator, .POST, "https://httpbun.com/post", .{ .json = "{}" });
+// ── Server Shorthand ──
+var server = httpx.createServer();                                  // page_allocator
+var server = httpx.createServerWithConfig(alloc, .{ .port = 3000 });
+try httpx.serve("/hello", handler);                                 // one-shot
+try httpx.serveWithConfig(alloc, config, "/hello", handler);        // one-shot + config
 
-// JSON helpers
-const User = struct { id: u32, name: []const u8 };
-const result = try httpx.getJson(User, "https://api.example.com/user/1", .{});
-defer result.response.deinit();
-defer result.value.deinit();
+// ── Concurrency ──
+var results = try httpx.all(alloc, &client, &specs, .{});          // all parallel
+var ok = try httpx.first(alloc, &client, &specs, .{});             // first 2xx
+var fast = try httpx.fastest(alloc, &client, &specs, .{});         // first done
+var settled = try httpx.settled(alloc, &client, &specs, .{});      // all settled
 
-const created = try httpx.postJsonAndParse(User, "https://api.example.com/users", .{}, .{ .name = "Alice" }, .{});
-defer created.response.deinit();
-defer created.value.deinit();
+// ── Network ──
+const addr = try httpx.resolveAddress("host", 443);
+const addr = try httpx.parseAndResolveAddress("127.0.0.1:9000", 80);
+const ok = httpx.isIpAddress("::1");
+const mime = httpx.mimeTypeFromPath("file.html");
+
+// ── Lifecycle ──
+try httpx.netInit();
+defer httpx.netDeinit();
 ```
 
 ### Concurrency
@@ -424,7 +449,7 @@ const is_ip = httpx.isIpAddress("::1"); // true
  
 ## Examples
 
-The `examples/` directory contains **57 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
+The `examples/` directory contains **60 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
 
 **Client:**
 - [`simple_get`](examples/simple_get.zig) - Basic GET requests
@@ -447,6 +472,8 @@ The `examples/` directory contains **57 comprehensive, runnable examples** demon
 - [`retry_example`](examples/retry_example.zig) - Retry with backoff
 - [`dns_example`](examples/dns_example.zig) - DNS resolution
 - [`compression_example`](examples/compression_example.zig) - gzip/deflate/brotli/zstd
+- [`streaming_compression_example`](examples/streaming_compression_example.zig) - Streaming chunked compression/decompression
+- [`http_cache_example`](examples/http_cache_example.zig) - HTTP caching: CacheControl, HttpCache, ConditionalGet (ETag)
 
 **Server:**
 - [`simple_server`](examples/simple_server.zig) - Minimal HTTP server
@@ -489,6 +516,7 @@ The `examples/` directory contains **57 comprehensive, runnable examples** demon
 - [`multipart_example`](examples/multipart_example.zig) - RFC 2046 multipart form data
 - [`session_example`](examples/session_example.zig) - TTL-based session store
 - [`metrics_example`](examples/metrics_example.zig) - Observability metrics
+- [`buffer_pool_example`](examples/buffer_pool_example.zig) - Pre-allocated buffer pool with ownership tracking
 - [`unix_socket_example`](examples/unix_socket_example.zig) - AF_UNIX domain sockets
 - [`tcp_local`](examples/tcp_local.zig) - TCP socket helpers
 - [`udp_local`](examples/udp_local.zig) - UDP socket helpers

@@ -8,10 +8,27 @@ The root module re-exports core types and convenience helpers so most apps can i
 
 ### Client Helpers
 
-- `httpx.fetch(url)`
-- `httpx.send(method, url, options)`
+- `httpx.fetch(url)` — alias for GET
+- `httpx.send(method, url, options)` — explicit method
 - `httpx.get/post/put/delete/del/patch/head/trace/connect/options/opts(...)`
-- Explicit allocator overrides: `httpx.fetchWithAllocator(...)`, `httpx.sendWithAllocator(...)`, and `*WithAllocator` variants for each alias.
+- `httpx.getJson(T, url, parse_opts)` — GET + parse JSON
+- `httpx.postJson(url, body)` — POST raw JSON
+- `httpx.postJsonAndParse(T, url, body, parse_opts)` — POST + parse JSON
+- `httpx.putJson/patchJson/deleteJson(T, url, body, parse_opts)` — other methods + parse
+- `httpx.getJsonBorrowed/postJsonBorrowed(T, url, body)` — zero-copy borrowed parsing
+- Explicit allocator overrides: `httpx.*WithAllocator(...)` for every alias above.
+
+### Client Shorthand
+
+- `httpx.createClient()` — page_allocator shorthand
+- `httpx.createClientWithConfig(allocator, config)` — explicit allocator + config
+
+### Server Shorthand
+
+- `httpx.createServer()` — page_allocator shorthand
+- `httpx.createServerWithConfig(allocator, config)` — explicit allocator + config
+- `httpx.serve(path, handler)` — one-shot create + register GET + listen
+- `httpx.serveWithConfig(allocator, config, path, handler)` — same with config
 
 ### Optional Client Builder Helpers
 
@@ -22,6 +39,11 @@ The root module re-exports core types and convenience helpers so most apps can i
 - `httpx.ClientConfig.defaults().withSslVerification(...)`
 - `httpx.ClientConfig.defaults().withKeepAlive(...)`
 - `httpx.ClientConfig.defaults().withMaxResponseSize(...)`
+- `httpx.ClientConfig.defaults().withProxy(...)`
+- `httpx.ClientConfig.defaults().withRetryPolicy(...)`
+- `httpx.ClientConfig.defaults().withTimeouts(...)`
+- `httpx.ClientConfig.defaults().withLogFn(...)`
+- `httpx.ClientConfig.defaults().withPoolLimits(...)`
 - `httpx.RequestOptions.defaults().withQueryParams(...)`
 - `httpx.RequestOptions.defaults().withFormUrlEncoded(...)`
 - `httpx.RequestOptions.defaults().withBearerToken(...)`
@@ -29,6 +51,13 @@ The root module re-exports core types and convenience helpers so most apps can i
 - `httpx.RequestOptions.defaults().withVersion(...)`
 - `httpx.RequestOptions.defaults().withHttp2()`
 - `httpx.RequestOptions.defaults().withHttp3()`
+- `httpx.RequestOptions.defaults().withJson(...)`
+- `httpx.RequestOptions.defaults().withHeaders(...)`
+- `httpx.RequestOptions.defaults().withFollowRedirects(...)`
+- `httpx.RequestOptions.defaults().withTimeout(...)`
+- `httpx.RequestOptions.defaults().withMultipartFields(...)`
+- `httpx.RequestOptions.defaults().withMultipartFiles(...)`
+- `httpx.RequestOptions.defaults().withMultipartBoundary(...)`
 - `httpx.BasicAuth`
 - `httpx.Proxy`
 - `httpx.ProxyKind`
@@ -73,12 +102,48 @@ The root module re-exports core types and convenience helpers so most apps can i
 - `httpx.defaultMimeMappings`
 - `httpx.encodeVarInt(...)`
 - `httpx.decodeVarInt(...)`
+- `httpx.sleepMs(ms)`
+- `httpx.defaultIo()`
+
+### Caching
+
+- `httpx.CacheControl` — parse Cache-Control headers
+- `httpx.HttpCache` — LRU in-memory cache with TTL
+- `httpx.CacheEntry` — individual cache entry
+- `httpx.ConditionalGet` — ETag/If-None-Match conditional requests
+
+### Streaming Compression
+
+- `httpx.StreamingCompressor` — chunked gzip/deflate/brotli/zstd compression
+- `httpx.StreamingDecompressor` — chunked decompression
+- `httpx.ContentEncoding` — encoding enum
+- `httpx.decompress(...)` / `httpx.compress(...)` — one-shot compression
+
+### Buffer Pool
+
+- `httpx.BufferPool` — pre-allocated buffer pool with ownership tracking
+
+### DNS Cache
+
+- `httpx.dns.DnsCache` — thread-safe DNS cache with TTL and eviction
+
+### WebSocket
+
+- `httpx.isWebSocketUpgrade(...)`, `httpx.wsExtractKey(...)`, `httpx.wsAcceptKey(...)`
+- `httpx.wsUpgradeHeaders(...)` — generate upgrade response headers
+- `httpx.wsEncodeFrame(...)` / `httpx.wsDecodeFrame(...)` — frame encode/decode
+- `httpx.wsTextFrame(...)`, `wsBinaryFrame(...)`, `wsPingFrame(...)`, `wsPongFrame(...)`, `wsCloseFrame(...)`
+
+### Debug
+
+- `httpx.debug` — structured debug logging with `entry`/`exit`/`log`/`detail` calls
 
 ## API Groups
 
 - [Client API](/api/client)
 - [Concurrency API](/api/concurrency)
 - [Core API](/api/core)
+- [DNS API](/api/dns)
 - [Middleware API](/api/middleware)
 - [Network API](/api/net)
 - [Pool API](/api/pool)
