@@ -3,7 +3,11 @@
 httpx.zig provides a complete, from-scratch implementation of HTTP/3 protocol primitives (RFC 9114) including QPACK header compression (RFC 9204) and QUIC transport framing (RFC 9000), plus high-level client/server runtime paths.
 
 ::: warning Custom Implementation
-Zig's standard library does not provide HTTP/3 or QUIC support. **httpx.zig implements these protocols entirely from scratch**, following RFC 9114, RFC 9204, and RFC 9000 specifications.
+Zig's standard library does not provide HTTP/3 or QUIC support. **httpx.zig implements these protocols entirely from scratch**, following RFC 9114, RFC 9204, and RFC 9000 specifications, including:
+- **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
+- **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, version negotiation, and transport parameters
+- **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling
+- **Interop note:** strict TLS-in-QUIC server negotiation expectations may vary by endpoint deployment
 :::
 
 ## Platform Support

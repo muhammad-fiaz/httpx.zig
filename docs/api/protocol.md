@@ -3,7 +3,12 @@
 Low-level protocol framing, parsing, and header compression. This module provides complete implementations of HTTP/1.1 parsing, HTTP/2 framing with HPACK, and HTTP/3 framing with QPACK over QUIC transport.
 
 ::: warning Custom Implementation
-Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx.zig implements these protocols entirely from scratch**. This includes complete implementations of HPACK, QPACK, HTTP/2 framing, HTTP/3 framing, and QUIC transport as specified in the relevant RFCs.
+Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx.zig implements these protocols entirely from scratch**. This includes complete implementations of HPACK, QPACK, HTTP/2 framing, HTTP/3 framing, and QUIC transport as specified in the relevant RFCs:
+- **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
+- **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and connection pooling (RFC 7540)
+- **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
+- **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, version negotiation, and transport parameters
+- **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling
 :::
 
 ## Protocol Support Matrix

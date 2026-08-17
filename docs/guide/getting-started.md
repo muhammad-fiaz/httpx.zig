@@ -21,8 +21,14 @@
 - **Security**: Custom TLS 1.2/1.3 implementation with ALPN negotiation, ECDSA certificate verification, and custom CA handling.
 - **Explicit Root Helpers**: Top-level aliases for requests (`fetch/send/...`), concurrency (`first/fastest/settled`), networking (`resolveAddress`, `parseAndResolveAddress`, `netInit/netDeinit`), and MIME detection (`mimeTypeFromPath`, `mimeTypeFromPathOr`, `mimeTypeFromPathWith`) with external mapping support via `MimeMapping`.
 
-::: warning Custom HTTP/2 & HTTP/3 Implementation
-Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx.zig implements these protocols entirely from scratch**, including HPACK (RFC 7541), QPACK (RFC 9204), HTTP/2 framing (RFC 7540), and QUIC transport (RFC 9000).
+::: warning Custom HTTP/2, HTTP/3, and TLS Implementation
+Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN support. **httpx.zig implements these protocols entirely from scratch**, including:
+- **TLS 1.2 and 1.3** with full handshake support (RFC 5246 / RFC 8446) — key exchange: X25519; AEAD cipher suites: ChaCha20-Poly1305, AES-128-GCM, AES-256-GCM; ALPN negotiation (RFC 7301); X.509 certificate parsing and verification (client-side)
+- **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
+- **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and connection pooling (RFC 7540)
+- **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
+- **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, version negotiation, and transport parameters
+- **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling
 :::
 
 ## Requirements

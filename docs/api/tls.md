@@ -1,6 +1,17 @@
 # TLS API
 
-The TLS module provides a fully custom TLS 1.2/1.3 implementation built entirely on `std.crypto` primitives. No dependency on `std.crypto.tls` -- all handshake, record-layer encryption, certificate verification, and ALPN negotiation is implemented from scratch.
+The TLS module provides a fully custom TLS 1.2/1.3 implementation built entirely on `std.crypto` primitives. No dependency on `std.crypto.tls` — all handshake, record-layer encryption, certificate verification, and ALPN negotiation is implemented from scratch.
+
+::: warning Custom Implementation
+Zig's standard library does not provide TLS/ALPN support. **httpx.zig implements TLS entirely from scratch**, including:
+- **TLS 1.2 and 1.3** with full handshake support (RFC 5246 / RFC 8446)
+- **Key exchange:** X25519 (TLS 1.2/1.3)
+- **AEAD cipher suites:** ChaCha20-Poly1305, AES-128-GCM, AES-256-GCM
+- **ALPN negotiation** (RFC 7301) for automatic HTTP/2 and HTTP/3 protocol selection with HTTP/1.1 fallback
+- **Handshake message encryption** (TLS 1.3)
+- **X.509 certificate parsing and verification** (client-side)
+- **Custom record-layer encryption/decryption**
+:::
 
 ## Supported Features
 
