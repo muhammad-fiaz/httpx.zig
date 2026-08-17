@@ -24,6 +24,23 @@ const httpx = @import("httpx");
 var server = httpx.Server.init(allocator);
 defer server.deinit();
 
+// Shorthand aliases
+var server = httpx.createServer();                           // uses page_allocator
+var server = httpx.createServerWithConfig(allocator, .{     // explicit allocator + config
+    .port = 3000,
+    .host = "0.0.0.0",
+});
+defer server.deinit();
+
+// One-shot: create + register + listen in one call
+try httpx.serve("/hello", helloHandler);
+
+// One-shot with full config
+try httpx.serveWithConfig(allocator, .{
+    .port = 3000,
+    .port_conflict = .increment,
+}, "/hello", helloHandler);
+
 // Initialize with custom config
 var server = httpx.Server.initWithConfig(allocator, .{
     .port = 3000,

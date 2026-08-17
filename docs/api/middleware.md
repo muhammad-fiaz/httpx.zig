@@ -7,13 +7,24 @@ Middleware functions sit between the incoming request and your route handlers. T
 Global middleware is added using `server.use()`.
 
 ```zig
+// Short aliases (recommended)
+try server.use(httpx.logger());
+try server.use(httpx.cors(.{}));
+try server.use(httpx.helmet());
+try server.use(httpx.rateLimit(.{ .max_requests = 100 }));
+try server.use(httpx.csrf(.{}));
+try server.use(httpx.bodyParser(1024 * 1024));
+try server.use(httpx.requestTimeout(30_000));
+try server.use(httpx.requestId());
+
+// Full namespace also works
 try server.use(httpx.middleware.logger());
 try server.use(httpx.middleware.cors(.{}));
 ```
 
 ## Built-in Middleware
 
-All middleware is in the `httpx.middleware` namespace.
+All middleware is available as top-level aliases via `httpx.*` (recommended) or under `httpx.middleware.*`.
 
 ### `logger`
 

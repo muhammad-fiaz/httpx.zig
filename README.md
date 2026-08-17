@@ -32,7 +32,7 @@
 
 
 > [!NOTE]
-> **Project maturity:** This project aims to be production-ready and is actively maintained. It is still a new project and not yet widely adopted. Feel free to use it in your projects.
+> **Project maturity:** This project is production-ready and actively maintained. It provides a comprehensive HTTP client and server implementation with modern protocol, networking, security, and performance features. The project is actively evolving and welcomes production use and contributions.
 >
 > **Custom HTTP/2, HTTP/3, and TLS implementation:** Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN support.
 > httpx.zig implements these protocols **entirely from scratch**, including:

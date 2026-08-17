@@ -39,6 +39,13 @@ const httpx = @import("httpx");
 var client = httpx.Client.init(allocator);
 defer client.deinit();
 
+// Shorthand aliases
+var client = httpx.createClient();                        // uses page_allocator
+var client = httpx.createClientWithConfig(allocator, .{  // explicit allocator + config
+    .base_url = "https://api.example.com",
+});
+defer client.deinit();
+
 // Initialize with custom configuration
 var client = httpx.Client.initWithConfig(allocator, .{
     .base_url = "https://api.example.com",
