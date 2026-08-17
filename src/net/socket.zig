@@ -1421,14 +1421,12 @@ pub const UdpSocket = struct {
 };
 
 test "Socket create and close" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var socket = try Socket.create();
     defer socket.close();
     try std.testing.expect(socket.isValid());
 }
 
 test "Socket options" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var socket = try Socket.create();
     defer socket.close();
 
@@ -1438,7 +1436,6 @@ test "Socket options" {
 }
 
 test "TcpListener getLocalAddress" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var listener = try TcpListener.init(try net.Address.parseIp("127.0.0.1", 0));
     defer listener.deinit();
 
@@ -1448,7 +1445,6 @@ test "TcpListener getLocalAddress" {
 }
 
 test "UdpSocket send/recv localhost" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var recv_sock = try UdpSocket.create();
     defer recv_sock.close();
 
@@ -1469,7 +1465,6 @@ test "UdpSocket send/recv localhost" {
 }
 
 test "Socket read/writeAll compatibility aliases" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const ThreadCtx = struct {
         listener: *TcpListener,
     };
@@ -1507,7 +1502,6 @@ test "Socket read/writeAll compatibility aliases" {
 }
 
 test "SocketIoReader readVec fills internal buffer for empty input" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     const ThreadCtx = struct {
         listener: *TcpListener,
     };

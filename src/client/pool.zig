@@ -362,7 +362,6 @@ test "ConnectionPool config" {
 }
 
 test "Connection health check" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var conn = Connection{
         .socket = try Socket.create(),
         .host = "localhost",

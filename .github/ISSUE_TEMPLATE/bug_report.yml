@@ -102,6 +102,6 @@ body:
       label: Checklist
       options:
         - label: I tested with Zig 0.16.0.
-          required: true
+          required: "true"
         - label: I searched existing issues before creating this report.
-          required: true
+          required: "true"

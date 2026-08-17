@@ -328,20 +328,20 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
                                 const io = threadIo();
                                 self.mutex.lock(io) catch unreachable;
                                 self.result.* = rr.success;
-                                rr = .{ .err = error.UnusedResult }; // transfer ownership
+                                rr = .{ .err = error.UnusedResult };
                                 self.cond.signal(io);
                                 self.mutex.unlock(io);
                                 break;
                             }
                         }
 
+                        const io = threadIo();
+                        self.mutex.lock(io) catch unreachable;
                         const prev = self.remaining.fetchSub(1, .acq_rel);
                         if (prev == 1) {
-                            const io = threadIo();
-                            self.mutex.lock(io) catch unreachable;
                             self.cond.signal(io);
-                            self.mutex.unlock(io);
                         }
+                        self.mutex.unlock(io);
                     }
                 }
             };
@@ -376,7 +376,7 @@ pub fn any(allocator: Allocator, client: *Client, specs: []const RequestSpec, co
 
             const any_io = threadIo();
             mutex.lock(any_io) catch unreachable;
-            while (!winner.load(.acquire) and remaining.load(.acquire) > (specs.len - spawned)) {
+            while (!winner.load(.acquire) and remaining.load(.acquire) > 0) {
                 cond.wait(any_io, &mutex) catch unreachable;
             }
             mutex.unlock(any_io);
@@ -513,13 +513,13 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, c
 
                         rr.deinit();
 
+                        const io = threadIo();
+                        self.mutex.lock(io) catch unreachable;
                         const prev = self.remaining.fetchSub(1, .acq_rel);
                         if (prev == 1) {
-                            const io = threadIo();
-                            self.mutex.lock(io) catch unreachable;
                             self.cond.signal(io);
-                            self.mutex.unlock(io);
                         }
+                        self.mutex.unlock(io);
                     }
                 }
             };
@@ -554,7 +554,7 @@ pub fn race(allocator: Allocator, client: *Client, specs: []const RequestSpec, c
 
             const race_io = threadIo();
             mutex.lock(race_io) catch unreachable;
-            while (!winner.load(.acquire) and remaining.load(.acquire) > (specs.len - spawned)) {
+            while (!winner.load(.acquire) and remaining.load(.acquire) > 0) {
                 cond.wait(race_io, &mutex) catch unreachable;
             }
             mutex.unlock(race_io);
@@ -727,8 +727,6 @@ test "RequestResult summary helpers" {
 }
 
 test "ConcurrencyConfig modes execution" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
     const allocator = std.testing.allocator;
     var client = Client.initWithConfig(allocator, .{
         .timeouts = .uniform(250),

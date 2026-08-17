@@ -366,8 +366,6 @@ pub const UnixClient = struct {
 };
 
 test "Unix domain socket integration - Client & Server" {
-    if (is_windows) return error.SkipZigTest;
-
     const allocator = std.testing.allocator;
     const io = defaultIo();
     const ts = std.Io.Timestamp.now(io, .real).toMilliseconds();

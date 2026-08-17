@@ -63,6 +63,6 @@ body:
       label: Checklist
       options:
         - label: I searched existing issues and discussions before creating this request.
-          required: true
+          required: "true"
         - label: I checked the latest `main` branch for existing implementation.
-          required: false
+          required: "false"

@@ -3261,9 +3261,11 @@ test "Server trace/connect helpers register routes" {
 
 fn reserveTcpPort() !struct { listener: TcpListener, port: u16 } {
     const addr = try net.Address.parseIp("127.0.0.1", 0);
-    var listener = try TcpListener.init(addr);
-    const local = try listener.getLocalAddress();
-    return .{ .listener = listener, .port = local.getPort() };
+    var sock = try Socket.createForAddress(addr);
+    errdefer sock.close();
+    try sock.bind(addr);
+    const local = try sock.getLocalAddress();
+    return .{ .listener = .{ .socket = sock }, .port = local.getPort() };
 }
 
 fn reserveUdpPort() !struct { socket: UdpSocket, port: u16 } {
@@ -3276,14 +3278,9 @@ fn reserveUdpPort() !struct { socket: UdpSocket, port: u16 } {
 }
 
 test "Server port conflict strategy fail for TCP" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
-
     const allocator = std.testing.allocator;
 
-    var reserved = reserveTcpPort() catch |err| switch (err) {
-        error.SetSockOptFailed => return error.SkipZigTest,
-        else => return err,
-    };
+    var reserved = reserveTcpPort() catch return error.SkipZigTest;
     defer reserved.listener.deinit();
 
     var server = Server.initWithConfig(allocator, .{
@@ -3306,14 +3303,9 @@ test "Server port conflict strategy fail for TCP" {
 }
 
 test "Server port conflict strategy increment for TCP" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
-
     const allocator = std.testing.allocator;
 
-    var reserved = reserveTcpPort() catch |err| switch (err) {
-        error.SetSockOptFailed => return error.SkipZigTest,
-        else => return err,
-    };
+    var reserved = reserveTcpPort() catch return error.SkipZigTest;
     defer reserved.listener.deinit();
 
     var server = Server.initWithConfig(allocator, .{
