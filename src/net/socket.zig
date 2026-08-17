@@ -1080,7 +1080,18 @@ pub const Socket = struct {
             dbg.log("SOCKET", "Socket.waitReadable result={s}", .{if (ready) "ready" else "timeout"});
             return ready;
         }
-        return true;
+        // Linux/macOS: use poll() with timeout so we can re-check
+        // self.running during the accept loop. A bare return true
+        // would make the blocking accept() un-interruptible on close.
+        const fd = self.handle;
+        var pfd = [_]posix.pollfd{
+            .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 },
+        };
+        const timeout: i32 = @intCast(@min(timeout_ms, @as(u64, std.math.maxInt(i32))));
+        const rc = posix.poll(&pfd, timeout) catch return false;
+        const ready = rc > 0;
+        dbg.log("SOCKET", "Socket.waitReadable result={s}", .{if (ready) "ready" else "timeout"});
+        return ready;
     }
 
     /// Returns the local address the socket is bound to.
