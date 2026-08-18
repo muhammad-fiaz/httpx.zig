@@ -6,19 +6,12 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("\n=== httpx.zig HTTP/3 Advanced Features ===\n\n", .{});
-
     try qpackInstructionExample(allocator);
     try quicFrameExample();
     try transportParamsExample(allocator);
-
-    std.debug.print("\n=== All HTTP/3 advanced examples completed ===\n", .{});
 }
 
-/// Demonstrates QPACK encoder and decoder stream instruction encode/decode.
 fn qpackInstructionExample(allocator: std.mem.Allocator) !void {
-    std.debug.print("--- QPACK Stream Instructions ---\n", .{});
-
     var section_buf: std.ArrayList(u8) = .empty;
     try httpx.qpack.encodeSectionAck(42, &section_buf, allocator);
     defer section_buf.deinit(allocator);
@@ -81,14 +74,9 @@ fn qpackInstructionExample(allocator: std.mem.Allocator) !void {
     const dup_decoded = try httpx.qpack.decodeDuplicate(dup_buf.items);
     std.debug.print("\nDuplicate (index=3): {d} bytes\n", .{dup_decoded.len});
     std.debug.print("  Decoded index: {d}\n", .{dup_decoded.result.index});
-
-    std.debug.print("\n", .{});
 }
 
-/// Demonstrates QUIC RESET_STREAM and STOP_SENDING frame construction.
 fn quicFrameExample() !void {
-    std.debug.print("--- QUIC Stream Cancellation Frames ---\n", .{});
-
     const reset = httpx.quic.ResetStreamFrame{
         .stream_id = 4,
         .error_code = 0x06,
@@ -112,17 +100,9 @@ fn quicFrameExample() !void {
     std.debug.print("\nSTOP_SENDING:\n", .{});
     std.debug.print("  stream_id: {d}\n", .{stop_decoded.frame.stream_id});
     std.debug.print("  error_code: 0x{x}\n", .{stop_decoded.frame.error_code});
-
-    std.debug.print("\nThese frames are used for graceful stream cancellation\n", .{});
-    std.debug.print("without tearing down the entire QUIC connection.\n", .{});
-
-    std.debug.print("\n", .{});
 }
 
-/// Demonstrates QUIC transport parameter encoding/decoding.
 fn transportParamsExample(allocator: std.mem.Allocator) !void {
-    std.debug.print("--- QUIC Transport Parameters ---\n", .{});
-
     const params = httpx.quic.TransportParameters{
         .max_idle_timeout = 30000,
         .max_udp_payload_size = 1200,
@@ -157,9 +137,4 @@ fn transportParamsExample(allocator: std.mem.Allocator) !void {
         if (decoded.disable_active_migration) "true" else "false",
     });
     std.debug.print("  active_connection_id_limit: {d}\n", .{decoded.active_connection_id_limit});
-
-    std.debug.print("\nTransport parameters are exchanged during the QUIC\n", .{});
-    std.debug.print("  handshake and define connection behavior limits.\n", .{});
-
-    std.debug.print("\n", .{});
 }

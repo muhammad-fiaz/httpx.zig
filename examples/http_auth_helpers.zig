@@ -51,8 +51,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== HTTP Auth Helpers Example ===\n\n", .{});
-
     const port = try pickFreeTcpPort();
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",

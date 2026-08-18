@@ -1,9 +1,3 @@
-//! HTTP/2 High-Level Client Runtime Example for httpx.zig
-//!
-//! This example demonstrates an end-to-end HTTP/2 request/response flow using
-//! the high-level client API (`ClientConfig.http2_enabled = true`) against a
-//! local loopback HTTP/2 server built from protocol primitives.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -38,7 +32,6 @@ pub fn main() !void {
     var response = try client.get(url, .{ .timeout_ms = 10_000 });
     defer response.deinit();
 
-    std.debug.print("\n=== HTTP/2 Client Runtime Example ===\n", .{});
     std.debug.print("Response version: {s}\n", .{response.version.toString()});
     std.debug.print("Status: {d}\n", .{response.status.code});
     std.debug.print("Body: {s}\n", .{response.text() orelse ""});
@@ -68,7 +61,6 @@ fn runServer(listener: *httpx.TcpListener) !void {
         accepted.socket.writer(),
     );
 
-    // Server sends its SETTINGS frame right after receiving the client preface.
     try h2_conn.writeFrame(.{
         .length = 0,
         .frame_type = .settings,
@@ -172,13 +164,12 @@ fn runServer(listener: *httpx.TcpListener) !void {
         .stream_id = request_stream_id,
     }, response_body);
 
-    // Send GOAWAY so the client knows no more frames will follow.
     var goaway_payload: [8]u8 = undefined;
     goaway_payload[0] = @intCast((request_stream_id >> 24) & 0x7F);
     goaway_payload[1] = @intCast((request_stream_id >> 16) & 0xFF);
     goaway_payload[2] = @intCast((request_stream_id >> 8) & 0xFF);
     goaway_payload[3] = @intCast(request_stream_id & 0xFF);
-    goaway_payload[4] = 0; // error code: no_error
+    goaway_payload[4] = 0;
     goaway_payload[5] = 0;
     goaway_payload[6] = 0;
     goaway_payload[7] = 0;

@@ -1,9 +1,3 @@
-//! Reverse Proxy Middleware Example
-//!
-//! Demonstrates middleware.reverseProxy() and middleware.reverseProxyRuntime()
-//! for proxying requests to a backend server. Shows both compile-time target
-//! configuration and runtime target selection.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -35,10 +29,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Reverse Proxy Middleware Example ===\n\n", .{});
-
-    // 1. Start a backend server
-    std.debug.print("--- Backend Server ---\n", .{});
     const backend_port = try pickFreeTcpPort();
     var backend = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -54,8 +44,6 @@ pub fn main() !void {
 
     std.debug.print("  Backend on port {d}\n", .{backend_port});
 
-    // 2. Proxy server with reverseProxy middleware (compile-time target)
-    std.debug.print("\n--- Proxy Server (compile-time target) ---\n", .{});
     const proxy_port = try pickFreeTcpPort();
     var proxy = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -73,8 +61,6 @@ pub fn main() !void {
 
     std.debug.print("  Proxy on port {d} -> backend {d}\n", .{ proxy_port, backend_port });
 
-    // 3. Proxy server with reverseProxyRuntime (runtime target)
-    std.debug.print("\n--- Proxy Server (runtime target) ---\n", .{});
     const rt_proxy_port = try pickFreeTcpPort();
     var rt_proxy = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -89,8 +75,6 @@ pub fn main() !void {
 
     std.debug.print("  Runtime proxy on port {d} -> backend {d}\n", .{ rt_proxy_port, backend_port });
 
-    // 4. Test the proxy
-    std.debug.print("\n--- Testing Proxy ---\n", .{});
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())
         .withRetryPolicy(httpx.RetryPolicy.noRetry()));
@@ -105,14 +89,6 @@ pub fn main() !void {
     if (resp.text()) |body| {
         std.debug.print("  Body: {s}\n", .{body});
     }
-
-    // 5. Middleware configuration summary
-    std.debug.print("\n--- Middleware Summary ---\n", .{});
-    std.debug.print("  reverseProxy(url)     - compile-time target URL\n", .{});
-    std.debug.print("  reverseProxyRuntime() - runtime target URL\n", .{});
-    std.debug.print("  Use case: API gateway, microservice proxy, load balancer\n", .{});
-
-    std.debug.print("\n=== Reverse Proxy Middleware Example Complete ===\n", .{});
 
     rt_proxy.stop();
     rt_proxy_thread.join();

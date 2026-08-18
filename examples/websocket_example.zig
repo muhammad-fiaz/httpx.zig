@@ -6,9 +6,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== WebSocket Protocol Example ===\n\n", .{});
-
-    std.debug.print("--- Handshake key ---\n", .{});
     const client_key = "dGhlIHNhbXBsZSBub25jZQ==";
     const accept = try httpx.wsAcceptKey(client_key, allocator);
     defer allocator.free(accept);
@@ -17,7 +14,6 @@ pub fn main() !void {
     std.debug.print("RFC expected: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\n", .{});
     std.debug.print("Match: {}\n\n", .{std.mem.eql(u8, accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")});
 
-    std.debug.print("--- Upgrade request detection ---\n", .{});
     var req = try httpx.Request.init(allocator, .GET, "ws://localhost:8080/chat");
     defer req.deinit();
     try req.headers.set("Upgrade", "websocket");
@@ -28,7 +24,6 @@ pub fn main() !void {
     std.debug.print("isWebSocketUpgrade: {}\n", .{httpx.isWebSocketUpgrade(&req)});
     std.debug.print("wsExtractKey:       {s}\n\n", .{httpx.wsExtractKey(&req).?});
 
-    std.debug.print("--- Text frame (server->client) ---\n", .{});
     const tf = try httpx.wsTextFrame(allocator, "Hello, WebSocket!");
     defer allocator.free(tf);
     var tr = try httpx.wsDecodeFrame(allocator, tf);
@@ -38,7 +33,6 @@ pub fn main() !void {
     std.debug.print("payload: \"{s}\"\n", .{tr.frame.payload});
     std.debug.print("match:   {}\n\n", .{std.mem.eql(u8, tr.frame.payload, "Hello, WebSocket!")});
 
-    std.debug.print("--- Binary frame (client->server, masked) ---\n", .{});
     const bin_data: []const u8 = &.{ 0xDE, 0xAD, 0xBE, 0xEF };
     const mask_key: [4]u8 = .{ 0x37, 0xfa, 0x21, 0x3d };
     const bf = try httpx.wsEncodeFrame(allocator, .binary, bin_data, true, true, mask_key);
@@ -50,7 +44,6 @@ pub fn main() !void {
     std.debug.print("decoded bytes: {d}\n", .{br.frame.payload.len});
     std.debug.print("roundtrip:   {}\n\n", .{std.mem.eql(u8, br.frame.payload, bin_data)});
 
-    std.debug.print("--- Control frames ---\n", .{});
     const ping = try httpx.wsPingFrame(allocator, "alive");
     defer allocator.free(ping);
     const pong = try httpx.wsPongFrame(allocator, "alive");
@@ -69,7 +62,6 @@ pub fn main() !void {
     std.debug.print("PONG  opcode: {s}  isControl: {}\n", .{ @tagName(pong_r.frame.opcode), pong_r.frame.opcode.isControl() });
     std.debug.print("CLOSE opcode: {s}  isControl: {}\n\n", .{ @tagName(close_r.frame.opcode), close_r.frame.opcode.isControl() });
 
-    std.debug.print("--- Extended payload length ---\n", .{});
     const big = try allocator.alloc(u8, 200);
     defer allocator.free(big);
     @memset(big, 0xAB);
@@ -80,7 +72,6 @@ pub fn main() !void {
     std.debug.print("payload: {d} bytes (uses 2-byte extended length)\n", .{big.len});
     std.debug.print("encoded: {d} bytes  roundtrip: {}\n\n", .{ big_frame.len, std.mem.eql(u8, big_r.frame.payload, big) });
 
-    std.debug.print("--- Opcode classification ---\n", .{});
     const opcodes = [_]httpx.WsOpcode{ .text, .binary, .continuation, .ping, .pong, .close };
     for (opcodes) |op| {
         std.debug.print("  {s: <12}  isData={}  isControl={}\n", .{
@@ -88,11 +79,9 @@ pub fn main() !void {
         });
     }
 
-    std.debug.print("\n--- Close codes ---\n", .{});
+    std.debug.print("\n", .{});
     const codes = [_]httpx.WsCloseCode{ .normal, .going_away, .protocol_error, .message_too_big, .internal_error };
     for (codes) |c| {
         std.debug.print("  {s} = {d}\n", .{ @tagName(c), @intFromEnum(c) });
     }
-
-    std.debug.print("\n=== WebSocket Example Complete ===\n", .{});
 }

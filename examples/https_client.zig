@@ -18,20 +18,15 @@ pub fn main(init: std.process.Init) !void {
     const allocator = gpa.allocator();
     const go_online = shouldUseLiveNetwork(init.minimal.environ, allocator);
 
-    std.debug.print("=== HTTPS Client Example ===\n\n", .{});
-
     if (!go_online) {
-        std.debug.print("Offline mode: set HTTPX_EXAMPLE_ONLINE=1 to run a live request.\n\n", .{});
         printOfflineDemo();
         return;
     }
 
     const tls_config = tls.TlsConfig.insecureWithH2(allocator);
-    std.debug.print("TLS config: ALPN = h2, http/1.1 (insecure mode for demo)\n", .{});
 
     const host = "httpbun.com";
     const port: u16 = 443;
-    std.debug.print("Connecting to {s}:{d}...\n", .{ host, port });
 
     const address = httpx.address.resolve(allocator, host, port) catch |err| {
         std.debug.print("  DNS resolve failed: {} (offline demo)\n", .{err});
@@ -52,7 +47,6 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
 
-    std.debug.print("Performing TLS handshake...\n", .{});
     var session = tls.TlsSession.init(tls_config);
     defer session.deinit();
     session.attachSocket(&socket);
@@ -77,13 +71,11 @@ pub fn main(init: std.process.Init) !void {
         "Accept: text/html\r\n" ++
         "\r\n";
 
-    std.debug.print("Sending HTTP request over TLS...\n", .{});
     session.writeAll(request) catch |err| {
         std.debug.print("  Write failed: {}\n", .{err});
         return;
     };
 
-    std.debug.print("Reading response...\n", .{});
     var buf: [4096]u8 = undefined;
     var total_read: usize = 0;
     while (total_read < buf.len) {
@@ -97,20 +89,9 @@ pub fn main(init: std.process.Init) !void {
 
     const response_text = buf[0..@min(total_read, 512)];
     std.debug.print("\nResponse (first {d} bytes):\n", .{response_text.len});
-    std.debug.print("--------\n", .{});
     std.debug.print("{s}\n", .{response_text});
 
     session.deinit();
-    std.debug.print("\nTLS session closed gracefully.\n", .{});
-    std.debug.print("\n=== Example complete ===\n", .{});
 }
 
-fn printOfflineDemo() void {
-    std.debug.print("\n--- Offline TLS Demo ---\n", .{});
-    std.debug.print("The custom TLS implementation supports TLS 1.2 and 1.3 handshakes,\n", .{});
-    std.debug.print("ALPN negotiation, and encrypted record I/O. For production use,\n", .{});
-    std.debug.print("connect to servers that support the same cipher suites:\n", .{});
-    std.debug.print("  TLS 1.3: AES_128_GCM_SHA256, AES_256_GCM_SHA384, CHACHA20_POLY1305_SHA256\n", .{});
-    std.debug.print("  TLS 1.2: ECDHE_RSA_WITH_AES_128_GCM_SHA256, ECDHE_RSA_WITH_AES_256_GCM_SHA384\n", .{});
-    std.debug.print("\n=== Example complete (offline) ===\n", .{});
-}
+fn printOfflineDemo() void {}

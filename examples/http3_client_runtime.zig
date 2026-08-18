@@ -1,9 +1,3 @@
-//! HTTP/3 High-Level Client Runtime Example for httpx.zig
-//!
-//! This example demonstrates an end-to-end local HTTP/3 request/response flow
-//! using the high-level client API (`ClientConfig.http3_enabled = true`) over
-//! UDP with QUIC/HTTP3/QPACK protocol primitives.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -52,7 +46,6 @@ pub fn main() !void {
     var response = try client.get(url, .{ .timeout_ms = 10_000 });
     defer response.deinit();
 
-    std.debug.print("\n=== HTTP/3 Client Runtime Example ===\n", .{});
     std.debug.print("Response version: {s}\n", .{response.version.toString()});
     std.debug.print("Status: {d}\n", .{response.status.code});
     std.debug.print("Body: {s}\n", .{response.text() orelse ""});

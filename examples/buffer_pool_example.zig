@@ -6,8 +6,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Buffer Pool Example ===\n\n", .{});
-
     var pool = try httpx.BufferPool.init(allocator, 8, 4096);
     defer pool.deinit();
 
@@ -29,7 +27,6 @@ pub fn main() !void {
     try pool.release(buf2);
     std.debug.print("After releasing 2: {d} available\n", .{pool.available()});
 
-    std.debug.print("\n--- Reuse Cycle ---\n", .{});
     for (0..6) |cycle| {
         const buf = pool.acquire() orelse {
             std.debug.print("Cycle {d}: no buffers (all in use)\n", .{cycle + 1});
@@ -45,7 +42,6 @@ pub fn main() !void {
 
     std.debug.print("Final available: {d}\n", .{pool.available()});
 
-    std.debug.print("\n--- Ownership Safety ---\n", .{});
     const foreign = try allocator.alloc(u8, 64);
     defer allocator.free(foreign);
 
@@ -64,6 +60,4 @@ pub fn main() !void {
     } else |err| {
         std.debug.print("Double release rejected: {}\n", .{err});
     }
-
-    std.debug.print("\n=== Buffer Pool Example Complete ===\n", .{});
 }

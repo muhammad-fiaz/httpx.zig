@@ -25,8 +25,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== SOCKS5h Proxy Example ===\n\n", .{});
-
     const backend_port = try pickFreeTcpPort();
     var backend_server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -39,13 +37,7 @@ pub fn main() !void {
     const backend_thread = try backend_server.listenInBackground();
     sleepMs(100);
 
-    std.debug.print("Backend server on port {d}\n", .{backend_port});
-
     const proxy_port = 1080;
-    std.debug.print("\nSOCKS5h proxy config:\n", .{});
-    std.debug.print("  Proxy: 127.0.0.1:{d}\n", .{proxy_port});
-    std.debug.print("  DNS resolution: remote (via proxy)\n", .{});
-    std.debug.print("  Protocol: SOCKS5 with username/password auth\n\n", .{});
 
     const client_config = httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())
@@ -64,20 +56,8 @@ pub fn main() !void {
     const target_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/data", .{backend_port});
     defer allocator.free(target_url);
 
-    std.debug.print("Sending request to {s} via SOCKS5h proxy...\n", .{target_url});
-
     var response = client.get(target_url, .{}) catch |err| {
         std.debug.print("\nRequest failed (expected if no proxy running): {}\n", .{err});
-        std.debug.print("\nTo test with a real proxy:\n", .{});
-        std.debug.print("  1. Install a SOCKS5 proxy (e.g., microsocks)\n", .{});
-        std.debug.print("  2. Start it: microsocks -p 1080 -u proxyuser -P proxypass\n", .{});
-        std.debug.print("  3. Run this example again\n\n", .{});
-
-        std.debug.print("--- SOCKS5h Proxy Features ---\n", .{});
-        std.debug.print("  - Remote DNS resolution (proxy resolves hostnames)\n", .{});
-        std.debug.print("  - Username/password authentication (RFC 1929)\n", .{});
-        std.debug.print("  - Supports IPv4, IPv6, and domain targets\n", .{});
-        std.debug.print("  - Works with HTTP and HTTPS (TLS pass-through)\n", .{});
         return;
     };
     defer response.deinit();
@@ -86,11 +66,6 @@ pub fn main() !void {
     if (response.text()) |body| {
         std.debug.print("Response body: {s}\n", .{body});
     }
-
-    std.debug.print("\n--- SOCKS5h vs SOCKS5 ---\n", .{});
-    std.debug.print("  SOCKS5:  DNS resolved locally (by client)\n", .{});
-    std.debug.print("  SOCKS5h: DNS resolved remotely (by proxy)\n", .{});
-    std.debug.print("  Use SOCKS5h when you want the proxy to handle DNS.\n", .{});
 
     backend_server.stop();
     backend_thread.join();

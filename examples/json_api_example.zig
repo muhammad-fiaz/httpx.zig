@@ -27,9 +27,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Simplified JSON API Example ===\n\n", .{});
-
-    std.debug.print("--- 1. getJson: fetch and parse typed response ---\n", .{});
     {
         var result = httpx.getJson(HttpBunGet, "http://httpbun.com/get?name=Alice&email=alice@test.com&age=30", .{ .ignore_unknown_fields = true }) catch |err| {
             std.debug.print("getJson failed: {}\n", .{err});
@@ -40,7 +37,6 @@ pub fn main() !void {
         std.debug.print("  origin={s} url={s}\n\n", .{ result.value.origin, result.value.url });
     }
 
-    std.debug.print("--- 2. Client.getJson: reusable client ---\n", .{});
     {
         var client = httpx.Client.init(allocator);
         defer client.deinit();
@@ -54,7 +50,6 @@ pub fn main() !void {
         std.debug.print("  origin={s} url={s}\n\n", .{ result.value.origin, result.value.url });
     }
 
-    std.debug.print("--- 3. postJsonAndParse: POST and parse response ---\n", .{});
     {
         const req_body =
             \\{"name":"Charlie","email":"charlie@test.com","age":35}
@@ -68,7 +63,6 @@ pub fn main() !void {
         std.debug.print("  origin={s} url={s}\n\n", .{ result.value.origin, result.value.url });
     }
 
-    std.debug.print("--- 4. Response.json: manual fetch then parse ---\n", .{});
     {
         var response = httpx.get("http://httpbun.com/get?name=Dave&email=dave@test.com&age=40", .{
             .headers = &.{.{ "Accept", "application/json" }},
@@ -85,7 +79,6 @@ pub fn main() !void {
         std.debug.print("  origin={s} url={s}\n\n", .{ resp.origin, resp.url });
     }
 
-    std.debug.print("--- 5. Server: ctx.jsonBody() + ctx.json() ---\n", .{});
     {
         var server = httpx.Server.initWithConfig(allocator, .{
             .port = 0,
@@ -130,8 +123,6 @@ pub fn main() !void {
         defer get_result.response.deinit();
         std.debug.print("  GET response: ok={} message={s}\n\n", .{ get_result.value.ok, get_result.value.message });
     }
-
-    std.debug.print("=== All JSON API examples completed ===\n", .{});
 }
 
 fn createUserHandler(ctx: *httpx.Context) anyerror!httpx.Response {

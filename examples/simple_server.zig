@@ -36,8 +36,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Simple HTTP Server Example ===\n\n", .{});
-
     const port = try pickFreeTcpPort();
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -52,18 +50,6 @@ pub fn main() !void {
     try server.get("/api/status", jsonHandler);
     try server.get("/users/:id", userHandler);
     try server.post("/users", helloHandler);
-
-    std.debug.print("Server Configuration:\n", .{});
-    std.debug.print("  Host: {s}\n", .{server.config.host});
-    std.debug.print("  Port: {d}\n", .{server.config.port});
-    std.debug.print("  Max connections: {d}\n", .{server.config.max_connections});
-    std.debug.print("  Keep-alive: {}\n", .{server.config.keep_alive});
-
-    std.debug.print("\nRegistered routes:\n", .{});
-    std.debug.print("  GET  /             -> helloHandler\n", .{});
-    std.debug.print("  GET  /api/status   -> jsonHandler\n", .{});
-    std.debug.print("  GET  /users/:id    -> userHandler\n", .{});
-    std.debug.print("  POST /users        -> helloHandler\n", .{});
 
     const server_thread = try server.listenInBackground();
 
@@ -95,8 +81,6 @@ pub fn main() !void {
     var resp3 = try client.get(user_url, .{});
     defer resp3.deinit();
     std.debug.print("GET /users/123 -> status: {d}, body: {s}\n", .{ resp3.status.code, resp3.text() orelse "" });
-
-    std.debug.print("\nAll routes verified!\n", .{});
 
     server.stop();
     server_thread.join();

@@ -18,9 +18,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Retry Policy Example ===\n\n", .{});
-
-    std.debug.print("--- Default RetryPolicy ---\n", .{});
     const default = httpx.RetryPolicy{};
     std.debug.print("  max_retries:              {d}\n", .{default.max_retries});
     std.debug.print("  initial_delay_ms:         {d}\n", .{default.initial_delay_ms});
@@ -29,17 +26,14 @@ pub fn main() !void {
     std.debug.print("  retry_on_connection_err:  {}\n", .{default.retry_on_connection_error});
     std.debug.print("  retry_only_idempotent:    {}\n", .{default.retry_only_idempotent});
 
-    std.debug.print("\n--- Exponential Backoff ---\n", .{});
     for (0..6) |attempt| {
         const delay = default.calculateDelay(@intCast(attempt));
         std.debug.print("  attempt {d}: {d}ms\n", .{ attempt, delay });
     }
 
-    std.debug.print("\n--- No-Retry Policy ---\n", .{});
     const no_retry = httpx.RetryPolicy.noRetry();
     std.debug.print("  max_retries: {d}\n", .{no_retry.max_retries});
 
-    std.debug.print("\n--- Aggressive RetryPolicy ---\n", .{});
     const aggressive = httpx.RetryPolicy.aggressive();
     std.debug.print("  max_retries:          {d}\n", .{aggressive.max_retries});
     std.debug.print("  initial_delay_ms:     {d}\n", .{aggressive.initial_delay_ms});
@@ -49,7 +43,6 @@ pub fn main() !void {
         std.debug.print("  attempt {d}: {d}ms\n", .{ attempt, delay });
     }
 
-    std.debug.print("\n--- Custom RetryPolicy ---\n", .{});
     const custom = httpx.RetryPolicy{
         .max_retries = 10,
         .initial_delay_ms = 200,
@@ -67,13 +60,11 @@ pub fn main() !void {
         std.debug.print("  attempt {d}: {d}ms\n", .{ attempt, delay });
     }
 
-    std.debug.print("\n--- Status-Based Retry ---\n", .{});
     const statuses = [_]u16{ 200, 429, 500, 503, 404, 502 };
     for (statuses) |s| {
         std.debug.print("  status {d}: retry={}\n", .{ s, custom.shouldRetryStatus(s) });
     }
 
-    std.debug.print("\n--- Client with Retry ---\n", .{});
     const port = try pickFreeTcpPort();
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -95,12 +86,6 @@ pub fn main() !void {
     var resp = try client.get(url, .{});
     defer resp.deinit();
     std.debug.print("  GET -> status: {d}\n", .{resp.status.code});
-
-    std.debug.print("\nRetry strategies:\n", .{});
-    std.debug.print("  - Exponential backoff: delay doubles each retry\n", .{});
-    std.debug.print("  - Jitter: add random variance to prevent thundering herd\n", .{});
-    std.debug.print("  - Idempotent-only: only retry safe/idempotent methods\n", .{});
-    std.debug.print("  - Status-based: retry on specific HTTP error codes\n", .{});
 
     server.stop();
     server_thread.join();

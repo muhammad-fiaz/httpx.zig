@@ -149,8 +149,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Static File Server Example ===\n\n", .{});
-
     const port = try pickFreeTcpPort();
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -168,16 +166,6 @@ pub fn main() !void {
     try server.get("/assets/*", assetsHandler);
     try server.get("/images/*", imagesHandler);
     try server.get("/go-home", redirectHandler);
-
-    std.debug.print("Registered routes:\n", .{});
-    std.debug.print("  GET /               -> demo index (HTML response)\n", .{});
-    std.debug.print("  GET /site-home      -> explicit file route to site index.html\n", .{});
-    std.debug.print("  GET /logo           -> explicit file route to site image\n", .{});
-    std.debug.print("  GET /styles.css     -> explicit file route to site CSS\n", .{});
-    std.debug.print("  GET /app.js         -> explicit file route to site JS\n", .{});
-    std.debug.print("  GET /assets/*       -> directory wildcard route to assets root\n", .{});
-    std.debug.print("  GET /images/*       -> directory wildcard route to image directory\n", .{});
-    std.debug.print("  GET /go-home        -> redirect('/')\n", .{});
 
     const server_thread = try server.listenInBackground();
     sleepMs(100);
@@ -200,8 +188,6 @@ pub fn main() !void {
     if (std.mem.indexOf(u8, body, "static files demo") != null) {
         std.debug.print("Home page contains expected content\n", .{});
     }
-
-    std.debug.print("\nStatic file routes verified!\n", .{});
 
     server.stop();
     server_thread.join();

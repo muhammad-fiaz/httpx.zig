@@ -41,7 +41,6 @@ fn shouldUseLiveNetwork(environ: std.process.Environ, allocator: std.mem.Allocat
 }
 
 fn printResponse(data: HttpbinResponse) void {
-    std.debug.print("\nDeserialized response:\n", .{});
     std.debug.print("  origin:       {s}\n", .{data.origin orelse "(missing)"});
     std.debug.print("  url:          {s}\n", .{data.url});
     std.debug.print("  User-Agent:   {s}\n", .{data.headers.@"User-Agent" orelse "(missing)"});
@@ -56,17 +55,13 @@ pub fn main(init: std.process.Init) !void {
     const allocator = gpa.allocator();
     const live_mode = shouldUseLiveNetwork(init.minimal.environ, allocator);
 
-    std.debug.print("=== Simple GET Request + JSON Deserialization ===\n\n", .{});
-
     if (!live_mode) {
-        std.debug.print("Offline-safe mode: parsing embedded sample payload.\n", .{});
         const parsed = std.json.parseFromSlice(HttpbinResponse, allocator, offline_sample_json, .{ .ignore_unknown_fields = true }) catch |err| {
             std.debug.print("JSON parse failed: {s}\n", .{@errorName(err)});
             return;
         };
         defer parsed.deinit();
         printResponse(parsed.value);
-        std.debug.print("\nSet HTTPX_EXAMPLE_ONLINE=1 to run a live request.\n", .{});
         return;
     }
 
@@ -77,8 +72,6 @@ pub fn main(init: std.process.Init) !void {
     var client = httpx.Client.initWithConfig(allocator, client_config);
     defer client.deinit();
 
-    std.debug.print("Making GET request to http://httpbun.com/get...\n", .{});
-
     var response = client.request(.GET, "http://httpbun.com/get", .{
         .timeout_ms = 5_000,
         .headers = &.{
@@ -86,7 +79,6 @@ pub fn main(init: std.process.Init) !void {
         },
     }) catch |err| {
         std.debug.print("Request failed: {s}\n", .{@errorName(err)});
-        std.debug.print("Falling back to embedded sample payload.\n", .{});
         const parsed = std.json.parseFromSlice(HttpbinResponse, allocator, offline_sample_json, .{ .ignore_unknown_fields = true }) catch |parse_err| {
             std.debug.print("JSON parse failed: {s}\n", .{@errorName(parse_err)});
             return;
@@ -97,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer response.deinit();
 
-    std.debug.print("\nResponse Status: {d} {s}\n", .{ response.status.code, response.status.phrase });
+    std.debug.print("Response Status: {d} {s}\n", .{ response.status.code, response.status.phrase });
 
     const parsed = response.json(HttpbinResponse, .{ .ignore_unknown_fields = true }) catch |err| {
         std.debug.print("JSON parse failed: {s}\n", .{@errorName(err)});

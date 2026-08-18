@@ -2,8 +2,6 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    std.debug.print("=== UDP Local Send/Recv Example ===\n\n", .{});
-
     var recv_sock = try httpx.UdpSocket.create();
     defer recv_sock.close();
 

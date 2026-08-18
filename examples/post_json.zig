@@ -6,8 +6,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== POST JSON Request Example ===\n\n", .{});
-
     var request = try httpx.Request.init(allocator, .POST, "http://httpbun.com/post");
     defer request.deinit();
 
@@ -25,12 +23,7 @@ pub fn main() !void {
     const serialized = try httpx.formatRequest(&request, allocator);
     defer allocator.free(serialized);
 
-    std.debug.print("Request:\n", .{});
-    std.debug.print("--------\n", .{});
     std.debug.print("{s}\n", .{serialized});
-
-    std.debug.print("\nUsing JsonBuilder:\n", .{});
-    std.debug.print("------------------\n", .{});
 
     var builder = httpx.json.JsonBuilder.init(allocator);
     defer builder.deinit();
@@ -51,7 +44,6 @@ pub fn main() !void {
 
     std.debug.print("Built JSON: {s}\n", .{builder.toSlice()});
 
-    std.debug.print("\nPOST method properties:\n", .{});
     std.debug.print("  Has request body: {}\n", .{httpx.Method.POST.hasRequestBody()});
     std.debug.print("  Is idempotent: {}\n", .{httpx.Method.POST.isIdempotent()});
 }

@@ -1,11 +1,3 @@
-//! Pre-Route Hook and Global Fallback Example
-//!
-//! Demonstrates server.preRoute() for hooks that run before route matching,
-//! and server.global() for fallback handlers on unmatched routes.
-//!
-//! Pre-route hooks return void — they run setup/logging, not rejection.
-//! For auth gating, use middleware instead.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -15,7 +7,6 @@ fn sleepMs(ms: i64) void {
 }
 
 fn preRouteHook(ctx: *httpx.Context) anyerror!void {
-    // Runs before every route match — useful for logging, metrics, setup.
     const method = @tagName(ctx.request.method);
     const path = ctx.request.uri.path;
     std.debug.print("[preRoute] {s} {s}\n", .{ method, path });
@@ -51,13 +42,10 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    // Register pre-route hook — runs before route matching
     try server.preRoute(preRouteHook);
 
-    // Register global fallback for unmatched routes
     server.global(notFoundHandler);
 
-    // Register routes
     try server.get("/", homeHandler);
     try server.get("/api/users", apiUsersHandler);
     try server.get("/api/items", apiItemsHandler);
@@ -66,7 +54,6 @@ pub fn main() !void {
     sleepMs(100);
 
     const port = server.listeningPort();
-    std.debug.print("Server listening on http://127.0.0.1:{d}\n", .{port});
 
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast()));
@@ -75,24 +62,18 @@ pub fn main() !void {
     const base = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port});
     defer allocator.free(base);
 
-    // 1. Request to / — preRoute logs the request, handler returns text
-    std.debug.print("\n--- GET / ---\n", .{});
     const url1 = try std.fmt.allocPrint(allocator, "{s}/", .{base});
     defer allocator.free(url1);
     var res1 = try client.get(url1, .{});
     defer res1.deinit();
     std.debug.print("Status: {d}, Body: {s}\n", .{ res1.status.code, res1.text() orelse "" });
 
-    // 2. Request to /api/users — preRoute logs, handler returns JSON
-    std.debug.print("\n--- GET /api/users ---\n", .{});
     const url2 = try std.fmt.allocPrint(allocator, "{s}/api/users", .{base});
     defer allocator.free(url2);
     var res2 = try client.get(url2, .{});
     defer res2.deinit();
     std.debug.print("Status: {d}, Body: {s}\n", .{ res2.status.code, res2.text() orelse "" });
 
-    // 3. Request to unmatched path — hits global fallback
-    std.debug.print("\n--- GET /nonexistent (global fallback) ---\n", .{});
     const url3 = try std.fmt.allocPrint(allocator, "{s}/nonexistent", .{base});
     defer allocator.free(url3);
     var res3 = try client.get(url3, .{});

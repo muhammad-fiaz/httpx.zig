@@ -10,16 +10,6 @@ const crypto = std.crypto;
 const assert = std.debug.assert;
 const Certificate = std.crypto.Certificate;
 
-/// Computes TLS 1.3 nonce by XORing the sequence number into the last 8 bytes of the IV.
-fn nonceTLS13(iv: *const [12]u8, seq: u64) [12]u8 {
-    var nonce: [12]u8 = iv.*;
-    var seq_bytes: [8]u8 = undefined;
-    mem.writeInt(u64, &seq_bytes, seq, .big);
-    for (0..8) |i| {
-        nonce[4 + i] = nonce[4 + i] ^ seq_bytes[i];
-    }
-    return nonce;
-}
 const Reader = std.Io.Reader;
 const Writer = std.Io.Writer;
 

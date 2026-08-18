@@ -108,8 +108,7 @@
 | **HTTP Caching** | `CacheControl` header parsing, `HttpCache` (LRU in-memory with TTL), `ConditionalGet` (ETag/If-None-Match), and thread-safe cache operations. | https://muhammad-fiaz.github.io/httpx.zig/api/cache |
 | **Buffer Pool** | `BufferPool` with slot-based ownership tracking, acquire/release semantics, and detection of foreign/double-release buffers. | https://muhammad-fiaz.github.io/httpx.zig/api/io |
 | **DNS Resolution** | `resolveAddress`, `resolveAllAddresses`, `parseHostAndPort`, `parseAndResolveAddress`, `isIpAddress`, `isIp4Address`, `isIp6Address` helpers with RFC 1035 wire protocol, UDP/TCP/DoH transports, and SSRF policy checks. | https://muhammad-fiaz.github.io/httpx.zig/api/dns |
-| **Server-Sent Events** | `SseEvent` type and `parseSseStream` helper for SSE client parsing. | https://muhammad-fiaz.github.io/httpx.zig/api/sse |
-| **Debug System** | Structured debug logging with `entry`/`exit`/`log`/`detail` calls, configurable via `debug.enabled` flag. | https://muhammad-fiaz.github.io/httpx.zig/api/io |
+| **Server-Sent Events** | `SseEvent` type and `parseSSEStream` helper for SSE client parsing. | https://muhammad-fiaz.github.io/httpx.zig/api/sse |
 | **HTTP/3 Flow Control** | MAX_DATA and MAX_STREAM_DATA frame handling with connection-level and per-stream flow control windows. | https://muhammad-fiaz.github.io/httpx.zig/examples/http3-advanced |
 | **Stream Cancellation** | RESET_STREAM and STOP_SENDING frames for graceful HTTP/3 stream teardown without connection disruption. | https://muhammad-fiaz.github.io/httpx.zig/examples/http3-advanced |
 | **Cookie APIs** | First-class request/response cookie helpers for both client and server contexts. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
@@ -481,6 +480,9 @@ The `examples/` directory contains **63 comprehensive, runnable examples** demon
 - [`redirect_example`](examples/redirect_example.zig) - Redirect handling
 - [`retry_example`](examples/retry_example.zig) - Retry with backoff
 - [`dns_example`](examples/dns_example.zig) - DNS resolution
+- [`dns_cache`](examples/dns_cache.zig) - DNS cache operations
+- [`dns_configuration`](examples/dns_configuration.zig) - DNS resolver configuration
+- [`dns_resolve_all`](examples/dns_resolve_all.zig) - Resolve all address candidates
 - [`compression_example`](examples/compression_example.zig) - gzip/deflate/brotli/zstd
 - [`streaming_compression_example`](examples/streaming_compression_example.zig) - Streaming chunked compression/decompression
 - [`http_cache_example`](examples/http_cache_example.zig) - HTTP caching: CacheControl, HttpCache, ConditionalGet (ETag)

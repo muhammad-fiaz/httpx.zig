@@ -16,8 +16,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Custom CA Certificate ===\n\n", .{});
-
     const ca_pem = @embedFile("certs/server_ec.crt");
     std.debug.print("Loaded CA cert: {d} bytes\n\n", .{ca_pem.len});
 
@@ -40,10 +38,8 @@ pub fn main() !void {
     sleepMs(200);
 
     const port = server.config.port;
-    std.debug.print("TLS server on 127.0.0.1:{d}\n\n", .{port});
 
     {
-        std.debug.print("--- Connect with self-signed cert ---\n", .{});
         const config = tls.TlsConfig.insecureWithH2(allocator);
         var sock = try httpx.Socket.create();
         defer sock.close();
@@ -64,14 +60,6 @@ pub fn main() !void {
         const n = try session.read(&buf);
         std.debug.print("  Response:  {d} bytes\n", .{n});
     }
-
-    std.debug.print("\n--- How to use custom CA in production ---\n", .{});
-    std.debug.print("  1. Generate CA: openssl req -x509 -newkey rsa:2048 -nodes \\\n", .{});
-    std.debug.print("       -keyout ca.key -out ca.crt -days 365 -subj '/CN=MyCA'\n", .{});
-    std.debug.print("  2. Embed in Zig: const ca_pem = @embedFile(\"ca.crt\");\n", .{});
-    std.debug.print("  3. Pass to TLS config for certificate verification\n", .{});
-
-    std.debug.print("\n=== Example complete ===\n", .{});
 
     server.stop();
     server_thread.join();

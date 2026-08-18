@@ -23,8 +23,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Concurrent Requests Example ===\n\n", .{});
-
     const port = try pickFreeTcpPort();
 
     var server = httpx.Server.initWithConfig(allocator, .{
@@ -54,7 +52,6 @@ pub fn main() !void {
         .withKeepAlive(false));
     defer client.deinit();
 
-    std.debug.print("Executing batch of {d} requests via multi_thread mode (implicit workers)...\n", .{builder.count()});
     const mt_results = try httpx.all(allocator, &client, builder.requests.items, .{
         .mode = .multi_thread,
         .workers = 2,
@@ -65,7 +62,6 @@ pub fn main() !void {
     }
     std.debug.print("Successful results: {d}/{d}\n\n", .{ httpx.successfulCount(mt_results), mt_results.len });
 
-    std.debug.print("Executing batch of {d} requests via single_thread mode (sequential)...\n", .{builder.count()});
     const st_results = try httpx.all(allocator, &client, builder.requests.items, .{
         .mode = .single_thread,
     });
@@ -75,7 +71,6 @@ pub fn main() !void {
     }
     std.debug.print("Successful results: {d}/{d}\n\n", .{ httpx.successfulCount(st_results), st_results.len });
 
-    std.debug.print("Executing batch of {d} requests via explicit_workers mode...\n", .{builder.count()});
     var exec = httpx.Executor.initWithConfig(allocator, .{ .num_threads = 3 });
     defer exec.deinit();
     try exec.start();
@@ -89,8 +84,6 @@ pub fn main() !void {
         allocator.free(ex_results);
     }
     std.debug.print("Successful results: {d}/{d}\n\n", .{ httpx.successfulCount(ex_results), ex_results.len });
-
-    std.debug.print("Demo complete!\n", .{});
 
     server.stop();
     server_thread.join();

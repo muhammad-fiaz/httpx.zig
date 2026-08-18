@@ -1,9 +1,3 @@
-//! Server-Sent Events (SSE) Example
-//!
-//! Demonstrates SSE event formatting and streaming from server to client.
-//! Uses `httpx.sse.Event` for W3C-compliant SSE wire format and
-//! `Context.sse()` for server-side SSE responses.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -33,11 +27,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Server-Sent Events (SSE) Example ===\n\n", .{});
-
-    // 1. SSE event formatting (W3C wire format)
-    std.debug.print("--- SSE Event Formatting ---\n", .{});
-
     const event1 = httpx.sse.Event{
         .event = "message",
         .id = "1",
@@ -62,9 +51,6 @@ pub fn main() !void {
     const formatted3 = try event3.format(allocator);
     defer allocator.free(formatted3);
     std.debug.print("Retry event:\n{s}\n", .{formatted3});
-
-    // 2. Server returning SSE response
-    std.debug.print("--- SSE Server Response ---\n", .{});
 
     const port = try pickFreeTcpPort();
     var server = httpx.Server.initWithConfig(allocator, .{
@@ -93,11 +79,6 @@ pub fn main() !void {
     if (resp.text()) |body| {
         std.debug.print("Body:\n{s}\n", .{body});
     }
-
-    std.debug.print("\nSSE use cases:\n", .{});
-    std.debug.print("  - Real-time notifications\n", .{});
-    std.debug.print("  - Live data feeds (stock prices, logs)\n", .{});
-    std.debug.print("  - Progressive content loading\n", .{});
 
     server.stop();
     server_thread.join();

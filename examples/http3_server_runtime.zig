@@ -11,13 +11,10 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("\n=== HTTP/3 Server Runtime Example ===\n\n", .{});
-
     var port = try pickFreeUdpPort();
     var attempts: u8 = 0;
     while (true) : (attempts += 1) {
         if (attempts >= 3) {
-            std.debug.print("  Could not bind after 3 attempts - skipping.\n", .{});
             return;
         }
         var server = httpx.Server.initWithConfig(allocator, .{
@@ -42,7 +39,6 @@ pub fn main() !void {
         defer server.deinit();
 
         sleepMs(100);
-        std.debug.print("  Server listening on port {d}\n", .{port});
 
         var client = httpx.Client.initWithConfig(allocator, .{
             .http3_enabled = true,

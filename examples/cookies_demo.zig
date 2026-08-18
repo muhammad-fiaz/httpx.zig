@@ -6,8 +6,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Cookie Jar Demo ===\n\n", .{});
-
     var client = httpx.Client.init(allocator);
     defer client.deinit();
 

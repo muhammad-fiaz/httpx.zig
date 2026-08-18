@@ -17,8 +17,6 @@ fn serverThread(ctx: *ServerCtx) void {
 }
 
 pub fn main() !void {
-    std.debug.print("=== TCP Local Send/Recv Example ===\n\n", .{});
-
     const listen_addr = try httpx.Address.parseIp("127.0.0.1", 0);
     var listener = try httpx.TcpListener.init(listen_addr);
     const addr = try listener.getLocalAddress();

@@ -23,9 +23,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== TLS Server Example ===\n\n", .{});
-
-    std.debug.print("--- Server Configuration ---\n", .{});
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
         .port = 0,
@@ -41,20 +38,10 @@ pub fn main() !void {
     try server.get("/api/data", apiHandler);
     try server.get("/hello", helloHandler);
 
-    std.debug.print("  TLS: enabled (custom implementation)\n", .{});
-    std.debug.print("  Cert: examples/certs/server_ec.crt\n", .{});
-    std.debug.print("  Key:  examples/certs/server_ec.key\n", .{});
-    std.debug.print("  ALPN: h3, h2, http/1.1\n", .{});
-    std.debug.print("  HTTP/2: enabled\n", .{});
-    std.debug.print("  HTTP/3: enabled\n", .{});
-
     const server_thread = try server.listenInBackground();
 
     const port = server.config.port;
     sleepMs(200);
-    std.debug.print("  Server listening on port {d}\n", .{port});
-
-    std.debug.print("\n--- TLS Client Handshake ---\n", .{});
 
     var sock = httpx.Socket.create() catch |err| {
         std.debug.print("  Socket create error: {}\n", .{err});
@@ -71,24 +58,19 @@ pub fn main() !void {
     var session = tls.TlsSession.init(tls_config);
     session.socket = &sock;
 
-    std.debug.print("  Connecting to 127.0.0.1:{d}...\n", .{port});
     session.handshake("127.0.0.1") catch |err| {
         std.debug.print("  TLS handshake error: {}\n", .{err});
         return;
     };
 
-    std.debug.print("  TLS handshake complete!\n", .{});
     std.debug.print("  Protocol: {s}\n", .{session.negotiatedProtocol() orelse "none"});
     std.debug.print("  HTTP/2 negotiated: {}\n", .{session.isHTTP2()});
-
-    std.debug.print("\n--- HTTP Request over TLS ---\n", .{});
 
     const request = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
     session.writeAll(request) catch |err| {
         std.debug.print("  Write error: {}\n", .{err});
         return;
     };
-    std.debug.print("  Sent: GET /hello\r\n", .{});
 
     var response_buf: [4096]u8 = undefined;
     const n = session.read(&response_buf) catch |err| {
@@ -102,23 +84,6 @@ pub fn main() !void {
             std.debug.print("  Response: HTTP/1.1 200 OK\n", .{});
         }
     }
-
-    std.debug.print("\n--- TLS Record Layer ---\n", .{});
-    std.debug.print("  Our custom TLS implementation provides:\n", .{});
-    std.debug.print("  - TLS 1.2: ECDHE_RSA_WITH_AES_128_GCM_SHA256\n", .{});
-    std.debug.print("  - TLS 1.3: AES_128_GCM_SHA256, AES_256_GCM_SHA384\n", .{});
-    std.debug.print("  - ALPN negotiation for protocol selection\n", .{});
-    std.debug.print("  - AEAD encryption with proper nonce handling\n", .{});
-    std.debug.print("  - Record-level fragmentation and reassembly\n", .{});
-
-    std.debug.print("\n--- Server Config Summary ---\n", .{});
-    std.debug.print("  Host: {s}\n", .{server.config.host});
-    std.debug.print("  Port: {d}\n", .{server.config.port});
-    std.debug.print("  TLS: {}\n", .{server.config.tls_enabled});
-    std.debug.print("  HTTP/2: {}\n", .{server.config.http2_enabled});
-    std.debug.print("  Keep-alive: {}\n", .{server.config.keep_alive});
-
-    std.debug.print("\n=== TLS Server Example Complete ===\n", .{});
 
     server.stop();
     server_thread.join();

@@ -44,10 +44,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Metrics and Observability Example ===\n\n", .{});
-
-    std.debug.print("--- Manual Recording ---\n", .{});
-
     var m = httpx.Metrics.init();
 
     for (0..10) |_| m.recordRequest();
@@ -70,14 +66,11 @@ pub fn main() !void {
     std.debug.print("Error rate:   {d:.1}%\n", .{snap.errorRate() * 100.0});
     std.debug.print("Success rate: {d:.1}%\n\n", .{snap.successRate() * 100.0});
 
-    std.debug.print("--- Reset ---\n", .{});
     m.reset();
     const after_reset = m.snapshot();
     std.debug.print("After reset - requests: {d}, responses: {d}\n\n", .{
         after_reset.totalRequests(), after_reset.totalResponses(),
     });
-
-    std.debug.print("--- Live Server + Metrics ---\n", .{});
 
     const port = try pickFreeTcpPort();
     var server = httpx.Server.initWithConfig(allocator, .{
@@ -134,8 +127,6 @@ pub fn main() !void {
     std.debug.print("2xx responses: {d}\n", .{live_snap.responses2xx()});
     std.debug.print("5xx responses: {d}\n", .{live_snap.responses5xx()});
     std.debug.print("Active conns:  {d}\n", .{live_snap.activeConnections()});
-
-    std.debug.print("\n=== Metrics Example Complete ===\n", .{});
 
     server.stop();
     t.join();

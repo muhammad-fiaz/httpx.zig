@@ -1,8 +1,3 @@
-//! Request and response customization example
-//!
-//! Demonstrates request builders, request/response helpers, response accessors,
-//! and server-side request inspection with headers, query params, JSON, and redirects.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -57,8 +52,6 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-
-    std.debug.print("=== Request/Response Customization Example ===\n\n", .{});
 
     const port = try pickFreeTcpPort();
     var server = httpx.Server.initWithConfig(allocator, .{

@@ -101,10 +101,6 @@ pub fn main() !void {
     try server.get("/go-home", redirectHomeHandler);
     try server.get("/static/*", staticHandler);
 
-    std.debug.print("=== Multi-page Website Example ===\n", .{});
-    std.debug.print("Serving site from: {s}\n", .{site_root});
-    std.debug.print("Routes: page routes + /logo (file route) + /static/* (directory route)\n", .{});
-
     const server_thread = try server.listenInBackground();
     sleepMs(100);
 
@@ -128,8 +124,6 @@ pub fn main() !void {
     var resp2 = try client.get(about_url, .{});
     defer resp2.deinit();
     std.debug.print("GET /about -> status: {d}\n", .{resp2.status.code});
-
-    std.debug.print("\nAll pages served successfully!\n", .{});
 
     server.stop();
     server_thread.join();

@@ -17,10 +17,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Session Store Example ===\n\n", .{});
-
-    std.debug.print("--- Basic CRUD ---\n", .{});
-
     var store = httpx.SessionStore.init(allocator, .{
         .ttl_ms = 60_000,
         .cookie_name = "sid",
@@ -51,8 +47,6 @@ pub fn main() !void {
     defer allocator.free(updated_role);
     std.debug.print("role (updated): {s}\n\n", .{updated_role});
 
-    std.debug.print("--- Multiple Sessions ---\n", .{});
-
     const sid2 = try store.create();
     try store.set(&sid2, "user_id", "99");
     const sid3 = try store.create();
@@ -60,12 +54,9 @@ pub fn main() !void {
 
     std.debug.print("Total sessions: {d}\n", .{store.count()});
 
-    std.debug.print("\n--- Delete ---\n", .{});
     store.delete(&sid2);
     std.debug.print("After delete - count: {d}\n", .{store.count()});
     std.debug.print("sid2 exists: {}\n\n", .{store.exists(&sid2)});
-
-    std.debug.print("--- Expiry ---\n", .{});
 
     var short_store = httpx.SessionStore.init(allocator, .{ .ttl_ms = 50 });
     defer short_store.deinit();
@@ -90,8 +81,6 @@ pub fn main() !void {
     sleepMs(100);
     const evicted = short_store.evictExpired();
     std.debug.print("Evicted {d} expired sessions\n\n", .{evicted});
-
-    std.debug.print("--- Server Integration ---\n", .{});
 
     const port = try pickFreeTcpPort();
 
@@ -151,8 +140,6 @@ pub fn main() !void {
     var profile_resp = try client.get(profile_url, .{});
     defer profile_resp.deinit();
     std.debug.print("GET  /profile -> {d} {s}\n", .{ profile_resp.status.code, profile_resp.text().? });
-
-    std.debug.print("\n=== Session Example Complete ===\n", .{});
 
     server.stop();
     t.join();

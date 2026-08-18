@@ -698,7 +698,6 @@ pub const SocketIoWriter = struct {
         var total_sent: usize = 0;
 
         const buffered = w.buffered();
-        // std.debug.print("drain called: buffered.len={}, bufs.len={}, splat={}\n", .{buffered.len, bufs.len, splat});
         if (buffered.len > 0) {
             const num = p.socket.send(buffered) catch return error.WriteFailed;
             total_sent += num;

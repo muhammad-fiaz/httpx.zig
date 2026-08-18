@@ -15,9 +15,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Connection Pool Example ===\n\n", .{});
-
-    std.debug.print("--- Starting Local Server ---\n", .{});
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
         .port = 0,
@@ -30,7 +27,6 @@ pub fn main() !void {
     const server_thread = try server.listenInBackground();
     sleepMs(200);
     const port = server.config.port;
-    std.debug.print("  Server listening on port {d}\n\n", .{port});
 
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())
@@ -41,13 +37,11 @@ pub fn main() !void {
     const base_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port});
     defer allocator.free(base_url);
 
-    std.debug.print("--- Initial Pool State ---\n", .{});
     var stats = client.poolStats();
     std.debug.print("  Total connections: {d}\n", .{stats.total});
     std.debug.print("  Active connections: {d}\n", .{stats.active});
     std.debug.print("  Idle connections: {d}\n\n", .{stats.idle});
 
-    std.debug.print("--- First Request (new connection) ---\n", .{});
     const url1 = try std.fmt.allocPrint(allocator, "{s}/pool/status", .{base_url});
     defer allocator.free(url1);
 
@@ -61,7 +55,6 @@ pub fn main() !void {
     stats = client.poolStats();
     std.debug.print("  Pool total: {d}, active: {d}, idle: {d}\n\n", .{ stats.total, stats.active, stats.idle });
 
-    std.debug.print("--- Second Request (reuses connection) ---\n", .{});
     const url2 = try std.fmt.allocPrint(allocator, "{s}/pool/data", .{base_url});
     defer allocator.free(url2);
 
@@ -75,7 +68,6 @@ pub fn main() !void {
     stats = client.poolStats();
     std.debug.print("  Pool total: {d}, active: {d}, idle: {d}\n\n", .{ stats.total, stats.active, stats.idle });
 
-    std.debug.print("--- Multiple Concurrent Requests ---\n", .{});
     var i: usize = 0;
     while (i < 5) : (i += 1) {
         const url = try std.fmt.allocPrint(allocator, "{s}/pool/status", .{base_url});
@@ -90,13 +82,10 @@ pub fn main() !void {
     }
 
     stats = client.poolStats();
-    std.debug.print("\n--- Final Pool State ---\n", .{});
     std.debug.print("  Total connections: {d}\n", .{stats.total});
     std.debug.print("  Active connections: {d}\n", .{stats.active});
     std.debug.print("  Idle connections: {d}\n", .{stats.idle});
     std.debug.print("  Host connections (127.0.0.1:{d}): {d}\n", .{ port, client.hostPoolConnectionCount("127.0.0.1", port) });
-
-    std.debug.print("\n=== Connection Pool Example Complete ===\n", .{});
 
     server.stop();
     server_thread.join();

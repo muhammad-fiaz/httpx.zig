@@ -6,9 +6,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== DNS Resolution Example ===\n\n", .{});
-
-    std.debug.print("--- IP Address Detection ---\n", .{});
     const candidates = [_][]const u8{
         "127.0.0.1",
         "::1",
@@ -27,7 +24,6 @@ pub fn main() !void {
         });
     }
 
-    std.debug.print("\n--- Parse Host:Port ---\n", .{});
     const host_ports = [_][]const u8{
         "127.0.0.1:8080",
         "[::1]:443",
@@ -42,7 +38,6 @@ pub fn main() !void {
         }
     }
 
-    std.debug.print("\n--- DNSResolver: IP Literal ---\n", .{});
     var resolver = httpx.DNSResolver.init(allocator, .{});
     defer resolver.deinit();
 
@@ -50,7 +45,6 @@ pub fn main() !void {
     defer res.deinit();
     std.debug.print("  resolve('127.0.0.1', port=80): {d} address(es)\n", .{res.addresses.len});
 
-    std.debug.print("\n--- DNSResolver: Caching ---\n", .{});
     var cached_resolver = httpx.DNSResolver.init(allocator, .{
         .positive_ttl_ms = 30_000,
         .negative_ttl_ms = 5_000,
@@ -73,7 +67,6 @@ pub fn main() !void {
         stats.literal_hits,
     });
 
-    std.debug.print("\n--- Address Family Filtering ---\n", .{});
     var v4_resolver = httpx.DNSResolver.init(allocator, .{
         .address_family = .ipv4_only,
     });
@@ -83,19 +76,7 @@ pub fn main() !void {
     defer v4_res.deinit();
     std.debug.print("  ipv4_only resolve('127.0.0.1'): {d} address(es)\n", .{v4_res.addresses.len});
 
-    std.debug.print("\n--- Cache Management ---\n", .{});
     std.debug.print("  Cache count before clear: {d}\n", .{cached_resolver.cache.count()});
     cached_resolver.clear();
     std.debug.print("  Cache count after clear: {d}\n", .{cached_resolver.cache.count()});
-
-    std.debug.print("\n--- Convenience Functions ---\n", .{});
-    std.debug.print("  httpx.resolveAddress(host, port)        - single address\n", .{});
-    std.debug.print("  httpx.resolveAllAddresses(alloc, host, port) - all candidates\n", .{});
-    std.debug.print("  httpx.parseHostAndPort(str)             - parse 'host:port'\n", .{});
-    std.debug.print("  httpx.parseAndResolveAddress(host, port) - parse + resolve\n", .{});
-    std.debug.print("  httpx.isIpAddress(str)                 - IPv4/IPv6 check\n", .{});
-    std.debug.print("  httpx.DNSResolver                      - cached DNS resolver\n", .{});
-    std.debug.print("  httpx.DNSCache                         - raw DNS cache\n", .{});
-
-    std.debug.print("\n=== DNS Resolution Example Complete ===\n", .{});
 }

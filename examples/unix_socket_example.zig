@@ -12,15 +12,11 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Unix Domain Socket Example ===\n\n", .{});
-    std.debug.print("Platform: {s}\n", .{@tagName(builtin.os.tag)});
-
     const io = std.Io.Threaded.global_single_threaded.io();
     const ts = std.Io.Timestamp.now(io, .real).toMilliseconds();
     var socket_path_buf: [64]u8 = undefined;
     const socket_path = try std.fmt.bufPrint(&socket_path_buf, "hx-{d}", .{ts});
 
-    std.debug.print("Initializing server on: {s}...\n", .{socket_path});
     var server = httpx.Server.initWithConfig(allocator, .{
         .unix_path = socket_path,
     });
@@ -42,28 +38,22 @@ pub fn main() !void {
             std.debug.print("Windows AF_UNIX socket paths have stricter address-length limitations.\n", .{});
             std.debug.print("Use a shorter socket path or run on Linux/macOS.\n", .{});
         }
-        std.debug.print("=== Unix Domain Socket Example Skipped (bind failed) ===\n", .{});
         return;
     };
     sleepMs(50);
 
-    std.debug.print("Connecting client to Unix socket: {s}...\n", .{socket_path});
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withUnixSocket(socket_path));
     defer client.deinit();
 
-    std.debug.print("Sending GET request over Unix socket...\n", .{});
     var resp = client.get("http://localhost/ipc-status", .{}) catch |err| {
         std.debug.print("Request failed: {s}\n", .{@errorName(err)});
-        std.debug.print("=== Unix Domain Socket Example Skipped (request failed) ===\n", .{});
         return;
     };
     defer resp.deinit();
 
     std.debug.print("\nResponse Status: {d}\n", .{resp.status.code});
     std.debug.print("Response Body:\n{s}\n", .{resp.text().?});
-
-    std.debug.print("\n=== Unix Domain Socket Example Complete ===\n", .{});
 
     server.stop();
     thread.join();

@@ -22,8 +22,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Request/Response Interceptors Example ===\n\n", .{});
-
     var client = httpx.Client.initWithConfig(allocator, .{
         .user_agent = "httpx.zig-interceptor-demo/1.0",
         .follow_redirects = true,
@@ -37,20 +35,4 @@ pub fn main() !void {
     });
 
     std.debug.print("Interceptors registered: {d}\n", .{client.interceptors.items.len});
-
-    std.debug.print("\nInterceptor use cases:\n", .{});
-    std.debug.print("  - Add authentication headers\n", .{});
-    std.debug.print("  - Log all requests/responses\n", .{});
-    std.debug.print("  - Modify request body\n", .{});
-    std.debug.print("  - Handle rate limiting\n", .{});
-    std.debug.print("  - Add timing metrics\n", .{});
-    std.debug.print("  - Cache responses\n", .{});
-
-    std.debug.print("\nExample: Adding auth header in interceptor:\n", .{});
-    std.debug.print("  fn addAuth(req: *Request, ctx: ?*anyopaque) !void {{\n", .{});
-    std.debug.print("      const token = @as(*[]const u8, @ptrCast(ctx.?)).*;\n", .{});
-    std.debug.print("      try req.headers.set(\"Authorization\", token);\n", .{});
-    std.debug.print("  }}\n", .{});
-
-    std.debug.print("\nDemo complete!\n", .{});
 }

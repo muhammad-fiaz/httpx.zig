@@ -10,8 +10,6 @@ fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     });
 }
 
-/// Health-check liveness endpoint. In production, verify DB / cache / upstream
-/// dependencies here and return 503 when they are down.
 fn healthHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.json(.{
         .status = "healthy",
@@ -23,7 +21,6 @@ fn healthHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     });
 }
 
-/// Readiness probe for load balancer / orchestrator rolling updates.
 fn readyHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.json(.{
         .ready = true,
@@ -35,7 +32,6 @@ fn readyHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     });
 }
 
-/// API route with a path parameter (e.g. `/api/users/42`).
 fn userHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     const user_id = ctx.param("id") orelse "unknown";
     return ctx.json(.{
@@ -46,7 +42,6 @@ fn userHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     });
 }
 
-/// Mock status endpoint returning system metrics.
 fn statusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.json(.{
         .service = "cloud-api",
@@ -57,7 +52,6 @@ fn statusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     });
 }
 
-/// 404 fallback handler for unmatched routes.
 fn notFoundHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     _ = ctx.status(404);
     return ctx.json(.{
@@ -67,13 +61,11 @@ fn notFoundHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     });
 }
 
-/// Blocking sleep helper using the canonical IO.
 fn sleepMs(ms: i64) void {
     const io = std.Io.Threaded.global_single_threaded.io();
     std.Io.sleep(io, std.Io.Duration.fromMilliseconds(ms), .real) catch {};
 }
 
-/// Reserves an ephemeral TCP port for the server to listen on.
 fn pickFreeTcpPort() !u16 {
     var listener = try httpx.TcpListener.init(try httpx.Address.parseIp("127.0.0.1", 0));
     defer listener.deinit();
@@ -85,8 +77,6 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-
-    std.debug.print("=== Cloud HTTPS Server Example (HTTP/1.1 + HTTP/2 + HTTP/3) ===\n\n", .{});
 
     const port = try pickFreeTcpPort();
 
@@ -132,32 +122,6 @@ pub fn main() !void {
 
     server.global(notFoundHandler);
 
-    std.debug.print("Server Configuration:\n", .{});
-    std.debug.print("  Host:              {s}\n", .{server.config.host});
-    std.debug.print("  Port:              {d}\n", .{port});
-    std.debug.print("  TLS (proxy):       terminated at reverse proxy\n", .{});
-    std.debug.print("  Worker Threads:    {d}\n", .{server.config.threads});
-    std.debug.print("  HTTP/1.1:          enabled (always)\n", .{});
-    std.debug.print("  HTTP/2:            {}\n", .{server.config.http2_enabled});
-    std.debug.print("  HTTP/3 (QUIC):     {}\n", .{server.config.http3_enabled});
-    std.debug.print("  Keep-Alive:        {}\n", .{server.config.keep_alive});
-    std.debug.print("  Max Connections:   {d}\n", .{server.config.max_connections});
-    std.debug.print("  Request Timeout:   {d}ms\n", .{server.config.request_timeout_ms});
-
-    std.debug.print("\nRegistered Routes:\n", .{});
-    std.debug.print("  GET  /              -> indexHandler\n", .{});
-    std.debug.print("  GET  /health        -> healthCheck middleware\n", .{});
-    std.debug.print("  GET  /ready         -> readinessProbe middleware\n", .{});
-    std.debug.print("  GET  /status        -> statusHandler\n", .{});
-    std.debug.print("  GET  /api/users/:id -> userHandler\n", .{});
-    std.debug.print("  ANY  *              -> notFoundHandler (404)\n", .{});
-
-    std.debug.print("\nMiddleware Stack:\n", .{});
-    std.debug.print("  1. cors\n", .{});
-    std.debug.print("  2. healthCheck (/health)\n", .{});
-    std.debug.print("  3. readinessProbe (/ready)\n", .{});
-    std.debug.print("  4. logger\n", .{});
-
     const server_thread = try server.listenInBackground();
     defer {
         server.stop();
@@ -191,8 +155,6 @@ pub fn main() !void {
         .withKeepAlive(false)
         .withProtocols(false, true));
     defer h3_client.deinit();
-
-    std.debug.print("\n--- Self-test: Verifying Endpoints (HTTP/1.0, HTTP/1.1, HTTP/2, HTTP/3) ---\n\n", .{});
 
     const endpoints = [_]struct {
         method: httpx.Method,
@@ -361,20 +323,6 @@ pub fn main() !void {
             });
         }
     }
-
-    std.debug.print("\n--- Cloud Deployment Notes ---\n", .{});
-    std.debug.print("\n", .{});
-    std.debug.print("  AWS/GCP/Azure: Allow inbound TCP 443 in security groups.\n", .{});
-    std.debug.print("  TLS: Terminate at load balancer (ALB / HTTPS LB);\n", .{});
-    std.debug.print("       forward plain HTTP to backend port.\n", .{});
-    std.debug.print("  ALPN: Configured as [\"h3\", \"h2\", \"http/1.1\"] so\n", .{});
-    std.debug.print("        clients negotiate the best available protocol.\n", .{});
-    std.debug.print("  Health checks: Point LB to /health (liveness) and\n", .{});
-    std.debug.print("                 /ready (readiness for rolling updates).\n", .{});
-    std.debug.print("  Process mgmt:  systemd Restart=always, Docker restart\n", .{});
-    std.debug.print("                 policy, or K8s livenessProbe.\n", .{});
-    std.debug.print("  Certificates:  Use Certbot / Let's Encrypt for public\n", .{});
-    std.debug.print("                 certs; self-signed only for dev/staging.\n", .{});
 
     if (all_ok) {
         std.debug.print("\n=== All endpoints verified successfully across HTTP/1.0, HTTP/1.1, HTTP/2, HTTP/3! ===\n", .{});

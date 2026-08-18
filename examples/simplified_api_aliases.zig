@@ -83,7 +83,6 @@ fn runAliasCalls(allocator: std.mem.Allocator, urls: DemoUrls) void {
     _ = opts_ptr;
     _ = trace_ptr;
     _ = connect_ptr;
-    std.debug.print("Top-level alias symbols are available: fetch, send, delete, opts, trace, connect\n", .{});
 
     printResult("httpx.sendWithAllocator(POST)", httpx.sendWithAllocator(allocator, .POST, urls.post, .{
         .timeout_ms = request_timeout,
@@ -119,9 +118,6 @@ pub fn main(init: std.process.Init) !void {
     const allocator = gpa.allocator();
     const live_mode = shouldUseLiveNetwork(init.minimal.environ, allocator);
 
-    std.debug.print("=== Simplified API Aliases Demo ===\n\n", .{});
-    std.debug.print("Mode: {s}\n", .{if (live_mode) "online (httpbin)" else "local loopback"});
-
     if (live_mode) {
         const urls = DemoUrls{
             .fetch = "http://httpbun.com/anything",
@@ -155,7 +151,6 @@ pub fn main(init: std.process.Init) !void {
 
     const server_thread = try server.listenInBackground();
     sleepMs(100);
-    std.debug.print("Local demo server: http://127.0.0.1:{d}\n", .{port});
 
     const urls = try buildLocalUrls(allocator, port);
     defer freeLocalUrls(allocator, urls);

@@ -20,10 +20,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Streaming Compression Example ===\n\n", .{});
-
-    std.debug.print("--- Streaming Gzip Compression ---\n", .{});
-
     var compressor = httpx.StreamingCompressor.init(allocator, .gzip);
     defer compressor.deinit();
     try compressor.start();
@@ -45,8 +41,6 @@ pub fn main() !void {
     std.debug.print("  Original size: ~{d} bytes (3 chunks)\n", .{"This is chunk 1 of the streaming compression example. This is chunk 2 with more data to compress. This is the final chunk completing the message!".len});
     std.debug.print("  Compressed:    {d} bytes\n", .{compressed.len});
 
-    std.debug.print("\n--- Streaming Gzip Decompression ---\n", .{});
-
     const reader = SliceReader{ .data = compressed };
     var decompressor = httpx.StreamingDecompressor(SliceReader).init(
         allocator,
@@ -66,8 +60,6 @@ pub fn main() !void {
 
     std.debug.print("  Decompressed in {d} chunks\n", .{chunk_count});
     std.debug.print("  Result: \"{s}\"\n", .{result.items});
-
-    std.debug.print("\n--- Streaming Deflate ---\n", .{});
 
     var deflate_compressor = httpx.StreamingCompressor.init(allocator, .deflate);
     defer deflate_compressor.deinit();
@@ -95,8 +87,6 @@ pub fn main() !void {
 
     std.debug.print("  Deflate result: \"{s}\"\n", .{deflate_result.items});
 
-    std.debug.print("\n--- Identity (No Compression) ---\n", .{});
-
     const identity_data = "Raw uncompressed data passed through";
     const id_reader = SliceReader{ .data = identity_data };
     var id_decompressor = httpx.StreamingDecompressor(SliceReader).init(
@@ -109,12 +99,4 @@ pub fn main() !void {
     while (try id_decompressor.readChunk()) |chunk| {
         std.debug.print("  Identity chunk: \"{s}\"\n", .{chunk});
     }
-
-    std.debug.print("\n--- Key Benefits ---\n", .{});
-    std.debug.print("  - Processes data incrementally (no full-body buffer)\n", .{});
-    std.debug.print("  - Works with chunked transfer encoding\n", .{});
-    std.debug.print("  - Handles large responses efficiently\n", .{});
-    std.debug.print("  - Supports gzip, deflate, brotli, and zstd\n", .{});
-
-    std.debug.print("\n=== Streaming Compression Example Complete ===\n", .{});
 }

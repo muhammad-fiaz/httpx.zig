@@ -18,9 +18,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Redirect Following Example ===\n\n", .{});
-
-    std.debug.print("--- Default RedirectPolicy ---\n", .{});
     const default = httpx.RedirectPolicy{};
     std.debug.print("  max_redirects:    {d}\n", .{default.max_redirects});
     std.debug.print("  follow_redirects: {}\n", .{default.follow_redirects});
@@ -28,15 +25,12 @@ pub fn main() !void {
     std.debug.print("  preserve_headers: {}\n", .{default.preserve_headers});
     std.debug.print("  allow_cross_origin: {}\n", .{default.allow_cross_origin});
 
-    std.debug.print("\n--- No-Follow Policy ---\n", .{});
     const no_follow = httpx.RedirectPolicy.noFollow();
     std.debug.print("  follow_redirects: {}\n", .{no_follow.follow_redirects});
 
-    std.debug.print("\n--- Strict Policy ---\n", .{});
     const strict = httpx.RedirectPolicy.strict();
     std.debug.print("  preserve_method: {}\n", .{strict.preserve_method});
 
-    std.debug.print("\n--- Redirect Method Logic ---\n", .{});
     const scenarios = [_]struct { status: u16, method: httpx.Method, label: []const u8 }{
         .{ .status = 301, .method = .POST, .label = "301 Moved (POST)" },
         .{ .status = 302, .method = .POST, .label = "302 Found (POST)" },
@@ -51,13 +45,11 @@ pub fn main() !void {
         std.debug.print("  {s: <30} -> {s}\n", .{ s.label, @tagName(redirect_method) });
     }
 
-    std.debug.print("\n  Strict policy:\n", .{});
     for (scenarios) |s| {
         const redirect_method = strict.getRedirectMethod(s.status, s.method);
         std.debug.print("    {s: <30} -> {s}\n", .{ s.label, @tagName(redirect_method) });
     }
 
-    std.debug.print("\n--- Client with Redirect ---\n", .{});
     const port = try pickFreeTcpPort();
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -79,20 +71,6 @@ pub fn main() !void {
     var resp = try client.get(url, .{});
     defer resp.deinit();
     std.debug.print("  GET -> status: {d}\n", .{resp.status.code});
-
-    std.debug.print("\n--- Request Options ---\n", .{});
-    std.debug.print("  .withFollowRedirects(true/false)  - enable/disable following\n", .{});
-    std.debug.print("  .withMaxRedirects(n)              - limit redirect count\n", .{});
-    std.debug.print("  .withRedirectPolicy(policy)       - custom policy\n", .{});
-
-    std.debug.print("\nRedirect status codes:\n", .{});
-    std.debug.print("  301 Moved Permanently    - follow, change method to GET\n", .{});
-    std.debug.print("  302 Found                - follow, change method to GET\n", .{});
-    std.debug.print("  303 See Other            - always change to GET\n", .{});
-    std.debug.print("  307 Temporary Redirect   - follow, preserve method\n", .{});
-    std.debug.print("  308 Permanent Redirect   - follow, preserve method\n", .{});
-
-    std.debug.print("\n=== Redirect Following Example Complete ===\n", .{});
 
     server.stop();
     server_thread.join();

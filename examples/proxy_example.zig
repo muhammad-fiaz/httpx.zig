@@ -22,8 +22,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Proxy Support Example ===\n\n", .{});
-
     const backend_port = try pickFreeTcpPort();
     const proxy_port = try pickFreeTcpPort();
 
@@ -88,7 +86,6 @@ pub fn main() !void {
     const target_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/backend-data", .{backend_port});
     defer allocator.free(target_url);
 
-    std.debug.print("Sending request to {s} via proxy at 127.0.0.1:{d}...\n", .{ target_url, proxy_port });
     var response = try client.get(target_url, .{});
     defer response.deinit();
 

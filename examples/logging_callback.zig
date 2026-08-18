@@ -1,13 +1,6 @@
-//! Logging Callback Example
-//!
-//! Demonstrates how to set up custom logging functions for both server and client.
-//! Shows how to route logs to an external logging library (simulated)
-//! and demonstrates silent mode (no logs) vs verbose mode.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
-// Simulated external logging library callback
 fn externalLogger(level: httpx.LogLevel, message: []const u8) void {
     const prefix = switch (level) {
         .debug => "[EXT-DEBUG]",
@@ -18,14 +11,11 @@ fn externalLogger(level: httpx.LogLevel, message: []const u8) void {
     std.debug.print("{s} {s}\n", .{ prefix, message });
 }
 
-// Silent logger that suppresses all output
 fn silentLogger(level: httpx.LogLevel, message: []const u8) void {
     _ = level;
     _ = message;
-    // Do nothing - silent mode
 }
 
-// Custom logger with timestamp
 fn timestampLogger(level: httpx.LogLevel, message: []const u8) void {
     const prefix = switch (level) {
         .debug => "DEBUG",
@@ -57,10 +47,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Logging Callback Example ===\n\n", .{});
-
-    // 1. Server with external logger
-    std.debug.print("--- Server with External Logger ---\n", .{});
     const port1 = try pickFreeTcpPort();
     var server1 = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -75,7 +61,6 @@ pub fn main() !void {
 
     sleepMs(100);
 
-    // Client with external logger
     var client1 = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())
         .withRetryPolicy(httpx.RetryPolicy.noRetry())
@@ -89,8 +74,6 @@ pub fn main() !void {
     defer resp1.deinit();
     std.debug.print("  Response status: {d}\n\n", .{resp1.status.code});
 
-    // 2. Server with silent logger (no logs)
-    std.debug.print("--- Server with Silent Logger (No Logs) ---\n", .{});
     const port2 = try pickFreeTcpPort();
     var server2 = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -105,7 +88,6 @@ pub fn main() !void {
 
     sleepMs(100);
 
-    // Client with silent logger
     var client2 = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())
         .withRetryPolicy(httpx.RetryPolicy.noRetry())
@@ -119,8 +101,6 @@ pub fn main() !void {
     defer resp2.deinit();
     std.debug.print("  Response status: {d} (no logs from server/client)\n\n", .{resp2.status.code});
 
-    // 3. Server with timestamp logger (verbose mode)
-    std.debug.print("--- Server with Timestamp Logger (Verbose) ---\n", .{});
     const port3 = try pickFreeTcpPort();
     var server3 = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -135,7 +115,6 @@ pub fn main() !void {
 
     sleepMs(100);
 
-    // Client with timestamp logger
     var client3 = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())
         .withRetryPolicy(httpx.RetryPolicy.noRetry())
@@ -148,8 +127,6 @@ pub fn main() !void {
     var resp3 = try client3.get(url3, .{});
     defer resp3.deinit();
     std.debug.print("  Response status: {d}\n\n", .{resp3.status.code});
-
-    std.debug.print("=== Logging Callback Example Complete ===\n", .{});
 
     server3.stop();
     server_thread3.join();

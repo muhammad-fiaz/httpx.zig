@@ -6,10 +6,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Multipart Form Data Example ===\n\n", .{});
-
-    std.debug.print("--- Building Multipart Body ---\n", .{});
-
     const boundary = "----httpxBoundary7MA4YWxkTrZu0gW";
     var builder = httpx.MultipartBuilder.init(allocator, boundary);
     defer builder.deinit();
@@ -33,15 +29,11 @@ pub fn main() !void {
     std.debug.print("Content-Type: {s}\n", .{ct});
     std.debug.print("Body size:    {d} bytes\n\n", .{body.len});
 
-    std.debug.print("--- Boundary Extraction ---\n", .{});
-
     const test_ct = "multipart/form-data; boundary=----httpxBoundary7MA4YWxkTrZu0gW";
     const extracted = httpx.extractMultipartBoundary(test_ct);
     std.debug.print("From: \"{s}\"\n", .{test_ct});
     std.debug.print("Got:  \"{s}\"\n", .{extracted orelse "(none)"});
     std.debug.print("Match: {}\n\n", .{std.mem.eql(u8, extracted orelse "", boundary)});
-
-    std.debug.print("--- Parsing Multipart Body ---\n", .{});
 
     var parsed = try httpx.parseMultipart(allocator, body, boundary);
     defer parsed.deinit();
@@ -60,8 +52,6 @@ pub fn main() !void {
         }
         std.debug.print("    headers:      {d}\n", .{part.headers.len});
     }
-
-    std.debug.print("\n--- HTTP Request Integration ---\n", .{});
 
     var request = try httpx.Request.init(allocator, .POST, "http://httpbun.com/upload");
     defer request.deinit();
@@ -82,14 +72,10 @@ pub fn main() !void {
     std.debug.print("Request Content-Type: {s}\n", .{request.headers.get("Content-Type").?});
     std.debug.print("Request body size:    {d} bytes\n", .{request.body.?.len});
 
-    std.debug.print("\n--- Quoted Boundary Edge Case ---\n", .{});
-
     const quoted_ct = "multipart/form-data; boundary=\"my boundary with spaces\"";
     const quoted_b = httpx.extractMultipartBoundary(quoted_ct);
     std.debug.print("Input:    \"{s}\"\n", .{quoted_ct});
     std.debug.print("Boundary: \"{s}\"\n", .{quoted_b orelse "(none)"});
-
-    std.debug.print("\n--- Client RequestOptions Integration ---\n", .{});
 
     var client = httpx.Client.init(allocator);
     defer client.deinit();
@@ -135,8 +121,6 @@ pub fn main() !void {
     std.debug.print("Formatted Content-Type: {s}\n", .{req.headers.get("Content-Type").?});
     std.debug.print("Formatted Body contents:\n{s}", .{req.body.?});
 
-    std.debug.print("\n\n--- Large File Upload (Windows-safe chunked API) ---\n", .{});
-
     const large_data = try allocator.alloc(u8, 200 * 1024);
     defer allocator.free(large_data);
     @memset(large_data, 0xAB);
@@ -156,13 +140,12 @@ pub fn main() !void {
     const chunk_body = try chunk_builder.build();
     defer allocator.free(chunk_body);
 
-    std.debug.print("Built chunked multipart body: {d} bytes\n", .{chunk_body.len});
+    std.debug.print("\nBuilt chunked multipart body: {d} bytes\n", .{chunk_body.len});
     std.debug.print("Max recommended chunk size:   {d} bytes ({d} KB)\n", .{
         httpx.MultipartMaxChunk,
         httpx.MultipartMaxChunk / 1024,
     });
 
-    std.debug.print("\nManual chunk-loop (one request per slice):\n", .{});
     var file_offset: usize = 0;
     var chunk_idx: usize = 1;
     while (file_offset < large_data.len) {
@@ -185,6 +168,4 @@ pub fn main() !void {
         file_offset = end;
         chunk_idx += 1;
     }
-
-    std.debug.print("\n=== Multipart Example Complete ===\n", .{});
 }

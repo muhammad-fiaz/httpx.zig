@@ -6,10 +6,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== HTTP Cache Example ===\n\n", .{});
-
-    std.debug.print("--- Cache-Control Parsing ---\n", .{});
-
     const headers = [_][]const u8{
         "max-age=3600, public",
         "no-store, no-cache",
@@ -28,8 +24,6 @@ pub fn main() !void {
             cc.must_revalidate,
         });
     }
-
-    std.debug.print("\n--- HTTP Cache Operations ---\n", .{});
 
     var cache = httpx.HttpCache.init(allocator, 100, 1024 * 1024);
     defer cache.deinit();
@@ -61,16 +55,12 @@ pub fn main() !void {
     const session = cache.get("/api/session");
     std.debug.print("  Cache for /api/session: {s}\n", .{if (session == null) "MISS (no-store)" else "HIT"});
 
-    std.debug.print("\n--- Conditional GET ---\n", .{});
-
     if (cache.get("/api/users")) |entry| {
         const cond = httpx.ConditionalGet.fromEntry(&entry);
         std.debug.print("  If-None-Match: {s}\n", .{cond.if_none_match orelse "none"});
         std.debug.print("  If-Modified-Since: {s}\n", .{cond.if_modified_since orelse "none"});
         std.debug.print("  304 means cache is still valid: {}\n", .{httpx.ConditionalGet.isNotModified(304)});
     }
-
-    std.debug.print("\n--- LRU Eviction ---\n", .{});
 
     var small_cache = httpx.HttpCache.init(allocator, 3, 1024);
     defer small_cache.deinit();
@@ -86,12 +76,8 @@ pub fn main() !void {
     std.debug.print("    /c: {s}\n", .{if (small_cache.get("/c") == null) "evicted" else "present"});
     std.debug.print("    /d: {s}\n", .{if (small_cache.get("/d") == null) "evicted" else "present"});
 
-    std.debug.print("\n--- Cache Invalidation ---\n", .{});
-
     _ = cache.invalidate("/api/users");
     std.debug.print("  Invalidated /api/users: {s}\n", .{if (cache.get("/api/users") == null) "gone" else "still present"});
-
-    std.debug.print("\n--- Cache Statistics ---\n", .{});
 
     _ = cache.get("/api/config");
     _ = cache.get("/api/config");
@@ -101,13 +87,4 @@ pub fn main() !void {
     std.debug.print("  Hits: {d}\n", .{stats.hits});
     std.debug.print("  Misses: {d}\n", .{stats.misses});
     std.debug.print("  Hit rate: {d:.1}%\n", .{stats.hitRate() * 100.0});
-
-    std.debug.print("\n--- Key Features ---\n", .{});
-    std.debug.print("  - Cache-Control parsing (max-age, no-store, no-cache, etc.)\n", .{});
-    std.debug.print("  - ETag and Last-Modified support\n", .{});
-    std.debug.print("  - LRU eviction with configurable limits\n", .{});
-    std.debug.print("  - Thread-safe with mutex\n", .{});
-    std.debug.print("  - Cache statistics for monitoring\n", .{});
-
-    std.debug.print("\n=== HTTP Cache Example Complete ===\n", .{});
 }
