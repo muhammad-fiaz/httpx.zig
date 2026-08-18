@@ -15,8 +15,7 @@ const Allocator = mem.Allocator;
 const posix = std.posix;
 
 const http = @import("http.zig");
-const io_util = @import("../util/any_io.zig");
-const dbg = @import("../util/debug.zig");
+const io_util = @import("../io/any_io.zig");
 const defaultIo = io_util.defaultIo;
 
 /// QUIC version identifiers
@@ -155,7 +154,6 @@ pub const LongHeader = struct {
 
     /// Encodes the header to wire format.
     pub fn encode(self: LongHeader, out: []u8) !usize {
-        dbg.entry("QUIC", "LongHeader.encode");
         if (out.len < 7 + self.dcid.len + self.scid.len) return error.BufferTooSmall;
 
         var offset: usize = 0;
@@ -192,7 +190,6 @@ pub const LongHeader = struct {
 
     /// Decodes a long header from wire format.
     pub fn decode(data: []const u8) !struct { header: LongHeader, len: usize } {
-        dbg.entry("QUIC", "LongHeader.decode");
         if (data.len < 7) return error.UnexpectedEof;
 
         var header = LongHeader{};
@@ -311,7 +308,6 @@ pub const StreamFrame = struct {
 
     /// Encodes a STREAM frame.
     pub fn encode(self: StreamFrame, out: []u8) !usize {
-        dbg.entry("QUIC", "StreamFrame.encode");
         var offset: usize = 0;
 
         // Frame type: 0x08 + flags
@@ -346,7 +342,6 @@ pub const StreamFrame = struct {
 
     /// Decodes a STREAM frame.
     pub fn decode(data: []const u8) !struct { frame: StreamFrame, len: usize } {
-        dbg.entry("QUIC", "StreamFrame.decode");
         if (data.len < 2) return error.UnexpectedEof;
 
         var offset: usize = 0;
@@ -403,7 +398,6 @@ pub const CryptoFrame = struct {
 
     /// Encodes a CRYPTO frame.
     pub fn encode(self: CryptoFrame, out: []u8) !usize {
-        dbg.entry("QUIC", "CryptoFrame.encode");
         var offset: usize = 0;
 
         // Frame type: 0x06
@@ -426,7 +420,6 @@ pub const CryptoFrame = struct {
 
     /// Decodes a CRYPTO frame.
     pub fn decode(data: []const u8) !struct { frame: CryptoFrame, len: usize } {
-        dbg.entry("QUIC", "CryptoFrame.decode");
         if (data.len < 3) return error.UnexpectedEof;
 
         var offset: usize = 0;
@@ -562,6 +555,9 @@ pub const AckFrame = struct {
     }
 
     /// Decodes an ACK frame.
+    /// Maximum number of ACK ranges to prevent OOM from malicious peers.
+    pub const MAX_ACK_RANGES: usize = 256;
+
     pub fn decode(data: []const u8, allocator: Allocator) !struct { frame: AckFrame, len: usize } {
         if (data.len < 1) return error.UnexpectedEof;
         if (data[0] != 0x02 and data[0] != 0x03) return error.InvalidFrameType;
@@ -581,6 +577,7 @@ pub const AckFrame = struct {
         offset += first_range.len;
 
         const ranges_len: usize = @intCast(range_count.value);
+        if (ranges_len > MAX_ACK_RANGES) return error.TooManyAckRanges;
         const ranges = try allocator.alloc(AckFrame.AckRange, ranges_len);
         errdefer allocator.free(ranges);
 
@@ -826,7 +823,7 @@ pub const StreamType = enum(u2) {
 };
 
 /// HTTP/3 unidirectional stream types
-pub const Http3StreamType = enum(u64) {
+pub const HTTP3StreamType = enum(u64) {
     /// Control stream
     control = 0x00,
     /// Push stream
@@ -836,6 +833,7 @@ pub const Http3StreamType = enum(u64) {
     /// QPACK decoder stream
     qpack_decoder = 0x03,
 };
+pub const Http3StreamType = HTTP3StreamType;
 
 test "ConnectionId" {
     const cid = try ConnectionId.init(&[_]u8{ 0x01, 0x02, 0x03, 0x04 });

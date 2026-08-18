@@ -8,7 +8,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const dbg = @import("debug.zig");
 
 /// Returns the appropriate `std.Io` for the current execution context.
 ///
@@ -40,8 +39,6 @@ pub inline fn threadIo() std.Io {
 /// `ms` is `i64` to match `std.Io.Duration.fromMilliseconds`.
 /// Errors from `std.Io.sleep` are silently ignored (non-critical).
 pub fn sleepMsI(ms: i64) void {
-    dbg.entry("AIO", "sleepMsI");
-    defer dbg.exit("AIO", "sleepMsI");
     const io = defaultIo();
     std.Io.sleep(io, std.Io.Duration.fromMilliseconds(ms), .real) catch {};
 }
@@ -50,8 +47,6 @@ pub fn sleepMsI(ms: i64) void {
 ///
 /// `ms` is `u64`. Values larger than `i64.max` are clamped.
 pub fn sleepMs(ms: u64) void {
-    dbg.entry("AIO", "sleepMs");
-    defer dbg.exit("AIO", "sleepMs");
     const clamped: i64 = @intCast(@min(ms, @as(u64, @intCast(std.math.maxInt(i64)))));
     sleepMsI(clamped);
 }

@@ -9,7 +9,6 @@
 //! - Semantic helper methods for common checks
 
 const std = @import("std");
-const dbg = @import("../util/debug.zig");
 
 /// Common HTTP status code constants.
 pub const StatusCode = struct {
@@ -90,8 +89,6 @@ pub const Status = struct {
 
     /// Creates a status from a numeric code with the standard reason phrase.
     pub fn fromCode(code: u16) Self {
-        dbg.entry("STATUS", "fromCode");
-        defer dbg.exit("STATUS", "fromCode");
         return .{ .code = code, .phrase = reasonPhrase(code) };
     }
 
@@ -138,6 +135,33 @@ pub const Status = struct {
     /// Returns true if the response may have a body.
     pub fn mayHaveBody(self: Self) bool {
         return self.code != 204 and self.code != 304 and !self.isInformational();
+    }
+
+    pub fn isCacheable(self: Self) bool {
+        return switch (self.code) {
+            200, 203, 204, 206, 300, 301, 404, 405, 410, 414, 501 => true,
+            else => false,
+        };
+    }
+
+    pub fn hasBody(self: Self, method: @import("types.zig").Method) bool {
+        if (method == .HEAD) return false;
+        if (self.isInformational()) return false;
+        if (self.code == 204 or self.code == 304) return false;
+        return true;
+    }
+
+    pub fn fromString(str: []const u8) ?Status {
+        const space_idx = for (str, 0..) |ch, i| {
+            if (ch == ' ') break i;
+        } else null;
+        if (space_idx) |idx| {
+            const code = std.fmt.parseInt(u16, str[0..idx], 10) catch return null;
+            return .{ .code = code, .phrase = str[idx + 1 ..] };
+        } else {
+            const code = std.fmt.parseInt(u16, str, 10) catch return null;
+            return .{ .code = code, .phrase = reasonPhrase(code) };
+        }
     }
 };
 

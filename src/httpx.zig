@@ -86,11 +86,13 @@ pub const stream = @import("protocol/stream.zig");
 pub const qpack = @import("protocol/qpack.zig");
 pub const quic = @import("protocol/quic.zig");
 pub const websocket = @import("protocol/websocket.zig");
-
 pub const socket = @import("net/socket.zig");
+
 pub const address = @import("net/address.zig");
+
 pub const unix = @import("net/unix.zig");
 
+pub const interfaces = @import("net/interfaces.zig");
 pub const tls = @import("tls/tls.zig");
 
 pub const client_mod = @import("client/client.zig");
@@ -100,32 +102,44 @@ pub const server_mod = @import("server/server.zig");
 pub const router = @import("server/router.zig");
 pub const middleware = @import("server/middleware.zig");
 
-pub const buffer = @import("util/buffer.zig");
-pub const encoding = @import("util/encoding.zig");
-pub const json = @import("util/json.zig");
-pub const mime = @import("util/mime.zig");
-pub const common = @import("util/common.zig");
-pub const multipart = @import("util/multipart.zig");
-pub const metrics = @import("util/metrics.zig");
-pub const session = @import("util/session.zig");
-pub const list_writer = @import("util/list_writer.zig");
-pub const ContentEncoding = @import("util/compression.zig").ContentEncoding;
-pub const decompress = @import("util/compression.zig").decompress;
-pub const compress = @import("util/compression.zig").compress;
-pub const compression_stream = @import("util/stream.zig");
+pub const buffer = @import("io/buffer.zig");
+pub const encoding = @import("data/encoding.zig");
+pub const json = @import("data/json.zig");
+pub const mime = @import("data/mime.zig");
+pub const common = @import("data/common.zig");
+pub const multipart = @import("data/multipart.zig");
+pub const metrics = @import("metrics/metrics.zig");
+pub const session = @import("session/session.zig");
+pub const list_writer = @import("io/list_writer.zig");
+pub const ContentEncoding = @import("compress/compression.zig").ContentEncoding;
+pub const decompress = @import("compress/compression.zig").decompress;
+pub const compress = @import("compress/compression.zig").compress;
+pub const compression_stream = @import("compress/stream.zig");
 pub const StreamingCompressor = compression_stream.StreamingCompressor;
 pub const StreamingDecompressor = compression_stream.StreamingDecompressor;
-pub const cache = @import("util/cache.zig");
+pub const AcceptEncoding = @import("compress/compression.zig").AcceptEncoding;
+pub const ContentCoding = @import("compress/compression.zig").ContentCoding;
+pub const TransferCoding = @import("compress/compression.zig").TransferCoding;
+pub const CompressOptions = @import("compress/compression.zig").CompressOptions;
+pub const compression_limits = @import("compress/compression.zig").Limits;
+pub const isCompressible = @import("compress/compression.zig").isCompressible;
+pub const cache = @import("cache/cache.zig");
 pub const CacheControl = cache.CacheControl;
 pub const HttpCache = cache.HttpCache;
 pub const CacheEntry = cache.CacheEntry;
 pub const ConditionalGet = cache.ConditionalGet;
-pub const buffer_pool = @import("util/buffer_pool.zig");
+pub const buffer_pool = @import("io/buffer_pool.zig");
 pub const BufferPool = buffer_pool.BufferPool;
 pub const dns = @import("net/dns.zig");
+pub const DNSResolver = dns.DNSResolver;
+pub const DNSCache = dns.DNSCache;
+pub const DNSResolution = dns.DNSResolution;
+pub const DNSConfig = dns.DNSConfig;
+pub const DNSStats = dns.DNSStats;
+pub const AddressFamily = dns.AddressFamily;
+pub const AddressOrder = dns.AddressOrder;
 pub const sse = @import("util/sse.zig");
-pub const debug = @import("util/debug.zig");
-pub const parseSseStream = sse.parseSseStream;
+pub const parseSSEStream = sse.parseSSEStream;
 
 pub const executor = @import("concurrency/executor.zig");
 pub const concurrency = @import("concurrency/pool.zig");
@@ -143,13 +157,15 @@ pub const ExecutorConfig = executor.ExecutorConfig;
 
 pub const Method = types.Method;
 pub const Version = types.Version;
-pub const HttpError = types.HttpError;
+pub const HTTPError = types.HTTPError;
 pub const ContentType = types.ContentType;
 pub const Timeouts = types.Timeouts;
 pub const RetryPolicy = types.RetryPolicy;
+pub const CancellationToken = types.CancellationToken;
 pub const RedirectPolicy = types.RedirectPolicy;
-pub const Http2Settings = types.Http2Settings;
-pub const Http3Settings = types.Http3Settings;
+pub const HTTP2Settings = types.HTTP2Settings;
+pub const HTTP3Settings = types.HTTP3Settings;
+pub const Http3Settings = types.HTTP3Settings;
 pub const ProxyKind = types.ProxyKind;
 pub const Proxy = types.Proxy;
 
@@ -182,21 +198,28 @@ pub const netDeinit = socket.deinit;
 pub const Parser = parser.Parser;
 
 pub const Http1Connection = http.Http1Connection;
-pub const Http2Connection = http.Http2Connection;
-pub const Http2FrameType = http.Http2FrameType;
-pub const Http2FrameHeader = http.Http2FrameHeader;
-pub const Http2ErrorCode = http.Http2ErrorCode;
-pub const Http3FrameType = http.Http3FrameType;
-pub const Http3ErrorCode = http.Http3ErrorCode;
+pub const HTTP2Connection = http.HTTP2Connection;
+pub const Http2Connection = http.HTTP2Connection;
+pub const HTTP2FrameType = http.HTTP2FrameType;
+pub const Http2FrameType = http.HTTP2FrameType;
+pub const HTTP2FrameHeader = http.HTTP2FrameHeader;
+pub const Http2FrameHeader = http.HTTP2FrameHeader;
+pub const HTTP2ErrorCode = http.HTTP2ErrorCode;
+pub const Http2ErrorCode = http.HTTP2ErrorCode;
+pub const HTTP3FrameType = http.HTTP3FrameType;
+pub const Http3FrameType = http.HTTP3FrameType;
+pub const HTTP3ErrorCode = http.HTTP3ErrorCode;
+pub const Http3ErrorCode = http.HTTP3ErrorCode;
 pub const AlpnProtocol = http.AlpnProtocol;
 pub const NegotiatedProtocol = http.NegotiatedProtocol;
 
 // HTTP/2 HPACK exports
-pub const HpackContext = hpack.HpackContext;
-pub const HpackStaticTable = hpack.StaticTable;
-pub const HpackDynamicTable = hpack.DynamicTable;
-pub const encodeHpackHeaders = hpack.encodeHeaders;
-pub const decodeHpackHeaders = hpack.decodeHeaders;
+pub const HPACKContext = hpack.HPACKContext;
+pub const HpackContext = hpack.HPACKContext;
+pub const HPACKStaticTable = hpack.StaticTable;
+pub const HPACKDynamicTable = hpack.DynamicTable;
+pub const encodeHPACKHeaders = hpack.encodeHeaders;
+pub const decodeHPACKHeaders = hpack.decodeHeaders;
 
 // HTTP/2 Stream exports
 pub const Stream = stream.Stream;
@@ -205,22 +228,23 @@ pub const StreamManager = stream.StreamManager;
 pub const StreamPriority = stream.StreamPriority;
 
 // HTTP/3 QPACK exports
-pub const QpackContext = qpack.QpackContext;
-pub const QpackStaticTable = qpack.StaticTable;
-pub const encodeQpackHeaders = qpack.encodeHeaders;
-pub const decodeQpackHeaders = qpack.decodeHeaders;
+pub const QPACKContext = qpack.QPACKContext;
+pub const QpackContext = qpack.QPACKContext;
+pub const QPACKStaticTable = qpack.StaticTable;
+pub const encodeQPACKHeaders = qpack.encodeHeaders;
+pub const decodeQPACKHeaders = qpack.decodeHeaders;
 
 // QUIC exports
-pub const QuicVersion = quic.Version;
-pub const QuicLongHeader = quic.LongHeader;
-pub const QuicShortHeader = quic.ShortHeader;
-pub const QuicConnectionId = quic.ConnectionId;
-pub const QuicFrameType = quic.FrameType;
-pub const QuicTransportError = quic.TransportError;
-pub const QuicStreamFrame = quic.StreamFrame;
-pub const QuicCryptoFrame = quic.CryptoFrame;
-pub const QuicAckFrame = quic.AckFrame;
-pub const QuicTransportParameters = quic.TransportParameters;
+pub const QUICVersion = quic.Version;
+pub const QUICLongHeader = quic.LongHeader;
+pub const QUICShortHeader = quic.ShortHeader;
+pub const QUICConnectionId = quic.ConnectionId;
+pub const QUICFrameType = quic.FrameType;
+pub const QUICTransportError = quic.TransportError;
+pub const QUICStreamFrame = quic.StreamFrame;
+pub const QUICCryptoFrame = quic.CryptoFrame;
+pub const QUICAckFrame = quic.AckFrame;
+pub const QUICTransportParameters = quic.TransportParameters;
 
 pub const formatRequest = http.formatRequest;
 pub const formatResponse = http.formatResponse;
@@ -231,6 +255,7 @@ pub const Client = client_mod.Client;
 pub const ClientConfig = client_mod.ClientConfig;
 pub const RequestOptions = client_mod.RequestOptions;
 pub const BasicAuth = client_mod.BasicAuth;
+pub const CookieEntry = client_mod.CookieEntry;
 pub const Interceptor = client_mod.Interceptor;
 pub const RequestInterceptor = client_mod.RequestInterceptor;
 pub const ResponseInterceptor = client_mod.ResponseInterceptor;
@@ -250,7 +275,8 @@ pub const Context = server_mod.Context;
 pub const Handler = server_mod.Handler;
 pub const CookieOptions = server_mod.CookieOptions;
 pub const SameSite = server_mod.SameSite;
-pub const SseEvent = server_mod.SseEvent;
+pub const SSEEvent = server_mod.SSEEvent;
+pub const SseEvent = server_mod.SSEEvent;
 pub const PreRouteHook = server_mod.PreRouteHook;
 pub const FileResponseOptions = server_mod.FileResponseOptions;
 
@@ -303,6 +329,19 @@ pub const wsBinaryFrame = websocket.wsBinaryFrame;
 pub const wsPingFrame = websocket.wsPingFrame;
 pub const wsPongFrame = websocket.wsPongFrame;
 pub const wsCloseFrame = websocket.wsCloseFrame;
+pub const WsClient = websocket.WsClient;
+pub const WsClientConfig = websocket.WsClientConfig;
+pub const WsMessage = websocket.WsMessage;
+pub const WsConnection = websocket.WsConnection;
+pub const WsServerConfig = websocket.WsServerConfig;
+pub const WsCallbacks = websocket.WsCallbacks;
+pub const validateUpgrade = websocket.validateUpgrade;
+pub const validateOrigin = websocket.validateOrigin;
+pub const negotiateSubprotocol = websocket.negotiateSubprotocol;
+pub const buildUpgradeResponse = websocket.buildUpgradeResponse;
+pub const MessageAssembler = websocket.MessageAssembler;
+pub const MessageAssemblerConfig = websocket.MessageAssemblerConfig;
+pub const WsCompleteMessage = websocket.WsCompleteMessage;
 
 // Multipart exports
 pub const MultipartBuilder = multipart.MultipartBuilder;
@@ -320,6 +359,19 @@ pub const MetricsSnapshot = metrics.MetricsSnapshot;
 pub const MetricsEvent = metrics.MetricsEvent;
 pub const MetricsCallbackFn = metrics.MetricsCallbackFn;
 
+// Server lifecycle hook exports
+pub const LifecycleHook = server_mod.LifecycleHook;
+pub const ErrorCallback = server_mod.ErrorCallback;
+pub const StreamWriter = server_mod.StreamWriter;
+
+// Client interceptor exports
+pub const ErrorInterceptor = client_mod.ErrorInterceptor;
+pub const RetryInterceptor = client_mod.RetryInterceptor;
+pub const RedirectInterceptor = client_mod.RedirectInterceptor;
+
+// SSE streaming parser export
+pub const StreamingSSEParser = @import("util/sse.zig").StreamingSSEParser;
+
 // Session exports
 pub const SessionStore = session.SessionStore;
 pub const SessionConfig = session.SessionConfig;
@@ -335,14 +387,21 @@ pub const FixedBuffer = buffer.FixedBuffer;
 pub const Base64 = encoding.Base64;
 pub const Hex = encoding.Hex;
 pub const PercentEncoding = encoding.PercentEncoding;
+
 pub const CookiePair = common.CookiePair;
+pub const ParsedCookie = common.ParsedCookie;
+pub const parseSetCookie = common.parseSetCookie;
+pub const cookieValue = common.cookieValue;
+pub const buildSetCookieHeader = common.buildSetCookieHeader;
 pub const MimeMapping = mime.MimeMapping;
 pub const defaultMimeMappings = mime.default_mappings;
 pub const MultipartField = client_mod.MultipartField;
 pub const MultipartFile = client_mod.MultipartFile;
 
-pub const TlsConfig = tls.TlsConfig;
-pub const TlsSession = tls.TlsSession;
+pub const TLSConfig = tls.TLSConfig;
+pub const TlsConfig = tls.TLSConfig;
+pub const TLSSession = tls.TLSSession;
+pub const TlsSession = tls.TLSSession;
 
 pub const VERSION = meta.version;
 pub const DEFAULT_USER_AGENT = meta.default_user_agent;
@@ -368,6 +427,30 @@ pub const isIp4Address = address.isIp4Address;
 
 /// Returns true if input is an IPv6 literal.
 pub const isIp6Address = address.isIp6Address;
+
+/// Returns true if the address is loopback (127.x.x.x or ::1).
+pub const isLoopback = address.isLoopback;
+
+/// Returns true if the address is unspecified (0.0.0.0 or ::).
+pub const isUnspecified = address.isUnspecified;
+
+/// Returns true if the address is private (10.x, 172.16-31.x, 192.168.x, fc00::/7).
+pub const isPrivate = address.isPrivate;
+
+/// Returns true if the address is link-local (169.254.x.x or fe80::/10).
+pub const isLinkLocal = address.isLinkLocal;
+
+/// Returns true if the address is multicast (224.x.x.x/4 or ff00::/8).
+pub const isMulticast = address.isMulticast;
+
+/// Returns true if the address is a unique-local IPv6 address (fc00::/7).
+pub const isUniqueLocal = address.isUniqueLocal;
+
+/// Returns true if the address is an IPv4-mapped IPv6 address (::ffff:x.x.x.x).
+pub const isIPv4Mapped = address.isIPv4Mapped;
+
+/// Returns true if the address is public (non-private, non-reserved).
+pub const isPublic = address.isPublic;
 
 /// Returns the canonical `std.Io` for the current execution context.
 pub const defaultIo = common.defaultIo;
@@ -905,10 +988,25 @@ test "compression_stream" {
     _ = compression_stream;
 }
 
+test "mime" {
+    _ = mime;
+}
+
 test "cache" {
     _ = cache;
 }
 
 test "buffer_pool" {
     _ = buffer_pool;
+}
+
+test "dns" {
+    _ = dns;
+    _ = DNSResolver;
+    _ = DNSCache;
+    _ = DNSResolution;
+    _ = DNSConfig;
+    _ = DNSStats;
+    _ = AddressFamily;
+    _ = AddressOrder;
 }

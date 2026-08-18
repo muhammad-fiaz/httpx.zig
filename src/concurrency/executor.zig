@@ -11,9 +11,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Thread = std.Thread;
 
-const io_util = @import("../util/any_io.zig");
+const io_util = @import("../io/any_io.zig");
 const threadIo = io_util.threadIo;
-const dbg = @import("../util/debug.zig");
 
 pub const ExecutorError = error{
     TaskQueueFull,
@@ -51,15 +50,11 @@ pub const Executor = struct {
 
     /// Creates an executor with default configuration.
     pub fn init(allocator: Allocator) Self {
-        dbg.entry("EXEC", "init");
-        defer dbg.exit("EXEC", "init");
         return initWithConfig(allocator, .{});
     }
 
     /// Creates an executor with custom configuration.
     pub fn initWithConfig(allocator: Allocator, config: ExecutorConfig) Self {
-        dbg.entry("EXEC", "initWithConfig");
-        defer dbg.exit("EXEC", "initWithConfig");
         var cfg = config;
         if (cfg.num_threads == 0) {
             const cpu_count = std.Thread.getCpuCount() catch 4;
@@ -73,8 +68,6 @@ pub const Executor = struct {
 
     /// Releases executor resources.
     pub fn deinit(self: *Self) void {
-        dbg.entry("EXEC", "deinit");
-        defer dbg.exit("EXEC", "deinit");
         self.stop();
         self.tasks.deinit(self.allocator);
         if (self.threads.len > 0) {
@@ -84,7 +77,6 @@ pub const Executor = struct {
 
     /// Submits a task for execution.
     pub fn submit(self: *Self, task: Task) !void {
-        dbg.entry("EXEC", "submit");
         const io = threadIo();
         self.mutex.lock(io) catch unreachable;
         defer self.mutex.unlock(io);

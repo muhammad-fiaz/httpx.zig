@@ -1,7 +1,6 @@
 //! MIME type registry and resolution helpers.
 
 const std = @import("std");
-const dbg = @import("debug.zig");
 
 pub const MimeMapping = struct {
     ext: []const u8,
@@ -130,20 +129,14 @@ pub const default_mappings = [_]MimeMapping{
 };
 
 pub fn resolve(path: []const u8) []const u8 {
-    dbg.entry("MIME", "resolve");
-    defer dbg.exit("MIME", "resolve");
     return resolveOr(path, "application/octet-stream");
 }
 
 pub fn resolveOr(path: []const u8, fallback: []const u8) []const u8 {
-    dbg.entry("MIME", "resolveOr");
-    defer dbg.exit("MIME", "resolveOr");
     return resolveWith(path, &default_mappings, fallback);
 }
 
 pub fn resolveWith(path: []const u8, mappings: []const MimeMapping, fallback: []const u8) []const u8 {
-    dbg.entry("MIME", "resolveWith");
-    defer dbg.exit("MIME", "resolveWith");
     const ext = std.fs.path.extension(path);
     if (ext.len == 0) return fallback;
 
@@ -182,4 +175,135 @@ test "mimeTypeFromPathWith supports external mappings" {
     try std.testing.expectEqualStrings("text/x-zig", resolveWith("main.zig", &custom, "application/octet-stream"));
     try std.testing.expectEqualStrings("text/x-template", resolveWith("view.TMPL", &custom, "application/octet-stream"));
     try std.testing.expectEqualStrings("application/octet-stream", resolveWith("asset.unknown", &custom, "application/octet-stream"));
+}
+
+/// Returns true if the given MIME type benefits from HTTP compression.
+/// Text-based types, JSON, XML, JavaScript, SVG, etc. are compressible.
+/// Already-compressed formats (images, video, audio, archives) are not.
+pub fn isCompressible(mime_type: []const u8) bool {
+    const t = trimParameters(mime_type);
+
+    if (hasPrefix(t, "text/")) return true;
+
+    if (eql(t, "application/json")) return true;
+    if (eql(t, "application/x-ndjson")) return true;
+    if (eql(t, "application/ld+json")) return true;
+    if (eql(t, "application/geo+json")) return true;
+    if (eql(t, "application/javascript")) return true;
+    if (eql(t, "application/x-javascript")) return true;
+    if (eql(t, "application/xml")) return true;
+    if (eql(t, "application/rss+xml")) return true;
+    if (eql(t, "application/atom+xml")) return true;
+    if (eql(t, "application/soap+xml")) return true;
+    if (eql(t, "application/vnd.wap.xhtml+xml")) return true;
+    if (eql(t, "application/xhtml+xml")) return true;
+    if (eql(t, "application/x-yaml")) return true;
+    if (eql(t, "application/yaml")) return true;
+    if (eql(t, "application/toml")) return true;
+    if (eql(t, "application/sql")) return true;
+    if (eql(t, "application/graphql")) return true;
+    if (eql(t, "application/wasm")) return true;
+    if (eql(t, "application/manifest+json")) return true;
+    if (eql(t, "application/x-sh")) return true;
+    if (eql(t, "application/x-www-form-urlencoded")) return true;
+    if (eql(t, "application/svg+xml")) return true;
+
+    if (eql(t, "image/svg+xml")) return true;
+
+    return false;
+}
+
+/// Returns true if the MIME type represents an already-compressed format.
+pub fn isAlreadyCompressed(mime_type: []const u8) bool {
+    const t = trimParameters(mime_type);
+
+    if (eql(t, "image/jpeg")) return true;
+    if (eql(t, "image/png")) return true;
+    if (eql(t, "image/webp")) return true;
+    if (eql(t, "image/avif")) return true;
+    if (eql(t, "image/heic")) return true;
+    if (eql(t, "image/heif")) return true;
+    if (eql(t, "image/jxl")) return true;
+    if (eql(t, "image/gif")) return true;
+
+    if (eql(t, "video/mp4")) return true;
+    if (eql(t, "video/webm")) return true;
+    if (eql(t, "video/quicktime")) return true;
+    if (eql(t, "video/x-matroska")) return true;
+    if (eql(t, "video/x-flv")) return true;
+    if (eql(t, "video/mp2t")) return true;
+    if (eql(t, "video/x-m4v")) return true;
+    if (eql(t, "video/avi")) return true;
+
+    if (eql(t, "audio/mpeg")) return true;
+    if (eql(t, "audio/ogg")) return true;
+    if (eql(t, "audio/flac")) return true;
+    if (eql(t, "audio/aac")) return true;
+    if (eql(t, "audio/opus")) return true;
+    if (eql(t, "audio/mp4")) return true;
+    if (eql(t, "audio/wav")) return true;
+
+    if (eql(t, "application/zip")) return true;
+    if (eql(t, "application/gzip")) return true;
+    if (eql(t, "application/x-gzip")) return true;
+    if (eql(t, "application/zstd")) return true;
+    if (eql(t, "application/x-bzip2")) return true;
+    if (eql(t, "application/x-7z-compressed")) return true;
+    if (eql(t, "application/vnd.rar")) return true;
+    if (eql(t, "application/x-tar")) return true;
+    if (eql(t, "application/pdf")) return true;
+    if (eql(t, "application/font-woff")) return true;
+    if (eql(t, "font/woff")) return true;
+    if (eql(t, "font/woff2")) return true;
+
+    return false;
+}
+
+fn trimParameters(mime_type: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, mime_type, ';')) |semi| {
+        return std.mem.trim(u8, mime_type[0..semi], " \t");
+    }
+    return mime_type;
+}
+
+fn eql(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(a, b);
+}
+
+fn hasPrefix(s: []const u8, prefix: []const u8) bool {
+    return std.mem.startsWith(u8, s, prefix);
+}
+
+test "isCompressible text types" {
+    try std.testing.expect(isCompressible("text/html"));
+    try std.testing.expect(isCompressible("text/plain"));
+    try std.testing.expect(isCompressible("text/css"));
+    try std.testing.expect(isCompressible("text/javascript"));
+    try std.testing.expect(isCompressible("text/html; charset=utf-8"));
+}
+
+test "isCompressible application types" {
+    try std.testing.expect(isCompressible("application/json"));
+    try std.testing.expect(isCompressible("application/javascript"));
+    try std.testing.expect(isCompressible("application/xml"));
+    try std.testing.expect(isCompressible("application/json; charset=utf-8"));
+}
+
+test "isCompressible not compressible" {
+    try std.testing.expect(!isCompressible("image/png"));
+    try std.testing.expect(!isCompressible("image/jpeg"));
+    try std.testing.expect(!isCompressible("video/mp4"));
+    try std.testing.expect(!isCompressible("audio/mpeg"));
+    try std.testing.expect(!isCompressible("application/zip"));
+    try std.testing.expect(!isCompressible("application/gzip"));
+}
+
+test "isAlreadyCompressed" {
+    try std.testing.expect(isAlreadyCompressed("image/jpeg"));
+    try std.testing.expect(isAlreadyCompressed("image/png"));
+    try std.testing.expect(isAlreadyCompressed("video/mp4"));
+    try std.testing.expect(isAlreadyCompressed("audio/mpeg"));
+    try std.testing.expect(isAlreadyCompressed("application/zip"));
+    try std.testing.expect(!isAlreadyCompressed("text/html"));
+    try std.testing.expect(!isAlreadyCompressed("application/json"));
 }

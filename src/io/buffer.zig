@@ -6,7 +6,6 @@
 //! - `FixedBuffer`: Stack-allocated fixed-size buffer
 
 const std = @import("std");
-const dbg = @import("debug.zig");
 const Allocator = std.mem.Allocator;
 
 /// Growable buffer for building HTTP messages.
@@ -20,8 +19,6 @@ pub const Buffer = struct {
 
     /// Creates a new buffer with the specified initial capacity.
     pub fn init(allocator: Allocator, initial_capacity: usize) !Self {
-        dbg.entry("BUF", "Buffer.init");
-        defer dbg.exit("BUF", "Buffer.init");
         const data = try allocator.alloc(u8, initial_capacity);
         return .{
             .allocator = allocator,
@@ -55,7 +52,7 @@ pub const Buffer = struct {
 
         var new_capacity = self.capacity;
         while (new_capacity < needed) {
-            new_capacity = new_capacity * 2;
+            new_capacity = if (new_capacity == 0) 64 else new_capacity * 2;
         }
 
         self.data = try self.allocator.realloc(self.data, new_capacity);

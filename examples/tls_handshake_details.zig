@@ -58,7 +58,7 @@ pub fn main() !void {
 
         std.debug.print("  Handshake:    OK\n", .{});
         std.debug.print("  Protocol:     {s}\n", .{session.negotiatedProtocol() orelse "none"});
-        std.debug.print("  HTTP/2:       {}\n", .{session.isHttp2()});
+        std.debug.print("  HTTP/2:       {}\n", .{session.isHTTP2()});
 
         // Send HTTP request
         const req = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";

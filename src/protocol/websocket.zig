@@ -32,7 +32,6 @@ const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
 const Request = @import("../core/request.zig").Request;
-const dbg = @import("../util/debug.zig");
 
 // Constants
 
@@ -168,7 +167,6 @@ pub fn wsEncodeFrame(
     masked: bool,
     mask_key: [4]u8,
 ) ![]u8 {
-    dbg.entry("WS", "wsEncodeFrame");
     const ext_len_bytes: usize =
         if (payload.len < 126) 0 else if (payload.len < 65536) 2 else 8;
     const mask_bytes: usize = if (masked) 4 else 0;
@@ -253,7 +251,6 @@ pub fn wsCloseFrame(allocator: Allocator, code: WsCloseCode, reason: []const u8)
 /// Returns `error.NeedMoreData` if `data` is incomplete.
 /// The returned `WsFrame.payload` is allocated; call `frame.deinit()` when done.
 pub fn wsDecodeFrame(allocator: Allocator, data: []const u8) !WsDecodeResult {
-    dbg.entry("WS", "wsDecodeFrame");
     if (data.len < 2) return error.NeedMoreData;
 
     const fin = (data[0] & 0x80) != 0;
@@ -705,4 +702,868 @@ test "MessageAssembler -- reset clears state" {
     assembler.reset();
     try std.testing.expect(!assembler.in_progress);
     try std.testing.expect(assembler.initial_opcode == null);
+}
+
+const Socket = @import("../net/socket.zig").Socket;
+const Address = @import("../net/address.zig");
+const tls_mod = @import("../tls/tls.zig");
+const common = @import("../data/common.zig");
+const io_util = @import("../io/any_io.zig");
+const list_writer = @import("../io/list_writer.zig");
+
+/// WebSocket client configuration.
+pub const WsClientConfig = struct {
+    /// Maximum frame size in bytes. 0 means no limit.
+    max_frame_size: usize = 0,
+    /// Maximum message size in bytes. 0 means no limit.
+    max_message_size: usize = 0,
+    /// Connect timeout in milliseconds. 0 means no timeout.
+    connect_timeout_ms: u64 = 10_000,
+    /// Read timeout in milliseconds. 0 means no timeout.
+    read_timeout_ms: u64 = 30_000,
+    /// Write timeout in milliseconds. 0 means no timeout.
+    write_timeout_ms: u64 = 30_000,
+    /// TLS certificate verification. Never set to false in production.
+    verify_ssl: bool = true,
+    /// Optional subprotocols to request.
+    subprotocols: ?[]const []const u8 = null,
+    /// Optional additional headers.
+    headers: ?[]const [2][]const u8 = null,
+};
+
+/// Result of a WebSocket receive operation.
+pub const WsMessage = struct {
+    opcode: WsOpcode,
+    payload: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *WsMessage) void {
+        self.allocator.free(self.payload);
+    }
+
+    pub fn isText(self: *const WsMessage) bool {
+        return self.opcode == .text;
+    }
+
+    pub fn isBinary(self: *const WsMessage) bool {
+        return self.opcode == .binary;
+    }
+};
+
+/// High-level WebSocket client. Manages connection, handshake, and messaging.
+pub const WsClient = struct {
+    allocator: std.mem.Allocator,
+    config: WsClientConfig,
+    socket: Socket,
+    connected: bool = false,
+    close_sent: bool = false,
+    close_received: bool = false,
+    assembler: MessageAssembler,
+
+    const Self = @This();
+
+    /// Creates a new WebSocket client. Call `connect` to establish a connection.
+    pub fn init(allocator: std.mem.Allocator, config: WsClientConfig) Self {
+        return .{
+            .allocator = allocator,
+            .config = config,
+            .socket = undefined,
+            .assembler = MessageAssembler.init(allocator, .{
+                .max_message_size = config.max_message_size,
+            }),
+        };
+    }
+
+    /// Releases all resources.
+    pub fn deinit(self: *Self) void {
+        self.assembler.deinit();
+        if (self.connected) {
+            self.socket.close();
+            self.connected = false;
+        }
+    }
+
+    /// Connects to a WebSocket server at the given URL (ws:// or wss://).
+    pub fn connect(self: *Self, url: []const u8) !void {
+        const parsed = try parseWsUrl(url);
+        const host = parsed.host orelse return error.InvalidUri;
+        const port = parsed.port orelse if (parsed.tls) 443 else 80;
+        const path = if (parsed.path) |p| p else "/";
+
+        const addr = try Address.resolve(self.allocator, host, port);
+        self.socket = try Socket.createForAddress(addr);
+
+        if (self.config.connect_timeout_ms > 0) {
+            try self.socket.connectWithTimeout(addr, self.config.connect_timeout_ms);
+        } else {
+            try self.socket.connect(addr);
+        }
+
+        if (self.config.read_timeout_ms > 0) {
+            try self.socket.setRecvTimeout(self.config.read_timeout_ms);
+        }
+        if (self.config.write_timeout_ms > 0) {
+            try self.socket.setSendTimeout(self.config.write_timeout_ms);
+        }
+
+        self.connected = true;
+
+        if (parsed.tls) {
+            return self.doTlsHandshake(host, port);
+        }
+
+        try self.doUpgrade(host, port, path);
+    }
+
+    fn doTlsHandshake(self: *Self, host: []const u8, port: u16) !void {
+        const cfg = tls_mod.TlsConfig{
+            .host = host,
+            .port = port,
+            .verify = self.config.verify_ssl,
+        };
+        var session = tls_mod.TlsSession.init(.{
+            .socket = &self.socket,
+            .config = cfg,
+        });
+        _ = try session.handshake();
+        // After TLS, do the HTTP upgrade over the encrypted channel
+        try self.doUpgrade(host, port, "/");
+    }
+
+    fn doUpgrade(self: *Self, host: []const u8, port: u16, path: []const u8) !void {
+        // Generate Sec-WebSocket-Key
+        var key_bytes: [16]u8 = undefined;
+        io_util.defaultIo().random(&key_bytes);
+        const key = std.base64.standard.Encoder.encode(&key_bytes);
+
+        // Build upgrade request
+        var request = std.ArrayList(u8).empty;
+        const writer = list_writer.init(self.allocator, &request);
+        defer request.deinit(self.allocator);
+
+        try writer.print("GET {s} HTTP/1.1\r\n", .{path});
+        try writer.print("Host: {s}:{d}\r\n", .{ host, port });
+        try writer.print("Upgrade: websocket\r\n", .{});
+        try writer.print("Connection: Upgrade\r\n", .{});
+        try writer.print("Sec-WebSocket-Key: {s}\r\n", .{key});
+        try writer.print("Sec-WebSocket-Version: 13\r\n", .{});
+
+        // Subprotocols
+        if (self.config.subprotocols) |protos| {
+            var first = true;
+            for (protos) |proto| {
+                if (first) {
+                    try writer.print("Sec-WebSocket-Protocol: {s}", .{proto});
+                    first = false;
+                } else {
+                    try writer.print(", {s}", .{proto});
+                }
+            }
+            try writer.print("\r\n", .{});
+        }
+
+        // Custom headers
+        if (self.config.headers) |hdrs| {
+            for (hdrs) |h| {
+                try writer.print("{s}: {s}\r\n", .{ h[0], h[1] });
+            }
+        }
+
+        try writer.print("\r\n", .{});
+
+        const req_bytes = try request.toOwnedSlice(self.allocator);
+        defer self.allocator.free(req_bytes);
+
+        try self.socket.sendAll(req_bytes);
+
+        // Read response
+        var response_buf = std.ArrayList(u8).empty;
+        defer response_buf.deinit(self.allocator);
+
+        var buf: [4096]u8 = undefined;
+        var found_end = false;
+        while (!found_end) {
+            const n = self.socket.recv(&buf, 0) catch |err| return err;
+            if (n == 0) return error.ConnectionClosed;
+            try response_buf.appendSlice(self.allocator, buf[0..n]);
+            if (mem.indexOf(u8, response_buf.items, "\r\n\r\n") != null) {
+                found_end = true;
+            }
+        }
+
+        const response = response_buf.items;
+        // Validate 101 response
+        if (!mem.startsWith(u8, response, "HTTP/1.1 101")) {
+            return error.HandshakeFailed;
+        }
+        if (mem.indexOf(u8, response, "Upgrade: websocket") == null and
+            mem.indexOf(u8, response, "upgrade: websocket") == null)
+        {
+            return error.HandshakeFailed;
+        }
+        if (mem.indexOf(u8, response, "Connection: Upgrade") == null and
+            mem.indexOf(u8, response, "connection: upgrade") == null)
+        {
+            return error.HandshakeFailed;
+        }
+
+        // Verify Sec-WebSocket-Accept
+        const accept = wsAcceptKey(key, self.allocator) catch return error.HandshakeFailed;
+        defer self.allocator.free(accept);
+        if (mem.indexOf(u8, response, accept) == null) {
+            return error.InvalidAcceptKey;
+        }
+    }
+
+    /// Sends a text message.
+    pub fn sendText(self: *Self, text: []const u8) !void {
+        return self.sendMessage(.text, text);
+    }
+
+    /// Sends a binary message.
+    pub fn sendBinary(self: *Self, data: []const u8) !void {
+        return self.sendMessage(.binary, data);
+    }
+
+    /// Sends a message with the given opcode.
+    pub fn sendMessage(self: *Self, opcode: WsOpcode, payload: []const u8) !void {
+        if (self.close_sent) return error.ConnectionClosing;
+        var mask_key: [4]u8 = undefined;
+        io_util.defaultIo().random(&mask_key);
+        const frame = try wsEncodeFrame(self.allocator, opcode, payload, true, true, mask_key);
+        defer self.allocator.free(frame);
+        try self.socket.sendAll(frame);
+    }
+
+    /// Sends a ping frame with optional payload.
+    pub fn ping(self: *Self, payload: []const u8) !void {
+        if (self.close_sent) return error.ConnectionClosing;
+        var mask_key: [4]u8 = undefined;
+        io_util.defaultIo().random(&mask_key);
+        const frame = try wsEncodeFrame(self.allocator, .ping, payload, true, true, mask_key);
+        defer self.allocator.free(frame);
+        try self.socket.sendAll(frame);
+    }
+
+    /// Sends a pong frame with optional payload.
+    pub fn pong(self: *Self, payload: []const u8) !void {
+        if (self.close_sent) return error.ConnectionClosing;
+        var mask_key: [4]u8 = undefined;
+        io_util.defaultIo().random(&mask_key);
+        const frame = try wsEncodeFrame(self.allocator, .pong, payload, true, true, mask_key);
+        defer self.allocator.free(frame);
+        try self.socket.sendAll(frame);
+    }
+
+    /// Initiates the close handshake with a normal close code.
+    pub fn close(self: *Self) !void {
+        return self.closeWithCode(.normal, "");
+    }
+
+    /// Initiates the close handshake with a specific code.
+    pub fn closeWithCode(self: *Self, code: WsCloseCode, reason: []const u8) !void {
+        if (self.close_sent) return;
+        self.close_sent = true;
+        const frame = try wsCloseFrame(self.allocator, code, reason);
+        defer self.allocator.free(frame);
+        self.socket.sendAll(frame) catch {};
+    }
+
+    /// Receives the next complete message. Caller must free with `msg.deinit()`.
+    pub fn receive(self: *Self) !WsMessage {
+        while (true) {
+            if (self.close_received) return error.ConnectionClosed;
+
+            // Read a frame
+            var frame_buf = std.ArrayList(u8).empty;
+            defer frame_buf.deinit(self.allocator);
+
+            var first_read = true;
+            var consumed: usize = 0;
+            while (true) {
+                var tmp: [4096]u8 = undefined;
+                const n = self.socket.recv(&tmp, 0) catch |err| return err;
+                if (n == 0) return error.ConnectionClosed;
+                try frame_buf.appendSlice(self.allocator, tmp[0..n]);
+
+                // Try to decode what we have so far
+                if (frame_buf.items.len >= 2) {
+                    const decode_result = wsDecodeFrame(self.allocator, frame_buf.items) catch |err| switch (err) {
+                        error.NeedMoreData => {
+                            first_read = false;
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    consumed = decode_result.consumed;
+                    const frame = decode_result.frame;
+
+                    // Handle control frames inline
+                    if (frame.opcode == .ping) {
+                        // Auto-respond with pong
+                        self.pong(frame.payload) catch {};
+                        self.allocator.free(frame.payload);
+                        // Remove consumed bytes and continue
+                        const remaining = frame_buf.items.len - consumed;
+                        if (remaining > 0) {
+                            mem.copyForwards(u8, frame_buf.items[0..remaining], frame_buf.items[consumed..]);
+                        }
+                        frame_buf.items.len = remaining;
+                        first_read = true;
+                        continue;
+                    } else if (frame.opcode == .pong) {
+                        // Unsolicited pong, ignore
+                        self.allocator.free(frame.payload);
+                        const remaining = frame_buf.items.len - consumed;
+                        if (remaining > 0) {
+                            mem.copyForwards(u8, frame_buf.items[0..remaining], frame_buf.items[consumed..]);
+                        }
+                        frame_buf.items.len = remaining;
+                        first_read = true;
+                        continue;
+                    } else if (frame.opcode == .close) {
+                        self.close_received = true;
+                        // Send close back if we haven't already
+                        if (!self.close_sent) {
+                            self.closeWithCode(.normal, "") catch {};
+                        }
+                        self.allocator.free(frame.payload);
+                        return error.ConnectionClosed;
+                    }
+
+                    // Data frame — feed to assembler
+                    const msg = self.assembler.feed(frame) catch |err| {
+                        self.allocator.free(frame.payload);
+                        return err;
+                    };
+                    self.allocator.free(frame.payload);
+
+                    if (msg) |complete_msg| {
+                        return WsMessage{
+                            .opcode = complete_msg.opcode,
+                            .payload = complete_msg.payload,
+                            .allocator = self.allocator,
+                        };
+                    }
+
+                    // Remove consumed bytes and continue
+                    const remaining = frame_buf.items.len - consumed;
+                    if (remaining > 0) {
+                        mem.copyForwards(u8, frame_buf.items[0..remaining], frame_buf.items[consumed..]);
+                    }
+                    frame_buf.items.len = remaining;
+                    first_read = true;
+                }
+            }
+        }
+    }
+};
+
+const Response = @import("../core/response.zig").Response;
+
+/// WebSocket server configuration.
+pub const WsServerConfig = struct {
+    /// Maximum frame size in bytes. 0 means no limit.
+    max_frame_size: usize = 0,
+    /// Maximum message size in bytes. 0 means no limit.
+    max_message_size: usize = 0,
+    /// Allowed origins. null means allow all.
+    allowed_origins: ?[]const []const u8 = null,
+    /// Supported subprotocols.
+    subprotocols: ?[]const []const u8 = null,
+};
+
+/// Validates a WebSocket upgrade request.
+/// Returns the extracted key, or null if the request is invalid.
+pub fn validateUpgrade(req: *const Request) ?[]const u8 {
+    if (!isWebSocketUpgrade(req)) return null;
+    return wsExtractKey(req);
+}
+
+/// Validates the Origin header against a list of allowed origins.
+/// Returns true if the origin is allowed, or if no restrictions are configured.
+pub fn validateOrigin(req: *const Request, allowed_origins: ?[]const []const u8) bool {
+    const origins = allowed_origins orelse return true;
+    const origin = req.headers.get("Origin") orelse return false;
+    for (origins) |allowed| {
+        if (mem.eql(u8, allowed, "*") or mem.eql(u8, allowed, origin)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Negotiates a subprotocol from the client's request.
+/// Returns the selected protocol, or null if none match.
+pub fn negotiateSubprotocol(
+    req: *const Request,
+    supported: []const []const u8,
+) ?[]const u8 {
+    const header = req.headers.get("Sec-WebSocket-Protocol") orelse return null;
+    var iter = mem.splitScalar(u8, header, ',');
+    while (iter.next()) |requested| {
+        const trimmed = mem.trim(u8, requested, " \t");
+        for (supported) |proto| {
+            if (mem.eql(u8, proto, trimmed)) {
+                return proto;
+            }
+        }
+    }
+    return null;
+}
+
+/// Builds a 101 Switching Protocols response for a WebSocket upgrade.
+/// Sets the required headers on the response. Returns the Sec-WebSocket-Accept value.
+pub fn buildUpgradeResponse(
+    allocator: std.mem.Allocator,
+    resp: *Response,
+    client_key: []const u8,
+    subprotocol: ?[]const u8,
+) ![]u8 {
+    const accept = try wsAcceptKey(client_key, allocator);
+    errdefer allocator.free(accept);
+
+    resp.status = .{ .code = 101, .reason = "Switching Protocols" };
+    try resp.headers.set("Upgrade", "websocket");
+    try resp.headers.set("Connection", "Upgrade");
+    try resp.headers.set("Sec-WebSocket-Accept", accept);
+
+    if (subprotocol) |proto| {
+        try resp.headers.set("Sec-WebSocket-Protocol", proto);
+    }
+
+    return accept;
+}
+
+/// Callbacks for WebSocket server event handling.
+pub const WsCallbacks = struct {
+    on_open: ?*const fn (ctx: *anyopaque) void = null,
+    on_message: ?*const fn (ctx: *anyopaque, msg: WsMessage) void = null,
+    on_close: ?*const fn (ctx: *anyopaque, code: u16, reason: []const u8) void = null,
+    on_error: ?*const fn (ctx: *anyopaque, err: anyerror) void = null,
+    on_ping: ?*const fn (ctx: *anyopaque, payload: []const u8) void = null,
+    on_pong: ?*const fn (ctx: *anyopaque, payload: []const u8) void = null,
+};
+
+/// Server-side WebSocket connection handler. Manages a single upgraded connection.
+pub const WsConnection = struct {
+    allocator: std.mem.Allocator,
+    socket: *Socket,
+    assembler: MessageAssembler,
+    callbacks: WsCallbacks,
+    context: *anyopaque,
+    close_sent: bool = false,
+    close_received: bool = false,
+
+    const Self = @This();
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        socket: *Socket,
+        config: WsServerConfig,
+        callbacks: WsCallbacks,
+        context: *anyopaque,
+    ) Self {
+        return .{
+            .allocator = allocator,
+            .socket = socket,
+            .assembler = MessageAssembler.init(allocator, .{
+                .max_message_size = config.max_message_size,
+            }),
+            .callbacks = callbacks,
+            .context = context,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.assembler.deinit();
+    }
+
+    /// Sends a text message.
+    pub fn sendText(self: *Self, text: []const u8) !void {
+        return self.sendMessage(.text, text);
+    }
+
+    /// Sends a binary message.
+    pub fn sendBinary(self: *Self, data: []const u8) !void {
+        return self.sendMessage(.binary, data);
+    }
+
+    /// Sends a message with the given opcode. Server frames are not masked.
+    pub fn sendMessage(self: *Self, opcode: WsOpcode, payload: []const u8) !void {
+        if (self.close_sent) return error.ConnectionClosing;
+        const frame = try wsEncodeFrame(self.allocator, opcode, payload, true, false, .{ 0, 0, 0, 0 });
+        defer self.allocator.free(frame);
+        try self.socket.sendAll(frame);
+    }
+
+    /// Sends a ping frame.
+    pub fn ping(self: *Self, payload: []const u8) !void {
+        if (self.close_sent) return error.ConnectionClosing;
+        const frame = try wsEncodeFrame(self.allocator, .ping, payload, true, false, .{ 0, 0, 0, 0 });
+        defer self.allocator.free(frame);
+        try self.socket.sendAll(frame);
+    }
+
+    /// Sends a pong frame.
+    pub fn pong(self: *Self, payload: []const u8) !void {
+        if (self.close_sent) return error.ConnectionClosing;
+        const frame = try wsEncodeFrame(self.allocator, .pong, payload, true, false, .{ 0, 0, 0, 0 });
+        defer self.allocator.free(frame);
+        try self.socket.sendAll(frame);
+    }
+
+    /// Sends a close frame.
+    pub fn close(self: *Self) !void {
+        return self.closeWithCode(.normal, "");
+    }
+
+    /// Sends a close frame with a specific code and reason.
+    pub fn closeWithCode(self: *Self, code: WsCloseCode, reason: []const u8) !void {
+        if (self.close_sent) return;
+        self.close_sent = true;
+        const frame = try wsCloseFrame(self.allocator, code, reason);
+        defer self.allocator.free(frame);
+        self.socket.sendAll(frame) catch {};
+    }
+
+    /// Reads and processes messages in a loop. Blocks until the connection closes.
+    pub fn readLoop(self: *Self) !void {
+        while (true) {
+            if (self.close_received) return;
+
+            var frame_buf = std.ArrayList(u8).empty;
+            defer frame_buf.deinit(self.allocator);
+
+            var consumed: usize = 0;
+            while (true) {
+                var tmp: [4096]u8 = undefined;
+                const n = self.socket.recv(&tmp, 0) catch |err| {
+                    if (self.callbacks.on_error) |cb| cb(self.context, err);
+                    return err;
+                };
+                if (n == 0) {
+                    if (self.callbacks.on_close) |cb| cb(self.context, 1006, "abnormal close");
+                    return;
+                }
+                try frame_buf.appendSlice(self.allocator, tmp[0..n]);
+
+                if (frame_buf.items.len >= 2) {
+                    const decode_result = wsDecodeFrame(self.allocator, frame_buf.items) catch |err| switch (err) {
+                        error.NeedMoreData => continue,
+                        else => {
+                            if (self.callbacks.on_error) |cb| cb(self.context, err);
+                            return err;
+                        },
+                    };
+                    consumed = decode_result.consumed;
+                    const frame = decode_result.frame;
+
+                    if (frame.opcode == .ping) {
+                        if (self.callbacks.on_ping) |cb| cb(self.context, frame.payload);
+                        self.pong(frame.payload) catch {};
+                        self.allocator.free(frame.payload);
+                    } else if (frame.opcode == .pong) {
+                        if (self.callbacks.on_pong) |cb| cb(self.context, frame.payload);
+                        self.allocator.free(frame.payload);
+                    } else if (frame.opcode == .close) {
+                        self.close_received = true;
+                        var close_code: u16 = 1005;
+                        var close_reason: []const u8 = "";
+                        if (frame.payload.len >= 2) {
+                            close_code = (@as(u16, frame.payload[0]) << 8) | frame.payload[1];
+                            close_reason = frame.payload[2..];
+                        }
+                        if (self.callbacks.on_close) |cb| cb(self.context, close_code, close_reason);
+                        if (!self.close_sent) {
+                            self.closeWithCode(.normal, "") catch {};
+                        }
+                        self.allocator.free(frame.payload);
+                        return;
+                    } else {
+                        // Data frame — feed to assembler
+                        const msg = self.assembler.feed(frame) catch |err| {
+                            self.allocator.free(frame.payload);
+                            if (self.callbacks.on_error) |cb| cb(self.context, err);
+                            return err;
+                        };
+                        self.allocator.free(frame.payload);
+
+                        if (msg) |complete_msg| {
+                            const ws_msg = WsMessage{
+                                .opcode = complete_msg.opcode,
+                                .payload = complete_msg.payload,
+                                .allocator = self.allocator,
+                            };
+                            if (self.callbacks.on_message) |cb| cb(self.context, ws_msg);
+                            complete_msg.deinit();
+                        }
+                    }
+
+                    // Remove consumed bytes
+                    const remaining = frame_buf.items.len - consumed;
+                    if (remaining > 0) {
+                        mem.copyForwards(u8, frame_buf.items[0..remaining], frame_buf.items[consumed..]);
+                    }
+                    frame_buf.items.len = remaining;
+                }
+            }
+        }
+    }
+};
+
+const ParsedWsUrl = struct {
+    tls: bool,
+    host: ?[]const u8,
+    port: ?u16,
+    path: ?[]const u8,
+};
+
+fn parseWsUrl(url: []const u8) !ParsedWsUrl {
+    var remaining = url;
+    var tls = false;
+
+    if (mem.startsWith(u8, remaining, "wss://")) {
+        tls = true;
+        remaining = remaining["wss://".len..];
+    } else if (mem.startsWith(u8, remaining, "ws://")) {
+        remaining = remaining["ws://".len..];
+    } else {
+        return error.InvalidUri;
+    }
+
+    // Find path
+    var path: ?[]const u8 = null;
+    if (mem.indexOf(u8, remaining, "/")) |pos| {
+        path = remaining[pos..];
+        remaining = remaining[0..pos];
+    }
+
+    // Parse host:port
+    var host: ?[]const u8 = null;
+    var port: ?u16 = null;
+    if (mem.indexOf(u8, remaining, ":")) |pos| {
+        host = remaining[0..pos];
+        port = std.fmt.parseInt(u16, remaining[pos + 1 ..], 10) catch return error.InvalidUri;
+    } else {
+        host = remaining;
+    }
+
+    return .{
+        .tls = tls,
+        .host = host,
+        .port = port,
+        .path = path,
+    };
+}
+
+test "WsClient init/deinit" {
+    const allocator = std.testing.allocator;
+    var client = WsClient.init(allocator, .{});
+    defer client.deinit();
+    try std.testing.expect(!client.connected);
+    try std.testing.expect(!client.close_sent);
+}
+
+test "parseWsUrl -- ws:// with path" {
+    const result = try parseWsUrl("ws://example.com/ws?token=abc");
+    try std.testing.expect(!result.tls);
+    try std.testing.expectEqualStrings("example.com", result.host.?);
+    try std.testing.expect(result.port == null);
+    try std.testing.expectEqualStrings("/ws?token=abc", result.path.?);
+}
+
+test "parseWsUrl -- wss:// with port" {
+    const result = try parseWsUrl("wss://example.com:8443/chat");
+    try std.testing.expect(result.tls);
+    try std.testing.expectEqualStrings("example.com", result.host.?);
+    try std.testing.expectEqual(@as(?u16, 8443), result.port);
+    try std.testing.expectEqualStrings("/chat", result.path.?);
+}
+
+test "parseWsUrl -- invalid scheme" {
+    try std.testing.expectError(error.InvalidUri, parseWsUrl("http://example.com"));
+}
+
+test "validateOrigin -- null allows all" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .GET, "/ws");
+    defer req.deinit();
+    try req.headers.set("Origin", "http://evil.com");
+    try std.testing.expect(validateOrigin(&req, null));
+}
+
+test "validateOrigin -- matching origin" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .GET, "/ws");
+    defer req.deinit();
+    try req.headers.set("Origin", "http://localhost:8080");
+    const allowed = [_][]const u8{ "http://localhost:8080", "https://example.com" };
+    try std.testing.expect(validateOrigin(&req, &allowed));
+}
+
+test "validateOrigin -- non-matching origin" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .GET, "/ws");
+    defer req.deinit();
+    try req.headers.set("Origin", "http://evil.com");
+    const allowed = [_][]const u8{"http://localhost:8080"};
+    try std.testing.expect(!validateOrigin(&req, &allowed));
+}
+
+test "validateOrigin -- wildcard" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .GET, "/ws");
+    defer req.deinit();
+    try req.headers.set("Origin", "http://anything.com");
+    const allowed = [_][]const u8{"*"};
+    try std.testing.expect(validateOrigin(&req, &allowed));
+}
+
+test "negotiateSubprotocol -- matching" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .GET, "/ws");
+    defer req.deinit();
+    try req.headers.set("Sec-WebSocket-Protocol", "chat, binary");
+    const supported = [_][]const u8{ "binary", "graphql-ws" };
+    const result = negotiateSubprotocol(&req, &supported);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("binary", result.?);
+}
+
+test "negotiateSubprotocol -- no match" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .GET, "/ws");
+    defer req.deinit();
+    try req.headers.set("Sec-WebSocket-Protocol", "chat");
+    const supported = [_][]const u8{ "binary", "graphql-ws" };
+    try std.testing.expect(negotiateSubprotocol(&req, &supported) == null);
+}
+
+test "negotiateSubprotocol -- no header" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .GET, "/ws");
+    defer req.deinit();
+    const supported = [_][]const u8{"chat"};
+    try std.testing.expect(negotiateSubprotocol(&req, &supported) == null);
+}
+
+test "buildUpgradeResponse -- sets headers" {
+    const allocator = std.testing.allocator;
+    var resp = Response.init(allocator, 200);
+    defer resp.deinit();
+
+    const accept = try buildUpgradeResponse(allocator, &resp, "dGhlIHNhbXBsZSBub25jZQ==", null);
+    defer allocator.free(accept);
+
+    try std.testing.expectEqual(@as(u16, 101), resp.status.code);
+    const upgrade = resp.headers.get("Upgrade");
+    try std.testing.expect(upgrade != null);
+    try std.testing.expectEqualStrings("websocket", upgrade.?);
+    const conn = resp.headers.get("Connection");
+    try std.testing.expect(conn != null);
+    try std.testing.expectEqualStrings("Upgrade", conn.?);
+    const accept_hdr = resp.headers.get("Sec-WebSocket-Accept");
+    try std.testing.expect(accept_hdr != null);
+    try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", accept_hdr.?);
+}
+
+test "buildUpgradeResponse -- with subprotocol" {
+    const allocator = std.testing.allocator;
+    var resp = Response.init(allocator, 200);
+    defer resp.deinit();
+
+    _ = try buildUpgradeResponse(allocator, &resp, "dGhlIHNhbXBsZSBub25jZQ==", "chat");
+    const proto = resp.headers.get("Sec-WebSocket-Protocol");
+    try std.testing.expect(proto != null);
+    try std.testing.expectEqualStrings("chat", proto.?);
+}
+
+test "WsConnection init/deinit" {
+    const allocator = std.testing.allocator;
+    var sock = Socket{ .handle = 0 };
+    var ctx: u32 = 0;
+    var conn = WsConnection.init(allocator, &sock, .{}, .{}, &ctx);
+    defer conn.deinit();
+    try std.testing.expect(!conn.close_sent);
+}
+
+test "validateUpgrade -- valid" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .GET, "/ws");
+    defer req.deinit();
+    try req.headers.set("Upgrade", "websocket");
+    try req.headers.set("Connection", "Upgrade");
+    try req.headers.set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
+    const key = validateUpgrade(&req);
+    try std.testing.expect(key != null);
+    try std.testing.expectEqualStrings("dGhlIHNhbXBsZSBub25jZQ==", key.?);
+}
+
+test "validateUpgrade -- missing key" {
+    const allocator = std.testing.allocator;
+    var req = try Request.init(allocator, .GET, "/ws");
+    defer req.deinit();
+    try req.headers.set("Upgrade", "websocket");
+    try req.headers.set("Connection", "Upgrade");
+    try std.testing.expect(validateUpgrade(&req) == null);
+}
+
+test "MessageAssembler -- fragmented binary across 3 frames" {
+    const allocator = std.testing.allocator;
+    var assembler = MessageAssembler.init(allocator, .{});
+    defer assembler.deinit();
+
+    const enc1 = try wsEncodeFrame(allocator, .binary, "AA", false, false, .{ 0, 0, 0, 0 });
+    defer allocator.free(enc1);
+    const enc2 = try wsEncodeFrame(allocator, .continuation, "BB", false, false, .{ 0, 0, 0, 0 });
+    defer allocator.free(enc2);
+    const enc3 = try wsEncodeFrame(allocator, .continuation, "CC", true, false, .{ 0, 0, 0, 0 });
+    defer allocator.free(enc3);
+
+    const r1 = try wsDecodeFrame(allocator, enc1);
+    const r2 = try wsDecodeFrame(allocator, enc2);
+    const r3 = try wsDecodeFrame(allocator, enc3);
+
+    try std.testing.expect((try assembler.feed(r1.frame)) == null);
+    try std.testing.expect((try assembler.feed(r2.frame)) == null);
+
+    const msg = try assembler.feed(r3.frame);
+    try std.testing.expect(msg != null);
+    try std.testing.expectEqual(WsOpcode.binary, msg.?.opcode);
+    try std.testing.expectEqualStrings("AABBCC", msg.?.payload);
+    msg.?.deinit();
+}
+
+test "wsDecodeFrame -- empty payload" {
+    const allocator = std.testing.allocator;
+    const enc = try wsEncodeFrame(allocator, .ping, "", true, false, .{ 0, 0, 0, 0 });
+    defer allocator.free(enc);
+    var r = try wsDecodeFrame(allocator, enc);
+    defer r.frame.deinit();
+    try std.testing.expectEqual(WsOpcode.ping, r.frame.opcode);
+    try std.testing.expect(r.frame.fin);
+    try std.testing.expectEqual(@as(usize, 0), r.frame.payload.len);
+}
+
+test "wsEncodeFrame -- 64-bit payload length" {
+    const allocator = std.testing.allocator;
+    // 70000 bytes requires 64-bit extended length
+    var big: [70000]u8 = undefined;
+    @memset(&big, 0xCD);
+    const enc = try wsEncodeFrame(allocator, .binary, &big, true, false, .{ 0, 0, 0, 0 });
+    defer allocator.free(enc);
+    // Header: 2 + 8 = 10 bytes
+    try std.testing.expect(enc.len > 10);
+    var r = try wsDecodeFrame(allocator, enc);
+    defer r.frame.deinit();
+    try std.testing.expectEqual(@as(usize, 70000), r.frame.payload.len);
+}
+
+test "WsCloseCode -- values" {
+    try std.testing.expectEqual(@as(u16, 1000), @intFromEnum(WsCloseCode.normal));
+    try std.testing.expectEqual(@as(u16, 1001), @intFromEnum(WsCloseCode.going_away));
+    try std.testing.expectEqual(@as(u16, 1002), @intFromEnum(WsCloseCode.protocol_error));
+    try std.testing.expectEqual(@as(u16, 1006), @intFromEnum(WsCloseCode.abnormal));
+    try std.testing.expectEqual(@as(u16, 1009), @intFromEnum(WsCloseCode.message_too_big));
 }

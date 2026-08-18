@@ -11,8 +11,7 @@ const SocketIoWriter = @import("../net/socket.zig").SocketIoWriter;
 const alpn = @import("alpn.zig");
 const errors = @import("errors.zig");
 const TlsClient = @import("client.zig");
-const any_io = @import("../util/any_io.zig");
-const dbg = @import("../util/debug.zig");
+const any_io = @import("../io/any_io.zig");
 
 pub const server = @import("server.zig");
 pub const acceptServer = server.acceptServer;
@@ -45,8 +44,7 @@ const RecordHeader = struct {
     }
 };
 
-pub fn nonceTls13(iv: *const [12]u8, seq: u64) [12]u8 {
-    dbg.log("TLS", "nonceTls13: seq={d}", .{seq});
+pub fn nonceTLS13(iv: *const [12]u8, seq: u64) [12]u8 {
     var nonce: [12]u8 = iv.*;
     var seq_bytes: [8]u8 = undefined;
     mem.writeInt(u64, &seq_bytes, seq, .big);
@@ -56,7 +54,7 @@ pub fn nonceTls13(iv: *const [12]u8, seq: u64) [12]u8 {
     return nonce;
 }
 
-pub fn encryptTls13(
+pub fn encryptTLS13(
     comptime Aead: type,
     out: []u8,
     plaintext: []const u8,
@@ -70,7 +68,7 @@ pub fn encryptTls13(
     return out[0 .. plaintext.len + Aead.tag_length];
 }
 
-pub fn decryptTls13(
+pub fn decryptTLS13(
     comptime Aead: type,
     ciphertext: []u8,
     record_header: *const [record_header_len]u8,
@@ -84,7 +82,7 @@ pub fn decryptTls13(
     return ciphertext[0..ct_len];
 }
 
-pub fn encryptTls12(
+pub fn encryptTLS12(
     comptime Aead: type,
     out: []u8,
     plaintext: []const u8,
@@ -111,7 +109,7 @@ pub fn encryptTls12(
     return out[0 .. 12 + plaintext.len + Aead.tag_length];
 }
 
-pub fn decryptTls12(
+pub fn decryptTLS12(
     comptime Aead: type,
     ciphertext: []u8,
     hdr: *const [record_header_len]u8,
@@ -417,7 +415,6 @@ pub fn deriveHandshakeSecret13(
 pub fn deriveTrafficKeys13(
     secret: []const u8,
 ) struct { key: [32]u8, iv: [12]u8 } {
-    dbg.log("TLS", "deriveTrafficKeys13: secret_len={d}", .{secret.len});
     var secret_arr: [32]u8 = undefined;
     @memcpy(&secret_arr, secret[0..32]);
     const key_label = hkdfExpandLabel(&secret_arr, "key", "", 32);
@@ -425,7 +422,7 @@ pub fn deriveTrafficKeys13(
     return .{ .key = key_label, .iv = iv_label };
 }
 
-pub fn readTlsRecord(socket: *Socket, buf: *[4096]u8) ![]const u8 {
+pub fn readTLSRecord(socket: *Socket, buf: *[4096]u8) ![]const u8 {
     var total: usize = 0;
     while (total < 5) {
         const n = socket.recv(buf[total..5]) catch |err| switch (err) {
@@ -449,7 +446,7 @@ pub fn readTlsRecord(socket: *Socket, buf: *[4096]u8) ![]const u8 {
 }
 
 fn readHandshakeRecord(socket: *Socket, buf: *[4096]u8) ![]const u8 {
-    const data = try readTlsRecord(socket, buf);
+    const data = try readTLSRecord(socket, buf);
     switch (buf[0]) {
         @intFromEnum(ContentType.handshake) => return data,
         @intFromEnum(ContentType.alert) => {
@@ -464,7 +461,7 @@ fn readHandshakeRecord(socket: *Socket, buf: *[4096]u8) ![]const u8 {
     }
 }
 
-pub fn sendTlsHandshakeRecord(socket: *Socket, msg: []const u8) !void {
+pub fn sendTLSHandshakeRecord(socket: *Socket, msg: []const u8) !void {
     var buf: [5 + max_plaintext_len]u8 = undefined;
     buf[0] = @intFromEnum(ContentType.handshake);
     buf[1] = 0x03;
@@ -474,7 +471,7 @@ pub fn sendTlsHandshakeRecord(socket: *Socket, msg: []const u8) !void {
     socket.sendAll(buf[0 .. 5 + msg.len]) catch return error.WriteFailed;
 }
 
-pub fn sendTlsChangeCipherSpec(socket: *Socket) !void {
+pub fn sendTLSChangeCipherSpec(socket: *Socket) !void {
     const ccs = [_]u8{
         @intFromEnum(ContentType.change_cipher_spec),
         0x03,
@@ -486,7 +483,7 @@ pub fn sendTlsChangeCipherSpec(socket: *Socket) !void {
     socket.sendAll(&ccs) catch return error.WriteFailed;
 }
 
-pub fn sendTls13EncryptedHandshake(
+pub fn sendTLS13EncryptedHandshake(
     socket: *Socket,
     msg: []const u8,
     key: []const u8,
@@ -507,7 +504,7 @@ pub fn sendTls13EncryptedHandshake(
     };
     hdr_val.format(&hdr_buf);
 
-    var nonce_storage = nonceTls13(iv[0..12], seq.*);
+    var nonce_storage = nonceTLS13(iv[0..12], seq.*);
     const nonce = &nonce_storage;
     var out_buf: [record_header_len + max_plaintext_len + 256]u8 = undefined;
     @memcpy(out_buf[0..record_header_len], &hdr_buf);
@@ -516,19 +513,19 @@ pub fn sendTls13EncryptedHandshake(
         .AES_128_GCM_SHA256 => blk: {
             var k: [16]u8 = undefined;
             @memcpy(&k, key[0..16]);
-            const enc = try encryptTls13(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], inner_buf[0..inner_len], &hdr_buf, nonce, &k);
+            const enc = try encryptTLS13(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], inner_buf[0..inner_len], &hdr_buf, nonce, &k);
             break :blk enc.len;
         },
         .AES_256_GCM_SHA384 => blk: {
             var k: [32]u8 = undefined;
             @memcpy(&k, key[0..32]);
-            const enc = try encryptTls13(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], inner_buf[0..inner_len], &hdr_buf, nonce, &k);
+            const enc = try encryptTLS13(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], inner_buf[0..inner_len], &hdr_buf, nonce, &k);
             break :blk enc.len;
         },
         .CHACHA20_POLY1305_SHA256 => blk: {
             var k: [32]u8 = undefined;
             @memcpy(&k, key[0..32]);
-            const enc = try encryptTls13(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], inner_buf[0..inner_len], &hdr_buf, nonce, &k);
+            const enc = try encryptTLS13(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], inner_buf[0..inner_len], &hdr_buf, nonce, &k);
             break :blk enc.len;
         },
         else => return error.TlsUnsupportedCipherSuite,
@@ -539,7 +536,7 @@ pub fn sendTls13EncryptedHandshake(
     seq.* += 1;
 }
 
-pub fn readTls13EncryptedHandshake(
+pub fn readTLS13EncryptedHandshake(
     socket: *Socket,
     buf: *[4096]u8,
     key: []const u8,
@@ -547,26 +544,26 @@ pub fn readTls13EncryptedHandshake(
     seq: *u64,
     cs: tls.CipherSuite,
 ) ![]const u8 {
-    const record_data = try readTlsRecord(socket, buf);
+    const record_data = try readTLSRecord(socket, buf);
     const hdr_ptr: *const [record_header_len]u8 = buf[0..record_header_len];
-    var nonce_storage = nonceTls13(iv[0..12], seq.*);
+    var nonce_storage = nonceTLS13(iv[0..12], seq.*);
     const nonce = &nonce_storage;
 
     const decrypted = switch (cs) {
         .AES_128_GCM_SHA256 => blk: {
             var k: [16]u8 = undefined;
             @memcpy(&k, key[0..16]);
-            break :blk try decryptTls13(crypto.aead.aes_gcm.Aes128Gcm, @constCast(record_data), hdr_ptr, nonce, &k);
+            break :blk try decryptTLS13(crypto.aead.aes_gcm.Aes128Gcm, @constCast(record_data), hdr_ptr, nonce, &k);
         },
         .AES_256_GCM_SHA384 => blk: {
             var k: [32]u8 = undefined;
             @memcpy(&k, key[0..32]);
-            break :blk try decryptTls13(crypto.aead.aes_gcm.Aes256Gcm, @constCast(record_data), hdr_ptr, nonce, &k);
+            break :blk try decryptTLS13(crypto.aead.aes_gcm.Aes256Gcm, @constCast(record_data), hdr_ptr, nonce, &k);
         },
         .CHACHA20_POLY1305_SHA256 => blk: {
             var k: [32]u8 = undefined;
             @memcpy(&k, key[0..32]);
-            break :blk try decryptTls13(crypto.aead.chacha_poly.ChaCha20Poly1305, @constCast(record_data), hdr_ptr, nonce, &k);
+            break :blk try decryptTLS13(crypto.aead.chacha_poly.ChaCha20Poly1305, @constCast(record_data), hdr_ptr, nonce, &k);
         },
         else => return error.TlsUnsupportedCipherSuite,
     };
@@ -680,13 +677,13 @@ pub fn loadPrivateKey(allocator: Allocator, path: []const u8) ![]const u8 {
     return pemDecode(allocator, pem[final_start..key_end]);
 }
 
-pub const ServerTlsConfig = struct {
+pub const ServerTLSConfig = struct {
     cert_chain_der: []const []const u8 = &.{},
     key_der: ?[]const u8 = null,
     allocator: ?Allocator = null,
     ecdsa_keypair: ?crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair = null,
 
-    pub fn deinit(self: *ServerTlsConfig) void {
+    pub fn deinit(self: *ServerTLSConfig) void {
         if (self.allocator) |a| {
             for (self.cert_chain_der) |cert| a.free(cert);
             a.free(self.cert_chain_der);
@@ -695,10 +692,10 @@ pub const ServerTlsConfig = struct {
     }
 };
 
-pub fn loadServerTlsConfig(allocator: Allocator, cert_path: []const u8, key_path: []const u8) !ServerTlsConfig {
+pub fn loadServerTLSConfig(allocator: Allocator, cert_path: []const u8, key_path: []const u8) !ServerTLSConfig {
     const cert_chain = try loadCertChain(allocator, cert_path);
     const key_der = try loadPrivateKey(allocator, key_path);
-    var config = ServerTlsConfig{
+    var config = ServerTLSConfig{
         .cert_chain_der = cert_chain,
         .key_der = key_der,
         .allocator = allocator,
@@ -784,6 +781,7 @@ pub const Connection = struct {
     hs_write_seq: u64 = 0,
     hs_read_seq: u64 = 0,
     cipher_suite: ?tls.CipherSuite = null,
+    sni_hostname: ?[]const u8 = null,
     read_buf: [max_record_len]u8 = undefined,
     read_buf_len: usize = 0,
     read_buf_pos: usize = 0,
@@ -792,12 +790,16 @@ pub const Connection = struct {
         return self.negotiated_alpn.get();
     }
 
-    pub fn isHttp2(self: *const Connection) bool {
-        return self.negotiated_alpn.isHttp2Result();
+    pub fn isHTTP2(self: *const Connection) bool {
+        return self.negotiated_alpn.isHTTP2Result();
     }
 
-    pub fn isHttp3(self: *const Connection) bool {
-        return self.negotiated_alpn.isHttp3Result();
+    pub fn isHTTP3(self: *const Connection) bool {
+        return self.negotiated_alpn.isHTTP3Result();
+    }
+
+    pub fn sniHostname(self: *const Connection) ?[]const u8 {
+        return self.sni_hostname;
     }
 
     pub fn tlsVersion(self: *const Connection) tls.ProtocolVersion {
@@ -817,7 +819,6 @@ pub const Connection = struct {
     }
 
     pub fn closeNotify(self: *Connection) void {
-        dbg.log("TLS", "close_notify", .{});
         self.sendAlert(.warning, .close_notify);
     }
 
@@ -846,7 +847,6 @@ pub const Connection = struct {
     }
 
     pub fn write(self: *Connection, data: []const u8) !usize {
-        dbg.log("TLS", "write: {d} bytes", .{data.len});
         const socket = self.socket;
         const version = self.tls_version;
         const key = self.app_write_key orelse return error.TlsHandshakeNotComplete;
@@ -862,26 +862,26 @@ pub const Connection = struct {
                     .length = @intCast(data.len + 16),
                 };
                 hdr_val.format(&hdr);
-                const nonce_val = nonceTls13(&iv, self.write_seq);
+                const nonce_val = nonceTLS13(&iv, self.write_seq);
                 var out_buf: [record_header_len + max_plaintext_len + 256]u8 = undefined;
                 @memcpy(out_buf[0..record_header_len], &hdr);
                 const enc_len = switch (cs) {
                     .AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
-                        const enc = try encryptTls13(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], data, &hdr, &nonce_val, &k);
+                        const enc = try encryptTLS13(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], data, &hdr, &nonce_val, &k);
                         break :blk enc.len;
                     },
                     .AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        const enc = try encryptTls13(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], data, &hdr, &nonce_val, &k);
+                        const enc = try encryptTLS13(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], data, &hdr, &nonce_val, &k);
                         break :blk enc.len;
                     },
                     .CHACHA20_POLY1305_SHA256 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        const enc = try encryptTls13(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], data, &hdr, &nonce_val, &k);
+                        const enc = try encryptTLS13(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], data, &hdr, &nonce_val, &k);
                         break :blk enc.len;
                     },
                     else => return error.TlsUnsupportedCipherSuite,
@@ -905,19 +905,19 @@ pub const Connection = struct {
                     .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
-                        const enc = try encryptTls12(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        const enc = try encryptTLS12(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
                         break :blk enc.len;
                     },
                     .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        const enc = try encryptTls12(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        const enc = try encryptTLS12(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
                         break :blk enc.len;
                     },
                     .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        const enc = try encryptTls12(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        const enc = try encryptTLS12(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
                         break :blk enc.len;
                     },
                     else => return error.TlsUnsupportedCipherSuite,
@@ -943,7 +943,6 @@ pub const Connection = struct {
     pub fn flush(_: *Connection) !void {}
 
     pub fn read(self: *Connection, buf: []u8) !usize {
-        dbg.log("TLS", "read: buf_len={d}", .{buf.len});
         const socket = self.socket;
         const version = self.tls_version;
         const key = self.app_read_key orelse return error.TlsHandshakeNotComplete;
@@ -981,22 +980,22 @@ pub const Connection = struct {
 
         switch (version) {
             .tls_1_3 => {
-                const nonce_val = nonceTls13(&iv, self.read_seq);
+                const nonce_val = nonceTLS13(&iv, self.read_seq);
                 const plaintext = switch (cs) {
                     .AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
-                        break :blk try decryptTls13(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], &nonce_val, &k);
+                        break :blk try decryptTLS13(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], &nonce_val, &k);
                     },
                     .AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        break :blk try decryptTls13(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], &nonce_val, &k);
+                        break :blk try decryptTLS13(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], &nonce_val, &k);
                     },
                     .CHACHA20_POLY1305_SHA256 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        break :blk try decryptTls13(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], &nonce_val, &k);
+                        break :blk try decryptTLS13(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], &nonce_val, &k);
                     },
                     else => return error.TlsUnsupportedCipherSuite,
                 };
@@ -1012,17 +1011,17 @@ pub const Connection = struct {
                     .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
-                        break :blk try decryptTls12(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                        break :blk try decryptTLS12(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
                     },
                     .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        break :blk try decryptTls12(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                        break :blk try decryptTLS12(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
                     },
                     .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        break :blk try decryptTls12(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                        break :blk try decryptTLS12(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
                     },
                     else => return error.TlsUnsupportedCipherSuite,
                 };
@@ -1044,46 +1043,47 @@ pub const Connection = struct {
     }
 };
 
-pub const TlsConfig = struct {
+pub const TLSConfig = struct {
     allocator: Allocator,
     alpn_protocols: []const []const u8 = &.{"http/1.1"},
     verify_server: bool = true,
     ca_bundle_path: ?[]const u8 = null,
 
-    pub fn init(allocator: Allocator) TlsConfig {
+    pub fn init(allocator: Allocator) TLSConfig {
         return .{ .allocator = allocator };
     }
 
-    pub fn insecure(allocator: Allocator) TlsConfig {
+    pub fn insecure(allocator: Allocator) TLSConfig {
         return .{ .allocator = allocator, .verify_server = false };
     }
 
-    pub fn withH2(allocator: Allocator) TlsConfig {
+    pub fn withH2(allocator: Allocator) TLSConfig {
         return .{ .allocator = allocator, .alpn_protocols = &.{ "h2", "http/1.1" } };
     }
 
-    pub fn insecureWithH2(allocator: Allocator) TlsConfig {
+    pub fn insecureWithH2(allocator: Allocator) TLSConfig {
         return .{ .allocator = allocator, .alpn_protocols = &.{ "h2", "http/1.1" }, .verify_server = false };
     }
 
-    pub fn withH3(allocator: Allocator) TlsConfig {
+    pub fn withH3(allocator: Allocator) TLSConfig {
         return .{ .allocator = allocator, .alpn_protocols = &.{ "h3", "h2", "http/1.1" } };
     }
 
-    pub fn insecureWithH3(allocator: Allocator) TlsConfig {
+    pub fn insecureWithH3(allocator: Allocator) TLSConfig {
         return .{ .allocator = allocator, .alpn_protocols = &.{ "h3", "h2", "http/1.1" }, .verify_server = false };
     }
 
-    pub fn wantsHttp2(self: TlsConfig) bool {
+    pub fn wantsHTTP2(self: TLSConfig) bool {
         for (self.alpn_protocols) |proto| {
             if (mem.eql(u8, proto, "h2")) return true;
         }
         return false;
     }
 };
+pub const TlsConfig = TLSConfig;
 
-pub const TlsSession = struct {
-    config: TlsConfig,
+pub const TLSSession = struct {
+    config: TLSConfig,
     negotiated_alpn: alpn.NegotiatedAlpn = .{},
     tls_version: ?tls.ProtocolVersion = null,
     socket: ?*Socket = null,
@@ -1109,16 +1109,15 @@ pub const TlsSession = struct {
     read_buf_len: usize = 0,
     read_buf_pos: usize = 0,
 
-    pub fn negotiatedProtocol(self: *const TlsSession) ?[]const u8 {
+    pub fn negotiatedProtocol(self: *const TLSSession) ?[]const u8 {
         return self.negotiated_alpn.get();
     }
 
-    pub fn init(config: TlsConfig) TlsSession {
-        dbg.log("TLS", "TlsSession init, verify={any}", .{config.verify_server});
+    pub fn init(config: TLSConfig) TLSSession {
         return .{ .config = config };
     }
 
-    pub fn deinit(self: *TlsSession) void {
+    pub fn deinit(self: *TLSSession) void {
         if (self.app_write_key) |*k| @memset(k, 0);
         if (self.app_write_iv) |*k| @memset(k, 0);
         if (self.app_read_key) |*k| @memset(k, 0);
@@ -1127,26 +1126,25 @@ pub const TlsSession = struct {
         self.read_buf_pos = 0;
     }
 
-    pub fn attachSocket(self: *TlsSession, socket: *Socket) void {
+    pub fn attachSocket(self: *TLSSession, socket: *Socket) void {
         self.socket = socket;
     }
 
-    pub fn handshake(self: *TlsSession, host: []const u8) !void {
-        dbg.entry("TLS", "handshake");
+    pub fn handshake(self: *TLSSession, host: []const u8) !void {
         const socket = self.socket orelse return error.TlsMissingTransport;
-        self.handshakeTls13(socket, host) catch {
+        self.handshakeDo(socket, host) catch {
             if (self.reconnect_fn) |reconnect| {
                 if (reconnect(self.reconnect_ctx)) |new_socket| {
                     self.socket = new_socket;
-                    try self.handshakeTls12(new_socket, host);
+                    try self.handshakeRetry(new_socket, host);
                     return;
                 }
             }
-            try self.handshakeTls12(socket, host);
+            try self.handshakeRetry(socket, host);
         };
     }
 
-    fn handshakeTls13(self: *TlsSession, socket: *Socket, host: []const u8) !void {
+    fn handshakeDo(self: *TLSSession, socket: *Socket, host: []const u8) !void {
         var io_reader = SocketIoReader.init(socket, &self.hs_read_buf);
         var io_writer = SocketIoWriter.init(socket, &self.hs_write_buf);
 
@@ -1169,31 +1167,69 @@ pub const TlsSession = struct {
             .alpn_protocols = self.config.alpn_protocols,
         });
         self.tls_version = self.stored_client.?.tls_version;
-        self.cipher_suite = switch (self.stored_client.?.application_cipher) {
-            .AES_128_GCM_SHA256 => .AES_128_GCM_SHA256,
-            .AES_256_GCM_SHA384 => .AES_256_GCM_SHA384,
-            .CHACHA20_POLY1305_SHA256 => .CHACHA20_POLY1305_SHA256,
-            .AEGIS_256_SHA512 => .AEGIS_256_SHA512,
-            .AEGIS_128L_SHA256 => .AEGIS_128L_SHA256,
-        };
-        switch (self.stored_client.?.application_cipher) {
-            inline else => |*p| {
-                const pv = &p.tls_1_3;
-                self.app_write_key = .{0} ** 32;
-                self.app_write_iv = .{0} ** 12;
-                self.app_read_key = .{0} ** 32;
-                self.app_read_iv = .{0} ** 12;
-                const wk = &self.app_write_key.?;
-                const wi = &self.app_write_iv.?;
-                const rk = &self.app_read_key.?;
-                const ri = &self.app_read_iv.?;
-                const key_len = @min(pv.client_key.len, 32);
-                const iv_len = @min(pv.client_iv.len, 12);
-                @memcpy(wk[0..key_len], pv.client_key[0..key_len]);
-                @memcpy(wi[0..iv_len], pv.client_iv[0..iv_len]);
-                @memcpy(rk[0..key_len], pv.server_key[0..key_len]);
-                @memcpy(ri[0..iv_len], pv.server_iv[0..iv_len]);
+
+        self.cipher_suite = switch (self.stored_client.?.tls_version) {
+            .tls_1_3 => switch (self.stored_client.?.application_cipher) {
+                .AES_128_GCM_SHA256 => .AES_128_GCM_SHA256,
+                .AES_256_GCM_SHA384 => .AES_256_GCM_SHA384,
+                .CHACHA20_POLY1305_SHA256 => .CHACHA20_POLY1305_SHA256,
+                .AEGIS_256_SHA512 => .AEGIS_256_SHA512,
+                .AEGIS_128L_SHA256 => .AEGIS_128L_SHA256,
             },
+            .tls_1_2 => switch (self.stored_client.?.application_cipher) {
+                .AES_128_GCM_SHA256 => .ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                .AES_256_GCM_SHA384 => .ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+                .CHACHA20_POLY1305_SHA256 => .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+                .AEGIS_256_SHA512 => .ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+                .AEGIS_128L_SHA256 => .ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            },
+            else => return error.TlsUnsupportedCipherSuite,
+        };
+
+        switch (self.stored_client.?.tls_version) {
+            .tls_1_3 => {
+                switch (self.stored_client.?.application_cipher) {
+                    inline else => |*p| {
+                        const pv = &p.tls_1_3;
+                        self.app_write_key = .{0} ** 32;
+                        self.app_write_iv = .{0} ** 12;
+                        self.app_read_key = .{0} ** 32;
+                        self.app_read_iv = .{0} ** 12;
+                        const wk = &self.app_write_key.?;
+                        const wi = &self.app_write_iv.?;
+                        const rk = &self.app_read_key.?;
+                        const ri = &self.app_read_iv.?;
+                        const key_len = @min(pv.client_key.len, 32);
+                        const iv_len = @min(pv.client_iv.len, 12);
+                        @memcpy(wk[0..key_len], pv.client_key[0..key_len]);
+                        @memcpy(wi[0..iv_len], pv.client_iv[0..iv_len]);
+                        @memcpy(rk[0..key_len], pv.server_key[0..key_len]);
+                        @memcpy(ri[0..iv_len], pv.server_iv[0..iv_len]);
+                    },
+                }
+            },
+            .tls_1_2 => {
+                switch (self.stored_client.?.application_cipher) {
+                    inline else => |*p| {
+                        const pv = &p.tls_1_2;
+                        self.app_write_key = .{0} ** 32;
+                        self.app_write_iv = .{0} ** 12;
+                        self.app_read_key = .{0} ** 32;
+                        self.app_read_iv = .{0} ** 12;
+                        const wk = &self.app_write_key.?;
+                        const wi = &self.app_write_iv.?;
+                        const rk = &self.app_read_key.?;
+                        const ri = &self.app_read_iv.?;
+                        const key_len = @min(pv.client_write_key.len, 32);
+                        const iv_len = @min(pv.client_write_IV.len, 12);
+                        @memcpy(wk[0..key_len], pv.client_write_key[0..key_len]);
+                        @memcpy(wi[0..iv_len], pv.client_write_IV[0..iv_len]);
+                        @memcpy(rk[0..key_len], pv.server_write_key[0..key_len]);
+                        @memcpy(ri[0..iv_len], pv.server_write_IV[0..iv_len]);
+                    },
+                }
+            },
+            else => return error.TlsUnsupportedCipherSuite,
         }
 
         if (self.stored_client.?.negotiated_alpn) |alpn_data| {
@@ -1204,19 +1240,19 @@ pub const TlsSession = struct {
         }
     }
 
-    fn handshakeTls12(self: *TlsSession, socket: *Socket, host: []const u8) !void {
-        try self.handshakeTls13(socket, host);
+    fn handshakeRetry(self: *TLSSession, socket: *Socket, host: []const u8) !void {
+        try self.handshakeDo(socket, host);
     }
 
-    pub fn isHttp2(self: *const TlsSession) bool {
-        return self.negotiated_alpn.isHttp2Result();
+    pub fn isHTTP2(self: *const TLSSession) bool {
+        return self.negotiated_alpn.isHTTP2Result();
     }
 
-    pub fn isHttp3(self: *const TlsSession) bool {
-        return self.negotiated_alpn.isHttp3Result();
+    pub fn isHTTP3(self: *const TLSSession) bool {
+        return self.negotiated_alpn.isHTTP3Result();
     }
 
-    pub fn write(self: *TlsSession, data: []const u8) !usize {
+    pub fn write(self: *TLSSession, data: []const u8) !usize {
         const socket = self.socket orelse return 0;
         const version = self.tls_version orelse return error.TlsHandshakeNotComplete;
         const key = self.app_write_key orelse return error.TlsHandshakeNotComplete;
@@ -1233,7 +1269,7 @@ pub const TlsSession = struct {
                     .length = @intCast(inner_len + 16),
                 };
                 hdr_val.format(&hdr);
-                const nonce_val = nonceTls13(&iv, self.write_seq);
+                const nonce_val = nonceTLS13(&iv, self.write_seq);
                 var out_buf: [record_header_len + max_plaintext_len + 256]u8 = undefined;
                 @memcpy(out_buf[0..record_header_len], &hdr);
                 var inner_plaintext: [max_plaintext_len]u8 = undefined;
@@ -1243,19 +1279,19 @@ pub const TlsSession = struct {
                     .AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
-                        const enc = try encryptTls13(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], inner_plaintext[0..inner_len], &hdr, &nonce_val, &k);
+                        const enc = try encryptTLS13(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], inner_plaintext[0..inner_len], &hdr, &nonce_val, &k);
                         break :blk enc.len;
                     },
                     .AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        const enc = try encryptTls13(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], inner_plaintext[0..inner_len], &hdr, &nonce_val, &k);
+                        const enc = try encryptTLS13(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], inner_plaintext[0..inner_len], &hdr, &nonce_val, &k);
                         break :blk enc.len;
                     },
                     .CHACHA20_POLY1305_SHA256 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        const enc = try encryptTls13(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], inner_plaintext[0..inner_len], &hdr, &nonce_val, &k);
+                        const enc = try encryptTLS13(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], inner_plaintext[0..inner_len], &hdr, &nonce_val, &k);
                         break :blk enc.len;
                     },
                     else => return error.TlsUnsupportedCipherSuite,
@@ -1279,19 +1315,19 @@ pub const TlsSession = struct {
                     .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
-                        const enc = try encryptTls12(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        const enc = try encryptTLS12(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
                         break :blk enc.len;
                     },
                     .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        const enc = try encryptTls12(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        const enc = try encryptTLS12(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
                         break :blk enc.len;
                     },
                     .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        const enc = try encryptTls12(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
+                        const enc = try encryptTLS12(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
                         break :blk enc.len;
                     },
                     else => return error.TlsUnsupportedCipherSuite,
@@ -1305,9 +1341,9 @@ pub const TlsSession = struct {
         }
     }
 
-    pub fn flush(_: *TlsSession) !void {}
+    pub fn flush(_: *TLSSession) !void {}
 
-    pub fn writeAll(self: *TlsSession, data: []const u8) !void {
+    pub fn writeAll(self: *TLSSession, data: []const u8) !void {
         var written: usize = 0;
         while (written < data.len) {
             const n = try self.write(data[written..]);
@@ -1316,7 +1352,7 @@ pub const TlsSession = struct {
         }
     }
 
-    pub fn read(self: *TlsSession, buf: []u8) !usize {
+    pub fn read(self: *TLSSession, buf: []u8) !usize {
         const socket = self.socket orelse return 0;
         const version = self.tls_version orelse return error.TlsHandshakeNotComplete;
         const key = self.app_read_key orelse return error.TlsHandshakeNotComplete;
@@ -1354,22 +1390,22 @@ pub const TlsSession = struct {
 
         switch (version) {
             .tls_1_3 => {
-                const nonce_val = nonceTls13(&iv, self.read_seq);
+                const nonce_val = nonceTLS13(&iv, self.read_seq);
                 const plaintext = switch (cs) {
                     .AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
-                        break :blk try decryptTls13(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], &nonce_val, &k);
+                        break :blk try decryptTLS13(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], &nonce_val, &k);
                     },
                     .AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        break :blk try decryptTls13(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], &nonce_val, &k);
+                        break :blk try decryptTLS13(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], &nonce_val, &k);
                     },
                     .CHACHA20_POLY1305_SHA256 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        break :blk try decryptTls13(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], &nonce_val, &k);
+                        break :blk try decryptTLS13(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], &nonce_val, &k);
                     },
                     else => return error.TlsUnsupportedCipherSuite,
                 };
@@ -1385,17 +1421,17 @@ pub const TlsSession = struct {
                     .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
-                        break :blk try decryptTls12(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                        break :blk try decryptTLS12(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
                     },
                     .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        break :blk try decryptTls12(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                        break :blk try decryptTLS12(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
                     },
                     .ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        break :blk try decryptTls12(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
+                        break :blk try decryptTLS12(crypto.aead.chacha_poly.ChaCha20Poly1305, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
                     },
                     else => return error.TlsUnsupportedCipherSuite,
                 };
@@ -1416,11 +1452,12 @@ pub const TlsSession = struct {
         }
     }
 };
+pub const TlsSession = TLSSession;
 
 pub fn connectClient(
     allocator: Allocator,
     socket: *Socket,
-    config: *const TlsConfig,
+    config: *const TLSConfig,
     host: []const u8,
 ) !Connection {
     var conn = Connection{
@@ -1430,7 +1467,7 @@ pub fn connectClient(
         .connected = true,
     };
 
-    var session = TlsSession.init(config.*);
+    var session = TLSSession.init(config.*);
     session.socket = socket;
     try session.handshake(host);
 
@@ -1444,7 +1481,7 @@ pub fn connectClient(
     return conn;
 }
 
-fn detectTls13(client_hello: []const u8) bool {
+fn detectTLS13(client_hello: []const u8) bool {
     if (client_hello.len < 42) return false;
     var off: usize = 4 + 2 + 32;
     if (off >= client_hello.len) return false;
@@ -1481,87 +1518,87 @@ fn detectTls13(client_hello: []const u8) bool {
     return false;
 }
 
-test "TlsConfig withH2 sets correct ALPN" {
-    const config = TlsConfig.withH2(std.testing.allocator);
+test "TLSConfig withH2 sets correct ALPN" {
+    const config = TLSConfig.withH2(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), config.alpn_protocols.len);
     try std.testing.expectEqualStrings("h2", config.alpn_protocols[0]);
     try std.testing.expectEqualStrings("http/1.1", config.alpn_protocols[1]);
 }
 
-test "TlsConfig insecure disables verification" {
-    const config = TlsConfig.insecure(std.testing.allocator);
+test "TLSConfig insecure disables verification" {
+    const config = TLSConfig.insecure(std.testing.allocator);
     try std.testing.expect(!config.verify_server);
 }
 
-test "TlsSession init" {
-    const session = TlsSession.init(TlsConfig.init(std.testing.allocator));
+test "TLSSession init" {
+    const session = TLSSession.init(TLSConfig.init(std.testing.allocator));
     try std.testing.expect(session.negotiated_alpn.get() == null);
     try std.testing.expect(session.tls_version == null);
 }
 
-test "TlsConfig withH3 sets correct ALPN" {
-    const config = TlsConfig.withH3(std.testing.allocator);
+test "TLSConfig withH3 sets correct ALPN" {
+    const config = TLSConfig.withH3(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 3), config.alpn_protocols.len);
     try std.testing.expectEqualStrings("h3", config.alpn_protocols[0]);
     try std.testing.expectEqualStrings("h2", config.alpn_protocols[1]);
     try std.testing.expectEqualStrings("http/1.1", config.alpn_protocols[2]);
 }
 
-test "TlsConfig insecureWithH2" {
-    const config = TlsConfig.insecureWithH2(std.testing.allocator);
+test "TLSConfig insecureWithH2" {
+    const config = TLSConfig.insecureWithH2(std.testing.allocator);
     try std.testing.expect(!config.verify_server);
     try std.testing.expectEqual(@as(usize, 2), config.alpn_protocols.len);
 }
 
-test "TlsConfig insecureWithH3" {
-    const config = TlsConfig.insecureWithH3(std.testing.allocator);
+test "TLSConfig insecureWithH3" {
+    const config = TLSConfig.insecureWithH3(std.testing.allocator);
     try std.testing.expect(!config.verify_server);
     try std.testing.expectEqual(@as(usize, 3), config.alpn_protocols.len);
     try std.testing.expectEqualStrings("h3", config.alpn_protocols[0]);
 }
 
-test "TlsConfig init defaults" {
-    const config = TlsConfig.init(std.testing.allocator);
+test "TLSConfig init defaults" {
+    const config = TLSConfig.init(std.testing.allocator);
     try std.testing.expect(config.verify_server);
     try std.testing.expectEqual(@as(usize, 1), config.alpn_protocols.len);
     try std.testing.expectEqualStrings("http/1.1", config.alpn_protocols[0]);
 }
 
-test "detectTls13 returns false for short data" {
-    try std.testing.expect(!detectTls13(&[_]u8{0}));
+test "detectTLS13 returns false for short data" {
+    try std.testing.expect(!detectTLS13(&[_]u8{0}));
 }
 
-test "detectTls13 returns false for no supported_versions extension" {
+test "detectTLS13 returns false for no supported_versions extension" {
     var buf: [50]u8 = [_]u8{0} ** 50;
     buf[0] = 1;
     buf[1] = 0x33;
-    try std.testing.expect(!detectTls13(&buf));
+    try std.testing.expect(!detectTLS13(&buf));
 }
 
-test "TlsSession isHttp2/isHttp3" {
-    var session = TlsSession.init(TlsConfig.init(std.testing.allocator));
-    try std.testing.expect(!session.isHttp2());
-    try std.testing.expect(!session.isHttp3());
+test "TLSSession isHTTP2/isHTTP3" {
+    var session = TLSSession.init(TLSConfig.init(std.testing.allocator));
+    try std.testing.expect(!session.isHTTP2());
+    try std.testing.expect(!session.isHTTP3());
     session.negotiated_alpn.set("h2");
-    try std.testing.expect(session.isHttp2());
-    try std.testing.expect(!session.isHttp3());
+    try std.testing.expect(session.isHTTP2());
+    try std.testing.expect(!session.isHTTP3());
 }
 
-test "TlsSession negotiatedProtocol returns null initially" {
-    const session = TlsSession.init(TlsConfig.init(std.testing.allocator));
+test "TLSSession negotiatedProtocol returns null initially" {
+    const session = TLSSession.init(TLSConfig.init(std.testing.allocator));
     try std.testing.expect(session.negotiatedProtocol() == null);
 }
 
-test "TlsSession negotiatedProtocol returns protocol after set" {
-    var session = TlsSession.init(TlsConfig.init(std.testing.allocator));
+test "TLSSession negotiatedProtocol returns protocol after set" {
+    var session = TLSSession.init(TLSConfig.init(std.testing.allocator));
     session.negotiated_alpn.set("h3");
     const proto = session.negotiatedProtocol();
     try std.testing.expect(proto != null);
     try std.testing.expectEqualStrings("h3", proto.?);
 }
 
-test "TlsSession deinit zeros key material" {
-    var session = TlsSession.init(TlsConfig.init(std.testing.allocator));
+test "TLSSession deinit zeros key material" {
+    var session = TLSSession.init(TLSConfig.init(std.testing.allocator));
     session.app_write_key = [_]u8{0xAB} ** 32;
     session.app_read_key = [_]u8{0xCD} ** 32;
     session.deinit();
@@ -1582,11 +1619,39 @@ test "Connection struct field defaults" {
     try std.testing.expect(!defaults.connected);
     try std.testing.expect(defaults.tls_version == .tls_1_2);
     try std.testing.expect(defaults.negotiated_alpn.get() == null);
+    try std.testing.expect(defaults.sni_hostname == null);
 }
 
-test "nonceTls13 XORs IV correctly" {
+test "Connection sniHostname returns hostname when set" {
+    const conn = Connection{
+        .allocator = undefined,
+        .socket = undefined,
+        .sni_hostname = "example.com",
+    };
+    try std.testing.expect(conn.sniHostname() != null);
+    try std.testing.expectEqualStrings("example.com", conn.sniHostname().?);
+}
+
+test "Connection sniHostname returns null when not set" {
+    const conn = Connection{
+        .allocator = undefined,
+        .socket = undefined,
+    };
+    try std.testing.expect(conn.sniHostname() == null);
+}
+
+test "TLSConfig wantsHTTP2" {
+    const config_h2 = TLSConfig.withH2(std.testing.allocator);
+    try std.testing.expect(config_h2.wantsHTTP2());
+    const config_default = TLSConfig.init(std.testing.allocator);
+    try std.testing.expect(!config_default.wantsHTTP2());
+    const config_h3 = TLSConfig.withH3(std.testing.allocator);
+    try std.testing.expect(config_h3.wantsHTTP2());
+}
+
+test "nonceTLS13 XORs IV correctly" {
     const iv = [_]u8{0} ** 12;
-    const nonce_val = nonceTls13(&iv, 1);
+    const nonce_val = nonceTLS13(&iv, 1);
     try std.testing.expectEqual(@as(u8, 0), nonce_val[0]);
     try std.testing.expectEqual(@as(u8, 0), nonce_val[7]);
     try std.testing.expectEqual(@as(u8, 1), nonce_val[11]);

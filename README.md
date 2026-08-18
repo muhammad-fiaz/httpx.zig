@@ -58,7 +58,7 @@
 - For **compression file format** support, check out **[zigx](https://github.com/muhammad-fiaz/zigx)**.
 - For **CUDA** support, check out **[cuda.zig](https://github.com/muhammad-fiaz/cuda.zig)**.
 - For **Simplified build.zig config** support, check out **[buildx.zig](https://github.com/muhammad-fiaz/buildx.zig)**.
-- For **SQLite** support, check out **[sqlite.zig](https://github.com/muhammad-fiaz/sqlite.zig)**.
+- For **SQLite (zig-native implementation)** support, check out **[sqlite.zig](https://github.com/muhammad-fiaz/sqlite.zig)**.
 - For **file downloading** support, check out **[downloader.zig](https://github.com/muhammad-fiaz/downloader.zig)**.
 - For **update checker/auto-updater** support, check out **[updater.zig](https://github.com/muhammad-fiaz/updater.zig)**.
 - For **numerical computing** support, check out **[num.zig](https://github.com/muhammad-fiaz/num.zig)**.
@@ -94,7 +94,7 @@
 | **Socket APIs** | Cross-platform TCP/UDP socket helpers, listener wrappers, and TLS stream adapters. | https://muhammad-fiaz.github.io/httpx.zig/api/net |
 | **Proxy Support** | Client-side HTTP forward proxy routing, SOCKS5h tunneling, and server-side reverse proxy middleware with SSRF protection. | https://muhammad-fiaz.github.io/httpx.zig/examples/proxy-example |
 | **Interceptors** | Global hooks to modify requests and responses (e.g., Auth injection). | https://muhammad-fiaz.github.io/httpx.zig/guide/interceptors |
-| **Logging Hooks** | Server log callbacks plus logger middleware customization for structured output. Internal logging uses tint.zig for colored output; configurable via `log_level` and `log_fn`. | https://muhammad-fiaz.github.io/httpx.zig/api/middleware |
+| **Logging Hooks** | Server log callbacks plus logger middleware customization for structured output. Internal logging uses tint.zig for colored output; configurable via `log_level` and `log_fn`. Client is silent by default — no internal printing. Custom loggers receive pre-formatted strings without ANSI. | https://muhammad-fiaz.github.io/httpx.zig/api/middleware |
 | **Smart Retries** | Configurable retry policies with exponential backoff. | https://muhammad-fiaz.github.io/httpx.zig/api/client |
 | **Cross-Platform Sockets** | Robust Windows socket handling with `WSAEWOULDBLOCK` retry via `select()`, plus `MSG_NOSIGNAL` on Linux/macOS to prevent SIGPIPE crashes. | https://muhammad-fiaz.github.io/httpx.zig/api/net |
 | **Config Builder Helpers** | Chainable optional customization helpers for `ClientConfig` and `RequestOptions` (defaults remain implicit). | https://muhammad-fiaz.github.io/httpx.zig/api/client |
@@ -104,18 +104,18 @@
 | **TLS/SSL** | Full TLS 1.2 and 1.3 with ALPN (RFC 7301), X25519 key exchange, AEAD ciphers (ChaCha20-Poly1305, AES-128/256-GCM), handshake encryption, X.509 certificate parsing (client-side), PEM cert/key loading for servers, and custom record-layer encryption/decryption. | https://muhammad-fiaz.github.io/httpx.zig/api/tls |
 | **Static Files** | Efficient static file serving with ETag, cache control, conditional GET, and MIME type detection. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **Streaming and Realtime** | Chunked transfer responses with optional trailers and SSE response helpers. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
-| **Streaming Compression** | `StreamingCompressor` and `StreamingDecompressor` for chunked gzip/deflate/brotli/zstd without buffering entire payloads. | https://muhammad-fiaz.github.io/httpx.zig/api/utils |
-| **HTTP Caching** | `CacheControl` header parsing, `HttpCache` (LRU in-memory with TTL), `ConditionalGet` (ETag/If-None-Match), and thread-safe cache operations. | https://muhammad-fiaz.github.io/httpx.zig/api/utils |
-| **Buffer Pool** | `BufferPool` with slot-based ownership tracking, acquire/release semantics, and detection of foreign/double-release buffers. | https://muhammad-fiaz.github.io/httpx.zig/api/utils |
-| **DNS Resolution** | `resolveAddress`, `resolveAllAddresses`, `parseHostAndPort`, `parseAndResolveAddress`, `isIpAddress`, `isIp4Address`, `isIp6Address` helpers. | https://muhammad-fiaz.github.io/httpx.zig/api/dns |
-| **Server-Sent Events** | `SseEvent` type and `parseSseStream` helper for SSE client parsing. | https://muhammad-fiaz.github.io/httpx.zig/api/utils |
-| **Debug System** | Structured debug logging with `entry`/`exit`/`log`/`detail` calls, configurable via `debug.enabled` flag. | https://muhammad-fiaz.github.io/httpx.zig/api/utils |
+| **Streaming Compression** | `StreamingCompressor` and `StreamingDecompressor` for chunked gzip/deflate/brotli/zstd without buffering entire payloads. | https://muhammad-fiaz.github.io/httpx.zig/api/compress |
+| **HTTP Caching** | `CacheControl` header parsing, `HttpCache` (LRU in-memory with TTL), `ConditionalGet` (ETag/If-None-Match), and thread-safe cache operations. | https://muhammad-fiaz.github.io/httpx.zig/api/cache |
+| **Buffer Pool** | `BufferPool` with slot-based ownership tracking, acquire/release semantics, and detection of foreign/double-release buffers. | https://muhammad-fiaz.github.io/httpx.zig/api/io |
+| **DNS Resolution** | `resolveAddress`, `resolveAllAddresses`, `parseHostAndPort`, `parseAndResolveAddress`, `isIpAddress`, `isIp4Address`, `isIp6Address` helpers with RFC 1035 wire protocol, UDP/TCP/DoH transports, and SSRF policy checks. | https://muhammad-fiaz.github.io/httpx.zig/api/dns |
+| **Server-Sent Events** | `SseEvent` type and `parseSseStream` helper for SSE client parsing. | https://muhammad-fiaz.github.io/httpx.zig/api/sse |
+| **Debug System** | Structured debug logging with `entry`/`exit`/`log`/`detail` calls, configurable via `debug.enabled` flag. | https://muhammad-fiaz.github.io/httpx.zig/api/io |
 | **HTTP/3 Flow Control** | MAX_DATA and MAX_STREAM_DATA frame handling with connection-level and per-stream flow control windows. | https://muhammad-fiaz.github.io/httpx.zig/examples/http3-advanced |
 | **Stream Cancellation** | RESET_STREAM and STOP_SENDING frames for graceful HTTP/3 stream teardown without connection disruption. | https://muhammad-fiaz.github.io/httpx.zig/examples/http3-advanced |
 | **Cookie APIs** | First-class request/response cookie helpers for both client and server contexts. | https://muhammad-fiaz.github.io/httpx.zig/api/server |
 | **Security** | Security headers (Helmet: X-Content-Type-Options, X-Frame-Options, X-XSS-Protection, HSTS), CSRF protection, SSRF protection in reverse proxy, and safe defaults. | https://muhammad-fiaz.github.io/httpx.zig/api/middleware |
 | **Minimal Dependencies** | Pure Zig core implementation for maximum portability. Compression uses bundled brotli and zstd packages. | https://muhammad-fiaz.github.io/httpx.zig/guide/installation |
-| **Shared Common Helpers** | Reusable query/cookie helpers plus MIME resolution with explicit fallback and external mapping support. | https://muhammad-fiaz.github.io/httpx.zig/api/utils |
+| **Shared Common Helpers** | Reusable query/cookie helpers plus MIME resolution with explicit fallback and external mapping support. | https://muhammad-fiaz.github.io/httpx.zig/api/data |
 | **WebSockets** | RFC 6455 upgrade checks, handshake accept key computations, and frame encoding/decoding. | https://muhammad-fiaz.github.io/httpx.zig/examples/websocket-example |
 | **Multipart Form Data** | RFC 2046 multipart body builder (`addFile`, `addFileChunked`) and parser for text fields and large file uploads. Windows-safe: each `winsock.send()` is capped at 64 KB to prevent upload hangs (fix for issue [#26](https://github.com/muhammad-fiaz/httpx.zig/issues/26)). | https://muhammad-fiaz.github.io/httpx.zig/examples/multipart-example |
 | **Session Management** | TTL-based secure in-memory session store and cookie integration. | https://muhammad-fiaz.github.io/httpx.zig/examples/session-example |
@@ -364,6 +364,16 @@ const mime = httpx.mimeTypeFromPath("file.html");
 // ── Lifecycle ──
 try httpx.netInit();
 defer httpx.netDeinit();
+
+// ── Short Aliases ──
+const hpack = httpx.HpackContext;     // HTTP/2 header compression
+const qpack = httpx.QpackContext;     // HTTP/3 header compression
+const h2 = httpx.Http2Connection;     // HTTP/2 connection
+const h2s = httpx.Http2Connection.Settings; // HTTP/2 settings
+const tls_cfg = httpx.TlsConfig;      // TLS configuration
+const tls_s = httpx.TlsSession;       // TLS session
+const sse = httpx.SseEvent;           // Server-Sent Events
+const h3s = httpx.Http3Settings;      // HTTP/3 settings
 ```
 
 ### Concurrency
@@ -449,7 +459,7 @@ const is_ip = httpx.isIpAddress("::1"); // true
  
 ## Examples
 
-The `examples/` directory contains **60 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
+The `examples/` directory contains **63 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
 
 **Client:**
 - [`simple_get`](examples/simple_get.zig) - Basic GET requests
@@ -491,6 +501,7 @@ The `examples/` directory contains **60 comprehensive, runnable examples** demon
 - [`request_response_customization`](examples/request_response_customization.zig) - Request/response customization
 - [`async_server_example`](examples/async_server_example.zig) - Thread pool concurrency
 - [`logging_callback`](examples/logging_callback.zig) - Custom logging, silent mode, and log_level filtering
+- [`logging_callback_server`](examples/logging_callback_server.zig) - Server logging with tint.zig colors and custom logger
 - [`reverse_proxy_middleware`](examples/reverse_proxy_middleware.zig) - Reverse proxy middleware
 
 **Protocol:**

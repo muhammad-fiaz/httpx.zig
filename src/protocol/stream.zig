@@ -16,7 +16,6 @@ const Allocator = mem.Allocator;
 
 const http = @import("http.zig");
 const hpack = @import("hpack.zig");
-const dbg = @import("../util/debug.zig");
 
 /// HTTP/2 Stream States as per RFC 7540 Section 5.1
 pub const StreamState = enum {
@@ -119,11 +118,9 @@ pub const Stream = struct {
         switch (self.state) {
             .open => {
                 self.state = .half_closed_local;
-                dbg.log("STREAM", "stream {d} -> half_closed_local (sent END_STREAM)", .{self.id});
             },
             .half_closed_remote => {
                 self.state = .closed;
-                dbg.log("STREAM", "stream {d} -> closed (sent END_STREAM)", .{self.id});
             },
             else => {},
         }
@@ -135,11 +132,9 @@ pub const Stream = struct {
         switch (self.state) {
             .open => {
                 self.state = .half_closed_remote;
-                dbg.log("STREAM", "stream {d} -> half_closed_remote (recv END_STREAM)", .{self.id});
             },
             .half_closed_local => {
                 self.state = .closed;
-                dbg.log("STREAM", "stream {d} -> closed (recv END_STREAM)", .{self.id});
             },
             else => {},
         }
@@ -147,17 +142,13 @@ pub const Stream = struct {
 
     /// Opens the stream (transitions from idle to open).
     pub fn open(self: *Self) !void {
-        dbg.entry("STREAM", "Stream.open");
         if (self.state != .idle) return error.InvalidStreamState;
         self.state = .open;
-        dbg.log("STREAM", "stream {d} -> open", .{self.id});
     }
 
     /// Closes the stream due to RST_STREAM or error.
     pub fn reset(self: *Self) void {
-        dbg.entry("STREAM", "Stream.reset");
         self.state = .closed;
-        dbg.log("STREAM", "stream {d} -> closed (reset)", .{self.id});
     }
 
     /// Updates the send window by delta (can be negative for data sent).
@@ -199,10 +190,10 @@ pub const StreamManager = struct {
     max_concurrent_streams: u32 = 100,
 
     /// Peer's connection settings for enforcement.
-    peer_settings: http.Http2Connection.Http2ConnectionSettings = .{},
+    peer_settings: http.HTTP2Connection.HTTP2ConnectionSettings = .{},
 
     /// HPACK encoder/decoder context.
-    hpack_ctx: hpack.HpackContext,
+    hpack_ctx: hpack.HPACKContext,
 
     const Self = @This();
 
@@ -210,7 +201,7 @@ pub const StreamManager = struct {
         return .{
             .allocator = allocator,
             .is_client = is_client,
-            .hpack_ctx = hpack.HpackContext.init(allocator),
+            .hpack_ctx = hpack.HPACKContext.init(allocator),
         };
     }
 
@@ -295,7 +286,7 @@ pub const StreamManager = struct {
     }
 
     /// Applies peer settings and enforces INITIAL_WINDOW_SIZE delta on all streams.
-    pub fn applyPeerSettings(self: *Self, new_settings: http.Http2Connection.Http2ConnectionSettings) !void {
+    pub fn applyPeerSettings(self: *Self, new_settings: http.HTTP2Connection.HTTP2ConnectionSettings) !void {
         const old_window = self.peer_settings.initial_window_size;
         self.peer_settings = new_settings;
         self.max_concurrent_streams = new_settings.max_concurrent_streams;
@@ -417,7 +408,7 @@ pub fn buildHeadersAndContinuations(
         errdefer result.deinit(allocator);
 
         const total_payload_len = priority_payload.items.len + encoded_headers.len;
-        const frame_header = http.Http2FrameHeader{
+        const frame_header = http.HTTP2FrameHeader{
             .length = @intCast(total_payload_len),
             .frame_type = .headers,
             .flags = flags,
@@ -444,7 +435,7 @@ pub fn buildHeadersAndContinuations(
     const first_chunk_len = @min(full_payload.items.len, max_fragment_size);
     {
         const first_flags: u8 = if (end_stream) 0x01 else 0; // END_STREAM only, no END_HEADERS
-        const frame_header = http.Http2FrameHeader{
+        const frame_header = http.HTTP2FrameHeader{
             .length = @intCast(first_chunk_len),
             .frame_type = .headers,
             .flags = first_flags,
@@ -462,7 +453,7 @@ pub fn buildHeadersAndContinuations(
         const is_last = (offset + chunk_len) == full_payload.items.len;
         const cont_flags: u8 = if (is_last) 0x04 else 0; // END_HEADERS on last CONTINUATION
 
-        const frame_header = http.Http2FrameHeader{
+        const frame_header = http.HTTP2FrameHeader{
             .length = @intCast(chunk_len),
             .frame_type = .continuation,
             .flags = cont_flags,
@@ -551,7 +542,7 @@ pub fn parseWindowUpdatePayload(payload: []const u8) !u31 {
 }
 
 /// Builds an RST_STREAM frame payload.
-pub fn buildRstStreamPayload(error_code: http.Http2ErrorCode) [4]u8 {
+pub fn buildRstStreamPayload(error_code: http.HTTP2ErrorCode) [4]u8 {
     const code = @intFromEnum(error_code);
     var buf: [4]u8 = undefined;
     buf[0] = @intCast((code >> 24) & 0xFF);
@@ -562,7 +553,7 @@ pub fn buildRstStreamPayload(error_code: http.Http2ErrorCode) [4]u8 {
 }
 
 /// Parses an RST_STREAM frame payload.
-pub fn parseRstStreamPayload(payload: []const u8) !http.Http2ErrorCode {
+pub fn parseRstStreamPayload(payload: []const u8) !http.HTTP2ErrorCode {
     if (payload.len != 4) return error.InvalidFrame;
     const code = (@as(u32, payload[0]) << 24) |
         (@as(u32, payload[1]) << 16) |
@@ -599,7 +590,7 @@ pub fn parsePriorityPayload(payload: []const u8) !StreamPriority {
 }
 
 /// Builds a GOAWAY frame payload.
-pub fn buildGoawayPayload(last_stream_id: u31, error_code: http.Http2ErrorCode, debug_data: ?[]const u8, allocator: Allocator) ![]u8 {
+pub fn buildGoawayPayload(last_stream_id: u31, error_code: http.HTTP2ErrorCode, debug_data: ?[]const u8, allocator: Allocator) ![]u8 {
     const code = @intFromEnum(error_code);
     const debug_len = if (debug_data) |d| d.len else 0;
     const payload = try allocator.alloc(u8, 8 + debug_len);
@@ -624,7 +615,7 @@ pub fn buildGoawayPayload(last_stream_id: u31, error_code: http.Http2ErrorCode, 
 /// Parses a GOAWAY frame payload.
 pub fn parseGoawayPayload(payload: []const u8, allocator: Allocator) !struct {
     last_stream_id: u31,
-    error_code: http.Http2ErrorCode,
+    error_code: http.HTTP2ErrorCode,
     debug_data: ?[]u8,
 } {
     if (payload.len < 8) return error.InvalidFrame;
@@ -635,7 +626,7 @@ pub fn parseGoawayPayload(payload: []const u8, allocator: Allocator) !struct {
             (@as(u32, payload[2]) << 8) |
             payload[3],
     );
-    const error_code: http.Http2ErrorCode = @enumFromInt(
+    const error_code: http.HTTP2ErrorCode = @enumFromInt(
         (@as(u32, payload[4]) << 24) |
             (@as(u32, payload[5]) << 16) |
             (@as(u32, payload[6]) << 8) |
@@ -662,7 +653,7 @@ pub fn buildPingPayload(opaque_data: [8]u8) [8]u8 {
 /// Builds a complete GOAWAY frame (header + payload) ready to write.
 pub fn buildGoawayFrame(
     last_stream_id: u31,
-    error_code: http.Http2ErrorCode,
+    error_code: http.HTTP2ErrorCode,
     debug_data: ?[]const u8,
     allocator: Allocator,
 ) ![]u8 {
@@ -672,7 +663,7 @@ pub fn buildGoawayFrame(
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
 
-    const header = http.Http2FrameHeader{
+    const header = http.HTTP2FrameHeader{
         .length = @intCast(payload.len),
         .frame_type = .goaway,
         .flags = 0,
@@ -689,10 +680,10 @@ pub fn buildGoawayFrame(
 /// Builds a complete RST_STREAM frame (header + payload) ready to write.
 pub fn buildRstStreamFrame(
     stream_id: u31,
-    error_code: http.Http2ErrorCode,
+    error_code: http.HTTP2ErrorCode,
 ) [13]u8 {
     const payload = buildRstStreamPayload(error_code);
-    const header = http.Http2FrameHeader{
+    const header = http.HTTP2FrameHeader{
         .length = 4,
         .frame_type = .rst_stream,
         .flags = 0,
@@ -758,7 +749,7 @@ test "WINDOW_UPDATE payload" {
 test "RST_STREAM payload" {
     const payload = buildRstStreamPayload(.cancel);
     const error_code = try parseRstStreamPayload(&payload);
-    try std.testing.expectEqual(http.Http2ErrorCode.cancel, error_code);
+    try std.testing.expectEqual(http.HTTP2ErrorCode.cancel, error_code);
 }
 
 test "PRIORITY payload" {
@@ -812,7 +803,7 @@ test "applyPeerSettings updates max_concurrent_streams and window size" {
     try std.testing.expectEqual(@as(i32, 65535), stream.send_window);
 
     // Apply new settings with different initial_window_size
-    const new_settings = http.Http2Connection.Http2ConnectionSettings{
+    const new_settings = http.HTTP2Connection.HTTP2ConnectionSettings{
         .max_concurrent_streams = 50,
         .initial_window_size = 32768,
         .max_frame_size = 16384,
@@ -834,9 +825,9 @@ test "buildGoawayFrame produces correct wire format" {
     try std.testing.expectEqual(@as(usize, 27), frame.len);
 
     // Parse the frame header
-    const header = http.Http2FrameHeader.parse(frame[0..9].*);
+    const header = http.HTTP2FrameHeader.parse(frame[0..9].*);
     try std.testing.expectEqual(@as(u24, 18), header.length);
-    try std.testing.expectEqual(http.Http2FrameType.goaway, header.frame_type);
+    try std.testing.expectEqual(http.HTTP2FrameType.goaway, header.frame_type);
     try std.testing.expectEqual(@as(u31, 0), header.stream_id);
 
     // Parse the GOAWAY payload directly from frame bytes
@@ -849,13 +840,13 @@ test "buildGoawayFrame produces correct wire format" {
     );
     try std.testing.expectEqual(@as(u31, 5), last_stream_id);
 
-    const error_code: http.Http2ErrorCode = @enumFromInt(
+    const error_code: http.HTTP2ErrorCode = @enumFromInt(
         (@as(u32, payload[4]) << 24) |
             (@as(u32, payload[5]) << 16) |
             (@as(u32, payload[6]) << 8) |
             payload[7],
     );
-    try std.testing.expectEqual(http.Http2ErrorCode.no_error, error_code);
+    try std.testing.expectEqual(http.HTTP2ErrorCode.no_error, error_code);
     try std.testing.expectEqualStrings("debug info", payload[8..]);
 }
 
@@ -865,11 +856,11 @@ test "buildRstStreamFrame produces correct wire format" {
     // 13 bytes total: 9-byte header + 4-byte error code
     try std.testing.expectEqual(@as(usize, 13), frame.len);
 
-    const header = http.Http2FrameHeader.parse(frame[0..9].*);
+    const header = http.HTTP2FrameHeader.parse(frame[0..9].*);
     try std.testing.expectEqual(@as(u24, 4), header.length);
-    try std.testing.expectEqual(http.Http2FrameType.rst_stream, header.frame_type);
+    try std.testing.expectEqual(http.HTTP2FrameType.rst_stream, header.frame_type);
     try std.testing.expectEqual(@as(u31, 3), header.stream_id);
 
     const error_code = try parseRstStreamPayload(frame[9..13]);
-    try std.testing.expectEqual(http.Http2ErrorCode.cancel, error_code);
+    try std.testing.expectEqual(http.HTTP2ErrorCode.cancel, error_code);
 }

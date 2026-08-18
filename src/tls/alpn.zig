@@ -9,7 +9,6 @@
 
 const std = @import("std");
 const mem = std.mem;
-const dbg = @import("../util/debug.zig");
 
 // Well-known protocol identifiers
 
@@ -36,28 +35,25 @@ pub fn serverNegotiate(
     server_preference: []const []const u8,
     client_offer: []const []const u8,
 ) ?[]const u8 {
-    dbg.log("ALPN", "serverNegotiate: server={d}, client={d}", .{ server_preference.len, client_offer.len });
     for (server_preference) |sp| {
         for (client_offer) |co| {
             if (mem.eql(u8, sp, co)) {
-                dbg.log("ALPN", "negotiated: {s}", .{sp});
                 return sp;
             }
         }
     }
-    dbg.log("ALPN", "no match found", .{});
     return null;
 }
 
 /// Returns true if the negotiated protocol string indicates HTTP/2.
-pub fn isHttp2(protocol: ?[]const u8) bool {
+pub fn isHTTP2(protocol: ?[]const u8) bool {
     const p = protocol orelse return false;
     return mem.eql(u8, p, Protocol.HTTP2);
 }
 
 /// Returns true if the negotiated protocol string indicates HTTP/3
 /// (including draft versions like "h3-29").
-pub fn isHttp3(protocol: ?[]const u8) bool {
+pub fn isHTTP3(protocol: ?[]const u8) bool {
     const p = protocol orelse return false;
     return mem.eql(u8, p, Protocol.HTTP3) or
         mem.startsWith(u8, p, "h3-");
@@ -96,12 +92,12 @@ pub const NegotiatedAlpn = struct {
         return self.buf[0..self.len];
     }
 
-    pub fn isHttp2Result(self: *const NegotiatedAlpn) bool {
-        return isHttp2(self.get());
+    pub fn isHTTP2Result(self: *const NegotiatedAlpn) bool {
+        return isHTTP2(self.get());
     }
 
-    pub fn isHttp3Result(self: *const NegotiatedAlpn) bool {
-        return isHttp3(self.get());
+    pub fn isHTTP3Result(self: *const NegotiatedAlpn) bool {
+        return isHTTP3(self.get());
     }
 
     pub fn isHttp1xResult(self: *const NegotiatedAlpn) bool {
@@ -125,13 +121,13 @@ test "serverNegotiate returns null on no match" {
     try std.testing.expect(serverNegotiate(server, client) == null);
 }
 
-test "isHttp2 / isHttp3 / isHttp1x" {
+test "isHTTP2 / isHTTP3 / isHttp1x" {
     const t = std.testing;
-    try t.expect(isHttp2("h2"));
-    try t.expect(!isHttp2("http/1.1"));
-    try t.expect(isHttp3("h3"));
-    try t.expect(isHttp3("h3-29"));
-    try t.expect(!isHttp3("h2"));
+    try t.expect(isHTTP2("h2"));
+    try t.expect(!isHTTP2("http/1.1"));
+    try t.expect(isHTTP3("h3"));
+    try t.expect(isHTTP3("h3-29"));
+    try t.expect(!isHTTP3("h2"));
     try t.expect(isHttp1x("http/1.1"));
     try t.expect(isHttp1x("http/1.0"));
     try t.expect(isHttp1x(null)); // no ALPN -> default to HTTP/1.x
@@ -144,10 +140,10 @@ test "NegotiatedAlpn round-trip" {
     try t.expect(n.get() == null);
     n.set(Protocol.HTTP2);
     try t.expectEqualStrings(Protocol.HTTP2, n.get().?);
-    try t.expect(n.isHttp2Result());
-    try t.expect(!n.isHttp3Result());
+    try t.expect(n.isHTTP2Result());
+    try t.expect(!n.isHTTP3Result());
     n.set(Protocol.H3_29);
-    try t.expect(n.isHttp3Result());
+    try t.expect(n.isHTTP3Result());
 }
 
 test "NegotiatedAlpn set/get multiple protocols" {
@@ -155,8 +151,8 @@ test "NegotiatedAlpn set/get multiple protocols" {
     var n: NegotiatedAlpn = .{};
     n.set("custom-proto");
     try t.expectEqualStrings("custom-proto", n.get().?);
-    try t.expect(!n.isHttp2Result());
-    try t.expect(!n.isHttp3Result());
+    try t.expect(!n.isHTTP2Result());
+    try t.expect(!n.isHTTP3Result());
     try t.expect(!n.isHttp1xResult());
 }
 
@@ -185,8 +181,8 @@ test "serverNegotiate empty client list" {
     try std.testing.expect(serverNegotiate(server, client) == null);
 }
 
-test "isHttp3 with h3-30 draft" {
-    try std.testing.expect(isHttp3("h3-30"));
+test "isHTTP3 with h3-30 draft" {
+    try std.testing.expect(isHTTP3("h3-30"));
 }
 
 test "isHttp1x with http/1.0" {

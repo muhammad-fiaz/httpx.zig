@@ -30,8 +30,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const list_writer = @import("list_writer.zig");
-const dbg = @import("debug.zig");
+const list_writer = @import("../io/list_writer.zig");
 
 fn stringifyJsonAlloc(allocator: Allocator, value: anytype, options: std.json.Stringify.Options) ![]u8 {
     return std.json.Stringify.valueAlloc(allocator, value, options);
@@ -42,8 +41,6 @@ pub const Json = struct {
     /// Parses a JSON string into the specified type.
     /// The caller must call `deinit()` on the returned `std.json.Parsed(T)`.
     pub fn parse(comptime T: type, allocator: Allocator, data: []const u8) !std.json.Parsed(T) {
-        dbg.entry("JSON", "Json.parse");
-        dbg.exit("JSON", "Json.parse");
         return std.json.parseFromSlice(T, allocator, data, .{});
     }
 
@@ -79,8 +76,6 @@ pub const Json = struct {
 
     /// Serializes a value to a JSON string.
     pub fn stringify(allocator: Allocator, value: anytype) ![]u8 {
-        dbg.entry("JSON", "Json.stringify");
-        dbg.exit("JSON", "Json.stringify");
         return stringifyJsonAlloc(allocator, value, .{});
     }
 
@@ -437,12 +432,14 @@ pub const JsonValue = struct {
     }
 
     /// Creates a JsonValue from any Zig value (struct, int, string, etc.).
+    /// The caller owns the returned value and must ensure the allocator outlives it.
     pub fn from(allocator: Allocator, value: anytype) !Self {
         const json_str = try std.json.Stringify.valueAlloc(allocator, value, .{});
         defer allocator.free(json_str);
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_str, .{});
-        _ = parsed.arena;
-        return .{ .inner = parsed.value, .allocator = allocator };
+        // Use leaky parse to avoid creating an arena that would be lost.
+        // The allocator passed here is responsible for freeing the parsed value.
+        const parsed = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json_str, .{});
+        return .{ .inner = parsed, .allocator = allocator };
     }
 };
 
@@ -578,10 +575,6 @@ test "isJsonContentType" {
     try std.testing.expect(!isJsonContentType("application/xml"));
     try std.testing.expect(!isJsonContentType(""));
 }
-
-// ========================================================================
-// JsonBuilder - dynamic JSON construction
-// ========================================================================
 
 /// Dynamic JSON builder for constructing JSON objects.
 pub const JsonBuilder = struct {

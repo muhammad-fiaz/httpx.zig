@@ -8,7 +8,6 @@
 //! provide compile-time string conversion for maximum performance.
 
 const std = @import("std");
-const dbg = @import("../util/debug.zig");
 const status_mod = @import("status.zig");
 
 /// HTTP request methods as defined in RFC 7231 and RFC 5789.
@@ -27,10 +26,6 @@ pub const Method = enum {
 
     /// Converts the method to its canonical string representation.
     pub fn toString(self: Method) []const u8 {
-        if (!@inComptime()) dbg.entry("TYPE", "Method.toString");
-        defer {
-            if (!@inComptime()) dbg.exit("TYPE", "Method.toString");
-        }
         return switch (self) {
             .GET => "GET",
             .POST => "POST",
@@ -109,10 +104,6 @@ pub const Version = enum {
 
     /// Returns the canonical string representation of the version.
     pub fn toString(self: Version) []const u8 {
-        if (!@inComptime()) dbg.entry("TYPE", "Version.toString");
-        defer {
-            if (!@inComptime()) dbg.exit("TYPE", "Version.toString");
-        }
         return switch (self) {
             .HTTP_1_0 => "HTTP/1.0",
             .HTTP_1_1 => "HTTP/1.1",
@@ -141,18 +132,18 @@ pub const Version = enum {
     }
 
     /// Returns true if the version uses QUIC transport.
-    pub fn usesQuic(self: Version) bool {
+    pub fn usesQUIC(self: Version) bool {
         return self == .HTTP_3;
     }
 
     /// Returns true if the version requires TLS by specification.
-    pub fn requiresTls(self: Version) bool {
+    pub fn requiresTLS(self: Version) bool {
         return self == .HTTP_2 or self == .HTTP_3;
     }
 };
 
 /// HTTP error types with context information for debugging.
-pub const HttpError = error{
+pub const HTTPError = error{
     ConnectionFailed,
     ConnectionReset,
     ConnectionTimeout,
@@ -161,22 +152,32 @@ pub const HttpError = error{
     InvalidHeader,
     InvalidChunkSize,
     TooManyRedirects,
-    TlsHandshakeFailed,
-    TlsCertificateError,
-    TlsError,
+    TLSHandshakeFailed,
+    TLSCertificateError,
+    TLSError,
+    TLSTimeout,
     ResponseTooLarge,
     RequestTooLarge,
     Timeout,
+    RequestTimeout,
+    ReadTimeout,
+    WriteTimeout,
+    DNSTimeout,
+    ProxyTimeout,
+    HeaderTimeout,
+    IdleTimeout,
+    ShutdownTimeout,
+    Cancelled,
     HostUnreachable,
-    DnsResolutionFailed,
+    DNSResolutionFailed,
     ProtocolError,
     StreamError,
     FlowControlError,
     FrameError,
     CompressionError,
-    Http2Error,
-    Http3Error,
-    QuicError,
+    HTTP2Error,
+    HTTP3Error,
+    QUICError,
     OutOfMemory,
 };
 
@@ -274,6 +275,12 @@ pub const Timeouts = struct {
     keep_alive_ms: u64 = 60_000,
     idle_ms: u64 = 120_000,
     request_ms: u64 = 0,
+    /// TLS handshake timeout in milliseconds. 0 means use connect_ms.
+    tls_handshake_ms: u64 = 0,
+    /// Header reception timeout in milliseconds. 0 means use read_ms.
+    header_ms: u64 = 0,
+    /// Shutdown timeout in milliseconds. 0 means 5000.
+    shutdown_ms: u64 = 0,
 
     /// Creates a timeout configuration with all values set uniformly.
     pub fn uniform(ms: u64) Timeouts {
@@ -306,6 +313,50 @@ pub const Timeouts = struct {
             .idle_ms = 0,
         };
     }
+
+    /// Returns the effective TLS handshake timeout.
+    pub fn effectiveTlsHandshakeMs(self: Timeouts) u64 {
+        if (self.tls_handshake_ms > 0) return self.tls_handshake_ms;
+        return self.connect_ms;
+    }
+
+    /// Returns the effective header timeout.
+    pub fn effectiveHeaderMs(self: Timeouts) u64 {
+        if (self.header_ms > 0) return self.header_ms;
+        return self.read_ms;
+    }
+
+    /// Returns the effective shutdown timeout.
+    pub fn effectiveShutdownMs(self: Timeouts) u64 {
+        if (self.shutdown_ms > 0) return self.shutdown_ms;
+        return 5_000;
+    }
+};
+
+/// Cancellation token for in-flight operations.
+/// Thread-safe: uses atomic operations for cancellation signal.
+pub const CancellationToken = struct {
+    cancelled: std.atomic.Value(bool) = .init(false),
+
+    pub fn init() @This() {
+        return .{};
+    }
+
+    /// Signals cancellation. Thread-safe.
+    pub fn cancel(self: *@This()) void {
+        self.cancelled.store(true, .release);
+    }
+
+    /// Returns true if cancellation has been requested. Thread-safe.
+    pub fn isCancelled(self: *const @This()) bool {
+        return self.cancelled.load(.acquire);
+    }
+
+    /// Returns error.Cancelled if cancellation has been requested.
+    /// Use this in I/O loops: try token.throwIfCancelled();
+    pub fn throwIfCancelled(self: *const @This()) error{Cancelled}!void {
+        if (self.isCancelled()) return error.Cancelled;
+    }
 };
 
 /// Retry policy configuration with exponential backoff support.
@@ -330,7 +381,7 @@ pub const RetryPolicy = struct {
         // Apply decorrelated jitter: delay = random(base * (1 - jitter), base * (1 + jitter))
         if (self.jitter > 0.0) {
             var rand_bytes: [8]u8 = undefined;
-            @import("../util/any_io.zig").defaultIo().random(&rand_bytes);
+            @import("../io/any_io.zig").defaultIo().random(&rand_bytes);
             const rand_val = @as(f64, @floatFromInt(@as(u64, @bitCast(rand_bytes)))) / @as(f64, @floatFromInt(std.math.maxInt(u64)));
             const jitter_range = @as(f64, @floatFromInt(clamped)) * self.jitter;
             const jitter_offset = jitter_range * (2.0 * rand_val - 1.0); // [-jitter_range, +jitter_range]
@@ -395,7 +446,7 @@ pub const RedirectPolicy = struct {
 };
 
 /// HTTP/2 specific settings as defined in RFC 7540.
-pub const Http2Settings = struct {
+pub const HTTP2Settings = struct {
     header_table_size: u32 = 4096,
     enable_push: bool = true,
     max_concurrent_streams: u32 = 100,
@@ -405,7 +456,7 @@ pub const Http2Settings = struct {
 };
 
 /// HTTP/3 and QUIC specific settings.
-pub const Http3Settings = struct {
+pub const HTTP3Settings = struct {
     max_field_section_size: u64 = 8192,
     qpack_max_table_capacity: u64 = 4096,
     qpack_blocked_streams: u64 = 100,
@@ -426,6 +477,47 @@ pub const Proxy = struct {
     port: u16,
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
+    no_proxy: ?[]const u8 = null,
+
+    pub fn shouldBypassProxy(proxy: Proxy, hostname: []const u8) bool {
+        const list = proxy.no_proxy orelse return false;
+        if (list.len == 0) return false;
+
+        var remaining = list;
+        while (remaining.len > 0) {
+            const next_comma = std.mem.indexOf(u8, remaining, ",");
+            const entry_raw = if (next_comma) |idx| remaining[0..idx] else remaining;
+            const entry = std.mem.trim(u8, entry_raw, " \t\r\n");
+
+            if (entry.len > 0) {
+                if (std.mem.eql(u8, entry, "*")) return true;
+
+                if (std.ascii.eqlIgnoreCase(entry, hostname)) return true;
+
+                if (entry.len > 0 and entry[0] == '.') {
+                    if (hostname.len >= entry.len) {
+                        const suffix = hostname[hostname.len - entry.len ..];
+                        if (std.ascii.eqlIgnoreCase(suffix, entry)) return true;
+                    }
+                } else {
+                    if (hostname.len > entry.len + 1) {
+                        const dot_pos = hostname.len - entry.len - 1;
+                        if (hostname[dot_pos] == '.' and std.ascii.eqlIgnoreCase(hostname[dot_pos + 1 ..], entry)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            if (next_comma) |idx| {
+                remaining = remaining[idx + 1 ..];
+            } else {
+                break;
+            }
+        }
+
+        return false;
+    }
 };
 
 test "Method.fromString" {
@@ -449,7 +541,7 @@ test "Version.fromString" {
 
 test "Version properties" {
     try std.testing.expect(Version.HTTP_2.supportsMultiplexing());
-    try std.testing.expect(Version.HTTP_3.usesQuic());
+    try std.testing.expect(Version.HTTP_3.usesQUIC());
     try std.testing.expect(!Version.HTTP_1_1.supportsMultiplexing());
 }
 
@@ -491,4 +583,115 @@ test "RedirectPolicy.getRedirectMethod" {
     try std.testing.expectEqual(Method.POST, strict.getRedirectMethod(308, .POST));
     // Strict: 303 ALWAYS changes to GET per RFC 7231
     try std.testing.expectEqual(Method.GET, strict.getRedirectMethod(303, .POST));
+}
+
+test "CancellationToken basic" {
+    var token = CancellationToken.init();
+    try std.testing.expect(!token.isCancelled());
+
+    token.cancel();
+    try std.testing.expect(token.isCancelled());
+}
+
+test "CancellationToken throwIfCancelled" {
+    var token = CancellationToken.init();
+    // Not cancelled yet - should return without error.
+    token.throwIfCancelled() catch unreachable;
+
+    token.cancel();
+    // Now cancelled - should return error.Cancelled.
+    const result = token.throwIfCancelled();
+    try std.testing.expectError(error.Cancelled, result);
+}
+
+test "Timeouts effective values" {
+    const t = Timeouts{
+        .connect_ms = 10_000,
+        .read_ms = 20_000,
+        .tls_handshake_ms = 0,
+        .header_ms = 0,
+        .shutdown_ms = 0,
+    };
+    // When tls_handshake_ms is 0, falls back to connect_ms.
+    try std.testing.expectEqual(@as(u64, 10_000), t.effectiveTlsHandshakeMs());
+    // When header_ms is 0, falls back to read_ms.
+    try std.testing.expectEqual(@as(u64, 20_000), t.effectiveHeaderMs());
+    // When shutdown_ms is 0, defaults to 5000.
+    try std.testing.expectEqual(@as(u64, 5_000), t.effectiveShutdownMs());
+
+    const t2 = Timeouts{
+        .connect_ms = 10_000,
+        .read_ms = 20_000,
+        .tls_handshake_ms = 15_000,
+        .header_ms = 25_000,
+        .shutdown_ms = 30_000,
+    };
+    try std.testing.expectEqual(@as(u64, 15_000), t2.effectiveTlsHandshakeMs());
+    try std.testing.expectEqual(@as(u64, 25_000), t2.effectiveHeaderMs());
+    try std.testing.expectEqual(@as(u64, 30_000), t2.effectiveShutdownMs());
+}
+
+test "Timeouts presets" {
+    const fast = Timeouts.fast();
+    try std.testing.expectEqual(@as(u64, 5_000), fast.connect_ms);
+    try std.testing.expectEqual(@as(u64, 10_000), fast.keep_alive_ms);
+
+    const slow = Timeouts.slow();
+    try std.testing.expectEqual(@as(u64, 120_000), slow.connect_ms);
+
+    const none = Timeouts.none();
+    try std.testing.expectEqual(@as(u64, 0), none.connect_ms);
+    try std.testing.expectEqual(@as(u64, 0), none.read_ms);
+}
+
+/// Resource limits for HTTP operations to prevent abuse and resource exhaustion.
+pub const ResourceLimits = struct {
+    max_url_length: usize = 8192,
+    max_header_size: usize = 8192,
+    max_header_count: usize = 100,
+    max_request_body_size: usize = 10 * 1024 * 1024,
+    max_response_body_size: usize = 50 * 1024 * 1024,
+    max_decompressed_size: usize = 100 * 1024 * 1024,
+    max_connections: u32 = 1024,
+    max_concurrent_streams: u32 = 100,
+    max_dns_response_size: usize = 4096,
+};
+
+test "ResourceLimits defaults" {
+    const limits = ResourceLimits{};
+    try std.testing.expectEqual(@as(usize, 8192), limits.max_url_length);
+    try std.testing.expectEqual(@as(usize, 8192), limits.max_header_size);
+    try std.testing.expectEqual(@as(usize, 100), limits.max_header_count);
+    try std.testing.expectEqual(@as(usize, 10 * 1024 * 1024), limits.max_request_body_size);
+    try std.testing.expectEqual(@as(usize, 50 * 1024 * 1024), limits.max_response_body_size);
+    try std.testing.expectEqual(@as(usize, 100 * 1024 * 1024), limits.max_decompressed_size);
+    try std.testing.expectEqual(@as(u32, 1024), limits.max_connections);
+    try std.testing.expectEqual(@as(u32, 100), limits.max_concurrent_streams);
+    try std.testing.expectEqual(@as(usize, 4096), limits.max_dns_response_size);
+}
+
+test "ResourceLimits custom" {
+    const limits = ResourceLimits{
+        .max_url_length = 4096,
+        .max_connections = 512,
+    };
+    try std.testing.expectEqual(@as(usize, 4096), limits.max_url_length);
+    try std.testing.expectEqual(@as(u32, 512), limits.max_connections);
+    try std.testing.expectEqual(@as(usize, 8192), limits.max_header_size);
+}
+
+test "HTTPError new timeout variants" {
+    // Ensure the new timeout error types compile as valid HTTPError variants.
+    const RequestTimeout = error.RequestTimeout;
+    const TLSTimeout = error.TLSTimeout;
+    const DNSTimeout = error.DNSTimeout;
+    const HeaderTimeout = error.HeaderTimeout;
+    const IdleTimeout = error.IdleTimeout;
+    const ShutdownTimeout = error.ShutdownTimeout;
+    try std.testing.expect(@as(HTTPError, RequestTimeout) == error.RequestTimeout);
+    try std.testing.expect(@as(HTTPError, TLSTimeout) == error.TLSTimeout);
+    try std.testing.expect(@as(HTTPError, DNSTimeout) == error.DNSTimeout);
+    try std.testing.expect(@as(HTTPError, HeaderTimeout) == error.HeaderTimeout);
+    try std.testing.expect(@as(HTTPError, IdleTimeout) == error.IdleTimeout);
+    try std.testing.expect(@as(HTTPError, ShutdownTimeout) == error.ShutdownTimeout);
 }

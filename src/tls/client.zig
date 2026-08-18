@@ -4,14 +4,14 @@ const native_endian = builtin.cpu.arch.endian();
 const std = @import("std");
 const tls = std.crypto.tls;
 const Client = @This();
-const dbg = @import("../util/debug.zig");
+
 const mem = std.mem;
 const crypto = std.crypto;
 const assert = std.debug.assert;
 const Certificate = std.crypto.Certificate;
 
 /// Computes TLS 1.3 nonce by XORing the sequence number into the last 8 bytes of the IV.
-fn nonceTls13(iv: *const [12]u8, seq: u64) [12]u8 {
+fn nonceTLS13(iv: *const [12]u8, seq: u64) [12]u8 {
     var nonce: [12]u8 = iv.*;
     var seq_bytes: [8]u8 = undefined;
     mem.writeInt(u64, &seq_bytes, seq, .big);
@@ -341,9 +341,6 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
         ch_off += alpn_extension.len;
     }
 
-    dbg.log("TLS_CLI", "ClientHello: {d} bytes, host={s}", .{ ch_off, host });
-    dbg.hexDump("TLS_CLI", "ClientHello extensions", &extensions_payload, 256);
-
     const client_hello = client_hello_buf[0..ch_off];
 
     // Wrap in handshake record
@@ -573,7 +570,6 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                         }
 
                         tls_version = @enumFromInt(supported_version orelse legacy_version);
-                        dbg.log("TLS_CLI", "ServerHello: version={any}, cipher={any}", .{ tls_version, cipher_suite_tag });
                         switch (tls_version) {
                             .tls_1_3 => if (!mem.eql(u8, legacy_session_id_echo, &legacy_session_id)) return error.TlsIllegalParameter,
                             .tls_1_2 => if (mem.eql(u8, server_hello_rand[24..31], "DOWNGRD") and
@@ -644,7 +640,6 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                                 }
                                 pending_cipher_state = .handshake;
                                 handshake_state = .encrypted_extensions;
-                                dbg.log("TLS_CLI", "TLS 1.3 handshake keys derived, cipher_state={any}", .{pending_cipher_state});
                             },
                             .tls_1_2 => switch (cipher_suite_tag) {
                                 .ECDHE_RSA_WITH_AES_128_GCM_SHA256,
@@ -815,7 +810,6 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                         const server_pub_key = hsd.slice(key_size);
                         try main_cert_pub_key.verifySignature(&hsd, &.{ &client_hello_rand, &server_hello_rand, hsd.buf[0..hsd.idx] });
                         try key_share.exchange(named_group, server_pub_key);
-                        dbg.log("TLS_CLI", "TLS 1.2 ServerKeyExchange verified, group={any}", .{named_group});
                         handshake_state = .server_hello_done;
                     },
                     .server_hello_done => {
@@ -907,7 +901,6 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                                 };
                                 try output.writeVecAll(&all_msgs_vec);
                                 try output.flush();
-                                dbg.log("TLS_CLI", "TLS 1.2 client Finished sent", .{});
                             },
                         }
                         write_seq += 1;
@@ -924,7 +917,6 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                         }
                         switch (handshake_cipher) {
                             inline else => |*p| {
-                                dbg.log("TLS_CLI", "verifying CertificateVerify", .{});
                                 try main_cert_pub_key.verifySignature(&hsd, &.{
                                     " " ** 64 ++ "TLS 1.3, server CertificateVerify\x00",
                                     &p.transcript_hash.peek(),
@@ -932,7 +924,6 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                                 p.transcript_hash.update(wrapped_handshake);
                             },
                         }
-                        dbg.log("TLS_CLI", "CertificateVerify OK", .{});
                         handshake_state = .finished;
                     },
                     .finished => {
@@ -952,7 +943,6 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                                     p.transcript_hash.update(wrapped_handshake);
                                     const expected_server_verify_data = tls.hmac(P.Hmac, &finished_digest, pv.server_finished_key);
                                     if (!std.crypto.timing_safe.eql([P.Hmac.mac_length]u8, expected_server_verify_data, hsd.array(P.Hmac.mac_length).*)) return error.TlsDecryptError;
-                                    dbg.log("TLS_CLI", "server Finished MAC verified", .{});
                                     const handshake_hash = p.transcript_hash.finalResult();
                                     const verify_data = tls.hmac(P.Hmac, &handshake_hash, pv.client_finished_key);
                                     const out_cleartext = .{@intFromEnum(tls.HandshakeType.finished)} ++
@@ -988,7 +978,6 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                                         .CLIENT_TRAFFIC_SECRET = &client_secret,
                                     });
                                     key_seq += 1;
-                                    dbg.log("TLS_CLI", "TLS 1.3 application keys derived", .{});
                                     break :app_cipher @unionInit(tls.ApplicationCipher, @tagName(tag), .{ .tls_1_3 = .{
                                         .client_secret = client_secret,
                                         .server_secret = server_secret,
@@ -1003,7 +992,6 @@ pub fn init(input: *Reader, output: *Writer, options: Options) InitError!Client 
                                     const P = @TypeOf(p.*).A;
                                     try hsd.ensure(P.verify_data_length);
                                     if (!std.crypto.timing_safe.eql([P.verify_data_length]u8, pv.expected_server_verify_data, hsd.array(P.verify_data_length).*)) return error.TlsDecryptError;
-                                    dbg.log("TLS_CLI", "TLS 1.2 server Finished verified", .{});
                                     break :app_cipher @unionInit(tls.ApplicationCipher, @tagName(tag), .{ .tls_1_2 = pv.app_cipher });
                                 },
                                 else => unreachable,

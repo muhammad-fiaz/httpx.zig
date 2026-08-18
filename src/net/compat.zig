@@ -1,9 +1,8 @@
 const std = @import("std");
 const posix = std.posix;
 const Io = std.Io;
-const io_util = @import("../util/any_io.zig");
+const io_util = @import("../io/any_io.zig");
 const defaultIo = io_util.defaultIo;
-const dbg = @import("../util/debug.zig");
 
 pub const Ip4Address = Io.net.Ip4Address;
 pub const Ip6Address = Io.net.Ip6Address;
@@ -127,28 +126,20 @@ fn fromIpAddress(ip: Io.net.IpAddress) Address {
 
 /// Parses an IPv4/IPv6 address and applies a port.
 pub fn parseIp(text: []const u8, port: u16) !Address {
-    dbg.entry("NET", "parseIp");
-    dbg.logUrl("NET", "parseIp", text);
     const result = Address.parseIp(text, port) catch |err| {
-        dbg.exitErr("NET", "parseIp", err);
         return err;
     };
-    dbg.exit("NET", "parseIp");
     return result;
 }
 
 /// Resolves a host name to one or more IP addresses.
 pub fn getAddressList(allocator: std.mem.Allocator, host: []const u8, port: u16) !AddressList {
-    dbg.entry("NET", "getAddressList");
     if (parseIp(host, port)) |ip| {
-        dbg.log("NET", "getAddressList: IP literal {s}", .{host});
         const addrs = try allocator.alloc(Address, 1);
         addrs[0] = ip;
-        dbg.exit("NET", "getAddressList");
         return .{ .addrs = addrs, .allocator = allocator };
     } else |_| {}
 
-    dbg.log("NET", "getAddressList: DNS lookup {s}:{d}", .{ host, port });
     const io = defaultIo();
     const host_name: Io.net.HostName = try .init(host);
 
@@ -170,11 +161,9 @@ pub fn getAddressList(allocator: std.mem.Allocator, host: []const u8, port: u16)
     }
 
     if (addrs.items.len == 0) {
-        dbg.exitErr("NET", "getAddressList", error.DnsResolutionFailed);
-        return error.DnsResolutionFailed;
+        return error.DNSResolutionFailed;
     }
 
-    dbg.exit("NET", "getAddressList");
     return .{ .addrs = try addrs.toOwnedSlice(allocator), .allocator = allocator };
 }
 
@@ -185,4 +174,51 @@ test "Address IPv4 round trip preserves bytes and port" {
 
     try std.testing.expectEqualDeep(ip_bytes, ip.ip4.bytes);
     try std.testing.expectEqual(@as(u16, 8080), ip.ip4.port);
+}
+
+test "Address IPv6 round trip" {
+    const ip_bytes: [16]u8 = .{ 0x20, 0x01, 0x0d, 0xb8, 0x85, 0xa3, 0x00, 0x00, 0x00, 0x00, 0x8a, 0x2e, 0x03, 0x70, 0x73, 0x34 };
+    const addr = Address.initIp6(ip_bytes, 443, 0, 0);
+    const ip = addr.toIpAddress();
+
+    try std.testing.expectEqualDeep(ip_bytes, ip.ip6.bytes);
+    try std.testing.expectEqual(@as(u16, 443), ip.ip6.port);
+    try std.testing.expectEqual(@as(u32, 0), ip.ip6.flow);
+    try std.testing.expectEqual(@as(u32, 0), ip.ip6.interface.index);
+}
+
+test "Address IPv6 round trip with flowinfo and scope_id" {
+    const ip_bytes: [16]u8 = .{ 0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x02, 0xb3, 0xff, 0xfe, 0x1e, 0x83, 0x29 };
+    const addr = Address.initIp6(ip_bytes, 9999, 1234, 5);
+    const ip = addr.toIpAddress();
+
+    try std.testing.expectEqualDeep(ip_bytes, ip.ip6.bytes);
+    try std.testing.expectEqual(@as(u16, 9999), ip.ip6.port);
+    try std.testing.expectEqual(@as(u32, 1234), ip.ip6.flow);
+    try std.testing.expectEqual(@as(u32, 5), ip.ip6.interface.index);
+}
+
+test "Address getPort and setPort" {
+    var addr4 = Address.initIp4(.{ 10, 0, 0, 1 }, 80);
+    try std.testing.expectEqual(@as(u16, 80), addr4.getPort());
+    addr4.setPort(443);
+    try std.testing.expectEqual(@as(u16, 443), addr4.getPort());
+
+    var addr6 = Address.initIp6(.{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 8080, 0, 0);
+    try std.testing.expectEqual(@as(u16, 8080), addr6.getPort());
+    addr6.setPort(8443);
+    try std.testing.expectEqual(@as(u16, 8443), addr6.getPort());
+}
+
+test "Address getOsSockLen" {
+    const addr4 = Address.initIp4(.{ 127, 0, 0, 1 }, 80);
+    try std.testing.expectEqual(@as(usize, 16), addr4.getOsSockLen());
+
+    const addr6 = Address.initIp6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 443, 0, 0);
+    try std.testing.expectEqual(@as(usize, 28), addr6.getOsSockLen());
+
+    var unknown: Address = undefined;
+    unknown.any = std.mem.zeroes(posix.sockaddr);
+    unknown.any.family = 9999;
+    try std.testing.expectEqual(@sizeOf(posix.sockaddr), unknown.getOsSockLen());
 }

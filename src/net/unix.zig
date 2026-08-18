@@ -9,10 +9,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
-const io_util = @import("../util/any_io.zig");
+const io_util = @import("../io/any_io.zig");
 const defaultIo = io_util.defaultIo;
 const is_windows = builtin.os.tag == .windows;
-const dbg = @import("../util/debug.zig");
 
 const is_unix_available = switch (builtin.os.tag) {
     .linux, .macos, .ios, .tvos, .watchos, .freebsd, .netbsd, .openbsd, .dragonfly => true,
@@ -48,15 +47,15 @@ const winsock = if (is_windows) struct {
     else
         -1;
 
-    var wsa_initialized: bool = false;
+    var wsa_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
     fn ensureWsaStartup() !void {
-        if (wsa_initialized) return;
+        if (wsa_initialized.load(.monotonic)) return;
         var wsa_data: WSADATA = undefined;
         // Request Winsock 2.2 (0x0202)
         const rc = WSAStartup(0x0202, &wsa_data);
         if (rc != 0) return error.SocketCreateFailed;
-        wsa_initialized = true;
+        wsa_initialized.store(true, .release);
     }
 } else struct {};
 
@@ -71,6 +70,7 @@ pub const UnixSocketError = error{
     ConnectFailed,
     AcceptFailed,
     SocketCreateFailed,
+    ConnectionClosed,
     WriteFailed,
     ReadFailed,
 };
@@ -78,9 +78,9 @@ pub const UnixSocketError = error{
 /// Maximum path length for a Unix socket path.
 pub const MAX_PATH_LEN = 108;
 
-/// Static storage for resolved Windows Unix socket paths.
+/// Thread-local storage for resolved Windows Unix socket paths.
 /// Used by UnixListener.init to store absolute paths when the input is relative.
-var resolved_path_storage: [std.fs.max_path_bytes]u8 = undefined;
+threadlocal var resolved_path_storage: [std.fs.max_path_bytes]u8 = undefined;
 
 /// On Windows, build a short socket path to avoid exceeding the
 /// 108-byte AF_UNIX sockaddr limit.
@@ -233,6 +233,7 @@ pub const UnixSocket = struct {
         var sent: usize = 0;
         while (sent < data.len) {
             const n = try sendBytes(self.fd, data[sent..]);
+            if (n == 0) return error.ConnectionClosed;
             sent += n;
         }
     }
@@ -270,9 +271,7 @@ pub const UnixListener = struct {
     /// Removes any existing socket file at the path first.
     /// On Windows, relative paths are resolved to short temp-dir paths.
     pub fn init(path: []const u8) !Self {
-        dbg.entry("UNIX", "UnixListener.init");
         if (!is_unix_available) {
-            dbg.exitErr("UNIX", "UnixListener.init", error.UnsupportedPlatform);
             return error.UnsupportedPlatform;
         }
 
@@ -301,34 +300,27 @@ pub const UnixListener = struct {
         try bindSocket(fd, &addr);
         try listenSocket(fd, 128);
 
-        dbg.log("UNIX", "listening on {s}", .{resolved_path});
-        dbg.exit("UNIX", "UnixListener.init");
         return .{ .fd = fd, .path = resolved_path };
     }
 
     /// Accepts an incoming connection.
     pub fn accept(self: *Self) !UnixAccepted {
-        dbg.entry("UNIX", "UnixListener.accept");
         var addr = std.mem.zeroes(posix.sockaddr.un);
         var len: posix.socklen_t = @sizeOf(posix.sockaddr.un);
         const client_fd = acceptConnection(self.fd, &addr, &len) catch |err| {
-            dbg.exitErr("UNIX", "UnixListener.accept", err);
             return err;
         };
-        dbg.exit("UNIX", "UnixListener.accept");
         return .{ .socket = .{ .fd = client_fd } };
     }
 
     /// Closes the listener and removes the socket file.
     pub fn deinit(self: *Self) void {
-        dbg.entry("UNIX", "UnixListener.deinit");
         closesocket(self.fd);
         {
             const io = defaultIo();
             const cwd = std.Io.Dir.cwd();
             cwd.deleteFile(io, self.path) catch {};
         }
-        dbg.exit("UNIX", "UnixListener.deinit");
     }
 };
 
@@ -337,9 +329,7 @@ pub const UnixClient = struct {
     /// Connects to a Unix socket path and returns a socket.
     /// On Windows, relative paths are resolved to short temp-dir paths.
     pub fn connect(path: []const u8) !UnixSocket {
-        dbg.entry("UNIX", "UnixClient.connect");
         if (!is_unix_available) {
-            dbg.exitErr("UNIX", "UnixClient.connect", error.UnsupportedPlatform);
             return error.UnsupportedPlatform;
         }
 
@@ -359,8 +349,6 @@ pub const UnixClient = struct {
         @memcpy(addr.path[0..resolved_path.len], resolved_path);
 
         try connectSocket(fd, &addr);
-        dbg.log("UNIX", "connected to {s}", .{resolved_path});
-        dbg.exit("UNIX", "UnixClient.connect");
         return .{ .fd = fd };
     }
 };

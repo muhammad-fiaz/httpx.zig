@@ -12,9 +12,8 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const list_writer = @import("../util/list_writer.zig");
+const list_writer = @import("../io/list_writer.zig");
 const types = @import("types.zig");
-const dbg = @import("../util/debug.zig");
 
 /// Standard HTTP header name constants.
 /// Using these constants enables compile-time string interning.
@@ -59,6 +58,34 @@ pub const HeaderName = struct {
     pub const X_CONTENT_TYPE_OPTIONS = "X-Content-Type-Options";
     pub const X_FRAME_OPTIONS = "X-Frame-Options";
     pub const X_XSS_PROTECTION = "X-XSS-Protection";
+    pub const EXPECT = "Expect";
+    pub const IF_UNMODIFIED_SINCE = "If-Unmodified-Since";
+    pub const IF_RANGE = "If-Range";
+    pub const CONTENT_LANGUAGE = "Content-Language";
+    pub const LINK = "Link";
+    pub const WARNING = "Warning";
+    pub const X_REQUESTED_WITH = "X-Requested-With";
+    pub const ACCESS_CONTROL_ALLOW_ORIGIN = "Access-Control-Allow-Origin";
+    pub const ACCESS_CONTROL_ALLOW_METHODS = "Access-Control-Allow-Methods";
+    pub const ACCESS_CONTROL_ALLOW_HEADERS = "Access-Control-Allow-Headers";
+    pub const ACCESS_CONTROL_ALLOW_CREDENTIALS = "Access-Control-Allow-Credentials";
+    pub const ACCESS_CONTROL_EXPOSE_HEADERS = "Access-Control-Expose-Headers";
+    pub const ACCESS_CONTROL_MAX_AGE = "Access-Control-Max-Age";
+    pub const ACCESS_CONTROL_REQUEST_METHOD = "Access-Control-Request-Method";
+    pub const ACCESS_CONTROL_REQUEST_HEADERS = "Access-Control-Request-Headers";
+    pub const X_FORWARDED_FOR = "X-Forwarded-For";
+    pub const X_FORWARDED_PROTO = "X-Forwarded-Proto";
+    pub const X_FORWARDED_HOST = "X-Forwarded-Host";
+    pub const VIA = "Via";
+    pub const KEEP_ALIVE = "Keep-Alive";
+    pub const TE = "TE";
+    pub const TRAILER = "Trailer";
+    pub const CONTENT_SECURITY_POLICY = "Content-Security-Policy";
+    pub const REFERRER_POLICY = "Referrer-Policy";
+    pub const PERMISSIONS_POLICY = "Permissions-Policy";
+    pub const CROSS_ORIGIN_OPENER_POLICY = "Cross-Origin-Opener-Policy";
+    pub const CROSS_ORIGIN_RESOURCE_POLICY = "Cross-Origin-Resource-Policy";
+    pub const CROSS_ORIGIN_EMBEDDER_POLICY = "Cross-Origin-Embedder-Policy";
 };
 
 /// Represents a single HTTP header entry.
@@ -92,8 +119,31 @@ pub const Headers = struct {
         self.entries.deinit(self.allocator);
     }
 
+    /// Returns true if the byte slice contains CR (\r) or LF (\n) characters.
+    /// Used to prevent HTTP header injection (CRLF injection) attacks.
+    fn containsCRLF(s: []const u8) bool {
+        for (s) |c| {
+            if (c == '\r' or c == '\n') return true;
+        }
+        return false;
+    }
+
+    /// Returns true if the byte slice contains control characters (0x00-0x1F, 0x7F).
+    /// RFC 7230 Section 3.2 forbids control characters in header field values.
+    fn containsControlChars(s: []const u8) bool {
+        for (s) |c| {
+            if (c < 0x20 or c == 0x7F) return true;
+        }
+        return false;
+    }
+
     /// Appends a header, allowing multiple values for the same name.
+    /// Validates that neither name nor value contains CRLF sequences
+    /// to prevent HTTP header injection attacks (RFC 7230 Section 3.2).
     pub fn append(self: *Self, name: []const u8, value: []const u8) !void {
+        if (self.entries.items.len >= self.max_headers) return error.TooManyHeaders;
+        if (containsCRLF(name)) return error.InvalidHeaderName;
+        if (containsCRLF(value)) return error.InvalidHeaderValue;
         const owned_name = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(owned_name);
         const owned_value = try self.allocator.dupe(u8, value);
@@ -115,14 +165,12 @@ pub const Headers = struct {
 
     /// Sets a header, replacing any existing values with the same name.
     pub fn set(self: *Self, name: []const u8, value: []const u8) !void {
-        if (dbg.isEnabled()) dbg.log("HDR", "set {s}: {s}", .{ name, value });
         self.removeAll(name);
         try self.append(name, value);
     }
 
     /// Retrieves the first value for a header name (case-insensitive).
     pub fn get(self: *const Self, name: []const u8) ?[]const u8 {
-        if (dbg.isEnabled()) dbg.log("HDR", "get {s}", .{name});
         for (self.entries.items) |entry| {
             if (eqlIgnoreCase(entry.name, name)) return entry.value;
         }
@@ -147,7 +195,6 @@ pub const Headers = struct {
 
     /// Returns true if the header exists.
     pub fn contains(self: *const Self, name: []const u8) bool {
-        if (dbg.isEnabled()) dbg.log("HDR", "contains {s}", .{name});
         return self.get(name) != null;
     }
 
@@ -263,12 +310,58 @@ pub const Headers = struct {
 };
 
 /// Case-insensitive string comparison for ASCII.
-fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |ca, cb| {
-        if (std.ascii.toLower(ca) != std.ascii.toLower(cb)) return false;
+inline fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(a, b);
+}
+
+/// Validates a header value: rejects CR, LF, and NUL bytes.
+/// Returns true if the value is safe to use in an HTTP header.
+pub fn validateHeaderValue(value: []const u8) bool {
+    for (value) |c| {
+        if (c == '\r' or c == '\n' or c == 0) return false;
     }
     return true;
+}
+
+/// Validates a header name: rejects control characters (except OWS) and requires non-empty.
+/// Returns true if the name is a valid HTTP header field name per RFC 7230.
+pub fn validateHeaderName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        if (c < 32 or c > 126) return false;
+        if (c == ':' and name.len > 1) continue;
+    }
+    return true;
+}
+
+test "validateHeaderValue rejects CRLF and NUL" {
+    try std.testing.expect(validateHeaderValue("hello world"));
+    try std.testing.expect(validateHeaderValue("application/json; charset=utf-8"));
+    try std.testing.expect(!validateHeaderValue("abc\r\nEvil: true"));
+    try std.testing.expect(!validateHeaderValue("abc\nEvil: true"));
+    try std.testing.expect(!validateHeaderValue("abc\rEvil: true"));
+    try std.testing.expect(!validateHeaderValue("abc\x00def"));
+}
+
+test "validateHeaderValue empty value" {
+    try std.testing.expect(validateHeaderValue(""));
+}
+
+test "validateHeaderName valid names" {
+    try std.testing.expect(validateHeaderName("Content-Type"));
+    try std.testing.expect(validateHeaderName("X-Custom-Header"));
+    try std.testing.expect(validateHeaderName("Accept"));
+    try std.testing.expect(validateHeaderName("X-Trace-Id-123"));
+}
+
+test "validateHeaderName rejects empty" {
+    try std.testing.expect(!validateHeaderName(""));
+}
+
+test "validateHeaderName rejects control characters" {
+    try std.testing.expect(!validateHeaderName("X-Test\x01"));
+    try std.testing.expect(!validateHeaderName("X-Test\x1f"));
+    try std.testing.expect(!validateHeaderName("X-Test\x7f"));
 }
 
 test "Headers basic operations" {
@@ -361,4 +454,53 @@ test "Headers mergeFrom" {
 
     try dst.mergeFrom(&src, true);
     try std.testing.expectEqualStrings("text/plain", dst.get("Accept").?);
+}
+
+test "New header constants exist" {
+    // Verify new constants are accessible
+    try std.testing.expectEqualStrings("Expect", HeaderName.EXPECT);
+    try std.testing.expectEqualStrings("If-Unmodified-Since", HeaderName.IF_UNMODIFIED_SINCE);
+    try std.testing.expectEqualStrings("If-Range", HeaderName.IF_RANGE);
+    try std.testing.expectEqualStrings("TE", HeaderName.TE);
+    try std.testing.expectEqualStrings("Trailer", HeaderName.TRAILER);
+    try std.testing.expectEqualStrings("X-Forwarded-For", HeaderName.X_FORWARDED_FOR);
+    try std.testing.expectEqualStrings("X-Forwarded-Proto", HeaderName.X_FORWARDED_PROTO);
+    try std.testing.expectEqualStrings("X-Forwarded-Host", HeaderName.X_FORWARDED_HOST);
+    try std.testing.expectEqualStrings("Content-Security-Policy", HeaderName.CONTENT_SECURITY_POLICY);
+    try std.testing.expectEqualStrings("Referrer-Policy", HeaderName.REFERRER_POLICY);
+    try std.testing.expectEqualStrings("Permissions-Policy", HeaderName.PERMISSIONS_POLICY);
+}
+
+test "CRLF injection prevention in header name" {
+    const allocator = std.testing.allocator;
+    var headers = Headers.init(allocator);
+    defer headers.deinit();
+
+    try std.testing.expectError(error.InvalidHeaderName, headers.append("X-Injected\r\nEvil: true", "value"));
+    try std.testing.expectError(error.InvalidHeaderName, headers.append("X-Injected\nEvil: true", "value"));
+    try std.testing.expectError(error.InvalidHeaderName, headers.append("X-Injected\rEvil: true", "value"));
+    try std.testing.expectEqual(@as(usize, 0), headers.count());
+}
+
+test "CRLF injection prevention in header value" {
+    const allocator = std.testing.allocator;
+    var headers = Headers.init(allocator);
+    defer headers.deinit();
+
+    try std.testing.expectError(error.InvalidHeaderValue, headers.append("X-Trace-Id", "abc\r\nEvil: true"));
+    try std.testing.expectError(error.InvalidHeaderValue, headers.append("X-Trace-Id", "abc\nEvil: true"));
+    try std.testing.expectError(error.InvalidHeaderValue, headers.append("X-Trace-Id", "abc\rEvil: true"));
+    try std.testing.expectEqual(@as(usize, 0), headers.count());
+}
+
+test "Valid headers still work after CRLF validation" {
+    const allocator = std.testing.allocator;
+    var headers = Headers.init(allocator);
+    defer headers.deinit();
+
+    try headers.append("Content-Type", "text/html");
+    try headers.append("X-Custom-Header", "hello world");
+    try headers.append("Set-Cookie", "session=abc123; Path=/; HttpOnly");
+    try std.testing.expectEqual(@as(usize, 3), headers.count());
+    try std.testing.expectEqualStrings("text/html", headers.get("Content-Type").?);
 }

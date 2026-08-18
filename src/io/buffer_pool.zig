@@ -134,10 +134,6 @@ pub const ReleaseError = error{
     DoubleRelease,
 };
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 test "buffer pool init and deinit" {
     const allocator = std.testing.allocator;
     var pool = try BufferPool.init(allocator, 4, 1024);

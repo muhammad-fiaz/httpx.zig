@@ -14,10 +14,10 @@ const builtin = @import("builtin");
 
 const Socket = @import("../net/socket.zig").Socket;
 const address_mod = @import("../net/address.zig");
+const dns_mod = @import("../net/dns.zig");
 const types = @import("../core/types.zig");
 const proxy_mod = @import("proxy.zig");
-const common = @import("../util/common.zig");
-const dbg = @import("../util/debug.zig");
+const common = @import("../data/common.zig");
 const Proxy = types.Proxy;
 
 pub const PoolError = error{
@@ -99,6 +99,7 @@ pub const PoolConfig = struct {
     max_requests_per_connection: u32 = 1000,
     health_check_interval_ms: i64 = 30_000,
     connect_timeout_ms: u64 = 30_000,
+    dns_resolver: ?*dns_mod.DNSResolver = null,
 };
 
 /// Snapshot statistics for the connection pool.
@@ -134,8 +135,6 @@ pub const ConnectionPool = struct {
 
     /// Creates a connection pool with custom configuration.
     pub fn initWithConfig(allocator: Allocator, config: PoolConfig) Self {
-        dbg.entry("POOL", "initWithConfig");
-        defer dbg.exit("POOL", "initWithConfig");
         return .{
             .allocator = allocator,
             .config = config,
@@ -144,8 +143,6 @@ pub const ConnectionPool = struct {
 
     /// Releases all pool resources.
     pub fn deinit(self: *Self) void {
-        dbg.entry("POOL", "deinit");
-        defer dbg.exit("POOL", "deinit");
         self.acquireLock();
         defer self.releaseLock();
         for (self.connections.items) |*conn| {
@@ -158,17 +155,12 @@ pub const ConnectionPool = struct {
 
     /// Gets or creates a connection to the specified host.
     pub fn getConnection(self: *Self, host: []const u8, port: u16, proxy: ?Proxy, connect_timeout_ms: u64) !*Connection {
-        dbg.entry("POOL", "getConnection");
-        defer dbg.exit("POOL", "getConnection");
-        dbg.log("POOL", "acquiring lock...", .{});
         self.acquireLock();
-        dbg.log("POOL", "lock acquired", .{});
         defer self.releaseLock();
 
         for (self.connections.items) |*conn| {
             if (conn.matches(host, port, proxy)) {
                 if (conn.isHealthy(self.config.idle_timeout_ms) and conn.requests_made < self.config.max_requests_per_connection) {
-                    dbg.log("POOL", "reusing connection to {s}:{d}", .{ host, port });
                     conn.acquire();
                     return conn;
                 }
@@ -188,18 +180,22 @@ pub const ConnectionPool = struct {
 
     /// Creates a new connection.
     fn createConnection(self: *Self, host: []const u8, port: u16, proxy: ?Proxy, connect_timeout_ms: u64) !*Connection {
-        dbg.entry("POOL", "createConnection");
-        defer dbg.exit("POOL", "createConnection");
         const host_owned = try self.allocator.dupe(u8, host);
         errdefer self.allocator.free(host_owned);
 
         const connect_host = if (proxy) |p| p.host else host;
         const connect_port = if (proxy) |p| p.port else port;
-        const addr = try address_mod.resolve(self.allocator, connect_host, connect_port);
+        const addr = if (self.config.dns_resolver) |resolver| blk: {
+            var result = try resolver.resolve(connect_host, .{ .port = connect_port });
+            defer result.deinit();
+            if (result.addresses.len == 0) return error.DNSResolutionFailed;
+            break :blk result.addresses[0];
+        } else try address_mod.resolve(self.allocator, connect_host, connect_port);
 
         var socket = try Socket.createForAddress(addr);
         errdefer socket.close();
         try socket.connectWithTimeout(addr, if (connect_timeout_ms > 0) connect_timeout_ms else self.config.connect_timeout_ms);
+        try socket.setNoDelay(true);
 
         if (proxy) |p| {
             if (p.kind == .socks5h) {
@@ -230,8 +226,6 @@ pub const ConnectionPool = struct {
 
     /// Releases a connection back to the pool.
     pub fn releaseConnection(self: *Self, conn: *Connection) void {
-        dbg.entry("POOL", "releaseConnection");
-        defer dbg.exit("POOL", "releaseConnection");
         self.acquireLock();
         defer self.releaseLock();
         conn.release();
@@ -239,8 +233,6 @@ pub const ConnectionPool = struct {
 
     /// Marks a connection as closed and removes it from the pool.
     pub fn closeConnection(self: *Self, conn: *Connection) void {
-        dbg.entry("POOL", "closeConnection");
-        defer dbg.exit("POOL", "closeConnection");
         self.acquireLock();
         defer self.releaseLock();
         conn.close();

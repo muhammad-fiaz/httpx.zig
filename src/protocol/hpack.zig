@@ -13,7 +13,6 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const dbg = @import("../util/debug.zig");
 
 /// HPACK static table entries (RFC 7541 Appendix A)
 /// Index 1-61 are pre-defined header name/value pairs
@@ -203,7 +202,7 @@ pub const DynamicTable = struct {
 };
 
 /// HPACK encoder/decoder context
-pub const HpackContext = struct {
+pub const HPACKContext = struct {
     allocator: Allocator,
     dynamic_table: DynamicTable,
 
@@ -550,12 +549,10 @@ pub fn encodeHeaderNeverIndexed(
 
 /// Encodes a header block using HPACK.
 pub fn encodeHeaders(
-    ctx: *HpackContext,
+    ctx: *HPACKContext,
     headers: []const HeaderEntry,
     allocator: Allocator,
 ) ![]u8 {
-    dbg.entry("HPACK", "encodeHeaders");
-    dbg.log("HPACK", "header_count={d}", .{headers.len});
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
 
@@ -608,12 +605,10 @@ pub const DecodedHeader = struct {
 
 /// Decodes a header block using HPACK.
 pub fn decodeHeaders(
-    ctx: *HpackContext,
+    ctx: *HPACKContext,
     data: []const u8,
     allocator: Allocator,
 ) ![]DecodedHeader {
-    dbg.entry("HPACK", "decodeHeaders");
-    dbg.log("HPACK", "data_len={d}", .{data.len});
     var headers = std.ArrayList(DecodedHeader).empty;
     errdefer {
         for (headers.items) |h| {
@@ -742,7 +737,7 @@ test "HPACK dynamic table" {
 
 test "HPACK context combined lookup" {
     const allocator = std.testing.allocator;
-    var ctx = HpackContext.init(allocator);
+    var ctx = HPACKContext.init(allocator);
     defer ctx.deinit();
 
     // Static table lookup
@@ -778,7 +773,7 @@ test "encode without indexing - indexed name" {
         .{ .name = "authorization", .value = "Bearer secret123", .representation = .without_indexing },
     };
 
-    var ctx = HpackContext.init(allocator);
+    var ctx = HPACKContext.init(allocator);
     defer ctx.deinit();
 
     const encoded = try encodeHeaders(&ctx, &headers, allocator);
@@ -792,7 +787,7 @@ test "encode without indexing - indexed name" {
     try std.testing.expectEqual(@as(u8, 0x08), encoded[1]);
 
     // Should be decodable
-    var ctx2 = HpackContext.init(allocator);
+    var ctx2 = HPACKContext.init(allocator);
     defer ctx2.deinit();
     const decoded = try decodeHeaders(&ctx2, encoded, allocator);
     defer {
@@ -814,7 +809,7 @@ test "encode without indexing - literal name" {
         .{ .name = "x-custom-header", .value = "some-value", .representation = .without_indexing },
     };
 
-    var ctx = HpackContext.init(allocator);
+    var ctx = HPACKContext.init(allocator);
     defer ctx.deinit();
 
     const encoded = try encodeHeaders(&ctx, &headers, allocator);
@@ -827,7 +822,7 @@ test "encode without indexing - literal name" {
     try std.testing.expectEqual(@as(u8, 0x00), encoded[0]);
 
     // Should be decodable
-    var ctx2 = HpackContext.init(allocator);
+    var ctx2 = HPACKContext.init(allocator);
     defer ctx2.deinit();
     const decoded = try decodeHeaders(&ctx2, encoded, allocator);
     defer {
@@ -850,7 +845,7 @@ test "encode never indexed - indexed name" {
         .{ .name = "set-cookie", .value = "session=abc123", .representation = .never_indexed },
     };
 
-    var ctx = HpackContext.init(allocator);
+    var ctx = HPACKContext.init(allocator);
     defer ctx.deinit();
 
     const encoded = try encodeHeaders(&ctx, &headers, allocator);
@@ -864,7 +859,7 @@ test "encode never indexed - indexed name" {
     try std.testing.expectEqual(@as(u8, 0x28), encoded[1]);
 
     // Should be decodable
-    var ctx2 = HpackContext.init(allocator);
+    var ctx2 = HPACKContext.init(allocator);
     defer ctx2.deinit();
     const decoded = try decodeHeaders(&ctx2, encoded, allocator);
     defer {
@@ -886,7 +881,7 @@ test "encode never indexed - literal name" {
         .{ .name = "x-secret", .value = "top-secret-data", .representation = .never_indexed },
     };
 
-    var ctx = HpackContext.init(allocator);
+    var ctx = HPACKContext.init(allocator);
     defer ctx.deinit();
 
     const encoded = try encodeHeaders(&ctx, &headers, allocator);
@@ -899,7 +894,7 @@ test "encode never indexed - literal name" {
     try std.testing.expectEqual(@as(u8, 0x10), encoded[0]);
 
     // Should be decodable
-    var ctx2 = HpackContext.init(allocator);
+    var ctx2 = HPACKContext.init(allocator);
     defer ctx2.deinit();
     const decoded = try decodeHeaders(&ctx2, encoded, allocator);
     defer {
@@ -928,7 +923,7 @@ test "mixed representations in header block" {
         .{ .name = "content-type", .value = "text/html" },
     };
 
-    var ctx = HpackContext.init(allocator);
+    var ctx = HPACKContext.init(allocator);
     defer ctx.deinit();
 
     const encoded = try encodeHeaders(&ctx, &headers, allocator);
@@ -940,7 +935,7 @@ test "mixed representations in header block" {
     try std.testing.expectEqual(@as(usize, 1), ctx.dynamic_table.len());
 
     // Roundtrip decode
-    var ctx2 = HpackContext.init(allocator);
+    var ctx2 = HPACKContext.init(allocator);
     defer ctx2.deinit();
     const decoded = try decodeHeaders(&ctx2, encoded, allocator);
     defer {

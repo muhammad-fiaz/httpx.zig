@@ -36,7 +36,6 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const dbg = @import("debug.zig");
 
 /// Recommended maximum byte size for a single multipart file part's data.
 ///
@@ -98,7 +97,6 @@ pub fn extractBoundary(content_type: []const u8) ?[]const u8 {
 /// `boundary` is the raw boundary string (without the leading `--`).
 /// Caller must call `result.deinit()` when done.
 pub fn parse(allocator: Allocator, body: []const u8, boundary: []const u8) !ParsedParts {
-    dbg.entry("MULTI", "parse");
     const delimiter = try std.fmt.allocPrint(allocator, "--{s}", .{boundary});
     defer allocator.free(delimiter);
 
@@ -181,7 +179,6 @@ pub fn parse(allocator: Allocator, body: []const u8, boundary: []const u8) !Pars
         pos = body_start;
     }
 
-    dbg.exit("MULTI", "parse");
     return .{
         .parts = try parts_list.toOwnedSlice(allocator),
         ._raw = raw,
@@ -303,9 +300,7 @@ pub const MultipartBuilder = struct {
 
     /// Finalizes and returns the complete body. Caller owns the result.
     pub fn build(self: *Self) ![]u8 {
-        dbg.entry("MULTI", "MultipartBuilder.build");
         try self.buf.print(self.allocator, "--{s}--\r\n", .{self.boundary});
-        dbg.exit("MULTI", "MultipartBuilder.build");
         return self.buf.toOwnedSlice(self.allocator);
     }
 

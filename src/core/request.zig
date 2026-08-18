@@ -11,16 +11,15 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const list_writer = @import("../util/list_writer.zig");
-const dbg = @import("../util/debug.zig");
+const list_writer = @import("../io/list_writer.zig");
 
 const types = @import("types.zig");
 const Headers = @import("headers.zig").Headers;
 const HeaderName = @import("headers.zig").HeaderName;
 const Uri = @import("uri.zig").Uri;
-const Base64 = @import("../util/encoding.zig").Base64;
-const PercentEncoding = @import("../util/encoding.zig").PercentEncoding;
-const encodeFormData = @import("../util/encoding.zig").encodeFormData;
+const Base64 = @import("../data/encoding.zig").Base64;
+const PercentEncoding = @import("../data/encoding.zig").PercentEncoding;
+const encodeFormData = @import("../data/encoding.zig").encodeFormData;
 
 /// HTTP request representation.
 pub const Request = struct {
@@ -39,13 +38,11 @@ pub const Request = struct {
 
     /// Creates a new request with the given method and URL.
     pub fn init(allocator: Allocator, method: types.Method, url: []const u8) !Self {
-        dbg.entry("REQ", "Request.init");
-        dbg.log("REQ", "method={} url={s}", .{ method, url });
         const uri = try Uri.parse(url);
         var headers = Headers.init(allocator);
 
         if (uri.host) |host| {
-            const default_port: u16 = if (uri.isTls()) 443 else 80;
+            const default_port: u16 = if (uri.isTLS()) 443 else 80;
             if (uri.port) |port| {
                 if (port != default_port) {
                     const host_with_port = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
@@ -59,7 +56,6 @@ pub const Request = struct {
             }
         }
 
-        dbg.exit("REQ", "Request.init");
         return .{
             .allocator = allocator,
             .method = method,
@@ -85,7 +81,6 @@ pub const Request = struct {
 
     /// Sets the request body with ownership.
     pub fn setBody(self: *Self, body: []const u8) !void {
-        dbg.entry("REQ", "Request.setBody");
         if (self.body_owned) {
             if (self.body) |b| {
                 self.allocator.free(b);
@@ -97,34 +92,27 @@ pub const Request = struct {
         var len_buf: [32]u8 = undefined;
         const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body.len}) catch unreachable;
         try self.headers.set(HeaderName.CONTENT_LENGTH, len_str);
-        dbg.exit("REQ", "Request.setBody");
     }
 
     /// Sets the request body as JSON with appropriate headers.
     pub fn setJson(self: *Self, body: []const u8) !void {
-        dbg.entry("REQ", "Request.setJson");
         try self.headers.set(HeaderName.CONTENT_TYPE, "application/json");
         try self.setBody(body);
-        dbg.exit("REQ", "Request.setJson");
     }
 
     /// Sets the Authorization header using a Bearer token.
     pub fn setBearerAuth(self: *Self, token: []const u8) !void {
-        dbg.entry("REQ", "Request.setBearerAuth");
         const auth_value = try std.fmt.allocPrint(self.allocator, "Bearer {s}", .{token});
         defer self.allocator.free(auth_value);
         try self.headers.set(HeaderName.AUTHORIZATION, auth_value);
-        dbg.exit("REQ", "Request.setBearerAuth");
     }
 
     /// Sets the Authorization header using HTTP Basic authentication.
     pub fn setBasicAuth(self: *Self, username: []const u8, password: []const u8) !void {
-        dbg.entry("REQ", "Request.setBasicAuth");
         const auth_value = try Base64.formatBasicAuth(self.allocator, username, password);
         defer self.allocator.free(auth_value);
 
         try self.headers.set(HeaderName.AUTHORIZATION, auth_value);
-        dbg.exit("REQ", "Request.setBasicAuth");
     }
 
     /// Sets the request body as application/x-www-form-urlencoded.
@@ -173,6 +161,20 @@ pub const Request = struct {
         }
     }
 
+    /// Adds a cookie to the Cookie header.
+    pub fn addCookie(self: *Self, name: []const u8, value: []const u8) !void {
+        const existing = self.headers.get(HeaderName.COOKIE);
+        if (existing) |current| {
+            const new_value = try std.fmt.allocPrint(self.allocator, "{s}; {s}={s}", .{ current, name, value });
+            defer self.allocator.free(new_value);
+            try self.headers.set(HeaderName.COOKIE, new_value);
+        } else {
+            const cookie_value = try std.fmt.allocPrint(self.allocator, "{s}={s}", .{ name, value });
+            defer self.allocator.free(cookie_value);
+            try self.headers.set(HeaderName.COOKIE, cookie_value);
+        }
+    }
+
     /// Returns the host from the URI.
     pub fn getHost(self: *const Self) ?[]const u8 {
         return self.uri.host;
@@ -184,8 +186,8 @@ pub const Request = struct {
     }
 
     /// Returns true if the request uses TLS.
-    pub fn isTls(self: *const Self) bool {
-        return self.uri.isTls();
+    pub fn isTLS(self: *const Self) bool {
+        return self.uri.isTLS();
     }
 
     /// Returns true if the request Content-Type matches the expected media type.
@@ -198,7 +200,7 @@ pub const Request = struct {
     /// Returns true if request Content-Type is JSON (handles charset, +json suffix, etc.).
     pub fn isJsonContent(self: *const Self) bool {
         const ct = self.headers.get(HeaderName.CONTENT_TYPE) orelse return false;
-        return @import("../util/json.zig").isJsonContentType(ct);
+        return @import("../data/json.zig").isJsonContentType(ct);
     }
 
     /// Returns true if request Content-Type is application/x-www-form-urlencoded.
@@ -304,6 +306,21 @@ pub const RequestBuilder = struct {
         return self;
     }
 
+    /// Adds a cookie to the request being built.
+    pub fn addCookie(self: *Self, name: []const u8, value: []const u8) !*Self {
+        const existing = self.headers.get(HeaderName.COOKIE);
+        if (existing) |current| {
+            const new_value = try std.fmt.allocPrint(self.allocator, "{s}; {s}={s}", .{ current, name, value });
+            defer self.allocator.free(new_value);
+            try self.headers.set(HeaderName.COOKIE, new_value);
+        } else {
+            const cookie_value = try std.fmt.allocPrint(self.allocator, "{s}={s}", .{ name, value });
+            defer self.allocator.free(cookie_value);
+            try self.headers.set(HeaderName.COOKIE, cookie_value);
+        }
+        return self;
+    }
+
     /// Sets a JSON body with appropriate Content-Type.
     pub fn setJsonBody(self: *Self, body: []const u8) !*Self {
         _ = try self.addHeader(HeaderName.CONTENT_TYPE, "application/json");
@@ -351,8 +368,26 @@ fn acceptsMediaType(accept_header: []const u8, target_media: []const u8) bool {
 
     var parts = mem.splitScalar(u8, accept_header, ',');
     while (parts.next()) |part_raw| {
-        const media = normalizeMediaType(mem.trim(u8, part_raw, " \t"));
+        const trimmed = mem.trim(u8, part_raw, " \t");
+        if (trimmed.len == 0) continue;
+
+        // Split on ';' to separate media type from parameters (e.g., q=)
+        const semicolon = mem.indexOfScalar(u8, trimmed, ';') orelse trimmed.len;
+        const media = mem.trim(u8, trimmed[0..semicolon], " \t");
         if (media.len == 0) continue;
+
+        // Parse quality value (q=) from parameters, default 1.0
+        var quality: f64 = 1.0;
+        if (semicolon < trimmed.len) {
+            const params = mem.trim(u8, trimmed[semicolon + 1 ..], " \t");
+            if (mem.startsWith(u8, params, "q=") or mem.startsWith(u8, params, "Q=")) {
+                quality = std.fmt.parseFloat(f64, params[2..]) catch 1.0;
+            }
+        }
+
+        // Skip entries with q=0 (explicitly excluded)
+        if (quality == 0.0) continue;
+
         if (std.ascii.eqlIgnoreCase(media, "*/*")) return true;
 
         const candidate = splitMediaType(media) orelse continue;
@@ -477,5 +512,27 @@ test "Request content and accept helpers" {
     try std.testing.expect(!request.isFormContent());
     try std.testing.expect(request.acceptsJson());
     try std.testing.expect(request.accepts("text/plain"));
+    try std.testing.expect(!request.accepts("image/png"));
+}
+
+test "Accept quality value parsing" {
+    const allocator = std.testing.allocator;
+    var request = try Request.init(allocator, .GET, "http://httpbun.com/api");
+    defer request.deinit();
+
+    // q=0 should exclude the type
+    try request.headers.set(HeaderName.ACCEPT, "application/json;q=0, text/plain;q=1.0");
+    try std.testing.expect(!request.accepts("application/json"));
+    try std.testing.expect(request.accepts("text/plain"));
+
+    // Default q=1.0
+    try request.headers.set(HeaderName.ACCEPT, "text/html, application/json");
+    try std.testing.expect(request.accepts("text/html"));
+    try std.testing.expect(request.accepts("application/json"));
+
+    // Mixed quality values
+    try request.headers.set(HeaderName.ACCEPT, "text/*;q=0.8, application/json;q=0.5");
+    try std.testing.expect(request.accepts("text/plain"));
+    try std.testing.expect(request.accepts("application/json"));
     try std.testing.expect(!request.accepts("image/png"));
 }

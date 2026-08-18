@@ -11,14 +11,14 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const list_writer = @import("../util/list_writer.zig");
-const dbg = @import("../util/debug.zig");
+const list_writer = @import("../io/list_writer.zig");
+const common = @import("../data/common.zig");
 
 const types = @import("types.zig");
 const Headers = @import("headers.zig").Headers;
 const HeaderName = @import("headers.zig").HeaderName;
 const Status = @import("status.zig").Status;
-const json_util = @import("../util/json.zig");
+const json_util = @import("../data/json.zig");
 /// HTTP response representation.
 pub const Response = struct {
     allocator: Allocator,
@@ -27,14 +27,13 @@ pub const Response = struct {
     headers: Headers,
     body: ?[]const u8 = null,
     body_owned: bool = false,
+    streaming_done: bool = false,
     trailers: ?Headers = null,
 
     const Self = @This();
 
     /// Creates a new response with the given status code.
     pub fn init(allocator: Allocator, status_code: u16) Self {
-        dbg.entry("RESP", "Response.init");
-        dbg.log("RESP", "status={d}", .{status_code});
         return .{
             .allocator = allocator,
             .status = Status.fromCode(status_code),
@@ -72,27 +71,15 @@ pub const Response = struct {
 
     /// Returns the response body as text.
     pub fn text(self: *const Self) ?[]const u8 {
-        dbg.entry("RESP", "Response.text");
-        dbg.exit("RESP", "Response.text");
         return self.body;
     }
 
     /// Parses the response body as JSON into the given type.
     /// The caller must call `deinit()` on the returned `std.json.Parsed(T)`.
     pub fn json(self: *const Self, comptime T: type, options: std.json.ParseOptions) !std.json.Parsed(T) {
-        dbg.entry("RESP", "Response.json");
         const body = self.body orelse return error.NoBody;
         const result = std.json.parseFromSlice(T, self.allocator, body, options);
-        dbg.exit("RESP", "Response.json");
         return result;
-    }
-
-    /// Parses the response body as JSON into the given type, using leaky parsing.
-    /// Strings borrow from the response body buffer. The response must outlive
-    /// the returned value.
-    pub fn jsonLeaky(self: *const Self, comptime T: type, options: std.json.ParseOptions) !T {
-        const body = self.body orelse return error.NoBody;
-        return std.json.parseFromSliceLeaky(T, self.allocator, body, options);
     }
 
     /// Zero-copy parse: returns T with strings pointing into the response body.
@@ -101,6 +88,9 @@ pub const Response = struct {
         const body = self.body orelse return error.NoBody;
         return std.json.parseFromSliceLeaky(T, self.allocator, body, options);
     }
+
+    /// Alias for `jsonBorrowed` — parses JSON with strings borrowing from the response body.
+    pub const jsonLeaky = jsonBorrowed;
 
     /// Parses the response body as a dynamic JSON value.
     /// The caller must call `deinit()` on the returned `ParsedJson`.
@@ -206,6 +196,26 @@ pub const Response = struct {
         try self.serialize(writer);
         return buffer.toOwnedSlice(allocator);
     }
+
+    pub fn setCookie(self: *Self, name: []const u8, value: []const u8, options: common.CookieOptions) !void {
+        const header_value = try common.buildSetCookieHeader(self.allocator, name, value, options);
+        try self.headers.append(HeaderName.SET_COOKIE, header_value);
+    }
+
+    pub fn getCookies(self: *const Self, allocator: Allocator) ![][]const u8 {
+        return self.headers.getAll(HeaderName.SET_COOKIE, allocator);
+    }
+
+    pub fn getCookie(self: *const Response, name: []const u8) ?[]const u8 {
+        for (self.headers.entries.items) |entry| {
+            if (!std.ascii.eqlIgnoreCase(entry.name, HeaderName.SET_COOKIE)) continue;
+            const eq_idx = std.mem.indexOfScalar(u8, entry.value, '=') orelse continue;
+            if (std.ascii.eqlIgnoreCase(entry.value[0..eq_idx], name)) {
+                return entry.value;
+            }
+        }
+        return null;
+    }
 };
 
 /// Fluent builder for constructing responses (server-side).
@@ -284,6 +294,12 @@ pub const ResponseBuilder = struct {
         _ = try self.header(HeaderName.CONTENT_TYPE, "text/plain; charset=utf-8");
         self.clearOwnedBody();
         self.body_data = content;
+        return self;
+    }
+
+    pub fn setCookie(self: *Self, name: []const u8, value: []const u8, options: common.CookieOptions) !*Self {
+        const header_value = try common.buildSetCookieHeader(self.allocator, name, value, options);
+        try self.headers.append(HeaderName.SET_COOKIE, header_value);
         return self;
     }
 

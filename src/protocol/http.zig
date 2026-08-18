@@ -18,10 +18,9 @@ const HeaderName = @import("../core/headers.zig").HeaderName;
 const Request = @import("../core/request.zig").Request;
 const Response = @import("../core/response.zig").Response;
 const Status = @import("../core/status.zig").Status;
-const any_io = @import("../util/any_io.zig");
-const list_writer = @import("../util/list_writer.zig");
+const any_io = @import("../io/any_io.zig");
+const list_writer = @import("../io/list_writer.zig");
 const alpn = @import("../tls/alpn.zig");
-const dbg = @import("../util/debug.zig");
 
 /// HTTP protocol version negotiation result.
 pub const NegotiatedProtocol = enum {
@@ -59,7 +58,6 @@ pub const Http1Connection = struct {
 
     /// Creates a new HTTP/1.x connection.
     pub fn init(allocator: Allocator, reader: any_io.AnyReader, writer: any_io.AnyWriter) Self {
-        dbg.entry("HTTP", "Http1Connection.init");
         return .{
             .allocator = allocator,
             .reader = reader,
@@ -233,7 +231,7 @@ fn parseStatusLine(line: []const u8) !struct { version: []const u8, status: u16 
 ///
 /// Non-exhaustive: any u8 is valid. Unknown/extension/GREASE frame types
 /// (>= 0x0A) MUST be ignored by the receiver per RFC 7540 4.1.
-pub const Http2FrameType = enum(u8) {
+pub const HTTP2FrameType = enum(u8) {
     data = 0x0,
     headers = 0x1,
     priority = 0x2,
@@ -248,14 +246,14 @@ pub const Http2FrameType = enum(u8) {
 };
 
 /// Represents the 9-byte header standard for all HTTP/2 frames.
-pub const Http2FrameHeader = struct {
+pub const HTTP2FrameHeader = struct {
     length: u24,
-    frame_type: Http2FrameType,
+    frame_type: HTTP2FrameType,
     flags: u8,
     stream_id: u31,
 
     /// Encodes the frame header into wire format.
-    pub fn serialize(self: Http2FrameHeader) [9]u8 {
+    pub fn serialize(self: HTTP2FrameHeader) [9]u8 {
         var buf: [9]u8 = undefined;
         buf[0] = @intCast((self.length >> 16) & 0xFF);
         buf[1] = @intCast((self.length >> 8) & 0xFF);
@@ -270,10 +268,10 @@ pub const Http2FrameHeader = struct {
     }
 
     /// Decodes a frame header from wire format.
-    pub fn parse(data: [9]u8) Http2FrameHeader {
+    pub fn parse(data: [9]u8) HTTP2FrameHeader {
         return .{
             .length = (@as(u24, data[0]) << 16) | (@as(u24, data[1]) << 8) | data[2],
-            .frame_type = @as(Http2FrameType, @enumFromInt(data[3])),
+            .frame_type = @as(HTTP2FrameType, @enumFromInt(data[3])),
             .flags = data[4],
             .stream_id = (@as(u31, data[5] & 0x7F) << 24) | (@as(u31, data[6]) << 16) | (@as(u31, data[7]) << 8) | data[8],
         };
@@ -287,7 +285,7 @@ pub const HTTP2_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 ///
 /// Non-exhaustive: any u16 is valid. Unknown/unsupported SETTINGS identifiers
 /// MUST be ignored by the receiver per RFC 7540 6.5.2.
-pub const Http2Settings = enum(u16) {
+pub const HTTP2Settings = enum(u16) {
     header_table_size = 0x1,
     enable_push = 0x2,
     max_concurrent_streams = 0x3,
@@ -300,7 +298,7 @@ pub const Http2Settings = enum(u16) {
 };
 
 /// Standard error codes for HTTP/2 stream and connection termination.
-pub const Http2ErrorCode = enum(u32) {
+pub const HTTP2ErrorCode = enum(u32) {
     no_error = 0x0,
     protocol_error = 0x1,
     internal_error = 0x2,
@@ -318,17 +316,17 @@ pub const Http2ErrorCode = enum(u32) {
 };
 
 /// Manages the state of an HTTP/2 connection, including HPack context and streams.
-pub const Http2Connection = struct {
+pub const HTTP2Connection = struct {
     allocator: Allocator,
     reader: any_io.AnyReader,
     writer: any_io.AnyWriter,
     next_stream_id: u31 = 1,
-    settings: Http2ConnectionSettings = .{},
-    peer_settings: Http2ConnectionSettings = .{},
+    settings: HTTP2ConnectionSettings = .{},
+    peer_settings: HTTP2ConnectionSettings = .{},
 
     const Self = @This();
 
-    pub const Http2ConnectionSettings = struct {
+    pub const HTTP2ConnectionSettings = struct {
         header_table_size: u32 = 4096,
         enable_push: bool = true,
         max_concurrent_streams: u32 = 100,
@@ -336,9 +334,10 @@ pub const Http2Connection = struct {
         max_frame_size: u32 = 16384,
         max_header_list_size: u32 = 8192,
     };
+    pub const Settings = HTTP2ConnectionSettings;
 
     pub const Frame = struct {
-        header: Http2FrameHeader,
+        header: HTTP2FrameHeader,
         payload: []u8,
 
         pub fn deinit(self: *Frame, allocator: Allocator) void {
@@ -348,7 +347,6 @@ pub const Http2Connection = struct {
 
     /// Initializes a new HTTP/2 connection state.
     pub fn init(allocator: Allocator, reader: any_io.AnyReader, writer: any_io.AnyWriter) Self {
-        dbg.entry("HTTP", "Http2Connection.init");
         return .{
             .allocator = allocator,
             .reader = reader,
@@ -358,7 +356,6 @@ pub const Http2Connection = struct {
 
     /// Initiates the HTTP/2 session by sending the preface and initial settings.
     pub fn handshake(self: *Self) !void {
-        dbg.entry("HTTP", "Http2Connection.handshake");
         try self.writer.writeAll(HTTP2_PREFACE);
         try self.sendSettings();
     }
@@ -369,7 +366,7 @@ pub const Http2Connection = struct {
         defer payload.deinit(self.allocator);
 
         try encodeSettingsPayload(self.settings, self.allocator, &payload);
-        const header = Http2FrameHeader{
+        const header = HTTP2FrameHeader{
             .length = @intCast(payload.items.len),
             .frame_type = .settings,
             .flags = 0,
@@ -385,7 +382,7 @@ pub const Http2Connection = struct {
     pub fn readFrame(self: *Self, allocator: Allocator, max_payload_size: usize) !Frame {
         var hdr_bytes: [9]u8 = undefined;
         try self.reader.readNoEof(&hdr_bytes);
-        const header = Http2FrameHeader.parse(hdr_bytes);
+        const header = HTTP2FrameHeader.parse(hdr_bytes);
         const len: usize = @intCast(header.length);
         if (len > max_payload_size) return error.FrameTooLarge;
 
@@ -397,7 +394,7 @@ pub const Http2Connection = struct {
         return .{ .header = header, .payload = payload };
     }
 
-    pub fn writeFrame(self: *Self, header: Http2FrameHeader, payload: []const u8) !void {
+    pub fn writeFrame(self: *Self, header: HTTP2FrameHeader, payload: []const u8) !void {
         const serialized = header.serialize();
         try self.writer.writeAll(&serialized);
         if (payload.len > 0) {
@@ -406,42 +403,42 @@ pub const Http2Connection = struct {
     }
 };
 
-pub fn encodeSettingsPayload(settings: Http2Connection.Http2ConnectionSettings, allocator: Allocator, out: *std.ArrayList(u8)) !void {
+pub fn encodeSettingsPayload(settings: HTTP2Connection.HTTP2ConnectionSettings, allocator: Allocator, out: *std.ArrayList(u8)) !void {
     // Each setting is 6 bytes: 16-bit ID + 32-bit value.
     var buf: [6]u8 = undefined;
 
     // HEADER_TABLE_SIZE (0x1)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.header_table_size));
+    writeU16BE(&buf, @intFromEnum(HTTP2Settings.header_table_size));
     writeU32BE(buf[2..6], settings.header_table_size);
     try out.appendSlice(allocator, &buf);
 
     // ENABLE_PUSH (0x2)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.enable_push));
+    writeU16BE(&buf, @intFromEnum(HTTP2Settings.enable_push));
     writeU32BE(buf[2..6], if (settings.enable_push) 1 else 0);
     try out.appendSlice(allocator, &buf);
 
     // MAX_CONCURRENT_STREAMS (0x3)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.max_concurrent_streams));
+    writeU16BE(&buf, @intFromEnum(HTTP2Settings.max_concurrent_streams));
     writeU32BE(buf[2..6], settings.max_concurrent_streams);
     try out.appendSlice(allocator, &buf);
 
     // INITIAL_WINDOW_SIZE (0x4)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.initial_window_size));
+    writeU16BE(&buf, @intFromEnum(HTTP2Settings.initial_window_size));
     writeU32BE(buf[2..6], settings.initial_window_size);
     try out.appendSlice(allocator, &buf);
 
     // MAX_FRAME_SIZE (0x5)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.max_frame_size));
+    writeU16BE(&buf, @intFromEnum(HTTP2Settings.max_frame_size));
     writeU32BE(buf[2..6], settings.max_frame_size);
     try out.appendSlice(allocator, &buf);
 
     // MAX_HEADER_LIST_SIZE (0x6)
-    writeU16BE(&buf, @intFromEnum(Http2Settings.max_header_list_size));
+    writeU16BE(&buf, @intFromEnum(HTTP2Settings.max_header_list_size));
     writeU32BE(buf[2..6], settings.max_header_list_size);
     try out.appendSlice(allocator, &buf);
 }
 
-pub fn applySettingsPayload(settings: *Http2Connection.Http2ConnectionSettings, payload: []const u8) !void {
+pub fn applySettingsPayload(settings: *HTTP2Connection.HTTP2ConnectionSettings, payload: []const u8) !void {
     if (payload.len % 6 != 0) return error.InvalidSettingsPayload;
 
     var i: usize = 0;
@@ -451,7 +448,7 @@ pub fn applySettingsPayload(settings: *Http2Connection.Http2ConnectionSettings, 
 
         // RFC 7540 6.5.2: An endpoint MUST ignore and discard any SETTINGS
         // parameter with an identifier it does not understand.
-        switch (@as(Http2Settings, @enumFromInt(id))) {
+        switch (@as(HTTP2Settings, @enumFromInt(id))) {
             .header_table_size => settings.header_table_size = value,
             .enable_push => settings.enable_push = (value != 0),
             .max_concurrent_streams => settings.max_concurrent_streams = value,
@@ -493,7 +490,7 @@ fn readU32BE(buf: []const u8) u32 {
 }
 
 /// HTTP/3 frame types as defined in RFC 9114.
-pub const Http3FrameType = enum(u64) {
+pub const HTTP3FrameType = enum(u64) {
     data = 0x00,
     headers = 0x01,
     cancel_push = 0x03,
@@ -504,10 +501,11 @@ pub const Http3FrameType = enum(u64) {
     max_data = 0x10,
     max_stream_data = 0x11,
 };
+pub const Http3FrameType = HTTP3FrameType;
 
 /// Configuration parameters for HTTP/3 connections.
-/// This is the canonical definition; see also `types.Http3Settings`.
-pub const Http3Settings = struct {
+/// This is the canonical definition; see also `types.HTTP3Settings`.
+pub const HTTP3Settings = struct {
     max_field_section_size: u64 = 8192,
     qpack_max_table_capacity: u64 = 4096,
     qpack_blocked_streams: u64 = 100,
@@ -516,7 +514,7 @@ pub const Http3Settings = struct {
 };
 
 /// Standard error codes for HTTP/3 stream and connection errors.
-pub const Http3ErrorCode = enum(u64) {
+pub const HTTP3ErrorCode = enum(u64) {
     no_error = 0x100,
     general_protocol_error = 0x101,
     internal_error = 0x102,
@@ -587,18 +585,18 @@ pub fn decodeVarInt(data: []const u8) !struct { value: u64, len: usize } {
 }
 
 /// HTTP/3 frame header (type + length), encoded as two QUIC varints.
-pub const Http3FrameHeader = struct {
+pub const HTTP3FrameHeader = struct {
     frame_type: u64,
     length: u64,
 
-    pub fn encode(self: Http3FrameHeader, out: []u8) !usize {
+    pub fn encode(self: HTTP3FrameHeader, out: []u8) !usize {
         var offset: usize = 0;
         offset += try encodeVarInt(self.frame_type, out[offset..]);
         offset += try encodeVarInt(self.length, out[offset..]);
         return offset;
     }
 
-    pub fn decode(data: []const u8) !struct { header: Http3FrameHeader, len: usize } {
+    pub fn decode(data: []const u8) !struct { header: HTTP3FrameHeader, len: usize } {
         const t = try decodeVarInt(data);
         const l = try decodeVarInt(data[t.len..]);
         return .{
@@ -607,9 +605,10 @@ pub const Http3FrameHeader = struct {
         };
     }
 };
+pub const Http3FrameHeader = HTTP3FrameHeader;
 
 /// HTTP/3 SETTINGS identifiers used on control streams.
-pub const Http3SettingId = enum(u64) {
+pub const HTTP3SettingId = enum(u64) {
     qpack_max_table_capacity = 0x01,
     max_field_section_size = 0x06,
     qpack_blocked_streams = 0x07,
@@ -625,14 +624,14 @@ pub fn appendVarInt(out: *std.ArrayList(u8), allocator: Allocator, value: u64) !
 }
 
 /// Appends a complete HTTP/3 frame (header + payload) into an unmanaged byte list.
-pub fn appendHttp3Frame(
+pub fn appendHTTP3Frame(
     out: *std.ArrayList(u8),
     allocator: Allocator,
-    frame_type: Http3FrameType,
+    frame_type: HTTP3FrameType,
     payload: []const u8,
 ) !void {
     var hdr_buf: [32]u8 = undefined;
-    const hdr_len = try (Http3FrameHeader{
+    const hdr_len = try (HTTP3FrameHeader{
         .frame_type = @intFromEnum(frame_type),
         .length = @intCast(payload.len),
     }).encode(&hdr_buf);
@@ -642,34 +641,34 @@ pub fn appendHttp3Frame(
 }
 
 /// Encodes HTTP/3 SETTINGS payload from high-level configuration values.
-pub fn encodeHttp3SettingsPayload(
-    settings: types.Http3Settings,
+pub fn encodeHTTP3SettingsPayload(
+    settings: types.HTTP3Settings,
     allocator: Allocator,
     out: *std.ArrayList(u8),
 ) !void {
-    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.qpack_max_table_capacity));
+    try appendVarInt(out, allocator, @intFromEnum(HTTP3SettingId.qpack_max_table_capacity));
     try appendVarInt(out, allocator, settings.qpack_max_table_capacity);
 
-    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.max_field_section_size));
+    try appendVarInt(out, allocator, @intFromEnum(HTTP3SettingId.max_field_section_size));
     try appendVarInt(out, allocator, settings.max_field_section_size);
 
-    try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.qpack_blocked_streams));
+    try appendVarInt(out, allocator, @intFromEnum(HTTP3SettingId.qpack_blocked_streams));
     try appendVarInt(out, allocator, settings.qpack_blocked_streams);
 
     if (settings.enable_connect_protocol) {
-        try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.enable_connect_protocol));
+        try appendVarInt(out, allocator, @intFromEnum(HTTP3SettingId.enable_connect_protocol));
         try appendVarInt(out, allocator, 1);
     }
 
     if (settings.enable_datagrams) {
-        try appendVarInt(out, allocator, @intFromEnum(Http3SettingId.h3_datagram));
+        try appendVarInt(out, allocator, @intFromEnum(HTTP3SettingId.h3_datagram));
         try appendVarInt(out, allocator, 1);
     }
 }
 
 /// Parses HTTP/3 SETTINGS payload into high-level configuration values.
-pub fn parseHttp3SettingsPayload(payload: []const u8) !types.Http3Settings {
-    var parsed = types.Http3Settings{
+pub fn parseHTTP3SettingsPayload(payload: []const u8) !types.HTTP3Settings {
+    var parsed = types.HTTP3Settings{
         .max_field_section_size = 0,
         .qpack_max_table_capacity = 0,
         .qpack_blocked_streams = 0,
@@ -686,11 +685,11 @@ pub fn parseHttp3SettingsPayload(payload: []const u8) !types.Http3Settings {
         offset += value_result.len;
 
         switch (id_result.value) {
-            @intFromEnum(Http3SettingId.qpack_max_table_capacity) => parsed.qpack_max_table_capacity = value_result.value,
-            @intFromEnum(Http3SettingId.max_field_section_size) => parsed.max_field_section_size = value_result.value,
-            @intFromEnum(Http3SettingId.qpack_blocked_streams) => parsed.qpack_blocked_streams = value_result.value,
-            @intFromEnum(Http3SettingId.enable_connect_protocol) => parsed.enable_connect_protocol = value_result.value != 0,
-            @intFromEnum(Http3SettingId.h3_datagram) => parsed.enable_datagrams = value_result.value != 0,
+            @intFromEnum(HTTP3SettingId.qpack_max_table_capacity) => parsed.qpack_max_table_capacity = value_result.value,
+            @intFromEnum(HTTP3SettingId.max_field_section_size) => parsed.max_field_section_size = value_result.value,
+            @intFromEnum(HTTP3SettingId.qpack_blocked_streams) => parsed.qpack_blocked_streams = value_result.value,
+            @intFromEnum(HTTP3SettingId.enable_connect_protocol) => parsed.enable_connect_protocol = value_result.value != 0,
+            @intFromEnum(HTTP3SettingId.h3_datagram) => parsed.enable_datagrams = value_result.value != 0,
             else => {},
         }
     }
@@ -698,10 +697,28 @@ pub fn parseHttp3SettingsPayload(payload: []const u8) !types.Http3Settings {
     return parsed;
 }
 
+/// Returns true if the byte slice contains CR (\r) or LF (\n) characters.
+/// Used to prevent HTTP request/response splitting (CRLF injection) attacks.
+fn containsCRLF(s: []const u8) bool {
+    for (s) |c| {
+        if (c == '\r' or c == '\n') return true;
+    }
+    return false;
+}
+
 /// Formats a request object into HTTP/1.x wire format.
+/// Validates that the request target and header values do not contain
+/// CRLF sequences to prevent HTTP request splitting attacks.
 pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
-    dbg.entry("HTTP", "formatRequest");
-    dbg.log("HTTP", "method={s} path={s}", .{ req.method.toString(), req.uri.path });
+    if (containsCRLF(req.uri.path)) return error.InvalidUri;
+    if (req.uri.query) |q| {
+        if (containsCRLF(q)) return error.InvalidUri;
+    }
+    for (req.headers.entries.items) |h| {
+        if (containsCRLF(h.name)) return error.InvalidHeaderName;
+        if (containsCRLF(h.value)) return error.InvalidHeaderValue;
+    }
+
     var buffer = std.ArrayList(u8).empty;
     const writer = list_writer.init(allocator, &buffer);
 
@@ -725,9 +742,15 @@ pub fn formatRequest(req: *const Request, allocator: Allocator) ![]u8 {
 }
 
 /// Formats a response object into HTTP/1.x wire format.
+/// Validates that the status phrase and header values do not contain
+/// CRLF sequences to prevent HTTP response splitting attacks.
 pub fn formatResponse(resp: *const Response, allocator: Allocator) ![]u8 {
-    dbg.entry("HTTP", "formatResponse");
-    dbg.log("HTTP", "status={d}", .{resp.status.code});
+    if (containsCRLF(resp.status.phrase)) return error.InvalidStatusPhrase;
+    for (resp.headers.entries.items) |h| {
+        if (containsCRLF(h.name)) return error.InvalidHeaderName;
+        if (containsCRLF(h.value)) return error.InvalidHeaderValue;
+    }
+
     var buffer = std.ArrayList(u8).empty;
     const writer = list_writer.init(allocator, &buffer);
 
@@ -820,6 +843,18 @@ pub fn ChunkedWriter(comptime WriterType: type) type {
     };
 }
 
+/// Writes a single chunk directly to a writer with proper chunked encoding framing.
+/// Use this for streaming responses where you want to send data incrementally.
+pub fn writeChunkToWriter(writer: anytype, data: []const u8) !void {
+    if (data.len == 0) return;
+    var size_buf: [20]u8 = undefined;
+    const size_str = std.fmt.bufPrint(&size_buf, "{x}", .{data.len}) catch return error.Overflow;
+    try writer.writeAll(size_str);
+    try writer.writeAll("\r\n");
+    try writer.writeAll(data);
+    try writer.writeAll("\r\n");
+}
+
 /// Determines the highest supported HTTP version based on ALPN negotiation string.
 pub fn negotiateVersion(alpn_str: ?[]const u8) NegotiatedProtocol {
     if (alpn_str) |protocol| {
@@ -855,14 +890,14 @@ test "HTTP/1.1 response formatting" {
 }
 
 test "HTTP/2 frame header serialization" {
-    const header = Http2FrameHeader{
+    const header = HTTP2FrameHeader{
         .length = 256,
         .frame_type = .data,
         .flags = 0x01,
         .stream_id = 1,
     };
     const serialized = header.serialize();
-    const parsed = Http2FrameHeader.parse(serialized);
+    const parsed = HTTP2FrameHeader.parse(serialized);
 
     try std.testing.expectEqual(header.length, parsed.length);
     try std.testing.expectEqual(header.frame_type, parsed.frame_type);
@@ -873,7 +908,7 @@ test "HTTP/2 non-exhaustive frame type: unknown value does not panic" {
     // RFC 7540 4.1: unknown frame types MUST be ignored.
     // Verify @enumFromInt does not panic for values >= 0x0A.
     const unknown_type: u8 = 0xFF; // GREASE/extension type
-    const ft: Http2FrameType = @enumFromInt(unknown_type);
+    const ft: HTTP2FrameType = @enumFromInt(unknown_type);
     // The tag integer should round-trip correctly.
     try std.testing.expectEqual(unknown_type, @intFromEnum(ft));
 }
@@ -898,7 +933,7 @@ test "HTTP/2 non-exhaustive SETTINGS: unknown identifier is silently ignored" {
     payload[10] = 0x00;
     payload[11] = 0x01;
 
-    var settings = Http2Connection.Http2ConnectionSettings{};
+    var settings = HTTP2Connection.HTTP2ConnectionSettings{};
     try applySettingsPayload(&settings, &payload);
 
     // Known setting must be applied.
@@ -914,7 +949,7 @@ test "HTTP/2 applySettingsPayload rejects invalid initial window size" {
     payload[3] = 0xFF;
     payload[4] = 0xFF;
     payload[5] = 0xFF; // > 2^31-1
-    var settings = Http2Connection.Http2ConnectionSettings{};
+    var settings = HTTP2Connection.HTTP2ConnectionSettings{};
     try std.testing.expectError(error.FlowControlError, applySettingsPayload(&settings, &payload));
 }
 
@@ -960,7 +995,7 @@ test "VarInt encoding" {
 test "HTTP/2 SETTINGS payload encode/decode" {
     const allocator = std.testing.allocator;
 
-    const settings_in = Http2Connection.Http2ConnectionSettings{
+    const settings_in = HTTP2Connection.HTTP2ConnectionSettings{
         .header_table_size = 4096,
         .enable_push = false,
         .max_concurrent_streams = 123,
@@ -973,7 +1008,7 @@ test "HTTP/2 SETTINGS payload encode/decode" {
     defer payload.deinit(allocator);
     try encodeSettingsPayload(settings_in, allocator, &payload);
 
-    var settings_out = Http2Connection.Http2ConnectionSettings{};
+    var settings_out = HTTP2Connection.HTTP2ConnectionSettings{};
     try applySettingsPayload(&settings_out, payload.items);
 
     try std.testing.expectEqual(settings_in.header_table_size, settings_out.header_table_size);
@@ -986,9 +1021,9 @@ test "HTTP/2 SETTINGS payload encode/decode" {
 
 test "HTTP/3 frame header encode/decode" {
     var buf: [32]u8 = undefined;
-    const hdr = Http3FrameHeader{ .frame_type = 0x01, .length = 1234 };
+    const hdr = HTTP3FrameHeader{ .frame_type = 0x01, .length = 1234 };
     const n = try hdr.encode(&buf);
-    const decoded = try Http3FrameHeader.decode(buf[0..n]);
+    const decoded = try HTTP3FrameHeader.decode(buf[0..n]);
     try std.testing.expectEqual(hdr.frame_type, decoded.header.frame_type);
     try std.testing.expectEqual(hdr.length, decoded.header.length);
 }
@@ -1009,7 +1044,7 @@ test "encodeChunkedBody includes final chunk and trailers" {
 
 test "HTTP/2 SETTINGS payload roundtrip with custom values" {
     const allocator = std.testing.allocator;
-    const settings = Http2Connection.Http2ConnectionSettings{
+    const settings = HTTP2Connection.HTTP2ConnectionSettings{
         .header_table_size = 8192,
         .enable_push = false,
         .max_concurrent_streams = 200,
@@ -1021,7 +1056,7 @@ test "HTTP/2 SETTINGS payload roundtrip with custom values" {
     defer buf.deinit(allocator);
     try encodeSettingsPayload(settings, allocator, &buf);
 
-    var decoded = Http2Connection.Http2ConnectionSettings{};
+    var decoded = HTTP2Connection.HTTP2ConnectionSettings{};
     try applySettingsPayload(&decoded, buf.items);
 
     try std.testing.expectEqual(@as(u32, 8192), decoded.header_table_size);
@@ -1085,4 +1120,24 @@ test "ChunkedWriter -- empty chunk is no-op" {
     try cw.finish(null);
 
     try std.testing.expectEqualStrings("0\r\n\r\n", buf.items);
+}
+
+test "writeChunkToWriter produces correct chunked encoding" {
+    const allocator = std.testing.allocator;
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+    const writer = list_writer.init(allocator, &buf);
+
+    try writeChunkToWriter(writer, "hello");
+    try std.testing.expectEqualStrings("5\r\nhello\r\n", buf.items);
+}
+
+test "writeChunkToWriter empty data is no-op" {
+    const allocator = std.testing.allocator;
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(allocator);
+    const writer = list_writer.init(allocator, &buf);
+
+    try writeChunkToWriter(writer, "");
+    try std.testing.expectEqualStrings("", buf.items);
 }

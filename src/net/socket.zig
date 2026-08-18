@@ -14,8 +14,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const address = @import("address.zig");
-const any_io = @import("../util/any_io.zig");
-const dbg = @import("../util/debug.zig");
+const any_io = @import("../io/any_io.zig");
 
 const is_windows = builtin.os.tag == .windows;
 
@@ -65,6 +64,7 @@ const winsock = if (is_windows) struct {
     extern "ws2_32" fn ioctlsocket(s: SOCKET, cmd: i32, argp: *u32) callconv(.winapi) i32;
     extern "ws2_32" fn select(nfds: i32, readfds: ?*fd_set, writefds: ?*fd_set, exceptfds: ?*fd_set, timeout: ?*posix.timeval) callconv(.winapi) i32;
 
+    const SO_ERROR: i32 = 0x1007;
     const FIONBIO: i32 = @bitCast(@as(u32, 0x8004667E));
     const FD_SETSIZE: u32 = 64;
     const fd_set = extern struct {
@@ -73,7 +73,7 @@ const winsock = if (is_windows) struct {
     };
 } else struct {};
 
-var winsock_initialized: bool = false;
+var winsock_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 const INVALID_SOCKET: posix.socket_t = if (is_windows)
     @ptrFromInt(~@as(usize, 0))
@@ -133,22 +133,18 @@ fn posixConnect(sock: posix.socket_t, addr_ptr: *const posix.sockaddr, addr_len:
 }
 
 fn setSocketNonBlocking(sock: posix.socket_t, enable: bool) !void {
-    dbg.entry("SOCKET", "setSocketNonBlocking");
     if (is_windows) {
         var mode: u32 = if (enable) 1 else 0;
         const rc = winsock.ioctlsocket(toWinsockSocket(sock), winsock.FIONBIO, &mode);
         if (rc == winsock.SOCKET_ERROR) {
-            dbg.exitErr("SOCKET", "setSocketNonBlocking", error.SocketOptionFailed);
             return error.SocketOptionFailed;
         }
-        dbg.exit("SOCKET", "setSocketNonBlocking");
         return;
     }
 
     const flags_rc = posix.system.fcntl(sock, posix.F.GETFL, @as(usize, 0));
     const flags_err = posix.errno(flags_rc);
     if (flags_err != .SUCCESS) {
-        dbg.exitErr("SOCKET", "setSocketNonBlocking", error.SocketOptionFailed);
         return error.SocketOptionFailed;
     }
     const flags: usize = @intCast(flags_rc);
@@ -156,10 +152,8 @@ fn setSocketNonBlocking(sock: posix.socket_t, enable: bool) !void {
     const new_flags = if (enable) flags | nonblock else flags & ~nonblock;
     const setfl_rc = posix.system.fcntl(sock, posix.F.SETFL, new_flags);
     if (posix.errno(setfl_rc) != .SUCCESS) {
-        dbg.exitErr("SOCKET", "setSocketNonBlocking", error.SocketOptionFailed);
         return error.SocketOptionFailed;
     }
-    dbg.exit("SOCKET", "setSocketNonBlocking");
 }
 
 fn waitConnectWritable(sock: posix.socket_t, timeout_ms: u64) !void {
@@ -190,10 +184,16 @@ fn waitConnectWritable(sock: posix.socket_t, timeout_ms: u64) !void {
         .revents = 0,
     }};
     const timeout: i32 = @intCast(@min(timeout_ms, @as(u64, std.math.maxInt(i32))));
-    const rc = try std.posix.poll(&poll_fds, timeout);
-    if (rc == 0) return error.ConnectionTimeout;
-    if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0) {
-        return error.ConnectFailed;
+    while (true) {
+        const rc = std.posix.poll(&poll_fds, timeout) catch |err| switch (err) {
+            error.Interrupted => continue,
+            else => return error.ConnectFailed,
+        };
+        if (rc == 0) return error.ConnectionTimeout;
+        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL)) != 0) {
+            return error.ConnectFailed;
+        }
+        return;
     }
 }
 
@@ -204,7 +204,7 @@ fn checkConnectCompleted(sock: posix.socket_t) !void {
         const rc = winsock.getsockopt(
             toWinsockSocket(sock),
             @intCast(posix.SOL.SOCKET),
-            0x1007, // SO_ERROR
+            winsock.SO_ERROR,
             @ptrCast(&err_code),
             &len,
         );
@@ -219,7 +219,6 @@ fn checkConnectCompleted(sock: posix.socket_t) !void {
 }
 
 fn posixConnectWithTimeout(sock: posix.socket_t, addr_ptr: *const posix.sockaddr, addr_len: posix.socklen_t, timeout_ms: u64) !void {
-    dbg.entry("SOCKET", "posixConnectWithTimeout");
     if (timeout_ms == 0) {
         return posixConnect(sock, addr_ptr, addr_len);
     }
@@ -231,12 +230,10 @@ fn posixConnectWithTimeout(sock: posix.socket_t, addr_ptr: *const posix.sockaddr
         const rc = winsock.connect(toWinsockSocket(sock), addr_ptr, @intCast(addr_len));
         if (rc == 0) {
             try setSocketNonBlocking(sock, false);
-            dbg.exit("SOCKET", "posixConnectWithTimeout");
             return;
         }
         const err = winsock.WSAGetLastError();
         if (err != winsock.WSAEWOULDBLOCK) {
-            dbg.exitErr("SOCKET", "posixConnectWithTimeout", error.ConnectFailed);
             return error.ConnectFailed;
         }
     } else {
@@ -244,22 +241,18 @@ fn posixConnectWithTimeout(sock: posix.socket_t, addr_ptr: *const posix.sockaddr
         switch (posix.errno(rc)) {
             .SUCCESS => {
                 try setSocketNonBlocking(sock, false);
-                dbg.exit("SOCKET", "posixConnectWithTimeout");
                 return;
             },
             .INPROGRESS, .ALREADY => {},
             else => {
-                dbg.exitErr("SOCKET", "posixConnectWithTimeout", error.ConnectFailed);
                 return error.ConnectFailed;
             },
         }
     }
 
-    dbg.log("SOCKET", "waiting for connect (timeout={d}ms)", .{timeout_ms});
     try waitConnectWritable(sock, timeout_ms);
     try checkConnectCompleted(sock);
     try setSocketNonBlocking(sock, false);
-    dbg.exit("SOCKET", "posixConnectWithTimeout");
 }
 
 fn posixBind(sock: posix.socket_t, addr_ptr: *const posix.sockaddr, addr_len: posix.socklen_t) !void {
@@ -306,10 +299,13 @@ fn posixAccept(sock: posix.socket_t, addr_ptr: *posix.sockaddr, addr_len: *posix
         return toSocketHandle(rc);
     }
 
-    const rc = posix.system.accept(sock, addr_ptr, addr_len);
-    switch (posix.errno(rc)) {
-        .SUCCESS => return toSocketHandle(rc),
-        else => return error.AcceptFailed,
+    while (true) {
+        const rc = posix.system.accept(sock, addr_ptr, addr_len);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return toSocketHandle(rc),
+            .INTR => continue,
+            else => return error.AcceptFailed,
+        }
     }
 }
 
@@ -345,7 +341,6 @@ fn posixSend(sock: posix.socket_t, data: []const u8, flags: u32) !usize {
                     try winsockWaitWritable(sock);
                     continue;
                 }
-                dbg.exitErr("SOCKET", "posixSend", error.SendFailed);
                 return error.SendFailed;
             }
             return @intCast(rc);
@@ -376,20 +371,16 @@ fn posixRecv(sock: posix.socket_t, buffer: []u8, flags: u32) !usize {
                     var tv = posix.timeval{ .sec = 30, .usec = 0 };
                     const sel_rc = winsock.select(0, &read_set, null, null, &tv);
                     if (sel_rc == winsock.SOCKET_ERROR) {
-                        dbg.exitErr("SOCKET", "posixRecv", error.RecvFailed);
                         return error.RecvFailed;
                     }
                     if (sel_rc == 0) {
-                        dbg.exitErr("SOCKET", "posixRecv", error.TimedOut);
                         return error.TimedOut;
                     }
                     continue;
                 }
                 if (err == winsock.WSAECONNRESET) {
-                    dbg.exitErr("SOCKET", "posixRecv", error.ConnectionResetByPeer);
                     return error.ConnectionResetByPeer;
                 }
-                dbg.exitErr("SOCKET", "posixRecv", error.RecvFailed);
                 return error.RecvFailed;
             }
             return @intCast(rc);
@@ -401,6 +392,7 @@ fn posixRecv(sock: posix.socket_t, buffer: []u8, flags: u32) !usize {
         switch (posix.errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .INTR => continue,
+            .AGAIN => continue,
             .CONNRESET => return error.ConnectionResetByPeer,
             else => return error.RecvFailed,
         }
@@ -418,7 +410,6 @@ fn posixSendTo(sock: posix.socket_t, data: []const u8, flags: u32, addr_ptr: *co
                     try winsockWaitWritable(sock);
                     continue;
                 }
-                dbg.exitErr("SOCKET", "posixSendTo", error.SendFailed);
                 return error.SendFailed;
             }
             return @intCast(rc);
@@ -550,35 +541,38 @@ fn tcpNoDelayOption() u32 {
 ///
 /// On Windows this calls `WSAStartup`; on other platforms it is a no-op.
 pub fn init() NetInitError!void {
-    dbg.entry("SOCKET", "init");
     if (!is_windows) return;
 
-    if (winsock_initialized) {
-        dbg.exit("SOCKET", "init");
+    if (winsock_initialized.load(.monotonic)) {
         return;
     }
 
-    var wsa_data: winsock.WSADATA = undefined;
-    const version_2_2: u16 = (@as(u16, 2) << 8) | 2;
-    if (winsock.WSAStartup(version_2_2, &wsa_data) != 0) {
-        dbg.exitErr("SOCKET", "init", error.InitializationError);
-        return error.InitializationError;
+    // Use compare-and-swap to ensure only one thread initializes Winsock.
+    const result = winsock_initialized.cmpxchgWeak(false, true, .acq_rel, .monotonic);
+    if (result == null) {
+        // We won the race — initialize Winsock.
+        var wsa_data: winsock.WSADATA = std.mem.zeroes(winsock.WSADATA);
+        const version_2_2: u16 = (@as(u16, 2) << 8) | 2;
+        if (winsock.WSAStartup(version_2_2, &wsa_data) != 0) {
+            winsock_initialized.store(false, .release);
+            return error.InitializationError;
+        }
+    } else {
+        // Another thread is initializing — spin until done.
+        while (!winsock_initialized.load(.acquire)) {
+            std.Thread.yield() catch {};
+        }
     }
-
-    winsock_initialized = true;
-    dbg.exit("SOCKET", "init");
 }
 
 /// Deinitializes the platform networking subsystem.
 ///
 /// On Windows this calls `WSACleanup`; on other platforms it is a no-op.
 pub fn deinit() void {
-    dbg.entry("SOCKET", "deinit");
     if (!is_windows) return;
-    if (!winsock_initialized) return;
+    if (!winsock_initialized.load(.monotonic)) return;
     _ = winsock.WSACleanup();
-    winsock_initialized = false;
-    dbg.exit("SOCKET", "deinit");
+    winsock_initialized.store(false, .release);
 }
 
 /// Adapter that exposes a `std.Io.Reader` backed by a connected `Socket`.
@@ -800,10 +794,8 @@ pub const Socket = struct {
 
     /// Creates a new TCP socket using the address family of the provided address.
     pub fn createForAddress(addr: net.Address) !Self {
-        dbg.entry("SOCKET", "Socket.createForAddress");
         try init();
         const handle = try posixSocket(addr.any.family, posix.SOCK.STREAM, 0);
-        dbg.exit("SOCKET", "Socket.createForAddress");
         return .{ .handle = handle };
     }
 
@@ -814,13 +806,11 @@ pub const Socket = struct {
 
     /// Closes the socket and releases resources.
     pub fn close(self: *Self) void {
-        dbg.entry("SOCKET", "Socket.close");
         if (self.isValid()) {
             posixClose(self.handle);
             self.handle = INVALID_SOCKET;
             self.connected = false;
         }
-        dbg.exit("SOCKET", "Socket.close");
     }
 
     /// Returns true if the socket handle is valid.
@@ -854,12 +844,9 @@ pub const Socket = struct {
 
     /// Sends data through the socket, returning bytes sent.
     pub fn send(self: *Self, data: []const u8) !usize {
-        dbg.entry("SOCKET", "Socket.send");
         const n = posixSend(self.handle, data, 0) catch |err| {
-            dbg.exitErr("SOCKET", "Socket.send", err);
             return err;
         };
-        dbg.log("SOCKET", "Socket.send sent {d} bytes", .{n});
         return n;
     }
 
@@ -870,12 +857,19 @@ pub const Socket = struct {
 
     /// Sends all data, blocking until complete.
     pub fn sendAll(self: *Self, data: []const u8) !void {
-        dbg.entry("SOCKET", "Socket.sendAll");
         var sent: usize = 0;
+        // Safety limit: prevent infinite loop if send returns 0 repeatedly.
+        var zero_count: u8 = 0;
         while (sent < data.len) {
-            sent += try self.send(data[sent..]);
+            const n = try self.send(data[sent..]);
+            if (n == 0) {
+                zero_count += 1;
+                if (zero_count >= 3) return error.SendFailed;
+            } else {
+                zero_count = 0;
+            }
+            sent += n;
         }
-        dbg.exit("SOCKET", "Socket.sendAll");
     }
 
     /// Compatibility alias for stream-style write-all APIs.
@@ -885,12 +879,9 @@ pub const Socket = struct {
 
     /// Receives data into the buffer, returning bytes received.
     pub fn recv(self: *Self, buffer: []u8) !usize {
-        dbg.entry("SOCKET", "Socket.recv");
         const n = posixRecv(self.handle, buffer, 0) catch |err| {
-            dbg.exitErr("SOCKET", "Socket.recv", err);
             return err;
         };
-        dbg.log("SOCKET", "Socket.recv got {d} bytes", .{n});
         return n;
     }
 
@@ -912,7 +903,6 @@ pub const Socket = struct {
 
     /// Sets the receive timeout in milliseconds.
     pub fn setRecvTimeout(self: *Self, ms: u64) !void {
-        dbg.logTimeout("SOCKET", "Socket.setRecvTimeout", ms);
         if (is_windows) {
             const value_ms: u32 = @intCast(@min(ms, @as(u64, std.math.maxInt(u32))));
             try posixSetSockOpt(self.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&value_ms));
@@ -925,15 +915,12 @@ pub const Socket = struct {
         }
     }
 
-    /// Sets the receive buffer size in bytes.
-    pub fn setRecvBufferSize(self: *Self, bytes: usize) !void {
-        const value: i32 = @intCast(@min(bytes, @as(usize, std.math.maxInt(i32))));
+    pub fn setRecvBufferSize(self: *Self, size: u32) !void {
+        const value: i32 = @intCast(size);
         try posixSetSockOpt(self.handle, posix.SOL.SOCKET, posix.SO.RCVBUF, std.mem.asBytes(&value));
     }
 
-    /// Sets the send timeout in milliseconds.
     pub fn setSendTimeout(self: *Self, ms: u64) !void {
-        dbg.logTimeout("SOCKET", "Socket.setSendTimeout", ms);
         if (is_windows) {
             const value_ms: u32 = @intCast(@min(ms, @as(u64, std.math.maxInt(u32))));
             try posixSetSockOpt(self.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&value_ms));
@@ -946,9 +933,8 @@ pub const Socket = struct {
         }
     }
 
-    /// Sets the send buffer size in bytes.
-    pub fn setSendBufferSize(self: *Self, bytes: usize) !void {
-        const value: i32 = @intCast(@min(bytes, @as(usize, std.math.maxInt(i32))));
+    pub fn setSendBufferSize(self: *Self, size: u32) !void {
+        const value: i32 = @intCast(size);
         try posixSetSockOpt(self.handle, posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&value));
     }
 
@@ -962,9 +948,14 @@ pub const Socket = struct {
     /// Only meaningful when keep-alive is enabled.
     pub fn setKeepAliveIdle(self: *Self, seconds: u32) !void {
         if (builtin.os.tag == .linux) {
-            try posixSetSockOpt(self.handle, posix.IPPROTO.TCP, 4, std.mem.asBytes(&seconds)); // TCP_KEEPIDLE
+            try posixSetSockOpt(self.handle, posix.IPPROTO.TCP, posix.TCP.KEEPIDLE, std.mem.asBytes(&seconds));
         } else if (builtin.os.tag == .macos or builtin.os.tag == .ios) {
             try posixSetSockOpt(self.handle, posix.IPPROTO.TCP, 0x101, std.mem.asBytes(&seconds)); // TCP_KEEPALIVE
+        } else if (is_windows) {
+            // Windows: use SO_KEEPALIVE; idle time is configured via SIO_KEEPALIVE_VALS
+            // which requires a struct, not a simple setsockopt. Return an error
+            // so callers know this platform doesn't support simple keepalive idle config.
+            return error.UnsupportedOperation;
         }
     }
 
@@ -972,7 +963,11 @@ pub const Socket = struct {
     /// Only meaningful when keep-alive is enabled.
     pub fn setKeepAliveInterval(self: *Self, seconds: u32) !void {
         if (builtin.os.tag == .linux) {
-            try posixSetSockOpt(self.handle, posix.IPPROTO.TCP, 5, std.mem.asBytes(&seconds)); // TCP_KEEPINTVL
+            try posixSetSockOpt(self.handle, posix.IPPROTO.TCP, posix.TCP.KEEPINTVL, std.mem.asBytes(&seconds));
+        } else if (builtin.os.tag == .macos or builtin.os.tag == .ios) {
+            try posixSetSockOpt(self.handle, posix.IPPROTO.TCP, 0x102, std.mem.asBytes(&seconds)); // TCP_KEEPINTVL
+        } else if (is_windows) {
+            return error.UnsupportedOperation;
         }
     }
 
@@ -980,8 +975,24 @@ pub const Socket = struct {
     /// Only meaningful when keep-alive is enabled.
     pub fn setKeepAliveCount(self: *Self, count: u32) !void {
         if (builtin.os.tag == .linux) {
-            try posixSetSockOpt(self.handle, posix.IPPROTO.TCP, 6, std.mem.asBytes(&count)); // TCP_KEEPCNT
+            try posixSetSockOpt(self.handle, posix.IPPROTO.TCP, posix.TCP.KEEPCNT, std.mem.asBytes(&count));
+        } else if (builtin.os.tag == .macos or builtin.os.tag == .ios) {
+            // macOS: TCP_KEEPCNT = 0x109 (265 decimal)
+            try posixSetSockOpt(self.handle, posix.IPPROTO.TCP, 0x109, std.mem.asBytes(&count));
+        } else if (is_windows) {
+            return error.UnsupportedOperation;
         }
+    }
+
+    /// Enables or disables dual-stack mode (IPV6_V6ONLY).
+    /// When disabled (v6only=false), an IPv6 socket can accept both IPv4 and IPv6 connections.
+    /// When enabled, the socket only handles IPv6 connections.
+    pub fn setDualStack(self: *Self, v6only: bool) !void {
+        const value: u32 = if (v6only) 1 else 0;
+        // IPV6_V6ONLY = 27 on all platforms
+        const ipv6_v6only: u32 = 27;
+        const ip_proto: u32 = if (is_windows) 41 else posix.IPPROTO.IPV6;
+        try posixSetSockOpt(self.handle, ip_proto, ipv6_v6only, std.mem.asBytes(&value));
     }
 
     /// Enables or disables address reuse.
@@ -991,9 +1002,13 @@ pub const Socket = struct {
     }
 
     /// Enables or disables port reuse (SO_REUSEPORT).
+    /// Only supported on Linux and macOS. Returns UnsupportedOperation on other platforms.
     pub fn setReusePort(self: *Self, enable: bool) !void {
+        if (builtin.os.tag != .linux and builtin.os.tag != .macos and builtin.os.tag != .ios) {
+            return error.UnsupportedOperation;
+        }
         const value: u32 = if (enable) 1 else 0;
-        const optname: u32 = if (builtin.os.tag == .linux or builtin.os.tag == .macos) 15 else posix.SO.REUSEADDR;
+        const optname: u32 = if (builtin.os.tag == .linux) 15 else posix.SO.REUSEADDR;
         try posixSetSockOpt(self.handle, posix.SOL.SOCKET, optname, std.mem.asBytes(&value));
     }
 
@@ -1028,14 +1043,11 @@ pub const Socket = struct {
 
     /// Accepts an incoming connection.
     pub fn accept(self: *Self) !AcceptResult {
-        dbg.entry("SOCKET", "Socket.accept");
         var addr: posix.sockaddr = undefined;
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
         const handle = posixAccept(self.handle, &addr, &addr_len) catch |err| {
-            dbg.exitErr("SOCKET", "Socket.accept", err);
             return err;
         };
-        dbg.exit("SOCKET", "Socket.accept");
         return .{
             .socket = Socket.fromHandle(handle),
             .addr = net.Address{ .any = addr },
@@ -1066,7 +1078,6 @@ pub const Socket = struct {
     /// available or a pending connection on a listening socket). Returns true
     /// if the socket is readable, false on timeout.
     pub fn waitReadable(self: *Self, timeout_ms: u32) bool {
-        dbg.logTimeout("SOCKET", "Socket.waitReadable", timeout_ms);
         if (is_windows) {
             var read_set: winsock.fd_set = .{ .fd_count = 0, .fd_array = undefined };
             read_set.fd_array[0] = toWinsockSocket(self.handle);
@@ -1077,7 +1088,6 @@ pub const Socket = struct {
             };
             const rc = winsock.select(0, &read_set, null, null, &tv);
             const ready = rc > 0;
-            dbg.log("SOCKET", "Socket.waitReadable result={s}", .{if (ready) "ready" else "timeout"});
             return ready;
         }
         // Linux/macOS: use poll() with timeout so we can re-check
@@ -1090,7 +1100,6 @@ pub const Socket = struct {
         const timeout: i32 = @intCast(@min(timeout_ms, @as(u64, std.math.maxInt(i32))));
         const rc = posix.poll(&pfd, timeout) catch return false;
         const ready = rc > 0;
-        dbg.log("SOCKET", "Socket.waitReadable result={s}", .{if (ready) "ready" else "timeout"});
         return ready;
     }
 
@@ -1137,6 +1146,36 @@ pub const Socket = struct {
     }
 };
 
+pub fn connectHappyEyeballs(allocator: Allocator, hostname: []const u8, port: u16, timeout_ms: u64) !Socket {
+    var list = try net.getAddressList(allocator, hostname, port);
+    defer list.deinit();
+
+    std.mem.sort(net.Address, list.addrs, {}, struct {
+        fn lessThan(_: void, a: net.Address, b: net.Address) bool {
+            return switch (a.any.family) {
+                posix.AF.INET6 => true,
+                else => switch (b.any.family) {
+                    posix.AF.INET6 => false,
+                    else => true,
+                },
+            };
+        }
+    }.lessThan);
+
+    const per_attempt: u64 = @min(timeout_ms / 2, 250);
+
+    for (list.addrs) |addr| {
+        var sock = Socket.createForAddress(addr) catch continue;
+        sock.connectWithTimeout(addr, per_attempt) catch {
+            sock.close();
+            continue;
+        };
+        return sock;
+    }
+
+    return error.ConnectFailed;
+}
+
 /// TCP listener for accepting incoming connections.
 pub const TcpListener = struct {
     socket: Socket,
@@ -1145,12 +1184,9 @@ pub const TcpListener = struct {
 
     /// Creates and binds a TCP listener to the address.
     pub fn init(addr: net.Address) !Self {
-        dbg.entry("SOCKET", "TcpListener.init");
         const result = initWithBacklog(addr, 128) catch |err| {
-            dbg.exitErr("SOCKET", "TcpListener.init", err);
             return err;
         };
-        dbg.exit("SOCKET", "TcpListener.init");
         return result;
     }
 
@@ -1164,6 +1200,11 @@ pub const TcpListener = struct {
     pub fn initWithBacklog(addr: net.Address, backlog: u31) !Self {
         var socket = try Socket.createForAddress(addr);
         errdefer socket.close();
+
+        // Enable dual-stack for IPv6 sockets by default.
+        if (addr.any.family == std.posix.AF.INET6) {
+            socket.setDualStack(false) catch {}; // IPV6_V6ONLY=0: accept both IPv4 and IPv6
+        }
 
         try socket.setReuseAddr(true);
         try socket.bind(addr);
@@ -1194,6 +1235,13 @@ pub const TcpListener = struct {
         var addr_len: posix.socklen_t = @sizeOf(posix.sockaddr);
         try posixGetSockName(self.socket.handle, &addr, &addr_len);
         return net.Address{ .any = addr };
+    }
+
+    /// Returns the port the listener is bound to. Useful for port 0 (ephemeral port) scenarios
+    /// where the OS assigns a port at bind time.
+    pub fn getLocalPort(self: *Self) !u16 {
+        const addr = try self.getLocalAddress();
+        return addr.getPort();
     }
 };
 
@@ -1551,8 +1599,8 @@ test "Socket helper API compile checks" {
     const shutdown_both_ptr: *const fn (*Socket) anyerror!void = Socket.shutdownBoth;
     const local_addr_ptr: *const fn (*Socket) anyerror!net.Address = Socket.getLocalAddress;
     const peer_addr_ptr: *const fn (*Socket) anyerror!net.Address = Socket.getPeerAddress;
-    const recv_buf_ptr: *const fn (*Socket, usize) anyerror!void = Socket.setRecvBufferSize;
-    const send_buf_ptr: *const fn (*Socket, usize) anyerror!void = Socket.setSendBufferSize;
+    const recv_buf_ptr: *const fn (*Socket, u32) anyerror!void = Socket.setRecvBufferSize;
+    const send_buf_ptr: *const fn (*Socket, u32) anyerror!void = Socket.setSendBufferSize;
 
     _ = create_v4_ptr;
     _ = create_v6_ptr;

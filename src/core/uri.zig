@@ -11,9 +11,8 @@
 const std = @import("std");
 const mem = std.mem;
 const Allocator = mem.Allocator;
-const list_writer = @import("../util/list_writer.zig");
-const PercentEncoding = @import("../util/encoding.zig").PercentEncoding;
-const dbg = @import("../util/debug.zig");
+const list_writer = @import("../io/list_writer.zig");
+const PercentEncoding = @import("../data/encoding.zig").PercentEncoding;
 
 /// Parsed URI structure per RFC 3986.
 pub const Uri = struct {
@@ -30,8 +29,6 @@ pub const Uri = struct {
 
     /// Parses a URI string into its components.
     pub fn parse(uri_string: []const u8) !Self {
-        dbg.entry("URI", "Uri.parse");
-        dbg.log("URI", "input={s}", .{uri_string});
         var uri = Self{ .raw = uri_string };
         var remaining = uri_string;
 
@@ -80,7 +77,6 @@ pub const Uri = struct {
             uri.host = remaining;
         }
 
-        dbg.exit("URI", "Uri.parse");
         return uri;
     }
 
@@ -98,7 +94,7 @@ pub const Uri = struct {
     }
 
     /// Returns true if the scheme requires TLS.
-    pub fn isTls(self: Self) bool {
+    pub fn isTLS(self: Self) bool {
         if (self.scheme) |s| {
             return mem.eql(u8, s, "https") or mem.eql(u8, s, "wss");
         }
@@ -142,6 +138,170 @@ pub const Uri = struct {
     }
 };
 
+/// Resolves a relative URI against a base URI per RFC 3986 Section 5.
+pub fn resolve(base: Uri, relative_str: []const u8, allocator: Allocator) !Uri {
+    var remaining = relative_str;
+    var rel_scheme: ?[]const u8 = null;
+    var rel_authority: ?[]const u8 = null;
+    var rel_path: []const u8 = "";
+    var rel_query: ?[]const u8 = null;
+    var rel_fragment: ?[]const u8 = null;
+
+    if (mem.indexOf(u8, remaining, "://")) |scheme_end| {
+        rel_scheme = remaining[0..scheme_end];
+        remaining = remaining[scheme_end + 3 ..];
+
+        if (mem.indexOf(u8, remaining, "/")) |path_start| {
+            rel_authority = remaining[0..path_start];
+            remaining = remaining[path_start..];
+        } else {
+            rel_authority = remaining;
+            remaining = "";
+        }
+    }
+
+    if (mem.indexOf(u8, remaining, "#")) |frag_start| {
+        rel_fragment = remaining[frag_start + 1 ..];
+        remaining = remaining[0..frag_start];
+    }
+
+    if (mem.indexOf(u8, remaining, "?")) |query_start| {
+        rel_query = remaining[query_start + 1 ..];
+        remaining = remaining[0..query_start];
+    }
+
+    if (remaining.len > 0 and remaining[0] == '/') {
+        rel_path = remaining;
+    } else if (remaining.len > 0) {
+        rel_path = remaining;
+    } else {
+        rel_path = "";
+    }
+
+    if (rel_scheme) |scheme| {
+        return Uri{
+            .scheme = scheme,
+            .host = rel_authority,
+            .path = try normalizePath(rel_path, allocator),
+            .query = rel_query,
+            .fragment = rel_fragment,
+            .raw = relative_str,
+        };
+    }
+
+    if (rel_authority) |auth| {
+        return Uri{
+            .scheme = base.scheme,
+            .host = auth,
+            .path = try normalizePath(rel_path, allocator),
+            .query = rel_query,
+            .fragment = rel_fragment,
+            .raw = relative_str,
+        };
+    }
+
+    if (rel_path.len == 0) {
+        const merged_path = base.path;
+        if (rel_query) |q| {
+            return Uri{
+                .scheme = base.scheme,
+                .host = base.host,
+                .port = base.port,
+                .path = merged_path,
+                .query = q,
+                .fragment = rel_fragment,
+                .raw = relative_str,
+            };
+        }
+        return Uri{
+            .scheme = base.scheme,
+            .host = base.host,
+            .port = base.port,
+            .path = merged_path,
+            .query = base.query,
+            .fragment = rel_fragment,
+            .raw = relative_str,
+        };
+    }
+
+    var merged_path: []const u8 = undefined;
+    var needs_free = false;
+    if (std.mem.startsWith(u8, rel_path, "/")) {
+        merged_path = rel_path;
+    } else {
+        needs_free = true;
+        if (base.host != null) {
+            if (std.mem.lastIndexOfScalar(u8, base.path, '/')) |last_slash| {
+                merged_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ base.path[0 .. last_slash + 1], rel_path });
+            } else {
+                merged_path = try std.fmt.allocPrint(allocator, "/{s}", .{rel_path});
+            }
+        } else {
+            if (std.mem.lastIndexOfScalar(u8, base.path, '/')) |last_slash| {
+                merged_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ base.path[0 .. last_slash + 1], rel_path });
+            } else {
+                merged_path = try std.fmt.allocPrint(allocator, "/{s}", .{rel_path});
+            }
+        }
+    }
+
+    // Prevent memory leak: free merged_path if normalizePath fails
+    errdefer if (needs_free) allocator.free(merged_path);
+
+    const normalized = try normalizePath(merged_path, allocator);
+    if (needs_free) allocator.free(merged_path);
+
+    return Uri{
+        .scheme = base.scheme,
+        .host = base.host,
+        .port = base.port,
+        .path = normalized,
+        .query = rel_query,
+        .fragment = rel_fragment,
+        .raw = relative_str,
+    };
+}
+
+/// Normalizes a URI path by resolving . and .. segments and removing duplicate slashes.
+pub fn normalizePath(path: []const u8, allocator: Allocator) ![]const u8 {
+    var components = std.ArrayList([]const u8).empty;
+    defer components.deinit(allocator);
+
+    var remaining = path;
+    while (remaining.len > 0) {
+        if (std.mem.startsWith(u8, remaining, "/")) {
+            remaining = remaining[1..];
+        }
+        var end: usize = 0;
+        while (end < remaining.len and remaining[end] != '/') : (end += 1) {}
+        const component = remaining[0..end];
+        remaining = if (end < remaining.len) remaining[end + 1 ..] else remaining[end..];
+
+        if (std.mem.eql(u8, component, ".")) continue;
+        if (std.mem.eql(u8, component, "..")) {
+            if (components.items.len > 0) {
+                _ = components.pop();
+            }
+            continue;
+        }
+        if (component.len == 0) continue;
+        try components.append(allocator, component);
+    }
+
+    var result = std.ArrayList(u8).empty;
+    defer result.deinit(allocator);
+
+    try result.append(allocator, '/');
+    for (components.items, 0..) |comp, i| {
+        try result.appendSlice(allocator, comp);
+        if (i < components.items.len - 1) {
+            try result.append(allocator, '/');
+        }
+    }
+
+    return try result.toOwnedSlice(allocator);
+}
+
 /// Percent-encodes a string for URI inclusion.
 /// Delegates to the canonical PercentEncoding implementation.
 pub const encode = PercentEncoding.encode;
@@ -179,10 +339,56 @@ test "URI effective port" {
 
 test "URI TLS detection" {
     const https = try Uri.parse("https://httpbun.com/");
-    try std.testing.expect(https.isTls());
+    try std.testing.expect(https.isTLS());
 
     const http = try Uri.parse("http://httpbun.com/");
-    try std.testing.expect(!http.isTls());
+    try std.testing.expect(!http.isTLS());
+}
+
+test "URI resolve relative path" {
+    const base = try Uri.parse("http://example.com/a/b/c");
+    const resolved = try resolve(base, "d", std.testing.allocator);
+    defer std.testing.allocator.free(resolved.path);
+    try std.testing.expectEqualStrings("/a/b/d", resolved.path);
+}
+
+test "URI resolve absolute path" {
+    const base = try Uri.parse("http://example.com/a/b/c");
+    const resolved = try resolve(base, "/x/y", std.testing.allocator);
+    defer std.testing.allocator.free(resolved.path);
+    try std.testing.expectEqualStrings("/x/y", resolved.path);
+}
+
+test "URI resolve with scheme" {
+    const base = try Uri.parse("http://example.com/a/b/c");
+    const resolved = try resolve(base, "https://other.com/x", std.testing.allocator);
+    defer std.testing.allocator.free(resolved.path);
+    try std.testing.expectEqualStrings("https", resolved.scheme.?);
+    try std.testing.expectEqualStrings("other.com", resolved.host.?);
+}
+
+test "normalizePath basic" {
+    const result = try normalizePath("/a/b/../c", std.testing.allocator);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("/a/c", result);
+}
+
+test "normalizePath double dots" {
+    const result = try normalizePath("/a/b/c/../../d", std.testing.allocator);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("/a/d", result);
+}
+
+test "normalizePath remove dots" {
+    const result = try normalizePath("/a/./b/./c", std.testing.allocator);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("/a/b/c", result);
+}
+
+test "normalizePath empty" {
+    const result = try normalizePath("", std.testing.allocator);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("/", result);
 }
 
 test "Percent encoding" {

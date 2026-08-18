@@ -37,7 +37,7 @@ fn settingsEnforcementExample(allocator: std.mem.Allocator) !void {
     defer manager.deinit();
 
     // Simulate receiving peer SETTINGS with custom values
-    const peer_settings = httpx.Http2Connection.Http2ConnectionSettings{
+    const peer_settings = httpx.Http2Connection.Settings{
         .header_table_size = 4096,
         .enable_push = false,
         .max_concurrent_streams = 3,
@@ -254,7 +254,7 @@ fn tlsAndAlpnExample(allocator: std.mem.Allocator) !void {
 
     const tls_cfg = httpx.tls.TlsConfig.withH2(allocator);
     std.debug.print("TlsConfig.withH2():\n", .{});
-    std.debug.print("  wantsHttp2: {s}\n", .{if (tls_cfg.wantsHttp2()) "true" else "false"});
+    std.debug.print("  wantsHttp2: {s}\n", .{if (tls_cfg.wantsHTTP2()) "true" else "false"});
     std.debug.print("  verify_server: {s}\n", .{if (tls_cfg.verify_server) "true" else "false"});
     std.debug.print("  primary ALPN protocol: {s}\n", .{tls_cfg.alpn_protocols[0]});
 

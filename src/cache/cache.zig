@@ -7,8 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const dbg = @import("debug.zig");
-const io_util = @import("any_io.zig");
+const io_util = @import("../io/any_io.zig");
 
 /// Parsed Cache-Control directives from a header value.
 pub const CacheControl = struct {
@@ -116,14 +115,15 @@ pub fn parseExpires(header_value: []const u8) ?i64 {
     const second = std.fmt.parseInt(u32, trimmed[23..25], 10) catch return null;
 
     // Convert to seconds since epoch (simplified - no timezone conversion needed for GMT).
-    // This is a simplified calculation that doesn't account for leap years perfectly.
     var total_days: i64 = 0;
 
-    // Days from years
+    // Days from complete years (year 1970 to year-1 inclusive)
     const y = @as(i64, year) - 1970;
     total_days += y * 365;
-    // Add leap year days
-    total_days += @divFloor(y + 1, 4) - @divFloor(y + 1, 100) + @divFloor(y + 1, 400);
+    // Add leap year days for [1970, year) range
+    // countLeapYears(Y) = Y/4 - Y/100 + Y/400 counts leap years from year 1 to Y
+    // We need countLeapYears(year-1) - countLeapYears(1970)
+    total_days += @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400);
 
     // Days from months in current year
     const leap = (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0));
@@ -258,7 +258,11 @@ pub const HttpCache = struct {
                     return null;
                 }
                 self.stats.hits += 1;
-                return entry.*;
+                const entry_copy = entry.*;
+                const idx: usize = @intCast(@intFromPtr(entry) - @intFromPtr(self.entries.items.ptr));
+                _ = self.entries.orderedRemove(idx);
+                self.entries.append(self.allocator, entry_copy) catch return entry_copy;
+                return entry_copy;
             }
         }
         self.stats.misses += 1;
@@ -479,6 +483,26 @@ test "parse expires header" {
     const ts = parseExpires("Sun, 06 Nov 1994 08:49:37 GMT");
     try std.testing.expect(ts != null);
     try std.testing.expect(ts.? > 0);
+}
+
+test "parse expires leap year correctness" {
+    // 2000-03-01 00:00:00 GMT (2000 is a leap year)
+    // Epoch for 2000-01-01 is 946684800
+    // Days in Jan: 31, Feb: 29 (leap year), so Mar 1 is 31+29=60 days after Jan 1
+    // 60 days = 60 * 86400 = 5184000
+    // Expected: 946684800 + 5184000 = 951868800
+    const ts = parseExpires("Wed, 01 Mar 2000 00:00:00 GMT");
+    try std.testing.expect(ts != null);
+    try std.testing.expectEqual(@as(i64, 951868800), ts.?);
+
+    // 1996-03-01 00:00:00 GMT (1996 is a leap year)
+    // Epoch for 1996-01-01 is 820454400
+    // Days in Jan: 31, Feb: 29 (leap year), so Mar 1 is 60 days after Jan 1
+    // 60 days = 5184000
+    // Expected: 820454400 + 5184000 = 825638400
+    const ts2 = parseExpires("Fri, 01 Mar 1996 00:00:00 GMT");
+    try std.testing.expect(ts2 != null);
+    try std.testing.expectEqual(@as(i64, 825638400), ts2.?);
 }
 
 test "parse age header" {

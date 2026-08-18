@@ -6,7 +6,6 @@
 //! Alert-derived errors follow the naming in RFC 8446 Section6.2 / RFC 5246 Section7.2.
 
 const std = @import("std");
-const dbg = @import("../util/debug.zig");
 
 /// All errors that can be produced by the TLS stack.
 pub const TlsError = error{

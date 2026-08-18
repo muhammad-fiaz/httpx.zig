@@ -1,7 +1,7 @@
 //! DNS Resolution Example
 //!
-//! Demonstrates DNS resolution helpers: resolveAddress, resolveAllAddresses,
-//! parseHostAndPort, parseAndResolveAddress, isIpAddress, and the DnsCache.
+//! Demonstrates the DNS subsystem: DNSResolver, DNSCache, DNSResolution,
+//! IP literal bypass, address family/ordering, and client integration.
 
 const std = @import("std");
 const httpx = @import("httpx");
@@ -49,53 +49,68 @@ pub fn main() !void {
         }
     }
 
-    // 3. Resolve hostname
-    std.debug.print("\n--- Resolve Hostname ---\n", .{});
-    const address = httpx.resolveAddress(allocator, "127.0.0.1", 80) catch |err| {
-        std.debug.print("  resolveAddress failed: {}\n", .{err});
-        return;
-    };
-    std.debug.print("  127.0.0.1:80 -> {any}\n", .{address});
+    // 3. DNSResolver with IP literal (bypasses DNS)
+    std.debug.print("\n--- DNSResolver: IP Literal ---\n", .{});
+    var resolver = httpx.DNSResolver.init(allocator, .{});
+    defer resolver.deinit();
 
-    // 4. Resolve all addresses
-    std.debug.print("\n--- Resolve All Addresses ---\n", .{});
-    const all_addrs = httpx.resolveAllAddresses(allocator, "127.0.0.1", 443) catch |err| {
-        std.debug.print("  resolveAllAddresses failed: {}\n", .{err});
-        return;
-    };
-    defer allocator.free(all_addrs);
-    std.debug.print("  127.0.0.1:443 -> {d} address(es)\n", .{all_addrs.len});
+    var res = try resolver.resolve("127.0.0.1", .{ .port = 80 });
+    defer res.deinit();
+    std.debug.print("  resolve('127.0.0.1', port=80): {d} address(es)\n", .{res.addresses.len});
 
-    // 5. Parse and resolve
-    std.debug.print("\n--- Parse and Resolve ---\n", .{});
-    const resolved = httpx.parseAndResolveAddress(allocator, "127.0.0.1", 8080) catch |err| {
-        std.debug.print("  parseAndResolveAddress failed: {}\n", .{err});
-        return;
-    };
-    std.debug.print("  127.0.0.1:8080 -> {any}\n", .{resolved});
+    // 4. DNSResolver with caching
+    std.debug.print("\n--- DNSResolver: Caching ---\n", .{});
+    var cached_resolver = httpx.DNSResolver.init(allocator, .{
+        .positive_ttl_ms = 30_000,
+        .negative_ttl_ms = 5_000,
+        .max_cache_entries = 256,
+    });
+    defer cached_resolver.deinit();
 
-    // 6. DNS Cache
-    std.debug.print("\n--- DNS Cache ---\n", .{});
-    var cache = httpx.dns.DnsCache.init(allocator);
-    defer cache.deinit();
+    // First lookup (cache miss).
+    var r1 = try cached_resolver.resolve("127.0.0.1", .{ .port = 443 });
+    defer r1.deinit();
+    std.debug.print("  First resolve: {d} address(es)\n", .{r1.addresses.len});
 
-    const cached_addr = try cache.resolve("127.0.0.1", 80);
-    std.debug.print("  First resolve: {any}\n", .{cached_addr});
+    // Second lookup (cache hit).
+    var r2 = try cached_resolver.resolve("127.0.0.1", .{ .port = 443 });
+    defer r2.deinit();
+    std.debug.print("  Second resolve (cached): {d} address(es)\n", .{r2.addresses.len});
 
-    const cached_addr2 = try cache.resolve("127.0.0.1", 80);
-    std.debug.print("  Second resolve (cached): {any}\n", .{cached_addr2});
-    std.debug.print("  Cache hit: {}\n", .{std.mem.eql(u8, std.mem.asBytes(&cached_addr), std.mem.asBytes(&cached_addr2))});
+    // Check stats.
+    const stats = cached_resolver.getStats();
+    std.debug.print("  Cache stats: hits={d} misses={d} literal_hits={d}\n", .{
+        stats.hits,
+        stats.misses,
+        stats.literal_hits,
+    });
+
+    // 5. Address family filtering
+    std.debug.print("\n--- Address Family Filtering ---\n", .{});
+    var v4_resolver = httpx.DNSResolver.init(allocator, .{
+        .address_family = .ipv4_only,
+    });
+    defer v4_resolver.deinit();
+
+    var v4_res = try v4_resolver.resolve("127.0.0.1", .{ .port = 80 });
+    defer v4_res.deinit();
+    std.debug.print("  ipv4_only resolve('127.0.0.1'): {d} address(es)\n", .{v4_res.addresses.len});
+
+    // 6. Cache management
+    std.debug.print("\n--- Cache Management ---\n", .{});
+    std.debug.print("  Cache count before clear: {d}\n", .{cached_resolver.cache.count()});
+    cached_resolver.clear();
+    std.debug.print("  Cache count after clear: {d}\n", .{cached_resolver.cache.count()});
 
     // 7. Convenience functions
     std.debug.print("\n--- Convenience Functions ---\n", .{});
-    std.debug.print("  httpx.resolveAddress(host, port)      - single address\n", .{});
+    std.debug.print("  httpx.resolveAddress(host, port)        - single address\n", .{});
     std.debug.print("  httpx.resolveAllAddresses(alloc, host, port) - all candidates\n", .{});
-    std.debug.print("  httpx.parseHostAndPort(str)           - parse \"host:port\"\n", .{});
+    std.debug.print("  httpx.parseHostAndPort(str)             - parse 'host:port'\n", .{});
     std.debug.print("  httpx.parseAndResolveAddress(host, port) - parse + resolve\n", .{});
-    std.debug.print("  httpx.isIpAddress(str)               - IPv4/IPv6 check\n", .{});
-    std.debug.print("  httpx.isIp4Address(str)              - IPv4 check\n", .{});
-    std.debug.print("  httpx.isIp6Address(str)              - IPv6 check\n", .{});
-    std.debug.print("  httpx.dns.DnsCache                   - TTL-based DNS cache\n", .{});
+    std.debug.print("  httpx.isIpAddress(str)                 - IPv4/IPv6 check\n", .{});
+    std.debug.print("  httpx.DNSResolver                      - cached DNS resolver\n", .{});
+    std.debug.print("  httpx.DNSCache                         - raw DNS cache\n", .{});
 
     std.debug.print("\n=== DNS Resolution Example Complete ===\n", .{});
 }

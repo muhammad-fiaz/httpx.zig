@@ -15,7 +15,6 @@ const Allocator = mem.Allocator;
 const types = @import("../core/types.zig");
 const Headers = @import("../core/headers.zig").Headers;
 const Status = @import("../core/status.zig").Status;
-const dbg = @import("../util/debug.zig");
 
 /// Parser state machine states.
 pub const ParserState = enum {
@@ -75,7 +74,6 @@ pub const Parser = struct {
 
     /// Creates a new parser instance.
     pub fn init(allocator: Allocator) Self {
-        dbg.entry("PARSE", "Parser.init");
         return .{
             .allocator = allocator,
             .headers = Headers.init(allocator),
@@ -84,7 +82,6 @@ pub const Parser = struct {
 
     /// Creates a parser for parsing responses.
     pub fn initResponse(allocator: Allocator) Self {
-        dbg.entry("PARSE", "Parser.initResponse");
         var p = init(allocator);
         p.mode = .response;
         p.state = .status_line;
@@ -130,9 +127,7 @@ pub const Parser = struct {
             };
         }
 
-        if (self.state == .complete) {
-            dbg.log("PARSE", "parse complete consumed={d}", .{consumed});
-        }
+        if (self.state == .complete) {}
 
         return consumed;
     }
@@ -571,6 +566,27 @@ pub const Parser = struct {
         return line_end + 2;
     }
 };
+
+/// Detects CL/TE ambiguity which can lead to HTTP request smuggling.
+/// Returns true if both Content-Length and Transfer-Encoding are present,
+/// indicating a potential smuggling vector.
+pub fn detectClTeAmbiguity(content_length: ?u64, transfer_encoding: ?[]const u8) bool {
+    if (content_length != null and transfer_encoding != null) {
+        return true;
+    }
+    return false;
+}
+
+test "detectClTeAmbiguity" {
+    // Both present -> ambiguous
+    try std.testing.expect(detectClTeAmbiguity(100, "chunked"));
+    // Only CL -> not ambiguous
+    try std.testing.expect(!detectClTeAmbiguity(100, null));
+    // Only TE -> not ambiguous
+    try std.testing.expect(!detectClTeAmbiguity(null, "chunked"));
+    // Neither -> not ambiguous
+    try std.testing.expect(!detectClTeAmbiguity(null, null));
+}
 
 test "Parser request line" {
     const allocator = std.testing.allocator;

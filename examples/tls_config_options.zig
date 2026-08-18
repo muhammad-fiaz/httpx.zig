@@ -39,7 +39,7 @@ pub fn main() !void {
         for (config.alpn_protocols) |proto| {
             std.debug.print("    - {s}\n", .{proto});
         }
-        std.debug.print("  wantsHttp2:    {}\n\n", .{config.wantsHttp2()});
+        std.debug.print("  wantsHttp2:    {}\n\n", .{config.wantsHTTP2()});
     }
 
     // 4. Insecure with H3 ALPN (HTTP/1.1 + HTTP/2 + HTTP/3)
@@ -51,7 +51,7 @@ pub fn main() !void {
         for (config.alpn_protocols) |proto| {
             std.debug.print("    - {s}\n", .{proto});
         }
-        std.debug.print("  wantsHttp2:    {}\n\n", .{config.wantsHttp2()});
+        std.debug.print("  wantsHttp2:    {}\n\n", .{config.wantsHTTP2()});
     }
 
     // 5. Custom config
@@ -65,7 +65,7 @@ pub fn main() !void {
         };
         std.debug.print("  verify_server: {}\n", .{config.verify_server});
         std.debug.print("  ALPN:          {d} protocols\n", .{config.alpn_protocols.len});
-        std.debug.print("  wantsHttp2:    {}\n\n", .{config.wantsHttp2()});
+        std.debug.print("  wantsHttp2:    {}\n\n", .{config.wantsHTTP2()});
     }
 
     std.debug.print("=== Example complete ===\n", .{});

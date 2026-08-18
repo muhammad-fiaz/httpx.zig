@@ -29,11 +29,10 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const io_util = @import("any_io.zig");
+const io_util = @import("../io/any_io.zig");
 const defaultIo = io_util.defaultIo;
 const threadIo = io_util.threadIo;
-const common = @import("common.zig");
-const dbg = @import("debug.zig");
+const common = @import("../data/common.zig");
 
 pub const SESSION_ID_LEN = 32;
 pub const DEFAULT_TTL_MS: u64 = 30 * 60 * 1000; // 30 minutes
@@ -111,8 +110,6 @@ pub const SessionStore = struct {
 
     /// Creates a new SessionStore.
     pub fn init(allocator: Allocator, config: SessionConfig) Self {
-        dbg.entry("SESSION", "SessionStore.init");
-        dbg.exit("SESSION", "SessionStore.init");
         return .{
             .allocator = allocator,
             .config = config,
@@ -175,7 +172,6 @@ pub const SessionStore = struct {
 
     /// Sets a key/value pair in the session. Value is duplicated.
     pub fn set(self: *Self, hex_id: []const u8, key: []const u8, value: []const u8) !void {
-        dbg.entry("SESSION", "SessionStore.set");
         self.lock();
         defer self.unlock();
 
@@ -191,7 +187,6 @@ pub const SessionStore = struct {
         const old = try entry.data.fetchPut(key, duped);
         if (old) |o| self.allocator.free(o.value);
         entry.last_accessed_ms = common.nowMillis();
-        dbg.exit("SESSION", "SessionStore.set");
     }
 
     /// Gets a value from the session. Returns null if not found or expired.
@@ -214,7 +209,6 @@ pub const SessionStore = struct {
 
     /// Deletes a session.
     pub fn delete(self: *Self, hex_id: []const u8) void {
-        dbg.entry("SESSION", "SessionStore.delete");
         self.lock();
         defer self.unlock();
 
@@ -223,7 +217,6 @@ pub const SessionStore = struct {
             entry.deinit();
         }
         _ = self.sessions.remove(raw);
-        dbg.exit("SESSION", "SessionStore.delete");
     }
 
     /// Returns true if the session exists and is not expired.

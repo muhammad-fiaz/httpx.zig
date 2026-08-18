@@ -13,16 +13,17 @@
 //! - SSRF protection in reverse proxy (private IP range blocking)
 
 const std = @import("std");
+const mem = std.mem;
+const Allocator = mem.Allocator;
 const tint = @import("tint");
 const Context = @import("server.zig").Context;
-const io_util = @import("../util/any_io.zig");
+const io_util = @import("../io/any_io.zig");
 const Response = @import("../core/response.zig").Response;
 const types = @import("../core/types.zig");
-const list_writer = @import("../util/list_writer.zig");
+const list_writer = @import("../io/list_writer.zig");
 const status = @import("../core/status.zig");
-const common = @import("../util/common.zig");
-const compression_util = @import("../util/compression.zig");
-const dbg = @import("../util/debug.zig");
+const common = @import("../data/common.zig");
+const compression_util = @import("../compress/compression.zig");
 
 /// Middleware function type.
 pub const Middleware = struct {
@@ -114,7 +115,6 @@ pub fn cors(comptime config: CorsConfig) Middleware {
             }
 
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                dbg.entry("MW", "cors");
                 const origin = allowedOrigin(ctx, config);
                 try ctx.setHeader("Access-Control-Allow-Origin", origin);
                 try ctx.setHeader("Vary", "Origin");
@@ -136,7 +136,6 @@ pub fn cors(comptime config: CorsConfig) Middleware {
                 }
 
                 const resp = try next(ctx);
-                dbg.exit("MW", "cors");
                 return resp;
             }
         }.handler,
@@ -154,7 +153,6 @@ pub fn loggerWithConfig(comptime config: LoggerConfig) Middleware {
         .name = "logger",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                dbg.log("MW", "logger {s} {s}", .{ ctx.request.method.toString(), ctx.request.uri.path });
                 const start = common.nowMillis();
                 const response = try next(ctx);
                 const duration = common.nowMillis() - start;
@@ -223,7 +221,17 @@ pub const compressionMiddleware = compression;
 /// Configuration for compression middleware.
 pub const CompressionConfig = struct {
     /// Minimum response body size in bytes before compression is applied.
-    min_bytes: usize = 1024,
+    min_bytes: usize = 256,
+    /// Compression level to use.
+    level: compression_util.CompressionLevel = .default,
+    /// Maximum decompressed size to prevent bomb attacks.
+    max_decompressed_size: usize = 100 * 1024 * 1024,
+    /// If set, only compress responses with these Content-Type prefixes.
+    /// If null, uses the built-in compressible MIME type check.
+    compressible_types: ?[]const []const u8 = null,
+    /// Encodings to allow, in priority order (highest first).
+    /// If null, allows all supported encodings.
+    allowed_encodings: ?[]const compression_util.ContentEncoding = null,
 };
 
 /// Creates compression middleware with explicit configuration.
@@ -238,30 +246,50 @@ pub fn compressionMiddlewareWithConfig(comptime config: CompressionConfig) Middl
                     if (body.len < config.min_bytes) return resp;
                     if (resp.headers.get("Content-Encoding") != null) return resp;
 
-                    const accept = ctx.header("Accept-Encoding") orelse return resp;
-                    const encoding = pickEncoding(accept) orelse return resp;
+                    const accept_raw = ctx.header("Accept-Encoding") orelse return resp;
+                    const accept = compression_util.AcceptEncoding.parse(accept_raw) catch return resp;
+
+                    const encoding = negotiateServerEncoding(accept, config.allowed_encodings) orelse return resp;
+
+                    const content_type = resp.headers.get("Content-Type") orelse "";
+                    if (!shouldCompressContent(content_type, config.compressible_types)) return resp;
 
                     var new_resp = resp;
-                    if (compression_util.compress(ctx.allocator, encoding, body)) |compressed| {
+                    const opts = compression_util.CompressOptions{ .level = config.level };
+                    if (compression_util.compressWithLevel(ctx.allocator, encoding, body, opts)) |compressed| {
+                        if (resp.body_owned) ctx.allocator.free(body);
                         new_resp.body = compressed;
                         new_resp.body_owned = true;
-                        ctx.setHeader("Content-Encoding", encoding.toString()) catch {};
-                        ctx.setHeader("Vary", "Accept-Encoding") catch {};
+                        new_resp.headers.append("Content-Encoding", encoding.toString()) catch {};
+                        new_resp.headers.append("Vary", "Accept-Encoding") catch {};
+                        if (ctx.server) |s| {
+                            if (s.config.metrics) |m| m.compression(@intCast(body.len), @intCast(compressed.len));
+                        }
                     } else |_| {}
                     return new_resp;
                 }
                 return resp;
             }
-
-            fn pickEncoding(accept: []const u8) ?compression_util.ContentEncoding {
-                if (std.ascii.indexOfIgnoreCase(accept, "br") != null) return .br;
-                if (std.ascii.indexOfIgnoreCase(accept, "zstd") != null) return .zstd;
-                if (std.ascii.indexOfIgnoreCase(accept, "gzip") != null) return .gzip;
-                if (std.ascii.indexOfIgnoreCase(accept, "deflate") != null) return .deflate;
-                return null;
-            }
         }.handler,
     };
+}
+
+fn negotiateServerEncoding(accept: compression_util.AcceptEncoding, allowed: ?[]const compression_util.ContentEncoding) ?compression_util.ContentEncoding {
+    const candidates = allowed orelse &[_]compression_util.ContentEncoding{ .zstd, .br, .gzip, .deflate };
+    for (candidates) |enc| {
+        if (accept.has(enc, 0.0)) return enc;
+    }
+    return null;
+}
+
+fn shouldCompressContent(content_type: []const u8, compressible_types: ?[]const []const u8) bool {
+    if (compressible_types) |allowed| {
+        for (allowed) |t| {
+            if (std.ascii.startsWithIgnoreCase(content_type, t)) return true;
+        }
+        return false;
+    }
+    return compression_util.isCompressible(content_type);
 }
 
 /// Rate limiting configuration.
@@ -271,6 +299,23 @@ pub const RateLimitConfig = struct {
     /// Whether to trust X-Forwarded-For (default: false for security).
     /// When false, uses connection socket IP directly.
     trust_proxy_headers: bool = false,
+};
+
+/// Per-server rate limit state. Allocated on the heap and freed when the
+/// middleware is no longer needed.
+const RateLimitState = struct {
+    const Entry = struct { count: u32, window_start: i64 };
+    store: std.StringHashMap(Entry),
+    evict_counter: u32 = 0,
+    mu: std.Io.Mutex = .init,
+
+    fn init(allocator: Allocator) @This() {
+        return .{ .store = std.StringHashMap(Entry).init(allocator) };
+    }
+
+    fn deinit(self: *@This()) void {
+        self.store.deinit();
+    }
 };
 
 /// Creates rate limiting middleware.
@@ -286,18 +331,16 @@ pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
     return .{
         .name = "rate_limit",
         .handler = struct {
-            const Entry = struct { count: u32, window_start: i64 };
-            var store: std.StringHashMap(Entry) = undefined;
-            var store_initialized: bool = false;
-            var evict_counter: u32 = 0;
-            var mu: std.Io.Mutex = .init;
+            var state: ?*RateLimitState = null;
 
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                dbg.entry("MW", "rateLimit");
-                if (!store_initialized) {
-                    store = std.StringHashMap(Entry).init(ctx.allocator);
-                    store_initialized = true;
+                // Lazily initialize per-call state using the first request's allocator.
+                if (state == null) {
+                    const s = ctx.allocator.create(RateLimitState) catch return error.OutOfMemory;
+                    s.* = RateLimitState.init(ctx.allocator);
+                    state = s;
                 }
+                const st = state.?;
 
                 const now = common.nowMillis();
                 // Use connection IP directly by default to prevent header spoofing.
@@ -309,39 +352,44 @@ pub fn rateLimit(comptime config: RateLimitConfig) Middleware {
                     ctx.connectionIp();
 
                 const io = io_util.defaultIo();
-                mu.lock(io) catch unreachable;
-                defer mu.unlock(io);
+                st.mu.lock(io) catch unreachable;
+                defer st.mu.unlock(io);
 
                 // Evict stale entries every 512 requests to prevent unbounded growth.
-                evict_counter +%= 1;
-                if (evict_counter % 512 == 0) {
-                    var it = store.iterator();
+                st.evict_counter +%= 1;
+                if (st.evict_counter % 512 == 0) {
+                    var it = st.store.iterator();
                     while (it.next()) |kv| {
                         if (now - kv.value_ptr.window_start > @as(i64, @intCast(config.window_ms * 2))) {
-                            _ = store.remove(kv.key_ptr.*);
+                            _ = st.store.remove(kv.key_ptr.*);
                         }
                     }
                 }
 
-                const entry = store.get(ip);
+                const entry = st.store.get(ip);
                 if (entry) |e| {
                     if (now - e.window_start < @as(i64, @intCast(config.window_ms))) {
                         if (e.count >= config.max_requests) {
-                            dbg.log("MW", "rate limit exceeded for {s}", .{ip});
+                            if (ctx.server) |s| {
+                                if (s.config.metrics) |m| m.rateLimitCheck(false);
+                            }
                             const retry_after = @as(u64, @intCast(@max(1, @as(i64, @intCast(config.window_ms)) - (now - e.window_start)) / 1000));
                             var buf: [16]u8 = undefined;
                             const ra_str = std.fmt.bufPrint(&buf, "{d}", .{retry_after}) catch "60";
                             try ctx.setHeader("Retry-After", ra_str);
                             return ctx.status(status.StatusCode.TOO_MANY_REQUESTS).text("Too Many Requests");
                         }
-                        try store.put(ip, .{ .count = e.count + 1, .window_start = e.window_start });
+                        try st.store.put(ip, .{ .count = e.count + 1, .window_start = e.window_start });
                     } else {
-                        try store.put(ip, .{ .count = 1, .window_start = now });
+                        try st.store.put(ip, .{ .count = 1, .window_start = now });
                     }
                 } else {
-                    try store.put(ip, .{ .count = 1, .window_start = now });
+                    try st.store.put(ip, .{ .count = 1, .window_start = now });
                 }
 
+                if (ctx.server) |s| {
+                    if (s.config.metrics) |m| m.rateLimitCheck(true);
+                }
                 return next(ctx);
             }
         }.handler,
@@ -354,9 +402,7 @@ pub fn basicAuth(realm: []const u8, validator: *const fn ([]const u8, []const u8
         .name = "basic_auth",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                dbg.entry("MW", "basicAuth");
                 const auth = ctx.header("Authorization") orelse {
-                    dbg.log("MW", "basicAuth failed: no Authorization header", .{});
                     const www_auth = try std.fmt.allocPrint(ctx.allocator, "Basic realm=\"{s}\"", .{realm});
                     defer ctx.allocator.free(www_auth);
                     try ctx.setHeader("WWW-Authenticate", www_auth);
@@ -364,7 +410,6 @@ pub fn basicAuth(realm: []const u8, validator: *const fn ([]const u8, []const u8
                 };
 
                 if (!std.mem.startsWith(u8, auth, "Basic ")) {
-                    dbg.log("MW", "basicAuth failed: not Basic prefix", .{});
                     const www_auth = try std.fmt.allocPrint(ctx.allocator, "Basic realm=\"{s}\"", .{realm});
                     defer ctx.allocator.free(www_auth);
                     try ctx.setHeader("WWW-Authenticate", www_auth);
@@ -372,15 +417,13 @@ pub fn basicAuth(realm: []const u8, validator: *const fn ([]const u8, []const u8
                 }
 
                 const encoded = std.mem.trim(u8, auth[6..], " \t");
-                const Base64 = @import("../util/encoding.zig").Base64;
+                const Base64 = @import("../data/encoding.zig").Base64;
                 const decoded = Base64.decode(ctx.allocator, encoded) catch {
-                    dbg.log("MW", "basicAuth failed: bad base64", .{});
                     return ctx.status(status.StatusCode.UNAUTHORIZED).text("Unauthorized");
                 };
                 defer ctx.allocator.free(decoded);
 
                 const colon_pos = std.mem.indexOfScalar(u8, decoded, ':') orelse {
-                    dbg.log("MW", "basicAuth failed: missing colon", .{});
                     return ctx.status(status.StatusCode.UNAUTHORIZED).text("Unauthorized");
                 };
 
@@ -388,14 +431,12 @@ pub fn basicAuth(realm: []const u8, validator: *const fn ([]const u8, []const u8
                 const password = decoded[colon_pos + 1 ..];
 
                 if (!validator(username, password)) {
-                    dbg.log("MW", "basicAuth failed: invalid credentials", .{});
                     const www_auth = try std.fmt.allocPrint(ctx.allocator, "Basic realm=\"{s}\"", .{realm});
                     defer ctx.allocator.free(www_auth);
                     try ctx.setHeader("WWW-Authenticate", www_auth);
                     return ctx.status(status.StatusCode.UNAUTHORIZED).text("Unauthorized");
                 }
 
-                dbg.log("MW", "basicAuth success for user {s}", .{username});
                 return next(ctx);
             }
         }.handler,
@@ -462,7 +503,11 @@ pub fn helmetWithConfig(comptime config: HelmetConfig) Middleware {
                 try ctx.setHeader("X-Content-Type-Options", config.x_content_type_options);
                 try ctx.setHeader("X-Frame-Options", config.x_frame_options);
                 try ctx.setHeader("X-XSS-Protection", config.x_xss_protection);
-                try ctx.setHeader("Strict-Transport-Security", config.strict_transport_security);
+                if (ctx.request.uri.isTLS() or
+                    std.mem.eql(u8, ctx.header("x-forwarded-proto") orelse "", "https"))
+                {
+                    try ctx.setHeader("Strict-Transport-Security", config.strict_transport_security);
+                }
                 try ctx.setHeader("Referrer-Policy", config.referrer_policy);
                 try ctx.setHeader("Cross-Origin-Opener-Policy", config.cross_origin_opener_policy);
                 try ctx.setHeader("Cross-Origin-Resource-Policy", config.cross_origin_resource_policy);
@@ -494,8 +539,6 @@ pub fn csrf(comptime config: CsrfConfig) Middleware {
         .name = "csrf",
         .handler = struct {
             fn handler(ctx: *Context, next: Next) anyerror!Response {
-                dbg.entry("MW", "csrf");
-
                 // Only protect state-changing methods.
                 const method = ctx.request.method;
                 if (method == .GET or method == .HEAD or method == .OPTIONS) {
@@ -535,7 +578,9 @@ pub fn csrf(comptime config: CsrfConfig) Middleware {
                                 if (parseCsrfTimestamp(rt)) |issued_ms| {
                                     const now_ms = @as(u64, @intCast(common.nowMillis()));
                                     if (now_ms -| issued_ms > config.max_age_ms) {
-                                        dbg.log("MW", "CSRF token expired", .{});
+                                        if (ctx.server) |s| {
+                                            if (s.config.metrics) |m| m.csrfRejection();
+                                        }
                                         return ctx.status(status.StatusCode.FORBIDDEN).text("CSRF token expired");
                                     }
                                 }
@@ -543,7 +588,9 @@ pub fn csrf(comptime config: CsrfConfig) Middleware {
                             return next(ctx);
                         }
                     }
-                    dbg.log("MW", "CSRF token mismatch", .{});
+                    if (ctx.server) |s| {
+                        if (s.config.metrics) |m| m.csrfRejection();
+                    }
                     return ctx.status(status.StatusCode.FORBIDDEN).text("CSRF token mismatch");
                 }
 
@@ -596,8 +643,10 @@ pub fn csrf(comptime config: CsrfConfig) Middleware {
 fn timingSafeEql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     var result: u8 = 0;
-    for (a, b) |x, y| {
-        result |= x ^ y;
+    const min_len = if (a.len < b.len) a.len else b.len;
+    var i: usize = 0;
+    while (i < min_len) : (i += 1) {
+        result |= a[i] ^ b[i];
     }
     return result == 0;
 }
@@ -695,7 +744,9 @@ pub fn reverseProxy(comptime target_url: []const u8) Middleware {
 
                 // SSRF protection: validate target is not a private IP.
                 if (isSsrfBlocked(full_target)) {
-                    dbg.log("MW", "SSRF blocked: {s}", .{full_target});
+                    if (ctx.server) |s| {
+                        if (s.config.metrics) |m| m.ssrfRejection();
+                    }
                     return ctx.status(status.StatusCode.FORBIDDEN).text("Forbidden: internal target");
                 }
 
@@ -742,7 +793,9 @@ pub fn reverseProxyRuntime(target_url: []const u8) Middleware {
 
                 // SSRF protection: validate target is not a private IP.
                 if (isSsrfBlocked(full_target)) {
-                    dbg.log("MW", "SSRF blocked: {s}", .{full_target});
+                    if (ctx.server) |s| {
+                        if (s.config.metrics) |m| m.ssrfRejection();
+                    }
                     return ctx.status(status.StatusCode.FORBIDDEN).text("Forbidden: internal target");
                 }
 

@@ -91,7 +91,7 @@ pub fn main() !void {
 
     std.debug.print("  TLS handshake complete!\n", .{});
     std.debug.print("  Protocol: {s}\n", .{session.negotiatedProtocol() orelse "none"});
-    std.debug.print("  HTTP/2 negotiated: {}\n", .{session.isHttp2()});
+    std.debug.print("  HTTP/2 negotiated: {}\n", .{session.isHTTP2()});
 
     // 4. Send HTTP request over TLS
     std.debug.print("\n--- HTTP Request over TLS ---\n", .{});

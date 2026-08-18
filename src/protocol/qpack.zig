@@ -17,7 +17,6 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 
 const hpack = @import("hpack.zig");
-const dbg = @import("../util/debug.zig");
 
 /// QPACK static table entries (RFC 9204 Appendix A)
 /// Index 0-98 are pre-defined header name/value pairs
@@ -261,7 +260,7 @@ pub const DynamicTable = struct {
 };
 
 /// QPACK encoder/decoder context
-pub const QpackContext = struct {
+pub const QPACKContext = struct {
     allocator: Allocator,
     dynamic_table: DynamicTable,
     /// Maximum blocked streams (from SETTINGS)
@@ -588,12 +587,10 @@ pub const HeaderEntry = struct { name: []const u8, value: []const u8 };
 
 /// Encodes headers using QPACK.
 pub fn encodeHeaders(
-    ctx: *QpackContext,
+    ctx: *QPACKContext,
     headers: []const HeaderEntry,
     allocator: Allocator,
 ) ![]u8 {
-    dbg.entry("QPACK", "encodeHeaders");
-    dbg.log("QPACK", "header_count={d}", .{headers.len});
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
 
@@ -654,12 +651,10 @@ pub const DecodedHeader = struct {
 
 /// Decodes headers using QPACK.
 pub fn decodeHeaders(
-    ctx: *QpackContext,
+    ctx: *QPACKContext,
     data: []const u8,
     allocator: Allocator,
 ) ![]DecodedHeader {
-    dbg.entry("QPACK", "decodeHeaders");
-    dbg.log("QPACK", "data_len={d}", .{data.len});
     var headers = std.ArrayList(DecodedHeader).empty;
     errdefer {
         for (headers.items) |h| {
@@ -786,13 +781,13 @@ fn computeBase(required_insert_count: u64, delta_base: u64, delta_is_negative: b
     return required_insert_count + delta_base;
 }
 
-fn resolvePreBaseEntry(ctx: *const QpackContext, base: u64, relative_index: u64) !StaticTable.Entry {
+fn resolvePreBaseEntry(ctx: *const QPACKContext, base: u64, relative_index: u64) !StaticTable.Entry {
     if (relative_index >= base) return error.InvalidIndex;
     const absolute_index = base - relative_index - 1;
     return ctx.dynamic_table.getAbsolute(absolute_index) orelse error.InvalidIndex;
 }
 
-fn resolvePostBaseEntry(ctx: *const QpackContext, base: u64, post_base_index: u64) !StaticTable.Entry {
+fn resolvePostBaseEntry(ctx: *const QPACKContext, base: u64, post_base_index: u64) !StaticTable.Entry {
     const absolute_index = base + post_base_index;
     return ctx.dynamic_table.getAbsolute(absolute_index) orelse error.InvalidIndex;
 }
@@ -845,7 +840,7 @@ test "QPACK dynamic table" {
 
 test "QPACK simple header encoding" {
     const allocator = std.testing.allocator;
-    var ctx = QpackContext.init(allocator);
+    var ctx = QPACKContext.init(allocator);
     defer ctx.deinit();
 
     const headers = [_]HeaderEntry{
@@ -862,7 +857,7 @@ test "QPACK simple header encoding" {
 
 test "QPACK decode dynamic indexed field" {
     const allocator = std.testing.allocator;
-    var ctx = QpackContext.initWithCapacity(allocator, 4096);
+    var ctx = QPACKContext.initWithCapacity(allocator, 4096);
     defer ctx.deinit();
 
     try ctx.dynamic_table.add("x-dyn", "one");
@@ -889,7 +884,7 @@ test "QPACK decode dynamic indexed field" {
 
 test "QPACK decode post-base indexed field" {
     const allocator = std.testing.allocator;
-    var ctx = QpackContext.initWithCapacity(allocator, 4096);
+    var ctx = QPACKContext.initWithCapacity(allocator, 4096);
     defer ctx.deinit();
 
     try ctx.dynamic_table.add("x-a", "v1"); // absolute index 0
