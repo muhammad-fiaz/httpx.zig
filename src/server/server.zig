@@ -771,6 +771,7 @@ pub const Server = struct {
     unix_listener: ?@import("../net/unix.zig").UnixListener = null,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     active_connections: std.ArrayList(Socket) = .empty,
+    active_conn_mutex: std.Io.Mutex = .init,
     active_conn_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     executor: ?Executor = null,
     executor_connections: std.ArrayList(Socket) = .empty,
@@ -1334,7 +1335,12 @@ pub const Server = struct {
                 self.allocator.destroy(job_ctx);
             };
         } else {
-            self.active_connections.append(self.allocator, socket) catch {};
+            {
+                const io = defaultIo();
+                self.active_conn_mutex.lock(io) catch unreachable;
+                self.active_connections.append(self.allocator, socket) catch {};
+                self.active_conn_mutex.unlock(io);
+            }
             self.handleConnection(socket) catch |err| {
                 // TlsConnectionTruncated and EndOfStream are normal client disconnections,
                 // not errors — don't pollute stderr with them.
@@ -1348,17 +1354,18 @@ pub const Server = struct {
     }
 
     fn removeFromActive(self: *Self, socket: Socket) void {
-        const items = self.active_connections.items;
-        for (items, 0..) |*s, i| {
-            if (s.handle == socket.handle) {
-                // Guard against concurrent stop() clearing the list.
-                if (i < self.active_connections.items.len) {
-                    _ = self.active_connections.swapRemove(i);
-                }
-                _ = self.active_conn_count.fetchSub(1, .monotonic);
-                return;
+        const io = defaultIo();
+        self.active_conn_mutex.lock(io) catch unreachable;
+        defer self.active_conn_mutex.unlock(io);
+        var i: usize = 0;
+        while (i < self.active_connections.items.len) {
+            if (self.active_connections.items[i].handle == socket.handle) {
+                _ = self.active_connections.swapRemove(i);
+                break;
             }
+            i += 1;
         }
+        _ = self.active_conn_count.fetchSub(1, .monotonic);
     }
 
     /// Parses pseudo-headers (:method, :path, :scheme, :authority) from a
@@ -1443,10 +1450,15 @@ pub const Server = struct {
         }
 
         // Phase 3: Force-close any remaining connections.
-        for (self.active_connections.items) |*s| {
-            s.close();
+        {
+            const io = defaultIo();
+            self.active_conn_mutex.lock(io) catch unreachable;
+            for (self.active_connections.items) |*s| {
+                s.close();
+            }
+            self.active_connections.clearRetainingCapacity();
+            self.active_conn_mutex.unlock(io);
         }
-        self.active_connections.clearRetainingCapacity();
         self.active_conn_count.store(0, .monotonic);
 
         // Close executor-tracked sockets so worker threads unblock from recv().
