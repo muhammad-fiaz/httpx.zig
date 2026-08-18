@@ -51,32 +51,38 @@ pub fn main() !void {
     std.debug.print("\nRoute Matching Tests:\n", .{});
 
     if (router.find(.GET, "/users/42")) |result| {
+        defer allocator.free(result.params);
         std.debug.print("  GET /users/42 -> matched!\n", .{});
         std.debug.print("    Parameters: {d}\n", .{result.params.len});
         std.debug.print("    Expected: id = 42\n", .{});
     }
 
     if (router.find(.GET, "/users/123/posts/456")) |result| {
+        defer allocator.free(result.params);
         std.debug.print("  GET /users/123/posts/456 -> matched!\n", .{});
         std.debug.print("    Parameters: {d}\n", .{result.params.len});
         std.debug.print("    Expected: userId = 123, postId = 456\n", .{});
     }
 
-    if (router.find(.DELETE, "/users/99")) |_| {
+    if (router.find(.DELETE, "/users/99")) |result| {
+        defer allocator.free(result.params);
         std.debug.print("  DELETE /users/99 -> matched!\n", .{});
     }
 
-    if (router.find(.PATCH, "/users/1")) |_| {
+    if (router.find(.PATCH, "/users/1")) |result| {
+        defer allocator.free(result.params);
         std.debug.print("  PATCH /users/1 -> matched!\n", .{});
     } else {
         std.debug.print("  PATCH /users/1 -> not found\n", .{});
     }
 
-    if (router.find(.TRACE, "/debug")) |_| {
+    if (router.find(.TRACE, "/debug")) |result| {
+        defer allocator.free(result.params);
         std.debug.print("  TRACE /debug -> matched!\n", .{});
     }
 
-    if (router.find(.CONNECT, "/tunnel")) |_| {
+    if (router.find(.CONNECT, "/tunnel")) |result| {
+        defer allocator.free(result.params);
         std.debug.print("  CONNECT /tunnel -> matched!\n", .{});
     }
 

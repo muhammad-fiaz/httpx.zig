@@ -24,6 +24,7 @@ pub const RouteParam = struct {
 };
 
 /// Route match result containing the handler and extracted parameters.
+/// `params` is allocated memory — caller must free with `allocator.free(result.params)`.
 pub const RouteMatch = struct {
     handler: Handler,
     params: []const RouteParam,
@@ -238,8 +239,7 @@ pub const Router = struct {
 
     /// Finds a matching route for the given method and path.
     /// Returns the best match based on specificity (static > param > wildcard).
-    /// The returned RouteMatch's params slice points into this router's
-    /// internal buffer, so it is only valid until the next call to find().
+    /// The returned RouteMatch's params slice is allocated memory; caller must free it.
     pub fn find(self: *Self, method: types.Method, path: []const u8) ?RouteMatch {
         const normalized = self.normalizePath(path);
 
@@ -260,9 +260,13 @@ pub const Router = struct {
         }
 
         if (best_handler) |handler| {
+            const params = self.allocator.alloc(RouteParam, best_params_len) catch return null;
+            for (params, 0..) |*p, i| {
+                p.* = self.params_buf[i];
+            }
             return .{
                 .handler = handler,
-                .params = self.params_buf[0..best_params_len],
+                .params = params,
             };
         }
 
@@ -271,6 +275,7 @@ pub const Router = struct {
 
     /// Finds a route with full result information (found / 405 / 404).
     /// This allows the server to distinguish 404 from 405.
+    /// The returned RouteMatch's params slice is allocated memory; caller must free it.
     pub fn findEx(self: *Self, method: types.Method, path: []const u8) FindResult {
         const normalized = self.normalizePath(path);
 
@@ -296,9 +301,13 @@ pub const Router = struct {
         }
 
         if (best_handler) |handler| {
+            const params = self.allocator.alloc(RouteParam, best_params_len) catch return .not_found;
+            for (params, 0..) |*p, i| {
+                p.* = self.params_buf[i];
+            }
             return .{ .found = .{
                 .handler = handler,
-                .params = self.params_buf[0..best_params_len],
+                .params = params,
             } };
         }
 
@@ -495,12 +504,14 @@ test "Router basic matching" {
     const result1 = router.find(.GET, "/users");
     try std.testing.expect(result1 != null);
     try std.testing.expectEqual(@as(usize, 0), result1.?.params.len);
+    allocator.free(result1.?.params);
 
     const result2 = router.find(.GET, "/users/123");
     try std.testing.expect(result2 != null);
     try std.testing.expectEqual(@as(usize, 1), result2.?.params.len);
     try std.testing.expectEqualStrings("id", result2.?.params[0].name);
     try std.testing.expectEqualStrings("123", result2.?.params[0].value);
+    allocator.free(result2.?.params);
 
     const result3 = router.find(.DELETE, "/users");
     try std.testing.expect(result3 == null);
@@ -526,6 +537,7 @@ test "Router multiple parameters" {
     try std.testing.expectEqualStrings("42", result.?.params[0].value);
     try std.testing.expectEqualStrings("postId", result.?.params[1].name);
     try std.testing.expectEqualStrings("99", result.?.params[1].value);
+    allocator.free(result.?.params);
 }
 
 test "Router convenience methods and group helpers" {
@@ -549,15 +561,51 @@ test "Router convenience methods and group helpers" {
     try router.trace("/trace", handler);
     try router.connect("/connect", handler);
 
-    try std.testing.expect(router.find(.GET, "/get") != null);
-    try std.testing.expect(router.find(.POST, "/post") != null);
-    try std.testing.expect(router.find(.PUT, "/put") != null);
-    try std.testing.expect(router.find(.DELETE, "/del") != null);
-    try std.testing.expect(router.find(.PATCH, "/patch") != null);
-    try std.testing.expect(router.find(.HEAD, "/head") != null);
-    try std.testing.expect(router.find(.OPTIONS, "/options") != null);
-    try std.testing.expect(router.find(.TRACE, "/trace") != null);
-    try std.testing.expect(router.find(.CONNECT, "/connect") != null);
+    {
+        const r = router.find(.GET, "/get");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.POST, "/post");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.PUT, "/put");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.DELETE, "/del");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.PATCH, "/patch");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.HEAD, "/head");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.OPTIONS, "/options");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.TRACE, "/trace");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.CONNECT, "/connect");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
 
     var api = router.group("/api");
     try api.get("/users", handler);
@@ -570,15 +618,51 @@ test "Router convenience methods and group helpers" {
     try api.trace("/diag", handler);
     try api.connect("/tunnel", handler);
 
-    try std.testing.expect(router.find(.GET, "/api/users") != null);
-    try std.testing.expect(router.find(.POST, "/api/users") != null);
-    try std.testing.expect(router.find(.PUT, "/api/users/1") != null);
-    try std.testing.expect(router.find(.DELETE, "/api/users/1") != null);
-    try std.testing.expect(router.find(.PATCH, "/api/users/1") != null);
-    try std.testing.expect(router.find(.HEAD, "/api/users/1") != null);
-    try std.testing.expect(router.find(.OPTIONS, "/api/users/1") != null);
-    try std.testing.expect(router.find(.TRACE, "/api/diag") != null);
-    try std.testing.expect(router.find(.CONNECT, "/api/tunnel") != null);
+    {
+        const r = router.find(.GET, "/api/users");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.POST, "/api/users");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.PUT, "/api/users/1");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.DELETE, "/api/users/1");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.PATCH, "/api/users/1");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.HEAD, "/api/users/1");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.OPTIONS, "/api/users/1");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.TRACE, "/api/diag");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
+    {
+        const r = router.find(.CONNECT, "/api/tunnel");
+        try std.testing.expect(r != null);
+        allocator.free(r.?.params);
+    }
 }
 
 test "Route priority: static preferred over param" {
@@ -605,8 +689,12 @@ test "Route priority: static preferred over param" {
     // Static should win.
     const result = router.find(.GET, "/users/me");
     try std.testing.expect(result != null);
+    allocator.free(result.?.params);
     // The static handler has lower specificity (0 vs 1001).
-    try std.testing.expectEqual(param_handler, router.find(.GET, "/users/42").?.handler);
+    const r2 = router.find(.GET, "/users/42");
+    try std.testing.expect(r2 != null);
+    try std.testing.expectEqual(param_handler, r2.?.handler);
+    allocator.free(r2.?.params);
 }
 
 test "Route priority: param preferred over wildcard" {
@@ -634,6 +722,7 @@ test "Route priority: param preferred over wildcard" {
     try std.testing.expect(result != null);
     // Verify param handler was chosen (lower specificity).
     try std.testing.expectEqual(param_handler, result.?.handler);
+    allocator.free(result.?.params);
 }
 
 test "Duplicate route detection" {
@@ -704,6 +793,7 @@ test "Trailing slash strip policy" {
     // /users/ should match /users when strip policy is active.
     const result = router.find(.GET, "/users/");
     try std.testing.expect(result != null);
+    allocator.free(result.?.params);
 }
 
 test "Router wildcard matching" {
@@ -724,6 +814,7 @@ test "Router wildcard matching" {
     try std.testing.expectEqual(@as(usize, 1), result.?.params.len);
     try std.testing.expectEqualStrings("path", result.?.params[0].name);
     try std.testing.expectEqualStrings("docs/readme.md", result.?.params[0].value);
+    allocator.free(result.?.params);
 }
 
 test "allowedMethods returns correct set" {
@@ -768,10 +859,13 @@ test "Trailing slash redirect policy sets flag" {
     const result = router.find(.GET, "/users/");
     try std.testing.expect(result != null);
     try std.testing.expect(router.redirect_trailing_slash);
+    allocator.free(result.?.params);
 
     // /users without trailing slash should not set the flag.
-    _ = router.find(.GET, "/users");
+    const result2 = router.find(.GET, "/users");
+    try std.testing.expect(result2 != null);
     try std.testing.expect(!router.redirect_trailing_slash);
+    allocator.free(result2.?.params);
 }
 
 test "Trailing slash strict policy still matches" {
@@ -792,6 +886,7 @@ test "Trailing slash strict policy still matches" {
     const result = router.find(.GET, "/users/");
     try std.testing.expect(result != null);
     try std.testing.expect(!router.redirect_trailing_slash);
+    allocator.free(result.?.params);
 }
 
 test "Wildcard with params in same route" {
@@ -814,6 +909,7 @@ test "Wildcard with params in same route" {
     try std.testing.expectEqualStrings("42", result.?.params[0].value);
     try std.testing.expectEqualStrings("path", result.?.params[1].name);
     try std.testing.expectEqualStrings("docs/readme.md", result.?.params[1].value);
+    allocator.free(result.?.params);
 }
 
 test "Root wildcard captures full path" {
@@ -834,4 +930,5 @@ test "Root wildcard captures full path" {
     try std.testing.expectEqual(@as(usize, 1), result.?.params.len);
     try std.testing.expectEqualStrings("path", result.?.params[0].name);
     try std.testing.expectEqualStrings("foo/bar/baz", result.?.params[0].value);
+    allocator.free(result.?.params);
 }

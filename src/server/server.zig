@@ -2802,12 +2802,16 @@ pub const Server = struct {
         var suppress_body = false;
         const find_result = self.router.findEx(req.method, req.uri.path);
 
-        var route_result: ?router_mod.RouteMatch = null;
+        var route_handler: ?Handler = null;
         var allowed_methods_for_405: ?[]const types.Method = null;
 
         switch (find_result) {
             .found => |m| {
-                route_result = m;
+                defer self.allocator.free(m.params);
+                for (m.params) |p| {
+                    try ctx.params.put(p.name, p.value);
+                }
+                route_handler = m.handler;
             },
             .method_not_allowed => |allowed| {
                 allowed_methods_for_405 = allowed;
@@ -2816,14 +2820,20 @@ pub const Server = struct {
                 // If HEAD is not explicitly registered, fall back to GET semantics
                 // and suppress the response body.
                 if (req.method == .HEAD) {
-                    route_result = self.router.find(.GET, req.uri.path);
-                    suppress_body = route_result != null;
+                    if (self.router.find(.GET, req.uri.path)) |m| {
+                        defer self.allocator.free(m.params);
+                        for (m.params) |p| {
+                            try ctx.params.put(p.name, p.value);
+                        }
+                        route_handler = m.handler;
+                        suppress_body = true;
+                    }
                 }
             },
         }
 
         // Handle trailing slash redirect (301) when policy is .redirect.
-        if (self.router.redirect_trailing_slash and route_result != null) {
+        if (self.router.redirect_trailing_slash and route_handler != null) {
             const path = req.uri.path;
             if (path.len > 1) {
                 var redirect_path = std.ArrayList(u8).empty;
@@ -2835,15 +2845,9 @@ pub const Server = struct {
             }
         }
 
-        if (route_result) |r| {
-            for (r.params) |p| {
-                try ctx.params.put(p.name, p.value);
-            }
-        }
-
         const FallbackHandler = struct {
             server: *Self,
-            route_result: ?router_mod.RouteMatch,
+            route_handler: ?Handler,
             suppress_body: bool,
             allowed_methods: ?[]const types.Method,
 
@@ -2852,8 +2856,8 @@ pub const Server = struct {
                 const s = c.data.get("__fallback_state") orelse return error.MissingFallbackState;
                 const state: *const self_ptr = @ptrCast(@alignCast(s));
 
-                if (state.route_result) |r| {
-                    return r.handler(c);
+                if (state.route_handler) |handler| {
+                    return handler(c);
                 }
 
                 // Use the pre-computed allowed methods from findEx if available.
@@ -2892,7 +2896,7 @@ pub const Server = struct {
 
         var fallback = FallbackHandler{
             .server = self,
-            .route_result = route_result,
+            .route_handler = route_handler,
             .suppress_body = suppress_body,
             .allowed_methods = allowed_methods_for_405,
         };
@@ -3347,10 +3351,18 @@ test "Server any() registers all methods" {
 
     try server.any("/wild", handler);
 
-    try std.testing.expect(server.router.find(.GET, "/wild") != null);
-    try std.testing.expect(server.router.find(.POST, "/wild") != null);
-    try std.testing.expect(server.router.find(.TRACE, "/wild") != null);
-    try std.testing.expect(server.router.find(.CONNECT, "/wild") != null);
+    const r1 = server.router.find(.GET, "/wild");
+    try std.testing.expect(r1 != null);
+    allocator.free(r1.?.params);
+    const r2 = server.router.find(.POST, "/wild");
+    try std.testing.expect(r2 != null);
+    allocator.free(r2.?.params);
+    const r3 = server.router.find(.TRACE, "/wild");
+    try std.testing.expect(r3 != null);
+    allocator.free(r3.?.params);
+    const r4 = server.router.find(.CONNECT, "/wild");
+    try std.testing.expect(r4 != null);
+    allocator.free(r4.?.params);
 }
 
 test "Server trace/connect helpers register routes" {
@@ -3367,8 +3379,12 @@ test "Server trace/connect helpers register routes" {
     try server.trace("/diag", handler);
     try server.connect("/tunnel", handler);
 
-    try std.testing.expect(server.router.find(.TRACE, "/diag") != null);
-    try std.testing.expect(server.router.find(.CONNECT, "/tunnel") != null);
+    const r1 = server.router.find(.TRACE, "/diag");
+    try std.testing.expect(r1 != null);
+    allocator.free(r1.?.params);
+    const r2 = server.router.find(.CONNECT, "/tunnel");
+    try std.testing.expect(r2 != null);
+    allocator.free(r2.?.params);
 }
 
 fn reserveTcpPort() !struct { listener: TcpListener, port: u16 } {

@@ -251,19 +251,21 @@ pub const HttpCache = struct {
         defer self.unlock();
 
         const now = std.Io.Timestamp.now(io_util.defaultIo(), .real).toSeconds();
-        for (self.entries.items) |*entry| {
+        var i: usize = 0;
+        while (i < self.entries.items.len) {
+            const entry = self.entries.items[i];
             if (std.mem.eql(u8, entry.key, key)) {
                 if (entry.isExpired(now)) {
                     self.stats.misses += 1;
                     return null;
                 }
                 self.stats.hits += 1;
-                const entry_copy = entry.*;
-                const idx: usize = @intCast(@intFromPtr(entry) - @intFromPtr(self.entries.items.ptr));
-                _ = self.entries.orderedRemove(idx);
+                const entry_copy = entry;
+                _ = self.entries.orderedRemove(i);
                 self.entries.append(self.allocator, entry_copy) catch return entry_copy;
                 return entry_copy;
             }
+            i += 1;
         }
         self.stats.misses += 1;
         return null;
