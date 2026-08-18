@@ -107,6 +107,8 @@
 | **Streaming Compression** | `StreamingCompressor` and `StreamingDecompressor` for chunked gzip/deflate/brotli/zstd without buffering entire payloads. | https://muhammad-fiaz.github.io/httpx.zig/api/compress |
 | **HTTP Caching** | `CacheControl` header parsing, `HttpCache` (LRU in-memory with TTL), `ConditionalGet` (ETag/If-None-Match), and thread-safe cache operations. | https://muhammad-fiaz.github.io/httpx.zig/api/cache |
 | **Buffer Pool** | `BufferPool` with slot-based ownership tracking, acquire/release semantics, and detection of foreign/double-release buffers. | https://muhammad-fiaz.github.io/httpx.zig/api/io |
+| **Transfer** | HTTP download/upload with progress tracking, checksums (SHA-256/512, MD5), resume support, atomic downloads. | https://muhammad-fiaz.github.io/httpx.zig/api/transfer |
+| **FTP** | Full FTP/FTPS client with PASV/EPSV, directory listing, upload/download, resume. | https://muhammad-fiaz.github.io/httpx.zig/api/ftp |
 | **DNS Resolution** | `resolveAddress`, `resolveAllAddresses`, `parseHostAndPort`, `parseAndResolveAddress`, `isIpAddress`, `isIp4Address`, `isIp6Address` helpers with RFC 1035 wire protocol, UDP/TCP/DoH transports, and SSRF policy checks. | https://muhammad-fiaz.github.io/httpx.zig/api/dns |
 | **Server-Sent Events** | `SseEvent` type and `parseSSEStream` helper for SSE client parsing. | https://muhammad-fiaz.github.io/httpx.zig/api/sse |
 | **HTTP/3 Flow Control** | MAX_DATA and MAX_STREAM_DATA frame handling with connection-level and per-stream flow control windows. | https://muhammad-fiaz.github.io/httpx.zig/examples/http3-advanced |
@@ -373,6 +375,16 @@ const tls_cfg = httpx.TlsConfig;      // TLS configuration
 const tls_s = httpx.TlsSession;       // TLS session
 const sse = httpx.SseEvent;           // Server-Sent Events
 const h3s = httpx.Http3Settings;      // HTTP/3 settings
+
+// ── Transfer & FTP ──
+const progress = httpx.Progress;      // Transfer progress tracking
+const checksum = httpx.Checksum;      // Checksum result
+const cs_stream = httpx.ChecksumStream; // Streaming checksum
+const dl_cfg = httpx.DownloadConfig;  // Download configuration
+const ul_cfg = httpx.UploadConfig;    // Upload configuration
+const cancel = httpx.CancelToken;     // Cancellation token
+const ftp_c = httpx.FtpClient;        // FTP client
+const ftp_cfg = httpx.FtpConfig;      // FTP configuration
 ```
 
 ### Concurrency
@@ -456,9 +468,58 @@ const resolved = try httpx.parseAndResolveAddress("127.0.0.1:9000", 80);
 const is_ip = httpx.isIpAddress("::1"); // true
 ```
  
+### Transfer & FTP
+
+```zig
+const std = @import("std");
+const httpx = @import("httpx");
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Progress tracking
+    const p = httpx.Progress{
+        .bytes_transferred = 500,
+        .total_bytes = 1000,
+        .elapsed_ns = std.time.ns_per_s,
+    };
+    if (p.percentage()) |pct| {
+        std.debug.print("Progress: {d:.1}%\n", .{pct});
+    }
+
+    // Cancel token
+    var token = httpx.CancelToken{};
+    std.debug.print("Cancelled: {}\n", .{token.isCancelled()});
+
+    // Checksum computation
+    const data = "Hello, httpx.zig!";
+    const sha256 = httpx.computeChecksum(.sha256, data);
+    var hex_buf: [128]u8 = undefined;
+    std.debug.print("SHA-256: {s}\n", .{sha256.hex(&hex_buf)});
+
+    // Streaming checksum
+    var stream = httpx.ChecksumStream.init(.sha256);
+    stream.update(data);
+    const result = stream.final();
+    std.debug.print("Match: {}\n", .{result.eql(sha256)});
+
+    // FTP client
+    const config = httpx.FtpConfig{
+        .allocator = allocator,
+        .host = "127.0.0.1",
+        .port = 21,
+        .connection_mode = .passive,
+        .transfer_mode = .binary,
+    };
+    std.debug.print("FTP: {s}:{d}\n", .{ config.host, config.port });
+}
+```
+
 ## Examples
 
-The `examples/` directory contains **63 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
+The `examples/` directory contains **67 comprehensive, runnable examples** demonstrating all features of `httpx.zig`:
 
 **Client:**
 - [`simple_get`](examples/simple_get.zig) - Basic GET requests
@@ -522,6 +583,12 @@ The `examples/` directory contains **63 comprehensive, runnable examples** demon
 - [`tls_handshake_details`](examples/tls_handshake_details.zig) - TLS handshake info and cipher suites
 - [`tls_custom_ca`](examples/tls_custom_ca.zig) - Custom CA certificate verification with self-signed certs
 - [`tls_mtls`](examples/tls_mtls.zig) - Mutual TLS (mTLS) client certificate authentication
+
+**Transfer & FTP:**
+- [`http_download`](examples/http_download.zig) - HTTP download with progress and checksums
+- [`checksum_example`](examples/checksum_example.zig) - SHA-256/MD5 checksum computation
+- [`progress_example`](examples/progress_example.zig) - Progress tracking and cancel tokens
+- [`ftp_example`](examples/ftp_example.zig) - FTP client with PASV and directory ops
 
 **Advanced Capabilities:**
 - [`websocket_example`](examples/websocket_example.zig) - RFC 6455 WebSocket client

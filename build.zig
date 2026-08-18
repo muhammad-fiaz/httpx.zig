@@ -106,6 +106,10 @@ pub fn build(b: *std.Build) void {
         .{ .name = "streaming_compression_example", .path = "examples/streaming_compression_example.zig" },
         .{ .name = "http_cache_example", .path = "examples/http_cache_example.zig" },
         .{ .name = "buffer_pool_example", .path = "examples/buffer_pool_example.zig" },
+        .{ .name = "http_download", .path = "examples/http_download.zig" },
+        .{ .name = "checksum_example", .path = "examples/checksum_example.zig" },
+        .{ .name = "progress_example", .path = "examples/progress_example.zig" },
+        .{ .name = "ftp_example", .path = "examples/ftp_example.zig" },
     };
 
     inline for (examples) |example| {

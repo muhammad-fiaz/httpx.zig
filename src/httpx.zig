@@ -21,6 +21,8 @@ pub const stream = @import("protocol/stream.zig");
 pub const qpack = @import("protocol/qpack.zig");
 pub const quic = @import("protocol/quic.zig");
 pub const websocket = @import("protocol/websocket.zig");
+pub const ftp = @import("protocol/ftp.zig");
+pub const transfer = @import("transfer/transfer.zig");
 pub const socket = @import("net/socket.zig");
 
 pub const address = @import("net/address.zig");
@@ -335,6 +337,29 @@ pub const MultipartFile = client_mod.MultipartFile;
 
 pub const TLSConfig = tls.TLSConfig;
 pub const TlsConfig = tls.TLSConfig;
+
+// Transfer exports
+pub const Progress = transfer.Progress;
+pub const ProgressCallback = transfer.ProgressCallback;
+pub const Checksum = transfer.Checksum;
+pub const ChecksumAlgorithm = transfer.ChecksumAlgorithm;
+pub const ChecksumStream = transfer.ChecksumStream;
+pub const ResumeInfo = transfer.ResumeInfo;
+pub const DownloadConfig = transfer.DownloadConfig;
+pub const UploadConfig = transfer.UploadConfig;
+pub const TransferError = transfer.TransferError;
+pub const CancelToken = transfer.CancelToken;
+pub const computeChecksum = transfer.computeChecksum;
+
+// FTP exports
+pub const FtpClient = ftp.FtpClient;
+pub const FtpConfig = ftp.FtpConfig;
+pub const FtpError = ftp.FtpError;
+pub const FtpResponse = ftp.Response;
+pub const FtpDirectoryEntry = ftp.DirectoryEntry;
+pub const FtpFeatures = ftp.Features;
+pub const TransferMode = ftp.TransferMode;
+pub const ConnectionMode = ftp.ConnectionMode;
 pub const TLSSession = tls.TLSSession;
 pub const TlsSession = tls.TLSSession;
 
