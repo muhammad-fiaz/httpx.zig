@@ -1,10 +1,3 @@
-//! WebSocket Server Example
-//!
-//! Demonstrates WebSocket handshake detection, key extraction, accept key
-//! computation, frame encoding/decoding, and bidirectional messaging.
-//! Uses the flat WebSocket API: isWebSocketUpgrade, wsExtractKey,
-//! wsAcceptKey, wsEncodeFrame, wsDecodeFrame.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -27,7 +20,6 @@ pub fn main() !void {
 
     std.debug.print("=== WebSocket Server Example ===\n\n", .{});
 
-    // 1. Simulate WebSocket handshake
     std.debug.print("--- WebSocket Handshake ---\n", .{});
 
     var upgrade_req = try httpx.Request.init(allocator, .GET, "ws://localhost:8080/ws");
@@ -47,7 +39,6 @@ pub fn main() !void {
     defer allocator.free(accept_key);
     std.debug.print("Sec-WebSocket-Accept: {s}\n", .{accept_key});
 
-    // 2. Send messages (text and binary frames)
     std.debug.print("\n--- Sending Messages ---\n", .{});
 
     const text_frame = try httpx.wsTextFrame(allocator, "Hello from server!");
@@ -63,7 +54,6 @@ pub fn main() !void {
     defer bin_decoded.frame.deinit();
     std.debug.print("Binary frame: {d} bytes\n", .{bin_decoded.frame.payload.len});
 
-    // 3. Masked frame (client -> server)
     std.debug.print("\n--- Masked Frame (Client -> Server) ---\n", .{});
     const mask_key: [4]u8 = .{ 0x12, 0x34, 0x56, 0x78 };
     const masked = try httpx.wsEncodeFrame(allocator, .text, "masked payload", true, true, mask_key);
@@ -72,7 +62,6 @@ pub fn main() !void {
     defer masked_dec.frame.deinit();
     std.debug.print("Masked payload: \"{s}\"\n", .{masked_dec.frame.payload});
 
-    // 4. Control frames
     std.debug.print("\n--- Control Frames ---\n", .{});
     const ping = try httpx.wsPingFrame(allocator, "ping");
     defer allocator.free(ping);
@@ -92,7 +81,6 @@ pub fn main() !void {
     std.debug.print("PONG: {s}\n", .{pong_dec.frame.payload});
     std.debug.print("CLOSE: {s}\n", .{close_dec.frame.payload});
 
-    // 5. Large payload (extended length)
     std.debug.print("\n--- Extended Payload ---\n", .{});
     const big = try allocator.alloc(u8, 300);
     defer allocator.free(big);

@@ -338,6 +338,11 @@ pub const Context = struct {
         var response = try self.file(path);
 
         if (filename) |name| {
+            for (name) |c| {
+                if (c == '"' or c == '\\' or c == '\r' or c == '\n' or c == 0) {
+                    return error.InvalidFilename;
+                }
+            }
             const disposition = try std.fmt.allocPrint(self.allocator, "attachment; filename=\"{s}\"", .{name});
             defer self.allocator.free(disposition);
             try response.headers.set(HeaderName.CONTENT_DISPOSITION, disposition);
@@ -365,6 +370,10 @@ pub const Context = struct {
         }
         if (path.len >= 2 and path[1] == ':') {
             return self.status(status_mod.StatusCode.FORBIDDEN).text("Forbidden: Absolute path");
+        }
+        // Security: Reject UNC paths on Windows (\\server\share\...)
+        if (path.len >= 2 and path[0] == '\\' and path[1] == '\\') {
+            return self.status(status_mod.StatusCode.FORBIDDEN).text("Forbidden: UNC path");
         }
         const io = defaultIo();
         var f = std.Io.Dir.cwd().openFile(io, path, .{}) catch return self.status(status_mod.StatusCode.NOT_FOUND).text("Not Found");

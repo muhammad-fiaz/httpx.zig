@@ -1,7 +1,3 @@
-//! Router Example
-//!
-//! Demonstrates pattern-based routing with path parameters.
-
 const std = @import("std");
 const httpx = @import("httpx");
 

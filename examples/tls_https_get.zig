@@ -18,7 +18,6 @@ pub fn main() !void {
 
     std.debug.print("=== TLS HTTPS GET Example ===\n\n", .{});
 
-    // 1. Start local TLS server with dummy certs (HTTP/1.1 + HTTP/2 + HTTP/3)
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
         .port = 0,
@@ -40,7 +39,6 @@ pub fn main() !void {
     const port = server.config.port;
     std.debug.print("TLS server on 127.0.0.1:{d}\n", .{port});
 
-    // 2. Connect TLS client
     var sock = httpx.Socket.create() catch |err| {
         std.debug.print("Socket error: {}\n", .{err});
         return;
@@ -62,7 +60,6 @@ pub fn main() !void {
     };
     std.debug.print("TLS handshake complete!\n", .{});
 
-    // 3. Send HTTP request over TLS
     const request = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
     session.writeAll(request) catch |err| {
         std.debug.print("Write error: {}\n", .{err});
@@ -70,7 +67,6 @@ pub fn main() !void {
     };
     std.debug.print("Sent GET /hello over TLS\n", .{});
 
-    // 4. Read response
     var response_buf: [4096]u8 = undefined;
     const n = session.read(&response_buf) catch |err| {
         std.debug.print("Read error: {}\n", .{err});

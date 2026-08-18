@@ -1,9 +1,3 @@
-//! Simplified API Aliases Demo
-//!
-//! Default mode runs against a local loopback server so alias calls succeed
-//! without requiring external internet access.
-//! Set HTTPX_EXAMPLE_ONLINE=1 to run live requests against httpbin.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -77,7 +71,6 @@ fn printResult(label: []const u8, result: anyerror!httpx.Response) void {
 fn runAliasCalls(allocator: std.mem.Allocator, urls: DemoUrls) void {
     const request_timeout: u64 = 5_000;
 
-    // Compile-time alias checks so this demo validates the API surface.
     const fetch_ptr: *const fn ([]const u8, httpx.RequestOptions) anyerror!httpx.Response = httpx.fetch;
     const send_ptr: *const fn (httpx.Method, []const u8, httpx.RequestOptions) anyerror!httpx.Response = httpx.send;
     const delete_ptr: *const fn ([]const u8, httpx.RequestOptions) anyerror!httpx.Response = httpx.delete;
@@ -92,7 +85,6 @@ fn runAliasCalls(allocator: std.mem.Allocator, urls: DemoUrls) void {
     _ = connect_ptr;
     std.debug.print("Top-level alias symbols are available: fetch, send, delete, opts, trace, connect\n", .{});
 
-    // Use explicit allocator + POST so default retry policy does not add backoff delays.
     printResult("httpx.sendWithAllocator(POST)", httpx.sendWithAllocator(allocator, .POST, urls.post, .{
         .timeout_ms = request_timeout,
         .json = "{\"ok\":true}",
@@ -105,7 +97,6 @@ fn runAliasCalls(allocator: std.mem.Allocator, urls: DemoUrls) void {
     printResult("httpx.trace", httpx.trace(urls.trace, .{ .timeout_ms = request_timeout }));
     printResult("httpx.connect", httpx.connect(urls.connect, .{ .timeout_ms = request_timeout }));
 
-    // Client aliases.
     const client_config = httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())
         .withRetryPolicy(httpx.RetryPolicy.noRetry())

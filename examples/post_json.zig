@@ -1,7 +1,3 @@
-//! POST JSON Request Example
-//!
-//! Demonstrates sending JSON data in a POST request.
-
 const std = @import("std");
 const httpx = @import("httpx");
 

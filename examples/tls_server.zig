@@ -1,12 +1,3 @@
-//! TLS Server Example
-//!
-//! Demonstrates the custom TLS server implementation built from scratch.
-//! Shows how to:
-//! - Configure a server with TLS enabled using cert/key PEM files
-//! - Accept TLS connections with ALPN negotiation
-//! - Handle HTTP/1.1, HTTP/2, and HTTP/3 over TLS
-//! - Connect a TLS client to the server
-
 const std = @import("std");
 const httpx = @import("httpx");
 const tls = httpx.tls;
@@ -34,7 +25,6 @@ pub fn main() !void {
 
     std.debug.print("=== TLS Server Example ===\n\n", .{});
 
-    // 1. Create a server with TLS enabled
     std.debug.print("--- Server Configuration ---\n", .{});
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -58,14 +48,12 @@ pub fn main() !void {
     std.debug.print("  HTTP/2: enabled\n", .{});
     std.debug.print("  HTTP/3: enabled\n", .{});
 
-    // 2. Start the TLS server in background
     const server_thread = try server.listenInBackground();
 
     const port = server.config.port;
     sleepMs(200);
     std.debug.print("  Server listening on port {d}\n", .{port});
 
-    // 3. TLS client handshake demonstration
     std.debug.print("\n--- TLS Client Handshake ---\n", .{});
 
     var sock = httpx.Socket.create() catch |err| {
@@ -93,7 +81,6 @@ pub fn main() !void {
     std.debug.print("  Protocol: {s}\n", .{session.negotiatedProtocol() orelse "none"});
     std.debug.print("  HTTP/2 negotiated: {}\n", .{session.isHTTP2()});
 
-    // 4. Send HTTP request over TLS
     std.debug.print("\n--- HTTP Request over TLS ---\n", .{});
 
     const request = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
@@ -103,7 +90,6 @@ pub fn main() !void {
     };
     std.debug.print("  Sent: GET /hello\r\n", .{});
 
-    // Read response
     var response_buf: [4096]u8 = undefined;
     const n = session.read(&response_buf) catch |err| {
         std.debug.print("  Read error: {}\n", .{err});
@@ -117,7 +103,6 @@ pub fn main() !void {
         }
     }
 
-    // 5. Show the TLS record layer details
     std.debug.print("\n--- TLS Record Layer ---\n", .{});
     std.debug.print("  Our custom TLS implementation provides:\n", .{});
     std.debug.print("  - TLS 1.2: ECDHE_RSA_WITH_AES_128_GCM_SHA256\n", .{});
@@ -126,7 +111,6 @@ pub fn main() !void {
     std.debug.print("  - AEAD encryption with proper nonce handling\n", .{});
     std.debug.print("  - Record-level fragmentation and reassembly\n", .{});
 
-    // 6. Server config summary
     std.debug.print("\n--- Server Config Summary ---\n", .{});
     std.debug.print("  Host: {s}\n", .{server.config.host});
     std.debug.print("  Port: {d}\n", .{server.config.port});

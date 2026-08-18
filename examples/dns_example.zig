@@ -1,8 +1,3 @@
-//! DNS Resolution Example
-//!
-//! Demonstrates the DNS subsystem: DNSResolver, DNSCache, DNSResolution,
-//! IP literal bypass, address family/ordering, and client integration.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -13,7 +8,6 @@ pub fn main() !void {
 
     std.debug.print("=== DNS Resolution Example ===\n\n", .{});
 
-    // 1. IP address detection
     std.debug.print("--- IP Address Detection ---\n", .{});
     const candidates = [_][]const u8{
         "127.0.0.1",
@@ -33,7 +27,6 @@ pub fn main() !void {
         });
     }
 
-    // 2. Parse host:port
     std.debug.print("\n--- Parse Host:Port ---\n", .{});
     const host_ports = [_][]const u8{
         "127.0.0.1:8080",
@@ -49,7 +42,6 @@ pub fn main() !void {
         }
     }
 
-    // 3. DNSResolver with IP literal (bypasses DNS)
     std.debug.print("\n--- DNSResolver: IP Literal ---\n", .{});
     var resolver = httpx.DNSResolver.init(allocator, .{});
     defer resolver.deinit();
@@ -58,7 +50,6 @@ pub fn main() !void {
     defer res.deinit();
     std.debug.print("  resolve('127.0.0.1', port=80): {d} address(es)\n", .{res.addresses.len});
 
-    // 4. DNSResolver with caching
     std.debug.print("\n--- DNSResolver: Caching ---\n", .{});
     var cached_resolver = httpx.DNSResolver.init(allocator, .{
         .positive_ttl_ms = 30_000,
@@ -67,17 +58,14 @@ pub fn main() !void {
     });
     defer cached_resolver.deinit();
 
-    // First lookup (cache miss).
     var r1 = try cached_resolver.resolve("127.0.0.1", .{ .port = 443 });
     defer r1.deinit();
     std.debug.print("  First resolve: {d} address(es)\n", .{r1.addresses.len});
 
-    // Second lookup (cache hit).
     var r2 = try cached_resolver.resolve("127.0.0.1", .{ .port = 443 });
     defer r2.deinit();
     std.debug.print("  Second resolve (cached): {d} address(es)\n", .{r2.addresses.len});
 
-    // Check stats.
     const stats = cached_resolver.getStats();
     std.debug.print("  Cache stats: hits={d} misses={d} literal_hits={d}\n", .{
         stats.hits,
@@ -85,7 +73,6 @@ pub fn main() !void {
         stats.literal_hits,
     });
 
-    // 5. Address family filtering
     std.debug.print("\n--- Address Family Filtering ---\n", .{});
     var v4_resolver = httpx.DNSResolver.init(allocator, .{
         .address_family = .ipv4_only,
@@ -96,13 +83,11 @@ pub fn main() !void {
     defer v4_res.deinit();
     std.debug.print("  ipv4_only resolve('127.0.0.1'): {d} address(es)\n", .{v4_res.addresses.len});
 
-    // 6. Cache management
     std.debug.print("\n--- Cache Management ---\n", .{});
     std.debug.print("  Cache count before clear: {d}\n", .{cached_resolver.cache.count()});
     cached_resolver.clear();
     std.debug.print("  Cache count after clear: {d}\n", .{cached_resolver.cache.count()});
 
-    // 7. Convenience functions
     std.debug.print("\n--- Convenience Functions ---\n", .{});
     std.debug.print("  httpx.resolveAddress(host, port)        - single address\n", .{});
     std.debug.print("  httpx.resolveAllAddresses(alloc, host, port) - all candidates\n", .{});

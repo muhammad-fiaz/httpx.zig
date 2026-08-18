@@ -1,73 +1,8 @@
-//! httpx.zig - Production-Ready HTTP Library for Zig
+//! httpx.zig — High-performance, modular HTTP client and server library for Zig.
 //!
-//! A comprehensive HTTP client and server library with production-ready HTTP/1.x
-//! runtime support, high-level HTTP/2 and HTTP/3 client/server runtime support,
-//! and HTTP/2/HTTP/3 protocol primitives.
-//!
-//! ## Important Note
-//!
-//! **httpx.zig implements HTTP/2 and HTTP/3 from scratch.** Zig's standard library
-//! does not provide HTTP/2, HTTP/3, or QUIC support. This library contains complete
-//! custom implementations of these protocols:
-//!
-//! - **HTTP/2**: HPACK header compression (RFC 7541), stream multiplexing, flow control (RFC 7540)
-//! - **HTTP/3**: QPACK header compression (RFC 9204), HTTP/3 framing (RFC 9114)
-//! - **QUIC**: Transport framing, packet structures, variable-length integers (RFC 9000)
-//!
-//! ## Supported Protocols
-//!
-//! - **HTTP/1.0**: Basic request-response semantics
-//! - **HTTP/1.1**: Persistent connections, chunked transfer, pipelining
-//! - **HTTP/2**: High-level client/server runtime paths plus HPACK/framing primitives
-//! - **HTTP/3**: High-level client/server runtime paths plus QPACK/QUIC framing primitives
-//!
-//! ## Platform Support
-//!
-//! - Linux (x86, x86_64, aarch64, arm)
-//! - Windows (x86, x86_64, aarch64, arm)
-//! - macOS (x86, x86_64, aarch64, arm)
-//! - FreeBSD, NetBSD, OpenBSD
-//!
-//! ## Features
-//!
-//! ### Client Features
-//! - Connection pooling with keep-alive
-//! - Automatic retry with exponential backoff
-//! - Redirect following with configurable policies
-//! - Request/response interceptors
-//! - Concurrent request execution
-//! - TLS/SSL support (HTTPS)
-//! - Timeout configuration
-//! - Cookie handling
-//!
-//! ### Server Features
-//! - Pattern-based routing with path parameters
-//! - Middleware stack (CORS, logging, rate limiting, etc.)
-//! - Static file serving
-//! - JSON response helpers
-//! - Request context with user data
-//!
-//! ### Protocol Features
-//! - HTTP/2 HPACK header compression (RFC 7541)
-//! - HTTP/2 stream state machine and flow control
-//! - HTTP/3 QPACK header compression (RFC 9204)
-//! - QUIC transport framing (RFC 9000)
-//!
-//! ## Quick Start
-//!
-//! ```zig
-//! const httpx = @import("httpx");
-//!
-//! // Client usage
-//! var client = httpx.Client.init(allocator);
-//! defer client.deinit();
-//! const response = try client.get("http://httpbun.com/users", .{});
-//!
-//! // Server usage
-//! var server = httpx.Server.init(allocator);
-//! try server.get("/hello", helloHandler);
-//! try server.listen();
-//! ```
+//! Repository: https://github.com/muhammad-fiaz/httpx.zig
+//! License: MIT
+//! Copyright (c) 2026 Muhammad Fiaz.
 
 const std = @import("std");
 

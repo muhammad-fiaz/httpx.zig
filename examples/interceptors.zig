@@ -1,7 +1,3 @@
-//! Request/Response Interceptors Example
-//!
-//! Demonstrates using interceptors to modify requests and responses.
-
 const std = @import("std");
 const httpx = @import("httpx");
 

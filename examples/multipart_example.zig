@@ -1,11 +1,3 @@
-//! Multipart Form Data Example
-//!
-//! Demonstrates httpx.zig's multipart/form-data support (RFC 2046):
-//! - Building multipart bodies with text fields and file uploads
-//! - Parsing multipart bodies back into individual parts
-//! - Boundary extraction from Content-Type headers
-//! - Integration with HTTP requests
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -16,7 +8,6 @@ pub fn main() !void {
 
     std.debug.print("=== Multipart Form Data Example ===\n\n", .{});
 
-    // 1. Build a multipart body
     std.debug.print("--- Building Multipart Body ---\n", .{});
 
     const boundary = "----httpxBoundary7MA4YWxkTrZu0gW";
@@ -30,7 +21,7 @@ pub fn main() !void {
         "avatar",
         "avatar.png",
         "image/png",
-        &.{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }, // PNG header bytes
+        &.{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A },
     );
 
     const body = try builder.build();
@@ -42,7 +33,6 @@ pub fn main() !void {
     std.debug.print("Content-Type: {s}\n", .{ct});
     std.debug.print("Body size:    {d} bytes\n\n", .{body.len});
 
-    // 2. Extract boundary from Content-Type
     std.debug.print("--- Boundary Extraction ---\n", .{});
 
     const test_ct = "multipart/form-data; boundary=----httpxBoundary7MA4YWxkTrZu0gW";
@@ -51,7 +41,6 @@ pub fn main() !void {
     std.debug.print("Got:  \"{s}\"\n", .{extracted orelse "(none)"});
     std.debug.print("Match: {}\n\n", .{std.mem.eql(u8, extracted orelse "", boundary)});
 
-    // 3. Parse the multipart body
     std.debug.print("--- Parsing Multipart Body ---\n", .{});
 
     var parsed = try httpx.parseMultipart(allocator, body, boundary);
@@ -63,7 +52,6 @@ pub fn main() !void {
         std.debug.print("    name:         \"{s}\"\n", .{part.name});
         if (part.filename) |f| std.debug.print("    filename:     \"{s}\"\n", .{f});
         std.debug.print("    content-type: {s}\n", .{part.content_type});
-        // Only print data as text for text/* content types; print byte count for binary types
         const is_text = std.mem.startsWith(u8, part.content_type, "text/");
         if (is_text) {
             std.debug.print("    data:         \"{s}\"\n", .{part.data});
@@ -73,13 +61,11 @@ pub fn main() !void {
         std.debug.print("    headers:      {d}\n", .{part.headers.len});
     }
 
-    // 4. HTTP request integration
     std.debug.print("\n--- HTTP Request Integration ---\n", .{});
 
     var request = try httpx.Request.init(allocator, .POST, "http://httpbun.com/upload");
     defer request.deinit();
 
-    // Build a fresh body for the request
     var req_builder = httpx.MultipartBuilder.init(allocator, "reqBoundary123");
     defer req_builder.deinit();
     try req_builder.addField("title", "My Upload");
@@ -96,7 +82,6 @@ pub fn main() !void {
     std.debug.print("Request Content-Type: {s}\n", .{request.headers.get("Content-Type").?});
     std.debug.print("Request body size:    {d} bytes\n", .{request.body.?.len});
 
-    // 5. Quoted boundary edge case
     std.debug.print("\n--- Quoted Boundary Edge Case ---\n", .{});
 
     const quoted_ct = "multipart/form-data; boundary=\"my boundary with spaces\"";
@@ -104,7 +89,6 @@ pub fn main() !void {
     std.debug.print("Input:    \"{s}\"\n", .{quoted_ct});
     std.debug.print("Boundary: \"{s}\"\n", .{quoted_b orelse "(none)"});
 
-    // 6. Client-Side RequestOptions Multipart upload integration
     std.debug.print("\n--- Client RequestOptions Integration ---\n", .{});
 
     var client = httpx.Client.init(allocator);
@@ -122,7 +106,6 @@ pub fn main() !void {
         .withMultipartFiles(&files)
         .withMultipartBoundary("clientBoundary999");
 
-    // Demonstrate how the client parses/formats this request options internally
     var req = try httpx.Request.init(allocator, .POST, "http://localhost/upload");
     defer req.deinit();
 
@@ -152,13 +135,8 @@ pub fn main() !void {
     std.debug.print("Formatted Content-Type: {s}\n", .{req.headers.get("Content-Type").?});
     std.debug.print("Formatted Body contents:\n{s}", .{req.body.?});
 
-    // 7. Large file upload — Windows-safe chunked pattern
-    // On Windows, sending a single multipart body larger than ~64 KB can cause
-    // the upload to hang (issue #26). Use addFileChunked or split at the call
-    // site and send one request per MAX_RECOMMENDED_CHUNK-sized slice.
     std.debug.print("\n\n--- Large File Upload (Windows-safe chunked API) ---\n", .{});
 
-    // Simulate a 200 KB binary payload.
     const large_data = try allocator.alloc(u8, 200 * 1024);
     defer allocator.free(large_data);
     @memset(large_data, 0xAB);
@@ -168,8 +146,6 @@ pub fn main() !void {
 
     try chunk_builder.addField("part_index", "1");
 
-    // addFileChunked writes data in MAX_RECOMMENDED_CHUNK (64 KB) slices
-    // internally, keeping each appendSlice call within the Windows send buffer.
     try chunk_builder.addFileChunked(
         "payload",
         "large_file.bin",
@@ -186,9 +162,6 @@ pub fn main() !void {
         httpx.MultipartMaxChunk / 1024,
     });
 
-    // Alternative: manual loop splitting at the call site.
-    // Useful when you want to send each slice as an independent HTTP request
-    // (resumable / server-side chunked upload protocol).
     std.debug.print("\nManual chunk-loop (one request per slice):\n", .{});
     var file_offset: usize = 0;
     var chunk_idx: usize = 1;
@@ -209,7 +182,6 @@ pub fn main() !void {
 
         std.debug.print("  chunk {d}: offset={d} size={d}\n", .{ chunk_idx, file_offset, per_body.len });
 
-        // In real code: try client.post(url, opts.withMultipartFiles(...));
         file_offset = end;
         chunk_idx += 1;
     }

@@ -1,7 +1,3 @@
-//! Simple HTTP Server Example
-//!
-//! Demonstrates creating a basic HTTP server with routing.
-
 const std = @import("std");
 const httpx = @import("httpx");
 

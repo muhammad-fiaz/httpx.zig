@@ -1,14 +1,3 @@
-//! Metrics and Observability Example
-//!
-//! Demonstrates httpx.zig's built-in metrics collection:
-//! - Recording requests, responses, errors, and connection events
-//! - Per-status-class counters (2xx, 3xx, 4xx, 5xx)
-//! - Latency tracking (min/avg/max)
-//! - Byte counters
-//! - Snapshot and reset
-//! - Error rate and success rate helpers
-//! - Integration with a live local server
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -57,15 +46,12 @@ pub fn main() !void {
 
     std.debug.print("=== Metrics and Observability Example ===\n\n", .{});
 
-    // 1. Manual metric recording
     std.debug.print("--- Manual Recording ---\n", .{});
 
     var m = httpx.Metrics.init();
 
-    // Simulate 10 requests
     for (0..10) |_| m.recordRequest();
 
-    // 6 x 200 OK, 2 x 404, 2 x 500
     for (0..6) |i| m.recordResponse(200, 512 + i * 100, 1000 + i * 200);
     for (0..2) |_| m.recordResponse(404, 128, 300);
     for (0..2) |_| m.recordResponse(500, 64, 5000);
@@ -84,7 +70,6 @@ pub fn main() !void {
     std.debug.print("Error rate:   {d:.1}%\n", .{snap.errorRate() * 100.0});
     std.debug.print("Success rate: {d:.1}%\n\n", .{snap.successRate() * 100.0});
 
-    // 2. Reset
     std.debug.print("--- Reset ---\n", .{});
     m.reset();
     const after_reset = m.snapshot();
@@ -92,7 +77,6 @@ pub fn main() !void {
         after_reset.totalRequests(), after_reset.totalResponses(),
     });
 
-    // 3. Live server integration
     std.debug.print("--- Live Server + Metrics ---\n", .{});
 
     const port = try pickFreeTcpPort();
@@ -117,7 +101,6 @@ pub fn main() !void {
     const t = try server.listenInBackground();
     sleepMs(100);
 
-    // Record metrics alongside real requests
     var live = httpx.Metrics.init();
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())

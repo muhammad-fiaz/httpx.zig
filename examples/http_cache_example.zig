@@ -1,9 +1,3 @@
-//! HTTP Cache Example
-//!
-//! Demonstrates the HTTP caching layer: Cache-Control parsing,
-//! LRU caching with TTL expiration, conditional GET requests,
-//! and cache statistics.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -14,7 +8,6 @@ pub fn main() !void {
 
     std.debug.print("=== HTTP Cache Example ===\n\n", .{});
 
-    // 1. Cache-Control Header Parsing
     std.debug.print("--- Cache-Control Parsing ---\n", .{});
 
     const headers = [_][]const u8{
@@ -36,13 +29,11 @@ pub fn main() !void {
         });
     }
 
-    // 2. Create and use an HTTP cache
     std.debug.print("\n--- HTTP Cache Operations ---\n", .{});
 
     var cache = httpx.HttpCache.init(allocator, 100, 1024 * 1024);
     defer cache.deinit();
 
-    // Put some entries
     try cache.put(.{
         .key = "/api/users",
         .etag = "\"v1-abc123\"",
@@ -62,17 +53,14 @@ pub fn main() !void {
         .cache_control = .{ .private = true, .no_store = true },
     });
 
-    // Get entries
     if (cache.get("/api/users")) |entry| {
         std.debug.print("  Cache HIT for /api/users: {s}\n", .{entry.body});
         std.debug.print("  ETag: {s}\n", .{entry.etag orelse "none"});
     }
 
-    // no-store entries are never cached
     const session = cache.get("/api/session");
     std.debug.print("  Cache for /api/session: {s}\n", .{if (session == null) "MISS (no-store)" else "HIT"});
 
-    // 3. Conditional GET (If-None-Match / If-Modified-Since)
     std.debug.print("\n--- Conditional GET ---\n", .{});
 
     if (cache.get("/api/users")) |entry| {
@@ -82,7 +70,6 @@ pub fn main() !void {
         std.debug.print("  304 means cache is still valid: {}\n", .{httpx.ConditionalGet.isNotModified(304)});
     }
 
-    // 4. Cache eviction
     std.debug.print("\n--- LRU Eviction ---\n", .{});
 
     var small_cache = httpx.HttpCache.init(allocator, 3, 1024);
@@ -99,16 +86,13 @@ pub fn main() !void {
     std.debug.print("    /c: {s}\n", .{if (small_cache.get("/c") == null) "evicted" else "present"});
     std.debug.print("    /d: {s}\n", .{if (small_cache.get("/d") == null) "evicted" else "present"});
 
-    // 5. Cache invalidation
     std.debug.print("\n--- Cache Invalidation ---\n", .{});
 
     _ = cache.invalidate("/api/users");
     std.debug.print("  Invalidated /api/users: {s}\n", .{if (cache.get("/api/users") == null) "gone" else "still present"});
 
-    // 6. Cache statistics
     std.debug.print("\n--- Cache Statistics ---\n", .{});
 
-    // Generate some hits and misses
     _ = cache.get("/api/config");
     _ = cache.get("/api/config");
     _ = cache.get("/nonexistent");

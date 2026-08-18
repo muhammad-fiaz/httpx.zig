@@ -1,12 +1,3 @@
-//! HTTP Auth Helpers Example
-//!
-//! Demonstrates built-in request auth helpers:
-//! - RequestOptions.withBearerToken(...)
-//! - RequestOptions.withBasicAuth(...)
-//! - Request.setBearerAuth(...)
-//! - Request.setBasicAuth(...)
-//! and server-side Context helpers for reading auth/media info.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -109,7 +100,6 @@ pub fn main() !void {
     std.debug.print("Basic status: {d}\n", .{basic_response.status.code});
     std.debug.print("Basic body: {s}\n", .{basic_response.text() orelse ""});
 
-    // Manual request helper check.
     var req = try httpx.Request.init(allocator, .GET, bearer_url);
     defer req.deinit();
     try req.setBearerAuth("demo-token");

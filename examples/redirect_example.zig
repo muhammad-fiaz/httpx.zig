@@ -1,9 +1,3 @@
-//! Redirect Following Example
-//!
-//! Demonstrates redirect policy configuration: follow_redirects,
-//! max_redirects, preserve_method, preserve_headers, allow_cross_origin,
-//! and the getRedirectMethod logic.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -26,7 +20,6 @@ pub fn main() !void {
 
     std.debug.print("=== Redirect Following Example ===\n\n", .{});
 
-    // 1. Default redirect policy
     std.debug.print("--- Default RedirectPolicy ---\n", .{});
     const default = httpx.RedirectPolicy{};
     std.debug.print("  max_redirects:    {d}\n", .{default.max_redirects});
@@ -35,17 +28,14 @@ pub fn main() !void {
     std.debug.print("  preserve_headers: {}\n", .{default.preserve_headers});
     std.debug.print("  allow_cross_origin: {}\n", .{default.allow_cross_origin});
 
-    // 2. No-follow policy
     std.debug.print("\n--- No-Follow Policy ---\n", .{});
     const no_follow = httpx.RedirectPolicy.noFollow();
     std.debug.print("  follow_redirects: {}\n", .{no_follow.follow_redirects});
 
-    // 3. Strict policy (preserve method)
     std.debug.print("\n--- Strict Policy ---\n", .{});
     const strict = httpx.RedirectPolicy.strict();
     std.debug.print("  preserve_method: {}\n", .{strict.preserve_method});
 
-    // 4. Redirect method determination
     std.debug.print("\n--- Redirect Method Logic ---\n", .{});
     const scenarios = [_]struct { status: u16, method: httpx.Method, label: []const u8 }{
         .{ .status = 301, .method = .POST, .label = "301 Moved (POST)" },
@@ -67,7 +57,6 @@ pub fn main() !void {
         std.debug.print("    {s: <30} -> {s}\n", .{ s.label, @tagName(redirect_method) });
     }
 
-    // 5. Client with redirect policy
     std.debug.print("\n--- Client with Redirect ---\n", .{});
     const port = try pickFreeTcpPort();
     var server = httpx.Server.initWithConfig(allocator, .{
@@ -91,7 +80,6 @@ pub fn main() !void {
     defer resp.deinit();
     std.debug.print("  GET -> status: {d}\n", .{resp.status.code});
 
-    // 6. Request options with redirect
     std.debug.print("\n--- Request Options ---\n", .{});
     std.debug.print("  .withFollowRedirects(true/false)  - enable/disable following\n", .{});
     std.debug.print("  .withMaxRedirects(n)              - limit redirect count\n", .{});

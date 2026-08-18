@@ -1,7 +1,3 @@
-//! Middleware Example
-//!
-//! Demonstrates using middleware for cross-cutting concerns.
-
 const std = @import("std");
 const httpx = @import("httpx");
 

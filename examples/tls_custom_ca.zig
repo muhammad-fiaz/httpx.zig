@@ -18,11 +18,9 @@ pub fn main() !void {
 
     std.debug.print("=== Custom CA Certificate ===\n\n", .{});
 
-    // Load CA cert (self-signed, used as both server cert and CA)
     const ca_pem = @embedFile("certs/server_ec.crt");
     std.debug.print("Loaded CA cert: {d} bytes\n\n", .{ca_pem.len});
 
-    // 1. Start local TLS server with self-signed cert (HTTP/1.1 + HTTP/2 + HTTP/3)
     var server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
         .port = 0,
@@ -44,7 +42,6 @@ pub fn main() !void {
     const port = server.config.port;
     std.debug.print("TLS server on 127.0.0.1:{d}\n\n", .{port});
 
-    // 2. Connect with verify_ssl=false (trust the self-signed cert)
     {
         std.debug.print("--- Connect with self-signed cert ---\n", .{});
         const config = tls.TlsConfig.insecureWithH2(allocator);

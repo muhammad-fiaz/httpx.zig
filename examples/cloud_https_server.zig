@@ -1,43 +1,3 @@
-//! Cloud HTTPS Deployment & Multi-Protocol Server Example for httpx.zig
-//!
-//! Demonstrates a production-ready HTTP server supporting HTTP/1.1, HTTP/2, and
-//! HTTP/3, with TLS configuration, middleware stacking (CORS, logging, rate
-//! limiting, health checks), route registration, and self-verification.
-//!
-//! ## Protocol Support
-//!
-//! httpx.zig implements HTTP/2 (RFC 7540), HTTP/3 (RFC 9114), QUIC (RFC 9000),
-//! TLS/ALPN negotiation, HPACK (RFC 7541), and QPACK (RFC 9204) entirely from
-//! scratch — Zig's standard library does not provide any of these.
-//!
-//! The server can run in any combination of protocols:
-//!   - HTTP/1.1 only (default)
-//!   - HTTP/2 only (`.http2_enabled = true`)
-//!   - HTTP/3 only (`.http3_enabled = true`)
-//!   - HTTP/1.1 + HTTP/2 (both enabled; ALPN selects at TLS handshake)
-//!   - HTTP/3 over UDP (QUIC transport, independent of TCP listener)
-//!
-//! ## TLS / HTTPS Notes
-//!
-//! The server stores `tls_config` for documentation / client-side reference.
-//! Actual TLS termination is **not** performed by this library's TCP listener —
-//! in production, TLS is terminated by a reverse proxy (nginx, Caddy, cloud LB)
-//! which forwards plain HTTP to this server on an internal port. The example
-//! includes self-signed certificates (`examples/certs/server.{crt,key}`) for
-//! local dev/staging behind such a proxy.
-//!
-//! ## Cloud Deployment Tips
-//!
-//! 1. **Security Groups**: Allow inbound TCP 443 from 0.0.0.0/0 (public) and
-//!    internal traffic on the backend port.
-//! 2. **TLS Certs**: Use Certbot / Let's Encrypt or a cloud LB with ACM.
-//! 3. **Process Management**: Run under systemd (`Restart=always`) or a
-//!    container orchestrator (Kubernetes, Nomad, ECS).
-//! 4. **Health Checks**: Configure the LB to hit `/health` (liveness) and
-//!    `/ready` (readiness).
-//! 5. **Observability**: Wire `log_fn` to your structured logger.
-//! 6. **Graceful Shutdown**: Catch SIGTERM/SIGINT and call `server.stop()`.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -128,18 +88,6 @@ pub fn main() !void {
 
     std.debug.print("=== Cloud HTTPS Server Example (HTTP/1.1 + HTTP/2 + HTTP/3) ===\n\n", .{});
 
-    // Self-signed certificates are provided in `examples/certs/` for local
-    // development behind a TLS-terminating reverse proxy. In production,
-    // replace with Let's Encrypt / ACME-managed certificates.
-    //
-    // NOTE: httpx.zig server currently handles plain HTTP. TLS termination
-    // is expected at a reverse proxy (nginx, Caddy, cloud LB) which forwards
-    // traffic to this server on an internal port.
-
-    // The server enables all three protocol versions simultaneously. HTTP/1.1
-    // and HTTP/2 share the TCP listener; HTTP/3 runs over QUIC on a separate
-    // UDP socket. In production, ALPN negotiation at the TLS handshake
-    // selects between HTTP/2 and HTTP/1.1 automatically.
     const port = try pickFreeTcpPort();
 
     var server = httpx.Server.initWithConfig(allocator, .{
@@ -157,11 +105,6 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    // Middleware runs in registration order. Health-check / readiness-probe
-    // middleware intercepts their paths before reaching route handlers, so
-    // even if your DB is down the LB knows the process is alive.
-
-    // CORS (allow all origins for development; lock down in production).
     try server.use(httpx.cors(.{
         .allowed_origins = &.{"*"},
         .allowed_methods = &.{ .GET, .POST, .PUT, .DELETE, .PATCH, .OPTIONS },
@@ -169,30 +112,24 @@ pub fn main() !void {
         .max_age = 3600,
     }));
 
-    // Health-check middleware — returns 200 on /health.
     try server.use(httpx.healthCheck(.{
         .path = "/health",
         .body = "{\"status\":\"ok\",\"service\":\"cloud-api\"}",
         .status = 200,
     }));
 
-    // Readiness probe — returns 200 on /ready.
     try server.use(httpx.readinessProbe(.{
         .path = "/ready",
         .body = "{\"ready\":true}",
     }));
 
-    // Request logging middleware.
     try server.use(httpx.logger());
 
-    // Public endpoints
     try server.get("/", indexHandler);
     try server.get("/status", statusHandler);
 
-    // API routes
     try server.get("/api/users/:id", userHandler);
 
-    // 404 fallback for unmatched routes
     server.global(notFoundHandler);
 
     std.debug.print("Server Configuration:\n", .{});
@@ -227,24 +164,20 @@ pub fn main() !void {
         server_thread.join();
     }
 
-    // Give the server a moment to bind the socket and start accepting.
     sleepMs(100);
 
-    // HTTP/1.0 client
     var h10_client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())
         .withRetryPolicy(httpx.RetryPolicy.noRetry())
         .withKeepAlive(false));
     defer h10_client.deinit();
 
-    // HTTP/1.1 client
     var h1_client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())
         .withRetryPolicy(httpx.RetryPolicy.noRetry())
         .withKeepAlive(false));
     defer h1_client.deinit();
 
-    // HTTP/2 client
     var h2_client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())
         .withRetryPolicy(httpx.RetryPolicy.noRetry())
@@ -252,7 +185,6 @@ pub fn main() !void {
         .withProtocols(true, false));
     defer h2_client.deinit();
 
-    // HTTP/3 client
     var h3_client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())
         .withRetryPolicy(httpx.RetryPolicy.noRetry())
@@ -278,7 +210,6 @@ pub fn main() !void {
 
     var all_ok = true;
 
-    // Test with HTTP/1.0
     std.debug.print("  Protocol: HTTP/1.0\n", .{});
     var h10_base: httpx.RequestOptions = .{};
     const h10_opts = h10_base.withVersion(.HTTP_1_0);
@@ -313,7 +244,6 @@ pub fn main() !void {
         }
     }
 
-    // Test with HTTP/1.1
     std.debug.print("  Protocol: HTTP/1.1\n", .{});
     for (endpoints) |ep| {
         const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ port, ep.path });
@@ -349,7 +279,6 @@ pub fn main() !void {
         }
     }
 
-    // Test with HTTP/2
     std.debug.print("\n  Protocol: HTTP/2\n", .{});
     for (endpoints) |ep| {
         const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ port, ep.path });
@@ -385,7 +314,6 @@ pub fn main() !void {
         }
     }
 
-    // Test with HTTP/3 (may fail on platforms without QUIC/UDP support)
     std.debug.print("\n  Protocol: HTTP/3 (QUIC)\n", .{});
     var h3_supported = true;
     for (endpoints) |ep| {

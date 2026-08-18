@@ -1,8 +1,3 @@
-//! TCP Local Send/Recv Example
-//!
-//! Demonstrates `httpx.Socket` + `httpx.TcpListener` by exchanging one message
-//! over loopback without requiring external network access.
-
 const std = @import("std");
 const httpx = @import("httpx");
 

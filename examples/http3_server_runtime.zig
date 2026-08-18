@@ -1,8 +1,3 @@
-//! HTTP/3 High-Level Server Runtime Example for httpx.zig
-//!
-//! This example runs the high-level `Server` in HTTP/3 mode over UDP and serves
-//! a route that is consumed by the high-level HTTP/3 client runtime.
-
 const std = @import("std");
 const httpx = @import("httpx");
 

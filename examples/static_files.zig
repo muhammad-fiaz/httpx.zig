@@ -1,10 +1,3 @@
-//! Static File Server Example
-//!
-//! Demonstrates:
-//! - serving explicit single-file static routes
-//! - serving directory-based wildcard static routes
-//! - redirects using httpx.zig response helpers
-
 const std = @import("std");
 const httpx = @import("httpx");
 

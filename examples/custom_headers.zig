@@ -1,7 +1,3 @@
-//! Custom Headers Example
-//!
-//! Demonstrates working with HTTP headers.
-
 const std = @import("std");
 const httpx = @import("httpx");
 

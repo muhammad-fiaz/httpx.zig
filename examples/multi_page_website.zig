@@ -1,8 +1,3 @@
-//! Multi-page Website Server Example
-//!
-//! Runs an httpx.zig server that serves a small multi-page site from
-//! `examples/multi_page_site/site`.
-
 const std = @import("std");
 const httpx = @import("httpx");
 

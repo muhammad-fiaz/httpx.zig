@@ -1,12 +1,3 @@
-//! HTTPS Client Example
-//!
-//! Demonstrates making an HTTPS request using the built-in TLS 1.2/1.3
-//! implementation. The TLS handshake negotiates ALPN for HTTP/1.1 or HTTP/2
-//! automatically.
-//!
-//! Set HTTPX_EXAMPLE_ONLINE=1 to run a live request against httpbun.com.
-//! By default runs in offline mode to avoid external network dependencies in CI.
-
 const std = @import("std");
 const httpx = @import("httpx");
 const tls = httpx.tls;
@@ -35,11 +26,9 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // 1. Configure TLS — withH2 enables ALPN for both h2 and http/1.1
     const tls_config = tls.TlsConfig.insecureWithH2(allocator);
     std.debug.print("TLS config: ALPN = h2, http/1.1 (insecure mode for demo)\n", .{});
 
-    // 2. Connect to server
     const host = "httpbun.com";
     const port: u16 = 443;
     std.debug.print("Connecting to {s}:{d}...\n", .{ host, port });
@@ -63,7 +52,6 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
 
-    // 3. Perform TLS handshake
     std.debug.print("Performing TLS handshake...\n", .{});
     var session = tls.TlsSession.init(tls_config);
     defer session.deinit();
@@ -82,7 +70,6 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("  TLS version: {}\n", .{session.tls_version orelse .tls_1_2});
 
-    // 4. Send HTTP request over the encrypted channel
     const request =
         "GET / HTTP/1.1\r\n" ++
         "Host: httpbun.com\r\n" ++
@@ -96,7 +83,6 @@ pub fn main(init: std.process.Init) !void {
         return;
     };
 
-    // 5. Read the response
     std.debug.print("Reading response...\n", .{});
     var buf: [4096]u8 = undefined;
     var total_read: usize = 0;
@@ -109,13 +95,11 @@ pub fn main(init: std.process.Init) !void {
         total_read += n;
     }
 
-    // Print first part of the response
     const response_text = buf[0..@min(total_read, 512)];
     std.debug.print("\nResponse (first {d} bytes):\n", .{response_text.len});
     std.debug.print("--------\n", .{});
     std.debug.print("{s}\n", .{response_text});
 
-    // 6. Send close_notify alert
     session.deinit();
     std.debug.print("\nTLS session closed gracefully.\n", .{});
     std.debug.print("\n=== Example complete ===\n", .{});

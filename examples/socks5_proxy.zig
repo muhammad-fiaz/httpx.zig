@@ -1,10 +1,3 @@
-//! SOCKS5h Proxy Example
-//!
-//! Demonstrates routing HTTP client requests through a SOCKS5h proxy.
-//! SOCKS5h performs DNS resolution on the proxy side (remote DNS),
-//! which is useful for bypassing local DNS restrictions or
-//! hiding your real IP from the DNS server.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -34,7 +27,6 @@ pub fn main() !void {
 
     std.debug.print("=== SOCKS5h Proxy Example ===\n\n", .{});
 
-    // 1. Start a mock backend server
     const backend_port = try pickFreeTcpPort();
     var backend_server = httpx.Server.initWithConfig(allocator, .{
         .host = "127.0.0.1",
@@ -49,10 +41,7 @@ pub fn main() !void {
 
     std.debug.print("Backend server on port {d}\n", .{backend_port});
 
-    // 2. Configure client with SOCKS5h proxy
-    //    In production, replace 127.0.0.1:1080 with your SOCKS5 proxy address.
-    //    SOCKS5h = SOCKS5 with remote DNS resolution (h = hostname).
-    const proxy_port = 1080; // Default SOCKS5 port
+    const proxy_port = 1080;
     std.debug.print("\nSOCKS5h proxy config:\n", .{});
     std.debug.print("  Proxy: 127.0.0.1:{d}\n", .{proxy_port});
     std.debug.print("  DNS resolution: remote (via proxy)\n", .{});
@@ -72,14 +61,11 @@ pub fn main() !void {
     var client = httpx.Client.initWithConfig(allocator, client_config);
     defer client.deinit();
 
-    // 3. Make a request through the SOCKS5h proxy
     const target_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/data", .{backend_port});
     defer allocator.free(target_url);
 
     std.debug.print("Sending request to {s} via SOCKS5h proxy...\n", .{target_url});
 
-    // Note: This will fail if no SOCKS5 proxy is running on 127.0.0.1:1080.
-    // To test, start a SOCKS5 proxy (e.g., dante, microsocks) on port 1080.
     var response = client.get(target_url, .{}) catch |err| {
         std.debug.print("\nRequest failed (expected if no proxy running): {}\n", .{err});
         std.debug.print("\nTo test with a real proxy:\n", .{});
@@ -87,7 +73,6 @@ pub fn main() !void {
         std.debug.print("  2. Start it: microsocks -p 1080 -u proxyuser -P proxypass\n", .{});
         std.debug.print("  3. Run this example again\n\n", .{});
 
-        // Demo the configuration even without a running proxy
         std.debug.print("--- SOCKS5h Proxy Features ---\n", .{});
         std.debug.print("  - Remote DNS resolution (proxy resolves hostnames)\n", .{});
         std.debug.print("  - Username/password authentication (RFC 1929)\n", .{});

@@ -1,9 +1,3 @@
-//! Streaming Compression Example
-//!
-//! Demonstrates chunk-by-chunk streaming compression and decompression
-//! using httpx.zig. Unlike one-shot compression that buffers the entire
-//! body, streaming processes data incrementally for large responses.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -28,14 +22,12 @@ pub fn main() !void {
 
     std.debug.print("=== Streaming Compression Example ===\n\n", .{});
 
-    // 1. Streaming Compression (gzip)
     std.debug.print("--- Streaming Gzip Compression ---\n", .{});
 
     var compressor = httpx.StreamingCompressor.init(allocator, .gzip);
     defer compressor.deinit();
     try compressor.start();
 
-    // Write data in chunks (simulates streaming a large body).
     const chunks = [_][]const u8{
         "This is chunk 1 of the streaming compression example. ",
         "This is chunk 2 with more data to compress. ",
@@ -53,7 +45,6 @@ pub fn main() !void {
     std.debug.print("  Original size: ~{d} bytes (3 chunks)\n", .{"This is chunk 1 of the streaming compression example. This is chunk 2 with more data to compress. This is the final chunk completing the message!".len});
     std.debug.print("  Compressed:    {d} bytes\n", .{compressed.len});
 
-    // 2. Streaming Decompression (gzip)
     std.debug.print("\n--- Streaming Gzip Decompression ---\n", .{});
 
     const reader = SliceReader{ .data = compressed };
@@ -76,7 +67,6 @@ pub fn main() !void {
     std.debug.print("  Decompressed in {d} chunks\n", .{chunk_count});
     std.debug.print("  Result: \"{s}\"\n", .{result.items});
 
-    // 3. Streaming with deflate
     std.debug.print("\n--- Streaming Deflate ---\n", .{});
 
     var deflate_compressor = httpx.StreamingCompressor.init(allocator, .deflate);
@@ -105,7 +95,6 @@ pub fn main() !void {
 
     std.debug.print("  Deflate result: \"{s}\"\n", .{deflate_result.items});
 
-    // 4. Identity (passthrough)
     std.debug.print("\n--- Identity (No Compression) ---\n", .{});
 
     const identity_data = "Raw uncompressed data passed through";

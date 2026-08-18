@@ -1,9 +1,3 @@
-//! Simple GET Request + JSON Deserialization Example
-//!
-//! Default mode is offline-safe and parses an embedded JSON payload so
-//! it does not hang in restricted environments.
-//! Set HTTPX_EXAMPLE_ONLINE=1 to run a live request against httpbin.
-
 const std = @import("std");
 const httpx = @import("httpx");
 

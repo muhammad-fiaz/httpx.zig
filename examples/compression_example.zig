@@ -1,9 +1,3 @@
-//! Compression Example
-//!
-//! Demonstrates gzip/deflate/zstd/brotli decompression and Content-Encoding handling.
-//! Shows how the compression module decompresses response bodies based
-//! on the Content-Encoding header.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -30,13 +24,11 @@ pub fn main() !void {
 
     std.debug.print("=== Compression Example ===\n\n", .{});
 
-    // 1. Content-Encoding parsing using enum-based API
     std.debug.print("--- Content-Encoding Parsing ---\n", .{});
     for (httpx.ContentEncoding.ALL) |enc| {
         std.debug.print("  {s} (enum: .{s})\n", .{ enc.toString(), @tagName(enc) });
     }
 
-    // 2. Decompression (identity passthrough)
     std.debug.print("\n--- Identity Passthrough ---\n", .{});
     const original = "Hello, compressed world!";
     const decompressed = try httpx.decompress(
@@ -49,7 +41,6 @@ pub fn main() !void {
     std.debug.print("  Output:  \"{s}\"\n", .{decompressed});
     std.debug.print("  Match:   {}\n", .{std.mem.eql(u8, original, decompressed)});
 
-    // 3. Server with compression middleware
     std.debug.print("\n--- Server with Compression Middleware ---\n", .{});
     const port = try pickFreeTcpPort();
     var server = httpx.Server.initWithConfig(allocator, .{
@@ -64,7 +55,6 @@ pub fn main() !void {
     std.debug.print("  Compression middleware enabled\n", .{});
     std.debug.print("  Server on port {d}\n", .{port});
 
-    // 4. Client with Accept-Encoding header
     std.debug.print("\n--- Client Accept-Encoding ---\n", .{});
     std.debug.print("  Send Accept-Encoding: gzip, deflate, zstd\n", .{});
     std.debug.print("  Server responds with Content-Encoding header\n", .{});

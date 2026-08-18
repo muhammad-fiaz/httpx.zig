@@ -1,8 +1,3 @@
-//! Simple GET Request Example
-//!
-//! Demonstrates making a basic HTTP GET request using httpx.zig.
-//! Shows both request building and actual network execution.
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -13,7 +8,6 @@ pub fn main() !void {
 
     std.debug.print("=== Simple GET Request Example ===\n\n", .{});
 
-    // 1. Build a request manually
     std.debug.print("--- Request Building ---\n", .{});
     var request = try httpx.Request.init(allocator, .GET, "http://httpbun.com/get");
     defer request.deinit();
@@ -26,7 +20,6 @@ pub fn main() !void {
 
     std.debug.print("{s}\n", .{serialized});
 
-    // 2. Create a client and send the request
     std.debug.print("--- Sending Request ---\n", .{});
     var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
         .withTimeouts(httpx.Timeouts.fast())

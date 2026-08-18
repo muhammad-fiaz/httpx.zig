@@ -1,12 +1,3 @@
-//! Session Store Example
-//!
-//! Demonstrates httpx.zig's in-memory session management:
-//! - Creating sessions with random IDs
-//! - Setting and getting session data
-//! - Session expiry and eviction
-//! - Session deletion
-//! - Integration with an HTTP server for login/logout flow
-
 const std = @import("std");
 const httpx = @import("httpx");
 
@@ -28,7 +19,6 @@ pub fn main() !void {
 
     std.debug.print("=== Session Store Example ===\n\n", .{});
 
-    // 1. Basic create / set / get
     std.debug.print("--- Basic CRUD ---\n", .{});
 
     var store = httpx.SessionStore.init(allocator, .{
@@ -56,13 +46,11 @@ pub fn main() !void {
     std.debug.print("exists:   {}\n", .{store.exists(&sid)});
     std.debug.print("count:    {d}\n\n", .{store.count()});
 
-    // Overwrite a value
     try store.set(&sid, "role", "superadmin");
     const updated_role = store.get(&sid, "role").?;
     defer allocator.free(updated_role);
     std.debug.print("role (updated): {s}\n\n", .{updated_role});
 
-    // 2. Multiple sessions
     std.debug.print("--- Multiple Sessions ---\n", .{});
 
     const sid2 = try store.create();
@@ -72,13 +60,11 @@ pub fn main() !void {
 
     std.debug.print("Total sessions: {d}\n", .{store.count()});
 
-    // 3. Delete
     std.debug.print("\n--- Delete ---\n", .{});
     store.delete(&sid2);
     std.debug.print("After delete - count: {d}\n", .{store.count()});
     std.debug.print("sid2 exists: {}\n\n", .{store.exists(&sid2)});
 
-    // 4. Expiry
     std.debug.print("--- Expiry ---\n", .{});
 
     var short_store = httpx.SessionStore.init(allocator, .{ .ttl_ms = 50 });
@@ -88,7 +74,7 @@ pub fn main() !void {
     try short_store.set(&short_sid, "temp", "value");
     std.debug.print("Before expiry - exists: {}\n", .{short_store.exists(&short_sid)});
 
-    sleepMs(100); // wait for TTL to pass
+    sleepMs(100);
 
     std.debug.print("After expiry  - exists: {}\n", .{short_store.exists(&short_sid)});
     const expired_val = short_store.get(&short_sid, "temp");
@@ -105,12 +91,10 @@ pub fn main() !void {
     const evicted = short_store.evictExpired();
     std.debug.print("Evicted {d} expired sessions\n\n", .{evicted});
 
-    // 5. Server integration (login/profile/logout)
     std.debug.print("--- Server Integration ---\n", .{});
 
     const port = try pickFreeTcpPort();
 
-    // Shared session store accessible by handlers via global
     const Globals = struct {
         var session_store: *httpx.SessionStore = undefined;
         var alloc: std.mem.Allocator = undefined;
