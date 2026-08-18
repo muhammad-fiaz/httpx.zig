@@ -219,6 +219,6 @@ test "Address getOsSockLen" {
 
     var unknown: Address = undefined;
     unknown.any = std.mem.zeroes(posix.sockaddr);
-    unknown.any.family = 9999;
+    unknown.any.family = 255;
     try std.testing.expectEqual(@sizeOf(posix.sockaddr), unknown.getOsSockLen());
 }
