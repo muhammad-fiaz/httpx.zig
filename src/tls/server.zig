@@ -393,10 +393,17 @@ pub fn acceptServer(
 
     const parsed = parseClientHelloExtensions(ch_data);
 
-    if (parsed.supports_tls13) {
-        if (acceptServerTLS13(&conn, socket, ch_data, &parsed, server_alpn, server_tls, &buf)) |result| {
-            return result;
-        } else |_| {}
+    // Only attempt TLS 1.3 if the client supports it AND offers an X25519 key
+    // share we can use.  Modern clients may only offer hybrid PQ groups
+    // (e.g. X25519Kyber768) which we do not yet implement — in that case
+    // fall through to TLS 1.2 directly instead of partially attempting TLS 1.3
+    // (which corrupts the socket and prevents a clean TLS 1.2 fallback).
+    const has_x25519_keyshare = findX25519ClientKey(ch_data) != null;
+
+    if (parsed.supports_tls13 and has_x25519_keyshare) {
+        return acceptServerTLS13(&conn, socket, ch_data, &parsed, server_alpn, server_tls, &buf) catch |err| {
+            return err;
+        };
     }
 
     return try acceptServerTLS12(&conn, socket, ch_data, &parsed, server_alpn, server_tls, &buf);
@@ -439,7 +446,6 @@ fn acceptServerTLS13Comptime(
     negotiated_cs: tls.CipherSuite,
     comptime hash_len: usize,
 ) !Connection {
-    // BUG 2 fix: client_random is at offset 6 in the ClientHello body
     var client_random: [32]u8 = undefined;
     if (ch_data.len >= 38) {
         @memcpy(&client_random, ch_data[6..38]);
@@ -453,7 +459,6 @@ fn acceptServerTLS13Comptime(
     const kp = crypto.dh.X25519.KeyPair.generate(std.Io.Threaded.global_single_threaded.io());
     var server_public_key: [32]u8 = kp.public_key;
 
-    // BUG 3 fix: parse key_share extension to find X25519 client public key
     const client_public_key_ptr = findX25519ClientKey(ch_data) orelse {
         return error.TlsKeyExchangeFailed;
     };
@@ -1046,4 +1051,295 @@ test "selectCipherSuite12 prefers CHACHA20" {
     const result = selectCipherSuite12(&client_list);
     try std.testing.expect(result != null);
     try std.testing.expectEqual(tls.CipherSuite.ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, result.?);
+}
+
+test "findX25519ClientKey finds pure X25519 key share" {
+    var buf: [512]u8 = undefined;
+    var off: usize = 0;
+    buf[0] = 1; // ClientHello
+    off = 4;
+    // legacy_version
+    mem.writeInt(u16, buf[off..][0..2], @intFromEnum(tls.ProtocolVersion.tls_1_2), .big);
+    off += 2;
+    // random
+    @memset(buf[off..][0..32], 0x42);
+    off += 32;
+    // session_id_len = 0
+    buf[off] = 0;
+    off += 1;
+    // cipher_suites (empty)
+    mem.writeInt(u16, buf[off..][0..2], 0, .big);
+    off += 2;
+    // compression methods
+    buf[off] = 1;
+    off += 1;
+    buf[off] = 0;
+    off += 1;
+    // extensions
+    const ext_len_pos = off;
+    off += 2;
+    const ext_start = off;
+    // key_share extension type = 0x0033
+    mem.writeInt(u16, buf[off..][0..2], 0x0033, .big);
+    off += 2;
+    // key_share data length
+    mem.writeInt(u16, buf[off..][0..2], 2 + 2 + 32, .big); // group(2) + key_len(2) + key(32)
+    off += 2;
+    // X25519 group = 0x001d
+    mem.writeInt(u16, buf[off..][0..2], 0x001d, .big);
+    off += 2;
+    // key length = 32
+    mem.writeInt(u16, buf[off..][0..2], 32, .big);
+    off += 2;
+    // 32-byte X25519 public key
+    @memset(buf[off..][0..32], 0xAB);
+    off += 32;
+    // fill in extensions length
+    const ext_data_len: u16 = @intCast(off - ext_start);
+    mem.writeInt(u16, buf[ext_len_pos..][0..2], ext_data_len, .big);
+    // fill in handshake body length
+    const body_len = off - 4;
+    mem.writeInt(u24, buf[1..][0..3], @intCast(body_len), .big);
+
+    const result = findX25519ClientKey(buf[0..off]);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u8, 0xAB), result.?[0]);
+}
+
+test "findX25519ClientKey returns null when only X25519Kyber768 offered" {
+    var buf: [1536]u8 = undefined;
+    var off: usize = 0;
+    buf[0] = 1; // ClientHello
+    off = 4;
+    mem.writeInt(u16, buf[off..][0..2], @intFromEnum(tls.ProtocolVersion.tls_1_2), .big);
+    off += 2;
+    @memset(buf[off..][0..32], 0x42);
+    off += 32;
+    buf[off] = 0;
+    off += 1;
+    mem.writeInt(u16, buf[off..][0..2], 0, .big);
+    off += 2;
+    buf[off] = 1;
+    off += 1;
+    buf[off] = 0;
+    off += 1;
+    const ext_len_pos = off;
+    off += 2;
+    const ext_start = off;
+    // key_share extension type = 0x0033
+    mem.writeInt(u16, buf[off..][0..2], 0x0033, .big);
+    off += 2;
+    // key_share data length — X25519Kyber768 group 0x11ec with ~1120 byte key
+    const kyber_key_len: u16 = 1120;
+    mem.writeInt(u16, buf[off..][0..2], 2 + 2 + kyber_key_len, .big);
+    off += 2;
+    // X25519Kyber768 group = 0x11ec
+    mem.writeInt(u16, buf[off..][0..2], 0x11ec, .big);
+    off += 2;
+    // key length = 1120
+    mem.writeInt(u16, buf[off..][0..2], kyber_key_len, .big);
+    off += 2;
+    @memset(buf[off..][0..kyber_key_len], 0xCD);
+    off += kyber_key_len;
+    const ext_data_len: u16 = @intCast(off - ext_start);
+    mem.writeInt(u16, buf[ext_len_pos..][0..2], ext_data_len, .big);
+    const body_len = off - 4;
+    mem.writeInt(u24, buf[1..][0..3], @intCast(body_len), .big);
+
+    const result = findX25519ClientKey(buf[0..off]);
+    try std.testing.expect(result == null);
+}
+
+test "findX25519ClientKey returns null when no key_share extension present" {
+    var buf: [256]u8 = undefined;
+    var off: usize = 0;
+    buf[0] = 1;
+    off = 4;
+    mem.writeInt(u16, buf[off..][0..2], @intFromEnum(tls.ProtocolVersion.tls_1_2), .big);
+    off += 2;
+    @memset(buf[off..][0..32], 0x42);
+    off += 32;
+    buf[off] = 0;
+    off += 1;
+    mem.writeInt(u16, buf[off..][0..2], 0, .big);
+    off += 2;
+    buf[off] = 1;
+    off += 1;
+    buf[off] = 0;
+    off += 1;
+    // Empty extensions
+    mem.writeInt(u16, buf[off..][0..2], 0, .big);
+    off += 2;
+    const body_len = off - 4;
+    mem.writeInt(u24, buf[1..][0..3], @intCast(body_len), .big);
+
+    const result = findX25519ClientKey(buf[0..off]);
+    try std.testing.expect(result == null);
+}
+
+test "findX25519ClientKey finds X25519 among multiple key share entries" {
+    var buf: [1536]u8 = undefined;
+    var off: usize = 0;
+    buf[0] = 1;
+    off = 4;
+    mem.writeInt(u16, buf[off..][0..2], @intFromEnum(tls.ProtocolVersion.tls_1_2), .big);
+    off += 2;
+    @memset(buf[off..][0..32], 0x42);
+    off += 32;
+    buf[off] = 0;
+    off += 1;
+    mem.writeInt(u16, buf[off..][0..2], 0, .big);
+    off += 2;
+    buf[off] = 1;
+    off += 1;
+    buf[off] = 0;
+    off += 1;
+    const ext_len_pos = off;
+    off += 2;
+    const ext_start = off;
+    // key_share extension
+    mem.writeInt(u16, buf[off..][0..2], 0x0033, .big);
+    off += 2;
+    const ks_data_start = off;
+    off += 2; // placeholder for key_share data length
+
+    // First entry: X25519Kyber768 (0x11ec)
+    const kyber_key_len: u16 = 1120;
+    mem.writeInt(u16, buf[off..][0..2], 0x11ec, .big);
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], kyber_key_len, .big);
+    off += 2;
+    @memset(buf[off..][0..kyber_key_len], 0xCD);
+    off += kyber_key_len;
+
+    // Second entry: X25519 (0x001d)
+    mem.writeInt(u16, buf[off..][0..2], 0x001d, .big);
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], 32, .big);
+    off += 2;
+    @memset(buf[off..][0..32], 0xEF);
+    off += 32;
+
+    // Fill in key_share data length
+    const ks_data_len: u16 = @intCast(off - ks_data_start - 2);
+    mem.writeInt(u16, buf[ks_data_start..][0..2], ks_data_len, .big);
+
+    const ext_data_len: u16 = @intCast(off - ext_start);
+    mem.writeInt(u16, buf[ext_len_pos..][0..2], ext_data_len, .big);
+    const body_len = off - 4;
+    mem.writeInt(u24, buf[1..][0..3], @intCast(body_len), .big);
+
+    const result = findX25519ClientKey(buf[0..off]);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(@as(u8, 0xEF), result.?[0]);
+}
+
+test "parseClientHelloExtensions with TLS 1.3 and key_share" {
+    var buf: [512]u8 = undefined;
+    var off: usize = 0;
+    buf[0] = 1;
+    off = 4;
+    mem.writeInt(u16, buf[off..][0..2], @intFromEnum(tls.ProtocolVersion.tls_1_2), .big);
+    off += 2;
+    @memset(buf[off..][0..32], 0x42);
+    off += 32;
+    buf[off] = 0;
+    off += 1;
+    // cipher suites: CHACHA20 + AES_128_GCM
+    mem.writeInt(u16, buf[off..][0..2], 4, .big);
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], @intFromEnum(tls.CipherSuite.CHACHA20_POLY1305_SHA256), .big);
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], @intFromEnum(tls.CipherSuite.AES_128_GCM_SHA256), .big);
+    off += 2;
+    buf[off] = 1;
+    off += 1;
+    buf[off] = 0;
+    off += 1;
+    const ext_len_pos = off;
+    off += 2;
+    const ext_start = off;
+    // supported_versions extension (0x002B)
+    mem.writeInt(u16, buf[off..][0..2], 0x002B, .big);
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], 3, .big);
+    off += 2;
+    buf[off] = 2;
+    off += 1;
+    mem.writeInt(u16, buf[off..][0..2], @intFromEnum(tls.ProtocolVersion.tls_1_3), .big);
+    off += 2;
+    // key_share extension (0x0033)
+    mem.writeInt(u16, buf[off..][0..2], 0x0033, .big);
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], 2 + 2 + 32, .big);
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], 0x001d, .big); // X25519
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], 32, .big);
+    off += 2;
+    @memset(buf[off..][0..32], 0xAB);
+    off += 32;
+    const ext_data_len: u16 = @intCast(off - ext_start);
+    mem.writeInt(u16, buf[ext_len_pos..][0..2], ext_data_len, .big);
+    const body_len = off - 4;
+    mem.writeInt(u24, buf[1..][0..3], @intCast(body_len), .big);
+
+    const parsed = parseClientHelloExtensions(buf[0..off]);
+    try std.testing.expect(parsed.supports_tls13);
+    try std.testing.expect(parsed.cipher_suites.len >= 2);
+    // findX25519ClientKey should also find the key
+    const key = findX25519ClientKey(buf[0..off]);
+    try std.testing.expect(key != null);
+}
+
+test "parseClientHelloExtensions with TLS 1.3 but no X25519 keyshare" {
+    var buf: [1536]u8 = undefined;
+    var off: usize = 0;
+    buf[0] = 1;
+    off = 4;
+    mem.writeInt(u16, buf[off..][0..2], @intFromEnum(tls.ProtocolVersion.tls_1_2), .big);
+    off += 2;
+    @memset(buf[off..][0..32], 0x42);
+    off += 32;
+    buf[off] = 0;
+    off += 1;
+    mem.writeInt(u16, buf[off..][0..2], 0, .big);
+    off += 2;
+    buf[off] = 1;
+    off += 1;
+    buf[off] = 0;
+    off += 1;
+    const ext_len_pos = off;
+    off += 2;
+    const ext_start = off;
+    // supported_versions: TLS 1.3
+    mem.writeInt(u16, buf[off..][0..2], 0x002B, .big);
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], 3, .big);
+    off += 2;
+    buf[off] = 2;
+    off += 1;
+    mem.writeInt(u16, buf[off..][0..2], @intFromEnum(tls.ProtocolVersion.tls_1_3), .big);
+    off += 2;
+    // key_share: only X25519Kyber768
+    mem.writeInt(u16, buf[off..][0..2], 0x0033, .big);
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], 2 + 2 + 1120, .big);
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], 0x11ec, .big); // X25519Kyber768
+    off += 2;
+    mem.writeInt(u16, buf[off..][0..2], 1120, .big);
+    off += 2;
+    @memset(buf[off..][0..1120], 0xCD);
+    off += 1120;
+    const ext_data_len: u16 = @intCast(off - ext_start);
+    mem.writeInt(u16, buf[ext_len_pos..][0..2], ext_data_len, .big);
+    const body_len = off - 4;
+    mem.writeInt(u24, buf[1..][0..3], @intCast(body_len), .big);
+
+    const parsed = parseClientHelloExtensions(buf[0..off]);
+    try std.testing.expect(parsed.supports_tls13);
+    // But findX25519ClientKey should NOT find X25519
+    const key = findX25519ClientKey(buf[0..off]);
+    try std.testing.expect(key == null);
 }
