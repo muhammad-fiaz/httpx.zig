@@ -82,6 +82,13 @@ pub fn decryptTLS13(
     return ciphertext[0..ct_len];
 }
 
+/// RFC 5246 §6.2.3.3 AEAD record protection.
+///
+/// nonce = write_salt (first 4 bytes of `iv`) || explicit_nonce (8 bytes = sequence number)
+/// additional_data = seq_num(8) || type || version || **plaintext length**
+/// (the AAD carries TLSCompressed.length, NOT the ciphertext record length!)
+///
+/// Wire layout: explicit_nonce(8) || ciphertext || tag(16)
 pub fn encryptTLS12(
     comptime Aead: type,
     out: []u8,
@@ -91,22 +98,23 @@ pub fn encryptTLS12(
     iv: *const [12]u8,
     key: *const [Aead.key_length]u8,
 ) ![]u8 {
-    var explicit_iv: [12]u8 = undefined;
-    std.Io.Threaded.global_single_threaded.io().random(&explicit_iv);
-    var nonce: [12]u8 = iv.*;
-    var seq_bytes: [8]u8 = undefined;
-    mem.writeInt(u64, &seq_bytes, seq, .big);
-    for (0..8) |i| {
-        nonce[4 + i] = nonce[4 + i] ^ seq_bytes[i];
-    }
-    for (0..12) |i| {
-        nonce[i] = nonce[i] ^ explicit_iv[i];
-    }
-    @memcpy(out[0..12], &explicit_iv);
+    var explicit_iv: [8]u8 = undefined;
+    mem.writeInt(u64, &explicit_iv, seq, .big);
+    var nonce: [12]u8 = undefined;
+    @memcpy(nonce[0..4], iv[0..4]);
+    @memcpy(nonce[4..12], &explicit_iv);
+    var aad: [record_header_len + 8]u8 = undefined;
+    mem.writeInt(u64, aad[0..8], seq, .big);
+    // Synthesize the AAD header with the PLAINTEXT length.
+    aad[8] = hdr[0];
+    aad[9] = hdr[1];
+    aad[10] = hdr[2];
+    mem.writeInt(u16, aad[11..13], @intCast(plaintext.len), .big);
+    @memcpy(out[0..8], &explicit_iv);
     var tag: [Aead.tag_length]u8 = undefined;
-    Aead.encrypt(out[12..][0..plaintext.len], &tag, plaintext, hdr, nonce, key.*);
-    @memcpy(out[12 + plaintext.len ..][0..Aead.tag_length], &tag);
-    return out[0 .. 12 + plaintext.len + Aead.tag_length];
+    Aead.encrypt(out[8..][0..plaintext.len], &tag, plaintext, &aad, nonce, key.*);
+    @memcpy(out[8 + plaintext.len ..][0..Aead.tag_length], &tag);
+    return out[0 .. 8 + plaintext.len + Aead.tag_length];
 }
 
 pub fn decryptTLS12(
@@ -117,32 +125,37 @@ pub fn decryptTLS12(
     iv: *const [12]u8,
     key: *const [Aead.key_length]u8,
 ) ![]u8 {
-    if (ciphertext.len < 12 + Aead.tag_length) return error.TlsDecryptError;
-    const explicit_iv: [12]u8 = ciphertext[0..12].*;
-    var nonce: [12]u8 = iv.*;
-    var seq_bytes: [8]u8 = undefined;
-    mem.writeInt(u64, &seq_bytes, seq, .big);
-    for (0..8) |i| {
-        nonce[4 + i] = nonce[4 + i] ^ seq_bytes[i];
-    }
-    for (0..12) |i| {
-        nonce[i] = nonce[i] ^ explicit_iv[i];
-    }
+    if (ciphertext.len < 8 + Aead.tag_length) return error.TlsDecryptError;
+    const explicit_iv: [8]u8 = ciphertext[0..8].*;
+    var nonce: [12]u8 = undefined;
+    @memcpy(nonce[0..4], iv[0..4]);
+    @memcpy(nonce[4..12], &explicit_iv);
+    const plain_len = ciphertext.len - 8 - Aead.tag_length;
+    var aad: [record_header_len + 8]u8 = undefined;
+    mem.writeInt(u64, aad[0..8], seq, .big);
+    aad[8] = hdr[0];
+    aad[9] = hdr[1];
+    aad[10] = hdr[2];
+    mem.writeInt(u16, aad[11..13], @intCast(plain_len), .big);
     const tag: [Aead.tag_length]u8 = ciphertext[ciphertext.len - Aead.tag_length ..][0..Aead.tag_length].*;
-    const ct_len = ciphertext.len - 12 - Aead.tag_length;
-    Aead.decrypt(ciphertext[12..][0..ct_len], ciphertext[12..][0..ct_len], tag, hdr, nonce, key.*) catch return error.TlsDecryptError;
-    return ciphertext[12..][0..ct_len];
+    const ct_len = ciphertext.len - 8 - Aead.tag_length;
+    Aead.decrypt(ciphertext[8..][0..ct_len], ciphertext[8..][0..ct_len], tag, &aad, nonce, key.*) catch return error.TlsDecryptError;
+    return ciphertext[8..][0..ct_len];
 }
 
-pub fn hmacSha256Expand(secret: *const [32]u8, label: []const u8, seed: []const u8, out: []u8) void {
+pub fn hmacSha256Expand(secret: []const u8, label: []const u8, seed: []const u8, out: []u8) void {
     const Hmac = crypto.auth.hmac.sha2.HmacSha256;
     const ls_len = label.len + seed.len;
     var ls: [128]u8 = undefined;
     @memcpy(ls[0..label.len], label);
     @memcpy(ls[label.len..][0..seed.len], seed);
+    // RFC 5246 §5:
+    //   A(0) = label || seed
+    //   A(i) = HMAC(secret, A(i-1))        <- NO seed in the A-chain
+    //   output = HMAC(secret, A(1)||label||seed) || HMAC(secret, A(2)||label||seed) || ...
     var a: [32]u8 = undefined;
     var result: [32]u8 = undefined;
-    Hmac.create(&a, ls[0..ls_len], secret);
+    Hmac.create(&a, ls[0..ls_len], secret); // A(1)
     var offset: usize = 0;
     while (offset + 32 <= out.len) : (offset += 32) {
         var a_ls: [32 + 128]u8 = undefined;
@@ -150,7 +163,7 @@ pub fn hmacSha256Expand(secret: *const [32]u8, label: []const u8, seed: []const 
         @memcpy(a_ls[32..][0..ls_len], ls[0..ls_len]);
         Hmac.create(&result, a_ls[0 .. 32 + ls_len], secret);
         @memcpy(out[offset..][0..32], &result);
-        Hmac.create(&a, a_ls[0 .. 32 + ls_len], secret);
+        Hmac.create(&a, &a, secret); // A(i+1) = HMAC(A(i))
     }
     if (offset < out.len) {
         var a_ls: [32 + 128]u8 = undefined;
@@ -161,7 +174,7 @@ pub fn hmacSha256Expand(secret: *const [32]u8, label: []const u8, seed: []const 
     }
 }
 
-pub fn hmacSha384Expand(secret: *const [48]u8, label: []const u8, seed: []const u8, out: []u8) void {
+pub fn hmacSha384Expand(secret: []const u8, label: []const u8, seed: []const u8, out: []u8) void {
     const Hmac = crypto.auth.hmac.sha2.HmacSha384;
     const ls_len = label.len + seed.len;
     var ls: [128]u8 = undefined;
@@ -169,7 +182,7 @@ pub fn hmacSha384Expand(secret: *const [48]u8, label: []const u8, seed: []const 
     @memcpy(ls[label.len..][0..seed.len], seed);
     var a: [48]u8 = undefined;
     var result: [48]u8 = undefined;
-    Hmac.create(&a, ls[0..ls_len], secret);
+    Hmac.create(&a, ls[0..ls_len], secret); // A(1)
     var offset: usize = 0;
     while (offset + 48 <= out.len) : (offset += 48) {
         var a_ls: [48 + 128]u8 = undefined;
@@ -177,7 +190,7 @@ pub fn hmacSha384Expand(secret: *const [48]u8, label: []const u8, seed: []const 
         @memcpy(a_ls[48..][0..ls_len], ls[0..ls_len]);
         Hmac.create(&result, a_ls[0 .. 48 + ls_len], secret);
         @memcpy(out[offset..][0..48], &result);
-        Hmac.create(&a, a_ls[0 .. 48 + ls_len], secret);
+        Hmac.create(&a, &a, secret); // A(i+1) = HMAC(A(i))
     }
     if (offset < out.len) {
         var a_ls: [48 + 128]u8 = undefined;
@@ -188,76 +201,32 @@ pub fn hmacSha384Expand(secret: *const [48]u8, label: []const u8, seed: []const 
     }
 }
 
+/// TLS 1.2 master secret is ALWAYS 48 bytes regardless of cipher hash
+/// (RFC 5246 §6.1): P_hash with the suite's hash, here SHA-256.
 pub fn deriveMasterSecret256(
     pre_master_secret: *const [32]u8,
     client_random: *const [32]u8,
     server_random: *const [32]u8,
-) [32]u8 {
-    const seed_len = 32 + 32;
-    var seed: [64]u8 = undefined;
-    @memcpy(seed[0..32], client_random);
-    @memcpy(seed[32..64], server_random);
-    const Hmac = crypto.auth.hmac.sha2.HmacSha256;
-
-    var ms_label: [13 + 64]u8 = undefined;
-    @memcpy(ms_label[0..13], "master secret");
-    @memcpy(ms_label[13..][0..seed_len], &seed);
-
-    var a1: [32]u8 = undefined;
-    Hmac.create(&a1, ms_label[0 .. 13 + seed_len], pre_master_secret);
-
-    var a1_ms_seed: [32 + 13 + 64]u8 = undefined;
-    @memcpy(a1_ms_seed[0..32], &a1);
-    @memcpy(a1_ms_seed[32..][0..13], "master secret");
-    @memcpy(a1_ms_seed[45..][0..seed_len], &seed);
-    var a2: [32]u8 = undefined;
-    Hmac.create(&a2, a1_ms_seed[0 .. 32 + 13 + seed_len], pre_master_secret);
-
-    var a2_ms_seed: [32 + 13 + 64]u8 = undefined;
-    @memcpy(a2_ms_seed[0..32], &a2);
-    @memcpy(a2_ms_seed[32..][0..13], "master secret");
-    @memcpy(a2_ms_seed[45..][0..seed_len], &seed);
-    var master_secret: [32]u8 = undefined;
-    Hmac.create(&master_secret, a2_ms_seed[0 .. 32 + 13 + seed_len], pre_master_secret);
+) [48]u8 {
+    const seed = client_random.* ++ server_random.*;
+    var master_secret: [48]u8 = undefined;
+    hmacSha256Expand(pre_master_secret, "master secret", &seed, &master_secret);
     return master_secret;
 }
 
 pub fn deriveMasterSecret384(
-    pre_master_secret: *const [48]u8,
+    pre_master_secret: *const [32]u8,
     client_random: *const [32]u8,
     server_random: *const [32]u8,
 ) [48]u8 {
-    const seed_len = 32 + 32;
-    var seed: [64]u8 = undefined;
-    @memcpy(seed[0..32], client_random);
-    @memcpy(seed[32..64], server_random);
-    const Hmac = crypto.auth.hmac.sha2.HmacSha384;
-
-    var ms_label: [13 + 64]u8 = undefined;
-    @memcpy(ms_label[0..13], "master secret");
-    @memcpy(ms_label[13..][0..seed_len], &seed);
-
-    var a1: [48]u8 = undefined;
-    Hmac.create(&a1, ms_label[0 .. 13 + seed_len], pre_master_secret);
-
-    var a1_ms_seed: [48 + 13 + 64]u8 = undefined;
-    @memcpy(a1_ms_seed[0..48], &a1);
-    @memcpy(a1_ms_seed[48..][0..13], "master secret");
-    @memcpy(a1_ms_seed[61..][0..seed_len], &seed);
-    var a2: [48]u8 = undefined;
-    Hmac.create(&a2, a1_ms_seed[0 .. 48 + 13 + seed_len], pre_master_secret);
-
-    var a2_ms_seed: [48 + 13 + 64]u8 = undefined;
-    @memcpy(a2_ms_seed[0..48], &a2);
-    @memcpy(a2_ms_seed[48..][0..13], "master secret");
-    @memcpy(a2_ms_seed[61..][0..seed_len], &seed);
+    const seed = client_random.* ++ server_random.*;
     var master_secret: [48]u8 = undefined;
-    Hmac.create(&master_secret, a2_ms_seed[0 .. 48 + 13 + seed_len], pre_master_secret);
+    hmacSha384Expand(pre_master_secret, "master secret", &seed, &master_secret);
     return master_secret;
 }
 
 pub fn deriveKeyBlock256(
-    master_secret: *const [32]u8,
+    master_secret: *const [48]u8,
     server_random: *const [32]u8,
     client_random: *const [32]u8,
     comptime length: usize,
@@ -318,62 +287,39 @@ pub fn hkdfExpandLabel(
     i += context.len;
     const info = buf[0..i];
 
-    // HKDF-Expand: T(1) = HMAC(PRK, info || 0x01), T(2) = HMAC(PRK, T(1) || info || 0x02), ...
-    if (out_len <= 32) {
-        const Hmac = crypto.auth.hmac.sha2.HmacSha256;
-        const mac_len = Hmac.mac_length;
-        var result: [out_len]u8 = undefined;
-        // T(1) = HMAC(PRK, info || 0x01)
-        var a: [mac_len]u8 = undefined;
-        var st = Hmac.init(prk);
-        st.update(info);
-        st.update(&[_]u8{0x01});
-        st.final(&a);
-        if (out_len <= mac_len) {
-            @memcpy(&result, a[0..out_len]);
-            return result;
-        }
-        // T(2) = HMAC(PRK, T(1) || info || 0x02) -- needed when out_len > mac_len
-        var t: [mac_len]u8 = undefined;
-        st = Hmac.init(prk);
-        st.update(&a);
-        st.update(info);
-        st.update(&[_]u8{0x02});
-        st.final(&t);
-        @memcpy(&result, a[0..mac_len]);
-        if (out_len > mac_len) {
-            const remaining = out_len - mac_len;
-            @memcpy(result[mac_len..][0..remaining], t[0..remaining]);
-        }
-        return result;
+    // HKDF-Expand with the hash matching the PRK length (RFC 8446 §7.1:
+    // secrets are 32 bytes for SHA-256 suites, 48 for SHA-384 suites).
+    if (prk.len == 32) {
+        return hkdfExpandT(crypto.auth.hmac.sha2.HmacSha256, prk, info, out_len);
     } else {
-        const Hmac = crypto.auth.hmac.sha2.HmacSha384;
-        const mac_len = Hmac.mac_length;
-        var result: [out_len]u8 = undefined;
-        // T(1) = HMAC(PRK, info || 0x01)
-        var a: [mac_len]u8 = undefined;
-        var st = Hmac.init(prk);
-        st.update(info);
-        st.update(&[_]u8{0x01});
-        st.final(&a);
-        if (out_len <= mac_len) {
-            @memcpy(&result, a[0..out_len]);
-            return result;
-        }
-        // T(2) = HMAC(PRK, T(1) || info || 0x02)
-        var t: [mac_len]u8 = undefined;
+        return hkdfExpandT(crypto.auth.hmac.sha2.HmacSha384, prk, info, out_len);
+    }
+}
+
+fn hkdfExpandT(comptime Hmac: type, prk: []const u8, info: []const u8, comptime out_len: usize) [out_len]u8 {
+    const mac_len = Hmac.mac_length;
+    var result: [out_len]u8 = undefined;
+    // T(1) = HMAC(PRK, info || 0x01)
+    var a: [mac_len]u8 = undefined;
+    var st = Hmac.init(prk);
+    st.update(info);
+    st.update(&[_]u8{0x01});
+    st.final(&a);
+    var offset: usize = @min(out_len, mac_len);
+    @memcpy(result[0..offset], a[0..offset]);
+    // T(i) = HMAC(PRK, T(i-1) || info || i)
+    var counter: u8 = 2;
+    while (offset < out_len) : (counter += 1) {
         st = Hmac.init(prk);
         st.update(&a);
         st.update(info);
-        st.update(&[_]u8{0x02});
-        st.final(&t);
-        @memcpy(&result, a[0..mac_len]);
-        if (out_len > mac_len) {
-            const remaining = out_len - mac_len;
-            @memcpy(result[mac_len..][0..remaining], t[0..remaining]);
-        }
-        return result;
+        st.update(&[_]u8{counter});
+        st.final(&a);
+        const take = @min(mac_len, out_len - offset);
+        @memcpy(result[offset..][0..take], a[0..take]);
+        offset += take;
     }
+    return result;
 }
 
 pub fn deriveHandshakeSecret13(
@@ -412,14 +358,27 @@ pub fn deriveHandshakeSecret13(
     return hkdfExtract(shared_secret, &handshake_derived_secret, hash_len);
 }
 
+/// Derives record protection keys and IVs from a traffic secret.
+/// The requested length feeds the HKDF label info, so key16 is NOT a prefix
+/// of key32. Callers pick per cipher: 16 for AES-128-GCM, 32 for AES-256-
+/// GCM and ChaCha20-Poly1305. IV is always 12 bytes.
 pub fn deriveTrafficKeys13(
     secret: []const u8,
-) struct { key: [32]u8, iv: [12]u8 } {
-    var secret_arr: [32]u8 = undefined;
-    @memcpy(&secret_arr, secret[0..32]);
-    const key_label = hkdfExpandLabel(&secret_arr, "key", "", 32);
-    const iv_label = hkdfExpandLabel(&secret_arr, "iv", "", 12);
-    return .{ .key = key_label, .iv = iv_label };
+) struct { key16: [16]u8, key32: [32]u8, iv: [12]u8 } {
+    return .{
+        .key16 = hkdfExpandLabel(secret, "key", "", 16),
+        .key32 = hkdfExpandLabel(secret, "key", "", 32),
+        .iv = hkdfExpandLabel(secret, "iv", "", 12),
+    };
+}
+
+/// Selects the record-protection key bytes for `cs` from a deriveTrafficKeys13
+/// result. `keys` must be passed by pointer so the returned slice stays valid.
+pub fn trafficKeyFor(cs: tls.CipherSuite, keys: anytype) []const u8 {
+    return switch (cs) {
+        .AES_128_GCM_SHA256 => &keys.*.key16,
+        else => &keys.*.key32,
+    };
 }
 
 pub fn readTLSRecord(socket: *Socket, buf: *[4096]u8) ![]const u8 {
@@ -472,15 +431,117 @@ pub fn sendTLSHandshakeRecord(socket: *Socket, msg: []const u8) !void {
 }
 
 pub fn sendTLSChangeCipherSpec(socket: *Socket) !void {
+    // RFC 5246 §6.2.1: every TLS 1.2 record — including CCS — carries
+    // legacy_version 0x0303.
     const ccs = [_]u8{
         @intFromEnum(ContentType.change_cipher_spec),
         0x03,
-        0x01,
+        0x03,
         0x00,
         0x01,
         0x01,
     };
     socket.sendAll(&ccs) catch return error.WriteFailed;
+}
+
+/// Send a TLS 1.2 handshake message protected with the negotiated AEAD
+/// (RFC 5246): outer record keeps content_type=handshake and version 0x0303.
+pub fn sendTLS12EncryptedHandshake(
+    socket: *Socket,
+    msg: []const u8,
+    key: []const u8,
+    iv: *const [12]u8,
+    seq: *u64,
+    cs: tls.CipherSuite,
+) !void {
+    var hdr_buf: [record_header_len]u8 = undefined;
+    const hdr_val = RecordHeader{
+        .content_type = .handshake,
+        .version = .tls_1_2,
+        .length = @intCast(8 + msg.len + 16),
+    };
+    hdr_val.format(&hdr_buf);
+
+    var out_buf: [record_header_len + max_plaintext_len + 256]u8 = undefined;
+    @memcpy(out_buf[0..record_header_len], &hdr_buf);
+
+    const enc_len = switch (cs) {
+        .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
+            var k: [16]u8 = undefined;
+            @memcpy(&k, key[0..16]);
+            const enc = try encryptTLS12(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], msg, &hdr_buf, seq.*, iv, &k);
+            break :blk enc.len;
+        },
+        .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
+            var k: [32]u8 = undefined;
+            @memcpy(&k, key[0..32]);
+            const enc = try encryptTLS12(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], msg, &hdr_buf, seq.*, iv, &k);
+            break :blk enc.len;
+        },
+        else => return error.TlsUnsupportedCipherSuite,
+    };
+
+    socket.sendAll(out_buf[0 .. record_header_len + enc_len]) catch return error.WriteFailed;
+    seq.* += 1;
+}
+
+/// Read one AEAD-protected TLS 1.2 record (handshake or application_data)
+/// and return the decrypted plaintext.
+pub fn readTLS12EncryptedRecord(
+    socket: *Socket,
+    buf: *[4096]u8,
+    key: []const u8,
+    iv: *const [12]u8,
+    seq: *u64,
+    cs: tls.CipherSuite,
+) ![]const u8 {
+    var total: usize = 0;
+    while (total < 5) {
+        const n = socket.recv(buf[total..5]) catch |err| switch (err) {
+            error.ConnectionResetByPeer => return error.TlsConnectionTruncated,
+            else => return error.ReadFailed,
+        };
+        if (n == 0) return error.TlsConnectionTruncated;
+        total += n;
+    }
+    switch (buf[0]) {
+        @intFromEnum(ContentType.alert) => {
+            if (buf[5] == 2) { // fatal
+                return errors.fromAlert(@enumFromInt(buf[6]));
+            }
+            return error.TlsHandshakeFailure;
+        },
+        @intFromEnum(ContentType.handshake), @intFromEnum(ContentType.application_data) => {},
+        else => return error.TlsUnexpectedMessage,
+    }
+    const length = mem.readInt(u16, buf[3..5], .big);
+    if (length > max_ciphertext_len) return error.TlsRecordOverflow;
+    while (total < 5 + length) {
+        const n = socket.recv(buf[total..][0 .. 5 + length - total]) catch |err| switch (err) {
+            error.ConnectionResetByPeer => return error.TlsConnectionTruncated,
+            else => return error.ReadFailed,
+        };
+        if (n == 0) return error.TlsConnectionTruncated;
+        total += n;
+    }
+
+    const hdr: *const [record_header_len]u8 = buf[0..5];
+    const ct = buf[5..][0..length];
+    const plain = switch (cs) {
+        .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
+            var k: [16]u8 = undefined;
+            @memcpy(&k, key[0..16]);
+            break :blk try decryptTLS12(crypto.aead.aes_gcm.Aes128Gcm, ct, hdr, seq.*, iv, &k);
+        },
+        .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
+            var k: [32]u8 = undefined;
+            @memcpy(&k, key[0..32]);
+            break :blk try decryptTLS12(crypto.aead.aes_gcm.Aes256Gcm, ct, hdr, seq.*, iv, &k);
+        },
+        else => return error.TlsUnsupportedCipherSuite,
+    };
+    seq.* += 1;
+    return plain;
 }
 
 pub fn sendTLS13EncryptedHandshake(
@@ -807,14 +868,21 @@ pub const Connection = struct {
     }
 
     pub fn sendAlert(self: *Connection, level: tls.Alert.Level, desc: tls.Alert.Description) void {
+        const payload = [_]u8{ @intFromEnum(level), @intFromEnum(desc) };
+        // After the handshake completes, alerts MUST be encrypted under the
+        // negotiated keys (RFC 5246 §7.2 / RFC 8446 §6).
+        if (self.app_write_key != null and self.cipher_suite != null) {
+            self.writeEncryptedRecord(&payload, .alert) catch {};
+            return;
+        }
         var buf: [7]u8 = undefined;
         buf[0] = @intFromEnum(ContentType.alert);
         buf[1] = 0x03;
         buf[2] = 0x03;
         buf[3] = 0;
         buf[4] = 2;
-        buf[5] = @intFromEnum(level);
-        buf[6] = @intFromEnum(desc);
+        buf[5] = payload[0];
+        buf[6] = payload[1];
         _ = self.socket.send(buf[0..7]) catch {};
     }
 
@@ -846,7 +914,12 @@ pub const Connection = struct {
         };
     }
 
-    pub fn write(self: *Connection, data: []const u8) !usize {
+    /// Encrypts and sends one record of `ctype` under the negotiated keys.
+    ///
+    /// TLS 1.3: inner plaintext = msg || content_type (RFC 8446 §5.2),
+    ///          outer record type is always application_data.
+    /// TLS 1.2: outer record keeps the real content type (RFC 5246).
+    pub fn writeEncryptedRecord(self: *Connection, data: []const u8, ctype: tls.ContentType) !void {
         const socket = self.socket;
         const version = self.tls_version;
         const key = self.app_write_key orelse return error.TlsHandshakeNotComplete;
@@ -855,11 +928,17 @@ pub const Connection = struct {
 
         switch (version) {
             .tls_1_3 => {
+                var inner_buf: [max_plaintext_len + 1]u8 = undefined;
+                if (data.len > max_plaintext_len) return error.TlsRecordOverflow;
+                @memcpy(inner_buf[0..data.len], data);
+                inner_buf[data.len] = @intFromEnum(ctype);
+                const inner = inner_buf[0 .. data.len + 1];
+
                 var hdr: [record_header_len]u8 = undefined;
                 const hdr_val = RecordHeader{
                     .content_type = .application_data,
                     .version = .tls_1_2,
-                    .length = @intCast(data.len + 16),
+                    .length = @intCast(inner.len + 16),
                 };
                 hdr_val.format(&hdr);
                 const nonce_val = nonceTLS13(&iv, self.write_seq);
@@ -869,19 +948,19 @@ pub const Connection = struct {
                     .AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
-                        const enc = try encryptTLS13(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], data, &hdr, &nonce_val, &k);
+                        const enc = try encryptTLS13(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], inner, &hdr, &nonce_val, &k);
                         break :blk enc.len;
                     },
                     .AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        const enc = try encryptTLS13(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], data, &hdr, &nonce_val, &k);
+                        const enc = try encryptTLS13(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], inner, &hdr, &nonce_val, &k);
                         break :blk enc.len;
                     },
                     .CHACHA20_POLY1305_SHA256 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
-                        const enc = try encryptTLS13(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], data, &hdr, &nonce_val, &k);
+                        const enc = try encryptTLS13(crypto.aead.chacha_poly.ChaCha20Poly1305, out_buf[record_header_len..], inner, &hdr, &nonce_val, &k);
                         break :blk enc.len;
                     },
                     else => return error.TlsUnsupportedCipherSuite,
@@ -889,26 +968,26 @@ pub const Connection = struct {
                 const total = record_header_len + enc_len;
                 socket.sendAll(out_buf[0..total]) catch return error.WriteFailed;
                 self.write_seq += 1;
-                return data.len;
             },
             .tls_1_2 => {
                 var hdr: [record_header_len]u8 = undefined;
                 const hdr_val = RecordHeader{
-                    .content_type = .application_data,
+                    .content_type = ctype,
                     .version = .tls_1_2,
-                    .length = @intCast(12 + data.len + 16),
+                    .length = @intCast(8 + data.len + 16),
                 };
                 hdr_val.format(&hdr);
+
                 var out_buf: [record_header_len + 32 + max_plaintext_len + 256]u8 = undefined;
                 @memcpy(out_buf[0..record_header_len], &hdr);
                 const enc_len = switch (cs) {
-                    .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
+                    .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
                         const enc = try encryptTLS12(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
                         break :blk enc.len;
                     },
-                    .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
+                    .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
                         const enc = try encryptTLS12(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
@@ -925,10 +1004,14 @@ pub const Connection = struct {
                 const total = record_header_len + enc_len;
                 socket.sendAll(out_buf[0..total]) catch return error.WriteFailed;
                 self.write_seq += 1;
-                return data.len;
             },
             else => return error.TlsUnsupportedCipherSuite,
         }
+    }
+
+    pub fn write(self: *Connection, data: []const u8) !usize {
+        try self.writeEncryptedRecord(data, .application_data);
+        return data.len;
     }
 
     pub fn writeAll(self: *Connection, data: []const u8) !void {
@@ -1008,12 +1091,12 @@ pub const Connection = struct {
             },
             .tls_1_2 => {
                 const plaintext = switch (cs) {
-                    .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
+                    .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
                         break :blk try decryptTLS12(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
                     },
-                    .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
+                    .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
                         break :blk try decryptTLS12(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
@@ -1306,19 +1389,20 @@ pub const TLSSession = struct {
                 const hdr_val = RecordHeader{
                     .content_type = .application_data,
                     .version = .tls_1_2,
-                    .length = @intCast(12 + data.len + 16),
+                    .length = @intCast(8 + data.len + 16),
                 };
                 hdr_val.format(&hdr);
+
                 var out_buf: [record_header_len + 32 + max_plaintext_len + 256]u8 = undefined;
                 @memcpy(out_buf[0..record_header_len], &hdr);
                 const enc_len = switch (cs) {
-                    .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
+                    .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
                         const enc = try encryptTLS12(crypto.aead.aes_gcm.Aes128Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
                         break :blk enc.len;
                     },
-                    .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
+                    .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
                         const enc = try encryptTLS12(crypto.aead.aes_gcm.Aes256Gcm, out_buf[record_header_len..], data, &hdr, self.write_seq, &iv, &k);
@@ -1418,12 +1502,12 @@ pub const TLSSession = struct {
             },
             .tls_1_2 => {
                 const plaintext = switch (cs) {
-                    .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
+                    .ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, .ECDHE_RSA_WITH_AES_128_GCM_SHA256 => blk: {
                         var k: [16]u8 = undefined;
                         @memcpy(&k, key[0..16]);
                         break :blk try decryptTLS12(crypto.aead.aes_gcm.Aes128Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);
                     },
-                    .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
+                    .ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, .ECDHE_RSA_WITH_AES_256_GCM_SHA384 => blk: {
                         var k: [32]u8 = undefined;
                         @memcpy(&k, key[0..32]);
                         break :blk try decryptTLS12(crypto.aead.aes_gcm.Aes256Gcm, record_body, self.read_buf[0..5], self.read_seq, &iv, &k);

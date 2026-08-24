@@ -1705,6 +1705,9 @@ pub const Server = struct {
         var first_request = true;
         while (self.running.load(.acquire)) {
             const timeout_ms = if (first_request) self.config.request_timeout_ms else self.config.keep_alive_timeout_ms;
+            // Idle-timeout window starts NOW for this request; last_activity_ms
+            // is shared server state and may be stale from a prior connection.
+            self.last_activity_ms = common.nowMillis();
 
             var parser = Parser.init(self.allocator);
             parser.max_header_size = self.config.max_header_size;
