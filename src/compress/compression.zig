@@ -566,18 +566,18 @@ fn compressZstd(allocator: Allocator, data: []const u8, level: CompressionLevel)
         .default => 3,
         .best => 19,
     };
-    return zstd_lib.compress(allocator, data, zstd_level) catch return error.CompressionFailed;
+    return zstd_lib.compressWithLevel(allocator, data, zstd_level) catch return error.CompressionFailed;
 }
 
 fn decompressZstd(allocator: Allocator, data: []const u8, max_output_size: usize) ![]u8 {
-    const content_size = switch (zstd_lib.getFrameContentSize(data)) {
-        .known => |size| size,
-        .unknown, .@"error" => return error.DecompressionFailed,
-    };
+    const content_size = zstd_lib.getFrameContentSize(data);
+    if (content_size == zstd_lib.CONTENTSIZE_UNKNOWN or content_size == zstd_lib.CONTENTSIZE_ERROR) {
+        return error.DecompressionFailed;
+    }
 
     if (content_size > max_output_size) return error.DecompressionBombDetected;
 
-    return zstd_lib.decompress(allocator, data, @intCast(content_size)) catch {
+    return zstd_lib.decompress(allocator, data) catch {
         return error.DecompressionFailed;
     };
 }
@@ -728,6 +728,118 @@ test "zstd compress decompress round trip" {
     defer allocator.free(decompressed);
 
     try std.testing.expectEqualStrings(sample, decompressed);
+}
+
+test "brotli large repetitive data round trip" {
+    const allocator = std.testing.allocator;
+    var sample: std.ArrayList(u8) = .empty;
+    defer sample.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        try sample.appendSlice(allocator, "The quick brown fox jumps over the lazy dog. ");
+    }
+
+    const compressed = try compress(allocator, .br, sample.items);
+    defer allocator.free(compressed);
+
+    // Repetitive data must actually shrink.
+    try std.testing.expect(compressed.len < sample.items.len);
+
+    const decompressed = try decompress(allocator, .br, compressed);
+    defer allocator.free(decompressed);
+
+    try std.testing.expectEqualStrings(sample.items, decompressed);
+}
+
+test "brotli binary payload round trip" {
+    const allocator = std.testing.allocator;
+    var sample: [1024]u8 = undefined;
+    for (&sample, 0..) |*b, i| {
+        b.* = @truncate(i *% 2654435761);
+    }
+
+    const compressed = try compress(allocator, .br, &sample);
+    defer allocator.free(compressed);
+
+    const decompressed = try decompress(allocator, .br, compressed);
+    defer allocator.free(decompressed);
+
+    try std.testing.expectEqualSlices(u8, &sample, decompressed);
+}
+
+test "zstd compression levels round trip" {
+    const allocator = std.testing.allocator;
+    const sample = "Level sensitivity test payload for zstd codec. " ** 20;
+
+    inline for ([_]CompressionLevel{ .fast, .default, .best }) |level| {
+        const compressed = try compressWithLevel(allocator, .zstd, sample, .{ .level = level });
+        defer allocator.free(compressed);
+
+        const decompressed = try decompress(allocator, .zstd, compressed);
+        defer allocator.free(decompressed);
+
+        try std.testing.expectEqualStrings(sample, decompressed);
+    }
+}
+
+test "brotli compression levels accepted" {
+    const allocator = std.testing.allocator;
+    const sample = "Brotli level acceptance payload for httpx.zig. " ** 10;
+
+    inline for ([_]CompressionLevel{ .fast, .default, .best }) |level| {
+        const compressed = try compressWithLevel(allocator, .br, sample, .{ .level = level });
+        defer allocator.free(compressed);
+
+        const decompressed = try decompress(allocator, .br, compressed);
+        defer allocator.free(decompressed);
+
+        try std.testing.expectEqualStrings(sample, decompressed);
+    }
+}
+
+test "brotli empty input round trip" {
+    const allocator = std.testing.allocator;
+
+    const compressed = try compress(allocator, .br, "");
+    defer allocator.free(compressed);
+
+    const decompressed = try decompress(allocator, .br, compressed);
+    defer allocator.free(decompressed);
+
+    try std.testing.expectEqual(@as(usize, 0), decompressed.len);
+}
+
+test "zstd empty input round trip" {
+    const allocator = std.testing.allocator;
+
+    const compressed = try compress(allocator, .zstd, "");
+    defer allocator.free(compressed);
+
+    const decompressed = try decompress(allocator, .zstd, compressed);
+    defer allocator.free(decompressed);
+
+    try std.testing.expectEqual(@as(usize, 0), decompressed.len);
+}
+
+test "brotli decompression bomb protection" {
+    const allocator = std.testing.allocator;
+    const sample = "Hello, brotli bomb test with a somewhat longer body!";
+
+    const compressed = try compress(allocator, .br, sample);
+    defer allocator.free(compressed);
+
+    try std.testing.expectError(error.DecompressionBombDetected, decompressWithLimit(allocator, .br, compressed, 5));
+}
+
+test "zstd decompression bomb protection" {
+    const allocator = std.testing.allocator;
+    const sample = "Hello, zstd bomb test with a somewhat longer body!";
+
+    const compressed = try compress(allocator, .zstd, sample);
+    defer allocator.free(compressed);
+
+    try std.testing.expectError(error.DecompressionBombDetected, decompressWithLimit(allocator, .zstd, compressed, 5));
 }
 
 test "identity passthrough" {

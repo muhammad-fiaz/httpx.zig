@@ -250,14 +250,14 @@ pub fn StreamingDecompressor(comptime ReaderType: type) type {
             const accum = self.zstd_accum orelse return null;
             if (accum.items.len == 0) return null;
 
-            const content_size = switch (zstd_pkg.getFrameContentSize(accum.items)) {
-                .unknown, .@"error" => return null,
-                .known => |s| s,
-            };
+            const content_size = zstd_pkg.getFrameContentSize(accum.items);
+            if (content_size == zstd_pkg.CONTENTSIZE_UNKNOWN or content_size == zstd_pkg.CONTENTSIZE_ERROR) {
+                return null;
+            }
 
             if (content_size > self.limits.max_decompressed_size) return null;
 
-            const decompressed = zstd_pkg.decompress(self.allocator, accum.items, @intCast(content_size)) catch return null;
+            const decompressed = zstd_pkg.decompress(self.allocator, accum.items) catch return null;
             self.zstd_accum.?.clearRetainingCapacity();
 
             self.total_decompressed +|= decompressed.len;
@@ -271,6 +271,7 @@ pub const StreamingCompressor = struct {
     encoding: ContentEncoding,
     aw: std.Io.Writer.Allocating,
     flate_compressor: ?flate_comp_state = null,
+    brotli_compressor: ?brotli.StreamingCompressor = null,
     window_buf: [std.compress.flate.max_window_len]u8,
     total_input: usize = 0,
     limits: StreamingLimits,
@@ -286,6 +287,7 @@ pub const StreamingCompressor = struct {
             .encoding = encoding,
             .aw = .init(allocator),
             .flate_compressor = null,
+            .brotli_compressor = null,
             .window_buf = undefined,
             .limits = .{},
             .level = .default,
@@ -298,6 +300,7 @@ pub const StreamingCompressor = struct {
             .encoding = encoding,
             .aw = .init(allocator),
             .flate_compressor = null,
+            .brotli_compressor = null,
             .window_buf = undefined,
             .limits = limits,
             .level = level,
@@ -305,6 +308,8 @@ pub const StreamingCompressor = struct {
     }
 
     pub fn deinit(self: *StreamingCompressor) void {
+        if (self.brotli_compressor) |*bc| bc.deinit();
+        self.brotli_compressor = null;
         self.aw.deinit();
     }
 
@@ -327,7 +332,21 @@ pub const StreamingCompressor = struct {
                 ) catch return error.CompressionFailed;
                 self.flate_compressor = .{ .compressor = compressor };
             },
-            .br, .zstd => {},
+            .br => {
+                // Use the brotli package's incremental encoder so all chunks form
+                // ONE continuous stream (concatenated one-shot streams cannot be
+                // decoded because brotli has no per-stream magic number).
+                const quality: u32 = switch (self.level) {
+                    .fast => 4,
+                    .default => 9,
+                    .best => 11,
+                };
+                self.brotli_compressor = brotli.StreamingCompressor.init(self.allocator, .{
+                    .quality = quality,
+                    .lgwin = 22,
+                });
+            },
+            .zstd => {},
         }
     }
 
@@ -349,9 +368,13 @@ pub const StreamingCompressor = struct {
                 }
             },
             .br => {
-                const compressed = brotli.compress(self.allocator, chunk) catch return error.CompressionFailed;
-                defer self.allocator.free(compressed);
-                _ = self.aw.writer.writeAll(compressed) catch return error.IoFailed;
+                if (self.brotli_compressor) |*bc| {
+                    const piece = bc.process(chunk) catch return error.CompressionFailed;
+                    defer self.allocator.free(piece);
+                    _ = self.aw.writer.writeAll(piece) catch return error.IoFailed;
+                } else {
+                    return error.CompressionFailed;
+                }
             },
             .zstd => {
                 const zstd_level: i32 = switch (self.level) {
@@ -359,7 +382,7 @@ pub const StreamingCompressor = struct {
                     .default => 3,
                     .best => 19,
                 };
-                const compressed = zstd_pkg.compress(self.allocator, chunk, zstd_level) catch return error.CompressionFailed;
+                const compressed = zstd_pkg.compressWithLevel(self.allocator, chunk, zstd_level) catch return error.CompressionFailed;
                 defer self.allocator.free(compressed);
                 _ = self.aw.writer.writeAll(compressed) catch return error.IoFailed;
             },
@@ -375,7 +398,16 @@ pub const StreamingCompressor = struct {
                     self.flate_compressor = null;
                 }
             },
-            .br, .zstd => {},
+            .br => {
+                if (self.brotli_compressor) |*bc| {
+                    const tail = bc.finish() catch return error.CompressionFailed;
+                    defer self.allocator.free(tail);
+                    _ = self.aw.writer.writeAll(tail) catch return error.IoFailed;
+                    bc.deinit();
+                    self.brotli_compressor = null;
+                }
+            },
+            .zstd => {},
         }
     }
 
@@ -557,6 +589,74 @@ test "streaming compressor deflate round trip" {
     }
 
     try testing.expectEqualStrings("Deflate streaming test data", result.items);
+}
+
+test "streaming compressor brotli round trip" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var compressor = StreamingCompressor.init(allocator, .br);
+    defer compressor.deinit();
+    try compressor.start();
+
+    try compressor.writeChunk("Brotli ");
+    try compressor.writeChunk("streaming ");
+    try compressor.writeChunk("compression test!");
+    try compressor.finish();
+
+    const compressed = try compressor.toOwnedSlice();
+    defer allocator.free(compressed);
+
+    try testing.expect(compressed.len > 0);
+
+    const r: std.Io.Reader = .fixed(compressed);
+    var decompressor = StreamingDecompressor(std.Io.Reader).init(allocator, .br, r);
+    defer decompressor.deinit();
+
+    var result: std.ArrayList(u8) = .empty;
+    defer result.deinit(allocator);
+
+    while (try decompressor.readChunk()) |chunk| {
+        defer allocator.free(chunk);
+        try result.appendSlice(allocator, chunk);
+    }
+
+    try testing.expectEqualStrings("Brotli streaming compression test!", result.items);
+}
+
+test "streaming compressor zstd multi-chunk round trip" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var compressor = StreamingCompressor.init(allocator, .zstd);
+    defer compressor.deinit();
+    try compressor.start();
+
+    // Multiple chunks produce independent zstd frames; the decompressor
+    // must handle the concatenated frame stream.
+    try compressor.writeChunk("Zstd chunk one. ");
+    try compressor.writeChunk("Zstd chunk two. ");
+    try compressor.writeChunk("Zstd chunk three.");
+    try compressor.finish();
+
+    const compressed = try compressor.toOwnedSlice();
+    defer allocator.free(compressed);
+
+    try testing.expect(compressed.len > 0);
+
+    const r: std.Io.Reader = .fixed(compressed);
+    var decompressor = StreamingDecompressor(std.Io.Reader).init(allocator, .zstd, r);
+    defer decompressor.deinit();
+
+    var result: std.ArrayList(u8) = .empty;
+    defer result.deinit(allocator);
+
+    while (try decompressor.readChunk()) |chunk| {
+        defer allocator.free(chunk);
+        try result.appendSlice(allocator, chunk);
+    }
+
+    try testing.expectEqualStrings("Zstd chunk one. Zstd chunk two. Zstd chunk three.", result.items);
 }
 
 test "streaming decompressor bomb protection" {
