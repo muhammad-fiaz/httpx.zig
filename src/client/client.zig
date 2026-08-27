@@ -236,57 +236,35 @@ test "explicit client init/deinit" {
 
 test "dns cache serves second hostname request from cache" {
     const a = std.testing.allocator;
-    const lifecycle = @import("../server/lifecycle.zig");
-    const router_mod = @import("../web/router/router.zig");
 
     var ctx = tcp.IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    var srv = lifecycle.Server.init(a, ctx.io, .{ .port = 0, .docs_enabled = false }) catch return;
-    defer srv.deinit();
-    try srv.router.add(.GET, "/ping", struct {
-        fn h(_: *router_mod.Context) anyerror!router_mod.Response {
-            return .{ .body = "pong", .content_type = "text/plain" };
-        }
-    }.h);
-    srv.max_connections = 1;
-
-    const Runner = struct {
-        fn run(s: *lifecycle.Server) void {
-            s.run();
-        }
-    };
-    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
-
     var client = Client.init(a, ctx.io, .{});
     defer client.deinit();
 
-    var ub: [64]u8 = undefined;
-    const port = srv.localPort();
-    const url1 = try std.fmt.bufPrint(&ub, "http://localhost:{d}/ping", .{port});
+    // Direct cache resolves avoid the localhost HTTP roundtrip which
+    // hangs on Linux/macOS (dual-stack connect) and previously panicked
+    // Windows (accept CANCELLED => unreachable). The HTTP path is
+    // already covered by keep-alive / connection-close tests; the
+    // FakeResolver unit test covers coalescing deterministically.
+    const r1 = client.dns_cache.?.resolve(ctx.io, "localhost") catch return;
+    defer {
+        for (r1) |addr| a.free(addr);
+        a.free(r1);
+    }
+    try std.testing.expect(r1.len >= 1);
 
-    // Request 1: miss -> real OS lookup.
-    var r1 = client.get(.{ .url = url1 }) catch {
-        client.pool.purge();
-        t.join();
-        srv.requestShutdown();
-        return; // environment without usable resolver support
-    };
-    defer r1.deinit();
-    try std.testing.expectEqual(@as(u16, 200), r1.status);
-    try std.testing.expectEqualStrings("pong", r1.body);
-
-    client.pool.purge();
-    t.join();
-    srv.requestShutdown();
+    const r2 = client.dns_cache.?.resolve(ctx.io, "localhost") catch return;
+    defer {
+        for (r2) |addr| a.free(addr);
+        a.free(r2);
+    }
+    try std.testing.expect(r2.len >= 1);
 
     const s = client.dns_cache.?.statsSnapshot();
     try std.testing.expectEqual(@as(u64, 1), s.started);
-    // Cache hit for the same host is validated by the dedicated
-    // `cache hit avoids second lookup` unit test with FakeResolver;
-    // a second HTTP roundtrip over localhost hangs on Linux (dual-stack)
-    // and panics Windows accept cancellation, so the integration check
-    // stops at the miss assertion.
+    try std.testing.expect(s.hits >= 1);
 }
 
 test "disabled dns cache never stores" {
