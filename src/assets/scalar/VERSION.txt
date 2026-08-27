@@ -1,0 +1,7 @@
+@scalar/api-reference 1.66.1 (release-2026-08-20)
+Source: https://registry.npmjs.org/@scalar/api-reference/-/api-reference-1.66.1.tgz
+File:   dist/browser/standalone.js
+Project: https://github.com/scalar/scalar
+License: MIT
+Update: download the new @scalar/api-reference npm tarball, copy dist/browser/standalone.js,
+        and bump this file.

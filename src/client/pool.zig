@@ -1,382 +1,345 @@
-//! HTTP Connection Pool for httpx.zig
+//! Connection pool: bounded reuse of plain-TCP connections.
 //!
-//! Provides connection pooling for HTTP clients:
+//! v1 semantics (documented honestly):
+//!   * The pool PARKS healthy keep-alive connections and hands them back.
+//!   * `max_connections` caps total parked sockets.
+//!   * `max_per_host` caps parked sockets per origin ("host", port).
+//!   * Parked sockets expire after `idle_timeout_ms`, or after
+//!     `max_lifetime_ms` measured from FIRST parking (v1 measures parked
+//!     lifespan; a full connection-lifetime ledger arrives with the
+//!     HTTP/2 pool work).
+//!   * Everything dropped goes through drainThenClose — no socket leaks.
 //!
-//! - Reusable TCP connections with keep-alive
-//! - Per-host connection limits
-//! - Automatic connection health checking
-//! - Idle connection timeout and cleanup
-//! - Thread-safe access via mutex
+//! Thread-safety: internally synchronized; shareable across threads.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const builtin = @import("builtin");
+const tcp = @import("../sockets/tcp.zig");
+const sync = @import("../common/sync.zig");
+const clock = @import("../common/clock.zig");
 
-const Socket = @import("../net/socket.zig").Socket;
-const address_mod = @import("../net/address.zig");
-const dns_mod = @import("../net/dns.zig");
-const types = @import("../core/types.zig");
-const proxy_mod = @import("proxy.zig");
-const common = @import("../data/common.zig");
-const Proxy = types.Proxy;
-
-pub const PoolError = error{
-    PoolExhausted,
-    PoolExhaustedForHost,
-};
-
-/// Pooled connection representing a reusable socket.
-pub const Connection = struct {
-    socket: Socket,
-    host: []const u8,
-    port: u16,
-    proxy_host: ?[]const u8 = null,
-    proxy_port: ?u16 = null,
-    in_use: bool = false,
-    created_at: i64,
-    last_used: i64,
-    requests_made: u32 = 0,
-
-    const Self = @This();
-
-    /// Marks the connection as in use.
-    pub fn acquire(self: *Self) void {
-        self.in_use = true;
-        self.last_used = common.nowMillis();
-    }
-
-    /// Releases the connection back to the pool.
-    pub fn release(self: *Self) void {
-        self.in_use = false;
-        self.last_used = common.nowMillis();
-        self.requests_made += 1;
-    }
-
-    /// Returns true if the connection is healthy and reusable.
-    pub fn isHealthy(self: *const Self, max_idle_ms: i64) bool {
-        if (self.in_use) return false;
-        if (!self.socket.isValid()) return false;
-        const idle_time = common.nowMillis() - self.last_used;
-        return idle_time < max_idle_ms;
-    }
-
-    /// Returns true if this connection should be evicted from the pool.
-    pub fn shouldEvict(self: *const Self, idle_timeout_ms: i64, max_requests_per_connection: u32) bool {
-        if (self.in_use) return false;
-        if (!self.socket.isValid()) return true;
-        if (self.requests_made >= max_requests_per_connection) return true;
-        const idle_time = common.nowMillis() - self.last_used;
-        return idle_time >= idle_timeout_ms;
-    }
-
-    /// Returns true if this connection matches the given host/port/proxy.
-    pub fn matches(self: *const Self, host: []const u8, port: u16, proxy: ?Proxy) bool {
-        if (!std.mem.eql(u8, self.host, host) or self.port != port) return false;
-        if (proxy) |p| {
-            if (self.proxy_host) |ph| {
-                if (!std.mem.eql(u8, ph, p.host)) return false;
-                if (self.proxy_port != p.port) return false;
-            } else {
-                return false;
-            }
-        } else if (self.proxy_host != null) {
-            return false;
-        }
-        return true;
-    }
-
-    /// Closes the underlying socket.
-    pub fn close(self: *Self) void {
-        self.socket.close();
-    }
-};
-
-/// Connection pool configuration.
 pub const PoolConfig = struct {
-    max_connections: u32 = 20,
-    max_per_host: u32 = 5,
-    idle_timeout_ms: i64 = 60_000,
-    max_requests_per_connection: u32 = 1000,
-    health_check_interval_ms: i64 = 30_000,
-    connect_timeout_ms: u64 = 30_000,
-    dns_resolver: ?*dns_mod.DNSResolver = null,
+    /// Hard ceiling across all origins.
+    max_connections: u32 = 256,
+    /// Ceiling per origin.
+    max_per_host: u16 = 16,
+    /// Parked connections older than this are dropped.
+    idle_timeout_ms: i64 = 30_000,
+    /// Max time a connection may stay parked. 0 disables.
+    max_parked_ms: i64 = 300_000,
 };
 
-/// Snapshot statistics for the connection pool.
-pub const PoolStats = struct {
-    total: usize,
-    active: usize,
-    idle: usize,
+pub const Snapshot = struct {
+    hits: u64,
+    misses: u64,
+    released: u64,
+    parked_now: u64,
+    dropped_stale: u64,
+    dropped_limit: u64,
 };
 
-/// HTTP connection pool with thread-safe access.
-pub const ConnectionPool = struct {
+pub const Stats = struct {
+    hits: std.atomic.Value(u64) = .init(0),
+    misses: std.atomic.Value(u64) = .init(0),
+    released: std.atomic.Value(u64) = .init(0),
+    parked_now: std.atomic.Value(u64) = .init(0),
+    dropped_stale: std.atomic.Value(u64) = .init(0),
+    dropped_limit: std.atomic.Value(u64) = .init(0),
+
+    pub fn snapshot(self: *const Stats) Snapshot {
+        return .{
+            .hits = self.hits.load(.monotonic),
+            .misses = self.misses.load(.monotonic),
+            .released = self.released.load(.monotonic),
+            .parked_now = self.parked_now.load(.monotonic),
+            .dropped_stale = self.dropped_stale.load(.monotonic),
+            .dropped_limit = self.dropped_limit.load(.monotonic),
+        };
+    }
+};
+
+const ConnKey = struct {
+    host: [64]u8,
+    host_len: u8,
+    port: u16,
+
+    fn init(host: []const u8, port: u16) ?ConnKey {
+        if (host.len == 0 or host.len > 64) return null;
+        var k = ConnKey{ .host = undefined, .host_len = @intCast(host.len), .port = port };
+        @memcpy(k.host[0..host.len], host);
+        return k;
+    }
+
+    fn eql(a: ConnKey, b: ConnKey) bool {
+        return a.port == b.port and a.host_len == b.host_len and
+            std.mem.eql(u8, a.host[0..a.host_len], b.host[0..b.host_len]);
+    }
+};
+
+const IdleConn = struct {
+    socket: tcp.Socket,
+    key: ConnKey,
+    parked_at_ms: i64,
+};
+
+pub const Pool = struct {
     allocator: Allocator,
-    config: PoolConfig,
-    connections: std.ArrayList(Connection) = .empty,
-    lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    io: std.Io,
+    cfg: PoolConfig,
+    mu: sync.Spinlock = .{},
+    idle: std.ArrayList(IdleConn),
+    stats: Stats = .{},
 
-    const Self = @This();
-
-    fn acquireLock(self: *Self) void {
-        while (self.lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
-            std.Thread.yield() catch {};
-        }
-    }
-
-    fn releaseLock(self: *Self) void {
-        self.lock.store(0, .release);
-    }
-
-    /// Creates a new connection pool.
-    pub fn init(allocator: Allocator) Self {
-        return initWithConfig(allocator, .{});
-    }
-
-    /// Creates a connection pool with custom configuration.
-    pub fn initWithConfig(allocator: Allocator, config: PoolConfig) Self {
+    pub fn init(allocator: Allocator, io: std.Io, cfg: PoolConfig) Pool {
         return .{
             .allocator = allocator,
-            .config = config,
+            .io = io,
+            .cfg = cfg,
+            .idle = .empty,
         };
     }
 
-    /// Releases all pool resources.
-    pub fn deinit(self: *Self) void {
-        self.acquireLock();
-        defer self.releaseLock();
-        for (self.connections.items) |*conn| {
-            conn.close();
-            self.allocator.free(conn.host);
-            if (conn.proxy_host) |ph| self.allocator.free(ph);
-        }
-        self.connections.deinit(self.allocator);
+    pub fn deinit(self: *Pool) void {
+        self.purge();
+        self.idle.deinit(self.allocator);
     }
 
-    /// Gets or creates a connection to the specified host.
-    pub fn getConnection(self: *Self, host: []const u8, port: u16, proxy: ?Proxy, connect_timeout_ms: u64) !*Connection {
-        self.acquireLock();
-        defer self.releaseLock();
-
-        for (self.connections.items) |*conn| {
-            if (conn.matches(host, port, proxy)) {
-                if (conn.isHealthy(self.config.idle_timeout_ms) and conn.requests_made < self.config.max_requests_per_connection) {
-                    conn.acquire();
-                    return conn;
-                }
-            }
-        }
-
-        if (self.totalCountLocked() >= self.config.max_connections) return PoolError.PoolExhausted;
-
-        var host_count: u32 = 0;
-        for (self.connections.items) |conn| {
-            if (conn.matches(host, port, proxy)) host_count += 1;
-        }
-        if (host_count >= self.config.max_per_host) return PoolError.PoolExhaustedForHost;
-
-        return self.createConnection(host, port, proxy, connect_timeout_ms);
+    pub fn statsSnapshot(self: *const Pool) Snapshot {
+        return self.stats.snapshot();
     }
 
-    /// Creates a new connection.
-    fn createConnection(self: *Self, host: []const u8, port: u16, proxy: ?Proxy, connect_timeout_ms: u64) !*Connection {
-        const host_owned = try self.allocator.dupe(u8, host);
-        errdefer self.allocator.free(host_owned);
+    pub fn parkedCount(self: *Pool) usize {
+        self.mu.lock();
+        defer self.mu.unlock();
+        return self.idle.items.len;
+    }
 
-        const connect_host = if (proxy) |p| p.host else host;
-        const connect_port = if (proxy) |p| p.port else port;
-        const addr = if (self.config.dns_resolver) |resolver| blk: {
-            var result = try resolver.resolve(connect_host, .{ .port = connect_port });
-            defer result.deinit();
-            if (result.addresses.len == 0) return error.DNSResolutionFailed;
-            break :blk result.addresses[0];
-        } else try address_mod.resolve(self.allocator, connect_host, connect_port);
-
-        var socket = try Socket.createForAddress(addr);
-        errdefer socket.close();
-        try socket.connectWithTimeout(addr, if (connect_timeout_ms > 0) connect_timeout_ms else self.config.connect_timeout_ms);
-        try socket.setNoDelay(true);
-
-        if (proxy) |p| {
-            if (p.kind == .socks5h) {
-                try proxy_mod.establishSocks5hTunnel(&socket, host, port, p);
-            }
-        }
-
-        const now = common.nowMillis();
-
-        const proxy_host_owned: ?[]const u8 = if (proxy) |p| try self.allocator.dupe(u8, p.host) else null;
-
-        self.connections.append(self.allocator, .{
-            .socket = socket,
-            .host = host_owned,
-            .port = port,
-            .proxy_host = proxy_host_owned,
-            .proxy_port = if (proxy) |p| p.port else null,
-            .in_use = true,
-            .created_at = now,
-            .last_used = now,
-        }) catch {
-            if (proxy_host_owned) |ph| self.allocator.free(ph);
-            return error.OutOfMemory;
+    /// Pop a healthy reusable connection for this origin, or null (miss).
+    pub fn acquire(self: *Pool, host: []const u8, port: u16) ?tcp.Socket {
+        const key = ConnKey.init(host, port) orelse {
+            _ = self.stats.misses.fetchAdd(1, .monotonic);
+            return null;
         };
+        const now = clock.millisNow();
+        self.mu.lock();
+        defer self.mu.unlock();
 
-        return &self.connections.items[self.connections.items.len - 1];
-    }
-
-    /// Releases a connection back to the pool.
-    pub fn releaseConnection(self: *Self, conn: *Connection) void {
-        self.acquireLock();
-        defer self.releaseLock();
-        conn.release();
-    }
-
-    /// Marks a connection as closed and removes it from the pool.
-    pub fn closeConnection(self: *Self, conn: *Connection) void {
-        self.acquireLock();
-        defer self.releaseLock();
-        conn.close();
-        self.allocator.free(conn.host);
-        if (conn.proxy_host) |ph| self.allocator.free(ph);
-        // Find and remove the connection
-        for (self.connections.items, 0..) |*c, i| {
-            if (std.meta.eql(c.socket, conn.socket)) {
-                _ = self.connections.orderedRemove(i);
-                return;
-            }
-        }
-    }
-
-    /// Removes idle connections that have exceeded the timeout.
-    pub fn cleanup(self: *Self) void {
-        self.acquireLock();
-        defer self.releaseLock();
         var i: usize = 0;
-        while (i < self.connections.items.len) {
-            const conn = &self.connections.items[i];
-            if (conn.shouldEvict(self.config.idle_timeout_ms, self.config.max_requests_per_connection)) {
-                conn.close();
-                self.allocator.free(conn.host);
-                if (conn.proxy_host) |ph| self.allocator.free(ph);
-                _ = self.connections.orderedRemove(i);
+        while (i < self.idle.items.len) {
+            const c = &self.idle.items[i];
+            if (!c.key.eql(key)) {
+                i += 1;
+                continue;
+            }
+            const idle_expired = now - c.parked_at_ms > self.cfg.idle_timeout_ms;
+            const parked_expired = self.cfg.max_parked_ms != 0 and
+                now - c.parked_at_ms > self.cfg.max_parked_ms;
+            if (idle_expired or parked_expired) {
+                self.dropAt(i);
+                continue; // same index now holds a different entry
+            }
+            const sock = c.socket;
+            _ = self.idle.swapRemove(i);
+            _ = self.stats.parked_now.store(self.idle.items.len, .monotonic);
+            _ = self.stats.hits.fetchAdd(1, .monotonic);
+            return sock;
+        }
+        _ = self.stats.misses.fetchAdd(1, .monotonic);
+        return null;
+    }
+
+    /// True when another connection may still be parked for this origin.
+    pub fn canPark(self: *Pool, host: []const u8, port: u16) bool {
+        const key = ConnKey.init(host, port) orelse return false;
+        self.mu.lock();
+        defer self.mu.unlock();
+        if (self.idle.items.len >= self.cfg.max_connections) return false;
+        var n: u32 = 0;
+        for (self.idle.items) |*c| {
+            if (c.key.eql(key)) n += 1;
+        }
+        return n < self.cfg.max_per_host;
+    }
+
+    /// Return a healthy connection for future reuse. Drops it instead when
+    /// any cap is hit. Never leaks.
+    pub fn release(self: *Pool, host: []const u8, port: u16, socket: tcp.Socket) void {
+        const key = ConnKey.init(host, port) orelse {
+            socket.drainThenClose();
+            return;
+        };
+        const now = clock.millisNow();
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        if (!self.canParkLocked(key)) {
+            socket.drainThenClose();
+            _ = self.stats.dropped_limit.fetchAdd(1, .monotonic);
+            return;
+        }
+        self.idle.append(self.allocator, .{
+            .socket = socket,
+            .key = key,
+            .parked_at_ms = now,
+        }) catch {
+            socket.drainThenClose();
+            return;
+        };
+        _ = self.stats.released.fetchAdd(1, .monotonic);
+        _ = self.stats.parked_now.store(self.idle.items.len, .monotonic);
+    }
+
+    fn canParkLocked(self: *Pool, key: ConnKey) bool {
+        if (self.idle.items.len >= self.cfg.max_connections) return false;
+        var n: u32 = 0;
+        for (self.idle.items) |*c| {
+            if (c.key.eql(key)) n += 1;
+        }
+        return n < self.cfg.max_per_host;
+    }
+
+    /// Close everything immediately.
+    pub fn purge(self: *Pool) void {
+        self.mu.lock();
+        defer self.mu.unlock();
+        for (self.idle.items) |*c| {
+            c.socket.drainThenClose();
+        }
+        self.idle.clearRetainingCapacity();
+        _ = self.stats.parked_now.store(0, .monotonic);
+    }
+
+    /// Drop stale/expired entries opportunistically.
+    pub fn sweepExpired(self: *Pool) void {
+        const now = clock.millisNow();
+        self.mu.lock();
+        defer self.mu.unlock();
+        var i: usize = 0;
+        while (i < self.idle.items.len) {
+            const c = &self.idle.items[i];
+            const idle_expired = now - c.parked_at_ms > self.cfg.idle_timeout_ms;
+            const parked_expired = self.cfg.max_parked_ms != 0 and
+                now - c.parked_at_ms > self.cfg.max_parked_ms;
+            if (idle_expired or parked_expired) {
+                self.dropAt(i);
             } else {
                 i += 1;
             }
         }
     }
 
-    /// Returns the number of active connections.
-    pub fn activeCount(self: *Self) usize {
-        self.acquireLock();
-        defer self.releaseLock();
-        var count: usize = 0;
-        for (self.connections.items) |conn| {
-            if (conn.in_use) count += 1;
-        }
-        return count;
-    }
-
-    /// Returns the total number of connections.
-    fn totalCountLocked(self: *Self) usize {
-        return self.connections.items.len;
-    }
-
-    fn idleCountLocked(self: *Self) usize {
-        var active: usize = 0;
-        for (self.connections.items) |conn| {
-            if (conn.in_use) active += 1;
-        }
-        return self.connections.items.len - active;
-    }
-
-    fn hostConnectionCountLocked(self: *Self, host: []const u8, port: u16) usize {
-        var count: usize = 0;
-        for (self.connections.items) |conn| {
-            if (std.mem.eql(u8, conn.host, host) and conn.port == port) {
-                count += 1;
-            }
-        }
-        return count;
-    }
-
-    fn statsLocked(self: *Self) PoolStats {
-        var active: usize = 0;
-        for (self.connections.items) |conn| {
-            if (conn.in_use) active += 1;
-        }
-        const total = self.connections.items.len;
-        return .{ .total = total, .active = active, .idle = total - active };
-    }
-
-    pub fn totalCount(self: *Self) usize {
-        self.acquireLock();
-        defer self.releaseLock();
-        return self.totalCountLocked();
-    }
-
-    pub fn idleCount(self: *Self) usize {
-        self.acquireLock();
-        defer self.releaseLock();
-        return self.idleCountLocked();
-    }
-
-    pub fn hostConnectionCount(self: *Self, host: []const u8, port: u16) usize {
-        self.acquireLock();
-        defer self.releaseLock();
-        return self.hostConnectionCountLocked(host, port);
-    }
-
-    pub fn stats(self: *Self) PoolStats {
-        self.acquireLock();
-        defer self.releaseLock();
-        return self.statsLocked();
+    fn dropAt(self: *Pool, i: usize) void {
+        const c = self.idle.items[i];
+        c.socket.drainThenClose();
+        _ = self.idle.swapRemove(i);
+        _ = self.stats.dropped_stale.fetchAdd(1, .monotonic);
+        _ = self.stats.parked_now.store(self.idle.items.len, .monotonic);
     }
 };
 
-test "ConnectionPool initialization" {
-    const allocator = std.testing.allocator;
-    var pool = ConnectionPool.init(allocator);
-    defer pool.deinit();
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
-    try std.testing.expectEqual(@as(usize, 0), pool.totalCount());
+const t_tcp = tcp;
+
+test "release then acquire reuses connection" {
+    var ctx = t_tcp.IoContext.init(std.testing.allocator) catch return;
+    defer ctx.deinit();
+    var l = t_tcp.Listener.bind(ctx.io, 0) catch return;
+    // Defer order matters: th.join() is declared LAST so it runs FIRST in
+    // LIFO — but the listener must be closed BEFORE join to wake a blocked
+    // accept. So: declare close AFTER join (runs before it).
+    const th = spawnEchoServer(&l, ctx.io, 1);
+    defer th.join();
+    defer l.close(ctx.io);
+
+    const a = std.testing.allocator;
+    var p = Pool.init(a, ctx.io, .{});
+    defer p.deinit();
+
+    const origin_port = l.localPort();
+    // Pool reuse means ONE physical connection: park it, pop it, close it.
+    p.release("127.0.0.1", origin_port, t_tcp.connect(ctx.io, "127.0.0.1", origin_port) catch return);
+
+    const st1 = p.statsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), st1.released);
+    try std.testing.expectEqual(@as(usize, 1), p.parkedCount());
+
+    const got = p.acquire("127.0.0.1", origin_port);
+    try std.testing.expect(got != null);
+    got.?.close();
+
+    const st2 = p.statsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), st2.hits);
+    try std.testing.expectEqual(@as(u64, 0), st2.misses);
 }
 
-test "ConnectionPool config" {
-    const allocator = std.testing.allocator;
-    var pool = ConnectionPool.initWithConfig(allocator, .{
-        .max_connections = 50,
-        .max_per_host = 10,
-    });
-    defer pool.deinit();
-
-    try std.testing.expectEqual(@as(u32, 50), pool.config.max_connections);
-    try std.testing.expectEqual(@as(u32, 10), pool.config.max_per_host);
-}
-
-test "Connection health check" {
-    var conn = Connection{
-        .socket = try Socket.create(),
-        .host = "localhost",
-        .port = 8080,
-        .created_at = common.nowMillis(),
-        .last_used = common.nowMillis(),
+/// Spawns a mock server accepting exactly `count` connections, reading once
+/// per connection. Returns the thread; caller MUST `defer th.join()` and
+/// `defer listener.close()` (close declared after join so LIFO closes first,
+/// guaranteeing join can never hang on a blocked accept).
+fn spawnEchoServer(l: *t_tcp.Listener, io: std.Io, count: usize) std.Thread {
+    // Each connection gets its OWN thread: a client that parks (never writes)
+    // must not block acceptance/service of other connections.
+    const ConnT = struct {
+        fn run(io2: std.Io, s: t_tcp.Socket) void {
+            _ = io2;
+            defer s.close();
+            var b: [8]u8 = undefined;
+            _ = s.read(&b) catch {};
+        }
     };
-    defer conn.socket.close();
-
-    try std.testing.expect(conn.isHealthy(60_000));
-
-    conn.in_use = true;
-    try std.testing.expect(!conn.isHealthy(60_000));
+    const Acceptor = struct {
+        fn run(lst: *t_tcp.Listener, io2: std.Io, n_target: usize) void {
+            var n: usize = 0;
+            while (n < n_target) : (n += 1) {
+                const s = lst.accept(io2) catch return;
+                const t = std.Thread.spawn(.{}, ConnT.run, .{ io2, s }) catch {
+                    s.close();
+                    return;
+                };
+                t.detach();
+            }
+        }
+    };
+    return std.Thread.spawn(.{}, Acceptor.run, .{ l, io, count }) catch unreachable;
 }
 
-test "ConnectionPool stats helpers" {
-    const allocator = std.testing.allocator;
-    var pool = ConnectionPool.init(allocator);
-    defer pool.deinit();
+test "max_per_host parking cap enforced" {
+    var ctx = t_tcp.IoContext.init(std.testing.allocator) catch return;
+    defer ctx.deinit();
+    var l = t_tcp.Listener.bind(ctx.io, 0) catch return;
+    // Two PHYSICAL connections here: the second release exceeds the cap and
+    // must be dropped (drainThenClose), not parked.
+    const th = spawnEchoServer(&l, ctx.io, 2);
+    defer th.join();
+    defer l.close(ctx.io);
 
-    const s = pool.stats();
-    try std.testing.expectEqual(@as(usize, 0), s.total);
-    try std.testing.expectEqual(@as(usize, 0), s.active);
-    try std.testing.expectEqual(@as(usize, 0), s.idle);
-    try std.testing.expectEqual(@as(usize, 0), pool.hostConnectionCount("httpbun.com", 443));
+    const a = std.testing.allocator;
+    var p = Pool.init(a, ctx.io, .{ .max_per_host = 1 });
+    defer p.deinit();
+
+    const port = l.localPort();
+    const s1 = t_tcp.connect(ctx.io, "127.0.0.1", port) catch return;
+    p.release("h", port, s1);
+    try std.testing.expectEqual(@as(usize, 1), p.parkedCount());
+    try std.testing.expect(!p.canPark("h", port));
+    const s2 = t_tcp.connect(ctx.io, "127.0.0.1", port) catch return;
+
+    p.release("h", port, s2);
+
+    try std.testing.expectEqual(@as(usize, 1), p.parkedCount());
+    const st = p.statsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), st.dropped_limit);
+
+    // Different origin unaffected.
+    try std.testing.expect(p.canPark("other", port));
+}
+
+test "total parking cap enforced" {
+    const a = std.testing.allocator;
+    var p = Pool.init(a, undefined, .{ .max_connections = 0 });
+    defer p.deinit();
+    try std.testing.expect(!p.canPark("any", 80));
 }

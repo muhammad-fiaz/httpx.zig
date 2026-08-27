@@ -1,0 +1,8 @@
+swagger-ui-dist 5.32.14 (2026-08-18)
+Source: https://registry.npmjs.org/swagger-ui-dist/-/swagger-ui-dist-5.32.14.tgz
+Project: https://github.com/swagger-api/swagger-ui
+License: Apache-2.0
+Files vendored: swagger-ui.css, swagger-ui-bundle.js, swagger-ui-standalone-preset.js,
+                oauth2-redirect.html, favicon-16x16.png, favicon-32x32.png
+Update: replace this directory with the contents of the new swagger-ui-dist npm tarball
+        and bump this file. Never load from a CDN at runtime.
