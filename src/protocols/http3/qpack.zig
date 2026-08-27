@@ -156,9 +156,7 @@ pub const static_table = [_]StaticEntry{
     se("x-frame-options", "sameorigin"), // 98
 };
 
-// ---------------------------------------------------------------------------
 // Integer primitives shared with HPACK-style prefixes
-// ---------------------------------------------------------------------------
 
 pub fn encodeInt(buf: []u8, prefix_bits: u4, value: u64) Error!usize {
     if (buf.len < 1) return Error.BufferTooSmall;
@@ -209,9 +207,7 @@ pub fn decodeInt(data: []const u8, offset: *usize, prefix_bits: u4) Error!u64 {
     return value;
 }
 
-// ---------------------------------------------------------------------------
 // Encoder
-// ---------------------------------------------------------------------------
 
 pub const Encoder = struct {
     allocator: Allocator,
@@ -249,9 +245,7 @@ pub const Encoder = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Decoder
-// ---------------------------------------------------------------------------
 
 pub const FieldLine = struct {
     name: []const u8,
@@ -365,9 +359,7 @@ fn appendOwnedField(
     try results.append(allocator, .{ .name = name, .value = value, .allocated = true });
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "qpack integer roundtrip" {
     var buf: [16]u8 = undefined;

@@ -85,7 +85,7 @@ pub fn parse(input: []const u8) !Uri {
         uri.host = authority_str;
     }
 
-    // Port — handle both regular hosts and bracketed IPv6 literals
+    // Port  handle both regular hosts and bracketed IPv6 literals
     if (uri.host.len > 0 and uri.host[0] == '[') {
         // IPv6 literal: [::1]:8080
         if (std.mem.indexOfScalar(u8, uri.host, ']')) |close| {
@@ -173,9 +173,7 @@ pub fn hasPathTraversal(decoded_path: []const u8) bool {
     return false;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "parse full URL" {
     const uri = try parse("https://user:pass@api.example.com:8443/api/users?page=2#results");

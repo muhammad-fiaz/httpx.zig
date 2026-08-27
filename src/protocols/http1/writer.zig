@@ -20,9 +20,7 @@ pub const Error = error{
     UnsupportedForVersion, // e.g. chunked for HTTP/1.0
 };
 
-// ---------------------------------------------------------------------------
 // Validators
-// ---------------------------------------------------------------------------
 
 pub fn validToken(s: []const u8) bool {
     if (s.len == 0 or s.len > 32) return false;
@@ -73,9 +71,7 @@ fn appendHeader(out: *std.ArrayList(u8), gpa: Allocator, name: []const u8, value
 
 pub const Header = struct { name: []const u8, value: []const u8 };
 
-// ---------------------------------------------------------------------------
 // Requests
-// ---------------------------------------------------------------------------
 
 pub const RequestOptions = struct {
     minor_version: u8 = 1, // 0 => HTTP/1.0
@@ -147,9 +143,7 @@ pub fn buildRequest(
     return out.toOwnedSlice(allocator);
 }
 
-// ---------------------------------------------------------------------------
 // Responses
-// ---------------------------------------------------------------------------
 
 pub fn reasonPhrase(code: u16) []const u8 {
     return switch (code) {
@@ -307,9 +301,7 @@ pub fn buildConnectTunnelHead(
     return out.toOwnedSlice(allocator);
 }
 
-// ---------------------------------------------------------------------------
 // Chunked emission (streaming)
-// ---------------------------------------------------------------------------
 
 pub const TrailerField = Header;
 
@@ -336,9 +328,7 @@ pub fn finishChunked(
     out.appendSlice(gpa, "\r\n") catch return Error.OutOfMemory;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "request serialization 1.0 vs 1.1" {
     const a = std.testing.allocator;

@@ -314,11 +314,9 @@ test "query build roundtrip structure" {
     // First question label
     try std.testing.expectEqual(@as(u8, 7), pkt[12]); // "example" is 7 bytes
 
-    // ---------------------------------------------------------------------------
 }
 
 // Resolver: query a nameserver over UDP, TCP fallback on truncation
-// ---------------------------------------------------------------------------
 
 const net_mod = std.Io.net;
 

@@ -123,9 +123,7 @@ pub fn buildSettingsFrame(allocator: Allocator, entries: []const frame_mod.Setti
     return out.toOwnedSlice(allocator);
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "settings frame structure" {
     const a = std.testing.allocator;

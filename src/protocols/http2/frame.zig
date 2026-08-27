@@ -132,9 +132,7 @@ pub const FrameHeader = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // SETTINGS
-// ---------------------------------------------------------------------------
 
 pub const SettingsId = enum(u16) {
     header_table_size = 0x1,
@@ -164,9 +162,7 @@ pub fn serializeSetting(buf: *[6]u8, id: u16, value: u32) void {
     std.mem.writeInt(u32, buf[2..6], value, .big);
 }
 
-// ---------------------------------------------------------------------------
 // Typed payloads
-// ---------------------------------------------------------------------------
 
 pub const Data = struct {
     data: []const u8,
@@ -375,9 +371,7 @@ pub const Frame = union(enum) {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Writers
-// ---------------------------------------------------------------------------
 
 pub fn writeHeader(out: *std.ArrayList(u8), gpa: Allocator, length: usize, t: FrameType, flags: u8, stream_id: u31) !void {
     var h: FrameHeader = .{ .length = @intCast(length), .frame_type = t, .flags = flags, .stream_id = stream_id };

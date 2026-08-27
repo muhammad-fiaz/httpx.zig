@@ -6,9 +6,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-// ---------------------------------------------------------------------------
 // CORS (Fetch spec / RFC 9110 semantics)
-// ---------------------------------------------------------------------------
 
 pub const CorsConfig = struct {
     allowed_origins: []const []const u8 = &.{},
@@ -42,9 +40,7 @@ pub const CorsConfig = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // CSRF tokens
-// ---------------------------------------------------------------------------
 
 /// Double-submit cookie pattern: constant-time comparison of header token vs
 /// cookie token. 32-byte random tokens base64url encoded (43 chars).
@@ -62,9 +58,7 @@ pub fn verifyCsrfToken(a: []const u8, b: []const u8) bool {
     return std.crypto.timing_safe.eql([CSRF_TOKEN_LEN]u8, a[0..CSRF_TOKEN_LEN].*, b[0..CSRF_TOKEN_LEN].*);
 }
 
-// ---------------------------------------------------------------------------
 // Rate limiting: sliding window counters per key
-// ---------------------------------------------------------------------------
 
 pub const RateLimitError = error{OutOfMemory};
 
@@ -112,9 +106,7 @@ pub const RateLimiter = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "cors rejects wildcard plus credentials" {
     const unsafe_cfg = CorsConfig{ .allow_all_origins = true, .allow_credentials = true };

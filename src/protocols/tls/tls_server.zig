@@ -20,9 +20,7 @@ const h1_parser = @import("../http1/parser.zig");
 const h1_writer = @import("../http1/writer.zig");
 const h1_semantics = @import("../http1/semantics.zig");
 
-// ---------------------------------------------------------------------------
 // Handler callback
-// ---------------------------------------------------------------------------
 
 pub const Header = struct { name: []const u8, value: []const u8 };
 
@@ -43,9 +41,7 @@ pub const HttpResponse = struct {
 
 pub const HandlerFn = *const fn (ctx: ?*anyopaque, req: HttpRequest) anyerror!HttpResponse;
 
-// ---------------------------------------------------------------------------
 // HTTP/1.x server over TLS
-// ---------------------------------------------------------------------------
 
 fn serveHttp1OverTls(
     allocator: Allocator,
@@ -169,9 +165,7 @@ fn serveHttp1OverTls(
     }
 }
 
-// ---------------------------------------------------------------------------
 // HTTP/2 server over TLS
-// ---------------------------------------------------------------------------
 
 fn serveHttp2OverTls(
     allocator: Allocator,
@@ -279,9 +273,7 @@ fn h2SvrOnData(ctx: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
     }
 }
 
-// ---------------------------------------------------------------------------
 // TLS server listener
-// ---------------------------------------------------------------------------
 
 pub const ListenerConfig = struct {
     allocator: Allocator,
@@ -330,9 +322,7 @@ pub const TlsListener = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "TLS listener config defaults" {
     const cfg = ListenerConfig{

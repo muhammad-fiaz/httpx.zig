@@ -131,9 +131,7 @@ pub fn parseLongHeader(data: []const u8) HeaderError!ParseResult {
     return .{ .header = h, .payload_offset = offset };
 }
 
-// ---------------------------------------------------------------------------
 // Serialization
-// ---------------------------------------------------------------------------
 
 pub const BuildInfo = struct {
     type: LongType,
@@ -213,9 +211,7 @@ pub fn writeShortHeader(buf: []u8, info: ShortBuildInfo) HeaderError!usize {
     return pos;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "long header detection" {
     try std.testing.expect(isLongHeader(0xC3));

@@ -26,9 +26,7 @@ pub const Error = error{
     ProtocolViolation,
 };
 
-// ---------------------------------------------------------------------------
 // Frames
-// ---------------------------------------------------------------------------
 
 pub const FrameHeader = struct {
     fin: bool,
@@ -138,9 +136,7 @@ pub fn generateKey(random: std.Random, out: *[24]u8) []const u8 {
     return std.base64.standard.Encoder.encode(out, &raw);
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "frame header roundtrip small unmasked" {
     var buf: [16]u8 = undefined;

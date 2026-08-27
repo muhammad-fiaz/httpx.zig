@@ -25,9 +25,7 @@ const alpn_mod = @import("alpn.zig");
 const config_mod = @import("config.zig");
 const tcp = @import("../../sockets/tcp.zig");
 
-// ---------------------------------------------------------------------------
 // Errors
-// ---------------------------------------------------------------------------
 
 pub const Error = error{
     TlsHandshakeFailed,
@@ -44,9 +42,7 @@ pub const Error = error{
     MissingCertificate,
 };
 
-// ---------------------------------------------------------------------------
 // TLS server connection (post-handshake)
-// ---------------------------------------------------------------------------
 
 /// Represents a completed TLS server connection ready for application data.
 pub const TlsServerConn = struct {
@@ -177,9 +173,7 @@ pub const TlsServerConn = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // TLS server listener
-// ---------------------------------------------------------------------------
 
 /// SNI-based certificate selector. Maps hostname → certificate identity.
 pub const CertSelector = struct {
@@ -336,9 +330,7 @@ pub const TlsServer = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // ClientHello parsing helpers
-// ---------------------------------------------------------------------------
 
 const max_handshake_body = 1 << 14;
 
@@ -415,9 +407,7 @@ fn parseSniExtension(data: []const u8) !?[]const u8 {
     return data[5..][0..name_len];
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "tls server handshake processes client hello" {
     const a = std.testing.allocator;

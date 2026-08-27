@@ -92,9 +92,7 @@ fn copyHostZ(host: []const u8, buf: *[256]u8) Error!void {
     buf[host.len] = 0;
 }
 
-// ---------------------------------------------------------------------------
 // Windows
-// ---------------------------------------------------------------------------
 
 // Wire ABI for ws2_32 GetAddrInfoW.
 const WinAddrinfoW = extern struct {
@@ -218,9 +216,7 @@ fn lookupPosix(allocator: Allocator, host: []const u8, port: u16) Error![]addres
     if (out.items.len == 0) return error.NoAddresses;
     return out.toOwnedSlice(allocator) catch error.OutOfMemory;
 }
-// ---------------------------------------------------------------------------
 // Tests (offline-safe)
-// ---------------------------------------------------------------------------
 
 test "localhost resolves offline (hosts file)" {
     if (builtin.os.tag != .windows and !builtin.link_libc) return error.SkipZigTest;

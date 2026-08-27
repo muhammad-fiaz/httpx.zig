@@ -113,9 +113,7 @@ pub fn validateClientSelection(we_offered: []const Protocol, selected_wire: []co
     return null;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "protocol wire names roundtrip" {
     const protos = [_]Protocol{ .@"http/1.0", .@"http/1.1", .h2, .h3 };

@@ -43,9 +43,7 @@ pub fn authorizeBearer(ctx: *const router_mod.Context, header_name: []const u8, 
     return verifyToken(tok, expected);
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "bearer extraction is case-insensitive and trims" {
     try std.testing.expectEqualStrings("tok", parseBearer("Bearer tok").?);

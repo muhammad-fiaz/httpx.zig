@@ -26,9 +26,7 @@ pub const eos_len: u8 = 30;
 
 const sym_table = table.sym_table;
 
-// ---------------------------------------------------------------------------
 // Encoder
-// ---------------------------------------------------------------------------
 
 /// Upper bound on encoded size for a plaintext of `len` bytes (8/5 ratio).
 pub fn maxEncodedLen(len: usize) usize {
@@ -66,9 +64,7 @@ pub fn encode(out: []u8, src: []const u8) Error!usize {
     return pos;
 }
 
-// ---------------------------------------------------------------------------
 // Decoder automaton (comptime-built)
-// ---------------------------------------------------------------------------
 
 pub const FLAG_ACCEPTED: u8 = 0x01;
 pub const FLAG_SYM: u8 = 0x02;
@@ -308,9 +304,7 @@ pub fn decode(out: []u8, src: []const u8) Error!usize {
     return pos;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "table sanity" {
     try std.testing.expectEqual(@as(u8, 5), sym_table['a'].len);

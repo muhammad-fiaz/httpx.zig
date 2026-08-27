@@ -191,9 +191,7 @@ pub const Registry = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "initial NEW_CONNECTION_ID becomes active" {
     var r = Registry.init(std.testing.allocator);

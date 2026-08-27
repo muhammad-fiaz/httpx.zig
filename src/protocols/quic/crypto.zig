@@ -115,9 +115,7 @@ pub fn nextApplicationSecret(current: [32]u8) [32]u8 {
     return deriveSecret(current, "quic ku");
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "hkdfExpandLabel produces tls13-prefixed info" {
     // Structural check: same prk+label yields deterministic equal output.

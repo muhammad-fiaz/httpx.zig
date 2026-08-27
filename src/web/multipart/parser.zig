@@ -115,9 +115,7 @@ fn dispositionField(headers: []const u8, field: []const u8) ?[]const u8 {
     return null;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "parses field and binary file parts" {
     const boundary = "XBOUND";

@@ -345,9 +345,7 @@ fn endsWithCodingChunked(value: []const u8) bool {
     return std.ascii.eqlIgnoreCase(last, "chunked");
 }
 
-// ---------------------------------------------------------------------------
 // Chunked transfer decoding (RFC 9112 section 7.1)
-// ---------------------------------------------------------------------------
 
 /// Incremental chunked decoder: in-place payload compaction, strict CRLF,
 /// safe extension skipping, overflow guards, optional trailer collection.
@@ -512,9 +510,7 @@ pub const ChunkedDecoder = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "parse simple GET request head" {
     const req = "GET /path?q=1 HTTP/1.1\r\nHost: x\r\n\r\n";

@@ -155,9 +155,7 @@ fn preference(e: Encoding) u8 {
     };
 }
 
-// ---------------------------------------------------------------------------
 // Codecs
-// ---------------------------------------------------------------------------
 
 /// Compresses with the given encoding.
 pub fn compress(allocator: Allocator, encoding: Encoding, data: []const u8) ![]u8 {
@@ -270,9 +268,7 @@ fn flateDecompressLimited(allocator: Allocator, is_gzip: bool, data: []const u8,
     return result;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "accept-encoding parse basic" {
     const a = std.testing.allocator;

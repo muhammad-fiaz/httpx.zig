@@ -739,9 +739,7 @@ fn resolveLocation(a: Allocator, base_url: []const u8, loc: []const u8) ![]u8 {
     return out.toOwnedSlice(a);
 }
 
-// ---------------------------------------------------------------------------
 // Convenience one-shot helpers (all route through request())
-// ---------------------------------------------------------------------------
 
 pub fn get(a: Allocator, io: std.Io, url: []const u8) Error!Response {
     return request(a, io, .{ .method = .GET, .url = url });
@@ -786,9 +784,7 @@ pub fn options(a: Allocator, io: std.Io, url: []const u8) Error!Response {
     return request(a, io, .{ .method = .OPTIONS, .url = url });
 }
 
-// ---------------------------------------------------------------------------
 // Multipart file upload (buffered; files up to max_buffered_upload)
-// ---------------------------------------------------------------------------
 
 /// Largest file buffered whole by `postMultipartFile`.
 pub const max_buffered_upload: usize = 16 * 1024 * 1024;
@@ -909,9 +905,7 @@ pub fn postMultipartFile(
         .headers = &.{.{ .name = "Content-Type", .value = ct }},
     });
 }
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 const t_tcp = tcp;
 
@@ -1039,7 +1033,6 @@ test "https without explicit tls options fails fast" {
     try std.testing.expectError(Error.TlsConfigRequired, get(a, ctx.io, "https://example.com/"));
 }
 
-// ---------------------------------------------------------------------------
 // Live TLS interop (environment-gated).
 //
 // Requires an external TLS endpoint because std.Io.Threaded's
@@ -1051,7 +1044,6 @@ test "https without explicit tls options fails fast" {
 // That runner starts src/assets/tls_harness.ps1 (SChannel, self-signed) and
 // runs this suite against it. Without the env vars this test skips — an
 // honest environment gate, not a code path we cannot verify.
-// ---------------------------------------------------------------------------
 
 test "live https interop against external TLS server" {
     if (@import("builtin").os.tag != .windows) return error.SkipZigTest;

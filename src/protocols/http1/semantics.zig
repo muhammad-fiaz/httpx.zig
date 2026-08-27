@@ -5,9 +5,7 @@
 
 const std = @import("std");
 
-// ---------------------------------------------------------------------------
 // Limits (configurable; parser.zig defaults derive from these)
-// ---------------------------------------------------------------------------
 
 pub const Limits = struct {
     max_headers: usize = 128,
@@ -20,9 +18,7 @@ pub const Limits = struct {
 
 pub const default_limits = Limits{};
 
-// ---------------------------------------------------------------------------
 // Request-target forms (RFC 9112 section 3.2)
-// ---------------------------------------------------------------------------
 
 pub const TargetForm = enum {
     origin, // /path?query
@@ -77,9 +73,7 @@ pub fn classifyTarget(method: []const u8, target: []const u8) ?TargetForm {
     return if (TargetForm.allowsForm(method, .authority)) .authority else null;
 }
 
-// ---------------------------------------------------------------------------
 // Host / authority validation (RFC 9112 section 3.2 + RFC 3986)
-// ---------------------------------------------------------------------------
 
 /// Validates a Host (or :authority-style) value: reg-name, IPv4 literal,
 /// or bracketed IPv6 literal with optional [:port].
@@ -132,9 +126,7 @@ pub fn validAuthority(value: []const u8) bool {
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Connection persistence (RFC 9110 section 7.6.1 / RFC 9112 section 9.3)
-// ---------------------------------------------------------------------------
 
 pub const Version = enum { http_1_0, http_1_1 };
 
@@ -177,9 +169,7 @@ pub fn reusableAfter(framing_kind: anytype) bool {
     };
 }
 
-// ---------------------------------------------------------------------------
 // Expect: 100-continue (RFC 9110 section 10.1.1)
-// ---------------------------------------------------------------------------
 
 pub fn expectsContinue(headers: []const @import("../http1/parser.zig").Field) bool {
     for (headers) |h| {
@@ -190,9 +180,7 @@ pub fn expectsContinue(headers: []const @import("../http1/parser.zig").Field) bo
     return false;
 }
 
-// ---------------------------------------------------------------------------
 // Informational responses (RFC 9110 section 15.2)
-// ---------------------------------------------------------------------------
 
 pub fn isInformational(status: u16) bool {
     return status >= 100 and status < 200;
@@ -210,9 +198,7 @@ pub fn responseHasBody(method_head: bool, status: u16) bool {
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Trailer field filtering (RFC 9112 section 7.1.3)
-// ---------------------------------------------------------------------------
 
 /// Framing-sensitive fields that MUST NOT appear in trailers.
 pub fn trailerAllowed(name: []const u8) bool {
@@ -227,9 +213,7 @@ pub fn trailerAllowed(name: []const u8) bool {
     return true;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "target classification" {
     try std.testing.expectEqual(TargetForm.origin, classifyTarget("GET", "/a/b?q=1").?);

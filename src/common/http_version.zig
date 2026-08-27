@@ -91,9 +91,7 @@ pub const HttpVersion = enum {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Capability model
-// ---------------------------------------------------------------------------
 
 /// What this build/runtime can actually establish. Compile-time feature
 /// availability belongs here so the selector never advertises a disabled
@@ -169,9 +167,7 @@ pub fn negotiate(
     return .{ .active = best };
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "canonical wire names" {
     try std.testing.expectEqualStrings("http/1.0", HttpVersion.http_1_0.wireName().?);

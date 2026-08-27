@@ -164,10 +164,8 @@ pub const Client = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Default global client (zero-config). Lazily created; never deinit'd
 // (process-lifetime resource, like the standard library's own globals).
-// ---------------------------------------------------------------------------
 
 var g_threaded: ?*std.Io.Threaded = null;
 var g_client: ?Client = null;
@@ -230,9 +228,7 @@ test "explicit client init/deinit" {
     defer c.deinit();
 }
 
-// ---------------------------------------------------------------------------
 // DNS cache integration: hostname requests share one OS lookup
-// ---------------------------------------------------------------------------
 
 test "dns cache serves second hostname request from cache" {
     const a = std.testing.allocator;

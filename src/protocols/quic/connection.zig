@@ -177,9 +177,7 @@ pub const Connection = struct {
         };
     }
 
-    // ------------------------------------------------------------------
     // Key installation (driven by TLS driver)
-    // ------------------------------------------------------------------
 
     /// Installs Initial keys derived from the original DCID.
     pub fn installInitialKeys(self: *Connection) Error!void {
@@ -217,9 +215,7 @@ pub const Connection = struct {
         self.spaces[0].keys_rx = null;
     }
 
-    // ------------------------------------------------------------------
     // Send path
-    // ------------------------------------------------------------------
 
     /// Queues one protected packet into outbuf.
     pub fn sendFrames(
@@ -307,7 +303,6 @@ pub const Connection = struct {
         sp.next_pn += 1;
     }
     // Receive path
-    // ------------------------------------------------------------------
 
     /// Processes one UDP datagram, iterating over COALESCED packets.
     pub fn receiveDatagram(self: *Connection, dgram: []const u8, now_ms: u64) Error!void {
@@ -521,12 +516,10 @@ pub const Connection = struct {
 /// Marker error used internally for short datagrams (kept private-ish).
 const TruncatedPacket = struct {};
 
-// ---------------------------------------------------------------------------
 // Loopback integration: full handshake-shaped exchange between two
 // Connections through an in-memory pipe. Packet protection (AEAD +
 // header protection + PN coding) is REAL crypto throughout; the TLS
 // message layer is a deterministic driver standing in for tls13.zig.
-// ---------------------------------------------------------------------------
 
 const TestDriverCtx = struct {
     role: Role,

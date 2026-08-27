@@ -157,9 +157,7 @@ pub fn selectStrategy(
     return .{ .kind = .direct };
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "parse socks5h url carries remote-dns flag" {
     const p = parseProxyUrl("socks5h://u:p@proxy.corp:1080").?;

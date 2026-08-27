@@ -85,10 +85,8 @@ pub const Endpoint = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Loopback integration: two Endpoints over REAL kernel UDP sockets
 // exchanging protected Initial-space traffic (RFC 9001 initial secrets).
-// ---------------------------------------------------------------------------
 
 test "quic endpoints exchange protected initial packets over real udp" {
     const a = std.testing.allocator;

@@ -16,7 +16,7 @@
 
 const std = @import("std");
 
-// ── Common primitives ───────────────────────────────────────────────────
+// Common primitives
 pub const errors = @import("common/errors.zig");
 pub const status = @import("common/status.zig");
 pub const headers_mod = @import("common/headers.zig");
@@ -29,23 +29,23 @@ pub const concurrency = struct {
     pub const worker_pool = @import("concurrency/worker_pool.zig");
 };
 
-// ── Sockets ─────────────────────────────────────────────────────────────
+// Sockets
 pub const tcp = @import("sockets/tcp.zig");
 /// Raw socket syscall layer: exhaustive platform error mapping (Phase 2).
 pub const sys = @import("sockets/sys.zig");
 pub const udp = @import("sockets/udp.zig");
 
-// ── Network layer ───────────────────────────────────────────────────────
+// Network layer
 pub const address = @import("net/address.zig");
 pub const dns = @import("net/dns.zig");
 pub const resolve = @import("net/resolve.zig");
 pub const socks5 = @import("net/socks5.zig");
 pub const proxy = @import("net/proxy.zig");
 
-// ── Compression ─────────────────────────────────────────────────────────
+// Compression
 pub const compression = @import("compression/codec.zig");
 
-// ── Protocol engines ────────────────────────────────────────────────────
+// Protocol engines
 /// Shared low-level protocol primitives (prefix integers, Huffman code).
 pub const proto_common = struct {
     pub const integer = @import("protocols/common/integer.zig");
@@ -95,7 +95,7 @@ pub const tls_mod = struct {
     pub const tls_server = @import("protocols/tls/tls_server.zig");
 };
 
-// ── Web framework ───────────────────────────────────────────────────────
+// Web framework
 pub const router_mod = @import("web/router/router.zig");
 pub const router_pattern = @import("web/router/pattern.zig");
 pub const route_meta = @import("web/router/metadata.zig");
@@ -105,7 +105,7 @@ pub const ws_handshake = @import("web/websocket/handshake.zig");
 pub const ws_frame = @import("web/websocket/frame.zig");
 pub const docs_mod = @import("web/docs/docs.zig");
 
-// ── Web subsystems ──────────────────────────────────────────────────────
+// Web subsystems
 pub const static_files = @import("web/static_files/serve.zig");
 pub const spa = @import("web/spa/serve.zig");
 pub const health = @import("web/health/endpoints.zig");
@@ -121,7 +121,7 @@ pub const multipart = struct {
     pub const parser = @import("web/multipart/parser.zig");
 };
 
-// ── Client ──────────────────────────────────────────────────────────────
+// Client
 pub const Client = @import("client/client.zig").Client;
 pub const ClientResponse = @import("client/request.zig").Response;
 pub const client_request = @import("client/request.zig");
@@ -141,15 +141,15 @@ pub const head = @import("client/client.zig").globalHead;
 pub const options = @import("client/client.zig").globalOptions;
 pub const request = @import("client/client.zig").globalRequest;
 
-// ── Server ──────────────────────────────────────────────────────────────
+// Server
 pub const server_lifecycle = @import("server/lifecycle.zig");
 pub const server_context = @import("server/context.zig");
 pub const Server = server_lifecycle.Server;
 
-// ── FTP / FTPS ──────────────────────────────────────────────────────────
+// FTP / FTPS
 pub const ftp = @import("protocols/ftp/client.zig");
 
-// ── Re-exports for convenience ──────────────────────────────────────────
+// Re-exports for convenience
 pub const Headers = headers_mod.Headers;
 pub const Header = client_request.Header;
 pub const Uri = uri_mod.Uri;
@@ -184,7 +184,7 @@ pub const RequestOptions = @import("client/client.zig").RequestOptions;
 pub const name = @import("common/version.zig").name;
 pub const version = @import("common/version.zig").version;
 
-// ── Tests ───────────────────────────────────────────────────────────────
+// Tests
 test {
     _ = @import("common/errors.zig");
     _ = @import("common/status.zig");

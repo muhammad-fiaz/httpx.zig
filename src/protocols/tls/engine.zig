@@ -21,9 +21,7 @@ const HashLen = handshake_mod.HashLen;
 
 const alpn_mod = @import("alpn.zig");
 
-// ---------------------------------------------------------------------------
 // Random helper — OS CSPRNG when available, otherwise deterministic PRNG
-// ---------------------------------------------------------------------------
 
 var random_counter: u64 = 0x9E3779B97F4A7C15;
 
@@ -41,9 +39,7 @@ fn fillRandom(buf: []u8) void {
     prng.random().bytes(buf);
 }
 
-// ---------------------------------------------------------------------------
 // HKDF-Expand-Label (RFC 8446 §7.1)
-// ---------------------------------------------------------------------------
 
 /// TLS 1.3 HKDF-Expand-Label. Labels must NOT include the "tls13 " prefix —
 /// this function constructs: HkdfSha256.expand(out, out_len || label_len || label || 0x00, prk)
@@ -63,9 +59,7 @@ pub fn hkdfExpandLabel(prk: [32]u8, comptime label: []const u8, out: []u8) void 
     HkdfSha256.expand(out, info_buf[0..w], prk);
 }
 
-// ---------------------------------------------------------------------------
 // Errors
-// ---------------------------------------------------------------------------
 
 pub const Error = error{
     OutOfMemory,
@@ -79,9 +73,7 @@ pub const Error = error{
     BufferTooSmall,
 };
 
-// ---------------------------------------------------------------------------
 // Encryption levels
-// ---------------------------------------------------------------------------
 
 pub const EncryptionLevel = enum {
     initial,
@@ -89,9 +81,7 @@ pub const EncryptionLevel = enum {
     application,
 };
 
-// ---------------------------------------------------------------------------
 // Callbacks
-// ---------------------------------------------------------------------------
 
 pub const Callbacks = struct {
     ctx: ?*anyopaque = null,
@@ -106,9 +96,7 @@ pub const Callbacks = struct {
     }.noOp,
 };
 
-// ---------------------------------------------------------------------------
 // Derived keys
-// ---------------------------------------------------------------------------
 
 pub const DerivedKeys = struct {
     client_key: [16]u8,
@@ -117,9 +105,7 @@ pub const DerivedKeys = struct {
     server_iv: [12]u8,
 };
 
-// ---------------------------------------------------------------------------
 // TLS 1.3 Handshake Engine
-// ---------------------------------------------------------------------------
 
 pub const Engine = struct {
     allocator: Allocator,
@@ -199,9 +185,7 @@ pub const Engine = struct {
         self.handshake_secret = HkdfSha256.extract(&derived, &ss);
     }
 
-    // -----------------------------------------------------------------------
     // Client-side handshake
-    // -----------------------------------------------------------------------
 
     /// Produces the ClientHello message and generates the ephemeral keypair.
     pub fn produceClientHello(
@@ -300,9 +284,7 @@ pub const Engine = struct {
         self.state = .handshake_complete;
     }
 
-    // -----------------------------------------------------------------------
     // Server-side handshake
-    // -----------------------------------------------------------------------
 
     /// Processes a ClientHello message received from the wire.
     pub fn processClientHello(self: *Engine, body: []const u8) !void {
@@ -478,7 +460,6 @@ pub const Engine = struct {
         };
     }
 
-    // -----------------------------------------------------------------------
     // Key derivation — RFC 8446 §7.1
     //
     // key_schedule:
@@ -489,7 +470,6 @@ pub const Engine = struct {
     //
     // HKDF-Expand-Label(PRK, Label, Context, Length):
     //   info = uint16(Length) || uint8(6 + Label.len) || "tls13 " || Label || uint8(0)
-    // -----------------------------------------------------------------------
 
     /// Derive handshake traffic secrets from the ECDHE shared secret.
     fn deriveHandshakeKeys(self: *Engine) void {
@@ -557,9 +537,7 @@ pub const Engine = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Server flight result
-// ---------------------------------------------------------------------------
 
 pub const ServerFlight = struct {
     server_hello: []u8,
@@ -577,9 +555,7 @@ pub const ServerFlight = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "client produces valid ClientHello" {
     const a = std.testing.allocator;

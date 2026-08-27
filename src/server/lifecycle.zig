@@ -508,9 +508,7 @@ pub fn reasonFor(status: u16) []const u8 {
     };
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 fn helloHandler(ctx: *Context) anyerror!Response {
     if (std.mem.eql(u8, ctx.path, "/hello")) {
@@ -563,9 +561,7 @@ fn echoRawHandler(ctx: *Context) anyerror!Response {
     return .{ .content_type = "application/json", .body = ctx.body };
 }
 
-// ---------------------------------------------------------------------------
 // Logging verification: custom sink receives access lines; silence when off
-// ---------------------------------------------------------------------------
 
 const sync = @import("../common/sync.zig");
 

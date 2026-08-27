@@ -64,9 +64,7 @@ pub fn resumptionMaster(ap_secret: [32]u8, final_transcript_hash: [32]u8) [32]u8
     return out;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "handshake -> application chain is deterministic and symmetric" {
     var shared: [32]u8 = undefined;

@@ -72,9 +72,7 @@ pub fn verify(creds: Credentials, expect_user: []const u8, expect_pass: []const 
     return user_ok and pass_ok;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "parses rfc7617 example" {
     // "Aladdin:open sesame"

@@ -32,9 +32,7 @@ pub const ENTRY_OVERHEAD: usize = 32;
 /// Hard cap on a single name/value length (DoS bound, mirrors nghttp2).
 pub const MAX_STRING_LEN: usize = 65536;
 
-// ---------------------------------------------------------------------------
 // Static table (RFC 7541 Appendix A) â€” indices are 1-based on the wire.
-// ---------------------------------------------------------------------------
 
 pub const StaticEntry = struct { name: []const u8, value: []const u8 };
 
@@ -108,9 +106,7 @@ fn entrySize(name: []const u8, value: []const u8) usize {
     return ENTRY_OVERHEAD + name.len + value.len;
 }
 
-// ---------------------------------------------------------------------------
 // Dynamic table (shared mechanics for encoder and decoder sides)
-// ---------------------------------------------------------------------------
 
 /// Ring of entries, newest first (index 0 = most recently inserted),
 /// matching the wire's relative-index direction.
@@ -170,9 +166,7 @@ const DynTable = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Decoder
-// ---------------------------------------------------------------------------
 
 pub const HeaderField = struct { name: []const u8, value: []const u8 };
 
@@ -354,9 +348,7 @@ fn appendDup(list: *std.ArrayList(HeaderField), gpa: Allocator, f: HeaderField) 
     });
 }
 
-// ---------------------------------------------------------------------------
 // Encoder
-// ---------------------------------------------------------------------------
 
 pub const Indexing = enum {
     /// 01xxxxxx â€” stored in dynamic table.
@@ -516,9 +508,7 @@ fn lowerBuf(gpa: Allocator, name: []const u8) ![]u8 {
     return buf;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "integer roundtrip via shared primitive" {
     var buf: [16]u8 = undefined;

@@ -35,9 +35,7 @@ pub const Error = error{
 
 pub var unknown_count: std.atomic.Value(u64) = .init(0);
 
-// ---------------------------------------------------------------------------
 // Windows
-// ---------------------------------------------------------------------------
 
 const is_windows = builtin.os.tag == .windows;
 
@@ -168,9 +166,7 @@ const ws = if (is_windows) struct {
     }
 } else struct {};
 
-// ---------------------------------------------------------------------------
 // POSIX (libc)
-// ---------------------------------------------------------------------------
 
 const posix_c = if (!is_windows and builtin.link_libc) struct {
     const fd_t = i32;
@@ -271,9 +267,7 @@ const posix_c = if (!is_windows and builtin.link_libc) struct {
     }
 } else struct {};
 
-// ---------------------------------------------------------------------------
 // Public API (dispatches per-platform)
-// ---------------------------------------------------------------------------
 
 /// One-shot global init (WSAStartup on Windows; no-op elsewhere).
 pub fn init() void {

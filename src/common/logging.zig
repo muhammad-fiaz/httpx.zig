@@ -140,9 +140,7 @@ pub const Logger = struct {
 
 fn noopLog(_: *anyopaque, _: Record) void {}
 
-// ---------------------------------------------------------------------------
 // Built-in sink: writes "[LABEL] [component] message" (+ optional ANSI color)
-// ---------------------------------------------------------------------------
 
 pub const WriterSink = struct {
     w: *std.Io.Writer,
@@ -173,9 +171,7 @@ pub const WriterSink = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Secret redaction
-// ---------------------------------------------------------------------------
 
 /// True for headers whose values must never be logged verbatim.
 pub fn isSensitiveHeader(name: []const u8) bool {

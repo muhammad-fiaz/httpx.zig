@@ -8,9 +8,7 @@ pub const frame = @import("frame.zig");
 /// Magic GUID from RFC 6455 section 1.3 used in Sec-WebSocket-Accept.
 pub const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-// ---------------------------------------------------------------------------
 // Handshake
-// ---------------------------------------------------------------------------
 
 /// Computes Sec-WebSocket-Accept from the client's Sec-WebSocket-Key.
 pub fn computeAccept(key: []const u8, out: *[28]u8) void {

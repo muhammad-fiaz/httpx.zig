@@ -13,9 +13,7 @@ const alpn_mod = @import("../protocols/tls/alpn.zig");
 const quic_tls = @import("../protocols/tls/quic_tls.zig");
 const qcrypto = @import("../protocols/quic/crypto.zig");
 
-// ---------------------------------------------------------------------------
 // Test 1: Full handshake state machine — client ↔ server
-// ---------------------------------------------------------------------------
 
 test "integration: full TLS 1.3 handshake state machine" {
     const a = testing.allocator;
@@ -80,9 +78,7 @@ test "integration: full TLS 1.3 handshake state machine" {
     try testing.expect(server.ap_keys != null);
 }
 
-// ---------------------------------------------------------------------------
 // Test 2: Key schedule determinism (same input → same output)
-// ---------------------------------------------------------------------------
 
 test "integration: key schedule is deterministic and symmetric" {
     const shared_secret: [32]u8 = .{0xAB} ** 32;
@@ -104,9 +100,7 @@ test "integration: key schedule is deterministic and symmetric" {
     try testing.expect(!std.mem.eql(u8, &ap.keys.tx_secret, &ap.keys.rx_secret));
 }
 
-// ---------------------------------------------------------------------------
 // Test 3: Record layer round-trip through the handshake engine
-// ---------------------------------------------------------------------------
 
 test "integration: record layer encrypts and decrypts with derived keys" {
     const a = testing.allocator;
@@ -172,9 +166,7 @@ test "integration: record layer encrypts and decrypts with derived keys" {
     try testing.expectEqualStrings(plaintext, result.plaintext);
 }
 
-// ---------------------------------------------------------------------------
 // Test 4: ALPN negotiation through the full handshake
-// ---------------------------------------------------------------------------
 
 test "integration: ALPN negotiation end-to-end" {
     const a = testing.allocator;
@@ -224,9 +216,7 @@ test "integration: ALPN negotiation end-to-end" {
     try testing.expectEqual(alpn_mod.Protocol.h2, negotiated.?);
 }
 
-// ---------------------------------------------------------------------------
 // Test 5: SNI is encoded in ClientHello
-// ---------------------------------------------------------------------------
 
 test "integration: SNI extension is encoded in ClientHello" {
     const a = testing.allocator;
@@ -248,9 +238,7 @@ test "integration: SNI extension is encoded in ClientHello" {
     try testing.expect(found_sni);
 }
 
-// ---------------------------------------------------------------------------
 // Test 6: Record layer sequence numbers produce unique ciphertexts
-// ---------------------------------------------------------------------------
 
 test "integration: sequence number progression produces unique nonces" {
     const key = [_]u8{0xAA} ** 16;
@@ -267,9 +255,7 @@ test "integration: sequence number progression produces unique nonces" {
     try testing.expect(!std.mem.eql(u8, r0.bytes[5..r0.len], r2.bytes[5..r2.len]));
 }
 
-// ---------------------------------------------------------------------------
 // Test 7: Handshake transcript produces consistent hashes
-// ---------------------------------------------------------------------------
 
 test "integration: transcript hash is consistent across client and server" {
     const ch_body = "ClientHello body";
@@ -291,9 +277,7 @@ test "integration: transcript hash is consistent across client and server" {
     try testing.expectEqual(client_hash, server_hash);
 }
 
-// ---------------------------------------------------------------------------
 // Test 8: HKDF-Expand-Label produces correct TLS 1.3 info format
-// ---------------------------------------------------------------------------
 
 test "integration: HKDF-Expand-Label produces tls13-prefixed info" {
     const prk: [32]u8 = .{0xAB} ** 32;

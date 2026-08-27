@@ -157,9 +157,7 @@ pub fn decode(data: []const u8) Error!Params {
     return p;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "encode/decode roundtrip preserves values" {
     var list = std.ArrayList(u8).empty;

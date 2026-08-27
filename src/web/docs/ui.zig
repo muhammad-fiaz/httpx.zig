@@ -314,9 +314,7 @@ fn renderScalarPage(a: Allocator, title: []const u8, spec_url: []const u8, scrip
     return out.toOwnedSlice();
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 fn helloHandler(ctx: *Context) anyerror!Response {
     _ = ctx;

@@ -54,9 +54,7 @@ pub const FrameType = enum(u64) {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Decoded frame view
-// ---------------------------------------------------------------------------
 
 pub const AckRange = struct { gap: u64, length: u64 };
 
@@ -329,9 +327,7 @@ fn allocRanges(src: []const AckRange) Error![]AckRange {
     return out;
 }
 
-// ---------------------------------------------------------------------------
 // Encoding
-// ---------------------------------------------------------------------------
 
 /// Encodes a frame into buf. Returns bytes written, or BufferTooSmall.
 /// The `scratch` variants avoid allocation by writing ranges inline.
@@ -475,9 +471,7 @@ pub fn encodeAckFromBlocks(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "crypto frame roundtrip" {
     var list = std.ArrayList(u8).empty;

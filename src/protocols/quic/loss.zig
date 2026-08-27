@@ -182,9 +182,7 @@ pub const Recovery = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "first rtt sample initializes stats without correction" {
     var r = RttStats{};

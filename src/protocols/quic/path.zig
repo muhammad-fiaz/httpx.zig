@@ -124,9 +124,7 @@ pub const PathValidator = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "challenge-response roundtrip validates path" {
     var prng = std.Random.DefaultPrng.init(0xC1D);

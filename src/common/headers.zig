@@ -124,9 +124,7 @@ fn validateValue(value: []const u8) !void {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "set and get header case-insensitive" {
     const a = std.testing.allocator;

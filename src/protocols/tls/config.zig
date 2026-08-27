@@ -17,9 +17,7 @@ pub const Error = error{
     CertificateExpired,
 };
 
-// ---------------------------------------------------------------------------
 // DER / PEM certificate parsing
-// ---------------------------------------------------------------------------
 
 /// Decodes base64 body of a PEM block.
 fn decodePemBody(allocator: Allocator, pem: []const u8, label: []const u8) ![]u8 {
@@ -95,9 +93,7 @@ pub fn parsePrivateKeyPem(allocator: Allocator, pem: []const u8) ![]u8 {
     return Error.InvalidPem;
 }
 
-// ---------------------------------------------------------------------------
 // Server TLS configuration
-// ---------------------------------------------------------------------------
 
 pub const TlsVersion = enum { tls_1_2, tls_1_3, both };
 
@@ -136,9 +132,7 @@ pub const ClientConfig = struct {
     verify_certificates: bool = true,
 };
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "parse single certificate PEM" {
     const a = std.testing.allocator;

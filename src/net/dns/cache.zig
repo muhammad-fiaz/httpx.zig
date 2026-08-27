@@ -292,9 +292,7 @@ pub const Cache = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Tests: injected fake proves caching, negatives, and single-flight
-// ---------------------------------------------------------------------------
 
 const FakeResolver = struct {
     calls: std.atomic.Value(u32) = .init(0),

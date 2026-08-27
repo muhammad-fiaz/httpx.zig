@@ -209,9 +209,7 @@ pub const CollectSink = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 fn collect(gpa: Allocator) struct { s: Stream, out: std.ArrayList(u8), cs: *CollectSink } {
     _ = gpa;

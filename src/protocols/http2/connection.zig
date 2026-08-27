@@ -54,9 +54,7 @@ pub const Settings = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Callbacks
-// ---------------------------------------------------------------------------
 
 pub const Callbacks = struct {
     ctx: ?*anyopaque = null,
@@ -71,9 +69,7 @@ pub const Callbacks = struct {
     onGoaway: ?*const fn (ctx: ?*anyopaque, last_sid: u31, code: u32, debug: []const u8) void = null,
 };
 
-// ---------------------------------------------------------------------------
 // Session
-// ---------------------------------------------------------------------------
 
 pub const Role = enum { client, server };
 
@@ -660,9 +656,7 @@ pub const Session = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Loopback integration test: full client<->server exchange
-// ---------------------------------------------------------------------------
 
 test "session pair completes request/response exchange" {
     const a = std.testing.allocator;

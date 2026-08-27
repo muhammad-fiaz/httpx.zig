@@ -449,9 +449,7 @@ fn containsId(ids: []const []u8, candidate: []const u8) bool {
     return false;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 fn h(ctx: *router_mod.Context) anyerror!router_mod.Response {
     _ = ctx;
@@ -534,9 +532,7 @@ test "operation ids are de-duplicated on sanitizer collision" {
     try std.testing.expectEqual(@as(usize, 1), seen_get_a_b_2);
 }
 
-// ---------------------------------------------------------------------------
 // Metadata-driven generation ("define once" verification)
-// ---------------------------------------------------------------------------
 
 const tmeta = @import("../router/metadata.zig");
 

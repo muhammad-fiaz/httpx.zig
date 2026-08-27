@@ -14,9 +14,7 @@ pub const Error = error{
     BufferTooSmall,
 };
 
-// ---------------------------------------------------------------------------
 // Header protection
-// ---------------------------------------------------------------------------
 
 /// AES-based header protection mask (Initial/Handshake/1-RTT AES suites).
 pub fn hpMaskAes128(comptime key: [16]u8, sample: *const [16]u8) [5]u8 {
@@ -85,9 +83,7 @@ pub fn applyHeaderProtection(
     _ = removeHeaderProtection(hdr, pn_offset, pn_len, cipher, key); // XOR symmetric
 }
 
-// ---------------------------------------------------------------------------
 // Payload protection
-// ---------------------------------------------------------------------------
 
 /// Nonce = IV with the last 8 bytes XORed with the big-endian packet number.
 pub fn buildNonce(iv: *const [12]u8, pn: u64) [12]u8 {
@@ -130,9 +126,7 @@ pub fn open(
         return Error.AuthenticationFailed;
 }
 
-// ---------------------------------------------------------------------------
 // Packet number encoding / reconstruction (RFC 9000 section A.3 style)
-// ---------------------------------------------------------------------------
 
 /// Smallest number of bytes needed to encode pn given the largest acked.
 pub fn pnEncodingLen(pn: u64, largest_acked: u64) usize {
@@ -156,9 +150,7 @@ pub fn reconstructPn(expected_pn: u64, truncated: u64, pn_len: usize) u64 {
     return candidate;
 }
 
-// ---------------------------------------------------------------------------
 // Retry integrity (RFC 9001 section 5.8)
-// ---------------------------------------------------------------------------
 
 pub const retry_secret_v1 = [_]u8{
     0xd9, 0xc9, 0x94, 0x3e, 0x61, 0x01, 0xfd, 0x20,
@@ -201,9 +193,7 @@ pub fn retryIntegrityTag(
     Aes128Gcm.encrypt(tag_out[0..0], tag_out, empty[0..], pseudo_buf[0..len], zero_iv, retry_keys_v1.key);
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "header protection mask matches RFC 9001 A.2" {
     const hp = [_]u8{ 0x9f, 0x50, 0x44, 0x9e, 0x04, 0xa0, 0xe8, 0x10, 0x28, 0x3a, 0x1e, 0x99, 0x33, 0xad, 0xed, 0xd2 };

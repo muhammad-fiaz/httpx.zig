@@ -78,9 +78,7 @@ pub fn find(kind: Kind, name: []const u8) ?*const File {
     return null;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "finds every vendored swagger ui file" {
     for (swagger_files) |f| {

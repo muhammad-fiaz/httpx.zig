@@ -448,9 +448,7 @@ fn readAll(io: std.Io, path: []const u8, out: []u8) !void {
     return f.readPositionalAll(io, out, 0);
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 test "safeJoin rejects traversal, encoding tricks, and windows separators" {
     const a = std.testing.allocator;

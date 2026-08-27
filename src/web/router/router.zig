@@ -265,9 +265,7 @@ fn matchPattern(pat: *const Pattern, path: []const u8, ctx: *Context) bool {
     return seg_idx == pat.count;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 fn dummyHandler(ctx: *Context) anyerror!Response {
     _ = ctx;

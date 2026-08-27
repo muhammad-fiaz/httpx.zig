@@ -27,9 +27,7 @@ fn writeAllRaw(sock: *const tcp.Socket, bytes: []const u8) Error!void {
     sock.writeAll(bytes) catch return error.WriteFailed;
 }
 
-// ---------------------------------------------------------------------------
 // Client
-// ---------------------------------------------------------------------------
 
 /// One complete exchange result.
 pub const Response = struct {
@@ -192,9 +190,7 @@ pub const Client = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
 // Server: maps HTTP/2 streams onto a handler over ONE connection (h2c).
-// ---------------------------------------------------------------------------
 
 /// Handler output for one request.
 pub const HandlerResponse = struct {
@@ -321,9 +317,7 @@ pub fn serveConnection(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tests: real client <-> server over loopback TCP
-// ---------------------------------------------------------------------------
 
 test "http2 client and server exchange over real tcp (h2c)" {
     const a = std.testing.allocator;
