@@ -225,7 +225,15 @@ fn lookupPosix(allocator: Allocator, host: []const u8, port: u16) Error![]addres
 test "localhost resolves offline (hosts file)" {
     if (builtin.os.tag != .windows and !builtin.link_libc) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const addrs = lookup(a, "localhost", 80) catch return error.SkipZigTest;
+    const addrs = lookup(a, "localhost", 80) catch |err| {
+        // macOS GitHub Actions runners may not have localhost in /etc/hosts.
+        // Fall back to 127.0.0.1 to verify the resolver path works.
+        if (err != error.HostNotFound) return err;
+        const fallback = try lookup(a, "127.0.0.1", 80);
+        defer a.free(fallback);
+        try std.testing.expect(fallback.len >= 1);
+        return;
+    };
     defer a.free(addrs);
     try std.testing.expect(addrs.len >= 1);
     // Order is OS-defined (::1 may precede 127.0.0.1); both are correct.
