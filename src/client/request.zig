@@ -1017,7 +1017,7 @@ test "connection close response is not pooled" {
     var client = @import("client.zig").Client.init(a, ctx.io, .{});
     defer client.deinit();
     var ub: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&ub, "http://localhost:{d}/x", .{srv.localPort()});
+    const url = try std.fmt.bufPrint(&ub, "http://127.0.0.1:{d}/x", .{srv.localPort()});
 
     var r1 = try client.get(.{ .url = url });
     r1.deinit();
