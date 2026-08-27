@@ -91,7 +91,7 @@ pub const ClientHello = struct {
         // server_name (SNI) — first protocol as the hostname
         if (self.alpn_protocols.len > 0) {
             const hostname = self.alpn_protocols[0];
-            const sni_len: u16 = @intCast(5 + 2 + hostname.len); // list_hdr(2) + type(1) + len(1) + name_len(1) + name
+            const sni_len: u16 = @intCast(5 + hostname.len); // list_hdr(2) + type(1) + name_len(2) + name
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.server_name))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, sni_len)));
             // SNI list length
