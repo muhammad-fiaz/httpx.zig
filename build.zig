@@ -1,22 +1,20 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// Cross-compilation targets verified in CI.
-const cross_targets = [_][]const u8{
-    "x86_64-linux-gnu",
-    "x86_64-linux-musl",
-    "aarch64-linux-gnu",
-    "aarch64-linux-musl",
-    "x86_64-windows-gnu",
-    "aarch64-windows-gnu",
-    "x86_64-macos-none",
-    "aarch64-macos-none",
-};
+fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag == .windows) {
+        // Winsock symbols are provided by these system libraries on Windows.
+        compile.root_module.linkSystemLibrary("ws2_32", .{});
+        compile.root_module.linkSystemLibrary("mswsock", .{});
+        compile.root_module.linkSystemLibrary("c", .{});
+    }
+}
 
-/// Build configuration for httpx.zig - Production-ready HTTP library for Zig.
+/// Build configuration for httpx.zig - Production-ready HTTP library for Zig
 /// Supports HTTP/1.1, HTTP/2, HTTP/3 with TLS, connection pooling, and more.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+
     const optimize = b.standardOptimizeOption(.{});
 
     const zstd_dep = b.dependency("zstd", .{
@@ -34,8 +32,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Public module exported as "httpx" to consumers.
-    // Dependencies added here propagate downstream.
+    // Create the public module that will be exported as "httpx" to consumers.
+    // Dependencies must be added here so they propagate to downstream packages.
     const httpx_module = b.addModule("httpx", .{
         .root_source_file = b.path("src/httpx.zig"),
     });
@@ -99,7 +97,6 @@ pub fn build(b: *std.Build) void {
         run_all_examples.dependOn(last);
     }
 
-    // Unit tests - run with `zig build test`
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/httpx.zig"),
@@ -114,7 +111,14 @@ pub fn build(b: *std.Build) void {
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_tests.step);
+
+    // Only run tests when target matches host; otherwise build test artifact only.
+    if (target.result.os.tag == builtin.os.tag and target.result.cpu.arch == builtin.cpu.arch) {
+        test_step.dependOn(&run_tests.step);
+    } else {
+        const install_tests = b.addInstallArtifact(tests, .{});
+        test_step.dependOn(&install_tests.step);
+    }
 
     const bench_exe = b.addExecutable(.{
         .name = "benchmark",
@@ -134,24 +138,36 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_bench.step);
 
-    // Cross-compile library for all supported targets
+    // Cross-compilation targets to verify support
+    const cross_targets = [_]std.Target.Query{
+        .{ .cpu_arch = .x86_64, .os_tag = .linux },
+        .{ .cpu_arch = .aarch64, .os_tag = .linux },
+        .{ .cpu_arch = .x86, .os_tag = .linux },
+        .{ .cpu_arch = .x86_64, .os_tag = .windows },
+        .{ .cpu_arch = .aarch64, .os_tag = .windows },
+        .{ .cpu_arch = .x86, .os_tag = .windows },
+        .{ .cpu_arch = .x86_64, .os_tag = .macos },
+        .{ .cpu_arch = .aarch64, .os_tag = .macos },
+    };
+
     const build_all_step = b.step("build-all-targets", "Build library for all supported targets");
 
-    inline for (cross_targets) |triple| {
+    for (cross_targets) |t| {
+        const target_cross = b.resolveTargetQuery(t);
         const root_module_cross = b.createModule(.{
             .root_source_file = b.path("src/httpx.zig"),
-            .target = b.resolveTargetQuery(tryParseTriple(triple)),
-            .optimize = .ReleaseFast,
+            .target = target_cross,
+            .optimize = optimize,
         });
         root_module_cross.addImport("zstd", zstd_dep.module("zstd"));
         root_module_cross.addImport("brotli", brotli_dep.module("brotli"));
         root_module_cross.addImport("tint", tint_dep.module("tint"));
-
         const lib_cross = b.addLibrary(.{
             .name = "httpx",
             .linkage = .static,
             .root_module = root_module_cross,
         });
+        linkPlatformLibs(lib_cross, target_cross);
 
         // Just build the artifact to verify it compiles
         build_all_step.dependOn(&lib_cross.step);
@@ -185,46 +201,6 @@ pub fn build(b: *std.Build) void {
 
     const test_all_step = b.step("test-all", "Run tests, benchmarks, and all runnable examples");
     test_all_step.dependOn(test_step);
+    test_all_step.dependOn(bench_step);
     test_all_step.dependOn(run_all_examples);
-}
-
-/// Parses a target triple like "x86_64-linux-gnu" into a Target.Query.
-fn tryParseTriple(triple: []const u8) std.Target.Query {
-    var parts = std.mem.splitScalar(u8, triple, '-');
-    const arch_str = parts.next() orelse "";
-    const os_str = parts.next() orelse "";
-    const abi_str = parts.next() orelse "none";
-
-    const cpu_arch: std.Target.Cpu.Arch = if (std.mem.eql(u8, arch_str, "x86_64"))
-        .x86_64
-    else if (std.mem.eql(u8, arch_str, "aarch64"))
-        .aarch64
-    else
-        return .{};
-
-    const os_tag: std.Target.Os.Tag = if (std.mem.eql(u8, os_str, "linux"))
-        .linux
-    else if (std.mem.eql(u8, os_str, "windows"))
-        .windows
-    else if (std.mem.eql(u8, os_str, "macos"))
-        .macos
-    else
-        return .{};
-
-    const abi: std.Target.Abi = if (std.mem.eql(u8, abi_str, "gnu"))
-        .gnu
-    else if (std.mem.eql(u8, abi_str, "musl"))
-        .musl
-    else
-        .none;
-
-    return .{ .cpu_arch = cpu_arch, .os_tag = os_tag, .abi = abi };
-}
-
-fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
-    if (target.result.os.tag == .windows) {
-        compile.root_module.linkSystemLibrary("ws2_32", .{});
-        compile.root_module.linkSystemLibrary("mswsock", .{});
-        compile.root_module.linkSystemLibrary("c", .{});
-    }
 }
