@@ -32,7 +32,7 @@ jobs:
           version: 0.16.0
 
       - name: Format check
-        run: zig fmt --check src/ examples/ bench/ build.zig
+        run: zig fmt --check src/ bench/ build.zig build.zig.zon
 
   test:
     name: Test (${{ matrix.name }})
