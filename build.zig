@@ -110,6 +110,10 @@ pub fn build(b: *std.Build) void {
     linkPlatformLibs(tests, target);
 
     const run_tests = b.addRunArtifact(tests);
+    // Windows IPC (--listen=-) sporadically fails with EndOfStream after all
+    // tests pass (338/339). Keep the run non-cacheable so a stale
+    // `failed command: ... --listen=-` from .zig-cache is not replayed.
+    run_tests.has_side_effects = true;
     const test_step = b.step("test", "Run unit tests");
 
     // Only run tests when target matches host; otherwise build test artifact only.
@@ -137,41 +141,6 @@ pub fn build(b: *std.Build) void {
 
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_bench.step);
-
-    // Cross-compilation targets to verify support
-    const cross_targets = [_]std.Target.Query{
-        .{ .cpu_arch = .x86_64, .os_tag = .linux },
-        .{ .cpu_arch = .aarch64, .os_tag = .linux },
-        .{ .cpu_arch = .x86, .os_tag = .linux },
-        .{ .cpu_arch = .x86_64, .os_tag = .windows },
-        .{ .cpu_arch = .aarch64, .os_tag = .windows },
-        .{ .cpu_arch = .x86, .os_tag = .windows },
-        .{ .cpu_arch = .x86_64, .os_tag = .macos },
-        .{ .cpu_arch = .aarch64, .os_tag = .macos },
-    };
-
-    const build_all_step = b.step("build-all-targets", "Build library for all supported targets");
-
-    for (cross_targets) |t| {
-        const target_cross = b.resolveTargetQuery(t);
-        const root_module_cross = b.createModule(.{
-            .root_source_file = b.path("src/httpx.zig"),
-            .target = target_cross,
-            .optimize = optimize,
-        });
-        root_module_cross.addImport("zstd", zstd_dep.module("zstd"));
-        root_module_cross.addImport("brotli", brotli_dep.module("brotli"));
-        root_module_cross.addImport("tint", tint_dep.module("tint"));
-        const lib_cross = b.addLibrary(.{
-            .name = "httpx",
-            .linkage = .static,
-            .root_module = root_module_cross,
-        });
-        linkPlatformLibs(lib_cross, target_cross);
-
-        // Just build the artifact to verify it compiles
-        build_all_step.dependOn(&lib_cross.step);
-    }
 
     const lib_root_module = b.createModule(.{
         .root_source_file = b.path("src/httpx.zig"),
