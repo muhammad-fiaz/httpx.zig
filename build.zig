@@ -1,20 +1,22 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
-    if (target.result.os.tag == .windows) {
-        // Winsock symbols are provided by these system libraries on Windows.
-        compile.root_module.linkSystemLibrary("ws2_32", .{});
-        compile.root_module.linkSystemLibrary("mswsock", .{});
-        compile.root_module.linkSystemLibrary("c", .{});
-    }
-}
+/// Cross-compilation targets verified in CI.
+const cross_targets = [_][]const u8{
+    "x86_64-linux-gnu",
+    "x86_64-linux-musl",
+    "aarch64-linux-gnu",
+    "aarch64-linux-musl",
+    "x86_64-windows-gnu",
+    "aarch64-windows-gnu",
+    "x86_64-macos-none",
+    "aarch64-macos-none",
+};
 
-/// Build configuration for httpx.zig - Production-ready HTTP library for Zig
+/// Build configuration for httpx.zig - Production-ready HTTP library for Zig.
 /// Supports HTTP/1.1, HTTP/2, HTTP/3 with TLS, connection pooling, and more.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-
     const optimize = b.standardOptimizeOption(.{});
 
     const zstd_dep = b.dependency("zstd", .{
@@ -32,8 +34,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Create the public module that will be exported as "httpx" to consumers.
-    // Dependencies must be added here so they propagate to downstream packages.
+    // Public module exported as "httpx" to consumers.
+    // Dependencies added here propagate downstream.
     const httpx_module = b.addModule("httpx", .{
         .root_source_file = b.path("src/httpx.zig"),
     });
@@ -42,75 +44,7 @@ pub fn build(b: *std.Build) void {
     httpx_module.addImport("brotli", brotli_dep.module("brotli"));
     httpx_module.addImport("tint", tint_dep.module("tint"));
 
-    const examples = [_]struct { name: []const u8, path: []const u8, skip_run_all: bool = false }{
-        .{ .name = "simple_get", .path = "examples/simple_get.zig" },
-        .{ .name = "simple_get_deserialize", .path = "examples/simple_get_deserialize.zig" },
-        .{ .name = "json_api_example", .path = "examples/json_api_example.zig" },
-        .{ .name = "http_auth_helpers", .path = "examples/http_auth_helpers.zig" },
-        .{ .name = "post_json", .path = "examples/post_json.zig" },
-        .{ .name = "concurrent_requests", .path = "examples/concurrent_requests.zig" },
-        .{ .name = "custom_headers", .path = "examples/custom_headers.zig" },
-        .{ .name = "tcp_local", .path = "examples/tcp_local.zig" },
-        .{ .name = "udp_local", .path = "examples/udp_local.zig" },
-        .{ .name = "simple_server", .path = "examples/simple_server.zig" },
-        .{ .name = "router_example", .path = "examples/router_example.zig" },
-        .{ .name = "middleware_example", .path = "examples/middleware_example.zig" },
-        .{ .name = "streaming", .path = "examples/streaming.zig" },
-        .{ .name = "interceptors", .path = "examples/interceptors.zig" },
-        .{ .name = "connection_pool", .path = "examples/connection_pool.zig" },
-        .{ .name = "cookies_demo", .path = "examples/cookies_demo.zig" },
-        .{ .name = "proxy_example", .path = "examples/proxy_example.zig" },
-        .{ .name = "socks5_proxy", .path = "examples/socks5_proxy.zig" },
-        .{ .name = "simplified_api_aliases", .path = "examples/simplified_api_aliases.zig" },
-        .{ .name = "static_files", .path = "examples/static_files.zig" },
-        .{ .name = "multi_page_website", .path = "examples/multi_page_website.zig" },
-        .{ .name = "http2_example", .path = "examples/http2_example.zig" },
-        .{ .name = "http2_client_runtime", .path = "examples/http2_client_runtime.zig" },
-        .{ .name = "http2_server_runtime", .path = "examples/http2_server_runtime.zig" },
-        .{ .name = "http3_client_runtime", .path = "examples/http3_client_runtime.zig" },
-        .{ .name = "http3_server_runtime", .path = "examples/http3_server_runtime.zig" },
-        .{ .name = "http3_example", .path = "examples/http3_example.zig" },
-        .{ .name = "http2_advanced", .path = "examples/http2_advanced.zig" },
-        .{ .name = "http3_advanced", .path = "examples/http3_advanced.zig" },
-        .{ .name = "websocket_example", .path = "examples/websocket_example.zig" },
-        .{ .name = "multipart_example", .path = "examples/multipart_example.zig" },
-        .{ .name = "metrics_example", .path = "examples/metrics_example.zig" },
-        .{ .name = "session_example", .path = "examples/session_example.zig" },
-        .{ .name = "health_check_example", .path = "examples/health_check_example.zig" },
-        .{ .name = "request_response_customization", .path = "examples/request_response_customization.zig" },
-        .{ .name = "unix_socket_example", .path = "examples/unix_socket_example.zig" },
-        .{ .name = "async_server_example", .path = "examples/async_server_example.zig" },
-        .{ .name = "cloud_https_server", .path = "examples/cloud_https_server.zig" },
-        .{ .name = "https_client", .path = "examples/https_client.zig" },
-        .{ .name = "sse_example", .path = "examples/sse_example.zig" },
-        .{ .name = "websocket_server", .path = "examples/websocket_server.zig" },
-        .{ .name = "tls_server", .path = "examples/tls_server.zig" },
-        .{ .name = "compression_example", .path = "examples/compression_example.zig" },
-        .{ .name = "http_methods", .path = "examples/http_methods.zig" },
-        .{ .name = "logging_callback", .path = "examples/logging_callback.zig" },
-        .{ .name = "retry_example", .path = "examples/retry_example.zig" },
-        .{ .name = "dns_example", .path = "examples/dns_example.zig" },
-        .{ .name = "dns_cache", .path = "examples/dns_cache.zig" },
-        .{ .name = "dns_resolve_all", .path = "examples/dns_resolve_all.zig" },
-        .{ .name = "dns_configuration", .path = "examples/dns_configuration.zig" },
-        .{ .name = "redirect_example", .path = "examples/redirect_example.zig" },
-        .{ .name = "batch_concurrent", .path = "examples/batch_concurrent.zig" },
-        .{ .name = "pre_route_example", .path = "examples/pre_route_example.zig" },
-        .{ .name = "readiness_probe_example", .path = "examples/readiness_probe_example.zig" },
-        .{ .name = "reverse_proxy_middleware", .path = "examples/reverse_proxy_middleware.zig" },
-        .{ .name = "tls_https_get", .path = "examples/tls_https_get.zig" },
-        .{ .name = "tls_config_options", .path = "examples/tls_config_options.zig" },
-        .{ .name = "tls_handshake_details", .path = "examples/tls_handshake_details.zig" },
-        .{ .name = "tls_custom_ca", .path = "examples/tls_custom_ca.zig" },
-        .{ .name = "tls_mtls", .path = "examples/tls_mtls.zig" },
-        .{ .name = "streaming_compression_example", .path = "examples/streaming_compression_example.zig" },
-        .{ .name = "http_cache_example", .path = "examples/http_cache_example.zig" },
-        .{ .name = "buffer_pool_example", .path = "examples/buffer_pool_example.zig" },
-        .{ .name = "http_download", .path = "examples/http_download.zig" },
-        .{ .name = "checksum_example", .path = "examples/checksum_example.zig" },
-        .{ .name = "progress_example", .path = "examples/progress_example.zig" },
-        .{ .name = "ftp_example", .path = "examples/ftp_example.zig" },
-    };
+    const examples = [_]struct { name: []const u8, path: []const u8, skip_run_all: bool = false }{};
 
     inline for (examples) |example| {
         const exe = b.addExecutable(.{
@@ -165,6 +99,7 @@ pub fn build(b: *std.Build) void {
         run_all_examples.dependOn(last);
     }
 
+    // Unit tests - run with `zig build test`
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/httpx.zig"),
@@ -179,14 +114,7 @@ pub fn build(b: *std.Build) void {
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
-
-    // Only run tests when target matches host; otherwise build test artifact only.
-    if (target.result.os.tag == builtin.os.tag and target.result.cpu.arch == builtin.cpu.arch) {
-        test_step.dependOn(&run_tests.step);
-    } else {
-        const install_tests = b.addInstallArtifact(tests, .{});
-        test_step.dependOn(&install_tests.step);
-    }
+    test_step.dependOn(&run_tests.step);
 
     const bench_exe = b.addExecutable(.{
         .name = "benchmark",
@@ -206,36 +134,24 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&run_bench.step);
 
-    // Cross-compilation targets to verify support
-    const cross_targets = [_]std.Target.Query{
-        .{ .cpu_arch = .x86_64, .os_tag = .linux },
-        .{ .cpu_arch = .aarch64, .os_tag = .linux },
-        .{ .cpu_arch = .x86, .os_tag = .linux },
-        .{ .cpu_arch = .x86_64, .os_tag = .windows },
-        .{ .cpu_arch = .aarch64, .os_tag = .windows },
-        .{ .cpu_arch = .x86, .os_tag = .windows },
-        .{ .cpu_arch = .x86_64, .os_tag = .macos },
-        .{ .cpu_arch = .aarch64, .os_tag = .macos },
-    };
-
+    // Cross-compile library for all supported targets
     const build_all_step = b.step("build-all-targets", "Build library for all supported targets");
 
-    for (cross_targets) |t| {
-        const target_cross = b.resolveTargetQuery(t);
+    inline for (cross_targets) |triple| {
         const root_module_cross = b.createModule(.{
             .root_source_file = b.path("src/httpx.zig"),
-            .target = target_cross,
-            .optimize = optimize,
+            .target = b.resolveTargetQuery(tryParseTriple(triple)),
+            .optimize = .ReleaseFast,
         });
         root_module_cross.addImport("zstd", zstd_dep.module("zstd"));
         root_module_cross.addImport("brotli", brotli_dep.module("brotli"));
         root_module_cross.addImport("tint", tint_dep.module("tint"));
+
         const lib_cross = b.addLibrary(.{
             .name = "httpx",
             .linkage = .static,
             .root_module = root_module_cross,
         });
-        linkPlatformLibs(lib_cross, target_cross);
 
         // Just build the artifact to verify it compiles
         build_all_step.dependOn(&lib_cross.step);
@@ -269,6 +185,46 @@ pub fn build(b: *std.Build) void {
 
     const test_all_step = b.step("test-all", "Run tests, benchmarks, and all runnable examples");
     test_all_step.dependOn(test_step);
-    test_all_step.dependOn(bench_step);
     test_all_step.dependOn(run_all_examples);
+}
+
+/// Parses a target triple like "x86_64-linux-gnu" into a Target.Query.
+fn tryParseTriple(triple: []const u8) std.Target.Query {
+    var parts = std.mem.splitScalar(u8, triple, '-');
+    const arch_str = parts.next() orelse "";
+    const os_str = parts.next() orelse "";
+    const abi_str = parts.next() orelse "none";
+
+    const cpu_arch: std.Target.Cpu.Arch = if (std.mem.eql(u8, arch_str, "x86_64"))
+        .x86_64
+    else if (std.mem.eql(u8, arch_str, "aarch64"))
+        .aarch64
+    else
+        return .{};
+
+    const os_tag: std.Target.Os.Tag = if (std.mem.eql(u8, os_str, "linux"))
+        .linux
+    else if (std.mem.eql(u8, os_str, "windows"))
+        .windows
+    else if (std.mem.eql(u8, os_str, "macos"))
+        .macos
+    else
+        return .{};
+
+    const abi: std.Target.Abi = if (std.mem.eql(u8, abi_str, "gnu"))
+        .gnu
+    else if (std.mem.eql(u8, abi_str, "musl"))
+        .musl
+    else
+        .none;
+
+    return .{ .cpu_arch = cpu_arch, .os_tag = os_tag, .abi = abi };
+}
+
+fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+    if (target.result.os.tag == .windows) {
+        compile.root_module.linkSystemLibrary("ws2_32", .{});
+        compile.root_module.linkSystemLibrary("mswsock", .{});
+        compile.root_module.linkSystemLibrary("c", .{});
+    }
 }

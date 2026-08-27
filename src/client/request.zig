@@ -959,7 +959,7 @@ test "keep-alive: second request reuses pooled connection" {
 
     var ub: [64]u8 = undefined;
     const port = srv.localPort();
-    const url = try std.fmt.bufPrint(&ub, "http://localhost:{d}/ka", .{port});
+    const url = try std.fmt.bufPrint(&ub, "http://127.0.0.1:{d}/ka", .{port});
 
     var r1 = client.get(.{ .url = url }) catch {
         client.deinit();
@@ -972,7 +972,7 @@ test "keep-alive: second request reuses pooled connection" {
     try std.testing.expectEqualStrings("hello-keepalive", r1.body);
 
     var ub2: [64]u8 = undefined;
-    var r2 = try client.get(.{ .url = try std.fmt.bufPrint(&ub2, "http://localhost:{d}/ka", .{port}) });
+    var r2 = try client.get(.{ .url = try std.fmt.bufPrint(&ub2, "http://127.0.0.1:{d}/ka", .{port}) });
     defer r2.deinit();
     try std.testing.expectEqual(@as(u16, 200), r2.status);
 

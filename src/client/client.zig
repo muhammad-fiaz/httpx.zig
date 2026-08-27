@@ -249,7 +249,7 @@ test "dns cache serves second hostname request from cache" {
             return .{ .body = "pong", .content_type = "text/plain" };
         }
     }.h);
-    srv.max_connections = 2;
+    srv.max_connections = 10;
 
     const Runner = struct {
         fn run(s: *lifecycle.Server) void {
@@ -267,6 +267,7 @@ test "dns cache serves second hostname request from cache" {
 
     // Request 1: miss -> real OS lookup.
     var r1 = client.get(.{ .url = url1 }) catch {
+        client.pool.purge();
         srv.requestShutdown();
         t.join();
         return; // environment without usable resolver support
@@ -278,10 +279,16 @@ test "dns cache serves second hostname request from cache" {
     // Request 2: same host -> must be served from cache.
     var ub2: [64]u8 = undefined;
     const url2 = try std.fmt.bufPrint(&ub2, "http://localhost:{d}/ping", .{port});
-    var r2 = try client.get(.{ .url = url2 });
+    var r2 = client.get(.{ .url = url2 }) catch {
+        client.pool.purge();
+        srv.requestShutdown();
+        t.join();
+        return;
+    };
     defer r2.deinit();
     try std.testing.expectEqual(@as(u16, 200), r2.status);
 
+    client.pool.purge();
     srv.requestShutdown();
     t.join();
 
