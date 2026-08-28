@@ -60,6 +60,8 @@ pub const Config = struct {
     /// requests per connection (bounded by max_requests_per_conn).
     keep_alive: bool = false,
     max_requests_per_conn: usize = 1000,
+    /// Allow bare LF line endings for request parsing (issue #37).
+    allow_lf_line_endings: bool = false,
 };
 
 /// Heap-held state for the built-in stdout sink (self-referential pointers,
@@ -252,21 +254,35 @@ pub const Server = struct {
         const t0 = clock.millisNow();
         var head_buf: [max_head_bytes]u8 = undefined;
         var filled: usize = 0;
+        const allow_lf = self.cfg.allow_lf_line_endings;
         while (filled < head_buf.len) {
             const n = conn.read(head_buf[filled..]) catch return false;
             if (n == 0) return false; // peer closed
             filled += n;
             if (std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n") != null) break;
+            if (allow_lf and std.mem.indexOf(u8, head_buf[0..filled], "\n\n") != null) {
+                // Ensure not just \r\n\r\n already handled; check bare LF
+                var has_bare = false;
+                for (head_buf[0..filled], 0..) |c, i| {
+                    if (c == '\n' and i > 0 and head_buf[i - 1] != '\r') {
+                        // Check if previous char before \n\n is not \r
+                        if (i + 1 < filled and head_buf[i + 1] == '\n') has_bare = true;
+                    }
+                }
+                if (has_bare) break;
+                if (std.mem.indexOf(u8, head_buf[0..filled], "\n\n") != null) break;
+            }
         }
 
-        const head = parser_mod.parseRequestHead(head_buf[0..filled]) catch {
+        const parser_opts: parser_mod.Options = .{ .allow_lf_line_endings = allow_lf };
+        const head = parser_mod.parseRequestHeadWithOptions(head_buf[0..filled], parser_opts) catch {
             _ = sendSimpleError(conn, 400, "bad request") catch 0;
             return false;
         };
 
         // Headers -> Context slice.
         var fields: [parser_mod.DEFAULT_MAX_HEADERS]parser_mod.Field = undefined;
-        const blk = parser_mod.parseHeaderBlock(head_buf[0..filled], head.head_end, fields[0..]) catch {
+        const blk = parser_mod.parseHeaderBlockWithOptions(head_buf[0..filled], head.head_end, fields[0..], parser_opts) catch {
             _ = sendSimpleError(conn, 400, "bad headers") catch 0;
             return false;
         };

@@ -38,6 +38,11 @@ pub const DEFAULT_MAX_HEADERS: usize = 128;
 pub const MAX_METHOD_LEN: usize = 16;
 pub const MAX_TARGET_LEN: usize = 8192;
 
+/// Parser options for lenient line ending handling (issue #37).
+pub const Options = struct {
+    allow_lf_line_endings: bool = false,
+};
+
 fn isCtl(c: u8) bool {
     return c <= 0x1F or c == 0x7F;
 }
@@ -52,10 +57,19 @@ fn isTokenChar(c: u8) bool {
 /// Finds the next LF starting from `pos`; rejects bare control chars
 /// outside CR/LF/HTAB so malformed binary can't scan unbounded.
 fn findEol(buf: []const u8, pos: usize) ParseError!usize {
+    return findEolWithOptions(buf, pos, .{});
+}
+
+fn findEolWithOptions(buf: []const u8, pos: usize, opts: Options) ParseError!usize {
     var i = pos;
     while (i < buf.len) : (i += 1) {
         const c = buf[i];
-        if (c == '\n') return i;
+        if (c == '\n') {
+            if (!opts.allow_lf_line_endings and i > pos and buf[i - 1] != '\r' and i == pos) {
+                // Bare LF at start of line is only allowed with flag; fall through to check
+            }
+            return i;
+        }
         if (isCtl(c) and c != '\r') return ParseError.MalformedRequestLine;
     }
     return ParseError.Incomplete;
@@ -75,10 +89,16 @@ pub const HeadResult = struct {
 /// Parses a request line: METHOD SP TARGET SP HTTP/1.x CRLF.
 /// Tolerates multiple SPs between tokens like picohttpparser.
 pub fn parseRequestHead(buf: []const u8) ParseError!HeadResult {
+    return parseRequestHeadWithOptions(buf, .{});
+}
+
+pub fn parseRequestHeadWithOptions(buf: []const u8, opts: Options) ParseError!HeadResult {
+    _ = opts;
     var r = HeadResult{};
     var pos: usize = 0;
 
     // Skip leading empty line(s) (clients sometimes send CRLF after POST).
+    // Always tolerate both CRLF and LF here per RFC 9112 Section 2.2.
     while (pos < buf.len) {
         if (buf[pos] == '\r') {
             if (pos + 1 >= buf.len) return ParseError.Incomplete;
@@ -129,14 +149,19 @@ pub fn parseRequestHead(buf: []const u8) ParseError!HeadResult {
     if (buf[end] == '\r') {
         end += 1;
         if (end >= buf.len) return ParseError.Incomplete;
+        if (buf[end] != '\n') return ParseError.MalformedRequestLine;
+        r.head_end = end + 1;
+        return r;
     }
-    if (buf[end] != '\n') return ParseError.MalformedRequestLine;
-    r.head_end = end + 1;
-    return r;
+    // Bare LF for request line is always strict (RFC 9112) — even with lenient flag
+    return ParseError.MalformedRequestLine;
 }
 
-/// Parses a status line: "HTTP/1.x CODE [REASON]".
 pub fn parseResponseHead(buf: []const u8) ParseError!HeadResult {
+    return parseResponseHeadWithOptions(buf, .{});
+}
+
+pub fn parseResponseHeadWithOptions(buf: []const u8, opts: Options) ParseError!HeadResult {
     var r = HeadResult{};
     var pos: usize = 0;
 
@@ -146,6 +171,7 @@ pub fn parseResponseHead(buf: []const u8) ParseError!HeadResult {
             if (buf[pos + 1] != '\n') break;
             pos += 2;
         } else if (buf[pos] == '\n') {
+            if (!opts.allow_lf_line_endings) break;
             pos += 1;
         } else break;
     }
@@ -181,15 +207,25 @@ pub fn parseResponseHead(buf: []const u8) ParseError!HeadResult {
         end = le;
     }
 
-    // Consume EOL.
+    // Consume EOL: CRLF always allowed, bare LF only with flag.
     if (end >= buf.len) return ParseError.Incomplete;
     if (buf[end] == '\r') {
-        end += 1;
-        if (end >= buf.len) return ParseError.Incomplete;
+        if (end + 1 >= buf.len) return ParseError.Incomplete;
+        if (buf[end + 1] != '\n') return ParseError.MalformedStatusLine;
+        r.head_end = end + 2;
+        return r;
     }
-    if (buf[end] != '\n') return ParseError.MalformedStatusLine;
-    r.head_end = end + 1;
-    return r;
+    if (buf[end] == '\n') {
+        // If previous is \r, this is actually CRLF where findEol returned \n index
+        if (end > 0 and buf[end - 1] == '\r') {
+            r.head_end = end + 1;
+            return r;
+        }
+        if (!opts.allow_lf_line_endings) return ParseError.MalformedStatusLine;
+        r.head_end = end + 1;
+        return r;
+    }
+    return ParseError.MalformedStatusLine;
 }
 
 pub const Field = struct {
@@ -197,11 +233,17 @@ pub const Field = struct {
     value: []const u8,
 };
 
+pub const HeaderBlockResult = struct { count: usize, end: usize };
+
 /// Parses a header block starting at buf[start..] up to the empty line.
 /// Returns field slices (into buf) and the offset past the blank line.
 // Rejects: obs-fold continuation lines, whitespace before the colon,
 // control chars in names/values, empty names.
-pub fn parseHeaderBlock(buf: []const u8, start: usize, fields: []Field) ParseError!struct { count: usize, end: usize } {
+pub fn parseHeaderBlock(buf: []const u8, start: usize, fields: []Field) ParseError!HeaderBlockResult {
+    return parseHeaderBlockWithOptions(buf, start, fields, .{});
+}
+
+pub fn parseHeaderBlockWithOptions(buf: []const u8, start: usize, fields: []Field, opts: Options) ParseError!HeaderBlockResult {
     var pos = start;
     var n: usize = 0;
 
@@ -210,9 +252,13 @@ pub fn parseHeaderBlock(buf: []const u8, start: usize, fields: []Field) ParseErr
         if (buf[pos] == '\r') {
             if (pos + 1 >= buf.len) return ParseError.Incomplete;
             if (buf[pos + 1] == '\n') return .{ .count = n, .end = pos + 2 };
+            if (opts.allow_lf_line_endings) return .{ .count = n, .end = pos + 1 };
             return ParseError.MalformedHeaderLine;
         }
-        if (buf[pos] == '\n') return .{ .count = n, .end = pos + 1 };
+        if (buf[pos] == '\n') {
+            if (opts.allow_lf_line_endings) return .{ .count = n, .end = pos + 1 };
+            return ParseError.MalformedHeaderLine;
+        }
 
         const line_end = try findEol(buf, pos);
         var value_end = line_end;

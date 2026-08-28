@@ -131,7 +131,7 @@ pub const pool = @import("client/pool.zig");
 /// Legacy low-level client (requires explicit allocator + io).
 pub const client = client_request;
 
-/// Top-level zero-config client aliases.
+/// Top-level zero-config client aliases (all HTTP methods + fetch/request).
 pub const get = @import("client/client.zig").globalGet;
 pub const post = @import("client/client.zig").globalPost;
 pub const put = @import("client/client.zig").globalPut;
@@ -139,7 +139,13 @@ pub const patch = @import("client/client.zig").globalPatch;
 pub const delete = @import("client/client.zig").globalDelete;
 pub const head = @import("client/client.zig").globalHead;
 pub const options = @import("client/client.zig").globalOptions;
+pub const trace = @import("client/client.zig").globalTrace;
+pub const connect = @import("client/client.zig").globalConnect;
+pub const fetch = @import("client/client.zig").globalFetch;
+pub const send = @import("client/client.zig").globalSend;
 pub const request = @import("client/client.zig").globalRequest;
+pub const getAll = @import("client/client.zig").globalGetAll;
+pub const requestAll = @import("client/client.zig").globalRequestAll;
 
 // Server
 pub const server_lifecycle = @import("server/lifecycle.zig");

@@ -27,6 +27,10 @@ pub const Config = struct {
     /// Explicit custom logger; default is silent (clients never spam).
     logger: ?logging.Logger = null,
     dns_cache: DnsCacheOptions = .{},
+    /// Allow bare LF line endings (instead of strict CRLF) for
+    /// non-compliant peers (issue #37). Stripping optional trailing
+    /// \\r. Default false (strict RFC 9110/9112).
+    allow_lf_line_endings: bool = false,
 
     pub const DnsCacheOptions = struct {
         enabled: bool = true,
@@ -38,17 +42,29 @@ pub const Config = struct {
 
 pub const RequestOptions = struct {
     url: []const u8,
+    /// Explicit method for generic `request` (e.g. `.method = .GET`); if null, uses the wrapper's method.
+    method: ?Method = null,
     headers: []const req_mod.Header = &.{},
     query: []const req_mod.Header = &.{},
     body: ?[]const u8 = null,
     /// Serialized JSON bytes; sets Content-Type automatically.
     json: ?[]const u8 = null,
+    /// Typed JSON value (struct) — will be `json.stringify`ed; takes precedence over `json` string if set.
+    json_typed: ?*const anyopaque = null,
+    json_typed_info: ?struct { ptr: *const anyopaque, stringify: *const fn (Allocator, *const anyopaque) anyerror![]u8 } = null,
     /// Encoded form body; sets Content-Type automatically.
     form: ?[]const u8 = null,
     text: ?[]const u8 = null,
     content_type: ?[]const u8 = null,
     follow_redirects: ?bool = null,
     max_redirects: ?u8 = null,
+    /// Allow bare LF line endings for response parsing (issue #37).
+    allow_lf_line_endings: bool = false,
+    /// HTTP version selection (auto or explicit).
+    http_version: ?@import("../common/http_version.zig").HttpVersion = null,
+    /// Optional pre-allocated headers/query as struct (ergonomic). Use `headersFromStruct` helper.
+    headers_struct: ?*const anyopaque = null,
+    query_struct: ?*const anyopaque = null,
 };
 
 pub const Response = req_mod.Response;
@@ -60,7 +76,10 @@ pub const Client = struct {
     pool: Pool,
     config: Config,
     dns_cache: ?dns_cache_mod.Cache = null,
+    owns_io: bool = false,
+    io_threaded: ?*std.Io.Threaded = null,
 
+    /// Explicit allocator + io (production).
     pub fn init(allocator: Allocator, io: std.Io, config: Config) Client {
         var c = Client{
             .allocator = allocator,
@@ -83,9 +102,26 @@ pub const Client = struct {
         return c;
     }
 
+    /// Out-of-box: uses page_allocator + internal Threaded io, no explicit allocator/io required.
+    pub fn initDefault(config: Config) !Client {
+        const gpa = std.heap.page_allocator;
+        const threaded = try gpa.create(std.Io.Threaded);
+        threaded.* = .init(gpa, .{});
+        var c = Client.init(gpa, threaded.io(), config);
+        c.owns_io = true;
+        c.io_threaded = threaded;
+        return c;
+    }
+
     pub fn deinit(self: *Client) void {
         if (self.dns_cache) |*cache| cache.deinit();
         self.pool.deinit();
+        if (self.owns_io) {
+            if (self.io_threaded) |t| {
+                t.deinit();
+                std.heap.page_allocator.destroy(t);
+            }
+        }
     }
 
     pub fn get(self: *Client, opts: RequestOptions) Error!Response {
@@ -116,41 +152,173 @@ pub const Client = struct {
         return self.doRequest(.OPTIONS, opts);
     }
 
-    pub fn doRequest(self: *Client, method: Method, opts: RequestOptions) Error!Response {
+    pub fn trace(self: *Client, opts: RequestOptions) Error!Response {
+        return self.doRequest(.TRACE, opts);
+    }
+
+    pub fn connect(self: *Client, opts: RequestOptions) Error!Response {
+        return self.doRequest(.CONNECT, opts);
+    }
+
+    pub fn fetch(self: *Client, opts: anytype) Error!Response {
+        return self.request(opts);
+    }
+
+    pub fn send(self: *Client, opts: anytype) Error!Response {
+        return self.request(opts);
+    }
+
+    pub fn request(self: *Client, opts: anytype) Error!Response {
+        const m: Method = if (@hasField(@TypeOf(opts), "method")) opts.method orelse .GET else .GET;
+        return self.doRequest(m, opts);
+    }
+
+    /// Batch: sequential array of requests (reuses pool, uses client's allocator).
+    pub fn requestAll(self: *Client, reqs: []const RequestOptions) ![]Response {
+        var out = try self.allocator.alloc(Response, reqs.len);
+        errdefer {
+            for (out) |*r| r.deinit();
+            self.allocator.free(out);
+        }
+        for (reqs, 0..) |req, i| {
+            out[i] = try self.doRequest(req.method orelse .GET, req);
+        }
+        return out;
+    }
+
+    pub fn getAll(self: *Client, urls: []const []const u8) ![]Response {
+        var reqs = try self.allocator.alloc(RequestOptions, urls.len);
+        defer self.allocator.free(reqs);
+        for (urls, 0..) |url, i| reqs[i] = .{ .url = url };
+        return self.requestAll(reqs);
+    }
+
+    pub fn doRequest(self: *Client, method: Method, opts: anytype) Error!Response {
         var hdrs: [16]req_mod.Header = undefined;
         var n: usize = 0;
 
-        var ct: ?[]const u8 = opts.content_type;
-        if (ct == null and opts.json != null) ct = "application/json";
-        if (ct == null and opts.form != null) ct = "application/x-www-form-urlencoded";
+        // Content-Type inference
+        var ct: ?[]const u8 = if (@hasField(@TypeOf(opts), "content_type")) opts.content_type else null;
+        const has_json = @hasField(@TypeOf(opts), "json") and opts.json != null;
+        const has_json_typed = @hasField(@TypeOf(opts), "json_typed") and opts.json_typed != null;
+        const has_form = @hasField(@TypeOf(opts), "form") and opts.form != null;
+        if (ct == null and (has_json or has_json_typed)) ct = "application/json";
+        if (ct == null and has_form) ct = "application/x-www-form-urlencoded";
         if (ct) |c| {
             if (n < hdrs.len) {
                 hdrs[n] = .{ .name = "Content-Type", .value = c };
                 n += 1;
             }
         }
-        for (opts.headers) |h| {
-            if (n < hdrs.len) {
-                hdrs[n] = h;
-                n += 1;
+        // Headers: support both []const Header and struct literal
+        if (@hasField(@TypeOf(opts), "headers")) {
+            const H = @TypeOf(opts.headers);
+            if (@typeInfo(H) == .pointer and @typeInfo(H).pointer.size == .slice) {
+                for (opts.headers) |h| {
+                    if (n < hdrs.len) {
+                        hdrs[n] = h;
+                        n += 1;
+                    }
+                }
+            } else if (@typeInfo(H) == .@"struct") {
+                inline for (@typeInfo(H).@"struct".fields) |field| {
+                    const v = @field(opts.headers, field.name);
+                    if (n < hdrs.len) {
+                        hdrs[n] = .{ .name = field.name, .value = switch (@typeInfo(@TypeOf(v))) {
+                            .int, .comptime_int => blk: {
+                                var buf: [32]u8 = undefined;
+                                const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch "";
+                                break :blk s;
+                            },
+                            else => v,
+                        } };
+                        n += 1;
+                    }
+                }
             }
         }
 
-        const body = opts.body orelse opts.json orelse opts.form orelse opts.text orelse "";
-        const body_kind: req_mod.BodyKind =
-            if (opts.json != null) .json else if (opts.form != null) .form else if (body.len > 0) .raw else .none;
+        // Query: support both []const Header and struct literal
+        var query_hdrs: [16]req_mod.Header = undefined;
+        var qn: usize = 0;
+        var query_slice: []const req_mod.Header = &.{};
+        if (@hasField(@TypeOf(opts), "query")) {
+            const Q = @TypeOf(opts.query);
+            if (@typeInfo(Q) == .pointer and @typeInfo(Q).pointer.size == .slice) {
+                query_slice = opts.query;
+            } else if (@typeInfo(Q) == .@"struct") {
+                inline for (@typeInfo(Q).@"struct".fields) |field| {
+                    const v = @field(opts.query, field.name);
+                    if (qn < query_hdrs.len) {
+                        var qbuf: [32]u8 = undefined;
+                        const vs = switch (@typeInfo(@TypeOf(v))) {
+                            .int, .comptime_int => std.fmt.bufPrint(&qbuf, "{d}", .{v}) catch "",
+                            .float, .comptime_float => std.fmt.bufPrint(&qbuf, "{d}", .{v}) catch "",
+                            .bool => if (v) "true" else "false",
+                            else => v,
+                        };
+                        query_hdrs[qn] = .{ .name = field.name, .value = vs };
+                        qn += 1;
+                    }
+                }
+                query_slice = query_hdrs[0..qn];
+            }
+        }
+
+        // Body handling: support typed json via struct
+        var json_buf: ?[]u8 = null;
+        defer if (json_buf) |b| self.allocator.free(b);
+        var body_val: []const u8 = "";
+        var body_kind: req_mod.BodyKind = .none;
+        if (@hasField(@TypeOf(opts), "json") and opts.json != null) {
+            const J = @TypeOf(opts.json.?);
+            if (J == []const u8 or J == []u8) {
+                body_val = opts.json.?;
+                body_kind = .json;
+            } else {
+                // Typed struct: stringify via Stringify.valueAlloc
+                json_buf = std.json.Stringify.valueAlloc(self.allocator, opts.json.?, .{}) catch null;
+                if (json_buf) |b| {
+                    body_val = b;
+                    body_kind = .json;
+                }
+            }
+        } else if (@hasField(@TypeOf(opts), "form") and opts.form != null) {
+            body_val = opts.form.?;
+            body_kind = .form;
+        } else if (@hasField(@TypeOf(opts), "body") and opts.body != null) {
+            body_val = opts.body.?;
+            body_kind = .raw;
+        } else if (@hasField(@TypeOf(opts), "text") and opts.text != null) {
+            body_val = opts.text.?;
+            body_kind = .raw;
+        } else if (has_json) {
+            body_val = "";
+        }
+
+        if (body_kind == .none and @hasField(@TypeOf(opts), "json") and opts.json != null) {
+            const jv = opts.json.?;
+            if (@typeInfo(@TypeOf(jv)) == .@"struct") {
+                json_buf = std.json.Stringify.valueAlloc(self.allocator, jv, .{}) catch null;
+                if (json_buf) |b| {
+                    body_val = b;
+                    body_kind = .json;
+                }
+            }
+        }
 
         const result = req_mod.request(self.allocator, self.io, .{
             .method = method,
             .url = opts.url,
             .headers = hdrs[0..n],
-            .query = opts.query,
+            .query = query_slice,
             .body_kind = body_kind,
-            .body = body,
-            .follow_redirects = opts.follow_redirects orelse self.config.follow_redirects,
-            .max_redirects = opts.max_redirects orelse self.config.max_redirects,
+            .body = body_val,
+            .follow_redirects = if (@hasField(@TypeOf(opts), "follow_redirects")) opts.follow_redirects orelse self.config.follow_redirects else self.config.follow_redirects,
+            .max_redirects = if (@hasField(@TypeOf(opts), "max_redirects")) opts.max_redirects orelse self.config.max_redirects else self.config.max_redirects,
             .dns_cache = if (self.dns_cache) |*cache| cache else null,
             .pool = &self.pool,
+            .allow_lf_line_endings = if (@hasField(@TypeOf(opts), "allow_lf_line_endings")) opts.allow_lf_line_endings or self.config.allow_lf_line_endings else self.config.allow_lf_line_endings,
         });
         if (result) |resp| {
             if (self.config.logger) |*l|
@@ -219,6 +387,37 @@ pub fn globalHead(opts: RequestOptions) Error!Response {
 
 pub fn globalOptions(opts: RequestOptions) Error!Response {
     return forward(.OPTIONS, opts);
+}
+
+pub fn globalTrace(opts: RequestOptions) Error!Response {
+    return forward(.TRACE, opts);
+}
+
+pub fn globalConnect(opts: RequestOptions) Error!Response {
+    return forward(.CONNECT, opts);
+}
+
+pub fn globalFetch(opts: anytype) Error!Response {
+    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
+    return c.fetch(opts);
+}
+
+pub fn globalSend(opts: anytype) Error!Response {
+    return globalFetch(opts);
+}
+
+pub fn globalRequest(opts: RequestOptions) Error!Response {
+    return forward(opts.method orelse .GET, opts);
+}
+
+pub fn globalGetAll(urls: []const []const u8) ![]Response {
+    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
+    return c.getAll(urls);
+}
+
+pub fn globalRequestAll(reqs: []const RequestOptions) ![]Response {
+    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
+    return c.requestAll(reqs);
 }
 
 test "explicit client init/deinit" {

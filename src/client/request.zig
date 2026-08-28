@@ -105,6 +105,18 @@ pub const Request = struct {
     pool: ?*Pool = null,
     /// HTTP version selection (see HttpVersion docs). Default .http_1.
     http_version: HttpVersion = .auto,
+    /// Allow bare LF line endings for non-compliant peers (issue #37).
+    allow_lf_line_endings: bool = false,
+    /// Optional cookie header value (e.g. "a=b; c=d").
+    cookie: ?[]const u8 = null,
+    /// Basic auth: "user:pass" will be base64-encoded as Authorization.
+    basic_auth: ?[]const u8 = null,
+    /// Bearer token for Authorization: Bearer <token>.
+    bearer_auth: ?[]const u8 = null,
+    /// Request timeout in milliseconds (connect + read).
+    timeout_ms: ?u64 = null,
+    /// Maximum response body size.
+    max_response_size: ?usize = null,
 
     pub fn text(url: []const u8, body_text: []const u8) Request {
         return .{ .url = url, .method = .POST, .body_kind = .raw, .body = body_text };
@@ -137,7 +149,61 @@ pub const Response = struct {
     pub fn json(self: *const Response, comptime T: type) !T {
         return std.json.parseFromSliceLeaky(T, self.allocator, self.body, .{});
     }
+
+    /// Returns body as text (UTF-8).
+    pub fn text(self: *const Response) []const u8 {
+        return self.body;
+    }
+
+    /// Returns body as bytes.
+    pub fn bytes(self: *const Response) []const u8 {
+        return self.body;
+    }
+
+    /// Returns a reader over the body for streaming.
+    pub fn reader(self: *const Response) std.Io.Reader {
+        return std.Io.Reader.fixed(self.body);
+    }
 };
+
+/// Helper: convert struct fields to Header array (for headers/query).
+pub fn headersFromStruct(allocator: Allocator, value: anytype) ![]Header {
+    const T = @TypeOf(value);
+    const info = @typeInfo(T);
+    if (info != .@"struct") return error.InvalidHeader;
+    var list = std.ArrayList(Header).empty;
+    errdefer {
+        for (list.items) |h| {
+            allocator.free(h.name);
+            allocator.free(h.value);
+        }
+        list.deinit(allocator);
+    }
+    inline for (info.@"struct".fields) |field| {
+        const v = @field(value, field.name);
+        const name = try allocator.dupe(u8, field.name);
+        errdefer allocator.free(name);
+        var buf: [64]u8 = undefined;
+        const val_str = switch (@typeInfo(field.type)) {
+            .int, .comptime_int => std.fmt.bufPrint(&buf, "{d}", .{v}) catch try std.fmt.allocPrint(allocator, "{d}", .{v}),
+            .float, .comptime_float => std.fmt.bufPrint(&buf, "{d}", .{v}) catch try std.fmt.allocPrint(allocator, "{d}", .{v}),
+            .bool => if (v) "true" else "false",
+            .pointer => |ptr| if (ptr.size == .slice and ptr.child == u8) v else try std.fmt.allocPrint(allocator, "{any}", .{v}),
+            else => try std.fmt.allocPrint(allocator, "{any}", .{v}),
+        };
+        const owned_val = if (val_str.ptr == buf[0..].ptr) try allocator.dupe(u8, val_str) else val_str;
+        // If we used stack buf, val_str is already duped; if heap, it's already allocated
+        try list.append(allocator, .{ .name = name, .value = owned_val });
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+/// Helper: stringify any struct/value to JSON bytes.
+pub fn jsonBody(allocator: Allocator, value: anytype) ![]u8 {
+    const T = @TypeOf(value);
+    if (T == []const u8 or T == []u8) return allocator.dupe(u8, value);
+    return std.json.Stringify.valueAlloc(allocator, value, .{});
+}
 
 pub const Error = error{
     InvalidUrl,
@@ -219,17 +285,42 @@ fn buildTarget(a: Allocator, req_path: []const u8, query: []const Header) ![]u8 
 }
 
 fn headerLines(a: Allocator, hdrs: []const Header, content_type: ?[]const u8) ![][]const u8 {
+    return headerLinesWithAuth(a, hdrs, content_type, null, null, null);
+}
+
+fn headerLinesWithAuth(a: Allocator, hdrs: []const Header, content_type: ?[]const u8, cookie: ?[]const u8, basic_auth: ?[]const u8, bearer_auth: ?[]const u8) ![][]const u8 {
     var lines: std.ArrayList([]const u8) = .empty;
     errdefer lines.deinit(a);
     var has_accept_encoding = false;
+    var has_authorization = false;
+    var has_cookie = false;
     for (hdrs) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) has_accept_encoding = true;
+        if (std.ascii.eqlIgnoreCase(h.name, "authorization")) has_authorization = true;
+        if (std.ascii.eqlIgnoreCase(h.name, "cookie")) has_cookie = true;
         const l = try std.fmt.allocPrint(a, "{s}: {s}", .{ h.name, h.value });
         try lines.append(a, l);
     }
     if (content_type) |ct| {
         const l = try std.fmt.allocPrint(a, "Content-Type: {s}", .{ct});
         try lines.append(a, l);
+    }
+    if (cookie) |c| if (!has_cookie) {
+        const l = try std.fmt.allocPrint(a, "Cookie: {s}", .{c});
+        try lines.append(a, l);
+    };
+    if (!has_authorization) {
+        if (bearer_auth) |tok| {
+            const l = try std.fmt.allocPrint(a, "Authorization: Bearer {s}", .{tok});
+            try lines.append(a, l);
+        } else if (basic_auth) |up| {
+            const enc_len = std.base64.standard.Encoder.calcSize(up.len);
+            const b64 = try a.alloc(u8, enc_len);
+            defer a.free(b64);
+            _ = std.base64.standard.Encoder.encode(b64, up);
+            const l = try std.fmt.allocPrint(a, "Authorization: Basic {s}", .{b64});
+            try lines.append(a, l);
+        }
     }
     if (!has_accept_encoding) {
         const l = try a.dupe(u8, "Accept-Encoding: gzip, br, zstd");
@@ -273,7 +364,7 @@ pub fn request(a: Allocator, io: std.Io, req_in: Request) Error!Response {
         };
         const body_out: ?[]const u8 = if (has_body) req_in.body else null;
 
-        const extra = try headerLines(a, req_in.headers, ct);
+        const extra = try headerLinesWithAuth(a, req_in.headers, ct, req_in.cookie, req_in.basic_auth, req_in.bearer_auth);
         defer {
             for (extra) |l| a.free(l);
             a.free(extra);
@@ -459,7 +550,7 @@ pub fn request(a: Allocator, io: std.Io, req_in: Request) Error!Response {
 
         transport.writeAll(raw) catch return Error.WriteFailed;
 
-        const full = try readFullResponse(a, transport, method == .HEAD);
+        const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allow_lf_line_endings = req_in.allow_lf_line_endings });
         var resp = full.resp;
 
         if (req_in.follow_redirects and isRedirect(resp.status)) {
@@ -567,6 +658,10 @@ test "client compression advertisement respects explicit override" {
 /// `reusable` is true ONLY when the body was framed and fully consumed —
 /// the precondition for parking a connection back into the keep-alive pool.
 fn readFullResponse(a: Allocator, conn: anytype, is_head: bool) Error!FullResponse {
+    return readFullResponseWithOptions(a, conn, is_head, .{});
+}
+
+fn readFullResponseWithOptions(a: Allocator, conn: anytype, is_head: bool, opts: parser_mod.Options) Error!FullResponse {
     var acc: std.ArrayList(u8) = .empty;
     defer acc.deinit(a);
     var buf: [8192]u8 = undefined;
@@ -577,16 +672,26 @@ fn readFullResponse(a: Allocator, conn: anytype, is_head: bool) Error!FullRespon
             head_end = idx + 4;
             break;
         }
+        if (opts.allow_lf_line_endings) {
+            if (std.mem.indexOf(u8, acc.items, "\n\n")) |idx| {
+                // Ensure not already counted as \r\n\r\n (avoid double)
+                if (idx == 0 or acc.items[idx - 1] != '\r') {
+                    head_end = idx + 2;
+                    break;
+                }
+            }
+        }
         const n = conn.read(buf[0..]) catch return Error.ReadFailed;
         if (n == 0) return Error.MalformedResponse;
         acc.appendSlice(a, buf[0..n]) catch return Error.OutOfMemory;
         if (acc.items.len > 128 * 1024) return Error.MalformedResponse;
     }
 
-    const resp_head = parser_mod.parseResponseHead(acc.items) catch return Error.MalformedResponse;
+    const opts_parser: parser_mod.Options = .{ .allow_lf_line_endings = opts.allow_lf_line_endings };
+    const resp_head = parser_mod.parseResponseHeadWithOptions(acc.items, opts_parser) catch return Error.MalformedResponse;
 
     var fields: [parser_mod.DEFAULT_MAX_HEADERS]parser_mod.Field = undefined;
-    const blk = parser_mod.parseHeaderBlock(acc.items[0..head_end], resp_head.head_end, fields[0..]) catch
+    const blk = parser_mod.parseHeaderBlockWithOptions(acc.items[0..head_end], resp_head.head_end, fields[0..], opts_parser) catch
         return Error.MalformedResponse;
 
     const framing = parser_mod.framingFull(fields[0..blk.count], .{
