@@ -69,8 +69,52 @@ pub const Parser = struct {
     connection_keep_alive: bool = false,
     /// Whether Transfer-Encoding header was seen (for conflict detection).
     transfer_encoding_seen: bool = false,
+    /// HTTP compliance relaxations. Defaults are strict.
+    compliance: types.ComplianceOptions = .{},
 
     const Self = @This();
+
+    const Line = struct {
+        /// Recognized line ending types. RFC 9112 §2.2 explicitly allows but
+        /// does not require support for LF instead of CRLF.
+        const Ending = enum(u2) { none = 0, lf = 1, crlf = 2 };
+
+        const Options = struct {
+            /// Whether to allow recognition of \n as line ending
+            allow_lf: bool = false,
+            /// Whether a previous unterminated line ended in \r
+            preceding_cr: bool = false,
+        };
+
+        data: []const u8,
+
+        /// The length of the line including its ending chars.
+        len: usize,
+
+        /// The line ending found; its integer value is the ending's byte length.
+        ending: Ending,
+
+        /// Locates the first line ending and initializes the Line.
+        fn init(data: []const u8, options: Options) Line {
+            if (options.preceding_cr and data.len > 0 and data[0] == '\n') {
+                return .{ .data = data, .len = 1, .ending = .lf };
+            }
+            if (!options.allow_lf) {
+                const i = mem.indexOf(u8, data, "\r\n") orelse
+                    return .{ .data = data, .len = data.len, .ending = .none };
+                return .{ .data = data, .len = i + 2, .ending = .crlf };
+            }
+            const i = mem.indexOfScalar(u8, data, '\n') orelse
+                return .{ .data = data, .len = data.len, .ending = .none };
+            const cr_before = i > 0 and data[i - 1] == '\r';
+            return .{ .data = data, .len = i + 1, .ending = if (cr_before) .crlf else .lf };
+        }
+
+        /// Slice containing the line's text without ending
+        fn text(self: Line) []const u8 {
+            return self.data[0 .. self.len - @intFromEnum(self.ending)];
+        }
+    };
 
     /// Creates a new parser instance.
     pub fn init(allocator: Allocator) Self {
@@ -216,110 +260,125 @@ pub const Parser = struct {
     }
 
     fn parseRequestLine(self: *Self, data: []const u8) !usize {
-        const line_end = mem.indexOf(u8, data, "\r\n") orelse {
+        const preceding_cr = self.line_buffer.items.len > 0 and self.line_buffer.items[self.line_buffer.items.len - 1] == '\r';
+        const line = Line.init(data, .{ .allow_lf = self.compliance.allow_lf_in_fields, .preceding_cr = preceding_cr });
+        if (line.ending == .none) {
             try self.line_buffer.appendSlice(self.allocator, data);
             try self.checkLineBufferLimit();
             return data.len;
-        };
+        }
+        if (preceding_cr and data.len > 0 and data[0] == '\n') {
+            self.line_buffer.items.len -= 1;
+        }
 
-        const line = if (self.line_buffer.items.len > 0) blk: {
-            try self.line_buffer.appendSlice(self.allocator, data[0..line_end]);
+        const text = if (self.line_buffer.items.len > 0) blk: {
+            try self.line_buffer.appendSlice(self.allocator, line.text());
             break :blk self.line_buffer.items;
-        } else data[0..line_end];
+        } else line.text();
 
-        var parts = mem.splitScalar(u8, line, ' ');
+        var parts = mem.splitScalar(u8, text, ' ');
 
         const method_str = parts.next() orelse {
             self.state = .err;
-            return line_end + 2;
+            return line.len;
         };
         self.method = types.Method.fromString(method_str) orelse .CUSTOM;
 
         const path = parts.next() orelse {
             self.state = .err;
-            return line_end + 2;
+            return line.len;
         };
         self.path = try self.allocator.dupe(u8, path);
 
         const version_str = parts.next() orelse {
             self.state = .err;
-            return line_end + 2;
+            return line.len;
         };
         self.version = types.Version.fromString(version_str) orelse .HTTP_1_1;
 
-        try self.bumpHeaderBytes(line.len);
+        try self.bumpHeaderBytes(text.len);
 
         self.line_buffer.clearRetainingCapacity();
         self.state = .headers;
-        return line_end + 2;
+        return line.len;
     }
 
     fn parseStatusLine(self: *Self, data: []const u8) !usize {
-        const line_end = mem.indexOf(u8, data, "\r\n") orelse {
+        const preceding_cr = self.line_buffer.items.len > 0 and self.line_buffer.items[self.line_buffer.items.len - 1] == '\r';
+        const line = Line.init(data, .{ .allow_lf = self.compliance.allow_lf_in_fields, .preceding_cr = preceding_cr });
+        if (line.ending == .none) {
             try self.line_buffer.appendSlice(self.allocator, data);
             try self.checkLineBufferLimit();
             return data.len;
-        };
+        }
+        if (preceding_cr and data.len > 0 and data[0] == '\n') {
+            self.line_buffer.items.len -= 1;
+        }
 
-        const line = if (self.line_buffer.items.len > 0) blk: {
-            try self.line_buffer.appendSlice(self.allocator, data[0..line_end]);
+        const text = if (self.line_buffer.items.len > 0) blk: {
+            try self.line_buffer.appendSlice(self.allocator, line.text());
             break :blk self.line_buffer.items;
-        } else data[0..line_end];
+        } else line.text();
 
-        var parts = mem.splitScalar(u8, line, ' ');
+        var parts = mem.splitScalar(u8, text, ' ');
 
         const version_str = parts.next() orelse {
             self.state = .err;
-            return line_end + 2;
+            return line.len;
         };
         self.version = types.Version.fromString(version_str) orelse .HTTP_1_1;
 
         const status_str = parts.next() orelse {
             self.state = .err;
-            return line_end + 2;
+            return line.len;
         };
         self.status_code = std.fmt.parseInt(u16, status_str, 10) catch {
             self.state = .err;
-            return line_end + 2;
+            return line.len;
         };
 
-        try self.bumpHeaderBytes(line.len);
+        try self.bumpHeaderBytes(text.len);
 
         self.line_buffer.clearRetainingCapacity();
         self.state = .headers;
-        return line_end + 2;
+        return line.len;
     }
 
     fn parseHeaders(self: *Self, data: []const u8) !usize {
         var lower_buf: [256]u8 = undefined; // For case-insensitive comparison buffers
 
-        const line_end = mem.indexOf(u8, data, "\r\n") orelse {
+        const preceding_cr = self.line_buffer.items.len > 0 and self.line_buffer.items[self.line_buffer.items.len - 1] == '\r';
+        const line = Line.init(data, .{ .allow_lf = self.compliance.allow_lf_in_fields, .preceding_cr = preceding_cr });
+        if (line.ending == .none) {
             try self.line_buffer.appendSlice(self.allocator, data);
             try self.checkLineBufferLimit();
             return data.len;
-        };
+        }
+        if (preceding_cr and data.len > 0 and data[0] == '\n') {
+            self.line_buffer.items.len -= 1;
+        }
 
-        const line = if (self.line_buffer.items.len > 0) blk: {
-            try self.line_buffer.appendSlice(self.allocator, data[0..line_end]);
+        const text = if (self.line_buffer.items.len > 0) blk: {
+            try self.line_buffer.appendSlice(self.allocator, line.text());
             break :blk self.line_buffer.items;
-        } else data[0..line_end];
+        } else line.text();
 
-        if (line.len == 0) {
+        if (text.len == 0) {
             self.line_buffer.clearRetainingCapacity();
             try self.bumpHeaderBytes(0);
             self.determineBodyState();
-            return line_end + 2;
+            return line.len;
         }
 
-        try self.bumpHeaderBytes(line.len);
+        try self.bumpHeaderBytes(text.len);
 
-        if (mem.indexOf(u8, line, ":")) |sep| {
+        if (mem.indexOf(u8, text, ":")) |sep| {
             if (self.header_count >= self.max_headers) {
                 self.state = .err;
                 return error.TooManyHeaders;
             }
-            const name = mem.trim(u8, line[0..sep], " \t");
-            const value = mem.trim(u8, line[sep + 1 ..], " \t");
+            const name = mem.trim(u8, text[0..sep], " \t");
+            const value = mem.trim(u8, text[sep + 1 ..], " \t");
             try self.headers.append(name, value);
             self.header_count += 1;
 
@@ -402,7 +461,7 @@ pub const Parser = struct {
         }
 
         self.line_buffer.clearRetainingCapacity();
-        return line_end + 2;
+        return line.len;
     }
 
     fn noBodyByStatus(self: *const Self) bool {
@@ -460,25 +519,30 @@ pub const Parser = struct {
     }
 
     fn parseChunkSize(self: *Self, data: []const u8) !usize {
-        const line_end = mem.indexOf(u8, data, "\r\n") orelse {
+        const preceding_cr = self.line_buffer.items.len > 0 and self.line_buffer.items[self.line_buffer.items.len - 1] == '\r';
+        const line = Line.init(data, .{ .allow_lf = self.compliance.allow_lf_in_framing, .preceding_cr = preceding_cr });
+        if (line.ending == .none) {
             try self.line_buffer.appendSlice(self.allocator, data);
             try self.checkLineBufferLimit();
             return data.len;
-        };
+        }
+        if (preceding_cr and data.len > 0 and data[0] == '\n') {
+            self.line_buffer.items.len -= 1;
+        }
 
-        const line = if (self.line_buffer.items.len > 0) blk: {
-            try self.line_buffer.appendSlice(self.allocator, data[0..line_end]);
+        const text = if (self.line_buffer.items.len > 0) blk: {
+            try self.line_buffer.appendSlice(self.allocator, line.text());
             break :blk self.line_buffer.items;
-        } else data[0..line_end];
+        } else line.text();
 
-        const size_part = if (mem.indexOfScalar(u8, line, ';')) |semi|
-            mem.trim(u8, line[0..semi], " \t")
+        const size_part = if (mem.indexOfScalar(u8, text, ';')) |semi|
+            mem.trim(u8, text[0..semi], " \t")
         else
-            mem.trim(u8, line, " \t");
+            mem.trim(u8, text, " \t");
 
         self.current_chunk_size = std.fmt.parseInt(usize, size_part, 16) catch {
             self.state = .err;
-            return line_end + 2;
+            return line.len;
         };
 
         self.line_buffer.clearRetainingCapacity();
@@ -491,7 +555,7 @@ pub const Parser = struct {
             self.state = .chunk_data;
         }
 
-        return line_end + 2;
+        return line.len;
     }
 
     fn parseChunkData(self: *Self, data: []const u8) !usize {
@@ -521,9 +585,20 @@ pub const Parser = struct {
         while (consumed < data.len and self.chunk_crlf_read < 2) {
             const b = data[consumed];
             switch (self.chunk_crlf_read) {
-                0 => if (b != '\r') {
-                    self.state = .err;
-                    return error.InvalidChunkEncoding;
+                0 => switch (b) {
+                    '\r' => {},
+                    '\n' => if (self.compliance.allow_lf_in_framing) {
+                        self.chunk_crlf_read = 0;
+                        self.state = .chunk_size;
+                        return consumed + 1;
+                    } else {
+                        self.state = .err;
+                        return error.InvalidChunkEncoding;
+                    },
+                    else => {
+                        self.state = .err;
+                        return error.InvalidChunkEncoding;
+                    },
                 },
                 1 => if (b != '\n') {
                     self.state = .err;
@@ -544,26 +619,31 @@ pub const Parser = struct {
     }
 
     fn parseChunkTrailer(self: *Self, data: []const u8) !usize {
-        const line_end = mem.indexOf(u8, data, "\r\n") orelse {
+        const preceding_cr = self.line_buffer.items.len > 0 and self.line_buffer.items[self.line_buffer.items.len - 1] == '\r';
+        const line = Line.init(data, .{ .allow_lf = self.compliance.allow_lf_in_framing, .preceding_cr = preceding_cr });
+        if (line.ending == .none) {
             try self.line_buffer.appendSlice(self.allocator, data);
             try self.checkLineBufferLimit();
             return data.len;
-        };
+        }
+        if (preceding_cr and data.len > 0 and data[0] == '\n') {
+            self.line_buffer.items.len -= 1;
+        }
 
-        const line = if (self.line_buffer.items.len > 0) blk: {
-            try self.line_buffer.appendSlice(self.allocator, data[0..line_end]);
+        const text = if (self.line_buffer.items.len > 0) blk: {
+            try self.line_buffer.appendSlice(self.allocator, line.text());
             break :blk self.line_buffer.items;
-        } else data[0..line_end];
+        } else line.text();
 
         // Ignore trailer fields but consume them until the terminating empty line.
-        if (line.len == 0) {
+        if (text.len == 0) {
             self.line_buffer.clearRetainingCapacity();
             self.state = .complete;
-            return line_end + 2;
+            return line.len;
         }
 
         self.line_buffer.clearRetainingCapacity();
-        return line_end + 2;
+        return line.len;
     }
 };
 
@@ -882,4 +962,124 @@ test "Parser multiple Content-Length with spaces" {
 
     try std.testing.expect(parser.isComplete());
     try std.testing.expectEqual(@as(?u64, 5), parser.content_length);
+}
+
+test "Parser LF field terminators rejected when strict" {
+    // Same as unchanged code: strict mode treats a lone LF as no terminator.
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    _ = try parser.feed("HTTP/1.1 200 OK\nContent-Length: 5\n\nHello");
+
+    try std.testing.expect(!parser.isComplete());
+    try std.testing.expect(!parser.isError());
+}
+
+test "Parser LF field terminators accepted with allow_lf_in_fields" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    parser.compliance.allow_lf_in_fields = true;
+    defer parser.deinit();
+
+    _ = try parser.feed("HTTP/1.1 200 OK\nContent-Length: 5\n\nHello");
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expectEqual(@as(?u16, 200), parser.status_code);
+    try std.testing.expectEqualStrings("Hello", parser.getBody());
+}
+
+test "Parser CRLF field terminators still parse with allow_lf_in_fields" {
+    // Same as unchanged code: CRLF is parsed regardless of the flag.
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    parser.compliance.allow_lf_in_fields = true;
+    defer parser.deinit();
+
+    _ = try parser.feed("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello");
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expectEqualStrings("Hello", parser.getBody());
+}
+
+test "Parser CRLF split across feeds keeps fields separate" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator);
+    defer parser.deinit();
+
+    _ = try parser.feed("GET / HTTP/1.1\r\nHost: x\r");
+    _ = try parser.feed("\nAccept: y\r\n\r\n");
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expectEqualStrings("x", parser.headers.get("Host").?);
+    try std.testing.expectEqualStrings("y", parser.headers.get("Accept").?);
+}
+
+test "Parser LF followed by CR is rejected under both modes" {
+    const allocator = std.testing.allocator;
+    const data = "GET / HTTP/1.1\r\nX: a\n\rY: b\r\n\r\n";
+
+    // Strict mode is unchanged: the LF is not a terminator, so the trailing
+    // bytes fold into X's value, which is rejected as an invalid value.
+    var strict = Parser.init(allocator);
+    defer strict.deinit();
+    try std.testing.expectError(error.InvalidHeaderValue, strict.feed(data));
+
+    // Lenient mode: the LF ends X and the following CR becomes the first byte
+    // of the next field name, which is rejected as an invalid name.
+    var lenient = Parser.init(allocator);
+    lenient.compliance.allow_lf_in_fields = true;
+    defer lenient.deinit();
+    try std.testing.expectError(error.InvalidHeaderName, lenient.feed(data));
+}
+
+test "Parser lone CR never terminates a field" {
+    // Same as unchanged code: a lone CR is not a line terminator.
+    const allocator = std.testing.allocator;
+
+    var strict = Parser.init(allocator);
+    defer strict.deinit();
+    _ = try strict.feed("GET / HTTP/1.1\rHost: x\r\r");
+    try std.testing.expect(!strict.isComplete());
+
+    var lenient = Parser.init(allocator);
+    lenient.compliance.allow_lf_in_fields = true;
+    defer lenient.deinit();
+    _ = try lenient.feed("GET / HTTP/1.1\rHost: x\r\r");
+    try std.testing.expect(!lenient.isComplete());
+}
+
+test "Parser LF chunk framing accepted with allow_lf_in_framing" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    parser.compliance.allow_lf_in_framing = true;
+    defer parser.deinit();
+
+    _ = try parser.feed("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\nHello\n0\n\n");
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expectEqualStrings("Hello", parser.getBody());
+}
+
+test "Parser LF chunk framing rejected without the framing flag" {
+    // Same as unchanged code: LF framing is rejected without allow_lf_in_framing.
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    parser.compliance.allow_lf_in_fields = true;
+    defer parser.deinit();
+
+    const data = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\n0\r\n\r\n";
+    try std.testing.expectError(error.InvalidChunkEncoding, parser.feed(data));
+}
+
+test "Parser CRLF split across feeds in chunk size line" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.initResponse(allocator);
+    defer parser.deinit();
+
+    _ = try parser.feed("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r");
+    _ = try parser.feed("\nHello\r\n0\r\n\r\n");
+
+    try std.testing.expect(parser.isComplete());
+    try std.testing.expectEqualStrings("Hello", parser.getBody());
 }

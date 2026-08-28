@@ -93,6 +93,8 @@ pub const ClientConfig = struct {
     /// Encodings to advertise in Accept-Encoding, in priority order.
     /// If null, sends "gzip, deflate, br, zstd, identity".
     accept_encoding: ?[]const u8 = null,
+    /// HTTP compliance relaxations applied to response parsing.
+    compliance: types.ComplianceOptions = .{},
 
     /// Returns default client configuration.
     pub fn defaults() ClientConfig {
@@ -2245,6 +2247,7 @@ pub const Client = struct {
         var total_read: usize = 0;
         var parser = Parser.initResponse(self.allocator);
         defer parser.deinit();
+        parser.compliance = self.config.compliance;
 
         while (!parser.isComplete()) {
             const n = try session.read(&buf);
@@ -2272,6 +2275,7 @@ pub const Client = struct {
     fn readResponseFromReadFn(self: *Self, reader: anytype, readFn: *const fn (@TypeOf(reader), []u8) anyerror!usize, expect_body: bool) !Response {
         var parser = Parser.initResponse(self.allocator);
         defer parser.deinit();
+        parser.compliance = self.config.compliance;
         parser.expect_body = expect_body;
 
         var buf: [16 * 1024]u8 = undefined;
@@ -2301,6 +2305,7 @@ pub const Client = struct {
     fn readResponseFromIo(self: *Self, r: *std.Io.Reader) !Response {
         var parser = Parser.initResponse(self.allocator);
         defer parser.deinit();
+        parser.compliance = self.config.compliance;
 
         var total_read: usize = 0;
         while (!parser.isComplete()) {

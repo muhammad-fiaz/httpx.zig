@@ -267,6 +267,17 @@ pub const TransferEncoding = enum {
     }
 };
 
+/// Relaxations of strict HTTP compliance. Defaults are strict (fully compliant).
+pub const ComplianceOptions = struct {
+    /// Accept a lone LF, not only CRLF, as the line terminator for the
+    /// start-line and header fields (RFC 9112 §2.2).
+    allow_lf_in_fields: bool = false,
+    /// Accept a lone LF as the line terminator in chunked framing: the
+    /// chunk-size line, the CRLF after chunk data, and trailer fields.
+    /// Not permitted by RFC 9112.
+    allow_lf_in_framing: bool = false,
+};
+
 /// Timeout configuration for HTTP operations in milliseconds.
 pub const Timeouts = struct {
     connect_ms: u64 = 30_000,
