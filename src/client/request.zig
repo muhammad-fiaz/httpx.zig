@@ -15,6 +15,7 @@
 //! Content-Length and chunked response bodies are both decoded.
 
 const std = @import("std");
+const env_mod = @import("env");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
 const uri_mod = @import("../common/uri.zig");
@@ -1045,39 +1046,21 @@ test "https without explicit tls options fails fast" {
 // honest environment gate, not a code path we cannot verify.
 
 test "live https interop against external TLS server" {
-    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
-
-    const kernel32 = struct {
-        extern "kernel32" fn GetEnvironmentVariableA(
-            lpName: [*:0]const u8,
-            lpBuffer: ?[*]u8,
-            nSize: u32,
-        ) callconv(.winapi) u32;
-    };
-    var host_buf: [64]u8 = undefined;
-    var port_buf: [16]u8 = undefined;
-    const hn = kernel32.GetEnvironmentVariableA("HTTPX_TLS_HOST", &host_buf, host_buf.len);
-    const pn = kernel32.GetEnvironmentVariableA("HTTPX_TLS_PORT", &port_buf, port_buf.len);
-    // Explicit opt-in: run via tools/run_tls_interop.ps1 (sets all three).
-    const kernel32b = struct {
-        extern "kernel32" fn GetEnvironmentVariableA(
-            lpName: [*:0]const u8,
-            lpBuffer: ?[*]u8,
-            nSize: u32,
-        ) callconv(.winapi) u32;
-    };
-    var gate_buf: [4]u8 = undefined;
-    const gn = kernel32b.GetEnvironmentVariableA("HTTPX_TLS_INTEROP", &gate_buf, gate_buf.len);
-    if (gn == 0) return error.SkipZigTest;
-    if (hn == 0 or pn == 0 or hn > 63 or pn > 15) return error.SkipZigTest;
-
-    const port = std.fmt.parseInt(u16, port_buf[0..pn], 10) catch return error.SkipZigTest;
+    var env = env_mod.Env.init(std.testing.allocator, .{});
+    defer env.deinit();
+    try env.loadOsEnv();
+    const host = env.get("HTTPX_TLS_HOST") orelse return;
+    const port_str = env.get("HTTPX_TLS_PORT") orelse return;
+    const gate = env.get("HTTPX_TLS_INTEROP") orelse return;
+    if (gate.len == 0) return;
+    if (host.len == 0 or host.len > 63 or port_str.len == 0 or port_str.len > 15) return;
+    const port = std.fmt.parseInt(u16, port_str, 10) catch return;
 
     var ctx = try t_tcp.IoContext.init(std.testing.allocator);
     defer ctx.deinit();
 
     var ub2: [128]u8 = undefined;
-    const full = try std.fmt.bufPrint(&ub2, "https://{s}:{d}/interop", .{ host_buf[0..hn], port });
+    const full = try std.fmt.bufPrint(&ub2, "https://{s}:{d}/interop", .{ host, port });
 
     // One retry: Windows localhost timing between backlog accept and TLS
     // auth occasionally refuses the first attempt.

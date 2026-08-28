@@ -16,6 +16,10 @@
             .url = "https://github.com/muhammad-fiaz/tint.zig/archive/refs/tags/0.0.1.tar.gz",
             .hash = "tint-0.0.1-UOf2-eCcAQDCOLQD9hhyreeUZnXH48SJQcXg4x5NRBT2",
         },
+        .env = .{
+            .url = "https://github.com/muhammad-fiaz/env.zig/archive/refs/tags/0.0.2.tar.gz",
+            .hash = "env-0.0.2-TMsAe4W0AgASsiE9dbVmd5L8xSduIybTGPONqK9AZ-_e",
+        },
     },
     .paths = .{
         "build.zig",

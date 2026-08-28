@@ -30,15 +30,21 @@ pub const Headers = struct {
 
     /// Sets (replaces) a header. Allocates copies of name and value.
     pub fn set(self: *Headers, name: []const u8, value: []const u8) !void {
-        // Replace existing
+        try validateName(name);
+        try validateValue(value);
         for (self.entries.items) |*h| {
             if (std.ascii.eqlIgnoreCase(h.name, name)) {
+                self.allocator.free(h.name);
                 self.allocator.free(h.value);
+                h.name = try self.allocator.dupe(u8, name);
                 h.value = try self.allocator.dupe(u8, value);
                 return;
             }
         }
-        try self.append(name, value);
+        try self.entries.append(self.allocator, .{
+            .name = try self.allocator.dupe(u8, name),
+            .value = try self.allocator.dupe(u8, value),
+        });
     }
 
     /// Appends a header without replacing duplicates.
@@ -72,17 +78,19 @@ pub const Headers = struct {
     }
 
     pub fn remove(self: *Headers, name: []const u8) bool {
+        var removed = false;
         var i: usize = 0;
         while (i < self.entries.items.len) {
             if (std.ascii.eqlIgnoreCase(self.entries.items[i].name, name)) {
                 const h = self.orderedRemove(i);
                 self.allocator.free(h.name);
                 self.allocator.free(h.value);
+                removed = true;
             } else {
                 i += 1;
             }
         }
-        return true;
+        return removed;
     }
 
     fn orderedRemove(self: *Headers, i: usize) Header {
@@ -108,19 +116,25 @@ pub const Headers = struct {
     }
 };
 
-/// Validates that a header name contains no control characters or spaces.
+/// Validates that a header name is a valid token (RFC 7230 Section 3.2.6).
 fn validateName(name: []const u8) !void {
     if (name.len == 0 or name.len > 256) return error.InvalidHeader;
     for (name) |c| {
         if (c <= 32 or c >= 127) return error.InvalidHeader;
+        switch (c) {
+            '(', ')', '<', '>', '@', ',', ';', ':', '\\', '"', '/', '[', ']', '?', '=', '{', '}', ' ', '\t' => return error.InvalidHeader,
+            else => {},
+        }
     }
 }
 
-/// Validates that a header value contains no CR/LF (injection prevention).
+/// Validates header value (RFC 7230 field-value: no CTL, no CR/LF).
 fn validateValue(value: []const u8) !void {
     if (value.len > 8192) return error.InvalidHeader;
     for (value) |c| {
         if (c == '\r' or c == '\n' or c == 0) return error.InvalidHeader;
+        if (c < 32 and c != '\t') return error.InvalidHeader;
+        if (c == 127) return error.InvalidHeader;
     }
 }
 

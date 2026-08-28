@@ -127,6 +127,7 @@ pub const Session = struct {
         };
         s.hdec = hpack_mod.Decoder.init(allocator);
         s.hdec.max_header_list = s.local_settings.max_header_list_size;
+        s.hdec.setProtocolMaxSize(s.local_settings.header_table_size);
         s.henc = hpack_mod.Encoder.init(allocator);
         return s;
     }
@@ -299,12 +300,13 @@ pub const Session = struct {
                 // Priority tolerated and ignored (RFC 9113 Section 5.3, deprecated).
             },
             .push_promise => {
-                if (self.local_settings.enable_push == 0) {
-                    return self.connError(.protocol_error);
-                }
-                // Push promise not yet implemented beyond validation; treat as protocol error for now
-                // to avoid silent ignore of unexpected push.
-                return self.connError(.protocol_error);
+                // Server receiving PUSH_PROMISE from client is always a
+                // connection error; client may receive it only if push is
+                // enabled. Reserved states not yet fully implemented so
+                // enabled push is tolerated and ignored.
+                if (self.role == .server) return self.connError(.protocol_error);
+                if (self.local_settings.enable_push == 0) return self.connError(.protocol_error);
+                return;
             },
             .unknown => {
                 // Unknown extension frames are length-delimited and ignored
@@ -493,7 +495,7 @@ pub const Session = struct {
             return self.connError(.flow_control_error);
         }
 
-        const st = self.streamPtr(sid) orelse return;
+        const st = self.streamPtr(sid) orelse return self.connError(.protocol_error);
         if (!st.state.canRecvData()) {
             if (st.state == .idle) return self.connError(.protocol_error);
             return self.connError(.stream_closed);
@@ -542,9 +544,8 @@ pub const Session = struct {
             return;
         }
         const st = self.streamPtr(sid) orelse return;
-        // WINDOW_UPDATE on idle/closed streams is a connection error
-        // (closed-stream updates are tolerated per RFC 9113 6.9 note).
-        if (st.state == .idle or st.state == .closed) return self.connError(.protocol_error);
+        if (st.state == .idle) return self.connError(.protocol_error);
+        if (st.state == .closed) return;
         st.send_window += amount;
         if (st.send_window > frame_mod.MAX_WINDOW) return self.connError(.flow_control_error);
     }

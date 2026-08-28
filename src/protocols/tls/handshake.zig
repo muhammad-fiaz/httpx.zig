@@ -19,11 +19,20 @@ pub const NamedGroup = tls.NamedGroup;
 /// Maximum handshake message size we handle.
 pub const max_handshake_len = 1 << 14;
 
-/// Transcript hash (SHA-256 for TLS 1.3 with AES-128-GCM-SHA256).
+/// Transcript hash (SHA-256 for AES-128-GCM-SHA256, SHA-384 for AES-256-GCM-SHA384).
 pub const TranscriptHash = Sha256;
 pub const HashLen = TranscriptHash.digest_length; // 32
+pub const TranscriptHash384 = std.crypto.hash.sha2.Sha384;
+pub const HashLen384 = TranscriptHash384.digest_length; // 48
 
-/// Running transcript hash over all handshake messages.
+pub fn hashLenForSuite(suite: tls.CipherSuite) usize {
+    return switch (suite) {
+        .AES_256_GCM_SHA384 => HashLen384,
+        else => HashLen,
+    };
+}
+
+/// Running transcript hash over all handshake messages (SHA-256 variant).
 pub const Transcript = struct {
     state: TranscriptHash,
 
@@ -36,6 +45,23 @@ pub const Transcript = struct {
     }
 
     pub fn finish(self: *Transcript) [HashLen]u8 {
+        return self.state.finalResult();
+    }
+};
+
+/// Running transcript hash for SHA-384 suites.
+pub const Transcript384 = struct {
+    state: TranscriptHash384,
+
+    pub fn init() Transcript384 {
+        return .{ .state = TranscriptHash384.init(.{}) };
+    }
+
+    pub fn feed(self: *Transcript384, data: []const u8) void {
+        self.state.update(data);
+    }
+
+    pub fn finish(self: *Transcript384) [HashLen384]u8 {
         return self.state.finalResult();
     }
 };

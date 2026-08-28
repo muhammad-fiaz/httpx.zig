@@ -309,6 +309,32 @@ pub const Encoder = struct {
         }
     }
 
+    fn emitString(self: *Encoder, out: *std.ArrayList(u8), str: []const u8, n: u3) !void {
+        if (str.len == 0) {
+            var tmp: [10]u8 = undefined;
+            const nn = try encodeInt(&tmp, n, 0);
+            try out.appendSlice(self.allocator, tmp[0..nn]);
+            return;
+        }
+        const max = huff.maxEncodedLen(str.len);
+        const buf = try self.allocator.alloc(u8, max);
+        defer self.allocator.free(buf);
+        if (huff.encode(buf, str)) |hlen| {
+            if (hlen < str.len) {
+                var tmp: [10]u8 = undefined;
+                const nn = try encodeInt(&tmp, n, hlen);
+                tmp[0] |= 0x80;
+                try out.appendSlice(self.allocator, tmp[0..nn]);
+                try out.appendSlice(self.allocator, buf[0..hlen]);
+                return;
+            }
+        } else |_| {}
+        var tmp: [10]u8 = undefined;
+        const nn = try encodeInt(&tmp, n, str.len);
+        try out.appendSlice(self.allocator, tmp[0..nn]);
+        try out.appendSlice(self.allocator, str);
+    }
+
     /// Encodes a header as literal-without-name-reference on the instruction stream.
     /// S flag cleared (never index). R bit reserved.
     pub fn encodeField(
@@ -330,17 +356,12 @@ pub const Encoder = struct {
                 i -= 1;
                 const e = dt.entries.items[i];
                 if (std.mem.eql(u8, e.name, name)) {
-                    // Literal with dynamic name reference
                     const absolute_idx = base + i;
                     var ib: [10]u8 = undefined;
                     const n = try encodeInt(&ib, 4, absolute_idx);
-                    ib[0] |= 0x40; // 01, N=0, S=0
+                    ib[0] |= 0x40;
                     try out.appendSlice(self.allocator, ib[0..n]);
-                    // Value as literal
-                    var vn: [10]u8 = undefined;
-                    const vlen = try encodeInt(&vn, 7, value.len);
-                    try out.appendSlice(self.allocator, vn[0..vlen]);
-                    try out.appendSlice(self.allocator, value);
+                    try self.emitString(out, value, 7);
                     return;
                 }
             }
@@ -348,15 +369,8 @@ pub const Encoder = struct {
 
         // No match: literal without name reference
         try out.append(self.allocator, 0x00);
-
-        var ib: [10]u8 = undefined;
-        var n = try encodeInt(&ib, 7, name.len);
-        try out.appendSlice(self.allocator, ib[0..n]);
-        try out.appendSlice(self.allocator, name);
-
-        n = try encodeInt(&ib, 7, value.len);
-        try out.appendSlice(self.allocator, ib[0..n]);
-        try out.appendSlice(self.allocator, value);
+        try self.emitString(out, name, 7);
+        try self.emitString(out, value, 7);
     }
 
     /// Attempts to encode using a static table indexed match.

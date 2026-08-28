@@ -146,6 +146,8 @@ pub const PeerSettings = struct {
     max_field_section_size: u64 = 16384,
     qpack_max_table_capacity: u64 = 0,
     qpack_blocked_streams: u64 = 0,
+    enable_connect_protocol: u64 = 0,
+    h3_datagram: u64 = 0,
 };
 
 /// HTTP/3 connection state machine. Manages control stream lifecycle,
@@ -164,6 +166,12 @@ pub const Connection = struct {
     // QPACK state
     qenc: qpack_mod.Encoder,
     qdec: qpack_mod.Decoder,
+
+    // GOAWAY and push tracking
+    goaway_sent: bool = false,
+    goaway_received: bool = false,
+    goaway_stream_id: u64 = 0,
+    max_push_id: u64 = 0,
 
     // Stream tracking
     next_bidi_id: u64,
@@ -217,6 +225,8 @@ pub const Connection = struct {
         var seen_qpack_capacity = false;
         var seen_max_field_section = false;
         var seen_blocked_streams = false;
+        var seen_connect = false;
+        var seen_datagram = false;
         for (settings_entries) |entry| {
             switch (entry.id) {
                 0x1 => {
@@ -235,6 +245,18 @@ pub const Connection = struct {
                     seen_blocked_streams = true;
                     self.peer_settings.qpack_blocked_streams = entry.value;
                 },
+                0x8 => {
+                    if (seen_connect) return Error.InvalidSettings;
+                    seen_connect = true;
+                    if (entry.value > 1) return Error.InvalidSettings;
+                    self.peer_settings.enable_connect_protocol = entry.value;
+                },
+                0x33 => {
+                    if (seen_datagram) return Error.InvalidSettings;
+                    seen_datagram = true;
+                    if (entry.value > 1) return Error.InvalidSettings;
+                    self.peer_settings.h3_datagram = entry.value;
+                },
                 else => {},
             }
         }
@@ -242,11 +264,29 @@ pub const Connection = struct {
         self.settings_received = true;
     }
 
+    /// Builds a GOAWAY frame payload (stream ID varint).
+    pub fn buildGoawayFrame(self: *Connection, stream_id: u64) ![]u8 {
+        var payload = std.ArrayList(u8).empty;
+        defer payload.deinit(self.allocator);
+        var vb: [16]u8 = undefined;
+        const n = try varint.encode(&vb, stream_id);
+        try payload.appendSlice(self.allocator, vb[0..n]);
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        var fh: [16]u8 = undefined;
+        const hn = try frame_mod.encodeFrameHeader(&fh, @intFromEnum(frame_mod.FrameType.goaway), payload.items.len);
+        try out.appendSlice(self.allocator, fh[0..hn]);
+        try out.appendSlice(self.allocator, payload.items);
+        self.goaway_sent = true;
+        self.goaway_stream_id = stream_id;
+        return out.toOwnedSlice(self.allocator);
+    }
+
     /// Processes one frame received on the HTTP/3 control stream.
     ///
     /// Request-stream frames such as DATA and HEADERS are forbidden here.
     /// SETTINGS is accepted exactly once; integer-valued control frames are
-    /// shape-validated and left for their feature-specific handlers.
+    /// shape-validated and handled.
     pub fn processControlFrame(self: *Connection, frame_type: u64, payload: []const u8) !void {
         self.control_stream_started = true;
         if (!self.settings_received and frame_type != 0x4) return Error.InvalidSettings;
@@ -260,12 +300,25 @@ pub const Connection = struct {
                 defer self.allocator.free(entries);
                 try self.processPeerSettings(entries);
             },
-            0x3, 0x7, 0xD => {
+            0x7 => {
+                var off: usize = 0;
+                const sid = varint.decode(payload, &off) catch return Error.ProtocolViolation;
+                if (off != payload.len) return Error.ProtocolViolation;
+                if (self.goaway_received and sid > self.goaway_stream_id) return Error.ProtocolViolation;
+                self.goaway_received = true;
+                self.goaway_stream_id = sid;
+            },
+            0x3, 0xD => {
                 const entries = frame_mod.validateFramePayload(self.allocator, frame_type, payload) catch |e| switch (e) {
                     error.OutOfMemory => return Error.OutOfMemory,
                     else => return Error.ProtocolViolation,
                 };
                 self.allocator.free(entries);
+                if (frame_type == 0xD) {
+                    var off: usize = 0;
+                    const pid = varint.decode(payload, &off) catch return Error.ProtocolViolation;
+                    if (pid > self.max_push_id) self.max_push_id = pid;
+                }
             },
             else => {}, // Unknown control frames are ignored per RFC 9114.
         }

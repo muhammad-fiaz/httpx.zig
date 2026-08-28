@@ -282,6 +282,8 @@ pub const FramingContext = struct {
     method_len: usize = 0,
     /// Treat 2xx responses to CONNECT as tunnels.
     connect_ok: bool = false,
+    /// True for HTTP/1.0 where Transfer-Encoding chunked is forbidden (RFC 9112 smuggling).
+    is_http_10: bool = false,
     /// Upper bound applied to any declared content length.
     max_body: usize = DEFAULT_MAX_BODY_BYTES,
 };
@@ -330,6 +332,7 @@ pub fn framingFull(fields: []const Field, ctx: FramingContext) ParseError!Framin
 
     if (has_te and !te_chunked_final) return ParseError.AmbiguousFraming;
     if (has_te and has_cl) return ParseError.AmbiguousFraming; // classic smuggling vector
+    if (has_te and ctx.is_http_10) return ParseError.AmbiguousFraming; // 1.0 must not use chunked
     if (has_te) return .{ .framing = .chunked, .length = 0 };
     if (has_cl) return .{ .framing = .content_length, .length = cl };
 

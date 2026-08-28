@@ -25,6 +25,7 @@ const frames = @import("frames.zig");
 const acktr_mod = @import("acktr.zig");
 const loss_mod = @import("loss.zig");
 const params_mod = @import("params.zig");
+const qstream = @import("stream.zig");
 
 pub const Error = error{
     ProtocolViolation,
@@ -137,9 +138,10 @@ pub const Connection = struct {
     peer_cids: std.ArrayList(CidEntry) = .empty,
     retire_prior_to: u64 = 0,
 
-    // Stream-level flow control.
+    // Stream-level flow control and reorder buffers.
     max_stream_data: std.AutoHashMap(u64, u64) = undefined,
     recv_stream_end: std.AutoHashMap(u64, u64) = undefined,
+    streams: std.AutoHashMap(u64, *qstream.Stream) = undefined,
     max_streams_bidi_remote: u64 = 0,
     max_streams_uni_remote: u64 = 0,
 
@@ -197,6 +199,7 @@ pub const Connection = struct {
         self.peer_cids = .empty;
         self.max_stream_data = std.AutoHashMap(u64, u64).init(allocator);
         self.recv_stream_end = std.AutoHashMap(u64, u64).init(allocator);
+        self.streams = std.AutoHashMap(u64, *qstream.Stream).init(allocator);
         self.sent_packets = .empty;
 
         // Random local CIDs (8 bytes fixed-length for this build).
@@ -219,6 +222,12 @@ pub const Connection = struct {
         self.peer_cids.deinit(self.allocator);
         self.max_stream_data.deinit();
         self.recv_stream_end.deinit();
+        var it = self.streams.valueIterator();
+        while (it.next()) |sp| {
+            sp.*.deinit();
+            self.allocator.destroy(sp.*);
+        }
+        self.streams.deinit();
         self.sent_packets.deinit(self.allocator);
         self.allocator.destroy(self);
     }
@@ -568,17 +577,43 @@ pub const Connection = struct {
                     try self.receiveCrypto(sp.kind, c.offset, c.data);
                 },
                 .stream => |s| {
-                    const end = std.math.add(u64, s.offset, s.data.len) catch return Error.FlowControlViolation;
-                    const old_end = self.recv_stream_end.get(s.id) orelse 0;
-                    if (end > self.cfg.initial_max_data) return Error.FlowControlViolation;
-                    if (end > old_end) {
-                        const delta = end - old_end;
-                        const total = std.math.add(u64, self.data_received, delta) catch return Error.FlowControlViolation;
-                        if (total > self.max_data) return Error.FlowControlViolation;
-                        self.data_received = total;
-                        self.recv_stream_end.put(s.id, end) catch return Error.OutOfMemory;
+                    const bidi = (s.id & 0x02) == 0;
+                    const initiator_is_client = (s.id & 0x01) == 0;
+                    const initiator_is_self = (self.role == .client and initiator_is_client) or (self.role == .server and !initiator_is_client);
+                    var st_ptr = self.streams.get(s.id);
+                    if (st_ptr == null) {
+                        const ns = try self.allocator.create(qstream.Stream);
+                        ns.* = qstream.Stream.init(self.allocator, s.id, bidi, initiator_is_self);
+                        if (self.max_stream_data.get(s.id)) |lim| ns.recv_max_offset = lim;
+                        try self.streams.put(s.id, ns);
+                        st_ptr = ns;
+                        if (self.cbs.onNewStream) |cb| cb(self.cbs.ctx, s.id);
                     }
-                    if (self.cbs.onStreamData) |cb| cb(self.cbs.ctx, s.id, s.data, s.fin);
+                    const st = st_ptr.?;
+                    const Sink = struct {
+                        cbs: Callbacks,
+                        sid: u64,
+                        pub fn call(sink_self: *@This(), data: []const u8) !void {
+                            if (sink_self.cbs.onStreamData) |cb| cb(sink_self.cbs.ctx, sink_self.sid, data, false);
+                        }
+                    };
+                    var sink = Sink{ .cbs = self.cbs, .sid = s.id };
+                    if (!st.fcAllows(s.offset, s.data.len)) return Error.FlowControlViolation;
+                    _ = st.receive(s.offset, s.data, s.fin, &sink) catch |e| switch (e) {
+                        error.FlowControlViolation => return Error.FlowControlViolation,
+                        error.FinalSizeViolation => return Error.ProtocolViolation,
+                        error.StreamReset => return,
+                        else => return Error.OutOfMemory,
+                    };
+                    const end = s.offset + s.data.len;
+                    const old_end = self.recv_stream_end.get(s.id) orelse 0;
+                    if (end > old_end) {
+                        self.data_received +|= end - old_end;
+                        try self.recv_stream_end.put(s.id, end);
+                    }
+                    if (s.fin and st.fin_offset != null and st.recv_offset == st.fin_offset.?) {
+                        if (self.cbs.onStreamData) |cb| cb(self.cbs.ctx, s.id, &.{}, true);
+                    }
                 },
                 .handshake_done => {
                     self.state = .established;

@@ -52,12 +52,22 @@ pub const Protocol = enum {
 /// Server default preference: h3 > h2 > http/1.1 > http/1.0
 pub const DEFAULT_SERVER_PREFERENCE = [_]Protocol{ .h3, .h2, .@"http/1.1", .@"http/1.0" };
 
+/// TCP-only preference (no h3): h2 > http/1.1 > http/1.0 — for TLS over TCP.
+/// h3 is QUIC-only (RFC 9114) and must not be advertised on TCP.
+pub const DEFAULT_TCP_PREFERENCE = [_]Protocol{ .h2, .@"http/1.1", .@"http/1.0" };
+
 /// Parses an ALPN ProtocolNameList body (without extension header):
-/// sequence of u8-length-prefixed names.
+/// sequence of u8-length-prefixed names. Uses page_allocator for
+/// backwards compatibility; prefer parseListWithAllocator for custom allocators.
 pub fn parseList(body: []const u8) Error![]const []const u8 {
+    return parseListWithAllocator(std.heap.page_allocator, body);
+}
+
+/// Parses an ALPN ProtocolNameList body with explicit allocator.
+pub fn parseListWithAllocator(allocator: Allocator, body: []const u8) Error![]const []const u8 {
     if (body.len > MAX_LIST_LENGTH) return Error.ListTooLarge;
     var names = std.ArrayList([]const u8).empty;
-    errdefer names.deinit(std.heap.page_allocator);
+    errdefer names.deinit(allocator);
 
     var offset: usize = 0;
     while (offset < body.len) {
@@ -66,10 +76,10 @@ pub fn parseList(body: []const u8) Error![]const []const u8 {
         offset += 1;
         if (offset + len > body.len) return Error.MalformedList;
         if (len == 0) return Error.MalformedList;
-        names.append(std.heap.page_allocator, body[offset..][0..len]) catch return Error.OutOfMemory;
+        names.append(allocator, body[offset..][0..len]) catch return Error.OutOfMemory;
         offset += len;
     }
-    return names.toOwnedSlice(std.heap.page_allocator);
+    return names.toOwnedSlice(allocator);
 }
 
 /// Serializes protocols into ALPN list body format.

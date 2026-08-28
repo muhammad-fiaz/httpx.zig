@@ -202,14 +202,9 @@ fn flateDecompress(allocator: Allocator, is_gzip: bool, data: []const u8) ![]u8 
     return flateDecompressImpl(allocator, if (is_gzip) .gzip else .zlib, data);
 }
 
-/// Decompresses with the given encoding.
+/// Decompresses with the given encoding (bounded by MAX_DECOMPRESSED_SIZE).
 pub fn decompress(allocator: Allocator, encoding: Encoding, data: []const u8) ![]u8 {
-    switch (encoding) {
-        .zstd => return zstd_mod.decompress(allocator, data) catch Error.CorruptData,
-        .br => return brotli_mod.decompress(allocator, data) catch Error.CorruptData,
-        .identity => return allocator.dupe(u8, data),
-        .gzip, .deflate => return flateDecompress(allocator, encoding == .gzip, data),
-    }
+    return decompressLimited(allocator, encoding, data, MAX_DECOMPRESSED_SIZE);
 }
 
 /// Decompresses content while rejecting expansion beyond `max_size`.
@@ -244,7 +239,11 @@ fn brotliDecompressLimited(allocator: Allocator, data: []const u8, max_size: usi
                     allocator.free(output);
                     return Error.DecompressedTooLarge;
                 }
-                return output[0..written];
+                if (written != capacity) {
+                    const exact = allocator.realloc(output, written) catch output[0..written];
+                    return exact;
+                }
+                return output;
             },
             .needs_more_output => {
                 allocator.free(output);
@@ -260,12 +259,20 @@ fn brotliDecompressLimited(allocator: Allocator, data: []const u8, max_size: usi
 }
 
 fn flateDecompressLimited(allocator: Allocator, is_gzip: bool, data: []const u8, max_size: usize) ![]u8 {
-    const result = flateDecompress(allocator, is_gzip, data) catch |err| return err;
-    if (result.len > max_size) {
-        allocator.free(result);
-        return Error.DecompressedTooLarge;
+    var in_reader = std.Io.Reader.fixed(data);
+    const window = try allocator.alloc(u8, flate.max_window_len);
+    defer allocator.free(window);
+    var decomp = flate.Decompress.init(&in_reader, if (is_gzip) .gzip else .zlib, window);
+    var out = std.ArrayList(u8).empty;
+    errdefer out.deinit(allocator);
+    var buf: [8192]u8 = undefined;
+    while (true) {
+        const n = decomp.reader.readSliceShort(&buf) catch return Error.CorruptData;
+        if (n == 0) break;
+        if (out.items.len + n > max_size) return Error.DecompressedTooLarge;
+        try out.appendSlice(allocator, buf[0..n]);
     }
-    return result;
+    return out.toOwnedSlice(allocator);
 }
 
 // Tests

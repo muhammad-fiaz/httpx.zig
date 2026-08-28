@@ -28,9 +28,9 @@ const sym_table = table.sym_table;
 
 // Encoder
 
-/// Upper bound on encoded size for a plaintext of `len` bytes (8/5 ratio).
+/// Upper bound on encoded size for a plaintext of `len` bytes (worst 30 bits per byte).
 pub fn maxEncodedLen(len: usize) usize {
-    return len * 8 / 5 + 1;
+    return len * 5 + 1;
 }
 
 /// Encodes `src` into `out`, padding the final byte with EOS MSBs.
@@ -289,9 +289,9 @@ pub const Decoder = struct {
         }
     }
 
-    /// Validates stream termination.
+    /// Validates stream termination. Empty input is valid per RFC 7541.
     pub fn finish(self: *const Decoder) Error!void {
-        if (!self.accepted or !self.emitted_any) return Error.InvalidHuffmanCode;
+        if (self.emitted_any and !self.accepted) return Error.InvalidHuffmanCode;
     }
 };
 

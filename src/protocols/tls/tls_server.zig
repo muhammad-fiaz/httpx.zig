@@ -334,7 +334,7 @@ pub const ListenerConfig = struct {
     allocator: Allocator,
     default_identity: ?tls_server_mod.CertIdentity = null,
     cert_selector: ?tls_server_mod.CertSelector = null,
-    alpn_protocols: []const alpn_mod.Protocol = &.{ .h2, .@"http/1.1", .@"http/1.0" },
+    alpn_protocols: []const alpn_mod.Protocol = &alpn_mod.DEFAULT_TCP_PREFERENCE,
 };
 
 pub const TlsListener = struct {

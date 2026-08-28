@@ -32,6 +32,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const env_dep = b.dependency("env", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create the public module that will be exported as "httpx" to consumers.
     // Dependencies must be added here so they propagate to downstream packages.
     const httpx_module = b.addModule("httpx", .{
@@ -41,6 +46,7 @@ pub fn build(b: *std.Build) void {
     httpx_module.addImport("zstd", zstd_dep.module("zstd"));
     httpx_module.addImport("brotli", brotli_dep.module("brotli"));
     httpx_module.addImport("tint", tint_dep.module("tint"));
+    httpx_module.addImport("env", env_dep.module("env"));
 
     const examples = [_]struct { name: []const u8, path: []const u8, skip_run_all: bool = false }{};
 
@@ -107,12 +113,19 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("zstd", zstd_dep.module("zstd"));
     tests.root_module.addImport("brotli", brotli_dep.module("brotli"));
     tests.root_module.addImport("tint", tint_dep.module("tint"));
+    tests.root_module.addImport("env", env_dep.module("env"));
     linkPlatformLibs(tests, target);
 
+    if (builtin.os.tag == .windows) {
+        const zig_lib = b.graph.zig_lib_directory.path orelse ".";
+        const runner_path = b.fmt("{s}/compiler/test_runner.zig", .{zig_lib});
+        tests.test_runner = .{
+            .path = .{ .cwd_relative = runner_path },
+            .mode = .simple,
+        };
+    }
+
     const run_tests = b.addRunArtifact(tests);
-    // Windows IPC (--listen=-) sporadically fails with EndOfStream after all
-    // tests pass (338/339). Keep the run non-cacheable so a stale
-    // `failed command: ... --listen=-` from .zig-cache is not replayed.
     run_tests.has_side_effects = true;
     const test_step = b.step("test", "Run unit tests");
 
@@ -150,6 +163,7 @@ pub fn build(b: *std.Build) void {
     lib_root_module.addImport("zstd", zstd_dep.module("zstd"));
     lib_root_module.addImport("brotli", brotli_dep.module("brotli"));
     lib_root_module.addImport("tint", tint_dep.module("tint"));
+    lib_root_module.addImport("env", env_dep.module("env"));
 
     const lib = b.addLibrary(.{
         .name = "httpx",

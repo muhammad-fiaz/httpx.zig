@@ -203,8 +203,8 @@ pub const TlsServerConfig = struct {
     /// SNI certificate selector (optional; falls back to default_identity).
     cert_selector: ?CertSelector = null,
 
-    /// ALPN protocols in server preference order.
-    alpn_protocols: []const alpn_mod.Protocol = &.{ .h2, .@"http/1.1", .@"http/1.0" },
+    /// ALPN protocols in server preference order (TCP: no h3, QUIC handles h3 separately).
+    alpn_protocols: []const alpn_mod.Protocol = &alpn_mod.DEFAULT_TCP_PREFERENCE,
 
     pub fn init(allocator: Allocator) TlsServerConfig {
         return .{ .allocator = allocator };

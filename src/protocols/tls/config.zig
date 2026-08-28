@@ -105,7 +105,10 @@ pub const ServerConfig = struct {
 
     min_version: TlsVersion = .tls_1_2,
     /// Preference order for ALPN; empty means no ALPN.
-    alpn_protocols: []const alpn.Protocol = &.{},
+    /// Defaults to h3>h2>http/1.1>http/1.0 per alpn.DEFAULT_SERVER_PREFERENCE
+    /// so that HTTP/3, HTTP/2 and HTTP/1.1 are all negotiable. Transports
+    /// that cannot carry h3 (TLS over TCP) filter h3 at negotiation time.
+    alpn_protocols: []const alpn.Protocol = &alpn.DEFAULT_SERVER_PREFERENCE,
 
     pub fn init(allocator: Allocator) ServerConfig {
         return .{ .allocator = allocator };
@@ -128,7 +131,8 @@ pub const ServerConfig = struct {
 
 pub const ClientConfig = struct {
     /// Protocols to offer in ALPN; order is our preference.
-    alpn_protocols: []const alpn.Protocol = &.{ .h2, .@"http/1.1", .@"http/1.0" },
+    /// Includes h3 so that QUIC/HTTP3 can be negotiated; TCP transports filter h3.
+    alpn_protocols: []const alpn.Protocol = &alpn.DEFAULT_SERVER_PREFERENCE,
     verify_certificates: bool = true,
 };
 

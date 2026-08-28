@@ -62,6 +62,7 @@ pub fn encodeRecord(
     iv_base: []const u8,
     cipher: RecordCipher,
 ) !EncodedRecord {
+    if (sequence_number == std.math.maxInt(u64)) return error.SequenceOverflow;
     if (plaintext.len > max_record_plaintext) return error.RecordTooLarge;
     if (key.len != cipher.keyLen()) return error.InvalidKeyLength;
     if (iv_base.len != cipher.ivLen()) return error.InvalidIvLength;
@@ -136,17 +137,23 @@ pub fn decodeRecord(
     iv_base: []const u8,
     cipher: RecordCipher,
 ) !struct { content_type: ContentType, plaintext: []u8 } {
+    if (sequence_number == std.math.maxInt(u64)) return error.SequenceOverflow;
     if (wire.len < 5 + cipher.tagLen()) return error.RecordTooShort;
     if (key.len != cipher.keyLen()) return error.InvalidKeyLength;
     if (iv_base.len != cipher.ivLen()) return error.InvalidIvLength;
 
     const header = wire[0..5];
+    const record_len: usize = (@as(usize, header[3]) << 8) | header[4];
+    // TLS 1.3 outer type is always application_data, but allow
+    // change_cipher_spec (0x14) for middlebox compatibility (RFC 8446 §5.4).
+    if (header[0] == @intFromEnum(ContentType.change_cipher_spec)) {
+        if (record_len != 1 or wire.len < 6 or wire[5] != 0x01) return error.InvalidContentType;
+        return .{ .content_type = .change_cipher_spec, .plaintext = out_buf[0..0] };
+    }
     if (header[0] != @intFromEnum(ContentType.application_data)) return error.InvalidContentType;
     const legacy_major = header[1];
     const legacy_minor = header[2];
     if (legacy_major != 3 or legacy_minor != 3) return error.InvalidRecordVersion;
-
-    const record_len: usize = (@as(usize, header[3]) << 8) | header[4];
     if (record_len < cipher.tagLen()) return error.RecordTooShort;
     if (record_len > max_record_plaintext + 1 + cipher.tagLen()) return error.RecordTooLarge;
     if (wire.len < 5 + record_len) return error.RecordTooShort;
@@ -193,9 +200,12 @@ pub fn decodeRecord(
         },
     }
 
-    // Last byte of plaintext is the content type
+    // Last byte(s) handling: strip trailing zeros (padding per RFC 8446 §5.4)
     if (enc_len == 0) return error.EmptyPlaintext;
-    const inner_ct = out_buf[enc_len - 1];
+    var end = enc_len;
+    while (end > 0 and out_buf[end - 1] == 0) end -= 1;
+    if (end == 0) return error.EmptyPlaintext;
+    const inner_ct = out_buf[end - 1];
     const inner_ct_enum: ContentType = switch (inner_ct) {
         @intFromEnum(ContentType.change_cipher_spec) => .change_cipher_spec,
         @intFromEnum(ContentType.alert) => .alert,
@@ -206,7 +216,7 @@ pub fn decodeRecord(
 
     return .{
         .content_type = inner_ct_enum,
-        .plaintext = out_buf[0 .. enc_len - 1],
+        .plaintext = out_buf[0 .. end - 1],
     };
 }
 

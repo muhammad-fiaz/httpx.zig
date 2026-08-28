@@ -24,12 +24,15 @@ pub const Uri = struct {
             std.ascii.eqlIgnoreCase(self.scheme, "ftps");
     }
 
-    /// Reconstructs the authority portion "host[:port]".
+    /// Reconstructs the authority portion "host[:port]" with brackets for IPv6.
     pub fn authority(self: *const Uri, buf: []u8) []const u8 {
+        const needs_brackets = std.mem.indexOfScalar(u8, self.host, ':') != null;
         if (self.port == 0 or self.port == defaultPort(self.scheme)) {
+            if (needs_brackets) return std.fmt.bufPrint(buf, "[{s}]", .{self.host}) catch self.host;
             @memcpy(buf[0..self.host.len], self.host);
             return buf[0..self.host.len];
         }
+        if (needs_brackets) return std.fmt.bufPrint(buf, "[{s}]:{d}", .{ self.host, self.port }) catch self.host;
         return std.fmt.bufPrint(buf, "{s}:{d}", .{ self.host, self.port }) catch self.host;
     }
 };
@@ -116,33 +119,35 @@ fn isIpv6Literal(host: []const u8) bool {
     return host.len > 0 and host[0] == '[';
 }
 
-/// Percent-decodes a string in place into `buf`. Returns decoded length.
+/// Percent-decodes a string in place into `buf`. Returns decoded slice or error if truncated.
 pub fn percentDecode(buf: []u8, input: []const u8) ![]const u8 {
+    if (input.len > buf.len * 3) return error.BufferTooSmall;
     var out: usize = 0;
     var i: usize = 0;
     while (i < input.len) {
-        if (input[i] == '%' and i + 2 < input.len + 1 and i + 2 <= input.len - 1 + 1) {
-            if (i + 2 < input.len) {
-                const hi = std.fmt.charToDigit(input[i + 1], 16) catch {
-                    buf[out] = input[i];
-                    out += 1;
-                    i += 1;
-                    continue;
-                };
-                const lo = std.fmt.charToDigit(input[i + 2], 16) catch {
-                    buf[out] = input[i];
-                    out += 1;
-                    i += 1;
-                    continue;
-                };
-                buf[out] = (hi << 4) | lo;
-                out += 1;
-                i += 3;
-            } else {
+        if (out >= buf.len) return error.BufferTooSmall;
+        if (input[i] == '%') {
+            if (i + 2 >= input.len) {
                 buf[out] = input[i];
                 out += 1;
                 i += 1;
+                continue;
             }
+            const hi = std.fmt.charToDigit(input[i + 1], 16) catch {
+                buf[out] = input[i];
+                out += 1;
+                i += 1;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(input[i + 2], 16) catch {
+                buf[out] = input[i];
+                out += 1;
+                i += 1;
+                continue;
+            };
+            buf[out] = (hi << 4) | lo;
+            out += 1;
+            i += 3;
         } else {
             buf[out] = input[i];
             out += 1;
@@ -153,23 +158,24 @@ pub fn percentDecode(buf: []u8, input: []const u8) ![]const u8 {
 }
 
 /// Checks whether a path contains traversal sequences after decoding.
-/// This is the single security gate used by static file serving.
 pub fn hasPathTraversal(decoded_path: []const u8) bool {
-    // Check for ".."
-    if (std.mem.indexOf(u8, decoded_path, "..") != null) return true;
-
-    // Check for null bytes
+    if (decoded_path.len == 0) return false;
     if (std.mem.indexOfScalar(u8, decoded_path, 0) != null) return true;
-
-    // Windows drive letters
     if (decoded_path.len >= 2 and decoded_path[1] == ':') return true;
-
-    // UNC paths
     if (decoded_path.len >= 2 and decoded_path[0] == '\\' and decoded_path[1] == '\\') return true;
-
-    // Absolute path escape
-    if (decoded_path.len > 0 and (decoded_path[0] == '/' or decoded_path[0] == '\\')) return true;
-
+    var it = std.mem.splitScalar(u8, decoded_path, '/');
+    while (it.next()) |seg| {
+        var sub = std.mem.splitScalar(u8, seg, '\\');
+        while (sub.next()) |part| {
+            if (std.mem.eql(u8, part, "..") or std.mem.eql(u8, part, ".")) return true;
+            if (part.len >= 2 and part[0] == '.' and part[1] == '.') {
+                // catch "..." etc. already, but also "%2e%2e" is decoded before call
+            }
+        }
+    }
+    // Also check backslash variants for Windows
+    if (std.mem.indexOf(u8, decoded_path, "..\\") != null) return true;
+    if (std.mem.indexOf(u8, decoded_path, "\\..") != null) return true;
     return false;
 }
 
