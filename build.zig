@@ -116,15 +116,6 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("env", env_dep.module("env"));
     linkPlatformLibs(tests, target);
 
-    if (builtin.os.tag == .windows) {
-        const zig_lib = b.graph.zig_lib_directory.path orelse ".";
-        const runner_path = b.fmt("{s}/compiler/test_runner.zig", .{zig_lib});
-        tests.test_runner = .{
-            .path = .{ .cwd_relative = runner_path },
-            .mode = .simple,
-        };
-    }
-
     const run_tests = b.addRunArtifact(tests);
     run_tests.has_side_effects = true;
     const test_step = b.step("test", "Run unit tests");
