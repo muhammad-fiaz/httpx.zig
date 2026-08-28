@@ -64,8 +64,7 @@ pub const LongHeader = struct {
 };
 
 pub const ShortHeader = struct {
-    /// Offset of the DCID (fixed length known from our own CIDs).
-    dcid_offset: usize = 5,
+    dcid: []const u8 = "",
     key_phase: bool = false,
     pn_offset: usize = 0,
     pn_len: usize = 0,
@@ -129,6 +128,25 @@ pub fn parseLongHeader(data: []const u8) HeaderError!ParseResult {
     if (pkt_type == .retry) return HeaderError.InvalidPacket;
 
     return .{ .header = h, .payload_offset = offset };
+}
+
+/// Parses an UNPROTECTED short header (1-RTT) starting at data[0].
+/// `dcid_len` is the length of the destination CID expected for this connection (0..20).
+pub fn parseShortHeader(data: []const u8, dcid_len: usize) HeaderError!ShortHeader {
+    if (dcid_len > 20) return HeaderError.InvalidPacket;
+    if (data.len < 1 + dcid_len) return HeaderError.Truncated;
+    const first = data[0];
+    if ((first & 0x80) != 0) return HeaderError.InvalidPacket;
+    if ((first & 0x40) == 0) return HeaderError.InvalidPacket;
+    const key_phase = (first & 0x04) != 0;
+    const pn_len: usize = @as(usize, first & 0x03) + 1;
+    if (data.len < 1 + dcid_len + pn_len) return HeaderError.Truncated;
+    return .{
+        .dcid = data[1..][0..dcid_len],
+        .key_phase = key_phase,
+        .pn_offset = 1 + dcid_len,
+        .pn_len = pn_len,
+    };
 }
 
 // Serialization

@@ -52,17 +52,17 @@ pub const RttStats = struct {
         else
             sample - self.smoothed_rtt_ms;
 
-        self.rttvar_ms = (3 * self.rttvar_ms + diff) / 4;
-        self.smoothed_rtt_ms = (7 * self.smoothed_rtt_ms + sample) / 8;
+        self.rttvar_ms = (3 *| self.rttvar_ms +| diff) / 4;
+        self.smoothed_rtt_ms = (7 *| self.smoothed_rtt_ms +| sample) / 8;
     }
 
     /// PTO base without exponential backoff (ms).
     pub fn ptoBase(self: *const RttStats, include_max_ack_delay: bool, max_ack_delay_ms: u64) u64 {
         if (self.first_sample_ts_ms == null) {
-            return self.initial_rtt_ms + @max(self.initial_rtt_ms / 2, GranularityMs);
+            return self.initial_rtt_ms +| @max(self.initial_rtt_ms / 2, GranularityMs);
         }
-        var pto = self.smoothed_rtt_ms + @max(4 * self.rttvar_ms, GranularityMs);
-        if (include_max_ack_delay) pto += max_ack_delay_ms;
+        var pto = self.smoothed_rtt_ms +| @max(4 *| self.rttvar_ms, GranularityMs);
+        if (include_max_ack_delay) pto +|= max_ack_delay_ms;
         return pto;
     }
 };
@@ -117,10 +117,10 @@ pub const Recovery = struct {
             if (p.pn >= largest) continue; // not yet beyond threshold
 
             // Packet threshold: lost when largest_newly_acked >= pn + K.
-            const thresh_lost = largest >= p.pn + PacketThreshold;
+            const thresh_lost = largest - p.pn >= PacketThreshold;
 
             // Time threshold: lost when now >= ts + loss_delay.
-            const expiry = p.ts_ms + loss_delay;
+            const expiry = p.ts_ms +| loss_delay;
             const time_lost = now_ms >= expiry;
 
             if (thresh_lost or time_lost) {
@@ -150,10 +150,9 @@ pub const Recovery = struct {
     pub fn persistentCongestion(self: *const Recovery) bool {
         const start = self.pc_start_ts_ms orelse return false;
         const latest = self.pc_latest_ts_ms.?; // set together
-        const duration =
-            (self.rtt.smoothed_rtt_ms +
-                @max(4 * self.rttvar_ms, GranularityMs) +
-                self.cfg.max_ack_delay_ms) * 3;
+        const duration = (self.rtt.smoothed_rtt_ms +|
+            @max(4 * self.rtt.rttvar_ms, GranularityMs) +|
+            self.cfg.max_ack_delay_ms) *| 3;
         return (latest - start) >= duration;
     }
 
@@ -166,7 +165,7 @@ pub const Recovery = struct {
     pub fn ptoDuration(self: *const Recovery, app_space: bool) u64 {
         const base = self.rtt.ptoBase(app_space and self.cfg.include_ack_delay_in_pto, self.cfg.max_ack_delay_ms);
         const backoff_shift: u5 = @intCast(@min(self.pto_count, 30));
-        return base << backoff_shift;
+        return base <<| backoff_shift;
     }
 
     pub fn onPtoExpired(self: *Recovery) void {

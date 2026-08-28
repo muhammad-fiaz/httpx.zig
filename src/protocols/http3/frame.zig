@@ -4,6 +4,38 @@ const std = @import("std");
 const varint = @import("../quic/varint.zig");
 const Allocator = std.mem.Allocator;
 
+/// HTTP/3 error codes (RFC 9114 section 8.1).
+pub const H3Error = enum(u64) {
+    h3_no_error = 0x0100,
+    h3_general_protocol_error = 0x0101,
+    h3_internal_error = 0x0102,
+    h3_stream_creation_error = 0x0103,
+    h3_closed_critical_stream = 0x0104,
+    h3_frame_unexpected = 0x0105,
+    h3_frame_error = 0x0106,
+    h3_excessive_load = 0x0107,
+    h3_id_error = 0x0108,
+    h3_settings_error = 0x0109,
+    h3_missing_settings = 0x010a,
+    h3_request_rejected = 0x010b,
+    h3_request_cancelled = 0x010c,
+    h3_request_incomplete = 0x010d,
+    h3_message_error = 0x010e,
+    h3_connect_error = 0x010f,
+    h3_version_fallback = 0x0110,
+    qpack_general_error = 0x0200,
+    qpack_encoder_stream_error = 0x0201,
+    qpack_decoder_stream_error = 0x0202,
+};
+
+/// Stream type identifiers for unidirectional streams.
+pub const UniStreamType = struct {
+    pub const control: u64 = 0x00;
+    pub const push: u64 = 0x01;
+    pub const qpack_encoder: u64 = 0x02;
+    pub const qpack_decoder: u64 = 0x03;
+};
+
 pub const FrameType = enum(u64) {
     data = 0x0,
     headers = 0x1,
@@ -137,7 +169,14 @@ pub fn parseSettingsPayload(data: []const u8, allocator: Allocator) Error![]Sett
 pub fn buildSettingsPayload(allocator: Allocator, entries: []const SettingEntry) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    for (entries) |e| {
+    for (entries, 0..) |e, i| {
+        switch (e.id) {
+            0x2, 0x3, 0x4, 0x5 => return Error.InvalidFrame,
+            else => {},
+        }
+        for (entries[0..i]) |previous| {
+            if (previous.id == e.id) return Error.InvalidFrame;
+        }
         var buf: [8]u8 = undefined;
         var n: usize = undefined;
         n = try varint.encode(&buf, e.id);
@@ -195,6 +234,17 @@ test "settings payload rejects duplicate and HTTP/2-only identifiers" {
     n = try varint.encode(&reserved, 0x4);
     n += try varint.encode(reserved[n..], 0);
     try std.testing.expectError(Error.InvalidFrame, parseSettingsPayload(reserved[0..n], a));
+}
+
+test "settings builder rejects duplicate and reserved identifiers" {
+    const a = std.testing.allocator;
+    const duplicate = [_]SettingEntry{
+        .{ .id = 0x6, .value = 1 },
+        .{ .id = 0x6, .value = 2 },
+    };
+    try std.testing.expectError(Error.InvalidFrame, buildSettingsPayload(a, &duplicate));
+    const reserved = [_]SettingEntry{.{ .id = 0x2, .value = 0 }};
+    try std.testing.expectError(Error.InvalidFrame, buildSettingsPayload(a, &reserved));
 }
 
 test "frame payload validation enforces integer-only frame payloads" {

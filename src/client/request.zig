@@ -39,8 +39,7 @@ pub fn systemLookupStrings(
     a: Allocator,
 ) dns_cache_mod.LookupError![]const []const u8 {
     _ = ctx;
-    _ = io;
-    const addrs = net_resolve.lookup(a, name, 0) catch |e| switch (e) {
+    const addrs = net_resolve.lookupWithIo(a, io, name, 0) catch |e| switch (e) {
         error.HostNotFound => return error.DnsFailed,
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.DnsFailed,
@@ -351,7 +350,7 @@ pub fn request(a: Allocator, io: std.Io, req_in: Request) Error!Response {
                     if (list.items.len == 0) return Error.ConnectFailed;
                     break :rblk list.toOwnedSlice(a) catch return Error.OutOfMemory;
                 }
-                break :rblk net_resolve.lookup(a, host_only, port) catch return Error.ConnectFailed;
+                break :rblk net_resolve.lookupWithIo(a, io, host_only, port) catch return Error.ConnectFailed;
             };
             // Happy-eyeballs-lite: prefer IPv4 results first (v6 endpoints
             // are frequently unreachable on dev machines).

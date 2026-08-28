@@ -86,8 +86,9 @@ pub const TlsServerConn = struct {
                 .application_data,
                 plaintext[offset..][0..chunk_len],
                 self.tx_seq,
-                self.app_keys.server_key,
-                self.app_keys.server_iv,
+                self.app_keys.serverKeySlice(),
+                &self.app_keys.server_iv,
+                self.app_keys.cipher,
             );
             self.socket.writeAll(encoded.bytes[0..encoded.len]) catch return error.IoError;
             self.tx_seq +%= 1;
@@ -114,9 +115,13 @@ pub const TlsServerConn = struct {
             total_read += n;
         }
 
+        // TLS 1.3 records use the TLS 1.2 legacy version on the wire.
+        if (hdr_buf[1] != 0x03 or hdr_buf[2] != 0x03) return error.TlsRecordError;
+
         const record_len: usize = (@as(usize, hdr_buf[3]) << 8) | hdr_buf[4];
-        if (record_len < record_mod.Aes128Gcm.tag_length or
-            record_len > record_mod.max_record_plaintext + 1 + record_mod.Aes128Gcm.tag_length)
+        const tag_len = self.app_keys.cipher.tagLen();
+        if (record_len < tag_len or
+            record_len > record_mod.max_record_plaintext + 1 + tag_len)
         {
             return error.TlsRecordError;
         }
@@ -141,8 +146,9 @@ pub const TlsServerConn = struct {
                     wire_buf[0..][0 .. 5 + record_len],
                     &decrypt_buf,
                     self.rx_seq,
-                    self.app_keys.client_key,
-                    self.app_keys.client_iv,
+                    self.app_keys.clientKeySlice(),
+                    &self.app_keys.client_iv,
+                    self.app_keys.cipher,
                 ) catch return error.TlsFatalAlert;
                 if (result.plaintext.len >= 2) {
                     const alert = handshake_mod.Alert.decode(.{ result.plaintext[0], result.plaintext[1] });
@@ -159,8 +165,9 @@ pub const TlsServerConn = struct {
             wire_buf[0..][0 .. 5 + record_len],
             &decrypt_buf,
             self.rx_seq,
-            self.app_keys.client_key,
-            self.app_keys.client_iv,
+            self.app_keys.clientKeySlice(),
+            &self.app_keys.client_iv,
+            self.app_keys.cipher,
         ) catch return error.TlsRecordError;
         self.rx_seq +%= 1;
 
@@ -197,7 +204,7 @@ pub const TlsServerConfig = struct {
     cert_selector: ?CertSelector = null,
 
     /// ALPN protocols in server preference order.
-    alpn_protocols: []const alpn_mod.Protocol = &.{ .h2, .@"http/1.1" },
+    alpn_protocols: []const alpn_mod.Protocol = &.{ .h2, .@"http/1.1", .@"http/1.0" },
 
     pub fn init(allocator: Allocator) TlsServerConfig {
         return .{ .allocator = allocator };
@@ -250,7 +257,8 @@ pub const TlsServer = struct {
 
         // Parse the ClientHello body for SNI and ALPN
         const ch_body = read_buf[4..][0..body_len];
-        const parsed_ch = try parseClientHelloExtensions(ch_body);
+        var parsed_ch = try parseClientHelloExtensions(a, ch_body);
+        defer parsed_ch.alpn_protocols.deinit(a);
 
         // Feed the full ClientHello (header + body) to the transcript
         try engine.processClientHello(ch_body);
@@ -271,6 +279,7 @@ pub const TlsServer = struct {
             identity.cert_chain_pem,
             identity.private_key_pem,
             self.config.alpn_protocols,
+            parsed_ch.alpn_protocols.items,
         );
         defer flight.deinit(a);
 
@@ -317,7 +326,7 @@ pub const TlsServer = struct {
     }
 
     fn writeEncryptedHandshakeRecord(socket: *tcp.Socket, message: []const u8, keys: engine_mod.DerivedKeys, seq: *u64) !void {
-        const encoded = try record_mod.encodeRecord(.handshake, message, seq.*, keys.server_key, keys.server_iv);
+        const encoded = try record_mod.encodeRecord(.handshake, message, seq.*, keys.serverKeySlice(), &keys.server_iv, keys.cipher);
         try socket.writeAll(encoded.bytes[0..encoded.len]);
         seq.* +%= 1;
     }
@@ -340,19 +349,23 @@ const ParsedClientHello = struct {
 };
 
 /// Parse extensions from a ClientHello body to extract SNI and ALPN.
-fn parseClientHelloExtensions(body: []const u8) !ParsedClientHello {
+fn parseClientHelloExtensions(allocator: Allocator, body: []const u8) !ParsedClientHello {
     if (body.len < 34) return error.TlsHandshakeFailed;
 
     // ClientHello body layout (matching our encoder):
     //   [0..2]   client_version
     //   [2..34]  random
-    //   [34..36] cipher_suites_length (u16)
-    //   [36..36+cs_len] cipher_suites
-    //   [36+cs_len]     compression_methods_length (u8)
-    //   [37+cs_len..][0..comp_len] compression_methods
-    //   [37+cs_len+comp_len..][0..2] extensions_length
-    //   [39+cs_len+comp_len..] extensions
+    //   [34]       legacy_session_id_length (u8)
+    //   [35..]     legacy_session_id
+    //   [...]      cipher suites, compression methods, extensions
     var pos: usize = 34; // skip client_version(2) + random(32)
+
+    if (pos + 1 > body.len) return error.TlsHandshakeFailed;
+    const session_id_len = body[pos];
+    pos += 1;
+    const session_end = std.math.add(usize, pos, session_id_len) catch return error.TlsHandshakeFailed;
+    if (session_end > body.len) return error.TlsHandshakeFailed;
+    pos += session_id_len;
 
     if (pos + 2 > body.len) return error.TlsHandshakeFailed;
     const cs_len: usize = (@as(usize, body[pos]) << 8) | body[pos + 1];
@@ -371,6 +384,7 @@ fn parseClientHelloExtensions(body: []const u8) !ParsedClientHello {
     var result = ParsedClientHello{
         .alpn_protocols = std.ArrayList([]const u8).empty,
     };
+    errdefer result.alpn_protocols.deinit(allocator);
 
     while (pos + 4 <= ext_end) {
         const ext_type = std.mem.readInt(u16, body[pos..][0..2], .big);
@@ -381,6 +395,8 @@ fn parseClientHelloExtensions(body: []const u8) !ParsedClientHello {
 
         if (ext_type == @intFromEnum(handshake_mod.ExtensionType.server_name)) {
             result.sni = try parseSniExtension(body[pos..][0..ext_data_len]);
+        } else if (ext_type == @intFromEnum(handshake_mod.ExtensionType.application_layer_protocol_negotiation)) {
+            result.alpn_protocols = try parseAlpnExtension(allocator, body[pos..][0..ext_data_len]);
         }
 
         pos = data_end;
@@ -393,18 +409,41 @@ fn parseClientHelloExtensions(body: []const u8) !ParsedClientHello {
 
 /// Parse the server_name extension to extract the hostname.
 fn parseSniExtension(data: []const u8) !?[]const u8 {
-    if (data.len < 5) return null;
+    if (data.len < 5) return error.TlsHandshakeFailed;
     // list length (2 bytes), then at least one entry
     const list_len: usize = (@as(usize, data[0]) << 8) | data[1];
-    if (list_len < 3 or 2 + list_len > data.len) return null;
+    const list_end = std.math.add(usize, 2, list_len) catch return null;
+    if (list_len < 3 or list_end != data.len) return error.TlsHandshakeFailed;
 
     // name type (1 byte) + name length (2 bytes)
     const name_type = data[2];
-    if (name_type != 0) return null; // only host_name type
+    if (name_type != 0) return error.TlsHandshakeFailed; // only host_name type
     const name_len: usize = (@as(usize, data[3]) << 8) | data[4];
-    if (5 + name_len > data.len) return null;
+    const name_end = std.math.add(usize, 5, name_len) catch return null;
+    if (name_end != list_end) return error.TlsHandshakeFailed;
 
     return data[5..][0..name_len];
+}
+
+/// Parse the ALPN extension to extract the list of offered protocol names.
+fn parseAlpnExtension(allocator: Allocator, data: []const u8) !std.ArrayList([]const u8) {
+    var result = std.ArrayList([]const u8).empty;
+    errdefer result.deinit(allocator);
+    if (data.len < 2) return error.TlsHandshakeFailed;
+    const list_len: usize = (@as(usize, data[0]) << 8) | data[1];
+    if (list_len != data.len - 2) return error.TlsHandshakeFailed;
+    var pos: usize = 2;
+    const list_end = 2 + list_len;
+    while (pos < list_end) {
+        if (pos + 1 > list_end) return error.TlsHandshakeFailed;
+        const name_len = data[pos];
+        pos += 1;
+        if (name_len == 0 or pos + name_len > list_end) return error.TlsHandshakeFailed;
+        try result.append(allocator, data[pos..][0..name_len]);
+        pos += name_len;
+    }
+    if (pos != list_end) return error.TlsHandshakeFailed;
+    return result;
 }
 
 // Tests
@@ -428,21 +467,31 @@ test "tls server handshake processes client hello" {
 test "alpn negotiation in server config" {
     const cfg = TlsServerConfig{
         .allocator = std.testing.allocator,
-        .alpn_protocols = &.{ .h2, .@"http/1.1" },
     };
-    try std.testing.expectEqual(@as(usize, 2), cfg.alpn_protocols.len);
+    try std.testing.expectEqual(@as(usize, 3), cfg.alpn_protocols.len);
     try std.testing.expectEqual(alpn_mod.Protocol.h2, cfg.alpn_protocols[0]);
+    try std.testing.expectEqual(alpn_mod.Protocol.@"http/1.1", cfg.alpn_protocols[1]);
+    try std.testing.expectEqual(alpn_mod.Protocol.@"http/1.0", cfg.alpn_protocols[2]);
 }
 
 test "ClientHello SNI parsing" {
     const a = std.testing.allocator;
 
     var client = engine_mod.Engine.initClient(a, .{});
-    const ch = try client.produceClientHello(&.{"h2"}, &.{});
+    const ch = try client.produceClientHelloWithSni(&.{"h2"}, &.{}, "example.com");
     defer a.free(ch);
 
     // Parse the ClientHello body for extensions
-    const parsed = try parseClientHelloExtensions(ch[4..]);
-    // SNI is set to the first ALPN protocol (used as hostname in this impl)
+    var parsed = try parseClientHelloExtensions(a, ch[4..]);
+    defer parsed.alpn_protocols.deinit(a);
     try std.testing.expect(parsed.sni != null);
+    try std.testing.expectEqualStrings("example.com", parsed.sni.?);
+}
+
+test "TLS extension parsers reject malformed SNI and ALPN" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.TlsHandshakeFailed, parseSniExtension(&.{ 0, 3, 0, 0, 1 }));
+    try std.testing.expectError(error.TlsHandshakeFailed, parseSniExtension(&.{ 0, 5, 0, 0, 1, 'x', 0 }));
+    try std.testing.expectError(error.TlsHandshakeFailed, parseAlpnExtension(a, &.{ 0, 3, 2, 'h' }));
+    try std.testing.expectError(error.TlsHandshakeFailed, parseAlpnExtension(a, &.{ 0, 2, 0, 'x' }));
 }

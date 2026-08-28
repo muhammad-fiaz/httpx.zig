@@ -291,6 +291,21 @@ pub const Server = struct {
             _ = sendSimpleError(conn, 400, "invalid message framing") catch 0;
             return false;
         };
+        var has_expect = false;
+        for (fields[0..blk.count]) |field| {
+            if (std.ascii.eqlIgnoreCase(field.name, "expect")) {
+                has_expect = true;
+                if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, field.value, " \t"), "100-continue")) {
+                    _ = sendSimpleError(conn, 417, "expectation failed") catch 0;
+                    return false;
+                }
+            }
+        }
+        if (has_expect and head.minor_version == 1 and framing.framing != .none) {
+            const interim = writer_mod.buildInformational(arena, 100, &.{}) catch return false;
+            defer arena.free(interim);
+            conn.writeAll(interim) catch return false;
+        }
         {
             const fr = framing;
             switch (fr.framing) {
@@ -302,6 +317,7 @@ pub const Server = struct {
                     body = arena.alloc(u8, fr.length) catch return false;
                     // How many body bytes were already pulled in by the header reads.
                     const buffered = if (filled > blk.end) filled - blk.end else 0;
+                    if (buffered > fr.length) client_close = true;
                     const take = @min(buffered, fr.length);
                     @memcpy(body[0..take], head_buf[blk.end..][0..take]);
                     var have: usize = take;
@@ -338,6 +354,10 @@ pub const Server = struct {
                         if (n == 0) return false;
                         raw.appendSlice(arena, head_buf[0..n]) catch return false;
                     }
+                    // Any bytes after the terminating chunk are currently not
+                    // retained for the next request, so do not reuse this
+                    // connection when the read crossed message boundaries.
+                    if (unparsed < raw.items.len) client_close = true;
                     if (acc.items.len > self.cfg.max_body) {
                         _ = sendSimpleError(conn, 413, "payload too large") catch 0;
                         return false;

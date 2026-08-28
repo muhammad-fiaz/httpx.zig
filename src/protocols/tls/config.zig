@@ -128,7 +128,7 @@ pub const ServerConfig = struct {
 
 pub const ClientConfig = struct {
     /// Protocols to offer in ALPN; order is our preference.
-    alpn_protocols: []const alpn.Protocol = &.{ .h2, .@"http/1.1" },
+    alpn_protocols: []const alpn.Protocol = &.{ .h2, .@"http/1.1", .@"http/1.0" },
     verify_certificates: bool = true,
 };
 

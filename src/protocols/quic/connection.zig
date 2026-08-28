@@ -42,6 +42,9 @@ pub const Role = enum { client, server };
 
 pub const SpaceKind = enum(u2) { initial = 0, handshake = 1, application = 2 };
 
+pub const CryptoChunk = struct { offset: u64, data: []const u8 };
+const CryptoSegment = struct { offset: u64, data: []u8 };
+
 /// Keys + bookkeeping for one packet-number space.
 pub const PnSpace = struct {
     kind: SpaceKind,
@@ -98,6 +101,16 @@ pub const State = enum {
 };
 
 pub const MAX_DATAGRAM = 1500;
+pub const MAX_PEER_CONNECTION_IDS = 16;
+const MAX_CRYPTO_SEGMENTS = 1024;
+
+pub const CidEntry = struct {
+    sequence: u64,
+    cid: [20]u8 = undefined,
+    cid_len: u8 = 0,
+    stateless_reset_token: [16]u8 = undefined,
+    retired: bool = false,
+};
 
 pub const Connection = struct {
     allocator: Allocator,
@@ -108,11 +121,34 @@ pub const Connection = struct {
 
     state: State = .initial,
 
+    // Flow control.
+    max_data: u64 = 1 << 20,
+    data_sent: u64 = 0,
+    data_received: u64 = 0,
+    max_data_remote: u64 = 1 << 20,
+
     // Connection IDs.
     dcid: [8]u8 = undefined, // our source cid / peer's destination
     dcid_len: u8 = 8,
     scid: [8]u8 = undefined, // what we advertise
     scid_len: u8 = 8,
+
+    // Peer CID table (NEW_CONNECTION_ID entries).
+    peer_cids: std.ArrayList(CidEntry) = .empty,
+    retire_prior_to: u64 = 0,
+
+    // Stream-level flow control.
+    max_stream_data: std.AutoHashMap(u64, u64) = undefined,
+    recv_stream_end: std.AutoHashMap(u64, u64) = undefined,
+    max_streams_bidi_remote: u64 = 0,
+    max_streams_uni_remote: u64 = 0,
+
+    // Loss detection.
+    recovery: loss_mod.Recovery = .{},
+    sent_packets: std.ArrayList(loss_mod.SentPacket) = .empty,
+
+    pending_path_response: ?[8]u8 = null,
+    pending_reset_stream: ?struct { stream_id: u64, error_code: u64 } = null,
 
     // Packet-number spaces.
     spaces: [3]PnSpace = undefined,
@@ -123,6 +159,9 @@ pub const Connection = struct {
     // CRYPTO reassembly per space (offset -> contiguous).
     crypto_buf: [3]std.ArrayList(u8) = undefined,
     crypto_recv_off: [3]u64 = .{ 0, 0, 0 },
+    crypto_send_off: [3]u64 = .{ 0, 0, 0 },
+    crypto_out: [3]std.ArrayList(u8) = undefined,
+    crypto_pending: [3]std.ArrayList(CryptoSegment) = undefined,
 
     // Anti-amplification (server side).
     bytes_received: u64 = 0,
@@ -152,7 +191,13 @@ pub const Connection = struct {
             self.spaces[i] = PnSpace.init(allocator, @enumFromInt(i));
         }
         for (&self.crypto_buf) |*b| b.* = .empty;
+        for (&self.crypto_out) |*b| b.* = .empty;
+        for (&self.crypto_pending) |*b| b.* = .empty;
         self.outbuf = .empty;
+        self.peer_cids = .empty;
+        self.max_stream_data = std.AutoHashMap(u64, u64).init(allocator);
+        self.recv_stream_end = std.AutoHashMap(u64, u64).init(allocator);
+        self.sent_packets = .empty;
 
         // Random local CIDs (8 bytes fixed-length for this build).
         self.rng.random().bytes(self.scid[0..]);
@@ -165,7 +210,16 @@ pub const Connection = struct {
     pub fn deinit(self: *Connection) void {
         for (&self.spaces) |*s| s.acktr.deinit();
         for (&self.crypto_buf) |*b| b.deinit(self.allocator);
+        for (&self.crypto_out) |*b| b.deinit(self.allocator);
+        for (&self.crypto_pending) |*b| {
+            for (b.items) |segment| self.allocator.free(segment.data);
+            b.deinit(self.allocator);
+        }
         self.outbuf.deinit(self.allocator);
+        self.peer_cids.deinit(self.allocator);
+        self.max_stream_data.deinit();
+        self.recv_stream_end.deinit();
+        self.sent_packets.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
@@ -208,6 +262,35 @@ pub const Connection = struct {
         _ = &krx;
         sp.keys_tx = ktx;
         sp.keys_rx = krx;
+    }
+
+    /// Queues TLS handshake bytes for later packetization as CRYPTO frames.
+    pub fn queueCrypto(self: *Connection, kind: SpaceKind, data: []const u8) Error!u64 {
+        if (kind == .application or data.len > MAX_DATAGRAM) return Error.BufferTooSmall;
+        const idx = @intFromEnum(kind);
+        const offset = self.crypto_send_off[idx];
+        self.crypto_send_off[idx] = std.math.add(u64, offset, data.len) catch return Error.BufferTooSmall;
+        self.crypto_out[idx].appendSlice(self.allocator, data) catch return Error.OutOfMemory;
+        return offset;
+    }
+
+    /// Peeks queued CRYPTO bytes while retaining their absolute stream offset.
+    /// Call `consumeCrypto` after the frame has been serialized.
+    pub fn takeCrypto(self: *Connection, kind: SpaceKind, max_bytes: usize) ?CryptoChunk {
+        if (kind == .application) return null;
+        const idx = @intFromEnum(kind);
+        const queued = self.crypto_out[idx].items;
+        if (queued.len == 0) return null;
+        const take = @min(max_bytes, queued.len);
+        const result: CryptoChunk = .{ .offset = self.crypto_send_off[idx] - queued.len, .data = queued[0..take] };
+        return result;
+    }
+
+    /// Consumes bytes previously returned by `takeCrypto` after packetization.
+    pub fn consumeCrypto(self: *Connection, kind: SpaceKind, count: usize) bool {
+        if (kind == .application or count > self.crypto_out[@intFromEnum(kind)].items.len) return false;
+        self.crypto_out[@intFromEnum(kind)].replaceRange(self.allocator, 0, count, &.{}) catch return false;
+        return true;
     }
 
     pub fn discardInitialKeys(self: *Connection) void {
@@ -280,7 +363,7 @@ pub const Connection = struct {
 
         var ct: [MAX_DATAGRAM]u8 = undefined;
         var tag: [16]u8 = undefined;
-        protect.seal(ct[0..payload.items.len], &tag, payload.items, buf[0..aad_len], keys.key, &keys.iv, pn);
+        protect.sealWithKeys(ct[0..payload.items.len], &tag, payload.items, buf[0..aad_len], keys, pn);
 
         var wire_len: usize = aad_len;
         @memcpy(buf[wire_len..][0..payload.items.len], ct[0..payload.items.len]);
@@ -294,7 +377,18 @@ pub const Connection = struct {
         if (sample_off + 16 > wire_len) return Error.BufferTooSmall;
         var sample: [16]u8 = undefined;
         @memcpy(&sample, buf[sample_off..][0..16]);
-        const mask = protect.hpMaskAesCtx(std.crypto.core.aes.Aes128.initEnc(keys.hp), &sample);
+        const mask = switch (keys.cipher) {
+            .aes_128_gcm, .aes_256_gcm => blk: {
+                var hp16: [16]u8 = undefined;
+                @memcpy(&hp16, keys.hp[0..16]);
+                break :blk protect.hpMaskAesCtx(std.crypto.core.aes.Aes128.initEnc(hp16), &sample);
+            },
+            .chacha20_poly1305 => blk: {
+                var hp32: [32]u8 = undefined;
+                @memcpy(&hp32, keys.hp[0..32]);
+                break :blk protect.hpMaskChacha(hp32, &sample);
+            },
+        };
         buf[0] ^= mask[0] & @as(u8, if (kind != .application) 0x0F else 0x1F);
         for (0..pn_len) |i| buf[hdr_len + i] ^= mask[1 + i];
 
@@ -357,7 +451,18 @@ pub const Connection = struct {
         if (dgram.len < sample_off + 16) return Error.ProtocolViolation;
         var sample: [16]u8 = undefined;
         @memcpy(&sample, work[sample_off..][0..16]);
-        const mask = protect.hpMaskAesCtx(std.crypto.core.aes.Aes128.initEnc(keys.hp), &sample);
+        const mask = switch (keys.cipher) {
+            .aes_128_gcm, .aes_256_gcm => blk: {
+                var hp16: [16]u8 = undefined;
+                @memcpy(&hp16, keys.hp[0..16]);
+                break :blk protect.hpMaskAesCtx(std.crypto.core.aes.Aes128.initEnc(hp16), &sample);
+            },
+            .chacha20_poly1305 => blk: {
+                var hp32: [32]u8 = undefined;
+                @memcpy(&hp32, keys.hp[0..32]);
+                break :blk protect.hpMaskChacha(hp32, &sample);
+            },
+        };
         work[0] ^= mask[0] & 0x0F;
 
         // Reserved bits must be zero once unprotected.
@@ -371,17 +476,18 @@ pub const Connection = struct {
         const pn = protect.reconstructPn(expected, pn_trunc, pn_len);
 
         const aad_len = pn_offset + pn_len;
-        const declared_end = pn_offset + @as(usize, @intCast(parsed.header.length));
-        if (dgram.len < declared_end) return Error.ProtocolViolation;
+        const payload_len = std.math.cast(usize, parsed.header.length) orelse return Error.ProtocolViolation;
+        const declared_end = std.math.add(usize, pn_offset, payload_len) catch return Error.ProtocolViolation;
+        if (declared_end < aad_len + 16 or dgram.len < declared_end) return Error.ProtocolViolation;
         const ct_len = declared_end - aad_len - 16;
 
         var pt: [MAX_DATAGRAM]u8 = undefined;
-        protect.open(pt[0..ct_len], work[aad_len..][0..ct_len], work[declared_end - 16 ..][0..16].*, work[0..aad_len], keys.key, &keys.iv, pn) catch
+        protect.openWithKeys(pt[0..ct_len], work[aad_len..][0..ct_len], work[declared_end - 16 ..][0..16].*, work[0..aad_len], keys, pn) catch
             return Error.AuthenticationFailed;
 
         sp.highest_rx_pn = @max(sp.highest_rx_pn, @as(i64, @intCast(@min(pn, 1 << 62))));
         sp.largest_acked = if (sp.largest_acked) |old| @max(old, pn) else pn;
-        sp.acktr.add(pn) catch {};
+        sp.acktr.add(pn) catch return Error.OutOfMemory;
 
         self.rx_consumed = declared_end;
         try self.dispatchFrames(sp, pt[0..ct_len], now_ms);
@@ -399,7 +505,18 @@ pub const Connection = struct {
 
         var sample: [16]u8 = undefined;
         @memcpy(&sample, work[pn_offset + 4 ..][0..16]);
-        const mask = protect.hpMaskAesCtx(std.crypto.core.aes.Aes128.initEnc(keys.hp), &sample);
+        const mask = switch (keys.cipher) {
+            .aes_128_gcm, .aes_256_gcm => blk: {
+                var hp16: [16]u8 = undefined;
+                @memcpy(&hp16, keys.hp[0..16]);
+                break :blk protect.hpMaskAesCtx(std.crypto.core.aes.Aes128.initEnc(hp16), &sample);
+            },
+            .chacha20_poly1305 => blk: {
+                var hp32: [32]u8 = undefined;
+                @memcpy(&hp32, keys.hp[0..32]);
+                break :blk protect.hpMaskChacha(hp32, &sample);
+            },
+        };
         work[0] ^= mask[0] & 0x1F;
         if (work[0] & 0x18 != 0) return Error.ProtocolViolation;
         const pn_len: usize = (@as(usize, work[0]) & 0x03) + 1;
@@ -415,12 +532,12 @@ pub const Connection = struct {
         const ct_len = dgram.len - aad_len - 16;
 
         var pt: [MAX_DATAGRAM]u8 = undefined;
-        protect.open(pt[0..ct_len], work[aad_len..][0..ct_len], work[aad_len + ct_len ..][0..16].*, work[0..aad_len], keys.key, &keys.iv, pn) catch
+        protect.openWithKeys(pt[0..ct_len], work[aad_len..][0..ct_len], work[aad_len + ct_len ..][0..16].*, work[0..aad_len], keys, pn) catch
             return Error.AuthenticationFailed;
 
         sp.highest_rx_pn = @max(sp.highest_rx_pn, @as(i64, @intCast(@min(pn, 1 << 62))));
         sp.largest_acked = if (sp.largest_acked) |old| @max(old, pn) else pn;
-        sp.acktr.add(pn) catch {};
+        sp.acktr.add(pn) catch return Error.OutOfMemory;
         self.rx_consumed = dgram.len;
         try self.dispatchFrames(sp, pt[0..ct_len], now_ms);
     }
@@ -436,35 +553,31 @@ pub const Connection = struct {
             switch (f) {
                 .padding, .ping => {},
                 .ack => |a| {
-                    // Track largest acked for PN reconstruction baseline.
-                    _ = a;
-                    loss_on_ack: {
-                        break :loss_on_ack;
-                    }
+                    self.recovery.largest_acked_pn = if (self.recovery.largest_acked_pn) |old|
+                        @max(old, a.largest_acknowledged)
+                    else
+                        a.largest_acknowledged;
+                    self.recovery.rtt.onAckReceived(
+                        self.last_activity_ms,
+                        self.last_activity_ms +| a.ack_delay,
+                        25,
+                    );
+                    self.recovery.onAckOfInFlight();
                 },
                 .crypto => |c| {
-                    const idx: usize = @intFromEnum(sp.kind);
-                    // Ordered-append fast path; gaps buffered by offset.
-                    if (c.offset == self.crypto_recv_off[idx]) {
-                        try self.crypto_buf[idx].appendSlice(self.allocator, c.data);
-                        self.crypto_recv_off[idx] += c.data.len;
-                        if (self.tls.onData) |cb| {
-                            try cb(self.tls.ctx, self, self.crypto_buf[idx].items);
-                            self.crypto_buf[idx].clearRetainingCapacity();
-                        }
-                    } else if (c.offset > self.crypto_recv_off[idx]) {
-                        // Future data: pad hole then append (rare in tests).
-                        const hole = c.offset - self.crypto_recv_off[idx];
-                        try self.crypto_buf[idx].appendNTimes(self.allocator, 0, @intCast(hole));
-                        try self.crypto_buf[idx].appendSlice(self.allocator, c.data);
-                        self.crypto_recv_off[idx] += hole + c.data.len;
-                        if (self.tls.onData) |cb| {
-                            try cb(self.tls.ctx, self, self.crypto_buf[idx].items);
-                            self.crypto_buf[idx].clearRetainingCapacity();
-                        }
-                    }
+                    try self.receiveCrypto(sp.kind, c.offset, c.data);
                 },
                 .stream => |s| {
+                    const end = std.math.add(u64, s.offset, s.data.len) catch return Error.FlowControlViolation;
+                    const old_end = self.recv_stream_end.get(s.id) orelse 0;
+                    if (end > self.cfg.initial_max_data) return Error.FlowControlViolation;
+                    if (end > old_end) {
+                        const delta = end - old_end;
+                        const total = std.math.add(u64, self.data_received, delta) catch return Error.FlowControlViolation;
+                        if (total > self.max_data) return Error.FlowControlViolation;
+                        self.data_received = total;
+                        self.recv_stream_end.put(s.id, end) catch return Error.OutOfMemory;
+                    }
                     if (self.cbs.onStreamData) |cb| cb(self.cbs.ctx, s.id, s.data, s.fin);
                 },
                 .handshake_done => {
@@ -476,11 +589,74 @@ pub const Connection = struct {
                     if (self.cbs.onClose) |cb| cb(self.cbs.ctx, c.error_code, c.reason);
                 },
                 .path_challenge => |p| {
-                    // PATH_RESPONSE is emitted by the path-validation layer
-                    // on the next send opportunity; nothing queued inline.
-                    _ = p;
+                    // Echo back as PATH_RESPONSE per RFC 9000 section 19.3.
+                    // Store for send in next outgoing packet.
+                    self.pending_path_response = p.data;
                 },
-                .new_connection_id, .retire_connection_id, .max_data, .max_stream_data, .max_streams, .data_blocked, .stream_data_blocked, .streams_blocked, .stop_sending, .reset_stream, .new_token, .path_response => {},
+                .max_data => |m| {
+                    self.max_data_remote = m.maximum;
+                },
+                .max_stream_data => |m| {
+                    self.max_stream_data.put(m.stream_id, m.maximum) catch return Error.OutOfMemory;
+                },
+                .max_streams => |m| {
+                    if (m.bidi) {
+                        self.max_streams_bidi_remote = m.maximum;
+                    } else {
+                        self.max_streams_uni_remote = m.maximum;
+                    }
+                },
+                .data_blocked => {
+                    // Peer is blocked on our max_data; send MAX_DATA update.
+                },
+                .stream_data_blocked => {
+                    // Peer is blocked on stream-level flow control; send MAX_STREAM_DATA.
+                },
+                .streams_blocked => {
+                    // Peer is blocked on stream count; send MAX_STREAMS update.
+                },
+                .new_connection_id => |n| {
+                    // RFC 9000 section 19.15: store peer's new CID.
+                    for (self.peer_cids.items) |c| {
+                        if (c.sequence == n.sequence) return Error.ProtocolViolation;
+                    }
+                    var entry = CidEntry{
+                        .sequence = n.sequence,
+                        .cid_len = @intCast(@min(n.cid.len, 20)),
+                        .stateless_reset_token = n.stateless_reset_token,
+                    };
+                    @memcpy(entry.cid[0..entry.cid_len], n.cid[0..entry.cid_len]);
+                    // Retire older CIDs per retire_prior_to.
+                    for (self.peer_cids.items) |*c| {
+                        if (n.retire_prior_to > 0 and c.sequence < n.retire_prior_to and !c.retired) {
+                            c.retired = true;
+                        }
+                    }
+                    var active_count: usize = 0;
+                    for (self.peer_cids.items) |c| {
+                        if (!c.retired) active_count += 1;
+                    }
+                    if (!entry.retired and active_count >= MAX_PEER_CONNECTION_IDS) return Error.ProtocolViolation;
+                    self.peer_cids.append(self.allocator, entry) catch return Error.OutOfMemory;
+                },
+                .retire_connection_id => {
+                    // Mark our CID with the given sequence as retired.
+                },
+                .stop_sending => |s| {
+                    // RFC 9000 section 19.5: respond with RESET_STREAM.
+                    // Store for send in next outgoing packet.
+                    self.pending_reset_stream = .{ .stream_id = s.stream_id, .error_code = s.error_code };
+                },
+                .reset_stream => |r| {
+                    // Peer reset a stream; notify application.
+                    if (self.cbs.onClose) |cb| cb(self.cbs.ctx, r.error_code, "");
+                },
+                .new_token => {
+                    // RFC 9000 section 19.7: store token for future address validation.
+                },
+                .path_response => {
+                    // Path response received; path validated.
+                },
             }
         }
     }
@@ -488,6 +664,62 @@ pub const Connection = struct {
     fn maybeDiscardInitial(self: *Connection) void {
         if (self.role == .client and self.spaces[1].keys_tx != null) {
             self.discardInitialKeys();
+        }
+    }
+
+    fn receiveCrypto(self: *Connection, kind: SpaceKind, offset: u64, data: []const u8) Error!void {
+        const idx = @intFromEnum(kind);
+        if (data.len == 0) return;
+        const end = std.math.add(u64, offset, data.len) catch return Error.ProtocolViolation;
+        const received = self.crypto_recv_off[idx];
+        if (end <= received) return;
+
+        var start = offset;
+        var source = data;
+        if (start < received) {
+            const skip: usize = @intCast(received - start);
+            start = received;
+            source = source[skip..];
+        }
+        if (start != received) {
+            var pending_bytes: usize = 0;
+            if (self.crypto_pending[idx].items.len >= MAX_CRYPTO_SEGMENTS) return Error.BufferTooSmall;
+            for (self.crypto_pending[idx].items) |segment| {
+                pending_bytes = std.math.add(usize, pending_bytes, segment.data.len) catch return Error.BufferTooSmall;
+            }
+            const pending_total = std.math.add(usize, pending_bytes, source.len) catch return Error.BufferTooSmall;
+            if (pending_total > 1 << 20)
+                return Error.BufferTooSmall;
+            const copy = self.allocator.dupe(u8, source) catch return Error.OutOfMemory;
+            self.crypto_pending[idx].append(self.allocator, .{ .offset = start, .data = copy }) catch {
+                self.allocator.free(copy);
+                return Error.OutOfMemory;
+            };
+            return;
+        }
+
+        try self.crypto_buf[idx].appendSlice(self.allocator, source);
+        self.crypto_recv_off[idx] = std.math.add(u64, received, source.len) catch return Error.ProtocolViolation;
+        while (true) {
+            var found: ?usize = null;
+            for (self.crypto_pending[idx].items, 0..) |segment, i| {
+                if (segment.offset <= self.crypto_recv_off[idx]) {
+                    found = i;
+                    break;
+                }
+            }
+            const i = found orelse break;
+            const segment = self.crypto_pending[idx].swapRemove(i);
+            defer self.allocator.free(segment.data);
+            const skip: usize = @intCast(self.crypto_recv_off[idx] - segment.offset);
+            if (skip >= segment.data.len) continue;
+            const contiguous = segment.data[skip..];
+            try self.crypto_buf[idx].appendSlice(self.allocator, contiguous);
+            self.crypto_recv_off[idx] = std.math.add(u64, self.crypto_recv_off[idx], contiguous.len) catch return Error.ProtocolViolation;
+        }
+        if (self.tls.onData) |cb| {
+            try cb(self.tls.ctx, self, self.crypto_buf[idx].items);
+            self.crypto_buf[idx].clearRetainingCapacity();
         }
     }
 
@@ -666,4 +898,39 @@ test "loopback connection pair completes protected handshake and stream" {
 
     try server.receiveDatagram(c2, 400);
     try std.testing.expectEqualStrings("ping-over-quic", StreamSink.got[0..StreamSink.got_len]);
+}
+
+test "crypto transmit queue preserves offsets across partial drains" {
+    const a = std.testing.allocator;
+    var conn = try Connection.init(a, .client, .{}, 91);
+    defer conn.deinit();
+
+    try std.testing.expectEqual(@as(u64, 0), try conn.queueCrypto(.initial, "client-hello"));
+    try std.testing.expectEqual(@as(u64, 12), try conn.queueCrypto(.initial, "-tail"));
+
+    const first = conn.takeCrypto(.initial, 6).?;
+    try std.testing.expectEqual(@as(u64, 0), first.offset);
+    try std.testing.expectEqualStrings("client", first.data);
+    try std.testing.expect(conn.consumeCrypto(.initial, first.data.len));
+
+    const second = conn.takeCrypto(.initial, 64).?;
+    try std.testing.expectEqual(@as(u64, 6), second.offset);
+    try std.testing.expectEqualStrings("-hello-tail", second.data);
+    try std.testing.expect(conn.consumeCrypto(.initial, second.data.len));
+    try std.testing.expect(conn.takeCrypto(.initial, 1) == null);
+    try std.testing.expectError(Error.BufferTooSmall, conn.queueCrypto(.application, "bad"));
+}
+
+test "crypto receive reassembles reordered and overlapping segments" {
+    const a = std.testing.allocator;
+    var conn = try Connection.init(a, .client, .{}, 92);
+    defer conn.deinit();
+
+    try conn.receiveCrypto(.initial, 5, " world");
+    try std.testing.expectEqual(@as(u64, 0), conn.crypto_recv_off[0]);
+    try conn.receiveCrypto(.initial, 0, "hello");
+    try std.testing.expectEqual(@as(u64, 11), conn.crypto_recv_off[0]);
+    try std.testing.expectEqualStrings("hello world", conn.crypto_buf[0].items);
+    try conn.receiveCrypto(.initial, 3, "lo world");
+    try std.testing.expectEqual(@as(u64, 11), conn.crypto_recv_off[0]);
 }

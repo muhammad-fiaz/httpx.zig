@@ -46,7 +46,7 @@ test "integration: full TLS 1.3 handshake state machine" {
     try testing.expect(server.handshake_secret != null);
 
     // ---- Server produces flight ----
-    var flight = try server.produceServerFlight("", "", &.{ .h2, .@"http/1.1" });
+    var flight = try server.produceServerFlight("", "", &.{ .h2, .@"http/1.1" }, &.{});
     defer flight.deinit(a);
 
     try testing.expectEqual(engine_mod.Engine.State.server_finished_sent, server.state);
@@ -148,8 +148,9 @@ test "integration: record layer encrypts and decrypts with derived keys" {
         .application_data,
         plaintext,
         0,
-        ck,
-        ci,
+        &ck,
+        &ci,
+        .aes_128_gcm,
     );
 
     // Decrypt with the same key (loopback test — both sides use same derivation)
@@ -158,8 +159,9 @@ test "integration: record layer encrypts and decrypts with derived keys" {
         encoded.bytes[0..encoded.len],
         &read_buf,
         0,
-        ck,
-        ci,
+        &ck,
+        &ci,
+        .aes_128_gcm,
     );
 
     try testing.expectEqual(record_mod.ContentType.application_data, result.content_type);
@@ -245,9 +247,9 @@ test "integration: sequence number progression produces unique nonces" {
     const iv = [_]u8{0xBB} ** 12;
     const msg = "test data";
 
-    const r0 = try record_mod.encodeRecord(.application_data, msg, 0, key, iv);
-    const r1 = try record_mod.encodeRecord(.application_data, msg, 1, key, iv);
-    const r2 = try record_mod.encodeRecord(.application_data, msg, 2, key, iv);
+    const r0 = try record_mod.encodeRecord(.application_data, msg, 0, &key, &iv, .aes_128_gcm);
+    const r1 = try record_mod.encodeRecord(.application_data, msg, 1, &key, &iv, .aes_128_gcm);
+    const r2 = try record_mod.encodeRecord(.application_data, msg, 2, &key, &iv, .aes_128_gcm);
 
     // All three ciphertexts must differ
     try testing.expect(!std.mem.eql(u8, r0.bytes[5..r0.len], r1.bytes[5..r1.len]));

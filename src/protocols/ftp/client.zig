@@ -39,11 +39,20 @@ pub const FtpError = error{
     ReadFailed,
     WriteFailed,
     UnexpectedEof,
+    ReplyTooLarge,
 };
+
+const max_reply_bytes: usize = 1024 * 1024;
+const max_command_bytes: usize = 510;
+
+fn validCommandLine(line: []const u8) bool {
+    return line.len <= max_command_bytes and std.mem.indexOfAny(u8, line, "\r\n") == null;
+}
 
 /// Parses one full reply starting at `buf[pos]`; multiline-aware.
 /// Returns the reply plus bytes consumed, or null when more input is needed.
 pub fn parseReplyAt(buf: []const u8, pos: usize) ?struct { reply: Reply, consumed: usize } {
+    if (pos > buf.len) return null;
     const first_end = std.mem.indexOfPos(u8, buf, pos, "\r\n") orelse return null;
     const first_line = buf[pos..first_end];
     if (first_line.len < 3) return null;
@@ -150,6 +159,9 @@ pub const Client = struct {
     }
 
     fn sendLine(self: *Client, line: []const u8) FtpError!void {
+        // FTP commands are line-delimited; reject CR/LF so arguments cannot
+        // inject a second command into the control connection (RFC 959).
+        if (!validCommandLine(line)) return FtpError.ProtocolError;
         self.ctrl.writeAll(line) catch return FtpError.WriteFailed;
         self.ctrl.writeAll("\r\n") catch return FtpError.WriteFailed;
     }
@@ -165,6 +177,7 @@ pub const Client = struct {
             const n = self.ctrl.read(buf[0..]) catch return FtpError.ReadFailed;
             if (n == 0) return FtpError.UnexpectedEof;
             acc.appendSlice(self.allocator, buf[0..n]) catch return FtpError.OutOfMemory;
+            if (acc.items.len > max_reply_bytes) return FtpError.ReplyTooLarge;
             if (parseReplyAt(acc.items, pos)) |parsed| {
                 pos = parsed.consumed + pos;
                 const text = self.allocator.dupe(u8, parsed.reply.text) catch return FtpError.OutOfMemory;
@@ -256,7 +269,7 @@ pub const Client = struct {
         const pasv = try self.expectCode("PASV", 227, 227);
         defer self.allocator.free(pasv.text);
         const p = parsePasive(pasv.text) orelse return FtpError.MalformedPasv;
-        return self.dataTo(p.port);
+        return self.dataToPasv(p.ip, p.port);
     }
 
     fn dataTo(self: *Client, port: u16) FtpError!tcp.Socket {
@@ -264,6 +277,15 @@ pub const Client = struct {
         // same literal host; parsePasive gives the IP for PASV anyway.
         const host = self.host_copy[0..self.host_len];
         return tcp.connect(self.ctrl.io, host, port) catch FtpError.ConnectFailed;
+    }
+
+    fn dataToPasv(self: *Client, ip: [4]u8, port: u16) FtpError!tcp.Socket {
+        var text: [15]u8 = undefined;
+        const host = std.fmt.bufPrint(&text, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch return FtpError.MalformedPasv;
+        var base = address_mod.Address{ .family = .ip4, .port = 0 };
+        var addr = base.parseIp(host) catch return FtpError.MalformedPasv;
+        addr.port = port;
+        return tcp.connectAddress(self.ctrl.io, &addr) catch FtpError.ConnectFailed;
     }
 
     /// Downloads `path`, streaming each chunk to `sink(data_chunk)` until EOF.
@@ -352,6 +374,17 @@ test "parses single-line replies" {
     const parsed = parseReplyAt("220 welcome\r\n", 0).?;
     try std.testing.expectEqual(@as(u16, 220), parsed.reply.code);
     try std.testing.expectEqual(@as(usize, 13), parsed.consumed);
+}
+
+test "reply parser rejects an out-of-range cursor" {
+    try std.testing.expect(parseReplyAt("220 ok\r\n", 100) == null);
+}
+
+test "ftp command line validation rejects injection and oversized input" {
+    try std.testing.expect(validCommandLine("USER anonymous"));
+    try std.testing.expect(!validCommandLine("USER guest\r\nQUIT"));
+    const oversized = [_]u8{'x'} ** (max_command_bytes + 1);
+    try std.testing.expect(!validCommandLine(&oversized));
 }
 
 test "parses multiline replies across chunk boundaries" {

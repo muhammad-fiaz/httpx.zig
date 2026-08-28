@@ -65,25 +65,65 @@ pub fn deriveSecret(prk: [32]u8, comptime label: []const u8) [32]u8 {
     return out;
 }
 
+pub const Cipher = enum { aes_128_gcm, aes_256_gcm, chacha20_poly1305 };
+
 /// Packet-protection keys for one direction at one encryption level.
 pub const ProtectionKeys = struct {
-    /// AEAD key (16 bytes for AES-128-GCM as used by Initial).
-    key: [16]u8,
+    /// AEAD key (16 bytes for AES-128-GCM, 32 for AES-256-GCM/ChaCha20-Poly1305).
+    key: [32]u8 = [_]u8{0} ** 32,
+    key_len: usize = 16,
     /// Nonce construction IV (12 bytes).
     iv: [12]u8,
-    /// Header-protection key.
-    hp: [16]u8,
+    /// Header-protection key (16 bytes for AES, 32 for ChaCha20).
+    hp: [32]u8 = [_]u8{0} ** 32,
+    hp_len: usize = 16,
+    cipher: Cipher = .aes_128_gcm,
 
-    pub const key_len = 16;
+    pub const key_len_128 = 16;
+    pub const key_len_256 = 32;
     pub const iv_len = 12;
 };
 
-/// Derives {key, iv, hp} from a secret using QUIC labels.
+/// Derives {key, iv, hp} from a secret using QUIC labels (AES-128-GCM, 16-byte key).
 pub fn deriveProtectionKeys(secret: [32]u8) ProtectionKeys {
-    var pk: ProtectionKeys = undefined;
-    hkdfExpandLabel(secret, "quic key", pk.key[0..]);
+    var pk: ProtectionKeys = .{ .iv = undefined, .hp = undefined, .cipher = .aes_128_gcm };
+    pk.key_len = 16;
+    pk.hp_len = 16;
+    hkdfExpandLabel(secret, "quic key", pk.key[0..16]);
     hkdfExpandLabel(secret, "quic iv", pk.iv[0..]);
-    hkdfExpandLabel(secret, "quic hp", pk.hp[0..]);
+    hkdfExpandLabel(secret, "quic hp", pk.hp[0..16]);
+    @memset(pk.key[16..], 0);
+    @memset(pk.hp[16..], 0);
+    return pk;
+}
+
+/// Derives {key, iv, hp} for the negotiated 1-RTT cipher.
+pub fn deriveProtectionKeysForCipher(secret: [32]u8, cipher: Cipher) ProtectionKeys {
+    var pk: ProtectionKeys = .{ .iv = undefined, .hp = undefined, .cipher = cipher };
+    switch (cipher) {
+        .aes_128_gcm => {
+            pk.key_len = 16;
+            pk.hp_len = 16;
+            hkdfExpandLabel(secret, "quic key", pk.key[0..16]);
+            @memset(pk.key[16..], 0);
+            hkdfExpandLabel(secret, "quic hp", pk.hp[0..16]);
+            @memset(pk.hp[16..], 0);
+        },
+        .aes_256_gcm => {
+            pk.key_len = 32;
+            pk.hp_len = 16;
+            hkdfExpandLabel(secret, "quic key", pk.key[0..32]);
+            hkdfExpandLabel(secret, "quic hp", pk.hp[0..16]);
+            @memset(pk.hp[16..], 0);
+        },
+        .chacha20_poly1305 => {
+            pk.key_len = 32;
+            pk.hp_len = 32;
+            hkdfExpandLabel(secret, "quic key", pk.key[0..32]);
+            hkdfExpandLabel(secret, "quic hp", pk.hp[0..32]);
+        },
+    }
+    hkdfExpandLabel(secret, "quic iv", pk.iv[0..]);
     return pk;
 }
 
@@ -164,10 +204,10 @@ test "RFC 9001 A.1/A.2 initial secrets and keys (authoritative vectors)" {
     const want_siv = [_]u8{ 0x0a, 0xc1, 0x49, 0x3c, 0xa1, 0x90, 0x58, 0x53, 0xb0, 0xbb, 0xa0, 0x3e };
     const want_shp = [_]u8{ 0xc2, 0x06, 0xb8, 0xd9, 0xb9, 0xf0, 0xf3, 0x76, 0x44, 0x43, 0x0b, 0x49, 0x0e, 0xea, 0xa3, 0x14 };
 
-    try std.testing.expectEqualSlices(u8, &want_ckey, &cpk.key);
+    try std.testing.expectEqualSlices(u8, &want_ckey, cpk.key[0..16]);
     try std.testing.expectEqualSlices(u8, &want_civ, &cpk.iv);
-    try std.testing.expectEqualSlices(u8, &want_chp, &cpk.hp);
-    try std.testing.expectEqualSlices(u8, &want_skey, &spk.key);
+    try std.testing.expectEqualSlices(u8, &want_chp, cpk.hp[0..16]);
+    try std.testing.expectEqualSlices(u8, &want_skey, spk.key[0..16]);
     try std.testing.expectEqualSlices(u8, &want_siv, &spk.iv);
-    try std.testing.expectEqualSlices(u8, &want_shp, &spk.hp);
+    try std.testing.expectEqualSlices(u8, &want_shp, spk.hp[0..16]);
 }

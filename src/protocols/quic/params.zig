@@ -71,6 +71,9 @@ fn u64be(v: u64) [8]u8 {
 /// Encodes the numeric parameter set (CIDs appended separately by the
 /// connection layer since they carry raw bytes).
 pub fn encode(out: *std.ArrayList(u8), gpa: Allocator, p: Params) !void {
+    if (p.max_udp_payload_size < 1200 or p.max_udp_payload_size > 65527) return Error.InvalidParameter;
+    if (p.ack_delay_exponent > 20 or p.max_ack_delay_ms >= (1 << 14)) return Error.InvalidParameter;
+    if (p.active_connection_id_limit < 2) return Error.InvalidParameter;
     // Only emit non-default values where the spec allows omission.
     if (p.max_idle_timeout_ms != 0)
         try putParam(out, gpa, @intFromEnum(ParamId.max_idle_timeout), &u64be(p.max_idle_timeout_ms));
@@ -111,8 +114,8 @@ pub fn decode(data: []const u8) Error!Params {
     while (pos < data.len) {
         const id_raw = try dv(data, &pos);
         const len_raw = try dv(data, &pos);
-        const len: usize = @intCast(len_raw);
-        if (pos + len > data.len) return Error.Truncated;
+        const len = std.math.cast(usize, len_raw) orelse return Error.InvalidParameter;
+        if (pos > data.len or len > data.len - pos) return Error.Truncated;
 
         const id: ParamId = @enumFromInt(id_raw);
         if (@intFromEnum(id) < 17) {
@@ -120,18 +123,37 @@ pub fn decode(data: []const u8) Error!Params {
             seen.set(@intCast(@intFromEnum(id)));
         }
 
-        const value_be: u64 = switch (len) {
-            0 => 0,
-            1 => data[pos],
-            2 => std.mem.readInt(u16, data[pos..][0..2], .big),
-            4 => std.mem.readInt(u32, data[pos..][0..4], .big),
-            8 => std.mem.readInt(u64, data[pos..][0..8], .big),
-            else => return Error.InvalidParameter, // numeric params are pow2-len BE
+        switch (id) {
+            .original_destination_connection_id, .initial_source_connection_id, .retry_source_connection_id => {
+                if (len > 20) return Error.InvalidParameter;
+            },
+            .stateless_reset_token => {
+                if (len != 16) return Error.InvalidParameter;
+            },
+            .max_idle_timeout, .max_udp_payload_size, .initial_max_data, .initial_max_stream_data_bidi_local, .initial_max_stream_data_bidi_remote, .initial_max_stream_data_uni, .initial_max_streams_bidi, .initial_max_streams_uni, .ack_delay_exponent, .max_ack_delay, .active_connection_id_limit => {
+                if (len != 1 and len != 2 and len != 4 and len != 8) return Error.InvalidParameter;
+            },
+            else => {},
+        }
+
+        const value_be: u64 = switch (id) {
+            .original_destination_connection_id, .initial_source_connection_id, .retry_source_connection_id, .stateless_reset_token => 0,
+            else => switch (len) {
+                0 => 0,
+                1 => data[pos],
+                2 => std.mem.readInt(u16, data[pos..][0..2], .big),
+                4 => std.mem.readInt(u32, data[pos..][0..4], .big),
+                8 => std.mem.readInt(u64, data[pos..][0..8], .big),
+                else => return Error.InvalidParameter, // numeric params are pow2-len BE
+            },
         };
 
         switch (id) {
             .max_idle_timeout => p.max_idle_timeout_ms = value_be,
-            .max_udp_payload_size => p.max_udp_payload_size = value_be,
+            .max_udp_payload_size => {
+                if (value_be < 1200) return Error.InvalidParameter;
+                p.max_udp_payload_size = value_be;
+            },
             .initial_max_data => p.initial_max_data = value_be,
             .initial_max_stream_data_bidi_local => p.initial_max_stream_data_bidi_local = value_be,
             .initial_max_stream_data_bidi_remote => p.initial_max_stream_data_bidi_remote = value_be,
@@ -192,6 +214,14 @@ test "empty encoding yields all defaults" {
     try std.testing.expectEqual(@as(u64, 2), got.active_connection_id_limit);
 }
 
+test "encoder rejects invalid local transport parameters" {
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(std.testing.allocator);
+    try std.testing.expectError(Error.InvalidParameter, encode(&list, std.testing.allocator, .{ .max_udp_payload_size = 1199 }));
+    try std.testing.expectError(Error.InvalidParameter, encode(&list, std.testing.allocator, .{ .ack_delay_exponent = 21 }));
+    try std.testing.expectError(Error.InvalidParameter, encode(&list, std.testing.allocator, .{ .active_connection_id_limit = 1 }));
+}
+
 test "validation bounds reject hostile values" {
     const mk = struct {
         fn enc(id: u64, v: u64) ![]u8 {
@@ -203,6 +233,11 @@ test "validation bounds reject hostile values" {
             return list.toOwnedSlice(std.testing.allocator);
         }
     };
+    {
+        const bad = try mk.enc(@intFromEnum(ParamId.max_udp_payload_size), 1199);
+        defer std.testing.allocator.free(bad);
+        try std.testing.expectError(Error.InvalidParameter, decode(bad));
+    }
     {
         const bad = try mk.enc(@intFromEnum(ParamId.ack_delay_exponent), 21);
         defer std.testing.allocator.free(bad);

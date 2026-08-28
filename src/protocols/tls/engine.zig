@@ -39,24 +39,38 @@ fn fillRandom(buf: []u8) void {
     prng.random().bytes(buf);
 }
 
-// HKDF-Expand-Label (RFC 8446 §7.1)
-
-/// TLS 1.3 HKDF-Expand-Label. Labels must NOT include the "tls13 " prefix —
-/// this function constructs: HkdfSha256.expand(out, out_len || label_len || label || 0x00, prk)
+// HKDF-Expand-Label (RFC 8446 Section 7.1)
+// info = uint16(len) || uint8(6 + label.len) || "tls13 " || label || uint8(context_len) || context
+// For Derive-Secret, context is the transcript hash; for key/iv expansion, context is empty.
 pub fn hkdfExpandLabel(prk: [32]u8, comptime label: []const u8, out: []u8) void {
-    var info_buf: [2 + 1 + 64 + 1]u8 = undefined;
+    hkdfExpandLabelWithContext(prk, label, &.{}, out);
+}
+
+pub fn hkdfExpandLabelWithContext(prk: [32]u8, comptime label: []const u8, context: []const u8, out: []u8) void {
+    const full_label = "tls13 " ++ label;
+    var info_buf: [2 + 1 + 64 + 1 + 32]u8 = undefined;
     const total: u16 = @intCast(out.len);
     var w: usize = 0;
     info_buf[w] = @intCast(total >> 8);
     info_buf[w + 1] = @intCast(total & 0xFF);
     w += 2;
-    info_buf[w] = @intCast(label.len);
+    info_buf[w] = @intCast(full_label.len);
     w += 1;
-    @memcpy(info_buf[w..][0..label.len], label);
-    w += label.len;
-    info_buf[w] = 0;
+    @memcpy(info_buf[w..][0..full_label.len], full_label);
+    w += full_label.len;
+    info_buf[w] = @intCast(context.len);
     w += 1;
+    if (context.len > 0) {
+        @memcpy(info_buf[w..][0..context.len], context);
+        w += context.len;
+    }
     HkdfSha256.expand(out, info_buf[0..w], prk);
+}
+
+fn deriveSecret(prk: [32]u8, comptime label: []const u8, transcript_hash: [32]u8) [32]u8 {
+    var out: [32]u8 = undefined;
+    hkdfExpandLabelWithContext(prk, label, &transcript_hash, &out);
+    return out;
 }
 
 // Errors
@@ -85,8 +99,8 @@ pub const EncryptionLevel = enum {
 
 pub const Callbacks = struct {
     ctx: ?*anyopaque = null,
-    onKeys: *const fn (ctx: ?*anyopaque, level: EncryptionLevel, client_key: [16]u8, client_iv: [12]u8, server_key: [16]u8, server_iv: [12]u8) void = struct {
-        fn noOp(_: ?*anyopaque, _: EncryptionLevel, _: [16]u8, _: [12]u8, _: [16]u8, _: [12]u8) void {}
+    onKeys: *const fn (ctx: ?*anyopaque, level: EncryptionLevel, keys: DerivedKeys) void = struct {
+        fn noOp(_: ?*anyopaque, _: EncryptionLevel, _: DerivedKeys) void {}
     }.noOp,
     onHandshakeData: *const fn (ctx: ?*anyopaque, level: EncryptionLevel, data: []const u8) void = struct {
         fn noOp(_: ?*anyopaque, _: EncryptionLevel, _: []const u8) void {}
@@ -99,10 +113,20 @@ pub const Callbacks = struct {
 // Derived keys
 
 pub const DerivedKeys = struct {
-    client_key: [16]u8,
-    client_iv: [12]u8,
-    server_key: [16]u8,
-    server_iv: [12]u8,
+    client_key: [32]u8 = undefined,
+    client_key_len: u8 = 16,
+    client_iv: [12]u8 = undefined,
+    server_key: [32]u8 = undefined,
+    server_key_len: u8 = 16,
+    server_iv: [12]u8 = undefined,
+    cipher: record_mod.RecordCipher = .aes_128_gcm,
+
+    pub fn clientKeySlice(self: *const DerivedKeys) []const u8 {
+        return self.client_key[0..self.client_key_len];
+    }
+    pub fn serverKeySlice(self: *const DerivedKeys) []const u8 {
+        return self.server_key[0..self.server_key_len];
+    }
 };
 
 // TLS 1.3 Handshake Engine
@@ -126,6 +150,8 @@ pub const Engine = struct {
     // Derived keys per level
     hs_keys: ?DerivedKeys = null,
     ap_keys: ?DerivedKeys = null,
+    client_hs_traffic_secret: ?[32]u8 = null,
+    server_hs_traffic_secret: ?[32]u8 = null,
 
     // Selected cipher suite
     selected_suite: tls.CipherSuite = .AES_128_GCM_SHA256,
@@ -193,6 +219,15 @@ pub const Engine = struct {
         alpn_protocols: []const []const u8,
         signature_algorithms: []const handshake_mod.SignatureScheme,
     ) ![]u8 {
+        return self.produceClientHelloWithSni(alpn_protocols, signature_algorithms, null);
+    }
+
+    pub fn produceClientHelloWithSni(
+        self: *Engine,
+        alpn_protocols: []const []const u8,
+        signature_algorithms: []const handshake_mod.SignatureScheme,
+        server_name: ?[]const u8,
+    ) ![]u8 {
         // Generate ephemeral X25519 keypair
         var seed: [32]u8 = undefined;
         fillRandom(&seed);
@@ -216,6 +251,7 @@ pub const Engine = struct {
                 .ed25519,
             },
             .alpn_protocols = alpn_protocols,
+            .server_name = server_name,
         };
 
         const encoded = try ch.encode(self.allocator);
@@ -299,9 +335,15 @@ pub const Engine = struct {
         cert_chain_pem: []const u8,
         private_key_der: []const u8,
         alpn_preference: []const alpn_mod.Protocol,
+        client_alpn_wire: []const []const u8,
     ) !ServerFlight {
         _ = cert_chain_pem;
         _ = private_key_der;
+
+        // Auto-derive handshake traffic keys if not yet derived.
+        if (self.server_hs_traffic_secret == null) {
+            self.deriveHandshakeKeys();
+        }
 
         // Generate server ephemeral keypair
         var seed: [32]u8 = undefined;
@@ -336,20 +378,27 @@ pub const Engine = struct {
         try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(ks_body.items.len))));
         try exts.appendSlice(self.allocator, ks_body.items);
 
-        // ALPN extension
+        // ALPN extension — negotiate from intersection of server preference
+        // and client-offered list per RFC 7301 Section 3.2.
         if (alpn_preference.len > 0) {
-            var alpn_body = std.ArrayList(u8).empty;
-            defer alpn_body.deinit(self.allocator);
-            const selected = alpn_preference[0].wireName();
-            try alpn_body.append(self.allocator, @intCast(selected.len));
-            try alpn_body.appendSlice(self.allocator, selected);
+            const selected = if (client_alpn_wire.len > 0)
+                alpn_mod.negotiateServer(alpn_preference, client_alpn_wire)
+            else
+                alpn_preference[0];
+            if (selected) |proto| {
+                var alpn_body = std.ArrayList(u8).empty;
+                defer alpn_body.deinit(self.allocator);
+                const wire = proto.wireName();
+                try alpn_body.append(self.allocator, @intCast(wire.len));
+                try alpn_body.appendSlice(self.allocator, wire);
 
-            try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshake_mod.ExtensionType.application_layer_protocol_negotiation))));
-            try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(alpn_body.items.len + 2))));
-            try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(alpn_body.items.len))));
-            try exts.appendSlice(self.allocator, alpn_body.items);
+                try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshake_mod.ExtensionType.application_layer_protocol_negotiation))));
+                try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(alpn_body.items.len + 2))));
+                try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(alpn_body.items.len))));
+                try exts.appendSlice(self.allocator, alpn_body.items);
 
-            self.negotiated_alpn = selected;
+                self.negotiated_alpn = wire;
+            }
         }
 
         // supported_versions (TLS 1.3 = 0x0304)
@@ -424,10 +473,11 @@ pub const Engine = struct {
 
         // ---- Finished ----
         // verify_data = HMAC(server_finished_key, Hash(Transcript))
-        // server_finished_key = HKDF-Expand-Label(server_handshake_secret, "finished", "", HashLen)
+        // server_finished_key = HKDF-Expand-Label(server_handshake_traffic_secret, "finished", "", HashLen)
         const hs_hash = self.transcript.finish();
+        const s_hs = self.server_hs_traffic_secret orelse return error.HandshakeFailed;
         var server_finished_key: [HashLen]u8 = undefined;
-        hkdfExpandLabel(self.handshake_secret orelse return error.HandshakeFailed, "finished", &server_finished_key);
+        hkdfExpandLabel(s_hs, "finished", &server_finished_key);
 
         var finished_verify: [HashLen]u8 = undefined;
         std.crypto.auth.hmac.Hmac(Sha256).create(&finished_verify, &hs_hash, &server_finished_key);
@@ -472,67 +522,85 @@ pub const Engine = struct {
     //   info = uint16(Length) || uint8(6 + Label.len) || "tls13 " || Label || uint8(0)
 
     /// Derive handshake traffic secrets from the ECDHE shared secret.
+    /// Uses Derive-Secret with transcript hash as per RFC 8446 Section 7.1.
     fn deriveHandshakeKeys(self: *Engine) void {
         self.deriveHandshakeSecret();
         const hs_secret = self.handshake_secret orelse return;
 
-        // client_handshake_traffic_secret
+        var copy = self.transcript.state;
+        const hash = copy.finalResult();
+
         var c_hs: [32]u8 = undefined;
-        hkdfExpandLabel(hs_secret, "c hs traffic", &c_hs);
+        hkdfExpandLabelWithContext(hs_secret, "c hs traffic", &hash, &c_hs);
 
-        // server_handshake_traffic_secret
         var s_hs: [32]u8 = undefined;
-        hkdfExpandLabel(hs_secret, "s hs traffic", &s_hs);
+        hkdfExpandLabelWithContext(hs_secret, "s hs traffic", &hash, &s_hs);
 
-        self.hs_keys = deriveAeadKeys(c_hs, s_hs);
+        // Store for Finished verification
+        self.server_hs_traffic_secret = s_hs;
+        self.client_hs_traffic_secret = c_hs;
 
-        // Deliver keys to transport
+        self.hs_keys = deriveAeadKeys(c_hs, s_hs, self.recordCipher());
+
         const k = self.hs_keys.?;
-        self.cbs.onKeys(self.cbs.ctx, .handshake, k.client_key, k.client_iv, k.server_key, k.server_iv);
+        self.cbs.onKeys(self.cbs.ctx, .handshake, k);
     }
 
     /// Derive application traffic secrets.
     fn deriveApplicationKeys(self: *Engine) void {
         const hs_secret = self.handshake_secret orelse return;
 
-        // derived_secret = HKDF-Expand-Label(handshake_secret, "derived", "", HashLen)
         var derived: [32]u8 = undefined;
         hkdfExpandLabel(hs_secret, "derived", &derived);
 
-        // master_secret = HKDF-Extract(derived, 0x00..00)
         const zero: [32]u8 = .{0} ** 32;
         const master = HkdfSha256.extract(&derived, &zero);
         self.master_secret = master;
 
-        // client_application_traffic_secret
+        var copy = self.transcript.state;
+        const hash = copy.finalResult();
+
         var c_ap: [32]u8 = undefined;
-        hkdfExpandLabel(master, "c ap traffic", &c_ap);
+        hkdfExpandLabelWithContext(master, "c ap traffic", &hash, &c_ap);
 
-        // server_application_traffic_secret
         var s_ap: [32]u8 = undefined;
-        hkdfExpandLabel(master, "s ap traffic", &s_ap);
+        hkdfExpandLabelWithContext(master, "s ap traffic", &hash, &s_ap);
 
-        self.ap_keys = deriveAeadKeys(c_ap, s_ap);
+        self.ap_keys = deriveAeadKeys(c_ap, s_ap, self.recordCipher());
 
         const k = self.ap_keys.?;
-        self.cbs.onKeys(self.cbs.ctx, .application, k.client_key, k.client_iv, k.server_key, k.server_iv);
+        self.cbs.onKeys(self.cbs.ctx, .application, k);
+    }
+
+    /// Maps the selected cipher suite to a RecordCipher.
+    fn recordCipher(self: *const Engine) record_mod.RecordCipher {
+        return switch (self.selected_suite) {
+            .AES_128_GCM_SHA256 => .aes_128_gcm,
+            .AES_256_GCM_SHA384 => .aes_256_gcm,
+            .CHACHA20_POLY1305_SHA256 => .chacha20_poly1305,
+            else => .aes_128_gcm,
+        };
     }
 
     /// Derive AEAD key + IV from a traffic secret using TLS 1.3 key/IV labels.
-    fn deriveAeadKeys(client_secret: [32]u8, server_secret: [32]u8) DerivedKeys {
-        var ck: [16]u8 = undefined;
+    fn deriveAeadKeys(client_secret: [32]u8, server_secret: [32]u8, cipher: record_mod.RecordCipher) DerivedKeys {
+        const key_len: usize = cipher.keyLen();
+        var ck: [32]u8 = undefined;
         var ci: [12]u8 = undefined;
-        var sk: [16]u8 = undefined;
+        var sk: [32]u8 = undefined;
         var si: [12]u8 = undefined;
-        hkdfExpandLabel(client_secret, "key", &ck);
+        hkdfExpandLabel(client_secret, "key", ck[0..key_len]);
         hkdfExpandLabel(client_secret, "iv", &ci);
-        hkdfExpandLabel(server_secret, "key", &sk);
+        hkdfExpandLabel(server_secret, "key", sk[0..key_len]);
         hkdfExpandLabel(server_secret, "iv", &si);
         return .{
             .client_key = ck,
+            .client_key_len = @intCast(key_len),
             .client_iv = ci,
             .server_key = sk,
+            .server_key_len = @intCast(key_len),
             .server_iv = si,
+            .cipher = cipher,
         };
     }
 };
@@ -597,7 +665,7 @@ test "handshake engine client-server key exchange" {
     server.deriveHandshakeKeys();
 
     // Server produces flight
-    var flight = try server.produceServerFlight("", "", &.{});
+    var flight = try server.produceServerFlight("", "", &.{}, &.{});
     defer flight.deinit(a);
 
     try std.testing.expectEqual(Engine.State.server_finished_sent, server.state);

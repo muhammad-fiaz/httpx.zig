@@ -126,6 +126,7 @@ pub const Session = struct {
             .streams = std.AutoHashMap(u31, *Stream).init(allocator),
         };
         s.hdec = hpack_mod.Decoder.init(allocator);
+        s.hdec.max_header_list = s.local_settings.max_header_list_size;
         s.henc = hpack_mod.Encoder.init(allocator);
         return s;
     }
@@ -156,6 +157,7 @@ pub const Session = struct {
     fn sendInitialSettings(self: *Session) !void {
         const es = self.local_settings.entries();
         try frame_mod.writeSettings(&self.outbound, self.allocator, &es);
+        self.awaiting_settings_ack = true;
     }
 
     // -- inbound ---------------------------------------------------------------
@@ -186,7 +188,7 @@ pub const Session = struct {
             @memcpy(&hdr_bytes, self.inbuf.items[0..9]);
             const hdr = FrameHeader.parse(&hdr_bytes);
 
-            if (@as(usize, hdr.length) > self.peer_settings.max_frame_size) {
+            if (@as(usize, hdr.length) > self.local_settings.max_frame_size) {
                 return self.connError(.frame_size_error);
             }
 
@@ -293,9 +295,16 @@ pub const Session = struct {
                 }
                 if (self.cbs.onGoaway) |cb| cb(self.cbs.ctx, g.last_stream_id, g.error_code, g.debug_data);
             },
-            .priority, .push_promise => {
-                // Priority tolerated-and-ignored (RFC 9113 Â§5.3 deprecation);
-                // PUSH_PROMISE ignored by default (push disabled).
+            .priority => {
+                // Priority tolerated and ignored (RFC 9113 Section 5.3, deprecated).
+            },
+            .push_promise => {
+                if (self.local_settings.enable_push == 0) {
+                    return self.connError(.protocol_error);
+                }
+                // Push promise not yet implemented beyond validation; treat as protocol error for now
+                // to avoid silent ignore of unexpected push.
+                return self.connError(.protocol_error);
             },
             .unknown => {
                 // Unknown extension frames are length-delimited and ignored
@@ -336,7 +345,6 @@ pub const Session = struct {
                 }
             }
         }
-        self.awaiting_settings_ack = true;
     }
 
     fn handleHeadersStart(self: *Session, sid: u31, block: []const u8, end_headers: bool, end_stream: bool) Error!void {
@@ -358,6 +366,9 @@ pub const Session = struct {
             s.* = Stream.init(self.allocator, sid);
             s.state = .idle;
             try self.streams.put(sid, s);
+            if (self.role == .server and sid % 2 == 1) {
+                self.active_peer_streams += 1;
+            }
             if (sid > self.largest_peer_stream) self.largest_peer_stream = sid;
             break :blk s;
         };
@@ -422,6 +433,11 @@ pub const Session = struct {
             self.allocator.free(res.fields);
         }
 
+        // Pseudo-header validation (RFC 9113 Section 8.3)
+        if (res.fields.len > 0 and !validatePseudoHeaders(res.fields)) {
+            return self.connError(.protocol_error);
+        }
+
         const end_stream = st.end_stream_recv;
         if (self.cbs.onHeaders) |cb| {
             cb(self.cbs.ctx, st.id, res.fields, end_stream) catch return Error.ProtocolViolation;
@@ -431,6 +447,43 @@ pub const Session = struct {
                 cb(self.cbs.ctx, st.id) catch return Error.ProtocolViolation;
             }
         }
+    }
+
+    fn validatePseudoHeaders(fields: []hpack_mod.HeaderField) bool {
+        var seen_method = false;
+        var seen_path = false;
+        var seen_scheme = false;
+        var seen_authority = false;
+        var seen_status = false;
+        var seen_regular = false;
+        for (fields) |f| {
+            const is_pseudo = f.name.len > 0 and f.name[0] == ':';
+            if (is_pseudo) {
+                if (seen_regular) return false;
+                if (std.mem.eql(u8, f.name, ":method")) {
+                    if (seen_method) return false;
+                    seen_method = true;
+                } else if (std.mem.eql(u8, f.name, ":path")) {
+                    if (seen_path) return false;
+                    seen_path = true;
+                } else if (std.mem.eql(u8, f.name, ":scheme")) {
+                    if (seen_scheme) return false;
+                    seen_scheme = true;
+                } else if (std.mem.eql(u8, f.name, ":authority")) {
+                    if (seen_authority) return false;
+                    seen_authority = true;
+                } else if (std.mem.eql(u8, f.name, ":status")) {
+                    if (seen_status) return false;
+                    seen_status = true;
+                } else {
+                    return false;
+                }
+                if (f.value.len == 0) return false;
+            } else {
+                seen_regular = true;
+            }
+        }
+        return true;
     }
 
     fn handleData(self: *Session, sid: u31, data: []const u8, end_stream: bool) Error!void {
@@ -459,23 +512,23 @@ pub const Session = struct {
         if (end_stream) {
             if (self.cbs.onStreamEnd) |cb| cb(self.cbs.ctx, sid) catch return Error.ProtocolViolation;
         }
-        self.maybeEmitWindowUpdates(sid);
+        try self.maybeEmitWindowUpdates(sid);
     }
 
     /// Sends WINDOW_UPDATEs once >= half the window has been consumed.
-    fn maybeEmitWindowUpdates(self: *Session, sid: u31) void {
+    fn maybeEmitWindowUpdates(self: *Session, sid: u31) Error!void {
         const half: i64 = @divTrunc(@as(i64, self.local_settings.initial_window_size), 2);
         if (self.conn_recv_pending >= half) {
             const inc: u31 = @intCast(self.conn_recv_pending);
+            try frame_mod.writeWindowUpdate(&self.outbound, self.allocator, 0, inc);
             self.conn_recv_pending = 0;
-            frame_mod.writeWindowUpdate(&self.outbound, self.allocator, 0, inc) catch {};
         }
         if (self.streamPtr(sid)) |st| {
             if (st.recv_pending >= half and st.state != .closed) {
                 const inc: u31 = @intCast(st.recv_pending);
+                try frame_mod.writeWindowUpdate(&self.outbound, self.allocator, sid, inc);
                 st.recv_pending = 0;
                 st.recv_window += inc;
-                frame_mod.writeWindowUpdate(&self.outbound, self.allocator, sid, inc) catch {};
             }
         }
     }
@@ -509,7 +562,7 @@ pub const Session = struct {
     }
 
     pub fn sendHeaderBlock(self: *Session, sid: u31, block: []const u8, end_stream: bool) !void {
-        const max = @min(@as(usize, self.local_settings.max_frame_size), 16384);
+        const max = @min(@as(usize, self.peer_settings.max_frame_size), 16384);
         if (self.streamPtr(sid) == null) {
             const s = try self.allocator.create(Stream);
             s.* = Stream.init(self.allocator, sid);
@@ -556,7 +609,7 @@ pub const Session = struct {
         const budget_win = @min(self.conn_send_window, st.send_window);
         if (budget_win <= 0) return 0;
 
-        const max = @min(@as(usize, self.local_settings.max_frame_size), 16384);
+        const max = @min(@as(usize, self.peer_settings.max_frame_size), 16384);
         const allowed: usize = @min(@as(usize, @intCast(budget_win)), data.len);
         var sent: usize = 0;
 
@@ -581,11 +634,20 @@ pub const Session = struct {
     }
 
     pub fn sendWindowUpdate(self: *Session, sid: u31, inc: u31) !void {
+        if (inc == 0) return Error.ProtocolViolation;
         if (sid == 0) {
-            self.conn_send_window += @as(i64, inc);
+            // The connection receive window is represented by pending
+            // consumed bytes; the emitted update replenishes that credit.
+            if (self.conn_recv_pending < 0 or inc > frame_mod.MAX_WINDOW) return Error.FlowControlError;
+            self.conn_recv_pending = @max(@as(i64, 0), self.conn_recv_pending - @as(i64, inc));
+            try frame_mod.writeWindowUpdate(&self.outbound, self.allocator, 0, inc);
             return;
         }
-        if (self.streamPtr(sid)) |st| st.send_window += @as(i64, inc);
+        if (self.streamPtr(sid)) |st| {
+            const next = st.recv_window + @as(i64, inc);
+            if (next > frame_mod.MAX_WINDOW) return Error.FlowControlError;
+            st.recv_window = next;
+        }
         try frame_mod.writeWindowUpdate(&self.outbound, self.allocator, sid, inc);
     }
 

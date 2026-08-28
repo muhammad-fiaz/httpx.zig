@@ -362,6 +362,7 @@ pub const Indexing = enum {
 pub const Encoder = struct {
     allocator: Allocator,
     dyn: DynTable,
+    pending_size_update: ?usize = null,
 
     /// Names that nghttp2 avoids indexing (volatile per-request values).
     const no_index_names = [_][]const u8{
@@ -380,6 +381,9 @@ pub const Encoder = struct {
     /// Applies negotiated SETTINGS_HEADER_TABLE_SIZE (emits an update at
     /// next encode when changed).
     pub fn applySettingsSize(self: *Encoder, sz: usize) void {
+        if (self.dyn.max_size != sz) {
+            self.pending_size_update = sz;
+        }
         self.dyn.setMaxSize(sz);
     }
 
@@ -446,6 +450,13 @@ pub const Encoder = struct {
         indexing: Indexing,
         force_literal: bool,
     ) !void {
+        if (self.pending_size_update) |sz| {
+            self.pending_size_update = null;
+            var tmp: [10]u8 = undefined;
+            const n = try pint.encode(tmp[0..], 5, 0x20, sz);
+            try out.appendSlice(self.allocator, tmp[0..n]);
+        }
+
         const name = lowerBuf(self.allocator, name_in) catch name_in;
         defer if (name.ptr != name_in.ptr) self.allocator.free(name);
 
@@ -463,18 +474,28 @@ pub const Encoder = struct {
 
         switch (indexing) {
             .incremental => {
-                // Insert into dynamic table, emit literal w/ incremental.
-                // Name index uses a 6-bit prefix (RFC 7541 6.2.1).
-                if (shouldIndex(name)) try self.dyn.insert(name, value);
-                const op: u8 = 0x40;
-                if (name_ref.idx != 0 and !force_literal) {
-                    const n = try pint.encode(ib[0..], 6, op, name_ref.idx);
-                    try out.appendSlice(self.allocator, ib[0..n]);
+                if (!shouldIndex(name)) {
+                    const op: u8 = 0x00;
+                    if (name_ref.idx != 0 and !force_literal) {
+                        const n = try pint.encode(ib[0..], 4, op, name_ref.idx);
+                        try out.appendSlice(self.allocator, ib[0..n]);
+                    } else {
+                        try out.append(self.allocator, op);
+                        try emitString(out, self.allocator, name);
+                    }
+                    try emitString(out, self.allocator, value);
                 } else {
-                    try out.append(self.allocator, op);
-                    try emitString(out, self.allocator, name);
+                    try self.dyn.insert(name, value);
+                    const op: u8 = 0x40;
+                    if (name_ref.idx != 0 and !force_literal) {
+                        const n = try pint.encode(ib[0..], 6, op, name_ref.idx);
+                        try out.appendSlice(self.allocator, ib[0..n]);
+                    } else {
+                        try out.append(self.allocator, op);
+                        try emitString(out, self.allocator, name);
+                    }
+                    try emitString(out, self.allocator, value);
                 }
-                try emitString(out, self.allocator, value);
             },
             .without => {
                 const op: u8 = 0x00;

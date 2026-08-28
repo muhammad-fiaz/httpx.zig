@@ -18,8 +18,12 @@ pub const Error = error{
     ReadFailed,
     StreamClosed,
     WindowExhausted,
+    ResponseTooLarge,
     OutOfMemory,
 };
+
+pub const MAX_RESPONSE_BODY_SIZE: usize = 64 * 1024 * 1024;
+pub const MAX_REQUEST_BODY_SIZE: usize = 16 * 1024 * 1024;
 
 pub const Header = struct { name: []const u8, value: []const u8 };
 
@@ -151,6 +155,8 @@ pub const Client = struct {
             fn onData(ctx: ?*anyopaque, s: u31, data: []const u8) anyerror!void {
                 const self_: *@This() = @ptrCast(@alignCast(ctx.?));
                 if (s != self_.sid) return;
+                if (self_.body.items.len > MAX_RESPONSE_BODY_SIZE -| data.len)
+                    return error.ResponseTooLarge;
                 try self_.body.appendSlice(self_.a, data);
             }
             fn onEnd(ctx: ?*anyopaque, s: u31) anyerror!void {
@@ -235,14 +241,17 @@ fn svrOnHeaders(ctx: ?*anyopaque, sid: u31, flds: []hpack.HeaderField, end_strea
     s.resetFor(sid);
     for (flds) |f| {
         if (std.mem.eql(u8, f.name, ":method")) {
-            s.method.appendSlice(s.arena, f.value) catch {};
+            try s.method.appendSlice(s.arena, f.value);
         } else if (std.mem.eql(u8, f.name, ":path")) {
-            s.path.appendSlice(s.arena, f.value) catch {};
+            try s.path.appendSlice(s.arena, f.value);
         } else if (!std.mem.startsWith(u8, f.name, ":")) {
+            const name = try s.arena.dupe(u8, f.name);
+            errdefer s.arena.free(name);
+            const value = try s.arena.dupe(u8, f.value);
             s.hdrs.append(s.arena, .{
-                .name = s.arena.dupe(u8, f.name) catch return,
-                .value = s.arena.dupe(u8, f.value) catch return,
-            }) catch {};
+                .name = name,
+                .value = value,
+            }) catch return error.OutOfMemory;
         }
     }
     // A request with no body ends at the HEADERS frame itself.
@@ -252,7 +261,9 @@ fn svrOnHeaders(ctx: ?*anyopaque, sid: u31, flds: []hpack.HeaderField, end_strea
 fn svrOnData(ctx: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
     const s: *ServerCtx = @ptrCast(@alignCast(ctx.?));
     if (sid != s.sid) return;
-    s.body.appendSlice(s.arena, data) catch {};
+    if (s.body.items.len > MAX_REQUEST_BODY_SIZE -| data.len)
+        return error.RequestTooLarge;
+    try s.body.appendSlice(s.arena, data);
 }
 
 /// Serves h2c requests on an accepted socket until close/GOAWAY.
@@ -307,7 +318,7 @@ pub fn serveConnection(
             }
 
             session.sendHeaders(sc.sid, out_fields.items, false) catch break;
-            _ = session.sendData(sc.sid, resp.body, true) catch {};
+            _ = session.sendData(sc.sid, resp.body, true) catch break;
         }
 
         if (session.outbound.items.len > 0) {

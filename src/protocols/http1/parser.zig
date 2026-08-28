@@ -29,6 +29,7 @@ pub const ParseError = error{
     AmbiguousFraming,
     InvalidChunkSize,
     ObsFold,
+    OutOfMemory,
 };
 
 pub const DEFAULT_MAX_HEADER_BYTES: usize = 32 * 1024;
@@ -465,7 +466,7 @@ pub const ChunkedDecoder = struct {
                         else => return err,
                     };
                     if (self.trailers) |list| {
-                        list.appendSlice(self.trailer_allocator, tfields[0..res.count]) catch {};
+                        list.appendSlice(self.trailer_allocator, tfields[0..res.count]) catch return ParseError.OutOfMemory;
                     }
                     self.trailers_seen += res.count;
                     src += res.end;

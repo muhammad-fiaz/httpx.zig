@@ -224,8 +224,7 @@ pub fn decode(data: []const u8, pos: *usize) Error!Frame {
             const flags = FrameType.streamFlags(raw);
             const sid = try dv(data, pos);
             const off = if (flags.off) try dv(data, pos) else 0;
-            if (!flags.len) return Error.InvalidFrame; // we always require LEN
-            const len = try dv(data, pos);
+            const len: u64 = if (flags.len) try dv(data, pos) else @intCast(data.len - pos.*);
             const d = try take(data, pos, len);
             _ = std.math.add(u64, off, len) catch return Error.InvalidFrame;
             return .{ .stream = .{ .id = sid, .offset = off, .data = d, .fin = flags.fin } };

@@ -48,6 +48,7 @@ pub const ClientHello = struct {
     key_share_entries: []const KeyShareEntry,
     signature_algorithms: []const SignatureScheme,
     alpn_protocols: []const []const u8,
+    server_name: ?[]const u8 = null,
     /// PSK identities (empty for initial handshake).
     psk_identities: []const []const u8 = &.{},
     /// Supported versions (typically [0x0304] for TLS 1.3).
@@ -72,6 +73,9 @@ pub const ClientHello = struct {
         // client_random (32 bytes)
         try body.appendSlice(allocator, &self.random);
 
+        // legacy_session_id (empty for a fresh TLS 1.3 handshake)
+        try body.append(allocator, 0);
+
         // cipher_suites_length (u16) + cipher_suites (u16 each)
         const cs_len: u16 = @intCast(self.cipher_suites.len * 2);
         try body.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, cs_len)));
@@ -86,16 +90,13 @@ pub const ClientHello = struct {
         var exts = std.ArrayList(u8).empty;
         defer exts.deinit(allocator);
 
-        // server_name (SNI) — first protocol as the hostname
-        if (self.alpn_protocols.len > 0) {
-            const hostname = self.alpn_protocols[0];
-            const sni_len: u16 = @intCast(5 + hostname.len); // list_hdr(2) + type(1) + name_len(2) + name
+        // server_name (SNI) - RFC 6066 Section 3
+        if (self.server_name) |hostname| {
+            const sni_len: u16 = @intCast(5 + hostname.len);
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.server_name))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, sni_len)));
-            // SNI list length
             const name_total: u16 = @intCast(3 + hostname.len);
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, name_total)));
-            // host_name type (0) + length
             try exts.append(allocator, 0x00);
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(hostname.len))));
             try exts.appendSlice(allocator, hostname);

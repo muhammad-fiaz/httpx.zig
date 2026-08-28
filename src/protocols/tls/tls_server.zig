@@ -19,6 +19,9 @@ const h2_connection_mod = @import("../http2/connection.zig");
 const h1_parser = @import("../http1/parser.zig");
 const h1_writer = @import("../http1/writer.zig");
 const h1_semantics = @import("../http1/semantics.zig");
+const compression = @import("../../compression/codec.zig");
+
+const MAX_HTTP2_REQUEST_BODY: usize = 16 * 1024 * 1024;
 
 // Handler callback
 
@@ -74,14 +77,29 @@ fn serveHttp1OverTls(
 
         var content_length: usize = 0;
         var transfer_chunked = false;
+        var has_expect = false;
         for (fields[0..result.count]) |field| {
             if (std.ascii.eqlIgnoreCase(field.name, "content-length")) {
                 content_length = std.fmt.parseInt(usize, std.mem.trim(u8, field.value, " \t"), 10) catch break;
             }
             if (std.ascii.eqlIgnoreCase(field.name, "transfer-encoding") and
                 std.ascii.indexOfIgnoreCase(field.value, "chunked") != null) transfer_chunked = true;
+            if (std.ascii.eqlIgnoreCase(field.name, "expect")) {
+                has_expect = true;
+                if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, field.value, " \t"), "100-continue")) {
+                    const interim = h1_writer.buildResponse(allocator, 417, "Expectation Failed", null, .{ .minor_version = head.minor_version }, false) catch break;
+                    defer allocator.free(interim);
+                    tls_conn.writeAll(interim) catch break;
+                    return;
+                }
+            }
         }
         if (content_length > 16 * 1024 * 1024) break;
+        if (has_expect and head.minor_version == 1 and (content_length > 0 or transfer_chunked)) {
+            const interim = h1_writer.buildInformational(allocator, 100, &.{}) catch break;
+            defer allocator.free(interim);
+            tls_conn.writeAll(interim) catch break;
+        }
         // Body reads use the TLS stream directly. Until pipelined bytes are
         // retained across body consumption, close body-bearing connections
         // to prevent buffered-tail desynchronization.
@@ -136,16 +154,51 @@ fn serveHttp1OverTls(
             },
             .body = body_storage.items,
         };
+        defer allocator.free(req.headers);
 
         const resp = handler(handler_ctx, req) catch HttpResponse{ .status = 500, .body = "Internal Server Error" };
+
+        var encoded_body: ?[]u8 = null;
+        defer if (encoded_body) |bytes| allocator.free(bytes);
+        var response_body = resp.body;
+        var response_headers: [64]h1_writer.Header = undefined;
+        var response_header_count: usize = 0;
+        for (resp.headers) |header| {
+            if (response_header_count == response_headers.len) break;
+            response_headers[response_header_count] = .{ .name = header.name, .value = header.value };
+            response_header_count += 1;
+        }
+        if (resp.body.len > 0 and resp.status != 204 and resp.status != 304) {
+            var accept_encoding: ?[]const u8 = null;
+            for (req.headers) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Accept-Encoding")) {
+                    accept_encoding = header.value;
+                    break;
+                }
+            }
+            if (accept_encoding) |accept| {
+                const selected = compression.negotiate(accept);
+                if (selected != .identity) {
+                    encoded_body = compression.compress(allocator, selected, resp.body) catch null;
+                    if (encoded_body) |bytes| {
+                        response_body = bytes;
+                        if (response_header_count + 2 <= response_headers.len) {
+                            response_headers[response_header_count] = .{ .name = "Content-Encoding", .value = selected.token() };
+                            response_headers[response_header_count + 1] = .{ .name = "Vary", .value = "Accept-Encoding" };
+                            response_header_count += 2;
+                        }
+                    }
+                }
+            }
+        }
 
         // Build HTTP/1 response
         const resp_bytes = h1_writer.buildResponse(
             allocator,
             resp.status,
             resp.reason,
-            if (resp.body.len > 0) resp.body else null,
-            .{ .minor_version = head.minor_version },
+            if (response_body.len > 0) response_body else null,
+            .{ .minor_version = head.minor_version, .headers = response_headers[0..response_header_count] },
             false,
         ) catch break;
         defer allocator.free(resp_bytes);
@@ -222,7 +275,7 @@ fn serveHttp2OverTls(
             }
 
             session.sendHeaders(sc.sid, out_fields.items, false) catch break;
-            _ = session.sendData(sc.sid, resp.body, true) catch {};
+            _ = session.sendData(sc.sid, resp.body, true) catch break;
         }
 
         if (session.outbound.items.len > 0) {
@@ -255,11 +308,11 @@ fn h2SvrOnHeaders(ctx: ?*anyopaque, sid: u31, fields: []const h2_transport.Heade
 
     for (fields) |f| {
         if (std.mem.eql(u8, f.name, ":method")) {
-            sc.method.appendSlice(sc.allocator, f.value) catch {};
+            try sc.method.appendSlice(sc.allocator, f.value);
         } else if (std.mem.eql(u8, f.name, ":path")) {
-            sc.path.appendSlice(sc.allocator, f.value) catch {};
+            try sc.path.appendSlice(sc.allocator, f.value);
         } else {
-            sc.hdrs.append(sc.allocator, .{ .name = f.name, .value = f.value }) catch {};
+            try sc.hdrs.append(sc.allocator, .{ .name = f.name, .value = f.value });
         }
     }
 
@@ -269,7 +322,9 @@ fn h2SvrOnHeaders(ctx: ?*anyopaque, sid: u31, fields: []const h2_transport.Heade
 fn h2SvrOnData(ctx: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
     const sc: *H2ServerCtx = @ptrCast(@alignCast(ctx orelse return));
     if (sid == sc.sid) {
-        sc.body.appendSlice(sc.allocator, data) catch {};
+        if (sc.body.items.len > MAX_HTTP2_REQUEST_BODY -| data.len)
+            return error.RequestTooLarge;
+        try sc.body.appendSlice(sc.allocator, data);
     }
 }
 
@@ -279,7 +334,7 @@ pub const ListenerConfig = struct {
     allocator: Allocator,
     default_identity: ?tls_server_mod.CertIdentity = null,
     cert_selector: ?tls_server_mod.CertSelector = null,
-    alpn_protocols: []const alpn_mod.Protocol = &.{ .h2, .@"http/1.1" },
+    alpn_protocols: []const alpn_mod.Protocol = &.{ .h2, .@"http/1.1", .@"http/1.0" },
 };
 
 pub const TlsListener = struct {
@@ -328,7 +383,7 @@ test "TLS listener config defaults" {
     const cfg = ListenerConfig{
         .allocator = std.testing.allocator,
     };
-    try std.testing.expectEqual(@as(usize, 2), cfg.alpn_protocols.len);
+    try std.testing.expectEqual(@as(usize, 3), cfg.alpn_protocols.len);
     try std.testing.expectEqual(alpn_mod.Protocol.h2, cfg.alpn_protocols[0]);
     try std.testing.expectEqual(alpn_mod.Protocol.@"http/1.1", cfg.alpn_protocols[1]);
 }

@@ -20,6 +20,37 @@ pub const Error = error{
     OutOfMemory,
 };
 
+/// Cross-platform resolver using Zig's std.Io networking backend. This
+/// additive API is available on targets where libc or Winsock bindings are
+/// not used by the legacy allocator-only `lookup` entry point.
+pub fn lookupWithIo(allocator: Allocator, io: std.Io, host: []const u8, port: u16) Error![]address_mod.Address {
+    const hostname = std.Io.net.HostName.init(host) catch return error.HostNotFound;
+    var queue_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+    var queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&queue_buffer);
+    defer queue.close(io);
+    std.Io.net.HostName.lookup(hostname, io, &queue, .{ .port = port }) catch return error.HostNotFound;
+
+    var out: std.ArrayList(address_mod.Address) = .empty;
+    errdefer out.deinit(allocator);
+    while (queue.getOneUncancelable(io)) |result| switch (result) {
+        .address => |addr| {
+            switch (addr) {
+                .ip4 => |v| {
+                    var a = address_mod.Address{ .family = .ip4, .port = v.port };
+                    a.bytes[0..4].* = v.bytes;
+                    try out.append(allocator, a);
+                },
+                .ip6 => |v| try out.append(allocator, .{ .family = .ip6, .bytes = v.bytes, .port = v.port }),
+            }
+        },
+        .canonical_name => {},
+    } else |err| switch (err) {
+        error.Closed => {},
+    }
+    if (out.items.len == 0) return error.NoAddresses;
+    return out.toOwnedSlice(allocator) catch error.OutOfMemory;
+}
+
 /// Resolve `host` to addresses (system order preserved; typically
 /// IPv4-preferred on dual stacks). Caller owns the returned slice.
 pub fn lookup(allocator: Allocator, host: []const u8, port: u16) Error![]address_mod.Address {
@@ -244,4 +275,14 @@ test "garbage hostname fails cleanly" {
     if (builtin.os.tag != .windows and !builtin.link_libc) return error.SkipZigTest;
     const a = std.testing.allocator;
     try std.testing.expectError(error.HostNotFound, lookup(a, "definitely-not-a-real-host-httpx", 80));
+}
+
+test "std.Io resolver returns canonical project addresses" {
+    const IoContext = @import("../sockets/tcp.zig").IoContext;
+    var ctx = IoContext.init(std.testing.allocator) catch return;
+    defer ctx.deinit();
+    const addrs = lookupWithIo(std.testing.allocator, ctx.io, "localhost", 80) catch return;
+    defer std.testing.allocator.free(addrs);
+    try std.testing.expect(addrs.len >= 1);
+    for (addrs) |addr| try std.testing.expectEqual(@as(u16, 80), addr.port);
 }

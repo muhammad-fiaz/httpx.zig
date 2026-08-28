@@ -148,6 +148,7 @@ pub const Server = server_lifecycle.Server;
 
 // FTP / FTPS
 pub const ftp = @import("protocols/ftp/client.zig");
+pub const ftp_server = @import("protocols/ftp/server.zig");
 
 // Re-exports for convenience
 pub const Headers = headers_mod.Headers;
