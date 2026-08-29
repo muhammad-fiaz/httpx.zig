@@ -130,8 +130,22 @@ pub const Client = struct {
     ctrl: tcp.Socket,
     host_copy: [256]u8,
     host_len: usize,
+    io: std.Io,
+    owns_io: bool = false,
+    io_threaded: ?*std.Io.Threaded = null,
 
-    pub fn connect(io: std.Io, allocator: Allocator, opts: Options) FtpError!Client {
+    pub fn connect(allocator: Allocator, opts: Options) FtpError!Client {
+        const threaded = try allocator.create(std.Io.Threaded);
+        errdefer allocator.destroy(threaded);
+        threaded.* = .init(allocator, .{});
+        const io = threaded.io();
+        var c = try connectWithIo(io, allocator, opts);
+        c.owns_io = true;
+        c.io_threaded = threaded;
+        return c;
+    }
+
+    pub fn connectWithIo(io: std.Io, allocator: Allocator, opts: Options) FtpError!Client {
         if (opts.host.len == 0 or opts.host.len > c_host_max) return FtpError.ProtocolError;
         var sock = tcp.connect(io, opts.host, opts.port) catch return FtpError.ConnectFailed;
         errdefer sock.close();
@@ -143,6 +157,7 @@ pub const Client = struct {
             .ctrl = sock,
             .host_copy = undefined,
             .host_len = @min(opts.host.len, c_host_max),
+            .io = io,
         };
         @memcpy(c.host_copy[0..c.host_len], opts.host[0..c.host_len]);
 
@@ -156,6 +171,12 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         self.ctrl.close();
+        if (self.owns_io) {
+            if (self.io_threaded) |t| {
+                t.deinit();
+                self.allocator.destroy(t);
+            }
+        }
     }
 
     fn sendLine(self: *Client, line: []const u8) FtpError!void {

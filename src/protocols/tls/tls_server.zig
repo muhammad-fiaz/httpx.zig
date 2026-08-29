@@ -345,22 +345,44 @@ pub const TlsListener = struct {
     listener: tcp.Listener,
     config: ListenerConfig,
     allocator: Allocator,
+    io: std.Io,
+    owns_io: bool = false,
+    io_threaded: ?*std.Io.Threaded = null,
 
-    pub fn init(allocator: Allocator, io: std.Io, config: ListenerConfig) !TlsListener {
+    pub fn init(allocator: Allocator, config: ListenerConfig) !TlsListener {
+        const threaded = try allocator.create(std.Io.Threaded);
+        errdefer allocator.destroy(threaded);
+        threaded.* = .init(allocator, .{});
+        const io = threaded.io();
         const l = try tcp.Listener.bind(io, config.port);
-        return .{ .listener = l, .config = config, .allocator = allocator };
+        return .{ .listener = l, .config = config, .allocator = allocator, .io = io, .owns_io = true, .io_threaded = threaded };
     }
 
-    pub fn close(self: *TlsListener, io: std.Io) void {
-        self.listener.close(io);
+    pub fn initWithIo(allocator: Allocator, io: std.Io, config: ListenerConfig) !TlsListener {
+        const l = try tcp.Listener.bind(io, config.port);
+        return .{ .listener = l, .config = config, .allocator = allocator, .io = io };
+    }
+
+    pub fn deinit(self: *TlsListener) void {
+        self.listener.close(self.io);
+        if (self.owns_io) {
+            if (self.io_threaded) |t| {
+                t.deinit();
+                self.allocator.destroy(t);
+            }
+        }
+    }
+
+    pub fn close(self: *TlsListener) void {
+        self.listener.close(self.io);
     }
 
     pub fn localPort(self: *const TlsListener) u16 {
         return self.listener.localPort();
     }
 
-    pub fn acceptAndServe(self: *TlsListener, io: std.Io, handler: HandlerFn, handler_ctx: ?*anyopaque) !void {
-        var socket = self.listener.accept(io) catch return error.AcceptFailed;
+    pub fn acceptAndServe(self: *TlsListener, handler: HandlerFn, handler_ctx: ?*anyopaque) !void {
+        var socket = self.listener.accept(self.io) catch return error.AcceptFailed;
         defer socket.close();
 
         const tls_config = tls_server_mod.TlsServerConfig{

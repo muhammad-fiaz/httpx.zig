@@ -442,6 +442,31 @@ pub const Client = struct {
             }
         }
 
+        // Multipart file upload support
+        var multipart_buf: ?[]u8 = null;
+        defer if (multipart_buf) |b| self.allocator.free(b);
+        if (body_kind == .none and @hasField(@TypeOf(opts), "multipart")) {
+            const mp = opts.multipart;
+            const mp_encoder = @import("../web/multipart/encoder.zig");
+            var boundary_buf: [32]u8 = undefined;
+            const boundary = mp_encoder.generateBoundary(&boundary_buf);
+            var ct_buf: [128]u8 = undefined;
+            const ct_val = mp_encoder.contentType(&ct_buf, boundary);
+
+            const part: mp_encoder.Part = .{
+                .name = mp.field_name,
+                .filename = mp.filename,
+                .content_type = mp.content_type orelse "application/octet-stream",
+                .data = mp.data,
+            };
+            multipart_buf = mp_encoder.encodeAlloc(self.allocator, boundary, &.{part}) catch return Error.OutOfMemory;
+            if (multipart_buf) |b| {
+                body_val = b;
+                body_kind = .raw;
+                hdrs.append(self.allocator, .{ .name = "Content-Type", .value = ct_val }) catch return Error.OutOfMemory;
+            }
+        }
+
         // Resolve http_version with hierarchy: per-request > client default > auto
         const req_http_version: HttpVersion = blk: {
             if (@hasField(@TypeOf(opts), "http_version")) {

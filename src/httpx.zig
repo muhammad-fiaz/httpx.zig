@@ -33,7 +33,6 @@ pub const concurrency = struct {
     pub const worker_pool = @import("concurrency/worker_pool.zig");
 };
 pub const logging = @import("common/logging.zig");
-pub const tint = @import("tint");
 
 // Sockets
 pub const tcp = @import("sockets/tcp.zig");
@@ -88,6 +87,12 @@ pub const quic = struct {
     pub const connection_id = @import("protocols/quic/connection_id.zig");
     pub const path = @import("protocols/quic/path.zig");
     pub const transport = @import("protocols/quic/transport.zig");
+
+    pub fn encodeFrame(allocator: std.mem.Allocator, f: frames.Frame) !std.ArrayList(u8) {
+        var out = std.ArrayList(u8).empty;
+        try frames.encode(&out, allocator, f);
+        return out;
+    }
 };
 pub const http3 = struct {
     pub const frame = @import("protocols/http3/frame.zig");
@@ -107,6 +112,10 @@ pub const tls = struct {
     pub const tcp_tls = @import("protocols/tls/tcp_tls.zig");
     pub const transport = @import("protocols/tls/transport.zig");
     pub const tls_server = @import("protocols/tls/tls_server.zig");
+    pub const TlsListener = tls_server.TlsListener;
+    pub const ListenerConfig = tls_server.ListenerConfig;
+    pub const ServerConfig = config.ServerConfig;
+    pub const ClientConfig = config.ClientConfig;
 };
 
 // Web framework
@@ -177,10 +186,10 @@ pub const Router = router.Router;
 pub const Context = router.Context;
 pub const Response = router.Response;
 pub const ServerResponse = router.Response;
-pub const TlsListener = tls.tls_server.TlsListener;
-pub const TlsListenerConfig = tls.tls_server.ListenerConfig;
-pub const TlsConfig = tls.config.ServerConfig;
-pub const TlsClientConfig = tls.config.ClientConfig;
+pub const TlsListener = tls.TlsListener;
+pub const TlsListenerConfig = tls.ListenerConfig;
+pub const TlsConfig = tls.ServerConfig;
+pub const TlsClientConfig = tls.ClientConfig;
 
 // Concurrency & Utilities
 pub const WorkerPool = concurrency.worker_pool.Pool;
@@ -207,8 +216,18 @@ pub const AlpnProtocol = tls.alpn.Protocol;
 pub const ApplicationProtocol = tls.alpn.Protocol;
 
 // FTP
-pub const ftp = @import("protocols/ftp/client.zig");
-pub const ftp_server = @import("protocols/ftp/server.zig");
+pub const ftp = struct {
+    pub const ftp_client = @import("protocols/ftp/client.zig");
+    pub const Client = ftp_client.Client;
+    pub const Options = ftp_client.Options;
+    pub const parseReplyAt = ftp_client.parseReplyAt;
+    pub const parsePasive = ftp_client.parsePasive;
+    pub const parseEpsv = ftp_client.parseEpsv;
+    pub const ftp_server = @import("protocols/ftp/server.zig");
+    pub const Server = ftp_server.Server;
+    pub const FtpConfig = ftp_server.Config;
+    pub const Callbacks = ftp_server.Callbacks;
+};
 
 // Version
 pub const name = @import("common/version.zig").name;

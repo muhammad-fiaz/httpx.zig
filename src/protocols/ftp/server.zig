@@ -36,15 +36,32 @@ pub const Server = struct {
     io: std.Io,
     listener: tcp.Listener,
     cfg: Config,
+    owns_io: bool = false,
+    io_threaded: ?*std.Io.Threaded = null,
     stop: std.atomic.Value(bool) = .init(false),
 
-    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Server {
+    pub fn init(allocator: Allocator, cfg: Config) !Server {
+        if (!std.mem.eql(u8, cfg.host, "0.0.0.0")) return error.ProtocolError;
+        const threaded = try allocator.create(std.Io.Threaded);
+        errdefer allocator.destroy(threaded);
+        threaded.* = .init(allocator, .{});
+        const io = threaded.io();
+        return .{ .allocator = allocator, .io = io, .listener = try tcp.Listener.bind(io, cfg.port), .cfg = cfg, .owns_io = true, .io_threaded = threaded };
+    }
+
+    pub fn initWithIo(allocator: Allocator, io: std.Io, cfg: Config) !Server {
         if (!std.mem.eql(u8, cfg.host, "0.0.0.0")) return error.ProtocolError;
         return .{ .allocator = allocator, .io = io, .listener = try tcp.Listener.bind(io, cfg.port), .cfg = cfg };
     }
 
     pub fn deinit(self: *Server) void {
         self.listener.close(self.io);
+        if (self.owns_io) {
+            if (self.io_threaded) |t| {
+                t.deinit();
+                self.allocator.destroy(t);
+            }
+        }
     }
     pub fn shutdown(self: *Server) void {
         self.stop.store(true, .release);

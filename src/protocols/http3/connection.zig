@@ -345,6 +345,14 @@ pub const Connection = struct {
         self.next_uni_id += 4;
         return id;
     }
+
+    pub fn createRequestStream(self: *Connection, stream_id: u64) RequestStream {
+        return .{
+            .id = stream_id,
+            .allocator = self.allocator,
+            .qpack = self.qenc,
+        };
+    }
 };
 
 // Tests
