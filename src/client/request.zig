@@ -1,7 +1,7 @@
 //! HTTP client: one request engine for all methods.
 //!
 //! ```zig
-//! const res = try httpx.client_request.request(allocator, io, .{
+//! const res = try httpx.client.request(allocator, io, .{
 //!     .method = .POST,
 //!     .url = "http://127.0.0.1:8080/api",
 //!     .body_kind = .json,

@@ -20,11 +20,8 @@ const std = @import("std");
 pub const errors = @import("common/errors.zig");
 pub const status = @import("common/status.zig");
 pub const headers = @import("common/headers.zig");
-pub const headers_mod = headers;
 pub const uri = @import("common/uri.zig");
-pub const uri_mod = uri;
 pub const method = @import("common/method.zig");
-pub const method_mod = method;
 pub const common = struct {
     pub const clock = @import("common/clock.zig");
     pub const sync = @import("common/sync.zig");
@@ -111,18 +108,15 @@ pub const tls = struct {
     pub const transport = @import("protocols/tls/transport.zig");
     pub const tls_server = @import("protocols/tls/tls_server.zig");
 };
-pub const tls_mod = tls;
 
 // Web framework
 pub const router = @import("web/router/router.zig");
-pub const router_mod = router;
 pub const router_pattern = @import("web/router/pattern.zig");
 pub const route_meta = @import("web/router/metadata.zig");
 pub const sse_writer = @import("web/sse/writer.zig");
 pub const sse_parser = @import("web/sse/parser.zig");
 pub const ws_handshake = @import("web/websocket/handshake.zig");
 pub const ws_frame = @import("web/websocket/frame.zig");
-pub const docs_mod = @import("web/docs/docs.zig");
 
 // Web subsystems
 pub const static_files = @import("web/static_files/serve.zig");
@@ -133,7 +127,6 @@ pub const health = @import("web/health/endpoints.zig");
 pub const metrics = @import("web/metrics/registry.zig");
 pub const mime = @import("utils/mime.zig");
 pub const openapi = @import("web/openapi/spec.zig");
-pub const openapi_spec = openapi;
 pub const docs = @import("web/docs/docs.zig");
 pub const graphql = @import("web/graphql/graphql.zig");
 pub const auth = struct {
@@ -146,15 +139,15 @@ pub const multipart = struct {
 };
 
 // Client API
-pub const client_request = @import("client/request.zig");
+pub const client = @import("client/request.zig");
 pub const cookies = @import("client/cookies.zig");
 pub const pool = @import("client/pool.zig");
 pub const Client = @import("client/client.zig").Client;
 pub const ClientConfig = @import("client/client.zig").Config;
 pub const RequestOptions = @import("client/client.zig").RequestOptions;
-pub const ClientResponse = client_request.Response;
-pub const Header = client_request.Header;
-pub const Headers = headers_mod.Headers;
+pub const ClientResponse = client.Response;
+pub const Header = client.Header;
+pub const Headers = headers.Headers;
 pub const CookieJar = cookies.Jar;
 pub const ConnectionPool = pool.Pool;
 pub const PoolConfig = pool.PoolConfig;
@@ -176,18 +169,18 @@ pub const getAll = @import("client/client.zig").globalGetAll;
 pub const requestAll = @import("client/client.zig").globalRequestAll;
 
 // Server API
-pub const server_lifecycle = @import("server/lifecycle.zig");
+pub const server = @import("server/lifecycle.zig");
 pub const server_context = @import("server/context.zig");
-pub const Server = server_lifecycle.Server;
-pub const ServerConfig = server_lifecycle.Config;
-pub const Router = router_mod.Router;
-pub const Context = router_mod.Context;
-pub const Response = router_mod.Response;
-pub const ServerResponse = router_mod.Response;
-pub const TlsListener = tls_mod.tls_server.TlsListener;
-pub const TlsListenerConfig = tls_mod.tls_server.ListenerConfig;
-pub const TlsConfig = tls_mod.config.ServerConfig;
-pub const TlsClientConfig = tls_mod.config.ClientConfig;
+pub const Server = server.Server;
+pub const ServerConfig = server.Config;
+pub const Router = router.Router;
+pub const Context = router.Context;
+pub const Response = router.Response;
+pub const ServerResponse = router.Response;
+pub const TlsListener = tls.tls_server.TlsListener;
+pub const TlsListenerConfig = tls.tls_server.ListenerConfig;
+pub const TlsConfig = tls.config.ServerConfig;
+pub const TlsClientConfig = tls.config.ClientConfig;
 
 // Concurrency & Utilities
 pub const WorkerPool = concurrency.worker_pool.Pool;
@@ -204,14 +197,14 @@ pub const WriterSink = logging.WriterSink;
 
 // Networking & Protocol Types
 pub const Address = address.Address;
-pub const Uri = uri_mod.Uri;
-pub const Method = method_mod.Method;
+pub const Uri = uri.Uri;
+pub const Method = method.Method;
 pub const Status = status.Status;
 pub const Http1Parser = http1.parser.Http1Parser;
 pub const ChunkedDecoder = http1.parser.ChunkedDecoder;
 pub const H2Session = http2.connection.Session;
-pub const AlpnProtocol = tls_mod.alpn.Protocol;
-pub const ApplicationProtocol = tls_mod.alpn.Protocol;
+pub const AlpnProtocol = tls.alpn.Protocol;
+pub const ApplicationProtocol = tls.alpn.Protocol;
 
 // FTP
 pub const ftp = @import("protocols/ftp/client.zig");
