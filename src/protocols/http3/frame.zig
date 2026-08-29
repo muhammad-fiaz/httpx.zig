@@ -1,4 +1,9 @@
-// HTTP/3 frame types and encoding (RFC 9114 section 7.2).
+//! HTTP/3 frame types and encoding (RFC 9114 section 7.2).
+//!
+//! References:
+//!   - RFC 9114 Section 7.2 — Frame Types (DATA, HEADERS, RESERVED, SETTINGS,
+//!     PUSH_PROMISE, GOAWAY, MAX_PUSH_ID)
+//!   - RFC 9114 Section 8.1 — HTTP/3 Error Codes
 
 const std = @import("std");
 const varint = @import("../quic/varint.zig");

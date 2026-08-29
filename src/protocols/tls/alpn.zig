@@ -1,12 +1,15 @@
-// ALPN - Application-Layer Protocol Negotiation (RFC 7301).
-//
-// Zig std.crypto.tls does NOT implement ALPN, so this module provides:
-//   * Wire format: opaque ProtocolNameList extension (type 16)
-//   * Parsing peer lists, matching our preferences, building responses
-//   * Protocol ID constants for h2 / http/1.1 / http/1.0 / h3
-//
-// Integration point: server picks protocol after TLS handshake using
-// client's list + our preference order; client validates selected.
+//! ALPN — Application-Layer Protocol Negotiation (RFC 7301).
+//!
+//! Zig std.crypto.tls does NOT implement ALPN, so this module provides:
+//!   * Wire format: opaque ProtocolNameList extension (type 16)
+//!   * Parsing peer lists, matching our preferences, building responses
+//!   * Protocol ID constants for h2 / http/1.1 / http/1.0 / h3
+//!
+//! Integration point: server picks protocol after TLS handshake using
+//! client's list + our preference order; client validates selected.
+//!
+//! References:
+//!   - RFC 7301 — Transport Layer Security (TLS) Application-Layer Protocol Negotiation Extension
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

@@ -1,11 +1,14 @@
 //! GraphQL Lexer and Recursive Descent Parser.
 //!
-//! Follows GraphQL specification RFC:
+//! Follows GraphQL specification (October 2021):
 //! - Ignored tokens: whitespace, commas, comments (#)
 //! - Operation parsing (query, mutation, subscription, shorthand)
 //! - Arguments, directives, variable definitions, fragments
 //! - Full value tree (scalars, enums, objects, lists)
 //! - Depth and complexity limits protection
+//!
+//! References:
+//!   - GraphQL Specification Section 2 — Language
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

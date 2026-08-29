@@ -1,4 +1,14 @@
-//! HTTP method types shared by client and server.
+//! HTTP request method types shared by client and server.
+//!
+//! Defines the nine standard HTTP methods from RFC 9110 Section 9.1.
+//! Each method carries defined safety, idempotency, and request-body
+//! semantics that this library uses to make routing and caching
+//! decisions.
+//!
+//! References:
+//!   - RFC 9110 Section 9.1 — Method Definitions
+//!   - RFC 9110 Section 9.2.1 — Safe Methods (GET, HEAD, OPTIONS, TRACE)
+//!   - RFC 9110 Section 9.2.2 — Idempotent Methods (PUT, DELETE)
 
 const std = @import("std");
 

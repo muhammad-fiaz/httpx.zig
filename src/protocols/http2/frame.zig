@@ -1,10 +1,17 @@
-//! HTTP/2 framing layer (RFC 9113 Â§4, Â§6).
+//! HTTP/2 framing layer (RFC 9113 §4, §6).
 //!
 //! Frame header parse/serialize plus typed payload decoding with the
 //! validation rules nghttp2 enforces: exact payload lengths where fixed,
 //! flag legality, padding bounds, stream-id requirements, SETTINGS value
 //! ranges. Unknown frame types are surfaced to the session (which ignores
 //! them) rather than rejected here.
+//!
+//! References:
+//!   - RFC 9113 Section 4 — Frame Format (9-byte header + payload)
+//!   - RFC 9113 Section 6 — Frame Definitions (DATA, HEADERS, PRIORITY, RST_STREAM,
+//!     PUSHPromise, PING, GOAWAY, WINDOW_UPDATE, CONTINUATION, SETTINGS)
+//!   - RFC 9113 Section 6.5 — SETTINGS (settings parameters and ranges)
+//!   - RFC 9113 Section 6.9 — WINDOW_UPDATE (flow control window)
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

@@ -1,10 +1,15 @@
-// TLS configuration and handshake management.
-//
-// Zig 0.16 std.crypto.tls provides the record/handshake engine but lacks:
-//   * Certificate loading from PEM/DER files (we parse DER here)
-//   * ALPN extension negotiation (see alpn.zig)
-//   * SNI
-// This module composes those pieces into a usable server/client config.
+//! TLS configuration and handshake management (RFC 8446).
+//!
+//! Zig 0.16 std.crypto.tls provides the record/handshake engine but lacks:
+//!   * Certificate loading from PEM/DER files (we parse DER here)
+//!   * ALPN extension negotiation (see alpn.zig)
+//!   * SNI (Server Name Indication, RFC 6066 section 3)
+//!
+//! This module composes those pieces into a usable server/client config.
+//!
+//! References:
+//!   - RFC 8446 — The Transport Layer Security (TLS) Protocol Version 1.3
+//!   - RFC 6066 Section 3 — Server Name Indication
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

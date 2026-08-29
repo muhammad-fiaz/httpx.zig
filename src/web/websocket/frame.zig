@@ -1,5 +1,10 @@
-// WebSocket frame codec (RFC 6455 section 5).
-// Frame layout: FIN RSV1-3 Opcode | MASK Len(7/16/64) | ExtLen MaskKey Payload
+//! WebSocket frame codec (RFC 6455 section 5).
+//!
+//! Frame layout: FIN RSV1-3 Opcode | MASK Len(7/16/64) | ExtLen MaskKey Payload
+//!
+//! References:
+//!   - RFC 6455 Section 5 — Data Framing
+//!   - RFC 6455 Section 5.2 — Base Framing Protocol
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

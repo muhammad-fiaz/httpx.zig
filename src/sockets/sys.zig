@@ -7,6 +7,10 @@
 //!
 //! Windows: ws2_32 directly. POSIX: libc when linked; otherwise this module
 //! exposes only what can be done without libc (documented per-fn).
+//!
+//! References:
+//!   - RFC 1122 — Requirements for Internet Hosts (TCP/UDP layer)
+//!
 
 const std = @import("std");
 const builtin = @import("builtin");

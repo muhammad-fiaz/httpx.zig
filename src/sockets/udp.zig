@@ -1,7 +1,12 @@
-// UDP socket wrapper over std.Io.net for DNS and QUIC transports.
-//
-// Connectionless send/receive with optional default destination so callers
-// can treat a DNS resolver or QUIC connection as a simple pipe.
+//! UDP socket wrapper over std.Io.net for DNS and QUIC transports.
+//!
+//! Connectionless send/receive with optional default destination so callers
+//! can treat a DNS resolver or QUIC connection as a simple pipe.
+//!
+//! References:
+//!   - RFC 768 — User Datagram Protocol (UDP)
+//!   - RFC 1035 Section 2.3.4 — UDP DNS Messages
+//!   - RFC 9000 Section 9.1 — QUIC Packet Connection (UDP-based)
 
 const std = @import("std");
 const net = std.Io.net;

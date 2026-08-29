@@ -1,4 +1,13 @@
-//! Wall-clock milliseconds since Unix epoch (std.time lost its clock fns).
+//! Wall-clock and monotonic time utilities.
+//!
+//! Platform-abstracted time sources (Windows `GetSystemTimeAsFileTime` /
+//! `QueryPerformanceCounter`, POSIX `clock_gettime` / `gettimeofday`,
+//! macOS `mach_absolute_time`). Used for timestamping, timeout
+//! calculations, and connection-lifetime tracking.
+//!
+//! References:
+//!   - RFC 9110 Section 12.1.3 — Date Header (wall-clock timestamps)
+//!   - RFC 9110 Section 18.2 — Date/Time Formats (HTTP-date)
 
 const std = @import("std");
 const builtin = @import("builtin");

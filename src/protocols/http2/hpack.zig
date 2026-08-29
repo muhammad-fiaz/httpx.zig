@@ -1,4 +1,4 @@
-//! HPACK â€” HTTP/2 header compression (RFC 7541).
+//! HPACK — HTTP/2 header compression (RFC 7541).
 //!
 //! Complete implementation: static table, dynamic table with eviction and
 //! size updates, all four representations (indexed, literal with/without
@@ -32,7 +32,7 @@ pub const ENTRY_OVERHEAD: usize = 32;
 /// Hard cap on a single name/value length (DoS bound, mirrors nghttp2).
 pub const MAX_STRING_LEN: usize = 65536;
 
-// Static table (RFC 7541 Appendix A) â€” indices are 1-based on the wire.
+// Static table (RFC 7541 Appendix A) — indices are 1-based on the wire.
 
 pub const StaticEntry = struct { name: []const u8, value: []const u8 };
 
@@ -351,11 +351,11 @@ fn appendDup(list: *std.ArrayList(HeaderField), gpa: Allocator, f: HeaderField) 
 // Encoder
 
 pub const Indexing = enum {
-    /// 01xxxxxx â€” stored in dynamic table.
+    /// 01xxxxxx — stored in dynamic table.
     incremental,
-    /// 0000xxxx â€” not stored.
+    /// 0000xxxx — not stored.
     without,
-    /// 0001xxxx â€” never indexed (sensitive).
+    /// 0001xxxx — never indexed (sensitive).
     never,
 };
 

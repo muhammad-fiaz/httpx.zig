@@ -1,12 +1,18 @@
-// Unified IP address handling: IPv4 + IPv6.
-//
-// Parsing supports:
-//   * Dotted quad IPv4: "127.0.0.1"
-//   * Full-form IPv6:   "2001:0db8:0000:0000:0000:0000:0000:0001"
-//   * Compressed IPv6:  "2001:db8::1"
-//   * Zone/scoped IPv6: "fe80::1%eth0" (zone parsed, interface resolved lazily)
-//   * v4-mapped:        "::ffff:192.168.1.1"
-// Formatting follows RFC 5952 (longest zero run compressed, lowercase).
+//! Unified IP address handling: IPv4 + IPv6.
+//!
+//! Parsing supports:
+//!   * Dotted quad IPv4: "127.0.0.1"
+//!   * Full-form IPv6:   "2001:0db8:0000:0000:0000:0000:0000:0001"
+//!   * Compressed IPv6:  "2001:db8::1"
+//!   * Zone/scoped IPv6: "fe80::1%eth0" (zone parsed, interface resolved lazily)
+//!   * v4-mapped:        "::ffff:192.168.1.1"
+//! Formatting follows RFC 5952 (longest zero run compressed, lowercase).
+//!
+//! References:
+//!   - RFC 4291 — IP Version 6 Addressing Architecture
+//!   - RFC 5952 — A Recommendation for IPv6 Text Representation
+//!   - RFC 6874 — IPv6 Zone Identifiers in URIs
+//!   - RFC 4007 — IPv6 Scoped Address Architecture
 
 const std = @import("std");
 const net = std.Io.net;

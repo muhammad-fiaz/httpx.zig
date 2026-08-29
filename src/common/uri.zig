@@ -1,4 +1,17 @@
 //! URI/URL parsing shared by client, server, proxy, and router.
+//!
+//! Parses RFC 3986 generic URI syntax into components. Handles
+//! hierarchical URIs with authority, path, query, and fragment.
+//! Includes percent-encoding/decoding (RFC 3986 Section 2.1) and
+//! path-traversal detection for security-sensitive operations.
+//!
+//! References:
+//!   - RFC 3986 — Uniform Resource Identifier (URI): Generic Syntax
+//!   - RFC 3986 Section 2.1 — Percent-Encoding
+//!   - RFC 3986 Section 2.2 — Reserved Characters
+//!   - RFC 3986 Section 3 — URI Components (scheme, authority, path, query)
+//!   - RFC 3986 Section 4.1 — Scheme-Based Parsing
+//!   - RFC 6874 — IPv6 Zone Identifiers in URIs
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

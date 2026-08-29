@@ -1,4 +1,4 @@
-//! QUIC ↔ real UDP socket adapter.
+//! QUIC <-> real UDP socket adapter.
 //!
 //! Bridges `Connection` to kernel UDP sockets so the engine runs over an
 //! actual network path (not just the internal test pipe). Each endpoint
@@ -6,9 +6,13 @@
 //! and flushes queued output datagrams to the last peer address seen.
 //!
 //! Scope note (honest): Initial-space packets are fully specified here —
-//! their keys derive from the DCID alone (RFC 9001 §5.2), so endpoints can
+//! their keys derive from the DCID alone (RFC 9001 section 5.2), so endpoints can
 //! exchange protected Initial traffic without the TLS 1.3 driver. The
 //! full handshake driver remains the open item tracked separately.
+//!
+//! References:
+//!   - RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport
+//!   - RFC 9001 — Using TLS to Secure QUIC
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

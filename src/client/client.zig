@@ -12,6 +12,12 @@
 //! Explicit io (advanced):
 //!   var client = Client.initWithIo(allocator, io, .{});
 //!   defer client.deinit();
+//!
+//! References:
+//!   - RFC 9110 — HTTP Semantics (request methods, header fields)
+//!   - RFC 9112 — HTTP/1.1 Message Syntax (keep-alive, chunked)
+//!   - RFC 6265 — HTTP State Management (Cookie header)
+//!   - RFC 7235 — HTTP/1.1 Authentication (Authorization header)
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

@@ -7,6 +7,10 @@
 //! API documentation routes (OpenAPI + Swagger UI + ReDoc) are mounted by
 //! default; disable with `Config.docs_enabled = false` or customize through
 //! `Config.docs`.
+//!
+//! References:
+//!   - RFC 9112 — HTTP/1.1 (message format, connection management)
+//!   - RFC 9110 — HTTP Semantics (status codes, headers, methods)
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

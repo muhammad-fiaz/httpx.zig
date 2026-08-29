@@ -6,6 +6,17 @@
 //! I/O model: feed() accepts arbitrary network chunks; outbound frames
 //! accumulate in `outbound` which the owner flushes to the wire. Protocol
 //! violations queue a terminating GOAWAY and surface as a returned error.
+//!
+//! References:
+//!   - RFC 9113 Section 2 — HTTP/2 Connection Preface
+//!   - RFC 9113 Section 4 — Frames (frame format, flags)
+//!   - RFC 9113 Section 5 — Streams (stream lifecycle, dependencies)
+//!   - RFC 9113 Section 5.3 — Stream Priority
+//!   - RFC 9113 Section 5.4 — Error Handling (GOAWAY, RST_STREAM)
+//!   - RFC 9113 Section 6 — Frame Definitions (DATA, HEADERS, SETTINGS, etc.)
+//!   - RFC 9113 Section 7 — HTTP/2 Error Codes
+//!   - RFC 9113 Section 8.1 — Field Name Requirements (lowercase)
+//!   - RFC 7541 — HPACK: Header Compression for HTTP/2
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

@@ -6,6 +6,11 @@
 //! Windows: ws2_32.getaddrinfo (no libc needed).
 //! POSIX-with-libc: libc getaddrinfo.
 //! Other targets: error.ResolverUnsupported (documented limitation).
+//!
+//! References:
+//!   - RFC 1035 Section 2.3.4 — UDP DNS Messages
+//!   - RFC 3484 — Default Address Selection for IPv6 (getaddrinfo ordering)
+//!
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

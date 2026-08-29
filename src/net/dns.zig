@@ -1,7 +1,15 @@
-// DNS client: message encoding/decoding and resolution over UDP with TCP
-// fallback on truncation (RFC 1035).
-//
-// Supports A, AAAA, CNAME record types. DoT and DoH layer on top of this.
+//! DNS client: message encoding/decoding and resolution over UDP with TCP
+//! fallback on truncation (RFC 1035).
+//!
+//! Supports A, AAAA, CNAME record types. DoT and DoH layer on top of this.
+//!
+//! References:
+//!   - RFC 1035 — Domain Names - Implementation and Specification
+//!   - RFC 1035 Section 4.1.1 — Header Format
+//!   - RFC 1035 Section 4.1.2 — Question Section
+//!   - RFC 1035 Section 4.1.3 — Resource Record Format
+//!   - RFC 3596 — DNS Extensions to Support IPv6
+//!   - RFC 1034 — Domain Names: Concepts and Facilities
 
 const std = @import("std");
 const clock = @import("../common/clock.zig");

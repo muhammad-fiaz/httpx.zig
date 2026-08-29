@@ -6,6 +6,9 @@
 //! engine treats plain and TLS connections uniformly.
 //!
 //! Thread-safety: thread-confined — one connection, one user.
+//!
+//! References:
+//!   - RFC 8446 — The Transport Layer Security (TLS) Protocol Version 1.3
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

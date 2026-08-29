@@ -6,6 +6,11 @@
 //! - Resolvers: Synchronous field resolution with context, arguments, and source data
 //! - Error formatting with locations, paths, and extensions
 //! - Query complexity and depth security limits
+//!
+//! References:
+//!   - GraphQL Specification Section 3 — Type System
+//!   - GraphQL Specification Section 6 — Execution
+//!   - GraphQL Specification Section 5 — Introspection
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

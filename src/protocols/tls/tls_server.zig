@@ -2,11 +2,15 @@
 //!
 //! Accepts TCP connections, performs TLS 1.3 handshake with ALPN
 //! negotiation, then dispatches to:
-//!   - ALPN "h2" → HTTP/2 server (transport.serveConnection)
-//!   - ALPN "http/1.0" or "http/1.1" → HTTP/1.x server
-//!   - No ALPN → HTTP/1.1 (default)
+//!   - ALPN "h2" -> HTTP/2 server (transport.serveConnection)
+//!   - ALPN "http/1.0" or "http/1.1" -> HTTP/1.x server
+//!   - No ALPN -> HTTP/1.1 (default)
 //!
 //! This is the main entry point for serving HTTPS.
+//!
+//! References:
+//!   - RFC 8446 — TLS 1.3
+//!   - RFC 7301 — ALPN (Application-Layer Protocol Negotiation)
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

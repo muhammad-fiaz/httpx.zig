@@ -1,6 +1,14 @@
-// HTTP/3 connection (RFC 9114).
-// Manages control stream lifecycle, SETTINGS exchange, and request/response
-// on bidirectional streams. Transport (QUIC) integration via Conn interface.
+//! HTTP/3 connection (RFC 9114).
+//!
+//! Manages control stream lifecycle, SETTINGS exchange, and request/response
+//! on bidirectional streams. Transport (QUIC) integration via Conn interface.
+//!
+//! References:
+//!   - RFC 9114 Section 3 — HTTP/3 Connection
+//!   - RFC 9114 Section 4.2 — Control Stream (SETTINGS)
+//!   - RFC 9114 Section 7.2 — HTTP/3 Frame Types
+//!   - RFC 9114 Section 8.1 — HTTP/3 Error Codes
+//!   - RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

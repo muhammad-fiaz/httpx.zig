@@ -1,8 +1,13 @@
-// TCP socket abstraction over std.Io.net (Zig 0.16).
-//
-// IPv4 + IPv6 via net/address.Address. Read/write are one-shot syscalls
-// through the Io vtable: read() returns whatever is available (>=1 byte,
-// ConnectionClosed at EOF) without waiting to fill the caller's buffer.
+//! TCP socket abstraction over std.Io.net (Zig 0.16).
+//!
+//! IPv4 + IPv6 via net/address.Address. Read/write are one-shot syscalls
+//! through the Io vtable: read() returns whatever is available (>=1 byte,
+//! ConnectionClosed at EOF) without waiting to fill the caller's buffer.
+//!
+//! References:
+//!   - RFC 9112 Section 8 — Connection Management (TCP lifecycle)
+//!   - RFC 9112 Section 9.6 — Persistence (keep-alive, Connection header)
+//!   - RFC 1122 — Requirements for Internet Hosts (TCP connection behavior)
 //
 // === Windows-specific design ===
 // On Windows, std.Io.Threaded.netConnectIpWindows maps the AFD

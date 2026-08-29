@@ -1,5 +1,9 @@
-// WebSocket handshake (RFC 6455 section 4): HTTP/1.1 Upgrade exchange,
-// Sec-WebSocket-Accept computation, client request building, server validation.
+//! WebSocket handshake (RFC 6455 section 4): HTTP/1.1 Upgrade exchange,
+//! Sec-WebSocket-Accept computation, client request building, server validation.
+//!
+//! References:
+//!   - RFC 6455 Section 4 — Opening Handshake
+//!   - RFC 6455 Section 1.3 — WebSocket Accept (magic GUID)
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

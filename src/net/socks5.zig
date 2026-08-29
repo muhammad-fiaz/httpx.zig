@@ -1,6 +1,14 @@
-// SOCKS5 proxy client (RFC 1928) - CONNECT method over TCP.
-// Supports no-auth (0x00) and username/password auth (0x02).
-// CONNECT-UDP layering for proxied HTTP/3 rides on this tunnel.
+//! SOCKS5 proxy client (RFC 1928) - CONNECT method over TCP.
+//!
+//! Implements the SOCKS Protocol Version 5 per RFC 1928: greeting,
+//! method negotiation, CONNECT command, and address types (IPv4, domain,
+//! IPv6). Supports no-auth (0x00) and username/password auth (RFC 1929).
+//!
+//! CONNECT-UDP layering for proxied HTTP/3 rides on this tunnel.
+//!
+//! References:
+//!   - RFC 1928 — SOCKS Protocol Version 5
+//!   - RFC 1929 — Username/Password Authentication for SOCKS V5
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

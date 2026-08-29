@@ -7,6 +7,13 @@
 //!
 //! Wire identifiers follow TLS ALPN (RFC 7301): "http/1.0", "http/1.1",
 //! "h2", "h3". `auto` has no wire identifier.
+//!
+//! References:
+//!   - RFC 9110 Section 2.3 — Version Numbering
+//!   - RFC 9112 Section 2.3 — HTTP/1.1 Upgrade
+//!   - RFC 9113 — HTTP/2 (h2 ALPN identification)
+//!   - RFC 9114 Section 3.1 — HTTP/3 over QUIC (h3 ALPN)
+//!   - RFC 7301 — TLS Application-Layer Protocol Negotiation (ALPN)
 
 const std = @import("std");
 

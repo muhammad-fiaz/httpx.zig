@@ -1,5 +1,5 @@
-// QUIC variable-length integer encoding (RFC 9000 section 16).
-// 2-bit length prefix: 00=1byte(6bit) 01=2bytes(14bit) 10=4bytes(30bit) 11=8bytes(62bit)
+//! QUIC variable-length integer encoding (RFC 9000 section 16).
+//! 2-bit length prefix: 00=1byte(6bit) 01=2bytes(14bit) 10=4bytes(30bit) 11=8bytes(62bit)
 
 const std = @import("std");
 

@@ -1,18 +1,29 @@
 //! HTTP client: one request engine for all methods.
 //!
 //! ```zig
-//! const res = try httpx.client.request(allocator, io, .{
+//! const res = try httpx.client_request.request(allocator, io, .{
 //!     .method = .POST,
 //!     .url = "http://127.0.0.1:8080/api",
-//!     .json = "{\"ok\":true}",          // convenience content-type
+//!     .body_kind = .json,
+//!     .body = "{\"ok\":true}",
 //! });
 //! defer res.deinit();
 //! ```
 //!
-//! Scope: HTTP/1.x over TCP (http://). https:// returns error.TlsUnavailable
-//! until the TLS transport is wired in. Follows 301/302/303 (-> GET) and
-//! 307/308 (method preserved), stripping Authorization on cross-origin hops.
-//! Content-Length and chunked response bodies are both decoded.
+//! Scope: HTTP/1.x over TCP (http://). https:// requires explicit TLS
+//! configuration (TlsOptions). Follows 301/302/303 (-> GET) and
+//! 307/308 (method preserved), stripping Authorization on cross-origin hops
+//! per RFC 7235 Section 2.2. Content-Length and chunked transfer-encoding
+//! response bodies are both decoded.
+//!
+//! References:
+//!   - RFC 9110 Section 5.3 — Request Target
+//!   - RFC 9112 Section 6 — Message Body (Content-Length, chunked)
+//!   - RFC 9112 Section 9.5 — Transfer-Encoding (chunked)
+//!   - RFC 7235 Section 2.2 — Authorization on Redirect
+//!   - RFC 7231 Section 6.4 — Redirection (301, 302, 303, 307, 308)
+//!   - RFC 7578 — Multipart Form Data (file upload support)
+//!   - RFC 3986 Section 5 — Reference Resolution (Location header)
 
 const std = @import("std");
 const env_mod = @import("env");

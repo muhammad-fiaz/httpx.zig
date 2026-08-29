@@ -1,6 +1,18 @@
 //! Cookie jar: stores Set-Cookie values and injects Cookie headers.
 //!
-//! Thread-safe, bounded, with domain/path matching.
+//! Thread-safe, bounded, with domain/path matching. Implements the core
+//! cookie storage and retrieval semantics from RFC 6265 Section 4, including
+//! domain matching (Section 5.1.3), path matching (Section 5.1.4), cookie
+//! expiry via Max-Age and Expires directives, and Secure/HttpOnly flags.
+//!
+//! References:
+//!   - RFC 6265 — HTTP State Management (Cookie mechanism)
+//!   - RFC 6265 Section 4.1.1 — Set-Cookie Syntax
+//!   - RFC 6265 Section 4.2.1 — Cookie Header Syntax
+//!   - RFC 6265 Section 5.1.3 — Domain Matching
+//!   - RFC 6265 Section 5.1.4 — Path Matching
+//!   - RFC 6265 Section 5.2.6 — SameSite Attribute
+//!   - RFC 7230 Section 4.1.1 — Connection: close
 
 const std = @import("std");
 const clock = @import("../common/clock.zig");

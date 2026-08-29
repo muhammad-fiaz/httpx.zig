@@ -11,6 +11,13 @@
 //!
 //! Ownership: per-request allocations come from ctx.allocator (the request
 //! arena); Response slices borrow from it.
+//!
+//! References:
+//!   - RFC 9110 Section 8.8 — ETag
+//!   - RFC 9110 Section 8.8.2 — If-None-Match
+//!   - RFC 9110 Section 8.8.3 — Last-Modified
+//!   - RFC 9110 Section 8.8.4 — If-Modified-Since
+//!   - RFC 9110 Section 14.1 — Range Requests
 
 const std = @import("std");
 const builtin = @import("builtin");

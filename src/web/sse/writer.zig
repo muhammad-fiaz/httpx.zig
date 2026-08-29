@@ -1,9 +1,12 @@
-// Server-side SSE event serialization (text/event-stream).
-//
-// Wire format per WHATWG HTML spec section 9.2:
-//   field:value\n  repeated fields, terminated by a blank line.
-//   Fields: event, data (repeatable), id, retry. Lines starting with ':'
-//   are comments used as keep-alives.
+//! Server-side SSE event serialization (text/event-stream).
+//!
+//! Wire format per WHATWG HTML spec section 9.2:
+//!   field:value\n  repeated fields, terminated by a blank line.
+//!   Fields: event, data (repeatable), id, retry. Lines starting with ':'
+//!   are comments used as keep-alives.
+//!
+//! References:
+//!   - WHATWG HTML Spec Section 9.2 — Server-Sent Events
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

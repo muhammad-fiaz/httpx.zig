@@ -1,12 +1,19 @@
-// QPACK - QUIC header compression (RFC 9204).
-// Modeled on nghttp3_qpack. Implements:
-//   * Static table lookup (99 entries)
-//   * Instruction encoding/decoding:
-//       - Indexed field line (S=1, 6-bit prefix)
-//       - Literal field line without name reference (S+R, 3-bit prefix)
-//   * Required insert count in section prefix
-//
-// Full dynamic table with streams is layered at connection level.
+//! QPACK - QUIC header compression (RFC 9204).
+//!
+//! Modeled on nghttp3_qpack. Implements:
+//!   * Static table lookup (99 entries)
+//!   * Instruction encoding/decoding:
+//!       - Indexed field line (S=1, 6-bit prefix)
+//!       - Literal field line without name reference (S+R, 3-bit prefix)
+//!   * Required insert count in section prefix
+//!
+//! Full dynamic table with streams is layered at connection level.
+//!
+//! References:
+//!   - RFC 9204 — QPACK: Field Compression for HTTP/3
+//!   - RFC 9204 Section 2.3.2 — Static Table
+//!   - RFC 9204 Section 3.1 — Encoder Instructions
+//!   - RFC 9204 Section 3.2.6 — Decoder Instructions
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

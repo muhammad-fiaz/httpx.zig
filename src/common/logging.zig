@@ -11,6 +11,11 @@
 //!   * Header redaction helpers keep secrets out of logs by construction.
 //!
 //! Nothing here hardcodes stdout/stderr or any external library.
+//!
+//! References:
+//!   - RFC 9110 Section 10.1.1 — Authorization (secret redaction)
+//!   - RFC 9110 Section 10.2.3 — Proxy-Authorization (secret redaction)
+//!   - RFC 5424 — The Syslog Protocol (severity levels mapping)
 
 const std = @import("std");
 const sync = @import("sync.zig");

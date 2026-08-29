@@ -1,4 +1,16 @@
 //! Shared synchronization primitives (Zig 0.16 std.Thread has no Mutex).
+//!
+//! Lock-free and low-overhead primitives for the httpx concurrency model:
+//!
+//! - `Spinlock` — thin spinlock wrapping `std.atomic.Mutex` (tryLock/unlock).
+//! - `Semaphore` — counting semaphore with CAS-based acquire; no OS
+//!   futex dependency. Used for connection-pool throttling and
+//!   backpressure enforcement.
+//! - `Once` — one-shot initialization gate (`std.once` does not exist
+//!   in 0.16). Ensures a function runs exactly once across threads.
+//!
+//! These primitives underpin the worker pool and connection pool
+//! subsystems.
 
 const std = @import("std");
 

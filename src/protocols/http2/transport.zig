@@ -3,6 +3,11 @@
 //! Thin glue driving the Session engine over plain TCP for BOTH roles.
 //! TLS+ALPN paths use the same Session from their own callers.
 //! Thread-safety: one transport per connection, thread-confined.
+//!
+//! References:
+//!   - RFC 9113 Section 3.4 — HTTP/2 Connection Preface (h2c)
+//!   - RFC 9113 Section 3.3 — Starting HTTP/2 for Prior Knowledge
+//!   - RFC 9113 Section 8.1 — Field Requirements (lowercase names)
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

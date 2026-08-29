@@ -1,7 +1,12 @@
-// Security middleware primitives: CORS, CSRF, rate limiting.
-//
-// Pure policy logic - no socket/server dependency - so handlers integrate it
-// into any transport (HTTP/1, HTTP/2, HTTP/3) and tests run standalone.
+//! Security middleware primitives: CORS, CSRF, rate limiting.
+//!
+//! Pure policy logic — no socket/server dependency — so handlers integrate it
+//! into any transport (HTTP/1, HTTP/2, HTTP/3) and tests run standalone.
+//!
+//! References:
+//!   - Fetch Standard — CORS (Cross-Origin Resource Sharing)
+//!   - RFC 9110 Section 13.1 — Effective Request URI (CORS origin)
+//!   - Double-submit cookie pattern for CSRF protection
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

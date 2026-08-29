@@ -8,7 +8,7 @@
 //! transition and routes the remainder bits (the already-consumed prefix
 //! of the next symbol) to the trie node they reach from the root. Input
 //! may legally terminate only where the unconsumed trailing bits are an
-//! all-ones run shorter than 8 bits â€” i.e. valid EOS-prefix padding.
+//! all-ones run shorter than 8 bits — i.e. valid EOS-prefix padding.
 //!
 //! This mirrors the representation nghttp2/nghttp3 generate (mkhufftbl),
 //! derived here from first principles.

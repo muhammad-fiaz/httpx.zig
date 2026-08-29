@@ -13,6 +13,15 @@
 //!   * whitespace before header colon -> error.MalformedHeaderLine
 //!   * control characters anywhere in tokens/values -> error
 //!   * all lengths overflow-checked; configurable limits
+//!
+//! References:
+//!   - RFC 9112 Section 2.1 — Request Line (method SP request-target SP HTTP-version)
+//!   - RFC 9112 Section 2.2 — Status Line (HTTP-version SP status-code SP reason-phrase)
+//!   - RFC 9112 Section 3 — Field Syntax (header fields)
+//!   - RFC 9112 Section 5.1 — Message Body (Content-Length)
+//!   - RFC 9112 Section 5.3 — Transfer-Encoding (chunked)
+//!   - RFC 9112 Section 6.3 — Status Code Rules
+//!   - RFC 9112 Section 7.1 — Transfer Encoding (obs-fold rejection)
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

@@ -1,7 +1,17 @@
-//! Case-insensitive HTTP header collection with injection protection.
+//! Case-insensitive HTTP header collection with CRLF injection protection.
 //!
 //! One authoritative implementation shared by client, server, HTTP/1,
-//! WebSocket, SSE, and authentication layers.
+//! HTTP/2, WebSocket, SSE, and authentication layers. Header names are
+//! validated per RFC 9110 Section 5.1 (token format) and values per
+//! RFC 9110 Section 5.5 (field-content). CRLF injection and null-byte
+//! attacks are rejected at the API boundary.
+//!
+//! References:
+//!   - RFC 9110 Section 5 — Request Header Fields, Response Header Fields
+//!   - RFC 9110 Section 5.1 — Field Names (token format)
+//!   - RFC 9110 Section 5.5 — Field Values (field-content)
+//!   - RFC 9112 Section 2.2 — Field Name Case Normalization
+//!   - RFC 7230 Section 3.2.6 — Token Definition
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

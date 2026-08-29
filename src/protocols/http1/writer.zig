@@ -5,6 +5,15 @@
 //! reason phrases) before writing, so response splitting and header
 //! injection cannot pass through. Chunked emission supports streaming
 //! with optional trailers; bodyless statuses/HEAD never emit a body.
+//!
+//! References:
+//!   - RFC 9110 Section 5.1 — Field Names (token format)
+//!   - RFC 9110 Section 5.5 — Field Values
+//!   - RFC 9112 Section 3 — Request Line
+//!   - RFC 9112 Section 3.2 — Request Target (origin-form, absolute-form)
+//!   - RFC 9112 Section 4 — Status Line
+//!   - RFC 9112 Section 6.2 — Content-Length
+//!   - RFC 9112 Section 7.1 — Chunked Transfer Coding
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

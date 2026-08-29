@@ -2,6 +2,12 @@
 //! request-target forms, Host authority validation, connection
 //! persistence, Expect handling, informational responses, and the
 //! configurable limits applied while parsing heads.
+//!
+//! References:
+//!   - RFC 9110 Section 5.3 — Request Target
+//!   - RFC 9110 Section 7.2 — Host Header
+//!   - RFC 9112 Section 9.6 — Connection Persistence
+//!   - RFC 9112 Section 9.3 — Expect-Continue
 
 const std = @import("std");
 

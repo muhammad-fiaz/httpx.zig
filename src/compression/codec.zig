@@ -1,11 +1,17 @@
-// Content compression: negotiation + encode/decode for gzip, deflate, zstd, brotli.
-//
-// Uses:
-//   * std.compress.flate for gzip + zlib (Zig builtin)
-//   * zstd dependency for zstd
-//   * brotli dependency for br
-//
-// Negotiation follows RFC 9110 section 12.5.3 (Accept-Encoding).
+//! Content compression: negotiation + encode/decode for gzip, deflate, zstd, brotli.
+//!
+//! Negotiation follows RFC 9110 section 12.5.3 (Accept-Encoding):
+//! the client sends Accept-Encoding, the server selects one encoding
+//! and responds with Content-Encoding. Identity is never compressed.
+//!
+//! Uses:
+//!   * std.compress.flate for gzip + zlib (Zig builtin)
+//!   * zstd dependency for zstd
+//!   * brotli dependency for br
+//!
+//! References:
+//!   - RFC 9110 Section 12.5.3 — Content-Encoding
+//!   - RFC 9110 Section 12.5.1 — Accept-Encoding
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

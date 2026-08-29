@@ -1,4 +1,12 @@
-//! Library identity, shared by docs, server headers, and the root module.
+//! Library identity — version string and server token.
+//!
+//! Provides the canonical library name and version, used in `Server`
+//! response headers (RFC 9110 Section 12.5.3) and user-agent string
+//! construction (RFC 9110 Section 10.1.5).
+//!
+//! References:
+//!   - RFC 9110 Section 10.1.5 — User-Agent
+//!   - RFC 9110 Section 12.5.3 — Server Header Field
 
 pub const name = "HTTPX";
 pub const version = "0.2.0";

@@ -1,5 +1,5 @@
-// RFC 7541 Appendix B Huffman code table (normative protocol constants).
-// Symbol order = canonical code order. EOS (symbol 256) is 30 bits, 0x3FFFFFFF.
+//! RFC 7541 Appendix B Huffman code table (normative protocol constants).
+//! Symbol order = canonical code order. EOS (symbol 256) is 30 bits, 0x3FFFFFFF.
 
 pub const Sym = struct { len: u8, code: u32 };
 

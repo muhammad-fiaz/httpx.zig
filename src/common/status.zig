@@ -1,4 +1,18 @@
 //! HTTP status codes with reason phrases.
+//!
+//! Status codes are grouped into five classes per RFC 9110 Section 15.
+//! Each code maps to a standard reason phrase used in the HTTP/1.1
+//! status line. This module provides both typed constants and a
+//! lookup function for reason phrases.
+//!
+//! References:
+//!   - RFC 9110 Section 15 — Response Status Codes
+//!   - RFC 9110 Section 15.1 — Overview (1xx Informational … 5xx Server Error)
+//!   - RFC 9110 Section 15.2 — 1xx Informational
+//!   - RFC 9110 Section 15.3 — 2xx Successful
+//!   - RFC 9110 Section 15.4 — 3xx Redirection
+//!   - RFC 9110 Section 15.5 — 4xx Client Error
+//!   - RFC 9110 Section 15.6 — 5xx Server Error
 
 pub const Status = struct {
     code: u16,

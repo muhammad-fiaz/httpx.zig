@@ -11,6 +11,10 @@
 //!   * Everything dropped goes through drainThenClose — no socket leaks.
 //!
 //! Thread-safety: internally synchronized; shareable across threads.
+//!
+//! References:
+//!   - RFC 9110 Section 9.3.4 — Connection Management (keep-alive)
+//!   - RFC 9112 Section 9.6 — Persistence (connection reuse)
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

@@ -1,8 +1,17 @@
-//! Shared error types for the entire httpx library.
+//! Unified error taxonomy for the entire httpx library.
 //!
-//! Every subsystem maps its errors into this unified taxonomy so callers
-//! can distinguish between network failures, protocol violations,
-//! resource limits, and application-level conditions.
+//! Every subsystem maps its errors into this shared enum so callers can
+//! distinguish between network failures, protocol violations, resource
+//! limits, and application-level conditions. Error categories are derived
+//! from the IANA HTTP Status Code Registry (RFC 9110 Section 15) and
+//! common network failure modes defined in RFC 5424 (Syslog) severity
+//! mappings.
+//!
+//! References:
+//!   - RFC 9110 — HTTP Semantics (status code semantics)
+//!   - RFC 9112 — HTTP/1.1 Message Syntax (malformed request/response)
+//!   - RFC 7231 — HTTP/1.1 Content Semantics (auth errors)
+//!   - RFC 9113 — HTTP/2 (protocol-level errors)
 
 pub const Error = error{
     // DNS
