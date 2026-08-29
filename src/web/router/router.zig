@@ -49,6 +49,52 @@ pub const Context = struct {
         }
         return null;
     }
+
+    /// Deserializes JSON request body into type `T`.
+    pub fn json(self: *const Context, comptime T: type) !T {
+        const parsed = try std.json.parseFromSlice(T, self.allocator, self.body, .{
+            .ignore_unknown_fields = true,
+        });
+        return parsed.value;
+    }
+
+    /// Renders an HTML response.
+    pub fn html(self: *const Context, content: []const u8) Response {
+        _ = self;
+        return .{
+            .status = 200,
+            .body = content,
+            .content_type = "text/html; charset=utf-8",
+        };
+    }
+
+    /// Renders a JSON response from a serialized string or struct.
+    pub fn renderJson(self: *const Context, value: anytype) !Response {
+        const T = @TypeOf(value);
+        if (T == []const u8 or T == []u8) {
+            return Response{
+                .status = 200,
+                .body = value,
+                .content_type = "application/json",
+            };
+        }
+        const str = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
+        return Response{
+            .status = 200,
+            .body = str,
+            .content_type = "application/json",
+        };
+    }
+
+    /// Renders a plain text response.
+    pub fn text(self: *const Context, content: []const u8) Response {
+        _ = self;
+        return .{
+            .status = 200,
+            .body = content,
+            .content_type = "text/plain; charset=utf-8",
+        };
+    }
 };
 
 pub const Response = struct {
@@ -58,6 +104,30 @@ pub const Response = struct {
     content_type: ?[]const u8 = null,
     /// Additional headers; borrowed from ctx-scratch or static data.
     headers: []const Header = &.{},
+
+    pub fn html(content: []const u8) Response {
+        return .{
+            .status = 200,
+            .body = content,
+            .content_type = "text/html; charset=utf-8",
+        };
+    }
+
+    pub fn text(content: []const u8) Response {
+        return .{
+            .status = 200,
+            .body = content,
+            .content_type = "text/plain; charset=utf-8",
+        };
+    }
+
+    pub fn jsonRaw(content: []const u8) Response {
+        return .{
+            .status = 200,
+            .body = content,
+            .content_type = "application/json",
+        };
+    }
 };
 
 pub const RouteError = error{
@@ -173,6 +243,21 @@ pub const Router = struct {
     pub fn post(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response) RouteError!void {
         try self.add(.POST, path, handler);
     }
+    pub fn put(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response) RouteError!void {
+        try self.add(.PUT, path, handler);
+    }
+    pub fn patch(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response) RouteError!void {
+        try self.add(.PATCH, path, handler);
+    }
+    pub fn delete(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response) RouteError!void {
+        try self.add(.DELETE, path, handler);
+    }
+    pub fn head(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response) RouteError!void {
+        try self.add(.HEAD, path, handler);
+    }
+    pub fn options(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response) RouteError!void {
+        try self.add(.OPTIONS, path, handler);
+    }
     pub fn getMeta(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response, m: meta_mod.Metadata) RouteError!void {
         try self.addMeta(.GET, path, handler, m);
     }
@@ -187,12 +272,6 @@ pub const Router = struct {
     }
     pub fn deleteMeta(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response, m: meta_mod.Metadata) RouteError!void {
         try self.addMeta(.DELETE, path, handler, m);
-    }
-    pub fn put(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response) RouteError!void {
-        try self.add(.PUT, path, handler);
-    }
-    pub fn delete(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response) RouteError!void {
-        try self.add(.DELETE, path, handler);
     }
 
     /// Matches a request and fills in path parameters.
@@ -250,9 +329,11 @@ fn matchPattern(pat: *const Pattern, path: []const u8, ctx: *Context) bool {
                 }
             },
             .wildcard => {
-                // Wildcard matches everything remaining
+                // Wildcard matches everything remaining in the path from this segment on
                 if (ctx.param_count < 16) {
-                    ctx.params[ctx.param_count] = .{ .name = seg.text, .value = path };
+                    const seg_start = @intFromPtr(path_seg.ptr) - @intFromPtr(path.ptr);
+                    const remainder = path[seg_start..];
+                    ctx.params[ctx.param_count] = .{ .name = seg.text, .value = remainder };
                     ctx.param_count += 1;
                 }
                 return true;

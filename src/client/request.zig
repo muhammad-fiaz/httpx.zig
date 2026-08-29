@@ -145,9 +145,9 @@ pub const Response = struct {
         return null;
     }
 
-    /// Parses the body as JSON into `T`.
+    /// Parses the body as JSON into `T` (ignores unknown fields).
     pub fn json(self: *const Response, comptime T: type) !T {
-        return std.json.parseFromSliceLeaky(T, self.allocator, self.body, .{});
+        return std.json.parseFromSliceLeaky(T, self.allocator, self.body, .{ .ignore_unknown_fields = true });
     }
 
     /// Returns body as text (UTF-8).
@@ -422,7 +422,16 @@ pub fn request(a: Allocator, io: std.Io, req_in: Request) Error!Response {
             if (probe.parseIp(host_only)) |direct| {
                 var da = direct;
                 da.port = port;
-                break :blk tcp.connectAddress(io, &da) catch return Error.ConnectFailed;
+                // For TLS, use the AFD-backed stream path (required for
+                // std.Io.net TLS initialization). For plain HTTP on Windows,
+                // use the direct winsock path (avoids netConnectIpWindows
+                // STATUS_CONNECTION_REFUSED → unexpectedStatus() stderr noise
+                // that corrupts the --listen=- test runner protocol).
+                if (is_tls) {
+                    break :blk tcp.connectAddressStream(io, &da) catch return Error.ConnectFailed;
+                } else {
+                    break :blk tcp.connectAddress(io, &da) catch return Error.ConnectFailed;
+                }
             } else |_| {}
 
             resolved = rblk: {
@@ -458,7 +467,11 @@ pub fn request(a: Allocator, io: std.Io, req_in: Request) Error!Response {
                 }
             }
             for (resolved.?) |*raddr| {
-                if (tcp.connectAddress(io, raddr)) |s| break :blk s else |_| {}
+                if (is_tls) {
+                    if (tcp.connectAddressStream(io, raddr)) |s| break :blk s else |_| {}
+                } else {
+                    if (tcp.connectAddress(io, raddr)) |s| break :blk s else |_| {}
+                }
             }
             return Error.ConnectFailed;
         };
@@ -537,7 +550,7 @@ pub fn request(a: Allocator, io: std.Io, req_in: Request) Error!Response {
             tls_conn = tls_transport.Connection.init(
                 a,
                 io,
-                tcp_sock.stream.socket.handle,
+                tcp_sock.netSocketHandle(),
                 host_copy[0..hl],
                 opts.verify,
                 opts.ca_bundle,
@@ -1024,7 +1037,7 @@ fn startTestServer(
     const router_mod = @import("../web/router/router.zig");
     var ctx = try t_tcp.IoContext.init(a);
     errdefer ctx.deinit();
-    var srv = try lifecycle.Server.init(a, ctx.io, .{
+    var srv = try lifecycle.Server.init(a, .{
         .port = 0,
         .docs_enabled = false,
         .keep_alive = keep_alive,
@@ -1054,7 +1067,7 @@ test "keep-alive: second request reuses pooled connection" {
     // Client with pool; two requests over hostname.
     // Manual lifecycle: client must be FULLY torn down (releasing pooled
     // sockets -> server readers see EOF) BEFORE server shutdown/join.
-    var client = @import("client.zig").Client.init(a, S.ctx.io, .{});
+    var client = @import("client.zig").Client.initWithIo(a, S.ctx.io, .{});
 
     var ub: [64]u8 = undefined;
     const port = srv.localPort();
@@ -1097,7 +1110,7 @@ test "connection close response is not pooled" {
     var ctx = try t_tcp.IoContext.init(a);
     defer ctx.deinit();
     // keep_alive=false server => always responds Connection: close
-    var srv = try lifecycle.Server.init(a, ctx.io, .{ .port = 0, .docs_enabled = false });
+    var srv = try lifecycle.Server.init(a, .{ .port = 0, .docs_enabled = false });
     defer srv.deinit();
     try srv.router.add(.GET, "/x", struct {
         fn h(_: *router_mod.Context) anyerror!router_mod.Response {
@@ -1113,7 +1126,7 @@ test "connection close response is not pooled" {
     };
     const th = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
 
-    var client = @import("client.zig").Client.init(a, ctx.io, .{});
+    var client = @import("client.zig").Client.initWithIo(a, ctx.io, .{});
     defer client.deinit();
     var ub: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&ub, "http://127.0.0.1:{d}/x", .{srv.localPort()});

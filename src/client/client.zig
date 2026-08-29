@@ -4,8 +4,13 @@
 //!   const res = try httpx.get(.{ .url = "http://example.com" });
 //!   defer res.deinit();
 //!
-//! Explicit client:
-//!   var client = try httpx.Client.init(gpa, io, .{});
+//! Explicit allocator:
+//!   var client = try httpx.Client.init(allocator, .{});
+//!   defer client.deinit();
+//!   var res = try client.get(.{ .url = "http://example.com" });
+//!
+//! Explicit io (advanced):
+//!   var client = Client.initWithIo(allocator, io, .{});
 //!   defer client.deinit();
 
 const std = @import("std");
@@ -18,6 +23,7 @@ const req_mod = @import("request.zig");
 const Pool = @import("pool.zig").Pool;
 const PoolConfig = @import("pool.zig").PoolConfig;
 const dns_cache_mod = @import("../net/dns/cache.zig");
+const HttpVersion = @import("../common/http_version.zig").HttpVersion;
 
 pub const Config = struct {
     allocator: ?Allocator = null,
@@ -29,8 +35,16 @@ pub const Config = struct {
     dns_cache: DnsCacheOptions = .{},
     /// Allow bare LF line endings (instead of strict CRLF) for
     /// non-compliant peers (issue #37). Stripping optional trailing
-    /// \\r. Default false (strict RFC 9110/9112).
+    /// \r. Default false (strict RFC 9110/9112).
     allow_lf_line_endings: bool = false,
+    /// Default HTTP version for requests when per-request version not set.
+    http_version: ?HttpVersion = null,
+    /// Default TLS options for https:// requests.
+    tls: ?req_mod.TlsOptions = null,
+    /// Default request timeout in ms.
+    timeout_ms: ?u64 = null,
+    /// Default max response body size.
+    max_response_size: ?usize = null,
 
     pub const DnsCacheOptions = struct {
         enabled: bool = true,
@@ -60,11 +74,14 @@ pub const RequestOptions = struct {
     max_redirects: ?u8 = null,
     /// Allow bare LF line endings for response parsing (issue #37).
     allow_lf_line_endings: bool = false,
-    /// HTTP version selection (auto or explicit).
-    http_version: ?@import("../common/http_version.zig").HttpVersion = null,
-    /// Optional pre-allocated headers/query as struct (ergonomic). Use `headersFromStruct` helper.
-    headers_struct: ?*const anyopaque = null,
-    query_struct: ?*const anyopaque = null,
+    /// HTTP version selection (auto or explicit). Reuses http_version.zig.
+    http_version: ?HttpVersion = null,
+    tls: ?req_mod.TlsOptions = null,
+    cookie: ?[]const u8 = null,
+    basic_auth: ?[]const u8 = null,
+    bearer_auth: ?[]const u8 = null,
+    timeout_ms: ?u64 = null,
+    max_response_size: ?usize = null,
 };
 
 pub const Response = req_mod.Response;
@@ -79,8 +96,20 @@ pub const Client = struct {
     owns_io: bool = false,
     io_threaded: ?*std.Io.Threaded = null,
 
-    /// Explicit allocator + io (production).
-    pub fn init(allocator: Allocator, io: std.Io, config: Config) Client {
+    /// Explicit allocator API: creates internal Threaded io.
+    /// Matches AGENT.md: `var client = try httpx.Client.init(allocator, .{});`
+    pub fn init(allocator: Allocator, config: Config) !Client {
+        const threaded = try allocator.create(std.Io.Threaded);
+        errdefer allocator.destroy(threaded);
+        threaded.* = .init(allocator, .{});
+        var c = Client.initWithIo(allocator, threaded.io(), config);
+        c.owns_io = true;
+        c.io_threaded = threaded;
+        return c;
+    }
+
+    /// Advanced: explicit io provided by caller. Does not own io.
+    pub fn initWithIo(allocator: Allocator, io: std.Io, config: Config) Client {
         var c = Client{
             .allocator = allocator,
             .io = io,
@@ -107,10 +136,15 @@ pub const Client = struct {
         const gpa = std.heap.page_allocator;
         const threaded = try gpa.create(std.Io.Threaded);
         threaded.* = .init(gpa, .{});
-        var c = Client.init(gpa, threaded.io(), config);
+        var c = Client.initWithIo(gpa, threaded.io(), config);
         c.owns_io = true;
         c.io_threaded = threaded;
         return c;
+    }
+
+    /// Alias for `init` for backward compatibility with docs.
+    pub fn initWithConfig(allocator: Allocator, config: Config) !Client {
+        return init(allocator, config);
     }
 
     pub fn deinit(self: *Client) void {
@@ -119,44 +153,45 @@ pub const Client = struct {
         if (self.owns_io) {
             if (self.io_threaded) |t| {
                 t.deinit();
-                std.heap.page_allocator.destroy(t);
+                // Destroy with the same allocator that created it.
+                self.allocator.destroy(t);
             }
         }
     }
 
-    pub fn get(self: *Client, opts: RequestOptions) Error!Response {
+    pub fn get(self: *Client, opts: anytype) Error!Response {
         return self.doRequest(.GET, opts);
     }
 
-    pub fn post(self: *Client, opts: RequestOptions) Error!Response {
+    pub fn post(self: *Client, opts: anytype) Error!Response {
         return self.doRequest(.POST, opts);
     }
 
-    pub fn put(self: *Client, opts: RequestOptions) Error!Response {
+    pub fn put(self: *Client, opts: anytype) Error!Response {
         return self.doRequest(.PUT, opts);
     }
 
-    pub fn patch(self: *Client, opts: RequestOptions) Error!Response {
+    pub fn patch(self: *Client, opts: anytype) Error!Response {
         return self.doRequest(.PATCH, opts);
     }
 
-    pub fn delete(self: *Client, opts: RequestOptions) Error!Response {
+    pub fn delete(self: *Client, opts: anytype) Error!Response {
         return self.doRequest(.DELETE, opts);
     }
 
-    pub fn head(self: *Client, opts: RequestOptions) Error!Response {
+    pub fn head(self: *Client, opts: anytype) Error!Response {
         return self.doRequest(.HEAD, opts);
     }
 
-    pub fn options(self: *Client, opts: RequestOptions) Error!Response {
+    pub fn options(self: *Client, opts: anytype) Error!Response {
         return self.doRequest(.OPTIONS, opts);
     }
 
-    pub fn trace(self: *Client, opts: RequestOptions) Error!Response {
+    pub fn trace(self: *Client, opts: anytype) Error!Response {
         return self.doRequest(.TRACE, opts);
     }
 
-    pub fn connect(self: *Client, opts: RequestOptions) Error!Response {
+    pub fn connect(self: *Client, opts: anytype) Error!Response {
         return self.doRequest(.CONNECT, opts);
     }
 
@@ -194,74 +229,144 @@ pub const Client = struct {
     }
 
     pub fn doRequest(self: *Client, method: Method, opts: anytype) Error!Response {
-        var hdrs: [16]req_mod.Header = undefined;
-        var n: usize = 0;
+        // Track allocations for header/query string conversions that need freeing.
+        var allocated_strings: std.ArrayList([]u8) = .empty;
+        defer {
+            for (allocated_strings.items) |s| self.allocator.free(s);
+            allocated_strings.deinit(self.allocator);
+        }
+
+        var hdrs: std.ArrayList(req_mod.Header) = .empty;
+        defer hdrs.deinit(self.allocator);
 
         // Content-Type inference
         var ct: ?[]const u8 = if (@hasField(@TypeOf(opts), "content_type")) opts.content_type else null;
-        const has_json = @hasField(@TypeOf(opts), "json") and opts.json != null;
+        const has_json = blk: {
+            if (!@hasField(@TypeOf(opts), "json")) break :blk false;
+            const v = opts.json;
+            const T = @TypeOf(v);
+            if (comptime @typeInfo(T) == .optional) break :blk v != null;
+            break :blk true;
+        };
         const has_json_typed = @hasField(@TypeOf(opts), "json_typed") and opts.json_typed != null;
-        const has_form = @hasField(@TypeOf(opts), "form") and opts.form != null;
+        const has_form = blk: {
+            if (!@hasField(@TypeOf(opts), "form")) break :blk false;
+            const v = opts.form;
+            const T = @TypeOf(v);
+            if (comptime @typeInfo(T) == .optional) break :blk v != null else break :blk true;
+        };
         if (ct == null and (has_json or has_json_typed)) ct = "application/json";
         if (ct == null and has_form) ct = "application/x-www-form-urlencoded";
         if (ct) |c| {
-            if (n < hdrs.len) {
-                hdrs[n] = .{ .name = "Content-Type", .value = c };
-                n += 1;
-            }
+            hdrs.append(self.allocator, .{ .name = "Content-Type", .value = c }) catch return Error.OutOfMemory;
         }
         // Headers: support both []const Header and struct literal
         if (@hasField(@TypeOf(opts), "headers")) {
             const H = @TypeOf(opts.headers);
-            if (@typeInfo(H) == .pointer and @typeInfo(H).pointer.size == .slice) {
+            if (comptime @typeInfo(H) == .pointer and @typeInfo(H).pointer.size == .slice) {
                 for (opts.headers) |h| {
-                    if (n < hdrs.len) {
-                        hdrs[n] = h;
-                        n += 1;
-                    }
+                    hdrs.append(self.allocator, h) catch return Error.OutOfMemory;
                 }
-            } else if (@typeInfo(H) == .@"struct") {
+            } else if (comptime @typeInfo(H) == .@"struct") {
                 inline for (@typeInfo(H).@"struct".fields) |field| {
                     const v = @field(opts.headers, field.name);
-                    if (n < hdrs.len) {
-                        hdrs[n] = .{ .name = field.name, .value = switch (@typeInfo(@TypeOf(v))) {
-                            .int, .comptime_int => blk: {
-                                var buf: [32]u8 = undefined;
-                                const s = std.fmt.bufPrint(&buf, "{d}", .{v}) catch "";
+                    const val_str: []const u8 = blk: {
+                        const T = @TypeOf(v);
+                        const info = @typeInfo(T);
+                        switch (info) {
+                            .int, .comptime_int => {
+                                const s = std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
                                 break :blk s;
                             },
-                            else => v,
-                        } };
-                        n += 1;
-                    }
+                            .float, .comptime_float => {
+                                const s = std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                            .bool => break :blk if (v) "true" else "false",
+                            .pointer => |ptr| {
+                                if (ptr.size == .slice and ptr.child == u8) break :blk v;
+                                const s = std.fmt.allocPrint(self.allocator, "{any}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                            else => {
+                                const s = std.fmt.allocPrint(self.allocator, "{any}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                        }
+                    };
+                    hdrs.append(self.allocator, .{ .name = field.name, .value = val_str }) catch return Error.OutOfMemory;
                 }
             }
         }
 
         // Query: support both []const Header and struct literal
-        var query_hdrs: [16]req_mod.Header = undefined;
-        var qn: usize = 0;
-        var query_slice: []const req_mod.Header = &.{};
+        var query_list: std.ArrayList(req_mod.Header) = .empty;
+        defer query_list.deinit(self.allocator);
         if (@hasField(@TypeOf(opts), "query")) {
             const Q = @TypeOf(opts.query);
-            if (@typeInfo(Q) == .pointer and @typeInfo(Q).pointer.size == .slice) {
-                query_slice = opts.query;
-            } else if (@typeInfo(Q) == .@"struct") {
+            if (comptime @typeInfo(Q) == .pointer and @typeInfo(Q).pointer.size == .slice) {
+                for (opts.query) |q| query_list.append(self.allocator, q) catch return Error.OutOfMemory;
+            } else if (comptime @typeInfo(Q) == .@"struct") {
                 inline for (@typeInfo(Q).@"struct".fields) |field| {
                     const v = @field(opts.query, field.name);
-                    if (qn < query_hdrs.len) {
-                        var qbuf: [32]u8 = undefined;
-                        const vs = switch (@typeInfo(@TypeOf(v))) {
-                            .int, .comptime_int => std.fmt.bufPrint(&qbuf, "{d}", .{v}) catch "",
-                            .float, .comptime_float => std.fmt.bufPrint(&qbuf, "{d}", .{v}) catch "",
-                            .bool => if (v) "true" else "false",
-                            else => v,
-                        };
-                        query_hdrs[qn] = .{ .name = field.name, .value = vs };
-                        qn += 1;
-                    }
+                    const vs: []const u8 = blk: {
+                        const T = @TypeOf(v);
+                        const info = @typeInfo(T);
+                        switch (info) {
+                            .int, .comptime_int => {
+                                const s = std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                            .float, .comptime_float => {
+                                const s = std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                            .bool => break :blk if (v) "true" else "false",
+                            .pointer => |ptr| {
+                                if (ptr.size == .slice and ptr.child == u8) break :blk v;
+                                const s = std.fmt.allocPrint(self.allocator, "{any}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                            else => {
+                                const s = std.fmt.allocPrint(self.allocator, "{any}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                        }
+                    };
+                    query_list.append(self.allocator, .{ .name = field.name, .value = vs }) catch return Error.OutOfMemory;
                 }
-                query_slice = query_hdrs[0..qn];
             }
         }
 
@@ -270,48 +375,93 @@ pub const Client = struct {
         defer if (json_buf) |b| self.allocator.free(b);
         var body_val: []const u8 = "";
         var body_kind: req_mod.BodyKind = .none;
-        if (@hasField(@TypeOf(opts), "json") and opts.json != null) {
-            const J = @TypeOf(opts.json.?);
-            if (J == []const u8 or J == []u8) {
-                body_val = opts.json.?;
-                body_kind = .json;
-            } else {
-                // Typed struct: stringify via Stringify.valueAlloc
-                json_buf = std.json.Stringify.valueAlloc(self.allocator, opts.json.?, .{}) catch null;
-                if (json_buf) |b| {
-                    body_val = b;
+        const has_json_field = @hasField(@TypeOf(opts), "json");
+        if (has_json_field) {
+            const v = opts.json;
+            const T = @TypeOf(v);
+            const is_opt = comptime @typeInfo(T) == .optional;
+            const is_present = if (is_opt) v != null else true;
+            if (is_present) {
+                const payload = if (is_opt) v.? else v;
+                const J = @TypeOf(payload);
+                if (J == []const u8 or J == []u8) {
+                    body_val = payload;
                     body_kind = .json;
+                } else {
+                    json_buf = std.json.Stringify.valueAlloc(self.allocator, payload, .{}) catch return Error.OutOfMemory;
+                    if (json_buf) |b| {
+                        body_val = b;
+                        body_kind = .json;
+                    }
                 }
             }
-        } else if (@hasField(@TypeOf(opts), "form") and opts.form != null) {
-            body_val = opts.form.?;
-            body_kind = .form;
-        } else if (@hasField(@TypeOf(opts), "body") and opts.body != null) {
-            body_val = opts.body.?;
-            body_kind = .raw;
-        } else if (@hasField(@TypeOf(opts), "text") and opts.text != null) {
-            body_val = opts.text.?;
-            body_kind = .raw;
-        } else if (has_json) {
-            body_val = "";
+        }
+        if (body_kind == .none and @hasField(@TypeOf(opts), "form")) {
+            const v = opts.form;
+            const T = @TypeOf(v);
+            if (comptime @typeInfo(T) == .optional) {
+                if (v) |val| {
+                    body_val = val;
+                    body_kind = .form;
+                }
+            } else {
+                body_val = v;
+                body_kind = .form;
+            }
+        }
+        if (body_kind == .none and @hasField(@TypeOf(opts), "body")) {
+            const v = opts.body;
+            const T = @TypeOf(v);
+            if (comptime @typeInfo(T) == .optional) {
+                if (v) |val| {
+                    body_val = val;
+                    body_kind = .raw;
+                }
+            } else {
+                body_val = v;
+                body_kind = .raw;
+            }
+        }
+        if (body_kind == .none and @hasField(@TypeOf(opts), "text")) {
+            const v = opts.text;
+            const T = @TypeOf(v);
+            if (comptime @typeInfo(T) == .optional) {
+                if (v) |val| {
+                    body_val = val;
+                    body_kind = .raw;
+                }
+            } else {
+                body_val = v;
+                body_kind = .raw;
+            }
         }
 
-        if (body_kind == .none and @hasField(@TypeOf(opts), "json") and opts.json != null) {
-            const jv = opts.json.?;
-            if (@typeInfo(@TypeOf(jv)) == .@"struct") {
-                json_buf = std.json.Stringify.valueAlloc(self.allocator, jv, .{}) catch null;
-                if (json_buf) |b| {
-                    body_val = b;
-                    body_kind = .json;
+        // Resolve http_version with hierarchy: per-request > client default > auto
+        const req_http_version: HttpVersion = blk: {
+            if (@hasField(@TypeOf(opts), "http_version")) {
+                const HVType = @TypeOf(opts.http_version);
+                if (comptime @typeInfo(HVType) == .optional) {
+                    if (opts.http_version) |v| break :blk v;
+                } else {
+                    break :blk opts.http_version;
                 }
             }
-        }
+            if (self.config.http_version) |v| break :blk v;
+            break :blk .auto;
+        };
+
+        const req_tls: ?req_mod.TlsOptions = if (@hasField(@TypeOf(opts), "tls")) opts.tls else self.config.tls;
+        const req_cookie: ?[]const u8 = if (@hasField(@TypeOf(opts), "cookie")) opts.cookie else null;
+        const req_basic_auth: ?[]const u8 = if (@hasField(@TypeOf(opts), "basic_auth")) opts.basic_auth else null;
+        const req_bearer_auth: ?[]const u8 = if (@hasField(@TypeOf(opts), "bearer_auth")) opts.bearer_auth else null;
+        const req_timeout: ?u64 = if (@hasField(@TypeOf(opts), "timeout_ms")) opts.timeout_ms else self.config.timeout_ms;
+        const req_max_size: ?usize = if (@hasField(@TypeOf(opts), "max_response_size")) opts.max_response_size else self.config.max_response_size;
 
         const result = req_mod.request(self.allocator, self.io, .{
             .method = method,
             .url = opts.url,
-            .headers = hdrs[0..n],
-            .query = query_slice,
+            .headers = hdrs.items,
+            .query = query_list.items,
             .body_kind = body_kind,
             .body = body_val,
             .follow_redirects = if (@hasField(@TypeOf(opts), "follow_redirects")) opts.follow_redirects orelse self.config.follow_redirects else self.config.follow_redirects,
@@ -319,6 +469,13 @@ pub const Client = struct {
             .dns_cache = if (self.dns_cache) |*cache| cache else null,
             .pool = &self.pool,
             .allow_lf_line_endings = if (@hasField(@TypeOf(opts), "allow_lf_line_endings")) opts.allow_lf_line_endings or self.config.allow_lf_line_endings else self.config.allow_lf_line_endings,
+            .http_version = req_http_version,
+            .tls = req_tls,
+            .cookie = req_cookie,
+            .basic_auth = req_basic_auth,
+            .bearer_auth = req_bearer_auth,
+            .timeout_ms = req_timeout,
+            .max_response_size = req_max_size,
         });
         if (result) |resp| {
             if (self.config.logger) |*l|
@@ -350,50 +507,50 @@ fn defaultClient() ?*Client {
     const gpa = std.heap.page_allocator;
     const threaded = gpa.create(std.Io.Threaded) catch return null;
     threaded.* = .init(gpa, .{});
-    g_client = Client.init(gpa, threaded.io(), .{});
+    g_client = Client.initWithIo(gpa, threaded.io(), .{});
     g_threaded = threaded;
     g_ready.store(true, .release);
-    return &g_client;
+    return &g_client.?;
 }
 
-fn forward(method: Method, opts: RequestOptions) Error!Response {
+fn forward(method: Method, opts: anytype) Error!Response {
     const c = defaultClient() orelse return Error.DefaultClientUnavailable;
     return c.doRequest(method, opts);
 }
 
-pub fn globalGet(opts: RequestOptions) Error!Response {
+pub fn globalGet(opts: anytype) Error!Response {
     return forward(.GET, opts);
 }
 
-pub fn globalPost(opts: RequestOptions) Error!Response {
+pub fn globalPost(opts: anytype) Error!Response {
     return forward(.POST, opts);
 }
 
-pub fn globalPut(opts: RequestOptions) Error!Response {
+pub fn globalPut(opts: anytype) Error!Response {
     return forward(.PUT, opts);
 }
 
-pub fn globalPatch(opts: RequestOptions) Error!Response {
+pub fn globalPatch(opts: anytype) Error!Response {
     return forward(.PATCH, opts);
 }
 
-pub fn globalDelete(opts: RequestOptions) Error!Response {
+pub fn globalDelete(opts: anytype) Error!Response {
     return forward(.DELETE, opts);
 }
 
-pub fn globalHead(opts: RequestOptions) Error!Response {
+pub fn globalHead(opts: anytype) Error!Response {
     return forward(.HEAD, opts);
 }
 
-pub fn globalOptions(opts: RequestOptions) Error!Response {
+pub fn globalOptions(opts: anytype) Error!Response {
     return forward(.OPTIONS, opts);
 }
 
-pub fn globalTrace(opts: RequestOptions) Error!Response {
+pub fn globalTrace(opts: anytype) Error!Response {
     return forward(.TRACE, opts);
 }
 
-pub fn globalConnect(opts: RequestOptions) Error!Response {
+pub fn globalConnect(opts: anytype) Error!Response {
     return forward(.CONNECT, opts);
 }
 
@@ -406,8 +563,9 @@ pub fn globalSend(opts: anytype) Error!Response {
     return globalFetch(opts);
 }
 
-pub fn globalRequest(opts: RequestOptions) Error!Response {
-    return forward(opts.method orelse .GET, opts);
+pub fn globalRequest(opts: anytype) Error!Response {
+    const m: Method = if (@hasField(@TypeOf(opts), "method")) opts.method orelse .GET else .GET;
+    return forward(m, opts);
 }
 
 pub fn globalGetAll(urls: []const []const u8) ![]Response {
@@ -421,36 +579,34 @@ pub fn globalRequestAll(reqs: []const RequestOptions) ![]Response {
 }
 
 test "explicit client init/deinit" {
-    var ctx = tcp.IoContext.init(std.testing.allocator) catch return;
-    defer ctx.deinit();
-    var c = Client.init(std.testing.allocator, ctx.io, .{});
+    var c = Client.init(std.testing.allocator, .{}) catch return;
     defer c.deinit();
 }
 
-// DNS cache integration: hostname requests share one OS lookup
+test "explicit client initWithIo" {
+    var ctx = tcp.IoContext.init(std.testing.allocator) catch return;
+    defer ctx.deinit();
+    var c = Client.initWithIo(std.testing.allocator, ctx.io, .{});
+    defer c.deinit();
+}
 
 test "dns cache serves second hostname request from cache" {
     const a = std.testing.allocator;
-
-    var ctx = tcp.IoContext.init(a) catch return;
-    defer ctx.deinit();
-
-    var client = Client.init(a, ctx.io, .{});
+    var client = Client.init(a, .{}) catch return;
     defer client.deinit();
-
     // Direct cache resolves avoid the localhost HTTP roundtrip which
     // hangs on Linux/macOS (dual-stack connect) and previously panicked
     // Windows (accept CANCELLED => unreachable). The HTTP path is
     // already covered by keep-alive / connection-close tests; the
     // FakeResolver unit test covers coalescing deterministically.
-    const r1 = client.dns_cache.?.resolve(ctx.io, "localhost") catch return;
+    const r1 = client.dns_cache.?.resolve(client.io, "localhost") catch return;
     defer {
         for (r1) |addr| a.free(addr);
         a.free(r1);
     }
     try std.testing.expect(r1.len >= 1);
 
-    const r2 = client.dns_cache.?.resolve(ctx.io, "localhost") catch return;
+    const r2 = client.dns_cache.?.resolve(client.io, "localhost") catch return;
     defer {
         for (r2) |addr| a.free(addr);
         a.free(r2);
@@ -464,10 +620,41 @@ test "dns cache serves second hostname request from cache" {
 
 test "disabled dns cache never stores" {
     const a = std.testing.allocator;
-    const tcp2 = tcp;
-    var ctx = tcp2.IoContext.init(a) catch return;
-    defer ctx.deinit();
-    var client = Client.init(a, ctx.io, .{ .dns_cache = .{ .enabled = false } });
+    var client = Client.init(a, .{ .dns_cache = .{ .enabled = false } }) catch return;
     defer client.deinit();
     try std.testing.expect(client.dns_cache == null);
+}
+
+test "client http_version forwarded from opts" {
+    const a = std.testing.allocator;
+    var client = Client.init(a, .{ .http_version = .http_1 }) catch return;
+    defer client.deinit();
+    try std.testing.expectEqual(HttpVersion.http_1, client.config.http_version.?);
+}
+
+test "client anytype headers struct literal" {
+    const a = std.testing.allocator;
+    var client = Client.init(a, .{}) catch return;
+    defer client.deinit();
+    // Do not actually connect; just verify doRequest builds correctly up to connect failure
+    // Use invalid port to get ConnectFailed quickly after header building
+    const res = client.get(.{ .url = "http://127.0.0.1:1/", .headers = .{ .X_Custom = "value", .X_Int = 42 } });
+    try std.testing.expectError(Error.ConnectFailed, res);
+}
+
+test "client anytype query struct literal" {
+    const a = std.testing.allocator;
+    var client = Client.init(a, .{}) catch return;
+    defer client.deinit();
+    const res = client.get(.{ .url = "http://127.0.0.1:1/", .query = .{ .page = 2, .active = true } });
+    try std.testing.expectError(Error.ConnectFailed, res);
+}
+
+test "client typed json struct" {
+    const a = std.testing.allocator;
+    var client = Client.init(a, .{}) catch return;
+    defer client.deinit();
+    const Payload = struct { name: []const u8, age: u32 };
+    const res = client.post(.{ .url = "http://127.0.0.1:1/", .json = Payload{ .name = "Alice", .age = 30 } });
+    try std.testing.expectError(Error.ConnectFailed, res);
 }

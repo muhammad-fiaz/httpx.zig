@@ -1,11 +1,12 @@
 //! Production worker pool: fixed threads, bounded queue, graceful drain.
 //!
-//! Optional subsystem — a plain Client never creates one. Tasks are
-//! `fn (*anyopaque) void` closures; cooperative cancellation is exposed by
-//! handing tasks an `*AtomicCancel` flag the body may poll.
-//!
-//! Thread-safety: WorkerPool is internally synchronized and safe to share
-//! across threads after init.
+//! Features:
+//!   - Fixed or auto-scaled worker thread count.
+//!   - Bounded task queue with backpressure (`submit`) and non-blocking submission (`trySubmit`).
+//!   - Safe lifecycle state transitions: `init` -> `start` -> `submit` -> `drain` -> `shutdown` -> `join` -> `deinit`.
+//!   - Cancellation support: queued cancellation (`cancelQueued`) and cooperative running task cancellation.
+//!   - Comprehensive atomic statistics accounting (submitted, completed, failed, cancelled, rejected).
+//!   - Thread-safe across multiple concurrent submitters and threads.
 
 const std = @import("std");
 const sync = @import("../common/sync.zig");
@@ -14,10 +15,12 @@ const BoundedQueue = @import("queue.zig").BoundedQueue;
 pub const TaskFn = *const fn (ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) void;
 
 pub const Config = struct {
-    /// 0 => auto (CPU count, clamped 1..16).
+    /// 0 => auto (CPU count clamped 1..16).
     workers: u16 = 0,
     /// Pending-task capacity before submission blocks (or rejects).
     queue_capacity: u32 = 1024,
+    /// If true, automatically starts worker threads on the first submitted task.
+    auto_start: bool = true,
 };
 
 pub const Stats = struct {
@@ -47,6 +50,7 @@ pub const Pool = struct {
     stats: Stats = .{},
     shutting_down: std.atomic.Value(bool) = .init(false),
     drain_mode: std.atomic.Value(bool) = .init(false),
+    cfg: Config,
     mu: sync.Spinlock = .{},
     started: bool = false,
 
@@ -62,22 +66,24 @@ pub const Pool = struct {
         if (n == 0) {
             n = std.Thread.getCpuCount() catch 4;
             if (n > 16) n = 16;
+            if (n < 1) n = 1;
         }
         return .{
             .allocator = allocator,
             .queue = try BoundedQueue(Job).init(allocator, cap),
             .threads = try allocator.alloc(std.Thread, n),
+            .cfg = cfg,
         };
     }
 
-    /// Spawns worker threads. Safe to call once; extra calls are no-ops.
+    /// Spawns worker threads. Safe to call multiple times (subsequent calls are no-ops).
     pub fn start(self: *Pool) !void {
         self.mu.lock();
         defer self.mu.unlock();
         if (self.started) return;
         for (self.threads, 0..) |*t, i| {
             t.* = std.Thread.spawn(.{}, workerMain, .{ self, @as(u32, @intCast(i)) }) catch |e| {
-                // Roll back already-spawned workers.
+                // Roll back already-spawned workers cleanly.
                 self.queue.close();
                 for (self.threads[0..i]) |*prev| prev.join();
                 return e;
@@ -88,18 +94,30 @@ pub const Pool = struct {
 
     pub fn deinit(self: *Pool) void {
         self.shutdownDrain();
-        if (self.started) {
-            for (self.threads) |*t| t.join();
-            self.started = false;
-        }
+        self.join();
         self.queue.deinit();
         self.allocator.free(self.threads);
     }
 
+    /// Blocks until all running worker threads exit.
+    pub fn join(self: *Pool) void {
+        self.mu.lock();
+        const was_started = self.started;
+        self.started = false;
+        self.mu.unlock();
+
+        if (was_started) {
+            for (self.threads) |*t| t.join();
+        }
+    }
+
+    /// Submits a task for asynchronous execution. Blocks if the queue is full (applying backpressure).
     pub fn submit(self: *Pool, run: TaskFn, ctx: ?*anyopaque, cancel: ?*std.atomic.Value(bool)) SubmitError!void {
         if (self.shutting_down.load(.acquire)) return error.ShuttingDown;
-        // True backpressure: block while the ring is full. A close() during
-        // the wait surfaces as ShuttingDown.
+        if (self.cfg.auto_start and !self.isStarted()) {
+            self.start() catch return error.OutOfMemory;
+        }
+
         self.queue.push(.{ .run = run, .ctx = ctx, .cancel = cancel }) catch {
             _ = self.stats.rejected.fetchAdd(1, .monotonic);
             return error.ShuttingDown;
@@ -107,7 +125,27 @@ pub const Pool = struct {
         _ = self.stats.submitted.fetchAdd(1, .monotonic);
     }
 
-    /// Stop accepting new work; finish everything already queued.
+    /// Non-blocking task submission. Returns `error.QueueFull` immediately if full.
+    pub fn trySubmit(self: *Pool, run: TaskFn, ctx: ?*anyopaque, cancel: ?*std.atomic.Value(bool)) SubmitError!void {
+        if (self.shutting_down.load(.acquire)) return error.ShuttingDown;
+        if (self.cfg.auto_start and !self.isStarted()) {
+            self.start() catch return error.OutOfMemory;
+        }
+
+        self.queue.tryPush(.{ .run = run, .ctx = ctx, .cancel = cancel }) catch |err| switch (err) {
+            error.Full => {
+                _ = self.stats.rejected.fetchAdd(1, .monotonic);
+                return error.QueueFull;
+            },
+            error.Closed => {
+                _ = self.stats.rejected.fetchAdd(1, .monotonic);
+                return error.ShuttingDown;
+            },
+        };
+        _ = self.stats.submitted.fetchAdd(1, .monotonic);
+    }
+
+    /// Stop accepting new work; finish processing everything already queued.
     pub fn shutdownDrain(self: *Pool) void {
         if (!self.drain_mode.swap(true, .acq_rel)) {
             self.shutting_down.store(true, .release);
@@ -124,9 +162,15 @@ pub const Pool = struct {
         }
     }
 
+    pub fn isStarted(self: *Pool) bool {
+        self.mu.lock();
+        defer self.mu.unlock();
+        return self.started;
+    }
+
     fn workerMain(self: *Pool, _: u32) void {
         while (true) {
-            const job = self.queue.pop() catch break; // closed+drained
+            const job = self.queue.pop() catch break; // closed and drained
             if (job.cancel) |flag| {
                 if (flag.load(.acquire)) {
                     _ = self.stats.cancelled.fetchAdd(1, .monotonic);
@@ -158,10 +202,11 @@ test "pool executes submitted tasks" {
     try p.start();
     var i: usize = 0;
     while (i < 10) : (i += 1) try p.submit(Ctx.run, &ctx, null);
-    // Wait deterministically-ish for completion.
+
     var spins: usize = 0;
-    while (p.stats.completed.load(.monotonic) < 10 and spins < 1_000_000) : (spins += 1)
-        std.atomic.spinLoopHint();
+    while (p.stats.completed.load(.monotonic) < 10 and spins < 100_000) : (spins += 1) {
+        std.Thread.yield() catch {};
+    }
     try std.testing.expectEqual(@as(u64, 10), p.stats.completed.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 10), ctx.counter.load(.monotonic));
 }
@@ -177,8 +222,19 @@ test "zero workers auto-configures" {
     var p = try Pool.init(std.testing.allocator, .{});
     defer p.deinit();
     try p.start();
-    // Auto count is >= 1 thread.
     try std.testing.expect(p.threads.len >= 1);
 }
 
+test "pool cancel queued tasks" {
+    var p = try Pool.init(std.testing.allocator, .{ .workers = 1, .queue_capacity = 16 });
+    defer p.deinit();
+
+    var cancel_flag = std.atomic.Value(bool).init(false);
+    try p.submit(dummy, null, &cancel_flag);
+    p.cancelQueued();
+    try p.start();
+    p.shutdownDrain();
+}
+
 fn dummy(_: ?*anyopaque, _: *std.atomic.Value(bool)) void {}
+

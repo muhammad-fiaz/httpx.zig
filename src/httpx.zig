@@ -19,15 +19,24 @@ const std = @import("std");
 // Common primitives
 pub const errors = @import("common/errors.zig");
 pub const status = @import("common/status.zig");
-pub const headers_mod = @import("common/headers.zig");
-pub const uri_mod = @import("common/uri.zig");
-pub const method_mod = @import("common/method.zig");
-pub const logging = @import("common/logging.zig");
-pub const sync = @import("common/sync.zig");
+pub const headers = @import("common/headers.zig");
+pub const headers_mod = headers;
+pub const uri = @import("common/uri.zig");
+pub const uri_mod = uri;
+pub const method = @import("common/method.zig");
+pub const method_mod = method;
+pub const common = struct {
+    pub const clock = @import("common/clock.zig");
+    pub const sync = @import("common/sync.zig");
+};
+pub const clock = common.clock;
+pub const sync = common.sync;
 pub const concurrency = struct {
     pub const queue = @import("concurrency/queue.zig");
     pub const worker_pool = @import("concurrency/worker_pool.zig");
 };
+pub const logging = @import("common/logging.zig");
+pub const tint = @import("tint");
 
 // Sockets
 pub const tcp = @import("sockets/tcp.zig");
@@ -62,6 +71,9 @@ pub const http2 = struct {
     pub const hpack = @import("protocols/http2/hpack.zig");
     pub const stream = @import("protocols/http2/stream.zig");
     pub const connection = @import("protocols/http2/connection.zig");
+    pub const Session = connection.Session;
+    pub const transport = @import("protocols/http2/transport.zig");
+    pub const Client = transport.Client;
 };
 pub const quic = struct {
     pub const varint = @import("protocols/quic/varint.zig");
@@ -75,15 +87,20 @@ pub const quic = struct {
     pub const params = @import("protocols/quic/params.zig");
     pub const stream = @import("protocols/quic/stream.zig");
     pub const connection = @import("protocols/quic/connection.zig");
+    pub const Connection = connection.Connection;
     pub const connection_id = @import("protocols/quic/connection_id.zig");
     pub const path = @import("protocols/quic/path.zig");
+    pub const transport = @import("protocols/quic/transport.zig");
 };
 pub const http3 = struct {
     pub const frame = @import("protocols/http3/frame.zig");
     pub const qpack = @import("protocols/http3/qpack.zig");
     pub const connection = @import("protocols/http3/connection.zig");
+    pub const Connection = connection.Connection;
+    pub const RequestStream = connection.RequestStream;
+    pub const Settings = connection.Settings;
 };
-pub const tls_mod = struct {
+pub const tls = struct {
     pub const alpn = @import("protocols/tls/alpn.zig");
     pub const config = @import("protocols/tls/config.zig");
     pub const record = @import("protocols/tls/record.zig");
@@ -94,9 +111,11 @@ pub const tls_mod = struct {
     pub const transport = @import("protocols/tls/transport.zig");
     pub const tls_server = @import("protocols/tls/tls_server.zig");
 };
+pub const tls_mod = tls;
 
 // Web framework
-pub const router_mod = @import("web/router/router.zig");
+pub const router = @import("web/router/router.zig");
+pub const router_mod = router;
 pub const router_pattern = @import("web/router/pattern.zig");
 pub const route_meta = @import("web/router/metadata.zig");
 pub const sse_writer = @import("web/sse/writer.zig");
@@ -108,10 +127,15 @@ pub const docs_mod = @import("web/docs/docs.zig");
 // Web subsystems
 pub const static_files = @import("web/static_files/serve.zig");
 pub const spa = @import("web/spa/serve.zig");
+pub const watcher = @import("web/watcher/watcher.zig");
+pub const Watcher = watcher.Watcher;
 pub const health = @import("web/health/endpoints.zig");
 pub const metrics = @import("web/metrics/registry.zig");
 pub const mime = @import("utils/mime.zig");
-pub const openapi_spec = @import("web/openapi/spec.zig");
+pub const openapi = @import("web/openapi/spec.zig");
+pub const openapi_spec = openapi;
+pub const docs = @import("web/docs/docs.zig");
+pub const graphql = @import("web/graphql/graphql.zig");
 pub const auth = struct {
     pub const basic = @import("web/auth/basic.zig");
     pub const bearer = @import("web/auth/bearer.zig");
@@ -151,6 +175,10 @@ pub const requestAll = @import("client/client.zig").globalRequestAll;
 pub const server_lifecycle = @import("server/lifecycle.zig");
 pub const server_context = @import("server/context.zig");
 pub const Server = server_lifecycle.Server;
+pub const TlsListener = tls_mod.tls_server.TlsListener;
+pub const TlsListenerConfig = tls_mod.tls_server.ListenerConfig;
+pub const TlsConfig = tls_mod.config.ServerConfig;
+pub const TlsClientConfig = tls_mod.config.ClientConfig;
 
 // FTP / FTPS
 pub const ftp = @import("protocols/ftp/client.zig");
@@ -214,6 +242,7 @@ test {
     _ = @import("net/proxy.zig");
     _ = @import("integration/http_stack.zig");
     _ = @import("integration/tls_integration.zig");
+    _ = @import("integration/client_server_integration.zig");
     _ = @import("compression/codec.zig");
     _ = @import("protocols/http1/parser.zig");
     _ = @import("protocols/http1/writer.zig");
@@ -262,6 +291,7 @@ test {
     _ = @import("web/websocket/frame.zig");
     _ = @import("web/middleware/security.zig");
     _ = @import("web/docs/docs.zig");
+    _ = @import("web/graphql/graphql.zig");
     _ = @import("web/openapi/spec.zig");
     _ = @import("web/static_files/serve.zig");
     _ = @import("web/spa/serve.zig");
@@ -277,6 +307,8 @@ test {
     _ = @import("client/cookies.zig");
     _ = @import("client/pool.zig");
     _ = @import("protocols/ftp/client.zig");
+    _ = @import("protocols/ftp/server.zig");
+    _ = @import("protocols/http2/transport.zig");
     _ = @import("server/lifecycle.zig");
     _ = @import("server/context.zig");
 }

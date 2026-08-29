@@ -8,7 +8,7 @@
 const std = @import("std");
 const t_tcp = @import("../sockets/tcp.zig");
 const parser = @import("../protocols/http1/parser.zig");
-const writer_mod = @import("../protocols/http1/writer.zig");
+const http_writer = @import("../protocols/http1/writer.zig");
 const semantics = @import("../protocols/http1/semantics.zig");
 
 /// Minimal echo server: parses ONE request head on the accepted socket,
@@ -42,8 +42,8 @@ fn serveOnce(l: *t_tcp.Listener, io: std.Io) void {
     );
 
     const body = "{\"ok\":true}";
-    const reason = writer_mod.reasonPhrase(200);
-    const resp = writer_mod.buildResponse(
+    const reason = http_writer.reasonPhrase(200);
+    const resp = http_writer.buildResponse(
         a,
         200,
         reason,
@@ -69,7 +69,7 @@ test "integration: full HTTP/1.1 exchange over real loopback TCP" {
     var sock = try t_tcp.connect(ctx.io, "127.0.0.1", port);
     defer sock.close();
 
-    const req = try writer_mod.buildRequest(
+    const req = try http_writer.buildRequest(
         std.testing.allocator,
         "GET",
         "/hello?x=1",

@@ -98,9 +98,24 @@ pub const Server = struct {
     /// True while the run-thread sits inside accept(); shutdown waits for
     /// this before closing the listener (removes the close/enter race).
     in_accept: std.atomic.Value(bool) = .init(false),
+    owns_io: bool = false,
+    io_threaded: ?*std.Io.Threaded = null,
 
-    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Server {
+    pub fn init(allocator: Allocator, cfg: Config) !Server {
         const address_mod = @import("../net/address.zig");
+        const threaded = try allocator.create(std.Io.Threaded);
+        threaded.* = .init(allocator, .{});
+        const owns_io = true;
+        const io_threaded: ?*std.Io.Threaded = threaded;
+        const io: std.Io = threaded.io();
+
+        errdefer if (owns_io) {
+            if (io_threaded) |th| {
+                th.deinit();
+                allocator.destroy(th);
+            }
+        };
+
         // Default: all-interfaces IPv4. Explicit literals (incl. "::") bind
         // their family; anything unparsable falls back to 0.0.0.0.
         var addr: address_mod.Address = blk: {
@@ -135,6 +150,8 @@ pub const Server = struct {
             .cfg = cfg,
             .logger = logger,
             .log_state = log_state,
+            .owns_io = owns_io,
+            .io_threaded = io_threaded,
         };
         errdefer srv.router.deinit();
 
@@ -148,12 +165,52 @@ pub const Server = struct {
         return srv;
     }
 
+    /// Zero-config server initialization: uses page_allocator without explicit arguments.
+    pub fn initDefault(cfg: Config) !Server {
+        return try init(std.heap.page_allocator, cfg);
+    }
+
+    pub fn get(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
+        try self.router.get(path, handler);
+    }
+
+    pub fn post(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
+        try self.router.post(path, handler);
+    }
+
+    pub fn put(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
+        try self.router.put(path, handler);
+    }
+
+    pub fn patch(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
+        try self.router.patch(path, handler);
+    }
+
+    pub fn delete(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
+        try self.router.delete(path, handler);
+    }
+
+    pub fn head(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
+        try self.router.head(path, handler);
+    }
+
+    pub fn options(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
+        try self.router.options(path, handler);
+    }
+
     pub fn deinit(self: *Server) void {
         if (self.cfg.docs_enabled) docs.unmount();
         self.router.deinit();
         self.listener.close(self.io);
         if (self.log_state) |s| self.allocator.destroy(s);
         self.active_conns.deinit(self.allocator);
+        if (self.owns_io) {
+            if (self.io_threaded) |th| {
+                th.deinit();
+                self.allocator.destroy(th);
+                self.io_threaded = null;
+            }
+        }
     }
 
     pub fn localPort(self: *const Server) u16 {
@@ -161,20 +218,30 @@ pub const Server = struct {
     }
 
     /// Signals the accept loop to stop and wakes a blocked accept() by
-    /// closing the listening socket. Safe to call multiple times.
+    /// closing the listening socket (POSIX) or connecting a dummy socket (Windows).
+    /// Safe to call multiple times.
     pub fn requestShutdown(self: *Server) void {
         if (!self.logged_stop.swap(true, .acq_rel) and self.cfg.logging.enabled and self.cfg.logging.lifecycle) {
             self.logger.log(.info, "server", "shutting down", .{});
         }
         self.stop.store(true, .release);
-        // Close immediately. The listener and connection close paths are
-        // idempotent, so this also safely handles a worker transitioning
-        // between accept and request processing without a shutdown spin loop.
-        self.listener.close(self.io);
+
+        // On Windows (Zig 0.16), the AFD-backed listener uses IOCP for accept().
+        // Closing the listening socket while a thread is blocked in netAcceptWindows
+        // returns STATUS_CANCELLED, which the stdlib marks `unreachable` → panic.
+        // tcp.wakeListenerPort() connects a dummy socket to the port instead,
+        // waking accept() naturally. The accept loop then sees stop==true and exits.
+        // On POSIX, wakeListenerPort is a no-op and we close the listener directly.
+        if (self.in_accept.load(.acquire)) {
+            tcp.wakeListenerPort(self.listener.localPort());
+        }
+        if (@import("builtin").os.tag != .windows) {
+            self.listener.close(self.io);
+        }
+
         // A keep-alive worker may be blocked in recv() and therefore never
         // reach accept(). Wake those readers immediately; Socket.close is
-        // idempotent and the worker's deferred drainThenClose will observe
-        // the same close flag.
+        // idempotent and the worker's deferred close will observe the same close flag.
         self.conns_mu.lock();
         for (self.active_conns.items) |conn| conn.close();
         self.conns_mu.unlock();
@@ -196,7 +263,7 @@ pub const Server = struct {
                 break;
             };
             self.in_accept.store(false, .release);
-            defer conn.drainThenClose();
+            defer conn.close();
             var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena.deinit();
             self.serveConnection(&conn, arena.allocator()) catch {};
@@ -212,10 +279,159 @@ pub const Server = struct {
 
     fn serveConnection(self: *Server, conn: *tcp.Socket, arena_in: Allocator) !void {
         _ = arena_in;
+
+        // Peek or read initial bytes to check for HTTP/2 cleartext prior knowledge (RFC 9113 §3.4)
+        var peek_buf: [32]u8 = undefined;
+        const n_peek = conn.read(peek_buf[0..]) catch return;
+        if (n_peek == 0) return;
+
+        const h2_preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+        if (n_peek >= 16 and std.mem.startsWith(u8, peek_buf[0..n_peek], h2_preface[0..16])) {
+            // Serve HTTP/2 cleartext connection
+            const H2Bridge = struct {
+                fn handle(ctx_ptr: ?*anyopaque, m_str: []const u8, p_str: []const u8, hdrs: []const @import("../protocols/http2/transport.zig").Header, b_str: []const u8) anyerror!@import("../protocols/http2/transport.zig").HandlerResponse {
+                    const server_ptr: *Server = @ptrCast(@alignCast(ctx_ptr.?));
+                    const method = Method.fromString(m_str) orelse .GET;
+                    var arena_h2 = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                    defer arena_h2.deinit();
+                    const a = arena_h2.allocator();
+
+                    var ctx_hdrs = try a.alloc(router_mod.Header, hdrs.len);
+                    for (hdrs, 0..) |h, i| ctx_hdrs[i] = .{ .name = h.name, .value = h.value };
+
+                    var clean_path = p_str;
+                    if (std.mem.indexOfAny(u8, clean_path, "?#")) |idx| {
+                        clean_path = clean_path[0..idx];
+                    }
+
+                    var ctx = Context{
+                        .allocator = a,
+                        .io = server_ptr.io,
+                        .headers = ctx_hdrs,
+                        .path = clean_path,
+                        .method = method,
+                        .body = b_str,
+                    };
+
+                    const handler = server_ptr.router.match(method, clean_path, &ctx) orelse {
+                        return .{ .status = 404, .body = "not found" };
+                    };
+                    const res = handler(&ctx) catch {
+                        return .{ .status = 500, .body = "internal server error" };
+                    };
+                    return .{
+                        .status = res.status,
+                        .body = res.body,
+                    };
+                }
+            };
+
+            // Initialize HTTP/2 session with pre-read preface bytes
+            var session = try @import("../protocols/http2/connection.zig").Session.init(self.allocator, .server, .{});
+            defer session.deinit();
+            try session.startHandshake();
+            conn.writeAll(session.outbound.items) catch return error.WriteFailed;
+            session.outbound.clearRetainingCapacity();
+
+            try session.feed(peek_buf[0..n_peek]);
+
+            var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena_state.deinit();
+            const transport_mod = @import("../protocols/http2/transport.zig");
+
+            // ServerCtx accumulates streams
+            var sc = struct {
+                arena: Allocator,
+                sid: u31 = 0,
+                method: std.ArrayList(u8) = .empty,
+                path: std.ArrayList(u8) = .empty,
+                hdrs: std.ArrayList(transport_mod.Header) = .empty,
+                body: std.ArrayList(u8) = .empty,
+                dispatched: bool = false,
+                responded: bool = true,
+
+                fn resetFor(s: *@This(), sid: u31) void {
+                    s.sid = sid;
+                    s.method.clearRetainingCapacity();
+                    s.path.clearRetainingCapacity();
+                    s.hdrs.clearRetainingCapacity();
+                    s.body.clearRetainingCapacity();
+                    s.dispatched = false;
+                    s.responded = false;
+                }
+
+                fn onHeaders(ctx_p: ?*anyopaque, sid: u31, flds: []@import("../protocols/http2/hpack.zig").HeaderField, end_stream: bool) anyerror!void {
+                    const s: *@This() = @ptrCast(@alignCast(ctx_p.?));
+                    s.resetFor(sid);
+                    for (flds) |f| {
+                        if (std.mem.eql(u8, f.name, ":method")) {
+                            try s.method.appendSlice(s.arena, f.value);
+                        } else if (std.mem.eql(u8, f.name, ":path")) {
+                            try s.path.appendSlice(s.arena, f.value);
+                        } else if (!std.mem.startsWith(u8, f.name, ":")) {
+                            const name = try s.arena.dupe(u8, f.name);
+                            const value = try s.arena.dupe(u8, f.value);
+                            try s.hdrs.append(s.arena, .{ .name = name, .value = value });
+                        }
+                    }
+                    if (end_stream) s.dispatched = true;
+                }
+
+                fn onData(ctx_p: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
+                    const s: *@This() = @ptrCast(@alignCast(ctx_p.?));
+                    if (sid != s.sid) return;
+                    try s.body.appendSlice(s.arena, data);
+                }
+            }{ .arena = arena_state.allocator() };
+
+            session.cbs = .{
+                .ctx = &sc,
+                .onHeaders = @TypeOf(sc).onHeaders,
+                .onData = @TypeOf(sc).onData,
+            };
+
+            var buf: [16 * 1024]u8 = undefined;
+            while (!session.closed and !session.goaway_received) {
+                if (session.outbound.items.len > 0) {
+                    conn.writeAll(session.outbound.items) catch break;
+                    session.outbound.clearRetainingCapacity();
+                }
+                if (sc.dispatched and !sc.responded) {
+                    sc.responded = true;
+                    const resp = H2Bridge.handle(self, sc.method.items, sc.path.items, sc.hdrs.items, sc.body.items) catch transport_mod.HandlerResponse{ .status = 500 };
+
+                    var out_fields = std.ArrayList(@import("../protocols/http2/hpack.zig").HeaderField).empty;
+                    defer out_fields.deinit(self.allocator);
+                    var st_buf: [8]u8 = undefined;
+                    var cl_buf: [8]u8 = undefined;
+                    const st = std.fmt.bufPrint(&st_buf, "{d}", .{resp.status}) catch "500";
+                    const cl = std.fmt.bufPrint(&cl_buf, "{d}", .{resp.body.len}) catch "0";
+                    try out_fields.append(self.allocator, .{ .name = ":status", .value = st });
+                    try out_fields.append(self.allocator, .{ .name = "content-length", .value = cl });
+                    for (resp.headers) |h| {
+                        try out_fields.append(self.allocator, .{ .name = h.name, .value = h.value });
+                    }
+
+                    try session.sendHeaders(sc.sid, out_fields.items, resp.body.len == 0);
+                    if (resp.body.len > 0) {
+                        _ = try session.sendData(sc.sid, resp.body, true);
+                    }
+                    if (session.outbound.items.len > 0) {
+                        conn.writeAll(session.outbound.items) catch break;
+                        session.outbound.clearRetainingCapacity();
+                    }
+                }
+                const n = conn.read(&buf) catch break;
+                if (n == 0) break;
+                session.feed(buf[0..n]) catch break;
+            }
+            return;
+        }
+
         if (!self.cfg.keep_alive) {
             var arena_one = std.heap.ArenaAllocator.init(std.heap.page_allocator);
             defer arena_one.deinit();
-            _ = try self.serveOneRequest(conn, arena_one.allocator(), 0, true);
+            _ = try self.serveOneRequestBuffered(conn, arena_one.allocator(), 0, true, peek_buf[0..n_peek]);
             return;
         }
         // Persistent connection: bounded request loop with per-request arena
@@ -242,23 +458,27 @@ pub const Server = struct {
         var served_n: usize = 0;
         while (served_n < self.cfg.max_requests_per_conn) : (served_n += 1) {
             _ = arena.reset(.retain_capacity);
-            const want_more = self.serveOneRequest(conn, arena.allocator(), served_n, false) catch return;
+            const init_bytes = if (served_n == 0) peek_buf[0..n_peek] else "";
+            const want_more = self.serveOneRequestBuffered(conn, arena.allocator(), served_n, false, init_bytes) catch return;
             if (!want_more) break;
         }
     }
 
-    /// Handles exactly one request. Returns `true` when the connection may
-    /// carry another request (keep-alive), `false` to close. In one-shot mode
-    /// (`force_close`) the return value is irrelevant.
-    fn serveOneRequest(self: *Server, conn: *tcp.Socket, arena: Allocator, _: usize, force_close: bool) !bool {
+    fn serveOneRequest(self: *Server, conn: *tcp.Socket, arena: Allocator, idx: usize, force_close: bool) !bool {
+        return self.serveOneRequestBuffered(conn, arena, idx, force_close, "");
+    }
+
+    fn serveOneRequestBuffered(self: *Server, conn: *tcp.Socket, arena: Allocator, _: usize, force_close: bool, initial: []const u8) !bool {
         const t0 = clock.millisNow();
         var head_buf: [max_head_bytes]u8 = undefined;
         var filled: usize = 0;
+        if (initial.len > 0) {
+            const take = @min(initial.len, head_buf.len);
+            @memcpy(head_buf[0..take], initial[0..take]);
+            filled = take;
+        }
         const allow_lf = self.cfg.allow_lf_line_endings;
         while (filled < head_buf.len) {
-            const n = conn.read(head_buf[filled..]) catch return false;
-            if (n == 0) return false; // peer closed
-            filled += n;
             if (std.mem.indexOf(u8, head_buf[0..filled], "\r\n\r\n") != null) break;
             if (allow_lf and std.mem.indexOf(u8, head_buf[0..filled], "\n\n") != null) {
                 // Ensure not just \r\n\r\n already handled; check bare LF
@@ -272,17 +492,20 @@ pub const Server = struct {
                 if (has_bare) break;
                 if (std.mem.indexOf(u8, head_buf[0..filled], "\n\n") != null) break;
             }
+            const n = conn.read(head_buf[filled..]) catch return false;
+            if (n == 0) return false; // peer closed
+            filled += n;
         }
 
         const parser_opts: parser_mod.Options = .{ .allow_lf_line_endings = allow_lf };
-        const head = parser_mod.parseRequestHeadWithOptions(head_buf[0..filled], parser_opts) catch {
+        const req_head = parser_mod.parseRequestHeadWithOptions(head_buf[0..filled], parser_opts) catch {
             _ = sendSimpleError(conn, 400, "bad request") catch 0;
             return false;
         };
 
         // Headers -> Context slice.
         var fields: [parser_mod.DEFAULT_MAX_HEADERS]parser_mod.Field = undefined;
-        const blk = parser_mod.parseHeaderBlockWithOptions(head_buf[0..filled], head.head_end, fields[0..], parser_opts) catch {
+        const blk = parser_mod.parseHeaderBlockWithOptions(head_buf[0..filled], req_head.head_end, fields[0..], parser_opts) catch {
             _ = sendSimpleError(conn, 400, "bad headers") catch 0;
             return false;
         };
@@ -292,14 +515,14 @@ pub const Server = struct {
 
         // Connection reuse decision (RFC 9112 §7): explicit "close" wins;
         // HTTP/1.0 defaults to close unless it requested keep-alive.
-        var client_close = force_close or head.minor_version == 0;
+        var client_close = force_close or req_head.minor_version == 0;
         var client_ka10 = false;
         for (hdrs) |h| {
             if (!std.ascii.eqlIgnoreCase(h.name, "connection")) continue;
             if (std.ascii.indexOfIgnoreCase(h.value, "close") != null) client_close = true;
             if (std.ascii.indexOfIgnoreCase(h.value, "keep-alive") != null) client_ka10 = true;
         }
-        if (head.minor_version == 0 and client_ka10) client_close = false;
+        if (req_head.minor_version == 0 and client_ka10) client_close = false;
 
         // Body: Content-Length or chunked (both bounded by cfg.max_body).
         var body: []u8 = "";
@@ -317,7 +540,7 @@ pub const Server = struct {
                 }
             }
         }
-        if (has_expect and head.minor_version == 1 and framing.framing != .none) {
+        if (has_expect and req_head.minor_version == 1 and framing.framing != .none) {
             const interim = writer_mod.buildInformational(arena, 100, &.{}) catch return false;
             defer arena.free(interim);
             conn.writeAll(interim) catch return false;
@@ -388,18 +611,24 @@ pub const Server = struct {
             }
         }
 
-        const method = Method.fromString(head.method) orelse {
+        const method = Method.fromString(req_head.method) orelse {
             _ = sendSimpleError(conn, 501, "method not supported") catch 0;
             return false;
         };
 
         const is_head = method == .HEAD;
 
+        const raw_path = req_head.path;
+        var clean_path = raw_path;
+        if (std.mem.indexOfAny(u8, clean_path, "?#")) |idx| {
+            clean_path = clean_path[0..idx];
+        }
+
         var ctx = Context{
             .allocator = arena,
             .io = self.io,
             .headers = hdrs,
-            .path = head.path,
+            .path = clean_path,
             .method = method,
             .body = body,
         };
@@ -413,8 +642,10 @@ pub const Server = struct {
             return false;
         };
 
-        const bytes_out = try writeResponse(conn, arena, head.minor_version, res, is_head, if (client_close) "close" else "keep-alive", ctx.header("Accept-Encoding"));
-        self.emitAccess(head.method, head.path, res.status, body.len, bytes_out, t0);
+        const bytes_out = writeResponse(conn, arena, req_head.minor_version, res, is_head, if (client_close) "close" else "keep-alive", ctx.header("Accept-Encoding")) catch {
+            return false;
+        };
+        self.emitAccess(req_head.method, req_head.path, res.status, body.len, bytes_out, t0);
         return !client_close;
     }
 
@@ -471,7 +702,8 @@ pub const Server = struct {
         defer if (encoded_body) |b| arena.free(b);
         var body_out: []const u8 = if (is_head) "" else res.body;
         var content_encoding: ?[]const u8 = null;
-        if (!is_head and res.body.len > 0 and res.status != 204 and res.status != 304 and accept_encoding != null) {
+        const is_huge_asset = res.body.len > 128 * 1024;
+        if (!is_head and !is_huge_asset and res.body.len > 0 and res.status != 204 and res.status != 304 and accept_encoding != null) {
             const selected = compression.negotiate(accept_encoding.?);
             if (selected != .identity) {
                 encoded_body = compression.compress(arena, selected, res.body) catch null;
@@ -558,7 +790,7 @@ test "server handles POST with content-length body" {
     var ctx = tcp.IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0, .docs_enabled = false }) catch return;
+    var srv = Server.init(a, .{ .port = 0, .docs_enabled = false }) catch return;
     defer srv.deinit();
     try srv.router.post("/echo", echoRawHandler);
     srv.max_connections = 1;
@@ -630,7 +862,7 @@ test "access log flows through explicit custom logger" {
     defer ctx.deinit();
 
     var cap = CaptureSink{};
-    var srv = Server.init(a, ctx.io, .{
+    var srv = Server.init(a, .{
         .port = 0,
         .docs_enabled = false,
         .logging = .{
@@ -682,7 +914,7 @@ test "logging disabled produces zero output" {
     defer ctx.deinit();
 
     var cap = CaptureSink{};
-    var srv = Server.init(a, ctx.io, .{
+    var srv = Server.init(a, .{
         .port = 0,
         .docs_enabled = false,
         .logging = .{
@@ -729,7 +961,7 @@ test "server serves routed GET end to end" {
     var ctx = tcp.IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{ .port = 0 }) catch return;
+    var srv = Server.init(a, .{ .port = 0 }) catch return;
     defer srv.deinit();
     try srv.router.get("/hello", helloHandler);
     srv.max_connections = 1;
@@ -768,7 +1000,7 @@ test "raw socket 200KB content-length body roundtrip" {
     const a = std.testing.allocator;
     var ctx0 = tcp.IoContext.init(a) catch return;
     defer ctx0.deinit();
-    var srv = Server.init(a, ctx0.io, .{ .port = 0, .docs_enabled = false }) catch return;
+    var srv = Server.init(a, .{ .port = 0, .docs_enabled = false }) catch return;
     defer srv.deinit();
     const LenH = struct {
         fn h(ctx: *Context) anyerror!Response {

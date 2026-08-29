@@ -13,6 +13,7 @@
 //! arena); Response slices borrow from it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const router_mod = @import("../router/router.zig");
 const Context = router_mod.Context;
@@ -31,6 +32,10 @@ pub const Config = struct {
     max_file_size: usize = 16 * 1024 * 1024,
     /// Cache-Control on success responses; empty omits the header.
     cache_control: []const u8 = "public, max-age=3600",
+    /// Live reload / hot reload: automatically injects SSE live-reload script into HTML files.
+    live_reload: bool = false,
+    /// SSE endpoint path for live-reload broadcast (default: "/__httpx_live_reload").
+    reload_sse_path: []const u8 = "/__httpx_live_reload",
 };
 
 pub const MountError = error{
@@ -46,6 +51,8 @@ const State = struct {
     index: []u8,
     cache_control: []u8,
     max_size: usize,
+    live_reload: bool,
+    reload_sse_path: []u8,
 
     fn create(a: Allocator, cfg: Config) !*State {
         const st = try a.create(State);
@@ -55,6 +62,8 @@ const State = struct {
             .index = try a.dupe(u8, cfg.index_file),
             .cache_control = try a.dupe(u8, cfg.cache_control),
             .max_size = cfg.max_file_size,
+            .live_reload = cfg.live_reload,
+            .reload_sse_path = try a.dupe(u8, cfg.reload_sse_path),
         };
         return st;
     }
@@ -64,6 +73,7 @@ const State = struct {
         a.free(self.root);
         a.free(self.index);
         a.free(self.cache_control);
+        a.free(self.reload_sse_path);
         a.destroy(self);
     }
 };
@@ -209,7 +219,9 @@ pub fn safeJoin(alloc: Allocator, url_path: []const u8, root: []const u8) !?[]u8
     errdefer out.deinit();
     out.writer.writeAll(root) catch return Allocator.Error.OutOfMemory;
     if (parts.items.len == 0) {
-        out.writer.writeByte('/') catch return Allocator.Error.OutOfMemory;
+        if (!std.mem.endsWith(u8, root, "/")) {
+            out.writer.writeByte('/') catch return Allocator.Error.OutOfMemory;
+        }
     } else {
         for (parts.items) |seg| {
             out.writer.writeByte('/') catch return Allocator.Error.OutOfMemory;
@@ -223,12 +235,227 @@ pub fn safeJoin(alloc: Allocator, url_path: []const u8, root: []const u8) !?[]u8
 
 pub const FileMeta = struct { size: u64, mtime_ns: i128 };
 
+const c_fs = struct {
+    pub const is_win = builtin.os.tag == .windows;
+
+    pub const FILE_HANDLE = if (is_win) std.os.windows.HANDLE else std.posix.fd_t;
+    pub const INVALID_HANDLE: FILE_HANDLE = if (is_win) std.os.windows.INVALID_HANDLE_VALUE else -1;
+
+    pub fn openRead(path: []const u8) ?FILE_HANDLE {
+        if (is_win) {
+            var wide_buf: [std.os.windows.PATH_MAX_WIDE:0]u16 = undefined;
+            const wlen = std.unicode.utf8ToUtf16Le(&wide_buf, path) catch return null;
+            if (wlen >= wide_buf.len) return null;
+            wide_buf[wlen] = 0;
+
+            const GENERIC_READ: u32 = 0x80000000;
+            const FILE_SHARE_READ: u32 = 0x00000001;
+            const FILE_SHARE_WRITE: u32 = 0x00000002;
+            const FILE_SHARE_DELETE: u32 = 0x00000004;
+            const OPEN_EXISTING: u32 = 3;
+            const FILE_ATTRIBUTE_NORMAL: u32 = 0x00000080;
+
+            const h = CreateFileW(
+                wide_buf[0..wlen :0],
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                null,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                null,
+            );
+            if (h == INVALID_HANDLE) return null;
+            return h;
+        } else {
+            var null_term: [4096]u8 = undefined;
+            if (path.len >= null_term.len) return null;
+            @memcpy(null_term[0..path.len], path);
+            null_term[path.len] = 0;
+            const fd = std.posix.open(&null_term, .{ .ACCMODE = .RDONLY }, 0) catch return null;
+            return fd;
+        }
+    }
+
+    pub fn openWrite(path: []const u8) ?FILE_HANDLE {
+        if (is_win) {
+            var wide_buf: [std.os.windows.PATH_MAX_WIDE:0]u16 = undefined;
+            const wlen = std.unicode.utf8ToUtf16Le(&wide_buf, path) catch return null;
+            if (wlen >= wide_buf.len) return null;
+            wide_buf[wlen] = 0;
+
+            const GENERIC_WRITE: u32 = 0x40000000;
+            const CREATE_ALWAYS: u32 = 2;
+            const FILE_ATTRIBUTE_NORMAL: u32 = 0x00000080;
+
+            const h = CreateFileW(
+                wide_buf[0..wlen :0],
+                GENERIC_WRITE,
+                0,
+                null,
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                null,
+            );
+            if (h == INVALID_HANDLE) return null;
+            return h;
+        } else {
+            var null_term: [4096]u8 = undefined;
+            if (path.len >= null_term.len) return null;
+            @memcpy(null_term[0..path.len], path);
+            null_term[path.len] = 0;
+            const fd = std.posix.open(&null_term, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch return null;
+            return fd;
+        }
+    }
+
+    pub fn close(h: FILE_HANDLE) void {
+        if (is_win) {
+            _ = CloseHandle(h);
+        } else {
+            std.posix.close(h);
+        }
+    }
+
+    pub extern "kernel32" fn CreateFileW(
+        lpFileName: [*:0]const u16,
+        dwDesiredAccess: u32,
+        dwShareMode: u32,
+        lpSecurityAttributes: ?*anyopaque,
+        dwCreationDisposition: u32,
+        dwFlagsAndAttributes: u32,
+        hTemplateFile: ?std.os.windows.HANDLE,
+    ) callconv(.winapi) std.os.windows.HANDLE;
+
+    pub extern "kernel32" fn CloseHandle(hObject: std.os.windows.HANDLE) callconv(.winapi) std.os.windows.BOOL;
+    pub extern "kernel32" fn GetFileSizeEx(hFile: std.os.windows.HANDLE, lpFileSize: *i64) callconv(.winapi) std.os.windows.BOOL;
+    pub extern "kernel32" fn GetFileTime(
+        hFile: std.os.windows.HANDLE,
+        lpCreationTime: ?*anyopaque,
+        lpLastAccessTime: ?*anyopaque,
+        lpLastWriteTime: ?*std.os.windows.FILETIME,
+    ) callconv(.winapi) std.os.windows.BOOL;
+    pub extern "kernel32" fn ReadFile(
+        hFile: std.os.windows.HANDLE,
+        lpBuffer: [*]u8,
+        nNumberOfBytesToRead: u32,
+        lpNumberOfBytesRead: ?*u32,
+        lpOverlapped: ?*anyopaque,
+    ) callconv(.winapi) std.os.windows.BOOL;
+    pub extern "kernel32" fn WriteFile(
+        hFile: std.os.windows.HANDLE,
+        lpBuffer: [*]const u8,
+        nNumberOfBytesToWrite: u32,
+        lpNumberOfBytesWritten: ?*u32,
+        lpOverlapped: ?*anyopaque,
+    ) callconv(.winapi) std.os.windows.BOOL;
+    pub extern "kernel32" fn SetFilePointerEx(
+        hFile: std.os.windows.HANDLE,
+        liDistanceToMove: i64,
+        lpNewFilePointer: ?*i64,
+        dwMoveMethod: u32,
+    ) callconv(.winapi) std.os.windows.BOOL;
+};
+
 pub fn statPath(io: std.Io, path: []const u8) ?FileMeta {
-    const f = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
-    defer f.close(io);
-    const st = f.stat(io) catch return null;
-    if (st.kind != .file) return null;
-    return .{ .size = st.size, .mtime_ns = st.mtime };
+    _ = io;
+    const h = c_fs.openRead(path) orelse return null;
+    defer c_fs.close(h);
+
+    if (c_fs.is_win) {
+        var size: i64 = 0;
+        if (c_fs.GetFileSizeEx(h, &size) == .FALSE or size < 0) return null;
+
+        var ft: std.os.windows.FILETIME = undefined;
+        var mtime_ns: i128 = 0;
+        if (c_fs.GetFileTime(h, null, null, &ft) != .FALSE) {
+            const ft_u64 = (@as(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+            mtime_ns = @as(i128, @intCast(ft_u64)) * 100;
+        }
+        return .{ .size = @intCast(size), .mtime_ns = mtime_ns };
+    } else {
+        const st = std.posix.fstat(h) catch return null;
+        if (!std.posix.S.ISREG(st.mode)) return null;
+        return .{ .size = @intCast(st.size), .mtime_ns = @intCast(st.mtime().nanoseconds) };
+    }
+}
+
+fn readAll(io: std.Io, path: []const u8, dest: []u8) !void {
+    _ = io;
+    const h = c_fs.openRead(path) orelse return error.FileNotFound;
+    defer c_fs.close(h);
+
+    if (c_fs.is_win) {
+        var read_bytes: u32 = 0;
+        var pos: usize = 0;
+        while (pos < dest.len) {
+            const chunk: u32 = @intCast(@min(dest.len - pos, @as(usize, 64 * 1024 * 1024)));
+            if (c_fs.ReadFile(h, dest.ptr + pos, chunk, &read_bytes, null) == .FALSE or read_bytes == 0) {
+                if (pos + read_bytes < dest.len) return error.UnexpectedEof;
+                break;
+            }
+            pos += read_bytes;
+        }
+    } else {
+        var pos: usize = 0;
+        while (pos < dest.len) {
+            const n = try std.posix.read(h, dest[pos..]);
+            if (n == 0) return error.UnexpectedEof;
+            pos += n;
+        }
+    }
+}
+
+pub fn writeFile(path: []const u8, content: []const u8) !void {
+    const h = c_fs.openWrite(path) orelse return error.AccessDenied;
+    defer c_fs.close(h);
+
+    if (c_fs.is_win) {
+        var written: u32 = 0;
+        var pos: usize = 0;
+        while (pos < content.len) {
+            const chunk: u32 = @intCast(@min(content.len - pos, @as(usize, 64 * 1024 * 1024)));
+            if (c_fs.WriteFile(h, content.ptr + pos, chunk, &written, null) == .FALSE or written == 0) {
+                return error.WriteFailed;
+            }
+            pos += written;
+        }
+    } else {
+        var pos: usize = 0;
+        while (pos < content.len) {
+            const n = try std.posix.write(h, content[pos..]);
+            if (n == 0) return error.WriteFailed;
+            pos += n;
+        }
+    }
+}
+
+fn readRange(io: std.Io, path: []const u8, offset: u64, dest: []u8) !void {
+    _ = io;
+    const h = c_fs.openRead(path) orelse return error.FileNotFound;
+    defer c_fs.close(h);
+
+    if (c_fs.is_win) {
+        const FILE_BEGIN: u32 = 0;
+        if (c_fs.SetFilePointerEx(h, @intCast(offset), null, FILE_BEGIN) == .FALSE) return error.SeekFailed;
+        var read_bytes: u32 = 0;
+        var pos: usize = 0;
+        while (pos < dest.len) {
+            const chunk: u32 = @intCast(@min(dest.len - pos, @as(usize, 64 * 1024 * 1024)));
+            if (c_fs.ReadFile(h, dest.ptr + pos, chunk, &read_bytes, null) == .FALSE or read_bytes == 0) {
+                if (pos + read_bytes < dest.len) return error.UnexpectedEof;
+                break;
+            }
+            pos += read_bytes;
+        }
+    } else {
+        _ = try std.posix.lseek_SET(h, @intCast(offset));
+        var pos: usize = 0;
+        while (pos < dest.len) {
+            const n = try std.posix.read(h, dest[pos..]);
+            if (n == 0) return error.UnexpectedEof;
+            pos += n;
+        }
+    }
 }
 
 // --- HTTP dates -------------------------------------------------------------
@@ -340,12 +567,20 @@ pub fn parseRange(spec: []const u8, size: u64) ?RangeSpec {
 fn servePath(ctx: *Context, st: *State, raw_url_path: []const u8) anyerror!Response {
     const a = ctx.allocator;
 
-    var joined = (try safeJoin(a, raw_url_path, st.root)) orelse
+    const formatted_path = if (raw_url_path.len > 0 and raw_url_path[0] == '/')
+        raw_url_path
+    else
+        std.fmt.allocPrint(a, "/{s}", .{raw_url_path}) catch return Allocator.Error.OutOfMemory;
+
+    var joined = (try safeJoin(a, formatted_path, st.root)) orelse
         return errText(403, "forbidden");
 
     var meta = statPath(ctx.io, joined);
-    if (meta == null and joined[joined.len - 1] == '/') {
-        const with_index = std.fmt.allocPrint(a, "{s}{s}", .{ joined, st.index }) catch return Allocator.Error.OutOfMemory;
+    if (meta == null) {
+        const with_index = if (std.mem.endsWith(u8, joined, "/"))
+            std.fmt.allocPrint(a, "{s}{s}", .{ joined, st.index }) catch return Allocator.Error.OutOfMemory
+        else
+            std.fmt.allocPrint(a, "{s}/{s}", .{ joined, st.index }) catch return Allocator.Error.OutOfMemory;
         meta = statPath(ctx.io, with_index);
         if (meta != null) joined = with_index;
     }
@@ -407,8 +642,30 @@ fn respondWithFile(ctx: *Context, st: *State, path: []const u8, meta: FileMeta) 
 
     if (meta.size > st.max_size) return errText(413, "file too large");
 
-    const body = a.alloc(u8, @intCast(meta.size)) catch return Allocator.Error.OutOfMemory;
+    var body = a.alloc(u8, @intCast(meta.size)) catch return Allocator.Error.OutOfMemory;
     readAll(ctx.io, path, body) catch return errText(500, "read error");
+
+    if (st.live_reload and !is_head and std.mem.startsWith(u8, content_type, "text/html")) {
+        const reload_script = try std.fmt.allocPrint(a,
+            \\<script>
+            \\(function() {{
+            \\  const es = new EventSource("{s}");
+            \\  es.onmessage = function(e) {{
+            \\    if (e.data === "reload") {{
+            \\      console.log("[httpx live-reload] Static file changed, reloading...");
+            \\      location.reload();
+            \\    }}
+            \\  }};
+            \\}})();
+            \\</script>
+        , .{st.reload_sse_path});
+
+        if (std.mem.indexOf(u8, body, "</body>")) |idx| {
+            body = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ body[0..idx], reload_script, body[idx..] });
+        } else {
+            body = try std.fmt.allocPrint(a, "{s}{s}", .{ body, reload_script });
+        }
+    }
 
     return .{
         .status = 200,
@@ -434,18 +691,6 @@ fn etagMatches(header_value: []const u8, etag: []const u8) bool {
         if (std.mem.eql(u8, c_weak, e_weak)) return true;
     }
     return false;
-}
-
-fn readRange(io: std.Io, path: []const u8, start: u64, out: []u8) !void {
-    const f = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer f.close(io);
-    return f.readPositionalAll(io, out, start);
-}
-
-fn readAll(io: std.Io, path: []const u8, out: []u8) !void {
-    const f = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer f.close(io);
-    return f.readPositionalAll(io, out, 0);
 }
 
 // Tests

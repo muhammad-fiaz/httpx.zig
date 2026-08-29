@@ -19,9 +19,9 @@ const Method = @import("../../common/method.zig").Method;
 const meta_mod = @import("../router/metadata.zig");
 
 pub const Info = struct {
-    title: []const u8 = "httpx API",
-    version: []const u8 = "0.0.0",
-    description: []const u8 = "",
+    title: []const u8 = "HTTPX API",
+    version: []const u8 = "0.2.0",
+    description: []const u8 = "Fast, modern web framework for Zig with automated OpenAPI & GraphQL documentation.",
 };
 
 const PathGroup = struct {
@@ -48,6 +48,16 @@ pub fn generate(allocator: Allocator, router: *const Router, info: Info) Generat
     }
 
     for (router.entries(), 0..) |entry, ei| {
+        // Skip internal docs routes and OpenAPI endpoints from appearing in the spec
+        if (std.mem.startsWith(u8, entry.path, "/docs") or
+            std.mem.startsWith(u8, entry.path, "/redoc") or
+            std.mem.startsWith(u8, entry.path, "/scalar") or
+            std.mem.startsWith(u8, entry.path, "/graphiql") or
+            std.mem.eql(u8, entry.path, "/openapi.json"))
+        {
+            continue;
+        }
+
         const path_str = try renderOpenApiPath(allocator, &entry.pattern);
         defer allocator.free(path_str);
 

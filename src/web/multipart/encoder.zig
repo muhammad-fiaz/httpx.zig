@@ -72,6 +72,14 @@ pub fn encode(w: anytype, boundary: []const u8, parts: []const Part) EncodeError
     try writeFinalBoundary(w, boundary);
 }
 
+/// Convenience: allocates and returns the complete encoded multipart payload as a single slice.
+pub fn encodeAlloc(allocator: std.mem.Allocator, boundary: []const u8, parts: []const Part) EncodeError![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try encode(&out.writer, boundary, parts);
+    return out.toOwnedSlice() catch EncodeError.OutOfMemory;
+}
+
 /// Writes "--B\r\n" plus the part's headers. Streaming-safe.
 pub fn writePartHeader(w: anytype, boundary: []const u8, part: Part) EncodeError!void {
     w.writeAll("--") catch return EncodeError.WriteFailed;

@@ -6,10 +6,10 @@
 const std = @import("std");
 const testing = std.testing;
 
-const engine_mod = @import("../protocols/tls/engine.zig");
-const handshake_mod = @import("../protocols/tls/handshake.zig");
-const record_mod = @import("../protocols/tls/record.zig");
-const alpn_mod = @import("../protocols/tls/alpn.zig");
+const tls_engine = @import("../protocols/tls/engine.zig");
+const tls_handshake = @import("../protocols/tls/handshake.zig");
+const tls_record = @import("../protocols/tls/record.zig");
+const tls_alpn = @import("../protocols/tls/alpn.zig");
 const quic_tls = @import("../protocols/tls/quic_tls.zig");
 const qcrypto = @import("../protocols/quic/crypto.zig");
 
@@ -18,19 +18,19 @@ const qcrypto = @import("../protocols/quic/crypto.zig");
 test "integration: full TLS 1.3 handshake state machine" {
     const a = testing.allocator;
 
-    var client = engine_mod.Engine.initClient(a, .{});
-    var server = engine_mod.Engine.initServer(a, .{});
+    var client = tls_engine.Engine.initClient(a, .{});
+    var server = tls_engine.Engine.initServer(a, .{});
 
     // ---- ClientHello ----
     const ch = try client.produceClientHello(&.{ "h2", "http/1.1" }, &.{});
     defer a.free(ch);
 
     try testing.expectEqual(@as(u8, 0x01), ch[0]);
-    try testing.expectEqual(engine_mod.Engine.State.client_hello_sent, client.state);
+    try testing.expectEqual(tls_engine.Engine.State.client_hello_sent, client.state);
 
     // ---- Server processes ClientHello ----
     try server.processClientHello(ch[4..]);
-    try testing.expectEqual(engine_mod.Engine.State.client_hello_received, server.state);
+    try testing.expectEqual(tls_engine.Engine.State.client_hello_received, server.state);
 
     // Generate server ECDHE keypair and compute shared secret
     var srv_seed: [32]u8 = undefined;
@@ -49,29 +49,29 @@ test "integration: full TLS 1.3 handshake state machine" {
     var flight = try server.produceServerFlight("", "", &.{ .h2, .@"http/1.1" }, &.{});
     defer flight.deinit(a);
 
-    try testing.expectEqual(engine_mod.Engine.State.server_finished_sent, server.state);
+    try testing.expectEqual(tls_engine.Engine.State.server_finished_sent, server.state);
     try testing.expect(server.ap_keys != null);
 
     // ---- Client processes ServerHello ----
     try client.processServerHello(flight.server_hello[4..]);
     try testing.expect(client.shared_secret != null);
-    try testing.expectEqual(engine_mod.Engine.State.handshake_keys_derived, client.state);
+    try testing.expectEqual(tls_engine.Engine.State.handshake_keys_derived, client.state);
 
     // ---- Client processes EncryptedExtensions ----
     try client.processEncryptedExtensions(flight.encrypted_extensions[4..]);
-    try testing.expectEqual(engine_mod.Engine.State.encrypted_extensions_received, client.state);
+    try testing.expectEqual(tls_engine.Engine.State.encrypted_extensions_received, client.state);
 
     // ---- Client processes Certificate ----
     try client.processCertificate(flight.certificate[4..]);
-    try testing.expectEqual(engine_mod.Engine.State.certificate_received, client.state);
+    try testing.expectEqual(tls_engine.Engine.State.certificate_received, client.state);
 
     // ---- Client processes CertificateVerify ----
     try client.processCertificateVerify(flight.certificate_verify[4..]);
-    try testing.expectEqual(engine_mod.Engine.State.certificate_verify_received, client.state);
+    try testing.expectEqual(tls_engine.Engine.State.certificate_verify_received, client.state);
 
     // ---- Client processes Finished ----
     try client.processFinished(flight.finished[4..]);
-    try testing.expectEqual(engine_mod.Engine.State.handshake_complete, client.state);
+    try testing.expectEqual(tls_engine.Engine.State.handshake_complete, client.state);
 
     // ---- Both sides have application keys ----
     try testing.expect(client.ap_keys != null);
@@ -106,8 +106,8 @@ test "integration: record layer encrypts and decrypts with derived keys" {
     const a = testing.allocator;
 
     // Use the TLS engine to derive proper TLS 1.3 keys
-    var client = engine_mod.Engine.initClient(a, .{});
-    var server = engine_mod.Engine.initServer(a, .{});
+    var client = tls_engine.Engine.initClient(a, .{});
+    var server = tls_engine.Engine.initServer(a, .{});
 
     const ch = try client.produceClientHello(&.{"h2"}, &.{});
     defer a.free(ch);
@@ -133,18 +133,18 @@ test "integration: record layer encrypts and decrypts with derived keys" {
     // Derive client handshake traffic secret from the handshake secret
     const hs_secret = client.handshake_secret.?;
     var c_hs: [32]u8 = undefined;
-    engine_mod.hkdfExpandLabel(hs_secret, "c hs traffic", &c_hs);
+    tls_engine.hkdfExpandLabel(hs_secret, "c hs traffic", &c_hs);
 
     // Derive AEAD key and IV from the traffic secret
     var ck: [16]u8 = undefined;
     var ci: [12]u8 = undefined;
-    engine_mod.hkdfExpandLabel(c_hs, "key", &ck);
-    engine_mod.hkdfExpandLabel(c_hs, "iv", &ci);
+    tls_engine.hkdfExpandLabel(c_hs, "key", &ck);
+    tls_engine.hkdfExpandLabel(c_hs, "iv", &ci);
 
     const plaintext = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
 
     // Encrypt with client handshake key
-    const encoded = try record_mod.encodeRecord(
+    const encoded = try tls_record.encodeRecord(
         .application_data,
         plaintext,
         0,
@@ -154,8 +154,8 @@ test "integration: record layer encrypts and decrypts with derived keys" {
     );
 
     // Decrypt with the same key (loopback test — both sides use same derivation)
-    var read_buf: [record_mod.max_record_plaintext]u8 = undefined;
-    const result = try record_mod.decodeRecord(
+    var read_buf: [tls_record.max_record_plaintext]u8 = undefined;
+    const result = try tls_record.decodeRecord(
         encoded.bytes[0..encoded.len],
         &read_buf,
         0,
@@ -164,7 +164,7 @@ test "integration: record layer encrypts and decrypts with derived keys" {
         .aes_128_gcm,
     );
 
-    try testing.expectEqual(record_mod.ContentType.application_data, result.content_type);
+    try testing.expectEqual(tls_record.ContentType.application_data, result.content_type);
     try testing.expectEqualStrings(plaintext, result.plaintext);
 }
 
@@ -173,7 +173,7 @@ test "integration: record layer encrypts and decrypts with derived keys" {
 test "integration: ALPN negotiation end-to-end" {
     const a = testing.allocator;
 
-    var client = engine_mod.Engine.initClient(a, .{});
+    var client = tls_engine.Engine.initClient(a, .{});
     const ch = try client.produceClientHello(&.{ "h3", "h2", "http/1.1" }, &.{});
     defer a.free(ch);
 
@@ -212,17 +212,17 @@ test "integration: ALPN negotiation end-to-end" {
     try testing.expect(found_http11);
 
     // Server-side ALPN negotiation
-    const server_pref = [_]alpn_mod.Protocol{ .h2, .@"http/1.1" };
+    const server_pref = [_]tls_alpn.Protocol{ .h2, .@"http/1.1" };
     const client_offered = [_][]const u8{ "h3", "h2", "http/1.1" };
-    const negotiated = alpn_mod.negotiateServer(&server_pref, &client_offered);
-    try testing.expectEqual(alpn_mod.Protocol.h2, negotiated.?);
+    const negotiated = tls_alpn.negotiateServer(&server_pref, &client_offered);
+    try testing.expectEqual(tls_alpn.Protocol.h2, negotiated.?);
 }
 
 // Test 5: SNI is encoded in ClientHello
 
 test "integration: SNI extension is encoded in ClientHello" {
     const a = testing.allocator;
-    var client = engine_mod.Engine.initClient(a, .{});
+    var client = tls_engine.Engine.initClient(a, .{});
 
     const ch = try client.produceClientHello(&.{ "h2", "http/1.1" }, &.{});
     defer a.free(ch);
@@ -247,9 +247,9 @@ test "integration: sequence number progression produces unique nonces" {
     const iv = [_]u8{0xBB} ** 12;
     const msg = "test data";
 
-    const r0 = try record_mod.encodeRecord(.application_data, msg, 0, &key, &iv, .aes_128_gcm);
-    const r1 = try record_mod.encodeRecord(.application_data, msg, 1, &key, &iv, .aes_128_gcm);
-    const r2 = try record_mod.encodeRecord(.application_data, msg, 2, &key, &iv, .aes_128_gcm);
+    const r0 = try tls_record.encodeRecord(.application_data, msg, 0, &key, &iv, .aes_128_gcm);
+    const r1 = try tls_record.encodeRecord(.application_data, msg, 1, &key, &iv, .aes_128_gcm);
+    const r2 = try tls_record.encodeRecord(.application_data, msg, 2, &key, &iv, .aes_128_gcm);
 
     // All three ciphertexts must differ
     try testing.expect(!std.mem.eql(u8, r0.bytes[5..r0.len], r1.bytes[5..r1.len]));
@@ -264,13 +264,13 @@ test "integration: transcript hash is consistent across client and server" {
     const sh_body = "ServerHello body";
     const ee_body = "EncryptedExtensions body";
 
-    var client_transcript = handshake_mod.Transcript.init();
+    var client_transcript = tls_handshake.Transcript.init();
     client_transcript.feed(ch_body);
     client_transcript.feed(sh_body);
     client_transcript.feed(ee_body);
     const client_hash = client_transcript.finish();
 
-    var server_transcript = handshake_mod.Transcript.init();
+    var server_transcript = tls_handshake.Transcript.init();
     server_transcript.feed(ch_body);
     server_transcript.feed(sh_body);
     server_transcript.feed(ee_body);

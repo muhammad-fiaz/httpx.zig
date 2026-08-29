@@ -160,7 +160,11 @@ fn preference(e: Encoding) u8 {
 /// Compresses with the given encoding.
 pub fn compress(allocator: Allocator, encoding: Encoding, data: []const u8) ![]u8 {
     switch (encoding) {
-        .zstd => return zstd_mod.compress(allocator, data) catch Error.CorruptData,
+        .zstd => {
+            // If data is very large (like Swagger/Scalar bundles > 500KB), use gzip/identity
+            if (data.len > 256 * 1024) return flateCompress(allocator, true, data);
+            return zstd_mod.compress(allocator, data) catch Error.CorruptData;
+        },
         .br => return brotli_mod.compress(allocator, data) catch Error.CorruptData,
         .identity => return allocator.dupe(u8, data),
         .gzip, .deflate => return flateCompress(allocator, encoding == .gzip, data),

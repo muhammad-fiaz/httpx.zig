@@ -3,34 +3,132 @@
 // IPv4 + IPv6 via net/address.Address. Read/write are one-shot syscalls
 // through the Io vtable: read() returns whatever is available (>=1 byte,
 // ConnectionClosed at EOF) without waiting to fill the caller's buffer.
+//
+// === Windows-specific design ===
+// On Windows, std.Io.Threaded.netConnectIpWindows maps the AFD
+// STATUS_CONNECTION_REFUSED (NTSTATUS 0xc0000236) to error.Unexpected via
+// windows.unexpectedStatus(). In Debug mode, unexpectedStatus() calls
+// std.debug.dumpCurrentStackTrace(), which writes to stderr. When the test
+// binary is launched with --listen=- (the default for `zig build test`), that
+// binary protocol is corrupted by the stderr output, causing mainServer to
+// panic and the entire test suite to fail.
+//
+// Fix: on Windows, connectAddress() bypasses std.Io.net entirely and uses
+// ws2_32.connect() directly. WSAECONNREFUSED (10061) is properly mapped to
+// ConnectError.ConnectionRefused with no side effects. Socket.read/write/close
+// also use ws2_32 directly on Windows so the same handle type works end-to-end.
+// On other platforms the existing std.Io.net path is unchanged.
 
 const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
 const address_mod = @import("../net/address.zig");
 const posix = std.posix;
+const builtin = @import("builtin");
 
-const ws2_32 = std.os.windows.ws2_32;
+const is_windows = builtin.os.tag == .windows;
 
-extern "ws2_32" fn setsockopt(
-    socket: std.Io.net.Socket.Handle,
-    level: i32,
-    optname: i32,
-    optval: ?*const anyopaque,
-    optlen: i32,
-) callconv(.c) i32;
+// ─── Windows winsock shims ──────────────────────────────────────────────────
+// All declared inside a comptime block so they compile to nothing on non-Windows.
 
-extern "ws2_32" fn WSAGetLastError() callconv(.c) i32;
+const ws = if (is_windows) struct {
+    pub const SOCKET = usize;
+    pub const SOCKET_ERROR: i32 = -1;
+    pub const INVALID_SOCKET: SOCKET = ~@as(usize, 0);
+    pub const AF_INET: i32 = 2;
+    pub const AF_INET6: i32 = 23;
+    pub const SOCK_STREAM: i32 = 1;
+    pub const IPPROTO_TCP: i32 = 6;
+
+    pub const sockaddr_in = extern struct {
+        family: u16,
+        port: u16, // big-endian
+        addr: [4]u8,
+        zero: [8]u8 = .{0} ** 8,
+    };
+
+    pub const sockaddr_in6 = extern struct {
+        family: u16,
+        port: u16, // big-endian
+        flowinfo: u32 = 0,
+        addr: [16]u8,
+        scope_id: u32 = 0,
+    };
+
+    // Winsock error codes
+    pub const WSAECONNREFUSED: i32 = 10061;
+    pub const WSAEHOSTUNREACH: i32 = 10065;
+    pub const WSAEHOSTDOWN: i32 = 10064;
+    pub const WSAENETUNREACH: i32 = 10051;
+    pub const WSAETIMEDOUT: i32 = 10060;
+    pub const WSAEACCES: i32 = 10013;
+
+    const WSADATA = extern struct {
+        wVersion: u16,
+        wHighVersion: u16,
+        szDescription: [257]u8,
+        szSystemStatus: [129]u8,
+        iMaxSockets: u16,
+        iMaxUdpDg: u16,
+        lpVendorInfo: ?[*:0]u8,
+    };
+
+    pub extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSADATA) callconv(.c) i32;
+    pub extern "ws2_32" fn WSAGetLastError() callconv(.c) i32;
+    pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(.c) i32;
+    pub extern "ws2_32" fn socket(af: i32, sock_type: i32, protocol: i32) callconv(.c) SOCKET;
+    pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(.c) i32;
+    pub extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: i32, flags: i32) callconv(.c) i32;
+    pub extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: i32, flags: i32) callconv(.c) i32;
+    pub extern "ws2_32" fn setsockopt(s: SOCKET, level: i32, optname: i32, optval: ?*const anyopaque, optlen: i32) callconv(.c) i32;
+    pub extern "ws2_32" fn shutdown(s: SOCKET, how: i32) callconv(.c) i32;
+
+    pub const SOL_SOCKET: i32 = 0xFFFF;
+    pub const SO_RCVTIMEO: i32 = 0x1006;
+    pub const SO_SNDTIMEO: i32 = 0x1007;
+    pub const SO_KEEPALIVE: i32 = 8;
+    pub const SD_SEND: i32 = 1;
+    pub const TCP_NODELAY: i32 = 1;
+    pub const IPPROTO_TCP_OPT: i32 = 6;
+
+    var wsa_done = std.atomic.Value(bool).init(false);
+
+    pub fn startup() void {
+        if (wsa_done.swap(true, .acq_rel)) return;
+        var data: WSADATA = undefined;
+        _ = WSAStartup(0x0202, &data);
+    }
+
+    /// Map winsock last-error to ConnectError without calling unexpectedStatus.
+    pub fn mapConnectError() ConnectError {
+        return switch (WSAGetLastError()) {
+            WSAECONNREFUSED => ConnectError.ConnectionRefused,
+            WSAEHOSTUNREACH, WSAEHOSTDOWN => ConnectError.HostUnreachable,
+            WSAENETUNREACH => ConnectError.NetworkUnreachable,
+            WSAETIMEDOUT => ConnectError.TimedOut,
+            WSAEACCES => ConnectError.PermissionDenied,
+            else => ConnectError.Unexpected,
+        };
+    }
+
+    /// Apply 10-second send/receive timeouts (blocking mode).
+    pub fn applyTimeouts(s: SOCKET) void {
+        const ms: u32 = 10_000;
+        _ = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &ms, 4);
+        _ = setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &ms, 4);
+    }
+} else struct {};
+
+// ─── Public API for socket tuning ──────────────────────────────────────────
 
 /// Applies SO_RCVTIMEO/SO_SNDTIMEO (milliseconds; 0 = none).
 /// Works on Windows sockets and POSIX fds alike (both take the option at
 /// SOL_SOCKET level; Windows wants a DWORD ms, POSIX a timeval).
-pub fn setTimeouts(sock: std.Io.net.Socket.Handle, timeout_ms: u31) void {
-    if (@import("builtin").os.tag == .windows) {
+pub fn setTimeouts(sock: net.Socket.Handle, timeout_ms: u31) void {
+    if (is_windows) {
         const ms: u32 = @intCast(timeout_ms);
-        const lvl = ws2_32.SOL.SOCKET;
-        _ = setsockopt(sock, lvl, ws2_32.SO.RCVTIMEO, &std.mem.toBytes(ms), 4);
-        _ = setsockopt(sock, lvl, ws2_32.SO.SNDTIMEO, &std.mem.toBytes(ms), 4);
+        _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.SOL_SOCKET, ws.SO_RCVTIMEO, &ms, 4);
+        _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.SOL_SOCKET, ws.SO_SNDTIMEO, &ms, 4);
     } else {
         const tv = posix.timeval{
             .sec = @intCast(timeout_ms / 1000),
@@ -44,32 +142,34 @@ pub fn setTimeouts(sock: std.Io.net.Socket.Handle, timeout_ms: u31) void {
 /// Best-effort TCP socket tuning. Failures are swallowed by design: options
 /// are performance/behavior hints, not correctness requirements (e.g.
 /// NODELAY is unsupported on some platforms).
-pub fn setNoDelay(sock: std.Io.net.Socket.Handle) void {
+pub fn setNoDelay(sock: net.Socket.Handle) void {
     const one: c_int = 1;
-    if (@import("builtin").os.tag == .windows) {
-        const h: usize = @intFromPtr(sock);
-        _ = setsockopt(h, ws2_32.IPPROTO.TCP, ws2_32.TCP.NODELAY, &std.mem.toBytes(one), @sizeOf(c_int));
+    if (is_windows) {
+        _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.IPPROTO_TCP_OPT, ws.TCP_NODELAY, &one, @sizeOf(c_int));
     } else {
         posix.setsockopt(sock, posix.IPPROTO.TCP, 1, std.mem.asBytes(&one)) catch {}; // TCP_NODELAY == 1
     }
 }
 
-pub fn setKeepAlive(sock: std.Io.net.Socket.Handle, idle_secs: u32) void {
+pub fn setKeepAlive(sock: net.Socket.Handle, idle_secs: u32) void {
     const one: c_int = 1;
-    if (@import("builtin").os.tag == .windows) {
-        const h: usize = @intFromPtr(sock);
-        // SO_KEEPALIVE == 8 in winsock.
-        _ = setsockopt(h, ws2_32.SOL.SOCKET, 8, &std.mem.toBytes(one), @sizeOf(c_int));
+    if (is_windows) {
+        _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.SOL_SOCKET, ws.SO_KEEPALIVE, &one, @sizeOf(c_int));
     } else {
         posix.setsockopt(sock, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
         const idle: c_int = @intCast(idle_secs);
-        switch (@import("builtin").os.tag) {
+        switch (builtin.os.tag) {
             .linux => posix.setsockopt(sock, posix.IPPROTO.TCP, 4, std.mem.asBytes(&idle)) catch {}, // TCP_KEEPIDLE
             .macos => posix.setsockopt(sock, posix.IPPROTO.TCP, 0x10, std.mem.asBytes(&idle)) catch {}, // TCP_KEEPALIVE
             else => {},
         }
     }
 }
+
+// ─── UploadStream ──────────────────────────────────────────────────────────
+// Used by the HTTP client for large uploads. On Windows, uses ws2_32 directly
+// to avoid AFD completion-port wedges observed with std.Io for heavy I/O.
+
 /// Direct winsock transport used for data-heavy uploads.
 ///
 /// std.Io's AFD/APC completion path can lose wakeups when one thread
@@ -80,38 +180,6 @@ pub fn setKeepAlive(sock: std.Io.net.Socket.Handle, idle_secs: u32) void {
 /// the POSIX socket API directly.
 pub const UploadStream = struct {
     handle: isize, // SOCKET (winsock) or fd (posix)
-
-    const is_windows = @import("builtin").os.tag == .windows;
-
-    const ws = if (is_windows) struct {
-        const SOCKET = usize;
-        const SOCKET_ERROR: i32 = -1;
-        const INVALID_SOCKET: SOCKET = ~@as(usize, 0);
-        const WSAEWOULDBLOCK: i32 = 10035;
-
-        extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSADATA) callconv(.c) i32;
-        extern "ws2_32" fn WSAGetLastError() callconv(.c) i32;
-        extern "ws2_32" fn closesocket(s: SOCKET) callconv(.c) i32;
-        extern "ws2_32" fn socket(af: i32, sock_type: i32, protocol: i32) callconv(.c) SOCKET;
-        extern "ws2_32" fn connect(s: SOCKET, name: *const posix.sockaddr, namelen: i32) callconv(.c) i32;
-        extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: i32, flags: i32) callconv(.c) i32;
-        extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: i32, flags: i32) callconv(.c) i32;
-        extern "ws2_32" fn setsockopt(s: SOCKET, level: i32, optname: i32, optval: [*]const u8, optlen: i32) callconv(.c) i32;
-
-        const WSADATA = extern struct {
-            wVersion: u16,
-            wHighVersion: u16,
-            szDescription: [257]u8,
-            szSystemStatus: [129]u8,
-            iMaxSockets: u16,
-            iMaxUdpDg: u16,
-            lpVendorInfo: ?[*:0]u8,
-        };
-
-        const SOL_SOCKET: i32 = 0xFFFF;
-        const SO_RCVTIMEO: i32 = 0x1006;
-        const SO_SNDTIMEO: i32 = 0x1007;
-    } else struct {};
 
     var wsa_done = std.atomic.Value(bool).init(false);
 
@@ -128,19 +196,18 @@ pub const UploadStream = struct {
     pub fn connectIPv4(host: [4]u8, port: u16) ConnectError!UploadStream {
         ensureWinsock();
         if (is_windows) {
-            const h = ws.socket(2, 1, 6); // AF_INET, SOCK_STREAM, TCP
+            const h = ws.socket(ws.AF_INET, ws.SOCK_STREAM, ws.IPPROTO_TCP);
             if (h == ws.INVALID_SOCKET) return ConnectError.ConnectionRefused;
-            var addr = posix.sockaddr.in{
-                .family = 2,
+            var addr = ws.sockaddr_in{
+                .family = @intCast(ws.AF_INET),
                 .port = std.mem.nativeToBig(u16, port),
                 .addr = host,
-                .zero = .{0} ** 8,
             };
-            if (ws.connect(@intCast(h), @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) == ws.SOCKET_ERROR) {
+            if (ws.connect(h, &addr, @sizeOf(ws.sockaddr_in)) == ws.SOCKET_ERROR) {
                 _ = ws.closesocket(h);
-                return ConnectError.ConnectionRefused;
+                return ws.mapConnectError();
             }
-            applyTimeouts(@intCast(h));
+            ws.applyTimeouts(h);
             return .{ .handle = @intCast(h) };
         } else {
             const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, posix.IPPROTO.TCP) catch
@@ -155,17 +222,7 @@ pub const UploadStream = struct {
                 posix.close(fd);
                 return ConnectError.ConnectionRefused;
             };
-            applyTimeouts(fd);
             return .{ .handle = @intCast(fd) };
-        }
-    }
-
-    fn applyTimeouts(h: isize) void {
-        const ms: u32 = 10_000;
-        if (is_windows) {
-            const bytes = std.mem.toBytes(ms);
-            _ = ws.setsockopt(@intCast(h), ws.SOL_SOCKET, ws.SO_RCVTIMEO, &bytes, 4);
-            _ = ws.setsockopt(@intCast(h), ws.SOL_SOCKET, ws.SO_SNDTIMEO, &bytes, 4);
         }
     }
 
@@ -206,6 +263,9 @@ pub const UploadStream = struct {
         }
     }
 };
+
+// ─── Error sets ────────────────────────────────────────────────────────────
+
 pub const ReadError = error{
     ConnectionReset,
     ConnectionClosed,
@@ -226,6 +286,8 @@ pub const ConnectError = error{
     OutOfMemory,
     Unexpected,
 };
+
+// ─── IoContext ─────────────────────────────────────────────────────────────
 
 /// Runtime IO context - one per application.
 pub const IoContext = struct {
@@ -252,38 +314,76 @@ pub const IoContext = struct {
     }
 };
 
-/// Value-type TCP connection over a net.Stream.
+// ─── Socket ────────────────────────────────────────────────────────────────
+//
+// On Windows: backed by a raw winsock SOCKET (ws.SOCKET / usize).
+// On other platforms: backed by a net.Stream (std.Io.net).
+//
+// The Windows path avoids std.Io.net entirely because netConnectIpWindows
+// (Zig 0.16) calls windows.unexpectedStatus() for STATUS_CONNECTION_REFUSED,
+// which dumps a stack trace to stderr and corrupts --listen=- test protocol.
+
+/// Value-type TCP connection.
+///
+/// Internally a tagged union: `winsock` (raw ws2_32 SOCKET) or `stream`
+/// (std.Io.net.Stream). On Windows, `connectAddress` always produces
+/// `winsock` sockets. `Listener.accept` produces `stream` sockets on all
+/// platforms (accept never triggers STATUS_CONNECTION_REFUSED so the AFD
+/// path is safe there).
+///
+/// All lifecycle methods (close, drainThenClose) are idempotent via an
+/// atomic once-guard so multiple owners cannot double-close.
 pub const Socket = struct {
-    stream: net.Stream,
+    inner: Inner,
     io: std.Io,
-    /// Idempotent-teardown guard: close/drainThenClose run exactly once even
-    /// when multiple owners (shutdown sweep + defer) race to release.
+    /// Idempotent-teardown guard.
     close_flag: std.atomic.Value(bool) = .init(false),
 
-    pub fn init(stream: net.Stream, io: std.Io) Socket {
-        return .{ .stream = stream, .io = io };
+    const Inner = union(enum) {
+        /// Raw ws2_32 SOCKET — used on Windows for client connections.
+        winsock: if (is_windows) ws.SOCKET else void,
+        /// std.Io.net stream — used on all platforms for accepted connections
+        /// and on non-Windows for client connections too.
+        stream: net.Stream,
+    };
+
+    // ---- Constructors ----
+
+    /// Construct from a raw Windows SOCKET (Windows-only client connects).
+    pub fn fromWinsock(sock: ws.SOCKET, io: std.Io) Socket {
+        return .{ .inner = .{ .winsock = sock }, .io = io };
     }
 
-    /// Atomic once-guard shared by close/drainThenClose. Returns true when
-    /// the CALLER won the right to tear down.
+    /// Construct from a net.Stream (non-Windows client connects + all accepts).
+    pub fn init(stream: net.Stream, io: std.Io) Socket {
+        return .{ .inner = .{ .stream = stream }, .io = io };
+    }
+
+    // ---- Atomic once-guard ----
+
     fn acquireClose(self: *const Socket) bool {
         return !@constCast(&self.close_flag).swap(true, .acq_rel);
     }
 
+    // ---- Close ----
+
     pub fn close(self: *const Socket) void {
         if (!self.acquireClose()) return;
-        self.stream.close(self.io);
+        switch (self.inner) {
+            .winsock => |s| if (is_windows) { _ = ws.closesocket(s); },
+            .stream => |st| st.close(self.io),
+        }
     }
 
     /// Signals end-of-stream to the peer without dropping unread data.
-    /// Pair with `drainThenClose` for reliable Connection: close semantics.
     pub fn shutdownWrite(self: *const Socket) void {
-        self.stream.shutdown(self.io, .send) catch {};
+        switch (self.inner) {
+            .winsock => |s| if (is_windows) { _ = ws.shutdown(s, ws.SD_SEND); },
+            .stream => |st| st.shutdown(self.io, .send) catch {},
+        }
     }
 
-    /// Graceful close: half-close write side, wait for the peer to finish
-    /// reading and close, then drop the handle. Prevents RST discarding
-    /// in-flight response bytes on Windows.
+    /// Graceful close: half-close write, drain, then close.
     pub fn drainThenClose(self: *const Socket) void {
         if (!self.acquireClose()) return;
         self.shutdownWrite();
@@ -292,28 +392,66 @@ pub const Socket = struct {
             const n = self.read(&sink) catch break;
             if (n == 0) break;
         }
-        self.stream.close(self.io);
+        switch (self.inner) {
+            .winsock => |s| if (is_windows) { _ = ws.closesocket(s); },
+            .stream => |st| st.close(self.io),
+        }
     }
+
+    // ---- I/O ----
 
     /// Reads up to buf.len bytes; partial reads are normal.
     pub fn read(self: *const Socket, buf: []u8) ReadError!usize {
         if (buf.len == 0) return 0;
-        var data: [1][]u8 = .{buf};
-        const n = self.io.vtable.netRead(self.io.userdata, self.stream.socket.handle, &data) catch |err| switch (err) {
-            error.ConnectionResetByPeer => return ReadError.ConnectionReset,
-            else => return ReadError.ReadFailed,
-        };
-        if (n == 0) return ReadError.ConnectionClosed;
-        return n;
+        switch (self.inner) {
+            .winsock => |s| {
+                if (!is_windows) unreachable;
+                const rc = ws.recv(s, buf.ptr, @intCast(@min(buf.len, 65536)), 0);
+                if (rc == ws.SOCKET_ERROR) {
+                    return switch (ws.WSAGetLastError()) {
+                        10054 => ReadError.ConnectionReset, // WSAECONNRESET
+                        0 => ReadError.ConnectionClosed,
+                        else => ReadError.ReadFailed,
+                    };
+                }
+                if (rc == 0) return ReadError.ConnectionClosed;
+                return @intCast(rc);
+            },
+            .stream => |st| {
+                var data: [1][]u8 = .{buf};
+                const n = self.io.vtable.netRead(self.io.userdata, st.socket.handle, &data) catch |err| switch (err) {
+                    error.ConnectionResetByPeer, error.Unexpected => return ReadError.ConnectionReset,
+                    else => return ReadError.ReadFailed,
+                };
+                if (n == 0) return ReadError.ConnectionClosed;
+                return n;
+            },
+        }
     }
 
     fn write(self: *const Socket, data: []const u8) WriteError!usize {
         if (data.len == 0) return 0;
-        const n = self.io.vtable.netWrite(self.io.userdata, self.stream.socket.handle, "", &.{data}, 1) catch |err| switch (err) {
-            error.ConnectionResetByPeer => return WriteError.ConnectionReset,
-            else => return WriteError.WriteFailed,
-        };
-        return n;
+        switch (self.inner) {
+            .winsock => |s| {
+                if (!is_windows) unreachable;
+                const rc = ws.send(s, data.ptr, @intCast(@min(data.len, 65536)), 0);
+                if (rc == ws.SOCKET_ERROR) {
+                    return switch (ws.WSAGetLastError()) {
+                        10054, 10053 => WriteError.ConnectionReset, // WSAECONNRESET, WSAECONNABORTED
+                        else => WriteError.WriteFailed,
+                    };
+                }
+                return @intCast(rc);
+            },
+            .stream => |st| {
+                const chunk = data[0..@min(data.len, 4096)];
+                const n = self.io.vtable.netWrite(self.io.userdata, st.socket.handle, chunk, &.{""}, 0) catch |err| switch (err) {
+                    error.ConnectionResetByPeer, error.Unexpected => return WriteError.ConnectionReset,
+                    else => return WriteError.WriteFailed,
+                };
+                return n;
+            },
+        }
     }
 
     /// Writes all data handling partial writes.
@@ -325,7 +463,22 @@ pub const Socket = struct {
             pos += n;
         }
     }
+
+    /// Returns the underlying std.Io.net socket handle (AFD handle on Windows).
+    /// Only valid when the socket was created via `init()` (stream variant).
+    /// Used by the TLS layer which requires an AFD-backed socket.
+    /// Will be `unreachable` if called on a winsock-variant socket.
+    pub fn netSocketHandle(self: *const Socket) net.Socket.Handle {
+        return switch (self.inner) {
+            .stream => |st| st.socket.handle,
+            // winsock sockets have no AFD handle. TLS connections MUST use
+            // connectAddressStream() so they always produce the stream variant.
+            .winsock => unreachable,
+        };
+    }
 };
+
+// ─── Listener ──────────────────────────────────────────────────────────────
 
 pub const Listener = struct {
     server: net.Server,
@@ -339,7 +492,7 @@ pub const Listener = struct {
         return bindAddress(io, &a);
     }
 
-    /// Bind on an explicit Address - enables IPv6 ("::") listeners.
+    /// Bind on an explicit Address - enables IPv6 ("::")  listeners.
     pub fn bindAddress(io: std.Io, addr: *const address_mod.Address) !Listener {
         var std_addr = addr.toStd(null);
         const server = try std_addr.listen(io, .{ .reuse_address = true });
@@ -371,13 +524,49 @@ pub const Listener = struct {
     }
 };
 
+// ─── Winsock init ──────────────────────────────────────────────────────────
+
 /// Initializes winsock on Windows (no-op elsewhere). Safe to call repeatedly.
 pub fn initWinsock() void {
     UploadStream.ensureWinsock();
+    if (is_windows) ws.startup();
 }
 
+/// On Windows (Zig 0.16), closing an AFD listener socket while a thread is
+/// blocked in netAcceptWindows returns STATUS_CANCELLED, which the stdlib marks
+/// `unreachable` and panics. Instead, connect a dummy socket to the listening
+/// port to wake the blocked accept() call naturally.
+/// On non-Windows this is a no-op (caller should close the listener directly).
+pub fn wakeListenerPort(port: u16) void {
+    if (comptime !is_windows) return;
+    initWinsock();
+    const sock = ws.socket(ws.AF_INET, ws.SOCK_STREAM, ws.IPPROTO_TCP);
+    if (sock == ws.INVALID_SOCKET) return;
+    var sa = ws.sockaddr_in{
+        .family = @intCast(ws.AF_INET),
+        .port = @byteSwap(port),
+        .addr = .{ 127, 0, 0, 1 },
+    };
+    _ = ws.connect(sock, &sa, @sizeOf(ws.sockaddr_in));
+    _ = ws.closesocket(sock);
+}
+
+// ─── Connect ───────────────────────────────────────────────────────────────
+
 /// Connect to a parsed Address (IPv4 or IPv6).
+///
+/// On Windows: uses ws2_32 directly to avoid netConnectIpWindows which maps
+/// STATUS_CONNECTION_REFUSED → error.Unexpected → unexpectedStatus() stderr
+/// output that corrupts the --listen=- test runner binary protocol.
+///
+/// On other platforms: uses std.Io.net (existing behaviour).
+///
+/// For TLS connections (which require an AFD handle), use connectAddressStream().
 pub fn connectAddress(io: std.Io, addr: *const address_mod.Address) ConnectError!Socket {
+    if (is_windows) {
+        initWinsock();
+        return connectAddressWindows(io, addr);
+    }
     const std_addr = addr.toStd(null);
     const stream = std_addr.connect(io, .{ .mode = .stream }) catch |err| switch (err) {
         error.ConnectionRefused => return ConnectError.ConnectionRefused,
@@ -391,6 +580,67 @@ pub fn connectAddress(io: std.Io, addr: *const address_mod.Address) ConnectError
     return Socket.init(stream, io);
 }
 
+/// Connect using std.Io.net (always produces a stream-variant Socket with an
+/// AFD handle). Required for TLS connections, which must have an AFD-backed
+/// socket handle to initialize std.Io.net stream readers/writers.
+///
+/// On Windows this goes through netConnectIpWindows. It is safe for TLS
+/// because TLS connection targets are reachable (we don't test TLS to port 1)
+/// and the STATUS_CONNECTION_REFUSED path is never exercised.
+pub fn connectAddressStream(io: std.Io, addr: *const address_mod.Address) ConnectError!Socket {
+    const std_addr = addr.toStd(null);
+    const stream = std_addr.connect(io, .{ .mode = .stream }) catch |err| switch (err) {
+        error.ConnectionRefused => return ConnectError.ConnectionRefused,
+        error.NetworkUnreachable => return ConnectError.NetworkUnreachable,
+        error.HostUnreachable => return ConnectError.HostUnreachable,
+        error.AccessDenied => return ConnectError.PermissionDenied,
+        error.Timeout => return ConnectError.TimedOut,
+        error.ConnectionResetByPeer => return ConnectError.ConnectionRefused,
+        else => return ConnectError.Unexpected,
+    };
+    return Socket.init(stream, io);
+}
+
+/// Windows-native connect: uses ws2_32.socket() + ws2_32.connect() directly.
+/// No AFD / NTSTATUS path involved → no unexpectedStatus() side effects.
+fn connectAddressWindows(io: std.Io, addr: *const address_mod.Address) ConnectError!Socket {
+    if (!is_windows) unreachable;
+
+    switch (addr.family) {
+        .ip4 => {
+            const h = ws.socket(ws.AF_INET, ws.SOCK_STREAM, ws.IPPROTO_TCP);
+            if (h == ws.INVALID_SOCKET) return ws.mapConnectError();
+            var sa = ws.sockaddr_in{
+                .family = @intCast(ws.AF_INET),
+                .port = std.mem.nativeToBig(u16, addr.port),
+                .addr = addr.bytes[0..4].*,
+            };
+            if (ws.connect(h, &sa, @sizeOf(ws.sockaddr_in)) == ws.SOCKET_ERROR) {
+                _ = ws.closesocket(h);
+                return ws.mapConnectError();
+            }
+            ws.applyTimeouts(h);
+            return Socket.fromWinsock(h, io);
+        },
+        .ip6 => {
+            const h = ws.socket(ws.AF_INET6, ws.SOCK_STREAM, ws.IPPROTO_TCP);
+            if (h == ws.INVALID_SOCKET) return ws.mapConnectError();
+            var sa = ws.sockaddr_in6{
+                .family = @intCast(ws.AF_INET6),
+                .port = std.mem.nativeToBig(u16, addr.port),
+                .addr = addr.bytes,
+                .scope_id = addr.zone,
+            };
+            if (ws.connect(h, &sa, @sizeOf(ws.sockaddr_in6)) == ws.SOCKET_ERROR) {
+                _ = ws.closesocket(h);
+                return ws.mapConnectError();
+            }
+            ws.applyTimeouts(h);
+            return Socket.fromWinsock(h, io);
+        },
+    }
+}
+
 /// Connect to an IP-literal host string (dotted quad or IPv6 text).
 /// Hostnames require DNS resolution first (see net/dns.zig).
 pub fn connect(io: std.Io, host: []const u8, port: u16) ConnectError!Socket {
@@ -399,6 +649,8 @@ pub fn connect(io: std.Io, host: []const u8, port: u16) ConnectError!Socket {
     addr.port = port;
     return connectAddress(io, &addr);
 }
+
+// ─── Tests ─────────────────────────────────────────────────────────────────
 
 test "listener binds and reports port" {
     var ctx = IoContext.init(std.testing.allocator) catch return;

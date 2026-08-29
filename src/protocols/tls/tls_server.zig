@@ -331,7 +331,7 @@ fn h2SvrOnData(ctx: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
 // TLS server listener
 
 pub const ListenerConfig = struct {
-    allocator: Allocator,
+    port: u16 = 8443,
     default_identity: ?tls_server_mod.CertIdentity = null,
     cert_selector: ?tls_server_mod.CertSelector = null,
     alpn_protocols: []const alpn_mod.Protocol = &alpn_mod.DEFAULT_TCP_PREFERENCE,
@@ -340,10 +340,11 @@ pub const ListenerConfig = struct {
 pub const TlsListener = struct {
     listener: tcp.Listener,
     config: ListenerConfig,
+    allocator: Allocator,
 
-    pub fn init(config: ListenerConfig, io: std.Io, port: u16) !TlsListener {
-        const l = try tcp.Listener.bind(io, port);
-        return .{ .listener = l, .config = config };
+    pub fn init(allocator: Allocator, io: std.Io, config: ListenerConfig) !TlsListener {
+        const l = try tcp.Listener.bind(io, config.port);
+        return .{ .listener = l, .config = config, .allocator = allocator };
     }
 
     pub fn close(self: *TlsListener, io: std.Io) void {
@@ -359,7 +360,7 @@ pub const TlsListener = struct {
         defer socket.close();
 
         const tls_config = tls_server_mod.TlsServerConfig{
-            .allocator = self.config.allocator,
+            .allocator = self.allocator,
             .default_identity = self.config.default_identity,
             .cert_selector = self.config.cert_selector,
             .alpn_protocols = self.config.alpn_protocols,
@@ -370,8 +371,8 @@ pub const TlsListener = struct {
 
         const alpn = tls_conn.alpn orelse .@"http/1.1";
         switch (alpn) {
-            .h2 => serveHttp2OverTls(self.config.allocator, &tls_conn, handler, handler_ctx),
-            .@"http/1.0", .@"http/1.1" => serveHttp1OverTls(self.config.allocator, &tls_conn, handler, handler_ctx),
+            .h2 => serveHttp2OverTls(self.allocator, &tls_conn, handler, handler_ctx),
+            .@"http/1.0", .@"http/1.1" => serveHttp1OverTls(self.allocator, &tls_conn, handler, handler_ctx),
             .h3 => return error.ProtocolError,
         }
     }
@@ -381,8 +382,9 @@ pub const TlsListener = struct {
 
 test "TLS listener config defaults" {
     const cfg = ListenerConfig{
-        .allocator = std.testing.allocator,
+        .port = 8443,
     };
+    _ = std.testing.allocator;
     try std.testing.expectEqual(@as(usize, 3), cfg.alpn_protocols.len);
     try std.testing.expectEqual(alpn_mod.Protocol.h2, cfg.alpn_protocols[0]);
     try std.testing.expectEqual(alpn_mod.Protocol.@"http/1.1", cfg.alpn_protocols[1]);

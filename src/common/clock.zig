@@ -77,6 +77,25 @@ pub fn monotonicMillis() i64 {
     }
 }
 
+/// Sleeps for the specified number of milliseconds.
+pub fn sleepMillis(ms: u64) void {
+    switch (builtin.os.tag) {
+        .windows => {
+            const kernel32 = struct {
+                extern "kernel32" fn Sleep(dwMilliseconds: u32) callconv(.winapi) void;
+            };
+            kernel32.Sleep(@intCast(ms));
+        },
+        else => {
+            var ts = std.posix.timespec{
+                .sec = @intCast(ms / 1000),
+                .nsec = @intCast((ms % 1000) * 1_000_000),
+            };
+            _ = std.posix.nanosleep(&ts, null);
+        },
+    }
+}
+
 test "millisNow plausible" {
     const now = millisNow();
     // Sometime after 2024-01-01 and before year 2100.
