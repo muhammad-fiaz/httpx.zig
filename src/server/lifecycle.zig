@@ -198,6 +198,21 @@ pub const Server = struct {
         try self.router.options(path, handler);
     }
 
+    /// Sets a custom 404 Not Found handler (HTML, JSON, custom template, etc.)
+    pub fn setNotFoundHandler(self: *Server, handler: *const fn (*Context) anyerror!Response) void {
+        self.router.setNotFoundHandler(handler);
+    }
+
+    /// Sets a custom 500 / Exception handler (HTML, JSON error envelope, etc.)
+    pub fn setErrorHandler(self: *Server, handler: *const fn (*Context, anyerror) anyerror!Response) void {
+        self.router.setErrorHandler(handler);
+    }
+
+    /// Sets a custom error page / response handler for a specific HTTP status code (e.g. 403, 404, 500, 502, 503).
+    pub fn setStatusHandler(self: *Server, status_code: u16, handler: *const fn (*Context) anyerror!Response) !void {
+        try self.router.setStatusHandler(status_code, handler);
+    }
+
     pub fn deinit(self: *Server) void {
         if (self.cfg.docs_enabled) docs.unmount();
         self.router.deinit();
@@ -632,14 +647,28 @@ pub const Server = struct {
             .method = method,
             .body = body,
         };
-        const handler = self.router.match(method, ctx.path, &ctx) orelse {
-            _ = sendSimpleError(conn, 404, "not found") catch 0;
-            return false;
-        };
-
-        const res = handler(&ctx) catch {
-            _ = sendSimpleError(conn, 500, "handler error") catch 0;
-            return false;
+        const maybe_handler = self.router.match(method, ctx.path, &ctx);
+        const res: Response = blk: {
+            if (maybe_handler) |h| {
+                const handler_res = h(&ctx) catch |err| {
+                    if (self.router.error_handler) |eh| {
+                        break :blk eh(&ctx, err) catch Response{ .status = 500, .body = "Internal Server Error", .content_type = "text/plain; charset=utf-8" };
+                    } else if (self.router.status_handlers.get(500)) |sh| {
+                        break :blk sh(&ctx) catch Response{ .status = 500, .body = "Internal Server Error", .content_type = "text/plain; charset=utf-8" };
+                    } else {
+                        break :blk Response{ .status = 500, .body = "Internal Server Error", .content_type = "text/plain; charset=utf-8" };
+                    }
+                };
+                break :blk handler_res;
+            } else {
+                if (self.router.not_found_handler) |nf| {
+                    break :blk nf(&ctx) catch Response{ .status = 404, .body = "Not Found", .content_type = "text/plain; charset=utf-8" };
+                } else if (self.router.status_handlers.get(404)) |sh| {
+                    break :blk sh(&ctx) catch Response{ .status = 404, .body = "Not Found", .content_type = "text/plain; charset=utf-8" };
+                } else {
+                    break :blk Response{ .status = 404, .body = "Not Found", .content_type = "text/plain; charset=utf-8" };
+                }
+            }
         };
 
         const bytes_out = writeResponse(conn, arena, req_head.minor_version, res, is_head, if (client_close) "close" else "keep-alive", ctx.header("Accept-Encoding")) catch {

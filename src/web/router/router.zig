@@ -50,6 +50,33 @@ pub const Context = struct {
         return null;
     }
 
+    /// Extracts Bearer token from Authorization header if present.
+    pub fn bearerToken(self: *const Context) ?[]const u8 {
+        const hv = self.header("Authorization") orelse return null;
+        const prefix = "Bearer ";
+        if (!std.ascii.startsWithIgnoreCase(hv, prefix)) return null;
+        const tok = std.mem.trim(u8, hv[prefix.len..], " ");
+        if (tok.len == 0) return null;
+        return tok;
+    }
+
+    /// Extracts and parses Basic Auth credentials from Authorization header if present.
+    pub fn basicAuth(self: *const Context) ?struct { username: []const u8, password: []const u8 } {
+        const hv = self.header("Authorization") orelse return null;
+        const prefix = "Basic ";
+        if (!std.ascii.startsWithIgnoreCase(hv, prefix)) return null;
+        const b64 = std.mem.trim(u8, hv[prefix.len..], " ");
+        const decoder = std.base64.standard.Decoder;
+        const decoded_len = decoder.calcSizeForSlice(b64) catch return null;
+        const buf = self.allocator.alloc(u8, decoded_len) catch return null;
+        decoder.decode(buf, b64) catch return null;
+        const colon = std.mem.indexOfScalar(u8, buf, ':') orelse return null;
+        return .{
+            .username = buf[0..colon],
+            .password = buf[colon + 1 ..],
+        };
+    }
+
     /// Deserializes JSON request body into type `T`.
     pub fn json(self: *const Context, comptime T: type) !T {
         const parsed = try std.json.parseFromSlice(T, self.allocator, self.body, .{
@@ -61,24 +88,45 @@ pub const Context = struct {
     /// Renders an HTML response.
     pub fn html(self: *const Context, content: []const u8) Response {
         _ = self;
+        return Response.html(content);
+    }
+
+    /// Renders an HTML response with custom status code.
+    pub fn htmlStatus(self: *const Context, code: u16, content: []const u8) Response {
+        _ = self;
         return .{
-            .status = 200,
+            .status = code,
             .body = content,
             .content_type = "text/html; charset=utf-8",
         };
     }
 
-    /// Renders a JSON response from a serialized string or struct.
+    /// Renders a JSON response from a serialized string or struct (200 OK).
     pub fn renderJson(self: *const Context, value: anytype) !Response {
+        return self.renderJsonStatus(200, value);
+    }
+
+    /// Renders a JSON response with a custom status code.
+    pub fn renderJsonStatus(self: *const Context, code: u16, value: anytype) !Response {
         const T = @TypeOf(value);
         if (T == []const u8 or T == []u8) {
             return Response{
-                .status = 200,
+                .status = code,
                 .body = value,
                 .content_type = "application/json",
             };
         }
         const str = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
+        return Response{
+            .status = code,
+            .body = str,
+            .content_type = "application/json",
+        };
+    }
+
+    /// Formatted JSON response from a format string and arguments.
+    pub fn jsonFmt(self: *const Context, comptime fmt: []const u8, args: anytype) !Response {
+        const str = try std.fmt.allocPrint(self.allocator, fmt, args);
         return Response{
             .status = 200,
             .body = str,
@@ -89,10 +137,27 @@ pub const Context = struct {
     /// Renders a plain text response.
     pub fn text(self: *const Context, content: []const u8) Response {
         _ = self;
+        return Response.text(content);
+    }
+
+    /// Renders a plain text response with custom status code.
+    pub fn textStatus(self: *const Context, code: u16, content: []const u8) Response {
+        _ = self;
         return .{
-            .status = 200,
+            .status = code,
             .body = content,
             .content_type = "text/plain; charset=utf-8",
+        };
+    }
+
+    /// HTTP Redirect response (default 302 Found or 301/307/308).
+    pub fn redirect(self: *const Context, location: []const u8, code: ?u16) !Response {
+        const headers_slice = try self.allocator.alloc(Header, 1);
+        headers_slice[0] = .{ .name = "Location", .value = location };
+        return Response{
+            .status = code orelse 302,
+            .body = "",
+            .headers = headers_slice,
         };
     }
 };
@@ -128,6 +193,13 @@ pub const Response = struct {
             .content_type = "application/json",
         };
     }
+
+    pub fn empty(status_code: u16) Response {
+        return .{
+            .status = status_code,
+            .body = "",
+        };
+    }
 };
 
 pub const RouteError = error{
@@ -150,17 +222,41 @@ const RouteEntry = struct {
     meta: meta_mod.Metadata = .{},
 };
 
+pub const ErrorHandlerFn = *const fn (*Context, anyerror) anyerror!Response;
+
 pub const Router = struct {
     allocator: Allocator,
     routes: std.ArrayList(RouteEntry) = .empty,
+    not_found_handler: ?HandlerFn = null,
+    error_handler: ?ErrorHandlerFn = null,
+    status_handlers: std.AutoHashMap(u16, HandlerFn),
 
     pub fn init(allocator: Allocator) Router {
-        return .{ .allocator = allocator };
+        return .{
+            .allocator = allocator,
+            .status_handlers = std.AutoHashMap(u16, HandlerFn).init(allocator),
+        };
     }
 
     pub fn deinit(self: *Router) void {
         for (self.routes.items) |entry| self.allocator.free(entry.path);
         self.routes.deinit(self.allocator);
+        self.status_handlers.deinit();
+    }
+
+    /// Sets a custom 404 Not Found handler (HTML, JSON, custom template, etc.)
+    pub fn setNotFoundHandler(self: *Router, handler: HandlerFn) void {
+        self.not_found_handler = handler;
+    }
+
+    /// Sets a custom 500 / Exception handler (HTML, JSON error envelope, etc.)
+    pub fn setErrorHandler(self: *Router, handler: ErrorHandlerFn) void {
+        self.error_handler = handler;
+    }
+
+    /// Sets a custom error page / response handler for a specific HTTP status code (e.g. 403, 404, 500, 502, 503).
+    pub fn setStatusHandler(self: *Router, status_code: u16, handler: HandlerFn) !void {
+        try self.status_handlers.put(status_code, handler);
     }
 
     pub fn add(self: *Router, method: Method, path: []const u8, handler: *const fn (*Context) anyerror!Response) RouteError!void {

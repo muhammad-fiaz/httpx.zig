@@ -145,17 +145,24 @@ pub const multipart = struct {
     pub const parser = @import("web/multipart/parser.zig");
 };
 
-// Client
-pub const Client = @import("client/client.zig").Client;
-pub const ClientResponse = @import("client/request.zig").Response;
+// Client API
 pub const client_request = @import("client/request.zig");
 pub const cookies = @import("client/cookies.zig");
 pub const pool = @import("client/pool.zig");
+pub const Client = @import("client/client.zig").Client;
+pub const ClientConfig = @import("client/client.zig").Config;
+pub const RequestOptions = @import("client/client.zig").RequestOptions;
+pub const ClientResponse = client_request.Response;
+pub const Header = client_request.Header;
+pub const Headers = headers_mod.Headers;
+pub const CookieJar = cookies.Jar;
+pub const ConnectionPool = pool.Pool;
+pub const PoolConfig = pool.PoolConfig;
 
-/// Legacy low-level client (requires explicit allocator + io).
-pub const client = client_request;
-
-/// Top-level zero-config client aliases (all HTTP methods + fetch/request).
+// Zero-config client functions & ubiquitous verb aliases
+pub const fetch = @import("client/client.zig").globalFetch;
+pub const request = @import("client/client.zig").globalRequest;
+pub const send = @import("client/client.zig").globalSend;
 pub const get = @import("client/client.zig").globalGet;
 pub const post = @import("client/client.zig").globalPost;
 pub const put = @import("client/client.zig").globalPut;
@@ -165,57 +172,52 @@ pub const head = @import("client/client.zig").globalHead;
 pub const options = @import("client/client.zig").globalOptions;
 pub const trace = @import("client/client.zig").globalTrace;
 pub const connect = @import("client/client.zig").globalConnect;
-pub const fetch = @import("client/client.zig").globalFetch;
-pub const send = @import("client/client.zig").globalSend;
-pub const request = @import("client/client.zig").globalRequest;
 pub const getAll = @import("client/client.zig").globalGetAll;
 pub const requestAll = @import("client/client.zig").globalRequestAll;
 
-// Server
+// Server API
 pub const server_lifecycle = @import("server/lifecycle.zig");
 pub const server_context = @import("server/context.zig");
 pub const Server = server_lifecycle.Server;
+pub const ServerConfig = server_lifecycle.Config;
+pub const Router = router_mod.Router;
+pub const Context = router_mod.Context;
+pub const Response = router_mod.Response;
+pub const ServerResponse = router_mod.Response;
 pub const TlsListener = tls_mod.tls_server.TlsListener;
 pub const TlsListenerConfig = tls_mod.tls_server.ListenerConfig;
 pub const TlsConfig = tls_mod.config.ServerConfig;
 pub const TlsClientConfig = tls_mod.config.ClientConfig;
 
-// FTP / FTPS
-pub const ftp = @import("protocols/ftp/client.zig");
-pub const ftp_server = @import("protocols/ftp/server.zig");
+// Concurrency & Utilities
+pub const WorkerPool = concurrency.worker_pool.Pool;
+pub const WorkerPoolConfig = concurrency.worker_pool.Config;
+pub const Queue = concurrency.queue.BoundedQueue;
+pub const RateLimiter = @import("web/middleware/security.zig").RateLimiter;
+pub const Metrics = metrics.Registry;
+pub const Logger = logging.Logger;
+pub const LogLevel = logging.Level;
+pub const LogSink = logging.Sink;
+pub const LogRecord = logging.Record;
+pub const LogField = logging.Field;
+pub const WriterSink = logging.WriterSink;
 
-// Re-exports for convenience
-pub const Headers = headers_mod.Headers;
-pub const Header = client_request.Header;
+// Networking & Protocol Types
+pub const Address = address.Address;
 pub const Uri = uri_mod.Uri;
 pub const Method = method_mod.Method;
 pub const Status = status.Status;
-pub const Router = router_mod.Router;
-pub const Context = router_mod.Context;
-pub const Response = router_mod.Response;
-
-pub const Address = address.Address;
 pub const Http1Parser = http1.parser.Http1Parser;
 pub const ChunkedDecoder = http1.parser.ChunkedDecoder;
 pub const H2Session = http2.connection.Session;
 pub const AlpnProtocol = tls_mod.alpn.Protocol;
 pub const ApplicationProtocol = tls_mod.alpn.Protocol;
 
-pub const Logger = logging.Logger;
-pub const LogLevel = logging.Level;
-/// Custom logger integration: implement Sink.logFn (ptr + callback) to
-/// bridge ANY external logging library — your formatting, your colors.
-pub const LogSink = logging.Sink;
-pub const LogRecord = logging.Record;
-pub const LogField = logging.Field;
-pub const WriterSink = logging.WriterSink;
-pub const Metrics = metrics.Registry;
-pub const CookieJar = cookies.Jar;
-pub const ConnectionPool = pool.Pool;
-pub const PoolConfig = pool.PoolConfig;
-pub const ClientConfig = @import("client/client.zig").Config;
-pub const RequestOptions = @import("client/client.zig").RequestOptions;
+// FTP
+pub const ftp = @import("protocols/ftp/client.zig");
+pub const ftp_server = @import("protocols/ftp/server.zig");
 
+// Version
 pub const name = @import("common/version.zig").name;
 pub const version = @import("common/version.zig").version;
 

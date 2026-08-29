@@ -65,12 +65,16 @@ fn findEolWithOptions(buf: []const u8, pos: usize, opts: Options) ParseError!usi
     while (i < buf.len) : (i += 1) {
         const c = buf[i];
         if (c == '\n') {
-            if (!opts.allow_lf_line_endings and i > pos and buf[i - 1] != '\r' and i == pos) {
-                // Bare LF at start of line is only allowed with flag; fall through to check
+            // In strict mode (allow_lf_line_endings == false), line must end in \r\n
+            if (!opts.allow_lf_line_endings) {
+                if (i == pos or buf[i - 1] != '\r') {
+                    return ParseError.MalformedHeaderLine;
+                }
             }
             return i;
         }
-        if (isCtl(c) and c != '\r') return ParseError.MalformedRequestLine;
+        // Bare control character check (excluding \r and \t)
+        if (isCtl(c) and c != '\r' and c != '\t') return ParseError.MalformedHeaderLine;
     }
     return ParseError.Incomplete;
 }
@@ -197,7 +201,7 @@ pub fn parseResponseHeadWithOptions(buf: []const u8, opts: Options) ParseError!H
     if (end < buf.len and buf[end] != '\r' and buf[end] != '\n') {
         if (buf[end] != ' ') return ParseError.MalformedStatusLine;
         // Reason phrase runs to EOL (may contain SP/HTAB only as OWS-ish text).
-        const le = findEol(buf, end) catch |e| switch (e) {
+        const le = findEolWithOptions(buf, end, opts) catch |e| switch (e) {
             ParseError.Incomplete => return ParseError.Incomplete,
             else => return ParseError.MalformedStatusLine,
         };
@@ -249,10 +253,14 @@ pub fn parseHeaderBlockWithOptions(buf: []const u8, start: usize, fields: []Fiel
 
     while (true) {
         if (pos >= buf.len) return ParseError.Incomplete;
+        // End of headers detection (empty line):
+        // 1. CRLF empty line: \r\n
+        // 2. LF empty line: \n (allowed only if opts.allow_lf_line_endings)
+        // Lone \r without \n is NOT end-of-headers; it is part of content or malformed line.
         if (buf[pos] == '\r') {
             if (pos + 1 >= buf.len) return ParseError.Incomplete;
             if (buf[pos + 1] == '\n') return .{ .count = n, .end = pos + 2 };
-            if (opts.allow_lf_line_endings) return .{ .count = n, .end = pos + 1 };
+            // If lone \r is encountered at the start of a line, it's not a valid blank line.
             return ParseError.MalformedHeaderLine;
         }
         if (buf[pos] == '\n') {
@@ -260,11 +268,11 @@ pub fn parseHeaderBlockWithOptions(buf: []const u8, start: usize, fields: []Fiel
             return ParseError.MalformedHeaderLine;
         }
 
-        const line_end = try findEol(buf, pos);
+        const line_end = try findEolWithOptions(buf, pos, opts);
         var value_end = line_end;
         if (line_end > pos and buf[line_end - 1] == '\r') value_end -= 1;
 
-        // Whitespace before colon is forbidden (RFC 9112 ï¿½5.1).
+        // Whitespace before colon is forbidden (RFC 9112 §5.1).
         const colon = std.mem.indexOfScalar(u8, buf[pos..value_end], ':') orelse {
             // A line starting with SP/HTAB here is obs-fold.
             if (buf[pos] == ' ' or buf[pos] == '\t') return ParseError.ObsFold;
@@ -284,7 +292,8 @@ pub fn parseHeaderBlockWithOptions(buf: []const u8, start: usize, fields: []Fiel
         while (vs < ve and (buf[vs] == ' ' or buf[vs] == '\t')) vs += 1;
         while (ve > vs and (buf[ve - 1] == ' ' or buf[ve - 1] == '\t')) ve -= 1;
         for (buf[vs..ve]) |ch| {
-            if (isCtl(ch)) return ParseError.MalformedHeaderLine;
+            // Check for control characters (except HTAB and lone \r)
+            if (isCtl(ch) and ch != '\t' and ch != '\r') return ParseError.MalformedHeaderLine;
         }
 
         if (name.len > 256) return ParseError.HeaderTooLarge;
@@ -773,4 +782,31 @@ test "chunked decoder rejects malformed sizes and terminators" {
     @memcpy(b4[0..nodigit.len], nodigit);
     var d4 = ChunkedDecoder.init();
     try std.testing.expectError(ParseError.InvalidChunkSize, d4.decode(b4[0..nodigit.len]));
+}
+
+test "strict mode rejects bare LF in headers while lenient mode accepts it" {
+    const raw = "HTTP/1.1 200 OK\nHost: example.com\nX-Test: value\n\n";
+    var fields: [4]Field = undefined;
+
+    // Strict mode (default) must reject bare LF in header lines
+    try std.testing.expectError(ParseError.MalformedHeaderLine, parseHeaderBlock(raw, 16, fields[0..]));
+
+    // Lenient mode must parse bare LF lines successfully
+    const res = try parseHeaderBlockWithOptions(raw, 16, fields[0..], .{ .allow_lf_line_endings = true });
+    try std.testing.expectEqual(@as(usize, 2), res.count);
+    try std.testing.expectEqualStrings("Host", fields[0].name);
+    try std.testing.expectEqualStrings("example.com", fields[0].value);
+    try std.testing.expectEqualStrings("X-Test", fields[1].name);
+    try std.testing.expectEqualStrings("value", fields[1].value);
+}
+
+test "lone CR inside header value is treated as data byte, not line terminator" {
+    // Header with a lone \r inside value
+    const raw = "HTTP/1.1 200 OK\r\nHeader: v\rX: y\r\n\r\n";
+    var fields: [4]Field = undefined;
+
+    const res = try parseHeaderBlockWithOptions(raw, 17, fields[0..], .{ .allow_lf_line_endings = true });
+    try std.testing.expectEqual(@as(usize, 1), res.count);
+    try std.testing.expectEqualStrings("Header", fields[0].name);
+    try std.testing.expectEqualStrings("v\rX: y", fields[0].value);
 }
