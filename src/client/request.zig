@@ -1155,6 +1155,43 @@ test "connection close response is not pooled" {
     try std.testing.expectEqual(@as(u64, 0), st.parked_now);
 }
 
+// Regression: a response with NO Content-Length and NO chunked encoding is
+// framed only by connection close (framing == .none). Reading its body relies
+// on the socket reporting EOF as 0 so the read-until-close loop can stop. The
+// httpx server always emits Content-Length (so "connection close ... not pooled"
+// above misses this), hence the raw server here. Before the tcp.Socket.read EOF
+// fix this failed with ReadFailed.
+test "connection-close body without Content-Length is read to EOF" {
+    const a = std.testing.allocator;
+    var ctx = try t_tcp.IoContext.init(a);
+    defer ctx.deinit();
+
+    var lst = try t_tcp.Listener.bind(ctx.io, 0);
+    defer lst.close(ctx.io);
+    const port = lst.localPort();
+
+    const RawServer = struct {
+        fn run(l: *t_tcp.Listener, io: std.Io) void {
+            var sock = l.accept(io) catch return;
+            defer sock.close();
+            var buf: [1024]u8 = undefined;
+            _ = sock.read(&buf) catch {}; // consume the request
+            // Head, blank line, body, then close — no Content-Length/chunked.
+            sock.writeAll("HTTP/1.1 200 OK\r\n\r\nclose-delimited-body") catch {};
+        }
+    };
+    const th = std.Thread.spawn(.{}, RawServer.run, .{ &lst, ctx.io }) catch return;
+    defer th.join();
+
+    var ub: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&ub, "http://127.0.0.1:{d}/", .{port});
+    var resp = try request(a, ctx.io, .{ .method = .GET, .url = url });
+    defer resp.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expectEqualStrings("close-delimited-body", resp.body);
+}
+
 test "https without explicit tls options fails fast" {
     const a = std.testing.allocator;
     var ctx = t_tcp.IoContext.init(a) catch return;

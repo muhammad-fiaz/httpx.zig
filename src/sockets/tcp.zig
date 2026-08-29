@@ -2,7 +2,7 @@
 //!
 //! IPv4 + IPv6 via net/address.Address. Read/write are one-shot syscalls
 //! through the Io vtable: read() returns whatever is available (>=1 byte,
-//! ConnectionClosed at EOF) without waiting to fill the caller's buffer.
+//! or 0 at EOF) without waiting to fill the caller's buffer.
 //!
 //! References:
 //!   - RFC 9112 Section 8 — Connection Management (TCP lifecycle)
@@ -425,7 +425,7 @@ pub const Socket = struct {
                         else => ReadError.ReadFailed,
                     };
                 }
-                if (rc == 0) return ReadError.ConnectionClosed;
+                if (rc == 0) return 0; // EOF
                 return @intCast(rc);
             },
             .stream => |st| {
@@ -434,7 +434,7 @@ pub const Socket = struct {
                     error.ConnectionResetByPeer, error.Unexpected => return ReadError.ConnectionReset,
                     else => return ReadError.ReadFailed,
                 };
-                if (n == 0) return ReadError.ConnectionClosed;
+                if (n == 0) return 0; // EOF
                 return n;
             },
         }
