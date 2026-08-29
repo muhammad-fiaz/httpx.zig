@@ -370,7 +370,9 @@ pub const Socket = struct {
     pub fn close(self: *const Socket) void {
         if (!self.acquireClose()) return;
         switch (self.inner) {
-            .winsock => |s| if (is_windows) { _ = ws.closesocket(s); },
+            .winsock => |s| if (is_windows) {
+                _ = ws.closesocket(s);
+            },
             .stream => |st| st.close(self.io),
         }
     }
@@ -378,7 +380,9 @@ pub const Socket = struct {
     /// Signals end-of-stream to the peer without dropping unread data.
     pub fn shutdownWrite(self: *const Socket) void {
         switch (self.inner) {
-            .winsock => |s| if (is_windows) { _ = ws.shutdown(s, ws.SD_SEND); },
+            .winsock => |s| if (is_windows) {
+                _ = ws.shutdown(s, ws.SD_SEND);
+            },
             .stream => |st| st.shutdown(self.io, .send) catch {},
         }
     }
@@ -393,7 +397,9 @@ pub const Socket = struct {
             if (n == 0) break;
         }
         switch (self.inner) {
-            .winsock => |s| if (is_windows) { _ = ws.closesocket(s); },
+            .winsock => |s| if (is_windows) {
+                _ = ws.closesocket(s);
+            },
             .stream => |st| st.close(self.io),
         }
     }

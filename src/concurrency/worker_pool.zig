@@ -237,4 +237,3 @@ test "pool cancel queued tasks" {
 }
 
 fn dummy(_: ?*anyopaque, _: *std.atomic.Value(bool)) void {}
-

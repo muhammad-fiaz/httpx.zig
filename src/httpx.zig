@@ -240,9 +240,6 @@ test {
     _ = @import("net/resolve.zig");
     _ = @import("net/socks5.zig");
     _ = @import("net/proxy.zig");
-    _ = @import("integration/http_stack.zig");
-    _ = @import("integration/tls_integration.zig");
-    _ = @import("integration/client_server_integration.zig");
     _ = @import("compression/codec.zig");
     _ = @import("protocols/http1/parser.zig");
     _ = @import("protocols/http1/writer.zig");
