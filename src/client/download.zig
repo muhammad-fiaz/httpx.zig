@@ -545,7 +545,7 @@ const FileOps = struct {
             if (fd < 0) return false;
             defer _ = std.c.close(fd);
             var st: std.c.Stat = undefined;
-            if (std.c.fstat(fd, &st) != 0) return false;
+            if (c_fs.fstat(fd, &st) != 0) return false;
             return (st.mode & 0o170000) == 0o040000;
         }
     }

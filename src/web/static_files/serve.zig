@@ -251,6 +251,10 @@ pub const c_fs = struct {
     pub const FILE_HANDLE = if (is_win) std.os.windows.HANDLE else std.c.fd_t;
     pub const INVALID_HANDLE: FILE_HANDLE = if (is_win) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
+    pub const fstat = if (!is_win) struct {
+        pub extern "c" fn fstat(fd: std.c.fd_t, buf: *std.c.Stat) c_int;
+    }.fstat else struct {};
+
     pub fn openRead(path: []const u8) ?FILE_HANDLE {
         if (is_win) {
             var wide_buf: [std.os.windows.PATH_MAX_WIDE:0]u16 = undefined;
@@ -386,9 +390,11 @@ pub fn statPath(io: std.Io, path: []const u8) ?FileMeta {
         return .{ .size = @intCast(size), .mtime_ns = mtime_ns };
     } else {
         var st: std.c.Stat = undefined;
-        if (std.c.fstat(h, &st) != 0) return null;
+        if (c_fs.fstat(h, &st) != 0) return null;
         if ((st.mode & 0o170000) != 0o100000) return null;
-        return .{ .size = @intCast(st.size), .mtime_ns = @intCast(st.mtime().nsec) };
+        const mt = st.mtime();
+        const mtime_ns = @as(i128, mt.sec) * std.time.ns_per_s + @as(i128, @intCast(mt.nsec));
+        return .{ .size = @intCast(st.size), .mtime_ns = mtime_ns };
     }
 }
 

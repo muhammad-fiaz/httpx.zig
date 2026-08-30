@@ -2,13 +2,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
+    compile.root_module.link_libc = true;
     if (target.result.os.tag == .windows) {
         // Winsock symbols are provided by these system libraries on Windows.
         compile.root_module.linkSystemLibrary("ws2_32", .{});
         compile.root_module.linkSystemLibrary("mswsock", .{});
-        compile.root_module.linkSystemLibrary("c", .{});
     }
 }
+
 
 /// Build configuration for httpx.zig - Production-ready HTTP library for Zig
 /// Supports HTTP/1.1, HTTP/2, HTTP/3 with TLS, connection pooling, and more.
