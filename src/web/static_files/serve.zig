@@ -374,10 +374,10 @@ pub fn statPath(_: ?std.Io, path: []const u8) ?FileMeta {
         defer c_fs.close(h);
 
         var size: i64 = 0;
-        if (c_fs.GetFileSizeEx(h, &size) == 0) return null;
+        if (c_fs.GetFileSizeEx(h, &size) == .FALSE) return null;
 
         var ft: std.os.windows.FILETIME = undefined;
-        if (c_fs.GetFileTime(h, null, null, &ft) == 0) return null;
+        if (c_fs.GetFileTime(h, null, null, &ft) == .FALSE) return null;
 
         const ft_u64: u64 = (@as(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
         // Convert Windows 100-ns intervals from 1601 to Unix epoch ns from 1970
@@ -415,7 +415,7 @@ fn readAll(_: ?std.Io, path: []const u8, dest: []u8) !void {
         while (total_read < dest.len) {
             var bytes_read: u32 = 0;
             const to_read: u32 = @intCast(@min(dest.len - total_read, std.math.maxInt(u32)));
-            if (c_fs.ReadFile(h, dest[total_read..].ptr, to_read, &bytes_read, null) == 0) return error.UnexpectedEof;
+            if (c_fs.ReadFile(h, dest[total_read..].ptr, to_read, &bytes_read, null) == .FALSE) return error.UnexpectedEof;
             if (bytes_read == 0) break;
             total_read += bytes_read;
         }
@@ -444,7 +444,7 @@ pub fn writeFile(path: []const u8, content: []const u8) !void {
         while (total_written < content.len) {
             var bytes_written: u32 = 0;
             const to_write: u32 = @intCast(@min(content.len - total_written, std.math.maxInt(u32)));
-            if (c_fs.WriteFile(h, content[total_written..].ptr, to_write, &bytes_written, null) == 0) return error.WriteFailed;
+            if (c_fs.WriteFile(h, content[total_written..].ptr, to_write, &bytes_written, null) == .FALSE) return error.WriteFailed;
             if (bytes_written == 0) return error.WriteFailed;
             total_written += bytes_written;
         }
@@ -467,13 +467,13 @@ fn readRange(_: ?std.Io, path: []const u8, offset: u64, dest: []u8) !void {
         defer c_fs.close(h);
 
         const FILE_BEGIN: u32 = 0;
-        if (c_fs.SetFilePointerEx(h, @intCast(offset), null, FILE_BEGIN) == 0) return error.SeekFailed;
+        if (c_fs.SetFilePointerEx(h, @intCast(offset), null, FILE_BEGIN) == .FALSE) return error.SeekFailed;
 
         var total_read: usize = 0;
         while (total_read < dest.len) {
             var bytes_read: u32 = 0;
             const to_read: u32 = @intCast(@min(dest.len - total_read, std.math.maxInt(u32)));
-            if (c_fs.ReadFile(h, dest[total_read..].ptr, to_read, &bytes_read, null) == 0) return error.UnexpectedEof;
+            if (c_fs.ReadFile(h, dest[total_read..].ptr, to_read, &bytes_read, null) == .FALSE) return error.UnexpectedEof;
             if (bytes_read == 0) break;
             total_read += bytes_read;
         }
