@@ -233,38 +233,60 @@ pub const TlsServer = struct {
         const a = self.config.allocator;
 
         var engine = engine_mod.Engine.initServer(a, .{});
+        defer engine.deinit();
 
-        // Read ClientHello
+        // Read initial bytes (at least 5 bytes to inspect TLS Record or Handshake header)
         var read_buf: [16384]u8 = undefined;
         var total_read: usize = 0;
-        while (total_read < 4) {
+        while (total_read < 5) {
             const n = socket.read(read_buf[total_read..]) catch return error.IoError;
             if (n == 0) return error.TlsHandshakeFailed;
             total_read += n;
         }
 
-        // Parse handshake header
-        if (read_buf[0] != @intFromEnum(handshake_mod.HandshakeType.client_hello)) {
+        var ch_offset: usize = 0;
+        var body_len: u24 = 0;
+
+        if (read_buf[0] == @intFromEnum(record_mod.ContentType.handshake)) {
+            // Standard framed TLS Record: [0]=0x16, [1..2]=version, [3..4]=record_len, [5..]=handshake
+            const record_len = std.mem.readInt(u16, read_buf[3..5], .big);
+            const total_needed = 5 + @as(usize, record_len);
+            if (total_needed > read_buf.len) return error.TlsHandshakeFailed;
+            while (total_read < total_needed) {
+                const n = socket.read(read_buf[total_read..]) catch return error.IoError;
+                if (n == 0) return error.TlsHandshakeFailed;
+                total_read += n;
+            }
+            if (read_buf[5] != @intFromEnum(handshake_mod.HandshakeType.client_hello)) {
+                return error.TlsHandshakeFailed;
+            }
+            body_len = @as(u24, @intCast(read_buf[6])) << 16 |
+                @as(u24, @intCast(read_buf[7])) << 8 |
+                @as(u24, @intCast(read_buf[8]));
+            if (body_len > max_handshake_body or 5 + 4 + body_len > total_read) return error.TlsHandshakeFailed;
+            ch_offset = 5;
+        } else if (read_buf[0] == @intFromEnum(handshake_mod.HandshakeType.client_hello)) {
+            // Raw Handshake framing without record layer
+            body_len = @as(u24, @intCast(read_buf[1])) << 16 |
+                @as(u24, @intCast(read_buf[2])) << 8 |
+                @as(u24, @intCast(read_buf[3]));
+            if (body_len > max_handshake_body) return error.TlsHandshakeFailed;
+            while (total_read < 4 + body_len) {
+                const n = socket.read(read_buf[total_read..]) catch return error.IoError;
+                if (n == 0) return error.TlsHandshakeFailed;
+                total_read += n;
+            }
+            ch_offset = 0;
+        } else {
             return error.TlsHandshakeFailed;
-        }
-        const body_len: u24 = @as(u24, @intCast(read_buf[1])) << 16 |
-            @as(u24, @intCast(read_buf[2])) << 8 |
-            @as(u24, @intCast(read_buf[3]));
-        if (body_len > max_handshake_body) return error.TlsHandshakeFailed;
-
-        // Read remaining body
-        while (total_read < 4 + body_len) {
-            const n = socket.read(read_buf[total_read..]) catch return error.IoError;
-            if (n == 0) return error.TlsHandshakeFailed;
-            total_read += n;
         }
 
         // Parse the ClientHello body for SNI and ALPN
-        const ch_body = read_buf[4..][0..body_len];
+        const ch_body = read_buf[ch_offset + 4 ..][0..body_len];
         var parsed_ch = try parseClientHelloExtensions(a, ch_body);
         defer parsed_ch.alpn_protocols.deinit(a);
 
-        // Feed the full ClientHello (header + body) to the transcript
+        // Feed the full ClientHello (handshake header + body) to the transcript
         try engine.processClientHello(ch_body);
 
         // Store SNI in engine

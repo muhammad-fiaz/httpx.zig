@@ -61,7 +61,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "simple-server", .path = "examples/simple_server.zig" },
         .{ .name = "static-files", .path = "examples/static_files.zig" },
         .{ .name = "health-check", .path = "examples/health_check.zig" },
-        .{ .name = "tls-get", .path = "examples/tls_get.zig" },
+        .{ .name = "tls-get", .path = "examples/tls_get.zig", .skip_run_all = true },
         .{ .name = "resolve", .path = "examples/resolve.zig" },
         .{ .name = "openapi", .path = "examples/openapi.zig" },
         .{ .name = "http10-client", .path = "examples/http10_client.zig" },

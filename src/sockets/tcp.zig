@@ -543,23 +543,27 @@ pub fn initWinsock() void {
     if (is_windows) ws.startup();
 }
 
-/// On Windows (Zig 0.16), closing an AFD listener socket while a thread is
-/// blocked in netAcceptWindows returns STATUS_CANCELLED, which the stdlib marks
-/// `unreachable` and panics. Instead, connect a dummy socket to the listening
-/// port to wake the blocked accept() call naturally.
-/// On non-Windows this is a no-op (caller should close the listener directly).
+/// Connect a dummy socket to the listening port to wake any blocked accept()
+/// call naturally across all platforms (Windows, Linux, macOS) so the accept
+/// thread exits without hanging or triggering runtime teardown race conditions.
 pub fn wakeListenerPort(port: u16) void {
-    if (comptime !is_windows) return;
-    initWinsock();
-    const sock = ws.socket(ws.AF_INET, ws.SOCK_STREAM, ws.IPPROTO_TCP);
-    if (sock == ws.INVALID_SOCKET) return;
-    var sa = ws.sockaddr_in{
-        .family = @intCast(ws.AF_INET),
-        .port = @byteSwap(port),
-        .addr = .{ 127, 0, 0, 1 },
-    };
-    _ = ws.connect(sock, &sa, @sizeOf(ws.sockaddr_in));
-    _ = ws.closesocket(sock);
+    if (is_windows) {
+        initWinsock();
+        const sock = ws.socket(ws.AF_INET, ws.SOCK_STREAM, ws.IPPROTO_TCP);
+        if (sock == ws.INVALID_SOCKET) return;
+        var sa = ws.sockaddr_in{
+            .family = @intCast(ws.AF_INET),
+            .port = @byteSwap(port),
+            .addr = .{ 127, 0, 0, 1 },
+        };
+        _ = ws.connect(sock, &sa, @sizeOf(ws.sockaddr_in));
+        _ = ws.closesocket(sock);
+    } else {
+        const sock_fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM | std.posix.SOCK.CLOEXEC, 0) catch return;
+        defer std.posix.close(sock_fd);
+        const sa = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+        _ = std.posix.connect(sock_fd, &sa.any, sa.getOsSockLen()) catch {};
+    }
 }
 
 // Connect

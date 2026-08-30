@@ -130,7 +130,7 @@ pub const Connection = struct {
         io.random(&entropy);
 
         const host_opt: @TypeOf(@as(tls.Client.Options, undefined).host) =
-            if (conf.host.len > 0) .{ .explicit = conf.host } else .no_verification;
+            if (conf.verify != .none and conf.host.len > 0) .{ .explicit = conf.host } else .no_verification;
         const ca_opt: @TypeOf(@as(tls.Client.Options, undefined).ca) = switch (conf.verify) {
             .none => .no_verification,
             .self_signed => .self_signed,

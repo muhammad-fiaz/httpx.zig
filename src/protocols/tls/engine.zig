@@ -162,6 +162,10 @@ pub const Engine = struct {
     // SNI hostname from ClientHello
     sni_hostname: ?[]const u8 = null,
 
+    // Legacy session ID from ClientHello to echo in ServerHello
+    legacy_session_id_buf: [32]u8 = undefined,
+    legacy_session_id_len: u8 = 0,
+
     // Handshake state
     state: State = .start,
 
@@ -197,6 +201,13 @@ pub const Engine = struct {
             .cbs = cbs,
             .transcript = Transcript.init(),
         };
+    }
+
+    pub fn deinit(self: *Engine) void {
+        if (self.sni_hostname) |sni| {
+            self.allocator.free(sni);
+            self.sni_hostname = null;
+        }
     }
 
     /// Derive the handshake secret from the ECDHE shared secret.
@@ -323,9 +334,19 @@ pub const Engine = struct {
     /// Processes a ClientHello message received from the wire.
     pub fn processClientHello(self: *Engine, body: []const u8) !void {
         self.transcript.feed(body);
-        // Minimal SNI extraction: scan extensions for server_name (type 0)
+        // Extract legacy_session_id and SNI from ClientHello:
+        //   [0..2]   client_version (0x0303)
+        //   [2..34]  random (32 bytes)
+        //   [34]     legacy_session_id_length (u8)
+        //   [35..]   legacy_session_id
         if (body.len > 34) {
-            var pos: usize = 34;
+            const sid_len = body[34];
+            if (sid_len <= 32 and 35 + @as(usize, sid_len) <= body.len) {
+                @memcpy(self.legacy_session_id_buf[0..sid_len], body[35 .. 35 + sid_len]);
+                self.legacy_session_id_len = sid_len;
+            }
+
+            var pos: usize = 35 + @as(usize, sid_len);
             if (pos + 2 <= body.len) {
                 const cs_len: usize = (@as(usize, body[pos]) << 8) | body[pos + 1];
                 pos += 2 + cs_len;
@@ -386,17 +407,35 @@ pub const Engine = struct {
         self.local_keypair = try x25519.KeyPair.generateDeterministic(seed);
         const pubkey = self.local_keypair.public_key;
 
-        // ServerHello
+        // ServerHello (RFC 8446 Section 4.1.3):
+        //   legacy_version: 0x0303 (TLS 1.2)
+        //   random: 32 bytes
+        //   legacy_session_id_echo: 1 byte len + echo bytes
+        //   cipher_suite: 2 bytes
+        //   legacy_compression_method: 0x00 (1 byte)
+        //   extensions: 2 bytes len + extensions
         var sh_body = std.ArrayList(u8).empty;
         defer sh_body.deinit(self.allocator);
 
-        // server_random
+        // legacy_version (0x0303)
+        try sh_body.appendSlice(self.allocator, &.{ 0x03, 0x03 });
+
+        // server_random (32 bytes)
         var server_random: [32]u8 = undefined;
         fillRandom(&server_random);
         try sh_body.appendSlice(self.allocator, &server_random);
 
+        // legacy_session_id_echo
+        try sh_body.append(self.allocator, self.legacy_session_id_len);
+        if (self.legacy_session_id_len > 0) {
+            try sh_body.appendSlice(self.allocator, self.legacy_session_id_buf[0..self.legacy_session_id_len]);
+        }
+
         // cipher_suite
         try sh_body.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(self.selected_suite))));
+
+        // legacy_compression_method (0x00)
+        try sh_body.append(self.allocator, 0x00);
 
         // extensions
         var exts = std.ArrayList(u8).empty;
