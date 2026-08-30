@@ -1,7 +1,7 @@
 //! Example: HTML/XML/Feed/Robots/Sitemap parsing with httpx.zig
 //!
 //! Demonstrates the full parsing API:
-//!   * Unified `httpx.parsing.init(allocator, .{})` instance
+//!   * Unified `httpx.Parser.init(allocator, .{})` instance
 //!   * Parser `parseHtml`, `parseXml`, `parseFeed`, `parseRobots`, `parseSitemap`
 //!   * Direct dot-notation access on parsed elements and collections
 //!   * Clean lifecycle: `doc.deinit()` frees all extracted structures and nodes
@@ -20,7 +20,7 @@ pub fn main() !void {
     std.debug.print("\n==> httpx.zig Unified Parsing & Inspection Subsystem Demo\n\n", .{});
 
     // 1. Initialize the unified Parser instance with the allocator once
-    var p = httpx.parsing.init(allocator, .{});
+    var p = httpx.Parser.init(allocator, .{});
 
     // 1. HTML Parsing & DOM Inspection
     std.debug.print("1. HTML Parsing & DOM Inspection\n", .{});

@@ -271,7 +271,7 @@ pub const DownloadResult = struct {
         const len = @min(dest_path.len, res.destination_buf.len);
         @memcpy(res.destination_buf[0..len], dest_path[0..len]);
         res.destination_len = len;
-        res.destination = dest_path; // Points to external buffer if valid
+        res.destination = res.destination_buf[0..len];
         return res;
     }
 
@@ -1322,7 +1322,10 @@ pub fn ftpDownload(
     }) catch return DownloadError.ConnectionFailed;
     defer ftp.deinit();
 
-    try ftp.login(options.user, options.password);
+    ftp.login(options.user, options.password) catch |err| switch (err) {
+        error.ConnectFailed => return DownloadError.ConnectionFailed,
+        else => return DownloadError.AuthenticationFailed,
+    };
 
     const remote_size = ftp.size(options.remote_path) catch null;
 

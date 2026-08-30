@@ -8,8 +8,8 @@ pub fn main() !void {
 
     var server = try httpx.Server.init(allocator, .{
         .host = "127.0.0.1",
-        .port = 8080,
-        .max_connections = 2,
+        .port = 0,
+        .max_connections = 5,
     });
     defer server.deinit();
 
@@ -17,10 +17,28 @@ pub fn main() !void {
     try server.get("/dashboard", dashboardHandler);
     try server.get("/logout", logoutHandler);
 
-    std.debug.print("Session server running on http://127.0.0.1:8080\n", .{});
-    std.debug.print("Implement session management with cookies or tokens.\n", .{});
+    const port = server.localPort();
+    std.debug.print("Session server running on http://127.0.0.1:{d}\n", .{port});
 
-    server.run();
+    const ServerThread = struct {
+        fn run(s: *httpx.Server) void {
+            s.run();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+
+    var client = try httpx.Client.init(allocator, .{});
+    defer client.deinit();
+
+    var url_buf: [128]u8 = undefined;
+    const url_login = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/login", .{port});
+    var res = try client.get(url_login);
+    std.debug.print("GET /login -> status={d}, body={s}\n", .{ res.status, res.body });
+    res.deinit();
+
+    server.requestShutdown();
+    t.join();
+    std.debug.print("Session server verification completed successfully.\n", .{});
 }
 
 fn loginHandler(_: *httpx.Context) anyerror!httpx.Response {

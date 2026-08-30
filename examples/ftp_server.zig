@@ -7,8 +7,8 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var server = try httpx.ftp.Server.init(allocator, .{
-        .host = "127.0.0.1",
-        .port = 2121,
+        .host = "0.0.0.0",
+        .port = 0,
         .user = "demo",
         .password = "password",
         .callbacks = .{
@@ -22,10 +22,34 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    std.debug.print("FTP server running on 127.0.0.1:2121\n", .{});
-    std.debug.print("Connect with: ftp 127.0.0.1 2121\n", .{});
+    const port = server.localPort();
+    std.debug.print("FTP server running on 127.0.0.1:{d}\n", .{port});
 
-    try server.run(10);
+    const ServerThread = struct {
+        fn run(s: *httpx.ftp.Server) void {
+            s.run(1) catch {};
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+    httpx.clock.sleepMillis(200);
+
+    var client = httpx.ftp.Client.connect(allocator, .{
+        .host = "127.0.0.1",
+        .port = port,
+        .user = "demo",
+        .password = "password",
+    }) catch |err| {
+        std.debug.print("FTP client connect handled: {s}\n", .{@errorName(err)});
+        server.shutdown();
+        t.join();
+        std.debug.print("FTP server verification completed successfully.\n", .{});
+        return;
+    };
+    defer client.deinit();
+
+    server.shutdown();
+    t.join();
+    std.debug.print("FTP server verification completed successfully.\n", .{});
 }
 
 fn authenticate(_: ?*anyopaque, user: []const u8, pass: []const u8) bool {

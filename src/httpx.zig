@@ -24,7 +24,8 @@ pub const zstd = @import("zstd");
 pub const env = @import("env");
 
 // Common primitives
-pub const version_info = @import("common/version.zig");
+pub const versionInfo = @import("common/version.zig");
+pub const version_info = versionInfo;
 pub const name = version_info.name;
 pub const version = version_info.version;
 pub const errors = @import("common/errors.zig");
@@ -161,7 +162,10 @@ pub const sse = struct {
 pub const ws = struct {
     pub const Handshake = @import("web/websocket/handshake.zig");
     pub const Frame = @import("web/websocket/frame.zig");
+    pub const computeAccept = Handshake.computeAccept;
+    pub const buildUpgradeRequest = Handshake.buildUpgradeRequest;
 };
+pub const websocket = ws;
 
 // Web subsystems
 pub const static = struct {
@@ -218,25 +222,33 @@ pub const download = @import("client/client.zig").globalDownload;
 pub const lookupFileInfo = @import("client/client.zig").globalLookupFileInfo;
 pub const updateFile = @import("client/client.zig").globalUpdateFile;
 pub const verifyFile = @import("client/client.zig").globalVerifyFile;
+pub const fetchSitemap = @import("client/client.zig").globalFetchSitemap;
 pub const ftpDownload = @import("client/download.zig").ftpDownload;
 
 // Download & Progress types
-pub const download_pkg = @import("client/download.zig");
-pub const DownloadOptions = download_pkg.DownloadOptions;
-pub const DownloadResult = download_pkg.DownloadResult;
-pub const DownloadError = download_pkg.DownloadError;
+pub const Download = @import("client/download.zig");
+pub const DownloadOptions = Download.DownloadOptions;
+pub const DownloadResult = Download.DownloadResult;
+pub const DownloadError = Download.DownloadError;
 pub const DownloadTask = struct { url: []const u8, dest: []const u8 };
-pub const RemoteFileInfo = download_pkg.RemoteFileInfo;
-pub const ProgressInfo = download_pkg.ProgressInfo;
-pub const ProgressState = download_pkg.ProgressState;
-pub const ProgressMode = download_pkg.ProgressMode;
-pub const ExistingFilePolicy = download_pkg.ExistingFilePolicy;
-pub const VerifyOptions = download_pkg.VerifyOptions;
-pub const UpdateOptions = download_pkg.UpdateOptions;
-pub const FtpDownloadOptions = download_pkg.FtpDownloadOptions;
+pub const RemoteFileInfo = Download.RemoteFileInfo;
+pub const ProgressInfo = Download.ProgressInfo;
+pub const ProgressState = Download.ProgressState;
+pub const ProgressMode = Download.ProgressMode;
+pub const ExistingFilePolicy = Download.ExistingFilePolicy;
+pub const VerifyOptions = Download.VerifyOptions;
+pub const UpdateOptions = Download.UpdateOptions;
+pub const FtpDownloadOptions = Download.FtpDownloadOptions;
 
 // Parsing & inspection subsystem
 /// Native HTML, XML, RSS/Atom/JSON feeds, robots.txt, and sitemap parsing engine.
+pub const Parser = @import("parsing/document.zig").Parser;
+pub const ParserConfig = @import("parsing/document.zig").ParserConfig;
+pub const Document = @import("parsing/document.zig").Document;
+pub const NodeHandle = @import("parsing/document.zig").NodeHandle;
+pub const NodeList = @import("parsing/document.zig").NodeList;
+pub const ContentKind = @import("parsing/document.zig").ContentKind;
+
 pub const parsing = struct {
     pub const dom = @import("parsing/dom.zig");
     pub const html = @import("parsing/html.zig");
@@ -270,8 +282,8 @@ pub const parsing = struct {
     pub const ChangeFreq = sitemap.ChangeFreq;
     pub const ParsedSelector = selector.ParsedSelector;
     // Unified Parser constructor with allocator and optional options
-    pub fn init(allocator: std.mem.Allocator, config: document.ParserConfig) Parser {
-        return Parser.init(allocator, config);
+    pub fn init(allocator: std.mem.Allocator, config: document.ParserConfig) document.Parser {
+        return document.Parser.init(allocator, config);
     }
     pub const detectKind = document.detectKind;
 };

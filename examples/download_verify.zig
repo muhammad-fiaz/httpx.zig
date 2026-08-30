@@ -30,9 +30,11 @@ pub fn main() !void {
     };
 
     if (result.verified) {
-        std.debug.print("File verified and saved successfully to: {s} (SHA-256: {?s})\n", .{
-            result.destination,
-            if (result.sha256_hex) |*h| h[0..] else null,
+        std.debug.print("File verified and saved successfully to: {s}\n", .{
+            result.destinationPath(),
         });
+        if (result.sha256_hex) |h| {
+            std.debug.print("SHA-256: {s}\n", .{h});
+        }
     }
 }

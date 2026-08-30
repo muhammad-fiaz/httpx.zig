@@ -34,7 +34,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var tls_listener = try httpx.TlsListener.init(allocator, .{
-        .port = 8446,
+        .port = 0,
         .default_identity = .{
             .cert_chain_pem = cert,
             .private_key_pem = key,
@@ -42,8 +42,10 @@ pub fn main() !void {
     });
     defer tls_listener.deinit();
 
+    const port = tls_listener.localPort();
+
     const server_thread = try std.Thread.spawn(.{}, runServer, .{&tls_listener});
-    httpx.clock.sleepMillis(500);
+    httpx.clock.sleepMillis(300);
 
     var client = try httpx.Client.init(allocator, .{
         .tls = .{ .verify = .none },
@@ -51,8 +53,11 @@ pub fn main() !void {
     });
     defer client.deinit();
 
+    var url_buf: [128]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/", .{port});
+
     var response = client.get(.{
-        .url = "https://127.0.0.1:8446/",
+        .url = url,
         .tls = .{ .verify = .none },
     }) catch |err| {
         std.debug.print("TLS error: {s}\n", .{@errorName(err)});
@@ -62,7 +67,7 @@ pub fn main() !void {
     };
     defer response.deinit();
 
-    std.debug.print("HTTPS Status: {d}\n", .{response.status});
+    std.debug.print("Status: {d}\n", .{response.status});
     std.debug.print("Body: {s}\n", .{response.body});
 
     tls_listener.requestShutdown();

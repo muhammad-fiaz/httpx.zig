@@ -287,7 +287,8 @@ pub const TlsServer = struct {
         defer parsed_ch.alpn_protocols.deinit(a);
 
         // Feed the full ClientHello (handshake header + body) to the transcript
-        try engine.processClientHello(ch_body);
+        const full_ch = read_buf[ch_offset..][0 .. 4 + body_len];
+        try engine.processClientHello(full_ch);
 
         // Store SNI in engine
         if (parsed_ch.sni) |sni| {

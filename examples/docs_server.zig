@@ -76,7 +76,7 @@ pub fn main() !void {
 
     var server = try httpx.Server.init(allocator, .{
         .host = "127.0.0.1",
-        .port = 8899,
+        .port = 0,
         .docs_enabled = true,
         .docs = .{
             .title = "HTTPX Modern API Suite",
@@ -87,10 +87,10 @@ pub fn main() !void {
             .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar Reference" },
             .graphiql = .{ .enabled = true, .route = "/graphiql", .graphql_endpoint = "/graphql", .title = "GraphiQL IDE" },
         },
-        .max_connections = 2,
+        .max_connections = 5,
         .logging = .{
             .enabled = true,
-            .color = .always,
+            .color = .never,
         },
     });
     defer server.deinit();
@@ -101,12 +101,25 @@ pub fn main() !void {
 
     const port = server.localPort();
     std.debug.print("[INFO] Server started on http://127.0.0.1:{d}\n", .{port});
-    std.debug.print("  - Home Page:   http://127.0.0.1:{d}/\n", .{port});
-    std.debug.print("  - Swagger UI:  http://127.0.0.1:{d}/docs\n", .{port});
-    std.debug.print("  - ReDoc UI:    http://127.0.0.1:{d}/redoc\n", .{port});
-    std.debug.print("  - Scalar UI:   http://127.0.0.1:{d}/scalar\n", .{port});
-    std.debug.print("  - GraphiQL UI: http://127.0.0.1:{d}/graphiql\n", .{port});
-    std.debug.print("  - OpenAPI Spec:http://127.0.0.1:{d}/openapi.json\n", .{port});
 
-    server.run();
+    const ServerThread = struct {
+        fn run(s: *httpx.Server) void {
+            s.run();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+
+    var client = try httpx.Client.init(allocator, .{});
+    defer client.deinit();
+
+    var url_buf: [128]u8 = undefined;
+    const url_items = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/items", .{port});
+    var res = try client.get(url_items);
+    std.debug.print("GET /api/items -> status={d}, body={s}\n", .{ res.status, res.body });
+    res.deinit();
+
+    server.requestShutdown();
+    t.join();
+    httpx.docs.unmount();
+    std.debug.print("Docs server verification completed successfully.\n", .{});
 }

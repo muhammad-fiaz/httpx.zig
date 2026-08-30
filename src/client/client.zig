@@ -368,6 +368,28 @@ pub const Client = struct {
         return @import("../parsing/sitemap.zig").parse(self.allocator, res.body);
     }
 
+    /// Executes a GraphQL query or mutation against a remote endpoint with typed or string variables.
+    pub fn graphql(self: *Client, url: []const u8, query_str: []const u8, variables: anytype, opts: anytype) !Response {
+        const VarsType = @TypeOf(variables);
+        const payload_json = if (VarsType == @TypeOf(null))
+            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = query_str }, .{})
+        else if (VarsType == []const u8 or VarsType == []u8)
+            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = query_str, .variables = variables }, .{})
+        else
+            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = query_str, .variables = variables }, .{});
+        defer self.allocator.free(payload_json);
+
+        var ro = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+        ro.url = url;
+        ro.body = payload_json;
+        ro.headers = &.{
+            .{ .name = "content-type", .value = "application/json" },
+            .{ .name = "accept", .value = "application/json" },
+        };
+
+        return self.post(ro);
+    }
+
     /// Safely updates an executable or asset on disk with rollback preservation.
     pub fn updateFile(self: *Client, url: []const u8, target_path: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.DownloadResult {
         const update_options: download_pkg.UpdateOptions = if (@TypeOf(opts) == download_pkg.UpdateOptions) opts else blk: {
@@ -892,6 +914,16 @@ pub fn globalVerifyFile(path: []const u8, opts: download_pkg.VerifyOptions) down
 pub fn globalLookupFileInfo(url: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.RemoteFileInfo {
     const c = defaultClient() orelse return download_pkg.DownloadError.ConnectionFailed;
     return c.lookupFileInfo(url, opts);
+}
+
+pub fn globalGraphql(url: []const u8, query: []const u8, variables: anytype, opts: anytype) !Response {
+    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
+    return c.graphql(url, query, variables, opts);
+}
+
+pub fn globalFetchSitemap(url: []const u8, opts: anytype) !@import("../parsing/sitemap.zig").Sitemap {
+    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
+    return c.fetchSitemap(url, opts);
 }
 
 test "explicit client init/deinit" {

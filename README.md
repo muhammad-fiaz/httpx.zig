@@ -406,7 +406,7 @@ pub fn main() !void {
 
 
     // 1. Initialize unified parser with reusable allocator & configuration
-    var p = httpx.parsing.init(allocator, .{});
+    var p = httpx.Parser.init(allocator, .{});
 
     // 2. Parse HTML directly
     var doc = try p.parseHtml("<html><head><title>My Page</title></head><body><h1 class='title'>Hello</h1><a href='/link'>Click</a></body></html>");

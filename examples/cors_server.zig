@@ -8,18 +8,36 @@ pub fn main() !void {
 
     var server = try httpx.Server.init(allocator, .{
         .host = "127.0.0.1",
-        .port = 8080,
-        .max_connections = 2,
+        .port = 0,
+        .max_connections = 5,
     });
     defer server.deinit();
 
     try server.get("/api/data", dataHandler);
     try server.post("/api/data", createHandler);
 
-    std.debug.print("CORS server running on http://127.0.0.1:8080\n", .{});
-    std.debug.print("Add CORS headers manually in your proxy/load balancer.\n", .{});
+    const port = server.localPort();
+    std.debug.print("CORS server running on http://127.0.0.1:{d}\n", .{port});
 
-    server.run();
+    const ServerThread = struct {
+        fn run(s: *httpx.Server) void {
+            s.run();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+
+    var client = try httpx.Client.init(allocator, .{});
+    defer client.deinit();
+
+    var url_buf: [128]u8 = undefined;
+    const url_data = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/data", .{port});
+    var res = try client.get(url_data);
+    std.debug.print("GET /api/data -> status={d}, body={s}\n", .{ res.status, res.body });
+    res.deinit();
+
+    server.requestShutdown();
+    t.join();
+    std.debug.print("CORS server verification completed successfully.\n", .{});
 }
 
 fn dataHandler(_: *httpx.Context) anyerror!httpx.Response {

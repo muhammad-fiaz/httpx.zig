@@ -12,8 +12,8 @@ pub fn main() !void {
 
     var server = try httpx.Server.init(allocator, .{
         .host = "127.0.0.1",
-        .port = 8080,
-        .port_strategy = .incremental,
+        .port = 0,
+        .max_connections = 5,
     });
     defer server.deinit();
 
@@ -22,9 +22,26 @@ pub fn main() !void {
 
     const port = server.localPort();
     std.debug.print("=== WebSocket Server running on http://127.0.0.1:{d} ===\n", .{port});
-    std.debug.print("Open http://127.0.0.1:{d}/ in your browser to test the interactive client.\n", .{port});
 
-    server.run();
+    const ServerThread = struct {
+        fn run(s: *httpx.Server) void {
+            s.run();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+
+    var client = try httpx.Client.init(allocator, .{});
+    defer client.deinit();
+
+    var url_buf: [128]u8 = undefined;
+    const url_root = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
+    var res = try client.get(url_root);
+    std.debug.print("GET / -> status={d}, len={d}\n", .{ res.status, res.body.len });
+    res.deinit();
+
+    server.requestShutdown();
+    t.join();
+    std.debug.print("WebSocket server verification completed successfully.\n", .{});
 }
 
 fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
@@ -61,7 +78,7 @@ fn wsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
         httpx.websocket.computeAccept(key, &accept_buf);
         return .{
             .status = 101,
-            .headers = try ctx.allocator.dupe(httpx.Header, &[_]httpx.Header{
+            .headers = try ctx.allocator.dupe(httpx.router.Header, &[_]httpx.router.Header{
                 .{ .name = "Upgrade", .value = "websocket" },
                 .{ .name = "Connection", .value = "Upgrade" },
                 .{ .name = "Sec-WebSocket-Accept", .value = try ctx.allocator.dupe(u8, &accept_buf) },

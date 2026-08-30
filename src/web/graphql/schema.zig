@@ -28,7 +28,7 @@ pub const TypeKind = enum {
     non_null,
 };
 
-pub const FieldResolver = *const fn (ctx: *ResolverContext) anyerror!std.json.Value;
+pub const FieldResolver = *const fn (ctx: ResolverContext) anyerror!std.json.Value;
 
 pub const ResolverContext = struct {
     allocator: Allocator,
@@ -37,6 +37,15 @@ pub const ResolverContext = struct {
     variables: std.json.Value = .null,
     field_name: []const u8,
     user_context: ?*anyopaque = null,
+
+    /// Converts any Zig value, struct, slice, or primitive directly into a std.json.Value.
+    /// Eliminates manual ObjectMap/Array boilerplate in resolvers.
+    pub fn value(self: ResolverContext, val: anytype) anyerror!std.json.Value {
+        const json_bytes = try std.json.Stringify.valueAlloc(self.allocator, val, .{});
+        defer self.allocator.free(json_bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, json_bytes, .{});
+        return parsed.value;
+    }
 };
 
 pub const FieldDef = struct {
@@ -208,7 +217,7 @@ pub const Schema = struct {
             try args_obj.put(arena, arg.name, arg_val);
         }
 
-        var res_ctx = ResolverContext{
+        const res_ctx = ResolverContext{
             .allocator = arena,
             .parent = parent_val,
             .args = std.json.Value{ .object = args_obj },
@@ -219,7 +228,7 @@ pub const Schema = struct {
 
         var resolved_value: std.json.Value = .null;
         if (fd.resolver) |r| {
-            resolved_value = r(&res_ctx) catch {
+            resolved_value = r(res_ctx) catch {
                 return .null;
             };
         } else if (parent_val) |pv| {
@@ -459,18 +468,18 @@ test "graphql schema basic execution" {
     };
 
     const resolver = struct {
-        fn getMe(ctx: *ResolverContext) anyerror!std.json.Value {
-            var map = std.json.ObjectMap.init(ctx.allocator, &.{}, &.{}) catch unreachable;
-            try map.put(ctx.allocator, "id", .{ .string = "101" });
-            try map.put(ctx.allocator, "name", .{ .string = "Muhammad" });
-            return .{ .object = map };
+        fn getMe(ctx: ResolverContext) anyerror!std.json.Value {
+            return ctx.value(.{
+                .id = "101",
+                .name = "Muhammad",
+            });
         }
     };
 
     const QueryType = ObjectTypeDef{
         .name = "Query",
         .fields = &.{
-            .{ .name = "me", .type_name = "User", .resolver = &resolver.getMe },
+            .{ .name = "me", .type_name = "User", .resolver = resolver.getMe },
         },
     };
 

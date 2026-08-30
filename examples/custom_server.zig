@@ -8,18 +8,37 @@ pub fn main() !void {
 
     var server = try httpx.Server.init(allocator, .{
         .host = "127.0.0.1",
-        .port = 8080,
-        .max_connections = 2,
-        .logging = .{ .enabled = true },
+        .port = 0,
+        .max_connections = 5,
+        .logging = .{ .enabled = false },
     });
     defer server.deinit();
 
     try server.get("/", indexHandler);
     try server.post("/api/echo", echoHandler);
 
-    std.debug.print("Server running on http://127.0.0.1:8080\n", .{});
+    const port = server.localPort();
+    std.debug.print("Server running on http://127.0.0.1:{d}\n", .{port});
 
-    server.run();
+    const ServerThread = struct {
+        fn run(s: *httpx.Server) void {
+            s.run();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+
+    var client = try httpx.Client.init(allocator, .{});
+    defer client.deinit();
+
+    var url_buf: [128]u8 = undefined;
+    const url_root = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
+    var res = try client.get(url_root);
+    std.debug.print("GET / -> status={d}, body={s}\n", .{ res.status, res.body });
+    res.deinit();
+
+    server.requestShutdown();
+    t.join();
+    std.debug.print("Custom server verification completed successfully.\n", .{});
 }
 
 fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {

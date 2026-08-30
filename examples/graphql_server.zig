@@ -21,33 +21,25 @@ const UserType = httpx.graphql.ObjectTypeDef{
 };
 
 const resolvers = struct {
-    pub fn getMe(ctx: *httpx.graphql.ResolverContext) anyerror!std.json.Value {
-        var map = std.json.ObjectMap.init(ctx.allocator, &.{}, &.{}) catch unreachable;
-        try map.put(ctx.allocator, "id", .{ .string = "usr_101" });
-        try map.put(ctx.allocator, "name", .{ .string = "Muhammad Fiaz" });
-        try map.put(ctx.allocator, "email", .{ .string = "contact@muhammadfiaz.com" });
-        try map.put(ctx.allocator, "role", .{ .string = "administrator" });
-        return .{ .object = map };
+    pub fn getMe(ctx: httpx.graphql.ResolverContext) anyerror!std.json.Value {
+        return ctx.value(.{
+            .id = "usr_101",
+            .name = "Muhammad Fiaz",
+            .email = "contact@muhammadfiaz.com",
+            .role = "administrator",
+        });
     }
 
-    pub fn getUsers(ctx: *httpx.graphql.ResolverContext) anyerror!std.json.Value {
-        var list = std.json.Array.init(ctx.allocator);
-
-        var usr1 = std.json.ObjectMap.init(ctx.allocator, &.{}, &.{}) catch unreachable;
-        try usr1.put(ctx.allocator, "id", .{ .string = "1" });
-        try usr1.put(ctx.allocator, "name", .{ .string = "Alice Cooper" });
-        try usr1.put(ctx.allocator, "email", .{ .string = "alice@example.com" });
-        try usr1.put(ctx.allocator, "role", .{ .string = "engineer" });
-        try list.append(.{ .object = usr1 });
-
-        var usr2 = std.json.ObjectMap.init(ctx.allocator, &.{}, &.{}) catch unreachable;
-        try usr2.put(ctx.allocator, "id", .{ .string = "2" });
-        try usr2.put(ctx.allocator, "name", .{ .string = "Bob Dylan" });
-        try usr2.put(ctx.allocator, "email", .{ .string = "bob@example.com" });
-        try usr2.put(ctx.allocator, "role", .{ .string = "designer" });
-        try list.append(.{ .object = usr2 });
-
-        return .{ .array = list };
+    pub fn getUsers(ctx: httpx.graphql.ResolverContext) anyerror!std.json.Value {
+        return ctx.value(&[_]struct {
+            id: []const u8,
+            name: []const u8,
+            email: []const u8,
+            role: []const u8,
+        }{
+            .{ .id = "1", .name = "Alice Cooper", .email = "alice@example.com", .role = "engineer" },
+            .{ .id = "2", .name = "Bob Dylan", .email = "bob@example.com", .role = "designer" },
+        });
     }
 };
 
@@ -55,8 +47,8 @@ const QueryType = httpx.graphql.ObjectTypeDef{
     .name = "Query",
     .description = "Root queries",
     .fields = &.{
-        .{ .name = "me", .type_name = "User", .description = "Current authenticated user", .resolver = &resolvers.getMe },
-        .{ .name = "users", .type_name = "User", .is_list = true, .description = "List all users in organization", .resolver = &resolvers.getUsers },
+        .{ .name = "me", .type_name = "User", .description = "Current authenticated user", .resolver = resolvers.getMe },
+        .{ .name = "users", .type_name = "User", .is_list = true, .description = "List all users in organization", .resolver = resolvers.getUsers },
     },
 };
 
@@ -74,7 +66,7 @@ pub fn main() !void {
 
     var server = try httpx.Server.init(allocator, .{
         .host = "127.0.0.1",
-        .port = 3000,
+        .port = 0,
         .docs_enabled = true,
         .docs = .{
             .title = "HTTPX GraphQL & REST API",
@@ -87,10 +79,10 @@ pub fn main() !void {
         },
         .logging = .{
             .enabled = true,
-            .color = .always,
-            .requests = true,
+            .color = .never,
+            .requests = false,
         },
-        .max_connections = 10,
+        .max_connections = 5,
     });
     defer server.deinit();
 
@@ -105,19 +97,33 @@ pub fn main() !void {
     });
     try httpx.graphql.mount(&server.router, schema, .{ .endpoint = "/graphql" });
 
-    std.debug.print(
-        \\=====================================================
-        \\ httpx Server with GraphiQL 5.3.0 running on http://127.0.0.1:3000
-        \\ - GraphiQL 5.3.0 UI:  http://127.0.0.1:3000/graphiql
-        \\ - GraphQL API:        http://127.0.0.1:3000/graphql
-        \\ - Swagger UI:         http://127.0.0.1:3000/docs
-        \\ - ReDoc UI:           http://127.0.0.1:3000/redoc
-        \\ - Scalar UI:          http://127.0.0.1:3000/scalar
-        \\ - OpenAPI Spec:       http://127.0.0.1:3000/openapi.json
-        \\=====================================================
-        \\
-    , .{});
+    const port = server.localPort();
+    std.debug.print("GraphQL server listening on http://127.0.0.1:{d}\n", .{port});
 
-    server.run();
+    const ServerThread = struct {
+        fn run(s: *httpx.Server) void {
+            s.run();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+
+    var client = try httpx.Client.init(allocator, .{});
+    defer client.deinit();
+
+    var url_buf: [128]u8 = undefined;
+    const url_root = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
+    var res = try client.get(url_root);
+    std.debug.print("GET / -> status={d}, body={s}\n", .{ res.status, res.body });
+    res.deinit();
+
+    var gql_buf: [128]u8 = undefined;
+    const url_graphql = try std.fmt.bufPrint(&gql_buf, "http://127.0.0.1:{d}/graphql", .{port});
+    var gql_res = try client.graphql(url_graphql, "{ me { id name email role } }", null, .{});
+    std.debug.print("POST /graphql -> status={d}, body={s}\n", .{ gql_res.status, gql_res.body });
+    gql_res.deinit();
+
+    server.requestShutdown();
+    t.join();
     httpx.docs.unmount();
+    std.debug.print("GraphQL server and client verification completed successfully.\n", .{});
 }

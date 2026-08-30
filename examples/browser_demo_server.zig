@@ -139,7 +139,8 @@ pub fn main() !void {
 
     var server = try httpx.Server.init(allocator, .{
         .host = "127.0.0.1",
-        .port = 8089,
+        .port = 0,
+        .max_connections = 5,
     });
     defer server.deinit();
 
@@ -151,6 +152,35 @@ pub fn main() !void {
     try server.get("/robots.txt", robotsHandler);
     try server.post("/api/trigger-reload", triggerReloadHandler);
 
-    std.debug.print("Demo server listening on http://127.0.0.1:8089\n", .{});
-    server.run();
+    const port = server.localPort();
+    std.debug.print("Demo server listening on http://127.0.0.1:{d}\n", .{port});
+
+    const ServerThread = struct {
+        fn run(s: *httpx.Server) void {
+            s.run();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+
+    var client = try httpx.Client.init(allocator, .{});
+    defer client.deinit();
+
+    var url_buf: [128]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/status", .{port});
+    var res = try client.get(url);
+    std.debug.print("GET /api/status -> status={d}, body={s}\n", .{ res.status, res.body });
+    res.deinit();
+
+    const trigger_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/trigger-reload", .{port});
+    var res2 = try client.post(.{ .url = trigger_url, .body = "{}" });
+    std.debug.print("POST /api/trigger-reload -> status={d}\n", .{res2.status});
+    res2.deinit();
+
+    var res3 = try client.get(url);
+    std.debug.print("GET /api/status (reloaded) -> status={d}, body={s}\n", .{ res3.status, res3.body });
+    res3.deinit();
+
+    server.requestShutdown();
+    t.join();
+    std.debug.print("Browser demo server verification completed successfully.\n", .{});
 }
