@@ -54,10 +54,24 @@ pub fn main() !void {
     const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/static/index.html", .{port});
     defer allocator.free(url);
 
-    var response = try client.get(.{ .url = url });
-    defer response.deinit();
+    var response: ?httpx.ClientResponse = null;
+    var attempts: usize = 0;
+    while (attempts < 20) : (attempts += 1) {
+        if (client.get(.{ .url = url })) |res| {
+            response = res;
+            break;
+        } else |_| {
+            var y: usize = 0;
+            while (y < 1000) : (y += 1) std.Thread.yield() catch {};
+        }
+    }
 
-    std.debug.print("GET /static/index.html -> {d} ({d} bytes)\n", .{ response.status, response.body.len });
+    if (response) |*res| {
+        defer res.deinit();
+        std.debug.print("GET /static/index.html -> {d} ({d} bytes)\n", .{ res.status, res.body.len });
+    } else {
+        std.debug.print("GET /static/index.html failed to connect\n", .{});
+    }
 
     t.join();
 }

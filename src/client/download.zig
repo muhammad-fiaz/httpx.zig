@@ -548,7 +548,7 @@ const FileOps = struct {
 
 /// Verifies a file on local disk against expected checksums and size parameters.
 pub fn verifyFile(path: []const u8, opts: VerifyOptions) DownloadError!void {
-    const meta = serve_mod.statPath(undefined, path) orelse return DownloadError.FileReadFailed;
+    const meta = serve_mod.statPath(null, path) orelse return DownloadError.FileReadFailed;
 
     if (opts.expected_size) |sz| {
         if (meta.size != sz) return DownloadError.ChecksumMismatch;

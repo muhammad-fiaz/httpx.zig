@@ -76,12 +76,13 @@ pub const Watcher = struct {
 
         var changed = false;
         const static_mod = @import("../static_files/serve.zig");
-        const io: std.Io = .initSingleThreaded();
+        const io: std.Io = std.Io.Threaded.global_single_threaded.io();
 
         // 1. Recursive directory walk if dir_path is provided and exists
         if (self.config.dir_path.len > 0) {
             const cwd: std.Io.Dir = .cwd();
             var dir = cwd.openDir(io, self.config.dir_path, .{ .iterate = true }) catch null;
+
             if (dir) |*d| {
                 defer d.close(io);
                 var walker = d.walk(self.allocator) catch null;
@@ -105,7 +106,7 @@ pub const Watcher = struct {
                         const full_path = std.Io.Dir.path.join(self.allocator, &.{ self.config.dir_path, entry.path }) catch continue;
                         defer self.allocator.free(full_path);
 
-                        if (static_mod.statPath(undefined, full_path)) |st| {
+                        if (static_mod.statPath(io, full_path)) |st| {
                             if (self.entries.getPtr(full_path)) |val| {
                                 if (val.mtime_ns != st.mtime_ns or val.size != st.size) {
                                     val.mtime_ns = st.mtime_ns;
@@ -150,7 +151,7 @@ pub const Watcher = struct {
         // 2. Check registered individual files for modifications or deletions
         var it_entries = self.entries.iterator();
         while (it_entries.next()) |entry| {
-            if (static_mod.statPath(undefined, entry.key_ptr.*)) |st| {
+            if (static_mod.statPath(io, entry.key_ptr.*)) |st| {
                 if (entry.value_ptr.mtime_ns != st.mtime_ns or entry.value_ptr.size != st.size) {
                     entry.value_ptr.mtime_ns = st.mtime_ns;
                     entry.value_ptr.size = st.size;
@@ -175,7 +176,8 @@ pub const Watcher = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         const static_mod = @import("../static_files/serve.zig");
-        if (static_mod.statPath(undefined, path)) |st| {
+        const io: std.Io = std.Io.Threaded.global_single_threaded.io();
+        if (static_mod.statPath(io, path)) |st| {
             const owned = try self.allocator.dupe(u8, path);
             try self.entries.put(owned, .{
                 .path = owned,

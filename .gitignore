@@ -50,11 +50,3 @@ downloads/
 *.zip
 *.tar.gz
 
-# Vendored C dependencies (fetched by build scripts)
-cpp-httplib/
-h2o/
-nghttp2/
-nghttp3/
-ngtcp2/
-picohttpparser/
-quiche/
