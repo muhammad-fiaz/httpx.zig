@@ -39,6 +39,7 @@ pub const Server = struct {
     owns_io: bool = false,
     io_threaded: ?*std.Io.Threaded = null,
     stop: std.atomic.Value(bool) = .init(false),
+    listener_closed: bool = false,
 
     pub fn init(allocator: Allocator, cfg: Config) !Server {
         if (!std.mem.eql(u8, cfg.host, "0.0.0.0")) return error.ProtocolError;
@@ -55,7 +56,10 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
-        self.listener.close(self.io);
+        if (!self.listener_closed) {
+            self.listener.close(self.io);
+            self.listener_closed = true;
+        }
         if (self.owns_io) {
             if (self.io_threaded) |t| {
                 t.deinit();
@@ -65,7 +69,10 @@ pub const Server = struct {
     }
     pub fn shutdown(self: *Server) void {
         self.stop.store(true, .release);
-        self.listener.close(self.io);
+        if (!self.listener_closed) {
+            self.listener.close(self.io);
+            self.listener_closed = true;
+        }
     }
     pub fn localPort(self: *const Server) u16 {
         return self.listener.localPort();
@@ -234,7 +241,10 @@ const Session = struct {
     }
 
     fn startPassive(self: *Session, extended: bool) Error!bool {
-        if (self.passive) |*p| p.close(self.io);
+        if (self.passive) |*p| {
+            p.close(self.io);
+            self.passive = null;
+        }
         self.passive = tcp.Listener.bind(self.io, 0) catch return error.ProtocolError;
         const port = self.passive.?.localPort();
         if (extended) {
@@ -284,8 +294,10 @@ const Session = struct {
                 @as(u8, @intCast(values[3])),
             } ++ .{0} ** 12,
         };
-        if (self.passive) |*p| p.close(self.io);
-        self.passive = null;
+        if (self.passive) |*p| {
+            p.close(self.io);
+            self.passive = null;
+        }
         try self.reply("200 PORT command successful");
         return true;
     }
@@ -327,8 +339,10 @@ const Session = struct {
         };
         addr.port = port;
         self.active = addr;
-        if (self.passive) |*p| p.close(self.io);
-        self.passive = null;
+        if (self.passive) |*p| {
+            p.close(self.io);
+            self.passive = null;
+        }
         try self.reply("200 EPRT command successful");
         return true;
     }
