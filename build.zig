@@ -10,7 +10,6 @@ fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.Resolved
     }
 }
 
-
 /// Build configuration for httpx.zig - Production-ready HTTP library for Zig
 /// Supports HTTP/1.1, HTTP/2, HTTP/3 with TLS, connection pooling, and more.
 pub fn build(b: *std.Build) void {
