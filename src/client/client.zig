@@ -254,7 +254,6 @@ pub const Client = struct {
         return self.requestAll(reqs);
     }
 
-
     fn coerceDownloadOptions(opts: anytype) download_pkg.DownloadOptions {
         if (@TypeOf(opts) == download_pkg.DownloadOptions) return opts;
         var o = download_pkg.DownloadOptions{};
@@ -368,8 +367,6 @@ pub const Client = struct {
         defer res.deinit();
         return @import("../parsing/sitemap.zig").parse(self.allocator, res.body);
     }
-
-
 
     /// Safely updates an executable or asset on disk with rollback preservation.
     pub fn updateFile(self: *Client, url: []const u8, target_path: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.DownloadResult {
@@ -877,7 +874,6 @@ pub fn globalRequestAll(reqs: anytype) ![]Response {
     const c = defaultClient() orelse return Error.DefaultClientUnavailable;
     return c.requestAll(reqs);
 }
-
 
 pub fn globalDownload(url: []const u8, destination: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.DownloadResult {
     const c = defaultClient() orelse return download_pkg.DownloadError.ConnectionFailed;

@@ -87,7 +87,6 @@ const State = struct {
     }
 };
 
-
 fn trimSlashes(p: []const u8) []const u8 {
     var s = p;
     while (s.len > 0 and s[0] == '/') s = s[1..];
@@ -122,7 +121,6 @@ pub fn register(router: *router_mod.Router, cfg: Config) MountError!void {
         return MountError.DuplicateRoute;
 
     const st = State.create(allocator, cfg) catch return MountError.OutOfMemory;
-
 
     router.get(p1, serveIndexHandler) catch {
         st.destroy();

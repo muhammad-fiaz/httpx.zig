@@ -65,7 +65,6 @@ pub fn fromPath(path: []const u8) []const u8 {
 
 pub const octet_stream = "application/octet-stream";
 
-
 test "detects common types case-insensitively" {
     try std.testing.expectEqualStrings("text/html; charset=utf-8", fromPath("/a/b/Index.HTML"));
     try std.testing.expectEqualStrings("application/json; charset=utf-8", fromPath("data.json"));

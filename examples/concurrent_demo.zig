@@ -33,7 +33,6 @@ pub fn main() !void {
         for (results2) |*r| r.deinit();
     }
 
-
     for (results2) |result| {
         std.debug.print("Status: {d}\n", .{result.status});
     }

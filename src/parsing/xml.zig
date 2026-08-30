@@ -189,13 +189,24 @@ fn parseAttrs(
     while (i < src.len) {
         while (i < src.len and (src[i] == ' ' or src[i] == '\t' or src[i] == '\r' or src[i] == '\n')) : (i += 1) {}
         if (i >= src.len) break;
-        if (src[i] == '>') { i += 1; break; }
-        if (src[i] == '/' and i + 1 < src.len and src[i + 1] == '>') { self_closing.* = true; i += 2; break; }
+        if (src[i] == '>') {
+            i += 1;
+            break;
+        }
+        if (src[i] == '/' and i + 1 < src.len and src[i + 1] == '>') {
+            self_closing.* = true;
+            i += 2;
+            break;
+        }
 
         const name_start = i;
         while (i < src.len and src[i] != '=' and src[i] != '>' and src[i] != '/' and
-            src[i] != ' ' and src[i] != '\t' and src[i] != '\r' and src[i] != '\n') : (i += 1) {}
-        if (i == name_start) { i += 1; continue; }
+            src[i] != ' ' and src[i] != '\t' and src[i] != '\r' and src[i] != '\n') : (i += 1)
+        {}
+        if (i == name_start) {
+            i += 1;
+            continue;
+        }
         const attr_name = src[name_start..i];
 
         while (i < src.len and (src[i] == ' ' or src[i] == '\t')) : (i += 1) {}
@@ -208,7 +219,8 @@ fn parseAttrs(
 
         var val: []const u8 = "";
         if (i < src.len and (src[i] == '"' or src[i] == '\'')) {
-            const q = src[i]; i += 1;
+            const q = src[i];
+            i += 1;
             const vs = i;
             while (i < src.len and src[i] != q) : (i += 1) {}
             val = src[vs..i];

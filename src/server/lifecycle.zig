@@ -416,7 +416,6 @@ pub const Server = struct {
             self.serveConnection(&conn, arena.allocator()) catch {};
             served += 1;
 
-
             // Stop before blocking on the next accept when asked.
             if (self.stop_flag.load(.acquire)) break;
         }

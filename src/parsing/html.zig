@@ -31,9 +31,9 @@ pub const ParseError = error{
 
 /// HTML void elements — never have children per the HTML5 spec.
 const VOID_ELEMENTS = std.StaticStringMap(void).initComptime(.{
-    .{ "area", {} }, .{ "base", {} }, .{ "br", {} }, .{ "col", {} },
-    .{ "embed", {} }, .{ "hr", {} }, .{ "img", {} }, .{ "input", {} },
-    .{ "link", {} }, .{ "meta", {} }, .{ "param", {} }, .{ "source", {} },
+    .{ "area", {} },  .{ "base", {} }, .{ "br", {} },    .{ "col", {} },
+    .{ "embed", {} }, .{ "hr", {} },   .{ "img", {} },   .{ "input", {} },
+    .{ "link", {} },  .{ "meta", {} }, .{ "param", {} }, .{ "source", {} },
     .{ "track", {} }, .{ "wbr", {} },
 });
 
@@ -149,7 +149,10 @@ const Builder = struct {
 
             if (src[i] == '?') {
                 while (i + 1 < src.len) : (i += 1) {
-                    if (src[i] == '?' and src[i + 1] == '>') { i += 2; break; }
+                    if (src[i] == '?' and src[i + 1] == '>') {
+                        i += 2;
+                        break;
+                    }
                 }
                 continue;
             }
@@ -217,8 +220,14 @@ fn consumeRawText(src: []const u8, pos: *usize, tag: []const u8) ParseError![]co
     const start = pos.*;
     var i = start;
     while (i < src.len) {
-        if (src[i] != '<') { i += 1; continue; }
-        if (i + 1 >= src.len or src[i + 1] != '/') { i += 1; continue; }
+        if (src[i] != '<') {
+            i += 1;
+            continue;
+        }
+        if (i + 1 >= src.len or src[i + 1] != '/') {
+            i += 1;
+            continue;
+        }
         var j = i + 2;
         while (j < src.len and src[j] != '>') : (j += 1) {}
         const candidate = std.mem.trim(u8, src[i + 2 .. j], " \t\r\n");
@@ -246,7 +255,10 @@ fn parseAttrs(
         while (i < src.len and isWhitespace(src[i])) : (i += 1) {}
         if (i >= src.len) break;
 
-        if (src[i] == '>') { i += 1; break; }
+        if (src[i] == '>') {
+            i += 1;
+            break;
+        }
         if (src[i] == '/' and i + 1 < src.len and src[i + 1] == '>') {
             self_closing.* = true;
             i += 2;
@@ -255,7 +267,10 @@ fn parseAttrs(
 
         const name_start = i;
         while (i < src.len and !isAttrNameEnd(src[i])) : (i += 1) {}
-        if (i == name_start) { i += 1; continue; }
+        if (i == name_start) {
+            i += 1;
+            continue;
+        }
         const attr_name = src[name_start..i];
 
         while (i < src.len and isWhitespace(src[i])) : (i += 1) {}

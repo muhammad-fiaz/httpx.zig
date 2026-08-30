@@ -170,8 +170,6 @@ pub const Watcher = struct {
         return changed;
     }
 
-
-
     /// Registers a specific file path to actively watch for modifications.
     pub fn watchFile(self: *Watcher, path: []const u8) !void {
         self.mutex.lock();
@@ -230,7 +228,6 @@ pub const Watcher = struct {
         , .{sse_url});
     }
 };
-
 
 test "watcher tracks registered files" {
     const a = std.testing.allocator;

@@ -34,7 +34,6 @@ pub fn main() !void {
     });
     defer httpx.static.files.unregister();
 
-
     const port = server.localPort();
     std.debug.print("serving examples/static on http://127.0.0.1:{d}/static\n", .{port});
     std.debug.print("health endpoint on http://127.0.0.1:{d}/healthz\n", .{port});

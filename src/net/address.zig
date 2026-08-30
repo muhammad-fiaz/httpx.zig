@@ -146,8 +146,14 @@ pub const Address = struct {
                 var gi: usize = 0;
                 while (gi < 8) {
                     if (gi == best_start) {
-                        if (pos < buf.len) { buf[pos] = ':'; pos += 1; }
-                        if (pos < buf.len) { buf[pos] = ':'; pos += 1; }
+                        if (pos < buf.len) {
+                            buf[pos] = ':';
+                            pos += 1;
+                        }
+                        if (pos < buf.len) {
+                            buf[pos] = ':';
+                            pos += 1;
+                        }
                         gi += best_len;
                         continue;
                     }
@@ -155,7 +161,10 @@ pub const Address = struct {
                         pos += str.len;
                     } else |_| break;
                     if (gi < 7 and gi + 1 != best_start) {
-                        if (pos < buf.len) { buf[pos] = ':'; pos += 1; }
+                        if (pos < buf.len) {
+                            buf[pos] = ':';
+                            pos += 1;
+                        }
                     }
                     gi += 1;
                 }
@@ -163,7 +172,6 @@ pub const Address = struct {
             },
         }
     }
-
 
     /// Converts to Zig std IpAddress for socket operations.
     pub fn toStd(self: *const Address, port: ?u16) net.IpAddress {

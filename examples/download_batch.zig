@@ -49,9 +49,3 @@ pub fn main() !void {
 
     std.debug.print("Batch download completed successfully.\n", .{});
 }
-
-
-
-
-
-

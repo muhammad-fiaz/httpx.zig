@@ -58,7 +58,6 @@ pub const Headers = struct {
         });
     }
 
-
     /// Appends a header without replacing duplicates.
     pub fn append(self: *Headers, name: []const u8, value: []const u8) !void {
         try validateName(name);

@@ -275,9 +275,21 @@ fn parseSequence(al: Allocator, src: []const u8) SelectorError!Sequence {
 
         var comb: ?Combinator = null;
         switch (src[i]) {
-            '>' => { comb = .child; i += 1; while (i < src.len and src[i] == ' ') : (i += 1) {} },
-            '+' => { comb = .adjacent; i += 1; while (i < src.len and src[i] == ' ') : (i += 1) {} },
-            '~' => { comb = .sibling; i += 1; while (i < src.len and src[i] == ' ') : (i += 1) {} },
+            '>' => {
+                comb = .child;
+                i += 1;
+                while (i < src.len and src[i] == ' ') : (i += 1) {}
+            },
+            '+' => {
+                comb = .adjacent;
+                i += 1;
+                while (i < src.len and src[i] == ' ') : (i += 1) {}
+            },
+            '~' => {
+                comb = .sibling;
+                i += 1;
+                while (i < src.len and src[i] == ' ') : (i += 1) {}
+            },
             else => {
                 if (had_ws and compounds.items.len > 0) comb = .descendant;
             },
@@ -348,7 +360,8 @@ fn parseAttrSel(src: []const u8, pos: *usize) SelectorError!AttrSel {
     const name_start = pos.*;
     while (pos.* < src.len and src[pos.*] != ']' and src[pos.*] != '=' and
         src[pos.*] != '^' and src[pos.*] != '$' and src[pos.*] != '*' and
-        src[pos.*] != '~' and src[pos.*] != ' ') : (pos.* += 1) {}
+        src[pos.*] != '~' and src[pos.*] != ' ') : (pos.* += 1)
+    {}
     const name = src[name_start..pos.*];
     while (pos.* < src.len and src[pos.*] == ' ') : (pos.* += 1) {}
 
@@ -360,10 +373,22 @@ fn parseAttrSel(src: []const u8, pos: *usize) SelectorError!AttrSel {
     var op: AttrOp = .eq;
     if (pos.* + 1 < src.len and src[pos.* + 1] == '=') {
         switch (src[pos.*]) {
-            '^' => { op = .prefix; pos.* += 1; },
-            '$' => { op = .suffix; pos.* += 1; },
-            '*' => { op = .contains; pos.* += 1; },
-            '~' => { op = .word; pos.* += 1; },
+            '^' => {
+                op = .prefix;
+                pos.* += 1;
+            },
+            '$' => {
+                op = .suffix;
+                pos.* += 1;
+            },
+            '*' => {
+                op = .contains;
+                pos.* += 1;
+            },
+            '~' => {
+                op = .word;
+                pos.* += 1;
+            },
             else => {},
         }
     }
@@ -373,7 +398,8 @@ fn parseAttrSel(src: []const u8, pos: *usize) SelectorError!AttrSel {
 
     var value: []const u8 = "";
     if (pos.* < src.len and (src[pos.*] == '"' or src[pos.*] == '\'')) {
-        const q = src[pos.*]; pos.* += 1;
+        const q = src[pos.*];
+        pos.* += 1;
         const vstart = pos.*;
         while (pos.* < src.len and src[pos.*] != q) : (pos.* += 1) {}
         value = src[vstart..pos.*];
@@ -437,4 +463,3 @@ fn isSelectorIdent(c: u8) bool {
 fn isSelectorStop(c: u8) bool {
     return c == ' ' or c == '\t' or c == ',' or c == '>' or c == '+' or c == '~';
 }
-

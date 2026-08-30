@@ -3,7 +3,6 @@
 //! Implements the secret chain a full handshake driver needs:
 //!   shared_secret (ECDHE) -> handshake secrets -> application secrets
 //!   -> update via "quic ku" / resumption via derived-secret + "resumption"
-
 //! All HKDF-Expand-Label traffic goes through protocols/quic/crypto.zig so
 //! labels live in ONE place. This module is driver-ready: a TLS engine only
 //! supplies the ECDHE shared secret + transport parameters transcript hash.

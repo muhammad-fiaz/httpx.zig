@@ -132,7 +132,6 @@ fn parseAtom(allocator: Allocator, tree: *const dom.Tree) !Feed {
         if (node.hasTag("entry")) try items.append(allocator, idx);
     }
 
-
     var entries: std.ArrayList(FeedEntry) = .empty;
     for (items.items) |entry_idx| {
         var entry = FeedEntry{};

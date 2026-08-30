@@ -1,4 +1,3 @@
 User-agent: *
 Allow: /
-
 Sitemap: https://muhammad-fiaz.github.io/httpx.zig/sitemap.xml

@@ -17,7 +17,6 @@ const DownloadObserver = struct {
         };
         const reset = "\x1b[0m";
 
-
         std.debug.print("[Observer Task {d}] State: {s}{s}{s} | Progress: {d:.1}% ({d} bytes) | Speed: {d:.2} KB/s | ETA: {?d}s\n", .{
             self.task_id,
             state_color,
@@ -90,6 +89,3 @@ pub fn main() !void {
         });
     };
 }
-
-
-

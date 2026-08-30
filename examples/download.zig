@@ -13,7 +13,6 @@ pub fn main() !void {
     const sample_url = "https://httpbun.com/bytes/90";
     std.debug.print("==> Downloading {s} with zero-config progress bar...\n", .{sample_url});
 
-
     // 1. Download to a specific directory (automatically uses URL basename "1048576")
     const result1 = client.download(
         sample_url,
@@ -53,4 +52,3 @@ pub fn main() !void {
         result2.downloaded_bytes,
     });
 }
-

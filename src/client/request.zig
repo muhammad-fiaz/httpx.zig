@@ -209,7 +209,6 @@ pub const Response = struct {
     }
 };
 
-
 /// Helper: convert struct fields to Header array (for headers/query).
 pub fn headersFromStruct(allocator: Allocator, value: anytype) ![]Header {
     const T = @TypeOf(value);
@@ -701,7 +700,6 @@ test "client compression advertisement respects explicit override" {
     try std.testing.expectEqualStrings("User-Agent: httpx/0.2.0", defaults[0]);
     try std.testing.expectEqualStrings("Accept-Encoding: gzip, br, zstd", defaults[1]);
 
-
     const custom = try headerLines(a, &.{.{ .name = "Accept-Encoding", .value = "identity" }}, null);
     defer {
         for (custom) |line| a.free(line);
@@ -711,7 +709,6 @@ test "client compression advertisement respects explicit override" {
     try std.testing.expectEqualStrings("Accept-Encoding: identity", custom[0]);
     try std.testing.expectEqualStrings("User-Agent: httpx/0.2.0", custom[1]);
 }
-
 
 /// `reusable` is true ONLY when the body was framed and fully consumed —
 /// the precondition for parking a connection back into the keep-alive pool.
@@ -1229,11 +1226,6 @@ test "https auto-enables tls when no explicit options provided" {
     const tls_opts = if (is_tls) req_tls orelse TlsOptions{ .verify = .none, .allow_truncation_attacks = true } else null;
     try std.testing.expectEqual(.none, tls_opts.verify);
 }
-
-
-
-
-
 
 // Live TLS interop (environment-gated).
 //

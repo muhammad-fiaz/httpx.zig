@@ -45,8 +45,6 @@ pub const WorkerPool = concurrency.WorkerPool;
 pub const Queue = concurrency.Queue;
 pub const logging = @import("common/logging.zig");
 
-
-
 // Sockets
 pub const tcp = @import("sockets/tcp.zig");
 /// Raw socket syscall layer: exhaustive platform error mapping (Phase 2).
@@ -230,8 +228,6 @@ pub const VerifyOptions = download_pkg.VerifyOptions;
 pub const UpdateOptions = download_pkg.UpdateOptions;
 pub const FtpDownloadOptions = download_pkg.FtpDownloadOptions;
 
-
-
 // Parsing & inspection subsystem
 /// Native HTML, XML, RSS/Atom/JSON feeds, robots.txt, and sitemap parsing engine.
 pub const parsing = struct {
@@ -272,8 +268,6 @@ pub const parsing = struct {
     }
     pub const detectKind = document.detectKind;
 };
-
-
 
 // Server API
 pub const server = @import("server/lifecycle.zig");
@@ -327,7 +321,6 @@ pub const ftp = struct {
     pub const FtpConfig = ftp_server.Config;
     pub const Callbacks = ftp_server.Callbacks;
 };
-
 
 // Tests
 test {

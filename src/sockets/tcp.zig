@@ -36,7 +36,6 @@ const is_windows = builtin.os.tag == .windows;
 // Windows winsock shims
 // All declared inside a comptime block so they compile to nothing on non-Windows.
 
-
 const ws = if (is_windows) struct {
     pub const SOCKET = usize;
     pub const SOCKET_ERROR: i32 = -1;

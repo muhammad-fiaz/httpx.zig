@@ -57,7 +57,6 @@ pub const NodeList = struct {
     }
 };
 
-
 pub const NodeHandle = struct {
     tree: *const Tree,
     node_idx: u32,
@@ -174,7 +173,6 @@ pub const Document = struct {
         };
     }
 
-
     pub fn selectFirst(self: *const Document, css_selector: []const u8) !?NodeHandle {
         const al = self.arenaAllocator();
         var parsed = try selector.parseSelector(al, css_selector);
@@ -195,7 +193,6 @@ pub const Document = struct {
         return self.selectFirst(sel_str);
     }
 };
-
 
 pub const Parser = struct {
     allocator: Allocator,
@@ -276,4 +273,3 @@ pub fn detectKind(source: []const u8, content_type: ?[]const u8) ContentKind {
     if (std.mem.startsWith(u8, trimmed, "{")) return .json_feed;
     return .unknown;
 }
-

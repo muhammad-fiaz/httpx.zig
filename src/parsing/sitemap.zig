@@ -83,13 +83,7 @@ pub fn parse(allocator: Allocator, src: []const u8) !Sitemap {
         try tree.getElementsByTag(al, u_idx, "changefreq", &freqs);
         if (freqs.items.len > 0) {
             const f = getText(&tree, freqs.items[0]);
-            if (std.ascii.eqlIgnoreCase(f, "always")) u.changefreq = .always
-            else if (std.ascii.eqlIgnoreCase(f, "hourly")) u.changefreq = .hourly
-            else if (std.ascii.eqlIgnoreCase(f, "daily")) u.changefreq = .daily
-            else if (std.ascii.eqlIgnoreCase(f, "weekly")) u.changefreq = .weekly
-            else if (std.ascii.eqlIgnoreCase(f, "monthly")) u.changefreq = .monthly
-            else if (std.ascii.eqlIgnoreCase(f, "yearly")) u.changefreq = .yearly
-            else if (std.ascii.eqlIgnoreCase(f, "never")) u.changefreq = .never;
+            if (std.ascii.eqlIgnoreCase(f, "always")) u.changefreq = .always else if (std.ascii.eqlIgnoreCase(f, "hourly")) u.changefreq = .hourly else if (std.ascii.eqlIgnoreCase(f, "daily")) u.changefreq = .daily else if (std.ascii.eqlIgnoreCase(f, "weekly")) u.changefreq = .weekly else if (std.ascii.eqlIgnoreCase(f, "monthly")) u.changefreq = .monthly else if (std.ascii.eqlIgnoreCase(f, "yearly")) u.changefreq = .yearly else if (std.ascii.eqlIgnoreCase(f, "never")) u.changefreq = .never;
         }
 
         var prios: std.ArrayList(u32) = .empty;
