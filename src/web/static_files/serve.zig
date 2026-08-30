@@ -251,6 +251,33 @@ pub const c_fs = struct {
     pub const FILE_HANDLE = if (is_win) std.os.windows.HANDLE else std.posix.fd_t;
     pub const INVALID_HANDLE: FILE_HANDLE = if (is_win) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
+    const c_stat = extern struct {
+        dev: std.c.dev_t,
+        ino: std.c.ino_t,
+        nlink: std.c.nlink_t,
+        mode: std.c.mode_t,
+        uid: std.c.uid_t,
+        gid: std.c.gid_t,
+        __pad0: c_uint = 0,
+        rdev: std.c.dev_t,
+        size: std.c.off_t,
+        blksize: std.c.blksize_t,
+        blocks: std.c.blkcnt_t,
+        atim: std.c.timespec,
+        mtim: std.c.timespec,
+        ctim: std.c.timespec,
+        __reserved: [3]c_long = .{ 0, 0, 0 },
+
+        pub fn mtime(self: c_stat) std.c.timespec {
+            return self.mtim;
+        }
+    };
+
+    extern "c" fn fstat(fd: std.c.fd_t, buf: *c_stat) c_int;
+    extern "c" fn lseek(fd: std.c.fd_t, offset: std.c.off_t, whence: c_int) std.c.off_t;
+    extern "c" fn c_write(fd: std.c.fd_t, buf: [*]const u8, count: usize) isize;
+    extern "c" fn c_close(fd: std.c.fd_t) c_int;
+
     pub fn openRead(path: []const u8) ?FILE_HANDLE {
         if (is_win) {
             var wide_buf: [std.os.windows.PATH_MAX_WIDE:0]u16 = undefined;
@@ -281,7 +308,7 @@ pub const c_fs = struct {
             if (path.len >= null_term.len) return null;
             @memcpy(null_term[0..path.len], path);
             null_term[path.len] = 0;
-            const fd = std.posix.open(&null_term, .{ .ACCMODE = .RDONLY }, 0) catch return null;
+            const fd = std.posix.openat(std.posix.AT.FDCWD, &null_term, .{ .ACCMODE = .RDONLY }, 0) catch return null;
             return fd;
         }
     }
@@ -313,7 +340,7 @@ pub const c_fs = struct {
             if (path.len >= null_term.len) return null;
             @memcpy(null_term[0..path.len], path);
             null_term[path.len] = 0;
-            const fd = std.posix.open(&null_term, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch return null;
+            const fd = std.posix.openat(std.posix.AT.FDCWD, &null_term, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch return null;
             return fd;
         }
     }
@@ -322,7 +349,7 @@ pub const c_fs = struct {
         if (is_win) {
             _ = CloseHandle(h);
         } else {
-            std.posix.close(h);
+            _ = std.c.close(h);
         }
     }
 
@@ -383,9 +410,10 @@ pub fn statPath(io: std.Io, path: []const u8) ?FileMeta {
         }
         return .{ .size = @intCast(size), .mtime_ns = mtime_ns };
     } else {
-        const st = std.posix.fstat(h) catch return null;
-        if (!std.posix.S.ISREG(st.mode)) return null;
-        return .{ .size = @intCast(st.size), .mtime_ns = @intCast(st.mtime().nanoseconds) };
+        var st: c_fs.c_stat = undefined;
+        if (c_fs.fstat(h, &st) != 0) return null;
+        if ((st.mode & 0o170000) != 0o100000) return null;
+        return .{ .size = @intCast(st.size), .mtime_ns = @intCast(st.mtime().nsec) };
     }
 }
 
@@ -432,9 +460,9 @@ pub fn writeFile(path: []const u8, content: []const u8) !void {
     } else {
         var pos: usize = 0;
         while (pos < content.len) {
-            const n = try std.posix.write(h, content[pos..]);
-            if (n == 0) return error.WriteFailed;
-            pos += n;
+            const n = c_fs.c_write(h, content.ptr + pos, content.len - pos);
+            if (n <= 0) return error.WriteFailed;
+            pos += @intCast(n);
         }
     }
 }
@@ -458,7 +486,7 @@ fn readRange(io: std.Io, path: []const u8, offset: u64, dest: []u8) !void {
             pos += read_bytes;
         }
     } else {
-        _ = try std.posix.lseek_SET(h, @intCast(offset));
+        _ = c_fs.lseek(h, @intCast(offset), 0);
         var pos: usize = 0;
         while (pos < dest.len) {
             const n = try std.posix.read(h, dest[pos..]);
