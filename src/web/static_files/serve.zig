@@ -251,7 +251,7 @@ pub const c_fs = struct {
     pub const FILE_HANDLE = if (is_win) std.os.windows.HANDLE else std.posix.fd_t;
     pub const INVALID_HANDLE: FILE_HANDLE = if (is_win) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
-    const c_stat = extern struct {
+    pub const c_stat = extern struct {
         dev: std.c.dev_t,
         ino: std.c.ino_t,
         nlink: std.c.nlink_t,
@@ -273,10 +273,7 @@ pub const c_fs = struct {
         }
     };
 
-    extern "c" fn fstat(fd: std.c.fd_t, buf: *c_stat) c_int;
-    extern "c" fn lseek(fd: std.c.fd_t, offset: std.c.off_t, whence: c_int) std.c.off_t;
-    extern "c" fn c_write(fd: std.c.fd_t, buf: [*]const u8, count: usize) isize;
-    extern "c" fn c_close(fd: std.c.fd_t) c_int;
+    pub extern "c" fn fstat(fd: std.c.fd_t, buf: *c_stat) c_int;
 
     pub fn openRead(path: []const u8) ?FILE_HANDLE {
         if (is_win) {
@@ -460,7 +457,7 @@ pub fn writeFile(path: []const u8, content: []const u8) !void {
     } else {
         var pos: usize = 0;
         while (pos < content.len) {
-            const n = c_fs.c_write(h, content.ptr + pos, content.len - pos);
+            const n = std.c.write(h, content.ptr + pos, content.len - pos);
             if (n <= 0) return error.WriteFailed;
             pos += @intCast(n);
         }
@@ -486,7 +483,7 @@ fn readRange(io: std.Io, path: []const u8, offset: u64, dest: []u8) !void {
             pos += read_bytes;
         }
     } else {
-        _ = c_fs.lseek(h, @intCast(offset), 0);
+        _ = std.c.lseek(h, @intCast(offset), 0);
         var pos: usize = 0;
         while (pos < dest.len) {
             const n = try std.posix.read(h, dest[pos..]);

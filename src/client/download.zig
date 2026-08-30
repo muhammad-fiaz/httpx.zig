@@ -389,7 +389,7 @@ const FileOps = struct {
             if (path.len >= null_term.len) return null;
             @memcpy(null_term[0..path.len], path);
             null_term[path.len] = 0;
-            return std.posix.open(&null_term, .{ .ACCMODE = .RDWR, .CREAT = true }, 0o644) catch null;
+            return std.posix.openat(std.posix.AT.FDCWD, &null_term, .{ .ACCMODE = .RDWR, .CREAT = true }, 0o644) catch null;
         }
     }
 
@@ -402,7 +402,7 @@ const FileOps = struct {
             var new_pos: i64 = 0;
             return c_fs.SetFilePointerEx(h, 0, &new_pos, 2) != .FALSE; // FILE_END = 2
         } else {
-            _ = std.posix.lseek_END(h, 0) catch return false;
+            _ = std.c.lseek(h, 0, 2); // SEEK_END = 2
             return true;
         }
     }
@@ -417,9 +417,9 @@ const FileOps = struct {
                 if (chunk_written == 0) return false;
                 written += chunk_written;
             } else {
-                const n = std.posix.write(h, data[written..]) catch return false;
-                if (n == 0) return false;
-                written += n;
+                const n = std.c.write(h, data[written..].ptr, data.len - written);
+                if (n <= 0) return false;
+                written += @intCast(n);
             }
         }
         return true;
@@ -454,7 +454,7 @@ const FileOps = struct {
             if (path.len >= null_term.len) return false;
             @memcpy(null_term[0..path.len], path);
             null_term[path.len] = 0;
-            std.posix.unlink(&null_term) catch return false;
+            _ = std.c.unlink(@ptrCast(&null_term));
             return true;
         }
     }
@@ -481,7 +481,7 @@ const FileOps = struct {
             o_nt[old_path.len] = 0;
             @memcpy(n_nt[0..new_path.len], new_path);
             n_nt[new_path.len] = 0;
-            std.posix.rename(&o_nt, &n_nt) catch return false;
+            _ = std.c.rename(@ptrCast(&o_nt), @ptrCast(&n_nt));
             return true;
         }
     }
@@ -500,7 +500,7 @@ const FileOps = struct {
             if (path.len >= null_term.len) return false;
             @memcpy(null_term[0..path.len], path);
             null_term[path.len] = 0;
-            std.posix.mkdir(&null_term, 0o755) catch return false;
+            _ = std.c.mkdir(@ptrCast(&null_term), 0o755);
             return true;
         }
     }
@@ -537,10 +537,11 @@ const FileOps = struct {
             if (path.len >= null_term.len) return false;
             @memcpy(null_term[0..path.len], path);
             null_term[path.len] = 0;
-            const fd = std.posix.open(&null_term, .{ .ACCMODE = .RDONLY }, 0) catch return false;
-            defer std.posix.close(fd);
-            const st = std.posix.fstat(fd) catch return false;
-            return std.posix.S.ISDIR(st.mode);
+            const fd = std.posix.openat(std.posix.AT.FDCWD, &null_term, .{ .ACCMODE = .RDONLY }, 0) catch return false;
+            defer _ = std.c.close(fd);
+            var st: c_fs.c_stat = undefined;
+            if (c_fs.fstat(fd, &st) != 0) return false;
+            return (st.mode & 0o170000) == 0o040000;
         }
     }
 
