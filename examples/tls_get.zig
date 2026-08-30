@@ -59,7 +59,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var tls_listener = try httpx.TlsListener.init(allocator, .{
+    var tls_listener = try httpx.tls.Listener.init(allocator, .{
         .port = 8447,
         .default_identity = .{
             .cert_chain_pem = cert,
@@ -71,11 +71,11 @@ pub fn main() !void {
     std.debug.print("TLS listener initialized on port {d}, config verified\n", .{tls_listener.localPort()});
 }
 
-fn runServer(listener: *httpx.TlsListener) void {
+fn runServer(listener: *httpx.tls.Listener) void {
     listener.run(handleRequest) catch |err| std.debug.print("TLS server error: {s}\n", .{@errorName(err)});
 }
 
-fn handleRequest(_: httpx.TlsRequest) anyerror!httpx.TlsResponse {
+fn handleRequest(_: httpx.tls.Request) anyerror!httpx.tls.Response {
     return .{
         .status = 200,
         .body = "Hello from TLS server!",

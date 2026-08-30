@@ -59,7 +59,7 @@ pub fn main() !void {
         \\-----END PRIVATE KEY-----
     ;
 
-    var tls_listener = try httpx.TlsListener.init(allocator, .{
+    var tls_listener = try httpx.tls.Listener.init(allocator, .{
         .port = 0,
         .default_identity = .{
             .cert_chain_pem = cert,
@@ -75,7 +75,7 @@ pub fn main() !void {
     std.debug.print("TLS server configuration verified.\n", .{});
 }
 
-fn handler(_: httpx.TlsRequest) anyerror!httpx.TlsResponse {
+fn handler(_: httpx.tls.Request) anyerror!httpx.tls.Response {
     return .{
         .status = 200,
         .body = "Hello from TLS server!",

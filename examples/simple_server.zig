@@ -9,8 +9,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    _ = ctx;
+fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "hello, world!",
@@ -18,8 +17,7 @@ fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn jsonHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    _ = ctx;
+fn jsonHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "{\"ok\":true}",
@@ -27,8 +25,7 @@ fn jsonHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn notFoundHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    _ = ctx;
+fn notFoundHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{ .status = 404, .body = "not found" };
 }
 
@@ -45,9 +42,9 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.router.add(.GET, "/", &indexHandler);
-    try server.router.add(.GET, "/json", &jsonHandler);
-    try server.router.add(.GET, "/*rest", &notFoundHandler);
+    try server.router.add(.GET, "/", indexHandler);
+    try server.router.add(.GET, "/json", jsonHandler);
+    try server.router.add(.GET, "/*rest", notFoundHandler);
 
     const port = server.localPort();
     std.debug.print("listening on 127.0.0.1:{d}\n", .{port});
