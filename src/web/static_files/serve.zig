@@ -388,21 +388,8 @@ fn readAll(io_opt: ?std.Io, path: []const u8, dest: []u8) !void {
     var file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only, .allow_directory = false }) catch return error.FileNotFound;
     defer file.close(io);
 
-    var pos: usize = 0;
-    while (pos < dest.len) {
-        const n = file.readStreaming(io, &.{dest[pos..]}) catch |err| switch (err) {
-            error.EndOfStream => {
-                if (pos < dest.len) return error.UnexpectedEof;
-                break;
-            },
-            else => return error.UnexpectedEof,
-        };
-        if (n == 0) {
-            if (pos < dest.len) return error.UnexpectedEof;
-            break;
-        }
-        pos += n;
-    }
+    const n = file.readPositionalAll(io, dest, 0) catch return error.UnexpectedEof;
+    if (n < dest.len) return error.UnexpectedEof;
 }
 
 pub fn writeFile(path: []const u8, content: []const u8) !void {
