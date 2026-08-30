@@ -370,10 +370,9 @@ pub const Server = struct {
         }
     }
 
-    /// Return the full bound address.
-    pub fn localAddress(self: *const Server) std.net.Address {
-        const addr = self.listener.server.socket.address;
-        return addr;
+    /// Return the full bound address. Supports IPv4 and IPv6.
+    pub fn localAddress(self: *const Server) std.Io.net.IpAddress {
+        return self.listener.server.socket.address;
     }
 
     /// Blocking accept loop. `requestShutdown()` takes effect between

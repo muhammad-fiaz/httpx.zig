@@ -47,7 +47,7 @@ pub const HttpResponse = struct {
     body: []const u8 = "",
 };
 
-pub const HandlerFn = *const fn (ctx: ?*anyopaque, req: HttpRequest) anyerror!HttpResponse;
+pub const HandlerFn = *const fn (req: HttpRequest) anyerror!HttpResponse;
 
 // HTTP/1.x server over TLS
 
@@ -55,7 +55,6 @@ fn serveHttp1OverTls(
     allocator: Allocator,
     tls_conn: *tls_server_mod.TlsServerConn,
     handler: HandlerFn,
-    handler_ctx: ?*anyopaque,
 ) void {
     var buf: [16 * 1024]u8 = undefined;
     var total: usize = 0;
@@ -163,7 +162,7 @@ fn serveHttp1OverTls(
         };
         defer allocator.free(req.headers);
 
-        const resp = handler(handler_ctx, req) catch HttpResponse{ .status = 500, .body = "Internal Server Error" };
+        const resp = handler(req) catch HttpResponse{ .status = 500, .body = "Internal Server Error" };
 
         var encoded_body: ?[]u8 = null;
         defer if (encoded_body) |bytes| allocator.free(bytes);
@@ -231,7 +230,6 @@ fn serveHttp2OverTls(
     allocator: Allocator,
     tls_conn: *tls_server_mod.TlsServerConn,
     handler: HandlerFn,
-    handler_ctx: ?*anyopaque,
 ) void {
     var session = h2_connection_mod.Session.init(allocator, .server, .{}) catch return;
     defer session.deinit();
@@ -266,7 +264,7 @@ fn serveHttp2OverTls(
                 .headers = sc.hdrs.items,
                 .body = sc.body.items,
             };
-            const resp = handler(handler_ctx, req) catch HttpResponse{ .status = 500 };
+            const resp = handler(req) catch HttpResponse{ .status = 500 };
 
             var out_fields = std.ArrayList(hpack_mod.HeaderField).empty;
             defer out_fields.deinit(allocator);
@@ -386,7 +384,7 @@ pub const TlsListener = struct {
         return self.listener.localPort();
     }
 
-    pub fn acceptAndServe(self: *TlsListener, handler: HandlerFn, handler_ctx: ?*anyopaque) !void {
+    pub fn acceptAndServe(self: *TlsListener, handler: HandlerFn) !void {
         var socket = self.listener.accept(self.io) catch return error.AcceptFailed;
         defer socket.close();
 
@@ -402,18 +400,18 @@ pub const TlsListener = struct {
 
         const alpn = tls_conn.alpn orelse .@"http/1.1";
         switch (alpn) {
-            .h2 => serveHttp2OverTls(self.allocator, &tls_conn, handler, handler_ctx),
-            .@"http/1.0", .@"http/1.1" => serveHttp1OverTls(self.allocator, &tls_conn, handler, handler_ctx),
+            .h2 => serveHttp2OverTls(self.allocator, &tls_conn, handler),
+            .@"http/1.0", .@"http/1.1" => serveHttp1OverTls(self.allocator, &tls_conn, handler),
             .h3 => return error.Http3RequiresQuic,
         }
     }
 
     /// Blocking accept loop. Calls acceptAndServe for each connection.
     /// Use `requestShutdown()` to break out of the loop.
-    pub fn run(self: *TlsListener, handler: HandlerFn, handler_ctx: ?*anyopaque) !void {
+    pub fn run(self: *TlsListener, handler: HandlerFn) !void {
         while (!self.stop.load(.acquire)) {
             self.in_accept.store(true, .release);
-            self.acceptAndServe(handler, handler_ctx) catch {};
+            self.acceptAndServe(handler) catch {};
             self.in_accept.store(false, .release);
             if (self.stop.load(.acquire)) break;
         }

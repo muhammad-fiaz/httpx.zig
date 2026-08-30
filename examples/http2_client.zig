@@ -29,7 +29,7 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.get("/h2", &h2Handler);
+    try server.get("/h2", h2Handler);
     const port = server.localPort();
 
     const ServerWorker = struct {

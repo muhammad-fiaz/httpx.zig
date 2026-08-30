@@ -30,11 +30,11 @@ pub fn main() !void {
 
     var router = httpx.Router.init(allocator);
     defer router.deinit();
-    try router.addMeta(.GET, "/widgets", &listHandler, .{
+    try router.addMeta(.GET, "/widgets", listHandler, .{
         .summary = "List all widgets",
         .description = "Returns the full set of widgets.",
     });
-    try router.addMeta(.GET, "/widgets/{id}", &getHandler, .{
+    try router.addMeta(.GET, "/widgets/{id}", getHandler, .{
         .summary = "Fetch a single widget",
         .description = "Looks up a widget by its opaque id.",
     });

@@ -45,7 +45,7 @@ pub fn main() !void {
     std.debug.print("TLS server configuration verified.\n", .{});
 }
 
-fn handler(_: ?*anyopaque, _: httpx.TlsRequest) anyerror!httpx.TlsResponse {
+fn handler(_: httpx.TlsRequest) anyerror!httpx.TlsResponse {
     return .{
         .status = 200,
         .body = "Hello from TLS server!",

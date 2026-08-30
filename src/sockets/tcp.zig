@@ -559,10 +559,15 @@ pub fn wakeListenerPort(port: u16) void {
         _ = ws.connect(sock, &sa, @sizeOf(ws.sockaddr_in));
         _ = ws.closesocket(sock);
     } else {
-        const addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-        if (std.net.tcpConnectToAddress(addr)) |stream| {
-            stream.close();
-        } else |_| {}
+        const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return;
+        defer posix.close(fd);
+        const addr = posix.sockaddr.in{
+            .family = posix.AF.INET,
+            .port = std.mem.nativeToBig(u16, port),
+            .addr = .{ 127, 0, 0, 1 },
+            .zero = [_]u8{0} ** 8,
+        };
+        posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch {};
     }
 }
 

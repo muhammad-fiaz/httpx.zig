@@ -67,10 +67,10 @@ pub fn main() !void {
 }
 
 fn runServer(listener: *httpx.TlsListener) void {
-    listener.run(handleRequest, null) catch {};
+    listener.run(handleRequest) catch {};
 }
 
-fn handleRequest(_: ?*anyopaque, _: httpx.TlsRequest) anyerror!httpx.TlsResponse {
+fn handleRequest(_: httpx.TlsRequest) anyerror!httpx.TlsResponse {
     return .{
         .status = 200,
         .body = "Hello from TLS server!",

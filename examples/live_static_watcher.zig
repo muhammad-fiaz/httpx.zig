@@ -110,10 +110,10 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.get("/", &indexHtmlHandler);
-    try server.get("/style.css", &styleCssHandler);
-    try server.get("/app.js", &appJsHandler);
-    try server.get("/api/status", &apiStatusHandler);
+    try server.get("/", indexHtmlHandler);
+    try server.get("/style.css", styleCssHandler);
+    try server.get("/app.js", appJsHandler);
+    try server.get("/api/status", apiStatusHandler);
 
     const port = server.localPort();
     std.debug.print("[INFO] Server running on http://127.0.0.1:{d} (Press CTRL+C to quit)\n", .{port});
