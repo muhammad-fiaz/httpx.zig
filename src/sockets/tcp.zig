@@ -223,10 +223,10 @@ pub const UploadStream = struct {
                 .addr = std.mem.nativeToBig(u32, std.mem.readInt(u32, &host, .big)),
                 .zero = [_]u8{0} ** 8,
             };
-            posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch {
-                posix.close(fd);
+            if (std.c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) != 0) {
+                _ = std.c.close(fd);
                 return ConnectError.ConnectionRefused;
-            };
+            }
             return .{ .handle = @intCast(fd) };
         }
     }
@@ -242,9 +242,9 @@ pub const UploadStream = struct {
                 if (rc == ws.SOCKET_ERROR) return error.WriteFailed;
                 pos += @intCast(rc);
             } else {
-                const n = posix.send(@intCast(self.handle), data[pos..], 0) catch return error.WriteFailed;
-                if (n == 0) return error.WriteFailed;
-                pos += n;
+                const n = std.c.send(@intCast(self.handle), data.ptr + pos, want, 0);
+                if (n <= 0) return error.WriteFailed;
+                pos += @intCast(n);
             }
         }
     }
@@ -255,7 +255,9 @@ pub const UploadStream = struct {
             if (rc == ws.SOCKET_ERROR) return error.ReadFailed;
             return @intCast(rc);
         } else {
-            return posix.recv(@intCast(self.handle), buf, 0) catch return error.ReadFailed;
+            const n = std.c.recv(@intCast(self.handle), buf.ptr, buf.len, 0);
+            if (n < 0) return error.ReadFailed;
+            return @intCast(n);
         }
     }
 
@@ -264,7 +266,7 @@ pub const UploadStream = struct {
         if (is_windows) {
             _ = ws.closesocket(@intCast(self.handle));
         } else {
-            posix.close(@intCast(self.handle));
+            _ = std.c.close(@intCast(self.handle));
         }
     }
 };
@@ -561,14 +563,14 @@ pub fn wakeListenerPort(port: u16) void {
     } else {
         const fd = std.c.socket(@intCast(posix.AF.INET), @intCast(posix.SOCK.STREAM), 0);
         if (fd < 0) return;
-        defer posix.close(fd);
+        defer _ = std.c.close(fd);
         const addr = posix.sockaddr.in{
             .family = posix.AF.INET,
             .port = std.mem.nativeToBig(u16, port),
             .addr = std.mem.nativeToBig(u32, 0x7F000001),
             .zero = [_]u8{0} ** 8,
         };
-        posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch {};
+        _ = std.c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in));
     }
 }
 
