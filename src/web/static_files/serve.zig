@@ -248,32 +248,8 @@ pub const FileMeta = struct { size: u64, mtime_ns: i128 };
 pub const c_fs = struct {
     pub const is_win = builtin.os.tag == .windows;
 
-    pub const FILE_HANDLE = if (is_win) std.os.windows.HANDLE else std.posix.fd_t;
+    pub const FILE_HANDLE = if (is_win) std.os.windows.HANDLE else std.c.fd_t;
     pub const INVALID_HANDLE: FILE_HANDLE = if (is_win) std.os.windows.INVALID_HANDLE_VALUE else -1;
-
-    pub const c_stat = extern struct {
-        dev: std.c.dev_t,
-        ino: std.c.ino_t,
-        nlink: std.c.nlink_t,
-        mode: std.c.mode_t,
-        uid: std.c.uid_t,
-        gid: std.c.gid_t,
-        __pad0: c_uint = 0,
-        rdev: std.c.dev_t,
-        size: std.c.off_t,
-        blksize: std.c.blksize_t,
-        blocks: std.c.blkcnt_t,
-        atim: std.c.timespec,
-        mtim: std.c.timespec,
-        ctim: std.c.timespec,
-        __reserved: [3]c_long = .{ 0, 0, 0 },
-
-        pub fn mtime(self: c_stat) std.c.timespec {
-            return self.mtim;
-        }
-    };
-
-    pub extern "c" fn fstat(fd: std.c.fd_t, buf: *c_stat) c_int;
 
     pub fn openRead(path: []const u8) ?FILE_HANDLE {
         if (is_win) {
@@ -301,11 +277,12 @@ pub const c_fs = struct {
             if (h == INVALID_HANDLE) return null;
             return h;
         } else {
-            var null_term: [4096]u8 = undefined;
+            var null_term: [4096:0]u8 = undefined;
             if (path.len >= null_term.len) return null;
             @memcpy(null_term[0..path.len], path);
             null_term[path.len] = 0;
-            const fd = std.posix.openat(std.posix.AT.FDCWD, &null_term, .{ .ACCMODE = .RDONLY }, 0) catch return null;
+            const fd = std.c.open(&null_term, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+            if (fd < 0) return null;
             return fd;
         }
     }
@@ -333,11 +310,12 @@ pub const c_fs = struct {
             if (h == INVALID_HANDLE) return null;
             return h;
         } else {
-            var null_term: [4096]u8 = undefined;
+            var null_term: [4096:0]u8 = undefined;
             if (path.len >= null_term.len) return null;
             @memcpy(null_term[0..path.len], path);
             null_term[path.len] = 0;
-            const fd = std.posix.openat(std.posix.AT.FDCWD, &null_term, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch return null;
+            const fd = std.c.open(&null_term, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+            if (fd < 0) return null;
             return fd;
         }
     }
@@ -407,8 +385,8 @@ pub fn statPath(io: std.Io, path: []const u8) ?FileMeta {
         }
         return .{ .size = @intCast(size), .mtime_ns = mtime_ns };
     } else {
-        var st: c_fs.c_stat = undefined;
-        if (c_fs.fstat(h, &st) != 0) return null;
+        var st: std.c.Stat = undefined;
+        if (std.c.fstat(h, &st) != 0) return null;
         if ((st.mode & 0o170000) != 0o100000) return null;
         return .{ .size = @intCast(st.size), .mtime_ns = @intCast(st.mtime().nsec) };
     }
@@ -433,9 +411,9 @@ fn readAll(io: std.Io, path: []const u8, dest: []u8) !void {
     } else {
         var pos: usize = 0;
         while (pos < dest.len) {
-            const n = try std.posix.read(h, dest[pos..]);
-            if (n == 0) return error.UnexpectedEof;
-            pos += n;
+            const n = std.c.read(h, dest.ptr + pos, dest.len - pos);
+            if (n <= 0) return error.UnexpectedEof;
+            pos += @intCast(n);
         }
     }
 }
@@ -486,9 +464,9 @@ fn readRange(io: std.Io, path: []const u8, offset: u64, dest: []u8) !void {
         _ = std.c.lseek(h, @intCast(offset), 0);
         var pos: usize = 0;
         while (pos < dest.len) {
-            const n = try std.posix.read(h, dest[pos..]);
-            if (n == 0) return error.UnexpectedEof;
-            pos += n;
+            const n = std.c.read(h, dest.ptr + pos, dest.len - pos);
+            if (n <= 0) return error.UnexpectedEof;
+            pos += @intCast(n);
         }
     }
 }

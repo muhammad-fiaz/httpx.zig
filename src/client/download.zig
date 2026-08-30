@@ -385,11 +385,13 @@ const FileOps = struct {
             if (h == c_fs.INVALID_HANDLE) return null;
             return h;
         } else {
-            var null_term: [4096]u8 = undefined;
+            var null_term: [4096:0]u8 = undefined;
             if (path.len >= null_term.len) return null;
             @memcpy(null_term[0..path.len], path);
             null_term[path.len] = 0;
-            return std.posix.openat(std.posix.AT.FDCWD, &null_term, .{ .ACCMODE = .RDWR, .CREAT = true }, 0o644) catch null;
+            const fd = std.c.open(&null_term, .{ .ACCMODE = .RDWR, .CREAT = true }, @as(std.c.mode_t, 0o644));
+            if (fd < 0) return null;
+            return fd;
         }
     }
 
@@ -432,7 +434,9 @@ const FileOps = struct {
             if (c_fs.ReadFile(h, buf.ptr, to_read, &read_bytes, null) == .FALSE) return error.FileReadFailed;
             return read_bytes;
         } else {
-            return std.posix.read(h, buf) catch return error.FileReadFailed;
+            const n = std.c.read(h, buf.ptr, buf.len);
+            if (n < 0) return error.FileReadFailed;
+            return @intCast(n);
         }
     }
 
@@ -533,14 +537,15 @@ const FileOps = struct {
             if (attr == INVALID_FILE_ATTRIBUTES) return false;
             return (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
         } else {
-            var null_term: [4096]u8 = undefined;
+            var null_term: [4096:0]u8 = undefined;
             if (path.len >= null_term.len) return false;
             @memcpy(null_term[0..path.len], path);
             null_term[path.len] = 0;
-            const fd = std.posix.openat(std.posix.AT.FDCWD, &null_term, .{ .ACCMODE = .RDONLY }, 0) catch return false;
+            const fd = std.c.open(&null_term, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+            if (fd < 0) return false;
             defer _ = std.c.close(fd);
-            var st: c_fs.c_stat = undefined;
-            if (c_fs.fstat(fd, &st) != 0) return false;
+            var st: std.c.Stat = undefined;
+            if (std.c.fstat(fd, &st) != 0) return false;
             return (st.mode & 0o170000) == 0o040000;
         }
     }
