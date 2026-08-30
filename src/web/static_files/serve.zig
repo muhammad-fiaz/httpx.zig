@@ -388,21 +388,65 @@ pub fn statPath(_: ?std.Io, path: []const u8) ?FileMeta {
             .size = @intCast(@max(0, size)),
             .mtime_ns = mtime_ns,
         };
+    } else if (builtin.os.tag == .linux) {
+        var null_term: [4096:0]u8 = undefined;
+        if (path.len >= null_term.len) return null;
+        @memcpy(null_term[0..path.len], path);
+        null_term[path.len] = 0;
+
+        var statx_buf: std.os.linux.Statx = undefined;
+        const mask: std.os.linux.STATX = .{
+            .TYPE = true,
+            .SIZE = true,
+            .MTIME = true,
+        };
+        const rc = std.os.linux.statx(
+            std.posix.AT.FDCWD,
+            &null_term,
+            0,
+            mask,
+            &statx_buf,
+        );
+        if (@as(isize, @bitCast(rc)) < 0) return null;
+        if ((statx_buf.mode & std.os.linux.S.IFMT) != std.os.linux.S.IFREG) return null;
+
+        const mtime_ns = @as(i128, statx_buf.mtime.sec) * std.time.ns_per_s + @as(i128, statx_buf.mtime.nsec);
+        return .{
+            .size = statx_buf.size,
+            .mtime_ns = mtime_ns,
+        };
     } else {
         var null_term: [4096:0]u8 = undefined;
         if (path.len >= null_term.len) return null;
         @memcpy(null_term[0..path.len], path);
         null_term[path.len] = 0;
 
-        var st: std.c.Stat = undefined;
-        if (std.c.stat(&null_term, &st) != 0) return null;
-        if (!std.c.S.ISREG(st.mode)) return null;
+        if (comptime std.posix.Stat != void) {
+            const stat_fn = switch (builtin.os.tag) {
+                .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => switch (builtin.cpu.arch) {
+                    .x86_64 => struct {
+                        extern "c" fn @"stat$INODE64"(noalias path: [*:0]const u8, noalias buf: *std.c.Stat) c_int;
+                    }.@"stat$INODE64",
+                    else => struct {
+                        extern "c" fn stat(noalias path: [*:0]const u8, noalias buf: *std.c.Stat) c_int;
+                    }.stat,
+                },
+                else => struct {
+                    extern "c" fn stat(noalias path: [*:0]const u8, noalias buf: *std.c.Stat) c_int;
+                }.stat,
+            };
 
-        const mtime_ns = @as(i128, st.mtime().sec) * std.time.ns_per_s + @as(i128, st.mtime().nsec);
-        return .{
-            .size = @intCast(@max(0, st.size)),
-            .mtime_ns = mtime_ns,
-        };
+            var st: std.c.Stat = undefined;
+            if (stat_fn(&null_term, &st) != 0) return null;
+            if (!std.c.S.ISREG(st.mode)) return null;
+
+            const mtime_ns = @as(i128, st.mtime().sec) * std.time.ns_per_s + @as(i128, st.mtime().nsec);
+            return .{
+                .size = @intCast(@max(0, st.size)),
+                .mtime_ns = mtime_ns,
+            };
+        }
+        return null;
     }
 }
 
