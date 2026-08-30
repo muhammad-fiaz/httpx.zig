@@ -12,17 +12,13 @@
             .url = "https://github.com/muhammad-fiaz/brotli.zig/archive/refs/tags/0.0.3.tar.gz",
             .hash = "brotli-0.0.3-utAAyElaCQDYD5YHF9fRTrOpepnxcULV_7-2dP3ogzC-",
         },
-        .tint = .{
-            .url = "https://github.com/muhammad-fiaz/tint.zig/archive/refs/tags/0.0.1.tar.gz",
-            .hash = "tint-0.0.1-UOf2-eCcAQDCOLQD9hhyreeUZnXH48SJQcXg4x5NRBT2",
-        },
         .env = .{
             .url = "https://github.com/muhammad-fiaz/env.zig/archive/refs/tags/0.0.2.tar.gz",
             .hash = "env-0.0.2-TMsAe4W0AgASsiE9dbVmd5L8xSduIybTGPONqK9AZ-_e",
         },
         .loaders = .{
-            .url = "https://github.com/muhammad-fiaz/loaders.zig/archive/refs/tags/0.0.4.tar.gz",
-            .hash = "loaders-0.0.4-lPpNaXxkAgD4ZAvMq_fRgaq0UpRN1t1kD2fCTe27TXR0",
+            .url = "https://github.com/muhammad-fiaz/loaders.zig/archive/refs/tags/0.0.5.tar.gz",
+            .hash = "loaders-0.0.5-lPpNacRmAgAKwT5wlYIR5fo_UV_S1DIiJCd4mHr7AdlX",
         },
     },
     .paths = .{

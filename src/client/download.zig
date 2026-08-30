@@ -21,7 +21,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const loaders = @import("loaders");
-const tint = @import("tint");
+const tint = loaders.tint;
 const clock = @import("../common/clock.zig");
 const Method = @import("../common/method.zig").Method;
 const Status = @import("../common/status.zig").Status;
@@ -67,7 +67,6 @@ pub const DownloadError = error{
     OutOfMemory,
     UnexpectedEof,
 };
-
 
 pub const ProgressState = enum {
     starting,
@@ -281,8 +280,6 @@ pub const DownloadResult = struct {
         return self.destination;
     }
 };
-
-
 
 // Checksum Helpers
 
@@ -928,7 +925,6 @@ pub const Downloader = struct {
         };
         defer resp.deinit();
 
-
         // Check 304 Not Modified
         if (resp.status == 304) {
             return .{
@@ -948,9 +944,6 @@ pub const Downloader = struct {
         if (resp.status == 416) return DownloadError.RangeUnsatisfiable;
         if (resp.status >= 500 and resp.status <= 599) return DownloadError.ServerError;
         if (resp.status < 200 or resp.status >= 300) return DownloadError.HttpError;
-
-
-
 
         var actual_offset: u64 = 0;
         if (resuming and resp.status == 206) {
@@ -1057,8 +1050,6 @@ pub const Downloader = struct {
     }
 };
 
-
-
 // Progress Presentation Tracker
 
 fn formatElapsed(ns: u64, buf: []u8) []const u8 {
@@ -1078,7 +1069,6 @@ fn formatSpeed(per_sec: f64, buf: []u8) []const u8 {
         return std.fmt.bufPrint(buf, "{d:.2} MB/s", .{per_sec / (1024.0 * 1024.0)}) catch "";
     }
 }
-
 
 pub const ProgressTracker = struct {
     allocator: Allocator,
@@ -1149,7 +1139,6 @@ pub const ProgressTracker = struct {
                 self.bar.?.forceRedraw();
             }
         }
-
 
         if (self.options.on_progress) |cb| {
             cb(.{
@@ -1226,7 +1215,6 @@ pub const ProgressTracker = struct {
             }, self.options.user_data);
         }
     }
-
 
     pub fn fail(self: *ProgressTracker) void {
         if (self.bar) |*b| b.fail("Download failed");
@@ -1678,4 +1666,3 @@ test "remote file info size formatting" {
     try std.testing.expectEqualStrings("15.49 MB", formatted);
     try std.testing.expectEqualStrings("file.zip", info.fileName());
 }
-

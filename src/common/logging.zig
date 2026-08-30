@@ -19,7 +19,7 @@
 
 const std = @import("std");
 const sync = @import("sync.zig");
-const tint = @import("tint");
+const tint = @import("loaders").tint;
 
 pub const Level = enum(u8) {
     debug = 0,
@@ -48,7 +48,6 @@ pub const Level = enum(u8) {
         };
     }
 };
-
 
 pub const ColorMode = enum { auto, always, never };
 
@@ -176,7 +175,6 @@ pub const WriterSink = struct {
         }
         w.writeAll("\n") catch return;
     }
-
 };
 
 // Secret redaction

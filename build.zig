@@ -27,11 +27,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const tint_dep = b.dependency("tint", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     const env_dep = b.dependency("env", .{
         .target = target,
         .optimize = optimize,
@@ -50,7 +45,6 @@ pub fn build(b: *std.Build) void {
 
     httpx_module.addImport("zstd", zstd_dep.module("zstd"));
     httpx_module.addImport("brotli", brotli_dep.module("brotli"));
-    httpx_module.addImport("tint", tint_dep.module("tint"));
     httpx_module.addImport("env", env_dep.module("env"));
     httpx_module.addImport("loaders", loaders_dep.module("loaders"));
 
@@ -184,7 +178,6 @@ pub fn build(b: *std.Build) void {
     });
     tests.root_module.addImport("zstd", zstd_dep.module("zstd"));
     tests.root_module.addImport("brotli", brotli_dep.module("brotli"));
-    tests.root_module.addImport("tint", tint_dep.module("tint"));
     tests.root_module.addImport("env", env_dep.module("env"));
     tests.root_module.addImport("loaders", loaders_dep.module("loaders"));
     linkPlatformLibs(tests, target);
@@ -226,7 +219,6 @@ pub fn build(b: *std.Build) void {
     });
     lib_root_module.addImport("zstd", zstd_dep.module("zstd"));
     lib_root_module.addImport("brotli", brotli_dep.module("brotli"));
-    lib_root_module.addImport("tint", tint_dep.module("tint"));
     lib_root_module.addImport("env", env_dep.module("env"));
     lib_root_module.addImport("loaders", loaders_dep.module("loaders"));
 
