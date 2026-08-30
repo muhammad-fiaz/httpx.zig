@@ -12,7 +12,10 @@ pub fn main() !void {
     };
 
     // Run all requests concurrently (array passed directly, no explicit & needed)
-    const results = try httpx.getAll(urls);
+    const results = httpx.getAll(urls) catch |err| {
+        std.debug.print("getAll failed: {s}\n", .{@errorName(err)});
+        return;
+    };
     defer {
         for (results) |*r| r.deinit();
     }
@@ -28,7 +31,10 @@ pub fn main() !void {
         .{ .method = .GET, .url = "http://httpbun.com/ip" },
     };
 
-    const results2 = try httpx.requestAll(reqs);
+    const results2 = httpx.requestAll(reqs) catch |err| {
+        std.debug.print("requestAll failed: {s}\n", .{@errorName(err)});
+        return;
+    };
     defer {
         for (results2) |*r| r.deinit();
     }

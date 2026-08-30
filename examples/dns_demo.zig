@@ -9,7 +9,10 @@ pub fn main() !void {
     var client = try httpx.Client.init(allocator, .{});
     defer client.deinit();
 
-    const addrs = try httpx.resolve.Resolver.init(allocator).lookup("httpbun.com", 443);
+    const addrs = httpx.resolve.Resolver.init(allocator).lookup("httpbun.com", 443) catch |err| {
+        std.debug.print("DNS lookup failed: {s}\n", .{@errorName(err)});
+        return;
+    };
     defer allocator.free(addrs);
 
     var buf: [64]u8 = undefined;

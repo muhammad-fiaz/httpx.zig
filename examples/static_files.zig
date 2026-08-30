@@ -34,44 +34,20 @@ pub fn main() !void {
     });
     defer httpx.static.files.unregister();
 
+    // Start server on a background thread
     const port = server.localPort();
     std.debug.print("serving examples/static on http://127.0.0.1:{d}/static\n", .{port});
     std.debug.print("health endpoint on http://127.0.0.1:{d}/healthz\n", .{port});
 
-    const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
-            s.run();
-        }
-    };
-    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+    const thread = try server.start();
 
-    var spin: usize = 0;
-    while (spin < 1000) : (spin += 1) std.Thread.yield() catch {};
+    var url_buf: [128]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/static/index.html", .{port});
 
-    var client = try httpx.Client.init(allocator, .{});
-    defer client.deinit();
+    var response = try httpx.get(.{ .url = url });
+    defer response.deinit();
 
-    const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/static/index.html", .{port});
-    defer allocator.free(url);
+    std.debug.print("GET /static/index.html -> {d} ({d} bytes)\n", .{ response.status, response.body.len });
 
-    var response: ?httpx.ClientResponse = null;
-    var attempts: usize = 0;
-    while (attempts < 20) : (attempts += 1) {
-        if (client.get(.{ .url = url })) |res| {
-            response = res;
-            break;
-        } else |_| {
-            var y: usize = 0;
-            while (y < 1000) : (y += 1) std.Thread.yield() catch {};
-        }
-    }
-
-    if (response) |*res| {
-        defer res.deinit();
-        std.debug.print("GET /static/index.html -> {d} ({d} bytes)\n", .{ res.status, res.body.len });
-    } else {
-        std.debug.print("GET /static/index.html failed to connect\n", .{});
-    }
-
-    t.join();
+    thread.join();
 }

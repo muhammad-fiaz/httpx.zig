@@ -10,10 +10,13 @@ pub fn main() !void {
     defer client.deinit();
 
     // GET with compression
-    var response = try client.get(.{
+    var response = client.get(.{
         .url = "http://httpbun.com/get",
         .headers = .{ .accept_encoding = "gzip, deflate, br" },
-    });
+    }) catch |err| {
+        std.debug.print("Compression request failed: {s}\n", .{@errorName(err)});
+        return;
+    };
     defer response.deinit();
 
     std.debug.print("Status: {d}\n", .{response.status});
