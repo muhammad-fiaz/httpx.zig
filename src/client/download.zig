@@ -524,30 +524,10 @@ const FileOps = struct {
     }
 
     pub fn isDir(path: []const u8) bool {
-        if (is_win) {
-            var wbuf: [1024]u16 = undefined;
-            const len = std.unicode.utf8ToUtf16Le(&wbuf, path) catch return false;
-            wbuf[len] = 0;
-            const GetFileAttributesW = struct {
-                pub extern "kernel32" fn GetFileAttributesW(lpFileName: [*:0]const u16) callconv(.winapi) u32;
-            }.GetFileAttributesW;
-            const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF;
-            const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x00000010;
-            const attr = GetFileAttributesW(@ptrCast(&wbuf));
-            if (attr == INVALID_FILE_ATTRIBUTES) return false;
-            return (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
-        } else {
-            var null_term: [4096:0]u8 = undefined;
-            if (path.len >= null_term.len) return false;
-            @memcpy(null_term[0..path.len], path);
-            null_term[path.len] = 0;
-            const fd = std.c.open(&null_term, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-            if (fd < 0) return false;
-            defer _ = std.c.close(fd);
-            var st: std.c.Stat = undefined;
-            if (c_fs.fstat(fd, &st) != 0) return false;
-            return (st.mode & 0o170000) == 0o040000;
-        }
+        const io: std.Io = .initSingleThreaded();
+        var dir = std.Io.Dir.cwd().openDir(io, path, .{}) catch return false;
+        dir.close(io);
+        return true;
     }
 
     pub fn copyFile(src_path: []const u8, dst_path: []const u8) bool {

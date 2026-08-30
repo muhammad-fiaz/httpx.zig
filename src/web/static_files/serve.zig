@@ -251,10 +251,6 @@ pub const c_fs = struct {
     pub const FILE_HANDLE = if (is_win) std.os.windows.HANDLE else std.c.fd_t;
     pub const INVALID_HANDLE: FILE_HANDLE = if (is_win) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
-    pub const fstat = if (!is_win) struct {
-        pub extern "c" fn fstat(fd: std.c.fd_t, buf: *std.c.Stat) c_int;
-    }.fstat else struct {};
-
     pub fn openRead(path: []const u8) ?FILE_HANDLE {
         if (is_win) {
             var wide_buf: [std.os.windows.PATH_MAX_WIDE:0]u16 = undefined;
@@ -373,29 +369,17 @@ pub const c_fs = struct {
 };
 
 pub fn statPath(io: std.Io, path: []const u8) ?FileMeta {
-    _ = io;
-    const h = c_fs.openRead(path) orelse return null;
-    defer c_fs.close(h);
+    var file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only, .allow_directory = false }) catch return null;
+    defer file.close(io);
 
-    if (c_fs.is_win) {
-        var size: i64 = 0;
-        if (c_fs.GetFileSizeEx(h, &size) == .FALSE or size < 0) return null;
+    const st = file.stat(io) catch return null;
+    if (st.kind != .file) return null;
 
-        var ft: std.os.windows.FILETIME = undefined;
-        var mtime_ns: i128 = 0;
-        if (c_fs.GetFileTime(h, null, null, &ft) != .FALSE) {
-            const ft_u64 = (@as(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-            mtime_ns = @as(i128, @intCast(ft_u64)) * 100;
-        }
-        return .{ .size = @intCast(size), .mtime_ns = mtime_ns };
-    } else {
-        var st: std.c.Stat = undefined;
-        if (c_fs.fstat(h, &st) != 0) return null;
-        if ((st.mode & 0o170000) != 0o100000) return null;
-        const mt = st.mtime();
-        const mtime_ns = @as(i128, mt.sec) * std.time.ns_per_s + @as(i128, @intCast(mt.nsec));
-        return .{ .size = @intCast(st.size), .mtime_ns = mtime_ns };
-    }
+    const mtime_ns = @as(i128, @intCast(st.mtime.nanoseconds));
+    return .{
+        .size = st.size,
+        .mtime_ns = mtime_ns,
+    };
 }
 
 fn readAll(io: std.Io, path: []const u8, dest: []u8) !void {
