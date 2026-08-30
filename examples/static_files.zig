@@ -41,6 +41,10 @@ pub fn main() !void {
 
     const thread = try server.start();
 
+    // Give server worker thread a moment to enter accept loop
+    var spin: usize = 0;
+    while (spin < 1000) : (spin += 1) std.Thread.yield() catch {};
+
     var url_buf: [128]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/static/index.html", .{port});
 
