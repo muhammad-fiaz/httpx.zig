@@ -466,6 +466,7 @@ pub const Engine = struct {
 
         // ServerHello with handshake header
         var sh_msg = std.ArrayList(u8).empty;
+        errdefer sh_msg.deinit(self.allocator);
         try sh_msg.append(self.allocator, @intFromEnum(handshake_mod.HandshakeType.server_hello));
         const sh_body_len: u24 = @intCast(sh_body.items.len);
         try sh_msg.append(self.allocator, @intCast((sh_body_len >> 16) & 0xFF));
@@ -511,6 +512,7 @@ pub const Engine = struct {
         try ee_body.appendSlice(self.allocator, ee_exts.items);
 
         var ee_msg = std.ArrayList(u8).empty;
+        errdefer ee_msg.deinit(self.allocator);
         try ee_msg.append(self.allocator, @intFromEnum(handshake_mod.HandshakeType.encrypted_extensions));
         const ee_body_len: u24 = @intCast(ee_body.items.len);
         try ee_msg.append(self.allocator, @intCast((ee_body_len >> 16) & 0xFF));
@@ -574,6 +576,7 @@ pub const Engine = struct {
         }
 
         var cert_msg = std.ArrayList(u8).empty;
+        errdefer cert_msg.deinit(self.allocator);
         try cert_msg.append(self.allocator, @intFromEnum(handshake_mod.HandshakeType.certificate));
         const cert_body_len: u24 = @intCast(cert_body.items.len);
         try cert_msg.append(self.allocator, @intCast((cert_body_len >> 16) & 0xFF));
@@ -591,6 +594,7 @@ pub const Engine = struct {
         _ = private_key_der;
 
         var cv_msg = std.ArrayList(u8).empty;
+        errdefer cv_msg.deinit(self.allocator);
         try cv_msg.append(self.allocator, @intFromEnum(handshake_mod.HandshakeType.certificate_verify));
         const cv_body_len: u24 = @intCast(cv_body.items.len);
         try cv_msg.append(self.allocator, @intCast((cv_body_len >> 16) & 0xFF));
@@ -616,6 +620,7 @@ pub const Engine = struct {
         try fin_body.appendSlice(self.allocator, &finished_verify);
 
         var fin_msg = std.ArrayList(u8).empty;
+        errdefer fin_msg.deinit(self.allocator);
         try fin_msg.append(self.allocator, @intFromEnum(handshake_mod.HandshakeType.finished));
         const fin_body_len: u24 = @intCast(fin_body.items.len);
         try fin_msg.append(self.allocator, @intCast((fin_body_len >> 16) & 0xFF));
