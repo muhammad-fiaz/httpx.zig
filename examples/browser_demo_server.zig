@@ -104,7 +104,7 @@ fn statusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.renderJson(.{
         .status = "online",
         .engine = "httpx.zig",
-        .protocols = [_][]const u8{ "HTTP/1.1", "HTTP/2", "HTTP/3", "QUIC", "TLS 1.3" },
+        .protocols = [_][]const u8{ "HTTP/1.1", "HTTP/2", "HTTP/3", "QUIC", "TLS 1.2", "TLS 1.3" },
         .version = if (current_version.load(.acquire) == 1) "1.0.0" else "2.0.0-reloaded",
         .uptime_ms = 42000,
         .hot_reload_active = true,
