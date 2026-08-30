@@ -118,17 +118,15 @@ fn installShutdownHandler(self: *Server) void {
         },
         else => {
             const handler_fn = struct {
-                fn sigHandler(sig: c_int) callconv(.C) void {
+                fn sigHandler(sig: std.posix.SIG) callconv(.c) void {
                     _ = sig;
                     if (g_active_server) |s| s.requestShutdown();
                 }
             };
-            var act: std.posix.Sigaction = .{
-                .handler = .{ .handler = &handler_fn.sigHandler },
-                .mask = std.posix.empty_sigset,
-                .flags = 0,
-            };
-            std.posix.sigaction(std.posix.SIG.INT, &act, null) catch {};
+            var act: std.posix.Sigaction = std.mem.zeroes(std.posix.Sigaction);
+            act.handler = .{ .handler = @ptrCast(&handler_fn.sigHandler) };
+            act.flags = 0;
+            std.posix.sigaction(std.posix.SIG.INT, &act, null);
         },
     }
 }

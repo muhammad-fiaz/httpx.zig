@@ -96,11 +96,11 @@ pub fn sleepMillis(ms: u64) void {
             kernel32.Sleep(@intCast(ms));
         },
         else => {
-            var ts = std.posix.timespec{
+            var ts: std.c.timespec = .{
                 .sec = @intCast(ms / 1000),
                 .nsec = @intCast((ms % 1000) * 1_000_000),
             };
-            _ = std.posix.nanosleep(&ts, null);
+            _ = std.c.nanosleep(&ts, null);
         },
     }
 }
