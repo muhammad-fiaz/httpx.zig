@@ -524,7 +524,7 @@ const FileOps = struct {
     }
 
     pub fn isDir(path: []const u8) bool {
-        const io: std.Io = .initSingleThreaded();
+        const io: std.Io = std.Io.Threaded.global_single_threaded.io();
         var dir = std.Io.Dir.cwd().openDir(io, path, .{}) catch return false;
         dir.close(io);
         return true;

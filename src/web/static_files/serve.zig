@@ -368,7 +368,8 @@ pub const c_fs = struct {
     ) callconv(.winapi) std.os.windows.BOOL;
 };
 
-pub fn statPath(io: std.Io, path: []const u8) ?FileMeta {
+pub fn statPath(io_opt: ?std.Io, path: []const u8) ?FileMeta {
+    const io = if (io_opt) |i| (if (i.userdata != null) i else std.Io.Threaded.global_single_threaded.io()) else std.Io.Threaded.global_single_threaded.io();
     var file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only, .allow_directory = false }) catch return null;
     defer file.close(io);
 
@@ -382,83 +383,40 @@ pub fn statPath(io: std.Io, path: []const u8) ?FileMeta {
     };
 }
 
-fn readAll(io: std.Io, path: []const u8, dest: []u8) !void {
-    _ = io;
-    const h = c_fs.openRead(path) orelse return error.FileNotFound;
-    defer c_fs.close(h);
+fn readAll(io_opt: ?std.Io, path: []const u8, dest: []u8) !void {
+    const io = if (io_opt) |i| (if (i.userdata != null) i else std.Io.Threaded.global_single_threaded.io()) else std.Io.Threaded.global_single_threaded.io();
+    var file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only, .allow_directory = false }) catch return error.FileNotFound;
+    defer file.close(io);
 
-    if (c_fs.is_win) {
-        var read_bytes: u32 = 0;
-        var pos: usize = 0;
-        while (pos < dest.len) {
-            const chunk: u32 = @intCast(@min(dest.len - pos, @as(usize, 64 * 1024 * 1024)));
-            if (c_fs.ReadFile(h, dest.ptr + pos, chunk, &read_bytes, null) == .FALSE or read_bytes == 0) {
-                if (pos + read_bytes < dest.len) return error.UnexpectedEof;
+    var pos: usize = 0;
+    while (pos < dest.len) {
+        const n = file.readStreaming(io, &.{dest[pos..]}) catch |err| switch (err) {
+            error.EndOfStream => {
+                if (pos < dest.len) return error.UnexpectedEof;
                 break;
-            }
-            pos += read_bytes;
+            },
+            else => return error.UnexpectedEof,
+        };
+        if (n == 0) {
+            if (pos < dest.len) return error.UnexpectedEof;
+            break;
         }
-    } else {
-        var pos: usize = 0;
-        while (pos < dest.len) {
-            const n = std.c.read(h, dest.ptr + pos, dest.len - pos);
-            if (n <= 0) return error.UnexpectedEof;
-            pos += @intCast(n);
-        }
+        pos += n;
     }
 }
 
 pub fn writeFile(path: []const u8, content: []const u8) !void {
-    const h = c_fs.openWrite(path) orelse return error.AccessDenied;
-    defer c_fs.close(h);
-
-    if (c_fs.is_win) {
-        var written: u32 = 0;
-        var pos: usize = 0;
-        while (pos < content.len) {
-            const chunk: u32 = @intCast(@min(content.len - pos, @as(usize, 64 * 1024 * 1024)));
-            if (c_fs.WriteFile(h, content.ptr + pos, chunk, &written, null) == .FALSE or written == 0) {
-                return error.WriteFailed;
-            }
-            pos += written;
-        }
-    } else {
-        var pos: usize = 0;
-        while (pos < content.len) {
-            const n = std.c.write(h, content.ptr + pos, content.len - pos);
-            if (n <= 0) return error.WriteFailed;
-            pos += @intCast(n);
-        }
-    }
+    const io: std.Io = std.Io.Threaded.global_single_threaded.io();
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = content }) catch return error.WriteFailed;
 }
 
-fn readRange(io: std.Io, path: []const u8, offset: u64, dest: []u8) !void {
-    _ = io;
-    const h = c_fs.openRead(path) orelse return error.FileNotFound;
-    defer c_fs.close(h);
+fn readRange(io_opt: ?std.Io, path: []const u8, offset: u64, dest: []u8) !void {
+    const io = if (io_opt) |i| (if (i.userdata != null) i else std.Io.Threaded.global_single_threaded.io()) else std.Io.Threaded.global_single_threaded.io();
+    var file = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only, .allow_directory = false }) catch return error.FileNotFound;
+    defer file.close(io);
 
-    if (c_fs.is_win) {
-        const FILE_BEGIN: u32 = 0;
-        if (c_fs.SetFilePointerEx(h, @intCast(offset), null, FILE_BEGIN) == .FALSE) return error.SeekFailed;
-        var read_bytes: u32 = 0;
-        var pos: usize = 0;
-        while (pos < dest.len) {
-            const chunk: u32 = @intCast(@min(dest.len - pos, @as(usize, 64 * 1024 * 1024)));
-            if (c_fs.ReadFile(h, dest.ptr + pos, chunk, &read_bytes, null) == .FALSE or read_bytes == 0) {
-                if (pos + read_bytes < dest.len) return error.UnexpectedEof;
-                break;
-            }
-            pos += read_bytes;
-        }
-    } else {
-        _ = std.c.lseek(h, @intCast(offset), 0);
-        var pos: usize = 0;
-        while (pos < dest.len) {
-            const n = std.c.read(h, dest.ptr + pos, dest.len - pos);
-            if (n <= 0) return error.UnexpectedEof;
-            pos += @intCast(n);
-        }
-    }
+    const n = file.readPositionalAll(io, dest, offset) catch return error.SeekFailed;
+    if (n < dest.len) return error.UnexpectedEof;
 }
 
 // HTTP dates
