@@ -215,8 +215,8 @@ pub const UploadStream = struct {
             ws.applyTimeouts(h);
             return .{ .handle = @intCast(h) };
         } else {
-            const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, posix.IPPROTO.TCP) catch
-                return ConnectError.ConnectionRefused;
+            const fd = std.c.socket(@intCast(posix.AF.INET), @intCast(posix.SOCK.STREAM), @intCast(posix.IPPROTO.TCP));
+            if (fd < 0) return ConnectError.ConnectionRefused;
             var addr = posix.sockaddr.in{
                 .family = posix.AF.INET,
                 .port = std.mem.nativeToBig(u16, port),
@@ -559,7 +559,8 @@ pub fn wakeListenerPort(port: u16) void {
         _ = ws.connect(sock, &sa, @sizeOf(ws.sockaddr_in));
         _ = ws.closesocket(sock);
     } else {
-        const fd = posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0) catch return;
+        const fd = std.c.socket(@intCast(posix.AF.INET), @intCast(posix.SOCK.STREAM), 0);
+        if (fd < 0) return;
         defer posix.close(fd);
         const addr = posix.sockaddr.in{
             .family = posix.AF.INET,
