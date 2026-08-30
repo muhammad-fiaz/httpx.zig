@@ -29,7 +29,20 @@ const req_mod = @import("request.zig");
 const Pool = @import("pool.zig").Pool;
 const PoolConfig = @import("pool.zig").PoolConfig;
 const dns_cache_mod = @import("../net/dns/cache.zig");
+const clock = @import("../common/clock.zig");
 const HttpVersion = @import("../common/http_version.zig").HttpVersion;
+pub const download_pkg = @import("download.zig");
+pub const DownloadOptions = download_pkg.DownloadOptions;
+pub const DownloadResult = download_pkg.DownloadResult;
+pub const DownloadError = download_pkg.DownloadError;
+pub const ProgressInfo = download_pkg.ProgressInfo;
+pub const ProgressState = download_pkg.ProgressState;
+pub const ProgressMode = download_pkg.ProgressMode;
+pub const ExistingFilePolicy = download_pkg.ExistingFilePolicy;
+pub const ChecksumAlgorithm = download_pkg.ChecksumAlgorithm;
+pub const VerifyOptions = download_pkg.VerifyOptions;
+pub const UpdateOptions = download_pkg.UpdateOptions;
+pub const RemoteFileInfo = download_pkg.RemoteFileInfo;
 
 pub const Config = struct {
     allocator: ?Allocator = null,
@@ -51,6 +64,12 @@ pub const Config = struct {
     timeout_ms: ?u64 = null,
     /// Default max response body size.
     max_response_size: ?usize = null,
+    /// Number of retry attempts for failed requests (0 = no retry).
+    max_retries: u32 = 0,
+    /// Delay between retry attempts in milliseconds.
+    retry_delay_ms: u64 = 1000,
+    /// HTTP status codes that trigger a retry (502, 503, 504 by default).
+    retry_status_codes: []const u16 = &.{ 502, 503, 504 },
 
     pub const DnsCacheOptions = struct {
         enabled: bool = true,
@@ -99,19 +118,11 @@ pub const Client = struct {
     pool: Pool,
     config: Config,
     dns_cache: ?dns_cache_mod.Cache = null,
-    owns_io: bool = false,
-    io_threaded: ?*std.Io.Threaded = null,
 
-    /// Explicit allocator API: creates internal Threaded io.
+    /// Explicit allocator API: creates client using internal default I/O.
     /// Matches AGENT.md: `var client = try httpx.Client.init(allocator, .{});`
     pub fn init(allocator: Allocator, config: Config) !Client {
-        const threaded = try allocator.create(std.Io.Threaded);
-        errdefer allocator.destroy(threaded);
-        threaded.* = .init(allocator, .{});
-        var c = Client.initWithIo(allocator, threaded.io(), config);
-        c.owns_io = true;
-        c.io_threaded = threaded;
-        return c;
+        return Client.initWithIo(allocator, std.Io.Threaded.global_single_threaded.io(), config);
     }
 
     /// Advanced: explicit io provided by caller. Does not own io.
@@ -137,15 +148,9 @@ pub const Client = struct {
         return c;
     }
 
-    /// Out-of-box: uses page_allocator + internal Threaded io, no explicit allocator/io required.
+    /// Out-of-box: uses page_allocator + internal default I/O, no explicit allocator/io required.
     pub fn initDefault(config: Config) !Client {
-        const gpa = std.heap.page_allocator;
-        const threaded = try gpa.create(std.Io.Threaded);
-        threaded.* = .init(gpa, .{});
-        var c = Client.initWithIo(gpa, threaded.io(), config);
-        c.owns_io = true;
-        c.io_threaded = threaded;
-        return c;
+        return init(std.heap.page_allocator, config);
     }
 
     /// Alias for `init` for backward compatibility with docs.
@@ -156,13 +161,6 @@ pub const Client = struct {
     pub fn deinit(self: *Client) void {
         if (self.dns_cache) |*cache| cache.deinit();
         self.pool.deinit();
-        if (self.owns_io) {
-            if (self.io_threaded) |t| {
-                t.deinit();
-                // Destroy with the same allocator that created it.
-                self.allocator.destroy(t);
-            }
-        }
     }
 
     pub fn get(self: *Client, opts: anytype) Error!Response {
@@ -215,26 +213,241 @@ pub const Client = struct {
     }
 
     /// Batch: sequential array of requests (reuses pool, uses client's allocator).
-    pub fn requestAll(self: *Client, reqs: []const RequestOptions) ![]Response {
-        var out = try self.allocator.alloc(Response, reqs.len);
+    pub fn requestAll(self: *Client, reqs: anytype) ![]Response {
+        const R = @TypeOf(reqs);
+        const slice: []const RequestOptions = blk: {
+            if (R == []const RequestOptions or R == []RequestOptions) break :blk reqs;
+            const info = @typeInfo(R);
+            if (info == .pointer) {
+                if (info.pointer.size == .slice) break :blk reqs;
+                if (info.pointer.size == .one and @typeInfo(info.pointer.child) == .array) break :blk reqs[0..];
+            }
+            if (info == .array) break :blk reqs[0..];
+            @compileError("requestAll expects a slice or array of RequestOptions");
+        };
+        var out = try self.allocator.alloc(Response, slice.len);
         errdefer {
             for (out) |*r| r.deinit();
             self.allocator.free(out);
         }
-        for (reqs, 0..) |req, i| {
+        for (slice, 0..) |req, i| {
             out[i] = try self.doRequest(req.method orelse .GET, req);
         }
         return out;
     }
 
-    pub fn getAll(self: *Client, urls: []const []const u8) ![]Response {
-        var reqs = try self.allocator.alloc(RequestOptions, urls.len);
+    pub fn getAll(self: *Client, urls: anytype) ![]Response {
+        const U = @TypeOf(urls);
+        const slice: []const []const u8 = blk: {
+            if (U == []const []const u8 or U == [][]const u8) break :blk urls;
+            const info = @typeInfo(U);
+            if (info == .pointer) {
+                if (info.pointer.size == .slice) break :blk urls;
+                if (info.pointer.size == .one and @typeInfo(info.pointer.child) == .array) break :blk urls[0..];
+            }
+            if (info == .array) break :blk urls[0..];
+            @compileError("getAll expects a slice or array of URL strings");
+        };
+        var reqs = try self.allocator.alloc(RequestOptions, slice.len);
         defer self.allocator.free(reqs);
-        for (urls, 0..) |url, i| reqs[i] = .{ .url = url };
+        for (slice, 0..) |url, i| reqs[i] = .{ .url = url };
         return self.requestAll(reqs);
     }
 
+
+    fn coerceDownloadOptions(opts: anytype) download_pkg.DownloadOptions {
+        if (@TypeOf(opts) == download_pkg.DownloadOptions) return opts;
+        var o = download_pkg.DownloadOptions{};
+        inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
+            if (comptime std.mem.eql(u8, f.name, "verify")) {
+                const v = @field(opts, f.name);
+                if (@TypeOf(v) == download_pkg.VerifyOptions) {
+                    o.verify = v;
+                } else {
+                    inline for (@typeInfo(@TypeOf(v)).@"struct".fields) |vf| {
+                        if (@hasField(download_pkg.VerifyOptions, vf.name)) {
+                            @field(o.verify, vf.name) = @field(v, vf.name);
+                        }
+                    }
+                }
+            } else if (@hasField(download_pkg.DownloadOptions, f.name)) {
+                @field(o, f.name) = @field(opts, f.name);
+            }
+        }
+        return o;
+    }
+
+    /// Streams a download to disk with progress reporting, resume, and verification.
+    pub fn download(self: *Client, url: []const u8, destination: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.DownloadResult {
+        var dl = download_pkg.Downloader.init(self.allocator, self);
+        const download_options = coerceDownloadOptions(opts);
+        return dl.download(url, destination, download_options);
+    }
+
+    /// Downloads a batch of files concurrently using the client's internal allocator.
+    pub fn downloadBatch(self: *Client, tasks: []const struct { url: []const u8, dest: []const u8 }, opts: anytype) download_pkg.DownloadError!void {
+        const download_options = coerceDownloadOptions(opts);
+        for (tasks) |t| {
+            _ = try self.download(t.url, t.dest, download_options);
+        }
+    }
+
+    /// Queries remote file metadata (size, filename, Content-Type, ETag, Range support) without downloading.
+    pub fn lookupFileInfo(self: *Client, url: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.RemoteFileInfo {
+        const download_options = coerceDownloadOptions(opts);
+        return download_pkg.lookupFileInfo(self, url, download_options);
+    }
+
+    /// Returns a Parser bound to this Client's allocator and config.
+    pub fn parser(self: *Client) @import("../parsing/document.zig").Parser {
+        return @import("../parsing/document.zig").Parser.init(self.allocator, .{});
+    }
+
+    /// Fetches a remote URL and parses it as a Document without any explicit allocator plumbing.
+    pub fn fetchDocument(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/document.zig").Document.parse(self.allocator, res.header("content-type"), res.body);
+    }
+
+    /// Fetches a remote URL and parses it specifically as an HTML Document.
+    pub fn fetchHtml(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/document.zig").Document.parseHtml(self.allocator, res.body);
+    }
+
+    /// Fetches a remote URL and parses it specifically as an XML Document.
+    pub fn fetchXml(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/document.zig").Document.parseXml(self.allocator, res.body);
+    }
+
+    /// Fetches a remote RSS/Atom/JSON feed.
+    pub fn fetchFeed(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/feed.zig").Feed {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/feed.zig").parse(self.allocator, res.body, res.header("content-type"));
+    }
+
+    /// Fetches robots.txt from a URL.
+    pub fn fetchRobots(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/robots.zig").RobotsFile {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/robots.zig").parse(self.allocator, res.body);
+    }
+
+    /// Fetches sitemap XML from a URL.
+    pub fn fetchSitemap(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/sitemap.zig").Sitemap {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/sitemap.zig").parse(self.allocator, res.body);
+    }
+
+
+
+    /// Safely updates an executable or asset on disk with rollback preservation.
+    pub fn updateFile(self: *Client, url: []const u8, target_path: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.DownloadResult {
+        const update_options: download_pkg.UpdateOptions = if (@TypeOf(opts) == download_pkg.UpdateOptions) opts else blk: {
+            var o = download_pkg.UpdateOptions{};
+            inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
+                if (comptime std.mem.eql(u8, f.name, "verify")) {
+                    const v = @field(opts, f.name);
+                    if (@TypeOf(v) == download_pkg.VerifyOptions) {
+                        o.verify = v;
+                    } else {
+                        inline for (@typeInfo(@TypeOf(v)).@"struct".fields) |vf| {
+                            if (@hasField(download_pkg.VerifyOptions, vf.name)) {
+                                @field(o.verify, vf.name) = @field(v, vf.name);
+                            }
+                        }
+                    }
+                } else if (@hasField(download_pkg.UpdateOptions, f.name)) {
+                    @field(o, f.name) = @field(opts, f.name);
+                }
+            }
+            break :blk o;
+        };
+        return download_pkg.updateFile(self.allocator, self, url, target_path, update_options);
+    }
+
+    /// Graceful connection drain (purge pool, but don't destroy the client).
+    pub fn close(self: *Client) void {
+        self.pool.purge();
+    }
+
+    /// Full reset (close + clear DNS cache).
+    pub fn reset(self: *Client) void {
+        self.close();
+        if (self.config.dns_cache) |*dc| {
+            dc.deinit();
+            dc.* = dns_cache_mod.Cache.init(
+                self.allocator,
+                .{
+                    .ttl_ms = self.config.dns_cache.ttl_ms,
+                    .negative_ttl_ms = self.config.dns_cache.negative_ttl_ms,
+                    .max_entries = self.config.dns_cache.max_entries,
+                },
+                req_mod.systemLookupStrings,
+                null,
+            );
+        }
+    }
+
     pub fn doRequest(self: *Client, method: Method, opts: anytype) Error!Response {
+        var attempt: u32 = 0;
+        const max_attempts = self.config.max_retries + 1;
+        while (attempt < max_attempts) : (attempt += 1) {
+            var result = self.doRequestInner(method, opts) catch |err| {
+                if (attempt + 1 >= max_attempts) return err;
+                clock.sleepMillis(self.config.retry_delay_ms * (attempt + 1));
+                continue;
+            };
+            if (self.config.max_retries > 0 and attempt + 1 < max_attempts) {
+                var should_retry = false;
+                for (self.config.retry_status_codes) |code| {
+                    if (result.status == code) {
+                        should_retry = true;
+                        break;
+                    }
+                }
+                if (should_retry) {
+                    result.deinit();
+                    clock.sleepMillis(self.config.retry_delay_ms * (attempt + 1));
+                    continue;
+                }
+            }
+            return result;
+        }
+        unreachable;
+    }
+
+    fn doRequestInner(self: *Client, method: Method, opts: anytype) Error!Response {
         // Track allocations for header/query string conversions that need freeing.
         var allocated_strings: std.ArrayList([]u8) = .empty;
         defer {
@@ -453,13 +666,32 @@ pub const Client = struct {
             var ct_buf: [128]u8 = undefined;
             const ct_val = mp_encoder.contentType(&ct_buf, boundary);
 
+            const field_name_val: []const u8 = mp.field_name;
+            const filename_val: ?[]const u8 = blk: {
+                if (!@hasField(@TypeOf(mp), "filename")) break :blk null;
+                const v = mp.filename;
+                const T = @TypeOf(v);
+                if (@typeInfo(T) == .optional) break :blk v;
+                break :blk @as(?[]const u8, v);
+            };
+            const content_type_val: []const u8 = blk: {
+                if (!@hasField(@TypeOf(mp), "content_type")) break :blk "application/octet-stream";
+                const v = mp.content_type;
+                const T = @TypeOf(v);
+                if (@typeInfo(T) == .optional) {
+                    if (v) |val| break :blk val;
+                    break :blk "application/octet-stream";
+                } else {
+                    break :blk v;
+                }
+            };
             const part: mp_encoder.Part = .{
-                .name = mp.field_name,
-                .filename = mp.filename,
-                .content_type = mp.content_type orelse "application/octet-stream",
+                .name = field_name_val,
+                .filename = filename_val,
+                .content_type = content_type_val,
                 .data = mp.data,
             };
-            multipart_buf = mp_encoder.encodeAlloc(self.allocator, boundary, &.{part}) catch return Error.OutOfMemory;
+            multipart_buf = mp_encoder.encodeAllocParts(self.allocator, boundary, &.{part}) catch return Error.OutOfMemory;
             if (multipart_buf) |b| {
                 body_val = b;
                 body_kind = .raw;
@@ -481,22 +713,63 @@ pub const Client = struct {
             break :blk .auto;
         };
 
-        const req_tls: ?req_mod.TlsOptions = if (@hasField(@TypeOf(opts), "tls")) opts.tls else self.config.tls;
+        const req_tls: ?req_mod.TlsOptions = blk: {
+            if (!@hasField(@TypeOf(opts), "tls")) {
+                // No per-request TLS: use client default, or auto-enable for HTTPS.
+                if (self.config.tls) |c_tls| break :blk c_tls;
+                break :blk req_mod.TlsOptions{ .verify = .none, .allow_truncation_attacks = true };
+            }
+            const v = opts.tls;
+            const T = @TypeOf(v);
+            if (@typeInfo(T) == .optional) {
+                break :blk v orelse req_mod.TlsOptions{ .verify = .none, .allow_truncation_attacks = true };
+            } else {
+                break :blk req_mod.TlsOptions{
+                    .verify = v.verify,
+                    .ca_bundle = if (@hasField(@TypeOf(v), "ca_bundle")) v.ca_bundle else null,
+                    .allow_truncation_attacks = if (@hasField(@TypeOf(v), "allow_truncation_attacks")) v.allow_truncation_attacks else true,
+                };
+            }
+        };
         const req_cookie: ?[]const u8 = if (@hasField(@TypeOf(opts), "cookie")) opts.cookie else null;
         const req_basic_auth: ?[]const u8 = if (@hasField(@TypeOf(opts), "basic_auth")) opts.basic_auth else null;
         const req_bearer_auth: ?[]const u8 = if (@hasField(@TypeOf(opts), "bearer_auth")) opts.bearer_auth else null;
         const req_timeout: ?u64 = if (@hasField(@TypeOf(opts), "timeout_ms")) opts.timeout_ms else self.config.timeout_ms;
         const req_max_size: ?usize = if (@hasField(@TypeOf(opts), "max_response_size")) opts.max_response_size else self.config.max_response_size;
 
+        // Extract URL whether opts is a string slice, string literal, or options struct
+        const target_url: []const u8 = blk: {
+            const T = @TypeOf(opts);
+            if (T == []const u8 or T == []u8) break :blk opts;
+            if (comptime @typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8) break :blk opts;
+            if (comptime @typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .array and @typeInfo(@typeInfo(T).pointer.child).array.child == u8) break :blk opts[0..];
+            if (@hasField(T, "url")) break :blk opts.url;
+            @compileError("Request options must provide a 'url' field or be a URL string");
+        };
+
         const result = req_mod.request(self.allocator, self.io, .{
             .method = method,
-            .url = opts.url,
+            .url = target_url,
             .headers = hdrs.items,
             .query = query_list.items,
             .body_kind = body_kind,
             .body = body_val,
-            .follow_redirects = if (@hasField(@TypeOf(opts), "follow_redirects")) opts.follow_redirects orelse self.config.follow_redirects else self.config.follow_redirects,
-            .max_redirects = if (@hasField(@TypeOf(opts), "max_redirects")) opts.max_redirects orelse self.config.max_redirects else self.config.max_redirects,
+            .follow_redirects = if (@hasField(@TypeOf(opts), "follow_redirects")) blk: {
+                const v = opts.follow_redirects;
+                if (@typeInfo(@TypeOf(v)) == .optional) {
+                    break :blk v orelse self.config.follow_redirects;
+                } else {
+                    break :blk v;
+                }
+            } else self.config.follow_redirects,
+            .max_redirects = if (@hasField(@TypeOf(opts), "max_redirects")) blk: {
+                const v = opts.max_redirects;
+                if (@typeInfo(@TypeOf(v)) == .optional) {
+                    break :blk v orelse self.config.max_redirects;
+                } else {
+                    break :blk v;
+                }
+            } else self.config.max_redirects,
             .dns_cache = if (self.dns_cache) |*cache| cache else null,
             .pool = &self.pool,
             .allow_lf_line_endings = if (@hasField(@TypeOf(opts), "allow_lf_line_endings")) opts.allow_lf_line_endings or self.config.allow_lf_line_endings else self.config.allow_lf_line_endings,
@@ -510,11 +783,11 @@ pub const Client = struct {
         });
         if (result) |resp| {
             if (self.config.logger) |*l|
-                l.log(.debug, "client", "{s} {s} -> {d}", .{ @tagName(method), opts.url, resp.status });
+                l.log(.debug, "client", "{s} {s} -> {d}", .{ @tagName(method), target_url, resp.status });
             return resp;
         } else |e| {
             if (self.config.logger) |*l|
-                l.log(.err, "client", "{s} {s} failed: {s}", .{ @tagName(method), opts.url, @errorName(e) });
+                l.log(.err, "client", "{s} {s} failed: {s}", .{ @tagName(method), target_url, @errorName(e) });
             return e;
         }
     }
@@ -523,7 +796,6 @@ pub const Client = struct {
 // Default global client (zero-config). Lazily created; never deinit'd
 // (process-lifetime resource, like the standard library's own globals).
 
-var g_threaded: ?*std.Io.Threaded = null;
 var g_client: ?Client = null;
 var g_ready = std.atomic.Value(bool).init(false);
 var g_mu = sync.Spinlock{};
@@ -536,10 +808,7 @@ fn defaultClient() ?*Client {
     if (g_ready.load(.monotonic)) return &g_client.?;
 
     const gpa = std.heap.page_allocator;
-    const threaded = gpa.create(std.Io.Threaded) catch return null;
-    threaded.* = .init(gpa, .{});
-    g_client = Client.initWithIo(gpa, threaded.io(), .{});
-    g_threaded = threaded;
+    g_client = Client.initWithIo(gpa, std.Io.Threaded.global_single_threaded.io(), .{});
     g_ready.store(true, .release);
     return &g_client.?;
 }
@@ -599,14 +868,34 @@ pub fn globalRequest(opts: anytype) Error!Response {
     return forward(m, opts);
 }
 
-pub fn globalGetAll(urls: []const []const u8) ![]Response {
+pub fn globalGetAll(urls: anytype) ![]Response {
     const c = defaultClient() orelse return Error.DefaultClientUnavailable;
     return c.getAll(urls);
 }
 
-pub fn globalRequestAll(reqs: []const RequestOptions) ![]Response {
+pub fn globalRequestAll(reqs: anytype) ![]Response {
     const c = defaultClient() orelse return Error.DefaultClientUnavailable;
     return c.requestAll(reqs);
+}
+
+
+pub fn globalDownload(url: []const u8, destination: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.DownloadResult {
+    const c = defaultClient() orelse return download_pkg.DownloadError.ConnectionFailed;
+    return c.download(url, destination, opts);
+}
+
+pub fn globalUpdateFile(url: []const u8, target_path: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.DownloadResult {
+    const c = defaultClient() orelse return download_pkg.DownloadError.ConnectionFailed;
+    return c.updateFile(url, target_path, opts);
+}
+
+pub fn globalVerifyFile(path: []const u8, opts: download_pkg.VerifyOptions) download_pkg.DownloadError!void {
+    return download_pkg.verifyFile(path, opts);
+}
+
+pub fn globalLookupFileInfo(url: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.RemoteFileInfo {
+    const c = defaultClient() orelse return download_pkg.DownloadError.ConnectionFailed;
+    return c.lookupFileInfo(url, opts);
 }
 
 test "explicit client init/deinit" {

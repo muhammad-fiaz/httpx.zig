@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const sync = @import("sync.zig");
+const tint = @import("tint");
 
 pub const Level = enum(u8) {
     debug = 0,
@@ -39,14 +40,15 @@ pub const Level = enum(u8) {
 
     pub fn colorCode(self: Level) []const u8 {
         return switch (self) {
-            .debug => "\x1b[90m",
-            .info => "\x1b[32m",
-            .warn => "\x1b[33m",
-            .err => "\x1b[31m",
-            .fatal => "\x1b[35m",
+            .debug => tint.fg(.{ .ansi4 = .bright_black }),
+            .info => tint.fg(.{ .ansi4 = .green }),
+            .warn => tint.fg(.{ .ansi4 = .yellow }),
+            .err => tint.fg(.{ .ansi4 = .red }),
+            .fatal => tint.fg(.{ .ansi4 = .magenta }),
         };
     }
 };
+
 
 pub const ColorMode = enum { auto, always, never };
 
@@ -167,13 +169,14 @@ pub const WriterSink = struct {
         const w = self.w;
         if (self.color) w.writeAll(record.level.colorCode()) catch return;
         w.writeAll(record.level.label()) catch return;
-        if (self.color) w.writeAll("\x1b[0m") catch return;
+        if (self.color) w.writeAll(tint.reset) catch return;
         w.print(" [{s}] {s}", .{ record.component, record.message }) catch return;
         for (record.fields) |f| {
             w.print(" {s}={s}", .{ f.name, f.value }) catch return;
         }
         w.writeAll("\n") catch return;
     }
+
 };
 
 // Secret redaction

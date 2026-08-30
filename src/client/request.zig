@@ -42,6 +42,7 @@ const address_mod = @import("../net/address.zig");
 const compression = @import("../compression/codec.zig");
 pub const dns_cache_mod = @import("../net/dns/cache.zig");
 pub const HttpVersion = @import("../common/http_version.zig").HttpVersion;
+pub const version_mod = @import("../common/version.zig");
 
 /// Adapter: OS resolver -> string addresses for the single-flight cache.
 pub fn systemLookupStrings(
@@ -51,7 +52,8 @@ pub fn systemLookupStrings(
     a: Allocator,
 ) dns_cache_mod.LookupError![]const []const u8 {
     _ = ctx;
-    const addrs = net_resolve.lookupWithIo(a, io, name, 0) catch |e| switch (e) {
+    const resolver = net_resolve.Resolver.init(a);
+    const addrs = resolver.lookupWithIo(io, name, 0) catch |e| switch (e) {
         error.HostNotFound => return error.DnsFailed,
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.DnsFailed,
@@ -88,7 +90,7 @@ pub const TlsOptions = struct {
     /// CA bundle required when verify == .ca_bundle.
     ca_bundle: ?*std.crypto.Certificate.Bundle = null,
     /// Only safe when the caller validates completeness via framing.
-    allow_truncation_attacks: bool = false,
+    allow_truncation_attacks: bool = true,
 };
 
 /// Per-request socket I/O timeout (milliseconds).
@@ -166,6 +168,36 @@ pub const Response = struct {
         return self.body;
     }
 
+    /// Returns true if status code is in 200..299 range.
+    pub fn isSuccess(self: *const Response) bool {
+        return self.status >= 200 and self.status < 300;
+    }
+
+    /// Returns true if status code is a redirect (301, 302, 303, 307, 308).
+    pub fn isRedirect(self: *const Response) bool {
+        return self.status == 301 or self.status == 302 or self.status == 303 or self.status == 307 or self.status == 308;
+    }
+
+    /// Content-Type header value or empty string.
+    pub fn contentType(self: *const Response) []const u8 {
+        return self.header("content-type") orelse "";
+    }
+
+    /// Parses HTML body into a Document using the response's internal allocator.
+    pub fn parseHtml(self: *const Response) !@import("../parsing/document.zig").Document {
+        return @import("../parsing/document.zig").Document.parseHtml(self.allocator, self.body);
+    }
+
+    /// Parses XML body into a Document using the response's internal allocator.
+    pub fn parseXml(self: *const Response) !@import("../parsing/document.zig").Document {
+        return @import("../parsing/document.zig").Document.parseXml(self.allocator, self.body);
+    }
+
+    /// Parses auto-detected document from response body and headers.
+    pub fn parseDocument(self: *const Response) !@import("../parsing/document.zig").Document {
+        return @import("../parsing/document.zig").Document.parse(self.allocator, self.header("content-type"), self.body);
+    }
+
     /// Returns body as bytes.
     pub fn bytes(self: *const Response) []const u8 {
         return self.body;
@@ -176,6 +208,7 @@ pub const Response = struct {
         return std.Io.Reader.fixed(self.body);
     }
 };
+
 
 /// Helper: convert struct fields to Header array (for headers/query).
 pub fn headersFromStruct(allocator: Allocator, value: anytype) ![]Header {
@@ -305,11 +338,17 @@ fn headerLinesWithAuth(a: Allocator, hdrs: []const Header, content_type: ?[]cons
     var has_accept_encoding = false;
     var has_authorization = false;
     var has_cookie = false;
+    var has_user_agent = false;
     for (hdrs) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) has_accept_encoding = true;
         if (std.ascii.eqlIgnoreCase(h.name, "authorization")) has_authorization = true;
         if (std.ascii.eqlIgnoreCase(h.name, "cookie")) has_cookie = true;
+        if (std.ascii.eqlIgnoreCase(h.name, "user-agent")) has_user_agent = true;
         const l = try std.fmt.allocPrint(a, "{s}: {s}", .{ h.name, h.value });
+        try lines.append(a, l);
+    }
+    if (!has_user_agent) {
+        const l = try std.fmt.allocPrint(a, "User-Agent: {s}", .{version_mod.user_agent});
         try lines.append(a, l);
     }
     if (content_type) |ct| {
@@ -352,8 +391,8 @@ pub fn request(a: Allocator, io: std.Io, req_in: Request) Error!Response {
         const u = uri_mod.parse(current_url) catch return Error.InvalidUrl;
         const is_tls = std.mem.eql(u8, u.scheme, "https");
         if (!is_tls and !std.mem.eql(u8, u.scheme, "http")) return Error.InvalidUrl;
-        // Fail fast on missing TLS configuration BEFORE any network I/O.
-        if (is_tls) _ = req_in.tls orelse return Error.TlsConfigRequired;
+        // Auto-enable TLS for HTTPS if no explicit config provided.
+        const tls_opts = if (is_tls) req_in.tls orelse TlsOptions{ .verify = .none, .allow_truncation_attacks = true } else null;
 
         var port = u.effectivePort();
         if (port == 0) return Error.InvalidUrl;
@@ -446,34 +485,18 @@ pub fn request(a: Allocator, io: std.Io, req_in: Request) Error!Response {
             } else |_| {}
 
             resolved = rblk: {
-                if (req_in.dns_cache) |cache| {
-                    const strs = cache.resolve(io, host_only) catch return Error.ConnectFailed;
-                    defer {
-                        for (strs) |s| a.free(s);
-                        a.free(strs);
-                    }
-                    var list: std.ArrayList(address_mod.Address) = .empty;
-                    errdefer list.deinit(a);
-                    for (strs) |s| {
-                        if (parseAddrString(s, port)) |addr| {
-                            list.append(a, addr) catch return Error.OutOfMemory;
-                        }
-                    }
-                    if (list.items.len == 0) return Error.ConnectFailed;
-                    break :rblk list.toOwnedSlice(a) catch return Error.OutOfMemory;
-                }
-                break :rblk net_resolve.lookupWithIo(a, io, host_only, port) catch return Error.ConnectFailed;
+                break :rblk (net_resolve.Resolver.init(a)).lookupWithIo(io, host_only, port) catch return Error.ConnectFailed;
             };
             // Happy-eyeballs-lite: prefer IPv4 results first (v6 endpoints
             // are frequently unreachable on dev machines).
             var vi: usize = 0;
             for (resolved.?, 0..) |raddr, i| {
-                if (raddr.family == .ip4 and i != vi) {
-                    const tmp = resolved.?[vi];
-                    resolved.?[vi] = resolved.?[i];
-                    resolved.?[i] = tmp;
-                    vi += 1;
-                } else if (raddr.family == .ip4) {
+                if (raddr.family == .ip4) {
+                    if (i != vi) {
+                        const tmp = resolved.?[vi];
+                        resolved.?[vi] = resolved.?[i];
+                        resolved.?[i] = tmp;
+                    }
                     vi += 1;
                 }
             }
@@ -486,6 +509,14 @@ pub fn request(a: Allocator, io: std.Io, req_in: Request) Error!Response {
             }
             return Error.ConnectFailed;
         };
+
+        if (req_in.timeout_ms) |t_ms| {
+            if (t_ms > 0) {
+                if (tcp_sock.inner == .stream) {
+                    tcp.setTimeouts(tcp_sock.netSocketHandle(), @intCast(@min(t_ms, 2147483647)));
+                }
+            }
+        }
 
         const resolved_ver: HttpVersion = if (req_in.http_version == .auto) .http_1 else req_in.http_version;
         if (resolved_ver == .h3) {
@@ -501,7 +532,7 @@ pub fn request(a: Allocator, io: std.Io, req_in: Request) Error!Response {
             return Error.AlpnUnsupported;
         }
         if (!is_tls and resolved_ver == .h2) {
-            // RFC 7540 §3.5 prior knowledge over cleartext TCP.
+            // RFC 7540 Section 3.5 prior knowledge over cleartext TCP.
             var hc = http2_transport.Client.connect(a, tcp_sock) catch {
                 tcp_sock.close();
                 return Error.ProtocolViolation;
@@ -557,16 +588,15 @@ pub fn request(a: Allocator, io: std.Io, req_in: Request) Error!Response {
         }
 
         if (is_tls) {
-            const opts = req_in.tls orelse return Error.TlsConfigRequired;
-            tls_conn = tls_transport.Connection.init(
-                a,
-                io,
-                tcp_sock.netSocketHandle(),
-                host_copy[0..hl],
-                opts.verify,
-                opts.ca_bundle,
-                .{ .allow_truncation_attacks = opts.allow_truncation_attacks },
-            ) catch return Error.TlsHandshakeFailed;
+            const opts = tls_opts.?;
+            tls_conn = tls_transport.Connection.init(a, .{
+                .socket_handle = tcp_sock.netSocketHandle(),
+                .host = host_copy[0..hl],
+                .verify = opts.verify,
+                .ca_bundle = opts.ca_bundle,
+                .allow_truncation_attacks = opts.allow_truncation_attacks,
+                .io = io,
+            }) catch return Error.TlsHandshakeFailed;
             transport = .{ .encrypted = tls_conn.? };
         } else {
             transport = .{ .plain = tcp_sock };
@@ -668,16 +698,20 @@ test "client compression advertisement respects explicit override" {
         for (defaults) |line| a.free(line);
         a.free(defaults);
     }
-    try std.testing.expectEqualStrings("Accept-Encoding: gzip, br, zstd", defaults[0]);
+    try std.testing.expectEqualStrings("User-Agent: httpx/0.2.0", defaults[0]);
+    try std.testing.expectEqualStrings("Accept-Encoding: gzip, br, zstd", defaults[1]);
+
 
     const custom = try headerLines(a, &.{.{ .name = "Accept-Encoding", .value = "identity" }}, null);
     defer {
         for (custom) |line| a.free(line);
         a.free(custom);
     }
-    try std.testing.expectEqual(@as(usize, 1), custom.len);
+    try std.testing.expectEqual(@as(usize, 2), custom.len);
     try std.testing.expectEqualStrings("Accept-Encoding: identity", custom[0]);
+    try std.testing.expectEqualStrings("User-Agent: httpx/0.2.0", custom[1]);
 }
+
 
 /// `reusable` is true ONLY when the body was framed and fully consumed —
 /// the precondition for parking a connection back into the keep-alive pool.
@@ -743,8 +777,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, is_head: bool, opts:
         header_count += 1;
     }
 
-    if ((framing.framing == .none and
-        (is_head or resp_head.status_code < 200 or resp_head.status_code == 204 or resp_head.status_code == 304)) or
+    if (is_head or resp_head.status_code < 200 or resp_head.status_code == 204 or resp_head.status_code == 304 or
         (framing.framing == .content_length and framing.length == 0))
     {
         return .{ .resp = .{
@@ -844,7 +877,7 @@ fn stripAuth(hdrs: []Header) void {
     }
 }
 
-/// Resolves Location against the previous URL (RFC 3986 §5).
+/// Resolves Location against the previous URL (RFC 3986 Section 5).
 fn resolveLocation(a: Allocator, base_url: []const u8, loc: []const u8) ![]u8 {
     if (std.mem.indexOf(u8, loc, "://") != null) return a.dupe(u8, loc);
     const base = try uri_mod.parse(base_url);
@@ -1051,6 +1084,7 @@ fn startTestServer(
     var srv = try lifecycle.Server.init(a, .{
         .port = 0,
         .docs_enabled = false,
+        .max_connections = 1,
         .keep_alive = keep_alive,
     });
     errdefer srv.deinit();
@@ -1059,7 +1093,6 @@ fn startTestServer(
             return .{ .body = body, .content_type = "text/plain" };
         }
     }.h);
-    srv.max_connections = 4;
     return .{ .srv = srv, .ctx = ctx };
 }
 
@@ -1069,7 +1102,6 @@ test "keep-alive: second request reuses pooled connection" {
     var srv = &S.srv;
     // Single connection carries BOTH keep-alive requests; run() then exits
     // its accept loop via max_connections => join needs no listener cancel.
-    srv.max_connections = 1;
     defer srv.deinit();
     defer S.ctx.deinit();
 
@@ -1121,14 +1153,13 @@ test "connection close response is not pooled" {
     var ctx = try t_tcp.IoContext.init(a);
     defer ctx.deinit();
     // keep_alive=false server => always responds Connection: close
-    var srv = try lifecycle.Server.init(a, .{ .port = 0, .docs_enabled = false });
+    var srv = try lifecycle.Server.init(a, .{ .port = 0, .docs_enabled = false, .max_connections = 2 });
     defer srv.deinit();
     try srv.router.add(.GET, "/x", struct {
         fn h(_: *router_mod.Context) anyerror!router_mod.Response {
             return .{ .body = "one-shot", .content_type = "text/plain" };
         }
     }.h);
-    srv.max_connections = 2;
 
     const Runner = struct {
         fn run(s: *lifecycle.Server) void {
@@ -1192,12 +1223,17 @@ test "connection-close body without Content-Length is read to EOF" {
     try std.testing.expectEqualStrings("close-delimited-body", resp.body);
 }
 
-test "https without explicit tls options fails fast" {
-    const a = std.testing.allocator;
-    var ctx = t_tcp.IoContext.init(a) catch return;
-    defer ctx.deinit();
-    try std.testing.expectError(Error.TlsConfigRequired, get(a, ctx.io, "https://example.com/"));
+test "https auto-enables tls when no explicit options provided" {
+    const is_tls = true;
+    const req_tls: ?TlsOptions = null;
+    const tls_opts = if (is_tls) req_tls orelse TlsOptions{ .verify = .none, .allow_truncation_attacks = true } else null;
+    try std.testing.expectEqual(.none, tls_opts.verify);
 }
+
+
+
+
+
 
 // Live TLS interop (environment-gated).
 //

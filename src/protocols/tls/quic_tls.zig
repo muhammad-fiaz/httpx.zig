@@ -1,8 +1,9 @@
-//! QUIC-TLS 1.3 key schedule (RFC 8446 §7.1 as profiled by RFC 9001 §7).
+//! QUIC-TLS 1.3 key schedule (RFC 8446 Section 7.1 as profiled by RFC 9001 Section 7).
 //!
 //! Implements the secret chain a full handshake driver needs:
-//!   shared_secret (ECDHE) ──► handshake secrets ──► application secrets
-//!   ──► update via "quic ku" / resumption via derived-secret + "resumption"
+//!   shared_secret (ECDHE) -> handshake secrets -> application secrets
+//!   -> update via "quic ku" / resumption via derived-secret + "resumption"
+
 //! All HKDF-Expand-Label traffic goes through protocols/quic/crypto.zig so
 //! labels live in ONE place. This module is driver-ready: a TLS engine only
 //! supplies the ECDHE shared secret + transport parameters transcript hash.

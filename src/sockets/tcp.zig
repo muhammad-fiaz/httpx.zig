@@ -9,7 +9,7 @@
 //!   - RFC 9112 Section 9.6 — Persistence (keep-alive, Connection header)
 //!   - RFC 1122 — Requirements for Internet Hosts (TCP connection behavior)
 //
-// === Windows-specific design ===
+// Windows-specific design:
 // On Windows, std.Io.Threaded.netConnectIpWindows maps the AFD
 // STATUS_CONNECTION_REFUSED (NTSTATUS 0xc0000236) to error.Unexpected via
 // windows.unexpectedStatus(). In Debug mode, unexpectedStatus() calls
@@ -33,8 +33,9 @@ const builtin = @import("builtin");
 
 const is_windows = builtin.os.tag == .windows;
 
-// ─── Windows winsock shims ──────────────────────────────────────────────────
+// Windows winsock shims
 // All declared inside a comptime block so they compile to nothing on non-Windows.
+
 
 const ws = if (is_windows) struct {
     pub const SOCKET = usize;
@@ -124,7 +125,7 @@ const ws = if (is_windows) struct {
     }
 } else struct {};
 
-// ─── Public API for socket tuning ──────────────────────────────────────────
+// Public API for socket tuning
 
 /// Applies SO_RCVTIMEO/SO_SNDTIMEO (milliseconds; 0 = none).
 /// Works on Windows sockets and POSIX fds alike (both take the option at
@@ -171,7 +172,7 @@ pub fn setKeepAlive(sock: net.Socket.Handle, idle_secs: u32) void {
     }
 }
 
-// ─── UploadStream ──────────────────────────────────────────────────────────
+// UploadStream
 // Used by the HTTP client for large uploads. On Windows, uses ws2_32 directly
 // to avoid AFD completion-port wedges observed with std.Io for heavy I/O.
 
@@ -269,7 +270,7 @@ pub const UploadStream = struct {
     }
 };
 
-// ─── Error sets ────────────────────────────────────────────────────────────
+// Error sets
 
 pub const ReadError = error{
     ConnectionReset,
@@ -292,7 +293,7 @@ pub const ConnectError = error{
     Unexpected,
 };
 
-// ─── IoContext ─────────────────────────────────────────────────────────────
+// IoContext
 
 /// Runtime IO context - one per application.
 pub const IoContext = struct {
@@ -319,7 +320,7 @@ pub const IoContext = struct {
     }
 };
 
-// ─── Socket ────────────────────────────────────────────────────────────────
+// Socket
 //
 // On Windows: backed by a raw winsock SOCKET (ws.SOCKET / usize).
 // On other platforms: backed by a net.Stream (std.Io.net).
@@ -352,7 +353,7 @@ pub const Socket = struct {
         stream: net.Stream,
     };
 
-    // ---- Constructors ----
+    // Constructors
 
     /// Construct from a raw Windows SOCKET (Windows-only client connects).
     pub fn fromWinsock(sock: ws.SOCKET, io: std.Io) Socket {
@@ -364,13 +365,13 @@ pub const Socket = struct {
         return .{ .inner = .{ .stream = stream }, .io = io };
     }
 
-    // ---- Atomic once-guard ----
+    // Atomic once-guard
 
     fn acquireClose(self: *const Socket) bool {
         return !@constCast(&self.close_flag).swap(true, .acq_rel);
     }
 
-    // ---- Close ----
+    // Close
 
     pub fn close(self: *const Socket) void {
         if (!self.acquireClose()) return;
@@ -409,7 +410,7 @@ pub const Socket = struct {
         }
     }
 
-    // ---- I/O ----
+    // I/O
 
     /// Reads up to buf.len bytes; partial reads are normal.
     pub fn read(self: *const Socket, buf: []u8) ReadError!usize {
@@ -489,7 +490,7 @@ pub const Socket = struct {
     }
 };
 
-// ─── Listener ──────────────────────────────────────────────────────────────
+// Listener
 
 pub const Listener = struct {
     server: net.Server,
@@ -535,7 +536,7 @@ pub const Listener = struct {
     }
 };
 
-// ─── Winsock init ──────────────────────────────────────────────────────────
+// Winsock init
 
 /// Initializes winsock on Windows (no-op elsewhere). Safe to call repeatedly.
 pub fn initWinsock() void {
@@ -562,7 +563,7 @@ pub fn wakeListenerPort(port: u16) void {
     _ = ws.closesocket(sock);
 }
 
-// ─── Connect ───────────────────────────────────────────────────────────────
+// Connect
 
 /// Connect to a parsed Address (IPv4 or IPv6).
 ///
@@ -661,7 +662,7 @@ pub fn connect(io: std.Io, host: []const u8, port: u16) ConnectError!Socket {
     return connectAddress(io, &addr);
 }
 
-// ─── Tests ─────────────────────────────────────────────────────────────────
+// Tests
 
 test "listener binds and reports port" {
     var ctx = IoContext.init(std.testing.allocator) catch return;

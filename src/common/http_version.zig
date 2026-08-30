@@ -34,7 +34,7 @@ pub const HttpVersion = enum {
     http_1_0,
     /// HTTP/1.1 (keep-alive, chunked, etc).
     http_1,
-    /// HTTP/2. Plain TCP -> prior knowledge (RFC 9113 §3.4); TLS requires h2 ALPN.
+    /// HTTP/2. Plain TCP -> prior knowledge (RFC 9113 Section 3.4); TLS requires h2 ALPN.
     h2,
     /// HTTP/3 over QUIC (RFC 9114).
     h3,

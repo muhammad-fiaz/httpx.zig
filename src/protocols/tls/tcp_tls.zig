@@ -40,6 +40,10 @@ pub const Error = error{
     OutOfMemory,
     BufferTooSmall,
     MissingCertificate,
+    SequenceOverflow,
+    RecordTooLarge,
+    InvalidKeyLength,
+    InvalidIvLength,
 };
 
 // TLS server connection (post-handshake)
@@ -230,7 +234,7 @@ pub const TlsServer = struct {
 
         var engine = engine_mod.Engine.initServer(a, .{});
 
-        // ---- Read ClientHello ----
+        // Read ClientHello
         var read_buf: [16384]u8 = undefined;
         var total_read: usize = 0;
         while (total_read < 4) {
@@ -269,13 +273,13 @@ pub const TlsServer = struct {
             _ = sni; // stored via engine
         }
 
-        // ---- Select certificate ----
+        // Select certificate
         const identity = self.resolveIdentity(parsed_ch.sni) orelse return error.MissingCertificate;
         if (identity.cert_chain_pem.len == 0 or identity.private_key_pem.len == 0)
             return error.MissingCertificate;
 
-        // ---- Server produces flight ----
-        const flight = try engine.produceServerFlight(
+        // Server produces flight
+        var flight = try engine.produceServerFlight(
             identity.cert_chain_pem,
             identity.private_key_pem,
             self.config.alpn_protocols,
@@ -293,7 +297,7 @@ pub const TlsServer = struct {
         try writeEncryptedHandshakeRecord(socket, flight.certificate_verify, hs_keys, &hs_seq);
         try writeEncryptedHandshakeRecord(socket, flight.finished, hs_keys, &hs_seq);
 
-        // ---- Derive application keys ----
+        // Derive application keys
         // Application keys were derived at the end of produceServerFlight
         const ap_keys = engine.ap_keys orelse return error.TlsHandshakeFailed;
 

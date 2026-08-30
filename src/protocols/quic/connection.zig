@@ -128,10 +128,10 @@ pub const Connection = struct {
     data_received: u64 = 0,
     max_data_remote: u64 = 1 << 20,
 
-    // Connection IDs.
-    dcid: [8]u8 = undefined, // our source cid / peer's destination
+    // Connection IDs (RFC 9000 allows CIDs up to 20 bytes).
+    dcid: [20]u8 = undefined, // our source cid / peer's destination
     dcid_len: u8 = 8,
-    scid: [8]u8 = undefined, // what we advertise
+    scid: [20]u8 = undefined, // what we advertise
     scid_len: u8 = 8,
 
     // Peer CID table (NEW_CONNECTION_ID entries).
@@ -202,10 +202,12 @@ pub const Connection = struct {
         self.streams = std.AutoHashMap(u64, *qstream.Stream).init(allocator);
         self.sent_packets = .empty;
 
-        // Random local CIDs (8 bytes fixed-length for this build).
-        self.rng.random().bytes(self.scid[0..]);
+        // Random local CIDs (8-byte default for initial handshake).
+        self.scid_len = 8;
+        self.rng.random().bytes(self.scid[0..self.scid_len]);
         if (role == .client) {
-            self.rng.random().bytes(self.dcid[0..]); // chosen DCID for Initial
+            self.dcid_len = 8;
+            self.rng.random().bytes(self.dcid[0..self.dcid_len]); // chosen DCID for Initial
         }
         return self;
     }

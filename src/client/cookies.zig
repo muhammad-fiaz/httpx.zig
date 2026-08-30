@@ -202,7 +202,7 @@ pub const Jar = struct {
 };
 
 fn domainMatches(host: []const u8, domain_in: []const u8) bool {
-    // RFC 6265 §5.1.2: a leading dot is ignored for matching purposes.
+    // RFC 6265 Section 5.1.2: a leading dot is ignored for matching purposes.
     const domain = if (domain_in.len > 0 and domain_in[0] == '.') domain_in[1..] else domain_in;
     if (std.ascii.eqlIgnoreCase(host, domain)) return true;
     return host.len > domain.len and

@@ -50,7 +50,7 @@ pub fn connect(
     var sock = try tcp_mod.connect(io, proxy_host, proxy_port);
     errdefer sock.close(io);
 
-    // --- Greeting: VER=5, NMETHODS, METHODS ---
+    // Greeting: VER=5, NMETHODS, METHODS
     const want_auth = username != null;
     if (want_auth and password == null) return Error.AuthFailed;
 
@@ -63,7 +63,7 @@ pub fn connect(
     if (resp[0] != 0x05) return Error.ProtocolViolation;
     if (resp[1] == 0xFF) return Error.NoAcceptableAuth;
 
-    // --- Username/password subnegotiation (RFC 1929) ---
+    // Username/password subnegotiation (RFC 1929)
     if (resp[1] == 0x02) {
         const u = username orelse return Error.AuthFailed;
         const p = password orelse return Error.AuthFailed;
@@ -91,7 +91,7 @@ pub fn connect(
         return Error.NoAcceptableAuth;
     }
 
-    // --- CONNECT request ---
+    // CONNECT request
     var req: [262]u8 = undefined;
     var pos: usize = 0;
     req[pos] = 0x05; // VER
@@ -134,7 +134,7 @@ pub fn connect(
     pos += 2;
     try sock.writeAll(io, req[0..pos]);
 
-    // --- Reply: VER REP RSV ATYP ADDR(4|16) PORT(2) ---
+    // Reply: VER REP RSV ATYP ADDR(4|16) PORT(2)
     var head: [4]u8 = undefined;
     try readExact(io, &sock, &head);
     if (head[0] != 0x05) return Error.ProtocolViolation;

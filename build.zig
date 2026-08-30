@@ -37,6 +37,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const loaders_dep = b.dependency("loaders", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create the public module that will be exported as "httpx" to consumers.
     // Dependencies must be added here so they propagate to downstream packages.
     const httpx_module = b.addModule("httpx", .{
@@ -47,8 +52,70 @@ pub fn build(b: *std.Build) void {
     httpx_module.addImport("brotli", brotli_dep.module("brotli"));
     httpx_module.addImport("tint", tint_dep.module("tint"));
     httpx_module.addImport("env", env_dep.module("env"));
+    httpx_module.addImport("loaders", loaders_dep.module("loaders"));
 
-    const examples = [_]struct { name: []const u8, path: []const u8, skip_run_all: bool = false }{};
+    const examples = [_]struct { name: []const u8, path: []const u8, skip_run_all: bool = false }{
+        .{ .name = "simple-get", .path = "examples/simple_get.zig" },
+        .{ .name = "post-json", .path = "examples/post_json.zig" },
+        .{ .name = "custom-headers", .path = "examples/custom_headers.zig" },
+        .{ .name = "connection-pool", .path = "examples/connection_pool.zig" },
+        .{ .name = "redirect", .path = "examples/redirect.zig" },
+        .{ .name = "streaming", .path = "examples/streaming.zig" },
+        .{ .name = "multipart", .path = "examples/multipart.zig" },
+        .{ .name = "custom-responses", .path = "examples/custom_responses.zig" },
+        .{ .name = "browser-demo-server", .path = "examples/browser_demo_server.zig", .skip_run_all = true },
+        .{ .name = "simple-server", .path = "examples/simple_server.zig" },
+        .{ .name = "static-files", .path = "examples/static_files.zig" },
+        .{ .name = "health-check", .path = "examples/health_check.zig" },
+        .{ .name = "tls-get", .path = "examples/tls_get.zig" },
+        .{ .name = "resolve", .path = "examples/resolve.zig" },
+        .{ .name = "openapi", .path = "examples/openapi.zig" },
+        .{ .name = "http10-client", .path = "examples/http10_client.zig" },
+        .{ .name = "http2-client", .path = "examples/http2_client.zig" },
+        .{ .name = "http2-multiplex", .path = "examples/http2_multiplex.zig" },
+        .{ .name = "http3-client", .path = "examples/http3_client.zig" },
+        .{ .name = "http3-quic", .path = "examples/http3_quic.zig" },
+        .{ .name = "ftp-client", .path = "examples/ftp_client.zig" },
+        .{ .name = "live-static-watcher", .path = "examples/live_static_watcher.zig", .skip_run_all = true },
+        .{ .name = "docs-server", .path = "examples/docs_server.zig", .skip_run_all = true },
+        .{ .name = "graphql-server", .path = "examples/graphql_server.zig", .skip_run_all = true },
+        .{ .name = "auth-and-errors", .path = "examples/auth_and_errors.zig" },
+        .{ .name = "spa-fallback", .path = "examples/spa_fallback.zig", .skip_run_all = true },
+        .{ .name = "websocket-server", .path = "examples/websocket_server.zig", .skip_run_all = true },
+        .{ .name = "sse-server", .path = "examples/sse_server.zig", .skip_run_all = true },
+        .{ .name = "session-server", .path = "examples/session_server.zig", .skip_run_all = true },
+        .{ .name = "metrics-server", .path = "examples/metrics_server.zig", .skip_run_all = true },
+        .{ .name = "interceptor-example", .path = "examples/interceptor_example.zig", .skip_run_all = true },
+        .{ .name = "cookie-server", .path = "examples/cookie_server.zig", .skip_run_all = true },
+        .{ .name = "concurrent-demo", .path = "examples/concurrent_demo.zig" },
+        .{ .name = "proxy-demo", .path = "examples/proxy_demo.zig" },
+        .{ .name = "dns-demo", .path = "examples/dns_demo.zig" },
+        .{ .name = "compression-demo", .path = "examples/compression_demo.zig" },
+        .{ .name = "retry-demo", .path = "examples/retry_demo.zig" },
+        .{ .name = "custom-server", .path = "examples/custom_server.zig", .skip_run_all = true },
+        .{ .name = "cors-server", .path = "examples/cors_server.zig", .skip_run_all = true },
+        .{ .name = "rate-limit-server", .path = "examples/rate_limit_server.zig", .skip_run_all = true },
+        .{ .name = "helmet-server", .path = "examples/helmet_server.zig", .skip_run_all = true },
+        .{ .name = "body-parser-server", .path = "examples/body_parser_server.zig", .skip_run_all = true },
+        .{ .name = "tls-server", .path = "examples/tls_server.zig", .skip_run_all = true },
+        .{ .name = "https-client", .path = "examples/https_client.zig", .skip_run_all = true },
+        .{ .name = "tls12-client", .path = "examples/tls12_client.zig", .skip_run_all = true },
+        .{ .name = "tls13-client", .path = "examples/tls13_client.zig", .skip_run_all = true },
+        .{ .name = "tls-mtls", .path = "examples/tls_mtls.zig", .skip_run_all = true },
+        .{ .name = "dns-cache", .path = "examples/dns_cache.zig" },
+        .{ .name = "ftp-server", .path = "examples/ftp_server.zig", .skip_run_all = true },
+        .{ .name = "download", .path = "examples/download.zig", .skip_run_all = true },
+        .{ .name = "download-info", .path = "examples/download_info.zig", .skip_run_all = true },
+        .{ .name = "download-verify", .path = "examples/download_verify.zig", .skip_run_all = true },
+        .{ .name = "download-resume", .path = "examples/download_resume.zig", .skip_run_all = true },
+        .{ .name = "download-existing", .path = "examples/download_existing.zig", .skip_run_all = true },
+        .{ .name = "download-custom-progress", .path = "examples/download_custom_progress.zig", .skip_run_all = true },
+        .{ .name = "download-batch", .path = "examples/download_batch.zig", .skip_run_all = true },
+        .{ .name = "download-update", .path = "examples/download_update.zig", .skip_run_all = true },
+        .{ .name = "download-checksum-file", .path = "examples/download_checksum_file.zig", .skip_run_all = true },
+        .{ .name = "ftp-download", .path = "examples/ftp_download.zig", .skip_run_all = true },
+        .{ .name = "parse-html", .path = "examples/parse_html.zig" },
+    };
 
     inline for (examples) |example| {
         const exe = b.addExecutable(.{
@@ -70,6 +137,11 @@ pub fn build(b: *std.Build) void {
         run_exe.step.dependOn(&install_exe.step);
         const run_step = b.step("run-" ++ example.name, "Run " ++ example.name ++ " example");
         run_step.dependOn(&run_exe.step);
+    }
+
+    const build_all_examples = b.step("build-all-examples", "Build all example executables");
+    inline for (examples) |_| {
+        build_all_examples.dependOn(b.getInstallStep());
     }
 
     const run_all_examples = b.step("run-all-examples", "Run all examples sequentially");
@@ -114,6 +186,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("brotli", brotli_dep.module("brotli"));
     tests.root_module.addImport("tint", tint_dep.module("tint"));
     tests.root_module.addImport("env", env_dep.module("env"));
+    tests.root_module.addImport("loaders", loaders_dep.module("loaders"));
     linkPlatformLibs(tests, target);
 
     const run_tests = b.addRunArtifact(tests);
@@ -155,6 +228,7 @@ pub fn build(b: *std.Build) void {
     lib_root_module.addImport("brotli", brotli_dep.module("brotli"));
     lib_root_module.addImport("tint", tint_dep.module("tint"));
     lib_root_module.addImport("env", env_dep.module("env"));
+    lib_root_module.addImport("loaders", loaders_dep.module("loaders"));
 
     const lib = b.addLibrary(.{
         .name = "httpx",

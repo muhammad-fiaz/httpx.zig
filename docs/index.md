@@ -25,13 +25,13 @@ features:
   - title: All HTTP Versions
     details: Full HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 client/server runtime support, plus full protocol primitives.
   - title: Robust Client
-    details: Connection pooling, automatic retries, interceptors, typed API, and default-safe chainable config/option overrides.
+    details: Connection pooling, automatic retries with configurable backoff, close/reset lifecycle, typed JSON requests, and zero-config defaults.
   - title: Powerful Server
-    details: Pattern-based routing, middleware support, context-based handling, ETag-aware static file helpers, and explicit port conflict startup strategies.
+    details: Pattern-based routing (httpx.router.pattern), middleware support, context-based handling (queryParam, cookie, remoteAddress), lifecycle management (run, start, stop, pause, resumeAccepting), and ETag-aware static file helpers.
   - title: Concurrent
     details: Async task executor and parallel request patterns (all, any, race).
   - title: TLS Security
-    details: Secure connections with TLS 1.2/1.3, custom CAs, and verification policies.
+    details: Secure connections with TLS 1.2/1.3, custom CAs, ALPN negotiation, and TlsListener lifecycle (run, stop, requestShutdown).
   - title: Low-level Control
     details: Direct access to sockets, buffers, protocol parsers, and HPACK/QPACK compression.
   - title: MIME Ready
@@ -70,16 +70,16 @@ If you are upgrading from `0.0.7`, review the GitHub Releases page for migration
 
 Choose one of these installation methods:
 
-1. Latest release (0.1.8)
+1. Latest stable release (0.1.8)
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.8.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz
 ```
 
 2. Previous stable release (0.1.7)
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.7.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.8.tar.gz
 ```
 
 3. Legacy Zig 0.15 support (0.0.7)
@@ -92,10 +92,10 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 Zig `0.15` is deprecated. It uses an older API surface and is only retained in `0.0.7`.
 :::
 
-4. Nightly/main branch
+4. Dev branch (latest)
 
 ```bash
-zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig
+zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```
 
 5. Manual dependency entry in `build.zig.zon`
@@ -103,7 +103,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.8.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz",
     .hash = "...",
   },
 },
@@ -120,16 +120,21 @@ httpx.zig is built with production-readiness as a core goal. It is still a relat
 - For **spinners/loading/progress bar** support, check out **[loaders.zig](https://github.com/muhammad-fiaz/loaders.zig)**.
 - For **MCP** support, check out **[mcp.zig](https://github.com/muhammad-fiaz/mcp.zig)**.
 - For **args parsing** support, check out **[args.zig](https://github.com/muhammad-fiaz/args.zig)**.
-- For **HTTP client/server** support, check out **[httpx.zig](https://github.com/muhammad-fiaz/httpx.zig)**.
 - For **API framework** support, check out **[api.zig](https://github.com/muhammad-fiaz/api.zig)**.
 - For **web framework** support, check out **[zix](https://github.com/muhammad-fiaz/zix)**.
 - For **archive/compression** support, check out **[archive.zig](https://github.com/muhammad-fiaz/archive.zig)**.
 - For **compression file format** support, check out **[zigx](https://github.com/muhammad-fiaz/zigx)**.
+- For **CUDA** support, check out **[cuda.zig](https://github.com/muhammad-fiaz/cuda.zig)**.
+- For **Simplified build.zig config** support, check out **[buildx.zig](https://github.com/muhammad-fiaz/buildx.zig)**.
+- For **SQLite (zig-native implementation)** support, check out **[sqlite.zig](https://github.com/muhammad-fiaz/sqlite.zig)**.
 - For **file downloading** support, check out **[downloader.zig](https://github.com/muhammad-fiaz/downloader.zig)**.
 - For **update checker/auto-updater** support, check out **[updater.zig](https://github.com/muhammad-fiaz/updater.zig)**.
 - For **numerical computing** support, check out **[num.zig](https://github.com/muhammad-fiaz/num.zig)**.
 - For **logging** support, check out **[logly.zig](https://github.com/muhammad-fiaz/logly.zig)**.
 - For **data validation and serialization** support, check out **[zigantic](https://github.com/muhammad-fiaz/zigantic)**.
+- For **UUID** support, check out **[uuid.zig](https://github.com/muhammad-fiaz/uuid.zig)**.
+- For **key-value database** support, check out **[zkv.zig](https://github.com/muhammad-fiaz/zkv.zig)**.
+- For **terminal color & text styles** support, check out **[hint.zig](https://github.com/muhammad-fiaz/hint.zig)**.
 :::
 
 For full setup details, including local path dependencies and `build.zig` wiring, see `/guide/installation`.
@@ -149,10 +154,10 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN suppor
 
 | Protocol | Status | Transport | Notes |
 |----------|--------|-----------|-------|
-| HTTP/1.0 | ✅ Full | TCP | Legacy support |
-| HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
-| HTTP/2 | ✅ Client + Server Runtime + Primitives | TCP/TLS | High-level client/server execution paths plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Client + Server Runtime + Primitives | QUIC/UDP | High-level client/server runtime over UDP + QUIC/HTTP3/QPACK primitives |
+| HTTP/1.0 | Full | TCP | Legacy support |
+| HTTP/1.1 | Full | TCP/TLS | Default protocol |
+| HTTP/2 | Client + Server Runtime + Primitives | TCP/TLS | High-level client/server execution paths plus full framing/HPACK/stream primitives |
+| HTTP/3 | Client + Server Runtime + Primitives | QUIC/UDP | High-level client/server runtime over UDP + QUIC/HTTP3/QPACK primitives |
 
 ## Platform Support
 
@@ -160,100 +165,8 @@ httpx.zig is validated across Linux, Windows, and macOS:
 
 | Platform | x86_64 | aarch64 | x86 |
 |----------|--------|---------|-----|
-| Linux    | ✅     | ✅      | ✅  |
-| Windows  | ✅     | ✅      | ✅  |
-| macOS    | ✅     | ✅      | ❌  |
+| Linux    | Yes    | Yes     | Yes |
+| Windows  | Yes    | Yes     | Yes |
+| macOS    | Yes    | Yes     | No  |
 
-## Examples
-
-All examples are runnable from the repo root:
-
-```bash
-zig build run-all-simple_get
-```
-
-Available examples (see the `/examples` folder):
-
-- `simple_get.zig`: minimal GET
-- `simple_get_deserialize.zig`: GET request with typed JSON deserialization
-- `json_api_example.zig`: JSON API: getJson, postJsonAndParse, Response.json, server ctx.jsonBody + ctx.json
-- `post_json.zig`: JSON POST
-- `custom_headers.zig`: request headers
-- `interceptors.zig`: request/response interception hooks
-- `middleware_example.zig`: middleware chain
-- `router_example.zig`: router + handlers
-- `simple_server.zig`: basic HTTP server
-- `streaming.zig`: streaming request/response bodies
-- `concurrent_requests.zig`: concurrency patterns
-- `connection_pool.zig`: keep-alive pooling
-- `cookies_demo.zig`: cookie jar management
-- `simplified_api_aliases.zig`: simplified top-level/client aliases
-- `static_files.zig`: file-based static routes and directory-based wildcard mounts for CSS/JS/images
-- `multi_page_website.zig`: full multi-page website serving index/about/contact with static assets
-- `http2_example.zig`: HTTP/2 HPACK compression and stream management
-- `http2_client_runtime.zig`: local end-to-end high-level HTTP/2 client runtime demo
-- `http2_server_runtime.zig`: local end-to-end high-level HTTP/2 server runtime demo
-- `http3_example.zig`: HTTP/3 QPACK compression and QUIC framing
-- `http3_client_runtime.zig`: local end-to-end high-level HTTP/3 client runtime demo
-- `http3_server_runtime.zig`: local end-to-end high-level HTTP/3 server runtime demo
-- `http2_advanced.zig`: HTTP/2 production features (SETTINGS enforcement, GOAWAY/RST_STREAM, HPACK security, trailers)
-- `http3_advanced.zig`: HTTP/3 production features (QPACK stream instructions, QUIC stream cancellation, transport parameters)
-- `tls_https_get.zig`: Simple HTTPS GET via local TLS server (HTTP/1.1 + HTTP/2 + HTTP/3)
-- `tls_config_options.zig`: TLS configuration constructors and ALPN negotiation
-- `tls_handshake_details.zig`: TLS handshake info and cipher suites
-- `tls_custom_ca.zig`: Custom CA certificate verification with self-signed certs
-- `tls_mtls.zig`: Mutual TLS client certificate authentication
-- `tcp_local.zig`: local TCP listener/client round trip
-- `udp_local.zig`: UDP local networking utility (prints human-readable `ip:port` for source address)
-- `unix_socket_example.zig`: Unix domain socket IPC client/server (Linux, macOS; Windows 10 build 17061+ only)
-- `websocket_example.zig`: WebSocket frame encoding/decoding and handshake helpers
-- `multipart_example.zig`: multipart/form-data builder and parser
-- `metrics_example.zig`: observability counters and latency tracking
-- `session_example.zig`: TTL-based session store with server integration
-- `health_check_example.zig`: liveness and readiness probe middleware
-- `proxy_example.zig`: HTTP proxy and SOCKS5h tunneling
-- `async_server_example.zig`: server thread pool concurrency and request handling on background workers
-- `logging_callback.zig`: custom logging, silent mode, and log_level filtering
-- `request_response_customization.zig`: request and response builder patterns
-- `http_auth_helpers.zig`: Bearer and Basic auth helpers
-
-> **Platform note — Unix domain sockets:** `unix_socket_example.zig` requires Linux, macOS, or Windows 10 build 17061+ with Developer Mode. On unsupported Windows builds the example prints a clear message and exits gracefully.
-
-
-## Configuration
-
-Client configuration lives on `ClientConfig` (timeouts, redirects, retries, TLS verification, keep-alive/pooling).
-
-For a full explicit export map (root aliases + API groups), see [API Overview](/api/).
-
-## Validation
-
-Use these commands to validate host runtime behavior and cross-target compatibility:
-
-```bash
-zig build test
-zig build run-all-examples   # Runs sequentially to prevent parallel compiler OOM / PC crashes
-zig build build-all-targets
-```
-
-To validate Linux runtime behavior (not just compile checks), build Linux artifacts and run them from Linux/WSL:
-
-```bash
-zig build test -Dtarget=x86_64-linux
-zig build run-all-tcp_local -Dtarget=x86_64-linux
-
-./zig-out/bin/test
-./zig-out/bin/tcp_local
-```
-
-For production client code, prefer explicit timeout + error handling so failures surface immediately:
-
-```zig
-var response = client.get(url, .{ .timeout_ms = 10_000 }) catch |err| {
-  std.debug.print("request failed: {s}\n", .{@errorName(err)});
-  return;
-};
-defer response.deinit();
-```
-
-For detailed target-matrix instructions, see [Installation](/guide/installation#validation-and-target-matrix).
+For detailed installation instructions, see [Installation](/guide/installation).

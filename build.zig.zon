@@ -20,6 +20,10 @@
             .url = "https://github.com/muhammad-fiaz/env.zig/archive/refs/tags/0.0.2.tar.gz",
             .hash = "env-0.0.2-TMsAe4W0AgASsiE9dbVmd5L8xSduIybTGPONqK9AZ-_e",
         },
+        .loaders = .{
+            .url = "https://github.com/muhammad-fiaz/loaders.zig/archive/refs/tags/0.0.4.tar.gz",
+            .hash = "loaders-0.0.4-lPpNaXxkAgD4ZAvMq_fRgaq0UpRN1t1kD2fCTe27TXR0",
+        },
     },
     .paths = .{
         "build.zig",

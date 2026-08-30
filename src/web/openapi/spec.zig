@@ -35,8 +35,9 @@ const PathGroup = struct {
 pub const GenerateError = Allocator.Error || std.Io.Writer.Error || error{DuplicateOperationId};
 
 /// Generates an OpenAPI 3.1 JSON document (owned by caller) describing every
-/// route currently registered on `router`.
-pub fn generate(allocator: Allocator, router: *const Router, info: Info) GenerateError![]u8 {
+/// route currently registered on `router`. Uses the router's internal allocator.
+pub fn generate(router: *const Router, info: Info) GenerateError![]u8 {
+    const allocator = router.allocator;
     var groups: std.ArrayList(PathGroup) = .empty;
     defer {
         for (groups.items) |*g| {
@@ -477,7 +478,7 @@ test "generates valid spec for mixed routes" {
     try router.delete("/users/{id}", h);
     try router.get("/files/*path", h);
 
-    const json_data = try generate(a, &router, .{ .title = "T", .version = "9.9" });
+    const json_data = try generate(&router, .{ .title = "T", .version = "9.9" });
     defer a.free(json_data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, a, json_data, .{});
@@ -505,7 +506,7 @@ test "empty router yields empty paths object" {
     var router = Router.init(a);
     defer router.deinit();
 
-    const json_data = try generate(a, &router, .{});
+    const json_data = try generate(&router, .{});
     defer a.free(json_data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, a, json_data, .{});
@@ -522,7 +523,7 @@ test "operation ids are de-duplicated on sanitizer collision" {
     try router.get("/a b", h);
     try router.get("/a_b", h);
 
-    const json_data = try generate(a, &router, .{});
+    const json_data = try generate(&router, .{});
     defer a.free(json_data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, a, json_data, .{});
@@ -591,7 +592,7 @@ test "metadata flows into full operation object" {
         .deprecated = false,
     });
 
-    const json_data = try generate(a, &router, .{});
+    const json_data = try generate(&router, .{});
     defer a.free(json_data);
 
     // Spot-check every metadata surface made it through.
@@ -634,7 +635,7 @@ test "explicit duplicate operation ids are rejected" {
     try router.get("/two", hMeta);
     try router.addMeta(.POST, "/three", hMeta, .{ .operation_id = "dup" });
 
-    try std.testing.expectError(error.DuplicateOperationId, generate(a, &router, .{}));
+    try std.testing.expectError(error.DuplicateOperationId, generate(&router, .{}));
 }
 
 test "nullable object field emits anyOf null union" {
@@ -646,7 +647,7 @@ test "nullable object field emits anyOf null union" {
         .request = .{ .content = .json, .schema = &UserSchema },
     });
 
-    const json_data = try generate(a, &router, .{});
+    const json_data = try generate(&router, .{});
     defer a.free(json_data);
     try std.testing.expect(std.mem.indexOf(u8, json_data, "\"anyOf\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json_data, "\"type\":\"null\"") != null);

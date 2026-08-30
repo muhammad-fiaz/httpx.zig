@@ -59,19 +59,33 @@ pub const Connection = struct {
 
     var g_ca_lock: std.Io.RwLock = .init;
 
+    pub const Config = struct {
+        socket_handle: std.Io.net.Socket.Handle,
+        host: []const u8 = "",
+        verify: VerifyMode = .none,
+        ca_bundle: ?*std.crypto.Certificate.Bundle = null,
+        allow_truncation_attacks: bool = false,
+        io: ?std.Io = null,
+    };
+
     /// Handshakes synchronously. Returns a HEAP pointer because tls.Client
     /// captures addresses of our reader/writer interfaces — this struct must
     /// never move after init. Free with `destroy()`.
-    pub fn init(
-        allocator: Allocator,
-        io: std.Io,
-        socket_handle: std.Io.net.Socket.Handle,
-        host: []const u8,
-        verify: VerifyMode,
-        bundle: ?*std.crypto.Certificate.Bundle,
-        opts: ConnectionOptions,
-    ) InitError!*Connection {
-        if (verify == .ca_bundle and bundle == null) return error.TlsCaUnavailable;
+    pub fn init(allocator: Allocator, config: anytype) InitError!*Connection {
+        const conf: Config = if (@TypeOf(config) == Config) config else blk: {
+            var c = Config{
+                .socket_handle = if (@hasField(@TypeOf(config), "socket_handle")) config.socket_handle else if (@hasField(@TypeOf(config), "socket")) config.socket.netSocketHandle() else undefined,
+            };
+            if (@hasField(@TypeOf(config), "host")) c.host = config.host;
+            if (@hasField(@TypeOf(config), "verify")) c.verify = config.verify;
+            if (@hasField(@TypeOf(config), "ca_bundle")) c.ca_bundle = config.ca_bundle;
+            if (@hasField(@TypeOf(config), "allow_truncation_attacks")) c.allow_truncation_attacks = config.allow_truncation_attacks;
+            if (@hasField(@TypeOf(config), "io")) c.io = config.io;
+            break :blk c;
+        };
+
+        const io = conf.io orelse std.Io.Threaded.global_single_threaded.io();
+        if (conf.verify == .ca_bundle and conf.ca_bundle == null) return error.TlsCaUnavailable;
 
         const self = allocator.create(Connection) catch return error.OutOfMemory;
         errdefer allocator.destroy(self);
@@ -90,7 +104,7 @@ pub const Connection = struct {
         // this struct after init would dangle them.
         self.* = .{
             .client = undefined,
-            .allow_truncation = opts.allow_truncation_attacks,
+            .allow_truncation = conf.allow_truncation_attacks,
             .buf_stream_writer = bufs_rw,
             .buf_stream_reader = bufs_rr,
             .buf_tls_read = bufs_tr,
@@ -98,16 +112,16 @@ pub const Connection = struct {
             .stream_writer = undefined,
             .stream_reader = undefined,
             .io = io,
-            .socket_handle = socket_handle,
+            .socket_handle = conf.socket_handle,
         };
 
         self.stream_writer = .init(
-            .{ .socket = .{ .handle = socket_handle, .address = undefined } },
+            .{ .socket = .{ .handle = conf.socket_handle, .address = undefined } },
             io,
             self.buf_stream_writer,
         );
         self.stream_reader = .init(
-            .{ .socket = .{ .handle = socket_handle, .address = undefined } },
+            .{ .socket = .{ .handle = conf.socket_handle, .address = undefined } },
             io,
             self.buf_stream_reader,
         );
@@ -116,15 +130,15 @@ pub const Connection = struct {
         io.random(&entropy);
 
         const host_opt: @TypeOf(@as(tls.Client.Options, undefined).host) =
-            if (verify == .none) .no_verification else .{ .explicit = host };
-        const ca_opt: @TypeOf(@as(tls.Client.Options, undefined).ca) = switch (verify) {
+            if (conf.host.len > 0) .{ .explicit = conf.host } else .no_verification;
+        const ca_opt: @TypeOf(@as(tls.Client.Options, undefined).ca) = switch (conf.verify) {
             .none => .no_verification,
             .self_signed => .self_signed,
             .ca_bundle => .{ .bundle = .{
                 .gpa = allocator,
                 .io = io,
                 .lock = &g_ca_lock,
-                .bundle = bundle.?,
+                .bundle = conf.ca_bundle.?,
             } },
         };
 
@@ -138,7 +152,7 @@ pub const Connection = struct {
                 .write_buffer = self.buf_plain_write,
                 .entropy = &entropy,
                 .realtime_now = std.Io.Clock.now(.real, io),
-                .allow_truncation_attacks = opts.allow_truncation_attacks,
+                .allow_truncation_attacks = conf.allow_truncation_attacks,
             },
         ) catch return error.TlsInitializationFailed;
         return self;

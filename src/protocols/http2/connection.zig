@@ -470,28 +470,54 @@ pub const Session = struct {
         var seen_status = false;
         var seen_regular = false;
         for (fields) |f| {
+            // RFC 9113 Section 8.2.1: Header field names MUST be lowercase ASCII.
+            for (f.name) |c| {
+                if (c >= 'A' and c <= 'Z') return false;
+            }
+
+            // RFC 9113 Section 8.2.2: Connection-specific header fields MUST NOT be sent.
+            if (std.mem.eql(u8, f.name, "connection") or
+                std.mem.eql(u8, f.name, "keep-alive") or
+                std.mem.eql(u8, f.name, "proxy-connection") or
+                std.mem.eql(u8, f.name, "transfer-encoding") or
+                std.mem.eql(u8, f.name, "upgrade"))
+            {
+                return false;
+            }
+            if (std.mem.eql(u8, f.name, "te") and !std.mem.eql(u8, f.value, "trailers")) {
+                return false;
+            }
+
             const is_pseudo = f.name.len > 0 and f.name[0] == ':';
             if (is_pseudo) {
+                // Pseudo-headers MUST appear before regular header fields.
                 if (seen_regular) return false;
                 if (std.mem.eql(u8, f.name, ":method")) {
-                    if (seen_method) return false;
+                    if (seen_method or seen_status) return false;
                     seen_method = true;
                 } else if (std.mem.eql(u8, f.name, ":path")) {
-                    if (seen_path) return false;
+                    if (seen_path or seen_status) return false;
                     seen_path = true;
                 } else if (std.mem.eql(u8, f.name, ":scheme")) {
-                    if (seen_scheme) return false;
+                    if (seen_scheme or seen_status) return false;
                     seen_scheme = true;
                 } else if (std.mem.eql(u8, f.name, ":authority")) {
                     if (seen_authority) return false;
                     seen_authority = true;
                 } else if (std.mem.eql(u8, f.name, ":status")) {
-                    if (seen_status) return false;
+                    if (seen_status or seen_method or seen_path or seen_scheme) return false;
                     seen_status = true;
                 } else {
                     return false;
                 }
-                if (f.value.len == 0) return false;
+                // :path, :method, :scheme, :status cannot be empty.
+                if (std.mem.eql(u8, f.name, ":path") or
+                    std.mem.eql(u8, f.name, ":method") or
+                    std.mem.eql(u8, f.name, ":scheme") or
+                    std.mem.eql(u8, f.name, ":status"))
+                {
+                    if (f.value.len == 0) return false;
+                }
             } else {
                 seen_regular = true;
             }
@@ -837,4 +863,41 @@ test "session pair completes request/response exchange" {
 
     // SETTINGS ACK flows back and closes the handshake cleanly.
     try server.feed(client.outbound.items);
+}
+
+test "validatePseudoHeaders rejects uppercase, forbidden headers and mixed pseudo-headers" {
+    // Uppercase header name -> rejected
+    var bad_upper = [_]hpack_mod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = "Content-Type", .value = "text/plain" },
+    };
+    try std.testing.expect(!Session.validatePseudoHeaders(&bad_upper));
+
+    // Forbidden 'connection' header -> rejected
+    var bad_conn = [_]hpack_mod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = "connection", .value = "keep-alive" },
+    };
+    try std.testing.expect(!Session.validatePseudoHeaders(&bad_conn));
+
+    // Forbidden 'te' header with value other than 'trailers' -> rejected
+    var bad_te = [_]hpack_mod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = "te", .value = "gzip" },
+    };
+    try std.testing.expect(!Session.validatePseudoHeaders(&bad_te));
+
+    // Valid 'te: trailers' -> accepted
+    var good_te = [_]hpack_mod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = "te", .value = "trailers" },
+    };
+    try std.testing.expect(Session.validatePseudoHeaders(&good_te));
+
+    // Mixed request and response pseudo-headers -> rejected
+    var bad_mixed = [_]hpack_mod.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = ":method", .value = "GET" },
+    };
+    try std.testing.expect(!Session.validatePseudoHeaders(&bad_mixed));
 }

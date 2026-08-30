@@ -60,10 +60,9 @@ pub const DEFAULT_SERVER_PREFERENCE = [_]Protocol{ .h3, .h2, .@"http/1.1", .@"ht
 pub const DEFAULT_TCP_PREFERENCE = [_]Protocol{ .h2, .@"http/1.1", .@"http/1.0" };
 
 /// Parses an ALPN ProtocolNameList body (without extension header):
-/// sequence of u8-length-prefixed names. Uses page_allocator for
-/// backwards compatibility; prefer parseListWithAllocator for custom allocators.
-pub fn parseList(body: []const u8) Error![]const []const u8 {
-    return parseListWithAllocator(std.heap.page_allocator, body);
+/// sequence of u8-length-prefixed names.
+pub fn parseList(allocator: Allocator, body: []const u8) Error![]const []const u8 {
+    return parseListWithAllocator(allocator, body);
 }
 
 /// Parses an ALPN ProtocolNameList body with explicit allocator.
@@ -146,8 +145,8 @@ test "build and parse ALPN list" {
     // Expected: \x02h2\x08http/1.1
     try std.testing.expectEqual(@as(usize, 12), wire.len);
 
-    const parsed = try parseList(wire);
-    defer std.heap.page_allocator.free(parsed);
+    const parsed = try parseList(a, wire);
+    defer a.free(parsed);
 
     try std.testing.expectEqual(@as(usize, 2), parsed.len);
     try std.testing.expectEqualStrings("h2", parsed[0]);
@@ -173,5 +172,5 @@ test "client rejects unknown selection" {
 test "ALPN rejects an oversized protocol list" {
     var body: [MAX_LIST_LENGTH + 1]u8 = undefined;
     @memset(&body, 1);
-    try std.testing.expectError(Error.ListTooLarge, parseList(&body));
+    try std.testing.expectError(Error.ListTooLarge, parseList(std.testing.allocator, &body));
 }

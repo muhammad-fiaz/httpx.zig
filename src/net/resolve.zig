@@ -25,10 +25,32 @@ pub const Error = error{
     OutOfMemory,
 };
 
-/// Cross-platform resolver using Zig's std.Io networking backend. This
-/// additive API is available on targets where libc or Winsock bindings are
-/// not used by the legacy allocator-only `lookup` entry point.
-pub fn lookupWithIo(allocator: Allocator, io: std.Io, host: []const u8, port: u16) Error![]address_mod.Address {
+/// DNS resolver that owns its allocator.
+///
+/// ```zig
+/// var resolver = resolve.Resolver.init(allocator);
+/// const addrs = try resolver.lookup("example.com", 443);
+/// defer allocator.free(addrs);
+/// ```
+pub const Resolver = struct {
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator) Resolver {
+        return .{ .allocator = allocator };
+    }
+
+    /// Cross-platform resolver using Zig's std.Io networking backend.
+    pub fn lookupWithIo(self: Resolver, io: std.Io, host: []const u8, port: u16) Error![]address_mod.Address {
+        return lookupWithIoImpl(self.allocator, io, host, port);
+    }
+
+    /// Resolve `host` to addresses (system order preserved). Caller owns the returned slice.
+    pub fn lookup(self: Resolver, host: []const u8, port: u16) Error![]address_mod.Address {
+        return lookupImpl(self.allocator, host, port);
+    }
+};
+
+fn lookupWithIoImpl(allocator: Allocator, io: std.Io, host: []const u8, port: u16) Error![]address_mod.Address {
     const hostname = std.Io.net.HostName.init(host) catch return error.HostNotFound;
     var queue_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
     var queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&queue_buffer);
@@ -56,9 +78,7 @@ pub fn lookupWithIo(allocator: Allocator, io: std.Io, host: []const u8, port: u1
     return out.toOwnedSlice(allocator) catch error.OutOfMemory;
 }
 
-/// Resolve `host` to addresses (system order preserved; typically
-/// IPv4-preferred on dual stacks). Caller owns the returned slice.
-pub fn lookup(allocator: Allocator, host: []const u8, port: u16) Error![]address_mod.Address {
+fn lookupImpl(allocator: Allocator, host: []const u8, port: u16) Error![]address_mod.Address {
     if (builtin.os.tag == .windows) return lookupWindows(allocator, host, port);
     if (builtin.link_libc) return lookupPosix(allocator, host, port);
     return error.ResolverUnsupported;
@@ -257,12 +277,13 @@ fn lookupPosix(allocator: Allocator, host: []const u8, port: u16) Error![]addres
 test "localhost resolves offline (hosts file)" {
     if (builtin.os.tag != .windows and !builtin.link_libc) return error.SkipZigTest;
     const a = std.testing.allocator;
-    const addrs = lookup(a, "localhost", 80) catch |err| {
+    const resolver = Resolver.init(a);
+    const addrs = resolver.lookup("localhost", 80) catch |err| {
         // macOS GitHub Actions runners may not resolve localhost via getaddrinfo.
         // Verify the resolver code path works with an IP literal; skip if the
         // runner's networking is fully restricted.
         if (err != error.HostNotFound) return err;
-        const fallback = lookup(a, "127.0.0.1", 80) catch return;
+        const fallback = resolver.lookup("127.0.0.1", 80) catch return;
         defer a.free(fallback);
         try std.testing.expect(fallback.len >= 1);
         return;
@@ -279,14 +300,16 @@ test "localhost resolves offline (hosts file)" {
 test "garbage hostname fails cleanly" {
     if (builtin.os.tag != .windows and !builtin.link_libc) return error.SkipZigTest;
     const a = std.testing.allocator;
-    try std.testing.expectError(error.HostNotFound, lookup(a, "definitely-not-a-real-host-httpx", 80));
+    const resolver = Resolver.init(a);
+    try std.testing.expectError(error.HostNotFound, resolver.lookup("definitely-not-a-real-host-httpx", 80));
 }
 
 test "std.Io resolver returns canonical project addresses" {
     const IoContext = @import("../sockets/tcp.zig").IoContext;
     var ctx = IoContext.init(std.testing.allocator) catch return;
     defer ctx.deinit();
-    const addrs = lookupWithIo(std.testing.allocator, ctx.io, "localhost", 80) catch return;
+    const resolver = Resolver.init(std.testing.allocator);
+    const addrs = resolver.lookupWithIo(ctx.io, "localhost", 80) catch return;
     defer std.testing.allocator.free(addrs);
     try std.testing.expect(addrs.len >= 1);
     for (addrs) |addr| try std.testing.expectEqual(@as(u16, 80), addr.port);

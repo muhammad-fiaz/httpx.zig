@@ -38,15 +38,16 @@ pub const Headers = struct {
         self.* = undefined;
     }
 
-    /// Sets (replaces) a header. Allocates copies of name and value.
     pub fn set(self: *Headers, name: []const u8, value: []const u8) !void {
         try validateName(name);
         try validateValue(value);
         for (self.entries.items) |*h| {
             if (std.ascii.eqlIgnoreCase(h.name, name)) {
-                self.allocator.free(h.name);
+                if (h.value.len == value.len) {
+                    @memcpy(@constCast(h.value), value);
+                    return;
+                }
                 self.allocator.free(h.value);
-                h.name = try self.allocator.dupe(u8, name);
                 h.value = try self.allocator.dupe(u8, value);
                 return;
             }
@@ -56,6 +57,7 @@ pub const Headers = struct {
             .value = try self.allocator.dupe(u8, value),
         });
     }
+
 
     /// Appends a header without replacing duplicates.
     pub fn append(self: *Headers, name: []const u8, value: []const u8) !void {

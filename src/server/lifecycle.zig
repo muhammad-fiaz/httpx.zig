@@ -49,11 +49,26 @@ pub const LoggingOptions = struct {
     pub const ColorOpt = enum { auto, always, never };
 };
 
+pub const PortStrategy = enum {
+    /// If port is in use, automatically try port + 1, port + 2, up to max_port_attempts.
+    incremental,
+    /// Return error.AddressInUse immediately if port is occupied.
+    strict,
+    /// Exit / fail if port is occupied.
+    exit,
+};
+
 pub const Config = struct {
     host: []const u8 = "0.0.0.0",
     port: u16 = 8080,
+    /// Port resolution strategy when the port is in use. Default is incremental.
+    port_strategy: PortStrategy = .incremental,
+    /// Maximum attempts when port_strategy is incremental.
+    max_port_attempts: u16 = 50,
     /// Largest accepted request body.
     max_body: usize = 8 * 1024 * 1024,
+    /// Maximum concurrent connections. 0 = unlimited.
+    max_connections: usize = 0,
     /// Mount /openapi.json, /docs (Swagger UI), /redoc by default.
     docs_enabled: bool = true,
     /// Overrides for docs routes when enabled.
@@ -82,15 +97,54 @@ fn resolveColor(c: LoggingOptions.ColorOpt) bool {
     return c == .always; // .auto resolves plain: TTY detection is host-dependent
 }
 
+/// Global pointer to the active server for the Ctrl+C handler.
+var g_active_server: ?*Server = null;
+
+fn installShutdownHandler(self: *Server) void {
+    g_active_server = self;
+    const builtin = @import("builtin");
+    switch (builtin.os.tag) {
+        .windows => {
+            const handler_fn = struct {
+                fn callback(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
+                    if (ctrl_type <= 2) {
+                        if (g_active_server) |s| s.requestShutdown();
+                        return @enumFromInt(1);
+                    }
+                    return @enumFromInt(0);
+                }
+            };
+            _ = SetConsoleCtrlHandler(&handler_fn.callback, @enumFromInt(1));
+        },
+        else => {
+            const handler_fn = struct {
+                fn sigHandler(sig: c_int) callconv(.C) void {
+                    _ = sig;
+                    if (g_active_server) |s| s.requestShutdown();
+                }
+            };
+            var act: std.posix.Sigaction = .{
+                .handler = .{ .handler = &handler_fn.sigHandler },
+                .mask = std.posix.empty_sigset,
+                .flags = 0,
+            };
+            std.posix.sigaction(std.posix.SIG.INT, &act, null) catch {};
+        },
+    }
+}
+
+extern "kernel32" fn SetConsoleCtrlHandler(
+    handler: *const fn (std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL,
+    add: std.os.windows.BOOL,
+) callconv(.winapi) std.os.windows.BOOL;
+
 pub const Server = struct {
     io: std.Io,
     allocator: Allocator,
     listener: tcp.Listener,
     router: Router,
     cfg: Config,
-    stop: std.atomic.Value(bool) = .init(false),
-    /// 0 = unlimited; run() exits after this many connections.
-    max_connections: usize = 0,
+    stop_flag: std.atomic.Value(bool) = .init(false),
     logger: logging.Logger,
     /// Heap-allocated built-in sink state (null when a custom logger was
     /// supplied or logging is disabled).
@@ -104,6 +158,8 @@ pub const Server = struct {
     in_accept: std.atomic.Value(bool) = .init(false),
     owns_io: bool = false,
     io_threaded: ?*std.Io.Threaded = null,
+    paused: std.atomic.Value(bool) = .init(false),
+    docs_mounted: bool = false,
 
     pub fn init(allocator: Allocator, cfg: Config) !Server {
         const address_mod = @import("../net/address.zig");
@@ -146,10 +202,34 @@ pub const Server = struct {
             }
         }
 
+        var listener: tcp.Listener = undefined;
+        if (cfg.port == 0) {
+            listener = try tcp.Listener.bindAddress(io, &addr);
+        } else {
+            var current_port = cfg.port;
+            var bound = false;
+            const max_attempts = if (cfg.port_strategy == .incremental) cfg.max_port_attempts else 1;
+            var attempt: u16 = 0;
+            while (attempt < max_attempts) : (attempt += 1) {
+                addr.port = current_port;
+                if (tcp.Listener.bindAddress(io, &addr)) |l| {
+                    listener = l;
+                    bound = true;
+                    break;
+                } else |err| {
+                    if (attempt + 1 >= max_attempts or cfg.port_strategy != .incremental) {
+                        return err;
+                    }
+                    current_port +%= 1;
+                }
+            }
+            if (!bound) return error.AddressInUse;
+        }
+
         var srv = Server{
             .io = io,
             .allocator = allocator,
-            .listener = try tcp.Listener.bindAddress(io, &addr),
+            .listener = listener,
             .router = Router.init(allocator),
             .cfg = cfg,
             .logger = logger,
@@ -159,13 +239,6 @@ pub const Server = struct {
         };
         errdefer srv.router.deinit();
 
-        if (cfg.docs_enabled) {
-            const dc = cfg.docs orelse docs.Config{};
-            docs.mount(allocator, &srv.router, dc, .{
-                .title = cfg.docs_title,
-                .version = @import("../common/version.zig").version,
-            }) catch {};
-        }
         return srv;
     }
 
@@ -243,7 +316,7 @@ pub const Server = struct {
         if (!self.logged_stop.swap(true, .acq_rel) and self.cfg.logging.enabled and self.cfg.logging.lifecycle) {
             self.logger.log(.info, "server", "shutting down", .{});
         }
-        self.stop.store(true, .release);
+        self.stop_flag.store(true, .release);
 
         // On Windows (Zig 0.16), the AFD-backed listener uses IOCP for accept().
         // Closing the listening socket while a thread is blocked in netAcceptWindows
@@ -266,16 +339,71 @@ pub const Server = struct {
         self.conns_mu.unlock();
     }
 
+    /// Immediate shutdown (no graceful drain). Sets stop flag and closes
+    /// the listener + all connections immediately.
+    pub fn stop(self: *Server) void {
+        self.stop_flag.store(true, .release);
+        self.listener.close(self.io);
+        self.conns_mu.lock();
+        for (self.active_conns.items) |conn| conn.close();
+        self.conns_mu.unlock();
+    }
+
+    /// Non-blocking server start. Spawns a thread that calls `run()`.
+    /// Returns the thread handle so the caller can join.
+    pub fn start(self: *Server) !std.Thread {
+        return std.Thread.spawn(.{}, (struct {
+            fn run(s: *Server) void {
+                s.run();
+            }
+        }).run, .{self});
+    }
+
+    /// Pause accepting new connections. Sets a paused flag that run() checks.
+    pub fn pause(self: *Server) void {
+        self.paused.store(true, .release);
+    }
+
+    /// Resume accepting new connections.
+    pub fn resumeAccepting(self: *Server) void {
+        self.paused.store(false, .release);
+        if (self.in_accept.load(.acquire)) {
+            tcp.wakeListenerPort(self.listener.localPort());
+        }
+    }
+
+    /// Return the full bound address.
+    pub fn localAddress(self: *const Server) std.net.Address {
+        const addr = self.listener.server.socket.address;
+        return addr;
+    }
+
     /// Blocking accept loop. `requestShutdown()` takes effect between
     /// accepts; `max_connections` (when nonzero) makes run() return after
     /// that many connections, which is how tests join deterministically.
+    /// Installs a Ctrl+C handler for graceful shutdown.
     pub fn run(self: *Server) void {
+        // Mount docs here (not in init) because init returns by value,
+        // making any &srv.router pointer taken inside init a dangling pointer.
+        if (self.cfg.docs_enabled and !self.docs_mounted) {
+            self.docs_mounted = true;
+            const dc = self.cfg.docs orelse docs.Config{};
+            docs.mount(self.allocator, &self.router, dc, .{
+                .title = self.cfg.docs_title,
+                .version = @import("../common/version.zig").version,
+            }) catch {};
+        }
+        installShutdownHandler(self);
         if (self.cfg.logging.enabled and self.cfg.logging.lifecycle) {
             self.logger.log(.info, "server", "listening on {s}:{d}", .{ self.cfg.host, self.listener.localPort() });
         }
         var served: usize = 0;
-        while (!self.stop.load(.acquire)) {
-            if (self.max_connections != 0 and served >= self.max_connections) break;
+        while (!self.stop_flag.load(.acquire)) {
+            if (self.cfg.max_connections != 0 and served >= self.cfg.max_connections) break;
+            // Yield when paused
+            while (self.paused.load(.acquire) and !self.stop_flag.load(.acquire)) {
+                clock.sleepMillis(10);
+            }
             self.in_accept.store(true, .release);
             var conn = self.listener.accept(self.io) catch {
                 self.in_accept.store(false, .release);
@@ -283,13 +411,14 @@ pub const Server = struct {
             };
             self.in_accept.store(false, .release);
             defer conn.close();
-            var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             self.serveConnection(&conn, arena.allocator()) catch {};
             served += 1;
 
+
             // Stop before blocking on the next accept when asked.
-            if (self.stop.load(.acquire)) break;
+            if (self.stop_flag.load(.acquire)) break;
         }
         if (self.cfg.logging.enabled and self.cfg.logging.lifecycle) {
             self.logger.log(.info, "server", "shutdown complete", .{});
@@ -299,7 +428,7 @@ pub const Server = struct {
     fn serveConnection(self: *Server, conn: *tcp.Socket, arena_in: Allocator) !void {
         _ = arena_in;
 
-        // Peek or read initial bytes to check for HTTP/2 cleartext prior knowledge (RFC 9113 §3.4)
+        // Peek or read initial bytes to check for HTTP/2 cleartext prior knowledge (RFC 9113 Section 3.4)
         var peek_buf: [32]u8 = undefined;
         const n_peek = conn.read(peek_buf[0..]) catch return;
         if (n_peek == 0) return;
@@ -448,15 +577,16 @@ pub const Server = struct {
         }
 
         if (!self.cfg.keep_alive) {
-            var arena_one = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            var arena_one = std.heap.ArenaAllocator.init(self.allocator);
             defer arena_one.deinit();
             _ = try self.serveOneRequestBuffered(conn, arena_one.allocator(), 0, true, peek_buf[0..n_peek]);
             return;
         }
         // Persistent connection: bounded request loop with per-request arena
         // reset so long-lived connections cannot grow memory unbounded.
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
+
         self.conns_mu.lock();
         self.active_conns.append(self.allocator, conn) catch |err| {
             self.conns_mu.unlock();
@@ -532,7 +662,7 @@ pub const Server = struct {
         const hdrs = arena.alloc(router_mod.Header, blk.count) catch return false;
         for (fields[0..blk.count], 0..) |f, i| hdrs[i] = .{ .name = f.name, .value = f.value };
 
-        // Connection reuse decision (RFC 9112 §7): explicit "close" wins;
+        // Connection reuse decision (RFC 9112 Section 7): explicit "close" wins;
         // HTTP/1.0 defaults to close unless it requested keep-alive.
         var client_close = force_close or req_head.minor_version == 0;
         var client_ka10 = false;
@@ -823,10 +953,9 @@ test "server handles POST with content-length body" {
     var ctx = tcp.IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    var srv = Server.init(a, .{ .port = 0, .docs_enabled = false }) catch return;
+    var srv = Server.init(a, .{ .port = 0, .docs_enabled = false, .max_connections = 1 }) catch return;
     defer srv.deinit();
     try srv.router.post("/echo", echoRawHandler);
-    srv.max_connections = 1;
 
     const Runner = struct {
         fn run(s: *Server) void {
@@ -898,6 +1027,7 @@ test "access log flows through explicit custom logger" {
     var srv = Server.init(a, .{
         .port = 0,
         .docs_enabled = false,
+        .max_connections = 1,
         .logging = .{
             .enabled = true,
             .requests = true,
@@ -907,7 +1037,6 @@ test "access log flows through explicit custom logger" {
     }) catch return;
     defer srv.deinit();
     try srv.router.get("/logged", returnOk);
-    srv.max_connections = 1;
 
     const Runner = struct {
         fn run(s: *Server) void {
@@ -950,6 +1079,7 @@ test "logging disabled produces zero output" {
     var srv = Server.init(a, .{
         .port = 0,
         .docs_enabled = false,
+        .max_connections = 1,
         .logging = .{
             .enabled = false,
             .requests = true,
@@ -958,7 +1088,6 @@ test "logging disabled produces zero output" {
     }) catch return;
     defer srv.deinit();
     try srv.router.get("/logged", returnOk);
-    srv.max_connections = 1;
 
     const Runner = struct {
         fn run(s: *Server) void {
@@ -994,10 +1123,9 @@ test "server serves routed GET end to end" {
     var ctx = tcp.IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    var srv = Server.init(a, .{ .port = 0 }) catch return;
+    var srv = Server.init(a, .{ .port = 0, .max_connections = 1 }) catch return;
     defer srv.deinit();
     try srv.router.get("/hello", helloHandler);
-    srv.max_connections = 1;
 
     const Runner = struct {
         fn run(s: *Server) void {
@@ -1033,7 +1161,7 @@ test "raw socket 200KB content-length body roundtrip" {
     const a = std.testing.allocator;
     var ctx0 = tcp.IoContext.init(a) catch return;
     defer ctx0.deinit();
-    var srv = Server.init(a, .{ .port = 0, .docs_enabled = false }) catch return;
+    var srv = Server.init(a, .{ .port = 0, .docs_enabled = false, .max_connections = 1 }) catch return;
     defer srv.deinit();
     const LenH = struct {
         fn h(ctx: *Context) anyerror!Response {
@@ -1042,7 +1170,6 @@ test "raw socket 200KB content-length body roundtrip" {
         }
     };
     try srv.router.post("/len", LenH.h);
-    srv.max_connections = 1;
     const R = struct {
         fn run(s: *Server) void {
             s.run();

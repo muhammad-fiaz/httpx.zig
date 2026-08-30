@@ -5,49 +5,47 @@
 
 const std = @import("std");
 
-const Entry = struct { ext: []const u8, mime: []const u8 };
+const mime_map = std.static_string_map.StaticStringMap([]const u8).initComptime(.{
+    .{ "html", "text/html; charset=utf-8" },
+    .{ "htm", "text/html; charset=utf-8" },
+    .{ "css", "text/css; charset=utf-8" },
+    .{ "js", "text/javascript; charset=utf-8" },
+    .{ "mjs", "text/javascript; charset=utf-8" },
+    .{ "json", "application/json; charset=utf-8" },
+    .{ "txt", "text/plain; charset=utf-8" },
+    .{ "md", "text/markdown; charset=utf-8" },
+    .{ "xml", "application/xml; charset=utf-8" },
+    .{ "csv", "text/csv; charset=utf-8" },
+    .{ "pdf", "application/pdf" },
+    .{ "wasm", "application/wasm" },
+    .{ "png", "image/png" },
+    .{ "jpg", "image/jpeg" },
+    .{ "jpeg", "image/jpeg" },
+    .{ "gif", "image/gif" },
+    .{ "webp", "image/webp" },
+    .{ "avif", "image/avif" },
+    .{ "svg", "image/svg+xml" },
+    .{ "ico", "image/x-icon" },
+    .{ "bmp", "image/bmp" },
+    .{ "woff", "font/woff" },
+    .{ "woff2", "font/woff2" },
+    .{ "ttf", "font/ttf" },
+    .{ "otf", "font/otf" },
+    .{ "mp3", "audio/mpeg" },
+    .{ "wav", "audio/wav" },
+    .{ "ogg", "audio/ogg" },
+    .{ "flac", "audio/flac" },
+    .{ "mp4", "video/mp4" },
+    .{ "webm", "video/webm" },
+    .{ "mov", "video/quicktime" },
+    .{ "zip", "application/zip" },
+    .{ "gz", "application/gzip" },
+    .{ "tar", "application/x-tar" },
+    .{ "map", "application/json; charset=utf-8" },
+    .{ "webmanifest", "application/manifest+json" },
+});
 
-const table = [_]Entry{
-    .{ .ext = "html", .mime = "text/html; charset=utf-8" },
-    .{ .ext = "htm", .mime = "text/html; charset=utf-8" },
-    .{ .ext = "css", .mime = "text/css; charset=utf-8" },
-    .{ .ext = "js", .mime = "text/javascript; charset=utf-8" },
-    .{ .ext = "mjs", .mime = "text/javascript; charset=utf-8" },
-    .{ .ext = "json", .mime = "application/json; charset=utf-8" },
-    .{ .ext = "txt", .mime = "text/plain; charset=utf-8" },
-    .{ .ext = "md", .mime = "text/markdown; charset=utf-8" },
-    .{ .ext = "xml", .mime = "application/xml; charset=utf-8" },
-    .{ .ext = "csv", .mime = "text/csv; charset=utf-8" },
-    .{ .ext = "pdf", .mime = "application/pdf" },
-    .{ .ext = "wasm", .mime = "application/wasm" },
-    .{ .ext = "png", .mime = "image/png" },
-    .{ .ext = "jpg", .mime = "image/jpeg" },
-    .{ .ext = "jpeg", .mime = "image/jpeg" },
-    .{ .ext = "gif", .mime = "image/gif" },
-    .{ .ext = "webp", .mime = "image/webp" },
-    .{ .ext = "avif", .mime = "image/avif" },
-    .{ .ext = "svg", .mime = "image/svg+xml" },
-    .{ .ext = "ico", .mime = "image/x-icon" },
-    .{ .ext = "bmp", .mime = "image/bmp" },
-    .{ .ext = "woff", .mime = "font/woff" },
-    .{ .ext = "woff2", .mime = "font/woff2" },
-    .{ .ext = "ttf", .mime = "font/ttf" },
-    .{ .ext = "otf", .mime = "font/otf" },
-    .{ .ext = "mp3", .mime = "audio/mpeg" },
-    .{ .ext = "wav", .mime = "audio/wav" },
-    .{ .ext = "ogg", .mime = "audio/ogg" },
-    .{ .ext = "flac", .mime = "audio/flac" },
-    .{ .ext = "mp4", .mime = "video/mp4" },
-    .{ .ext = "webm", .mime = "video/webm" },
-    .{ .ext = "mov", .mime = "video/quicktime" },
-    .{ .ext = "zip", .mime = "application/zip" },
-    .{ .ext = "gz", .mime = "application/gzip" },
-    .{ .ext = "tar", .mime = "application/x-tar" },
-    .{ .ext = "map", .mime = "application/json; charset=utf-8" },
-    .{ .ext = "webmanifest", .mime = "application/manifest+json" },
-};
-
-/// MIME type for a path's extension. Always returns a usable value.
+/// MIME type for a path's extension. Always returns a usable value with O(1) lookup.
 pub fn fromPath(path: []const u8) []const u8 {
     const name = blk: {
         const idx = std.mem.lastIndexOfScalar(u8, path, '/') orelse break :blk path;
@@ -62,13 +60,11 @@ pub fn fromPath(path: []const u8) []const u8 {
     for (ext, 0..) |c, i| lower[i] = std.ascii.toLower(c);
     const key = lower[0..ext.len];
 
-    for (table) |e| {
-        if (std.mem.eql(u8, e.ext, key)) return e.mime;
-    }
-    return octet_stream;
+    return mime_map.get(key) orelse octet_stream;
 }
 
 pub const octet_stream = "application/octet-stream";
+
 
 test "detects common types case-insensitively" {
     try std.testing.expectEqualStrings("text/html; charset=utf-8", fromPath("/a/b/Index.HTML"));

@@ -25,8 +25,8 @@ pub const Config = struct {
 /// API routes should be registered BEFORE calling this so they take
 /// precedence; register it last so the static mount only claims what
 /// remains.
-pub fn register(allocator: Allocator, router: *Router, cfg: Config) !void {
-    try static_files.register(allocator, router, .{
+pub fn register(router: *Router, cfg: Config) !void {
+    try static_files.register(router, .{
         .root = cfg.root,
         .mount = cfg.mount,
         .index_file = cfg.fallback,

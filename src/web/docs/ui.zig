@@ -186,7 +186,7 @@ pub fn mount(
         st.graphql_endpoint = try normalizeRoute(allocator, cfg.graphiql.graphql_endpoint);
     }
 
-    st.spec = try openapi.generate(allocator, router, actual_info);
+    st.spec = try openapi.generate(router, actual_info);
 
     // Pre-render enabled UI pages once; handlers only borrow.
     if (st.swagger_route) |route| {
@@ -278,7 +278,7 @@ fn requireState() *DocsState {
 fn openApiHandler(ctx: *Context) anyerror!Response {
     const st = requireState();
     _ = ctx;
-    if (openapi.generate(st.allocator, st.router, st.info)) |fresh_spec| {
+    if (openapi.generate(st.router, st.info)) |fresh_spec| {
         if (st.spec) |old| st.allocator.free(old);
         st.spec = fresh_spec;
     } else |_| {}
@@ -337,7 +337,7 @@ fn serveAsset(ctx: *Context, kind: assets.Kind, path: []const u8) anyerror!Respo
     return .{ .status = 200, .content_type = f.content_type, .body = f.data };
 }
 
-// --- page rendering ---------------------------------------------------------
+// page rendering
 
 fn escapeInto(w: anytype, s: []const u8) !void {
     for (s) |c| {

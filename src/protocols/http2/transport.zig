@@ -1,4 +1,4 @@
-//! HTTP/2 cleartext transport (h2c prior knowledge, RFC 9113 §3.4).
+//! HTTP/2 cleartext transport (h2c prior knowledge, RFC 9113 Section 3.4).
 //!
 //! Thin glue driving the Session engine over plain TCP for BOTH roles.
 //! TLS+ALPN paths use the same Session from their own callers.

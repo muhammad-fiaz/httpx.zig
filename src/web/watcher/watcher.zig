@@ -75,27 +75,82 @@ pub const Watcher = struct {
         defer self.mutex.unlock();
 
         var changed = false;
-        var visited = std.StringHashMap(void).init(self.allocator);
-        defer visited.deinit();
-
         const static_mod = @import("../static_files/serve.zig");
+        const io: std.Io = .initSingleThreaded();
 
-        // Scan the directory entries
-        for (self.config.extensions) |ext| {
-            // Check files matching target extension in dir_path
-            var buf: [512]u8 = undefined;
-            _ = ext;
-            _ = &buf;
+        // 1. Recursive directory walk if dir_path is provided and exists
+        if (self.config.dir_path.len > 0) {
+            const cwd: std.Io.Dir = .cwd();
+            var dir = cwd.openDir(io, self.config.dir_path, .{ .iterate = true }) catch null;
+            if (dir) |*d| {
+                defer d.close(io);
+                var walker = d.walk(self.allocator) catch null;
+                if (walker) |*w| {
+                    defer w.deinit();
+                    while (w.next(io) catch null) |entry| {
+                        if (entry.kind != .file) continue;
+
+                        // Check extension filter
+                        if (self.config.extensions.len > 0) {
+                            var matched = false;
+                            for (self.config.extensions) |ext| {
+                                if (std.mem.endsWith(u8, entry.path, ext)) {
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                            if (!matched) continue;
+                        }
+
+                        const full_path = std.Io.Dir.path.join(self.allocator, &.{ self.config.dir_path, entry.path }) catch continue;
+                        defer self.allocator.free(full_path);
+
+                        if (static_mod.statPath(undefined, full_path)) |st| {
+                            if (self.entries.getPtr(full_path)) |val| {
+                                if (val.mtime_ns != st.mtime_ns or val.size != st.size) {
+                                    val.mtime_ns = st.mtime_ns;
+                                    val.size = st.size;
+                                    changed = true;
+                                    _ = self.change_count.fetchAdd(1, .release);
+                                    if (self.config.on_change) |cb| {
+                                        cb(.{
+                                            .path = full_path,
+                                            .kind = .modified,
+                                            .timestamp_ms = clock.millisNow(),
+                                        }, self.config.user_data);
+                                    }
+                                }
+                            } else {
+                                // New file detected
+                                const owned_path = self.allocator.dupe(u8, full_path) catch continue;
+                                self.entries.put(owned_path, .{
+                                    .path = owned_path,
+                                    .mtime_ns = st.mtime_ns,
+                                    .size = st.size,
+                                }) catch {
+                                    self.allocator.free(owned_path);
+                                    continue;
+                                };
+                                changed = true;
+                                _ = self.change_count.fetchAdd(1, .release);
+                                if (self.config.on_change) |cb| {
+                                    cb(.{
+                                        .path = full_path,
+                                        .kind = .created,
+                                        .timestamp_ms = clock.millisNow(),
+                                    }, self.config.user_data);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        // Check configured root or registered files
+        // 2. Check registered individual files for modifications or deletions
         var it_entries = self.entries.iterator();
         while (it_entries.next()) |entry| {
             if (static_mod.statPath(undefined, entry.key_ptr.*)) |st| {
-                const full_rel = try self.allocator.dupe(u8, entry.key_ptr.*);
-                defer self.allocator.free(full_rel);
-                try visited.put(full_rel, {});
-
                 if (entry.value_ptr.mtime_ns != st.mtime_ns or entry.value_ptr.size != st.size) {
                     entry.value_ptr.mtime_ns = st.mtime_ns;
                     entry.value_ptr.size = st.size;
@@ -114,6 +169,8 @@ pub const Watcher = struct {
 
         return changed;
     }
+
+
 
     /// Registers a specific file path to actively watch for modifications.
     pub fn watchFile(self: *Watcher, path: []const u8) !void {
@@ -173,6 +230,7 @@ pub const Watcher = struct {
         , .{sse_url});
     }
 };
+
 
 test "watcher tracks registered files" {
     const a = std.testing.allocator;

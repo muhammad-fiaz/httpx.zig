@@ -1,4 +1,4 @@
-//! TLS 1.3 handshake message serialization/parsing (RFC 8446 §4).
+//! TLS 1.3 handshake message serialization/parsing (RFC 8446 Section 4).
 //!
 //! Every handshake message has: u8 type + u24 length + body.
 //! This module encodes/decodes each message type and provides
@@ -66,7 +66,7 @@ pub const Transcript384 = struct {
     }
 };
 
-// ClientHello (RFC 8446 §4.2.1)
+// ClientHello (RFC 8446 Section 4.2.1)
 
 pub const ClientHello = struct {
     random: [32]u8,
@@ -219,7 +219,7 @@ pub const ClientHello = struct {
     }
 };
 
-// ServerHello (RFC 8446 §4.1.3)
+// ServerHello (RFC 8446 Section 4.1.3)
 
 pub const ServerHello = struct {
     random: [32]u8,
@@ -271,7 +271,7 @@ pub const ServerHello = struct {
     }
 };
 
-// EncryptedExtensions (RFC 8446 §4.3.1)
+// EncryptedExtensions (RFC 8446 Section 4.3.1)
 
 pub const EncryptedExtensions = struct {
     alpn_protocol: ?[]const u8 = null,
@@ -307,14 +307,14 @@ pub const EncryptedExtensions = struct {
     }
 };
 
-// CertificateEntry (part of Certificate message, RFC 8446 §4.4.2)
+// CertificateEntry (part of Certificate message, RFC 8446 Section 4.4.2)
 
 pub const CertificateEntry = struct {
     cert_data: []const u8,
     extensions: []const u8,
 };
 
-// CertificateVerify (RFC 8446 §4.4.3)
+// CertificateVerify (RFC 8446 Section 4.4.3)
 
 pub const CertificateVerify = struct {
     algorithm: SignatureScheme,
@@ -332,7 +332,7 @@ pub const CertificateVerify = struct {
     }
 };
 
-// Finished (RFC 8446 §4.4.4)
+// Finished (RFC 8446 Section 4.4.4)
 
 pub const Finished = struct {
     verify_data: [HashLen]u8,
@@ -349,7 +349,7 @@ pub const Finished = struct {
 
 pub const ExtensionType = tls.ExtensionType;
 
-// TLS alert (RFC 8446 §6.2)
+// TLS alert (RFC 8446 Section 6.2)
 
 pub const AlertLevel = enum(u8) {
     warning = 1,

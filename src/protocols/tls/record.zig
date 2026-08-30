@@ -1,4 +1,4 @@
-//! TLS 1.3 record layer (RFC 8446 §5).
+//! TLS 1.3 record layer (RFC 8446 Section 5).
 //!
 //! Handles framing (content type + version + length), AEAD protection
 //! (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305), and the TLS 1.3
@@ -39,7 +39,7 @@ pub const RecordCipher = enum {
     }
 };
 
-/// Maximum plaintext per record (RFC 8446 §5.1).
+/// Maximum plaintext per record (RFC 8446 Section 5.1).
 pub const max_record_plaintext = 1 << 14;
 /// Overhead: AEAD tag (16) + content type (1).
 pub const max_record_overhead = 17;
@@ -145,7 +145,7 @@ pub fn decodeRecord(
     const header = wire[0..5];
     const record_len: usize = (@as(usize, header[3]) << 8) | header[4];
     // TLS 1.3 outer type is always application_data, but allow
-    // change_cipher_spec (0x14) for middlebox compatibility (RFC 8446 §5.4).
+    // change_cipher_spec (0x14) for middlebox compatibility (RFC 8446 Section 5.4).
     if (header[0] == @intFromEnum(ContentType.change_cipher_spec)) {
         if (record_len != 1 or wire.len < 6 or wire[5] != 0x01) return error.InvalidContentType;
         return .{ .content_type = .change_cipher_spec, .plaintext = out_buf[0..0] };
@@ -200,7 +200,7 @@ pub fn decodeRecord(
         },
     }
 
-    // Last byte(s) handling: strip trailing zeros (padding per RFC 8446 §5.4)
+    // Last byte(s) handling: strip trailing zeros (padding per RFC 8446 Section 5.4)
     if (enc_len == 0) return error.EmptyPlaintext;
     var end = enc_len;
     while (end > 0 and out_buf[end - 1] == 0) end -= 1;

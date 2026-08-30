@@ -77,7 +77,7 @@ pub const Server = struct {
         while (!self.stop.load(.acquire) and (max_connections == 0 or served < max_connections)) {
             var control = self.listener.accept(self.io) catch return error.AcceptFailed;
             defer control.close();
-            tcp.setTimeouts(control.stream.socket.handle, self.cfg.timeout_ms);
+            tcp.setTimeouts(control.netSocketHandle(), self.cfg.timeout_ms);
             var session = Session.init(self.allocator, self.io, &control, self.cfg);
             session.run() catch {};
             served += 1;
@@ -128,8 +128,10 @@ const Session = struct {
 
     fn dispatch(self: *Session, line: []const u8) Error!bool {
         const split = std.mem.indexOfScalar(u8, line, ' ');
-        const name = std.ascii.upperString(self.allocator, line[0 .. split orelse line.len]) catch return error.OutOfMemory;
-        defer self.allocator.free(name);
+        const src = line[0 .. split orelse line.len];
+        const buf = self.allocator.alloc(u8, src.len) catch return error.OutOfMemory;
+        defer self.allocator.free(buf);
+        const name = std.ascii.upperString(buf, src);
         const arg = if (split) |i| std.mem.trim(u8, line[i + 1 ..], " ") else "";
         if (std.mem.eql(u8, name, "QUIT")) {
             try self.reply("221 Goodbye");
@@ -272,7 +274,16 @@ const Session = struct {
             try self.reply("501 Invalid PORT");
             return true;
         }
-        self.active = .{ .family = .ip4, .port = values[4] * 256 + values[5], .bytes = .{ values[0], values[1], values[2], values[3] } ++ .{0} ** 12 };
+        self.active = .{
+            .family = .ip4,
+            .port = values[4] * 256 + values[5],
+            .bytes = .{
+                @as(u8, @intCast(values[0])),
+                @as(u8, @intCast(values[1])),
+                @as(u8, @intCast(values[2])),
+                @as(u8, @intCast(values[3])),
+            } ++ .{0} ** 12,
+        };
         if (self.passive) |*p| p.close(self.io);
         self.passive = null;
         try self.reply("200 PORT command successful");
@@ -331,7 +342,7 @@ const Session = struct {
             };
             p.close(self.io);
             self.passive = null;
-            tcp.setTimeouts(data.stream.socket.handle, self.cfg.timeout_ms);
+            tcp.setTimeouts(data.netSocketHandle(), self.cfg.timeout_ms);
             return data;
         }
         if (self.active) |*addr| {
@@ -340,7 +351,7 @@ const Session = struct {
                 return error.AcceptFailed;
             };
             self.active = null;
-            tcp.setTimeouts(data.stream.socket.handle, self.cfg.timeout_ms);
+            tcp.setTimeouts(data.netSocketHandle(), self.cfg.timeout_ms);
             return data;
         }
         return error.AcceptFailed;

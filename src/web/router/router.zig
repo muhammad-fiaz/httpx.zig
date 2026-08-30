@@ -150,6 +150,58 @@ pub const Context = struct {
         };
     }
 
+    /// Renders an XML response (application/xml; charset=utf-8).
+    pub fn xml(self: *const Context, content: []const u8) Response {
+        _ = self;
+        return Response.xml(content);
+    }
+
+    /// Renders an XML response with custom status code.
+    pub fn xmlStatus(self: *const Context, code: u16, content: []const u8) Response {
+        _ = self;
+        return .{
+            .status = code,
+            .body = content,
+            .content_type = "application/xml; charset=utf-8",
+        };
+    }
+
+    /// Renders an RSS 2.0 XML feed response (application/rss+xml; charset=utf-8).
+    pub fn rss(self: *const Context, content: []const u8) Response {
+        _ = self;
+        return Response.rss(content);
+    }
+
+    /// Renders an Atom XML feed response (application/atom+xml; charset=utf-8).
+    pub fn atom(self: *const Context, content: []const u8) Response {
+        _ = self;
+        return Response.atom(content);
+    }
+
+    /// Renders a robots.txt response (text/plain; charset=utf-8).
+    pub fn robots(self: *const Context, content: []const u8) Response {
+        _ = self;
+        return Response.robots(content);
+    }
+
+    /// Renders a sitemap.xml response (application/xml; charset=utf-8).
+    pub fn sitemap(self: *const Context, content: []const u8) Response {
+        _ = self;
+        return Response.sitemap(content);
+    }
+
+    /// Renders a binary octet stream or custom binary payload response.
+    pub fn binary(self: *const Context, bytes: []const u8, content_type: ?[]const u8) Response {
+        _ = self;
+        return Response.binary(bytes, content_type);
+    }
+
+    /// Renders an arbitrary custom response.
+    pub fn custom(self: *const Context, status_code: u16, content_type: ?[]const u8, content: []const u8) Response {
+        _ = self;
+        return Response.custom(status_code, content_type, content);
+    }
+
     /// HTTP Redirect response (default 302 Found or 301/307/308).
     pub fn redirect(self: *const Context, location: []const u8, code: ?u16) !Response {
         const headers_slice = try self.allocator.alloc(Header, 1);
@@ -159,6 +211,55 @@ pub const Context = struct {
             .body = "",
             .headers = headers_slice,
         };
+    }
+
+    /// Extract a query parameter by name from the URL path.
+    pub fn queryParam(self: *const Context, name: []const u8) ?[]const u8 {
+        const path = self.path;
+        if (std.mem.indexOfScalar(u8, path, '?')) |qstart| {
+            var iter = std.mem.splitScalar(u8, path[qstart + 1 ..], '&');
+            while (iter.next()) |pair| {
+                if (std.mem.indexOfScalar(u8, pair, '=')) |eq| {
+                    const k = pair[0..eq];
+                    if (std.mem.eql(u8, k, name)) {
+                        return pair[eq + 1 ..];
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Extract a cookie value by name from the Cookie header.
+    pub fn cookie(self: *const Context, name: []const u8) ?[]const u8 {
+        for (self.headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "Cookie")) {
+                var iter = std.mem.splitScalar(u8, h.value, ';');
+                while (iter.next()) |pair| {
+                    const trimmed = std.mem.trim(u8, pair, " \t");
+                    if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
+                        const k = std.mem.trim(u8, trimmed[0..eq], " \t");
+                        if (std.mem.eql(u8, k, name)) {
+                            return std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /// Get the remote address from headers (X-Forwarded-For or peer info).
+    pub fn remoteAddress(self: *const Context) ?[]const u8 {
+        for (self.headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "X-Forwarded-For")) {
+                if (std.mem.indexOfScalar(u8, h.value, ',')) |comma| {
+                    return std.mem.trim(u8, h.value[0..comma], " ");
+                }
+                return h.value;
+            }
+        }
+        return null;
     }
 };
 
@@ -191,6 +292,62 @@ pub const Response = struct {
             .status = 200,
             .body = content,
             .content_type = "application/json",
+        };
+    }
+
+    pub fn xml(content: []const u8) Response {
+        return .{
+            .status = 200,
+            .body = content,
+            .content_type = "application/xml; charset=utf-8",
+        };
+    }
+
+    pub fn rss(content: []const u8) Response {
+        return .{
+            .status = 200,
+            .body = content,
+            .content_type = "application/rss+xml; charset=utf-8",
+        };
+    }
+
+    pub fn atom(content: []const u8) Response {
+        return .{
+            .status = 200,
+            .body = content,
+            .content_type = "application/atom+xml; charset=utf-8",
+        };
+    }
+
+    pub fn robots(content: []const u8) Response {
+        return .{
+            .status = 200,
+            .body = content,
+            .content_type = "text/plain; charset=utf-8",
+        };
+    }
+
+    pub fn sitemap(content: []const u8) Response {
+        return .{
+            .status = 200,
+            .body = content,
+            .content_type = "application/xml; charset=utf-8",
+        };
+    }
+
+    pub fn binary(bytes: []const u8, content_type: ?[]const u8) Response {
+        return .{
+            .status = 200,
+            .body = bytes,
+            .content_type = content_type orelse "application/octet-stream",
+        };
+    }
+
+    pub fn custom(status_code: u16, content_type: ?[]const u8, content: []const u8) Response {
+        return .{
+            .status = status_code,
+            .body = content,
+            .content_type = content_type,
         };
     }
 

@@ -27,7 +27,7 @@ pub const Error = pint.Error || huff.Error || error{
 };
 
 pub const DEFAULT_TABLE_SIZE: usize = 4096;
-/// Per-entry size overhead (RFC 7541 Â§4.1).
+/// Per-entry size overhead (RFC 7541 Section 4.1).
 pub const ENTRY_OVERHEAD: usize = 32;
 /// Hard cap on a single name/value length (DoS bound, mirrors nghttp2).
 pub const MAX_STRING_LEN: usize = 65536;
@@ -176,7 +176,7 @@ pub const Decoder = struct {
     /// Upper bound from SETTINGS_HEADER_TABLE_SIZE the peer may not exceed.
     protocol_max_size: usize = DEFAULT_TABLE_SIZE,
     /// Set when peer shrinks below current max: next block MUST open with
-    /// a table size update (RFC 7541 Â§4.2 via nghttp2 behavior).
+    /// a table size update (RFC 7541 Section 4.2 via nghttp2 behavior).
     require_size_update: bool = false,
     max_header_list: usize = 0xFFFFFFFF,
 

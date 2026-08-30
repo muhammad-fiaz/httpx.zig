@@ -20,6 +20,7 @@ const tls_server_mod = @import("tcp_tls.zig");
 const alpn_mod = @import("alpn.zig");
 const h2_transport = @import("../http2/transport.zig");
 const h2_connection_mod = @import("../http2/connection.zig");
+const hpack_mod = @import("../http2/hpack.zig");
 const h1_parser = @import("../http1/parser.zig");
 const h1_writer = @import("../http1/writer.zig");
 const h1_semantics = @import("../http1/semantics.zig");
@@ -29,7 +30,7 @@ const MAX_HTTP2_REQUEST_BODY: usize = 16 * 1024 * 1024;
 
 // Handler callback
 
-pub const Header = struct { name: []const u8, value: []const u8 };
+pub const Header = hpack_mod.HeaderField;
 
 pub const HttpRequest = struct {
     method: []const u8,
@@ -60,7 +61,7 @@ fn serveHttp1OverTls(
     var total: usize = 0;
 
     while (true) {
-        const n = tls_conn.read(&buf[total..]) catch break;
+        const n = tls_conn.read(buf[total..]) catch break;
         if (n == 0) break;
         total += n;
 
@@ -70,14 +71,14 @@ fn serveHttp1OverTls(
             continue;
         };
 
-        const head_end = head.headers_end;
+        const head_end = head.head_end;
         if (head_end > total) continue;
 
         // Parse headers into a flat array
         var fields: [64]h1_parser.Field = undefined;
         const result = h1_parser.parseHeaderBlock(buf[0..total], head_end, &fields) catch break;
 
-        var keep_alive = h1_semantics.shouldKeepAlive(fields[0..result.count]);
+        var keep_alive = h1_semantics.shouldKeepAlive(if (head.minor_version == 0) .http_1_0 else .http_1_1, fields[0..result.count]);
 
         var content_length: usize = 0;
         var transfer_chunked = false;
@@ -144,17 +145,19 @@ fn serveHttp1OverTls(
         }
 
         // Build the request
+        const version_str = if (head.major_version == 1 and head.minor_version == 0) "HTTP/1.0" else "HTTP/1.1";
         const req = HttpRequest{
             .method = head.method,
             .path = head.path,
-            .version = head.version,
+            .version = version_str,
             .headers = blk: {
                 var hdrs = std.ArrayList(Header).empty;
                 defer hdrs.deinit(allocator);
                 for (fields[0..result.count]) |f| {
                     hdrs.append(allocator, .{ .name = f.name, .value = f.value }) catch break;
                 }
-                break :blk try hdrs.toOwnedSlice(allocator);
+                const owned = hdrs.toOwnedSlice(allocator) catch &.{};
+                break :blk owned;
             },
             .body = body_storage.items,
         };
@@ -265,7 +268,7 @@ fn serveHttp2OverTls(
             };
             const resp = handler(handler_ctx, req) catch HttpResponse{ .status = 500 };
 
-            var out_fields = std.ArrayList(h2_transport.Header).empty;
+            var out_fields = std.ArrayList(hpack_mod.HeaderField).empty;
             defer out_fields.deinit(allocator);
 
             var st_buf: [8]u8 = undefined;
@@ -294,13 +297,13 @@ const H2ServerCtx = struct {
     sid: u31 = 0,
     method: std.ArrayList(u8) = .empty,
     path: std.ArrayList(u8) = .empty,
-    hdrs: std.ArrayList(Header) = .empty,
+    hdrs: std.ArrayList(hpack_mod.HeaderField) = .empty,
     body: std.ArrayList(u8) = .empty,
     dispatched: bool = false,
     responded: bool = false,
 };
 
-fn h2SvrOnHeaders(ctx: ?*anyopaque, sid: u31, fields: []const h2_transport.Header, end_stream: bool) anyerror!void {
+fn h2SvrOnHeaders(ctx: ?*anyopaque, sid: u31, fields: []hpack_mod.HeaderField, end_stream: bool) anyerror!void {
     const sc: *H2ServerCtx = @ptrCast(@alignCast(ctx orelse return));
     sc.sid = sid;
     sc.method.clearRetainingCapacity();
@@ -348,6 +351,8 @@ pub const TlsListener = struct {
     io: std.Io,
     owns_io: bool = false,
     io_threaded: ?*std.Io.Threaded = null,
+    stop: std.atomic.Value(bool) = .init(false),
+    in_accept: std.atomic.Value(bool) = .init(false),
 
     pub fn init(allocator: Allocator, config: ListenerConfig) !TlsListener {
         const threaded = try allocator.create(std.Io.Threaded);
@@ -399,7 +404,30 @@ pub const TlsListener = struct {
         switch (alpn) {
             .h2 => serveHttp2OverTls(self.allocator, &tls_conn, handler, handler_ctx),
             .@"http/1.0", .@"http/1.1" => serveHttp1OverTls(self.allocator, &tls_conn, handler, handler_ctx),
-            .h3 => return error.ProtocolError,
+            .h3 => return error.Http3RequiresQuic,
+        }
+    }
+
+    /// Blocking accept loop. Calls acceptAndServe for each connection.
+    /// Use `requestShutdown()` to break out of the loop.
+    pub fn run(self: *TlsListener, handler: HandlerFn, handler_ctx: ?*anyopaque) !void {
+        while (!self.stop.load(.acquire)) {
+            self.in_accept.store(true, .release);
+            self.acceptAndServe(handler, handler_ctx) catch {};
+            self.in_accept.store(false, .release);
+            if (self.stop.load(.acquire)) break;
+        }
+    }
+
+    /// Immediate shutdown. Sets stop flag and closes the listener socket
+    /// so that a blocked accept() returns.
+    pub fn requestShutdown(self: *TlsListener) void {
+        self.stop.store(true, .release);
+        if (self.in_accept.load(.acquire)) {
+            tcp.wakeListenerPort(self.listener.localPort());
+        }
+        if (@import("builtin").os.tag != .windows) {
+            self.listener.close(self.io);
         }
     }
 };

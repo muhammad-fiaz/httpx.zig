@@ -17,6 +17,9 @@
 const std = @import("std");
 
 // Common primitives
+pub const version_info = @import("common/version.zig");
+pub const name = version_info.name;
+pub const version = version_info.version;
 pub const errors = @import("common/errors.zig");
 pub const status = @import("common/status.zig");
 pub const headers = @import("common/headers.zig");
@@ -25,14 +28,24 @@ pub const method = @import("common/method.zig");
 pub const common = struct {
     pub const clock = @import("common/clock.zig");
     pub const sync = @import("common/sync.zig");
+    pub const version = @import("common/version.zig");
 };
 pub const clock = common.clock;
 pub const sync = common.sync;
 pub const concurrency = struct {
     pub const queue = @import("concurrency/queue.zig");
+    pub const Queue = @import("concurrency/queue.zig").BoundedQueue;
+    pub const workerPool = @import("concurrency/worker_pool.zig");
+    pub const WorkerPool = @import("concurrency/worker_pool.zig").Pool;
+    pub const Pool = @import("concurrency/worker_pool.zig").Pool;
     pub const worker_pool = @import("concurrency/worker_pool.zig");
 };
+pub const workerPool = concurrency.workerPool;
+pub const WorkerPool = concurrency.WorkerPool;
+pub const Queue = concurrency.Queue;
 pub const logging = @import("common/logging.zig");
+
+
 
 // Sockets
 pub const tcp = @import("sockets/tcp.zig");
@@ -52,9 +65,11 @@ pub const compression = @import("compression/codec.zig");
 
 // Protocol engines
 /// Shared low-level protocol primitives (prefix integers, Huffman code).
-pub const proto_common = struct {
-    pub const integer = @import("protocols/common/integer.zig");
-    pub const huffman = @import("protocols/common/huffman.zig");
+pub const proto = struct {
+    pub const common = struct {
+        pub const integer = @import("protocols/common/integer.zig");
+        pub const huffman = @import("protocols/common/huffman.zig");
+    };
 };
 pub const http1 = struct {
     pub const parser = @import("protocols/http1/parser.zig");
@@ -84,7 +99,7 @@ pub const quic = struct {
     pub const stream = @import("protocols/quic/stream.zig");
     pub const connection = @import("protocols/quic/connection.zig");
     pub const Connection = connection.Connection;
-    pub const connection_id = @import("protocols/quic/connection_id.zig");
+    pub const connectionId = @import("protocols/quic/connection_id.zig");
     pub const path = @import("protocols/quic/path.zig");
     pub const transport = @import("protocols/quic/transport.zig");
 
@@ -108,30 +123,48 @@ pub const tls = struct {
     pub const record = @import("protocols/tls/record.zig");
     pub const handshake = @import("protocols/tls/handshake.zig");
     pub const engine = @import("protocols/tls/engine.zig");
-    pub const quic_tls = @import("protocols/tls/quic_tls.zig");
-    pub const tcp_tls = @import("protocols/tls/tcp_tls.zig");
+    pub const quicTls = @import("protocols/tls/quic_tls.zig");
+    pub const tcpTls = @import("protocols/tls/tcp_tls.zig");
     pub const transport = @import("protocols/tls/transport.zig");
-    pub const tls_server = @import("protocols/tls/tls_server.zig");
+    const tls_server = @import("protocols/tls/tls_server.zig");
     pub const TlsListener = tls_server.TlsListener;
+    pub const Listener = tls_server.TlsListener;
     pub const ListenerConfig = tls_server.ListenerConfig;
     pub const ServerConfig = config.ServerConfig;
     pub const ClientConfig = config.ClientConfig;
+    pub const HttpRequest = tls_server.HttpRequest;
+    pub const HttpResponse = tls_server.HttpResponse;
+    pub const HandlerFn = tls_server.HandlerFn;
+    pub const Handler = tls_server.HandlerFn;
+    pub const Header = tls_server.Header;
 };
 
 // Web framework
-pub const router = @import("web/router/router.zig");
-pub const router_pattern = @import("web/router/pattern.zig");
-pub const route_meta = @import("web/router/metadata.zig");
-pub const sse_writer = @import("web/sse/writer.zig");
-pub const sse_parser = @import("web/sse/parser.zig");
-pub const ws_handshake = @import("web/websocket/handshake.zig");
-pub const ws_frame = @import("web/websocket/frame.zig");
+pub const router = struct {
+    pub const Router = @import("web/router/router.zig").Router;
+    pub const Context = @import("web/router/router.zig").Context;
+    pub const Response = @import("web/router/router.zig").Response;
+    pub const Header = @import("web/router/router.zig").Header;
+    pub const HandlerFn = @import("web/router/router.zig").HandlerFn;
+    pub const pattern = @import("web/router/pattern.zig");
+    pub const metadata = @import("web/router/metadata.zig");
+};
+pub const sse = struct {
+    pub const Writer = @import("web/sse/writer.zig");
+    pub const Parser = @import("web/sse/parser.zig");
+};
+pub const ws = struct {
+    pub const Handshake = @import("web/websocket/handshake.zig");
+    pub const Frame = @import("web/websocket/frame.zig");
+};
 
 // Web subsystems
-pub const static_files = @import("web/static_files/serve.zig");
-pub const spa = @import("web/spa/serve.zig");
-pub const watcher = @import("web/watcher/watcher.zig");
-pub const Watcher = watcher.Watcher;
+pub const static = struct {
+    pub const files = @import("web/static_files/serve.zig");
+    pub const spa = @import("web/spa/serve.zig");
+    pub const watcher = @import("web/watcher/watcher.zig");
+    pub const Watcher = watcher.Watcher;
+};
 pub const health = @import("web/health/endpoints.zig");
 pub const metrics = @import("web/metrics/registry.zig");
 pub const mime = @import("utils/mime.zig");
@@ -176,12 +209,77 @@ pub const trace = @import("client/client.zig").globalTrace;
 pub const connect = @import("client/client.zig").globalConnect;
 pub const getAll = @import("client/client.zig").globalGetAll;
 pub const requestAll = @import("client/client.zig").globalRequestAll;
+pub const download = @import("client/client.zig").globalDownload;
+pub const lookupFileInfo = @import("client/client.zig").globalLookupFileInfo;
+pub const updateFile = @import("client/client.zig").globalUpdateFile;
+pub const verifyFile = @import("client/client.zig").globalVerifyFile;
+pub const ftpDownload = @import("client/download.zig").ftpDownload;
+
+// Download & Progress types
+pub const download_pkg = @import("client/download.zig");
+pub const DownloadOptions = download_pkg.DownloadOptions;
+pub const DownloadResult = download_pkg.DownloadResult;
+pub const DownloadError = download_pkg.DownloadError;
+pub const DownloadTask = struct { url: []const u8, dest: []const u8 };
+pub const RemoteFileInfo = download_pkg.RemoteFileInfo;
+pub const ProgressInfo = download_pkg.ProgressInfo;
+pub const ProgressState = download_pkg.ProgressState;
+pub const ProgressMode = download_pkg.ProgressMode;
+pub const ExistingFilePolicy = download_pkg.ExistingFilePolicy;
+pub const VerifyOptions = download_pkg.VerifyOptions;
+pub const UpdateOptions = download_pkg.UpdateOptions;
+pub const FtpDownloadOptions = download_pkg.FtpDownloadOptions;
+
+
+
+// Parsing & inspection subsystem
+/// Native HTML, XML, RSS/Atom/JSON feeds, robots.txt, and sitemap parsing engine.
+pub const parsing = struct {
+    pub const dom = @import("parsing/dom.zig");
+    pub const html = @import("parsing/html.zig");
+    pub const xml = @import("parsing/xml.zig");
+    pub const selector = @import("parsing/selector.zig");
+    pub const extract = @import("parsing/extract.zig");
+    pub const feed = @import("parsing/feed.zig");
+    pub const robots = @import("parsing/robots.zig");
+    pub const sitemap = @import("parsing/sitemap.zig");
+    pub const document = @import("parsing/document.zig");
+    // Re-export the Document and Parser types at this level
+    pub const Document = document.Document;
+    pub const Parser = document.Parser;
+    pub const ParserConfig = document.ParserConfig;
+    pub const NodeHandle = document.NodeHandle;
+    pub const NodeList = document.NodeList;
+    pub const ContentKind = document.ContentKind;
+    pub const Metadata = extract.Metadata;
+    pub const Link = extract.Link;
+    pub const Form = extract.Form;
+    pub const FormField = extract.FormField;
+    pub const Image = extract.Image;
+    pub const ScriptRef = extract.ScriptRef;
+    pub const StyleRef = extract.StyleRef;
+    pub const Feed = feed.Feed;
+    pub const FeedKind = feed.FeedKind;
+    pub const FeedEntry = feed.FeedEntry;
+    pub const RobotsFile = robots.RobotsFile;
+    pub const Sitemap = sitemap.Sitemap;
+    pub const SitemapUrl = sitemap.SitemapUrl;
+    pub const ChangeFreq = sitemap.ChangeFreq;
+    pub const ParsedSelector = selector.ParsedSelector;
+    // Unified Parser constructor with allocator and optional options
+    pub fn init(allocator: std.mem.Allocator, config: document.ParserConfig) Parser {
+        return Parser.init(allocator, config);
+    }
+    pub const detectKind = document.detectKind;
+};
+
+
 
 // Server API
 pub const server = @import("server/lifecycle.zig");
-pub const server_context = @import("server/context.zig");
 pub const Server = server.Server;
 pub const ServerConfig = server.Config;
+pub const PortStrategy = server.PortStrategy;
 pub const Router = router.Router;
 pub const Context = router.Context;
 pub const Response = router.Response;
@@ -190,11 +288,12 @@ pub const TlsListener = tls.TlsListener;
 pub const TlsListenerConfig = tls.ListenerConfig;
 pub const TlsConfig = tls.ServerConfig;
 pub const TlsClientConfig = tls.ClientConfig;
+pub const TlsRequest = tls.HttpRequest;
+pub const TlsResponse = tls.HttpResponse;
+pub const TlsHandler = tls.HandlerFn;
 
 // Concurrency & Utilities
-pub const WorkerPool = concurrency.worker_pool.Pool;
-pub const WorkerPoolConfig = concurrency.worker_pool.Config;
-pub const Queue = concurrency.queue.BoundedQueue;
+pub const WorkerPoolConfig = @import("concurrency/worker_pool.zig").Config;
 pub const RateLimiter = @import("web/middleware/security.zig").RateLimiter;
 pub const Metrics = metrics.Registry;
 pub const Logger = logging.Logger;
@@ -217,21 +316,18 @@ pub const ApplicationProtocol = tls.alpn.Protocol;
 
 // FTP
 pub const ftp = struct {
-    pub const ftp_client = @import("protocols/ftp/client.zig");
+    const ftp_client = @import("protocols/ftp/client.zig");
     pub const Client = ftp_client.Client;
     pub const Options = ftp_client.Options;
     pub const parseReplyAt = ftp_client.parseReplyAt;
     pub const parsePasive = ftp_client.parsePasive;
     pub const parseEpsv = ftp_client.parseEpsv;
-    pub const ftp_server = @import("protocols/ftp/server.zig");
+    const ftp_server = @import("protocols/ftp/server.zig");
     pub const Server = ftp_server.Server;
     pub const FtpConfig = ftp_server.Config;
     pub const Callbacks = ftp_server.Callbacks;
 };
 
-// Version
-pub const name = @import("common/version.zig").name;
-pub const version = @import("common/version.zig").version;
 
 // Tests
 test {
@@ -321,5 +417,13 @@ test {
     _ = @import("protocols/ftp/server.zig");
     _ = @import("protocols/http2/transport.zig");
     _ = @import("server/lifecycle.zig");
-    _ = @import("server/context.zig");
+    _ = @import("parsing/dom.zig");
+    _ = @import("parsing/html.zig");
+    _ = @import("parsing/xml.zig");
+    _ = @import("parsing/selector.zig");
+    _ = @import("parsing/extract.zig");
+    _ = @import("parsing/feed.zig");
+    _ = @import("parsing/robots.zig");
+    _ = @import("parsing/sitemap.zig");
+    _ = @import("parsing/document.zig");
 }

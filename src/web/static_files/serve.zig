@@ -54,6 +54,7 @@ pub const MountError = error{
 var g_state: ?*State = null;
 
 const State = struct {
+    allocator: Allocator,
     root: []u8,
     index: []u8,
     cache_control: []u8,
@@ -65,6 +66,7 @@ const State = struct {
         const st = try a.create(State);
         errdefer a.destroy(st);
         st.* = .{
+            .allocator = a,
             .root = try normalizeDir(a, cfg.root),
             .index = try a.dupe(u8, cfg.index_file),
             .cache_control = try a.dupe(u8, cfg.cache_control),
@@ -76,7 +78,7 @@ const State = struct {
     }
 
     fn destroy(self: *State) void {
-        const a = std.heap.page_allocator;
+        const a = self.allocator;
         a.free(self.root);
         a.free(self.index);
         a.free(self.cache_control);
@@ -84,6 +86,7 @@ const State = struct {
         a.destroy(self);
     }
 };
+
 
 fn trimSlashes(p: []const u8) []const u8 {
     var s = p;
@@ -100,10 +103,11 @@ fn normalizeDir(a: Allocator, dir: []const u8) ![]u8 {
 }
 
 /// Registers GET routes for `mount` itself and `mount/*path`.
-pub fn register(allocator: Allocator, router: *router_mod.Router, cfg: Config) MountError!void {
+pub fn register(router: *router_mod.Router, cfg: Config) MountError!void {
     if (cfg.root.len == 0 or cfg.mount.len == 0 or cfg.mount[0] != '/')
         return MountError.InvalidMount;
 
+    const allocator = router.allocator;
     const base = trimSlashes(cfg.mount);
     const p1: []const u8 = if (base.len == 0)
         "/"
@@ -117,7 +121,8 @@ pub fn register(allocator: Allocator, router: *router_mod.Router, cfg: Config) M
     if (router.hasConflict(.GET, p1) or router.hasConflict(.GET, p2))
         return MountError.DuplicateRoute;
 
-    const st = State.create(std.heap.page_allocator, cfg) catch return MountError.OutOfMemory;
+    const st = State.create(allocator, cfg) catch return MountError.OutOfMemory;
+
 
     router.get(p1, serveIndexHandler) catch {
         st.destroy();
@@ -141,7 +146,7 @@ pub fn unregister() void {
     }
 }
 
-// --- handlers ---------------------------------------------------------------
+// handlers
 
 fn serveIndexHandler(ctx: *Context) anyerror!Response {
     const st = g_state orelse return errText(500, "static not mounted");
@@ -157,7 +162,7 @@ fn errText(status: u16, text: []const u8) Response {
     return .{ .status = status, .content_type = "text/plain; charset=utf-8", .body = text };
 }
 
-// --- path resolution --------------------------------------------------------
+// path resolution
 
 pub fn percentDecode(alloc: Allocator, s: []const u8) Allocator.Error![]u8 {
     // First pass: exact output length so the returned slice is freed with
@@ -238,11 +243,11 @@ pub fn safeJoin(alloc: Allocator, url_path: []const u8, root: []const u8) !?[]u8
     return out.toOwnedSlice() catch Allocator.Error.OutOfMemory;
 }
 
-// --- filesystem -------------------------------------------------------------
+// filesystem
 
 pub const FileMeta = struct { size: u64, mtime_ns: i128 };
 
-const c_fs = struct {
+pub const c_fs = struct {
     pub const is_win = builtin.os.tag == .windows;
 
     pub const FILE_HANDLE = if (is_win) std.os.windows.HANDLE else std.posix.fd_t;
@@ -465,7 +470,7 @@ fn readRange(io: std.Io, path: []const u8, offset: u64, dest: []u8) !void {
     }
 }
 
-// --- HTTP dates -------------------------------------------------------------
+// HTTP dates
 
 const month_names = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
@@ -540,7 +545,7 @@ fn daysFromCivil(y_in: i32, m: u4, d: u16) i64 {
     return era * 146097 + doe - 719468;
 }
 
-// --- ranges -----------------------------------------------------------------
+// ranges
 
 pub const RangeSpec = struct { start: u64, end: u64 }; // inclusive
 
@@ -569,7 +574,7 @@ pub fn parseRange(spec: []const u8, size: u64) ?RangeSpec {
     return RangeSpec{ .start = start, .end = @min(end, size - 1) };
 }
 
-// --- serving ----------------------------------------------------------------
+// serving
 
 fn servePath(ctx: *Context, st: *State, raw_url_path: []const u8) anyerror!Response {
     const a = ctx.allocator;

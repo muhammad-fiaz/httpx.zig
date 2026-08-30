@@ -1,4 +1,4 @@
-//! HTTP/2 framing layer (RFC 9113 §4, §6).
+//! HTTP/2 framing layer (RFC 9113 Section 4, Section 6).
 //!
 //! Frame header parse/serialize plus typed payload decoding with the
 //! validation rules nghttp2 enforces: exact payload lengths where fixed,

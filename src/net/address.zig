@@ -142,30 +142,28 @@ pub const Address = struct {
                 }
                 if (best_len < 2) best_start = 8;
 
-                var aw: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
-                defer aw.deinit();
-                const w = &aw.writer;
-
+                var pos: usize = 0;
                 var gi: usize = 0;
                 while (gi < 8) {
                     if (gi == best_start) {
-                        // Always "::": supplies the run marker plus any
-                        // separator suppressed on the preceding group.
-                        w.writeAll("::") catch break;
+                        if (pos < buf.len) { buf[pos] = ':'; pos += 1; }
+                        if (pos < buf.len) { buf[pos] = ':'; pos += 1; }
                         gi += best_len;
                         continue;
                     }
-                    w.print("{x}", .{groups[gi]}) catch break;
-                    if (gi < 7 and gi + 1 != best_start) w.writeAll(":") catch break;
+                    if (std.fmt.bufPrint(buf[pos..], "{x}", .{groups[gi]})) |str| {
+                        pos += str.len;
+                    } else |_| break;
+                    if (gi < 7 and gi + 1 != best_start) {
+                        if (pos < buf.len) { buf[pos] = ':'; pos += 1; }
+                    }
                     gi += 1;
                 }
-                const written = aw.written();
-                const n = @min(written.len, buf.len);
-                @memcpy(buf[0..n], written[0..n]);
-                return buf[0..n];
+                return buf[0..pos];
             },
         }
     }
+
 
     /// Converts to Zig std IpAddress for socket operations.
     pub fn toStd(self: *const Address, port: ?u16) net.IpAddress {

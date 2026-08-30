@@ -281,7 +281,7 @@ pub fn parseHeaderBlockWithOptions(buf: []const u8, start: usize, fields: []Fiel
         var value_end = line_end;
         if (line_end > pos and buf[line_end - 1] == '\r') value_end -= 1;
 
-        // Whitespace before colon is forbidden (RFC 9112 §5.1).
+        // Whitespace before colon is forbidden (RFC 9112 Section 5.1).
         const colon = std.mem.indexOfScalar(u8, buf[pos..value_end], ':') orelse {
             // A line starting with SP/HTAB here is obs-fold.
             if (buf[pos] == ' ' or buf[pos] == '\t') return ParseError.ObsFold;
@@ -430,6 +430,11 @@ pub const ChunkedDecoder = struct {
 
     max_chunk_size: u64 = DEFAULT_MAX_BODY_BYTES,
 
+    /// Total bytes of raw chunk overhead (framing/CRLF/extensions).
+    total_overhead: u64 = 0,
+    /// Total bytes fed into the decoder.
+    total_read: u64 = 0,
+
     /// Optional sink for trailer fields. Field slices point into the most
     /// recent input buffer and are valid only until it is reused.
     /// When set, `trailer_allocator` must be set too (ArrayList is unmanaged).
@@ -471,6 +476,10 @@ pub const ChunkedDecoder = struct {
                         'a'...'f' => self.pushDigit(c - 'a' + 10),
                         'A'...'F' => self.pushDigit(c - 'A' + 10),
                         ';' => self.state = .ext,
+                        '\t', ' ' => {
+                            if (self.size_digits == 0) return ParseError.InvalidChunkSize;
+                            self.state = .ext;
+                        },
                         '\r' => self.state = .size_cr,
                         '\n' => try self.endSizeLine(),
                         else => return ParseError.InvalidChunkSize,
@@ -502,7 +511,9 @@ pub const ChunkedDecoder = struct {
                 .data => {
                     const avail: u64 = @min(@as(u64, buf.len - src), self.remaining_in_chunk);
                     const n: usize = @intCast(avail);
-                    std.mem.copyForwards(u8, buf[dst..][0..n], buf[src..][0..n]);
+                    if (dst != src) {
+                        std.mem.copyForwards(u8, buf[dst..][0..n], buf[src..][0..n]);
+                    }
                     dst += n;
                     src += n;
                     self.remaining_in_chunk -= avail;
@@ -545,6 +556,16 @@ pub const ChunkedDecoder = struct {
 
         self.raw_consumed = src;
         self.decoded_len = dst;
+        self.total_read += src;
+        const overhead = src - dst;
+        self.total_overhead += overhead;
+
+        // Anti-DoS overhead check modeled on picohttpparser:
+        // if overhead >= 100KB and overhead accounts for > 75% of read bytes, abort.
+        if (self.total_overhead >= 100 * 1024 and self.total_read - self.total_overhead < self.total_read / 4) {
+            return ParseError.InvalidChunkSize;
+        }
+
         if (self.state == .done) return src;
         return ParseError.Incomplete;
     }
@@ -807,6 +828,26 @@ test "strict mode rejects bare LF in headers while lenient mode accepts it" {
     try std.testing.expectEqualStrings("example.com", fields[0].value);
     try std.testing.expectEqualStrings("X-Test", fields[1].name);
     try std.testing.expectEqualStrings("value", fields[1].value);
+}
+
+test "chunked decoder handles BWS whitespace after chunk size" {
+    const input = "5 \r\nhello\r\n0\r\n\r\n";
+    var dec = ChunkedDecoder.init();
+    var buf: [32]u8 = undefined;
+    @memcpy(buf[0..input.len], input);
+    _ = try dec.decode(buf[0..input.len]);
+    try std.testing.expect(dec.isDone());
+    try std.testing.expectEqualStrings("hello", buf[0..5]);
+}
+
+test "chunked decoder rejects excessive chunk overhead amplification" {
+    var dec = ChunkedDecoder.init();
+    dec.total_overhead = 101 * 1024;
+    dec.total_read = 102 * 1024; // overhead is > 75%
+    const input = "1\r\na\r\n";
+    var buf: [16]u8 = undefined;
+    @memcpy(buf[0..input.len], input);
+    try std.testing.expectError(ParseError.InvalidChunkSize, dec.decode(buf[0..input.len]));
 }
 
 test "lone CR inside header value is treated as data byte, not line terminator" {

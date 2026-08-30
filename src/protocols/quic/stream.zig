@@ -25,7 +25,7 @@ pub const Stream = struct {
     bidi: bool,
     initiator: bool,
 
-    // --- receive side -------------------------------------------------------
+    // receive side
     /// Next byte offset the application expects.
     recv_offset: u64 = 0,
     /// Largest offset we are willing to receive (our advertised window top).
@@ -39,7 +39,7 @@ pub const Stream = struct {
     /// offset ascending; non-overlapping.
     pending: std.ArrayList(Chunk) = .empty,
 
-    // --- send side ----------------------------------------------------------
+    // send side
     send_max_offset: u64 = 0, // peer-granted limit
     sent_offset: u64 = 0,
     fin_queued: bool = false,

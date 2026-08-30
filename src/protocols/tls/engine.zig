@@ -1,4 +1,4 @@
-//! TLS 1.3 handshake engine (RFC 8446 §4, §7.1).
+//! TLS 1.3 handshake engine (RFC 8446 Section 4, Section 7.1).
 //!
 //! Drives the full TLS 1.3 handshake for both client and server roles.
 //! Produces/parses handshake messages, derives keys via the key schedule,
@@ -143,7 +143,7 @@ pub const Engine = struct {
     // Transcript over all handshake messages (SHA-256)
     transcript: Transcript,
 
-    // Key schedule state (RFC 8446 §7.1)
+    // Key schedule state (RFC 8446 Section 7.1)
     handshake_secret: ?[32]u8 = null,
     master_secret: ?[32]u8 = null,
 
@@ -284,7 +284,7 @@ pub const Engine = struct {
         self.shared_secret = try x25519.scalarmult(self.local_keypair.secret_key, peer_pub);
         self.state = .server_hello_received;
 
-        // Derive handshake traffic secrets (RFC 8446 §7.1)
+        // Derive handshake traffic secrets (RFC 8446 Section 7.1)
         self.deriveHandshakeKeys();
         self.state = .handshake_keys_derived;
     }
@@ -386,7 +386,7 @@ pub const Engine = struct {
         self.local_keypair = try x25519.KeyPair.generateDeterministic(seed);
         const pubkey = self.local_keypair.public_key;
 
-        // ---- ServerHello ----
+        // ServerHello
         var sh_body = std.ArrayList(u8).empty;
         defer sh_body.deinit(self.allocator);
 
@@ -436,29 +436,35 @@ pub const Engine = struct {
 
         self.transcript.feed(sh_msg.items);
 
-        // ---- EncryptedExtensions ----
+        // EncryptedExtensions
         var ee_body = std.ArrayList(u8).empty;
         defer ee_body.deinit(self.allocator);
         var ee_exts = std.ArrayList(u8).empty;
         defer ee_exts.deinit(self.allocator);
 
-        // ALPN extension — per RFC 8446 §4.3.1 must be in EncryptedExtensions
+        // ALPN extension — per RFC 8446 Section 4.3.1 must be in EncryptedExtensions
         if (alpn_preference.len > 0) {
-            const selected = if (client_alpn_wire.len > 0)
+            const selected_opt = if (client_alpn_wire.len > 0)
                 alpn_mod.negotiateServer(alpn_preference, client_alpn_wire)
             else
                 alpn_preference[0];
-            if (selected) |proto| {
-                var alpn_body = std.ArrayList(u8).empty;
-                defer alpn_body.deinit(self.allocator);
-                const wire = proto.wireName();
-                try alpn_body.append(self.allocator, @intCast(wire.len));
-                try alpn_body.appendSlice(self.allocator, wire);
-                try ee_exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshake_mod.ExtensionType.application_layer_protocol_negotiation))));
-                try ee_exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(alpn_body.items.len + 2))));
-                try ee_exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(alpn_body.items.len))));
-                try ee_exts.appendSlice(self.allocator, alpn_body.items);
+            if (selected_opt) |selected| {
+                const wire = selected.wireName();
                 self.negotiated_alpn = wire;
+
+                var alpn_list = std.ArrayList(u8).empty;
+                defer alpn_list.deinit(self.allocator);
+                try alpn_list.append(self.allocator, @intCast(wire.len));
+                try alpn_list.appendSlice(self.allocator, wire);
+
+                var alpn_ext_body = std.ArrayList(u8).empty;
+                defer alpn_ext_body.deinit(self.allocator);
+                try alpn_ext_body.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(alpn_list.items.len))));
+                try alpn_ext_body.appendSlice(self.allocator, alpn_list.items);
+
+                try ee_exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshake_mod.ExtensionType.application_layer_protocol_negotiation))));
+                try ee_exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(alpn_ext_body.items.len))));
+                try ee_exts.appendSlice(self.allocator, alpn_ext_body.items);
             }
         }
 
@@ -475,7 +481,7 @@ pub const Engine = struct {
 
         self.transcript.feed(ee_msg.items);
 
-        // ---- Certificate ----
+        // Certificate
         var cert_body = std.ArrayList(u8).empty;
         defer cert_body.deinit(self.allocator);
         try cert_body.append(self.allocator, 0x00); // request_context length 0
@@ -538,7 +544,7 @@ pub const Engine = struct {
 
         self.transcript.feed(cert_msg.items);
 
-        // ---- CertificateVerify ----
+        // CertificateVerify
         var cv_body = std.ArrayList(u8).empty;
         defer cv_body.deinit(self.allocator);
         try cv_body.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshake_mod.SignatureScheme.ecdsa_secp256r1_sha256))));
@@ -555,7 +561,7 @@ pub const Engine = struct {
 
         self.transcript.feed(cv_msg.items);
 
-        // ---- Finished ----
+        // Finished
         // verify_data = HMAC(server_finished_key, Hash(Transcript))
         // server_finished_key = HKDF-Expand-Label(server_handshake_traffic_secret, "finished", "", HashLen)
         const hs_hash = self.transcript.finish();
@@ -594,7 +600,7 @@ pub const Engine = struct {
         };
     }
 
-    // Key derivation — RFC 8446 §7.1
+    // Key derivation — RFC 8446 Section 7.1
     //
     // key_schedule:
     //   0. PSK or (zero) -> Early Secret

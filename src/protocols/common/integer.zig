@@ -1,4 +1,4 @@
-//! Prefixed variable-length integers (RFC 7541 §5.1 / RFC 9204 §4.1.1).
+//! Prefixed variable-length integers (RFC 7541 Section 5.1 / RFC 9204 Section 4.1.1).
 //!
 //! One authoritative implementation shared by HPACK and QPACK. The wire
 //! format: an N-bit prefix in the first byte carries the opcode-specific
