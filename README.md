@@ -872,6 +872,83 @@ Contributions are welcome! Please:
 4. Ensure all tests pass: `zig build test`
 5. Submit a pull request
 
+## Project Structure
+
+```
+httpx.zig/
+├── src/
+│   ├── httpx.zig                    # Public API entry point & re-exports
+│   ├── client/                      # HTTP client
+│   │   ├── client.zig               # Client struct, connection pooling, retry
+│   │   ├── request.zig              # Raw request API, TLS options, auto-TLS
+│   │   ├── cookies.zig              # Client cookie jar
+│   │   └── download.zig             # File download, resume, verify, batch
+│   ├── server/
+│   │   └── lifecycle.zig            # Server struct, Config, run/stop/start, Ctrl+C
+│   ├── web/
+│   │   ├── router/                  # Router, Context, Response, pattern matching
+│   │   ├── middleware/              # CORS, Helmet, rate-limit, auth, CSRF, proxy
+│   │   ├── static_files/            # Static file serving, ETag, MIME detection
+│   │   ├── spa/                     # SPA HTML5 fallback serving
+│   │   ├── openapi/                 # OpenAPI 3.1 spec generation
+│   │   ├── docs/                    # Swagger UI, ReDoc, Scalar, GraphiQL
+│   │   ├── graphql/                 # GraphQL schema, resolvers, mount
+│   │   ├── sse/                     # Server-Sent Events writer/parser
+│   │   ├── websocket/               # WebSocket handshake & frames
+│   │   ├── multipart/               # Multipart form encoder/parser
+│   │   ├── health/                  # Health check endpoints
+│   │   ├── metrics/                 # Metrics registry
+│   │   ├── auth/                    # Basic & Bearer auth helpers
+│   │   └── watcher/                 # Live file watcher for dev reload
+│   ├── protocols/
+│   │   ├── http1/                   # HTTP/1.x parser & writer
+│   │   ├── http2/                   # HTTP/2 frame, HPACK, transport
+│   │   ├── http3/                   # HTTP/3 frame, connection
+│   │   ├── quic/                    # QUIC varint, packet, crypto
+│   │   ├── tls/                     # TLS 1.2/1.3, ALPN, server, QUIC-TLS
+│   │   ├── ftp/                     # FTP client & server
+│   │   └── common/                  # Shared protocol utilities
+│   ├── net/
+│   │   ├── resolve.zig              # DNS resolver with caching
+│   │   ├── address.zig              # Network address abstraction
+│   │   ├── socks5.zig               # SOCKS5 proxy tunneling
+│   │   └── dns/                     # DNS protocol implementation
+│   ├── sockets/
+│   │   └── tcp.zig                  # Cross-platform TCP socket (IOCP/epoll)
+│   ├── compression/                 # gzip, brotli, zstd, deflate
+│   ├── concurrency/                 # WorkerPool, parallel requests
+│   ├── parsing/                     # HTML/XML DOM, CSS selectors, feeds
+│   │   ├── html.zig                 # HTML5 parser
+│   │   ├── xml.zig                  # XML parser
+│   │   ├── selector.zig             # CSS selector engine
+│   │   ├── dom.zig                  # DOM tree traversal
+│   │   ├── document.zig             # Document abstraction
+│   │   ├── extract.zig              # Content extraction
+│   │   ├── feed.zig                 # RSS/Atom/JSON feed parser
+│   │   ├── robots.zig               # robots.txt parser
+│   │   └── sitemap.zig              # Sitemap parser
+│   ├── common/                      # Shared types: Method, Status, Headers, Logger
+│   ├── utils/                       # MIME detection, helpers
+│   └── assets/                      # Embedded UI assets (Swagger, ReDoc, GraphiQL)
+├── examples/                        # 65 runnable examples
+│   ├── simple_get.zig               # Basic HTTP GET
+│   ├── post_json.zig                # POST with JSON body
+│   ├── simple_server.zig            # Minimal HTTP server
+│   ├── graphql_server.zig           # GraphQL + REST + OpenAPI
+│   ├── tls_get.zig                  # HTTPS with TLS
+│   ├── download.zig                 # File download with progress
+│   └── ...                          # 60+ more (see examples/ dir)
+├── bench/
+│   └── main.zig                     # Microbenchmarks
+├── docs/                            # VitePress documentation site
+├── build.zig                        # Build system
+├── build.zig.zon                    # Package metadata
+├── README.md
+├── SECURITY.md
+├── LICENSE
+└── CONTRIBUTING.md
+```
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.

@@ -10,12 +10,15 @@ build
 *.lib
 *.exe
 httpx.lib
-# IDEs
+
+# IDEs & System
 .vscode/
 .idea/
 *.swp
 *~
 .DS_Store
+.cache/
+__cmake_systeminformation/
 
 # VitePress / Node
 node_modules/
@@ -36,3 +39,22 @@ docs/yarn.lock
 docs/bun.lockb
 docs/bun.lock
 zig-pkg
+
+# Generated example files & downloads
+downloads/
+*.httpx-part
+*.ftp-part
+*.bak
+*.pdf
+*.bin
+*.zip
+*.tar.gz
+
+# Vendored C dependencies (fetched by build scripts)
+cpp-httplib/
+h2o/
+nghttp2/
+nghttp3/
+ngtcp2/
+picohttpparser/
+quiche/
