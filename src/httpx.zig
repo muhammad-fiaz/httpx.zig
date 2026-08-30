@@ -16,6 +16,13 @@
 
 const std = @import("std");
 
+// External dependencies
+pub const tint = @import("loaders").tint;
+pub const loaders = @import("loaders");
+pub const brotli = @import("brotli");
+pub const zstd = @import("zstd");
+pub const env = @import("env");
+
 // Common primitives
 pub const version_info = @import("common/version.zig");
 pub const name = version_info.name;
