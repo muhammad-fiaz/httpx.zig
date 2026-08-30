@@ -220,8 +220,8 @@ pub const UploadStream = struct {
             var addr = posix.sockaddr.in{
                 .family = posix.AF.INET,
                 .port = std.mem.nativeToBig(u16, port),
-                .addr = host,
-                .zero = .{0} ** 8,
+                .addr = std.mem.nativeToBig(u32, std.mem.readInt(u32, &host, .big)),
+                .zero = [_]u8{0} ** 8,
             };
             posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch {
                 posix.close(fd);
@@ -565,7 +565,7 @@ pub fn wakeListenerPort(port: u16) void {
         const addr = posix.sockaddr.in{
             .family = posix.AF.INET,
             .port = std.mem.nativeToBig(u16, port),
-            .addr = .{ 127, 0, 0, 1 },
+            .addr = std.mem.nativeToBig(u32, 0x7F000001),
             .zero = [_]u8{0} ** 8,
         };
         posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) catch {};
