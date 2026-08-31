@@ -109,6 +109,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "download-checksum-file", .path = "examples/download_checksum_file.zig" },
         .{ .name = "ftp-download", .path = "examples/ftp_download.zig" },
         .{ .name = "parse-html", .path = "examples/parse_html.zig" },
+        .{ .name = "connectivity", .path = "examples/connectivity.zig" },
     };
 
     inline for (examples) |example| {

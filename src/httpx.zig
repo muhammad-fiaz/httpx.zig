@@ -63,6 +63,7 @@ pub const udp = @import("sockets/udp.zig");
 pub const address = @import("net/address.zig");
 pub const dns = @import("net/dns.zig");
 pub const resolve = @import("net/resolve.zig");
+pub const connectivity = @import("net/connectivity.zig");
 pub const socks5 = @import("net/socks5.zig");
 pub const proxy = @import("net/proxy.zig");
 
@@ -226,6 +227,8 @@ pub const lookupFileInfo = @import("client/client.zig").globalLookupFileInfo;
 pub const updateFile = @import("client/client.zig").globalUpdateFile;
 pub const verifyFile = @import("client/client.zig").globalVerifyFile;
 pub const fetchSitemap = @import("client/client.zig").globalFetchSitemap;
+pub const isOnline = @import("client/client.zig").globalIsOnline;
+pub const checkConnectivity = @import("client/client.zig").globalCheckConnectivity;
 pub const ftpDownload = @import("client/download.zig").ftpDownload;
 
 // Download & Progress types
@@ -243,6 +246,8 @@ pub const VerifyOptions = Download.VerifyOptions;
 pub const UpdateOptions = Download.UpdateOptions;
 pub const FtpDownloadOptions = Download.FtpDownloadOptions;
 pub const parseChecksumFile = Download.parseChecksumFile;
+pub const ConnectivityOptions = connectivity.ConnectivityOptions;
+pub const ConnectivityResult = connectivity.ConnectivityResult;
 
 // Parsing & inspection subsystem
 /// Native HTML, XML, RSS/Atom/JSON feeds, robots.txt, and sitemap parsing engine.
@@ -336,6 +341,8 @@ pub const ftp = struct {
     const ftp_client = @import("protocols/ftp/client.zig");
     pub const Client = ftp_client.Client;
     pub const Options = ftp_client.Options;
+    pub const Reply = ftp_client.Reply;
+    pub const FtpError = ftp_client.FtpError;
     pub const parseReplyAt = ftp_client.parseReplyAt;
     pub const parsePasive = ftp_client.parsePasive;
     pub const parseEpsv = ftp_client.parseEpsv;

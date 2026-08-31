@@ -32,6 +32,9 @@ const dns_cache_mod = @import("../net/dns/cache.zig");
 const clock = @import("../common/clock.zig");
 const HttpVersion = @import("../common/http_version.zig").HttpVersion;
 const DownloadCore = @import("download.zig");
+const connectivity = @import("../net/connectivity.zig");
+pub const ConnectivityOptions = connectivity.ConnectivityOptions;
+pub const ConnectivityResult = connectivity.ConnectivityResult;
 pub const DownloadOptions = DownloadCore.DownloadOptions;
 pub const DownloadResult = DownloadCore.DownloadResult;
 pub const DownloadError = DownloadCore.DownloadError;
@@ -413,6 +416,34 @@ pub const Client = struct {
             break :blk o;
         };
         return DownloadCore.updateFile(self.allocator, self, url, target_path, update_options);
+    }
+
+    /// Returns true if the internet is reachable from this machine.
+    ///
+    /// Probes a small set of highly-available public endpoints (Cloudflare /
+    /// Google DNS on port 53) using the client's own I/O backend.  IPv4 and
+    /// IPv6 are both attempted.
+    ///
+    /// Example:
+    /// ```zig
+    /// if (!client.isOnline()) return error.NoInternet;
+    /// ```
+    pub fn isOnline(self: *Client) bool {
+        return connectivity.isOnline(self.io);
+    }
+
+    /// Probes internet connectivity and returns detailed results.
+    ///
+    /// Returns a `ConnectivityResult` with `.online`, `.family`, `.latency_ms`,
+    /// and `.endpointStr()`.  Useful for diagnostics or choosing IPv4/IPv6.
+    ///
+    /// Example:
+    /// ```zig
+    /// const r = client.checkConnectivity(.{ .timeout_ms = 2000 });
+    /// if (r.online) std.debug.print("online via {s} ({?d}ms)\n", .{ r.endpointStr(), r.latency_ms });
+    /// ```
+    pub fn checkConnectivity(self: *Client, opts: ConnectivityOptions) ConnectivityResult {
+        return connectivity.checkConnectivity(self.io, opts);
     }
 
     /// Graceful connection drain (purge pool, but don't destroy the client).
@@ -924,6 +955,33 @@ pub fn globalGraphql(url: []const u8, query: []const u8, variables: anytype, opt
 pub fn globalFetchSitemap(url: []const u8, opts: anytype) !@import("../parsing/sitemap.zig").Sitemap {
     const c = defaultClient() orelse return Error.DefaultClientUnavailable;
     return c.fetchSitemap(url, opts);
+}
+
+/// Returns true if the internet is reachable (zero-config, no client needed).
+///
+/// Uses a short-lived I/O context to probe Cloudflare/Google DNS (port 53).
+/// Works on Windows (Winsock), Linux, and macOS.  IPv4 and IPv6 are both
+/// attempted.
+///
+/// Example:
+/// ```zig
+/// if (!httpx.isOnline()) @panic("No internet connection");
+/// ```
+pub fn globalIsOnline() bool {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    return connectivity.isOnline(threaded.io());
+}
+
+/// Probes internet connectivity and returns a `ConnectivityResult` (zero-config).
+///
+/// Example:
+/// ```zig
+/// const r = httpx.checkConnectivity(.{ .timeout_ms = 2000 });
+/// if (r.online) std.debug.print("online via {s} ({?d}ms)\n", .{ r.endpointStr(), r.latency_ms });
+/// ```
+pub fn globalCheckConnectivity(opts: ConnectivityOptions) ConnectivityResult {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    return connectivity.checkConnectivity(threaded.io(), opts);
 }
 
 test "explicit client init/deinit" {

@@ -14,6 +14,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../../sockets/tcp.zig");
 const address_mod = @import("../../net/address.zig");
+const resolve_mod = @import("../../net/resolve.zig");
 
 pub const Options = struct {
     host: []const u8,
@@ -147,14 +148,34 @@ pub const Client = struct {
 
     pub fn connectWithIo(io: std.Io, allocator: Allocator, opts: Options) FtpError!Client {
         if (opts.host.len == 0 or opts.host.len > c_host_max) return FtpError.ProtocolError;
-        var sock = tcp.connect(io, opts.host, opts.port) catch return FtpError.ConnectFailed;
-        errdefer sock.close();
-
         if (opts.secure) return FtpError.TlsUnavailable;
+
+        // Connect by attempting IP literal parsing first, then falling back to hostname resolution
+        var sock: ?tcp.Socket = null;
+        var holder = address_mod.Address{ .family = .ip4, .port = 0 };
+        if (holder.parseIp(opts.host)) |addr| {
+            var a = addr;
+            a.port = opts.port;
+            sock = tcp.connectAddress(io, &a) catch null;
+        } else |_| {
+            const resolver = resolve_mod.Resolver.init(allocator);
+            if (resolver.lookup(opts.host, opts.port)) |addrs| {
+                defer allocator.free(addrs);
+                for (addrs) |*addr| {
+                    if (tcp.connectAddress(io, addr)) |s| {
+                        sock = s;
+                        break;
+                    } else |_| {}
+                }
+            } else |_| {}
+        }
+
+        var s = sock orelse return FtpError.ConnectFailed;
+        errdefer s.close();
 
         var c = Client{
             .allocator = allocator,
-            .ctrl = sock,
+            .ctrl = s,
             .host_copy = undefined,
             .host_len = @min(opts.host.len, c_host_max),
             .io = io,
@@ -294,10 +315,24 @@ pub const Client = struct {
     }
 
     fn dataTo(self: *Client, port: u16) FtpError!tcp.Socket {
-        // Reuse the control connection's peer address by reconnecting to the
-        // same literal host; parsePasive gives the IP for PASV anyway.
         const host = self.host_copy[0..self.host_len];
-        return tcp.connect(self.ctrl.io, host, port) catch FtpError.ConnectFailed;
+        var holder = address_mod.Address{ .family = .ip4, .port = 0 };
+        if (holder.parseIp(host)) |addr| {
+            var a = addr;
+            a.port = port;
+            return tcp.connectAddress(self.ctrl.io, &a) catch FtpError.ConnectFailed;
+        } else |_| {
+            const resolver = resolve_mod.Resolver.init(self.allocator);
+            if (resolver.lookup(host, port)) |addrs| {
+                defer self.allocator.free(addrs);
+                for (addrs) |*addr| {
+                    if (tcp.connectAddress(self.ctrl.io, addr)) |s| {
+                        return s;
+                    } else |_| {}
+                }
+            } else |_| {}
+        }
+        return FtpError.ConnectFailed;
     }
 
     fn dataToPasv(self: *Client, ip: [4]u8, port: u16) FtpError!tcp.Socket {
