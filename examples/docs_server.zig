@@ -72,7 +72,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== Starting httpx FastAPI-Style Documentation & API Server ===\n", .{});
+    std.debug.print("=== Starting httpx Documentation & API Server ===\n", .{});
 
     var server = try httpx.Server.init(allocator, .{
         .host = "127.0.0.1",

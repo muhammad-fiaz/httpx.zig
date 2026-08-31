@@ -1,7 +1,7 @@
 //! Static Files, HTML/CSS/JS Rendering, Live Watcher, and Hot-Reload Example.
 //!
 //! Demonstrates:
-//! 1. FastAPI-style server with console logging
+//! 1. Server with console logging
 //! 2. Dynamic HTML, CSS, JavaScript, and JSON rendering
 //! 3. Static file mounting with automatic live-reload script injection
 //! 4. Background file watcher (`httpx.Watcher`) monitoring assets and broadcasting reloads
@@ -16,7 +16,7 @@ fn indexHtmlHandler(ctx: *httpx.Context) anyerror!httpx.Response {
         \\<html lang="en">
         \\<head>
         \\  <meta charset="UTF-8">
-        \\  <title>FastAPI-Style Zig App</title>
+        \\  <title>Zig App</title>
         \\  <link rel="stylesheet" href="/style.css">
         \\</head>
         \\<body>
@@ -69,7 +69,7 @@ fn apiStatusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
         .status = "healthy",
         .engine = "httpx.zig",
         .version = "0.1.0",
-        .framework = "FastAPI-for-Zig",
+        .framework = "httpx.zig",
         .hot_reload = true,
     });
 }
@@ -79,7 +79,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.debug.print("=== FastAPI-Style Server with Live File Watcher & Hot-Reload ===\n", .{});
+    std.debug.print("=== Server with Live File Watcher & Hot-Reload ===\n", .{});
 
     // 1. Setup sample asset for watcher
     const test_asset = "sample_dev_asset.txt";
@@ -96,7 +96,7 @@ pub fn main() !void {
 
     std.debug.print("[INFO] Background file watcher started for '{s}'\n", .{test_asset});
 
-    // 3. Initialize FastAPI-style server with colored lifecycle logging
+    // 3. Initialize server with colored lifecycle logging
     var server = try httpx.Server.init(allocator, .{
         .host = "127.0.0.1",
         .port = 0,
@@ -165,5 +165,5 @@ pub fn main() !void {
     httpx.clock.sleepMillis(150);
     const changes_detected = file_watcher.change_count.load(.acquire);
     std.debug.print("[HOT RELOAD] Detected {d} change(s) - Triggered automatic reload!\n", .{changes_detected});
-    std.debug.print("All FastAPI-style endpoints and hot-reload verified successfully.\n", .{});
+    std.debug.print("All endpoints and hot-reload verified successfully.\n", .{});
 }
