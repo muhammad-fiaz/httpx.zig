@@ -19,7 +19,7 @@ pub fn main() !void {
     ;
 
     const target_filename = "sample-local-pdf.pdf";
-    const expected_hash = httpx.download_pkg.parseChecksumFile(checksum_manifest, target_filename);
+    const expected_hash = httpx.parseChecksumFile(checksum_manifest, target_filename);
 
     if (expected_hash) |hash| {
         std.debug.print("Parsed hash for {s}: {s}\n", .{ target_filename, hash });

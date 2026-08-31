@@ -1102,9 +1102,9 @@ pub const ProgressTracker = struct {
                 .total = tot,
                 .prefix = std.fs.path.basename(self.destination),
                 .style = .{
-                    .filled = "█",
-                    .empty = "░",
-                    .head = "█",
+                    .filled = "=",
+                    .empty = "-",
+                    .head = ">",
                     .left_bracket = "[",
                     .right_bracket = "]",
                 },
@@ -1286,7 +1286,12 @@ pub fn updateFile(
         return DownloadError.FileRenameFailed;
     }
 
-    return res;
+    var final_res = res;
+    const len = @min(target_path.len, final_res.destination_buf.len);
+    @memcpy(final_res.destination_buf[0..len], target_path[0..len]);
+    final_res.destination_len = len;
+    final_res.destination = final_res.destination_buf[0..len];
+    return final_res;
 }
 
 // FTP Download Helper

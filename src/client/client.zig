@@ -31,18 +31,18 @@ const PoolConfig = @import("pool.zig").PoolConfig;
 const dns_cache_mod = @import("../net/dns/cache.zig");
 const clock = @import("../common/clock.zig");
 const HttpVersion = @import("../common/http_version.zig").HttpVersion;
-pub const download_pkg = @import("download.zig");
-pub const DownloadOptions = download_pkg.DownloadOptions;
-pub const DownloadResult = download_pkg.DownloadResult;
-pub const DownloadError = download_pkg.DownloadError;
-pub const ProgressInfo = download_pkg.ProgressInfo;
-pub const ProgressState = download_pkg.ProgressState;
-pub const ProgressMode = download_pkg.ProgressMode;
-pub const ExistingFilePolicy = download_pkg.ExistingFilePolicy;
-pub const ChecksumAlgorithm = download_pkg.ChecksumAlgorithm;
-pub const VerifyOptions = download_pkg.VerifyOptions;
-pub const UpdateOptions = download_pkg.UpdateOptions;
-pub const RemoteFileInfo = download_pkg.RemoteFileInfo;
+const DownloadCore = @import("download.zig");
+pub const DownloadOptions = DownloadCore.DownloadOptions;
+pub const DownloadResult = DownloadCore.DownloadResult;
+pub const DownloadError = DownloadCore.DownloadError;
+pub const ProgressInfo = DownloadCore.ProgressInfo;
+pub const ProgressState = DownloadCore.ProgressState;
+pub const ProgressMode = DownloadCore.ProgressMode;
+pub const ExistingFilePolicy = DownloadCore.ExistingFilePolicy;
+pub const ChecksumAlgorithm = DownloadCore.ChecksumAlgorithm;
+pub const VerifyOptions = DownloadCore.VerifyOptions;
+pub const UpdateOptions = DownloadCore.UpdateOptions;
+pub const RemoteFileInfo = DownloadCore.RemoteFileInfo;
 
 pub const Config = struct {
     allocator: ?Allocator = null,
@@ -254,22 +254,22 @@ pub const Client = struct {
         return self.requestAll(reqs);
     }
 
-    fn coerceDownloadOptions(opts: anytype) download_pkg.DownloadOptions {
-        if (@TypeOf(opts) == download_pkg.DownloadOptions) return opts;
-        var o = download_pkg.DownloadOptions{};
+    fn coerceDownloadOptions(opts: anytype) DownloadOptions {
+        if (@TypeOf(opts) == DownloadOptions) return opts;
+        var o = DownloadOptions{};
         inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
             if (comptime std.mem.eql(u8, f.name, "verify")) {
                 const v = @field(opts, f.name);
-                if (@TypeOf(v) == download_pkg.VerifyOptions) {
+                if (@TypeOf(v) == VerifyOptions) {
                     o.verify = v;
                 } else {
                     inline for (@typeInfo(@TypeOf(v)).@"struct".fields) |vf| {
-                        if (@hasField(download_pkg.VerifyOptions, vf.name)) {
+                        if (@hasField(VerifyOptions, vf.name)) {
                             @field(o.verify, vf.name) = @field(v, vf.name);
                         }
                     }
                 }
-            } else if (@hasField(download_pkg.DownloadOptions, f.name)) {
+            } else if (@hasField(DownloadOptions, f.name)) {
                 @field(o, f.name) = @field(opts, f.name);
             }
         }
@@ -277,14 +277,14 @@ pub const Client = struct {
     }
 
     /// Streams a download to disk with progress reporting, resume, and verification.
-    pub fn download(self: *Client, url: []const u8, destination: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.DownloadResult {
-        var dl = download_pkg.Downloader.init(self.allocator, self);
+    pub fn download(self: *Client, url: []const u8, destination: []const u8, opts: anytype) DownloadError!DownloadResult {
+        var dl = DownloadCore.Downloader.init(self.allocator, self);
         const download_options = coerceDownloadOptions(opts);
         return dl.download(url, destination, download_options);
     }
 
     /// Downloads a batch of files concurrently using the client's internal allocator.
-    pub fn downloadBatch(self: *Client, tasks: []const struct { url: []const u8, dest: []const u8 }, opts: anytype) download_pkg.DownloadError!void {
+    pub fn downloadBatch(self: *Client, tasks: []const struct { url: []const u8, dest: []const u8 }, opts: anytype) DownloadError!void {
         const download_options = coerceDownloadOptions(opts);
         for (tasks) |t| {
             _ = try self.download(t.url, t.dest, download_options);
@@ -292,9 +292,9 @@ pub const Client = struct {
     }
 
     /// Queries remote file metadata (size, filename, Content-Type, ETag, Range support) without downloading.
-    pub fn lookupFileInfo(self: *Client, url: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.RemoteFileInfo {
+    pub fn lookupFileInfo(self: *Client, url: []const u8, opts: anytype) DownloadError!RemoteFileInfo {
         const download_options = coerceDownloadOptions(opts);
-        return download_pkg.lookupFileInfo(self, url, download_options);
+        return DownloadCore.lookupFileInfo(self, url, download_options);
     }
 
     /// Returns a Parser bound to this Client's allocator and config.
@@ -391,28 +391,28 @@ pub const Client = struct {
     }
 
     /// Safely updates an executable or asset on disk with rollback preservation.
-    pub fn updateFile(self: *Client, url: []const u8, target_path: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.DownloadResult {
-        const update_options: download_pkg.UpdateOptions = if (@TypeOf(opts) == download_pkg.UpdateOptions) opts else blk: {
-            var o = download_pkg.UpdateOptions{};
+    pub fn updateFile(self: *Client, url: []const u8, target_path: []const u8, opts: anytype) DownloadError!DownloadResult {
+        const update_options: UpdateOptions = if (@TypeOf(opts) == UpdateOptions) opts else blk: {
+            var o = UpdateOptions{};
             inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
                 if (comptime std.mem.eql(u8, f.name, "verify")) {
                     const v = @field(opts, f.name);
-                    if (@TypeOf(v) == download_pkg.VerifyOptions) {
+                    if (@TypeOf(v) == VerifyOptions) {
                         o.verify = v;
                     } else {
                         inline for (@typeInfo(@TypeOf(v)).@"struct".fields) |vf| {
-                            if (@hasField(download_pkg.VerifyOptions, vf.name)) {
+                            if (@hasField(VerifyOptions, vf.name)) {
                                 @field(o.verify, vf.name) = @field(v, vf.name);
                             }
                         }
                     }
-                } else if (@hasField(download_pkg.UpdateOptions, f.name)) {
+                } else if (@hasField(UpdateOptions, f.name)) {
                     @field(o, f.name) = @field(opts, f.name);
                 }
             }
             break :blk o;
         };
-        return download_pkg.updateFile(self.allocator, self, url, target_path, update_options);
+        return DownloadCore.updateFile(self.allocator, self, url, target_path, update_options);
     }
 
     /// Graceful connection drain (purge pool, but don't destroy the client).
@@ -897,22 +897,22 @@ pub fn globalRequestAll(reqs: anytype) ![]Response {
     return c.requestAll(reqs);
 }
 
-pub fn globalDownload(url: []const u8, destination: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.DownloadResult {
-    const c = defaultClient() orelse return download_pkg.DownloadError.ConnectionFailed;
+pub fn globalDownload(url: []const u8, destination: []const u8, opts: anytype) DownloadError!DownloadResult {
+    const c = defaultClient() orelse return DownloadError.ConnectionFailed;
     return c.download(url, destination, opts);
 }
 
-pub fn globalUpdateFile(url: []const u8, target_path: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.DownloadResult {
-    const c = defaultClient() orelse return download_pkg.DownloadError.ConnectionFailed;
+pub fn globalUpdateFile(url: []const u8, target_path: []const u8, opts: anytype) DownloadError!DownloadResult {
+    const c = defaultClient() orelse return DownloadError.ConnectionFailed;
     return c.updateFile(url, target_path, opts);
 }
 
-pub fn globalVerifyFile(path: []const u8, opts: download_pkg.VerifyOptions) download_pkg.DownloadError!void {
-    return download_pkg.verifyFile(path, opts);
+pub fn globalVerifyFile(path: []const u8, opts: VerifyOptions) DownloadError!void {
+    return DownloadCore.verifyFile(path, opts);
 }
 
-pub fn globalLookupFileInfo(url: []const u8, opts: anytype) download_pkg.DownloadError!download_pkg.RemoteFileInfo {
-    const c = defaultClient() orelse return download_pkg.DownloadError.ConnectionFailed;
+pub fn globalLookupFileInfo(url: []const u8, opts: anytype) DownloadError!RemoteFileInfo {
+    const c = defaultClient() orelse return DownloadError.ConnectionFailed;
     return c.lookupFileInfo(url, opts);
 }
 

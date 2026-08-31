@@ -221,6 +221,7 @@ pub const connect = @import("client/client.zig").globalConnect;
 pub const getAll = @import("client/client.zig").globalGetAll;
 pub const requestAll = @import("client/client.zig").globalRequestAll;
 pub const download = @import("client/client.zig").globalDownload;
+pub const graphqlQuery = @import("client/client.zig").globalGraphql;
 pub const lookupFileInfo = @import("client/client.zig").globalLookupFileInfo;
 pub const updateFile = @import("client/client.zig").globalUpdateFile;
 pub const verifyFile = @import("client/client.zig").globalVerifyFile;
@@ -241,6 +242,7 @@ pub const ExistingFilePolicy = Download.ExistingFilePolicy;
 pub const VerifyOptions = Download.VerifyOptions;
 pub const UpdateOptions = Download.UpdateOptions;
 pub const FtpDownloadOptions = Download.FtpDownloadOptions;
+pub const parseChecksumFile = Download.parseChecksumFile;
 
 // Parsing & inspection subsystem
 /// Native HTML, XML, RSS/Atom/JSON feeds, robots.txt, and sitemap parsing engine.

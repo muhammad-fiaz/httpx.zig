@@ -254,10 +254,11 @@ fn lookupPosix(allocator: Allocator, host: []const u8, port: u16) Error![]addres
     try copyHostZ(host, &host_z);
     var port_buf: [8]u8 = undefined;
     const port_str = std.fmt.bufPrint(&port_buf, "{d}", .{port}) catch return error.HostNotFound;
+    port_buf[port_str.len] = 0;
 
     var hints = PosixHints{};
     var result: ?*PosixAddrinfo = null;
-    if (posix_ffi.getaddrinfo(@ptrCast(&host_z), @ptrCast(port_str), &hints, &result) != 0)
+    if (posix_ffi.getaddrinfo(@ptrCast(&host_z), @ptrCast(&port_buf), &hints, &result) != 0)
         return error.HostNotFound;
     defer if (result) |r| posix_ffi.freeaddrinfo(r);
 

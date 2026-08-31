@@ -6,7 +6,11 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var server = try httpx.ftp.Server.init(allocator, .{
+    const IoContext = httpx.tcp.IoContext;
+    var ctx = try IoContext.init(allocator);
+    defer ctx.deinit();
+
+    var server = try httpx.ftp.Server.initWithIo(allocator, ctx.io, .{
         .host = "0.0.0.0",
         .port = 0,
         .user = "demo",
@@ -25,30 +29,26 @@ pub fn main() !void {
     const port = server.localPort();
     std.debug.print("FTP server running on 127.0.0.1:{d}\n", .{port});
 
-    const ServerThread = struct {
-        fn run(s: *httpx.ftp.Server) void {
-            s.run(1) catch {};
+    const ClientThread = struct {
+        fn run(io: std.Io, allocator_arg: std.mem.Allocator, server_port: u16) void {
+            var client = httpx.ftp.Client.connectWithIo(io, allocator_arg, .{
+                .host = "127.0.0.1",
+                .port = server_port,
+                .user = "demo",
+                .password = "password",
+            }) catch |err| {
+                std.debug.print("FTP client failed: {s}\n", .{@errorName(err)});
+                return;
+            };
+            defer client.deinit();
+            std.debug.print("FTP client connected and verified.\n", .{});
         }
     };
-    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
-    httpx.clock.sleepMillis(200);
 
-    var client = httpx.ftp.Client.connect(allocator, .{
-        .host = "127.0.0.1",
-        .port = port,
-        .user = "demo",
-        .password = "password",
-    }) catch |err| {
-        std.debug.print("FTP client connect handled: {s}\n", .{@errorName(err)});
-        server.shutdown();
-        t.join();
-        std.debug.print("FTP server verification completed successfully.\n", .{});
-        return;
-    };
-    defer client.deinit();
-
-    server.shutdown();
+    const t = try std.Thread.spawn(.{}, ClientThread.run, .{ ctx.io, allocator, port });
+    server.run(1) catch {};
     t.join();
+
     std.debug.print("FTP server verification completed successfully.\n", .{});
 }
 
