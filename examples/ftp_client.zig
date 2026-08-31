@@ -2,10 +2,6 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
     std.debug.print("=== HTTPX Native FTP Client ===\n", .{});
 
     // 1. Configure FTP options
@@ -28,8 +24,8 @@ pub fn main() !void {
         });
     }
 
-    // 3. Connect via TCP (requires network access)
-    var client = httpx.ftp.Client.connect(allocator, ftp_opts) catch |err| {
+    // 3. Connect via TCP (zero-config, no allocator required)
+    var client = httpx.ftp.connect(ftp_opts) catch |err| {
         std.debug.print("3. FTP connection failed: {s}\n", .{@errorName(err)});
         std.debug.print("   Skipping network tests (server may be unreachable).\n", .{});
         return;
@@ -50,7 +46,7 @@ pub fn main() !void {
         std.debug.print("5. List files failed: {s}\n", .{@errorName(err)});
         return;
     };
-    defer allocator.free(files);
+    defer client.free(files);
     std.debug.print("5. File listing:\n{s}\n", .{files});
 
     std.debug.print("FTP client demonstration completed.\n", .{});

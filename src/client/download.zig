@@ -1319,7 +1319,7 @@ pub fn ftpDownload(
     const dest = resolveDestination(allocator, options.destination_path, options.remote_path, null) catch return DownloadError.OutOfMemory;
     defer allocator.free(dest);
 
-    var ftp = ftp_client.Client.connect(allocator, .{
+    var ftp = ftp_client.Client.connectWithAlloc(allocator, .{
         .host = options.host,
         .port = options.port,
         .user = options.user,

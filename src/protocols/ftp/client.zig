@@ -134,8 +134,14 @@ pub const Client = struct {
     io: std.Io,
     owns_io: bool = false,
     io_threaded: ?*std.Io.Threaded = null,
+    read_buf: std.ArrayList(u8) = .empty,
 
-    pub fn connect(allocator: Allocator, opts: Options) FtpError!Client {
+    /// Connect to an FTP server with zero-config default allocator.
+    pub fn connect(opts: Options) FtpError!Client {
+        return connectWithAlloc(std.heap.page_allocator, opts);
+    }
+
+    pub fn connectWithAlloc(allocator: Allocator, opts: Options) FtpError!Client {
         const threaded = try allocator.create(std.Io.Threaded);
         errdefer allocator.destroy(threaded);
         threaded.* = .init(allocator, .{});
@@ -192,12 +198,18 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         self.ctrl.close();
+        self.read_buf.deinit(self.allocator);
         if (self.owns_io) {
             if (self.io_threaded) |t| {
                 t.deinit();
                 self.allocator.destroy(t);
             }
         }
+    }
+
+    /// Free memory allocated by this client (such as directory listings from `list()`).
+    pub fn free(self: *Client, memory: anytype) void {
+        self.allocator.free(memory);
     }
 
     fn sendLine(self: *Client, line: []const u8) FtpError!void {
@@ -210,22 +222,30 @@ pub const Client = struct {
 
     /// Reads one complete reply into owned memory (caller frees `text`).
     pub fn readReply(self: *Client) FtpError!Reply {
-        var acc: std.ArrayList(u8) = .empty;
-        errdefer acc.deinit(self.allocator);
         var buf: [1024]u8 = undefined;
-
         var pos: usize = 0;
+
         while (true) {
+            if (parseReplyAt(self.read_buf.items, pos)) |parsed| {
+                const consumed = parsed.consumed;
+                const text = self.allocator.dupe(u8, parsed.reply.text) catch return FtpError.OutOfMemory;
+                const code = parsed.reply.code;
+                // Shift remaining unconsumed bytes
+                const remaining = self.read_buf.items.len - (pos + consumed);
+                if (remaining > 0) {
+                    std.mem.copyForwards(u8, self.read_buf.items[0..remaining], self.read_buf.items[pos + consumed ..]);
+                    self.read_buf.items.len = remaining;
+                } else {
+                    self.read_buf.items.len = 0;
+                }
+                return .{ .code = code, .text = text };
+            }
+
+            pos = if (self.read_buf.items.len > 4) self.read_buf.items.len - 4 else 0;
             const n = self.ctrl.read(buf[0..]) catch return FtpError.ReadFailed;
             if (n == 0) return FtpError.UnexpectedEof;
-            acc.appendSlice(self.allocator, buf[0..n]) catch return FtpError.OutOfMemory;
-            if (acc.items.len > max_reply_bytes) return FtpError.ReplyTooLarge;
-            if (parseReplyAt(acc.items, pos)) |parsed| {
-                pos = parsed.consumed + pos;
-                const text = self.allocator.dupe(u8, parsed.reply.text) catch return FtpError.OutOfMemory;
-                return .{ .code = parsed.reply.code, .text = text };
-            }
-            pos = if (acc.items.len > 4) acc.items.len - 4 else 0;
+            self.read_buf.appendSlice(self.allocator, buf[0..n]) catch return FtpError.OutOfMemory;
+            if (self.read_buf.items.len > max_reply_bytes) return FtpError.ReplyTooLarge;
         }
     }
 
@@ -236,8 +256,10 @@ pub const Client = struct {
 
     fn expectCode(self: *Client, cmd: []const u8, code_lo: u16, code_hi: u16) FtpError!Reply {
         const r = try self.command(cmd);
-        defer self.allocator.free(r.text);
-        if (r.code < code_lo or r.code > code_hi) return FtpError.ProtocolError;
+        if (r.code < code_lo or r.code > code_hi) {
+            self.allocator.free(r.text);
+            return FtpError.ProtocolError;
+        }
         return r;
     }
 
@@ -245,17 +267,16 @@ pub const Client = struct {
         var buf: [512]u8 = undefined;
         const user_cmd = std.fmt.bufPrint(&buf, "USER {s}", .{user}) catch return FtpError.WriteFailed;
         const r1 = try self.command(user_cmd);
+        defer self.allocator.free(r1.text);
         switch (r1.code) {
             230 => {},
             331 => {
-                self.allocator.free(r1.text);
                 var pbuf: [512]u8 = undefined;
                 const pass_cmd = std.fmt.bufPrint(&pbuf, "PASS {s}", .{password}) catch return FtpError.WriteFailed;
                 const r2 = try self.expectCode(pass_cmd, 200, 299);
                 self.allocator.free(r2.text);
             },
             else => {
-                self.allocator.free(r1.text);
                 return FtpError.ProtocolError;
             },
         }
@@ -366,9 +387,11 @@ pub const Client = struct {
             try sink(ctx, chunk[0..n]);
         }
 
+        data.close(); // Signal completion before reading final reply
+
         const done = try self.readReply();
         defer self.allocator.free(done.text);
-        if (done.code != 226) return FtpError.ProtocolError;
+        if (done.code != 226 and done.code != 250) return FtpError.ProtocolError;
     }
 
     /// Uploads `source` chunks via `fill(ctx) ?[]const u8` (null ends upload).
@@ -405,7 +428,7 @@ pub const Client = struct {
         defer data.close();
 
         var buf: [1024]u8 = undefined;
-        const pre = std.fmt.bufPrint(&buf, "LIST {s}", .{path}) catch return FtpError.WriteFailed;
+        const pre = if (path.len == 0) "LIST" else std.fmt.bufPrint(&buf, "LIST {s}", .{path}) catch return FtpError.WriteFailed;
         const r = try self.command(pre);
         defer self.allocator.free(r.text);
         if (r.code != 150 and r.code != 125) return FtpError.ProtocolError;
@@ -417,9 +440,11 @@ pub const Client = struct {
             out.appendSlice(self.allocator, chunk[0..n]) catch return FtpError.OutOfMemory;
         }
 
+        data.close(); // Close data connection before reading completion reply
+
         const done = try self.readReply();
         defer self.allocator.free(done.text);
-        if (done.code != 226) return FtpError.ProtocolError;
+        if (done.code != 226 and done.code != 250) return FtpError.ProtocolError;
         return out.toOwnedSlice(self.allocator) catch FtpError.OutOfMemory;
     }
 };

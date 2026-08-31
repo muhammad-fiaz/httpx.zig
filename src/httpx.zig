@@ -343,6 +343,7 @@ pub const ftp = struct {
     pub const Options = ftp_client.Options;
     pub const Reply = ftp_client.Reply;
     pub const FtpError = ftp_client.FtpError;
+    pub const connect = ftp_client.Client.connect;
     pub const parseReplyAt = ftp_client.parseReplyAt;
     pub const parsePasive = ftp_client.parsePasive;
     pub const parseEpsv = ftp_client.parseEpsv;
