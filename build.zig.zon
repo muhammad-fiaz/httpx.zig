@@ -17,8 +17,8 @@
             .hash = "env-0.0.2-TMsAe4W0AgASsiE9dbVmd5L8xSduIybTGPONqK9AZ-_e",
         },
         .loaders = .{
-            .url = "https://github.com/muhammad-fiaz/loaders.zig/archive/refs/tags/0.0.5.tar.gz",
-            .hash = "loaders-0.0.5-lPpNacRmAgAKwT5wlYIR5fo_UV_S1DIiJCd4mHr7AdlX",
+            .url = "https://github.com/muhammad-fiaz/loaders.zig/archive/refs/tags/0.0.6.tar.gz",
+            .hash = "loaders-0.0.6-lPpNad1mAgBBPiQ4G94Ywn7kGP21S-CxMtv7noE5lhdT",
         },
     },
     .paths = .{
