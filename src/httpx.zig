@@ -24,6 +24,8 @@ pub const zstd = @import("zstd");
 pub const env = @import("env");
 
 // Common primitives
+pub const io_ctx = @import("common/io.zig");
+pub const IoContext = io_ctx.IoContext;
 pub const versionInfo = @import("common/version.zig");
 pub const version_info = versionInfo;
 pub const name = version_info.name;

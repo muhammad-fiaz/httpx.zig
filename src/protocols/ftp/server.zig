@@ -236,8 +236,9 @@ const Session = struct {
     }
 
     fn reply(self: *Session, text: []const u8) Error!void {
-        self.control.writeAll(text) catch return error.WriteFailed;
-        self.control.writeAll("\r\n") catch return error.WriteFailed;
+        var buf: [600]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{s}\r\n", .{text}) catch return error.WriteFailed;
+        self.control.writeAll(line) catch return error.WriteFailed;
     }
 
     fn startPassive(self: *Session, extended: bool) Error!bool {

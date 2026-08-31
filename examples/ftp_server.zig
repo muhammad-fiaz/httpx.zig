@@ -6,11 +6,10 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const IoContext = httpx.tcp.IoContext;
-    var ctx = try IoContext.init(allocator);
-    defer ctx.deinit();
+    var server_ctx = try httpx.tcp.IoContext.init(allocator);
+    defer server_ctx.deinit();
 
-    var server = try httpx.ftp.Server.initWithIo(allocator, ctx.io, .{
+    var server = try httpx.ftp.Server.initWithIo(allocator, server_ctx.io, .{
         .host = "0.0.0.0",
         .port = 0,
         .user = "demo",
@@ -30,8 +29,18 @@ pub fn main() !void {
     std.debug.print("FTP server running on 127.0.0.1:{d}\n", .{port});
 
     const ClientThread = struct {
-        fn run(io: std.Io, allocator_arg: std.mem.Allocator, server_port: u16) void {
-            var client = httpx.ftp.Client.connectWithIo(io, allocator_arg, .{
+        fn run(server_port: u16) void {
+            var c_gpa: std.heap.DebugAllocator(.{}) = .init;
+            defer _ = c_gpa.deinit();
+            const c_allocator = c_gpa.allocator();
+
+            var c_ctx = httpx.tcp.IoContext.init(c_allocator) catch |err| {
+                std.debug.print("FTP client IoContext failed: {s}\n", .{@errorName(err)});
+                return;
+            };
+            defer c_ctx.deinit();
+
+            var client = httpx.ftp.Client.connectWithIo(c_ctx.io, c_allocator, .{
                 .host = "127.0.0.1",
                 .port = server_port,
                 .user = "demo",
@@ -45,8 +54,10 @@ pub fn main() !void {
         }
     };
 
-    const t = try std.Thread.spawn(.{}, ClientThread.run, .{ ctx.io, allocator, port });
-    server.run(1) catch {};
+    const t = try std.Thread.spawn(.{}, ClientThread.run, .{port});
+    server.run(1) catch |err| {
+        std.debug.print("FTP server run failed: {s}\n", .{@errorName(err)});
+    };
     t.join();
 
     std.debug.print("FTP server verification completed successfully.\n", .{});

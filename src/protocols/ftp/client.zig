@@ -176,8 +176,7 @@ pub const Client = struct {
             } else |_| {}
         }
 
-        var s = sock orelse return FtpError.ConnectFailed;
-        errdefer s.close();
+        const s = sock orelse return FtpError.ConnectFailed;
 
         var c = Client{
             .allocator = allocator,
@@ -187,10 +186,16 @@ pub const Client = struct {
             .io = io,
         };
         @memcpy(c.host_copy[0..c.host_len], opts.host[0..c.host_len]);
+        errdefer {
+            c.read_buf.deinit(allocator);
+            c.ctrl.close();
+        }
 
         const greeting = try c.readReply();
         defer allocator.free(greeting.text);
-        if (greeting.code != 220) return FtpError.ProtocolError;
+        if (greeting.code != 220) {
+            return FtpError.ProtocolError;
+        }
         return c;
     }
 
