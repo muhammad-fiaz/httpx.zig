@@ -6,28 +6,27 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var cache = httpx.DNSCache.init(allocator, .{
-        .positive_ttl_ms = 10_000,
-        .negative_ttl_ms = 5_000,
-        .max_cache_entries = 10,
+    var client = try httpx.Client.init(allocator, .{
+        .dns_cache = .{
+            .enabled = true,
+            .ttl_ms = 60_000,
+        },
     });
-    defer cache.deinit();
+    defer client.deinit();
 
-    std.debug.print("  Cache count: {d}\n", .{cache.count()});
+    // First request - DNS lookup + cache
+    var r1 = client.get(.{ .url = "http://httpbun.com/get" }) catch |err| {
+        std.debug.print("R1 failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer r1.deinit();
+    std.debug.print("R1 Status: {d}\n", .{r1.status});
 
-    const stats = cache.getStats();
-    std.debug.print("  Hits: {d}\n", .{stats.hits});
-    std.debug.print("  Misses: {d}\n", .{stats.misses});
-    std.debug.print("  Failures: {d}\n", .{stats.failures});
-    std.debug.print("  Evictions: {d}\n", .{stats.evictions});
-    std.debug.print("  Hit rate: {d:.1}%\n", .{stats.hitRate() * 100});
-
-    cache.invalidate("example.com");
-    std.debug.print("  Invalidated 'example.com'\n", .{});
-
-    cache.clear();
-    std.debug.print("  Cache cleared. Count: {d}\n", .{cache.count()});
-
-    cache.evictExpired();
-    std.debug.print("  Expired entries evicted.\n", .{});
+    // Second request - uses cached DNS
+    var r2 = client.get(.{ .url = "http://httpbun.com/headers" }) catch |err| {
+        std.debug.print("R2 failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer r2.deinit();
+    std.debug.print("R2 Status: {d}\n", .{r2.status});
 }

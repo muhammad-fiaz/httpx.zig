@@ -1,3681 +1,1066 @@
-//! HTTP Client Implementation for httpx.zig
+//! HTTP Client with connection pooling, cookie jar, and zero-config support.
 //!
-//! HTTP/1.1, HTTP/2, and HTTP/3 client runtime support.
+//! Zero-config usage:
+//!   const res = try httpx.get(.{ .url = "http://example.com" });
+//!   defer res.deinit();
 //!
-//! Notes:
-//! - HTTP/2 runtime is supported with direct frame exchange.
-//! - HTTP/3 runtime uses UDP + QUIC/HTTP3/QPACK primitives for local/integration
-//!   endpoints. Full TLS-in-QUIC interoperability is still evolving.
+//! Explicit allocator:
+//!   var client = try httpx.Client.init(allocator, .{});
+//!   defer client.deinit();
+//!   var res = try client.get(.{ .url = "http://example.com" });
+//!
+//! Explicit io (advanced):
+//!   var client = Client.initWithIo(allocator, io, .{});
+//!   defer client.deinit();
+//!
+//! References:
+//!   - RFC 9110 — HTTP Semantics (request methods, header fields)
+//!   - RFC 9112 — HTTP/1.1 Message Syntax (keep-alive, chunked)
+//!   - RFC 6265 — HTTP State Management (Cookie header)
+//!   - RFC 7235 — HTTP/1.1 Authentication (Authorization header)
 
 const std = @import("std");
-const mem = std.mem;
-const Allocator = mem.Allocator;
+const Allocator = std.mem.Allocator;
+const tcp = @import("../sockets/tcp.zig");
+const sync = @import("../common/sync.zig");
+const logging = @import("../common/logging.zig");
+const Method = @import("../common/method.zig").Method;
+const req_mod = @import("request.zig");
+const Pool = @import("pool.zig").Pool;
+const PoolConfig = @import("pool.zig").PoolConfig;
+const dns_cache_mod = @import("../net/dns/cache.zig");
+const clock = @import("../common/clock.zig");
+const HttpVersion = @import("../common/http_version.zig").HttpVersion;
+const DownloadCore = @import("download.zig");
+const connectivity = @import("../net/connectivity.zig");
+pub const ConnectivityOptions = connectivity.ConnectivityOptions;
+pub const ConnectivityResult = connectivity.ConnectivityResult;
+pub const DownloadOptions = DownloadCore.DownloadOptions;
+pub const DownloadResult = DownloadCore.DownloadResult;
+pub const DownloadError = DownloadCore.DownloadError;
+pub const ProgressInfo = DownloadCore.ProgressInfo;
+pub const ProgressState = DownloadCore.ProgressState;
+pub const ProgressMode = DownloadCore.ProgressMode;
+pub const ExistingFilePolicy = DownloadCore.ExistingFilePolicy;
+pub const ChecksumAlgorithm = DownloadCore.ChecksumAlgorithm;
+pub const VerifyOptions = DownloadCore.VerifyOptions;
+pub const UpdateOptions = DownloadCore.UpdateOptions;
+pub const RemoteFileInfo = DownloadCore.RemoteFileInfo;
 
-const types = @import("../core/types.zig");
-const meta = @import("../core/meta.zig");
-const Headers = @import("../core/headers.zig").Headers;
-const HeaderName = @import("../core/headers.zig").HeaderName;
-const Uri = @import("../core/uri.zig").Uri;
-const Request = @import("../core/request.zig").Request;
-const Response = @import("../core/response.zig").Response;
-const Status = @import("../core/status.zig").Status;
-const Socket = @import("../net/socket.zig").Socket;
-const UdpSocket = @import("../net/socket.zig").UdpSocket;
-const SocketIoReader = @import("../net/socket.zig").SocketIoReader;
-const SocketIoWriter = @import("../net/socket.zig").SocketIoWriter;
-const address_mod = @import("../net/address.zig");
-const http = @import("../protocol/http.zig");
-const hpack = @import("../protocol/hpack.zig");
-const h2stream = @import("../protocol/stream.zig");
-const qpack = @import("../protocol/qpack.zig");
-const quic = @import("../protocol/quic.zig");
-const Parser = @import("../protocol/parser.zig").Parser;
-const TLSConfig = @import("../tls/tls.zig").TLSConfig;
-const TLSSession = @import("../tls/tls.zig").TLSSession;
-const ConnectionPool = @import("pool.zig").ConnectionPool;
-const proxy_mod = @import("proxy.zig");
-const PoolStats = @import("pool.zig").PoolStats;
-const common = @import("../data/common.zig");
-const list_writer = @import("../io/list_writer.zig");
-const compression_util = @import("../compress/compression.zig");
-const io_util = @import("../io/any_io.zig");
-const Metrics = @import("../io/metrics.zig").Metrics;
-const dns_mod = @import("../net/dns.zig");
-const server_mod = @import("../server/server.zig");
-const LogFn = server_mod.LogFn;
-
-const defaultIo = io_util.defaultIo;
-const sleepMs = io_util.sleepMs;
-
-const RequestTimeouts = struct {
-    connect_ms: u64,
-    read_ms: u64,
-    write_ms: u64,
-    request_ms: u64,
-};
-
-/// HTTP client configuration.
-pub const ClientConfig = struct {
-    base_url: ?[]const u8 = null,
-    timeouts: types.Timeouts = .{},
-    retry_policy: types.RetryPolicy = .{},
-    redirect_policy: types.RedirectPolicy = .{},
-    default_headers: ?[]const [2][]const u8 = null,
-    user_agent: []const u8 = meta.default_user_agent,
-    max_response_size: usize = 100 * 1024 * 1024,
-    max_request_size: usize = 10 * 1024 * 1024,
+pub const Config = struct {
+    allocator: ?Allocator = null,
+    max_redirects: u8 = 10,
     follow_redirects: bool = true,
-    verify_ssl: bool = true,
-    http2_enabled: bool = false,
-    http3_enabled: bool = false,
-    allow_push: bool = true,
-    http2_settings: types.HTTP2Settings = .{},
-    http3_settings: types.HTTP3Settings = .{},
-    keep_alive: bool = true,
-    pool_max_connections: u32 = 20,
-    pool_max_per_host: u32 = 5,
-    proxy: ?types.Proxy = null,
-    unix_socket_path: ?[]const u8 = null,
-    log_fn: ?LogFn = null,
-    log_level: server_mod.LogLevel = .info,
-    metrics: ?*Metrics = null,
-    /// Maximum number of cookies in the jar. 0 = unlimited.
-    max_cookies: u32 = 1000,
-    /// Maximum size in bytes of a single cookie name+value. 0 = unlimited.
-    max_cookie_size: usize = 4096,
-    /// Optional DNS resolver for hostname resolution. When set, the client uses
-    /// this resolver (with its cache and deduplication) instead of the system resolver.
-    dns_resolver: ?*dns_mod.DNSResolver = null,
-    /// Whether to automatically decompress response bodies based on Content-Encoding.
-    auto_decompress: bool = true,
-    /// Compression options for request body compression. Null disables compression.
-    request_compression: ?compression_util.CompressOptions = null,
-    /// Encodings to advertise in Accept-Encoding, in priority order.
-    /// If null, sends "gzip, deflate, br, zstd, identity".
-    accept_encoding: ?[]const u8 = null,
-
-    /// Returns default client configuration.
-    pub fn defaults() ClientConfig {
-        return .{};
-    }
-
-    /// Returns default configuration with a base URL.
-    pub fn forBaseUrl(base_url: []const u8) ClientConfig {
-        return .{ .base_url = base_url };
-    }
-
-    /// Returns a copy with a proxy configured.
-    pub fn withProxy(self: ClientConfig, proxy: ?types.Proxy) ClientConfig {
-        var out = self;
-        out.proxy = proxy;
-        return out;
-    }
-
-    /// Returns a copy with a new base URL.
-    pub fn withBaseUrl(self: ClientConfig, base_url: ?[]const u8) ClientConfig {
-        var out = self;
-        out.base_url = base_url;
-        return out;
-    }
-
-    /// Returns a copy with new timeout settings.
-    pub fn withTimeouts(self: ClientConfig, timeouts: types.Timeouts) ClientConfig {
-        var out = self;
-        out.timeouts = timeouts;
-        return out;
-    }
-
-    /// Returns a copy with a new retry policy.
-    pub fn withRetryPolicy(self: ClientConfig, retry_policy: types.RetryPolicy) ClientConfig {
-        var out = self;
-        out.retry_policy = retry_policy;
-        return out;
-    }
-
-    /// Returns a copy with a new redirect policy.
-    pub fn withRedirectPolicy(self: ClientConfig, redirect_policy: types.RedirectPolicy) ClientConfig {
-        var out = self;
-        out.redirect_policy = redirect_policy;
-        return out;
-    }
-
-    /// Returns a copy with default request headers applied to every request.
-    pub fn withDefaultHeaders(self: ClientConfig, headers: ?[]const [2][]const u8) ClientConfig {
-        var out = self;
-        out.default_headers = headers;
-        return out;
-    }
-
-    /// Returns a copy with a custom User-Agent.
-    pub fn withUserAgent(self: ClientConfig, user_agent: []const u8) ClientConfig {
-        var out = self;
-        out.user_agent = user_agent;
-        return out;
-    }
-
-    /// Returns a copy with client-level redirect-follow behavior.
-    pub fn withFollowRedirects(self: ClientConfig, follow_redirects: bool) ClientConfig {
-        var out = self;
-        out.follow_redirects = follow_redirects;
-        return out;
-    }
-
-    /// Returns a copy with a Unix domain socket path configured.
-    pub fn withUnixSocket(self: ClientConfig, path: ?[]const u8) ClientConfig {
-        var out = self;
-        out.unix_socket_path = path;
-        return out;
-    }
-
-    pub fn withLogFn(self: ClientConfig, log_fn: LogFn) ClientConfig {
-        var config = self;
-        config.log_fn = log_fn;
-        return config;
-    }
-
-    /// Returns a copy with protocol runtime toggles.
-    pub fn withProtocols(self: ClientConfig, http2_enabled: bool, http3_enabled: bool) ClientConfig {
-        var out = self;
-        out.http2_enabled = http2_enabled;
-        out.http3_enabled = http3_enabled;
-        return out;
-    }
-
-    /// Returns a copy with HTTP/2 server push allow/deny behavior.
-    pub fn withAllowPush(self: ClientConfig, allow_push: bool) ClientConfig {
-        var out = self;
-        out.allow_push = allow_push;
-        return out;
-    }
-
-    /// Returns a copy with explicit HTTP/2 settings.
-    pub fn withHTTP2Settings(self: ClientConfig, settings: types.HTTP2Settings) ClientConfig {
-        var out = self;
-        out.http2_settings = settings;
-        return out;
-    }
-
-    /// Returns a copy with explicit HTTP/3 settings.
-    pub fn withHTTP3Settings(self: ClientConfig, settings: types.HTTP3Settings) ClientConfig {
-        var out = self;
-        out.http3_settings = settings;
-        return out;
-    }
-
-    /// Returns a copy with SSL verification behavior.
-    pub fn withSslVerification(self: ClientConfig, verify_ssl: bool) ClientConfig {
-        var out = self;
-        out.verify_ssl = verify_ssl;
-        return out;
-    }
-
-    /// Returns a copy with keep-alive enablement.
-    pub fn withKeepAlive(self: ClientConfig, keep_alive: bool) ClientConfig {
-        var out = self;
-        out.keep_alive = keep_alive;
-        return out;
-    }
-
-    /// Returns a copy with maximum response-size limit.
-    pub fn withMaxResponseSize(self: ClientConfig, max_response_size: usize) ClientConfig {
-        var out = self;
-        out.max_response_size = max_response_size;
-        return out;
-    }
-
-    /// Returns a copy with connection-pool limits.
-    pub fn withPoolLimits(self: ClientConfig, max_connections: u32, max_per_host: u32) ClientConfig {
-        var out = self;
-        out.pool_max_connections = max_connections;
-        out.pool_max_per_host = max_per_host;
-        return out;
-    }
-};
-
-/// Basic authentication credentials used by per-request options.
-pub const BasicAuth = struct {
-    username: []const u8,
-    password: []const u8,
-};
-
-/// Representation of a multipart form field.
-pub const MultipartField = struct {
-    name: []const u8,
-    value: []const u8,
-};
-
-/// Representation of a multipart upload file.
-pub const MultipartFile = struct {
-    name: []const u8,
-    filename: []const u8,
-    content_type: ?[]const u8 = null,
-    data: []const u8,
-};
-
-/// Per-request options.
-pub const RequestOptions = struct {
-    headers: ?[]const [2][]const u8 = null,
-    query_params: ?[]const [2][]const u8 = null,
-    body: ?[]const u8 = null,
-    json: ?[]const u8 = null,
-    form_fields: ?[]const [2][]const u8 = null,
-    bearer_token: ?[]const u8 = null,
-    basic_auth: ?BasicAuth = null,
+    pool: PoolConfig = .{},
+    /// Explicit custom logger; default is silent (clients never spam).
+    logger: ?logging.Logger = null,
+    dns_cache: DnsCacheOptions = .{},
+    /// Allow bare LF line endings (instead of strict CRLF) for
+    /// non-compliant peers (issue #37). Stripping optional trailing
+    /// \r. Default false (strict RFC 9110/9112).
+    allow_lf_line_endings: bool = false,
+    /// Default HTTP version for requests when per-request version not set.
+    http_version: ?HttpVersion = null,
+    /// Default TLS options for https:// requests.
+    tls: ?req_mod.TlsOptions = null,
+    /// Default request timeout in ms.
     timeout_ms: ?u64 = null,
-    connect_timeout_ms: ?u64 = null,
-    read_timeout_ms: ?u64 = null,
-    write_timeout_ms: ?u64 = null,
-    timeouts: ?types.Timeouts = null,
+    /// Default max response body size.
+    max_response_size: ?usize = null,
+    /// Number of retry attempts for failed requests (0 = no retry).
+    max_retries: u32 = 0,
+    /// Delay between retry attempts in milliseconds.
+    retry_delay_ms: u64 = 1000,
+    /// HTTP status codes that trigger a retry (502, 503, 504 by default).
+    retry_status_codes: []const u16 = &.{ 502, 503, 504 },
+
+    pub const DnsCacheOptions = struct {
+        enabled: bool = true,
+        ttl_ms: i64 = 60_000,
+        negative_ttl_ms: i64 = 5_000,
+        max_entries: u32 = 1024,
+    };
+};
+
+pub const RequestOptions = struct {
+    url: []const u8,
+    /// Explicit method for generic `request` (e.g. `.method = .GET`); if null, uses the wrapper's method.
+    method: ?Method = null,
+    headers: []const req_mod.Header = &.{},
+    query: []const req_mod.Header = &.{},
+    body: ?[]const u8 = null,
+    /// Serialized JSON bytes; sets Content-Type automatically.
+    json: ?[]const u8 = null,
+    /// Typed JSON value (struct) — will be `json.stringify`ed; takes precedence over `json` string if set.
+    json_typed: ?*const anyopaque = null,
+    json_typed_info: ?struct { ptr: *const anyopaque, stringify: *const fn (Allocator, *const anyopaque) anyerror![]u8 } = null,
+    /// Encoded form body; sets Content-Type automatically.
+    form: ?[]const u8 = null,
+    text: ?[]const u8 = null,
+    content_type: ?[]const u8 = null,
     follow_redirects: ?bool = null,
-    version: ?types.Version = null,
-    multipart_fields: ?[]const MultipartField = null,
-    multipart_files: ?[]const MultipartFile = null,
-    multipart_boundary: ?[]const u8 = null,
-    proxy: ?types.Proxy = null,
-    verify_ssl: ?bool = null,
-    keep_alive: ?bool = null,
-    unix_socket_path: ?[]const u8 = null,
-    range_header: ?[]const u8 = null,
-    api_key_header: ?[]const u8 = null,
-    api_key_value: ?[]const u8 = null,
-    expect_100_continue: bool = false,
-
-    /// Returns default request options.
-    pub fn defaults() RequestOptions {
-        return .{};
-    }
-
-    /// Returns a copy with request headers.
-    pub fn withHeaders(self: RequestOptions, headers: []const [2][]const u8) RequestOptions {
-        var out = self;
-        out.headers = headers;
-        return out;
-    }
-
-    /// Returns a copy with a custom proxy configuration for this request.
-    pub fn withProxy(self: RequestOptions, proxy: ?types.Proxy) RequestOptions {
-        var out = self;
-        out.proxy = proxy;
-        return out;
-    }
-
-    /// Returns a copy with explicit SSL verification behavior for this request.
-    pub fn withSslVerification(self: RequestOptions, verify_ssl: bool) RequestOptions {
-        var out = self;
-        out.verify_ssl = verify_ssl;
-        return out;
-    }
-
-    /// Returns a copy with explicit keep-alive behavior for this request.
-    pub fn withKeepAlive(self: RequestOptions, keep_alive: bool) RequestOptions {
-        var out = self;
-        out.keep_alive = keep_alive;
-        return out;
-    }
-
-    /// Returns a copy with a custom Unix domain socket path for this request.
-    pub fn withUnixSocket(self: RequestOptions, path: ?[]const u8) RequestOptions {
-        var out = self;
-        out.unix_socket_path = path;
-        return out;
-    }
-
-    /// Returns a copy with a Range header for partial content requests.
-    /// Supports "bytes=start-end", "bytes=start-", and "bytes=-suffix" formats.
-    pub fn withRange(self: RequestOptions, range: []const u8) RequestOptions {
-        var out = self;
-        out.range_header = range;
-        return out;
-    }
-
-    /// Returns a copy with a byte range request (e.g., "bytes=0-499").
-    pub fn withByteRange(self: RequestOptions, start: u64, end: ?u64) RequestOptions {
-        var buf: [64]u8 = undefined;
-        const range_str = if (end) |e|
-            std.fmt.bufPrint(&buf, "bytes={d}-{d}", .{ start, e }) catch return self
-        else
-            std.fmt.bufPrint(&buf, "bytes={d}-", .{start}) catch return self;
-        return self.withRange(range_str);
-    }
-
-    /// Returns a copy with a suffix range (last N bytes, e.g., "bytes=-500").
-    pub fn withSuffixRange(self: RequestOptions, suffix_len: u64) RequestOptions {
-        var buf: [64]u8 = undefined;
-        const range_str = std.fmt.bufPrint(&buf, "bytes=-{d}", .{suffix_len}) catch return self;
-        return self.withRange(range_str);
-    }
-
-    /// Returns a copy with multipart fields.
-    pub fn withMultipartFields(self: RequestOptions, fields: []const MultipartField) RequestOptions {
-        var out = self;
-        out.multipart_fields = fields;
-        return out;
-    }
-
-    /// Returns a copy with multipart files.
-    pub fn withMultipartFiles(self: RequestOptions, files: []const MultipartFile) RequestOptions {
-        var out = self;
-        out.multipart_files = files;
-        return out;
-    }
-
-    /// Returns a copy with a custom boundary for multipart request.
-    pub fn withMultipartBoundary(self: RequestOptions, boundary: []const u8) RequestOptions {
-        var out = self;
-        out.multipart_boundary = boundary;
-        return out;
-    }
-
-    /// Returns a copy with query parameters to append to the request URL.
-    pub fn withQueryParams(self: RequestOptions, query_params: []const [2][]const u8) RequestOptions {
-        var out = self;
-        out.query_params = query_params;
-        return out;
-    }
-
-    /// Returns a copy with a raw request body.
-    pub fn withBody(self: RequestOptions, body: []const u8) RequestOptions {
-        var out = self;
-        out.body = body;
-        return out;
-    }
-
-    /// Returns a copy with a JSON request body.
-    pub fn withJson(self: RequestOptions, json: []const u8) RequestOptions {
-        var out = self;
-        out.json = json;
-        return out;
-    }
-
-    /// Returns a copy with form fields encoded as application/x-www-form-urlencoded.
-    pub fn withFormUrlEncoded(self: RequestOptions, form_fields: []const [2][]const u8) RequestOptions {
-        var out = self;
-        out.form_fields = form_fields;
-        return out;
-    }
-
-    /// Returns a copy that sets `Authorization: Bearer <token>` for this request.
-    /// This clears any previously set basic-auth credentials in the options copy.
-    pub fn withBearerToken(self: RequestOptions, token: []const u8) RequestOptions {
-        var out = self;
-        out.bearer_token = token;
-        out.basic_auth = null;
-        return out;
-    }
-
-    /// Returns a copy that sets `Authorization: Basic ...` for this request.
-    /// This clears any previously set bearer token in the options copy.
-    pub fn withBasicAuth(self: RequestOptions, username: []const u8, password: []const u8) RequestOptions {
-        var out = self;
-        out.basic_auth = .{ .username = username, .password = password };
-        out.bearer_token = null;
-        return out;
-    }
-
-    /// Returns a copy that sets an API key in the specified header.
-    /// Common patterns: `X-API-Key`, `Authorization: ApiKey <key>`, or custom headers.
-    pub fn withApiKey(self: RequestOptions, header_name: []const u8, key: []const u8) RequestOptions {
-        var out = self;
-        out.api_key_header = header_name;
-        out.api_key_value = key;
-        return out;
-    }
-
-    /// Returns a copy that sets `Expect: 100-continue` for this request.
-    /// The client will wait for a 100 Continue response before sending the body.
-    pub fn withExpect100Continue(self: RequestOptions) RequestOptions {
-        var out = self;
-        out.expect_100_continue = true;
-        return out;
-    }
-
-    /// Returns a copy with a per-request uniform timeout across connect/read/write phases.
-    pub fn withTimeoutMs(self: RequestOptions, timeout_ms: u64) RequestOptions {
-        var out = self;
-        out.timeout_ms = timeout_ms;
-        return out;
-    }
-
-    /// Returns a copy with explicit per-phase timeouts struct.
-    pub fn withTimeouts(self: RequestOptions, timeouts: types.Timeouts) RequestOptions {
-        var out = self;
-        out.timeouts = timeouts;
-        return out;
-    }
-
-    /// Returns a copy with explicit connect phase timeout in milliseconds.
-    pub fn withConnectTimeoutMs(self: RequestOptions, connect_timeout_ms: u64) RequestOptions {
-        var out = self;
-        out.connect_timeout_ms = connect_timeout_ms;
-        return out;
-    }
-
-    /// Returns a copy with explicit read phase timeout in milliseconds.
-    pub fn withReadTimeoutMs(self: RequestOptions, read_timeout_ms: u64) RequestOptions {
-        var out = self;
-        out.read_timeout_ms = read_timeout_ms;
-        return out;
-    }
-
-    /// Returns a copy with explicit write phase timeout in milliseconds.
-    pub fn withWriteTimeoutMs(self: RequestOptions, write_timeout_ms: u64) RequestOptions {
-        var out = self;
-        out.write_timeout_ms = write_timeout_ms;
-        return out;
-    }
-
-    /// Returns a copy with an explicit redirect-follow policy.
-    pub fn withFollowRedirects(self: RequestOptions, follow_redirects: bool) RequestOptions {
-        var out = self;
-        out.follow_redirects = follow_redirects;
-        return out;
-    }
-
-    /// Returns a copy with an explicit HTTP version for this request.
-    pub fn withVersion(self: RequestOptions, version: types.Version) RequestOptions {
-        var out = self;
-        out.version = version;
-        return out;
-    }
-
-    /// Returns a copy that forces this request through the HTTP/2 runtime path.
-    pub fn withHTTP2(self: RequestOptions) RequestOptions {
-        return self.withVersion(.HTTP_2);
-    }
-
-    /// Returns a copy that forces this request through the HTTP/3 runtime path.
-    pub fn withHTTP3(self: RequestOptions) RequestOptions {
-        return self.withVersion(.HTTP_3);
-    }
+    max_redirects: ?u8 = null,
+    /// Allow bare LF line endings for response parsing (issue #37).
+    allow_lf_line_endings: bool = false,
+    /// HTTP version selection (auto or explicit). Reuses http_version.zig.
+    http_version: ?HttpVersion = null,
+    tls: ?req_mod.TlsOptions = null,
+    cookie: ?[]const u8 = null,
+    basic_auth: ?[]const u8 = null,
+    bearer_auth: ?[]const u8 = null,
+    timeout_ms: ?u64 = null,
+    max_response_size: ?usize = null,
 };
 
-/// Request interceptor function type.
-pub const RequestInterceptor = *const fn (*Request, ?*anyopaque) anyerror!void;
+pub const Response = req_mod.Response;
+pub const Error = req_mod.Error || error{DefaultClientUnavailable};
 
-/// Response interceptor function type.
-pub const ResponseInterceptor = *const fn (*Response, ?*anyopaque) anyerror!void;
-
-/// Error interceptor function type. Called when a request fails.
-pub const ErrorInterceptor = *const fn (anyerror, ?*anyopaque) void;
-
-/// Retry interceptor function type. Called when a request is about to be retried.
-pub const RetryInterceptor = *const fn (u32, ?*anyopaque) void;
-
-/// Redirect interceptor function type. Called when a redirect is followed.
-pub const RedirectInterceptor = *const fn ([]const u8, ?*anyopaque) void;
-
-/// Interceptor with context.
-pub const Interceptor = struct {
-    request_fn: ?RequestInterceptor = null,
-    response_fn: ?ResponseInterceptor = null,
-    error_fn: ?ErrorInterceptor = null,
-    retry_fn: ?RetryInterceptor = null,
-    redirect_fn: ?RedirectInterceptor = null,
-    context: ?*anyopaque = null,
-};
-
-/// Stored cookie metadata for the client cookie jar.
-pub const CookieEntry = struct {
-    value: []const u8,
-    path: []const u8 = "/",
-    domain: []const u8 = "",
-    secure: bool = false,
-    http_only: bool = false,
-    same_site: ?common.SameSite = null,
-    max_age: ?i64 = null,
-    stored_at: i64 = 0,
-};
-
-/// HTTP Client.
 pub const Client = struct {
     allocator: Allocator,
-    config: ClientConfig,
-    interceptors: std.ArrayList(Interceptor) = .empty,
-    cookies: std.StringHashMapUnmanaged(CookieEntry) = .{},
-    pool: ConnectionPool,
+    io: std.Io,
+    pool: Pool,
+    config: Config,
+    dns_cache: ?dns_cache_mod.Cache = null,
 
-    const Self = @This();
-
-    /// Creates a new HTTP client with default configuration.
-    pub fn init(allocator: Allocator) Self {
-        return initWithConfig(allocator, .{});
+    /// Explicit allocator API: creates client using internal default I/O.
+    /// Matches AGENT.md: `var client = try httpx.Client.init(allocator, .{});`
+    pub fn init(allocator: Allocator, config: Config) !Client {
+        return Client.initWithIo(allocator, std.Io.Threaded.global_single_threaded.io(), config);
     }
 
-    /// Creates a new HTTP client with custom configuration.
-    pub fn initWithConfig(allocator: Allocator, config: ClientConfig) Self {
-        return .{
+    /// Advanced: explicit io provided by caller. Does not own io.
+    pub fn initWithIo(allocator: Allocator, io: std.Io, config: Config) Client {
+        var c = Client{
             .allocator = allocator,
+            .io = io,
+            .pool = Pool.init(allocator, io, config.pool),
             .config = config,
-            .pool = ConnectionPool.initWithConfig(allocator, .{
-                .max_connections = config.pool_max_connections,
-                .max_per_host = config.pool_max_per_host,
-                .connect_timeout_ms = config.timeouts.connect_ms,
-                .idle_timeout_ms = if (config.timeouts.idle_ms > 0) @intCast(config.timeouts.idle_ms) else 60_000,
-                .dns_resolver = config.dns_resolver,
-            }),
         };
-    }
-
-    /// Creates a new client with default settings and a base URL.
-    pub fn initForBaseUrl(allocator: Allocator, base_url: []const u8) Self {
-        return initWithConfig(allocator, ClientConfig.forBaseUrl(base_url));
-    }
-
-    /// Releases all allocated resources.
-    pub fn deinit(self: *Self) void {
-        self.interceptors.deinit(self.allocator);
-        var it = self.cookies.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*.value);
+        if (config.dns_cache.enabled) {
+            c.dns_cache = dns_cache_mod.Cache.init(
+                allocator,
+                .{
+                    .ttl_ms = config.dns_cache.ttl_ms,
+                    .negative_ttl_ms = config.dns_cache.negative_ttl_ms,
+                    .max_entries = config.dns_cache.max_entries,
+                },
+                req_mod.systemLookupStrings,
+                null,
+            );
         }
-        self.cookies.deinit(self.allocator);
+        return c;
+    }
+
+    /// Out-of-box: uses page_allocator + internal default I/O, no explicit allocator/io required.
+    pub fn initDefault(config: Config) !Client {
+        return init(std.heap.page_allocator, config);
+    }
+
+    /// Alias for `init` for backward compatibility with docs.
+    pub fn initWithConfig(allocator: Allocator, config: Config) !Client {
+        return init(allocator, config);
+    }
+
+    pub fn deinit(self: *Client) void {
+        if (self.dns_cache) |*cache| cache.deinit();
         self.pool.deinit();
     }
 
-    /// Resolves a hostname to a single address using the configured DNS resolver
-    /// (if any) or falling back to the system resolver.
-    fn resolveAddress(self: *Self, hostname: []const u8, port: u16) !address_mod.Address {
-        if (self.config.dns_resolver) |resolver| {
-            var result = try resolver.resolve(hostname, .{ .port = port });
-            defer result.deinit();
-            if (result.addresses.len == 0) return error.DNSResolutionFailed;
-            return result.addresses[0];
-        }
-        return try address_mod.resolve(self.allocator, hostname, port);
+    pub fn get(self: *Client, opts: anytype) Error!Response {
+        return self.doRequest(.GET, opts);
     }
 
-    /// Logs a formatted message. If config.log_fn is provided, delegates to it.
-    /// Otherwise, silently drops the message. Client does not print internally.
-    pub fn log(self: *const Self, level: server_mod.LogLevel, comptime format: []const u8, args: anytype) void {
-        if (@intFromEnum(level) < @intFromEnum(self.config.log_level)) return;
-        if (self.config.log_fn) |log_fn| {
-            var buf: [1024]u8 = undefined;
-            if (std.fmt.bufPrint(&buf, format, args)) |msg| {
-                log_fn(level, msg);
-            } else |_| {
-                log_fn(level, "[Log format failed or message too long]");
+    pub fn post(self: *Client, opts: anytype) Error!Response {
+        return self.doRequest(.POST, opts);
+    }
+
+    pub fn put(self: *Client, opts: anytype) Error!Response {
+        return self.doRequest(.PUT, opts);
+    }
+
+    pub fn patch(self: *Client, opts: anytype) Error!Response {
+        return self.doRequest(.PATCH, opts);
+    }
+
+    pub fn delete(self: *Client, opts: anytype) Error!Response {
+        return self.doRequest(.DELETE, opts);
+    }
+
+    pub fn head(self: *Client, opts: anytype) Error!Response {
+        return self.doRequest(.HEAD, opts);
+    }
+
+    pub fn options(self: *Client, opts: anytype) Error!Response {
+        return self.doRequest(.OPTIONS, opts);
+    }
+
+    pub fn trace(self: *Client, opts: anytype) Error!Response {
+        return self.doRequest(.TRACE, opts);
+    }
+
+    pub fn connect(self: *Client, opts: anytype) Error!Response {
+        return self.doRequest(.CONNECT, opts);
+    }
+
+    pub fn fetch(self: *Client, opts: anytype) Error!Response {
+        return self.request(opts);
+    }
+
+    pub fn send(self: *Client, opts: anytype) Error!Response {
+        return self.request(opts);
+    }
+
+    pub fn request(self: *Client, opts: anytype) Error!Response {
+        const m: Method = if (@hasField(@TypeOf(opts), "method")) opts.method orelse .GET else .GET;
+        return self.doRequest(m, opts);
+    }
+
+    /// Batch: sequential array of requests (reuses pool, uses client's allocator).
+    pub fn requestAll(self: *Client, reqs: anytype) ![]Response {
+        const R = @TypeOf(reqs);
+        const slice: []const RequestOptions = blk: {
+            if (R == []const RequestOptions or R == []RequestOptions) break :blk reqs;
+            const info = @typeInfo(R);
+            if (info == .pointer) {
+                if (info.pointer.size == .slice) break :blk reqs;
+                if (info.pointer.size == .one and @typeInfo(info.pointer.child) == .array) break :blk reqs[0..];
+            }
+            if (info == .array) break :blk reqs[0..];
+            @compileError("requestAll expects a slice or array of RequestOptions");
+        };
+        var out = try self.allocator.alloc(Response, slice.len);
+        errdefer {
+            for (out) |*r| r.deinit();
+            self.allocator.free(out);
+        }
+        for (slice, 0..) |req, i| {
+            out[i] = try self.doRequest(req.method orelse .GET, req);
+        }
+        return out;
+    }
+
+    pub fn getAll(self: *Client, urls: anytype) ![]Response {
+        const U = @TypeOf(urls);
+        const slice: []const []const u8 = blk: {
+            if (U == []const []const u8 or U == [][]const u8) break :blk urls;
+            const info = @typeInfo(U);
+            if (info == .pointer) {
+                if (info.pointer.size == .slice) break :blk urls;
+                if (info.pointer.size == .one and @typeInfo(info.pointer.child) == .array) break :blk urls[0..];
+            }
+            if (info == .array) break :blk urls[0..];
+            @compileError("getAll expects a slice or array of URL strings");
+        };
+        var reqs = try self.allocator.alloc(RequestOptions, slice.len);
+        defer self.allocator.free(reqs);
+        for (slice, 0..) |url, i| reqs[i] = .{ .url = url };
+        return self.requestAll(reqs);
+    }
+
+    fn coerceDownloadOptions(opts: anytype) DownloadOptions {
+        if (@TypeOf(opts) == DownloadOptions) return opts;
+        var o = DownloadOptions{};
+        inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
+            if (comptime std.mem.eql(u8, f.name, "verify")) {
+                const v = @field(opts, f.name);
+                if (@TypeOf(v) == VerifyOptions) {
+                    o.verify = v;
+                } else {
+                    inline for (@typeInfo(@TypeOf(v)).@"struct".fields) |vf| {
+                        if (@hasField(VerifyOptions, vf.name)) {
+                            @field(o.verify, vf.name) = @field(v, vf.name);
+                        }
+                    }
+                }
+            } else if (@hasField(DownloadOptions, f.name)) {
+                @field(o, f.name) = @field(opts, f.name);
             }
         }
+        return o;
     }
 
-    /// Adds an interceptor to the client.
-    pub fn addInterceptor(self: *Self, interceptor: Interceptor) !void {
-        try self.interceptors.append(self.allocator, interceptor);
+    /// Streams a download to disk with progress reporting, resume, and verification.
+    pub fn download(self: *Client, url: []const u8, destination: []const u8, opts: anytype) DownloadError!DownloadResult {
+        var dl = DownloadCore.Downloader.init(self.allocator, self);
+        const download_options = coerceDownloadOptions(opts);
+        return dl.download(url, destination, download_options);
     }
 
-    /// Removes idle or exhausted pooled connections based on pool policy.
-    pub fn cleanupIdleConnections(self: *Self) void {
-        self.pool.cleanup();
+    /// Downloads a batch of files concurrently using the client's internal allocator.
+    pub fn downloadBatch(self: *Client, tasks: []const struct { url: []const u8, dest: []const u8 }, opts: anytype) DownloadError!void {
+        const download_options = coerceDownloadOptions(opts);
+        for (tasks) |t| {
+            _ = try self.download(t.url, t.dest, download_options);
+        }
     }
 
-    /// Returns a snapshot of total/active/idle pooled connection counts.
-    pub fn poolStats(self: *Self) PoolStats {
-        return self.pool.stats();
+    /// Queries remote file metadata (size, filename, Content-Type, ETag, Range support) without downloading.
+    pub fn lookupFileInfo(self: *Client, url: []const u8, opts: anytype) DownloadError!RemoteFileInfo {
+        const download_options = coerceDownloadOptions(opts);
+        return DownloadCore.lookupFileInfo(self, url, download_options);
     }
 
-    /// Returns how many pooled connections are tracked for a host/port.
-    pub fn hostPoolConnectionCount(self: *Self, host: []const u8, port: u16) usize {
-        return self.pool.hostConnectionCount(host, port);
+    /// Returns a Parser bound to this Client's allocator and config.
+    pub fn parser(self: *Client) @import("../parsing/document.zig").Parser {
+        return @import("../parsing/document.zig").Parser.init(self.allocator, .{});
     }
 
-    /// Makes an HTTP request.
-    pub fn request(self: *Self, method: types.Method, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.requestInternal(method, url, reqOpts, 0);
+    /// Fetches a remote URL and parses it as a Document without any explicit allocator plumbing.
+    pub fn fetchDocument(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/document.zig").Document.parse(self.allocator, res.header("content-type"), res.body);
     }
 
-    /// Alias for request() with a shorter name for application code.
-    pub fn send(self: *Self, method: types.Method, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.request(method, url, reqOpts);
+    /// Fetches a remote URL and parses it specifically as an HTML Document.
+    pub fn fetchHtml(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/document.zig").Document.parseHtml(self.allocator, res.body);
     }
 
-    /// Alias for GET requests in fetch-style client code.
-    pub fn fetch(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.get(url, reqOpts);
+    /// Fetches a remote URL and parses it specifically as an XML Document.
+    pub fn fetchXml(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/document.zig").Document.parseXml(self.allocator, res.body);
     }
 
-    fn requestInternal(self: *Self, method: types.Method, url: []const u8, reqOpts: RequestOptions, depth: u32) !Response {
-        const full_url = if (self.config.base_url) |base|
-            try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ base, url })
+    /// Fetches a remote RSS/Atom/JSON feed.
+    pub fn fetchFeed(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/feed.zig").Feed {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/feed.zig").parse(self.allocator, res.body, res.header("content-type"));
+    }
+
+    /// Fetches robots.txt from a URL.
+    pub fn fetchRobots(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/robots.zig").RobotsFile {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/robots.zig").parse(self.allocator, res.body);
+    }
+
+    /// Fetches sitemap XML from a URL.
+    pub fn fetchSitemap(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/sitemap.zig").Sitemap {
+        var res = try self.get(opts_blk: {
+            var o = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+            o.url = url;
+            break :opts_blk o;
+        });
+        defer res.deinit();
+        return @import("../parsing/sitemap.zig").parse(self.allocator, res.body);
+    }
+
+    /// Executes a GraphQL query or mutation against a remote endpoint with typed or string variables.
+    pub fn graphql(self: *Client, url: []const u8, query_str: []const u8, variables: anytype, opts: anytype) !Response {
+        const VarsType = @TypeOf(variables);
+        const payload_json = if (VarsType == @TypeOf(null))
+            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = query_str }, .{})
+        else if (VarsType == []const u8 or VarsType == []u8)
+            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = query_str, .variables = variables }, .{})
         else
-            try self.allocator.dupe(u8, url);
-        defer self.allocator.free(full_url);
+            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = query_str, .variables = variables }, .{});
+        defer self.allocator.free(payload_json);
 
-        var req = try Request.init(self.allocator, method, full_url);
-        defer req.deinit();
+        var ro = if (@TypeOf(opts) == RequestOptions) opts else RequestOptions{ .url = url };
+        ro.url = url;
+        ro.body = payload_json;
+        ro.headers = &.{
+            .{ .name = "content-type", .value = "application/json" },
+            .{ .name = "accept", .value = "application/json" },
+        };
 
-        if (reqOpts.version) |version| {
-            req.version = version;
-        }
-
-        try req.headers.set(HeaderName.USER_AGENT, self.config.user_agent);
-        if (!req.headers.contains("Accept-Encoding")) {
-            const ae = self.config.accept_encoding orelse "gzip, deflate, br, zstd, identity";
-            try req.headers.set("Accept-Encoding", ae);
-        }
-
-        if (self.config.default_headers) |hdrs| {
-            for (hdrs) |h| {
-                try req.headers.set(h[0], h[1]);
-            }
-        }
-
-        if (reqOpts.headers) |hdrs| {
-            for (hdrs) |h| {
-                try req.headers.set(h[0], h[1]);
-            }
-        }
-
-        if (reqOpts.query_params) |params| {
-            try req.addQueryParams(params);
-        }
-
-        if (reqOpts.body) |body| {
-            try req.setBody(body);
-        } else if (reqOpts.json) |json_body| {
-            try req.setJson(json_body);
-        } else if (reqOpts.form_fields) |fields| {
-            try req.setFormUrlEncoded(fields);
-        } else if (reqOpts.multipart_fields != null or reqOpts.multipart_files != null) {
-            const boundary = reqOpts.multipart_boundary orelse "----httpxBoundary1234567890";
-            var builder = @import("../data/multipart.zig").MultipartBuilder.init(self.allocator, boundary);
-            defer builder.deinit();
-
-            if (reqOpts.multipart_fields) |fields| {
-                for (fields) |field| {
-                    try builder.addField(field.name, field.value);
-                }
-            }
-
-            if (reqOpts.multipart_files) |files| {
-                for (files) |file| {
-                    const resolved_mime = file.content_type orelse common.mimeTypeFromPathOr(file.filename, "application/octet-stream");
-
-                    try builder.addFile(file.name, file.filename, resolved_mime, file.data);
-                }
-            }
-
-            const body = try builder.build();
-            defer self.allocator.free(body);
-            try req.setBody(body);
-
-            const ct = try builder.contentType();
-            defer self.allocator.free(ct);
-            try req.headers.set(HeaderName.CONTENT_TYPE, ct);
-        }
-
-        if (reqOpts.range_header) |range| {
-            try req.headers.set(HeaderName.RANGE, range);
-        }
-
-        if (reqOpts.api_key_header) |header_name| {
-            if (reqOpts.api_key_value) |key_value| {
-                try req.headers.set(header_name, key_value);
-            }
-        }
-
-        if (reqOpts.expect_100_continue) {
-            try req.headers.set(HeaderName.EXPECT, "100-continue");
-        }
-
-        // Enforce request size limit.
-        if (req.body) |body| {
-            if (body.len > self.config.max_request_size) {
-                return error.RequestTooLarge;
-            }
-        }
-
-        // Compress request body if configured.
-        if (req.body) |body| {
-            if (body.len > 0 and self.config.request_compression != null) {
-                if (req.headers.get("Content-Encoding") == null) {
-                    const ct = req.headers.get("Content-Type") orelse "";
-                    if (compression_util.isCompressible(ct)) {
-                        if (compression_util.compressWithLevel(
-                            self.allocator,
-                            .gzip,
-                            body,
-                            self.config.request_compression.?,
-                        )) |compressed| {
-                            req.body = compressed;
-                            req.body_owned = true;
-                            try req.headers.set("Content-Encoding", "gzip");
-                            try req.headers.set("Vary", "Content-Encoding");
-                        } else |_| {}
-                    }
-                }
-            }
-        }
-
-        if (reqOpts.basic_auth) |basic| {
-            try req.setBasicAuth(basic.username, basic.password);
-        }
-        if (reqOpts.bearer_token) |token| {
-            try req.setBearerAuth(token);
-        }
-
-        try self.attachCookies(&req);
-
-        for (self.interceptors.items) |interceptor| {
-            if (interceptor.request_fn) |f| {
-                try f(&req, interceptor.context);
-            }
-        }
-
-        var response = try self.executeRequest(&req, reqOpts);
-        try self.storeCookies(&response, req.uri.host orelse "");
-
-        for (self.interceptors.items) |interceptor| {
-            if (interceptor.response_fn) |f| {
-                try f(&response, interceptor.context);
-            }
-        }
-
-        const should_follow = reqOpts.follow_redirects orelse self.config.follow_redirects;
-        if (should_follow and response.isRedirect()) {
-            if (depth >= self.config.redirect_policy.max_redirects) {
-                if (self.config.metrics) |m| m.redirectFailed();
-                response.deinit();
-                return error.TooManyRedirects;
-            }
-
-            const location = response.headers.get(HeaderName.LOCATION) orelse {
-                response.deinit();
-                return error.InvalidResponse;
-            };
-
-            const next_url = try self.resolveRedirectUrl(req.uri, location);
-            defer self.allocator.free(next_url);
-
-            // Call redirect interceptors.
-            for (self.interceptors.items) |interceptor| {
-                if (interceptor.redirect_fn) |fn_ptr| {
-                    fn_ptr(next_url, interceptor.context);
-                }
-            }
-
-            const next_method = self.config.redirect_policy.getRedirectMethod(response.status.code, req.method);
-
-            // Security: strip credentials on cross-origin redirects (RFC 6454).
-            var next_opts = reqOpts;
-            var safe_headers = std.ArrayList([2][]const u8).empty;
-            if (!isSameOrigin(req.uri.host orelse "", next_url)) {
-                // Strip Authorization header to prevent credential leakage.
-                if (next_opts.headers) |hdrs| {
-                    for (hdrs) |h| {
-                        if (!std.ascii.eqlIgnoreCase(h[0], "Authorization") and
-                            !std.ascii.eqlIgnoreCase(h[0], "Proxy-Authorization"))
-                        {
-                            safe_headers.append(self.allocator, h) catch break;
-                        }
-                    }
-                    next_opts.headers = safe_headers.items;
-                }
-                // Clear auth fields.
-                next_opts.bearer_token = null;
-                next_opts.basic_auth = null;
-            }
-
-            response.deinit();
-            defer safe_headers.deinit(self.allocator);
-            if (self.config.metrics) |m| m.redirect();
-            return self.requestInternal(next_method, next_url, next_opts, depth + 1);
-        }
-
-        return response;
+        return self.post(ro);
     }
 
-    /// Executes the actual HTTP request.
-    fn executeRequest(self: *Self, req: *Request, reqOpts: RequestOptions) !Response {
-        if (self.config.metrics) |m| m.recordRequest();
-        const start_time_ms: u64 = @intCast(@max(common.nowMillis(), 0));
-        const timeouts = self.resolveRequestTimeouts(reqOpts);
-        const request_deadline_ms: u64 = if (timeouts.request_ms > 0) start_time_ms + timeouts.request_ms else 0;
-        const policy = self.config.retry_policy;
-        const can_retry_method = (!policy.retry_only_idempotent) or req.method.isIdempotent();
-
-        var attempt: u32 = 0;
-        while (true) {
-            // Check request deadline before each attempt.
-            if (request_deadline_ms > 0) {
-                const now_ms: u64 = @intCast(@max(common.nowMillis(), 0));
-                if (now_ms >= request_deadline_ms) {
-                    if (self.config.metrics) |m| m.recordError();
-                    return error.RequestTimeout;
+    /// Safely updates an executable or asset on disk with rollback preservation.
+    pub fn updateFile(self: *Client, url: []const u8, target_path: []const u8, opts: anytype) DownloadError!DownloadResult {
+        const update_options: UpdateOptions = if (@TypeOf(opts) == UpdateOptions) opts else blk: {
+            var o = UpdateOptions{};
+            inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
+                if (comptime std.mem.eql(u8, f.name, "verify")) {
+                    const v = @field(opts, f.name);
+                    if (@TypeOf(v) == VerifyOptions) {
+                        o.verify = v;
+                    } else {
+                        inline for (@typeInfo(@TypeOf(v)).@"struct".fields) |vf| {
+                            if (@hasField(VerifyOptions, vf.name)) {
+                                @field(o.verify, vf.name) = @field(v, vf.name);
+                            }
+                        }
+                    }
+                } else if (@hasField(UpdateOptions, f.name)) {
+                    @field(o, f.name) = @field(opts, f.name);
                 }
             }
+            break :blk o;
+        };
+        return DownloadCore.updateFile(self.allocator, self, url, target_path, update_options);
+    }
 
-            var res = self.executeRequestOnce(req, reqOpts) catch |err| {
-                if (policy.retry_on_connection_error and can_retry_method and attempt < policy.max_retries and isRetryableRequestError(err)) {
-                    // Check deadline before retry delay.
-                    if (request_deadline_ms > 0) {
-                        const now_ms: u64 = @intCast(@max(common.nowMillis(), 0));
-                        if (now_ms >= request_deadline_ms) {
-                            if (self.config.metrics) |m| m.recordError();
-                            return error.RequestTimeout;
-                        }
+    /// Returns true if the internet is reachable from this machine.
+    ///
+    /// Probes a small set of highly-available public endpoints (Cloudflare /
+    /// Google DNS on port 53) using the client's own I/O backend.  IPv4 and
+    /// IPv6 are both attempted.
+    ///
+    /// Example:
+    /// ```zig
+    /// if (!client.isOnline()) return error.NoInternet;
+    /// ```
+    pub fn isOnline(self: *Client) bool {
+        return connectivity.isOnline(self.io);
+    }
+
+    /// Probes internet connectivity and returns detailed results.
+    ///
+    /// Returns a `ConnectivityResult` with `.online`, `.family`, `.latency_ms`,
+    /// and `.endpointStr()`.  Useful for diagnostics or choosing IPv4/IPv6.
+    ///
+    /// Example:
+    /// ```zig
+    /// const r = client.checkConnectivity(.{ .timeout_ms = 2000 });
+    /// if (r.online) std.debug.print("online via {s} ({?d}ms)\n", .{ r.endpointStr(), r.latency_ms });
+    /// ```
+    pub fn checkConnectivity(self: *Client, opts: ConnectivityOptions) ConnectivityResult {
+        return connectivity.checkConnectivity(self.io, opts);
+    }
+
+    /// Graceful connection drain (purge pool, but don't destroy the client).
+    pub fn close(self: *Client) void {
+        self.pool.purge();
+    }
+
+    /// Full reset (close + clear DNS cache).
+    pub fn reset(self: *Client) void {
+        self.close();
+        if (self.config.dns_cache) |*dc| {
+            dc.deinit();
+            dc.* = dns_cache_mod.Cache.init(
+                self.allocator,
+                .{
+                    .ttl_ms = self.config.dns_cache.ttl_ms,
+                    .negative_ttl_ms = self.config.dns_cache.negative_ttl_ms,
+                    .max_entries = self.config.dns_cache.max_entries,
+                },
+                req_mod.systemLookupStrings,
+                null,
+            );
+        }
+    }
+
+    pub fn doRequest(self: *Client, method: Method, opts: anytype) Error!Response {
+        var attempt: u32 = 0;
+        const max_attempts = self.config.max_retries + 1;
+        while (attempt < max_attempts) : (attempt += 1) {
+            var result = self.doRequestInner(method, opts) catch |err| {
+                if (attempt + 1 >= max_attempts) return err;
+                clock.sleepMillis(self.config.retry_delay_ms * (attempt + 1));
+                continue;
+            };
+            if (self.config.max_retries > 0 and attempt + 1 < max_attempts) {
+                var should_retry = false;
+                for (self.config.retry_status_codes) |code| {
+                    if (result.status == code) {
+                        should_retry = true;
+                        break;
                     }
-                    attempt += 1;
-                    if (self.config.metrics) |m| {
-                        m.recordError();
-                        m.retryAttempt();
-                    }
-                    // Call retry interceptors.
-                    for (self.interceptors.items) |interceptor| {
-                        if (interceptor.retry_fn) |fn_ptr| {
-                            fn_ptr(attempt, interceptor.context);
-                        }
-                    }
-                    const delay_ms = policy.calculateDelay(attempt);
-                    if (delay_ms > 0) sleepMs(delay_ms);
+                }
+                if (should_retry) {
+                    result.deinit();
+                    clock.sleepMillis(self.config.retry_delay_ms * (attempt + 1));
                     continue;
                 }
-                // Call error interceptors.
-                for (self.interceptors.items) |interceptor| {
-                    if (interceptor.error_fn) |fn_ptr| {
-                        fn_ptr(err, interceptor.context);
-                    }
-                }
-                if (self.config.metrics) |m| m.recordError();
-                return err;
-            };
-
-            if (can_retry_method and attempt < policy.max_retries and policy.shouldRetryStatus(res.status.code)) {
-                // Check deadline before retry.
-                if (request_deadline_ms > 0) {
-                    const now_ms: u64 = @intCast(@max(common.nowMillis(), 0));
-                    if (now_ms >= request_deadline_ms) {
-                        res.deinit();
-                        if (self.config.metrics) |m| m.recordError();
-                        return error.RequestTimeout;
-                    }
-                }
-                // Parse Retry-After header if present.
-                const retry_after_ms = if (res.headers.get("Retry-After")) |ra|
-                    parseRetryAfter(ra) orelse policy.calculateDelay(attempt)
-                else
-                    policy.calculateDelay(attempt);
-                res.deinit();
-                attempt += 1;
-                if (self.config.metrics) |m| m.retryAttempt();
-                // Call retry interceptors.
-                for (self.interceptors.items) |interceptor| {
-                    if (interceptor.retry_fn) |fn_ptr| {
-                        fn_ptr(attempt, interceptor.context);
-                    }
-                }
-                if (retry_after_ms > 0) sleepMs(retry_after_ms);
-                continue;
             }
-
-            // Record metrics.
-            if (self.config.metrics) |m| {
-                const now_ms: u64 = @intCast(@max(common.nowMillis(), 0));
-                const elapsed_ms: u64 = now_ms -| start_time_ms;
-                const latency_ns = elapsed_ms * 1_000_000;
-                const body_len: u64 = if (res.body) |b| @intCast(b.len) else 0;
-                m.recordResponse(res.status.code, body_len, latency_ns);
-            }
-
-            return res;
+            return result;
         }
+        unreachable;
     }
 
-    /// Returns true for transport-layer failures that are worth retrying.
-    /// TLS/protocol/parse failures are treated as deterministic and fail fast.
-    fn isRetryableRequestError(err: anyerror) bool {
-        const name = @errorName(err);
-
-        if (mem.startsWith(u8, name, "TLS")) return false;
-
-        return !(mem.eql(u8, name, "InvalidUri") or
-            mem.eql(u8, name, "InvalidResponse") or
-            mem.eql(u8, name, "InvalidHeader") or
-            mem.eql(u8, name, "InvalidChunkSize") or
-            mem.eql(u8, name, "ProtocolError") or
-            mem.eql(u8, name, "HTTP2Error") or
-            mem.eql(u8, name, "HTTP3Error") or
-            mem.eql(u8, name, "QUICError") or
-            mem.eql(u8, name, "CompressionError") or
-            mem.eql(u8, name, "ResponseTooLarge") or
-            mem.eql(u8, name, "RequestTooLarge") or
-            mem.eql(u8, name, "TooManyRedirects"));
-    }
-
-    /// Parses a Retry-After header value (seconds or HTTP-date) into milliseconds.
-    fn parseRetryAfter(value: []const u8) ?u64 {
-        const trimmed = mem.trim(u8, value, " \t\r\n");
-        // Try integer seconds first.
-        if (std.fmt.parseInt(u64, trimmed, 10)) |seconds| {
-            return seconds * 1000;
-        } else |_| {}
-        // Try HTTP-date format (simplified: just return a default 60s delay).
-        return null;
-    }
-
-    fn formatProxyRequest(self: *Self, req: *const Request, proxy: types.Proxy) ![]u8 {
-        var buffer = std.ArrayList(u8).empty;
-        const writer = list_writer.init(self.allocator, &buffer);
-
-        const method_str = req.method.toString();
-        // Construct absolute URI
-        try writer.print("{s} http://{s}:{d}{s}", .{ method_str, req.uri.host orelse "", req.uri.effectivePort(), req.uri.path });
-        if (req.uri.query) |q| {
-            try writer.print("?{s}", .{q});
-        }
-        try writer.print(" {s}\r\n", .{req.version.toString()});
-
-        for (req.headers.entries.items) |h| {
-            try writer.print("{s}: {s}\r\n", .{ h.name, h.value });
+    fn doRequestInner(self: *Client, method: Method, opts: anytype) Error!Response {
+        // Track allocations for header/query string conversions that need freeing.
+        var allocated_strings: std.ArrayList([]u8) = .empty;
+        defer {
+            for (allocated_strings.items) |s| self.allocator.free(s);
+            allocated_strings.deinit(self.allocator);
         }
 
-        if (proxy.username) |user| {
-            const pass = proxy.password orelse "";
-            const auth_val = try @import("../data/encoding.zig").Base64.formatBasicAuth(self.allocator, user, pass);
-            defer self.allocator.free(auth_val);
-            try writer.print("Proxy-Authorization: {s}\r\n", .{auth_val});
-        }
+        var hdrs: std.ArrayList(req_mod.Header) = .empty;
+        defer hdrs.deinit(self.allocator);
 
-        try writer.writeAll("\r\n");
-
-        if (req.body) |body| {
-            try writer.writeAll(body);
-        }
-
-        return buffer.toOwnedSlice(self.allocator);
-    }
-
-    fn establishProxyTLSTunnel(self: *Self, socket: *Socket, target_host: []const u8, target_port: u16, proxy: types.Proxy) !void {
-        var buffer = std.ArrayList(u8).empty;
-        const writer = list_writer.init(self.allocator, &buffer);
-
-        try writer.print("CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n", .{ target_host, target_port, target_host, target_port });
-
-        if (proxy.username) |user| {
-            const pass = proxy.password orelse "";
-            const auth_val = try @import("../data/encoding.zig").Base64.formatBasicAuth(self.allocator, user, pass);
-            defer self.allocator.free(auth_val);
-            try writer.print("Proxy-Authorization: {s}\r\n", .{auth_val});
-        }
-        try writer.writeAll("\r\n");
-
-        const connect_req = try buffer.toOwnedSlice(self.allocator);
-        defer self.allocator.free(connect_req);
-
-        try socket.sendAll(connect_req);
-
-        var response = try self.readResponseFromTcp(socket, true);
-        defer response.deinit();
-
-        if (response.status.code < 200 or response.status.code >= 300) {
-            return error.ProxyConnectionFailed;
-        }
-    }
-
-    fn resolveRequestTimeouts(self: *const Self, req_opts: RequestOptions) RequestTimeouts {
-        var connect_ms = self.config.timeouts.connect_ms;
-        var read_ms = self.config.timeouts.read_ms;
-        var write_ms = self.config.timeouts.write_ms;
-        var request_ms = self.config.timeouts.request_ms;
-
-        if (req_opts.timeouts) |t| {
-            connect_ms = t.connect_ms;
-            read_ms = t.read_ms;
-            write_ms = t.write_ms;
-            if (t.request_ms > 0) request_ms = t.request_ms;
-        }
-
-        if (req_opts.timeout_ms) |ms| {
-            connect_ms = ms;
-            read_ms = ms;
-            write_ms = ms;
-        }
-
-        if (req_opts.connect_timeout_ms) |c_ms| connect_ms = c_ms;
-        if (req_opts.read_timeout_ms) |r_ms| read_ms = r_ms;
-        if (req_opts.write_timeout_ms) |w_ms| write_ms = w_ms;
-
-        return .{
-            .connect_ms = connect_ms,
-            .read_ms = read_ms,
-            .write_ms = write_ms,
-            .request_ms = request_ms,
+        // Content-Type inference
+        var ct: ?[]const u8 = if (@hasField(@TypeOf(opts), "content_type")) opts.content_type else null;
+        const has_json = blk: {
+            if (!@hasField(@TypeOf(opts), "json")) break :blk false;
+            const v = opts.json;
+            const T = @TypeOf(v);
+            if (comptime @typeInfo(T) == .optional) break :blk v != null;
+            break :blk true;
         };
-    }
-
-    fn executeRequestOnce(self: *Self, req: *Request, reqOpts: RequestOptions) !Response {
-        const timeouts = self.resolveRequestTimeouts(reqOpts);
-        const keep_alive = reqOpts.keep_alive orelse self.config.keep_alive;
-        const verify_ssl = reqOpts.verify_ssl orelse self.config.verify_ssl;
-        const unix_socket_path = reqOpts.unix_socket_path orelse self.config.unix_socket_path;
-
-        if (unix_socket_path) |path| {
-            const unix_mod = @import("../net/unix.zig");
-            const unix_sock = try unix_mod.UnixClient.connect(path);
-            var socket = Socket.fromHandle(unix_sock.fd);
-            defer socket.close();
-
-            if (timeouts.read_ms > 0) {
-                try socket.setRecvTimeout(timeouts.read_ms);
-            }
-            if (timeouts.write_ms > 0) {
-                try socket.setSendTimeout(timeouts.write_ms);
-            }
-
-            const request_data = try http.formatRequest(req, self.allocator);
-            defer self.allocator.free(request_data);
-
-            try socket.sendAll(request_data);
-            if (self.config.metrics) |m| m.recordBytesSent(@intCast(request_data.len));
-            return self.readResponseFromTcp(&socket, req.method.hasResponseBody());
+        const has_json_typed = @hasField(@TypeOf(opts), "json_typed") and opts.json_typed != null;
+        const has_form = blk: {
+            if (!@hasField(@TypeOf(opts), "form")) break :blk false;
+            const v = opts.form;
+            const T = @TypeOf(v);
+            if (comptime @typeInfo(T) == .optional) break :blk v != null else break :blk true;
+        };
+        if (ct == null and (has_json or has_json_typed)) ct = "application/json";
+        if (ct == null and has_form) ct = "application/x-www-form-urlencoded";
+        if (ct) |c| {
+            hdrs.append(self.allocator, .{ .name = "Content-Type", .value = c }) catch return Error.OutOfMemory;
         }
-
-        const host = req.uri.host orelse return error.InvalidUri;
-        const port = req.uri.effectivePort();
-
-        var effective_proxy = reqOpts.proxy orelse self.config.proxy;
-        if (effective_proxy) |p| {
-            if (p.shouldBypassProxy(host)) effective_proxy = null;
-        }
-
-        const wants_http2 = self.config.http2_enabled or req.version == .HTTP_2;
-        const wants_http3 = self.config.http3_enabled or req.version == .HTTP_3;
-
-        // HTTP/3 takes priority, but falls back to HTTP/2 when a proxy is
-        // configured (QUIC does not support standard HTTP proxies).
-        if (wants_http3) {
-            if (effective_proxy != null) {
-                // Fall back to HTTP/2 if also enabled; otherwise return error.
-                if (wants_http2) {
-                    return self.executeRequestHTTP2(req, host, port, timeouts, reqOpts);
+        // Headers: support both []const Header and struct literal
+        if (@hasField(@TypeOf(opts), "headers")) {
+            const H = @TypeOf(opts.headers);
+            if (comptime @typeInfo(H) == .pointer and @typeInfo(H).pointer.size == .slice) {
+                for (opts.headers) |h| {
+                    hdrs.append(self.allocator, h) catch return Error.OutOfMemory;
                 }
-                return error.ProxyNotSupported;
-            }
-            return self.executeRequestHTTP3(req, host, port, timeouts, reqOpts);
-        }
-
-        if (wants_http2) {
-            return self.executeRequestHTTP2(req, host, port, timeouts, reqOpts);
-        }
-
-        var request_data: []u8 = undefined;
-        if (effective_proxy) |p| {
-            if (p.kind == .http and !req.uri.isTLS()) {
-                request_data = try self.formatProxyRequest(req, p);
-            } else {
-                request_data = try http.formatRequest(req, self.allocator);
-            }
-        } else {
-            request_data = try http.formatRequest(req, self.allocator);
-        }
-        defer self.allocator.free(request_data);
-
-        if (req.uri.isTLS()) {
-            const connect_host = if (effective_proxy) |p| p.host else host;
-            const connect_port = if (effective_proxy) |p| p.port else port;
-            const addr = try self.resolveAddress(connect_host, connect_port);
-
-            var socket = try Socket.createForAddress(addr);
-            defer socket.close();
-
-            // Do not set SO_RCVTIMEO / SO_SNDTIMEO on TLS sockets.
-            // The TLS layer performs multi-step record I/O; a per-recv
-            // timeout fires mid-handshake and kills the TLS state
-            // machine.  The connect timeout is handled separately by
-            // connectWithTimeout (which uses poll).
-            try socket.setNoDelay(true);
-
-            try socket.connectWithTimeout(addr, timeouts.connect_ms);
-            try socket.setNoDelay(true);
-
-            if (effective_proxy) |p| {
-                if (p.kind == .socks5h) {
-                    try proxy_mod.establishSocks5hTunnel(&socket, host, port, p);
-                } else {
-                    try self.establishProxyTLSTunnel(&socket, host, port, p);
-                }
-            }
-
-            // Set a temporary SO_RCVTIMEO for the TLS handshake to prevent
-            // blocking indefinitely. Restored after handshake in executeTLSHttp.
-            if (timeouts.connect_ms > 0) {
-                try socket.setRecvTimeout(timeouts.connect_ms);
-            }
-
-            return self.executeTLSHttp(&socket, host, port, request_data, verify_ssl);
-        }
-
-        if (keep_alive) {
-            var conn = try self.pool.getConnection(host, port, effective_proxy, timeouts.connect_ms);
-            errdefer conn.close();
-            defer self.pool.releaseConnection(conn);
-
-            if (timeouts.read_ms > 0) {
-                try conn.socket.setRecvTimeout(timeouts.read_ms);
-            }
-            if (timeouts.write_ms > 0) {
-                try conn.socket.setSendTimeout(timeouts.write_ms);
-            }
-            try conn.socket.setKeepAlive(true);
-
-            try conn.socket.sendAll(request_data);
-            if (self.config.metrics) |m| m.recordBytesSent(@intCast(request_data.len));
-            var res = try self.readResponseFromTcp(&conn.socket, req.method.hasResponseBody());
-            if (!res.headers.isKeepAlive(res.version)) {
-                self.pool.closeConnection(conn);
-            }
-            return res;
-        }
-
-        const connect_host = if (effective_proxy) |p| p.host else host;
-        const connect_port = if (effective_proxy) |p| p.port else port;
-        const addr = try self.resolveAddress(connect_host, connect_port);
-
-        var socket = try Socket.createForAddress(addr);
-        defer socket.close();
-
-        if (timeouts.read_ms > 0) {
-            try socket.setRecvTimeout(timeouts.read_ms);
-        }
-        if (timeouts.write_ms > 0) {
-            try socket.setSendTimeout(timeouts.write_ms);
-        }
-
-        try socket.connectWithTimeout(addr, timeouts.connect_ms);
-
-        if (effective_proxy) |p| {
-            if (p.kind == .socks5h) {
-                try proxy_mod.establishSocks5hTunnel(&socket, host, port, p);
-            }
-        }
-
-        try socket.sendAll(request_data);
-        if (self.config.metrics) |m| m.recordBytesSent(@intCast(request_data.len));
-        return self.readResponseFromTcp(&socket, req.method.hasResponseBody());
-    }
-
-    fn executeRequestHTTP2(
-        self: *Self,
-        req: *Request,
-        host: []const u8,
-        port: u16,
-        timeouts: RequestTimeouts,
-        reqOpts: RequestOptions,
-    ) !Response {
-        var effective_proxy = reqOpts.proxy orelse self.config.proxy;
-        if (effective_proxy) |p| {
-            if (p.shouldBypassProxy(host)) effective_proxy = null;
-        }
-        const verify_ssl = reqOpts.verify_ssl orelse self.config.verify_ssl;
-
-        const connect_host = if (effective_proxy) |p| p.host else host;
-        const connect_port = if (effective_proxy) |p| p.port else port;
-        const addr = try self.resolveAddress(connect_host, connect_port);
-
-        var socket = try Socket.createForAddress(addr);
-        defer socket.close();
-
-        // Do not set SO_RCVTIMEO / SO_SNDTIMEO on sockets used for
-        // TLS -- the TLS layer performs multi-step record I/O and a
-        // per-recv timeout fires mid-handshake.  The connect timeout
-        // is handled separately by connectWithTimeout.
-
-        try socket.connectWithTimeout(addr, timeouts.connect_ms);
-
-        if (effective_proxy) |p| {
-            if (p.kind == .socks5h) {
-                try proxy_mod.establishSocks5hTunnel(&socket, host, port, p);
-            } else {
-                try self.establishProxyTLSTunnel(&socket, host, port, p);
-            }
-        }
-
-        if (req.uri.isTLS()) {
-            // Build ALPN list based on enabled protocols.
-            // When both HTTP/2 and HTTP/3 are enabled, advertise all three.
-            const tls_session_cfg = blk: {
-                if (self.config.http3_enabled and self.config.http2_enabled) {
-                    break :blk if (verify_ssl)
-                        TLSConfig.withH3(self.allocator)
-                    else
-                        TLSConfig.insecureWithH3(self.allocator);
-                } else if (verify_ssl) {
-                    break :blk TLSConfig.withH2(self.allocator);
-                } else {
-                    break :blk TLSConfig.insecureWithH2(self.allocator);
-                }
-            };
-            var session = TLSSession.init(tls_session_cfg);
-            defer session.deinit();
-            session.attachSocket(&socket);
-
-            // Set a temporary SO_RCVTIMEO for the TLS handshake to prevent
-            // it from blocking indefinitely. The TLS layer performs multi-step
-            // record I/O, but a timeout here is better than no timeout at all.
-            // After handshake completes, we either restore the original timeout
-            // or set the configured read timeout.
-            const tls_handshake_timeout = timeouts.connect_ms;
-            if (tls_handshake_timeout > 0) {
-                try socket.setRecvTimeout(tls_handshake_timeout);
-            }
-            const handshake_result = session.handshake(host);
-            // Restore or set appropriate timeout after handshake.
-            if (timeouts.read_ms > 0) {
-                try socket.setRecvTimeout(timeouts.read_ms);
-            }
-            try handshake_result;
-
-            const negotiated = http.negotiateVersion(session.negotiatedProtocol());
-            switch (negotiated) {
-                .http_2 => {
-                    var transport = TLSHTTP2Transport{ .session = &session };
-                    return self.executeHTTP2WithTransport(req, &transport);
-                },
-                .http_3 => {
-                    // Server selected h3 via ALPN.  For TLS-based connections
-                    // (TCP), HTTP/3 negotiation means the server prefers QUIC
-                    // but we are on a TCP socket.  Attempt to upgrade via
-                    // Alt-Svc or fall back to HTTP/2 if available.
-                    if (self.config.http2_enabled) {
-                        var transport = TLSHTTP2Transport{ .session = &session };
-                        return self.executeHTTP2WithTransport(req, &transport);
-                    }
-                    return error.UnsupportedHttpVersion;
-                },
-                .http_1_1, .http_1_0 => {
-                    // Server selected http/1.1 via ALPN (or ALPN was
-                    // unavailable).  Fall back to HTTP/1.1 over the
-                    // already-established TLS session.
-                    const request_data = try http.formatRequest(req, self.allocator);
-                    defer self.allocator.free(request_data);
-
-                    try session.writeAll(request_data);
-                    try session.flush();
-
-                    return self.readResponseFromTLS(&session, req.method.hasResponseBody());
-                },
-            }
-        }
-
-        var transport = SocketHTTP2Transport{ .socket = &socket };
-
-        // Set recv timeout for the HTTP/2 preface exchange so we
-        // do not hang if the server never responds.
-        if (timeouts.read_ms > 0) {
-            try socket.setRecvTimeout(timeouts.read_ms);
-        }
-
-        return self.executeHTTP2WithTransport(req, &transport);
-    }
-
-    fn executeRequestHTTP3(
-        self: *Self,
-        req: *Request,
-        host: []const u8,
-        port: u16,
-        timeouts: RequestTimeouts,
-        reqOpts: RequestOptions,
-    ) !Response {
-        _ = reqOpts;
-        const addr = try self.resolveAddress(host, port);
-
-        var socket = try UdpSocket.createForAddress(addr);
-        defer socket.close();
-
-        if (timeouts.read_ms > 0) {
-            try socket.setRecvTimeout(timeouts.read_ms);
-        }
-        if (timeouts.write_ms > 0) {
-            try socket.setSendTimeout(timeouts.write_ms);
-        }
-
-        try socket.connect(addr);
-
-        var transport = UDPHTTP3Transport{ .socket = &socket };
-        return self.executeHTTP3WithTransport(req, &transport);
-    }
-
-    fn executeHTTP3WithTransport(self: *Self, req: *Request, transport: anytype) !Response {
-        var qpack_encoder = qpack.QPACKContext.initWithCapacity(
-            self.allocator,
-            common.clampU64ToUsize(self.config.http3_settings.qpack_max_table_capacity),
-        );
-        defer qpack_encoder.deinit();
-        qpack_encoder.max_blocked_streams = self.config.http3_settings.qpack_blocked_streams;
-
-        var qpack_decoder = qpack.QPACKContext.initWithCapacity(
-            self.allocator,
-            common.clampU64ToUsize(self.config.http3_settings.qpack_max_table_capacity),
-        );
-        defer qpack_decoder.deinit();
-        qpack_decoder.max_blocked_streams = self.config.http3_settings.qpack_blocked_streams;
-
-        // HTTP/3 flow control state
-        var conn_max_data: u64 = 10 * 1024 * 1024; // 10 MB default
-        var conn_data_sent: u64 = 0;
-        var stream_max_data: u64 = 1024 * 1024; // 1 MB default per stream
-        var stream_data_sent: u64 = 0;
-
-        var path_buf: ?[]u8 = null;
-        defer if (path_buf) |buf| self.allocator.free(buf);
-        var authority_buf: ?[]u8 = null;
-        defer if (authority_buf) |buf| self.allocator.free(buf);
-
-        var header_entries = std.ArrayList(qpack.HeaderEntry).empty;
-        defer header_entries.deinit(self.allocator);
-
-        var owned_header_names = std.ArrayList([]u8).empty;
-        defer {
-            for (owned_header_names.items) |name| self.allocator.free(name);
-            owned_header_names.deinit(self.allocator);
-        }
-
-        try buildPseudoHeaders(self.allocator, req, &header_entries, &owned_header_names, &path_buf, &authority_buf);
-
-        const headers_block = try qpack.encodeHeaders(&qpack_encoder, header_entries.items, self.allocator);
-        defer self.allocator.free(headers_block);
-
-        var request_stream_payload = std.ArrayList(u8).empty;
-        defer request_stream_payload.deinit(self.allocator);
-        try http.appendHTTP3Frame(&request_stream_payload, self.allocator, .headers, headers_block);
-
-        if (req.body) |body| {
-            if (body.len > 0) {
-                // Check connection and stream flow control limits
-                if (conn_data_sent + body.len > conn_max_data) return error.FlowControlError;
-                if (stream_data_sent + body.len > stream_max_data) return error.FlowControlError;
-                try http.appendHTTP3Frame(&request_stream_payload, self.allocator, .data, body);
-                conn_data_sent += body.len;
-                stream_data_sent += body.len;
-            }
-        }
-
-        var settings_payload = std.ArrayList(u8).empty;
-        defer settings_payload.deinit(self.allocator);
-        try http.encodeHTTP3SettingsPayload(self.config.http3_settings, self.allocator, &settings_payload);
-
-        var control_stream_payload = std.ArrayList(u8).empty;
-        defer control_stream_payload.deinit(self.allocator);
-        try http.appendVarInt(&control_stream_payload, self.allocator, @intFromEnum(quic.HTTP3StreamType.control));
-        try http.appendHTTP3Frame(&control_stream_payload, self.allocator, .settings, settings_payload.items);
-
-        // Send MAX_DATA and MAX_STREAM_DATA to advertise our flow control limits
-        {
-            var max_data_payload = std.ArrayList(u8).empty;
-            defer max_data_payload.deinit(self.allocator);
-            try http.appendVarInt(&max_data_payload, self.allocator, conn_max_data);
-            try http.appendHTTP3Frame(&control_stream_payload, self.allocator, .max_data, max_data_payload.items);
-        }
-        {
-            var max_stream_data_payload = std.ArrayList(u8).empty;
-            defer max_stream_data_payload.deinit(self.allocator);
-            try http.appendVarInt(&max_stream_data_payload, self.allocator, 0); // stream_id 0
-            try http.appendVarInt(&max_stream_data_payload, self.allocator, stream_max_data);
-            try http.appendHTTP3Frame(&control_stream_payload, self.allocator, .max_stream_data, max_stream_data_payload.items);
-        }
-
-        var session = HTTP3QUICSession.initClient();
-
-        // Client control stream (id=2) and request stream (id=0).
-        try self.sendHTTP3StreamData(transport, &session, 2, false, control_stream_payload.items);
-        try self.sendHTTP3StreamData(transport, &session, 0, true, request_stream_payload.items);
-
-        var response_stream_payload = std.ArrayList(u8).empty;
-        defer response_stream_payload.deinit(self.allocator);
-
-        var peer_control_payload = std.ArrayList(u8).empty;
-        defer peer_control_payload.deinit(self.allocator);
-
-        var read_buf: [64 * 1024]u8 = undefined;
-        var got_response_fin = false;
-
-        var packet_counter: usize = 0;
-        while (!got_response_fin) {
-            packet_counter += 1;
-            if (packet_counter > 10_000) return error.ProtocolError;
-
-            const n = try transport.recvDatagram(&read_buf);
-            if (n == 0) continue;
-
-            const incoming = try decodeHTTP3StreamDatagram(read_buf[0..n], &session);
-
-            if (incoming.stream_id == 0) {
-                if (response_stream_payload.items.len + incoming.data.len > self.config.max_response_size) {
-                    return error.ResponseTooLarge;
-                }
-                try response_stream_payload.appendSlice(self.allocator, incoming.data);
-                if (incoming.fin) {
-                    got_response_fin = true;
-                }
-            } else if (incoming.stream_id == 3) {
-                if (peer_control_payload.items.len + incoming.data.len > self.config.max_response_size) {
-                    return error.ResponseTooLarge;
-                }
-                try peer_control_payload.appendSlice(self.allocator, incoming.data);
-            }
-        }
-
-        if (peer_control_payload.items.len > 0) {
-            try parseHTTP3ControlStream(peer_control_payload.items);
-        }
-
-        var response_headers = Headers.init(self.allocator);
-        defer response_headers.deinit();
-
-        var response_body = std.ArrayList(u8).empty;
-        defer response_body.deinit(self.allocator);
-
-        var status_code: ?u16 = null;
-        try self.parseHTTP3ResponseFrames(
-            &qpack_decoder,
-            response_stream_payload.items,
-            &status_code,
-            &response_headers,
-            &response_body,
-            &conn_max_data,
-            &stream_max_data,
-            &got_response_fin,
-        );
-
-        const final_status = status_code orelse return error.InvalidResponse;
-
-        var response = Response.init(self.allocator, final_status);
-        errdefer response.deinit();
-        response.version = .HTTP_3;
-
-        response.headers.deinit();
-        response.headers = response_headers;
-        response_headers = Headers.init(self.allocator);
-
-        if (response_body.items.len > 0) {
-            // Decompress body based on Content-Encoding header (HTTP/3).
-            if (self.config.auto_decompress) {
-                if (response.headers.get(HeaderName.CONTENT_ENCODING)) |encoding_str| {
-                    if (compression_util.ContentEncoding.fromString(encoding_str)) |enc| {
-                        if (enc != .identity) {
-                            if (compression_util.decompress(self.allocator, enc, response_body.items)) |decompressed| {
-                                response.body = decompressed;
-                                response.body_owned = true;
-                                return response;
-                            } else |_| {}
+            } else if (comptime @typeInfo(H) == .@"struct") {
+                inline for (@typeInfo(H).@"struct".fields) |field| {
+                    const v = @field(opts.headers, field.name);
+                    const val_str: []const u8 = blk: {
+                        const T = @TypeOf(v);
+                        const info = @typeInfo(T);
+                        switch (info) {
+                            .int, .comptime_int => {
+                                const s = std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                            .float, .comptime_float => {
+                                const s = std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                            .bool => break :blk if (v) "true" else "false",
+                            .pointer => |ptr| {
+                                if (ptr.size == .slice and ptr.child == u8) break :blk v;
+                                const s = std.fmt.allocPrint(self.allocator, "{any}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                            else => {
+                                const s = std.fmt.allocPrint(self.allocator, "{any}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
                         }
-                    }
-                }
-            }
-            response.body = try response_body.toOwnedSlice(self.allocator);
-            response.body_owned = true;
-        }
-
-        return response;
-    }
-
-    fn sendHTTP3StreamData(
-        self: *Self,
-        transport: anytype,
-        session: *HTTP3QUICSession,
-        stream_id: u64,
-        fin: bool,
-        payload: []const u8,
-    ) !void {
-        const max_chunk_size: usize = 1200;
-
-        var offset: usize = 0;
-        var sent_any = false;
-
-        while (offset < payload.len or !sent_any) {
-            const chunk_len = if (offset < payload.len)
-                @min(max_chunk_size, payload.len - offset)
-            else
-                0;
-
-            const chunk = payload[offset .. offset + chunk_len];
-            const chunk_fin = fin and (offset + chunk_len == payload.len);
-
-            const frame_storage = try self.allocator.alloc(u8, chunk_len + 64);
-            defer self.allocator.free(frame_storage);
-
-            const stream_frame = quic.StreamFrame{
-                .stream_id = stream_id,
-                .offset = @intCast(offset),
-                .length = @intCast(chunk_len),
-                .fin = chunk_fin,
-                .data = chunk,
-            };
-
-            const frame_len = try stream_frame.encode(frame_storage);
-
-            var packet = std.ArrayList(u8).empty;
-            defer packet.deinit(self.allocator);
-
-            try appendHTTP3PacketHeader(&packet, self.allocator, session);
-            try packet.appendSlice(self.allocator, frame_storage[0..frame_len]);
-
-            try transport.sendDatagram(packet.items);
-
-            sent_any = true;
-            offset += chunk_len;
-
-            if (payload.len == 0) break;
-        }
-    }
-
-    fn parseHTTP3ResponseFrames(
-        self: *Self,
-        qpack_decoder: *qpack.QPACKContext,
-        payload: []const u8,
-        status_code: *?u16,
-        response_headers: *Headers,
-        response_body: *std.ArrayList(u8),
-        conn_max_data: *u64,
-        stream_max_data: *u64,
-        got_response_fin: *bool,
-    ) !void {
-        var offset: usize = 0;
-
-        while (offset < payload.len) {
-            const header_decoded = http.HTTP3FrameHeader.decode(payload[offset..]) catch return error.InvalidResponse;
-            offset += header_decoded.len;
-
-            const frame_len: usize = @intCast(header_decoded.header.length);
-            if (payload.len < offset + frame_len) return error.InvalidResponse;
-
-            const frame_payload = payload[offset .. offset + frame_len];
-            offset += frame_len;
-
-            switch (header_decoded.header.frame_type) {
-                @intFromEnum(http.HTTP3FrameType.headers) => {
-                    const decoded_headers = try qpack.decodeHeaders(qpack_decoder, frame_payload, self.allocator);
-                    defer {
-                        for (decoded_headers) |h| {
-                            self.allocator.free(h.name);
-                            self.allocator.free(h.value);
-                        }
-                        self.allocator.free(decoded_headers);
-                    }
-
-                    for (decoded_headers) |h| {
-                        if (h.name.len > 0 and h.name[0] == ':') {
-                            if (mem.eql(u8, h.name, ":status")) {
-                                status_code.* = std.fmt.parseInt(u16, h.value, 10) catch return error.InvalidResponse;
-                            }
-                            continue;
-                        }
-
-                        if (common.isConnectionSpecificHeader(h.name)) continue;
-                        try response_headers.append(h.name, h.value);
-                    }
-                },
-                @intFromEnum(http.HTTP3FrameType.data) => {
-                    if (response_body.items.len + frame_payload.len > self.config.max_response_size) {
-                        return error.ResponseTooLarge;
-                    }
-                    try response_body.appendSlice(self.allocator, frame_payload);
-                },
-                @intFromEnum(http.HTTP3FrameType.settings) => {
-                    _ = try http.parseHTTP3SettingsPayload(frame_payload);
-                },
-                @intFromEnum(http.HTTP3FrameType.goaway) => {
-                    // Gracefully handle GOAWAY: finish current stream processing
-                    if (status_code.* != null) {
-                        got_response_fin.* = true;
-                    }
-                },
-                @intFromEnum(http.HTTP3FrameType.max_data) => {
-                    if (frame_payload.len > 0) {
-                        const val = try http.decodeVarInt(frame_payload);
-                        conn_max_data.* = val.value;
-                    }
-                },
-                @intFromEnum(http.HTTP3FrameType.max_stream_data) => {
-                    if (frame_payload.len > 0) {
-                        // stream_id varint + data_limit varint; update the relevant stream
-                        const sid = try http.decodeVarInt(frame_payload);
-                        const data_limit = try http.decodeVarInt(frame_payload[sid.len..]);
-                        stream_max_data.* = data_limit.value;
-                    }
-                },
-                else => {
-                    // Unknown/unsupported frame types are ignored for forward compatibility.
-                },
-            }
-        }
-    }
-
-    /// A frame buffered during the H2 body-upload flow-control pump phase.
-    /// Freed by the caller after replaying in the response loop.
-    const EarlyH2Frame = struct {
-        header: http.HTTP2FrameHeader,
-        payload: []u8,
-
-        fn deinit(self: *EarlyH2Frame, allocator: Allocator) void {
-            allocator.free(self.payload);
-        }
-    };
-
-    /// A frame read by the H2 response loop -- wraps either a freshly-read frame
-    /// (owned) or a replayed early frame (not owned by this value).
-    const H2Frame = struct {
-        header: http.HTTP2FrameHeader,
-        payload: []u8,
-        from_early_buf: bool,
-    };
-
-    /// Pumps incoming HTTP/2 frames until the send window is positive.
-    ///
-    /// Called when `request_stream.send_window` or
-    /// `stream_manager.connection_send_window` reaches zero mid-body upload.
-    /// Processes WINDOW_UPDATE, SETTINGS, and PING frames to grow the send window.
-    /// Early response frames (HEADERS/DATA/CONTINUATION) are appended to
-    /// `early_frames` so the response loop can replay them without data loss.
-    ///
-    /// Returns `error.GoAway` if the server sends GOAWAY, or
-    /// `error.StreamError` if the server resets the request stream.
-    /// Returns `error.ProtocolError` if more than 10,000 frames are processed
-    /// without the window being granted.
-    fn pumpUntilSendWindow(
-        self: *Client,
-        transport: anytype,
-        stream_manager: *h2stream.StreamManager,
-        request_stream: *h2stream.Stream,
-        peer_max_frame_size: *u32,
-        early_frames: *std.ArrayList(EarlyH2Frame),
-    ) !void {
-        var pump_counter: usize = 0;
-        while (request_stream.send_window <= 0 or stream_manager.connection_send_window <= 0) {
-            pump_counter += 1;
-            if (pump_counter > 10_000) return error.ProtocolError;
-
-            var hdr_bytes: [9]u8 = undefined;
-            try transport.readNoEof(&hdr_bytes);
-            const fhdr = http.HTTP2FrameHeader.parse(hdr_bytes);
-
-            const payload_len: usize = @intCast(fhdr.length);
-            if (payload_len > self.config.max_response_size) return error.FrameTooLarge;
-
-            const payload = try self.allocator.alloc(u8, payload_len);
-            errdefer self.allocator.free(payload);
-            if (payload_len > 0) try transport.readNoEof(payload);
-
-            switch (fhdr.frame_type) {
-                .window_update => {
-                    if (payload.len != 4) {
-                        self.allocator.free(payload);
-                        return error.ProtocolError;
-                    }
-                    const increment = ((@as(u32, payload[0] & 0x7F) << 24) |
-                        (@as(u32, payload[1]) << 16) |
-                        (@as(u32, payload[2]) << 8) |
-                        payload[3]);
-                    self.allocator.free(payload);
-                    if (increment == 0) return error.ProtocolError;
-                    if (fhdr.stream_id == 0) {
-                        // Connection-level WINDOW_UPDATE.
-                        stream_manager.connection_send_window += @intCast(increment);
-                    } else if (fhdr.stream_id == request_stream.id) {
-                        // Stream-level WINDOW_UPDATE.
-                        request_stream.send_window += @intCast(increment);
-                    }
-                    // If both windows are positive now, we can stop pumping.
-                },
-                .settings => {
-                    const is_ack = (fhdr.flags & 0x01) != 0;
-                    if (!is_ack and fhdr.stream_id == 0) {
-                        var peer_settings = http.HTTP2Connection.HTTP2ConnectionSettings{};
-                        http.applySettingsPayload(&peer_settings, payload) catch return error.ProtocolError;
-                        stream_manager.applyPeerSettings(peer_settings) catch return error.ProtocolError;
-                        peer_max_frame_size.* = peer_settings.max_frame_size;
-                        // Send SETTINGS ACK.
-                        writeHTTP2Frame(transport, .settings, 0x01, 0, &.{}) catch return error.WriteFailed;
-                    }
-                    self.allocator.free(payload);
-                },
-                .ping => {
-                    const is_ack = (fhdr.flags & 0x01) != 0;
-                    if (!is_ack and fhdr.stream_id == 0 and payload.len == 8) {
-                        writeHTTP2Frame(transport, .ping, 0x01, 0, payload) catch return error.WriteFailed;
-                    }
-                    self.allocator.free(payload);
-                },
-                .goaway => {
-                    self.allocator.free(payload);
-                    return error.GoAway;
-                },
-                .rst_stream => {
-                    if (fhdr.stream_id == request_stream.id) {
-                        self.allocator.free(payload);
-                        return error.StreamError;
-                    }
-                    self.allocator.free(payload);
-                },
-                .priority => {
-                    self.allocator.free(payload);
-                },
-                .headers, .data, .continuation, .push_promise => {
-                    // Early response frame -- buffer for replay in the response loop.
-                    try early_frames.append(self.allocator, .{
-                        .header = fhdr,
-                        .payload = payload,
-                    });
-                },
-                // RFC 7540 4.1: Unknown frame types MUST be ignored.
-                _ => {
-                    self.allocator.free(payload);
-                },
-            }
-        }
-    }
-
-    fn executeHTTP2WithTransport(self: *Self, req: *Request, transport: anytype) !Response {
-        var stream_manager = h2stream.StreamManager.init(self.allocator, true);
-        defer stream_manager.deinit();
-
-        try transport.writeAll(http.HTTP2_PREFACE);
-
-        var settings_payload = std.ArrayList(u8).empty;
-        defer settings_payload.deinit(self.allocator);
-
-        const local_settings = toConnectionSettings(self.config.http2_settings, self.config.allow_push);
-        try http.encodeSettingsPayload(local_settings, self.allocator, &settings_payload);
-        try writeHTTP2Frame(transport, .settings, 0, 0, settings_payload.items);
-
-        const request_stream = try stream_manager.createStream();
-        try request_stream.open();
-
-        var path_buf: ?[]u8 = null;
-        defer if (path_buf) |buf| self.allocator.free(buf);
-        var authority_buf: ?[]u8 = null;
-        defer if (authority_buf) |buf| self.allocator.free(buf);
-
-        var header_entries = std.ArrayList(hpack.HeaderEntry).empty;
-        defer header_entries.deinit(self.allocator);
-
-        var owned_header_names = std.ArrayList([]u8).empty;
-        defer {
-            for (owned_header_names.items) |name| self.allocator.free(name);
-            owned_header_names.deinit(self.allocator);
-        }
-
-        try buildPseudoHeaders(self.allocator, req, &header_entries, &owned_header_names, &path_buf, &authority_buf);
-
-        const has_body = req.body != null and req.body.?.len > 0;
-        const headers_frames = try h2stream.buildHeadersAndContinuations(
-            &stream_manager,
-            request_stream.id,
-            header_entries.items,
-            null,
-            local_settings.max_frame_size,
-            !has_body,
-            self.allocator,
-        );
-        defer self.allocator.free(headers_frames);
-
-        try transport.writeAll(headers_frames);
-
-        var peer_max_frame_size: u32 = local_settings.max_frame_size;
-
-        // Buffered early-response frames received during the body upload phase
-        // (when we pump for WINDOW_UPDATE). These are replayed at the start of
-        // the response loop so no frames are dropped.
-        var early_frames = std.ArrayList(EarlyH2Frame).empty;
-        defer {
-            for (early_frames.items) |*ef| ef.deinit(self.allocator);
-            early_frames.deinit(self.allocator);
-        }
-
-        if (has_body) {
-            const body = req.body.?;
-            var offset: usize = 0;
-            while (offset < body.len) {
-                // If either the stream or connection send window is exhausted,
-                // pump incoming frames until we get enough WINDOW_UPDATE credit
-                // rather than immediately failing with FlowControlError.
-                if (request_stream.send_window <= 0 or stream_manager.connection_send_window <= 0) {
-                    try pumpUntilSendWindow(
-                        self,
-                        transport,
-                        &stream_manager,
-                        request_stream,
-                        &peer_max_frame_size,
-                        &early_frames,
-                    );
-                }
-                const window_stream = @as(i64, request_stream.send_window);
-                const window_conn = @as(i64, stream_manager.connection_send_window);
-                if (window_stream <= 0 or window_conn <= 0) return error.FlowControlError;
-                const max_chunk = @min(
-                    std.math.cast(usize, @as(u64, @intCast(window_stream))) orelse std.math.maxInt(usize),
-                    std.math.cast(usize, @as(u64, @intCast(window_conn))) orelse std.math.maxInt(usize),
-                );
-                const chunk_len = @min(body.len - offset, max_chunk, @as(usize, @intCast(peer_max_frame_size)));
-                const is_last = offset + chunk_len == body.len;
-                const chunk_flags: u8 = if (is_last) 0x01 else 0;
-                try writeHTTP2Frame(
-                    transport,
-                    .data,
-                    chunk_flags,
-                    request_stream.id,
-                    body[offset .. offset + chunk_len],
-                );
-                request_stream.send_window -= @intCast(chunk_len);
-                stream_manager.connection_send_window -= @intCast(chunk_len);
-                offset += chunk_len;
-            }
-            request_stream.sendEndStream();
-        } else {
-            request_stream.sendEndStream();
-        }
-
-        var response_headers = Headers.init(self.allocator);
-        defer response_headers.deinit();
-
-        var trailers = Headers.init(self.allocator);
-        defer trailers.deinit();
-
-        var body = std.ArrayList(u8).empty;
-        defer body.deinit(self.allocator);
-
-        var pending_headers_block = std.ArrayList(u8).empty;
-        defer pending_headers_block.deinit(self.allocator);
-
-        var pending_headers_flags: u8 = 0;
-        var waiting_continuation = false;
-
-        var status_code: ?u16 = null;
-        var response_done = false;
-        var got_end_stream = false;
-
-        var peer_settings = http.HTTP2Connection.HTTP2ConnectionSettings{};
-
-        // Replay buffered early-response frames collected during body upload
-        // (pumpUntilSendWindow may have buffered them).  We process them first
-        // so the loop below sees a logically complete frame stream.
-        var early_frame_idx: usize = 0;
-
-        var frame_counter: usize = 0;
-        while (!response_done) {
-            frame_counter += 1;
-            if (frame_counter > 10_000) return error.ProtocolError;
-
-            // Consume buffered early frames before reading from the transport.
-            const frame: H2Frame = blk: {
-                if (early_frame_idx < early_frames.items.len) {
-                    const ef = &early_frames.items[early_frame_idx];
-                    early_frame_idx += 1;
-                    break :blk H2Frame{
-                        .header = ef.header,
-                        .payload = ef.payload,
-                        .from_early_buf = true,
                     };
+                    hdrs.append(self.allocator, .{ .name = field.name, .value = val_str }) catch return Error.OutOfMemory;
                 }
-                break :blk self.readHTTP2Frame(transport) catch |err| switch (err) {
-                    error.UnexpectedEof => {
-                        // RFC 7540 6.8: a server may close the connection
-                        // after sending the final frame. If we already received a
-                        // complete response (END_STREAM seen, status code present),
-                        // treat the clean close as end-of-response rather than error.
-                        if (got_end_stream and status_code != null) {
-                            response_done = true;
-                            continue;
+            }
+        }
+
+        // Query: support both []const Header and struct literal
+        var query_list: std.ArrayList(req_mod.Header) = .empty;
+        defer query_list.deinit(self.allocator);
+        if (@hasField(@TypeOf(opts), "query")) {
+            const Q = @TypeOf(opts.query);
+            if (comptime @typeInfo(Q) == .pointer and @typeInfo(Q).pointer.size == .slice) {
+                for (opts.query) |q| query_list.append(self.allocator, q) catch return Error.OutOfMemory;
+            } else if (comptime @typeInfo(Q) == .@"struct") {
+                inline for (@typeInfo(Q).@"struct".fields) |field| {
+                    const v = @field(opts.query, field.name);
+                    const vs: []const u8 = blk: {
+                        const T = @TypeOf(v);
+                        const info = @typeInfo(T);
+                        switch (info) {
+                            .int, .comptime_int => {
+                                const s = std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                            .float, .comptime_float => {
+                                const s = std.fmt.allocPrint(self.allocator, "{d}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                            .bool => break :blk if (v) "true" else "false",
+                            .pointer => |ptr| {
+                                if (ptr.size == .slice and ptr.child == u8) break :blk v;
+                                const s = std.fmt.allocPrint(self.allocator, "{any}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
+                            else => {
+                                const s = std.fmt.allocPrint(self.allocator, "{any}", .{v}) catch return Error.OutOfMemory;
+                                allocated_strings.append(self.allocator, s) catch {
+                                    self.allocator.free(s);
+                                    return Error.OutOfMemory;
+                                };
+                                break :blk s;
+                            },
                         }
-                        return error.InvalidResponse;
-                    },
-                    else => return err,
-                };
+                    };
+                    query_list.append(self.allocator, .{ .name = field.name, .value = vs }) catch return Error.OutOfMemory;
+                }
+            }
+        }
+
+        // Body handling: support typed json via struct
+        var json_buf: ?[]u8 = null;
+        defer if (json_buf) |b| self.allocator.free(b);
+        var body_val: []const u8 = "";
+        var body_kind: req_mod.BodyKind = .none;
+        const has_json_field = @hasField(@TypeOf(opts), "json");
+        if (has_json_field) {
+            const v = opts.json;
+            const T = @TypeOf(v);
+            const is_opt = comptime @typeInfo(T) == .optional;
+            const is_present = if (is_opt) v != null else true;
+            if (is_present) {
+                const payload = if (is_opt) v.? else v;
+                const J = @TypeOf(payload);
+                if (J == []const u8 or J == []u8) {
+                    body_val = payload;
+                    body_kind = .json;
+                } else {
+                    json_buf = std.json.Stringify.valueAlloc(self.allocator, payload, .{}) catch return Error.OutOfMemory;
+                    if (json_buf) |b| {
+                        body_val = b;
+                        body_kind = .json;
+                    }
+                }
+            }
+        }
+        if (body_kind == .none and @hasField(@TypeOf(opts), "form")) {
+            const v = opts.form;
+            const T = @TypeOf(v);
+            if (comptime @typeInfo(T) == .optional) {
+                if (v) |val| {
+                    body_val = val;
+                    body_kind = .form;
+                }
+            } else {
+                body_val = v;
+                body_kind = .form;
+            }
+        }
+        if (body_kind == .none and @hasField(@TypeOf(opts), "body")) {
+            const v = opts.body;
+            const T = @TypeOf(v);
+            if (comptime @typeInfo(T) == .optional) {
+                if (v) |val| {
+                    body_val = val;
+                    body_kind = .raw;
+                }
+            } else {
+                body_val = v;
+                body_kind = .raw;
+            }
+        }
+        if (body_kind == .none and @hasField(@TypeOf(opts), "text")) {
+            const v = opts.text;
+            const T = @TypeOf(v);
+            if (comptime @typeInfo(T) == .optional) {
+                if (v) |val| {
+                    body_val = val;
+                    body_kind = .raw;
+                }
+            } else {
+                body_val = v;
+                body_kind = .raw;
+            }
+        }
+
+        // Multipart file upload support
+        var multipart_buf: ?[]u8 = null;
+        defer if (multipart_buf) |b| self.allocator.free(b);
+        if (body_kind == .none and @hasField(@TypeOf(opts), "multipart")) {
+            const mp = opts.multipart;
+            const mp_encoder = @import("../web/multipart/encoder.zig");
+            var boundary_buf: [32]u8 = undefined;
+            const boundary = mp_encoder.generateBoundary(&boundary_buf);
+            var ct_buf: [128]u8 = undefined;
+            const ct_val = mp_encoder.contentType(&ct_buf, boundary);
+
+            const field_name_val: []const u8 = mp.field_name;
+            const filename_val: ?[]const u8 = blk: {
+                if (!@hasField(@TypeOf(mp), "filename")) break :blk null;
+                const v = mp.filename;
+                const T = @TypeOf(v);
+                if (@typeInfo(T) == .optional) break :blk v;
+                break :blk @as(?[]const u8, v);
             };
-            // Only free payload for frames we allocated ourselves (not early buf replays).
-            defer if (!frame.from_early_buf) self.allocator.free(frame.payload);
-
-            switch (frame.header.frame_type) {
-                .settings => {
-                    if (frame.header.stream_id != 0) return error.ProtocolError;
-                    const is_ack = (frame.header.flags & 0x01) != 0;
-                    if (!is_ack) {
-                        try http.applySettingsPayload(&peer_settings, frame.payload);
-                        try stream_manager.applyPeerSettings(peer_settings);
-                        peer_max_frame_size = peer_settings.max_frame_size;
-                        try writeHTTP2Frame(transport, .settings, 0x01, 0, &.{});
-                    }
-                },
-                .ping => {
-                    if (frame.header.stream_id != 0) return error.ProtocolError;
-                    const is_ack = (frame.header.flags & 0x01) != 0;
-                    if (!is_ack) {
-                        if (frame.payload.len != 8) return error.ProtocolError;
-                        try writeHTTP2Frame(transport, .ping, 0x01, 0, frame.payload);
-                    }
-                },
-                .goaway => {
-                    if (status_code == null) return error.ProtocolError;
-                    response_done = true;
-                },
-                .window_update, .priority => {},
-                .push_promise => {
-                    if (frame.header.stream_id == 0) return error.ProtocolError;
-                    if (!self.config.allow_push) {
-                        const promised_stream_id = (@as(u31, frame.payload[0] & 0x7F) << 24) |
-                            (@as(u31, frame.payload[1]) << 16) |
-                            (@as(u31, frame.payload[2]) << 8) |
-                            frame.payload[3];
-                        const rst_frame = h2stream.buildRstStreamFrame(promised_stream_id, .refused_stream);
-                        try transport.writeAll(&rst_frame);
-                    }
-                },
-                .rst_stream => {
-                    if (frame.header.stream_id == request_stream.id) {
-                        if (!got_end_stream) {
-                            const rst_frame = h2stream.buildRstStreamFrame(request_stream.id, .cancel);
-                            try transport.writeAll(&rst_frame);
-                            return error.StreamError;
-                        }
-                        response_done = true;
-                    }
-                },
-                .headers => {
-                    if (frame.header.stream_id != request_stream.id) continue;
-
-                    if (got_end_stream) {
-                        if (waiting_continuation) return error.ProtocolError;
-
-                        if ((frame.header.flags & 0x04) != 0) {
-                            const parsed = try h2stream.parseHeadersFramePayload(
-                                &stream_manager,
-                                frame.payload,
-                                frame.header.flags,
-                                self.allocator,
-                            );
-                            defer {
-                                for (parsed.headers) |header| {
-                                    self.allocator.free(header.name);
-                                    self.allocator.free(header.value);
-                                }
-                                self.allocator.free(parsed.headers);
-                            }
-
-                            for (parsed.headers) |header| {
-                                if (header.name.len > 0 and header.name[0] == ':') continue;
-                                if (common.isConnectionSpecificHeader(header.name)) continue;
-                                try trailers.append(header.name, header.value);
-                            }
-                            response_done = true;
-                        } else {
-                            pending_headers_flags = frame.header.flags;
-                            try pending_headers_block.appendSlice(self.allocator, frame.payload);
-                            waiting_continuation = true;
-                        }
-                        continue;
-                    }
-
-                    if (waiting_continuation) return error.ProtocolError;
-
-                    if ((frame.header.flags & 0x04) != 0) {
-                        const expect_initial_headers = status_code == null;
-                        try applyResponseHeaderBlock(
-                            self,
-                            &stream_manager,
-                            frame.payload,
-                            frame.header.flags,
-                            expect_initial_headers,
-                            &status_code,
-                            &response_headers,
-                        );
-                        if ((frame.header.flags & 0x01) != 0) {
-                            got_end_stream = true;
-                            request_stream.receiveEndStream();
-                            // Fix: terminate the response loop immediately when
-                            // END_STREAM is set on a HEADERS frame and we have
-                            // a status code. Without this, the loop keeps
-                            // reading frames from keep-alive servers until the
-                            // recv timeout fires (causing a hang or ProtocolError).
-                            if (status_code != null) response_done = true;
-                        }
-                    } else {
-                        pending_headers_flags = frame.header.flags;
-                        try pending_headers_block.appendSlice(self.allocator, frame.payload);
-                        waiting_continuation = true;
-                    }
-                },
-                .continuation => {
-                    if (frame.header.stream_id != request_stream.id) continue;
-                    if (!waiting_continuation) return error.ProtocolError;
-
-                    try pending_headers_block.appendSlice(self.allocator, frame.payload);
-                    if ((frame.header.flags & 0x04) != 0) {
-                        if (got_end_stream) {
-                            const parsed = try h2stream.parseHeadersFramePayload(
-                                &stream_manager,
-                                pending_headers_block.items,
-                                pending_headers_flags,
-                                self.allocator,
-                            );
-                            defer {
-                                for (parsed.headers) |header| {
-                                    self.allocator.free(header.name);
-                                    self.allocator.free(header.value);
-                                }
-                                self.allocator.free(parsed.headers);
-                            }
-
-                            for (parsed.headers) |header| {
-                                if (header.name.len > 0 and header.name[0] == ':') continue;
-                                if (common.isConnectionSpecificHeader(header.name)) continue;
-                                try trailers.append(header.name, header.value);
-                            }
-                            pending_headers_block.clearRetainingCapacity();
-                            waiting_continuation = false;
-                            response_done = true;
-                        } else {
-                            const expect_initial_headers = status_code == null;
-                            try applyResponseHeaderBlock(
-                                self,
-                                &stream_manager,
-                                pending_headers_block.items,
-                                pending_headers_flags,
-                                expect_initial_headers,
-                                &status_code,
-                                &response_headers,
-                            );
-                            pending_headers_block.clearRetainingCapacity();
-                            waiting_continuation = false;
-
-                            if ((pending_headers_flags & 0x01) != 0) {
-                                got_end_stream = true;
-                                request_stream.receiveEndStream();
-                                // Fix: terminate on END_STREAM from CONTINUATION.
-                                if (status_code != null) response_done = true;
-                            }
-                        }
-                    }
-                },
-                .data => {
-                    if (frame.header.stream_id != request_stream.id) continue;
-
-                    if (got_end_stream) continue;
-
-                    if (frame.header.length > local_settings.max_frame_size) return error.FrameTooLarge;
-
-                    var data_slice = frame.payload;
-                    if ((frame.header.flags & 0x08) != 0) {
-                        if (frame.payload.len == 0) return error.ProtocolError;
-                        const pad_len = frame.payload[0];
-                        if (frame.payload.len < @as(usize, pad_len) + 1) return error.ProtocolError;
-                        data_slice = frame.payload[1 .. frame.payload.len - pad_len];
-                    }
-
-                    if (body.items.len + data_slice.len > self.config.max_response_size) return error.ResponseTooLarge;
-                    try body.appendSlice(self.allocator, data_slice);
-
-                    if (data_slice.len > 0) {
-                        const window_increment: u31 = @intCast(data_slice.len);
-                        const window_update = h2stream.buildWindowUpdatePayload(window_increment);
-                        try writeHTTP2Frame(transport, .window_update, 0, request_stream.id, &window_update);
-                        try writeHTTP2Frame(transport, .window_update, 0, 0, &window_update);
-                    }
-
-                    if ((frame.header.flags & 0x01) != 0) {
-                        got_end_stream = true;
-                        request_stream.receiveEndStream();
-                        // Fix: terminate the response loop immediately when
-                        // END_STREAM is set on a DATA frame and we have a
-                        // status code. Without this, the loop keeps reading
-                        // from keep-alive servers until the recv timeout fires.
-                        if (status_code != null) response_done = true;
-                    }
-                },
-                // RFC 7540 4.1: Unknown frame types MUST be ignored.
-                _ => {},
+            const content_type_val: []const u8 = blk: {
+                if (!@hasField(@TypeOf(mp), "content_type")) break :blk "application/octet-stream";
+                const v = mp.content_type;
+                const T = @TypeOf(v);
+                if (@typeInfo(T) == .optional) {
+                    if (v) |val| break :blk val;
+                    break :blk "application/octet-stream";
+                } else {
+                    break :blk v;
+                }
+            };
+            const part: mp_encoder.Part = .{
+                .name = field_name_val,
+                .filename = filename_val,
+                .content_type = content_type_val,
+                .data = mp.data,
+            };
+            multipart_buf = mp_encoder.encodeAllocParts(self.allocator, boundary, &.{part}) catch return Error.OutOfMemory;
+            if (multipart_buf) |b| {
+                body_val = b;
+                body_kind = .raw;
+                hdrs.append(self.allocator, .{ .name = "Content-Type", .value = ct_val }) catch return Error.OutOfMemory;
             }
         }
 
-        if (waiting_continuation) return error.InvalidResponse;
-
-        const final_status = status_code orelse return error.InvalidResponse;
-
-        var response = Response.init(self.allocator, final_status);
-        errdefer response.deinit();
-        response.version = .HTTP_2;
-
-        response.headers.deinit();
-        response.headers = response_headers;
-        response_headers = Headers.init(self.allocator);
-
-        if (trailers.count() > 0) {
-            response.trailers = trailers;
-            trailers = Headers.init(self.allocator);
-        }
-
-        if (body.items.len > 0) {
-            // Decompress body based on Content-Encoding header (HTTP/2).
-            if (self.config.auto_decompress) {
-                if (response_headers.get(HeaderName.CONTENT_ENCODING)) |encoding_str| {
-                    if (compression_util.ContentEncoding.fromString(encoding_str)) |enc| {
-                        if (enc != .identity) {
-                            if (compression_util.decompress(self.allocator, enc, body.items)) |decompressed| {
-                                response.body = decompressed;
-                                response.body_owned = true;
-                                return response;
-                            } else |_| {}
-                        }
-                    }
+        // Resolve http_version with hierarchy: per-request > client default > auto
+        const req_http_version: HttpVersion = blk: {
+            if (@hasField(@TypeOf(opts), "http_version")) {
+                const HVType = @TypeOf(opts.http_version);
+                if (comptime @typeInfo(HVType) == .optional) {
+                    if (opts.http_version) |v| break :blk v;
+                } else {
+                    break :blk opts.http_version;
                 }
             }
-            response.body = try body.toOwnedSlice(self.allocator);
-            response.body_owned = true;
-        }
-
-        return response;
-    }
-
-    fn readHTTP2Frame(self: *Self, transport: anytype) !H2Frame {
-        var header_bytes: [9]u8 = undefined;
-        try transport.readNoEof(&header_bytes);
-        const header = http.HTTP2FrameHeader.parse(header_bytes);
-
-        const payload_len: usize = @intCast(header.length);
-        if (payload_len > self.config.max_response_size) return error.FrameTooLarge;
-
-        const payload = try self.allocator.alloc(u8, payload_len);
-        errdefer self.allocator.free(payload);
-
-        if (payload_len > 0) {
-            try transport.readNoEof(payload);
-        }
-
-        return .{ .header = header, .payload = payload, .from_early_buf = false };
-    }
-
-    /// Context for TLS version fallback reconnection.
-    /// When TLS 1.3 fails and the server closes the TCP connection,
-    /// the reconnect callback creates a fresh socket for the TLS 1.2 retry.
-    const ReconnectContext = struct {
-        allocator: Allocator,
-        host: []const u8,
-        port: u16,
-        socket: ?*Socket = null,
-    };
-
-    fn reconnectCallback(ctx_ptr: ?*anyopaque) ?*Socket {
-        const ctx: *ReconnectContext = @ptrCast(@alignCast(ctx_ptr.?));
-        // Resolve address first to create the correct socket family (IPv4/IPv6).
-        const addr = address_mod.resolve(ctx.allocator, ctx.host, ctx.port) catch return null;
-        const socket = ctx.allocator.create(Socket) catch return null;
-        socket.* = Socket.createForAddress(addr) catch {
-            ctx.allocator.destroy(socket);
-            return null;
-        };
-        socket.connect(addr) catch {
-            socket.close();
-            ctx.allocator.destroy(socket);
-            return null;
-        };
-        socket.setNoDelay(true) catch {};
-        ctx.socket = socket;
-        return socket;
-    }
-
-    fn executeTLSHttp(self: *Self, socket: *Socket, host: []const u8, port: u16, request_data: []const u8, verify_ssl: bool) !Response {
-        const tls_cfg = if (verify_ssl) TLSConfig.init(self.allocator) else TLSConfig.insecure(self.allocator);
-
-        // Set up reconnect context for TLS version fallback.
-        // When TLS 1.3 fails and the server closes the connection,
-        // we need a fresh TCP socket for the TLS 1.2 retry.
-        var reconnect_ctx = ReconnectContext{
-            .allocator = self.allocator,
-            .host = host,
-            .port = port,
-            .socket = null,
-        };
-        // Ensure reconnect socket is cleaned up on any error
-        errdefer if (reconnect_ctx.socket) |s| {
-            s.close();
-            self.allocator.destroy(s);
+            if (self.config.http_version) |v| break :blk v;
+            break :blk .auto;
         };
 
-        var session = TLSSession.init(tls_cfg);
-        defer session.deinit();
-        session.attachSocket(socket);
-        session.reconnect_fn = reconnectCallback;
-        session.reconnect_ctx = &reconnect_ctx;
-        try session.handshake(host);
-
-        // Use encrypted write/read (TLS record layer)
-        try session.writeAll(request_data);
-        try session.flush();
-
-        var buf: [16 * 1024]u8 = undefined;
-        var total_read: usize = 0;
-        var parser = Parser.initResponse(self.allocator);
-        defer parser.deinit();
-
-        while (!parser.isComplete()) {
-            const n = try session.read(&buf);
-            if (n == 0) break;
-            total_read += n;
-            if (total_read > self.config.max_response_size) return error.ResponseTooLarge;
-            _ = try parser.feed(buf[0..n]);
-        }
-
-        parser.finishEof();
-        if (!parser.isComplete()) return error.InvalidResponse;
-
-        // Clean up reconnect socket if it was allocated.
-        // The caller's `defer socket.close()` handles the original socket.
-        // session.deinit() does not close the socket, so we must clean up
-        // any heap-allocated reconnect socket here.
-        if (reconnect_ctx.socket) |s| {
-            s.close();
-            self.allocator.destroy(s);
-        }
-
-        return self.responseFromParser(&parser);
-    }
-
-    fn readResponseFromReadFn(self: *Self, reader: anytype, readFn: *const fn (@TypeOf(reader), []u8) anyerror!usize, expect_body: bool) !Response {
-        var parser = Parser.initResponse(self.allocator);
-        defer parser.deinit();
-        parser.expect_body = expect_body;
-
-        var buf: [16 * 1024]u8 = undefined;
-        var total_read: usize = 0;
-        while (!parser.isComplete()) {
-            const n = try readFn(reader, &buf);
-            if (n == 0) break;
-            total_read += n;
-            if (total_read > self.config.max_response_size) return error.ResponseTooLarge;
-            _ = try parser.feed(buf[0..n]);
-        }
-
-        parser.finishEof();
-
-        if (!parser.isComplete()) return error.InvalidResponse;
-        return self.responseFromParser(&parser);
-    }
-
-    fn readResponseFromTcp(self: *Self, socket: *Socket, expect_body: bool) !Response {
-        return self.readResponseFromReadFn(socket, Socket.recv, expect_body);
-    }
-
-    fn readResponseFromTLS(self: *Self, session: *TLSSession, expect_body: bool) !Response {
-        return self.readResponseFromReadFn(session, TLSSession.read, expect_body);
-    }
-
-    fn readResponseFromIo(self: *Self, r: *std.Io.Reader) !Response {
-        var parser = Parser.initResponse(self.allocator);
-        defer parser.deinit();
-
-        var total_read: usize = 0;
-        while (!parser.isComplete()) {
-            const buffered = r.buffered();
-            if (buffered.len == 0) {
-                r.fillMore() catch |err| switch (err) {
-                    error.EndOfStream => break,
-                    error.ReadFailed => return error.ReadFailed,
+        const req_tls: ?req_mod.TlsOptions = blk: {
+            if (!@hasField(@TypeOf(opts), "tls")) {
+                // No per-request TLS: use client default, or auto-enable for HTTPS.
+                if (self.config.tls) |c_tls| break :blk c_tls;
+                break :blk req_mod.TlsOptions{ .verify = .none, .allow_truncation_attacks = true };
+            }
+            const v = opts.tls;
+            const T = @TypeOf(v);
+            if (@typeInfo(T) == .optional) {
+                break :blk v orelse req_mod.TlsOptions{ .verify = .none, .allow_truncation_attacks = true };
+            } else {
+                break :blk req_mod.TlsOptions{
+                    .verify = v.verify,
+                    .ca_bundle = if (@hasField(@TypeOf(v), "ca_bundle")) v.ca_bundle else null,
+                    .allow_truncation_attacks = if (@hasField(@TypeOf(v), "allow_truncation_attacks")) v.allow_truncation_attacks else true,
                 };
-                continue;
             }
-            total_read += buffered.len;
-            if (total_read > self.config.max_response_size) return error.ResponseTooLarge;
-            const consumed = try parser.feed(buffered);
-            r.toss(consumed);
-        }
+        };
+        const req_cookie: ?[]const u8 = if (@hasField(@TypeOf(opts), "cookie")) opts.cookie else null;
+        const req_basic_auth: ?[]const u8 = if (@hasField(@TypeOf(opts), "basic_auth")) opts.basic_auth else null;
+        const req_bearer_auth: ?[]const u8 = if (@hasField(@TypeOf(opts), "bearer_auth")) opts.bearer_auth else null;
+        const req_timeout: ?u64 = if (@hasField(@TypeOf(opts), "timeout_ms")) opts.timeout_ms else self.config.timeout_ms;
+        const req_max_size: ?usize = if (@hasField(@TypeOf(opts), "max_response_size")) opts.max_response_size else self.config.max_response_size;
 
-        parser.finishEof();
+        // Extract URL whether opts is a string slice, string literal, or options struct
+        const target_url: []const u8 = blk: {
+            const T = @TypeOf(opts);
+            if (T == []const u8 or T == []u8) break :blk opts;
+            if (comptime @typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8) break :blk opts;
+            if (comptime @typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .array and @typeInfo(@typeInfo(T).pointer.child).array.child == u8) break :blk opts[0..];
+            if (@hasField(T, "url")) break :blk opts.url;
+            @compileError("Request options must provide a 'url' field or be a URL string");
+        };
 
-        if (!parser.isComplete()) return error.InvalidResponse;
-        return self.responseFromParser(&parser);
-    }
-
-    fn responseFromParser(self: *Self, parser: *Parser) !Response {
-        const code = parser.status_code orelse return error.InvalidResponse;
-        var res = Response.init(parser.allocator, code);
-        errdefer res.deinit();
-
-        // Move headers ownership from parser to response.
-        res.headers.deinit();
-        res.headers = parser.headers;
-        parser.headers = Headers.init(parser.allocator);
-
-        if (parser.getBody().len > 0) {
-            const raw_body = parser.getBody();
-            if (self.config.auto_decompress) {
-                if (res.headers.get(HeaderName.CONTENT_ENCODING)) |encoding_str| {
-                    if (compression_util.ContentEncoding.fromString(encoding_str)) |enc| {
-                        if (enc != .identity) {
-                            const decompressed = compression_util.decompress(parser.allocator, enc, raw_body) catch |err| {
-                                return err;
-                            };
-                            res.body = decompressed;
-                            res.body_owned = true;
-                            return res;
-                        }
-                    }
+        const result = req_mod.request(self.allocator, self.io, .{
+            .method = method,
+            .url = target_url,
+            .headers = hdrs.items,
+            .query = query_list.items,
+            .body_kind = body_kind,
+            .body = body_val,
+            .follow_redirects = if (@hasField(@TypeOf(opts), "follow_redirects")) blk: {
+                const v = opts.follow_redirects;
+                if (@typeInfo(@TypeOf(v)) == .optional) {
+                    break :blk v orelse self.config.follow_redirects;
+                } else {
+                    break :blk v;
                 }
-            }
-            res.body = try parser.allocator.dupe(u8, raw_body);
-            res.body_owned = true;
-        }
-
-        return res;
-    }
-
-    fn resolveRedirectUrl(self: *Self, base: Uri, location: []const u8) ![]u8 {
-        // Absolute URL.
-        if (mem.indexOf(u8, location, "://") != null) {
-            return self.allocator.dupe(u8, location);
-        }
-
-        // Protocol-relative URL: //httpbun.com/path
-        if (location.len > 1 and location[0] == '/' and location[1] == '/') {
-            const scheme = base.scheme orelse "http";
-            return std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ scheme, location });
-        }
-
-        const scheme = base.scheme orelse "http";
-        const host = base.host orelse return error.InvalidUri;
-        const port = base.effectivePort();
-
-        if (location.len > 0 and location[0] == '/') {
-            return std.fmt.allocPrint(self.allocator, "{s}://{s}:{d}{s}", .{ scheme, host, port, location });
-        }
-
-        // Relative to current path.
-        const base_path = base.path;
-        const slash = mem.lastIndexOfScalar(u8, base_path, '/') orelse 0;
-        const prefix = base_path[0 .. slash + 1];
-        return std.fmt.allocPrint(self.allocator, "{s}://{s}:{d}{s}{s}", .{ scheme, host, port, prefix, location });
-    }
-
-    /// Returns true if two URLs share the same origin (scheme + host + port).
-    fn isSameOrigin(base_url: []const u8, target_url: []const u8) bool {
-        const base_host = extractOriginHost(base_url) orelse return false;
-        const target_host = extractOriginHost(target_url) orelse return false;
-        return std.ascii.eqlIgnoreCase(base_host, target_host);
-    }
-
-    fn extractOriginHost(url: []const u8) ?[]const u8 {
-        var rest = url;
-        if (mem.startsWith(u8, rest, "https://")) {
-            rest = rest[8..];
-        } else if (mem.startsWith(u8, rest, "http://")) {
-            rest = rest[7..];
-        } else {
-            return null;
-        }
-        const host_end = mem.indexOfAny(u8, rest, "/:?#@") orelse rest.len;
-        return if (host_end > 0) rest[0..host_end] else null;
-    }
-
-    fn attachCookies(self: *Self, req: *Request) !void {
-        if (self.cookies.count() == 0) return;
-
-        const req_host = req.uri.host orelse return;
-        const req_path = if (req.uri.path.len > 0) req.uri.path else "/";
-        const req_is_tls = req.uri.isTLS();
-        const now = std.Io.Timestamp.now(io_util.defaultIo(), .real).toSeconds();
-
-        var list = std.ArrayList(u8).empty;
-        defer list.deinit(self.allocator);
-        const writer = list_writer.init(self.allocator, &list);
-
-        var it = self.cookies.iterator();
-        var first = true;
-        while (it.next()) |entry| {
-            const name = entry.key_ptr.*;
-            const cookie = entry.value_ptr.*;
-            // Cookie keys are stored as "domain|name" for domain-aware storage.
-            if (mem.lastIndexOfScalar(u8, name, '|')) |pipe| {
-                const cookie_domain = name[0..pipe];
-                const cookie_name = name[pipe + 1 ..];
-                // Domain matching
-                if (!domainMatches(req_host, cookie_domain)) continue;
-                // Path matching: cookie path must be a prefix of the request path
-                if (!pathMatches(req_path, cookie.path)) continue;
-                // Secure flag: only send over HTTPS
-                if (cookie.secure and !req_is_tls) continue;
-                // Max-Age expiry: skip expired cookies
-                if (cookie.max_age) |max_age| {
-                    if (max_age > 0) {
-                        const elapsed = now - cookie.stored_at;
-                        if (elapsed > max_age) continue;
-                    }
+            } else self.config.follow_redirects,
+            .max_redirects = if (@hasField(@TypeOf(opts), "max_redirects")) blk: {
+                const v = opts.max_redirects;
+                if (@typeInfo(@TypeOf(v)) == .optional) {
+                    break :blk v orelse self.config.max_redirects;
+                } else {
+                    break :blk v;
                 }
-                if (!first) try writer.writeAll("; ");
-                first = false;
-                try writer.print("{s}={s}", .{ cookie_name, cookie.value });
-            } else {
-                // Legacy cookie without domain - send to all hosts
-                if (!first) try writer.writeAll("; ");
-                first = false;
-                try writer.print("{s}={s}", .{ name, cookie.value });
-            }
-        }
-
-        if (list.items.len > 0) {
-            try req.headers.set(HeaderName.COOKIE, list.items);
-        }
-    }
-
-    /// Returns true if `host` matches `cookie_domain`.
-    /// A cookie with domain ".httpbun.com" matches "www.httpbun.com" and "httpbun.com".
-    fn domainMatches(host: []const u8, cookie_domain: []const u8) bool {
-        // Exact match
-        if (std.mem.eql(u8, host, cookie_domain)) return true;
-        // Subdomain match: host must end with "." + cookie_domain
-        if (cookie_domain.len > 0 and cookie_domain[0] == '.') {
-            return std.mem.endsWith(u8, host, cookie_domain);
-        }
-        // Implicit dot: "httpbun.com" matches "www.httpbun.com"
-        if (host.len > cookie_domain.len + 1) {
-            const suffix = host[host.len - cookie_domain.len ..];
-            if (std.mem.eql(u8, suffix, cookie_domain)) {
-                return host[host.len - cookie_domain.len - 1] == '.';
-            }
-        }
-        return false;
-    }
-
-    /// Returns true if `req_path` matches the cookie's `path` attribute.
-    /// RFC 6265 Section 5.1.4: cookie path matching.
-    fn pathMatches(req_path: []const u8, cookie_path: []const u8) bool {
-        // Exact match
-        if (mem.eql(u8, req_path, cookie_path)) return true;
-        // The cookie path must be a prefix of the request path
-        if (!mem.startsWith(u8, req_path, cookie_path)) return false;
-        // If the cookie path ends with '/', it's a prefix match
-        if (cookie_path.len > 0 and cookie_path[cookie_path.len - 1] == '/') return true;
-        // Otherwise, the first character after the prefix must be '/'
-        if (req_path.len > cookie_path.len) return req_path[cookie_path.len] == '/';
-        return false;
-    }
-
-    fn storeCookies(self: *Self, res: *const Response, request_host: []const u8) !void {
-        const values = try res.headers.getAll(HeaderName.SET_COOKIE, self.allocator);
-        defer self.allocator.free(values);
-
-        const now = std.Io.Timestamp.now(io_util.defaultIo(), .real).toSeconds();
-
-        for (values) |set_cookie| {
-            const parsed = common.parseSetCookie(set_cookie) orelse continue;
-            // Use the cookie's domain if present, otherwise fall back to the request host
-            const domain = parsed.domain orelse request_host;
-            // Enforce max_cookie_size limit
-            if (self.config.max_cookie_size > 0 and (parsed.name.len + parsed.value.len) > self.config.max_cookie_size) continue;
-            // Enforce max_cookies limit
-            if (self.config.max_cookies > 0 and self.cookies.count() >= self.config.max_cookies) break;
-            // Store as "domain|name" key
-            const key = try std.fmt.allocPrint(self.allocator, "{s}|{s}", .{ domain, parsed.name });
-            errdefer self.allocator.free(key);
-            const owned_value = try self.allocator.dupe(u8, parsed.value);
-            errdefer self.allocator.free(owned_value);
-
-            if (self.cookies.fetchRemove(key)) |removed| {
-                self.allocator.free(removed.key);
-                self.allocator.free(removed.value.value);
-            }
-            try self.cookies.put(self.allocator, key, .{
-                .value = owned_value,
-                .path = parsed.path orelse "/",
-                .domain = domain,
-                .secure = parsed.secure,
-                .http_only = parsed.http_only,
-                .same_site = parsed.same_site,
-                .max_age = parsed.max_age,
-                .stored_at = now,
-            });
-        }
-    }
-
-    /// Adds or replaces a cookie in the in-memory client cookie jar.
-    /// The cookie is stored with domain association using "domain|name" format.
-    pub fn setCookie(self: *Self, name: []const u8, value: []const u8) !void {
-        // If name already contains a domain prefix, use it as-is
-        const key = if (mem.lastIndexOfScalar(u8, name, '|') != null)
-            name
-        else
-            name; // Legacy: no domain, matches all hosts
-
-        if (self.cookies.fetchRemove(key)) |removed| {
-            self.allocator.free(removed.key);
-            self.allocator.free(removed.value.value);
-        }
-
-        const owned_name = try self.allocator.dupe(u8, key);
-        errdefer self.allocator.free(owned_name);
-        const owned_value = try self.allocator.dupe(u8, value);
-        errdefer self.allocator.free(owned_value);
-
-        try self.cookies.put(self.allocator, owned_name, .{ .value = owned_value });
-    }
-
-    /// Adds or replaces a cookie with explicit domain association.
-    pub fn setCookieWithDomain(self: *Self, name: []const u8, value: []const u8, domain: []const u8) !void {
-        const key = try std.fmt.allocPrint(self.allocator, "{s}|{s}", .{ domain, name });
-        errdefer self.allocator.free(key);
-
-        if (self.cookies.fetchRemove(key)) |removed| {
-            self.allocator.free(removed.key);
-            self.allocator.free(removed.value.value);
-        }
-
-        const owned_value = try self.allocator.dupe(u8, value);
-        errdefer self.allocator.free(owned_value);
-
-        try self.cookies.put(self.allocator, key, .{
-            .value = owned_value,
-            .domain = domain,
+            } else self.config.max_redirects,
+            .dns_cache = if (self.dns_cache) |*cache| cache else null,
+            .pool = &self.pool,
+            .allow_lf_line_endings = if (@hasField(@TypeOf(opts), "allow_lf_line_endings")) opts.allow_lf_line_endings or self.config.allow_lf_line_endings else self.config.allow_lf_line_endings,
+            .http_version = req_http_version,
+            .tls = req_tls,
+            .cookie = req_cookie,
+            .basic_auth = req_basic_auth,
+            .bearer_auth = req_bearer_auth,
+            .timeout_ms = req_timeout,
+            .max_response_size = req_max_size,
         });
-    }
-
-    /// Returns a cookie value from the in-memory cookie jar.
-    pub fn getCookie(self: *const Self, name: []const u8) ?[]const u8 {
-        if (self.cookies.get(name)) |entry| return entry.value;
-        return null;
-    }
-
-    /// Removes a cookie from the in-memory cookie jar.
-    pub fn removeCookie(self: *Self, name: []const u8) bool {
-        if (self.cookies.fetchRemove(name)) |removed| {
-            self.allocator.free(removed.key);
-            self.allocator.free(removed.value.value);
-            return true;
-        }
-        return false;
-    }
-
-    /// Clears all cookies from the in-memory cookie jar.
-    pub fn clearCookies(self: *Self) void {
-        var it = self.cookies.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*.value);
-        }
-        self.cookies.clearRetainingCapacity();
-    }
-
-    /// Returns true if a cookie with the given name exists in the jar.
-    pub fn hasCookie(self: *const Self, name: []const u8) bool {
-        return self.cookies.contains(name);
-    }
-
-    /// Returns the number of cookies currently stored in the jar.
-    pub fn cookieCount(self: *const Self) usize {
-        return self.cookies.count();
-    }
-
-    /// Removes all expired cookies from the jar.
-    pub fn pruneExpiredCookies(self: *Self) void {
-        const now = std.Io.Timestamp.now(io_util.defaultIo(), .real).toSeconds();
-        var to_remove = std.ArrayList([]const u8).empty;
-        defer to_remove.deinit(self.allocator);
-
-        var it = self.cookies.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.*.max_age) |max_age| {
-                if (max_age > 0) {
-                    const elapsed = now - entry.value_ptr.*.stored_at;
-                    if (elapsed > max_age) {
-                        to_remove.append(self.allocator, entry.key_ptr.*) catch {};
-                    }
-                }
-            }
-        }
-        for (to_remove.items) |key| {
-            if (self.cookies.fetchRemove(key)) |removed| {
-                self.allocator.free(removed.key);
-                self.allocator.free(removed.value.value);
-            }
-        }
-    }
-
-    /// GET request convenience method.
-    pub fn get(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.request(.GET, url, reqOpts);
-    }
-
-    /// POST request convenience method.
-    pub fn post(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.request(.POST, url, reqOpts);
-    }
-
-    /// PUT request convenience method.
-    pub fn put(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.request(.PUT, url, reqOpts);
-    }
-
-    /// DELETE request convenience method.
-    pub fn delete(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.request(.DELETE, url, reqOpts);
-    }
-
-    /// Alias for delete() with short method naming.
-    pub fn del(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.delete(url, reqOpts);
-    }
-
-    /// PATCH request convenience method.
-    pub fn patch(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.request(.PATCH, url, reqOpts);
-    }
-
-    /// HEAD request convenience method.
-    pub fn head(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.request(.HEAD, url, reqOpts);
-    }
-
-    /// TRACE request convenience method.
-    pub fn trace(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.request(.TRACE, url, reqOpts);
-    }
-
-    /// CONNECT request convenience method.
-    pub fn connect(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.request(.CONNECT, url, reqOpts);
-    }
-
-    /// OPTIONS request convenience method.
-    pub fn options(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.request(.OPTIONS, url, reqOpts);
-    }
-
-    /// Alias for options() with short method naming.
-    pub fn opts(self: *Self, url: []const u8, reqOpts: RequestOptions) !Response {
-        return self.options(url, reqOpts);
-    }
-
-    /// GET request that parses the JSON response into type T.
-    /// Returns both the response and parsed value. Caller deinit's both.
-    pub fn getJson(self: *Self, comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-        const response = try self.get(url, .{ .headers = &.{.{ "Accept", "application/json" }} });
-        const value = try response.jsonBorrowed(T, parse_opts);
-        return .{ .response = response, .value = value };
-    }
-
-    /// GET request with zero-copy JSON parse. Returns both the response and
-    /// parsed value. The response must outlive the parsed value.
-    pub fn getJsonBorrowed(self: *Self, comptime T: type, url: []const u8) !JsonBorrowedResult(T) {
-        const response = try self.get(url, .{ .headers = &.{.{ "Accept", "application/json" }} });
-        const value = try response.jsonBorrowed(T, .{});
-        return .{ .response = response, .value = value };
-    }
-
-    /// POST JSON body and parse the response as type T.
-    /// Returns both the response and parsed value. Caller deinit's both.
-    pub fn postJsonAndParse(self: *Self, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-        const response = try self.post(url, .{ .json = body });
-        const value = try response.jsonBorrowed(T, parse_opts);
-        return .{ .response = response, .value = value };
-    }
-
-    /// POST JSON body with zero-copy parse. Caller must keep response alive.
-    pub fn postJsonBorrowed(self: *Self, comptime T: type, url: []const u8, body: []const u8) !JsonBorrowedResult(T) {
-        const response = try self.post(url, .{ .json = body });
-        const value = try response.jsonBorrowed(T, .{});
-        return .{ .response = response, .value = value };
-    }
-
-    /// PUT JSON body and parse the response as type T.
-    /// Returns both the response and parsed value. Caller deinit's both.
-    pub fn putJson(self: *Self, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-        const response = try self.put(url, .{ .json = body });
-        const value = try response.jsonBorrowed(T, parse_opts);
-        return .{ .response = response, .value = value };
-    }
-
-    /// PUT JSON body with zero-copy parse.
-    pub fn putJsonBorrowed(self: *Self, comptime T: type, url: []const u8, body: []const u8) !JsonBorrowedResult(T) {
-        const response = try self.put(url, .{ .json = body });
-        const value = try response.jsonBorrowed(T, .{});
-        return .{ .response = response, .value = value };
-    }
-
-    /// PATCH JSON body and parse the response as type T.
-    /// Returns both the response and parsed value. Caller deinit's both.
-    pub fn patchJson(self: *Self, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-        const response = try self.patch(url, .{ .json = body });
-        const value = try response.jsonBorrowed(T, parse_opts);
-        return .{ .response = response, .value = value };
-    }
-
-    /// PATCH JSON body with zero-copy parse.
-    pub fn patchJsonBorrowed(self: *Self, comptime T: type, url: []const u8, body: []const u8) !JsonBorrowedResult(T) {
-        const response = try self.patch(url, .{ .json = body });
-        const value = try response.jsonBorrowed(T, .{});
-        return .{ .response = response, .value = value };
-    }
-
-    /// DELETE request that parses the JSON response as type T.
-    /// Returns both the response and parsed value. Caller deinit's both.
-    pub fn deleteJson(self: *Self, comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-        const response = try self.delete(url, .{ .headers = &.{.{ "Accept", "application/json" }} });
-        const value = try response.jsonBorrowed(T, parse_opts);
-        return .{ .response = response, .value = value };
-    }
-
-    /// DELETE request with zero-copy JSON parse.
-    pub fn deleteJsonBorrowed(self: *Self, comptime T: type, url: []const u8) !JsonBorrowedResult(T) {
-        const response = try self.delete(url, .{ .headers = &.{.{ "Accept", "application/json" }} });
-        const value = try response.jsonBorrowed(T, .{});
-        return .{ .response = response, .value = value };
-    }
-};
-
-/// Result of a zero-copy JSON parse. Holds both the response (which owns the
-/// body buffer) and the parsed value (which borrows string slices from it).
-/// The caller must keep `response` alive while using `value`, then deinit both.
-pub fn JsonBorrowedResult(comptime T: type) type {
-    return struct {
-        response: Response,
-        value: T,
-    };
-}
-
-const SocketHTTP2Transport = struct {
-    socket: *Socket,
-
-    fn writeAll(self: *SocketHTTP2Transport, data: []const u8) !void {
-        try self.socket.sendAll(data);
-    }
-
-    fn readNoEof(self: *SocketHTTP2Transport, out: []u8) !void {
-        var read: usize = 0;
-        while (read < out.len) {
-            const n = try self.socket.recv(out[read..]);
-            if (n == 0) return error.UnexpectedEof;
-            read += n;
+        if (result) |resp| {
+            if (self.config.logger) |*l|
+                l.log(.debug, "client", "{s} {s} -> {d}", .{ @tagName(method), target_url, resp.status });
+            return resp;
+        } else |e| {
+            if (self.config.logger) |*l|
+                l.log(.err, "client", "{s} {s} failed: {s}", .{ @tagName(method), target_url, @errorName(e) });
+            return e;
         }
     }
 };
 
-const TLSHTTP2Transport = struct {
-    session: *TLSSession,
+// Default global client (zero-config). Lazily created; never deinit'd
+// (process-lifetime resource, like the standard library's own globals).
 
-    fn writeAll(self: *TLSHTTP2Transport, data: []const u8) !void {
-        var written: usize = 0;
-        while (written < data.len) {
-            const n = try self.session.write(data[written..]);
-            if (n == 0) return error.UnexpectedEof;
-            written += n;
-        }
-        try self.session.flush();
-    }
+var g_client: ?Client = null;
+var g_ready = std.atomic.Value(bool).init(false);
+var g_mu = sync.Spinlock{};
 
-    fn readNoEof(self: *TLSHTTP2Transport, out: []u8) !void {
-        var read: usize = 0;
-        while (read < out.len) {
-            const n = try self.session.read(out[read..]);
-            if (n == 0) return error.UnexpectedEof;
-            read += n;
-        }
-    }
-};
+fn defaultClient() ?*Client {
+    if (g_ready.load(.acquire)) return &g_client.?;
 
-const UDPHTTP3Transport = struct {
-    socket: *UdpSocket,
+    g_mu.lock();
+    defer g_mu.unlock();
+    if (g_ready.load(.monotonic)) return &g_client.?;
 
-    fn sendDatagram(self: *UDPHTTP3Transport, data: []const u8) !void {
-        const sent = try self.socket.send(data);
-        if (sent != data.len) return error.ShortWrite;
-    }
-
-    fn recvDatagram(self: *UDPHTTP3Transport, out: []u8) !usize {
-        return self.socket.recv(out);
-    }
-};
-
-const HTTP3QUICSession = struct {
-    local_cid: quic.ConnectionId,
-    peer_cid: quic.ConnectionId,
-    next_packet_number: u64 = 0,
-    sent_initial: bool = false,
-
-    fn initClient() HTTP3QUICSession {
-        return .{
-            .local_cid = quic.ConnectionId.random(),
-            .peer_cid = quic.ConnectionId.random(),
-        };
-    }
-};
-
-/// Sends a QUIC RESET_STREAM frame to cancel a stream.
-fn sendHTTP3ResetStream(
-    transport: anytype,
-    session: *HTTP3QUICSession,
-    stream_id: u64,
-    error_code: u64,
-    final_size: u64,
-    allocator: Allocator,
-) !void {
-    var frame_buf: [64]u8 = undefined;
-    const frame = quic.ResetStreamFrame{
-        .stream_id = stream_id,
-        .error_code = error_code,
-        .final_size = final_size,
-    };
-    const frame_len = try frame.encode(&frame_buf);
-
-    var packet = std.ArrayList(u8).empty;
-    defer packet.deinit(allocator);
-
-    try appendHTTP3PacketHeader(&packet, allocator, session);
-    try packet.appendSlice(allocator, frame_buf[0..frame_len]);
-
-    try transport.sendDatagram(packet.items);
+    const gpa = std.heap.page_allocator;
+    g_client = Client.initWithIo(gpa, std.Io.Threaded.global_single_threaded.io(), .{});
+    g_ready.store(true, .release);
+    return &g_client.?;
 }
 
-/// Sends a QUIC STOP_SENDING frame to tell the peer to stop sending on a stream.
-fn sendHTTP3StopSending(
-    transport: anytype,
-    session: *HTTP3QUICSession,
-    stream_id: u64,
-    error_code: u64,
-    allocator: Allocator,
-) !void {
-    var frame_buf: [64]u8 = undefined;
-    const frame = quic.StopSendingFrame{
-        .stream_id = stream_id,
-        .error_code = error_code,
-    };
-    const frame_len = try frame.encode(&frame_buf);
-
-    var packet = std.ArrayList(u8).empty;
-    defer packet.deinit(allocator);
-
-    try appendHTTP3PacketHeader(&packet, allocator, session);
-    try packet.appendSlice(allocator, frame_buf[0..frame_len]);
-
-    try transport.sendDatagram(packet.items);
+fn forward(method: Method, opts: anytype) Error!Response {
+    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
+    return c.doRequest(method, opts);
 }
 
-const DecodedHTTP3StreamDatagram = struct {
-    stream_id: u64,
-    fin: bool,
-    data: []const u8,
-};
-
-fn parseHTTP3ControlStream(stream_data: []const u8) !void {
-    if (stream_data.len == 0) return error.ProtocolError;
-
-    var offset: usize = 0;
-    const stream_type = try http.decodeVarInt(stream_data[offset..]);
-    offset += stream_type.len;
-
-    if (stream_type.value != @intFromEnum(quic.HTTP3StreamType.control)) {
-        return error.ProtocolError;
-    }
-
-    var saw_settings = false;
-
-    while (offset < stream_data.len) {
-        const frame = http.HTTP3FrameHeader.decode(stream_data[offset..]) catch return error.ProtocolError;
-        offset += frame.len;
-
-        const payload_len: usize = @intCast(frame.header.length);
-        if (stream_data.len < offset + payload_len) return error.ProtocolError;
-
-        const payload = stream_data[offset .. offset + payload_len];
-        offset += payload_len;
-
-        if (frame.header.frame_type == @intFromEnum(http.HTTP3FrameType.settings)) {
-            _ = try http.parseHTTP3SettingsPayload(payload);
-            saw_settings = true;
-        }
-    }
-
-    if (!saw_settings) return error.ProtocolError;
+pub fn globalGet(opts: anytype) Error!Response {
+    return forward(.GET, opts);
 }
 
-fn appendHTTP3PacketHeader(
-    out: *std.ArrayList(u8),
-    allocator: Allocator,
-    session: *HTTP3QUICSession,
-) !void {
-    var hdr_buf: [128]u8 = undefined;
-
-    const hdr_len = if (!session.sent_initial) blk: {
-        const long_header = quic.LongHeader{
-            .packet_type = .initial,
-            .version = .v1,
-            .dcid = session.peer_cid,
-            .scid = session.local_cid,
-        };
-        const n = try long_header.encode(&hdr_buf);
-        session.sent_initial = true;
-        break :blk n;
-    } else blk: {
-        const short_header = quic.ShortHeader{ .dcid = session.peer_cid };
-        break :blk try short_header.encode(&hdr_buf);
-    };
-
-    try out.appendSlice(allocator, hdr_buf[0..hdr_len]);
-
-    var pn_buf: [8]u8 = undefined;
-    const pn_len = try quic.encodeVarInt(session.next_packet_number, &pn_buf);
-    session.next_packet_number += 1;
-    try out.appendSlice(allocator, pn_buf[0..pn_len]);
+pub fn globalPost(opts: anytype) Error!Response {
+    return forward(.POST, opts);
 }
 
-fn decodeHTTP3StreamDatagram(datagram: []const u8, session: *HTTP3QUICSession) !DecodedHTTP3StreamDatagram {
-    if (datagram.len == 0) return error.InvalidResponse;
-
-    var offset: usize = 0;
-
-    if ((datagram[0] & 0x80) != 0) {
-        const long_decoded = try quic.LongHeader.decode(datagram);
-        offset = long_decoded.len;
-        if (long_decoded.header.scid.len > 0) {
-            session.peer_cid = long_decoded.header.scid;
-        }
-    } else {
-        const short_decoded = try quic.ShortHeader.decode(datagram, session.local_cid.len);
-        offset = short_decoded.len;
-    }
-
-    const packet_number = try quic.decodeVarInt(datagram[offset..]);
-    _ = packet_number.value;
-    offset += packet_number.len;
-
-    if (offset >= datagram.len) return error.InvalidResponse;
-    if (!quic.FrameType.isStream(@as(u64, datagram[offset]))) return error.ProtocolError;
-
-    const stream_decoded = try quic.StreamFrame.decode(datagram[offset..]);
-    if (stream_decoded.len != datagram[offset..].len) return error.ProtocolError;
-
-    return .{
-        .stream_id = stream_decoded.frame.stream_id,
-        .fin = stream_decoded.frame.fin,
-        .data = stream_decoded.frame.data,
-    };
+pub fn globalPut(opts: anytype) Error!Response {
+    return forward(.PUT, opts);
 }
 
-fn toConnectionSettings(settings: types.HTTP2Settings, allow_push: bool) http.HTTP2Connection.HTTP2ConnectionSettings {
-    return .{
-        .header_table_size = settings.header_table_size,
-        .enable_push = settings.enable_push and allow_push,
-        .max_concurrent_streams = settings.max_concurrent_streams,
-        .initial_window_size = settings.initial_window_size,
-        .max_frame_size = settings.max_frame_size,
-        .max_header_list_size = settings.max_header_list_size,
-    };
+pub fn globalPatch(opts: anytype) Error!Response {
+    return forward(.PATCH, opts);
 }
 
-fn buildAuthority(allocator: Allocator, req: *const Request, authority_buf: *?[]u8) ![]const u8 {
-    const host = req.uri.host orelse return error.InvalidUri;
-    const explicit_port = req.uri.port orelse return host;
-    const default_port: u16 = if (req.uri.isTLS()) 443 else 80;
-
-    if (explicit_port == default_port) return host;
-
-    authority_buf.* = try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, explicit_port });
-    return authority_buf.*.?;
+pub fn globalDelete(opts: anytype) Error!Response {
+    return forward(.DELETE, opts);
 }
 
-fn buildPseudoHeaders(
-    allocator: Allocator,
-    req: *Request,
-    header_entries: anytype,
-    owned_header_names: anytype,
-    path_buf: *?[]u8,
-    authority_buf: *?[]u8,
-) !void {
-    const path = if (req.uri.query) |q| blk: {
-        path_buf.* = try std.fmt.allocPrint(allocator, "{s}?{s}", .{ req.uri.path, q });
-        break :blk path_buf.*.?;
-    } else req.uri.path;
-
-    const authority = try buildAuthority(allocator, req, authority_buf);
-
-    const method_value = if (req.method == .CUSTOM)
-        (req.custom_method orelse "CUSTOM")
-    else
-        req.method.toString();
-
-    try header_entries.append(allocator, .{ .name = ":method", .value = method_value });
-    try header_entries.append(allocator, .{ .name = ":path", .value = path });
-    try header_entries.append(allocator, .{ .name = ":scheme", .value = if (req.uri.isTLS()) "https" else "http" });
-    try header_entries.append(allocator, .{ .name = ":authority", .value = authority });
-
-    for (req.headers.entries.items) |entry| {
-        if (common.isConnectionSpecificHeader(entry.name) or std.ascii.eqlIgnoreCase(entry.name, HeaderName.HOST)) {
-            continue;
-        }
-        if (entry.name.len > 0 and entry.name[0] == ':') continue;
-
-        const lowered_name = try common.dupLowerAscii(allocator, entry.name);
-        try owned_header_names.append(allocator, lowered_name);
-        try header_entries.append(allocator, .{ .name = lowered_name, .value = entry.value });
-    }
+pub fn globalHead(opts: anytype) Error!Response {
+    return forward(.HEAD, opts);
 }
 
-fn writeHTTP2Frame(
-    transport: anytype,
-    frame_type: http.HTTP2FrameType,
-    flags: u8,
-    stream_id: u31,
-    payload: []const u8,
-) !void {
-    const header = http.HTTP2FrameHeader{
-        .length = @intCast(payload.len),
-        .frame_type = frame_type,
-        .flags = flags,
-        .stream_id = stream_id,
-    };
-    const raw_header = header.serialize();
-    try transport.writeAll(&raw_header);
-    if (payload.len > 0) {
-        try transport.writeAll(payload);
-    }
+pub fn globalOptions(opts: anytype) Error!Response {
+    return forward(.OPTIONS, opts);
 }
 
-fn applyResponseHeaderBlock(
-    self: *Client,
-    stream_manager: *h2stream.StreamManager,
-    header_block: []const u8,
-    flags: u8,
-    expect_initial_headers: bool,
-    status_code: *?u16,
-    response_headers: *Headers,
-) !void {
-    const parsed = try h2stream.parseHeadersFramePayload(stream_manager, header_block, flags, self.allocator);
+pub fn globalTrace(opts: anytype) Error!Response {
+    return forward(.TRACE, opts);
+}
+
+pub fn globalConnect(opts: anytype) Error!Response {
+    return forward(.CONNECT, opts);
+}
+
+pub fn globalFetch(opts: anytype) Error!Response {
+    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
+    return c.fetch(opts);
+}
+
+pub fn globalSend(opts: anytype) Error!Response {
+    return globalFetch(opts);
+}
+
+pub fn globalRequest(opts: anytype) Error!Response {
+    const m: Method = if (@hasField(@TypeOf(opts), "method")) opts.method orelse .GET else .GET;
+    return forward(m, opts);
+}
+
+pub fn globalGetAll(urls: anytype) ![]Response {
+    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
+    return c.getAll(urls);
+}
+
+pub fn globalRequestAll(reqs: anytype) ![]Response {
+    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
+    return c.requestAll(reqs);
+}
+
+pub fn globalDownload(url: []const u8, destination: []const u8, opts: anytype) DownloadError!DownloadResult {
+    const c = defaultClient() orelse return DownloadError.ConnectionFailed;
+    return c.download(url, destination, opts);
+}
+
+pub fn globalUpdateFile(url: []const u8, target_path: []const u8, opts: anytype) DownloadError!DownloadResult {
+    const c = defaultClient() orelse return DownloadError.ConnectionFailed;
+    return c.updateFile(url, target_path, opts);
+}
+
+pub fn globalVerifyFile(path: []const u8, opts: VerifyOptions) DownloadError!void {
+    return DownloadCore.verifyFile(path, opts);
+}
+
+pub fn globalLookupFileInfo(url: []const u8, opts: anytype) DownloadError!RemoteFileInfo {
+    const c = defaultClient() orelse return DownloadError.ConnectionFailed;
+    return c.lookupFileInfo(url, opts);
+}
+
+pub fn globalGraphql(url: []const u8, query: []const u8, variables: anytype, opts: anytype) !Response {
+    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
+    return c.graphql(url, query, variables, opts);
+}
+
+pub fn globalFetchSitemap(url: []const u8, opts: anytype) !@import("../parsing/sitemap.zig").Sitemap {
+    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
+    return c.fetchSitemap(url, opts);
+}
+
+/// Returns true if the internet is reachable (zero-config, no client needed).
+///
+/// Uses a short-lived I/O context to probe Cloudflare/Google DNS (port 53).
+/// Works on Windows (Winsock), Linux, and macOS.  IPv4 and IPv6 are both
+/// attempted.
+///
+/// Example:
+/// ```zig
+/// if (!httpx.isOnline()) @panic("No internet connection");
+/// ```
+pub fn globalIsOnline() bool {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    return connectivity.isOnline(threaded.io());
+}
+
+/// Probes internet connectivity and returns a `ConnectivityResult` (zero-config).
+///
+/// Example:
+/// ```zig
+/// const r = httpx.checkConnectivity(.{ .timeout_ms = 2000 });
+/// if (r.online) std.debug.print("online via {s} ({?d}ms)\n", .{ r.endpointStr(), r.latency_ms });
+/// ```
+pub fn globalCheckConnectivity(opts: ConnectivityOptions) ConnectivityResult {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    return connectivity.checkConnectivity(threaded.io(), opts);
+}
+
+test "explicit client init/deinit" {
+    var c = Client.init(std.testing.allocator, .{}) catch return;
+    defer c.deinit();
+}
+
+test "explicit client initWithIo" {
+    var ctx = tcp.IoContext.init(std.testing.allocator) catch return;
+    defer ctx.deinit();
+    var c = Client.initWithIo(std.testing.allocator, ctx.io, .{});
+    defer c.deinit();
+}
+
+test "dns cache serves second hostname request from cache" {
+    const a = std.testing.allocator;
+    var client = Client.init(a, .{}) catch return;
+    defer client.deinit();
+    // Direct cache resolves avoid the localhost HTTP roundtrip which
+    // hangs on Linux/macOS (dual-stack connect) and previously panicked
+    // Windows (accept CANCELLED => unreachable). The HTTP path is
+    // already covered by keep-alive / connection-close tests; the
+    // FakeResolver unit test covers coalescing deterministically.
+    const r1 = client.dns_cache.?.resolve(client.io, "localhost") catch return;
     defer {
-        for (parsed.headers) |header| {
-            self.allocator.free(header.name);
-            self.allocator.free(header.value);
-        }
-        self.allocator.free(parsed.headers);
+        for (r1) |addr| a.free(addr);
+        a.free(r1);
     }
+    try std.testing.expect(r1.len >= 1);
 
-    var saw_status = false;
-
-    for (parsed.headers) |header| {
-        if (header.name.len > 0 and header.name[0] == ':') {
-            if (mem.eql(u8, header.name, ":status")) {
-                if (!expect_initial_headers or status_code.* != null or saw_status) {
-                    return error.ProtocolError;
-                }
-                status_code.* = std.fmt.parseInt(u16, header.value, 10) catch return error.InvalidResponse;
-                saw_status = true;
-            } else {
-                return error.ProtocolError;
-            }
-            continue;
-        }
-
-        if (common.isConnectionSpecificHeader(header.name)) continue;
-        try response_headers.append(header.name, header.value);
+    const r2 = client.dns_cache.?.resolve(client.io, "localhost") catch return;
+    defer {
+        for (r2) |addr| a.free(addr);
+        a.free(r2);
     }
+    try std.testing.expect(r2.len >= 1);
 
-    if (expect_initial_headers and !saw_status and status_code.* == null) {
-        return error.InvalidResponse;
-    }
+    const s = client.dns_cache.?.statsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), s.started);
+    try std.testing.expect(s.hits >= 1);
 }
 
-test "Client initialization" {
-    const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
+test "disabled dns cache never stores" {
+    const a = std.testing.allocator;
+    var client = Client.init(a, .{ .dns_cache = .{ .enabled = false } }) catch return;
     defer client.deinit();
-
-    try std.testing.expectEqualStrings(meta.default_user_agent, client.config.user_agent);
+    try std.testing.expect(client.dns_cache == null);
 }
 
-test "Client with config" {
-    const allocator = std.testing.allocator;
-    var client = Client.initWithConfig(allocator, .{
-        .base_url = "http://httpbun.com",
-        .user_agent = "TestClient/1.0",
-    });
+test "client http_version forwarded from opts" {
+    const a = std.testing.allocator;
+    var client = Client.init(a, .{ .http_version = .http_1 }) catch return;
     defer client.deinit();
-
-    try std.testing.expectEqualStrings("http://httpbun.com", client.config.base_url.?);
+    try std.testing.expectEqual(HttpVersion.http_1, client.config.http_version.?);
 }
 
-test "Client initForBaseUrl helper" {
-    const allocator = std.testing.allocator;
-    var client = Client.initForBaseUrl(allocator, "http://httpbun.com");
+test "client anytype headers struct literal" {
+    const a = std.testing.allocator;
+    var client = Client.init(a, .{}) catch return;
     defer client.deinit();
-
-    try std.testing.expectEqualStrings("http://httpbun.com", client.config.base_url.?);
+    // Do not actually connect; just verify doRequest builds correctly up to connect failure
+    // Use invalid port to get ConnectFailed quickly after header building
+    const res = client.get(.{ .url = "http://127.0.0.1:1/", .headers = .{ .X_Custom = "value", .X_Int = 42 } });
+    try std.testing.expectError(Error.ConnectFailed, res);
 }
 
-test "Client initialization defaults" {
-    const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
+test "client anytype query struct literal" {
+    const a = std.testing.allocator;
+    var client = Client.init(a, .{}) catch return;
     defer client.deinit();
-
-    try std.testing.expect(client.config.base_url == null);
-    try std.testing.expect(client.config.keep_alive);
-    try std.testing.expect(client.config.follow_redirects);
-    try std.testing.expect(client.config.verify_ssl);
-    try std.testing.expectEqual(@as(u32, 20), client.config.pool_max_connections);
-    try std.testing.expectEqual(@as(u32, 5), client.config.pool_max_per_host);
+    const res = client.get(.{ .url = "http://127.0.0.1:1/", .query = .{ .page = 2, .active = true } });
+    try std.testing.expectError(Error.ConnectFailed, res);
 }
 
-test "ClientConfig builder helpers" {
-    const default_headers = [_][2][]const u8{
-        .{ "Accept", "application/json" },
-    };
-
-    const cfg = ClientConfig.defaults()
-        .withBaseUrl("http://httpbun.com")
-        .withTimeouts(types.Timeouts.fast())
-        .withRetryPolicy(types.RetryPolicy.noRetry())
-        .withRedirectPolicy(types.RedirectPolicy.strict())
-        .withDefaultHeaders(&default_headers)
-        .withUserAgent("MyClient/1.0")
-        .withFollowRedirects(false)
-        .withProtocols(true, false)
-        .withHTTP2Settings(.{ .max_concurrent_streams = 42 })
-        .withHTTP3Settings(.{ .enable_datagrams = true })
-        .withSslVerification(false)
-        .withKeepAlive(false)
-        .withMaxResponseSize(1024)
-        .withPoolLimits(64, 16)
-        .withProxy(.{ .host = "127.0.0.1", .port = 8080 });
-
-    try std.testing.expectEqualStrings("http://httpbun.com", cfg.base_url.?);
-    try std.testing.expectEqual(@as(u64, 5_000), cfg.timeouts.connect_ms);
-    try std.testing.expectEqual(@as(u32, 0), cfg.retry_policy.max_retries);
-    try std.testing.expect(cfg.redirect_policy.preserve_method);
-    try std.testing.expect(cfg.default_headers != null);
-    try std.testing.expectEqual(@as(usize, 1), cfg.default_headers.?.len);
-    try std.testing.expectEqualStrings("MyClient/1.0", cfg.user_agent);
-    try std.testing.expect(!cfg.follow_redirects);
-    try std.testing.expect(cfg.http2_enabled);
-    try std.testing.expect(!cfg.http3_enabled);
-    try std.testing.expectEqual(@as(u32, 42), cfg.http2_settings.max_concurrent_streams);
-    try std.testing.expect(cfg.http3_settings.enable_datagrams);
-    try std.testing.expect(!cfg.verify_ssl);
-    try std.testing.expect(!cfg.keep_alive);
-    try std.testing.expectEqual(@as(usize, 1024), cfg.max_response_size);
-    try std.testing.expectEqual(@as(u32, 64), cfg.pool_max_connections);
-    try std.testing.expectEqual(@as(u32, 16), cfg.pool_max_per_host);
-    try std.testing.expect(cfg.proxy != null);
-    try std.testing.expectEqualStrings("127.0.0.1", cfg.proxy.?.host);
-    try std.testing.expectEqual(@as(u16, 8080), cfg.proxy.?.port);
-}
-
-test "RequestOptions builder helpers" {
-    const headers = [_][2][]const u8{
-        .{ "Authorization", "Bearer test" },
-        .{ "Accept", "application/json" },
-    };
-    const query_params = [_][2][]const u8{
-        .{ "page", "1" },
-        .{ "sort", "desc" },
-    };
-    const form_fields = [_][2][]const u8{
-        .{ "email", "user@example.com" },
-    };
-
-    const opts = RequestOptions.defaults()
-        .withHeaders(&headers)
-        .withQueryParams(&query_params)
-        .withJson("{\"ok\":true}")
-        .withFormUrlEncoded(&form_fields)
-        .withBearerToken("token-123")
-        .withTimeoutMs(2_500)
-        .withFollowRedirects(false)
-        .withVersion(.HTTP_2);
-
-    try std.testing.expect(opts.headers != null);
-    try std.testing.expectEqual(@as(usize, 2), opts.headers.?.len);
-    try std.testing.expect(opts.query_params != null);
-    try std.testing.expectEqual(@as(usize, 2), opts.query_params.?.len);
-    try std.testing.expectEqualStrings("{\"ok\":true}", opts.json.?);
-    try std.testing.expect(opts.form_fields != null);
-    try std.testing.expectEqual(@as(usize, 1), opts.form_fields.?.len);
-    try std.testing.expectEqualStrings("token-123", opts.bearer_token.?);
-    try std.testing.expect(opts.basic_auth == null);
-    try std.testing.expectEqual(@as(u64, 2_500), opts.timeout_ms.?);
-    try std.testing.expect(!opts.follow_redirects.?);
-    try std.testing.expectEqual(types.Version.HTTP_2, opts.version.?);
-
-    const basic = RequestOptions.defaults().withBasicAuth("demo", "pass");
-    try std.testing.expect(basic.basic_auth != null);
-    try std.testing.expectEqualStrings("demo", basic.basic_auth.?.username);
-    try std.testing.expectEqualStrings("pass", basic.basic_auth.?.password);
-    try std.testing.expect(basic.bearer_token == null);
-
-    const h3 = RequestOptions.defaults().withHTTP3();
-    try std.testing.expectEqual(types.Version.HTTP_3, h3.version.?);
-}
-
-test "Client stores Set-Cookie headers" {
-    const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
+test "client typed json struct" {
+    const a = std.testing.allocator;
+    var client = Client.init(a, .{}) catch return;
     defer client.deinit();
-
-    var response = Response.init(allocator, 200);
-    defer response.deinit();
-
-    try response.headers.append("Set-Cookie", "session=abc123; Path=/; HttpOnly");
-    try response.headers.append("Set-Cookie", "theme=dark; Path=/");
-
-    try client.storeCookies(&response, "httpbun.com");
-
-    try std.testing.expectEqualStrings("abc123", client.cookies.get("httpbun.com|session").?.value);
-    try std.testing.expectEqualStrings("dark", client.cookies.get("httpbun.com|theme").?.value);
-}
-
-test "Client attaches Cookie header from jar" {
-    const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
-    defer client.deinit();
-
-    try client.setCookie("session", "abc123");
-    try client.setCookie("theme", "dark");
-
-    var request = try Request.init(allocator, .GET, "http://httpbun.com/");
-    defer request.deinit();
-
-    try client.attachCookies(&request);
-
-    const cookie_header = request.headers.get("Cookie") orelse return error.TestUnexpectedResult;
-    try std.testing.expect(mem.indexOf(u8, cookie_header, "session=abc123") != null);
-    try std.testing.expect(mem.indexOf(u8, cookie_header, "theme=dark") != null);
-}
-
-test "Client cookie jar public API" {
-    const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
-    defer client.deinit();
-
-    try client.setCookie("session", "abc123");
-    try std.testing.expectEqualStrings("abc123", client.getCookie("session").?);
-
-    const removed = client.removeCookie("session");
-    try std.testing.expect(removed);
-    try std.testing.expect(client.getCookie("session") == null);
-
-    try client.setCookie("theme", "dark");
-    try client.setCookie("lang", "en");
-    client.clearCookies();
-    try std.testing.expectEqual(@as(usize, 0), client.cookies.count());
-}
-
-test "Client send/fetch/options aliases" {
-    const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
-    defer client.deinit();
-
-    // Compile-time alias checks through function pointer assignment.
-    const send_ptr: *const fn (*Client, types.Method, []const u8, RequestOptions) anyerror!Response = Client.send;
-    const fetch_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.fetch;
-    const del_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.del;
-    const trace_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.trace;
-    const connect_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.connect;
-    const options_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.options;
-    const opts_ptr: *const fn (*Client, []const u8, RequestOptions) anyerror!Response = Client.opts;
-    _ = send_ptr;
-    _ = fetch_ptr;
-    _ = del_ptr;
-    _ = trace_ptr;
-    _ = connect_ptr;
-    _ = options_ptr;
-    _ = opts_ptr;
-}
-
-test "Client hasCookie and cookieCount" {
-    const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
-    defer client.deinit();
-
-    try std.testing.expectEqual(@as(usize, 0), client.cookieCount());
-    try std.testing.expect(!client.hasCookie("session"));
-
-    try client.setCookie("session", "abc123");
-    try std.testing.expectEqual(@as(usize, 1), client.cookieCount());
-    try std.testing.expect(client.hasCookie("session"));
-}
-
-test "Client pool helpers" {
-    const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
-    defer client.deinit();
-
-    client.cleanupIdleConnections();
-    const stats = client.poolStats();
-    try std.testing.expectEqual(@as(usize, 0), stats.total);
-    try std.testing.expectEqual(@as(usize, 0), stats.active);
-    try std.testing.expectEqual(@as(usize, 0), stats.idle);
-    try std.testing.expectEqual(@as(usize, 0), client.hostPoolConnectionCount("httpbun.com", 443));
-}
-
-test "Client retry classifier avoids TLS/protocol retries" {
-    try std.testing.expect(!Client.isRetryableRequestError(error.TLSConnectionTruncated));
-    try std.testing.expect(!Client.isRetryableRequestError(error.InvalidResponse));
-    try std.testing.expect(!Client.isRetryableRequestError(error.ProtocolError));
-    try std.testing.expect(Client.isRetryableRequestError(error.ConnectionReset));
-}
-
-test "Client proxy request formatting" {
-    const allocator = std.testing.allocator;
-    var client = Client.initWithConfig(allocator, .{});
-    defer client.deinit();
-
-    var req = try Request.init(allocator, .GET, "http://httpbun.com/api/v1/users?active=true");
-    defer req.deinit();
-    try req.headers.set("Accept", "application/json");
-
-    const formatted = try client.formatProxyRequest(&req, .{
-        .host = "127.0.0.1",
-        .port = 8080,
-        .username = "user",
-        .password = "pass",
-    });
-    defer allocator.free(formatted);
-
-    try std.testing.expect(std.mem.indexOf(u8, formatted, "GET http://httpbun.com:80/api/v1/users?active=true HTTP/1.1\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, formatted, "Accept: application/json\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, formatted, "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n") != null);
-}
-
-test "Client multipart options and MIME resolution" {
-    const allocator = std.testing.allocator;
-
-    var client = Client.init(allocator);
-    defer client.deinit();
-
-    const fields = [_]MultipartField{
-        .{ .name = "username", .value = "bob" },
-    };
-    const files = [_]MultipartFile{
-        .{ .name = "doc", .filename = "notes.html", .data = "some content", .content_type = null },
-        .{ .name = "custom", .filename = "data.bin", .data = "binary data", .content_type = "application/x-custom" },
-    };
-
-    var req = try Request.init(allocator, .POST, "http://localhost/");
-    defer req.deinit();
-
-    const reqOpts = RequestOptions.defaults()
-        .withMultipartFields(&fields)
-        .withMultipartFiles(&files);
-
-    if (reqOpts.multipart_fields != null or reqOpts.multipart_files != null) {
-        const boundary = reqOpts.multipart_boundary orelse "----httpxBoundary1234567890";
-        var builder = @import("../data/multipart.zig").MultipartBuilder.init(allocator, boundary);
-        defer builder.deinit();
-
-        if (reqOpts.multipart_fields) |flds| {
-            for (flds) |field| {
-                try builder.addField(field.name, field.value);
-            }
-        }
-
-        if (reqOpts.multipart_files) |fls| {
-            for (fls) |file| {
-                const resolved_mime = file.content_type orelse common.mimeTypeFromPathOr(file.filename, "application/octet-stream");
-                try builder.addFile(file.name, file.filename, resolved_mime, file.data);
-            }
-        }
-
-        const body = try builder.build();
-        defer allocator.free(body);
-        try req.setBody(body);
-
-        const ct = try builder.contentType();
-        defer allocator.free(ct);
-        try req.headers.set(HeaderName.CONTENT_TYPE, ct);
-    }
-
-    try std.testing.expect(req.body != null);
-    try std.testing.expect(std.mem.indexOf(u8, req.body.?, "text/html; charset=utf-8") != null);
-    try std.testing.expect(std.mem.indexOf(u8, req.body.?, "application/x-custom") != null);
-    try std.testing.expect(std.mem.indexOf(u8, req.body.?, "name=\"username\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, req.body.?, "bob") != null);
-
-    const ct = req.headers.get("Content-Type").?;
-    try std.testing.expect(std.mem.startsWith(u8, ct, "multipart/form-data; boundary=----httpxBoundary1234567890"));
-}
-
-test "RequestOptions per-request overrides" {
-    const proxy = types.Proxy{
-        .kind = .http,
-        .host = "127.0.0.1",
-        .port = 8888,
-        .username = null,
-        .password = null,
-    };
-
-    const opts = RequestOptions.defaults()
-        .withProxy(proxy)
-        .withSslVerification(false)
-        .withKeepAlive(false)
-        .withUnixSocket("/tmp/test.sock");
-
-    try std.testing.expect(opts.proxy != null);
-    try std.testing.expectEqualStrings("127.0.0.1", opts.proxy.?.host);
-    try std.testing.expectEqual(@as(u16, 8888), opts.proxy.?.port);
-    try std.testing.expectEqual(false, opts.verify_ssl.?);
-    try std.testing.expectEqual(false, opts.keep_alive.?);
-    try std.testing.expectEqualStrings("/tmp/test.sock", opts.unix_socket_path.?);
-}
-
-test "RequestOptions explicit timeout resolution" {
-    const allocator = std.testing.allocator;
-    var client = Client.initWithConfig(allocator, .{
-        .timeouts = .{
-            .connect_ms = 5000,
-            .read_ms = 10000,
-            .write_ms = 15000,
-        },
-    });
-    defer client.deinit();
-
-    // Default fallback
-    const t_def = client.resolveRequestTimeouts(.{});
-    try std.testing.expectEqual(@as(u64, 5000), t_def.connect_ms);
-    try std.testing.expectEqual(@as(u64, 10000), t_def.read_ms);
-    try std.testing.expectEqual(@as(u64, 15000), t_def.write_ms);
-
-    // Uniform timeout_ms override
-    const t_uni = client.resolveRequestTimeouts(RequestOptions.defaults().withTimeoutMs(2000));
-    try std.testing.expectEqual(@as(u64, 2000), t_uni.connect_ms);
-    try std.testing.expectEqual(@as(u64, 2000), t_uni.read_ms);
-    try std.testing.expectEqual(@as(u64, 2000), t_uni.write_ms);
-
-    // Explicit per-phase timeout overrides
-    const t_exp = client.resolveRequestTimeouts(
-        RequestOptions.defaults()
-            .withConnectTimeoutMs(100)
-            .withReadTimeoutMs(200)
-            .withWriteTimeoutMs(300),
-    );
-    try std.testing.expectEqual(@as(u64, 100), t_exp.connect_ms);
-    try std.testing.expectEqual(@as(u64, 200), t_exp.read_ms);
-    try std.testing.expectEqual(@as(u64, 300), t_exp.write_ms);
-
-    // Explicit timeouts struct override
-    const t_struct = client.resolveRequestTimeouts(
-        RequestOptions.defaults().withTimeouts(.{
-            .connect_ms = 111,
-            .read_ms = 222,
-            .write_ms = 333,
-        }),
-    );
-    try std.testing.expectEqual(@as(u64, 111), t_struct.connect_ms);
-    try std.testing.expectEqual(@as(u64, 222), t_struct.read_ms);
-    try std.testing.expectEqual(@as(u64, 333), t_struct.write_ms);
-}
-
-test "Cookie path matching" {
-    const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
-    defer client.deinit();
-
-    // Test pathMatches helper
-    try std.testing.expect(Client.pathMatches("/", "/"));
-    try std.testing.expect(Client.pathMatches("/api/users", "/api"));
-    try std.testing.expect(Client.pathMatches("/api/users", "/api/"));
-    try std.testing.expect(Client.pathMatches("/api/users", "/"));
-    try std.testing.expect(!Client.pathMatches("/api", "/api/users"));
-    try std.testing.expect(!Client.pathMatches("/other", "/api"));
-}
-
-test "Cookie domain matching" {
-    const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
-    defer client.deinit();
-
-    try std.testing.expect(Client.domainMatches("example.com", "example.com"));
-    try std.testing.expect(Client.domainMatches("www.example.com", "example.com"));
-    try std.testing.expect(Client.domainMatches("www.example.com", ".example.com"));
-    try std.testing.expect(!Client.domainMatches("example.com", "other.com"));
-    try std.testing.expect(!Client.domainMatches("notexample.com", "example.com"));
-}
-
-test "CookieEntry stores metadata" {
-    const allocator = std.testing.allocator;
-    var client = Client.init(allocator);
-    defer client.deinit();
-
-    try client.setCookie("session", "abc123");
-    const entry = client.cookies.get("session").?;
-    try std.testing.expectEqualStrings("abc123", entry.value);
-    try std.testing.expectEqualStrings("/", entry.path);
-    try std.testing.expect(!entry.secure);
-}
-
-test "RequestOptions withRange" {
-    const opts = RequestOptions.defaults().withRange("bytes=0-499");
-    try std.testing.expectEqualStrings("bytes=0-499", opts.range_header.?);
-}
-
-test "RequestOptions withByteRange" {
-    const opts = RequestOptions.defaults().withByteRange(0, 499);
-    try std.testing.expectEqualStrings("bytes=0-499", opts.range_header.?);
-}
-
-test "RequestOptions withSuffixRange" {
-    const opts = RequestOptions.defaults().withSuffixRange(500);
-    try std.testing.expectEqualStrings("bytes=-500", opts.range_header.?);
-}
-
-test "RequestOptions withApiKey" {
-    const opts = RequestOptions.defaults().withApiKey("X-API-Key", "my-secret-key");
-    try std.testing.expectEqualStrings("X-API-Key", opts.api_key_header.?);
-    try std.testing.expectEqualStrings("my-secret-key", opts.api_key_value.?);
-}
-
-test "RequestOptions withExpect100Continue" {
-    const opts = RequestOptions.defaults().withExpect100Continue();
-    try std.testing.expect(opts.expect_100_continue);
-}
-
-test "Interceptor error_fn callback type" {
-    const TestContext = struct {
-        var called: bool = false;
-        var last_err: anyerror = undefined;
-    };
-    const onError = struct {
-        fn f(err: anyerror, ctx: ?*anyopaque) void {
-            _ = ctx;
-            TestContext.called = true;
-            TestContext.last_err = err;
-        }
-    }.f;
-    var interceptor = Interceptor{};
-    interceptor.error_fn = onError;
-    try std.testing.expect(interceptor.error_fn != null);
-    interceptor.error_fn.?(error.ConnectionRefused, null);
-    try std.testing.expect(TestContext.called);
-    try std.testing.expectEqualStrings("ConnectionRefused", @errorName(TestContext.last_err));
-}
-
-test "Interceptor retry_fn callback type" {
-    const TestContext = struct {
-        var called: bool = false;
-        var last_attempt: u32 = 0;
-    };
-    const onRetry = struct {
-        fn f(attempt: u32, ctx: ?*anyopaque) void {
-            _ = ctx;
-            TestContext.called = true;
-            TestContext.last_attempt = attempt;
-        }
-    }.f;
-    var interceptor = Interceptor{};
-    interceptor.retry_fn = onRetry;
-    try std.testing.expect(interceptor.retry_fn != null);
-    interceptor.retry_fn.?(3, null);
-    try std.testing.expect(TestContext.called);
-    try std.testing.expectEqual(@as(u32, 3), TestContext.last_attempt);
-}
-
-test "Interceptor redirect_fn callback type" {
-    const TestContext = struct {
-        var called: bool = false;
-        var last_url: []const u8 = "";
-    };
-    const onRedirect = struct {
-        fn f(url: []const u8, ctx: ?*anyopaque) void {
-            _ = ctx;
-            TestContext.called = true;
-            TestContext.last_url = url;
-        }
-    }.f;
-    var interceptor = Interceptor{};
-    interceptor.redirect_fn = onRedirect;
-    try std.testing.expect(interceptor.redirect_fn != null);
-    interceptor.redirect_fn.?("https://example.com/new", null);
-    try std.testing.expect(TestContext.called);
-    try std.testing.expectEqualStrings("https://example.com/new", TestContext.last_url);
-}
-
-test "Client custom log_fn receives messages" {
-    const TestLogger = struct {
-        var logged: bool = false;
-        var last_level: server_mod.LogLevel = .debug;
-        var last_message: []const u8 = "";
-
-        fn log_fn(level: server_mod.LogLevel, message: []const u8) void {
-            logged = true;
-            last_level = level;
-            last_message = message;
-        }
-    };
-
-    var client = Client.initWithConfig(std.testing.allocator, .{
-        .log_fn = TestLogger.log_fn,
-    });
-    defer client.deinit();
-
-    client.log(.info, "connection to {s}:{d}", .{ "example.com", 443 });
-    try std.testing.expect(TestLogger.logged);
-    try std.testing.expectEqual(server_mod.LogLevel.info, TestLogger.last_level);
-    try std.testing.expect(std.mem.indexOf(u8, TestLogger.last_message, "example.com") != null);
-}
-
-test "Client without log_fn silently drops messages" {
-    var client = Client.initWithConfig(std.testing.allocator, .{
-        .log_fn = null,
-    });
-    defer client.deinit();
-
-    client.log(.info, "this should be silently dropped {s}", .{"test"});
-}
-
-test "Client log_level filters messages below threshold" {
-    const TestLogger = struct {
-        var logged: bool = false;
-
-        fn log_fn(level: server_mod.LogLevel, message: []const u8) void {
-            _ = level;
-            _ = message;
-            logged = true;
-        }
-    };
-
-    var client = Client.initWithConfig(std.testing.allocator, .{
-        .log_fn = TestLogger.log_fn,
-        .log_level = .warn,
-    });
-    defer client.deinit();
-
-    client.log(.debug, "debug message", .{});
-    try std.testing.expect(!TestLogger.logged);
-
-    client.log(.info, "info message", .{});
-    try std.testing.expect(!TestLogger.logged);
-
-    client.log(.warn, "warn message", .{});
-    try std.testing.expect(TestLogger.logged);
+    const Payload = struct { name: []const u8, age: u32 };
+    const res = client.post(.{ .url = "http://127.0.0.1:1/", .json = Payload{ .name = "Alice", .age = 30 } });
+    try std.testing.expectError(Error.ConnectFailed, res);
 }

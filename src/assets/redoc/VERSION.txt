@@ -1,0 +1,5 @@
+redoc 2.5.3 (2026-05-27)
+Source: https://cdn.redoc.ly/redoc/v2.5.3/bundles/redoc.standalone.js
+Project: https://github.com/Redocly/redoc
+License: MIT
+Update: fetch the version-pinned CDN bundle for the new release and bump this file.

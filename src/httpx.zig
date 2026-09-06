@@ -1,972 +1,455 @@
-//! httpx.zig — High-performance, modular HTTP client and server library for Zig.
+//! httpx.zig - Batteries-included native Zig networking library.
 //!
-//! Repository: https://github.com/muhammad-fiaz/httpx.zig
-//! License: MIT
-//! Copyright (c) 2026 Muhammad Fiaz.
+//! One library. One coherent API.
+//!
+//! Layers (bottom -> top):
+//!   common/     - shared primitives (errors, status, headers, URI, methods, logging)
+//!   sockets/    - TCP + UDP wrappers (std.Io based)
+//!   net/        - addresses (IPv4+IPv6), DNS, SOCKS5
+//!   protocols/  - HTTP/1.x parser+serializer, HTTP/2 engine, HTTP/3+QUIC,
+//!                 TLS with custom ALPN, FTP
+//!   compression/- gzip/deflate/zstd/brotli codecs + content negotiation
+//!   web/        - router, middleware, SSE, WebSocket, docs, SPA, health,
+//!                 metrics, multipart, cookies, auth, static files, openapi
+//!   server/     - server lifecycle, connections, request context
+//!   client/     - request engine, connection pool, cookie jar, zero-config
 
 const std = @import("std");
 
-pub const types = @import("core/types.zig");
-pub const meta = @import("core/meta.zig");
-pub const headers = @import("core/headers.zig");
-pub const uri = @import("core/uri.zig");
-pub const status = @import("core/status.zig");
-pub const request = @import("core/request.zig");
-pub const response = @import("core/response.zig");
+// External dependencies
+pub const tint = @import("loaders").tint;
+pub const loaders = @import("loaders");
+pub const brotli = @import("brotli");
+pub const zstd = @import("zstd");
+pub const env = @import("env");
 
-pub const http = @import("protocol/http.zig");
-pub const parser = @import("protocol/parser.zig");
-pub const hpack = @import("protocol/hpack.zig");
-pub const stream = @import("protocol/stream.zig");
-pub const qpack = @import("protocol/qpack.zig");
-pub const quic = @import("protocol/quic.zig");
-pub const websocket = @import("protocol/websocket.zig");
-pub const ftp = @import("protocol/ftp.zig");
-pub const transfer = @import("io/transfer.zig");
-pub const socket = @import("net/socket.zig");
+// Common primitives
+pub const io_ctx = @import("common/io.zig");
+pub const IoContext = io_ctx.IoContext;
+pub const versionInfo = @import("common/version.zig");
+pub const version_info = versionInfo;
+pub const name = version_info.name;
+pub const version = version_info.version;
+pub const errors = @import("common/errors.zig");
+pub const status = @import("common/status.zig");
+pub const headers = @import("common/headers.zig");
+pub const uri = @import("common/uri.zig");
+pub const method = @import("common/method.zig");
+pub const common = struct {
+    pub const clock = @import("common/clock.zig");
+    pub const sync = @import("common/sync.zig");
+    pub const version = @import("common/version.zig");
+};
+pub const clock = common.clock;
+pub const sync = common.sync;
+pub const concurrency = struct {
+    pub const queue = @import("concurrency/queue.zig");
+    pub const Queue = @import("concurrency/queue.zig").BoundedQueue;
+    pub const workerPool = @import("concurrency/worker_pool.zig");
+    pub const WorkerPool = @import("concurrency/worker_pool.zig").Pool;
+    pub const Pool = @import("concurrency/worker_pool.zig").Pool;
+    pub const worker_pool = @import("concurrency/worker_pool.zig");
+};
+pub const workerPool = concurrency.workerPool;
+pub const WorkerPool = concurrency.WorkerPool;
+pub const Queue = concurrency.Queue;
+pub const logging = @import("common/logging.zig");
 
+// Sockets
+pub const tcp = @import("sockets/tcp.zig");
+/// Raw socket syscall layer: exhaustive platform error mapping (Phase 2).
+pub const sys = @import("sockets/sys.zig");
+pub const udp = @import("sockets/udp.zig");
+
+// Network layer
 pub const address = @import("net/address.zig");
-
-pub const unix = @import("net/unix.zig");
-
-pub const interfaces = @import("net/interfaces.zig");
-pub const tls = @import("tls/tls.zig");
-
-pub const client_mod = @import("client/client.zig");
-pub const pool = @import("client/pool.zig");
-
-pub const server_mod = @import("server/server.zig");
-pub const router = @import("server/router.zig");
-pub const middleware = @import("server/middleware.zig");
-
-pub const buffer = @import("io/buffer.zig");
-pub const encoding = @import("data/encoding.zig");
-pub const json = @import("data/json.zig");
-pub const mime = @import("data/mime.zig");
-pub const common = @import("data/common.zig");
-pub const multipart = @import("data/multipart.zig");
-pub const metrics = @import("io/metrics.zig");
-pub const session = @import("server/session.zig");
-pub const list_writer = @import("io/list_writer.zig");
-pub const ContentEncoding = @import("compress/compression.zig").ContentEncoding;
-pub const decompress = @import("compress/compression.zig").decompress;
-pub const compress = @import("compress/compression.zig").compress;
-pub const compression_stream = @import("compress/stream.zig");
-pub const StreamingCompressor = compression_stream.StreamingCompressor;
-pub const StreamingDecompressor = compression_stream.StreamingDecompressor;
-pub const AcceptEncoding = @import("compress/compression.zig").AcceptEncoding;
-pub const ContentCoding = @import("compress/compression.zig").ContentCoding;
-pub const TransferCoding = @import("compress/compression.zig").TransferCoding;
-pub const CompressOptions = @import("compress/compression.zig").CompressOptions;
-pub const compression_limits = @import("compress/compression.zig").Limits;
-pub const isCompressible = @import("compress/compression.zig").isCompressible;
-pub const cache = @import("data/cache.zig");
-pub const CacheControl = cache.CacheControl;
-pub const HttpCache = cache.HttpCache;
-pub const CacheEntry = cache.CacheEntry;
-pub const ConditionalGet = cache.ConditionalGet;
-pub const buffer_pool = @import("io/buffer_pool.zig");
-pub const BufferPool = buffer_pool.BufferPool;
 pub const dns = @import("net/dns.zig");
-pub const DNSResolver = dns.DNSResolver;
-pub const DNSCache = dns.DNSCache;
-pub const DNSResolution = dns.DNSResolution;
-pub const DNSConfig = dns.DNSConfig;
-pub const DNSStats = dns.DNSStats;
-pub const AddressFamily = dns.AddressFamily;
-pub const AddressOrder = dns.AddressOrder;
-pub const sse = @import("protocol/sse.zig");
-pub const parseSSEStream = sse.parseSSEStream;
+pub const resolve = @import("net/resolve.zig");
+pub const connectivity = @import("net/connectivity.zig");
+pub const socks5 = @import("net/socks5.zig");
+pub const proxy = @import("net/proxy.zig");
 
-pub const executor = @import("concurrency/executor.zig");
-pub const concurrency = @import("concurrency/pool.zig");
+// Compression
+pub const compression = @import("compression/codec.zig");
 
-pub const RequestSpec = concurrency.RequestSpec;
-pub const RequestResult = concurrency.RequestResult;
-pub const BatchBuilder = concurrency.BatchBuilder;
-pub const ConcurrencyConfig = concurrency.ConcurrencyConfig;
-pub const ConcurrencyMode = concurrency.ConcurrencyMode;
+// Protocol engines
+/// Shared low-level protocol primitives (prefix integers, Huffman code).
+pub const proto = struct {
+    pub const common = struct {
+        pub const integer = @import("protocols/common/integer.zig");
+        pub const huffman = @import("protocols/common/huffman.zig");
+    };
+};
+pub const http1 = struct {
+    pub const parser = @import("protocols/http1/parser.zig");
+    pub const writer = @import("protocols/http1/writer.zig");
+    pub const semantics = @import("protocols/http1/semantics.zig");
+    pub const fuzz = @import("protocols/http1/fuzz.zig");
+};
+pub const http2 = struct {
+    pub const frame = @import("protocols/http2/frame.zig");
+    pub const hpack = @import("protocols/http2/hpack.zig");
+    pub const stream = @import("protocols/http2/stream.zig");
+    pub const connection = @import("protocols/http2/connection.zig");
+    pub const Session = connection.Session;
+    pub const transport = @import("protocols/http2/transport.zig");
+    pub const Client = transport.Client;
+};
+pub const quic = struct {
+    pub const varint = @import("protocols/quic/varint.zig");
+    pub const packet = @import("protocols/quic/packet.zig");
+    pub const crypto = @import("protocols/quic/crypto.zig");
+    pub const protect = @import("protocols/quic/protect.zig");
+    pub const frames = @import("protocols/quic/frames.zig");
+    pub const acktr = @import("protocols/quic/acktr.zig");
+    pub const loss = @import("protocols/quic/loss.zig");
+    pub const cc = @import("protocols/quic/cc.zig");
+    pub const params = @import("protocols/quic/params.zig");
+    pub const stream = @import("protocols/quic/stream.zig");
+    pub const connection = @import("protocols/quic/connection.zig");
+    pub const Connection = connection.Connection;
+    pub const connectionId = @import("protocols/quic/connection_id.zig");
+    pub const path = @import("protocols/quic/path.zig");
+    pub const transport = @import("protocols/quic/transport.zig");
 
-pub const Executor = executor.Executor;
-pub const Task = executor.Task;
-pub const TaskFn = executor.TaskFn;
-pub const ExecutorConfig = executor.ExecutorConfig;
+    pub fn encodeFrame(allocator: std.mem.Allocator, f: frames.Frame) !std.ArrayList(u8) {
+        var out = std.ArrayList(u8).empty;
+        try frames.encode(&out, allocator, f);
+        return out;
+    }
+};
+pub const http3 = struct {
+    pub const frame = @import("protocols/http3/frame.zig");
+    pub const qpack = @import("protocols/http3/qpack.zig");
+    pub const connection = @import("protocols/http3/connection.zig");
+    pub const Connection = connection.Connection;
+    pub const RequestStream = connection.RequestStream;
+    pub const Settings = connection.Settings;
+};
+pub const tls = struct {
+    pub const alpn = @import("protocols/tls/alpn.zig");
+    pub const config = @import("protocols/tls/config.zig");
+    pub const record = @import("protocols/tls/record.zig");
+    pub const handshake = @import("protocols/tls/handshake.zig");
+    pub const engine = @import("protocols/tls/engine.zig");
+    pub const quicTls = @import("protocols/tls/quic_tls.zig");
+    pub const tcpTls = @import("protocols/tls/tcp_tls.zig");
+    pub const transport = @import("protocols/tls/transport.zig");
+    const tls_server = @import("protocols/tls/tls_server.zig");
+    pub const TlsListener = tls_server.TlsListener;
+    pub const Listener = tls_server.TlsListener;
+    pub const ListenerConfig = tls_server.ListenerConfig;
+    pub const ServerConfig = config.ServerConfig;
+    pub const ClientConfig = config.ClientConfig;
+    pub const HttpRequest = tls_server.HttpRequest;
+    pub const HttpResponse = tls_server.HttpResponse;
+    pub const Request = tls_server.HttpRequest;
+    pub const Response = tls_server.HttpResponse;
+    pub const HandlerFn = tls_server.HandlerFn;
+    pub const Handler = tls_server.HandlerFn;
+    pub const Header = tls_server.Header;
+};
 
-pub const Method = types.Method;
-pub const Version = types.Version;
-pub const HTTPError = types.HTTPError;
-pub const ContentType = types.ContentType;
-pub const Timeouts = types.Timeouts;
-pub const RetryPolicy = types.RetryPolicy;
-pub const CancellationToken = types.CancellationToken;
-pub const RedirectPolicy = types.RedirectPolicy;
-pub const HTTP2Settings = types.HTTP2Settings;
-pub const HTTP3Settings = types.HTTP3Settings;
-pub const Http3Settings = types.HTTP3Settings;
-pub const ProxyKind = types.ProxyKind;
-pub const Proxy = types.Proxy;
+// Web framework
+pub const router = struct {
+    pub const Router = @import("web/router/router.zig").Router;
+    pub const Context = @import("web/router/router.zig").Context;
+    pub const Response = @import("web/router/router.zig").Response;
+    pub const Header = @import("web/router/router.zig").Header;
+    pub const HandlerFn = @import("web/router/router.zig").HandlerFn;
+    pub const pattern = @import("web/router/pattern.zig");
+    pub const metadata = @import("web/router/metadata.zig");
+};
+pub const sse = struct {
+    pub const Writer = @import("web/sse/writer.zig");
+    pub const Parser = @import("web/sse/parser.zig");
+};
+pub const ws = struct {
+    pub const Handshake = @import("web/websocket/handshake.zig");
+    pub const Frame = @import("web/websocket/frame.zig");
+    pub const computeAccept = Handshake.computeAccept;
+    pub const buildUpgradeRequest = Handshake.buildUpgradeRequest;
+};
+pub const websocket = ws;
 
+// Web subsystems
+pub const static = struct {
+    pub const files = @import("web/static_files/serve.zig");
+    pub const spa = @import("web/spa/serve.zig");
+    pub const watcher = @import("web/watcher/watcher.zig");
+    pub const Watcher = watcher.Watcher;
+};
+pub const health = @import("web/health/endpoints.zig");
+pub const metrics = @import("web/metrics/registry.zig");
+pub const mime = @import("utils/mime.zig");
+pub const openapi = @import("web/openapi/spec.zig");
+pub const docs = @import("web/docs/docs.zig");
+pub const graphql = @import("web/graphql/graphql.zig");
+pub const auth = struct {
+    pub const basic = @import("web/auth/basic.zig");
+    pub const bearer = @import("web/auth/bearer.zig");
+};
+pub const multipart = struct {
+    pub const encoder = @import("web/multipart/encoder.zig");
+    pub const parser = @import("web/multipart/parser.zig");
+};
+
+// Client API
+pub const client = @import("client/request.zig");
+pub const cookies = @import("client/cookies.zig");
+pub const pool = @import("client/pool.zig");
+pub const Client = @import("client/client.zig").Client;
+pub const ClientConfig = @import("client/client.zig").Config;
+pub const RequestOptions = @import("client/client.zig").RequestOptions;
+pub const ClientResponse = client.Response;
+pub const Header = client.Header;
 pub const Headers = headers.Headers;
-pub const HeaderName = headers.HeaderName;
-pub const Header = headers.Header;
-
-pub const Uri = uri.Uri;
-
-pub const Status = status.Status;
-pub const StatusCode = status.StatusCode;
-
-pub const Request = request.Request;
-pub const RequestBuilder = request.RequestBuilder;
-
-pub const Response = response.Response;
-pub const ResponseBuilder = response.ResponseBuilder;
-
-pub const Socket = socket.Socket;
-pub const TcpListener = socket.TcpListener;
-pub const UdpSocket = socket.UdpSocket;
-pub const Address = address.Address;
-pub const AddressList = address.AddressList;
-pub const ShutdownMode = socket.ShutdownMode;
-pub const TcpSocket = Socket;
-pub const DatagramSocket = UdpSocket;
-pub const netInit = socket.init;
-pub const netDeinit = socket.deinit;
-
-pub const Parser = parser.Parser;
-
-pub const Http1Connection = http.Http1Connection;
-pub const HTTP2Connection = http.HTTP2Connection;
-pub const Http2Connection = http.HTTP2Connection;
-pub const HTTP2FrameType = http.HTTP2FrameType;
-pub const Http2FrameType = http.HTTP2FrameType;
-pub const HTTP2FrameHeader = http.HTTP2FrameHeader;
-pub const Http2FrameHeader = http.HTTP2FrameHeader;
-pub const HTTP2ErrorCode = http.HTTP2ErrorCode;
-pub const Http2ErrorCode = http.HTTP2ErrorCode;
-pub const HTTP3FrameType = http.HTTP3FrameType;
-pub const Http3FrameType = http.HTTP3FrameType;
-pub const HTTP3ErrorCode = http.HTTP3ErrorCode;
-pub const Http3ErrorCode = http.HTTP3ErrorCode;
-pub const AlpnProtocol = http.AlpnProtocol;
-pub const NegotiatedProtocol = http.NegotiatedProtocol;
-
-// HTTP/2 HPACK exports
-pub const HPACKContext = hpack.HPACKContext;
-pub const HpackContext = hpack.HPACKContext;
-pub const HPACKStaticTable = hpack.StaticTable;
-pub const HPACKDynamicTable = hpack.DynamicTable;
-pub const encodeHPACKHeaders = hpack.encodeHeaders;
-pub const decodeHPACKHeaders = hpack.decodeHeaders;
-
-// HTTP/2 Stream exports
-pub const Stream = stream.Stream;
-pub const StreamState = stream.StreamState;
-pub const StreamManager = stream.StreamManager;
-pub const StreamPriority = stream.StreamPriority;
-
-// HTTP/3 QPACK exports
-pub const QPACKContext = qpack.QPACKContext;
-pub const QpackContext = qpack.QPACKContext;
-pub const QPACKStaticTable = qpack.StaticTable;
-pub const encodeQPACKHeaders = qpack.encodeHeaders;
-pub const decodeQPACKHeaders = qpack.decodeHeaders;
-
-// QUIC exports
-pub const QUICVersion = quic.Version;
-pub const QUICLongHeader = quic.LongHeader;
-pub const QUICShortHeader = quic.ShortHeader;
-pub const QUICConnectionId = quic.ConnectionId;
-pub const QUICFrameType = quic.FrameType;
-pub const QUICTransportError = quic.TransportError;
-pub const QUICStreamFrame = quic.StreamFrame;
-pub const QUICCryptoFrame = quic.CryptoFrame;
-pub const QUICAckFrame = quic.AckFrame;
-pub const QUICTransportParameters = quic.TransportParameters;
-
-pub const formatRequest = http.formatRequest;
-pub const formatResponse = http.formatResponse;
-pub const encodeChunkedBody = http.encodeChunkedBody;
-pub const negotiateVersion = http.negotiateVersion;
-
-pub const Client = client_mod.Client;
-pub const ClientConfig = client_mod.ClientConfig;
-pub const RequestOptions = client_mod.RequestOptions;
-pub const BasicAuth = client_mod.BasicAuth;
-pub const CookieEntry = client_mod.CookieEntry;
-pub const Interceptor = client_mod.Interceptor;
-pub const RequestInterceptor = client_mod.RequestInterceptor;
-pub const ResponseInterceptor = client_mod.ResponseInterceptor;
-pub const JsonBorrowedResult = client_mod.JsonBorrowedResult;
-
-pub const ConnectionPool = pool.ConnectionPool;
+pub const CookieJar = cookies.Jar;
+pub const ConnectionPool = pool.Pool;
 pub const PoolConfig = pool.PoolConfig;
-pub const Connection = pool.Connection;
-pub const PoolStats = pool.PoolStats;
 
-pub const Server = server_mod.Server;
-pub const ServerConfig = server_mod.ServerConfig;
-pub const LogLevel = server_mod.LogLevel;
-pub const LogFn = server_mod.LogFn;
-pub const PortConflictStrategy = server_mod.PortConflictStrategy;
-pub const Context = server_mod.Context;
-pub const Handler = server_mod.Handler;
-pub const CookieOptions = server_mod.CookieOptions;
-pub const SameSite = server_mod.SameSite;
-pub const SSEEvent = server_mod.SSEEvent;
-pub const SseEvent = server_mod.SSEEvent;
-pub const PreRouteHook = server_mod.PreRouteHook;
-pub const FileResponseOptions = server_mod.FileResponseOptions;
+// Zero-config client functions & ubiquitous verb aliases
+pub const fetch = @import("client/client.zig").globalFetch;
+pub const request = @import("client/client.zig").globalRequest;
+pub const send = @import("client/client.zig").globalSend;
+pub const get = @import("client/client.zig").globalGet;
+pub const post = @import("client/client.zig").globalPost;
+pub const put = @import("client/client.zig").globalPut;
+pub const patch = @import("client/client.zig").globalPatch;
+pub const delete = @import("client/client.zig").globalDelete;
+pub const head = @import("client/client.zig").globalHead;
+pub const options = @import("client/client.zig").globalOptions;
+pub const trace = @import("client/client.zig").globalTrace;
+pub const connect = @import("client/client.zig").globalConnect;
+pub const getAll = @import("client/client.zig").globalGetAll;
+pub const requestAll = @import("client/client.zig").globalRequestAll;
+pub const download = @import("client/client.zig").globalDownload;
+pub const graphqlQuery = @import("client/client.zig").globalGraphql;
+pub const lookupFileInfo = @import("client/client.zig").globalLookupFileInfo;
+pub const updateFile = @import("client/client.zig").globalUpdateFile;
+pub const verifyFile = @import("client/client.zig").globalVerifyFile;
+pub const fetchSitemap = @import("client/client.zig").globalFetchSitemap;
+pub const isOnline = @import("client/client.zig").globalIsOnline;
+pub const checkConnectivity = @import("client/client.zig").globalCheckConnectivity;
+pub const ftpDownload = @import("client/download.zig").ftpDownload;
 
+// Download & Progress types
+pub const Download = @import("client/download.zig");
+pub const DownloadOptions = Download.DownloadOptions;
+pub const DownloadResult = Download.DownloadResult;
+pub const DownloadError = Download.DownloadError;
+pub const DownloadTask = struct { url: []const u8, dest: []const u8 };
+pub const RemoteFileInfo = Download.RemoteFileInfo;
+pub const ProgressInfo = Download.ProgressInfo;
+pub const ProgressState = Download.ProgressState;
+pub const ProgressMode = Download.ProgressMode;
+pub const ExistingFilePolicy = Download.ExistingFilePolicy;
+pub const VerifyOptions = Download.VerifyOptions;
+pub const UpdateOptions = Download.UpdateOptions;
+pub const FtpDownloadOptions = Download.FtpDownloadOptions;
+pub const parseChecksumFile = Download.parseChecksumFile;
+pub const ConnectivityOptions = connectivity.ConnectivityOptions;
+pub const ConnectivityResult = connectivity.ConnectivityResult;
+
+// Parsing & inspection subsystem
+/// Native HTML, XML, RSS/Atom/JSON feeds, robots.txt, and sitemap parsing engine.
+pub const Parser = @import("parsing/document.zig").Parser;
+pub const ParserConfig = @import("parsing/document.zig").ParserConfig;
+pub const Document = @import("parsing/document.zig").Document;
+pub const NodeHandle = @import("parsing/document.zig").NodeHandle;
+pub const NodeList = @import("parsing/document.zig").NodeList;
+pub const ContentKind = @import("parsing/document.zig").ContentKind;
+
+pub const parsing = struct {
+    pub const dom = @import("parsing/dom.zig");
+    pub const html = @import("parsing/html.zig");
+    pub const xml = @import("parsing/xml.zig");
+    pub const selector = @import("parsing/selector.zig");
+    pub const extract = @import("parsing/extract.zig");
+    pub const feed = @import("parsing/feed.zig");
+    pub const robots = @import("parsing/robots.zig");
+    pub const sitemap = @import("parsing/sitemap.zig");
+    pub const document = @import("parsing/document.zig");
+    // Re-export the Document and Parser types at this level
+    pub const Document = document.Document;
+    pub const Parser = document.Parser;
+    pub const ParserConfig = document.ParserConfig;
+    pub const NodeHandle = document.NodeHandle;
+    pub const NodeList = document.NodeList;
+    pub const ContentKind = document.ContentKind;
+    pub const Metadata = extract.Metadata;
+    pub const Link = extract.Link;
+    pub const Form = extract.Form;
+    pub const FormField = extract.FormField;
+    pub const Image = extract.Image;
+    pub const ScriptRef = extract.ScriptRef;
+    pub const StyleRef = extract.StyleRef;
+    pub const Feed = feed.Feed;
+    pub const FeedKind = feed.FeedKind;
+    pub const FeedEntry = feed.FeedEntry;
+    pub const RobotsFile = robots.RobotsFile;
+    pub const Sitemap = sitemap.Sitemap;
+    pub const SitemapUrl = sitemap.SitemapUrl;
+    pub const ChangeFreq = sitemap.ChangeFreq;
+    pub const ParsedSelector = selector.ParsedSelector;
+    // Unified Parser constructor with allocator and optional options
+    pub fn init(allocator: std.mem.Allocator, config: document.ParserConfig) document.Parser {
+        return document.Parser.init(allocator, config);
+    }
+    pub const detectKind = document.detectKind;
+};
+
+// Server API
+pub const server = @import("server/lifecycle.zig");
+pub const Server = server.Server;
+pub const ServerConfig = server.Config;
+pub const PortStrategy = server.PortStrategy;
 pub const Router = router.Router;
-pub const RouteGroup = router.RouteGroup;
-pub const RouteMatch = router.RouteMatch;
-
-pub const Middleware = middleware.Middleware;
-pub const Next = middleware.Next;
-pub const cors = middleware.cors;
-pub const logger = middleware.logger;
-pub const LoggerConfig = middleware.LoggerConfig;
-pub const loggerWithConfig = middleware.loggerWithConfig;
-pub const compressionMiddleware = middleware.compression;
-pub const compressionMiddlewareWithConfig = middleware.compressionMiddlewareWithConfig;
-pub const rateLimit = middleware.rateLimit;
-pub const basicAuth = middleware.basicAuth;
-pub const helmet = middleware.helmet;
-pub const helmetWithConfig = middleware.helmetWithConfig;
-pub const csrf = middleware.csrf;
-pub const reverseProxy = middleware.reverseProxy;
-pub const reverseProxyRuntime = middleware.reverseProxyRuntime;
-pub const healthCheck = middleware.healthCheck;
-pub const readinessProbe = middleware.readinessProbe;
-pub const HealthConfig = middleware.HealthConfig;
-pub const ReadinessConfig = middleware.ReadinessConfig;
-pub const RateLimitConfig = middleware.RateLimitConfig;
-pub const CorsConfig = middleware.CorsConfig;
-pub const HelmetConfig = middleware.HelmetConfig;
-pub const CsrfConfig = middleware.CsrfConfig;
-pub const CompressionConfig = middleware.CompressionConfig;
-pub const bodyParser = middleware.bodyParser;
-pub const requestTimeout = middleware.timeout;
-pub const requestId = middleware.requestId;
-
-// WebSocket exports (flat API -- no httpx.websocket.WebSocket.X redundancy)
-pub const WsOpcode = websocket.WsOpcode;
-pub const WsFrame = websocket.WsFrame;
-pub const WsCloseCode = websocket.WsCloseCode;
-pub const WsDecodeResult = websocket.WsDecodeResult;
-pub const WS_GUID = websocket.WS_GUID;
-pub const isWebSocketUpgrade = websocket.isWebSocketUpgrade;
-pub const wsExtractKey = websocket.wsExtractKey;
-pub const wsAcceptKey = websocket.wsAcceptKey;
-pub const wsUpgradeHeaders = websocket.wsUpgradeHeaders;
-pub const wsEncodeFrame = websocket.wsEncodeFrame;
-pub const wsDecodeFrame = websocket.wsDecodeFrame;
-pub const wsTextFrame = websocket.wsTextFrame;
-pub const wsBinaryFrame = websocket.wsBinaryFrame;
-pub const wsPingFrame = websocket.wsPingFrame;
-pub const wsPongFrame = websocket.wsPongFrame;
-pub const wsCloseFrame = websocket.wsCloseFrame;
-pub const WsClient = websocket.WsClient;
-pub const WsClientConfig = websocket.WsClientConfig;
-pub const WsMessage = websocket.WsMessage;
-pub const WsConnection = websocket.WsConnection;
-pub const WsServerConfig = websocket.WsServerConfig;
-pub const WsCallbacks = websocket.WsCallbacks;
-pub const validateUpgrade = websocket.validateUpgrade;
-pub const validateOrigin = websocket.validateOrigin;
-pub const negotiateSubprotocol = websocket.negotiateSubprotocol;
-pub const buildUpgradeResponse = websocket.buildUpgradeResponse;
-pub const MessageAssembler = websocket.MessageAssembler;
-pub const MessageAssemblerConfig = websocket.MessageAssemblerConfig;
-pub const WsCompleteMessage = websocket.WsCompleteMessage;
-
-// Multipart exports
-pub const MultipartBuilder = multipart.MultipartBuilder;
-pub const MultipartPart = multipart.Part;
-pub const MultipartParsed = multipart.ParsedParts;
-pub const extractMultipartBoundary = multipart.extractBoundary;
-pub const parseMultipart = multipart.parse;
-/// Safe per-part data limit for multipart uploads on Windows (64 KB).
-/// See `multipart.MAX_RECOMMENDED_CHUNK` for details.
-pub const MultipartMaxChunk = multipart.MAX_RECOMMENDED_CHUNK;
-
-// Metrics exports
-pub const Metrics = metrics.Metrics;
-pub const MetricsSnapshot = metrics.MetricsSnapshot;
-pub const MetricsEvent = metrics.MetricsEvent;
-pub const MetricsCallbackFn = metrics.MetricsCallbackFn;
-
-// Server lifecycle hook exports
-pub const LifecycleHook = server_mod.LifecycleHook;
-pub const ErrorCallback = server_mod.ErrorCallback;
-pub const StreamWriter = server_mod.StreamWriter;
-
-// Client interceptor exports
-pub const ErrorInterceptor = client_mod.ErrorInterceptor;
-pub const RetryInterceptor = client_mod.RetryInterceptor;
-pub const RedirectInterceptor = client_mod.RedirectInterceptor;
-
-// SSE streaming parser export
-pub const StreamingSSEParser = @import("protocol/sse.zig").StreamingSSEParser;
-
-// Session exports
-pub const SessionStore = session.SessionStore;
-pub const SessionConfig = session.SessionConfig;
-pub const SESSION_ID_LEN = session.SESSION_ID_LEN;
-
-// Unix socket exports
-pub const UnixSocket = unix.UnixSocket;
-pub const UnixListener = unix.UnixListener;
-pub const UnixClient = unix.UnixClient;
-pub const Buffer = buffer.Buffer;
-pub const FixedBuffer = buffer.FixedBuffer;
-
-pub const Base64 = encoding.Base64;
-pub const Hex = encoding.Hex;
-pub const PercentEncoding = encoding.PercentEncoding;
-
-pub const CookiePair = common.CookiePair;
-pub const ParsedCookie = common.ParsedCookie;
-pub const parseSetCookie = common.parseSetCookie;
-pub const cookieValue = common.cookieValue;
-pub const buildSetCookieHeader = common.buildSetCookieHeader;
-pub const MimeMapping = mime.MimeMapping;
-pub const defaultMimeMappings = mime.default_mappings;
-pub const MultipartField = client_mod.MultipartField;
-pub const MultipartFile = client_mod.MultipartFile;
-
-pub const TLSConfig = tls.TLSConfig;
-pub const TlsConfig = tls.TLSConfig;
-
-// Transfer exports
-pub const Progress = transfer.Progress;
-pub const ProgressCallback = transfer.ProgressCallback;
-pub const Checksum = transfer.Checksum;
-pub const ChecksumAlgorithm = transfer.ChecksumAlgorithm;
-pub const ChecksumStream = transfer.ChecksumStream;
-pub const ResumeInfo = transfer.ResumeInfo;
-pub const DownloadConfig = transfer.DownloadConfig;
-pub const UploadConfig = transfer.UploadConfig;
-pub const TransferError = transfer.TransferError;
-pub const CancelToken = transfer.CancelToken;
-pub const computeChecksum = transfer.computeChecksum;
-
-// FTP exports
-pub const FtpClient = ftp.FtpClient;
-pub const FtpConfig = ftp.FtpConfig;
-pub const FtpError = ftp.FtpError;
-pub const FtpResponse = ftp.Response;
-pub const FtpDirectoryEntry = ftp.DirectoryEntry;
-pub const FtpFeatures = ftp.Features;
-pub const TransferMode = ftp.TransferMode;
-pub const ConnectionMode = ftp.ConnectionMode;
-pub const TLSSession = tls.TLSSession;
-pub const TlsSession = tls.TLSSession;
-
-pub const VERSION = meta.version;
-pub const DEFAULT_USER_AGENT = meta.default_user_agent;
-const default_alias_allocator = std.heap.page_allocator;
-
-/// Resolves a hostname to a network address.
-pub const resolveAddress = address.resolve;
-
-/// Parses "host:port" style address strings.
-pub const parseHostAndPort = address.parseHostPort;
-
-/// Resolves a hostname to all candidate addresses.
-pub const resolveAllAddresses = address.resolveAll;
-
-/// Parses "host:port" and resolves to a concrete address.
-pub const parseAndResolveAddress = address.parseAndResolve;
-
-/// Returns true if input is an IPv4/IPv6 literal.
-pub const isIpAddress = address.isIpAddress;
-
-/// Returns true if input is an IPv4 literal.
-pub const isIp4Address = address.isIp4Address;
-
-/// Returns true if input is an IPv6 literal.
-pub const isIp6Address = address.isIp6Address;
-
-/// Returns true if the address is loopback (127.x.x.x or ::1).
-pub const isLoopback = address.isLoopback;
-
-/// Returns true if the address is unspecified (0.0.0.0 or ::).
-pub const isUnspecified = address.isUnspecified;
-
-/// Returns true if the address is private (10.x, 172.16-31.x, 192.168.x, fc00::/7).
-pub const isPrivate = address.isPrivate;
-
-/// Returns true if the address is link-local (169.254.x.x or fe80::/10).
-pub const isLinkLocal = address.isLinkLocal;
-
-/// Returns true if the address is multicast (224.x.x.x/4 or ff00::/8).
-pub const isMulticast = address.isMulticast;
-
-/// Returns true if the address is a unique-local IPv6 address (fc00::/7).
-pub const isUniqueLocal = address.isUniqueLocal;
-
-/// Returns true if the address is an IPv4-mapped IPv6 address (::ffff:x.x.x.x).
-pub const isIPv4Mapped = address.isIPv4Mapped;
-
-/// Returns true if the address is public (non-private, non-reserved).
-pub const isPublic = address.isPublic;
-
-/// Returns the canonical `std.Io` for the current execution context.
-pub const defaultIo = common.defaultIo;
-
-/// Sleeps for `ms` milliseconds using the canonical IO.
-pub const sleepMs = common.sleepMs;
-pub const sleepMsI = common.sleepMsI;
-
-/// Returns a query parameter value from a raw query string.
-pub const queryValue = common.queryValue;
-
-/// Parses the first name/value pair from a Set-Cookie header value.
-pub const parseSetCookiePair = common.parseSetCookiePair;
-
-/// Returns a best-effort MIME type from file extension.
-pub const mimeTypeFromPath = common.mimeTypeFromPath;
-
-/// Returns a MIME type from file extension with a custom fallback.
-pub const mimeTypeFromPathOr = common.mimeTypeFromPathOr;
-
-/// Returns a MIME type using caller-provided mappings and fallback.
-pub const mimeTypeFromPathWith = common.mimeTypeFromPathWith;
-
-/// HTTP/3 varint encode alias.
-pub const encodeVarInt = http.encodeVarInt;
-
-/// HTTP/3 varint decode alias.
-pub const decodeVarInt = http.decodeVarInt;
-
-/// Executes all requests in parallel and returns a result per request.
-pub fn all(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
-    return concurrency.all(allocator, client, specs, config);
-}
-
-/// Executes all requests in parallel and returns the first 2xx response (if any).
-pub fn any(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !?Response {
-    return concurrency.any(allocator, client, specs, config);
-}
-
-/// Executes all requests in parallel and returns the first completion (success or error).
-pub fn race(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !RequestResult {
-    return concurrency.race(allocator, client, specs, config);
-}
-
-/// Executes all requests in parallel and returns a settled result for each one.
-pub fn allSettled(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
-    return concurrency.allSettled(allocator, client, specs, config);
-}
-
-/// Counts successful results returned by all/allSettled.
-pub fn successfulCount(results: []const RequestResult) usize {
-    return concurrency.successfulCount(results);
-}
-
-/// Counts failed results returned by all/allSettled.
-pub fn errorCount(results: []const RequestResult) usize {
-    return concurrency.errorCount(results);
-}
-
-/// Alias for any() for first-success semantics.
-pub fn first(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !?Response {
-    return any(allocator, client, specs, config);
-}
-
-/// Alias for race() for first-completion semantics.
-pub fn fastest(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) !RequestResult {
-    return race(allocator, client, specs, config);
-}
-
-/// Alias for allSettled() returning settled outcomes.
-pub fn settled(allocator: std.mem.Allocator, client: *Client, specs: []const RequestSpec, config: ConcurrencyConfig) ![]RequestResult {
-    return allSettled(allocator, client, specs, config);
-}
-
-/// Creates a new Client with the default page allocator.
-pub fn createClient() Client {
-    return Client.init(default_alias_allocator);
-}
-
-/// Creates a new Client with the given allocator.
-pub fn createClientWithConfig(allocator: std.mem.Allocator, config: ClientConfig) Client {
-    return Client.initWithConfig(allocator, config);
-}
-
-/// Creates a new Server with the default page allocator.
-pub fn createServer() Server {
-    return Server.init(default_alias_allocator);
-}
-
-/// Creates a new Server with the given allocator and config.
-pub fn createServerWithConfig(allocator: std.mem.Allocator, config: ServerConfig) Server {
-    return Server.initWithConfig(allocator, config);
-}
-
-/// One-shot: creates a server, registers a GET route, and listens.
-pub fn serve(path: []const u8, handler: Handler) !void {
-    var s = createServer();
-    defer s.deinit();
-    try s.get(path, handler);
-    try s.listen();
-}
-
-/// One-shot: creates a server with config, registers a GET route, and listens.
-pub fn serveWithConfig(allocator: std.mem.Allocator, config: ServerConfig, path: []const u8, handler: Handler) !void {
-    var s = createServerWithConfig(allocator, config);
-    defer s.deinit();
-    try s.get(path, handler);
-    try s.listen();
-}
-
-/// Convenience function to create a GET request.
-pub fn get(url: []const u8, req_options: RequestOptions) !Response {
-    return getWithAllocator(default_alias_allocator, url, req_options);
-}
-
-/// Convenience function to create a GET request with an explicit allocator.
-pub fn getWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.get(url, req_options);
-}
-
-/// Convenience alias for GET requests.
-pub fn fetch(url: []const u8, req_options: RequestOptions) !Response {
-    return get(url, req_options);
-}
-
-/// Convenience alias for GET requests with an explicit allocator.
-pub fn fetchWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
-    return getWithAllocator(allocator, url, req_options);
-}
-
-/// Convenience function to create a request with an explicit method.
-pub fn send(method: Method, url: []const u8, req_options: RequestOptions) !Response {
-    return sendWithAllocator(default_alias_allocator, method, url, req_options);
-}
-
-/// Convenience function to create a request with an explicit method and allocator.
-pub fn sendWithAllocator(
-    allocator: std.mem.Allocator,
-    method: Method,
-    url: []const u8,
-    req_options: RequestOptions,
-) !Response {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.request(method, url, req_options);
-}
-
-/// Convenience function to create a POST request with JSON body.
-pub fn postJson(url: []const u8, body: []const u8) !Response {
-    return postJsonWithAllocator(default_alias_allocator, url, body);
-}
-
-/// Convenience function to create a POST request with JSON body and allocator.
-pub fn postJsonWithAllocator(allocator: std.mem.Allocator, url: []const u8, body: []const u8) !Response {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.post(url, .{ .json = body });
-}
-
-/// Convenience function to GET a URL and parse the JSON response into type T.
-/// Returns both the response and parsed value. Caller deinit's both.
-pub fn getJson(comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-    return getJsonWithAllocator(default_alias_allocator, T, url, parse_opts);
-}
-
-/// Convenience function to GET a URL and parse JSON with an explicit allocator.
-pub fn getJsonWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.getJson(T, url, parse_opts);
-}
-
-/// Convenience function to POST JSON and parse the response as type T.
-/// Returns both the response and parsed value. Caller deinit's both.
-pub fn postJsonAndParse(comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-    return postJsonAndParseWithAllocator(default_alias_allocator, T, url, body, parse_opts);
-}
-
-/// Convenience function to POST JSON and parse the response with an explicit allocator.
-pub fn postJsonAndParseWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.postJsonAndParse(T, url, body, parse_opts);
-}
-
-/// Convenience function to PUT JSON and parse the response as type T.
-pub fn putJson(comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-    return putJsonWithAllocator(default_alias_allocator, T, url, body, parse_opts);
-}
-
-/// Convenience function to PUT JSON and parse the response with an explicit allocator.
-pub fn putJsonWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.putJson(T, url, body, parse_opts);
-}
-
-/// Convenience function to PATCH JSON and parse the response as type T.
-pub fn patchJson(comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-    return patchJsonWithAllocator(default_alias_allocator, T, url, body, parse_opts);
-}
-
-/// Convenience function to PATCH JSON and parse the response with an explicit allocator.
-pub fn patchJsonWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, body: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.patchJson(T, url, body, parse_opts);
-}
-
-/// Convenience function to DELETE and parse the JSON response as type T.
-pub fn deleteJson(comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-    return deleteJsonWithAllocator(default_alias_allocator, T, url, parse_opts);
-}
-
-/// Convenience function to DELETE and parse the JSON response with an explicit allocator.
-pub fn deleteJsonWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, parse_opts: std.json.ParseOptions) !JsonBorrowedResult(T) {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.deleteJson(T, url, parse_opts);
-}
-
-/// Zero-copy: GET and parse JSON with strings borrowing from the response body.
-/// The response must outlive the parsed value.
-pub fn getJsonBorrowed(comptime T: type, url: []const u8) !JsonBorrowedResult(T) {
-    return getJsonBorrowedWithAllocator(default_alias_allocator, T, url);
-}
-
-/// Zero-copy: GET with explicit allocator.
-pub fn getJsonBorrowedWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8) !JsonBorrowedResult(T) {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.getJsonBorrowed(T, url);
-}
-
-/// Zero-copy: POST JSON and parse response with strings borrowing from the body.
-pub fn postJsonBorrowed(comptime T: type, url: []const u8, body: []const u8) !JsonBorrowedResult(T) {
-    return postJsonBorrowedWithAllocator(default_alias_allocator, T, url, body);
-}
-
-/// Zero-copy: POST with explicit allocator.
-pub fn postJsonBorrowedWithAllocator(allocator: std.mem.Allocator, comptime T: type, url: []const u8, body: []const u8) !JsonBorrowedResult(T) {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.postJsonBorrowed(T, url, body);
-}
-
-/// Convenience function to create a POST request.
-pub fn post(url: []const u8, req_options: RequestOptions) !Response {
-    return postWithAllocator(default_alias_allocator, url, req_options);
-}
-
-/// Convenience function to create a POST request with an explicit allocator.
-pub fn postWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.post(url, req_options);
-}
-
-/// Convenience function to create a PUT request.
-pub fn put(url: []const u8, req_options: RequestOptions) !Response {
-    return putWithAllocator(default_alias_allocator, url, req_options);
-}
-
-/// Convenience function to create a PUT request with an explicit allocator.
-pub fn putWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.put(url, req_options);
-}
-
-/// Convenience function to create a DELETE request.
-pub fn del(url: []const u8, req_options: RequestOptions) !Response {
-    return delWithAllocator(default_alias_allocator, url, req_options);
-}
-
-/// Convenience function to create a DELETE request with an explicit allocator.
-pub fn delWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.delete(url, req_options);
-}
-
-/// Convenience alias for DELETE requests.
-pub fn delete(url: []const u8, req_options: RequestOptions) !Response {
-    return del(url, req_options);
-}
-
-/// Convenience alias for DELETE requests with an explicit allocator.
-pub fn deleteWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
-    return delWithAllocator(allocator, url, req_options);
-}
-
-/// Convenience function to create a PATCH request.
-pub fn patch(url: []const u8, req_options: RequestOptions) !Response {
-    return patchWithAllocator(default_alias_allocator, url, req_options);
-}
-
-/// Convenience function to create a PATCH request with an explicit allocator.
-pub fn patchWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.patch(url, req_options);
-}
-
-/// Convenience function to create a HEAD request.
-pub fn head(url: []const u8, req_options: RequestOptions) !Response {
-    return headWithAllocator(default_alias_allocator, url, req_options);
-}
-
-/// Convenience function to create a HEAD request with an explicit allocator.
-pub fn headWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.head(url, req_options);
-}
-
-/// Convenience function to create a TRACE request.
-pub fn trace(url: []const u8, req_options: RequestOptions) !Response {
-    return traceWithAllocator(default_alias_allocator, url, req_options);
-}
-
-/// Convenience function to create a TRACE request with an explicit allocator.
-pub fn traceWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.trace(url, req_options);
-}
-
-/// Convenience function to create a CONNECT request.
-pub fn connect(url: []const u8, req_options: RequestOptions) !Response {
-    return connectWithAllocator(default_alias_allocator, url, req_options);
-}
-
-/// Convenience function to create a CONNECT request with an explicit allocator.
-pub fn connectWithAllocator(allocator: std.mem.Allocator, url: []const u8, req_options: RequestOptions) !Response {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.connect(url, req_options);
-}
-
-/// Convenience function to create an OPTIONS request.
-pub fn options(url: []const u8, options_in: RequestOptions) !Response {
-    return optionsWithAllocator(default_alias_allocator, url, options_in);
-}
-
-/// Convenience function to create an OPTIONS request with an explicit allocator.
-pub fn optionsWithAllocator(allocator: std.mem.Allocator, url: []const u8, options_in: RequestOptions) !Response {
-    var c = Client.init(allocator);
-    defer c.deinit();
-    return c.options(url, options_in);
-}
-
-/// Convenience alias for OPTIONS requests.
-pub fn opts(url: []const u8, options_in: RequestOptions) !Response {
-    return options(url, options_in);
-}
-
-/// Convenience alias for OPTIONS requests with an explicit allocator.
-pub fn optsWithAllocator(allocator: std.mem.Allocator, url: []const u8, options_in: RequestOptions) !Response {
-    return optionsWithAllocator(allocator, url, options_in);
-}
-
-test "top-level alias compile checks" {
-    const get_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = get;
-    const get_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = getWithAllocator;
-    const fetch_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = fetch;
-    const fetch_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = fetchWithAllocator;
-    const post_json_ptr: *const fn ([]const u8, []const u8) anyerror!Response = postJson;
-    const post_json_alloc_ptr: *const fn (std.mem.Allocator, []const u8, []const u8) anyerror!Response = postJsonWithAllocator;
-    const get_json_ptr = &getJson;
-    const get_json_alloc_ptr = &getJsonWithAllocator;
-    const post_json_parse_ptr = &postJsonAndParse;
-    const post_json_parse_alloc_ptr = &postJsonAndParseWithAllocator;
-    const send_ptr: *const fn (Method, []const u8, RequestOptions) anyerror!Response = send;
-    const send_alloc_ptr: *const fn (std.mem.Allocator, Method, []const u8, RequestOptions) anyerror!Response = sendWithAllocator;
-    const post_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = post;
-    const post_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = postWithAllocator;
-    const put_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = put;
-    const put_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = putWithAllocator;
-    const del_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = del;
-    const del_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = delWithAllocator;
-    const delete_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = delete;
-    const delete_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = deleteWithAllocator;
-    const patch_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = patch;
-    const patch_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = patchWithAllocator;
-    const head_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = head;
-    const head_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = headWithAllocator;
-    const trace_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = trace;
-    const trace_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = traceWithAllocator;
-    const connect_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = connect;
-    const connect_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = connectWithAllocator;
-    const options_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = options;
-    const options_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = optionsWithAllocator;
-    const opts_ptr: *const fn ([]const u8, RequestOptions) anyerror!Response = opts;
-    const opts_alloc_ptr: *const fn (std.mem.Allocator, []const u8, RequestOptions) anyerror!Response = optsWithAllocator;
-    const first_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec, ConcurrencyConfig) anyerror!?Response = first;
-    const fastest_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec, ConcurrencyConfig) anyerror!RequestResult = fastest;
-    const settled_ptr: *const fn (std.mem.Allocator, *Client, []const RequestSpec, ConcurrencyConfig) anyerror![]RequestResult = settled;
-    const resolve_addr_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror!address.Address = resolveAddress;
-    const resolve_all_addr_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror![]address.Address = resolveAllAddresses;
-    const parse_host_port_ptr = parseHostAndPort;
-    const parse_and_resolve_ptr: *const fn (std.mem.Allocator, []const u8, u16) anyerror!address.Address = parseAndResolveAddress;
-    const is_ip_ptr: *const fn ([]const u8) bool = isIpAddress;
-    const is_ip4_ptr: *const fn ([]const u8) bool = isIp4Address;
-    const is_ip6_ptr: *const fn ([]const u8) bool = isIp6Address;
-    const mime_ptr: *const fn ([]const u8) []const u8 = mimeTypeFromPath;
-    const mime_or_ptr: *const fn ([]const u8, []const u8) []const u8 = mimeTypeFromPathOr;
-    const mime_with_ptr: *const fn ([]const u8, []const common.MimeMapping, []const u8) []const u8 = mimeTypeFromPathWith;
-    const net_init_ptr: *const fn () anyerror!void = netInit;
-    const net_deinit_ptr: *const fn () void = netDeinit;
-    _ = get_ptr;
-    _ = get_alloc_ptr;
-    _ = fetch_ptr;
-    _ = fetch_alloc_ptr;
-    _ = post_json_ptr;
-    _ = post_json_alloc_ptr;
-    _ = get_json_ptr;
-    _ = get_json_alloc_ptr;
-    _ = post_json_parse_ptr;
-    _ = post_json_parse_alloc_ptr;
-    _ = send_ptr;
-    _ = send_alloc_ptr;
-    _ = post_ptr;
-    _ = post_alloc_ptr;
-    _ = put_ptr;
-    _ = put_alloc_ptr;
-    _ = del_ptr;
-    _ = del_alloc_ptr;
-    _ = delete_ptr;
-    _ = delete_alloc_ptr;
-    _ = patch_ptr;
-    _ = patch_alloc_ptr;
-    _ = head_ptr;
-    _ = head_alloc_ptr;
-    _ = trace_ptr;
-    _ = trace_alloc_ptr;
-    _ = connect_ptr;
-    _ = connect_alloc_ptr;
-    _ = options_ptr;
-    _ = options_alloc_ptr;
-    _ = opts_ptr;
-    _ = opts_alloc_ptr;
-    _ = first_ptr;
-    _ = fastest_ptr;
-    _ = settled_ptr;
-    _ = resolve_addr_ptr;
-    _ = resolve_all_addr_ptr;
-    _ = parse_host_port_ptr;
-    _ = parse_and_resolve_ptr;
-    _ = is_ip_ptr;
-    _ = is_ip4_ptr;
-    _ = is_ip6_ptr;
-    _ = mime_ptr;
-    _ = mime_or_ptr;
-    _ = mime_with_ptr;
-    _ = net_init_ptr;
-    _ = net_deinit_ptr;
-}
-
-test "core types" {
-    _ = types;
-}
-
-test "headers" {
-    _ = headers;
-}
-
-test "uri" {
-    _ = uri;
-}
-
-test "status" {
-    _ = status;
-}
-
-test "request" {
-    _ = request;
-}
-
-test "response" {
-    _ = response;
-}
-
-test "http protocol" {
-    _ = http;
-}
-
-test "hpack" {
-    _ = hpack;
-}
-
-test "stream" {
-    _ = stream;
-}
-
-test "qpack" {
-    _ = qpack;
-}
-
-test "quic" {
-    _ = quic;
-}
-
-test "parser" {
-    _ = parser;
-}
-
-test "buffer" {
-    _ = buffer;
-}
-
-test "encoding" {
-    _ = encoding;
-}
-
-test "json" {
-    _ = json;
-}
-
-test "common" {
-    _ = common;
-}
-
-test "socket" {
-    _ = socket;
-}
-
-test "address" {
-    _ = address;
-}
-
-test "compression_stream" {
-    _ = compression_stream;
-}
-
-test "mime" {
-    _ = mime;
-}
-
-test "cache" {
-    _ = cache;
-}
-
-test "buffer_pool" {
-    _ = buffer_pool;
-}
-
-test "dns" {
-    _ = dns;
-    _ = DNSResolver;
-    _ = DNSCache;
-    _ = DNSResolution;
-    _ = DNSConfig;
-    _ = DNSStats;
-    _ = AddressFamily;
-    _ = AddressOrder;
+pub const Context = router.Context;
+pub const Response = router.Response;
+pub const ServerResponse = router.Response;
+pub const TlsListener = tls.TlsListener;
+pub const TlsListenerConfig = tls.ListenerConfig;
+pub const TlsConfig = tls.ServerConfig;
+pub const TlsClientConfig = tls.ClientConfig;
+pub const TlsRequest = tls.HttpRequest;
+pub const TlsResponse = tls.HttpResponse;
+pub const TlsHandler = tls.HandlerFn;
+
+// Concurrency & Utilities
+pub const WorkerPoolConfig = @import("concurrency/worker_pool.zig").Config;
+pub const RateLimiter = @import("web/middleware/security.zig").RateLimiter;
+pub const Metrics = metrics.Registry;
+pub const Logger = logging.Logger;
+pub const LogLevel = logging.Level;
+pub const LogSink = logging.Sink;
+pub const LogRecord = logging.Record;
+pub const LogField = logging.Field;
+pub const WriterSink = logging.WriterSink;
+
+// Networking & Protocol Types
+pub const Address = address.Address;
+pub const Uri = uri.Uri;
+pub const Method = method.Method;
+pub const Status = status.Status;
+pub const Http1Parser = http1.parser.Http1Parser;
+pub const ChunkedDecoder = http1.parser.ChunkedDecoder;
+pub const H2Session = http2.connection.Session;
+pub const AlpnProtocol = tls.alpn.Protocol;
+pub const ApplicationProtocol = tls.alpn.Protocol;
+
+// FTP
+pub const ftp = struct {
+    const ftp_client = @import("protocols/ftp/client.zig");
+    pub const Client = ftp_client.Client;
+    pub const Options = ftp_client.Options;
+    pub const Reply = ftp_client.Reply;
+    pub const FtpError = ftp_client.FtpError;
+    pub const connect = ftp_client.Client.connect;
+    pub const parseReplyAt = ftp_client.parseReplyAt;
+    pub const parsePasive = ftp_client.parsePasive;
+    pub const parseEpsv = ftp_client.parseEpsv;
+    const ftp_server = @import("protocols/ftp/server.zig");
+    pub const Server = ftp_server.Server;
+    pub const FtpConfig = ftp_server.Config;
+    pub const Callbacks = ftp_server.Callbacks;
+};
+
+// Tests
+test {
+    _ = @import("common/errors.zig");
+    _ = @import("common/status.zig");
+    _ = @import("common/headers.zig");
+    _ = @import("common/uri.zig");
+    _ = @import("common/method.zig");
+    _ = @import("common/version.zig");
+    _ = @import("common/sync.zig");
+    _ = @import("concurrency/queue.zig");
+    _ = @import("concurrency/worker_pool.zig");
+    _ = @import("common/logging.zig");
+    _ = @import("sockets/tcp.zig");
+    _ = @import("sockets/sys.zig");
+    _ = @import("sockets/udp.zig");
+    _ = @import("net/address.zig");
+    _ = @import("net/dns.zig");
+    _ = @import("net/dns/cache.zig");
+    _ = @import("net/resolve.zig");
+    _ = @import("net/socks5.zig");
+    _ = @import("net/proxy.zig");
+    _ = @import("compression/codec.zig");
+    _ = @import("protocols/http1/parser.zig");
+    _ = @import("protocols/http1/writer.zig");
+    _ = @import("protocols/http1/semantics.zig");
+    _ = @import("protocols/http1/fuzz.zig");
+    _ = @import("protocols/common/integer.zig");
+    _ = @import("protocols/common/huffman.zig");
+    _ = @import("protocols/common/huffman_table.zig");
+    _ = @import("protocols/http2/frame.zig");
+    _ = @import("protocols/http2/hpack.zig");
+    _ = @import("protocols/http2/stream.zig");
+    _ = @import("protocols/http2/connection.zig");
+    _ = @import("protocols/quic/varint.zig");
+    _ = @import("protocols/quic/packet.zig");
+    _ = @import("protocols/quic/crypto.zig");
+    _ = @import("protocols/quic/protect.zig");
+    _ = @import("protocols/quic/frames.zig");
+    _ = @import("protocols/quic/acktr.zig");
+    _ = @import("protocols/quic/loss.zig");
+    _ = @import("protocols/quic/cc.zig");
+    _ = @import("protocols/quic/params.zig");
+    _ = @import("protocols/quic/stream.zig");
+    _ = @import("protocols/quic/connection.zig");
+    _ = @import("protocols/quic/connection_id.zig");
+    _ = @import("protocols/quic/path.zig");
+    _ = @import("protocols/quic/transport.zig");
+    _ = @import("protocols/tls/quic_tls.zig");
+    _ = @import("protocols/http3/frame.zig");
+    _ = @import("protocols/http3/qpack.zig");
+    _ = @import("protocols/http3/connection.zig");
+    _ = @import("protocols/tls/alpn.zig");
+    _ = @import("protocols/tls/config.zig");
+    _ = @import("protocols/tls/record.zig");
+    _ = @import("protocols/tls/handshake.zig");
+    _ = @import("protocols/tls/engine.zig");
+    _ = @import("protocols/tls/quic_tls.zig");
+    _ = @import("protocols/tls/tcp_tls.zig");
+    _ = @import("protocols/tls/tls_server.zig");
+    _ = @import("protocols/tls/transport.zig");
+    _ = @import("web/router/pattern.zig");
+    _ = @import("web/router/metadata.zig");
+    _ = @import("web/router/router.zig");
+    _ = @import("web/sse/writer.zig");
+    _ = @import("web/sse/parser.zig");
+    _ = @import("web/websocket/handshake.zig");
+    _ = @import("web/websocket/frame.zig");
+    _ = @import("web/middleware/security.zig");
+    _ = @import("web/docs/docs.zig");
+    _ = @import("web/graphql/graphql.zig");
+    _ = @import("web/openapi/spec.zig");
+    _ = @import("web/static_files/serve.zig");
+    _ = @import("web/spa/serve.zig");
+    _ = @import("web/health/endpoints.zig");
+    _ = @import("web/metrics/registry.zig");
+    _ = @import("utils/mime.zig");
+    _ = @import("web/auth/basic.zig");
+    _ = @import("web/auth/bearer.zig");
+    _ = @import("web/multipart/encoder.zig");
+    _ = @import("web/multipart/parser.zig");
+    _ = @import("client/request.zig");
+    _ = @import("client/client.zig");
+    _ = @import("client/cookies.zig");
+    _ = @import("client/pool.zig");
+    _ = @import("protocols/ftp/client.zig");
+    _ = @import("protocols/ftp/server.zig");
+    _ = @import("protocols/http2/transport.zig");
+    _ = @import("server/lifecycle.zig");
+    _ = @import("parsing/dom.zig");
+    _ = @import("parsing/html.zig");
+    _ = @import("parsing/xml.zig");
+    _ = @import("parsing/selector.zig");
+    _ = @import("parsing/extract.zig");
+    _ = @import("parsing/feed.zig");
+    _ = @import("parsing/robots.zig");
+    _ = @import("parsing/sitemap.zig");
+    _ = @import("parsing/document.zig");
 }

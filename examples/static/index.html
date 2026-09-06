@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>httpx.zig SPA Example</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <nav>
+        <a href="/" class="nav-link" data-page="home">Home</a>
+        <a href="/about" class="nav-link" data-page="about">About</a>
+        <a href="/contact" class="nav-link" data-page="contact">Contact</a>
+    </nav>
+
+    <main id="app">
+        <h1>Welcome to httpx.zig</h1>
+        <p>A production-ready HTTP client and server library for Zig.</p>
+        <div id="features">
+            <div class="feature">
+                <h3>HTTP/1.x, HTTP/2, HTTP/3</h3>
+                <p>Full protocol support with custom implementations.</p>
+            </div>
+            <div class="feature">
+                <h3>TLS 1.2 & 1.3</h3>
+                <p>Secure connections with ALPN negotiation.</p>
+            </div>
+            <div class="feature">
+                <h3>High Performance</h3>
+                <p>Zero-copy parsing, connection pooling, and more.</p>
+            </div>
+        </div>
+        <button id="fetch-btn">Fetch Data</button>
+        <pre id="output"></pre>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

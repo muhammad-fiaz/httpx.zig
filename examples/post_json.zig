@@ -6,44 +6,16 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var request = try httpx.Request.init(allocator, .POST, "http://httpbun.com/post");
-    defer request.deinit();
+    var client = try httpx.Client.init(allocator, .{});
+    defer client.deinit();
 
-    const json_body =
-        \\{
-        \\  "name": "John Doe",
-        \\  "email": "john@example.com",
-        \\  "age": 30
-        \\}
-    ;
+    // POST with JSON
+    var response = try client.post(.{
+        .url = "http://httpbun.com/post",
+        .json = "{\"name\":\"Alice\"}",
+    });
+    defer response.deinit();
 
-    try request.setJson(json_body);
-    try request.headers.set("Accept", "application/json");
-
-    const serialized = try httpx.formatRequest(&request, allocator);
-    defer allocator.free(serialized);
-
-    std.debug.print("{s}\n", .{serialized});
-
-    var builder = httpx.json.JsonBuilder.init(allocator);
-    defer builder.deinit();
-
-    try builder.beginObject();
-    try builder.key("name");
-    try builder.string("Jane Doe");
-    try builder.key("email");
-    try builder.string("jane@example.com");
-    try builder.key("active");
-    try builder.boolean(true);
-    try builder.key("roles");
-    try builder.beginArray();
-    try builder.string("admin");
-    try builder.string("user");
-    try builder.endArray();
-    try builder.endObject();
-
-    std.debug.print("Built JSON: {s}\n", .{builder.toSlice()});
-
-    std.debug.print("  Has request body: {}\n", .{httpx.Method.POST.hasRequestBody()});
-    std.debug.print("  Is idempotent: {}\n", .{httpx.Method.POST.isIdempotent()});
+    std.debug.print("Status: {d}\n", .{response.status});
+    std.debug.print("Body: {s}\n", .{response.body});
 }

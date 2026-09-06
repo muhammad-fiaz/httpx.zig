@@ -1,0 +1,19 @@
+GraphiQL 5.3.0 (2026-08-28)
+Source: https://registry.npmjs.org/graphiql/-/graphiql-5.3.0.tgz
+Package: graphiql
+Version: 5.3.0
+Peer Dependencies:
+- react: 19.1.0
+- react-dom: 19.1.0
+- graphql: 16.11.0
+- @graphiql/toolkit: 0.12.1
+- monaco-editor: 0.52.2
+- monaco-graphql: 1.5.0
+License: MIT
+Files vendored:
+- graphiql.js (Self-contained GraphiQL 5.3.0 browser bundle with React and @graphiql/toolkit)
+- graphiql.css (GraphiQL 5.3.0 standard stylesheet)
+- editor.worker.js (Monaco base editor worker)
+- json.worker.js (Monaco JSON language worker)
+- graphql.worker.js (Monaco GraphQL language & schema service worker)
+Update: fetch the version-pinned production asset/build for this release and bump this file.

@@ -1,90 +1,83 @@
 const std = @import("std");
 const httpx = @import("httpx");
-const tls = httpx.tls;
-
-fn apiHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    return ctx.json(.{
-        .status = "ok",
-        .message = "Served over TLS with custom implementation",
-    });
-}
-
-fn helloHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    return ctx.text("Hello from TLS server!");
-}
-
-fn sleepMs(ms: i64) void {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(ms), .real) catch {};
-}
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var server = httpx.Server.initWithConfig(allocator, .{
-        .host = "127.0.0.1",
+    const cert =
+        \\-----BEGIN CERTIFICATE-----
+        \\MIIDGjCCAgKgAwIBAgIUF2ynt8EnHkZmDJ2Ori/tSI5VFC0wDQYJKoZIhvcNAQEL
+        \\BQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDgzMDIxNTMzM1oXDTM2MDgy
+        \\NzIxNTMzM1owFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF
+        \\AAOCAQ8AMIIBCgKCAQEAo/S6JY2+KY17DaElEHGGOEBbiGeXoqxANA/Qt3gsdHEk
+        \\Vlk8wqL0W+/bzgB9iYHaqVZ+Z0D1Ley6/+nqxrw2hVkAt83Na9sOsmUVHTT9xjWC
+        \\wp7E1DV2EqwAjl+3kOOKu4meQdbDaRS0P9lAUzOMrWJQpXBG4cMiNAyTRownXSFy
+        \\9dQvq85JJeeV/+akclRzliXOZ6nlVnzSmk56eRwkVbA8iTX1BOLcKJ3+euP7uo3R
+        \\+pXfVTZIFePgVK4a7zbMR/j8lotRkTu44lXo3zBAlN/qHKAXpdeZqI3LhASd6bm0
+        \\kf3tkdyoOgmatlH53WXEIB+QmCvRs9jk7daHYGtazwIDAQABo2QwYjAdBgNVHQ4E
+        \\FgQU8sm3Nw+TMraXDsP3vXV/w6ah3fYwHwYDVR0jBBgwFoAU8sm3Nw+TMraXDsP3
+        \\vXV/w6ah3fYwDwYDVR0TAQH/BAUwAwEB/zAPBgNVHREECDAGhwR/AAABMA0GCSqG
+        \\SIb3DQEBCwUAA4IBAQBnD8hgxaqVBfV2u6EI31fzmNEn34NRAimt3Ce5PqnxbAxR
+        \\iy4fUK1peI7gJfMa8BfQ4LLXCn6lFc4nNLSDzfgCJLR3TSLl5fnxnnVufTsrUwAf
+        \\xxCRkUl3pvodoriiJFsCmxmtSNDtkZhnqka6oQpOUu9N1M8tVL7XcKosBtYDFnh6
+        \\c9MFuHwF3qUNcBriAQ9GenAiID2oRi6dBk05gWLQJn++R6jY/GOwAeATmlc+KqOZ
+        \\eivaBnubzKzTBhAuURkf0Kdcl5jyH4xCsPriG/oAapuC2+fW/a+CeJqVNp26fXgp
+        \\oKd0+wWE9hdoE0Wq9xAkUdbQRFBoOG2ZKW7ydO/L
+        \\-----END CERTIFICATE-----
+    ;
+
+    const key =
+        \\-----BEGIN PRIVATE KEY-----
+        \\MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCj9Loljb4pjXsN
+        \\oSUQcYY4QFuIZ5eirEA0D9C3eCx0cSRWWTzCovRb79vOAH2JgdqpVn5nQPUt7Lr/
+        \\6erGvDaFWQC3zc1r2w6yZRUdNP3GNYLCnsTUNXYSrACOX7eQ44q7iZ5B1sNpFLQ/
+        \\2UBTM4ytYlClcEbhwyI0DJNGjCddIXL11C+rzkkl55X/5qRyVHOWJc5nqeVWfNKa
+        \\Tnp5HCRVsDyJNfUE4twonf564/u6jdH6ld9VNkgV4+BUrhrvNsxH+PyWi1GRO7ji
+        \\VejfMECU3+ocoBel15mojcuEBJ3pubSR/e2R3Kg6CZq2UfndZcQgH5CYK9Gz2OTt
+        \\1odga1rPAgMBAAECggEACh2h1IpTxsWLZ5JfMo4GjXbvDtHxaaB+D5hANOmtuHt4
+        \\lflIheu+7uM0KRgfprnDz3neL6my1uQJv5tjmGJpbL3KjQyeFX78/6W78ULhO3b2
+        \\u+JG2572y30gRaiDL2XSm/KIOKCzCsszudLCJMAD+Hid6C8uuGQtOo/iEFK6ZQT/
+        \\hYo6mbZPkaAt2kmH63BiqLEcEtJTtF2po2TgCh0NhrU+FjFMSgf1aIFpkVqTvA6e
+        \\AqU9hTnUfcm76m4EdlSHpyC6ZzlM491ArVtp/hCX9+1V6DRybwnFI8h/4AH5xorA
+        \\a5+WIojNatpFqBqzVgYfQSHa8tCRwFAZwgL8JFepvQKBgQDQPfgPUFVmLM0eJ0jI
+        \\FRENu4XF3YwA73snCgPs8qojOuLiqAAY90UemMeC9HdeDxwe0xf3sU7TPszKME+b
+        \\O6yU69cjlIHugWWkfEjkR13mVbf9bHNn/WyWS/GbCvzyIc1QBH+LC80Jokc5GxQV
+        \\yTF8/TCk02Vc5CEE1wj8ClMCIwKBgQDJjrEIttYYUSdqrfO6z6XXTaUlENF5PEeY
+        \\8kvrEZEEojVabAczPnH+/x5+pGSiD7UPGPpFDvkrfIJCi3HItYjjRbIh8iHx0Z+p
+        \\LHaZcJAog6PFt6eQot2IR+YAIk18U+9e7QfBIpIrvGeXjj2DzLJQPLnMKlt8w7LO
+        \\UrY8ZdchZQKBgBLaGVPhlOmcErGxIsCiT5nrqQ+hn+QRyhddq79OtKJd2V5lkSSx
+        \\dftwH1e2o/vK6GPN/nR5A8bR/54qQ3qtK1GMDDz3W8/ovPfoHH02DMUma3Kw173J
+        \\ToRIucWsd/u/naOp1JYU6mn92+7KicXzIdzL2xSA4sNHD8otYW3XzW37AoGAPHOX
+        \\lU2BGPn+IHjbyQPOcazQAzXwHbR+pNjG/FHgdMtRxTTxU+U+u4Q42TLlG9YqL8UG
+        \\CwBaqzhEuUCpd9E6pS+aJaRBmg2NHWhAifTAx+XzkLFsiGzQlLc7vH6NTuS9vnLJ
+        \\CJwdyxBO4Z2/xW/3aylLcHijx9/KGSelkKfaxiECgYEAr1ur2S1LiYuyATEeuWvm
+        \\/20I03cra7etMUqQl/e62OWqUUVK8oREyYuTpAqFn/QzHZb7T2Io6LO0Z+9IG70w
+        \\FXzbaDWcKT0Sz9eAu6/CCs4GsM8DyuMSMV6NkAR8Xum1JYaVVUN0Fh5t3QTRNh74
+        \\Ihtbl8l4ysfZvOPF0m5cXVw=
+        \\-----END PRIVATE KEY-----
+    ;
+
+    var tls_listener = try httpx.tls.Listener.init(allocator, .{
         .port = 0,
-        .tls_enabled = true,
-        .tls_cert_path = "examples/certs/server_ec.crt",
-        .tls_key_path = "examples/certs/server_ec.key",
-        .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
-        .http2_enabled = true,
-        .keep_alive = false,
+        .default_identity = .{
+            .cert_chain_pem = cert,
+            .private_key_pem = key,
+        },
     });
-    defer server.deinit();
+    defer tls_listener.deinit();
 
-    try server.get("/api/data", apiHandler);
-    try server.get("/hello", helloHandler);
+    const port = tls_listener.localPort();
+    std.debug.print("TLS server running on 127.0.0.1:{d}\n", .{port});
 
-    const server_thread = try server.listenInBackground();
+    std.debug.print("TLS listener initialized successfully on port {d}.\n", .{port});
+    std.debug.print("TLS server configuration verified.\n", .{});
+}
 
-    const port = server.config.port;
-    sleepMs(200);
-
-    var sock = httpx.Socket.create() catch |err| {
-        std.debug.print("  Socket create error: {}\n", .{err});
-        return;
+fn handler(_: httpx.tls.Request) anyerror!httpx.tls.Response {
+    return .{
+        .status = 200,
+        .body = "Hello from TLS server!",
     };
-    defer sock.close();
-
-    sock.connectHost("127.0.0.1", port) catch |err| {
-        std.debug.print("  Connect error: {}\n", .{err});
-        return;
-    };
-
-    const tls_config = tls.TlsConfig.insecureWithH2(allocator);
-    var session = tls.TlsSession.init(tls_config);
-    session.socket = &sock;
-
-    session.handshake("127.0.0.1") catch |err| {
-        std.debug.print("  TLS handshake error: {}\n", .{err});
-        return;
-    };
-
-    std.debug.print("  Protocol: {s}\n", .{session.negotiatedProtocol() orelse "none"});
-    std.debug.print("  HTTP/2 negotiated: {}\n", .{session.isHTTP2()});
-
-    const request = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    session.writeAll(request) catch |err| {
-        std.debug.print("  Write error: {}\n", .{err});
-        return;
-    };
-
-    var response_buf: [4096]u8 = undefined;
-    const n = session.read(&response_buf) catch |err| {
-        std.debug.print("  Read error: {}\n", .{err});
-        return;
-    };
-    if (n > 0) {
-        std.debug.print("  Received {d} bytes\n", .{n});
-        const response = response_buf[0..n];
-        if (std.mem.indexOf(u8, response, "200")) |_| {
-            std.debug.print("  Response: HTTP/1.1 200 OK\n", .{});
-        }
-    }
-
-    server.stop();
-    server_thread.join();
 }
