@@ -27,6 +27,9 @@
 
 `httpx.zig` is a modern, high-performance HTTP library for Zig, providing everything needed to build fast and reliable networked applications, including HTTP clients, servers, APIs, web services, reverse proxies, and full-featured websites.
 
+> [!WARNING]
+> v0.2.0 is a major rewrite with new improvements and is currently in active development on the `main` branch, so it may include breaking API changes. The live docs site is for stable v0.1.8. For the latest in-development version, use Method 2 below. Docs generated from `main` are version 0.2.0.
+
 > [!TIP]
 > If you build with httpx.zig, make sure to give it a star.
 
@@ -172,7 +175,9 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 > [!WARNING]
 > Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.1.8**.
 
-### Method 2: Zig Fetch (Dev Branch)
+### Method 2: Zig Fetch (Latest / v0.2.0 in development)
+
+Use this for the latest in-development version from the `main` branch:
 
 ```bash
 zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
