@@ -25,7 +25,9 @@ export default defineConfig({
   cleanUrls: false,
 
   sitemap: {
-    hostname: SITE_URL,
+    // Per VitePress docs: when `base` is set, append it (with trailing
+    // slash) to the hostname so generated loc entries keep the subpath.
+    hostname: `${SITE_URL}/`,
   },
 
   vite: {
@@ -49,8 +51,8 @@ export default defineConfig({
     ["meta", { property: "og:title", content: SITE_NAME }],
     ["meta", { property: "og:description", content: SITE_DESCRIPTION }],
     ["meta", { property: "og:image", content: `${SITE_URL}/cover.png` }],
-    ["meta", { property: "og:image:width", content: "1200" }],
-    ["meta", { property: "og:image:height", content: "630" }],
+    ["meta", { property: "og:image:width", content: "1536" }],
+    ["meta", { property: "og:image:height", content: "1024" }],
     ["meta", { property: "og:image:alt", content: "httpx.zig - High Performance Zig HTTP Library" }],
     ["meta", { property: "og:image:secure_url", content: `${SITE_URL}/cover.png` }],
     ["meta", { property: "og:site_name", content: SITE_NAME }],

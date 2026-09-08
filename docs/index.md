@@ -8,7 +8,7 @@ hero:
   text: HTTP client and server library for Zig
   tagline: Production-ready HTTP/1.x/2/3 client and server runtime with proxy support, concurrency, and protocol primitives
   image:
-    src: /logo.png
+    src: /httpx.zig-transparent.png
     alt: httpx.zig
   actions:
     - theme: brand
