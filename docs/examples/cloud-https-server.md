@@ -32,15 +32,16 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = httpx.Server.initWithConfig(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 8080,
         .port_conflict = .increment,
         .max_connections = 10000,
         .threads = 4,
-        .http2_enabled = true,
-        .http3_enabled = false,
+        .http2 = true,
+        .http3 = false,
         .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
         .keep_alive = true,
         .request_timeout_ms = 30_000,

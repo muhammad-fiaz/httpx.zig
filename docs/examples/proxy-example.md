@@ -7,7 +7,7 @@ Demonstrates how to use client-side forward proxying and server-side reverse pro
 SOCKS5h is useful when you want remote hostname resolution instead of local DNS lookup. In `httpx.zig`, set the proxy kind explicitly:
 
 ```zig
-const socks_proxy = httpx.ClientConfig.defaults()
+const socks_proxy = .{}
     .withProxy(.{
         .kind = .socks5h,
         .host = "127.0.0.1",
@@ -36,7 +36,7 @@ pub fn main() !void {
     const proxy_port = 45234;
 
     // 1. Start the backend server
-    var backend_server = httpx.Server.initWithConfig(allocator, .{
+    var backend_server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = backend_port,
         .keep_alive = false,
@@ -56,7 +56,7 @@ pub fn main() !void {
     std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .real) catch {};
 
     // 2. Start the proxy server with reverseProxy middleware
-    var proxy_server = httpx.Server.initWithConfig(allocator, .{
+    var proxy_server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = proxy_port,
         .keep_alive = false,
@@ -76,13 +76,13 @@ pub fn main() !void {
     std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .real) catch {};
 
     // 3. Setup client with proxy configuration pointing to the proxy server
-    const client_config = httpx.ClientConfig.defaults()
+    const client_config = .{}
         .withProxy(.{
             .host = "127.0.0.1",
             .port = proxy_port,
         });
 
-    var client = httpx.Client.initWithConfig(allocator, client_config);
+    var client = httpx.Client.init(allocator, io, client_config);
     defer client.deinit();
 
     // 4. Request the backend path through the proxy.

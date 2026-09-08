@@ -114,7 +114,6 @@ pub fn mount(
     info: ?openapi.Info,
 ) !void {
     if (!cfg.enabled) return;
-    if (g_state != null) return error.AlreadyMounted;
 
     const actual_info = info orelse openapi.Info{
         .title = cfg.title,
@@ -205,10 +204,10 @@ pub fn mount(
     }
 
     if (cfg.openapi.enabled and st.openapi_route.len > 0) {
-        try router.get(st.openapi_route, openApiHandler);
+        try router.getWithData(st.openapi_route, openApiHandler, st);
     }
     if (st.swagger_route) |route| {
-        try router.get(route, swaggerPageHandler);
+        try router.getWithData(route, swaggerPageHandler, st);
         for (assets.swagger_files) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
@@ -216,7 +215,7 @@ pub fn mount(
         }
     }
     if (st.redoc_route) |route| {
-        try router.get(route, redocPageHandler);
+        try router.getWithData(route, redocPageHandler, st);
         for (assets.redoc_files) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
@@ -224,20 +223,19 @@ pub fn mount(
         }
     }
     if (st.scalar_route) |route| {
-        try router.get(route, scalarPageHandler);
+        try router.getWithData(route, scalarPageHandler, st);
         const full = try joinRoute(allocator, route, "standalone.js");
         defer allocator.free(full);
         try router.get(full, scalarAssetHandler);
     }
     if (st.graphiql_route) |route| {
-        try router.get(route, graphiqlPageHandler);
+        try router.getWithData(route, graphiqlPageHandler, st);
         for (assets.graphiql_files) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
             try router.get(full, graphiqlAssetHandler);
         }
     }
-
     g_state = st;
 }
 
@@ -271,13 +269,12 @@ fn joinRoute(allocator: Allocator, base: []const u8, name: []const u8) Allocator
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ base, name }) catch return error.OutOfMemory;
 }
 
-fn requireState() *DocsState {
-    return g_state orelse unreachable; // handlers only reachable after mount()
+fn requireState(ctx: *Context) *DocsState {
+    return @ptrCast(@alignCast(ctx.user_data orelse unreachable));
 }
 
 fn openApiHandler(ctx: *Context) anyerror!Response {
-    const st = requireState();
-    _ = ctx;
+    const st = requireState(ctx);
     if (openapi.generate(st.router, st.info)) |fresh_spec| {
         if (st.spec) |old| st.allocator.free(old);
         st.spec = fresh_spec;
@@ -286,26 +283,22 @@ fn openApiHandler(ctx: *Context) anyerror!Response {
 }
 
 fn swaggerPageHandler(ctx: *Context) anyerror!Response {
-    const st = requireState();
-    _ = ctx;
+    const st = requireState(ctx);
     return .{ .status = 200, .content_type = "text/html; charset=utf-8", .body = st.swagger_page.? };
 }
 
 fn redocPageHandler(ctx: *Context) anyerror!Response {
-    const st = requireState();
-    _ = ctx;
+    const st = requireState(ctx);
     return .{ .status = 200, .content_type = "text/html; charset=utf-8", .body = st.redoc_page.? };
 }
 
 fn scalarPageHandler(ctx: *Context) anyerror!Response {
-    const st = requireState();
-    _ = ctx;
+    const st = requireState(ctx);
     return .{ .status = 200, .content_type = "text/html; charset=utf-8", .body = st.scalar_page.? };
 }
 
 fn graphiqlPageHandler(ctx: *Context) anyerror!Response {
-    const st = requireState();
-    _ = ctx;
+    const st = requireState(ctx);
     return .{ .status = 200, .content_type = "text/html; charset=utf-8", .body = st.graphiql_page.? };
 }
 
@@ -515,7 +508,6 @@ test "disabled config registers nothing" {
     defer router.deinit();
 
     try mount(a, &router, .{ .enabled = false }, null);
-    try std.testing.expect(g_state == null);
     try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) == null);
 }
 
@@ -540,7 +532,6 @@ test "conflicting user route is reported, not overwritten" {
 
     try std.testing.expectError(error.DuplicateRoute, mount(a, &router, .{}, null));
     unmount(); // partial state cleaned up
-    try std.testing.expect(g_state == null);
 }
 
 test "graphiql opt-in mounts its page and all worker assets" {

@@ -14,6 +14,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // 1. Zero-config global (no client, no allocator)
     std.debug.print("\n=== Zero-config check ===\n", .{});
@@ -25,7 +26,7 @@ pub fn main() !void {
 
     // 2. Detailed result
     std.debug.print("\n=== Detailed connectivity probe ===\n", .{});
-    const result = httpx.checkConnectivity(.{ .timeout_ms = 3000 });
+    const result = httpx.checkConnectivity(.{ .timeoutMs = 3000 });
     if (result.online) {
         const fam_str: []const u8 = if (result.family) |f| switch (f) {
             .ip4 => "IPv4",
@@ -33,7 +34,7 @@ pub fn main() !void {
         } else "?";
         std.debug.print(
             "Online: endpoint={s} family={s} latency={?d}ms\n",
-            .{ result.endpointStr(), fam_str, result.latency_ms },
+            .{ result.endpointStr(), fam_str, result.latencyMs },
         );
     } else {
         std.debug.print("Offline: all probes failed.\n", .{});
@@ -41,14 +42,14 @@ pub fn main() !void {
 
     // 3. Via an explicit Client
     std.debug.print("\n=== Via Client ===\n", .{});
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     const client_result = client.checkConnectivity(.{});
     if (client_result.online) {
         std.debug.print("Client: online via {s} ({?d}ms)\n", .{
             client_result.endpointStr(),
-            client_result.latency_ms,
+            client_result.latencyMs,
         });
     } else {
         std.debug.print("Client: offline.\n", .{});

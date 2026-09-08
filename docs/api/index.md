@@ -6,58 +6,32 @@ This page maps the explicit public API surface exposed by `httpx.zig`.
 
 The root module re-exports core types and convenience helpers so most apps can import only `httpx`.
 
-### Client Helpers
+### Client Operations
 
-- `httpx.fetch(url)` — alias for GET
-- `httpx.send(method, url, options)` — explicit method
-- `httpx.get/post/put/delete/del/patch/head/trace/connect/options/opts(...)`
-- `httpx.getJson(T, url, parse_opts)` — GET + parse JSON
-- `httpx.postJson(url, body)` — POST raw JSON
-- `httpx.postJsonAndParse(T, url, body, parse_opts)` — POST + parse JSON
-- `httpx.putJson/patchJson/deleteJson(T, url, body, parse_opts)` — other methods + parse
-- `httpx.getJsonBorrowed/postJsonBorrowed(T, url, body)` — zero-copy borrowed parsing
-- Explicit allocator overrides: `httpx.*WithAllocator(...)` for every alias above.
+- `httpx.fetch(url, options)` — **primary unified fetch operation** (supports methods, typed JSON, headers, body)
+- `httpx.client.fetch(url, options)` — primary unified fetch under dot-notation namespace
+- `httpx.get / post / put / patch / delete / head / options / trace / connect(...)`
+- `httpx.client.get / post / put / patch / delete / ...` (clean dot notation namespace)
+- `httpx.request(options)`
+- `httpx.getAll(urls)` — fetch multiple URLs concurrently (array passed directly, no & needed)
+- `httpx.requestAll(requests)` — perform multiple custom requests concurrently
 
-### Client Shorthand
+### Client Lifecycle
 
-- `httpx.createClient()` — page_allocator shorthand
-- `httpx.createClientWithConfig(allocator, config)` — explicit allocator + config
+- `httpx.Client.init(allocator, io, config)` — initialize client with allocator, io, and configuration (or `.{}` for defaults)
 
-### Server Shorthand
+### Server Lifecycle
 
-- `httpx.createServer()` — page_allocator shorthand
-- `httpx.createServerWithConfig(allocator, config)` — explicit allocator + config
-- `httpx.serve(path, handler)` — one-shot create + register GET + listen
-- `httpx.serveWithConfig(allocator, config, path, handler)` — same with config
+- `httpx.Server.init(allocator, io, config)` — initialize server with allocator, io, and configuration (or `.{}` for defaults)
+- `httpx.serve(path, handler)` — one-shot server on port 8080
+- `httpx.serveWithConfig(allocator, config, path, handler)` — one-shot server with explicit configuration
 
-### Optional Client Builder Helpers
+### Configuration Types
 
-- `httpx.ClientConfig.defaults().withDefaultHeaders(...)`
-- `httpx.ClientConfig.defaults().withFollowRedirects(...)`
-- `httpx.ClientConfig.defaults().withHttp2Settings(...)`
-- `httpx.ClientConfig.defaults().withHttp3Settings(...)`
-- `httpx.ClientConfig.defaults().withSslVerification(...)`
-- `httpx.ClientConfig.defaults().withKeepAlive(...)`
-- `httpx.ClientConfig.defaults().withMaxResponseSize(...)`
-- `httpx.ClientConfig.defaults().withProxy(...)`
-- `httpx.ClientConfig.defaults().withRetryPolicy(...)`
-- `httpx.ClientConfig.defaults().withTimeouts(...)`
-- `httpx.ClientConfig.defaults().withLogFn(...)`
-- `httpx.ClientConfig.defaults().withPoolLimits(...)`
-- `httpx.RequestOptions.defaults().withQueryParams(...)`
-- `httpx.RequestOptions.defaults().withFormUrlEncoded(...)`
-- `httpx.RequestOptions.defaults().withBearerToken(...)`
-- `httpx.RequestOptions.defaults().withBasicAuth(...)`
-- `httpx.RequestOptions.defaults().withVersion(...)`
-- `httpx.RequestOptions.defaults().withHttp2()`
-- `httpx.RequestOptions.defaults().withHttp3()`
-- `httpx.RequestOptions.defaults().withJson(...)`
-- `httpx.RequestOptions.defaults().withHeaders(...)`
-- `httpx.RequestOptions.defaults().withFollowRedirects(...)`
-- `httpx.RequestOptions.defaults().withTimeout(...)`
-- `httpx.RequestOptions.defaults().withMultipartFields(...)`
-- `httpx.RequestOptions.defaults().withMultipartFiles(...)`
-- `httpx.RequestOptions.defaults().withMultipartBoundary(...)`
+- `httpx.ClientConfig` — client settings (protocols, timeouts, redirects, pool limits, proxies, TLS)
+- `httpx.ServerConfig` — server settings (host, port, protocols, workers, TLS, limits)
+- `httpx.RequestOptions` — per-request options (headers, body, params, timeouts)
+- `httpx.HttpVersion` — protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`)
 - `httpx.BasicAuth`
 - `httpx.Proxy`
 - `httpx.ProxyKind`

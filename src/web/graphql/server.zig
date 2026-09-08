@@ -29,20 +29,50 @@ pub const RequestPayload = struct {
 pub const HandlerConfig = struct {
     endpoint: []const u8 = "/graphql",
     max_body_size: usize = 2 * 1024 * 1024,
-    enable_cors: bool = true,
+    cors: bool = true,
+    enable_cors: ?bool = null,
+
+    pub fn isCorsEnabled(self: HandlerConfig) bool {
+        return self.enable_cors orelse self.cors;
+    }
 };
 
-var g_schema: ?Schema = null;
-var g_cfg: HandlerConfig = .{};
+pub const ServerState = struct {
+    schema: Schema,
+    cfg: HandlerConfig,
+};
+
+fn getState(ctx: *Context) !*ServerState {
+    return @ptrCast(@alignCast(ctx.user_data orelse return error.SchemaNotMounted));
+}
 
 /// Mounts a GraphQL schema on a Router at `cfg.endpoint` (default "/graphql").
 pub fn mount(router: *router_mod.Router, schema: Schema, cfg: HandlerConfig) !void {
-    g_schema = schema;
-    g_cfg = cfg;
+    const st = try router.allocator.create(ServerState);
+    st.* = .{ .schema = schema, .cfg = cfg };
 
-    try router.add(.POST, cfg.endpoint, &handleGraphQLPost);
-    try router.add(.GET, cfg.endpoint, &handleGraphQLGet);
-    try router.add(.OPTIONS, cfg.endpoint, &handleGraphQLOptions);
+    try router.addWithData(.POST, cfg.endpoint, &handleGraphQLPost, st);
+    try router.addWithData(.GET, cfg.endpoint, &handleGraphQLGet, st);
+    try router.addWithData(.OPTIONS, cfg.endpoint, &handleGraphQLOptions, st);
+}
+
+/// Removes the GraphQL routes and frees the associated ServerState.
+pub fn unmount(router: *router_mod.Router, cfg: HandlerConfig) void {
+    var state_to_free: ?*ServerState = null;
+    for (router.routes.items) |entry| {
+        if (entry.user_data) |ud| {
+            if (entry.handler == &handleGraphQLPost or entry.handler == &handleGraphQLGet or entry.handler == &handleGraphQLOptions) {
+                state_to_free = @ptrCast(@alignCast(ud));
+                break;
+            }
+        }
+    }
+    _ = router.remove(.POST, cfg.endpoint);
+    _ = router.remove(.GET, cfg.endpoint);
+    _ = router.remove(.OPTIONS, cfg.endpoint);
+    if (state_to_free) |st| {
+        router.allocator.destroy(st);
+    }
 }
 
 fn handleGraphQLOptions(ctx: *Context) anyerror!Response {
@@ -59,7 +89,8 @@ fn handleGraphQLOptions(ctx: *Context) anyerror!Response {
 }
 
 fn handleGraphQLGet(ctx: *Context) anyerror!Response {
-    const s = g_schema orelse return error.SchemaNotMounted;
+    const st = try getState(ctx);
+    const s = st.schema;
 
     // Parse query from query string
     var query_str: ?[]const u8 = null;
@@ -91,12 +122,13 @@ fn handleGraphQLGet(ctx: *Context) anyerror!Response {
         .status = 200,
         .content_type = "application/json; charset=utf-8",
         .body = result,
-        .headers = if (g_cfg.enable_cors) &.{.{ .name = "Access-Control-Allow-Origin", .value = "*" }} else &.{},
+        .headers = if (st.cfg.isCorsEnabled()) &.{.{ .name = "Access-Control-Allow-Origin", .value = "*" }} else &.{},
     };
 }
 
 fn handleGraphQLPost(ctx: *Context) anyerror!Response {
-    const s = g_schema orelse return error.SchemaNotMounted;
+    const st = try getState(ctx);
+    const s = st.schema;
 
     if (ctx.body.len == 0) {
         return .{
@@ -106,7 +138,7 @@ fn handleGraphQLPost(ctx: *Context) anyerror!Response {
         };
     }
 
-    if (ctx.body.len > g_cfg.max_body_size) {
+    if (ctx.body.len > st.cfg.max_body_size) {
         return .{
             .status = 413,
             .content_type = "application/json; charset=utf-8",
@@ -160,6 +192,6 @@ fn handleGraphQLPost(ctx: *Context) anyerror!Response {
         .status = 200,
         .content_type = "application/json; charset=utf-8",
         .body = result,
-        .headers = if (g_cfg.enable_cors) &.{.{ .name = "Access-Control-Allow-Origin", .value = "*" }} else &.{},
+        .headers = if (st.cfg.isCorsEnabled()) &.{.{ .name = "Access-Control-Allow-Origin", .value = "*" }} else &.{},
     };
 }

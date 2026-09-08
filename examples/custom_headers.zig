@@ -5,13 +5,13 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     // Custom headers
-    var response = try client.get(.{
-        .url = "http://httpbun.com/headers",
+    var response = try client.get("http://httpbun.com/headers", .{
         .headers = .{
             .authorization = "Bearer my-token",
             .x_custom = "my-value",

@@ -18,18 +18,18 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const tcp = @import("../sockets/tcp.zig");
-const address_mod = @import("address.zig");
+const addressMod = @import("address.zig");
 
 /// Options controlling the connectivity probe.
 pub const ConnectivityOptions = struct {
     /// Milliseconds to wait for each TCP connect attempt.
     /// Default is 3 000 ms — fast enough for interactive use, long enough for
     /// slow mobile links.
-    timeout_ms: u32 = 3_000,
+    timeoutMs: u32 = 3_000,
 
     /// Maximum number of probe targets to attempt before returning false.
     /// Stops as soon as one succeeds.  Setting 1 is fastest but less reliable.
-    max_probes: u8 = 4,
+    maxProbes: u8 = 4,
 };
 
 /// Result returned by `checkConnectivity`.
@@ -37,16 +37,16 @@ pub const ConnectivityResult = struct {
     /// True when at least one probe endpoint was reachable.
     online: bool,
     /// Address family that succeeded, or null when offline.
-    family: ?address_mod.Family,
+    family: ?addressMod.Family,
     /// Latency of the first successful probe in milliseconds.
-    latency_ms: ?u32,
+    latencyMs: ?u32,
     /// The endpoint IP that succeeded, zero-terminated ASCII, or empty.
     endpoint: [46]u8 = [_]u8{0} ** 46,
-    endpoint_len: u8 = 0,
+    endpointLen: u8 = 0,
 
     /// Slice of the successful endpoint string.
     pub fn endpointStr(self: *const ConnectivityResult) []const u8 {
-        return self.endpoint[0..self.endpoint_len];
+        return self.endpoint[0..self.endpointLen];
     }
 };
 
@@ -54,7 +54,7 @@ pub const ConnectivityResult = struct {
 const Probe = struct {
     ip: []const u8,
     port: u16,
-    family: address_mod.Family,
+    family: addressMod.Family,
 };
 
 const probes: []const Probe = &.{
@@ -65,8 +65,8 @@ const probes: []const Probe = &.{
 };
 
 /// Parse a dotted-decimal IPv4 or a colon-hex IPv6 literal into an Address.
-fn parseIpLiteral(ip: []const u8, port: u16, family: address_mod.Family) ?address_mod.Address {
-    var addr = address_mod.Address{ .family = family, .port = port };
+fn parseIpLiteral(ip: []const u8, port: u16, family: addressMod.Family) ?addressMod.Address {
+    var addr = addressMod.Address{ .family = family, .port = port };
     switch (family) {
         .ip4 => {
             var octets: [4]u8 = undefined;
@@ -115,21 +115,21 @@ fn probeOne(io: std.Io, probe: Probe, timeout_ms: u32) ?u32 {
 ///
 /// This function is allocation-free and safe to call from any context.
 pub fn checkConnectivity(io: std.Io, opts: ConnectivityOptions) ConnectivityResult {
-    const limit = @min(opts.max_probes, @as(u8, @intCast(probes.len)));
+    const limit = @min(opts.maxProbes, @as(u8, @intCast(probes.len)));
     for (probes[0..limit]) |probe| {
-        if (probeOne(io, probe, opts.timeout_ms)) |lat| {
+        if (probeOne(io, probe, opts.timeoutMs)) |lat| {
             var result = ConnectivityResult{
                 .online = true,
                 .family = probe.family,
-                .latency_ms = lat,
+                .latencyMs = lat,
             };
             const ep_len = @min(probe.ip.len, result.endpoint.len);
             @memcpy(result.endpoint[0..ep_len], probe.ip[0..ep_len]);
-            result.endpoint_len = @intCast(ep_len);
+            result.endpointLen = @intCast(ep_len);
             return result;
         }
     }
-    return ConnectivityResult{ .online = false, .family = null, .latency_ms = null };
+    return ConnectivityResult{ .online = false, .family = null, .latencyMs = null };
 }
 
 /// Convenience wrapper — returns true if any probe succeeded.

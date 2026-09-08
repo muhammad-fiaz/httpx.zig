@@ -6,8 +6,8 @@ Demonstrates redirect policy configuration including `follow_redirects`, `max_re
 
 ```zig
 const default = httpx.RedirectPolicy{};
-std.debug.print("  max_redirects:    {d}\n", .{default.max_redirects});
-std.debug.print("  follow_redirects: {}\n", .{default.follow_redirects});
+std.debug.print("  max_redirects:    {d}\n", .{default.maxRedirects});
+std.debug.print("  follow_redirects: {}\n", .{default.followRedirects});
 
 const strict = httpx.RedirectPolicy.strict();
 // strict.preserve_method == true

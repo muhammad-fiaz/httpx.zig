@@ -16,8 +16,9 @@ const httpx = @import("httpx");
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
+    var client = httpx.Client.init(allocator, io, .{}
         .withProxy(.{
             .kind = .http,
             .host = "proxy.example.com",
@@ -38,7 +39,8 @@ pub fn main() !void {
 The SOCKS5h protocol delegates target name resolution directly to the proxy server, avoiding local DNS leaks and resolving internal hostnames:
 
 ```zig
-var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
+    const io = std.Io.Threaded.global_single_threaded.io();
+var client = httpx.Client.init(allocator, io, .{}
     .withProxy(.{
         .kind = .socks5h,
         .host = "127.0.0.1",
@@ -61,7 +63,8 @@ const httpx = @import("httpx");
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
-    var server = httpx.Server.init(allocator);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var server = try httpx.Server.init(allocator, io, .{});
     defer server.deinit();
 
     // Route all incoming requests on /api/* downstream to the backend service

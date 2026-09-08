@@ -5,13 +5,13 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     // GET with compression
-    var response = client.get(.{
-        .url = "http://httpbun.com/get",
+    var response = client.get("http://httpbun.com/get", .{
         .headers = .{ .accept_encoding = "gzip, deflate, br" },
     }) catch |err| {
         std.debug.print("Compression request failed: {s}\n", .{@errorName(err)});

@@ -81,7 +81,15 @@ fn lookupWithIoImpl(allocator: Allocator, io: std.Io, host: []const u8, port: u1
 fn lookupImpl(allocator: Allocator, host: []const u8, port: u16) Error![]address_mod.Address {
     if (builtin.os.tag == .windows) return lookupWindows(allocator, host, port);
     if (builtin.link_libc) return lookupPosix(allocator, host, port);
-    return error.ResolverUnsupported;
+    if (std.mem.eql(u8, host, "localhost")) {
+        var out: std.ArrayList(address_mod.Address) = .empty;
+        errdefer out.deinit(allocator);
+        var ip4 = address_mod.Address{ .family = .ip4, .port = port };
+        ip4.bytes[0..4].* = [_]u8{ 127, 0, 0, 1 };
+        out.append(allocator, ip4) catch return error.OutOfMemory;
+        return out.toOwnedSlice(allocator) catch error.OutOfMemory;
+    }
+    return error.HostNotFound;
 }
 
 // Wire structs kept local so we don't depend on platform sockaddr exports.
@@ -278,7 +286,6 @@ fn lookupPosix(allocator: Allocator, host: []const u8, port: u16) Error![]addres
 // Tests (offline-safe)
 
 test "localhost resolves offline (hosts file)" {
-    if (builtin.os.tag != .windows and !builtin.link_libc) return error.SkipZigTest;
     const a = std.testing.allocator;
     const resolver = Resolver.init(a);
     const addrs = resolver.lookup("localhost", 80) catch |err| {
@@ -302,7 +309,6 @@ test "localhost resolves offline (hosts file)" {
 }
 
 test "garbage hostname fails cleanly" {
-    if (builtin.os.tag != .windows and !builtin.link_libc) return error.SkipZigTest;
     const a = std.testing.allocator;
     const resolver = Resolver.init(a);
     try std.testing.expectError(error.HostNotFound, resolver.lookup("definitely-not-a-real-host-httpx", 80));

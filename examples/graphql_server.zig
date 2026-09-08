@@ -63,11 +63,12 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .docs_enabled = true,
+        .enableDocs = true,
         .docs = .{
             .title = "HTTPX GraphQL & REST API",
             .version = "0.2.0",
@@ -77,11 +78,7 @@ pub fn main() !void {
             .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar Reference" },
             .graphiql = .{ .enabled = true, .route = "/graphiql", .graphql_endpoint = "/graphql", .title = "GraphiQL IDE" },
         },
-        .logging = .{
-            .enabled = true,
-            .color = .never,
-            .requests = false,
-        },
+        .logging = .{},
         .max_connections = 5,
     });
     defer server.deinit();
@@ -107,12 +104,12 @@ pub fn main() !void {
     };
     const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
 
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     var url_buf: [128]u8 = undefined;
     const url_root = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
-    var res = try client.get(url_root);
+    var res = try client.get(url_root, .{});
     std.debug.print("GET / -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
@@ -124,6 +121,7 @@ pub fn main() !void {
 
     server.requestShutdown();
     t.join();
+    httpx.graphql.unmount(&server.router, .{ .endpoint = "/graphql" });
     httpx.docs.unmount();
     std.debug.print("GraphQL server and client verification completed successfully.\n", .{});
 }

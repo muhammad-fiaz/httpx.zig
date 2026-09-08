@@ -5,8 +5,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .max_connections = 5,
@@ -26,12 +27,12 @@ pub fn main() !void {
     };
     const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
 
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     var url_buf: [128]u8 = undefined;
     const url_parse = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/parse", .{port});
-    var res = try client.post(.{ .url = url_parse, .body = "{\"test\":123}" });
+    var res = try client.post(url_parse, .{ .body = "{\"test\":123}" });
     std.debug.print("POST /api/parse -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 

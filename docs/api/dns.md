@@ -1,152 +1,241 @@
-# DNS API
+# DNS API Reference
 
-The `httpx.dns` module provides a thread-safe in-memory DNS resolution cache with TTL tracking, negative caching, eviction, and observability statistics. It wraps `std.net.getAddressList` and caches resolved addresses to avoid repeated DNS lookups.
+The DNS subsystem in HTTPX provides high-level client resolution methods, structured IP address types, thread-safe resolution caching, and low-level resolver controls.
 
-## Types
+---
 
-### `DnsCache`
+## Architecture Overview
 
-A thread-safe DNS resolution cache.
+```text
+                 httpx.Client
+                      │
+          ┌───────────┴───────────┐
+          │                       │
+      Normal API            Advanced API
+          │                       │
+    client.resolve()      httpx.resolve.Resolver
+          │               httpx.dns.cache.Cache
+          └───────────┬───────────┘
+                      │
+              Canonical DNS
+                Subsystem
+```
+
+---
+
+## 1. High-Level Client API (Recommended)
+
+Normal applications resolve hostnames through `httpx.Client`. The client manages allocator ownership, background I/O handles, and caching automatically.
+
+### `client.resolve(host, port, options)`
+
+Resolves a hostname or IP address to candidate addresses.
 
 ```zig
-pub const DnsCache = struct {
+pub fn resolve(
+    self: *Client,
+    host: []const u8,
+    port: u16,
+    opts: anytype,
+) Error!ResolvedAddresses
+```
+
+* **Parameters**:
+  * `host`: Hostname string (e.g., `"httpbun.com"`) or numeric IP literal (e.g., `"127.0.0.1"`, `"::1"`).
+  * `port`: Destination TCP/UDP port number.
+  * `opts`: Struct of `ResolveOptions` or `.{}` for defaults.
+* **Returns**: `ResolvedAddresses` owning the returned slice.
+* **Errors**: `error.DnsFailed`, `error.OutOfMemory`.
+
+#### Default Options Semantics
+
+Passing `.{}` uses documented HTTPX defaults:
+* Dual-stack resolution (`.family = .any`) in system preference order (RFC 3484).
+* In-memory cache enabled (`.use_cache = true`).
+* Default timeout inherited from client config.
+
+### `client.resolveUrl(url_str, options)`
+
+Extracts the hostname and effective port from a URL string (e.g. 80 for `http://`, 443 for `https://`) and resolves it:
+
+```zig
+var addrs = try client.resolveUrl("https://httpbun.com/get", .{});
+defer addrs.deinit();
+```
+
+### `httpx.resolveHost(host, port, options)`
+
+Zero-config global convenience wrapper that resolves a host without manually instantiating a client:
+
+```zig
+var addrs = try httpx.resolveHost("httpbun.com", 443, .{});
+defer addrs.deinit();
+```
+
+---
+
+## 2. DNS Options & Result Types
+
+### `ResolveOptions`
+
+Configuration passed to `client.resolve`:
+
+```zig
+pub const ResolveOptions = struct {
+    family: AddressFamilyPreference = .any,
+    use_cache: bool = true,
+    timeout_ms: ?u64 = null,
+};
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `family` | `AddressFamilyPreference` | `.any` | Address family filter (`.any`, `.ipv4`, `.ipv6`) |
+| `use_cache` | `bool` | `true` | When true, queries and updates the client's cache |
+| `timeout_ms` | `?u64` | `null` | Optional lookup timeout override |
+
+### `AddressFamilyPreference`
+
+```zig
+pub const AddressFamilyPreference = enum {
+    any,  // Dual-stack: both IPv4 and IPv6
+    ipv4, // IPv4 addresses only
+    ipv6, // IPv6 addresses only
+};
+```
+
+### `ResolvedAddresses`
+
+A collection of resolved addresses with a clear lifecycle API:
+
+```zig
+pub const ResolvedAddresses = struct {
     allocator: Allocator,
-    entries: std.StringHashMapUnmanaged(DnsEntry) = .{},
-    lock: std.Io.Mutex = .init,
-    default_ttl_ms: i64 = 60_000,
-    negative_ttl_ms: i64 = 5_000,
-    max_entries: u32 = 0,
-    stats: DnsStats = .{},
+    items: []Address,
+
+    pub fn deinit(self: *ResolvedAddresses) void;
+    pub fn slice(self: *const ResolvedAddresses) []const Address;
+    pub fn first(self: *const ResolvedAddresses) ?Address;
+    pub fn len(self: *const ResolvedAddresses) usize;
+    pub fn format(self: ResolvedAddresses, writer: anytype) !void;
 };
 ```
 
-### `DnsEntry`
+* **Memory Ownership**: Caller owns `ResolvedAddresses` and must call `defer addresses.deinit();`.
+* **Iteration**: Iterate over `addresses.items` or `addresses.slice()`.
+* **Printing**: Implements native Zig formatting:
+  ```zig
+  std.debug.print("Addresses: {f}\n", .{addresses});
+  ```
 
-A cached DNS resolution entry.
+---
+
+## 3. Client DNS Configuration
+
+Client-wide DNS parameters are configured in `Client.Config.dnsCache` during `Client.init`:
 
 ```zig
-pub const DnsEntry = struct {
-    address: net.Address,
-    expires_at_ms: i64,
-    failed: bool = false,
+pub const DnsCacheOptions = struct {
+    enable: bool = true,
+    ttlMs: i64 = 60_000,
+    negativeTtlMs: i64 = 5_000,
+    maxEntries: u32 = 1024,
 };
 ```
 
-### `DnsStats`
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `enable` | `true` | Activates internal resolution caching |
+| `ttlMs` | `60_000` (60s) | Lifetime for successful lookups |
+| `negativeTtlMs` | `5_000` (5s) | Lifetime for failed lookups |
+| `maxEntries` | `1024` | Maximum bounded entries before eviction |
 
-Cache statistics for observability.
+---
+
+## 4. Address Representation (`Address`)
+
+Defined in `src/net/address.zig` and re-exported as `httpx.Address`:
 
 ```zig
-pub const DnsStats = struct {
-    hits: u64 = 0,
-    misses: u64 = 0,
-    failures: u64 = 0,
-    evictions: u64 = 0,
+pub const Address = struct {
+    family: Family,
+    bytes: [16]u8,
+    port: u16,
+    zone: u32 = 0,
+
+    pub fn format(self: Address, writer: anytype) !void;
+    pub fn formatBuf(self: *const Address, buf: []u8) []const u8;
+    pub fn formatWithPort(self: *const Address, buf: []u8) []const u8;
+    pub fn toString(self: Address, allocator: Allocator) ![]u8;
+    pub fn isV4Mapped(self: *const Address) bool;
 };
 ```
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `hitRate()` | `f64` | Cache hit ratio (0.0 to 1.0) |
+### Native Formatting
 
-## Methods
-
-### `DnsCache.init`
-
-Creates a new DNS cache with default 60-second TTL.
+Formats addresses per RFC 5952:
 
 ```zig
-pub fn init(allocator: Allocator) DnsCache
+// Native {f} format specifier:
+std.debug.print("Target: {f}:{d}\n", .{ addr, addr.port });
+
+// Zero-allocation buffer format:
+var buf: [64]u8 = undefined;
+const s = addr.formatBuf(&buf);
+
+// Address with port:
+var port_buf: [64]u8 = undefined;
+const hp = addr.formatWithPort(&port_buf); // e.g. "127.0.0.1:443" or "[::1]:443"
 ```
 
-### `DnsCache.deinit`
+---
 
-Frees all cached entries and the cache structure.
+## 5. Advanced Resolver API
+
+For applications requiring direct control over low-level resolvers without instantiating an HTTP client:
+
+### `httpx.resolve.Resolver`
+
+Cross-platform OS resolver wrapping `ws2_32.getaddrinfo` on Windows and `libc getaddrinfo` on POSIX:
 
 ```zig
-pub fn deinit(self: *DnsCache) void
+var resolver = httpx.resolve.Resolver.init(allocator);
+const addrs = try resolver.lookupWithIo(io, "httpbun.com", 443);
+defer allocator.free(addrs);
 ```
 
-### `DnsCache.resolve`
+### `httpx.dns` Wire Protocol
 
-Resolves a hostname to an address, using the cache when the entry is still valid. On cache miss, performs a system DNS lookup and stores the result. Failed lookups are cached briefly (5 seconds by default) to prevent repeated DNS hammering.
+Low-level RFC 1035 message encoder and decoder for raw DNS packets:
 
-```zig
-pub fn resolve(self: *DnsCache, host: []const u8, port: u16) !net.Address
-```
+* `buildQuery(allocator, id, name, qtype)`
+* `parseResponse(allocator, msg)`
+* `resolveA(allocator, io, name)`
+* `resolveAAAA(allocator, io, name)`
 
-Returns `error.DnsLookupFailed` if the cached entry represents a failed resolution.
+---
 
-### `DnsCache.evictExpired`
+## 6. Concurrency & Stampede Prevention
 
-Removes all expired entries from the cache. Safe to call periodically to free memory.
+* **Thread-Safety**: Lookups through `httpx.Client` are fully thread-safe.
+* **Single-Flight Coalescing**: When multiple threads or concurrent requests resolve the same domain concurrently, only a single network query is dispatched; subsequent callers await and share the result.
+* **Non-Blocking Locks**: Network I/O is never executed while holding cache mutexes.
 
-```zig
-pub fn evictExpired(self: *DnsCache) void
-```
+---
 
-### `DnsCache.count`
+## 7. Proxy & SOCKS5 DNS Semantics
 
-Returns the number of cached entries.
+| Connection Type | Resolution Location | Behavior |
+|-----------------|---------------------|----------|
+| Direct | Local | Resolved via client DNS subsystem |
+| HTTP Proxy (`http://`) | Local / Proxy | Proxy connects; TLS uses HTTP `CONNECT` |
+| SOCKS5 (`socks5://`) | Local | Host resolved locally prior to connection |
+| SOCKS5H (`socks5h://`) | Remote (Proxy) | Unresolved hostname sent to SOCKS5 proxy |
 
-```zig
-pub fn count(self: *DnsCache) u32
-```
+---
 
-### `DnsCache.clear`
+## 8. Platform Resolver Differences
 
-Removes all cached entries (expired or not).
-
-```zig
-pub fn clear(self: *DnsCache) void
-```
-
-### `DnsCache.getStats`
-
-Returns a snapshot of cache statistics.
-
-```zig
-pub fn getStats(self: *DnsCache) DnsStats
-```
-
-## Usage
-
-```zig
-const httpx = @import("httpx");
-
-var dns_cache = httpx.DnsCache.init(allocator);
-defer dns_cache.deinit();
-
-// First call performs a real DNS lookup
-const addr1 = try dns_cache.resolve("example.com", 443);
-
-// Second call within TTL returns the cached address
-const addr2 = try dns_cache.resolve("example.com", 443);
-
-// Check cache hit rate
-const stats = dns_cache.getStats();
-std.debug.print("hit rate: {d:.1}%\n", .{stats.hitRate() * 100});
-```
-
-## Configuration
-
-```zig
-var dns_cache = httpx.DnsCache.init(allocator);
-defer dns_cache.deinit();
-
-dns_cache.default_ttl_ms = 300_000;    // 5 minutes for positive lookups
-dns_cache.negative_ttl_ms = 10_000;    // 10 seconds for failed lookups
-dns_cache.max_entries = 1000;          // Evict oldest when full
-```
-
-## Negative Caching
-
-Failed DNS lookups are cached for `negative_ttl_ms` (default 5 seconds) to prevent repeated hammering of invalid hostnames. The `DnsEntry.failed` field distinguishes positive from negative cache entries.
-
-## Eviction
-
-When `max_entries > 0`, the cache evicts the oldest entry before inserting a new one when the cache is full. Call `evictExpired()` periodically to clean up expired entries without waiting for lookups.
-
-## Thread Safety
-
-`DnsCache` uses a mutex to protect concurrent access. Multiple threads can safely call `resolve` on the same cache instance.
+* **Windows**: Direct native `ws2_32.GetAddrInfoW` API; requires no libc dependency.
+* **Linux / macOS**: Uses libc `getaddrinfo` when linked with libc; std.Io HostName lookup when freestanding.
+* **RFC 3484**: Both Windows and POSIX OS resolvers perform address sorting according to default address selection rules.

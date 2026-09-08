@@ -105,6 +105,8 @@
 | **Proxy Support** | Client-side HTTP forward proxy, SOCKS5h tunneling, and server-side reverse proxy middleware. |
 | **Structured Logging** | Zero-allocation level-filtered structured logger supporting custom sinks and terminal formatting. |
 | **Cross-Platform Sockets** | Robust non-blocking Windows socket handling with `WSAEWOULDBLOCK` retry, plus `MSG_NOSIGNAL` on POSIX. |
+| **Observability & Metrics** | Production-ready Prometheus text exposition (`/metrics`), live request/duration histograms, status counters, and zero-alloc snapshots. |
+| **File Watcher & Live Reload** | Event-driven directory watching (`next() ?WatchEvent`, `changeCount()`) with bounded event queues, cross-platform notifications, and hot/warm reload. |
 
 </details>
 
@@ -160,20 +162,20 @@ zig build -Dtarget=x86-windows
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Stable Release (v0.1.8)**
+**Latest Stable Release (v0.2.0)**
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz
+```
+
+**Previous Stable Release (v0.1.8)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.8.tar.gz
 ```
 
-**Previous Stable Release (v0.1.7)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.7.tar.gz
-```
-
 > [!WARNING]
-> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.1.8**.
+> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.0**.
 
 ### Method 2: Zig Fetch (Latest / v0.2.0 in development)
 
@@ -188,7 +190,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.8.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz",
         .hash = "...", // Run `zig fetch --save <url>` to generate the hash.
     },
 },
@@ -231,32 +233,28 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    // 1. Simple GET with options struct
-    var resp = try httpx.get(.{ .url = "https://httpbun.com/get" });
+    // 1. Primary unified fetch API (supports GET, POST, headers, typed JSON)
+    var resp = try httpx.fetch("https://httpbun.com/get", .{});
     defer resp.deinit();
-    std.debug.print("GET Status: {d}, Body: {s}\n", .{ resp.status, resp.body });
+    std.debug.print("GET Status: {d}, Body: {s}\n", .{ resp.status, resp.bytes() });
 
-    // 2. POST with JSON body
-    var post = try httpx.post(.{
-        .url = "https://httpbun.com/post",
-        .json = "{\"name\":\"Alice\"}",
+    // 2. POST with strongly typed Zig struct (serialized via std.json)
+    const CreateUser = struct { name: []const u8, email: []const u8 };
+    const User = struct { id: u64 = 1, name: []const u8, email: []const u8 };
+
+    var post = try httpx.fetch("https://httpbun.com/post", .{
+        .method = .POST,
+        .json = CreateUser{ .name = "Alice", .email = "alice@example.com" },
     });
     defer post.deinit();
 
-    // 3. DELETE request
+    // 3. Strongly typed response decoding
+    const user = try post.json(User);
+    std.debug.print("User: {s} <{s}>\n", .{ user.name, user.email });
+
+    // 4. Convenience verb shortcuts
     var del = try httpx.delete(.{ .url = "https://httpbun.com/delete" });
     defer del.deinit();
-
-    // 4. PATCH with struct or JSON string
-    var patch = try httpx.patch(.{
-        .url = "https://httpbun.com/patch",
-        .json = "{\"x\":1}",
-    });
-    defer patch.deinit();
-
-    // 5. HEAD request
-    var head = try httpx.head(.{ .url = "https://httpbun.com/get" });
-    defer head.deinit();
 }
 ```
 
@@ -271,33 +269,33 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Create client with full config (allocator owned at boundary)
-    var client = try httpx.Client.init(allocator, .{
-        .timeout_ms = 10_000,
-        .max_redirects = 5,
-        .max_retries = 3,
-        .retry_delay_ms = 500,
-        .retry_status_codes = &.{ 502, 503, 504 },
-        .dns_cache = .{ .enabled = true, .ttl_ms = 60_000 },
+    // Create client with full config (supports both snake_case and camelCase options)
+    var client = httpx.Client.init(allocator, io, .{
+        .timeoutMs = 10_000,
+        .followRedirects = true,
+        .maxRedirects = 5,
+        .maxRetries = 3,
+        .retryDelayMs = 500,
+        .retryStatusCodes = &.{ 502, 503, 504 },
+        .dnsCache = .{ .enable = true, .ttlMs = 60_000 },
     });
     defer client.deinit();
 
-    // GET request
-    var response = try client.get(.{ .url = "https://httpbun.com/get" });
+    // Unified fetch request (GET)
+    var response = try client.fetch("https://httpbun.com/get", .{});
     defer response.deinit();
 
-    // POST with JSON
-    var post = try client.post(.{
-        .url = "https://httpbun.com/post",
-        .json = "{\"name\":\"John\"}",
+    // Unified fetch request (POST with JSON)
+    var post = try client.fetch("https://httpbun.com/post", .{
+        .method = .POST,
+        .json = .{ .name = "John", .role = "engineer" },
     });
     defer post.deinit();
 
-
     // HTTPS with TLS options
-    var tls_resp = try client.get(.{
-        .url = "https://httpbun.com/get",
+    var tls_resp = try client.fetch("https://httpbun.com/get", .{
         .tls = .{ .verify = .none }, // dev only
     });
     defer tls_resp.deinit();
@@ -343,9 +341,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     const sample_url = "https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf";
@@ -375,30 +373,32 @@ pub fn main() !void {
 
     // 4. Resume partial download via HTTP Range: bytes=X- (clean non-reserved keyword name)
     const resumed_res = try client.download(sample_url, "downloads/sample.pdf", .{
-        .existing = .resume_download, // or .continue_partial
-        .max_retries = 3,
+        .existing = .resumePartial,
+        .maxRetries = 3,
     });
 
     // 5. Safe file updater with rollback backup
     const update_res = try client.updateFile(sample_url, "bin/app.bin", .{
-        .backup_existing = true,
-        .backup_suffix = ".bak",
+        .backupExisting = true,
+        .backupSuffix = ".bak",
     });
 
     // 6. Native FTP Download with progress
-    const ftp_res = try httpx.ftpDownload(allocator, .{
+    const ftp_res = try httpx.ftp.download(allocator, .{
         .host = "ftp.example.com",
-        .remote_path = "/pub/archive.tar.gz",
-        .destination_path = "downloads/",
+        .remotePath = "/pub/archive.tar.gz",
+        .destinationPath = "downloads/",
         .progress = .auto,
     });
 }
 ```
 
-### Parsing & Inspection (DOM Engine)
+### Parsing & Inspection (Internal Tree-sitter & DOM Engine)
 
-`httpx.zig` includes a comprehensive parsing and web resource inspection engine written natively in Zig:
+`httpx.zig` includes a comprehensive document parsing, DOM manipulation, and CSS selector inspection engine.
 
+> [!NOTE]
+> HTTPX uses `tree-sitter.zig` internally as its parsing and incremental parsing engine. Applications interact exclusively with HTTPX's public APIs (`httpx.Parser`, `response.html()`, `doc.select()`). Tree-sitter is strictly an internal implementation detail and never needs to be imported by application code.
 
 ```zig
 const std = @import("std");
@@ -458,8 +458,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 8080,
         .port_strategy = .incremental, // auto-increments port (8081, 8082, ...) if 8080 is busy
@@ -524,6 +525,57 @@ server.requestShutdown();
 server.stop();
 ```
 
+## Server Metrics & Prometheus Observability
+
+HTTPX servers feature dynamic Prometheus v0.0.4 text exposition and thread-safe snapshots:
+
+```zig
+// Mount dynamic Prometheus endpoint
+try server.metrics("/metrics");
+
+// Query point-in-time server snapshot (zero-allocation)
+const snap = server.snapshot();
+std.debug.print("Uptime: {d}ms, Requests: {d}, Errors: {d}, Error Rate: {d:.2}%\n", .{
+    snap.uptime_ms,
+    snap.requests_total,
+    snap.errors_total,
+    snap.errorRate() * 100.0,
+});
+
+// Query point-in-time metrics snapshot
+const m_snap = server.metricsSnapshot();
+std.debug.print("Avg Latency: {d:.3}ms\n", .{m_snap.averageLatencyMs()});
+```
+
+Visiting `/metrics` provides standard Prometheus metrics:
+- `http_requests_total{method="...",status="..."}`
+- `http_connections_active`
+- `http_request_duration_seconds_bucket{le="..."}`, `_sum`, `_count`
+- `http_request_size_bytes_total`, `http_response_size_bytes_total`
+
+## Live File Watcher & Reload Engine
+
+Monitor directory trees for development asset updates with a safe, bounded event queue:
+
+```zig
+var watcher = try httpx.static.Watcher.init(allocator, io, .{
+    .dir_path = "./public",
+    .poll_interval_ms = 50,
+});
+defer watcher.deinit();
+
+try watcher.start();
+
+// Drain detected file events
+while (watcher.next()) |event| {
+    std.debug.print("Changed: {s} (kind={s})\n", .{ event.path, @tagName(event.kind) });
+}
+
+// Inspect cumulative change count
+const count = watcher.changeCount();
+std.debug.print("Total changes: {d}\n", .{count});
+```
+
 ## TLS Listener Lifecycle
 
 ```zig
@@ -552,8 +604,8 @@ client.reset();
 Configure automatic retries for failed or retryable requests:
 
 ```zig
-var client = try httpx.Client.init(allocator, .{
-    .max_retries = 3,                // retry up to 3 times (4 total attempts)
+var client = httpx.Client.init(allocator, io, .{
+    .maxRetries = 3,                // retry up to 3 times (4 total attempts)
     .retry_delay_ms = 500,           // base delay between retries
     .retry_status_codes = &.{ 502, 503, 504 }, // status codes that trigger retry
 });
@@ -655,8 +707,21 @@ The `examples/` directory contains runnable examples demonstrating all features 
 - [`download_custom_progress`](examples/download_custom_progress.zig) - Custom progress tracking and observers
 - [`ftp_download`](examples/ftp_download.zig) - Direct FTP file download
 
-**Parsing & Inspection (Native DOM Engine):**
+**Parsing & Inspection (Internal Tree-sitter & DOM Engine):**
+- [`html_client`](examples/html_client.zig) - Client fetch and automatic `response.html()` parsing
+- [`html_select`](examples/html_select.zig) - CSS selector engine queries (`tag`, `.class`, `#id`, `[attr]`, combinators)
+- [`html_extract`](examples/html_extract.zig) - High-level extraction helpers (title, text, links, forms, images)
+- [`html_stream`](examples/html_stream.zig) - Streaming reader input parsing
+- [`html_file`](examples/html_file.zig) - HTML file parsing and node inspection
+- [`html_transform`](examples/html_transform.zig) - Structural mutation, attribute updating, and XSS-safe serialization
 - [`parse_html`](examples/parse_html.zig) - HTML DOM, CSS Selectors, RSS feeds, robots.txt, and sitemaps
+
+**File Watching, Static Assets & Live Reload:**
+- [`file_watcher`](examples/file_watcher.zig) - OS-native file monitoring (Windows ReadDirectoryChangesW, Linux inotify)
+- [`live_reload`](examples/live_reload.zig) - Live reload dev server with CSS hot reload vs HTML page reload
+- [`static_site`](examples/static_site.zig) - Static site directory mounting with ETag caching and conditional GET
+- [`spa_server`](examples/spa_server.zig) - Single Page Application server with client-side route fallback
+- [`development_server`](examples/development_server.zig) - Unified dev server combining watcher, live reload, and incremental parsing
 
 
 **Protocol:**
@@ -705,8 +770,15 @@ httpx.RequestOptions   // Per-request options
 client.close()         // Purge connection pool
 client.reset()         // Close + clear DNS cache
 
+// Client & Server Protocol Configuration (Config & RequestOptions)
+.httpVersion          // ?HttpVersion = null (.auto, .http10, .http11, .http2, .http3)
+.http10               // bool (HTTP/1.0 toggle)
+.http11               // bool (HTTP/1.1 toggle)
+.http2                 // bool (HTTP/2 toggle)
+.http3                 // bool (HTTP/3 toggle)
+
 // Client retry config (in Config)
-.max_retries           // Number of retry attempts (0 = disabled)
+.maxRetries           // Number of retry attempts (0 = disabled)
 .retry_delay_ms        // Delay between retries in ms (default 1000)
 .retry_status_codes    // Status codes that trigger retry (default 502, 503, 504)
 
@@ -720,9 +792,7 @@ httpx.head(.{ .url = "..." })
 httpx.options(.{ .url = "..." })
 httpx.trace(.{ .url = "..." })
 httpx.connect(.{ .url = "..." })
-httpx.fetch(.{ .url = "..." })
 httpx.request(.{ .method = .GET, .url = "..." })
-httpx.send(.{ .method = .GET, .url = "..." })
 httpx.getAll(&urls)
 httpx.requestAll(&reqs)
 
@@ -849,23 +919,40 @@ Run benchmarks:
 zig build bench
 ```
 
-Benchmark target: `x86_64-windows`, `ReleaseFast`.
+Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-09-07).
 
-| Benchmark | Avg (ns/op) | Throughput (ops/sec) |
-|-----------|-------------|----------------------|
-| headers_parse | 14669.17 | 68170 |
-| uri_parse | 32.03 | 31220048 |
-| status_lookup | 0.95 | 1054585337 |
-| method_lookup | 14.72 | 67941706 |
-| base64_encode | 4707.96 | 212406 |
-| base64_decode | 4766.07 | 209816 |
-| json_builder | 5066.82 | 197362 |
-| request_build | 25681.18 | 38939 |
-| response_builders | 25546.64 | 39144 |
-| executor_run_all | 198.41 | 5039997 |
-| proxy_request_build | 41799.37 | 23923 |
-| h2_frame_header | 1.00 | 1001883541 |
-| h3_varint_encode | 0.91 | 1100589475 |
+| Benchmark | Category | Avg Latency | Throughput | Target |
+| :--- | :--- | :---: | :---: | :---: |
+| `headers_parse` | Core Operations | 273.73 ns/op | **3,653,226 ops/sec** | `x86_64-windows` |
+| `uri_parse` | Core Operations | 34.36 ns/op | **29,105,048 ops/sec** | `x86_64-windows` |
+| `status_lookup` | Core Operations | 1.06 ns/op | **940,698,374 ops/sec** | `x86_64-windows` |
+| `method_lookup` | Core Operations | 10.25 ns/op | **97,558,596 ops/sec** | `x86_64-windows` |
+| `http1_request_head` | Core Operations | 23.81 ns/op | **42,002,864 ops/sec** | `x86_64-windows` |
+| `http1_header_block` | Core Operations | 224.34 ns/op | **4,457,450 ops/sec** | `x86_64-windows` |
+| `router_static_match` | Routing | 1.01 µs/op | **988,272 ops/sec** | `x86_64-windows` |
+| `router_param_match` | Routing | 1.10 µs/op | **912,934 ops/sec** | `x86_64-windows` |
+| `router_dispatch` | Routing | 1.10 µs/op | **911,344 ops/sec** | `x86_64-windows` |
+| `json_stringify` | Serialization | 293.18 ns/op | **3,410,848 ops/sec** | `x86_64-windows` |
+| `json_parse` | Serialization | 441.95 ns/op | **2,262,686 ops/sec** | `x86_64-windows` |
+| `basic_auth_encode` | Security | 54.86 ns/op | **18,227,253 ops/sec** | `x86_64-windows` |
+| `basic_auth_decode` | Security | 26.43 ns/op | **37,834,933 ops/sec** | `x86_64-windows` |
+| `bearer_token_parse` | Security | 8.17 ns/op | **122,465,274 ops/sec** | `x86_64-windows` |
+| `gzip_compress` | Compression | 68.65 µs/op | **14,566 ops/sec** | `x86_64-windows` |
+| `gzip_decompress` | Compression | 8.80 µs/op | **113,688 ops/sec** | `x86_64-windows` |
+| `deflate_compress` | Compression | 67.62 µs/op | **14,789 ops/sec** | `x86_64-windows` |
+| `deflate_decompress` | Compression | 8.11 µs/op | **123,295 ops/sec** | `x86_64-windows` |
+| `html_parse` | Parsing | 1.51 µs/op | **661,640 ops/sec** | `x86_64-windows` |
+| `worker_pool_submit` | Concurrency | 206.42 ns/op | **4,844,557 ops/sec** | `x86_64-windows` |
+| `concurrency_queue` | Concurrency | 68.82 ns/op | **14,529,667 ops/sec** | `x86_64-windows` |
+| `dns_cache_hit` | DNS | 68.99 ns/op | **14,494,140 ops/sec** | `x86_64-windows` |
+| `h2_frame_header` | Protocols | 1.19 ns/op | **840,703,500 ops/sec** | `x86_64-windows` |
+| `hpack_int_encode` | Protocols | 1.02 ns/op | **976,247,888 ops/sec** | `x86_64-windows` |
+| `hpack_int_decode` | Protocols | 1.53 ns/op | **653,906,765 ops/sec** | `x86_64-windows` |
+| `h3_varint_encode` | Protocols | 0.91 ns/op | **1,097,526,175 ops/sec** | `x86_64-windows` |
+| `h3_varint_decode` | Protocols | 1.15 ns/op | **869,920,750 ops/sec** | `x86_64-windows` |
+| `client_server_get` | Network | 376.20 µs/op | **2,658 req/sec** | `x86_64-windows` |
+
+See [docs/reference/benchmarks.md](docs/reference/benchmarks.md) for full methodology and detailed analysis.
 
 ## Contributing
 

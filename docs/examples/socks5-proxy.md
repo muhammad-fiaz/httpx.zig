@@ -5,8 +5,9 @@ Demonstrates routing HTTP client requests through a SOCKS5h proxy with remote DN
 ## Demo Program
 
 ```zig
+    const io = std.Io.Threaded.global_single_threaded.io();
 // Configure client with SOCKS5h proxy
-const client_config = httpx.ClientConfig.defaults()
+const client_config = .{}
     .withTimeouts(httpx.Timeouts.fast())
     .withRetryPolicy(httpx.RetryPolicy.noRetry())
     .withProxy(.{
@@ -17,7 +18,7 @@ const client_config = httpx.ClientConfig.defaults()
         .password = "proxypass",
     });
 
-var client = httpx.Client.initWithConfig(allocator, client_config);
+var client = httpx.Client.init(allocator, io, client_config);
 defer client.deinit();
 
 // Request through the SOCKS5h proxy

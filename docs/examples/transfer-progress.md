@@ -10,7 +10,7 @@ const httpx = @import("httpx");
 
 fn onProgress(p: httpx.Progress) void {
     if (p.percentage()) |pct| {
-        std.debug.print("Progress: {d:.1}% ({d}/{d} bytes)\n", .{ pct, p.bytes_transferred, p.total_bytes orelse 0 });
+        std.debug.print("Progress: {d:.1}% ({d}/{d} bytes)\n", .{ pct, p.bytes_transferred, p.totalBytes orelse 0 });
     } else {
         std.debug.print("Transferred: {d} bytes\n", .{p.bytes_transferred});
     }
@@ -23,7 +23,7 @@ pub fn main() !void {
 
     const p = httpx.Progress{
         .bytes_transferred = 500,
-        .total_bytes = 1000,
+        .totalBytes = 1000,
         .elapsed_ns = std.time.ns_per_s,
     };
     onProgress(p);

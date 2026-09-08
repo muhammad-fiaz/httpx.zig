@@ -4,65 +4,50 @@ Middleware functions execute before your route handlers. They can modify the req
 
 ## Using Middleware
 
-To add global middleware to the server, use `server.use()`.
+To add global middleware to the server, use `server.use()`. Middleware functions follow the signature `fn (*httpx.Context, httpx.router.NextFn) anyerror!httpx.Response`.
 
 ```zig
-// Add standard logger
-try server.use(httpx.middleware.logger());
+// Add standard CORS middleware
+try server.use(httpx.middleware.cors);
 
-// Add rate limiting
-try server.use(httpx.middleware.rateLimit(.{
-    .max_requests = 100,
-    .window_ms = 60_000,
-}));
+// Add security headers (Helmet)
+try server.use(httpx.middleware.helmet);
+
+// Add error recovery (500 fallback)
+try server.use(httpx.middleware.recovery);
 ```
-
-Logging is opt-in. Use `httpx.middleware.loggerWithConfig(.{ .log_fn = ... })` to send logs to a custom sink, or omit the logger middleware to disable request logging.
 
 ## Built-in Middleware
 
-`httpx.zig` includes:
+`httpx.zig` includes built-in middleware under the `httpx.middleware` namespace:
 
-- **Logger**: Logs request timing and status.
-- **CORS**: Configures Cross-Origin Resource Sharing headers.
-- **RateLimit**: Simple in-memory rate limiting (thread-safe with mutex).
-- **BasicAuth**: RFC 7617 Basic Authentication.
-- **Helmet**: Security headers (X-Content-Type-Options, X-Frame-Options, X-XSS-Protection, HSTS).
-- **Compression**: Response compression middleware (gzip, deflate, br, zstd) via `httpx.middleware.compression()`. Compresses responses larger than 1KB by default, preferring brotli > zstd > gzip > deflate.
-- **Timeout**: Application-level per-request timeout enforcement via `httpx.middleware.timeout(ms)`. Stores a deadline and returns 408 if exceeded.
-- **RequestId**: Injects `X-Request-ID`.
-- **BodyParser**: Validates Content-Length and body size against a maximum limit.
-- **CSRF**: Double-submit cookie pattern for state-changing requests (POST/PUT/PATCH/DELETE).
-- **Reverse Proxy**: Comptime and runtime reverse proxy with built-in SSRF protection (blocks private IPs).
-- **Health Check**: Liveness probe middleware for Kubernetes deployments.
-- **Readiness Probe**: Readiness probe middleware for Kubernetes deployments.
+- **`httpx.middleware.cors`**: Handles preflight `OPTIONS` requests (204 No Content) and injects CORS response headers.
+- **`httpx.middleware.helmet` / `httpx.middleware.securityHeaders`**: Defensive headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`).
+- **`httpx.middleware.recovery`**: Intercepts uncaught handler errors and returns safe HTTP 500 responses without crashing the connection loop.
+- **`httpx.middleware.logging`**: Non-blocking request pass-through and observability hooks.
+- **`httpx.RateLimiter`**: Multi-dimensional token bucket rate limiting (by IP, Bearer token, route, or custom key).
+- **`httpx.middleware.generateCsrfToken` / `verifyCsrfToken`**: Double-submit cookie CSRF validation.
 
 ## Writing Custom Middleware
 
-A middleware is simply a struct with a `handler` function. The handler receives the `Context` and a `next` function.
+A custom middleware is a function that receives the `*httpx.Context` and the `NextFn` callback:
 
 ```zig
-const MyMiddleware = struct {
-    fn handler(ctx: *httpx.Context, next: httpx.server.middleware.Next) !httpx.Response {
-        // 1. Pre-processing
-        if (ctx.header("X-Ban")) |_| {
-            return ctx.status(403).text("Banned");
-        }
-
-        // 2. Call next in chain
-        const response = try next(ctx);
-
-        // 3. Post-processing (optional)
-        // e.g., inspect response.status
-
-        return response;
+fn banCheckMiddleware(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response {
+    // 1. Pre-processing
+    if (ctx.header("X-Ban")) |_| {
+        return ctx.textStatus(403, "Forbidden");
     }
-};
 
-try server.use(.{ 
-    .name = "ban_check", 
-    .handler = MyMiddleware.handler 
-});
+    // 2. Call next in chain
+    var response = try next(ctx);
+
+    // 3. Post-processing (optional)
+    // Modify response or inspect response.status
+    return response;
+}
+
+try server.use(banCheckMiddleware);
 ```
 
 ## Compression Middleware

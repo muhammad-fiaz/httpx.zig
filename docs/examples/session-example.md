@@ -21,7 +21,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var store = httpx.SessionStore.init(allocator, .{
-        .ttl_ms = 60_000,
+        .ttlMs = 60_000,
         .cookie_name = "sid",
     });
     defer store.deinit();

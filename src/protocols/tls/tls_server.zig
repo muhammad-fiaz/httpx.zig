@@ -77,7 +77,7 @@ fn serveHttp1OverTls(
         var fields: [64]h1_parser.Field = undefined;
         const result = h1_parser.parseHeaderBlock(buf[0..total], head_end, &fields) catch break;
 
-        var keep_alive = h1_semantics.shouldKeepAlive(if (head.minor_version == 0) .http_1_0 else .http_1_1, fields[0..result.count]);
+        var keep_alive = h1_semantics.shouldKeepAlive(if (head.minor_version == 0) .http10 else .http11, fields[0..result.count]);
 
         var content_length: usize = 0;
         var transfer_chunked = false;
@@ -352,16 +352,7 @@ pub const TlsListener = struct {
     stop: std.atomic.Value(bool) = .init(false),
     in_accept: std.atomic.Value(bool) = .init(false),
 
-    pub fn init(allocator: Allocator, config: ListenerConfig) !TlsListener {
-        const threaded = try allocator.create(std.Io.Threaded);
-        errdefer allocator.destroy(threaded);
-        threaded.* = .init(allocator, .{});
-        const io = threaded.io();
-        const l = try tcp.Listener.bind(io, config.port);
-        return .{ .listener = l, .config = config, .allocator = allocator, .io = io, .owns_io = true, .io_threaded = threaded };
-    }
-
-    pub fn initWithIo(allocator: Allocator, io: std.Io, config: ListenerConfig) !TlsListener {
+    pub fn init(allocator: Allocator, io: std.Io, config: ListenerConfig) !TlsListener {
         const l = try tcp.Listener.bind(io, config.port);
         return .{ .listener = l, .config = config, .allocator = allocator, .io = io };
     }

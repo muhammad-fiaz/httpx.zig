@@ -14,13 +14,13 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var response = try client.get(.{
-        .url = "http://httpbun.com/bytes/4096",
-        .max_response_size = 8 * 1024 * 1024,
+    var response = try client.get("http://httpbun.com/bytes/4096", .{
+        .maxResponseSize = 8 * 1024 * 1024,
     });
     defer response.deinit();
 

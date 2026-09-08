@@ -17,10 +17,11 @@ const httpx = @import("httpx");
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
     const socket_path = "httpx-ipc.sock";
 
     // 1. Initialize and configure HTTP Server on Unix Socket
-    var server = httpx.Server.initWithConfig(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .unix_path = socket_path,
     });
     defer server.deinit();
@@ -36,7 +37,7 @@ pub fn main() !void {
     defer server.stop();
 
     // 2. Initialize HTTP Client with unix_socket_path
-    var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
+    var client = httpx.Client.init(allocator, io, .{}
         .withUnixSocket(socket_path)
     );
     defer client.deinit();

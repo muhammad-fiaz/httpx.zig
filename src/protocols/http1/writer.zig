@@ -370,7 +370,6 @@ test "request content-length and chunked selection" {
     const a = std.testing.allocator;
     const cl = try buildRequest(a, "POST", "/p", "hello", .{ .host = "x" });
     defer a.free(cl);
-    std.debug.print("\n", .{});
     try std.testing.expect(std.mem.indexOf(u8, cl, "Content-Length: 5\r\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, cl, "\r\n\r\nhello"));
 

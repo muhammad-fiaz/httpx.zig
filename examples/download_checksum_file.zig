@@ -5,8 +5,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     std.debug.print("==> Downloading with SHA256SUMS file parsing & verification...\n", .{});
@@ -30,16 +31,16 @@ pub fn main() !void {
             "downloads/",
             .{
                 .verify = .{
-                    .min_size = 100,
+                    .minSize = 100,
                 },
                 .progress = .auto,
-                .create_dirs = true,
+                .createDirs = true,
             },
         ) catch |err| {
             std.debug.print("Download handled: {s}\n", .{@errorName(err)});
             return;
         };
 
-        std.debug.print("Successfully downloaded to {s} ({d} bytes)\n", .{ dl_res.destination, dl_res.downloaded_bytes });
+        std.debug.print("Successfully downloaded to {s} ({d} bytes)\n", .{ dl_res.destination, dl_res.downloadedBytes });
     }
 }

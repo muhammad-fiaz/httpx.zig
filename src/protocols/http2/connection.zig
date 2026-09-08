@@ -811,7 +811,6 @@ test "session pair completes request/response exchange" {
     server.cbs = .{ .onHeaders = Capture.onHeaders };
 
     server.feed(client.outbound.items) catch |e| {
-        std.debug.print("server.feed err={any} closed={} outbound_len={d}\n", .{ e, server.closed, server.outbound.items.len });
         return e;
     };
     try std.testing.expect(Capture.done);

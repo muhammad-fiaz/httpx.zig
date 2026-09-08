@@ -24,6 +24,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Load client certificate and key (using the same dummy certs for demo)
     const client_cert = @embedFile("certs/server_ec.crt");
@@ -35,15 +36,15 @@ pub fn main() !void {
     std.debug.print("CA certificate:     {d} bytes\n", .{ca_cert.len});
 
     // Start local TLS server
-    var server = httpx.Server.initWithConfig(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .tls_enabled = true,
         .tls_cert_path = "examples/certs/server_ec.crt",
         .tls_key_path = "examples/certs/server_ec.key",
         .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
-        .http2_enabled = true,
-        .http3_enabled = false,
+        .http2 = true,
+        .http3 = false,
         .keep_alive = true,
     });
     defer server.deinit();

@@ -78,6 +78,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     std.debug.print("=== Server with Live File Watcher & Hot-Reload ===\n", .{});
 
@@ -86,7 +87,7 @@ pub fn main() !void {
     try httpx.static.files.writeFile(test_asset, "Initial static asset content");
 
     // 2. Initialize Watcher with reload callbacks
-    var file_watcher = try httpx.static.Watcher.init(allocator, .{
+    var file_watcher = try httpx.static.Watcher.init(allocator, io, .{
         .dir_path = ".",
         .poll_interval_ms = 50,
     });
@@ -97,16 +98,12 @@ pub fn main() !void {
     std.debug.print("[INFO] Background file watcher started for '{s}'\n", .{test_asset});
 
     // 3. Initialize server with colored lifecycle logging
-    var server = try httpx.Server.init(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .docs_enabled = false,
+        .enableDocs = false,
         .max_connections = 4,
-        .logging = .{
-            .enabled = true,
-            .color = .always,
-            .requests = true,
-        },
+        .logging = .{},
     });
     defer server.deinit();
 
@@ -127,43 +124,50 @@ pub fn main() !void {
     defer t.join();
 
     // 4. Verify client fetches HTML, CSS, JS, and JSON
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     // GET / (HTML)
     const url_root = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{port});
     defer allocator.free(url_root);
-    var res_html = try client.get(.{ .url = url_root });
+    var res_html = try client.get(url_root, .{});
     defer res_html.deinit();
     std.debug.print("[200 OK] GET / -> text/html (len={d})\n", .{res_html.body.len});
 
     // GET /style.css (CSS)
     const url_css = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/style.css", .{port});
     defer allocator.free(url_css);
-    var res_css = try client.get(.{ .url = url_css });
+    var res_css = try client.get(url_css, .{});
     defer res_css.deinit();
     std.debug.print("[200 OK] GET /style.css -> text/css\n", .{});
 
     // GET /app.js (JS)
     const url_js = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/app.js", .{port});
     defer allocator.free(url_js);
-    var res_js = try client.get(.{ .url = url_js });
+    var res_js = try client.get(url_js, .{});
     defer res_js.deinit();
     std.debug.print("[200 OK] GET /app.js -> text/javascript\n", .{});
 
     // GET /api/status (JSON)
     const url_api = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/api/status", .{port});
     defer allocator.free(url_api);
-    var res_json = try client.get(.{ .url = url_api });
+    var res_json = try client.get(url_api, .{});
     defer res_json.deinit();
     std.debug.print("[200 OK] GET /api/status -> {s}\n", .{res_json.body});
 
     // 5. Test Live Watcher File Update
     std.debug.print("[HOT RELOAD] Modifying static file '{s}'...\n", .{test_asset});
-    try httpx.static.files.writeFile(test_asset, "Updated asset content trigger");
+    try httpx.fs.writeFile(test_asset, "Updated asset content trigger");
 
     httpx.clock.sleepMillis(150);
-    const changes_detected = file_watcher.change_count.load(.acquire);
+    while (file_watcher.next()) |event| {
+        std.debug.print("[HOT RELOAD] Event: path='{s}', kind={s}, strategy={s}\n", .{
+            event.path,
+            @tagName(event.kind),
+            @tagName(event.strategy),
+        });
+    }
+    const changes_detected = file_watcher.changeCount();
     std.debug.print("[HOT RELOAD] Detected {d} change(s) - Triggered automatic reload!\n", .{changes_detected});
     std.debug.print("All endpoints and hot-reload verified successfully.\n", .{});
 }

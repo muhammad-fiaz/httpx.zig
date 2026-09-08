@@ -33,8 +33,10 @@ pub const IoContext = struct {
 /// Global shared I/O for convenience in examples and single-threaded use.
 /// Lazily initialized on first use. Not thread-safe for init — call `globalInit`
 /// once from the main thread before spawning workers.
+const sync = @import("sync.zig");
+
 var global_state: ?IoContext = null;
-var global_mutex: std.Thread.Mutex = .{};
+var global_mutex: sync.Spinlock = .{};
 
 pub fn globalInit(allocator: Allocator) !std.Io {
     global_mutex.lock();
@@ -59,4 +61,19 @@ pub fn globalIo() ?std.Io {
     defer global_mutex.unlock();
     if (global_state) |s| return s.io;
     return null;
+}
+
+test "IoContext lifecycle" {
+    const a = std.testing.allocator;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+    _ = ctx.io;
+}
+
+test "globalIo lifecycle" {
+    const a = std.testing.allocator;
+    _ = try globalInit(a);
+    try std.testing.expect(globalIo() != null);
+    globalDeinit();
+    try std.testing.expect(globalIo() == null);
 }

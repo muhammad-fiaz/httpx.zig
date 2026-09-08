@@ -29,15 +29,15 @@ pub const LookupFn = *const fn (
 
 pub const Config = struct {
     /// Positive-answer lifetime.
-    ttl_ms: i64 = 60_000,
+    ttlMs: i64 = 60_000,
     /// Failed-resolution lifetime (short so transient failures retry soon).
-    negative_ttl_ms: i64 = 5_000,
-    max_entries: u32 = 1024,
+    negativeTtlMs: i64 = 5_000,
+    maxEntries: u32 = 1024,
 };
 
 const Entry = struct {
     addrs: []const []const u8,
-    expires_at: i64,
+    expiresAt: i64,
     failed: bool,
 };
 
@@ -45,7 +45,7 @@ const Inflight = struct {
     sem: sync.Semaphore,
     failed: bool = false,
     addrs: []const []const u8 = &.{},
-    /// The lookup_fn payload itself; node OWNS it. Freed by whoever drops
+    /// The lookupFn payload itself; node OWNS it. Freed by whoever drops
     /// the final reference — safe because all readers hold a reference
     /// while cloning.
     owned: []const []const u8 = &.{},
@@ -59,28 +59,28 @@ pub const Cache = struct {
     mu: sync.Spinlock = .{},
     entries: std.StringHashMap(Entry),
     inflight: std.StringHashMap(*Inflight),
-    lookup_fn: LookupFn,
-    lookup_ctx: ?*anyopaque,
+    lookupFn: LookupFn,
+    lookupCtx: ?*anyopaque,
 
     // Observability
     hits: std.atomic.Value(u64) = .init(0),
     misses: std.atomic.Value(u64) = .init(0),
-    lookups_started: std.atomic.Value(u64) = .init(0),
-    lookups_coalesced: std.atomic.Value(u64) = .init(0),
+    lookupsStarted: std.atomic.Value(u64) = .init(0),
+    lookupsCoalesced: std.atomic.Value(u64) = .init(0),
 
     pub fn init(
         allocator: Allocator,
         cfg: Config,
-        lookup_fn: LookupFn,
-        lookup_ctx: ?*anyopaque,
+        lookupFn: LookupFn,
+        lookupCtx: ?*anyopaque,
     ) Cache {
         return .{
             .allocator = allocator,
             .cfg = cfg,
             .entries = std.StringHashMap(Entry).init(allocator),
             .inflight = std.StringHashMap(*Inflight).init(allocator),
-            .lookup_fn = lookup_fn,
-            .lookup_ctx = lookup_ctx,
+            .lookupFn = lookupFn,
+            .lookupCtx = lookupCtx,
         };
     }
 
@@ -112,7 +112,7 @@ pub const Cache = struct {
 
         self.mu.lock();
         if (self.entries.get(name)) |e| {
-            if (now < e.expires_at) {
+            if (now < e.expiresAt) {
                 _ = self.hits.fetchAdd(1, .monotonic);
                 if (e.failed) {
                     self.mu.unlock();
@@ -129,7 +129,7 @@ pub const Cache = struct {
         }
         if (self.inflight.get(name)) |node| {
             node.refs += 1;
-            _ = self.lookups_coalesced.fetchAdd(1, .monotonic);
+            _ = self.lookupsCoalesced.fetchAdd(1, .monotonic);
             self.mu.unlock();
 
             node.sem.wait();
@@ -167,12 +167,12 @@ pub const Cache = struct {
             self.mu.unlock();
             return error.OutOfMemory;
         };
-        _ = self.lookups_started.fetchAdd(1, .monotonic);
+        _ = self.lookupsStarted.fetchAdd(1, .monotonic);
         _ = self.misses.fetchAdd(1, .monotonic);
         self.mu.unlock();
 
         // Network I/O strictly outside the lock.
-        const outcome = self.lookup_fn(self.lookup_ctx, io, name, self.allocator);
+        const outcome = self.lookupFn(self.lookupCtx, io, name, self.allocator);
         var fresh: []const []const u8 = &.{};
         var failed_err: ?LookupError = null;
         if (outcome) |ok_addrs| {
@@ -190,10 +190,10 @@ pub const Cache = struct {
             _ = self.inflight.remove(name_copy);
             const cloned = self.cloneAddrs(fresh) catch null;
             if (cloned) |cl| {
-                if (self.entries.count() >= self.cfg.max_entries) self.evictOneLocked();
+                if (self.entries.count() >= self.cfg.maxEntries) self.evictOneLocked();
                 self.entries.put(name_copy, .{
                     .addrs = cl,
-                    .expires_at = clock.millisNow() + self.cfg.ttl_ms,
+                    .expiresAt = clock.millisNow() + self.cfg.ttlMs,
                     .failed = false,
                 }) catch {
                     self.freeAddrs(cl);
@@ -235,10 +235,10 @@ pub const Cache = struct {
     }
 
     fn putNegativeLocked(self: *Cache, name_owned: []u8) void {
-        if (self.entries.count() >= self.cfg.max_entries) self.evictOneLocked();
+        if (self.entries.count() >= self.cfg.maxEntries) self.evictOneLocked();
         self.entries.put(name_owned, .{
             .addrs = &.{},
-            .expires_at = clock.millisNow() + self.cfg.negative_ttl_ms,
+            .expiresAt = clock.millisNow() + self.cfg.negativeTtlMs,
             .failed = true,
         }) catch {
             self.allocator.free(name_owned);
@@ -279,8 +279,8 @@ pub const Cache = struct {
         return .{
             .hits = self.hits.load(.monotonic),
             .misses = self.misses.load(.monotonic),
-            .started = self.lookups_started.load(.monotonic),
-            .coalesced = self.lookups_coalesced.load(.monotonic),
+            .started = self.lookupsStarted.load(.monotonic),
+            .coalesced = self.lookupsCoalesced.load(.monotonic),
         };
     }
 
@@ -296,13 +296,13 @@ pub const Cache = struct {
 
 const FakeResolver = struct {
     calls: std.atomic.Value(u32) = .init(0),
-    delay_loops: usize = 0,
+    delayLoops: usize = 0,
 
     fn lookup(ctx: ?*anyopaque, _: std.Io, name: []const u8, a: Allocator) LookupError![]const []const u8 {
         const self: *FakeResolver = @ptrCast(@alignCast(ctx.?));
         _ = self.calls.fetchAdd(1, .monotonic);
         var spins: usize = 0;
-        while (spins < self.delay_loops) : (spins += 1) std.atomic.spinLoopHint();
+        while (spins < self.delayLoops) : (spins += 1) std.atomic.spinLoopHint();
         if (std.mem.eql(u8, name, "bad.example")) return error.DnsFailed;
         const out = try a.alloc([]const u8, 1);
         errdefer a.free(out);
@@ -341,7 +341,7 @@ test "negative answers are cached briefly" {
 }
 
 test "concurrent resolvers coalesce into one lookup" {
-    var fake = FakeResolver{ .delay_loops = 50000 };
+    var fake = FakeResolver{ .delayLoops = 50000 };
     var c = Cache.init(std.testing.allocator, .{}, FakeResolver.lookup, &fake);
     defer c.deinit();
 

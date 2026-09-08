@@ -42,8 +42,9 @@ HTTP/2 support is validated across Linux, Windows, and macOS targets:
 Enable HTTP/2 in `ClientConfig`:
 
 ```zig
-var client = httpx.Client.initWithConfig(allocator, .{
-    .http2_enabled = true,
+    const io = std.Io.Threaded.global_single_threaded.io();
+var client = httpx.Client.init(allocator, io, .{
+    .http2 = true,
     .http2_settings = .{
         .max_frame_size = 16 * 1024,
         .max_concurrent_streams = 100,
@@ -58,7 +59,7 @@ std.debug.print("version={s} status={d}\n", .{ res.version.toString(), res.statu
 ```
 
 ::: tip TLS & ALPN Protocol Negotiation
-httpx.zig natively performs ALPN protocol negotiation via a post-handshake HTTP/2 preface probe on TLS connections when `http2_enabled = true` or when using `TlsConfig.withH2()`. If the server supports HTTP/2, the connection uses HTTP/2; otherwise it cleanly falls back to HTTP/1.1 without dropping data.
+httpx.zig natively performs ALPN protocol negotiation via a post-handshake HTTP/2 preface probe on TLS connections when `http2 = true`. If the server supports HTTP/2, the connection uses HTTP/2; otherwise it cleanly falls back to HTTP/1.1 without dropping data.
 :::
 
 ## High-level Server Usage
@@ -66,10 +67,11 @@ httpx.zig natively performs ALPN protocol negotiation via a post-handshake HTTP/
 Enable HTTP/2 in `ServerConfig`:
 
 ```zig
-var server = httpx.Server.initWithConfig(allocator, .{
+    const io = std.Io.Threaded.global_single_threaded.io();
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
-    .http2_enabled = true,
+    .http2 = true,
 });
 defer server.deinit();
 

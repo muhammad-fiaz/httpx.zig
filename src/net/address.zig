@@ -108,8 +108,16 @@ pub const Address = struct {
         return parseIp6Text(text);
     }
 
+    /// Standard Zig format method: enables `{f}` formatting in Zig 0.16.0.
+    /// Example: `std.debug.print("{f}\n", .{addr})` or `std.fmt.allocPrint(a, "{f}", .{addr})`.
+    pub fn format(self: Address, writer: anytype) !void {
+        var buf: [64]u8 = undefined;
+        const s = self.formatBuf(&buf);
+        try writer.writeAll(s);
+    }
+
     /// Formats into buf per RFC 5952. Returns formatted slice.
-    pub fn format(self: *const Address, buf: []u8) []const u8 {
+    pub fn formatBuf(self: *const Address, buf: []u8) []const u8 {
         switch (self.family) {
             .ip4 => return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{
                 self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
@@ -171,6 +179,27 @@ pub const Address = struct {
                 return buf[0..pos];
             },
         }
+    }
+
+    /// Formats the address and port (e.g. "127.0.0.1:80" or "[::1]:443") into buf.
+    pub fn formatWithPort(self: *const Address, buf: []u8) []const u8 {
+        switch (self.family) {
+            .ip4 => {
+                var ip_buf: [32]u8 = undefined;
+                const ip_s = self.formatBuf(&ip_buf);
+                return std.fmt.bufPrint(buf, "{s}:{d}", .{ ip_s, self.port }) catch buf[0..0];
+            },
+            .ip6 => {
+                var ip_buf: [64]u8 = undefined;
+                const ip_s = self.formatBuf(&ip_buf);
+                return std.fmt.bufPrint(buf, "[{s}]:{d}", .{ ip_s, self.port }) catch buf[0..0];
+            },
+        }
+    }
+
+    /// Allocates and formats the address as an owned string.
+    pub fn toString(self: Address, allocator: Allocator) ![]u8 {
+        return std.fmt.allocPrint(allocator, "{f}", .{self});
     }
 
     /// Converts to Zig std IpAddress for socket operations.
@@ -314,7 +343,12 @@ test "parse ipv4 dotted quad" {
     const a = addrAny.parseIp("192.168.1.100") catch unreachable;
     try std.testing.expectEqual(Family.ip4, a.family);
     try std.testing.expectEqualSlices(u8, &.{ 192, 168, 1, 100 }, a.bytes[0..4]);
-    try std.testing.expectEqualStrings("192.168.1.100", a.format(&buf));
+    try std.testing.expectEqualStrings("192.168.1.100", a.formatBuf(&buf));
+
+    // Test native std.fmt printing
+    const str = try a.toString(std.testing.allocator);
+    defer std.testing.allocator.free(str);
+    try std.testing.expectEqualStrings("192.168.1.100", str);
 }
 
 test "reject malformed ipv4" {
@@ -330,7 +364,11 @@ test "parse full-form ipv6" {
     var buf: [64]u8 = undefined;
     const a = addrAny.parseIp("2001:0db8:0000:0000:0000:0000:0000:0001") catch unreachable;
     try std.testing.expectEqual(Family.ip6, a.family);
-    try std.testing.expectEqualStrings("2001:db8::1", a.format(&buf));
+    try std.testing.expectEqualStrings("2001:db8::1", a.formatBuf(&buf));
+
+    const str = try a.toString(std.testing.allocator);
+    defer std.testing.allocator.free(str);
+    try std.testing.expectEqualStrings("2001:db8::1", str);
 }
 
 test "parse compressed ipv6" {
@@ -342,25 +380,28 @@ test "parse compressed ipv6" {
     for (cases) |c| {
         const a = try addrAny.parseIp(c);
         try std.testing.expectEqual(Family.ip6, a.family);
-        _ = a.format(&buf);
+        _ = a.formatBuf(&buf);
     }
 }
 
 test "ipv6 loopback roundtrip" {
     var buf: [64]u8 = undefined;
     const a = Address.loopback6(443);
-    try std.testing.expectEqualStrings("::1", a.format(&buf));
+    try std.testing.expectEqualStrings("::1", a.formatBuf(&buf));
+
+    var port_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("[::1]:443", a.formatWithPort(&port_buf));
 }
 
 test "v4 mapped ipv6" {
     var buf: [64]u8 = undefined;
     const a = addrAny.parseIp("::ffff:192.168.1.1") catch unreachable;
     try std.testing.expect(a.isV4Mapped());
-    try std.testing.expectEqualStrings("::ffff:192.168.1.1", a.format(&buf));
+    try std.testing.expectEqualStrings("::ffff:192.168.1.1", a.formatBuf(&buf));
 
     const as_v4 = a.toV4MappedView().?;
     try std.testing.expectEqual(Family.ip4, as_v4.family);
-    try std.testing.expectEqualStrings("192.168.1.1", as_v4.format(&buf));
+    try std.testing.expectEqualStrings("192.168.1.1", as_v4.formatBuf(&buf));
 }
 
 test "host:port splitting" {

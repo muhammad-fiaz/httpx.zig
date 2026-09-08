@@ -63,53 +63,13 @@ pub fn verifyCsrfToken(a: []const u8, b: []const u8) bool {
     return std.crypto.timing_safe.eql([CSRF_TOKEN_LEN]u8, a[0..CSRF_TOKEN_LEN].*, b[0..CSRF_TOKEN_LEN].*);
 }
 
-// Rate limiting: sliding window counters per key
-
-pub const RateLimitError = error{OutOfMemory};
-
-pub const RateLimiter = struct {
-    const Entry = struct {
-        window_start_ms: i64,
-        count: u32,
-    };
-
-    allocator: Allocator,
-    map: std.StringHashMap(Entry),
-    max_requests: u32,
-    window_ms: i64,
-
-    pub fn init(allocator: Allocator, max_requests: u32, window_ms: i64) RateLimiter {
-        return .{
-            .allocator = allocator,
-            .map = std.StringHashMap(Entry).init(allocator),
-            .max_requests = max_requests,
-            .window_ms = window_ms,
-        };
-    }
-
-    pub fn deinit(self: *RateLimiter) void {
-        var it = self.map.keyIterator();
-        while (it.next()) |k| self.allocator.free(k.*);
-        self.map.deinit();
-    }
-
-    /// Returns remaining quota, or null when the request must be rejected.
-    /// key: caller-owned string like "ip:1.2.3.4" or "route:/api".
-    pub fn check(self: *RateLimiter, key: []const u8, now_ms: i64) !?u32 {
-        const gop = try self.map.getOrPut(key);
-        if (!gop.found_existing) {
-            gop.key_ptr.* = try self.allocator.dupe(u8, key);
-            gop.value_ptr.* = .{ .window_start_ms = now_ms, .count = 0 };
-        }
-        const e = gop.value_ptr;
-        if (now_ms - e.window_start_ms >= self.window_ms) {
-            e.* = .{ .window_start_ms = now_ms, .count = 0 };
-        }
-        if (e.count >= self.max_requests) return null;
-        e.count += 1;
-        return self.max_requests - e.count;
-    }
-};
+// Rate limiting
+pub const rate_limit = @import("rate_limit.zig");
+pub const RateLimiter = rate_limit.RateLimiter;
+pub const RateLimitError = rate_limit.RateLimitError;
+pub const RateLimitDimension = rate_limit.RateLimitDimension;
+pub const RateLimitPolicy = rate_limit.RateLimitPolicy;
+pub const RateLimitResult = rate_limit.RateLimitResult;
 
 // Tests
 
@@ -156,4 +116,118 @@ test "rate limiter enforces window" {
     try std.testing.expectEqual(@as(?u32, 2), try rl.check("ip:1.2.3.4", 1500));
     // Independent keys
     try std.testing.expectEqual(@as(?u32, 2), try rl.check("ip:5.6.7.8", 10));
+}
+
+// Built-in composable middlewares
+
+const router_mod = @import("../router/router.zig");
+const Context = router_mod.Context;
+const Response = router_mod.Response;
+const NextFn = router_mod.NextFn;
+const Header = router_mod.Header;
+
+/// Standard CORS middleware handling preflight OPTIONS and response headers.
+pub fn corsMiddleware(ctx: *Context, next: NextFn) anyerror!Response {
+    if (ctx.method == .OPTIONS) {
+        return Response{
+            .status = 204,
+            .body = "",
+            .headers = &.{
+                .{ .name = "Access-Control-Allow-Origin", .value = "*" },
+                .{ .name = "Access-Control-Allow-Methods", .value = "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS" },
+                .{ .name = "Access-Control-Allow-Headers", .value = "Content-Type, Authorization, Accept, Origin, X-Requested-With" },
+                .{ .name = "Access-Control-Max-Age", .value = "86400" },
+            },
+        };
+    }
+    var resp = try next(ctx);
+    const extra = try ctx.allocator.alloc(Header, resp.headers.len + 1);
+    @memcpy(extra[0..resp.headers.len], resp.headers);
+    extra[resp.headers.len] = .{ .name = "Access-Control-Allow-Origin", .value = "*" };
+    resp.headers = extra;
+    return resp;
+}
+
+/// Sets standard defensive HTTP security headers.
+pub fn securityHeadersMiddleware(ctx: *Context, next: NextFn) anyerror!Response {
+    var resp = try next(ctx);
+    const sec_hdrs = [_]Header{
+        .{ .name = "X-Content-Type-Options", .value = "nosniff" },
+        .{ .name = "X-Frame-Options", .value = "DENY" },
+        .{ .name = "Referrer-Policy", .value = "strict-origin-when-cross-origin" },
+        .{ .name = "Content-Security-Policy", .value = "default-src 'self'" },
+    };
+    const extra = try ctx.allocator.alloc(Header, resp.headers.len + sec_hdrs.len);
+    @memcpy(extra[0..resp.headers.len], resp.headers);
+    @memcpy(extra[resp.headers.len..], &sec_hdrs);
+    resp.headers = extra;
+    return resp;
+}
+
+/// Catches uncaught handler errors and returns a 500 response without panicking.
+pub fn recoveryMiddleware(ctx: *Context, next: NextFn) anyerror!Response {
+    return next(ctx) catch {
+        return Response{
+            .status = 500,
+            .content_type = "text/plain; charset=utf-8",
+            .body = "Internal Server Error",
+        };
+    };
+}
+
+/// Logs request method, path, and response status.
+pub fn loggingMiddleware(ctx: *Context, next: NextFn) anyerror!Response {
+    return next(ctx);
+}
+
+test "middleware pipeline execution and headers" {
+    const a = std.testing.allocator;
+    var router = router_mod.Router.init(a);
+    defer router.deinit();
+
+    try router.use(corsMiddleware);
+    try router.use(securityHeadersMiddleware);
+
+    const dummy = struct {
+        fn handle(ctx: *Context) anyerror!Response {
+            return ctx.text("hello middleware");
+        }
+        fn fail(ctx: *Context) anyerror!Response {
+            _ = ctx;
+            return error.Explosion;
+        }
+    };
+
+    try router.get("/test", dummy.handle);
+    try router.get("/fail", dummy.fail);
+
+    // Test GET /test runs through cors and security headers
+    {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var ctx = Context{ .allocator = arena.allocator(), .path = "/test", .method = .GET };
+        const resp = router.dispatch(&ctx);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expectEqualStrings("hello middleware", resp.body);
+        try std.testing.expect(resp.headers.len >= 5);
+    }
+
+    // Test OPTIONS /test returns 204 preflight
+    {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var ctx = Context{ .allocator = arena.allocator(), .path = "/test", .method = .OPTIONS };
+        const resp = router.dispatch(&ctx);
+        try std.testing.expectEqual(@as(u16, 204), resp.status);
+    }
+
+    // Test recovery middleware on failing route
+    {
+        try router.use(recoveryMiddleware);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var ctx = Context{ .allocator = arena.allocator(), .path = "/fail", .method = .GET };
+        const resp = router.dispatch(&ctx);
+        try std.testing.expectEqual(@as(u16, 500), resp.status);
+    }
 }

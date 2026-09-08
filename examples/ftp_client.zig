@@ -5,7 +5,7 @@ pub fn main() !void {
     std.debug.print("=== HTTPX Native FTP Client ===\n", .{});
 
     // 1. Configure FTP options
-    const ftp_opts: httpx.ftp.Options = .{
+    const ftpOpts: httpx.ftp.Options = .{
         .host = "test.rebex.net",
         .port = 21,
         .user = "demo",
@@ -13,19 +13,10 @@ pub fn main() !void {
         .secure = false, // Set to true for explicit FTPS
     };
 
-    std.debug.print("1. FTP client configuration: {s}:{d}\n", .{ ftp_opts.host, ftp_opts.port });
+    std.debug.print("1. FTP client configuration: {s}:{d}\n", .{ ftpOpts.host, ftpOpts.port });
 
-    // 2. Demonstrate reply parsing
-    const sample_reply = "220-Welcome to Rebex FTP Server\r\n220 Service ready for new user.\r\n";
-    if (httpx.ftp.parseReplyAt(sample_reply, 0)) |parsed| {
-        std.debug.print("2. Parsed server banner: code={d}, message='{s}'\n", .{
-            parsed.reply.code,
-            parsed.reply.text,
-        });
-    }
-
-    // 3. Connect via TCP (zero-config, no allocator required)
-    var client = httpx.ftp.connect(ftp_opts) catch |err| {
+    // 2. Connect via TCP (zero-config, no allocator required)
+    var client = httpx.ftp.Client.connect(ftpOpts) catch |err| {
         std.debug.print("3. FTP connection failed: {s}\n", .{@errorName(err)});
         std.debug.print("   Skipping network tests (server may be unreachable).\n", .{});
         return;
@@ -41,12 +32,11 @@ pub fn main() !void {
     };
     std.debug.print("4. Login successful\n", .{});
 
-    // 5. List files
+    // 5. List files (result lifetime is managed automatically by Client until next operation or client.deinit)
     const files = client.list("/") catch |err| {
         std.debug.print("5. List files failed: {s}\n", .{@errorName(err)});
         return;
     };
-    defer client.free(files);
     std.debug.print("5. File listing:\n{s}\n", .{files});
 
     std.debug.print("FTP client demonstration completed.\n", .{});

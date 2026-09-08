@@ -1,40 +1,112 @@
-# DNS Resolution
+# DNS Resolution Example
 
-Demonstrates DNS helpers: IP address detection, `host:port` parsing, hostname resolution, and TTL-based DNS caching.
+## What it Demonstrates
 
-## Demo Program
+Hostname resolution using the normal HTTPX client (`httpx.Client`).
+
+A normal HTTPX user does not need to understand low-level resolver construction, allocator ownership, internal DNS wire packets, or raw address buffers merely to resolve a hostname. The reusable client initializes its resolver and thread-safe cache once and manages resolution internally.
+
+## Basic Example
+
+The standard way to resolve a hostname is via `client.resolve(host, port, .{})`:
 
 ```zig
-// Check if a string is an IP address
-httpx.isIpAddress("127.0.0.1");       // true
-httpx.isIp4Address("example.com");    // false
-httpx.isIp6Address("::1");            // true
+const std = @import("std");
+const httpx = @import("httpx");
 
-// Parse "host:port" strings
-const parsed = httpx.parseHostAndPort("127.0.0.1:8080", 0);
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-// Resolve a single address
-const address = httpx.resolveAddress(allocator, "127.0.0.1", 80);
+    // Initialize client once
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
 
-// Resolve all candidate addresses
-const all_addrs = httpx.resolveAllAddresses(allocator, "127.0.0.1", 443);
+    // Resolve hostname to candidate addresses
+    var addresses = try client.resolve("httpbun.com", 443, .{});
+    defer addresses.deinit();
 
-// DNS cache with TTL-based expiration
-var cache = httpx.dns.DnsCache.init(allocator);
-const cached = try cache.resolve("127.0.0.1", 80);
+    // Iterate through returned addresses
+    for (addresses.items) |address| {
+        std.debug.print("Address: {f}:{d} (family: {s})\n", .{
+            address,
+            address.port,
+            @tagName(address.family),
+        });
+    }
+}
 ```
 
-## Run
+## IPv4 and IPv6 Selection
 
+By default, resolution returns dual-stack addresses in system order. You can restrict resolution to IPv4 or IPv6 via `ResolveOptions`:
+
+```zig
+// Force IPv4 only
+var v4 = try client.resolve("httpbun.com", 443, .{
+    .family = .ipv4,
+});
+defer v4.deinit();
+
+// Force IPv6 only
+var v6 = try client.resolve("httpbun.com", 443, .{
+    .family = .ipv6,
+});
+defer v6.deinit();
 ```
-zig build run-all-dns_example
+
+## URL Resolution
+
+You can also resolve directly from a full URL string:
+
+```zig
+var addrs = try client.resolveUrl("https://httpbun.com/get", .{});
+defer addrs.deinit();
 ```
 
-## Checklist
+The client automatically extracts the hostname and default port (80 for HTTP, 443 for HTTPS).
 
-- [x] `isIpAddress` correctly identifies IPv4, IPv6, and hostnames
-- [x] `parseHostAndPort` splits "host:port" and "[::1]:port" correctly
-- [x] `resolveAddress` returns a single `Address`
-- [x] `resolveAllAddresses` returns all candidate addresses
-- [x] `DnsCache` returns the same result on repeated lookups
-- [x] Convenience function summary prints at the end
+## DNS Cache
+
+The client caches DNS results in memory with positive and negative TTL:
+
+```zig
+var client = httpx.Client.init(allocator, io, .{
+    .dnsCache = .{
+        .enable = true,
+        .ttlMs = 60_000,          // Positive cache: 60 seconds
+        .negativeTtlMs = 5_000,  // Negative cache: 5 seconds
+        .maxEntries = 1024,       // Bounded cache capacity
+    },
+});
+defer client.deinit();
+```
+
+To bypass the cache for a single query:
+
+```zig
+var fresh = try client.resolve("httpbun.com", 443, .{
+    .use_cache = false,
+});
+defer fresh.deinit();
+```
+
+## Proxy and SOCKS5H Remote Resolution
+
+When communicating through proxies:
+* **Direct connection**: DNS is resolved locally via the client's resolver.
+* **HTTP Proxy**: The client connects to the proxy; HTTPS tunnels use HTTP `CONNECT` where the proxy resolves the destination.
+* **SOCKS5** (`socks5://`): Hostnames are resolved locally before connecting to the SOCKS proxy.
+* **SOCKS5H** (`socks5h://`): Hostnames are **not** resolved locally; the unresolved domain name is sent to the proxy server to resolve remotely.
+
+See the [Proxy Protocol Documentation](/protocols/proxies) and [SOCKS5H Guide](/protocols/socks5h) for details.
+
+## Related Resources
+
+* [API: Client](/api/client)
+* [API: DNS](/api/dns)
+* [API: Address](/api/net)
+* [Guide: DNS](/guide/dns)
+* [Protocol: DNS](/protocols/dns)

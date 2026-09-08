@@ -23,9 +23,9 @@ const DownloadObserver = struct {
             @tagName(info.state),
             reset,
             pct,
-            info.downloaded_bytes,
-            info.speed_bps / 1024.0,
-            info.eta_seconds,
+            info.downloadedBytes,
+            info.speedBps / 1024.0,
+            info.etaSeconds,
         });
     }
 };
@@ -34,8 +34,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     var observer = DownloadObserver{
@@ -51,9 +52,9 @@ pub fn main() !void {
         "downloads/observed_download.bin",
         .{
             .progress = .custom,
-            .on_progress = DownloadObserver.onProgress,
-            .user_data = &observer,
-            .create_dirs = true,
+            .onProgress = DownloadObserver.onProgress,
+            .userData = &observer,
+            .createDirs = true,
         },
     ) catch |err| {
         std.debug.print("Download error handled: {s}\n", .{@errorName(err)});
@@ -81,7 +82,7 @@ pub fn main() !void {
         "downloads/invalid.bin",
         .{
             .progress = .quiet,
-            .max_retries = 0,
+            .maxRetries = 0,
         },
     ) catch |err| {
         std.debug.print("Correctly caught network/URL error: {s}\n", .{

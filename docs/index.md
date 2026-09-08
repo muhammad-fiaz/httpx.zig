@@ -40,70 +40,74 @@ features:
 
 ## Latest Benchmark Snapshot
 
-Benchmark target: `x86_64-windows`, `ReleaseFast`.
+Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-09-07).
 
-| Benchmark | Avg (ns/op) | Throughput (ops/sec) |
-|-----------|-------------|----------------------|
-| headers_parse | 14669.17 | 68170 |
-| uri_parse | 32.03 | 31220048 |
-| status_lookup | 0.95 | 1054585337 |
-| method_lookup | 14.72 | 67941706 |
-| base64_encode | 4707.96 | 212406 |
-| base64_decode | 4766.07 | 209816 |
-| json_builder | 5066.82 | 197362 |
-| request_build | 25681.18 | 38939 |
-| response_builders | 25546.64 | 39144 |
-| executor_run_all | 198.41 | 5039997 |
-| proxy_request_build | 41799.37 | 23923 |
-| h2_frame_header | 1.00 | 1001883541 |
-| h3_varint_encode | 0.91 | 1100589475 |
+| Benchmark | Category | Avg Latency | Throughput | Target |
+| :--- | :--- | :---: | :---: | :---: |
+| `headers_parse` | Core Operations | 273.73 ns/op | **3,653,226 ops/sec** | `x86_64-windows` |
+| `uri_parse` | Core Operations | 34.36 ns/op | **29,105,048 ops/sec** | `x86_64-windows` |
+| `status_lookup` | Core Operations | 1.06 ns/op | **940,698,374 ops/sec** | `x86_64-windows` |
+| `method_lookup` | Core Operations | 10.25 ns/op | **97,558,596 ops/sec** | `x86_64-windows` |
+| `http1_request_head` | Core Operations | 23.81 ns/op | **42,002,864 ops/sec** | `x86_64-windows` |
+| `http1_header_block` | Core Operations | 224.34 ns/op | **4,457,450 ops/sec** | `x86_64-windows` |
+| `router_static_match` | Routing | 1.01 µs/op | **988,272 ops/sec** | `x86_64-windows` |
+| `router_param_match` | Routing | 1.10 µs/op | **912,934 ops/sec** | `x86_64-windows` |
+| `router_dispatch` | Routing | 1.10 µs/op | **911,344 ops/sec** | `x86_64-windows` |
+| `json_stringify` | Serialization | 293.18 ns/op | **3,410,848 ops/sec** | `x86_64-windows` |
+| `json_parse` | Serialization | 441.95 ns/op | **2,262,686 ops/sec** | `x86_64-windows` |
+| `basic_auth_encode` | Security | 54.86 ns/op | **18,227,253 ops/sec** | `x86_64-windows` |
+| `basic_auth_decode` | Security | 26.43 ns/op | **37,834,933 ops/sec** | `x86_64-windows` |
+| `bearer_token_parse` | Security | 8.17 ns/op | **122,465,274 ops/sec** | `x86_64-windows` |
+| `gzip_compress` | Compression | 68.65 µs/op | **14,566 ops/sec** | `x86_64-windows` |
+| `gzip_decompress` | Compression | 8.80 µs/op | **113,688 ops/sec** | `x86_64-windows` |
+| `deflate_compress` | Compression | 67.62 µs/op | **14,789 ops/sec** | `x86_64-windows` |
+| `deflate_decompress` | Compression | 8.11 µs/op | **123,295 ops/sec** | `x86_64-windows` |
+| `html_parse` | Parsing | 1.51 µs/op | **661,640 ops/sec** | `x86_64-windows` |
+| `worker_pool_submit` | Concurrency | 206.42 ns/op | **4,844,557 ops/sec** | `x86_64-windows` |
+| `concurrency_queue` | Concurrency | 68.82 ns/op | **14,529,667 ops/sec** | `x86_64-windows` |
+| `dns_cache_hit` | DNS | 68.99 ns/op | **14,494,140 ops/sec** | `x86_64-windows` |
+| `h2_frame_header` | Protocols | 1.19 ns/op | **840,703,500 ops/sec** | `x86_64-windows` |
+| `hpack_int_encode` | Protocols | 1.02 ns/op | **976,247,888 ops/sec** | `x86_64-windows` |
+| `hpack_int_decode` | Protocols | 1.53 ns/op | **653,906,765 ops/sec** | `x86_64-windows` |
+| `h3_varint_encode` | Protocols | 0.91 ns/op | **1,097,526,175 ops/sec** | `x86_64-windows` |
+| `h3_varint_decode` | Protocols | 1.15 ns/op | **869,920,750 ops/sec** | `x86_64-windows` |
+| `client_server_get` | Network | 376.20 µs/op | **2,658 req/sec** | `x86_64-windows` |
 
-## Install
+Detailed methodology and analysis: [Benchmarks Reference](/reference/benchmarks).
 
-::: warning v0.1.8 release and Zig 0.15 deprecation
-`v0.1.8` is the current release and targets Zig `0.16.0+`.
-`v0.1.7` is the previous stable release for the immediate prior `0.1.x` line.
-Zig `0.15` support is legacy and remains available only through `0.0.7`.
-The HTTPS/TLS reader fix for Zig `0.16` empty-buffer reads is included in this release.
-If you are upgrading from `0.0.7`, review the GitHub Releases page for migration notes.
-:::
+## Installation
 
-Choose one of these installation methods:
+### Method 1: Zig Fetch (Recommended)
 
-1. Latest release (0.1.8)
+**Latest Stable Release (v0.2.0)**
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz
+```
+
+**Previous Stable Release (v0.1.8)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.8.tar.gz
 ```
 
-2. Previous stable release (0.1.7)
+> [!WARNING]
+> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.0**.
+
+### Method 2: Zig Fetch (Latest / v0.2.0 in development)
+
+Use this for the latest in-development version from the `main` branch:
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.7.tar.gz
+zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```
 
-3. Legacy Zig 0.15 support (0.0.7)
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.0.7.tar.gz
-```
-
-::: warning Zig 0.15 deprecation
-Zig `0.15` is deprecated. It uses an older API surface and is only retained in `0.0.7`.
-:::
-
-4. Nightly/main branch
-
-```bash
-zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig
-```
-
-5. Manual dependency entry in `build.zig.zon`
+### Method 3: Manual `build.zig.zon` Configuration
 
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.8.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz",
     .hash = "...",
   },
 },

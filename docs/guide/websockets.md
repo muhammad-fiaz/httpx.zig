@@ -138,8 +138,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = httpx.Server.init(allocator);
+    var server = try httpx.Server.init(allocator, io, .{});
     defer server.deinit();
 
     try server.get("/ws", struct {

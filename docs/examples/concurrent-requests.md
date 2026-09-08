@@ -16,9 +16,10 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // 1. Start a local loopback server
-    var server = httpx.Server.initWithConfig(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 45235,
         .keep_alive = false,
@@ -44,7 +45,7 @@ pub fn main() !void {
     _ = try builder.get("http://127.0.0.1:45235/data");
     _ = try builder.get("http://127.0.0.1:45235/data");
 
-    var client = httpx.Client.initWithConfig(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     // 3. Multi-threaded Mode (with at most 2 concurrent workers)
@@ -72,7 +73,7 @@ pub fn main() !void {
 
     // 5. Explicit Workers Mode (reusing a started Executor)
     std.debug.print("Executing with explicit_workers mode...\n", .{});
-    var exec = httpx.Executor.initWithConfig(allocator, .{ .num_threads = 3 });
+    var exec = httpx.Executor.init(allocator, .{ .num_threads = 3 });
     defer exec.deinit();
     try exec.start();
 

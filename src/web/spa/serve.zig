@@ -30,6 +30,7 @@ pub fn register(router: *Router, cfg: Config) !void {
         .root = cfg.root,
         .mount = cfg.mount,
         .index_file = cfg.fallback,
+        .spa_fallback = cfg.fallback,
     });
 }
 

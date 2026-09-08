@@ -5,19 +5,45 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = try httpx.Client.init(allocator, .{});
+    // 1. Initialize reusable client once
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    const addrs = httpx.resolve.Resolver.init(allocator).lookup("httpbun.com", 443) catch |err| {
+    // 2. Dual-stack DNS resolution with default options (.{})
+    std.debug.print("--- Dual-Stack Resolution (httpbun.com:443) ---\n", .{});
+    var addresses = client.resolve("httpbun.com", 443, .{}) catch |err| {
         std.debug.print("DNS lookup failed: {s}\n", .{@errorName(err)});
         return;
     };
-    defer allocator.free(addrs);
+    defer addresses.deinit();
 
-    var buf: [64]u8 = undefined;
-    for (addrs) |addr| {
-        const ip = addr.format(&buf);
-        std.debug.print("Resolved: {s}:{d}\n", .{ ip, addr.port });
+    for (addresses.items) |addr| {
+        std.debug.print("  Address: {f}:{d} (family: {s})\n", .{ addr, addr.port, @tagName(addr.family) });
+    }
+
+    // 3. IPv4-only resolution
+    std.debug.print("\n--- IPv4-Only Resolution (httpbun.com:443) ---\n", .{});
+    var v4_addresses = client.resolve("httpbun.com", 443, .{ .family = .ipv4 }) catch |err| {
+        std.debug.print("IPv4 lookup failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer v4_addresses.deinit();
+
+    for (v4_addresses.items) |addr| {
+        std.debug.print("  IPv4: {f}:{d}\n", .{ addr, addr.port });
+    }
+
+    // 4. URL-based resolution
+    std.debug.print("\n--- URL Resolution (https://httpbun.com/get) ---\n", .{});
+    var url_addresses = client.resolveUrl("https://httpbun.com/get", .{}) catch |err| {
+        std.debug.print("URL resolution failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer url_addresses.deinit();
+
+    for (url_addresses.items) |addr| {
+        std.debug.print("  Target address: {f}:{d}\n", .{ addr, addr.port });
     }
 }

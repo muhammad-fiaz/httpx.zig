@@ -18,9 +18,11 @@ zig build run-all-http3_example -Dtarget=aarch64-macos
 
 ## Available Examples
 
+- [HTTP/1.1 Client](/examples/http11-client): Dedicated HTTP/1.1 client with keep-alive and headers.
+- [HTTP/1.1 Server](/examples/http11-server): Dedicated HTTP/1.1 server with persistent connections.
 - [Simple Get](/examples/simple-get): Basic GET request and response handling.
 - [Simple Get Deserialize](/examples/simple-get-deserialize): Parse JSON into typed structs.
-- [`json_api_example`](examples/json_api_example.zig): JSON API: getJson, postJsonAndParse, Response.json, server ctx.jsonBody + ctx.json
+- [JSON API Example](/examples/json-api-example): JSON API requests and typed parsing.
 - [HTTP Auth Helpers](/examples/http-auth-helpers): Use built-in Bearer and Basic auth request helpers against a local loopback server.
 - [Post JSON](/examples/post-json): Send JSON payloads with POST.
 - [Custom Headers](/examples/custom-headers): Attach auth and custom metadata headers.

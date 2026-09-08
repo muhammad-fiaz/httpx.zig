@@ -86,12 +86,13 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // 1. Initialize Server
-    var server = try httpx.Server.init(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .docs_enabled = false,
+        .enableDocs = false,
     });
     defer server.deinit();
 
@@ -123,7 +124,7 @@ pub fn main() !void {
     {
         var url_buf: [128]u8 = undefined;
         const not_found_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/invalid/path/404", .{port});
-        var resp = try httpx.get(.{ .url = not_found_url });
+        var resp = try httpx.get(not_found_url, .{});
         defer resp.deinit();
 
         std.debug.print("1. Custom 404 Response Status: {d}\n", .{resp.status});
@@ -134,7 +135,7 @@ pub fn main() !void {
     {
         var url_buf: [128]u8 = undefined;
         const faulty_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/faulty", .{port});
-        var resp = try httpx.get(.{ .url = faulty_url });
+        var resp = try httpx.get(faulty_url, .{});
         defer resp.deinit();
 
         std.debug.print("2. Custom 500 Response Status: {d}\n", .{resp.status});
@@ -145,7 +146,7 @@ pub fn main() !void {
     {
         var url_buf: [128]u8 = undefined;
         const bearer_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/protected/bearer", .{port});
-        var resp = try httpx.get(.{ .url = bearer_url });
+        var resp = try httpx.get(bearer_url, .{});
         defer resp.deinit();
 
         std.debug.print("3. Missing Bearer Token Status: {d}\n", .{resp.status});
@@ -155,9 +156,8 @@ pub fn main() !void {
     {
         var url_buf: [128]u8 = undefined;
         const bearer_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/protected/bearer", .{port});
-        var resp = try httpx.get(.{
-            .url = bearer_url,
-            .bearer_auth = "secret-token-xyz",
+        var resp = try httpx.get(bearer_url, .{
+            .bearerAuth = "secret-token-xyz",
         });
         defer resp.deinit();
 
@@ -169,9 +169,8 @@ pub fn main() !void {
     {
         var url_buf: [128]u8 = undefined;
         const basic_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/protected/basic", .{port});
-        var resp = try httpx.get(.{
-            .url = basic_url,
-            .basic_auth = "admin:pass123",
+        var resp = try httpx.get(basic_url, .{
+            .basicAuth = "admin:pass123",
         });
         defer resp.deinit();
 

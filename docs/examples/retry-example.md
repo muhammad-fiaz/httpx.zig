@@ -12,7 +12,7 @@ const no_retry = httpx.RetryPolicy.noRetry();
 const aggressive = httpx.RetryPolicy.aggressive();
 
 const custom = httpx.RetryPolicy{
-    .max_retries = 10,
+    .maxRetries = 10,
     .initial_delay_ms = 200,
     .backoff_multiplier = 3.0,
     .retry_on_status = &.{ 429, 500, 502, 503, 504 },

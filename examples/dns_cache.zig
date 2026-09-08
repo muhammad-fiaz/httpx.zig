@@ -5,17 +5,18 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = try httpx.Client.init(allocator, .{
-        .dns_cache = .{
-            .enabled = true,
-            .ttl_ms = 60_000,
+    var client = httpx.Client.init(allocator, io, .{
+        .dnsCache = .{
+            .enable = true,
+            .ttlMs = 60_000,
         },
     });
     defer client.deinit();
 
     // First request - DNS lookup + cache
-    var r1 = client.get(.{ .url = "http://httpbun.com/get" }) catch |err| {
+    var r1 = client.get("http://httpbun.com/get", .{}) catch |err| {
         std.debug.print("R1 failed: {s}\n", .{@errorName(err)});
         return;
     };
@@ -23,7 +24,7 @@ pub fn main() !void {
     std.debug.print("R1 Status: {d}\n", .{r1.status});
 
     // Second request - uses cached DNS
-    var r2 = client.get(.{ .url = "http://httpbun.com/headers" }) catch |err| {
+    var r2 = client.get("http://httpbun.com/headers", .{}) catch |err| {
         std.debug.print("R2 failed: {s}\n", .{@errorName(err)});
         return;
     };

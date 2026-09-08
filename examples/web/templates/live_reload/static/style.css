@@ -1,0 +1,19 @@
+body {
+  font-family: system-ui, sans-serif;
+  background: #0f172a;
+  color: #f8fafc;
+  margin: 0;
+  padding: 3rem;
+}
+
+h1 {
+  color: #38bdf8;
+}
+
+.status-box {
+  background: #1e293b;
+  border-left: 4px solid #38bdf8;
+  padding: 1rem 1.5rem;
+  border-radius: 0 8px 8px 0;
+  margin-top: 1.5rem;
+}

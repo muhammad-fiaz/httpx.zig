@@ -9,38 +9,56 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    std.debug.print("=== HTTPX Native FTP Client ===\n", .{});
 
-    const config = httpx.FtpConfig{
-        .allocator = allocator,
-        .host = "127.0.0.1",
+    // 1. Configure FTP options
+    const ftpOpts: httpx.ftp.Options = .{
+        .host = "test.rebex.net",
         .port = 21,
-        .connection_mode = .passive,
-        .transfer_mode = .binary,
+        .user = "demo",
+        .password = "password",
+        .secure = false, // Set to true for explicit FTPS
     };
 
-    std.debug.print("FTP Config: {s}:{d}\n", .{ config.host, config.port });
-    std.debug.print("Mode: {s}\n", .{if (config.connection_mode == .passive) "passive" else "active"});
-    std.debug.print("Transfer: {s}\n", .{config.transfer_mode.toString()});
+    std.debug.print("1. FTP client configuration: {s}:{d}\n", .{ ftpOpts.host, ftpOpts.port });
 
-    const addr = httpx.ftp.parsePasvAddress("227 Entering Passive Mode (192,168,1,1,4,1)");
-    if (addr) |a| {
-        std.debug.print("Parsed PASV: port={d}\n", .{a.getPort()});
-    }
+    // 2. Connect via TCP (zero-config, no allocator required)
+    var client = httpx.ftp.Client.connect(ftpOpts) catch |err| {
+        std.debug.print("3. FTP connection failed: {s}\n", .{@errorName(err)});
+        std.debug.print("   Skipping network tests (server may be unreachable).\n", .{});
+        return;
+    };
+    defer client.deinit();
+
+    std.debug.print("3. Connected to FTP server successfully!\n", .{});
+
+    // 4. Login
+    client.login("demo", "password") catch |err| {
+        std.debug.print("4. Login failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    std.debug.print("4. Login successful\n", .{});
+
+    // 5. List files (managed automatically by client)
+    const files = client.list("/") catch |err| {
+        std.debug.print("5. List files failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    std.debug.print("5. File listing:\n{s}\n", .{files});
+
+    std.debug.print("FTP client demonstration completed.\n", .{});
 }
 ```
 
 ## Run
 
 ```bash
-zig build run-all-ftp_example
+zig build run-ftp-client
 ```
 
 ## What to Verify
 
-- FTP config fields are printed correctly.
-- Connection mode defaults to passive.
-- Transfer mode defaults to binary.
-- PASV address parsing extracts the correct port.
+- FTP client configuration is printed cleanly.
+- Connection is established using passive data channel negotiations.
+- Directory listing (`LIST /`) displays remote directory contents.
+

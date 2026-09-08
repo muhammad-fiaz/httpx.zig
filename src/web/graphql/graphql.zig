@@ -22,6 +22,7 @@ pub const Parser = parser.Parser;
 pub const ParseLimits = parser.ParseLimits;
 pub const HandlerConfig = server.HandlerConfig;
 pub const mount = server.mount;
+pub const unmount = server.unmount;
 pub const query = @import("../../client/client.zig").globalGraphql;
 pub const execute = @import("../../client/client.zig").globalGraphql;
 

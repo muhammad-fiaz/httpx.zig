@@ -6,7 +6,7 @@
 //! - Incremental cryptographic hashing (SHA-256, SHA-384, SHA-512, MD5, SHA-1) while streaming
 //! - Out-of-the-box built-in terminal progress bars via `loaders.zig` + TTY detection
 //! - Completely UI-independent custom progress callback interface
-//! - Existing-file policies: fail, overwrite, skip, resume, verify_existing, replace_if_changed
+//! - Existing-file policies: fail, overwrite, skip, resumePartial, verifyExisting, replaceIfChanged
 //! - Atomic destination replacement via temporary part files
 //! - Untrusted filename sanitization and safe directory creation
 //! - Transparent authentication (Basic, Bearer, API-key, custom headers, cookies)
@@ -27,12 +27,12 @@ const Method = @import("../common/method.zig").Method;
 const Status = @import("../common/status.zig").Status;
 const Header = @import("request.zig").Header;
 const Response = @import("request.zig").Response;
-const req_mod = @import("request.zig");
-const client_mod = @import("client.zig");
-const Client = client_mod.Client;
-const ftp_client = @import("../protocols/ftp/client.zig");
-const serve_mod = @import("../web/static_files/serve.zig");
-const c_fs = serve_mod.c_fs;
+const req = @import("request.zig");
+const clientNs = @import("client.zig");
+const Client = clientNs.Client;
+const ftpClient = @import("../protocols/ftp/client.zig");
+const serveMod = @import("../web/static_files/serve.zig");
+const cFs = serveMod.c_fs;
 
 pub const DownloadError = error{
     DestinationExists,
@@ -80,13 +80,13 @@ pub const ProgressState = enum {
 pub const ProgressInfo = struct {
     url: []const u8,
     destination: []const u8,
-    downloaded_bytes: u64,
-    total_bytes: ?u64,
+    downloadedBytes: u64,
+    totalBytes: ?u64,
     percentage: ?f32,
-    speed_bps: f64,
-    eta_seconds: ?u64,
-    elapsed_ms: u64,
-    status_code: u16,
+    speedBps: f64,
+    etaSeconds: ?u64,
+    elapsedMs: u64,
+    statusCode: u16,
     state: ProgressState,
 };
 
@@ -110,79 +110,72 @@ pub const ExistingFilePolicy = enum {
     overwrite,
     /// Skip download if destination already exists.
     skip,
-    /// Resume partial download if possible (primary clean name, no @ needed).
-    resume_download,
-    /// Non-reserved alias for resume_download.
-    continue_partial,
-    /// Backward-compatible alias for resume_download.
-    @"resume",
+    /// Resume partial download if possible (short canonical name; `resume` is a Zig keyword).
+    resumePartial,
     /// Verify existing file on disk against expected checksum; skip if valid, download if invalid.
-    verify_existing,
+    verifyExisting,
     /// Use conditional headers (If-None-Match / If-Modified-Since); skip if 304 Not Modified.
-    replace_if_changed,
+    replaceIfChanged,
 
     pub fn isResume(self: ExistingFilePolicy) bool {
-        return switch (self) {
-            .resume_download, .continue_partial, .@"resume" => true,
-            else => false,
-        };
+        return self == .resumePartial;
     }
 };
 
 pub const RemoteFileInfo = struct {
     status: u16 = 200,
-    file_size: ?u64 = null,
-    accepts_ranges: bool = false,
+    fileSize: ?u64 = null,
+    acceptsRanges: bool = false,
 
-    url_buf: [256]u8 = [_]u8{0} ** 256,
-    url_len: usize = 0,
+    urlBuf: [256]u8 = [_]u8{0} ** 256,
+    urlLen: usize = 0,
 
-    file_name_buf: [128]u8 = [_]u8{0} ** 128,
-    file_name_len: usize = 0,
+    fileNameBuf: [128]u8 = [_]u8{0} ** 128,
+    fileNameLen: usize = 0,
 
-    content_type_buf: [64]u8 = [_]u8{0} ** 64,
-    content_type_len: usize = 0,
+    contentTypeBuf: [64]u8 = [_]u8{0} ** 64,
+    contentTypeLen: usize = 0,
 
-    etag_buf: [64]u8 = [_]u8{0} ** 64,
-    etag_len: usize = 0,
+    etagBuf: [64]u8 = [_]u8{0} ** 64,
+    etagLen: usize = 0,
 
-    last_modified_buf: [64]u8 = [_]u8{0} ** 64,
-    last_modified_len: usize = 0,
+    lastModifiedBuf: [64]u8 = [_]u8{0} ** 64,
+    lastModifiedLen: usize = 0,
 
-    content_encoding_buf: [32]u8 = [_]u8{0} ** 32,
-    content_encoding_len: usize = 0,
+    contentEncodingBuf: [32]u8 = [_]u8{0} ** 32,
+    contentEncodingLen: usize = 0,
 
     pub fn url(self: *const RemoteFileInfo) []const u8 {
-        return self.url_buf[0..self.url_len];
+        return self.urlBuf[0..self.urlLen];
     }
 
     pub fn fileName(self: *const RemoteFileInfo) []const u8 {
-        return self.file_name_buf[0..self.file_name_len];
+        return self.fileNameBuf[0..self.fileNameLen];
     }
 
     pub fn contentType(self: *const RemoteFileInfo) ?[]const u8 {
-        if (self.content_type_len == 0) return null;
-        return self.content_type_buf[0..self.content_type_len];
+        if (self.contentTypeLen == 0) return null;
+        return self.contentTypeBuf[0..self.contentTypeLen];
     }
 
     pub fn etag(self: *const RemoteFileInfo) ?[]const u8 {
-        if (self.etag_len == 0) return null;
-        return self.etag_buf[0..self.etag_len];
+        if (self.etagLen == 0) return null;
+        return self.etagBuf[0..self.etagLen];
     }
 
     pub fn lastModified(self: *const RemoteFileInfo) ?[]const u8 {
-        if (self.last_modified_len == 0) return null;
-        return self.last_modified_buf[0..self.last_modified_len];
+        if (self.lastModifiedLen == 0) return null;
+        return self.lastModifiedBuf[0..self.lastModifiedLen];
     }
 
     pub fn contentEncoding(self: *const RemoteFileInfo) ?[]const u8 {
-        if (self.content_encoding_len == 0) return null;
-        return self.content_encoding_buf[0..self.content_encoding_len];
+        if (self.contentEncodingLen == 0) return null;
+        return self.contentEncodingBuf[0..self.contentEncodingLen];
     }
 
     /// Formats the file size as human-readable string (e.g., "12.42 MB", "500 KB", "1.20 GB").
     pub fn formatSize(self: RemoteFileInfo, buf: []u8) []const u8 {
-        const sz = self.file_size orelse return "unknown";
+        const sz = self.fileSize orelse return "unknown";
         if (sz < 1024) {
             return std.fmt.bufPrint(buf, "{d} B", .{sz}) catch "unknown";
         } else if (sz < 1024 * 1024) {
@@ -212,71 +205,71 @@ pub const VerifyOptions = struct {
     sha512: ?[]const u8 = null,
     md5: ?[]const u8 = null,
     sha1: ?[]const u8 = null,
-    expected_size: ?u64 = null,
-    min_size: ?u64 = null,
-    max_size: ?u64 = null,
+    expectedSize: ?u64 = null,
+    minSize: ?u64 = null,
+    maxSize: ?u64 = null,
     etag: ?[]const u8 = null,
-    last_modified: ?[]const u8 = null,
-    checksum_file_url: ?[]const u8 = null,
+    lastModified: ?[]const u8 = null,
+    checksumFileUrl: ?[]const u8 = null,
 };
 
 pub const DownloadOptions = struct {
     headers: []const Header = &.{},
-    timeout_ms: ?u64 = null,
-    max_retries: u32 = 3,
-    retry_delay_ms: u64 = 500,
-    follow_redirects: bool = true,
-    max_redirects: u8 = 10,
+    timeoutMs: ?u64 = null,
+    maxRetries: u32 = 3,
+    retryDelayMs: u64 = 500,
+    followRedirects: bool = true,
+    maxRedirects: u8 = 10,
     existing: ExistingFilePolicy = .overwrite,
     verify: VerifyOptions = .{},
     progress: ProgressMode = .auto,
-    on_progress: ?*const fn (info: ProgressInfo, user_data: ?*anyopaque) void = null,
-    user_data: ?*anyopaque = null,
+    onProgress: ?*const fn (info: ProgressInfo, userData: ?*anyopaque) void = null,
+    userData: ?*anyopaque = null,
     /// Atomically download to a temporary file first, then rename on success and verification pass.
     atomic: bool = true,
-    temp_suffix: []const u8 = ".httpx-part",
+    tempSuffix: []const u8 = ".httpx-part",
     /// Automatically create missing parent directories for the destination path.
-    create_dirs: bool = true,
+    createDirs: bool = true,
     /// Flag for cooperative cancellation.
-    cancel_flag: ?*const std.atomic.Value(bool) = null,
+    cancelFlag: ?*const std.atomic.Value(bool) = null,
     /// Authentication helpers
-    bearer_token: ?[]const u8 = null,
-    basic_auth: ?[]const u8 = null,
-    api_key_header: ?[]const u8 = null,
-    api_key_value: ?[]const u8 = null,
+    bearerAuth: ?[]const u8 = null,
+    basicAuth: ?[]const u8 = null,
+    apiKeyHeader: ?[]const u8 = null,
+    apiKeyValue: ?[]const u8 = null,
     cookie: ?[]const u8 = null,
 };
 
 pub const DownloadResult = struct {
-    destination_buf: [1024]u8 = [_]u8{0} ** 1024,
-    destination_len: usize = 0,
+    destinationBuf: [1024]u8 = [_]u8{0} ** 1024,
+    destinationLen: usize = 0,
     destination: []const u8 = "",
-    downloaded_bytes: u64,
-    total_bytes: ?u64,
-    elapsed_ms: u64,
-    status_code: u16,
+    downloadedBytes: u64,
+    totalBytes: ?u64,
+    elapsedMs: u64,
+    statusCode: u16,
     resumed: bool = false,
     skipped: bool = false,
     overwritten: bool = false,
     verified: bool = false,
-    sha256_hex: ?[64]u8 = null,
+    sha256Hex: ?[64]u8 = null,
 
-    pub fn make(dest_path: []const u8, downloaded: u64, total: ?u64, elapsed: u64, status: u16) DownloadResult {
+    pub fn make(destPath: []const u8, downloaded: u64, total: ?u64, elapsed: u64, status: u16) DownloadResult {
         var res = DownloadResult{
-            .downloaded_bytes = downloaded,
-            .total_bytes = total,
-            .elapsed_ms = elapsed,
-            .status_code = status,
+            .downloadedBytes = downloaded,
+            .totalBytes = total,
+            .elapsedMs = elapsed,
+            .statusCode = status,
         };
-        const len = @min(dest_path.len, res.destination_buf.len);
-        @memcpy(res.destination_buf[0..len], dest_path[0..len]);
-        res.destination_len = len;
-        res.destination = res.destination_buf[0..len];
+        const len = @min(destPath.len, res.destinationBuf.len);
+        @memcpy(res.destinationBuf[0..len], destPath[0..len]);
+        res.destinationLen = len;
+        res.destination = res.destinationBuf[0..len];
         return res;
     }
 
     pub fn destinationPath(self: *const DownloadResult) []const u8 {
-        if (self.destination_len > 0) return self.destination_buf[0..self.destination_len];
+        if (self.destinationLen > 0) return self.destinationBuf[0..self.destinationLen];
         return self.destination;
     }
 };
@@ -289,28 +282,28 @@ pub const Hasher = struct {
     sha512: std.crypto.hash.sha2.Sha512 = std.crypto.hash.sha2.Sha512.init(.{}),
     md5: std.crypto.hash.Md5 = std.crypto.hash.Md5.init(.{}),
     sha1: std.crypto.hash.Sha1 = std.crypto.hash.Sha1.init(.{}),
-    enabled_sha256: bool = false,
-    enabled_sha384: bool = false,
-    enabled_sha512: bool = false,
-    enabled_md5: bool = false,
-    enabled_sha1: bool = false,
+    enableSha256: bool = false,
+    enableSha384: bool = false,
+    enableSha512: bool = false,
+    enableMd5: bool = false,
+    enableSha1: bool = false,
 
-    pub fn init(verify_opts: VerifyOptions) Hasher {
+    pub fn init(verifyOpts: VerifyOptions) Hasher {
         return .{
-            .enabled_sha256 = verify_opts.sha256 != null or verify_opts.checksum_file_url != null,
-            .enabled_sha384 = verify_opts.sha384 != null,
-            .enabled_sha512 = verify_opts.sha512 != null,
-            .enabled_md5 = verify_opts.md5 != null,
-            .enabled_sha1 = verify_opts.sha1 != null,
+            .enableSha256 = verifyOpts.sha256 != null or verifyOpts.checksumFileUrl != null,
+            .enableSha384 = verifyOpts.sha384 != null,
+            .enableSha512 = verifyOpts.sha512 != null,
+            .enableMd5 = verifyOpts.md5 != null,
+            .enableSha1 = verifyOpts.sha1 != null,
         };
     }
 
     pub fn update(self: *Hasher, bytes: []const u8) void {
-        if (self.enabled_sha256) self.sha256.update(bytes);
-        if (self.enabled_sha384) self.sha384.update(bytes);
-        if (self.enabled_sha512) self.sha512.update(bytes);
-        if (self.enabled_md5) self.md5.update(bytes);
-        if (self.enabled_sha1) self.sha1.update(bytes);
+        if (self.enableSha256) self.sha256.update(bytes);
+        if (self.enableSha384) self.sha384.update(bytes);
+        if (self.enableSha512) self.sha512.update(bytes);
+        if (self.enableMd5) self.md5.update(bytes);
+        if (self.enableSha1) self.sha1.update(bytes);
     }
 
     pub fn finalSha256Hex(self: *Hasher) [64]u8 {
@@ -355,17 +348,17 @@ pub const Hasher = struct {
 };
 
 const FileOps = struct {
-    const is_win = builtin.os.tag == .windows;
+    const isWin = builtin.os.tag == .windows;
 
-    pub const Handle = if (is_win) std.os.windows.HANDLE else std.posix.fd_t;
-    pub const invalid_handle: Handle = if (is_win) std.os.windows.INVALID_HANDLE_VALUE else -1;
+    pub const Handle = if (isWin) std.os.windows.HANDLE else std.posix.fd_t;
+    pub const invalidHandle: Handle = if (isWin) std.os.windows.INVALID_HANDLE_VALUE else -1;
 
     pub fn createTruncate(path: []const u8) ?Handle {
-        return c_fs.openWrite(path);
+        return cFs.openWrite(path);
     }
 
     pub fn openReadWrite(path: []const u8) ?Handle {
-        if (is_win) {
+        if (isWin) {
             var wbuf: [1024]u16 = undefined;
             const len = std.unicode.utf8ToUtf16Le(&wbuf, path) catch return null;
             wbuf[len] = 0;
@@ -373,7 +366,7 @@ const FileOps = struct {
             const GENERIC_READ: u32 = 0x80000000;
             const GENERIC_WRITE: u32 = 0x40000000;
             const FILE_ATTRIBUTE_NORMAL: u32 = 0x00000080;
-            const h = c_fs.CreateFileW(
+            const h = cFs.CreateFileW(
                 @ptrCast(&wbuf),
                 GENERIC_READ | GENERIC_WRITE,
                 0,
@@ -382,27 +375,27 @@ const FileOps = struct {
                 FILE_ATTRIBUTE_NORMAL,
                 null,
             );
-            if (h == c_fs.INVALID_HANDLE) return null;
+            if (h == cFs.INVALID_HANDLE) return null;
             return h;
         } else {
-            var null_term: [4096:0]u8 = undefined;
-            if (path.len >= null_term.len) return null;
-            @memcpy(null_term[0..path.len], path);
-            null_term[path.len] = 0;
-            const fd = std.c.open(&null_term, .{ .ACCMODE = .RDWR, .CREAT = true }, @as(std.c.mode_t, 0o644));
+            var nullTerm: [4096:0]u8 = undefined;
+            if (path.len >= nullTerm.len) return null;
+            @memcpy(nullTerm[0..path.len], path);
+            nullTerm[path.len] = 0;
+            const fd = std.c.open(&nullTerm, .{ .ACCMODE = .RDWR, .CREAT = true }, @as(std.c.mode_t, 0o644));
             if (fd < 0) return null;
             return fd;
         }
     }
 
     pub fn openRead(path: []const u8) ?Handle {
-        return c_fs.openRead(path);
+        return cFs.openRead(path);
     }
 
     pub fn seekToEnd(h: Handle) bool {
-        if (is_win) {
-            var new_pos: i64 = 0;
-            return c_fs.SetFilePointerEx(h, 0, &new_pos, 2) != .FALSE; // FILE_END = 2
+        if (isWin) {
+            var newPos: i64 = 0;
+            return cFs.SetFilePointerEx(h, 0, &newPos, 2) != .FALSE; // FILE_END = 2
         } else {
             _ = std.c.lseek(h, 0, 2); // SEEK_END = 2
             return true;
@@ -412,12 +405,12 @@ const FileOps = struct {
     pub fn writeAll(h: Handle, data: []const u8) bool {
         var written: usize = 0;
         while (written < data.len) {
-            if (is_win) {
-                var chunk_written: u32 = 0;
-                const chunk_len: u32 = @intCast(@min(data.len - written, @as(usize, std.math.maxInt(u32))));
-                if (c_fs.WriteFile(h, data[written..].ptr, chunk_len, &chunk_written, null) == .FALSE) return false;
-                if (chunk_written == 0) return false;
-                written += chunk_written;
+            if (isWin) {
+                var chunkWritten: u32 = 0;
+                const chunkLen: u32 = @intCast(@min(data.len - written, @as(usize, std.math.maxInt(u32))));
+                if (cFs.WriteFile(h, data[written..].ptr, chunkLen, &chunkWritten, null) == .FALSE) return false;
+                if (chunkWritten == 0) return false;
+                written += chunkWritten;
             } else {
                 const n = std.c.write(h, data[written..].ptr, data.len - written);
                 if (n <= 0) return false;
@@ -428,11 +421,11 @@ const FileOps = struct {
     }
 
     pub fn read(h: Handle, buf: []u8) !usize {
-        if (is_win) {
-            var read_bytes: u32 = 0;
-            const to_read: u32 = @intCast(@min(buf.len, @as(usize, std.math.maxInt(u32))));
-            if (c_fs.ReadFile(h, buf.ptr, to_read, &read_bytes, null) == .FALSE) return error.FileReadFailed;
-            return read_bytes;
+        if (isWin) {
+            var readBytes: u32 = 0;
+            const toRead: u32 = @intCast(@min(buf.len, @as(usize, std.math.maxInt(u32))));
+            if (cFs.ReadFile(h, buf.ptr, toRead, &readBytes, null) == .FALSE) return error.FileReadFailed;
+            return readBytes;
         } else {
             const n = std.c.read(h, buf.ptr, buf.len);
             if (n < 0) return error.FileReadFailed;
@@ -441,11 +434,11 @@ const FileOps = struct {
     }
 
     pub fn close(h: Handle) void {
-        c_fs.close(h);
+        cFs.close(h);
     }
 
     pub fn deleteFile(path: []const u8) bool {
-        if (is_win) {
+        if (isWin) {
             var wbuf: [1024]u16 = undefined;
             const len = std.unicode.utf8ToUtf16Le(&wbuf, path) catch return false;
             wbuf[len] = 0;
@@ -454,22 +447,22 @@ const FileOps = struct {
             }.DeleteFileW;
             return DeleteFileW(@ptrCast(&wbuf)) != .FALSE;
         } else {
-            var null_term: [4096]u8 = undefined;
-            if (path.len >= null_term.len) return false;
-            @memcpy(null_term[0..path.len], path);
-            null_term[path.len] = 0;
-            _ = std.c.unlink(@ptrCast(&null_term));
+            var nullTerm: [4096]u8 = undefined;
+            if (path.len >= nullTerm.len) return false;
+            @memcpy(nullTerm[0..path.len], path);
+            nullTerm[path.len] = 0;
+            _ = std.c.unlink(@ptrCast(&nullTerm));
             return true;
         }
     }
 
-    pub fn renameFile(old_path: []const u8, new_path: []const u8) bool {
-        if (is_win) {
+    pub fn renameFile(oldPath: []const u8, newPath: []const u8) bool {
+        if (isWin) {
             var wold: [1024]u16 = undefined;
-            const olen = std.unicode.utf8ToUtf16Le(&wold, old_path) catch return false;
+            const olen = std.unicode.utf8ToUtf16Le(&wold, oldPath) catch return false;
             wold[olen] = 0;
             var wnew: [1024]u16 = undefined;
-            const nlen = std.unicode.utf8ToUtf16Le(&wnew, new_path) catch return false;
+            const nlen = std.unicode.utf8ToUtf16Le(&wnew, newPath) catch return false;
             wnew[nlen] = 0;
             const MoveFileExW = struct {
                 pub extern "kernel32" fn MoveFileExW(lpExistingFileName: [*:0]const u16, lpNewFileName: [*:0]const u16, dwFlags: u32) callconv(.winapi) std.os.windows.BOOL;
@@ -478,20 +471,20 @@ const FileOps = struct {
             const MOVEFILE_COPY_ALLOWED: u32 = 0x00000002;
             return MoveFileExW(@ptrCast(&wold), @ptrCast(&wnew), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED) != .FALSE;
         } else {
-            var o_nt: [4096]u8 = undefined;
-            var n_nt: [4096]u8 = undefined;
-            if (old_path.len >= o_nt.len or new_path.len >= n_nt.len) return false;
-            @memcpy(o_nt[0..old_path.len], old_path);
-            o_nt[old_path.len] = 0;
-            @memcpy(n_nt[0..new_path.len], new_path);
-            n_nt[new_path.len] = 0;
-            _ = std.c.rename(@ptrCast(&o_nt), @ptrCast(&n_nt));
+            var oNt: [4096]u8 = undefined;
+            var nNt: [4096]u8 = undefined;
+            if (oldPath.len >= oNt.len or newPath.len >= nNt.len) return false;
+            @memcpy(oNt[0..oldPath.len], oldPath);
+            oNt[oldPath.len] = 0;
+            @memcpy(nNt[0..newPath.len], newPath);
+            nNt[newPath.len] = 0;
+            _ = std.c.rename(@ptrCast(&oNt), @ptrCast(&nNt));
             return true;
         }
     }
 
     pub fn makeDir(path: []const u8) bool {
-        if (is_win) {
+        if (isWin) {
             var wbuf: [1024]u16 = undefined;
             const len = std.unicode.utf8ToUtf16Le(&wbuf, path) catch return false;
             wbuf[len] = 0;
@@ -500,11 +493,11 @@ const FileOps = struct {
             }.CreateDirectoryW;
             return CreateDirectoryW(@ptrCast(&wbuf), null) != .FALSE;
         } else {
-            var null_term: [4096]u8 = undefined;
-            if (path.len >= null_term.len) return false;
-            @memcpy(null_term[0..path.len], path);
-            null_term[path.len] = 0;
-            _ = std.c.mkdir(@ptrCast(&null_term), 0o755);
+            var nullTerm: [4096]u8 = undefined;
+            if (path.len >= nullTerm.len) return false;
+            @memcpy(nullTerm[0..path.len], path);
+            nullTerm[path.len] = 0;
+            _ = std.c.mkdir(@ptrCast(&nullTerm), 0o755);
             return true;
         }
     }
@@ -530,17 +523,17 @@ const FileOps = struct {
         return true;
     }
 
-    pub fn copyFile(src_path: []const u8, dst_path: []const u8) bool {
-        const src_h = openRead(src_path) orelse return false;
-        defer close(src_h);
-        const dst_h = createTruncate(dst_path) orelse return false;
-        defer close(dst_h);
+    pub fn copyFile(srcPath: []const u8, dstPath: []const u8) bool {
+        const srcH = openRead(srcPath) orelse return false;
+        defer close(srcH);
+        const dstH = createTruncate(dstPath) orelse return false;
+        defer close(dstH);
 
         var buf: [64 * 1024]u8 = undefined;
         while (true) {
-            const n = read(src_h, &buf) catch return false;
+            const n = read(srcH, &buf) catch return false;
             if (n == 0) break;
-            if (!writeAll(dst_h, buf[0..n])) return false;
+            if (!writeAll(dstH, buf[0..n])) return false;
         }
         return true;
     }
@@ -548,15 +541,15 @@ const FileOps = struct {
 
 /// Verifies a file on local disk against expected checksums and size parameters.
 pub fn verifyFile(path: []const u8, opts: VerifyOptions) DownloadError!void {
-    const meta = serve_mod.statPath(null, path) orelse return DownloadError.FileReadFailed;
+    const meta = serveMod.statPath(null, path) orelse return DownloadError.FileReadFailed;
 
-    if (opts.expected_size) |sz| {
+    if (opts.expectedSize) |sz| {
         if (meta.size != sz) return DownloadError.ChecksumMismatch;
     }
-    if (opts.min_size) |min| {
+    if (opts.minSize) |min| {
         if (meta.size < min) return DownloadError.ResponseTooSmall;
     }
-    if (opts.max_size) |max| {
+    if (opts.maxSize) |max| {
         if (meta.size > max) return DownloadError.ResponseTooLarge;
     }
 
@@ -581,21 +574,21 @@ pub fn verifyFile(path: []const u8, opts: VerifyOptions) DownloadError!void {
 /// Parses a checksum file line (e.g. "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  target.zip").
 pub fn parseChecksumFile(content: []const u8, filename: ?[]const u8) ?[]const u8 {
     var it = std.mem.splitScalar(u8, content, '\n');
-    while (it.next()) |raw_line| {
-        const line = std.mem.trim(u8, raw_line, " \r\t");
+    while (it.next()) |rawLine| {
+        const line = std.mem.trim(u8, rawLine, " \r\t");
         if (line.len == 0 or line[0] == '#') continue;
 
         var tokens = std.mem.tokenizeAny(u8, line, " \t");
         const hash = tokens.next() orelse continue;
-        const file_token = tokens.next();
+        const fileToken = tokens.next();
 
         if (filename) |target| {
-            if (file_token) |ft| {
-                const clean_target = std.fs.path.basename(target);
-                var clean_ft = ft;
-                if (clean_ft.len > 0 and clean_ft[0] == '*') clean_ft = clean_ft[1..];
-                clean_ft = std.fs.path.basename(clean_ft);
-                if (std.mem.eql(u8, clean_target, clean_ft)) {
+            if (fileToken) |ft| {
+                const cleanTarget = std.fs.path.basename(target);
+                var cleanFt = ft;
+                if (cleanFt.len > 0 and cleanFt[0] == '*') cleanFt = cleanFt[1..];
+                cleanFt = std.fs.path.basename(cleanFt);
+                if (std.mem.eql(u8, cleanTarget, cleanFt)) {
                     return hash;
                 }
             }
@@ -631,41 +624,41 @@ pub fn resolveDestination(
     allocator: Allocator,
     dest: ?[]const u8,
     url: []const u8,
-    content_disposition: ?[]const u8,
+    contentDisposition: ?[]const u8,
 ) ![]const u8 {
-    const raw_dest = if (dest) |d| d else "";
-    var is_dir = false;
-    if (raw_dest.len == 0 or std.mem.eql(u8, raw_dest, ".")) {
-        is_dir = true;
-    } else if (raw_dest[raw_dest.len - 1] == '/' or raw_dest[raw_dest.len - 1] == '\\') {
-        is_dir = true;
+    const rawDest = if (dest) |d| d else "";
+    var isDir = false;
+    if (rawDest.len == 0 or std.mem.eql(u8, rawDest, ".")) {
+        isDir = true;
+    } else if (rawDest[rawDest.len - 1] == '/' or rawDest[rawDest.len - 1] == '\\') {
+        isDir = true;
     } else {
-        if (serve_mod.statPath(undefined, raw_dest)) |_| {
-            if (FileOps.isDir(raw_dest)) {
-                is_dir = true;
+        if (serveMod.statPath(undefined, rawDest)) |_| {
+            if (FileOps.isDir(rawDest)) {
+                isDir = true;
             }
         }
     }
 
-    if (!is_dir) return allocator.dupe(u8, raw_dest);
+    if (!isDir) return allocator.dupe(u8, rawDest);
 
-    var chosen_name: []const u8 = "downloaded_file";
-    if (content_disposition) |cd| {
+    var chosenName: []const u8 = "downloaded_file";
+    if (contentDisposition) |cd| {
         if (extractFilenameFromContentDisposition(cd)) |fname| {
-            chosen_name = fname;
+            chosenName = fname;
         }
     } else {
-        const url_base = std.fs.path.basename(url);
-        if (url_base.len > 0 and !std.mem.eql(u8, url_base, "/") and !std.mem.eql(u8, url_base, "\\")) {
-            chosen_name = url_base;
+        const urlBase = std.fs.path.basename(url);
+        if (urlBase.len > 0 and !std.mem.eql(u8, urlBase, "/") and !std.mem.eql(u8, urlBase, "\\")) {
+            chosenName = urlBase;
         }
     }
 
-    const safe_name = sanitizeFilename(chosen_name);
-    if (raw_dest.len == 0 or std.mem.eql(u8, raw_dest, ".")) {
-        return allocator.dupe(u8, safe_name);
+    const safeName = sanitizeFilename(chosenName);
+    if (rawDest.len == 0 or std.mem.eql(u8, rawDest, ".")) {
+        return allocator.dupe(u8, safeName);
     }
-    return std.fs.path.join(allocator, &.{ raw_dest, safe_name });
+    return std.fs.path.join(allocator, &.{ rawDest, safeName });
 }
 
 fn extractFilenameFromContentDisposition(cd: []const u8) ?[]const u8 {
@@ -710,17 +703,17 @@ pub const Downloader = struct {
     pub fn download(
         self: *Downloader,
         url: []const u8,
-        destination_path: []const u8,
+        destinationPath: []const u8,
         options: DownloadOptions,
     ) DownloadError!DownloadResult {
-        const start_time = clock.millisNow();
+        const startTime = clock.millisNow();
 
         // 1. Resolve destination
-        const dest = resolveDestination(self.allocator, destination_path, url, null) catch return DownloadError.OutOfMemory;
+        const dest = resolveDestination(self.allocator, destinationPath, url, null) catch return DownloadError.OutOfMemory;
         defer self.allocator.free(dest);
 
         // 2. Create parent directories if requested
-        if (options.create_dirs) {
+        if (options.createDirs) {
             if (std.fs.path.dirname(dest)) |parent| {
                 if (parent.len > 0 and !std.mem.eql(u8, parent, ".")) {
                     _ = FileOps.makePath(parent);
@@ -729,18 +722,18 @@ pub const Downloader = struct {
         }
 
         // 3. Handle existing destination policy
-        const existing_meta = serve_mod.statPath(undefined, dest);
-        if (existing_meta) |meta| {
+        const existingMeta = serveMod.statPath(undefined, dest);
+        if (existingMeta) |meta| {
             switch (options.existing) {
                 .fail => return DownloadError.DestinationExists,
                 .skip => {
-                    var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.millisNow() - start_time), 200);
+                    var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.millisNow() - startTime), 200);
                     res.skipped = true;
                     return res;
                 },
-                .verify_existing => {
+                .verifyExisting => {
                     if (verifyFile(dest, options.verify)) |_| {
-                        var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.millisNow() - start_time), 200);
+                        var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.millisNow() - startTime), 200);
                         res.skipped = true;
                         res.verified = true;
                         return res;
@@ -749,161 +742,160 @@ pub const Downloader = struct {
                     }
                 },
 
-                .overwrite, .resume_download, .continue_partial, .@"resume", .replace_if_changed => {},
+                .overwrite, .resumePartial, .replaceIfChanged => {},
             }
         }
 
         // 4. Temporary part file strategy
-        var temp_path: []const u8 = undefined;
-        var is_temp = false;
+        var tempPath: []const u8 = undefined;
+        var isTemp = false;
         if (options.atomic) {
-            temp_path = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ dest, options.temp_suffix }) catch return DownloadError.OutOfMemory;
-            is_temp = true;
+            tempPath = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ dest, options.tempSuffix }) catch return DownloadError.OutOfMemory;
+            isTemp = true;
         } else {
-            temp_path = self.allocator.dupe(u8, dest) catch return DownloadError.OutOfMemory;
+            tempPath = self.allocator.dupe(u8, dest) catch return DownloadError.OutOfMemory;
         }
-        defer self.allocator.free(temp_path);
+        defer self.allocator.free(tempPath);
 
         // 5. Check for partial resume
-        var resume_offset: u64 = 0;
+        var resumeOffset: u64 = 0;
         if (options.existing.isResume()) {
-            if (serve_mod.statPath(undefined, temp_path)) |tmeta| {
-                resume_offset = tmeta.size;
-            } else if (existing_meta) |emeta| {
-                resume_offset = emeta.size;
+            if (serveMod.statPath(undefined, tempPath)) |tmeta| {
+                resumeOffset = tmeta.size;
+            } else if (existingMeta) |emeta| {
+                resumeOffset = emeta.size;
             }
         }
 
         // 6. Setup progress presentation
-        var progress_tracker = ProgressTracker.init(self.allocator, self.client.io, url, dest, options);
-        defer progress_tracker.deinit();
+        var progressTracker = ProgressTracker.init(self.allocator, self.client.io, url, dest, options);
+        defer progressTracker.deinit();
 
         // 7. Perform download loop with retries
         var attempt: u32 = 0;
         var result: DownloadResult = .{
             .destination = dest,
-            .downloaded_bytes = 0,
-            .total_bytes = null,
-            .elapsed_ms = 0,
-            .status_code = 0,
+            .downloadedBytes = 0,
+            .totalBytes = null,
+            .elapsedMs = 0,
+            .statusCode = 0,
         };
 
-        while (attempt <= options.max_retries) : (attempt += 1) {
-            if (options.cancel_flag) |cf| {
+        while (attempt <= options.maxRetries) : (attempt += 1) {
+            if (options.cancelFlag) |cf| {
                 if (cf.load(.acquire)) return DownloadError.Cancelled;
             }
 
-            const download_res = self.performTransfer(
+            const downloadRes = self.performTransfer(
                 url,
-                temp_path,
+                tempPath,
                 dest,
-                resume_offset,
+                resumeOffset,
                 options,
-                &progress_tracker,
+                &progressTracker,
             );
 
-            if (download_res) |res| {
+            if (downloadRes) |res| {
                 result = res;
                 break;
             } else |err| {
                 if (err == DownloadError.Cancelled or err == DownloadError.DestinationExists or err == DownloadError.ChecksumMismatch) {
-                    if (is_temp and !options.existing.isResume()) {
-                        _ = FileOps.deleteFile(temp_path);
+                    if (isTemp and !options.existing.isResume()) {
+                        _ = FileOps.deleteFile(tempPath);
                     }
                     return err;
                 }
-                if (attempt >= options.max_retries) {
-                    if (is_temp and !options.existing.isResume()) {
-                        _ = FileOps.deleteFile(temp_path);
+                if (attempt >= options.maxRetries) {
+                    if (isTemp and !options.existing.isResume()) {
+                        _ = FileOps.deleteFile(tempPath);
                     }
                     return err;
                 }
-                clock.sleepMillis(options.retry_delay_ms * (@as(u64, 1) << @intCast(@min(attempt, 4))));
+                clock.sleepMillis(options.retryDelayMs * (@as(u64, 1) << @intCast(@min(attempt, 4))));
             }
         }
 
         // 8. Atomic Rename / Replace
-        if (is_temp and !result.skipped) {
-            if (!FileOps.renameFile(temp_path, dest)) {
+        if (isTemp and !result.skipped) {
+            if (!FileOps.renameFile(tempPath, dest)) {
                 return DownloadError.FileRenameFailed;
             }
         }
 
-        result.elapsed_ms = @intCast(clock.millisNow() - start_time);
+        result.elapsedMs = @intCast(clock.millisNow() - startTime);
         return result;
     }
 
     fn performTransfer(
         self: *Downloader,
         url: []const u8,
-        temp_path: []const u8,
-        dest_path: []const u8,
-        resume_offset: u64,
+        tempPath: []const u8,
+        destPath: []const u8,
+        resumeOffset: u64,
         options: DownloadOptions,
         tracker: *ProgressTracker,
     ) DownloadError!DownloadResult {
         // Headers setup
-        var custom_headers: std.ArrayList(Header) = .empty;
-        defer custom_headers.deinit(self.allocator);
+        var customHeaders: std.ArrayList(Header) = .empty;
+        defer customHeaders.deinit(self.allocator);
 
         for (options.headers) |h| {
-            custom_headers.append(self.allocator, h) catch return DownloadError.OutOfMemory;
+            customHeaders.append(self.allocator, h) catch return DownloadError.OutOfMemory;
         }
 
         // Authentication
-        var auth_buf: [256]u8 = undefined;
-        if (options.bearer_token) |token| {
-            const val = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{token}) catch return DownloadError.AuthenticationFailed;
-            custom_headers.append(self.allocator, .{ .name = "Authorization", .value = val }) catch return DownloadError.OutOfMemory;
-        } else if (options.basic_auth) |basic| {
-            const val = std.fmt.bufPrint(&auth_buf, "Basic {s}", .{basic}) catch return DownloadError.AuthenticationFailed;
-            custom_headers.append(self.allocator, .{ .name = "Authorization", .value = val }) catch return DownloadError.OutOfMemory;
+        var authBuf: [256]u8 = undefined;
+        if (options.bearerAuth) |token| {
+            const val = std.fmt.bufPrint(&authBuf, "Bearer {s}", .{token}) catch return DownloadError.AuthenticationFailed;
+            customHeaders.append(self.allocator, .{ .name = "Authorization", .value = val }) catch return DownloadError.OutOfMemory;
+        } else if (options.basicAuth) |basic| {
+            const val = std.fmt.bufPrint(&authBuf, "Basic {s}", .{basic}) catch return DownloadError.AuthenticationFailed;
+            customHeaders.append(self.allocator, .{ .name = "Authorization", .value = val }) catch return DownloadError.OutOfMemory;
         }
 
-        if (options.api_key_header) |hdr| {
-            if (options.api_key_value) |val| {
-                custom_headers.append(self.allocator, .{ .name = hdr, .value = val }) catch return DownloadError.OutOfMemory;
+        if (options.apiKeyHeader) |hdr| {
+            if (options.apiKeyValue) |val| {
+                customHeaders.append(self.allocator, .{ .name = hdr, .value = val }) catch return DownloadError.OutOfMemory;
             }
         }
 
         if (options.cookie) |c| {
-            custom_headers.append(self.allocator, .{ .name = "Cookie", .value = c }) catch return DownloadError.OutOfMemory;
+            customHeaders.append(self.allocator, .{ .name = "Cookie", .value = c }) catch return DownloadError.OutOfMemory;
         }
 
         // Resume Range header
-        var range_buf: [64]u8 = undefined;
+        var rangeBuf: [64]u8 = undefined;
         var resuming = false;
-        if (resume_offset > 0) {
-            const range_str = std.fmt.bufPrint(&range_buf, "bytes={d}-", .{resume_offset}) catch return DownloadError.RangeNotSupported;
-            custom_headers.append(self.allocator, .{ .name = "Range", .value = range_str }) catch return DownloadError.OutOfMemory;
+        if (resumeOffset > 0) {
+            const rangeStr = std.fmt.bufPrint(&rangeBuf, "bytes={d}-", .{resumeOffset}) catch return DownloadError.RangeNotSupported;
+            customHeaders.append(self.allocator, .{ .name = "Range", .value = rangeStr }) catch return DownloadError.OutOfMemory;
             resuming = true;
         }
 
         // Conditional headers
-        if (options.existing == .replace_if_changed) {
+        if (options.existing == .replaceIfChanged) {
             if (options.verify.etag) |etag| {
-                custom_headers.append(self.allocator, .{ .name = "If-None-Match", .value = etag }) catch return DownloadError.OutOfMemory;
+                customHeaders.append(self.allocator, .{ .name = "If-None-Match", .value = etag }) catch return DownloadError.OutOfMemory;
             }
-            if (options.verify.last_modified) |lm| {
-                custom_headers.append(self.allocator, .{ .name = "If-Modified-Since", .value = lm }) catch return DownloadError.OutOfMemory;
+            if (options.verify.lastModified) |lm| {
+                customHeaders.append(self.allocator, .{ .name = "If-Modified-Since", .value = lm }) catch return DownloadError.OutOfMemory;
             }
         }
 
-        var has_connection = false;
-        for (custom_headers.items) |h| {
-            if (std.ascii.eqlIgnoreCase(h.name, "connection")) has_connection = true;
+        var hasConnection = false;
+        for (customHeaders.items) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "connection")) hasConnection = true;
         }
-        if (!has_connection) {
-            custom_headers.append(self.allocator, .{ .name = "Connection", .value = "close" }) catch return DownloadError.OutOfMemory;
+        if (!hasConnection) {
+            customHeaders.append(self.allocator, .{ .name = "Connection", .value = "close" }) catch return DownloadError.OutOfMemory;
         }
 
         // Execute request
-        var resp = self.client.get(.{
-            .url = url,
-            .headers = custom_headers.items,
-            .follow_redirects = options.follow_redirects,
-            .max_redirects = options.max_redirects,
-            .timeout_ms = options.timeout_ms orelse 15000,
+        var resp = self.client.get(url, .{
+            .headers = customHeaders.items,
+            .followRedirects = options.followRedirects,
+            .maxRedirects = options.maxRedirects,
+            .timeoutMs = options.timeoutMs orelse 15000,
         }) catch |e| switch (e) {
             error.ConnectFailed => return DownloadError.ConnectionFailed,
             error.TooManyRedirects => return DownloadError.TooManyRedirects,
@@ -914,11 +906,11 @@ pub const Downloader = struct {
         // Check 304 Not Modified
         if (resp.status == 304) {
             return .{
-                .destination = dest_path,
-                .downloaded_bytes = 0,
-                .total_bytes = null,
-                .elapsed_ms = 0,
-                .status_code = 304,
+                .destination = destPath,
+                .downloadedBytes = 0,
+                .totalBytes = null,
+                .elapsedMs = 0,
+                .statusCode = 304,
                 .skipped = true,
             };
         }
@@ -931,92 +923,92 @@ pub const Downloader = struct {
         if (resp.status >= 500 and resp.status <= 599) return DownloadError.ServerError;
         if (resp.status < 200 or resp.status >= 300) return DownloadError.HttpError;
 
-        var actual_offset: u64 = 0;
+        var actualOffset: u64 = 0;
         if (resuming and resp.status == 206) {
-            actual_offset = resume_offset;
+            actualOffset = resumeOffset;
         } else {
             resuming = false;
-            actual_offset = 0;
+            actualOffset = 0;
         }
 
         // Determine total size
-        var total_size: ?u64 = null;
+        var totalSize: ?u64 = null;
         if (resp.header("content-length")) |cl| {
             if (std.fmt.parseInt(u64, std.mem.trim(u8, cl, " "), 10)) |val| {
-                total_size = val + actual_offset;
+                totalSize = val + actualOffset;
             } else |_| {}
         }
 
         // Size limits enforcement
-        if (total_size) |tot| {
-            if (options.verify.max_size) |max| {
+        if (totalSize) |tot| {
+            if (options.verify.maxSize) |max| {
                 if (tot > max) return DownloadError.ResponseTooLarge;
             }
-            if (options.verify.min_size) |min| {
+            if (options.verify.minSize) |min| {
                 if (tot < min) return DownloadError.ResponseTooSmall;
             }
-            if (options.verify.expected_size) |exp| {
+            if (options.verify.expectedSize) |exp| {
                 if (tot != exp) return DownloadError.ChecksumMismatch;
             }
         }
 
-        tracker.start(total_size);
+        tracker.start(totalSize);
 
         // Open destination / temp file
-        const file_handle = blk: {
-            if (actual_offset > 0) {
-                const h = FileOps.openReadWrite(temp_path) orelse return DownloadError.FileCreateFailed;
+        const fileHandle = blk: {
+            if (actualOffset > 0) {
+                const h = FileOps.openReadWrite(tempPath) orelse return DownloadError.FileCreateFailed;
                 if (!FileOps.seekToEnd(h)) return DownloadError.FileSeekFailed;
                 break :blk h;
             } else {
-                const h = FileOps.createTruncate(temp_path) orelse return DownloadError.FileCreateFailed;
+                const h = FileOps.createTruncate(tempPath) orelse return DownloadError.FileCreateFailed;
                 break :blk h;
             }
         };
-        defer FileOps.close(file_handle);
+        defer FileOps.close(fileHandle);
 
         // Streaming to file with incremental hashing
         var hasher = Hasher.init(options.verify);
 
         // If resuming, hash existing bytes
-        if (actual_offset > 0 and (options.verify.sha256 != null or options.verify.sha512 != null)) {
-            const rf = FileOps.openRead(temp_path) orelse return DownloadError.FileReadFailed;
+        if (actualOffset > 0 and (options.verify.sha256 != null or options.verify.sha512 != null)) {
+            const rf = FileOps.openRead(tempPath) orelse return DownloadError.FileReadFailed;
             defer FileOps.close(rf);
-            var r_buf: [32 * 1024]u8 = undefined;
-            var read_so_far: u64 = 0;
-            while (read_so_far < actual_offset) {
-                const to_read: usize = @intCast(@min(@as(u64, r_buf.len), actual_offset - read_so_far));
-                const n = FileOps.read(rf, r_buf[0..to_read]) catch return DownloadError.FileReadFailed;
+            var rBuf: [32 * 1024]u8 = undefined;
+            var readSoFar: u64 = 0;
+            while (readSoFar < actualOffset) {
+                const toRead: usize = @intCast(@min(@as(u64, rBuf.len), actualOffset - readSoFar));
+                const n = FileOps.read(rf, rBuf[0..toRead]) catch return DownloadError.FileReadFailed;
                 if (n == 0) break;
-                hasher.update(r_buf[0..n]);
-                read_so_far += n;
+                hasher.update(rBuf[0..n]);
+                readSoFar += n;
             }
         }
 
         // Stream body
-        var written_bytes: u64 = actual_offset;
-        const body_data = resp.body;
-        var chunk_pos: usize = 0;
-        const chunk_size: usize = 32 * 1024;
+        var writtenBytes: u64 = actualOffset;
+        const bodyData = resp.body;
+        var chunkPos: usize = 0;
+        const chunkSize: usize = 32 * 1024;
 
-        while (chunk_pos < body_data.len) {
-            if (options.cancel_flag) |cf| {
+        while (chunkPos < bodyData.len) {
+            if (options.cancelFlag) |cf| {
                 if (cf.load(.acquire)) {
                     tracker.cancel();
                     return DownloadError.Cancelled;
                 }
             }
 
-            const end = @min(chunk_pos + chunk_size, body_data.len);
-            const chunk = body_data[chunk_pos..end];
+            const end = @min(chunkPos + chunkSize, bodyData.len);
+            const chunk = bodyData[chunkPos..end];
 
-            if (!FileOps.writeAll(file_handle, chunk)) return DownloadError.FileWriteFailed;
+            if (!FileOps.writeAll(fileHandle, chunk)) return DownloadError.FileWriteFailed;
             hasher.update(chunk);
 
-            written_bytes += chunk.len;
-            chunk_pos = end;
+            writtenBytes += chunk.len;
+            chunkPos = end;
 
-            tracker.update(written_bytes);
+            tracker.update(writtenBytes);
         }
 
         // Verify checksums
@@ -1027,11 +1019,11 @@ pub const Downloader = struct {
 
         tracker.finish();
 
-        var res = DownloadResult.make(dest_path, written_bytes, total_size, 0, resp.status);
+        var res = DownloadResult.make(destPath, writtenBytes, totalSize, 0, resp.status);
         res.resumed = resuming;
         res.overwritten = true;
         res.verified = true;
-        res.sha256_hex = hasher.finalSha256Hex();
+        res.sha256Hex = hasher.finalSha256Hex();
         return res;
     }
 };
@@ -1046,13 +1038,13 @@ fn formatEta(ns: u64, buf: []u8) []const u8 {
     return loaders.formatNs(buf, ns);
 }
 
-fn formatSpeed(per_sec: f64, buf: []u8) []const u8 {
-    if (per_sec < 1024.0) {
-        return std.fmt.bufPrint(buf, "{d:.1} B/s", .{per_sec}) catch "";
-    } else if (per_sec < 1024.0 * 1024.0) {
-        return std.fmt.bufPrint(buf, "{d:.1} KB/s", .{per_sec / 1024.0}) catch "";
+fn formatSpeed(perSec: f64, buf: []u8) []const u8 {
+    if (perSec < 1024.0) {
+        return std.fmt.bufPrint(buf, "{d:.1} B/s", .{perSec}) catch "";
+    } else if (perSec < 1024.0 * 1024.0) {
+        return std.fmt.bufPrint(buf, "{d:.1} KB/s", .{perSec / 1024.0}) catch "";
     } else {
-        return std.fmt.bufPrint(buf, "{d:.2} MB/s", .{per_sec / (1024.0 * 1024.0)}) catch "";
+        return std.fmt.bufPrint(buf, "{d:.2} MB/s", .{perSec / (1024.0 * 1024.0)}) catch "";
     }
 }
 
@@ -1062,27 +1054,27 @@ pub const ProgressTracker = struct {
     url: []const u8,
     destination: []const u8,
     options: DownloadOptions,
-    start_time: i64,
-    last_update_time: i64,
-    last_bytes: u64,
-    total_bytes: ?u64,
+    startTime: i64,
+    lastUpdateTime: i64,
+    lastBytes: u64,
+    totalBytes: ?u64,
     bar: ?loaders.ProgressBar,
-    is_tty: bool,
+    isTty: bool,
 
     pub fn init(allocator: Allocator, io: std.Io, url: []const u8, destination: []const u8, options: DownloadOptions) ProgressTracker {
-        const is_tty = loaders.terminal.getSize(io).cols > 0;
+        const isTty = loaders.terminal.getSize(io).cols > 0;
         return .{
             .allocator = allocator,
             .io = io,
             .url = url,
             .destination = destination,
             .options = options,
-            .start_time = clock.millisNow(),
-            .last_update_time = clock.millisNow(),
-            .last_bytes = 0,
-            .total_bytes = null,
+            .startTime = clock.millisNow(),
+            .lastUpdateTime = clock.millisNow(),
+            .lastBytes = 0,
+            .totalBytes = null,
             .bar = null,
-            .is_tty = is_tty,
+            .isTty = isTty,
         };
     }
 
@@ -1090,14 +1082,14 @@ pub const ProgressTracker = struct {
         if (self.bar) |*b| b.deinit();
     }
 
-    pub fn start(self: *ProgressTracker, total_size: ?u64) void {
-        self.total_bytes = total_size;
-        self.start_time = clock.millisNow();
-        self.last_update_time = self.start_time;
+    pub fn start(self: *ProgressTracker, totalSize: ?u64) void {
+        self.totalBytes = totalSize;
+        self.startTime = clock.millisNow();
+        self.lastUpdateTime = self.startTime;
 
-        const should_render_bar = (self.options.progress == .auto and self.is_tty) or (self.options.progress == .enabled);
-        if (should_render_bar) {
-            const tot = total_size orelse 100;
+        const shouldRenderBar = (self.options.progress == .auto and self.isTty) or (self.options.progress == .enabled);
+        if (shouldRenderBar) {
+            const tot = totalSize orelse 100;
             const pb = loaders.ProgressBar.init(self.allocator, self.io, .{
                 .total = tot,
                 .prefix = std.fs.path.basename(self.destination),
@@ -1109,7 +1101,7 @@ pub const ProgressTracker = struct {
                     .right_bracket = "]",
                 },
                 .color = tint.fg(.{ .ansi4 = .cyan }),
-                .template = if (total_size != null)
+                .template = if (totalSize != null)
                     "{prefix} {bar} {percent}% | {elapsed} | {speed} | ETA: {eta}"
                 else
                     "{prefix} {bar} | {elapsed} | {speed}",
@@ -1126,115 +1118,115 @@ pub const ProgressTracker = struct {
             }
         }
 
-        if (self.options.on_progress) |cb| {
+        if (self.options.onProgress) |cb| {
             cb(.{
                 .url = self.url,
                 .destination = self.destination,
-                .downloaded_bytes = 0,
-                .total_bytes = total_size,
-                .percentage = if (total_size != null) 0.0 else null,
-                .speed_bps = 0.0,
-                .eta_seconds = null,
-                .elapsed_ms = 0,
-                .status_code = 200,
+                .downloadedBytes = 0,
+                .totalBytes = totalSize,
+                .percentage = if (totalSize != null) 0.0 else null,
+                .speedBps = 0.0,
+                .etaSeconds = null,
+                .elapsedMs = 0,
+                .statusCode = 200,
                 .state = .starting,
-            }, self.options.user_data);
+            }, self.options.userData);
         }
     }
 
-    pub fn update(self: *ProgressTracker, downloaded_bytes: u64) void {
+    pub fn update(self: *ProgressTracker, downloadedBytes: u64) void {
         const now = clock.millisNow();
-        const elapsed_total_s = @as(f64, @floatFromInt(now - self.start_time)) / 1000.0;
-        const speed_bps = if (elapsed_total_s > 0.01) @as(f64, @floatFromInt(downloaded_bytes)) / elapsed_total_s else 0.0;
+        const elapsed_total_s = @as(f64, @floatFromInt(now - self.startTime)) / 1000.0;
+        const speed_bps = if (elapsed_total_s > 0.01) @as(f64, @floatFromInt(downloadedBytes)) / elapsed_total_s else 0.0;
 
-        var eta_s: ?u64 = null;
+        var etaS: ?u64 = null;
         var percent: ?f32 = null;
-        if (self.total_bytes) |tot| {
+        if (self.totalBytes) |tot| {
             if (tot > 0) {
-                percent = @as(f32, @floatFromInt(downloaded_bytes)) / @as(f32, @floatFromInt(tot)) * 100.0;
-                if (speed_bps > 0 and downloaded_bytes < tot) {
-                    eta_s = @intFromFloat(@as(f64, @floatFromInt(tot - downloaded_bytes)) / speed_bps);
+                percent = @as(f32, @floatFromInt(downloadedBytes)) / @as(f32, @floatFromInt(tot)) * 100.0;
+                if (speed_bps > 0 and downloadedBytes < tot) {
+                    etaS = @intFromFloat(@as(f64, @floatFromInt(tot - downloadedBytes)) / speed_bps);
                 }
             }
         }
 
-        self.last_bytes = downloaded_bytes;
+        self.lastBytes = downloadedBytes;
 
         if (self.bar) |*b| {
-            b.setProgress(downloaded_bytes);
+            b.setProgress(downloadedBytes);
         }
 
-        if (self.options.on_progress) |cb| {
+        if (self.options.onProgress) |cb| {
             cb(.{
                 .url = self.url,
                 .destination = self.destination,
-                .downloaded_bytes = downloaded_bytes,
-                .total_bytes = self.total_bytes,
+                .downloadedBytes = downloadedBytes,
+                .totalBytes = self.totalBytes,
                 .percentage = percent,
-                .speed_bps = speed_bps,
-                .eta_seconds = eta_s,
-                .elapsed_ms = @intCast(@max(0, now - self.start_time)),
-                .status_code = 200,
+                .speedBps = speed_bps,
+                .etaSeconds = etaS,
+                .elapsedMs = @intCast(@max(0, now - self.startTime)),
+                .statusCode = 200,
                 .state = .downloading,
-            }, self.options.user_data);
+            }, self.options.userData);
         }
     }
 
     pub fn finish(self: *ProgressTracker) void {
-        const final_bytes = if (self.total_bytes) |tot| tot else self.last_bytes;
+        const final_bytes = if (self.totalBytes) |tot| tot else self.lastBytes;
         if (self.bar) |*b| {
             b.setProgress(final_bytes);
             b.finish(.{ .clear = false, .newline = true });
         }
-        if (self.options.on_progress) |cb| {
+        if (self.options.onProgress) |cb| {
             cb(.{
                 .url = self.url,
                 .destination = self.destination,
-                .downloaded_bytes = final_bytes,
-                .total_bytes = self.total_bytes orelse final_bytes,
+                .downloadedBytes = final_bytes,
+                .totalBytes = self.totalBytes orelse final_bytes,
                 .percentage = 100.0,
-                .speed_bps = 0.0,
-                .eta_seconds = 0,
-                .elapsed_ms = @intCast(@max(0, clock.millisNow() - self.start_time)),
-                .status_code = 200,
+                .speedBps = 0.0,
+                .etaSeconds = 0,
+                .elapsedMs = @intCast(@max(0, clock.millisNow() - self.startTime)),
+                .statusCode = 200,
                 .state = .completed,
-            }, self.options.user_data);
+            }, self.options.userData);
         }
     }
 
     pub fn fail(self: *ProgressTracker) void {
         if (self.bar) |*b| b.fail("Download failed");
-        if (self.options.on_progress) |cb| {
+        if (self.options.onProgress) |cb| {
             cb(.{
                 .url = self.url,
                 .destination = self.destination,
-                .downloaded_bytes = 0,
-                .total_bytes = self.total_bytes,
+                .downloadedBytes = 0,
+                .totalBytes = self.totalBytes,
                 .percentage = null,
-                .speed_bps = 0.0,
-                .eta_seconds = null,
-                .elapsed_ms = @intCast(@max(0, clock.millisNow() - self.start_time)),
-                .status_code = 500,
+                .speedBps = 0.0,
+                .etaSeconds = null,
+                .elapsedMs = @intCast(@max(0, clock.millisNow() - self.startTime)),
+                .statusCode = 500,
                 .state = .failed,
-            }, self.options.user_data);
+            }, self.options.userData);
         }
     }
 
     pub fn cancel(self: *ProgressTracker) void {
         if (self.bar) |*b| b.fail("Download cancelled");
-        if (self.options.on_progress) |cb| {
+        if (self.options.onProgress) |cb| {
             cb(.{
                 .url = self.url,
                 .destination = self.destination,
-                .downloaded_bytes = 0,
-                .total_bytes = self.total_bytes,
+                .downloadedBytes = 0,
+                .totalBytes = self.totalBytes,
                 .percentage = null,
-                .speed_bps = 0.0,
-                .eta_seconds = null,
-                .elapsed_ms = @intCast(@max(0, clock.millisNow() - self.start_time)),
-                .status_code = 499,
+                .speedBps = 0.0,
+                .etaSeconds = null,
+                .elapsedMs = @intCast(@max(0, clock.millisNow() - self.startTime)),
+                .statusCode = 499,
                 .state = .cancelled,
-            }, self.options.user_data);
+            }, self.options.userData);
         }
     }
 };
@@ -1244,9 +1236,9 @@ pub const ProgressTracker = struct {
 pub const UpdateOptions = struct {
     verify: VerifyOptions = .{},
     progress: ProgressMode = .auto,
-    backup_existing: bool = true,
-    backup_suffix: []const u8 = ".bak",
-    cancel_flag: ?*const std.atomic.Value(bool) = null,
+    backupExisting: bool = true,
+    backupSuffix: []const u8 = ".bak",
+    cancelFlag: ?*const std.atomic.Value(bool) = null,
 };
 
 /// Safely updates an existing executable or asset on disk with rollback preservation.
@@ -1254,12 +1246,12 @@ pub fn updateFile(
     allocator: Allocator,
     client: *Client,
     url: []const u8,
-    target_path: []const u8,
+    targetPath: []const u8,
     options: UpdateOptions,
 ) DownloadError!DownloadResult {
     var dl = Downloader.init(allocator, client);
 
-    const temp_target = std.fmt.allocPrint(allocator, "{s}.update-tmp", .{target_path}) catch return DownloadError.OutOfMemory;
+    const temp_target = std.fmt.allocPrint(allocator, "{s}.update-tmp", .{targetPath}) catch return DownloadError.OutOfMemory;
     defer allocator.free(temp_target);
 
     // 1. Download to temporary file
@@ -1268,29 +1260,29 @@ pub fn updateFile(
         .progress = options.progress,
         .atomic = true,
         .existing = .overwrite,
-        .cancel_flag = options.cancel_flag,
+        .cancelFlag = options.cancelFlag,
     });
 
     // 2. Backup existing file if requested
-    var backup_path: ?[]const u8 = null;
-    if (options.backup_existing) {
-        backup_path = std.fmt.allocPrint(allocator, "{s}{s}", .{ target_path, options.backup_suffix }) catch null;
-        if (backup_path) |bp| {
-            _ = FileOps.copyFile(target_path, bp);
+    var backupPath: ?[]const u8 = null;
+    if (options.backupExisting) {
+        backupPath = std.fmt.allocPrint(allocator, "{s}{s}", .{ targetPath, options.backupSuffix }) catch null;
+        if (backupPath) |bp| {
+            _ = FileOps.copyFile(targetPath, bp);
         }
     }
-    defer if (backup_path) |bp| allocator.free(bp);
+    defer if (backupPath) |bp| allocator.free(bp);
 
     // 3. Atomically replace target with verified new file
-    if (!FileOps.renameFile(temp_target, target_path)) {
+    if (!FileOps.renameFile(temp_target, targetPath)) {
         return DownloadError.FileRenameFailed;
     }
 
     var final_res = res;
-    const len = @min(target_path.len, final_res.destination_buf.len);
-    @memcpy(final_res.destination_buf[0..len], target_path[0..len]);
-    final_res.destination_len = len;
-    final_res.destination = final_res.destination_buf[0..len];
+    const len = @min(targetPath.len, final_res.destinationBuf.len);
+    @memcpy(final_res.destinationBuf[0..len], targetPath[0..len]);
+    final_res.destinationLen = len;
+    final_res.destination = final_res.destinationBuf[0..len];
     return final_res;
 }
 
@@ -1301,13 +1293,13 @@ pub const FtpDownloadOptions = struct {
     port: u16 = 21,
     user: []const u8 = "anonymous",
     password: []const u8 = "anonymous@",
-    remote_path: []const u8,
-    destination_path: []const u8,
+    remotePath: []const u8,
+    destinationPath: []const u8,
     verify: VerifyOptions = .{},
     progress: ProgressMode = .auto,
     existing: ExistingFilePolicy = .overwrite,
     atomic: bool = true,
-    cancel_flag: ?*const std.atomic.Value(bool) = null,
+    cancelFlag: ?*const std.atomic.Value(bool) = null,
 };
 
 /// Downloads a file over FTP with progress reporting and checksum verification.
@@ -1315,11 +1307,11 @@ pub fn ftpDownload(
     allocator: Allocator,
     options: FtpDownloadOptions,
 ) DownloadError!DownloadResult {
-    const start_time = clock.millisNow();
-    const dest = resolveDestination(allocator, options.destination_path, options.remote_path, null) catch return DownloadError.OutOfMemory;
+    const startTime = clock.millisNow();
+    const dest = resolveDestination(allocator, options.destinationPath, options.remotePath, null) catch return DownloadError.OutOfMemory;
     defer allocator.free(dest);
 
-    var ftp = ftp_client.Client.connectWithAlloc(allocator, .{
+    var ftp = ftpClient.Client.connectWithAlloc(allocator, .{
         .host = options.host,
         .port = options.port,
         .user = options.user,
@@ -1332,10 +1324,10 @@ pub fn ftpDownload(
         else => return DownloadError.AuthenticationFailed,
     };
 
-    const remote_size = ftp.size(options.remote_path) catch null;
+    const remote_size = ftp.size(options.remotePath) catch null;
 
     var threaded: std.Io.Threaded = .init_single_threaded;
-    var tracker = ProgressTracker.init(allocator, threaded.io(), options.remote_path, dest, .{
+    var tracker = ProgressTracker.init(allocator, threaded.io(), options.remotePath, dest, .{
         .progress = options.progress,
         .verify = options.verify,
     });
@@ -1345,23 +1337,23 @@ pub fn ftpDownload(
     const temp_dest = if (options.atomic) try std.fmt.allocPrint(allocator, "{s}.ftp-part", .{dest}) else try allocator.dupe(u8, dest);
     defer allocator.free(temp_dest);
 
-    const file_handle = FileOps.createTruncate(temp_dest) orelse return DownloadError.FileCreateFailed;
-    defer FileOps.close(file_handle);
+    const fileHandle = FileOps.createTruncate(temp_dest) orelse return DownloadError.FileCreateFailed;
+    defer FileOps.close(fileHandle);
 
     var hasher = Hasher.init(options.verify);
 
     const Context = struct {
-        h_file: FileOps.Handle,
+        hFile: FileOps.Handle,
         h: *Hasher,
         t: *ProgressTracker,
         written: u64 = 0,
         cancel: ?*const std.atomic.Value(bool),
 
-        fn sink(ctx: *@This(), chunk: []const u8) ftp_client.FtpError!void {
+        fn sink(ctx: *@This(), chunk: []const u8) ftpClient.FtpError!void {
             if (ctx.cancel) |cf| {
-                if (cf.load(.acquire)) return ftp_client.FtpError.ProtocolError;
+                if (cf.load(.acquire)) return ftpClient.FtpError.ProtocolError;
             }
-            if (!FileOps.writeAll(ctx.h_file, chunk)) return ftp_client.FtpError.WriteFailed;
+            if (!FileOps.writeAll(ctx.hFile, chunk)) return ftpClient.FtpError.WriteFailed;
             ctx.h.update(chunk);
             ctx.written += chunk.len;
             ctx.t.update(ctx.written);
@@ -1369,16 +1361,16 @@ pub fn ftpDownload(
     };
 
     var ctx = Context{
-        .h_file = file_handle,
+        .hFile = fileHandle,
         .h = &hasher,
         .t = &tracker,
-        .cancel = options.cancel_flag,
+        .cancel = options.cancelFlag,
     };
 
-    ftp.download(options.remote_path, &ctx, Context.sink) catch |e| {
+    ftp.download(options.remotePath, &ctx, Context.sink) catch |e| {
         tracker.fail();
         if (options.atomic) _ = FileOps.deleteFile(temp_dest);
-        if (e == ftp_client.FtpError.ConnectFailed) return DownloadError.ConnectionFailed;
+        if (e == ftpClient.FtpError.ConnectFailed) return DownloadError.ConnectionFailed;
         return DownloadError.HttpError;
     };
 
@@ -1396,12 +1388,12 @@ pub fn ftpDownload(
 
     return .{
         .destination = dest,
-        .downloaded_bytes = ctx.written,
-        .total_bytes = remote_size,
-        .elapsed_ms = @intCast(clock.millisNow() - start_time),
-        .status_code = 226,
+        .downloadedBytes = ctx.written,
+        .totalBytes = remote_size,
+        .elapsedMs = @intCast(clock.millisNow() - startTime),
+        .statusCode = 226,
         .verified = true,
-        .sha256_hex = hasher.finalSha256Hex(),
+        .sha256Hex = hasher.finalSha256Hex(),
     };
 }
 
@@ -1420,20 +1412,19 @@ pub fn lookupFileInfoWithClient(
     options: DownloadOptions,
 ) DownloadError!RemoteFileInfo {
     // 1. Try HEAD request first with Connection: close and sensible timeout
-    const default_timeout: u64 = options.timeout_ms orelse 15000;
-    var head_headers: std.ArrayList(Header) = .empty;
-    defer head_headers.deinit(client.allocator);
+    const defaultTimeout: u64 = options.timeoutMs orelse 15000;
+    var headHeaders: std.ArrayList(Header) = .empty;
+    defer headHeaders.deinit(client.allocator);
     for (options.headers) |h| {
-        head_headers.append(client.allocator, h) catch return DownloadError.OutOfMemory;
+        headHeaders.append(client.allocator, h) catch return DownloadError.OutOfMemory;
     }
-    head_headers.append(client.allocator, .{ .name = "Connection", .value = "close" }) catch return DownloadError.OutOfMemory;
+    headHeaders.append(client.allocator, .{ .name = "Connection", .value = "close" }) catch return DownloadError.OutOfMemory;
 
-    var head_resp = client.head(.{
-        .url = url,
-        .headers = head_headers.items,
-        .follow_redirects = options.follow_redirects,
-        .max_redirects = options.max_redirects,
-        .timeout_ms = default_timeout,
+    var head_resp = client.head(url, .{
+        .headers = headHeaders.items,
+        .followRedirects = options.followRedirects,
+        .maxRedirects = options.maxRedirects,
+        .timeoutMs = defaultTimeout,
     }) catch |err| switch (err) {
         error.ConnectFailed => return DownloadError.ConnectionFailed,
         error.TooManyRedirects => return DownloadError.TooManyRedirects,
@@ -1446,20 +1437,19 @@ pub fn lookupFileInfoWithClient(
     }
 
     // 2. Fallback to GET with Range: bytes=0-0 if HEAD method is not allowed
-    var get_headers: std.ArrayList(Header) = .empty;
-    defer get_headers.deinit(client.allocator);
+    var getHeaders: std.ArrayList(Header) = .empty;
+    defer getHeaders.deinit(client.allocator);
     for (options.headers) |h| {
-        get_headers.append(client.allocator, h) catch return DownloadError.OutOfMemory;
+        getHeaders.append(client.allocator, h) catch return DownloadError.OutOfMemory;
     }
-    get_headers.append(client.allocator, .{ .name = "Range", .value = "bytes=0-0" }) catch return DownloadError.OutOfMemory;
-    get_headers.append(client.allocator, .{ .name = "Connection", .value = "close" }) catch return DownloadError.OutOfMemory;
+    getHeaders.append(client.allocator, .{ .name = "Range", .value = "bytes=0-0" }) catch return DownloadError.OutOfMemory;
+    getHeaders.append(client.allocator, .{ .name = "Connection", .value = "close" }) catch return DownloadError.OutOfMemory;
 
-    var get_resp = client.get(.{
-        .url = url,
-        .headers = get_headers.items,
-        .follow_redirects = options.follow_redirects,
-        .max_redirects = options.max_redirects,
-        .timeout_ms = default_timeout,
+    var get_resp = client.get(url, .{
+        .headers = getHeaders.items,
+        .followRedirects = options.followRedirects,
+        .maxRedirects = options.maxRedirects,
+        .timeoutMs = defaultTimeout,
     }) catch |err| switch (err) {
         error.ConnectFailed => return DownloadError.ConnectionFailed,
         error.TooManyRedirects => return DownloadError.TooManyRedirects,
@@ -1470,72 +1460,72 @@ pub fn lookupFileInfoWithClient(
     return parseRemoteFileInfo(url, get_resp.status, get_resp.headers);
 }
 
-fn parseRemoteFileInfo(source_url: []const u8, status: u16, headers: []const Header) RemoteFileInfo {
+fn parseRemoteFileInfo(sourceUrl: []const u8, status: u16, headers: []const Header) RemoteFileInfo {
     var info = RemoteFileInfo{
         .status = status,
     };
 
-    const ulen = @min(source_url.len, info.url_buf.len);
-    @memcpy(info.url_buf[0..ulen], source_url[0..ulen]);
-    info.url_len = ulen;
+    const ulen = @min(sourceUrl.len, info.urlBuf.len);
+    @memcpy(info.urlBuf[0..ulen], sourceUrl[0..ulen]);
+    info.urlLen = ulen;
 
-    var content_disposition: ?[]const u8 = null;
+    var contentDisposition: ?[]const u8 = null;
 
     for (headers) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "Content-Length")) {
-            info.file_size = std.fmt.parseInt(u64, std.mem.trim(u8, h.value, " \t"), 10) catch null;
+            info.fileSize = std.fmt.parseInt(u64, std.mem.trim(u8, h.value, " \t"), 10) catch null;
         } else if (std.ascii.eqlIgnoreCase(h.name, "Content-Range")) {
             if (std.mem.lastIndexOfScalar(u8, h.value, '/')) |slash_idx| {
                 const total_part = std.mem.trim(u8, h.value[slash_idx + 1 ..], " \t");
                 if (!std.mem.eql(u8, total_part, "*")) {
                     if (std.fmt.parseInt(u64, total_part, 10)) |tot| {
-                        info.file_size = tot;
+                        info.fileSize = tot;
                     } else |_| {}
                 }
             }
         } else if (std.ascii.eqlIgnoreCase(h.name, "Content-Disposition")) {
-            content_disposition = h.value;
+            contentDisposition = h.value;
         } else if (std.ascii.eqlIgnoreCase(h.name, "Content-Type")) {
             const val = std.mem.trim(u8, h.value, " \t");
-            const len = @min(val.len, info.content_type_buf.len);
-            @memcpy(info.content_type_buf[0..len], val[0..len]);
-            info.content_type_len = len;
+            const len = @min(val.len, info.contentTypeBuf.len);
+            @memcpy(info.contentTypeBuf[0..len], val[0..len]);
+            info.contentTypeLen = len;
         } else if (std.ascii.eqlIgnoreCase(h.name, "ETag")) {
             const val = std.mem.trim(u8, h.value, " \t");
-            const len = @min(val.len, info.etag_buf.len);
-            @memcpy(info.etag_buf[0..len], val[0..len]);
-            info.etag_len = len;
+            const len = @min(val.len, info.etagBuf.len);
+            @memcpy(info.etagBuf[0..len], val[0..len]);
+            info.etagLen = len;
         } else if (std.ascii.eqlIgnoreCase(h.name, "Last-Modified")) {
             const val = std.mem.trim(u8, h.value, " \t");
-            const len = @min(val.len, info.last_modified_buf.len);
-            @memcpy(info.last_modified_buf[0..len], val[0..len]);
-            info.last_modified_len = len;
+            const len = @min(val.len, info.lastModifiedBuf.len);
+            @memcpy(info.lastModifiedBuf[0..len], val[0..len]);
+            info.lastModifiedLen = len;
         } else if (std.ascii.eqlIgnoreCase(h.name, "Accept-Ranges")) {
             if (std.ascii.indexOfIgnoreCase(h.value, "bytes") != null) {
-                info.accepts_ranges = true;
+                info.acceptsRanges = true;
             }
         } else if (std.ascii.eqlIgnoreCase(h.name, "Content-Encoding")) {
             const val = std.mem.trim(u8, h.value, " \t");
-            const len = @min(val.len, info.content_encoding_buf.len);
-            @memcpy(info.content_encoding_buf[0..len], val[0..len]);
-            info.content_encoding_len = len;
+            const len = @min(val.len, info.contentEncodingBuf.len);
+            @memcpy(info.contentEncodingBuf[0..len], val[0..len]);
+            info.contentEncodingLen = len;
         }
     }
 
     var fname: []const u8 = "downloaded_file";
-    if (content_disposition) |cd| {
+    if (contentDisposition) |cd| {
         if (extractFilenameFromContentDisposition(cd)) |cd_name| {
             fname = sanitizeFilename(cd_name);
         } else {
-            fname = sanitizeFilename(source_url);
+            fname = sanitizeFilename(sourceUrl);
         }
     } else {
-        fname = sanitizeFilename(source_url);
+        fname = sanitizeFilename(sourceUrl);
     }
 
-    const flen = @min(fname.len, info.file_name_buf.len);
-    @memcpy(info.file_name_buf[0..flen], fname[0..flen]);
-    info.file_name_len = flen;
+    const flen = @min(fname.len, info.fileNameBuf.len);
+    @memcpy(info.fileNameBuf[0..flen], fname[0..flen]);
+    info.fileNameLen = flen;
 
     return info;
 }
@@ -1573,14 +1563,14 @@ test "parse checksum file formats" {
 test "streaming hasher calculates sha256 and verifies successfully" {
     const data = "hello world streaming download verification";
     var hasher = Hasher.init(.{
-        .sha256 = "b9f71c4ffbe32b509bc052dfac2bfabfb268e3cc00d603a19992ad3ccfe2a632",
+        .sha256 = "456fa02ee650c20d3cd882a644401888caccad7106e742558fecc36946ca3987",
     });
     hasher.update(data[0..10]);
     hasher.update(data[10..25]);
     hasher.update(data[25..]);
 
     try hasher.verify(.{
-        .sha256 = "b9f71c4ffbe32b509bc052dfac2bfabfb268e3cc00d603a19992ad3ccfe2a632",
+        .sha256 = "456fa02ee650c20d3cd882a644401888caccad7106e742558fecc36946ca3987",
     });
 
     try std.testing.expectError(DownloadError.ChecksumMismatch, hasher.verify(.{
@@ -1606,11 +1596,11 @@ test "custom progress callback receives events" {
         downloaded: u64 = 0,
         completed: bool = false,
 
-        fn onProgress(info: ProgressInfo, user_data: ?*anyopaque) void {
-            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+        fn onProgress(info: ProgressInfo, userData: ?*anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(userData.?));
             self.called = true;
-            self.total = info.total_bytes;
-            self.downloaded = info.downloaded_bytes;
+            self.total = info.totalBytes;
+            self.downloaded = info.downloadedBytes;
             if (info.state == .completed) {
                 self.completed = true;
             }
@@ -1621,8 +1611,8 @@ test "custom progress callback receives events" {
     var state = CustomState{};
     var tracker = ProgressTracker.init(std.testing.allocator, threaded.io(), "http://example.com/test.bin", "test.bin", .{
         .progress = .custom,
-        .on_progress = CustomState.onProgress,
-        .user_data = &state,
+        .onProgress = CustomState.onProgress,
+        .userData = &state,
     });
     defer tracker.deinit();
 
@@ -1638,9 +1628,7 @@ test "custom progress callback receives events" {
 }
 
 test "existing file policy resume check" {
-    try std.testing.expect(ExistingFilePolicy.resume_download.isResume());
-    try std.testing.expect(ExistingFilePolicy.continue_partial.isResume());
-    try std.testing.expect(ExistingFilePolicy.@"resume".isResume());
+    try std.testing.expect(ExistingFilePolicy.resumePartial.isResume());
     try std.testing.expect(!ExistingFilePolicy.overwrite.isResume());
     try std.testing.expect(!ExistingFilePolicy.fail.isResume());
     try std.testing.expect(!ExistingFilePolicy.skip.isResume());
@@ -1649,11 +1637,11 @@ test "existing file policy resume check" {
 test "remote file info size formatting" {
     var info = RemoteFileInfo{
         .status = 200,
-        .file_size = 15 * 1024 * 1024 + 500 * 1024,
+        .fileSize = 15 * 1024 * 1024 + 500 * 1024,
     };
     const sample_name = "file.zip";
-    @memcpy(info.file_name_buf[0..sample_name.len], sample_name);
-    info.file_name_len = sample_name.len;
+    @memcpy(info.fileNameBuf[0..sample_name.len], sample_name);
+    info.fileNameLen = sample_name.len;
 
     var buf: [32]u8 = undefined;
     const formatted = info.formatSize(&buf);

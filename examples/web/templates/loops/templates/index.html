@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>{{ title }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; }
+    h1 { color: #38bdf8; }
+    table { width: 100%; max-width: 700px; border-collapse: collapse; margin-top: 1rem; }
+    th, td { border: 1px solid #334155; padding: 0.75rem 1rem; text-align: left; }
+    th { background: #1e293b; color: #94a3b8; }
+    tr:nth-child(even) { background: #1e293b; }
+    .badge { padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.85rem; }
+    .online { background: #14532d; color: #86efac; }
+  </style>
+</head>
+<body>
+  <h1>{{ title }}</h1>
+  <p>Displaying cluster instances using template for-loops.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Service</th>
+        <th>Host</th>
+        <th>Port</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in services %}
+      <tr>
+        <td><strong>{{ s.name }}</strong></td>
+        <td>{{ s.host }}</td>
+        <td>{{ s.port }}</td>
+        <td><span class="badge online">{{ s.status }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</body>
+</html>

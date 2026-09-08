@@ -11,6 +11,7 @@ Demonstrates `server.preRoute()` for hooks that run before route matching, and `
 ## Demo Program
 
 ```zig
+    const io = std.Io.Threaded.global_single_threaded.io();
 // Pre-route hook — runs before route matching
 fn preRouteHook(ctx: *httpx.Context) anyerror!void {
     const method = @tagName(ctx.request.method);
@@ -26,7 +27,7 @@ fn notFoundHandler(ctx: *httpx.Context) !httpx.Response {
     });
 }
 
-var server = httpx.Server.initWithConfig(allocator, .{
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
 });

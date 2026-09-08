@@ -11,14 +11,15 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // 1. High-level Client configured for HTTP/3
-    var client = try httpx.Client.init(allocator, .{
-        .http_version = .h3,
+    var client = httpx.Client.init(allocator, io, .{
+        .httpVersion = .http3,
     });
     defer client.deinit();
 
-    std.debug.print("1. HTTP/3 client configured: protocol={s}\n", .{@tagName(client.config.http_version.?)});
+    std.debug.print("1. HTTP/3 client configured: protocol={s}\n", .{@tagName(client.config.httpVersion.?)});
 
     // 2. Client & Server HTTP/3 Connection Engines (RFC 9114)
     var client_conn = httpx.http3.Connection.init(allocator, .client);

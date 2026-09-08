@@ -4,12 +4,12 @@
 //! FTP, and QUIC callers never re-implement proxy selection:
 //!
 //!   (none)        -> .direct            resolve locally, connect directly
-//!   http://proxy  -> .http_connect      CONNECT tunnel via HTTP proxy
-//!   socks5://...  -> .socks5 { remote_dns = false }  local DNS, then proxy
-//!   socks5h://... -> .socks5 { remote_dns = true }   proxy resolves DNS
+//!   http://proxy  -> .httpConnect       CONNECT tunnel via HTTP proxy
+//!   socks5://...  -> .socks5 { remoteDns = false }  local DNS, then proxy
+//!   socks5h://... -> .socks5 { remoteDns = true }   proxy resolves DNS
 //!
 //! SOCKS5H contract: `DialStrategy` carries the hostname UNRESOLVED and
-//! `remote_dns` tells socks5.connect to send ATYP=domain. Callers must
+//! `remoteDns` tells socks5.connect to send ATYP=domain. Callers must
 //! not consult the local resolver when `needsLocalDns()` is false.
 
 const std = @import("std");
@@ -37,33 +37,33 @@ pub const Scheme = enum {
 pub const ProxyKind = enum {
     direct,
     /// HTTP CONNECT tunnel through an HTTP proxy.
-    http_connect,
+    httpConnect,
     socks5,
 };
 
 pub const DialStrategy = struct {
     kind: ProxyKind,
-    proxy_host: []const u8 = "",
-    proxy_port: u16 = 0,
+    proxyHost: []const u8 = "",
+    proxyPort: u16 = 0,
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
     /// SOCKS5H flag: delegate destination resolution to the proxy.
-    remote_dns: bool = false,
+    remoteDns: bool = false,
 
     /// True when the CALLER must not resolve dest_host locally
     /// (SOCKS5H semantics).
     pub fn needsLocalDns(self: *const DialStrategy) bool {
         return switch (self.kind) {
             .direct => true,
-            .http_connect => true, // CONNECT target may be host:port; proxy resolves
-            .socks5 => !self.remote_dns,
+            .httpConnect => true, // CONNECT target may be host:port; proxy resolves
+            .socks5 => !self.remoteDns,
         };
     }
 
     /// True when the destination host string is forwarded to a proxy that
     /// performs name resolution.
     pub fn proxiesDns(self: *const DialStrategy) bool {
-        return self.kind == .socks5 and self.remote_dns;
+        return self.kind == .socks5 and self.remoteDns;
     }
 };
 
@@ -72,7 +72,7 @@ pub const DialStrategy = struct {
 ///   socks5://[user:pass@]host:port
 ///   http://host:port
 /// Returns null when the text is not a recognized proxy URL.
-pub fn parseProxyUrl(url: []const u8) ?struct { kind: ProxyKind, host: []const u8, port: u16, username: ?[]const u8, password: ?[]const u8, remote_dns: bool } {
+pub fn parseProxyUrl(url: []const u8) ?struct { kind: ProxyKind, host: []const u8, port: u16, username: ?[]const u8, password: ?[]const u8, remoteDns: bool } {
     if (url.len == 0) return null;
 
     var kind: ProxyKind = undefined;
@@ -87,7 +87,7 @@ pub fn parseProxyUrl(url: []const u8) ?struct { kind: ProxyKind, host: []const u
         kind = .socks5;
         rest = url["socks5://".len..];
     } else if (std.mem.startsWith(u8, url, "http://")) {
-        kind = .http_connect;
+        kind = .httpConnect;
         rest = url["http://".len..];
     } else {
         return null;
@@ -109,7 +109,7 @@ pub fn parseProxyUrl(url: []const u8) ?struct { kind: ProxyKind, host: []const u
 
     var host = rest;
     var port: u16 = switch (kind) {
-        .http_connect => 80,
+        .httpConnect => 80,
         else => 1080,
     };
     if (std.mem.lastIndexOfScalar(u8, rest, ':')) |colon| {
@@ -132,25 +132,25 @@ pub fn parseProxyUrl(url: []const u8) ?struct { kind: ProxyKind, host: []const u
         .port = port,
         .username = username,
         .password = password,
-        .remote_dns = remote,
+        .remoteDns = remote,
     };
 }
 
 /// Chooses the dial strategy for a destination URL scheme + optional proxy.
 pub fn selectStrategy(
-    proxy_url: ?[]const u8,
-    dest_scheme: Scheme,
+    proxyUrl: ?[]const u8,
+    destScheme: Scheme,
 ) DialStrategy {
-    _ = dest_scheme;
-    if (proxy_url) |u| {
+    _ = destScheme;
+    if (proxyUrl) |u| {
         if (parseProxyUrl(u)) |p| {
             return .{
                 .kind = p.kind,
-                .proxy_host = p.host,
-                .proxy_port = p.port,
+                .proxyHost = p.host,
+                .proxyPort = p.port,
                 .username = p.username,
                 .password = p.password,
-                .remote_dns = p.remote_dns,
+                .remoteDns = p.remoteDns,
             };
         }
     }
@@ -162,7 +162,7 @@ pub fn selectStrategy(
 test "parse socks5h url carries remote-dns flag" {
     const p = parseProxyUrl("socks5h://u:p@proxy.corp:1080").?;
     try std.testing.expectEqual(ProxyKind.socks5, p.kind);
-    try std.testing.expect(p.remote_dns);
+    try std.testing.expect(p.remoteDns);
     try std.testing.expectEqualStrings("proxy.corp", p.host);
     try std.testing.expectEqual(@as(u16, 1080), p.port);
     try std.testing.expectEqualStrings("u", p.username.?);
@@ -171,11 +171,11 @@ test "parse socks5h url carries remote-dns flag" {
 
 test "parse socks5 vs http defaults" {
     const s5 = parseProxyUrl("socks5://[::1]:9050").?;
-    try std.testing.expect(!s5.remote_dns);
+    try std.testing.expect(!s5.remoteDns);
     try std.testing.expectEqualStrings("::1", s5.host); // brackets stripped
 
     const hp = parseProxyUrl("http://10.0.0.2:3128").?;
-    try std.testing.expectEqual(ProxyKind.http_connect, hp.kind);
+    try std.testing.expectEqual(ProxyKind.httpConnect, hp.kind);
     try std.testing.expectEqual(@as(u16, 3128), hp.port);
 
     try std.testing.expect(parseProxyUrl("ftp://x") == null);
@@ -201,5 +201,5 @@ test "strategy dns delegation rules" {
 
     // HTTP CONNECT: destination may be a name; proxy resolves it.
     st = selectStrategy("http://p:3128", .https);
-    try std.testing.expect(st.kind == .http_connect);
+    try std.testing.expect(st.kind == .httpConnect);
 }

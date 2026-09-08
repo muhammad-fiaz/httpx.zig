@@ -131,17 +131,15 @@ defer allocator.free(body);
 const ct = try builder.contentType();
 defer allocator.free(ct);
 
-var opts = httpx.RequestOptions.defaults();
-opts.body = body;
-try opts.withHeaders(&.{.{ "Content-Type", ct }});
-
-var resp = try client.post("https://example.com/upload", opts);
+var resp = try client.post("https://example.com/upload", .{ .body = body,
+    .headers = &.{.{ "Content-Type", ct }},
+});
 defer resp.deinit();
 ```
 
-### Fluent Client-Side API
+### Direct Multipart Fields & Files
 
-Instead of manually building and cleaning up the body, you can pass fields and files directly using `RequestOptions` for automatic formatting and optional MIME type resolution:
+Instead of manually building and cleaning up the body, you can pass fields and files directly using `RequestOptions`:
 
 ```zig
 const fields = [_]httpx.MultipartField{
@@ -151,11 +149,9 @@ const files = [_]httpx.MultipartFile{
     .{ .name = "avatar", .filename = "photo.png", .data = png_bytes },
 };
 
-const opts = httpx.RequestOptions.defaults()
-    .withMultipartFields(&fields)
-    .withMultipartFiles(&files);
-
-var resp = try client.post("https://example.com/upload", opts);
+var resp = try client.post("https://example.com/upload", .{ .multipart_fields = &fields,
+    .multipart_files = &files,
+});
 defer resp.deinit();
 ```
 
@@ -193,8 +189,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = httpx.Server.init(allocator);
+    var server = try httpx.Server.init(allocator, io, .{});
     defer server.deinit();
 
     try server.post("/upload", uploadHandler);
@@ -256,11 +253,9 @@ while (offset < file_bytes.len) {
         .{ .name = "data", .filename = "chunk.bin", .data = slice },
     };
 
-    const opts = httpx.RequestOptions.defaults()
-        .withMultipartFields(&fields)
-        .withMultipartFiles(&files);
-
-    var resp = try client.post(upload_url, opts);
+    var resp = try client.post(upload_url, .{ .multipart_fields = &fields,
+        .multipart_files = &files,
+    });
     defer resp.deinit();
 
     offset = end;

@@ -18,15 +18,18 @@ The `Server` struct manages the listener, router, and middleware processing.
 ### Initialization
 
 ```zig
+const std = @import("std");
 const httpx = @import("httpx");
 
+const io = std.Io.Threaded.global_single_threaded.io();
+
 // Initialize with default config
-var server = httpx.Server.init(allocator);
+var server = try httpx.Server.init(allocator, io, .{});
 defer server.deinit();
 
 // Shorthand aliases
-var server = httpx.createServer();                           // uses page_allocator
-var server = httpx.createServerWithConfig(allocator, .{     // explicit allocator + config
+var server = try httpx.createServer(); // uses page_allocator + default io
+var server = try httpx.createServerWithConfig(allocator, .{ // explicit allocator + config
     .port = 3000,
     .host = "0.0.0.0",
 });
@@ -42,7 +45,7 @@ try httpx.serveWithConfig(allocator, .{
 }, "/hello", helloHandler);
 
 // Initialize with custom config
-var server = httpx.Server.initWithConfig(allocator, .{
+var server = try httpx.Server.init(allocator, io, .{
     .port = 3000,
     .host = "0.0.0.0",
     .port_conflict = .increment,
@@ -65,8 +68,11 @@ var server = httpx.Server.initWithConfig(allocator, .{
 | `keep_alive` | `bool` | `true` | Enable HTTP Keep-Alive. |
 | `max_connections` | `u32` | `1000` | Max concurrent connections. |
 | `threads` | `u32` | `0` | Number of worker threads. `0` runs requests sequentially (single-threaded). `> 0` routes accepted connections through a task `Executor` thread pool of the specified size. |
-| `http2_enabled` | `bool` | `false` | Enable HTTP/2 server runtime path. |
-| `http3_enabled` | `bool` | `false` | Enable HTTP/3 server runtime path (UDP transport). |
+| `httpVersion` | `?HttpVersion` | `null` | Preferred HTTP version enforcement (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`). |
+| `http10` | `bool` | `true` | Enable HTTP/1.0 server runtime handling. |
+| `http11` | `bool` | `true` | Enable HTTP/1.1 server runtime handling. |
+| `http2` | `bool` | `true` | HTTP/2 cleartext and TLS server runtime path. |
+| `http3` | `bool` | `false` | HTTP/3 server runtime path (UDP transport). |
 | `http2_settings` | `Http2Settings` | `{}` | HTTP/2 SETTINGS frame defaults and limits. |
 | `http3_settings` | `Http3Settings` | `{}` | HTTP/3 SETTINGS defaults (QPACK/field section limits). |
 | `log_fn` | `?LogFn` | `null` | Optional server log callback. Leave unset to use tint.zig colored output to stderr. |
@@ -76,18 +82,18 @@ var server = httpx.Server.initWithConfig(allocator, .{
 | `tls_cert_path` | `?[]const u8` | `null` | Path to the TLS certificate file (PEM format). Required when `tls_enabled = true`. |
 | `tls_key_path` | `?[]const u8` | `null` | Path to the TLS private key file (PEM format). Required when `tls_enabled = true`. |
 | `tls_alpn_protocols` | `[]const []const u8` | `&.{ "h3", "h2", "http/1.1" }` | ALPN protocol list for TLS negotiation (e.g., `&.{"h2", "http/1.1"}`). |
-| `enable_push` | `bool` | `true` | Enable HTTP/2 server push (PUSH_PROMISE) support. |
 
 All `ServerConfig` fields are optional customizations. Omitted fields use the built-in defaults.
 
 ### HTTP/2 and HTTP/3 Runtime Configuration
 
 ```zig
-var server = httpx.Server.initWithConfig(allocator, .{
+    const io = std.Io.Threaded.global_single_threaded.io();
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
-    .http2_enabled = true,
-    .http3_enabled = false,
+    .http2 = true,
+    .http3 = false,
     .http2_settings = .{
         .max_concurrent_streams = 100,
         .initial_window_size = 65_535,
@@ -99,7 +105,8 @@ defer server.deinit();
 ### Port Conflict Handling
 
 ```zig
-var server = httpx.Server.initWithConfig(allocator, .{
+    const io = std.Io.Threaded.global_single_threaded.io();
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
     .port_conflict = .increment,
@@ -166,7 +173,8 @@ By default, HTTPX uses tint.zig for colored console output. Server logs appear a
 
 **Default (tint.zig colored output):**
 ```zig
-var server = httpx.Server.initWithConfig(allocator, .{
+    const io = std.Io.Threaded.global_single_threaded.io();
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
 });
@@ -174,20 +182,22 @@ var server = httpx.Server.initWithConfig(allocator, .{
 
 **Disable all logs:**
 ```zig
-var server = httpx.Server.initWithConfig(allocator, .{
+    const io = std.Io.Threaded.global_single_threaded.io();
+var server = try httpx.Server.init(allocator, io, .{
     .log_level = .err, // Only show errors (or .err + custom .log_fn)
 });
 ```
 
 **Custom logger (structured logging):**
 ```zig
+    const io = std.Io.Threaded.global_single_threaded.io();
 const CustomLogger = struct {
     fn log(level: httpx.LogLevel, message: []const u8) void {
         std.debug.print("[{s}] {s}", .{ @tagName(level), message });
     }
 };
 
-var server = httpx.Server.initWithConfig(allocator, .{
+var server = try httpx.Server.init(allocator, io, .{
     .log_fn = CustomLogger.log,
 });
 ```
@@ -220,14 +230,16 @@ If you want no request logging, omit `httpx.middleware.logger()` and leave `log_
 ### Quick Example
 
 ```zig
+const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = httpx.Server.init(allocator);
+    var server = try httpx.Server.init(allocator, io, .{});
     defer server.deinit();
 
     // Add middleware

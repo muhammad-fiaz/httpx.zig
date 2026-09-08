@@ -27,7 +27,7 @@ pub const Error = error{
     OutOfMemory,
 };
 
-pub const MAX_RESPONSE_BODY_SIZE: usize = 64 * 1024 * 1024;
+pub const maxResponseBodySize: usize = 64 * 1024 * 1024;
 pub const MAX_REQUEST_BODY_SIZE: usize = 16 * 1024 * 1024;
 
 pub const Header = struct { name: []const u8, value: []const u8 };
@@ -160,7 +160,7 @@ pub const Client = struct {
             fn onData(ctx: ?*anyopaque, s: u31, data: []const u8) anyerror!void {
                 const self_: *@This() = @ptrCast(@alignCast(ctx.?));
                 if (s != self_.sid) return;
-                if (self_.body.items.len > MAX_RESPONSE_BODY_SIZE -| data.len)
+                if (self_.body.items.len > maxResponseBodySize -| data.len)
                     return error.ResponseTooLarge;
                 try self_.body.appendSlice(self_.a, data);
             }

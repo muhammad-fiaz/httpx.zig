@@ -13,8 +13,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../../sockets/tcp.zig");
-const address_mod = @import("../../net/address.zig");
-const resolve_mod = @import("../../net/resolve.zig");
+const addressMod = @import("../../net/address.zig");
+const netResolve = @import("../../net/resolve.zig");
 
 pub const Options = struct {
     host: []const u8,
@@ -52,7 +52,7 @@ fn validCommandLine(line: []const u8) bool {
 
 /// Parses one full reply starting at `buf[pos]`; multiline-aware.
 /// Returns the reply plus bytes consumed, or null when more input is needed.
-pub fn parseReplyAt(buf: []const u8, pos: usize) ?struct { reply: Reply, consumed: usize } {
+fn parseReplyAt(buf: []const u8, pos: usize) ?struct { reply: Reply, consumed: usize } {
     if (pos > buf.len) return null;
     const first_end = std.mem.indexOfPos(u8, buf, pos, "\r\n") orelse return null;
     const first_line = buf[pos..first_end];
@@ -83,10 +83,10 @@ pub fn parseReplyAt(buf: []const u8, pos: usize) ?struct { reply: Reply, consume
 }
 
 /// "227 ... (h1,h2,h3,h4,p1,p2)" -> IPv4 + port.
-pub fn parsePasive(reply_text: []const u8) ?struct { ip: [4]u8, port: u16 } {
-    const open = std.mem.indexOfScalar(u8, reply_text, '(') orelse return null;
-    const close_rel = std.mem.indexOfScalar(u8, reply_text[open..], ')') orelse return null;
-    const inner = reply_text[open + 1 ..][0 .. close_rel - 1];
+fn parsePasv(replyText: []const u8) ?struct { ip: [4]u8, port: u16 } {
+    const open = std.mem.indexOfScalar(u8, replyText, '(') orelse return null;
+    const close_rel = std.mem.indexOfScalar(u8, replyText[open..], ')') orelse return null;
+    const inner = replyText[open + 1 ..][0 .. close_rel - 1];
 
     var nums: [6]u16 = undefined;
     var it = std.mem.splitScalar(u8, inner, ',');
@@ -106,10 +106,10 @@ pub fn parsePasive(reply_text: []const u8) ?struct { ip: [4]u8, port: u16 } {
 
 /// "229 ... (|||port|)" -> port. Uses the LAST digit run inside the parens,
 /// which is the port per the EPSV reply format.
-pub fn parseEpsv(reply_text: []const u8) ?u16 {
-    const open = std.mem.lastIndexOfScalar(u8, reply_text, '(') orelse return null;
-    const close = std.mem.indexOfScalarPos(u8, reply_text, open, ')') orelse return null;
-    const inner = reply_text[open + 1 .. close];
+fn parseEpsv(replyText: []const u8) ?u16 {
+    const open = std.mem.lastIndexOfScalar(u8, replyText, '(') orelse return null;
+    const close = std.mem.indexOfScalarPos(u8, replyText, open, ')') orelse return null;
+    const inner = replyText[open + 1 .. close];
 
     var last: ?[]const u8 = null;
     var i: usize = 0;
@@ -129,12 +129,20 @@ pub fn parseEpsv(reply_text: []const u8) ?u16 {
 pub const Client = struct {
     allocator: Allocator,
     ctrl: tcp.Socket,
-    host_copy: [256]u8,
-    host_len: usize,
+    hostCopy: [256]u8,
+    hostLen: usize,
     io: std.Io,
-    owns_io: bool = false,
-    io_threaded: ?*std.Io.Threaded = null,
-    read_buf: std.ArrayList(u8) = .empty,
+    ownsIo: bool = false,
+    ioThreaded: ?*std.Io.Threaded = null,
+    readBuf: std.ArrayList(u8) = .empty,
+    lastPwdBuf: [512]u8 = undefined,
+    lastPwdLen: usize = 0,
+    lastListing: std.ArrayList(u8) = .empty,
+
+    /// Initialize an FTP client connected using the provided allocator and IO engine.
+    pub fn init(allocator: Allocator, io: std.Io, opts: Options) FtpError!Client {
+        return connectWithIo(io, allocator, opts);
+    }
 
     /// Connect to an FTP server with zero-config default allocator.
     pub fn connect(opts: Options) FtpError!Client {
@@ -147,24 +155,24 @@ pub const Client = struct {
         threaded.* = .init(allocator, .{});
         const io = threaded.io();
         var c = try connectWithIo(io, allocator, opts);
-        c.owns_io = true;
-        c.io_threaded = threaded;
+        c.ownsIo = true;
+        c.ioThreaded = threaded;
         return c;
     }
 
     pub fn connectWithIo(io: std.Io, allocator: Allocator, opts: Options) FtpError!Client {
-        if (opts.host.len == 0 or opts.host.len > c_host_max) return FtpError.ProtocolError;
+        if (opts.host.len == 0 or opts.host.len > cHostMax) return FtpError.ProtocolError;
         if (opts.secure) return FtpError.TlsUnavailable;
 
         // Connect by attempting IP literal parsing first, then falling back to hostname resolution
         var sock: ?tcp.Socket = null;
-        var holder = address_mod.Address{ .family = .ip4, .port = 0 };
+        var holder = addressMod.Address{ .family = .ip4, .port = 0 };
         if (holder.parseIp(opts.host)) |addr| {
             var a = addr;
             a.port = opts.port;
             sock = tcp.connectAddress(io, &a) catch null;
         } else |_| {
-            const resolver = resolve_mod.Resolver.init(allocator);
+            const resolver = netResolve.Resolver.init(allocator);
             if (resolver.lookup(opts.host, opts.port)) |addrs| {
                 defer allocator.free(addrs);
                 for (addrs) |*addr| {
@@ -181,13 +189,14 @@ pub const Client = struct {
         var c = Client{
             .allocator = allocator,
             .ctrl = s,
-            .host_copy = undefined,
-            .host_len = @min(opts.host.len, c_host_max),
+            .hostCopy = undefined,
+            .hostLen = @min(opts.host.len, cHostMax),
             .io = io,
         };
-        @memcpy(c.host_copy[0..c.host_len], opts.host[0..c.host_len]);
+        @memcpy(c.hostCopy[0..c.hostLen], opts.host[0..c.hostLen]);
         errdefer {
-            c.read_buf.deinit(allocator);
+            c.readBuf.deinit(allocator);
+            c.lastListing.deinit(allocator);
             c.ctrl.close();
         }
 
@@ -199,22 +208,18 @@ pub const Client = struct {
         return c;
     }
 
-    const c_host_max = 256;
+    const cHostMax = 256;
 
     pub fn deinit(self: *Client) void {
         self.ctrl.close();
-        self.read_buf.deinit(self.allocator);
-        if (self.owns_io) {
-            if (self.io_threaded) |t| {
+        self.readBuf.deinit(self.allocator);
+        self.lastListing.deinit(self.allocator);
+        if (self.ownsIo) {
+            if (self.ioThreaded) |t| {
                 t.deinit();
                 self.allocator.destroy(t);
             }
         }
-    }
-
-    /// Free memory allocated by this client (such as directory listings from `list()`).
-    pub fn free(self: *Client, memory: anytype) void {
-        self.allocator.free(memory);
     }
 
     fn sendLine(self: *Client, line: []const u8) FtpError!void {
@@ -226,31 +231,31 @@ pub const Client = struct {
     }
 
     /// Reads one complete reply into owned memory (caller frees `text`).
-    pub fn readReply(self: *Client) FtpError!Reply {
+    fn readReply(self: *Client) FtpError!Reply {
         var buf: [1024]u8 = undefined;
         var pos: usize = 0;
 
         while (true) {
-            if (parseReplyAt(self.read_buf.items, pos)) |parsed| {
+            if (parseReplyAt(self.readBuf.items, pos)) |parsed| {
                 const consumed = parsed.consumed;
                 const text = self.allocator.dupe(u8, parsed.reply.text) catch return FtpError.OutOfMemory;
                 const code = parsed.reply.code;
                 // Shift remaining unconsumed bytes
-                const remaining = self.read_buf.items.len - (pos + consumed);
+                const remaining = self.readBuf.items.len - (pos + consumed);
                 if (remaining > 0) {
-                    std.mem.copyForwards(u8, self.read_buf.items[0..remaining], self.read_buf.items[pos + consumed ..]);
-                    self.read_buf.items.len = remaining;
+                    std.mem.copyForwards(u8, self.readBuf.items[0..remaining], self.readBuf.items[pos + consumed ..]);
+                    self.readBuf.items.len = remaining;
                 } else {
-                    self.read_buf.items.len = 0;
+                    self.readBuf.items.len = 0;
                 }
                 return .{ .code = code, .text = text };
             }
 
-            pos = if (self.read_buf.items.len > 4) self.read_buf.items.len - 4 else 0;
+            pos = if (self.readBuf.items.len > 4) self.readBuf.items.len - 4 else 0;
             const n = self.ctrl.read(buf[0..]) catch return FtpError.ReadFailed;
             if (n == 0) return FtpError.UnexpectedEof;
-            self.read_buf.appendSlice(self.allocator, buf[0..n]) catch return FtpError.OutOfMemory;
-            if (self.read_buf.items.len > max_reply_bytes) return FtpError.ReplyTooLarge;
+            self.readBuf.appendSlice(self.allocator, buf[0..n]) catch return FtpError.OutOfMemory;
+            if (self.readBuf.items.len > max_reply_bytes) return FtpError.ReplyTooLarge;
         }
     }
 
@@ -291,6 +296,38 @@ pub const Client = struct {
 
     pub fn quit(self: *Client) void {
         _ = self.sendLine("QUIT") catch {};
+    }
+
+    /// Queries current working directory (RFC 959 PWD).
+    /// The returned slice is managed internally by the Client and remains valid
+    /// until the next call to `pwd()` or `client.deinit()`.
+    /// Caller does NOT need to free it.
+    pub fn pwd(self: *Client) FtpError![]const u8 {
+        const r = try self.expectCode("PWD", 257, 257);
+        defer self.allocator.free(r.text);
+        var dir: []const u8 = "";
+        // Reply format: 257 "/path/name" ...
+        if (std.mem.indexOfScalar(u8, r.text, '"')) |first_quote| {
+            if (std.mem.indexOfScalarPos(u8, r.text, first_quote + 1, '"')) |second_quote| {
+                dir = r.text[first_quote + 1 .. second_quote];
+            } else {
+                dir = std.mem.trim(u8, r.text[3..], " \r\n");
+            }
+        } else {
+            // Fallback: trim code and return text
+            dir = std.mem.trim(u8, r.text[3..], " \r\n");
+        }
+        if (dir.len > self.lastPwdBuf.len) return FtpError.ProtocolError;
+        @memcpy(self.lastPwdBuf[0..dir.len], dir);
+        self.lastPwdLen = dir.len;
+        return self.lastPwdBuf[0..self.lastPwdLen];
+    }
+
+    /// Queries current working directory and returns an owned allocation.
+    /// Caller owns the returned slice and must free it with `self.allocator.free(slice)`.
+    pub fn pwdAlloc(self: *Client) FtpError![]u8 {
+        const p = try self.pwd();
+        return self.allocator.dupe(u8, p) catch FtpError.OutOfMemory;
     }
 
     pub fn cwd(self: *Client, path: []const u8) FtpError!void {
@@ -336,19 +373,19 @@ pub const Client = struct {
 
         const pasv = try self.expectCode("PASV", 227, 227);
         defer self.allocator.free(pasv.text);
-        const p = parsePasive(pasv.text) orelse return FtpError.MalformedPasv;
+        const p = parsePasv(pasv.text) orelse return FtpError.MalformedPasv;
         return self.dataToPasv(p.ip, p.port);
     }
 
     fn dataTo(self: *Client, port: u16) FtpError!tcp.Socket {
-        const host = self.host_copy[0..self.host_len];
-        var holder = address_mod.Address{ .family = .ip4, .port = 0 };
+        const host = self.hostCopy[0..self.hostLen];
+        var holder = addressMod.Address{ .family = .ip4, .port = 0 };
         if (holder.parseIp(host)) |addr| {
             var a = addr;
             a.port = port;
             return tcp.connectAddress(self.ctrl.io, &a) catch FtpError.ConnectFailed;
         } else |_| {
-            const resolver = resolve_mod.Resolver.init(self.allocator);
+            const resolver = netResolve.Resolver.init(self.allocator);
             if (resolver.lookup(host, port)) |addrs| {
                 defer self.allocator.free(addrs);
                 for (addrs) |*addr| {
@@ -364,7 +401,7 @@ pub const Client = struct {
     fn dataToPasv(self: *Client, ip: [4]u8, port: u16) FtpError!tcp.Socket {
         var text: [15]u8 = undefined;
         const host = std.fmt.bufPrint(&text, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch return FtpError.MalformedPasv;
-        var base = address_mod.Address{ .family = .ip4, .port = 0 };
+        var base = addressMod.Address{ .family = .ip4, .port = 0 };
         var addr = base.parseIp(host) catch return FtpError.MalformedPasv;
         addr.port = port;
         return tcp.connectAddress(self.ctrl.io, &addr) catch FtpError.ConnectFailed;
@@ -425,9 +462,11 @@ pub const Client = struct {
     }
 
     /// Returns a directory listing (raw LIST output).
-    pub fn list(self: *Client, path: []const u8) FtpError![]u8 {
-        var out: std.ArrayList(u8) = .empty;
-        errdefer out.deinit(self.allocator);
+    /// The returned slice is managed internally by the Client and remains valid
+    /// until the next call to `list()` or `client.deinit()`.
+    /// Caller does NOT need to free it.
+    pub fn list(self: *Client, path: []const u8) FtpError![]const u8 {
+        self.lastListing.clearRetainingCapacity();
 
         var data = self.openData() catch return FtpError.ConnectFailed;
         defer data.close();
@@ -442,7 +481,7 @@ pub const Client = struct {
         while (true) {
             const n = data.read(chunk[0..]) catch break;
             if (n == 0) break;
-            out.appendSlice(self.allocator, chunk[0..n]) catch return FtpError.OutOfMemory;
+            self.lastListing.appendSlice(self.allocator, chunk[0..n]) catch return FtpError.OutOfMemory;
         }
 
         data.close(); // Close data connection before reading completion reply
@@ -450,7 +489,14 @@ pub const Client = struct {
         const done = try self.readReply();
         defer self.allocator.free(done.text);
         if (done.code != 226 and done.code != 250) return FtpError.ProtocolError;
-        return out.toOwnedSlice(self.allocator) catch FtpError.OutOfMemory;
+        return self.lastListing.items;
+    }
+
+    /// Returns a directory listing as an owned slice.
+    /// Caller owns the returned slice and must free it with `self.allocator.free(slice)`.
+    pub fn listAlloc(self: *Client, path: []const u8) FtpError![]u8 {
+        const l = try self.list(path);
+        return self.allocator.dupe(u8, l) catch FtpError.OutOfMemory;
     }
 };
 
@@ -487,11 +533,11 @@ test "parses multiline replies across chunk boundaries" {
 }
 
 test "pasv address extraction" {
-    const p = parsePasive("227 Entering Passive Mode (127,0,0,1,200,35)").?;
+    const p = parsePasv("227 Entering Passive Mode (127,0,0,1,200,35)").?;
     try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, p.ip);
     try std.testing.expectEqual(@as(u16, 200 * 256 + 35), p.port);
-    try std.testing.expect(parsePasive("225 no parens here") == null);
-    try std.testing.expect(parsePasive("227 (1,2,3)") == null); // too few
+    try std.testing.expect(parsePasv("225 no parens here") == null);
+    try std.testing.expect(parsePasv("227 (1,2,3)") == null); // too few
 }
 
 test "epsv port extraction" {

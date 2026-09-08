@@ -5,8 +5,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .max_connections = 5,
@@ -25,12 +26,12 @@ pub fn main() !void {
     };
     const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
 
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     var url_buf: [128]u8 = undefined;
     const url_events = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/events", .{port});
-    var res = try client.get(url_events);
+    var res = try client.get(url_events, .{});
     std.debug.print("GET /events -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
@@ -39,6 +40,19 @@ pub fn main() !void {
     std.debug.print("SSE server verification completed successfully.\n", .{});
 }
 
-fn sseHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 200, .body = "<h1>SSE endpoint</h1><p>EventSource clients can subscribe here.</p>", .content_type = "text/html" };
+fn sseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    var out = std.ArrayList(u8).empty;
+    var writer = httpx.sse.Writer.EventWriter.init(ctx.allocator);
+    try writer.writeEvent(&out, &[_][]const u8{"Connected to SSE live stream"}, "status", 1, 5000);
+    try writer.writeEvent(&out, &[_][]const u8{"First data packet"}, "message", 2, null);
+
+    return .{
+        .status = 200,
+        .body = out.items,
+        .content_type = "text/event-stream; charset=utf-8",
+        .headers = try ctx.allocator.dupe(httpx.router.Header, &[_]httpx.router.Header{
+            .{ .name = "Cache-Control", .value = "no-cache" },
+            .{ .name = "Connection", .value = "keep-alive" },
+        }),
+    };
 }

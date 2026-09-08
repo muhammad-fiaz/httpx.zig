@@ -5,22 +5,23 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    const sample_url = "https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf";
-    std.debug.print("==> Downloading {s} with Range resume policy (.resume_download / .continue_partial)...\n", .{sample_url});
+    const sampleUrl = "https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf";
+    std.debug.print("==> Downloading {s} with Range resume policy (.resumePartial)...\n", .{sampleUrl});
 
-    // Uses .resume_download (clean non-reserved keyword name)
+    // Uses .resumePartial (short canonical resume policy)
     const result = client.download(
-        sample_url,
+        sampleUrl,
         "downloads/resumable-sample.pdf",
         .{
-            .existing = .resume_download,
+            .existing = .resumePartial,
             .progress = .auto,
-            .max_retries = 3,
-            .create_dirs = true,
+            .maxRetries = 3,
+            .createDirs = true,
         },
     ) catch |err| {
         std.debug.print("Resume download handled: {s}\n", .{@errorName(err)});
@@ -29,7 +30,7 @@ pub fn main() !void {
 
     std.debug.print("Download status: resumed={any}, downloaded={d} bytes to {s}\n", .{
         result.resumed,
-        result.downloaded_bytes,
+        result.downloadedBytes,
         result.destination,
     });
 }

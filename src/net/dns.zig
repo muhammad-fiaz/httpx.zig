@@ -16,6 +16,7 @@ const clock = @import("../common/clock.zig");
 const Allocator = std.mem.Allocator;
 const net = std.Io.net;
 const udp_mod = @import("../sockets/udp.zig");
+pub const cache = @import("dns/cache.zig");
 
 pub const RecordType = enum(u16) {
     a = 1,

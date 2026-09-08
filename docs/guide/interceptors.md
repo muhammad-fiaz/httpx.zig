@@ -25,13 +25,14 @@ pub const Interceptor = struct {
 This interceptor adds a Bearer token to every outgoing request.
 
 ```zig
+    const io = std.Io.Threaded.global_single_threaded.io();
 fn addAuthToken(req: *httpx.Request, ctx: ?*anyopaque) !void {
     // In a real app, you might cast ctx to a Config struct
     try req.headers.set("Authorization", "Bearer my-secret-token");
 }
 
 // Usage
-var client = httpx.Client.init(allocator);
+var client = httpx.Client.init(allocator, io, .{});
 try client.addInterceptor(.{
     .request_fn = addAuthToken,
     // response_fn can be null

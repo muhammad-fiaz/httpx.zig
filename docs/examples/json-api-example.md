@@ -37,6 +37,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // 1. Top-level getJson: fetch + parse in one call
     var result = httpx.getJson(HttpBunGet, "http://httpbun.com/get?name=Alice", .{
@@ -48,41 +49,39 @@ pub fn main() !void {
     defer result.response.deinit();
     std.debug.print("origin={s}\n", .{result.value.origin});
 
-    // 2. Client.getJson: reusable client
-    var client = httpx.Client.init(allocator);
+    // 2. Client.fetch with typed JSON struct
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var client_result = client.getJson(HttpBunGet, "http://httpbun.com/get?name=Bob", .{
-        .ignore_unknown_fields = true,
+    var fetch_resp = client.fetch("http://httpbun.com/post", .{
+        .method = .POST,
+        .json = .{ .name = "Bob", .role = "developer" },
     }) catch |err| {
-        std.debug.print("Client.getJson failed: {}\n", .{err});
+        std.debug.print("Client.fetch failed: {}\n", .{err});
         return;
     };
-    defer client_result.response.deinit();
-    std.debug.print("origin={s}\n", .{client_result.value.origin});
+    defer fetch_resp.deinit();
 
-    // 3. postJsonAndParse: POST JSON and parse response
-    var post_result = httpx.postJsonAndParse(HttpBunPost, "http://httpbun.com/post",
-        \\{"name":"Charlie"}
-    , .{ .ignore_unknown_fields = true }) catch |err| {
-        std.debug.print("postJsonAndParse failed: {}\n", .{err});
+    // Direct typed deserialization via std.json
+    const post_data = fetch_resp.json(HttpBunPost) catch |err| {
+        std.debug.print("json parse failed: {}\n", .{err});
         return;
     };
-    defer post_result.response.deinit();
-    std.debug.print("origin={s}\n", .{post_result.value.origin});
+    std.debug.print("origin={s}\n", .{post_data.origin});
 
-    // 4. Response.jsonBorrowed: manual fetch then parse
-    var response = httpx.get("http://httpbun.com/get?name=Dave", .{}) catch |err| {
+    // 3. Response.jsonAlloc with explicit allocator
+    var get_resp = client.fetch("http://httpbun.com/get?name=Dave", .{}) catch |err| {
         std.debug.print("GET failed: {}\n", .{err});
         return;
     };
-    defer response.deinit();
+    defer get_resp.deinit();
 
-    const parsed = response.jsonBorrowed(HttpBunGet, .{ .ignore_unknown_fields = true }) catch |err| {
-        std.debug.print("jsonBorrowed failed: {}\n", .{err});
+    const parsed = get_resp.jsonAlloc(HttpBunGet, allocator) catch |err| {
+        std.debug.print("jsonAlloc failed: {}\n", .{err});
         return;
     };
-    std.debug.print("origin={s}\n", .{parsed.origin});
+    defer parsed.deinit();
+    std.debug.print("origin={s}\n", .{parsed.value.origin});
 }
 ```
 

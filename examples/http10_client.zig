@@ -5,16 +5,16 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = try httpx.Client.init(allocator, .{
-        .allow_lf_line_endings = true,
+    var client = httpx.Client.init(allocator, io, .{
+        .allowLfLineEndings = true,
     });
     defer client.deinit();
 
     // HTTP/1.0 request
-    var response = try client.get(.{
-        .url = "http://httpbun.com/get",
-        .http_version = .http_1_0,
+    var response = try client.get("http://httpbun.com/get", .{
+        .httpVersion = .http10,
     });
     defer response.deinit();
 

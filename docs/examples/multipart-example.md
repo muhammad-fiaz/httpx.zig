@@ -19,6 +19,7 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     const boundary = "----httpxBoundary7MA4YWxkTrZu0gW";
     var builder = httpx.MultipartBuilder.init(allocator, boundary);
@@ -45,7 +46,7 @@ pub fn main() !void {
     }
 
     // Client-side RequestOptions Integration
-    var client = httpx.Client.init(allocator);
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     const fields = [_]httpx.MultipartField{
@@ -55,10 +56,11 @@ pub fn main() !void {
         .{ .name = "attachment", .filename = "resume.html", .data = "resumedata" },
     };
 
-    const reqOpts = httpx.RequestOptions.defaults()
-        .withMultipartFields(&fields)
-        .withMultipartFiles(&files)
-        .withMultipartBoundary("clientBoundary999");
+    const reqOpts: httpx.RequestOptions = .{
+        .multipart_fields = &fields,
+        .multipart_files = &files,
+        .multipart_boundary = "clientBoundary999",
+    };
 }
 ```
 

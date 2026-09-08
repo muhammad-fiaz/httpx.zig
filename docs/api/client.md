@@ -33,45 +33,49 @@ The `Client` struct is the main entry point for making requests. It manages conn
 ### Initialization
 
 ```zig
+const std = @import("std");
 const httpx = @import("httpx");
 
-// Initialize with default configuration
-var client = httpx.Client.init(allocator);
-defer client.deinit();
+const io = std.Io.Threaded.global_single_threaded.io();
 
-// Shorthand aliases
-var client = httpx.createClient();                        // uses page_allocator
-var client = httpx.createClientWithConfig(allocator, .{  // explicit allocator + config
-    .base_url = "https://api.example.com",
-});
+// Initialize with default configuration (returns Client by value)
+var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 
 // Initialize with custom configuration
-var client = httpx.Client.initWithConfig(allocator, .{
+var client = httpx.Client.init(allocator, io, .{
     .base_url = "https://api.example.com",
     .user_agent = "my-app/1.0",
+    .httpVersion = .auto, // or .http10, .http11, .http2, .http3
 });
 defer client.deinit();
 
-// Initialize with default config + base URL helper
-var api = httpx.Client.initForBaseUrl(allocator, "https://api.example.com");
-defer api.deinit();
+// Out-of-the-box convenience (zero initialization needed):
+var response = try httpx.get("https://api.example.com/users");
+defer response.deinit();
+
+// Dot notation module access:
+var post_res = try httpx.client.post("https://api.example.com/users", .{ .json = .{ .name = "Alice", .role = "developer" },
+});
+defer post_res.deinit();
 ```
 
-For optional explicit customization, `ClientConfig` supports chainable helpers:
+`ClientConfig` is an idiomatic Zig struct where omitted fields use standard defaults:
 
 ```zig
-const cfg = httpx.ClientConfig.defaults()
-    .withBaseUrl("https://api.example.com")
-    .withTimeouts(httpx.Timeouts.fast())
-    .withRetryPolicy(httpx.RetryPolicy.noRetry())
-    .withFollowRedirects(false)
-    .withHttp2Settings(.{ .max_concurrent_streams = 100 })
-    .withHttp3Settings(.{ .enable_datagrams = true })
-    .withPoolLimits(64, 16)
-    .withUserAgent("my-app/2.0");
+    const io = std.Io.Threaded.global_single_threaded.io();
+const cfg: httpx.ClientConfig = .{
+    .base_url = "https://api.example.com",
+    .timeouts = httpx.Timeouts.fast(),
+    .retry_policy = httpx.RetryPolicy.noRetry(),
+    .follow_redirects = false,
+    .httpVersion = .http2,
+    .pool_max_connections = 64,
+    .pool_max_per_host = 16,
+    .user_agent = "my-app/2.0",
+};
 
-var client = httpx.Client.initWithConfig(allocator, cfg);
+var client = httpx.Client.init(allocator, io, cfg);
 defer client.deinit();
 ```
 
@@ -84,13 +88,17 @@ defer client.deinit();
 | `retry_policy` | `RetryPolicy` | `{}` | Configuration for automatic retries. |
 | `redirect_policy` | `RedirectPolicy` | `{}` | Configuration for handling redirects. |
 | `default_headers` | `?[]const [2][]const u8` | `null` | Headers added to every request. |
-| `user_agent` | `[]const u8` | `"httpx.zig/0.1.8"` | User-Agent header value. |
+| `user_agent` | `[]const u8` | `"httpx.zig/0.2.0"` | User-Agent header value. |
 | `max_response_size` | `usize` | `100MB` | Maximum allowed response body size. |
 | `max_request_size` | `usize` | `10MB` | Maximum allowed outgoing request body size. Raises `RequestTooLarge` error when exceeded (excluded from retry logic). |
 | `follow_redirects` | `bool` | `true` | Whether to automatically follow redirects. |
 | `verify_ssl` | `bool` | `true` | Whether to verify SSL certificates. |
-| `http2_enabled` | `bool` | `false` | Enable high-level HTTP/2 execution path for client requests. |
-| `http3_enabled` | `bool` | `false` | Enable high-level HTTP/3 execution path over UDP/QUIC stream framing. |
+| `httpVersion` | `?HttpVersion` | `null` | Preferred HTTP version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`). |
+| `http10` | `bool` | `true` | Fast toggle to enable HTTP/1.0 protocol. |
+| `http11` | `bool` | `true` | Fast toggle to enable HTTP/1.1 protocol. |
+| `http2` | `bool` | `false` | Fast toggle to use HTTP/2 as default protocol. |
+| `http3` | `bool` | `false` | Fast toggle to use HTTP/3 as default protocol. |
+| `cookies` | `bool` | `true` | Enable cookie jar handling. |
 | `http2_settings` | `Http2Settings` | `{}` | HTTP/2 SETTINGS values sent during connection setup (`header_table_size`, `max_frame_size`, etc.). |
 | `http3_settings` | `Http3Settings` | `{}` | HTTP/3/QPACK settings sent on the control stream (`max_field_section_size`, `qpack_max_table_capacity`, `qpack_blocked_streams`, etc.). |
 | `keep_alive` | `bool` | `true` | Reuse TCP connections when possible. |
@@ -126,7 +134,8 @@ Helpers:
 Per-request `RequestOptions.timeout_ms` overrides all three active phases (`connect_ms`, `read_ms`, `write_ms`) for that request.
 
 ```zig
-var client = httpx.Client.initWithConfig(allocator, .{
+    const io = std.Io.Threaded.global_single_threaded.io();
+var client = httpx.Client.init(allocator, io, .{
     .timeouts = httpx.Timeouts.fast(),
 });
 defer client.deinit();
@@ -135,70 +144,73 @@ const res = try client.get("https://example.com/slow", .{ .timeout_ms = 2_000 })
 defer res.deinit();
 ```
 
-### Config Helper Methods
+### Client Initialization
 
-| Helper | Description |
-|--------|-------------|
-| `ClientConfig.defaults()` | Returns default config (`.{}`). |
-| `ClientConfig.forBaseUrl(url)` | Returns defaults with `base_url` set. |
-| `withBaseUrl(url_or_null)` | Override base URL on a copy. |
-| `withTimeouts(timeouts)` | Override timeout bundle (`Timeouts`). |
-| `withRetryPolicy(policy)` | Override retry behavior (`RetryPolicy`). |
-| `withRedirectPolicy(policy)` | Override redirect behavior (`RedirectPolicy`). |
-| `withDefaultHeaders(headers_or_null)` | Override default client headers. |
-| `withUserAgent(ua)` | Override `User-Agent` string. |
-| `withFollowRedirects(enabled)` | Override client-level redirect following. |
-| `withProtocols(http2, http3)` | Override protocol runtime toggles. |
-| `withHttp2Settings(settings)` | Override HTTP/2 SETTINGS values. |
-| `withHttp3Settings(settings)` | Override HTTP/3 SETTINGS values. |
-| `withSslVerification(enabled)` | Toggle TLS certificate verification. |
-| `withKeepAlive(enabled)` | Toggle keep-alive connection reuse. |
-| `withAllowPush(enabled)` | Toggle HTTP/2 server push acceptance. |
-| `withMaxResponseSize(bytes)` | Override maximum response body size. |
-| `withPoolLimits(max_connections, max_per_host)` | Override pool sizing limits. |
-| `withProxy(proxy_or_null)` | Configure or clear a forward proxy. Set `.kind = .socks5h` for SOCKS5h tunneling. |
-| `withUnixSocket(path_or_null)` | Configure or clear a Unix Domain Socket (AF_UNIX) connection path. |
-| `withLogFn(log_fn)` | Set a custom logging callback for client-side log output. |
+| Function | Description |
+|----------|-------------|
+| `Client.init(allocator, io, config)` | Initialize client with allocator, io, and configuration (or `.{}` for defaults). |
 
-### Client Initialization Helpers
+### Primary Unified API: `fetch`
 
-| Helper | Description |
-|--------|-------------|
-| `Client.init(allocator)` | Default client config. |
-| `Client.initWithConfig(allocator, cfg)` | Explicit config. |
-| `Client.initForBaseUrl(allocator, url)` | Default config with base URL set. |
-
-### Methods
-
-#### `request`
-
-Makes a generic HTTP request.
+`client.fetch(url, options)` is the primary high-level HTTP client operation. It supports all HTTP methods, strongly typed JSON serialization, custom headers, query parameters, timeouts, and body streaming in a single call:
 
 ```zig
-pub fn request(self: *Self, method: Method, url: []const u8, options: RequestOptions) !Response
+// Simple GET
+var res = try client.fetch("https://api.example.com/data", .{});
+defer res.deinit();
+
+// POST with strongly typed Zig struct (automatically serialized via std.json)
+const CreateUser = struct { name: []const u8, email: []const u8 };
+const User = struct { id: u64, name: []const u8, email: []const u8 };
+
+var res2 = try client.fetch("https://api.example.com/users", .{
+    .method = .POST,
+    .headers = .{ .Authorization = "Bearer secret_token" },
+    .json = CreateUser{ .name = "Fiaz", .email = "fiaz@example.com" },
+});
+defer res2.deinit();
+
+// Strongly typed response deserialization:
+const user = try res2.json(User);
+std.debug.print("User created: id={d} name={s}\n", .{ user.id, user.name });
+
+// Managed lifecycle deserialization with explicit allocator:
+const parsed = try res2.jsonAlloc(User, allocator);
+defer parsed.deinit();
 ```
 
-#### `send` (alias)
-
-Alias for `request` with shorter naming.
-
-```zig
-pub fn send(self: *Self, method: Method, url: []const u8, options: RequestOptions) !Response
-```
-
-#### Short aliases
-
-```zig
-pub fn del(self: *Self, url: []const u8, options: RequestOptions) !Response
-pub fn opts(self: *Self, url: []const u8, options: RequestOptions) !Response
-```
-
-#### Convenience Methods
+### Response Methods
 
 | Method | Description |
 |--------|-------------|
-| `get(url, options)` | HTTP GET request |
-| `fetch(url, options)` | Alias for GET request |
+| `json(comptime T: type) !T` | Parses response body as JSON into type `T` using the response's allocator. |
+| `jsonAlloc(comptime T: type, allocator: Allocator) !std.json.Parsed(T)` | Parses response body as JSON with explicit allocator and managed lifecycle. |
+| `bytes() []const u8` | Returns response body as a raw byte slice. |
+| `text() []const u8` | Returns response body as a UTF-8 text string. |
+| `writeTo(writer: anytype) !void` | Streams or writes response body directly to any writer (file, stdout, buffer). |
+| `header(name: []const u8) ?[]const u8` | Case-insensitive header lookup. |
+| `status u16` | Returns HTTP status code integer. |
+| `isSuccess() bool` | Returns true if status code is in 200..299 range. |
+| `isClientError() bool` | Returns true if status code is in 400..499 range. |
+| `isServerError() bool` | Returns true if status code is in 500..599 range. |
+
+### Methods & Convenience Aliases
+
+| Method | Description |
+|--------|-------------|
+| `fetch(url, options)` | **Primary unified HTTP request operation** |
+| `get(options)` | HTTP GET request |
+| `post(options)` | HTTP POST request |
+| `put(options)` | HTTP PUT request |
+| `delete(options)` | HTTP DELETE request |
+| `del(options)` | Alias for HTTP DELETE request |
+| `patch(options)` | HTTP PATCH request |
+| `head(options)` | HTTP HEAD request |
+| `trace(options)` | HTTP TRACE request |
+| `connect(options)` | HTTP CONNECT request |
+| `options(options)` | HTTP OPTIONS request |
+| `opts(options)` | Alias for HTTP OPTIONS request |
+| `request(options)` | Generic request (method set via `options.method`) |
 | `post(url, options)` | HTTP POST request |
 | `put(url, options)` | HTTP PUT request |
 | `delete(url, options)` | HTTP DELETE request |
@@ -244,16 +256,18 @@ The client keeps an in-memory cookie jar and automatically:
 ### Quick Examples
 
 ```zig
+const std = @import("std");
 const httpx = @import("httpx");
 
-var client = httpx.Client.init(allocator);
+const io = std.Io.Threaded.global_single_threaded.io();
+var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 
 // Simple GET
 const response = try client.get("https://api.example.com/users", .{});
 defer response.deinit();
-std.debug.print("Status: {d}\n", .{response.status.code});
-std.debug.print("Body: {s}\n", .{response.text() orelse ""});
+std.debug.print("Status: {d}\n", .{response.status});
+std.debug.print("Body: {s}\n", .{response.body});
 
 // POST with JSON
 const json_response = try client.post("https://api.example.com/users", .{
@@ -271,11 +285,8 @@ const auth_response = try client.get("https://api.example.com/protected", .{
 defer auth_response.deinit();
 
 // Built-in auth helpers
-const bearer_opts = httpx.RequestOptions.defaults()
-    .withBearerToken("token123")
-    .withHeaders(&.{.{ "Accept", "application/json" }});
-
-const bearer_response = try client.get("https://api.example.com/protected", bearer_opts);
+const bearer_response = try client.get("https://api.example.com/protected", .{ .headers = &.{.{ "Authorization", "Bearer token123" }, .{ "Accept", "application/json" }},
+});
 defer bearer_response.deinit();
 
 // With timeout
@@ -339,53 +350,21 @@ Authentication helper precedence when both are set directly in a literal:
 1. `basic_auth`
 2. `bearer_token` (applied last)
 
-Optional builder helpers are available for concise per-request setup when you want explicit overrides:
+Request options are configured directly using `RequestOptions` struct literals:
 
 ```zig
-const opts = httpx.RequestOptions.defaults()
-    .withHeaders(&.{ .{ "Accept", "application/json" } })
-    .withBearerToken("demo-token")
-    .withQueryParams(&.{ .{ "page", "1" } })
-    .withTimeoutMs(10_000)
-    .withHttp2()
-    .withFollowRedirects(true)
-    .withSslVerification(false)
-    .withKeepAlive(false);
-
-var res = try client.get("/users", opts);
+var res = try client.get("/users", .{ .headers = &.{.{ "Accept", "application/json" }, .{ "Authorization", "Bearer demo-token" }},
+    .query_params = &.{.{ "page", "1" }},
+    .timeout_ms = 10_000,
+    .httpVersion = .http2,
+    .follow_redirects = true,
+});
 defer res.deinit();
 ```
 
-Available helpers:
-
-- `RequestOptions.defaults()`
-- `withHeaders(headers)`
-- `withQueryParams(params)`
-- `withBody(body)`
-- `withJson(json)`
-- `withFormUrlEncoded(fields)`
-- `withBearerToken(token)`
-- `withBasicAuth(username, password)`
-- `withTimeoutMs(ms)`
-- `withConnectTimeoutMs(ms)`
-- `withReadTimeoutMs(ms)`
-- `withWriteTimeoutMs(ms)`
-- `withTimeouts(timeouts)`
-- `withFollowRedirects(bool)`
-- `withVersion(version)`
-- `withHttp2()`
-- `withHttp3()`
-- `withProxy(proxy)`
-- `withSslVerification(bool)`
-- `withKeepAlive(bool)`
-- `withUnixSocket(path)`
-- `withMultipartFields(fields)`
-- `withMultipartFiles(files)`
-- `withMultipartBoundary(boundary)`
-
 ### Multipart File Uploads
 
-Use `withMultipartFields` and `withMultipartFiles` to send `multipart/form-data` bodies.
+Use `multipart_fields` and `multipart_files` to send `multipart/form-data` bodies.
 The client automatically assembles the body and sets the `Content-Type` header.
 
 ```zig
@@ -397,11 +376,9 @@ const files = [_]httpx.MultipartFile{
     .{ .name = "file", .filename = "data.bin", .data = chunk_slice },
 };
 
-const opts = httpx.RequestOptions.defaults()
-    .withMultipartFields(&fields)
-    .withMultipartFiles(&files);
-
-var resp = try client.post("https://example.com/upload", opts);
+var resp = try client.post("https://example.com/upload", .{ .multipart_fields = &fields,
+    .multipart_files = &files,
+});
 defer resp.deinit();
 ```
 
@@ -536,85 +513,58 @@ const response = client.get("https://example.com", .{}) catch |err| switch (err)
 };
 ```
 
-## Simplified Top-Level Aliases
+## Convenience Functions
 
-The root module also exposes simple aliases for common client usage:
+The root module exposes zero-config convenience helpers for simple requests:
 
 ```zig
-var a = try httpx.fetch("https://example.com");
+var a = try httpx.get("https://example.com", .{});
 defer a.deinit();
 
-var b = try httpx.send(.GET, "https://example.com/health", .{});
+var b = try httpx.post("https://example.com/items", .{ .json = "{\"name\":\"demo\"}",
+});
 defer b.deinit();
 
-var c = try httpx.post("https://example.com/items", .{ .json = "{\"name\":\"demo\"}" });
+var c = try httpx.delete("https://example.com/items/42", .{});
 defer c.deinit();
 
-var d = try httpx.delete("https://example.com/items/42", .{});
+var d = try httpx.put("https://example.com/items", .{ .json = "{\"name\":\"updated\"}",
+});
 defer d.deinit();
 
-var e = try httpx.put("https://example.com/items", .{ .json = "{\"name\":\"updated\"}" });
+var e = try httpx.patch("https://example.com/items", .{ .json = "{\"name\":\"patched\"}",
+});
 defer e.deinit();
 
-var f = try httpx.patch("https://example.com/items", .{ .json = "{\"name\":\"patched\"}" });
+var f = try httpx.head("https://example.com/items", .{});
 defer f.deinit();
 
-var g = try httpx.head("https://example.com/items", .{});
+var g = try httpx.options("https://example.com/items", .{});
 defer g.deinit();
 
-var h = try httpx.opts("https://example.com/items", .{});
+var h = try httpx.request(.{
+    .method = .GET,
+    .url = "https://example.com/health",
+});
 defer h.deinit();
-
-var i = try httpx.trace("https://example.com/trace", .{});
-defer i.deinit();
-
-var j = try httpx.connect("https://example.com/tunnel", .{});
-defer j.deinit();
-
-// Optional explicit allocator override
-var k = try httpx.sendWithAllocator(allocator, .GET, "https://example.com/health", .{ .timeout_ms = 10_000 });
-defer k.deinit();
-
-// JSON POST convenience
-var l = try httpx.postJson("https://api.example.com/data", "{\"key\":\"value\"}");
-defer l.deinit();
 ```
 
-All top-level aliases:
+Top-level request functions:
 
 | Function | Description |
 |----------|-------------|
-| `httpx.get(url, opts)` | HTTP GET |
-| `httpx.post(url, opts)` | HTTP POST |
-| `httpx.put(url, opts)` | HTTP PUT |
-| `httpx.delete(url, opts)` / `httpx.del(...)` | HTTP DELETE |
-| `httpx.patch(url, opts)` | HTTP PATCH |
-| `httpx.head(url, opts)` | HTTP HEAD |
-| `httpx.options(url, opts)` / `httpx.opts(...)` | HTTP OPTIONS |
-| `httpx.trace(url, opts)` | HTTP TRACE |
-| `httpx.connect(url, opts)` | HTTP CONNECT |
-| `httpx.fetch(url, opts)` | Alias for GET |
-| `httpx.send(method, url, opts)` | Generic request |
-| `httpx.postJson(url, json)` | POST with JSON body |
-| `httpx.getJson(T, url, parse_opts)` | GET and parse JSON response |
-| `httpx.putJson(T, url, body, parse_opts)` | PUT and parse JSON response |
-| `httpx.patchJson(T, url, body, parse_opts)` | PATCH and parse JSON response |
-| `httpx.deleteJson(T, url, parse_opts)` | DELETE and parse JSON response |
-| `httpx.postJsonAndParse(T, url, body, parse_opts)` | POST and parse JSON response |
-| `httpx.getWithAllocator(...)` | GET with explicit allocator |
-| `httpx.postWithAllocator(...)` | POST with explicit allocator |
-| `httpx.putWithAllocator(...)` | PUT with explicit allocator |
-| `httpx.delWithAllocator(...)` | DELETE with explicit allocator |
-| `httpx.deleteWithAllocator(...)` | DELETE with explicit allocator |
-| `httpx.patchWithAllocator(...)` | PATCH with explicit allocator |
-| `httpx.headWithAllocator(...)` | HEAD with explicit allocator |
-| `httpx.optionsWithAllocator(...)` | OPTIONS with explicit allocator |
-| `httpx.optsWithAllocator(...)` | OPTIONS with explicit allocator |
-| `httpx.traceWithAllocator(...)` | TRACE with explicit allocator |
-| `httpx.connectWithAllocator(...)` | CONNECT with explicit allocator |
-| `httpx.fetchWithAllocator(...)` | GET with explicit allocator |
-| `httpx.sendWithAllocator(...)` | Generic with explicit allocator |
-| `httpx.postJsonWithAllocator(...)` | JSON POST with explicit allocator |
+| `httpx.get(options)` | HTTP GET |
+| `httpx.post(options)` | HTTP POST |
+| `httpx.put(options)` | HTTP PUT |
+| `httpx.patch(options)` | HTTP PATCH |
+| `httpx.delete(options)` | HTTP DELETE |
+| `httpx.head(options)` | HTTP HEAD |
+| `httpx.options(options)` | HTTP OPTIONS |
+| `httpx.trace(options)` | HTTP TRACE |
+| `httpx.connect(options)` | HTTP CONNECT |
+| `httpx.request(options)` | General HTTP request |
+| `httpx.getAll(&urls)` | Concurrent GET requests |
+| `httpx.requestAll(&requests)` | Concurrent custom requests |
 
 ## See Also
 

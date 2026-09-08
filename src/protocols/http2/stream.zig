@@ -22,7 +22,7 @@ pub const ErrorCode = enum(u32) {
     connect_error = 0x0a,
     enhance_your_calm = 0x0b,
     inadequate_security = 0x0c,
-    http_1_1_required = 0x0d,
+    http11Required = 0x0d,
     _,
 
     pub fn name(self: ErrorCode) []const u8 {

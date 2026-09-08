@@ -16,9 +16,10 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     // Start a local server
-    var server = httpx.Server.initWithConfig(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .keep_alive = false,
@@ -35,7 +36,7 @@ pub fn main() !void {
     const base_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/data", .{port});
     defer allocator.free(base_url);
 
-    var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
+    var client = httpx.Client.init(allocator, io, .{}
         .withTimeouts(httpx.Timeouts.fast())
         .withRetryPolicy(httpx.RetryPolicy.noRetry())
         .withKeepAlive(false));

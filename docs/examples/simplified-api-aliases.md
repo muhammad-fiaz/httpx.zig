@@ -17,6 +17,7 @@ pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
     const live_mode = shouldUseLiveNetwork(init.minimal.environ, allocator);
 
     if (live_mode) {
@@ -33,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const port = try pickFreeTcpPort();
-    var server = httpx.Server.initWithConfig(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = port,
         .port_conflict = .fail,

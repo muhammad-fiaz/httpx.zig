@@ -136,8 +136,9 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .max_connections = 5,
@@ -162,21 +163,22 @@ pub fn main() !void {
     };
     const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
 
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     var url_buf: [128]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/status", .{port});
-    var res = try client.get(url);
+    var res = try client.get(url, .{});
     std.debug.print("GET /api/status -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
-    const trigger_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/trigger-reload", .{port});
-    var res2 = try client.post(.{ .url = trigger_url, .body = "{}" });
+    var trigger_buf: [128]u8 = undefined;
+    const trigger_url = try std.fmt.bufPrint(&trigger_buf, "http://127.0.0.1:{d}/api/trigger-reload", .{port});
+    var res2 = try client.post(trigger_url, .{ .body = "{}" });
     std.debug.print("POST /api/trigger-reload -> status={d}\n", .{res2.status});
     res2.deinit();
 
-    var res3 = try client.get(url);
+    var res3 = try client.get(url, .{});
     std.debug.print("GET /api/status (reloaded) -> status={d}, body={s}\n", .{ res3.status, res3.body });
     res3.deinit();
 

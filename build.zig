@@ -37,6 +37,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const treesitter_dep = b.dependency("treesitter", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const args_dep = b.dependency("args", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create the public module that will be exported as "httpx" to consumers.
     // Dependencies must be added here so they propagate to downstream packages.
     const httpx_module = b.addModule("httpx", .{
@@ -47,6 +57,27 @@ pub fn build(b: *std.Build) void {
     httpx_module.addImport("brotli", brotli_dep.module("brotli"));
     httpx_module.addImport("env", env_dep.module("env"));
     httpx_module.addImport("loaders", loaders_dep.module("loaders"));
+    httpx_module.addImport("treesitter", treesitter_dep.module("treesitter"));
+
+    const cli_exe = b.addExecutable(.{
+        .name = "httpx",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    cli_exe.root_module.addImport("httpx", httpx_module);
+    cli_exe.root_module.addImport("args", args_dep.module("args"));
+    linkPlatformLibs(cli_exe, target);
+    b.installArtifact(cli_exe);
+
+    const run_cli = b.addRunArtifact(cli_exe);
+    const cli_step = b.step("cli", "Run HTTPX CLI");
+    cli_step.dependOn(&run_cli.step);
+    if (b.args) |cli_args| {
+        run_cli.addArgs(cli_args);
+    }
 
     const examples = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "simple-get", .path = "examples/simple_get.zig" },
@@ -65,6 +96,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "resolve", .path = "examples/resolve.zig" },
         .{ .name = "openapi", .path = "examples/openapi.zig" },
         .{ .name = "http10-client", .path = "examples/http10_client.zig" },
+        .{ .name = "http11-client", .path = "examples/http11_client.zig" },
+        .{ .name = "http11-server", .path = "examples/http11_server.zig" },
         .{ .name = "http2-client", .path = "examples/http2_client.zig" },
         .{ .name = "http2-multiplex", .path = "examples/http2_multiplex.zig" },
         .{ .name = "http3-client", .path = "examples/http3_client.zig" },
@@ -109,8 +142,27 @@ pub fn build(b: *std.Build) void {
         .{ .name = "download-checksum-file", .path = "examples/download_checksum_file.zig" },
         .{ .name = "ftp-download", .path = "examples/ftp_download.zig" },
         .{ .name = "parse-html", .path = "examples/parse_html.zig" },
+        .{ .name = "html-client", .path = "examples/html_client.zig" },
+        .{ .name = "html-select", .path = "examples/html_select.zig" },
+        .{ .name = "html-extract", .path = "examples/html_extract.zig" },
+        .{ .name = "html-stream", .path = "examples/html_stream.zig" },
+        .{ .name = "html-file", .path = "examples/html_file.zig" },
+        .{ .name = "html-transform", .path = "examples/html_transform.zig" },
+        .{ .name = "file-watcher", .path = "examples/file_watcher.zig" },
+        .{ .name = "live-reload", .path = "examples/live_reload.zig" },
+        .{ .name = "static-site", .path = "examples/static_site.zig" },
+        .{ .name = "spa-server", .path = "examples/spa_server.zig" },
+        .{ .name = "development-server", .path = "examples/development_server.zig" },
         .{ .name = "connectivity", .path = "examples/connectivity.zig" },
+        .{ .name = "full-integration", .path = "examples/full_integration.zig" },
+        .{ .name = "template-basic", .path = "examples/web/templates/basic/main.zig" },
+        .{ .name = "template-inheritance", .path = "examples/web/templates/inheritance/main.zig" },
+        .{ .name = "template-loops", .path = "examples/web/templates/loops/main.zig" },
+        .{ .name = "template-includes", .path = "examples/web/templates/includes/main.zig" },
+        .{ .name = "template-live-reload", .path = "examples/web/templates/live_reload/main.zig" },
     };
+
+    const build_all_examples = b.step("build-all-examples", "Build all example executables");
 
     inline for (examples) |example| {
         const exe = b.addExecutable(.{
@@ -125,6 +177,7 @@ pub fn build(b: *std.Build) void {
         linkPlatformLibs(exe, target);
 
         const install_exe = b.addInstallArtifact(exe, .{});
+        build_all_examples.dependOn(&install_exe.step);
         const example_step = b.step("example-" ++ example.name, "Build " ++ example.name ++ " example");
         example_step.dependOn(&install_exe.step);
 
@@ -132,11 +185,6 @@ pub fn build(b: *std.Build) void {
         run_exe.step.dependOn(&install_exe.step);
         const run_step = b.step("run-" ++ example.name, "Run " ++ example.name ++ " example");
         run_step.dependOn(&run_exe.step);
-    }
-
-    const build_all_examples = b.step("build-all-examples", "Build all example executables");
-    inline for (examples) |_| {
-        build_all_examples.dependOn(b.getInstallStep());
     }
 
     const run_all_examples = b.step("run-all-examples", "Run all examples sequentially");
@@ -180,6 +228,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("brotli", brotli_dep.module("brotli"));
     tests.root_module.addImport("env", env_dep.module("env"));
     tests.root_module.addImport("loaders", loaders_dep.module("loaders"));
+    tests.root_module.addImport("treesitter", treesitter_dep.module("treesitter"));
     linkPlatformLibs(tests, target);
 
     const run_tests = b.addRunArtifact(tests);
@@ -221,6 +270,7 @@ pub fn build(b: *std.Build) void {
     lib_root_module.addImport("brotli", brotli_dep.module("brotli"));
     lib_root_module.addImport("env", env_dep.module("env"));
     lib_root_module.addImport("loaders", loaders_dep.module("loaders"));
+    lib_root_module.addImport("treesitter", treesitter_dep.module("treesitter"));
 
     const lib = b.addLibrary(.{
         .name = "httpx",

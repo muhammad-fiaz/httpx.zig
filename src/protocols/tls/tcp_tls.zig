@@ -230,6 +230,12 @@ pub const TlsServer = struct {
     /// flight (ServerHello + EncryptedExtensions + Certificate +
     /// CertificateVerify + Finished) as plaintext records.
     pub fn handshake(self: *TlsServer, socket: *tcp.Socket) !TlsServerConn {
+        return self.handshakeBuffered(socket, &.{});
+    }
+
+    /// Perform TLS 1.3 server handshake on an accepted TCP connection,
+    /// accepting any pre-read bytes from initial buffer peek.
+    pub fn handshakeBuffered(self: *TlsServer, socket: *tcp.Socket, initial: []const u8) !TlsServerConn {
         const a = self.config.allocator;
 
         var engine = engine_mod.Engine.initServer(a, .{});
@@ -238,6 +244,11 @@ pub const TlsServer = struct {
         // Read initial bytes (at least 5 bytes to inspect TLS Record or Handshake header)
         var read_buf: [16384]u8 = undefined;
         var total_read: usize = 0;
+        if (initial.len > 0) {
+            const take = @min(initial.len, read_buf.len);
+            @memcpy(read_buf[0..take], initial[0..take]);
+            total_read = take;
+        }
         while (total_read < 5) {
             const n = socket.read(read_buf[total_read..]) catch return error.IoError;
             if (n == 0) return error.TlsHandshakeFailed;

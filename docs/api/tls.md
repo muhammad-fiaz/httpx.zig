@@ -46,9 +46,9 @@ Configuration for TLS client connections.
 ```zig
 pub const TlsConfig = struct {
     allocator: Allocator,
-    alpn_protocols: []const []const u8 = &.{"http/1.1"},
-    verify_server: bool = true,
-    ca_bundle_path: ?[]const u8 = null,
+    alpnProtocols: []const []const u8 = &.{"http/1.1"},
+    verifyServer: bool = true,
+    caBundlePath: ?[]const u8 = null,
 };
 ```
 
@@ -91,20 +91,21 @@ defer server_tls.deinit();
 Enable TLS on the server via `ServerConfig`:
 
 ```zig
-var server = httpx.Server.initWithConfig(allocator, .{
+    const io = std.Io.Threaded.global_single_threaded.io();
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8443,
     .tls_enabled = true,
     .tls_cert_path = "examples/certs/server_ec.crt",
     .tls_key_path = "examples/certs/server_ec.key",
-    .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
-    .http2_enabled = true,
-    .http3_enabled = true,
+    .tls_alpnProtocols = &.{ "h3", "h2", "http/1.1" },
+    .http2 = true,
+    .http3 = true,
 });
 ```
 
 ::: tip ALPN Default
-The default `tls_alpn_protocols` is `&.{ "h3", "h2", "http/1.1" }`, so clients can negotiate HTTP/3, HTTP/2, or HTTP/1.1 automatically.
+The default `tls_alpnProtocols` is `&.{ "h3", "h2", "http/1.1" }`, so clients can negotiate HTTP/3, HTTP/2, or HTTP/1.1 automatically.
 :::
 
 The server automatically loads the certificate chain and private key on the first TLS connection. ALPN negotiation selects between HTTP/1.1, HTTP/2, and HTTP/3 based on the client's offer.
@@ -162,7 +163,7 @@ defer connection.closeNotify();
 Accept a TLS connection on the server side:
 
 ```zig
-const connection = try tls.acceptServer(allocator, socket, alpn_protocols, server_tls_config);
+const connection = try tls.acceptServer(allocator, socket, alpnProtocols, server_tls_config);
 defer connection.closeNotify();
 ```
 

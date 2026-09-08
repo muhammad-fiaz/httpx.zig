@@ -87,7 +87,8 @@ std.debug.print("response: {s}\n", .{buf[0..n]});
 The httpx high-level client can route HTTP requests over a Unix socket:
 
 ```zig
-var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
+    const io = std.Io.Threaded.global_single_threaded.io();
+var client = httpx.Client.init(allocator, io, .{}
     .withUnixSocket("app.sock"));
 defer client.deinit();
 
@@ -100,7 +101,8 @@ defer resp.deinit();
 Bind the httpx server to a Unix socket path instead of a port:
 
 ```zig
-var server = httpx.Server.initWithConfig(allocator, .{
+    const io = std.Io.Threaded.global_single_threaded.io();
+var server = try httpx.Server.init(allocator, io, .{
     .unix_path = "app.sock",
 });
 defer server.deinit();
@@ -135,11 +137,12 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     const path = "httpx-demo.sock";
 
     // Start server in background
-    var server = httpx.Server.initWithConfig(allocator, .{ .unix_path = path });
+    var server = try httpx.Server.init(allocator, io, .{ .unix_path = path });
     defer server.deinit();
 
     try server.get("/ping", struct {
@@ -156,7 +159,7 @@ pub fn main() !void {
     std.Thread.sleep(50_000_000);
 
     // Connect as client
-    var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
+    var client = httpx.Client.init(allocator, io, .{}
         .withUnixSocket(path));
     defer client.deinit();
 

@@ -12,7 +12,7 @@ Sessions are identified by a randomly generated 32-byte ID (encoded as a 64-char
 const httpx = @import("httpx");
 
 var store = httpx.SessionStore.init(allocator, .{
-    .ttl_ms = 30 * 60 * 1000, // 30 minutes
+    .ttlMs = 30 * 60 * 1000, // 30 minutes
     .cookie_name = "session_id",
     .max_sessions = 0,         // 0 = unlimited
 });
@@ -136,7 +136,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     var store = httpx.SessionStore.init(allocator, .{
-        .ttl_ms = 5 * 60 * 1000, // 5 minutes
+        .ttlMs = 5 * 60 * 1000, // 5 minutes
     });
     defer store.deinit();
 

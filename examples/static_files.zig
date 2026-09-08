@@ -17,11 +17,12 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .docs_enabled = false,
+        .enableDocs = false,
         .max_connections = 1,
     });
     defer server.deinit();
@@ -48,7 +49,7 @@ pub fn main() !void {
     var url_buf: [128]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/static/index.html", .{port});
 
-    var response = try httpx.get(.{ .url = url });
+    var response = try httpx.get(url, .{});
     defer response.deinit();
 
     std.debug.print("GET /static/index.html -> {d} ({d} bytes)\n", .{ response.status, response.body.len });

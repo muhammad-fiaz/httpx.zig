@@ -40,8 +40,10 @@ HTTP/3 support is validated across Linux, Windows, and macOS targets:
 Enable HTTP/3 in `ClientConfig`:
 
 ```zig
-var client = httpx.Client.initWithConfig(allocator, .{
-    .http3_enabled = true,
+    const io = std.Io.Threaded.global_single_threaded.io();
+var client = httpx.Client.init(allocator, io, .{
+    .httpVersion = .http3,
+    .http3 = true,
     .http3_settings = .{
         .qpack_max_table_capacity = 4096,
         .qpack_blocked_streams = 16,
@@ -58,10 +60,11 @@ defer response.deinit();
 std.debug.print("version={s} status={d}\n", .{ response.version.toString(), response.status.code });
 ```
 
-You can also force HTTP/3 on a single request (without changing other client defaults):
+You can also specify HTTP/3 per-request:
 
 ```zig
-var response = try client.get("http://127.0.0.1:8080/runtime", httpx.RequestOptions.defaults().withHttp3());
+var response = try client.get("http://127.0.0.1:8080/runtime", .{ .httpVersion = .http3,
+});
 defer response.deinit();
 ```
 
@@ -74,11 +77,12 @@ The current HTTP/3 runtime paths use UDP + QUIC stream framing primitives direct
 Enable HTTP/3 in `ServerConfig`:
 
 ```zig
-var server = httpx.Server.initWithConfig(allocator, .{
+    const io = std.Io.Threaded.global_single_threaded.io();
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
-    .http3_enabled = true,
-    .http2_enabled = false,
+    .http3 = true,
+    .http2 = false,
 });
 defer server.deinit();
 

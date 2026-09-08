@@ -1,38 +1,67 @@
-# DNS Cache
+# DNS Cache Example
 
-Demonstrates DNS cache operations: insert, lookup, invalidation, statistics, and expiration.
+Demonstrates HTTPX's thread-safe in-memory DNS caching subsystem with positive/negative TTL and single-flight stampede prevention.
 
-## Demo Program
+## How DNS Caching Works
+
+1. **Automatic Client Caching**: By default, `httpx.Client` initializes an internal `Cache` that caches successful lookups for 60,000 ms (60 seconds) and failed lookups for 5,000 ms (5 seconds).
+2. **Single-Flight Coalescing**: If 50 concurrent requests simultaneously need to resolve `httpbun.com`, only **one** real DNS query is dispatched to the network. The other 49 callers await the result and receive clones, preventing cache stampedes.
+3. **Thread Safety**: Internally synchronized via spinlocks. Network I/O is never performed while holding locks.
+4. **Memory Bounds**: Entries are bounded by `maxEntries` (default: 1024) to prevent memory exhaustion.
+
+## High-Level Usage via Client
 
 ```zig
-const cache = httpx.dns.DnsCache.init(allocator);
+const std = @import("std");
+const httpx = @import("httpx");
 
-// Insert entries
-try cache.put("example.com", 80, &.{address}, 60000);
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-// Lookup
-if (cache.get("example.com", 80)) |entry| { ... }
+    // Initialize client with custom cache settings
+    var client = httpx.Client.init(allocator, io, .{
+        .dnsCache = .{
+            .enable = true,
+            .ttlMs = 120_000,         // 2 minutes positive TTL
+            .negativeTtlMs = 3_000,  // 3 seconds negative TTL
+            .maxEntries = 2048,
+        },
+    });
+    defer client.deinit();
 
-// Invalidate
-cache.invalidate("example.com", 80);
+    // First lookup: queries DNS and populates cache
+    var addrs1 = try client.resolve("httpbun.com", 443, .{});
+    defer addrs1.deinit();
 
-// Statistics
-const stats = cache.stats();
+    // Second lookup: served instantly from cache
+    var addrs2 = try client.resolve("httpbun.com", 443, .{});
+    defer addrs2.deinit();
 
-// Clear all
-cache.clear();
+    // Force fresh lookup bypassing cache
+    var fresh = try client.resolve("httpbun.com", 443, .{ .use_cache = false });
+    defer fresh.deinit();
+}
 ```
 
-## Run
+## Advanced Direct Cache API
 
+For specialized network applications, the standalone cache in `src/net/dns/cache.zig` can be used directly:
+
+```zig
+const cache_mod = @import("httpx").dnsCache; // or @import("src/net/dns/cache.zig")
 ```
-zig build run-all-dns_cache
-```
 
-## Checklist
+The cache exposes atomic observability counters:
+* `hits`: Number of lookups satisfied from cache.
+* `misses`: Number of lookups that required network I/O.
+* `lookups_started`: Number of network lookups initiated.
+* `lookups_coalesced`: Number of concurrent requests joined to an in-flight lookup.
 
-- [x] Cache insert and lookup
-- [x] Cache invalidation
-- [x] Cache statistics (hits, misses, evictions)
-- [x] Cache clear
-- [x] TTL-based expiration
+## Related
+
+* [Guide: DNS Resolution](/guide/dns)
+* [API: DNS](/api/dns)
+* [Example: DNS Configuration](/examples/dns-configuration)

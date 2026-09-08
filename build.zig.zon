@@ -20,6 +20,14 @@
             .url = "https://github.com/muhammad-fiaz/loaders.zig/archive/refs/tags/0.0.6.tar.gz",
             .hash = "loaders-0.0.6-lPpNad1mAgBBPiQ4G94Ywn7kGP21S-CxMtv7noE5lhdT",
         },
+        .treesitter = .{
+            .url = "https://github.com/muhammad-fiaz/tree-sitter.zig/archive/refs/tags/0.0.1.tar.gz",
+            .hash = "treesitter-0.0.1-QlQpWG_bBgDu5W6swtL7ROwFKek4n-gWzfnWUgUB9jcC",
+        },
+        .args = .{
+            .url = "https://github.com/muhammad-fiaz/args.zig/archive/refs/tags/0.0.9.tar.gz",
+            .hash = "args-0.0.9-8hzgbh4KCgB9UYVNvr6R_GmZgq7j1DpV2kGcqn3F36Q1",
+        },
     },
     .paths = .{
         "build.zig",

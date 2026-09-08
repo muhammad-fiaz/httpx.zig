@@ -411,6 +411,12 @@ pub const Socket = struct {
         }
     }
 
+    /// Probes whether the socket is still open and healthy.
+    /// Returns false if closed locally.
+    pub fn isAlive(self: *const Socket) bool {
+        return !self.close_flag.load(.monotonic);
+    }
+
     // I/O
 
     /// Reads up to buf.len bytes; partial reads are normal.

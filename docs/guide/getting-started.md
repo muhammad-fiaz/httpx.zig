@@ -11,7 +11,7 @@
     - Automatic retries with exponential backoff.
     - Request/Response interceptors.
     - Cookie management.
-    - Optional chainable config/option builders (`ClientConfig.defaults().with...`, `RequestOptions.defaults().with...`) when you want explicit overrides.
+    - Idiomatic, grouped configuration structs with sensible defaults.
 - **Server**:
     - Pattern-based routing.
     - Middleware architecture.
@@ -19,7 +19,7 @@
     - JSON helpers.
 - **Concurrency**: Built-in thread pool and async primitives (`all`, `any`, `race`).
 - **Security**: Custom TLS 1.2/1.3 implementation with ALPN negotiation, ECDSA certificate verification, and custom CA handling.
-- **Explicit Root Helpers**: Top-level aliases for requests (`fetch/send/...`), concurrency (`first/fastest/settled`), networking (`resolveAddress`, `parseAndResolveAddress`, `netInit/netDeinit`), and MIME detection (`mimeTypeFromPath`, `mimeTypeFromPathOr`, `mimeTypeFromPathWith`) with external mapping support via `MimeMapping`.
+- **Modern Architecture**: Minimal, unified client and server APIs, explicit resource ownership, and zero boilerplate.
 
 ::: warning Custom HTTP/2, HTTP/3, and TLS Implementation
 Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN support. **httpx.zig implements these protocols entirely from scratch**, including:

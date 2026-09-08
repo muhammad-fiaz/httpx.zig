@@ -24,10 +24,10 @@ pub const Cookie = struct {
     value: []const u8,
     domain: ?[]const u8 = null,
     path: ?[]const u8 = null,
-    expires_ms: ?i64 = null,
+    expiresMs: ?i64 = null,
     secure: bool = false,
-    http_only: bool = false,
-    same_site: SameSite = .lax,
+    httpOnly: bool = false,
+    sameSite: SameSite = .lax,
 
     pub const SameSite = enum { strict, lax, none };
 };
@@ -36,17 +36,17 @@ pub const Jar = struct {
     allocator: Allocator,
     cookies: std.ArrayList(CookieEntry),
     mu: sync.Spinlock = .{},
-    max_cookies: usize = 4096,
+    maxCookies: usize = 4096,
 
     const CookieEntry = struct {
         name: []const u8,
         value: []const u8,
         domain: []const u8,
         path: []const u8,
-        expires_ms: ?i64,
+        expiresMs: ?i64,
         secure: bool,
-        http_only: bool,
-        same_site: Cookie.SameSite,
+        httpOnly: bool,
+        sameSite: Cookie.SameSite,
     };
 
     pub fn init(allocator: Allocator) Jar {
@@ -69,17 +69,17 @@ pub const Jar = struct {
     }
 
     /// Parse a Set-Cookie header and store the cookie.
-    pub fn setFromHeader(self: *Jar, set_cookie: []const u8, request_host: []const u8) void {
+    pub fn setFromHeader(self: *Jar, setCookie: []const u8, requestHost: []const u8) void {
         var name: ?[]const u8 = null;
         var value: ?[]const u8 = null;
         var domain: ?[]const u8 = null;
         var path: ?[]const u8 = "/";
-        var expires_ms: ?i64 = null;
+        var expiresMs: ?i64 = null;
         var secure = false;
-        var http_only = false;
-        var same_site: Cookie.SameSite = .lax;
+        var httpOnly = false;
+        var sameSite: Cookie.SameSite = .lax;
 
-        var iter = std.mem.splitScalar(u8, set_cookie, ';');
+        var iter = std.mem.splitScalar(u8, setCookie, ';');
         var first = true;
         while (iter.next()) |part| {
             const trimmed = std.mem.trim(u8, part, " \t");
@@ -95,31 +95,31 @@ pub const Jar = struct {
             if (std.ascii.eqlIgnoreCase(trimmed, "secure")) {
                 secure = true;
             } else if (std.ascii.eqlIgnoreCase(trimmed, "httponly")) {
-                http_only = true;
+                httpOnly = true;
             } else if (std.ascii.startsWithIgnoreCase(trimmed, "domain=")) {
                 domain = std.mem.trim(u8, trimmed[7..], "\" ");
             } else if (std.ascii.startsWithIgnoreCase(trimmed, "path=")) {
                 path = std.mem.trim(u8, trimmed[5..], "\" ");
             } else if (std.ascii.startsWithIgnoreCase(trimmed, "max-age=")) {
                 const secs = std.fmt.parseInt(i64, trimmed[8..], 10) catch continue;
-                expires_ms = clock.millisNow() + (secs * 1000);
+                expiresMs = clock.millisNow() + (secs * 1000);
             } else if (std.ascii.startsWithIgnoreCase(trimmed, "expires=")) {
                 // HTTP-date parsing handled via static_files.parseHttpDate.
                 if (@import("../web/static_files/serve.zig").parseHttpDate(trimmed[8..])) |secs| {
-                    expires_ms = secs * 1000;
+                    expiresMs = secs * 1000;
                 }
             } else if (std.ascii.eqlIgnoreCase(trimmed, "samesite=strict")) {
-                same_site = .strict;
+                sameSite = .strict;
             } else if (std.ascii.eqlIgnoreCase(trimmed, "samesite=none")) {
-                same_site = .none;
+                sameSite = .none;
             } else if (std.ascii.eqlIgnoreCase(trimmed, "samesite=lax")) {
-                same_site = .lax;
+                sameSite = .lax;
             }
         }
 
         const n = name orelse return;
         const v = value orelse "";
-        const d = domain orelse request_host;
+        const d = domain orelse requestHost;
         const p = path orelse "/";
 
         self.mu.lock();
@@ -141,17 +141,17 @@ pub const Jar = struct {
         }
 
         // Enforce limit.
-        if (self.cookies.items.len >= self.max_cookies) return;
+        if (self.cookies.items.len >= self.maxCookies) return;
 
         self.cookies.append(self.allocator, .{
             .name = self.allocator.dupe(u8, n) catch return,
             .value = self.allocator.dupe(u8, v) catch return,
             .domain = self.allocator.dupe(u8, d) catch return,
             .path = self.allocator.dupe(u8, p) catch return,
-            .expires_ms = expires_ms,
+            .expiresMs = expiresMs,
             .secure = secure,
-            .http_only = http_only,
-            .same_site = same_site,
+            .httpOnly = httpOnly,
+            .sameSite = sameSite,
         }) catch return;
     }
 
@@ -163,7 +163,7 @@ pub const Jar = struct {
         var pos: usize = 0;
         var wrote = false;
         for (self.cookies.items) |c| {
-            if (c.expires_ms) |exp| {
+            if (c.expiresMs) |exp| {
                 if (now >= exp) continue;
             }
             if (!domainMatches(host, c.domain)) continue;
@@ -186,7 +186,7 @@ pub const Jar = struct {
         var i: usize = 0;
         while (i < self.cookies.items.len) {
             const c = &self.cookies.items[i];
-            if (c.expires_ms) |exp| {
+            if (c.expiresMs) |exp| {
                 if (now >= exp) {
                     self.allocator.free(c.name);
                     self.allocator.free(c.value);
@@ -201,20 +201,20 @@ pub const Jar = struct {
     }
 };
 
-fn domainMatches(host: []const u8, domain_in: []const u8) bool {
+fn domainMatches(host: []const u8, domainIn: []const u8) bool {
     // RFC 6265 Section 5.1.2: a leading dot is ignored for matching purposes.
-    const domain = if (domain_in.len > 0 and domain_in[0] == '.') domain_in[1..] else domain_in;
+    const domain = if (domainIn.len > 0 and domainIn[0] == '.') domainIn[1..] else domainIn;
     if (std.ascii.eqlIgnoreCase(host, domain)) return true;
     return host.len > domain.len and
         std.ascii.endsWithIgnoreCase(host, domain) and
         host[host.len - domain.len - 1] == '.';
 }
 
-fn pathMatches(request_path: []const u8, cookie_path: []const u8) bool {
-    if (std.mem.eql(u8, request_path, cookie_path)) return true;
-    if (std.mem.startsWith(u8, request_path, cookie_path)) {
-        if (cookie_path.len == 0 or cookie_path[cookie_path.len - 1] == '/') return true;
-        if (request_path.len > cookie_path.len and request_path[cookie_path.len] == '/') return true;
+fn pathMatches(requestPath: []const u8, cookiePath: []const u8) bool {
+    if (std.mem.eql(u8, requestPath, cookiePath)) return true;
+    if (std.mem.startsWith(u8, requestPath, cookiePath)) {
+        if (cookiePath.len == 0 or cookiePath[cookiePath.len - 1] == '/') return true;
+        if (requestPath.len > cookiePath.len and requestPath[cookiePath.len] == '/') return true;
     }
     return false;
 }

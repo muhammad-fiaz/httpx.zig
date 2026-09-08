@@ -5,6 +5,7 @@ Demonstrates custom log functions for server and client, including routing logs 
 ## Demo Program
 
 ```zig
+    const io = std.Io.Threaded.global_single_threaded.io();
 // External logger callback — prefixes messages with level
 fn externalLogger(level: httpx.LogLevel, message: []const u8) void {
     std.debug.print("[EXT-{s}] {s}\n", .{ @tagName(level), message });
@@ -21,12 +22,12 @@ fn timestampLogger(level: httpx.LogLevel, message: []const u8) void {
 }
 
 // Attach to server
-var server = httpx.Server.initWithConfig(allocator, .{
+var server = try httpx.Server.init(allocator, io, .{
     .log_fn = externalLogger,
 });
 
 // Attach to client
-var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
+var client = httpx.Client.init(allocator, io, .{}
     .withLogFn(externalLogger));
 ```
 
@@ -49,7 +50,8 @@ zig build run-all-logging_callback
 To suppress all logs except errors:
 
 ```zig
-var server = httpx.Server.initWithConfig(allocator, .{
+    const io = std.Io.Threaded.global_single_threaded.io();
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
     .log_level = .err, // Only show errors

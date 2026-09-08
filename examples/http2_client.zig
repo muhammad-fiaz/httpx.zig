@@ -20,11 +20,12 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .docs_enabled = false,
+        .enableDocs = false,
         .max_connections = 1,
     });
     defer server.deinit();
@@ -42,17 +43,16 @@ pub fn main() !void {
     defer t.join();
 
     // Client side: connect and perform HTTP/2 request with zero manual IO management
-    var client = try httpx.Client.init(allocator, .{
-        .http_version = .h2,
+    var client = httpx.Client.init(allocator, io, .{
+        .httpVersion = .http2,
     });
     defer client.deinit();
 
     const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/h2", .{port});
     defer allocator.free(url);
 
-    var resp = try client.get(.{
-        .url = url,
-        .http_version = .h2,
+    var resp = try client.get(url, .{
+        .httpVersion = .http2,
     });
     defer resp.deinit();
 

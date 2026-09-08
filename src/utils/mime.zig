@@ -63,6 +63,10 @@ pub fn fromPath(path: []const u8) []const u8 {
     return mime_map.get(key) orelse octet_stream;
 }
 
+pub fn byExtension(path: []const u8) []const u8 {
+    return fromPath(path);
+}
+
 pub const octet_stream = "application/octet-stream";
 
 test "detects common types case-insensitively" {

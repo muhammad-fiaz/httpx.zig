@@ -1,26 +1,51 @@
-# Connection Pooling & Concurrency
+# Connection Pooling Guide
 
-`httpx.zig` handles connection concurrency at two levels: 
-1. **Internal Connection Pooling**: Reusing socket connections for efficiency.
-2. **Parallel Request Execution**: Running multiple requests essentially at the same time.
+HTTPX includes an internal, thread-safe connection pool designed for high throughput, connection reuse, and minimal socket creation overhead.
 
-## Connection Pooling
+## Architecture
 
-The `Client` automatically manages a pool of TCP connections. When a request is made, it checks for an idle, healthy connection to the target host. If one exists, it is reused; otherwise, a new connection is created.
-
-### Configuration
-
-You can configure the pool size and behavior via `ClientConfig`:
-
-```zig
-const config = httpx.ClientConfig{
-    .keep_alive = true,
-    .pool_max_connections = 50,  // Total connections in pool
-    .pool_max_per_host = 10,     // Max connections to a single host
-};
+```text
+HTTP Request -> Pool.acquire(host, port)
+                 |
+                 +--> Reusable Keep-Alive socket found?
+                 |       Yes: Send request on existing socket
+                 |       No: Connect new TCP/TLS socket
+                 |
+HTTP Response -> Pool.release(socket)
+                 |
+                 +--> Return to idle pool for subsequent requests
 ```
 
-This acts mostly transparently to the user.
+## Configuration
 
-For parallel request execution (all, race, any) and task execution, see the [Concurrency](/guide/concurrency) guide.
+Connection pooling is configured on `Client.init`:
 
+```zig
+var client = httpx.Client.init(allocator, io, .{
+    .max_connections = 64,
+    .max_idle_connections = 16,
+    .idle_timeout_ms = 30_000,
+});
+defer client.deinit();
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `max_connections` | `usize` | `128` | Total active connections across all hosts |
+| `max_idle_connections` | `usize` | `32` | Max idle sockets preserved in pool |
+| `idle_timeout_ms` | `u32` | `60000` | Sockets idle longer than this are closed |
+
+## Pool Key Isolation
+
+Connections are keyed by:
+1. Target Hostname / IP
+2. Target Port
+3. Transport Scheme (`http` vs `https`)
+4. Proxy Configuration (direct vs proxy endpoint)
+
+A connection established for `http://example.com` will never be mistakenly reused for `https://example.com` or through a proxy.
+
+## Related
+
+* [API: Pool](/api/pool)
+* [Example: Connection Pool](/examples/connection-pool)

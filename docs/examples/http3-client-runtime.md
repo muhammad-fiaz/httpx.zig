@@ -12,9 +12,10 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = httpx.Client.initWithConfig(allocator, .{
-        .http3_enabled = true,
+    var client = httpx.Client.init(allocator, io, .{
+        .http3 = true,
     });
     defer client.deinit();
 

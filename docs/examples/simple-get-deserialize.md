@@ -49,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
     const live_mode = shouldUseLiveNetwork(init.minimal.environ, allocator);
 
     if (!live_mode) {
@@ -58,18 +59,17 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var client = httpx.Client.initWithConfig(allocator, httpx.ClientConfig.defaults()
-        .withTimeouts(httpx.Timeouts.fast())
-        .withRetryPolicy(httpx.RetryPolicy.noRetry()));
+    var client = httpx.Client.init(allocator, io, .{
+        .timeoutMs = 5_000,
+    });
     defer client.deinit();
 
-    var res = try client.request(.GET, "https://httpbun.com/get", .{ .timeout_ms = 5_000 });
+    var res = try client.fetch("https://httpbun.com/get", .{ .timeoutMs = 5_000 });
     defer res.deinit();
 
     // Use response.json() helper for clean automatic JSON deserialization
-    const parsed = try res.json(HttpbinResponse, .{});
-    defer parsed.deinit();
-    std.debug.print("url={s}\n", .{parsed.value.url});
+    const data = try res.json(HttpbinResponse);
+    std.debug.print("url={s}\n", .{data.url});
 }
 ```
 

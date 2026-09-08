@@ -69,7 +69,12 @@ pub const SchemaConfig = struct {
     types: []const ObjectTypeDef = &.{},
     max_depth: usize = 32,
     max_complexity: usize = 500,
-    enable_introspection: bool = true,
+    introspection: bool = true,
+    enable_introspection: ?bool = null,
+
+    pub fn isIntrospectionEnabled(self: SchemaConfig) bool {
+        return self.enable_introspection orelse self.introspection;
+    }
 };
 
 pub const Schema = struct {
@@ -180,7 +185,7 @@ pub const Schema = struct {
         user_ctx: ?*anyopaque,
     ) !std.json.Value {
         // Introspection handling
-        if (self.config.enable_introspection) {
+        if (self.config.isIntrospectionEnabled()) {
             if (std.mem.eql(u8, field.name, "__typename")) {
                 return std.json.Value{ .string = obj_def.name };
             }

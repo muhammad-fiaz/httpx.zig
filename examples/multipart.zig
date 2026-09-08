@@ -9,18 +9,18 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = try httpx.Client.init(allocator, .{});
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     const file_data = "hello, world!";
 
-    var response = try client.post(.{
-        .url = "http://httpbun.com/post",
+    var response = try client.post("http://httpbun.com/post", .{
         .multipart = .{
-            .field_name = "upload",
+            .fieldName = "upload",
             .filename = "hello.txt",
-            .content_type = "text/plain",
+            .contentType = "text/plain",
             .data = file_data,
         },
     });

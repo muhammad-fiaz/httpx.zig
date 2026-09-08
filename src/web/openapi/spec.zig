@@ -17,12 +17,7 @@ const Response = router_mod.Response;
 const Router = router_mod.Router;
 const Method = @import("../../common/method.zig").Method;
 const meta_mod = @import("../router/metadata.zig");
-
-pub const Info = struct {
-    title: []const u8 = "HTTPX API",
-    version: []const u8 = "0.2.0",
-    description: []const u8 = "Fast, modern web framework for Zig with automated OpenAPI & GraphQL documentation.",
-};
+pub const Info = @import("../../common/version.zig").Info;
 
 const PathGroup = struct {
     openapi_path: []u8, // owned
