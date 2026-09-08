@@ -2,16 +2,16 @@
 
 ## Supported Versions
 
-| Version  | Supported |
-| -------- | --------- |
-| 0.1.9+   | :white_check_mark: |
-| 0.1.8    | :white_check_mark: |
-| 0.1.7    | :white_check_mark: |
-| 0.1.6    | :white_check_mark: |
-| < 0.1.5  | :x: |
+| Version | Supported |
+| ------- | --------- |
+| 0.2.x   | :white_check_mark: |
+| 0.1.x   | :warning: migrate to 0.2.x |
+| < 0.1.5 | :x: |
 
-Versions below 0.1.5 are considered end-of-life and will not receive
-security fixes or updates.
+v0.2.0 is the production-grade release for long-term use. Versions in the
+0.1.x line are legacy: please migrate to 0.2.x for better performance,
+stronger security defaults, and ongoing fixes. Versions below 0.1.5 are
+considered end-of-life and will not receive security fixes or updates.
 
 ---
 
@@ -27,13 +27,12 @@ security fixes or updates.
 - **ALPN negotiation** (RFC 7301) for automatic protocol selection
 - **X.509 certificate parsing** and chain verification
 - **mTLS** (mutual TLS) support for client certificate authentication
-- Custom CA trust stores and certificate pinning options
+- Custom CA trust stores with system, custom, combined, and self-signed modes
 
 ### HTTP Security
 
 - **CRLF injection defense** in header values and request paths
-- **Path traversal rejection** in static file serving (`../` normalization)
-- **Host header validation** to prevent DNS rebinding attacks
+- **Path traversal rejection** in static file serving and template loading (safe relative-path resolution)
 - **Request size limits** via `max_body` configuration (default 8 MB)
 - **Connection limits** via `max_connections` to prevent resource exhaustion
 
@@ -41,16 +40,15 @@ security fixes or updates.
 
 - **Bearer token extraction** and validation helpers
 - **Basic authentication** parsing and verification
-- **SSRF protection** in reverse proxy middleware
-- **CSRF token validation** middleware
+- **CSRF token generation and verification** helpers
 - **Security headers (Helmet)** middleware for HSTS, X-Frame-Options, CSP, etc.
 
 ### Network Security
 
-- **DNS resolution with SSRF policy checks** to block internal network access
+- **DNS resolution with caching** and concurrent lookup coalescing
 - **Rate limiting** middleware to prevent brute-force and DDoS
 - **SOCKS5 proxy** support for privacy-preserving connections
-- **Connection pooling** with health checking to prevent stale connections
+- **Connection pooling** with stale-connection eviction
 
 ### Data Integrity
 

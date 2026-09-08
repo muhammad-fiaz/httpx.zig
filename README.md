@@ -27,8 +27,8 @@
 
 `httpx.zig` is a modern, high-performance HTTP library for Zig, providing everything needed to build fast and reliable networked applications, including HTTP clients, servers, APIs, web services, reverse proxies, and full-featured websites.
 
-> [!WARNING]
-> v0.2.0 is a major rewrite with new improvements and is currently in active development on the `main` branch, so it may include breaking API changes. The live docs site is for stable v0.1.8. For the latest in-development version, use Method 2 below. Docs generated from `main` are version 0.2.0.
+> [!IMPORTANT]
+> **v0.2.0 is the new major production-grade release, built for long-term use.** It delivers better performance, stronger security defaults, and a unified client API. If you are on any version below 0.2.0, please migrate to v0.2.0. Note that v0.2.0 introduces breaking API changes over 0.1.x, so review the updated usage below when migrating. The live docs site documents v0.2.0.
 
 > [!TIP]
 > If you build with httpx.zig, make sure to give it a star.
@@ -86,22 +86,22 @@
 | **Header Compression** | HPACK (RFC 7541) for HTTP/2; QPACK (RFC 9204) for HTTP/3 with static and dynamic table management. |
 | **HTTP/2 & HTTP/3 ALPN** | Automatic protocol negotiation during TLS handshake with graceful HTTP/1.1 fallback. |
 | **Stream Multiplexing** | HTTP/2 stream state machine with flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, and trailers. |
-| **Connection Pooling** | Automatic reuse of TCP & HTTP/2 connections with keep-alive, health checking, and parking caps. |
+| **Connection Pooling** | Automatic reuse of TCP keep-alive connections with parking caps and stale-connection eviction. |
 | **Unified DOM & Web Parsing** | Native parser for HTML5, XML, RSS/Atom/JSON feeds, robots.txt, and sitemaps with zero-leak arena architecture. |
 | **Streaming Downloader** | Resumable chunked file downloader powered by `loaders.zig` progress bars, ETA calculation, and hash verification. |
 | **Pattern-based Routing** | Intuitive server routing with dynamic parameters (`/users/:id`), wildcards (`/*path`), and route groups. |
-| **Middleware Stack** | Built-in middleware for CORS, Compression (gzip/deflate/brotli/zstd), Timeout, Rate Limiting, Logging, Auth, Helmet, CSRF, Reverse Proxy, Body Parsing, Request ID, and Health probes. |
+| **Middleware Stack** | Built-in middleware for CORS, security headers (Helmet), recovery, logging, rate limiting, and CSRF, plus health endpoints. |
 | **TLS/SSL** | Full TLS 1.2 and 1.3 with ALPN (RFC 7301), X25519 key exchange, AEAD ciphers, X.509 cert parsing, and mTLS support. |
 | **Static Files & SPA** | High-performance static file serving with ETag, cache control, conditional GET, MIME detection, and SPA HTML5 fallback. |
 | **Interactive API Docs** | Auto-generated OpenAPI 3.1 specifications with embedded Swagger UI, ReDoc, Scalar, and GraphiQL interfaces. |
 | **Streaming & Realtime** | Chunked transfer responses with optional trailers, Server-Sent Events (SSE), and WebSocket frame support. |
-| **HTTP Caching** | `CacheControl` header parsing, `HttpCache` (LRU in-memory with TTL), and `ConditionalGet` (ETag/If-None-Match). |
+| **Conditional Requests** | ETag and Last-Modified static file serving with `If-None-Match` revalidation. |
 | **DNS Resolution** | Resolution with caching, concurrent resolver coalescing, and SSRF policy checks. |
 | **Cookie APIs** | First-class request/response cookie jar and header helpers for both client and server contexts. |
 | **Security & Hardening** | Security headers (Helmet), CSRF protection, SSRF protection in reverse proxy, and CRLF injection defenses. |
 | **Multipart Form Data** | RFC 2046 streaming multipart body builder and parser for text fields and large file uploads. |
 | **FTP & FTPS** | Full FTP client and server with PASV/EPSV, directory listing, streaming uploads/downloads, and resumption. |
-| **Concurrency & Workers** | Thread-safe bounded `WorkerPool`, parallel requests (`getAll`, `requestAll`), and async task execution. |
+| **Concurrency & Workers** | Thread-safe bounded `WorkerPool` and parallel client requests (`getAll`, `requestAll`). |
 | **Proxy Support** | Client-side HTTP forward proxy, SOCKS5h tunneling, and server-side reverse proxy middleware. |
 | **Structured Logging** | Zero-allocation level-filtered structured logger supporting custom sinks and terminal formatting. |
 | **Cross-Platform Sockets** | Robust non-blocking Windows socket handling with `WSAEWOULDBLOCK` retry, plus `MSG_NOSIGNAL` on POSIX. |
@@ -177,9 +177,9 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 > [!WARNING]
 > Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.0**.
 
-### Method 2: Zig Fetch (Latest / v0.2.0 in development)
+### Method 2: Zig Fetch (Latest Development Build)
 
-Use this for the latest in-development version from the `main` branch:
+Use this for the latest development build from the `main` branch:
 
 ```bash
 zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
