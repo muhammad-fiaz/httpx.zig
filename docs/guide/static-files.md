@@ -24,8 +24,17 @@ server.run();
 3. **ETag & 304 Validation**: Automatically calculates ETags based on file modification timestamp and size.
 4. **Directory Traversal Protection**: Rejects paths containing `../` or encoded traversal sequences (`%2e%2e/`).
 
+## Embedded vs Filesystem Mode
+
+By default assets serve from disk, which pairs with the watcher for live
+iteration. To ship one self-contained `.exe`, register the same files with
+`@embedFile` + `httpx.assets.registerEmbedded`: `server.static`,
+`server.spa`, and `ctx.render` then resolve from memory with identical
+handler code. See [Single-File Deployment](/guide/single-file).
+
 ## Related
 
+* [Single-File Deployment](/guide/single-file)
 * [Web: Static Files](/web/static-files)
 * [Web: SPA](/web/spa)
 * [Example: Static Files](/examples/static-files)

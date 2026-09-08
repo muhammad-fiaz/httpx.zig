@@ -151,6 +151,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "file-watcher", .path = "examples/file_watcher.zig" },
         .{ .name = "live-reload", .path = "examples/live_reload.zig" },
         .{ .name = "static-site", .path = "examples/static_site.zig" },
+        .{ .name = "static-embedded", .path = "examples/static_embedded.zig" },
         .{ .name = "spa-server", .path = "examples/spa_server.zig" },
         .{ .name = "development-server", .path = "examples/development_server.zig" },
         .{ .name = "connectivity", .path = "examples/connectivity.zig" },
