@@ -22,8 +22,8 @@ HTTP/3 support is validated across Linux, Windows, and macOS targets:
 
 ## Features
 
-- **High-level Client Runtime** - `Client` can execute requests over HTTP/3 when `http3_enabled = true`
-- **High-level Server Runtime** - `Server` can serve routes over HTTP/3 when `http3_enabled = true`
+- **High-level Client Runtime** - `Client` can execute requests over HTTP/3 when `.http3 = true`
+- **High-level Server Runtime** - `Server` can serve routes over HTTP/3 when `.http3 = true`
 - **QPACK Header Compression** - Full RFC 9204 implementation with 99-entry static table
 - **QUIC Transport Framing** - All QUIC frame types (STREAM, CRYPTO, ACK, etc.)
 - **Variable-Length Integers** - QUIC varint encoding/decoding
@@ -92,11 +92,11 @@ try server.get("/h3", struct {
     }
 }.handler);
 
-try server.listen();
+server.run();
 ```
 
 ::: tip ALPN Default
-When `http3_enabled = true`, the server automatically includes `"h3"` in the ALPN protocols list. The default `tls_alpn_protocols` is `&.{ "h3", "h2", "http/1.1" }`, so clients can negotiate HTTP/3, HTTP/2, or HTTP/1.1 automatically.
+When `.http3 = true`, set `alpnProtocols` to include `"h3"` so clients can negotiate HTTP/3, HTTP/2, or HTTP/1.1.
 :::
 
 ## QPACK vs HPACK

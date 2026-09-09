@@ -32,7 +32,7 @@ pub const Schema = union(enum) {
     number,
     boolean,
     /// ISO-ish string date; still a string schema with format hint.
-    string_fmt: []const u8,
+    stringFmt: []const u8,
     array: *const Schema,
     object: []const ObjectField,
     /// Reference into components/schemas.
@@ -51,27 +51,27 @@ pub const Param = struct {
     in: Location,
     required: bool = false,
     description: []const u8 = "",
-    schema: *const Schema = &default_schema,
+    schema: *const Schema = &defaultSchema,
 
-    pub const default_schema: Schema = .string;
+    pub const defaultSchema: Schema = .string;
 };
 
 pub const ContentType = enum {
     json,
     form,
     multipart,
-    text_plain,
+    textPlain,
     html,
-    octet_stream,
+    octetStream,
 
     pub fn mime(self: ContentType) []const u8 {
         return switch (self) {
             .json => "application/json",
             .form => "application/x-www-form-urlencoded",
             .multipart => "multipart/form-data",
-            .text_plain => "text/plain",
+            .textPlain => "text/plain",
             .html => "text/html",
-            .octet_stream => "application/octet-stream",
+            .octetStream => "application/octet-stream",
         };
     }
 };
@@ -105,7 +105,7 @@ pub const schemas = struct {
 };
 
 pub const Metadata = struct {
-    operation_id: ?[]const u8 = null,
+    operationId: ?[]const u8 = null,
     summary: []const u8 = "",
     description: []const u8 = "",
     tags: []const []const u8 = &.{},

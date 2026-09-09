@@ -141,9 +141,9 @@ pub const TlsServerConn = struct {
         }
 
         // Check content type
-        const content_type_byte = wire_buf[0];
-        if (content_type_byte != @intFromEnum(record_mod.ContentType.application_data)) {
-            if (content_type_byte == @intFromEnum(record_mod.ContentType.alert)) {
+        const contentTypeByte = wire_buf[0];
+        if (contentTypeByte != @intFromEnum(record_mod.ContentType.application_data)) {
+            if (contentTypeByte == @intFromEnum(record_mod.ContentType.alert)) {
                 // Try to decrypt to read alert description
                 var decrypt_buf: [record_mod.max_record_plaintext + 1]u8 = undefined;
                 const result = record_mod.decodeRecord(
@@ -193,8 +193,8 @@ pub const CertSelector = struct {
 };
 
 pub const CertIdentity = struct {
-    cert_chain_pem: []const u8,
-    private_key_pem: []const u8,
+    certChainPem: []const u8,
+    privateKeyPem: []const u8,
 };
 
 /// Configuration for the TLS server.
@@ -202,13 +202,13 @@ pub const TlsServerConfig = struct {
     allocator: Allocator,
 
     /// Default certificate (used when SNI doesn't match any specific cert).
-    default_identity: ?CertIdentity = null,
+    defaultIdentity: ?CertIdentity = null,
 
-    /// SNI certificate selector (optional; falls back to default_identity).
-    cert_selector: ?CertSelector = null,
+    /// SNI certificate selector (optional; falls back to defaultIdentity).
+    certSelector: ?CertSelector = null,
 
     /// ALPN protocols in server preference order (TCP: no h3, QUIC handles h3 separately).
-    alpn_protocols: []const alpn_mod.Protocol = &alpn_mod.DEFAULT_TCP_PREFERENCE,
+    alpnProtocols: []const alpn_mod.Protocol = &alpn_mod.DEFAULT_TCP_PREFERENCE,
 
     pub fn init(allocator: Allocator) TlsServerConfig {
         return .{ .allocator = allocator };
@@ -295,7 +295,7 @@ pub const TlsServer = struct {
         // Parse the ClientHello body for SNI and ALPN
         const ch_body = read_buf[ch_offset + 4 ..][0..body_len];
         var parsed_ch = try parseClientHelloExtensions(a, ch_body);
-        defer parsed_ch.alpn_protocols.deinit(a);
+        defer parsed_ch.alpnProtocols.deinit(a);
 
         // Feed the full ClientHello (handshake header + body) to the transcript
         const full_ch = read_buf[ch_offset..][0 .. 4 + body_len];
@@ -309,15 +309,15 @@ pub const TlsServer = struct {
 
         // Select certificate
         const identity = self.resolveIdentity(parsed_ch.sni) orelse return error.MissingCertificate;
-        if (identity.cert_chain_pem.len == 0 or identity.private_key_pem.len == 0)
+        if (identity.certChainPem.len == 0 or identity.privateKeyPem.len == 0)
             return error.MissingCertificate;
 
         // Server produces flight
         var flight = try engine.produceServerFlight(
-            identity.cert_chain_pem,
-            identity.private_key_pem,
-            self.config.alpn_protocols,
-            parsed_ch.alpn_protocols.items,
+            identity.certChainPem,
+            identity.privateKeyPem,
+            self.config.alpnProtocols,
+            parsed_ch.alpnProtocols.items,
         );
         defer flight.deinit(a);
 
@@ -370,10 +370,10 @@ pub const TlsServer = struct {
     }
 
     fn resolveIdentity(self: *const TlsServer, sni: ?[]const u8) ?CertIdentity {
-        if (self.config.cert_selector) |sel| {
+        if (self.config.certSelector) |sel| {
             return sel.select(sel.ctx, sni);
         }
-        return self.config.default_identity;
+        return self.config.defaultIdentity;
     }
 };
 
@@ -383,7 +383,7 @@ const max_handshake_body = 1 << 14;
 
 const ParsedClientHello = struct {
     sni: ?[]const u8 = null,
-    alpn_protocols: std.ArrayList([]const u8),
+    alpnProtocols: std.ArrayList([]const u8),
 };
 
 /// Parse extensions from a ClientHello body to extract SNI and ALPN.
@@ -420,9 +420,9 @@ fn parseClientHelloExtensions(allocator: Allocator, body: []const u8) !ParsedCli
     if (ext_end > body.len) return error.TlsHandshakeFailed;
 
     var result = ParsedClientHello{
-        .alpn_protocols = std.ArrayList([]const u8).empty,
+        .alpnProtocols = std.ArrayList([]const u8).empty,
     };
-    errdefer result.alpn_protocols.deinit(allocator);
+    errdefer result.alpnProtocols.deinit(allocator);
 
     while (pos + 4 <= ext_end) {
         const ext_type = std.mem.readInt(u16, body[pos..][0..2], .big);
@@ -434,7 +434,7 @@ fn parseClientHelloExtensions(allocator: Allocator, body: []const u8) !ParsedCli
         if (ext_type == @intFromEnum(handshake_mod.ExtensionType.server_name)) {
             result.sni = try parseSniExtension(body[pos..][0..ext_data_len]);
         } else if (ext_type == @intFromEnum(handshake_mod.ExtensionType.application_layer_protocol_negotiation)) {
-            result.alpn_protocols = try parseAlpnExtension(allocator, body[pos..][0..ext_data_len]);
+            result.alpnProtocols = try parseAlpnExtension(allocator, body[pos..][0..ext_data_len]);
         }
 
         pos = data_end;
@@ -506,10 +506,10 @@ test "alpn negotiation in server config" {
     const cfg = TlsServerConfig{
         .allocator = std.testing.allocator,
     };
-    try std.testing.expectEqual(@as(usize, 3), cfg.alpn_protocols.len);
-    try std.testing.expectEqual(alpn_mod.Protocol.h2, cfg.alpn_protocols[0]);
-    try std.testing.expectEqual(alpn_mod.Protocol.@"http/1.1", cfg.alpn_protocols[1]);
-    try std.testing.expectEqual(alpn_mod.Protocol.@"http/1.0", cfg.alpn_protocols[2]);
+    try std.testing.expectEqual(@as(usize, 3), cfg.alpnProtocols.len);
+    try std.testing.expectEqual(alpn_mod.Protocol.h2, cfg.alpnProtocols[0]);
+    try std.testing.expectEqual(alpn_mod.Protocol.@"http/1.1", cfg.alpnProtocols[1]);
+    try std.testing.expectEqual(alpn_mod.Protocol.@"http/1.0", cfg.alpnProtocols[2]);
 }
 
 test "ClientHello SNI parsing" {
@@ -521,7 +521,7 @@ test "ClientHello SNI parsing" {
 
     // Parse the ClientHello body for extensions
     var parsed = try parseClientHelloExtensions(a, ch[4..]);
-    defer parsed.alpn_protocols.deinit(a);
+    defer parsed.alpnProtocols.deinit(a);
     try std.testing.expect(parsed.sni != null);
     try std.testing.expectEqualStrings("example.com", parsed.sni.?);
 }

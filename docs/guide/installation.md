@@ -194,7 +194,7 @@ zig build run-all-udp_local -Dtarget=aarch64-macos
 For client requests against external endpoints, prefer explicit timeout and error handling:
 
 ```zig
-var res = client.get("https://example.com", .{ .timeout_ms = 10_000 }) catch |err| {
+var res = client.get("https://example.com", .{ .timeoutMs = 10_000 }) catch |err| {
     std.debug.print("request failed: {s}\n", .{@errorName(err)});
     return;
 };

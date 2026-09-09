@@ -16,7 +16,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const tcp = @import("../../sockets/tcp.zig");
-const tls_server_mod = @import("tcp_tls.zig");
+const tlsServer_mod = @import("tcp_tls.zig");
 const alpn_mod = @import("alpn.zig");
 const h2_transport = @import("../http2/transport.zig");
 const h2_connection_mod = @import("../http2/connection.zig");
@@ -53,7 +53,7 @@ pub const HandlerFn = *const fn (req: HttpRequest) anyerror!HttpResponse;
 
 fn serveHttp1OverTls(
     allocator: Allocator,
-    tls_conn: *tls_server_mod.TlsServerConn,
+    tls_conn: *tlsServer_mod.TlsServerConn,
     handler: HandlerFn,
 ) void {
     var buf: [16 * 1024]u8 = undefined;
@@ -70,14 +70,14 @@ fn serveHttp1OverTls(
             continue;
         };
 
-        const head_end = head.head_end;
-        if (head_end > total) continue;
+        const headEnd = head.headEnd;
+        if (headEnd > total) continue;
 
         // Parse headers into a flat array
         var fields: [64]h1_parser.Field = undefined;
-        const result = h1_parser.parseHeaderBlock(buf[0..total], head_end, &fields) catch break;
+        const result = h1_parser.parseHeaderBlock(buf[0..total], headEnd, &fields) catch break;
 
-        var keep_alive = h1_semantics.shouldKeepAlive(if (head.minor_version == 0) .http10 else .http11, fields[0..result.count]);
+        var keepAlive = h1_semantics.shouldKeepAlive(if (head.minorVersion == 0) .http10 else .http11, fields[0..result.count]);
 
         var content_length: usize = 0;
         var transfer_chunked = false;
@@ -91,7 +91,7 @@ fn serveHttp1OverTls(
             if (std.ascii.eqlIgnoreCase(field.name, "expect")) {
                 has_expect = true;
                 if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, field.value, " \t"), "100-continue")) {
-                    const interim = h1_writer.buildResponse(allocator, 417, "Expectation Failed", null, .{ .minor_version = head.minor_version }, false) catch break;
+                    const interim = h1_writer.buildResponse(allocator, 417, "Expectation Failed", null, .{ .minorVersion = head.minorVersion }, false) catch break;
                     defer allocator.free(interim);
                     tls_conn.writeAll(interim) catch break;
                     return;
@@ -99,7 +99,7 @@ fn serveHttp1OverTls(
             }
         }
         if (content_length > 16 * 1024 * 1024) break;
-        if (has_expect and head.minor_version == 1 and (content_length > 0 or transfer_chunked)) {
+        if (has_expect and head.minorVersion == 1 and (content_length > 0 or transfer_chunked)) {
             const interim = h1_writer.buildInformational(allocator, 100, &.{}) catch break;
             defer allocator.free(interim);
             tls_conn.writeAll(interim) catch break;
@@ -107,14 +107,14 @@ fn serveHttp1OverTls(
         // Body reads use the TLS stream directly. Until pipelined bytes are
         // retained across body consumption, close body-bearing connections
         // to prevent buffered-tail desynchronization.
-        if (content_length > 0 or transfer_chunked) keep_alive = false;
+        if (content_length > 0 or transfer_chunked) keepAlive = false;
         var body_storage = std.ArrayList(u8).empty;
         defer body_storage.deinit(allocator);
         if (transfer_chunked) {
             var decoder = h1_parser.ChunkedDecoder.init();
             var wire = std.ArrayList(u8).empty;
             defer wire.deinit(allocator);
-            wire.appendSlice(allocator, buf[head_end..total]) catch break;
+            wire.appendSlice(allocator, buf[headEnd..total]) catch break;
             var cursor: usize = 0;
             while (!decoder.isDone()) {
                 const tail = decoder.decode(wire.items[cursor..]) catch |err| switch (err) {
@@ -133,7 +133,7 @@ fn serveHttp1OverTls(
             }
         } else {
             body_storage.ensureTotalCapacity(allocator, content_length) catch break;
-            if (head_end < total) body_storage.appendSlice(allocator, buf[head_end..][0..@min(content_length, total - head_end)]) catch break;
+            if (headEnd < total) body_storage.appendSlice(allocator, buf[headEnd..][0..@min(content_length, total - headEnd)]) catch break;
             while (body_storage.items.len < content_length) {
                 const body_n = tls_conn.read(buf[0..]) catch break;
                 if (body_n == 0) break;
@@ -144,7 +144,7 @@ fn serveHttp1OverTls(
         }
 
         // Build the request
-        const version_str = if (head.major_version == 1 and head.minor_version == 0) "HTTP/1.0" else "HTTP/1.1";
+        const version_str = if (head.majorVersion == 1 and head.minorVersion == 0) "HTTP/1.0" else "HTTP/1.1";
         const req = HttpRequest{
             .method = head.method,
             .path = head.path,
@@ -204,19 +204,19 @@ fn serveHttp1OverTls(
             resp.status,
             resp.reason,
             if (response_body.len > 0) response_body else null,
-            .{ .minor_version = head.minor_version, .headers = response_headers[0..response_header_count] },
+            .{ .minorVersion = head.minorVersion, .headers = response_headers[0..response_header_count] },
             false,
         ) catch break;
         defer allocator.free(resp_bytes);
 
         tls_conn.writeAll(resp_bytes) catch break;
 
-        if (!keep_alive) break;
+        if (!keepAlive) break;
 
         // Move unconsumed data to beginning
-        if (head_end < total) {
-            const remaining = total - head_end;
-            std.mem.copyForwards(u8, buf[0..remaining], buf[head_end..total]);
+        if (headEnd < total) {
+            const remaining = total - headEnd;
+            std.mem.copyForwards(u8, buf[0..remaining], buf[headEnd..total]);
             total = remaining;
         } else {
             total = 0;
@@ -228,7 +228,7 @@ fn serveHttp1OverTls(
 
 fn serveHttp2OverTls(
     allocator: Allocator,
-    tls_conn: *tls_server_mod.TlsServerConn,
+    tls_conn: *tlsServer_mod.TlsServerConn,
     handler: HandlerFn,
 ) void {
     var session = h2_connection_mod.Session.init(allocator, .server, .{}) catch return;
@@ -337,9 +337,9 @@ fn h2SvrOnData(ctx: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
 
 pub const ListenerConfig = struct {
     port: u16 = 8443,
-    default_identity: ?tls_server_mod.CertIdentity = null,
-    cert_selector: ?tls_server_mod.CertSelector = null,
-    alpn_protocols: []const alpn_mod.Protocol = &alpn_mod.DEFAULT_TCP_PREFERENCE,
+    defaultIdentity: ?tlsServer_mod.CertIdentity = null,
+    certSelector: ?tlsServer_mod.CertSelector = null,
+    alpnProtocols: []const alpn_mod.Protocol = &alpn_mod.DEFAULT_TCP_PREFERENCE,
 };
 
 pub const TlsListener = struct {
@@ -347,10 +347,10 @@ pub const TlsListener = struct {
     config: ListenerConfig,
     allocator: Allocator,
     io: std.Io,
-    owns_io: bool = false,
-    io_threaded: ?*std.Io.Threaded = null,
+    ownsIo: bool = false,
+    ioThreaded: ?*std.Io.Threaded = null,
     stop: std.atomic.Value(bool) = .init(false),
-    in_accept: std.atomic.Value(bool) = .init(false),
+    inAccept: std.atomic.Value(bool) = .init(false),
 
     pub fn init(allocator: Allocator, io: std.Io, config: ListenerConfig) !TlsListener {
         const l = try tcp.Listener.bind(io, config.port);
@@ -359,8 +359,8 @@ pub const TlsListener = struct {
 
     pub fn deinit(self: *TlsListener) void {
         self.listener.close(self.io);
-        if (self.owns_io) {
-            if (self.io_threaded) |t| {
+        if (self.ownsIo) {
+            if (self.ioThreaded) |t| {
                 t.deinit();
                 self.allocator.destroy(t);
             }
@@ -379,13 +379,13 @@ pub const TlsListener = struct {
         var socket = self.listener.accept(self.io) catch return error.AcceptFailed;
         defer socket.close();
 
-        const tls_config = tls_server_mod.TlsServerConfig{
+        const tls_config = tlsServer_mod.TlsServerConfig{
             .allocator = self.allocator,
-            .default_identity = self.config.default_identity,
-            .cert_selector = self.config.cert_selector,
-            .alpn_protocols = self.config.alpn_protocols,
+            .defaultIdentity = self.config.defaultIdentity,
+            .certSelector = self.config.certSelector,
+            .alpnProtocols = self.config.alpnProtocols,
         };
-        var tls_inst = tls_server_mod.TlsServer.init(tls_config);
+        var tls_inst = tlsServer_mod.TlsServer.init(tls_config);
         var tls_conn = tls_inst.handshake(&socket) catch return error.TlsHandshakeFailed;
         defer tls_conn.deinit();
 
@@ -401,9 +401,9 @@ pub const TlsListener = struct {
     /// Use `requestShutdown()` to break out of the loop.
     pub fn run(self: *TlsListener, handler: HandlerFn) !void {
         while (!self.stop.load(.acquire)) {
-            self.in_accept.store(true, .release);
+            self.inAccept.store(true, .release);
             self.acceptAndServe(handler) catch {};
-            self.in_accept.store(false, .release);
+            self.inAccept.store(false, .release);
             if (self.stop.load(.acquire)) break;
         }
     }
@@ -412,7 +412,7 @@ pub const TlsListener = struct {
     /// so that a blocked accept() returns.
     pub fn requestShutdown(self: *TlsListener) void {
         self.stop.store(true, .release);
-        if (self.in_accept.load(.acquire)) {
+        if (self.inAccept.load(.acquire)) {
             tcp.wakeListenerPort(self.listener.localPort());
         }
         if (@import("builtin").os.tag != .windows) {
@@ -428,7 +428,7 @@ test "TLS listener config defaults" {
         .port = 8443,
     };
     _ = std.testing.allocator;
-    try std.testing.expectEqual(@as(usize, 3), cfg.alpn_protocols.len);
-    try std.testing.expectEqual(alpn_mod.Protocol.h2, cfg.alpn_protocols[0]);
-    try std.testing.expectEqual(alpn_mod.Protocol.@"http/1.1", cfg.alpn_protocols[1]);
+    try std.testing.expectEqual(@as(usize, 3), cfg.alpnProtocols.len);
+    try std.testing.expectEqual(alpn_mod.Protocol.h2, cfg.alpnProtocols[0]);
+    try std.testing.expectEqual(alpn_mod.Protocol.@"http/1.1", cfg.alpnProtocols[1]);
 }

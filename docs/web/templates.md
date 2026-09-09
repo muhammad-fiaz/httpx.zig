@@ -85,7 +85,7 @@ pub fn main() !void {
             return .{
                 .status = 200,
                 .body = html_page,
-                .content_type = "text/html; charset=utf-8",
+                .contentType = "text/html; charset=utf-8",
             };
         }
     };
@@ -97,14 +97,9 @@ pub fn main() !void {
 
 ## Security: HTML Escaping
 
-Always escape dynamic values injected into HTML templates using `httpx.html.escape`:
-
-```zig
-const untrusted_input = "<script>alert('xss')</script>";
-const safe_escaped = try httpx.html.escape(allocator, untrusted_input);
-defer allocator.free(safe_escaped);
-// Produces: &lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;
-```
+Template variables are HTML-escaped by default (`&` → `&amp;`, `<` → `&lt;`,
+`>` → `&gt;`, `"` → `&quot;`, `'` → `&#39;`). Bypass escaping only for
+trusted markup with `templates.raw(...)` (see above).
 
 ## Engine Configuration and Caching
 
@@ -115,11 +110,14 @@ var engine = try httpx.templates.Engine.init(allocator, io, .{
 });
 defer engine.deinit();
 
-// Render a template file with data
-try engine.render("index.html", .{ .title = "Hello" }, &writer);
+// Render a template file with data into any writer
+var list = std.ArrayList(u8).empty;
+defer list.deinit(allocator);
+var lw = httpx.templates.renderer.ListWriter{ .list = &list, .allocator = allocator };
+try engine.render("index.html", .{ .title = "Hello" }, &lw);
 
 // Or render an in-memory string
-try engine.renderString("<h1>{{ title }}</h1>", .{ .title = "Hello" }, &writer);
+try engine.renderString("<h1>{{ title }}</h1>", .{ .title = "Hello" }, &lw);
 ```
 
 Compiled templates are cached in memory (`enableCache`). Template loading
@@ -131,4 +129,3 @@ for hot reload during development.
 
 * [Web: HTML & DOM](/web/html)
 * [Security: Overview](/security/overview)
-* [CLI Reference](/reference/cli)

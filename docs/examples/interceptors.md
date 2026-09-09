@@ -1,47 +1,29 @@
 # Interceptors
 
-Apply request/response interceptors to inject shared behavior.
-
-## Demo Program
+HTTPX has no client interceptor registry. Cross-cutting request/response
+behavior belongs in server middleware (`httpx.middleware.*`) or in small
+wrappers around the URL-first client calls. See
+`examples/interceptor_example.zig`, which exercises a plain server route plus
+a client GET against it.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-fn onRequest(req: *httpx.Request, _: ?*anyopaque) !void {
-    try req.setHeader("X-Intercepted", "true");
+fn timing(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response {
+    const t0 = std.time.nanoTimestamp();
+    const resp = try next(ctx);
+    return resp;
 }
 
-fn onResponse(res: *httpx.Response, _: ?*anyopaque) !void {
-    std.debug.print("intercepted status={d}\n", .{res.status.code});
-}
-
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    var client = httpx.Client.init(allocator, io, .{});
-    defer client.deinit();
-
-    try client.addInterceptor(.{
-        .request_fn = onRequest,
-        .response_fn = onResponse,
-    });
-
-    var res = try client.get("https://httpbun.com/get", .{});
-    defer res.deinit();
-}
+try server.use(timing);
+try server.use(httpx.middleware.logging);
 ```
 
 ## Run
 
 ```bash
-zig build run-all-interceptors
+zig build run-interceptor-example
 ```
 
 ## What to Verify
 
-- Request interceptor injects the custom header.
-- Response interceptor executes for successful responses.
+- `GET /` returns 200 with the expected JSON body.
+- Middleware runs in registration order.

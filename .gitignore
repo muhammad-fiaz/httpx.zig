@@ -45,8 +45,9 @@ downloads/
 *.httpx-part
 *.ftp-part
 *.bak
-*.pdf
-*.bin
-*.zip
-*.tar.gz
+downloads/*.pdf
+downloads/*.bin
+downloads/*.zip
+downloads/*.tar.gz
+downloads/*.txt
 *.txt

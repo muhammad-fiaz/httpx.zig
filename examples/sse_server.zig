@@ -10,7 +10,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .max_connections = 5,
+        .maxConnections = 5,
     });
     defer server.deinit();
 
@@ -49,7 +49,7 @@ fn sseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = out.items,
-        .content_type = "text/event-stream; charset=utf-8",
+        .contentType = "text/event-stream; charset=utf-8",
         .headers = try ctx.allocator.dupe(httpx.router.Header, &[_]httpx.router.Header{
             .{ .name = "Cache-Control", .value = "no-cache" },
             .{ .name = "Connection", .value = "keep-alive" },

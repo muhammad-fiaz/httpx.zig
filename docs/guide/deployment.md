@@ -59,8 +59,8 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "0.0.0.0", // Bind all interfaces for containers/VPS
         .port = 8080,      // Unprivileged internal application port
-        .keep_alive = true,
-        .trust_forwarded_headers = true, // Trust X-Forwarded-* from Nginx
+        .keepAlive = true,
+        .trustForwardedHeaders = true, // Trust X-Forwarded-* from Nginx
     });
     defer server.deinit();
 
@@ -76,11 +76,11 @@ fn healthCheck(ctx: *httpx.Context) anyerror!httpx.Response {
 }
 
 fn dataHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    // When trust_forwarded_headers is true, remoteAddress() reads X-Forwarded-For
-    const client_ip = ctx.remoteAddress() orelse "unknown";
+    // When trustForwardedHeaders is true, remoteAddress() reads X-Forwarded-For
+    const clientIp = ctx.remoteAddress() orelse "unknown";
     const scheme = ctx.scheme(); // "https" or "http"
     return ctx.renderJson(.{
-        .client_ip = client_ip,
+        .clientIp = clientIp,
         .scheme = scheme,
         .data = "Production payload",
     });
@@ -88,7 +88,7 @@ fn dataHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 ```
 
 ### Port Handling & Privileges
-- **Port 0**: Lets the operating system assign an ephemeral port (ideal for test suites or microservice registration). Query `server.listener.localPort()` to discover the allocated port.
+- **Port 0**: Lets the operating system assign an ephemeral port (ideal for test suites or microservice registration). Query `server.localPort()` to discover the allocated port.
 - **Unprivileged Ports (`> 1024`)**: Recommended for running HTTPX under dedicated non-root service users (`httpx-user`).
 - **Privileged Ports (80 / 443)**: On Linux, avoid running your binary as `root`. If binding directly without a reverse proxy, grant capability:
   ```bash
@@ -148,7 +148,7 @@ server {
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
 
-    # Maximum upload size (align with HTTPX Config.max_body)
+    # Maximum upload size (align with HTTPX Config.maxBody)
     client_max_body_size 16M;
 
     # Primary Proxy Pass Location
@@ -195,8 +195,8 @@ server {
 ## 4. Trusted Proxy Security Model
 
 Never blindly trust client headers like `X-Forwarded-For` or `X-Forwarded-Proto` without configuration:
-1. When `trust_forwarded_headers: false` (the default), `ctx.remoteAddress()` will report the direct TCP peer address, and `ctx.scheme()` will return `"https"` only if direct TLS was negotiated.
-2. When `trust_forwarded_headers: true`, HTTPX will parse the client IP from the first entry of `X-Forwarded-For` (or `X-Real-IP`), and use `X-Forwarded-Proto` for canonical redirect generation and scheme detection.
+1. When `trustForwardedHeaders: false` (the default), `ctx.remoteAddress()` will report the direct TCP peer address, and `ctx.scheme()` will return `"https"` only if direct TLS was negotiated.
+2. When `trustForwardedHeaders: true`, HTTPX will parse the client IP from the first entry of `X-Forwarded-For` (or `X-Real-IP`), and use `X-Forwarded-Proto` for canonical redirect generation and scheme detection.
 
 ---
 

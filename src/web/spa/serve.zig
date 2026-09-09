@@ -18,6 +18,8 @@ pub const Config = struct {
     fallback: []const u8 = "index.html",
     /// URL prefix under which real files are served.
     mount: []const u8 = "/",
+    /// Serve from the embedded registry only; never touch the filesystem.
+    filesystem: bool = true,
 };
 
 /// Register the SPA's static assets on the router.
@@ -29,8 +31,9 @@ pub fn register(router: *Router, cfg: Config) !void {
     try static_files.register(router, .{
         .root = cfg.root,
         .mount = cfg.mount,
-        .index_file = cfg.fallback,
-        .spa_fallback = cfg.fallback,
+        .indexFile = cfg.fallback,
+        .spaFallback = cfg.fallback,
+        .filesystem = cfg.filesystem,
     });
 }
 

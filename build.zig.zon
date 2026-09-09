@@ -24,10 +24,6 @@
             .url = "https://github.com/muhammad-fiaz/tree-sitter.zig/archive/refs/tags/0.0.1.tar.gz",
             .hash = "treesitter-0.0.1-QlQpWG_bBgDu5W6swtL7ROwFKek4n-gWzfnWUgUB9jcC",
         },
-        .args = .{
-            .url = "https://github.com/muhammad-fiaz/args.zig/archive/refs/tags/0.0.9.tar.gz",
-            .hash = "args-0.0.9-8hzgbh4KCgB9UYVNvr6R_GmZgq7j1DpV2kGcqn3F36Q1",
-        },
     },
     .paths = .{
         "build.zig",

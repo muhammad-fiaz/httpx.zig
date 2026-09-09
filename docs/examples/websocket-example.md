@@ -1,55 +1,33 @@
 # WebSocket Example
 
-Demonstrates how to use the built-in WebSocket support (`RFC 6455`) in `httpx.zig` using a clean, straightforward API surface.
-
-## Features Covered
-
-- **Upgrade Request Detection**: Checking incoming HTTP requests for `Upgrade: websocket` headers.
-- **Handshake Key Calculations**: Computing `Sec-WebSocket-Accept` from `Sec-WebSocket-Key` using standard SHA-1 and Base64 algorithms.
-- **Opcode Primitives**: Handling text, binary, ping, pong, and close frames.
-- **Payload Framing**: Handling 1-byte, 2-byte, and 8-byte frame length encodings.
-- **Masking Support**: Applying and decoding masking keys on client-sent payloads.
-
-## Code Example
+WebSocket handshake and framing primitives (`httpx.websocket`, RFC 6455).
+See `examples/websocket_server.zig`.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
+// Compute Sec-WebSocket-Accept for an upgrade response.
+var accept: [28]u8 = undefined;
+httpx.websocket.computeAccept("dGhlIHNhbXBsZSBub25jZQ==", &accept);
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+// Encode a server-to-client text frame header.
+var hdr: [10]u8 = undefined;
+const n = httpx.websocket.Frame.buildFrameHeader(&hdr, true, .text, 5, null);
+_ = n;
 
-    // Compute WebSocket Handshake Accept Key
-    const client_key = "dGhlIHNhbXBsZSBub25jZQ==";
-    const accept = try httpx.wsAcceptKey(client_key, allocator);
-    defer allocator.free(accept);
-    std.debug.print("Accept key: {s}\n", .{accept});
-
-    // Detect Upgrade Request
-    var req = try httpx.Request.init(allocator, .GET, "ws://localhost:8080/chat");
-    defer req.deinit();
-    try req.headers.set("Upgrade", "websocket");
-    try req.headers.set("Connection", "Upgrade");
-    try req.headers.set("Sec-WebSocket-Key", client_key);
-
-    std.debug.print("Is upgrade: {}\n", .{httpx.isWebSocketUpgrade(&req)});
-
-    // Encode and Decode a Text Frame
-    const frame_bytes = try httpx.wsTextFrame(allocator, "Hello, WebSocket!");
-    defer allocator.free(frame_bytes);
-
-    var decoded = try httpx.wsDecodeFrame(allocator, frame_bytes);
-    defer decoded.frame.deinit();
-    std.debug.print("Opcode: {s}, Payload: {s}\n", .{ @tagName(decoded.frame.opcode), decoded.frame.payload });
-}
+// Decode a frame header.
+const parsed = try httpx.websocket.Frame.parseFrameHeader(raw);
+const frameHdr = parsed.hdr; // fin, opcode, masked, payloadLen, maskKey
 ```
 
-## Running the Example
+Opcodes live on `httpx.websocket.Frame.Opcode` (`.text`, `.binary`,
+`.close`, `.ping`, `.pong`); `applyMask` masks payloads in place.
 
-Run the pre-configured WebSocket example:
+## Run
 
 ```bash
-zig build run-all-websocket_example
+zig build run-websocket-server
 ```
+
+## What to Verify
+
+- The browser client page returns 200.
+- Handshake accept keys match the RFC 6455 test vector.

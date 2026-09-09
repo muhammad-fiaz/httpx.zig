@@ -227,15 +227,15 @@ pub const Engine = struct {
     /// Produces the ClientHello message and generates the ephemeral keypair.
     pub fn produceClientHello(
         self: *Engine,
-        alpn_protocols: []const []const u8,
+        alpnProtocols: []const []const u8,
         signature_algorithms: []const handshake_mod.SignatureScheme,
     ) ![]u8 {
-        return self.produceClientHelloWithSni(alpn_protocols, signature_algorithms, null);
+        return self.produceClientHelloWithSni(alpnProtocols, signature_algorithms, null);
     }
 
     pub fn produceClientHelloWithSni(
         self: *Engine,
-        alpn_protocols: []const []const u8,
+        alpnProtocols: []const []const u8,
         signature_algorithms: []const handshake_mod.SignatureScheme,
         server_name: ?[]const u8,
     ) ![]u8 {
@@ -261,7 +261,7 @@ pub const Engine = struct {
                 .rsa_pss_rsae_sha256,
                 .ed25519,
             },
-            .alpn_protocols = alpn_protocols,
+            .alpnProtocols = alpnProtocols,
             .server_name = server_name,
         };
 
@@ -391,8 +391,8 @@ pub const Engine = struct {
     /// Certificate + CertificateVerify + Finished.
     pub fn produceServerFlight(
         self: *Engine,
-        cert_chain_pem: []const u8,
-        private_key_der: []const u8,
+        certChainPem: []const u8,
+        privateKeyDer: []const u8,
         alpn_preference: []const alpn_mod.Protocol,
         client_alpn_wire: []const []const u8,
     ) !ServerFlight {
@@ -526,7 +526,7 @@ pub const Engine = struct {
         var cert_body = std.ArrayList(u8).empty;
         defer cert_body.deinit(self.allocator);
         try cert_body.append(self.allocator, 0x00); // request_context length 0
-        if (cert_chain_pem.len > 0) {
+        if (certChainPem.len > 0) {
             // Attempt to parse PEM and encode each cert; fallback to empty on parse failure
             // to keep tests with empty strings passing.
             var certs = std.ArrayList([]const u8).empty;
@@ -536,9 +536,9 @@ pub const Engine = struct {
             }
             // Simple PEM scan for CERTIFICATE blocks
             var off: usize = 0;
-            while (std.mem.indexOfPos(u8, cert_chain_pem, off, "-----BEGIN CERTIFICATE-----")) |b| {
-                const e = std.mem.indexOfPos(u8, cert_chain_pem, b, "-----END CERTIFICATE-----") orelse break;
-                const b64 = cert_chain_pem[b + 27 .. e];
+            while (std.mem.indexOfPos(u8, certChainPem, off, "-----BEGIN CERTIFICATE-----")) |b| {
+                const e = std.mem.indexOfPos(u8, certChainPem, b, "-----END CERTIFICATE-----") orelse break;
+                const b64 = certChainPem[b + 27 .. e];
                 var clean = std.ArrayList(u8).empty;
                 defer clean.deinit(self.allocator);
                 for (b64) |c| if (c != '\n' and c != '\r' and c != ' ' and c != '\t') try clean.append(self.allocator, c);
@@ -591,7 +591,7 @@ pub const Engine = struct {
         defer cv_body.deinit(self.allocator);
         try cv_body.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshake_mod.SignatureScheme.ecdsa_secp256r1_sha256))));
         try cv_body.appendSlice(self.allocator, &.{ 0x00, 0x00 });
-        _ = private_key_der;
+        _ = privateKeyDer;
 
         var cv_msg = std.ArrayList(u8).empty;
         errdefer cv_msg.deinit(self.allocator);

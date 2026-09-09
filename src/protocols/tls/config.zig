@@ -22,49 +22,7 @@ pub const TrustStore = trust_mod.TrustStore;
 pub const TrustMode = trust_mod.TrustMode;
 pub const TlsError = errors_mod.TlsError;
 
-const c_fs = @import("../../web/static_files/serve.zig").c_fs;
-
-pub fn readFileAlloc(a: Allocator, path: []const u8, max_size: usize) ![]u8 {
-    const h = c_fs.openRead(path) orelse return error.FileNotFound;
-    defer c_fs.close(h);
-
-    if (c_fs.is_win) {
-        var size: i64 = 0;
-        if (c_fs.GetFileSizeEx(h, &size) == @as(std.os.windows.BOOL, @enumFromInt(0))) return error.IoError;
-        const fsize: usize = @intCast(@max(0, size));
-        if (fsize > max_size) return error.FileTooLarge;
-
-        const buf = try a.alloc(u8, fsize);
-        errdefer a.free(buf);
-
-        var total: usize = 0;
-        while (total < fsize) {
-            var bytes_read: u32 = 0;
-            const ok = c_fs.ReadFile(h, buf[total..].ptr, @intCast(@min(fsize - total, 0xFFFF_FFFF)), &bytes_read, null);
-            if (ok == @as(std.os.windows.BOOL, @enumFromInt(0))) return error.IoError;
-            if (bytes_read == 0) break;
-            total += bytes_read;
-        }
-        if (total != fsize) return error.IoError;
-        return buf;
-    } else {
-        const stat = std.posix.fstat(h) catch return error.IoError;
-        const fsize: usize = @intCast(stat.size);
-        if (fsize > max_size) return error.FileTooLarge;
-
-        const buf = try a.alloc(u8, fsize);
-        errdefer a.free(buf);
-
-        var total: usize = 0;
-        while (total < fsize) {
-            const rc = std.c.read(h, buf[total..].ptr, fsize - total);
-            if (rc <= 0) break;
-            total += @intCast(rc);
-        }
-        if (total != fsize) return error.IoError;
-        return buf;
-    }
-}
+const fs_mod = @import("../../utils/fs.zig");
 
 pub const TlsVersion = enum {
     tls12,
@@ -83,56 +41,54 @@ pub const ServerConfig = struct {
     allocator: Allocator = undefined,
 
     /// Certificate PEM string or file path.
-    certificate: ?[]const u8 = null,
-    cert_pem: ?[]const u8 = null,
+    certPem: ?[]const u8 = null,
     /// Private key PEM string or file path.
-    private_key: ?[]const u8 = null,
-    key_pem: ?[]const u8 = null,
+    keyPem: ?[]const u8 = null,
 
     /// Parsed certificate chain in DER format.
-    cert_chain: ?CertificateChain = null,
+    certChain: ?CertificateChain = null,
     /// Parsed private key bytes (redacted from logs).
-    private_key_der: ?[]u8 = null,
+    privateKeyDer: ?[]u8 = null,
 
     /// Minimum and maximum supported TLS protocol versions.
-    min_version: TlsVersion = .tls12,
-    max_version: TlsVersion = .tls13,
+    minVersion: TlsVersion = .tls12,
+    maxVersion: TlsVersion = .tls13,
 
     /// Preference order for ALPN negotiation (h2, http/1.1).
-    alpn_protocols: []const alpn.Protocol = &.{ .h2, .@"http/1.1" },
+    alpnProtocols: []const alpn.Protocol = &.{ .h2, .@"http/1.1" },
 
     /// Mutual TLS (mTLS) client certificate authentication mode.
-    client_auth: ClientAuthMode = .disabled,
+    clientAuth: ClientAuthMode = .disabled,
     /// Client CA certificate PEM or file path for mTLS validation.
-    client_ca: ?[]const u8 = null,
+    clientCa: ?[]const u8 = null,
     /// Parsed client trust store for mTLS.
-    client_trust_store: ?TrustStore = null,
+    clientTrustStore: ?TrustStore = null,
     /// Whether to allow cleartext HTTP requests on the TLS port (e.g. for dev/dual-mode).
     /// Defaults to false (strict HTTPS: plain HTTP gets 400 Bad Request).
-    allow_plain_http: bool = false,
+    allowPlainHttp: bool = false,
 
     pub fn init(allocator: Allocator) ServerConfig {
         return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *ServerConfig) void {
-        if (self.cert_chain) |*c| c.deinit();
-        if (self.private_key_der) |k| {
+        if (self.certChain) |*c| c.deinit();
+        if (self.privateKeyDer) |k| {
             std.crypto.secureZero(u8, k);
             self.allocator.free(k);
         }
-        if (self.client_trust_store) |*ts| ts.deinit();
+        if (self.clientTrustStore) |*ts| ts.deinit();
         self.* = undefined;
     }
 
     /// Loads certificate and private key from PEM buffers or file paths.
-    pub fn loadCertificates(self: *ServerConfig, cert_pem_or_path: []const u8, key_pem_or_path: []const u8) !void {
+    pub fn loadCertificates(self: *ServerConfig, certPemOrPath: []const u8, keyPemOrPath: []const u8) !void {
         var cert_buf: ?[]u8 = null;
         defer if (cert_buf) |b| self.allocator.free(b);
-        const cert_data = if (std.mem.indexOf(u8, cert_pem_or_path, "-----BEGIN") != null)
-            cert_pem_or_path
+        const cert_data = if (std.mem.indexOf(u8, certPemOrPath, "-----BEGIN") != null)
+            certPemOrPath
         else blk: {
-            cert_buf = try readFileAlloc(self.allocator, cert_pem_or_path, 10 * 1024 * 1024);
+            cert_buf = try fs_mod.readFileLimited(self.allocator, certPemOrPath, 10 * 1024 * 1024);
             break :blk cert_buf.?;
         };
 
@@ -141,21 +97,21 @@ pub const ServerConfig = struct {
             std.crypto.secureZero(u8, b);
             self.allocator.free(b);
         };
-        const key_data = if (std.mem.indexOf(u8, key_pem_or_path, "-----BEGIN") != null)
-            key_pem_or_path
+        const key_data = if (std.mem.indexOf(u8, keyPemOrPath, "-----BEGIN") != null)
+            keyPemOrPath
         else blk: {
-            key_buf = try readFileAlloc(self.allocator, key_pem_or_path, 10 * 1024 * 1024);
+            key_buf = try fs_mod.readFileLimited(self.allocator, keyPemOrPath, 10 * 1024 * 1024);
             break :blk key_buf.?;
         };
 
-        self.cert_chain = try cert_mod.parseCertificateChainPem(self.allocator, cert_data);
+        self.certChain = try cert_mod.parseCertificateChainPem(self.allocator, cert_data);
         const parsed_key = try key_mod.parsePrivateKeyPem(self.allocator, key_data);
-        self.private_key_der = parsed_key.raw_der;
+        self.privateKeyDer = parsed_key.der;
     }
 
     /// Returns true if server identity (certificate + private key) is loaded.
     pub fn hasIdentity(self: *const ServerConfig) bool {
-        return self.cert_chain != null and self.private_key_der != null;
+        return self.certChain != null and self.privateKeyDer != null;
     }
 };
 

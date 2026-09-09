@@ -18,10 +18,10 @@ pub const Config = struct {
     enabled: bool = true,
     directory: []const u8 = "templates",
     enableCache: bool = true,
-    max_templates: usize = 1024,
-    max_file_size: usize = 10 * 1024 * 1024,
-    max_include_depth: usize = 32,
-    max_inheritance_depth: usize = 16,
+    maxTemplates: usize = 1024,
+    maxFileSize: usize = 10 * 1024 * 1024,
+    maxIncludeDepth: usize = 32,
+    maxInheritanceDepth: usize = 16,
 };
 
 pub const Engine = struct {
@@ -32,7 +32,7 @@ pub const Engine = struct {
     cache: cache_mod.Cache,
     renderer: renderer_mod.Renderer,
     lock: sync.Spinlock = .{},
-    last_error: ?err_mod.SourceError = null,
+    lastError: ?err_mod.SourceError = null,
 
     pub fn init(allocator: Allocator, io: std.Io, config: Config) !Engine {
         return .{
@@ -41,16 +41,16 @@ pub const Engine = struct {
             .config = config,
             .loader = loader_mod.Loader.init(.{
                 .directory = config.directory,
-                .max_file_size = config.max_file_size,
+                .maxFileSize = config.maxFileSize,
             }),
             .cache = cache_mod.Cache.init(allocator, .{
                 .enabled = config.enableCache,
-                .max_templates = config.max_templates,
+                .maxTemplates = config.maxTemplates,
             }),
             .renderer = renderer_mod.Renderer{
                 .options = .{
-                    .max_include_depth = config.max_include_depth,
-                    .max_inheritance_depth = config.max_inheritance_depth,
+                    .maxIncludeDepth = config.maxIncludeDepth,
+                    .maxInheritanceDepth = config.maxInheritanceDepth,
                 },
             },
         };
@@ -84,8 +84,8 @@ pub const Engine = struct {
 
         var parser = parser_mod.Parser.init(self.allocator, name, source);
         const ast = parser.parse() catch |err| {
-            if (parser.last_error) |diag| {
-                self.last_error = diag;
+            if (parser.lastError) |diag| {
+                self.lastError = diag;
             }
             return err;
         };
@@ -93,7 +93,7 @@ pub const Engine = struct {
         try self.cache.put(name, source, ast);
 
         // Preload any extends parent
-        if (ast.extends_path) |parent| {
+        if (ast.extendsPath) |parent| {
             _ = self.getOrCompile(parent) catch {};
         }
 

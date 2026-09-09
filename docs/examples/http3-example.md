@@ -1,31 +1,24 @@
 # HTTP/3 Example
 
-Use HTTP/3 and QUIC protocol helpers (QPACK and frame primitives).
-
-## Demo Program
+HTTP/3 and QUIC protocol helpers (QPACK and frame primitives). See
+`examples/http3_client.zig` and `examples/http3_quic.zig`.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-pub fn main() !void {
-    const v: u64 = 1337;
-    var buf: [16]u8 = undefined;
-
-    const encoded = httpx.encodeVarInt(v, &buf);
-    const decoded = try httpx.decodeVarInt(encoded);
-
-    std.debug.print("h3 varint encoded={d} decoded={d}\n", .{ encoded.len, decoded.value });
-}
+var buf: [8]u8 = undefined;
+const n = try httpx.quic.varint.encode(&buf, 1337);
+var off: usize = 0;
+const v = try httpx.quic.varint.decode(&buf, &off);
+std.debug.print("h3 varint encoded={d} decoded={d}\n", .{ n, v });
 ```
 
 ## Run
 
 ```bash
-zig build run-all-http3_example
+zig build run-http3-client
 ```
 
 ## What to Verify
 
-- Varint round trip produces original numeric value.
-- Encoded size is consistent with QUIC varint rules.
+- Varint round trip produces the original numeric value.
+- Encoded size follows QUIC varint rules.
+- Control-stream SETTINGS exchange validates.

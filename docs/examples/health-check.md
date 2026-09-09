@@ -41,7 +41,7 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
-        .max_connections = 2,
+        .maxConnections = 2,
     });
     defer server.deinit();
 

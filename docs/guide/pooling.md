@@ -22,18 +22,21 @@ Connection pooling is configured on `Client.init`:
 
 ```zig
 var client = httpx.Client.init(allocator, io, .{
-    .max_connections = 64,
-    .max_idle_connections = 16,
-    .idle_timeout_ms = 30_000,
+    .pool = .{
+        .maxConnections = 64,
+        .maxPerHost = 16,
+        .idleTimeoutMs = 30_000,
+    },
 });
 defer client.deinit();
 ```
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `max_connections` | `usize` | `128` | Total active connections across all hosts |
-| `max_idle_connections` | `usize` | `32` | Max idle sockets preserved in pool |
-| `idle_timeout_ms` | `u32` | `60000` | Sockets idle longer than this are closed |
+| `maxConnections` | `u32` | `256` | Hard ceiling across all origins |
+| `maxPerHost` | `u16` | `16` | Ceiling per origin (host + port) |
+| `idleTimeoutMs` | `i64` | `30000` | Parked sockets older than this are dropped |
+| `maxParkedMs` | `i64` | `300000` | Max time a connection may stay parked (`0` disables) |
 
 ## Pool Key Isolation
 

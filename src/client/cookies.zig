@@ -156,7 +156,9 @@ pub const Jar = struct {
     }
 
     /// Build a "Cookie: name=value; name2=value2" header for the given host/path.
-    pub fn cookieHeader(self: *Jar, host: []const u8, path: []const u8, buf: []u8) ?[]const u8 {
+    /// `secure` must be true when the connection uses TLS: Secure cookies
+    /// are only emitted over encrypted transports (RFC 6265 Section 4.1).
+    pub fn cookieHeader(self: *Jar, host: []const u8, path: []const u8, secure: bool, buf: []u8) ?[]const u8 {
         self.mu.lock();
         defer self.mu.unlock();
         const now = clock.millisNow();
@@ -168,7 +170,7 @@ pub const Jar = struct {
             }
             if (!domainMatches(host, c.domain)) continue;
             if (!pathMatches(path, c.path)) continue;
-            if (c.secure) continue; // skip Secure cookies for plain HTTP
+            if (c.secure and !secure) continue; // Secure cookies need TLS
             const sep = if (wrote) "; " else "";
             const entry = std.fmt.bufPrint(buf[pos..], "{s}{s}={s}", .{ sep, c.name, c.value }) catch break;
             pos += entry.len;
@@ -224,7 +226,7 @@ test "cookie jar set and get" {
     defer jar.deinit();
     jar.setFromHeader("session=abc123; Path=/; HttpOnly; SameSite=Lax", "example.com");
     var buf: [1024]u8 = undefined;
-    const h = jar.cookieHeader("example.com", "/api", &buf);
+    const h = jar.cookieHeader("example.com", "/api", false, &buf);
     try std.testing.expect(h != null);
     try std.testing.expectEqualStrings("session=abc123", h.?);
 }
@@ -235,10 +237,10 @@ test "cookie jar domain matching" {
     jar.setFromHeader("a=1; Domain=.example.com; Path=/", "example.com");
     var buf: [1024]u8 = undefined;
     // Should match subdomain.
-    const h1 = jar.cookieHeader("sub.example.com", "/", &buf);
+    const h1 = jar.cookieHeader("sub.example.com", "/", false, &buf);
     try std.testing.expect(h1 != null);
     // Should not match different domain.
-    const h2 = jar.cookieHeader("evil.com", "/", &buf);
+    const h2 = jar.cookieHeader("evil.com", "/", false, &buf);
     try std.testing.expect(h2 == null);
 }
 
@@ -249,6 +251,19 @@ test "cookie jar expiry" {
     // Max-Age=0 means expires immediately (now - 0 = now).
     jar.purgeExpired();
     var buf: [1024]u8 = undefined;
-    const h = jar.cookieHeader("example.com", "/", &buf);
+    const h = jar.cookieHeader("example.com", "/", false, &buf);
     try std.testing.expect(h == null);
+}
+
+test "secure cookies require TLS transport" {
+    var jar = Jar.init(std.testing.allocator);
+    defer jar.deinit();
+    jar.setFromHeader("s=topsecret; Path=/; Secure", "example.com");
+    var buf: [1024]u8 = undefined;
+    // Plain HTTP must not emit Secure cookies (RFC 6265 Section 4.1).
+    try std.testing.expect(jar.cookieHeader("example.com", "/", false, &buf) == null);
+    // TLS transport emits them.
+    const h = jar.cookieHeader("example.com", "/", true, &buf);
+    try std.testing.expect(h != null);
+    try std.testing.expectEqualStrings("s=topsecret", h.?);
 }

@@ -23,13 +23,13 @@ pub fn main() !void {
         .port = 8080,
         .port_conflict = .increment,
         .max_port_tries = 32,
-        .max_connections = 1000,
-        .keep_alive = true,
+        .maxConnections = 1000,
+        .keepAlive = true,
     });
     defer server.deinit();
 
     try server.get("/health", health);
-    try server.listen();
+    server.run();
 }
 ```
 

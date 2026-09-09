@@ -1,26 +1,20 @@
 # Middleware Example
 
-Chain middleware for logging, CORS, and custom request checks.
-
-## Demo Program
+Chain middleware for CORS, headers, recovery, and custom request checks.
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn auth(ctx: *httpx.Context, next: httpx.Next) anyerror!httpx.Response {
+fn auth(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response {
     if (ctx.header("Authorization") == null) {
-        return ctx.status(401).json(.{ .error = "missing auth" });
+        return ctx.textStatus(401, "missing auth");
     }
     return next(ctx);
 }
 
 fn secure(ctx: *httpx.Context) anyerror!httpx.Response {
-    return ctx.json(.{ .message = "secure route" });
-}
-
-fn logMessage(level: httpx.LogLevel, message: []const u8) void {
-    std.debug.print("[{s}] {s}", .{ @tagName(level), message });
+    return ctx.renderJson(.{ .message = "secure route" });
 }
 
 pub fn main() !void {
@@ -32,22 +26,26 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{});
     defer server.deinit();
 
-    try server.use(httpx.middleware.loggerWithConfig(.{ .log_fn = logMessage }));
-    try server.use(httpx.middleware.cors(.{}));
-    try server.use(.{ .name = "auth", .handler = auth });
+    try server.use(httpx.middleware.logging);
+    try server.use(httpx.middleware.cors);
+    try server.use(httpx.middleware.helmet);
+    try server.use(auth);
 
     try server.get("/secure", secure);
-    try server.listen();
+    server.run();
 }
 ```
+
+Built-ins: `cors`, `helmet` (`securityHeaders`), `recovery`, `logging`,
+plus `RateLimiter` and CSRF token helpers. See [Middleware](/api/middleware).
 
 ## Run
 
 ```bash
-zig build run-all-middleware_example
+zig build run-helmet-server
 ```
 
 ## What to Verify
 
-- Requests without auth header return 401.
-- Requests with auth header reach final handler.
+- Unauthenticated requests return 401.
+- Security headers appear on responses.

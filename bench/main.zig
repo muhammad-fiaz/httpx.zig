@@ -165,7 +165,7 @@ fn dummyHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return httpx.router.Response{
         .status = 200,
         .body = "{\"status\":\"ok\"}",
-        .content_type = "application/json",
+        .contentType = "application/json",
     };
 }
 
@@ -377,7 +377,7 @@ fn loopbackPingHandler(_: *httpx.router.Context) anyerror!httpx.router.Response 
     return httpx.router.Response{
         .status = 200,
         .body = "pong",
-        .content_type = "text/plain",
+        .contentType = "text/plain",
     };
 }
 
@@ -395,7 +395,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     // 1. Initialize WorkerPool
-    var pool = try httpx.WorkerPool.init(bench_allocator, .{ .workers = 2, .queue_capacity = 256 });
+    var pool = try httpx.WorkerPool.init(bench_allocator, .{ .workers = 2, .queueCapacity = 256 });
     try pool.start();
     defer pool.deinit();
     bench_pool = &pool;
@@ -445,8 +445,8 @@ pub fn main() !void {
     var srv = try httpx.Server.init(bench_allocator, io, .{
         .port = 0,
         .enableDocs = false,
-        .keep_alive = true,
-        .max_connections = 100000,
+        .keepAlive = true,
+        .maxConnections = 100000,
     });
     try srv.router.get("/ping", loopbackPingHandler);
     loopback_server = &srv;

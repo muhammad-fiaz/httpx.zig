@@ -14,12 +14,12 @@ const std = @import("std");
 // Limits (configurable; parser.zig defaults derive from these)
 
 pub const Limits = struct {
-    max_headers: usize = 128,
-    max_name_len: usize = 256,
-    max_value_len: usize = 8192,
+    maxHeaders: usize = 128,
+    maxNameLen: usize = 256,
+    maxValueLen: usize = 8192,
     /// Total bytes across all header lines (excluding CRLFs).
-    max_header_bytes: usize = 32 * 1024,
-    max_body_bytes: usize = 64 * 1024 * 1024,
+    maxHeaderBytes: usize = 32 * 1024,
+    maxBodyBytes: usize = 64 * 1024 * 1024,
 };
 
 pub const default_limits = Limits{};

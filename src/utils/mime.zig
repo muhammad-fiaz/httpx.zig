@@ -51,23 +51,19 @@ pub fn fromPath(path: []const u8) []const u8 {
         const idx = std.mem.lastIndexOfScalar(u8, path, '/') orelse break :blk path;
         break :blk path[idx + 1 ..];
     };
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return octet_stream;
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return octetStream;
     const ext = name[dot + 1 ..];
-    if (ext.len == 0) return octet_stream;
+    if (ext.len == 0) return octetStream;
 
     var lower: [16]u8 = undefined;
-    if (ext.len > lower.len) return octet_stream;
+    if (ext.len > lower.len) return octetStream;
     for (ext, 0..) |c, i| lower[i] = std.ascii.toLower(c);
     const key = lower[0..ext.len];
 
-    return mime_map.get(key) orelse octet_stream;
+    return mime_map.get(key) orelse octetStream;
 }
 
-pub fn byExtension(path: []const u8) []const u8 {
-    return fromPath(path);
-}
-
-pub const octet_stream = "application/octet-stream";
+pub const octetStream = "application/octet-stream";
 
 test "detects common types case-insensitively" {
     try std.testing.expectEqualStrings("text/html; charset=utf-8", fromPath("/a/b/Index.HTML"));
@@ -77,7 +73,7 @@ test "detects common types case-insensitively" {
 }
 
 test "falls back to octet stream" {
-    try std.testing.expectEqualStrings(octet_stream, fromPath("file.unknownext123456789"));
-    try std.testing.expectEqualStrings(octet_stream, fromPath("noextension"));
-    try std.testing.expectEqualStrings(octet_stream, fromPath("trailing."));
+    try std.testing.expectEqualStrings(octetStream, fromPath("file.unknownext123456789"));
+    try std.testing.expectEqualStrings(octetStream, fromPath("noextension"));
+    try std.testing.expectEqualStrings(octetStream, fromPath("trailing."));
 }

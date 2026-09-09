@@ -29,8 +29,8 @@ pub fn buildUpgradeRequest(
     allocator: Allocator,
     host: []const u8,
     path: []const u8,
-    key_b64: []const u8,
-    extra_headers: []const []const u8,
+    keyB64: []const u8,
+    extraHeaders: []const []const u8,
 ) ![]u8 {
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
@@ -40,9 +40,9 @@ pub fn buildUpgradeRequest(
     try w.print("Host: {s}\r\n", .{host});
     try w.writeAll("Upgrade: websocket\r\n");
     try w.writeAll("Connection: Upgrade\r\n");
-    try w.print("Sec-WebSocket-Key: {s}\r\n", .{key_b64});
+    try w.print("Sec-WebSocket-Key: {s}\r\n", .{keyB64});
     try w.writeAll("Sec-WebSocket-Version: 13\r\n");
-    for (extra_headers) |h| {
+    for (extraHeaders) |h| {
         try w.print("{s}\r\n", .{h});
     }
     try w.writeAll("\r\n");

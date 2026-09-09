@@ -14,31 +14,31 @@ const Allocator = std.mem.Allocator;
 // CORS (Fetch spec / RFC 9110 semantics)
 
 pub const CorsConfig = struct {
-    allowed_origins: []const []const u8 = &.{},
-    allow_all_origins: bool = false,
-    allowed_methods: []const []const u8 = &.{ "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS" },
-    allowed_headers: []const []const u8 = &.{},
-    exposed_headers: []const []const u8 = &.{},
-    allow_credentials: bool = false,
-    max_age_seconds: u32 = 600,
+    allowedOrigins: []const []const u8 = &.{},
+    allowAllOrigins: bool = false,
+    allowedMethods: []const []const u8 = &.{ "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS" },
+    allowedHeaders: []const []const u8 = &.{},
+    exposedHeaders: []const []const u8 = &.{},
+    allowCredentials: bool = false,
+    maxAgeSeconds: u32 = 600,
 
     /// Validates the unsafe combination: wildcard origin + credentials.
     pub fn isSafe(self: *const CorsConfig) bool {
-        if (self.allow_credentials and self.allow_all_origins) return false;
+        if (self.allowCredentials and self.allowAllOrigins) return false;
         return true;
     }
 
     /// Origin check with exact match against the configured list.
     pub fn isOriginAllowed(self: *const CorsConfig, origin: []const u8) bool {
-        if (self.allow_all_origins) return true;
-        for (self.allowed_origins) |o| {
+        if (self.allowAllOrigins) return true;
+        for (self.allowedOrigins) |o| {
             if (std.ascii.eqlIgnoreCase(o, origin)) return true;
         }
         return false;
     }
 
     pub fn isMethodAllowed(self: *const CorsConfig, method: []const u8) bool {
-        for (self.allowed_methods) |m| {
+        for (self.allowedMethods) |m| {
             if (std.ascii.eqlIgnoreCase(m, method)) return true;
         }
         return false;
@@ -74,15 +74,15 @@ pub const RateLimitResult = rate_limit.RateLimitResult;
 // Tests
 
 test "cors rejects wildcard plus credentials" {
-    const unsafe_cfg = CorsConfig{ .allow_all_origins = true, .allow_credentials = true };
+    const unsafe_cfg = CorsConfig{ .allowAllOrigins = true, .allowCredentials = true };
     try std.testing.expect(!unsafe_cfg.isSafe());
 
-    const safe_cfg = CorsConfig{ .allow_all_origins = true };
+    const safe_cfg = CorsConfig{ .allowAllOrigins = true };
     try std.testing.expect(safe_cfg.isSafe());
 }
 
 test "cors origin matching" {
-    const cfg = CorsConfig{ .allowed_origins = &.{ "https://a.com", "https://b.com" } };
+    const cfg = CorsConfig{ .allowedOrigins = &.{ "https://a.com", "https://b.com" } };
     try std.testing.expect(cfg.isOriginAllowed("https://A.com"));
     try std.testing.expect(!cfg.isOriginAllowed("https://evil.com"));
     try std.testing.expect(cfg.isMethodAllowed("post"));
@@ -169,7 +169,7 @@ pub fn recoveryMiddleware(ctx: *Context, next: NextFn) anyerror!Response {
     return next(ctx) catch {
         return Response{
             .status = 500,
-            .content_type = "text/plain; charset=utf-8",
+            .contentType = "text/plain; charset=utf-8",
             .body = "Internal Server Error",
         };
     };

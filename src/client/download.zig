@@ -276,6 +276,15 @@ pub const DownloadResult = struct {
 
 // Checksum Helpers
 
+/// Parses `Content-Range: bytes */<complete-length>` from a 416 response.
+/// Returns the complete length, or null when absent/malformed.
+fn parseUnsatisfiedRange(headerValue: []const u8) ?u64 {
+    const v = std.mem.trim(u8, headerValue, " \t");
+    const prefix = "bytes */";
+    if (!std.ascii.startsWithIgnoreCase(v, prefix)) return null;
+    return std.fmt.parseInt(u64, std.mem.trim(u8, v[prefix.len..], " \t"), 10) catch null;
+}
+
 pub const Hasher = struct {
     sha256: std.crypto.hash.sha2.Sha256 = std.crypto.hash.sha2.Sha256.init(.{}),
     sha384: std.crypto.hash.sha2.Sha384 = std.crypto.hash.sha2.Sha384.init(.{}),
@@ -799,7 +808,8 @@ pub const Downloader = struct {
                 result = res;
                 break;
             } else |err| {
-                if (err == DownloadError.Cancelled or err == DownloadError.DestinationExists or err == DownloadError.ChecksumMismatch) {
+                // Deterministic outcomes are never retried.
+                if (err == DownloadError.Cancelled or err == DownloadError.DestinationExists or err == DownloadError.ChecksumMismatch or err == DownloadError.RangeUnsatisfiable) {
                     if (isTemp and !options.existing.isResume()) {
                         _ = FileOps.deleteFile(tempPath);
                     }
@@ -919,7 +929,29 @@ pub const Downloader = struct {
         if (resp.status == 400) return DownloadError.BadRequest;
         if (resp.status == 401 or resp.status == 403) return DownloadError.AuthenticationFailed;
         if (resp.status == 404) return DownloadError.FileNotFound;
-        if (resp.status == 416) return DownloadError.RangeUnsatisfiable;
+        if (resp.status == 416) {
+            // RFC 9110 Section 14.2: a 416 carries Content-Range: bytes */N.
+            // When resuming and the local file already holds all N bytes,
+            // the download is complete — succeed without retransferring.
+            if (resuming) {
+                if (resp.header("content-range")) |cr| {
+                    if (parseUnsatisfiedRange(cr)) |complete| {
+                        if (complete == resumeOffset) {
+                            return .{
+                                .destination = destPath,
+                                .downloadedBytes = 0,
+                                .totalBytes = complete,
+                                .elapsedMs = 0,
+                                .statusCode = 200,
+                                .resumed = true,
+                                .skipped = true,
+                            };
+                        }
+                    }
+                }
+            }
+            return DownloadError.RangeUnsatisfiable;
+        }
         if (resp.status >= 500 and resp.status <= 599) return DownloadError.ServerError;
         if (resp.status < 200 or resp.status >= 300) return DownloadError.HttpError;
 
@@ -1632,6 +1664,14 @@ test "existing file policy resume check" {
     try std.testing.expect(!ExistingFilePolicy.overwrite.isResume());
     try std.testing.expect(!ExistingFilePolicy.fail.isResume());
     try std.testing.expect(!ExistingFilePolicy.skip.isResume());
+}
+
+test "unsatisfied range header parses complete length" {
+    try std.testing.expectEqual(@as(?u64, 49672), parseUnsatisfiedRange("bytes */49672"));
+    try std.testing.expectEqual(@as(?u64, 0), parseUnsatisfiedRange("bytes */0"));
+    try std.testing.expectEqual(@as(?u64, null), parseUnsatisfiedRange("bytes 0-99/49672"));
+    try std.testing.expectEqual(@as(?u64, null), parseUnsatisfiedRange("none"));
+    try std.testing.expectEqual(@as(?u64, null), parseUnsatisfiedRange("bytes */abc"));
 }
 
 test "remote file info size formatting" {

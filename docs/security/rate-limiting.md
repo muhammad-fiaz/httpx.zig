@@ -21,24 +21,26 @@ Incoming Request -> Key Extractor (Remote IP, API Key, User ID)
 ## Implementation
 
 ```zig
-var limiter = httpx.web.rate_limit.RateLimiter.init(allocator, .{
-    .capacity = 50,      // Allow burst of 50 requests
-    .refill_rate = 5.0,  // Refill 5 requests per second
-});
+// 50 requests per 60s window.
+var limiter = httpx.RateLimiter.init(allocator, 50, 60_000);
 defer limiter.deinit();
 
-server.use(struct {
-    fn rateLimitMiddleware(ctx: *httpx.Context) !void {
-        const key = ctx.remoteIp() orelse "unknown";
-        if (!limiter.allow(key)) {
-            ctx.status(429);
-            ctx.header("Retry-After", "2");
-            try ctx.json(.{ .error = "Rate limit exceeded" });
-            return;
+const RateGate = struct {
+    var rl: ?*httpx.RateLimiter = null;
+
+    fn middleware(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response {
+        const now = std.time.milliTimestamp();
+        var keyBuf: [128]u8 = undefined;
+        const key = try std.fmt.bufPrint(&keyBuf, "ip:{s}", .{ctx.remoteAddress() orelse "unknown"});
+        const remaining = try rl.?.check(key, now);
+        if (remaining == null) {
+            return ctx.textStatus(429, "Rate limit exceeded");
         }
-        try ctx.next();
+        return next(ctx);
     }
-}.rateLimitMiddleware);
+};
+RateGate.rl = &limiter;
+try server.use(RateGate.middleware);
 ```
 
 ## Related

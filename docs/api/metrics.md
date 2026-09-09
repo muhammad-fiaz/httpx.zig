@@ -2,59 +2,66 @@
 
 Thread-safe, allocation-free request/response metrics using atomic operations.
 
-Located in `src/metrics/`.
+Located in `src/web/metrics/` (`registry.zig`, `snapshot.zig`).
 
-## Metrics
+## Registry
+
+`httpx.metrics.Registry` (aliased as `httpx.Metrics`) holds atomic counters,
+gauges, and a latency histogram. The server owns one (`server.metrics_registry`)
+and records automatically; use the API below for custom instrumentation.
 
 | Method | Description |
 |--------|-------------|
-| `init()` | Create a zeroed Metrics instance |
-| `initWithCallback(fn)` | Create with a custom event callback |
-| `recordRequest()` | Increment total requests |
-| `recordResponse(status, bytes, latency_ns)` | Record response, update status buckets and latency |
-| `recordBytesSent(bytes)` | Increment bytes sent |
-| `recordError()` | Increment error counter |
-| `connectionOpened()` | Increment active connections |
-| `connectionClosed()` | Decrement active connections |
+| `recordRequest()` | Increment total requests (+1 in-flight) |
+| `recordRequestMethod(method)` | Count by method (`GET`, `POST`, …) |
+| `recordResponse(bytes)` | Increment responses, decrement in-flight, add bytes out |
+| `recordResponseFull(status, duration_ns, bytes)` | Response + status class + latency sample |
+| `recordStatus(status)` | Bucket a status code (`status2xx`…`status5xx`) |
+| `recordError()` | Increment errors (decrements in-flight) |
+| `recordBytesIn(n)` / `recordBytesOut(n)` | Byte counters |
+| `recordTimeout()` | Increment timeouts |
+| `connectionOpened()` / `connectionClosed()` | Active-connection gauge (underflow-safe) |
 | `reset()` | Reset all counters to zero |
-| `snapshot()` | Return a `MetricsSnapshot` |
+| `snapshot()` | Return an immutable `MetricsSnapshot` |
+| `render(writer)` / `renderPrometheus(writer)` | Prometheus 0.0.4 text exposition |
+
+Root-level aliases: `httpx.Metrics`, `httpx.MetricsSnapshot`,
+`httpx.ServerSnapshot`, `httpx.ClientSnapshot`, `httpx.Counter`,
+`httpx.Gauge`, `httpx.Histogram`.
 
 ## MetricsSnapshot
 
+Immutable point-in-time copy. All multi-word fields are camelCase:
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `total_requests` | `u64` | Total requests recorded |
-| `total_responses` | `u64` | Total responses recorded |
-| `active_connections` | `i64` | Current open connections |
-| `errors` | `u64` | Total errors |
-| `bytes_sent` | `u64` | Total bytes sent |
-| `bytes_received` | `u64` | Total bytes received |
-| `responses_2xx` | `u64` | 2xx response count |
-| `responses_3xx` | `u64` | 3xx response count |
-| `responses_4xx` | `u64` | 4xx response count |
-| `responses_5xx` | `u64` | 5xx response count |
-| `avg_latency_ns` | `u64` | Average latency in nanoseconds |
-| `min_latency_ns` | `u64` | Minimum latency in nanoseconds |
-| `max_latency_ns` | `u64` | Maximum latency in nanoseconds |
+| `requestsTotal` | `u64` | Total requests recorded |
+| `responsesTotal` | `u64` | Total responses recorded |
+| `errorsTotal` | `u64` | Total errors |
+| `timeoutsTotal` | `u64` | Total timeouts |
+| `bytesIn` / `bytesOut` | `u64` | Byte counters |
+| `activeConnections` / `activeRequests` | `u64` | Current gauges |
+| `status2xx` / `status3xx` / `status4xx` / `status5xx` | `u64` | Status class counts |
+| `methodGet` / `methodPost` / `methodPut` / `methodDelete` / `methodPatch` / `methodHead` / `methodOptions` / `methodOther` | `u64` | Per-method counts |
+| `durationCount` | `u64` | Latency sample count |
+| `durationSumSeconds` | `f64` | Latency sum in seconds |
+| `durationBuckets` | `[11]u64` | Cumulative histogram buckets |
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `errorRate()` | `f64` | `errors / total_requests` |
-| `successRate()` | `f64` | `responses_2xx / total_responses` |
-| `print()` | `void` | Print a human-readable summary to stderr |
+| `errorRate()` | `f64` | `errorsTotal / requestsTotal` (0.0 when empty) |
+| `averageLatencySeconds()` | `f64` | Mean latency in seconds |
+| `averageLatencyMs()` | `f64` | Mean latency in milliseconds |
 
-## MetricsEvent
+## ServerSnapshot
 
-Tagged union passed to the optional callback:
+`server.snapshot()` returns uptime, gauges, totals, and the embedded
+`metrics: MetricsSnapshot`. `errorRate()` and `requestsPerSecond()` are
+computed from the snapshot (no duplicated stored state).
 
-- `.request` — a request was recorded
-- `.response` — `{ status: u16, bytes: u64, latency_ns: u64 }`
-- `.bytes_sent` — `u64`
-- `.err` — an error was recorded
-- `.connection_open` / `.connection_close`
+## Prometheus exposition
 
-## MetricsCallbackFn
-
-`*const fn (event: MetricsEvent) void`
-
-Root-level aliases: `httpx.Metrics`, `httpx.MetricsSnapshot`, `httpx.MetricsEvent`, `httpx.MetricsCallbackFn`.
+`renderPrometheus` emits standard snake_case wire names (`http_requests_total`,
+`http_requests_by_method_total{method="GET"}`, `http_responses_by_status_total`,
+`http_request_duration_seconds_bucket/count/sum`). Wire names follow the
+Prometheus convention; Zig identifiers stay camelCase.

@@ -12,8 +12,7 @@ const std = @import("std");
 
 pub const name = "httpx";
 pub const version = "0.2.0";
-pub const user_agent = "httpx/0.2.0";
-pub const server_token = "httpx/0.2.0";
+pub const userAgent = "httpx/0.2.0";
 
 pub const Info = struct {
     title: []const u8 = "HTTPX API",
@@ -28,13 +27,8 @@ pub fn serverToken(buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ name, version }) catch "";
 }
 
-/// Default client User-Agent header value, e.g. "httpx/0.2.0".
-pub fn userAgent(buf: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ name, version }) catch "";
-}
-
 test "server token format" {
     var buf: [32]u8 = undefined;
     try std.testing.expectEqualStrings("httpx/0.2.0", serverToken(&buf));
-    try std.testing.expectEqualStrings("httpx/0.2.0", userAgent(&buf));
+    try std.testing.expectEqualStrings("httpx/0.2.0", userAgent);
 }

@@ -44,7 +44,7 @@ pub fn main() !void {
 
     try server.get("/", home);
     try server.get("/app.js", asset);
-    try server.listen();
+    server.run();
 }
 ```
 

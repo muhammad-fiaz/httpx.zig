@@ -26,46 +26,30 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Start local TLS server with dummy certs (HTTP/1.1 + HTTP/2 + HTTP/3)
-    var server = try httpx.Server.init(allocator, io, .{
+    // Start a local TLS listener with a self-signed identity.
+    var listener = try httpx.tls.Listener.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .tls_enabled = true,
-        .tls_cert_path = "examples/certs/server_ec.crt",
-        .tls_key_path = "examples/certs/server_ec.key",
-        .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
-        .http2 = true,
-        .http3 = true,
-        .keep_alive = true,
+        .defaultIdentity = .{
+            .certChainPem = @embedFile("cert.pem"),
+            .privateKeyPem = @embedFile("key.pem"),
+        },
     });
-    defer server.deinit();
+    defer listener.deinit();
 
-    try server.get("/hello", handler);
+    const port = listener.localPort();
+    std.debug.print("TLS listening on {d}\n", .{port});
 
-    const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
+    // HTTPS client options for self-signed endpoints
+    // (development only; production must verify against a CA bundle).
+    // NOTE: a full local client<->server TLS handshake is not yet wired;
+    // external HTTPS endpoints work via the high-level client:
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
 
-    const port = server.config.port;
-
-    // Connect TLS client
-    var sock = try httpx.Socket.create();
-    defer sock.close();
-    try sock.connectHost("127.0.0.1", port);
-
-    const tls_config = tls.TlsConfig.insecureWithH2(allocator);
-    var session = tls.TlsSession.init(tls_config);
-    session.socket = &sock;
-    try session.handshake("127.0.0.1");
-
-    // Send HTTP request over TLS
-    const request = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    try session.writeAll(request);
-
-    // Read response
-    var response_buf: [4096]u8 = undefined;
-    const n = try session.read(&response_buf);
-    std.debug.print("Received {d} bytes over TLS\n", .{n});
+    var res = try client.get("https://example.com/", .{});
+    defer res.deinit();
+    std.debug.print("HTTPS status: {d}\n", .{res.status});
 }
 ```
 

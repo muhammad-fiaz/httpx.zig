@@ -1,48 +1,32 @@
 # Transfer Checksum
 
-Compute SHA-256 and MD5 checksums using streaming and one-shot APIs.
-
-## Demo Program
+Cryptographic verification happens inline during downloads via
+`VerifyOptions`. See `examples/download_verify.zig`.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-
-    const data = "Hello, httpx.zig checksum verification!";
-
-    var sha256_stream = httpx.ChecksumStream.init(.sha256);
-    sha256_stream.update(data);
-    const sha256_result = sha256_stream.final();
-
-    var hex_buf: [128]u8 = undefined;
-    const hex_str = sha256_result.hex(&hex_buf);
-    std.debug.print("SHA-256: {s}\n", .{hex_str});
-    std.debug.print("Bytes: {d}\n", .{sha256_result.len});
-
-    var md5_stream = httpx.ChecksumStream.init(.md5);
-    md5_stream.update(data);
-    const md5_result = md5_stream.final();
-
-    var md5_hex: [128]u8 = undefined;
-    std.debug.print("MD5: {s}\n", .{md5_result.hex(&md5_hex)});
-
-    const computed = httpx.computeChecksum(.sha256, data);
-    std.debug.print("Match: {}\n", .{computed.eql(sha256_result)});
-}
+const res = try client.download(url, "downloads/file.pdf", .{
+    .verify = .{
+        .sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        .minSize = 100,
+        .maxSize = 50 * 1024 * 1024,
+    },
+    .atomic = true,
+});
+std.debug.print("verified={}\n", .{res.verified});
+if (res.sha256Hex) |hex| std.debug.print("sha256={s}\n", .{&hex});
 ```
+
+Supported hashes: `sha256`, `sha384`, `sha512`, `md5`, `sha1`, plus
+`expectedSize`, `minSize`, `maxSize`, `etag`, `lastModified`, and
+`checksumFileUrl` for remote checksum files.
 
 ## Run
 
 ```bash
-zig build run-all-checksum_example
+zig build run-download-verify
 ```
 
 ## What to Verify
 
-- SHA-256 and MD5 hex strings are printed.
-- `computeChecksum` result matches `ChecksumStream` result.
-- Checksum byte length is non-zero.
+- Matching hashes verify and save the file.
+- Mismatches return `ChecksumMismatch` without keeping corrupt output.

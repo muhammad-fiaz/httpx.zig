@@ -27,7 +27,7 @@ fn handleRoot(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "HTTPX production server running",
-        .content_type = "text/plain; charset=utf-8",
+        .contentType = "text/plain; charset=utf-8",
     };
 }
 
@@ -41,7 +41,7 @@ fn handleCreateUser(ctx: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 201,
         .body = formatted,
-        .content_type = "application/json",
+        .contentType = "application/json",
     };
 }
 
@@ -61,7 +61,7 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
-        .max_connections = 2,
+        .maxConnections = 2,
     });
     defer server.deinit();
 

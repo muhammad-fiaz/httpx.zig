@@ -36,10 +36,10 @@ pub const SourcePoint = struct {
 };
 
 pub const SourceRange = struct {
-    start_byte: u32 = 0,
-    end_byte: u32 = 0,
-    start_point: SourcePoint = .{},
-    end_point: SourcePoint = .{},
+    startByte: u32 = 0,
+    endByte: u32 = 0,
+    startPoint: SourcePoint = .{},
+    endPoint: SourcePoint = .{},
 };
 
 pub const Node = struct {
@@ -53,13 +53,13 @@ pub const Node = struct {
     /// Source byte and line/column range.
     range: SourceRange = .{},
     /// Whether this node had parsing errors/recovery.
-    has_error: bool = false,
+    hasError: bool = false,
     /// Tree links (all NO_NODE when unset).
     parent: u32 = NO_NODE,
-    first_child: u32 = NO_NODE,
-    last_child: u32 = NO_NODE,
-    prev_sibling: u32 = NO_NODE,
-    next_sibling: u32 = NO_NODE,
+    firstChild: u32 = NO_NODE,
+    lastChild: u32 = NO_NODE,
+    prevSibling: u32 = NO_NODE,
+    nextSibling: u32 = NO_NODE,
 
     /// Returns the value of the named attribute (case-insensitive), or null.
     pub fn attr(self: *const Node, name: []const u8) ?[]const u8 {
@@ -141,34 +141,34 @@ pub const Tree = struct {
     /// Attaches `child` as the last child of `parent`.
     pub fn appendChild(self: *Tree, parent_idx: u32, child_idx: u32) void {
         const parent = self.getMut(parent_idx);
-        const prev_last = parent.last_child;
-        parent.last_child = child_idx;
-        if (parent.first_child == NO_NODE) parent.first_child = child_idx;
+        const prev_last = parent.lastChild;
+        parent.lastChild = child_idx;
+        if (parent.firstChild == NO_NODE) parent.firstChild = child_idx;
 
         const child = self.getMut(child_idx);
         child.parent = parent_idx;
-        child.prev_sibling = prev_last;
-        child.next_sibling = NO_NODE;
+        child.prevSibling = prev_last;
+        child.nextSibling = NO_NODE;
 
         if (prev_last != NO_NODE) {
-            self.getMut(prev_last).next_sibling = child_idx;
+            self.getMut(prev_last).nextSibling = child_idx;
         }
     }
 
     /// Attaches `child` as the first child of `parent`.
     pub fn prependChild(self: *Tree, parent_idx: u32, child_idx: u32) void {
         const parent = self.getMut(parent_idx);
-        const old_first = parent.first_child;
-        parent.first_child = child_idx;
-        if (parent.last_child == NO_NODE) parent.last_child = child_idx;
+        const old_first = parent.firstChild;
+        parent.firstChild = child_idx;
+        if (parent.lastChild == NO_NODE) parent.lastChild = child_idx;
 
         const child = self.getMut(child_idx);
         child.parent = parent_idx;
-        child.prev_sibling = NO_NODE;
-        child.next_sibling = old_first;
+        child.prevSibling = NO_NODE;
+        child.nextSibling = old_first;
 
         if (old_first != NO_NODE) {
-            self.getMut(old_first).prev_sibling = child_idx;
+            self.getMut(old_first).prevSibling = child_idx;
         }
     }
 
@@ -179,24 +179,24 @@ pub const Tree = struct {
         if (p_idx == NO_NODE) return;
 
         const parent = self.getMut(p_idx);
-        const prev = child.prev_sibling;
-        const next = child.next_sibling;
+        const prev = child.prevSibling;
+        const next = child.nextSibling;
 
         if (prev != NO_NODE) {
-            self.getMut(prev).next_sibling = next;
+            self.getMut(prev).nextSibling = next;
         } else {
-            parent.first_child = next;
+            parent.firstChild = next;
         }
 
         if (next != NO_NODE) {
-            self.getMut(next).prev_sibling = prev;
+            self.getMut(next).prevSibling = prev;
         } else {
-            parent.last_child = prev;
+            parent.lastChild = prev;
         }
 
         child.parent = NO_NODE;
-        child.prev_sibling = NO_NODE;
-        child.next_sibling = NO_NODE;
+        child.prevSibling = NO_NODE;
+        child.nextSibling = NO_NODE;
     }
 
     /// Replaces an existing child node with a new node.
@@ -205,30 +205,30 @@ pub const Tree = struct {
         const p_idx = old_child.parent;
         if (p_idx == NO_NODE) return;
 
-        const prev = old_child.prev_sibling;
-        const next = old_child.next_sibling;
+        const prev = old_child.prevSibling;
+        const next = old_child.nextSibling;
 
         const new_child = self.getMut(new_child_idx);
         new_child.parent = p_idx;
-        new_child.prev_sibling = prev;
-        new_child.next_sibling = next;
+        new_child.prevSibling = prev;
+        new_child.nextSibling = next;
 
         if (prev != NO_NODE) {
-            self.getMut(prev).next_sibling = new_child_idx;
+            self.getMut(prev).nextSibling = new_child_idx;
         } else {
-            self.getMut(p_idx).first_child = new_child_idx;
+            self.getMut(p_idx).firstChild = new_child_idx;
         }
 
         if (next != NO_NODE) {
-            self.getMut(next).prev_sibling = new_child_idx;
+            self.getMut(next).prevSibling = new_child_idx;
         } else {
-            self.getMut(p_idx).last_child = new_child_idx;
+            self.getMut(p_idx).lastChild = new_child_idx;
         }
 
         const old_mut = self.getMut(old_child_idx);
         old_mut.parent = NO_NODE;
-        old_mut.prev_sibling = NO_NODE;
-        old_mut.next_sibling = NO_NODE;
+        old_mut.prevSibling = NO_NODE;
+        old_mut.nextSibling = NO_NODE;
     }
 
     /// Sets or adds an attribute on the element node.
@@ -284,10 +284,10 @@ pub const Tree = struct {
             const idx = self.stack.pop().?;
             const node = self.tree.get(idx);
             // Push children right-to-left so first child comes out first.
-            var sib = node.last_child;
+            var sib = node.lastChild;
             while (sib != NO_NODE) {
                 self.stack.append(self.allocator, sib) catch {};
-                sib = self.tree.get(sib).prev_sibling;
+                sib = self.tree.get(sib).prevSibling;
             }
             return idx;
         }
@@ -364,10 +364,10 @@ pub const Tree = struct {
         const node = self.get(node_idx);
         switch (node.kind) {
             .document => {
-                var child = node.first_child;
+                var child = node.firstChild;
                 while (child != NO_NODE) {
                     try self.serializeToWriter(allocator, child, writer);
-                    child = self.get(child).next_sibling;
+                    child = self.get(child).nextSibling;
                 }
             },
             .doctype => {
@@ -389,10 +389,10 @@ pub const Tree = struct {
 
                 if (VOID_ELEMENTS.has(node.tag)) return;
 
-                var child = node.first_child;
+                var child = node.firstChild;
                 while (child != NO_NODE) {
                     try self.serializeToWriter(allocator, child, writer);
-                    child = self.get(child).next_sibling;
+                    child = self.get(child).nextSibling;
                 }
 
                 try writer.writeAll("</");
@@ -454,8 +454,8 @@ test "tree basic append, walk, mutate, serialize" {
     tree.appendChild(elem, txt);
 
     try std.testing.expectEqual(@as(u32, NO_NODE), tree.get(root).parent);
-    try std.testing.expectEqual(elem, tree.get(root).first_child);
-    try std.testing.expectEqual(txt, tree.get(elem).first_child);
+    try std.testing.expectEqual(elem, tree.get(root).firstChild);
+    try std.testing.expectEqual(txt, tree.get(elem).firstChild);
     try std.testing.expectEqual(elem, tree.get(txt).parent);
 
     try tree.setAttribute(a, elem, "class", "active");

@@ -49,7 +49,7 @@ pub const MAX_TARGET_LEN: usize = 8192;
 
 /// Parser options for lenient line ending handling (issue #37).
 pub const Options = struct {
-    allow_lf_line_endings: bool = false,
+    allowLfLineEndings: bool = false,
 };
 
 fn isCtl(c: u8) bool {
@@ -74,8 +74,8 @@ fn findEolWithOptions(buf: []const u8, pos: usize, opts: Options) ParseError!usi
     while (i < buf.len) : (i += 1) {
         const c = buf[i];
         if (c == '\n') {
-            // In strict mode (allow_lf_line_endings == false), line must end in \r\n
-            if (!opts.allow_lf_line_endings) {
+            // In strict mode (allowLfLineEndings == false), line must end in \r\n
+            if (!opts.allowLfLineEndings) {
                 if (i == pos or buf[i - 1] != '\r') {
                     return ParseError.MalformedHeaderLine;
                 }
@@ -91,12 +91,12 @@ fn findEolWithOptions(buf: []const u8, pos: usize, opts: Options) ParseError!usi
 pub const HeadResult = struct {
     method: []const u8 = "",
     path: []const u8 = "",
-    status_code: u16 = 0,
+    statusCode: u16 = 0,
     reason: []const u8 = "",
-    minor_version: u8 = 1,
-    major_version: u8 = 1,
+    minorVersion: u8 = 1,
+    majorVersion: u8 = 1,
     /// Offset one past the request/status line's LF.
-    head_end: usize = 0,
+    headEnd: usize = 0,
 };
 
 /// Parses a request line: METHOD SP TARGET SP HTTP/1.x CRLF.
@@ -154,8 +154,8 @@ pub fn parseRequestHeadWithOptions(buf: []const u8, opts: Options) ParseError!He
     if (!std.mem.eql(u8, buf[end..][0..7], "HTTP/1.")) return ParseError.UnsupportedHttpVersion;
     const minor = buf[end + 7];
     if (minor != '0' and minor != '1') return ParseError.UnsupportedHttpVersion;
-    r.major_version = 1;
-    r.minor_version = minor - '0';
+    r.majorVersion = 1;
+    r.minorVersion = minor - '0';
     end += 8;
 
     if (end >= buf.len) return ParseError.Incomplete;
@@ -163,7 +163,7 @@ pub fn parseRequestHeadWithOptions(buf: []const u8, opts: Options) ParseError!He
         end += 1;
         if (end >= buf.len) return ParseError.Incomplete;
         if (buf[end] != '\n') return ParseError.MalformedRequestLine;
-        r.head_end = end + 1;
+        r.headEnd = end + 1;
         return r;
     }
     // Bare LF for request line is always strict (RFC 9112) — even with lenient flag
@@ -184,7 +184,7 @@ pub fn parseResponseHeadWithOptions(buf: []const u8, opts: Options) ParseError!H
             if (buf[pos + 1] != '\n') break;
             pos += 2;
         } else if (buf[pos] == '\n') {
-            if (!opts.allow_lf_line_endings) break;
+            if (!opts.allowLfLineEndings) break;
             pos += 1;
         } else break;
     }
@@ -194,8 +194,8 @@ pub fn parseResponseHeadWithOptions(buf: []const u8, opts: Options) ParseError!H
     if (!std.mem.eql(u8, buf[pos..][0..7], "HTTP/1.")) return ParseError.UnsupportedHttpVersion;
     const minor = buf[pos + 7];
     if (minor != '0' and minor != '1') return ParseError.UnsupportedHttpVersion;
-    r.major_version = 1;
-    r.minor_version = minor - '0';
+    r.majorVersion = 1;
+    r.minorVersion = minor - '0';
 
     if (buf[pos + 8] != ' ') return ParseError.MalformedStatusLine;
 
@@ -204,7 +204,7 @@ pub fn parseResponseHeadWithOptions(buf: []const u8, opts: Options) ParseError!H
     for (code_start..code_start + 3) |i| {
         if (!std.ascii.isDigit(buf[i])) return ParseError.MalformedStatusLine;
     }
-    r.status_code = std.fmt.parseInt(u16, buf[code_start..][0..3], 10) catch unreachable;
+    r.statusCode = std.fmt.parseInt(u16, buf[code_start..][0..3], 10) catch unreachable;
     var end = code_start + 3;
 
     if (end < buf.len and buf[end] != '\r' and buf[end] != '\n') {
@@ -225,17 +225,17 @@ pub fn parseResponseHeadWithOptions(buf: []const u8, opts: Options) ParseError!H
     if (buf[end] == '\r') {
         if (end + 1 >= buf.len) return ParseError.Incomplete;
         if (buf[end + 1] != '\n') return ParseError.MalformedStatusLine;
-        r.head_end = end + 2;
+        r.headEnd = end + 2;
         return r;
     }
     if (buf[end] == '\n') {
         // If previous is \r, this is actually CRLF where findEol returned \n index
         if (end > 0 and buf[end - 1] == '\r') {
-            r.head_end = end + 1;
+            r.headEnd = end + 1;
             return r;
         }
-        if (!opts.allow_lf_line_endings) return ParseError.MalformedStatusLine;
-        r.head_end = end + 1;
+        if (!opts.allowLfLineEndings) return ParseError.MalformedStatusLine;
+        r.headEnd = end + 1;
         return r;
     }
     return ParseError.MalformedStatusLine;
@@ -264,7 +264,7 @@ pub fn parseHeaderBlockWithOptions(buf: []const u8, start: usize, fields: []Fiel
         if (pos >= buf.len) return ParseError.Incomplete;
         // End of headers detection (empty line):
         // 1. CRLF empty line: \r\n
-        // 2. LF empty line: \n (allowed only if opts.allow_lf_line_endings)
+        // 2. LF empty line: \n (allowed only if opts.allowLfLineEndings)
         // Lone \r without \n is NOT end-of-headers; it is part of content or malformed line.
         if (buf[pos] == '\r') {
             if (pos + 1 >= buf.len) return ParseError.Incomplete;
@@ -273,7 +273,7 @@ pub fn parseHeaderBlockWithOptions(buf: []const u8, start: usize, fields: []Fiel
             return ParseError.MalformedHeaderLine;
         }
         if (buf[pos] == '\n') {
-            if (opts.allow_lf_line_endings) return .{ .count = n, .end = pos + 1 };
+            if (opts.allowLfLineEndings) return .{ .count = n, .end = pos + 1 };
             return ParseError.MalformedHeaderLine;
         }
 
@@ -349,7 +349,7 @@ pub const FramingContext = struct {
     /// True for HTTP/1.0 where Transfer-Encoding chunked is forbidden (RFC 9112 smuggling).
     is_http_10: bool = false,
     /// Upper bound applied to any declared content length.
-    max_body: usize = DEFAULT_MAX_BODY_BYTES,
+    maxBody: usize = DEFAULT_MAX_BODY_BYTES,
 };
 
 pub fn framingFull(fields: []const Field, ctx: FramingContext) ParseError!FramingDecision {
@@ -383,7 +383,7 @@ pub fn framingFull(fields: []const Field, ctx: FramingContext) ParseError!Framin
                 if (!std.ascii.isDigit(c)) return ParseError.InvalidContentLength;
             }
             const v = std.fmt.parseInt(usize, f.value, 10) catch return ParseError.InvalidContentLength;
-            if (v > ctx.max_body) return ParseError.InvalidContentLength;
+            if (v > ctx.maxBody) return ParseError.InvalidContentLength;
             if (has_cl and cl != v) return ParseError.AmbiguousFraming; // differing duplicates
             has_cl = true;
             cl = v;
@@ -606,7 +606,7 @@ test "parse simple GET request head" {
     const r = try parseRequestHead(req);
     try std.testing.expectEqualStrings("GET", r.method);
     try std.testing.expectEqualStrings("/path?q=1", r.path);
-    try std.testing.expectEqual(@as(u8, 1), r.minor_version);
+    try std.testing.expectEqual(@as(u8, 1), r.minorVersion);
 }
 
 test "request head split across arbitrary reads" {
@@ -615,7 +615,7 @@ test "request head split across arbitrary reads" {
         var acc: [128]u8 = undefined;
         @memcpy(acc[0..cut], req[0..cut]);
         if (parseRequestHead(acc[0..cut])) |h| {
-            try std.testing.expect(h.head_end <= cut);
+            try std.testing.expect(h.headEnd <= cut);
         } else |e| {
             try std.testing.expectEqual(ParseError.Incomplete, e);
         }
@@ -632,15 +632,15 @@ test "reject bad request lines" {
 
 test "parse response status line variants" {
     const r1 = try parseResponseHead("HTTP/1.1 200 OK\r\nServer: x\r\n\r\n");
-    try std.testing.expectEqual(@as(u16, 200), r1.status_code);
+    try std.testing.expectEqual(@as(u16, 200), r1.statusCode);
     try std.testing.expectEqualStrings("OK", r1.reason);
 
     const r2 = try parseResponseHead("HTTP/1.0 404 Not Found with words\r\n\r\n");
-    try std.testing.expectEqual(@as(u16, 404), r2.status_code);
+    try std.testing.expectEqual(@as(u16, 404), r2.statusCode);
     try std.testing.expectEqualStrings("Not Found with words", r2.reason);
 
     const r3 = try parseResponseHead("HTTP/1.1 204\r\n\r\n");
-    try std.testing.expectEqual(@as(u16, 204), r3.status_code);
+    try std.testing.expectEqual(@as(u16, 204), r3.statusCode);
     try std.testing.expectEqualStrings("", r3.reason);
 }
 
@@ -822,7 +822,7 @@ test "strict mode rejects bare LF in headers while lenient mode accepts it" {
     try std.testing.expectError(ParseError.MalformedHeaderLine, parseHeaderBlock(raw, 16, fields[0..]));
 
     // Lenient mode must parse bare LF lines successfully
-    const res = try parseHeaderBlockWithOptions(raw, 16, fields[0..], .{ .allow_lf_line_endings = true });
+    const res = try parseHeaderBlockWithOptions(raw, 16, fields[0..], .{ .allowLfLineEndings = true });
     try std.testing.expectEqual(@as(usize, 2), res.count);
     try std.testing.expectEqualStrings("Host", fields[0].name);
     try std.testing.expectEqualStrings("example.com", fields[0].value);
@@ -855,7 +855,7 @@ test "lone CR inside header value is treated as data byte, not line terminator" 
     const raw = "HTTP/1.1 200 OK\r\nHeader: v\rX: y\r\n\r\n";
     var fields: [4]Field = undefined;
 
-    const res = try parseHeaderBlockWithOptions(raw, 17, fields[0..], .{ .allow_lf_line_endings = true });
+    const res = try parseHeaderBlockWithOptions(raw, 17, fields[0..], .{ .allowLfLineEndings = true });
     try std.testing.expectEqual(@as(usize, 1), res.count);
     try std.testing.expectEqualStrings("Header", fields[0].name);
     try std.testing.expectEqualStrings("v\rX: y", fields[0].value);

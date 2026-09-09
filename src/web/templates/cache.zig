@@ -13,7 +13,7 @@ pub const CachedTemplate = struct {
 
 pub const CacheConfig = struct {
     enabled: bool = true,
-    max_templates: usize = 1024,
+    maxTemplates: usize = 1024,
 };
 
 const sync = @import("../../common/sync.zig");
@@ -22,7 +22,7 @@ pub const Cache = struct {
     allocator: Allocator,
     config: CacheConfig,
     lock: sync.Spinlock = .{},
-    // map template_name -> CachedTemplate
+    // map templateName -> CachedTemplate
     entries: std.StringHashMap(CachedTemplate),
     // map dependency_name -> list of dependents
     // e.g. "base.html" -> ["index.html", "about.html"]
@@ -109,7 +109,7 @@ pub const Cache = struct {
 
         // Track dependencies: if this template extends a parent or includes partials,
         // register this template as a dependent of those parent/partial templates.
-        if (ast.extends_path) |parent| {
+        if (ast.extendsPath) |parent| {
             try self.addDependencyInternal(parent, name);
         }
         for (ast.includes) |inc| {

@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = httpx.Client.init(allocator, io, .{ .base_url = "https://httpbun.com" });
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
     // Unified fetch request

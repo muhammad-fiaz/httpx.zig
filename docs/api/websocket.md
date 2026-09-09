@@ -1,6 +1,7 @@
 # API: WebSocket
 
-The `httpx.websocket` module provides WebSocket client and server primitives according to RFC 6455, including framing, masking, Sec-WebSocket-Key acceptance, ping/pong heartbeats, and UTF-8 validation.
+The `httpx.websocket` module provides WebSocket primitives according to
+RFC 6455: handshake helpers and frame encoding/decoding.
 
 ## Overview
 
@@ -12,52 +13,44 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Client connection
-    var client = httpx.Client.init(allocator, io, .{});
-    defer client.deinit();
+    // Compute Sec-WebSocket-Accept for an upgrade response.
+    var accept: [28]u8 = undefined;
+    httpx.websocket.computeAccept("dGhlIHNhbXBsZSBub25jZQ==", &accept);
 
-    // Server-side upgrade handler
-    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
-    defer server.deinit();
-
-    server.ws("/chat", struct {
-        pub fn onConnect(conn: *httpx.ws.Connection) void {
-            conn.sendText("Welcome to chat!") catch {};
-        }
-        pub fn onMessage(conn: *httpx.ws.Connection, msg: httpx.ws.Message) void {
-            conn.sendText(msg.text) catch {};
-        }
-        pub fn onClose(conn: *httpx.ws.Connection) void {
-            _ = conn;
-        }
-    });
-
-    try server.run();
+    // Encode a text frame header.
+    var hdr: [10]u8 = undefined;
+    const n = httpx.websocket.Frame.buildFrameHeader(&hdr, true, .text, 5, null);
+    _ = n;
+    _ = allocator;
 }
 ```
 
 ## Opcodes & Frame Types
 
-```zig
-pub const Opcode = enum(u4) {
-    continuation = 0x0,
-    text = 0x1,
-    binary = 0x2,
-    close = 0x8,
-    ping = 0x9,
-    pong = 0xA,
-};
-```
+`httpx.websocket.Frame.Opcode` (`.continuation`, `.text`, `.binary`,
+`.close`, `.ping`, `.pong`) with `isControl()`, plus `FrameHeader`
+(`fin`, `opcode`, `masked`, `payloadLen`, `maskKey`).
 
 ## Functions
 
-### `httpx.ws.computeAccept(key: []const u8, out_buf: *[28]u8) []const u8`
-Computes the RFC 6455 `Sec-WebSocket-Accept` value from a client `Sec-WebSocket-Key` by appending the GUID `258EAFA5-E914-47DA-95CA-C5AB0DC85B11`, computing SHA-1, and Base64-encoding.
+### `httpx.websocket.computeAccept(key, out)`
 
-### `httpx.ws.buildUpgradeRequest(allocator, host, path) ![]u8`
-Builds an HTTP/1.1 WebSocket upgrade handshake request with valid `Sec-WebSocket-Key` and `Upgrade: websocket`.
+Computes the RFC 6455 `Sec-WebSocket-Accept` value from a client
+`Sec-WebSocket-Key` (SHA-1 over key + GUID, Base64-encoded).
+
+### `httpx.websocket.Handshake.buildUpgradeRequest(allocator, host, path, key, headers)`
+
+Builds an HTTP/1.1 WebSocket upgrade handshake request with a valid
+`Sec-WebSocket-Key` and `Upgrade: websocket`.
+
+### `httpx.websocket.Handshake.validateUpgradeResponse(head, accept)`
+
+Validates a `101` response against the expected accept key.
+
+### `httpx.websocket.Frame.parseFrameHeader(buf)` / `buildFrameHeader(...)`
+
+Decode/encode frame headers; `applyMask(data, key)` masks payloads in place.
 
 ## Related
 

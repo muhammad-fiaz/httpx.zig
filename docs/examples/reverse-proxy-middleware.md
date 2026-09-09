@@ -1,32 +1,17 @@
 # Reverse Proxy Middleware Example
 
-Demonstrates `middleware.reverseProxy()` and `middleware.reverseProxyRuntime()` for proxying requests to a backend server. Shows both compile-time target configuration and runtime target selection.
-
-## Demo Program
+HTTPX has no server-side reverse proxy middleware. To front a backend,
+either deploy a dedicated proxy (Nginx, HAProxy) or forward explicitly in a
+handler with the URL-first client:
 
 ```zig
-// Start a backend server
-try backend.get("/api/data", backendHandler);
-
-// Proxy with runtime target URL
-try proxy.use(httpx.reverseProxyRuntime(backend_url));
-
-// Test the proxy
-var resp = try client.get(proxy_url, .{});
-// GET /api/data -> proxied to backend
+fn proxyHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    var res = try client.get("http://127.0.0.1:9001/api/data", .{});
+    defer res.deinit();
+    const body = try ctx.allocator.dupe(u8, res.body);
+    return .{ .status = res.status, .body = body, .contentType = res.contentType() };
+}
 ```
 
-## Run
-
-```
-zig build run-all-reverse_proxy_middleware
-```
-
-## Checklist
-
-- [x] Backend server starts and handles `/api/data`
-- [x] Proxy forwards requests to backend transparently
-- [x] `reverseProxyRuntime()` accepts target URL at runtime
-- [x] Response body is proxied unchanged
-- [x] Status code is forwarded correctly
-- [x] Use cases: API gateway, microservice proxy, load balancer
+For client-side forward proxies (including SOCKS5h), see
+[Proxy Example](/examples/proxy-example) and `examples/proxy_demo.zig`.

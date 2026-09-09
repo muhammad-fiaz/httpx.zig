@@ -1,96 +1,29 @@
 # Simple Get Deserialize
 
-Parse JSON responses into typed Zig structs.
-
-This example now defaults to an offline-safe path so it completes quickly even in restricted network environments.
-Set `HTTPX_EXAMPLE_ONLINE=1` when you want to run a live request to `https://httpbun.com/get`.
-
-## Demo Program
+Parse JSON responses into typed Zig structs with `Response.json(T)`.
+See `examples/post_json.zig`.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
+const User = struct { id: u64, name: []const u8, email: []const u8 };
 
-const HttpbinResponse = struct {
-    args: std.json.Value,
-    headers: Headers,
-    origin: []const u8,
-    url: []const u8,
+var res = try client.get("https://httpbun.com/get", .{});
+defer res.deinit();
 
-    const Headers = struct {
-        Accept: ?[]const u8 = null,
-        Host: ?[]const u8 = null,
-        @"User-Agent": ?[]const u8 = null,
-        @"X-Amzn-Trace-Id": ?[]const u8 = null,
-    };
-};
+// Decode into a struct (unknown fields are ignored).
+const user = try res.json(User);
 
-const offline_sample_json =
-    \\{
-    \\  "args": {},
-    \\  "headers": {
-    \\    "Accept": "application/json",
-    \\    "Host": "example.local",
-    \\    "User-Agent": "httpx.zig/offline-demo",
-    \\    "X-Amzn-Trace-Id": "Root=1-offline-demo"
-    \\  },
-    \\  "origin": "127.0.0.1",
-    \\  "url": "https://httpbun.com/get"
-    \\}
-;
-
-fn shouldUseLiveNetwork(environ: std.process.Environ, allocator: std.mem.Allocator) bool {
-    const value = environ.getAlloc(allocator, "HTTPX_EXAMPLE_ONLINE") catch return false;
-    defer allocator.free(value);
-    return std.mem.eql(u8, value, "1");
-}
-
-pub fn main(init: std.process.Init) !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const live_mode = shouldUseLiveNetwork(init.minimal.environ, allocator);
-
-    if (!live_mode) {
-        const parsed = try std.json.parseFromSlice(HttpbinResponse, allocator, offline_sample_json, .{});
-        defer parsed.deinit();
-        std.debug.print("url={s}\n", .{parsed.value.url});
-        return;
-    }
-
-    var client = httpx.Client.init(allocator, io, .{
-        .timeoutMs = 5_000,
-    });
-    defer client.deinit();
-
-    var res = try client.fetch("https://httpbun.com/get", .{ .timeoutMs = 5_000 });
-    defer res.deinit();
-
-    // Use response.json() helper for clean automatic JSON deserialization
-    const data = try res.json(HttpbinResponse);
-    std.debug.print("url={s}\n", .{data.url});
-}
+// Or keep the parsed DOM with an explicit allocator.
+const parsed = try res.jsonAlloc(User, allocator);
+defer parsed.deinit();
 ```
 
 ## Run
 
 ```bash
-zig build run-all-simple_get_deserialize
-```
-
-Live network mode:
-
-```powershell
-$env:HTTPX_EXAMPLE_ONLINE = "1"
-zig build run-all-simple_get_deserialize
-```
-
-```bash
-HTTPX_EXAMPLE_ONLINE=1 zig build run-all-simple_get_deserialize
+zig build run-post-json
 ```
 
 ## What to Verify
 
-- Default run completes quickly without external network dependency.
-- Live mode performs an actual HTTP request and parses typed JSON.
+- GET returns 200 with a JSON body.
+- Typed decoding succeeds and ignores unknown fields.

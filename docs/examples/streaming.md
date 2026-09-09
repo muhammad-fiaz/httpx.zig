@@ -26,7 +26,7 @@ pub fn main() !void {
     defer server.deinit();
 
     try server.get("/stream", stream);
-    try server.listen();
+    server.run();
 }
 ```
 

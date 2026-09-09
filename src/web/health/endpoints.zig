@@ -6,13 +6,13 @@ pub const Status = enum {
     healthy,
     unhealthy,
     ready,
-    not_ready,
+    notReady,
 
     /// HTTP status code for this health state.
     pub fn httpStatus(self: Status) u16 {
         return switch (self) {
             .healthy, .ready => 200,
-            .unhealthy, .not_ready => 503,
+            .unhealthy, .notReady => 503,
         };
     }
 
@@ -22,16 +22,16 @@ pub const Status = enum {
             .healthy => "{\"status\":\"healthy\"}",
             .unhealthy => "{\"status\":\"unhealthy\"}",
             .ready => "{\"status\":\"ready\"}",
-            .not_ready => "{\"status\":\"not_ready\"}",
+            .notReady => "{\"status\":\"notReady\"}",
         };
     }
 };
 
 pub const Config = struct {
     /// Liveness route. Empty disables it.
-    health_path: []const u8 = "/health",
+    healthPath: []const u8 = "/health",
     /// Readiness route. Empty disables it.
-    ready_path: []const u8 = "/ready",
+    readyPath: []const u8 = "/ready",
     enabled: bool = true,
 };
 
@@ -42,5 +42,5 @@ test "healthy is 200" {
 
 test "unhealthy is 503" {
     try std.testing.expectEqual(@as(u16, 503), Status.unhealthy.httpStatus());
-    try std.testing.expectEqual(@as(u16, 503), Status.not_ready.httpStatus());
+    try std.testing.expectEqual(@as(u16, 503), Status.notReady.httpStatus());
 }

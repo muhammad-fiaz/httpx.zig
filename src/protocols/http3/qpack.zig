@@ -226,17 +226,17 @@ pub const DynEntry = struct {
 
 pub const DynTable = struct {
     entries: std.ArrayList(DynEntry),
-    max_size: usize,
+    maxSize: usize,
     current_size: usize = 0,
     /// Absolute index of the oldest retained dynamic entry.
     base_index: u64 = STATIC_TABLE_SIZE,
     /// Absolute index assigned to the next insertion.
     next_index: u64 = STATIC_TABLE_SIZE,
 
-    pub fn init(_: Allocator, max_size: usize) DynTable {
+    pub fn init(_: Allocator, maxSize: usize) DynTable {
         return .{
             .entries = std.ArrayList(DynEntry).empty,
-            .max_size = max_size,
+            .maxSize = maxSize,
         };
     }
 
@@ -248,7 +248,7 @@ pub const DynTable = struct {
         self.entries.deinit(allocator);
     }
 
-    /// Inserts a new entry, evicting oldest entries to stay within max_size.
+    /// Inserts a new entry, evicting oldest entries to stay within maxSize.
     pub fn insert(self: *DynTable, allocator: Allocator, name: []const u8, value: []const u8) !u64 {
         const owned_name = try allocator.dupe(u8, name);
         errdefer allocator.free(owned_name);
@@ -256,11 +256,11 @@ pub const DynTable = struct {
         errdefer allocator.free(owned_value);
 
         const total = std.math.add(usize, std.math.add(usize, name.len, value.len) catch return Error.OutOfMemory, ENTRY_OVERHEAD) catch return Error.OutOfMemory;
-        if (total > self.max_size) return Error.TableCapacityExceeded;
+        if (total > self.maxSize) return Error.TableCapacityExceeded;
         const index = self.next_index;
 
         // Evict from oldest (index = STATIC_TABLE_SIZE) until room.
-        while (self.current_size + total > self.max_size and self.entries.items.len > 0) {
+        while (self.current_size + total > self.maxSize and self.entries.items.len > 0) {
             const old = self.entries.orderedRemove(0);
             self.current_size -%= old.total_size;
             self.base_index = std.math.add(u64, self.base_index, 1) catch return Error.OutOfMemory;

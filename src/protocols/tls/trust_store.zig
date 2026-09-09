@@ -63,12 +63,12 @@ pub const TrustStore = struct {
     }
 
     /// Parses and adds all PEM-encoded CA certificates to the trust store.
-    pub fn addCertPem(self: *TrustStore, pem_bytes: []const u8) TlsError!void {
+    pub fn addCertPem(self: *TrustStore, pemBytes: []const u8) TlsError!void {
         var search_from: usize = 0;
         var added: usize = 0;
-        while (std.mem.indexOfPos(u8, pem_bytes, search_from, "-----BEGIN CERTIFICATE-----")) |idx| {
+        while (std.mem.indexOfPos(u8, pemBytes, search_from, "-----BEGIN CERTIFICATE-----")) |idx| {
             const cert_mod = @import("certificate.zig");
-            const der = cert_mod.decodePemBlock(self.allocator, pem_bytes[idx..], "CERTIFICATE") catch break;
+            const der = cert_mod.decodePemBlock(self.allocator, pemBytes[idx..], "CERTIFICATE") catch break;
             defer self.allocator.free(der);
             self.addCertDer(der) catch return TlsError.OutOfMemory;
             added += 1;

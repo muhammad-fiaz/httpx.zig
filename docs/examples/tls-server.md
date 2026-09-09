@@ -27,44 +27,20 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    // Start a local TLS listener with a self-signed identity.
+    // (See examples/tls_server.zig for the runnable version.)
+    var listener = try httpx.tls.Listener.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .tls_enabled = true,
-        .tls_cert_path = "examples/certs/server_ec.crt",
-        .tls_key_path = "examples/certs/server_ec.key",
-        .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
-        .http2 = true,
-        .keep_alive = true,
+        .defaultIdentity = .{
+            .certChainPem = @embedFile("cert.pem"),
+            .privateKeyPem = @embedFile("key.pem"),
+        },
     });
-    defer server.deinit();
+    defer listener.deinit();
 
-    try server.get("/hello", helloHandler);
-
-    const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
-
-    const port = server.config.port;
-
-    // TLS client handshake
-    var sock = try httpx.Socket.create();
-    defer sock.close();
-    try sock.connectHost("127.0.0.1", port);
-
-    const tls_config = tls.TlsConfig.insecureWithH2(allocator);
-    var session = tls.TlsSession.init(tls_config);
-    session.socket = &sock;
-    try session.handshake("127.0.0.1");
-
-    // Send HTTP request over TLS
-    const request = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    try session.writeAll(request);
-
-    // Read response
-    var response_buf: [4096]u8 = undefined;
-    const n = try session.read(&response_buf);
-    std.debug.print("Received {d} bytes over TLS\n", .{n});
+    const port = listener.localPort();
+    std.debug.print("TLS listening on {d}\n", .{port});
 }
 ```
 

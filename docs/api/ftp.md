@@ -45,11 +45,11 @@ const res = try httpx.ftp.download(allocator, .{
     .port = 21,
     .user = "demo",
     .password = "password",
-    .remote_path = "readme.txt",
-    .destination_path = "downloads/readme.txt",
+    .remotePath = "readme.txt",
+    .destinationPath = "downloads/readme.txt",
     .progress = .auto,
     .verify = .{
-        .min_size = 1,
+        .minSize = 1,
     },
 });
 ```

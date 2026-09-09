@@ -1,47 +1,39 @@
-# Session Store Example
+# Session Example
 
-Demonstrates how to use the built-in in-memory session management system in `httpx.zig` to track user sessions.
-
-## Features Covered
-
-- **Session Creation**: Spawning secure sessions with randomized unique IDs.
-- **Session Data Store**: Storing, getting, and updating key-value attributes inside active session payloads.
-- **Time-to-Live (TTL)**: Configurable TTL and active eviction of expired sessions.
-- **HTTP Server Integration**: Integrating session checking and cookie parsing into server routes.
-
-## Code Example
+Cookie-backed sessions in handlers. See `examples/session_server.zig` for a
+runnable `/login`, `/dashboard`, `/logout` flow.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
+fn loginHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    _ = ctx;
+    return .{
+        .status = 200,
+        .body = "{\"message\":\"Logged in\"}",
+        .contentType = "application/json",
+        .headers = &.{
+            .{ .name = "Set-Cookie", .value = "session=abc123; Path=/; HttpOnly" },
+        },
+    };
+}
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var store = httpx.SessionStore.init(allocator, .{
-        .ttlMs = 60_000,
-        .cookie_name = "sid",
-    });
-    defer store.deinit();
-
-    // Create a new session
-    const sid = try store.create();
-    try store.set(&sid, "user_id", "42");
-    try store.set(&sid, "role", "admin");
-
-    // Fetch and check session data
-    if (store.get(&sid, "user_id")) |uid| {
-        std.debug.print("User: {s}, Role: {s}\n", .{ uid, store.get(&sid, "role").? });
-    }
+fn dashboardHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    const session = ctx.cookie("session") orelse
+        return ctx.textStatus(401, "login required");
+    _ = session;
+    return ctx.text("welcome back");
 }
 ```
 
-## Running the Example
+There is no built-in session store; keep server-side state in your own
+structures keyed by the session cookie value.
 
-Run the pre-configured session example:
+## Run
 
 ```bash
-zig build run-all-session_example
+zig build run-session-server
 ```
+
+## What to Verify
+
+- `GET /login` returns 200.
+- `GET /dashboard` without a session returns 401.

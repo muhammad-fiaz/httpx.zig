@@ -1,42 +1,32 @@
 # SOCKS5h Proxy Example
 
-Demonstrates routing HTTP client requests through a SOCKS5h proxy with remote DNS resolution, username/password authentication, and IPv4/IPv6/domain target support.
-
-## Demo Program
+Route HTTP client requests through a SOCKS5h proxy with remote DNS
+resolution. See `examples/proxy_demo.zig`.
 
 ```zig
-    const io = std.Io.Threaded.global_single_threaded.io();
-// Configure client with SOCKS5h proxy
-const client_config = .{}
-    .withTimeouts(httpx.Timeouts.fast())
-    .withRetryPolicy(httpx.RetryPolicy.noRetry())
-    .withProxy(.{
-        .host = "127.0.0.1",
-        .port = 1080,
-        .kind = .socks5h,
-        .username = "proxyuser",
-        .password = "proxypass",
-    });
-
-var client = httpx.Client.init(allocator, io, client_config);
+// Client-level proxy (URL form).
+var client = httpx.Client.init(allocator, io, .{
+    .proxy = "socks5h://127.0.0.1:1080",
+});
 defer client.deinit();
 
-// Request through the SOCKS5h proxy
-var response = try client.get("http://target.example.com/data", .{});
+// Per-request proxy override.
+var response = try client.get("http://target.example.com/data", .{
+    .proxy = "socks5h://127.0.0.1:1080",
+});
 defer response.deinit();
 ```
 
+`socks5h://` delegates hostname resolution to the proxy; `socks5://`
+resolves locally. `http://` selects an HTTP forward proxy.
+
 ## Run
 
-```
-zig build run-all-socks5_proxy
+```bash
+zig build run-proxy-demo
 ```
 
 ## What to Verify
 
-- [x] Client config sets `.kind = .socks5h` for remote DNS resolution
-- [x] Username and password authentication fields are accepted
-- [x] Proxy host and port are configured correctly
-- [x] SOCKS5h performs DNS resolution on the proxy side (remote DNS)
-- [x] Request is routed through the proxy to the target backend
-- [x] Response is returned correctly through the proxy chain
+- Requests route through the configured proxy.
+- SOCKS5h performs DNS resolution on the proxy side (remote DNS).

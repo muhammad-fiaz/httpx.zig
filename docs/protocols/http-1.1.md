@@ -52,7 +52,7 @@ Connection: keep-alive
 
 ## Key HTTP/1.1 Features in HTTPX
 
-1. **Persistent Connection Pooling**: The HTTPX client retains idle TCP sockets in an internal pool. Sockets are reused automatically up to `max_idle_connections` and `idle_timeout_ms`.
+1. **Persistent Connection Pooling**: The HTTPX client retains idle TCP sockets in an internal pool. Sockets are reused automatically bounded by `pool.maxConnections`, `pool.maxPerHost`, and `pool.idleTimeoutMs`.
 2. **Chunked Transfer Encoding**: Allows sending and receiving streaming dynamic payloads of unknown length without pre-computing a `Content-Length` header.
 3. **100 Continue Handling**: The client automatically handles `Expect: 100-continue` for large file uploads, verifying server authorization before transmitting large request bodies.
 4. **Header Normalization**: Headers are parsed case-insensitively while preserving RFC 9110 formatting.
@@ -70,7 +70,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     var client = httpx.Client.init(allocator, io, .{
-        .max_connections = 32,
+        .pool = .{ .maxConnections = 32 },
     });
     defer client.deinit();
 

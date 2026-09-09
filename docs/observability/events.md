@@ -22,7 +22,7 @@ fn onClientEvent(event: httpx.client.ClientEvent) void {
                 ev.host, ev.ip, ev.duration_ms,
             });
         },
-        .tls_handshake_done => |ev| {
+        .tlsHandshake_done => |ev| {
             std.debug.print("[Client] TLS 1.3 negotiated with {s} (cipher: {s})\n", .{
                 ev.sni, ev.cipher,
             });
@@ -32,7 +32,7 @@ fn onClientEvent(event: httpx.client.ClientEvent) void {
                 ev.status, ev.duration_ms,
             });
         },
-        .request_failed => |ev| {
+        .requestFailed => |ev| {
             std.debug.print("[Client] Request failed: {s}\n", .{@errorName(ev.err)});
         },
     }
@@ -63,7 +63,7 @@ On the server, events report connection acceptance, request routing, middleware 
 ```zig
 fn onServerEvent(event: httpx.server.ServerEvent) void {
     switch (event) {
-        .connection_accepted => |ev| {
+        .connectionAccepted => |ev| {
             std.debug.print("[Server] Accepted TCP from {s}\n", .{ev.remote_addr});
         },
         .request_routed => |ev| {
@@ -71,7 +71,7 @@ fn onServerEvent(event: httpx.server.ServerEvent) void {
                 ev.method, ev.path, ev.status, ev.elapsed_us,
             });
         },
-        .connection_closed => |ev| {
+        .connectionClosed => |ev| {
             std.debug.print("[Server] Closed connection from {s}\n", .{ev.remote_addr});
         },
     }

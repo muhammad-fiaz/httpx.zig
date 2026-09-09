@@ -4,14 +4,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 pub const Rule = struct {
-    path_prefix: []const u8,
+    pathPrefix: []const u8,
     allow: bool,
 };
 
 pub const UserAgentGroup = struct {
-    user_agent: []const u8,
+    userAgent: []const u8,
     rules: []Rule = &.{},
-    crawl_delay_s: ?f32 = null,
+    crawlDelay: ?f32 = null,
 };
 
 pub const RobotsFile = struct {
@@ -27,14 +27,14 @@ pub const RobotsFile = struct {
         self.allocator.free(self.sitemaps);
     }
 
-    pub fn isAllowed(self: *const RobotsFile, user_agent: []const u8, path: []const u8) bool {
+    pub fn isAllowed(self: *const RobotsFile, userAgent: []const u8, path: []const u8) bool {
         var best_group: ?*const UserAgentGroup = null;
         var wildcard_group: ?*const UserAgentGroup = null;
 
         for (self.groups) |*g| {
-            if (std.mem.eql(u8, g.user_agent, "*")) {
+            if (std.mem.eql(u8, g.userAgent, "*")) {
                 wildcard_group = g;
-            } else if (std.ascii.indexOfIgnoreCase(user_agent, g.user_agent) != null) {
+            } else if (std.ascii.indexOfIgnoreCase(userAgent, g.userAgent) != null) {
                 best_group = g;
                 break;
             }
@@ -46,9 +46,9 @@ pub const RobotsFile = struct {
         var allowed = true;
 
         for (group.rules) |r| {
-            if (matchPath(r.path_prefix, path)) {
-                if (r.path_prefix.len >= longest_match_len) {
-                    longest_match_len = r.path_prefix.len;
+            if (matchPath(r.pathPrefix, path)) {
+                if (r.pathPrefix.len >= longest_match_len) {
+                    longest_match_len = r.pathPrefix.len;
                     allowed = r.allow;
                 }
             }
@@ -93,9 +93,9 @@ pub fn parse(allocator: Allocator, src: []const u8) !RobotsFile {
             if (current_rules.items.len > 0 and current_agents.items.len > 0) {
                 for (current_agents.items) |ua| {
                     try groups.append(allocator, .{
-                        .user_agent = ua,
+                        .userAgent = ua,
                         .rules = try current_rules.toOwnedSlice(allocator),
-                        .crawl_delay_s = current_delay,
+                        .crawlDelay = current_delay,
                     });
                 }
                 current_agents.clearRetainingCapacity();
@@ -104,12 +104,12 @@ pub fn parse(allocator: Allocator, src: []const u8) !RobotsFile {
             try current_agents.append(allocator, val);
         } else if (std.ascii.eqlIgnoreCase(key, "disallow")) {
             if (val.len == 0) {
-                try current_rules.append(allocator, .{ .path_prefix = "/", .allow = true });
+                try current_rules.append(allocator, .{ .pathPrefix = "/", .allow = true });
             } else {
-                try current_rules.append(allocator, .{ .path_prefix = val, .allow = false });
+                try current_rules.append(allocator, .{ .pathPrefix = val, .allow = false });
             }
         } else if (std.ascii.eqlIgnoreCase(key, "allow")) {
-            try current_rules.append(allocator, .{ .path_prefix = val, .allow = true });
+            try current_rules.append(allocator, .{ .pathPrefix = val, .allow = true });
         } else if (std.ascii.eqlIgnoreCase(key, "crawl-delay")) {
             if (std.fmt.parseFloat(f32, val)) |d| current_delay = d else |_| {}
         } else if (std.ascii.eqlIgnoreCase(key, "sitemap")) {
@@ -120,9 +120,9 @@ pub fn parse(allocator: Allocator, src: []const u8) !RobotsFile {
     if (current_agents.items.len > 0) {
         for (current_agents.items) |ua| {
             try groups.append(allocator, .{
-                .user_agent = ua,
+                .userAgent = ua,
                 .rules = try current_rules.toOwnedSlice(allocator),
-                .crawl_delay_s = current_delay,
+                .crawlDelay = current_delay,
             });
         }
     }

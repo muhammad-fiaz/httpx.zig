@@ -73,7 +73,7 @@ pub const ClientHello = struct {
     cipher_suites: []const CipherSuite,
     key_share_entries: []const KeyShareEntry,
     signature_algorithms: []const SignatureScheme,
-    alpn_protocols: []const []const u8,
+    alpnProtocols: []const []const u8,
     server_name: ?[]const u8 = null,
     /// PSK identities (empty for initial handshake).
     psk_identities: []const []const u8 = &.{},
@@ -167,10 +167,10 @@ pub const ClientHello = struct {
         }
 
         // ALPN
-        if (self.alpn_protocols.len > 0) {
+        if (self.alpnProtocols.len > 0) {
             var alpn_body = std.ArrayList(u8).empty;
             defer alpn_body.deinit(allocator);
-            for (self.alpn_protocols) |proto| {
+            for (self.alpnProtocols) |proto| {
                 try alpn_body.append(allocator, @intCast(proto.len));
                 try alpn_body.appendSlice(allocator, proto);
             }
@@ -461,7 +461,7 @@ test "ClientHello encode produces valid frame" {
             .key_exchange = &[_]u8{0xBB} ** 32,
         }},
         .signature_algorithms = &.{.ecdsa_secp256r1_sha256},
-        .alpn_protocols = &.{"h2"},
+        .alpnProtocols = &.{"h2"},
     };
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

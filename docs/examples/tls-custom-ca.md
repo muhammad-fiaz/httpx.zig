@@ -1,23 +1,22 @@
 # TLS Custom CA Certificate
 
-Demonstrates using custom CA certificates with self-signed certificates for development and testing.
+Demonstrates TLS with self-signed certificates for development and testing,
+using `httpx.tls.Listener` with PEM identity material.
 
 ## Features Demonstrated
 
-- Self-signed certificate generation
-- `@embedFile` for embedding certificates
-- `verify_ssl=false` for development mode
-- Custom CA certificate workflow
+- Self-signed certificate PEM blocks
+- `httpx.tls.Listener` with `defaultIdentity`
+- Development-only verification bypass via `.tls = .{ .verify = .none }`
 
 ## Demo Program
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
-const tls = httpx.tls;
 
-fn handler(ctx: *httpx.Context) anyerror!httpx.Response {
-    return ctx.text("Served with custom CA cert");
+fn handler(_: httpx.tls.Request) anyerror!httpx.tls.Response {
+    return .{ .status = 200, .body = "Served with custom CA cert" };
 }
 
 pub fn main() !void {
@@ -26,57 +25,39 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Load CA cert (self-signed, used as both server cert and CA)
-    const ca_pem = @embedFile("certs/server_ec.crt");
-    std.debug.print("Loaded CA cert: {d} bytes\n", .{ca_pem.len});
-
-    // Start local TLS server with self-signed cert
-    var server = try httpx.Server.init(allocator, io, .{
-        .host = "127.0.0.1",
+    // Start a local TLS listener with a self-signed identity.
+    var listener = try httpx.tls.Listener.init(allocator, io, .{
         .port = 0,
-        .tls_enabled = true,
-        .tls_cert_path = "examples/certs/server_ec.crt",
-        .tls_key_path = "examples/certs/server_ec.key",
-        .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
-        .http2 = true,
-        .http3 = true,
-        .keep_alive = true,
+        .defaultIdentity = .{
+            .certChainPem = @embedFile("cert.pem"),
+            .privateKeyPem = @embedFile("key.pem"),
+        },
     });
-    defer server.deinit();
-    try server.get("/secure", handler);
+    defer listener.deinit();
 
-    const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
-    const port = server.config.port;
+    const port = listener.localPort();
 
-    // Connect with verify_ssl=false (trust the self-signed cert)
-    const config = tls.TlsConfig.insecureWithH2(allocator);
-    var sock = try httpx.Socket.create();
-    defer sock.close();
-    try sock.connectHost("127.0.0.1", port);
+    // Development-only client bypass for the self-signed chain.
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
 
-    var session = tls.TlsSession.init(config);
-    session.socket = &sock;
-    try session.handshake("127.0.0.1");
-
-    const req = "GET /secure HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    try session.writeAll(req);
-
-    var buf: [4096]u8 = undefined;
-    const n = try session.read(&buf);
-    std.debug.print("Response: {d} bytes\n", .{n});
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/secure", .{port});
+    var res = try client.get(url, .{ .tls = .{ .verify = .none } });
+    defer res.deinit();
+    std.debug.print("Response: {d} bytes\n", .{res.body.len});
 }
 ```
 
 ## Run
 
 ```bash
-zig build run-all-tls_custom_ca
+zig build run-tls-mtls
 ```
 
 ## Production CA Workflow
 
 1. Generate CA: `openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 365 -subj '/CN=MyCA'`
 2. Embed in Zig: `const ca_pem = @embedFile("ca.crt");`
-3. Pass to TLS config for certificate verification
+3. Serve via `httpx.tls.Listener` with `defaultIdentity`, and verify with a
+   populated CA bundle (never `.verify = .none` in production).

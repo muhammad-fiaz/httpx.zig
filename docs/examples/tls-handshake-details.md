@@ -27,46 +27,18 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Start local TLS server
-    var server = try httpx.Server.init(allocator, io, .{
+    // Start a local TLS listener with a self-signed identity.
+    var listener = try httpx.tls.Listener.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .tls_enabled = true,
-        .tls_cert_path = "examples/certs/server_ec.crt",
-        .tls_key_path = "examples/certs/server_ec.key",
-        .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
-        .http2 = true,
-        .http3 = true,
-        .keep_alive = true,
+        .defaultIdentity = .{
+            .certChainPem = @embedFile("cert.pem"),
+            .privateKeyPem = @embedFile("key.pem"),
+        },
     });
-    defer server.deinit();
-    try server.get("/hello", handler);
-
-    const server_thread = try server.listenInBackground();
-    defer server_thread.join();
-    defer server.stop();
-    const port = server.config.port;
-
-    // TLS handshake with details
-    const config = tls.TlsConfig.insecureWithH2(allocator);
-    var sock = try httpx.Socket.create();
-    defer sock.close();
-    try sock.connectHost("127.0.0.1", port);
-
-    var session = tls.TlsSession.init(config);
-    session.socket = &sock;
-    try session.handshake("127.0.0.1");
-
-    std.debug.print("Protocol: {s}\n", .{session.negotiatedProtocol() orelse "none"});
-    std.debug.print("HTTP/2:   {}\n", .{session.isHttp2()});
-
-    // Send HTTP request
-    const req = "GET /hello HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-    try session.writeAll(req);
-
-    var buf: [4096]u8 = undefined;
-    const n = try session.read(&buf);
-    std.debug.print("Response: {d} bytes\n", .{n});
+    defer listener.deinit();
+    const port = listener.localPort();
+    std.debug.print("TLS listening on {d} (TLS 1.2/1.3, ALPN h2 + http/1.1)\n", .{port});
 }
 ```
 

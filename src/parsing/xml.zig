@@ -19,14 +19,14 @@ pub const ParseError = error{
 
 pub const Options = struct {
     lenient: bool = true,
-    max_nodes: u32 = dom.MAX_NODES,
-    max_depth: u32 = dom.MAX_DEPTH,
-    max_attrs: u32 = 256,
-    max_attr_value: usize = 8192,
+    maxNodes: u32 = dom.MAX_NODES,
+    maxDepth: u32 = dom.MAX_DEPTH,
+    maxAttrs: u32 = 256,
+    maxAttrValue: usize = 8192,
 };
 
 pub fn parse(arena: Allocator, xml_src: []const u8, opts: Options) ParseError!Tree {
-    var tree = try Tree.initCapacity(arena, @min(xml_src.len / 12 + 4, opts.max_nodes));
+    var tree = try Tree.initCapacity(arena, @min(xml_src.len / 12 + 4, opts.maxNodes));
     errdefer tree.deinit(arena);
     const root = try tree.append(arena, .{ .kind = .document });
     var p = Parser{
@@ -142,7 +142,7 @@ const Parser = struct {
     }
 
     fn consumeStartTag(self: *Parser) ParseError!void {
-        if (self.open_stack.items.len >= self.opts.max_depth) return error.TooDeep;
+        if (self.open_stack.items.len >= self.opts.maxDepth) return error.TooDeep;
 
         const tag_start = self.pos;
         while (self.pos < self.src.len and !isStop(self.src[self.pos])) : (self.pos += 1) {}
@@ -156,19 +156,19 @@ const Parser = struct {
         var attrs: std.ArrayList(Attribute) = .empty;
         defer attrs.deinit(self.arena);
         var self_closing = false;
-        self.pos = try parseAttrs(self.arena, self.src, self.pos, &attrs, &self_closing, self.opts.max_attr_value);
-        if (attrs.items.len > self.opts.max_attrs) return error.TooManyAttributes;
+        self.pos = try parseAttrs(self.arena, self.src, self.pos, &attrs, &self_closing, self.opts.maxAttrValue);
+        if (attrs.items.len > self.opts.maxAttrs) return error.TooManyAttributes;
         const owned = try attrs.toOwnedSlice(self.arena);
 
-        const node_idx = try self.tree.append(self.arena, .{
+        const nodeIdx = try self.tree.append(self.arena, .{
             .kind = .element,
             .tag = tag,
             .attrs = owned,
         });
-        self.tree.appendChild(self.cur(), node_idx);
+        self.tree.appendChild(self.cur(), nodeIdx);
 
         if (!self_closing) {
-            try self.open_stack.append(self.arena, node_idx);
+            try self.open_stack.append(self.arena, nodeIdx);
         }
     }
 };

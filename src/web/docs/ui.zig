@@ -3,13 +3,13 @@
 //! All vendor assets are embedded (see `assets.zig`) and served locally —
 //! never from a CDN. Mounting registers:
 //!
-//!   GET {openapi_route}              -> OpenAPI 3.1 JSON of current routes
-//!   GET {swagger_route}              -> Swagger UI page
-//!   GET {swagger_route}/<asset>      -> Swagger UI bundle files
-//!   GET {redoc_route}                -> ReDoc page
-//!   GET {redoc_route}/<asset>        -> ReDoc bundle
-//!   GET {scalar_route}               -> Scalar page
-//!   GET {scalar_route}/standalone.js -> Scalar bundle
+//!   GET {openapiRoute}              -> OpenAPI 3.1 JSON of current routes
+//!   GET {swaggerRoute}              -> Swagger UI page
+//!   GET {swaggerRoute}/<asset>      -> Swagger UI bundle files
+//!   GET {redocRoute}                -> ReDoc page
+//!   GET {redocRoute}/<asset>        -> ReDoc bundle
+//!   GET {scalarRoute}               -> Scalar page
+//!   GET {scalarRoute}/standalone.js -> Scalar bundle
 //!
 //! Route conflicts are surfaced as Router errors, never silently overwritten.
 //!
@@ -47,7 +47,7 @@ pub const ScalarConfig = struct {
 pub const GraphiQLConfig = struct {
     enabled: bool = true,
     route: []const u8 = "/graphiql",
-    graphql_endpoint: []const u8 = "/graphql",
+    graphqlEndpoint: []const u8 = "/graphql",
     title: []const u8 = "GraphiQL IDE",
 };
 
@@ -72,33 +72,33 @@ pub const Config = struct {
 const DocsState = struct {
     allocator: Allocator,
     spec: ?[]u8 = null,
-    openapi_route: []u8,
-    swagger_route: ?[]u8 = null,
-    redoc_route: ?[]u8 = null,
-    scalar_route: ?[]u8 = null,
-    graphiql_route: ?[]u8 = null,
-    graphql_endpoint: ?[]u8 = null,
+    openapiRoute: []u8,
+    swaggerRoute: ?[]u8 = null,
+    redocRoute: ?[]u8 = null,
+    scalarRoute: ?[]u8 = null,
+    graphiqlRoute: ?[]u8 = null,
+    graphqlEndpoint: ?[]u8 = null,
     title: []u8 = &.{},
     router: *const Router,
     info: openapi.Info,
     /// Pages are rendered once at mount; handlers hand out borrowed slices
     /// so request handling performs zero dynamic allocation.
-    swagger_page: ?[]u8 = null,
-    redoc_page: ?[]u8 = null,
-    scalar_page: ?[]u8 = null,
-    graphiql_page: ?[]u8 = null,
+    swaggerPage: ?[]u8 = null,
+    redocPage: ?[]u8 = null,
+    scalarPage: ?[]u8 = null,
+    graphiqlPage: ?[]u8 = null,
 
     fn deinitPages(self: *DocsState) void {
         const a = self.allocator;
-        if (self.swagger_page) |p| a.free(p);
-        if (self.redoc_page) |p| a.free(p);
-        if (self.scalar_page) |p| a.free(p);
-        if (self.graphiql_page) |p| a.free(p);
+        if (self.swaggerPage) |p| a.free(p);
+        if (self.redocPage) |p| a.free(p);
+        if (self.scalarPage) |p| a.free(p);
+        if (self.graphiqlPage) |p| a.free(p);
         if (self.spec) |s| a.free(s);
-        self.swagger_page = null;
-        self.redoc_page = null;
-        self.scalar_page = null;
-        self.graphiql_page = null;
+        self.swaggerPage = null;
+        self.redocPage = null;
+        self.scalarPage = null;
+        self.graphiqlPage = null;
         self.spec = null;
     }
 };
@@ -127,14 +127,14 @@ pub fn mount(
     if (cfg.scalar.enabled and router.hasConflict(.GET, cfg.scalar.route)) return error.DuplicateRoute;
     if (cfg.graphiql.enabled and router.hasConflict(.GET, cfg.graphiql.route)) return error.DuplicateRoute;
     if (cfg.swagger.enabled) {
-        for (assets.swagger_files) |f| {
+        for (assets.swaggerFiles) |f| {
             const full = try joinRoute(allocator, cfg.swagger.route, f.name);
             defer allocator.free(full);
             if (router.hasConflict(.GET, full)) return error.DuplicateRoute;
         }
     }
     if (cfg.redoc.enabled) {
-        for (assets.redoc_files) |f| {
+        for (assets.redocFiles) |f| {
             const full = try joinRoute(allocator, cfg.redoc.route, f.name);
             defer allocator.free(full);
             if (router.hasConflict(.GET, full)) return error.DuplicateRoute;
@@ -146,7 +146,7 @@ pub fn mount(
         if (router.hasConflict(.GET, full)) return error.DuplicateRoute;
     }
     if (cfg.graphiql.enabled) {
-        for (assets.graphiql_files) |f| {
+        for (assets.graphiqlFiles) |f| {
             const full = try joinRoute(allocator, cfg.graphiql.route, f.name);
             defer allocator.free(full);
             if (router.hasConflict(.GET, full)) return error.DuplicateRoute;
@@ -157,80 +157,80 @@ pub fn mount(
     errdefer allocator.destroy(st);
     st.* = .{
         .allocator = allocator,
-        .openapi_route = &.{},
+        .openapiRoute = &.{},
         .router = router,
         .info = actual_info,
     };
     errdefer {
-        allocator.free(st.openapi_route);
-        if (st.swagger_route) |p| allocator.free(p);
-        if (st.redoc_route) |p| allocator.free(p);
-        if (st.scalar_route) |p| allocator.free(p);
-        if (st.graphiql_route) |p| allocator.free(p);
-        if (st.graphql_endpoint) |p| allocator.free(p);
+        allocator.free(st.openapiRoute);
+        if (st.swaggerRoute) |p| allocator.free(p);
+        if (st.redocRoute) |p| allocator.free(p);
+        if (st.scalarRoute) |p| allocator.free(p);
+        if (st.graphiqlRoute) |p| allocator.free(p);
+        if (st.graphqlEndpoint) |p| allocator.free(p);
         allocator.free(st.title);
         st.deinitPages();
     }
 
-    st.openapi_route = try normalizeRoute(allocator, cfg.openapi.route);
+    st.openapiRoute = try normalizeRoute(allocator, cfg.openapi.route);
     st.title = try allocator.dupe(u8, cfg.title);
     if (cfg.swagger.enabled and cfg.swagger.route.len > 0)
-        st.swagger_route = try normalizeRoute(allocator, cfg.swagger.route);
+        st.swaggerRoute = try normalizeRoute(allocator, cfg.swagger.route);
     if (cfg.redoc.enabled and cfg.redoc.route.len > 0)
-        st.redoc_route = try normalizeRoute(allocator, cfg.redoc.route);
+        st.redocRoute = try normalizeRoute(allocator, cfg.redoc.route);
     if (cfg.scalar.enabled and cfg.scalar.route.len > 0)
-        st.scalar_route = try normalizeRoute(allocator, cfg.scalar.route);
+        st.scalarRoute = try normalizeRoute(allocator, cfg.scalar.route);
     if (cfg.graphiql.enabled and cfg.graphiql.route.len > 0) {
-        st.graphiql_route = try normalizeRoute(allocator, cfg.graphiql.route);
-        st.graphql_endpoint = try normalizeRoute(allocator, cfg.graphiql.graphql_endpoint);
+        st.graphiqlRoute = try normalizeRoute(allocator, cfg.graphiql.route);
+        st.graphqlEndpoint = try normalizeRoute(allocator, cfg.graphiql.graphqlEndpoint);
     }
 
     st.spec = try openapi.generate(router, actual_info);
 
     // Pre-render enabled UI pages once; handlers only borrow.
-    if (st.swagger_route) |route| {
-        st.swagger_page = try renderSwaggerPage(allocator, cfg.swagger.title, st.openapi_route, route);
+    if (st.swaggerRoute) |route| {
+        st.swaggerPage = try renderSwaggerPage(allocator, cfg.swagger.title, st.openapiRoute, route);
     }
-    if (st.redoc_route) |route| {
+    if (st.redocRoute) |route| {
         const script = try joinRoute(allocator, route, "redoc.standalone.js");
-        st.redoc_page = try renderRedocPage(allocator, cfg.redoc.title, st.openapi_route, script);
+        st.redocPage = try renderRedocPage(allocator, cfg.redoc.title, st.openapiRoute, script);
     }
-    if (st.scalar_route) |route| {
+    if (st.scalarRoute) |route| {
         const script = try joinRoute(allocator, route, "standalone.js");
-        st.scalar_page = try renderScalarPage(allocator, cfg.scalar.title, st.openapi_route, script);
+        st.scalarPage = try renderScalarPage(allocator, cfg.scalar.title, st.openapiRoute, script);
     }
-    if (st.graphiql_route) |route| {
-        st.graphiql_page = try renderGraphiqlPage(allocator, cfg.graphiql.title, st.graphql_endpoint.?, route);
+    if (st.graphiqlRoute) |route| {
+        st.graphiqlPage = try renderGraphiqlPage(allocator, cfg.graphiql.title, st.graphqlEndpoint.?, route);
     }
 
-    if (cfg.openapi.enabled and st.openapi_route.len > 0) {
-        try router.getWithData(st.openapi_route, openApiHandler, st);
+    if (cfg.openapi.enabled and st.openapiRoute.len > 0) {
+        try router.getWithData(st.openapiRoute, openApiHandler, st);
     }
-    if (st.swagger_route) |route| {
+    if (st.swaggerRoute) |route| {
         try router.getWithData(route, swaggerPageHandler, st);
-        for (assets.swagger_files) |f| {
+        for (assets.swaggerFiles) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
             try router.get(full, swaggerAssetHandler);
         }
     }
-    if (st.redoc_route) |route| {
+    if (st.redocRoute) |route| {
         try router.getWithData(route, redocPageHandler, st);
-        for (assets.redoc_files) |f| {
+        for (assets.redocFiles) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
             try router.get(full, redocAssetHandler);
         }
     }
-    if (st.scalar_route) |route| {
+    if (st.scalarRoute) |route| {
         try router.getWithData(route, scalarPageHandler, st);
         const full = try joinRoute(allocator, route, "standalone.js");
         defer allocator.free(full);
         try router.get(full, scalarAssetHandler);
     }
-    if (st.graphiql_route) |route| {
+    if (st.graphiqlRoute) |route| {
         try router.getWithData(route, graphiqlPageHandler, st);
-        for (assets.graphiql_files) |f| {
+        for (assets.graphiqlFiles) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
             try router.get(full, graphiqlAssetHandler);
@@ -243,12 +243,12 @@ pub fn mount(
 pub fn unmount() void {
     if (g_state) |st| {
         const a = st.allocator;
-        a.free(st.openapi_route);
-        if (st.swagger_route) |p| a.free(p);
-        if (st.redoc_route) |p| a.free(p);
-        if (st.scalar_route) |p| a.free(p);
-        if (st.graphiql_route) |p| a.free(p);
-        if (st.graphql_endpoint) |p| a.free(p);
+        a.free(st.openapiRoute);
+        if (st.swaggerRoute) |p| a.free(p);
+        if (st.redocRoute) |p| a.free(p);
+        if (st.scalarRoute) |p| a.free(p);
+        if (st.graphiqlRoute) |p| a.free(p);
+        if (st.graphqlEndpoint) |p| a.free(p);
         a.free(st.title);
         st.deinitPages();
         a.destroy(st);
@@ -270,7 +270,7 @@ fn joinRoute(allocator: Allocator, base: []const u8, name: []const u8) Allocator
 }
 
 fn requireState(ctx: *Context) *DocsState {
-    return @ptrCast(@alignCast(ctx.user_data orelse unreachable));
+    return @ptrCast(@alignCast(ctx.userData orelse unreachable));
 }
 
 fn openApiHandler(ctx: *Context) anyerror!Response {
@@ -279,31 +279,31 @@ fn openApiHandler(ctx: *Context) anyerror!Response {
         if (st.spec) |old| st.allocator.free(old);
         st.spec = fresh_spec;
     } else |_| {}
-    return .{ .status = 200, .content_type = "application/json; charset=utf-8", .body = st.spec.? };
+    return .{ .status = 200, .contentType = "application/json; charset=utf-8", .body = st.spec.? };
 }
 
 fn swaggerPageHandler(ctx: *Context) anyerror!Response {
     const st = requireState(ctx);
-    return .{ .status = 200, .content_type = "text/html; charset=utf-8", .body = st.swagger_page.? };
+    return .{ .status = 200, .contentType = "text/html; charset=utf-8", .body = st.swaggerPage.? };
 }
 
 fn redocPageHandler(ctx: *Context) anyerror!Response {
     const st = requireState(ctx);
-    return .{ .status = 200, .content_type = "text/html; charset=utf-8", .body = st.redoc_page.? };
+    return .{ .status = 200, .contentType = "text/html; charset=utf-8", .body = st.redocPage.? };
 }
 
 fn scalarPageHandler(ctx: *Context) anyerror!Response {
     const st = requireState(ctx);
-    return .{ .status = 200, .content_type = "text/html; charset=utf-8", .body = st.scalar_page.? };
+    return .{ .status = 200, .contentType = "text/html; charset=utf-8", .body = st.scalarPage.? };
 }
 
 fn graphiqlPageHandler(ctx: *Context) anyerror!Response {
     const st = requireState(ctx);
-    return .{ .status = 200, .content_type = "text/html; charset=utf-8", .body = st.graphiql_page.? };
+    return .{ .status = 200, .contentType = "text/html; charset=utf-8", .body = st.graphiqlPage.? };
 }
 
 fn swaggerAssetHandler(ctx: *Context) anyerror!Response {
-    return serveAsset(ctx, .swagger_ui, ctx.path);
+    return serveAsset(ctx, .swaggerUi, ctx.path);
 }
 
 fn redocAssetHandler(ctx: *Context) anyerror!Response {
@@ -325,9 +325,9 @@ fn serveAsset(ctx: *Context, kind: assets.Kind, path: []const u8) anyerror!Respo
         break :blk path[idx + 1 ..];
     };
     const f = assets.find(kind, name) orelse
-        return .{ .status = 404, .content_type = "text/plain; charset=utf-8", .body = "not found" };
+        return .{ .status = 404, .contentType = "text/plain; charset=utf-8", .body = "not found" };
     _ = ctx;
-    return .{ .status = 200, .content_type = f.content_type, .body = f.data };
+    return .{ .status = 200, .contentType = f.contentType, .body = f.data };
 }
 
 // page rendering
@@ -345,7 +345,7 @@ fn escapeInto(w: anytype, s: []const u8) !void {
     }
 }
 
-fn renderSwaggerPage(a: Allocator, title: []const u8, spec_url: []const u8, swagger_route: []const u8) ![]u8 {
+fn renderSwaggerPage(a: Allocator, title: []const u8, spec_url: []const u8, swaggerRoute: []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
     const w = &out.writer;
@@ -353,17 +353,17 @@ fn renderSwaggerPage(a: Allocator, title: []const u8, spec_url: []const u8, swag
     try w.writeAll("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<title>");
     try escapeInto(w, title);
     try w.writeAll("</title>\n<link rel=\"stylesheet\" href=\"");
-    try escapeInto(w, swagger_route);
+    try escapeInto(w, swaggerRoute);
     try w.writeAll("/swagger-ui.css\">\n<link rel=\"icon\" type=\"image/png\" href=\"");
-    try escapeInto(w, swagger_route);
+    try escapeInto(w, swaggerRoute);
     try w.writeAll("/favicon-32x32.png\">\n<style>body { margin: 0; padding: 0; }</style>\n</head>\n<body>\n<div id=\"swagger-ui\"></div>\n<script src=\"");
-    try escapeInto(w, swagger_route);
+    try escapeInto(w, swaggerRoute);
     try w.writeAll("/swagger-ui-bundle.js\"></script>\n<script src=\"");
-    try escapeInto(w, swagger_route);
+    try escapeInto(w, swaggerRoute);
     try w.writeAll("/swagger-ui-standalone-preset.js\"></script>\n<script>\nwindow.onload = function () {\n  const ui = SwaggerUIBundle({\n    url: '");
     try escapeInto(w, spec_url);
     try w.writeAll("',\n    dom_id: '#swagger-ui',\n    deepLinking: true,\n    presets: [\n      SwaggerUIBundle.presets.apis,\n      SwaggerUIStandalonePreset\n    ],\n    plugins: [\n      SwaggerUIBundle.plugins.DownloadUrl\n    ],\n    layout: 'StandaloneLayout',\n    oauth2RedirectUrl: window.location.origin + '");
-    try escapeInto(w, swagger_route);
+    try escapeInto(w, swaggerRoute);
     try w.writeAll("/oauth2-redirect.html'\n  });\n  window.ui = ui;\n};\n</script>\n</body>\n</html>\n");
     return out.toOwnedSlice();
 }
@@ -400,7 +400,7 @@ fn renderScalarPage(a: Allocator, title: []const u8, spec_url: []const u8, scrip
     return out.toOwnedSlice();
 }
 
-fn renderGraphiqlPage(a: Allocator, title: []const u8, graphql_endpoint: []const u8, graphiql_route: []const u8) ![]u8 {
+fn renderGraphiqlPage(a: Allocator, title: []const u8, graphqlEndpoint: []const u8, graphiqlRoute: []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
     const w = &out.writer;
@@ -408,13 +408,13 @@ fn renderGraphiqlPage(a: Allocator, title: []const u8, graphql_endpoint: []const
     try w.writeAll("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>");
     try escapeInto(w, title);
     try w.writeAll("</title>\n<link rel=\"stylesheet\" href=\"");
-    try escapeInto(w, graphiql_route);
+    try escapeInto(w, graphiqlRoute);
     try w.writeAll("/graphiql.css\">\n<style>\n  html, body, #graphiql {\n    height: 100%;\n    margin: 0;\n    width: 100%;\n    overflow: hidden;\n  }\n</style>\n</head>\n<body>\n<div id=\"graphiql\"></div>\n<script>\n  window.__GRAPHIQL_BASE_PATH__ = '");
-    try escapeInto(w, graphiql_route);
+    try escapeInto(w, graphiqlRoute);
     try w.writeAll("';\n</script>\n<script src=\"");
-    try escapeInto(w, graphiql_route);
+    try escapeInto(w, graphiqlRoute);
     try w.writeAll("/graphiql.js\"></script>\n<script>\n  window.onload = function() {\n    if (window.renderGraphiQL) {\n      window.renderGraphiQL(document.getElementById('graphiql'), {\n        endpoint: '");
-    try escapeInto(w, graphql_endpoint);
+    try escapeInto(w, graphqlEndpoint);
     try w.writeAll("'\n      });\n    }\n  };\n</script>\n</body>\n</html>\n");
     return out.toOwnedSlice();
 }
@@ -452,7 +452,7 @@ test "mount registers spec, pages, and local assets" {
 
     // Swagger page references only local assets.
     const page = (try invoke(&router, .GET, "/docs", a)).?;
-    try std.testing.expectEqualStrings("text/html; charset=utf-8", page.content_type.?);
+    try std.testing.expectEqualStrings("text/html; charset=utf-8", page.contentType.?);
     try std.testing.expect(std.mem.indexOf(u8, page.body, "swagger-ui-bundle.js") != null);
     try std.testing.expect(std.mem.indexOf(u8, page.body, "cdn") == null);
 
@@ -463,23 +463,23 @@ test "mount registers spec, pages, and local assets" {
 
     // Bundle served from embedded bytes.
     const bundle = (try invoke(&router, .GET, "/docs/swagger-ui-bundle.js", a)).?;
-    try std.testing.expect(bundle.body.len == assets.swagger_ui_bundle_js.len);
+    try std.testing.expect(bundle.body.len == assets.swaggerUiBundleJs.len);
     try std.testing.expect(std.mem.startsWith(u8, bundle.body, "/*!"));
 
     // Unknown asset name does not fall through to any catch-all route.
     try std.testing.expect((try invoke(&router, .GET, "/docs/nonexistent.js", a)) == null);
 
     // ReDoc page + bundle.
-    const redoc_page = (try invoke(&router, .GET, "/redoc", a)).?;
-    try std.testing.expect(std.mem.indexOf(u8, redoc_page.body, "redoc.standalone.js") != null);
+    const redocPage = (try invoke(&router, .GET, "/redoc", a)).?;
+    try std.testing.expect(std.mem.indexOf(u8, redocPage.body, "redoc.standalone.js") != null);
     const redoc_js = (try invoke(&router, .GET, "/redoc/redoc.standalone.js", a)).?;
-    try std.testing.expect(redoc_js.body.len == assets.redoc_standalone_js.len);
+    try std.testing.expect(redoc_js.body.len == assets.redocStandaloneJs.len);
 
     // Scalar page + bundle (enabled by default).
-    const scalar_page = (try invoke(&router, .GET, "/scalar", a)).?;
-    try std.testing.expect(std.mem.indexOf(u8, scalar_page.body, "id=\"api-reference\"") != null);
+    const scalarPage = (try invoke(&router, .GET, "/scalar", a)).?;
+    try std.testing.expect(std.mem.indexOf(u8, scalarPage.body, "id=\"api-reference\"") != null);
     const scalar_js = (try invoke(&router, .GET, "/scalar/standalone.js", a)).?;
-    try std.testing.expectEqual(assets.scalar_standalone_js.len, scalar_js.body.len);
+    try std.testing.expectEqual(assets.scalarStandaloneJs.len, scalar_js.body.len);
 }
 
 test "scalar opt-in mounts its page and bundle" {
@@ -494,7 +494,7 @@ test "scalar opt-in mounts its page and bundle" {
     const page = (try invoke(&router, .GET, "/scalar", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, page.body, "id=\"api-reference\"") != null);
     const js = (try invoke(&router, .GET, "/scalar/standalone.js", a)).?;
-    try std.testing.expectEqual(assets.scalar_standalone_js.len, js.body.len);
+    try std.testing.expectEqual(assets.scalarStandaloneJs.len, js.body.len);
 
     const res = (try invoke(&router, .GET, "/openapi.json", a)).?;
     const parsed = try std.json.parseFromSlice(std.json.Value, a, res.body, .{});
@@ -540,7 +540,7 @@ test "graphiql opt-in mounts its page and all worker assets" {
     defer router.deinit();
     try router.get("/graphql", helloHandler);
 
-    try mount(a, &router, .{ .graphiql = .{ .enabled = true, .graphql_endpoint = "/graphql" } }, null);
+    try mount(a, &router, .{ .graphiql = .{ .enabled = true, .graphqlEndpoint = "/graphql" } }, null);
     defer unmount();
 
     const page = (try invoke(&router, .GET, "/graphiql", a)).?;
@@ -549,11 +549,26 @@ test "graphiql opt-in mounts its page and all worker assets" {
     try std.testing.expect(std.mem.indexOf(u8, page.body, "graphiql.css") != null);
 
     const js = (try invoke(&router, .GET, "/graphiql/graphiql.js", a)).?;
-    try std.testing.expectEqual(assets.graphiql_js.len, js.body.len);
+    try std.testing.expectEqual(assets.graphiqlJs.len, js.body.len);
 
     const css = (try invoke(&router, .GET, "/graphiql/graphiql.css", a)).?;
-    try std.testing.expectEqual(assets.graphiql_css.len, css.body.len);
+    try std.testing.expectEqual(assets.graphiqlCss.len, css.body.len);
 
     const worker = (try invoke(&router, .GET, "/graphiql/graphql.worker.js", a)).?;
-    try std.testing.expectEqual(assets.graphiql_graphql_worker_js.len, worker.body.len);
+    try std.testing.expectEqual(assets.graphiqlGraphqlWorkerJs.len, worker.body.len);
+}
+
+test "disabling swagger and redoc leaves scalar and spec" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+    try router.get("/ping", helloHandler);
+
+    try mount(a, &router, .{ .swagger = .{ .enabled = false }, .redoc = .{ .enabled = false } }, null);
+    defer unmount();
+
+    try std.testing.expect((try invoke(&router, .GET, "/docs", a)) == null);
+    try std.testing.expect((try invoke(&router, .GET, "/redoc", a)) == null);
+    try std.testing.expect((try invoke(&router, .GET, "/scalar", a)) != null);
+    try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) != null);
 }

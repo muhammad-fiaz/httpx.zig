@@ -123,7 +123,6 @@ httpx.zig is built with production-readiness as a core goal. It is still a relat
 - For **ZON file format** support, check out **[zon.zig](https://github.com/muhammad-fiaz/zon.zig)**.
 - For **spinners/loading/progress bar** support, check out **[loaders.zig](https://github.com/muhammad-fiaz/loaders.zig)**.
 - For **MCP** support, check out **[mcp.zig](https://github.com/muhammad-fiaz/mcp.zig)**.
-- For **args parsing** support, check out **[args.zig](https://github.com/muhammad-fiaz/args.zig)**.
 - For **HTTP client/server** support, check out **[httpx.zig](https://github.com/muhammad-fiaz/httpx.zig)**.
 - For **API framework** support, check out **[api.zig](https://github.com/muhammad-fiaz/api.zig)**.
 - For **web framework** support, check out **[zix](https://github.com/muhammad-fiaz/zix)**.
@@ -176,52 +175,29 @@ All examples are runnable from the repo root:
 zig build run-all-simple_get
 ```
 
-Available examples (see the `/examples` folder):
+Runnable examples live in `examples/` (see the [README](https://github.com/muhammad-fiaz/httpx.zig#examples)
+for the full list), including:
 
-- `simple_get.zig`: minimal GET
-- `simple_get_deserialize.zig`: GET request with typed JSON deserialization
-- `json_api_example.zig`: JSON API: getJson, postJsonAndParse, Response.json, server ctx.jsonBody + ctx.json
-- `post_json.zig`: JSON POST
-- `custom_headers.zig`: request headers
-- `interceptors.zig`: request/response interception hooks
-- `middleware_example.zig`: middleware chain
-- `router_example.zig`: router + handlers
 - `simple_server.zig`: basic HTTP server
-- `streaming.zig`: streaming request/response bodies
-- `concurrent_requests.zig`: concurrency patterns
+- `simple_get.zig`: basic HTTP client GET
+- `full_integration.zig`: end-to-end client + server lifecycle
+- `websocket_server.zig`: WebSocket handshake and frames
+- `sse_server.zig`: Server-Sent Events
+- `multipart.zig`: multipart/form-data uploads
+- `metrics_server.zig`: Prometheus exposition and snapshots
+- `session_server.zig`: cookie-based session flow
+- `health_check.zig`: liveness/readiness probes
+- `proxy_demo.zig`: HTTP proxy and SOCKS5h tunneling
+- `concurrent_demo.zig`: parallel getAll / requestAll
 - `connection_pool.zig`: keep-alive pooling
-- `cookies_demo.zig`: cookie jar management
-- `simplified_api_aliases.zig`: simplified top-level/client aliases
-- `static_files.zig`: file-based static routes and directory-based wildcard mounts for CSS/JS/images
-- `multi_page_website.zig`: full multi-page website serving index/about/contact with static assets
-- `http2_example.zig`: HTTP/2 HPACK compression and stream management
-- `http2_client_runtime.zig`: local end-to-end high-level HTTP/2 client runtime demo
-- `http2_server_runtime.zig`: local end-to-end high-level HTTP/2 server runtime demo
-- `http3_example.zig`: HTTP/3 QPACK compression and QUIC framing
-- `http3_client_runtime.zig`: local end-to-end high-level HTTP/3 client runtime demo
-- `http3_server_runtime.zig`: local end-to-end high-level HTTP/3 server runtime demo
-- `http2_advanced.zig`: HTTP/2 production features (SETTINGS enforcement, GOAWAY/RST_STREAM, HPACK security, trailers)
-- `http3_advanced.zig`: HTTP/3 production features (QPACK stream instructions, QUIC stream cancellation, transport parameters)
-- `tls_https_get.zig`: Simple HTTPS GET via local TLS server (HTTP/1.1 + HTTP/2 + HTTP/3)
-- `tls_config_options.zig`: TLS configuration constructors and ALPN negotiation
-- `tls_handshake_details.zig`: TLS handshake info and cipher suites
-- `tls_custom_ca.zig`: Custom CA certificate verification with self-signed certs
-- `tls_mtls.zig`: Mutual TLS client certificate authentication
-- `tcp_local.zig`: local TCP listener/client round trip
-- `udp_local.zig`: UDP local networking utility (prints human-readable `ip:port` for source address)
-- `unix_socket_example.zig`: Unix domain socket IPC client/server (Linux, macOS; Windows 10 build 17061+ only)
-- `websocket_example.zig`: WebSocket frame encoding/decoding and handshake helpers
-- `multipart_example.zig`: multipart/form-data builder and parser
-- `metrics_example.zig`: observability counters and latency tracking
-- `session_example.zig`: TTL-based session store with server integration
-- `health_check_example.zig`: liveness and readiness probe middleware
-- `proxy_example.zig`: HTTP proxy and SOCKS5h tunneling
-- `async_server_example.zig`: server thread pool concurrency and request handling on background workers
-- `logging_callback.zig`: custom logging, silent mode, and log_level filtering
-- `request_response_customization.zig`: request and response builder patterns
-- `http_auth_helpers.zig`: Bearer and Basic auth helpers
-
-> **Platform note — Unix domain sockets:** `unix_socket_example.zig` requires Linux, macOS, or Windows 10 build 17061+ with Developer Mode. On unsupported Windows builds the example prints a clear message and exits gracefully.
+- `static_files.zig`, `static_site.zig`, `static_embedded.zig`: filesystem, site, and single-file embedded assets
+- `spa_server.zig`, `spa_fallback.zig`: single-page applications
+- `http2_client.zig`, `http2_multiplex.zig`: HTTP/2 and HPACK
+- `http3_client.zig`, `http3_quic.zig`: HTTP/3, QPACK, and QUIC framing
+- `tls_server.zig`, `tls_get.zig`, `tls_mtls.zig`: TLS listener and identities
+- `graphql_server.zig`: GraphQL over HTTP
+- `template-basic`, `template-loops`, `template-inheritance`, `template-includes`: template engine features
+- `website`: embedded single-file website demo
 
 
 ## Configuration
@@ -253,7 +229,7 @@ zig build run-all-tcp_local -Dtarget=x86_64-linux
 For production client code, prefer explicit timeout + error handling so failures surface immediately:
 
 ```zig
-var response = client.get(url, .{ .timeout_ms = 10_000 }) catch |err| {
+var response = client.get(url, .{ .timeoutMs = 10_000 }) catch |err| {
   std.debug.print("request failed: {s}\n", .{@errorName(err)});
   return;
 };

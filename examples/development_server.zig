@@ -35,7 +35,7 @@ fn devCssHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "body { margin: 0; background: #0f172a; color: #f8fafc; font-family: system-ui; }",
-        .content_type = "text/css; charset=utf-8",
+        .contentType = "text/css; charset=utf-8",
     };
 }
 
@@ -49,9 +49,9 @@ pub fn main() !void {
 
     // 1. Initialize background watcher
     var watcher = try httpx.Watcher.init(allocator, io, .{
-        .dir_path = ".",
-        .debounce_ms = 50,
-        .poll_interval_ms = 50,
+        .dirPath = ".",
+        .debounceMs = 50,
+        .pollIntervalMs = 50,
     });
     defer watcher.deinit();
     try watcher.start();
@@ -61,7 +61,7 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
-        .max_connections = 4,
+        .maxConnections = 4,
     });
     defer server.deinit();
 

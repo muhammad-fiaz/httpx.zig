@@ -83,7 +83,7 @@ pub const Header = struct { name: []const u8, value: []const u8 };
 // Requests
 
 pub const RequestOptions = struct {
-    minor_version: u8 = 1, // 0 => HTTP/1.0
+    minorVersion: u8 = 1, // 0 => HTTP/1.0
     host: []const u8 = "",
     headers: []const Header = &.{},
     /// "close" | "keep-alive" | "" (default per version)
@@ -113,12 +113,12 @@ pub fn buildRequest(
     out.append(allocator, ' ') catch return Error.OutOfMemory;
     out.appendSlice(allocator, target) catch return Error.OutOfMemory;
     out.appendSlice(allocator, " HTTP/1.") catch return Error.OutOfMemory;
-    out.append(allocator, '0' + @as(u8, @intCast(opts.minor_version))) catch return Error.OutOfMemory;
+    out.append(allocator, '0' + @as(u8, @intCast(opts.minorVersion))) catch return Error.OutOfMemory;
     out.appendSlice(allocator, "\r\n") catch return Error.OutOfMemory;
 
     if (opts.host.len > 0) {
         try appendHeader(&out, allocator, "Host", opts.host);
-    } else if (opts.minor_version >= 1) {
+    } else if (opts.minorVersion >= 1) {
         // HTTP/1.1 requires Host on non-absolute-form requests.
         const absolute = std.mem.indexOf(u8, target, "://") != null;
         if (!absolute) return Error.InvalidHeader;
@@ -137,7 +137,7 @@ pub fn buildRequest(
             if (std.ascii.eqlIgnoreCase(h.name, "content-length")) declared = true;
         }
         if (opts.chunked) {
-            if (opts.minor_version == 0) return Error.UnsupportedForVersion;
+            if (opts.minorVersion == 0) return Error.UnsupportedForVersion;
             try appendHeader(&out, allocator, "Transfer-Encoding", "chunked");
         } else if (!declared) {
             var num_buf: [20]u8 = undefined;
@@ -196,7 +196,7 @@ pub fn reasonPhrase(code: u16) []const u8 {
 }
 
 pub const ResponseOptions = struct {
-    minor_version: u8 = 1,
+    minorVersion: u8 = 1,
     headers: []const Header = &.{},
     connection: []const u8 = "",
     chunked: bool = false,
@@ -227,28 +227,28 @@ fn fmtStatusLine(buf: []u8, minor: u8, code: u16, reason: []const u8) Error![]co
 }
 
 /// Serializes a complete response with buffered body.
-/// `method_head` suppresses the body while preserving metadata framing.
+/// `methodHead` suppresses the body while preserving metadata framing.
 pub fn buildResponse(
     allocator: Allocator,
-    status_code: u16,
-    reason_in: []const u8,
+    statusCode: u16,
+    reasonIn: []const u8,
     body: ?[]const u8,
     opts: ResponseOptions,
-    method_head: bool,
+    methodHead: bool,
 ) Error![]u8 {
-    const reason = if (reason_in.len > 0) reason_in else reasonPhrase(status_code);
+    const reason = if (reasonIn.len > 0) reasonIn else reasonPhrase(statusCode);
 
     var line_buf: [64]u8 = undefined;
-    const status_line = try fmtStatusLine(line_buf[0..], opts.minor_version, status_code, reason);
+    const status_line = try fmtStatusLine(line_buf[0..], opts.minorVersion, statusCode, reason);
 
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     try writeHead(&out, allocator, status_line, opts.headers, opts.connection);
 
-    const no_body_status = semantics.bodylessStatus(status_code);
+    const no_body_status = semantics.bodylessStatus(statusCode);
     const wants_body = body != null and body.?.len > 0;
 
-    if (no_body_status or method_head or opts.upgrade) {
+    if (no_body_status or methodHead or opts.upgrade) {
         // Metadata only: explicit Content-Length allowed when caller
         // supplied it via headers (e.g., HEAD of a GET); nothing auto-added.
         out.appendSlice(allocator, "\r\n") catch return Error.OutOfMemory;
@@ -256,9 +256,9 @@ pub fn buildResponse(
         return out.toOwnedSlice(allocator);
     }
 
-    if (status_code >= 200) {
+    if (statusCode >= 200) {
         if (opts.chunked) {
-            if (opts.minor_version == 0) return Error.UnsupportedForVersion;
+            if (opts.minorVersion == 0) return Error.UnsupportedForVersion;
             try appendHeader(&out, allocator, "Transfer-Encoding", "chunked");
         } else {
             var declared = false;
@@ -286,23 +286,23 @@ pub fn buildResponse(
 /// Builds a bare informational response head (100 Continue, 103 Early Hints).
 pub fn buildInformational(
     allocator: Allocator,
-    status_code: u16,
+    statusCode: u16,
     headers: []const Header,
 ) Error![]u8 {
-    if (!semantics.isInformational(status_code)) return Error.InvalidStatus;
-    return buildResponse(allocator, status_code, "", null, .{ .headers = headers }, false);
+    if (!semantics.isInformational(statusCode)) return Error.InvalidStatus;
+    return buildResponse(allocator, statusCode, "", null, .{ .headers = headers }, false);
 }
 
 /// CONNECT 2xx success head: no framing, tunnel begins after blank line.
 pub fn buildConnectTunnelHead(
     allocator: Allocator,
-    minor_version: u8,
-    status_code: u16,
+    minorVersion: u8,
+    statusCode: u16,
     headers: []const Header,
 ) Error![]u8 {
-    if (status_code < 200 or status_code >= 300) return Error.InvalidStatus;
+    if (statusCode < 200 or statusCode >= 300) return Error.InvalidStatus;
     var line_buf: [64]u8 = undefined;
-    const line = try fmtStatusLine(line_buf[0..], minor_version, status_code, "");
+    const line = try fmtStatusLine(line_buf[0..], minorVersion, statusCode, "");
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
     try writeHead(&out, allocator, line, headers, "");
@@ -341,7 +341,7 @@ pub fn finishChunked(
 
 test "request serialization 1.0 vs 1.1" {
     const a = std.testing.allocator;
-    const r10 = try buildRequest(a, "GET", "/", null, .{ .minor_version = 0 });
+    const r10 = try buildRequest(a, "GET", "/", null, .{ .minorVersion = 0 });
     defer a.free(r10);
     try std.testing.expect(std.mem.startsWith(u8, r10, "GET / HTTP/1.0\r\n"));
     // No Host auto-required for 1.0.
@@ -380,7 +380,7 @@ test "request content-length and chunked selection" {
     // HTTP/1.0 cannot use chunked.
     try std.testing.expectError(
         Error.UnsupportedForVersion,
-        buildRequest(a, "POST", "/p", null, .{ .chunked = true, .minor_version = 0, .host = "x" }),
+        buildRequest(a, "POST", "/p", null, .{ .chunked = true, .minorVersion = 0, .host = "x" }),
     );
 }
 

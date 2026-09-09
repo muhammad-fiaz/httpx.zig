@@ -35,7 +35,7 @@ pub const RequestStream = struct {
     /// Builds HEADERS frame payload for a response.
     pub fn buildResponseHeaders(
         self: *RequestStream,
-        status_code: u16,
+        statusCode: u16,
         headers: []const qpack_mod.FieldLine,
     ) ![]u8 {
         var block = std.ArrayList(u8).empty;
@@ -49,7 +49,7 @@ pub const RequestStream = struct {
 
         // Status pseudo-header
         var code_buf: [4]u8 = undefined;
-        const code_str = std.fmt.bufPrint(&code_buf, "{d}", .{status_code}) catch "500";
+        const code_str = std.fmt.bufPrint(&code_buf, "{d}", .{statusCode}) catch "500";
         try self.qpack.encodeField(&block, ":status", code_str);
 
         for (headers) |h| {

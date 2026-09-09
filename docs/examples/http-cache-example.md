@@ -1,32 +1,17 @@
 # HTTP Cache
 
-Demonstrates HTTP caching with CacheControl, HttpCache, and ConditionalGet (ETag).
+HTTPX has no in-memory HTTP cache subsystem. HTTP caching is handled where
+it is actually implemented:
 
-## Demo Program
-
-```zig
-// Cache-Control header parsing
-const cc = httpx.CacheControl.parse("max-age=3600, must-revalidate");
-
-// HTTP cache with ETag
-var cache = httpx.HttpCache.init(allocator);
-try cache.put("/api/data", etag, body);
-
-// Conditional GET
-if (cache.get("/api/data")) |entry| {
-    if (entry.matches(etag)) return .not_modified;
-}
-```
-
-## Run
-
-```
-zig build run-all-http_cache_example
-```
+- **Static files**: `server.static(mount, dir)` serves with ETags and honors
+  `If-None-Match` (`304 Not Modified`). See `examples/static_files.zig`.
+- **Downloads**: `.existing = .verifyExisting` skips re-downloads, and
+  `.replaceIfChanged` uses conditional headers. See
+  `examples/download_existing.zig`.
+- **DNS**: client-side cache via `ClientConfig.dnsCache`.
 
 ## Checklist
 
-- [x] Cache-Control header parsing
-- [x] ETag generation and matching
+- [x] ETag generation and matching on static routes
 - [x] Conditional GET (304 Not Modified)
-- [x] Cache invalidation
+- [x] Download resume and existing-file policies

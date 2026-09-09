@@ -12,7 +12,7 @@ fn healthzHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = httpx.health.Status.healthy.httpStatus(),
         .body = httpx.health.Status.healthy.jsonBody(),
-        .content_type = "application/json",
+        .contentType = "application/json",
     };
 }
 
@@ -20,7 +20,7 @@ fn readyzHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = httpx.health.Status.ready.httpStatus(),
         .body = httpx.health.Status.ready.jsonBody(),
-        .content_type = "application/json",
+        .contentType = "application/json",
     };
 }
 
@@ -34,7 +34,7 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
-        .max_connections = 2,
+        .maxConnections = 2,
     });
     defer server.deinit();
 

@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const sync = @import("../common/sync.zig");
 const posix = std.posix;
 
 pub const Error = error{
@@ -41,7 +42,7 @@ pub const Error = error{
     Unknown, // unmapped code — counted atomically, never panics
 };
 
-pub var unknown_count: std.atomic.Value(u64) = .init(0);
+pub var unknownCount: std.atomic.Value(u64) = .init(0);
 
 // Windows
 
@@ -108,13 +109,18 @@ pub const ws = if (is_windows) struct {
     pub const SD_SEND: i32 = 1;
     pub const SD_BOTH: i32 = 2;
 
-    var wsa_done = std.atomic.Value(bool).init(false);
+    var wsa_once: sync.Once = .{};
+
+    fn doWsaStartup() void {
+        var data: WSAData = undefined;
+        _ = WSAStartup(0x0202, &data);
+    }
 
     pub fn startup() void {
         if (!is_windows) return;
-        if (wsa_done.swap(true, .acq_rel)) return;
-        var data: WSAData = undefined;
-        _ = WSAStartup(0x0202, &data);
+        // Once-gated: racing threads block until WSAStartup completes,
+        // so nobody observes WSANOTINITIALISED on socket().
+        wsa_once.call(doWsaStartup);
     }
 
     /// Map every documented winsock error code. Exhaustive by construction:
@@ -153,7 +159,7 @@ pub const ws = if (is_windows) struct {
             10064 => error.HostUnreachable, // WSAEHOSTDOWN
             10065 => error.HostUnreachable, // WSAEHOSTUNREACH
             else => blk: {
-                _ = unknown_count.fetchAdd(1, .monotonic);
+                _ = unknownCount.fetchAdd(1, .monotonic);
                 break :blk error.Unknown;
             },
         };
@@ -291,7 +297,7 @@ pub const posix_c = if (!is_windows and builtin.link_libc) struct {
             114 => error.OperationInProgress, // EALREADY
             22 => error.ProtocolError, // EINVAL
             else => blk: {
-                _ = unknown_count.fetchAdd(1, .monotonic);
+                _ = unknownCount.fetchAdd(1, .monotonic);
                 break :blk error.Unknown;
             },
         };
@@ -515,7 +521,7 @@ fn mapPosixError(err: anyerror) Error {
         error.AddressInUse => error.AddressInUse,
         error.AddressNotAvailable => error.AddressNotAvailable,
         else => blk: {
-            _ = unknown_count.fetchAdd(1, .monotonic);
+            _ = unknownCount.fetchAdd(1, .monotonic);
             break :blk error.Unknown;
         },
     };
@@ -549,7 +555,7 @@ test "unknown codes never panic" {
     if (is_windows) {
         const E = ws.map(-42);
         try std.testing.expect(E == error.Unknown);
-        try std.testing.expect(unknown_count.load(.monotonic) >= 1);
+        try std.testing.expect(unknownCount.load(.monotonic) >= 1);
     }
 }
 

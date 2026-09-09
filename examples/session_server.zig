@@ -10,7 +10,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .max_connections = 5,
+        .maxConnections = 5,
     });
     defer server.deinit();
 
@@ -46,7 +46,7 @@ fn loginHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Logged in\",\"user\":\"alice\"}",
-        .content_type = "application/json",
+        .contentType = "application/json",
     };
 }
 
@@ -54,7 +54,7 @@ fn dashboardHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "{\"user\":\"alice\",\"page\":\"dashboard\"}",
-        .content_type = "application/json",
+        .contentType = "application/json",
     };
 }
 
@@ -62,6 +62,6 @@ fn logoutHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Logged out\"}",
-        .content_type = "application/json",
+        .contentType = "application/json",
     };
 }

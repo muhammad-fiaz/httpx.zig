@@ -1,54 +1,43 @@
 # Transfer Progress
 
-Track download/upload progress with percentage, speed, ETA, and cancellation.
-
-## Demo Program
+Download progress with percentage, speed, ETA, and cancellation. See
+`examples/download_custom_progress.zig`.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
+const Observer = struct {
+    taskId: u32,
 
-fn onProgress(p: httpx.Progress) void {
-    if (p.percentage()) |pct| {
-        std.debug.print("Progress: {d:.1}% ({d}/{d} bytes)\n", .{ pct, p.bytes_transferred, p.totalBytes orelse 0 });
-    } else {
-        std.debug.print("Transferred: {d} bytes\n", .{p.bytes_transferred});
+    fn onProgress(info: httpx.ProgressInfo, userData: ?*anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(userData.?));
+        const pct = if (info.percentage) |p| p else 0.0;
+        std.debug.print("[Task {d}] {d:.1}% ({d} bytes) {d:.0} B/s ETA: {?d}s\n", .{
+            self.taskId, pct, info.downloadedBytes, info.speedBps, info.etaSeconds,
+        });
     }
-    std.debug.print("Speed: {d} bytes/sec\n", .{p.bytesPerSecond()});
-}
+};
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-
-    const p = httpx.Progress{
-        .bytes_transferred = 500,
-        .totalBytes = 1000,
-        .elapsed_ns = std.time.ns_per_s,
-    };
-    onProgress(p);
-
-    std.debug.print("ETA: ", .{});
-    if (p.estimatedRemainingNs()) |eta_ns| {
-        std.debug.print("{d:.1}s\n", .{@as(f64, @floatFromInt(eta_ns)) / @as(f64, @floatFromInt(std.time.ns_per_s))});
-    } else {
-        std.debug.print("unknown\n", .{});
-    }
-
-    var token = httpx.CancelToken{};
-    std.debug.print("Cancelled: {}\n", .{token.isCancelled()});
-}
+var observer = Observer{ .taskId = 101 };
+_ = try client.download(url, "downloads/out.bin", .{
+    .progress = .custom, // .auto / .enabled / .disabled / .quiet
+    .onProgress = Observer.onProgress,
+    .userData = &observer,
+    .cancelFlag = &cancel, // *const std.atomic.Value(bool), optional
+    .createDirs = true,
+});
 ```
+
+`ProgressInfo` carries `downloadedBytes`, `totalBytes`, `percentage`,
+`speedBps`, `etaSeconds`, `elapsedMs`, `statusCode`, and `state`
+(`starting`, `downloading`, `verifying`, `completed`, `failed`,
+`cancelled`).
 
 ## Run
 
 ```bash
-zig build run-all-progress_example
+zig build run-download-custom-progress
 ```
 
 ## What to Verify
 
-- Progress percentage is calculated correctly.
-- Bytes-per-second speed is reported.
-- ETA is computed based on transfer rate.
-- CancelToken starts in a non-cancelled state.
+- Progress callbacks fire with sane percentages and speeds.
+- Cancellation via `cancelFlag` aborts the transfer.

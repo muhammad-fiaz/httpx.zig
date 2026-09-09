@@ -1,14 +1,17 @@
 # Rate Limiting Guide
 
-HTTPX provides token-bucket rate limiting middleware to protect servers from abuse, brute-force attempts, and denial of service attacks.
+HTTPX provides token-bucket rate limiting via `httpx.RateLimiter` to protect
+servers from abuse, brute-force attempts, and denial of service attacks.
 
 ## Token Bucket Algorithm
-
-The token bucket allows bursts of requests up to a configurable bucket capacity, while steadily refilling tokens at a fixed rate per second.
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
+
+fn limitedHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.renderJson(.{ .status = "ok", .data = "sensitive information" });
+}
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -19,34 +22,30 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
-    // Rate limiter: 10 requests burst, refilling at 2 requests per second
-    var limiter = httpx.web.rate_limit.RateLimiter.init(allocator, .{
-        .capacity = 10,
-        .refill_rate = 2.0,
-    });
+    // 10 requests per 60s window, burst up to 10.
+    var limiter = httpx.RateLimiter.init(allocator, 10, 60_000);
     defer limiter.deinit();
 
-    server.get("/api/data", struct {
-        fn handle(ctx: *httpx.Context) !void {
-            const ip = ctx.remoteIp() orelse "127.0.0.1";
-            if (!limiter.allow(ip)) {
-                ctx.status(429);
-                ctx.header("Retry-After", "5");
-                try ctx.json(.{ .error = "Too Many Requests" });
-                return;
-            }
+    try server.get("/api/data", limitedHandler);
 
-            try ctx.json(.{ .status = "ok", .data = "sensitive information" });
-        }
-    }.handle);
-
-    try server.run();
+    server.run();
 }
 ```
 
+Gate per request with `check(key, nowMs)` (remaining quota, or `null` when
+limited) or `checkDetailed` for full `RateLimitResult` metadata
+(`allowed`, `remaining`, `resetSeconds`, `retryAfterSeconds`). Build keys by
+dimension (`RateLimitDimension`: `.global`, `.clientIp`, `.userId`,
+`.apiKey`, `.route`, `.userAndRoute`, `.ipAndRoute`, `.custom`).
+
+Configure windows with `RateLimitPolicy` (`.limit`, `.windowMs`, `.burst`,
+`.ttlMs`) via `initWithOptions`.
+
 ## Rate Limiting Headers
 
-Standard HTTP headers returned when rate limits are active:
+`RateLimitResult.toResponse(allocator)` renders a `429` response with standard
+headers:
+
 * `X-RateLimit-Limit`: Maximum bucket capacity.
 * `X-RateLimit-Remaining`: Tokens remaining in the current window.
 * `X-RateLimit-Reset`: Seconds until bucket is fully replenished.

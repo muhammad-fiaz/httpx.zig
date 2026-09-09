@@ -1,39 +1,34 @@
 # Metrics and Observability Example
 
-Demonstrates how to collect, aggregate, and report performance and error metrics within your client/server programs using `httpx.zig`.
-
-## Features Covered
-
-- **Request/Response Counters**: Logging total requests and classifying responses by status class (2xx, 3xx, 4xx, 5xx).
-- **Latency Tracking**: Measuring minimum, average, and maximum response times in milliseconds.
-- **Traffic Logging**: Tracking bytes sent and bytes received.
-- **Observability Snapshots**: Exporting metrics snapshots with success rates, error rates, and resetting collections.
-
-## Code Example
+Request/response counters, status classes, and latency histograms with
+`httpx.Metrics`. See `examples/metrics_server.zig`.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
+var m = httpx.Metrics{};
 
-pub fn main() !void {
-    var m = httpx.Metrics.init();
+// Record traffic.
+m.recordRequest();
+m.recordRequestMethod("GET");
+m.recordResponseFull(200, 1_200_000, 512); // status, latency_ns, bytes
+m.recordResponseFull(500, 4_500_000, 64);
 
-    // Record some sample traffic data
-    m.recordRequest();
-    m.recordResponse(200, 512, 1200); // status, bytes, latency_ns
-    m.recordResponse(500, 64, 4500);
-
-    const snap = m.snapshot();
-    std.debug.print("Total Requests: {d}\n", .{snap.totalRequests()});
-    std.debug.print("Success Rate:   {d:.1}%\n", .{snap.successRate() * 100.0});
-    std.debug.print("Avg Latency:    {d}ns\n", .{snap.avgLatencyNs()});
-}
+const snap = m.snapshot();
+std.debug.print("Total Requests: {d}\n", .{snap.requestsTotal});
+std.debug.print("Error Rate:     {d:.1}%\n", .{snap.errorRate() * 100.0});
+std.debug.print("Avg Latency:    {d:.3}ms\n", .{snap.averageLatencyMs()});
 ```
 
-## Running the Example
+Servers record automatically; mount `try server.metrics("/metrics");` for
+live Prometheus exposition, or read `server.snapshot()` /
+`server.metricsSnapshot()`.
 
-Run the pre-configured metrics example:
+## Run
 
 ```bash
-zig build run-all-metrics_example
+zig build run-metrics-server
 ```
+
+## What to Verify
+
+- Counters, status classes, and latency samples accumulate.
+- `/metrics` renders Prometheus text with the live values.

@@ -1,51 +1,34 @@
-# Health Check Middleware Example
+# Health Check Example
 
-Demonstrates using built-in health check and readiness probe middleware components in `httpx.zig` to support Kubernetes-style liveness/readiness probes.
-
-## Features Covered
-
-- **Liveness Probes**: Minimal health check endpoints responding with configured status code and JSON.
-- **Readiness Probes**: Configurable readiness checks to identify database/cache availability before serving traffic.
-- **Middleware Integration**: Stacking probes alongside logger, CORS, or other route handlers.
-
-## Code Example
+Liveness/readiness probe routes for Kubernetes-style checks. Register plain
+routes (see `examples/health_check.zig`).
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
+var server = try httpx.Server.init(allocator, io, .{ .port = 0 });
+defer server.deinit();
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
+try server.get("/healthz", healthHandler);
+try server.get("/readyz", readyHandler);
 
-    var server = try httpx.Server.init(allocator, io, .{});
-    defer server.deinit();
+fn healthHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.renderJson(.{ .status = "healthy" });
+}
 
-    // Register health check middleware
-    try server.use(httpx.middleware.healthCheck(.{
-        .path = "/health",
-        .body = "{\"status\":\"ok\"}",
-        .status = 200,
-    }));
-
-    // Register readiness probe middleware
-    try server.use(httpx.middleware.readinessProbe(.{
-        .path = "/ready",
-        .body = "{\"ready\":true,\"db\":true}",
-    }));
-
-    const thread = try server.listenInBackground();
-    defer thread.join();
-    defer server.stop();
+fn readyHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.renderJson(.{ .status = "ready" });
 }
 ```
 
-## Running the Example
+`httpx.health.Status` (`.healthy`, `.ready`, ...) renders standard JSON
+bodies via `jsonBody()` with matching HTTP status codes.
 
-Run the pre-configured health check example:
+## Run
 
 ```bash
-zig build run-all-health_check_example
+zig build run-health-check
 ```
+
+## What to Verify
+
+- `GET /healthz` returns 200 `{"status":"healthy"}`.
+- `GET /readyz` returns 200 `{"status":"ready"}`.

@@ -33,7 +33,7 @@ pub const Context = struct {
     /// Raw request headers as provided by the transport (may be empty).
     headers: []const Header = &.{},
     params: [16]struct { name: []const u8, value: []const u8 } = undefined,
-    param_count: usize = 0,
+    paramCount: usize = 0,
     path: []const u8 = "",
     method: Method = .GET,
     /// IO context for handlers that need filesystem/network access.
@@ -41,39 +41,39 @@ pub const Context = struct {
     /// Raw request body (Content-Length framed; empty otherwise).
     body: []const u8 = "",
     /// User-supplied state pointer attached to the route, enabling zero-global-state handlers.
-    user_data: ?*anyopaque = null,
-    middleware_index: usize = 0,
-    active_router: ?*anyopaque = null,
-    active_handler: ?HandlerFn = null,
+    userData: ?*anyopaque = null,
+    middlewareIndex: usize = 0,
+    activeRouter: ?*anyopaque = null,
+    activeHandler: ?HandlerFn = null,
     /// Remote peer network address (e.g. "127.0.0.1" or "[::1]").
-    peer_address: []const u8 = "",
+    peerAddress: []const u8 = "",
     /// True if connection was established over direct TLS / HTTPS.
-    is_tls: bool = false,
+    isTls: bool = false,
     /// Whether reverse proxy forwarded headers (X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host) are trusted.
-    trust_forwarded: bool = false,
+    trustForwarded: bool = false,
 
     /// Invokes the next middleware in the pipeline, or the route handler if at the end.
     pub fn next(self: *Context) anyerror!Response {
-        const r: *Router = @ptrCast(@alignCast(self.active_router orelse return error.NoRouter));
-        if (self.middleware_index < r.middlewares.items.len) {
-            const mw = r.middlewares.items[self.middleware_index];
-            self.middleware_index += 1;
+        const r: *Router = @ptrCast(@alignCast(self.activeRouter orelse return error.NoRouter));
+        if (self.middlewareIndex < r.middlewares.items.len) {
+            const mw = r.middlewares.items[self.middlewareIndex];
+            self.middlewareIndex += 1;
             return mw(self, contextNext);
         }
-        if (self.active_handler) |h| {
+        if (self.activeHandler) |h| {
             return h(self);
         }
-        if (r.not_found_handler) |nf| {
-            return nf(self) catch Response{ .status = 404, .body = "Not Found", .content_type = "text/plain; charset=utf-8" };
-        } else if (r.status_handlers.get(404)) |sh| {
-            return sh(self) catch Response{ .status = 404, .body = "Not Found", .content_type = "text/plain; charset=utf-8" };
+        if (r.notFoundHandler) |nf| {
+            return nf(self) catch Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
+        } else if (r.statusHandlers.get(404)) |sh| {
+            return sh(self) catch Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
         } else {
-            return Response{ .status = 404, .body = "Not Found", .content_type = "text/plain; charset=utf-8" };
+            return Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
         }
     }
 
     pub fn param(self: *const Context, name: []const u8) ?[]const u8 {
-        for (self.params[0..self.param_count]) |p| {
+        for (self.params[0..self.paramCount]) |p| {
             if (std.mem.eql(u8, p.name, name)) return p.value;
         }
         return null;
@@ -134,27 +134,27 @@ pub const Context = struct {
         return .{
             .status = code,
             .body = content,
-            .content_type = "text/html; charset=utf-8",
+            .contentType = "text/html; charset=utf-8",
         };
     }
 
     /// Renders a native server-side template by name using the configured template engine (200 OK).
-    pub fn render(self: *const Context, template_name: []const u8, data: anytype) anyerror!Response {
-        return self.renderStatus(200, template_name, data);
+    pub fn render(self: *const Context, templateName: []const u8, data: anytype) anyerror!Response {
+        return self.renderStatus(200, templateName, data);
     }
 
     /// Renders a native server-side template with a custom HTTP status code.
-    pub fn renderStatus(self: *const Context, code: u16, template_name: []const u8, data: anytype) anyerror!Response {
+    pub fn renderStatus(self: *const Context, code: u16, templateName: []const u8, data: anytype) anyerror!Response {
         const templates_mod = @import("../templates/templates.zig");
         var engine: ?*templates_mod.Engine = null;
-        if (self.active_router) |r_ptr| {
+        if (self.activeRouter) |r_ptr| {
             const r: *Router = @ptrCast(@alignCast(r_ptr));
-            if (r.template_engine) |te| {
+            if (r.templateEngine) |te| {
                 engine = @ptrCast(@alignCast(te));
             }
         }
         if (engine) |eng| {
-            const body_str = try eng.renderToString(self.allocator, template_name, data);
+            const body_str = try eng.renderToString(self.allocator, templateName, data);
             return self.htmlStatus(code, body_str);
         }
         return error.TemplateEngineNotConfigured;
@@ -172,14 +172,14 @@ pub const Context = struct {
             return Response{
                 .status = code,
                 .body = value,
-                .content_type = "application/json",
+                .contentType = "application/json",
             };
         }
         const str = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
         return Response{
             .status = code,
             .body = str,
-            .content_type = "application/json",
+            .contentType = "application/json",
         };
     }
 
@@ -189,7 +189,7 @@ pub const Context = struct {
         return Response{
             .status = 200,
             .body = str,
-            .content_type = "application/json",
+            .contentType = "application/json",
         };
     }
 
@@ -205,7 +205,7 @@ pub const Context = struct {
         return .{
             .status = code,
             .body = content,
-            .content_type = "text/plain; charset=utf-8",
+            .contentType = "text/plain; charset=utf-8",
         };
     }
 
@@ -221,7 +221,7 @@ pub const Context = struct {
         return .{
             .status = code,
             .body = content,
-            .content_type = "application/xml; charset=utf-8",
+            .contentType = "application/xml; charset=utf-8",
         };
     }
 
@@ -250,15 +250,15 @@ pub const Context = struct {
     }
 
     /// Renders a binary octet stream or custom binary payload response.
-    pub fn binary(self: *const Context, bytes: []const u8, content_type: ?[]const u8) Response {
+    pub fn binary(self: *const Context, bytes: []const u8, contentType: ?[]const u8) Response {
         _ = self;
-        return Response.binary(bytes, content_type);
+        return Response.binary(bytes, contentType);
     }
 
     /// Renders an arbitrary custom response.
-    pub fn custom(self: *const Context, status_code: u16, content_type: ?[]const u8, content: []const u8) Response {
+    pub fn custom(self: *const Context, statusCode: u16, contentType: ?[]const u8, content: []const u8) Response {
         _ = self;
-        return Response.custom(status_code, content_type, content);
+        return Response.custom(statusCode, contentType, content);
     }
 
     /// HTTP Redirect response (default 302 Found or 301/307/308).
@@ -309,23 +309,23 @@ pub const Context = struct {
     }
 
     /// Returns the effective scheme ("https" or "http").
-    /// Honors X-Forwarded-Proto only when trust_forwarded is true.
+    /// Honors X-Forwarded-Proto only when trustForwarded is true.
     pub fn scheme(self: *const Context) []const u8 {
-        if (self.trust_forwarded) {
+        if (self.trustForwarded) {
             if (self.header("X-Forwarded-Proto")) |p| {
                 const trimmed = std.mem.trim(u8, p, " \t");
                 if (std.ascii.eqlIgnoreCase(trimmed, "https")) return "https";
                 if (std.ascii.eqlIgnoreCase(trimmed, "http")) return "http";
             }
         }
-        return if (self.is_tls) "https" else "http";
+        return if (self.isTls) "https" else "http";
     }
 
     /// Returns the client's IP address.
-    /// If trust_forwarded is true and X-Forwarded-For / X-Real-IP is present, it returns the forwarded client IP.
-    /// Otherwise returns peer_address if available, or fallback header if no peer address was set.
+    /// If trustForwarded is true and X-Forwarded-For / X-Real-IP is present, it returns the forwarded client IP.
+    /// Otherwise returns peerAddress if available, or fallback header if no peer address was set.
     pub fn remoteAddress(self: *const Context) ?[]const u8 {
-        if (self.trust_forwarded) {
+        if (self.trustForwarded) {
             if (self.header("X-Forwarded-For")) |xff| {
                 if (std.mem.indexOfScalar(u8, xff, ',')) |comma| {
                     return std.mem.trim(u8, xff[0..comma], " \t");
@@ -338,7 +338,7 @@ pub const Context = struct {
                 if (trimmed.len > 0) return trimmed;
             }
         }
-        if (self.peer_address.len > 0) return self.peer_address;
+        if (self.peerAddress.len > 0) return self.peerAddress;
         // Fallback for standalone/mock tests
         if (self.header("X-Forwarded-For")) |xff| {
             if (std.mem.indexOfScalar(u8, xff, ',')) |comma| {
@@ -350,9 +350,9 @@ pub const Context = struct {
     }
 
     /// Returns the authoritative host header.
-    /// When trust_forwarded is true, respects X-Forwarded-Host if provided.
+    /// When trustForwarded is true, respects X-Forwarded-Host if provided.
     pub fn host(self: *const Context) ?[]const u8 {
-        if (self.trust_forwarded) {
+        if (self.trustForwarded) {
             if (self.header("X-Forwarded-Host")) |h| {
                 const trimmed = std.mem.trim(u8, h, " \t");
                 if (trimmed.len > 0) return trimmed;
@@ -366,7 +366,7 @@ pub const Response = struct {
     status: u16 = 200,
     body: []const u8 = "",
     /// When set, transports should emit this as Content-Type.
-    content_type: ?[]const u8 = null,
+    contentType: ?[]const u8 = null,
     /// Additional headers; borrowed from ctx-scratch or static data.
     headers: []const Header = &.{},
 
@@ -374,7 +374,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .content_type = "text/html; charset=utf-8",
+            .contentType = "text/html; charset=utf-8",
         };
     }
 
@@ -382,7 +382,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .content_type = "text/plain; charset=utf-8",
+            .contentType = "text/plain; charset=utf-8",
         };
     }
 
@@ -390,7 +390,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .content_type = "application/json",
+            .contentType = "application/json",
         };
     }
 
@@ -398,7 +398,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .content_type = "application/xml; charset=utf-8",
+            .contentType = "application/xml; charset=utf-8",
         };
     }
 
@@ -406,7 +406,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .content_type = "application/rss+xml; charset=utf-8",
+            .contentType = "application/rss+xml; charset=utf-8",
         };
     }
 
@@ -414,7 +414,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .content_type = "application/atom+xml; charset=utf-8",
+            .contentType = "application/atom+xml; charset=utf-8",
         };
     }
 
@@ -422,7 +422,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .content_type = "text/plain; charset=utf-8",
+            .contentType = "text/plain; charset=utf-8",
         };
     }
 
@@ -430,29 +430,29 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .content_type = "application/xml; charset=utf-8",
+            .contentType = "application/xml; charset=utf-8",
         };
     }
 
-    pub fn binary(bytes: []const u8, content_type: ?[]const u8) Response {
+    pub fn binary(bytes: []const u8, contentType: ?[]const u8) Response {
         return .{
             .status = 200,
             .body = bytes,
-            .content_type = content_type orelse "application/octet-stream",
+            .contentType = contentType orelse "application/octet-stream",
         };
     }
 
-    pub fn custom(status_code: u16, content_type: ?[]const u8, content: []const u8) Response {
+    pub fn custom(statusCode: u16, contentType: ?[]const u8, content: []const u8) Response {
         return .{
-            .status = status_code,
+            .status = statusCode,
             .body = content,
-            .content_type = content_type,
+            .contentType = contentType,
         };
     }
 
-    pub fn empty(status_code: u16) Response {
+    pub fn empty(statusCode: u16) Response {
         return .{
-            .status = status_code,
+            .status = statusCode,
             .body = "",
         };
     }
@@ -476,8 +476,8 @@ const RouteEntry = struct {
     priority: u32,
     /// OpenAPI documentation source; empty default keeps plain routes free.
     meta: meta_mod.Metadata = .{},
-    user_data: ?*anyopaque = null,
-    deinit_data: ?*const fn (?*anyopaque) void = null,
+    userData: ?*anyopaque = null,
+    deinitData: ?*const fn (?*anyopaque) void = null,
 };
 
 pub const ErrorHandlerFn = *const fn (*Context, anyerror) anyerror!Response;
@@ -486,15 +486,15 @@ pub const Router = struct {
     allocator: Allocator,
     routes: std.ArrayList(RouteEntry) = .empty,
     middlewares: std.ArrayList(MiddlewareFn) = .empty,
-    not_found_handler: ?HandlerFn = null,
-    error_handler: ?ErrorHandlerFn = null,
-    status_handlers: std.AutoHashMap(u16, HandlerFn),
-    template_engine: ?*anyopaque = null,
+    notFoundHandler: ?HandlerFn = null,
+    errorHandler: ?ErrorHandlerFn = null,
+    statusHandlers: std.AutoHashMap(u16, HandlerFn),
+    templateEngine: ?*anyopaque = null,
 
     pub fn init(allocator: Allocator) Router {
         return .{
             .allocator = allocator,
-            .status_handlers = std.AutoHashMap(u16, HandlerFn).init(allocator),
+            .statusHandlers = std.AutoHashMap(u16, HandlerFn).init(allocator),
         };
     }
 
@@ -504,16 +504,16 @@ pub const Router = struct {
 
         for (self.routes.items) |entry| {
             self.allocator.free(entry.path);
-            if (entry.user_data != null and entry.deinit_data != null) {
-                if (!freed_ptrs.contains(entry.user_data)) {
-                    entry.deinit_data.?(entry.user_data);
-                    freed_ptrs.put(entry.user_data, {}) catch {};
+            if (entry.userData != null and entry.deinitData != null) {
+                if (!freed_ptrs.contains(entry.userData)) {
+                    entry.deinitData.?(entry.userData);
+                    freed_ptrs.put(entry.userData, {}) catch {};
                 }
             }
         }
         self.routes.deinit(self.allocator);
         self.middlewares.deinit(self.allocator);
-        self.status_handlers.deinit();
+        self.statusHandlers.deinit();
     }
 
     /// Registers a middleware that runs on all routed requests.
@@ -523,17 +523,17 @@ pub const Router = struct {
 
     /// Sets a custom 404 Not Found handler (HTML, JSON, custom template, etc.)
     pub fn setNotFoundHandler(self: *Router, handler: HandlerFn) void {
-        self.not_found_handler = handler;
+        self.notFoundHandler = handler;
     }
 
     /// Sets a custom 500 / Exception handler (HTML, JSON error envelope, etc.)
     pub fn setErrorHandler(self: *Router, handler: ErrorHandlerFn) void {
-        self.error_handler = handler;
+        self.errorHandler = handler;
     }
 
     /// Sets a custom error page / response handler for a specific HTTP status code (e.g. 403, 404, 500, 502, 503).
-    pub fn setStatusHandler(self: *Router, status_code: u16, handler: HandlerFn) !void {
-        try self.status_handlers.put(status_code, handler);
+    pub fn setStatusHandler(self: *Router, statusCode: u16, handler: HandlerFn) !void {
+        try self.statusHandlers.put(statusCode, handler);
     }
 
     pub fn add(self: *Router, method: Method, path: []const u8, handler: *const fn (*Context) anyerror!Response) RouteError!void {
@@ -653,9 +653,9 @@ pub const Router = struct {
         path: []const u8,
         handler: *const fn (*Context) anyerror!Response,
         meta: meta_mod.Metadata,
-        user_data: ?*anyopaque,
+        userData: ?*anyopaque,
     ) RouteError!void {
-        return self.addMetaWithDataDeinit(method, path, handler, meta, user_data, null);
+        return self.addMetaWithDataDeinit(method, path, handler, meta, userData, null);
     }
 
     pub fn addMetaWithDataDeinit(
@@ -664,8 +664,8 @@ pub const Router = struct {
         path: []const u8,
         handler: *const fn (*Context) anyerror!Response,
         meta: meta_mod.Metadata,
-        user_data: ?*anyopaque,
-        deinit_data: ?*const fn (?*anyopaque) void,
+        userData: ?*anyopaque,
+        deinitData: ?*const fn (?*anyopaque) void,
     ) RouteError!void {
         const owned = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned);
@@ -691,29 +691,29 @@ pub const Router = struct {
             .handler = handler,
             .priority = pattern_mod.priorityScore(&pat),
             .meta = meta,
-            .user_data = user_data,
-            .deinit_data = deinit_data,
+            .userData = userData,
+            .deinitData = deinitData,
         });
     }
 
-    pub fn addWithData(self: *Router, method: Method, path: []const u8, handler: *const fn (*Context) anyerror!Response, user_data: ?*anyopaque) RouteError!void {
-        return self.addMetaWithData(method, path, handler, .{}, user_data);
+    pub fn addWithData(self: *Router, method: Method, path: []const u8, handler: *const fn (*Context) anyerror!Response, userData: ?*anyopaque) RouteError!void {
+        return self.addMetaWithData(method, path, handler, .{}, userData);
     }
 
-    pub fn getWithData(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response, user_data: ?*anyopaque) RouteError!void {
-        return self.addMetaWithData(.GET, path, handler, .{}, user_data);
+    pub fn getWithData(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response, userData: ?*anyopaque) RouteError!void {
+        return self.addMetaWithData(.GET, path, handler, .{}, userData);
     }
 
-    pub fn getWithDataDeinit(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response, user_data: ?*anyopaque, deinit_data: ?*const fn (?*anyopaque) void) RouteError!void {
-        return self.addMetaWithDataDeinit(.GET, path, handler, .{}, user_data, deinit_data);
+    pub fn getWithDataDeinit(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response, userData: ?*anyopaque, deinitData: ?*const fn (?*anyopaque) void) RouteError!void {
+        return self.addMetaWithDataDeinit(.GET, path, handler, .{}, userData, deinitData);
     }
 
-    pub fn postWithData(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response, user_data: ?*anyopaque) RouteError!void {
-        return self.addMetaWithData(.POST, path, handler, .{}, user_data);
+    pub fn postWithData(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response, userData: ?*anyopaque) RouteError!void {
+        return self.addMetaWithData(.POST, path, handler, .{}, userData);
     }
 
-    pub fn optionsWithData(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response, user_data: ?*anyopaque) RouteError!void {
-        return self.addMetaWithData(.OPTIONS, path, handler, .{}, user_data);
+    pub fn optionsWithData(self: *Router, path: []const u8, handler: *const fn (*Context) anyerror!Response, userData: ?*anyopaque) RouteError!void {
+        return self.addMetaWithData(.OPTIONS, path, handler, .{}, userData);
     }
 
     /// Matches a request and fills in path parameters.
@@ -735,7 +735,7 @@ pub const Router = struct {
                 .path = path,
                 .method = method,
                 .io = ctx.io,
-                .user_data = entry.user_data,
+                .userData = entry.userData,
             };
 
             if (matchPattern(&entry.pattern, path, &ctx_params)) {
@@ -754,19 +754,19 @@ pub const Router = struct {
     /// Matches and dispatches the request through registered middlewares and route handler.
     pub fn dispatch(self: *Router, ctx: *Context) Response {
         const maybe_handler = self.match(ctx.method, ctx.path, ctx);
-        ctx.active_router = self;
-        ctx.active_handler = maybe_handler;
-        ctx.middleware_index = 0;
+        ctx.activeRouter = self;
+        ctx.activeHandler = maybe_handler;
+        ctx.middlewareIndex = 0;
         return ctx.next() catch |err| self.handleError(ctx, err);
     }
 
     fn handleError(self: *Router, ctx: *Context, err: anyerror) Response {
-        if (self.error_handler) |eh| {
-            return eh(ctx, err) catch Response{ .status = 500, .body = "Internal Server Error", .content_type = "text/plain; charset=utf-8" };
-        } else if (self.status_handlers.get(500)) |sh| {
-            return sh(ctx) catch Response{ .status = 500, .body = "Internal Server Error", .content_type = "text/plain; charset=utf-8" };
+        if (self.errorHandler) |eh| {
+            return eh(ctx, err) catch Response{ .status = 500, .body = "Internal Server Error", .contentType = "text/plain; charset=utf-8" };
+        } else if (self.statusHandlers.get(500)) |sh| {
+            return sh(ctx) catch Response{ .status = 500, .body = "Internal Server Error", .contentType = "text/plain; charset=utf-8" };
         } else {
-            return Response{ .status = 500, .body = "Internal Server Error", .content_type = "text/plain; charset=utf-8" };
+            return Response{ .status = 500, .body = "Internal Server Error", .contentType = "text/plain; charset=utf-8" };
         }
     }
 };
@@ -786,18 +786,18 @@ fn matchPattern(pat: *const Pattern, path: []const u8, ctx: *Context) bool {
                 if (!std.mem.eql(u8, seg.text, path_seg)) return false;
             },
             .parameter => {
-                if (ctx.param_count < 16) {
-                    ctx.params[ctx.param_count] = .{ .name = seg.text, .value = path_seg };
-                    ctx.param_count += 1;
+                if (ctx.paramCount < 16) {
+                    ctx.params[ctx.paramCount] = .{ .name = seg.text, .value = path_seg };
+                    ctx.paramCount += 1;
                 }
             },
             .wildcard => {
                 // Wildcard matches everything remaining in the path from this segment on
-                if (ctx.param_count < 16) {
+                if (ctx.paramCount < 16) {
                     const seg_start = @intFromPtr(path_seg.ptr) - @intFromPtr(path.ptr);
                     const remainder = path[seg_start..];
-                    ctx.params[ctx.param_count] = .{ .name = seg.text, .value = remainder };
-                    ctx.param_count += 1;
+                    ctx.params[ctx.paramCount] = .{ .name = seg.text, .value = remainder };
+                    ctx.paramCount += 1;
                 }
                 return true;
             },
@@ -857,7 +857,7 @@ test "static beats parameter precedence" {
     const handler = router.match(.GET, "/users/me", &ctx);
     try std.testing.expect(handler != null);
     // The /users/me route should have won (higher priority)
-    try std.testing.expectEqual(@as(usize, 0), ctx.param_count);
+    try std.testing.expectEqual(@as(usize, 0), ctx.paramCount);
 }
 
 test "extracts path parameters" {
@@ -904,28 +904,28 @@ test "context trusted proxy and scheme detection" {
         .{ .name = "X-Forwarded-For", .value = "203.0.113.195, 127.0.0.1" },
     };
 
-    // Case 1: Untrusted proxy (trust_forwarded = false)
+    // Case 1: Untrusted proxy (trustForwarded = false)
     {
         var ctx = Context{
             .allocator = a,
             .headers = &hdrs,
-            .peer_address = "127.0.0.1",
-            .is_tls = false,
-            .trust_forwarded = false,
+            .peerAddress = "127.0.0.1",
+            .isTls = false,
+            .trustForwarded = false,
         };
         try std.testing.expectEqualStrings("http", ctx.scheme());
         try std.testing.expectEqualStrings("127.0.0.1", ctx.remoteAddress().?);
         try std.testing.expectEqualStrings("internal.local", ctx.host().?);
     }
 
-    // Case 2: Trusted proxy (trust_forwarded = true)
+    // Case 2: Trusted proxy (trustForwarded = true)
     {
         var ctx = Context{
             .allocator = a,
             .headers = &hdrs,
-            .peer_address = "127.0.0.1",
-            .is_tls = false,
-            .trust_forwarded = true,
+            .peerAddress = "127.0.0.1",
+            .isTls = false,
+            .trustForwarded = true,
         };
         try std.testing.expectEqualStrings("https", ctx.scheme());
         try std.testing.expectEqualStrings("203.0.113.195", ctx.remoteAddress().?);

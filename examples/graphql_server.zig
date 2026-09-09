@@ -13,10 +13,10 @@ const UserType = httpx.graphql.ObjectTypeDef{
     .name = "User",
     .description = "A system user account",
     .fields = &.{
-        .{ .name = "id", .type_name = "ID", .description = "Unique user identifier" },
-        .{ .name = "name", .type_name = "String", .description = "Full user display name" },
-        .{ .name = "email", .type_name = "String", .description = "Primary email address" },
-        .{ .name = "role", .type_name = "String", .description = "Security role" },
+        .{ .name = "id", .typeName = "ID", .description = "Unique user identifier" },
+        .{ .name = "name", .typeName = "String", .description = "Full user display name" },
+        .{ .name = "email", .typeName = "String", .description = "Primary email address" },
+        .{ .name = "role", .typeName = "String", .description = "Security role" },
     },
 };
 
@@ -47,8 +47,8 @@ const QueryType = httpx.graphql.ObjectTypeDef{
     .name = "Query",
     .description = "Root queries",
     .fields = &.{
-        .{ .name = "me", .type_name = "User", .description = "Current authenticated user", .resolver = resolvers.getMe },
-        .{ .name = "users", .type_name = "User", .is_list = true, .description = "List all users in organization", .resolver = resolvers.getUsers },
+        .{ .name = "me", .typeName = "User", .description = "Current authenticated user", .resolver = resolvers.getMe },
+        .{ .name = "users", .typeName = "User", .isList = true, .description = "List all users in organization", .resolver = resolvers.getUsers },
     },
 };
 
@@ -76,10 +76,10 @@ pub fn main() !void {
             .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
             .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
             .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar Reference" },
-            .graphiql = .{ .enabled = true, .route = "/graphiql", .graphql_endpoint = "/graphql", .title = "GraphiQL IDE" },
+            .graphiql = .{ .enabled = true, .route = "/graphiql", .graphqlEndpoint = "/graphql", .title = "GraphiQL IDE" },
         },
         .logging = .{},
-        .max_connections = 5,
+        .maxConnections = 5,
     });
     defer server.deinit();
 

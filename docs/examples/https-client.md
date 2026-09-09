@@ -1,45 +1,41 @@
 # HTTPS Client
 
-Demonstrates a raw TLS 1.2/1.3 handshake using the built-in TLS implementation, including ALPN negotiation and encrypted HTTP request/response over the session.
-
-## Demo Program
+TLS client requests through the high-level client, plus local TLS listener
+setup. See `examples/https_client.zig` (listener init + config verification)
+and `examples/tls_get.zig`.
 
 ```zig
-// Configure TLS with ALPN for h3 + h2 + http/1.1
-const tls_config = tls.TlsConfig.insecureWithH3(allocator);
+// External HTTPS through the client (zero config).
+var res = try client.get("https://example.com/", .{});
+defer res.deinit();
 
-// Connect to the server
-const address = httpx.address.resolve(allocator, host, port);
-var socket = httpx.Socket.createForAddress(address);
-socket.connectWithTimeout(address, 10_000);
+// Development only: bypass verification for self-signed endpoints.
+var dev = try client.get("https://127.0.0.1:8443/", .{
+    .tls = .{ .verify = .none },
+});
+defer dev.deinit();
+```
 
-// Perform TLS handshake
-var session = tls.TlsSession.init(tls_config);
-session.attachSocket(&socket);
-session.handshake(host);
+Local listener setup with an identity:
 
-// Read negotiated protocol
-const proto = session.negotiatedProtocol();
-
-// Send HTTP request over the encrypted channel
-session.writeAll("GET / HTTP/1.1\r\nHost: example.com\r\n...\r\n");
-
-// Read response
-var buf: [4096]u8 = undefined;
-const n = session.read(&buf);
+```zig
+var listener = try httpx.tls.Listener.init(allocator, io, .{
+    .port = 0,
+    .defaultIdentity = .{
+        .certChainPem = cert,
+        .privateKeyPem = key,
+    },
+});
+defer listener.deinit();
 ```
 
 ## Run
 
-```
-zig build run-all-https_client
+```bash
+zig build run-https-client
 ```
 
 ## Checklist
 
-- [x] TLS config created with ALPN (h3, h2, http/1.1)
-- [x] Socket connects to `example.com:443`
-- [x] TLS handshake completes (or offline demo prints cipher suites)
-- [x] ALPN protocol is printed if negotiated
-- [x] HTTP response is read and printed (first 512 bytes)
-- [x] Session closes gracefully with `close_notify`
+- [x] TLS listener initializes with an identity and reports its port
+- [x] External HTTPS GET returns 200 (network permitting)

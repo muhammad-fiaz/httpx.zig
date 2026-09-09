@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head><title>{{ title }}</title><link rel="stylesheet" href="/assets/css/app.css"></head>
+<body>
+<h1>{{ title }}</h1>
+<ul>
+{% for p in site.pages %}
+<li><a href="{{ p.url }}">{{ p.name }}</a></li>
+{% endfor %}
+</ul>
+<script src="/assets/js/app.js"></script>
+</body>
+</html>

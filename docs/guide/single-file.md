@@ -75,4 +75,3 @@ Full runnable demo: `zig build run-static-site`.
 
 - [Static Files Guide](/guide/static-files)
 - [HTML Templates](/web/templates)
-- [CLI Reference](/reference/cli)

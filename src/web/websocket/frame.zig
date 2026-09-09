@@ -38,8 +38,8 @@ pub const FrameHeader = struct {
     rsv1: bool = false,
     opcode: Opcode,
     masked: bool,
-    payload_len: u64,
-    mask_key: ?[4]u8 = null,
+    payloadLen: u64,
+    maskKey: ?[4]u8 = null,
 };
 
 /// Parses frame header at start of buf. Returns header + bytes consumed.
@@ -53,7 +53,7 @@ pub fn parseFrameHeader(buf: []const u8) Error!struct { hdr: FrameHeader, consum
         .rsv1 = b0 & 0x40 != 0,
         .opcode = @enumFromInt(@as(u4, @truncate(b0 & 0x0F))),
         .masked = b1 & 0x80 != 0,
-        .payload_len = b1 & 0x7F,
+        .payloadLen = b1 & 0x7F,
     };
 
     // Reject reserved opcodes and enforce control-frame wire invariants
@@ -63,62 +63,62 @@ pub fn parseFrameHeader(buf: []const u8) Error!struct { hdr: FrameHeader, consum
         @intFromEnum(hdr.opcode) == 0x7 or @intFromEnum(hdr.opcode) == 0xB or
         @intFromEnum(hdr.opcode) == 0xC or @intFromEnum(hdr.opcode) == 0xD or
         @intFromEnum(hdr.opcode) == 0xE or @intFromEnum(hdr.opcode) == 0xF) return Error.InvalidFrame;
-    if (hdr.opcode.isControl() and (!hdr.fin or hdr.payload_len > 125)) return Error.ProtocolViolation;
+    if (hdr.opcode.isControl() and (!hdr.fin or hdr.payloadLen > 125)) return Error.ProtocolViolation;
 
     var pos: usize = 2;
-    var payload_len: u64 = hdr.payload_len;
+    var payloadLen: u64 = hdr.payloadLen;
 
-    if (hdr.payload_len == 126) {
+    if (hdr.payloadLen == 126) {
         if (pos + 2 > buf.len) return Error.InvalidFrame;
-        payload_len = std.mem.readInt(u16, buf[pos..][0..2], .big);
-        if (payload_len < 126) return Error.ProtocolViolation;
+        payloadLen = std.mem.readInt(u16, buf[pos..][0..2], .big);
+        if (payloadLen < 126) return Error.ProtocolViolation;
         pos += 2;
-    } else if (hdr.payload_len == 127) {
+    } else if (hdr.payloadLen == 127) {
         if (pos + 8 > buf.len) return Error.InvalidFrame;
-        payload_len = std.mem.readInt(u64, buf[pos..][0..8], .big);
-        if (payload_len & 0x8000000000000000 != 0 or payload_len < 65536) return Error.ProtocolViolation;
+        payloadLen = std.mem.readInt(u64, buf[pos..][0..8], .big);
+        if (payloadLen & 0x8000000000000000 != 0 or payloadLen < 65536) return Error.ProtocolViolation;
         pos += 8;
     }
 
-    if (hdr.opcode.isControl() and payload_len > 125) return Error.ProtocolViolation;
+    if (hdr.opcode.isControl() and payloadLen > 125) return Error.ProtocolViolation;
 
-    var mask_key: ?[4]u8 = null;
+    var maskKey: ?[4]u8 = null;
     if (hdr.masked) {
         if (pos + 4 > buf.len) return Error.InvalidFrame;
-        mask_key = buf[pos..][0..4].*;
+        maskKey = buf[pos..][0..4].*;
         pos += 4;
     }
 
     return .{
-        .hdr = .{ .fin = hdr.fin, .rsv1 = hdr.rsv1, .opcode = hdr.opcode, .masked = hdr.masked, .payload_len = payload_len, .mask_key = mask_key },
+        .hdr = .{ .fin = hdr.fin, .rsv1 = hdr.rsv1, .opcode = hdr.opcode, .masked = hdr.masked, .payloadLen = payloadLen, .maskKey = maskKey },
         .consumed = pos,
     };
 }
 
 /// Serializes a frame header into out. Returns bytes written.
-pub fn buildFrameHeader(out: []u8, fin: bool, opcode: Opcode, payload_len: usize, mask_key: ?[4]u8) usize {
+pub fn buildFrameHeader(out: []u8, fin: bool, opcode: Opcode, payloadLen: usize, maskKey: ?[4]u8) usize {
     var pos: usize = 0;
     var b0: u8 = @intFromEnum(opcode);
     if (fin) b0 |= 0x80;
     out[pos] = b0;
     pos += 1;
 
-    if (payload_len < 126) {
-        out[pos] = @intCast(payload_len);
+    if (payloadLen < 126) {
+        out[pos] = @intCast(payloadLen);
         pos += 1;
-    } else if (payload_len <= 0xFFFF) {
+    } else if (payloadLen <= 0xFFFF) {
         out[pos] = 126;
         pos += 1;
-        std.mem.writeInt(u16, out[pos..][0..2], @intCast(payload_len), .big);
+        std.mem.writeInt(u16, out[pos..][0..2], @intCast(payloadLen), .big);
         pos += 2;
     } else {
         out[pos] = 127;
         pos += 1;
-        std.mem.writeInt(u64, out[pos..][0..8], payload_len, .big);
+        std.mem.writeInt(u64, out[pos..][0..8], payloadLen, .big);
         pos += 8;
     }
 
-    if (mask_key) |mk| {
+    if (maskKey) |mk| {
         out[1] |= 0x80; // MASK bit is the high bit of the second frame byte
         @memcpy(out[pos..][0..4], &mk);
         pos += 4;
@@ -150,7 +150,7 @@ test "frame header roundtrip small unmasked" {
     const parsed = try parseFrameHeader(buf[0..n]);
     try std.testing.expect(parsed.hdr.fin);
     try std.testing.expectEqual(Opcode.text, parsed.hdr.opcode);
-    try std.testing.expectEqual(@as(u64, 5), parsed.hdr.payload_len);
+    try std.testing.expectEqual(@as(u64, 5), parsed.hdr.payloadLen);
     try std.testing.expect(!parsed.hdr.masked);
 }
 
@@ -159,9 +159,9 @@ test "frame header roundtrip extended 16-bit len masked" {
     const n = buildFrameHeader(&buf, false, .binary, 1000, [_]u8{ 1, 2, 3, 4 });
 
     const parsed = try parseFrameHeader(buf[0..n]);
-    try std.testing.expectEqual(@as(u64, 1000), parsed.hdr.payload_len);
+    try std.testing.expectEqual(@as(u64, 1000), parsed.hdr.payloadLen);
     try std.testing.expect(parsed.hdr.masked);
-    const mk = parsed.hdr.mask_key.?;
+    const mk = parsed.hdr.maskKey.?;
     try std.testing.expectEqual(@as(u8, 1), mk[0]);
 }
 

@@ -1,8 +1,6 @@
 # Router Example
 
-Use path parameters and multiple methods with route handlers.
-
-## Demo Program
+Path parameters and multiple methods with route handlers.
 
 ```zig
 const std = @import("std");
@@ -10,11 +8,11 @@ const httpx = @import("httpx");
 
 fn getUser(ctx: *httpx.Context) anyerror!httpx.Response {
     const id = ctx.param("id") orelse "unknown";
-    return ctx.json(.{ .id = id });
+    return ctx.renderJson(.{ .id = id });
 }
 
 fn createUser(ctx: *httpx.Context) anyerror!httpx.Response {
-    return httpx.Response.fromText(ctx.allocator, 201, "created");
+    return ctx.textStatus(201, "created");
 }
 
 pub fn main() !void {
@@ -26,16 +24,19 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{});
     defer server.deinit();
 
-    try server.get("/users/:id", getUser);
+    try server.get("/users/{id}", getUser);
     try server.post("/users", createUser);
-    try server.listen();
+    server.run();
 }
 ```
+
+Routes support static segments, `{param}` parameters (via `ctx.param`),
+and wildcards. See [Router](/api/router) and `examples/custom_server.zig`.
 
 ## Run
 
 ```bash
-zig build run-all-router_example
+zig build run-custom-server
 ```
 
 ## What to Verify

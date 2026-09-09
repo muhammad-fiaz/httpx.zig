@@ -70,6 +70,6 @@ pub fn main() !void {
     // Route all incoming requests on /api/* downstream to the backend service
     try server.use(httpx.middleware.reverseProxy("http://backend-service.local:9000"));
 
-    try server.listen();
+    server.run();
 }
 ```

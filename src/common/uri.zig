@@ -170,6 +170,38 @@ pub fn percentDecode(buf: []u8, input: []const u8) ![]const u8 {
     return buf[0..out];
 }
 
+/// Percent-encodes a string into `buf` (RFC 3986 unreserved set kept as-is).
+/// Encoded output never exceeds `3 * input.len` bytes; errors BufferTooSmall
+/// when `buf` is too short. Suitable for path segments, where `/` must
+/// always be encoded, and for query values.
+pub fn percentEncode(buf: []u8, input: []const u8) ![]const u8 {
+    const hexd = "0123456789ABCDEF";
+    if (input.len > buf.len) {
+        var need: usize = 0;
+        for (input) |c| need += if (isUnreserved(c)) 1 else 3;
+        if (need > buf.len) return error.BufferTooSmall;
+    }
+    var out: usize = 0;
+    for (input) |c| {
+        if (isUnreserved(c)) {
+            if (out >= buf.len) return error.BufferTooSmall;
+            buf[out] = c;
+            out += 1;
+        } else {
+            if (out + 3 > buf.len) return error.BufferTooSmall;
+            buf[out] = '%';
+            buf[out + 1] = hexd[c >> 4];
+            buf[out + 2] = hexd[c & 15];
+            out += 3;
+        }
+    }
+    return buf[0..out];
+}
+
+fn isUnreserved(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~';
+}
+
 /// Checks whether a path contains traversal sequences after decoding.
 pub fn hasPathTraversal(decoded_path: []const u8) bool {
     if (decoded_path.len == 0) return false;

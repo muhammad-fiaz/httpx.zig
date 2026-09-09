@@ -55,7 +55,7 @@ pub const EncodedRecord = struct {
 /// Encode one TLS 1.3 record into a byte buffer.
 /// Content type is appended inside the encrypted payload per TLS 1.3.
 pub fn encodeRecord(
-    content_type: ContentType,
+    contentType: ContentType,
     plaintext: []const u8,
     sequence_number: u64,
     key: []const u8,
@@ -70,7 +70,7 @@ pub fn encodeRecord(
     // Build inner plaintext: content || ContentType(1 byte)
     var inner: [max_record_plaintext + 1]u8 = undefined;
     @memcpy(inner[0..plaintext.len], plaintext);
-    inner[plaintext.len] = @intFromEnum(content_type);
+    inner[plaintext.len] = @intFromEnum(contentType);
     const total = plaintext.len + 1;
 
     // Construct nonce: iv_base XOR sequence_number (96-bit big-endian)
@@ -136,7 +136,7 @@ pub fn decodeRecord(
     key: []const u8,
     iv_base: []const u8,
     cipher: RecordCipher,
-) !struct { content_type: ContentType, plaintext: []u8 } {
+) !struct { contentType: ContentType, plaintext: []u8 } {
     if (sequence_number == std.math.maxInt(u64)) return error.SequenceOverflow;
     if (wire.len < 5 + cipher.tagLen()) return error.RecordTooShort;
     if (key.len != cipher.keyLen()) return error.InvalidKeyLength;
@@ -148,7 +148,7 @@ pub fn decodeRecord(
     // change_cipher_spec (0x14) for middlebox compatibility (RFC 8446 Section 5.4).
     if (header[0] == @intFromEnum(ContentType.change_cipher_spec)) {
         if (record_len != 1 or wire.len < 6 or wire[5] != 0x01) return error.InvalidContentType;
-        return .{ .content_type = .change_cipher_spec, .plaintext = out_buf[0..0] };
+        return .{ .contentType = .change_cipher_spec, .plaintext = out_buf[0..0] };
     }
     if (header[0] != @intFromEnum(ContentType.application_data)) return error.InvalidContentType;
     const legacy_major = header[1];
@@ -215,7 +215,7 @@ pub fn decodeRecord(
     };
 
     return .{
-        .content_type = inner_ct_enum,
+        .contentType = inner_ct_enum,
         .plaintext = out_buf[0 .. end - 1],
     };
 }
@@ -230,7 +230,7 @@ test "record roundtrip aes-128-gcm" {
 
     var read_buf: [max_record_plaintext]u8 = undefined;
     const result = try decodeRecord(encoded.bytes[0..encoded.len], &read_buf, 0, &test_key, &test_iv, .aes_128_gcm);
-    try std.testing.expectEqual(ContentType.handshake, result.content_type);
+    try std.testing.expectEqual(ContentType.handshake, result.contentType);
     try std.testing.expectEqualStrings("hello TLS 1.3 world", result.plaintext);
 }
 
@@ -242,7 +242,7 @@ test "record roundtrip aes-256-gcm" {
 
     var read_buf: [max_record_plaintext]u8 = undefined;
     const result = try decodeRecord(encoded.bytes[0..encoded.len], &read_buf, 0, &test_key, &test_iv, .aes_256_gcm);
-    try std.testing.expectEqual(ContentType.handshake, result.content_type);
+    try std.testing.expectEqual(ContentType.handshake, result.contentType);
     try std.testing.expectEqualStrings("AES-256-GCM record", result.plaintext);
 }
 
@@ -254,7 +254,7 @@ test "record roundtrip chacha20-poly1305" {
 
     var read_buf: [max_record_plaintext]u8 = undefined;
     const result = try decodeRecord(encoded.bytes[0..encoded.len], &read_buf, 0, &test_key, &test_iv, .chacha20_poly1305);
-    try std.testing.expectEqual(ContentType.handshake, result.content_type);
+    try std.testing.expectEqual(ContentType.handshake, result.contentType);
     try std.testing.expectEqualStrings("ChaCha20 record", result.plaintext);
 }
 

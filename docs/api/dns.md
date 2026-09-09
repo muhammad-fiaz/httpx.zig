@@ -83,16 +83,16 @@ Configuration passed to `client.resolve`:
 ```zig
 pub const ResolveOptions = struct {
     family: AddressFamilyPreference = .any,
-    use_cache: bool = true,
-    timeout_ms: ?u64 = null,
+    useCache: bool = true,
+    timeoutMs: ?u64 = null,
 };
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `family` | `AddressFamilyPreference` | `.any` | Address family filter (`.any`, `.ipv4`, `.ipv6`) |
-| `use_cache` | `bool` | `true` | When true, queries and updates the client's cache |
-| `timeout_ms` | `?u64` | `null` | Optional lookup timeout override |
+| `useCache` | `bool` | `true` | When true, queries and updates the client's cache |
+| `timeoutMs` | `?u64` | `null` | Optional lookup timeout override |
 
 ### `AddressFamilyPreference`
 

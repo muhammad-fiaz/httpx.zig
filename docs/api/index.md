@@ -6,111 +6,66 @@ This page maps the explicit public API surface exposed by `httpx.zig`.
 
 The root module re-exports core types and convenience helpers so most apps can import only `httpx`.
 
-### Client Operations
+### Client Operations (URL-first)
 
-- `httpx.fetch(url, options)` — **primary unified fetch operation** (supports methods, typed JSON, headers, body)
-- `httpx.client.fetch(url, options)` — primary unified fetch under dot-notation namespace
-- `httpx.get / post / put / patch / delete / head / options / trace / connect(...)`
-- `httpx.client.get / post / put / patch / delete / ...` (clean dot notation namespace)
-- `httpx.request(options)`
-- `httpx.getAll(urls)` — fetch multiple URLs concurrently (array passed directly, no & needed)
+- `httpx.fetch(url, options)` — **primary unified fetch operation** (methods, typed JSON, headers, body)
+- `httpx.get / post / put / patch / delete / head / options / trace / connect / request(url, options)`
+- `httpx.getAll(urls)` — fetch multiple URLs concurrently
 - `httpx.requestAll(requests)` — perform multiple custom requests concurrently
+- `httpx.download / updateFile / lookupFileInfo / graphqlQuery / resolveHost / resolveUrl / isOnline / checkConnectivity`
 
 ### Client Lifecycle
 
 - `httpx.Client.init(allocator, io, config)` — initialize client with allocator, io, and configuration (or `.{}` for defaults)
+- `client.close()` — purge the connection pool; `client.reset()` — close + clear DNS cache
 
 ### Server Lifecycle
 
 - `httpx.Server.init(allocator, io, config)` — initialize server with allocator, io, and configuration (or `.{}` for defaults)
-- `httpx.serve(path, handler)` — one-shot server on port 8080
-- `httpx.serveWithConfig(allocator, config, path, handler)` — one-shot server with explicit configuration
+- `server.run()` — blocking loop; `server.start()` — background thread
+- `server.requestShutdown()` / `server.stop()` / `server.pause()` / `server.resumeAccepting()`
+- `server.localPort()` — actual bound port
 
 ### Configuration Types
 
-- `httpx.ClientConfig` — client settings (protocols, timeouts, redirects, pool limits, proxies, TLS)
-- `httpx.ServerConfig` — server settings (host, port, protocols, workers, TLS, limits)
-- `httpx.RequestOptions` — per-request options (headers, body, params, timeouts)
+- `httpx.ClientConfig` — client settings (protocols, timeouts, redirects, retries, pool, proxy, TLS, DNS cache)
+- `httpx.ServerConfig` — server settings (host, port, strategy, body limits, protocols, docs, TLS, watcher, templates, logging)
+- `httpx.RequestOptions` — per-request options (headers, query, body/json/form/text, auth, timeouts, proxy, TLS)
 - `httpx.HttpVersion` — protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`)
-- `httpx.BasicAuth`
-- `httpx.Proxy`
-- `httpx.ProxyKind`
+- `httpx.PortStrategy` — `.incremental`, `.strict`, `.exit`
+- `httpx.DownloadOptions` / `DownloadResult` / `VerifyOptions` / `UpdateOptions` / `ExistingFilePolicy` / `ProgressMode`
 
 ### Server Types
 
-- `httpx.Server`
-- `httpx.ServerConfig`
-- `httpx.PortConflictStrategy`
-- `httpx.FileResponseOptions`
+- `httpx.Server`, `httpx.ServerConfig`, `httpx.Router`, `httpx.Context`, `httpx.Response`
+- `httpx.TlsListener` via `httpx.tls.Listener` (use `httpx.tls.Listener`, `httpx.tls.Request`, `httpx.tls.Response`)
 
 ### Concurrency Helpers
 
-- `httpx.all(...)`
-- `httpx.any(...)`
-- `httpx.race(...)`
-- `httpx.allSettled(...)`
-- `httpx.first(...)` (alias for `any`)
-- `httpx.fastest(...)` (alias for `race`)
-- `httpx.settled(...)` (alias for `allSettled`)
-- `httpx.successfulCount(...)`
-- `httpx.errorCount(...)`
-- `httpx.BatchBuilder`
+- `client.getAll(urls)` / `client.requestAll(reqs)` (+ `httpx.getAll` / `httpx.requestAll`)
+- `httpx.WorkerPool` / `httpx.Queue` (`src/concurrency/`)
 
 ### Network Helpers
 
-- `httpx.netInit()` / `httpx.netDeinit()`
-- `httpx.resolveAddress(allocator, host, port)`
-- `httpx.resolveAllAddresses(allocator, host, port)`
-- `httpx.parseHostAndPort(input, default_port)`
-- `httpx.parseAndResolveAddress(input, default_port)`
-- `httpx.isIpAddress/isIp4Address/isIp6Address(...)`
+- `client.resolve(host, port, options)` / `client.resolveUrl(url, options)`
+- `httpx.resolve.Resolver`, `httpx.dns`, `httpx.socks5`, `httpx.proxy`
+- `httpx.tcp`, `httpx.udp`, `httpx.Address`, `httpx.connectivity`
 
 ### Utility Aliases
 
-- `httpx.queryValue(...)`
-- `httpx.parseSetCookiePair(...)`
-- `httpx.mimeTypeFromPath(...)`
-- `httpx.mimeTypeFromPathOr(...)`
-- `httpx.mimeTypeFromPathWith(...)`
-- `httpx.MimeMapping`
-- `httpx.defaultMimeMappings`
-- `httpx.encodeVarInt(...)`
-- `httpx.decodeVarInt(...)`
-- `httpx.sleepMs(ms)`
-- `httpx.defaultIo()`
-
-### Caching
-
-- `httpx.CacheControl` — parse Cache-Control headers
-- `httpx.HttpCache` — LRU in-memory cache with TTL
-- `httpx.CacheEntry` — individual cache entry
-- `httpx.ConditionalGet` — ETag/If-None-Match conditional requests
-
-### Streaming Compression
-
-- `httpx.StreamingCompressor` — chunked gzip/deflate/brotli/zstd compression
-- `httpx.StreamingDecompressor` — chunked decompression
-- `httpx.ContentEncoding` — encoding enum
-- `httpx.decompress(...)` / `httpx.compress(...)` — one-shot compression
-
-### Buffer Pool
-
-- `httpx.BufferPool` — pre-allocated buffer pool with ownership tracking
+- `httpx.mime.fromPath(path)` — extension-based MIME lookup
+- `httpx.clock.millisNow()` / `sleepMillis(ms)` — monotonic clock helpers
+- `httpx.Uri.parse(...)` — RFC 3986 URI parsing
+- `httpx.quic.varint` — QUIC variable-length integers
 
 ### DNS Cache
 
-- `httpx.dns.DnsCache` — thread-safe DNS cache with TTL and eviction
+- Client DNS cache via `ClientConfig.dnsCache` (`enable`, `ttlMs`, `negativeTtlMs`, `maxEntries`)
 
 ### WebSocket
 
-- `httpx.isWebSocketUpgrade(...)`, `httpx.wsExtractKey(...)`, `httpx.wsAcceptKey(...)`
-- `httpx.wsUpgradeHeaders(...)` — generate upgrade response headers
-- `httpx.wsEncodeFrame(...)` / `httpx.wsDecodeFrame(...)` — frame encode/decode
-- `httpx.wsTextFrame(...)`, `wsBinaryFrame(...)`, `wsPingFrame(...)`, `wsPongFrame(...)`, `wsCloseFrame(...)`
-
-### Debug
-
-- `httpx.debug` — structured debug logging with `entry`/`exit`/`log`/`detail` calls
+- `httpx.websocket.Handshake.computeAccept / buildUpgradeRequest / validateUpgradeResponse`
+- `httpx.websocket.Frame.parseFrameHeader / buildFrameHeader / applyMask / generateKey`
 
 ## API Groups
 
@@ -136,9 +91,8 @@ The root module re-exports core types and convenience helpers so most apps can i
 
 ## Customization and Callbacks
 
-- Client interceptors for request/response hooks: `addInterceptor(...)`
-- Server logging sinks via `ServerConfig.log_fn`
-- Middleware logger customization via `loggerWithConfig(.{ .log_fn = ... })`
-- Request and response JSON helpers: `RequestOptions.withJson(...)`, `Response.json(T, options)`, `Response.jsonLeaky(T, options)`
-- Socket and UDP primitives: `Socket`, `UdpSocket`, `SocketIoReader`, `SocketIoWriter`
-- Custom middleware structs with `handler` functions
+- Server event callbacks via `ServerConfig.logging = .{ .callback = onEvent }`
+- Client event callbacks via `ClientConfig.eventCallback`
+- Response JSON helpers: `Response.json(T)`, `Response.jsonAlloc(T, allocator)`
+- Socket primitives: `httpx.tcp.Socket` / `httpx.tcp.Listener`, `httpx.udp`
+- Custom middleware: `fn (ctx: *Context, next: NextFn) anyerror!Response`

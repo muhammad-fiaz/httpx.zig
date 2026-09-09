@@ -68,33 +68,33 @@ pub const ColorMode = enum { auto, always, never };
 /// Identifies what happened in the server event.
 pub const ServerEventKind = enum {
     /// Server bound and is ready to accept connections.
-    server_started,
+    serverStarted,
     /// Server has finished its accept loop and shut down.
-    server_stopped,
+    serverStopped,
     /// A new TCP connection was accepted.
-    connection_accepted,
+    connectionAccepted,
     /// A connection was closed (normally or by error).
-    connection_closed,
+    connectionClosed,
     /// A complete HTTP request was received and parsed.
-    request_received,
+    requestReceived,
     /// A request was fully handled and the response was sent.
-    request_completed,
+    requestCompleted,
     /// A request failed before or during handler execution.
-    request_failed,
+    requestFailed,
     /// The handler returned an error.
-    handler_error,
+    handlerError,
     /// A middleware function returned an error.
-    middleware_error,
+    middlewareError,
     /// A worker thread started.
-    worker_started,
+    workerStarted,
     /// A worker thread stopped.
-    worker_stopped,
+    workerStopped,
     /// No route matched the request path.
-    route_not_found,
+    routeNotFound,
     /// The path matched a route but the method did not.
-    method_not_allowed,
+    methodNotAllowed,
     /// A TLS handshake failed or was rejected.
-    tls_handshake_failed,
+    tlsHandshakeFailed,
 };
 
 /// Structured server-side event delivered to the application callback.
@@ -115,11 +115,11 @@ pub const ServerEvent = struct {
     /// HTTP response status code (0 when not applicable).
     status: u16 = 0,
     /// Wall-clock request duration in milliseconds (0 when not applicable).
-    duration_ms: i64 = 0,
+    durationMs: i64 = 0,
     /// Request body bytes received (0 when not applicable).
-    bytes_in: usize = 0,
+    bytesIn: usize = 0,
     /// Response bytes sent including headers (0 when not applicable).
-    bytes_out: usize = 0,
+    bytesOut: usize = 0,
     /// Optional human-readable message for diagnostic context.
     message: []const u8 = "",
 
@@ -132,11 +132,6 @@ pub const ServerEvent = struct {
     pub fn statusCode(self: ServerEvent) u16 {
         return self.status;
     }
-
-    /// Convenience accessor — same as `event.duration_ms`.
-    pub fn durationMs(self: ServerEvent) i64 {
-        return self.duration_ms;
-    }
 };
 
 /// Function type for server-side event callbacks.
@@ -145,9 +140,9 @@ pub const ServerEvent = struct {
 ///
 /// ```zig
 /// fn onEvent(event: httpx.ServerEvent) void {
-///     if (event.kind == .request_completed) {
+///     if (event.kind == .requestCompleted) {
 ///         std.debug.print("{s} {s} {d} {d}ms\n", .{
-///             event.method, event.path, event.status, event.duration_ms,
+///             event.method, event.path, event.status, event.durationMs,
 ///         });
 ///     }
 /// }
@@ -161,25 +156,25 @@ pub const ServerEventCallback = *const fn (event: ServerEvent) void;
 /// Identifies what happened in the client event.
 pub const ClientEventKind = enum {
     /// A fetch/request was started.
-    request_started,
+    requestStarted,
     /// A request completed successfully (response received).
-    request_completed,
+    requestCompleted,
     /// A request failed (transport or protocol error).
-    request_failed,
+    requestFailed,
     /// A redirect was followed.
     redirect,
     /// A request is being retried.
     retry,
     /// A DNS lookup was performed.
-    dns_lookup,
+    dnsLookup,
     /// A DNS cache hit occurred (no network lookup needed).
-    dns_cache_hit,
+    dnsCacheHit,
     /// A new TCP connection was established.
-    connection_established,
+    connectionEstablished,
     /// An existing pooled connection was reused.
-    connection_reused,
+    connectionReused,
     /// A TLS handshake was completed.
-    tls_handshake,
+    tlsHandshake,
     /// A request or operation timed out.
     timeout,
     /// A request was cancelled.
@@ -203,11 +198,11 @@ pub const ClientEvent = struct {
     /// HTTP response status code (0 when not applicable).
     status: u16 = 0,
     /// Wall-clock request duration in milliseconds (0 when not applicable).
-    duration_ms: i64 = 0,
+    durationMs: i64 = 0,
     /// Request body bytes sent (0 when not applicable).
-    bytes_sent: usize = 0,
+    bytesSent: usize = 0,
     /// Response body bytes received (0 when not applicable).
-    bytes_received: usize = 0,
+    bytesReceived: usize = 0,
     /// Optional human-readable message for diagnostic context.
     message: []const u8 = "",
 
@@ -220,11 +215,6 @@ pub const ClientEvent = struct {
     pub fn statusCode(self: ClientEvent) u16 {
         return self.status;
     }
-
-    /// Convenience accessor — same as `event.duration_ms`.
-    pub fn durationMs(self: ClientEvent) i64 {
-        return self.duration_ms;
-    }
 };
 
 /// Function type for client-side event callbacks.
@@ -233,9 +223,9 @@ pub const ClientEvent = struct {
 ///
 /// ```zig
 /// fn onClientEvent(event: httpx.ClientEvent) void {
-///     if (event.kind == .request_completed) {
+///     if (event.kind == .requestCompleted) {
 ///         std.debug.print("{s} {d} {d}ms\n", .{
-///             event.method, event.status, event.duration_ms,
+///             event.method, event.status, event.durationMs,
 ///         });
 ///     }
 /// }
@@ -292,31 +282,31 @@ pub const Sink = struct {
 /// Copyable by value; `log()` is thread-safe when the underlying sink is.
 pub const Logger = struct {
     sink: Sink,
-    min_level: Level = .info,
+    minLevel: Level = .info,
     enabled: bool = true,
 
     /// Built-in writer-backed logger (application use).
-    pub fn writer(ws: *WriterSink, min_level: Level, enabled: bool) Logger {
+    pub fn writer(ws: *WriterSink, minLevel: Level, enabled: bool) Logger {
         return .{
             .sink = ws.sink(),
-            .min_level = min_level,
+            .minLevel = minLevel,
             .enabled = enabled,
         };
     }
 
     /// Wrap an arbitrary custom/external logger.
-    pub fn custom(sink: Sink, min_level: Level, enabled: bool) Logger {
-        return .{ .sink = sink, .min_level = min_level, .enabled = enabled };
+    pub fn custom(sink: Sink, minLevel: Level, enabled: bool) Logger {
+        return .{ .sink = sink, .minLevel = minLevel, .enabled = enabled };
     }
 
     /// A logger that swallows everything (tests, quiet mode).
     pub fn disabled() Logger {
-        return .{ .sink = .{ .ptr = undefined, .logFn = &noopLog }, .min_level = .trace, .enabled = false };
+        return .{ .sink = .{ .ptr = undefined, .logFn = &noopLog }, .minLevel = .trace, .enabled = false };
     }
 
     pub fn log(self: *const Logger, level: Level, comptime component: []const u8, comptime fmt: []const u8, args: anytype) void {
         if (!self.enabled) return;
-        if (@intFromEnum(level) < @intFromEnum(self.min_level)) return;
+        if (@intFromEnum(level) < @intFromEnum(self.minLevel)) return;
 
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch blk: {
@@ -333,7 +323,7 @@ pub const Logger = struct {
     /// Log with structured fields appended after the message.
     pub fn logFields(self: *const Logger, level: Level, comptime component: []const u8, fields: []const Field, comptime fmt: []const u8, args: anytype) void {
         if (!self.enabled) return;
-        if (@intFromEnum(level) < @intFromEnum(self.min_level)) return;
+        if (@intFromEnum(level) < @intFromEnum(self.minLevel)) return;
 
         var buf: [1024]u8 = undefined;
         var fbs = std.Io.Writer.fixed(&buf);
@@ -500,7 +490,7 @@ test "redaction list" {
 test "ServerEvent callback receives structured data" {
     const Capture = struct {
         seen: usize = 0,
-        last_kind: ServerEventKind = .server_started,
+        last_kind: ServerEventKind = .serverStarted,
         last_status: u16 = 0,
         last_method: []const u8 = "",
 
@@ -514,34 +504,34 @@ test "ServerEvent callback receives structured data" {
 
     // Verify event construction and field access compile and produce correct values.
     const ev = ServerEvent{
-        .kind = .request_completed,
+        .kind = .requestCompleted,
         .level = .info,
         .method = "GET",
         .path = "/health",
         .status = 200,
-        .duration_ms = 3,
-        .bytes_in = 0,
-        .bytes_out = 64,
+        .durationMs = 3,
+        .bytesIn = 0,
+        .bytesOut = 64,
     };
     try std.testing.expectEqualStrings("GET", ev.methodName());
     try std.testing.expectEqual(@as(u16, 200), ev.statusCode());
-    try std.testing.expectEqual(@as(i64, 3), ev.durationMs());
+    try std.testing.expectEqual(@as(i64, 3), ev.durationMs);
 }
 
 test "ClientEvent callback receives structured data" {
     const ev = ClientEvent{
-        .kind = .request_completed,
+        .kind = .requestCompleted,
         .level = .info,
         .method = "POST",
         .url = "https://example.com/api",
         .status = 201,
-        .duration_ms = 42,
-        .bytes_sent = 128,
-        .bytes_received = 512,
+        .durationMs = 42,
+        .bytesSent = 128,
+        .bytesReceived = 512,
     };
     try std.testing.expectEqualStrings("POST", ev.methodName());
     try std.testing.expectEqual(@as(u16, 201), ev.statusCode());
-    try std.testing.expectEqual(@as(i64, 42), ev.durationMs());
+    try std.testing.expectEqual(@as(i64, 42), ev.durationMs);
 }
 
 test "null callback produces no overhead path" {
@@ -550,7 +540,7 @@ test "null callback produces no overhead path" {
     var called = false;
     if (callback) |cb| {
         called = true;
-        cb(.{ .kind = .request_completed, .level = .info });
+        cb(.{ .kind = .requestCompleted, .level = .info });
     }
     try std.testing.expect(!called);
 }

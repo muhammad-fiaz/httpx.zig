@@ -1,60 +1,31 @@
-# Readiness Probe Middleware Example
+# Readiness Probe Example
 
-Demonstrates the `readinessProbe` middleware for Kubernetes readiness checks, alongside the `healthCheck` middleware for liveness probes.
-
-## Features Covered
-
-- **Liveness Probe**: `healthCheck()` returns 200 when the process is running. Used by Kubernetes to detect deadlocks.
-- **Readiness Probe**: `readinessProbe()` returns 200 when the service is ready to accept traffic. Used during rolling updates.
-- **Configurable Paths**: Both probes support custom paths and response bodies.
-
-## Demo Program
+Liveness/readiness probe routes for Kubernetes checks. Register plain
+routes (see `examples/health_check.zig`).
 
 ```zig
-// Liveness probe — always returns 200 when the process is running
-try server.use(httpx.middleware.healthCheck(.{
-    .path = "/healthz",
-    .body = "{\"status\":\"ok\"}",
-}));
+fn healthHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.renderJson(.{ .status = "healthy" });
+}
 
-// Readiness probe — returns 200 when the service is ready to accept traffic
-try server.use(httpx.middleware.readinessProbe(.{
-    .path = "/readyz",
-    .body = "{\"ready\":true}",
-}));
+fn readyHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.renderJson(.{ .status = "ready" });
+}
 
-// Application routes
-try server.get("/", homeHandler);
-try server.get("/api/users", usersHandler);
+try server.get("/healthz", healthHandler);
+try server.get("/readyz", readyHandler);
 ```
+
+`httpx.health.Status` (`.healthy`, `.ready`, ...) renders standard JSON
+bodies via `jsonBody()` with matching HTTP status codes.
 
 ## Run
 
-```
-zig build run-all-readiness_probe_example
-```
-
-## Expected Output
-
-```
-GET /healthz (liveness) -> 200 {"status":"ok"}
-GET /readyz (readiness) -> 200 {"ready":true}
-GET /api/users          -> 200 {"users":["alice","bob","charlie"]}
+```bash
+zig build run-health-check
 ```
 
-## Kubernetes Integration
+## What to Verify
 
-```yaml
-livenessProbe:
-  httpGet:
-    path: /healthz
-    port: 8080
-  initialDelaySeconds: 5
-  periodSeconds: 10
-readinessProbe:
-  httpGet:
-    path: /readyz
-    port: 8080
-  initialDelaySeconds: 3
-  periodSeconds: 5
-```
+- `GET /healthz` returns 200 (liveness: the process is running).
+- `GET /readyz` returns 200 (readiness: ready to accept traffic).

@@ -83,8 +83,8 @@ pub fn main() !void {
     // Metadata
     const meta = try doc.metadata();
     std.debug.print("  Description: {s}\n", .{meta.description});
-    std.debug.print("  OG title: {s}\n", .{meta.og_title});
-    std.debug.print("  OG image: {s}\n", .{meta.og_image});
+    std.debug.print("  OG title: {s}\n", .{meta.ogTitle});
+    std.debug.print("  OG image: {s}\n", .{meta.ogImage});
     std.debug.print("  Canonical: {s}\n", .{meta.canonical});
     std.debug.print("  Language: {s}\n", .{meta.language});
 
@@ -193,7 +193,7 @@ pub fn main() !void {
     defer sm.deinit();
     std.debug.print("  Sitemap URLs ({d}):\n", .{sm.urls.len});
     for (sm.urls) |u| {
-        std.debug.print("    loc={s} lastmod={s} prio={d:.1}\n", .{ u.loc, u.lastmod, u.priority orelse 0.0 });
+        std.debug.print("    loc={s} lastMod={s} prio={d:.1}\n", .{ u.loc, u.lastMod, u.priority orelse 0.0 });
     }
 
     std.debug.print("\nAll parsing tests and demonstrations completed successfully.\n", .{});

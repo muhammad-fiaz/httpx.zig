@@ -50,6 +50,21 @@ pub const Protocol = enum {
         if (std.mem.eql(u8, name, "h3")) return .h3;
         return null;
     }
+
+    /// Bridges the client-facing version selector to its ALPN identifier.
+    /// `.auto` has no wire form and maps to null; every concrete version
+    /// maps through the single `HttpVersion.wireName` table, so the two
+    /// enums cannot drift apart (see round-trip test below).
+    pub fn fromHttpVersion(v: @import("../../common/http_version.zig").HttpVersion) ?Protocol {
+        const wire = v.wireName() orelse return null;
+        return fromWire(wire);
+    }
+
+    /// Bridges an ALPN identifier back to the client-facing selector.
+    /// Total over `Protocol`: every variant maps to a concrete version.
+    pub fn toHttpVersion(self: Protocol) @import("../../common/http_version.zig").HttpVersion {
+        return @import("../../common/http_version.zig").HttpVersion.fromWire(self.wireName()).?;
+    }
 };
 
 /// Server default preference: h3 > h2 > http/1.1 > http/1.0
@@ -133,6 +148,22 @@ test "protocol wire names roundtrip" {
         const back = Protocol.fromWire(p.wireName());
         try std.testing.expectEqual(p, back.?);
     }
+}
+
+test "http version and ALPN identifiers stay in sync" {
+    const HttpVersion = @import("../../common/http_version.zig").HttpVersion;
+    const pairs = [_]struct { v: HttpVersion, p: Protocol }{
+        .{ .v = .http10, .p = .@"http/1.0" },
+        .{ .v = .http11, .p = .@"http/1.1" },
+        .{ .v = .http2, .p = .h2 },
+        .{ .v = .http3, .p = .h3 },
+    };
+    for (pairs) |pair| {
+        try std.testing.expectEqual(pair.p, Protocol.fromHttpVersion(pair.v).?);
+        try std.testing.expectEqual(pair.v, pair.p.toHttpVersion());
+        try std.testing.expectEqualStrings(pair.v.wireName().?, pair.p.wireName());
+    }
+    try std.testing.expect(Protocol.fromHttpVersion(.auto) == null);
 }
 
 test "build and parse ALPN list" {

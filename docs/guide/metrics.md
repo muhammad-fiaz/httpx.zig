@@ -4,181 +4,91 @@
 
 ## Overview
 
-`Metrics` uses `std.atomic.Value` for all counters, making it safe to call from multiple threads without locks. `MetricsSnapshot` is a plain struct copy taken at a point in time, safe to read without synchronization.
+`httpx.Metrics` (`src/web/metrics/registry.zig`) uses `std.atomic.Value` for all counters, making it safe to call from multiple threads without locks. `snapshot()` returns a plain `MetricsSnapshot` struct copy, safe to read without synchronization. Servers record automatically into their own registry; the API below is for custom instrumentation.
 
-## Initializing Metrics
-
-```zig
-const httpx = @import("httpx");
-
-// Basic metrics instance
-var metrics = httpx.Metrics.init();
-
-// With a custom callback for external integrations
-var metrics = httpx.Metrics.initWithCallback(myCallbackFn);
-```
-
-## Recording Events
-
-### Requests and responses
+## Recording events
 
 ```zig
-metrics.recordRequest();                         // increment request counter
-metrics.recordResponse(200, 1024, 1_500_000);   // status, bytes, latency_ns
-metrics.recordResponse(500, 0, 800_000);
-metrics.recordError();                           // increment error counter
+var reg = httpx.Metrics{};
+reg.recordRequest();                            // +1 requests, +1 in-flight
+reg.recordRequestMethod("GET");                 // per-method count
+reg.recordResponseFull(200, 1_500_000, 1024);   // status, latency_ns, bytes
+reg.recordResponseFull(500, 800_000, 0);
+reg.recordError();                              // +1 errors, -1 in-flight
+reg.connectionOpened();                         // +1 activeConnections
+reg.connectionClosed();                         // -1 activeConnections (underflow-safe)
+reg.recordBytesIn(4096);
+reg.reset();                                    // zero everything
 ```
 
-`recordResponse` automatically buckets the status code into `responses_2xx`, `responses_3xx`, `responses_4xx`, or `responses_5xx` and updates latency min/max/total.
-
-### Connections
-
-```zig
-metrics.connectionOpened();   // +1 to active_connections
-metrics.connectionClosed();   // -1 to active_connections
-```
-
-### Bytes sent
-
-```zig
-metrics.recordBytesSent(4096);
-```
-
-## Taking a Snapshot
+## Taking a snapshot
 
 `snapshot()` reads all atomic values and returns a `MetricsSnapshot`:
 
 ```zig
-const snap = metrics.snapshot();
+const snap = reg.snapshot();
 
 std.debug.print("requests={d} responses={d}\n", .{
-    snap.total_requests, snap.total_responses,
+    snap.requestsTotal, snap.responsesTotal,
 });
 std.debug.print("2xx={d} 4xx={d} 5xx={d}\n", .{
-    snap.responses_2xx, snap.responses_4xx, snap.responses_5xx,
+    snap.status2xx, snap.status4xx, snap.status5xx,
 });
-std.debug.print("avg_latency={d}ns\n", .{snap.avg_latency_ns});
+std.debug.print("avg_latency={d:.3}ms\n", .{snap.averageLatencyMs()});
 std.debug.print("error_rate={d:.2}\n", .{snap.errorRate()});
-std.debug.print("success_rate={d:.2}\n", .{snap.successRate()});
 ```
 
 ### `MetricsSnapshot` fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `total_requests` | `u64` | Total recorded requests |
-| `total_responses` | `u64` | Total recorded responses |
-| `active_connections` | `i64` | Current open connections |
-| `total_errors` | `u64` | Total errors |
-| `bytes_sent` | `u64` | Total bytes sent |
-| `bytes_received` | `u64` | Total bytes received |
-| `responses_2xx` | `u64` | 2xx response count |
-| `responses_3xx` | `u64` | 3xx response count |
-| `responses_4xx` | `u64` | 4xx response count |
-| `responses_5xx` | `u64` | 5xx response count |
-| `avg_latency_ns` | `u64` | Average response latency (nanoseconds) |
-| `min_latency_ns` | `u64` | Minimum observed latency |
-| `max_latency_ns` | `u64` | Maximum observed latency |
+| `requestsTotal` | `u64` | Total recorded requests |
+| `responsesTotal` | `u64` | Total recorded responses |
+| `errorsTotal` | `u64` | Total errors |
+| `timeoutsTotal` | `u64` | Total timeouts |
+| `bytesIn` / `bytesOut` | `u64` | Byte counters |
+| `activeConnections` / `activeRequests` | `u64` | Current gauges |
+| `status2xx` / `status3xx` / `status4xx` / `status5xx` | `u64` | Status class counts |
+| `methodGet` / `methodPost` / `methodPut` / `methodDelete` / `methodPatch` / `methodHead` / `methodOptions` / `methodOther` | `u64` | Per-method counts |
+| `durationCount` | `u64` | Latency sample count |
+| `durationSumSeconds` | `f64` | Latency sum in seconds |
+| `durationBuckets` | `[11]u64` | Cumulative histogram buckets |
 
 ### `MetricsSnapshot` methods
 
 | Method | Returns | Description |
 |--------|---------|-------------|
-| `totalRequests()` | `u64` | Return `total_requests` |
-| `totalResponses()` | `u64` | Return `total_responses` |
-| `activeConnections()` | `i64` | Return `active_connections` |
-| `errors()` | `u64` | Return `total_errors` |
-| `errorRate()` | `f64` | `total_errors / total_requests`, 0.0 if no requests |
-| `successRate()` | `f64` | `responses_2xx / total_responses`, 0.0 if no responses |
-| `redirectRate()` | `f64` | `responses_3xx / total_responses` |
-| `clientErrorRate()` | `f64` | `responses_4xx / total_responses` |
-| `serverErrorRate()` | `f64` | `responses_5xx / total_responses` |
-| `throughputBytesPerResponse()` | `u64` | Average bytes per response |
+| `errorRate()` | `f64` | `errorsTotal / requestsTotal`, 0.0 if no requests |
+| `averageLatencySeconds()` | `f64` | Mean latency in seconds |
+| `averageLatencyMs()` | `f64` | Mean latency in milliseconds |
 
-## Custom Callbacks
-
-Register a callback to forward events to external monitoring systems:
+## Server snapshots
 
 ```zig
-fn myCallback(event: httpx.MetricsEvent) void {
-    switch (event) {
-        .request => { /* increment external counter */ },
-        .response => |r| {
-            std.debug.print("status={d} latency={d}ns\n", .{
-                r.status, r.latency_ns,
-            });
-        },
-        .err => { /* alert on errors */ },
-        .connection_open, .connection_close => {},
-        .bytes_sent => |n| _ = n,
-    }
-}
-
-var metrics = httpx.Metrics.initWithCallback(myCallback);
+const snap = server.snapshot(); // ServerSnapshot: uptimeMs, gauges, totals
+std.debug.print("uptime={d}ms rps={d:.1}\n", .{ snap.uptimeMs, snap.requestsPerSecond() });
+const m = server.metricsSnapshot(); // raw MetricsSnapshot
 ```
 
-`MetricsEvent` is a tagged union with variants: `request`, `response` (with `status`, `bytes`, `latency_ns`), `bytes_sent`, `err`, `connection_open`, `connection_close`.
+Mount a live Prometheus endpoint with `try server.metrics("/metrics");`.
 
-## Thread Safety
+## Thread safety
 
-All `Metrics` methods use `.monotonic` atomic operations. This means:
+All `Metrics` methods use `.monotonic` atomic operations:
 - Individual counter updates are atomic and safe from any thread.
-- `snapshot()` reads each counter independently; there is no global snapshot lock, so values from different fields may come from slightly different instants. For most observability use cases this is fine.
-- If you need a strictly consistent snapshot, take it from a single thread or add your own mutex.
+- `snapshot()` reads each counter independently; there is no global snapshot lock, so fields may come from slightly different instants. For most observability use cases this is fine.
 
-## Resetting Counters
+## Prometheus exposition
 
-```zig
-metrics.reset(); // sets all counters back to zero
-```
+`reg.render(writer)` emits Prometheus 0.0.4 text with standard snake_case wire
+names (`http_requests_total`, `http_request_duration_seconds_bucket`, …).
+See [Observability: Metrics](/observability/metrics).
 
-## Exposing a Metrics Endpoint
-
-```zig
-const httpx = @import("httpx");
-
-var global_metrics = httpx.Metrics.init();
-
-fn metricsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    const snap = global_metrics.snapshot();
-    return ctx.json(.{
-        .requests = snap.total_requests,
-        .responses = snap.total_responses,
-        .errors = snap.total_errors,
-        .success_rate = snap.successRate(),
-        .error_rate = snap.errorRate(),
-        .avg_latency_ms = snap.avg_latency_ns / 1_000_000,
-        .active_connections = snap.active_connections,
-    });
-}
-```
-
-## Full Working Example
+## Full working example
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
-
-var metrics = httpx.Metrics.init();
-
-fn apiHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    metrics.recordRequest();
-    const t0 = std.time.nanoTimestamp();
-
-    const resp = try ctx.json(.{ .hello = "world" });
-
-    const elapsed: u64 = @intCast(std.time.nanoTimestamp() - t0);
-    metrics.recordResponse(200, resp.body.len, elapsed);
-    return resp;
-}
-
-fn metricsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    const snap = metrics.snapshot();
-    return ctx.json(.{
-        .requests = snap.total_requests,
-        .success_rate = snap.successRate(),
-    });
-}
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -186,11 +96,18 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{});
+    var server = try httpx.Server.init(allocator, io, .{ .port = 0 });
     defer server.deinit();
 
     try server.get("/api", apiHandler);
-    try server.get("/metrics", metricsHandler);
-    try server.listen();
+    try server.metrics("/metrics");
+
+    const thread = try server.start();
+    defer thread.join();
+    defer server.requestShutdown();
+}
+
+fn apiHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.renderJson(.{ .hello = "world" });
 }
 ```

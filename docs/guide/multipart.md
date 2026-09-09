@@ -195,7 +195,7 @@ pub fn main() !void {
     defer server.deinit();
 
     try server.post("/upload", uploadHandler);
-    try server.listen();
+    server.run();
 }
 ```
 ## Large File Uploads & Windows Compatibility

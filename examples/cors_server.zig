@@ -10,7 +10,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .max_connections = 5,
+        .maxConnections = 5,
     });
     defer server.deinit();
 
@@ -44,9 +44,9 @@ pub fn main() !void {
 }
 
 fn dataHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 200, .body = "{\"data\":\"CORS enabled\"}", .content_type = "application/json" };
+    return .{ .status = 200, .body = "{\"data\":\"CORS enabled\"}", .contentType = "application/json" };
 }
 
 fn createHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 201, .body = "{\"created\":true}", .content_type = "application/json" };
+    return .{ .status = 201, .body = "{\"created\":true}", .contentType = "application/json" };
 }

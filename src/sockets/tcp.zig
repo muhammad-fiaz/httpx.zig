@@ -28,6 +28,7 @@ const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
 const address_mod = @import("../net/address.zig");
+const sync = @import("../common/sync.zig");
 const posix = std.posix;
 const builtin = @import("builtin");
 
@@ -96,12 +97,17 @@ const ws = if (is_windows) struct {
     pub const TCP_NODELAY: i32 = 1;
     pub const IPPROTO_TCP_OPT: i32 = 6;
 
-    var wsa_done = std.atomic.Value(bool).init(false);
+    var wsa_once: sync.Once = .{};
 
-    pub fn startup() void {
-        if (wsa_done.swap(true, .acq_rel)) return;
+    fn doWsaStartup() void {
         var data: WSADATA = undefined;
         _ = WSAStartup(0x0202, &data);
+    }
+
+    pub fn startup() void {
+        // Once-gated: racing threads block until WSAStartup completes,
+        // so nobody observes WSANOTINITIALISED on socket().
+        wsa_once.call(doWsaStartup);
     }
 
     /// Map winsock last-error to ConnectError without calling unexpectedStatus.
@@ -186,13 +192,18 @@ pub fn setKeepAlive(sock: net.Socket.Handle, idle_secs: u32) void {
 pub const UploadStream = struct {
     handle: isize, // SOCKET (winsock) or fd (posix)
 
-    var wsa_done = std.atomic.Value(bool).init(false);
+    var wsa_once: sync.Once = .{};
+
+    fn doEnsureWsa() void {
+        var data: ws.WSADATA = undefined;
+        _ = ws.WSAStartup(0x0202, &data);
+    }
 
     pub fn ensureWinsock() void {
         if (!is_windows) return;
-        if (wsa_done.swap(true, .acq_rel)) return;
-        var data: ws.WSADATA = undefined;
-        _ = ws.WSAStartup(0x0202, &data);
+        // Once-gated (see ws.startup): racing threads block until WSAStartup
+        // completes instead of observing WSANOTINITIALISED on socket().
+        wsa_once.call(doEnsureWsa);
     }
 
     /// Connects to an IPv4 literal host. Returns error.ConnectFailed on any
@@ -209,8 +220,11 @@ pub const UploadStream = struct {
                 .addr = host,
             };
             if (ws.connect(h, &addr, @sizeOf(ws.sockaddr_in)) == ws.SOCKET_ERROR) {
+                // Read the error BEFORE closesocket: successful winsock calls
+                // reset the thread's last-error, clobbering the real code.
+                const err = ws.mapConnectError();
                 _ = ws.closesocket(h);
-                return ws.mapConnectError();
+                return err;
             }
             ws.applyTimeouts(h);
             return .{ .handle = @intCast(h) };
@@ -638,15 +652,19 @@ fn connectAddressWindows(io: std.Io, addr: *const address_mod.Address) ConnectEr
     switch (addr.family) {
         .ip4 => {
             const h = ws.socket(ws.AF_INET, ws.SOCK_STREAM, ws.IPPROTO_TCP);
-            if (h == ws.INVALID_SOCKET) return ws.mapConnectError();
+            if (h == ws.INVALID_SOCKET) {
+                return ws.mapConnectError();
+            }
             var sa = ws.sockaddr_in{
                 .family = @intCast(ws.AF_INET),
                 .port = std.mem.nativeToBig(u16, addr.port),
                 .addr = addr.bytes[0..4].*,
             };
             if (ws.connect(h, &sa, @sizeOf(ws.sockaddr_in)) == ws.SOCKET_ERROR) {
+                // Read the error BEFORE closesocket (see connectIPv4).
+                const err = ws.mapConnectError();
                 _ = ws.closesocket(h);
-                return ws.mapConnectError();
+                return err;
             }
             ws.applyTimeouts(h);
             return Socket.fromWinsock(h, io);
@@ -661,8 +679,10 @@ fn connectAddressWindows(io: std.Io, addr: *const address_mod.Address) ConnectEr
                 .scope_id = addr.zone,
             };
             if (ws.connect(h, &sa, @sizeOf(ws.sockaddr_in6)) == ws.SOCKET_ERROR) {
+                // Read the error BEFORE closesocket (see connectIPv4).
+                const err = ws.mapConnectError();
                 _ = ws.closesocket(h);
-                return ws.mapConnectError();
+                return err;
             }
             ws.applyTimeouts(h);
             return Socket.fromWinsock(h, io);

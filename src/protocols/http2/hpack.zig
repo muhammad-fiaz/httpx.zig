@@ -114,7 +114,7 @@ const DynTable = struct {
     allocator: Allocator,
     entries: std.ArrayList(Entry) = .empty,
     size: usize = 0,
-    max_size: usize = DEFAULT_TABLE_SIZE,
+    maxSize: usize = DEFAULT_TABLE_SIZE,
 
     const Entry = struct {
         name: []u8,
@@ -134,7 +134,7 @@ const DynTable = struct {
     }
 
     fn evictFor(self: *DynTable, incoming: usize) void {
-        while (self.size + incoming > self.max_size and self.entries.items.len > 0) {
+        while (self.size + incoming > self.maxSize and self.entries.items.len > 0) {
             const old = self.entries.pop() orelse break;
             self.size -= entrySize(old.name, old.value);
             self.allocator.free(old.name);
@@ -142,11 +142,11 @@ const DynTable = struct {
         }
     }
 
-    /// Inserts newest-first. An entry larger than max_size is dropped
+    /// Inserts newest-first. An entry larger than maxSize is dropped
     /// after emptying (per RFC it empties the table but is not stored).
     fn insert(self: *DynTable, name: []const u8, value: []const u8) !void {
         self.evictFor(entrySize(name, value));
-        if (entrySize(name, value) > self.max_size) return; // emptied, not stored
+        if (entrySize(name, value) > self.maxSize) return; // emptied, not stored
         const owned_name = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(owned_name);
         const owned_value = try self.allocator.dupe(u8, value);
@@ -156,7 +156,7 @@ const DynTable = struct {
     }
 
     fn setMaxSize(self: *DynTable, new_max: usize) void {
-        self.max_size = new_max;
+        self.maxSize = new_max;
         self.evictFor(0);
     }
 
@@ -174,7 +174,7 @@ pub const Decoder = struct {
     allocator: Allocator,
     dyn: DynTable,
     /// Upper bound from SETTINGS_HEADER_TABLE_SIZE the peer may not exceed.
-    protocol_max_size: usize = DEFAULT_TABLE_SIZE,
+    protocol_maxSize: usize = DEFAULT_TABLE_SIZE,
     /// Set when peer shrinks below current max: next block MUST open with
     /// a table size update (RFC 7541 Section 4.2 via nghttp2 behavior).
     require_size_update: bool = false,
@@ -190,8 +190,8 @@ pub const Decoder = struct {
 
     /// Applies our advertised SETTINGS_HEADER_TABLE_SIZE.
     pub fn setProtocolMaxSize(self: *Decoder, sz: usize) void {
-        self.protocol_max_size = sz;
-        if (self.dyn.max_size > sz) {
+        self.protocol_maxSize = sz;
+        if (self.dyn.maxSize > sz) {
             self.dyn.setMaxSize(sz);
             self.require_size_update = true;
         }
@@ -285,7 +285,7 @@ pub const Decoder = struct {
                 // 001xxxxx: dynamic table size update.
                 if (!at_start) return Error.UnexpectedTableSizeUpdate;
                 const sz = try pint.decode(block, &offset, 5);
-                if (sz > self.protocol_max_size) return Error.InvalidTableSize;
+                if (sz > self.protocol_maxSize) return Error.InvalidTableSize;
                 self.dyn.setMaxSize(@intCast(sz));
                 self.require_size_update = false;
             } else {
@@ -381,7 +381,7 @@ pub const Encoder = struct {
     /// Applies negotiated SETTINGS_HEADER_TABLE_SIZE (emits an update at
     /// next encode when changed).
     pub fn applySettingsSize(self: *Encoder, sz: usize) void {
-        if (self.dyn.max_size != sz) {
+        if (self.dyn.maxSize != sz) {
             self.pending_size_update = sz;
         }
         self.dyn.setMaxSize(sz);

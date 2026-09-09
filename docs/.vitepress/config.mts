@@ -515,7 +515,6 @@ gtag('config', '${GA_ID}');`,
         {
           text: "Reference & Benchmarks",
           items: [
-            { text: "CLI", link: "/reference/cli" },
             { text: "Benchmarks", link: "/reference/benchmarks" },
           ],
         },

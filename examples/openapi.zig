@@ -11,7 +11,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn listHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 200, .body = "[]", .content_type = "application/json" };
+    return .{ .status = 200, .body = "[]", .contentType = "application/json" };
 }
 
 fn getHandler(ctx: *httpx.Context) anyerror!httpx.Response {
@@ -19,7 +19,7 @@ fn getHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = id,
-        .content_type = "text/plain",
+        .contentType = "text/plain",
     };
 }
 

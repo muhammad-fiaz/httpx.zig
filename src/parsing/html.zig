@@ -16,11 +16,11 @@ const NO_NODE = dom.NO_NODE;
 
 /// Limits for the HTML parser.
 pub const Limits = struct {
-    max_nodes: u32 = dom.MAX_NODES,
-    max_depth: u32 = dom.MAX_DEPTH,
-    max_attrs: u32 = 256,
-    max_attr_value: usize = 8192,
-    max_text_block: usize = 4 * 1024 * 1024,
+    maxNodes: u32 = dom.MAX_NODES,
+    maxDepth: u32 = dom.MAX_DEPTH,
+    maxAttrs: u32 = 256,
+    maxAttrValue: usize = 8192,
+    maxTextBlock: usize = 4 * 1024 * 1024,
 };
 
 pub const ParseError = error{
@@ -45,15 +45,15 @@ const RAW_TEXT_ELEMENTS = std.StaticStringMap(void).initComptime(.{
 });
 
 pub fn parse(arena: Allocator, html_src: []const u8, limits: Limits) ParseError!Tree {
-    var tree = try Tree.initCapacity(arena, @min(html_src.len / 16 + 4, limits.max_nodes));
+    var tree = try Tree.initCapacity(arena, @min(html_src.len / 16 + 4, limits.maxNodes));
     errdefer tree.deinit(arena);
     const root = try tree.append(arena, .{
         .kind = .document,
         .range = .{
-            .start_byte = 0,
-            .end_byte = @intCast(html_src.len),
-            .start_point = .{ .row = 0, .column = 0 },
-            .end_point = pointForOffset(html_src, html_src.len),
+            .startByte = 0,
+            .endByte = @intCast(html_src.len),
+            .startPoint = .{ .row = 0, .column = 0 },
+            .endPoint = pointForOffset(html_src, html_src.len),
         },
     });
     var builder = Builder{
@@ -92,7 +92,7 @@ const Builder = struct {
                 while (i < src.len and src[i] != '<') : (i += 1) {}
                 const raw = src[start..i];
                 if (raw.len > 0) {
-                    if (raw.len > self.limits.max_text_block) return error.InputTooLarge;
+                    if (raw.len > self.limits.maxTextBlock) return error.InputTooLarge;
                     const idx = try self.tree.append(self.arena, .{
                         .kind = .text,
                         .data = raw,
@@ -185,7 +185,7 @@ const Builder = struct {
                     .kind = .text,
                     .data = "<",
                     .range = makeRange(src, tag_open_idx, i),
-                    .has_error = true,
+                    .hasError = true,
                 });
                 self.tree.appendChild(self.currentParent(), idx);
                 continue;
@@ -198,25 +198,25 @@ const Builder = struct {
             var self_closing = false;
             i = try parseAttrs(self.arena, src, i, &attrs, &self_closing, self.limits);
 
-            if (attrs.items.len > self.limits.max_attrs) return error.TooManyAttributes;
+            if (attrs.items.len > self.limits.maxAttrs) return error.TooManyAttributes;
 
             const owned_attrs = try attrs.toOwnedSlice(self.arena);
 
-            if (self.depth() >= self.limits.max_depth) return error.TooDeep;
+            if (self.depth() >= self.limits.maxDepth) return error.TooDeep;
 
             const void_el = VOID_ELEMENTS.has(tag);
             const raw_text = RAW_TEXT_ELEMENTS.has(tag);
 
-            const node_idx = try self.tree.append(self.arena, .{
+            const nodeIdx = try self.tree.append(self.arena, .{
                 .kind = .element,
                 .tag = tag,
                 .attrs = owned_attrs,
                 .range = makeRange(src, tag_open_idx, i),
             });
-            self.tree.appendChild(self.currentParent(), node_idx);
+            self.tree.appendChild(self.currentParent(), nodeIdx);
 
             if (!void_el and !self_closing) {
-                try self.open_stack.append(self.arena, node_idx);
+                try self.open_stack.append(self.arena, nodeIdx);
 
                 if (raw_text) {
                     const raw_content = try consumeRawText(src, &i, tag);
@@ -226,11 +226,11 @@ const Builder = struct {
                             .data = raw_content,
                             .range = makeRange(src, tag_open_idx, i),
                         });
-                        self.tree.appendChild(node_idx, txt_idx);
+                        self.tree.appendChild(nodeIdx, txt_idx);
                     }
                     _ = self.open_stack.pop();
-                    self.tree.getMut(node_idx).range.end_byte = @intCast(i);
-                    self.tree.getMut(node_idx).range.end_point = pointForOffset(src, i);
+                    self.tree.getMut(nodeIdx).range.endByte = @intCast(i);
+                    self.tree.getMut(nodeIdx).range.endPoint = pointForOffset(src, i);
                 }
             }
         }
@@ -242,8 +242,8 @@ const Builder = struct {
             const idx = self.open_stack.items[k - 1];
             const node = self.tree.getMut(idx);
             if (node.kind == .element and node.hasTag(tag)) {
-                node.range.end_byte = @intCast(end_offset);
-                node.range.end_point = pointForOffset(src, end_offset);
+                node.range.endByte = @intCast(end_offset);
+                node.range.endPoint = pointForOffset(src, end_offset);
                 self.open_stack.shrinkRetainingCapacity(k - 1);
                 return;
             }
@@ -268,10 +268,10 @@ fn pointForOffset(source: []const u8, offset: usize) SourcePoint {
 
 fn makeRange(source: []const u8, start: usize, end: usize) SourceRange {
     return .{
-        .start_byte = @intCast(start),
-        .end_byte = @intCast(end),
-        .start_point = pointForOffset(source, start),
-        .end_point = pointForOffset(source, end),
+        .startByte = @intCast(start),
+        .endByte = @intCast(end),
+        .startPoint = pointForOffset(source, start),
+        .endPoint = pointForOffset(source, end),
     };
 }
 
@@ -354,7 +354,7 @@ fn parseAttrs(
             while (i < src.len and !isWhitespace(src[i]) and src[i] != '>') : (i += 1) {}
             attr_value = src[val_start..i];
         }
-        if (attr_value.len > limits.max_attr_value) return error.InputTooLarge;
+        if (attr_value.len > limits.maxAttrValue) return error.InputTooLarge;
         try attrs.append(arena, .{ .name = attr_name, .value = attr_value });
     }
     return i;

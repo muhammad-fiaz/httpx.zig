@@ -10,34 +10,34 @@ const Allocator = std.mem.Allocator;
 
 pub const Limits = struct {
     /// Maximum boundary length (RFC 2046: ≤70 without "--" prefix).
-    max_boundary_len: usize = 70,
+    maxBoundaryLen: usize = 70,
     /// Maximum number of parts (0 = unlimited).
-    max_parts: usize = 1024,
+    maxParts: usize = 1024,
     /// Maximum single header line length in bytes.
-    max_header_line: usize = 8192,
+    maxHeaderLine: usize = 8192,
     /// Maximum total headers size per part in bytes.
-    max_headers_size: usize = 16384,
+    maxHeadersSize: usize = 16384,
     /// Maximum single part body size in bytes (0 = unlimited).
-    max_part_size: usize = 0,
+    maxPartSize: usize = 0,
     /// Maximum total body size in bytes (0 = unlimited).
-    max_total_size: usize = 0,
+    maxTotalSize: usize = 0,
 
     pub const strict = Limits{
-        .max_boundary_len = 70,
-        .max_parts = 256,
-        .max_header_line = 4096,
-        .max_headers_size = 8192,
-        .max_part_size = 10 * 1024 * 1024,
-        .max_total_size = 50 * 1024 * 1024,
+        .maxBoundaryLen = 70,
+        .maxParts = 256,
+        .maxHeaderLine = 4096,
+        .maxHeadersSize = 8192,
+        .maxPartSize = 10 * 1024 * 1024,
+        .maxTotalSize = 50 * 1024 * 1024,
     };
 
     pub const relaxed = Limits{
-        .max_boundary_len = 70,
-        .max_parts = 8192,
-        .max_header_line = 16384,
-        .max_headers_size = 65536,
-        .max_part_size = 0,
-        .max_total_size = 0,
+        .maxBoundaryLen = 70,
+        .maxParts = 8192,
+        .maxHeaderLine = 16384,
+        .maxHeadersSize = 65536,
+        .maxPartSize = 0,
+        .maxTotalSize = 0,
     };
 };
 
@@ -46,9 +46,9 @@ pub const Limits = struct {
 pub const Field = struct {
     name: []const u8,
     filename: ?[]const u8 = null,
-    filename_star: ?FilenameStar = null,
-    content_type: []const u8 = "",
-    content_transfer_encoding: ?[]const u8 = null,
+    filenameStar: ?FilenameStar = null,
+    contentType: []const u8 = "",
+    contentTransferEncoding: ?[]const u8 = null,
     data: []const u8,
     headers: []const Header = &.{},
 };
@@ -99,13 +99,13 @@ pub const Parser = struct {
 };
 
 pub const StreamEvent = union(enum) {
-    part_begin: struct {
+    partBegin: struct {
         name: []const u8,
         filename: ?[]const u8 = null,
-        content_type: []const u8 = "",
+        contentType: []const u8 = "",
     },
-    part_data: []const u8,
-    part_end,
+    partData: []const u8,
+    partEnd,
     done,
 };
 
@@ -134,7 +134,7 @@ pub const StreamParser = struct {
 
     pub fn init(allocator: Allocator, boundary: []const u8, limits: Limits) ParseError!StreamParser {
         if (boundary.len == 0) return ParseError.InvalidBoundary;
-        if (boundary.len > limits.max_boundary_len) return ParseError.BoundaryTooLong;
+        if (boundary.len > limits.maxBoundaryLen) return ParseError.BoundaryTooLong;
 
         var sp = StreamParser{
             .allocator = allocator,
@@ -208,7 +208,7 @@ pub const StreamParser = struct {
                         }
                     }
                     if (headers_end == null) {
-                        if (self.limits.max_headers_size > 0 and self.buffer.items.len > self.limits.max_headers_size)
+                        if (self.limits.maxHeadersSize > 0 and self.buffer.items.len > self.limits.maxHeadersSize)
                             return ParseError.HeadersTooLarge;
                         return null;
                     }
@@ -237,7 +237,7 @@ pub const StreamParser = struct {
                     }
 
                     self.part_count += 1;
-                    if (self.limits.max_parts > 0 and self.part_count > self.limits.max_parts)
+                    if (self.limits.maxParts > 0 and self.part_count > self.limits.maxParts)
                         return ParseError.TooManyParts;
                     self.current_part_size = 0;
 
@@ -246,10 +246,10 @@ pub const StreamParser = struct {
                     self.state = .body;
 
                     return StreamEvent{
-                        .part_begin = .{
+                        .partBegin = .{
                             .name = stable_name,
                             .filename = stable_filename,
-                            .content_type = stable_ctype,
+                            .contentType = stable_ctype,
                         },
                     };
                 },
@@ -262,14 +262,14 @@ pub const StreamParser = struct {
                             const data = self.buffer.items[0..pos];
                             self.current_part_size += data.len;
                             self.total_size += data.len;
-                            if (self.limits.max_part_size > 0 and self.current_part_size > self.limits.max_part_size)
+                            if (self.limits.maxPartSize > 0 and self.current_part_size > self.limits.maxPartSize)
                                 return ParseError.PartTooLarge;
-                            if (self.limits.max_total_size > 0 and self.total_size > self.limits.max_total_size)
+                            if (self.limits.maxTotalSize > 0 and self.total_size > self.limits.maxTotalSize)
                                 return ParseError.BodyTooLarge;
 
                             const out = try self.allocator.dupe(u8, data);
                             self.dropFront(pos);
-                            return StreamEvent{ .part_data = out };
+                            return StreamEvent{ .partData = out };
                         }
 
                         const after = body_delim.len;
@@ -278,13 +278,13 @@ pub const StreamParser = struct {
                         if (self.buffer.items[after] == '-' and self.buffer.items[after + 1] == '-') {
                             self.state = .finished;
                             self.buffer.clearRetainingCapacity();
-                            return StreamEvent.part_end;
+                            return StreamEvent.partEnd;
                         }
                         if (self.buffer.items[after] == '\r' and self.buffer.items[after + 1] == '\n') {
                             const drop_len = after + 2;
                             self.dropFront(drop_len);
                             self.state = .headers;
-                            return StreamEvent.part_end;
+                            return StreamEvent.partEnd;
                         }
                         return ParseError.Malformed;
                     }
@@ -294,14 +294,14 @@ pub const StreamParser = struct {
                         const data = self.buffer.items[0..emit_len];
                         self.current_part_size += data.len;
                         self.total_size += data.len;
-                        if (self.limits.max_part_size > 0 and self.current_part_size > self.limits.max_part_size)
+                        if (self.limits.maxPartSize > 0 and self.current_part_size > self.limits.maxPartSize)
                             return ParseError.PartTooLarge;
-                        if (self.limits.max_total_size > 0 and self.total_size > self.limits.max_total_size)
+                        if (self.limits.maxTotalSize > 0 and self.total_size > self.limits.maxTotalSize)
                             return ParseError.BodyTooLarge;
 
                         const out = try self.allocator.dupe(u8, data);
                         self.dropFront(emit_len);
-                        return StreamEvent{ .part_data = out };
+                        return StreamEvent{ .partData = out };
                     }
 
                     return null;
@@ -326,7 +326,7 @@ pub fn parse(body: []const u8, boundary: []const u8) ParseError![]Field {
 /// Parses with custom allocator and limits.
 pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const u8, limits: Limits) ParseError![]Field {
     if (boundary.len == 0) return ParseError.InvalidBoundary;
-    if (boundary.len > limits.max_boundary_len) return ParseError.BoundaryTooLong;
+    if (boundary.len > limits.maxBoundaryLen) return ParseError.BoundaryTooLong;
 
     var delim_buf: [72 + 4]u8 = undefined;
     const delim = std.fmt.bufPrint(&delim_buf, "--{s}", .{boundary}) catch return ParseError.Malformed;
@@ -346,7 +346,7 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
     var total_size: usize = 0;
 
     while (true) {
-        if (limits.max_parts > 0 and part_count >= limits.max_parts)
+        if (limits.maxParts > 0 and part_count >= limits.maxParts)
             return ParseError.TooManyParts;
 
         if (cursor + 2 <= body.len and body[cursor] == '-' and body[cursor + 1] == '-')
@@ -372,8 +372,8 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
                 const line_end = std.mem.indexOfScalar(u8, body[cursor..], '\n') orelse return ParseError.Malformed;
                 const line_len = line_end + 1;
                 total_headers += line_len;
-                if (line_len > limits.max_header_line) return ParseError.HeaderLineTooLong;
-                if (limits.max_headers_size > 0 and total_headers > limits.max_headers_size)
+                if (line_len > limits.maxHeaderLine) return ParseError.HeaderLineTooLong;
+                if (limits.maxHeadersSize > 0 and total_headers > limits.maxHeadersSize)
                     return ParseError.HeadersTooLarge;
                 cursor += line_end + 1;
             } else {
@@ -395,21 +395,21 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
             return ParseError.Malformed;
         };
 
-        const part_data = body[data_start..next_delim_pos];
-        total_size += part_data.len;
-        if (limits.max_part_size > 0 and part_data.len > limits.max_part_size)
+        const partData = body[data_start..next_delim_pos];
+        total_size += partData.len;
+        if (limits.maxPartSize > 0 and partData.len > limits.maxPartSize)
             return ParseError.PartTooLarge;
-        if (limits.max_total_size > 0 and total_size > limits.max_total_size)
+        if (limits.maxTotalSize > 0 and total_size > limits.maxTotalSize)
             return ParseError.BodyTooLarge;
 
         const name = dispositionField(raw_headers, "name") orelse return ParseError.Malformed;
         const filename = dispositionField(raw_headers, "filename");
-        const filename_star_val = dispositionField(raw_headers, "filename*");
+        const filenameStar_val = dispositionField(raw_headers, "filename*");
         const ctype = headerValue(raw_headers, "Content-Type");
         const ctenc = headerValue(raw_headers, "Content-Transfer-Encoding");
 
         var fs: ?FilenameStar = null;
-        if (filename_star_val) |fsv| {
+        if (filenameStar_val) |fsv| {
             fs = parseFilenameStar(fsv);
         }
 
@@ -418,10 +418,10 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
         try fields.append(allocator, .{
             .name = name,
             .filename = filename,
-            .filename_star = fs,
-            .content_type = ctype orelse "",
-            .content_transfer_encoding = ctenc,
-            .data = part_data,
+            .filenameStar = fs,
+            .contentType = ctype orelse "",
+            .contentTransferEncoding = ctenc,
+            .data = partData,
             .headers = hdrs,
         });
         part_count += 1;
@@ -443,8 +443,8 @@ pub fn freeFieldsAlloc(allocator: Allocator, fields: []Field) void {
 
 // Extract boundary from Content-Type
 
-pub fn extractBoundary(content_type: []const u8) ?[]const u8 {
-    var it = std.mem.splitScalar(u8, content_type, ';');
+pub fn extractBoundary(contentType: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, contentType, ';');
     _ = it.next();
     while (it.next()) |param_raw| {
         const param = std.mem.trim(u8, param_raw, " ");
@@ -461,8 +461,8 @@ pub fn extractBoundary(content_type: []const u8) ?[]const u8 {
 
 // Subtype detection
 
-pub fn detectSubtype(content_type: []const u8) ?[]const u8 {
-    var it = std.mem.splitScalar(u8, content_type, ';');
+pub fn detectSubtype(contentType: []const u8) ?[]const u8 {
+    var it = std.mem.splitScalar(u8, contentType, ';');
     const main = std.mem.trim(u8, it.next() orelse return null, " ");
     if (std.mem.startsWith(u8, main, "multipart/")) {
         return main[10..];
@@ -603,24 +603,24 @@ test "detects multipart subtype" {
     try std.testing.expect(detectSubtype("text/html") == null);
 }
 
-test "parser respects max_parts limit" {
+test "parser respects maxParts limit" {
     const boundary = "B";
     const body =
         "--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n1\r\n" ++
         "--B\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\n2\r\n" ++
         "--B--\r\n";
 
-    var p = Parser.initWithLimits(std.heap.page_allocator, .{ .max_parts = 1 });
+    var p = Parser.initWithLimits(std.heap.page_allocator, .{ .maxParts = 1 });
     try std.testing.expectError(ParseError.TooManyParts, p.parse(body, boundary));
 }
 
-test "parser respects max_part_size limit" {
+test "parser respects maxPartSize limit" {
     const boundary = "B";
     const body =
         "--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n12345\r\n" ++
         "--B--\r\n";
 
-    var p = Parser.initWithLimits(std.heap.page_allocator, .{ .max_part_size = 3 });
+    var p = Parser.initWithLimits(std.heap.page_allocator, .{ .maxPartSize = 3 });
     try std.testing.expectError(ParseError.PartTooLarge, p.parse(body, boundary));
 }
 
@@ -637,9 +637,9 @@ test "parses filename* parameter" {
     defer std.heap.page_allocator.free(fields);
 
     try std.testing.expectEqual(@as(usize, 1), fields.len);
-    try std.testing.expect(fields[0].filename_star != null);
-    try std.testing.expectEqualStrings("UTF-8", fields[0].filename_star.?.charset);
-    try std.testing.expectEqualStrings("test-%C3%A9.txt", fields[0].filename_star.?.value);
+    try std.testing.expect(fields[0].filenameStar != null);
+    try std.testing.expectEqualStrings("UTF-8", fields[0].filenameStar.?.charset);
+    try std.testing.expectEqualStrings("test-%C3%A9.txt", fields[0].filenameStar.?.value);
 }
 
 test "parses Content-Transfer-Encoding" {
@@ -656,7 +656,7 @@ test "parses Content-Transfer-Encoding" {
     defer std.heap.page_allocator.free(fields);
 
     try std.testing.expectEqual(@as(usize, 1), fields.len);
-    try std.testing.expectEqualStrings("base64", fields[0].content_transfer_encoding.?);
+    try std.testing.expectEqualStrings("base64", fields[0].contentTransferEncoding.?);
 }
 
 test "empty parts list" {
@@ -700,7 +700,7 @@ test "parses duplicate field names" {
 }
 
 test "parser rejects invalid boundary length" {
-    var p = Parser.initWithLimits(std.heap.page_allocator, .{ .max_boundary_len = 5 });
+    var p = Parser.initWithLimits(std.heap.page_allocator, .{ .maxBoundaryLen = 5 });
     try std.testing.expectError(ParseError.BoundaryTooLong, p.parse("--abc--\r\n", "toolongboundary"));
 }
 
@@ -758,7 +758,7 @@ test "StreamParser processes multipart stream and emits events" {
 
     while (try sp.next()) |ev| {
         switch (ev) {
-            .part_begin => |pb| {
+            .partBegin => |pb| {
                 current_part += 1;
                 if (current_part == 1) {
                     part1_name = try a.dupe(u8, pb.name);
@@ -767,7 +767,7 @@ test "StreamParser processes multipart stream and emits events" {
                     if (pb.filename) |f| part2_filename = try a.dupe(u8, f);
                 }
             },
-            .part_data => |pd| {
+            .partData => |pd| {
                 defer a.free(pd);
                 if (current_part == 1) {
                     try part1_data.appendSlice(a, pd);
@@ -775,7 +775,7 @@ test "StreamParser processes multipart stream and emits events" {
                     try part2_data.appendSlice(a, pd);
                 }
             },
-            .part_end => {
+            .partEnd => {
                 completed_parts += 1;
             },
             .done => break,
@@ -809,7 +809,7 @@ test "StreamParser incremental 1-byte feed test" {
         try sp.feed(&slice);
         while (try sp.next()) |ev| {
             switch (ev) {
-                .part_data => |pd| {
+                .partData => |pd| {
                     defer a.free(pd);
                     try gathered.appendSlice(a, pd);
                 },
@@ -821,7 +821,7 @@ test "StreamParser incremental 1-byte feed test" {
 
     while (try sp.next()) |ev| {
         switch (ev) {
-            .part_data => |pd| {
+            .partData => |pd| {
                 defer a.free(pd);
                 try gathered.appendSlice(a, pd);
             },

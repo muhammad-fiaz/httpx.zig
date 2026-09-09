@@ -24,7 +24,7 @@ pub const ContentKind = enum {
     xml,
     rss,
     atom,
-    json_feed,
+    jsonFeed,
     robots,
     sitemap,
     unknown,
@@ -32,7 +32,7 @@ pub const ContentKind = enum {
 
 pub const ParserConfig = struct {
     limits: html.Limits = .{},
-    detect_content_type: bool = true,
+    detectContentType: bool = true,
 };
 
 pub const NodeList = struct {
@@ -53,7 +53,7 @@ pub const NodeList = struct {
         if (index >= self.nodes.len) return null;
         return NodeHandle{
             .tree = self.tree,
-            .node_idx = self.nodes[index],
+            .nodeIdx = self.nodes[index],
             .arena = self.arena,
         };
     }
@@ -61,38 +61,38 @@ pub const NodeList = struct {
 
 pub const NodeHandle = struct {
     tree: *const Tree,
-    node_idx: u32,
+    nodeIdx: u32,
     arena: ?*std.heap.ArenaAllocator = null,
 
     pub fn tag(self: NodeHandle) []const u8 {
-        return self.tree.get(self.node_idx).tag;
+        return self.tree.get(self.nodeIdx).tag;
     }
 
     pub fn attr(self: NodeHandle, name: []const u8) ?[]const u8 {
-        return self.tree.get(self.node_idx).attr(name);
+        return self.tree.get(self.nodeIdx).attr(name);
     }
 
     /// Returns the text content of this node. If the handle carries the Document arena,
     /// allocation is managed by the Document arena and freed on doc.deinit().
     pub fn text(self: NodeHandle) ![]u8 {
         if (self.arena) |a| {
-            return extract.extractNodeText(self.tree, self.node_idx, a.allocator());
+            return extract.extractNodeText(self.tree, self.nodeIdx, a.allocator());
         }
         return error.NoAllocator;
     }
 
     pub fn textWith(self: NodeHandle, allocator: Allocator) ![]u8 {
-        return extract.extractNodeText(self.tree, self.node_idx, allocator);
+        return extract.extractNodeText(self.tree, self.nodeIdx, allocator);
     }
 
     pub fn innerHtml(self: NodeHandle) ![]u8 {
         if (self.arena) |a| {
             var out = std.Io.Writer.Allocating.init(a.allocator());
             errdefer out.deinit();
-            var child = self.tree.get(self.node_idx).first_child;
+            var child = self.tree.get(self.nodeIdx).firstChild;
             while (child != NO_NODE) {
                 try self.tree.serializeToWriter(a.allocator(), child, &out.writer);
-                child = self.tree.get(child).next_sibling;
+                child = self.tree.get(child).nextSibling;
             }
             return out.toOwnedSlice();
         }
@@ -101,58 +101,58 @@ pub const NodeHandle = struct {
 
     pub fn outerHtml(self: NodeHandle) ![]u8 {
         if (self.arena) |a| {
-            return self.tree.serialize(a.allocator(), self.node_idx);
+            return self.tree.serialize(a.allocator(), self.nodeIdx);
         }
         return error.NoAllocator;
     }
 
     pub fn startByte(self: NodeHandle) u32 {
-        return self.tree.get(self.node_idx).range.start_byte;
+        return self.tree.get(self.nodeIdx).range.startByte;
     }
 
     pub fn endByte(self: NodeHandle) u32 {
-        return self.tree.get(self.node_idx).range.end_byte;
+        return self.tree.get(self.nodeIdx).range.endByte;
     }
 
     pub fn hasError(self: NodeHandle) bool {
-        return self.tree.get(self.node_idx).has_error;
+        return self.tree.get(self.nodeIdx).hasError;
     }
 
     pub fn parent(self: NodeHandle) ?NodeHandle {
-        const p = self.tree.get(self.node_idx).parent;
+        const p = self.tree.get(self.nodeIdx).parent;
         if (p == NO_NODE) return null;
-        return NodeHandle{ .tree = self.tree, .node_idx = p, .arena = self.arena };
+        return NodeHandle{ .tree = self.tree, .nodeIdx = p, .arena = self.arena };
     }
 
     pub fn nextSibling(self: NodeHandle) ?NodeHandle {
-        const s = self.tree.get(self.node_idx).next_sibling;
+        const s = self.tree.get(self.nodeIdx).nextSibling;
         if (s == NO_NODE) return null;
-        return NodeHandle{ .tree = self.tree, .node_idx = s, .arena = self.arena };
+        return NodeHandle{ .tree = self.tree, .nodeIdx = s, .arena = self.arena };
     }
 
     pub fn prevSibling(self: NodeHandle) ?NodeHandle {
-        const s = self.tree.get(self.node_idx).prev_sibling;
+        const s = self.tree.get(self.nodeIdx).prevSibling;
         if (s == NO_NODE) return null;
-        return NodeHandle{ .tree = self.tree, .node_idx = s, .arena = self.arena };
+        return NodeHandle{ .tree = self.tree, .nodeIdx = s, .arena = self.arena };
     }
 
     pub fn firstChild(self: NodeHandle) ?NodeHandle {
-        const c = self.tree.get(self.node_idx).first_child;
+        const c = self.tree.get(self.nodeIdx).firstChild;
         if (c == NO_NODE) return null;
-        return NodeHandle{ .tree = self.tree, .node_idx = c, .arena = self.arena };
+        return NodeHandle{ .tree = self.tree, .nodeIdx = c, .arena = self.arena };
     }
 
     pub fn setAttr(self: NodeHandle, name: []const u8, value: []const u8) !void {
         if (self.arena) |a| {
             const tree_mut = @constCast(self.tree);
-            try tree_mut.setAttribute(a.allocator(), self.node_idx, name, value);
+            try tree_mut.setAttribute(a.allocator(), self.nodeIdx, name, value);
         }
     }
 
     pub fn removeAttr(self: NodeHandle, name: []const u8) !void {
         if (self.arena) |a| {
             const tree_mut = @constCast(self.tree);
-            try tree_mut.removeAttribute(a.allocator(), self.node_idx, name);
+            try tree_mut.removeAttribute(a.allocator(), self.nodeIdx, name);
         }
     }
 
@@ -161,18 +161,18 @@ pub const NodeHandle = struct {
             const al = a.allocator();
             const tree_mut = @constCast(self.tree);
             const duped = try al.dupe(u8, new_text);
-            const node = tree_mut.getMut(self.node_idx);
+            const node = tree_mut.getMut(self.nodeIdx);
             if (node.kind == .text) {
                 node.data = duped;
             } else {
                 // Clear existing children and append a new text child
-                node.first_child = NO_NODE;
-                node.last_child = NO_NODE;
+                node.firstChild = NO_NODE;
+                node.lastChild = NO_NODE;
                 const txt_idx = try tree_mut.append(al, .{
                     .kind = .text,
                     .data = duped,
                 });
-                tree_mut.appendChild(self.node_idx, txt_idx);
+                tree_mut.appendChild(self.nodeIdx, txt_idx);
             }
         }
     }
@@ -246,7 +246,7 @@ pub const Document = struct {
         if (try selector.selectFirst(al, &self.tree, 0, &parsed)) |idx| {
             return NodeHandle{
                 .tree = &self.tree,
-                .node_idx = idx,
+                .nodeIdx = idx,
                 .arena = @constCast(&self.arena),
             };
         }
@@ -268,38 +268,38 @@ pub const Document = struct {
     pub fn root(self: *const Document) NodeHandle {
         return NodeHandle{
             .tree = &self.tree,
-            .node_idx = 0,
+            .nodeIdx = 0,
             .arena = @constCast(&self.arena),
         };
     }
 
     /// Computes an incremental edit descriptor between current source and new source.
-    pub fn computeEdit(self: *const Document, start_byte: usize, old_len: usize, new_len: usize, new_source: []const u8) ts_bridge.InputEdit {
-        return ts_bridge.computeEdit(self.source, start_byte, old_len, new_len, new_source);
+    pub fn computeEdit(self: *const Document, startByte: usize, old_len: usize, new_len: usize, new_source: []const u8) ts_bridge.InputEdit {
+        return ts_bridge.computeEdit(self.source, startByte, old_len, new_len, new_source);
     }
 
     /// Incrementally updates the document with new source content, reusing unchanged tree nodes.
-    pub fn incrementalUpdate(self: *Document, new_source: []const u8) !void {
+    pub fn incrementalUpdate(self: *Document, newSource: []const u8) !void {
         const al = self.arenaAllocator();
-        const new_tree = try html.parse(al, new_source, .{});
+        const new_tree = try html.parse(al, newSource, .{});
         self.tree = new_tree;
-        self.source = new_source;
+        self.source = newSource;
     }
 
     /// Convenience static constructors matching `Document.parseHtml(...)`
-    pub fn parseHtml(allocator: Allocator, html_source: []const u8) !Document {
+    pub fn parseHtml(allocator: Allocator, htmlSource: []const u8) !Document {
         const p = Parser.init(allocator, .{});
-        return p.parseHtml(html_source);
+        return p.parseHtml(htmlSource);
     }
 
-    pub fn parseXml(allocator: Allocator, xml_source: []const u8) !Document {
+    pub fn parseXml(allocator: Allocator, xmlSource: []const u8) !Document {
         const p = Parser.init(allocator, .{});
-        return p.parseXml(xml_source);
+        return p.parseXml(xmlSource);
     }
 
-    pub fn parse(allocator: Allocator, content_type: ?[]const u8, source: []const u8) !Document {
+    pub fn parse(allocator: Allocator, contentType: ?[]const u8, source: []const u8) !Document {
         const p = Parser.init(allocator, .{});
-        return p.parse(source, content_type);
+        return p.parse(source, contentType);
     }
 };
 
@@ -314,8 +314,8 @@ pub const Parser = struct {
         };
     }
 
-    pub fn parse(self: *const Parser, source: []const u8, content_type: ?[]const u8) !Document {
-        const k = detectKind(source, content_type);
+    pub fn parse(self: *const Parser, source: []const u8, contentType: ?[]const u8) !Document {
+        const k = detectKind(source, contentType);
         return switch (k) {
             .html => self.parseHtml(source),
             .xml, .rss, .atom, .sitemap => self.parseXml(source),
@@ -351,8 +351,8 @@ pub const Parser = struct {
         };
     }
 
-    /// Streaming parse directly from a std.Io.Reader up to max_size bytes.
-    pub fn parseStream(self: *const Parser, reader: *std.Io.Reader, max_size: usize) !Document {
+    /// Streaming parse directly from a std.Io.Reader up to maxSize bytes.
+    pub fn parseStream(self: *const Parser, reader: *std.Io.Reader, maxSize: usize) !Document {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
         const al = arena.allocator();
@@ -366,7 +366,7 @@ pub const Parser = struct {
             const n = reader.readSliceShort(&chunk_buf) catch break;
             if (n == 0) break;
             total_read += n;
-            if (total_read > max_size) return error.InputTooLarge;
+            if (total_read > maxSize) return error.InputTooLarge;
             try buf.appendSlice(al, chunk_buf[0..n]);
         }
 
@@ -381,8 +381,8 @@ pub const Parser = struct {
         };
     }
 
-    pub fn parseFeed(self: *const Parser, source: []const u8, content_type: ?[]const u8) !feed.Feed {
-        return feed.parse(self.allocator, source, content_type);
+    pub fn parseFeed(self: *const Parser, source: []const u8, contentType: ?[]const u8) !feed.Feed {
+        return feed.parse(self.allocator, source, contentType);
     }
 
     pub fn parseRobots(self: *const Parser, source: []const u8) !robots.RobotsFile {
@@ -398,17 +398,17 @@ pub const Parser = struct {
     }
 };
 
-pub fn detectKind(source: []const u8, content_type: ?[]const u8) ContentKind {
-    if (content_type) |ct| {
+pub fn detectKind(source: []const u8, contentType: ?[]const u8) ContentKind {
+    if (contentType) |ct| {
         if (std.mem.indexOf(u8, ct, "html") != null) return .html;
         if (std.mem.indexOf(u8, ct, "rss") != null) return .rss;
         if (std.mem.indexOf(u8, ct, "atom") != null) return .atom;
-        if (std.mem.indexOf(u8, ct, "json") != null) return .json_feed;
+        if (std.mem.indexOf(u8, ct, "json") != null) return .jsonFeed;
         if (std.mem.indexOf(u8, ct, "xml") != null) return .xml;
     }
     const trimmed = std.mem.trim(u8, source, " \t\r\n");
     if (std.mem.startsWith(u8, trimmed, "<!DOCTYPE html") or std.mem.startsWith(u8, trimmed, "<html") or std.mem.startsWith(u8, trimmed, "<!doctype html")) return .html;
     if (std.mem.startsWith(u8, trimmed, "<?xml") or std.mem.startsWith(u8, trimmed, "<")) return .xml;
-    if (std.mem.startsWith(u8, trimmed, "{")) return .json_feed;
+    if (std.mem.startsWith(u8, trimmed, "{")) return .jsonFeed;
     return .unknown;
 }

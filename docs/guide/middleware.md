@@ -50,61 +50,22 @@ fn banCheckMiddleware(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!h
 try server.use(banCheckMiddleware);
 ```
 
-## Compression Middleware
+## Compression
 
-Use `httpx.middleware.compression()` to enable automatic response compression. The middleware negotiates the best encoding based on the client's `Accept-Encoding` header and compresses the response body before sending.
+Response compression is available through the `httpx.compression` codec
+(gzip, deflate, brotli, zstd) applied inside handlers. There is no built-in
+compression middleware; negotiate `Accept-Encoding` in the handler and encode
+the body explicitly.
 
-```zig
-try server.use(httpx.middleware.compression());
-```
+## Rate Limiting
 
-This enables gzip, deflate, brotli, and zstd compression. The middleware:
-- Reads the incoming `Accept-Encoding` header
-- Prefers brotli > zstd > gzip > deflate (first match wins)
-- Only compresses when the response body exceeds `min_bytes` (default: 1024)
-- Skips compression if `Content-Encoding` is already set on the response
+Use `httpx.RateLimiter` for per-key request-rate enforcement (see
+`src/web/middleware/rate_limit.zig` for `RateLimitPolicy`,
+`RateLimitResult`, and `RateLimitDimension`).
 
-With explicit configuration:
+## CSRF Helpers
 
-```zig
-try server.use(httpx.middleware.compressionMiddlewareWithConfig(.{
-    .min_bytes = 512, // compress responses >= 512 bytes
-}));
-```
-
-## Timeout Middleware
-
-Use `httpx.middleware.timeout(ms)` to enforce a per-request timeout at the application level. This complements the server's `request_timeout_ms` socket-level timeout:
-
-```zig
-try server.use(httpx.middleware.timeout(5_000)); // 5 second timeout
-```
-
-If the deadline has passed before the handler runs, returns `408 Request Timeout` immediately.
-
-## CSRF Protection
-
-Use `httpx.csrf(.{})` to protect state-changing requests from cross-site request forgery:
-
-```zig
-try server.use(httpx.csrf(.{}));
-```
-
-The middleware uses the double-submit cookie pattern:
-1. On the first POST/PUT/PATCH/DELETE request, generates a random token and sets it as a cookie.
-2. Subsequent requests must include the token in the `X-CSRF-Token` header or `_csrf` form field.
-3. GET/HEAD/OPTIONS requests are not challenged.
-
-## SSRF Protection in Reverse Proxy
-
-The `reverseProxy` and `reverseProxyRuntime` middlewares include built-in SSRF protection that blocks requests targeting private/internal IP ranges:
-
-- `localhost`, `0.0.0.0`, `127.0.0.1`, `::1`
-- `127.0.0.0/8` (loopback)
-- `10.0.0.0/8` (private Class A)
-- `172.16.0.0/12` (private Class B)
-- `192.168.0.0/16` (private Class C)
-- `169.254.0.0/16` (link-local)
-- `198.18.0.0/15` (benchmarking)
-
-Blocked requests return `403 Forbidden`.
+Use `httpx.middleware.generateCsrfToken` / `httpx.middleware.verifyCsrfToken`
+(double-submit cookie pattern) inside handlers for state-changing routes.
+There is no built-in CSRF middleware; GET/HEAD/OPTIONS pass through
+unchallenged by construction.

@@ -2,7 +2,7 @@
 //!
 //! Evaluates compiled template ASTs against Context values, supporting:
 //!   - Secure auto-escaping of HTML characters (&, <, >, ", ')
-//!   - Raw trusted HTML bypass via RawHtml/Value.raw_html
+//!   - Raw trusted HTML bypass via RawHtml/Value.rawHtml
 //!   - Dot-path variable lookups and basic conditional expressions
 //!   - Template inheritance ({% extends %}, {% block %}) with block overrides
 //!   - Reusable includes ({% include %}) with recursion and cycle detection
@@ -58,8 +58,8 @@ pub fn writeEscaped(writer: anytype, text: []const u8) !void {
 }
 
 pub const RenderOptions = struct {
-    max_include_depth: usize = 32,
-    max_inheritance_depth: usize = 16,
+    maxIncludeDepth: usize = 32,
+    maxInheritanceDepth: usize = 16,
 };
 
 pub const ListWriter = struct {
@@ -119,14 +119,14 @@ pub const Renderer = struct {
         inheritance_depth: *usize,
     ) anyerror!void {
         // Handle inheritance: if ast extends a parent, render parent with block overrides
-        if (ast.extends_path) |parent_path| {
+        if (ast.extendsPath) |parentPath| {
             inheritance_depth.* += 1;
-            if (inheritance_depth.* > self.options.max_inheritance_depth) {
+            if (inheritance_depth.* > self.options.maxInheritanceDepth) {
                 return TemplateError.DepthLimitExceeded;
             }
 
             const p = provider orelse return TemplateError.TemplateNotFound;
-            const parent_ast = p.getAst(parent_path) orelse return TemplateError.TemplateNotFound;
+            const parent_ast = p.getAst(parentPath) orelse return TemplateError.TemplateNotFound;
 
             // Merge block overrides: current ast's blocks take precedence over inherited blocks
             var combined_blocks = std.ArrayList(BlockInfo).empty;
@@ -181,20 +181,20 @@ pub const Renderer = struct {
                 .expression => |expr_info| {
                     try self.renderExpression(expr_info.expr, ctx, writer);
                 },
-                .if_block => |if_info| {
+                .ifBlock => |if_info| {
                     const is_true = self.evalCondition(ctx, if_info.condition);
                     if (is_true) {
-                        try self.renderNodes(if_info.then_nodes, ctx, provider, writer, block_overrides, include_stack, inheritance_depth);
-                    } else if (if_info.else_nodes.len > 0) {
-                        try self.renderNodes(if_info.else_nodes, ctx, provider, writer, block_overrides, include_stack, inheritance_depth);
+                        try self.renderNodes(if_info.thenNodes, ctx, provider, writer, block_overrides, include_stack, inheritance_depth);
+                    } else if (if_info.elseNodes.len > 0) {
+                        try self.renderNodes(if_info.elseNodes, ctx, provider, writer, block_overrides, include_stack, inheritance_depth);
                     }
                 },
-                .for_loop => |for_info| {
+                .forLoop => |for_info| {
                     try self.renderForLoop(for_info, ctx, provider, writer, block_overrides, include_stack, inheritance_depth);
                 },
                 .block => |block_info| {
                     // Check if block is overridden by a child template
-                    var block_to_render = block_info.body_nodes;
+                    var block_to_render = block_info.bodyNodes;
                     for (block_overrides) |ov| {
                         if (std.mem.eql(u8, ov.name, block_info.name)) {
                             block_to_render = ov.nodes;
@@ -207,23 +207,23 @@ pub const Renderer = struct {
                     // Handled at template root level
                 },
                 .include => |inc_info| {
-                    if (include_stack.len >= self.options.max_include_depth) {
+                    if (include_stack.len >= self.options.maxIncludeDepth) {
                         return TemplateError.DepthLimitExceeded;
                     }
                     for (include_stack) |item| {
-                        if (std.mem.eql(u8, item, inc_info.template_path)) {
+                        if (std.mem.eql(u8, item, inc_info.templatePath)) {
                             return TemplateError.CircularInclude;
                         }
                     }
 
                     const p = provider orelse return TemplateError.TemplateNotFound;
-                    const inc_ast = p.getAst(inc_info.template_path) orelse return TemplateError.TemplateNotFound;
+                    const inc_ast = p.getAst(inc_info.templatePath) orelse return TemplateError.TemplateNotFound;
 
                     // Allocate next include stack
                     const new_stack = try ctx.arena.child_allocator.alloc([]const u8, include_stack.len + 1);
                     defer ctx.arena.child_allocator.free(new_stack);
                     @memcpy(new_stack[0..include_stack.len], include_stack);
-                    new_stack[include_stack.len] = inc_info.template_path;
+                    new_stack[include_stack.len] = inc_info.templatePath;
 
                     try self.renderInternal(
                         inc_ast,
@@ -252,12 +252,12 @@ pub const Renderer = struct {
 
         const val = ctx.get(trimmed) orelse return;
         switch (val) {
-            .null_val => {},
+            .nullVal => {},
             .boolean => |b| try writer.writeAll(if (b) "true" else "false"),
             .integer => |i| try writer.print("{d}", .{i}),
             .float => |f| try writer.print("{d}", .{f}),
             .string => |s| try writeEscaped(writer, s),
-            .raw_html => |h| try writer.writeAll(h),
+            .rawHtml => |h| try writer.writeAll(h),
             .list => {},
             .map => {},
         }
@@ -299,7 +299,7 @@ pub const Renderer = struct {
         const s = std.mem.trim(u8, expr, " \t\r\n");
         if (std.mem.eql(u8, s, "true")) return .{ .boolean = true };
         if (std.mem.eql(u8, s, "false")) return .{ .boolean = false };
-        if (std.mem.eql(u8, s, "null")) return .null_val;
+        if (std.mem.eql(u8, s, "null")) return .nullVal;
 
         // Quoted string literal
         if (s.len >= 2 and ((s[0] == '"' and s[s.len - 1] == '"') or (s[0] == '\'' and s[s.len - 1] == '\''))) {
@@ -312,7 +312,7 @@ pub const Renderer = struct {
         } else |_| {}
 
         // Look up variable in context
-        return ctx.get(s) orelse .null_val;
+        return ctx.get(s) orelse .nullVal;
     }
 
     fn renderForLoop(
@@ -325,7 +325,7 @@ pub const Renderer = struct {
         include_stack: []const []const u8,
         inheritance_depth: *usize,
     ) anyerror!void {
-        const coll_val = ctx.get(for_info.collection_expr) orelse return;
+        const coll_val = ctx.get(for_info.collectionExpr) orelse return;
         const items = switch (coll_val) {
             .list => |l| l,
             else => return,
@@ -343,7 +343,7 @@ pub const Renderer = struct {
             loop_meta_entries[3] = .{ .key = "last", .value = .{ .boolean = (i + 1 == items.len) } };
             loop_meta_entries[4] = .{ .key = "length", .value = .{ .integer = @intCast(items.len) } };
 
-            // Create temporary overlaid map containing item_var and loop metadata
+            // Create temporary overlaid map containing itemVar and loop metadata
             var orig_entries: []const context_mod.Entry = &[_]context_mod.Entry{};
             if (original_root == .map) {
                 orig_entries = original_root.map;
@@ -352,7 +352,7 @@ pub const Renderer = struct {
             const scoped_entries = try ctx.arena.child_allocator.alloc(context_mod.Entry, orig_entries.len + 2);
             defer ctx.arena.child_allocator.free(scoped_entries);
             @memcpy(scoped_entries[0..orig_entries.len], orig_entries);
-            scoped_entries[orig_entries.len] = .{ .key = for_info.item_var, .value = item };
+            scoped_entries[orig_entries.len] = .{ .key = for_info.itemVar, .value = item };
             scoped_entries[orig_entries.len + 1] = .{ .key = "loop", .value = .{ .map = loop_meta_entries } };
 
             const scoped_ctx: Context = .{
@@ -360,7 +360,7 @@ pub const Renderer = struct {
                 .root = .{ .map = scoped_entries },
             };
 
-            try self.renderNodes(for_info.body_nodes, &scoped_ctx, provider, writer, block_overrides, include_stack, inheritance_depth);
+            try self.renderNodes(for_info.bodyNodes, &scoped_ctx, provider, writer, block_overrides, include_stack, inheritance_depth);
         }
     }
 };

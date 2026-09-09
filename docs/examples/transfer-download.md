@@ -1,39 +1,29 @@
 # Transfer Download
 
-Download files over HTTP with progress tracking and checksum verification.
-
-## Demo Program
+File downloads with progress and verification. See
+`examples/download.zig` and `examples/download_verify.zig`.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
+var client = httpx.Client.init(allocator, io, .{});
+defer client.deinit();
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-
-    var result = httpx.get("http://httpbun.com/get", .{}) catch |err| {
-        std.debug.print("Error: {}\n", .{err});
-        return;
-    };
-    defer result.deinit();
-
-    std.debug.print("Status: {d}\n", .{result.status.code});
-    if (result.body) |body| {
-        std.debug.print("Body length: {d}\n", .{body.len});
-        std.debug.print("Body: {s}\n", .{body[0..@min(200, body.len)]});
-    }
-}
+const res = try client.download(url, "downloads/", .{
+    .progress = .auto,
+    .existing = .overwrite,
+    .createDirs = true,
+});
+std.debug.print("Downloaded: {s} ({d} bytes)\n", .{
+    res.destinationPath(), res.downloadedBytes,
+});
 ```
 
 ## Run
 
 ```bash
-zig build run-all-http_download
+zig build run-download
 ```
 
 ## What to Verify
 
 - Successful HTTP status code.
-- Non-empty response body.
-- Body length is reported correctly.
+- File lands on disk with the expected byte count.

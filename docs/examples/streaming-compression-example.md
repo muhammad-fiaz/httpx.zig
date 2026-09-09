@@ -1,23 +1,27 @@
 # Streaming Compression
 
-Demonstrates streaming compression and decompression with gzip, deflate, and identity passthrough.
-
-## Demo Program
+Streaming compression over the codec API (`httpx.compression`). See
+`examples/compression_demo.zig` and `examples/streaming.zig`.
 
 ```zig
-// Streaming compress
-var comp = httpx.StreamingCompressor.init(.gzip);
-const compressed = try comp.compress(allocator, input);
+// One-shot round trip.
+const blob = try httpx.compression.compress(allocator, .gzip, input);
+defer allocator.free(blob);
+const plain = try httpx.compression.decompress(allocator, .gzip, blob);
+defer allocator.free(plain);
 
-// Streaming decompress
-var decomp = httpx.StreamingDecompressor.init(.gzip);
-const decompressed = try decomp.decompress(allocator, compressed);
+// Bounded decompression for untrusted input.
+const safe = try httpx.compression.decompressLimited(allocator, .gzip, blob, 1 << 20);
+defer allocator.free(safe);
 ```
+
+Servers negotiate `Accept-Encoding` per request (`gzip`, `deflate`,
+`brotli`, `zstd`); clients decode transparently.
 
 ## Run
 
-```
-zig build run-all-streaming_compression_example
+```bash
+zig build run-compression-demo
 ```
 
 ## Checklist
@@ -26,4 +30,4 @@ zig build run-all-streaming_compression_example
 - [x] Streaming gzip decompression
 - [x] Streaming deflate
 - [x] Identity passthrough
-- [x] Incremental processing
+- [x] Decompression limits enforced

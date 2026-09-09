@@ -19,24 +19,26 @@ pub const TsLanguage = treesitter.Language;
 pub const ReaderSource = treesitter.ReaderSource;
 
 /// Computes an InputEdit for a replacement within source text.
+/// Parameter names are camelCase; the returned dependency-owned InputEdit
+/// keeps upstream Tree-sitter field names by construction below.
 pub fn computeEdit(
-    old_source: []const u8,
-    start_byte: usize,
-    old_len: usize,
-    new_len: usize,
-    new_source: []const u8,
+    oldSource: []const u8,
+    startByte: usize,
+    oldLen: usize,
+    newLen: usize,
+    newSource: []const u8,
 ) InputEdit {
-    const start_point = pointForOffset(old_source, start_byte);
-    const old_end_point = pointForOffset(old_source, start_byte + old_len);
-    const new_end_point = pointForOffset(new_source, start_byte + new_len);
+    const startPoint = pointForOffset(oldSource, startByte);
+    const oldEndPoint = pointForOffset(oldSource, startByte + oldLen);
+    const newEndPoint = pointForOffset(newSource, startByte + newLen);
 
     return .{
-        .start_byte = @intCast(start_byte),
-        .old_end_byte = @intCast(start_byte + old_len),
-        .new_end_byte = @intCast(start_byte + new_len),
-        .start_point = start_point,
-        .old_end_point = old_end_point,
-        .new_end_point = new_end_point,
+        .start_byte = @intCast(startByte),
+        .old_end_byte = @intCast(startByte + oldLen),
+        .new_end_byte = @intCast(startByte + newLen),
+        .start_point = startPoint,
+        .old_end_point = oldEndPoint,
+        .new_end_point = newEndPoint,
     };
 }
 
@@ -68,10 +70,10 @@ pub fn rangeForBytes(source: []const u8, start: usize, end: usize) Range {
 
 /// Changes detected between an old tree and a new tree.
 pub const ChangedRange = struct {
-    start_byte: u32,
-    end_byte: u32,
-    start_point: Point,
-    end_point: Point,
+    startByte: u32,
+    endByte: u32,
+    startPoint: Point,
+    endPoint: Point,
 };
 
 /// Compares old and new DOM/Tree-sitter structures and returns byte ranges that changed.
@@ -86,10 +88,10 @@ pub fn getChangedByteRanges(
     const out = try allocator.alloc(ChangedRange, ts_ranges.len);
     for (ts_ranges, 0..) |r, i| {
         out[i] = .{
-            .start_byte = r.start_byte,
-            .end_byte = r.end_byte,
-            .start_point = r.start_point,
-            .end_point = r.end_point,
+            .startByte = r.start_byte,
+            .endByte = r.end_byte,
+            .startPoint = r.start_point,
+            .endPoint = r.end_point,
         };
     }
     return out;

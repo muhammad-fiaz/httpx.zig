@@ -39,7 +39,7 @@ pub fn main() !void {
     // 3. Per-lookup address family override
     var v4_only = try client.resolve("httpbun.com", 443, .{
         .family = .ipv4,
-        .use_cache = true,
+        .useCache = true,
     });
     defer v4_only.deinit();
 

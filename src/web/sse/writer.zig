@@ -28,29 +28,29 @@ pub const EventWriter = struct {
     pub fn writeEvent(
         self: *EventWriter,
         out: *std.ArrayList(u8),
-        data_lines: []const []const u8,
-        event_type: ?[]const u8,
-        last_event_id: ?u64,
-        retry_ms: ?u32,
+        dataLines: []const []const u8,
+        eventType: ?[]const u8,
+        lastEventId: ?u64,
+        retryMs: ?u32,
     ) Error!void {
-        if (retry_ms) |r| {
+        if (retryMs) |r| {
             var buf: [16]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "retry:{d}\n", .{r}) catch return;
             try out.appendSlice(self.allocator, s);
         }
-        if (last_event_id) |id| {
+        if (lastEventId) |id| {
             var buf: [24]u8 = undefined;
             const s = std.fmt.bufPrint(&buf, "id:{d}\n", .{id}) catch return;
             try out.appendSlice(self.allocator, s);
         }
-        if (event_type) |t| {
+        if (eventType) |t| {
             // Event type must not contain newline (would forge fields)
             if (std.mem.indexOfAny(u8, t, "\r\n") != null) return error.InvalidField;
             try out.appendSlice(self.allocator, "event:");
             try out.appendSlice(self.allocator, t);
             try out.appendSlice(self.allocator, "\n");
         }
-        for (data_lines) |line| {
+        for (dataLines) |line| {
             try out.appendSlice(self.allocator, "data:");
             try out.appendSlice(self.allocator, line);
             try out.appendSlice(self.allocator, "\n");

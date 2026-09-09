@@ -1,34 +1,34 @@
 # Session API
 
-In-memory server-side sessions with TTL expiry.
+HTTPX has no built-in server-side session store. The recommended pattern is
+cookie-backed sessions in handlers — see `examples/session_server.zig` for a
+runnable `/login`, `/dashboard`, `/logout` flow.
 
-Located in `src/session/`.
+To persist a session across requests, issue a cookie on login and read it
+back on later requests:
 
-## SessionStore
+```zig
+fn loginHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    _ = ctx;
+    return .{
+        .status = 200,
+        .body = "{\"message\":\"Logged in\"}",
+        .contentType = "application/json",
+        .headers = &.{
+            .{ .name = "Set-Cookie", .value = "session=abc123; Path=/; HttpOnly" },
+        },
+    };
+}
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `init(allocator, config)` | `SessionStore` | Create a store with the given config |
-| `deinit()` | `void` | Release all resources |
-| `create()` | `![SESSION_ID_LEN * 2]u8` | Create a new session, return hex ID |
-| `set(hex_id, key, value)` | `!void` | Set a key in the session (duplicates value) |
-| `get(hex_id, key)` | `?[]const u8` | Get a value; null if not found or expired |
-| `delete(hex_id)` | `void` | Remove a session |
-| `exists(hex_id)` | `bool` | True if session exists and is not expired |
-| `evictExpired()` | `usize` | Remove expired sessions, returns count removed |
-| `count()` | `usize` | Number of sessions in the store |
+fn dashboardHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    const session = ctx.cookie("session") orelse
+        return ctx.textStatus(401, "login required");
+    _ = session;
+    return ctx.text("welcome back");
+}
+```
 
-## SessionConfig
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `ttl_ms` | `1_800_000` | Session TTL in milliseconds since last access |
-| `cookie_name` | `"session_id"` | Cookie name for session ID |
-| `max_sessions` | `0` | Max sessions (0 = unlimited) |
-
-## Constants
-
-- `SESSION_ID_LEN = 32` — raw session ID byte length
-- `DEFAULT_TTL_MS = 1_800_000` — 30 minutes
-
-Root-level aliases: `httpx.SessionStore`, `httpx.SessionConfig`, `httpx.SESSION_ID_LEN`.
+The client keeps cookies automatically when `cookies: true` (the default) in
+`ClientConfig`, and `ctx.cookie(name)` reads them server-side. For CSRF
+protection on state-changing routes, use
+`httpx.middleware.generateCsrfToken` / `verifyCsrfToken`.

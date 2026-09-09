@@ -14,31 +14,29 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.Server.init(allocator, io, .{
+        .port = 8080,
+        .enableDocs = true,
+        .docs = .{
+            .title = "Inventory API",
+            .version = "1.0.0",
+            .description = "Automated OpenAPI generation with HTTPX",
+        },
+    });
     defer server.deinit();
 
-    // Register OpenAPI specification endpoint
-    server.openapi("/openapi.json", .{
-        .title = "Inventory API",
-        .version = "1.0.0",
-        .description = "Automated OpenAPI generation with HTTPX",
+    try server.get("/api/items", itemsHandler);
+
+    server.run();
+}
+
+fn itemsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.renderJson(.{
+        .items = [_]struct { id: u32, name: []const u8 }{
+            .{ .id = 1, .name = "Widget" },
+            .{ .id = 2, .name = "Gadget" },
+        },
     });
-
-    // Mount Swagger UI, ReDoc, and Scalar
-    server.swagger_ui("/docs", .{ .spec_url = "/openapi.json" });
-    server.redoc("/redoc", .{ .spec_url = "/openapi.json" });
-    server.scalar("/scalar", .{ .spec_url = "/openapi.json" });
-
-    server.get("/api/items", struct {
-        fn handle(ctx: *httpx.Context) !void {
-            try ctx.json(&.{
-                .{ .id = 1, .name = "Widget" },
-                .{ .id = 2, .name = "Gadget" },
-            });
-        }
-    }.handle);
-
-    try server.run();
 }
 ```
 

@@ -19,42 +19,42 @@ pub const TemplateNode = union(enum) {
     text: []const u8,
     expression: struct {
         expr: []const u8,
-        start_byte: usize,
+        startByte: usize,
         line: usize,
         col: usize,
     },
-    if_block: struct {
+    ifBlock: struct {
         condition: []const u8,
-        then_nodes: []const TemplateNode,
-        else_nodes: []const TemplateNode,
-        start_byte: usize,
+        thenNodes: []const TemplateNode,
+        elseNodes: []const TemplateNode,
+        startByte: usize,
         line: usize,
         col: usize,
     },
-    for_loop: struct {
-        item_var: []const u8,
-        collection_expr: []const u8,
-        body_nodes: []const TemplateNode,
-        start_byte: usize,
+    forLoop: struct {
+        itemVar: []const u8,
+        collectionExpr: []const u8,
+        bodyNodes: []const TemplateNode,
+        startByte: usize,
         line: usize,
         col: usize,
     },
     block: struct {
         name: []const u8,
-        body_nodes: []const TemplateNode,
-        start_byte: usize,
+        bodyNodes: []const TemplateNode,
+        startByte: usize,
         line: usize,
         col: usize,
     },
     extends: struct {
-        parent_path: []const u8,
-        start_byte: usize,
+        parentPath: []const u8,
+        startByte: usize,
         line: usize,
         col: usize,
     },
     include: struct {
-        template_path: []const u8,
-        start_byte: usize,
+        templatePath: []const u8,
+        startByte: usize,
         line: usize,
         col: usize,
     },
@@ -67,7 +67,7 @@ pub const BlockInfo = struct {
 
 pub const TemplateAst = struct {
     nodes: []const TemplateNode,
-    extends_path: ?[]const u8 = null,
+    extendsPath: ?[]const u8 = null,
     blocks: []const BlockInfo,
     includes: [][]const u8,
     arena: std.heap.ArenaAllocator,
@@ -79,15 +79,15 @@ pub const TemplateAst = struct {
 
 pub const Parser = struct {
     allocator: Allocator,
-    template_name: []const u8,
+    templateName: []const u8,
     source: []const u8,
     pos: usize = 0,
-    last_error: ?SourceError = null,
+    lastError: ?SourceError = null,
 
-    pub fn init(allocator: Allocator, template_name: []const u8, source: []const u8) Parser {
+    pub fn init(allocator: Allocator, templateName: []const u8, source: []const u8) Parser {
         return .{
             .allocator = allocator,
-            .template_name = template_name,
+            .templateName = templateName,
             .source = source,
             .pos = 0,
         };
@@ -101,13 +101,13 @@ pub const Parser = struct {
         var nodes_list = std.ArrayList(TemplateNode).empty;
         var blocks_list = std.ArrayList(BlockInfo).empty;
         var includes_list = std.ArrayList([]const u8).empty;
-        var extends_path: ?[]const u8 = null;
+        var extendsPath: ?[]const u8 = null;
 
-        try self.parseNodes(a, &nodes_list, &blocks_list, &includes_list, &extends_path, null);
+        try self.parseNodes(a, &nodes_list, &blocks_list, &includes_list, &extendsPath, null);
 
         return .{
             .nodes = try nodes_list.toOwnedSlice(a),
-            .extends_path = extends_path,
+            .extendsPath = extendsPath,
             .blocks = try blocks_list.toOwnedSlice(a),
             .includes = try includes_list.toOwnedSlice(a),
             .arena = arena,
@@ -116,12 +116,12 @@ pub const Parser = struct {
 
     fn fail(self: *Parser, kind: err_mod.TemplateErrorKind, offset: usize, message: []const u8) TemplateError {
         const loc = lineColFromOffset(self.source, offset);
-        self.last_error = .{
+        self.lastError = .{
             .kind = kind,
-            .template_name = self.template_name,
+            .templateName = self.templateName,
             .line = loc.line,
             .column = loc.col,
-            .byte_offset = offset,
+            .byteOffset = offset,
             .message = message,
         };
         return switch (kind) {
@@ -139,7 +139,7 @@ pub const Parser = struct {
         out_nodes: *std.ArrayList(TemplateNode),
         blocks_list: *std.ArrayList(BlockInfo),
         includes_list: *std.ArrayList([]const u8),
-        extends_path: *?[]const u8,
+        extendsPath: *?[]const u8,
         stop_tag: ?[]const u8,
     ) TemplateError!void {
         while (self.pos < self.source.len) {
@@ -178,7 +178,7 @@ pub const Parser = struct {
                 try out_nodes.append(a, .{
                     .expression = .{
                         .expr = raw_expr,
-                        .start_byte = expr_start,
+                        .startByte = expr_start,
                         .line = loc.line,
                         .col = loc.col,
                     },
@@ -216,10 +216,10 @@ pub const Parser = struct {
 
                 if (std.mem.eql(u8, tag_cmd, "if")) {
                     const condition = std.mem.trim(u8, tag_content[2..], " \t\r\n");
-                    var then_nodes = std.ArrayList(TemplateNode).empty;
-                    var else_nodes = std.ArrayList(TemplateNode).empty;
+                    var thenNodes = std.ArrayList(TemplateNode).empty;
+                    var elseNodes = std.ArrayList(TemplateNode).empty;
 
-                    try self.parseNodes(a, &then_nodes, blocks_list, includes_list, extends_path, "endif_or_else");
+                    try self.parseNodes(a, &thenNodes, blocks_list, includes_list, extendsPath, "endif_or_else");
 
                     if (self.pos < self.source.len) {
                         const next_dir_close = std.mem.indexOfPos(u8, self.source, self.pos, "%}") orelse {
@@ -228,7 +228,7 @@ pub const Parser = struct {
                         const next_dir = std.mem.trim(u8, self.source[self.pos + 2 .. next_dir_close], " \t\r\n");
                         if (std.mem.startsWith(u8, next_dir, "else")) {
                             self.pos = next_dir_close + 2;
-                            try self.parseNodes(a, &else_nodes, blocks_list, includes_list, extends_path, "endif");
+                            try self.parseNodes(a, &elseNodes, blocks_list, includes_list, extendsPath, "endif");
                             if (self.pos < self.source.len) {
                                 const end_close = std.mem.indexOfPos(u8, self.source, self.pos, "%}") orelse {
                                     return self.fail(.unclosed_block, tag_start, "expected {% endif %}");
@@ -243,11 +243,11 @@ pub const Parser = struct {
                     }
 
                     try out_nodes.append(a, .{
-                        .if_block = .{
+                        .ifBlock = .{
                             .condition = condition,
-                            .then_nodes = try then_nodes.toOwnedSlice(a),
-                            .else_nodes = try else_nodes.toOwnedSlice(a),
-                            .start_byte = tag_start,
+                            .thenNodes = try thenNodes.toOwnedSlice(a),
+                            .elseNodes = try elseNodes.toOwnedSlice(a),
+                            .startByte = tag_start,
                             .line = loc.line,
                             .col = loc.col,
                         },
@@ -258,11 +258,11 @@ pub const Parser = struct {
                     const in_pos = std.mem.indexOf(u8, remainder, " in ") orelse {
                         return self.fail(.syntax_error, tag_start, "invalid for loop syntax, expected '{% for item in items %}'");
                     };
-                    const item_var = std.mem.trim(u8, remainder[0..in_pos], " \t\r\n");
+                    const itemVar = std.mem.trim(u8, remainder[0..in_pos], " \t\r\n");
                     const coll_expr = std.mem.trim(u8, remainder[in_pos + 4 ..], " \t\r\n");
 
-                    var body_nodes = std.ArrayList(TemplateNode).empty;
-                    try self.parseNodes(a, &body_nodes, blocks_list, includes_list, extends_path, "endfor");
+                    var bodyNodes = std.ArrayList(TemplateNode).empty;
+                    try self.parseNodes(a, &bodyNodes, blocks_list, includes_list, extendsPath, "endfor");
 
                     if (self.pos < self.source.len) {
                         const end_close = std.mem.indexOfPos(u8, self.source, self.pos, "%}") orelse {
@@ -274,11 +274,11 @@ pub const Parser = struct {
                     }
 
                     try out_nodes.append(a, .{
-                        .for_loop = .{
-                            .item_var = item_var,
-                            .collection_expr = coll_expr,
-                            .body_nodes = try body_nodes.toOwnedSlice(a),
-                            .start_byte = tag_start,
+                        .forLoop = .{
+                            .itemVar = itemVar,
+                            .collectionExpr = coll_expr,
+                            .bodyNodes = try bodyNodes.toOwnedSlice(a),
+                            .startByte = tag_start,
                             .line = loc.line,
                             .col = loc.col,
                         },
@@ -289,8 +289,8 @@ pub const Parser = struct {
                         return self.fail(.syntax_error, tag_start, "expected block name in '{% block name %}'");
                     }
 
-                    var body_nodes = std.ArrayList(TemplateNode).empty;
-                    try self.parseNodes(a, &body_nodes, blocks_list, includes_list, extends_path, "endblock");
+                    var bodyNodes = std.ArrayList(TemplateNode).empty;
+                    try self.parseNodes(a, &bodyNodes, blocks_list, includes_list, extendsPath, "endblock");
 
                     if (self.pos < self.source.len) {
                         const end_close = std.mem.indexOfPos(u8, self.source, self.pos, "%}") orelse {
@@ -301,7 +301,7 @@ pub const Parser = struct {
                         return self.fail(.unclosed_block, tag_start, "unclosed {% block %}, expected {% endblock %}");
                     }
 
-                    const owned_body = try body_nodes.toOwnedSlice(a);
+                    const owned_body = try bodyNodes.toOwnedSlice(a);
                     try blocks_list.append(a, .{
                         .name = block_name,
                         .nodes = owned_body,
@@ -310,8 +310,8 @@ pub const Parser = struct {
                     try out_nodes.append(a, .{
                         .block = .{
                             .name = block_name,
-                            .body_nodes = owned_body,
-                            .start_byte = tag_start,
+                            .bodyNodes = owned_body,
+                            .startByte = tag_start,
                             .line = loc.line,
                             .col = loc.col,
                         },
@@ -321,11 +321,11 @@ pub const Parser = struct {
                     const path = parseQuotedString(raw_path) orelse {
                         return self.fail(.syntax_error, tag_start, "invalid path in '{% extends \"...\" %}'");
                     };
-                    extends_path.* = path;
+                    extendsPath.* = path;
                     try out_nodes.append(a, .{
                         .extends = .{
-                            .parent_path = path,
-                            .start_byte = tag_start,
+                            .parentPath = path,
+                            .startByte = tag_start,
                             .line = loc.line,
                             .col = loc.col,
                         },
@@ -338,8 +338,8 @@ pub const Parser = struct {
                     try includes_list.append(a, path);
                     try out_nodes.append(a, .{
                         .include = .{
-                            .template_path = path,
-                            .start_byte = tag_start,
+                            .templatePath = path,
+                            .startByte = tag_start,
                             .line = loc.line,
                             .col = loc.col,
                         },
@@ -386,7 +386,7 @@ test "Parser parses expressions, conditionals, and loops" {
     defer ast.deinit();
 
     try testing.expect(ast.nodes.len > 0);
-    try testing.expect(ast.extends_path == null);
+    try testing.expect(ast.extendsPath == null);
 }
 
 test "Parser parses blocks, extends, and includes" {
@@ -405,7 +405,7 @@ test "Parser parses blocks, extends, and includes" {
     var ast = try parser.parse();
     defer ast.deinit();
 
-    try testing.expectEqualStrings("base.html", ast.extends_path.?);
+    try testing.expectEqualStrings("base.html", ast.extendsPath.?);
     try testing.expectEqual(@as(usize, 1), ast.blocks.len);
     try testing.expectEqualStrings("content", ast.blocks[0].name);
     try testing.expectEqual(@as(usize, 1), ast.includes.len);
@@ -420,6 +420,6 @@ test "Parser reports syntax errors with line/column" {
     var parser = Parser.init(alloc, "bad.html", src);
     const res = parser.parse();
     try testing.expectError(TemplateError.UnclosedBlock, res);
-    try testing.expect(parser.last_error != null);
-    try testing.expectEqual(@as(usize, 2), parser.last_error.?.line);
+    try testing.expect(parser.lastError != null);
+    try testing.expectEqual(@as(usize, 2), parser.lastError.?.line);
 }

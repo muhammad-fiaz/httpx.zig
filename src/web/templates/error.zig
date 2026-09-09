@@ -40,16 +40,16 @@ pub const TemplateError = error{
 /// Developer-friendly source diagnostic capturing precise location of template errors.
 pub const SourceError = struct {
     kind: TemplateErrorKind,
-    template_name: []const u8 = "",
+    templateName: []const u8 = "",
     line: usize = 1,
     column: usize = 1,
-    byte_offset: usize = 0,
+    byteOffset: usize = 0,
     message: []const u8 = "",
 
     pub fn formatToString(self: SourceError, buf: []u8) ![]const u8 {
-        if (self.template_name.len > 0) {
+        if (self.templateName.len > 0) {
             return try std.fmt.bufPrint(buf, "{s}:{d}:{d}: {s}: {s}", .{
-                self.template_name,
+                self.templateName,
                 self.line,
                 self.column,
                 @tagName(self.kind),
@@ -90,10 +90,10 @@ test "SourceError format and lineColFromOffset" {
 
     const err = SourceError{
         .kind = .syntax_error,
-        .template_name = "index.html",
+        .templateName = "index.html",
         .line = loc.line,
         .column = loc.col,
-        .byte_offset = 9,
+        .byteOffset = 9,
         .message = "expected {% endif %}",
     };
     var buf: [128]u8 = undefined;

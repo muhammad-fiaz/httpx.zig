@@ -23,24 +23,24 @@ pub const Entry = struct {
 
 /// Tagged union representing dynamic values inside template evaluation.
 pub const Value = union(enum) {
-    null_val: void,
+    nullVal: void,
     boolean: bool,
     integer: i64,
     float: f64,
     string: []const u8,
-    raw_html: []const u8,
+    rawHtml: []const u8,
     list: []const Value,
     map: []const Entry,
 
     /// Returns whether this value evaluates to true in conditional contexts.
     pub fn isTruthy(self: Value) bool {
         return switch (self) {
-            .null_val => false,
+            .nullVal => false,
             .boolean => |b| b,
             .integer => |i| i != 0,
             .float => |f| f != 0.0 and !std.math.isNan(f),
             .string => |s| s.len > 0,
-            .raw_html => |h| h.len > 0,
+            .rawHtml => |h| h.len > 0,
             .list => |l| l.len > 0,
             .map => |m| m.len > 0,
         };
@@ -79,7 +79,7 @@ pub const Value = union(enum) {
     /// Checks equality with another Value (for `{% if a == b %}`).
     pub fn equals(self: Value, other: Value) bool {
         switch (self) {
-            .null_val => return other == .null_val,
+            .nullVal => return other == .nullVal,
             .boolean => |b| return if (other == .boolean) b == other.boolean else false,
             .integer => |i| {
                 return switch (other) {
@@ -98,13 +98,13 @@ pub const Value = union(enum) {
             .string => |s| {
                 return switch (other) {
                     .string => |os| std.mem.eql(u8, s, os),
-                    .raw_html => |oh| std.mem.eql(u8, s, oh),
+                    .rawHtml => |oh| std.mem.eql(u8, s, oh),
                     else => false,
                 };
             },
-            .raw_html => |h| {
+            .rawHtml => |h| {
                 return switch (other) {
-                    .raw_html => |oh| std.mem.eql(u8, h, oh),
+                    .rawHtml => |oh| std.mem.eql(u8, h, oh),
                     .string => |os| std.mem.eql(u8, h, os),
                     else => false,
                 };
@@ -122,10 +122,10 @@ pub const Value = union(enum) {
             return val;
         }
         if (T == RawHtml) {
-            return .{ .raw_html = val.content };
+            return .{ .rawHtml = val.content };
         }
         if (T == void or T == @TypeOf(null)) {
-            return .null_val;
+            return .nullVal;
         }
 
         const info = @typeInfo(T);
@@ -134,7 +134,7 @@ pub const Value = union(enum) {
                 if (val) |unwrapped| {
                     return try from(allocator, unwrapped);
                 }
-                return .null_val;
+                return .nullVal;
             },
             .bool => return .{ .boolean = val },
             .int => return .{ .integer = @intCast(val) },
@@ -160,7 +160,7 @@ pub const Value = union(enum) {
                         }
                         return try from(allocator, val.*);
                     },
-                    else => return .null_val,
+                    else => return .nullVal,
                 }
             },
             .array => |arr| {
@@ -186,8 +186,8 @@ pub const Value = union(enum) {
                 }
                 return .{ .map = entries };
             },
-            .null => return .null_val,
-            else => return .null_val,
+            .null => return .nullVal,
+            else => return .nullVal,
         }
     }
 };
@@ -254,11 +254,11 @@ test "Value and Context basic operations" {
     // Truthiness
     try testing.expect(ctx.get("enabled").?.isTruthy());
     try testing.expect(ctx.get("count").?.isTruthy());
-    const null_v = Value{ .null_val = {} };
+    const null_v = Value{ .nullVal = {} };
     try testing.expect(!null_v.isTruthy());
 
     // Raw HTML
     const markup = ctx.get("safe_markup");
     try testing.expect(markup != null);
-    try testing.expectEqual(Value.raw_html, std.meta.activeTag(markup.?));
+    try testing.expectEqual(Value.rawHtml, std.meta.activeTag(markup.?));
 }

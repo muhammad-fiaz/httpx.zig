@@ -18,7 +18,7 @@ pub fn main() !void {
 
     var response = try client.post("http://httpbun.com/post", .{
         .multipart = .{
-            .fieldName = "upload",
+            .name = "upload",
             .filename = "hello.txt",
             .contentType = "text/plain",
             .data = file_data,

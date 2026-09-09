@@ -121,7 +121,7 @@ pub fn generate(router: *const Router, info: Info) GenerateError![]u8 {
                 if (entry.method != m or emitted[mi]) continue;
                 emitted[mi] = true;
 
-                const op_id = if (entry.meta.operation_id) |explicit|
+                const op_id = if (entry.meta.operationId) |explicit|
                     try uniqueExplicitId(allocator, explicit, &used_ids)
                 else
                     try uniqueOperationId(allocator, m, g.openapi_path, &used_ids);
@@ -313,7 +313,7 @@ fn writeSchema(j: *std.json.Stringify, s: *const meta_mod.Schema) !void {
             });
             try j.endObject();
         },
-        .string_fmt => |f| {
+        .stringFmt => |f| {
             try j.beginObject();
             try j.objectField("type");
             try j.write("string");
@@ -552,7 +552,7 @@ const UserSchema = tmeta.Schema{
 
 fn hMeta(ctx: *Context) anyerror!Response {
     _ = ctx;
-    return .{ .body = "{}", .content_type = "application/json" };
+    return .{ .body = "{}", .contentType = "application/json" };
 }
 
 test "metadata flows into full operation object" {
@@ -567,7 +567,7 @@ test "metadata flows into full operation object" {
         .schema = &tmeta.schemas.integer,
     };
     try router.addMeta(.GET, "/users/{id}", hMeta, .{
-        .operation_id = "getUserById",
+        .operationId = "getUserById",
         .summary = "Fetch one user",
         .tags = &.{"users"},
         .params = &.{
@@ -626,9 +626,9 @@ test "explicit duplicate operation ids are rejected" {
     var router = Router.init(a);
     defer router.deinit();
 
-    try router.addMeta(.GET, "/one", hMeta, .{ .operation_id = "dup" });
+    try router.addMeta(.GET, "/one", hMeta, .{ .operationId = "dup" });
     try router.get("/two", hMeta);
-    try router.addMeta(.POST, "/three", hMeta, .{ .operation_id = "dup" });
+    try router.addMeta(.POST, "/three", hMeta, .{ .operationId = "dup" });
 
     try std.testing.expectError(error.DuplicateOperationId, generate(&router, .{}));
 }

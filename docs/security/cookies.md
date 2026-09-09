@@ -13,18 +13,26 @@ HTTPX implements the latest RFC 6265bis specifications, providing defense-in-dep
 
 ```zig
 // Setting a hardened session cookie in server handlers
-ctx.header(
-    "Set-Cookie",
-    "session_id=s_94f83b281a; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=3600",
-);
+return .{
+    .status = 200,
+    .body = "{\"status\":\"cookie set\"}",
+    .contentType = "application/json",
+    .headers = &.{
+        .{
+            .name = "Set-Cookie",
+            .value = "session_id=s_94f83b281a; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=3600",
+        },
+    },
+};
 ```
 
 ## Client-Side Security
 
-When the client is configured with `.cookies = true`:
-1. Cookies marked `Secure` are discarded if received over plain HTTP.
+The standalone `httpx.CookieJar` partitions by domain and path:
+
+1. Cookies marked `Secure` are only emitted when the caller passes `secure = true` (TLS).
 2. Cookies are strictly partitioned by effective domain name and path.
-3. Supercookies or cross-domain cookies matching public suffixes are rejected.
+3. Expired cookies are skipped (and dropped by `purgeExpired`).
 
 ## Related
 

@@ -28,34 +28,34 @@ pub fn main() !void {
     // Mount live Prometheus /metrics endpoint
     try server.metrics("/metrics");
 
-    server.get("/", struct {
-        fn handle(ctx: *httpx.Context) !void {
-            try ctx.text("Hello World!");
-        }
-    }.handle);
+    try server.get("/", helloHandler);
 
-    try server.run();
+    server.run();
+}
+
+fn helloHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    return ctx.text("Hello World!");
 }
 ```
 
 Visiting `http://localhost:8080/metrics` dynamically generates standard Prometheus exposition text with `# HELP` and `# TYPE` headers:
 
 ```text
-# HELP http_requests_total Total HTTP requests served.
+# HELP http_requests_total Total HTTP requests received
 # TYPE http_requests_total counter
-http_requests_total{method="GET",status="2xx"} 1420
-http_requests_total{method="POST",status="2xx"} 85
+http_requests_total 1505
+# HELP http_requests_by_method_total Total HTTP requests by method
+# TYPE http_requests_by_method_total counter
+http_requests_by_method_total{method="GET"} 1420
+http_requests_by_method_total{method="POST"} 85
+# HELP http_active_connections Number of currently active connections
+# TYPE http_active_connections gauge
+http_active_connections 4
 
-# HELP http_connections_active Number of active TCP connections.
-# TYPE http_connections_active gauge
-http_connections_active 4
-
-# HELP http_request_duration_seconds HTTP request latency distribution.
+# HELP http_request_duration_seconds HTTP request duration in seconds
 # TYPE http_request_duration_seconds histogram
 http_request_duration_seconds_bucket{le="0.005"} 1240
-http_request_duration_seconds_bucket{le="0.010"} 1380
 http_request_duration_seconds_bucket{le="0.025"} 1410
-http_request_duration_seconds_bucket{le="0.050"} 1450
 http_request_duration_seconds_bucket{le="0.100"} 1490
 http_request_duration_seconds_bucket{le="+Inf"} 1505
 http_request_duration_seconds_sum 3.421500
@@ -69,11 +69,11 @@ HTTPX provides lightweight, lock-free snapshots to inspect metrics without heap 
 ```zig
 // Server snapshot with uptime, rate, and connection stats
 const snap = server.snapshot();
-std.debug.print("Uptime: {d}ms\n", .{snap.uptime_ms});
-std.debug.print("Total requests: {d}\n", .{snap.requests_total});
+std.debug.print("Uptime: {d}ms\n", .{snap.uptimeMs});
+std.debug.print("Total requests: {d}\n", .{snap.requestsTotal});
 std.debug.print("Error rate: {d:.2}%\n", .{snap.errorRate() * 100.0});
 std.debug.print("Throughput: {d:.2} req/sec\n", .{snap.requestsPerSecond()});
-std.debug.print("Active connections: {d}\n", .{snap.active_connections});
+std.debug.print("Active connections: {d}\n", .{snap.activeConnections});
 
 // Raw metrics snapshot
 const m_snap = server.metricsSnapshot();
@@ -82,18 +82,19 @@ std.debug.print("Avg latency: {d:.3}ms\n", .{m_snap.averageLatencyMs()});
 
 ## Standalone Registry
 
-You can also use `httpx.metrics.MetricsRegistry` standalone in custom applications, background workers, or microservices:
+You can also use `httpx.Metrics` standalone in custom applications, background workers, or microservices:
 
 ```zig
-var reg = httpx.metrics.MetricsRegistry.init();
+var reg = httpx.Metrics{};
 
-reg.requests_total.inc();
-reg.active_connections.inc();
-reg.recordRequest("GET", 200, 12_500_000); // 12.5ms duration
+reg.requestsTotal.inc();
+reg.activeConnections.inc();
+reg.recordRequestMethod("GET");
+reg.recordResponseFull(200, 12_500_000, 512); // status, latency_ns, bytes
 
 var buf: [4096]u8 = undefined;
-var fbs = std.io.fixedBufferStream(&buf);
-try reg.writePrometheus(fbs.writer());
+var w: std.Io.Writer = .fixed(&buf);
+try reg.render(&w);
 ```
 
 ## Related

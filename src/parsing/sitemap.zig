@@ -18,14 +18,14 @@ pub const ChangeFreq = enum {
 
 pub const SitemapUrl = struct {
     loc: []const u8 = "",
-    lastmod: []const u8 = "",
-    changefreq: ChangeFreq = .unknown,
+    lastMod: []const u8 = "",
+    changeFreq: ChangeFreq = .unknown,
     priority: ?f32 = null,
 };
 
 pub const Sitemap = struct {
     allocator: Allocator,
-    is_index: bool = false,
+    isIndex: bool = false,
     urls: []SitemapUrl = &.{},
     sitemaps: [][]const u8 = &.{},
 
@@ -60,7 +60,7 @@ pub fn parse(allocator: Allocator, src: []const u8) !Sitemap {
         }
         return Sitemap{
             .allocator = allocator,
-            .is_index = true,
+            .isIndex = true,
             .sitemaps = try sm_list.toOwnedSlice(allocator),
         };
     }
@@ -76,14 +76,14 @@ pub fn parse(allocator: Allocator, src: []const u8) !Sitemap {
         if (locs.items.len > 0) u.loc = getText(&tree, locs.items[0]);
 
         var mods: std.ArrayList(u32) = .empty;
-        try tree.getElementsByTag(al, u_idx, "lastmod", &mods);
-        if (mods.items.len > 0) u.lastmod = getText(&tree, mods.items[0]);
+        try tree.getElementsByTag(al, u_idx, "lastMod", &mods);
+        if (mods.items.len > 0) u.lastMod = getText(&tree, mods.items[0]);
 
         var freqs: std.ArrayList(u32) = .empty;
-        try tree.getElementsByTag(al, u_idx, "changefreq", &freqs);
+        try tree.getElementsByTag(al, u_idx, "changeFreq", &freqs);
         if (freqs.items.len > 0) {
             const f = getText(&tree, freqs.items[0]);
-            if (std.ascii.eqlIgnoreCase(f, "always")) u.changefreq = .always else if (std.ascii.eqlIgnoreCase(f, "hourly")) u.changefreq = .hourly else if (std.ascii.eqlIgnoreCase(f, "daily")) u.changefreq = .daily else if (std.ascii.eqlIgnoreCase(f, "weekly")) u.changefreq = .weekly else if (std.ascii.eqlIgnoreCase(f, "monthly")) u.changefreq = .monthly else if (std.ascii.eqlIgnoreCase(f, "yearly")) u.changefreq = .yearly else if (std.ascii.eqlIgnoreCase(f, "never")) u.changefreq = .never;
+            if (std.ascii.eqlIgnoreCase(f, "always")) u.changeFreq = .always else if (std.ascii.eqlIgnoreCase(f, "hourly")) u.changeFreq = .hourly else if (std.ascii.eqlIgnoreCase(f, "daily")) u.changeFreq = .daily else if (std.ascii.eqlIgnoreCase(f, "weekly")) u.changeFreq = .weekly else if (std.ascii.eqlIgnoreCase(f, "monthly")) u.changeFreq = .monthly else if (std.ascii.eqlIgnoreCase(f, "yearly")) u.changeFreq = .yearly else if (std.ascii.eqlIgnoreCase(f, "never")) u.changeFreq = .never;
         }
 
         var prios: std.ArrayList(u32) = .empty;
@@ -98,19 +98,19 @@ pub fn parse(allocator: Allocator, src: []const u8) !Sitemap {
 
     return Sitemap{
         .allocator = allocator,
-        .is_index = false,
+        .isIndex = false,
         .urls = try urls.toOwnedSlice(allocator),
     };
 }
 
 fn getText(tree: *const dom.Tree, root: u32) []const u8 {
-    var c = tree.get(root).first_child;
+    var c = tree.get(root).firstChild;
     while (c != dom.NO_NODE) {
         const node = tree.get(c);
         if (node.kind == .text or node.kind == .cdata) {
             return std.mem.trim(u8, node.data, " \t\r\n");
         }
-        c = node.next_sibling;
+        c = node.nextSibling;
     }
     return "";
 }

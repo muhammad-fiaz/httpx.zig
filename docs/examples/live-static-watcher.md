@@ -77,7 +77,7 @@ fn apiStatusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
         .engine = "httpx.zig",
         .version = "0.1.0",
         .framework = "httpx.zig",
-        .hot_reload = true,
+        .hotReload = true,
     });
 }
 
@@ -109,7 +109,7 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
-        .max_connections = 4,
+        .maxConnections = 4,
         .logging = .{},
     });
     defer server.deinit();

@@ -43,8 +43,8 @@ pub const Value = union(enum) {
     float: f64,
     string: []const u8,
     boolean: bool,
-    null_val: void,
-    enum_val: []const u8,
+    nullVal: void,
+    enumVal: []const u8,
     list: []const Value,
     object: []const ObjectField,
 };
@@ -84,7 +84,7 @@ pub const FragmentSpread = struct {
 };
 
 pub const InlineFragment = struct {
-    type_condition: ?[]const u8 = null,
+    typeCondition: ?[]const u8 = null,
     directives: []const Directive = &.{},
     selection_set: []const Selection = &.{},
 };
@@ -97,9 +97,9 @@ pub const OperationType = enum {
 
 pub const VariableDefinition = struct {
     name: []const u8,
-    type_name: []const u8,
+    typeName: []const u8,
     is_non_null: bool = false,
-    is_list: bool = false,
+    isList: bool = false,
     default_value: ?Value = null,
 };
 
@@ -113,7 +113,7 @@ pub const OperationDefinition = struct {
 
 pub const FragmentDefinition = struct {
     name: []const u8,
-    type_condition: []const u8,
+    typeCondition: []const u8,
     directives: []const Directive = &.{},
     selection_set: []const Selection = &.{},
 };

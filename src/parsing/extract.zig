@@ -12,17 +12,17 @@ pub const Metadata = struct {
     keywords: []const u8 = "",
     author: []const u8 = "",
     canonical: []const u8 = "",
-    og_title: []const u8 = "",
-    og_description: []const u8 = "",
-    og_image: []const u8 = "",
-    og_url: []const u8 = "",
-    og_type: []const u8 = "",
-    og_site_name: []const u8 = "",
-    twitter_card: []const u8 = "",
-    twitter_title: []const u8 = "",
-    twitter_description: []const u8 = "",
-    twitter_image: []const u8 = "",
-    twitter_site: []const u8 = "",
+    ogTitle: []const u8 = "",
+    ogDescription: []const u8 = "",
+    ogImage: []const u8 = "",
+    ogUrl: []const u8 = "",
+    ogType: []const u8 = "",
+    ogSiteName: []const u8 = "",
+    twitterCard: []const u8 = "",
+    twitterTitle: []const u8 = "",
+    twitterDescription: []const u8 = "",
+    twitterImage: []const u8 = "",
+    twitterSite: []const u8 = "",
     charset: []const u8 = "",
     viewport: []const u8 = "",
     robots: []const u8 = "",
@@ -40,7 +40,7 @@ pub fn extractMetadata(tree: *const Tree, allocator: Allocator) !Metadata {
         if (node.kind != .element) continue;
 
         if (node.hasTag("title")) {
-            const child = node.first_child;
+            const child = node.firstChild;
             if (child != NO_NODE and tree.get(child).kind == .text) {
                 meta.title = std.mem.trim(u8, tree.get(child).data, " \t\r\n");
             }
@@ -67,18 +67,18 @@ pub fn extractMetadata(tree: *const Tree, allocator: Allocator) !Metadata {
             if (std.ascii.eqlIgnoreCase(name, "robots")) meta.robots = content;
             if (std.ascii.eqlIgnoreCase(name, "generator")) meta.generator = content;
 
-            if (std.ascii.eqlIgnoreCase(property, "og:title")) meta.og_title = content;
-            if (std.ascii.eqlIgnoreCase(property, "og:description")) meta.og_description = content;
-            if (std.ascii.eqlIgnoreCase(property, "og:image")) meta.og_image = content;
-            if (std.ascii.eqlIgnoreCase(property, "og:url")) meta.og_url = content;
-            if (std.ascii.eqlIgnoreCase(property, "og:type")) meta.og_type = content;
-            if (std.ascii.eqlIgnoreCase(property, "og:site_name")) meta.og_site_name = content;
+            if (std.ascii.eqlIgnoreCase(property, "og:title")) meta.ogTitle = content;
+            if (std.ascii.eqlIgnoreCase(property, "og:description")) meta.ogDescription = content;
+            if (std.ascii.eqlIgnoreCase(property, "og:image")) meta.ogImage = content;
+            if (std.ascii.eqlIgnoreCase(property, "og:url")) meta.ogUrl = content;
+            if (std.ascii.eqlIgnoreCase(property, "og:type")) meta.ogType = content;
+            if (std.ascii.eqlIgnoreCase(property, "og:site_name")) meta.ogSiteName = content;
 
-            if (std.ascii.eqlIgnoreCase(name, "twitter:card")) meta.twitter_card = content;
-            if (std.ascii.eqlIgnoreCase(name, "twitter:title")) meta.twitter_title = content;
-            if (std.ascii.eqlIgnoreCase(name, "twitter:description")) meta.twitter_description = content;
-            if (std.ascii.eqlIgnoreCase(name, "twitter:image")) meta.twitter_image = content;
-            if (std.ascii.eqlIgnoreCase(name, "twitter:site")) meta.twitter_site = content;
+            if (std.ascii.eqlIgnoreCase(name, "twitter:card")) meta.twitterCard = content;
+            if (std.ascii.eqlIgnoreCase(name, "twitter:title")) meta.twitterTitle = content;
+            if (std.ascii.eqlIgnoreCase(name, "twitter:description")) meta.twitterDescription = content;
+            if (std.ascii.eqlIgnoreCase(name, "twitter:image")) meta.twitterImage = content;
+            if (std.ascii.eqlIgnoreCase(name, "twitter:site")) meta.twitterSite = content;
             continue;
         }
 
@@ -119,11 +119,11 @@ pub fn extractLinks(tree: *const Tree, allocator: Allocator) ![]Link {
             const link_text = blk: {
                 var txt: std.ArrayList(u8) = .empty;
                 defer txt.deinit(allocator);
-                var child = node.first_child;
+                var child = node.firstChild;
                 while (child != NO_NODE) {
                     const c = tree.get(child);
                     if (c.kind == .text) try txt.appendSlice(allocator, c.data);
-                    child = c.next_sibling;
+                    child = c.nextSibling;
                 }
                 break :blk try txt.toOwnedSlice(allocator);
             };
@@ -282,9 +282,9 @@ pub fn extractImages(tree: *const Tree, allocator: Allocator) ![]Image {
 
 pub const ScriptRef = struct {
     src: []const u8,
-    async_: bool = false,
-    defer_: bool = false,
-    type_: []const u8 = "",
+    asyncAttr: bool = false,
+    deferAttr: bool = false,
+    typeAttr: []const u8 = "",
     integrity: []const u8 = "",
 };
 
@@ -301,9 +301,9 @@ pub fn extractScripts(tree: *const Tree, allocator: Allocator) ![]ScriptRef {
         if (src.len == 0) continue;
         try scripts.append(allocator, .{
             .src = src,
-            .async_ = node.attr("async") != null,
-            .defer_ = node.attr("defer") != null,
-            .type_ = node.attr("type") orelse "",
+            .asyncAttr = node.attr("async") != null,
+            .deferAttr = node.attr("defer") != null,
+            .typeAttr = node.attr("type") orelse "",
             .integrity = node.attr("integrity") orelse "",
         });
     }

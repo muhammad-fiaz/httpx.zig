@@ -1,29 +1,12 @@
 # Cookies Guide
 
-HTTPX provides robust, secure cookie handling compliant with RFC 6265bis, including cookie jar management, `Set-Cookie` parsing, and security attributes.
+HTTPX handles cookies explicitly per request/response, following RFC 6265,
+plus a standalone cookie jar utility (`httpx.CookieJar`).
 
-## Client-Side Cookie Jar
+## Client-Side Cookies
 
-The HTTPX client can manage cookies across requests automatically when enabled:
+Pass cookies on individual requests with the `cookie` option:
 
-```zig
-var client = httpx.Client.init(allocator, io, .{
-    .cookies = true,
-});
-defer client.deinit();
-
-// Login endpoint returns Set-Cookie: session_id=abc; Secure; HttpOnly
-const login_res = try client.post("https://example.com/login", .{
-    .json = .{ .user = "alice", .pass = "p@ssword" },
-});
-defer login_res.deinit();
-
-// Next request automatically sends Cookie: session_id=abc
-const profile_res = try client.get("https://example.com/profile", .{});
-defer profile_res.deinit();
-```
-
-Alternatively, pass explicit cookies on individual requests:
 ```zig
 const res = try client.get("https://example.com/api", .{
     .cookie = "theme=dark; lang=en",
@@ -31,25 +14,52 @@ const res = try client.get("https://example.com/api", .{
 defer res.deinit();
 ```
 
----
+Read `Set-Cookie` values from any response with `res.header("Set-Cookie")`.
+
+For multi-request flows, keep a `httpx.CookieJar` alongside the client:
+
+```zig
+var jar = httpx.CookieJar.init(allocator);
+defer jar.deinit();
+
+// After a login response carrying Set-Cookie:
+if (loginRes.header("Set-Cookie")) |sc| {
+    jar.setFromHeader(sc, "example.com");
+}
+
+// Before the next request, render the Cookie header.
+// Pass secure=true when the connection uses TLS so Secure cookies are sent.
+var cookieBuf: [512]u8 = undefined;
+const cookieHeader = jar.cookieHeader("example.com", "/profile", true, &cookieBuf);
+var profileRes = try client.get("https://example.com/profile", .{
+    .cookie = cookieHeader,
+});
+defer profileRes.deinit();
+```
 
 ## Server-Side Cookies
 
-On the server, inspect incoming cookies from `ctx` or set new ones:
+Read incoming cookies with `ctx.cookie(name)` and set them via `Set-Cookie`
+response headers:
 
 ```zig
-server.get("/visit", struct {
-    fn handle(ctx: *httpx.Context) !void {
-        // Read cookie
-        if (ctx.header("Cookie")) |cookie_hdr| {
-            std.debug.print("Incoming Cookies: {s}\n", .{cookie_hdr});
-        }
-
-        // Set secure cookie
-        ctx.header("Set-Cookie", "session_token=xyz123; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=86400");
-        try ctx.json(.{ .status = "cookie set" });
+fn visitHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    if (ctx.cookie("session_token")) |token| {
+        _ = token;
+        return ctx.text("welcome back");
     }
-}.handle);
+    return .{
+        .status = 200,
+        .body = "{\"status\":\"cookie set\"}",
+        .contentType = "application/json",
+        .headers = &.{
+            .{
+                .name = "Set-Cookie",
+                .value = "session_token=xyz123; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=86400",
+            },
+        },
+    };
+}
 ```
 
 ## Security Attributes
@@ -61,4 +71,4 @@ server.get("/visit", struct {
 ## Related
 
 * [Security: Cookies](/security/cookies)
-* [Example: Cookies Demo](/examples/cookies-demo)
+* [Example: Cookie Server](/examples/cookie-server)

@@ -3,7 +3,7 @@
 //! Provides first-class GraphQL routing and execution:
 //! - POST /graphql: GraphQL JSON body parser (query, variables, operationName)
 //! - GET /graphql: GraphQL query string support
-//! - Request validation & security limits (max_body, depth, complexity)
+//! - Request validation & security limits (maxBody, depth, complexity)
 //! - CORS, custom headers, and auth context forwarding
 //! - Integration with `httpx.Server` and `httpx.Router`
 
@@ -28,13 +28,8 @@ pub const RequestPayload = struct {
 
 pub const HandlerConfig = struct {
     endpoint: []const u8 = "/graphql",
-    max_body_size: usize = 2 * 1024 * 1024,
+    maxBodySize: usize = 2 * 1024 * 1024,
     cors: bool = true,
-    enable_cors: ?bool = null,
-
-    pub fn isCorsEnabled(self: HandlerConfig) bool {
-        return self.enable_cors orelse self.cors;
-    }
 };
 
 pub const ServerState = struct {
@@ -43,7 +38,7 @@ pub const ServerState = struct {
 };
 
 fn getState(ctx: *Context) !*ServerState {
-    return @ptrCast(@alignCast(ctx.user_data orelse return error.SchemaNotMounted));
+    return @ptrCast(@alignCast(ctx.userData orelse return error.SchemaNotMounted));
 }
 
 /// Mounts a GraphQL schema on a Router at `cfg.endpoint` (default "/graphql").
@@ -60,7 +55,7 @@ pub fn mount(router: *router_mod.Router, schema: Schema, cfg: HandlerConfig) !vo
 pub fn unmount(router: *router_mod.Router, cfg: HandlerConfig) void {
     var state_to_free: ?*ServerState = null;
     for (router.routes.items) |entry| {
-        if (entry.user_data) |ud| {
+        if (entry.userData) |ud| {
             if (entry.handler == &handleGraphQLPost or entry.handler == &handleGraphQLGet or entry.handler == &handleGraphQLOptions) {
                 state_to_free = @ptrCast(@alignCast(ud));
                 break;
@@ -111,7 +106,7 @@ fn handleGraphQLGet(ctx: *Context) anyerror!Response {
     if (query_str == null or query_str.?.len == 0) {
         return .{
             .status = 400,
-            .content_type = "application/json; charset=utf-8",
+            .contentType = "application/json; charset=utf-8",
             .body = "{\"errors\":[{\"message\":\"Missing query parameter in GET request\"}]}",
         };
     }
@@ -120,9 +115,9 @@ fn handleGraphQLGet(ctx: *Context) anyerror!Response {
     const result = try s.execute(ctx.allocator, query_str.?, vars_str, null);
     return .{
         .status = 200,
-        .content_type = "application/json; charset=utf-8",
+        .contentType = "application/json; charset=utf-8",
         .body = result,
-        .headers = if (st.cfg.isCorsEnabled()) &.{.{ .name = "Access-Control-Allow-Origin", .value = "*" }} else &.{},
+        .headers = if (st.cfg.cors) &.{.{ .name = "Access-Control-Allow-Origin", .value = "*" }} else &.{},
     };
 }
 
@@ -133,15 +128,15 @@ fn handleGraphQLPost(ctx: *Context) anyerror!Response {
     if (ctx.body.len == 0) {
         return .{
             .status = 400,
-            .content_type = "application/json; charset=utf-8",
+            .contentType = "application/json; charset=utf-8",
             .body = "{\"errors\":[{\"message\":\"Empty GraphQL request body\"}]}",
         };
     }
 
-    if (ctx.body.len > st.cfg.max_body_size) {
+    if (ctx.body.len > st.cfg.maxBodySize) {
         return .{
             .status = 413,
-            .content_type = "application/json; charset=utf-8",
+            .contentType = "application/json; charset=utf-8",
             .body = "{\"errors\":[{\"message\":\"GraphQL request body exceeds size limit\"}]}",
         };
     }
@@ -149,7 +144,7 @@ fn handleGraphQLPost(ctx: *Context) anyerror!Response {
     const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, ctx.body, .{}) catch {
         return .{
             .status = 400,
-            .content_type = "application/json; charset=utf-8",
+            .contentType = "application/json; charset=utf-8",
             .body = "{\"errors\":[{\"message\":\"Invalid JSON payload in GraphQL request body\"}]}",
         };
     };
@@ -158,7 +153,7 @@ fn handleGraphQLPost(ctx: *Context) anyerror!Response {
     if (parsed.value != .object) {
         return .{
             .status = 400,
-            .content_type = "application/json; charset=utf-8",
+            .contentType = "application/json; charset=utf-8",
             .body = "{\"errors\":[{\"message\":\"GraphQL JSON payload must be an object\"}]}",
         };
     }
@@ -166,7 +161,7 @@ fn handleGraphQLPost(ctx: *Context) anyerror!Response {
     const query_val = parsed.value.object.get("query") orelse {
         return .{
             .status = 400,
-            .content_type = "application/json; charset=utf-8",
+            .contentType = "application/json; charset=utf-8",
             .body = "{\"errors\":[{\"message\":\"GraphQL request object missing 'query' field\"}]}",
         };
     };
@@ -174,7 +169,7 @@ fn handleGraphQLPost(ctx: *Context) anyerror!Response {
     if (query_val != .string or query_val.string.len == 0) {
         return .{
             .status = 400,
-            .content_type = "application/json; charset=utf-8",
+            .contentType = "application/json; charset=utf-8",
             .body = "{\"errors\":[{\"message\":\"'query' field must be a non-empty string\"}]}",
         };
     }
@@ -190,8 +185,8 @@ fn handleGraphQLPost(ctx: *Context) anyerror!Response {
 
     return .{
         .status = 200,
-        .content_type = "application/json; charset=utf-8",
+        .contentType = "application/json; charset=utf-8",
         .body = result,
-        .headers = if (st.cfg.isCorsEnabled()) &.{.{ .name = "Access-Control-Allow-Origin", .value = "*" }} else &.{},
+        .headers = if (st.cfg.cors) &.{.{ .name = "Access-Control-Allow-Origin", .value = "*" }} else &.{},
     };
 }

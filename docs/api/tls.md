@@ -41,131 +41,90 @@ tls.zig              -- High-level Connection, TlsConfig, TlsSession, record-lay
 
 ## TlsConfig (Client)
 
-Configuration for TLS client connections.
+Per-request and client-level TLS options (`src/client/request.zig`):
 
 ```zig
-pub const TlsConfig = struct {
-    allocator: Allocator,
-    alpnProtocols: []const []const u8 = &.{"http/1.1"},
-    verifyServer: bool = true,
-    caBundlePath: ?[]const u8 = null,
+pub const TlsOptions = struct {
+    verify: VerifyMode = .caBundle, // .caBundle, .selfSigned, .none
+    caBundle: ?*std.crypto.Certificate.Bundle = null,
+    allowTruncation: bool = true,
 };
 ```
 
-### Factory Methods
-
-| Method | Description |
-|--------|-------------|
-| `init(allocator)` | Default config (verify server, HTTP/1.1 only) |
-| `insecure(allocator)` | Skip server verification |
-| `withH2(allocator)` | Advertise h2 + http/1.1 ALPN |
-| `insecureWithH2(allocator)` | Insecure + h2 ALPN |
-| `withH3(allocator)` | Advertise h3 + h2 + http/1.1 ALPN |
-| `insecureWithH3(allocator)` | Insecure + h3 ALPN |
+```zig
+// Development-only verification bypass:
+var res = try client.get("https://127.0.0.1:8443/", .{ .tls = .{ .verify = .none } });
+```
 
 ## ServerTlsConfig
 
-Configuration for TLS server connections. Holds loaded certificate chain and private key in DER format.
+Server identity and ALPN preference (`src/protocols/tls/tcp_tls.zig`):
 
 ```zig
-pub const ServerTlsConfig = struct {
-    cert_chain_der: []const []const u8 = &.{},
-    key_der: ?[]const u8 = null,
-    allocator: ?Allocator = null,
-    ecdsa_keypair: ?crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair = null,
+pub const TlsServerConfig = struct {
+    allocator: Allocator,
+    defaultIdentity: ?CertIdentity = null, // .{ .certChainPem, .privateKeyPem }
+    certSelector: ?CertSelector = null,    // SNI selector, falls back to defaultIdentity
+    alpnProtocols: []const alpn.Protocol = &alpn.DEFAULT_TCP_PREFERENCE,
 };
-```
-
-### Loading from PEM Files
-
-```zig
-const server_tls = try tls.loadServerTlsConfig(allocator,
-    "examples/certs/server_ec.crt",
-    "examples/certs/server_ec.key",
-);
-defer server_tls.deinit();
 ```
 
 ## Server Configuration
 
-Enable TLS on the server via `ServerConfig`:
+Enable TLS on the server via `ServerConfig.tls` (PEM string or file path for
+both entries):
 
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
 var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8443,
-    .tls_enabled = true,
-    .tls_cert_path = "examples/certs/server_ec.crt",
-    .tls_key_path = "examples/certs/server_ec.key",
-    .tls_alpnProtocols = &.{ "h3", "h2", "http/1.1" },
+    .tls = .{
+        .certPem = @embedFile("cert.pem"),
+        .keyPem = @embedFile("key.pem"),
+    },
     .http2 = true,
-    .http3 = true,
 });
 ```
 
+For a standalone TLS listener, use `httpx.tls.Listener`:
+
+```zig
+var listener = try httpx.tls.Listener.init(allocator, io, .{
+    .port = 8443,
+    .defaultIdentity = .{
+        .certChainPem = @embedFile("cert.pem"),
+        .privateKeyPem = @embedFile("key.pem"),
+    },
+});
+defer listener.deinit();
+try listener.run(handler);
+```
+
 ::: tip ALPN Default
-The default `tls_alpnProtocols` is `&.{ "h3", "h2", "http/1.1" }`, so clients can negotiate HTTP/3, HTTP/2, or HTTP/1.1 automatically.
+The server negotiates ALPN from `alpnProtocols` (default TCP preference: h2 then http/1.1), so clients negotiate HTTP/2 or HTTP/1.1 automatically.
 :::
 
 The server automatically loads the certificate chain and private key on the first TLS connection. ALPN negotiation selects between HTTP/1.1, HTTP/2, and HTTP/3 based on the client's offer.
 
 ## Connection
 
-The `Connection` struct represents an established TLS session over a TCP socket.
+Client connections flow through the high-level client (`client.get("https://…")`),
+which performs the handshake, ALPN negotiation, hostname verification, and
+record-layer encryption internally. Server connections are accepted by
+`httpx.tls.Listener` / `Server.tls` and dispatched to HTTP/1 or HTTP/2
+handlers based on the negotiated ALPN protocol.
 
-```zig
-pub const Connection = struct {
-    allocator: Allocator,
-    socket: *Socket,
-    negotiated_alpn: NegotiatedAlpn,
-    tls_version: ProtocolVersion,
-    is_server: bool,
-    connected: bool,
-    app_write_key: ?[32]u8,
-    app_write_iv: ?[12]u8,
-    app_read_key: ?[32]u8,
-    app_read_iv: ?[12]u8,
-    write_seq: u64,
-    read_seq: u64,
-    hs_write_seq: u64,
-    hs_read_seq: u64,
-    cipher_suite: ?CipherSuite,
-};
-```
-
-### Methods
+### Methods (server side)
 
 | Method | Description |
 |--------|-------------|
-| `negotiatedAlpn()` | Get the negotiated ALPN protocol string |
-| `isHttp2()` | Returns true if HTTP/2 was negotiated |
-| `isHttp3()` | Returns true if HTTP/3 was negotiated |
-| `tlsVersion()` | Returns the negotiated TLS protocol version |
-| `sendAlert(level, desc)` | Send a TLS alert to the peer |
-| `closeNotify()` | Send close_notify alert for clean shutdown |
-| `reader()` | Get an `AnyReader` for reading decrypted data |
-| `writer()` | Get an `AnyWriter` for writing encrypted data |
-| `read(buffer)` | Read decrypted data from the connection |
-| `write(data)` | Write encrypted data to the connection |
-
-## Client Handshake
-
-Perform a full TLS 1.2 or 1.3 client handshake:
-
-```zig
-const connection = try tls.connectClient(allocator, socket, &config, "example.com");
-defer connection.closeNotify();
-```
-
-## Server Handshake
-
-Accept a TLS connection on the server side:
-
-```zig
-const connection = try tls.acceptServer(allocator, socket, alpnProtocols, server_tls_config);
-defer connection.closeNotify();
-```
+| `httpx.tls.Listener.init(allocator, io, cfg)` | Bind a TLS listener with `defaultIdentity` |
+| `listener.run(handler)` | Blocking accept loop |
+| `listener.stop()` | Immediate shutdown |
+| `listener.localPort()` | Actual bound port |
+| `server.setTls(certPemOrPath, keyPemOrPath)` | Rotate server identity at runtime |
+| `server.isTls()` | Whether TLS is active |
 
 ## ALPN Negotiation
 
@@ -189,9 +148,9 @@ Certificate verification uses `std.crypto.Certificate.Chain` for chain validatio
 5. Downloads root certificates from the configured CA bundle when needed
 
 ```zig
-// During handshake, certificate chain is verified automatically
-const connection = try tls.connectClient(allocator, socket, &config, "example.com");
-// If verification fails, returns error.TlsCertificateNotVerified or related errors
+// During handshake, the certificate chain is verified automatically.
+// Failures surface as client errors (e.g. TlsAlert) or server
+// tls_handshake_failed events; see the error tables below.
 ```
 
 ### Certificate-Related Errors

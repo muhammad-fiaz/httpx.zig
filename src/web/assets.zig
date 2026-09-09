@@ -20,13 +20,13 @@ pub const Asset = struct {
     /// Immutable byte content.
     content: []const u8,
     /// MIME content type (e.g. "text/html; charset=utf-8").
-    content_type: []const u8,
+    contentType: []const u8,
     /// Strong ETag for conditional HTTP requests (e.g. "\"a1b2c3d4\"").
     etag: []const u8,
     /// Modification timestamp in nanoseconds.
-    mtime_ns: i128 = 0,
+    mtimeNs: i128 = 0,
     /// True if embedded in binary memory; false if loaded from disk.
-    is_embedded: bool = true,
+    isEmbedded: bool = true,
 };
 
 /// Thread-safe registry for embedded production assets and filesystem fallback.
@@ -34,13 +34,13 @@ pub const AssetStore = struct {
     allocator: Allocator,
     assets: std.StringHashMap(Asset),
     lock: sync.Spinlock = .{},
-    fs_root: ?[]const u8 = null,
+    fsRoot: ?[]const u8 = null,
 
     pub fn init(allocator: Allocator) AssetStore {
         return .{
             .allocator = allocator,
             .assets = std.StringHashMap(Asset).init(allocator),
-            .fs_root = null,
+            .fsRoot = null,
         };
     }
 
@@ -56,8 +56,8 @@ pub const AssetStore = struct {
     }
 
     /// Normalizes path by stripping leading slashes and converting Windows backslashes to forward slashes.
-    pub fn normalizePath(buf: []u8, raw_path: []const u8) []const u8 {
-        var trimmed = raw_path;
+    pub fn normalizePath(buf: []u8, rawPath: []const u8) []const u8 {
+        var trimmed = rawPath;
         while (trimmed.len > 0 and (trimmed[0] == '/' or trimmed[0] == '\\')) {
             trimmed = trimmed[1..];
         }
@@ -71,17 +71,17 @@ pub const AssetStore = struct {
     /// Registers an embedded asset into the store.
     pub fn register(
         self: *AssetStore,
-        raw_path: []const u8,
+        rawPath: []const u8,
         content: []const u8,
-        custom_content_type: ?[]const u8,
+        customContentType: ?[]const u8,
     ) !void {
         var norm_buf: [512]u8 = undefined;
-        const norm_path = normalizePath(&norm_buf, raw_path);
+        const norm_path = normalizePath(&norm_buf, rawPath);
 
         const owned_key = try self.allocator.dupe(u8, norm_path);
         errdefer self.allocator.free(owned_key);
 
-        const ct = custom_content_type orelse mime.byExtension(norm_path);
+        const ct = customContentType orelse mime.fromPath(norm_path);
 
         // Generate deterministic ETag from content hash
         var hash_buf: [32]u8 = undefined;
@@ -101,17 +101,17 @@ pub const AssetStore = struct {
         try self.assets.put(owned_key, .{
             .path = owned_key,
             .content = content,
-            .content_type = ct,
+            .contentType = ct,
             .etag = etag_str,
-            .mtime_ns = 0,
-            .is_embedded = true,
+            .mtimeNs = 0,
+            .isEmbedded = true,
         });
     }
 
     /// Looks up an asset by logical path.
-    pub fn get(self: *AssetStore, raw_path: []const u8) ?Asset {
+    pub fn get(self: *AssetStore, rawPath: []const u8) ?Asset {
         var norm_buf: [512]u8 = undefined;
-        const norm_path = normalizePath(&norm_buf, raw_path);
+        const norm_path = normalizePath(&norm_buf, rawPath);
 
         self.lock.lock();
         defer self.lock.unlock();
@@ -131,8 +131,8 @@ pub const AssetStore = struct {
     }
 
     /// Returns true if the store has an embedded asset for the given path.
-    pub fn has(self: *AssetStore, raw_path: []const u8) bool {
-        return self.get(raw_path) != null;
+    pub fn has(self: *AssetStore, rawPath: []const u8) bool {
+        return self.get(rawPath) != null;
     }
 
     /// Returns the total count of registered embedded assets.
@@ -162,26 +162,42 @@ pub fn registerEmbedded(
     allocator: Allocator,
     path: []const u8,
     content: []const u8,
-    content_type: ?[]const u8,
+    contentType: ?[]const u8,
 ) !void {
     const store = globalStore(allocator);
-    try store.register(path, content, content_type);
+    try store.register(path, content, contentType);
+}
+
+/// One entry of a build-generated embedded directory manifest: a logical
+/// web path plus the bytes embedded for it (typically via `@embedFile`).
+/// Manifests are generated deterministically sorted by `build.zig` helpers,
+/// so registration order never depends on filesystem enumeration order.
+pub const EmbeddedFile = struct {
+    path: []const u8,
+    content: []const u8,
+};
+
+/// Registers a whole build-generated manifest with one call. MIME types
+/// resolve through the shared MIME system unless an entry needs an
+/// override, in which case register that path individually afterwards.
+pub fn registerEmbeddedDir(allocator: Allocator, files: []const EmbeddedFile) !void {
+    for (files) |f| try registerEmbedded(allocator, f.path, f.content, null);
 }
 
 /// Retrieves an embedded asset from the global registry.
-pub fn getEmbedded(raw_path: []const u8) ?Asset {
+pub fn getEmbedded(rawPath: []const u8) ?Asset {
     g_asset_lock.lock();
     defer g_asset_lock.unlock();
 
     if (g_asset_store) |*store| {
-        return store.get(raw_path);
+        return store.get(rawPath);
     }
     return null;
 }
 
 /// Checks if an embedded asset exists in the global registry.
-pub fn hasEmbedded(raw_path: []const u8) bool {
-    return getEmbedded(raw_path) != null;
+pub fn hasEmbedded(rawPath: []const u8) bool {
+    return getEmbedded(rawPath) != null;
 }
 
 test "AssetStore register and lookup" {
@@ -195,13 +211,13 @@ test "AssetStore register and lookup" {
     const a1 = store.get("index.html");
     try std.testing.expect(a1 != null);
     try std.testing.expectEqualStrings("<h1>Hello Embedded</h1>", a1.?.content);
-    try std.testing.expectEqualStrings("text/html; charset=utf-8", a1.?.content_type);
-    try std.testing.expect(a1.?.is_embedded);
+    try std.testing.expectEqualStrings("text/html; charset=utf-8", a1.?.contentType);
+    try std.testing.expect(a1.?.isEmbedded);
 
     // Test backslash normalization
     const a2 = store.get("css/style.css");
     try std.testing.expect(a2 != null);
-    try std.testing.expectEqualStrings("text/css; charset=utf-8", a2.?.content_type);
+    try std.testing.expectEqualStrings("text/css; charset=utf-8", a2.?.contentType);
 
     // Test missing asset
     try std.testing.expect(store.get("missing.js") == null);

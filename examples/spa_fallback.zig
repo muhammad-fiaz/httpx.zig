@@ -10,7 +10,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .max_connections = 5,
+        .maxConnections = 5,
     });
     defer server.deinit();
 
@@ -41,5 +41,5 @@ pub fn main() !void {
 }
 
 fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 200, .body = "<h1>SPA Fallback Example</h1>", .content_type = "text/html" };
+    return .{ .status = 200, .body = "<h1>SPA Fallback Example</h1>", .contentType = "text/html" };
 }

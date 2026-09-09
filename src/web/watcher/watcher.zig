@@ -26,17 +26,17 @@ pub const WatchEventKind = enum {
 /// Strategy automatically determined for resource reloading (hot/warm/cold/restart).
 pub const ReloadStrategy = enum {
     /// Stylesheet (CSS) in-place update without reloading the document.
-    hot_reload,
+    hotReload,
     /// HTML / template / static content soft reload (window refresh).
-    warm_reload,
+    warmReload,
     /// Configuration, env, schema files (cache invalidation / re-fetch).
-    cold_reload,
+    coldReload,
     /// Compiled executable or application source code change requiring restart.
     restart,
 
     /// Automatically selects the reload strategy based on file path extension.
     pub fn forPath(path: []const u8) ReloadStrategy {
-        if (std.mem.endsWith(u8, path, ".css")) return .hot_reload;
+        if (std.mem.endsWith(u8, path, ".css")) return .hotReload;
         if (std.mem.endsWith(u8, path, ".zig")) return .restart;
         if (std.mem.endsWith(u8, path, ".json") or
             std.mem.endsWith(u8, path, ".env") or
@@ -44,30 +44,30 @@ pub const ReloadStrategy = enum {
             std.mem.endsWith(u8, path, ".yaml") or
             std.mem.endsWith(u8, path, ".conf"))
         {
-            return .cold_reload;
+            return .coldReload;
         }
-        return .warm_reload;
+        return .warmReload;
     }
 };
 
 pub const WatchEvent = struct {
     path: []const u8,
-    old_path: ?[]const u8 = null,
+    oldPath: ?[]const u8 = null,
     kind: WatchEventKind,
-    strategy: ReloadStrategy = .warm_reload,
-    timestamp_ms: i64,
+    strategy: ReloadStrategy = .warmReload,
+    timestampMs: i64,
 };
 
 pub const OwnedWatchEvent = struct {
     path: []u8,
-    old_path: ?[]u8 = null,
+    oldPath: ?[]u8 = null,
     kind: WatchEventKind,
-    strategy: ReloadStrategy = .warm_reload,
-    timestamp_ms: i64,
+    strategy: ReloadStrategy = .warmReload,
+    timestampMs: i64,
 
     pub fn deinit(self: *OwnedWatchEvent, allocator: Allocator) void {
         allocator.free(self.path);
-        if (self.old_path) |op| {
+        if (self.oldPath) |op| {
             allocator.free(op);
         }
     }
@@ -75,31 +75,34 @@ pub const OwnedWatchEvent = struct {
     pub fn asView(self: *const OwnedWatchEvent) WatchEvent {
         return .{
             .path = self.path,
-            .old_path = self.old_path,
+            .oldPath = self.oldPath,
             .kind = self.kind,
             .strategy = self.strategy,
-            .timestamp_ms = self.timestamp_ms,
+            .timestampMs = self.timestampMs,
         };
     }
 };
 
 pub const WatcherConfig = struct {
     /// Root directory to recursively watch.
-    dir_path: []const u8 = "",
+    dirPath: []const u8 = "",
     /// Poll interval in milliseconds for fallback scanning.
-    poll_interval_ms: u64 = 100,
+    pollIntervalMs: u64 = 100,
     /// Debounce window in milliseconds. Rapid events within this window are coalesced.
-    debounce_ms: u64 = 75,
+    debounceMs: u64 = 75,
     /// Optional file extensions to filter (e.g. &[].{ ".html", ".css", ".js" }). Empty means all.
     extensions: []const []const u8 = &.{ ".html", ".htm", ".css", ".js", ".json" },
+    /// Top-level directory names skipped during scans (generated trees).
+    /// Empty disables skipping.
+    ignoredDirs: []const []const u8 = &.{ "node_modules", ".git", ".zig-cache", "zig-out", ".cache", "dist" },
     /// Callback triggered when a file modification is detected.
-    on_change: ?*const fn (event: WatchEvent, user_data: ?*anyopaque) void = null,
-    user_data: ?*anyopaque = null,
+    onChange: ?*const fn (event: WatchEvent, userData: ?*anyopaque) void = null,
+    userData: ?*anyopaque = null,
 };
 
 const FileEntry = struct {
     path: []u8,
-    mtime_ns: i128,
+    mtimeNs: i128,
     size: u64,
 };
 
@@ -146,11 +149,11 @@ pub const Watcher = struct {
     running: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     _change_count: std.atomic.Value(u64) = .init(0),
-    event_queue: std.ArrayList(OwnedWatchEvent) = .empty,
-    current_event: ?OwnedWatchEvent = null,
-    last_event_ms: i64 = 0,
-    last_event_path: [512]u8 = undefined,
-    last_event_path_len: usize = 0,
+    eventQueue: std.ArrayList(OwnedWatchEvent) = .empty,
+    currentEvent: ?OwnedWatchEvent = null,
+    lastEventMs: i64 = 0,
+    lastEventPath: [512]u8 = undefined,
+    lastEventPathLen: usize = 0,
 
     pub fn init(allocator: Allocator, io: std.Io, config: WatcherConfig) !*Watcher {
         const w = try allocator.create(Watcher);
@@ -171,14 +174,14 @@ pub const Watcher = struct {
     pub fn deinit(self: *Watcher) void {
         self.stop();
         self.mutex.lock();
-        if (self.current_event) |*ev| {
+        if (self.currentEvent) |*ev| {
             ev.deinit(self.allocator);
-            self.current_event = null;
+            self.currentEvent = null;
         }
-        for (self.event_queue.items) |*ev| {
+        for (self.eventQueue.items) |*ev| {
             ev.deinit(self.allocator);
         }
-        self.event_queue.deinit(self.allocator);
+        self.eventQueue.deinit(self.allocator);
         var it = self.entries.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.value_ptr.path);
@@ -188,46 +191,46 @@ pub const Watcher = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn notifyChange(self: *Watcher, path: []const u8, old_path: ?[]const u8, kind: WatchEventKind) void {
+    pub fn notifyChange(self: *Watcher, path: []const u8, oldPath: ?[]const u8, kind: WatchEventKind) void {
         const now = clock.millisNow();
         // Coalesce events for same file within debounce window
-        if (self.config.debounce_ms > 0 and (now - self.last_event_ms) < self.config.debounce_ms) {
-            if (self.last_event_path_len == path.len and
-                std.mem.eql(u8, self.last_event_path[0..self.last_event_path_len], path))
+        if (self.config.debounceMs > 0 and (now - self.lastEventMs) < self.config.debounceMs) {
+            if (self.lastEventPathLen == path.len and
+                std.mem.eql(u8, self.lastEventPath[0..self.lastEventPathLen], path))
             {
                 return;
             }
         }
-        self.last_event_ms = now;
-        const copy_len = @min(path.len, self.last_event_path.len);
-        @memcpy(self.last_event_path[0..copy_len], path[0..copy_len]);
-        self.last_event_path_len = copy_len;
+        self.lastEventMs = now;
+        const copy_len = @min(path.len, self.lastEventPath.len);
+        @memcpy(self.lastEventPath[0..copy_len], path[0..copy_len]);
+        self.lastEventPathLen = copy_len;
 
         _ = self._change_count.fetchAdd(1, .release);
 
         const owned_path = self.allocator.dupe(u8, path) catch return;
-        const owned_old = if (old_path) |op| (self.allocator.dupe(u8, op) catch null) else null;
+        const owned_old = if (oldPath) |op| (self.allocator.dupe(u8, op) catch null) else null;
         const ev = OwnedWatchEvent{
             .path = owned_path,
-            .old_path = owned_old,
+            .oldPath = owned_old,
             .kind = kind,
             .strategy = ReloadStrategy.forPath(path),
-            .timestamp_ms = now,
+            .timestampMs = now,
         };
 
-        if (self.event_queue.items.len >= 1024) {
-            var dropped = self.event_queue.orderedRemove(0);
+        if (self.eventQueue.items.len >= 1024) {
+            var dropped = self.eventQueue.orderedRemove(0);
             dropped.deinit(self.allocator);
         }
 
-        self.event_queue.append(self.allocator, ev) catch {
+        self.eventQueue.append(self.allocator, ev) catch {
             var mut_ev = ev;
             mut_ev.deinit(self.allocator);
             return;
         };
 
-        if (self.config.on_change) |cb| {
-            cb(ev.asView(), self.config.user_data);
+        if (self.config.onChange) |cb| {
+            cb(ev.asView(), self.config.userData);
         }
     }
 
@@ -239,10 +242,10 @@ pub const Watcher = struct {
         var changed = false;
         const io = self.io;
 
-        // 1. Recursive directory walk if dir_path is provided and exists
-        if (self.config.dir_path.len > 0) {
+        // 1. Recursive directory walk if dirPath is provided and exists
+        if (self.config.dirPath.len > 0) {
             const cwd: std.Io.Dir = .cwd();
-            var dir = cwd.openDir(io, self.config.dir_path, .{ .iterate = true }) catch null;
+            var dir = cwd.openDir(io, self.config.dirPath, .{ .iterate = true }) catch null;
 
             if (dir) |*d| {
                 defer d.close(io);
@@ -267,13 +270,16 @@ pub const Watcher = struct {
                         // Filter out editor temp / atomic swap files (~file, .tmp)
                         if (isEditorTempFile(entry.path)) continue;
 
-                        const full_path = std.Io.Dir.path.join(self.allocator, &.{ self.config.dir_path, entry.path }) catch continue;
+                        // Skip generated trees (node_modules, caches, build output).
+                        if (self.isIgnoredPath(entry.path)) continue;
+
+                        const full_path = std.Io.Dir.path.join(self.allocator, &.{ self.config.dirPath, entry.path }) catch continue;
                         defer self.allocator.free(full_path);
 
                         if (static_mod.statPath(io, full_path)) |st| {
                             if (self.entries.getPtr(full_path)) |val| {
-                                if (val.mtime_ns != st.mtime_ns or val.size != st.size) {
-                                    val.mtime_ns = st.mtime_ns;
+                                if (val.mtimeNs != st.mtimeNs or val.size != st.size) {
+                                    val.mtimeNs = st.mtimeNs;
                                     val.size = st.size;
                                     changed = true;
                                     self.notifyChange(full_path, null, .modified);
@@ -283,7 +289,7 @@ pub const Watcher = struct {
                                 const owned_path = self.allocator.dupe(u8, full_path) catch continue;
                                 self.entries.put(owned_path, .{
                                     .path = owned_path,
-                                    .mtime_ns = st.mtime_ns,
+                                    .mtimeNs = st.mtimeNs,
                                     .size = st.size,
                                 }) catch {
                                     self.allocator.free(owned_path);
@@ -305,8 +311,8 @@ pub const Watcher = struct {
         var it_entries = self.entries.iterator();
         while (it_entries.next()) |entry| {
             if (static_mod.statPath(io, entry.key_ptr.*)) |st| {
-                if (entry.value_ptr.mtime_ns != st.mtime_ns or entry.value_ptr.size != st.size) {
-                    entry.value_ptr.mtime_ns = st.mtime_ns;
+                if (entry.value_ptr.mtimeNs != st.mtimeNs or entry.value_ptr.size != st.size) {
+                    entry.value_ptr.mtimeNs = st.mtimeNs;
                     entry.value_ptr.size = st.size;
                     changed = true;
                     self.notifyChange(entry.key_ptr.*, null, .modified);
@@ -327,6 +333,22 @@ pub const Watcher = struct {
         return changed;
     }
 
+    /// True when the walk-relative path lives under an ignored top-level
+    /// directory (generated trees such as node_modules or build caches).
+    /// Matches the first path component exactly.
+    pub fn isIgnoredPath(self: *const Watcher, path: []const u8) bool {
+        if (self.config.ignoredDirs.len == 0) return false;
+        var p = path;
+        while (p.len > 0 and (p[0] == '/' or p[0] == '\\')) p = p[1..];
+        var end: usize = 0;
+        while (end < p.len and p[end] != '/' and p[end] != '\\') end += 1;
+        const top = p[0..end];
+        for (self.config.ignoredDirs) |ignored| {
+            if (std.mem.eql(u8, top, ignored)) return true;
+        }
+        return false;
+    }
+
     /// Registers a specific file path to actively watch for modifications.
     pub fn watchFile(self: *Watcher, path: []const u8) !void {
         self.mutex.lock();
@@ -336,7 +358,7 @@ pub const Watcher = struct {
             const owned = try self.allocator.dupe(u8, path);
             try self.entries.put(owned, .{
                 .path = owned,
-                .mtime_ns = st.mtime_ns,
+                .mtimeNs = st.mtimeNs,
                 .size = st.size,
             });
         }
@@ -361,7 +383,7 @@ pub const Watcher = struct {
     fn workerLoop(self: *Watcher) void {
         while (self.running.load(.acquire)) {
             _ = self.scan() catch false;
-            clock.sleepMillis(self.config.poll_interval_ms);
+            clock.sleepMillis(self.config.pollIntervalMs);
         }
     }
 
@@ -371,24 +393,24 @@ pub const Watcher = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.current_event) |*ev| {
+        if (self.currentEvent) |*ev| {
             ev.deinit(self.allocator);
-            self.current_event = null;
+            self.currentEvent = null;
         }
 
-        if (self.event_queue.items.len == 0) {
+        if (self.eventQueue.items.len == 0) {
             return null;
         }
 
-        self.current_event = self.event_queue.orderedRemove(0);
-        return self.current_event.?.asView();
+        self.currentEvent = self.eventQueue.orderedRemove(0);
+        return self.currentEvent.?.asView();
     }
 
     /// Returns true if there are unconsumed change events in the queue.
     pub fn hasChanges(self: *Watcher) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
-        return self.event_queue.items.len > 0;
+        return self.eventQueue.items.len > 0;
     }
 
     /// Returns the live-reload client JS script that connects via SSE or WebSocket to auto-reload on file changes.
@@ -398,10 +420,10 @@ pub const Watcher = struct {
             \\(function() {{
             \\  const es = new EventSource("{s}");
             \\  es.onmessage = function(e) {{
-            \\    if (e.data === "reload" || e.data === "warm_reload") {{
+            \\    if (e.data === "reload" || e.data === "warmReload") {{
             \\      console.log("[httpx live-reload] Reloading page...");
             \\      location.reload();
-            \\    }} else if (e.data === "hot_reload" || (typeof e.data === "string" && e.data.indexOf(".css") !== -1)) {{
+            \\    }} else if (e.data === "hotReload" || (typeof e.data === "string" && e.data.indexOf(".css") !== -1)) {{
             \\      console.log("[httpx live-reload] Hot-reloading styles...");
             \\      const links = document.querySelectorAll('link[rel="stylesheet"]');
             \\      for (let i = 0; i < links.length; i++) {{
@@ -443,13 +465,33 @@ fn isEditorTempFile(path: []const u8) bool {
     return false;
 }
 
+test "ignored dirs skip generated trees" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var watcher = try Watcher.init(a, io, .{
+        .dirPath = "src",
+        .ignoredDirs = &.{},
+    });
+    defer watcher.deinit();
+    // With an empty ignore list nothing is skipped.
+    try std.testing.expect(!watcher.isIgnoredPath("node_modules/x/y.js"));
+    try std.testing.expect(!watcher.isIgnoredPath("src/a.html"));
+
+    var watcher2 = try Watcher.init(a, io, .{ .dirPath = "src" });
+    defer watcher2.deinit();
+    try std.testing.expect(watcher2.isIgnoredPath("node_modules/x/y.js"));
+    try std.testing.expect(watcher2.isIgnoredPath(".zig-cache/o/f.js"));
+    try std.testing.expect(!watcher2.isIgnoredPath("src/a.html"));
+    try std.testing.expect(!watcher2.isIgnoredPath("node_modules_fake/x.js"));
+}
+
 // Tests
 
 test "watcher tracks registered files" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var watcher = try Watcher.init(a, io, .{
-        .dir_path = "src",
+        .dirPath = "src",
     });
     defer watcher.deinit();
 
@@ -458,11 +500,11 @@ test "watcher tracks registered files" {
 }
 
 test "reload strategy maps extensions correctly" {
-    try std.testing.expectEqual(ReloadStrategy.hot_reload, ReloadStrategy.forPath("styles/main.css"));
-    try std.testing.expectEqual(ReloadStrategy.warm_reload, ReloadStrategy.forPath("index.html"));
-    try std.testing.expectEqual(ReloadStrategy.warm_reload, ReloadStrategy.forPath("templates/page.html"));
-    try std.testing.expectEqual(ReloadStrategy.cold_reload, ReloadStrategy.forPath("config.json"));
-    try std.testing.expectEqual(ReloadStrategy.cold_reload, ReloadStrategy.forPath(".env"));
+    try std.testing.expectEqual(ReloadStrategy.hotReload, ReloadStrategy.forPath("styles/main.css"));
+    try std.testing.expectEqual(ReloadStrategy.warmReload, ReloadStrategy.forPath("index.html"));
+    try std.testing.expectEqual(ReloadStrategy.warmReload, ReloadStrategy.forPath("templates/page.html"));
+    try std.testing.expectEqual(ReloadStrategy.coldReload, ReloadStrategy.forPath("config.json"));
+    try std.testing.expectEqual(ReloadStrategy.coldReload, ReloadStrategy.forPath(".env"));
     try std.testing.expectEqual(ReloadStrategy.restart, ReloadStrategy.forPath("src/main.zig"));
 }
 
@@ -484,7 +526,7 @@ test "watcher event queue next and hasChanges" {
     try std.testing.expect(ev != null);
     try std.testing.expectEqualStrings("test_style.css", ev.?.path);
     try std.testing.expectEqual(WatchEventKind.created, ev.?.kind);
-    try std.testing.expectEqual(ReloadStrategy.hot_reload, ev.?.strategy);
+    try std.testing.expectEqual(ReloadStrategy.hotReload, ev.?.strategy);
 
     try std.testing.expect(!watcher.hasChanges());
     try std.testing.expectEqual(@as(?WatchEvent, null), watcher.next());

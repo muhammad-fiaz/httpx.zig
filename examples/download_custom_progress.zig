@@ -2,10 +2,10 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 const DownloadObserver = struct {
-    task_id: u32,
+    taskId: u32,
 
-    fn onProgress(info: httpx.ProgressInfo, user_data: ?*anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(user_data.?));
+    fn onProgress(info: httpx.ProgressInfo, userData: ?*anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(userData.?));
         const pct = if (info.percentage) |p| p else 0.0;
         const state_color: []const u8 = switch (info.state) {
             .completed => "\x1b[32m",
@@ -18,7 +18,7 @@ const DownloadObserver = struct {
         const reset = "\x1b[0m";
 
         std.debug.print("[Observer Task {d}] State: {s}{s}{s} | Progress: {d:.1}% ({d} bytes) | Speed: {d:.2} KB/s | ETA: {?d}s\n", .{
-            self.task_id,
+            self.taskId,
             state_color,
             @tagName(info.state),
             reset,
@@ -40,7 +40,7 @@ pub fn main() !void {
     defer client.deinit();
 
     var observer = DownloadObserver{
-        .task_id = 101,
+        .taskId = 101,
     };
 
     // 1. Successful download test

@@ -1,39 +1,30 @@
 # HTTP/2 Example
 
-Use HTTP/2 protocol primitives (frame headers and stream utilities).
-
-## Demo Program
+HTTP/2 frame headers and stream multiplexing with `httpx.http2`.
+See `examples/http2_client.zig` and `examples/http2_multiplex.zig`.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
+var hdrBuf: [httpx.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
+const hdr = httpx.http2.frame.FrameHeader.parse(&hdrBuf);
+var out: [9]u8 = undefined;
+hdr.serialize(&out);
 
-pub fn main() !void {
-    const hdr = httpx.Http2FrameHeader{
-        .length = 12,
-        .frame_type = .headers,
-        .flags = 0x04,
-        .stream_id = 1,
-    };
-
-    const bytes = hdr.serialize();
-    const decoded = httpx.Http2FrameHeader.parse(bytes);
-
-    std.debug.print("h2 frame type={s} stream={d} len={d}\n", .{
-        @tagName(decoded.frame_type),
-        decoded.stream_id,
-        decoded.length,
-    });
-}
+var sess = try httpx.http2.Session.init(allocator, .client, .{});
+defer sess.deinit();
+try sess.startHandshake();
+const sid = try sess.nextClientStreamId();
+try sess.sendHeaders(sid, &fields, false);
+_ = try sess.sendData(sid, body, true);
 ```
 
 ## Run
 
 ```bash
-zig build run-all-http2_example
+zig build run-http2-multiplex
 ```
 
 ## What to Verify
 
 - Frame header serialize/parse round trip remains stable.
-- Frame metadata matches expected stream and type values.
+- HPACK headers encode and decode back.
+- Multiplexed streams complete independently.

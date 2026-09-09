@@ -19,6 +19,9 @@ Swagger UI   ReDoc       Scalar
 
 ## Mounting Documentation UIs
 
+Documentation routes mount automatically from `Server` config (or manually via
+`httpx.docs.mount`). All UIs consume the same canonical `/openapi.json`:
+
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
@@ -29,41 +32,51 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.Server.init(allocator, io, .{
+        .port = 8080,
+        .enableDocs = true,
+        .docs = .{
+            .title = "Store API",
+            .version = "1.0.0",
+            .description = "Production e-commerce API built with HTTPX",
+            .swagger = .{ .enabled = true, .route = "/docs", .title = "Store API - Swagger" },
+            .redoc = .{ .enabled = true, .route = "/redoc", .title = "Store API - ReDoc" },
+            .scalar = .{ .enabled = true, .route = "/scalar", .title = "Store API - Scalar" },
+            .graphiql = .{ .enabled = true, .route = "/graphiql", .graphqlEndpoint = "/graphql", .title = "Store API - GraphiQL" },
+        },
+    });
     defer server.deinit();
 
-    // 1. Generate canonical OpenAPI specification endpoint
-    server.openapi("/openapi.json", .{
-        .title = "Store API",
-        .version = "1.0.0",
-        .description = "Production e-commerce API built with HTTPX",
-    });
-
-    // 2. Mount documentation UIs pointing to the spec
-    server.swagger_ui("/docs", .{
-        .spec_url = "/openapi.json",
-        .title = "Store API - Swagger",
-    });
-
-    server.redoc("/redoc", .{
-        .spec_url = "/openapi.json",
-        .title = "Store API - ReDoc",
-    });
-
-    server.scalar("/scalar", .{
-        .spec_url = "/openapi.json",
-        .title = "Store API - Scalar",
-    });
-
-    // 3. Mount interactive GraphiQL IDE
-    server.graphiql("/graphiql", .{
-        .endpoint = "/graphql",
-        .title = "Store API - GraphiQL",
-    });
-
-    try server.run();
+    server.run();
 }
 ```
+
+For router-only setups (no `Server`), mount explicitly:
+
+```zig
+try httpx.docs.mount(allocator, &router, .{ .title = "Store API" }, null);
+```
+
+## Enabling and Disabling Docs
+
+`enableDocs` is the global switch for all documentation. Each UI is
+individually optional — every option below defaults to enabled:
+
+```zig
+var server = try httpx.Server.init(allocator, io, .{
+    .enableDocs = true, // global switch; false disables everything
+    .docs = .{
+        .openapi = .{ .enabled = true },   // /openapi.json
+        .swagger = .{ .enabled = false },  // hide Swagger UI
+        .redoc = .{ .enabled = true },     // keep ReDoc
+        .scalar = .{ .enabled = true },    // keep Scalar
+        .graphiql = .{ .enabled = false }, // hide GraphiQL
+    },
+});
+```
+
+Each section also takes its own `route` and `title`. Disabled routes are
+never registered, so they return 404 like any unknown path.
 
 ## Features per UI
 

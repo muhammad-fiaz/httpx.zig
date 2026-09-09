@@ -69,9 +69,9 @@ pub fn main() !void {
 
     var tls_listener = try httpx.tls.Listener.init(allocator, io, .{
         .port = 8444,
-        .default_identity = .{
-            .cert_chain_pem = cert,
-            .private_key_pem = key,
+        .defaultIdentity = .{
+            .certChainPem = cert,
+            .privateKeyPem = key,
         },
     });
     defer tls_listener.deinit();

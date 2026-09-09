@@ -26,13 +26,13 @@ pub const ParseError = error{
 
 /// Decodes a "Basic <base64>" Authorization header value.
 /// The returned credentials borrow from `decoded`; pass an arena.
-pub fn parse(header_value: []const u8, decoded: []u8) ParseError!Credentials {
+pub fn parse(headerValue: []const u8, decoded: []u8) ParseError!Credentials {
     const prefix = "Basic ";
-    if (header_value.len <= prefix.len or
-        !std.ascii.startsWithIgnoreCase(header_value, prefix))
+    if (headerValue.len <= prefix.len or
+        !std.ascii.startsWithIgnoreCase(headerValue, prefix))
         return ParseError.NotBasic;
 
-    const b64 = std.mem.trim(u8, header_value[prefix.len..], " ");
+    const b64 = std.mem.trim(u8, headerValue[prefix.len..], " ");
     const decoder = std.base64.standard.Decoder;
     const decoded_len = decoder.calcSizeForSlice(b64) catch return ParseError.InvalidBase64;
     if (decoded_len > decoded.len) return ParseError.InvalidBase64;

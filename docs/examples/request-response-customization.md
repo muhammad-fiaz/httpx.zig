@@ -1,31 +1,47 @@
 # Request and Response Customization
 
-This demo shows the full request/response customization surface that is already implemented in `httpx.zig`:
-
-- Request builders and direct request mutation
-- Query params, headers, bearer auth, and JSON bodies
-- Response accessors for status, headers, content type, content length, location, and body text
-- Server-side request inspection with `Context` helpers
-- Redirects and HTML/JSON responses
-
-## Demo Program
+Per-request options on the client and `Context` helpers on the server.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
+// Client: headers, query, auth, and JSON bodies in one call.
+var res = try client.post("https://api.example.com/users", .{
+    .headers = &.{.{ .name = "X-Request-Id", .value = "123" }},
+    .query = &.{.{ .name = "verbose", .value = "1" }},
+    .bearerAuth = "demo-token",
+    .json = .{ .name = "Alice", .role = "admin" },
+    .timeoutMs = 10_000,
+});
+defer res.deinit();
 
-// See examples/request_response_customization.zig
+// Response accessors.
+const status = res.status;
+const contentType = res.contentType();
+const bodyText = res.text();
 ```
+
+```zig
+// Server: inspect with Context helpers, respond with rich types.
+fn createUser(ctx: *httpx.Context) anyerror!httpx.Response {
+    const verbose = ctx.queryParam("verbose") orelse "0";
+    _ = verbose;
+    const auth = ctx.header("Authorization");
+    _ = auth;
+    return ctx.renderJsonStatus(201, .{ .created = true });
+}
+```
+
+See `examples/custom_headers.zig`, `examples/custom_responses.zig`, and
+`examples/custom_server.zig`.
 
 ## Run
 
 ```bash
-zig build run-all-request_response_customization
+zig build run-custom-headers
+zig build run-custom-responses
+zig build run-custom-server
 ```
 
 ## What to Verify
 
-- Direct request serialization includes custom headers, query params, and auth.
-- RequestBuilder can build JSON requests with explicit protocol versions.
-- The server sees query params, headers, body text, and auth values.
-- Response accessors return the expected content type, content length, redirect location, and text body.
+- Custom headers, query params, and auth round-trip.
+- Response accessors return status, content type, and body text.

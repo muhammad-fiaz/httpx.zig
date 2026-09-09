@@ -106,8 +106,8 @@ fn statusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
         .engine = "httpx.zig",
         .protocols = [_][]const u8{ "HTTP/1.1", "HTTP/2", "HTTP/3", "QUIC", "TLS 1.2", "TLS 1.3" },
         .version = if (current_version.load(.acquire) == 1) "1.0.0" else "2.0.0-reloaded",
-        .uptime_ms = 42000,
-        .hot_reload_active = true,
+        .uptimeMs = 42000,
+        .hotReloadActive = true,
     });
 }
 
@@ -141,7 +141,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .max_connections = 5,
+        .maxConnections = 5,
     });
     defer server.deinit();
 

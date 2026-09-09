@@ -18,21 +18,15 @@ Defaults remain implicit unless you explicitly override fields:
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
 const config: httpx.ClientConfig = .{
-    .base_url = "https://api.github.com",
-    .user_agent = "MyApp/1.0",
-    .timeouts = .{
-        .connect_ms = 5000,
-        .read_ms = 10000,
-    },
+    .timeoutMs = 10_000,
+    .followRedirects = true,
+    .maxRedirects = 5,
+    .maxRetries = 3,
+    .retryDelayMs = 500,
     .http2 = true,
     .http3 = false,
-    .http2_settings = .{ .max_concurrent_streams = 100 },
-    .http3_settings = .{ .qpack_blocked_streams = 16 },
-    .verify_ssl = true,
-    .keep_alive = true,
-    .max_response_size = 32 * 1024 * 1024,
-    .pool_max_connections = 64,
-    .pool_max_per_host = 16,
+    .maxResponseSize = 32 * 1024 * 1024,
+    .pool = .{ .maxConnections = 64, .maxPerHost = 16 },
 };
 
 var client = httpx.Client.init(allocator, io, config);
@@ -77,7 +71,7 @@ For external endpoints, you can specify per-request timeouts:
 
 ```zig
 var response = client.fetch("https://httpbun.com/get", .{
-    .timeout_ms = 10_000,
+    .timeoutMs = 10_000,
 }) catch |err| {
     std.debug.print("request failed: {s}\n", .{@errorName(err)});
     return;
@@ -120,15 +114,21 @@ _ = opt_res;
 
 ## Cookie Jar
 
-The client automatically stores `Set-Cookie` values and sends a `Cookie` header on subsequent requests. Cookies are domain-aware per RFC 6265 — cookies with a `Domain` attribute are only sent to matching hosts.
+Pass cookies per request with the `cookie` option, or keep a standalone
+`httpx.CookieJar` across requests (domain-aware per RFC 6265):
 
 ```zig
-try client.setCookie("session", "abc123");
-if (client.getCookie("session")) |session| {
-    std.debug.print("session={s}\n", .{session});
+var jar = httpx.CookieJar.init(allocator);
+defer jar.deinit();
+
+if (loginRes.header("Set-Cookie")) |sc| {
+    jar.setFromHeader(sc, "example.com");
 }
-_ = client.removeCookie("session");
-client.clearCookies();
+
+var cookieBuf: [512]u8 = undefined;
+const cookieHeader = jar.cookieHeader("example.com", "/profile", true, &cookieBuf);
+var profileRes = try client.get("https://example.com/profile", .{ .cookie = cookieHeader });
+defer profileRes.deinit();
 ```
 
 For top-level convenience in smaller programs, use functions from the root module:
@@ -137,10 +137,9 @@ For top-level convenience in smaller programs, use functions from the root modul
 var res = try httpx.get("https://httpbun.com/get", .{});
 defer res.deinit();
 
-var custom = try httpx.request(.{
+var custom = try httpx.request("https://httpbun.com/headers", .{
     .method = .GET,
-    .url = "https://httpbun.com/headers",
-    .timeout_ms = 10_000,
+    .timeoutMs = 10_000,
 });
 defer custom.deinit();
 ```
@@ -150,12 +149,15 @@ defer custom.deinit();
 Use built-in request auth helpers instead of manually building `Authorization` headers:
 
 ```zig
-var bearer_res = try client.get("/protected", .{ .headers = &.{.{ "Authorization", "Bearer demo-token" }, .{ "Accept", "application/json" }},
+var bearer_res = try client.get("/protected", .{
+    .bearerAuth = "demo-token",
+    .headers = &.{.{ .name = "Accept", .value = "application/json" }},
 });
 defer bearer_res.deinit();
 
-var basic_res = try client.get("/admin", .{ .basic_auth = .{ .username = "demo", .password = "pass" },
-    .headers = &.{.{ "Accept", "application/json" }},
+var basic_res = try client.get("/admin", .{
+    .basicAuth = "demo:pass",
+    .headers = &.{.{ .name = "Accept", .value = "application/json" }},
 });
 defer basic_res.deinit();
 ```
@@ -166,24 +168,26 @@ The second argument to request methods is `RequestOptions`:
 
 ```zig
 pub const RequestOptions = struct {
-    headers: ?[]const [2][]const u8 = null,    // Custom headers
-    query_params: ?[]const [2][]const u8 = null, // Optional URL query params
-    body: ?[]const u8 = null,                  // Raw body (highest precedence)
-    json: ?[]const u8 = null,                  // JSON body
-    form_fields: ?[]const [2][]const u8 = null, // x-www-form-urlencoded body
-    bearer_token: ?[]const u8 = null,          // Authorization: Bearer <token>
-    basic_auth: ?httpx.BasicAuth = null,       // Authorization: Basic ...
-    timeout_ms: ?u64 = null,                   // Request-specific timeout
-    follow_redirects: ?bool = null,            // Override redirect policy
-    version: ?httpx.Version = null,            // Optional per-request protocol override
-    proxy: ?httpx.Proxy = null,                // Per-request forward proxy override
-    verify_ssl: ?bool = null,                  // Per-request SSL verification toggle
-    keep_alive: ?bool = null,                  // Per-request connection reuse control
-    unix_socket_path: ?[]const u8 = null,      // Per-request Unix Domain Socket path
+    url: []const u8,
+    method: ?httpx.Method = null,       // Explicit method for generic request
+    headers: []const httpx.Header = &.{}, // Custom headers
+    query: []const httpx.Header = &.{},   // Optional URL query params
+    body: ?[]const u8 = null,           // Raw body
+    json: ?[]const u8 = null,           // JSON body
+    form: ?[]const u8 = null,           // x-www-form-urlencoded body
+    text: ?[]const u8 = null,           // Plain-text body
+    bearerAuth: ?[]const u8 = null,     // Authorization: Bearer <token>
+    basicAuth: ?[]const u8 = null,      // Authorization: Basic ...
+    timeoutMs: ?u64 = null,             // Request-specific timeout
+    followRedirects: ?bool = null,      // Override redirect policy
+    maxRedirects: ?u8 = null,           // Override redirect limit
+    httpVersion: ?httpx.HttpVersion = null, // Optional per-request protocol override
+    proxy: ?[]const u8 = null,          // Per-request proxy URL override
+    tls: ?TlsOptions = null,            // Per-request TLS override
 };
 ```
 
-All fields are optional customizations. Per-request overrides allow complete control over proxy routing, security verification, connection persistence, and socket routing on a per-request basis without modifying the shared client config. Passing `.{}` keeps defaults implicit.
+All fields except `url` are optional customizations. Passing `. {}` keeps defaults implicit.
 
 ## Proxy Configuration
 
@@ -192,27 +196,18 @@ Configure forward proxies when initializing the client:
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
 const config: httpx.ClientConfig = .{
-    .proxy = .{
-        .host = "127.0.0.1",
-        .port = 8080,
-        .username = "user", // Optional authentication
-        .password = "pass", // Optional authentication
-    },
+    .proxy = "http://127.0.0.1:8080",
 };
 
 var client = httpx.Client.init(allocator, io, config);
 defer client.deinit();
 ```
 
-For SOCKS5h, set the proxy kind explicitly:
+For SOCKS5h (remote DNS), use a `socks5h://` URL:
 
 ```zig
 const socks_config: httpx.ClientConfig = .{
-    .proxy = .{
-        .kind = .socks5h,
-        .host = "127.0.0.1",
-        .port = 1080,
-    },
+    .proxy = "socks5h://127.0.0.1:1080",
 };
 ```
 
@@ -222,17 +217,16 @@ The `Response` object provides helpers to access data:
 
 ```zig
 // Check status
-if (response.ok()) { ... }
+if (response.isSuccess()) { ... }
 
 // Get headers
-if (response.headers.get("Content-Type")) |ct| { ... }
+if (response.header("Content-Type")) |ct| { ... }
 
-// Parse JSON response safely (returns std.json.Parsed(T), caller owns memory)
+// Parse JSON response into a struct (ignores unknown fields)
 const MyStruct = struct { id: u32, name: []const u8 };
-const parsed = try response.json(MyStruct, .{ .ignore_unknown_fields = true });
-defer parsed.deinit();
-const data = parsed.value;
+const data = try response.json(MyStruct);
 
-// Or use leaky JSON parsing directly into the struct (useful for simple structs)
-const data_leaky = try response.jsonLeaky(MyStruct, .{});
+// Or parse with an explicit allocator (returns std.json.Parsed(T))
+const parsed = try response.jsonAlloc(MyStruct, allocator);
+defer parsed.deinit();
 ```

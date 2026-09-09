@@ -11,8 +11,8 @@ pub const is_win = builtin.os.tag == .windows;
 
 pub const Stat = struct {
     size: u64,
-    mtime_ns: i128,
-    is_dir: bool,
+    mtimeNs: i128,
+    isDir: bool,
 };
 
 const c_fs = struct {
@@ -143,10 +143,11 @@ pub fn writeFile(path: []const u8, content: []const u8) !void {
 }
 
 /// Reads the entire file at `path` into a newly allocated buffer.
-pub fn readFileAlloc(allocator: Allocator, path: []const u8) ![]u8 {
+/// Rejects directories and files larger than `maxBytes`.
+pub fn readFileLimited(allocator: Allocator, path: []const u8, maxBytes: usize) ![]u8 {
     const stat = statPath(null, path) orelse return error.FileNotFound;
-    if (stat.is_dir) return error.IsDir;
-    if (stat.size > 256 * 1024 * 1024) return error.FileTooBig; // 256MB safety cap
+    if (stat.isDir) return error.IsDir;
+    if (stat.size > maxBytes) return error.FileTooBig;
 
     const buf = try allocator.alloc(u8, @intCast(stat.size));
     errdefer allocator.free(buf);
@@ -181,6 +182,12 @@ pub fn readFileAlloc(allocator: Allocator, path: []const u8) ![]u8 {
     return buf;
 }
 
+/// Reads the entire file at `path` into a newly allocated buffer.
+/// Uses the default 256MB safety cap; see readFileLimited for custom caps.
+pub fn readFileAlloc(allocator: Allocator, path: []const u8) ![]u8 {
+    return readFileLimited(allocator, path, 256 * 1024 * 1024);
+}
+
 /// Returns stat metadata for the file or directory at `path`.
 pub fn statPath(io: ?std.Io, path: []const u8) ?Stat {
     _ = io;
@@ -194,13 +201,13 @@ pub fn statPath(io: ?std.Io, path: []const u8) ?Stat {
         const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x00000010;
         const attrs = c_fs.GetFileAttributesA(&buf);
         if (attrs == INVALID_FILE_ATTRIBUTES) return null;
-        const is_directory = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        const isDirectory = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
-        if (is_directory) {
+        if (isDirectory) {
             return Stat{
                 .size = 0,
-                .mtime_ns = 0,
-                .is_dir = true,
+                .mtimeNs = 0,
+                .isDir = true,
             };
         }
 
@@ -215,23 +222,23 @@ pub fn statPath(io: ?std.Io, path: []const u8) ?Stat {
 
         const ft_u64: u64 = (@as(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
         const windows_epoch_diff: i128 = 116444736000000000;
-        const mtime_ns = (@as(i128, ft_u64) - windows_epoch_diff) * 100;
+        const mtimeNs = (@as(i128, ft_u64) - windows_epoch_diff) * 100;
 
         return Stat{
             .size = @intCast(@max(0, size)),
-            .mtime_ns = mtime_ns,
-            .is_dir = false,
+            .mtimeNs = mtimeNs,
+            .isDir = false,
         };
     } else {
         var st: std.c.Stat = undefined;
         if (std.c.stat(&buf, &st) != 0) return null;
         const S_IFDIR: u32 = 0o040000;
-        const is_directory = (st.mode & S_IFDIR) != 0;
+        const isDirectory = (st.mode & S_IFDIR) != 0;
 
         return Stat{
             .size = @intCast(st.size),
-            .mtime_ns = @as(i128, st.mtime().tv_sec) * std.time.ns_per_s + @as(i128, st.mtime().tv_nsec),
-            .is_dir = is_directory,
+            .mtimeNs = @as(i128, st.mtime().tv_sec) * std.time.ns_per_s + @as(i128, st.mtime().tv_nsec),
+            .isDir = isDirectory,
         };
     }
 }
@@ -266,7 +273,7 @@ test "fs write, read, stat, delete" {
     const st = statPath(null, test_path);
     try std.testing.expect(st != null);
     try std.testing.expectEqual(@as(u64, 19), st.?.size);
-    try std.testing.expect(!st.?.is_dir);
+    try std.testing.expect(!st.?.isDir);
 
     const content = try readFileAlloc(a, test_path);
     defer a.free(content);

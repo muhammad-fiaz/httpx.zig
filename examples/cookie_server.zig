@@ -10,7 +10,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .max_connections = 5,
+        .maxConnections = 5,
     });
     defer server.deinit();
 
@@ -45,15 +45,15 @@ pub fn main() !void {
 fn setCookieHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     const name = ctx.queryParam("name") orelse "guest";
     _ = name;
-    return .{ .status = 200, .body = "{\"message\":\"Cookie set\"}", .content_type = "application/json" };
+    return .{ .status = 200, .body = "{\"message\":\"Cookie set\"}", .contentType = "application/json" };
 }
 
 fn getCookieHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     const username = ctx.cookie("username") orelse "anonymous";
     _ = username;
-    return .{ .status = 200, .body = "{\"username\":\"anonymous\"}", .content_type = "application/json" };
+    return .{ .status = 200, .body = "{\"username\":\"anonymous\"}", .contentType = "application/json" };
 }
 
 fn clearCookieHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 200, .body = "{\"message\":\"Cookie cleared\"}", .content_type = "application/json" };
+    return .{ .status = 200, .body = "{\"message\":\"Cookie cleared\"}", .contentType = "application/json" };
 }

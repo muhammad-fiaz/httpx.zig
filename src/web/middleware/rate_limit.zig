@@ -40,17 +40,17 @@ pub const RateLimitDimension = enum {
     /// Single global rate limit applied to all traffic across the server.
     global,
     /// Per-client IP address (from socket or trusted X-Forwarded-For).
-    client_ip,
+    clientIp,
     /// Per authenticated user account (Bearer token, user header, or session).
-    user_id,
-    /// Per API key (X-API-Key header or api_key query param).
-    api_key,
+    userId,
+    /// Per API key (X-API-Key header or apiKey query param).
+    apiKey,
     /// Per route (method + path, e.g. "POST /api/login").
     route,
     /// Combined authenticated user AND route (per-user-per-endpoint limit).
-    user_and_route,
+    userAndRoute,
     /// Combined client IP AND route (per-ip-per-endpoint limit).
-    ip_and_route,
+    ipAndRoute,
     /// Custom application-provided identity string.
     custom,
 };
@@ -60,11 +60,11 @@ pub const RateLimitPolicy = struct {
     /// Maximum allowed requests per window.
     limit: u32 = 100,
     /// Time window in milliseconds over which `limit` requests refill (e.g. 60_000 for 1 minute).
-    window_ms: i64 = 60_000,
+    windowMs: i64 = 60_000,
     /// Maximum burst capacity. If 0, burst defaults to `limit`.
     burst: u32 = 0,
     /// Inactivity TTL in milliseconds after which an idle key is purged from memory.
-    ttl_ms: i64 = 300_000,
+    ttlMs: i64 = 300_000,
 };
 
 /// Detailed result of evaluating a rate limit check.
@@ -76,15 +76,15 @@ pub const RateLimitResult = struct {
     /// Remaining requests in the current window.
     remaining: u32,
     /// Seconds until the quota fully resets.
-    reset_seconds: u32,
+    resetSeconds: u32,
     /// Seconds the client must wait before retrying (only meaningful when allowed == false).
-    retry_after_seconds: u32,
+    retryAfterSeconds: u32,
 
     /// Formats an HTTP 429 Too Many Requests response with standard rate-limit headers.
     pub fn toResponse(self: RateLimitResult, allocator: Allocator) !Response {
-        const retry_str = try std.fmt.allocPrint(allocator, "{d}", .{self.retry_after_seconds});
+        const retry_str = try std.fmt.allocPrint(allocator, "{d}", .{self.retryAfterSeconds});
         const limit_str = try std.fmt.allocPrint(allocator, "{d}", .{self.limit});
-        const reset_str = try std.fmt.allocPrint(allocator, "{d}", .{self.reset_seconds});
+        const reset_str = try std.fmt.allocPrint(allocator, "{d}", .{self.resetSeconds});
 
         const headers = try allocator.alloc(Header, 5);
         headers[0] = .{ .name = "Retry-After", .value = retry_str };
@@ -96,7 +96,7 @@ pub const RateLimitResult = struct {
         const body = try std.fmt.allocPrint(
             allocator,
             "{{\"error\":\"too_many_requests\",\"message\":\"Rate limit exceeded. Try again in {d} seconds.\",\"retry_after\":{d}}}\n",
-            .{ self.retry_after_seconds, self.retry_after_seconds },
+            .{ self.retryAfterSeconds, self.retryAfterSeconds },
         );
 
         return Response{
@@ -127,28 +127,28 @@ const BucketEntry = struct {
 pub const RateLimiter = struct {
     allocator: Allocator,
     default_policy: RateLimitPolicy,
-    max_entries: usize,
+    maxEntries: usize,
     buckets: std.StringHashMap(BucketEntry),
     mutex: sync.Spinlock = .{},
     last_sweep_ms: i64 = 0,
 
     /// Creates a new RateLimiter with default policy and max memory entries.
-    pub fn init(allocator: Allocator, max_requests: u32, window_ms: i64) RateLimiter {
+    pub fn init(allocator: Allocator, maxRequests: u32, windowMs: i64) RateLimiter {
         return initWithOptions(allocator, .{
-            .limit = max_requests,
-            .window_ms = window_ms,
-            .burst = max_requests,
+            .limit = maxRequests,
+            .windowMs = windowMs,
+            .burst = maxRequests,
         }, 10_000);
     }
 
     /// Creates a new RateLimiter with full policy and entry capacity control.
-    pub fn initWithOptions(allocator: Allocator, policy: RateLimitPolicy, max_entries: usize) RateLimiter {
+    pub fn initWithOptions(allocator: Allocator, policy: RateLimitPolicy, maxEntries: usize) RateLimiter {
         var p = policy;
         if (p.burst == 0) p.burst = p.limit;
         return .{
             .allocator = allocator,
             .default_policy = p,
-            .max_entries = @max(1, max_entries),
+            .maxEntries = @max(1, maxEntries),
             .buckets = std.StringHashMap(BucketEntry).init(allocator),
             .last_sweep_ms = clock.millisNow(),
         };
@@ -167,8 +167,8 @@ pub const RateLimiter = struct {
     /// Evaluates rate limit for `key` against the default policy.
     /// Returns remaining quota on success, or null when the request is rate-limited.
     /// (Compatible with original HTTPX RateLimiter API).
-    pub fn check(self: *RateLimiter, key: []const u8, now_ms: i64) !?u32 {
-        const res = try self.checkDetailed(key, now_ms, 1, self.default_policy);
+    pub fn check(self: *RateLimiter, key: []const u8, nowMs: i64) !?u32 {
+        const res = try self.checkDetailed(key, nowMs, 1, self.default_policy);
         if (!res.allowed) return null;
         return res.remaining;
     }
@@ -177,44 +177,44 @@ pub const RateLimiter = struct {
     pub fn checkDetailed(
         self: *RateLimiter,
         key: []const u8,
-        now_ms: i64,
+        nowMs: i64,
         cost: u32,
         policy: RateLimitPolicy,
     ) RateLimitError!RateLimitResult {
         const capacity: f64 = @floatFromInt(if (policy.burst > 0) policy.burst else policy.limit);
         const limit_f: f64 = @floatFromInt(policy.limit);
-        const win_ms_f: f64 = @floatFromInt(@max(1, policy.window_ms));
+        const win_ms_f: f64 = @floatFromInt(@max(1, policy.windowMs));
         const fill_rate_per_ms = limit_f / win_ms_f;
 
         self.mutex.lock();
         defer self.mutex.unlock();
 
         // Opportunistic sweep every 30 seconds or when reaching 90% capacity
-        if (now_ms - self.last_sweep_ms > 30_000 or self.buckets.count() >= (self.max_entries * 9) / 10) {
-            self.sweepExpiredLocked(now_ms, policy.ttl_ms);
-            self.last_sweep_ms = now_ms;
+        if (nowMs - self.last_sweep_ms > 30_000 or self.buckets.count() >= (self.maxEntries * 9) / 10) {
+            self.sweepExpiredLocked(nowMs, policy.ttlMs);
+            self.last_sweep_ms = nowMs;
         }
 
         const bucket = if (self.buckets.getPtr(key)) |b| b else blk: {
-            if (self.buckets.count() >= self.max_entries) {
+            if (self.buckets.count() >= self.maxEntries) {
                 self.evictOldestLocked();
             }
             const owned_key = try self.allocator.dupe(u8, key);
             errdefer self.allocator.free(owned_key);
             try self.buckets.put(owned_key, .{
                 .tokens = capacity,
-                .last_update_ms = now_ms,
-                .last_access_ms = now_ms,
+                .last_update_ms = nowMs,
+                .last_access_ms = nowMs,
             });
             break :blk self.buckets.getPtr(key).?;
         };
 
-        bucket.last_access_ms = now_ms;
+        bucket.last_access_ms = nowMs;
 
         // Refill tokens according to elapsed time
-        const elapsed_ms: f64 = @floatFromInt(@max(0, now_ms - bucket.last_update_ms));
+        const elapsed_ms: f64 = @floatFromInt(@max(0, nowMs - bucket.last_update_ms));
         bucket.tokens = @min(capacity, bucket.tokens + elapsed_ms * fill_rate_per_ms);
-        bucket.last_update_ms = now_ms;
+        bucket.last_update_ms = nowMs;
 
         const cost_f: f64 = @floatFromInt(cost);
         if (bucket.tokens >= cost_f) {
@@ -230,8 +230,8 @@ pub const RateLimiter = struct {
                 .allowed = true,
                 .limit = policy.limit,
                 .remaining = remaining_u32,
-                .reset_seconds = reset_sec,
-                .retry_after_seconds = 0,
+                .resetSeconds = reset_sec,
+                .retryAfterSeconds = 0,
             };
         } else {
             const deficit = cost_f - bucket.tokens;
@@ -247,8 +247,8 @@ pub const RateLimiter = struct {
                 .allowed = false,
                 .limit = policy.limit,
                 .remaining = 0,
-                .reset_seconds = reset_sec,
-                .retry_after_seconds = retry_after,
+                .resetSeconds = reset_sec,
+                .retryAfterSeconds = retry_after,
             };
         }
     }
@@ -269,13 +269,13 @@ pub const RateLimiter = struct {
         return self.buckets.count();
     }
 
-    fn sweepExpiredLocked(self: *RateLimiter, now_ms: i64, ttl_ms: i64) void {
+    fn sweepExpiredLocked(self: *RateLimiter, nowMs: i64, ttl_ms: i64) void {
         var to_remove = std.ArrayList([]const u8).empty;
         defer to_remove.deinit(self.allocator);
 
         var it = self.buckets.iterator();
         while (it.next()) |entry| {
-            if (now_ms - entry.value_ptr.last_access_ms > ttl_ms) {
+            if (nowMs - entry.value_ptr.last_access_ms > ttl_ms) {
                 to_remove.append(self.allocator, entry.key_ptr.*) catch break;
             }
         }
@@ -315,11 +315,11 @@ pub fn extractKey(
 ) ![]const u8 {
     return switch (dimension) {
         .global => "global",
-        .client_ip => blk: {
+        .clientIp => blk: {
             const ip = ctx.remoteAddress() orelse "127.0.0.1";
             break :blk try std.fmt.bufPrint(buf, "ip:{s}", .{ip});
         },
-        .user_id => blk: {
+        .userId => blk: {
             if (ctx.bearerToken()) |tok| {
                 break :blk try std.fmt.bufPrint(buf, "user:{s}", .{tok});
             }
@@ -333,22 +333,22 @@ pub fn extractKey(
             const ip = ctx.remoteAddress() orelse "127.0.0.1";
             break :blk try std.fmt.bufPrint(buf, "anon:{s}", .{ip});
         },
-        .api_key => blk: {
+        .apiKey => blk: {
             if (ctx.header("X-API-Key")) |key| {
                 break :blk try std.fmt.bufPrint(buf, "key:{s}", .{key});
             }
-            if (ctx.queryParam("api_key")) |key| {
+            if (ctx.queryParam("apiKey")) |key| {
                 break :blk try std.fmt.bufPrint(buf, "key:{s}", .{key});
             }
             const ip = ctx.remoteAddress() orelse "127.0.0.1";
             break :blk try std.fmt.bufPrint(buf, "nokey:{s}", .{ip});
         },
         .route => try std.fmt.bufPrint(buf, "route:{s} {s}", .{ ctx.method.name(), ctx.path }),
-        .user_and_route => blk: {
+        .userAndRoute => blk: {
             const u = ctx.bearerToken() orelse ctx.header("X-User-Id") orelse (ctx.remoteAddress() orelse "anon");
             break :blk try std.fmt.bufPrint(buf, "u:{s}|r:{s} {s}", .{ u, ctx.method.name(), ctx.path });
         },
-        .ip_and_route => blk: {
+        .ipAndRoute => blk: {
             const ip = ctx.remoteAddress() orelse "127.0.0.1";
             break :blk try std.fmt.bufPrint(buf, "ip:{s}|r:{s} {s}", .{ ip, ctx.method.name(), ctx.path });
         },
@@ -419,7 +419,7 @@ test "rate limit 429 response formatting" {
     _ = try rl.check("ip:1.2.3.4", 0);
     const rejected = try rl.checkDetailed("ip:1.2.3.4", 10, 1, rl.default_policy);
     try std.testing.expect(!rejected.allowed);
-    try std.testing.expect(rejected.retry_after_seconds >= 1);
+    try std.testing.expect(rejected.retryAfterSeconds >= 1);
 
     const resp = try rejected.toResponse(a);
     defer RateLimitResult.deinitResponse(a, &resp);
@@ -432,8 +432,8 @@ test "bounded memory and eviction of inactive entries" {
     const a = std.testing.allocator;
     var rl = RateLimiter.initWithOptions(a, .{
         .limit = 10,
-        .window_ms = 1000,
-        .ttl_ms = 500,
+        .windowMs = 1000,
+        .ttlMs = 500,
     }, 4); // Max 4 entries
     defer rl.deinit();
 

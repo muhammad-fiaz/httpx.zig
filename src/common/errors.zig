@@ -55,6 +55,8 @@ pub const Error = error{
     MethodNotAllowed,
     DuplicateRoute,
     InvalidRoutePattern,
+    UnknownRoute,
+    MissingRouteParam,
 
     // Validation
     ValidationFailed,

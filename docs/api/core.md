@@ -1,119 +1,81 @@
 # Core API
 
-The Core module contains the fundamental types used throughout the library, such as Requests, Responses, Headers, and URIs.
+The core module holds the fundamental types used throughout the library:
+requests, responses, headers, URIs, methods, and status codes
+(`src/common/`, `src/client/request.zig`, `src/web/router/router.zig`).
 
-## Request
+## Client request
 
-Represents an incoming (server) or outgoing (client) HTTP request.
-
-### `httpx.Request`
-
-Usually constructed via `RequestBuilder` or internally by the server.
-
-- **Fields**:
-  - `method`: `Method` enum (GET, POST, etc.)
-  - `uri`: `Uri` struct
-  - `headers`: `Headers` struct
-  - `body`: `?[]const u8`
-
-- **Selected methods**:
-  - `setBody(body)`: Set request body and Content-Length.
-  - `setJson(body)`: Set JSON body and Content-Type.
-  - `setFormUrlEncoded(fields)`: Set form body and Content-Type.
-  - `setBearerAuth(token)`: Set `Authorization: Bearer <token>`.
-  - `setBasicAuth(username, password)`: Set `Authorization: Basic ...`.
-  - `addQueryParam(key, value)`: Append a percent-encoded query parameter.
-  - `addQueryParams(fields)`: Append multiple query parameters.
-  - `hasContentType(media_type)`: Match request Content-Type ignoring parameters.
-  - `isJsonContent()`: True when Content-Type is `application/json`.
-  - `isFormContent()`: True when Content-Type is `application/x-www-form-urlencoded`.
-  - `accepts(media_type)`: True when Accept header allows a media type.
-  - `acceptsJson()`: True when Accept allows `application/json`.
-
-### `httpx.RequestBuilder`
-
-A fluent builder for creating requests.
+Requests go through the URL-first client engine — there is no
+request-object-first builder API:
 
 ```zig
-var builder = httpx.RequestBuilder.init(allocator);
-defer builder.deinit();
-
-var req = try builder
-    .setMethod(.POST)
-    .setUrl("https://api.example.com/data")
-    .addHeader("Authorization", "Bearer token")
-    .setJsonBody("{\"foo\":\"bar\"}")
-    .build();
-defer req.deinit();
+var res = try client.post("https://api.example.com/data", .{
+    .headers = &.{.{ .name = "Authorization", .value = "Bearer token" }},
+    .json = "{\"foo\":\"bar\"}",
+    .query = &.{.{ .name = "page", .value = "1" }},
+    .bearerAuth = "token",
+    .timeoutMs = 10_000,
+});
+defer res.deinit();
 ```
 
-## Response
+See [Client](/api/client) and [Request](/api/request).
 
-Represents an HTTP response.
+## Client response
 
-### `httpx.Response`
+`ClientResponse` (`src/client/request.zig`):
 
-- **Fields**:
-  - `status`: `Status` struct (code and phrase)
-  - `headers`: `Headers` struct
-  - `body`: `?[]const u8`
+| Member | Description |
+|--------|-------------|
+| `status: u16` | Numeric status code |
+| `headers: []Header` | Response headers |
+| `body: []u8` | Owned body bytes |
+| `deinit()` | Free headers and body |
+| `header(name)` | Header lookup (case-insensitive) |
+| `text()` / `bytes()` | Body bytes |
+| `writeTo(writer)` | Stream the body out |
+| `contentType()` | Content-Type value |
+| `json(T)` / `jsonAlloc(T, allocator)` | JSON decoding |
+| `isInformational()` / `isSuccess()` / `isRedirect()` | Status class checks |
 
-- **Methods**:
-  - `ok()`: Returns true if status is 2xx.
-  - `isRedirect()`: Returns true if status is 3xx.
-  - `isError()`: Returns true if status is 4xx or 5xx.
-  - `json(T, options)`: Parses body as JSON, returning `std.json.Parsed(T)`.
-  - `jsonLeaky(T, options)`: Leaky parsing directly into type `T`.
-  - `jsonBorrowed(T, parse_opts)`: Zero-copy JSON parsing returning `JsonBorrowedResult(T)`.
-  - `jsonValue(parse_opts)`: Parse body as dynamic `std.json.Value` with `ParsedJson`.
-  - `isJson()`: Returns true if body exists and Content-Type is JSON.
-  - `text()`: Returns body as string.
-  - `redirect(allocator, status_code, location)`: Static: build redirect response with `Location` header.
-  - `fromText(allocator, status_code, body)`: Static: build text response with headers.
-  - `fromJson(allocator, status_code, value)`: Static: build JSON response with headers.
+## Server response
 
-### `httpx.ResponseBuilder`
-
-Used server-side to construct responses.
-
-```zig
-var builder = httpx.ResponseBuilder.init(allocator);
-defer builder.deinit();
-
-var resp = try builder
-    .status(200)
-    .header("Custom-Header", "Val")
-    .json(.{ .success = true })
-    .build();
-```
+Handlers return `httpx.Response` literals or `Context` helpers
+(`ctx.html`, `ctx.text`, `ctx.renderJson`, `ctx.redirect`, ...).
+See [Server](/api/server).
 
 ## Headers
 
-A wrapper around an insertion-ordered String HashMap (or list) for HTTP headers.
+`httpx.Headers` (`src/common/headers.zig`) is an ordered multi-map:
 
-- **Methods**:
-  - `get(name)`: Get first value.
-  - `getOr(name, fallback)`: Get first value or fallback.
-  - `set(name, value)`: Set/Overwrite value.
-  - `append(name, value)`: Append value (for multi-value headers).
-  - `appendIfMissing(name, value)`: Append only when missing.
-  - `mergeFrom(other, overwrite)`: Merge another header collection.
-  - `remove(name)`: Remove header.
+| Method | Description |
+|--------|-------------|
+| `init(allocator)` / `deinit()` | Lifecycle |
+| `set(name, value)` | Set/overwrite value |
+| `append(name, value)` | Append value (multi-value headers) |
+| `get(name)` | First value, case-insensitive |
+| `getAll(allocator, name)` | All values |
+| `remove(name)` | Remove header |
+| `contains(name)` | Presence check |
+| `count()` / `clear()` | Size and reset |
+
+Plain `[]Header` (`{ .name, .value }`) slices are used for per-request headers.
 
 ## URI
 
-`httpx.Uri` parses and serializes URIs (RFC 3986).
+`httpx.Uri.parse(...)` parses RFC 3986 URIs:
 
 ```zig
 const uri = try httpx.Uri.parse("https://user:pass@example.com:8080/path?query=1");
 ```
 
-- **Fields**:
-  - `scheme`: `?[]const u8` — `http`, `https`, or null
-  - `userinfo`: `?[]const u8` — User info before `@`, or null
-  - `host`: `?[]const u8` — Hostname or IP, or null
-  - `port`: `?u16` — Explicit port or null
-  - `path`: `[]const u8` — Resource path (defaults to `/`)
-  - `query`: `?[]const u8` — Query string, or null
-  - `fragment`: `?[]const u8` — Fragment identifier, or null
-  - `raw`: `[]const u8` — Original unparsed URI string
+| Field | Type | Description |
+|-------|------|-------------|
+| `scheme` | `[]const u8` | `"http"`, `"https"`, or empty |
+| `userinfo` | `[]const u8` | User info before `@`, or empty |
+| `host` | `[]const u8` | Hostname or IP |
+| `port` | `u16` | Explicit port (`0` when absent; see `effectivePort()`) |
+| `path` | `[]const u8` | Resource path (defaults to `/`) |
+| `query` | `[]const u8` | Query string, or empty |
+| `fragment` | `[]const u8` | Fragment identifier, or empty |

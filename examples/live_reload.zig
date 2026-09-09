@@ -31,7 +31,7 @@ fn styleHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "body { background: #1e1e2e; color: #cdd6f4; font-family: sans-serif; }",
-        .content_type = "text/css; charset=utf-8",
+        .contentType = "text/css; charset=utf-8",
     };
 }
 
@@ -47,7 +47,7 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
-        .max_connections = 4,
+        .maxConnections = 4,
     });
     defer server.deinit();
 

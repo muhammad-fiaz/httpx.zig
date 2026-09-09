@@ -1,44 +1,31 @@
 # HTTP/2 Server Runtime Example
 
-Run a full local end-to-end HTTP/2 server route with the high-level server runtime (`http2_enabled = true`).
-
-## Demo Program
+End-to-end HTTP/2 server routes with the high-level server runtime
+(`.http2 = true`). See `examples/http11_server.zig` for the HTTP/1.x shape
+and `examples/http2_client.zig` for h2c verification.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
+var server = try httpx.Server.init(allocator, io, .{
+    .host = "127.0.0.1",
+    .port = 0,
+    .http2 = true,
+});
+defer server.deinit();
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
+try server.get("/h2", h2Handler);
 
-    var server = try httpx.Server.init(allocator, io, .{
-        .host = "127.0.0.1",
-        .port = 8080,
-        .http2 = true,
-    });
-    defer server.deinit();
-
-    try server.get("/h2", struct {
-        fn handler(ctx: *httpx.Context) !httpx.Response {
-            return ctx.text("hello from http2 server runtime");
-        }
-    }.handler);
-
-    try server.listen();
-}
+const thread = try server.start();
+defer thread.join();
+defer server.requestShutdown();
 ```
 
 ## Run
 
 ```bash
-zig build run-all-http2_server_runtime
+zig build run-http2-client
 ```
 
 ## What to Verify
 
-- The response version prints `HTTP/2`.
-- The server accepts an HTTP/2 preface and request HEADERS/DATA flow.
-- The route response is emitted through HTTP/2 HEADERS/DATA frames.
+- The server speaks HTTP/2 (preface + SETTINGS) to h2c clients.
+- Routes dispatch identically across HTTP versions.

@@ -16,23 +16,18 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.Server.init(allocator, io, .{
+        .port = 8080,
+        .enableDocs = true,
+        .docs = .{
+            .title = "Users API",
+            .version = "1.0.0",
+            .description = "Production API built with HTTPX",
+        },
+    });
     defer server.deinit();
 
-    // Serve OpenAPI JSON document
-    server.openapi("/openapi.json", .{
-        .title = "Users API",
-        .version = "1.0.0",
-        .description = "Production API built with HTTPX",
-    });
-
-    // Mount interactive UIs pointing to the spec
-    server.swagger_ui("/docs", .{ .spec_url = "/openapi.json" });
-    server.redoc("/redoc", .{ .spec_url = "/openapi.json" });
-    server.scalar("/scalar", .{ .spec_url = "/openapi.json" });
-
-    try server.run();
-}
+    server.run();
 ```
 
 ## Documentation UIs

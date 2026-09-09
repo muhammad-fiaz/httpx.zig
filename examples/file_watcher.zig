@@ -34,10 +34,10 @@ pub fn main() !void {
     }
 
     var watcher = try httpx.Watcher.init(allocator, io, .{
-        .dir_path = ".",
-        .debounce_ms = 50,
-        .poll_interval_ms = 50,
-        .on_change = onFileChanged,
+        .dirPath = ".",
+        .debounceMs = 50,
+        .pollIntervalMs = 50,
+        .onChange = onFileChanged,
     });
     defer watcher.deinit();
 

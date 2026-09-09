@@ -6,36 +6,30 @@ Centralized API documentation for all utility modules.
 
 | Module | Location | Description |
 |--------|----------|-------------|
-| [IO](/api/io) | `src/io/` | AnyIO, Buffer, FixedBuffer, BufferPool, encoding helpers |
-| [Compression](/api/compression) | `src/compress/` | gzip/deflate/brotli/zstd compress/decompress, streaming |
-| [Cache](/api/cache) | `src/cache/` | HttpCache (LRU + TTL), ConditionalGet (ETag) |
-| [Data](/api/data) | `src/data/` | MIME types, multipart, JSON builder, shared helpers |
-| [Metrics](/api/metrics) | `src/metrics/` | Thread-safe request/response metrics |
-| [Session](/api/session) | `src/session/` | TTL-based in-memory session store |
-| [SSE](/api/sse) | `src/protocol/sse.zig` | Server-Sent Events parsing and streaming |
+| [IO](/api/io) | `src/common/io.zig` | IO context helpers |
+| [Compression](/api/compression) | `src/compression/` | gzip/deflate/brotli/zstd compress/decompress |
+| [Cache](/api/cache) | — | ETag/conditional static serving, download resume |
+| [Metrics](/api/metrics) | `src/web/metrics/` | Thread-safe request/response metrics |
+| [Session](/api/session) | — | Cookie-backed sessions (no built-in store) |
+| [SSE](/api/sse) | `src/web/sse/` | Server-Sent Events parsing and streaming |
 
 ## Quick Reference
 
 ### Encoding
 
-- `httpx.encodeVarInt(...)` / `httpx.decodeVarInt(...)` — QUIC variable-length integer encoding
+- `httpx.quic.varint.encode(buf, value)` / `httpx.quic.varint.decode(data, offset)` — QUIC variable-length integer encoding
 
 ### WebSocket
 
-See [Protocol API](/api/protocol) for the full WebSocket section. Root-level aliases:
+See [Protocol API](/api/protocol) for the full WebSocket section:
 
-- `httpx.isWebSocketUpgrade(req)` — checks upgrade headers
-- `httpx.wsExtractKey(req)` — returns `Sec-WebSocket-Key` value
-- `httpx.wsAcceptKey(key, allocator)` — computes `Sec-WebSocket-Accept`
-- `httpx.wsEncodeFrame(allocator, opcode, payload, fin, masked, mask_key)` — low-level frame encoder
-- `httpx.wsDecodeFrame(allocator, data)` — decode one frame, returns `WsDecodeResult`
-- `httpx.wsTextFrame(allocator, text)` — encode server text frame
-- `httpx.wsBinaryFrame(allocator, data)` — encode server binary frame
-- `httpx.wsPingFrame(allocator, data)` — encode ping frame
-- `httpx.wsPongFrame(allocator, data)` — encode pong frame
-- `httpx.wsCloseFrame(allocator, code, reason)` — encode close frame
-- `httpx.WsOpcode` — frame opcode enum
-- `httpx.WsFrame` — decoded frame struct
-- `httpx.WsCloseCode` — close status codes
-- `httpx.WsDecodeResult` — `{ frame, consumed }`
-- `httpx.WS_GUID` — RFC 6455 magic GUID
+- `httpx.websocket.Handshake.computeAccept(key, out)` — `Sec-WebSocket-Accept`
+- `httpx.websocket.Handshake.buildUpgradeRequest(...)` — client upgrade head
+- `httpx.websocket.Frame.buildFrameHeader / parseFrameHeader / applyMask / generateKey`
+- `httpx.websocket.Frame.Opcode` — frame opcode enum
+
+### MIME and URIs
+
+- `httpx.mime.fromPath(path)` — extension-based MIME lookup
+- `httpx.Uri.parse(...)` — RFC 3986 URI parsing
+- `httpx.fs.readFileLimited(allocator, path, maxBytes)` — bounded file reads

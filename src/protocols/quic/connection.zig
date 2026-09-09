@@ -166,8 +166,8 @@ pub const Connection = struct {
     crypto_pending: [3]std.ArrayList(CryptoSegment) = undefined,
 
     // Anti-amplification (server side).
-    bytes_received: u64 = 0,
-    bytes_sent: u64 = 0,
+    bytesReceived: u64 = 0,
+    bytesSent: u64 = 0,
     address_validated: bool = false,
 
     // Timers (ms domain, caller-driven clock).
@@ -328,8 +328,8 @@ pub const Connection = struct {
 
         // Server anti-amplification gate until address validation.
         if (self.role == .server and !self.address_validated) {
-            const budget = self.bytes_received *| 3;
-            if (self.bytes_sent >= budget) return Error.AmplificationBlocked;
+            const budget = self.bytesReceived *| 3;
+            if (self.bytesSent >= budget) return Error.AmplificationBlocked;
         }
 
         var payload = std.ArrayList(u8).empty;
@@ -404,7 +404,7 @@ pub const Connection = struct {
         for (0..pn_len) |i| buf[hdr_len + i] ^= mask[1 + i];
 
         try self.outbuf.appendSlice(self.allocator, buf[0..wire_len]);
-        self.bytes_sent += wire_len;
+        self.bytesSent += wire_len;
         sp.next_pn += 1;
     }
     // Receive path
@@ -415,7 +415,7 @@ pub const Connection = struct {
             .draining, .closed => return Error.Draining,
             else => {},
         }
-        self.bytes_received += dgram.len;
+        self.bytesReceived += dgram.len;
         self.last_activity_ms = now_ms;
 
         var off: usize = 0;

@@ -1,35 +1,33 @@
 # Redirect Following Example
 
-Demonstrates redirect policy configuration including `follow_redirects`, `max_redirects`, `preserve_method`, `preserve_headers`, `allow_cross_origin`, and the `getRedirectMethod` logic.
+Demonstrates redirect configuration with `followRedirects` and
+`maxRedirects` on the client and per-request overrides.
 
 ## Demo Program
 
 ```zig
-const default = httpx.RedirectPolicy{};
-std.debug.print("  max_redirects:    {d}\n", .{default.maxRedirects});
-std.debug.print("  follow_redirects: {}\n", .{default.followRedirects});
+var client = httpx.Client.init(allocator, io, .{
+    .followRedirects = true,
+    .maxRedirects = 5,
+});
+defer client.deinit();
 
-const strict = httpx.RedirectPolicy.strict();
-// strict.preserve_method == true
+std.debug.print("  maxRedirects:    {d}\n", .{client.config.maxRedirects});
+std.debug.print("  followRedirects: {}\n", .{client.config.followRedirects});
 
-const redirect_method = default.getRedirectMethod(301, .POST);
-// 301 with POST -> method changes to GET
-
-const strict_method = strict.getRedirectMethod(301, .POST);
-// strict: 301 with POST -> POST preserved
+// Per-request override: do not follow redirects for this call.
+var res = try client.get("http://httpbun.com/redirect/2", .{ .followRedirects = false });
+defer res.deinit();
 ```
 
 ## Run
 
 ```
-zig build run-all-redirect_example
+zig build run-redirect
 ```
 
 ## Checklist
 
-- [x] Default policy follows redirects, changes POST→GET for 301/302/303
-- [x] `RedirectPolicy.noFollow()` disables following
-- [x] `RedirectPolicy.strict()` preserves original HTTP method
-- [x] 307/308 always preserve the method
-- [x] 301/302 change POST to GET under default policy
-- [x] 303 always changes to GET regardless of policy
+- [x] Default client follows redirects up to `maxRedirects`
+- [x] `.followRedirects = false` disables following per request
+- [x] 307/308 preserve the method; 301/302/303 may rewrite POST to GET

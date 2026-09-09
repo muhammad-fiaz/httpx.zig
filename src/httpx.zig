@@ -137,27 +137,32 @@ pub const router = struct {
     pub const Response = @import("web/router/router.zig").Response;
     pub const Header = @import("web/router/router.zig").Header;
     pub const HandlerFn = @import("web/router/router.zig").HandlerFn;
+    pub const NextFn = @import("web/router/router.zig").NextFn;
+    pub const MiddlewareFn = @import("web/router/router.zig").MiddlewareFn;
     pub const pattern = @import("web/router/pattern.zig");
     pub const metadata = @import("web/router/metadata.zig");
 };
 pub const sse = struct {
     pub const Writer = @import("web/sse/writer.zig");
     pub const Parser = @import("web/sse/parser.zig");
+    pub const EventWriter = @import("web/sse/writer.zig").EventWriter;
+    pub const Event = @import("web/sse/parser.zig").Event;
+    pub const EventParser = @import("web/sse/parser.zig").EventParser;
 };
-pub const ws = struct {
+pub const websocket = struct {
     pub const Handshake = @import("web/websocket/handshake.zig");
     pub const Frame = @import("web/websocket/frame.zig");
     pub const computeAccept = Handshake.computeAccept;
     pub const buildUpgradeRequest = Handshake.buildUpgradeRequest;
 };
-pub const websocket = ws;
 
 // Native Template Engine
 pub const templates = @import("web/templates/templates.zig");
-pub const Templates = templates.Engine;
 pub const TemplateEngine = templates.Engine;
 pub const TemplateConfig = templates.Config;
 pub const assets = @import("web/assets.zig");
+pub const site = @import("web/site/site.zig");
+pub const Site = site.Site;
 pub const static = struct {
     pub const files = @import("web/static_files/serve.zig");
     pub const spa = @import("web/spa/serve.zig");
@@ -191,15 +196,11 @@ pub const multipart = struct {
 pub const middleware = struct {
     const sec = @import("web/middleware/security.zig");
     pub const cors = sec.corsMiddleware;
-    pub const corsMiddleware = sec.corsMiddleware;
     pub const CorsConfig = sec.CorsConfig;
     pub const securityHeaders = sec.securityHeadersMiddleware;
-    pub const securityHeadersMiddleware = sec.securityHeadersMiddleware;
     pub const helmet = sec.securityHeadersMiddleware;
     pub const recovery = sec.recoveryMiddleware;
-    pub const recoveryMiddleware = sec.recoveryMiddleware;
     pub const logging = sec.loggingMiddleware;
-    pub const loggingMiddleware = sec.loggingMiddleware;
     pub const RateLimiter = sec.RateLimiter;
     pub const RateLimitPolicy = sec.RateLimitPolicy;
     pub const RateLimitResult = sec.RateLimitResult;
@@ -216,10 +217,22 @@ pub const web = struct {
     pub const spa = @import("web/spa/serve.zig");
     pub const watcher = @import("web/watcher/watcher.zig");
     pub const templates = @import("web/templates/templates.zig");
-    pub const Templates = @import("web/templates/templates.zig").Engine;
+    pub const TemplateEngine = @import("web/templates/templates.zig").Engine;
     pub const assets = @import("web/assets.zig");
-    pub const sse = @import("web/sse/writer.zig");
-    pub const websocket = ws;
+    pub const site = @import("web/site/site.zig");
+    pub const sse = struct {
+        pub const Writer = @import("web/sse/writer.zig");
+        pub const Parser = @import("web/sse/parser.zig");
+        pub const EventWriter = @import("web/sse/writer.zig").EventWriter;
+        pub const Event = @import("web/sse/parser.zig").Event;
+        pub const EventParser = @import("web/sse/parser.zig").EventParser;
+    };
+    pub const websocket = struct {
+        pub const Handshake = @import("web/websocket/handshake.zig");
+        pub const Frame = @import("web/websocket/frame.zig");
+        pub const computeAccept = Handshake.computeAccept;
+        pub const buildUpgradeRequest = Handshake.buildUpgradeRequest;
+    };
     pub const health = @import("web/health/endpoints.zig");
     pub const metrics = @import("web/metrics/registry.zig");
     pub const openapi = @import("web/openapi/spec.zig");
@@ -237,6 +250,7 @@ pub const web = struct {
         const sec = @import("web/middleware/security.zig");
         pub const cors = sec.corsMiddleware;
         pub const securityHeaders = sec.securityHeadersMiddleware;
+        pub const helmet = sec.securityHeadersMiddleware;
         pub const recovery = sec.recoveryMiddleware;
         pub const logging = sec.loggingMiddleware;
         pub const RateLimiter = sec.RateLimiter;
@@ -277,6 +291,7 @@ pub const ClientConfig = @import("client/client.zig").Config;
 pub const RequestOptions = @import("client/client.zig").RequestOptions;
 pub const ClientResponse = @import("client/request.zig").Response;
 pub const Header = @import("client/request.zig").Header;
+pub const TlsOptions = @import("client/request.zig").TlsOptions;
 pub const Headers = headers.Headers;
 pub const CookieJar = cookies.Jar;
 pub const ConnectionPool = pool.Pool;
@@ -411,6 +426,8 @@ pub const LogSink = logging.Sink;
 pub const LogRecord = logging.Record;
 pub const LogField = logging.Field;
 pub const WriterSink = logging.WriterSink;
+pub const ServerEvent = logging.ServerEvent;
+pub const ServerEventKind = logging.ServerEventKind;
 
 // Networking & Protocol Types
 pub const Address = address.Address;
@@ -421,7 +438,6 @@ pub const Http1Parser = http1.parser.Http1Parser;
 pub const ChunkedDecoder = http1.parser.ChunkedDecoder;
 pub const H2Session = http2.connection.Session;
 pub const AlpnProtocol = tls.alpn.Protocol;
-pub const ApplicationProtocol = tls.alpn.Protocol;
 
 // FTP (isolated protocol subsystem)
 pub const ftp = struct {
@@ -515,6 +531,8 @@ test {
     _ = @import("web/static_files/serve.zig");
     _ = @import("web/watcher/watcher.zig");
     _ = @import("web/spa/serve.zig");
+    _ = @import("web/site/routes.zig");
+    _ = @import("web/site/site.zig");
     _ = @import("web/health/endpoints.zig");
     _ = @import("web/metrics/registry.zig");
     _ = @import("utils/mime.zig");
@@ -531,7 +549,6 @@ test {
     _ = @import("protocols/ftp/server.zig");
     _ = @import("protocols/http2/transport.zig");
     _ = @import("server/lifecycle.zig");
-    _ = @import("server/context.zig");
     _ = @import("parsing/dom.zig");
     _ = @import("parsing/html.zig");
     _ = @import("parsing/xml.zig");

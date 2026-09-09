@@ -55,8 +55,8 @@ pub fn main() !void {
     std.debug.print("Metadata:\n", .{});
     std.debug.print("  Title: {s}\n", .{meta.title});
     std.debug.print("  Description: {s}\n", .{meta.description});
-    std.debug.print("  OG Title: {s}\n", .{meta.og_title});
-    std.debug.print("  OG URL: {s}\n", .{meta.og_url});
+    std.debug.print("  OG Title: {s}\n", .{meta.ogTitle});
+    std.debug.print("  OG URL: {s}\n", .{meta.ogUrl});
     std.debug.print("  Canonical: {s}\n\n", .{meta.canonical});
 
     // 2. Images

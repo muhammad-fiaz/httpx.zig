@@ -1,36 +1,36 @@
 # Compression
 
-Demonstrates `Content-Encoding` parsing, the `httpx.decompress()` API, compression middleware, and how clients advertise supported algorithms via `Accept-Encoding`.
-
-## Demo Program
+Content encoding negotiation and codecs (`httpx.compression`): gzip,
+deflate, brotli, and zstd. See `examples/compression_demo.zig`.
 
 ```zig
-// Iterate all supported Content-Encoding values
-for (httpx.ContentEncoding.ALL) |enc| {
-    std.debug.print("{s} -> .{s}\n", .{ enc.toString(), @tagName(enc) });
-}
+// Advertise encodings; the client decodes transparently.
+var response = try client.get("http://httpbun.com/get", .{
+    .headers = .{ .acceptEncoding = "gzip, deflate, br" },
+});
+defer response.deinit();
 
-// Identity passthrough — input equals output
-const decompressed = try httpx.decompress(allocator, .identity, original);
-
-// Enable compression middleware on the server
-try server.use(httpx.middleware.compression());
-
-// Client advertises supported encodings
-var req = try httpx.Request.init(allocator, .GET, "http://127.0.0.1/data");
-try req.headers.set("Accept-Encoding", "gzip, deflate, zstd");
+// Codec-level API.
+const blob = try httpx.compression.compress(allocator, .gzip, data);
+defer allocator.free(blob);
+const plain = try httpx.compression.decompress(allocator, .gzip, blob);
+defer allocator.free(plain);
+const limited = try httpx.compression.decompressLimited(allocator, .gzip, blob, 1 << 20);
+defer allocator.free(limited);
 ```
+
+Negotiate with `httpx.compression.negotiate(headerValue)` and parse offers
+with `httpx.compression.parseAcceptEncoding(allocator, headerValue)`.
+Decompression is always size-bounded (`MAX_DECOMPRESSED_SIZE`).
 
 ## Run
 
-```
-zig build run-all-compression_example
+```bash
+zig build run-compression-demo
 ```
 
 ## Checklist
 
-- [x] `ContentEncoding.ALL` lists gzip, deflate, zstd, brotli
-- [x] `httpx.decompress(.identity, ...)` returns input unchanged
-- [x] Server accepts and applies compression middleware
-- [x] Client sends `Accept-Encoding` header with supported algorithms
-- [x] Supported algorithms print: gzip, deflate, zstd, br
+- [x] Client sends `Accept-Encoding` and reads decoded bodies
+- [x] Round-trip compress/decompress matches input
+- [x] `decompressLimited` enforces the cap

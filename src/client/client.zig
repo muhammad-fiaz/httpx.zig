@@ -125,8 +125,6 @@ pub const Config = struct {
     http2: bool = false,
     /// Fast boolean toggle to use HTTP/3 as default protocol
     http3: bool = false,
-    /// Enable cookie handling
-    cookies: bool = true,
 
     pub const DnsCacheOptions = struct {
         enable: bool = true,
@@ -334,6 +332,9 @@ pub const Client = struct {
     }
 
     /// Batch: concurrent array of requests (runs in parallel, reuses pool and dns cache).
+    ///
+    /// Caller owns the returned slice: deinit each Response, then free the
+    /// slice with this client's allocator.
     pub fn requestAll(self: *Client, reqs: anytype) ![]Response {
         const R = @TypeOf(reqs);
         const slice: []const RequestOptions = blk: {
@@ -347,13 +348,14 @@ pub const Client = struct {
             @compileError("requestAll expects a slice or array of RequestOptions");
         };
         var out = try self.allocator.alloc(Response, slice.len);
-        errdefer {
-            for (out) |*r| r.deinit();
-            self.allocator.free(out);
-        }
         if (slice.len <= 1) {
             for (slice, 0..) |item, i| {
-                out[i] = try self.doRequest(item.method orelse .GET, item.url, item);
+                out[i] = self.doRequest(item.method orelse .GET, item.url, item) catch |e| {
+                    // Only entries before i were assigned; later slots are uninitialized.
+                    for (out[0..i]) |*r| r.deinit();
+                    self.allocator.free(out);
+                    return e;
+                };
             }
             return out;
         }
@@ -391,7 +393,10 @@ pub const Client = struct {
             }
         };
 
-        const success = try self.allocator.alloc(bool, slice.len);
+        const success = self.allocator.alloc(bool, slice.len) catch |e| {
+            self.allocator.free(out);
+            return e;
+        };
         defer self.allocator.free(success);
         @memset(success, false);
 
@@ -405,7 +410,10 @@ pub const Client = struct {
         };
 
         const max_workers = @min(@as(usize, 16), slice.len);
-        var threads = try self.allocator.alloc(?std.Thread, max_workers);
+        var threads = self.allocator.alloc(?std.Thread, max_workers) catch |e| {
+            self.allocator.free(out);
+            return e;
+        };
         defer self.allocator.free(threads);
 
         for (0..max_workers) |w| {
@@ -429,6 +437,8 @@ pub const Client = struct {
         return out;
     }
 
+    /// Parallel GETs. Ownership: deinit each Response, then free the slice
+    /// with this client's allocator (see requestAll).
     pub fn getAll(self: *Client, urls: anytype) ![]Response {
         const U = @TypeOf(urls);
         const slice: []const []const u8 = blk: {
@@ -800,14 +810,14 @@ pub const Client = struct {
         var hdrs: std.ArrayList(req.Header) = .empty;
         defer hdrs.deinit(self.allocator);
 
-        var user_has_content_type = false;
+        var userHasContentType = false;
 
         // Headers: support both []const Header and struct literal
         if (@hasField(@TypeOf(opts), "headers")) {
             const H = @TypeOf(opts.headers);
             if (comptime @typeInfo(H) == .pointer and @typeInfo(H).pointer.size == .slice) {
                 for (opts.headers) |h| {
-                    if (std.ascii.eqlIgnoreCase(h.name, "content-type")) user_has_content_type = true;
+                    if (std.ascii.eqlIgnoreCase(h.name, "content-type")) userHasContentType = true;
                     hdrs.append(self.allocator, h) catch return Error.OutOfMemory;
                 }
             } else if (comptime @typeInfo(H) == .@"struct") {
@@ -819,7 +829,7 @@ pub const Client = struct {
                         if (std.mem.eql(u8, field.name, "acceptEncoding")) break :blk "Accept-Encoding";
                         break :blk field.name;
                     };
-                    if (std.ascii.eqlIgnoreCase(norm_name, "content-type")) user_has_content_type = true;
+                    if (std.ascii.eqlIgnoreCase(norm_name, "content-type")) userHasContentType = true;
                     const v = @field(opts.headers, field.name);
                     const val_str: []const u8 = blk: {
                         const T = @TypeOf(v);
@@ -844,6 +854,9 @@ pub const Client = struct {
                             .bool => break :blk if (v) "true" else "false",
                             .pointer => |ptr| {
                                 if (ptr.size == .slice and ptr.child == u8) break :blk v;
+                                // String literals decay to array pointers (*const [N(:0)]u8),
+                                // not slices — slice them instead of {any}-formatting bytes.
+                                if (ptr.size == .one and @typeInfo(ptr.child) == .array and @typeInfo(ptr.child).array.child == u8) break :blk v[0..];
                                 const s = std.fmt.allocPrint(self.allocator, "{any}", .{v}) catch return Error.OutOfMemory;
                                 allocated_strings.append(self.allocator, s) catch {
                                     self.allocator.free(s);
@@ -867,7 +880,7 @@ pub const Client = struct {
         }
 
         // Content-Type inference (only if not already explicitly provided in headers)
-        if (!user_has_content_type) {
+        if (!userHasContentType) {
             var ct: ?[]const u8 = blk: {
                 if (@hasField(@TypeOf(opts), "contentType")) {
                     const v = opts.contentType;
@@ -931,6 +944,9 @@ pub const Client = struct {
                             .bool => break :blk if (v) "true" else "false",
                             .pointer => |ptr| {
                                 if (ptr.size == .slice and ptr.child == u8) break :blk v;
+                                // String literals decay to array pointers (*const [N(:0)]u8),
+                                // not slices — slice them instead of {any}-formatting bytes.
+                                if (ptr.size == .one and @typeInfo(ptr.child) == .array and @typeInfo(ptr.child).array.child == u8) break :blk v[0..];
                                 const s = std.fmt.allocPrint(self.allocator, "{any}", .{v}) catch return Error.OutOfMemory;
                                 allocated_strings.append(self.allocator, s) catch {
                                     self.allocator.free(s);
@@ -1030,7 +1046,7 @@ pub const Client = struct {
             var ct_buf: [128]u8 = undefined;
             const ct_val = mp_encoder.contentType(&ct_buf, boundary);
 
-            const field_name_val: []const u8 = mp.fieldName;
+            const field_name_val: []const u8 = mp.name;
             const filename_val: ?[]const u8 = blk: {
                 if (!@hasField(@TypeOf(mp), "filename")) break :blk null;
                 const v = mp.filename;
@@ -1038,7 +1054,7 @@ pub const Client = struct {
                 if (@typeInfo(T) == .optional) break :blk v;
                 break :blk @as(?[]const u8, v);
             };
-            const content_type_val: []const u8 = blk: {
+            const contentTypeVal: []const u8 = blk: {
                 if (!@hasField(@TypeOf(mp), "contentType")) break :blk "application/octet-stream";
                 const v = mp.contentType;
                 const T = @TypeOf(v);
@@ -1052,7 +1068,7 @@ pub const Client = struct {
             const part: mp_encoder.Part = .{
                 .name = field_name_val,
                 .filename = filename_val,
-                .content_type = content_type_val,
+                .contentType = contentTypeVal,
                 .data = mp.data,
             };
             multipart_buf = mp_encoder.encodeAllocParts(self.allocator, boundary, &.{part}) catch return Error.OutOfMemory;
@@ -1176,7 +1192,7 @@ pub const Client = struct {
         });
         if (result) |resp| {
             if (self.config.eventCallback) |cb| cb(.{
-                .kind = .request_completed,
+                .kind = .requestCompleted,
                 .level = .info,
                 .method = @tagName(method),
                 .url = targetUrl,
@@ -1185,7 +1201,7 @@ pub const Client = struct {
             return resp;
         } else |e| {
             if (self.config.eventCallback) |cb| cb(.{
-                .kind = .request_failed,
+                .kind = .requestFailed,
                 .level = .err,
                 .method = @tagName(method),
                 .url = targetUrl,
@@ -1271,11 +1287,14 @@ pub fn globalRequest(url: []const u8, opts: anytype) Error!Response {
 }
 
 pub fn globalGetAll(urls: anytype) ![]Response {
+    // Slice is page_allocator-owned (see requestAll): deinit each Response,
+    // then std.heap.page_allocator.free(results).
     const c = defaultClient() orelse return Error.DefaultClientUnavailable;
     return c.getAll(urls);
 }
 
 pub fn globalRequestAll(reqs: anytype) ![]Response {
+    // Same ownership as globalGetAll.
     const c = defaultClient() orelse return Error.DefaultClientUnavailable;
     return c.requestAll(reqs);
 }
@@ -1416,6 +1435,65 @@ test "client anytype query struct literal" {
     defer client.deinit();
     const res = client.get("http://127.0.0.1:1/", .{ .query = .{ .page = 2, .active = true } });
     try std.testing.expectError(Error.ConnectFailed, res);
+}
+
+test "struct headers/query string literals serialize as strings on the wire" {
+    // Regression test: string literals in struct-form headers/query decay to
+    // array pointers (*const [N:0]u8), which were {any}-formatted as byte
+    // dumps ("{ 66, 101, ... }") instead of sent as strings.
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = Client.init(a, io, .{});
+    defer client.deinit();
+
+    var addr: addressMod.Address = undefined;
+    addr = try addr.parseIp("127.0.0.1");
+    addr.port = 0;
+    var listener = try tcp.Listener.bindAddress(io, &addr);
+    defer listener.close(io);
+    const port = listener.localPort();
+
+    const Capture = struct {
+        buf: [4096]u8 = [_]u8{0} ** 4096,
+        len: usize = 0,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This(), l: *tcp.Listener, io_in: std.Io) void {
+            var conn = l.accept(io_in) catch return;
+            defer conn.close();
+            var total: usize = 0;
+            while (total < self.buf.len) {
+                const n = conn.read(self.buf[total..]) catch break;
+                if (n == 0) break;
+                total += n;
+                if (std.mem.indexOf(u8, self.buf[0..total], "\r\n\r\n") != null) break;
+            }
+            self.len = total;
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok") catch {};
+            self.done.store(true, .release);
+        }
+    };
+    var cap = Capture{};
+    const t = try std.Thread.spawn(.{}, Capture.run, .{ &cap, &listener, io });
+    defer t.join();
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
+    var res = try client.get(url, .{
+        .headers = .{ .authorization = "Bearer my-token", .x_count = 42, .x_flag = true },
+        .query = .{ .page = 2, .tag = "hi" },
+    });
+    defer res.deinit();
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+
+    while (!cap.done.load(.acquire)) std.Thread.yield() catch {};
+    const raw = cap.buf[0..cap.len];
+    try std.testing.expect(std.mem.indexOf(u8, raw, "Authorization: Bearer my-token") != null);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "x_count: 42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "x_flag: true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "page=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "tag=hi") != null);
+    // No {any}-formatted byte dumps anywhere on the wire.
+    try std.testing.expect(std.mem.indexOf(u8, raw, "{") == null);
 }
 
 test "client typed json struct" {
@@ -1566,6 +1644,39 @@ test "client camelCase config options and request options" {
         .httpVersion = .http11,
     });
     try std.testing.expectError(Error.ConnectFailed, res3);
+}
+
+test "requestAll error path cleans up without double free" {
+    // Regression test: batch failures previously double-freed the result
+    // buffer (function errdefer + manual cleanup) and segfaulted.
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = Client.init(a, io, .{ .timeoutMs = 500 });
+    defer client.deinit();
+
+    // Parallel path (len > 1): all targets refused -> first_err cleanup.
+    const reqs = [_]RequestOptions{
+        .{ .method = .GET, .url = "http://127.0.0.1:1/a" },
+        .{ .method = .GET, .url = "http://127.0.0.1:1/b" },
+        .{ .method = .GET, .url = "http://127.0.0.1:1/c" },
+    };
+    const batch = client.requestAll(reqs);
+    try std.testing.expectError(Error.ConnectFailed, batch);
+
+    // Single path (len == 1): error must free only the assigned prefix.
+    const one = [_]RequestOptions{
+        .{ .method = .GET, .url = "http://127.0.0.1:1/only" },
+    };
+    const single = client.requestAll(one);
+    try std.testing.expectError(Error.ConnectFailed, single);
+
+    // getAll wrapper shares the same cleanup path.
+    const urls = [_][]const u8{
+        "http://127.0.0.1:1/x",
+        "http://127.0.0.1:1/y",
+    };
+    const multi = client.getAll(urls);
+    try std.testing.expectError(Error.ConnectFailed, multi);
 }
 
 test "normalizeMethod enum and string literals" {

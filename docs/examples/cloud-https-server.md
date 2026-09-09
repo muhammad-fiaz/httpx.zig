@@ -17,7 +17,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    return ctx.json(.{
+    return ctx.renderJson(.{
         .status = "ok",
         .service = "cloud-https-api",
         .version = "1.0.0",
@@ -25,7 +25,7 @@ fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 }
 
 fn healthHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    return ctx.json(.{ .status = "healthy" });
+    return ctx.renderJson(.{ .status = "healthy" });
 }
 
 pub fn main() !void {
@@ -37,43 +37,25 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 8080,
-        .port_conflict = .increment,
-        .max_connections = 10000,
-        .threads = 4,
+        .portStrategy = .incremental,
+        .maxConnections = 10000,
         .http2 = true,
         .http3 = false,
-        .tls_alpn_protocols = &.{ "h3", "h2", "http/1.1" },
-        .keep_alive = true,
-        .request_timeout_ms = 30_000,
-        .keep_alive_timeout_ms = 60_000,
+        .keepAlive = true,
     });
     defer server.deinit();
 
-    try server.use(httpx.middleware.cors(.{
-        .allowed_origins = &.{"*"},
-        .allowed_methods = &.{ "GET", "POST", "OPTIONS" },
-        .allowed_headers = &.{ "Content-Type", "Authorization" },
-        .max_age_seconds = 3600,
-    }));
+    try server.use(httpx.middleware.cors);
+    try server.use(httpx.middleware.helmet);
+    try server.use(httpx.middleware.recovery);
+    try server.use(httpx.middleware.logging);
 
-    try server.use(httpx.middleware.healthCheck(.{
-        .path = "/health",
-        .body = "{\"status\":\"ok\"}",
-        .status = 200,
-    }));
-
-    try server.use(httpx.middleware.readinessProbe(.{
-        .path = "/ready",
-        .body = "{\"ready\":true}",
-    }));
-
-    try server.use(httpx.middleware.logger());
-
+    try server.get("/health", healthHandler);
     try server.get("/", indexHandler);
 
-    const thread = try server.listenInBackground();
+    const thread = try server.start();
     defer thread.join();
-    defer server.stop();
+    defer server.requestShutdown();
 }
 ```
 

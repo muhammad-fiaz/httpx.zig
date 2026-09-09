@@ -13,7 +13,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0, // Pick ephemeral port for testing
-        .max_connections = 9,
+        .maxConnections = 9,
     });
     defer server.deinit();
 

@@ -27,7 +27,7 @@ pub const Config = struct {
     port: u16 = 2121,
     user: []const u8 = "anonymous",
     password: []const u8 = "anonymous@",
-    timeout_ms: u31 = 30_000,
+    timeoutMs: u31 = 30_000,
     callbacks: Callbacks = .{},
 };
 
@@ -36,8 +36,8 @@ pub const Server = struct {
     io: std.Io,
     listener: tcp.Listener,
     cfg: Config,
-    owns_io: bool = false,
-    io_threaded: ?*std.Io.Threaded = null,
+    ownsIo: bool = false,
+    ioThreaded: ?*std.Io.Threaded = null,
     stop: std.atomic.Value(bool) = .init(false),
     listener_closed: bool = false,
 
@@ -51,8 +51,8 @@ pub const Server = struct {
             self.listener.close(self.io);
             self.listener_closed = true;
         }
-        if (self.owns_io) {
-            if (self.io_threaded) |t| {
+        if (self.ownsIo) {
+            if (self.ioThreaded) |t| {
                 t.deinit();
                 self.allocator.destroy(t);
             }
@@ -69,13 +69,13 @@ pub const Server = struct {
         return self.listener.localPort();
     }
 
-    /// Serves accepted control connections until shutdown or max_connections.
-    pub fn run(self: *Server, max_connections: usize) Error!void {
+    /// Serves accepted control connections until shutdown or maxConnections.
+    pub fn run(self: *Server, maxConnections: usize) Error!void {
         var served: usize = 0;
-        while (!self.stop.load(.acquire) and (max_connections == 0 or served < max_connections)) {
+        while (!self.stop.load(.acquire) and (maxConnections == 0 or served < maxConnections)) {
             var control = self.listener.accept(self.io) catch return error.AcceptFailed;
             defer control.close();
-            tcp.setTimeouts(control.netSocketHandle(), self.cfg.timeout_ms);
+            tcp.setTimeouts(control.netSocketHandle(), self.cfg.timeoutMs);
             var session = Session.init(self.allocator, self.io, &control, self.cfg);
             session.run() catch {};
             served += 1;
@@ -348,7 +348,7 @@ const Session = struct {
             };
             p.close(self.io);
             self.passive = null;
-            tcp.setTimeouts(data.netSocketHandle(), self.cfg.timeout_ms);
+            tcp.setTimeouts(data.netSocketHandle(), self.cfg.timeoutMs);
             return data;
         }
         if (self.active) |*addr| {
@@ -357,7 +357,7 @@ const Session = struct {
                 return error.AcceptFailed;
             };
             self.active = null;
-            tcp.setTimeouts(data.netSocketHandle(), self.cfg.timeout_ms);
+            tcp.setTimeouts(data.netSocketHandle(), self.cfg.timeoutMs);
             return data;
         }
         return error.AcceptFailed;

@@ -1,61 +1,30 @@
-# Thread Pool / Async Server
+# Async Server Example
 
-Start a concurrent HTTP server configured with a bounded thread pool to offload slow/blocking request tasks safely.
-
-## Demo Program
+Run CPU-bound work off the request path with `httpx.WorkerPool`, and serve
+results from normal handlers. See `examples/concurrent_demo.zig` for parallel
+client requests.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-fn helloHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    return ctx.text("Hello from the worker pool thread!");
-}
-
-fn asyncTaskHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    const start = std.time.milliTimestamp();
-    // Simulate a slow blocking computation/I/O task.
-    // Since the server configures threads > 0, this request runs on a background worker thread.
-    // It does not block other connections from being accepted or processed by other threads.
-    httpx.sleepMs(50);
-    const elapsed = std.time.milliTimestamp() - start;
-
-    const msg = try std.fmt.allocPrint(ctx.allocator, "Processed blocking task in {d}ms on worker thread pool!\n", .{elapsed});
-    defer ctx.allocator.free(msg);
-
-    return ctx.text(msg);
-}
-
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    var server = try httpx.Server.init(allocator, io, .{
-        .host = "127.0.0.1",
-        .port = 8080,
-        .port_conflict = .increment,
-        .threads = 4, // Enables the Executor thread pool
-        .keep_alive = true,
-    });
-    defer server.deinit();
-
-    try server.get("/", helloHandler);
-    try server.get("/async", asyncTaskHandler);
-
-    try server.listen();
-}
+var pool = httpx.WorkerPool.init(allocator, .{
+    .workers = 4,
+    .queueCapacity = 1024,
+    .autoStart = true,
+});
+defer pool.deinit();
 ```
+
+Handlers stay single-threaded and deterministic; submit background jobs to
+the pool and poll or block on their completion. Server lifecycle is unchanged:
+`server.run()` blocks, `server.start()` returns a joinable thread, and
+`server.requestShutdown()` drains in-flight requests.
 
 ## Run
 
 ```bash
-zig build run-all-async_server_example
+zig build run-concurrent-demo
 ```
 
 ## What to Verify
 
-- `GET /` returns "Hello from the worker pool thread!".
-- `GET /async` simulates a blocking workload without stalling other concurrent requests.
-- The server processes up to 4 connection jobs concurrently in background threads.
+- Parallel `getAll` / `requestAll` calls all return 200.
+- `WorkerPool` submits background jobs without stalling request handling.

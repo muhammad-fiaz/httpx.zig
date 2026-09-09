@@ -12,19 +12,19 @@ pub const Extracted = struct {
 };
 
 /// Extracts "Bearer <token>".
-pub fn parseBearer(header_value: []const u8) ?[]const u8 {
+pub fn parseBearer(headerValue: []const u8) ?[]const u8 {
     const prefix = "Bearer ";
-    if (!std.ascii.startsWithIgnoreCase(header_value, prefix)) return null;
-    const token = std.mem.trim(u8, header_value[prefix.len..], " ");
+    if (!std.ascii.startsWithIgnoreCase(headerValue, prefix)) return null;
+    const token = std.mem.trim(u8, headerValue[prefix.len..], " ");
     if (token.len == 0) return null;
     return token;
 }
 
 /// Extracts a custom-scheme API key, e.g. "X-Key abc123" or any scheme name.
-pub fn parseApiKey(header_value: []const u8, scheme: []const u8) ?[]const u8 {
+pub fn parseApiKey(headerValue: []const u8, scheme: []const u8) ?[]const u8 {
     if (scheme.len == 0) return null;
-    if (!std.ascii.startsWithIgnoreCase(header_value, scheme)) return null;
-    var rest = header_value[scheme.len..];
+    if (!std.ascii.startsWithIgnoreCase(headerValue, scheme)) return null;
+    var rest = headerValue[scheme.len..];
     if (rest.len == 0 or rest[0] != ' ') return null; // require separator
     rest = std.mem.trim(u8, rest, " ");
     if (rest.len == 0) return null;

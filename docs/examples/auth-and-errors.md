@@ -20,7 +20,7 @@ const httpx = @import("httpx");
 // Protected data model
 const SecretData = struct {
     role: []const u8,
-    secret_code: []const u8,
+    secretCode: []const u8,
 };
 
 // 1. Custom 404 HTML handler
@@ -63,7 +63,7 @@ fn handleRestrictedBearer(ctx: *httpx.Context) anyerror!httpx.Response {
 
     return try ctx.renderJson(SecretData{
         .role = "admin",
-        .secret_code = "ALPHA-OMEGA-99",
+        .secretCode = "ALPHA-OMEGA-99",
     });
 }
 
@@ -79,7 +79,7 @@ fn handleRestrictedBasic(ctx: *httpx.Context) anyerror!httpx.Response {
 
     return try ctx.renderJson(SecretData{
         .role = "manager",
-        .secret_code = "BETA-KAPPA-42",
+        .secretCode = "BETA-KAPPA-42",
     });
 }
 

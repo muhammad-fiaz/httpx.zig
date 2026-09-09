@@ -10,7 +10,7 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .max_connections = 5,
+        .maxConnections = 5,
     });
     defer server.deinit();
 
@@ -48,9 +48,9 @@ pub fn main() !void {
 
     // 3. Inspect in-memory snapshot
     const snap = server.snapshot();
-    std.debug.print("Server snapshot: uptime={d}ms, requests_total={d}, error_rate={d:.2}%\n", .{
-        snap.uptime_ms,
-        snap.requests_total,
+    std.debug.print("Server snapshot: uptime={d}ms, requestsTotal={d}, errorRate={d:.2}%\n", .{
+        snap.uptimeMs,
+        snap.requestsTotal,
         snap.errorRate() * 100.0,
     });
 
@@ -60,9 +60,9 @@ pub fn main() !void {
 }
 
 fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 200, .body = "<h1>Metrics Example</h1>", .content_type = "text/html" };
+    return .{ .status = 200, .body = "<h1>Metrics Example</h1>", .contentType = "text/html" };
 }
 
 fn dataHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 200, .body = "{\"data\":\"some value\",\"count\":42}", .content_type = "application/json" };
+    return .{ .status = 200, .body = "{\"data\":\"some value\",\"count\":42}", .contentType = "application/json" };
 }

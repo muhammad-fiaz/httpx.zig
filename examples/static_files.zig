@@ -23,7 +23,7 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
-        .max_connections = 1,
+        .maxConnections = 1,
     });
     defer server.deinit();
 
@@ -31,7 +31,7 @@ pub fn main() !void {
     try httpx.static.files.register(&server.router, .{
         .root = "examples/static",
         .mount = "/static",
-        .index_file = "index.html",
+        .indexFile = "index.html",
     });
     defer httpx.static.files.unregister();
 

@@ -5,7 +5,7 @@ const Allocator = std.mem.Allocator;
 const dom = @import("dom.zig");
 const xml = @import("xml.zig");
 
-pub const FeedKind = enum { rss, atom, json_feed, unknown };
+pub const FeedKind = enum { rss, atom, jsonFeed, unknown };
 
 pub const FeedEntry = struct {
     title: []const u8 = "",
@@ -32,8 +32,8 @@ pub const Feed = struct {
     }
 };
 
-pub fn parse(allocator: Allocator, src: []const u8, content_type: ?[]const u8) !Feed {
-    const is_json = if (content_type) |ct| std.mem.indexOf(u8, ct, "json") != null else std.mem.startsWith(u8, std.mem.trim(u8, src, " \t\r\n"), "{");
+pub fn parse(allocator: Allocator, src: []const u8, contentType: ?[]const u8) !Feed {
+    const is_json = if (contentType) |ct| std.mem.indexOf(u8, ct, "json") != null else std.mem.startsWith(u8, std.mem.trim(u8, src, " \t\r\n"), "{");
     if (is_json) {
         return parseJsonFeed(allocator, src);
     }
@@ -160,19 +160,19 @@ fn parseJsonFeed(allocator: Allocator, src: []const u8) !Feed {
     _ = src;
     return Feed{
         .allocator = allocator,
-        .kind = .json_feed,
+        .kind = .jsonFeed,
         .title = "JSON Feed",
     };
 }
 
 fn getText(tree: *const dom.Tree, root: u32) []const u8 {
-    var c = tree.get(root).first_child;
+    var c = tree.get(root).firstChild;
     while (c != dom.NO_NODE) {
         const node = tree.get(c);
         if (node.kind == .text or node.kind == .cdata) {
             return std.mem.trim(u8, node.data, " \t\r\n");
         }
-        c = node.next_sibling;
+        c = node.nextSibling;
     }
     return "";
 }

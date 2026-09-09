@@ -1,38 +1,31 @@
 # Server-Sent Events (SSE) Example
 
-Demonstrates SSE event formatting and streaming from server to client. Uses `httpx.sse.Event` for W3C-compliant SSE wire format and `Context.sse()` for server-side SSE responses.
-
-## Demo Program
+SSE payloads with `httpx.sse.EventWriter`, parsed back with
+`httpx.sse.EventParser`. See `examples/sse_server.zig`.
 
 ```zig
-// Format an SSE event (W3C wire format)
-const event = httpx.sse.Event{
-    .event = "message",
-    .id = "1",
-    .data = "Hello, World!",
-};
-const formatted = try event.format(allocator);
-
-// Server handler returning SSE response
 fn sseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    const events = [_]httpx.sse.Event{
-        .{ .event = "message", .id = "1", .data = "Hello, SSE!" },
-        .{ .event = "update", .id = "2", .data = "Second event" },
+    var out = std.ArrayList(u8).empty;
+    var writer = httpx.sse.EventWriter.init(ctx.allocator);
+    try writer.writeEvent(&out, &[_][]const u8{"Hello, SSE!"}, "message", 1, null);
+    return .{
+        .status = 200,
+        .body = out.items,
+        .contentType = "text/event-stream; charset=utf-8",
     };
-    return ctx.sse(&events);
 }
 ```
 
+Parsed events carry `eventType`, `data`, `id`, and `retryMs`.
+
 ## Run
 
-```
-zig build run-all-sse_example
+```bash
+zig build run-sse-server
 ```
 
 ## Checklist
 
-- [x] SSE events are formatted in W3C wire format (`event:`, `id:`, `data:`)
-- [x] Multi-line data is split correctly
-- [x] Retry events include `retry:` field
-- [x] Server returns proper `Content-Type: text/event-stream`
+- [x] SSE events use W3C wire format (`event:`, `id:`, `data:`)
+- [x] Server returns `Content-Type: text/event-stream`
 - [x] Client receives all events in order

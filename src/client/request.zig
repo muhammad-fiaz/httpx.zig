@@ -261,7 +261,7 @@ pub fn headersFromStruct(allocator: Allocator, value: anytype) ![]Header {
             .int, .comptime_int => std.fmt.bufPrint(&buf, "{d}", .{v}) catch try std.fmt.allocPrint(allocator, "{d}", .{v}),
             .float, .comptime_float => std.fmt.bufPrint(&buf, "{d}", .{v}) catch try std.fmt.allocPrint(allocator, "{d}", .{v}),
             .bool => if (v) "true" else "false",
-            .pointer => |ptr| if (ptr.size == .slice and ptr.child == u8) v else try std.fmt.allocPrint(allocator, "{any}", .{v}),
+            .pointer => |ptr| if (ptr.size == .slice and ptr.child == u8) v else if (ptr.size == .one and @typeInfo(ptr.child) == .array and @typeInfo(ptr.child).array.child == u8) v[0..] else try std.fmt.allocPrint(allocator, "{any}", .{v}),
             else => try std.fmt.allocPrint(allocator, "{any}", .{v}),
         };
         const owned_val = if (val_str.ptr == buf[0..].ptr) try allocator.dupe(u8, val_str) else val_str;
@@ -366,32 +366,32 @@ fn buildTarget(a: Allocator, req_path: []const u8, query: []const Header) ![]u8 
     return out.toOwnedSlice(a);
 }
 
-fn headerLines(a: Allocator, hdrs: []const Header, content_type: ?[]const u8) ![][]const u8 {
-    return headerLinesWithAuth(a, hdrs, content_type, null, null, null);
+fn headerLines(a: Allocator, hdrs: []const Header, contentType: ?[]const u8) ![][]const u8 {
+    return headerLinesWithAuth(a, hdrs, contentType, null, null, null);
 }
 
-fn headerLinesWithAuth(a: Allocator, hdrs: []const Header, content_type: ?[]const u8, cookie: ?[]const u8, basic_auth: ?[]const u8, bearer_auth: ?[]const u8) ![][]const u8 {
+fn headerLinesWithAuth(a: Allocator, hdrs: []const Header, contentType: ?[]const u8, cookie: ?[]const u8, basic_auth: ?[]const u8, bearer_auth: ?[]const u8) ![][]const u8 {
     var lines: std.ArrayList([]const u8) = .empty;
     errdefer lines.deinit(a);
     var has_accept_encoding = false;
     var has_authorization = false;
     var has_cookie = false;
     var has_user_agent = false;
-    var has_content_type = false;
+    var hasContentType = false;
     for (hdrs) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) has_accept_encoding = true;
         if (std.ascii.eqlIgnoreCase(h.name, "authorization")) has_authorization = true;
         if (std.ascii.eqlIgnoreCase(h.name, "cookie")) has_cookie = true;
         if (std.ascii.eqlIgnoreCase(h.name, "user-agent")) has_user_agent = true;
-        if (std.ascii.eqlIgnoreCase(h.name, "content-type")) has_content_type = true;
+        if (std.ascii.eqlIgnoreCase(h.name, "content-type")) hasContentType = true;
         const l = try std.fmt.allocPrint(a, "{s}: {s}", .{ h.name, h.value });
         try lines.append(a, l);
     }
     if (!has_user_agent) {
-        const l = try std.fmt.allocPrint(a, "User-Agent: {s}", .{versionInfo.user_agent});
+        const l = try std.fmt.allocPrint(a, "User-Agent: {s}", .{versionInfo.userAgent});
         try lines.append(a, l);
     }
-    if (content_type) |ct| if (!has_content_type) {
+    if (contentType) |ct| if (!hasContentType) {
         const l = try std.fmt.allocPrint(a, "Content-Type: {s}", .{ct});
         try lines.append(a, l);
     };
@@ -429,10 +429,10 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 
     while (true) {
         const u = uriMod.parse(current_url) catch return Error.InvalidUrl;
-        const is_tls = std.mem.eql(u8, u.scheme, "https");
-        if (!is_tls and !std.mem.eql(u8, u.scheme, "http")) return Error.InvalidUrl;
+        const isTls = std.mem.eql(u8, u.scheme, "https");
+        if (!isTls and !std.mem.eql(u8, u.scheme, "http")) return Error.InvalidUrl;
         // Auto-enable TLS for HTTPS with safe default verification (.caBundle).
-        const tls_opts = if (is_tls) req.tls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
+        const tls_opts = if (isTls) req.tls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
 
         var port = u.effectivePort();
         if (port == 0) return Error.InvalidUrl;
@@ -475,7 +475,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             target,
             body_out,
             .{
-                .minor_version = if (req.httpVersion == .http10) 0 else 1,
+                .minorVersion = if (req.httpVersion == .http10) 0 else 1,
                 .host = authority_str,
                 .headers = hdr_pairs,
                 .connection = if (req.httpVersion == .http10) "close" else "",
@@ -519,7 +519,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                                 target_host = addrs[0].formatBuf(&local_resolved_buf);
                             }
                         }
-                        if (is_tls) {
+                        if (isTls) {
                             break :blk socks5.connectStream(
                                 io,
                                 p_info.host,
@@ -542,7 +542,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                         }
                     },
                     .httpConnect => {
-                        var s = if (is_tls) blk_s: {
+                        var s = if (isTls) blk_s: {
                             var probe = addressMod.Address{ .family = .ip4, .port = 0 };
                             if (probe.parseIp(p_info.host)) |parsed| {
                                 var addr = parsed;
@@ -587,7 +587,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             }
 
             // Keep-alive reuse first (plain HTTP only, no proxy).
-            if (!is_tls and req.proxy == null) {
+            if (!isTls and req.proxy == null) {
                 if (req.pool) |p| {
                     if (p.acquire(host_copy[0..hl], port)) |s| break :blk s;
                 }
@@ -601,7 +601,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 // use the direct winsock path (avoids netConnectIpWindows
                 // STATUS_CONNECTION_REFUSED → unexpectedStatus() stderr noise
                 // that corrupts the --listen=- test runner protocol).
-                if (is_tls) {
+                if (isTls) {
                     break :blk tcp.connectAddressStream(io, &da) catch return Error.ConnectFailed;
                 } else {
                     break :blk tcp.connectAddress(io, &da) catch return Error.ConnectFailed;
@@ -643,7 +643,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 }
             }
             for (resolved.?) |*raddr| {
-                if (is_tls) {
+                if (isTls) {
                     if (tcp.connectAddressStream(io, raddr)) |s| break :blk s else |_| {}
                 } else {
                     if (tcp.connectAddress(io, raddr)) |s| break :blk s else |_| {}
@@ -666,14 +666,14 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             tcp_sock.close();
             return Error.Http3NotImplemented;
         }
-        if (is_tls and resolved_ver == .http2) {
+        if (isTls and resolved_ver == .http2) {
             // std.crypto.tls has no ALPN hook; h2-over-TLS cannot be
             // negotiated yet. Fail with a typed error, never silently
             // downgrade.
             tcp_sock.close();
             return Error.AlpnUnsupported;
         }
-        if (!is_tls and resolved_ver == .http2) {
+        if (!isTls and resolved_ver == .http2) {
             // RFC 7540 Section 3.5 prior knowledge over cleartext TCP.
             var hc = http2Transport.Client.connect(a, tcp_sock) catch {
                 tcp_sock.close();
@@ -730,7 +730,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             }
         }
 
-        if (is_tls) {
+        if (isTls) {
             const opts = tls_opts.?;
             tls_conn = tlsTransport.Connection.init(a, .{
                 .socketHandle = tcp_sock.netSocketHandle(),
@@ -758,7 +758,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 
         transport.writeAll(raw) catch return Error.WriteFailed;
 
-        const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allow_lf_line_endings = req.allowLfLineEndings });
+        const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings });
         var resp = full.resp;
 
         if (req.followRedirects and isRedirect(resp.status)) {
@@ -782,7 +782,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             continue;
         }
 
-        return finishPlain(req.pool, is_tls, req.proxy != null, host_copy[0..hl], port, full, &pooled_out, transport, resp);
+        return finishPlain(req.pool, isTls, req.proxy != null, host_copy[0..hl], port, full, &pooled_out, transport, resp);
     }
 }
 
@@ -790,7 +790,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 /// framed body and no "Connection: close", parks the socket in the pool.
 fn finishPlain(
     pool: ?*Pool,
-    is_tls: bool,
+    isTls: bool,
     has_proxy: bool,
     host: []const u8,
     port: u16,
@@ -800,7 +800,7 @@ fn finishPlain(
     resp: Response,
 ) Response {
     if (pool) |p| {
-        if (!is_tls and !has_proxy and full.reusable and !respSaysClose(&resp)) {
+        if (!isTls and !has_proxy and full.reusable and !respSaysClose(&resp)) {
             p.release(host, port, transport.plain);
             pooled_out.* = true;
         }
@@ -877,17 +877,17 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, is_head: bool, opts:
     defer acc.deinit(a);
     var buf: [8192]u8 = undefined;
 
-    var head_end: usize = 0;
+    var headEnd: usize = 0;
     while (true) {
         if (std.mem.indexOf(u8, acc.items, "\r\n\r\n")) |idx| {
-            head_end = idx + 4;
+            headEnd = idx + 4;
             break;
         }
-        if (opts.allow_lf_line_endings) {
+        if (opts.allowLfLineEndings) {
             if (std.mem.indexOf(u8, acc.items, "\n\n")) |idx| {
                 // Ensure not already counted as \r\n\r\n (avoid double)
                 if (idx == 0 or acc.items[idx - 1] != '\r') {
-                    head_end = idx + 2;
+                    headEnd = idx + 2;
                     break;
                 }
             }
@@ -898,16 +898,16 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, is_head: bool, opts:
         if (acc.items.len > 128 * 1024) return Error.MalformedResponse;
     }
 
-    const opts_parser: parserMod.Options = .{ .allow_lf_line_endings = opts.allow_lf_line_endings };
+    const opts_parser: parserMod.Options = .{ .allowLfLineEndings = opts.allowLfLineEndings };
     const resp_head = parserMod.parseResponseHeadWithOptions(acc.items, opts_parser) catch return Error.MalformedResponse;
 
     var fields: [parserMod.DEFAULT_MAX_HEADERS]parserMod.Field = undefined;
-    const blk = parserMod.parseHeaderBlockWithOptions(acc.items[0..head_end], resp_head.head_end, fields[0..], opts_parser) catch
+    const blk = parserMod.parseHeaderBlockWithOptions(acc.items[0..headEnd], resp_head.headEnd, fields[0..], opts_parser) catch
         return Error.MalformedResponse;
 
     const framing = parserMod.framingFull(fields[0..blk.count], .{
         .is_response = true,
-        .status = resp_head.status_code,
+        .status = resp_head.statusCode,
         .method_len = if (is_head) 4 else 0,
     }) catch return Error.MalformedResponse;
 
@@ -930,12 +930,12 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, is_head: bool, opts:
         header_count += 1;
     }
 
-    if (is_head or resp_head.status_code < 200 or resp_head.status_code == 204 or resp_head.status_code == 304 or
+    if (is_head or resp_head.statusCode < 200 or resp_head.statusCode == 204 or resp_head.statusCode == 304 or
         (framing.framing == .content_length and framing.length == 0))
     {
         return .{ .resp = .{
             .allocator = a,
-            .status = resp_head.status_code,
+            .status = resp_head.statusCode,
             .headers = headers,
             .body = try a.alloc(u8, 0),
         }, .reusable = true };
@@ -952,8 +952,8 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, is_head: bool, opts:
 
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(a);
-    if (acc.items.len - head_end > maxResponseBodySize) return Error.ResponseTooLarge;
-    try body.appendSlice(a, acc.items[head_end..]);
+    if (acc.items.len - headEnd > maxResponseBodySize) return Error.ResponseTooLarge;
+    try body.appendSlice(a, acc.items[headEnd..]);
 
     if (chunked) {
         while (std.mem.indexOf(u8, body.items, "\r\n0\r\n\r\n") == null and
@@ -967,8 +967,8 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, is_head: bool, opts:
         const decoded = decodeChunked(a, body.items) catch return Error.MalformedResponse;
         return .{ .resp = .{
             .allocator = a,
-            .status = resp_head.status_code,
-            .version = if (resp_head.minor_version == 0) .http10 else .http11,
+            .status = resp_head.statusCode,
+            .version = if (resp_head.minorVersion == 0) .http10 else .http11,
             .headers = headers,
             .body = try decodeResponseBody(a, headers, decoded),
         }, .reusable = true };
@@ -996,8 +996,8 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, is_head: bool, opts:
     const owned_body = try body.toOwnedSlice(a);
     return .{ .resp = .{
         .allocator = a,
-        .status = resp_head.status_code,
-        .version = if (resp_head.minor_version == 0) .http10 else .http11,
+        .status = resp_head.statusCode,
+        .version = if (resp_head.minorVersion == 0) .http10 else .http11,
         .headers = headers,
         .body = try decodeResponseBody(a, headers, owned_body),
     }, .reusable = complete };
@@ -1032,10 +1032,11 @@ fn stripAuth(hdrs: []Header) void {
     }
 }
 
-/// Resolves Location against the previous URL (RFC 3986 Section 5).
-fn resolveLocation(a: Allocator, base_url: []const u8, loc: []const u8) ![]u8 {
+/// Resolves Location against the previous URL (RFC 3986 Section 5),
+/// including dot-segment removal (RFC 3986 Section 5.2.4).
+fn resolveLocation(a: Allocator, baseUrl: []const u8, loc: []const u8) ![]u8 {
     if (std.mem.indexOf(u8, loc, "://") != null) return a.dupe(u8, loc);
-    const base = try uriMod.parse(base_url);
+    const base = try uriMod.parse(baseUrl);
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
     try out.appendSlice(a, base.scheme);
@@ -1043,16 +1044,74 @@ fn resolveLocation(a: Allocator, base_url: []const u8, loc: []const u8) ![]u8 {
     var ab: [512]u8 = undefined;
     try out.appendSlice(a, base.authority(&ab));
 
-    if (loc.len > 0 and loc[0] == '/') {
-        try out.appendSlice(a, loc);
+    // Split off fragment and query; they survive dot-segment removal untouched.
+    var path_end = loc.len;
+    var suffix: []const u8 = "";
+    if (std.mem.indexOfScalar(u8, loc, '#')) |hi| {
+        path_end = hi;
+        suffix = loc[hi..];
+    }
+    var query: []const u8 = "";
+    if (std.mem.indexOfScalar(u8, loc[0..path_end], '?')) |qi| {
+        query = loc[qi..path_end];
+        path_end = qi;
+    }
+    const loc_path = loc[0..path_end];
+
+    var merged: std.ArrayList(u8) = .empty;
+    defer merged.deinit(a);
+    if (loc_path.len > 0 and loc_path[0] == '/') {
+        try merged.appendSlice(a, loc_path);
     } else {
         const base_path = base.path;
         const last_slash = std.mem.lastIndexOfScalar(u8, base_path, '/');
         const dir = if (last_slash) |idx| base_path[0..idx] else "";
-        try out.appendSlice(a, dir);
-        if (dir.len == 0 or dir[dir.len - 1] != '/') try out.append(a, '/');
-        try out.appendSlice(a, loc);
+        try merged.appendSlice(a, dir);
+        if (dir.len == 0 or dir[dir.len - 1] != '/') try merged.append(a, '/');
+        try merged.appendSlice(a, loc_path);
     }
+    const clean = try removeDotSegments(a, merged.items);
+    defer a.free(clean);
+    try out.appendSlice(a, clean);
+    try out.appendSlice(a, query);
+    try out.appendSlice(a, suffix);
+    return out.toOwnedSlice(a);
+}
+
+/// RFC 3986 Section 5.2.4: resolves "." and ".." segments. Input must be
+/// the path component only (no query/fragment). Always returns an
+/// absolute-path-style result for rooted inputs.
+fn removeDotSegments(a: Allocator, path: []const u8) ![]u8 {
+    const rooted = path.len > 0 and path[0] == '/';
+    var stack: std.ArrayList([]const u8) = .empty;
+    defer stack.deinit(a);
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (stack.items.len > 0 and !std.mem.eql(u8, stack.items[stack.items.len - 1], "..")) {
+                _ = stack.pop();
+            } else if (!rooted) {
+                try stack.append(a, seg);
+            }
+            continue;
+        }
+        try stack.append(a, seg);
+    }
+    // A trailing "/.", "/..", or "/" forces a trailing slash.
+    var trailing = path.len > 0 and path[path.len - 1] == '/';
+    if (!trailing) {
+        if (std.mem.endsWith(u8, path, "/.") or std.mem.endsWith(u8, path, "/..")) trailing = true;
+    }
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(a);
+    if (rooted) try out.append(a, '/');
+    for (stack.items, 0..) |seg, i| {
+        if (i > 0) try out.append(a, '/');
+        try out.appendSlice(a, seg);
+    }
+    if (trailing and (out.items.len > 0 and out.items[out.items.len - 1] != '/')) try out.append(a, '/');
+    if (out.items.len == 0 and rooted) try out.append(a, '/');
     return out.toOwnedSlice(a);
 }
 
@@ -1178,7 +1237,7 @@ fn readFilePosix(a: Allocator, path: []const u8) ![]u8 {
     return buf;
 }
 
-/// Uploads `file_path` as multipart/form-data via POST to `url`.
+/// Uploads `filePath` as multipart/form-data via POST to `url`.
 pub fn postMultipartFile(
     a: Allocator,
     io: std.Io,
@@ -1211,7 +1270,7 @@ pub fn postMultipartFile(
     var body_buf: std.Io.Writer.Allocating = .init(a);
     defer body_buf.deinit();
     mpEncoder.encode(&body_buf.writer, boundary, &.{
-        .{ .name = fieldName, .filename = fname, .content_type = "application/octet-stream", .data = fileData },
+        .{ .name = fieldName, .filename = fname, .contentType = "application/octet-stream", .data = fileData },
     }) catch return Error.OutOfMemory;
 
     return request(a, io, .{
@@ -1228,7 +1287,7 @@ const t_tcp = tcp;
 
 fn startTestServer(
     a: Allocator,
-    keep_alive: bool,
+    keepAlive: bool,
     comptime route: []const u8,
     comptime body: []const u8,
 ) !struct { srv: @import("../server/lifecycle.zig").Server, ctx: t_tcp.IoContext } {
@@ -1239,13 +1298,13 @@ fn startTestServer(
     var srv = try lifecycle.Server.init(a, ctx.io, .{
         .port = 0,
         .enableDocs = false,
-        .max_connections = 1,
-        .keep_alive = keep_alive,
+        .maxConnections = 1,
+        .keepAlive = keepAlive,
     });
     errdefer srv.deinit();
     try srv.router.add(.GET, route, struct {
         fn h(_: *routerNs.Context) anyerror!routerNs.Response {
-            return .{ .body = body, .content_type = "text/plain" };
+            return .{ .body = body, .contentType = "text/plain" };
         }
     }.h);
     return .{ .srv = srv, .ctx = ctx };
@@ -1256,7 +1315,7 @@ test "keep-alive: second request reuses pooled connection" {
     var S = try startTestServer(a, true, "/ka", "hello-keepalive");
     var srv = &S.srv;
     // Single connection carries BOTH keep-alive requests; run() then exits
-    // its accept loop via max_connections => join needs no listener cancel.
+    // its accept loop via maxConnections => join needs no listener cancel.
     defer srv.deinit();
     defer S.ctx.deinit();
 
@@ -1292,7 +1351,7 @@ test "keep-alive: second request reuses pooled connection" {
 
     // Teardown order matters:
     //   1. purge pool -> closes pooled socket -> server reader sees EOF
-    //   2. join       -> server thread exits (served==max_connections)
+    //   2. join       -> server thread exits (served==maxConnections)
     //   3. shutdown   -> flip flags (listener already idle; no cancel race)
     //   4. client.deinit -> destroys pool/dns structures with zero in-flight IO
     client.pool.purge();
@@ -1307,12 +1366,12 @@ test "connection close response is not pooled" {
     const routerNs = @import("../web/router/router.zig");
     var ctx = try t_tcp.IoContext.init(a);
     defer ctx.deinit();
-    // keep_alive=false server => always responds Connection: close
-    var srv = try lifecycle.Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .max_connections = 2 });
+    // keepAlive=false server => always responds Connection: close
+    var srv = try lifecycle.Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .maxConnections = 2 });
     defer srv.deinit();
     try srv.router.add(.GET, "/x", struct {
         fn h(_: *routerNs.Context) anyerror!routerNs.Response {
-            return .{ .body = "one-shot", .content_type = "text/plain" };
+            return .{ .body = "one-shot", .contentType = "text/plain" };
         }
     }.h);
 
@@ -1378,10 +1437,27 @@ test "connection-close body without Content-Length is read to EOF" {
     try std.testing.expectEqualStrings("close-delimited-body", resp.body);
 }
 
+test "resolveLocation handles relative paths and dot segments" {
+    const a = std.testing.allocator;
+    const cases = [_]struct { base: []const u8, loc: []const u8, want: []const u8 }{
+        .{ .base = "http://h/redirect/2", .loc = "1", .want = "http://h/redirect/1" },
+        .{ .base = "http://h/redirect/1", .loc = "../anything", .want = "http://h/anything" },
+        .{ .base = "http://h/a/b/c", .loc = "/x", .want = "http://h/x" },
+        .{ .base = "http://h/a/b/", .loc = "../../z?q=1#frag", .want = "http://h/z?q=1#frag" },
+        .{ .base = "http://h/a/./b", .loc = "./c", .want = "http://h/a/c" },
+        .{ .base = "http://h/old", .loc = "https://other.new/path", .want = "https://other.new/path" },
+    };
+    for (cases) |c| {
+        const got = try resolveLocation(a, c.base, c.loc);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(c.want, got);
+    }
+}
+
 test "https auto-enables tls with secure caBundle verification when no explicit options provided" {
-    const is_tls = true;
+    const isTls = true;
     const req_tls: ?TlsOptions = null;
-    const tls_opts: ?TlsOptions = if (is_tls) req_tls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
+    const tls_opts: ?TlsOptions = if (isTls) req_tls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
     try std.testing.expectEqual(.caBundle, tls_opts.?.verify);
 }
 

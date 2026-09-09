@@ -15,7 +15,7 @@ const Allocator = std.mem.Allocator;
 const ast = @import("ast.zig");
 
 pub const ParseLimits = struct {
-    max_depth: usize = 64,
+    maxDepth: usize = 64,
     max_tokens: usize = 10000,
     max_length: usize = 1024 * 1024,
 };
@@ -55,7 +55,7 @@ pub const Parser = struct {
     pos: usize = 0,
     current_token: ast.Token = .{ .kind = .eof, .text = "", .pos = 0 },
     tokens_read: usize = 0,
-    current_depth: usize = 0,
+    currentDepth: usize = 0,
     limits: ParseLimits,
 
     pub fn init(allocator: Allocator, source: []const u8, limits: ParseLimits) ParseError!Parser {
@@ -292,7 +292,7 @@ pub const Parser = struct {
         if (self.current_token.kind != .name) {
             return error.ExpectedTypeCondition;
         }
-        const type_condition = self.current_token.text;
+        const typeCondition = self.current_token.text;
         try self.advance();
 
         var directives: []const ast.Directive = &.{};
@@ -303,7 +303,7 @@ pub const Parser = struct {
         const sel_set = try self.parseSelectionSet();
         return ast.FragmentDefinition{
             .name = name,
-            .type_condition = type_condition,
+            .typeCondition = typeCondition,
             .directives = directives,
             .selection_set = sel_set,
         };
@@ -322,18 +322,18 @@ pub const Parser = struct {
             if (self.current_token.kind != .punctuator_colon) return error.ExpectedColon;
             try self.advance();
 
-            var is_list = false;
-            var type_name: []const u8 = "";
+            var isList = false;
+            var typeName: []const u8 = "";
             if (self.current_token.kind == .punctuator_bracket_l) {
-                is_list = true;
+                isList = true;
                 try self.advance();
                 if (self.current_token.kind != .name) return error.ExpectedTypeName;
-                type_name = self.current_token.text;
+                typeName = self.current_token.text;
                 try self.advance();
                 if (self.current_token.kind != .punctuator_bracket_r) return error.ExpectedClosingBracket;
                 try self.advance();
             } else if (self.current_token.kind == .name) {
-                type_name = self.current_token.text;
+                typeName = self.current_token.text;
                 try self.advance();
             } else {
                 return error.ExpectedTypeName;
@@ -353,9 +353,9 @@ pub const Parser = struct {
 
             try list.append(self.allocator, .{
                 .name = var_name,
-                .type_name = type_name,
+                .typeName = typeName,
                 .is_non_null = is_non_null,
-                .is_list = is_list,
+                .isList = isList,
                 .default_value = default_val,
             });
         }
@@ -399,9 +399,9 @@ pub const Parser = struct {
 
     fn parseSelectionSet(self: *Parser) ParseError![]const ast.Selection {
         if (self.current_token.kind != .punctuator_brace_l) return error.ExpectedBraceOpen;
-        self.current_depth += 1;
-        if (self.current_depth > self.limits.max_depth) return error.MaxQueryDepthExceeded;
-        defer self.current_depth -= 1;
+        self.currentDepth += 1;
+        if (self.currentDepth > self.limits.maxDepth) return error.MaxQueryDepthExceeded;
+        defer self.currentDepth -= 1;
 
         try self.advance(); // consume '{'
         var list = std.ArrayList(ast.Selection).empty;
@@ -424,11 +424,11 @@ pub const Parser = struct {
                 if (self.current_token.kind == .punctuator_at) dirs = try self.parseDirectives();
                 return ast.Selection{ .fragment_spread = .{ .name = frag_name, .directives = dirs } };
             } else {
-                var type_cond: ?[]const u8 = null;
+                var typeCondition: ?[]const u8 = null;
                 if (self.current_token.kind == .name and std.mem.eql(u8, self.current_token.text, "on")) {
                     try self.advance();
                     if (self.current_token.kind != .name) return error.ExpectedTypeCondition;
-                    type_cond = self.current_token.text;
+                    typeCondition = self.current_token.text;
                     try self.advance();
                 }
                 var dirs: []const ast.Directive = &.{};
@@ -436,7 +436,7 @@ pub const Parser = struct {
                 const sel_set = try self.parseSelectionSet();
                 return ast.Selection{
                     .inline_fragment = .{
-                        .type_condition = type_cond,
+                        .typeCondition = typeCondition,
                         .directives = dirs,
                         .selection_set = sel_set,
                     },
@@ -517,9 +517,9 @@ pub const Parser = struct {
                 } else if (std.mem.eql(u8, txt, "false")) {
                     return ast.Value{ .boolean = false };
                 } else if (std.mem.eql(u8, txt, "null")) {
-                    return ast.Value{ .null_val = {} };
+                    return ast.Value{ .nullVal = {} };
                 } else {
-                    return ast.Value{ .enum_val = txt };
+                    return ast.Value{ .enumVal = txt };
                 }
             },
             .punctuator_bracket_l => {

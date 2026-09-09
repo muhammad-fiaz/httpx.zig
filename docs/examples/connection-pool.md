@@ -15,15 +15,14 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     var client = httpx.Client.init(allocator, io, .{
-        .pool_max_connections = 32,
-        .pool_max_per_host = 8,
+        .pool = .{ .maxConnections = 32, .maxPerHost = 8 },
     });
     defer client.deinit();
 
     inline for (0..5) |_| {
         var res = try client.get("https://httpbun.com/get", .{});
         defer res.deinit();
-        std.debug.print("status={d}, len={?d}\n", .{ res.status.code, res.contentLength() });
+        std.debug.print("status={d}, len={d}\n", .{ res.status, res.body.len });
     }
 }
 ```

@@ -1,40 +1,33 @@
 # Cookies Demo
 
-Work with the built-in client cookie jar for session-style flows.
-
-## Demo Program
+Cookie flows with per-request headers and the standalone `httpx.CookieJar`.
+See `examples/cookie_server.zig`.
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
+var jar = httpx.CookieJar.init(allocator);
+defer jar.deinit();
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    var client = httpx.Client.init(allocator, io, .{});
-    defer client.deinit();
-
-    try client.setCookie("session", "abc123");
-    std.debug.print("has session: {}\n", .{client.hasCookie("session")});
-
-    const value = client.getCookie("session") orelse "";
-    std.debug.print("session={s}\n", .{value});
-
-    client.removeCookie("session");
-    std.debug.print("cookie count={d}\n", .{client.cookieCount()});
+// Store a Set-Cookie value received from a login response.
+if (loginRes.header("Set-Cookie")) |sc| {
+    jar.setFromHeader(sc, "example.com");
 }
+
+// Render the Cookie header for the next request (secure=true over TLS).
+var cookieBuf: [512]u8 = undefined;
+const cookieHeader = jar.cookieHeader("example.com", "/profile", true, &cookieBuf);
+var profileRes = try client.get("https://example.com/profile", .{ .cookie = cookieHeader });
+defer profileRes.deinit();
+
+// Server side: read cookies with ctx.cookie(name).
 ```
 
 ## Run
 
 ```bash
-zig build run-all-cookies_demo
+zig build run-cookie-server
 ```
 
 ## What to Verify
 
-- Cookie values are set/read/removed as expected.
-- Cookie count reflects jar state changes.
+- `GET /get` returns 200 with the expected JSON body.
+- Jar round-trips survive domain/path/expiry checks.

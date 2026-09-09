@@ -81,7 +81,7 @@ try server.get("/h2", struct {
     }
 }.handler);
 
-try server.listen();
+server.run();
 ```
 
 ## HPACK Header Compression

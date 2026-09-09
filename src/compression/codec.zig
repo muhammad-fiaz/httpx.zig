@@ -70,11 +70,11 @@ fn parseQuality(text: []const u8) f32 {
 
 /// Parses an Accept-Encoding header value into weighted entries.
 /// Handles q-values and "*" wildcard.
-pub fn parseAcceptEncoding(allocator: Allocator, header_value: []const u8) ![]ParsedEncoding {
+pub fn parseAcceptEncoding(allocator: Allocator, headerValue: []const u8) ![]ParsedEncoding {
     var results = std.ArrayList(ParsedEncoding).empty;
     errdefer results.deinit(allocator);
 
-    var it = std.mem.splitScalar(u8, header_value, ',');
+    var it = std.mem.splitScalar(u8, headerValue, ',');
     while (it.next()) |raw| {
         const part = std.mem.trim(u8, raw, " \t");
         if (part.len == 0) continue;
@@ -108,12 +108,12 @@ pub fn parseAcceptEncoding(allocator: Allocator, header_value: []const u8) ![]Pa
 }
 
 /// Picks the best encoding we support from the client's Accept-Encoding.
-pub fn negotiate(header_value: []const u8) Encoding {
+pub fn negotiate(headerValue: []const u8) Encoding {
     var explicit: [5]?f32 = .{ null, null, null, null, null };
     var wildcard: ?f32 = null;
     var has_entry = false;
 
-    var it = std.mem.splitScalar(u8, header_value, ',');
+    var it = std.mem.splitScalar(u8, headerValue, ',');
     while (it.next()) |raw| {
         const part = std.mem.trim(u8, raw, " \t");
         if (part.len == 0) continue;
@@ -217,24 +217,24 @@ pub fn decompress(allocator: Allocator, encoding: Encoding, data: []const u8) ![
     return decompressLimited(allocator, encoding, data, MAX_DECOMPRESSED_SIZE);
 }
 
-/// Decompresses content while rejecting expansion beyond `max_size`.
+/// Decompresses content while rejecting expansion beyond `maxSize`.
 /// This is intended for response bodies and other untrusted compressed input.
-pub fn decompressLimited(allocator: Allocator, encoding: Encoding, data: []const u8, max_size: usize) ![]u8 {
-    if (max_size == 0) return Error.DecompressedTooLarge;
+pub fn decompressLimited(allocator: Allocator, encoding: Encoding, data: []const u8, maxSize: usize) ![]u8 {
+    if (maxSize == 0) return Error.DecompressedTooLarge;
     return switch (encoding) {
-        .identity => if (data.len > max_size) Error.DecompressedTooLarge else allocator.dupe(u8, data),
+        .identity => if (data.len > maxSize) Error.DecompressedTooLarge else allocator.dupe(u8, data),
         .zstd => {
             const bound = zstd_mod.decompressBound(data) catch return Error.CorruptData;
-            if (bound > max_size) return Error.DecompressedTooLarge;
+            if (bound > maxSize) return Error.DecompressedTooLarge;
             return zstd_mod.decompress(allocator, data) catch Error.CorruptData;
         },
-        .br => brotliDecompressLimited(allocator, data, max_size),
-        .gzip, .deflate => flateDecompressLimited(allocator, encoding == .gzip, data, max_size),
+        .br => brotliDecompressLimited(allocator, data, maxSize),
+        .gzip, .deflate => flateDecompressLimited(allocator, encoding == .gzip, data, maxSize),
     };
 }
 
-fn brotliDecompressLimited(allocator: Allocator, data: []const u8, max_size: usize) ![]u8 {
-    var capacity: usize = @min(max_size, @max(@as(usize, 4096), data.len *| 4));
+fn brotliDecompressLimited(allocator: Allocator, data: []const u8, maxSize: usize) ![]u8 {
+    var capacity: usize = @min(maxSize, @max(@as(usize, 4096), data.len *| 4));
     while (true) {
         var decoder = brotli_mod.Decoder.init(allocator, .{});
         defer decoder.deinit();
@@ -245,7 +245,7 @@ fn brotliDecompressLimited(allocator: Allocator, data: []const u8, max_size: usi
         switch (decoder.decompressStream(&input, &available, &total)) {
             .success => {
                 const written: usize = @intCast(total);
-                if (written > max_size) {
+                if (written > maxSize) {
                     allocator.free(output);
                     return Error.DecompressedTooLarge;
                 }
@@ -257,8 +257,8 @@ fn brotliDecompressLimited(allocator: Allocator, data: []const u8, max_size: usi
             },
             .needs_more_output => {
                 allocator.free(output);
-                if (capacity == max_size) return Error.DecompressedTooLarge;
-                capacity = @min(max_size, capacity *| 2);
+                if (capacity == maxSize) return Error.DecompressedTooLarge;
+                capacity = @min(maxSize, capacity *| 2);
             },
             else => {
                 allocator.free(output);
@@ -268,7 +268,7 @@ fn brotliDecompressLimited(allocator: Allocator, data: []const u8, max_size: usi
     }
 }
 
-fn flateDecompressLimited(allocator: Allocator, is_gzip: bool, data: []const u8, max_size: usize) ![]u8 {
+fn flateDecompressLimited(allocator: Allocator, is_gzip: bool, data: []const u8, maxSize: usize) ![]u8 {
     var in_reader = std.Io.Reader.fixed(data);
     const window = try allocator.alloc(u8, flate.max_window_len);
     defer allocator.free(window);
@@ -279,7 +279,7 @@ fn flateDecompressLimited(allocator: Allocator, is_gzip: bool, data: []const u8,
     while (true) {
         const n = decomp.reader.readSliceShort(&buf) catch return Error.CorruptData;
         if (n == 0) break;
-        if (out.items.len + n > max_size) return Error.DecompressedTooLarge;
+        if (out.items.len + n > maxSize) return Error.DecompressedTooLarge;
         try out.appendSlice(allocator, buf[0..n]);
     }
     return out.toOwnedSlice(allocator);

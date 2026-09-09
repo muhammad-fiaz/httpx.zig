@@ -26,7 +26,7 @@ pub fn main() !void {
             .{ .name = "Accept", .value = "application/json" },
         },
         .json = .{ .id = 42, .name = "Antigravity" },
-        .timeout_ms = 5000,
+        .timeoutMs = 5000,
     });
     defer resp.deinit();
 }
@@ -34,21 +34,31 @@ pub fn main() !void {
 
 ## Request Options Fields
 
+Matches `httpx.RequestOptions` (`src/client/client.zig`). The client
+accepts these fields directly (plus duck-typed extras such as `multipart`
+handled via `anytype` opts).
+
 ```zig
 pub const RequestOptions = struct {
-    method: httpx.Method = .GET,
+    url: []const u8,
+    method: ?Method = null,
     headers: []const Header = &.{},
-    query: []const QueryParam = &.{},
-    body: []const u8 = "",
-    json: anytype = null,
-    form: anytype = null,
+    query: []const Header = &.{},
+    body: ?[]const u8 = null,
+    json: ?[]const u8 = null,
+    form: ?[]const u8 = null,
+    text: ?[]const u8 = null,
+    contentType: ?[]const u8 = null,
     cookie: ?[]const u8 = null,
-    basic_auth: ?BasicAuth = null,
-    bearer_auth: ?[]const u8 = null,
+    basicAuth: ?[]const u8 = null,
+    bearerAuth: ?[]const u8 = null,
     proxy: ?[]const u8 = null,
     tls: ?TlsOptions = null,
-    follow_redirects: bool = true,
-    max_redirects: u8 = 5,
+    timeoutMs: ?u64 = null,
+    maxResponseSize: ?usize = null,
+    followRedirects: ?bool = null,
+    maxRedirects: ?u8 = null,
+    allowLfLineEndings: bool = false,
     httpVersion: ?HttpVersion = null,
     http10: ?bool = null,
     http11: ?bool = null,
@@ -59,21 +69,26 @@ pub const RequestOptions = struct {
 
 | Field | Type | Description |
 |---|---|---|
-| `method` | `Method` | HTTP verb (.GET, .POST, .PUT, .DELETE, .PATCH, .HEAD, .OPTIONS) |
-| `headers` | `[]const Header` | Slice of request header key-value pairs |
-| `query` | `[]const QueryParam` | URL query parameters automatically encoded |
-| `body` | `[]const u8` | Raw payload bytes |
-| `json` | `anytype` | Zig value serialized to JSON with `application/json` Content-Type |
-| `form` | `anytype` | URL-encoded form data |
+| `url` | `[]const u8` | Request URL (required) |
+| `method` | `?Method` | Explicit method for generic `request`/`fetch` |
+| `headers` | `[]const Header` | Slice of request header name/value pairs |
+| `query` | `[]const Header` | URL query parameters automatically encoded |
+| `body` | `?[]const u8` | Raw payload bytes |
+| `json` | `?[]const u8` | JSON string body (sets Content-Type) |
+| `form` | `?[]const u8` | Pre-encoded `application/x-www-form-urlencoded` body |
+| `text` | `?[]const u8` | Plain-text body |
+| `contentType` | `?[]const u8` | Explicit Content-Type override |
 | `cookie` | `?[]const u8` | Value for `Cookie` header |
-| `basic_auth` | `?BasicAuth` | Username and password for Basic Authorization |
-| `bearer_auth` | `?[]const u8` | Token for Bearer Authorization |
-| `proxy` | `?[]const u8` | Proxy URI overriding client default |
+| `basicAuth` | `?[]const u8` | `"user:pass"` for Basic Authorization |
+| `bearerAuth` | `?[]const u8` | Token for Bearer Authorization |
+| `proxy` | `?[]const u8` | Proxy URL overriding client default |
 | `tls` | `?TlsOptions` | Custom TLS configuration for this request |
-| `timeout_ms` | `?u64` | Request deadline in milliseconds |
-| `follow_redirects` | `bool` | Whether to automatically follow 3xx redirects (default: true) |
-| `max_redirects` | `u8` | Maximum redirect hops before error (default: 5) |
-| `httpVersion` | `?HttpVersion` | Protocol version (.auto, .http10, .http11, .http2, .http3) |
+| `timeoutMs` | `?u64` | Request deadline in milliseconds |
+| `maxResponseSize` | `?usize` | Max response body size for this request |
+| `followRedirects` | `?bool` | Whether to automatically follow 3xx redirects |
+| `maxRedirects` | `?u8` | Maximum redirect hops before error |
+| `allowLfLineEndings` | `bool` | Accept bare LF line endings in the response |
+| `httpVersion` | `?HttpVersion` | Protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`) |
 | `http10` | `?bool` | Fast toggle to force HTTP/1.0 |
 | `http11` | `?bool` | Fast toggle to force HTTP/1.1 |
 | `http2` | `?bool` | Fast toggle to force HTTP/2 |

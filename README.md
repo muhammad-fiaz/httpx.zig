@@ -38,7 +38,7 @@
 >
 > **Custom HTTP/2, HTTP/3, TLS, Streaming, and Parsing implementation:** Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, TLS/ALPN, OpenAPI documentation UI, full HTML/XML DOM parsing, or built-in progress download engines.
 > httpx.zig implements these subsystems **entirely from scratch and natively in Zig**, including:
-> - **TLS 1.2 and 1.3** with full handshake support (RFC 5246 / RFC 8446) — key exchange: X25519; AEAD cipher suites: ChaCha20-Poly1305, AES-128-GCM, AES-256-GCM; ALPN negotiation (RFC 7301) for automatic HTTP/2 and HTTP/3 protocol selection with HTTP/1.1 fallback; X.509 certificate parsing and verification; custom record-layer encryption/decryption
+> - **TLS 1.2 and 1.3** with full handshake support (RFC 5246 / RFC 8446) — key exchange: X25519; AEAD cipher suites: ChaCha20-Poly1305, AES-128-GCM, AES-256-GCM; server-side ALPN negotiation (RFC 7301) for automatic HTTP/2 protocol selection with HTTP/1.1 fallback; X.509 certificate parsing and verification; custom record-layer encryption/decryption
 > - **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
 > - **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and connection pooling (RFC 7540)
 > - **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
@@ -56,7 +56,6 @@
 - For **ZON file format** support, check out **[zon.zig](https://github.com/muhammad-fiaz/zon.zig)**.
 - For **Spinners/loading/progress bar** support, check out **[loaders.zig](https://github.com/muhammad-fiaz/loaders.zig)**.
 - For **MCP** support, check out **[mcp.zig](https://github.com/muhammad-fiaz/mcp.zig)**.
-- For **Args parsing** support, check out **[args.zig](https://github.com/muhammad-fiaz/args.zig)**.
 - For **API framework** support, check out **[api.zig](https://github.com/muhammad-fiaz/api.zig)**.
 - For **Web framework** support, check out **[zix](https://github.com/muhammad-fiaz/zix)**.
 - For **archive/compression** support, check out **[archive.zig](https://github.com/muhammad-fiaz/archive.zig)**.
@@ -82,27 +81,27 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Protocol Support** | Full runtime support for **HTTP/1.0**, **HTTP/1.1**, **HTTP/2**, and **HTTP/3** in high-level client/server APIs, plus low-level protocol primitives. |
+| **Protocol Support** | Client: `auto` negotiates to HTTP/1.1 over TLS and supports explicit HTTP/1.0, HTTP/1.1, and cleartext HTTP/2; server: HTTP/1.x plus HTTP/2 over cleartext and TLS ALPN; HTTP/3 frame/QPACK/QUIC primitives with transport integration forthcoming. |
 | **Header Compression** | HPACK (RFC 7541) for HTTP/2; QPACK (RFC 9204) for HTTP/3 with static and dynamic table management. |
-| **HTTP/2 & HTTP/3 ALPN** | Automatic protocol negotiation during TLS handshake with graceful HTTP/1.1 fallback. |
+| **HTTP/2 & HTTP/3 ALPN** | Server-side ALPN negotiation during the TLS handshake with graceful HTTP/1.1 fallback; explicit client h2-over-TLS fails loudly until the std TLS layer gains an ALPN hook. |
 | **Stream Multiplexing** | HTTP/2 stream state machine with flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, and trailers. |
 | **Connection Pooling** | Automatic reuse of TCP keep-alive connections with parking caps and stale-connection eviction. |
 | **Unified DOM & Web Parsing** | Native parser for HTML5, XML, RSS/Atom/JSON feeds, robots.txt, and sitemaps with zero-leak arena architecture. |
 | **Streaming Downloader** | Resumable chunked file downloader powered by `loaders.zig` progress bars, ETA calculation, and hash verification. |
-| **Pattern-based Routing** | Intuitive server routing with dynamic parameters (`/users/:id`), wildcards (`/*path`), and route groups. |
+| **Pattern-based Routing** | Intuitive server routing with dynamic parameters (`/users/{id}`), wildcards (`/*path`), and route groups. |
 | **Middleware Stack** | Built-in middleware for CORS, security headers (Helmet), recovery, logging, rate limiting, and CSRF, plus health endpoints. |
 | **TLS/SSL** | Full TLS 1.2 and 1.3 with ALPN (RFC 7301), X25519 key exchange, AEAD ciphers, X.509 cert parsing, and mTLS support. |
 | **Static Files & SPA** | High-performance static file serving with ETag, cache control, conditional GET, MIME detection, and SPA HTML5 fallback. |
 | **Interactive API Docs** | Auto-generated OpenAPI 3.1 specifications with embedded Swagger UI, ReDoc, Scalar, and GraphiQL interfaces. |
 | **Streaming & Realtime** | Chunked transfer responses with optional trailers, Server-Sent Events (SSE), and WebSocket frame support. |
 | **Conditional Requests** | ETag and Last-Modified static file serving with `If-None-Match` revalidation. |
-| **DNS Resolution** | Resolution with caching, concurrent resolver coalescing, and SSRF policy checks. |
+| **DNS Resolution** | Resolution with caching and concurrent resolver coalescing. |
 | **Cookie APIs** | First-class request/response cookie jar and header helpers for both client and server contexts. |
-| **Security & Hardening** | Security headers (Helmet), CSRF protection, SSRF protection in reverse proxy, and CRLF injection defenses. |
+| **Security & Hardening** | Security headers (Helmet), CSRF token helpers, and CRLF injection defenses. |
 | **Multipart Form Data** | RFC 2046 streaming multipart body builder and parser for text fields and large file uploads. |
-| **FTP & FTPS** | Full FTP client and server with PASV/EPSV, directory listing, streaming uploads/downloads, and resumption. |
+| **FTP & FTPS** | FTP client and server with PASV/EPSV, directory listing, streaming uploads/downloads, and resumption (explicit FTPS returns a typed error until TLS wiring lands). |
 | **Concurrency & Workers** | Thread-safe bounded `WorkerPool` and parallel client requests (`getAll`, `requestAll`). |
-| **Proxy Support** | Client-side HTTP forward proxy, SOCKS5h tunneling, and server-side reverse proxy middleware. |
+| **Proxy Support** | Client-side HTTP forward proxy and SOCKS5/SOCKS5h tunneling with remote-DNS delegation. |
 | **Structured Logging** | Zero-allocation level-filtered structured logger supporting custom sinks and terminal formatting. |
 | **Cross-Platform Sockets** | Robust non-blocking Windows socket handling with `WSAEWOULDBLOCK` retry, plus `MSG_NOSIGNAL` on POSIX. |
 | **Observability & Metrics** | Production-ready Prometheus text exposition (`/metrics`), live request/duration histograms, status counters, and zero-alloc snapshots. |
@@ -253,7 +252,7 @@ pub fn main() !void {
     std.debug.print("User: {s} <{s}>\n", .{ user.name, user.email });
 
     // 4. Convenience verb shortcuts
-    var del = try httpx.delete(.{ .url = "https://httpbun.com/delete" });
+    var del = try httpx.delete("https://httpbun.com/delete", .{});
     defer del.deinit();
 }
 ```
@@ -271,7 +270,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Create client with full config (supports both snake_case and camelCase options)
+    // Create client with full config (all options use camelCase)
     var client = httpx.Client.init(allocator, io, .{
         .timeoutMs = 10_000,
         .followRedirects = true,
@@ -311,13 +310,18 @@ pub fn main() !void {
 ### Batch Requests
 
 ```zig
-// Parallel requests - getAll (arrays and slices accepted directly)
+// Parallel requests - getAll (arrays and slices accepted directly).
+// Each Response must be deinited; the slice itself is freed with the
+// caller's allocator (page_allocator for these global helpers).
 const urls = [_][]const u8{
     "https://httpbun.com/get",
     "https://httpbun.com/headers",
 };
 var results = try httpx.getAll(urls);
-defer { for (results) |*r| r.deinit(); }
+defer {
+    for (results) |*r| r.deinit();
+    std.heap.page_allocator.free(results);
+}
 
 // Parallel requests - requestAll
 const reqs = [_]httpx.RequestOptions{
@@ -325,7 +329,10 @@ const reqs = [_]httpx.RequestOptions{
     .{ .method = .GET, .url = "https://httpbun.com/headers" },
 };
 var batch = try httpx.requestAll(reqs);
-defer { for (batch) |*r| r.deinit(); }
+defer {
+    for (batch) |*r| r.deinit();
+    std.heap.page_allocator.free(batch);
+}
 ```
 
 
@@ -346,45 +353,45 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    const sample_url = "https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf";
+    const sampleUrl = "https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf";
 
     // 1. Zero-config download with automatic filename & loaders.zig progress bar
-    const res = try client.download(sample_url, "downloads/", .{
+    const res = try client.download(sampleUrl, "downloads/", .{
         .progress = .auto,
         .existing = .overwrite,
-        .create_dirs = true,
+        .createDirs = true,
     });
-    std.debug.print("Downloaded: {s} ({d} bytes)\n", .{ res.destination, res.downloaded_bytes });
+    std.debug.print("Downloaded: {s} ({d} bytes)\n", .{ res.destinationPath(), res.downloadedBytes });
 
     // 2. Download with in-flight cryptographic SHA-256 verification
-    const verified_res = try client.download(sample_url, "downloads/sample.pdf", .{
+    const verifiedRes = try client.download(sampleUrl, "downloads/sample.pdf", .{
         .verify = .{
             .sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            .min_size = 100,
-            .max_size = 50 * 1024 * 1024,
+            .minSize = 100,
+            .maxSize = 50 * 1024 * 1024,
         },
         .atomic = true, // downloads to temp file first, renames on valid hash
     });
 
     // 3. Inspect remote file metadata without downloading (size, filename, ranges)
-    const file_info = try client.lookupFileInfo(sample_url, .{});
-    var size_str_buf: [32]u8 = undefined;
-    std.debug.print("Remote file: {s}, size: {s}\n", .{ file_info.fileName(), file_info.formatSize(&size_str_buf) });
+    const fileInfo = try client.lookupFileInfo(sampleUrl, .{});
+    var sizeStrBuf: [32]u8 = undefined;
+    std.debug.print("Remote file: {s}, size: {s}\n", .{ fileInfo.fileName(), fileInfo.formatSize(&sizeStrBuf) });
 
     // 4. Resume partial download via HTTP Range: bytes=X- (clean non-reserved keyword name)
-    const resumed_res = try client.download(sample_url, "downloads/sample.pdf", .{
+    const resumedRes = try client.download(sampleUrl, "downloads/sample.pdf", .{
         .existing = .resumePartial,
         .maxRetries = 3,
     });
 
     // 5. Safe file updater with rollback backup
-    const update_res = try client.updateFile(sample_url, "bin/app.bin", .{
+    const updateRes = try client.updateFile(sampleUrl, "bin/app.bin", .{
         .backupExisting = true,
         .backupSuffix = ".bak",
     });
 
     // 6. Native FTP Download with progress
-    const ftp_res = try httpx.ftp.download(allocator, .{
+    const ftpRes = try httpx.ftp.download(allocator, .{
         .host = "ftp.example.com",
         .remotePath = "/pub/archive.tar.gz",
         .destinationPath = "downloads/",
@@ -479,8 +486,7 @@ pub fn main() !void {
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn handler(req: httpx.TlsRequest, ctx: ?*anyopaque) httpx.TlsResponse {
-    _ = ctx;
+fn handler(_: httpx.tls.Request) anyerror!httpx.tls.Response {
     return .{ .body = "Hello over TLS!" };
 }
 
@@ -488,18 +494,19 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    var tls_listener = try httpx.TlsListener.init(allocator, .{
+    var tls_listener = try httpx.tls.Listener.init(allocator, io, .{
         .port = 8443,
-        .default_identity = .{
-            .cert_chain_pem = @embedFile("cert.pem"),
-            .private_key_pem = @embedFile("key.pem"),
+        .defaultIdentity = .{
+            .certChainPem = @embedFile("cert.pem"),
+            .privateKeyPem = @embedFile("key.pem"),
         },
     });
     defer tls_listener.deinit();
 
     // Blocking accept loop — use requestShutdown() to break out
-    try tls_listener.run(handler, null);
+    try tls_listener.run(handler);
 }
 ```
 
@@ -536,9 +543,9 @@ try server.metrics("/metrics");
 // Query point-in-time server snapshot (zero-allocation)
 const snap = server.snapshot();
 std.debug.print("Uptime: {d}ms, Requests: {d}, Errors: {d}, Error Rate: {d:.2}%\n", .{
-    snap.uptime_ms,
-    snap.requests_total,
-    snap.errors_total,
+    snap.uptimeMs,
+    snap.requestsTotal,
+    snap.errorsTotal,
     snap.errorRate() * 100.0,
 });
 
@@ -580,13 +587,13 @@ std.debug.print("Total changes: {d}\n", .{count});
 
 ```zig
 // Blocking accept loop
-try tls_listener.run(handler, null);
+try tls_listener.run(handler);
 
-// Graceful shutdown
-tls_listener.requestShutdown();
+// Graceful shutdown (via the wrapped server)
+tls_listener.server.requestShutdown();
 
-// Close the listener socket immediately
-tls_listener.close();
+// Immediate shutdown
+tls_listener.stop();
 ```
 
 ## Client Lifecycle
@@ -606,12 +613,12 @@ Configure automatic retries for failed or retryable requests:
 ```zig
 var client = httpx.Client.init(allocator, io, .{
     .maxRetries = 3,                // retry up to 3 times (4 total attempts)
-    .retry_delay_ms = 500,           // base delay between retries
-    .retry_status_codes = &.{ 502, 503, 504 }, // status codes that trigger retry
+    .retryDelayMs = 500,            // base delay between retries
+    .retryStatusCodes = &.{ 502, 503, 504 }, // status codes that trigger retry
 });
 ```
 
-The delay between retries increases linearly: `retry_delay_ms * (attempt + 1)`.
+The delay between retries increases linearly: `retryDelayMs * (attempt + 1)`.
 
 ## DNS Resolution
 
@@ -779,20 +786,21 @@ client.reset()         // Close + clear DNS cache
 
 // Client retry config (in Config)
 .maxRetries           // Number of retry attempts (0 = disabled)
-.retry_delay_ms        // Delay between retries in ms (default 1000)
-.retry_status_codes    // Status codes that trigger retry (default 502, 503, 504)
+.retryDelayMs         // Delay between retries in ms (default 1000)
+.retryStatusCodes     // Status codes that trigger retry (default 502, 503, 504)
 
-// Global functions (no allocator needed)
-httpx.get(.{ .url = "..." })
-httpx.post(.{ .url = "...", .json = "..." })
-httpx.put(.{ .url = "...", .json = "..." })
-httpx.patch(.{ .url = "...", .json = "..." })
-httpx.delete(.{ .url = "..." })
-httpx.head(.{ .url = "..." })
-httpx.options(.{ .url = "..." })
-httpx.trace(.{ .url = "..." })
-httpx.connect(.{ .url = "..." })
-httpx.request(.{ .method = .GET, .url = "..." })
+// Global functions (no allocator needed, URL-first)
+httpx.get("https://...", .{})
+httpx.post("https://...", .{})
+httpx.put("https://...", .{})
+httpx.patch("https://...", .{})
+httpx.delete("https://...", .{})
+httpx.head("https://...", .{})
+httpx.options("https://...", .{})
+httpx.trace("https://...", .{})
+httpx.connect("https://...", .{})
+httpx.request("https://...", .{ .method = .GET })
+httpx.fetch("https://...", .{})
 httpx.getAll(&urls)
 httpx.requestAll(&reqs)
 
@@ -860,10 +868,13 @@ httpx.router.Context   // Request context
 httpx.router.Response  // Response type
 httpx.router.pattern   // Route pattern parsing
 httpx.router.metadata  // Route metadata
-httpx.sse.Writer       // SSE writer
-httpx.sse.Parser       // SSE parser
-httpx.ws.Handshake     // WebSocket handshake
-httpx.ws.Frame         // WebSocket frame
+httpx.sse.Writer       // SSE writer module
+httpx.sse.Parser       // SSE parser module
+httpx.sse.EventWriter  // SSE event writer
+httpx.sse.Event        // Parsed SSE event
+httpx.sse.EventParser  // Stateful SSE stream parser
+httpx.websocket.Handshake // WebSocket handshake
+httpx.websocket.Frame     // WebSocket frame
 
 // Utility types
 httpx.RateLimiter      // Rate limiter

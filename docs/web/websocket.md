@@ -1,55 +1,28 @@
 # WebSocket Server & Client
 
-HTTPX implements full RFC 6455 WebSockets, enabling bidirectional, full-duplex communication for real-time web applications.
+HTTPX implements RFC 6455 WebSocket primitives: handshake helpers and frame
+encoding/decoding. Serve upgrade-capable routes from a normal `Server` (see
+`examples/websocket_server.zig`, which serves an interactive browser client
+and verifies the endpoint over HTTP).
 
-## WebSocket Server
+## Handshake (`httpx.websocket.Handshake`)
 
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
+| Function | Description |
+|----------|-------------|
+| `computeAccept(key, out)` | Compute `Sec-WebSocket-Accept` from the client key |
+| `buildUpgradeRequest(allocator, host, path, key, headers)` | Build a client upgrade request head |
+| `validateUpgradeResponse(head, accept)` | Validate a `101` response against the expected accept key |
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
+## Frames (`httpx.websocket.Frame`)
 
-    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
-    defer server.deinit();
-
-    server.ws("/ws/chat", struct {
-        pub fn onConnect(conn: *httpx.ws.Connection) void {
-            conn.sendText("Connected to chat server") catch {};
-        }
-
-        pub fn onMessage(conn: *httpx.ws.Connection, msg: httpx.ws.Message) void {
-            // Echo message back to sender
-            conn.sendText(msg.text) catch {};
-        }
-
-        pub fn onClose(conn: *httpx.ws.Connection) void {
-            _ = conn;
-        }
-    });
-
-    try server.run();
-}
-```
-
-## Handshake Flow
-
-1. Browser initiates HTTP upgrade:
-   ```http
-   GET /ws/chat HTTP/1.1
-   Host: server.example.com
-   Upgrade: websocket
-   Connection: Upgrade
-   Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
-   Sec-WebSocket-Version: 13
-   ```
-2. HTTPX server validates headers and computes `Sec-WebSocket-Accept`.
-3. Server responds with `101 Switching Protocols`.
-4. TCP connection switches to framed binary/text WebSocket protocol.
+| Member | Description |
+|--------|-------------|
+| `Opcode` | Frame opcodes (`.text`, `.binary`, `.close`, ...) |
+| `FrameHeader` | Parsed header: `fin`, `opcode`, `masked`, `payloadLen`, `maskKey` |
+| `parseFrameHeader(buf)` | Parse a header, returning header + bytes consumed |
+| `buildFrameHeader(out, fin, opcode, payloadLen, maskKey)` | Encode a header |
+| `applyMask(data, key)` | Apply/unapply the masking key in place |
+| `generateKey(random, out)` | Random client masking material |
 
 ## Related
 

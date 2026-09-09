@@ -46,14 +46,14 @@ const Allocator = std.mem.Allocator;
 const lifecycle = @import("../../server/lifecycle.zig");
 
 pub const Identity = struct {
-    cert_chain_pem: []const u8 = "",
-    private_key_pem: []const u8 = "",
+    certChainPem: []const u8 = "",
+    privateKeyPem: []const u8 = "",
 };
 
 pub const ListenerConfig = struct {
     port: u16 = 0,
     host: []const u8 = "127.0.0.1",
-    default_identity: ?Identity = null,
+    defaultIdentity: ?Identity = null,
 };
 
 pub const Request = struct {
@@ -80,9 +80,9 @@ pub const Listener = struct {
             .host = cfg.host,
             .port = cfg.port,
             .enableDocs = false,
-            .tls = if (cfg.default_identity) |id| .{
-                .certificate = id.cert_chain_pem,
-                .private_key = id.private_key_pem,
+            .tls = if (cfg.defaultIdentity) |id| .{
+                .certPem = id.certChainPem,
+                .keyPem = id.privateKeyPem,
             } else null,
         });
 

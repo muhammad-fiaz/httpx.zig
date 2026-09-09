@@ -24,30 +24,30 @@ pub const ParseError = error{
 /// A parsed Server-Sent Event.
 pub const Event = struct {
     /// Event name from `event: ...`. Default is "message".
-    event_type: []const u8 = "message",
+    eventType: []const u8 = "message",
     /// Payload from `data: ...` lines. Multiple data lines are joined by `\n`.
     data: []const u8 = "",
     /// Event ID from `id: ...`, or null if not set.
     id: ?[]const u8 = null,
     /// Reconnection time in milliseconds from `retry: ...`, or null.
-    retry_ms: ?u32 = null,
+    retryMs: ?u32 = null,
 };
 
 /// Stateful SSE stream parser adhering to the WHATWG event stream processing model.
 pub const EventParser = struct {
     allocator: Allocator,
     data_buf: std.ArrayList(u8),
-    event_type_buf: std.ArrayList(u8),
+    eventType_buf: std.ArrayList(u8),
     last_id_buf: std.ArrayList(u8),
-    has_id: bool = false,
-    retry_ms: ?u32 = null,
+    hasId: bool = false,
+    retryMs: ?u32 = null,
     line_buf: std.ArrayList(u8),
 
     pub fn init(allocator: Allocator) EventParser {
         return .{
             .allocator = allocator,
             .data_buf = std.ArrayList(u8).empty,
-            .event_type_buf = std.ArrayList(u8).empty,
+            .eventType_buf = std.ArrayList(u8).empty,
             .last_id_buf = std.ArrayList(u8).empty,
             .line_buf = std.ArrayList(u8).empty,
         };
@@ -55,15 +55,15 @@ pub const EventParser = struct {
 
     pub fn deinit(self: *EventParser) void {
         self.data_buf.deinit(self.allocator);
-        self.event_type_buf.deinit(self.allocator);
+        self.eventType_buf.deinit(self.allocator);
         self.last_id_buf.deinit(self.allocator);
         self.line_buf.deinit(self.allocator);
     }
 
-    /// Resets per-event data while keeping stream-level state (last_id and retry_ms).
+    /// Resets per-event data while keeping stream-level state (last_id and retryMs).
     pub fn resetEventData(self: *EventParser) void {
         self.data_buf.clearRetainingCapacity();
-        self.event_type_buf.clearRetainingCapacity();
+        self.eventType_buf.clearRetainingCapacity();
     }
 
     /// Processes a stream line according to the WHATWG specification.
@@ -79,26 +79,26 @@ pub const EventParser = struct {
         // Empty line: dispatch event if data was accumulated
         if (line.len == 0) {
             if (self.data_buf.items.len > 0) {
-                const ev_type = if (self.event_type_buf.items.len > 0)
-                    self.event_type_buf.items
+                const ev_type = if (self.eventType_buf.items.len > 0)
+                    self.eventType_buf.items
                 else
                     "message";
 
-                const ev_id: ?[]const u8 = if (self.has_id)
+                const ev_id: ?[]const u8 = if (self.hasId)
                     self.last_id_buf.items
                 else
                     null;
 
                 const event = Event{
-                    .event_type = ev_type,
+                    .eventType = ev_type,
                     .data = self.data_buf.items,
                     .id = ev_id,
-                    .retry_ms = self.retry_ms,
+                    .retryMs = self.retryMs,
                 };
                 return event;
             }
             // Empty data: discard event type buffer per spec
-            self.event_type_buf.clearRetainingCapacity();
+            self.eventType_buf.clearRetainingCapacity();
             return null;
         }
 
@@ -118,8 +118,8 @@ pub const EventParser = struct {
         }
 
         if (std.mem.eql(u8, field_name, "event")) {
-            self.event_type_buf.clearRetainingCapacity();
-            try self.event_type_buf.appendSlice(self.allocator, field_value);
+            self.eventType_buf.clearRetainingCapacity();
+            try self.eventType_buf.appendSlice(self.allocator, field_value);
         } else if (std.mem.eql(u8, field_name, "data")) {
             if (self.data_buf.items.len > 0) {
                 try self.data_buf.append(self.allocator, '\n');
@@ -130,11 +130,11 @@ pub const EventParser = struct {
             if (std.mem.indexOfScalar(u8, field_value, 0) == null) {
                 self.last_id_buf.clearRetainingCapacity();
                 try self.last_id_buf.appendSlice(self.allocator, field_value);
-                self.has_id = true;
+                self.hasId = true;
             }
         } else if (std.mem.eql(u8, field_name, "retry")) {
             if (std.fmt.parseInt(u32, field_value, 10)) |val| {
-                self.retry_ms = val;
+                self.retryMs = val;
             } else |_| {}
         }
 
@@ -186,7 +186,7 @@ pub fn parseAll(allocator: Allocator, stream: []const u8) ParseError![]Event {
     errdefer {
         for (events.items) |ev| {
             allocator.free(ev.data);
-            if (!std.mem.eql(u8, ev.event_type, "message")) allocator.free(ev.event_type);
+            if (!std.mem.eql(u8, ev.eventType, "message")) allocator.free(ev.eventType);
             if (ev.id) |id| allocator.free(id);
         }
         events.deinit(allocator);
@@ -198,8 +198,8 @@ pub fn parseAll(allocator: Allocator, stream: []const u8) ParseError![]Event {
 
         fn onEvent(ctx: *@This(), ev: Event) void {
             const owned_data = ctx.a.dupe(u8, ev.data) catch return;
-            const owned_type = if (!std.mem.eql(u8, ev.event_type, "message"))
-                ctx.a.dupe(u8, ev.event_type) catch {
+            const owned_type = if (!std.mem.eql(u8, ev.eventType, "message"))
+                ctx.a.dupe(u8, ev.eventType) catch {
                     ctx.a.free(owned_data);
                     return;
                 }
@@ -208,10 +208,10 @@ pub fn parseAll(allocator: Allocator, stream: []const u8) ParseError![]Event {
             const owned_id = if (ev.id) |id| ctx.a.dupe(u8, id) catch null else null;
 
             ctx.list.append(ctx.a, .{
-                .event_type = owned_type,
+                .eventType = owned_type,
                 .data = owned_data,
                 .id = owned_id,
-                .retry_ms = ev.retry_ms,
+                .retryMs = ev.retryMs,
             }) catch {
                 ctx.a.free(owned_data);
                 if (!std.mem.eql(u8, owned_type, "message")) ctx.a.free(owned_type);
@@ -230,7 +230,7 @@ pub fn parseAll(allocator: Allocator, stream: []const u8) ParseError![]Event {
 pub fn freeEvents(allocator: Allocator, events: []Event) void {
     for (events) |ev| {
         allocator.free(ev.data);
-        if (!std.mem.eql(u8, ev.event_type, "message")) allocator.free(ev.event_type);
+        if (!std.mem.eql(u8, ev.eventType, "message")) allocator.free(ev.eventType);
         if (ev.id) |id| allocator.free(id);
     }
     allocator.free(events);
@@ -245,10 +245,10 @@ test "parse single simple sse event" {
     defer freeEvents(a, events);
 
     try std.testing.expectEqual(@as(usize, 1), events.len);
-    try std.testing.expectEqualStrings("message", events[0].event_type);
+    try std.testing.expectEqualStrings("message", events[0].eventType);
     try std.testing.expectEqualStrings("hello world", events[0].data);
     try std.testing.expect(events[0].id == null);
-    try std.testing.expect(events[0].retry_ms == null);
+    try std.testing.expect(events[0].retryMs == null);
 }
 
 test "parse multiline data sse event" {
@@ -275,10 +275,10 @@ test "parse custom event type and id and retry" {
     defer freeEvents(a, events);
 
     try std.testing.expectEqual(@as(usize, 1), events.len);
-    try std.testing.expectEqualStrings("user_join", events[0].event_type);
+    try std.testing.expectEqualStrings("user_join", events[0].eventType);
     try std.testing.expectEqualStrings("Alice joined", events[0].data);
     try std.testing.expectEqualStrings("42", events[0].id.?);
-    try std.testing.expectEqual(@as(?u32, 3000), events[0].retry_ms);
+    try std.testing.expectEqual(@as(?u32, 3000), events[0].retryMs);
 }
 
 test "parse ignores comments and handles crlf" {

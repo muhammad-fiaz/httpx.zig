@@ -15,8 +15,8 @@ const AttrSel = struct {
 };
 
 const PseudoKind = enum {
-    first_child,
-    last_child,
+    firstChild,
+    lastChild,
     nth_child,
     not,
     none,
@@ -139,15 +139,15 @@ fn matchesSequence(tree: *const Tree, node_idx: u32, seq: *const Sequence) bool 
                 current = par;
             },
             .adjacent => {
-                const sib = tree.get(current).prev_sibling;
+                const sib = tree.get(current).prevSibling;
                 if (sib == NO_NODE) return false;
                 var s = sib;
-                while (s != NO_NODE and tree.get(s).kind == .text) s = tree.get(s).prev_sibling;
+                while (s != NO_NODE and tree.get(s).kind == .text) s = tree.get(s).prevSibling;
                 if (s == NO_NODE or !matchesCompound(tree, s, cmp)) return false;
                 current = s;
             },
             .sibling => {
-                var s = tree.get(current).prev_sibling;
+                var s = tree.get(current).prevSibling;
                 var found = false;
                 while (s != NO_NODE) {
                     if (tree.get(s).kind != .text and matchesCompound(tree, s, cmp)) {
@@ -155,7 +155,7 @@ fn matchesSequence(tree: *const Tree, node_idx: u32, seq: *const Sequence) bool 
                         current = s;
                         break;
                     }
-                    s = tree.get(s).prev_sibling;
+                    s = tree.get(s).prevSibling;
                 }
                 if (!found) return false;
             },
@@ -216,31 +216,31 @@ fn matchesAttr(node: *const dom.Node, asel: *const AttrSel) bool {
 fn matchesPseudo(tree: *const Tree, node_idx: u32, p: *const Pseudo) bool {
     switch (p.kind) {
         .none => return true,
-        .first_child => {
+        .firstChild => {
             const par = tree.get(node_idx).parent;
             if (par == NO_NODE) return false;
-            var s = tree.get(par).first_child;
-            while (s != NO_NODE and tree.get(s).kind == .text) s = tree.get(s).next_sibling;
+            var s = tree.get(par).firstChild;
+            while (s != NO_NODE and tree.get(s).kind == .text) s = tree.get(s).nextSibling;
             return s == node_idx;
         },
-        .last_child => {
+        .lastChild => {
             const par = tree.get(node_idx).parent;
             if (par == NO_NODE) return false;
-            var s = tree.get(par).last_child;
-            while (s != NO_NODE and tree.get(s).kind == .text) s = tree.get(s).prev_sibling;
+            var s = tree.get(par).lastChild;
+            while (s != NO_NODE and tree.get(s).kind == .text) s = tree.get(s).prevSibling;
             return s == node_idx;
         },
         .nth_child => {
             const par = tree.get(node_idx).parent;
             if (par == NO_NODE) return false;
             var pos: i32 = 0;
-            var s = tree.get(par).first_child;
+            var s = tree.get(par).firstChild;
             while (s != NO_NODE) {
                 if (tree.get(s).kind == .element) {
                     pos += 1;
                     if (s == node_idx) break;
                 }
-                s = tree.get(s).next_sibling;
+                s = tree.get(s).nextSibling;
             }
             if (p.nth_n == 0) return pos == p.nth_of;
             return p.nth_n > 0 and (pos - p.nth_of) >= 0 and @mod((pos - p.nth_of), p.nth_n) == 0;
@@ -421,8 +421,8 @@ fn parsePseudo(al: Allocator, src: []const u8, pos: *usize, simple: *Simple) Sel
     while (pos.* < src.len and src[pos.*] != '(' and !isSelectorStop(src[pos.*])) : (pos.* += 1) {}
     const name = src[start..pos.*];
 
-    if (std.ascii.eqlIgnoreCase(name, "first-child")) return .{ .kind = .first_child };
-    if (std.ascii.eqlIgnoreCase(name, "last-child")) return .{ .kind = .last_child };
+    if (std.ascii.eqlIgnoreCase(name, "first-child")) return .{ .kind = .firstChild };
+    if (std.ascii.eqlIgnoreCase(name, "last-child")) return .{ .kind = .lastChild };
     if (std.ascii.eqlIgnoreCase(name, "nth-child")) {
         if (pos.* < src.len and src[pos.*] == '(') {
             pos.* += 1;

@@ -18,8 +18,8 @@ pub fn main() !void {
         .host = "127.0.0.1",
         .port = 0,
         .watch = true,
-        .watch_dir = "examples/web/templates/live_reload/templates",
-        .live_reload = true,
+        .watchDir = "examples/web/templates/live_reload/templates",
+        .liveReload = true,
         .templates = .{
             .directory = "examples/web/templates/live_reload/templates",
         },
