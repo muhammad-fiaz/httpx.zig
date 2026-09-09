@@ -349,11 +349,20 @@ pub fn encodeQueryValue(a: Allocator, s: []const u8) ![]u8 {
     return out.toOwnedSlice(a);
 }
 
-fn buildTarget(a: Allocator, req_path: []const u8, query: []const Header) ![]u8 {
+/// Builds the origin-form request target, preserving a query string already
+/// present in the URL and appending structured `.query` options after it
+/// (`?a=1&b=2`). URL-embedded pairs are sent verbatim; option values are
+/// percent-encoded.
+fn buildTarget(a: Allocator, req_path: []const u8, url_query: []const u8, query: []const Header) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
     try out.appendSlice(a, req_path);
     var first = true;
+    if (url_query.len > 0) {
+        try out.append(a, '?');
+        try out.appendSlice(a, url_query);
+        first = false;
+    }
     for (query) |kv| {
         try out.append(a, if (first) '?' else '&');
         first = false;
@@ -440,7 +449,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         var auth_buf: [256]u8 = undefined;
         const authority_str = u.authority(&auth_buf);
 
-        const target = try buildTarget(a, u.path, req.query);
+        const target = try buildTarget(a, u.path, u.query, req.query);
         defer a.free(target);
 
         const ct: ?[]const u8 = switch (req.bodyKind) {
@@ -1522,4 +1531,35 @@ test "live https interop against external TLS server" {
 
     try std.testing.expectEqual(@as(u16, 200), res.status);
     try std.testing.expect(std.mem.indexOf(u8, res.body, "interoperability-ok") != null);
+}
+
+test "buildTarget preserves URL query and merges option query" {
+    const a = std.testing.allocator;
+
+    // No query anywhere.
+    {
+        const t = try buildTarget(a, "/users", "", &.{});
+        defer a.free(t);
+        try std.testing.expectEqualStrings("/users", t);
+    }
+    // URL-embedded query is preserved verbatim (previously dropped).
+    {
+        const t = try buildTarget(a, "/users/42", "verbose=1", &.{});
+        defer a.free(t);
+        try std.testing.expectEqualStrings("/users/42?verbose=1", t);
+    }
+    // Options-only query still works.
+    {
+        const q = [_]Header{.{ .name = "page", .value = "2" }};
+        const t = try buildTarget(a, "/users", "", &q);
+        defer a.free(t);
+        try std.testing.expectEqualStrings("/users?page=2", t);
+    }
+    // Both merge with & (URL pairs first, option values encoded).
+    {
+        const q = [_]Header{ .{ .name = "tag", .value = "a&b" }, .{ .name = "n", .value = "x" } };
+        const t = try buildTarget(a, "/s", "q=zig", &q);
+        defer a.free(t);
+        try std.testing.expectEqualStrings("/s?q=zig&tag=a%26b&n=x", t);
+    }
 }
