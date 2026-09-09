@@ -25,6 +25,7 @@ const Context = router_mod.Context;
 const Method = @import("../../common/method.zig").Method;
 const openapi = @import("../openapi/spec.zig");
 const assets = @import("assets.zig");
+const meta_mod = @import("../router/metadata.zig");
 
 pub const SwaggerConfig = struct {
     enabled: bool = true,
@@ -203,37 +204,77 @@ pub fn mount(
         st.graphiqlPage = try renderGraphiqlPage(allocator, cfg.graphiql.title, st.graphqlEndpoint.?, route);
     }
 
+    const internal_meta: meta_mod.Metadata = .{ .internal = true };
+
+    // Roll back partial registration on error so a failed mount leaves no
+    // stray docs routes behind (pre-checks make this rare, e.g. OOM only).
+    errdefer {
+        if (cfg.openapi.enabled and st.openapiRoute.len > 0) _ = router.remove(.GET, st.openapiRoute);
+        if (st.swaggerRoute) |route| {
+            _ = router.remove(.GET, route);
+            for (assets.swaggerFiles) |f| {
+                const full = joinRoute(allocator, route, f.name) catch continue;
+                defer allocator.free(full);
+                _ = router.remove(.GET, full);
+            }
+        }
+        if (st.redocRoute) |route| {
+            _ = router.remove(.GET, route);
+            for (assets.redocFiles) |f| {
+                const full = joinRoute(allocator, route, f.name) catch continue;
+                defer allocator.free(full);
+                _ = router.remove(.GET, full);
+            }
+        }
+        if (st.scalarRoute) |route| {
+            _ = router.remove(.GET, route);
+            const full = joinRoute(allocator, route, "standalone.js") catch null;
+            if (full) |fp| {
+                defer allocator.free(fp);
+                _ = router.remove(.GET, fp);
+            }
+        }
+        if (st.graphiqlRoute) |route| {
+            _ = router.remove(.GET, route);
+            for (assets.graphiqlFiles) |f| {
+                const full = joinRoute(allocator, route, f.name) catch continue;
+                defer allocator.free(full);
+                _ = router.remove(.GET, full);
+            }
+        }
+    }
+
     if (cfg.openapi.enabled and st.openapiRoute.len > 0) {
-        try router.getWithData(st.openapiRoute, openApiHandler, st);
+        try router.addMetaWithData(.GET, st.openapiRoute, openApiHandler, internal_meta, st);
     }
     if (st.swaggerRoute) |route| {
-        try router.getWithData(route, swaggerPageHandler, st);
+        try router.addMetaWithData(.GET, route, swaggerPageHandler, internal_meta, st);
         for (assets.swaggerFiles) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
-            try router.get(full, swaggerAssetHandler);
+            try router.addMeta(.GET, full, swaggerAssetHandler, internal_meta);
         }
     }
     if (st.redocRoute) |route| {
-        try router.getWithData(route, redocPageHandler, st);
+        try router.addMetaWithData(.GET, route, redocPageHandler, internal_meta, st);
         for (assets.redocFiles) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
-            try router.get(full, redocAssetHandler);
+            try router.addMeta(.GET, full, redocAssetHandler, internal_meta);
         }
     }
     if (st.scalarRoute) |route| {
-        try router.getWithData(route, scalarPageHandler, st);
+        try router.addMetaWithData(.GET, route, scalarPageHandler, internal_meta, st);
         const full = try joinRoute(allocator, route, "standalone.js");
         defer allocator.free(full);
-        try router.get(full, scalarAssetHandler);
+        try router.addMeta(.GET, full, scalarAssetHandler, internal_meta);
     }
     if (st.graphiqlRoute) |route| {
-        try router.getWithData(route, graphiqlPageHandler, st);
+        try router.addMetaWithData(.GET, route, graphiqlPageHandler, internal_meta, st);
         for (assets.graphiqlFiles) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
-            try router.get(full, graphiqlAssetHandler);
+            try router.addMeta(.GET, full, graphiqlAssetHandler, internal_meta);
         }
     }
     g_state = st;

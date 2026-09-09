@@ -44,15 +44,12 @@ pub fn generate(router: *const Router, info: Info) GenerateError![]u8 {
     }
 
     for (router.entries(), 0..) |entry, ei| {
-        // Skip internal docs routes and OpenAPI endpoints from appearing in the spec
-        if (std.mem.startsWith(u8, entry.path, "/docs") or
-            std.mem.startsWith(u8, entry.path, "/redoc") or
-            std.mem.startsWith(u8, entry.path, "/scalar") or
-            std.mem.startsWith(u8, entry.path, "/graphiql") or
-            std.mem.eql(u8, entry.path, "/openapi.json"))
-        {
-            continue;
-        }
+        // Internal infrastructure routes (docs UI, assets) never appear.
+        if (entry.meta.internal) continue;
+        // Fallback for docs routes registered without the internal flag
+        // (backwards compat): exact match or slash-boundary prefix only, so
+        // user routes like "/docs-custom" or "/redocly" are NOT filtered.
+        if (isDocsPath(entry.path)) continue;
 
         const path_str = try renderOpenApiPath(allocator, &entry.pattern);
         defer allocator.free(path_str);
@@ -142,6 +139,15 @@ pub fn generate(router: *const Router, info: Info) GenerateError![]u8 {
 }
 
 /// Stack-render variant used for grouping comparisons (no allocation).
+fn isDocsPath(path: []const u8) bool {
+    if (std.mem.eql(u8, path, "/openapi.json")) return true;
+    for ([_][]const u8{ "/docs", "/redoc", "/scalar", "/graphiql" }) |prefix| {
+        if (std.mem.eql(u8, path, prefix)) return true;
+        if (path.len > prefix.len and std.mem.startsWith(u8, path, prefix) and path[prefix.len] == '/') return true;
+    }
+    return false;
+}
+
 fn renderOpenApiPathInto(buf: []u8, pattern: anytype) ![]u8 {
     var n: usize = 0;
     buf[n] = '/';
@@ -646,4 +652,33 @@ test "nullable object field emits anyOf null union" {
     defer a.free(json_data);
     try std.testing.expect(std.mem.indexOf(u8, json_data, "\"anyOf\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json_data, "\"type\":\"null\"") != null);
+}
+
+test "docs prefix filter uses slash boundary and internal flag" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    // User routes that merely share a prefix must NOT be filtered.
+    try router.get("/docs-custom", h);
+    try router.get("/redocly", h);
+    try router.get("/scalar-app", h);
+    try router.get("/graphiql-test", h);
+    // Internal routes are always filtered regardless of path.
+    try router.addMeta(.GET, "/custom-docs-page", h, .{ .internal = true });
+    // Real docs paths are filtered.
+    try router.get("/docs", h);
+    try router.get("/docs/swagger-ui-bundle.js", h);
+
+    const json_data = try generate(&router, .{});
+    defer a.free(json_data);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_data, .{});
+    defer parsed.deinit();
+    const paths = parsed.value.object.get("paths").?.object;
+    try std.testing.expect(paths.get("/docs-custom") != null);
+    try std.testing.expect(paths.get("/redocly") != null);
+    try std.testing.expect(paths.get("/scalar-app") != null);
+    try std.testing.expect(paths.get("/graphiql-test") != null);
+    try std.testing.expect(paths.get("/docs") == null);
+    try std.testing.expect(paths.get("/custom-docs-page") == null);
 }

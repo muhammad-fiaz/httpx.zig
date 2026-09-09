@@ -43,21 +43,21 @@ pub const Snapshot = struct {
 };
 
 pub const Stats = struct {
-    hits: std.atomic.Value(u64) = .init(0),
-    misses: std.atomic.Value(u64) = .init(0),
-    released: std.atomic.Value(u64) = .init(0),
-    parkedNow: std.atomic.Value(u64) = .init(0),
-    droppedStale: std.atomic.Value(u64) = .init(0),
-    droppedLimit: std.atomic.Value(u64) = .init(0),
+    hits: std.atomic.Value(usize) = .init(0),
+    misses: std.atomic.Value(usize) = .init(0),
+    released: std.atomic.Value(usize) = .init(0),
+    parkedNow: std.atomic.Value(usize) = .init(0),
+    droppedStale: std.atomic.Value(usize) = .init(0),
+    droppedLimit: std.atomic.Value(usize) = .init(0),
 
     pub fn snapshot(self: *const Stats) Snapshot {
         return .{
-            .hits = self.hits.load(.monotonic),
-            .misses = self.misses.load(.monotonic),
-            .released = self.released.load(.monotonic),
-            .parkedNow = self.parkedNow.load(.monotonic),
-            .droppedStale = self.droppedStale.load(.monotonic),
-            .droppedLimit = self.droppedLimit.load(.monotonic),
+            .hits = @intCast(self.hits.load(.monotonic)),
+            .misses = @intCast(self.misses.load(.monotonic)),
+            .released = @intCast(self.released.load(.monotonic)),
+            .parkedNow = @intCast(self.parkedNow.load(.monotonic)),
+            .droppedStale = @intCast(self.droppedStale.load(.monotonic)),
+            .droppedLimit = @intCast(self.droppedLimit.load(.monotonic)),
         };
     }
 };

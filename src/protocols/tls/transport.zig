@@ -157,8 +157,17 @@ pub const Connection = struct {
         var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
         io.random(&entropy);
 
+        // SNI handling: virtual-hosted HTTPS servers abort the handshake
+        // (TlsAlert) when no server_name is sent. std's `no_verification`
+        // sends no SNI, so `verify=none` debug mode would always fail against
+        // such hosts. When the peer is a DNS name (not a literal IP), always
+        // offer it as SNI via `explicit` — chain verification is still
+        // skipped for `none` (ca=no_verification), so clock/CA issues stay
+        // bypassed; only the SAN hostname check remains (no time involved).
+        // Literal IPs never send SNI per RFC 6066.
+        const send_sni = conf.host.len > 0 and !isIpLiteral(conf.host);
         const host_opt: @TypeOf(@as(tls.Client.Options, undefined).host) =
-            if (conf.verify != .none and conf.host.len > 0) .{ .explicit = conf.host } else .no_verification;
+            if (send_sni) .{ .explicit = conf.host } else .no_verification;
         const ca_opt: @TypeOf(@as(tls.Client.Options, undefined).ca) = switch (conf.verify) {
             .none => .no_verification,
             .selfSigned => .self_signed,
@@ -227,3 +236,17 @@ pub const Connection = struct {
         return self.client.reader.readSliceShort(buffer) catch error.ReadFailed;
     }
 };
+
+/// True for IPv4/IPv6 literals (no SNI per RFC 6066 Section 3).
+fn isIpLiteral(host: []const u8) bool {
+    // Strip brackets for "[::1]" style literals.
+    var h = host;
+    if (h.len >= 2 and h[0] == '[' and h[h.len - 1] == ']') h = h[1 .. h.len - 1];
+    // Strip zone id ("fe80::1%eth0").
+    if (std.mem.indexOfScalar(u8, h, '%')) |zi| h = h[0..zi];
+    if (std.Io.net.IpAddress.parseLiteral(h)) |_| {
+        return true;
+    } else |_| {
+        return false;
+    }
+}

@@ -42,7 +42,7 @@ pub const Error = error{
     Unknown, // unmapped code — counted atomically, never panics
 };
 
-pub var unknownCount: std.atomic.Value(u64) = .init(0);
+pub var unknownCount: std.atomic.Value(usize) = .init(0);
 
 // Windows
 
@@ -380,7 +380,7 @@ pub const posix_c = if (!is_windows and builtin.link_libc) struct {
     }
 
     pub fn setNonBlocking(fd: fd_t, non_blocking: bool) void {
-        const flags = fcntl(fd, F_GETFL, 0);
+        const flags = fcntl(fd, F_GETFL, @as(c_int, 0));
         if (flags < 0) return;
         const new_flags = if (non_blocking) (flags | O_NONBLOCK) else (flags & ~O_NONBLOCK);
         _ = fcntl(fd, F_SETFL, new_flags);

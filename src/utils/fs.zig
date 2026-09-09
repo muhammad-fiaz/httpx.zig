@@ -229,15 +229,61 @@ pub fn statPath(io: ?std.Io, path: []const u8) ?Stat {
             .mtimeNs = mtimeNs,
             .isDir = false,
         };
+    } else if (builtin.os.tag == .linux) {
+        var null_term: [1024:0]u8 = undefined;
+        if (path.len >= null_term.len) return null;
+        @memcpy(null_term[0..path.len], path);
+        null_term[path.len] = 0;
+
+        var statx_buf: std.os.linux.Statx = undefined;
+        const mask: std.os.linux.STATX = .{
+            .TYPE = true,
+            .SIZE = true,
+            .MTIME = true,
+        };
+        const rc = std.os.linux.statx(
+            std.posix.AT.FDCWD,
+            &null_term,
+            0,
+            mask,
+            &statx_buf,
+        );
+        if (@as(isize, @bitCast(rc)) < 0) return null;
+        const isDirectory = (statx_buf.mode & std.os.linux.S.IFMT) == std.os.linux.S.IFDIR;
+
+        const mtimeNs = @as(i128, statx_buf.mtime.sec) * std.time.ns_per_s + @as(i128, statx_buf.mtime.nsec);
+        return Stat{
+            .size = statx_buf.size,
+            .mtimeNs = mtimeNs,
+            .isDir = isDirectory,
+        };
     } else {
+        var null_term: [1024:0]u8 = undefined;
+        if (path.len >= null_term.len) return null;
+        @memcpy(null_term[0..path.len], path);
+        null_term[path.len] = 0;
+
+        const stat_fn = switch (builtin.os.tag) {
+            .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => switch (builtin.cpu.arch) {
+                .x86_64 => struct {
+                    extern "c" fn @"stat$INODE64"(noalias p: [*:0]const u8, noalias b: *std.c.Stat) c_int;
+                }.@"stat$INODE64",
+                else => struct {
+                    extern "c" fn stat(noalias p: [*:0]const u8, noalias b: *std.c.Stat) c_int;
+                }.stat,
+            },
+            else => struct {
+                extern "c" fn stat(noalias p: [*:0]const u8, noalias b: *std.c.Stat) c_int;
+            }.stat,
+        };
+
         var st: std.c.Stat = undefined;
-        if (std.c.stat(&buf, &st) != 0) return null;
-        const S_IFDIR: u32 = 0o040000;
-        const isDirectory = (st.mode & S_IFDIR) != 0;
+        if (stat_fn(&null_term, &st) != 0) return null;
+        const isDirectory = std.c.S.ISDIR(st.mode);
 
         return Stat{
-            .size = @intCast(st.size),
-            .mtimeNs = @as(i128, st.mtime().tv_sec) * std.time.ns_per_s + @as(i128, st.mtime().tv_nsec),
+            .size = @intCast(@max(0, st.size)),
+            .mtimeNs = @as(i128, st.mtime().sec) * std.time.ns_per_s + @as(i128, st.mtime().nsec),
             .isDir = isDirectory,
         };
     }

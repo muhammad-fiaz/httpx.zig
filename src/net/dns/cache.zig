@@ -62,11 +62,11 @@ pub const Cache = struct {
     lookupFn: LookupFn,
     lookupCtx: ?*anyopaque,
 
-    // Observability
-    hits: std.atomic.Value(u64) = .init(0),
-    misses: std.atomic.Value(u64) = .init(0),
-    lookupsStarted: std.atomic.Value(u64) = .init(0),
-    lookupsCoalesced: std.atomic.Value(u64) = .init(0),
+    // Observability (usize atomics: lock-free on both 32- and 64-bit)
+    hits: std.atomic.Value(usize) = .init(0),
+    misses: std.atomic.Value(usize) = .init(0),
+    lookupsStarted: std.atomic.Value(usize) = .init(0),
+    lookupsCoalesced: std.atomic.Value(usize) = .init(0),
 
     pub fn init(
         allocator: Allocator,
@@ -277,10 +277,10 @@ pub const Cache = struct {
 
     pub fn statsSnapshot(self: *Cache) struct { hits: u64, misses: u64, started: u64, coalesced: u64 } {
         return .{
-            .hits = self.hits.load(.monotonic),
-            .misses = self.misses.load(.monotonic),
-            .started = self.lookupsStarted.load(.monotonic),
-            .coalesced = self.lookupsCoalesced.load(.monotonic),
+            .hits = @intCast(self.hits.load(.monotonic)),
+            .misses = @intCast(self.misses.load(.monotonic)),
+            .started = @intCast(self.lookupsStarted.load(.monotonic)),
+            .coalesced = @intCast(self.lookupsCoalesced.load(.monotonic)),
         };
     }
 

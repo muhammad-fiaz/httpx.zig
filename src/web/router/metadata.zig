@@ -115,4 +115,7 @@ pub const Metadata = struct {
     /// Defaults to a single `200 OK` when empty and not deprecated.
     responses: []const ResponseDesc = &.{},
     security: []const SecurityReq = &.{},
+    /// Internal infrastructure routes (docs UI, assets) are excluded from
+    /// OpenAPI generation. User routes leave this false.
+    internal: bool = false,
 };

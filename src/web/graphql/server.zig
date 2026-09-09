@@ -42,12 +42,24 @@ fn getState(ctx: *Context) !*ServerState {
 }
 
 /// Mounts a GraphQL schema on a Router at `cfg.endpoint` (default "/graphql").
+/// Pre-checks all three methods atomically; on partial failure any routes
+/// already added are removed and the allocated state is freed.
+/// Caller must call `unmount` before router.deinit to free the state.
 pub fn mount(router: *router_mod.Router, schema: Schema, cfg: HandlerConfig) !void {
+    if (router.hasConflict(.POST, cfg.endpoint) or
+        router.hasConflict(.GET, cfg.endpoint) or
+        router.hasConflict(.OPTIONS, cfg.endpoint))
+    {
+        return error.DuplicateRoute;
+    }
     const st = try router.allocator.create(ServerState);
     st.* = .{ .schema = schema, .cfg = cfg };
+    errdefer router.allocator.destroy(st);
 
-    try router.addWithData(.POST, cfg.endpoint, &handleGraphQLPost, st);
-    try router.addWithData(.GET, cfg.endpoint, &handleGraphQLGet, st);
+    router.addWithData(.POST, cfg.endpoint, &handleGraphQLPost, st) catch |err| return err;
+    errdefer _ = router.remove(.POST, cfg.endpoint);
+    router.addWithData(.GET, cfg.endpoint, &handleGraphQLGet, st) catch |err| return err;
+    errdefer _ = router.remove(.GET, cfg.endpoint);
     try router.addWithData(.OPTIONS, cfg.endpoint, &handleGraphQLOptions, st);
 }
 

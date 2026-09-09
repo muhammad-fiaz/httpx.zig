@@ -19,10 +19,10 @@ pub const LATENCY_BUCKET_LABELS = [LATENCY_BUCKET_COUNT][]const u8{
 
 /// Monotonically increasing atomic counter.
 pub const Counter = struct {
-    val: std.atomic.Value(u64) = .init(0),
+    val: std.atomic.Value(usize) = .init(0),
 
     pub fn init(initial: u64) Counter {
-        return .{ .val = .init(initial) };
+        return .{ .val = .init(@intCast(initial)) };
     }
 
     pub fn inc(self: *Counter) void {
@@ -30,19 +30,19 @@ pub const Counter = struct {
     }
 
     pub fn add(self: *Counter, n: u64) void {
-        _ = self.val.fetchAdd(n, .monotonic);
+        _ = self.val.fetchAdd(@intCast(n), .monotonic);
     }
 
     pub fn get(self: *const Counter) u64 {
-        return self.val.load(.monotonic);
+        return @intCast(self.val.load(.monotonic));
     }
 
     pub fn load(self: *const Counter, comptime ordering: std.builtin.AtomicOrder) u64 {
-        return self.val.load(ordering);
+        return @intCast(self.val.load(ordering));
     }
 
     pub fn fetchAdd(self: *Counter, val: u64, comptime ordering: std.builtin.AtomicOrder) u64 {
-        return self.val.fetchAdd(val, ordering);
+        return @intCast(self.val.fetchAdd(@intCast(val), ordering));
     }
 
     pub fn reset(self: *Counter) void {
@@ -52,10 +52,10 @@ pub const Counter = struct {
 
 /// Underflow-safe atomic gauge.
 pub const Gauge = struct {
-    val: std.atomic.Value(u64) = .init(0),
+    val: std.atomic.Value(usize) = .init(0),
 
     pub fn init(initial: u64) Gauge {
-        return .{ .val = .init(initial) };
+        return .{ .val = .init(@intCast(initial)) };
     }
 
     pub fn inc(self: *Gauge) void {
@@ -71,43 +71,45 @@ pub const Gauge = struct {
     }
 
     pub fn add(self: *Gauge, n: u64) void {
-        _ = self.val.fetchAdd(n, .monotonic);
+        _ = self.val.fetchAdd(@intCast(n), .monotonic);
     }
 
     pub fn sub(self: *Gauge, n: u64) void {
         while (true) {
             const current = self.val.load(.monotonic);
-            const next = if (current >= n) current - n else 0;
+            const dec_by: usize = @intCast(n);
+            const next = if (current >= dec_by) current - dec_by else 0;
             if (self.val.cmpxchgWeak(current, next, .monotonic, .monotonic) == null) break;
         }
     }
 
     pub fn set(self: *Gauge, n: u64) void {
-        self.val.store(n, .monotonic);
+        self.val.store(@intCast(n), .monotonic);
     }
 
     pub fn store(self: *Gauge, val: u64, comptime ordering: std.builtin.AtomicOrder) void {
-        self.val.store(val, ordering);
+        self.val.store(@intCast(val), ordering);
     }
 
     pub fn get(self: *const Gauge) u64 {
-        return self.val.load(.monotonic);
+        return @intCast(self.val.load(.monotonic));
     }
 
     pub fn load(self: *const Gauge, comptime ordering: std.builtin.AtomicOrder) u64 {
-        return self.val.load(ordering);
+        return @intCast(self.val.load(ordering));
     }
 
     pub fn fetchAdd(self: *Gauge, val: u64, comptime ordering: std.builtin.AtomicOrder) u64 {
-        return self.val.fetchAdd(val, ordering);
+        return @intCast(self.val.fetchAdd(@intCast(val), ordering));
     }
 
     pub fn fetchSub(self: *Gauge, val: u64, comptime ordering: std.builtin.AtomicOrder) u64 {
         _ = ordering;
         while (true) {
             const current = self.val.load(.monotonic);
-            const next = if (current >= val) current - val else 0;
-            if (self.val.cmpxchgWeak(current, next, .monotonic, .monotonic) == null) return current;
+            const dec_by: usize = @intCast(val);
+            const next = if (current >= dec_by) current - dec_by else 0;
+            if (self.val.cmpxchgWeak(current, next, .monotonic, .monotonic) == null) return @intCast(current);
         }
     }
 

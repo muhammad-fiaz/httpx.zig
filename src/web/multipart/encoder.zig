@@ -126,13 +126,13 @@ pub const FileOptions = struct {
 
 // Boundary
 
-var boundary_counter = std.atomic.Value(u64).init(0);
+var boundary_counter = std.atomic.Value(usize).init(0);
 
 pub fn generateBoundary(buf: *[32]u8) []const u8 {
-    const n = boundary_counter.fetchAdd(1, .monotonic);
+    const n: usize = boundary_counter.fetchAdd(1, .monotonic);
     var raw: [16]u8 = @splat(0);
-    std.mem.writeInt(u64, raw[0..8], n, .little);
-    std.mem.writeInt(u64, raw[8..16], @intFromPtr(buf) & std.math.maxInt(u64), .little);
+    std.mem.writeInt(usize, raw[0..@sizeOf(usize)], n, .little);
+    std.mem.writeInt(usize, raw[@sizeOf(usize)..][0..@sizeOf(usize)], @intFromPtr(buf), .little);
     const hex = "0123456789abcdef";
     for (raw, 0..) |b, i| {
         buf[i * 2] = hex[b >> 4];

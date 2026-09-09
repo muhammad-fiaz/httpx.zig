@@ -213,7 +213,7 @@ pub const Server = struct {
     paused: std.atomic.Value(bool) = .init(false),
     docsMounted: bool = false,
     watcher: ?*watcher_mod.Watcher = null,
-    liveReloadEventId: std.atomic.Value(u64) = .init(1),
+    liveReloadEventId: std.atomic.Value(usize) = .init(1),
     templateEngine: ?*templates_mod.Engine = null,
     tlsServer: ?tcp_tls_mod.TlsServer = null,
     tlsCertPemLoaded: ?[]const u8 = null,
@@ -840,12 +840,19 @@ pub const Server = struct {
                 if (std.mem.indexOfAny(u8, clean_path, "?#")) |idx| {
                     clean_path = clean_path[0..idx];
                 }
+                var query_part: []const u8 = "";
+                if (std.mem.indexOfScalar(u8, p_str, '?')) |qi| {
+                    var q = p_str[qi + 1 ..];
+                    if (std.mem.indexOfScalar(u8, q, '#')) |hi| q = q[0..hi];
+                    query_part = q;
+                }
 
                 var ctx = Context{
                     .allocator = a,
                     .io = server_ptr.io,
                     .headers = ctx_hdrs,
                     .path = clean_path,
+                    .query = query_part,
                     .method = method,
                     .body = b_str,
                     .isTls = isTlsFlag,
@@ -1184,12 +1191,19 @@ pub const Server = struct {
         if (std.mem.indexOfAny(u8, clean_path, "?#")) |idx| {
             clean_path = clean_path[0..idx];
         }
+        var query_part: []const u8 = "";
+        if (std.mem.indexOfScalar(u8, raw_path, '?')) |qi| {
+            var q = raw_path[qi + 1 ..];
+            if (std.mem.indexOfScalar(u8, q, '#')) |hi| q = q[0..hi];
+            query_part = q;
+        }
 
         var ctx = Context{
             .allocator = arena,
             .io = self.io,
             .headers = hdrs,
             .path = clean_path,
+            .query = query_part,
             .method = method,
             .body = body,
             .isTls = isTlsConn,

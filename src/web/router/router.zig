@@ -35,6 +35,10 @@ pub const Context = struct {
     params: [16]struct { name: []const u8, value: []const u8 } = undefined,
     paramCount: usize = 0,
     path: []const u8 = "",
+    /// Raw query string (without leading '?' and without fragment), populated
+    /// by the server transports. Direct `match()` calls also fill it when the
+    /// input path contains '?'. `queryParam()` reads this first.
+    query: []const u8 = "",
     method: Method = .GET,
     /// IO context for handlers that need filesystem/network access.
     io: std.Io = undefined,
@@ -272,19 +276,18 @@ pub const Context = struct {
         };
     }
 
-    /// Extract a query parameter by name from the URL path.
+    /// Extract a query parameter by name from the URL.
+    /// Reads the transport-populated `query` field first, then falls back to
+    /// parsing `path` directly (for hand-built contexts in tests).
     pub fn queryParam(self: *const Context, name: []const u8) ?[]const u8 {
+        if (self.query.len > 0) {
+            if (lookupQuery(self.query, name)) |v| return v;
+        }
         const path = self.path;
         if (std.mem.indexOfScalar(u8, path, '?')) |qstart| {
-            var iter = std.mem.splitScalar(u8, path[qstart + 1 ..], '&');
-            while (iter.next()) |pair| {
-                if (std.mem.indexOfScalar(u8, pair, '=')) |eq| {
-                    const k = pair[0..eq];
-                    if (std.mem.eql(u8, k, name)) {
-                        return pair[eq + 1 ..];
-                    }
-                }
-            }
+            var q = path[qstart + 1 ..];
+            if (std.mem.indexOfScalar(u8, q, '#')) |hend| q = q[0..hend];
+            if (lookupQuery(q, name)) |v| return v;
         }
         return null;
     }
@@ -543,6 +546,9 @@ pub const Router = struct {
     /// Register with OpenAPI metadata — the "define once" path: handler and
     /// documentation come from this single call.
     pub fn addMeta(self: *Router, method: Method, path: []const u8, handler: *const fn (*Context) anyerror!Response, meta: meta_mod.Metadata) RouteError!void {
+        // Registration paths must be clean patterns; query/fragment belong
+        // to requests, never to route definitions.
+        if (std.mem.indexOfAny(u8, path, "?#") != null) return RouteError.InvalidPattern;
         // Parse from an owned copy so pattern segments outlive the call.
         const owned = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned);
@@ -582,8 +588,10 @@ pub const Router = struct {
     }
 
     /// True when a GET route with the same normalized shape already exists.
+    /// Query strings and fragments are ignored for conflict checks.
     pub fn hasConflict(self: *Router, method: Method, path: []const u8) bool {
-        const pat = pattern_mod.parsePattern(path) catch return false;
+        const clean = cleanRequestPath(path);
+        const pat = pattern_mod.parsePattern(clean) catch return false;
         var buf1: [512]u8 = undefined;
         const new_shape = pat.shape(&buf1) catch return false;
         for (self.routes.items) |existing| {
@@ -596,9 +604,10 @@ pub const Router = struct {
     }
 
     /// Removes the first route matching method+shape. Returns true when a
-    /// route was removed (its owned path is freed).
+    /// route was removed (its owned path is freed). Query/fragment ignored.
     pub fn remove(self: *Router, method: Method, path: []const u8) bool {
-        const pat = pattern_mod.parsePattern(path) catch return false;
+        const clean = cleanRequestPath(path);
+        const pat = pattern_mod.parsePattern(clean) catch return false;
         var buf1: [512]u8 = undefined;
         const target = pat.shape(&buf1) catch return false;
         for (self.routes.items, 0..) |existing, i| {
@@ -667,6 +676,7 @@ pub const Router = struct {
         userData: ?*anyopaque,
         deinitData: ?*const fn (?*anyopaque) void,
     ) RouteError!void {
+        if (std.mem.indexOfAny(u8, path, "?#") != null) return RouteError.InvalidPattern;
         const owned = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned);
 
@@ -718,7 +728,29 @@ pub const Router = struct {
 
     /// Matches a request and fills in path parameters.
     /// Returns the handler or null if no match.
+    /// Query strings and fragments are stripped for matching; the extracted
+    /// query is stored on the context so `queryParam()` keeps working.
+    /// Request-scoped fields (headers, body, peer, TLS, trust) are preserved
+    /// across the match. HEAD falls back to GET when no explicit HEAD route
+    /// exists (body stripped by the transport).
     pub fn match(self: *Router, method: Method, path: []const u8, ctx: *Context) ?*const fn (*Context) anyerror!Response {
+        const orig = ctx.method;
+        if (self.matchMethod(method, path, ctx)) |h| return h;
+        if (method == .HEAD) {
+            if (self.matchMethod(.GET, path, ctx)) |h| {
+                ctx.method = orig;
+                return h;
+            }
+        }
+        return null;
+    }
+
+    fn matchMethod(self: *Router, method: Method, path: []const u8, ctx: *Context) ?*const fn (*Context) anyerror!Response {
+        const clean = cleanRequestPath(path);
+        // Preserve a transport-populated query when the match input is
+        // already stripped (server path); otherwise extract from the input.
+        const from_path = queryStringOf(path);
+        const query = if (from_path.len > 0) from_path else ctx.query;
         var best: ?*const RouteEntry = null;
         var best_score: i64 = -1;
 
@@ -732,18 +764,31 @@ pub const Router = struct {
                 .allocator = ctx.allocator,
                 .headers = ctx.headers,
                 .body = ctx.body,
-                .path = path,
+                .path = clean,
+                .query = query,
                 .method = method,
                 .io = ctx.io,
                 .userData = entry.userData,
+                .peerAddress = ctx.peerAddress,
+                .isTls = ctx.isTls,
+                .trustForwarded = ctx.trustForwarded,
+                .activeRouter = ctx.activeRouter,
             };
 
-            if (matchPattern(&entry.pattern, path, &ctx_params)) {
+            if (matchPattern(&entry.pattern, clean, &ctx_params)) {
                 const score: i64 = @intCast(entry.priority);
                 if (score > best_score) {
                     best_score = score;
                     best = entry;
+                    const saved_router = ctx.activeRouter;
+                    const saved_handler = ctx.activeHandler;
+                    const saved_mw = ctx.middlewareIndex;
                     ctx.* = ctx_params;
+                    // match() must not clobber dispatch bookkeeping; dispatch
+                    // sets activeHandler/middlewareIndex itself.
+                    ctx.activeRouter = saved_router;
+                    ctx.activeHandler = saved_handler;
+                    ctx.middlewareIndex = saved_mw;
                 }
             }
         }
@@ -772,7 +817,8 @@ pub const Router = struct {
 };
 
 fn matchPattern(pat: *const Pattern, path: []const u8, ctx: *Context) bool {
-    var path_it = std.mem.splitScalar(u8, path, '/');
+    const clean = cleanRequestPath(path);
+    var path_it = std.mem.splitScalar(u8, clean, '/');
     var seg_idx: usize = 0;
 
     while (path_it.next()) |path_seg| {
@@ -793,9 +839,10 @@ fn matchPattern(pat: *const Pattern, path: []const u8, ctx: *Context) bool {
             },
             .wildcard => {
                 // Wildcard matches everything remaining in the path from this segment on
+                // (nested slugs preserved, query already stripped via clean).
                 if (ctx.paramCount < 16) {
-                    const seg_start = @intFromPtr(path_seg.ptr) - @intFromPtr(path.ptr);
-                    const remainder = path[seg_start..];
+                    const seg_start = @intFromPtr(path_seg.ptr) - @intFromPtr(clean.ptr);
+                    const remainder = clean[seg_start..];
                     ctx.params[ctx.paramCount] = .{ .name = seg.text, .value = remainder };
                     ctx.paramCount += 1;
                 }
@@ -807,6 +854,34 @@ fn matchPattern(pat: *const Pattern, path: []const u8, ctx: *Context) bool {
 
     // All path segments consumed — check all pattern segments consumed
     return seg_idx == pat.count;
+}
+
+/// Strips query string and fragment for route matching.
+/// "/users/42?foo=bar#sec" -> "/users/42", "/" stays "/".
+fn cleanRequestPath(path: []const u8) []const u8 {
+    if (std.mem.indexOfAny(u8, path, "?#")) |idx| return path[0..idx];
+    return path;
+}
+
+/// Returns the raw query string without '?' and without fragment.
+fn queryStringOf(path: []const u8) []const u8 {
+    const q = std.mem.indexOfScalar(u8, path, '?') orelse return "";
+    var rest = path[q + 1 ..];
+    if (std.mem.indexOfScalar(u8, rest, '#')) |hend| rest = rest[0..hend];
+    return rest;
+}
+
+fn lookupQuery(query: []const u8, name: []const u8) ?[]const u8 {
+    var iter = std.mem.splitScalar(u8, query, '&');
+    while (iter.next()) |pair| {
+        if (pair.len == 0) continue;
+        if (std.mem.indexOfScalar(u8, pair, '=')) |eq| {
+            if (std.mem.eql(u8, pair[0..eq], name)) return pair[eq + 1 ..];
+        } else if (std.mem.eql(u8, pair, name)) {
+            return "";
+        }
+    }
+    return null;
 }
 
 // Tests
@@ -931,4 +1006,104 @@ test "context trusted proxy and scheme detection" {
         try std.testing.expectEqualStrings("203.0.113.195", ctx.remoteAddress().?);
         try std.testing.expectEqualStrings("example.com", ctx.host().?);
     }
+}
+
+test "matches with query string and exposes queryParam" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    try router.get("/users/{id}", dummyHandler);
+    var ctx = Context{ .allocator = a };
+    const h = router.match(.GET, "/users/42?foo=bar&baz=qux", &ctx);
+    try std.testing.expect(h != null);
+    try std.testing.expectEqualStrings("42", ctx.param("id").?);
+    try std.testing.expectEqualStrings("/users/42", ctx.path);
+    try std.testing.expectEqualStrings("bar", ctx.queryParam("foo").?);
+    try std.testing.expectEqualStrings("qux", ctx.queryParam("baz").?);
+}
+
+test "transport query field survives match on clean path" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    try router.get("/search", dummyHandler);
+    var ctx = Context{ .allocator = a, .path = "/search", .query = "q=zig&page=2", .method = .GET };
+    const h = router.match(.GET, "/search", &ctx);
+    try std.testing.expect(h != null);
+    try std.testing.expectEqualStrings("zig", ctx.queryParam("q").?);
+    try std.testing.expectEqualStrings("2", ctx.queryParam("page").?);
+}
+
+test "HEAD falls back to GET handler" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    try router.get("/asset", dummyHandler);
+    var ctx = Context{ .allocator = a, .method = .HEAD };
+    const h = router.match(.HEAD, "/asset", &ctx);
+    try std.testing.expect(h != null);
+    // Original method preserved for transport body-stripping.
+    try std.testing.expectEqual(Method.HEAD, ctx.method);
+}
+
+test "registration rejects query and fragment in patterns" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    try std.testing.expectError(RouteError.InvalidPattern, router.get("/users?x=1", dummyHandler));
+    try std.testing.expectError(RouteError.InvalidPattern, router.get("/users#frag", dummyHandler));
+}
+
+test "duplicate detection ignores query strings" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    try router.get("/users/{id}", dummyHandler);
+    try std.testing.expect(router.hasConflict(.GET, "/users/{other}?x=1"));
+    try std.testing.expect(router.remove(.GET, "/users/{other}?x=1"));
+    try std.testing.expect(!router.hasConflict(.GET, "/users/{id}"));
+}
+
+test "nested slugs and wildcard remainder" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    try router.get("/a/{x}/c/{y}", dummyHandler);
+    try router.get("/files/*path", dummyHandler);
+
+    var ctx1 = Context{ .allocator = a };
+    _ = router.match(.GET, "/a/1/c/2", &ctx1);
+    try std.testing.expectEqualStrings("1", ctx1.param("x").?);
+    try std.testing.expectEqualStrings("2", ctx1.param("y").?);
+
+    var ctx2 = Context{ .allocator = a };
+    _ = router.match(.GET, "/files/a/b/c?x=1", &ctx2);
+    try std.testing.expectEqualStrings("a/b/c", ctx2.param("path").?);
+
+    // Same nested shape with different param names is a duplicate.
+    try std.testing.expectError(RouteError.DuplicateRoute, router.get("/a/{p}/c/{q}", dummyHandler));
+}
+
+test "match preserves TLS and peer fields" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    try router.get("/secure", dummyHandler);
+    var ctx = Context{
+        .allocator = a,
+        .peerAddress = "10.0.0.1",
+        .isTls = true,
+        .trustForwarded = true,
+    };
+    _ = router.match(.GET, "/secure", &ctx);
+    try std.testing.expect(ctx.isTls);
+    try std.testing.expectEqualStrings("10.0.0.1", ctx.peerAddress);
+    try std.testing.expect(ctx.trustForwarded);
 }

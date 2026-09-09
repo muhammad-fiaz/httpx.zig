@@ -140,7 +140,8 @@ pub const Stream = struct {
                     _ = self.pending.orderedRemove(i);
                     continue;
                 }
-                const keep = cur.data[(prev_end - cur.offset)..];
+                const trim_front: usize = @intCast(prev_end - cur.offset);
+                const keep = cur.data[trim_front..];
                 const moved = try self.allocator.dupe(u8, keep);
                 self.allocator.free(cur.data);
                 self.pending.items[i] = .{ .offset = prev_end, .data = moved };

@@ -24,11 +24,11 @@ pub const Config = struct {
 };
 
 pub const Stats = struct {
-    submitted: std.atomic.Value(u64) = .init(0),
-    completed: std.atomic.Value(u64) = .init(0),
-    failed: std.atomic.Value(u64) = .init(0),
-    cancelled: std.atomic.Value(u64) = .init(0),
-    rejected: std.atomic.Value(u64) = .init(0),
+    submitted: std.atomic.Value(usize) = .init(0),
+    completed: std.atomic.Value(usize) = .init(0),
+    failed: std.atomic.Value(usize) = .init(0),
+    cancelled: std.atomic.Value(usize) = .init(0),
+    rejected: std.atomic.Value(usize) = .init(0),
 
     pub fn snapshot(self: *const Stats) Stats {
         return .{
