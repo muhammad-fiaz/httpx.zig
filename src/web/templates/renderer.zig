@@ -510,26 +510,15 @@ pub const Renderer = struct {
     filters: ?*const FilterRegistry = null,
     globals: ?*const GlobalMap = null,
 
-    /// Renders a template AST directly to any writer.
+    /// Renders a template AST directly to any writer. This is the single
+    /// render entry point; custom filters and globals come from the
+    /// renderer's own registry pointers.
     pub fn render(
         self: Renderer,
         ast: *const TemplateAst,
         ctx: *const Context,
         provider: ?TemplateProvider,
         writer: anytype,
-    ) !void {
-        try self.renderWithFilters(ast, ctx, provider, writer, self.filters, self.globals);
-    }
-
-    /// Renders with explicit filter registry (custom filters overlay builtins).
-    pub fn renderWithFilters(
-        self: Renderer,
-        ast: *const TemplateAst,
-        ctx: *const Context,
-        provider: ?TemplateProvider,
-        writer: anytype,
-        filters: ?*const FilterRegistry,
-        globals: ?*const GlobalMap,
     ) !void {
         var depth: usize = 0;
         var chain = InheritChain{};
@@ -546,8 +535,8 @@ pub const Renderer = struct {
             .inheritanceDepth = &depth,
             .inheritChain = &chain,
             .macros = &macros,
-            .filters = filters,
-            .globals = globals,
+            .filters = self.filters,
+            .globals = self.globals,
             .scope = &scope,
             .strict = self.options.strictUndefined,
             .alloc = arena_alloc,

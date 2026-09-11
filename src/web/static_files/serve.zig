@@ -655,7 +655,7 @@ fn respondWithEmbedded(ctx: *Context, st: *State, asset: @import("../assets.zig"
             return .{
                 .status = 206,
                 .contentType = asset.contentType,
-                .body = if (is_head) "" else asset.content[r.start .. r.end + 1],
+                .body = if (is_head) "" else asset.content[@intCast(r.start)..@intCast(r.end + 1)],
                 .headers = headers.items,
             };
         }

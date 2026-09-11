@@ -16,8 +16,8 @@ const clock = @import("../../common/clock.zig");
 const session_mod = @import("connection.zig");
 const Session = session_mod.Session;
 const hpack = @import("hpack.zig");
-const tlsClientMod = @import("../tls/tcp_client.zig");
-const tlsServerMod = @import("../tls/tcp_tls.zig");
+const tlsClientMod = @import("../tls/tcpClient.zig");
+const tlsServerMod = @import("../tls/tcpTls.zig");
 const tlsSessionMod = @import("../tls/session.zig");
 pub const Error = error{
     ProtocolViolation,

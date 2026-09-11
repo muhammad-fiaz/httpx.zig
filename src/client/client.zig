@@ -1812,7 +1812,7 @@ test "client get over https negotiates h2 end to end" {
     defer ctx.deinit();
 
     const h2t = @import("../protocols/http2/transport.zig");
-    const tlsServerMod = @import("../protocols/tls/tcp_tls.zig");
+    const tlsServerMod = @import("../protocols/tls/tcpTls.zig");
     const cert_pem = @embedFile("../protocols/tls/testdata/localhost_cert.pem");
     const key_pem = @embedFile("../protocols/tls/testdata/localhost_key.pem");
 
@@ -2006,7 +2006,7 @@ test "client pools h2-tls sessions across sequential requests" {
     defer ctx.deinit();
 
     const h2t = @import("../protocols/http2/transport.zig");
-    const tlsServerMod = @import("../protocols/tls/tcp_tls.zig");
+    const tlsServerMod = @import("../protocols/tls/tcpTls.zig");
     const cert_pem = @embedFile("../protocols/tls/testdata/localhost_cert.pem");
     const key_pem = @embedFile("../protocols/tls/testdata/localhost_key.pem");
 
@@ -2088,7 +2088,7 @@ test "client resumes h2-tls across fresh handshakes via session cache" {
     defer ctx.deinit();
 
     const h2t = @import("../protocols/http2/transport.zig");
-    const tlsServerMod = @import("../protocols/tls/tcp_tls.zig");
+    const tlsServerMod = @import("../protocols/tls/tcpTls.zig");
     const cert_pem = @embedFile("../protocols/tls/testdata/localhost_cert.pem");
     const key_pem = @embedFile("../protocols/tls/testdata/localhost_key.pem");
 
@@ -2369,7 +2369,7 @@ test "client get over mtls presents certificate through high-level api" {
                 return;
             };
             defer conn.close();
-            const tlsServerMod = @import("../protocols/tls/tcp_tls.zig");
+            const tlsServerMod = @import("../protocols/tls/tcpTls.zig");
             var srv = tlsServerMod.TlsServer.init(.{
                 .allocator = std.heap.page_allocator,
                 .defaultIdentity = .{ .certChainPem = cert_pem, .privateKeyPem = key_pem },

@@ -46,15 +46,15 @@ its own TLS 1.3 handshake paths**, including:
 ```
 tls.zig              -- Listener, TlsServer/TlsClient facades
 ├── engine.zig       -- TLS 1.3 handshake engine (both roles), key schedule
-├── tcp_tls.zig      -- TLS 1.3 server transport (records, mTLS enforcement)
-├── tcp_client.zig   -- TLS 1.3 client transport (ALPN offer, chain verify)
-├── quic_tls.zig     -- RFC 9001 key schedule for TLS-in-QUIC
+├── tcpTls.zig      -- TLS 1.3 server transport (records, mTLS enforcement)
+├── tcpClient.zig   -- TLS 1.3 client transport (ALPN offer, chain verify)
+├── quicTls.zig     -- RFC 9001 key schedule for TLS-in-QUIC
 ├── transport.zig    -- std-based HTTPS/1.1 client transport
 ├── handshake.zig    -- handshake message encode/decode, transcript
 ├── record.zig       -- record-layer AEAD encrypt/decrypt
 ├── certificate.zig  -- X.509 parsing (+ structural DER guard)
 ├── verify.zig       -- chain/hostname verification
-├── trust_store.zig  -- system + custom trust anchors
+├── trustStore.zig  -- system + custom trust anchors
 ├── config.zig       -- ServerConfig/ClientConfig (incl. mTLS fields)
 ├── alpn.zig         -- ALPN protocol negotiation
 └── errors.zig       -- Unified TLS error set and alert conversion
@@ -108,7 +108,7 @@ var res = try client.get("https://127.0.0.1:8443/", .{
 
 ## ServerTlsConfig
 
-Server identity and ALPN preference (`src/protocols/tls/tcp_tls.zig`):
+Server identity and ALPN preference (`src/protocols/tls/tcpTls.zig`):
 
 ```zig
 pub const TlsServerConfig = struct {

@@ -45,7 +45,7 @@ fn homePageHandler(_: *httpx.Context) anyerror!httpx.Response {
         \\<body>
         \\  <div class="card">
         \\    <h1>httpx.zig</h1>
-         \\    <p>Actively developed HTTP/1.x, HTTP/2, HTTP/3 client &amp; server for Zig.</p>
+        \\    <p>Actively developed HTTP/1.x, HTTP/2, HTTP/3 client &amp; server for Zig.</p>
         \\    <div>
         \\      <span class="badge">HTTP/1.1</span>
         \\      <span class="badge">HTTP/2</span>

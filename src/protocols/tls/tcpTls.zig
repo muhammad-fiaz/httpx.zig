@@ -26,7 +26,7 @@ const config_mod = @import("config.zig");
 const session_mod = @import("session.zig");
 const cert_mod = @import("certificate.zig");
 const verify_mod = @import("verify.zig");
-const trustStore_mod = @import("trust_store.zig");
+const trustStoreMod = @import("trustStore.zig");
 const clock_mod = @import("../../common/clock.zig");
 const address_mod = @import("../../net/address.zig");
 const tcp = @import("../../sockets/tcp.zig");
@@ -518,7 +518,7 @@ pub const TlsServer = struct {
             if (self.config.clientAuth == .required) return error.ClientCertificateRequired;
         } else {
             const ca_pem = self.config.clientCaPem orelse return error.ClientCertificateInvalid;
-            var store = trustStore_mod.TrustStore.init(a, io);
+            var store = trustStoreMod.TrustStore.init(a, io);
             defer store.deinit();
             // Pre-validate CA blocks structurally: malformed operator
             // configuration must fail closed, never panic downstream.

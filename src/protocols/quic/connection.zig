@@ -13,7 +13,7 @@
 //! The TlsDriver interface lets the transport be fully exercised without
 //! the TLS 1.3 engine; the loopback tests below wire the TLS engine
 //! (protocols/tls/engine.zig) through CRYPTO frames, with QUIC packet
-//! keys derived via protocols/tls/quic_tls.zig (RFC 9001).
+//! keys derived via protocols/tls/quicTls.zig (RFC 9001).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -28,7 +28,7 @@ const loss_mod = @import("loss.zig");
 const params_mod = @import("params.zig");
 const qstream = @import("stream.zig");
 const tls_engine = @import("../tls/engine.zig");
-const qtls = @import("../tls/quic_tls.zig");
+const qtls = @import("../tls/quicTls.zig");
 const ths = @import("../tls/handshake.zig");
 const h3conn = @import("../http3/connection.zig");
 const h3frame = @import("../http3/frame.zig");
@@ -947,7 +947,7 @@ test "loopback connection pair completes protected handshake and stream" {
 
 // TLS-in-QUIC integration: the TLS 1.3 engine drives both ends
 // through CRYPTO frames, with QUIC packet keys derived from the live
-// handshake via tls/quic_tls.zig (RFC 9001 Section 7). Packet protection
+// handshake via tls/quicTls.zig (RFC 9001 Section 7). Packet protection
 // (AEAD + header protection) applies throughout; a forged or reordered
 // byte fails packet authentication or Finished verification instead of
 // silently passing.

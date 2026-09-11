@@ -8,7 +8,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../../sockets/tcp.zig");
 const address_mod = @import("../../net/address.zig");
-const tlsServerMod = @import("../tls/tcp_tls.zig");
+const tlsServerMod = @import("../tls/tcpTls.zig");
 
 pub const Error = error{ AcceptFailed, ReadFailed, WriteFailed, ProtocolError, OutOfMemory, TlsHandshakeFailed };
 

@@ -1,6 +1,6 @@
 //! TLS 1.3 client over TCP with ALPN + chain verification (RFC 8446).
 //!
-//! Native counterpart to tcp_tls.zig (server): drives the handshake engine
+//! Native counterpart to tcpTls.zig (server): drives the handshake engine
 //! as a client, offers ALPN, verifies the server chain against system or
 //! custom trust with hostname checks, and exchanges application records.
 //! Used by the HTTP client for explicit HTTP/2-over-TLS (and anywhere the
@@ -17,11 +17,11 @@ const record_mod = @import("record.zig");
 const alpn_mod = @import("alpn.zig");
 const cert_mod = @import("certificate.zig");
 const verify_mod = @import("verify.zig");
-const trustStore_mod = @import("trust_store.zig");
+const trustStoreMod = @import("trustStore.zig");
 const clock_mod = @import("../../common/clock.zig");
 const address_mod = @import("../../net/address.zig");
 const tcp = @import("../../sockets/tcp.zig");
-const tcpTls = @import("tcp_tls.zig");
+const tcpTls = @import("tcpTls.zig");
 const transport_mod = @import("transport.zig");
 const session_mod = @import("session.zig");
 

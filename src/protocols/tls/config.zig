@@ -12,7 +12,7 @@ const Allocator = std.mem.Allocator;
 pub const alpn = @import("alpn.zig");
 pub const certMod = @import("certificate.zig");
 pub const keyMod = @import("key.zig");
-pub const trustMod = @import("trust_store.zig");
+pub const trustMod = @import("trustStore.zig");
 pub const errorsMod = @import("errors.zig");
 pub const sessionMod = @import("session.zig");
 

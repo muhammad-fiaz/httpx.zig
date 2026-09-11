@@ -496,7 +496,7 @@ test {
     _ = @import("protocols/quic/connection_id.zig");
     _ = @import("protocols/quic/path.zig");
     _ = @import("protocols/quic/transport.zig");
-    _ = @import("protocols/tls/quic_tls.zig");
+    _ = @import("protocols/tls/quicTls.zig");
     _ = @import("protocols/http3/frame.zig");
     _ = @import("protocols/http3/qpack.zig");
     _ = @import("protocols/http3/connection.zig");
@@ -507,9 +507,9 @@ test {
     _ = @import("protocols/tls/record.zig");
     _ = @import("protocols/tls/handshake.zig");
     _ = @import("protocols/tls/engine.zig");
-    _ = @import("protocols/tls/quic_tls.zig");
-    _ = @import("protocols/tls/tcp_tls.zig");
-    _ = @import("protocols/tls/tcp_client.zig");
+    _ = @import("protocols/tls/quicTls.zig");
+    _ = @import("protocols/tls/tcpTls.zig");
+    _ = @import("protocols/tls/tcpClient.zig");
     _ = @import("protocols/tls/session.zig");
     _ = @import("protocols/tls/tls.zig");
     _ = @import("protocols/tls/transport.zig");

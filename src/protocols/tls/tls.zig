@@ -12,7 +12,7 @@
 
 pub const config = @import("config.zig");
 pub const certificate = @import("certificate.zig");
-pub const trustStore = @import("trust_store.zig");
+pub const trustStore = @import("trustStore.zig");
 pub const verify = @import("verify.zig");
 pub const key = @import("key.zig");
 pub const errors = @import("errors.zig");
@@ -21,9 +21,9 @@ pub const record = @import("record.zig");
 pub const handshake = @import("handshake.zig");
 pub const engine = @import("engine.zig");
 pub const transport = @import("transport.zig");
-pub const tcpTls = @import("tcp_tls.zig");
-pub const tcpClient = @import("tcp_client.zig");
-pub const quicTls = @import("quic_tls.zig");
+pub const tcpTls = @import("tcpTls.zig");
+pub const tcpClient = @import("tcpClient.zig");
+pub const quicTls = @import("quicTls.zig");
 pub const session = @import("session.zig");
 
 // Canonical types

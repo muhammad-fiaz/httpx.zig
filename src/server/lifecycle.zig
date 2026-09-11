@@ -28,7 +28,7 @@ const http_version = @import("../common/http_version.zig");
 pub const HttpVersion = http_version.HttpVersion;
 const watcher_mod = @import("../web/watcher/backend.zig");
 const templates_mod = @import("../web/templates/templates.zig");
-const tcp_tls_mod = @import("../protocols/tls/tcp_tls.zig");
+const tcpTlsMod = @import("../protocols/tls/tcpTls.zig");
 const tls_config_mod = @import("../protocols/tls/config.zig");
 const fs_mod = @import("../utils/fs.zig");
 const alpn_mod = @import("../protocols/tls/alpn.zig");
@@ -39,7 +39,7 @@ pub const maxHeadBytes = 32 * 1024;
 /// Unified abstraction over plain TCP sockets and encrypted TLS server connections.
 pub const StreamConn = union(enum) {
     plain: *tcp.Socket,
-    tls: *tcp_tls_mod.TlsServerConn,
+    tls: *tcpTlsMod.TlsServerConn,
 
     pub fn read(self: StreamConn, buf: []u8) anyerror!usize {
         return switch (self) {
@@ -219,7 +219,7 @@ pub const Server = struct {
     /// `hotReload` (CSS swap) vs `reload` (full page) payloads.
     liveReloadStrategy: std.atomic.Value(u8) = .init(1),
     templateEngine: ?*templates_mod.Engine = null,
-    tlsServer: ?tcp_tls_mod.TlsServer = null,
+    tlsServer: ?tcpTlsMod.TlsServer = null,
     tlsCertPemLoaded: ?[]const u8 = null,
     tlsKeyPemLoaded: ?[]const u8 = null,
     metricsRegistry: metrics_mod.Registry = .{},
@@ -330,7 +330,7 @@ pub const Server = struct {
             templateEngine = eng;
         }
 
-        var tlsServer_opt: ?tcp_tls_mod.TlsServer = null;
+        var tlsServer_opt: ?tcpTlsMod.TlsServer = null;
         var loadedCertPem: ?[]const u8 = null;
         var loadedKeyPem: ?[]const u8 = null;
 
@@ -354,7 +354,7 @@ pub const Server = struct {
                         loadedKeyPem = fs_mod.readFileLimited(allocator, key, 10 * 1024 * 1024) catch null;
                     }
                     if (loadedCertPem != null and loadedKeyPem != null) {
-                        tlsServer_opt = tcp_tls_mod.TlsServer.init(.{
+                        tlsServer_opt = tcpTlsMod.TlsServer.init(.{
                             .allocator = allocator,
                             .defaultIdentity = .{
                                 .certChainPem = loadedCertPem.?,
@@ -598,7 +598,7 @@ pub const Server = struct {
         self.tlsCertPemLoaded = cert_str;
         self.tlsKeyPemLoaded = key_str;
 
-        self.tlsServer = tcp_tls_mod.TlsServer.init(.{
+        self.tlsServer = tcpTlsMod.TlsServer.init(.{
             .allocator = self.allocator,
             .defaultIdentity = .{
                 .certChainPem = cert_str,

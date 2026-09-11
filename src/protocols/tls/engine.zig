@@ -22,7 +22,7 @@ const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const P256 = std.crypto.ecc.P256;
 const certMod = @import("certificate.zig");
 const verify_mod = @import("verify.zig");
-const trustStoreMod = @import("trust_store.zig");
+const trustStoreMod = @import("trustStore.zig");
 const clock_mod = @import("../../common/clock.zig");
 
 const alpn_mod = @import("alpn.zig");

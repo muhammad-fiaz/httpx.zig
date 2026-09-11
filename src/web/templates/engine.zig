@@ -172,7 +172,10 @@ pub const Engine = struct {
         var ctx = try context_mod.Context.init(self.allocator, data);
         defer ctx.deinit();
 
-        try self.renderer.renderWithFilters(ast, &ctx, self.provider(), writer, &self.filters, &self.globals);
+        var renderer = self.renderer;
+        renderer.filters = &self.filters;
+        renderer.globals = &self.globals;
+        try renderer.render(ast, &ctx, self.provider(), writer);
     }
 
     /// Renders a template to an allocated string.
@@ -203,7 +206,10 @@ pub const Engine = struct {
         var ctx = try context_mod.Context.init(self.allocator, data);
         defer ctx.deinit();
 
-        try self.renderer.renderWithFilters(&ast, &ctx, self.provider(), writer, &self.filters, &self.globals);
+        var renderer = self.renderer;
+        renderer.filters = &self.filters;
+        renderer.globals = &self.globals;
+        try renderer.render(&ast, &ctx, self.provider(), writer);
     }
 
     /// Invalidate a template and all its dependents when a watched file changes.

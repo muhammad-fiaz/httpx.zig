@@ -18,7 +18,7 @@ const Allocator = std.mem.Allocator;
 const tcp = @import("../../sockets/tcp.zig");
 const addressMod = @import("../../net/address.zig");
 const netResolve = @import("../../net/resolve.zig");
-const tlsClientMod = @import("../tls/tcp_client.zig");
+const tlsClientMod = @import("../tls/tcpClient.zig");
 const tlsTransport = @import("../tls/transport.zig");
 
 pub const Options = struct {
