@@ -1,0 +1,9 @@
+# GitGuardian scan configuration.
+#
+# src/protocols/tls/testdata holds a self-signed loopback fixture key
+# (localhost_key.pem) generated for mTLS tests only. It is not a real
+# credential and must not fail CI.
+version: 2
+secret:
+  ignored-paths:
+    - "src/protocols/tls/testdata/**"

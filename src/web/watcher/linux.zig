@@ -10,8 +10,8 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
-const O_NONBLOCK: u32 = 0o2000;
-const O_CLOEXEC: u32 = 0o2000000;
+const IN_NONBLOCK: u32 = 0o4000;
+const IN_CLOEXEC: u32 = 0o2000000;
 
 pub const IN_ACCESS: u32 = 0x00000001;
 pub const IN_MODIFY: u32 = 0x00000002;
@@ -57,6 +57,17 @@ pub const RawKind = enum {
     ignored,
 };
 
+/// Converts a raw Linux syscall return into a file descriptor.
+/// Raw syscalls encode -errno in the return value; anything negative is
+/// a failure. Never @intCast blindly: a missed error would abort the
+/// process with "integer does not fit in destination type" instead of
+/// surfacing a catchable WatchInitFailed.
+fn syscallFd(rc: usize) !std.posix.fd_t {
+    const signed: isize = @bitCast(rc);
+    if (signed < 0) return error.WatchInitFailed;
+    return @intCast(signed);
+}
+
 pub const Backend = struct {
     allocator: Allocator,
     io: std.Io,
@@ -73,10 +84,7 @@ pub const Backend = struct {
             .watches = std.AutoHashMap(i32, []u8).init(allocator),
         };
         errdefer self.deinit();
-        const rc = linux.inotify_init1(O_NONBLOCK | O_CLOEXEC);
-        const err = std.posix.errno(rc);
-        if (err != .SUCCESS) return error.WatchInitFailed;
-        self.fd = @intCast(rc);
+        self.fd = try syscallFd(linux.inotify_init1(IN_NONBLOCK | IN_CLOEXEC));
         self.root = try allocator.dupe(u8, root);
         try self.watchRecursive(root);
         return self;
@@ -98,9 +106,7 @@ pub const Backend = struct {
     fn watchDir(self: *Backend, path: []const u8) void {
         const cpath = self.allocator.dupeZ(u8, path) catch return;
         defer self.allocator.free(cpath);
-        const rc = linux.inotify_add_watch(self.fd, cpath, WATCH_MASK | IN_ONLYDIR);
-        if (std.posix.errno(rc) != .SUCCESS) return;
-        const wd: i32 = @intCast(rc);
+        const wd: i32 = syscallFd(linux.inotify_add_watch(self.fd, cpath, WATCH_MASK | IN_ONLYDIR)) catch return;
         if (self.watches.getPtr(wd)) |old| {
             self.allocator.free(old.*);
             old.* = self.allocator.dupe(u8, path) catch return;

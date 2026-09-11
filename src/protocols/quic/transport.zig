@@ -18,7 +18,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const udp_mod = @import("../../sockets/udp.zig");
 const conn_mod = @import("connection.zig");
-const tcp_mod = @import("../../sockets/tcp.zig");
 const sync_mod = @import("../../common/sync.zig");
 const clock_mod = @import("../../common/clock.zig");
 const Connection = conn_mod.Connection;
@@ -174,9 +173,12 @@ pub const Endpoint = struct {
     pub fn initPort(allocator: Allocator, io: std.Io, conn: *Connection, port: u16) !Endpoint {
         _ = allocator;
         const sock = try udp_mod.UdpSocket.bind(io, port);
-        // Bound waits so pumpIn drains-and-yields instead of blocking
-        // forever once the peer goes quiet.
-        tcp_mod.setTimeouts(sock.socket.handle, 250);
+        // No SO_RCVTIMEO on purpose: a receive timeout surfaces as
+        // error.WouldBlock, which the Threaded std.Io backend treats as
+        // unreachable and aborts the process. The socket stays fully
+        // blocking; Pump readers idle in receive until a datagram (or
+        // the stop() wakeup) arrives, and pumpIn is only called where
+        // progress is guaranteed.
         return .{ .conn = conn, .sock = sock, .io = io };
     }
 
@@ -194,8 +196,7 @@ pub const Endpoint = struct {
     /// Receives up to `max` datagrams into the connection. Returns the
     /// number processed. Blocks indefinitely when the peer is quiet (see
     /// `UdpSocket.receive`), so only call this where progress is
-    /// guaranteed (data known present, as in the Initial-ping test) or
-    /// from a `Pump` reader thread woken by socket close.
+    /// guaranteed (data known present, as in the Initial-ping test).
     /// Deadline-driven code uses `Pump.next` instead.
     /// Non-fatal per-datagram errors are counted and skipped
     /// (hostile-input tolerance); fatal connection errors surface.

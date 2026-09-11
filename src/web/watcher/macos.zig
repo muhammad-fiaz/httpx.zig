@@ -78,8 +78,8 @@ pub const Backend = struct {
             self.allocator.free(w.path);
         }
         self.dirs.deinit(self.allocator);
-        var kit = self.by_path.keyIterator();
-        while (kit.next()) |k| self.allocator.free(k.*);
+        // by_path keys borrow dirs[].path (no separate allocation),
+        // so only the table itself is released here.
         self.by_path.deinit();
         if (self.kq >= 0) {
             _ = close(self.kq);
@@ -92,19 +92,25 @@ pub const Backend = struct {
         const cpath = self.allocator.dupeZ(u8, path) catch return;
         defer self.allocator.free(cpath);
         const fd = std.posix.openat(std.posix.AT.FDCWD, cpath, .{ .ACCMODE = .RDONLY }, 0) catch return;
-        errdefer _ = close(fd);
+        // Single ownership: dirs[].path owns the bytes; by_path only
+        // borrows the slice. Freeing both (as separate frees) would
+        // double-free the same allocation on deinit/removeWatch.
         const owned_path = self.allocator.dupe(u8, path) catch {
             _ = close(fd);
             return;
         };
-        errdefer self.allocator.free(owned_path);
         const idx = self.dirs.items.len;
         self.dirs.append(self.allocator, .{ .fd = fd, .path = owned_path }) catch {
+            self.allocator.free(owned_path);
             _ = close(fd);
             return;
         };
-        errdefer _ = self.dirs.pop();
-        self.by_path.put(owned_path, idx) catch return;
+        self.by_path.put(owned_path, idx) catch {
+            _ = self.dirs.pop();
+            self.allocator.free(owned_path);
+            _ = close(fd);
+            return;
+        };
         var change = std.c.Kevent{
             .ident = @intCast(fd),
             .filter = EVFILT_VNODE,
@@ -118,6 +124,7 @@ pub const Backend = struct {
         if (rc < 0) {
             _ = self.by_path.remove(owned_path);
             _ = self.dirs.pop();
+            self.allocator.free(owned_path);
             _ = close(fd);
             return;
         }
@@ -173,9 +180,12 @@ pub const Backend = struct {
             if (idx >= self.dirs.items.len) continue;
             const dir_path = self.dirs.items[idx].path;
             if (ev.fflags & (NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE) != 0) {
+                // Copy the path BEFORE removeWatch frees it.
+                const gone = try allocator.dupe(u8, dir_path);
+                errdefer allocator.free(gone);
                 self.removeWatch(idx);
                 try out.append(allocator, .{
-                    .dir = try allocator.dupe(u8, dir_path),
+                    .dir = gone,
                     .kind = .dir_gone,
                 });
                 continue;
@@ -194,9 +204,9 @@ pub const Backend = struct {
         if (idx >= self.dirs.items.len) return;
         const removed = self.dirs.orderedRemove(idx);
         _ = close(removed.fd);
-        if (self.by_path.fetchRemove(removed.path)) |kv| {
-            self.allocator.free(kv.key);
-        }
+        // Borrowed map key: drop the entry without freeing; the bytes
+        // are freed once below via removed.path.
+        _ = self.by_path.remove(removed.path);
         self.allocator.free(removed.path);
         var it = self.by_path.iterator();
         while (it.next()) |entry| {
