@@ -30,14 +30,14 @@ pub fn main() !void {
 
     var router = httpx.Router.init(allocator);
     defer router.deinit();
-    try router.addMeta(.GET, "/widgets", listHandler, .{
+    try router.add(.GET, "/widgets", listHandler, .{ .meta = .{
         .summary = "List all widgets",
         .description = "Returns the full set of widgets.",
-    });
-    try router.addMeta(.GET, "/widgets/{id}", getHandler, .{
+    } });
+    try router.add(.GET, "/widgets/{id}", getHandler, .{ .meta = .{
         .summary = "Fetch a single widget",
         .description = "Looks up a widget by its opaque id.",
-    });
+    } });
 
     const spec = try httpx.openapi.generate(&router, .{
         .title = "Widgets API",

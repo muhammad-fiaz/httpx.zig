@@ -4,7 +4,8 @@ Cryptographic verification happens inline during downloads via
 `VerifyOptions`. See `examples/download_verify.zig`.
 
 ```zig
-const res = try client.download(url, "downloads/file.pdf", .{
+const res = try client.download(url, .{
+    .path = "downloads/file.pdf",
     .verify = .{
         .sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
         .minSize = 100,

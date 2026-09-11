@@ -16,8 +16,8 @@ pub fn main() !void {
     // Uses .resumePartial (short canonical resume policy)
     const result = client.download(
         sampleUrl,
-        "downloads/resumable-sample.pdf",
         .{
+            .path = "downloads/resumable-sample.pdf",
             .existing = .resumePartial,
             .progress = .auto,
             .maxRetries = 3,

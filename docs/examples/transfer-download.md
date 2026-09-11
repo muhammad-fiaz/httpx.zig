@@ -7,7 +7,8 @@ File downloads with progress and verification. See
 var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 
-const res = try client.download(url, "downloads/", .{
+const res = try client.download(url, .{
+    .path = "downloads/",
     .progress = .auto,
     .existing = .overwrite,
     .createDirs = true,

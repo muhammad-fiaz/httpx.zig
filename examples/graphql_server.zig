@@ -90,7 +90,7 @@ pub fn main() !void {
     const schema = httpx.graphql.Schema.init(allocator, .{
         .query = QueryType,
         .types = &.{UserType},
-        .enable_introspection = true,
+        .enableIntrospection = true,
     });
     try httpx.graphql.mount(&server.router, schema, .{ .endpoint = "/graphql" });
 

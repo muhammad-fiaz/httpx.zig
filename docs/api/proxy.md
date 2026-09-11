@@ -31,10 +31,15 @@ pub fn main() !void {
 
 | Scheme | Protocol | DNS Resolution | Description |
 |---|---|---|---|
-| `http://` | HTTP CONNECT | Local | Standard HTTP proxy tunnel |
-| `https://` | HTTP CONNECT | Local | Secure TLS connection to proxy, then CONNECT |
+| `http://` | HTTP CONNECT | Local | Standard HTTP proxy tunnel; `http://user:pass@host:port` sends `Proxy-Authorization: Basic` on CONNECT, `407` surfaces as `error.ProxyAuthRequired` |
 | `socks5://` | SOCKS5 | Local | SOCKS5 protocol with local client DNS resolution |
 | `socks5h://` | SOCKS5H | Remote | SOCKS5 protocol with proxy-side DNS resolution |
+| `socks4://` | SOCKS4 | Local | IPv4 destinations only; USERID informational, no password |
+| `socks4a://` | SOCKS4a | Remote | Hostnames forwarded unresolved (SOCKS5H idea for v4) |
+
+> Note: `https://` proxy URLs are not accepted (`parseProxyUrl` returns
+> `null`); SOCKS4 has no IPv6 representation (rejected loudly). TLS runs
+> end-to-end *through* the CONNECT tunnel to the origin server.
 
 ## Types
 
@@ -42,6 +47,7 @@ pub fn main() !void {
 pub const ProxyKind = enum {
     httpConnect,
     socks5,
+    socks4,
     direct,
 };
 

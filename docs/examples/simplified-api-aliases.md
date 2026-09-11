@@ -18,7 +18,9 @@ defer del.deinit();
 
 Available verbs: `fetch`, `get`, `post`, `put`, `patch`, `delete`, `head`,
 `options`, `trace`, `connect`, `request`, plus `getAll` / `requestAll` for
-batches and `download` / `graphqlQuery` / `resolveHost` helpers.
+batches and `isOnline` / `checkConnectivity` probes. Downloads, GraphQL,
+and DNS live on the client namespace (`client.download`,
+`client.graphql`, `client.resolve`, `client.resolveUrl`).
 
 ## Run
 

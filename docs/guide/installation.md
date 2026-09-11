@@ -9,7 +9,7 @@ This guide covers all supported installation methods for `httpx.zig`.
 
 ::: warning v0.2.0 release and Zig 0.15 deprecation
 `v0.2.0` is the current release and targets Zig `0.16.0+`.
-`v0.1.8` is the previous stable release.
+`v0.1.8` is the previous release.
 Zig `0.15` support is legacy and remains available only through `0.0.7`.
 New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.0**.
 :::
@@ -50,13 +50,13 @@ zig build -Dtarget=aarch64-macos
 
 ## Method 1: Zig Fetch (Recommended)
 
-**Latest Stable Release (v0.2.0)**
+**Latest Release (v0.2.0)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz
 ```
 
-**Previous Stable Release (v0.1.8)**
+**Previous Release (v0.1.8)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.8.tar.gz
@@ -165,30 +165,30 @@ Run these commands from the repository root to verify functionality:
 zig build test
 zig build run-all-examples  # Runs sequentially to prevent parallel compiler OOM / PC crashes
 
-# Cross-target library compile matrix
-zig build build-all-targets
+# Cross-target library compile validation
+zig build build-all-examples -Dtarget=x86_64-linux-gnu
 ```
 
-To validate Linux runtime behavior (not only cross-compilation), build Linux-target artifacts and execute them on Linux/WSL:
+To validate Linux runtime behavior, run the cross-compiled artifacts on Linux/WSL (a foreign-target `zig build test` only compiles; it does not execute):
 
 ```bash
 # Build Linux artifacts
-zig build test -Dtarget=x86_64-linux
-zig build run-all-udp_local -Dtarget=x86_64-linux
+zig build test -Dtarget=x86_64-linux-gnu
+zig build run-simple-get -Dtarget=x86_64-linux-gnu
 
 # Run on Linux/WSL
 ./zig-out/bin/test
-./zig-out/bin/udp_local
+./zig-out/bin/simple-get
 ```
 
 To compile tests or examples for a specific target:
 
 ```bash
-# Cross-target test artifact build
-zig build test -Dtarget=x86-windows
+# Compile tests for 32-bit Windows
+zig build test -Dtarget=x86-windows-gnu
 
-# Cross-target example build
-zig build run-all-udp_local -Dtarget=aarch64-macos
+# Compile an example for macOS ARM64
+zig build run-simple-get -Dtarget=aarch64-macos
 ```
 
 For client requests against external endpoints, prefer explicit timeout and error handling:
@@ -201,4 +201,4 @@ var res = client.get("https://example.com", .{ .timeoutMs = 10_000 }) catch |err
 defer res.deinit();
 ```
 
-`httpx.zig` uses `build-all-targets` as the all-targets validation step.
+`httpx.zig` uses `build-all-examples` with an explicit `-Dtarget=` triple as the cross-target validation step.

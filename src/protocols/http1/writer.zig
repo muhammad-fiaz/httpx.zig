@@ -208,11 +208,11 @@ pub const ResponseOptions = struct {
 fn writeHead(
     out: *std.ArrayList(u8),
     gpa: Allocator,
-    status_line: []const u8,
+    statusLine: []const u8,
     headers: []const Header,
     connection: []const u8,
 ) Error!void {
-    out.appendSlice(gpa, status_line) catch return Error.OutOfMemory;
+    out.appendSlice(gpa, statusLine) catch return Error.OutOfMemory;
     for (headers) |h| try appendHeader(out, gpa, h.name, h.value);
     if (connection.len > 0) try appendHeader(out, gpa, "Connection", connection);
 }
@@ -239,11 +239,11 @@ pub fn buildResponse(
     const reason = if (reasonIn.len > 0) reasonIn else reasonPhrase(statusCode);
 
     var line_buf: [64]u8 = undefined;
-    const status_line = try fmtStatusLine(line_buf[0..], opts.minorVersion, statusCode, reason);
+    const statusLine = try fmtStatusLine(line_buf[0..], opts.minorVersion, statusCode, reason);
 
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
-    try writeHead(&out, allocator, status_line, opts.headers, opts.connection);
+    try writeHead(&out, allocator, statusLine, opts.headers, opts.connection);
 
     const no_body_status = semantics.bodylessStatus(statusCode);
     const wants_body = body != null and body.?.len > 0;
@@ -448,7 +448,7 @@ test "chunked emission with trailers and prohibited filtering" {
     @memcpy(buf[0..out.items.len], out.items);
     const tail = try dec.decode(buf[0..out.items.len]);
     try std.testing.expect(dec.isDone());
-    try std.testing.expectEqual(@as(u64, 11), dec.total_decoded);
+    try std.testing.expectEqual(@as(u64, 11), dec.totalDecoded);
     try std.testing.expectEqual(out.items.len, tail);
 }
 

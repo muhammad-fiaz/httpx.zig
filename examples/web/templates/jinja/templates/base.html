@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>{{ title|default("HTTPX") }}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; margin: 0; }
+    header { border-bottom: 1px solid #334155; padding: 1rem 0; margin-bottom: 2rem; }
+    footer { border-top: 1px solid #334155; padding-top: 1rem; margin-top: 2rem; color: #94a3b8; font-size: 0.9rem; }
+    .card { background: #1e293b; padding: 1rem; border-radius: 8px; border: 1px solid #334155; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h2>{{ heading|default("Users") }}</h2>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer>
+    <p>Rendered with the HTTPX Flask-style template engine</p>
+  </footer>
+</body>
+</html>

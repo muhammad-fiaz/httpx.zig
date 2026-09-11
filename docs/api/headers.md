@@ -19,8 +19,8 @@ pub fn main() !void {
     defer hdrs.deinit();
 
     try hdrs.set("Content-Type", "application/json");
-    try hdrs.add("Accept", "text/html");
-    try hdrs.add("Accept", "application/json");
+    try hdrs.append("Accept", "text/html");
+    try hdrs.append("Accept", "application/json");
 
     // Case-insensitive lookup
     if (hdrs.get("content-type")) |ct| {
@@ -44,35 +44,27 @@ pub const Header = struct {
 
 pub const Headers = struct {
     allocator: Allocator,
-    items: std.ArrayList(Header),
+    entries: std.ArrayList(Header),
 
     pub fn init(allocator: Allocator) Headers;
     pub fn deinit(self: *Headers) void;
-    pub fn add(self: *Headers, name: []const u8, value: []const u8) !void;
     pub fn set(self: *Headers, name: []const u8, value: []const u8) !void;
+    pub fn append(self: *Headers, name: []const u8, value: []const u8) !void;
     pub fn get(self: *const Headers, name: []const u8) ?[]const u8;
-    pub fn delete(self: *Headers, name: []const u8) bool;
-    pub fn has(self: *const Headers, name: []const u8) bool;
+    pub fn getAll(self: *const Headers, allocator: Allocator, name: []const u8) ![]const []const u8;
+    pub fn remove(self: *Headers, name: []const u8) bool;
+    pub fn contains(self: *const Headers, name: []const u8) bool;
+    pub fn count(self: *const Headers) usize;
     pub fn clear(self: *Headers) void;
-    pub fn clone(self: *const Headers) !Headers;
-    pub fn iterator(self: *const Headers) Iterator;
 };
 ```
 
-## Standard Header Constants
+## Header Names
 
-`httpx.headers` exposes canonical compile-time constants for standard HTTP headers:
-
-* `httpx.headers.CONTENT_TYPE`: `"content-type"`
-* `httpx.headers.CONTENT_LENGTH`: `"content-length"`
-* `httpx.headers.AUTHORIZATION`: `"authorization"`
-* `httpx.headers.ACCEPT`: `"accept"`
-* `httpx.headers.ACCEPT_ENCODING`: `"accept-encoding"`
-* `httpx.headers.CACHE_CONTROL`: `"cache-control"`
-* `httpx.headers.COOKIE`: `"cookie"`
-* `httpx.headers.SET_COOKIE`: `"set-cookie"`
-* `httpx.headers.HOST`: `"host"`
-* `httpx.headers.LOCATION`: `"location"`
+There are no predeclared header-name constants; use plain string literals
+(`"content-type"`, `"content-length"`, `"authorization"`, `"accept"`,
+`"accept-encoding"`, `"cache-control"`, `"cookie"`, `"set-cookie"`,
+`"host"`, `"location"`). All lookups are case-insensitive.
 
 ## Methods
 
@@ -82,17 +74,23 @@ Initializes an empty header container using the provided memory allocator.
 ### `headers.set(name, value) !void`
 Replaces any existing header matching `name` (case-insensitively) with `value`, or appends it if absent.
 
-### `headers.add(name, value) !void`
+### `headers.append(name, value) !void`
 Appends a new header entry without removing existing matching names, enabling multi-valued headers such as `Set-Cookie` and `Accept`.
 
 ### `headers.get(name) ?[]const u8`
 Finds the first value matching `name` case-insensitively. Returns `null` if not found.
 
-### `headers.delete(name) bool`
+### `headers.getAll(name, allocator) ![]const []const u8`
+Returns all values for a header name (for multi-value headers).
+
+### `headers.remove(name) bool`
 Removes all header entries matching `name`. Returns `true` if any entries were removed.
 
-### `headers.has(name) bool`
+### `headers.contains(name) bool`
 Returns `true` if one or more entries with the given name exist.
+
+### `headers.count() usize`
+Returns the number of stored header entries.
 
 ### `headers.deinit() void`
 Frees all duplicated header names, values, and the underlying list.

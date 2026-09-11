@@ -36,69 +36,69 @@ pub const Event = struct {
 /// Stateful SSE stream parser adhering to the WHATWG event stream processing model.
 pub const EventParser = struct {
     allocator: Allocator,
-    data_buf: std.ArrayList(u8),
-    eventType_buf: std.ArrayList(u8),
-    last_id_buf: std.ArrayList(u8),
+    dataBuf: std.ArrayList(u8),
+    eventTypeBuf: std.ArrayList(u8),
+    lastIdBuf: std.ArrayList(u8),
     hasId: bool = false,
     retryMs: ?u32 = null,
-    line_buf: std.ArrayList(u8),
+    lineBuf: std.ArrayList(u8),
 
     pub fn init(allocator: Allocator) EventParser {
         return .{
             .allocator = allocator,
-            .data_buf = std.ArrayList(u8).empty,
-            .eventType_buf = std.ArrayList(u8).empty,
-            .last_id_buf = std.ArrayList(u8).empty,
-            .line_buf = std.ArrayList(u8).empty,
+            .dataBuf = std.ArrayList(u8).empty,
+            .eventTypeBuf = std.ArrayList(u8).empty,
+            .lastIdBuf = std.ArrayList(u8).empty,
+            .lineBuf = std.ArrayList(u8).empty,
         };
     }
 
     pub fn deinit(self: *EventParser) void {
-        self.data_buf.deinit(self.allocator);
-        self.eventType_buf.deinit(self.allocator);
-        self.last_id_buf.deinit(self.allocator);
-        self.line_buf.deinit(self.allocator);
+        self.dataBuf.deinit(self.allocator);
+        self.eventTypeBuf.deinit(self.allocator);
+        self.lastIdBuf.deinit(self.allocator);
+        self.lineBuf.deinit(self.allocator);
     }
 
     /// Resets per-event data while keeping stream-level state (last_id and retryMs).
     pub fn resetEventData(self: *EventParser) void {
-        self.data_buf.clearRetainingCapacity();
-        self.eventType_buf.clearRetainingCapacity();
+        self.dataBuf.clearRetainingCapacity();
+        self.eventTypeBuf.clearRetainingCapacity();
     }
 
     /// Processes a stream line according to the WHATWG specification.
     /// If the line terminates an event (empty line with buffered data), returns the parsed Event.
     /// The returned Event's slices are valid until the next call to `processLine` or `deinit`.
-    pub fn processLine(self: *EventParser, raw_line: []const u8) ParseError!?Event {
+    pub fn processLine(self: *EventParser, rawLine: []const u8) ParseError!?Event {
         // Strip trailing \r if present (handles CRLF when split on LF)
-        const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r')
-            raw_line[0 .. raw_line.len - 1]
+        const line = if (rawLine.len > 0 and rawLine[rawLine.len - 1] == '\r')
+            rawLine[0 .. rawLine.len - 1]
         else
-            raw_line;
+            rawLine;
 
         // Empty line: dispatch event if data was accumulated
         if (line.len == 0) {
-            if (self.data_buf.items.len > 0) {
-                const ev_type = if (self.eventType_buf.items.len > 0)
-                    self.eventType_buf.items
+            if (self.dataBuf.items.len > 0) {
+                const ev_type = if (self.eventTypeBuf.items.len > 0)
+                    self.eventTypeBuf.items
                 else
                     "message";
 
                 const ev_id: ?[]const u8 = if (self.hasId)
-                    self.last_id_buf.items
+                    self.lastIdBuf.items
                 else
                     null;
 
                 const event = Event{
                     .eventType = ev_type,
-                    .data = self.data_buf.items,
+                    .data = self.dataBuf.items,
                     .id = ev_id,
                     .retryMs = self.retryMs,
                 };
                 return event;
             }
             // Empty data: discard event type buffer per spec
-            self.eventType_buf.clearRetainingCapacity();
+            self.eventTypeBuf.clearRetainingCapacity();
             return null;
         }
 
@@ -118,18 +118,18 @@ pub const EventParser = struct {
         }
 
         if (std.mem.eql(u8, field_name, "event")) {
-            self.eventType_buf.clearRetainingCapacity();
-            try self.eventType_buf.appendSlice(self.allocator, field_value);
+            self.eventTypeBuf.clearRetainingCapacity();
+            try self.eventTypeBuf.appendSlice(self.allocator, field_value);
         } else if (std.mem.eql(u8, field_name, "data")) {
-            if (self.data_buf.items.len > 0) {
-                try self.data_buf.append(self.allocator, '\n');
+            if (self.dataBuf.items.len > 0) {
+                try self.dataBuf.append(self.allocator, '\n');
             }
-            try self.data_buf.appendSlice(self.allocator, field_value);
+            try self.dataBuf.appendSlice(self.allocator, field_value);
         } else if (std.mem.eql(u8, field_name, "id")) {
             // Null characters inside ID are rejected / ignored per spec
             if (std.mem.indexOfScalar(u8, field_value, 0) == null) {
-                self.last_id_buf.clearRetainingCapacity();
-                try self.last_id_buf.appendSlice(self.allocator, field_value);
+                self.lastIdBuf.clearRetainingCapacity();
+                try self.lastIdBuf.appendSlice(self.allocator, field_value);
                 self.hasId = true;
             }
         } else if (std.mem.eql(u8, field_name, "retry")) {
@@ -154,14 +154,14 @@ pub const EventParser = struct {
             if (next_nl) |offset| {
                 const end = pos + offset;
                 const part = chunk[pos..end];
-                if (self.line_buf.items.len > 0) {
-                    try self.line_buf.appendSlice(self.allocator, part);
-                    const line = self.line_buf.items;
+                if (self.lineBuf.items.len > 0) {
+                    try self.lineBuf.appendSlice(self.allocator, part);
+                    const line = self.lineBuf.items;
                     if (try self.processLine(line)) |ev| {
                         callback(context, ev);
                         self.resetEventData();
                     }
-                    self.line_buf.clearRetainingCapacity();
+                    self.lineBuf.clearRetainingCapacity();
                 } else {
                     if (try self.processLine(part)) |ev| {
                         callback(context, ev);
@@ -170,7 +170,7 @@ pub const EventParser = struct {
                 }
                 pos = end + 1;
             } else {
-                try self.line_buf.appendSlice(self.allocator, chunk[pos..]);
+                try self.lineBuf.appendSlice(self.allocator, chunk[pos..]);
                 break;
             }
         }

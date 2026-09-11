@@ -22,82 +22,59 @@ HTTP/3 support is validated across Linux, Windows, and macOS targets:
 
 ## Features
 
-- **High-level Client Runtime** - `Client` can execute requests over HTTP/3 when `.http3 = true`
-- **High-level Server Runtime** - `Server` can serve routes over HTTP/3 when `.http3 = true`
-- **QPACK Header Compression** - Full RFC 9204 implementation with 99-entry static table
-- **QUIC Transport Framing** - All QUIC frame types (STREAM, CRYPTO, ACK, etc.)
-- **Variable-Length Integers** - QUIC varint encoding/decoding
-- **Connection IDs** - Full connection ID management
-- **Transport Parameters** - QUIC transport parameter encoding and decoding
-- **Flow Control** - MAX_DATA and MAX_STREAM_DATA frame handling with connection-level and per-stream flow control windows
-- **GOAWAY and CONNECTION_CLOSE** - Both client and server handle incoming GOAWAY gracefully and can send GOAWAY or CONNECTION_CLOSE on errors
-- **Stream Cancellation** - RESET_STREAM and STOP_SENDING frames for graceful stream teardown without connection disruption
-- **QPACK Decoder Stream** - Decode functions for Section Ack, Stream Cancel, Insert Count Increment, Set Capacity, and encoder stream instructions
-- **Connection Preface Timeout** - Detects missing initial SETTINGS frame from peer
+- **High-level Client Runtime** - `Client` executes real requests over HTTP/3: `client.get("https://host/", .{ .httpVersion = .http3 })` performs a live QUIC + TLS 1.3 handshake (ALPN `h3`, verified chain) over UDP and returns the response.
+- **Protocol-level Server Runtime** - serve H3 over QUIC with `httpx.quic` (Endpoint + Pump + HandshakeDriver) and `httpx.http3` builders; see `examples/http3_client.zig` for a complete loopback server. `httpx.Server` has no UDP front-end yet (TCP only).
+- **QPACK Header Compression** - RFC 9204 static-table encode/decode with encoder/decoder stream prefixes.
+- **QUIC Transport Framing** - STREAM, CRYPTO, ACK, HANDSHAKE_DONE, RESET_STREAM/STOP_SENDING stubs, version negotiation, and transport parameters.
+- **Variable-Length Integers** - QUIC varint encoding/decoding.
+- **Connection IDs** - Connection ID generation and peer table.
+- **Flow Control** - MAX_DATA and MAX_STREAM_DATA frame handling with connection-level and per-stream flow control windows.
+- **GOAWAY and CONNECTION_CLOSE** - Frame codecs present; server-initiated graceful shutdown mid-request is future work.
+- **Stream Cancellation** - RESET_STREAM and STOP_SENDING frame codecs.
+
+### Deliberate Current Limits
+
+- One request per QUIC connection (no H3 pooling yet); proxy routes are rejected loudly (`Http3ProxyUnsupported`).
+- Full handshakes only: no PSK resumption or HRR over QUIC yet (both exist on the TCP/TLS paths).
+- No transport-parameter negotiation (both ends run compiled-in defaults), no Retry/token round trip, no loss recovery or congestion control: reliable paths (loopback/LAN) only.
+- Request bodies are not sent yet (GET/HEAD-style exchanges).
 
 ## High-level Client Usage
 
-Enable HTTP/3 in `ClientConfig`:
+HTTP/3 requires `https://` (QUIC is always TLS). Per-request:
 
 ```zig
-    const io = std.Io.Threaded.global_single_threaded.io();
-var client = httpx.Client.init(allocator, io, .{
+var response = try client.get("https://127.0.0.1:8443/runtime", .{
     .httpVersion = .http3,
-    .http3 = true,
-    .http3_settings = .{
-        .qpack_max_table_capacity = 4096,
-        .qpack_blocked_streams = 16,
-        .max_field_section_size = 8192,
-        .enable_connect_protocol = true,
-        .enable_datagrams = false,
-    },
-});
-defer client.deinit();
-
-var response = try client.get("http://127.0.0.1:8080/runtime", .{});
-defer response.deinit();
-
-std.debug.print("version={s} status={d}\n", .{ response.version.toString(), response.status.code });
-```
-
-You can also specify HTTP/3 per-request:
-
-```zig
-var response = try client.get("http://127.0.0.1:8080/runtime", .{ .httpVersion = .http3,
+    .tls = .{ .verify = .caBundle, .caPem = ca_pem },
+    .timeoutMs = 15_000,
 });
 defer response.deinit();
+// response.version == .http3, response.status is the u16 code.
 ```
 
-::: warning Interoperability Note
-The current HTTP/3 runtime paths use UDP + QUIC stream framing primitives directly. Interoperability with endpoints that require full TLS-in-QUIC handshake negotiation may vary by deployment requirements.
-:::
+Or as the client default (`.httpVersion = .http3` / `.http3 = true` in `ClientConfig` resolves every request to H3).
 
-## High-level Server Usage
+A wrong chain fails fast and loudly (`error.TlsCertificateNotVerified`); an ALPN mismatch that is not `h3` fails with `error.AlpnNegotiationFailed`. A quiet peer burns the request deadline, then `error.Timeout`.
 
-Enable HTTP/3 in `ServerConfig`:
+## Protocol-level Server Usage
+
+An H3 server is one UDP socket plus the protocol pieces (full example in `examples/http3_client.zig`):
 
 ```zig
-    const io = std.Io.Threaded.global_single_threaded.io();
-var server = try httpx.Server.init(allocator, io, .{
-    .host = "127.0.0.1",
-    .port = 8080,
-    .http3 = true,
-    .http2 = false,
+var ep = try httpx.quic.transport.Endpoint.initPort(allocator, io, conn, 8443);
+var pump = httpx.quic.Pump{};
+try pump.start(&ep, allocator);
+defer pump.stop();
+var drv = httpx.quic.HandshakeDriver.initServer(allocator, .{
+    .certChainPem = cert_pem,
+    .privateKeyPem = key_pem,
 });
-defer server.deinit();
-
-try server.get("/h3", struct {
-    fn handler(ctx: *httpx.Context) !httpx.Response {
-        return ctx.text("hello from http3 server runtime");
-    }
-}.handler);
-
-server.run();
+defer drv.deinit();
+conn.tls = .{ .ctx = &drv, .start = ..., .onData = ... };
+try httpx.quic.handshake.serveHandshake(&ep, &pump, &drv, 15_000);
+// ... read request HEADERS on a bidi stream, route, respond ...
 ```
-
-::: tip ALPN Default
-When `.http3 = true`, set `alpnProtocols` to include `"h3"` so clients can negotiate HTTP/3, HTTP/2, or HTTP/1.1.
-:::
 
 ## QPACK vs HPACK
 
@@ -206,7 +183,7 @@ std.debug.print("Packet type: {s}\n", .{@tagName(decoded.header.packet_type)});
 const short_header = httpx.quic.ShortHeader{
     .dcid = dcid,
     .spin_bit = 0,
-    .key_phase = 0,
+    .keyPhase = 0,
 };
 
 var buf: [32]u8 = undefined;
@@ -231,7 +208,7 @@ Carries application data:
 
 ```zig
 const stream_frame = httpx.quic.StreamFrame{
-    .stream_id = 4, // Client-initiated bidirectional stream
+    .streamId = 4, // Client-initiated bidirectional stream
     .offset = 0,
     .data = "Hello, HTTP/3!",
     .fin = false,
@@ -265,8 +242,8 @@ Acknowledges received packets:
 
 ```zig
 const ack_frame = httpx.quic.AckFrame{
-    .largest_acknowledged = 42,
-    .ack_delay = 100,
+    .largestAcknowledged = 42,
+    .ackDelay = 100,
     .first_ack_range = 10,
     .ack_ranges = &.{},
 };
@@ -277,17 +254,15 @@ const len = try ack_frame.encode(&buf);
 
 ### CONNECTION_CLOSE Frame
 
-Terminates a connection:
+Terminates a connection (`httpx.quic.frames.Frame.connectionClose`):
 
 ```zig
-const close_frame = httpx.quic.ConnectionCloseFrame{
-    .error_code = @intFromEnum(httpx.quic.TransportError.no_error),
-    .frame_type = null,
-    .reason_phrase = "graceful shutdown",
-};
-
-var buf: [64]u8 = undefined;
-const len = try close_frame.encode(false, &buf); // false = transport close
+const close_frame = httpx.quic.frames.Frame{ .connectionClose = .{
+    .errorCode = 0, // NO_ERROR
+    .triggering_frame_type = 0,
+    .reason = "graceful shutdown",
+    .application = false, // false = transport close, true = application close
+} };
 ```
 
 ### Frame Types
@@ -326,12 +301,13 @@ QUIC uses a variable-length integer encoding:
 ```zig
 // Encoding
 var buf: [8]u8 = undefined;
-const len = try httpx.quic.encodeVarInt(15293, &buf);
+const len = try httpx.quic.varint.encode(&buf, 15293);
 std.debug.print("Encoded in {d} bytes\n", .{len});
 
 // Decoding
-const result = try httpx.quic.decodeVarInt(&buf);
-std.debug.print("Value: {d}\n", .{result.value});
+var offset: usize = 0;
+const value = try httpx.quic.varint.decode(&buf, &offset);
+std.debug.print("Value: {d}\n", .{value});
 ```
 
 ### Varint Ranges
@@ -369,54 +345,55 @@ std.debug.print("Value: {d}\n", .{result.value});
 QUIC transport parameters can be encoded:
 
 ```zig
-const params = httpx.quic.TransportParameters{
-    .original_destination_connection_id = null,
-    .max_idle_timeout = 30000,
-    .max_udp_payload_size = 1350,
-    .initial_max_data = 1048576,
-    .initial_max_stream_data_bidi_local = 262144,
-    .initial_max_stream_data_bidi_remote = 262144,
-    .initial_max_stream_data_uni = 262144,
-    .initial_max_streams_bidi = 100,
-    .initial_max_streams_uni = 100,
-};
-
-const encoded = try params.encode(allocator);
-defer allocator.free(encoded);
+var list = std.ArrayList(u8).empty;
+defer list.deinit(allocator);
+try httpx.quic.params.encode(&list, allocator, .{
+    .maxIdleTimeoutMs = 30000,
+    .maxUdpPayloadSize = 1350,
+    .initialMaxData = 1048576,
+    .initialMaxStreamDataBidiLocal = 262144,
+    .initialMaxStreamDataBidiRemote = 262144,
+    .initialMaxStreamDataUni = 262144,
+    .initialMaxStreamsBidi = 100,
+    .initialMaxStreamsUni = 100,
+});
+// list.items now holds the wire-encoded parameters.
 ```
 
 ## Flow Control
 
-HTTP/3 uses MAX_DATA and MAX_STREAM_DATA frames for flow control. These are defined as frame types (`max_data = 0x10`, `max_stream_data = 0x11`) and are handled internally by the connection. Flow control limits are configured via transport parameters:
+HTTP/3 uses MAX_DATA and MAX_STREAM_DATA frames for flow control. These are defined as frame types (`maxData = 0x10`, `maxStreamData = 0x11`) and are handled internally by the connection. Flow control limits are configured via transport parameters:
 
 ```zig
-const params = httpx.quic.TransportParameters{
-    .initial_max_data = 10 * 1024 * 1024,           // 10MB connection-level
-    .initial_max_stream_data_bidi_local = 1024 * 1024,  // 1MB per stream
-    .initial_max_stream_data_bidi_remote = 1024 * 1024,
-    .initial_max_stream_data_uni = 1024 * 1024,
+const params = httpx.quic.params.Params{
+    .initialMaxData = 10 * 1024 * 1024,           // 10MB connection-level
+    .initialMaxStreamDataBidiLocal = 1024 * 1024,  // 1MB per stream
+    .initialMaxStreamDataBidiRemote = 1024 * 1024,
+    .initialMaxStreamDataUni = 1024 * 1024,
 };
 ```
 
 ## GOAWAY and CONNECTION_CLOSE
 
-Both client and server handle incoming GOAWAY gracefully:
+Both client and server handle incoming GOAWAY gracefully.
+`httpx.quic.frames.Frame` carries both variants as `.connectionClose`:
 
 ```zig
-// Server sends GOAWAY on clean shutdown
-const goaway = httpx.quic.ConnectionCloseFrame{
-    .error_code = @intFromEnum(httpx.quic.TransportError.no_error),
-    .frame_type = null,
-    .reason_phrase = "server shutting down",
-};
+// Transport close (CONNECTION_CLOSE, type 0x1C)
+const transport_close = httpx.quic.frames.Frame{ .connectionClose = .{
+    .errorCode = 0, // NO_ERROR
+    .triggering_frame_type = 0,
+    .reason = "server shutting down",
+    .application = false,
+} };
 
-// CONNECTION_CLOSE (transport vs application)
-const transport_close = httpx.quic.ConnectionCloseFrame{
-    .error_code = @intFromEnum(httpx.quic.TransportError.no_error),
-    .frame_type = null,
-    .reason_phrase = "graceful shutdown",
-};
-const len = try transport_close.encode(false, &buf); // false = transport close
+// Application close (type 0x1D)
+const app_close = httpx.quic.frames.Frame{ .connectionClose = .{
+    .errorCode = 0,
+    .triggering_frame_type = 0,
+    .reason = "graceful shutdown",
+    .application = true,
+} };
 ```
 
 ## Stream Cancellation
@@ -426,15 +403,15 @@ Cancel individual streams without tearing down the connection:
 ```zig
 // RESET_STREAM: abruptly terminates a send stream
 const reset = httpx.quic.ResetStreamFrame{
-    .stream_id = 4,
-    .error_code = 0x06, // application error (user-defined)
-    .final_size = 1024,
+    .streamId = 4,
+    .errorCode = 0x06, // application error (user-defined)
+    .finalSize = 1024,
 };
 
 // STOP_SENDING: ask the peer to stop sending on a receive stream
 const stop = httpx.quic.StopSendingFrame{
-    .stream_id = 8,
-    .error_code = 0x01, // application error (user-defined)
+    .streamId = 8,
+    .errorCode = 0x01, // application error (user-defined)
 };
 ```
 
@@ -458,15 +435,11 @@ const capacity = try httpx.qpack.decodeSetCapacity(data);
 
 ## Running the Example
 
-Run the low-level protocol, high-level runtime, and advanced HTTP/3 examples with:
+Run the client and QUIC examples with:
 
 ```bash
-zig build run-all-http3_example
-./zig-out/bin/http3_example
-
-zig build run-all-http3_client_runtime
-zig build run-all-http3_server_runtime
-zig build run-all-http3_advanced
+zig build run-http3-client
+zig build run-http3-quic
 ```
 
 ## See Also

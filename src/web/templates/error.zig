@@ -3,10 +3,10 @@
 const std = @import("std");
 
 pub const TemplateErrorKind = enum {
-    syntax_error,
-    unexpected_token,
+    syntaxError,
+    unexpectedToken,
     unclosed_block,
-    unclosed_expression,
+    unclosedExpression,
     unknown_variable,
     type_mismatch,
     template_not_found,
@@ -89,7 +89,7 @@ test "SourceError format and lineColFromOffset" {
     try std.testing.expectEqual(@as(usize, 3), loc.col);
 
     const err = SourceError{
-        .kind = .syntax_error,
+        .kind = .syntaxError,
         .templateName = "index.html",
         .line = loc.line,
         .column = loc.col,
@@ -98,5 +98,5 @@ test "SourceError format and lineColFromOffset" {
     };
     var buf: [128]u8 = undefined;
     const msg = try err.formatToString(&buf);
-    try std.testing.expectEqualStrings("index.html:2:3: syntax_error: expected {% endif %}", msg);
+    try std.testing.expectEqualStrings("index.html:2:3: syntaxError: expected {% endif %}", msg);
 }

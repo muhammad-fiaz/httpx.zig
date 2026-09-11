@@ -44,7 +44,7 @@ defer client.deinit();
 ## High-Level Resolution
 
 ```zig
-var addrs = try client.resolve("httpbun.com", 443, .{});
+var addrs = try client.resolve("httpbun.com", .{ .port = 443 });
 defer addrs.deinit();
 ```
 

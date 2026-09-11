@@ -9,14 +9,14 @@ const Allocator = std.mem.Allocator;
 // Subtypes
 
 pub const Subtype = enum {
-    form_data,
+    formData,
     mixed,
     related,
     alternative,
 
     pub fn label(self: Subtype) []const u8 {
         return switch (self) {
-            .form_data => "form-data",
+            .formData => "form-data",
             .mixed => "mixed",
             .related => "related",
             .alternative => "alternative",
@@ -57,7 +57,7 @@ pub const Multipart = struct {
     subtype: Subtype,
 
     pub fn init(allocator: Allocator) Multipart {
-        return initWithSubtype(allocator, .form_data);
+        return initWithSubtype(allocator, .formData);
     }
 
     pub fn initWithSubtype(allocator: Allocator, subtype: Subtype) Multipart {

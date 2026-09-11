@@ -28,8 +28,8 @@ pub fn main() !void {
         const sample_url = "https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf";
         const dl_res = client.download(
             sample_url,
-            "downloads/",
             .{
+                .path = "downloads/",
                 .verify = .{
                     .minSize = 100,
                 },

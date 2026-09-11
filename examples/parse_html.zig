@@ -25,7 +25,7 @@ pub fn main() !void {
     // 1. HTML Parsing & DOM Inspection
     std.debug.print("1. HTML Parsing & DOM Inspection\n", .{});
 
-    const html_src =
+    const htmlSrc =
         \\<!DOCTYPE html>
         \\<html lang="en">
         \\<head>
@@ -66,7 +66,7 @@ pub fn main() !void {
         \\</html>
     ;
 
-    var doc = try p.parseHtml(html_src);
+    var doc = try p.parseHtml(htmlSrc);
     defer doc.deinit();
 
     // Title

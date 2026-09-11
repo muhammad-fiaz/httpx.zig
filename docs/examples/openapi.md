@@ -18,7 +18,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn listHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 200, .body = "[]", .content_type = "application/json" };
+    return .{ .status = 200, .body = "[]", .contentType = "application/json" };
 }
 
 fn getHandler(ctx: *httpx.Context) anyerror!httpx.Response {
@@ -26,7 +26,7 @@ fn getHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = id,
-        .content_type = "text/plain",
+        .contentType = "text/plain",
     };
 }
 
@@ -37,14 +37,14 @@ pub fn main() !void {
 
     var router = httpx.Router.init(allocator);
     defer router.deinit();
-    try router.addMeta(.GET, "/widgets", listHandler, .{
+    try router.add("/widgets", listHandler, .{.meta = .{
         .summary = "List all widgets",
         .description = "Returns the full set of widgets.",
-    });
-    try router.addMeta(.GET, "/widgets/{id}", getHandler, .{
+    }});
+    try router.add("/widgets/{id}", getHandler, .{.meta = .{
         .summary = "Fetch a single widget",
         .description = "Looks up a widget by its opaque id.",
-    });
+    }});
 
     const spec = try httpx.openapi.generate(&router, .{
         .title = "Widgets API",

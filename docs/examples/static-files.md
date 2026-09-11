@@ -1,6 +1,8 @@
 # Static Files
 
-Serve files with automatic MIME type resolution.
+Serve a directory with automatic MIME type resolution (`httpx.mime.fromPath`),
+ETag / `If-None-Match` conditional requests, range requests, and index
+resolution. See `examples/static_files.zig`.
 
 ## Demo Program
 
@@ -8,56 +10,54 @@ Serve files with automatic MIME type resolution.
 const std = @import("std");
 const httpx = @import("httpx");
 
-const custom_mime_mappings = [_]httpx.MimeMapping{
-    .{ .ext = ".geojson", .mime = "application/geo+json" },
-    .{ .ext = ".glb", .mime = "model/gltf-binary" },
-};
-
-fn home(ctx: *httpx.Context) anyerror!httpx.Response {
-    return ctx.fileWithOptions("examples/multi_page_site/index.html", .{
-        .cache_control = "no-cache",
-        .add_etag = true,
-        .conditional_get = true,
-    });
-}
-
-fn asset(ctx: *httpx.Context) anyerror!httpx.Response {
-    const path = "examples/multi_page_site/site/assets/app.js";
-    const fallback = httpx.mimeTypeFromPath(path);
-    const content_type = httpx.mimeTypeFromPathWith(path, &custom_mime_mappings, fallback);
-    return ctx.fileWithOptions(path, .{
-        .content_type = content_type,
-        .cache_control = "public, max-age=300",
-        .add_etag = true,
-        .conditional_get = true,
-    });
-}
-
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{});
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 1,
+    });
     defer server.deinit();
 
-    try server.get("/", home);
-    try server.get("/app.js", asset);
-    server.run();
+    // Mount a filesystem directory at /static (relative to the process CWD).
+    try httpx.static.files.register(&server.router, .{
+        .root = "examples/static",
+        .mount = "/static",
+        .indexFile = "index.html",
+    });
+    defer httpx.static.files.unregister();
+
+    // ...or the shorthand, equivalent for the common case:
+    // try server.static("/static", "examples/static");
+
+    const thread = try server.start();
+    defer thread.join();
+
+    var response = try httpx.get("http://127.0.0.1:PORT/static/index.html", .{});
+    defer response.deinit();
 }
 ```
+
+Mount options (all fields use camelCase): `root`, `mount`, `indexFile`,
+`maxFileSize`, `cacheControl`, `liveReload`, `reloadSsePath`,
+`spaFallback`, `filesystem` (set `false` for embedded-only deployments).
 
 ## Run
 
 ```bash
-zig build run-all-static_files
+zig build run-static-files
 ```
 
 ## What to Verify
 
-- HTML file is served from disk.
-- `Content-Type` matches file extension for `ctx.file(...)`.
-- `ctx.fileWithOptions(...)` allows explicit MIME override and cache policy tuning.
+- HTML file is served from disk with the `Content-Type` matching its extension.
 - `ETag` is emitted and `If-None-Match` can return `304 Not Modified`.
-- `mimeTypeFromPathWith(...)` supports user-defined external MIME mappings.
+- Directories resolve to `index.html`; `..` traversal is rejected with `403`.
+- Single-file deployments register the same paths with
+  `httpx.assets.registerEmbedded` and serve them from memory (see
+  `zig build run-static-embedded`).

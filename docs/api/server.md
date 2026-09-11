@@ -241,15 +241,15 @@ pub fn main() !void {
     try server.get("/", homePage);
     try server.get("/api/users", listUsers);
     try server.post("/api/users", createUser);
-    try server.get("/api/users/:id", getUser);
-    try server.put("/api/users/:id", updateUser);
-    try server.delete("/api/users/:id", deleteUser);
+    try server.get("/api/users/{id}", getUser);
+    try server.put("/api/users/{id}", updateUser);
+    try server.delete("/api/users/{id}", deleteUser);
 
     std.debug.print("Server listening on http://localhost:8080\n", .{});
     server.run();
 }
 
-fn homePage(ctx: *httpx.Context) !httpx.Response {
+fn homePage(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.html("<h1>Welcome to httpx.zig!</h1>");
 }
 

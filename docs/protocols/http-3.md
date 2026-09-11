@@ -1,6 +1,11 @@
 # HTTP/3 Protocol
 
-RFC 9114 defines HTTP/3, mapping HTTP semantics onto the UDP-based QUIC transport layer (RFC 9000).
+> Status: live. `client.get(url, .{ .httpVersion = .http3 })` performs a
+> real QUIC + TLS 1.3 handshake (ALPN `h3`, verified chain) over UDP and
+> returns the response — verified over loopback (`run-http3-client`,
+> `566/566` tests). Reliable paths only for now (no loss recovery /
+> congestion control yet); outside its scope it fails loudly, never
+> silently downgraded. See README feature table.
 
 ## Motivation
 
@@ -30,6 +35,12 @@ While HTTP/2 eliminated head-of-line blocking at the application level, TCP head
 
 ## Client Usage Example
 
+Live since the QUIC transport landing: `client.get` with
+`.httpVersion = .http3` performs a real QUIC + TLS 1.3 handshake (ALPN
+`h3`, verified chain) over UDP. Reliable paths (loopback/LAN) — no loss
+recovery yet, so lossy networks stall to the request deadline. Runnable
+end to end in `examples/http3_client.zig`:
+
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
@@ -43,8 +54,10 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var response = try client.get("https://cloudflare.com", .{
+    var response = try client.get("https://127.0.0.1:8443/", .{
         .httpVersion = .http3,
+        .tls = .{ .verify = .caBundle, .caPem = ca_pem },
+        .timeoutMs = 15_000,
     });
     defer response.deinit();
 

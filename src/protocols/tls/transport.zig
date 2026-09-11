@@ -53,13 +53,13 @@ pub const Connection = struct {
     allowTruncation: bool,
 
     // Heap-owned buffers (freed in destroy).
-    buf_stream_writer: []u8,
-    buf_stream_reader: []u8,
-    buf_tls_read: []u8,
-    buf_plain_write: []u8,
+    bufStreamWriter: []u8,
+    bufStreamReader: []u8,
+    bufTlsRead: []u8,
+    bufPlainWrite: []u8,
 
-    stream_writer: std.Io.net.Stream.Writer,
-    stream_reader: std.Io.net.Stream.Reader,
+    streamWriter: std.Io.net.Stream.Writer,
+    streamReader: std.Io.net.Stream.Reader,
     io: std.Io,
     socketHandle: std.Io.net.Socket.Handle,
 
@@ -71,13 +71,17 @@ pub const Connection = struct {
     var g_system_bundle_loaded: bool = false;
     var g_system_bundle_lock: sync.Spinlock = .{};
 
-    fn getOrLoadSystemBundle(allocator: Allocator, io: std.Io) !*std.crypto.Certificate.Bundle {
+    // Process-lifetime system CA cache. Backed by the untracked page
+    // allocator on purpose: the bundle lives until process exit (freed by
+    // the OS), so routing it through a caller's tracked allocator (e.g. a
+    // DebugAllocator) would report a false leak at shutdown.
+    fn getOrLoadSystemBundle(io: std.Io) !*std.crypto.Certificate.Bundle {
         g_system_bundle_lock.lock();
         defer g_system_bundle_lock.unlock();
 
         if (!g_system_bundle_loaded) {
             const now = std.Io.Timestamp.now(io, .awake);
-            g_system_bundle.rescan(allocator, io, now) catch return error.TlsCaUnavailable;
+            g_system_bundle.rescan(std.heap.page_allocator, io, now) catch return error.TlsCaUnavailable;
             g_system_bundle_loaded = true;
         }
         return &g_system_bundle;
@@ -111,7 +115,7 @@ pub const Connection = struct {
         const io = conf.io orelse std.Io.Threaded.global_single_threaded.io();
         var active_bundle: ?*std.crypto.Certificate.Bundle = conf.caBundle;
         if (conf.verify == .caBundle and active_bundle == null) {
-            active_bundle = getOrLoadSystemBundle(allocator, io) catch null;
+            active_bundle = getOrLoadSystemBundle(io) catch null;
             if (active_bundle == null) return error.TlsCaUnavailable;
         }
 
@@ -133,32 +137,32 @@ pub const Connection = struct {
         self.* = .{
             .client = undefined,
             .allowTruncation = conf.allowTruncation,
-            .buf_stream_writer = bufs_rw,
-            .buf_stream_reader = bufs_rr,
-            .buf_tls_read = bufs_tr,
-            .buf_plain_write = bufs_pw,
-            .stream_writer = undefined,
-            .stream_reader = undefined,
+            .bufStreamWriter = bufs_rw,
+            .bufStreamReader = bufs_rr,
+            .bufTlsRead = bufs_tr,
+            .bufPlainWrite = bufs_pw,
+            .streamWriter = undefined,
+            .streamReader = undefined,
             .io = io,
             .socketHandle = conf.socketHandle,
         };
 
-        self.stream_writer = .init(
+        self.streamWriter = .init(
             .{ .socket = .{ .handle = conf.socketHandle, .address = undefined } },
             io,
-            self.buf_stream_writer,
+            self.bufStreamWriter,
         );
-        self.stream_reader = .init(
+        self.streamReader = .init(
             .{ .socket = .{ .handle = conf.socketHandle, .address = undefined } },
             io,
-            self.buf_stream_reader,
+            self.bufStreamReader,
         );
 
         var entropy: [tls.Client.Options.entropy_len]u8 = undefined;
         io.random(&entropy);
 
         // SNI handling: virtual-hosted HTTPS servers abort the handshake
-        // (TlsAlert) when no server_name is sent. std's `no_verification`
+        // (TlsAlert) when no serverName is sent. std's `no_verification`
         // sends no SNI, so `verify=none` debug mode would always fail against
         // such hosts. When the peer is a DNS name (not a literal IP), always
         // offer it as SNI via `explicit` — chain verification is still
@@ -180,13 +184,13 @@ pub const Connection = struct {
         };
 
         self.client = tls.Client.init(
-            &self.stream_reader.interface,
-            &self.stream_writer.interface,
+            &self.streamReader.interface,
+            &self.streamWriter.interface,
             .{
                 .host = host_opt,
                 .ca = ca_opt,
-                .read_buffer = self.buf_tls_read,
-                .write_buffer = self.buf_plain_write,
+                .read_buffer = self.bufTlsRead,
+                .write_buffer = self.bufPlainWrite,
                 .entropy = &entropy,
                 .realtime_now = std.Io.Clock.now(.real, io),
                 .allow_truncation_attacks = conf.allowTruncation,
@@ -211,10 +215,10 @@ pub const Connection = struct {
         if (!self.allowTruncation) self.client.end() catch {};
         var stream = std.Io.net.Stream{ .socket = .{ .handle = self.socketHandle, .address = undefined } };
         stream.close(self.io);
-        allocator.free(self.buf_stream_writer);
-        allocator.free(self.buf_stream_reader);
-        allocator.free(self.buf_tls_read);
-        allocator.free(self.buf_plain_write);
+        allocator.free(self.bufStreamWriter);
+        allocator.free(self.bufStreamReader);
+        allocator.free(self.bufTlsRead);
+        allocator.free(self.bufPlainWrite);
         allocator.destroy(self);
     }
 
@@ -224,7 +228,7 @@ pub const Connection = struct {
         self.client.writer.flush() catch return error.WriteFailed;
         // The TLS writer drains into the stream writer's own ciphertext
         // buffer; that one needs its own flush to reach the wire.
-        self.stream_writer.interface.flush() catch return error.WriteFailed;
+        self.streamWriter.interface.flush() catch return error.WriteFailed;
     }
 
     /// Plaintext read; returns 0 on clean TLS EOF (close_notify) or, when

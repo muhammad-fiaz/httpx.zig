@@ -87,11 +87,11 @@ pub fn parse(input: []const u8) !Uri {
     }
 
     // Authority vs path
-    var authority_end: usize = rest.len;
+    var authorityEnd: usize = rest.len;
     if (std.mem.indexOfScalar(u8, rest, '/')) |idx| {
-        authority_end = idx;
+        authorityEnd = idx;
     }
-    const authority_str = rest[0..authority_end];
+    const authority_str = rest[0..authorityEnd];
 
     // Userinfo
     if (std.mem.lastIndexOfScalar(u8, authority_str, '@')) |idx| {
@@ -121,7 +121,7 @@ pub fn parse(input: []const u8) !Uri {
     }
 
     // Path
-    uri.path = rest[authority_end..];
+    uri.path = rest[authorityEnd..];
     if (uri.path.len == 0) uri.path = "/";
 
     return uri;
@@ -203,12 +203,12 @@ fn isUnreserved(c: u8) bool {
 }
 
 /// Checks whether a path contains traversal sequences after decoding.
-pub fn hasPathTraversal(decoded_path: []const u8) bool {
-    if (decoded_path.len == 0) return false;
-    if (std.mem.indexOfScalar(u8, decoded_path, 0) != null) return true;
-    if (decoded_path.len >= 2 and decoded_path[1] == ':') return true;
-    if (decoded_path.len >= 2 and decoded_path[0] == '\\' and decoded_path[1] == '\\') return true;
-    var it = std.mem.splitScalar(u8, decoded_path, '/');
+pub fn hasPathTraversal(decodedPath: []const u8) bool {
+    if (decodedPath.len == 0) return false;
+    if (std.mem.indexOfScalar(u8, decodedPath, 0) != null) return true;
+    if (decodedPath.len >= 2 and decodedPath[1] == ':') return true;
+    if (decodedPath.len >= 2 and decodedPath[0] == '\\' and decodedPath[1] == '\\') return true;
+    var it = std.mem.splitScalar(u8, decodedPath, '/');
     while (it.next()) |seg| {
         var sub = std.mem.splitScalar(u8, seg, '\\');
         while (sub.next()) |part| {
@@ -219,8 +219,8 @@ pub fn hasPathTraversal(decoded_path: []const u8) bool {
         }
     }
     // Also check backslash variants for Windows
-    if (std.mem.indexOf(u8, decoded_path, "..\\") != null) return true;
-    if (std.mem.indexOf(u8, decoded_path, "\\..") != null) return true;
+    if (std.mem.indexOf(u8, decodedPath, "..\\") != null) return true;
+    if (std.mem.indexOf(u8, decodedPath, "\\..") != null) return true;
     return false;
 }
 

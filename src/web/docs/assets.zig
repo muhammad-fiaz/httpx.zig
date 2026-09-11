@@ -43,8 +43,8 @@ pub const swaggerFiles = [_]File{
     .{ .name = "swagger-ui-standalone-preset.js", .contentType = "text/javascript; charset=utf-8", .data = swaggerUiStandalonePresetJs },
     .{ .name = "swagger-ui.css", .contentType = "text/css; charset=utf-8", .data = swaggerUiCss },
     .{ .name = "oauth2-redirect.html", .contentType = "text/html; charset=utf-8", .data = oauth2RedirectHtml },
-    .{ .name = "favicon-16x16.png", .contentType = "image/png", .data = favicon_16_png },
-    .{ .name = "favicon-32x32.png", .contentType = "image/png", .data = favicon_32_png },
+    .{ .name = "favicon-16x16.png", .contentType = "image/png", .data = favicon16Png },
+    .{ .name = "favicon-32x32.png", .contentType = "image/png", .data = favicon32Png },
 };
 
 pub const redocFiles = [_]File{
@@ -59,7 +59,7 @@ pub const graphiqlFiles = [_]File{
     .{ .name = "graphiql.js", .contentType = "text/javascript; charset=utf-8", .data = graphiqlJs },
     .{ .name = "graphiql.css", .contentType = "text/css; charset=utf-8", .data = graphiqlCss },
     .{ .name = "editor.worker.js", .contentType = "text/javascript; charset=utf-8", .data = graphiqlEditorWorkerJs },
-    .{ .name = "json.worker.js", .contentType = "text/javascript; charset=utf-8", .data = graphiqlJson_worker_js },
+    .{ .name = "json.worker.js", .contentType = "text/javascript; charset=utf-8", .data = graphiqlJsonWorkerJs },
     .{ .name = "graphql.worker.js", .contentType = "text/javascript; charset=utf-8", .data = graphiqlGraphqlWorkerJs },
 };
 
@@ -67,14 +67,14 @@ pub const swaggerUiBundleJs = @embedFile("../../assets/swagger-ui/swagger-ui-bun
 pub const swaggerUiStandalonePresetJs = @embedFile("../../assets/swagger-ui/swagger-ui-standalone-preset.js");
 pub const swaggerUiCss = @embedFile("../../assets/swagger-ui/swagger-ui.css");
 pub const oauth2RedirectHtml = @embedFile("../../assets/swagger-ui/oauth2-redirect.html");
-pub const favicon_16_png = @embedFile("../../assets/swagger-ui/favicon-16x16.png");
-pub const favicon_32_png = @embedFile("../../assets/swagger-ui/favicon-32x32.png");
+pub const favicon16Png = @embedFile("../../assets/swagger-ui/favicon-16x16.png");
+pub const favicon32Png = @embedFile("../../assets/swagger-ui/favicon-32x32.png");
 pub const redocStandaloneJs = @embedFile("../../assets/redoc/redoc.standalone.js");
 pub const scalarStandaloneJs = @embedFile("../../assets/scalar/standalone.js");
 pub const graphiqlJs = @embedFile("../../assets/graphiql/graphiql.js");
 pub const graphiqlCss = @embedFile("../../assets/graphiql/graphiql.css");
 pub const graphiqlEditorWorkerJs = @embedFile("../../assets/graphiql/editor.worker.js");
-pub const graphiqlJson_worker_js = @embedFile("../../assets/graphiql/json.worker.js");
+pub const graphiqlJsonWorkerJs = @embedFile("../../assets/graphiql/json.worker.js");
 pub const graphiqlGraphqlWorkerJs = @embedFile("../../assets/graphiql/graphql.worker.js");
 
 /// All files belonging to a vendor bundle.

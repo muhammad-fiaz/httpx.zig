@@ -164,7 +164,7 @@ pub fn main() !void {
         var url_buf: [128]u8 = undefined;
         const bearer_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/protected/bearer", .{port});
         var resp = try httpx.get(bearer_url, .{
-            .bearer_auth = "secret-token-xyz",
+            .bearerAuth = "secret-token-xyz",
         });
         defer resp.deinit();
 
@@ -177,7 +177,7 @@ pub fn main() !void {
         var url_buf: [128]u8 = undefined;
         const basic_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/protected/basic", .{port});
         var resp = try httpx.get(basic_url, .{
-            .basic_auth = "admin:pass123",
+            .basicAuth = "admin:pass123",
         });
         defer resp.deinit();
 

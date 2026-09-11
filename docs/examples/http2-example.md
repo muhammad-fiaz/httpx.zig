@@ -5,7 +5,7 @@ See `examples/http2_client.zig` and `examples/http2_multiplex.zig`.
 
 ```zig
 var hdrBuf: [httpx.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
-const hdr = httpx.http2.frame.FrameHeader.parse(&hdrBuf);
+const hdr = httpx.http2.FrameHeader.parse(&hdrBuf);
 var out: [9]u8 = undefined;
 hdr.serialize(&out);
 

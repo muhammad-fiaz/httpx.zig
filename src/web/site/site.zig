@@ -28,7 +28,7 @@ const assets_mod = @import("../assets.zig");
 const templates_mod = @import("../templates/templates.zig");
 const static_files = @import("../static_files/serve.zig");
 const spa = @import("../spa/serve.zig");
-const watcher_mod = @import("../watcher/watcher.zig");
+const watcher_mod = @import("../watcher/backend.zig");
 const Server = @import("../../server/lifecycle.zig").Server;
 const routes_mod = @import("routes.zig");
 
@@ -138,14 +138,14 @@ pub const Site = struct {
         });
         errdefer table.deinit(allocator);
 
-        var trimmed_end = config.base.len;
-        while (trimmed_end > 1 and config.base[trimmed_end - 1] == '/') trimmed_end -= 1;
+        var trimmedEnd = config.base.len;
+        while (trimmedEnd > 1 and config.base[trimmedEnd - 1] == '/') trimmedEnd -= 1;
 
         var self = Site{
             .allocator = allocator,
             .io = io,
             .config = config,
-            .base = try allocator.dupe(u8, config.base[0..trimmed_end]),
+            .base = try allocator.dupe(u8, config.base[0..trimmedEnd]),
             .embedded = embedded,
             .root = root,
             .table = table,
@@ -279,14 +279,14 @@ pub const Site = struct {
         for (self.table.routes) |*r| {
             const target = try self.targets.addOne(self.allocator);
             target.* = .{ .site = self, .route = r };
-            try server.router.getWithData(r.route, servePage, target);
+            try server.router.get(r.route, servePage, .{ .userData = target });
             try registered.append(self.allocator, r.route);
             if (r.extRoute) |e| {
-                try server.router.getWithData(e, servePage, target);
+                try server.router.get(e, servePage, .{ .userData = target });
                 try registered.append(self.allocator, e);
             }
             for (r.aliases) |a| {
-                try server.router.getWithData(a, servePage, target);
+                try server.router.get(a, servePage, .{ .userData = target });
                 try registered.append(self.allocator, a);
             }
         }

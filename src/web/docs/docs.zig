@@ -3,7 +3,7 @@
 //! Quick start:
 //! ```zig
 //! var router = httpx.Router.init(allocator);
-//! try router.get("/hello", hello);
+//! try router.get("/hello", hello, .{});
 //! try httpx.docs.mount(allocator, &router, .{}, .{ .title = "My API" });
 //! // GET /openapi.json  -> OpenAPI 3.1 document
 //! // GET /docs          -> Swagger UI (local assets, no CDN)

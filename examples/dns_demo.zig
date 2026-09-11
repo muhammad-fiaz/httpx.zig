@@ -13,7 +13,7 @@ pub fn main() !void {
 
     // 2. Dual-stack DNS resolution with default options (.{})
     std.debug.print("--- Dual-Stack Resolution (httpbun.com:443) ---\n", .{});
-    var addresses = client.resolve("httpbun.com", 443, .{}) catch |err| {
+    var addresses = client.resolve("httpbun.com", .{ .port = 443 }) catch |err| {
         std.debug.print("DNS lookup failed: {s}\n", .{@errorName(err)});
         return;
     };
@@ -25,7 +25,7 @@ pub fn main() !void {
 
     // 3. IPv4-only resolution
     std.debug.print("\n--- IPv4-Only Resolution (httpbun.com:443) ---\n", .{});
-    var v4_addresses = client.resolve("httpbun.com", 443, .{ .family = .ipv4 }) catch |err| {
+    var v4_addresses = client.resolve("httpbun.com", .{ .port = 443, .family = .ipv4 }) catch |err| {
         std.debug.print("IPv4 lookup failed: {s}\n", .{@errorName(err)});
         return;
     };

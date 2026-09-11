@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+
+{% block content %}
+  {% set total = users|length %}
+  <p>Showing {{ total }} user(s).</p>
+  {% include "components/user.html" %}
+  {% for u in users %}
+    {{ user_card(u)|safe }}
+  {% endfor %}
+{% endblock %}

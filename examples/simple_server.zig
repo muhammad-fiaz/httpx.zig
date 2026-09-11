@@ -43,9 +43,9 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.router.add(.GET, "/", indexHandler);
-    try server.router.add(.GET, "/json", jsonHandler);
-    try server.router.add(.GET, "/*rest", notFoundHandler);
+    try server.router.add(.GET, "/", indexHandler, .{});
+    try server.router.add(.GET, "/json", jsonHandler, .{});
+    try server.router.add(.GET, "/*rest", notFoundHandler, .{});
 
     const port = server.localPort();
     std.debug.print("listening on 127.0.0.1:{d}\n", .{port});

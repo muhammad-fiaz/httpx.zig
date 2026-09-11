@@ -139,42 +139,42 @@ pub const Tree = struct {
     }
 
     /// Attaches `child` as the last child of `parent`.
-    pub fn appendChild(self: *Tree, parent_idx: u32, child_idx: u32) void {
-        const parent = self.getMut(parent_idx);
+    pub fn appendChild(self: *Tree, parentIdx: u32, childIdx: u32) void {
+        const parent = self.getMut(parentIdx);
         const prev_last = parent.lastChild;
-        parent.lastChild = child_idx;
-        if (parent.firstChild == NO_NODE) parent.firstChild = child_idx;
+        parent.lastChild = childIdx;
+        if (parent.firstChild == NO_NODE) parent.firstChild = childIdx;
 
-        const child = self.getMut(child_idx);
-        child.parent = parent_idx;
+        const child = self.getMut(childIdx);
+        child.parent = parentIdx;
         child.prevSibling = prev_last;
         child.nextSibling = NO_NODE;
 
         if (prev_last != NO_NODE) {
-            self.getMut(prev_last).nextSibling = child_idx;
+            self.getMut(prev_last).nextSibling = childIdx;
         }
     }
 
     /// Attaches `child` as the first child of `parent`.
-    pub fn prependChild(self: *Tree, parent_idx: u32, child_idx: u32) void {
-        const parent = self.getMut(parent_idx);
+    pub fn prependChild(self: *Tree, parentIdx: u32, childIdx: u32) void {
+        const parent = self.getMut(parentIdx);
         const old_first = parent.firstChild;
-        parent.firstChild = child_idx;
-        if (parent.lastChild == NO_NODE) parent.lastChild = child_idx;
+        parent.firstChild = childIdx;
+        if (parent.lastChild == NO_NODE) parent.lastChild = childIdx;
 
-        const child = self.getMut(child_idx);
-        child.parent = parent_idx;
+        const child = self.getMut(childIdx);
+        child.parent = parentIdx;
         child.prevSibling = NO_NODE;
         child.nextSibling = old_first;
 
         if (old_first != NO_NODE) {
-            self.getMut(old_first).prevSibling = child_idx;
+            self.getMut(old_first).prevSibling = childIdx;
         }
     }
 
     /// Removes a child node from its parent.
-    pub fn removeChild(self: *Tree, child_idx: u32) void {
-        const child = self.getMut(child_idx);
+    pub fn removeChild(self: *Tree, childIdx: u32) void {
+        const child = self.getMut(childIdx);
         const p_idx = child.parent;
         if (p_idx == NO_NODE) return;
 
@@ -200,40 +200,40 @@ pub const Tree = struct {
     }
 
     /// Replaces an existing child node with a new node.
-    pub fn replaceChild(self: *Tree, old_child_idx: u32, new_child_idx: u32) void {
-        const old_child = self.get(old_child_idx);
+    pub fn replaceChild(self: *Tree, oldChildIdx: u32, newChildIdx: u32) void {
+        const old_child = self.get(oldChildIdx);
         const p_idx = old_child.parent;
         if (p_idx == NO_NODE) return;
 
         const prev = old_child.prevSibling;
         const next = old_child.nextSibling;
 
-        const new_child = self.getMut(new_child_idx);
+        const new_child = self.getMut(newChildIdx);
         new_child.parent = p_idx;
         new_child.prevSibling = prev;
         new_child.nextSibling = next;
 
         if (prev != NO_NODE) {
-            self.getMut(prev).nextSibling = new_child_idx;
+            self.getMut(prev).nextSibling = newChildIdx;
         } else {
-            self.getMut(p_idx).firstChild = new_child_idx;
+            self.getMut(p_idx).firstChild = newChildIdx;
         }
 
         if (next != NO_NODE) {
-            self.getMut(next).prevSibling = new_child_idx;
+            self.getMut(next).prevSibling = newChildIdx;
         } else {
-            self.getMut(p_idx).lastChild = new_child_idx;
+            self.getMut(p_idx).lastChild = newChildIdx;
         }
 
-        const old_mut = self.getMut(old_child_idx);
+        const old_mut = self.getMut(oldChildIdx);
         old_mut.parent = NO_NODE;
         old_mut.prevSibling = NO_NODE;
         old_mut.nextSibling = NO_NODE;
     }
 
     /// Sets or adds an attribute on the element node.
-    pub fn setAttribute(self: *Tree, allocator: Allocator, node_idx: u32, name: []const u8, value: []const u8) !void {
-        const node = self.getMut(node_idx);
+    pub fn setAttribute(self: *Tree, allocator: Allocator, nodeIdx: u32, name: []const u8, value: []const u8) !void {
+        const node = self.getMut(nodeIdx);
         if (node.kind != .element) return;
 
         for (node.attrs) |*a| {
@@ -250,8 +250,8 @@ pub const Tree = struct {
     }
 
     /// Removes an attribute from the element node if present.
-    pub fn removeAttribute(self: *Tree, allocator: Allocator, node_idx: u32, name: []const u8) !void {
-        const node = self.getMut(node_idx);
+    pub fn removeAttribute(self: *Tree, allocator: Allocator, nodeIdx: u32, name: []const u8) !void {
+        const node = self.getMut(nodeIdx);
         if (node.kind != .element or node.attrs.len == 0) return;
 
         var found_idx: ?usize = null;
@@ -293,10 +293,10 @@ pub const Tree = struct {
         }
     };
 
-    /// Returns a depth-first walker starting at `root_idx`.
-    pub fn walk(self: *const Tree, allocator: Allocator, root_idx: u32) !WalkState {
+    /// Returns a depth-first walker starting at `rootIdx`.
+    pub fn walk(self: *const Tree, allocator: Allocator, rootIdx: u32) !WalkState {
         var stack: std.ArrayList(u32) = .empty;
-        try stack.append(allocator, root_idx);
+        try stack.append(allocator, rootIdx);
         return .{ .tree = self, .stack = stack, .allocator = allocator };
     }
 
@@ -304,11 +304,11 @@ pub const Tree = struct {
     pub fn getElementsByTag(
         self: *const Tree,
         allocator: Allocator,
-        root_idx: u32,
+        rootIdx: u32,
         t: []const u8,
         out: *std.ArrayList(u32),
     ) !void {
-        var w = try self.walk(allocator, root_idx);
+        var w = try self.walk(allocator, rootIdx);
         defer w.deinit();
         while (w.next()) |idx| {
             const node = self.get(idx);
@@ -318,26 +318,26 @@ pub const Tree = struct {
         }
     }
 
-    /// Returns the first element with `id` attribute matching `id_val`.
-    pub fn getElementById(self: *const Tree, allocator: Allocator, root_idx: u32, id_val: []const u8) !?u32 {
-        var w = try self.walk(allocator, root_idx);
+    /// Returns the first element with `id` attribute matching `idVal`.
+    pub fn getElementById(self: *const Tree, allocator: Allocator, rootIdx: u32, idVal: []const u8) !?u32 {
+        var w = try self.walk(allocator, rootIdx);
         defer w.deinit();
         while (w.next()) |idx| {
             const node = self.get(idx);
             if (node.kind == .element) {
                 if (node.attr("id")) |v| {
-                    if (std.mem.eql(u8, v, id_val)) return idx;
+                    if (std.mem.eql(u8, v, idVal)) return idx;
                 }
             }
         }
         return null;
     }
 
-    /// Recursively concatenates all text node descendants of `root_idx`.
-    pub fn innerText(self: *const Tree, allocator: Allocator, root_idx: u32) ![]u8 {
+    /// Recursively concatenates all text node descendants of `rootIdx`.
+    pub fn innerText(self: *const Tree, allocator: Allocator, rootIdx: u32) ![]u8 {
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(allocator);
-        var w = try self.walk(allocator, root_idx);
+        var w = try self.walk(allocator, rootIdx);
         defer w.deinit();
         while (w.next()) |idx| {
             const node = self.get(idx);
@@ -353,15 +353,15 @@ pub const Tree = struct {
     }
 
     /// Canonical, XSS-safe HTML serialization of a node and its descendants.
-    pub fn serialize(self: *const Tree, allocator: Allocator, node_idx: u32) ![]u8 {
+    pub fn serialize(self: *const Tree, allocator: Allocator, nodeIdx: u32) ![]u8 {
         var out = std.Io.Writer.Allocating.init(allocator);
         errdefer out.deinit();
-        try self.serializeToWriter(allocator, node_idx, &out.writer);
+        try self.serializeToWriter(allocator, nodeIdx, &out.writer);
         return out.toOwnedSlice();
     }
 
-    pub fn serializeToWriter(self: *const Tree, allocator: Allocator, node_idx: u32, writer: anytype) !void {
-        const node = self.get(node_idx);
+    pub fn serializeToWriter(self: *const Tree, allocator: Allocator, nodeIdx: u32, writer: anytype) !void {
+        const node = self.get(nodeIdx);
         switch (node.kind) {
             .document => {
                 var child = node.firstChild;

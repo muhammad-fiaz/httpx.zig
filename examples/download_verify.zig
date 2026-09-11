@@ -15,8 +15,8 @@ pub fn main() !void {
 
     const result = client.download(
         sample_url,
-        "downloads/verified-sample.pdf",
         .{
+            .path = "downloads/verified-sample.pdf",
             .verify = .{
                 .minSize = 100,
                 .maxSize = 50 * 1024 * 1024,

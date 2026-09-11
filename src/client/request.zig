@@ -1,10 +1,9 @@
 //! HTTP client: one request engine for all methods.
 //!
 //! ```zig
-//! const res = try httpx.client.request(allocator, io, .{
+//! const res = try httpx.request("http://127.0.0.1:8080/api", .{
 //!     .method = .POST,
-//!     .url = "http://127.0.0.1:8080/api",
-//!     .body_kind = .json,
+//!     .bodyKind = .json,
 //!     .body = "{\"ok\":true}",
 //! });
 //! defer res.deinit();
@@ -34,9 +33,12 @@ const Method = @import("../common/method.zig").Method;
 const parserMod = @import("../protocols/http1/parser.zig");
 const writerMod = @import("../protocols/http1/writer.zig");
 const tlsTransport = @import("../protocols/tls/transport.zig");
+const nativeTlsClient = @import("../protocols/tls/tcp_client.zig");
 const http2Transport = @import("../protocols/http2/transport.zig");
 const poolNs = @import("pool.zig");
 const Pool = poolNs.Pool;
+const tlsSession = @import("../protocols/tls/session.zig");
+const clockMod = @import("../common/clock.zig");
 const netResolve = @import("../net/resolve.zig");
 const addressMod = @import("../net/address.zig");
 const compression = @import("../compression/codec.zig");
@@ -45,6 +47,11 @@ pub const HttpVersion = @import("../common/http_version.zig").HttpVersion;
 const versionInfo = @import("../common/version.zig");
 const proxyMod = @import("../net/proxy.zig");
 const socks5 = @import("../net/socks5.zig");
+const socks4 = @import("../net/socks4.zig");
+const quicConn = @import("../protocols/quic/connection.zig");
+const quicEp = @import("../protocols/quic/transport.zig");
+const quicHs = @import("../protocols/quic/handshake.zig");
+const h3Transport = @import("../protocols/http3/transport.zig");
 
 /// Adapter: OS resolver -> string addresses for the single-flight cache.
 pub fn systemLookupStrings(
@@ -54,8 +61,8 @@ pub fn systemLookupStrings(
     a: Allocator,
 ) dnsCacheNs.LookupError![]const []const u8 {
     _ = ctx;
-    const resolver = netResolve.Resolver.init(a);
-    const addrs = resolver.lookupWithIo(io, name, 0) catch |e| switch (e) {
+    const resolver = netResolve.Resolver.init(a, io);
+    const addrs = resolver.lookup(name, .{ .port = 0 }) catch |e| switch (e) {
         error.HostNotFound => return error.DnsFailed,
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.DnsFailed,
@@ -91,6 +98,15 @@ pub const TlsOptions = struct {
     verify: tlsTransport.VerifyMode = .caBundle,
     /// CA bundle required when verify == .caBundle.
     caBundle: ?*std.crypto.Certificate.Bundle = null,
+    /// PEM bundle of extra/custom CAs for the native TLS paths
+    /// (HTTP/2 over TLS). Null means system trust only.
+    caPem: ?[]const u8 = null,
+    /// Client certificate chain (PEM) presented when the server requests
+    /// mutual TLS. Requires `clientKeyPem`; only the native TLS paths
+    /// can present it.
+    clientCertPem: ?[]const u8 = null,
+    /// Client private key (PEM, P-256 ECDSA) for `clientCertPem`.
+    clientKeyPem: ?[]const u8 = null,
     /// Only safe when the caller validates completeness via framing.
     allowTruncation: bool = true,
 };
@@ -118,6 +134,9 @@ pub const Request = struct {
     dnsCache: ?*dnsCacheNs.Cache = null,
     /// Optional keep-alive connection pool; set by Client automatically.
     pool: ?*Pool = null,
+    /// Optional TLS session cache for resumption on the native TLS
+    /// paths; set by Client automatically. Ignored on other paths.
+    sessionCache: ?*tlsSession.SessionCache = null,
     /// HTTP version selection (see HttpVersion docs). Default auto.
     httpVersion: HttpVersion = .auto,
     /// Allow bare LF line endings for non-compliant peers (issue #37).
@@ -291,13 +310,22 @@ pub const Error = error{
     TlsCertificateNotVerified,
     TlsAlert,
     TlsDecodeError,
-    /// .http2 over TLS: std TLS has no ALPN hook yet.
-    AlpnUnsupported,
-    /// .http3 selected but the QUIC transport is not implemented (honest).
+    /// Explicit h2 requested but the server did not select it via ALPN,
+    /// or no ALPN agreement was reached. Never silently downgraded.
+    AlpnNegotiationFailed,
+    /// Retained for API stability; no longer returned now that the live
+    /// QUIC transport backs `.http3` (out-of-scope conditions use the
+    /// precise errors above instead).
     Http3NotImplemented,
+    /// HTTP/3 over a proxy: CONNECT-UDP tunneling is not implemented.
+    Http3ProxyUnsupported,
+    /// HTTP/3 operation exceeded its deadline (handshake or exchange).
+    Timeout,
     /// HTTP/2 framing/HPACK violation from the peer.
     ProtocolViolation,
     ConnectFailed,
+    /// HTTP proxy replied 407: CONNECT credentials missing or rejected.
+    ProxyAuthRequired,
     DnsFailed,
     ReadFailed,
     WriteFailed,
@@ -315,11 +343,13 @@ pub const maxResponseBodySize: usize = 64 * 1024 * 1024;
 const Transport = union(enum) {
     plain: tcp.Socket,
     encrypted: *tlsTransport.Connection,
+    nativeTls: *nativeTlsClient.TlsClientConn,
 
     fn writeAll(self: Transport, bytes: []const u8) !void {
         switch (self) {
             .plain => |s| try s.writeAll(bytes),
             .encrypted => |t| try t.writeAll(bytes),
+            .nativeTls => |t| try t.writeAll(bytes),
         }
     }
 
@@ -327,6 +357,7 @@ const Transport = union(enum) {
         return switch (self) {
             .plain => |s| s.read(buf) catch return error.ReadFailed,
             .encrypted => |t| t.read(buf) catch return error.ReadFailed,
+            .nativeTls => |t| t.read(buf) catch return error.ReadFailed,
         };
     }
 };
@@ -413,8 +444,8 @@ fn headerLinesWithAuth(a: Allocator, hdrs: []const Header, contentType: ?[]const
             const l = try std.fmt.allocPrint(a, "Authorization: Bearer {s}", .{tok});
             try lines.append(a, l);
         } else if (basic_auth) |up| {
-            const enc_len = std.base64.standard.Encoder.calcSize(up.len);
-            const b64 = try a.alloc(u8, enc_len);
+            const encLen = std.base64.standard.Encoder.calcSize(up.len);
+            const b64 = try a.alloc(u8, encLen);
             defer a.free(b64);
             _ = std.base64.standard.Encoder.encode(b64, up);
             const l = try std.fmt.allocPrint(a, "Authorization: Basic {s}", .{b64});
@@ -429,6 +460,216 @@ fn headerLinesWithAuth(a: Allocator, hdrs: []const Header, contentType: ?[]const
 }
 
 /// Executes the request. Returned Response owns its memory via `a`.
+/// Maps native-TLS client errors onto the request error set.
+fn mapNativeTlsError(err: anyerror) Error {
+    return switch (err) {
+        error.CertificateExpired => Error.CertificateExpired,
+        error.CertificateHostMismatch => Error.CertificateHostMismatch,
+        error.CertificateUntrusted => Error.TlsCertificateNotVerified,
+        error.OutOfMemory => Error.OutOfMemory,
+        else => Error.TlsHandshakeFailed,
+    };
+}
+
+/// One HTTP/3 request/response exchange over live UDP (RFC 9114 over
+/// RFC 9000/9001). Resolves the origin, performs the QUIC + TLS 1.3
+/// handshake (ALPN `h3`, chain + hostname verification), runs a single
+/// GET-style exchange, and maps the result onto `Response`.
+///
+/// Fresh connection per call (no H3 pooling yet); proxy routes are
+/// rejected by the caller before reaching here.
+fn h3DoRequest(
+    a: Allocator,
+    io: std.Io,
+    req: Request,
+    tls_opts: ?TlsOptions,
+    host: []const u8,
+    port: u16,
+    authority: []const u8,
+    target: []const u8,
+) Error!Response {
+    if (host.len == 0) return Error.InvalidUrl;
+    const deadline_ms = req.timeoutMs orelse 30_000;
+
+    // Resolve: literal first, then single-flight cache, then OS resolver
+    // (IPv4 preferred, mirroring the TCP happy-eyeballs-lite order).
+    var probe = addressMod.Address{ .family = .ip4, .port = 0 };
+    var dest_addr: addressMod.Address = undefined;
+    var have_dest = false;
+    if (probe.parseIp(host)) |direct| {
+        dest_addr = direct;
+        dest_addr.port = port;
+        have_dest = true;
+    } else |_| {
+        if (req.dnsCache) |cache| {
+            if (cache.resolve(host)) |cached_strs| {
+                defer {
+                    for (cached_strs) |s| a.free(s);
+                    a.free(cached_strs);
+                }
+                for (cached_strs) |s| {
+                    if (parseAddrString(s, port)) |parsed| {
+                        dest_addr = parsed;
+                        have_dest = true;
+                        break;
+                    }
+                }
+            } else |_| {}
+        }
+        if (!have_dest) {
+            const addrs = (netResolve.Resolver.init(a, io)).lookup(host, .{ .port = port }) catch return Error.DnsFailed;
+            defer a.free(addrs);
+            if (addrs.len == 0) return Error.DnsFailed;
+            var vi: usize = 0;
+            for (addrs, 0..) |raddr, i| {
+                if (raddr.family == .ip4) {
+                    if (i != vi) {
+                        const tmp = addrs[vi];
+                        addrs[vi] = addrs[i];
+                        addrs[i] = tmp;
+                    }
+                    vi += 1;
+                }
+            }
+            dest_addr = addrs[0];
+            have_dest = true;
+        }
+    }
+    if (!have_dest) return Error.DnsFailed;
+    const dest = dest_addr.toStd(null);
+
+    const t = tls_opts orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true };
+    var conn = quicConn.Connection.init(a, .client, .{}, @intCast(clockMod.millisNow())) catch return Error.OutOfMemory;
+    defer conn.deinit();
+    var ep = quicEp.Endpoint.init(a, io, conn) catch return Error.ConnectFailed;
+    defer ep.deinit();
+    var driver = quicHs.Driver.initClient(a, .{ .host = host, .verify = t.verify, .caPem = t.caPem });
+    defer driver.deinit();
+    conn.tls = .{ .ctx = &driver, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
+
+    // One pump spans handshake + exchange (stopping closes the socket).
+    var pump: quicEp.Pump = undefined;
+    pump.start(&ep, a) catch return Error.OutOfMemory;
+    defer pump.stop();
+
+    quicHs.performHandshake(&ep, &pump, &driver, null, null, null, dest, deadline_ms) catch |e| {
+        return mapQuicHandshakeError(e, driver.detail);
+    };
+
+    var h3c = h3Transport.Client.init(a, &ep);
+    defer h3c.deinit();
+    var has_accept_encoding = false;
+    for (req.headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) has_accept_encoding = true;
+    }
+    var conv = std.ArrayList(h3Transport.Header).empty;
+    defer conv.deinit(a);
+    for (req.headers) |h| conv.append(a, .{ .name = h.name, .value = h.value }) catch return Error.OutOfMemory;
+    if (!has_accept_encoding) {
+        conv.append(a, .{ .name = "accept-encoding", .value = "gzip, br, zstd" }) catch return Error.OutOfMemory;
+    }
+    const h3resp_raw = h3c.request(
+        req.method.toString(),
+        "https",
+        authority,
+        target,
+        conv.items,
+        &pump,
+        dest,
+        deadline_ms,
+    ) catch |e| switch (e) {
+        error.OutOfMemory => return Error.OutOfMemory,
+        error.Timeout => return Error.Timeout,
+        error.ResponseTooLarge => return Error.ResponseTooLarge,
+        else => return Error.ProtocolViolation,
+    };
+    const h3resp = h3resp_raw;
+    // Convert header type (same shape, different namespace); the
+    // transport allocator IS `a`, so ownership transfers cleanly, and
+    // decodeResponseBody consumes the body exactly like h2DoRequest.
+    var out_hdrs = try a.alloc(Header, h3resp.headers.len);
+    for (h3resp.headers, 0..) |h, i| out_hdrs[i] = .{ .name = h.name, .value = h.value };
+    const decoded_body = decodeResponseBody(a, out_hdrs, h3resp.body) catch |e| {
+        for (out_hdrs) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(out_hdrs);
+        a.free(h3resp.body);
+        return e;
+    };
+    a.free(h3resp.headers);
+    return .{
+        .allocator = a,
+        .status = h3resp.status,
+        .version = .http3,
+        .headers = out_hdrs,
+        .body = decoded_body,
+    };
+}
+
+/// Maps QUIC handshake failures onto the request error set, preserving
+/// the driver's precise cause (ALPN vs certificate vs generic).
+fn mapQuicHandshakeError(err: anyerror, detail: quicHs.Detail) Error {
+    return switch (err) {
+        error.OutOfMemory => Error.OutOfMemory,
+        error.HandshakeTimeout => Error.Timeout,
+        else => switch (detail) {
+            .alpn_mismatch => Error.AlpnNegotiationFailed,
+            .cert_failed => Error.TlsCertificateNotVerified,
+            else => Error.TlsHandshakeFailed,
+        },
+    };
+}
+
+/// One HTTP/2 request/response exchange over an established H2 session
+/// (cleartext or TLS — the transport was connected by the caller).
+/// Shared by the h2c and h2-over-TLS paths so framing, header mapping,
+/// and body decoding stay in one place.
+fn h2DoRequest(
+    a: Allocator,
+    pc: *http2Transport.PooledConn,
+    method: []const u8,
+    target: []const u8,
+    req_headers: []const Header,
+    scheme: []const u8,
+    authority: []const u8,
+) Error!Response {
+    var has_accept_encoding = false;
+    for (req_headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) has_accept_encoding = true;
+    }
+    var conv: []http2Transport.Header = try a.alloc(http2Transport.Header, req_headers.len + @as(usize, if (has_accept_encoding) 0 else 1));
+    defer a.free(conv);
+    for (req_headers, 0..) |h, i| conv[i] = .{ .name = h.name, .value = h.value };
+    if (!has_accept_encoding) conv[req_headers.len] = .{ .name = "accept-encoding", .value = "gzip, br, zstd" };
+    const r = pc.request(method, target, conv, scheme, authority) catch |e| switch (e) {
+        error.OutOfMemory => return Error.OutOfMemory,
+        else => return Error.ProtocolViolation,
+    };
+    // Convert header type (same shape, different namespace); the
+    // transport allocator IS `a`, so ownership transfers cleanly.
+    var out_hdrs = try a.alloc(Header, r.headers.len);
+    for (r.headers, 0..) |h, i| out_hdrs[i] = .{ .name = h.name, .value = h.value };
+    const decoded_body = decodeResponseBody(a, out_hdrs, r.body) catch |e| {
+        for (out_hdrs) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(out_hdrs);
+        a.free(r.body);
+        return e;
+    };
+    a.free(r.headers);
+    return .{
+        .allocator = a,
+        .status = r.status,
+        .version = .http2,
+        .headers = out_hdrs,
+        .body = decoded_body,
+    };
+}
+
 pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
     var current_url: []u8 = try a.dupe(u8, req.url);
     defer a.free(current_url);
@@ -493,8 +734,8 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         defer a.free(raw);
 
         var host_copy: [256]u8 = undefined;
-        const host_len = @min(authority_str.len, 256);
-        @memcpy(host_copy[0..host_len], authority_str[0..host_len]);
+        const hostLen = @min(authority_str.len, 256);
+        @memcpy(host_copy[0..hostLen], authority_str[0..hostLen]);
 
         // Strip :port from authority for DNS/connect when present.
         var host_only = authority_str;
@@ -506,6 +747,38 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         const hl = @min(host_only.len, 256);
         @memcpy(host_copy[0..hl], host_only[0..hl]);
 
+        // HTTP/3 leaves TCP entirely: branch to the QUIC path before any
+        // TCP dial (dialing just to close the socket would be a visible
+        // side effect on the origin). `auto` never resolves to H3.
+        const resolved_ver: HttpVersion = if (req.httpVersion == .auto) .http11 else req.httpVersion;
+        if (resolved_ver == .http3) {
+            // RFC 9114 runs exclusively over QUIC+TLS: cleartext H3
+            // cannot exist, so this is an invalid URL+version pairing.
+            if (!isTls) return Error.InvalidUrl;
+            if (req.proxy != null) return Error.Http3ProxyUnsupported;
+            return h3DoRequest(a, io, req, tls_opts, host_copy[0..hl], port, authority_str, target);
+        }
+
+        // HTTP/2 pooled fast path BEFORE any dial: a parked session
+        // serves the request with no new connection at all. Dialing
+        // first and pooling second would abandon a fresh socket on
+        // every hit (FD leak) and SYN-flood the origin for nothing.
+        // `auto` never resolves to H2, so the version test is exact;
+        // proxy routes never mix into pooled lanes.
+        if (resolved_ver == .http2 and req.proxy == null) {
+            if (req.pool) |p| {
+                if (p.acquireH2(host_copy[0..hl], port, isTls)) |pc| {
+                    const scheme: []const u8 = if (isTls) "https" else "http";
+                    const resp = h2DoRequest(a, pc, method.toString(), target, req.headers, scheme, host_copy[0..hl]) catch |e| {
+                        pc.deinit();
+                        return e;
+                    };
+                    p.releaseH2(host_copy[0..hl], port, isTls, pc);
+                    return resp;
+                }
+            }
+        }
+
         // Numeric IPs connect directly; hostnames resolve via the OS
         // (getaddrinfo) and each returned address is tried in order.
         var resolved: ?[]addressMod.Address = null;
@@ -514,18 +787,52 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             if (req.proxy) |p_url| {
                 const p_info = proxyMod.parseProxyUrl(p_url) orelse return Error.InvalidUrl;
                 switch (p_info.kind) {
-                    .socks5 => {
-                        var target_host = host_only;
+                    .socks4 => {
+                        var targetHost = host_only;
                         var local_resolved_buf: [64]u8 = undefined;
                         if (!p_info.remoteDns) {
                             var probe = addressMod.Address{ .family = .ip4, .port = 0 };
                             if (probe.parseIp(host_only)) |_| {
-                                target_host = host_only;
+                                targetHost = host_only;
                             } else |_| {
-                                const addrs = (netResolve.Resolver.init(a)).lookupWithIo(io, host_only, port) catch return Error.ConnectFailed;
+                                const addrs = (netResolve.Resolver.init(a, io)).lookup(host_only, .{ .port = port }) catch return Error.ConnectFailed;
                                 defer a.free(addrs);
                                 if (addrs.len == 0) return Error.ConnectFailed;
-                                target_host = addrs[0].formatBuf(&local_resolved_buf);
+                                targetHost = addrs[0].formatBuf(&local_resolved_buf);
+                            }
+                        }
+                        if (isTls) {
+                            break :blk socks4.connectStream(
+                                io,
+                                p_info.host,
+                                p_info.port,
+                                targetHost,
+                                port,
+                                p_info.username,
+                            ) catch return Error.ConnectFailed;
+                        } else {
+                            break :blk socks4.connect(
+                                io,
+                                p_info.host,
+                                p_info.port,
+                                targetHost,
+                                port,
+                                p_info.username,
+                            ) catch return Error.ConnectFailed;
+                        }
+                    },
+                    .socks5 => {
+                        var targetHost = host_only;
+                        var local_resolved_buf: [64]u8 = undefined;
+                        if (!p_info.remoteDns) {
+                            var probe = addressMod.Address{ .family = .ip4, .port = 0 };
+                            if (probe.parseIp(host_only)) |_| {
+                                targetHost = host_only;
+                            } else |_| {
+                                const addrs = (netResolve.Resolver.init(a, io)).lookup(host_only, .{ .port = port }) catch return Error.ConnectFailed;
+                                defer a.free(addrs);
+                                if (addrs.len == 0) return Error.ConnectFailed;
+                                targetHost = addrs[0].formatBuf(&local_resolved_buf);
                             }
                         }
                         if (isTls) {
@@ -533,7 +840,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                                 io,
                                 p_info.host,
                                 p_info.port,
-                                target_host,
+                                targetHost,
                                 port,
                                 p_info.username,
                                 p_info.password,
@@ -543,7 +850,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                                 io,
                                 p_info.host,
                                 p_info.port,
-                                target_host,
+                                targetHost,
                                 port,
                                 p_info.username,
                                 p_info.password,
@@ -558,7 +865,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                                 addr.port = p_info.port;
                                 break :blk_s tcp.connectAddressStream(io, &addr) catch return Error.ConnectFailed;
                             } else |_| {}
-                            const addrs = (netResolve.Resolver.init(a)).lookupWithIo(io, p_info.host, p_info.port) catch return Error.ConnectFailed;
+                            const addrs = (netResolve.Resolver.init(a, io)).lookup(p_info.host, .{ .port = p_info.port }) catch return Error.ConnectFailed;
                             defer a.free(addrs);
                             if (addrs.len == 0) return Error.ConnectFailed;
                             break :blk_s tcp.connectAddressStream(io, &addrs[0]) catch return Error.ConnectFailed;
@@ -569,24 +876,46 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                                 addr.port = p_info.port;
                                 break :blk_s tcp.connectAddress(io, &addr) catch return Error.ConnectFailed;
                             } else |_| {}
-                            const addrs = (netResolve.Resolver.init(a)).lookupWithIo(io, p_info.host, p_info.port) catch return Error.ConnectFailed;
+                            const addrs = (netResolve.Resolver.init(a, io)).lookup(p_info.host, .{ .port = p_info.port }) catch return Error.ConnectFailed;
                             defer a.free(addrs);
                             if (addrs.len == 0) return Error.ConnectFailed;
                             break :blk_s tcp.connectAddress(io, &addrs[0]) catch return Error.ConnectFailed;
                         };
                         errdefer s.close();
-                        const connect_req = std.fmt.allocPrint(a, "CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n\r\n", .{ host_only, port, host_only, port }) catch return Error.OutOfMemory;
+                        // RFC 7235 proxy credentials: userinfo from the proxy URL
+                        // becomes Proxy-Authorization on the CONNECT request only
+                        // (never forwarded to the origin server).
+                        var auth_header: ?[]u8 = null;
+                        defer if (auth_header) |h| a.free(h);
+                        if (p_info.username) |user| {
+                            const pass = p_info.password orelse "";
+                            const creds = try std.fmt.allocPrint(a, "{s}:{s}", .{ user, pass });
+                            defer a.free(creds);
+                            const enc_len = std.base64.standard.Encoder.calcSize(creds.len);
+                            const enc = try a.alloc(u8, enc_len);
+                            errdefer a.free(enc);
+                            _ = std.base64.standard.Encoder.encode(enc, creds);
+                            auth_header = try std.fmt.allocPrint(a, "Proxy-Authorization: Basic {s}\r\n", .{enc});
+                            a.free(enc);
+                        }
+                        const connect_req = if (auth_header) |ah|
+                            try std.fmt.allocPrint(a, "CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n{s}\r\n", .{ host_only, port, host_only, port, ah })
+                        else
+                            try std.fmt.allocPrint(a, "CONNECT {s}:{d} HTTP/1.1\r\nHost: {s}:{d}\r\n\r\n", .{ host_only, port, host_only, port });
                         defer a.free(connect_req);
                         s.writeAll(connect_req) catch return Error.WriteFailed;
                         var connect_resp: [512]u8 = undefined;
-                        var read_len: usize = 0;
-                        while (read_len < connect_resp.len) {
-                            const n = s.read(connect_resp[read_len..]) catch return Error.ReadFailed;
+                        var readLen: usize = 0;
+                        while (readLen < connect_resp.len) {
+                            const n = s.read(connect_resp[readLen..]) catch return Error.ReadFailed;
                             if (n == 0) return Error.ConnectFailed;
-                            read_len += n;
-                            if (std.mem.indexOf(u8, connect_resp[0..read_len], "\r\n\r\n")) |_| break;
+                            readLen += n;
+                            if (std.mem.indexOf(u8, connect_resp[0..readLen], "\r\n\r\n")) |_| break;
                         }
-                        if (read_len < 12 or !std.mem.startsWith(u8, connect_resp[0..read_len], "HTTP/1.") or !std.mem.eql(u8, connect_resp[9..12], "200")) {
+                        if (readLen < 12 or !std.mem.startsWith(u8, connect_resp[0..readLen], "HTTP/1.") or !std.mem.eql(u8, connect_resp[9..12], "200")) {
+                            if (readLen >= 12 and std.mem.startsWith(u8, connect_resp[0..readLen], "HTTP/1.") and std.mem.eql(u8, connect_resp[9..12], "407")) {
+                                return Error.ProxyAuthRequired;
+                            }
                             return Error.ConnectFailed;
                         }
                         break :blk s;
@@ -595,8 +924,12 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 }
             }
 
-            // Keep-alive reuse first (plain HTTP only, no proxy).
-            if (!isTls and req.proxy == null) {
+            // Keep-alive reuse first (plain HTTP/1 only, no proxy).
+            // H2 has its own pooled lane (acquireH2 below); probing the
+            // plain lane here would only pollute stats and sweep work.
+            // Note: `auto` never resolves to H2 (see resolved_ver), so
+            // testing the requested version is exact.
+            if (!isTls and req.proxy == null and req.httpVersion != .http2) {
                 if (req.pool) |p| {
                     if (p.acquire(host_copy[0..hl], port)) |s| break :blk s;
                 }
@@ -619,7 +952,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 
             resolved = rblk: {
                 if (req.dnsCache) |cache| {
-                    if (cache.resolve(io, host_only)) |cached_strs| {
+                    if (cache.resolve(host_only)) |cached_strs| {
                         defer {
                             for (cached_strs) |s| a.free(s);
                             a.free(cached_strs);
@@ -636,7 +969,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                         }
                     } else |_| {}
                 }
-                break :rblk (netResolve.Resolver.init(a)).lookupWithIo(io, host_only, port) catch return Error.ConnectFailed;
+                break :rblk (netResolve.Resolver.init(a, io)).lookup(host_only, .{ .port = port }) catch return Error.ConnectFailed;
             };
             // Happy-eyeballs-lite: prefer IPv4 results first (v6 endpoints
             // are frequently unreachable on dev machines).
@@ -669,59 +1002,99 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             }
         }
 
-        const resolved_ver: HttpVersion = if (req.httpVersion == .auto) .http11 else req.httpVersion;
-        if (resolved_ver == .http3) {
-            // Honest boundary: QUIC transport not implemented yet.
-            tcp_sock.close();
-            return Error.Http3NotImplemented;
-        }
         if (isTls and resolved_ver == .http2) {
-            // std.crypto.tls has no ALPN hook; h2-over-TLS cannot be
-            // negotiated yet. Fail with a typed error, never silently
-            // downgrade.
-            tcp_sock.close();
-            return Error.AlpnUnsupported;
+            // Native TLS + ALPN h2 (RFC 9113 Section 3.3): the std TLS
+            // wrapper has no ALPN hook, so explicit h2 uses the native
+            // client transport. A server that does not select h2 fails
+            // loudly instead of being silently downgraded.
+            const tls_opts_h2 = tls_opts orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true };
+            // No second acquire here: the pre-dial fast path above already
+            // tried. A concurrent park racing our dial simply becomes an
+            // extra (correct, capped-at-park) connection — never a leak,
+            // since the fresh path below owns its socket end to end.
+            // Fresh session in heap boxes: the TLS connection borrows
+            // its socket, and both must outlive this frame whenever the
+            // session is parked in the pool below.
+            const box = a.create(http2Transport.TlsBox) catch {
+                tcp_sock.close();
+                return Error.OutOfMemory;
+            };
+            box.sock = tcp_sock;
+            // Resumption offer from the client's session cache (origin
+            // lane). The cache hands out an owned duplicate; it is freed
+            // once the handshake consumed it.
+            const now_ms: u64 = @intCast(clockMod.millisNow());
+            var offered: ?tlsSession.ClientSession = if (req.sessionCache) |sc|
+                sc.get(host_copy[0..hl], port, now_ms)
+            else
+                null;
+            defer if (offered) |*s| s.deinit(a);
+            var native_cli = nativeTlsClient.TlsClient.init(.{
+                .allocator = a,
+                .verify = tls_opts_h2.verify,
+                .caPem = tls_opts_h2.caPem,
+                .clientCertPem = tls_opts_h2.clientCertPem,
+                .clientKeyPem = tls_opts_h2.clientKeyPem,
+                .alpnProtocols = &.{"h2"},
+                .session = if (offered) |*s| s else null,
+                .captureSession = true,
+            });
+            box.conn = nativeTlsClient.TlsClient.handshake(&native_cli, io, &box.sock, host_copy[0..hl]) catch |err| {
+                box.sock.close();
+                a.destroy(box);
+                return mapNativeTlsError(err);
+            };
+            if (box.conn.alpn != .h2) {
+                box.conn.deinit();
+                box.sock.close();
+                a.destroy(box);
+                return Error.AlpnNegotiationFailed;
+            }
+            var pc = http2Transport.PooledConn.wrapTls(a, box) catch {
+                // wrapTls already closed the socket and freed the box.
+                return Error.ProtocolViolation;
+            };
+            const resp = h2DoRequest(a, pc, method.toString(), target, req.headers, "https", host_copy[0..hl]) catch |e| {
+                pc.deinit();
+                return e;
+            };
+            // Captured tickets feed the cache BEFORE parking, so the next
+            // fresh handshake to this origin can resume.
+            if (req.sessionCache) |sc| {
+                if (pc.takeSession()) |taken| {
+                    var owned = taken;
+                    defer owned.deinit(a);
+                    sc.put(host_copy[0..hl], port, &owned);
+                }
+            }
+            if (req.proxy == null) {
+                if (req.pool) |p| {
+                    p.releaseH2(host_copy[0..hl], port, true, pc);
+                    return resp;
+                }
+            }
+            pc.deinit();
+            return resp;
         }
         if (!isTls and resolved_ver == .http2) {
             // RFC 7540 Section 3.5 prior knowledge over cleartext TCP.
-            var hc = http2Transport.Client.connect(a, tcp_sock) catch {
+            // (Single pre-dial acquire above; see the h2-TLS note.)
+            var pc = http2Transport.PooledConn.wrapPlain(a, tcp_sock) catch {
                 tcp_sock.close();
                 return Error.ProtocolViolation;
             };
-            defer hc.deinit();
-            var has_accept_encoding = false;
-            for (req.headers) |h| {
-                if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) has_accept_encoding = true;
-            }
-            var conv: []http2Transport.Header = try a.alloc(http2Transport.Header, req.headers.len + @as(usize, if (has_accept_encoding) 0 else 1));
-            defer a.free(conv);
-            for (req.headers, 0..) |h, i| conv[i] = .{ .name = h.name, .value = h.value };
-            if (!has_accept_encoding) conv[req.headers.len] = .{ .name = "accept-encoding", .value = "gzip, br, zstd" };
-            const r = hc.request(method.toString(), target, conv) catch |e| switch (e) {
-                error.OutOfMemory => return Error.OutOfMemory,
-                else => return Error.ProtocolViolation,
-            };
-            // Convert header type (same shape, different namespace); the
-            // transport allocator IS `a`, so ownership transfers cleanly.
-            var out_hdrs = try a.alloc(Header, r.headers.len);
-            for (r.headers, 0..) |h, i| out_hdrs[i] = .{ .name = h.name, .value = h.value };
-            const decoded_body = decodeResponseBody(a, out_hdrs, r.body) catch |e| {
-                for (out_hdrs) |h| {
-                    a.free(h.name);
-                    a.free(h.value);
-                }
-                a.free(out_hdrs);
-                a.free(r.body);
+            const resp = h2DoRequest(a, pc, method.toString(), target, req.headers, "http", host_copy[0..hl]) catch |e| {
+                pc.deinit();
                 return e;
             };
-            a.free(r.headers);
-            return .{
-                .allocator = a,
-                .status = r.status,
-                .version = .http2,
-                .headers = out_hdrs,
-                .body = decoded_body,
-            };
+            if (req.proxy == null) {
+                if (req.pool) |p| {
+                    p.releaseH2(host_copy[0..hl], port, false, pc);
+                    return resp;
+                }
+            }
+            pc.deinit();
+            return resp;
         }
 
         // The TCP socket remains the owned cleanup resource until TLS
@@ -729,38 +1102,75 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         // it before the defer is essential: TLS setup may fail before the
         // encrypted transport exists.
         var transport: Transport = .{ .plain = tcp_sock };
-        var tls_conn: ?*tlsTransport.Connection = null;
-        var pooled_out = false; // socket handed back to the pool
+        var tlsConn: ?*tlsTransport.Connection = null;
+        // Native-TLS state (client certificates): the session borrows the
+        // moved socket below; both are released together in the defer.
+        var nativeSock: tcp.Socket = undefined;
+        var nativeInit = false;
+        var native: nativeTlsClient.TlsClientConn = undefined;
+        var pooledOut = false; // socket handed back to the pool
         defer {
-            if (tls_conn) |t| {
+            if (tlsConn) |t| {
                 t.destroy(a);
-            } else if (!pooled_out) {
+            } else if (nativeInit) {
+                native.deinit();
+                nativeSock.close();
+            } else if (!pooledOut) {
                 transport.plain.close();
             }
         }
 
         if (isTls) {
             const opts = tls_opts.?;
-            tls_conn = tlsTransport.Connection.init(a, .{
-                .socketHandle = tcp_sock.netSocketHandle(),
-                .host = host_copy[0..hl],
-                .verify = opts.verify,
-                .caBundle = opts.caBundle,
-                .allowTruncation = opts.allowTruncation,
-                .io = io,
-            }) catch |err| switch (err) {
-                error.CertificateExpired => return Error.CertificateExpired,
-                error.CertificateHostMismatch => return Error.CertificateHostMismatch,
-                error.CertificateIssuerMismatch => return Error.CertificateIssuerMismatch,
-                error.CertificateNotYetValid => return Error.CertificateNotYetValid,
-                error.CertificateSignatureInvalid => return Error.CertificateSignatureInvalid,
-                error.TlsCertificateNotVerified => return Error.TlsCertificateNotVerified,
-                error.TlsAlert => return Error.TlsAlert,
-                error.TlsDecodeError => return Error.TlsDecodeError,
-                error.OutOfMemory => return Error.OutOfMemory,
-                else => return Error.TlsHandshakeFailed,
-            };
-            transport = .{ .encrypted = tls_conn.? };
+            if (opts.clientCertPem != null and resolved_ver != .http2) {
+                // Mutual TLS over HTTP/1.x needs certificate presentation,
+                // which only the native client implements: handshake here
+                // offering http/1.1, then join the shared HTTP/1.1 flow
+                // below. Never silently downgraded: anything but http/1.1
+                // (or no ALPN, treated as http/1.1 like the std path)
+                // fails loudly.
+                var native_cli = nativeTlsClient.TlsClient.init(.{
+                    .allocator = a,
+                    .verify = opts.verify,
+                    .caPem = opts.caPem,
+                    .clientCertPem = opts.clientCertPem,
+                    .clientKeyPem = opts.clientKeyPem,
+                    .alpnProtocols = &.{"http/1.1"},
+                });
+                nativeSock = tcp_sock;
+                native = nativeTlsClient.TlsClient.handshake(&native_cli, io, &nativeSock, host_copy[0..hl]) catch |err| {
+                    nativeSock.close();
+                    return mapNativeTlsError(err);
+                };
+                if (native.alpn != null and native.alpn.? != .@"http/1.1") {
+                    native.deinit();
+                    nativeSock.close();
+                    return Error.AlpnNegotiationFailed;
+                }
+                nativeInit = true;
+                transport = .{ .nativeTls = &native };
+            } else {
+                tlsConn = tlsTransport.Connection.init(a, .{
+                    .socketHandle = tcp_sock.netSocketHandle(),
+                    .host = host_copy[0..hl],
+                    .verify = opts.verify,
+                    .caBundle = opts.caBundle,
+                    .allowTruncation = opts.allowTruncation,
+                    .io = io,
+                }) catch |err| switch (err) {
+                    error.CertificateExpired => return Error.CertificateExpired,
+                    error.CertificateHostMismatch => return Error.CertificateHostMismatch,
+                    error.CertificateIssuerMismatch => return Error.CertificateIssuerMismatch,
+                    error.CertificateNotYetValid => return Error.CertificateNotYetValid,
+                    error.CertificateSignatureInvalid => return Error.CertificateSignatureInvalid,
+                    error.TlsCertificateNotVerified => return Error.TlsCertificateNotVerified,
+                    error.TlsAlert => return Error.TlsAlert,
+                    error.TlsDecodeError => return Error.TlsDecodeError,
+                    error.OutOfMemory => return Error.OutOfMemory,
+                    else => return Error.TlsHandshakeFailed,
+                };
+                transport = .{ .encrypted = tlsConn.? };
+            }
         } else {
             transport = .{ .plain = tcp_sock };
         }
@@ -791,7 +1201,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             continue;
         }
 
-        return finishPlain(req.pool, isTls, req.proxy != null, host_copy[0..hl], port, full, &pooled_out, transport, resp);
+        return finishPlain(req.pool, isTls, req.proxy != null, host_copy[0..hl], port, full, &pooledOut, transport, resp);
     }
 }
 
@@ -800,18 +1210,18 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 fn finishPlain(
     pool: ?*Pool,
     isTls: bool,
-    has_proxy: bool,
+    hasProxy: bool,
     host: []const u8,
     port: u16,
     full: FullResponse,
-    pooled_out: *bool,
+    pooledOut: *bool,
     transport: Transport,
     resp: Response,
 ) Response {
     if (pool) |p| {
-        if (!isTls and !has_proxy and full.reusable and !respSaysClose(&resp)) {
+        if (!isTls and !hasProxy and full.reusable and !respSaysClose(&resp)) {
             p.release(host, port, transport.plain);
-            pooled_out.* = true;
+            pooledOut.* = true;
         }
     }
     return resp;
@@ -915,15 +1325,15 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, is_head: bool, opts:
         return Error.MalformedResponse;
 
     const framing = parserMod.framingFull(fields[0..blk.count], .{
-        .is_response = true,
+        .isResponse = true,
         .status = resp_head.statusCode,
-        .method_len = if (is_head) 4 else 0,
+        .methodLen = if (is_head) 4 else 0,
     }) catch return Error.MalformedResponse;
 
     const headers = a.alloc(Header, blk.count) catch return Error.OutOfMemory;
-    var header_count: usize = 0;
+    var headerCount: usize = 0;
     errdefer {
-        for (headers[0..header_count]) |h| {
+        for (headers[0..headerCount]) |h| {
             a.free(h.name);
             a.free(h.value);
         }
@@ -936,11 +1346,11 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, is_head: bool, opts:
             return Error.OutOfMemory;
         };
         headers[i] = .{ .name = name, .value = value };
-        header_count += 1;
+        headerCount += 1;
     }
 
     if (is_head or resp_head.statusCode < 200 or resp_head.statusCode == 204 or resp_head.statusCode == 304 or
-        (framing.framing == .content_length and framing.length == 0))
+        (framing.framing == .contentLength and framing.length == 0))
     {
         return .{ .resp = .{
             .allocator = a,
@@ -1054,18 +1464,18 @@ fn resolveLocation(a: Allocator, baseUrl: []const u8, loc: []const u8) ![]u8 {
     try out.appendSlice(a, base.authority(&ab));
 
     // Split off fragment and query; they survive dot-segment removal untouched.
-    var path_end = loc.len;
+    var pathEnd = loc.len;
     var suffix: []const u8 = "";
     if (std.mem.indexOfScalar(u8, loc, '#')) |hi| {
-        path_end = hi;
+        pathEnd = hi;
         suffix = loc[hi..];
     }
     var query: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, loc[0..path_end], '?')) |qi| {
-        query = loc[qi..path_end];
-        path_end = qi;
+    if (std.mem.indexOfScalar(u8, loc[0..pathEnd], '?')) |qi| {
+        query = loc[qi..pathEnd];
+        pathEnd = qi;
     }
-    const loc_path = loc[0..path_end];
+    const loc_path = loc[0..pathEnd];
 
     var merged: std.ArrayList(u8) = .empty;
     defer merged.deinit(a);
@@ -1124,7 +1534,10 @@ fn removeDotSegments(a: Allocator, path: []const u8) ![]u8 {
     return out.toOwnedSlice(a);
 }
 
-// Convenience one-shot helpers (all route through request())
+// Convenience one-shot helpers (all route through request()).
+// NOTE: JSON/form bodies use the canonical `.{.bodyKind/.body}` fields on
+// `Request` (or `Client.RequestOptions.json`) — no postJson/putJson/patchJson
+// explosion.
 
 pub fn get(a: Allocator, io: std.Io, url: []const u8) Error!Response {
     return request(a, io, .{ .method = .GET, .url = url });
@@ -1134,27 +1547,12 @@ pub fn post(a: Allocator, io: std.Io, url: []const u8, body: []const u8, content
     return request(a, io, .{ .method = .POST, .url = url, .bodyKind = .raw, .body = body, .headers = &.{.{ .name = "Content-Type", .value = contentType }} });
 }
 
-pub fn postJson(a: Allocator, io: std.Io, url: []const u8, jsonData: []const u8) Error!Response {
-    return request(a, io, .{ .method = .POST, .url = url, .bodyKind = .json, .body = jsonData });
-}
-pub fn postForm(a: Allocator, io: std.Io, url: []const u8, encodedForm: []const u8) Error!Response {
-    return request(a, io, .{ .method = .POST, .url = url, .bodyKind = .form, .body = encodedForm });
-}
-
 pub fn put(a: Allocator, io: std.Io, url: []const u8, body: []const u8, contentType: []const u8) Error!Response {
     return request(a, io, .{ .method = .PUT, .url = url, .bodyKind = .raw, .body = body, .headers = &.{.{ .name = "Content-Type", .value = contentType }} });
 }
 
-pub fn putJson(a: Allocator, io: std.Io, url: []const u8, jsonData: []const u8) Error!Response {
-    return request(a, io, .{ .method = .PUT, .url = url, .bodyKind = .json, .body = jsonData });
-}
-
 pub fn patch(a: Allocator, io: std.Io, url: []const u8, body: []const u8, contentType: []const u8) Error!Response {
     return request(a, io, .{ .method = .PATCH, .url = url, .bodyKind = .raw, .body = body, .headers = &.{.{ .name = "Content-Type", .value = contentType }} });
-}
-
-pub fn patchJson(a: Allocator, io: std.Io, url: []const u8, jsonData: []const u8) Error!Response {
-    return request(a, io, .{ .method = .PATCH, .url = url, .bodyKind = .json, .body = jsonData });
 }
 
 pub fn delete(a: Allocator, io: std.Io, url: []const u8) Error!Response {
@@ -1315,7 +1713,7 @@ fn startTestServer(
         fn h(_: *routerNs.Context) anyerror!routerNs.Response {
             return .{ .body = body, .contentType = "text/plain" };
         }
-    }.h);
+    }.h, .{});
     return .{ .srv = srv, .ctx = ctx };
 }
 
@@ -1382,7 +1780,7 @@ test "connection close response is not pooled" {
         fn h(_: *routerNs.Context) anyerror!routerNs.Response {
             return .{ .body = "one-shot", .contentType = "text/plain" };
         }
-    }.h);
+    }.h, .{});
 
     const Runner = struct {
         fn run(s: *lifecycle.Server) void {

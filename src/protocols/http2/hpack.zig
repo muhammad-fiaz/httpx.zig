@@ -36,7 +36,7 @@ pub const MAX_STRING_LEN: usize = 65536;
 
 pub const StaticEntry = struct { name: []const u8, value: []const u8 };
 
-pub const static_table = [_]StaticEntry{
+pub const staticTable = [_]StaticEntry{
     .{ .name = ":authority", .value = "" },
     .{ .name = ":method", .value = "GET" },
     .{ .name = ":method", .value = "POST" },
@@ -100,7 +100,7 @@ pub const static_table = [_]StaticEntry{
     .{ .name = "www-authenticate", .value = "" },
 };
 
-pub const STATIC_TABLE_SIZE = static_table.len;
+pub const STATIC_TABLE_SIZE = staticTable.len;
 
 fn entrySize(name: []const u8, value: []const u8) usize {
     return ENTRY_OVERHEAD + name.len + value.len;
@@ -174,11 +174,11 @@ pub const Decoder = struct {
     allocator: Allocator,
     dyn: DynTable,
     /// Upper bound from SETTINGS_HEADER_TABLE_SIZE the peer may not exceed.
-    protocol_maxSize: usize = DEFAULT_TABLE_SIZE,
+    protocolMaxSize: usize = DEFAULT_TABLE_SIZE,
     /// Set when peer shrinks below current max: next block MUST open with
     /// a table size update (RFC 7541 Section 4.2 via nghttp2 behavior).
-    require_size_update: bool = false,
-    max_header_list: usize = 0xFFFFFFFF,
+    requireSizeUpdate: bool = false,
+    maxHeaderList: usize = 0xFFFFFFFF,
 
     pub fn init(allocator: Allocator) Decoder {
         return .{ .allocator = allocator, .dyn = DynTable.init(allocator) };
@@ -190,17 +190,17 @@ pub const Decoder = struct {
 
     /// Applies our advertised SETTINGS_HEADER_TABLE_SIZE.
     pub fn setProtocolMaxSize(self: *Decoder, sz: usize) void {
-        self.protocol_maxSize = sz;
+        self.protocolMaxSize = sz;
         if (self.dyn.maxSize > sz) {
             self.dyn.setMaxSize(sz);
-            self.require_size_update = true;
+            self.requireSizeUpdate = true;
         }
     }
 
     fn lookup(self: *Decoder, index: u64) Error!HeaderField {
         if (index == 0) return Error.InvalidIndex;
         if (index <= STATIC_TABLE_SIZE) {
-            const e = static_table[@intCast(index - 1)];
+            const e = staticTable[@intCast(index - 1)];
             return .{ .name = e.name, .value = e.value };
         }
         const rel: usize = @intCast(index - STATIC_TABLE_SIZE - 1);
@@ -215,10 +215,10 @@ pub const Decoder = struct {
         const huffman_bit = data[offset.*] & 0x80 != 0;
         const len = try pint.decode(data, offset, 7);
         if (len > MAX_STRING_LEN) return Error.HeaderTooLarge;
-        const raw_len = std.math.cast(usize, len) orelse return Error.HeaderTooLarge;
-        if (offset.* > data.len or raw_len > data.len - offset.*) return Error.Truncated;
-        const raw = data[offset.*..][0..raw_len];
-        offset.* += raw_len;
+        const rawLen = std.math.cast(usize, len) orelse return Error.HeaderTooLarge;
+        if (offset.* > data.len or rawLen > data.len - offset.*) return Error.Truncated;
+        const raw = data[offset.*..][0..rawLen];
+        offset.* += rawLen;
         if (!huffman_bit) {
             return .{ .data = @constCast(raw), .owned = false };
         }
@@ -241,7 +241,7 @@ pub const Decoder = struct {
     pub const Result = struct {
         fields: []HeaderField,
         /// Total decompressed list size for SETTINGS_MAX_HEADER_LIST_SIZE checks.
-        total_size: usize,
+        totalSize: usize,
     };
 
     /// Decodes one complete header block fragment chain (already assembled).
@@ -285,9 +285,9 @@ pub const Decoder = struct {
                 // 001xxxxx: dynamic table size update.
                 if (!at_start) return Error.UnexpectedTableSizeUpdate;
                 const sz = try pint.decode(block, &offset, 5);
-                if (sz > self.protocol_maxSize) return Error.InvalidTableSize;
+                if (sz > self.protocolMaxSize) return Error.InvalidTableSize;
                 self.dyn.setMaxSize(@intCast(sz));
-                self.require_size_update = false;
+                self.requireSizeUpdate = false;
             } else {
                 // 0000xxxx / 0001xxxx: literal without indexing / never indexed.
                 const idx = try pint.decode(block, &offset, 4);
@@ -300,14 +300,14 @@ pub const Decoder = struct {
                 total = std.math.add(usize, total, ENTRY_OVERHEAD + f.name.len + f.value.len) catch return Error.HeaderTooLarge;
                 at_start = false;
             }
-            if (total > self.max_header_list) return Error.HeaderTooLarge;
+            if (total > self.maxHeaderList) return Error.HeaderTooLarge;
         }
 
-        if (self.require_size_update) return Error.UnexpectedTableSizeUpdate;
+        if (self.requireSizeUpdate) return Error.UnexpectedTableSizeUpdate;
 
         return .{
             .fields = try list.toOwnedSlice(self.allocator),
-            .total_size = total,
+            .totalSize = total,
         };
     }
 
@@ -362,7 +362,7 @@ pub const Indexing = enum {
 pub const Encoder = struct {
     allocator: Allocator,
     dyn: DynTable,
-    pending_size_update: ?usize = null,
+    pendingSizeUpdate: ?usize = null,
 
     /// Names that nghttp2 avoids indexing (volatile per-request values).
     const no_index_names = [_][]const u8{
@@ -382,26 +382,26 @@ pub const Encoder = struct {
     /// next encode when changed).
     pub fn applySettingsSize(self: *Encoder, sz: usize) void {
         if (self.dyn.maxSize != sz) {
-            self.pending_size_update = sz;
+            self.pendingSizeUpdate = sz;
         }
         self.dyn.setMaxSize(sz);
     }
 
-    fn findNameIndex(self: *const Encoder, name: []const u8) struct { idx: u64, in_dyn: bool } {
-        for (static_table, 0..) |e, i| {
-            if (std.mem.eql(u8, e.name, name)) return .{ .idx = i + 1, .in_dyn = false };
+    fn findNameIndex(self: *const Encoder, name: []const u8) struct { idx: u64, inDyn: bool } {
+        for (staticTable, 0..) |e, i| {
+            if (std.mem.eql(u8, e.name, name)) return .{ .idx = i + 1, .inDyn = false };
         }
         // Dynamic indices are relative to the newest entry and start
         // AFTER the whole static table.
         for (self.dyn.entries.items, 0..) |e, i| {
             if (std.mem.eql(u8, e.name, name))
-                return .{ .idx = STATIC_TABLE_SIZE + 1 + i, .in_dyn = true };
+                return .{ .idx = STATIC_TABLE_SIZE + 1 + i, .inDyn = true };
         }
-        return .{ .idx = 0, .in_dyn = false };
+        return .{ .idx = 0, .inDyn = false };
     }
 
     fn findFullIndex(self: *const Encoder, name: []const u8, value: []const u8) ?u64 {
-        for (static_table, 0..) |e, i| {
+        for (staticTable, 0..) |e, i| {
             if (std.mem.eql(u8, e.name, name) and std.mem.eql(u8, e.value, value)) return i + 1;
         }
         for (self.dyn.entries.items, 0..) |e, i| {
@@ -445,24 +445,24 @@ pub const Encoder = struct {
     pub fn encode(
         self: *Encoder,
         out: *std.ArrayList(u8),
-        name_in: []const u8,
+        nameIn: []const u8,
         value: []const u8,
         indexing: Indexing,
-        force_literal: bool,
+        forceLiteral: bool,
     ) !void {
-        if (self.pending_size_update) |sz| {
-            self.pending_size_update = null;
+        if (self.pendingSizeUpdate) |sz| {
+            self.pendingSizeUpdate = null;
             var tmp: [10]u8 = undefined;
             const n = try pint.encode(tmp[0..], 5, 0x20, sz);
             try out.appendSlice(self.allocator, tmp[0..n]);
         }
 
-        const name = lowerBuf(self.allocator, name_in) catch name_in;
-        defer if (name.ptr != name_in.ptr) self.allocator.free(name);
+        const name = lowerBuf(self.allocator, nameIn) catch nameIn;
+        defer if (name.ptr != nameIn.ptr) self.allocator.free(name);
 
         var ib: [10]u8 = undefined;
 
-        if (!force_literal) {
+        if (!forceLiteral) {
             if (self.findFullIndex(name, value)) |full| {
                 const n = try pint.encode(ib[0..], 7, 0x80, full);
                 try out.appendSlice(self.allocator, ib[0..n]);
@@ -476,7 +476,7 @@ pub const Encoder = struct {
             .incremental => {
                 if (!shouldIndex(name)) {
                     const op: u8 = 0x00;
-                    if (name_ref.idx != 0 and !force_literal) {
+                    if (name_ref.idx != 0 and !forceLiteral) {
                         const n = try pint.encode(ib[0..], 4, op, name_ref.idx);
                         try out.appendSlice(self.allocator, ib[0..n]);
                     } else {
@@ -487,7 +487,7 @@ pub const Encoder = struct {
                 } else {
                     try self.dyn.insert(name, value);
                     const op: u8 = 0x40;
-                    if (name_ref.idx != 0 and !force_literal) {
+                    if (name_ref.idx != 0 and !forceLiteral) {
                         const n = try pint.encode(ib[0..], 6, op, name_ref.idx);
                         try out.appendSlice(self.allocator, ib[0..n]);
                     } else {
@@ -499,7 +499,7 @@ pub const Encoder = struct {
             },
             .without => {
                 const op: u8 = 0x00;
-                if (name_ref.idx != 0 and !force_literal) {
+                if (name_ref.idx != 0 and !forceLiteral) {
                     const n = try pint.encode(ib[0..], 4, op, name_ref.idx);
                     try out.appendSlice(self.allocator, ib[0..n]);
                 } else {
@@ -510,7 +510,7 @@ pub const Encoder = struct {
             },
             .never => {
                 const op: u8 = 0x10;
-                if (name_ref.idx != 0 and !force_literal) {
+                if (name_ref.idx != 0 and !forceLiteral) {
                     const n = try pint.encode(ib[0..], 4, op, name_ref.idx);
                     try out.appendSlice(self.allocator, ib[0..n]);
                 } else {

@@ -16,7 +16,11 @@ const clock = @import("../common/clock.zig");
 const Allocator = std.mem.Allocator;
 const net = std.Io.net;
 const udp_mod = @import("../sockets/udp.zig");
-pub const cache = @import("dns/cache.zig");
+const cacheMod = @import("dns/cache.zig");
+/// DNS response cache: `httpx.dns.Cache` is the one canonical path.
+pub const Cache = cacheMod.Cache;
+pub const CacheConfig = cacheMod.Config;
+pub const LookupError = cacheMod.LookupError;
 
 pub const RecordType = enum(u16) {
     a = 1,
@@ -39,7 +43,7 @@ pub const Rcode = enum(u4) {
     no_error = 0,
     format_error = 1,
     server_failure = 2,
-    name_error = 3,
+    nameError = 3,
     not_implemented = 4,
     refused = 5,
     _,
@@ -130,6 +134,7 @@ pub fn decodeName(allocator: Allocator, msg: []const u8, offset: *usize, depth: 
     var pos = offset.*;
     var jumped = false;
     var guard: usize = 0;
+    var ptr_jumps: u8 = 0;
 
     while (true) {
         if (guard > 255) return error.NameLoop;
@@ -144,6 +149,8 @@ pub fn decodeName(allocator: Allocator, msg: []const u8, offset: *usize, depth: 
         switch (len & 0xC0) {
             0xC0 => { // pointer
                 if (pos + 1 >= msg.len) return error.Truncated;
+                ptr_jumps += 1;
+                if (ptr_jumps + depth > 10) return error.TooManyPointers;
                 const ptr = (@as(usize, len & 0x3F) << 8) | msg[pos + 1];
                 if (!jumped) offset.* = pos + 2;
                 jumped = true;
@@ -168,8 +175,8 @@ pub const ResourceRecord = struct {
     rtype: RecordType,
     ttl: u32,
     /// For A/AAAA: raw address bytes (4 or 16). Otherwise empty.
-    addr_bytes: [16]u8 = [_]u8{0} ** 16,
-    addr_len: usize = 0,
+    addrBytes: [16]u8 = [_]u8{0} ** 16,
+    addrLen: usize = 0,
 
     pub fn deinit(self: *ResourceRecord, allocator: Allocator) void {
         allocator.free(self.name);
@@ -179,15 +186,15 @@ pub const ResourceRecord = struct {
     pub fn formatAddress(self: *const ResourceRecord, buf: []u8) ![]const u8 {
         switch (self.rtype) {
             .a => {
-                if (self.addr_len != 4) return error.NotAnAddress;
+                if (self.addrLen != 4) return error.NotAnAddress;
                 const ip4 = net.IpAddress.Ip4Address{
-                    .bytes = self.addr_bytes[0..4].*,
+                    .bytes = self.addrBytes[0..4].*,
                     .port = 0,
                 };
                 _ = ip4;
                 return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{
-                    self.addr_bytes[0], self.addr_bytes[1],
-                    self.addr_bytes[2], self.addr_bytes[3],
+                    self.addrBytes[0], self.addrBytes[1],
+                    self.addrBytes[2], self.addrBytes[3],
                 });
             },
             else => return error.NotAnAddress,
@@ -256,14 +263,14 @@ pub fn parseResponse(allocator: Allocator, msg: []const u8) !Response {
         switch (rr.rtype) {
             .a => {
                 if (rdlength == 4) {
-                    @memcpy(rr.addr_bytes[0..4], msg[offset..][0..4]);
-                    rr.addr_len = 4;
+                    @memcpy(rr.addrBytes[0..4], msg[offset..][0..4]);
+                    rr.addrLen = 4;
                 }
             },
             .aaaa => {
                 if (rdlength == 16) {
-                    @memcpy(rr.addr_bytes[0..16], msg[offset..][0..16]);
-                    rr.addr_len = 16;
+                    @memcpy(rr.addrBytes[0..16], msg[offset..][0..16]);
+                    rr.addrLen = 16;
                 }
             },
             else => {}, // CNAME etc: skip rdata (could follow pointers)
@@ -329,7 +336,7 @@ test "query build roundtrip structure" {
 
 const net_mod = std.Io.net;
 
-pub var default_nameserver: [4]u8 = .{ 127, 0, 0, 53 };
+pub var defaultNameserver: [4]u8 = .{ 127, 0, 0, 53 };
 
 /// Resolves `name` against the configured nameserver over UDP.
 /// Returns A-record addresses. Caller frees slices and the Response.
@@ -355,14 +362,14 @@ pub fn resolveA(allocator: std.mem.Allocator, io: std.Io, name: []const u8) ![]n
         for (resp.answers) |*r| r.deinit(allocator);
         allocator.free(resp.answers);
     }
-    if (resp.rcode == .name_error) return error.NameError;
+    if (resp.rcode == .nameError) return error.NameError;
     if (resp.rcode != .no_error) return error.ServerFailure;
 
     var out = std.ArrayList(net_mod.IpAddress.Ip4Address).empty;
     errdefer out.deinit(allocator);
     for (resp.answers) |rr| {
-        if (rr.rtype == .a and rr.addr_len == 4) {
-            try out.append(allocator, .{ .bytes = rr.addr_bytes[0..4].*, .port = 0 });
+        if (rr.rtype == .a and rr.addrLen == 4) {
+            try out.append(allocator, .{ .bytes = rr.addrBytes[0..4].*, .port = 0 });
         }
     }
     return out.toOwnedSlice(allocator);
@@ -381,7 +388,7 @@ pub fn resolveAAAA(allocator: std.mem.Allocator, io: std.Io, name: []const u8) !
 
     var ns_addr = net_mod.IpAddress.parseIp6("::1", 53) catch blk: {
         // Fall back to the v4 loopback resolver stub if v6 parse unavailable.
-        break :blk net_mod.IpAddress{ .v6 = .{ .bytes = [_]u8{0} ** 15 ++ [_]u8{1}, .port = 53, .flow_label = 0, .scope_id = 0 } };
+        break :blk net_mod.IpAddress{ .v6 = .{ .bytes = [_]u8{0} ** 15 ++ [_]u8{1}, .port = 53, .flowLabel = 0, .scopeId = 0 } };
     };
     _ = &ns_addr;
     try sock.sendTo(&ns_addr, pkt);
@@ -395,18 +402,18 @@ pub fn resolveAAAA(allocator: std.mem.Allocator, io: std.Io, name: []const u8) !
         for (resp.answers) |*r| r.deinit(allocator);
         allocator.free(resp.answers);
     }
-    if (resp.rcode == .name_error) return error.NameError;
+    if (resp.rcode == .nameError) return error.NameError;
     if (resp.rcode != .no_error) return error.ServerFailure;
 
     var out = std.ArrayList(net_mod.IpAddress.Ip6Address).empty;
     errdefer out.deinit(allocator);
     for (resp.answers) |rr| {
-        if (rr.rtype == .aaaa and rr.addr_len == 16) {
+        if (rr.rtype == .aaaa and rr.addrLen == 16) {
             out.append(allocator, .{
-                .bytes = rr.addr_bytes[0..16].*,
+                .bytes = rr.addrBytes[0..16].*,
                 .port = 0,
-                .flow_label = 0,
-                .scope_id = 0,
+                .flowLabel = 0,
+                .scopeId = 0,
             }) catch continue;
         }
     }
@@ -425,4 +432,36 @@ test "aaaa query builds valid packet structure" {
     const q = try buildQuery(a, 7, "localhost", .aaaa);
     defer a.free(q);
     try std.testing.expect(q.len > HEADER_SIZE + 4);
+}
+
+test "multi-answer response parses every address without deadlock" {
+    const a = std.testing.allocator;
+    // Hand-built response: 1 question (example.com A) + 3 A answers using
+    // compression pointers, exercising the multi-address result path that
+    // once deadlocked a fixed-capacity result queue.
+    var msg = std.ArrayList(u8).empty;
+    defer msg.deinit(a);
+    // Header: id, flags(response|recursion), qd=1, an=3, ns=0, ar=0.
+    try msg.appendSlice(a, &.{ 0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00 });
+    // Question: example.com, A, IN.
+    try msg.appendSlice(a, &.{ 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0x00, 0x01, 0x00, 0x01 });
+    // Answers: pointer to offset 12, A/IN, TTL 300, 4-byte rdata.
+    const addrs = [_][4]u8{
+        .{ 93, 184, 216, 34 },
+        .{ 93, 184, 216, 35 },
+        .{ 93, 184, 216, 36 },
+    };
+    for (addrs) |ip| {
+        try msg.appendSlice(a, &.{ 0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x2C, 0x00, 0x04 });
+        try msg.appendSlice(a, &ip);
+    }
+
+    var resp = try parseResponse(a, msg.items);
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(usize, 3), resp.answers.len);
+    for (resp.answers, 0..) |rr, i| {
+        try std.testing.expectEqual(RecordType.a, rr.rtype);
+        try std.testing.expectEqual(@as(usize, 4), rr.addrLen);
+        try std.testing.expectEqual(addrs[i], rr.addrBytes[0..4].*);
+    }
 }

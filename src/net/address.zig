@@ -70,14 +70,14 @@ pub const Address = struct {
     }
 
     /// Parses "host" or "[v6]:port" or "host:port" or bare host.
-    pub fn parse(text: []const u8, default_port: u16) Error!struct { addr: []const u8, port: u16 } {
-        _ = default_port;
+    /// Bare hosts without an explicit port use `defaultPort`.
+    pub fn parse(text: []const u8, defaultPort: u16) Error!struct { addr: []const u8, port: u16 } {
         // Bracketed IPv6 [::1]:8080
         if (text.len > 0 and text[0] == '[') {
             const close = std.mem.indexOfScalar(u8, text, ']') orelse return Error.InvalidAddress;
             const rest = text[close + 1 ..];
             if (rest.len == 0) {
-                return .{ .addr = text[1..close], .port = 0 };
+                return .{ .addr = text[1..close], .port = defaultPort };
             }
             if (rest[0] != ':') return Error.InvalidAddress;
             const p = std.fmt.parseInt(u16, rest[1..], 10) catch return Error.InvalidPort;
@@ -94,7 +94,7 @@ pub const Address = struct {
             return .{ .addr = text[0..colon], .port = p };
         }
         // Raw host or unbracketed IPv6 without port
-        return .{ .addr = text, .port = 0 };
+        return .{ .addr = text, .port = defaultPort };
     }
 
     pub fn parseIp(self: *const Address, text: []const u8) Error!Address {
@@ -270,9 +270,9 @@ fn parseIp6Text(text_in: []const u8) Error!Address {
     // Find "::" compression point
     const double_colon = std.mem.indexOf(u8, text, "::");
     var head_groups: [8]u16 = [_]u16{0} ** 8;
-    var head_count: usize = 0;
+    var headCount: usize = 0;
     var tail_groups: [8]u16 = [_]u16{0} ** 8;
-    var tail_count: usize = 0;
+    var tailCount: usize = 0;
 
     var head_part: []const u8 = "";
     var tail_part: []const u8 = "";
@@ -286,32 +286,32 @@ fn parseIp6Text(text_in: []const u8) Error!Address {
     var fit = std.mem.splitScalar(u8, head_part, ':');
     while (fit.next()) |g| {
         if (g.len == 0) continue;
-        if (head_count >= 8) return Error.InvalidAddress;
-        head_groups[head_count] = std.fmt.parseInt(u16, g, 16) catch return Error.InvalidAddress;
-        head_count += 1;
+        if (headCount >= 8) return Error.InvalidAddress;
+        head_groups[headCount] = std.fmt.parseInt(u16, g, 16) catch return Error.InvalidAddress;
+        headCount += 1;
     }
 
     if (double_colon != null) {
         var tit = std.mem.splitScalar(u8, tail_part, ':');
         while (tit.next()) |g| {
             if (g.len == 0) continue;
-            if (tail_count >= 8) return Error.InvalidAddress;
-            tail_groups[tail_count] = std.fmt.parseInt(u16, g, 16) catch return Error.InvalidAddress;
-            tail_count += 1;
+            if (tailCount >= 8) return Error.InvalidAddress;
+            tail_groups[tailCount] = std.fmt.parseInt(u16, g, 16) catch return Error.InvalidAddress;
+            tailCount += 1;
         }
     } else {
         // No compression: must have exactly 8 groups (or 6 + v4 tail)
-        if (head_count != 8 and !(tail_v4 != null and head_count == 6)) return Error.InvalidAddress;
+        if (headCount != 8 and !(tail_v4 != null and headCount == 6)) return Error.InvalidAddress;
     }
 
     var out = Address{ .family = .ip6, .port = 0 };
-    const total_from_text = head_count + tail_count;
+    const total_from_text = headCount + tailCount;
     const v4_extra: usize = if (tail_v4 != null) 2 else 0;
     const zeros = 8 - total_from_text - v4_extra;
     if (zeros < 0 or total_from_text + v4_extra > 8) return Error.InvalidAddress;
 
     var pos: usize = 0;
-    for (head_groups[0..head_count]) |g| {
+    for (head_groups[0..headCount]) |g| {
         out.bytes[pos * 2] = @intCast(g >> 8);
         out.bytes[pos * 2 + 1] = @intCast(g & 0xFF);
         pos += 1;
@@ -319,7 +319,7 @@ fn parseIp6Text(text_in: []const u8) Error!Address {
     for (0..@intCast(zeros)) |_| {
         pos += 1;
     }
-    for (tail_groups[0..tail_count]) |g| {
+    for (tail_groups[0..tailCount]) |g| {
         out.bytes[pos * 2] = @intCast(g >> 8);
         out.bytes[pos * 2 + 1] = @intCast(g & 0xFF);
         pos += 1;
@@ -415,4 +415,9 @@ test "host:port splitting" {
 
     const r3 = try Address.parse("example.com", 80);
     try std.testing.expectEqualStrings("example.com", r3.addr);
+    try std.testing.expectEqual(@as(u16, 80), r3.port);
+
+    const r4 = try Address.parse("[::1]", 443);
+    try std.testing.expectEqualStrings("::1", r4.addr);
+    try std.testing.expectEqual(@as(u16, 443), r4.port);
 }

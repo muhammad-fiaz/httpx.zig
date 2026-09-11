@@ -1,6 +1,6 @@
 //! Connection ID registry for the local-endpoint view (RFC 9000 section
 //! 5.1): tracks CIDs advertised by the PEER via NEW_CONNECTION_ID,
-//! enforces uniqueness and retire_prior_to semantics, rotates the active
+//! enforces uniqueness and retirePriorTo semantics, rotates the active
 //! destination CID, and emits RETIRE_CONNECTION_ID exactly once per
 //! retired sequence.
 
@@ -19,27 +19,27 @@ pub const MAX_CID_LEN = 20;
 pub const Entry = struct {
     sequence: u64,
     cid: [MAX_CID_LEN]u8,
-    cid_len: u8,
-    stateless_reset_token: [16]u8,
+    cidLen: u8,
+    statelessResetToken: [16]u8,
     retired: bool = false,
     /// RETIRE_CONNECTION_ID already queued for this sequence.
-    retire_sent: bool = false,
+    retireSent: bool = false,
 
     pub fn cidSlice(self: *const Entry) []const u8 {
-        return self.cid[0..self.cid_len];
+        return self.cid[0..self.cidLen];
     }
 };
 
 /// Outcome of processing one NEW_CONNECTION_ID frame.
 pub const NewCidResult = struct {
     /// Sequence numbers needing RETIRE_CONNECTION_ID frames.
-    newly_retired_buf: [8]u64 = undefined,
-    newly_retired_len: usize = 0,
+    newlyRetiredBuf: [8]u64 = undefined,
+    newlyRetiredLen: usize = 0,
     /// True when the ACTIVE destination CID was rotated.
     rotated: bool = false,
 
     pub fn newlyRetired(self: *const NewCidResult) []const u64 {
-        return self.newly_retired_buf[0..self.newly_retired_len];
+        return self.newlyRetiredBuf[0..self.newlyRetiredLen];
     }
 };
 
@@ -47,10 +47,10 @@ pub const Registry = struct {
     allocator: Allocator,
     entries: std.ArrayList(Entry) = .empty,
     /// Sequence of our currently preferred destination CID.
-    active_seq: u64 = 0,
-    have_active: bool = false,
-    /// Peer's advertised limit (active_connection_id_limit).
-    peer_cid_limit: u64 = 2,
+    activeSeq: u64 = 0,
+    haveActive: bool = false,
+    /// Peer's advertised limit (activeConnectionIdLimit).
+    peerCidLimit: u64 = 2,
 
     pub fn init(allocator: Allocator) Registry {
         return .{ .allocator = allocator };
@@ -71,20 +71,20 @@ pub const Registry = struct {
     pub fn onNewConnectionId(
         self: *Registry,
         sequence: u64,
-        retire_prior_to: u64,
+        retirePriorTo: u64,
         cid: []const u8,
         token: *const [16]u8,
     ) Error!NewCidResult {
         var res: NewCidResult = .{};
 
-        // RFC 9000 19.15: retire_prior_to must not exceed sequence.
-        if (retire_prior_to > sequence) return Error.ProtocolViolation;
+        // RFC 9000 19.15: retirePriorTo must not exceed sequence.
+        if (retirePriorTo > sequence) return Error.ProtocolViolation;
         if (cid.len == 0 or cid.len > MAX_CID_LEN) return Error.ProtocolViolation;
 
         if (self.findBySeq(sequence)) |existing| {
             // Re-transmission: MUST match exactly.
             if (!std.mem.eql(u8, existing.cidSlice(), cid) or
-                !std.mem.eql(u8, existing.stateless_reset_token[0..], token))
+                !std.mem.eql(u8, existing.statelessResetToken[0..], token))
             {
                 return Error.ProtocolViolation;
             }
@@ -100,11 +100,11 @@ pub const Registry = struct {
             for (self.entries.items) |*e| {
                 if (!e.retired) live += 1;
             }
-            if (live >= @max(self.peer_cid_limit, 2)) {
+            if (live >= @max(self.peerCidLimit, 2)) {
                 // Retire the oldest non-active entry to make room.
                 var oldest_idx: ?usize = null;
                 for (self.entries.items, 0..) |*e, i| {
-                    if (!e.retired and e.sequence != self.active_seq) {
+                    if (!e.retired and e.sequence != self.activeSeq) {
                         if (oldest_idx == null or e.sequence < self.entries.items[oldest_idx.?].sequence) {
                             oldest_idx = i;
                         }
@@ -124,37 +124,37 @@ pub const Registry = struct {
                     @memcpy(c[0..cid.len], cid);
                     break :blk c;
                 },
-                .cid_len = @intCast(cid.len),
-                .stateless_reset_token = token.*,
+                .cidLen = @intCast(cid.len),
+                .statelessResetToken = token.*,
             });
         }
 
-        // Process retire_prior_to: mark all lower sequences retired and
+        // Process retirePriorTo: mark all lower sequences retired and
         // queue RETIRE frames for them (once).
         for (self.entries.items) |*e| {
-            if (e.sequence < retire_prior_to and !e.retire_sent) {
+            if (e.sequence < retirePriorTo and !e.retireSent) {
                 e.retired = true;
-                e.retire_sent = true;
-                if (res.newly_retired_len < res.newly_retired_buf.len) {
-                    res.newly_retired_buf[res.newly_retired_len] = e.sequence;
-                    res.newly_retired_len += 1;
+                e.retireSent = true;
+                if (res.newlyRetiredLen < res.newlyRetiredBuf.len) {
+                    res.newlyRetiredBuf[res.newlyRetiredLen] = e.sequence;
+                    res.newlyRetiredLen += 1;
                 }
-            } else if (e.sequence >= retire_prior_to) {
+            } else if (e.sequence >= retirePriorTo) {
                 e.retired = false;
             }
         }
 
         // Rotate away from an actively-retired CID.
-        if (self.have_active and self.active_seq < retire_prior_to) {
-            if (self.pickReplacement(retire_prior_to)) |new_seq| {
-                self.active_seq = new_seq;
+        if (self.haveActive and self.activeSeq < retirePriorTo) {
+            if (self.pickReplacement(retirePriorTo)) |new_seq| {
+                self.activeSeq = new_seq;
                 res.rotated = true;
             } else {
                 return Error.CidLimitExceeded;
             }
-        } else if (!self.have_active and sequence >= retire_prior_to) {
-            self.active_seq = sequence;
-            self.have_active = true;
+        } else if (!self.haveActive and sequence >= retirePriorTo) {
+            self.activeSeq = sequence;
+            self.haveActive = true;
         }
 
         return res;
@@ -171,16 +171,16 @@ pub const Registry = struct {
     }
 
     pub fn activeCid(self: *const Registry) ?[]const u8 {
-        if (!self.have_active) return null;
-        const e = self.findBySeqConst(self.active_seq) orelse return null;
+        if (!self.haveActive) return null;
+        const e = self.findBySeqConst(self.activeSeq) orelse return null;
         if (e.retired) return null;
         return e.cidSlice();
     }
 
     pub fn activeToken(self: *const Registry) ?[16]u8 {
-        if (!self.have_active) return null;
-        const e = self.findBySeqConst(self.active_seq) orelse return null;
-        return e.stateless_reset_token;
+        if (!self.haveActive) return null;
+        const e = self.findBySeqConst(self.activeSeq) orelse return null;
+        return e.statelessResetToken;
     }
 
     fn findBySeqConst(self: *const Registry, seq: u64) ?*const Entry {
@@ -223,7 +223,7 @@ test "distinct sequences cannot share a CID" {
     try std.testing.expectError(Error.ProtocolViolation, r.onNewConnectionId(2, 0, &.{ 5, 5 }, &tok));
 }
 
-test "retire_prior_to rotates active and queues retirements" {
+test "retirePriorTo rotates active and queues retirements" {
     var r = Registry.init(std.testing.allocator);
     defer r.deinit();
     var tok: [16]u8 = .{1} ** 16;
@@ -235,7 +235,7 @@ test "retire_prior_to rotates active and queues retirements" {
     // Peer demands retiring everything below seq 2 -> active (0) must move.
     const res = try r.onNewConnectionId(3, 2, &.{ 0xA3, 0xA3 }, &tok);
     try std.testing.expect(res.rotated);
-    try std.testing.expectEqual(@as(u64, 2), r.active_seq);
+    try std.testing.expectEqual(@as(u64, 2), r.activeSeq);
     try std.testing.expectEqualSlices(u8, &.{ 0xA2, 0xA2 }, r.activeCid().?);
 
     // Sequences 0 and 1 queued for RETIRE_CONNECTION_ID exactly once each.
@@ -247,7 +247,7 @@ test "retire_prior_to rotates active and queues retirements" {
     try std.testing.expectEqual(@as(usize, 0), res2.newlyRetired().len);
 }
 
-test "invalid retire_prior_to rejected" {
+test "invalid retirePriorTo rejected" {
     var r = Registry.init(std.testing.allocator);
     defer r.deinit();
     var tok: [16]u8 = .{0} ** 16;

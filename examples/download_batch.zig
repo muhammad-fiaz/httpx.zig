@@ -12,7 +12,8 @@ const DownloadTask = struct {
         var c = httpx.Client.init(std.heap.smp_allocator, io, .{});
         defer c.deinit();
 
-        _ = c.download(self.url, self.dest, .{
+        _ = c.download(self.url, .{
+            .path = self.dest,
             .progress = .enabled,
             .existing = .overwrite,
             .cancelFlag = cancel,

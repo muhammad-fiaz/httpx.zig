@@ -18,7 +18,7 @@ pub fn BoundedQueue(comptime T: type) type {
 
         mu: sync.Spinlock = .{},
         space: sync.Semaphore,
-        items_avail: sync.Semaphore,
+        itemsAvail: sync.Semaphore,
         buf: []T,
         head: usize = 0, // pop index
         tail: usize = 0, // push index
@@ -27,12 +27,12 @@ pub fn BoundedQueue(comptime T: type) type {
         allocator: std.mem.Allocator,
 
         /// Initializes a bounded queue with fixed capacity.
-        pub fn init(allocator: std.mem.Allocator, cap_size: usize) !Self {
-            const cap = @max(1, cap_size);
+        pub fn init(allocator: std.mem.Allocator, capSize: usize) !Self {
+            const cap = @max(1, capSize);
             const buf = try allocator.alloc(T, cap);
             return .{
                 .space = sync.Semaphore.init(@intCast(cap)),
-                .items_avail = sync.Semaphore.init(0),
+                .itemsAvail = sync.Semaphore.init(0),
                 .buf = buf,
                 .allocator = allocator,
             };
@@ -57,7 +57,7 @@ pub fn BoundedQueue(comptime T: type) type {
                     self.buf[self.tail % self.buf.len] = item;
                     self.tail +%= 1;
                     self.len += 1;
-                    self.items_avail.post();
+                    self.itemsAvail.post();
                     return;
                 }
                 std.Thread.yield() catch {};
@@ -74,13 +74,13 @@ pub fn BoundedQueue(comptime T: type) type {
             self.buf[self.tail % self.buf.len] = item;
             self.tail +%= 1;
             self.len += 1;
-            self.items_avail.post();
+            self.itemsAvail.post();
         }
 
         /// Blocks when empty. Returns queued items first (drain mode) and returns `error.Closed` once completely empty and closed.
         pub fn pop(self: *Self) error{Closed}!T {
             while (true) {
-                if (self.items_avail.tryWait()) {
+                if (self.itemsAvail.tryWait()) {
                     self.mu.lock();
                     if (self.len > 0) {
                         const item = self.buf[self.head % self.buf.len];
@@ -108,7 +108,7 @@ pub fn BoundedQueue(comptime T: type) type {
             self.mu.lock();
             defer self.mu.unlock();
             if (self.len == 0) return null;
-            _ = self.items_avail.tryWait();
+            _ = self.itemsAvail.tryWait();
             const item = self.buf[self.head % self.buf.len];
             self.head +%= 1;
             self.len -= 1;
@@ -126,7 +126,7 @@ pub fn BoundedQueue(comptime T: type) type {
             if (!was_closed) {
                 var i: usize = 0;
                 while (i < self.buf.len + 32) : (i += 1) {
-                    self.items_avail.post();
+                    self.itemsAvail.post();
                     self.space.post();
                 }
             }

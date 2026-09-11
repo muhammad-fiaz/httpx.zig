@@ -33,15 +33,15 @@ pub fn main() !void {
     defer client.deinit();
 
     // First lookup: queries DNS and populates cache
-    var addrs1 = try client.resolve("httpbun.com", 443, .{});
+    var addrs1 = try client.resolve("httpbun.com", .{ .port = 443 });
     defer addrs1.deinit();
 
     // Second lookup: served instantly from cache
-    var addrs2 = try client.resolve("httpbun.com", 443, .{});
+    var addrs2 = try client.resolve("httpbun.com", .{ .port = 443 });
     defer addrs2.deinit();
 
     // Force fresh lookup bypassing cache
-    var fresh = try client.resolve("httpbun.com", 443, .{ .use_cache = false });
+    var fresh = try client.resolve("httpbun.com", .{ .port = 443, .useCache = false });
     defer fresh.deinit();
 }
 ```

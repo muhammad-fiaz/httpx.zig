@@ -15,8 +15,8 @@ pub fn main() !void {
 
     const res = client.updateFile(
         sample_url,
-        "downloads/app-asset.pdf",
         .{
+            .path = "downloads/app-asset.pdf",
             .backupExisting = true,
             .backupSuffix = ".bak",
             .verify = .{

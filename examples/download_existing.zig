@@ -16,8 +16,8 @@ pub fn main() !void {
     // Policy 1: Verify on-disk file size/checksum first; if valid, skip downloading!
     const res1 = client.download(
         sample_url,
-        "downloads/existing-sample.pdf",
         .{
+            .path = "downloads/existing-sample.pdf",
             .existing = .verifyExisting,
             .verify = .{
                 .minSize = 100,
@@ -33,8 +33,8 @@ pub fn main() !void {
     // Policy 2: Fail if destination already exists
     const res2 = client.download(
         sample_url,
-        "downloads/existing-sample.pdf",
         .{
+            .path = "downloads/existing-sample.pdf",
             .existing = .fail,
         },
     );

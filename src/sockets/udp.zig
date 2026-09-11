@@ -17,7 +17,8 @@ pub const MAX_DATAGRAM: usize = 65527; // max UDP payload (64KiB - 8 header - 20
 pub const UdpSocket = struct {
     socket: net.Socket,
     io: std.Io,
-    default_dest: ?net.IpAddress = null,
+    defaultDest: ?net.IpAddress = null,
+    closed: bool = false,
 
     /// Binds to 0.0.0.0:port. port=0 lets the OS choose (typical for clients).
     pub fn bind(io: std.Io, port: u16) !UdpSocket {
@@ -26,7 +27,12 @@ pub const UdpSocket = struct {
         return .{ .socket = sock, .io = io };
     }
 
+    /// Idempotent close: QUIC pump shutdown and endpoint teardown both
+    /// close the same socket, and a second OS close could otherwise
+    /// release an unrelated recycled descriptor.
     pub fn close(self: *UdpSocket) void {
+        if (self.closed) return;
+        self.closed = true;
         self.socket.close(self.io);
     }
 
@@ -37,11 +43,17 @@ pub const UdpSocket = struct {
 
     /// Sends using the configured default destination.
     pub fn send(self: *UdpSocket, data: []const u8) !void {
-        const d = self.default_dest orelse error.NoDefaultDestination;
+        const d = self.defaultDest orelse error.NoDefaultDestination;
         try self.sendTo(&d, data);
     }
 
     /// Receives one datagram. Returns payload slice (into buffer) and source address.
+    ///
+    /// NOTE: this blocks indefinitely (socket-level SO_RCVTIMEO does not
+    /// constrain `std.Io` datagram receives, and `receiveTimeout` is
+    /// unsupported by some `std.Io` backends). Deadline-driven code must
+    /// receive on a `quic Pump` reader thread instead — never call this
+    /// where a quiet peer could stall the caller forever.
     pub fn receive(self: *UdpSocket, buffer: []u8) !struct { data: []const u8, from: net.IpAddress } {
         const msg = self.socket.receive(self.io, buffer) catch |err| switch (err) {
             error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
@@ -53,7 +65,7 @@ pub const UdpSocket = struct {
 
 test "udp bind and local datagram echo" {
     // Bind two UDP sockets on loopback and exchange a datagram
-    var gpa_state = std.heap.DebugAllocator(.{}){};
+    var gpa_state: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa_state.deinit();
     const gpa = gpa_state.allocator();
 

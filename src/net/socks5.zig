@@ -88,7 +88,7 @@ fn connectInternal(
         }
     } else |_| blk: {
         const a = std.heap.page_allocator;
-        const addrs = (resolve_mod.Resolver.init(a)).lookupWithIo(io, proxyHost, proxyPort) catch return Error.ProxyConnectFailed;
+        const addrs = (resolve_mod.Resolver.init(a, io)).lookup(proxyHost, .{ .port = proxyPort }) catch return Error.ProxyConnectFailed;
         defer a.free(addrs);
         if (addrs.len == 0) return Error.ProxyConnectFailed;
         for (addrs) |*raddr| {
@@ -120,7 +120,7 @@ fn connectInternal(
         const p = password orelse return Error.AuthFailed;
         if (u.len > 255 or p.len > 255) return Error.AuthFailed;
 
-        var auth_buf: [512]u8 = undefined;
+        var auth_buf: [515]u8 = undefined;
         var pos: usize = 0;
         auth_buf[pos] = 0x01; // auth version
         pos += 1;
@@ -202,7 +202,7 @@ fn connectInternal(
     };
 
     const atyp = head[3];
-    var addr_len: usize = switch (atyp) {
+    var addrLen: usize = switch (atyp) {
         0x01 => 4,
         0x03 => blk: {
             var lb: [1]u8 = undefined;
@@ -214,10 +214,10 @@ fn connectInternal(
     };
     // Skip bound address + port
     var skip: [260]u8 = undefined;
-    while (addr_len > 0) {
-        const chunk = @min(addr_len, skip.len - 2);
+    while (addrLen > 0) {
+        const chunk = @min(addrLen, skip.len - 2);
         _ = try readExact(&sock, skip[0..chunk]);
-        addr_len -= chunk;
+        addrLen -= chunk;
     }
     var portb: [2]u8 = undefined;
     _ = try readExact(&sock, &portb);
@@ -264,15 +264,15 @@ fn parseIp4(text: []const u8) ?u32 {
 pub const MockSocksServer = struct {
     listener: tcp_mod.Listener,
     port: u16,
-    require_auth: bool = false,
-    expected_user: []const u8 = "alice",
-    expected_pass: []const u8 = "secret",
-    reply_code: u8 = 0x00,
-    recorded_atyp: std.atomic.Value(u8) = .init(0),
+    requireAuth: bool = false,
+    expectedUser: []const u8 = "alice",
+    expectedPass: []const u8 = "secret",
+    replyCode: u8 = 0x00,
+    recordedAtyp: std.atomic.Value(u8) = .init(0),
     thread: ?std.Thread = null,
     io: std.Io,
 
-    pub fn start(io: std.Io, require_auth: bool, reply_code: u8) !*MockSocksServer {
+    pub fn start(io: std.Io, requireAuth: bool, replyCode: u8) !*MockSocksServer {
         const a = std.testing.allocator;
         const server = try a.create(MockSocksServer);
         errdefer a.destroy(server);
@@ -281,11 +281,11 @@ pub const MockSocksServer = struct {
         server.* = .{
             .listener = listener,
             .port = listener.localPort(),
-            .require_auth = require_auth,
-            .expected_user = "alice",
-            .expected_pass = "secret",
-            .reply_code = reply_code,
-            .recorded_atyp = .init(0),
+            .requireAuth = requireAuth,
+            .expectedUser = "alice",
+            .expectedPass = "secret",
+            .replyCode = replyCode,
+            .recordedAtyp = .init(0),
             .thread = null,
             .io = io,
         };
@@ -313,7 +313,7 @@ pub const MockSocksServer = struct {
         _ = readExact(&conn, methods[0..nmethods]) catch return;
 
         // Choose method
-        if (self.require_auth) {
+        if (self.requireAuth) {
             conn.writeAll(&[_]u8{ 0x05, 0x02 }) catch return; // user/pass
             // Read subnegotiation: [VER=1, ULEN, USER..., PLEN, PASS...]
             var auth_ver: [2]u8 = undefined;
@@ -327,8 +327,8 @@ pub const MockSocksServer = struct {
             var pbuf: [255]u8 = undefined;
             _ = readExact(&conn, pbuf[0..plen]) catch return;
 
-            const u_ok = std.mem.eql(u8, ubuf[0..ulen], self.expected_user);
-            const p_ok = std.mem.eql(u8, pbuf[0..plen], self.expected_pass);
+            const u_ok = std.mem.eql(u8, ubuf[0..ulen], self.expectedUser);
+            const p_ok = std.mem.eql(u8, pbuf[0..plen], self.expectedPass);
             if (u_ok and p_ok) {
                 conn.writeAll(&[_]u8{ 0x01, 0x00 }) catch return;
             } else {
@@ -344,7 +344,7 @@ pub const MockSocksServer = struct {
         _ = readExact(&conn, &req_head) catch return;
         if (req_head[0] != 5 or req_head[1] != 1) return;
         const atyp = req_head[3];
-        self.recorded_atyp.store(atyp, .release);
+        self.recordedAtyp.store(atyp, .release);
 
         switch (atyp) {
             0x01 => { // IPv4: 4 bytes
@@ -367,10 +367,10 @@ pub const MockSocksServer = struct {
         _ = readExact(&conn, &port_b) catch return;
 
         // Send reply: [VER=5, REP, RSV=0, ATYP=1, 127.0.0.1, PORT=1080]
-        const reply = [_]u8{ 0x05, self.reply_code, 0x00, 0x01, 127, 0, 0, 1, 0x04, 0x38 };
+        const reply = [_]u8{ 0x05, self.replyCode, 0x00, 0x01, 127, 0, 0, 1, 0x04, 0x38 };
         conn.writeAll(&reply) catch return;
 
-        if (self.reply_code == 0x00) {
+        if (self.replyCode == 0x00) {
             // Echo one message if written
             var echo_buf: [128]u8 = undefined;
             const n = conn.read(&echo_buf) catch 0;
@@ -403,7 +403,7 @@ test "socks5 mock server no-auth connect and echo" {
     var buf: [32]u8 = undefined;
     const n = try sock.read(&buf);
     try std.testing.expectEqualStrings("hello-socks5", buf[0..n]);
-    try std.testing.expectEqual(@as(u8, 0x01), mock.recorded_atyp.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 0x01), mock.recordedAtyp.load(.acquire));
 }
 
 test "socks5h domain name destination sent to proxy" {
@@ -419,7 +419,7 @@ test "socks5h domain name destination sent to proxy" {
     defer sock.close();
 
     // Verify proxy received ATYP=0x03 (domain)
-    try std.testing.expectEqual(@as(u8, 0x03), mock.recorded_atyp.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 0x03), mock.recordedAtyp.load(.acquire));
 }
 
 test "socks5 username password authentication success" {

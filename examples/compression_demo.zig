@@ -10,9 +10,10 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    // GET with compression
+    // GET with compression (struct-literal headers use camelCase names,
+    // normalized to wire names: acceptEncoding -> Accept-Encoding).
     var response = client.get("http://httpbun.com/get", .{
-        .headers = .{ .accept_encoding = "gzip, deflate, br" },
+        .headers = .{ .acceptEncoding = "gzip, deflate, br" },
     }) catch |err| {
         std.debug.print("Compression request failed: {s}\n", .{@errorName(err)});
         return;

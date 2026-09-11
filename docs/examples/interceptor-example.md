@@ -52,7 +52,7 @@ fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Request example\"}",
-        .content_type = "application/json",
+        .contentType = "application/json",
     };
 }
 ```

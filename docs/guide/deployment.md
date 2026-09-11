@@ -35,7 +35,7 @@ HTTPX is built on standards-based TCP/UDP, TLS, and HTTP abstractions. It runs i
       │ HTTPS (Port 8443 or Port 443 with bind capabilities)
       ▼
 ┌───────────────────────┐
-│ HTTPX (TlsListener)   │ ── Native Zig TLS 1.2/1.3 engine
+│ HTTPX (httpx.tls.Listener) │ ── Native Zig TLS 1.3 engine (+ std.crypto.tls HTTPS client)
 └───────────────────────┘
 ```
 
@@ -114,7 +114,7 @@ upstream httpx_backend {
 server {
     listen 80;
     listen [::]:80;
-    server_name example.com www.example.com;
+    serverName example.com www.example.com;
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -129,7 +129,7 @@ server {
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name example.com www.example.com;
+    serverName example.com www.example.com;
 
     # TLS Certificates
     ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;

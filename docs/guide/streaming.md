@@ -13,8 +13,7 @@ defer client.deinit();
 // Stream download directly to local destination file
 try client.download(
     "https://releases.example.com/large_archive.iso",
-    "large_archive.iso",
-    .{},
+    .{ .path = "large_archive.iso" },
 );
 ```
 

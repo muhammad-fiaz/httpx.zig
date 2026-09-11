@@ -50,17 +50,17 @@ pub fn buildUpgradeRequest(
 }
 
 /// Validates server's 101 response head. Returns true if upgrade accepted.
-pub fn validateUpgradeResponse(response_head: []const u8, expected_accept: *const [28]u8) bool {
-    if (!std.mem.startsWith(u8, response_head, "HTTP/1.1 101 ")) return false;
-    if (!hasHeaderToken(response_head, "Upgrade", "websocket")) return false;
-    if (!hasHeaderToken(response_head, "Connection", "Upgrade")) return false;
+pub fn validateUpgradeResponse(responseHead: []const u8, expectedAccept: *const [28]u8) bool {
+    if (!std.mem.startsWith(u8, responseHead, "HTTP/1.1 101 ")) return false;
+    if (!hasHeaderToken(responseHead, "Upgrade", "websocket")) return false;
+    if (!hasHeaderToken(responseHead, "Connection", "Upgrade")) return false;
 
     // Find Sec-WebSocket-Accept value
     const needle = "sec-websocket-accept:";
-    const idx = std.ascii.indexOfIgnoreCase(response_head, needle) orelse return false;
-    const line_end = std.mem.indexOfPos(u8, response_head, idx, "\r\n") orelse return false;
-    const value = std.mem.trim(u8, response_head[idx + needle.len .. line_end], " \t");
-    return std.mem.eql(u8, value, expected_accept);
+    const idx = std.ascii.indexOfIgnoreCase(responseHead, needle) orelse return false;
+    const lineEnd = std.mem.indexOfPos(u8, responseHead, idx, "\r\n") orelse return false;
+    const value = std.mem.trim(u8, responseHead[idx + needle.len .. lineEnd], " \t");
+    return std.mem.eql(u8, value, expectedAccept);
 }
 
 /// Finds a header and verifies one comma-separated token, case-insensitively.

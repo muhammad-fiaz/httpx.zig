@@ -12,29 +12,16 @@ The zero-output default design guarantees that library internals never clutter c
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn onClientEvent(event: httpx.client.ClientEvent) void {
-    switch (event) {
-        .request_start => |ev| {
-            std.debug.print("[Client] Starting {s} {s}\n", .{ ev.method, ev.url });
-        },
-        .dns_resolved => |ev| {
-            std.debug.print("[Client] DNS resolved {s} -> {s} in {d}ms\n", .{
-                ev.host, ev.ip, ev.duration_ms,
-            });
-        },
-        .tlsHandshake_done => |ev| {
-            std.debug.print("[Client] TLS 1.3 negotiated with {s} (cipher: {s})\n", .{
-                ev.sni, ev.cipher,
-            });
-        },
-        .response_received => |ev| {
-            std.debug.print("[Client] Completed with status {d} in {d}ms\n", .{
-                ev.status, ev.duration_ms,
-            });
-        },
-        .requestFailed => |ev| {
-            std.debug.print("[Client] Request failed: {s}\n", .{@errorName(ev.err)});
-        },
+fn onClientEvent(event: httpx.ClientEvent) void {
+    switch (event.kind) {
+        .requestStarted => std.debug.print("[Client] Starting {s} {s}\n", .{ event.method, event.url }),
+        .dnsLookup => std.debug.print("[Client] DNS lookup for {s}\n", .{event.url}),
+        .tlsHandshake => std.debug.print("[Client] TLS handshake done in {d}ms\n", .{event.durationMs}),
+        .requestCompleted => std.debug.print("[Client] Completed with status {d} in {d}ms\n", .{
+            event.status, event.durationMs,
+        }),
+        .requestFailed => std.debug.print("[Client] Request failed: {s}\n", .{event.message}),
+        else => {},
     }
 }
 
@@ -45,7 +32,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     var client = httpx.Client.init(allocator, io, .{
-        .event_callback = &onClientEvent,
+        .eventCallback = &onClientEvent,
     });
     defer client.deinit();
 
@@ -54,6 +41,12 @@ pub fn main() !void {
 }
 ```
 
+Client event kinds: `requestStarted`, `requestCompleted`, `requestFailed`,
+`redirect`, `retry`, `dnsLookup`, `dnsCacheHit`, `connectionEstablished`,
+`connectionReused`, `tlsHandshake`, `timeout`, `cancellation`.
+Payload fields: `method`, `url`, `status`, `durationMs`, `bytesSent`,
+`bytesReceived`, `message` (all borrowed for the callback duration only).
+
 ---
 
 ## Server Lifecycle Events
@@ -61,22 +54,26 @@ pub fn main() !void {
 On the server, events report connection acceptance, request routing, middleware timings, and worker thread status:
 
 ```zig
-fn onServerEvent(event: httpx.server.ServerEvent) void {
-    switch (event) {
-        .connectionAccepted => |ev| {
-            std.debug.print("[Server] Accepted TCP from {s}\n", .{ev.remote_addr});
-        },
-        .request_routed => |ev| {
-            std.debug.print("[Server] {s} {s} -> status {d} in {d}us\n", .{
-                ev.method, ev.path, ev.status, ev.elapsed_us,
-            });
-        },
-        .connectionClosed => |ev| {
-            std.debug.print("[Server] Closed connection from {s}\n", .{ev.remote_addr});
-        },
+fn onServerEvent(event: httpx.ServerEvent) void {
+    switch (event.kind) {
+        .connectionAccepted => std.debug.print("[Server] Accepted connection\n", .{}),
+        .requestCompleted => std.debug.print("[Server] {s} {s} -> status {d} in {d}ms\n", .{
+            event.method, event.path, event.status, event.durationMs,
+        }),
+        .connectionClosed => std.debug.print("[Server] Closed connection\n", .{}),
+        else => {},
     }
 }
 ```
+
+Server event kinds: `serverStarted`, `serverStopped`, `connectionAccepted`,
+`connectionClosed`, `requestReceived`, `requestCompleted`, `requestFailed`,
+`handlerError`, `middlewareError`, `workerStarted`, `workerStopped`,
+`routeNotFound`, `methodNotAllowed`, `tlsHandshakeFailed`.
+Payload fields: `method`, `path`, `status`, `durationMs`, `bytesIn`,
+`bytesOut`, `message` (all borrowed for the callback duration only).
+
+Attach with `ServerConfig.logging = .{ .callback = &onServerEvent }`.
 
 ## Related
 

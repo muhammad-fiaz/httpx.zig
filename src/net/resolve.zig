@@ -25,34 +25,46 @@ pub const Error = error{
     OutOfMemory,
 };
 
-/// DNS resolver that owns its allocator.
+/// DNS resolver that owns its allocator and IO backend.
 ///
 /// ```zig
-/// var resolver = resolve.Resolver.init(allocator);
-/// const addrs = try resolver.lookup("example.com", 443);
+/// var resolver = resolve.Resolver.init(allocator, io);
+/// const addrs = try resolver.lookup("example.com", .{});
 /// defer allocator.free(addrs);
 /// ```
 pub const Resolver = struct {
     allocator: Allocator,
+    io: std.Io,
 
-    pub fn init(allocator: Allocator) Resolver {
-        return .{ .allocator = allocator };
+    pub fn init(allocator: Allocator, io: std.Io) Resolver {
+        return .{ .allocator = allocator, .io = io };
     }
 
-    /// Cross-platform resolver using Zig's std.Io networking backend.
-    pub fn lookupWithIo(self: Resolver, io: std.Io, host: []const u8, port: u16) Error![]address_mod.Address {
-        return lookupWithIoImpl(self.allocator, io, host, port);
-    }
+    pub const LookupOptions = struct {
+        /// Port stamped onto every returned address. Defaults to 443 (HTTPS).
+        port: u16 = 443,
+    };
 
     /// Resolve `host` to addresses (system order preserved). Caller owns the returned slice.
-    pub fn lookup(self: Resolver, host: []const u8, port: u16) Error![]address_mod.Address {
-        return lookupImpl(self.allocator, host, port);
+    ///
+    /// Uses the `std.Io` networking backend first, falling back to the OS
+    /// resolver (or a localhost literal) when the backend cannot serve the
+    /// query, so restricted environments still resolve local names.
+    pub fn lookup(self: Resolver, host: []const u8, opts: LookupOptions) Error![]address_mod.Address {
+        const port = opts.port;
+        const addrs = lookupIoImpl(self.allocator, self.io, host, port) catch |err| switch (err) {
+            error.HostNotFound, error.NoAddresses => return lookupImpl(self.allocator, host, port) catch return err,
+            else => |e| return e,
+        };
+        return addrs;
     }
 };
 
-fn lookupWithIoImpl(allocator: Allocator, io: std.Io, host: []const u8, port: u16) Error![]address_mod.Address {
+fn lookupIoImpl(allocator: Allocator, io: std.Io, host: []const u8, port: u16) Error![]address_mod.Address {
     const hostname = std.Io.net.HostName.init(host) catch return error.HostNotFound;
-    var queue_buffer: [32]std.Io.net.HostName.LookupResult = undefined;
+    // Bounded queue: std guarantees lookup() never needs more than 16
+    // outstanding slots; 128 total bounds memory for pathological answers.
+    var queue_buffer: [128]std.Io.net.HostName.LookupResult = undefined;
     var queue: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&queue_buffer);
     defer queue.close(io);
     std.Io.net.HostName.lookup(hostname, io, &queue, .{ .port = port }) catch return error.HostNotFound;
@@ -109,7 +121,7 @@ const SockaddrIn6 = extern struct {
     port: u16, // network order
     flowinfo: u32,
     addr: [16]u8,
-    scope_id: u32,
+    scopeId: u32,
 };
 
 const GenericSockaddr = extern struct {
@@ -131,21 +143,21 @@ fn decodeIn6(sa: *const GenericSockaddr) address_mod.Address {
         .family = .ip6,
         .bytes = in6.addr,
         .port = std.mem.bigToNative(u16, in6.port),
-        .zone = in6.scope_id,
+        .zone = in6.scopeId,
     };
 }
 
 fn appendDecoded(
     allocator: Allocator,
     out: *std.ArrayList(address_mod.Address),
-    sa_family: u16,
+    saFamily: u16,
     sa: *const GenericSockaddr,
-    af_inet: u16,
-    af_inet6: u16,
+    afInet: u16,
+    afInet6: u16,
 ) Error!void {
-    if (sa_family == af_inet) {
+    if (saFamily == afInet) {
         out.append(allocator, decodeIn(sa)) catch return error.OutOfMemory;
-    } else if (sa_family == af_inet6) {
+    } else if (saFamily == afInet6) {
         out.append(allocator, decodeIn6(sa)) catch return error.OutOfMemory;
     }
 }
@@ -256,8 +268,8 @@ fn lookupWindows(allocator: Allocator, host: []const u8, port: u16) Error![]addr
     return out.toOwnedSlice(allocator) catch error.OutOfMemory;
 }
 fn lookupPosix(allocator: Allocator, host: []const u8, port: u16) Error![]address_mod.Address {
-    const af_inet: u16 = 2;
-    const af_inet6: u16 = if (builtin.os.tag == .linux) 10 else 30;
+    const afInet: u16 = 2;
+    const afInet6: u16 = if (builtin.os.tag == .linux) 10 else 30;
 
     var host_z: [256]u8 = undefined;
     try copyHostZ(host, &host_z);
@@ -278,7 +290,7 @@ fn lookupPosix(allocator: Allocator, host: []const u8, port: u16) Error![]addres
         const sa = ai.addr orelse continue;
         // Cast c_int family safely: values are always small positive (2 or 10/30)
         const fam: u16 = @intCast(@as(u32, @bitCast(ai.family)) & 0xFFFF);
-        try appendDecoded(allocator, &out, fam, sa, af_inet, af_inet6);
+        try appendDecoded(allocator, &out, fam, sa, afInet, afInet6);
     }
     if (out.items.len == 0) return error.NoAddresses;
     return out.toOwnedSlice(allocator) catch error.OutOfMemory;
@@ -287,14 +299,15 @@ fn lookupPosix(allocator: Allocator, host: []const u8, port: u16) Error![]addres
 
 test "localhost resolves offline (hosts file)" {
     const a = std.testing.allocator;
-    const resolver = Resolver.init(a);
-    const addrs = resolver.lookup("localhost", 80) catch |err| {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const resolver = Resolver.init(a, io);
+    const addrs = resolver.lookup("localhost", .{ .port = 80 }) catch |err| {
         // Some CI runners (Linux) resolve localhost via getaddrinfo but return
         // an empty address list (NoAddresses) or fail entirely (HostNotFound)
         // due to restricted networking or missing IPv6 support.
         // In both cases fall back to an IP literal to verify the code path.
         if (err != error.HostNotFound and err != error.NoAddresses) return err;
-        const fallback = resolver.lookup("127.0.0.1", 80) catch return;
+        const fallback = resolver.lookup("127.0.0.1", .{ .port = 80 }) catch return;
         defer a.free(fallback);
         try std.testing.expect(fallback.len >= 1);
         return;
@@ -310,16 +323,17 @@ test "localhost resolves offline (hosts file)" {
 
 test "garbage hostname fails cleanly" {
     const a = std.testing.allocator;
-    const resolver = Resolver.init(a);
-    try std.testing.expectError(error.HostNotFound, resolver.lookup("definitely-not-a-real-host-httpx", 80));
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const resolver = Resolver.init(a, io);
+    try std.testing.expectError(error.HostNotFound, resolver.lookup("definitely-not-a-real-host-httpx", .{ .port = 80 }));
 }
 
 test "std.Io resolver returns canonical project addresses" {
     const IoContext = @import("../sockets/tcp.zig").IoContext;
     var ctx = IoContext.init(std.testing.allocator) catch return;
     defer ctx.deinit();
-    const resolver = Resolver.init(std.testing.allocator);
-    const addrs = resolver.lookupWithIo(ctx.io, "localhost", 80) catch return;
+    const resolver = Resolver.init(std.testing.allocator, ctx.io);
+    const addrs = resolver.lookup("localhost", .{ .port = 80 }) catch return;
     defer std.testing.allocator.free(addrs);
     try std.testing.expect(addrs.len >= 1);
     for (addrs) |addr| try std.testing.expectEqual(@as(u16, 80), addr.port);

@@ -14,14 +14,14 @@ const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 pub const Error = error{UnsupportedVersion};
 
 /// QUIC v1 initial salt.
-pub const initial_salt_v1 = [_]u8{
+pub const initialSaltV1 = [_]u8{
     0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3,
     0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
     0xcc, 0xbb, 0x7f, 0x0a,
 };
 
 /// QUIC v2 initial salt (RFC 9369).
-pub const initial_salt_v2 = [_]u8{
+pub const initialSaltV2 = [_]u8{
     0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb,
     0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb,
     0xf9, 0xbd, 0x2e, 0xd9,
@@ -29,8 +29,8 @@ pub const initial_salt_v2 = [_]u8{
 
 pub fn saltForVersion(version: u32) Error![20]u8 {
     return switch (version) {
-        0x00000001 => initial_salt_v1,
-        0x6B3343CF => initial_salt_v2,
+        0x00000001 => initialSaltV1,
+        0x6B3343CF => initialSaltV2,
         else => Error.UnsupportedVersion,
     };
 }
@@ -38,23 +38,23 @@ pub fn saltForVersion(version: u32) Error![20]u8 {
 /// HKDF-Expand-Label from TLS 1.3 (RFC 8446 section 7.1):
 /// info = uint16(len) || uint8(6 + label.len) || "tls13 " || label || 0x00
 pub fn hkdfExpandLabel(prk: [32]u8, comptime label: []const u8, out: []u8) void {
-    const full_label = "tls13 " ++ label;
+    const fullLabel = "tls13 " ++ label;
     var info_buf: [2 + 1 + 64 + 1]u8 = undefined;
-    const info_len = 2 + 1 + full_label.len + 1;
+    const infoLen = 2 + 1 + fullLabel.len + 1;
     var w: usize = 0;
 
     const total: u16 = @intCast(out.len);
     info_buf[w] = @intCast(total >> 8);
     info_buf[w + 1] = @intCast(total & 0xFF);
     w += 2;
-    info_buf[w] = @intCast(full_label.len);
+    info_buf[w] = @intCast(fullLabel.len);
     w += 1;
-    @memcpy(info_buf[w..][0..full_label.len], full_label);
-    w += full_label.len;
+    @memcpy(info_buf[w..][0..fullLabel.len], fullLabel);
+    w += fullLabel.len;
     info_buf[w] = 0;
     w += 1;
 
-    HkdfSha256.expand(out, info_buf[0..info_len], prk);
+    HkdfSha256.expand(out, info_buf[0..infoLen], prk);
 }
 
 /// Derives a secret from a parent secret with a label suffix
@@ -65,30 +65,52 @@ pub fn deriveSecret(prk: [32]u8, comptime label: []const u8) [32]u8 {
     return out;
 }
 
+/// HKDF-Expand-Label with an explicit transcript-hash context
+/// (RFC 8446 Section 7.1 Derive-Secret).
+pub fn deriveSecretWithContext(prk: [32]u8, comptime label: []const u8, contextHash: *const [32]u8) [32]u8 {
+    const fullLabel = "tls13 " ++ label;
+    var info_buf: [2 + 1 + 64 + 1 + 32]u8 = undefined;
+    var w: usize = 0;
+    info_buf[w] = 0;
+    info_buf[w + 1] = 32;
+    w += 2;
+    info_buf[w] = @intCast(fullLabel.len);
+    w += 1;
+    @memcpy(info_buf[w..][0..fullLabel.len], fullLabel);
+    w += fullLabel.len;
+    info_buf[w] = 32;
+    w += 1;
+    @memcpy(info_buf[w..][0..32], contextHash);
+    w += 32;
+    var out: [32]u8 = undefined;
+    HkdfSha256.expand(&out, info_buf[0..w], prk);
+    return out;
+}
+
 pub const Cipher = enum { aes_128_gcm, aes_256_gcm, chacha20_poly1305 };
 
 /// Packet-protection keys for one direction at one encryption level.
 pub const ProtectionKeys = struct {
     /// AEAD key (16 bytes for AES-128-GCM, 32 for AES-256-GCM/ChaCha20-Poly1305).
     key: [32]u8 = [_]u8{0} ** 32,
-    key_len: usize = 16,
+    keyLen: usize = 16,
     /// Nonce construction IV (12 bytes).
     iv: [12]u8,
     /// Header-protection key (16 bytes for AES, 32 for ChaCha20).
     hp: [32]u8 = [_]u8{0} ** 32,
-    hp_len: usize = 16,
+    hpLen: usize = 16,
     cipher: Cipher = .aes_128_gcm,
 
-    pub const key_len_128 = 16;
-    pub const key_len_256 = 32;
-    pub const iv_len = 12;
+    pub const keyLen128 = 16;
+    pub const keyLen256 = 32;
+    pub const ivLen = 12;
 };
 
 /// Derives {key, iv, hp} from a secret using QUIC labels (AES-128-GCM, 16-byte key).
 pub fn deriveProtectionKeys(secret: [32]u8) ProtectionKeys {
     var pk: ProtectionKeys = .{ .iv = undefined, .hp = undefined, .cipher = .aes_128_gcm };
-    pk.key_len = 16;
-    pk.hp_len = 16;
+    pk.keyLen = 16;
+    pk.hpLen = 16;
     hkdfExpandLabel(secret, "quic key", pk.key[0..16]);
     hkdfExpandLabel(secret, "quic iv", pk.iv[0..]);
     hkdfExpandLabel(secret, "quic hp", pk.hp[0..16]);
@@ -102,23 +124,23 @@ pub fn deriveProtectionKeysForCipher(secret: [32]u8, cipher: Cipher) ProtectionK
     var pk: ProtectionKeys = .{ .iv = undefined, .hp = undefined, .cipher = cipher };
     switch (cipher) {
         .aes_128_gcm => {
-            pk.key_len = 16;
-            pk.hp_len = 16;
+            pk.keyLen = 16;
+            pk.hpLen = 16;
             hkdfExpandLabel(secret, "quic key", pk.key[0..16]);
             @memset(pk.key[16..], 0);
             hkdfExpandLabel(secret, "quic hp", pk.hp[0..16]);
             @memset(pk.hp[16..], 0);
         },
         .aes_256_gcm => {
-            pk.key_len = 32;
-            pk.hp_len = 16;
+            pk.keyLen = 32;
+            pk.hpLen = 16;
             hkdfExpandLabel(secret, "quic key", pk.key[0..32]);
             hkdfExpandLabel(secret, "quic hp", pk.hp[0..16]);
             @memset(pk.hp[16..], 0);
         },
         .chacha20_poly1305 => {
-            pk.key_len = 32;
-            pk.hp_len = 32;
+            pk.keyLen = 32;
+            pk.hpLen = 32;
             hkdfExpandLabel(secret, "quic key", pk.key[0..32]);
             hkdfExpandLabel(secret, "quic hp", pk.hp[0..32]);
         },

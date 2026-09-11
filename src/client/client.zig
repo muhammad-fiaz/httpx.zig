@@ -26,6 +26,7 @@ const Method = @import("../common/method.zig").Method;
 const req = @import("request.zig");
 const Pool = @import("pool.zig").Pool;
 const PoolConfig = @import("pool.zig").PoolConfig;
+const tlsSessionCache = @import("../protocols/tls/session.zig");
 const dnsCache = @import("../net/dns/cache.zig");
 const clock = @import("../common/clock.zig");
 const HttpVersion = @import("../common/http_version.zig").HttpVersion;
@@ -57,6 +58,8 @@ pub const ResolveOptions = struct {
     family: AddressFamilyPreference = .any,
     useCache: bool = true,
     timeoutMs: ?u64 = null,
+    /// Port stamped onto every returned address. Defaults to 443 (HTTPS).
+    port: u16 = 443,
 };
 pub const ResolvedAddresses = struct {
     allocator: Allocator,
@@ -228,6 +231,10 @@ pub const Client = struct {
     pool: Pool,
     config: Config,
     dnsCache: ?dnsCache.Cache = null,
+    /// Origin-keyed TLS 1.3 session cache for resumption on the native
+    /// TLS paths (H2-TLS always; HTTPS/1.1 when already native via
+    /// client certificates). Shared across threads; bounded.
+    sessionCache: tlsSessionCache.SessionCache,
 
     /// Initializes client with explicit allocator and shared IO.
     /// Matches `var client = httpx.Client.init(allocator, io, .{});`
@@ -237,10 +244,12 @@ pub const Client = struct {
             .io = io,
             .pool = Pool.init(allocator, io, config.pool),
             .config = config,
+            .sessionCache = tlsSessionCache.SessionCache.init(allocator),
         };
         if (config.dnsCache.enable) {
             c.dnsCache = dnsCache.Cache.init(
                 allocator,
+                io,
                 .{
                     .ttlMs = config.dnsCache.ttlMs,
                     .negativeTtlMs = config.dnsCache.negativeTtlMs,
@@ -256,6 +265,7 @@ pub const Client = struct {
     pub fn deinit(self: *Client) void {
         if (self.dnsCache) |*cache| cache.deinit();
         self.pool.deinit();
+        self.sessionCache.deinit();
     }
 
     /// The primary unified HTTP client operation.
@@ -365,26 +375,26 @@ pub const Client = struct {
             reqs: []const RequestOptions,
             out: []Response,
             success: []bool,
-            next_idx: *std.atomic.Value(usize),
-            err_mutex: sync.Spinlock = .{},
-            first_err: ?anyerror = null,
+            nextIdx: *std.atomic.Value(usize),
+            errMutex: sync.Spinlock = .{},
+            firstErr: ?anyerror = null,
 
             fn worker(ctx: *@This()) void {
                 while (true) {
-                    const idx = ctx.next_idx.fetchAdd(1, .monotonic);
+                    const idx = ctx.nextIdx.fetchAdd(1, .monotonic);
                     if (idx >= ctx.reqs.len) break;
                     {
-                        ctx.err_mutex.lock();
-                        const has_err = ctx.first_err != null;
-                        ctx.err_mutex.unlock();
+                        ctx.errMutex.lock();
+                        const has_err = ctx.firstErr != null;
+                        ctx.errMutex.unlock();
                         if (has_err) break;
                     }
 
                     const current = ctx.reqs[idx];
                     const resp = ctx.client.doRequestWithOverride(current.method orelse .GET, current.url, current) catch |e| {
-                        ctx.err_mutex.lock();
-                        if (ctx.first_err == null) ctx.first_err = e;
-                        ctx.err_mutex.unlock();
+                        ctx.errMutex.lock();
+                        if (ctx.firstErr == null) ctx.firstErr = e;
+                        ctx.errMutex.unlock();
                         break;
                     };
                     ctx.out[idx] = resp;
@@ -400,23 +410,23 @@ pub const Client = struct {
         defer self.allocator.free(success);
         @memset(success, false);
 
-        var next_idx = std.atomic.Value(usize).init(0);
+        var nextIdx = std.atomic.Value(usize).init(0);
         var task_ctx = TaskCtx{
             .client = self,
             .reqs = slice,
             .out = out,
             .success = success,
-            .next_idx = &next_idx,
+            .nextIdx = &nextIdx,
         };
 
-        const max_workers = @min(@as(usize, 16), slice.len);
-        var threads = self.allocator.alloc(?std.Thread, max_workers) catch |e| {
+        const maxWorkers = @min(@as(usize, 16), slice.len);
+        var threads = self.allocator.alloc(?std.Thread, maxWorkers) catch |e| {
             self.allocator.free(out);
             return e;
         };
         defer self.allocator.free(threads);
 
-        for (0..max_workers) |w| {
+        for (0..maxWorkers) |w| {
             threads[w] = std.Thread.spawn(.{}, TaskCtx.worker, .{&task_ctx}) catch null;
             if (threads[w] == null) {
                 TaskCtx.worker(&task_ctx);
@@ -427,7 +437,7 @@ pub const Client = struct {
             if (m_th) |th| th.join();
         }
 
-        if (task_ctx.first_err) |e| {
+        if (task_ctx.firstErr) |e| {
             for (0..slice.len) |i| {
                 if (success[i]) out[i].deinit();
             }
@@ -480,17 +490,19 @@ pub const Client = struct {
     }
 
     /// Streams a download to disk with progress reporting, resume, and verification.
-    pub fn download(self: *Client, url: []const u8, destination: []const u8, opts: anytype) DownloadError!DownloadResult {
+    pub fn download(self: *Client, url: []const u8, opts: anytype) DownloadError!DownloadResult {
         var dl = DownloadCore.Downloader.init(self.allocator, self);
         const downloadOptions = coerceDownloadOptions(opts);
-        return dl.download(url, destination, downloadOptions);
+        return dl.download(url, downloadOptions);
     }
 
     /// Downloads a batch of files concurrently using the client's internal allocator.
     pub fn downloadBatch(self: *Client, tasks: []const struct { url: []const u8, dest: []const u8 }, opts: anytype) DownloadError!void {
         const downloadOptions = coerceDownloadOptions(opts);
         for (tasks) |t| {
-            _ = try self.download(t.url, t.dest, downloadOptions);
+            var per_task = downloadOptions;
+            per_task.path = t.dest;
+            _ = try self.download(t.url, per_task);
         }
     }
 
@@ -575,7 +587,7 @@ pub const Client = struct {
     }
 
     /// Safely updates an executable or asset on disk with rollback preservation.
-    pub fn updateFile(self: *Client, url: []const u8, targetPath: []const u8, opts: anytype) DownloadError!DownloadResult {
+    pub fn updateFile(self: *Client, url: []const u8, opts: anytype) DownloadError!DownloadResult {
         const updateOptions: UpdateOptions = if (@TypeOf(opts) == UpdateOptions) opts else blk: {
             var o = UpdateOptions{};
             inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
@@ -596,7 +608,7 @@ pub const Client = struct {
             }
             break :blk o;
         };
-        return DownloadCore.updateFile(self.allocator, self, url, targetPath, updateOptions);
+        return DownloadCore.updateFile(self.allocator, self, url, updateOptions);
     }
 
     /// Returns true if the internet is reachable from this machine.
@@ -632,16 +644,16 @@ pub const Client = struct {
     /// and thread-safe DNS cache.
     ///
     /// Basic usage:
-    ///   var addresses = try client.resolve("httpbun.com", 443, .{});
+    ///   var addresses = try client.resolve("httpbun.com", .{});
     ///   defer addresses.deinit();
     ///   for (addresses.items) |addr| {
     ///       std.debug.print("Resolved: {f}\n", .{addr});
     ///   }
     ///
     /// IPv4-only:
-    ///   var addresses = try client.resolve("httpbun.com", 443, .{ .family = .ipv4 });
+    ///   var addresses = try client.resolve("httpbun.com", .{ .family = .ipv4 });
     ///   defer addresses.deinit();
-    pub fn resolve(self: *Client, host: []const u8, port: u16, opts: anytype) Error!ResolvedAddresses {
+    pub fn resolve(self: *Client, host: []const u8, opts: anytype) Error!ResolvedAddresses {
         const resolveOpts: ResolveOptions = blk: {
             if (@TypeOf(opts) == ResolveOptions) break :blk opts;
             var r = ResolveOptions{};
@@ -660,7 +672,7 @@ pub const Client = struct {
         var probe = addressMod.Address{ .family = .ip4, .port = 0 };
         if (probe.parseIp(host)) |parsed| {
             var addr = parsed;
-            addr.port = port;
+            addr.port = resolveOpts.port;
             const matches_family = switch (resolveOpts.family) {
                 .any => true,
                 .ipv4 => addr.family == .ip4,
@@ -679,13 +691,13 @@ pub const Client = struct {
 
         // 2. Cached lookup when enabled
         if (resolveOpts.useCache and self.dnsCache != null) {
-            if (self.dnsCache.?.resolve(self.io, host)) |cached_strs| {
+            if (self.dnsCache.?.resolve(host)) |cached_strs| {
                 defer {
                     for (cached_strs) |s| self.allocator.free(s);
                     self.allocator.free(cached_strs);
                 }
                 for (cached_strs) |s| {
-                    if (req.parseAddrString(s, port)) |parsed| {
+                    if (req.parseAddrString(s, resolveOpts.port)) |parsed| {
                         outList.append(self.allocator, parsed) catch return Error.OutOfMemory;
                     }
                 }
@@ -694,8 +706,8 @@ pub const Client = struct {
 
         // 3. Fallback to fresh OS resolution if un-cached
         if (outList.items.len == 0) {
-            const resolver = netResolve.Resolver.init(self.allocator);
-            const resolvedRaw = resolver.lookupWithIo(self.io, host, port) catch |err| switch (err) {
+            const resolver = netResolve.Resolver.init(self.allocator, self.io);
+            const resolvedRaw = resolver.lookup(host, .{ .port = resolveOpts.port }) catch |err| switch (err) {
                 error.HostNotFound => return Error.DnsFailed,
                 error.OutOfMemory => return Error.OutOfMemory,
                 else => return Error.DnsFailed,
@@ -736,12 +748,27 @@ pub const Client = struct {
     }
 
     /// Resolves a URL string (e.g. "https://httpbun.com/get") by extracting its hostname and port.
+    /// The URL's effective port always wins; other options come from `opts`.
     pub fn resolveUrl(self: *Client, urlStr: []const u8, opts: anytype) Error!ResolvedAddresses {
         const uriMod = @import("../common/uri.zig");
         const u = uriMod.parse(urlStr) catch return Error.InvalidUrl;
         const p = u.effectivePort();
         if (p == 0) return Error.InvalidUrl;
-        return self.resolve(u.host, p, opts);
+        if (@TypeOf(opts) == ResolveOptions) {
+            var o = opts;
+            o.port = p;
+            return self.resolve(u.host, o);
+        }
+        // Anonymous options: copy known fields, then stamp the URL port.
+        var r = ResolveOptions{};
+        inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
+            if (comptime std.mem.eql(u8, f.name, "port")) continue;
+            if (@hasField(ResolveOptions, f.name)) {
+                @field(r, f.name) = @field(opts, f.name);
+            }
+        }
+        r.port = p;
+        return self.resolve(u.host, r);
     }
 
     /// Graceful connection drain (purge pool, but don't destroy the client).
@@ -756,6 +783,7 @@ pub const Client = struct {
             dc.deinit();
             dc.* = dnsCache.Cache.init(
                 self.allocator,
+                self.io,
                 .{
                     .ttlMs = self.config.dnsCache.ttlMs,
                     .negativeTtlMs = self.config.dnsCache.negativeTtlMs,
@@ -973,7 +1001,7 @@ pub const Client = struct {
         var json_buf: ?[]u8 = null;
         defer if (json_buf) |b| self.allocator.free(b);
         var body_val: []const u8 = "";
-        var body_kind: req.BodyKind = .none;
+        var bodyKind: req.BodyKind = .none;
         const has_json_field = @hasField(@TypeOf(opts), "json");
         if (has_json_field) {
             const v = opts.json;
@@ -985,60 +1013,60 @@ pub const Client = struct {
                 const J = @TypeOf(payload);
                 if (J == []const u8 or J == []u8) {
                     body_val = payload;
-                    body_kind = .json;
+                    bodyKind = .json;
                 } else {
                     json_buf = std.json.Stringify.valueAlloc(self.allocator, payload, .{}) catch return Error.OutOfMemory;
                     if (json_buf) |b| {
                         body_val = b;
-                        body_kind = .json;
+                        bodyKind = .json;
                     }
                 }
             }
         }
-        if (body_kind == .none and @hasField(@TypeOf(opts), "form")) {
+        if (bodyKind == .none and @hasField(@TypeOf(opts), "form")) {
             const v = opts.form;
             const T = @TypeOf(v);
             if (comptime @typeInfo(T) == .optional) {
                 if (v) |val| {
                     body_val = val;
-                    body_kind = .form;
+                    bodyKind = .form;
                 }
             } else {
                 body_val = v;
-                body_kind = .form;
+                bodyKind = .form;
             }
         }
-        if (body_kind == .none and @hasField(@TypeOf(opts), "body")) {
+        if (bodyKind == .none and @hasField(@TypeOf(opts), "body")) {
             const v = opts.body;
             const T = @TypeOf(v);
             if (comptime @typeInfo(T) == .optional) {
                 if (v) |val| {
                     body_val = val;
-                    body_kind = .raw;
+                    bodyKind = .raw;
                 }
             } else {
                 body_val = v;
-                body_kind = .raw;
+                bodyKind = .raw;
             }
         }
-        if (body_kind == .none and @hasField(@TypeOf(opts), "text")) {
+        if (bodyKind == .none and @hasField(@TypeOf(opts), "text")) {
             const v = opts.text;
             const T = @TypeOf(v);
             if (comptime @typeInfo(T) == .optional) {
                 if (v) |val| {
                     body_val = val;
-                    body_kind = .raw;
+                    bodyKind = .raw;
                 }
             } else {
                 body_val = v;
-                body_kind = .raw;
+                bodyKind = .raw;
             }
         }
 
         // Multipart file upload support
         var multipart_buf: ?[]u8 = null;
         defer if (multipart_buf) |b| self.allocator.free(b);
-        if (body_kind == .none and @hasField(@TypeOf(opts), "multipart")) {
+        if (bodyKind == .none and @hasField(@TypeOf(opts), "multipart")) {
             const mp = opts.multipart;
             const mp_encoder = @import("../web/multipart/encoder.zig");
             var boundary_buf: [32]u8 = undefined;
@@ -1074,7 +1102,7 @@ pub const Client = struct {
             multipart_buf = mp_encoder.encodeAllocParts(self.allocator, boundary, &.{part}) catch return Error.OutOfMemory;
             if (multipart_buf) |b| {
                 body_val = b;
-                body_kind = .raw;
+                bodyKind = .raw;
                 hdrs.append(self.allocator, .{ .name = "Content-Type", .value = ct_val }) catch return Error.OutOfMemory;
             }
         }
@@ -1131,6 +1159,9 @@ pub const Client = struct {
                 break :blk req.TlsOptions{
                     .verify = v.verify,
                     .caBundle = if (@hasField(@TypeOf(v), "caBundle")) v.caBundle else null,
+                    .caPem = if (@hasField(@TypeOf(v), "caPem")) v.caPem else null,
+                    .clientCertPem = if (@hasField(@TypeOf(v), "clientCertPem")) v.clientCertPem else null,
+                    .clientKeyPem = if (@hasField(@TypeOf(v), "clientKeyPem")) v.clientKeyPem else null,
                     .allowTruncation = if (@hasField(@TypeOf(v), "allowTruncation")) v.allowTruncation else true,
                 };
             }
@@ -1149,7 +1180,7 @@ pub const Client = struct {
             .url = targetUrl,
             .headers = hdrs.items,
             .query = query_list.items,
-            .bodyKind = body_kind,
+            .bodyKind = bodyKind,
             .body = body_val,
             .followRedirects = blk: {
                 if (@hasField(@TypeOf(opts), "followRedirects")) {
@@ -1175,6 +1206,7 @@ pub const Client = struct {
             },
             .dnsCache = if (self.dnsCache) |*cache| cache else null,
             .pool = &self.pool,
+            .sessionCache = &self.sessionCache,
             .allowLfLineEndings = blk: {
                 if (@hasField(@TypeOf(opts), "allowLfLineEndings")) {
                     break :blk opts.allowLfLineEndings or self.config.allowLfLineEndings;
@@ -1299,14 +1331,14 @@ pub fn globalRequestAll(reqs: anytype) ![]Response {
     return c.requestAll(reqs);
 }
 
-pub fn globalDownload(url: []const u8, destination: []const u8, opts: anytype) DownloadError!DownloadResult {
+pub fn globalDownload(url: []const u8, opts: anytype) DownloadError!DownloadResult {
     const c = defaultClient() orelse return DownloadError.ConnectionFailed;
-    return c.download(url, destination, opts);
+    return c.download(url, opts);
 }
 
-pub fn globalUpdateFile(url: []const u8, targetPath: []const u8, opts: anytype) DownloadError!DownloadResult {
+pub fn globalUpdateFile(url: []const u8, opts: anytype) DownloadError!DownloadResult {
     const c = defaultClient() orelse return DownloadError.ConnectionFailed;
-    return c.updateFile(url, targetPath, opts);
+    return c.updateFile(url, opts);
 }
 
 pub fn globalVerifyFile(path: []const u8, opts: VerifyOptions) DownloadError!void {
@@ -1319,9 +1351,9 @@ pub fn globalLookupFileInfo(url: []const u8, opts: anytype) DownloadError!Remote
 }
 
 /// Zero-config global DNS resolution function.
-pub fn globalResolve(host: []const u8, port: u16, opts: anytype) Error!ResolvedAddresses {
+pub fn globalResolve(host: []const u8, opts: anytype) Error!ResolvedAddresses {
     const c = defaultClient() orelse return Error.DefaultClientUnavailable;
-    return c.resolve(host, port, opts);
+    return c.resolve(host, opts);
 }
 
 /// Zero-config global URL hostname resolution function.
@@ -1383,14 +1415,14 @@ test "dns cache serves second hostname request from cache" {
     // Windows (accept CANCELLED => unreachable). The HTTP path is
     // already covered by keep-alive / connection-close tests; the
     // FakeResolver unit test covers coalescing deterministically.
-    const r1 = client.dnsCache.?.resolve(client.io, "localhost") catch return;
+    const r1 = client.dnsCache.?.resolve("localhost") catch return;
     defer {
         for (r1) |addr| a.free(addr);
         a.free(r1);
     }
     try std.testing.expect(r1.len >= 1);
 
-    const r2 = client.dnsCache.?.resolve(client.io, "localhost") catch return;
+    const r2 = client.dnsCache.?.resolve("localhost") catch return;
     defer {
         for (r2) |addr| a.free(addr);
         a.free(r2);
@@ -1569,7 +1601,834 @@ test "client fetch with socks5 proxy connects through mock server" {
 
     // Fetch through the mock proxy - verifies handshake was routed through SOCKS
     _ = client.fetch("http://127.0.0.1:8080/test", .{ .timeoutMs = 500 }) catch {};
-    try std.testing.expect(mock.recorded_atyp.load(.acquire) != 0);
+    try std.testing.expect(mock.recordedAtyp.load(.acquire) != 0);
+}
+
+test "client fetch with socks4 proxy connects through mock server" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    const socks4mod = @import("../net/socks4.zig");
+    var mock = try socks4mod.MockSocks4Server.start(ctx.io, 0x5A);
+    defer mock.deinit();
+
+    var proxy_url_buf: [64]u8 = undefined;
+    const proxy_url = try std.fmt.bufPrint(&proxy_url_buf, "socks4://127.0.0.1:{d}", .{mock.port});
+
+    var client = Client.init(a, ctx.io, .{ .proxy = proxy_url });
+    defer client.deinit();
+
+    _ = client.fetch("http://127.0.0.1:8080/test", .{ .timeoutMs = 500 }) catch {};
+    try std.testing.expectEqual(@as(u32, 0x7F000001), mock.recordedIp);
+}
+
+test "http CONNECT proxy tunnels with origin-form request target" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const proxy_port = listener.localPort();
+
+    const Mock = struct {
+        var connect_line: [128]u8 = undefined;
+        var connect_len: usize = 0;
+        var tunneled_line: [128]u8 = undefined;
+        var tunneled_len: usize = 0;
+
+        fn readLine(sock: *tcp.Socket, buf: []u8) !usize {
+            var n: usize = 0;
+            while (n < buf.len) {
+                const m = try sock.read(buf[n..][0..1]);
+                if (m == 0) break;
+                n += m;
+                if (n >= 2 and buf[n - 2] == '\r' and buf[n - 1] == '\n') break;
+            }
+            return n;
+        }
+
+        fn run(lst: *tcp.Listener, io2: std.Io) void {
+            var sock = lst.accept(io2) catch return;
+            defer sock.close();
+            // 1. CONNECT request line.
+            var line_buf: [256]u8 = undefined;
+            const n = readLine(&sock, &line_buf) catch return;
+            const take = @min(n, connect_line.len);
+            @memcpy(connect_line[0..take], line_buf[0..take]);
+            connect_len = take;
+            // Drain remaining CONNECT headers.
+            while (true) {
+                const m = readLine(&sock, &line_buf) catch return;
+                if (m <= 2) break;
+            }
+            sock.writeAll("HTTP/1.1 200 Connection Established\r\n\r\n") catch return;
+            // 2. First tunneled request line (must be origin-form).
+            const t = readLine(&sock, &tunneled_line) catch return;
+            tunneled_len = t;
+            sock.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok") catch {};
+        }
+    };
+    Mock.connect_len = 0;
+    Mock.tunneled_len = 0;
+    const th = try std.Thread.spawn(.{}, Mock.run, .{ &listener, ctx.io });
+    defer th.join();
+
+    var proxy_url_buf: [64]u8 = undefined;
+    const proxy_url = try std.fmt.bufPrint(&proxy_url_buf, "http://127.0.0.1:{d}", .{proxy_port});
+    var client = Client.init(a, ctx.io, .{});
+    defer client.deinit();
+
+    var res = try client.get("http://127.0.0.1:9/proxied/path", .{ .proxy = proxy_url, .timeoutMs = 10_000 });
+    defer res.deinit();
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+    try std.testing.expectEqualStrings("ok", res.body);
+
+    // CONNECT carried host:port of the TARGET…
+    try std.testing.expect(std.mem.startsWith(u8, Mock.connect_line[0..Mock.connect_len], "CONNECT 127.0.0.1:9 "));
+    // …while the tunneled request uses the relative origin-form target.
+    try std.testing.expect(std.mem.startsWith(u8, Mock.tunneled_line[0..Mock.tunneled_len], "GET /proxied/path "));
+    try std.testing.expect(std.mem.indexOf(u8, Mock.tunneled_line[0..Mock.tunneled_len], "https://") == null);
+}
+
+test "http CONNECT proxy with credentials sends Proxy-Authorization" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const proxy_port = listener.localPort();
+
+    const Mock = struct {
+        var head: [512]u8 = undefined;
+        var head_len: usize = 0;
+
+        fn readLine(sock: *tcp.Socket, buf: []u8) !usize {
+            var n: usize = 0;
+            while (n < buf.len) {
+                const m = try sock.read(buf[n..][0..1]);
+                if (m == 0) break;
+                n += m;
+                if (n >= 2 and buf[n - 2] == '\r' and buf[n - 1] == '\n') break;
+            }
+            return n;
+        }
+
+        fn run(lst: *tcp.Listener, io2: std.Io) void {
+            var sock = lst.accept(io2) catch return;
+            defer sock.close();
+            // Capture the whole CONNECT head (request line + headers).
+            var line_buf: [256]u8 = undefined;
+            while (true) {
+                const m = readLine(&sock, &line_buf) catch return;
+                const take = @min(m, head.len - head_len);
+                @memcpy(head[head_len..][0..take], line_buf[0..take]);
+                head_len += take;
+                if (m <= 2) break;
+            }
+            sock.writeAll("HTTP/1.1 200 Connection Established\r\n\r\n") catch return;
+            // Drain the tunneled request head, then answer.
+            while (true) {
+                const m = readLine(&sock, &line_buf) catch return;
+                if (m <= 2) break;
+            }
+            sock.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok") catch {};
+        }
+    };
+    Mock.head_len = 0;
+    const th = try std.Thread.spawn(.{}, Mock.run, .{ &listener, ctx.io });
+    defer th.join();
+
+    var proxy_url_buf: [96]u8 = undefined;
+    const proxy_url = try std.fmt.bufPrint(&proxy_url_buf, "http://user:pass@127.0.0.1:{d}", .{proxy_port});
+    var client = Client.init(a, ctx.io, .{});
+    defer client.deinit();
+
+    var res = try client.get("http://127.0.0.1:9/authed/path", .{ .proxy = proxy_url, .timeoutMs = 10_000 });
+    defer res.deinit();
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+
+    // "user:pass" base64s to dXNlcjpwYXNz (RFC 7617).
+    const head = Mock.head[0..Mock.head_len];
+    try std.testing.expect(std.mem.indexOf(u8, head, "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n") != null);
+    // Credentials stay on the CONNECT hop, never leak into the tunnel.
+    try std.testing.expect(std.mem.indexOf(u8, head, "CONNECT 127.0.0.1:9 ") != null);
+}
+
+test "http CONNECT proxy 407 maps to ProxyAuthRequired" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const proxy_port = listener.localPort();
+
+    const Mock = struct {
+        fn readLine(sock: *tcp.Socket, buf: []u8) !usize {
+            var n: usize = 0;
+            while (n < buf.len) {
+                const m = try sock.read(buf[n..][0..1]);
+                if (m == 0) break;
+                n += m;
+                if (n >= 2 and buf[n - 2] == '\r' and buf[n - 1] == '\n') break;
+            }
+            return n;
+        }
+
+        fn run(lst: *tcp.Listener, io2: std.Io) void {
+            var sock = lst.accept(io2) catch return;
+            defer sock.close();
+            var line_buf: [256]u8 = undefined;
+            while (true) {
+                const m = readLine(&sock, &line_buf) catch return;
+                if (m <= 2) break;
+            }
+            sock.writeAll("HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"proxy\"\r\n\r\n") catch return;
+        }
+    };
+    const th = try std.Thread.spawn(.{}, Mock.run, .{ &listener, ctx.io });
+    defer th.join();
+
+    var proxy_url_buf: [64]u8 = undefined;
+    const proxy_url = try std.fmt.bufPrint(&proxy_url_buf, "http://127.0.0.1:{d}", .{proxy_port});
+    var client = Client.init(a, ctx.io, .{});
+    defer client.deinit();
+
+    const err = client.get("http://127.0.0.1:9/needs-auth", .{ .proxy = proxy_url, .timeoutMs = 10_000 });
+    try std.testing.expectError(error.ProxyAuthRequired, err);
+}
+
+test "client get over https negotiates h2 end to end" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    const h2t = @import("../protocols/http2/transport.zig");
+    const tlsServerMod = @import("../protocols/tls/tcp_tls.zig");
+    const cert_pem = @embedFile("../protocols/tls/testdata/localhost_cert.pem");
+    const key_pem = @embedFile("../protocols/tls/testdata/localhost_key.pem");
+
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const h2t.Header, _: []const u8) anyerror!h2t.HandlerResponse {
+            if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/secure")) {
+                return .{ .status = 200, .body = "secure-h2" };
+            }
+            return .{ .status = 404, .body = "nope" };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io, out: *?anyerror) void {
+            var conn = lst.accept(io2) catch {
+                out.* = error.AcceptFailed;
+                return;
+            };
+            defer conn.close();
+            var srv = tlsServerMod.TlsServer.init(.{
+                .allocator = std.heap.page_allocator,
+                .defaultIdentity = .{ .certChainPem = cert_pem, .privateKeyPem = key_pem },
+            });
+            var tls_conn = srv.handshake(io2, &conn) catch |e| {
+                out.* = e;
+                return;
+            };
+            defer tls_conn.deinit();
+            h2t.serveTlsConnection(std.heap.page_allocator, &tls_conn, H.handle, null) catch |e| {
+                out.* = e;
+                return;
+            };
+            out.* = null;
+        }
+    };
+    var result: ?anyerror = error.NotRun;
+    const th = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io, &result });
+    defer th.join();
+
+    var client = Client.init(a, ctx.io, .{});
+    defer client.deinit();
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/secure", .{port});
+    var res = try client.get(url, .{
+        .httpVersion = .http2,
+        .tls = .{ .verify = .caBundle, .caPem = cert_pem },
+        .timeoutMs = 15_000,
+    });
+    defer res.deinit();
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+    try std.testing.expectEqualStrings("secure-h2", res.body);
+    try std.testing.expect(res.version == .http2);
+}
+
+test "client pools h2c sessions across sequential requests" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    const h2t = @import("../protocols/http2/transport.zig");
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const h2t.Header, _: []const u8) anyerror!h2t.HandlerResponse {
+            if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/a")) {
+                return .{ .status = 200, .body = "first" };
+            }
+            if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/b")) {
+                return .{ .status = 200, .body = "second" };
+            }
+            return .{ .status = 404, .body = "nope" };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io) void {
+            // ONE connection serves both requests: reuse is observable
+            // only when the client parks instead of closing.
+            var conn = lst.accept(io2) catch return;
+            defer conn.close();
+            h2t.serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const th = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io });
+    defer th.join();
+
+    var client = Client.init(a, ctx.io, .{});
+    defer client.deinit();
+
+    var url_buf: [64]u8 = undefined;
+    const url_a = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/a", .{port});
+    var r1 = try client.get(url_a, .{ .httpVersion = .http2, .timeoutMs = 15_000 });
+    defer r1.deinit();
+    try std.testing.expectEqual(@as(u16, 200), r1.status);
+    try std.testing.expectEqualStrings("first", r1.body);
+
+    const url_b = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/b", .{port});
+    var r2 = try client.get(url_b, .{ .httpVersion = .http2, .timeoutMs = 15_000 });
+    defer r2.deinit();
+    try std.testing.expectEqual(@as(u16, 200), r2.status);
+    try std.testing.expectEqualStrings("second", r2.body);
+
+    // The second request must have reused the parked session: one miss
+    // (first dial), one hit (second request), one session parked.
+    const st = client.pool.statsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), st.misses);
+    try std.testing.expectEqual(@as(u64, 1), st.hits);
+    try std.testing.expectEqual(@as(u64, 2), st.released);
+    try std.testing.expectEqual(@as(usize, 1), client.pool.parkedCount());
+}
+
+test "client reaps h2 streams past maxConcurrentStreams" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    const h2t = @import("../protocols/http2/transport.zig");
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const h2t.Header, _: []const u8) anyerror!h2t.HandlerResponse {
+            if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/p")) {
+                return .{ .status = 200, .body = "pong" };
+            }
+            return .{ .status = 404, .body = "nope" };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io, out: *?anyerror) void {
+            // ONE connection serves all requests: reuse is observable
+            // only when the client parks instead of closing. Serving ends
+            // at client EOF, so `join` after `client.deinit()` below can
+            // never hang.
+            var conn = lst.accept(io2) catch {
+                out.* = error.AcceptFailed;
+                return;
+            };
+            defer conn.close();
+            h2t.serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch |e| {
+                out.* = e;
+                return;
+            };
+            out.* = null;
+        }
+    };
+    var result: ?anyerror = error.NotRun;
+    const th = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io, &result });
+    // No defer join: explicit teardown below guarantees client EOF before
+    // join (errdefer covers failure paths). A deferred join plus an
+    // explicit join double-joins on Windows (INVALID_HANDLE).
+
+    var client = Client.init(a, ctx.io, .{});
+    errdefer client.deinit();
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/p", .{port});
+    // 250 sequential requests on one pooled session: completed streams
+    // must be reaped (both sides), or the server falsely hits its
+    // maxConcurrentStreams=100 admission cap and kills the connection.
+    // testing.allocator additionally proves no per-stream memory leaks.
+    var i: usize = 0;
+    while (i < 250) : (i += 1) {
+        var res = try client.get(url, .{ .httpVersion = .http2, .timeoutMs = 15_000 });
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+        try std.testing.expectEqualStrings("pong", res.body);
+    }
+    const st = client.pool.statsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), st.misses);
+    try std.testing.expectEqual(@as(u64, 249), st.hits);
+    try std.testing.expectEqual(@as(u64, 250), st.released);
+    try std.testing.expectEqual(@as(usize, 1), client.pool.parkedCount());
+    client.deinit();
+    th.join();
+    try std.testing.expect(result == null);
+}
+
+test "client pools h2-tls sessions across sequential requests" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    const h2t = @import("../protocols/http2/transport.zig");
+    const tlsServerMod = @import("../protocols/tls/tcp_tls.zig");
+    const cert_pem = @embedFile("../protocols/tls/testdata/localhost_cert.pem");
+    const key_pem = @embedFile("../protocols/tls/testdata/localhost_key.pem");
+
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const h2t.Header, _: []const u8) anyerror!h2t.HandlerResponse {
+            if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/s")) {
+                return .{ .status = 200, .body = "secure-pooled" };
+            }
+            return .{ .status = 404, .body = "nope" };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io, out: *?anyerror) void {
+            var conn = lst.accept(io2) catch {
+                out.* = error.AcceptFailed;
+                return;
+            };
+            defer conn.close();
+            var srv = tlsServerMod.TlsServer.init(.{
+                .allocator = std.heap.page_allocator,
+                .defaultIdentity = .{ .certChainPem = cert_pem, .privateKeyPem = key_pem },
+            });
+            var tls_conn = srv.handshake(io2, &conn) catch |e| {
+                out.* = e;
+                return;
+            };
+            defer tls_conn.deinit();
+            h2t.serveTlsConnection(std.heap.page_allocator, &tls_conn, H.handle, null) catch |e| {
+                out.* = e;
+                return;
+            };
+            out.* = null;
+        }
+    };
+    var result: ?anyerror = error.NotRun;
+    const th = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io, &result });
+
+    var client = Client.init(a, ctx.io, .{});
+    // No defer: the client is torn down explicitly below so the server
+    // observes EOF and exits BEFORE the join (errdefer covers failures).
+    errdefer client.deinit();
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/s", .{port});
+    var r1 = try client.get(url, .{
+        .httpVersion = .http2,
+        .tls = .{ .verify = .caBundle, .caPem = cert_pem },
+        .timeoutMs = 15_000,
+    });
+    defer r1.deinit();
+    try std.testing.expectEqualStrings("secure-pooled", r1.body);
+
+    // A second request over the SAME TLS+H2 session: no new handshake.
+    var r2 = try client.get(url, .{
+        .httpVersion = .http2,
+        .tls = .{ .verify = .caBundle, .caPem = cert_pem },
+        .timeoutMs = 15_000,
+    });
+    defer r2.deinit();
+    try std.testing.expectEqualStrings("secure-pooled", r2.body);
+
+    const st = client.pool.statsSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), st.misses);
+    try std.testing.expectEqual(@as(u64, 1), st.hits);
+
+    client.deinit();
+    th.join();
+    try std.testing.expect(result == null);
+}
+
+test "client resumes h2-tls across fresh handshakes via session cache" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    const h2t = @import("../protocols/http2/transport.zig");
+    const tlsServerMod = @import("../protocols/tls/tcp_tls.zig");
+    const cert_pem = @embedFile("../protocols/tls/testdata/localhost_cert.pem");
+    const key_pem = @embedFile("../protocols/tls/testdata/localhost_key.pem");
+
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const h2t.Header, _: []const u8) anyerror!h2t.HandlerResponse {
+            if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/r")) {
+                return .{ .status = 200, .body = "resumed-h2" };
+            }
+            return .{ .status = 404, .body = "nope" };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io, out: *?anyerror) void {
+            var resumed: [2]bool = .{ false, false };
+            for (0..2) |i| {
+                var conn = lst.accept(io2) catch {
+                    out.* = error.AcceptFailed;
+                    return;
+                };
+                defer conn.close();
+                var srv = tlsServerMod.TlsServer.init(.{
+                    .allocator = std.heap.page_allocator,
+                    .defaultIdentity = .{ .certChainPem = cert_pem, .privateKeyPem = key_pem },
+                    .ticketKeys = .{ .current = [_]u8{0x5E} ** 32 },
+                });
+                var tls_conn = srv.handshake(io2, &conn) catch |e| {
+                    out.* = e;
+                    return;
+                };
+                defer tls_conn.deinit();
+                resumed[i] = tls_conn.resumed;
+                h2t.serveTlsConnection(std.heap.page_allocator, &tls_conn, H.handle, null) catch |e| {
+                    out.* = e;
+                    return;
+                };
+            }
+            if (resumed[0] or !resumed[1]) {
+                out.* = error.ResumptionMismatch;
+                return;
+            }
+            out.* = null;
+        }
+    };
+    var result: ?anyerror = error.NotRun;
+    const th = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io, &result });
+
+    // Pooling disabled so each get performs a fresh handshake; the
+    // second must abbreviate via the session cache.
+    var client = Client.init(a, ctx.io, .{ .pool = .{ .maxConnections = 0 } });
+    errdefer client.deinit();
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/r", .{port});
+    var r1 = try client.get(url, .{
+        .httpVersion = .http2,
+        .tls = .{ .verify = .caBundle, .caPem = cert_pem },
+        .timeoutMs = 15_000,
+    });
+    defer r1.deinit();
+    try std.testing.expectEqualStrings("resumed-h2", r1.body);
+
+    var r2 = try client.get(url, .{
+        .httpVersion = .http2,
+        .tls = .{ .verify = .caBundle, .caPem = cert_pem },
+        .timeoutMs = 15_000,
+    });
+    defer r2.deinit();
+    try std.testing.expectEqualStrings("resumed-h2", r2.body);
+
+    client.deinit();
+    th.join();
+    try std.testing.expect(result == null);
+}
+
+test "client get over http3 serves loopback over real udp" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    const quicConn = @import("../protocols/quic/connection.zig");
+    const quicEp = @import("../protocols/quic/transport.zig");
+    const quicHs = @import("../protocols/quic/handshake.zig");
+    const quicFrames = @import("../protocols/quic/frames.zig");
+    const h3conn = @import("../protocols/http3/connection.zig");
+    const h3frame = @import("../protocols/http3/frame.zig");
+    const h3qpack = @import("../protocols/http3/qpack.zig");
+    const cert_pem = @embedFile("../protocols/tls/testdata/localhost_cert.pem");
+    const key_pem = @embedFile("../protocols/tls/testdata/localhost_key.pem");
+
+    // In-process H3/QUIC server: two sequential connections on one UDP
+    // socket, one GET each. Pumps itself on its own thread; the client
+    // under test pumps only itself (the external-peer path).
+    const Server = struct {
+        ep: quicEp.Endpoint = undefined,
+        pump: quicEp.Pump = undefined,
+
+        // One client-bidi request stream's bytes until FIN. Control and
+        // QPACK uni streams are ignored (static-table responses need no
+        // decoder traffic); only client bidi streams (id % 4 == 0) latch.
+        const Acc = struct {
+            sid: u64 = std.math.maxInt(u64),
+            buf: std.ArrayList(u8) = .empty,
+            fin: bool = false,
+        };
+
+        fn onStream(c: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
+            const acc: *Acc = @ptrCast(@alignCast(c.?));
+            if (acc.sid == std.math.maxInt(u64) and sid % 4 == 0) acc.sid = sid;
+            if (sid != acc.sid) return;
+            acc.buf.appendSlice(std.testing.allocator, data) catch return;
+            if (fin) acc.fin = true;
+        }
+
+        fn sendStream(conn: *quicConn.Connection, sid: u64, bytes: []const u8, fin: bool) !void {
+            const B = struct {
+                var s_id: u64 = 0;
+                var s_fin: bool = false;
+                var s_data: []const u8 = "";
+                pub fn build(gpa: std.mem.Allocator, payload: *std.ArrayList(u8)) quicConn.Error!void {
+                    quicFrames.encode(payload, gpa, .{ .stream = .{ .id = s_id, .offset = 0, .data = s_data, .fin = s_fin } }) catch
+                        return quicConn.Error.OutOfMemory;
+                }
+            };
+            B.s_id = sid;
+            B.s_fin = fin;
+            B.s_data = bytes;
+            try conn.sendFrames(.application, B.build, 0);
+        }
+
+        fn serveOne(srv: *@This(), seed: u64, deadline_ms: u64) !void {
+            const alloc = std.testing.allocator;
+            var qconn = try quicConn.Connection.init(alloc, .server, .{}, seed);
+            defer qconn.deinit();
+            // The endpoint's conn pointer follows each fresh connection;
+            // the previous one is already deinited by its own scope.
+            srv.ep.conn = qconn;
+            var drv = quicHs.Driver.initServer(alloc, .{ .certChainPem = cert_pem, .privateKeyPem = key_pem });
+            defer drv.deinit();
+            qconn.tls = .{ .ctx = &drv, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
+            try quicHs.serveHandshake(&srv.ep, &srv.pump, &drv, deadline_ms);
+
+            var h3 = h3conn.Connection.init(alloc, .server);
+            defer h3.deinit();
+            var acc = Acc{};
+            defer acc.buf.deinit(alloc);
+            qconn.cbs = .{ .ctx = &acc, .onStreamData = onStream };
+            const start: u64 = @intCast(clock.millisNow());
+            while (true) {
+                const now: u64 = @intCast(clock.millisNow());
+                if (now -| start > deadline_ms) return error.Timeout;
+                try quicHs.feedPumped(&srv.ep, &srv.pump, null, 500, now);
+                if (!acc.fin) continue;
+                // Decode request HEADERS, route by :path, respond.
+                var off: usize = 0;
+                const fr = try h3frame.parseFrame(acc.buf.items, &off);
+                const fields = try h3.qdec.decodeSectionWithPrefix(fr.payload);
+                defer h3.qdec.freeFields(fields);
+                var path: []const u8 = "";
+                for (fields) |f| {
+                    if (std.mem.eql(u8, f.name, ":path")) path = f.value;
+                }
+                const is_hello = std.mem.eql(u8, path, "/hello");
+                var rs = h3conn.RequestStream{ .id = acc.sid, .allocator = alloc, .qpack = h3qpack.Encoder.init(alloc) };
+                defer rs.qpack.deinit();
+                const rhead = try rs.buildResponseHeaders(if (is_hello) 200 else 404, &.{});
+                defer alloc.free(rhead);
+                const rdata = try rs.buildData(if (is_hello) "hello-h3" else "not-found");
+                defer alloc.free(rdata);
+                var wire = std.ArrayList(u8).empty;
+                defer wire.deinit(alloc);
+                try wire.appendSlice(alloc, rhead);
+                try wire.appendSlice(alloc, rdata);
+                try sendStream(qconn, acc.sid, wire.items, true);
+                _ = try srv.ep.flush(null);
+                return;
+            }
+        }
+
+        fn run(srv: *@This(), out: *?anyerror) void {
+            serveOne(srv, 0x91, 15_000) catch |e| {
+                out.* = e;
+                return;
+            };
+            serveOne(srv, 0x92, 15_000) catch |e| {
+                out.* = e;
+                return;
+            };
+            // Third connection: untrusted client. It fails chain
+            // verification and goes quiet, so the server must time out
+            // (never complete). A completed third handshake would mean
+            // the client accepted a forged chain — catastrophic.
+            if (serveOne(srv, 0x93, 5_000)) {
+                out.* = error.UnexpectedSuccess;
+            } else |e| {
+                out.* = if (e == error.HandshakeTimeout) null else e;
+            }
+        }
+    };
+
+    // Placeholder conn: replaced by each serveOne before any feeding.
+    var placeholder = try quicConn.Connection.init(a, .server, .{}, 0x90);
+    defer placeholder.deinit();
+    var srv = Server{};
+    srv.ep = try quicEp.Endpoint.initPort(a, ctx.io, placeholder, 0);
+    const port = srv.ep.localPort();
+    defer srv.ep.deinit();
+    try srv.pump.start(&srv.ep, a);
+    defer srv.pump.stop();
+
+    var result: ?anyerror = error.NotRun;
+    const th = try std.Thread.spawn(.{}, Server.run, .{ &srv, &result });
+
+    // Explicit teardown (no defer join): the server exits on its own
+    // after two requests, so join-then-assert is exact. errdefer covers
+    // failures (server times out internally and exits by itself).
+    var client = Client.init(a, ctx.io, .{});
+    errdefer client.deinit();
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/hello", .{port});
+    var res = try client.get(url, .{
+        .httpVersion = .http3,
+        .tls = .{ .verify = .caBundle, .caPem = cert_pem },
+        .timeoutMs = 15_000,
+    });
+    defer res.deinit();
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+    try std.testing.expectEqualStrings("hello-h3", res.body);
+    try std.testing.expect(res.version == .http3);
+
+    const url404 = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/missing", .{port});
+    var res404 = try client.get(url404, .{
+        .httpVersion = .http3,
+        .tls = .{ .verify = .caBundle, .caPem = cert_pem },
+        .timeoutMs = 15_000,
+    });
+    defer res404.deinit();
+    try std.testing.expectEqual(@as(u16, 404), res404.status);
+
+    // Untrusted chain fails fast and loudly (no 15s deadline burn: the
+    // doomed handshake aborts as soon as the driver rejects the chain).
+    const bad = client.get(url, .{
+        .httpVersion = .http3,
+        .tls = .{ .verify = .caBundle, .caPem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----" },
+        .timeoutMs = 15_000,
+    });
+    try std.testing.expectError(Error.TlsCertificateNotVerified, bad);
+
+    client.deinit();
+    th.join();
+    // Server side: two clean serves, then the quiet-abort timeout.
+    try std.testing.expect(result == null);
+}
+
+test "client get over mtls presents certificate through high-level api" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    const cert_pem = @embedFile("../protocols/tls/testdata/localhost_cert.pem");
+    const key_pem = @embedFile("../protocols/tls/testdata/localhost_key.pem");
+
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    // Plain HTTPS/1.1 server that *requires* a client certificate.
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io, out: *?anyerror) void {
+            var conn = lst.accept(io2) catch {
+                out.* = error.AcceptFailed;
+                return;
+            };
+            defer conn.close();
+            const tlsServerMod = @import("../protocols/tls/tcp_tls.zig");
+            var srv = tlsServerMod.TlsServer.init(.{
+                .allocator = std.heap.page_allocator,
+                .defaultIdentity = .{ .certChainPem = cert_pem, .privateKeyPem = key_pem },
+                .clientAuth = .required,
+                .clientCaPem = cert_pem,
+            });
+            var tls_conn = srv.handshake(io2, &conn) catch |e| {
+                out.* = e;
+                return;
+            };
+            defer tls_conn.deinit();
+            var buf: [256]u8 = undefined;
+            var head_len: usize = 0;
+            while (head_len < buf.len) {
+                const n = tls_conn.read(buf[head_len..]) catch |e| {
+                    out.* = e;
+                    return;
+                };
+                if (n == 0) {
+                    out.* = error.EarlyClose;
+                    return;
+                }
+                head_len += n;
+                if (std.mem.indexOf(u8, buf[0..head_len], "\r\n\r\n") != null) break;
+            }
+            const body = "mutual-high-level";
+            var resp_buf: [256]u8 = undefined;
+            const resp = std.fmt.bufPrint(&resp_buf, "HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body }) catch {
+                out.* = error.NoSpace;
+                return;
+            };
+            tls_conn.writeAll(resp) catch |e| {
+                out.* = e;
+                return;
+            };
+            out.* = null;
+        }
+    };
+    var result: ?anyerror = error.NotRun;
+    const th = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io, &result });
+    defer th.join();
+
+    var client = Client.init(a, ctx.io, .{});
+    defer client.deinit();
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/", .{port});
+    var res = try client.get(url, .{
+        .tls = .{
+            .verify = .caBundle,
+            .caPem = cert_pem,
+            .clientCertPem = cert_pem,
+            .clientKeyPem = key_pem,
+        },
+        .timeoutMs = 15_000,
+    });
+    defer res.deinit();
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+    try std.testing.expectEqualStrings("mutual-high-level", res.body);
 }
 
 test "client resolve literal IP and hostname" {
@@ -1579,14 +2438,14 @@ test "client resolve literal IP and hostname" {
     defer client.deinit();
 
     // 1. Literal IP resolution
-    var addrs = try client.resolve("127.0.0.1", 80, .{});
+    var addrs = try client.resolve("127.0.0.1", .{ .port = 80 });
     defer addrs.deinit();
     try std.testing.expect(addrs.len() >= 1);
     try std.testing.expectEqual(addressMod.Family.ip4, addrs.first().?.family);
     try std.testing.expectEqual(@as(u16, 80), addrs.first().?.port);
 
     // 2. Family filter for IP
-    var v4_only = try client.resolve("127.0.0.1", 8080, .{ .family = .ipv4 });
+    var v4_only = try client.resolve("127.0.0.1", .{ .port = 8080, .family = .ipv4 });
     defer v4_only.deinit();
     try std.testing.expectEqual(@as(usize, 1), v4_only.len());
 
@@ -1600,6 +2459,23 @@ test "client resolve literal IP and hostname" {
     var w: std.Io.Writer = .fixed(&fmt_buf);
     try addrs.format(&w);
     try std.testing.expect(w.buffered().len > 0);
+}
+
+test "resolve uses safe .{} defaults and explicit overrides" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = Client.init(a, io, .{});
+    defer client.deinit();
+
+    // Default .{}: port 443, family any, cache on.
+    var def = try client.resolve("127.0.0.1", .{});
+    defer def.deinit();
+    try std.testing.expectEqual(@as(u16, 443), def.first().?.port);
+
+    // Single override leaves everything else default.
+    var over = try client.resolve("127.0.0.1", .{ .port = 8080 });
+    defer over.deinit();
+    try std.testing.expectEqual(@as(u16, 8080), over.first().?.port);
 }
 
 test "client camelCase config options and request options" {
@@ -1654,7 +2530,7 @@ test "requestAll error path cleans up without double free" {
     var client = Client.init(a, io, .{ .timeoutMs = 500 });
     defer client.deinit();
 
-    // Parallel path (len > 1): all targets refused -> first_err cleanup.
+    // Parallel path (len > 1): all targets refused -> firstErr cleanup.
     const reqs = [_]RequestOptions{
         .{ .method = .GET, .url = "http://127.0.0.1:1/a" },
         .{ .method = .GET, .url = "http://127.0.0.1:1/b" },

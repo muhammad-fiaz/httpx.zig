@@ -137,8 +137,9 @@ Sends `QUIT`, closes open sockets, and frees client buffers.
 ## Errors
 
 * `FtpError.ConnectFailed`: Unable to connect to host or data port.
-* `FtpError.ProtocolError`: Unexpected FTP response code or command rejection.
-* `FtpError.TlsUnavailable`: Explicit FTPS requested but TLS is unconfigured.
+* `FtpError.ProtocolError`: Unexpected FTP response code or command rejection (including a refused `AUTH TLS`, which fails closed instead of falling back to plaintext).
+* `FtpError.TlsHandshakeFailed`: The FTPS handshake (control or data) failed.
+* `FtpError.CertificateUntrusted` / `CertificateHostMismatch` / `CertificateExpired`: FTPS server certificate rejected; check `tlsCaPem` / hostname.
 * `FtpError.MalformedReply`: Server sent non-conforming reply text.
 * `FtpError.MalformedPasv`: Failed to parse passive port negotiation.
 

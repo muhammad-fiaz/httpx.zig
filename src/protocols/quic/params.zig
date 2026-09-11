@@ -39,17 +39,17 @@ pub const ParamId = enum(u64) {
 
 /// Numeric parameter set with RFC defaults for absent entries.
 pub const Params = struct {
-    max_idle_timeout_ms: u64 = 0, // 0 = disabled
-    max_udp_payload_size: u64 = 65527,
-    initial_max_data: u64 = 0,
-    initial_max_stream_data_bidi_local: u64 = 0,
-    initial_max_stream_data_bidi_remote: u64 = 0,
-    initial_max_stream_data_uni: u64 = 0,
-    initial_max_streams_bidi: u64 = 0,
-    initial_max_streams_uni: u64 = 0,
-    ack_delay_exponent: u64 = 3,
-    max_ack_delay_ms: u64 = 25,
-    active_connection_id_limit: u64 = 2,
+    maxIdleTimeoutMs: u64 = 0, // 0 = disabled
+    maxUdpPayloadSize: u64 = 65527,
+    initialMaxData: u64 = 0,
+    initialMaxStreamDataBidiLocal: u64 = 0,
+    initialMaxStreamDataBidiRemote: u64 = 0,
+    initialMaxStreamDataUni: u64 = 0,
+    initialMaxStreamsBidi: u64 = 0,
+    initialMaxStreamsUni: u64 = 0,
+    ackDelayExponent: u64 = 3,
+    maxAckDelayMs: u64 = 25,
+    activeConnectionIdLimit: u64 = 2,
 };
 
 fn putParam(out: *std.ArrayList(u8), gpa: Allocator, id: u64, value_bytes: []const u8) !void {
@@ -71,31 +71,31 @@ fn u64be(v: u64) [8]u8 {
 /// Encodes the numeric parameter set (CIDs appended separately by the
 /// connection layer since they carry raw bytes).
 pub fn encode(out: *std.ArrayList(u8), gpa: Allocator, p: Params) !void {
-    if (p.max_udp_payload_size < 1200 or p.max_udp_payload_size > 65527) return Error.InvalidParameter;
-    if (p.ack_delay_exponent > 20 or p.max_ack_delay_ms >= (1 << 14)) return Error.InvalidParameter;
-    if (p.active_connection_id_limit < 2) return Error.InvalidParameter;
+    if (p.maxUdpPayloadSize < 1200 or p.maxUdpPayloadSize > 65527) return Error.InvalidParameter;
+    if (p.ackDelayExponent > 20 or p.maxAckDelayMs >= (1 << 14)) return Error.InvalidParameter;
+    if (p.activeConnectionIdLimit < 2) return Error.InvalidParameter;
     // Only emit non-default values where the spec allows omission.
-    if (p.max_idle_timeout_ms != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.max_idle_timeout), &u64be(p.max_idle_timeout_ms));
-    try putParam(out, gpa, @intFromEnum(ParamId.max_udp_payload_size), &u64be(p.max_udp_payload_size));
-    if (p.initial_max_data != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_data), &u64be(p.initial_max_data));
-    if (p.initial_max_stream_data_bidi_local != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_stream_data_bidi_local), &u64be(p.initial_max_stream_data_bidi_local));
-    if (p.initial_max_stream_data_bidi_remote != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_stream_data_bidi_remote), &u64be(p.initial_max_stream_data_bidi_remote));
-    if (p.initial_max_stream_data_uni != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_stream_data_uni), &u64be(p.initial_max_stream_data_uni));
-    if (p.initial_max_streams_bidi != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_streams_bidi), &u64be(p.initial_max_streams_bidi));
-    if (p.initial_max_streams_uni != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_streams_uni), &u64be(p.initial_max_streams_uni));
-    if (p.ack_delay_exponent != 3)
-        try putParam(out, gpa, @intFromEnum(ParamId.ack_delay_exponent), &u64be(p.ack_delay_exponent));
-    if (p.max_ack_delay_ms != 25)
-        try putParam(out, gpa, @intFromEnum(ParamId.max_ack_delay), &u64be(p.max_ack_delay_ms));
-    if (p.active_connection_id_limit != 2)
-        try putParam(out, gpa, @intFromEnum(ParamId.active_connection_id_limit), &u64be(p.active_connection_id_limit));
+    if (p.maxIdleTimeoutMs != 0)
+        try putParam(out, gpa, @intFromEnum(ParamId.max_idle_timeout), &u64be(p.maxIdleTimeoutMs));
+    try putParam(out, gpa, @intFromEnum(ParamId.max_udp_payload_size), &u64be(p.maxUdpPayloadSize));
+    if (p.initialMaxData != 0)
+        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_data), &u64be(p.initialMaxData));
+    if (p.initialMaxStreamDataBidiLocal != 0)
+        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_stream_data_bidi_local), &u64be(p.initialMaxStreamDataBidiLocal));
+    if (p.initialMaxStreamDataBidiRemote != 0)
+        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_stream_data_bidi_remote), &u64be(p.initialMaxStreamDataBidiRemote));
+    if (p.initialMaxStreamDataUni != 0)
+        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_stream_data_uni), &u64be(p.initialMaxStreamDataUni));
+    if (p.initialMaxStreamsBidi != 0)
+        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_streams_bidi), &u64be(p.initialMaxStreamsBidi));
+    if (p.initialMaxStreamsUni != 0)
+        try putParam(out, gpa, @intFromEnum(ParamId.initial_max_streams_uni), &u64be(p.initialMaxStreamsUni));
+    if (p.ackDelayExponent != 3)
+        try putParam(out, gpa, @intFromEnum(ParamId.ack_delay_exponent), &u64be(p.ackDelayExponent));
+    if (p.maxAckDelayMs != 25)
+        try putParam(out, gpa, @intFromEnum(ParamId.max_ack_delay), &u64be(p.maxAckDelayMs));
+    if (p.activeConnectionIdLimit != 2)
+        try putParam(out, gpa, @intFromEnum(ParamId.active_connection_id_limit), &u64be(p.activeConnectionIdLimit));
 }
 
 fn dv(data: []const u8, pos: *usize) Error!u64 {
@@ -149,28 +149,28 @@ pub fn decode(data: []const u8) Error!Params {
         };
 
         switch (id) {
-            .max_idle_timeout => p.max_idle_timeout_ms = value_be,
+            .max_idle_timeout => p.maxIdleTimeoutMs = value_be,
             .max_udp_payload_size => {
                 if (value_be < 1200) return Error.InvalidParameter;
-                p.max_udp_payload_size = value_be;
+                p.maxUdpPayloadSize = value_be;
             },
-            .initial_max_data => p.initial_max_data = value_be,
-            .initial_max_stream_data_bidi_local => p.initial_max_stream_data_bidi_local = value_be,
-            .initial_max_stream_data_bidi_remote => p.initial_max_stream_data_bidi_remote = value_be,
-            .initial_max_stream_data_uni => p.initial_max_stream_data_uni = value_be,
-            .initial_max_streams_bidi => p.initial_max_streams_bidi = value_be,
-            .initial_max_streams_uni => p.initial_max_streams_uni = value_be,
+            .initial_max_data => p.initialMaxData = value_be,
+            .initial_max_stream_data_bidi_local => p.initialMaxStreamDataBidiLocal = value_be,
+            .initial_max_stream_data_bidi_remote => p.initialMaxStreamDataBidiRemote = value_be,
+            .initial_max_stream_data_uni => p.initialMaxStreamDataUni = value_be,
+            .initial_max_streams_bidi => p.initialMaxStreamsBidi = value_be,
+            .initial_max_streams_uni => p.initialMaxStreamsUni = value_be,
             .ack_delay_exponent => {
                 if (value_be > 20) return Error.InvalidParameter;
-                p.ack_delay_exponent = value_be;
+                p.ackDelayExponent = value_be;
             },
             .max_ack_delay => {
                 if (value_be >= 1 << 14) return Error.InvalidParameter;
-                p.max_ack_delay_ms = value_be;
+                p.maxAckDelayMs = value_be;
             },
             .active_connection_id_limit => {
                 if (value_be < 2) return Error.InvalidParameter;
-                p.active_connection_id_limit = value_be;
+                p.activeConnectionIdLimit = value_be;
             },
             else => {}, // unknown / CID-carrying handled by connection
         }
@@ -186,21 +186,21 @@ test "encode/decode roundtrip preserves values" {
     defer list.deinit(std.testing.allocator);
 
     try encode(&list, std.testing.allocator, .{
-        .max_idle_timeout_ms = 30_000,
-        .initial_max_data = 1 << 20,
-        .initial_max_streams_bidi = 128,
-        .ack_delay_exponent = 5,
-        .max_ack_delay_ms = 40,
-        .active_connection_id_limit = 8,
+        .maxIdleTimeoutMs = 30_000,
+        .initialMaxData = 1 << 20,
+        .initialMaxStreamsBidi = 128,
+        .ackDelayExponent = 5,
+        .maxAckDelayMs = 40,
+        .activeConnectionIdLimit = 8,
     });
 
     const got = try decode(list.items);
-    try std.testing.expectEqual(@as(u64, 30_000), got.max_idle_timeout_ms);
-    try std.testing.expectEqual(@as(u64, 1 << 20), got.initial_max_data);
-    try std.testing.expectEqual(@as(u64, 128), got.initial_max_streams_bidi);
-    try std.testing.expectEqual(@as(u64, 5), got.ack_delay_exponent);
-    try std.testing.expectEqual(@as(u64, 40), got.max_ack_delay_ms);
-    try std.testing.expectEqual(@as(u64, 8), got.active_connection_id_limit);
+    try std.testing.expectEqual(@as(u64, 30_000), got.maxIdleTimeoutMs);
+    try std.testing.expectEqual(@as(u64, 1 << 20), got.initialMaxData);
+    try std.testing.expectEqual(@as(u64, 128), got.initialMaxStreamsBidi);
+    try std.testing.expectEqual(@as(u64, 5), got.ackDelayExponent);
+    try std.testing.expectEqual(@as(u64, 40), got.maxAckDelayMs);
+    try std.testing.expectEqual(@as(u64, 8), got.activeConnectionIdLimit);
 }
 
 test "empty encoding yields all defaults" {
@@ -208,18 +208,18 @@ test "empty encoding yields all defaults" {
     defer list.deinit(std.testing.allocator);
     try encode(&list, std.testing.allocator, .{});
     const got = try decode(list.items);
-    try std.testing.expectEqual(@as(u64, 65527), got.max_udp_payload_size);
-    try std.testing.expectEqual(@as(u64, 3), got.ack_delay_exponent);
-    try std.testing.expectEqual(@as(u64, 25), got.max_ack_delay_ms);
-    try std.testing.expectEqual(@as(u64, 2), got.active_connection_id_limit);
+    try std.testing.expectEqual(@as(u64, 65527), got.maxUdpPayloadSize);
+    try std.testing.expectEqual(@as(u64, 3), got.ackDelayExponent);
+    try std.testing.expectEqual(@as(u64, 25), got.maxAckDelayMs);
+    try std.testing.expectEqual(@as(u64, 2), got.activeConnectionIdLimit);
 }
 
 test "encoder rejects invalid local transport parameters" {
     var list = std.ArrayList(u8).empty;
     defer list.deinit(std.testing.allocator);
-    try std.testing.expectError(Error.InvalidParameter, encode(&list, std.testing.allocator, .{ .max_udp_payload_size = 1199 }));
-    try std.testing.expectError(Error.InvalidParameter, encode(&list, std.testing.allocator, .{ .ack_delay_exponent = 21 }));
-    try std.testing.expectError(Error.InvalidParameter, encode(&list, std.testing.allocator, .{ .active_connection_id_limit = 1 }));
+    try std.testing.expectError(Error.InvalidParameter, encode(&list, std.testing.allocator, .{ .maxUdpPayloadSize = 1199 }));
+    try std.testing.expectError(Error.InvalidParameter, encode(&list, std.testing.allocator, .{ .ackDelayExponent = 21 }));
+    try std.testing.expectError(Error.InvalidParameter, encode(&list, std.testing.allocator, .{ .activeConnectionIdLimit = 1 }));
 }
 
 test "validation bounds reject hostile values" {

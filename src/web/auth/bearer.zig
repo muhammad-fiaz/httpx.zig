@@ -37,8 +37,8 @@ pub fn verifyToken(actual: []const u8, expected: []const u8) bool {
 }
 
 /// Convenience: authorize a request context against one expected Bearer token.
-pub fn authorizeBearer(ctx: *const router_mod.Context, header_name: []const u8, expected: []const u8) bool {
-    const hv = ctx.header(header_name) orelse return false;
+pub fn authorizeBearer(ctx: *const router_mod.Context, headerName: []const u8, expected: []const u8) bool {
+    const hv = ctx.header(headerName) orelse return false;
     const tok = parseBearer(hv) orelse return false;
     return verifyToken(tok, expected);
 }

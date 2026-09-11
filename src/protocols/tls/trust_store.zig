@@ -12,8 +12,9 @@ const Allocator = std.mem.Allocator;
 const crypto = std.crypto;
 const Certificate = crypto.Certificate;
 const Bundle = Certificate.Bundle;
-const errors_mod = @import("errors.zig");
-pub const TlsError = errors_mod.TlsError;
+const errorsMod = @import("errors.zig");
+pub const TlsError = errorsMod.TlsError;
+const clock = @import("../../common/clock.zig");
 
 pub const TrustMode = enum {
     /// Use operating system root certificates combined with any configured custom CAs.
@@ -30,14 +31,16 @@ pub const TrustMode = enum {
 
 pub const TrustStore = struct {
     allocator: Allocator,
+    io: std.Io,
     bundle: Bundle,
     lock: std.Io.RwLock = .init,
     mode: TrustMode = .systemAndCustom,
     loadedSystem: bool = false,
 
-    pub fn init(allocator: Allocator) TrustStore {
+    pub fn init(allocator: Allocator, io: std.Io) TrustStore {
         return .{
             .allocator = allocator,
+            .io = io,
             .bundle = .empty,
             .mode = .systemAndCustom,
             .loadedSystem = false,
@@ -50,16 +53,25 @@ pub const TrustStore = struct {
     }
 
     /// Automatically scans and populates root certificates from host operating system.
-    pub fn loadSystemTrust(self: *TrustStore, io: std.Io) TlsError!void {
+    pub fn loadSystemTrust(self: *TrustStore) TlsError!void {
         if (self.loadedSystem) return;
-        const now = std.Io.Timestamp.now(io, .awake);
-        self.bundle.rescan(self.allocator, io, now) catch return TlsError.TlsCaUnavailable;
+        const now = std.Io.Timestamp.now(self.io, .awake);
+        self.bundle.rescan(self.allocator, self.io, now) catch return TlsError.TlsCaUnavailable;
         self.loadedSystem = true;
     }
 
     /// Adds a single DER-encoded CA certificate to the trust store.
-    pub fn addCertDer(self: *TrustStore, der_bytes: []const u8) TlsError!void {
-        self.bundle.add(self.allocator, der_bytes) catch return TlsError.OutOfMemory;
+    /// Follows `Bundle.parseCert` semantics: the bytes are appended to the
+    /// bundle store and indexed by subject (expired anchors are skipped).
+    pub fn addCertDer(self: *TrustStore, derBytes: []const u8) TlsError!void {
+        const now_sec: i64 = @divFloor(clock.millisNow(), 1000);
+        const start: u32 = @intCast(self.bundle.bytes.items.len);
+        self.bundle.bytes.appendSlice(self.allocator, derBytes) catch return TlsError.OutOfMemory;
+        errdefer self.bundle.bytes.items.len = start;
+        self.bundle.parseCert(self.allocator, start, now_sec) catch |err| switch (err) {
+            error.OutOfMemory => return TlsError.OutOfMemory,
+            else => return TlsError.InvalidCertificate,
+        };
     }
 
     /// Parses and adds all PEM-encoded CA certificates to the trust store.
@@ -67,8 +79,8 @@ pub const TrustStore = struct {
         var search_from: usize = 0;
         var added: usize = 0;
         while (std.mem.indexOfPos(u8, pemBytes, search_from, "-----BEGIN CERTIFICATE-----")) |idx| {
-            const cert_mod = @import("certificate.zig");
-            const der = cert_mod.decodePemBlock(self.allocator, pemBytes[idx..], "CERTIFICATE") catch break;
+            const certMod = @import("certificate.zig");
+            const der = certMod.decodePemBlock(self.allocator, pemBytes[idx..], "CERTIFICATE") catch break;
             defer self.allocator.free(der);
             self.addCertDer(der) catch return TlsError.OutOfMemory;
             added += 1;
@@ -78,8 +90,8 @@ pub const TrustStore = struct {
     }
 
     /// Verifies a parsed peer certificate against the trusted bundle.
-    pub fn verify(self: *TrustStore, subject: Certificate.Parsed, now_sec: i64) TlsError!void {
-        self.bundle.verify(subject, now_sec) catch |err| switch (err) {
+    pub fn verify(self: *TrustStore, subject: Certificate.Parsed, nowSec: i64) TlsError!void {
+        self.bundle.verify(subject, nowSec) catch |err| switch (err) {
             error.CertificateExpired => return TlsError.CertificateExpired,
             error.CertificateNotYetValid => return TlsError.CertificateNotYetValid,
             error.CertificateIssuerNotFound => return TlsError.CertificateUntrusted,
@@ -96,7 +108,7 @@ pub const TrustStore = struct {
 
 test "TrustStore initialization and empty verification" {
     const alloc = std.testing.allocator;
-    var ts = TrustStore.init(alloc);
+    var ts = TrustStore.init(alloc, std.Io.Threaded.global_single_threaded.io());
     defer ts.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), ts.count());

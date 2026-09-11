@@ -97,8 +97,8 @@ fn parseIpLiteral(ip: []const u8, port: u16, family: addressMod.Family) ?address
 const clock = @import("../common/clock.zig");
 
 /// Probe a single endpoint. Returns the latency in ms on success, or null.
-fn probeOne(io: std.Io, probe: Probe, timeout_ms: u32) ?u32 {
-    _ = timeout_ms; // We rely on the OS default connect timeout for now.
+fn probeOne(io: std.Io, probe: Probe, timeoutMs: u32) ?u32 {
+    _ = timeoutMs; // We rely on the OS default connect timeout for now.
     const addr = parseIpLiteral(probe.ip, probe.port, probe.family) orelse return null;
     const t0 = clock.millisNow();
     const sock = tcp.connectAddress(io, &addr) catch return null;
@@ -109,7 +109,7 @@ fn probeOne(io: std.Io, probe: Probe, timeout_ms: u32) ?u32 {
 
 /// Check whether the internet is reachable.
 ///
-/// Tries up to `opts.max_probes` well-known public endpoints in order,
+/// Tries up to `opts.maxProbes` well-known public endpoints in order,
 /// stopping as soon as one succeeds.  Returns a `ConnectivityResult` with
 /// `.online = true` and latency information.
 ///
@@ -123,9 +123,9 @@ pub fn checkConnectivity(io: std.Io, opts: ConnectivityOptions) ConnectivityResu
                 .family = probe.family,
                 .latencyMs = lat,
             };
-            const ep_len = @min(probe.ip.len, result.endpoint.len);
-            @memcpy(result.endpoint[0..ep_len], probe.ip[0..ep_len]);
-            result.endpointLen = @intCast(ep_len);
+            const epLen = @min(probe.ip.len, result.endpoint.len);
+            @memcpy(result.endpoint[0..epLen], probe.ip[0..epLen]);
+            result.endpointLen = @intCast(epLen);
             return result;
         }
     }

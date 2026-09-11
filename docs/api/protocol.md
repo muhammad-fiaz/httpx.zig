@@ -27,7 +27,7 @@ const head = try httpx.http1.parser.parseRequestHead(buf);
 var fields: [128]httpx.http1.parser.Field = undefined;
 const blk = try httpx.http1.parser.parseHeaderBlock(buf, head.headEnd, &fields);
 
-// Framing decision (none / content_length / chunked / tunnel).
+// Framing decision (none / contentLength / chunked / tunnel).
 const framing = try httpx.http1.parser.decideFraming(fields[0..blk.count], false, 0, 0);
 
 // Incremental chunked decoding.
@@ -66,7 +66,7 @@ Limits live in `httpx.http1.parser.Options` (`allowLfLineEndings`); size caps in
 
 ```zig
 var hdrBuf: [httpx.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
-const hdr = httpx.http2.frame.FrameHeader.parse(&hdrBuf);
+const hdr = httpx.http2.FrameHeader.parse(&hdrBuf);
 var out: [9]u8 = undefined;
 hdr.serialize(&out);
 

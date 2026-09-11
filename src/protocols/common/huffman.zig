@@ -22,9 +22,9 @@ pub const Error = error{
 };
 
 /// EOS: 30 one-bits (never emitted as a symbol).
-pub const eos_len: u8 = 30;
+pub const eosLen: u8 = 30;
 
-const sym_table = table.sym_table;
+const symTable = table.symTable;
 
 // Encoder
 
@@ -41,7 +41,7 @@ pub fn encode(out: []u8, src: []const u8) Error!usize {
     var pos: usize = 0;
 
     for (src) |b| {
-        const s = sym_table[b];
+        const s = symTable[b];
         const slen: u5 = @intCast(s.len);
         const top: u64 = s.code >> @as(u5, @intCast(32 - @as(usize, s.len)));
         acc = (acc << slen) | top;
@@ -68,10 +68,10 @@ pub fn encode(out: []u8, src: []const u8) Error!usize {
 
 pub const FLAG_ACCEPTED: u8 = 0x01;
 pub const FLAG_SYM: u8 = 0x02;
-pub const fail_state: u16 = 0x100;
+pub const failState: u16 = 0x100;
 
 const Entry = struct {
-    next: u16 = fail_state,
+    next: u16 = failState,
     flags: u8 = 0,
     sym: u8 = 0,
 };
@@ -93,7 +93,7 @@ fn buildAutomaton() [256][16]Entry {
     var n: usize = 1; // node 0 = root
 
     for (0..256) |si| {
-        const s = sym_table[si];
+        const s = symTable[si];
         var t: u32 = 0;
         var pos: usize = 0;
         while (pos < s.len) : (pos += 1) {
@@ -213,7 +213,7 @@ fn buildAutomaton() [256][16]Entry {
             const target = e_next[t][nibi];
             if (target == NONE) continue;
             if (final_ids[target] == 0xFFFF) {
-                if (n_out >= fail_state) {
+                if (n_out >= failState) {
                     @compileError("Huffman DFA exceeds 254 states");
                 }
                 final_ids[target] = @intCast(n_out);
@@ -235,7 +235,7 @@ fn buildAutomaton() [256][16]Entry {
 const decode_table = buildAutomaton();
 
 /// Number of reachable DFA states (diagnostics).
-pub const dfa_state_count: usize = blk: {
+pub const dfaStateCount: usize = blk: {
     @setEvalBranchQuota(1_000_000);
     var seen = [_]bool{false} ** 256;
     var queue: [512]u16 = .{0} ** 512;
@@ -249,7 +249,7 @@ pub const dfa_state_count: usize = blk: {
         seen[s] = true;
         count += 1;
         for (decode_table[s]) |e| {
-            if (e.next != fail_state and !seen[e.next] and qt < queue.len) {
+            if (e.next != failState and !seen[e.next] and qt < queue.len) {
                 queue[qt] = e.next;
                 qt += 1;
             }
@@ -264,25 +264,25 @@ pub const Decoder = struct {
     /// Whether the automaton is parked on an accepting position.
     accepted: bool = true,
     /// Any symbol decoded (rejects pure-EOS/empty inputs at finish()).
-    emitted_any: bool = false,
+    emittedAny: bool = false,
 
     pub fn init() Decoder {
         return .{};
     }
 
-    /// Feeds compressed bytes, appending decoded symbols to out[*out_pos..].
-    pub fn feed(self: *Decoder, out: []u8, out_pos: *usize, data: []const u8) Error!void {
+    /// Feeds compressed bytes, appending decoded symbols to out[*outPos..].
+    pub fn feed(self: *Decoder, out: []u8, outPos: *usize, data: []const u8) Error!void {
         for (data) |byte| {
             inline for ([_]u3{ 4, 0 }) |shift| {
                 const nib: u4 = @truncate(byte >> shift);
                 const e = decode_table[self.state][nib];
-                if (e.next == fail_state) return Error.InvalidHuffmanCode;
+                if (e.next == failState) return Error.InvalidHuffmanCode;
                 self.accepted = e.flags & FLAG_ACCEPTED != 0;
                 if (e.flags & FLAG_SYM != 0) {
-                    if (out_pos.* >= out.len) return Error.BufferTooSmall;
-                    out[out_pos.*] = e.sym;
-                    out_pos.* += 1;
-                    self.emitted_any = true;
+                    if (outPos.* >= out.len) return Error.BufferTooSmall;
+                    out[outPos.*] = e.sym;
+                    outPos.* += 1;
+                    self.emittedAny = true;
                 }
                 self.state = e.next;
             }
@@ -291,7 +291,7 @@ pub const Decoder = struct {
 
     /// Validates stream termination. Empty input is valid per RFC 7541.
     pub fn finish(self: *const Decoder) Error!void {
-        if (self.emitted_any and !self.accepted) return Error.InvalidHuffmanCode;
+        if (self.emittedAny and !self.accepted) return Error.InvalidHuffmanCode;
     }
 };
 
@@ -307,16 +307,16 @@ pub fn decode(out: []u8, src: []const u8) Error!usize {
 // Tests
 
 test "table sanity" {
-    try std.testing.expectEqual(@as(u8, 5), sym_table['a'].len);
-    try std.testing.expectEqual(@as(u32, 0b00011 << 27), sym_table['a'].code);
-    try std.testing.expectEqual(@as(u8, 5), sym_table['0'].len);
+    try std.testing.expectEqual(@as(u8, 5), symTable['a'].len);
+    try std.testing.expectEqual(@as(u32, 0b00011 << 27), symTable['a'].code);
+    try std.testing.expectEqual(@as(u8, 5), symTable['0'].len);
     var max_len: u8 = 0;
-    for (sym_table) |s| max_len = @max(max_len, s.len);
+    for (symTable) |s| max_len = @max(max_len, s.len);
     try std.testing.expectEqual(@as(u8, 30), max_len);
 }
 
 test "dfa fits in u8 state space" {
-    try std.testing.expect(dfa_state_count <= 254);
+    try std.testing.expect(dfaStateCount <= 254);
 }
 
 test "encode single 'a' pads with EOS MSBs" {

@@ -17,24 +17,24 @@ pub const Error = error{
 
 /// Maximum bytes a decoded integer may consume (DoS bound; matches the
 /// 62-bit QUIC-style ceiling used by nghttp2/nghttp3).
-pub const max_decode_bytes: usize = 10;
+pub const maxDecodeBytes: usize = 10;
 
-/// Encodes `value` into `buf` using the low `prefix_bits` of buf[0].
-/// `first_byte_high` bits are OR-ed into the high positions of buf[0]
+/// Encodes `value` into `buf` using the low `prefixBits` of buf[0].
+/// `firstByteHigh` bits are OR-ed into the high positions of buf[0]
 /// (opcode bits); callers pass 0 when none apply. Returns bytes written.
-pub fn encode(buf: []u8, prefix_bits: u3, first_byte_high: u8, value: u64) Error!usize {
-    std.debug.assert(prefix_bits >= 1 and prefix_bits <= 7);
+pub fn encode(buf: []u8, prefixBits: u3, firstByteHigh: u8, value: u64) Error!usize {
+    std.debug.assert(prefixBits >= 1 and prefixBits <= 7);
     if (buf.len < 1) return Error.BufferTooSmall;
 
-    const max_prefix: u64 = (@as(u64, 1) << prefix_bits) - 1;
-    const high_mask: u8 = @intCast((@as(u16, 0xFF) << prefix_bits) & 0xFF);
+    const max_prefix: u64 = (@as(u64, 1) << prefixBits) - 1;
+    const high_mask: u8 = @intCast((@as(u16, 0xFF) << prefixBits) & 0xFF);
 
     if (value < max_prefix) {
-        buf[0] = (first_byte_high & high_mask) | @as(u8, @intCast(value));
+        buf[0] = (firstByteHigh & high_mask) | @as(u8, @intCast(value));
         return 1;
     }
 
-    buf[0] = (first_byte_high & high_mask) | @as(u8, @intCast(max_prefix));
+    buf[0] = (firstByteHigh & high_mask) | @as(u8, @intCast(max_prefix));
     var remaining = value - max_prefix;
     var pos: usize = 1;
     while (remaining >= 128) {
@@ -48,12 +48,12 @@ pub fn encode(buf: []u8, prefix_bits: u3, first_byte_high: u8, value: u64) Error
     return pos + 1;
 }
 
-/// Decodes an integer whose prefix occupies `prefix_bits` of data[offset.*].
+/// Decodes an integer whose prefix occupies `prefixBits` of data[offset.*].
 /// The high bits of the first byte are ignored (caller dispatches opcodes
 /// on them beforehand). `offset` advances past the integer.
-pub fn decode(data: []const u8, offset: *usize, prefix_bits: u3) Error!u64 {
+pub fn decode(data: []const u8, offset: *usize, prefixBits: u3) Error!u64 {
     if (offset.* >= data.len) return Error.Truncated;
-    const max_prefix: u64 = (@as(u64, 1) << prefix_bits) - 1;
+    const max_prefix: u64 = (@as(u64, 1) << prefixBits) - 1;
 
     var value: u64 = data[offset.*] & @as(u8, @intCast(max_prefix));
     offset.* += 1;
@@ -63,7 +63,7 @@ pub fn decode(data: []const u8, offset: *usize, prefix_bits: u3) Error!u64 {
     var used: usize = 1;
     while (true) {
         if (offset.* >= data.len) return Error.Truncated;
-        if (used > max_decode_bytes) return Error.IntegerOverflow;
+        if (used > maxDecodeBytes) return Error.IntegerOverflow;
         const byte = data[offset.*];
         offset.* += 1;
         used += 1;
@@ -77,8 +77,8 @@ pub fn decode(data: []const u8, offset: *usize, prefix_bits: u3) Error!u64 {
 }
 
 /// Number of bytes `encode` will produce (for sizing buffers).
-pub fn encodedLen(prefix_bits: u3, value: u64) usize {
-    const max_prefix: u64 = (@as(u64, 1) << prefix_bits) - 1;
+pub fn encodedLen(prefixBits: u3, value: u64) usize {
+    const max_prefix: u64 = (@as(u64, 1) << prefixBits) - 1;
     if (value < max_prefix) return 1;
     var remaining = value - max_prefix;
     var digits: usize = 1;

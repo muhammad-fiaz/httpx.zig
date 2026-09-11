@@ -23,7 +23,8 @@ Content-Type: image/png
 
 ## Building Multipart Bodies
 
-Use `MultipartBuilder` to construct the body incrementally:
+Use `httpx.multipart.encoder.Multipart` to construct the body incrementally
+(boundary auto-generated):
 
 ```zig
 const std = @import("std");
@@ -34,39 +35,43 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var builder = httpx.MultipartBuilder.init(allocator, "boundary-abc123");
-    defer builder.deinit();
+    var form = httpx.multipart.encoder.Multipart.init(allocator);
+    defer form.deinit();
 
     // Add text fields
-    try builder.addField("username", "alice");
-    try builder.addField("email", "alice@example.com");
+    try form.field("username", "alice");
+    try form.field("email", "alice@example.com");
 
     // Add a file upload
     const png_data = @embedFile("avatar.png");
-    try builder.addFile("avatar", "photo.png", "image/png", png_data);
+    try form.file("avatar", png_data, .{
+        .filename = "photo.png",
+        .contentType = "image/png",
+    });
 
     // Finalize — caller owns the result
-    const body = try builder.build();
+    const body = try form.encodeAlloc();
     defer allocator.free(body);
 
     // Get the Content-Type header value with boundary
-    const content_type = try builder.contentType();
-    defer allocator.free(content_type);
-    // content_type = "multipart/form-data; boundary=boundary-abc123"
+    var ctBuf: [128]u8 = undefined;
+    const contentType = form.contentType(&ctBuf);
+    // contentType = "multipart/form-data; boundary=..."
 
     std.debug.print("body size: {d} bytes\n", .{body.len});
 }
 ```
 
-### `MultipartBuilder` API
+### `Multipart` API
 
 | Method | Description |
 |--------|-------------|
-| `init(allocator, boundary)` | Create builder with a boundary string |
-| `addField(name, value)` | Append a text form field |
-| `addFile(name, filename, content_type, data)` | Append a file upload part |
-| `build()` | Finalize and return the complete body (caller owns) |
-| `contentType()` | Return the `Content-Type` header value (caller owns) |
+| `init(allocator)` / `initWithSubtype(allocator, subtype)` | Create builder (boundary auto-generated; override with `setBoundary`) |
+| `field(name, value)` | Append a text form field |
+| `file(name, data, .{ .filename, .contentType, ... })` | Append a file upload part |
+| `encodeAlloc()` | Finalize and return the complete body (caller owns) |
+| `encode(writer)` | Stream-encode into any writer |
+| `contentType(&buf)` | Return the `Content-Type` header value (borrowed from `buf`) |
 | `deinit()` | Release builder resources |
 
 The boundary must not contain `--` and should not exceed 70 characters (RFC 2046).
@@ -75,11 +80,12 @@ The boundary must not contain `--` and should not exceed 70 characters (RFC 2046
 
 ### Extracting the Boundary
 
-Use `extractMultipartBoundary` (also exported as `httpx.extractMultipartBoundary`) to get the boundary string from a `Content-Type` header:
+Use `httpx.multipart.parser.extractBoundary` to get the boundary string from
+a `Content-Type` header:
 
 ```zig
-const content_type = "multipart/form-data; boundary=----WebKitFormBoundary";
-const boundary = httpx.extractMultipartBoundary(content_type) orelse {
+const contentType = "multipart/form-data; boundary=----WebKitFormBoundary";
+const boundary = httpx.multipart.parser.extractBoundary(contentType) orelse {
     return error.MissingBoundary;
 };
 // boundary = "----WebKitFormBoundary"
@@ -90,14 +96,14 @@ Returns `null` if no boundary parameter is present. Handles both quoted (`bounda
 ### Parsing Parts
 
 ```zig
-const boundary = httpx.extractMultipartBoundary(content_type).?;
-var result = try httpx.parseMultipart(allocator, body, boundary);
-defer result.deinit();
+const boundary = httpx.multipart.parser.extractBoundary(contentType).?;
+const fields = try httpx.multipart.parser.parseMultipart(allocator, body, boundary, .{});
+defer httpx.multipart.parser.freeFieldsAlloc(allocator, fields);
 
-for (result.parts) |part| {
+for (fields) |part| {
     if (part.filename) |filename| {
         std.debug.print("file: {s} ({d} bytes, type={s})\n", .{
-            filename, part.data.len, part.content_type,
+            filename, part.data.len, part.contentType,
         });
     } else {
         std.debug.print("field: {s} = {s}\n", .{ part.name, part.data });
@@ -105,57 +111,53 @@ for (result.parts) |part| {
 }
 ```
 
-### `Part` fields
+Use `Limits` presets (`.strict` / `.relaxed`, or `Parser.initWithLimits`) to
+bound part counts, header sizes, and body sizes.
+
+### `Field` fields
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | `[]const u8` | Form field name from `Content-Disposition` |
 | `filename` | `?[]const u8` | Original filename for file uploads, or null |
-| `content_type` | `[]const u8` | Part content type (defaults to `"text/plain"`) |
+| `contentType` | `[]const u8` | Part content type (defaults to `""`) |
 | `data` | `[]const u8` | Raw bytes of the part body |
-| `headers` | `[]const [2][]const u8` | All raw header pairs for this part |
-
-`ParsedParts` has a `deinit()` method that frees all allocated memory. The `data` slice points into the internal raw buffer, so it is valid until `deinit()` is called.
+| `headers` | `[]const Header` | All raw header pairs (`{ .name, .value }`) |
 
 ## Integration with HTTP Requests
 
 When sending a multipart request with the httpx client:
 
 ```zig
-var builder = httpx.MultipartBuilder.init(allocator, "myBoundary");
-defer builder.deinit();
-try builder.addField("name", "alice");
+var form = httpx.multipart.encoder.Multipart.init(allocator);
+defer form.deinit();
+try form.field("name", "alice");
 
-const body = try builder.build();
+const body = try form.encodeAlloc();
 defer allocator.free(body);
-const ct = try builder.contentType();
-defer allocator.free(ct);
+var ctBuf: [128]u8 = undefined;
+const ct = form.contentType(&ctBuf);
 
 var resp = try client.post("https://example.com/upload", .{ .body = body,
-    .headers = &.{.{ "Content-Type", ct }},
+    .headers = &.{.{ .name = "Content-Type", .value = ct }},
 });
 defer resp.deinit();
 ```
 
-### Direct Multipart Fields & Files
+### Direct Multipart Upload
 
-Instead of manually building and cleaning up the body, you can pass fields and files directly using `RequestOptions`:
+Instead of manually building the body, post a single part inline with the
+`.multipart` request option:
 
 ```zig
-const fields = [_]httpx.MultipartField{
-    .{ .name = "name", .value = "alice" },
-};
-const files = [_]httpx.MultipartFile{
-    .{ .name = "avatar", .filename = "photo.png", .data = png_bytes },
-};
-
-var resp = try client.post("https://example.com/upload", .{ .multipart_fields = &fields,
-    .multipart_files = &files,
-});
+var resp = try client.post("https://example.com/upload", .{ .multipart = .{
+    .name = "avatar",
+    .filename = "photo.png",
+    .contentType = "image/png",
+    .data = png_bytes,
+} });
 defer resp.deinit();
 ```
-
-If the file's `content_type` is omitted, it will automatically resolve the extension using built-in mapping defaults out-of-the-box.
 
 ## Full Server-Side Example
 
@@ -164,17 +166,17 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn uploadHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    const ct = ctx.request.headers.get("Content-Type") orelse
-        return ctx.status(400).text("Missing Content-Type");
+    const ct = ctx.header("Content-Type") orelse
+        return ctx.textStatus(400, "Missing Content-Type");
 
-    const boundary = httpx.extractMultipartBoundary(ct) orelse
-        return ctx.status(400).text("Missing boundary");
+    const parser = httpx.multipart.parser;
+    const boundary = parser.extractBoundary(ct) orelse
+        return ctx.textStatus(400, "Missing boundary");
 
-    const body = ctx.request.body orelse "";
-    var result = try httpx.parseMultipart(ctx.allocator, body, boundary);
-    defer result.deinit();
+    const fields = try parser.parseMultipart(ctx.allocator, ctx.body, boundary, .{});
+    defer parser.freeFieldsAlloc(ctx.allocator, fields);
 
-    for (result.parts) |part| {
+    for (fields) |part| {
         if (part.filename) |name| {
             std.debug.print("uploaded: {s} ({d} bytes)\n", .{ name, part.data.len });
         } else {
@@ -182,7 +184,7 @@ fn uploadHandler(ctx: *httpx.Context) anyerror!httpx.Response {
         }
     }
 
-    return ctx.json(.{ .ok = true, .parts = result.parts.len });
+    return ctx.renderJson(.{ .ok = true, .parts = fields.len });
 }
 
 pub fn main() !void {
@@ -210,21 +212,23 @@ pub fn main() !void {
 at 64 KB automatically, and increases the writability timeout from 5 s to 30 s.
 No application-level changes are required for most users.
 
-For large file data passed as a single slice, you can also use
-`MultipartBuilder.addFileChunked`, which writes `data` internally in
-`MAX_RECOMMENDED_CHUNK` (64 KB) blocks:
+For large file data, stream-encode directly into a buffer or writer instead
+of holding two copies: `encode(writer)` writes parts incrementally, and the
+socket layer caps each `send()` at 64 KB — safe on all platforms:
 
 ```zig
 const large_bytes: []const u8 = ...; // e.g. @embedFile("big.bin")
 
-var builder = httpx.MultipartBuilder.init(allocator, "myBound");
-defer builder.deinit();
+var form = httpx.multipart.encoder.Multipart.init(allocator);
+defer form.deinit();
 
-try builder.addField("description", "large upload");
-// Writes internally in ≤64 KB slices — safe on all platforms.
-try builder.addFileChunked("file", "big.bin", "application/octet-stream", large_bytes);
+try form.field("description", "large upload");
+try form.file("file", large_bytes, .{
+    .filename = "big.bin",
+    .contentType = "application/octet-stream",
+});
 
-const body = try builder.build();
+const body = try form.encodeAlloc();
 defer allocator.free(body);
 ```
 
@@ -235,7 +239,7 @@ file yourself at the call site and send each slice as a separate POST request.
 Use `httpx.MultipartMaxChunk` (64 KB) as the slice size:
 
 ```zig
-const chunk_size = httpx.MultipartMaxChunk; // 65 536 bytes
+const chunk_size = 64 * 1024; // 65_536 bytes per request
 
 var offset: usize = 0;
 var part: usize = 1;
@@ -246,15 +250,17 @@ while (offset < file_bytes.len) {
     const part_str = try std.fmt.allocPrint(allocator, "{d}", .{part});
     defer allocator.free(part_str);
 
-    const fields = [_]httpx.MultipartField{
-        .{ .name = "part", .value = part_str },
-    };
-    const files = [_]httpx.MultipartFile{
-        .{ .name = "data", .filename = "chunk.bin", .data = slice },
-    };
+    var form = httpx.multipart.encoder.Multipart.init(allocator);
+    defer form.deinit();
+    try form.field("part", part_str);
+    try form.file("data", slice, .{ .filename = "chunk.bin" });
+    const req_body = try form.encodeAlloc();
+    defer allocator.free(req_body);
+    var ctBuf: [128]u8 = undefined;
 
-    var resp = try client.post(upload_url, .{ .multipart_fields = &fields,
-        .multipart_files = &files,
+    var resp = try client.post(upload_url, .{
+        .body = req_body,
+        .headers = &.{.{ .name = "Content-Type", .value = form.contentType(&ctBuf) }},
     });
     defer resp.deinit();
 

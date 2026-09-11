@@ -24,8 +24,8 @@ const PseudoKind = enum {
 
 const Pseudo = struct {
     kind: PseudoKind = .none,
-    nth_n: i32 = 0,
-    nth_of: i32 = 0,
+    nthN: i32 = 0,
+    nthOf: i32 = 0,
 };
 
 const Simple = struct {
@@ -34,7 +34,7 @@ const Simple = struct {
     classes: []const []const u8 = &.{},
     attrs: []const AttrSel = &.{},
     pseudo: Pseudo = .{},
-    not_sel: ?*const Compound = null,
+    notSel: ?*const Compound = null,
 };
 
 const Compound = struct {
@@ -73,11 +73,11 @@ pub fn parseSelector(allocator: Allocator, sel: []const u8) SelectorError!Parsed
 pub fn selectAll(
     allocator: Allocator,
     tree: *const Tree,
-    root_idx: u32,
+    rootIdx: u32,
     sel: *const ParsedSelector,
 ) ![]const u32 {
     var out: std.ArrayList(u32) = .empty;
-    var w = try tree.walk(allocator, root_idx);
+    var w = try tree.walk(allocator, rootIdx);
     defer w.deinit();
     while (w.next()) |idx| {
         if (matchesSelector(tree, idx, sel)) {
@@ -90,10 +90,10 @@ pub fn selectAll(
 pub fn selectFirst(
     allocator: Allocator,
     tree: *const Tree,
-    root_idx: u32,
+    rootIdx: u32,
     sel: *const ParsedSelector,
 ) !?u32 {
-    var w = try tree.walk(allocator, root_idx);
+    var w = try tree.walk(allocator, rootIdx);
     defer w.deinit();
     while (w.next()) |idx| {
         if (matchesSelector(tree, idx, sel)) return idx;
@@ -101,20 +101,20 @@ pub fn selectFirst(
     return null;
 }
 
-pub fn matchesSelector(tree: *const Tree, node_idx: u32, sel: *const ParsedSelector) bool {
+pub fn matchesSelector(tree: *const Tree, nodeIdx: u32, sel: *const ParsedSelector) bool {
     for (sel.sequences) |seq| {
-        if (matchesSequence(tree, node_idx, &seq)) return true;
+        if (matchesSequence(tree, nodeIdx, &seq)) return true;
     }
     return false;
 }
 
-fn matchesSequence(tree: *const Tree, node_idx: u32, seq: *const Sequence) bool {
+fn matchesSequence(tree: *const Tree, nodeIdx: u32, seq: *const Sequence) bool {
     if (seq.compounds.len == 0) return false;
     const last_cmp = &seq.compounds[seq.compounds.len - 1];
-    if (!matchesCompound(tree, node_idx, last_cmp)) return false;
+    if (!matchesCompound(tree, nodeIdx, last_cmp)) return false;
     if (seq.compounds.len == 1) return true;
 
-    var current = node_idx;
+    var current = nodeIdx;
     var ci: usize = seq.compounds.len - 1;
     while (ci > 0) {
         const comb = seq.combinators[ci - 1];
@@ -165,15 +165,15 @@ fn matchesSequence(tree: *const Tree, node_idx: u32, seq: *const Sequence) bool 
     return true;
 }
 
-fn matchesCompound(tree: *const Tree, node_idx: u32, cmp: *const Compound) bool {
+fn matchesCompound(tree: *const Tree, nodeIdx: u32, cmp: *const Compound) bool {
     for (cmp.parts) |*simple| {
-        if (!matchesSimple(tree, node_idx, simple)) return false;
+        if (!matchesSimple(tree, nodeIdx, simple)) return false;
     }
     return true;
 }
 
-fn matchesSimple(tree: *const Tree, node_idx: u32, s: *const Simple) bool {
-    const node = tree.get(node_idx);
+fn matchesSimple(tree: *const Tree, nodeIdx: u32, s: *const Simple) bool {
+    const node = tree.get(nodeIdx);
     if (node.kind != .element) return false;
 
     if (s.tag) |t| {
@@ -189,9 +189,9 @@ fn matchesSimple(tree: *const Tree, node_idx: u32, s: *const Simple) bool {
     for (s.attrs) |asel| {
         if (!matchesAttr(node, &asel)) return false;
     }
-    if (!matchesPseudo(tree, node_idx, &s.pseudo)) return false;
-    if (s.not_sel) |not_cmp| {
-        if (matchesCompound(tree, node_idx, not_cmp)) return false;
+    if (!matchesPseudo(tree, nodeIdx, &s.pseudo)) return false;
+    if (s.notSel) |not_cmp| {
+        if (matchesCompound(tree, nodeIdx, not_cmp)) return false;
     }
     return true;
 }
@@ -213,37 +213,37 @@ fn matchesAttr(node: *const dom.Node, asel: *const AttrSel) bool {
     }
 }
 
-fn matchesPseudo(tree: *const Tree, node_idx: u32, p: *const Pseudo) bool {
+fn matchesPseudo(tree: *const Tree, nodeIdx: u32, p: *const Pseudo) bool {
     switch (p.kind) {
         .none => return true,
         .firstChild => {
-            const par = tree.get(node_idx).parent;
+            const par = tree.get(nodeIdx).parent;
             if (par == NO_NODE) return false;
             var s = tree.get(par).firstChild;
             while (s != NO_NODE and tree.get(s).kind == .text) s = tree.get(s).nextSibling;
-            return s == node_idx;
+            return s == nodeIdx;
         },
         .lastChild => {
-            const par = tree.get(node_idx).parent;
+            const par = tree.get(nodeIdx).parent;
             if (par == NO_NODE) return false;
             var s = tree.get(par).lastChild;
             while (s != NO_NODE and tree.get(s).kind == .text) s = tree.get(s).prevSibling;
-            return s == node_idx;
+            return s == nodeIdx;
         },
         .nth_child => {
-            const par = tree.get(node_idx).parent;
+            const par = tree.get(nodeIdx).parent;
             if (par == NO_NODE) return false;
             var pos: i32 = 0;
             var s = tree.get(par).firstChild;
             while (s != NO_NODE) {
                 if (tree.get(s).kind == .element) {
                     pos += 1;
-                    if (s == node_idx) break;
+                    if (s == nodeIdx) break;
                 }
                 s = tree.get(s).nextSibling;
             }
-            if (p.nth_n == 0) return pos == p.nth_of;
-            return p.nth_n > 0 and (pos - p.nth_of) >= 0 and @mod((pos - p.nth_of), p.nth_n) == 0;
+            if (p.nthN == 0) return pos == p.nthOf;
+            return p.nthN > 0 and (pos - p.nthOf) >= 0 and @mod((pos - p.nthOf), p.nthN) == 0;
         },
         .not => return true,
     }
@@ -431,10 +431,10 @@ fn parsePseudo(al: Allocator, src: []const u8, pos: *usize, simple: *Simple) Sel
             const nstr = std.mem.trim(u8, src[nstart..pos.*], " ");
             if (pos.* < src.len) pos.* += 1;
             if (std.fmt.parseInt(i32, nstr, 10)) |n| {
-                return .{ .kind = .nth_child, .nth_n = 0, .nth_of = n };
+                return .{ .kind = .nth_child, .nthN = 0, .nthOf = n };
             } else |_| {}
         }
-        return .{ .kind = .nth_child, .nth_n = 1, .nth_of = 0 };
+        return .{ .kind = .nth_child, .nthN = 1, .nthOf = 0 };
     }
     if (std.ascii.eqlIgnoreCase(name, "not")) {
         if (pos.* < src.len and src[pos.*] == '(') {
@@ -449,7 +449,7 @@ fn parsePseudo(al: Allocator, src: []const u8, pos: *usize, simple: *Simple) Sel
             const not_cmp = try al.create(Compound);
             var inner_pos: usize = 0;
             not_cmp.* = try parseCompound(al, inner, &inner_pos);
-            simple.not_sel = not_cmp;
+            simple.notSel = not_cmp;
         }
         return .{ .kind = .not };
     }
@@ -458,6 +458,43 @@ fn parsePseudo(al: Allocator, src: []const u8, pos: *usize, simple: *Simple) Sel
 
 fn isSelectorIdent(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '-' or c == '_';
+}
+
+test "selectors query tree-sitter-derived dom" {
+    const html = @import("html.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const al = arena.allocator();
+    var tree = try html.parse(al,
+        \\<div id="main" class="wrap"><p class="intro">Hi</p><p>Bye <a href="/x" class="link">X</a></p><ul><li>1</li><li>2</li></ul></div>
+    , .{});
+    var sel_tag = try parseSelector(al, "p");
+    defer sel_tag.deinit();
+    try std.testing.expectEqual(@as(usize, 2), (try selectAll(al, &tree, 0, &sel_tag)).len);
+    var sel_id = try parseSelector(al, "#main");
+    defer sel_id.deinit();
+    try std.testing.expect((try selectFirst(al, &tree, 0, &sel_id)) != null);
+    var sel_class = try parseSelector(al, ".intro");
+    defer sel_class.deinit();
+    try std.testing.expect((try selectFirst(al, &tree, 0, &sel_class)) != null);
+    var sel_attr = try parseSelector(al, "a[href=/x]");
+    defer sel_attr.deinit();
+    try std.testing.expect((try selectFirst(al, &tree, 0, &sel_attr)) != null);
+    var sel_desc = try parseSelector(al, "div a.link");
+    defer sel_desc.deinit();
+    try std.testing.expect((try selectFirst(al, &tree, 0, &sel_desc)) != null);
+    var sel_child = try parseSelector(al, "ul > li");
+    defer sel_child.deinit();
+    try std.testing.expectEqual(@as(usize, 2), (try selectAll(al, &tree, 0, &sel_child)).len);
+    var sel_group = try parseSelector(al, "h1, a.link");
+    defer sel_group.deinit();
+    try std.testing.expect((try selectFirst(al, &tree, 0, &sel_group)) != null);
+    var sel_first = try parseSelector(al, "li:first-child");
+    defer sel_first.deinit();
+    try std.testing.expect((try selectFirst(al, &tree, 0, &sel_first)) != null);
+    var sel_not = try parseSelector(al, "p:not(.intro)");
+    defer sel_not.deinit();
+    try std.testing.expect((try selectFirst(al, &tree, 0, &sel_not)) != null);
 }
 
 fn isSelectorStop(c: u8) bool {

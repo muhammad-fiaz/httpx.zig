@@ -112,17 +112,17 @@ pub const StreamEvent = union(enum) {
 pub const StreamParser = struct {
     allocator: Allocator,
     boundary: []const u8,
-    delim_buf: [76]u8 = undefined,
-    delim_len: usize = 0,
+    delimBuf: [76]u8 = undefined,
+    delimLen: usize = 0,
     limits: Limits,
     buffer: std.ArrayList(u8),
     state: State = .preamble,
-    part_count: usize = 0,
-    current_part_size: usize = 0,
-    total_size: usize = 0,
-    header_name_buf: [256]u8 = undefined,
-    header_filename_buf: [256]u8 = undefined,
-    header_ctype_buf: [128]u8 = undefined,
+    partCount: usize = 0,
+    currentPartSize: usize = 0,
+    totalSize: usize = 0,
+    headerNameBuf: [256]u8 = undefined,
+    headerFilenameBuf: [256]u8 = undefined,
+    headerCtypeBuf: [128]u8 = undefined,
 
     const State = enum {
         preamble,
@@ -142,8 +142,8 @@ pub const StreamParser = struct {
             .limits = limits,
             .buffer = .empty,
         };
-        const d = std.fmt.bufPrint(&sp.delim_buf, "--{s}", .{boundary}) catch return ParseError.Malformed;
-        sp.delim_len = d.len;
+        const d = std.fmt.bufPrint(&sp.delimBuf, "--{s}", .{boundary}) catch return ParseError.Malformed;
+        sp.delimLen = d.len;
         return sp;
     }
 
@@ -152,7 +152,7 @@ pub const StreamParser = struct {
     }
 
     pub fn getDelim(self: *const StreamParser) []const u8 {
-        return self.delim_buf[0..self.delim_len];
+        return self.delimBuf[0..self.delimLen];
     }
 
     fn dropFront(self: *StreamParser, count: usize) void {
@@ -195,53 +195,53 @@ pub const StreamParser = struct {
                     return ParseError.Malformed;
                 },
                 .headers => {
-                    var headers_end: ?usize = null;
+                    var headersEnd: ?usize = null;
                     if (self.buffer.items.len >= 4) {
                         var i: usize = 0;
                         while (i + 4 <= self.buffer.items.len) : (i += 1) {
                             if (self.buffer.items[i] == '\r' and self.buffer.items[i + 1] == '\n' and
                                 self.buffer.items[i + 2] == '\r' and self.buffer.items[i + 3] == '\n')
                             {
-                                headers_end = i;
+                                headersEnd = i;
                                 break;
                             }
                         }
                     }
-                    if (headers_end == null) {
+                    if (headersEnd == null) {
                         if (self.limits.maxHeadersSize > 0 and self.buffer.items.len > self.limits.maxHeadersSize)
                             return ParseError.HeadersTooLarge;
                         return null;
                     }
 
-                    const raw_headers = self.buffer.items[0..headers_end.?];
+                    const raw_headers = self.buffer.items[0..headersEnd.?];
                     const name = dispositionField(raw_headers, "name") orelse return ParseError.Malformed;
                     const filename = dispositionField(raw_headers, "filename");
                     const ctype = headerValue(raw_headers, "Content-Type");
 
-                    const name_len = @min(name.len, self.header_name_buf.len);
-                    @memcpy(self.header_name_buf[0..name_len], name[0..name_len]);
-                    const stable_name = self.header_name_buf[0..name_len];
+                    const nameLen = @min(name.len, self.headerNameBuf.len);
+                    @memcpy(self.headerNameBuf[0..nameLen], name[0..nameLen]);
+                    const stable_name = self.headerNameBuf[0..nameLen];
 
                     var stable_filename: ?[]const u8 = null;
                     if (filename) |fn_val| {
-                        const fn_len = @min(fn_val.len, self.header_filename_buf.len);
-                        @memcpy(self.header_filename_buf[0..fn_len], fn_val[0..fn_len]);
-                        stable_filename = self.header_filename_buf[0..fn_len];
+                        const fnLen = @min(fn_val.len, self.headerFilenameBuf.len);
+                        @memcpy(self.headerFilenameBuf[0..fnLen], fn_val[0..fnLen]);
+                        stable_filename = self.headerFilenameBuf[0..fnLen];
                     }
 
                     var stable_ctype: []const u8 = "";
                     if (ctype) |ct_val| {
-                        const ct_len = @min(ct_val.len, self.header_ctype_buf.len);
-                        @memcpy(self.header_ctype_buf[0..ct_len], ct_val[0..ct_len]);
-                        stable_ctype = self.header_ctype_buf[0..ct_len];
+                        const ctLen = @min(ct_val.len, self.headerCtypeBuf.len);
+                        @memcpy(self.headerCtypeBuf[0..ctLen], ct_val[0..ctLen]);
+                        stable_ctype = self.headerCtypeBuf[0..ctLen];
                     }
 
-                    self.part_count += 1;
-                    if (self.limits.maxParts > 0 and self.part_count > self.limits.maxParts)
+                    self.partCount += 1;
+                    if (self.limits.maxParts > 0 and self.partCount > self.limits.maxParts)
                         return ParseError.TooManyParts;
-                    self.current_part_size = 0;
+                    self.currentPartSize = 0;
 
-                    const drop_len = headers_end.? + 4;
+                    const drop_len = headersEnd.? + 4;
                     self.dropFront(drop_len);
                     self.state = .body;
 
@@ -260,11 +260,11 @@ pub const StreamParser = struct {
                     if (indexOf(self.buffer.items, body_delim)) |pos| {
                         if (pos > 0) {
                             const data = self.buffer.items[0..pos];
-                            self.current_part_size += data.len;
-                            self.total_size += data.len;
-                            if (self.limits.maxPartSize > 0 and self.current_part_size > self.limits.maxPartSize)
+                            self.currentPartSize += data.len;
+                            self.totalSize += data.len;
+                            if (self.limits.maxPartSize > 0 and self.currentPartSize > self.limits.maxPartSize)
                                 return ParseError.PartTooLarge;
-                            if (self.limits.maxTotalSize > 0 and self.total_size > self.limits.maxTotalSize)
+                            if (self.limits.maxTotalSize > 0 and self.totalSize > self.limits.maxTotalSize)
                                 return ParseError.BodyTooLarge;
 
                             const out = try self.allocator.dupe(u8, data);
@@ -290,17 +290,17 @@ pub const StreamParser = struct {
                     }
 
                     if (self.buffer.items.len > body_delim.len) {
-                        const emit_len = self.buffer.items.len - body_delim.len;
-                        const data = self.buffer.items[0..emit_len];
-                        self.current_part_size += data.len;
-                        self.total_size += data.len;
-                        if (self.limits.maxPartSize > 0 and self.current_part_size > self.limits.maxPartSize)
+                        const emitLen = self.buffer.items.len - body_delim.len;
+                        const data = self.buffer.items[0..emitLen];
+                        self.currentPartSize += data.len;
+                        self.totalSize += data.len;
+                        if (self.limits.maxPartSize > 0 and self.currentPartSize > self.limits.maxPartSize)
                             return ParseError.PartTooLarge;
-                        if (self.limits.maxTotalSize > 0 and self.total_size > self.limits.maxTotalSize)
+                        if (self.limits.maxTotalSize > 0 and self.totalSize > self.limits.maxTotalSize)
                             return ParseError.BodyTooLarge;
 
                         const out = try self.allocator.dupe(u8, data);
-                        self.dropFront(emit_len);
+                        self.dropFront(emitLen);
                         return StreamEvent{ .partData = out };
                     }
 
@@ -328,8 +328,8 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
     if (boundary.len == 0) return ParseError.InvalidBoundary;
     if (boundary.len > limits.maxBoundaryLen) return ParseError.BoundaryTooLong;
 
-    var delim_buf: [72 + 4]u8 = undefined;
-    const delim = std.fmt.bufPrint(&delim_buf, "--{s}", .{boundary}) catch return ParseError.Malformed;
+    var delimBuf: [72 + 4]u8 = undefined;
+    const delim = std.fmt.bufPrint(&delimBuf, "--{s}", .{boundary}) catch return ParseError.Malformed;
 
     const first_pos = indexOf(body, delim) orelse return ParseError.MissingBoundary;
 
@@ -342,11 +342,11 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
     }
 
     var cursor = first_pos + delim.len;
-    var part_count: usize = 0;
-    var total_size: usize = 0;
+    var partCount: usize = 0;
+    var totalSize: usize = 0;
 
     while (true) {
-        if (limits.maxParts > 0 and part_count >= limits.maxParts)
+        if (limits.maxParts > 0 and partCount >= limits.maxParts)
             return ParseError.TooManyParts;
 
         if (cursor + 2 <= body.len and body[cursor] == '-' and body[cursor + 1] == '-')
@@ -357,32 +357,32 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
         cursor += 2;
 
         const headers_start = cursor;
-        var headers_end: ?usize = null;
+        var headersEnd: ?usize = null;
         var total_headers: usize = 0;
 
         while (cursor + 4 <= body.len) {
             if (body[cursor] == '\r' and body[cursor + 1] == '\n' and
                 body[cursor + 2] == '\r' and body[cursor + 3] == '\n')
             {
-                headers_end = cursor;
+                headersEnd = cursor;
                 cursor += 4;
                 break;
             }
             if (body[cursor] == '\r' or body[cursor] == '\n') {
-                const line_end = std.mem.indexOfScalar(u8, body[cursor..], '\n') orelse return ParseError.Malformed;
-                const line_len = line_end + 1;
+                const lineEnd = std.mem.indexOfScalar(u8, body[cursor..], '\n') orelse return ParseError.Malformed;
+                const line_len = lineEnd + 1;
                 total_headers += line_len;
                 if (line_len > limits.maxHeaderLine) return ParseError.HeaderLineTooLong;
                 if (limits.maxHeadersSize > 0 and total_headers > limits.maxHeadersSize)
                     return ParseError.HeadersTooLarge;
-                cursor += line_end + 1;
+                cursor += lineEnd + 1;
             } else {
                 cursor += 1;
             }
         }
-        if (headers_end == null) return ParseError.Malformed;
+        if (headersEnd == null) return ParseError.Malformed;
 
-        const raw_headers = body[headers_start..headers_end.?];
+        const raw_headers = body[headers_start..headersEnd.?];
 
         const data_start = cursor;
         var search_from = data_start;
@@ -396,10 +396,10 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
         };
 
         const partData = body[data_start..next_delim_pos];
-        total_size += partData.len;
+        totalSize += partData.len;
         if (limits.maxPartSize > 0 and partData.len > limits.maxPartSize)
             return ParseError.PartTooLarge;
-        if (limits.maxTotalSize > 0 and total_size > limits.maxTotalSize)
+        if (limits.maxTotalSize > 0 and totalSize > limits.maxTotalSize)
             return ParseError.BodyTooLarge;
 
         const name = dispositionField(raw_headers, "name") orelse return ParseError.Malformed;
@@ -424,7 +424,7 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
             .data = partData,
             .headers = hdrs,
         });
-        part_count += 1;
+        partCount += 1;
 
         cursor = next_delim_pos + 2 + delim.len;
     }

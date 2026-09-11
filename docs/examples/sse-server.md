@@ -48,7 +48,7 @@ pub fn main() !void {
 }
 
 fn sseHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 200, .body = "<h1>SSE endpoint</h1><p>EventSource clients can subscribe here.</p>", .content_type = "text/html" };
+    return .{ .status = 200, .body = "<h1>SSE endpoint</h1><p>EventSource clients can subscribe here.</p>", .contentType = "text/html" };
 }
 ```
 

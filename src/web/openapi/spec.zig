@@ -17,14 +17,15 @@ const Response = router_mod.Response;
 const Router = router_mod.Router;
 const Method = @import("../../common/method.zig").Method;
 const meta_mod = @import("../router/metadata.zig");
+const pattern_mod = @import("../router/pattern.zig");
 pub const Info = @import("../../common/version.zig").Info;
 
 const PathGroup = struct {
-    openapi_path: []u8, // owned
+    openapiPath: []u8, // owned
     methods: std.ArrayList(Method) = .empty,
     /// Indexes into router.routes rendering to this OpenAPI path. Distinct
     /// router shapes (e.g. /f/{id} and /f/*rest) may share one group.
-    entry_idx: std.ArrayList(usize) = .empty,
+    entryIdx: std.ArrayList(usize) = .empty,
 };
 
 pub const GenerateError = Allocator.Error || std.Io.Writer.Error || error{DuplicateOperationId};
@@ -36,9 +37,9 @@ pub fn generate(router: *const Router, info: Info) GenerateError![]u8 {
     var groups: std.ArrayList(PathGroup) = .empty;
     defer {
         for (groups.items) |*g| {
-            allocator.free(g.openapi_path);
+            allocator.free(g.openapiPath);
             g.methods.deinit(allocator);
-            g.entry_idx.deinit(allocator);
+            g.entryIdx.deinit(allocator);
         }
         groups.deinit(allocator);
     }
@@ -55,21 +56,21 @@ pub fn generate(router: *const Router, info: Info) GenerateError![]u8 {
         defer allocator.free(path_str);
 
         const found = for (groups.items) |*g| {
-            if (std.mem.eql(u8, g.openapi_path, path_str)) break g;
+            if (std.mem.eql(u8, g.openapiPath, path_str)) break g;
         } else null;
 
         if (found) |g| {
             try g.methods.append(allocator, entry.method);
-            try g.entry_idx.append(allocator, ei);
+            try g.entryIdx.append(allocator, ei);
         } else {
             var methods: std.ArrayList(Method) = .empty;
             try methods.append(allocator, entry.method);
             var idx: std.ArrayList(usize) = .empty;
             try idx.append(allocator, ei);
             try groups.append(allocator, .{
-                .openapi_path = try allocator.dupe(u8, path_str),
+                .openapiPath = try allocator.dupe(u8, path_str),
                 .methods = methods,
-                .entry_idx = idx,
+                .entryIdx = idx,
             });
         }
     }
@@ -104,7 +105,7 @@ pub fn generate(router: *const Router, info: Info) GenerateError![]u8 {
     }
 
     for (groups.items) |*g| {
-        try j.objectField(g.openapi_path);
+        try j.objectField(g.openapiPath);
         try j.beginObject();
 
         // Deterministic ordering within a path; at most one operation per
@@ -113,7 +114,7 @@ pub fn generate(router: *const Router, info: Info) GenerateError![]u8 {
         var emitted = [_]bool{false} ** order.len;
         const all_entries = router.entries();
         for (order, 0..) |m, mi| {
-            for (g.entry_idx.items) |ei| {
+            for (g.entryIdx.items) |ei| {
                 const entry = all_entries[ei];
                 if (entry.method != m or emitted[mi]) continue;
                 emitted[mi] = true;
@@ -121,11 +122,11 @@ pub fn generate(router: *const Router, info: Info) GenerateError![]u8 {
                 const op_id = if (entry.meta.operationId) |explicit|
                     try uniqueExplicitId(allocator, explicit, &used_ids)
                 else
-                    try uniqueOperationId(allocator, m, g.openapi_path, &used_ids);
+                    try uniqueOperationId(allocator, m, g.openapiPath, &used_ids);
 
                 try j.objectField(methodName(m));
                 try j.beginObject();
-                try writeOperation(&j, entry.meta, op_id);
+                try writeOperation(&j, entry.meta, &entry.pattern, op_id);
                 try j.endObject();
             }
         }
@@ -195,7 +196,19 @@ fn uniqueExplicitId(allocator: Allocator, explicit: []const u8, used: *std.Array
     return copy;
 }
 
-fn writeOperation(j: *std.json.Stringify, meta: meta_mod.Metadata, op_id: []const u8) !void {
+/// Maps a route converter to an OpenAPI schema for synthesized path params.
+const uuid_schema: meta_mod.Schema = .{ .stringFmt = "uuid" };
+fn converterSchema(conv: pattern_mod.Converter) *const meta_mod.Schema {
+    return switch (conv) {
+        .int, .uint => &meta_mod.schemas.integer,
+        .float => &meta_mod.schemas.number,
+        .boolean => &meta_mod.schemas.boolean,
+        .uuid => &uuid_schema,
+        .str, .slug, .path => &meta_mod.schemas.string,
+    };
+}
+
+fn writeOperation(j: *std.json.Stringify, meta: meta_mod.Metadata, pattern: *const pattern_mod.Pattern, op_id: []const u8) !void {
     try j.objectField("operationId");
     try j.write(op_id);
     if (meta.summary.len > 0) {
@@ -250,6 +263,39 @@ fn writeOperation(j: *std.json.Stringify, meta: meta_mod.Metadata, op_id: []cons
             try j.endObject();
         }
         try j.endArray();
+    }
+
+    // Synthesize path parameters from typed converters for pattern params
+    // not explicitly documented in meta.params (converter chooses schema).
+    {
+        var any_synth = false;
+        for (pattern.segments[0..pattern.count]) |seg| {
+            if (seg.kind != .parameter and seg.kind != .wildcard) continue;
+            var covered = false;
+            for (meta.params) |p| {
+                if (p.in == .path and std.mem.eql(u8, p.name, seg.text)) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (covered) continue;
+            if (!any_synth) {
+                try j.objectField("parameters");
+                try j.beginArray();
+                any_synth = true;
+            }
+            try j.beginObject();
+            try j.objectField("name");
+            try j.write(seg.text);
+            try j.objectField("in");
+            try j.write("path");
+            try j.objectField("required");
+            try j.write(true);
+            try j.objectField("schema");
+            try writeSchema(j, converterSchema(seg.converter));
+            try j.endObject();
+        }
+        if (any_synth) try j.endArray();
     }
 
     if (meta.request) |rb| {
@@ -425,7 +471,7 @@ fn renderOpenApiPath(allocator: Allocator, pattern: anytype) (Allocator.Error ||
 fn uniqueOperationId(
     allocator: Allocator,
     method: Method,
-    openapi_path: []const u8,
+    openapiPath: []const u8,
     used: *std.ArrayList([]u8),
 ) (Allocator.Error || std.Io.Writer.Error)![]const u8 {
     var base: std.Io.Writer.Allocating = .init(allocator);
@@ -433,7 +479,7 @@ fn uniqueOperationId(
     const w = &base.writer;
 
     w.writeAll(methodName(method)) catch return error.WriteFailed;
-    for (openapi_path) |c| {
+    for (openapiPath) |c| {
         const ok = std.ascii.isAlphanumeric(c);
         w.writeByte(if (ok) c else '_') catch return error.WriteFailed;
     }
@@ -473,11 +519,11 @@ test "generates valid spec for mixed routes" {
     var router = Router.init(a);
     defer router.deinit();
 
-    try router.get("/", h);
-    try router.get("/users/{id}", h);
-    try router.post("/users", h);
-    try router.delete("/users/{id}", h);
-    try router.get("/files/*path", h);
+    try router.get("/", h, .{});
+    try router.get("/users/{id}", h, .{});
+    try router.post("/users", h, .{});
+    try router.delete("/users/{id}", h, .{});
+    try router.get("/files/*path", h, .{});
 
     const json_data = try generate(&router, .{ .title = "T", .version = "9.9" });
     defer a.free(json_data);
@@ -521,8 +567,8 @@ test "operation ids are de-duplicated on sanitizer collision" {
     defer router.deinit();
 
     // Distinct shapes -> both allowed by the router; both sanitize to get_a_b.
-    try router.get("/a b", h);
-    try router.get("/a_b", h);
+    try router.get("/a b", h, .{});
+    try router.get("/a_b", h, .{});
 
     const json_data = try generate(&router, .{});
     defer a.free(json_data);
@@ -561,6 +607,59 @@ fn hMeta(ctx: *Context) anyerror!Response {
     return .{ .body = "{}", .contentType = "application/json" };
 }
 
+test "typed converters synthesize path parameters" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    try router.get("/users/{id:int}", hMeta, .{});
+    try router.get("/posts/{slug:slug}", hMeta, .{});
+
+    const json_data = try generate(&router, .{});
+    defer a.free(json_data);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_data, .{});
+    defer parsed.deinit();
+    const paths = parsed.value.object.get("paths").?.object;
+
+    const users = paths.get("/users/{id}").?.object.get("get").?.object;
+    const uparams = users.get("parameters").?.array;
+    try std.testing.expectEqual(@as(usize, 1), uparams.items.len);
+    const up0 = uparams.items[0].object;
+    try std.testing.expectEqualStrings("id", up0.get("name").?.string);
+    try std.testing.expectEqualStrings("path", up0.get("in").?.string);
+    try std.testing.expectEqual(true, up0.get("required").?.bool);
+    try std.testing.expectEqualStrings("integer", up0.get("schema").?.object.get("type").?.string);
+
+    const posts = paths.get("/posts/{slug}").?.object.get("get").?.object;
+    const pparams = posts.get("parameters").?.array;
+    try std.testing.expectEqual(@as(usize, 1), pparams.items.len);
+    try std.testing.expectEqualStrings("string", pparams.items[0].object.get("schema").?.object.get("type").?.string);
+}
+
+test "explicit meta params take precedence over synthesis" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    try router.get("/users/{id:int}", hMeta, .{ .meta = .{
+        .params = &.{
+            .{ .name = "id", .in = .path, .description = "custom", .schema = &tmeta.schemas.string },
+        },
+    } });
+
+    const json_data = try generate(&router, .{});
+    defer a.free(json_data);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_data, .{});
+    defer parsed.deinit();
+    const users = parsed.value.object.get("paths").?.object.get("/users/{id}").?.object.get("get").?.object;
+    const uparams = users.get("parameters").?.array;
+    try std.testing.expectEqual(@as(usize, 1), uparams.items.len);
+    try std.testing.expectEqualStrings("custom", uparams.items[0].object.get("description").?.string);
+    try std.testing.expectEqualStrings("string", uparams.items[0].object.get("schema").?.object.get("type").?.string);
+}
+
 test "metadata flows into full operation object" {
     const a = std.testing.allocator;
     var router = Router.init(a);
@@ -572,7 +671,7 @@ test "metadata flows into full operation object" {
         .description = "1-based page number",
         .schema = &tmeta.schemas.integer,
     };
-    try router.addMeta(.GET, "/users/{id}", hMeta, .{
+    try router.add(.GET, "/users/{id}", hMeta, .{ .meta = .{
         .operationId = "getUserById",
         .summary = "Fetch one user",
         .tags = &.{"users"},
@@ -591,7 +690,7 @@ test "metadata flows into full operation object" {
         },
         .security = &.{.{ .scheme = "bearerAuth" }},
         .deprecated = false,
-    });
+    } });
 
     const json_data = try generate(&router, .{});
     defer a.free(json_data);
@@ -632,9 +731,9 @@ test "explicit duplicate operation ids are rejected" {
     var router = Router.init(a);
     defer router.deinit();
 
-    try router.addMeta(.GET, "/one", hMeta, .{ .operationId = "dup" });
-    try router.get("/two", hMeta);
-    try router.addMeta(.POST, "/three", hMeta, .{ .operationId = "dup" });
+    try router.add(.GET, "/one", hMeta, .{ .meta = .{ .operationId = "dup" } });
+    try router.get("/two", hMeta, .{});
+    try router.add(.POST, "/three", hMeta, .{ .meta = .{ .operationId = "dup" } });
 
     try std.testing.expectError(error.DuplicateOperationId, generate(&router, .{}));
 }
@@ -644,9 +743,9 @@ test "nullable object field emits anyOf null union" {
     var router = Router.init(a);
     defer router.deinit();
 
-    try router.addMeta(.POST, "/nicknames", hMeta, .{
+    try router.add(.POST, "/nicknames", hMeta, .{ .meta = .{
         .request = .{ .content = .json, .schema = &UserSchema },
-    });
+    } });
 
     const json_data = try generate(&router, .{});
     defer a.free(json_data);
@@ -660,15 +759,15 @@ test "docs prefix filter uses slash boundary and internal flag" {
     defer router.deinit();
 
     // User routes that merely share a prefix must NOT be filtered.
-    try router.get("/docs-custom", h);
-    try router.get("/redocly", h);
-    try router.get("/scalar-app", h);
-    try router.get("/graphiql-test", h);
+    try router.get("/docs-custom", h, .{});
+    try router.get("/redocly", h, .{});
+    try router.get("/scalar-app", h, .{});
+    try router.get("/graphiql-test", h, .{});
     // Internal routes are always filtered regardless of path.
-    try router.addMeta(.GET, "/custom-docs-page", h, .{ .internal = true });
+    try router.add(.GET, "/custom-docs-page", h, .{ .meta = .{ .internal = true } });
     // Real docs paths are filtered.
-    try router.get("/docs", h);
-    try router.get("/docs/swagger-ui-bundle.js", h);
+    try router.get("/docs", h, .{});
+    try router.get("/docs/swagger-ui-bundle.js", h, .{});
 
     const json_data = try generate(&router, .{});
     defer a.free(json_data);

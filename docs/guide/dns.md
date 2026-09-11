@@ -43,7 +43,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // 2. Resolve hostname using client's internal resources
-    var addresses = try client.resolve("httpbun.com", 443, .{});
+    var addresses = try client.resolve("httpbun.com", .{ .port = 443 });
     defer addresses.deinit();
 
     // 3. Inspect candidate addresses
@@ -55,10 +55,12 @@ pub fn main() !void {
 
 ### Zero-Config Standalone Resolution
 
-If you do not already have a client instance, use `httpx.resolveHost`:
+If you do not already have a client instance, create a short-lived one:
 
 ```zig
-var addresses = try httpx.resolveHost("httpbun.com", 443, .{});
+var tmp = httpx.Client.init(allocator, io, .{});
+defer tmp.deinit();
+var addresses = try tmp.resolve("httpbun.com", .{});
 defer addresses.deinit();
 ```
 
@@ -89,7 +91,8 @@ By default, HTTPX performs dual-stack resolution (`.family = .any`). You can for
 ### Force IPv4
 
 ```zig
-var v4_addrs = try client.resolve("httpbun.com", 443, .{
+var v4_addrs = try client.resolve("httpbun.com", .{
+    .port = 443,
     .family = .ipv4,
 });
 defer v4_addrs.deinit();
@@ -98,7 +101,8 @@ defer v4_addrs.deinit();
 ### Force IPv6
 
 ```zig
-var v6_addrs = try client.resolve("httpbun.com", 443, .{
+var v6_addrs = try client.resolve("httpbun.com", .{
+    .port = 443,
     .family = .ipv6,
 });
 defer v6_addrs.deinit();
@@ -112,9 +116,9 @@ Passing `.{}` retains the default dual-stack behavior.
 
 * **Positive Caching**: Successful resolutions are cached for `ttlMs` (default 60 seconds). Subsequent requests within this window return immediately with zero network delay.
 * **Negative Caching**: Non-existent hostnames or failed lookups are cached for `negativeTtlMs` (default 5 seconds). This protects upstream DNS servers from repeated rapid failure storms while allowing transient outages to recover quickly.
-* **Cache Bypass**: Pass `.use_cache = false` on `client.resolve` to force a fresh lookup:
+* **Cache Bypass**: Pass `.useCache = false` on `client.resolve` to force a fresh lookup:
   ```zig
-  var fresh = try client.resolve("httpbun.com", 443, .{ .use_cache = false });
+  var fresh = try client.resolve("httpbun.com", .{ .port = 443, .useCache = false });
   defer fresh.deinit();
   ```
 
@@ -140,7 +144,7 @@ The destination hostname is **not resolved locally**. The unresolved domain name
 
 For specialized applications that require manual DNS message encoding/decoding without an HTTP client:
 
-* **OS Resolver**: `httpx.resolve.Resolver.init(allocator)`
+* **OS Resolver**: `httpx.resolve.Resolver.init(allocator, io)`
 * **RFC 1035 Packet Codec**: `httpx.dns.buildQuery`, `httpx.dns.parseResponse`
 * **Raw UDP Query**: `httpx.dns.resolveA`, `httpx.dns.resolveAAAA`
 

@@ -28,7 +28,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // 2. Dual-stack lookup using client defaults (.{})
-    var addrs = try client.resolve("httpbun.com", 443, .{});
+    var addrs = try client.resolve("httpbun.com", .{ .port = 443 });
     defer addrs.deinit();
 
     std.debug.print("Resolved {d} address(es):\n", .{addrs.len()});
@@ -37,7 +37,8 @@ pub fn main() !void {
     }
 
     // 3. Per-lookup address family override
-    var v4_only = try client.resolve("httpbun.com", 443, .{
+    var v4_only = try client.resolve("httpbun.com", .{
+        .port = 443,
         .family = .ipv4,
         .useCache = true,
     });
@@ -64,8 +65,9 @@ pub fn main() !void {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `.family` | `AddressFamilyPreference` | `.any` | `.any` (dual-stack), `.ipv4`, or `.ipv6` |
-| `.use_cache` | `bool` | `true` | Whether to consult/populate the client's cache |
+| `.useCache` | `bool` | `true` | Whether to consult/populate the client's cache |
 | `.timeoutMs` | `?u64` | `null` | Optional lookup timeout override |
+| `.port` | `u16` | `443` | Port stamped onto every returned address |
 
 Passing `.{}` uses HTTPX defaults.
 

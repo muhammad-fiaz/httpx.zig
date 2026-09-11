@@ -39,6 +39,8 @@ pub const ProxyKind = enum {
     /// HTTP CONNECT tunnel through an HTTP proxy.
     httpConnect,
     socks5,
+    /// SOCKS4 (IPv4 literals) / SOCKS4a (remote DNS via hostname extension).
+    socks4,
 };
 
 pub const DialStrategy = struct {
@@ -51,26 +53,28 @@ pub const DialStrategy = struct {
     remoteDns: bool = false,
 
     /// True when the CALLER must not resolve dest_host locally
-    /// (SOCKS5H semantics).
+    /// (SOCKS5H / SOCKS4a semantics).
     pub fn needsLocalDns(self: *const DialStrategy) bool {
         return switch (self.kind) {
             .direct => true,
             .httpConnect => true, // CONNECT target may be host:port; proxy resolves
-            .socks5 => !self.remoteDns,
+            .socks5, .socks4 => !self.remoteDns,
         };
     }
 
     /// True when the destination host string is forwarded to a proxy that
     /// performs name resolution.
     pub fn proxiesDns(self: *const DialStrategy) bool {
-        return self.kind == .socks5 and self.remoteDns;
+        return (self.kind == .socks5 or self.kind == .socks4) and self.remoteDns;
     }
 };
 
 /// Parses a proxy URL of the forms:
 ///   socks5h://[user:pass@]host:port
 ///   socks5://[user:pass@]host:port
-///   http://host:port
+///   socks4a://[user@]host:port (remote DNS via hostname extension)
+///   socks4://[user@]host:port (IPv4 literals only)
+///   http://[user:pass@]host:port (userinfo becomes Proxy-Authorization on CONNECT)
 /// Returns null when the text is not a recognized proxy URL.
 pub fn parseProxyUrl(url: []const u8) ?struct { kind: ProxyKind, host: []const u8, port: u16, username: ?[]const u8, password: ?[]const u8, remoteDns: bool } {
     if (url.len == 0) return null;
@@ -86,6 +90,13 @@ pub fn parseProxyUrl(url: []const u8) ?struct { kind: ProxyKind, host: []const u
     } else if (std.mem.startsWith(u8, url, "socks5://")) {
         kind = .socks5;
         rest = url["socks5://".len..];
+    } else if (std.mem.startsWith(u8, url, "socks4a://")) {
+        kind = .socks4;
+        remote = true;
+        rest = url["socks4a://".len..];
+    } else if (std.mem.startsWith(u8, url, "socks4://")) {
+        kind = .socks4;
+        rest = url["socks4://".len..];
     } else if (std.mem.startsWith(u8, url, "http://")) {
         kind = .httpConnect;
         rest = url["http://".len..];
@@ -202,4 +213,28 @@ test "strategy dns delegation rules" {
     // HTTP CONNECT: destination may be a name; proxy resolves it.
     st = selectStrategy("http://p:3128", .https);
     try std.testing.expect(st.kind == .httpConnect);
+}
+
+test "parse socks4 and socks4a urls" {
+    const s4 = parseProxyUrl("socks4://bob@10.0.0.2:1080").?;
+    try std.testing.expectEqual(ProxyKind.socks4, s4.kind);
+    try std.testing.expect(!s4.remoteDns);
+    try std.testing.expectEqualStrings("10.0.0.2", s4.host);
+    try std.testing.expectEqual(@as(u16, 1080), s4.port);
+    try std.testing.expectEqualStrings("bob", s4.username.?);
+
+    const s4a = parseProxyUrl("socks4a://10.0.0.2").?;
+    try std.testing.expectEqual(ProxyKind.socks4, s4a.kind);
+    try std.testing.expect(s4a.remoteDns);
+    try std.testing.expectEqual(@as(u16, 1080), s4a.port);
+
+    var st = selectStrategy("socks4://p:1080", .https);
+    try std.testing.expect(st.kind == .socks4);
+    try std.testing.expect(st.needsLocalDns());
+    try std.testing.expect(!st.proxiesDns());
+
+    st = selectStrategy("socks4a://p:1080", .https);
+    try std.testing.expect(st.kind == .socks4);
+    try std.testing.expect(!st.needsLocalDns());
+    try std.testing.expect(st.proxiesDns());
 }

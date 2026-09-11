@@ -19,29 +19,16 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
-    // CORS pre-flight & headers handler
-    server.use(struct {
-        fn cors(ctx: *httpx.Context) !void {
-            ctx.header("Access-Control-Allow-Origin", "https://app.example.com");
-            ctx.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-            ctx.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key");
-            ctx.header("Access-Control-Max-Age", "86400");
+    // Built-in CORS middleware (handles pre-flight + headers)
+    try server.use(httpx.middleware.cors);
 
-            if (ctx.request.method == .OPTIONS) {
-                ctx.status(204);
-                return;
-            }
-            try ctx.next();
-        }
-    }.cors);
-
-    server.get("/api/user", struct {
-        fn handle(ctx: *httpx.Context) !void {
-            try ctx.json(.{ .user = "Alice" });
-        }
-    }.handle);
-
+    try server.get("/api/user", userHandler);
     try server.run();
+}
+
+fn userHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    _ = ctx;
+    return .{ .status = 200, .body = "{\"user\":\"Alice\"}", .contentType = "application/json" };
 }
 ```
 

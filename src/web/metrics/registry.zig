@@ -1,11 +1,11 @@
 //! Production metrics registry: atomics, latency histograms, and Prometheus text exposition.
 
 const std = @import("std");
-pub const snapshot_mod = @import("snapshot.zig");
-pub const MetricsSnapshot = snapshot_mod.MetricsSnapshot;
-pub const ServerSnapshot = snapshot_mod.ServerSnapshot;
-pub const ClientSnapshot = snapshot_mod.ClientSnapshot;
-pub const LATENCY_BUCKET_COUNT = snapshot_mod.LATENCY_BUCKET_COUNT;
+pub const snapshotMod = @import("snapshot.zig");
+pub const MetricsSnapshot = snapshotMod.MetricsSnapshot;
+pub const ServerSnapshot = snapshotMod.ServerSnapshot;
+pub const ClientSnapshot = snapshotMod.ClientSnapshot;
+pub const LATENCY_BUCKET_COUNT = snapshotMod.LATENCY_BUCKET_COUNT;
 
 /// Standard Prometheus latency bucket thresholds in seconds.
 pub const LATENCY_BUCKETS = [LATENCY_BUCKET_COUNT]f64{
@@ -229,16 +229,16 @@ pub const Registry = struct {
         }
     }
 
-    pub fn recordResponse(self: *Registry, bytes_written: u64) void {
+    pub fn recordResponse(self: *Registry, bytesWritten: u64) void {
         self.responsesTotal.inc();
         self.activeRequests.dec();
-        self.bytesOut.add(bytes_written);
+        self.bytesOut.add(bytesWritten);
     }
 
-    pub fn recordResponseFull(self: *Registry, status: u16, duration_ns: u64, bytes_written: u64) void {
-        self.recordResponse(bytes_written);
+    pub fn recordResponseFull(self: *Registry, status: u16, durationNs: u64, bytesWritten: u64) void {
+        self.recordResponse(bytesWritten);
         self.recordStatus(status);
-        self.requestDuration.observeNanos(duration_ns);
+        self.requestDuration.observeNanos(durationNs);
     }
 
     pub fn recordStatus(self: *Registry, statusCode: u16) void {

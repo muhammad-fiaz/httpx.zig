@@ -37,8 +37,8 @@ pub const H3Error = enum(u64) {
 pub const UniStreamType = struct {
     pub const control: u64 = 0x00;
     pub const push: u64 = 0x01;
-    pub const qpack_encoder: u64 = 0x02;
-    pub const qpack_decoder: u64 = 0x03;
+    pub const qpackEncoder: u64 = 0x02;
+    pub const qpackDecoder: u64 = 0x03;
 };
 
 pub const FrameType = enum(u64) {
@@ -46,9 +46,9 @@ pub const FrameType = enum(u64) {
     headers = 0x1,
     cancel_push = 0x3,
     settings = 0x4,
-    push_promise = 0x5,
+    pushPromise = 0x5,
     goaway = 0x7,
-    max_push_id = 0xD,
+    maxPushId = 0xD,
     _,
 
     pub fn fromInt(v: u64) FrameType {
@@ -59,12 +59,12 @@ pub const FrameType = enum(u64) {
 pub const Error = error{ Truncated, InvalidFrame, OutOfMemory, BufferTooSmall, TooLarge };
 
 pub const FrameHeader = struct {
-    frame_type: u64,
+    frameType: u64,
     length: u64,
 };
 
 pub const ParsedFrame = struct {
-    frame_type: u64,
+    frameType: u64,
     payload: []const u8,
 };
 
@@ -76,10 +76,10 @@ pub const ParsedFrame = struct {
 /// caller; non-SETTINGS frames return an empty owned slice.
 pub fn validateFramePayload(
     allocator: Allocator,
-    frame_type: u64,
+    frameType: u64,
     payload: []const u8,
 ) Error![]SettingEntry {
-    switch (frame_type) {
+    switch (frameType) {
         0x0, 0x1 => return allocator.alloc(SettingEntry, 0), // DATA and HEADERS
         0x3, 0x5, 0x7, 0xD => {
             var offset: usize = 0;
@@ -105,7 +105,7 @@ pub fn parseFrameHeader(data: []const u8, offset: *usize) Error!FrameHeader {
         error.Truncated => return Error.Truncated,
         else => return Error.InvalidFrame,
     };
-    return .{ .frame_type = ft, .length = len };
+    return .{ .frameType = ft, .length = len };
 }
 
 /// Parses one complete HTTP/3 frame and advances `offset` past its payload.
@@ -117,21 +117,21 @@ pub fn parseFrame(data: []const u8, offset: *usize) Error!ParsedFrame {
     if (offset.* > data.len or n > data.len - offset.*) return Error.Truncated;
     const payload = data[offset.*..][0..n];
     offset.* += n;
-    return .{ .frame_type = header.frame_type, .payload = payload };
+    return .{ .frameType = header.frameType, .payload = payload };
 }
 
 /// Encodes a frame header into buf. Returns bytes written.
-pub fn encodeFrameHeader(buf: []u8, frame_type: u64, length: u64) Error!usize {
-    const n1 = varint.encode(buf, frame_type) catch return Error.BufferTooSmall;
+pub fn encodeFrameHeader(buf: []u8, frameType: u64, length: u64) Error!usize {
+    const n1 = varint.encode(buf, frameType) catch return Error.BufferTooSmall;
     const n2 = varint.encode(buf[n1..], length) catch return Error.BufferTooSmall;
     return n1 + n2;
 }
 
 /// SETTINGS parameter IDs (RFC 9114 section 7.2.4).
 pub const SettingsId = enum(u64) {
-    qpack_max_table_capacity = 0x1,
-    max_field_section_size = 0x6,
-    qpack_blocked_streams = 0x7,
+    qpackMaxTableCapacity = 0x1,
+    maxFieldSectionSize = 0x6,
+    qpackBlockedStreams = 0x7,
     _,
 };
 
@@ -197,7 +197,7 @@ test "frame header roundtrip" {
     const n = try encodeFrameHeader(&buf, 0x1, 300);
     var offset: usize = 0;
     const fh = try parseFrameHeader(buf[0..n], &offset);
-    try std.testing.expectEqual(@as(u64, 0x1), fh.frame_type);
+    try std.testing.expectEqual(@as(u64, 0x1), fh.frameType);
     try std.testing.expectEqual(@as(u64, 300), fh.length);
     try std.testing.expectEqual(n, offset);
 }

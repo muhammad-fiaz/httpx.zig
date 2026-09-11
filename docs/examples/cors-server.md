@@ -49,11 +49,11 @@ pub fn main() !void {
 }
 
 fn dataHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 200, .body = "{\"data\":\"CORS enabled\"}", .content_type = "application/json" };
+    return .{ .status = 200, .body = "{\"data\":\"CORS enabled\"}", .contentType = "application/json" };
 }
 
 fn createHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 201, .body = "{\"created\":true}", .content_type = "application/json" };
+    return .{ .status = 201, .body = "{\"created\":true}", .contentType = "application/json" };
 }
 ```
 

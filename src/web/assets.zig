@@ -61,11 +61,11 @@ pub const AssetStore = struct {
         while (trimmed.len > 0 and (trimmed[0] == '/' or trimmed[0] == '\\')) {
             trimmed = trimmed[1..];
         }
-        const copy_len = @min(buf.len, trimmed.len);
-        for (trimmed[0..copy_len], 0..) |c, i| {
+        const copyLen = @min(buf.len, trimmed.len);
+        for (trimmed[0..copyLen], 0..) |c, i| {
             buf[i] = if (c == '\\') '/' else c;
         }
-        return buf[0..copy_len];
+        return buf[0..copyLen];
     }
 
     /// Registers an embedded asset into the store.
@@ -108,6 +108,19 @@ pub const AssetStore = struct {
         });
     }
 
+    /// Removes a previously registered embedded asset. No-op if absent.
+    pub fn unregister(self: *AssetStore, rawPath: []const u8) void {
+        var norm_buf: [512]u8 = undefined;
+        const norm_path = normalizePath(&norm_buf, rawPath);
+
+        self.lock.lock();
+        defer self.lock.unlock();
+
+        if (self.assets.fetchRemove(norm_path)) |old| {
+            self.allocator.free(old.key);
+            self.allocator.free(old.value.etag);
+        }
+    }
     /// Looks up an asset by logical path.
     pub fn get(self: *AssetStore, rawPath: []const u8) ?Asset {
         var norm_buf: [512]u8 = undefined;
@@ -182,6 +195,12 @@ pub const EmbeddedFile = struct {
 /// override, in which case register that path individually afterwards.
 pub fn registerEmbeddedDir(allocator: Allocator, files: []const EmbeddedFile) !void {
     for (files) |f| try registerEmbedded(allocator, f.path, f.content, null);
+}
+
+/// Removes a previously registered embedded asset. No-op if absent.
+pub fn unregisterEmbedded(allocator: Allocator, rawPath: []const u8) void {
+    const store = globalStore(allocator);
+    store.unregister(rawPath);
 }
 
 /// Retrieves an embedded asset from the global registry.

@@ -20,7 +20,7 @@ pub const Info = struct {
     description: []const u8 = "Fast, modern web framework for Zig with automated OpenAPI & GraphQL documentation.",
 };
 
-pub const default_info: Info = .{};
+pub const defaultInfo: Info = .{};
 
 /// Server header value, e.g. "httpx/0.2.0".
 pub fn serverToken(buf: []u8) []const u8 {

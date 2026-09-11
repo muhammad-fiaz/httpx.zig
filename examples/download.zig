@@ -17,8 +17,8 @@ pub fn main() !void {
     // 1. Download to a specific directory (automatically uses URL basename "1048576")
     const result1 = client.download(
         sample_url,
-        "downloads/",
         .{
+            .path = "downloads/",
             .progress = .enabled,
             .existing = .overwrite,
             .createDirs = true,
@@ -37,8 +37,8 @@ pub fn main() !void {
     // 2. Download with explicit custom destination filename
     const result2 = client.download(
         sample_url,
-        "downloads/custom_named_doc.bin",
         .{
+            .path = "downloads/custom_named_doc.bin",
             .progress = .enabled,
             .existing = .overwrite,
             .createDirs = true,

@@ -1,6 +1,127 @@
 # TLS Configuration Guide
 
-HTTPX implements modern Transport Layer Security (TLS 1.2 and TLS 1.3) with full cross-platform support across Linux, Windows, and macOS.
+HTTPX implements Transport Layer Security with full cross-platform support
+across Linux, Windows, and macOS.
+
+## Support Scope (read this first)
+
+* **Client** (`httpx.Client` → `https://`): HTTPS/1.1 without client
+  certificates runs on `std.crypto.tls` (TLS 1.2/1.3) with SNI, system +
+  custom trust stores, and hostname verification. Setting
+  `.tls = .{ .clientCertPem, .clientKeyPem }` (mTLS) or explicit
+  `.httpVersion = .http2` switches that request to the **native** client
+  instead, adding certificate presentation and/or ALPN (`h2` for HTTP/2,
+  `http/1.1` otherwise) on top of the same verification.
+* **Server** (native engine in `src/protocols/tls/`): **TLS 1.3 only**, with
+  X25519 ECDHE, AES-128-GCM / AES-256-GCM / ChaCha20-Poly1305 record
+  protection, SNI parsing, and ALPN dispatch. Server certificates must be
+  **P-256 ECDSA** (`ecdsa_secp256r1_sha256`); RSA/private-key types are
+  rejected loudly with `UnsupportedSignatureScheme` instead of emitting a
+  broken handshake.
+* **Session resumption** (TLS 1.3 PSK, `psk_dhe_ke`): the native client
+  offers cached sessions and the native server issues stateless tickets —
+  see [Session Resumption](#session-resumption-psk--tickets) below.
+  Resumption covers the native paths (HTTP/2 over TLS always; HTTPS/1.1
+  when already native via client certificates). Plain HTTPS/1.1 runs on
+  `std.crypto.tls`, which exposes no ticket API, so it always does full
+  handshakes.
+* **HelloRetryRequest**: fully handled on both sides (shareless hello →
+  retry with share, single-retry guard, transcript splice). Only X25519
+  is supported: a server selecting any other group fails loudly.
+* **Not implemented, by policy**: 0-RTT early data. There is deliberately
+  **no** 0-RTT at any layer (replay-unsafe methods must never be sent
+  early); tickets never carry `early_data` extensions.
+
+## Mutual TLS (Client Certificates)
+
+The server can require (or optionally accept) client certificates:
+
+```zig
+var server = try httpx.Server.init(allocator, io, .{
+    .host = "127.0.0.1",
+    .port = 0,
+    .tls = .{
+        .certPem = cert_pem,
+        .keyPem = key_pem,
+        .clientAuth = .required, // or .optional / .disabled (default)
+        .clientCa = ca_pem,      // PEM bundle trusted for client chains
+    },
+});
+```
+
+With `.required`, a missing certificate fails the handshake: the client
+observes `error.ClientCertificateRequired` (its native handshake refuses
+to continue cert-less) while the server side only ever sees the
+connection vanish mid-flight (`error.IoError` / `error.TlsHandshakeFailed`)
+— there is no server-side policy error to assert on. Presented chains
+must anchor in `clientCa` with valid signatures
+(`error.ClientCertificateInvalid` otherwise). `.optional` lets cert-less
+clients through while still verifying any presented chain. See
+`[TLS mTLS](/examples/tls-mtls)` for a runnable loopback demo.
+
+A client presents its certificate through the high-level API — no
+engine calls needed:
+
+```zig
+var res = try client.get("https://service.internal/", .{
+    .tls = .{
+        .verify = .caBundle,
+        .caPem = ca_pem, // extra trust anchor for the server chain
+        .clientCertPem = cert_pem, // presented when requested
+        .clientKeyPem = key_pem,   // P-256 ECDSA key for the chain
+    },
+});
+defer res.deinit();
+```
+
+Omitting the pair on a `.required` server fails the request loudly;
+a non-`http/1.1` ALPN answer on the HTTP/1.x path (and anything but
+`h2` on the `.http2` path) fails with `error.AlpnNegotiationFailed`
+instead of silently downgrading.
+
+## Session Resumption (PSK / Tickets)
+
+TLS 1.3 resumption (RFC 8446 Sections 4.6.1, 4.2.11) abbreviates repeat
+handshakes: no Certificate/CertificateVerify flight, authentication via
+the PSK binder, forward secrecy preserved (`psk_dhe_ke` always performs
+fresh ECDHE alongside the PSK).
+
+Server — opt in with ticket keys (stateless; no per-client storage):
+
+```zig
+var server = try httpx.Server.init(allocator, io, .{
+    .port = 8443,
+    .tls = .{
+        .certPem = cert_pem,
+        .keyPem = key_pem,
+        .ticketKeys = httpx.tls.TicketKeys.generate(),
+        .ticketLifetimeSecs = 7200,
+    },
+});
+```
+
+Rotate with `keys.rotate(next)`; outstanding tickets stay valid through
+one rotation via the previous-key slot, then fail closed (clients fall
+back to full handshakes — never an alert storm).
+
+Client — automatic on the native paths: `httpx.Client` keeps an
+origin-keyed session cache, offers usable tickets, captures new ones
+from `NewSessionTicket` messages during reads, and resumes
+transparently. No API changes needed.
+
+Rules that keep resumption honest:
+
+- Any ticket problem (unknown/expired/corrupt ticket, binder mismatch,
+  suite mismatch) silently falls back to a full handshake — the client
+  cannot distinguish either way.
+- Resumption is disabled under mutual TLS: an abbreviated flight carries
+  no `CertificateRequest`, so resumed connections would bypass client
+  certificate authentication. Servers with `clientAuth` set always do
+  full handshakes.
+- Only SHA-256 suites resume (`AES_128_GCM_SHA256`,
+  `CHACHA20_POLY1305_SHA256`); tickets for other hashes are ignored.
+- Tickets bind to the issuing origin host; the client never offers a
+  ticket to a different host.
 
 ## Client HTTPS Usage
 

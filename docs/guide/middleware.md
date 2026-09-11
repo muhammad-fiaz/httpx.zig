@@ -22,7 +22,7 @@ try server.use(httpx.middleware.recovery);
 `httpx.zig` includes built-in middleware under the `httpx.middleware` namespace:
 
 - **`httpx.middleware.cors`**: Handles preflight `OPTIONS` requests (204 No Content) and injects CORS response headers.
-- **`httpx.middleware.helmet` / `httpx.middleware.securityHeaders`**: Defensive headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`).
+- **`httpx.middleware.helmet`**: Defensive headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`).
 - **`httpx.middleware.recovery`**: Intercepts uncaught handler errors and returns safe HTTP 500 responses without crashing the connection loop.
 - **`httpx.middleware.logging`**: Non-blocking request pass-through and observability hooks.
 - **`httpx.RateLimiter`**: Multi-dimensional token bucket rate limiting (by IP, Bearer token, route, or custom key).
@@ -48,6 +48,18 @@ fn banCheckMiddleware(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!h
 }
 
 try server.use(banCheckMiddleware);
+```
+
+## Scopes and Ordering
+
+Middleware runs in a deterministic order: router-wide (`server.use`)
+first, then route-level (`.{ .middleware = ... }` on registration),
+then the handler. Groups prepend their middleware to each route:
+
+```zig
+const api = server.router.group("/api", .{ .middleware = &.{authMw} });
+try api.get("/users", listUsers, .{ .middleware = &.{auditMw} });
+// order: server.use middlewares → authMw → auditMw → listUsers
 ```
 
 ## Compression

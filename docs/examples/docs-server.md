@@ -52,7 +52,7 @@ fn homePageHandler(_: *httpx.Context) anyerror!httpx.Response {
         \\<body>
         \\  <div class="card">
         \\    <h1>httpx.zig</h1>
-        \\    <p>Production-ready HTTP/1.x, HTTP/2, HTTP/3 client &amp; server for Zig.</p>
+         \\    <p>Actively developed HTTP/1.x, HTTP/2, HTTP/3 client &amp; server for Zig.</p>
         \\    <div>
         \\      <span class="badge">HTTP/1.1</span>
         \\      <span class="badge">HTTP/2</span>
@@ -70,7 +70,7 @@ fn homePageHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = html,
-        .content_type = "text/html; charset=utf-8",
+        .contentType = "text/html; charset=utf-8",
     };
 }
 
@@ -102,7 +102,7 @@ pub fn main() !void {
 
     try server.get("/", homePageHandler);
     try server.get("/api/items", listItemsHandler);
-    try server.get("/api/items/:id", getItemHandler);
+    try server.get("/api/items/{id}", getItemHandler);
 
     const port = server.localPort();
     std.debug.print("[INFO] Server started on http://127.0.0.1:{d}\n", .{port});

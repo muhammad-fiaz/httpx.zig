@@ -14,7 +14,7 @@ The DNS subsystem in HTTPX provides high-level client resolution methods, struct
       Normal API            Advanced API
           │                       │
     client.resolve()      httpx.resolve.Resolver
-          │               httpx.dns.cache.Cache
+          │               httpx.dns.Cache
           └───────────┬───────────┘
                       │
               Canonical DNS
@@ -27,7 +27,7 @@ The DNS subsystem in HTTPX provides high-level client resolution methods, struct
 
 Normal applications resolve hostnames through `httpx.Client`. The client manages allocator ownership, background I/O handles, and caching automatically.
 
-### `client.resolve(host, port, options)`
+### `client.resolve(host, options)`
 
 Resolves a hostname or IP address to candidate addresses.
 
@@ -35,15 +35,13 @@ Resolves a hostname or IP address to candidate addresses.
 pub fn resolve(
     self: *Client,
     host: []const u8,
-    port: u16,
     opts: anytype,
 ) Error!ResolvedAddresses
 ```
 
 * **Parameters**:
   * `host`: Hostname string (e.g., `"httpbun.com"`) or numeric IP literal (e.g., `"127.0.0.1"`, `"::1"`).
-  * `port`: Destination TCP/UDP port number.
-  * `opts`: Struct of `ResolveOptions` or `.{}` for defaults.
+  * `opts`: Struct of `ResolveOptions` (`.port`, `.family`, `.useCache`, `.timeoutMs`) or `.{}` for defaults.
 * **Returns**: `ResolvedAddresses` owning the returned slice.
 * **Errors**: `error.DnsFailed`, `error.OutOfMemory`.
 
@@ -51,7 +49,7 @@ pub fn resolve(
 
 Passing `.{}` uses documented HTTPX defaults:
 * Dual-stack resolution (`.family = .any`) in system preference order (RFC 3484).
-* In-memory cache enabled (`.use_cache = true`).
+* In-memory cache enabled (`.useCache = true`).
 * Default timeout inherited from client config.
 
 ### `client.resolveUrl(url_str, options)`
@@ -63,12 +61,14 @@ var addrs = try client.resolveUrl("https://httpbun.com/get", .{});
 defer addrs.deinit();
 ```
 
-### `httpx.resolveHost(host, port, options)`
+### `client.resolve(host, options)` without a long-lived client
 
-Zero-config global convenience wrapper that resolves a host without manually instantiating a client:
+If you need one-off resolution, create a short-lived client:
 
 ```zig
-var addrs = try httpx.resolveHost("httpbun.com", 443, .{});
+var tmp = httpx.Client.init(allocator, io, .{});
+defer tmp.deinit();
+var addrs = try tmp.resolve("httpbun.com", .{});
 defer addrs.deinit();
 ```
 
@@ -85,6 +85,7 @@ pub const ResolveOptions = struct {
     family: AddressFamilyPreference = .any,
     useCache: bool = true,
     timeoutMs: ?u64 = null,
+    port: u16 = 443,
 };
 ```
 
@@ -93,6 +94,7 @@ pub const ResolveOptions = struct {
 | `family` | `AddressFamilyPreference` | `.any` | Address family filter (`.any`, `.ipv4`, `.ipv6`) |
 | `useCache` | `bool` | `true` | When true, queries and updates the client's cache |
 | `timeoutMs` | `?u64` | `null` | Optional lookup timeout override |
+| `port` | `u16` | `443` | Port stamped onto every returned address |
 
 ### `AddressFamilyPreference`
 
@@ -196,11 +198,11 @@ For applications requiring direct control over low-level resolvers without insta
 
 ### `httpx.resolve.Resolver`
 
-Cross-platform OS resolver wrapping `ws2_32.getaddrinfo` on Windows and `libc getaddrinfo` on POSIX:
+Resolver owning its allocator and IO backend (`std.Io` first, OS fallback):
 
 ```zig
-var resolver = httpx.resolve.Resolver.init(allocator);
-const addrs = try resolver.lookupWithIo(io, "httpbun.com", 443);
+var resolver = httpx.resolve.Resolver.init(allocator, io);
+const addrs = try resolver.lookup("httpbun.com", 443);
 defer allocator.free(addrs);
 ```
 

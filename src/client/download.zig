@@ -30,9 +30,9 @@ const Response = @import("request.zig").Response;
 const req = @import("request.zig");
 const clientNs = @import("client.zig");
 const Client = clientNs.Client;
-const ftpClient = @import("../protocols/ftp/client.zig");
+const ftpClientMod = @import("../protocols/ftp/client.zig");
 const serveMod = @import("../web/static_files/serve.zig");
-const cFs = serveMod.c_fs;
+const cFs = serveMod.cFs;
 
 pub const DownloadError = error{
     DestinationExists,
@@ -214,6 +214,9 @@ pub const VerifyOptions = struct {
 };
 
 pub const DownloadOptions = struct {
+    /// Destination file path. Empty derives a filename from the URL
+    /// (or Content-Disposition), so `.path` may be omitted deliberately.
+    path: []const u8 = "",
     headers: []const Header = &.{},
     timeoutMs: ?u64 = null,
     maxRetries: u32 = 3,
@@ -712,13 +715,12 @@ pub const Downloader = struct {
     pub fn download(
         self: *Downloader,
         url: []const u8,
-        destinationPath: []const u8,
         options: DownloadOptions,
     ) DownloadError!DownloadResult {
         const startTime = clock.millisNow();
 
         // 1. Resolve destination
-        const dest = resolveDestination(self.allocator, destinationPath, url, null) catch return DownloadError.OutOfMemory;
+        const dest = resolveDestination(self.allocator, options.path, url, null) catch return DownloadError.OutOfMemory;
         defer self.allocator.free(dest);
 
         // 2. Create parent directories if requested
@@ -1266,6 +1268,9 @@ pub const ProgressTracker = struct {
 // Updater
 
 pub const UpdateOptions = struct {
+    /// Target file to update in place (with rollback). Empty derives a
+    /// filename from the URL, like downloads.
+    path: []const u8 = "",
     verify: VerifyOptions = .{},
     progress: ProgressMode = .auto,
     backupExisting: bool = true,
@@ -1278,16 +1283,17 @@ pub fn updateFile(
     allocator: Allocator,
     client: *Client,
     url: []const u8,
-    targetPath: []const u8,
     options: UpdateOptions,
 ) DownloadError!DownloadResult {
     var dl = Downloader.init(allocator, client);
 
+    const targetPath = options.path;
     const temp_target = std.fmt.allocPrint(allocator, "{s}.update-tmp", .{targetPath}) catch return DownloadError.OutOfMemory;
     defer allocator.free(temp_target);
 
     // 1. Download to temporary file
-    const res = try dl.download(url, temp_target, .{
+    const res = try dl.download(url, .{
+        .path = temp_target,
         .verify = options.verify,
         .progress = options.progress,
         .atomic = true,
@@ -1325,6 +1331,11 @@ pub const FtpDownloadOptions = struct {
     port: u16 = 21,
     user: []const u8 = "anonymous",
     password: []const u8 = "anonymous@",
+    /// Explicit FTPS (AUTH TLS + PROT P). Fails closed when the server
+    /// refuses the upgrade; never downloads in plaintext.
+    secure: bool = false,
+    tlsVerify: ftpClientMod.TlsVerifyMode = .caBundle,
+    tlsCaPem: ?[]const u8 = null,
     remotePath: []const u8,
     destinationPath: []const u8,
     verify: VerifyOptions = .{},
@@ -1343,11 +1354,14 @@ pub fn ftpDownload(
     const dest = resolveDestination(allocator, options.destinationPath, options.remotePath, null) catch return DownloadError.OutOfMemory;
     defer allocator.free(dest);
 
-    var ftp = ftpClient.Client.connectWithAlloc(allocator, .{
+    var ftp = ftpClientMod.Client.connectWithAlloc(allocator, .{
         .host = options.host,
         .port = options.port,
         .user = options.user,
         .password = options.password,
+        .secure = options.secure,
+        .tlsVerify = options.tlsVerify,
+        .tlsCaPem = options.tlsCaPem,
     }) catch return DownloadError.ConnectionFailed;
     defer ftp.deinit();
 
@@ -1381,11 +1395,11 @@ pub fn ftpDownload(
         written: u64 = 0,
         cancel: ?*const std.atomic.Value(bool),
 
-        fn sink(ctx: *@This(), chunk: []const u8) ftpClient.FtpError!void {
+        fn sink(ctx: *@This(), chunk: []const u8) ftpClientMod.FtpError!void {
             if (ctx.cancel) |cf| {
-                if (cf.load(.acquire)) return ftpClient.FtpError.ProtocolError;
+                if (cf.load(.acquire)) return ftpClientMod.FtpError.ProtocolError;
             }
-            if (!FileOps.writeAll(ctx.hFile, chunk)) return ftpClient.FtpError.WriteFailed;
+            if (!FileOps.writeAll(ctx.hFile, chunk)) return ftpClientMod.FtpError.WriteFailed;
             ctx.h.update(chunk);
             ctx.written += chunk.len;
             ctx.t.update(ctx.written);
@@ -1402,7 +1416,7 @@ pub fn ftpDownload(
     ftp.download(options.remotePath, &ctx, Context.sink) catch |e| {
         tracker.fail();
         if (options.atomic) _ = FileOps.deleteFile(temp_dest);
-        if (e == ftpClient.FtpError.ConnectFailed) return DownloadError.ConnectionFailed;
+        if (e == ftpClientMod.FtpError.ConnectFailed) return DownloadError.ConnectionFailed;
         return DownloadError.HttpError;
     };
 
@@ -1679,9 +1693,9 @@ test "remote file info size formatting" {
         .status = 200,
         .fileSize = 15 * 1024 * 1024 + 500 * 1024,
     };
-    const sample_name = "file.zip";
-    @memcpy(info.fileNameBuf[0..sample_name.len], sample_name);
-    info.fileNameLen = sample_name.len;
+    const sampleName = "file.zip";
+    @memcpy(info.fileNameBuf[0..sampleName.len], sampleName);
+    info.fileNameLen = sampleName.len;
 
     var buf: [32]u8 = undefined;
     const formatted = info.formatSize(&buf);

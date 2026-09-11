@@ -36,7 +36,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-all-post_json
+zig build run-post-json
 ```
 
 ## What to Verify

@@ -1,4 +1,8 @@
 //! robots.txt parsing and path matching (RFC 9309).
+//!
+//! Deliberately native (no Tree-sitter): robots.txt is a line-oriented
+//! `field: value` format with group scoping, not a nested syntax tree.
+//! A grammar would add table overhead for zero structural benefit.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -78,8 +82,8 @@ pub fn parse(allocator: Allocator, src: []const u8) !RobotsFile {
     var current_delay: ?f32 = null;
 
     var lines = std.mem.splitScalar(u8, src, '\n');
-    while (lines.next()) |raw_line| {
-        var line = std.mem.trim(u8, raw_line, " \t\r");
+    while (lines.next()) |rawLine| {
+        var line = std.mem.trim(u8, rawLine, " \t\r");
         if (std.mem.indexOfScalar(u8, line, '#')) |hash| {
             line = std.mem.trim(u8, line[0..hash], " \t");
         }

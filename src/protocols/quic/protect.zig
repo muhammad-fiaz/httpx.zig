@@ -43,17 +43,17 @@ pub fn hpMaskChacha(key: [32]u8, sample: *const [16]u8) [5]u8 {
 }
 
 /// Removes header protection in place. `hdr` spans the whole packet
-/// header INCLUDING the packet number; pn_offset points at the first PN
-/// byte; pn_len is decoded from the exposed low bits by the caller.
+/// header INCLUDING the packet number; pnOffset points at the first PN
+/// byte; pnLen is decoded from the exposed low bits by the caller.
 /// Returns the recovered first byte.
 pub fn removeHeaderProtection(
     hdr: []u8,
-    pn_offset: usize,
-    pn_len: usize,
+    pnOffset: usize,
+    pnLen: usize,
     comptime cipher: enum { aes, chacha },
     key: if (cipher == .aes) [16]u8 else [32]u8,
 ) u8 {
-    const sample_off = pn_offset + 4;
+    const sample_off = pnOffset + 4;
     var sample: [16]u8 = undefined;
     @memcpy(&sample, hdr[sample_off..][0..16]);
 
@@ -66,8 +66,8 @@ pub fn removeHeaderProtection(
     const bits: u8 = if (is_long) 0x0F else 0x1F;
     hdr[0] ^= mask[0] & bits;
 
-    for (0..pn_len) |i| {
-        hdr[pn_offset + i] ^= mask[1 + i];
+    for (0..pnLen) |i| {
+        hdr[pnOffset + i] ^= mask[1 + i];
     }
     return hdr[0];
 }
@@ -75,12 +75,12 @@ pub fn removeHeaderProtection(
 /// Applies header protection (encrypt direction) in place.
 pub fn applyHeaderProtection(
     hdr: []u8,
-    pn_offset: usize,
-    pn_len: usize,
+    pnOffset: usize,
+    pnLen: usize,
     comptime cipher: enum { aes, chacha },
     key: if (cipher == .aes) [16]u8 else [32]u8,
 ) void {
-    _ = removeHeaderProtection(hdr, pn_offset, pn_len, cipher, key); // XOR symmetric
+    _ = removeHeaderProtection(hdr, pnOffset, pnLen, cipher, key); // XOR symmetric
 }
 
 // Payload protection
@@ -117,7 +117,7 @@ pub fn seal(
         // keys; ChaCha handling is via separate hp path but payload AEAD is similar.
         // Use AES-256-GCM when available, fallback to AES-128 with truncated key is not correct.
         // For ChaCha20-Poly1305, use the ChaCha implementation.
-        // Detect ChaCha vs AES-256 by checking if the key was derived for ChaCha (hp_len 32)
+        // Detect ChaCha vs AES-256 by checking if the key was derived for ChaCha (hpLen 32)
         // For now, assume AES-256-GCM for 32-byte keys.
         const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
         var k32: [32]u8 = undefined;
@@ -130,7 +130,7 @@ pub fn seal(
 
 /// Decrypts one packet payload; supports AES-128-GCM and AES-256-GCM/ChaCha20-Poly1305.
 pub fn open(
-    plaintext_out: []u8,
+    plaintextOut: []u8,
     ciphertext: []const u8,
     tag: [16]u8,
     aad: []const u8,
@@ -142,13 +142,13 @@ pub fn open(
     if (key.len == 16) {
         var k16: [16]u8 = undefined;
         @memcpy(&k16, key[0..16]);
-        Aes128Gcm.decrypt(plaintext_out, ciphertext, tag, aad, nonce, k16) catch
+        Aes128Gcm.decrypt(plaintextOut, ciphertext, tag, aad, nonce, k16) catch
             return Error.AuthenticationFailed;
     } else if (key.len == 32) {
         const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
         var k32: [32]u8 = undefined;
         @memcpy(&k32, key[0..32]);
-        Aes256Gcm.decrypt(plaintext_out, ciphertext, tag, aad, nonce, k32) catch
+        Aes256Gcm.decrypt(plaintextOut, ciphertext, tag, aad, nonce, k32) catch
             return Error.AuthenticationFailed;
     } else {
         return Error.AuthenticationFailed;
@@ -188,7 +188,7 @@ pub fn sealWithKeys(
 
 /// Decrypts using ProtectionKeys.
 pub fn openWithKeys(
-    plaintext_out: []u8,
+    plaintextOut: []u8,
     ciphertext: []const u8,
     tag: [16]u8,
     aad: []const u8,
@@ -200,48 +200,48 @@ pub fn openWithKeys(
         .aes_128_gcm => {
             var k16: [16]u8 = undefined;
             @memcpy(&k16, keys.key[0..16]);
-            Aes128Gcm.decrypt(plaintext_out, ciphertext, tag, aad, nonce, k16) catch
+            Aes128Gcm.decrypt(plaintextOut, ciphertext, tag, aad, nonce, k16) catch
                 return Error.AuthenticationFailed;
         },
         .aes_256_gcm => {
             const Aes256Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
             var k32: [32]u8 = undefined;
             @memcpy(&k32, keys.key[0..32]);
-            Aes256Gcm.decrypt(plaintext_out, ciphertext, tag, aad, nonce, k32) catch
+            Aes256Gcm.decrypt(plaintextOut, ciphertext, tag, aad, nonce, k32) catch
                 return Error.AuthenticationFailed;
         },
         .chacha20_poly1305 => {
             const ChaChaPoly = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
             var k32: [32]u8 = undefined;
             @memcpy(&k32, keys.key[0..32]);
-            ChaChaPoly.decrypt(plaintext_out, ciphertext, tag, aad, nonce, k32) catch
+            ChaChaPoly.decrypt(plaintextOut, ciphertext, tag, aad, nonce, k32) catch
                 return Error.AuthenticationFailed;
         },
     }
 }
 
 /// Header protection with ProtectionKeys (handles AES vs ChaCha).
-pub fn removeHeaderProtectionWithKeys(hdr: []u8, pn_offset: usize, pn_len: usize, keys: @import("crypto.zig").ProtectionKeys) u8 {
+pub fn removeHeaderProtectionWithKeys(hdr: []u8, pnOffset: usize, pnLen: usize, keys: @import("crypto.zig").ProtectionKeys) u8 {
     if (keys.cipher == .chacha20_poly1305) {
         var hp32: [32]u8 = undefined;
         @memcpy(&hp32, keys.hp[0..32]);
-        return removeHeaderProtection(hdr, pn_offset, pn_len, .chacha, hp32);
+        return removeHeaderProtection(hdr, pnOffset, pnLen, .chacha, hp32);
     } else {
         var hp16: [16]u8 = undefined;
         @memcpy(&hp16, keys.hp[0..16]);
-        return removeHeaderProtection(hdr, pn_offset, pn_len, .aes, hp16);
+        return removeHeaderProtection(hdr, pnOffset, pnLen, .aes, hp16);
     }
 }
 
-pub fn applyHeaderProtectionWithKeys(hdr: []u8, pn_offset: usize, pn_len: usize, keys: @import("crypto.zig").ProtectionKeys) void {
-    _ = removeHeaderProtectionWithKeys(hdr, pn_offset, pn_len, keys);
+pub fn applyHeaderProtectionWithKeys(hdr: []u8, pnOffset: usize, pnLen: usize, keys: @import("crypto.zig").ProtectionKeys) void {
+    _ = removeHeaderProtectionWithKeys(hdr, pnOffset, pnLen, keys);
 }
 
 // Packet number encoding / reconstruction (RFC 9000 section A.3 style)
 
 /// Smallest number of bytes needed to encode pn given the largest acked.
-pub fn pnEncodingLen(pn: u64, largest_acked: u64) usize {
-    const n = pn -% largest_acked;
+pub fn pnEncodingLen(pn: u64, largestAcked: u64) usize {
+    const n = pn -% largestAcked;
     if (n > 0x7FFFFFFF) return 4;
     if ((2 *% n) > 0xFFFFFF) return 4;
     if ((2 *% n) > 0xFFFF) return 3;
@@ -250,20 +250,20 @@ pub fn pnEncodingLen(pn: u64, largest_acked: u64) usize {
 }
 
 /// Reconstructs the full packet number from truncated form.
-pub fn reconstructPn(expected_pn: u64, truncated: u64, pn_len: usize) u64 {
-    const bits: u6 = @intCast(pn_len * 8);
+pub fn reconstructPn(expectedPn: u64, truncated: u64, pnLen: usize) u64 {
+    const bits: u6 = @intCast(pnLen * 8);
     const win = @as(u64, 1) << bits;
     const hwin = win / 2;
     const mask = win - 1;
-    const candidate = (expected_pn & ~mask) | truncated;
-    if (candidate +| hwin <= expected_pn) return candidate + win;
-    if (candidate > expected_pn + hwin and candidate >= win) return candidate - win;
+    const candidate = (expectedPn & ~mask) | truncated;
+    if (candidate +| hwin <= expectedPn) return candidate + win;
+    if (candidate > expectedPn + hwin and candidate >= win) return candidate - win;
     return candidate;
 }
 
 // Retry integrity (RFC 9001 section 5.8)
 
-pub const retry_secret_v1 = [_]u8{
+pub const retrySecretV1 = [_]u8{
     0xd9, 0xc9, 0x94, 0x3e, 0x61, 0x01, 0xfd, 0x20,
     0x00, 0x21, 0x50, 0x6b, 0xcc, 0x02, 0x81, 0x4c,
     0x73, 0x03, 0x0f, 0x25, 0xc7, 0x9d, 0x71, 0xce,
@@ -273,7 +273,7 @@ pub const retry_secret_v1 = [_]u8{
 const crypto_mod = @import("crypto.zig");
 
 /// Fixed Retry protection keys (QUIC v1).
-pub const retry_keys_v1 = struct {
+pub const retryKeysV1 = struct {
     pub const key = [_]u8{ 0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e };
     pub const nonce = [_]u8{ 0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb };
 };
@@ -282,8 +282,8 @@ pub const retry_keys_v1 = struct {
 /// odcid_len || odcid || retry_packet_without_tag.
 pub fn retryIntegrityTag(
     odcid: []const u8,
-    retry_packet_no_tag: []const u8,
-    tag_out: *[16]u8,
+    retryPacketNoTag: []const u8,
+    tagOut: *[16]u8,
 ) void {
     // Associated data assembled into caller-independent scratch via stack
     // would overflow for large packets; stream through GCM's AD is not
@@ -295,13 +295,13 @@ pub fn retryIntegrityTag(
     len += 1;
     @memcpy(pseudo_buf[len..][0..odcid.len], odcid);
     len += odcid.len;
-    const body_len = @min(retry_packet_no_tag.len, pseudo_buf.len - len);
-    @memcpy(pseudo_buf[len..][0..body_len], retry_packet_no_tag[0..body_len]);
-    len += body_len;
+    const bodyLen = @min(retryPacketNoTag.len, pseudo_buf.len - len);
+    @memcpy(pseudo_buf[len..][0..bodyLen], retryPacketNoTag[0..bodyLen]);
+    len += bodyLen;
 
     var empty: [0]u8 = .{};
-    const zero_iv: [12]u8 = retry_keys_v1.nonce;
-    Aes128Gcm.encrypt(tag_out[0..0], tag_out, empty[0..], pseudo_buf[0..len], zero_iv, retry_keys_v1.key);
+    const zero_iv: [12]u8 = retryKeysV1.nonce;
+    Aes128Gcm.encrypt(tagOut[0..0], tagOut, empty[0..], pseudo_buf[0..len], zero_iv, retryKeysV1.key);
 }
 
 // Tests
@@ -336,12 +336,12 @@ test "unprotecting RFC 9001 A.2 protected header recovers original" {
     @memcpy(buf[0..22], hdr[0..]);
     @memcpy(buf[22..], payload_sample[0..]);
 
-    const pn_offset = 18;
+    const pnOffset = 18;
     // Exposed low 2 bits of the FIRST PROTECTED PN byte give the length.
-    const pn_len: usize = (@as(usize, protected[pn_offset]) & 0x03) + 1;
-    try std.testing.expectEqual(@as(usize, 4), pn_len);
+    const pnLen: usize = (@as(usize, protected[pnOffset]) & 0x03) + 1;
+    try std.testing.expectEqual(@as(usize, 4), pnLen);
 
-    const first = removeHeaderProtection(buf[0..], pn_offset, pn_len, .aes, .{
+    const first = removeHeaderProtection(buf[0..], pnOffset, pnLen, .aes, .{
         0x9f, 0x50, 0x44, 0x9e, 0x04, 0xa0, 0xe8, 0x10,
         0x28, 0x3a, 0x1e, 0x99, 0x33, 0xad, 0xed, 0xd2,
     });
@@ -351,10 +351,10 @@ test "unprotecting RFC 9001 A.2 protected header recovers original" {
     try std.testing.expectEqual(@as(u8, 0x44), buf[16]);
     try std.testing.expectEqual(@as(u8, 0x9e), buf[17]);
     // PN recovered = 00 00 00 02
-    try std.testing.expectEqual(@as(u8, 0x00), buf[pn_offset]);
-    try std.testing.expectEqual(@as(u8, 0x00), buf[pn_offset + 1]);
-    try std.testing.expectEqual(@as(u8, 0x00), buf[pn_offset + 2]);
-    try std.testing.expectEqual(@as(u8, 0x02), buf[pn_offset + 3]);
+    try std.testing.expectEqual(@as(u8, 0x00), buf[pnOffset]);
+    try std.testing.expectEqual(@as(u8, 0x00), buf[pnOffset + 1]);
+    try std.testing.expectEqual(@as(u8, 0x00), buf[pnOffset + 2]);
+    try std.testing.expectEqual(@as(u8, 0x02), buf[pnOffset + 3]);
 }
 
 test "payload seal/open roundtrip and tamper detection" {
@@ -385,7 +385,7 @@ test "pn encoding length selection" {
 }
 
 test "pn reconstruction window behavior" {
-    // RFC-style: largest_acked near value; truncated low byte.
+    // RFC-style: largestAcked near value; truncated low byte.
     // expected = 0xac5c02 + 1 case from spec examples family.
     const got = reconstructPn(0xac5c02 + 1, 0x9b, 1);
     try std.testing.expect(got > 0xac5c02 + 1 - 128 and got < 0xac5c02 + 1 + 128);

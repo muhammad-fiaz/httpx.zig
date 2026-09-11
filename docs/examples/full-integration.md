@@ -34,7 +34,7 @@ fn handleRoot(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "HTTPX production server running",
-        .content_type = "text/plain; charset=utf-8",
+        .contentType = "text/plain; charset=utf-8",
     };
 }
 
@@ -48,7 +48,7 @@ fn handleCreateUser(ctx: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 201,
         .body = formatted,
-        .content_type = "application/json",
+        .contentType = "application/json",
     };
 }
 

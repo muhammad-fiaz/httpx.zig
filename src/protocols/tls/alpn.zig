@@ -77,11 +77,6 @@ pub const DEFAULT_TCP_PREFERENCE = [_]Protocol{ .h2, .@"http/1.1", .@"http/1.0" 
 /// Parses an ALPN ProtocolNameList body (without extension header):
 /// sequence of u8-length-prefixed names.
 pub fn parseList(allocator: Allocator, body: []const u8) Error![]const []const u8 {
-    return parseListWithAllocator(allocator, body);
-}
-
-/// Parses an ALPN ProtocolNameList body with explicit allocator.
-pub fn parseListWithAllocator(allocator: Allocator, body: []const u8) Error![]const []const u8 {
     if (body.len > MAX_LIST_LENGTH) return Error.ListTooLarge;
     var names = std.ArrayList([]const u8).empty;
     errdefer names.deinit(allocator);
@@ -103,9 +98,9 @@ pub fn parseListWithAllocator(allocator: Allocator, body: []const u8) Error![]co
 pub fn buildList(allocator: Allocator, protocols: []const Protocol) ![]u8 {
     var size: usize = 0;
     for (protocols) |p| {
-        const name_len = p.wireName().len;
-        if (name_len == 0 or name_len > MAX_PROTOCOL_NAME_LENGTH) return Error.ListTooLarge;
-        size = std.math.add(usize, size, 1 + name_len) catch return Error.ListTooLarge;
+        const nameLen = p.wireName().len;
+        if (nameLen == 0 or nameLen > MAX_PROTOCOL_NAME_LENGTH) return Error.ListTooLarge;
+        size = std.math.add(usize, size, 1 + nameLen) catch return Error.ListTooLarge;
         if (size > MAX_LIST_LENGTH) return Error.ListTooLarge;
     }
 
@@ -123,9 +118,9 @@ pub fn buildList(allocator: Allocator, protocols: []const Protocol) ![]u8 {
 
 /// Server-side negotiation: pick first client-offered protocol that we support,
 /// honoring OUR preference order (server preference wins per RFC 7301 3.2).
-pub fn negotiateServer(ours: []const Protocol, theirs_wire: []const []const u8) ?Protocol {
+pub fn negotiateServer(ours: []const Protocol, theirsWire: []const []const u8) ?Protocol {
     for (ours) |candidate| {
-        for (theirs_wire) |offered| {
+        for (theirsWire) |offered| {
             if (std.mem.eql(u8, candidate.wireName(), offered)) return candidate;
         }
     }
@@ -133,9 +128,9 @@ pub fn negotiateServer(ours: []const Protocol, theirs_wire: []const []const u8) 
 }
 
 /// Client-side validation: the selected protocol must be one we offered.
-pub fn validateClientSelection(we_offered: []const Protocol, selected_wire: []const u8) ?Protocol {
-    for (we_offered) |p| {
-        if (std.mem.eql(u8, p.wireName(), selected_wire)) return p;
+pub fn validateClientSelection(weOffered: []const Protocol, selectedWire: []const u8) ?Protocol {
+    for (weOffered) |p| {
+        if (std.mem.eql(u8, p.wireName(), selectedWire)) return p;
     }
     return null;
 }

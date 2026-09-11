@@ -55,6 +55,7 @@ const Inflight = struct {
 
 pub const Cache = struct {
     allocator: Allocator,
+    io: std.Io,
     cfg: Config,
     mu: sync.Spinlock = .{},
     entries: std.StringHashMap(Entry),
@@ -70,12 +71,14 @@ pub const Cache = struct {
 
     pub fn init(
         allocator: Allocator,
+        io: std.Io,
         cfg: Config,
         lookupFn: LookupFn,
         lookupCtx: ?*anyopaque,
     ) Cache {
         return .{
             .allocator = allocator,
+            .io = io,
             .cfg = cfg,
             .entries = std.StringHashMap(Entry).init(allocator),
             .inflight = std.StringHashMap(*Inflight).init(allocator),
@@ -107,7 +110,7 @@ pub const Cache = struct {
 
     /// Resolve `name` via cache / inflight-join / fresh lookup.
     /// Caller owns returned slices.
-    pub fn resolve(self: *Cache, io: std.Io, name: []const u8) LookupError![]const []const u8 {
+    pub fn resolve(self: *Cache, name: []const u8) LookupError![]const []const u8 {
         const now = clock.millisNow();
 
         self.mu.lock();
@@ -172,7 +175,7 @@ pub const Cache = struct {
         self.mu.unlock();
 
         // Network I/O strictly outside the lock.
-        const outcome = self.lookupFn(self.lookupCtx, io, name, self.allocator);
+        const outcome = self.lookupFn(self.lookupCtx, self.io, name, self.allocator);
         var fresh: []const []const u8 = &.{};
         var failed_err: ?LookupError = null;
         if (outcome) |ok_addrs| {
@@ -318,12 +321,12 @@ fn freeAll(a: Allocator, addrs: []const []const u8) void {
 
 test "cache hit avoids second lookup" {
     var fake = FakeResolver{};
-    var c = Cache.init(std.testing.allocator, .{}, FakeResolver.lookup, &fake);
+    var c = Cache.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{}, FakeResolver.lookup, &fake);
     defer c.deinit();
 
-    const r1 = try c.resolve(undefined, "example.com");
+    const r1 = try c.resolve("example.com");
     defer freeAll(std.testing.allocator, r1);
-    const r2 = try c.resolve(undefined, "example.com");
+    const r2 = try c.resolve("example.com");
     defer freeAll(std.testing.allocator, r2);
 
     try std.testing.expectEqual(@as(u32, 1), fake.calls.load(.monotonic));
@@ -332,23 +335,23 @@ test "cache hit avoids second lookup" {
 
 test "negative answers are cached briefly" {
     var fake = FakeResolver{};
-    var c = Cache.init(std.testing.allocator, .{}, FakeResolver.lookup, &fake);
+    var c = Cache.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{}, FakeResolver.lookup, &fake);
     defer c.deinit();
 
-    try std.testing.expectError(error.DnsFailed, c.resolve(undefined, "bad.example"));
-    try std.testing.expectError(error.DnsFailed, c.resolve(undefined, "bad.example"));
+    try std.testing.expectError(error.DnsFailed, c.resolve("bad.example"));
+    try std.testing.expectError(error.DnsFailed, c.resolve("bad.example"));
     try std.testing.expectEqual(@as(u32, 1), fake.calls.load(.monotonic));
 }
 
 test "concurrent resolvers coalesce into one lookup" {
     var fake = FakeResolver{ .delayLoops = 50000 };
-    var c = Cache.init(std.testing.allocator, .{}, FakeResolver.lookup, &fake);
+    var c = Cache.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{}, FakeResolver.lookup, &fake);
     defer c.deinit();
 
     const Worker = struct {
         fn run(cache: *Cache, done: *std.atomic.Value(u32)) void {
             defer _ = done.fetchAdd(1, .monotonic);
-            const r = cache.resolve(undefined, "coalesce.test") catch return;
+            const r = cache.resolve("coalesce.test") catch return;
             for (r) |a| cache.allocator.free(a);
             cache.allocator.free(r);
         }

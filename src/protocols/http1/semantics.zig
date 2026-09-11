@@ -22,7 +22,7 @@ pub const Limits = struct {
     maxBodyBytes: usize = 64 * 1024 * 1024,
 };
 
-pub const default_limits = Limits{};
+pub const defaultLimits = Limits{};
 
 // Request-target forms (RFC 9112 section 3.2)
 
@@ -167,8 +167,8 @@ pub fn shouldKeepAlive(
 
 /// True when framing is unambiguous enough to allow reuse (e.g. never
 /// reuse after a close-delimited response).
-pub fn reusableAfter(framing_kind: anytype) bool {
-    return switch (framing_kind) {
+pub fn reusableAfter(framingKind: anytype) bool {
+    return switch (framingKind) {
         .none => false, // close-delimited consumed the connection
         .tunnel => false,
         else => true,
@@ -198,8 +198,8 @@ pub fn bodylessStatus(status: u16) bool {
 }
 
 /// A response to HEAD carries metadata but no payload bytes.
-pub fn responseHasBody(method_head: bool, status: u16) bool {
-    if (method_head) return false;
+pub fn responseHasBody(methodHead: bool, status: u16) bool {
+    if (methodHead) return false;
     if (bodylessStatus(status)) return false;
     return true;
 }

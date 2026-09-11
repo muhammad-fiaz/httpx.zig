@@ -4,7 +4,7 @@ Demonstrates candidate address resolution for dual-stack hostnames and IP litera
 
 ## Unified Candidate Resolution
 
-In HTTPX, a single canonical method — `client.resolve(host, port, .{})` — resolves and returns all candidate addresses in system preference order (RFC 3484). There is no need for separate `resolve` vs `resolveAll` functions:
+In HTTPX, a single canonical method — `client.resolve(host, .{ .port = 443 })` — resolves and returns all candidate addresses in system preference order (RFC 3484). There is no need for separate `resolve` vs `resolveAll` functions:
 
 * Access the primary address: `addresses.first()`
 * Access all candidate addresses: `addresses.items` or `addresses.slice()`
@@ -26,7 +26,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // 1. Resolve host with multiple candidate IP addresses
-    var candidates = try client.resolve("httpbun.com", 443, .{});
+    var candidates = try client.resolve("httpbun.com", .{ .port = 443 });
     defer candidates.deinit();
 
     std.debug.print("Found {d} candidate address(es):\n", .{candidates.len()});
@@ -40,7 +40,7 @@ pub fn main() !void {
     }
 
     // 2. IP literal pass-through (bypasses DNS automatically)
-    var literal = try client.resolve("127.0.0.1", 8080, .{});
+    var literal = try client.resolve("127.0.0.1", .{ .port = 8080 });
     defer literal.deinit();
 
     if (literal.first()) |primary| {

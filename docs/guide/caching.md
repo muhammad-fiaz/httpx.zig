@@ -15,22 +15,21 @@ Key mechanisms supported:
 
 ## Client-Side Caching
 
-When configured with client-side caching, HTTPX automatically manages an in-memory cache store:
+HTTPX does not yet implement an HTTP response cache (RFC 9111 client cache):
+there is no `enable_cache` option on `Client.init` — the client exposes DNS
+caching only (`ClientConfig.dnsCache`). Send conditional headers (`If-None-Match`,
+`If-Modified-Since`) explicitly per request and handle `304` responses in the
+caller:
 
 ```zig
-var client = httpx.Client.init(allocator, io, .{
-    .enable_cache = true,
-});
+var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 
-// First request: Cache miss -> 200 OK
-const res1 = try client.get("https://api.example.com/items", .{});
-defer res1.deinit();
-
-// Second request: Evaluates Cache-Control. Revalidates with If-None-Match.
-// If unmodified, returns cached body with 304 revalidation transparently.
-const res2 = try client.get("https://api.example.com/items", .{});
-defer res2.deinit();
+var res = try client.get("https://api.example.com/items", .{
+    .headers = &.{.{ .name = "If-None-Match", .value = cached_etag }},
+});
+defer res.deinit();
+// 304 here means "use your stored copy".
 ```
 
 ---
@@ -40,23 +39,28 @@ defer res2.deinit();
 In server handlers, you can easily attach ETags and cache headers:
 
 ```zig
-server.get("/api/catalog", struct {
-    fn handle(ctx: *httpx.Context) !void {
-        const etag = "\"catalog-v1.4\"";
-        ctx.header("Cache-Control", "public, max-age=300, must-revalidate");
-        ctx.header("ETag", etag);
+fn catalogHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    const etag = "\"catalog-v1.4\"";
 
-        // Check if client provided matching If-None-Match
-        if (ctx.header("If-None-Match")) |client_etag| {
-            if (std.mem.eql(u8, client_etag, etag)) {
-                ctx.status(304);
-                return;
-            }
+    // Check if client provided matching If-None-Match
+    if (ctx.header("If-None-Match")) |client_etag| {
+        if (std.mem.eql(u8, client_etag, etag)) {
+            return .{ .status = 304 };
         }
-
-        try ctx.json(.{ .products = &.{ "Widget A", "Widget B" } });
     }
-}.handle);
+
+    return .{
+        .status = 200,
+        .body = "{\"products\":[\"Widget A\",\"Widget B\"]}",
+        .contentType = "application/json",
+        .headers = &.{
+            .{ .name = "Cache-Control", .value = "public, max-age=300, must-revalidate" },
+            .{ .name = "ETag", .value = etag },
+        },
+    };
+}
+
+// try server.get("/api/catalog", catalogHandler);
 ```
 
 Static file serving (`server.static`) automatically computes and attaches ETags based on file modification times and file size.

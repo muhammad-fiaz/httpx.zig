@@ -198,10 +198,10 @@ pub fn extractForms(tree: *const Tree, allocator: Allocator) ![]Form {
 fn extractFormFields(
     tree: *const Tree,
     allocator: Allocator,
-    form_idx: u32,
+    formIdx: u32,
     fields: *std.ArrayList(FormField),
 ) !void {
-    var fw = try tree.walk(allocator, form_idx);
+    var fw = try tree.walk(allocator, formIdx);
     defer fw.deinit();
     _ = fw.next();
 
@@ -344,11 +344,26 @@ pub fn extractText(tree: *const Tree, allocator: Allocator) ![]u8 {
     return extractNodeText(tree, 0, allocator);
 }
 
-pub fn extractNodeText(tree: *const Tree, root_idx: u32, allocator: Allocator) ![]u8 {
+test "extraction consumes tree-sitter-derived dom" {
+    const html = @import("html.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const al = arena.allocator();
+    var tree = try html.parse(al, "<html><head><title>T</title></head><body><a href=\"/a\">A</a><img src=\"i.png\" alt=\"I\"></body></html>", .{});
+    const links = try extractLinks(&tree, al);
+    try std.testing.expectEqual(@as(usize, 1), links.len);
+    try std.testing.expectEqualStrings("/a", links[0].href);
+    const meta = try extractMetadata(&tree, al);
+    try std.testing.expectEqualStrings("T", meta.title);
+    const images = try extractImages(&tree, al);
+    try std.testing.expectEqual(@as(usize, 1), images.len);
+}
+
+pub fn extractNodeText(tree: *const Tree, rootIdx: u32, allocator: Allocator) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    var w = try tree.walk(allocator, root_idx);
+    var w = try tree.walk(allocator, rootIdx);
     defer w.deinit();
 
     while (w.next()) |idx| {

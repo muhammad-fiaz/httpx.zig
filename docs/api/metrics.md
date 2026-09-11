@@ -7,7 +7,7 @@ Located in `src/web/metrics/` (`registry.zig`, `snapshot.zig`).
 ## Registry
 
 `httpx.metrics.Registry` (aliased as `httpx.Metrics`) holds atomic counters,
-gauges, and a latency histogram. The server owns one (`server.metrics_registry`)
+gauges, and a latency histogram. The server owns one (`server.metricsRegistry`)
 and records automatically; use the API below for custom instrumentation.
 
 | Method | Description |
@@ -15,7 +15,7 @@ and records automatically; use the API below for custom instrumentation.
 | `recordRequest()` | Increment total requests (+1 in-flight) |
 | `recordRequestMethod(method)` | Count by method (`GET`, `POST`, …) |
 | `recordResponse(bytes)` | Increment responses, decrement in-flight, add bytes out |
-| `recordResponseFull(status, duration_ns, bytes)` | Response + status class + latency sample |
+| `recordResponseFull(status, durationNs, bytes)` | Response + status class + latency sample |
 | `recordStatus(status)` | Bucket a status code (`status2xx`…`status5xx`) |
 | `recordError()` | Increment errors (decrements in-flight) |
 | `recordBytesIn(n)` / `recordBytesOut(n)` | Byte counters |

@@ -23,8 +23,9 @@ pub const ParseLimits = parser.ParseLimits;
 pub const HandlerConfig = server.HandlerConfig;
 pub const mount = server.mount;
 pub const unmount = server.unmount;
-pub const query = @import("../../client/client.zig").globalGraphql;
-pub const execute = @import("../../client/client.zig").globalGraphql;
+// NOTE: client GraphQL requests live on Client.graphql
+// (client.graphql(url, query, variables, .{})); they are not
+// re-exported here to keep server/client namespaces distinct.
 
 test {
     _ = ast;

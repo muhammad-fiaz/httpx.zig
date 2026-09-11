@@ -1,4 +1,4 @@
-//! Document and Parser — the unified, production-ready parsing API for httpx.zig.
+//! Document and Parser — the unified parsing API for httpx.zig.
 //!
 //! Provides native, ergonomic HTML, XML, RSS/Atom/JSON feeds,
 //! robots.txt, and Sitemap XML parsing with unified allocator lifecycle management,
@@ -17,7 +17,65 @@ const selector = @import("selector.zig");
 const feed = @import("feed.zig");
 const robots = @import("robots.zig");
 const sitemap = @import("sitemap.zig");
-const ts_bridge = @import("treesitter.zig");
+const ts = @import("treesitter");
+
+pub const Point = struct {
+    row: u32 = 0,
+    column: u32 = 0,
+};
+
+pub const SourceRange = struct {
+    startByte: u32 = 0,
+    endByte: u32 = 0,
+    startPoint: Point = .{},
+    endPoint: Point = .{},
+};
+
+pub const TextEdit = struct {
+    startByte: u32 = 0,
+    oldEndByte: u32 = 0,
+    newEndByte: u32 = 0,
+    startPoint: Point = .{},
+    oldEndPoint: Point = .{},
+    newEndPoint: Point = .{},
+};
+
+pub fn pointForOffset(source: []const u8, offset: usize) Point {
+    const clamped = @min(offset, source.len);
+    var row: u32 = 0;
+    var col: u32 = 0;
+    for (source[0..clamped]) |b| {
+        if (b == '\n') {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    return .{ .row = row, .column = col };
+}
+
+pub fn computeEditFor(oldSource: []const u8, startByte: usize, oldLen: usize, newLen: usize, newSource: []const u8) TextEdit {
+    return .{
+        .startByte = @intCast(startByte),
+        .oldEndByte = @intCast(startByte + oldLen),
+        .newEndByte = @intCast(startByte + newLen),
+        .startPoint = pointForOffset(oldSource, startByte),
+        .oldEndPoint = pointForOffset(oldSource, startByte + oldLen),
+        .newEndPoint = pointForOffset(newSource, startByte + newLen),
+    };
+}
+
+pub fn toInputEdit(edit: TextEdit) ts.InputEdit {
+    return .{
+        .start_byte = edit.startByte,
+        .old_end_byte = edit.oldEndByte,
+        .new_end_byte = edit.newEndByte,
+        .start_point = .{ .row = edit.startPoint.row, .column = edit.startPoint.column },
+        .old_end_point = .{ .row = edit.oldEndPoint.row, .column = edit.oldEndPoint.column },
+        .new_end_point = .{ .row = edit.newEndPoint.row, .column = edit.newEndPoint.column },
+    };
+}
 
 pub const ContentKind = enum {
     html,
@@ -156,11 +214,11 @@ pub const NodeHandle = struct {
         }
     }
 
-    pub fn replaceText(self: NodeHandle, new_text: []const u8) !void {
+    pub fn replaceText(self: NodeHandle, newText: []const u8) !void {
         if (self.arena) |a| {
             const al = a.allocator();
             const tree_mut = @constCast(self.tree);
-            const duped = try al.dupe(u8, new_text);
+            const duped = try al.dupe(u8, newText);
             const node = tree_mut.getMut(self.nodeIdx);
             if (node.kind == .text) {
                 node.data = duped;
@@ -226,9 +284,9 @@ pub const Document = struct {
         return extract.extractText(&self.tree, self.arenaAllocator());
     }
 
-    pub fn select(self: *const Document, css_selector: []const u8) !NodeList {
+    pub fn select(self: *const Document, cssSelector: []const u8) !NodeList {
         const al = self.arenaAllocator();
-        var parsed = try selector.parseSelector(al, css_selector);
+        var parsed = try selector.parseSelector(al, cssSelector);
         defer parsed.deinit();
         const matches = try selector.selectAll(al, &self.tree, 0, &parsed);
         return NodeList{
@@ -239,9 +297,9 @@ pub const Document = struct {
         };
     }
 
-    pub fn selectFirst(self: *const Document, css_selector: []const u8) !?NodeHandle {
+    pub fn selectFirst(self: *const Document, cssSelector: []const u8) !?NodeHandle {
         const al = self.arenaAllocator();
-        var parsed = try selector.parseSelector(al, css_selector);
+        var parsed = try selector.parseSelector(al, cssSelector);
         defer parsed.deinit();
         if (try selector.selectFirst(al, &self.tree, 0, &parsed)) |idx| {
             return NodeHandle{
@@ -274,16 +332,24 @@ pub const Document = struct {
     }
 
     /// Computes an incremental edit descriptor between current source and new source.
-    pub fn computeEdit(self: *const Document, startByte: usize, old_len: usize, new_len: usize, new_source: []const u8) ts_bridge.InputEdit {
-        return ts_bridge.computeEdit(self.source, startByte, old_len, new_len, new_source);
+    pub fn computeEdit(self: *const Document, startByte: usize, oldLen: usize, newLen: usize, newSource: []const u8) TextEdit {
+        return computeEditFor(self.source, startByte, oldLen, newLen, newSource);
     }
 
-    /// Incrementally updates the document with new source content, reusing unchanged tree nodes.
-    pub fn incrementalUpdate(self: *Document, newSource: []const u8) !void {
+    /// Incrementally updates the document with new source content.
+    /// Runs a Tree-sitter incremental reparse of the HTML source to obtain
+    /// changed ranges (structurally aware), then rebuilds the DOM in a fresh
+    /// arena. Re-query after updating: prior handles are invalidated.
+    /// Returns the number of changed ranges detected.
+    pub fn incrementalUpdate(self: *Document, newSource: []const u8) !usize {
+        const changed = try html.changedRanges(self.allocator, self.source, newSource);
+        self.arena.deinit();
+        self.arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer self.arena.deinit();
         const al = self.arenaAllocator();
-        const new_tree = try html.parse(al, newSource, .{});
-        self.tree = new_tree;
+        self.tree = try html.parse(al, newSource, .{});
         self.source = newSource;
+        return changed;
     }
 
     /// Convenience static constructors matching `Document.parseHtml(...)`
@@ -361,12 +427,12 @@ pub const Parser = struct {
         errdefer buf.deinit(al);
 
         var chunk_buf: [4096]u8 = undefined;
-        var total_read: usize = 0;
+        var totalRead: usize = 0;
         while (true) {
             const n = reader.readSliceShort(&chunk_buf) catch break;
             if (n == 0) break;
-            total_read += n;
-            if (total_read > maxSize) return error.InputTooLarge;
+            totalRead += n;
+            if (totalRead > maxSize) return error.InputTooLarge;
             try buf.appendSlice(al, chunk_buf[0..n]);
         }
 
@@ -397,6 +463,48 @@ pub const Parser = struct {
         return selector.parseSelector(self.allocator, sel);
     }
 };
+
+test "edit vocabulary tracks points across replacement" {
+    const old_s = "hello\nworld";
+    const new_s = "hello\nbeautiful world";
+    const edit = computeEditFor(old_s, 6, 0, 10, new_s);
+    try std.testing.expectEqual(@as(u32, 6), edit.startByte);
+    try std.testing.expectEqual(@as(u32, 6), edit.oldEndByte);
+    try std.testing.expectEqual(@as(u32, 16), edit.newEndByte);
+    try std.testing.expectEqual(@as(u32, 1), edit.startPoint.row);
+    try std.testing.expectEqual(@as(u32, 0), edit.startPoint.column);
+    const input_edit = toInputEdit(edit);
+    try std.testing.expectEqual(@as(u32, 6), input_edit.start_byte);
+    try std.testing.expectEqual(@as(u32, 16), input_edit.new_end_byte);
+}
+
+test "incremental update reparses and reports changed ranges" {
+    const a = std.testing.allocator;
+    var doc = try Parser.init(a, .{}).parseHtml("<p>one</p>");
+    defer doc.deinit();
+    const changed = try doc.incrementalUpdate("<p>one</p><p>two</p>");
+    try std.testing.expect(changed > 0);
+    var paras = try doc.select("p");
+    defer paras.deinit();
+    try std.testing.expectEqual(@as(usize, 2), paras.len());
+}
+
+test "tree-sitter incremental query proves execution" {
+    const a = std.testing.allocator;
+    var parser = ts.Parser.init(a);
+    defer parser.deinit();
+    try parser.setLanguage(html.htmlLanguage);
+    var tree = try parser.parseString("<div><span>hi</span></div>");
+    defer tree.deinit();
+    try std.testing.expect(!tree.hasError());
+    try std.testing.expectEqualStrings("program", tree.rootNode().nodeType());
+    var query = try ts.Query.compile(a, html.htmlLanguage, "(text) @t");
+    defer query.deinit();
+    var qcursor = ts.QueryCursor.init(a);
+    defer qcursor.deinit();
+    try qcursor.execute(html.htmlLanguage, query.patterns(), query.nodes(), query.captureNames(), &tree);
+    try std.testing.expect(qcursor.matchCount() > 0);
+}
 
 pub fn detectKind(source: []const u8, contentType: ?[]const u8) ContentKind {
     if (contentType) |ct| {

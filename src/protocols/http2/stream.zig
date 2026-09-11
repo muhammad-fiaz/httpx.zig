@@ -40,8 +40,8 @@ pub const ErrorCode = enum(u32) {
 
 pub const State = enum {
     idle,
-    reserved_local,
-    reserved_remote,
+    reservedLocal,
+    reservedRemote,
     open,
     half_closed_local,
     half_closed_remote,
@@ -63,7 +63,7 @@ pub const State = enum {
     /// half_closed_remote allows the response side of an exchange.
     pub fn canSendHeaders(self: State) bool {
         return switch (self) {
-            .idle, .reserved_local, .open, .half_closed_remote => true,
+            .idle, .reservedLocal, .open, .half_closed_remote => true,
             else => false,
         };
     }
@@ -76,7 +76,7 @@ pub const State = enum {
     /// May we receive HEADERS (trailers included)?
     pub fn canRecvHeaders(self: State) bool {
         return switch (self) {
-            .idle, .reserved_remote, .open => true,
+            .idle, .reservedRemote, .open => true,
             else => false,
         };
     }
@@ -92,62 +92,66 @@ pub const Stream = struct {
     state: State = .idle,
 
     // Flow control (RFC 9113 section 5.2)
-    send_window: i64 = DEFAULT_WINDOW_SIZE,
-    recv_window: i64 = DEFAULT_WINDOW_SIZE,
+    sendWindow: i64 = DEFAULT_WINDOW_SIZE,
+    recvWindow: i64 = DEFAULT_WINDOW_SIZE,
     /// Bytes received but not yet credited back via WINDOW_UPDATE.
-    recv_pending: i64 = 0,
+    recvPending: i64 = 0,
 
-    end_headers: bool = false,
-    end_stream_sent: bool = false,
-    end_stream_recv: bool = false,
-    reset_by_us: bool = false,
-    reset_code: u32 = 0,
+    endHeaders: bool = false,
+    endStreamSent: bool = false,
+    endStreamRecv: bool = false,
+    resetByUs: bool = false,
+    resetCode: u32 = 0,
 
     /// Assembled header block fragments (HEADERS + CONTINUATION chain).
-    header_block: ?std.ArrayList(u8) = null,
+    headerBlock: ?std.ArrayList(u8) = null,
     /// Reassembled DATA payload for buffered consumers.
-    data_buf: ?std.ArrayList(u8) = null,
+    dataBuf: ?std.ArrayList(u8) = null,
 
     pub fn init(allocator: Allocator, id: u31) Stream {
         return .{ .id = id, .allocator = allocator };
     }
 
     pub fn deinit(self: *Stream) void {
-        if (self.header_block) |*b| b.deinit(self.allocator);
-        if (self.data_buf) |*b| b.deinit(self.allocator);
+        if (self.headerBlock) |*b| b.deinit(self.allocator);
+        if (self.dataBuf) |*b| b.deinit(self.allocator);
     }
 
     // -- send-side transitions ------------------------------------------------
 
-    pub fn onSendHeaders(self: *Stream, end_stream: bool) error{InvalidState}!void {
+    pub fn onSendHeaders(self: *Stream, endStream: bool) error{InvalidState}!void {
         if (!self.state.canSendHeaders()) return error.InvalidState;
-        if (self.end_stream_sent) return error.InvalidState;
+        if (self.endStreamSent) return error.InvalidState;
         switch (self.state) {
-            .idle => self.state = if (end_stream) State.half_closed_local else State.open,
-            .reserved_local => self.state = .half_closed_remote,
+            .idle => self.state = if (endStream) State.half_closed_local else State.open,
+            .reservedLocal => self.state = .half_closed_remote,
             .open => {
-                if (end_stream) self.state = .half_closed_local;
+                if (endStream) self.state = .half_closed_local;
             },
             // Response/trailer headers on a half-closed(remote) stream do
             // not change our own direction; END_STREAM closes it.
             .half_closed_remote => {
-                if (end_stream) self.state = .closed;
+                if (endStream) self.state = .closed;
             },
             else => return error.InvalidState,
         }
-        if (end_stream) self.end_stream_sent = true;
+        if (endStream) self.endStreamSent = true;
     }
 
-    pub fn onSendData(self: *Stream, end_stream: bool) error{InvalidState}!void {
-        if (!self.state.canSendData() or self.end_stream_sent) return error.InvalidState;
-        if (end_stream) {
-            self.state = .half_closed_local;
-            self.end_stream_sent = true;
+    pub fn onSendData(self: *Stream, endStream: bool) error{InvalidState}!void {
+        if (!self.state.canSendData() or self.endStreamSent) return error.InvalidState;
+        if (endStream) {
+            // A sender that already received END_STREAM closes fully here
+            // (mirrors onSendHeaders); otherwise it half-closes its side.
+            // Getting this wrong leaks the stream (and, server-side, the
+            // concurrency slot) forever.
+            self.state = if (self.state == .half_closed_remote) .closed else .half_closed_local;
+            self.endStreamSent = true;
         }
     }
 
     pub fn onSendRst(self: *Stream) void {
-        self.reset_by_us = true;
+        self.resetByUs = true;
         self.state = .closed;
     }
 
@@ -158,49 +162,49 @@ pub const Stream = struct {
         ProtocolError,
     };
 
-    pub fn onRecvHeaders(self: *Stream, end_stream: bool) RecvError!void {
+    pub fn onRecvHeaders(self: *Stream, endStream: bool) RecvError!void {
         switch (self.state) {
             .idle => {
-                self.state = if (end_stream) .half_closed_remote else .open;
-                self.end_stream_recv = end_stream;
+                self.state = if (endStream) .half_closed_remote else .open;
+                self.endStreamRecv = endStream;
             },
-            .reserved_remote => {
-                self.state = if (end_stream) .closed else .half_closed_local;
-                self.end_stream_recv = end_stream;
+            .reservedRemote => {
+                self.state = if (endStream) .closed else .half_closed_local;
+                self.endStreamRecv = endStream;
             },
             .open => {
-                if (end_stream) {
+                if (endStream) {
                     self.state = .half_closed_remote;
-                    self.end_stream_recv = true;
+                    self.endStreamRecv = true;
                 }
             },
             .half_closed_local => {
-                if (end_stream) {
+                if (endStream) {
                     self.state = .closed;
-                    self.end_stream_recv = true;
+                    self.endStreamRecv = true;
                 }
                 // Trailers without END_STREAM on a half-closed(local) stream:
                 // legal (we may still be sending).
             },
-            .half_closed_remote, .closed, .reserved_local => return RecvError.StreamClosed,
+            .half_closed_remote, .closed, .reservedLocal => return RecvError.StreamClosed,
         }
     }
 
-    pub fn onRecvData(self: *Stream, end_stream: bool) RecvError!void {
+    pub fn onRecvData(self: *Stream, endStream: bool) RecvError!void {
         switch (self.state) {
             .open => {
-                if (end_stream) {
+                if (endStream) {
                     self.state = .half_closed_remote;
-                    self.end_stream_recv = true;
+                    self.endStreamRecv = true;
                 }
             },
             .half_closed_local => {
-                if (end_stream) {
+                if (endStream) {
                     self.state = .closed;
-                    self.end_stream_recv = true;
+                    self.endStreamRecv = true;
                 }
             },
-            .idle, .reserved_local, .reserved_remote => return RecvError.ProtocolError,
+            .idle, .reservedLocal, .reservedRemote => return RecvError.ProtocolError,
             .half_closed_remote, .closed => return RecvError.StreamClosed,
         }
     }
@@ -219,15 +223,15 @@ pub const Stream = struct {
 
     /// Flow-control credit accounting; returns false when overflow.
     pub fn creditSend(self: *Stream, n: i64) bool {
-        self.send_window -= n;
-        return self.send_window >= -MAX_WINDOW_DELTA;
+        self.sendWindow -= n;
+        return self.sendWindow >= -MAX_WINDOW_DELTA;
     }
 
     pub fn consumeRecv(self: *Stream, n: i64) bool {
-        self.recv_window -= n;
-        self.recv_pending += n;
+        self.recvWindow -= n;
+        self.recvPending += n;
         // Overflow beyond -(2^31-1) is FLOW_CONTROL_ERROR at the receiver.
-        return self.recv_window >= -MAX_WINDOW_DELTA;
+        return self.recvWindow >= -MAX_WINDOW_DELTA;
     }
 };
 

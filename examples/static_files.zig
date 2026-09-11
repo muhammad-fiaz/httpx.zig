@@ -27,7 +27,7 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.router.add(.GET, "/healthz", &healthHandler);
+    try server.router.add(.GET, "/healthz", &healthHandler, .{});
     try httpx.static.files.register(&server.router, .{
         .root = "examples/static",
         .mount = "/static",

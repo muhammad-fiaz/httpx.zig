@@ -21,9 +21,17 @@ pub const Entry = struct {
     value: Value,
 };
 
+const parser_mod = @import("parser.zig");
+
 /// Tagged union representing dynamic values inside template evaluation.
+/// `.missing` marks an unresolvable lookup (distinct from explicit null):
+/// it renders empty, is falsy, and drives `is defined` tests plus the
+/// `default` filter. Strict mode turns it into a render error at output.
+/// `.macro` holds a first-class macro reference (e.g. `caller` in call
+/// blocks); it renders empty and is truthy.
 pub const Value = union(enum) {
     nullVal: void,
+    missing: void,
     boolean: bool,
     integer: i64,
     float: f64,
@@ -31,11 +39,14 @@ pub const Value = union(enum) {
     rawHtml: []const u8,
     list: []const Value,
     map: []const Entry,
+    macro: parser_mod.MacroDef,
 
     /// Returns whether this value evaluates to true in conditional contexts.
     pub fn isTruthy(self: Value) bool {
         return switch (self) {
             .nullVal => false,
+            .missing => false,
+            .macro => true,
             .boolean => |b| b,
             .integer => |i| i != 0,
             .float => |f| f != 0.0 and !std.math.isNan(f),
@@ -80,6 +91,7 @@ pub const Value = union(enum) {
     pub fn equals(self: Value, other: Value) bool {
         switch (self) {
             .nullVal => return other == .nullVal,
+            .missing => return other == .missing,
             .boolean => |b| return if (other == .boolean) b == other.boolean else false,
             .integer => |i| {
                 return switch (other) {
@@ -111,6 +123,7 @@ pub const Value = union(enum) {
             },
             .list => return false,
             .map => return false,
+            .macro => return false,
         }
     }
 
@@ -192,14 +205,47 @@ pub const Value = union(enum) {
     }
 };
 
+/// Mutable lexical scope overlay for `{% set %}`, loop variables, and
+/// macro arguments. Scopes chain via `parent`; rendering threads a single
+/// current scope through the AST walk. Storage lives in the Context arena.
+pub const Scope = struct {
+    parent: ?*Scope = null,
+    entries: std.ArrayList(Entry) = .empty,
+
+    pub fn deinit(self: *Scope, allocator: Allocator) void {
+        self.entries.deinit(allocator);
+    }
+
+    pub fn getLocal(self: *const Scope, key: []const u8) ?Value {
+        var s: ?*const Scope = self;
+        while (s) |sc| {
+            for (sc.entries.items) |e| {
+                if (std.mem.eql(u8, e.key, key)) return e.value;
+            }
+            s = sc.parent;
+        }
+        return null;
+    }
+
+    pub fn set(self: *Scope, allocator: Allocator, key: []const u8, value: Value) !void {
+        for (self.entries.items) |*e| {
+            if (std.mem.eql(u8, e.key, key)) {
+                e.value = value;
+                return;
+            }
+        }
+        try self.entries.append(allocator, .{ .key = key, .value = value });
+    }
+};
+
 /// Evaluation context holding template scope values and an arena for temporary allocations.
 pub const Context = struct {
     arena: std.heap.ArenaAllocator,
     root: Value,
 
     /// Initializes a context from an arbitrary Zig struct or Value.
-    pub fn init(base_allocator: Allocator, data: anytype) !Context {
-        var arena = std.heap.ArenaAllocator.init(base_allocator);
+    pub fn init(baseAllocator: Allocator, data: anytype) !Context {
+        var arena = std.heap.ArenaAllocator.init(baseAllocator);
         errdefer arena.deinit();
 
         const root_val = try Value.from(arena.allocator(), data);
@@ -216,6 +262,40 @@ pub const Context = struct {
     /// Looks up a variable or nested path (e.g. "user.profile.name") from the context.
     pub fn get(self: Context, path: []const u8) ?Value {
         return self.root.lookup(path);
+    }
+
+    /// Scope-aware lookup: the first path segment resolves through the scope
+    /// chain (shadowing root), remaining segments traverse the found value.
+    /// A null scope falls back to plain root lookup.
+    pub fn resolve(self: Context, scope: ?*const Scope, path: []const u8) ?Value {
+        const sc = scope orelse return self.get(path);
+        var it = std.mem.splitScalar(u8, path, '.');
+        const first = it.next() orelse return null;
+        if (first.len == 0) return self.get(path);
+        const base = sc.getLocal(first) orelse return self.get(path);
+        var current = base;
+        while (it.next()) |part| {
+            if (part.len == 0) continue;
+            current = switch (current) {
+                .map => |entries| blk: {
+                    var found: ?Value = null;
+                    for (entries) |e| {
+                        if (std.mem.eql(u8, e.key, part)) {
+                            found = e.value;
+                            break;
+                        }
+                    }
+                    break :blk found orelse return null;
+                },
+                .list => |items| blk: {
+                    const idx = std.fmt.parseInt(usize, part, 10) catch return null;
+                    if (idx < items.len) break :blk items[idx];
+                    return null;
+                },
+                else => return null,
+            };
+        }
+        return current;
     }
 };
 

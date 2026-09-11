@@ -10,9 +10,9 @@ pub const NewReno = struct {
     cwnd: usize,
     ssthresh: usize = std.math.maxInt(usize),
     /// Start of the most recent congestion recovery epoch.
-    recovery_start_ts_ms: ?u64 = null,
+    recoveryStartTsMs: ?u64 = null,
     /// Congestion-avoidance fractional credit (bytes toward one MSS).
-    ca_pending: usize = 0,
+    caPending: usize = 0,
 
     const max_cwnd_cap: usize = 1 << 30;
 
@@ -27,23 +27,23 @@ pub const NewReno = struct {
         return self.cwnd;
     }
 
-    pub fn inRecovery(self: *const NewReno, sent_ts_ms: u64) bool {
-        const start = self.recovery_start_ts_ms orelse return false;
-        return sent_ts_ms <= start;
+    pub fn inRecovery(self: *const NewReno, sentTsMs: u64) bool {
+        const start = self.recoveryStartTsMs orelse return false;
+        return sentTsMs <= start;
     }
 
     /// Slow start grows +MSS per ACKed MSS; congestion avoidance adds
     /// roughly one MSS per round trip using fractional credit.
-    pub fn onPacketAcked(self: *NewReno, acked_bytes: usize, sent_ts_ms: u64) void {
-        if (self.inRecovery(sent_ts_ms)) return;
+    pub fn onPacketAcked(self: *NewReno, ackedBytes: usize, sentTsMs: u64) void {
+        if (self.inRecovery(sentTsMs)) return;
 
         if (self.cwnd < self.ssthresh) {
-            const grow = @min(acked_bytes, self.mss);
+            const grow = @min(ackedBytes, self.mss);
             self.cwnd += grow;
-        } else if (acked_bytes > 0) {
-            self.ca_pending += acked_bytes;
-            if (self.ca_pending >= self.cwnd) {
-                self.ca_pending -= self.cwnd;
+        } else if (ackedBytes > 0) {
+            self.caPending += ackedBytes;
+            if (self.caPending >= self.cwnd) {
+                self.caPending -= self.cwnd;
                 self.cwnd += self.mss;
             }
         }
@@ -51,19 +51,19 @@ pub const NewReno = struct {
     }
 
     /// Congestion event (new loss or ECN-CE): halve, enter recovery.
-    pub fn onCongestionEvent(self: *NewReno, now_ms: u64) void {
-        self.recovery_start_ts_ms = now_ms;
+    pub fn onCongestionEvent(self: *NewReno, nowMs: u64) void {
+        self.recoveryStartTsMs = nowMs;
         self.ssthresh = @max(self.cwnd / 2, 2 * self.mss);
         self.cwnd = @max(self.cwnd / 2, 2 * self.mss);
-        self.ca_pending = 0;
+        self.caPending = 0;
     }
 
     /// Persistent congestion: collapse to minimum window.
     pub fn onPersistentCongestion(self: *NewReno) void {
         self.ssthresh = @max(self.cwnd / 2, 2 * self.mss);
         self.cwnd = 2 * self.mss;
-        self.recovery_start_ts_ms = null;
-        self.ca_pending = 0;
+        self.recoveryStartTsMs = null;
+        self.caPending = 0;
     }
 };
 
@@ -99,7 +99,7 @@ test "congestion event halves cwnd and blocks same-epoch growth" {
 
     // ACK of a later packet in CA accumulates credit without immediate growth.
     cc.onPacketAcked(1000, 200);
-    try std.testing.expect(cc.ca_pending > 0 or cc.cwnd > pre);
+    try std.testing.expect(cc.caPending > 0 or cc.cwnd > pre);
 }
 
 test "persistent congestion collapses to minimum window" {

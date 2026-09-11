@@ -31,8 +31,8 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.router.add(.GET, "/", helloHandler);
-    try server.router.add(.GET, "/status", statusHandler);
+    try server.router.add(.GET, "/", helloHandler, .{});
+    try server.router.add(.GET, "/status", statusHandler, .{});
 
     const port = server.localPort();
     std.debug.print("HTTP/1.1 server listening on 127.0.0.1:{d}\n", .{port});

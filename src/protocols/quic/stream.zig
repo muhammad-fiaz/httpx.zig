@@ -27,22 +27,22 @@ pub const Stream = struct {
 
     // receive side
     /// Next byte offset the application expects.
-    recv_offset: u64 = 0,
+    recvOffset: u64 = 0,
     /// Largest offset we are willing to receive (our advertised window top).
-    recv_max_offset: u64 = 65_535,
+    recvMaxOffset: u64 = 65_535,
     /// Highest offset ever received (for final-size checks).
-    max_seen_offset: u64 = 0,
-    fin_offset: ?u64 = null,
-    reset_error: ?u64 = null,
+    maxSeenOffset: u64 = 0,
+    finOffset: ?u64 = null,
+    resetError: ?u64 = null,
 
     /// Buffered out-of-order chunks awaiting earlier bytes. Sorted by
     /// offset ascending; non-overlapping.
     pending: std.ArrayList(Chunk) = .empty,
 
     // send side
-    send_max_offset: u64 = 0, // peer-granted limit
-    sent_offset: u64 = 0,
-    fin_queued: bool = false,
+    sendMaxOffset: u64 = 0, // peer-granted limit
+    sentOffset: u64 = 0,
+    finQueued: bool = false,
 
     pub const Chunk = struct { offset: u64, data: []u8 };
 
@@ -57,7 +57,7 @@ pub const Stream = struct {
 
     /// Receive-side flow-control check for an incoming frame span.
     pub fn fcAllows(self: *const Stream, offset: u64, len: u64) bool {
-        return offset +| len <= self.recv_max_offset;
+        return offset +| len <= self.recvMaxOffset;
     }
 
     /// Feeds received stream bytes at `offset`. Delivers contiguous bytes
@@ -70,7 +70,7 @@ pub const Stream = struct {
         fin: bool,
         sink: anytype,
     ) Error!usize {
-        if (self.reset_error != null) return Error.StreamReset;
+        if (self.resetError != null) return Error.StreamReset;
         if (!self.fcAllows(offset, data.len)) return Error.FlowControlViolation;
 
         const end = std.math.add(u64, offset, data.len) catch return Error.FlowControlViolation;
@@ -78,30 +78,30 @@ pub const Stream = struct {
         // Once FIN has established the stream's final size, every later
         // frame must lie entirely at or below that size (RFC 9000 Section
         // 4.5), regardless of whether the duplicate frame repeats FIN.
-        if (self.fin_offset) |final_size| {
-            if (end > final_size) return Error.FinalSizeViolation;
+        if (self.finOffset) |finalSize| {
+            if (end > finalSize) return Error.FinalSizeViolation;
         }
 
         // Final-size consistency (RFC 9000 section 4.5).
         if (fin) {
-            if (self.fin_offset) |prev| {
+            if (self.finOffset) |prev| {
                 if (prev != end) return Error.FinalSizeViolation;
-            } else if (end < self.max_seen_offset) {
+            } else if (end < self.maxSeenOffset) {
                 return Error.FinalSizeViolation;
             }
-            self.fin_offset = end;
+            self.finOffset = end;
         }
-        self.max_seen_offset = @max(self.max_seen_offset, end);
+        self.maxSeenOffset = @max(self.maxSeenOffset, end);
 
         var delivered: usize = 0;
 
-        if (offset == self.recv_offset) {
+        if (offset == self.recvOffset) {
             // Fast path / head of the hole.
             sink.call(data[0..]) catch return Error.OutOfMemory;
             delivered += data.len;
-            self.recv_offset = end;
+            self.recvOffset = end;
             try self.drainContiguous(sink, &delivered);
-        } else if (offset > self.recv_offset) {
+        } else if (offset > self.recvOffset) {
             // Out of order: buffer it.
             const copy = try self.allocator.dupe(u8, data);
             errdefer self.allocator.free(copy);
@@ -111,12 +111,12 @@ pub const Stream = struct {
             if (self.pending.items.len > MAX_BUFFERED_GAPS) return Error.OutOfMemory;
         } else {
             // Partial overlap of already-delivered prefix: trim left.
-            const skip = self.recv_offset - offset;
+            const skip = self.recvOffset - offset;
             if (skip < data.len) {
                 const tail = data[@intCast(skip)..];
                 sink.call(tail) catch return Error.OutOfMemory;
                 delivered += tail.len;
-                self.recv_offset = end;
+                self.recvOffset = end;
                 try self.drainContiguous(sink, &delivered);
             }
         }
@@ -152,51 +152,51 @@ pub const Stream = struct {
 
     fn drainContiguous(self: *Stream, sink: anytype, delivered: *usize) Error!void {
         while (self.pending.items.len > 0 and
-            self.pending.items[0].offset <= self.recv_offset)
+            self.pending.items[0].offset <= self.recvOffset)
         {
             const c = self.pending.items[0];
-            if (c.offset + c.data.len <= self.recv_offset) {
+            if (c.offset + c.data.len <= self.recvOffset) {
                 // Fully redundant.
                 self.allocator.free(c.data);
                 _ = self.pending.orderedRemove(0);
                 continue;
             }
-            const skip: usize = @intCast(self.recv_offset - c.offset);
+            const skip: usize = @intCast(self.recvOffset - c.offset);
             const tail = c.data[skip..];
             sink.call(tail) catch return Error.OutOfMemory;
             delivered.* += tail.len;
-            self.recv_offset += tail.len;
+            self.recvOffset += tail.len;
             self.allocator.free(c.data);
             _ = self.pending.orderedRemove(0);
         }
     }
 
     /// Advertises more receive capacity by `delta` (MAX_STREAM_DATA value
-    /// becomes recv_max_offset + delta).
+    /// becomes recvMaxOffset + delta).
     pub fn extendRecvWindow(self: *Stream, delta: u64) void {
-        self.recv_max_offset += delta;
+        self.recvMaxOffset += delta;
     }
 
     pub fn canReceiveMore(self: *const Stream) bool {
         // Simple half-window policy: grant more once consumed >= 50%.
-        return self.max_seen_offset >= self.recv_max_offset / 2;
+        return self.maxSeenOffset >= self.recvMaxOffset / 2;
     }
 
     pub fn onReset(self: *Stream, code: u64) void {
-        self.reset_error = code;
+        self.resetError = code;
         for (self.pending.items) |c| self.allocator.free(c.data);
         self.pending.clearRetainingCapacity();
     }
 
     /// Sender side: returns how many bytes may be sent now.
-    pub fn sendAllowance(self: *const Stream, conn_allowance: u64) u64 {
-        const granted = self.send_max_offset -| self.sent_offset;
-        return @min(granted, conn_allowance);
+    pub fn sendAllowance(self: *const Stream, connAllowance: u64) u64 {
+        const granted = self.sendMaxOffset -| self.sentOffset;
+        return @min(granted, connAllowance);
     }
 
     pub fn recordSent(self: *Stream, n: u64, fin: bool) void {
-        self.sent_offset += n;
-        if (fin) self.fin_queued = true;
+        self.sentOffset += n;
+        if (fin) self.finQueued = true;
     }
 };
 
@@ -229,7 +229,7 @@ test "in-order delivery passes straight through" {
     _ = try st.receive(0, "hello ", false, &sink);
     _ = try st.receive(6, "world", true, &sink);
     try std.testing.expectEqualStrings("hello world", out.items);
-    try std.testing.expectEqual(@as(u64, 11), st.recv_offset);
+    try std.testing.expectEqual(@as(u64, 11), st.recvOffset);
 }
 
 test "out-of-order chunks buffer then flush" {
@@ -255,7 +255,7 @@ test "flow control violation detected" {
     const a = std.testing.allocator;
     var st = Stream.init(a, 0, true, true);
     defer st.deinit();
-    st.recv_max_offset = 10;
+    st.recvMaxOffset = 10;
     try std.testing.expect(!st.fcAllows(5, 6));
     try std.testing.expect(st.fcAllows(5, 5));
 
@@ -306,7 +306,7 @@ test "send allowance respects peer grants and connection budget" {
     const a = std.testing.allocator;
     var st = Stream.init(a, 0, true, true);
     defer st.deinit();
-    st.send_max_offset = 100;
+    st.sendMaxOffset = 100;
     st.recordSent(30, false);
     try std.testing.expectEqual(@as(u64, 70), st.sendAllowance(1000));
     try std.testing.expectEqual(@as(u64, 20), st.sendAllowance(20));

@@ -1,5 +1,11 @@
 # FTPS (FTP over TLS)
 
+> Status: implemented. `.secure = true` performs explicit FTPS
+> (RFC 4217): `AUTH TLS` → TLS 1.3 handshake → `PBSZ 0` → `PROT P`
+> (or `PROT C` with `protPrivate = false`). A server that refuses the
+> upgrade fails the connection loudly; there is no silent plaintext
+> fallback.
+
 RFC 4217 defines secure FTP extensions via the `AUTH TLS` command, securing authentication credentials and file transfers over encrypted TLS connections.
 
 ## Explicit FTPS Handshake

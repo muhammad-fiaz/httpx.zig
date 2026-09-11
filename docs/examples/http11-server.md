@@ -12,7 +12,7 @@ fn helloHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "HTTP/1.1 keep-alive response",
-        .content_type = "text/plain; charset=utf-8",
+        .contentType = "text/plain; charset=utf-8",
     };
 }
 
@@ -20,7 +20,7 @@ fn statusHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "{\"status\":\"healthy\",\"protocol\":\"HTTP/1.1\"}",
-        .content_type = "application/json",
+        .contentType = "application/json",
     };
 }
 
@@ -37,8 +37,8 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.router.add(.GET, "/", helloHandler);
-    try server.router.add(.GET, "/status", statusHandler);
+    try server.router.add(.GET, "/", helloHandler, .{});
+    try server.router.add(.GET, "/status", statusHandler, .{});
 
     const port = server.localPort();
     std.debug.print("HTTP/1.1 server listening on 127.0.0.1:{d}\n", .{port});
@@ -65,7 +65,7 @@ pub fn main() !void {
     std.debug.print("Client verified status: {d}\n", .{resp.status});
     std.debug.print("Response: {s}\n", .{resp.body});
 
-    server.shutdown();
+    server.requestShutdown();
     thread.join();
 }
 ```

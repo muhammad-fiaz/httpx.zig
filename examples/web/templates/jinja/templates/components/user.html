@@ -1,0 +1,13 @@
+{% macro user_card(user) %}
+<div class="card">
+  <strong>{{ user.name|trim|title }}</strong>
+  <span>{{ user.role|upper }}</span>
+  {% if user.age >= 18 %}
+  <em>adult</em>
+  {% elif user.age >= 13 %}
+  <em>teen</em>
+  {% else %}
+  <em>minor</em>
+  {% endif %}
+</div>
+{% endmacro %}

@@ -26,7 +26,7 @@ const Method = @import("../common/method.zig").Method;
 const docs = @import("../web/docs/docs.zig");
 const http_version = @import("../common/http_version.zig");
 pub const HttpVersion = http_version.HttpVersion;
-const watcher_mod = @import("../web/watcher/watcher.zig");
+const watcher_mod = @import("../web/watcher/backend.zig");
 const templates_mod = @import("../web/templates/templates.zig");
 const tcp_tls_mod = @import("../protocols/tls/tcp_tls.zig");
 const tls_config_mod = @import("../protocols/tls/config.zig");
@@ -161,7 +161,7 @@ fn installShutdownHandler(self: *Server) void {
     const builtin = @import("builtin");
     switch (builtin.os.tag) {
         .windows => {
-            const handler_fn = struct {
+            const handlerFn = struct {
                 fn callback(ctrl_type: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
                     if (ctrl_type <= 2) {
                         if (g_active_server) |s| s.requestShutdown();
@@ -170,17 +170,17 @@ fn installShutdownHandler(self: *Server) void {
                     return @enumFromInt(0);
                 }
             };
-            _ = SetConsoleCtrlHandler(&handler_fn.callback, @enumFromInt(1));
+            _ = SetConsoleCtrlHandler(&handlerFn.callback, @enumFromInt(1));
         },
         else => {
-            const handler_fn = struct {
+            const handlerFn = struct {
                 fn sigHandler(sig: std.posix.SIG) callconv(.c) void {
                     _ = sig;
                     if (g_active_server) |s| s.requestShutdown();
                 }
             };
             var act: std.posix.Sigaction = std.mem.zeroes(std.posix.Sigaction);
-            act.handler = .{ .handler = @ptrCast(&handler_fn.sigHandler) };
+            act.handler = .{ .handler = @ptrCast(&handlerFn.sigHandler) };
             act.flags = 0;
             std.posix.sigaction(std.posix.SIG.INT, &act, null);
         },
@@ -214,11 +214,15 @@ pub const Server = struct {
     docsMounted: bool = false,
     watcher: ?*watcher_mod.Watcher = null,
     liveReloadEventId: std.atomic.Value(usize) = .init(1),
+    /// Last reload strategy reported by the watcher (as a
+    /// `watcher_mod.ReloadStrategy` tag). The SSE endpoint maps it to
+    /// `hotReload` (CSS swap) vs `reload` (full page) payloads.
+    liveReloadStrategy: std.atomic.Value(u8) = .init(1),
     templateEngine: ?*templates_mod.Engine = null,
     tlsServer: ?tcp_tls_mod.TlsServer = null,
     tlsCertPemLoaded: ?[]const u8 = null,
     tlsKeyPemLoaded: ?[]const u8 = null,
-    metrics_registry: metrics_mod.Registry = .{},
+    metricsRegistry: metrics_mod.Registry = .{},
     startTimeMs: i64 = 0,
 
     /// Initializes server with explicit allocator, shared IO, and configuration.
@@ -357,6 +361,10 @@ pub const Server = struct {
                                 .privateKeyPem = loadedKeyPem.?,
                             },
                             .alpnProtocols = t_cfg.alpnProtocols,
+                            .clientAuth = t_cfg.clientAuth,
+                            .clientCaPem = t_cfg.clientCa,
+                            .ticketKeys = t_cfg.ticketKeys,
+                            .ticketLifetimeSecs = t_cfg.ticketLifetimeSecs,
                         });
                     }
                 }
@@ -396,36 +404,46 @@ pub const Server = struct {
     }
 
     pub fn get(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
-        try self.router.get(path, handler);
+        try self.router.get(path, handler, .{});
     }
 
     pub fn post(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
-        try self.router.post(path, handler);
+        try self.router.post(path, handler, .{});
     }
 
     pub fn put(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
-        try self.router.put(path, handler);
+        try self.router.put(path, handler, .{});
     }
 
     pub fn patch(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
-        try self.router.patch(path, handler);
+        try self.router.patch(path, handler, .{});
     }
 
     pub fn delete(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
-        try self.router.delete(path, handler);
+        try self.router.delete(path, handler, .{});
     }
 
     pub fn head(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
-        try self.router.head(path, handler);
+        try self.router.head(path, handler, .{});
     }
 
     pub fn options(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
-        try self.router.options(path, handler);
+        try self.router.options(path, handler, .{});
     }
 
     /// Registers a route with an arbitrary HTTP method.
     pub fn add(self: *Server, method: Method, path: []const u8, handler: *const fn (*Context) anyerror!Response) router_mod.RouteError!void {
-        try self.router.add(method, path, handler);
+        try self.router.add(method, path, handler, .{});
+    }
+
+    /// Creates a prefixed route group on the server router.
+    pub fn group(self: *Server, prefix: []const u8, opts: router_mod.GroupOptions) router_mod.Group {
+        return self.router.group(prefix, opts);
+    }
+
+    /// Mounts another router's entries under `prefix`.
+    pub fn mount(self: *Server, prefix: []const u8, other: *router_mod.Router, opts: router_mod.MountOptions) router_mod.RouteError!void {
+        try self.router.mount(prefix, other, opts);
     }
 
     /// Attaches a global middleware to the server's routing pipeline.
@@ -434,19 +452,19 @@ pub const Server = struct {
     }
 
     /// Mounts a directory of static files under a URL prefix.
-    pub fn static(self: *Server, mount_path: []const u8, dirPath: []const u8) !void {
+    pub fn static(self: *Server, mountPath: []const u8, dirPath: []const u8) !void {
         const static_mod = @import("../web/static_files/serve.zig");
         try static_mod.register(&self.router, .{
-            .mount = mount_path,
+            .mount = mountPath,
             .root = dirPath,
         });
     }
 
     /// Mounts a Single Page Application (SPA) with index fallback.
-    pub fn spa(self: *Server, mount_path: []const u8, dirPath: []const u8) !void {
+    pub fn spa(self: *Server, mountPath: []const u8, dirPath: []const u8) !void {
         const spa_mod = @import("../web/spa/serve.zig");
         try spa_mod.register(&self.router, .{
-            .mount = mount_path,
+            .mount = mountPath,
             .root = dirPath,
         });
     }
@@ -467,12 +485,12 @@ pub const Server = struct {
                 };
             }
         };
-        try self.router.getWithData(path, MetricsHandler.handle, &self.metrics_registry);
+        try self.router.get(path, MetricsHandler.handle, .{ .userData = &self.metricsRegistry });
     }
 
     /// Captures a point-in-time snapshot of the server metrics registry.
     pub fn metricsSnapshot(self: *const Server) metrics_mod.MetricsSnapshot {
-        return self.metrics_registry.snapshot();
+        return self.metricsRegistry.snapshot();
     }
 
     /// Captures a comprehensive runtime snapshot of the server (uptime, throughput, error rate, active connections).
@@ -482,7 +500,7 @@ pub const Server = struct {
             @intCast(now - self.startTimeMs)
         else
             0;
-        const ms = self.metrics_registry.snapshot();
+        const ms = self.metricsRegistry.snapshot();
         return .{
             .uptimeMs = uptime,
             .activeConnections = ms.activeConnections,
@@ -587,6 +605,10 @@ pub const Server = struct {
                 .privateKeyPem = key_str,
             },
             .alpnProtocols = if (self.cfg.tls) |t| t.alpnProtocols else &alpn_mod.DEFAULT_TCP_PREFERENCE,
+            .clientAuth = if (self.cfg.tls) |t| t.clientAuth else .disabled,
+            .clientCaPem = if (self.cfg.tls) |t| t.clientCa else null,
+            .ticketKeys = if (self.cfg.tls) |t| t.ticketKeys else null,
+            .ticketLifetimeSecs = if (self.cfg.tls) |t| t.ticketLifetimeSecs else 7200,
         });
     }
 
@@ -690,6 +712,7 @@ pub const Server = struct {
                 fn onChange(event: watcher_mod.WatchEvent, userData: ?*anyopaque) void {
                     const s: *Server = @ptrCast(@alignCast(userData.?));
                     _ = s.liveReloadEventId.fetchAdd(1, .release);
+                    s.liveReloadStrategy.store(@intFromEnum(event.strategy), .release);
                     if (s.templateEngine) |te| {
                         te.invalidate(event.path);
                     }
@@ -722,7 +745,11 @@ pub const Server = struct {
                     fn handle(ctx: *Context) anyerror!Response {
                         const s: *Server = @ptrCast(@alignCast(ctx.userData.?));
                         const current_id = s.liveReloadEventId.load(.acquire);
-                        const sse_body = try std.fmt.allocPrint(ctx.allocator, "id: {d}\ndata: reload\n\n", .{current_id});
+                        const strat: watcher_mod.ReloadStrategy = @enumFromInt(s.liveReloadStrategy.load(.acquire));
+                        // CSS-only changes hot-swap in the browser; anything
+                        // else is a full page reload (see liveReloadScript).
+                        const payload: []const u8 = if (strat == .hotReload) "hotReload" else "reload";
+                        const sse_body = try std.fmt.allocPrint(ctx.allocator, "id: {d}\ndata: {s}\n\n", .{ current_id, payload });
                         return .{
                             .status = 200,
                             .body = sse_body,
@@ -734,7 +761,7 @@ pub const Server = struct {
                         };
                     }
                 };
-                self.router.getWithData(self.cfg.liveReloadPath, SseHandler.handle, self) catch {};
+                self.router.get(self.cfg.liveReloadPath, SseHandler.handle, .{ .userData = self }) catch {};
             }
         }
 
@@ -781,25 +808,27 @@ pub const Server = struct {
 
     fn serveConnection(self: *Server, conn: *tcp.Socket, arena_in: Allocator) !void {
         _ = arena_in;
-        self.metrics_registry.connectionOpened();
-        defer self.metrics_registry.connectionClosed();
+        self.metricsRegistry.connectionOpened();
+        defer self.metricsRegistry.connectionClosed();
 
         // Peek or read initial bytes to check protocol / TLS / HTTP/2 preface
         var peek_buf: [32]u8 = undefined;
-        const n_peek = conn.read(peek_buf[0..]) catch return;
-        if (n_peek == 0) return;
+        const nPeek = conn.read(peek_buf[0..]) catch return;
+        if (nPeek == 0) return;
 
         // Check for TLS Handshake record (ContentType = 0x16, TLS legacy version 0x03, 0x01..0x03)
         if (self.tlsServer != null) {
-            if (n_peek >= 3 and peek_buf[0] == 0x16 and peek_buf[1] == 0x03) {
-                var tls_conn = self.tlsServer.?.handshakeBuffered(conn, peek_buf[0..n_peek]) catch {
-                    self.emit(.{ .kind = .tlsHandshakeFailed, .level = .warn, .message = "TLS handshake failed" });
+            if (nPeek >= 3 and peek_buf[0] == 0x16 and peek_buf[1] == 0x03) {
+                var tlsConn = self.tlsServer.?.handshakeBuffered(self.io, conn, peek_buf[0..nPeek]) catch |err| {
+                    var msg_buf: [64]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&msg_buf, "TLS handshake failed: {s}", .{@errorName(err)}) catch "TLS handshake failed";
+                    self.emit(.{ .kind = .tlsHandshakeFailed, .level = .warn, .message = msg });
                     return;
                 };
-                defer tls_conn.deinit();
+                defer tlsConn.deinit();
 
-                const stream_conn = StreamConn{ .tls = &tls_conn };
-                if (self.cfg.http2 and tls_conn.alpn == .h2) {
+                const stream_conn = StreamConn{ .tls = &tlsConn };
+                if (self.cfg.http2 and tlsConn.alpn == .h2) {
                     try self.serveHttp2Connection(stream_conn, true, "");
                 } else {
                     try self.serveHttp1Connection(stream_conn, true, "");
@@ -814,19 +843,19 @@ pub const Server = struct {
         }
 
         const h2_preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-        if (self.cfg.http2 and n_peek >= 16 and std.mem.startsWith(u8, peek_buf[0..n_peek], h2_preface[0..16])) {
+        if (self.cfg.http2 and nPeek >= 16 and std.mem.startsWith(u8, peek_buf[0..nPeek], h2_preface[0..16])) {
             const stream_conn = StreamConn{ .plain = conn };
-            try self.serveHttp2Connection(stream_conn, false, peek_buf[0..n_peek]);
+            try self.serveHttp2Connection(stream_conn, false, peek_buf[0..nPeek]);
             return;
         }
 
         const stream_conn = StreamConn{ .plain = conn };
-        try self.serveHttp1Connection(stream_conn, false, peek_buf[0..n_peek]);
+        try self.serveHttp1Connection(stream_conn, false, peek_buf[0..nPeek]);
     }
 
     fn serveHttp2Connection(self: *Server, conn: StreamConn, isTlsConn: bool, initial: []const u8) !void {
         const H2Bridge = struct {
-            fn handle(ctx_ptr: ?*anyopaque, isTlsFlag: bool, m_str: []const u8, p_str: []const u8, hdrs: []const @import("../protocols/http2/transport.zig").Header, b_str: []const u8) anyerror!@import("../protocols/http2/transport.zig").HandlerResponse {
+            fn handle(resp_alloc: Allocator, ctx_ptr: ?*anyopaque, isTlsFlag: bool, m_str: []const u8, p_str: []const u8, hdrs: []const @import("../protocols/http2/transport.zig").Header, b_str: []const u8) anyerror!@import("../protocols/http2/transport.zig").HandlerResponse {
                 const server_ptr: *Server = @ptrCast(@alignCast(ctx_ptr.?));
                 const method = Method.fromString(m_str) orelse .GET;
                 var arena_h2 = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -859,15 +888,31 @@ pub const Server = struct {
                     .trustForwarded = server_ptr.cfg.trustForwardedHeaders,
                 };
 
-                const handler = server_ptr.router.match(method, clean_path, &ctx) orelse {
-                    return .{ .status = 404, .body = "not found" };
-                };
-                const res = handler(&ctx) catch {
-                    return .{ .status = 500, .body = "internal server error" };
-                };
+                // Full pipeline: match + router/route middleware + 404/405 +
+                // auto-OPTIONS, exactly like HTTP/1.
+                const res = server_ptr.router.dispatch(&ctx);
+                // res borrows from arena_h2 (freed on return) or static data:
+                // duplicate into resp_alloc (connection lifetime) so the
+                // caller can send after we return.
+                const out_body = try resp_alloc.dupe(u8, res.body);
+                const extra: usize = if (res.contentType != null) 1 else 0;
+                var out_hdrs = try resp_alloc.alloc(@import("../protocols/http2/transport.zig").Header, res.headers.len + extra);
+                for (res.headers, 0..) |h, i| {
+                    out_hdrs[i] = .{
+                        .name = try resp_alloc.dupe(u8, h.name),
+                        .value = try resp_alloc.dupe(u8, h.value),
+                    };
+                }
+                if (res.contentType) |ct| {
+                    out_hdrs[out_hdrs.len - 1] = .{
+                        .name = "content-type",
+                        .value = try resp_alloc.dupe(u8, ct),
+                    };
+                }
                 return .{
                     .status = res.status,
-                    .body = res.body,
+                    .headers = out_hdrs,
+                    .body = out_body,
                 };
             }
         };
@@ -908,7 +953,7 @@ pub const Server = struct {
                 s.responded = false;
             }
 
-            fn onHeaders(ctx_p: ?*anyopaque, sid: u31, flds: []@import("../protocols/http2/hpack.zig").HeaderField, end_stream: bool) anyerror!void {
+            fn onHeaders(ctx_p: ?*anyopaque, sid: u31, flds: []@import("../protocols/http2/hpack.zig").HeaderField, endStream: bool) anyerror!void {
                 const s: *@This() = @ptrCast(@alignCast(ctx_p.?));
                 s.resetFor(sid);
                 for (flds) |f| {
@@ -922,7 +967,7 @@ pub const Server = struct {
                         try s.hdrs.append(s.arena, .{ .name = name, .value = value });
                     }
                 }
-                if (end_stream) s.dispatched = true;
+                if (endStream) s.dispatched = true;
             }
 
             fn onData(ctx_p: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
@@ -939,14 +984,14 @@ pub const Server = struct {
         };
 
         var buf: [16 * 1024]u8 = undefined;
-        while (!session.closed and !session.goaway_received) {
+        while (!session.closed and !session.goawayReceived) {
             if (session.outbound.items.len > 0) {
                 conn.writeAll(session.outbound.items) catch break;
                 session.outbound.clearRetainingCapacity();
             }
             if (sc.dispatched and !sc.responded) {
                 sc.responded = true;
-                const resp = H2Bridge.handle(self, isTlsConn, sc.method.items, sc.path.items, sc.hdrs.items, sc.body.items) catch transport_mod.HandlerResponse{ .status = 500 };
+                const resp = H2Bridge.handle(arena_state.allocator(), self, isTlsConn, sc.method.items, sc.path.items, sc.hdrs.items, sc.body.items) catch transport_mod.HandlerResponse{ .status = 500 };
 
                 var out_fields = std.ArrayList(@import("../protocols/http2/hpack.zig").HeaderField).empty;
                 defer out_fields.deinit(self.allocator);
@@ -961,8 +1006,13 @@ pub const Server = struct {
                 }
 
                 try session.sendHeaders(sc.sid, out_fields.items, resp.body.len == 0);
-                if (resp.body.len > 0) {
+                // HEAD responses carry headers (with content-length) but no
+                // DATA frames, mirroring the HTTP/1 transport.
+                const is_head = std.ascii.eqlIgnoreCase(sc.method.items, "HEAD");
+                if (resp.body.len > 0 and !is_head) {
                     _ = try session.sendData(sc.sid, resp.body, true);
+                } else if (is_head and resp.body.len > 0) {
+                    _ = try session.sendData(sc.sid, "", true);
                 }
                 if (session.outbound.items.len > 0) {
                     conn.writeAll(session.outbound.items) catch break;
@@ -1024,7 +1074,7 @@ pub const Server = struct {
 
     fn serveOneRequestBuffered(self: *Server, conn: StreamConn, arena: Allocator, _: usize, force_close: bool, initial: []const u8, isTlsConn: bool) !bool {
         const t0 = clock.millisNow();
-        self.metrics_registry.recordRequest();
+        self.metricsRegistry.recordRequest();
         var head_buf: [maxHeadBytes]u8 = undefined;
         var filled: usize = 0;
         if (initial.len > 0) {
@@ -1051,16 +1101,16 @@ pub const Server = struct {
             if (n == 0) return false; // peer closed
             filled += n;
         }
-        self.metrics_registry.recordBytesIn(filled);
+        self.metricsRegistry.recordBytesIn(filled);
 
         const parser_opts: parser_mod.Options = .{ .allowLfLineEndings = allow_lf };
         const req_head = parser_mod.parseRequestHeadWithOptions(head_buf[0..filled], parser_opts) catch {
-            self.metrics_registry.recordError();
+            self.metricsRegistry.recordError();
             _ = sendSimpleError(conn, 400, "bad request") catch 0;
             return false;
         };
 
-        self.metrics_registry.recordRequestMethod(req_head.method);
+        self.metricsRegistry.recordRequestMethod(req_head.method);
 
         if (req_head.minorVersion == 0 and !self.cfg.http10) {
             _ = sendSimpleError(conn, 505, "HTTP/1.0 Not Supported") catch 0;
@@ -1116,7 +1166,7 @@ pub const Server = struct {
         {
             const fr = framing;
             switch (fr.framing) {
-                .none, .content_length => {
+                .none, .contentLength => {
                     if (fr.length > self.cfg.maxBody) {
                         _ = sendSimpleError(conn, 413, "payload too large") catch 0;
                         return false;
@@ -1212,11 +1262,11 @@ pub const Server = struct {
         const res: Response = self.router.dispatch(&ctx);
 
         const bytesOut = writeResponse(conn, arena, req_head.minorVersion, res, is_head, if (client_close) "close" else "keep-alive", ctx.header("Accept-Encoding")) catch {
-            self.metrics_registry.recordError();
+            self.metricsRegistry.recordError();
             return false;
         };
         const dur_ns: u64 = @intCast(@max(0, (clock.millisNow() -| t0) * 1_000_000));
-        self.metrics_registry.recordResponseFull(res.status, dur_ns, bytesOut);
+        self.metricsRegistry.recordResponseFull(res.status, dur_ns, bytesOut);
         self.emitAccess(req_head.method, req_head.path, res.status, body.len, bytesOut, t0);
         return !client_close;
     }
@@ -1343,6 +1393,61 @@ fn helloHandler(ctx: *Context) anyerror!Response {
     return .{ .status = 404, .body = "" };
 }
 
+test "template route renders through tree-sitter pipeline end to end" {
+    const tmpl_engine_mod = @import("../web/templates/engine.zig");
+    const tmpl_renderer_mod = @import("../web/templates/renderer.zig");
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var eng = tmpl_engine_mod.Engine.init(a, ctx.io, .{ .enableCache = true }) catch return;
+    defer eng.deinit();
+
+    const H = struct {
+        var engine_ptr: ?*tmpl_engine_mod.Engine = null;
+        fn handle(c: *Context) anyerror!Response {
+            var list = std.ArrayList(u8).empty;
+            errdefer list.deinit(c.allocator);
+            var lw = tmpl_renderer_mod.ListWriter{ .list = &list, .allocator = c.allocator };
+            try engine_ptr.?.renderString("<h1>{{ title }}</h1>{% for u in users %}<p>{{ u }}</p>{% endfor %}", .{
+                .title = "Hello",
+                .users = [_][]const u8{ "ann", "bob" },
+            }, &lw);
+            return .{ .body = list.items, .contentType = "text/html" };
+        }
+    };
+    H.engine_ptr = &eng;
+
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .maxConnections = 2 }) catch return;
+    defer srv.deinit();
+    try srv.router.get("/", H.handle, .{});
+
+    const Runner = struct {
+        fn run(s: *Server) void {
+            s.run();
+        }
+    };
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    defer t.join();
+
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    defer client.close();
+    try client.writeAll("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+
+    var buf: [2048]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = client.read(buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..total], "HTTP/1.1 200 OK"));
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "<h1>Hello</h1>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "<p>bob</p>") != null);
+
+    srv.requestShutdown();
+}
+
 test "server handles POST with content-length body" {
     const a = std.testing.allocator;
     var ctx = tcp.IoContext.init(a) catch return;
@@ -1350,7 +1455,7 @@ test "server handles POST with content-length body" {
 
     var srv = Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
     defer srv.deinit();
-    try srv.router.post("/echo", echoRawHandler);
+    try srv.router.post("/echo", echoRawHandler, .{});
 
     const Runner = struct {
         fn run(s: *Server) void {
@@ -1425,7 +1530,7 @@ test "access log flows through event callback" {
         .logging = .{ .callback = testEventCallback },
     }) catch return;
     defer srv.deinit();
-    try srv.router.get("/logged", returnOk);
+    try srv.router.get("/logged", returnOk, .{});
 
     const Runner = struct {
         fn run(s: *Server) void {
@@ -1475,7 +1580,7 @@ test "no callback produces zero events" {
         .logging = .{}, // null callback — silent by default
     }) catch return;
     defer srv.deinit();
-    try srv.router.get("/logged", returnOk);
+    try srv.router.get("/logged", returnOk, .{});
 
     const Runner = struct {
         fn run(s: *Server) void {
@@ -1515,7 +1620,7 @@ test "sequential clients are each served and closed cleanly" {
         .enableDocs = false,
     }) catch return;
     defer srv.deinit();
-    try srv.router.get("/ok", returnOk);
+    try srv.router.get("/ok", returnOk, .{});
 
     const Runner = struct {
         fn run(s: *Server) void {
@@ -1550,7 +1655,7 @@ test "server serves routed GET end to end" {
 
     var srv = Server.init(a, ctx.io, .{ .port = 0, .maxConnections = 1 }) catch return;
     defer srv.deinit();
-    try srv.router.get("/hello", helloHandler);
+    try srv.router.get("/hello", helloHandler, .{});
 
     const Runner = struct {
         fn run(s: *Server) void {
@@ -1594,7 +1699,7 @@ test "raw socket 200KB content-length body roundtrip" {
             return .{ .body = t };
         }
     };
-    try srv.router.post("/len", LenH.h);
+    try srv.router.post("/len", LenH.h, .{});
     const R = struct {
         fn run(s: *Server) void {
             s.run();
@@ -1782,7 +1887,7 @@ test "StreamConn operations" {
         .maxConnections = 1,
     }) catch return;
     defer srv.deinit();
-    try srv.router.get("/stream", returnOk);
+    try srv.router.get("/stream", returnOk, .{});
 
     const Runner = struct {
         fn run(s: *Server) void {
@@ -1846,7 +1951,7 @@ test "server metrics snapshot and live Prometheus endpoint" {
     }) catch return;
     defer srv.deinit();
 
-    try srv.router.get("/hello", helloHandler);
+    try srv.router.get("/hello", helloHandler, .{});
     try srv.metrics("/metrics");
 
     const snap0 = srv.metricsSnapshot();

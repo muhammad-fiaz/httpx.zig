@@ -56,11 +56,11 @@ pub fn mount(router: *router_mod.Router, schema: Schema, cfg: HandlerConfig) !vo
     st.* = .{ .schema = schema, .cfg = cfg };
     errdefer router.allocator.destroy(st);
 
-    router.addWithData(.POST, cfg.endpoint, &handleGraphQLPost, st) catch |err| return err;
+    router.add(.POST, cfg.endpoint, &handleGraphQLPost, .{ .userData = st }) catch |err| return err;
     errdefer _ = router.remove(.POST, cfg.endpoint);
-    router.addWithData(.GET, cfg.endpoint, &handleGraphQLGet, st) catch |err| return err;
+    router.add(.GET, cfg.endpoint, &handleGraphQLGet, .{ .userData = st }) catch |err| return err;
     errdefer _ = router.remove(.GET, cfg.endpoint);
-    try router.addWithData(.OPTIONS, cfg.endpoint, &handleGraphQLOptions, st);
+    try router.add(.OPTIONS, cfg.endpoint, &handleGraphQLOptions, .{ .userData = st });
 }
 
 /// Removes the GraphQL routes and frees the associated ServerState.

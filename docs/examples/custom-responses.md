@@ -75,7 +75,7 @@ pub fn main() !void {
                 \\  <item>
                 \\    <title>v1.0.0 Released</title>
                 \\    <link>https://github.com/muhammad-fiaz/httpx.zig/releases/tag/v1.0.0</link>
-                \\    <description>Production ready HTTP stack for Zig</description>
+                 \\    <description>HTTP stack for Zig</description>
                 \\  </item>
                 \\</channel>
                 \\</rss>

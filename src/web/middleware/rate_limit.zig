@@ -119,18 +119,18 @@ pub const RateLimitResult = struct {
 /// Token bucket entry for a single identity key.
 const BucketEntry = struct {
     tokens: f64,
-    last_update_ms: i64,
-    last_access_ms: i64,
+    lastUpdateMs: i64,
+    lastAccessMs: i64,
 };
 
 /// Production-grade thread-safe rate limiter with multi-dimensional keys and memory bounds.
 pub const RateLimiter = struct {
     allocator: Allocator,
-    default_policy: RateLimitPolicy,
+    defaultPolicy: RateLimitPolicy,
     maxEntries: usize,
     buckets: std.StringHashMap(BucketEntry),
     mutex: sync.Spinlock = .{},
-    last_sweep_ms: i64 = 0,
+    lastSweepMs: i64 = 0,
 
     /// Creates a new RateLimiter with default policy and max memory entries.
     pub fn init(allocator: Allocator, maxRequests: u32, windowMs: i64) RateLimiter {
@@ -147,10 +147,10 @@ pub const RateLimiter = struct {
         if (p.burst == 0) p.burst = p.limit;
         return .{
             .allocator = allocator,
-            .default_policy = p,
+            .defaultPolicy = p,
             .maxEntries = @max(1, maxEntries),
             .buckets = std.StringHashMap(BucketEntry).init(allocator),
-            .last_sweep_ms = clock.millisNow(),
+            .lastSweepMs = clock.millisNow(),
         };
     }
 
@@ -168,7 +168,7 @@ pub const RateLimiter = struct {
     /// Returns remaining quota on success, or null when the request is rate-limited.
     /// (Compatible with original HTTPX RateLimiter API).
     pub fn check(self: *RateLimiter, key: []const u8, nowMs: i64) !?u32 {
-        const res = try self.checkDetailed(key, nowMs, 1, self.default_policy);
+        const res = try self.checkDetailed(key, nowMs, 1, self.defaultPolicy);
         if (!res.allowed) return null;
         return res.remaining;
     }
@@ -190,9 +190,9 @@ pub const RateLimiter = struct {
         defer self.mutex.unlock();
 
         // Opportunistic sweep every 30 seconds or when reaching 90% capacity
-        if (nowMs - self.last_sweep_ms > 30_000 or self.buckets.count() >= (self.maxEntries * 9) / 10) {
+        if (nowMs - self.lastSweepMs > 30_000 or self.buckets.count() >= (self.maxEntries * 9) / 10) {
             self.sweepExpiredLocked(nowMs, policy.ttlMs);
-            self.last_sweep_ms = nowMs;
+            self.lastSweepMs = nowMs;
         }
 
         const bucket = if (self.buckets.getPtr(key)) |b| b else blk: {
@@ -203,18 +203,18 @@ pub const RateLimiter = struct {
             errdefer self.allocator.free(owned_key);
             try self.buckets.put(owned_key, .{
                 .tokens = capacity,
-                .last_update_ms = nowMs,
-                .last_access_ms = nowMs,
+                .lastUpdateMs = nowMs,
+                .lastAccessMs = nowMs,
             });
             break :blk self.buckets.getPtr(key).?;
         };
 
-        bucket.last_access_ms = nowMs;
+        bucket.lastAccessMs = nowMs;
 
         // Refill tokens according to elapsed time
-        const elapsed_ms: f64 = @floatFromInt(@max(0, nowMs - bucket.last_update_ms));
+        const elapsed_ms: f64 = @floatFromInt(@max(0, nowMs - bucket.lastUpdateMs));
         bucket.tokens = @min(capacity, bucket.tokens + elapsed_ms * fill_rate_per_ms);
-        bucket.last_update_ms = nowMs;
+        bucket.lastUpdateMs = nowMs;
 
         const cost_f: f64 = @floatFromInt(cost);
         if (bucket.tokens >= cost_f) {
@@ -275,7 +275,7 @@ pub const RateLimiter = struct {
 
         var it = self.buckets.iterator();
         while (it.next()) |entry| {
-            if (nowMs - entry.value_ptr.last_access_ms > ttl_ms) {
+            if (nowMs - entry.value_ptr.lastAccessMs > ttl_ms) {
                 to_remove.append(self.allocator, entry.key_ptr.*) catch break;
             }
         }
@@ -293,8 +293,8 @@ pub const RateLimiter = struct {
 
         var it = self.buckets.iterator();
         while (it.next()) |entry| {
-            if (entry.value_ptr.last_access_ms < oldest_time) {
-                oldest_time = entry.value_ptr.last_access_ms;
+            if (entry.value_ptr.lastAccessMs < oldest_time) {
+                oldest_time = entry.value_ptr.lastAccessMs;
                 oldest_key = entry.key_ptr.*;
             }
         }
@@ -401,12 +401,12 @@ test "token bucket refilling over time" {
     try std.testing.expectEqual(@as(?u32, null), try rl.check("key:test", 0));
 
     // At t=500ms (half the window), 5 tokens should have refilled
-    const res_mid = try rl.checkDetailed("key:test", 500, 1, rl.default_policy);
+    const res_mid = try rl.checkDetailed("key:test", 500, 1, rl.defaultPolicy);
     try std.testing.expect(res_mid.allowed);
     try std.testing.expectEqual(@as(u32, 4), res_mid.remaining);
 
     // At t=1500ms, full tokens refilled up to burst capacity (10)
-    const res_full = try rl.checkDetailed("key:test", 1500, 1, rl.default_policy);
+    const res_full = try rl.checkDetailed("key:test", 1500, 1, rl.defaultPolicy);
     try std.testing.expect(res_full.allowed);
     try std.testing.expectEqual(@as(u32, 9), res_full.remaining);
 }
@@ -417,7 +417,7 @@ test "rate limit 429 response formatting" {
     defer rl.deinit();
 
     _ = try rl.check("ip:1.2.3.4", 0);
-    const rejected = try rl.checkDetailed("ip:1.2.3.4", 10, 1, rl.default_policy);
+    const rejected = try rl.checkDetailed("ip:1.2.3.4", 10, 1, rl.defaultPolicy);
     try std.testing.expect(!rejected.allowed);
     try std.testing.expect(rejected.retryAfterSeconds >= 1);
 

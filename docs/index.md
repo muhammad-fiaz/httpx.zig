@@ -1,12 +1,12 @@
 ---
 layout: home
 title: httpx.zig
-description: A production-ready, high-performance HTTP client and server library for Zig with HTTP/1.x, HTTP/2, HTTP/3, proxy support, concurrency, and protocol primitives.
+description: A production-grade, high-performance HTTP client and server library for Zig with HTTP/1.x, HTTP/2, HTTP/3, proxy support, concurrency, and protocol primitives.
 
 hero:
   name: httpx.zig
   text: HTTP client and server library for Zig
-  tagline: Production-ready HTTP/1.x/2/3 client and server runtime with proxy support, concurrency, and protocol primitives
+  tagline: Production-grade HTTP/1.x/2/3 client and server runtime with proxy support, concurrency, and protocol primitives
   image:
     src: /httpx.zig-transparent.png
     alt: httpx.zig
@@ -79,13 +79,13 @@ Detailed methodology and analysis: [Benchmarks Reference](/reference/benchmarks)
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Stable Release (v0.2.0)**
+**Latest Release (v0.2.0)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz
 ```
 
-**Previous Stable Release (v0.1.8)**
+**Previous Release (v0.1.8)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.8.tar.gz
@@ -155,7 +155,7 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN suppor
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
 | HTTP/2 | ✅ Client + Server Runtime + Primitives | TCP/TLS | High-level client/server execution paths plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Client + Server Runtime + Primitives | QUIC/UDP | High-level client/server runtime over UDP + QUIC/HTTP3/QPACK primitives |
+| HTTP/3 | 🚧 Primitives | QUIC/UDP | Frame/QPACK/QUIC codec + unit tests; end-to-end transport forthcoming |
 
 ## Platform Support
 
@@ -213,17 +213,17 @@ Use these commands to validate host runtime behavior and cross-target compatibil
 ```bash
 zig build test
 zig build run-all-examples   # Runs sequentially to prevent parallel compiler OOM / PC crashes
-zig build build-all-targets
+zig build build-all-examples -Dtarget=x86_64-linux-gnu
 ```
 
-To validate Linux runtime behavior (not just compile checks), build Linux artifacts and run them from Linux/WSL:
+To validate Linux runtime behavior, run the cross-compiled artifacts on Linux/WSL (a foreign-target `zig build test` only compiles; it does not execute):
 
 ```bash
-zig build test -Dtarget=x86_64-linux
-zig build run-all-tcp_local -Dtarget=x86_64-linux
+zig build test -Dtarget=x86_64-linux-gnu
+zig build run-simple-get -Dtarget=x86_64-linux-gnu
 
 ./zig-out/bin/test
-./zig-out/bin/tcp_local
+./zig-out/bin/simple-get
 ```
 
 For production client code, prefer explicit timeout + error handling so failures surface immediately:

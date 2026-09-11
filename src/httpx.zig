@@ -69,6 +69,7 @@ pub const dns = @import("net/dns.zig");
 pub const resolve = @import("net/resolve.zig");
 pub const connectivity = @import("net/connectivity.zig");
 pub const socks5 = @import("net/socks5.zig");
+pub const socks4 = @import("net/socks4.zig");
 pub const proxy = @import("net/proxy.zig");
 
 // Compression
@@ -94,6 +95,10 @@ pub const http2 = struct {
     pub const stream = @import("protocols/http2/stream.zig");
     pub const connection = @import("protocols/http2/connection.zig");
     pub const Session = connection.Session;
+    pub const Stream = stream.Stream;
+    pub const ErrorCode = stream.ErrorCode;
+    pub const Frame = frame.Frame;
+    pub const FrameHeader = frame.FrameHeader;
     pub const transport = @import("protocols/http2/transport.zig");
     pub const Client = transport.Client;
 };
@@ -108,11 +113,16 @@ pub const quic = struct {
     pub const cc = @import("protocols/quic/cc.zig");
     pub const params = @import("protocols/quic/params.zig");
     pub const stream = @import("protocols/quic/stream.zig");
+    pub const Stream = stream.Stream;
     pub const connection = @import("protocols/quic/connection.zig");
     pub const Connection = connection.Connection;
     pub const connectionId = @import("protocols/quic/connection_id.zig");
     pub const path = @import("protocols/quic/path.zig");
     pub const transport = @import("protocols/quic/transport.zig");
+    pub const Endpoint = transport.Endpoint;
+    pub const Pump = transport.Pump;
+    pub const handshake = @import("protocols/quic/handshake.zig");
+    pub const HandshakeDriver = handshake.Driver;
 
     pub fn encodeFrame(allocator: std.mem.Allocator, f: frames.Frame) !std.ArrayList(u8) {
         var out = std.ArrayList(u8).empty;
@@ -122,11 +132,15 @@ pub const quic = struct {
 };
 pub const http3 = struct {
     pub const frame = @import("protocols/http3/frame.zig");
+    pub const FrameHeader = frame.FrameHeader;
+    pub const ParsedFrame = frame.ParsedFrame;
     pub const qpack = @import("protocols/http3/qpack.zig");
     pub const connection = @import("protocols/http3/connection.zig");
     pub const Connection = connection.Connection;
     pub const RequestStream = connection.RequestStream;
     pub const Settings = connection.Settings;
+    pub const transport = @import("protocols/http3/transport.zig");
+    pub const Client = transport.Client;
 };
 pub const tls = @import("protocols/tls/tls.zig");
 
@@ -166,11 +180,16 @@ pub const Site = site.Site;
 pub const static = struct {
     pub const files = @import("web/static_files/serve.zig");
     pub const spa = @import("web/spa/serve.zig");
-    pub const watcher = @import("web/watcher/watcher.zig");
+    pub const watcher = @import("web/watcher/backend.zig");
     pub const Watcher = watcher.Watcher;
     pub const ReloadStrategy = watcher.ReloadStrategy;
     pub const WatchEvent = watcher.WatchEvent;
     pub const WatchEventKind = watcher.WatchEventKind;
+    pub const WatcherConfig = watcher.WatcherConfig;
+    pub const events = @import("web/watcher/events.zig");
+    pub const backend = @import("web/watcher/backend.zig");
+    pub const dependency = @import("web/watcher/dependency.zig");
+    pub const reload = @import("web/watcher/reload.zig");
 };
 pub const Watcher = static.Watcher;
 pub const ReloadStrategy = static.ReloadStrategy;
@@ -197,7 +216,6 @@ pub const middleware = struct {
     const sec = @import("web/middleware/security.zig");
     pub const cors = sec.corsMiddleware;
     pub const CorsConfig = sec.CorsConfig;
-    pub const securityHeaders = sec.securityHeadersMiddleware;
     pub const helmet = sec.securityHeadersMiddleware;
     pub const recovery = sec.recoveryMiddleware;
     pub const logging = sec.loggingMiddleware;
@@ -215,7 +233,10 @@ pub const web = struct {
     pub const router = @import("web/router/router.zig");
     pub const static = @import("web/static_files/serve.zig");
     pub const spa = @import("web/spa/serve.zig");
-    pub const watcher = @import("web/watcher/watcher.zig");
+    pub const watcher = @import("web/watcher/backend.zig");
+    pub const watcherEvents = @import("web/watcher/events.zig");
+    pub const watcherDependency = @import("web/watcher/dependency.zig");
+    pub const watcherReload = @import("web/watcher/reload.zig");
     pub const templates = @import("web/templates/templates.zig");
     pub const TemplateEngine = @import("web/templates/templates.zig").Engine;
     pub const assets = @import("web/assets.zig");
@@ -249,7 +270,6 @@ pub const web = struct {
     pub const middleware = struct {
         const sec = @import("web/middleware/security.zig");
         pub const cors = sec.corsMiddleware;
-        pub const securityHeaders = sec.securityHeadersMiddleware;
         pub const helmet = sec.securityHeadersMiddleware;
         pub const recovery = sec.recoveryMiddleware;
         pub const logging = sec.loggingMiddleware;
@@ -257,33 +277,8 @@ pub const web = struct {
     };
 };
 
-// Client API
-pub const client = struct {
-    pub const Client = @import("client/client.zig").Client;
-    pub const Config = @import("client/client.zig").Config;
-    pub const RequestOptions = @import("client/client.zig").RequestOptions;
-    pub const Response = @import("client/request.zig").Response;
-    pub const Header = @import("client/request.zig").Header;
-    pub const fetch = @import("client/client.zig").globalFetch;
-    pub const get = @import("client/client.zig").globalGet;
-    pub const post = @import("client/client.zig").globalPost;
-    pub const put = @import("client/client.zig").globalPut;
-    pub const patch = @import("client/client.zig").globalPatch;
-    pub const delete = @import("client/client.zig").globalDelete;
-    pub const head = @import("client/client.zig").globalHead;
-    pub const options = @import("client/client.zig").globalOptions;
-    pub const trace = @import("client/client.zig").globalTrace;
-    pub const connect = @import("client/client.zig").globalConnect;
-    pub const request = @import("client/client.zig").globalRequest;
-    pub const getAll = @import("client/client.zig").globalGetAll;
-    pub const requestAll = @import("client/client.zig").globalRequestAll;
-    pub const download = @import("client/client.zig").globalDownload;
-    pub const resolve = @import("client/client.zig").globalResolve;
-    pub const resolveUrl = @import("client/client.zig").globalResolveUrl;
-    pub const ResolveOptions = @import("client/client.zig").ResolveOptions;
-    pub const ResolvedAddresses = @import("client/client.zig").ResolvedAddresses;
-    pub const AddressFamilyPreference = @import("client/client.zig").AddressFamilyPreference;
-};
+// Client API (canonical paths live at the root: httpx.Client,
+// httpx.ClientConfig, httpx.RequestOptions, httpx.get, ...).
 pub const cookies = @import("client/cookies.zig");
 pub const pool = @import("client/pool.zig");
 pub const Client = @import("client/client.zig").Client;
@@ -311,16 +306,12 @@ pub const trace = @import("client/client.zig").globalTrace;
 pub const connect = @import("client/client.zig").globalConnect;
 pub const getAll = @import("client/client.zig").globalGetAll;
 pub const requestAll = @import("client/client.zig").globalRequestAll;
-pub const download = @import("client/client.zig").globalDownload;
-pub const graphqlQuery = @import("client/client.zig").globalGraphql;
-pub const lookupFileInfo = @import("client/client.zig").globalLookupFileInfo;
-pub const updateFile = @import("client/client.zig").globalUpdateFile;
-pub const verifyFile = @import("client/client.zig").globalVerifyFile;
-pub const fetchSitemap = @import("client/client.zig").globalFetchSitemap;
+// Namespaced operations (not root globals): client.download,
+// client.graphql, client.lookupFileInfo, client.updateFile,
+// Download.verifyFile / parseChecksumFile, client.fetchSitemap,
+// client.resolve / client.resolveUrl. See Client and Download.
 pub const isOnline = @import("client/client.zig").globalIsOnline;
 pub const checkConnectivity = @import("client/client.zig").globalCheckConnectivity;
-pub const resolveHost = @import("client/client.zig").globalResolve;
-pub const resolveUrl = @import("client/client.zig").globalResolveUrl;
 pub const ResolveOptions = @import("client/client.zig").ResolveOptions;
 pub const ResolvedAddresses = @import("client/client.zig").ResolvedAddresses;
 pub const AddressFamilyPreference = @import("client/client.zig").AddressFamilyPreference;
@@ -361,7 +352,9 @@ pub const parsing = struct {
     pub const robots = @import("parsing/robots.zig");
     pub const sitemap = @import("parsing/sitemap.zig");
     pub const document = @import("parsing/document.zig");
-    pub const treesitter = @import("parsing/treesitter.zig");
+    // NOTE: Tree-sitter is used directly inside the parsing modules above
+    // (html/xml/feed/document) and web/templates/parser; it is intentionally
+    // not re-exported here.
     // Re-export the Document and Parser types at this level
     pub const Document = document.Document;
     pub const Parser = document.Parser;
@@ -400,7 +393,6 @@ pub const StreamConn = server.StreamConn;
 pub const Router = router.Router;
 pub const Context = router.Context;
 pub const Response = router.Response;
-pub const ServerResponse = router.Response;
 pub const TlsServer = tls.TlsServer;
 pub const TlsServerConn = tls.TlsServerConn;
 pub const TlsServerConfig = tls.TlsServerConfig;
@@ -441,11 +433,11 @@ pub const AlpnProtocol = tls.alpn.Protocol;
 
 // FTP (isolated protocol subsystem)
 pub const ftp = struct {
-    const ftpClient = @import("protocols/ftp/client.zig");
-    pub const Client = ftpClient.Client;
-    pub const Options = ftpClient.Options;
-    pub const Reply = ftpClient.Reply;
-    pub const FtpError = ftpClient.FtpError;
+    const ftpClientMod = @import("protocols/ftp/client.zig");
+    pub const Client = ftpClientMod.Client;
+    pub const Options = ftpClientMod.Options;
+    pub const Reply = ftpClientMod.Reply;
+    pub const FtpError = ftpClientMod.FtpError;
     const ftpServer = @import("protocols/ftp/server.zig");
     pub const Server = ftpServer.Server;
     pub const Config = ftpServer.Config;
@@ -476,6 +468,7 @@ test {
     _ = @import("net/dns/cache.zig");
     _ = @import("net/resolve.zig");
     _ = @import("net/socks5.zig");
+    _ = @import("net/socks4.zig");
     _ = @import("net/proxy.zig");
     _ = @import("compression/codec.zig");
     _ = @import("protocols/http1/parser.zig");
@@ -507,6 +500,8 @@ test {
     _ = @import("protocols/http3/frame.zig");
     _ = @import("protocols/http3/qpack.zig");
     _ = @import("protocols/http3/connection.zig");
+    _ = @import("protocols/http3/transport.zig");
+    _ = @import("protocols/quic/handshake.zig");
     _ = @import("protocols/tls/alpn.zig");
     _ = @import("protocols/tls/config.zig");
     _ = @import("protocols/tls/record.zig");
@@ -514,7 +509,9 @@ test {
     _ = @import("protocols/tls/engine.zig");
     _ = @import("protocols/tls/quic_tls.zig");
     _ = @import("protocols/tls/tcp_tls.zig");
-    _ = @import("protocols/tls/tls_server.zig");
+    _ = @import("protocols/tls/tcp_client.zig");
+    _ = @import("protocols/tls/session.zig");
+    _ = @import("protocols/tls/tls.zig");
     _ = @import("protocols/tls/transport.zig");
     _ = @import("web/router/pattern.zig");
     _ = @import("web/router/metadata.zig");
@@ -529,7 +526,10 @@ test {
     _ = @import("web/graphql/graphql.zig");
     _ = @import("web/openapi/spec.zig");
     _ = @import("web/static_files/serve.zig");
-    _ = @import("web/watcher/watcher.zig");
+    _ = @import("web/watcher/backend.zig");
+    _ = @import("web/watcher/events.zig");
+    _ = @import("web/watcher/dependency.zig");
+    _ = @import("web/watcher/reload.zig");
     _ = @import("web/spa/serve.zig");
     _ = @import("web/site/routes.zig");
     _ = @import("web/site/site.zig");
@@ -558,7 +558,6 @@ test {
     _ = @import("parsing/robots.zig");
     _ = @import("parsing/sitemap.zig");
     _ = @import("parsing/document.zig");
-    _ = @import("parsing/treesitter.zig");
     _ = @import("web/templates/error.zig");
     _ = @import("web/templates/context.zig");
     _ = @import("web/templates/parser.zig");
@@ -590,7 +589,7 @@ test "Full template engine integration: variables, loops, conditionals, and raw 
         \\  <li>#{{ loop.index }}: {{ item }}</li>
         \\{% endfor %}
         \\</ul>
-        \\<div>{{ safe_footer }}</div>
+        \\<div>{{ safeFooter }}</div>
     ;
 
     var list = std.ArrayList(u8).empty;
@@ -605,7 +604,7 @@ test "Full template engine integration: variables, loops, conditionals, and raw 
             .role = "Architect",
         },
         .items = [_][]const u8{ "Engine", "Watcher", "LiveReload" },
-        .safe_footer = templates.raw("<small>&copy; 2026 HTTPX</small>"),
+        .safeFooter = templates.raw("<small>&copy; 2026 HTTPX</small>"),
     }, &lw);
 
     const out = list.items;

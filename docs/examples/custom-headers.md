@@ -34,7 +34,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-all-custom_headers
+zig build run-custom-headers
 ```
 
 ## What to Verify

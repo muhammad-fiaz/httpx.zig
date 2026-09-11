@@ -136,7 +136,7 @@ pub fn buildSettingsFrame(allocator: Allocator, entries: []const frame_mod.Setti
 pub fn buildQpackEncoderStreamPrefix(allocator: Allocator) ![]u8 {
     var out = std.ArrayList(u8).empty;
     var vb: [16]u8 = undefined;
-    const n = try varint.encode(&vb, frame_mod.UniStreamType.qpack_encoder);
+    const n = try varint.encode(&vb, frame_mod.UniStreamType.qpackEncoder);
     try out.appendSlice(allocator, vb[0..n]);
     return out.toOwnedSlice(allocator);
 }
@@ -145,17 +145,17 @@ pub fn buildQpackEncoderStreamPrefix(allocator: Allocator) ![]u8 {
 pub fn buildQpackDecoderStreamPrefix(allocator: Allocator) ![]u8 {
     var out = std.ArrayList(u8).empty;
     var vb: [16]u8 = undefined;
-    const n = try varint.encode(&vb, frame_mod.UniStreamType.qpack_decoder);
+    const n = try varint.encode(&vb, frame_mod.UniStreamType.qpackDecoder);
     try out.appendSlice(allocator, vb[0..n]);
     return out.toOwnedSlice(allocator);
 }
 
 pub const PeerSettings = struct {
-    max_field_section_size: u64 = 16384,
-    qpack_max_table_capacity: u64 = 0,
-    qpack_blocked_streams: u64 = 0,
-    enable_connect_protocol: u64 = 0,
-    h3_datagram: u64 = 0,
+    maxFieldSectionSize: u64 = 16384,
+    qpackMaxTableCapacity: u64 = 0,
+    qpackBlockedStreams: u64 = 0,
+    enableConnectProtocol: u64 = 0,
+    h3Datagram: u64 = 0,
 };
 
 /// HTTP/3 connection state machine. Manages control stream lifecycle,
@@ -165,25 +165,25 @@ pub const Connection = struct {
     role: Role,
 
     // Settings
-    local_settings: PeerSettings = .{},
-    peer_settings: PeerSettings = .{},
-    settings_sent: bool = false,
-    settings_received: bool = false,
-    control_stream_started: bool = false,
+    localSettings: PeerSettings = .{},
+    peerSettings: PeerSettings = .{},
+    settingsSent: bool = false,
+    settingsReceived: bool = false,
+    controlStreamStarted: bool = false,
 
     // QPACK state
     qenc: qpack_mod.Encoder,
     qdec: qpack_mod.Decoder,
 
     // GOAWAY and push tracking
-    goaway_sent: bool = false,
-    goaway_received: bool = false,
-    goaway_stream_id: u64 = 0,
-    max_push_id: u64 = 0,
+    goawaySent: bool = false,
+    goawayReceived: bool = false,
+    goawayStreamId: u64 = 0,
+    maxPushId: u64 = 0,
 
     // Stream tracking
-    next_bidi_id: u64,
-    next_uni_id: u64,
+    nextBidiId: u64,
+    nextUniId: u64,
 
     pub const Role = enum { client, server };
 
@@ -194,8 +194,8 @@ pub const Connection = struct {
             .role = role,
             .qenc = qpack_mod.Encoder.init(allocator),
             .qdec = qpack_mod.Decoder.init(allocator),
-            .next_bidi_id = initiator_bit,
-            .next_uni_id = initiator_bit | 2,
+            .nextBidiId = initiator_bit,
+            .nextUniId = initiator_bit | 2,
         };
     }
 
@@ -209,75 +209,75 @@ pub const Connection = struct {
         var entries: [4]frame_mod.SettingEntry = undefined;
         var count: usize = 0;
 
-        entries[count] = .{ .id = 0x6, .value = self.local_settings.max_field_section_size };
+        entries[count] = .{ .id = 0x6, .value = self.localSettings.maxFieldSectionSize };
         count += 1;
 
-        if (self.local_settings.qpack_max_table_capacity > 0) {
-            entries[count] = .{ .id = 0x1, .value = self.local_settings.qpack_max_table_capacity };
+        if (self.localSettings.qpackMaxTableCapacity > 0) {
+            entries[count] = .{ .id = 0x1, .value = self.localSettings.qpackMaxTableCapacity };
             count += 1;
         }
 
-        if (self.local_settings.qpack_blocked_streams > 0) {
-            entries[count] = .{ .id = 0x7, .value = self.local_settings.qpack_blocked_streams };
+        if (self.localSettings.qpackBlockedStreams > 0) {
+            entries[count] = .{ .id = 0x7, .value = self.localSettings.qpackBlockedStreams };
             count += 1;
         }
 
         const result = try buildSettingsFrame(self.allocator, entries[0..count]);
-        self.settings_sent = true;
+        self.settingsSent = true;
         return result;
     }
 
     /// Processes an incoming SETTINGS frame from the peer's control stream.
-    pub fn processPeerSettings(self: *Connection, settings_entries: []const frame_mod.SettingEntry) !void {
-        if (self.settings_received) return Error.InvalidSettings;
+    pub fn processPeerSettings(self: *Connection, settingsEntries: []const frame_mod.SettingEntry) !void {
+        if (self.settingsReceived) return Error.InvalidSettings;
         var seen_qpack_capacity = false;
         var seen_max_field_section = false;
         var seen_blocked_streams = false;
         var seen_connect = false;
         var seen_datagram = false;
-        for (settings_entries) |entry| {
+        for (settingsEntries) |entry| {
             switch (entry.id) {
                 0x1 => {
                     if (seen_qpack_capacity) return Error.InvalidSettings;
                     seen_qpack_capacity = true;
-                    self.peer_settings.qpack_max_table_capacity = entry.value;
+                    self.peerSettings.qpackMaxTableCapacity = entry.value;
                 },
                 0x2 => return Error.InvalidSettings, // ENABLE_PUSH is forbidden in HTTP/3.
                 0x6 => {
                     if (seen_max_field_section) return Error.InvalidSettings;
                     seen_max_field_section = true;
-                    self.peer_settings.max_field_section_size = entry.value;
+                    self.peerSettings.maxFieldSectionSize = entry.value;
                 },
                 0x7 => {
                     if (seen_blocked_streams) return Error.InvalidSettings;
                     seen_blocked_streams = true;
-                    self.peer_settings.qpack_blocked_streams = entry.value;
+                    self.peerSettings.qpackBlockedStreams = entry.value;
                 },
                 0x8 => {
                     if (seen_connect) return Error.InvalidSettings;
                     seen_connect = true;
                     if (entry.value > 1) return Error.InvalidSettings;
-                    self.peer_settings.enable_connect_protocol = entry.value;
+                    self.peerSettings.enableConnectProtocol = entry.value;
                 },
                 0x33 => {
                     if (seen_datagram) return Error.InvalidSettings;
                     seen_datagram = true;
                     if (entry.value > 1) return Error.InvalidSettings;
-                    self.peer_settings.h3_datagram = entry.value;
+                    self.peerSettings.h3Datagram = entry.value;
                 },
                 else => {},
             }
         }
-        self.qenc.setMaxTableCapacity(std.math.cast(usize, self.peer_settings.qpack_max_table_capacity) orelse return Error.InvalidSettings);
-        self.settings_received = true;
+        self.qenc.setMaxTableCapacity(std.math.cast(usize, self.peerSettings.qpackMaxTableCapacity) orelse return Error.InvalidSettings);
+        self.settingsReceived = true;
     }
 
     /// Builds a GOAWAY frame payload (stream ID varint).
-    pub fn buildGoawayFrame(self: *Connection, stream_id: u64) ![]u8 {
+    pub fn buildGoawayFrame(self: *Connection, streamId: u64) ![]u8 {
         var payload = std.ArrayList(u8).empty;
         defer payload.deinit(self.allocator);
         var vb: [16]u8 = undefined;
-        const n = try varint.encode(&vb, stream_id);
+        const n = try varint.encode(&vb, streamId);
         try payload.appendSlice(self.allocator, vb[0..n]);
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
@@ -285,8 +285,8 @@ pub const Connection = struct {
         const hn = try frame_mod.encodeFrameHeader(&fh, @intFromEnum(frame_mod.FrameType.goaway), payload.items.len);
         try out.appendSlice(self.allocator, fh[0..hn]);
         try out.appendSlice(self.allocator, payload.items);
-        self.goaway_sent = true;
-        self.goaway_stream_id = stream_id;
+        self.goawaySent = true;
+        self.goawayStreamId = streamId;
         return out.toOwnedSlice(self.allocator);
     }
 
@@ -295,10 +295,10 @@ pub const Connection = struct {
     /// Request-stream frames such as DATA and HEADERS are forbidden here.
     /// SETTINGS is accepted exactly once; integer-valued control frames are
     /// shape-validated and handled.
-    pub fn processControlFrame(self: *Connection, frame_type: u64, payload: []const u8) !void {
-        self.control_stream_started = true;
-        if (!self.settings_received and frame_type != 0x4) return Error.InvalidSettings;
-        switch (frame_type) {
+    pub fn processControlFrame(self: *Connection, frameType: u64, payload: []const u8) !void {
+        self.controlStreamStarted = true;
+        if (!self.settingsReceived and frameType != 0x4) return Error.InvalidSettings;
+        switch (frameType) {
             0x0, 0x1, 0x5 => return Error.ProtocolViolation, // DATA, HEADERS, PUSH_PROMISE
             0x4 => {
                 const entries = frame_mod.parseSettingsPayload(payload, self.allocator) catch |e| switch (e) {
@@ -312,20 +312,20 @@ pub const Connection = struct {
                 var off: usize = 0;
                 const sid = varint.decode(payload, &off) catch return Error.ProtocolViolation;
                 if (off != payload.len) return Error.ProtocolViolation;
-                if (self.goaway_received and sid > self.goaway_stream_id) return Error.ProtocolViolation;
-                self.goaway_received = true;
-                self.goaway_stream_id = sid;
+                if (self.goawayReceived and sid > self.goawayStreamId) return Error.ProtocolViolation;
+                self.goawayReceived = true;
+                self.goawayStreamId = sid;
             },
             0x3, 0xD => {
-                const entries = frame_mod.validateFramePayload(self.allocator, frame_type, payload) catch |e| switch (e) {
+                const entries = frame_mod.validateFramePayload(self.allocator, frameType, payload) catch |e| switch (e) {
                     error.OutOfMemory => return Error.OutOfMemory,
                     else => return Error.ProtocolViolation,
                 };
                 self.allocator.free(entries);
-                if (frame_type == 0xD) {
+                if (frameType == 0xD) {
                     var off: usize = 0;
                     const pid = varint.decode(payload, &off) catch return Error.ProtocolViolation;
-                    if (pid > self.max_push_id) self.max_push_id = pid;
+                    if (pid > self.maxPushId) self.maxPushId = pid;
                 }
             },
             else => {}, // Unknown control frames are ignored per RFC 9114.
@@ -334,21 +334,21 @@ pub const Connection = struct {
 
     /// Allocates the next bidirectional stream ID.
     pub fn nextBidiStreamId(self: *Connection) u64 {
-        const id = self.next_bidi_id;
-        self.next_bidi_id += 4;
+        const id = self.nextBidiId;
+        self.nextBidiId += 4;
         return id;
     }
 
     /// Allocates the next unidirectional stream ID.
     pub fn nextUniStreamId(self: *Connection) u64 {
-        const id = self.next_uni_id;
-        self.next_uni_id += 4;
+        const id = self.nextUniId;
+        self.nextUniId += 4;
         return id;
     }
 
-    pub fn createRequestStream(self: *Connection, stream_id: u64) RequestStream {
+    pub fn createRequestStream(self: *Connection, streamId: u64) RequestStream {
         return .{
-            .id = stream_id,
+            .id = streamId,
             .allocator = self.allocator,
             .qpack = self.qenc,
         };
@@ -360,7 +360,7 @@ pub const Connection = struct {
 test "settings frame structure" {
     const a = std.testing.allocator;
     const entries = [_]frame_mod.SettingEntry{
-        .{ .id = 0x6, .value = 16384 }, // max_field_section_size
+        .{ .id = 0x6, .value = 16384 }, // maxFieldSectionSize
     };
     const f = try buildSettingsFrame(a, &entries);
     defer a.free(f);
@@ -462,8 +462,8 @@ test "connection builds and processes settings" {
         .{ .id = 0x7, .value = 100 },
     };
     try conn.processPeerSettings(&entries);
-    try std.testing.expectEqual(@as(u64, 8192), conn.peer_settings.max_field_section_size);
-    try std.testing.expectEqual(@as(u64, 100), conn.peer_settings.qpack_blocked_streams);
+    try std.testing.expectEqual(@as(u64, 8192), conn.peerSettings.maxFieldSectionSize);
+    try std.testing.expectEqual(@as(u64, 100), conn.peerSettings.qpackBlockedStreams);
 }
 
 test "http3 rejects duplicate and forbidden settings" {
@@ -478,8 +478,8 @@ test "http3 rejects duplicate and forbidden settings" {
 
     var forbidden = Connection.init(a, .client);
     defer forbidden.deinit();
-    const enable_push = [_]frame_mod.SettingEntry{.{ .id = 0x2, .value = 0 }};
-    try std.testing.expectError(Error.InvalidSettings, forbidden.processPeerSettings(&enable_push));
+    const enablePush = [_]frame_mod.SettingEntry{.{ .id = 0x2, .value = 0 }};
+    try std.testing.expectError(Error.InvalidSettings, forbidden.processPeerSettings(&enablePush));
 }
 
 test "http3 control stream rejects request frames and accepts settings" {
@@ -492,7 +492,7 @@ test "http3 control stream rejects request frames and accepts settings" {
     const encoded = try frame_mod.buildSettingsPayload(a, &entries);
     defer a.free(encoded);
     try c.processControlFrame(0x4, encoded);
-    try std.testing.expect(c.settings_received);
+    try std.testing.expect(c.settingsReceived);
     try std.testing.expectError(Error.InvalidSettings, c.processControlFrame(0x4, encoded));
 }
 

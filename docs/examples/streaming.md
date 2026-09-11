@@ -33,7 +33,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-all-streaming
+zig build run-streaming
 ```
 
 ## What to Verify

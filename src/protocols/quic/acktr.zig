@@ -22,7 +22,7 @@ pub const AckTracker = struct {
     allocator: Allocator,
     /// Sorted strictly descending by highest; non-overlapping.
     blocks: std.ArrayList(Block) = .empty,
-    largest_seen: ?u64 = null,
+    largestSeen: ?u64 = null,
 
     pub fn init(allocator: Allocator) AckTracker {
         return .{ .allocator = allocator };
@@ -34,7 +34,7 @@ pub const AckTracker = struct {
 
     pub fn contains(self: *const AckTracker, pn: u64) bool {
         for (self.blocks.items) |b| {
-            if (pn <= b.highest and pn >= b.highest - b.len + 1) return true;
+            if (pn <= b.highest and pn >= low(b)) return true;
             if (b.highest < pn) break;
         }
         return false;
@@ -49,7 +49,7 @@ pub const AckTracker = struct {
         var idx: usize = 0;
         while (idx < self.blocks.items.len and self.blocks.items[idx].highest > pn) idx += 1;
         try self.insertAndCoalesce(.{ .highest = pn, .len = 1 }, idx);
-        self.largest_seen = @max(self.largest_seen orelse 0, pn);
+        self.largestSeen = @max(self.largestSeen orelse 0, pn);
     }
 
     fn insertAndCoalesce(self: *AckTracker, block_in: Block, at: usize) Error!void {
@@ -59,10 +59,10 @@ pub const AckTracker = struct {
         // Coalesce with the immediately-lower block(s).
         while (at + 1 < self.blocks.items.len) {
             const below = self.blocks.items[at + 1];
-            if (below.highest + 1 >= (block.highest - block.len + 1)) {
-                const lo = @min((block.highest - block.len + 1), (below.highest - below.len + 1));
+            if (below.highest +| 1 >= low(block)) {
+                const lo = @min(low(block), low(below));
                 block = .{ .highest = @max(block.highest, below.highest), .len = 0 };
-                block.len = block.highest - lo + 1;
+                block.len = block.highest -| lo +| 1;
                 self.blocks.items[at] = block;
                 _ = self.blocks.orderedRemove(at + 1);
             } else break;
@@ -73,10 +73,10 @@ pub const AckTracker = struct {
         var i = at;
         while (i > 0) {
             const above = self.blocks.items[i - 1];
-            if (block.highest + 1 >= (above.highest - above.len + 1)) {
-                const lo = @min((above.highest - above.len + 1), (block.highest - block.len + 1));
+            if (block.highest +| 1 >= low(above)) {
+                const lo = @min(low(above), low(block));
                 const hi = @max(above.highest, block.highest);
-                self.blocks.items[i - 1] = .{ .highest = hi, .len = hi - lo + 1 };
+                self.blocks.items[i - 1] = .{ .highest = hi, .len = hi -| lo +| 1 };
                 _ = self.blocks.orderedRemove(i);
                 i -= 1;
                 block = self.blocks.items[i];
@@ -89,16 +89,22 @@ pub const AckTracker = struct {
         }
     }
 
+    /// Lowest packet number covered by a block (saturating: a corrupt
+    /// zero-length block reports its highest instead of underflowing).
+    fn low(b: Block) u64 {
+        return b.highest -| (b.len -| 1);
+    }
+
     /// Produces ACK blocks ready for frames.encodeAckFromBlocks. The
     /// returned slice is owned by the caller's ArrayList.
     pub fn generateBlocks(
         self: *const AckTracker,
         out: *std.ArrayList(Block),
         gpa: Allocator,
-        max_blocks: usize,
+        maxBlocks: usize,
     ) !void {
         out.clearRetainingCapacity();
-        const limit = @min(max_blocks, self.blocks.items.len);
+        const limit = @min(maxBlocks, self.blocks.items.len);
         for (self.blocks.items[0..limit]) |b| {
             try out.append(gpa, b);
         }
@@ -112,6 +118,23 @@ test "single packet add" {
     try std.testing.expect(t.contains(5));
     try std.testing.expect(!t.contains(4));
     try std.testing.expectError(Error.DuplicatePacket, t.add(5));
+}
+
+test "ranges starting at packet zero merge without overflow" {
+    // Regression: `highest - len + 1` panicked in Debug for PN 0 blocks.
+    var t = AckTracker.init(std.testing.allocator);
+    defer t.deinit();
+    try t.add(0);
+    try std.testing.expect(t.contains(0));
+    try t.add(1);
+    try std.testing.expectEqual(@as(usize, 1), t.blocks.items.len);
+    try std.testing.expectEqual(@as(u64, 1), t.blocks.items[0].highest);
+    try std.testing.expectEqual(@as(u64, 2), t.blocks.items[0].len);
+    try t.add(3);
+    try std.testing.expectEqual(@as(usize, 2), t.blocks.items.len);
+    try t.add(2);
+    try std.testing.expectEqual(@as(usize, 1), t.blocks.items.len);
+    try std.testing.expectEqual(@as(u64, 4), t.blocks.items[0].len);
 }
 
 test "in-order and out-of-order adds coalesce" {
@@ -168,8 +191,8 @@ test "ack frame generation matches wire expectations" {
 
     var pos: usize = 0;
     const f = try frames.decode(wire.items, &pos);
-    try std.testing.expectEqual(@as(u64, 10), f.ack.largest_acknowledged);
-    try std.testing.expectEqual(@as(u64, 0), f.ack.first_range);
+    try std.testing.expectEqual(@as(u64, 10), f.ack.largestAcknowledged);
+    try std.testing.expectEqual(@as(u64, 0), f.ack.firstRange);
     try std.testing.expectEqual(@as(usize, 1), f.ack.ranges.len);
     try std.testing.expectEqual(@as(u64, 1), f.ack.ranges[0].gap); // 9,8 missing
     try std.testing.expectEqual(@as(u64, 2), f.ack.ranges[0].length); // covers len-1

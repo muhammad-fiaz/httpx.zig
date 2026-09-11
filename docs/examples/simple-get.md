@@ -29,7 +29,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-all-simple_get
+zig build run-simple-get
 ```
 
 ## What to Verify

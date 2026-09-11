@@ -3,7 +3,7 @@
 HTTPX provides high-performance, structured HTML and XML document parsing, DOM manipulation, and CSS selector inspection.
 
 > [!NOTE]
-> HTTPX uses `tree-sitter.zig` internally for structured HTML/document parsing and incremental parsing. Applications normally interact only with HTTPX's HTML/document APIs (`httpx.Parser`, `response.html()`, `doc.select()`). Applications do not need to install or import Tree-sitter directly.
+> HTTPX parses HTML/XML with its native DOM engine (`parsing/html.zig`, `parsing/xml.zig`); Tree-sitter is used for the JSON Feed syntax layer, the template syntax layer, plus the shared incremental-edit vocabulary (`Point`/`SourceRange`/`TextEdit`). Applications normally interact only with HTTPX's HTML/document APIs (`httpx.Parser`, `response.html()`, `doc.select()`). Applications do not need to install or import Tree-sitter directly.
 
 ## Parsing Documents
 
@@ -88,7 +88,7 @@ for (links) |link| {
 
 ## Incremental Document Updates
 
-For live-reloading and development mode, HTTPX tracks changed byte ranges and syntax tree updates using Tree-sitter's internal incremental parsing engine without throwing away the entire syntax tree on edits.
+For live-reloading and development mode, HTTPX runs Tree-sitter incremental reparses (`htmlLanguage` in `parsing/html.zig`) to obtain structurally changed ranges; `Document.incrementalUpdate` rebuilds the DOM from the new syntax tree. The file watcher (`web/watcher`) uses the same incremental analysis plus template dependency tracking for targeted cache invalidation.
 
 ## Related
 

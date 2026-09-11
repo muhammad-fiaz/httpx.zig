@@ -62,7 +62,7 @@ fn se(name: []const u8, value: []const u8) StaticEntry {
     return .{ .name = name, .value = value };
 }
 
-pub const static_table = [_]StaticEntry{
+pub const staticTable = [_]StaticEntry{
     se(":authority", ""), // 0
     se(":path", "/"), // 1
     se("age", "0"), // 2
@@ -166,9 +166,9 @@ pub const static_table = [_]StaticEntry{
 
 // Integer primitives shared with HPACK-style prefixes
 
-pub fn encodeInt(buf: []u8, prefix_bits: u4, value: u64) Error!usize {
+pub fn encodeInt(buf: []u8, prefixBits: u4, value: u64) Error!usize {
     if (buf.len < 1) return Error.BufferTooSmall;
-    const max_prefix: u64 = (@as(u64, 1) << prefix_bits) - 1;
+    const max_prefix: u64 = (@as(u64, 1) << prefixBits) - 1;
     buf[0] = 0;
 
     if (value < max_prefix) {
@@ -189,9 +189,9 @@ pub fn encodeInt(buf: []u8, prefix_bits: u4, value: u64) Error!usize {
     return pos + 1;
 }
 
-pub fn decodeInt(data: []const u8, offset: *usize, prefix_bits: u4) Error!u64 {
+pub fn decodeInt(data: []const u8, offset: *usize, prefixBits: u4) Error!u64 {
     if (offset.* >= data.len) return Error.InvalidInstruction;
-    const max_prefix: u64 = (@as(u64, 1) << prefix_bits) - 1;
+    const max_prefix: u64 = (@as(u64, 1) << prefixBits) - 1;
     var value: u64 = data[offset.*] & @as(u8, @intCast(max_prefix));
     offset.* += 1;
     if (value < max_prefix) return value;
@@ -221,17 +221,17 @@ pub const DynEntry = struct {
     name: []const u8,
     value: []const u8,
     /// Total size = name.len + value.len + ENTRY_OVERHEAD (32).
-    total_size: usize,
+    totalSize: usize,
 };
 
 pub const DynTable = struct {
     entries: std.ArrayList(DynEntry),
     maxSize: usize,
-    current_size: usize = 0,
+    currentSize: usize = 0,
     /// Absolute index of the oldest retained dynamic entry.
-    base_index: u64 = STATIC_TABLE_SIZE,
+    baseIndex: u64 = STATIC_TABLE_SIZE,
     /// Absolute index assigned to the next insertion.
-    next_index: u64 = STATIC_TABLE_SIZE,
+    nextIndex: u64 = STATIC_TABLE_SIZE,
 
     pub fn init(_: Allocator, maxSize: usize) DynTable {
         return .{
@@ -257,13 +257,13 @@ pub const DynTable = struct {
 
         const total = std.math.add(usize, std.math.add(usize, name.len, value.len) catch return Error.OutOfMemory, ENTRY_OVERHEAD) catch return Error.OutOfMemory;
         if (total > self.maxSize) return Error.TableCapacityExceeded;
-        const index = self.next_index;
+        const index = self.nextIndex;
 
         // Evict from oldest (index = STATIC_TABLE_SIZE) until room.
-        while (self.current_size + total > self.maxSize and self.entries.items.len > 0) {
+        while (self.currentSize + total > self.maxSize and self.entries.items.len > 0) {
             const old = self.entries.orderedRemove(0);
-            self.current_size -%= old.total_size;
-            self.base_index = std.math.add(u64, self.base_index, 1) catch return Error.OutOfMemory;
+            self.currentSize -%= old.totalSize;
+            self.baseIndex = std.math.add(u64, self.baseIndex, 1) catch return Error.OutOfMemory;
             allocator.free(old.name);
             allocator.free(old.value);
         }
@@ -271,21 +271,21 @@ pub const DynTable = struct {
         try self.entries.append(allocator, .{
             .name = owned_name,
             .value = owned_value,
-            .total_size = total,
+            .totalSize = total,
         });
-        self.current_size += total;
-        self.next_index = std.math.add(u64, self.next_index, 1) catch return Error.OutOfMemory;
+        self.currentSize += total;
+        self.nextIndex = std.math.add(u64, self.nextIndex, 1) catch return Error.OutOfMemory;
         return @intCast(index);
     }
 
     /// Resolves a QPACK absolute index to a name+value pair.
-    pub fn resolve(self: *const DynTable, absolute_index: u64) ?struct { name: []const u8, value: []const u8 } {
-        if (absolute_index < STATIC_TABLE_SIZE) {
-            const e = static_table[@intCast(absolute_index)];
+    pub fn resolve(self: *const DynTable, absoluteIndex: u64) ?struct { name: []const u8, value: []const u8 } {
+        if (absoluteIndex < STATIC_TABLE_SIZE) {
+            const e = staticTable[@intCast(absoluteIndex)];
             return .{ .name = e.name, .value = e.value };
         }
-        if (absolute_index < self.base_index) return null;
-        const dyn_idx = absolute_index - self.base_index;
+        if (absoluteIndex < self.baseIndex) return null;
+        const dyn_idx = absoluteIndex - self.baseIndex;
         if (dyn_idx >= self.entries.items.len) return null;
         const e = self.entries.items[@intCast(dyn_idx)];
         return .{ .name = e.name, .value = e.value };
@@ -382,7 +382,7 @@ pub const Encoder = struct {
 
     /// Attempts to encode using a static table indexed match.
     fn encodeStaticMatch(self: *Encoder, out: *std.ArrayList(u8), name: []const u8, value: []const u8) bool {
-        for (static_table, 0..) |entry, i| {
+        for (staticTable, 0..) |entry, i| {
             if (std.mem.eql(u8, entry.name, name) and std.mem.eql(u8, entry.value, value)) {
                 self.encodeIndexedStatic(out, @intCast(i)) catch return false;
                 return true;
@@ -400,13 +400,13 @@ pub const Encoder = struct {
     }
 
     /// Encodes a dynamic-table indexed field.
-    pub fn encodeIndexedDynamic(self: *Encoder, out: *std.ArrayList(u8), absolute_index: u64) !void {
+    pub fn encodeIndexedDynamic(self: *Encoder, out: *std.ArrayList(u8), absoluteIndex: u64) !void {
         const base = STATIC_TABLE_SIZE;
-        if (absolute_index < base) {
-            return try self.encodeIndexedStatic(out, absolute_index);
+        if (absoluteIndex < base) {
+            return try self.encodeIndexedStatic(out, absoluteIndex);
         }
         var ib: [10]u8 = undefined;
-        const n = try encodeInt(&ib, 4, absolute_index);
+        const n = try encodeInt(&ib, 4, absoluteIndex);
         ib[0] |= 0xC0; // S=1 + 4-bit prefix
         try out.appendSlice(self.allocator, ib[0..n]);
     }
@@ -462,7 +462,7 @@ pub const Decoder = struct {
                     }
                 } else {
                     if (idx >= STATIC_TABLE_SIZE) return Error.InvalidIndex;
-                    const e = static_table[@intCast(idx)];
+                    const e = staticTable[@intCast(idx)];
                     try results.append(self.allocator, .{ .name = e.name, .value = e.value, .allocated = false });
                 }
             } else if (first & 0xF0 == 0x20 or first & 0xF0 == 0x30) {
@@ -486,7 +486,7 @@ pub const Decoder = struct {
                         };
                     } else {
                         if (idx >= STATIC_TABLE_SIZE) return Error.InvalidIndex;
-                        const name = try self.allocator.dupe(u8, static_table[@intCast(idx)].name);
+                        const name = try self.allocator.dupe(u8, staticTable[@intCast(idx)].name);
                         const value = readString(self.allocator, data, &offset) catch |e| {
                             self.allocator.free(name);
                             return e;
@@ -499,7 +499,7 @@ pub const Decoder = struct {
                     }
                 } else {
                     if (idx >= STATIC_TABLE_SIZE) return Error.InvalidIndex;
-                    const name = try self.allocator.dupe(u8, static_table[@intCast(idx)].name);
+                    const name = try self.allocator.dupe(u8, staticTable[@intCast(idx)].name);
                     const value = readString(self.allocator, data, &offset) catch |e| {
                         self.allocator.free(name);
                         return e;
@@ -597,10 +597,10 @@ test "qpack integer roundtrip" {
 }
 
 test "static table known entries" {
-    try std.testing.expectEqualStrings(":method", static_table[17].name);
-    try std.testing.expectEqualStrings("GET", static_table[17].value);
-    try std.testing.expectEqualStrings(":status", static_table[25].name);
-    try std.testing.expectEqualStrings("200", static_table[25].value);
+    try std.testing.expectEqualStrings(":method", staticTable[17].name);
+    try std.testing.expectEqualStrings("GET", staticTable[17].value);
+    try std.testing.expectEqualStrings(":status", staticTable[25].name);
+    try std.testing.expectEqualStrings("200", staticTable[25].value);
 }
 
 test "encoder indexed static then decoder reads it" {
@@ -627,9 +627,9 @@ test "qpack static name reference decodes without consuming a name" {
     defer block.deinit(a);
 
     var len_buf: [10]u8 = undefined;
-    const index_bytes = try encodeInt(&len_buf, 4, 17);
+    const indexBytes = try encodeInt(&len_buf, 4, 17);
     len_buf[0] |= 0x50; // 01, N=0, S=1
-    try block.appendSlice(a, len_buf[0..index_bytes]);
+    try block.appendSlice(a, len_buf[0..indexBytes]);
     const n = try encodeInt(&len_buf, 7, 4);
     try block.appendSlice(a, len_buf[0..n]);
     try block.appendSlice(a, "POST");
@@ -684,7 +684,7 @@ test "qpack rejects entries larger than dynamic capacity" {
     defer table.deinit(a);
     try std.testing.expectError(Error.TableCapacityExceeded, table.insert(a, "oversized-name", "oversized-value"));
     try std.testing.expectEqual(@as(usize, 0), table.entries.items.len);
-    try std.testing.expectEqual(@as(usize, 0), table.current_size);
+    try std.testing.expectEqual(@as(usize, 0), table.currentSize);
 }
 
 test "qpack huffman literal decodes through shared codec" {
@@ -694,18 +694,18 @@ test "qpack huffman literal decodes through shared codec" {
     try block.append(a, 0x00); // literal without name reference
 
     var encoded: [64]u8 = undefined;
-    const name_len = try huff.encode(encoded[0..], ":path");
+    const nameLen = try huff.encode(encoded[0..], ":path");
     var len_buf: [10]u8 = undefined;
-    var n = try encodeInt(&len_buf, 7, name_len);
+    var n = try encodeInt(&len_buf, 7, nameLen);
     len_buf[0] |= 0x80;
     try block.appendSlice(a, len_buf[0..n]);
-    try block.appendSlice(a, encoded[0..name_len]);
+    try block.appendSlice(a, encoded[0..nameLen]);
 
-    const value_len = try huff.encode(encoded[0..], "/");
-    n = try encodeInt(&len_buf, 7, value_len);
+    const valueLen = try huff.encode(encoded[0..], "/");
+    n = try encodeInt(&len_buf, 7, valueLen);
     len_buf[0] |= 0x80;
     try block.appendSlice(a, len_buf[0..n]);
-    try block.appendSlice(a, encoded[0..value_len]);
+    try block.appendSlice(a, encoded[0..valueLen]);
 
     var dec = Decoder.init(a);
     const fields = try dec.decodeSection(block.items);

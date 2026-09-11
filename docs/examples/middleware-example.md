@@ -36,7 +36,7 @@ pub fn main() !void {
 }
 ```
 
-Built-ins: `cors`, `helmet` (`securityHeaders`), `recovery`, `logging`,
+Built-ins: `cors`, `helmet`, `recovery`, `logging`,
 plus `RateLimiter` and CSRF token helpers. See [Middleware](/api/middleware).
 
 ## Run

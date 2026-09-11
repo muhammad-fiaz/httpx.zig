@@ -53,13 +53,13 @@ fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Custom request/response example\"}",
-        .content_type = "application/json",
+        .contentType = "application/json",
     };
 }
 
 fn echoHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     if (ctx.body.len == 0) {
-        return .{ .status = 400, .body = "{\"error\":\"No body\"}", .content_type = "application/json" };
+        return .{ .status = 400, .body = "{\"error\":\"No body\"}", .contentType = "application/json" };
     }
     return ctx.renderJson(.{ .echo = ctx.body });
 }

@@ -82,7 +82,7 @@ Returns the body slice as a string. The slice is valid until `resp.deinit()`.
 Decodes the response body into the target Zig type `T` using Zig's standard JSON parser.
 
 ### `resp.html() !httpx.parsing.Document`
-Parses the body into an HTML/DOM document tree using the internal Tree-sitter engine. Caller must call `document.deinit()`.
+Parses the body into an HTML/DOM document tree using the native HTML engine. Caller must call `document.deinit()`.
 
 ### `resp.xml() !httpx.parsing.Document`
 Parses the body into an XML document tree. Caller must call `document.deinit()`.

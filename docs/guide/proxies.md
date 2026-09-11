@@ -1,14 +1,10 @@
-# Proxies & SOCKS5h Guide
+# Proxies & SOCKS5 Guide
 
-`httpx.zig` includes comprehensive forward and reverse proxy capabilities, supporting HTTP proxies, HTTPS CONNECT tunneling, SOCKS5h proxies (with remote DNS resolution), and server-side reverse proxy middleware.
+`httpx.zig` routes client requests through forward proxies: HTTP
+CONNECT tunnels and SOCKS5 / SOCKS5h (remote DNS). Configure globally
+on the client or per request.
 
 ## Forward Proxying (Client)
-
-A forward proxy intercepts outbound client requests and routes them to target servers on behalf of the client.
-
-### 1. HTTP/HTTPS Proxy
-
-Configure standard HTTP or HTTPS forward proxies on `ClientConfig`:
 
 ```zig
 const std = @import("std");
@@ -18,15 +14,10 @@ pub fn main() !void {
     const allocator = std.heap.page_allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = httpx.Client.init(allocator, io, .{}
-        .withProxy(.{
-            .kind = .http,
-            .host = "proxy.example.com",
-            .port = 8080,
-            .username = "user", // Optional credentials
-            .password = "secret",
-        })
-    );
+    // Global proxy for every request from this client.
+    var client = httpx.Client.init(allocator, io, .{
+        .proxy = "http://127.0.0.1:8080",
+    });
     defer client.deinit();
 
     var resp = try client.get("https://httpbun.com/get", .{});
@@ -34,42 +25,52 @@ pub fn main() !void {
 }
 ```
 
-### 2. SOCKS5h Proxy
-
-The SOCKS5h protocol delegates target name resolution directly to the proxy server, avoiding local DNS leaks and resolving internal hostnames:
+Per-request override uses the same `.proxy` field:
 
 ```zig
-    const io = std.Io.Threaded.global_single_threaded.io();
-var client = httpx.Client.init(allocator, io, .{}
-    .withProxy(.{
-        .kind = .socks5h,
-        .host = "127.0.0.1",
-        .port = 1080,
-    })
-);
+var resp = try client.get("http://internal/", .{
+    .proxy = "http://127.0.0.1:8080",
+});
 ```
 
----
+### 1. HTTP CONNECT Proxy (with authentication)
 
-## Reverse Proxying (Server)
+Plain `http://host:port` tunnels via `CONNECT host:port`, keeping the
+tunneled request in origin-form (`GET /path`, never an absolute URI).
 
-A reverse proxy sits in front of backend servers, receiving incoming client requests and forwarding them downstream.
-
-Use the built-in `reverseProxy` middleware to configure routing to backend services:
+Credentials in the proxy URL become `Proxy-Authorization: Basic` on
+the CONNECT request only — they are never forwarded to the origin:
 
 ```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-pub fn main() !void {
-    const allocator = std.heap.page_allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var server = try httpx.Server.init(allocator, io, .{});
-    defer server.deinit();
-
-    // Route all incoming requests on /api/* downstream to the backend service
-    try server.use(httpx.middleware.reverseProxy("http://backend-service.local:9000"));
-
-    server.run();
-}
+var resp = try client.get("http://internal/", .{
+    .proxy = "http://user:pass@127.0.0.1:8080",
+});
 ```
+
+A `407 Proxy Authentication Required` response surfaces as
+`error.ProxyAuthRequired`; other non-`200` CONNECT replies surface as
+`error.ConnectFailed`. (`https://` proxy URLs are not accepted.)
+
+### 2. SOCKS5 / SOCKS5h Proxy
+
+```zig
+var client = httpx.Client.init(allocator, io, .{
+    // SOCKS5h delegates target name resolution to the proxy,
+    // avoiding local DNS leaks for internal hostnames.
+    .proxy = "socks5h://user:pass@127.0.0.1:1080",
+});
+defer client.deinit();
+```
+
+`socks5://` resolves the destination locally; `socks5h://` sends the
+domain name to the proxy (`ATYP=0x03`). Username/password sub-
+negotiation is supported for both. SOCKS4 (`socks4://`, IPv4 literals
+only) and SOCKS4a (`socks4a://`, hostnames forwarded unresolved) are
+supported the same way; SOCKS4 has no authentication and no IPv6.
+
+## Server-side Middleware
+
+Apply standard middleware to a server with `server.use(mw)` (CORS,
+security headers, logging, rate limiting — see `/guide/middleware`).
+There is no built-in reverse-proxy middleware; proxy *servers* are
+outside the scope of this guide.

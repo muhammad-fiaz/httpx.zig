@@ -46,19 +46,19 @@ const ws = if (is_windows) struct {
     pub const SOCK_STREAM: i32 = 1;
     pub const IPPROTO_TCP: i32 = 6;
 
-    pub const sockaddr_in = extern struct {
+    pub const sockaddrIn = extern struct {
         family: u16,
         port: u16, // big-endian
         addr: [4]u8,
         zero: [8]u8 = .{0} ** 8,
     };
 
-    pub const sockaddr_in6 = extern struct {
+    pub const sockaddrIn6 = extern struct {
         family: u16,
         port: u16, // big-endian
         flowinfo: u32 = 0,
         addr: [16]u8,
-        scope_id: u32 = 0,
+        scopeId: u32 = 0,
     };
 
     // Winsock error codes
@@ -135,15 +135,15 @@ const ws = if (is_windows) struct {
 /// Applies SO_RCVTIMEO/SO_SNDTIMEO (milliseconds; 0 = none).
 /// Works on Windows sockets and POSIX fds alike (both take the option at
 /// SOL_SOCKET level; Windows wants a DWORD ms, POSIX a timeval).
-pub fn setTimeouts(sock: net.Socket.Handle, timeout_ms: u31) void {
+pub fn setTimeouts(sock: net.Socket.Handle, timeoutMs: u31) void {
     if (is_windows) {
-        const ms: u32 = @intCast(timeout_ms);
+        const ms: u32 = @intCast(timeoutMs);
         _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.SOL_SOCKET, ws.SO_RCVTIMEO, &ms, 4);
         _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.SOL_SOCKET, ws.SO_SNDTIMEO, &ms, 4);
     } else {
         const tv = posix.timeval{
-            .sec = @intCast(timeout_ms / 1000),
-            .usec = @intCast((timeout_ms % 1000) * 1000),
+            .sec = @intCast(timeoutMs / 1000),
+            .usec = @intCast((timeoutMs % 1000) * 1000),
         };
         _ = posix.setsockopt(sock, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
         _ = posix.setsockopt(sock, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
@@ -162,13 +162,13 @@ pub fn setNoDelay(sock: net.Socket.Handle) void {
     }
 }
 
-pub fn setKeepAlive(sock: net.Socket.Handle, idle_secs: u32) void {
+pub fn setKeepAlive(sock: net.Socket.Handle, idleSecs: u32) void {
     const one: c_int = 1;
     if (is_windows) {
         _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.SOL_SOCKET, ws.SO_KEEPALIVE, &one, @sizeOf(c_int));
     } else {
         posix.setsockopt(sock, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
-        const idle: c_int = @intCast(idle_secs);
+        const idle: c_int = @intCast(idleSecs);
         switch (builtin.os.tag) {
             .linux => posix.setsockopt(sock, posix.IPPROTO.TCP, 4, std.mem.asBytes(&idle)) catch {}, // TCP_KEEPIDLE
             .macos => posix.setsockopt(sock, posix.IPPROTO.TCP, 0x10, std.mem.asBytes(&idle)) catch {}, // TCP_KEEPALIVE
@@ -214,12 +214,12 @@ pub const UploadStream = struct {
         if (is_windows) {
             const h = ws.socket(ws.AF_INET, ws.SOCK_STREAM, ws.IPPROTO_TCP);
             if (h == ws.INVALID_SOCKET) return ConnectError.ConnectionRefused;
-            var addr = ws.sockaddr_in{
+            var addr = ws.sockaddrIn{
                 .family = @intCast(ws.AF_INET),
                 .port = std.mem.nativeToBig(u16, port),
                 .addr = host,
             };
-            if (ws.connect(h, &addr, @sizeOf(ws.sockaddr_in)) == ws.SOCKET_ERROR) {
+            if (ws.connect(h, &addr, @sizeOf(ws.sockaddrIn)) == ws.SOCKET_ERROR) {
                 // Read the error BEFORE closesocket: successful winsock calls
                 // reset the thread's last-error, clobbering the real code.
                 const err = ws.mapConnectError();
@@ -358,7 +358,7 @@ pub const Socket = struct {
     inner: Inner,
     io: std.Io,
     /// Idempotent-teardown guard.
-    close_flag: std.atomic.Value(bool) = .init(false),
+    closeFlag: std.atomic.Value(bool) = .init(false),
 
     const Inner = union(enum) {
         /// Raw ws2_32 SOCKET — used on Windows for client connections.
@@ -383,7 +383,7 @@ pub const Socket = struct {
     // Atomic once-guard
 
     fn acquireClose(self: *const Socket) bool {
-        return !@constCast(&self.close_flag).swap(true, .acq_rel);
+        return !@constCast(&self.closeFlag).swap(true, .acq_rel);
     }
 
     // Close
@@ -428,7 +428,7 @@ pub const Socket = struct {
     /// Probes whether the socket is still open and healthy.
     /// Returns false if closed locally.
     pub fn isAlive(self: *const Socket) bool {
-        return !self.close_flag.load(.monotonic);
+        return !self.closeFlag.load(.monotonic);
     }
 
     // I/O
@@ -515,7 +515,7 @@ pub const Socket = struct {
 
 pub const Listener = struct {
     server: net.Server,
-    bound_port: u16,
+    boundPort: u16,
     family: address_mod.Family = .ip4,
     closed: bool = false,
 
@@ -531,7 +531,7 @@ pub const Listener = struct {
         const server = try std_addr.listen(io, .{ .reuse_address = true });
         return .{
             .server = server,
-            .bound_port = switch (server.socket.address) {
+            .boundPort = switch (server.socket.address) {
                 .ip4 => |v| v.port,
                 .ip6 => |v| v.port,
             },
@@ -540,7 +540,7 @@ pub const Listener = struct {
     }
 
     pub fn localPort(self: *const Listener) u16 {
-        return self.bound_port;
+        return self.boundPort;
     }
 
     /// Accepts a connection.
@@ -573,12 +573,12 @@ pub fn wakeListenerPort(port: u16) void {
         initWinsock();
         const sock = ws.socket(ws.AF_INET, ws.SOCK_STREAM, ws.IPPROTO_TCP);
         if (sock == ws.INVALID_SOCKET) return;
-        var sa = ws.sockaddr_in{
+        var sa = ws.sockaddrIn{
             .family = @intCast(ws.AF_INET),
             .port = @byteSwap(port),
             .addr = .{ 127, 0, 0, 1 },
         };
-        _ = ws.connect(sock, &sa, @sizeOf(ws.sockaddr_in));
+        _ = ws.connect(sock, &sa, @sizeOf(ws.sockaddrIn));
         _ = ws.closesocket(sock);
     } else {
         const fd = std.c.socket(@intCast(posix.AF.INET), @intCast(posix.SOCK.STREAM), 0);
@@ -655,12 +655,12 @@ fn connectAddressWindows(io: std.Io, addr: *const address_mod.Address) ConnectEr
             if (h == ws.INVALID_SOCKET) {
                 return ws.mapConnectError();
             }
-            var sa = ws.sockaddr_in{
+            var sa = ws.sockaddrIn{
                 .family = @intCast(ws.AF_INET),
                 .port = std.mem.nativeToBig(u16, addr.port),
                 .addr = addr.bytes[0..4].*,
             };
-            if (ws.connect(h, &sa, @sizeOf(ws.sockaddr_in)) == ws.SOCKET_ERROR) {
+            if (ws.connect(h, &sa, @sizeOf(ws.sockaddrIn)) == ws.SOCKET_ERROR) {
                 // Read the error BEFORE closesocket (see connectIPv4).
                 const err = ws.mapConnectError();
                 _ = ws.closesocket(h);
@@ -672,13 +672,13 @@ fn connectAddressWindows(io: std.Io, addr: *const address_mod.Address) ConnectEr
         .ip6 => {
             const h = ws.socket(ws.AF_INET6, ws.SOCK_STREAM, ws.IPPROTO_TCP);
             if (h == ws.INVALID_SOCKET) return ws.mapConnectError();
-            var sa = ws.sockaddr_in6{
+            var sa = ws.sockaddrIn6{
                 .family = @intCast(ws.AF_INET6),
                 .port = std.mem.nativeToBig(u16, addr.port),
                 .addr = addr.bytes,
-                .scope_id = addr.zone,
+                .scopeId = addr.zone,
             };
-            if (ws.connect(h, &sa, @sizeOf(ws.sockaddr_in6)) == ws.SOCKET_ERROR) {
+            if (ws.connect(h, &sa, @sizeOf(ws.sockaddrIn6)) == ws.SOCKET_ERROR) {
                 // Read the error BEFORE closesocket (see connectIPv4).
                 const err = ws.mapConnectError();
                 _ = ws.closesocket(h);

@@ -30,7 +30,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-all-connection_pool
+zig build run-connection-pool
 ```
 
 ## What to Verify

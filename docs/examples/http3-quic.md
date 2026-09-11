@@ -77,7 +77,7 @@ pub fn main() !void {
 
     var off: usize = 1;
     const parsed_frame = try httpx.http3.frame.parseFrame(client_ctrl, &off);
-    try server_conn.processControlFrame(parsed_frame.frame_type, parsed_frame.payload);
+    try server_conn.processControlFrame(parsed_frame.frameType, parsed_frame.payload);
 
     const bidi_id = client_conn.nextBidiStreamId();
     var req_stream = client_conn.createRequestStream(bidi_id);

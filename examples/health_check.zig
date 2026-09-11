@@ -38,8 +38,8 @@ pub fn main() !void {
     });
     defer server.deinit();
 
-    try server.router.add(.GET, "/healthz", &healthzHandler);
-    try server.router.add(.GET, "/readyz", &readyzHandler);
+    try server.router.add(.GET, "/healthz", &healthzHandler, .{});
+    try server.router.add(.GET, "/readyz", &readyzHandler, .{});
 
     const port = server.localPort();
     std.debug.print("endpoints on 127.0.0.1:{d}\n", .{port});

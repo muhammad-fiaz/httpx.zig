@@ -1,8 +1,8 @@
-//! HTTP/2 cleartext transport (h2c prior knowledge, RFC 9113 Section 3.4).
+//! HTTP/2 transport (RFC 9113): cleartext h2c prior knowledge plus TLS.
 //!
-//! Thin glue driving the Session engine over plain TCP for BOTH roles.
-//! TLS+ALPN paths use the same Session from their own callers.
-//! Thread-safety: one transport per connection, thread-confined.
+//! Thin glue driving the Session engine over plain TCP or a native TLS
+//! session for BOTH roles. The Session itself is transport-agnostic
+//! (outbound buffer + feed()); this layer only moves bytes.
 //!
 //! References:
 //!   - RFC 9113 Section 3.4 — HTTP/2 Connection Preface (h2c)
@@ -12,10 +12,13 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../../sockets/tcp.zig");
+const clock = @import("../../common/clock.zig");
 const session_mod = @import("connection.zig");
 const Session = session_mod.Session;
 const hpack = @import("hpack.zig");
-
+const tlsClientMod = @import("../tls/tcp_client.zig");
+const tlsServerMod = @import("../tls/tcp_tls.zig");
+const tlsSessionMod = @import("../tls/session.zig");
 pub const Error = error{
     ProtocolViolation,
     HandshakeFailed,
@@ -32,9 +35,46 @@ pub const MAX_REQUEST_BODY_SIZE: usize = 16 * 1024 * 1024;
 
 pub const Header = struct { name: []const u8, value: []const u8 };
 
-fn writeAllRaw(sock: *const tcp.Socket, bytes: []const u8) Error!void {
-    sock.writeAll(bytes) catch return error.WriteFailed;
-}
+/// Transport stream: plain TCP or an established native TLS session.
+/// Both expose read/writeAll/close with identical ownership (the Client
+/// or serve loop owns the underlying socket through the stream).
+pub const Stream = union(enum) {
+    tcp: tcp.Socket,
+    /// Client side of a native TLS session (h2 negotiated via ALPN).
+    tls: *tlsClientMod.TlsClientConn,
+    /// Server side of a native TLS session.
+    tlsServer: *tlsServerMod.TlsServerConn,
+
+    fn read(self: *Stream, buf: []u8) !usize {
+        return switch (self.*) {
+            .tcp => |*s| try s.read(buf),
+            .tls => |t| try t.read(buf),
+            .tlsServer => |t| try t.read(buf),
+        };
+    }
+
+    fn writeAll(self: *Stream, bytes: []const u8) !void {
+        switch (self.*) {
+            .tcp => |*s| try s.writeAll(bytes),
+            .tls => |t| try t.writeAll(bytes),
+            .tlsServer => |t| try t.writeAll(bytes),
+        }
+    }
+
+    fn close(self: *Stream) void {
+        switch (self.*) {
+            .tcp => |*s| s.close(),
+            .tls => |t| {
+                t.deinit();
+                t.close();
+            },
+            .tlsServer => |t| {
+                t.deinit();
+                t.socket.close();
+            },
+        }
+    }
+};
 
 // Client
 
@@ -57,11 +97,21 @@ pub const Response = struct {
 
 pub const Client = struct {
     allocator: Allocator,
-    sock: tcp.Socket,
+    stream: Stream,
     session: *Session,
 
-    /// Handshakes (magic + SETTINGS) and flushes.
+    /// Handshakes (magic + SETTINGS) and flushes over plain TCP.
     pub fn connect(allocator: Allocator, sock: tcp.Socket) !*Client {
+        return connectStream(allocator, .{ .tcp = sock });
+    }
+
+    /// Handshakes (magic + SETTINGS) and flushes over an established
+    /// native TLS session (h2 negotiated via ALPN).
+    pub fn connectTls(allocator: Allocator, tlsConn: *tlsClientMod.TlsClientConn) !*Client {
+        return connectStream(allocator, .{ .tls = tlsConn });
+    }
+
+    fn connectStream(allocator: Allocator, stream: Stream) !*Client {
         const c = try allocator.create(Client);
         errdefer allocator.destroy(c);
 
@@ -73,22 +123,21 @@ pub const Client = struct {
         }
 
         try sess.startHandshake();
-        c.* = .{ .allocator = allocator, .sock = sock, .session = sess };
-        try writeAllRaw(&c.sock, sess.outbound.items);
-        sess.outbound.clearRetainingCapacity();
+        c.* = .{ .allocator = allocator, .stream = stream, .session = sess };
+        try c.flush();
         return c;
     }
 
     pub fn deinit(self: *Client) void {
         self.session.deinit();
         self.allocator.destroy(self.session);
-        self.sock.close();
+        self.stream.close();
         self.allocator.destroy(self);
     }
 
     fn pump(self: *Client) Error!void {
         var buf: [16 * 1024]u8 = undefined;
-        const n = self.sock.read(&buf) catch return error.ReadFailed;
+        const n = self.stream.read(&buf) catch return error.ReadFailed;
         if (n == 0) return error.StreamClosed;
         self.session.feed(buf[0..n]) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -99,17 +148,21 @@ pub const Client = struct {
 
     fn flush(self: *Client) Error!void {
         if (self.session.outbound.items.len > 0) {
-            try writeAllRaw(&self.sock, self.session.outbound.items);
+            self.stream.writeAll(self.session.outbound.items) catch return error.WriteFailed;
             self.session.outbound.clearRetainingCapacity();
         }
     }
 
     /// One full request/response exchange on a fresh stream.
+    /// `scheme`/`authority` are caller-supplied (:scheme https and the
+    /// real host for TLS; http/localhost for cleartext loopback tests).
     pub fn request(
         self: *Client,
         method: []const u8,
         path: []const u8,
         extra: []const Header,
+        scheme: []const u8,
+        authority: []const u8,
     ) !Response {
         const a = self.allocator;
         const sid = try self.session.nextClientStreamId();
@@ -118,13 +171,12 @@ pub const Client = struct {
         defer fields.deinit(a);
         try fields.append(a, .{ .name = ":method", .value = method });
         try fields.append(a, .{ .name = ":path", .value = path });
-        try fields.append(a, .{ .name = ":scheme", .value = "http" });
-        try fields.append(a, .{ .name = ":authority", .value = "localhost" });
+        try fields.append(a, .{ .name = ":scheme", .value = scheme });
+        try fields.append(a, .{ .name = ":authority", .value = authority });
         for (extra) |h| try fields.append(a, .{ .name = h.name, .value = h.value });
 
         try self.session.sendHeaders(sid, fields.items, true);
-        try writeAllRaw(&self.sock, self.session.outbound.items);
-        self.session.outbound.clearRetainingCapacity();
+        try self.flush();
 
         // Collectors wired through session callbacks.
         var status: u16 = 500;
@@ -142,7 +194,7 @@ pub const Client = struct {
             body: *std.ArrayList(u8),
             a: Allocator,
 
-            fn onHeaders(ctx: ?*anyopaque, s: u31, flds: []hpack.HeaderField, end_stream: bool) anyerror!void {
+            fn onHeaders(ctx: ?*anyopaque, s: u31, flds: []hpack.HeaderField, endStream: bool) anyerror!void {
                 const self_: *@This() = @ptrCast(@alignCast(ctx.?));
                 if (s != self_.sid) return;
                 for (flds) |f| {
@@ -155,7 +207,7 @@ pub const Client = struct {
                         .value = try self_.a.dupe(u8, f.value),
                     });
                 }
-                if (end_stream) self_.done.* = true;
+                if (endStream) self_.done.* = true;
             }
             fn onData(ctx: ?*anyopaque, s: u31, data: []const u8) anyerror!void {
                 const self_: *@This() = @ptrCast(@alignCast(ctx.?));
@@ -187,7 +239,7 @@ pub const Client = struct {
         };
         defer self.session.cbs = .{};
 
-        while (!done and !self.session.closed and !self.session.goaway_received) {
+        while (!done and !self.session.closed and !self.session.goawayReceived) {
             try self.pump();
         }
         if (!done) return error.StreamClosed;
@@ -201,9 +253,99 @@ pub const Client = struct {
     }
 };
 
+/// Heap box for a TLS-backed H2 session. `TlsClientConn` borrows its
+/// socket, and pooled connections outlive any stack frame, so both live
+/// together on the heap with a stable address.
+pub const TlsBox = struct {
+    sock: tcp.Socket,
+    conn: tlsClientMod.TlsClientConn,
+};
+
+/// A pool-owned H2 connection: heap-stable transport boxes plus the
+/// session client. At most one borrower uses it at a time (the pool
+/// transfers exclusive ownership on acquire/release), so no per-request
+/// locking is needed inside the session. Free with `deinit()`.
+pub const PooledConn = struct {
+    allocator: Allocator,
+    tlsBox: ?*TlsBox,
+    client: *Client,
+    /// Wall-clock creation time: the pool measures H2 lifetime from
+    /// here (connection-lifetime ledger), not from parking.
+    createdAtMs: i64,
+
+    /// Wrap a connected cleartext socket (takes ownership).
+    pub fn wrapPlain(allocator: Allocator, sock: tcp.Socket) !*PooledConn {
+        const self = try allocator.create(PooledConn);
+        errdefer allocator.destroy(self);
+        const hc = try Client.connect(allocator, sock);
+        self.* = .{ .allocator = allocator, .tlsBox = null, .client = hc, .createdAtMs = clock.millisNow() };
+        return self;
+    }
+
+    /// Wrap a completed TLS box (takes ownership). The box must already
+    /// hold a handshaked connection whose socket borrow points at
+    /// `box.sock`.
+    pub fn wrapTls(allocator: Allocator, box: *TlsBox) !*PooledConn {
+        const self = try allocator.create(PooledConn);
+        errdefer allocator.destroy(self);
+        const hc = Client.connectTls(allocator, &box.conn) catch |err| {
+            box.conn.deinit();
+            box.sock.close();
+            allocator.destroy(box);
+            return err;
+        };
+        self.* = .{ .allocator = allocator, .tlsBox = box, .client = hc, .createdAtMs = clock.millisNow() };
+        return self;
+    }
+
+    pub fn deinit(self: *PooledConn) void {
+        // Client.deinit closes the stream exactly once (plain socket, or
+        // TLS session + its borrowed socket); only the boxes remain.
+        self.client.deinit();
+        if (self.tlsBox) |box| self.allocator.destroy(box);
+        self.allocator.destroy(self);
+    }
+
+    /// True when another request may run on this session: transport
+    /// open, no GOAWAY either way. HPACK tables are connection-scoped
+    /// per RFC 9113, so reuse is also compression-correct.
+    pub fn isReusable(self: *const PooledConn) bool {
+        const s = self.client.session;
+        if (s.closed or s.goawayReceived or s.goawaySent) return false;
+        return true;
+    }
+
+    /// One full request/response exchange on a fresh stream. Exclusive
+    /// use is the caller's contract (enforced by pool ownership).
+    pub fn request(
+        self: *PooledConn,
+        method: []const u8,
+        path: []const u8,
+        extra: []const Header,
+        scheme: []const u8,
+        authority: []const u8,
+    ) !Response {
+        return self.client.request(method, path, extra, scheme, authority);
+    }
+
+    /// Takes ownership of a captured resumption session from the
+    /// underlying TLS connection, if any (null for cleartext or when
+    /// capture is disabled). Call before parking to feed the client's
+    /// session cache. Caller owns the result.
+    pub fn takeSession(self: *PooledConn) ?tlsSessionMod.ClientSession {
+        const box = self.tlsBox orelse return null;
+        return box.conn.takeCapturedSession();
+    }
+};
+
 // Server: maps HTTP/2 streams onto a handler over ONE connection (h2c).
 
 /// Handler output for one request.
+///
+/// Ownership: `headers`/`body` must remain valid until the caller finishes
+/// sending the response (the server loop consumes them synchronously before
+/// invoking the handler again). Handlers backed by a per-request arena must
+/// duplicate response data into a longer-lived allocator.
 pub const HandlerResponse = struct {
     status: u16 = 200,
     headers: []const Header = &.{},
@@ -241,7 +383,7 @@ const ServerCtx = struct {
     }
 };
 
-fn svrOnHeaders(ctx: ?*anyopaque, sid: u31, flds: []hpack.HeaderField, end_stream: bool) anyerror!void {
+fn svrOnHeaders(ctx: ?*anyopaque, sid: u31, flds: []hpack.HeaderField, endStream: bool) anyerror!void {
     const s: *ServerCtx = @ptrCast(@alignCast(ctx.?));
     s.resetFor(sid);
     for (flds) |f| {
@@ -260,7 +402,7 @@ fn svrOnHeaders(ctx: ?*anyopaque, sid: u31, flds: []hpack.HeaderField, end_strea
         }
     }
     // A request with no body ends at the HEADERS frame itself.
-    if (end_stream) s.dispatched = true;
+    if (endStream) s.dispatched = true;
 }
 
 fn svrOnData(ctx: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
@@ -271,12 +413,35 @@ fn svrOnData(ctx: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
     try s.body.appendSlice(s.arena, data);
 }
 
+/// Serves h2 requests on an established native TLS session until
+/// close/GOAWAY. Same dispatch as serveConnection; only the byte mover
+/// differs (TLS records instead of TCP).
+pub fn serveTlsConnection(
+    allocator: Allocator,
+    tlsConn: *tlsServerMod.TlsServerConn,
+    handler: HandlerFn,
+    handlerCtx: ?*anyopaque,
+) !void {
+    var stream = Stream{ .tlsServer = tlsConn };
+    try serveStream(allocator, &stream, handler, handlerCtx);
+}
+
 /// Serves h2c requests on an accepted socket until close/GOAWAY.
 pub fn serveConnection(
     allocator: Allocator,
     sock: *tcp.Socket,
     handler: HandlerFn,
-    handler_ctx: ?*anyopaque,
+    handlerCtx: ?*anyopaque,
+) !void {
+    var stream = Stream{ .tcp = sock.* };
+    try serveStream(allocator, &stream, handler, handlerCtx);
+}
+
+fn serveStream(
+    allocator: Allocator,
+    stream: *Stream,
+    handler: HandlerFn,
+    handlerCtx: ?*anyopaque,
 ) !void {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -284,7 +449,7 @@ pub fn serveConnection(
     var session = try Session.init(allocator, .server, .{});
     defer session.deinit();
     try session.startHandshake();
-    sock.writeAll(session.outbound.items) catch return error.WriteFailed;
+    stream.writeAll(session.outbound.items) catch return error.WriteFailed;
     session.outbound.clearRetainingCapacity();
 
     var sc = ServerCtx{ .arena = arena_state.allocator() };
@@ -295,15 +460,15 @@ pub fn serveConnection(
     };
 
     var buf: [16 * 1024]u8 = undefined;
-    while (!session.closed and !session.goaway_received) {
-        const n = sock.read(&buf) catch break;
+    while (!session.closed and !session.goawayReceived) {
+        const n = stream.read(&buf) catch break;
         if (n == 0) break;
         session.feed(buf[0..n]) catch break;
 
         if (sc.dispatched and !sc.responded) {
             sc.responded = true;
             const resp = handler(
-                handler_ctx,
+                handlerCtx,
                 sc.method.items,
                 sc.path.items,
                 sc.hdrs.items,
@@ -327,7 +492,7 @@ pub fn serveConnection(
         }
 
         if (session.outbound.items.len > 0) {
-            sock.writeAll(session.outbound.items) catch break;
+            stream.writeAll(session.outbound.items) catch break;
             session.outbound.clearRetainingCapacity();
         }
     }
@@ -359,8 +524,8 @@ test "http2 client and server exchange over real tcp (h2c)" {
             serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
         }
     };
-    const t = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
-    defer t.join();
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    defer thread.join();
 
     var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
 
@@ -370,14 +535,92 @@ test "http2 client and server exchange over real tcp (h2c)" {
     };
     defer hc.deinit();
 
-    const r = try hc.request("GET", "/h2", &[_]Header{});
+    const r = try hc.request("GET", "/h2", &[_]Header{}, "http", "localhost");
     defer r.deinit();
 
     try std.testing.expectEqual(@as(u16, 200), r.status);
     try std.testing.expectEqualStrings("hello-h2", r.body);
 
     // Second request on the SAME connection proves multiplexing-ready reuse.
-    const r404 = try hc.request("GET", "/missing", &[_]Header{});
+    const r404 = try hc.request("GET", "/missing", &[_]Header{}, "http", "localhost");
     defer r404.deinit();
     try std.testing.expectEqual(@as(u16, 404), r404.status);
+}
+
+test "http2 over native tls loopback negotiates h2 via alpn" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return; // skip w/o network
+    defer ctx.deinit();
+
+    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const cert_pem = @embedFile("../tls/testdata/localhost_cert.pem");
+    const key_pem = @embedFile("../tls/testdata/localhost_key.pem");
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const Header, _: []const u8) anyerror!HandlerResponse {
+            if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/h2s")) {
+                return .{ .status = 200, .body = "hello-h2-tls" };
+            }
+            return .{ .status = 404, .body = "nope" };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io, out: *?anyerror) void {
+            var conn = lst.accept(io2) catch {
+                out.* = error.AcceptFailed;
+                return;
+            };
+            defer conn.close();
+            var srv = tlsServerMod.TlsServer.init(.{
+                .allocator = std.heap.page_allocator,
+                .defaultIdentity = .{ .certChainPem = cert_pem, .privateKeyPem = key_pem },
+            });
+            var tls_conn = srv.handshake(io2, &conn) catch |e| {
+                out.* = e;
+                return;
+            };
+            defer tls_conn.deinit();
+            if (tls_conn.alpn != .h2) {
+                out.* = error.AlpnMismatch;
+                return;
+            }
+            serveTlsConnection(std.heap.page_allocator, &tls_conn, H.handle, null) catch |e| {
+                out.* = e;
+                return;
+            };
+            out.* = null;
+        }
+    };
+    var result: ?anyerror = error.NotRun;
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io, &result }) catch return;
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+    errdefer sock.close();
+    var tls_cli = tlsClientMod.TlsClient.init(.{
+        .allocator = a,
+        .verify = .caBundle,
+        .caPem = cert_pem,
+        .alpnProtocols = &.{"h2"},
+    });
+    var tls_conn = try tls_cli.handshake(ctx.io, &sock, "127.0.0.1");
+    {
+        // TlsClientConn borrows the socket; the block scope ends the
+        // session (and closes the socket) before joining below, so the
+        // serve loop observes EOF and exits instead of deadlocking.
+        var hc = try Client.connectTls(a, &tls_conn);
+        defer hc.deinit();
+
+        const negotiated = tls_conn.alpn orelse return error.AlpnMissing;
+        try std.testing.expect(negotiated == .h2);
+        const r = try hc.request("GET", "/h2s", &[_]Header{}, "https", "127.0.0.1");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(u16, 200), r.status);
+        try std.testing.expectEqualStrings("hello-h2-tls", r.body);
+    }
+
+    thread.join();
+    try std.testing.expect(result == null);
 }

@@ -10,20 +10,20 @@ Define GraphQL query types and register resolvers:
 const std = @import("std");
 const httpx = @import("httpx");
 
-// Define schema resolvers and execution handler
-fn handleGraphQL(ctx: *httpx.Context) !void {
-    const body = ctx.body() orelse {
-        ctx.status(400);
-        return;
-    };
+Define GraphQL object types with resolvers, build a schema, and mount it.
+`mount` registers `GET`/`POST`/`OPTIONS` on the endpoint (default
+`/graphql`); the GraphiQL IDE is served by the docs mount
+(`enableDocs`, route `/graphiql`):
 
-    // Execute query against compiled schema
-    const result = try httpx.graphql.execute(ctx.allocator, schema, body);
-    defer ctx.allocator.free(result);
+```zig
+const std = @import("std");
+const httpx = @import("httpx");
 
-    ctx.header("Content-Type", "application/json");
-    try ctx.text(result);
-}
+const resolvers = struct {
+    pub fn getMe(ctx: httpx.graphql.ResolverContext) anyerror!std.json.Value {
+        return ctx.value(.{ .id = "usr_101", .name = "Muhammad Fiaz" });
+    }
+};
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -34,12 +34,22 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
-    server.post("/graphql", handleGraphQL);
-    server.graphiql("/graphiql", .{ .endpoint = "/graphql" });
+    const QueryType = httpx.graphql.ObjectTypeDef{
+        .name = "Query",
+        .fields = &.{
+            .{ .name = "me", .typeName = "User", .resolver = resolvers.getMe },
+        },
+    };
+    const schema = httpx.graphql.Schema.init(allocator, .{ .query = QueryType });
+    try httpx.graphql.mount(&server.router, schema, .{ .endpoint = "/graphql" });
+    defer httpx.graphql.unmount(&server.router, .{ .endpoint = "/graphql" });
 
     try server.run();
 }
 ```
+
+See `examples/graphql_server.zig` (`zig build run-graphql-server`) for the
+complete runnable version with queries, variables, and verification.
 
 ## Client Execution & Typed Responses
 

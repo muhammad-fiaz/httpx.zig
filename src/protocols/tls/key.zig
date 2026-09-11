@@ -6,9 +6,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const crypto = std.crypto;
-const cert_mod = @import("certificate.zig");
-const errors_mod = @import("errors.zig");
-pub const TlsError = errors_mod.TlsError;
+const certMod = @import("certificate.zig");
+const errorsMod = @import("errors.zig");
+pub const TlsError = errorsMod.TlsError;
 
 pub const KeyType = enum {
     rsa,
@@ -54,7 +54,7 @@ pub fn parsePrivateKeyPem(allocator: Allocator, pemBytes: []const u8) TlsError!P
 
     for (labels) |label| {
         if (std.mem.indexOf(u8, pemBytes, label) != null) {
-            const der = cert_mod.decodePemBlock(allocator, pemBytes, label) catch continue;
+            const der = certMod.decodePemBlock(allocator, pemBytes, label) catch continue;
             var keyType: KeyType = .unknown;
             if (std.mem.eql(u8, label, "RSA PRIVATE KEY")) {
                 keyType = .rsa;

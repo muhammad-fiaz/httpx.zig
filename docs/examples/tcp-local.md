@@ -35,7 +35,7 @@ pub fn main() !void {
     const thread = try std.Thread.spawn(.{}, Th.run, .{&ctx});
     defer thread.join();
 
-    var client = try httpx.tcp.connect(io, "127.0.0.1", port);
+    var client = try httpx.tcp.connectAddress(io, &addr);
     defer client.close();
     try client.writeAll("ping");
     var outBuf: [64]u8 = undefined;

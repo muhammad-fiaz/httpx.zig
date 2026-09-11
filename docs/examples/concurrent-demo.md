@@ -28,7 +28,7 @@ pub fn main() !void {
     }
 
     for (results, 0..) |result, i| {
-        std.debug.print("Request {d}: status={d} body_len={d}\n", .{ i + 1, result.status, result.body.len });
+        std.debug.print("Request {d}: status={d} bodyLen={d}\n", .{ i + 1, result.status, result.body.len });
     }
 
     // Request with options

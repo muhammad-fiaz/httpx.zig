@@ -12,7 +12,8 @@ The root module re-exports core types and convenience helpers so most apps can i
 - `httpx.get / post / put / patch / delete / head / options / trace / connect / request(url, options)`
 - `httpx.getAll(urls)` — fetch multiple URLs concurrently
 - `httpx.requestAll(requests)` — perform multiple custom requests concurrently
-- `httpx.download / updateFile / lookupFileInfo / graphqlQuery / resolveHost / resolveUrl / isOnline / checkConnectivity`
+- `httpx.isOnline() / httpx.checkConnectivity(options)` — stateless connectivity probes
+- Namespaced (not root globals): `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.Download.verifyFile`, `client.fetchSitemap`, `client.resolve`, `client.resolveUrl`
 
 ### Client Lifecycle
 
@@ -38,7 +39,7 @@ The root module re-exports core types and convenience helpers so most apps can i
 ### Server Types
 
 - `httpx.Server`, `httpx.ServerConfig`, `httpx.Router`, `httpx.Context`, `httpx.Response`
-- `httpx.TlsListener` via `httpx.tls.Listener` (use `httpx.tls.Listener`, `httpx.tls.Request`, `httpx.tls.Response`)
+- `httpx.tls.Listener`, `httpx.tls.ListenerConfig`, `httpx.tls.Request`, `httpx.tls.Response`
 
 ### Concurrency Helpers
 
@@ -47,7 +48,7 @@ The root module re-exports core types and convenience helpers so most apps can i
 
 ### Network Helpers
 
-- `client.resolve(host, port, options)` / `client.resolveUrl(url, options)`
+- `client.resolve(host, options)` / `client.resolveUrl(url, options)`
 - `httpx.resolve.Resolver`, `httpx.dns`, `httpx.socks5`, `httpx.proxy`
 - `httpx.tcp`, `httpx.udp`, `httpx.Address`, `httpx.connectivity`
 
@@ -86,7 +87,7 @@ The root module re-exports core types and convenience helpers so most apps can i
 
 - HTTP/1.0 and HTTP/1.1 are production runtime paths in the high-level client/server API.
 - HTTP/2 has high-level client and server runtime paths plus full protocol primitives (HPACK/framing/streams).
-- HTTP/3 has high-level client and server runtime paths over UDP/QUIC stream framing, plus full protocol primitives (QPACK/HTTP3/QUIC framing).
+- HTTP/3 has a live client runtime path over QUIC + TLS 1.3 (`client.get` with `.httpVersion = .http3`, reliable networks) plus full protocol primitives (QPACK/HTTP3/QUIC framing).
 - Cross-platform validation is maintained for Linux/Windows (x86, x86_64, aarch64) and macOS (x86_64, aarch64) build matrices.
 
 ## Customization and Callbacks

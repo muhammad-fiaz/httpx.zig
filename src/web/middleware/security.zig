@@ -64,12 +64,12 @@ pub fn verifyCsrfToken(a: []const u8, b: []const u8) bool {
 }
 
 // Rate limiting
-pub const rate_limit = @import("rate_limit.zig");
-pub const RateLimiter = rate_limit.RateLimiter;
-pub const RateLimitError = rate_limit.RateLimitError;
-pub const RateLimitDimension = rate_limit.RateLimitDimension;
-pub const RateLimitPolicy = rate_limit.RateLimitPolicy;
-pub const RateLimitResult = rate_limit.RateLimitResult;
+pub const rateLimit = @import("rate_limit.zig");
+pub const RateLimiter = rateLimit.RateLimiter;
+pub const RateLimitError = rateLimit.RateLimitError;
+pub const RateLimitDimension = rateLimit.RateLimitDimension;
+pub const RateLimitPolicy = rateLimit.RateLimitPolicy;
+pub const RateLimitResult = rateLimit.RateLimitResult;
 
 // Tests
 
@@ -198,8 +198,8 @@ test "middleware pipeline execution and headers" {
         }
     };
 
-    try router.get("/test", dummy.handle);
-    try router.get("/fail", dummy.fail);
+    try router.get("/test", dummy.handle, .{});
+    try router.get("/fail", dummy.fail, .{});
 
     // Test GET /test runs through cors and security headers
     {

@@ -19,7 +19,141 @@ const Allocator = std.mem.Allocator;
 const udp_mod = @import("../../sockets/udp.zig");
 const conn_mod = @import("connection.zig");
 const tcp_mod = @import("../../sockets/tcp.zig");
+const sync_mod = @import("../../common/sync.zig");
+const clock_mod = @import("../../common/clock.zig");
 const Connection = conn_mod.Connection;
+
+/// Background datagram pump for deadline-driven QUIC code.
+///
+/// `std.Io` datagram receives block indefinitely with no usable timeout
+/// on several backends, so a quiet peer would stall any direct pump
+/// loop forever. `Pump` instead receives on a dedicated reader thread
+/// into a bounded queue; the owner thread pops with a deadline and feeds
+/// the connection itself. ALL connection access stays on the owner
+/// thread — the reader only moves socket bytes into the queue, so no
+/// connection locking is needed anywhere.
+///
+/// Lifecycle: `start` spawns the reader; `next` pops (owned slice) until
+/// the deadline; `stop` wakes the reader via socket close, joins it, and
+/// drains the queue. Stopping consumes the endpoint's socket: one `Pump`
+/// spans the whole connection use (handshake through exchange).
+pub const Pump = struct {
+    ep: *Endpoint,
+    allocator: Allocator,
+    thread: std.Thread = undefined,
+    running: bool = false,
+    stop_flag: std.atomic.Value(bool) = .init(false),
+    /// Set by `stop()`: in-flight and future `next()` calls fail fast
+    /// with `error.PumpStopped` instead of polling to their deadline.
+    /// This is what makes server-thread teardown instant.
+    dead: std.atomic.Value(bool) = .init(false),
+    mu: sync_mod.Spinlock = .{},
+    queue: std.ArrayList(Queued) = .empty,
+    /// Hard cap: beyond this, newest datagrams drop (receive path has no
+    /// loss recovery yet, so shedding under flood matches wire reality).
+    max_queued: usize = 256,
+
+    const Queued = struct {
+        data: []u8,
+        from: std.Io.net.IpAddress,
+    };
+
+    pub fn start(self: *Pump, ep: *Endpoint, allocator: Allocator) !void {
+        self.* = .{
+            .ep = ep,
+            .allocator = allocator,
+            .thread = undefined,
+        };
+        self.stop_flag.store(false, .release);
+        self.thread = try std.Thread.spawn(.{}, readerProc, .{self});
+        self.running = true;
+    }
+
+    pub const Deliverable = struct {
+        /// Owned datagram bytes (caller frees).
+        data: []u8,
+        from: std.Io.net.IpAddress,
+    };
+
+    /// Pops one queued datagram, null on deadline expiry, or
+    /// `error.PumpStopped` once `stop()` ran. The owner thread — and
+    /// only it — assigns `ep.peer` from `from`, so the endpoint's peer
+    /// field is never shared across threads. Polls at ~1ms granularity;
+    /// never blocks past the deadline.
+    pub fn next(self: *Pump, deadlineMs: u64) !?Deliverable {
+        const t0: u64 = @intCast(clock_mod.millisNow());
+        while (true) {
+            if (self.dead.load(.acquire)) return error.PumpStopped;
+            self.mu.lock();
+            const item = self.queue.pop();
+            self.mu.unlock();
+            if (item) |q| return .{ .data = q.data, .from = q.from };
+            const now: u64 = @intCast(clock_mod.millisNow());
+            if (now -| t0 >= deadlineMs) return null;
+            clock_mod.sleepMillis(1);
+        }
+    }
+
+    /// Stops the reader and frees any unpopped datagrams. The reader is
+    /// woken with a 1-byte loopback datagram, NOT a socket close:
+    /// closing a socket with a blocked `std.Io` receive trips
+    /// `.CANCELLED => unreachable` inside the Threaded backend on
+    /// Windows. Short datagrams are ignored by `receiveDatagram`, so a
+    /// queued wakeup is harmless. Safe to call once per started pump;
+    /// the endpoint (and its socket) stays usable until `deinit`.
+    pub fn stop(self: *Pump) void {
+        if (!self.running) return;
+        self.running = false;
+        self.stop_flag.store(true, .release);
+        self.dead.store(true, .release);
+        self.wakeReader();
+        self.thread.join();
+        self.mu.lock();
+        // Never toOwnedSlice a possibly-never-allocated list: remap on
+        // the static empty backing is unsound. Pop item-by-item instead.
+        while (self.queue.pop()) |q| {
+            self.mu.unlock();
+            self.allocator.free(q.data);
+            self.mu.lock();
+        }
+        self.queue.deinit(self.allocator);
+        self.mu.unlock();
+    }
+
+    fn wakeReader(self: *Pump) void {
+        const dest = std.Io.net.IpAddress.parseIp4("127.0.0.1", self.ep.localPort()) catch return;
+        self.ep.sock.sendTo(&dest, &.{0}) catch {};
+    }
+
+    fn readerProc(self: *Pump) void {
+        var buf: [MAX_DATAGRAM]u8 = undefined;
+        while (!self.stop_flag.load(.acquire)) {
+            const rx = self.ep.sock.receive(&buf) catch {
+                // Socket closed (stop) or ICMP/transport noise: back off
+                // briefly, then re-check the flag. Never hot-spins: a
+                // persistently failing socket still yields the CPU.
+                clock_mod.sleepMillis(1);
+                continue;
+            };
+            const owned = self.allocator.dupe(u8, rx.data) catch {
+                clock_mod.sleepMillis(1);
+                continue;
+            };
+            self.mu.lock();
+            if (self.queue.items.len >= self.max_queued) {
+                self.mu.unlock();
+                self.allocator.free(owned);
+                continue;
+            }
+            self.queue.append(self.allocator, .{ .data = owned, .from = rx.from }) catch {
+                self.mu.unlock();
+                self.allocator.free(owned);
+                continue;
+            };
+            self.mu.unlock();
+        }
+    }
+};
 
 pub const MAX_DATAGRAM: usize = 1500;
 
@@ -32,8 +166,14 @@ pub const Endpoint = struct {
 
     /// Binds an ephemeral local port for `conn`.
     pub fn init(allocator: Allocator, io: std.Io, conn: *Connection) !Endpoint {
+        return initPort(allocator, io, conn, 0);
+    }
+
+    /// Binds `port` (0 = ephemeral) for `conn`. Servers bind a known
+    /// port so clients can address them; clients use ephemeral ports.
+    pub fn initPort(allocator: Allocator, io: std.Io, conn: *Connection, port: u16) !Endpoint {
         _ = allocator;
-        const sock = try udp_mod.UdpSocket.bind(io, 0);
+        const sock = try udp_mod.UdpSocket.bind(io, port);
         // Bound waits so pumpIn drains-and-yields instead of blocking
         // forever once the peer goes quiet.
         tcp_mod.setTimeouts(sock.socket.handle, 250);
@@ -52,15 +192,20 @@ pub const Endpoint = struct {
     }
 
     /// Receives up to `max` datagrams into the connection. Returns the
-    /// number processed. Non-fatal per-datagram errors are counted and
-    /// skipped (hostile-input tolerance); fatal connection errors surface.
-    pub fn pumpIn(self: *Endpoint, max: usize, now_ms: u64) !usize {
+    /// number processed. Blocks indefinitely when the peer is quiet (see
+    /// `UdpSocket.receive`), so only call this where progress is
+    /// guaranteed (data known present, as in the Initial-ping test) or
+    /// from a `Pump` reader thread woken by socket close.
+    /// Deadline-driven code uses `Pump.next` instead.
+    /// Non-fatal per-datagram errors are counted and skipped
+    /// (hostile-input tolerance); fatal connection errors surface.
+    pub fn pumpIn(self: *Endpoint, max: usize, nowMs: u64) !usize {
         var buf: [MAX_DATAGRAM]u8 = undefined;
         var n: usize = 0;
         while (n < max) : (n += 1) {
-            const rx = self.sock.receive(&buf) catch return n; // timeout/err => drained
+            const rx = self.sock.receive(&buf) catch return n; // closed/err => drained
             self.peer = rx.from;
-            self.conn.receiveDatagram(rx.data, now_ms) catch |e| switch (e) {
+            self.conn.receiveDatagram(rx.data, nowMs) catch |e| switch (e) {
                 error.Draining => return error.Draining,
                 else => continue, // drop bad datagrams, keep going
             };

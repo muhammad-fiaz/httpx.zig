@@ -38,7 +38,7 @@ pub fn main() !void {
     std.debug.print("Downloaded with auto filename: {s} ({d} bytes in {d} ms)\n", .{
         result1.destinationPath(),
         result1.downloadedBytes,
-        result1.elapsed_ms,
+        result1.elapsedMs,
     });
 
     // 2. Download with explicit custom destination filename

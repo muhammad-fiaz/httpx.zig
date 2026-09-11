@@ -8,8 +8,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../../sockets/tcp.zig");
 const address_mod = @import("../../net/address.zig");
+const tlsServerMod = @import("../tls/tcp_tls.zig");
 
-pub const Error = error{ AcceptFailed, ReadFailed, WriteFailed, ProtocolError, OutOfMemory };
+pub const Error = error{ AcceptFailed, ReadFailed, WriteFailed, ProtocolError, OutOfMemory, TlsHandshakeFailed };
 
 pub const Callbacks = struct {
     context: ?*anyopaque = null,
@@ -29,6 +30,16 @@ pub const Config = struct {
     password: []const u8 = "anonymous@",
     timeoutMs: u31 = 30_000,
     callbacks: Callbacks = .{},
+    /// Server certificate chain (PEM) enabling explicit FTPS (`AUTH
+    /// TLS`). Both must be set; otherwise `AUTH TLS` is refused.
+    certChainPem: ?[]const u8 = null,
+    /// Server private key (PEM, P-256 ECDSA) for `certChainPem`.
+    privateKeyPem: ?[]const u8 = null,
+
+    /// True when the server can upgrade control connections with AUTH TLS.
+    pub fn secureAvailable(self: Config) bool {
+        return self.certChainPem != null and self.privateKeyPem != null;
+    }
 };
 
 pub const Server = struct {
@@ -39,7 +50,7 @@ pub const Server = struct {
     ownsIo: bool = false,
     ioThreaded: ?*std.Io.Threaded = null,
     stop: std.atomic.Value(bool) = .init(false),
-    listener_closed: bool = false,
+    listenerClosed: bool = false,
 
     pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Server {
         if (!std.mem.eql(u8, cfg.host, "0.0.0.0")) return error.ProtocolError;
@@ -47,9 +58,9 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Server) void {
-        if (!self.listener_closed) {
+        if (!self.listenerClosed) {
             self.listener.close(self.io);
-            self.listener_closed = true;
+            self.listenerClosed = true;
         }
         if (self.ownsIo) {
             if (self.ioThreaded) |t| {
@@ -60,9 +71,9 @@ pub const Server = struct {
     }
     pub fn shutdown(self: *Server) void {
         self.stop.store(true, .release);
-        if (!self.listener_closed) {
+        if (!self.listenerClosed) {
             self.listener.close(self.io);
-            self.listener_closed = true;
+            self.listenerClosed = true;
         }
     }
     pub fn localPort(self: *const Server) u16 {
@@ -88,11 +99,18 @@ const Session = struct {
     io: std.Io,
     control: *tcp.Socket,
     cfg: Config,
-    logged_in: bool = false,
-    user_buf: [256]u8 = undefined,
-    user_len: usize = 0,
+    loggedIn: bool = false,
+    userBuf: [256]u8 = undefined,
+    userLen: usize = 0,
     passive: ?tcp.Listener = null,
     active: ?address_mod.Address = null,
+    /// TLS-wrapped control channel after `AUTH TLS`. Both fields live in
+    /// the `Session` value itself (never moved after `run` starts), so the
+    /// connection's borrow of `tlsSock` stays valid for the session.
+    tlsSock: ?tcp.Socket = null,
+    tlsConn: ?tlsServerMod.TlsServerConn = null,
+    /// `PROT P` negotiated: data connections are TLS-wrapped.
+    protPrivate: bool = false,
 
     fn init(allocator: Allocator, io: std.Io, control: *tcp.Socket, cfg: Config) Session {
         return .{ .allocator = allocator, .io = io, .control = control, .cfg = cfg };
@@ -100,6 +118,7 @@ const Session = struct {
 
     fn run(self: *Session) Error!void {
         defer if (self.passive) |*p| p.close(self.io);
+        defer if (self.tlsConn) |*c| c.deinit();
         try self.reply("220 httpx FTP server ready");
         var line: [4096]u8 = undefined;
         while (try self.readLine(&line)) |command| {
@@ -107,11 +126,26 @@ const Session = struct {
         }
     }
 
+    fn ctrlRead(self: *Session, buf: []u8) Error!usize {
+        if (self.tlsConn) |*c| {
+            return c.read(buf) catch error.ReadFailed;
+        }
+        return self.control.read(buf) catch error.ReadFailed;
+    }
+
+    fn ctrlWrite(self: *Session, bytes: []const u8) Error!void {
+        if (self.tlsConn) |*c| {
+            c.writeAll(bytes) catch return error.WriteFailed;
+            return;
+        }
+        self.control.writeAll(bytes) catch return error.WriteFailed;
+    }
+
     fn readLine(self: *Session, buf: []u8) Error!?[]const u8 {
         var used: usize = 0;
         while (used < buf.len) {
             var one: [1]u8 = undefined;
-            const n = self.control.read(&one) catch return error.ReadFailed;
+            const n = try self.ctrlRead(&one);
             if (n == 0) return null;
             if (one[0] == '\n') {
                 if (used > 0 and buf[used - 1] == '\r') used -= 1;
@@ -144,27 +178,35 @@ const Session = struct {
             return true;
         }
         if (std.mem.eql(u8, name, "FEAT")) {
-            try self.reply("211-Features\r\n EPSV\r\n PASV\r\n211 End");
+            if (self.cfg.secureAvailable()) {
+                try self.reply("211-Features\r\n AUTH TLS\r\n PBSZ\r\n PROT\r\n EPSV\r\n PASV\r\n211 End");
+            } else {
+                try self.reply("211-Features\r\n EPSV\r\n PASV\r\n211 End");
+            }
             return true;
         }
+        // Security commands (RFC 4217) are valid before login.
+        if (std.mem.eql(u8, name, "AUTH")) return self.doAuth(arg);
+        if (std.mem.eql(u8, name, "PBSZ")) return self.doPbsz();
+        if (std.mem.eql(u8, name, "PROT")) return self.doProt(arg);
         if (std.mem.eql(u8, name, "USER")) {
-            self.logged_in = false;
-            if (arg.len > self.user_buf.len) {
+            self.loggedIn = false;
+            if (arg.len > self.userBuf.len) {
                 try self.reply("530 Invalid user");
                 return true;
             }
-            @memcpy(self.user_buf[0..arg.len], arg);
-            self.user_len = arg.len;
+            @memcpy(self.userBuf[0..arg.len], arg);
+            self.userLen = arg.len;
             try self.reply("331 Password required");
             return true;
         }
         if (std.mem.eql(u8, name, "PASS")) {
-            const user = self.user_buf[0..self.user_len];
-            self.logged_in = if (self.cfg.callbacks.authenticate) |f| f(self.cfg.callbacks.context, user, arg) else std.mem.eql(u8, user, self.cfg.user) and std.mem.eql(u8, arg, self.cfg.password);
-            try self.reply(if (self.logged_in) "230 Logged in" else "530 Login incorrect");
+            const user = self.userBuf[0..self.userLen];
+            self.loggedIn = if (self.cfg.callbacks.authenticate) |f| f(self.cfg.callbacks.context, user, arg) else std.mem.eql(u8, user, self.cfg.user) and std.mem.eql(u8, arg, self.cfg.password);
+            try self.reply(if (self.loggedIn) "230 Logged in" else "530 Login incorrect");
             return true;
         }
-        if (!self.logged_in) {
+        if (!self.loggedIn) {
             try self.reply("530 Not logged in");
             return true;
         }
@@ -229,7 +271,71 @@ const Session = struct {
     fn reply(self: *Session, text: []const u8) Error!void {
         var buf: [600]u8 = undefined;
         const line = std.fmt.bufPrint(&buf, "{s}\r\n", .{text}) catch return error.WriteFailed;
-        self.control.writeAll(line) catch return error.WriteFailed;
+        try self.ctrlWrite(line);
+    }
+
+    /// `AUTH TLS`: upgrade the control connection to TLS (RFC 4217).
+    /// Refused without configured certificates; re-AUTH on an already
+    /// secure channel is rejected. A failed handshake ends the session —
+    /// there is no downgrade back to plaintext.
+    fn doAuth(self: *Session, arg: []const u8) Error!bool {
+        var upper: [8]u8 = undefined;
+        const mechanism = if (arg.len <= upper.len) std.ascii.upperString(upper[0..arg.len], arg) else "";
+        if (!std.mem.eql(u8, mechanism, "TLS")) {
+            try self.reply("502 Unsupported AUTH mechanism");
+            return true;
+        }
+        if (self.tlsConn != null) {
+            try self.reply("534 Already secure");
+            return true;
+        }
+        if (!self.cfg.secureAvailable()) {
+            try self.reply("502 AUTH TLS unavailable");
+            return true;
+        }
+        try self.reply("234 AUTH TLS OK");
+        // Move the plaintext socket into the session; `run`'s own
+        // `control` still aliases the same OS handle, but `close()` is
+        // idempotent so the deferred close there is harmless.
+        self.tlsSock = self.control.*;
+        var srv = tlsServerMod.TlsServer.init(.{
+            .allocator = self.allocator,
+            .defaultIdentity = .{
+                .certChainPem = self.cfg.certChainPem.?,
+                .privateKeyPem = self.cfg.privateKeyPem.?,
+            },
+            .alpnProtocols = &.{},
+        });
+        self.tlsConn = srv.handshake(self.io, &self.tlsSock.?) catch return error.TlsHandshakeFailed;
+        return true;
+    }
+
+    fn doPbsz(self: *Session) Error!bool {
+        if (self.tlsConn == null) {
+            try self.reply("503 Secure connection required");
+            return true;
+        }
+        try self.reply("200 PBSZ=0");
+        return true;
+    }
+
+    fn doProt(self: *Session, arg: []const u8) Error!bool {
+        if (self.tlsConn == null) {
+            try self.reply("503 Secure connection required");
+            return true;
+        }
+        var upper: [8]u8 = undefined;
+        const level = if (arg.len <= upper.len) std.ascii.upperString(upper[0..arg.len], arg) else "";
+        if (std.mem.eql(u8, level, "P")) {
+            self.protPrivate = true;
+            try self.reply("200 Protection set to Private");
+        } else if (std.mem.eql(u8, level, "C")) {
+            self.protPrivate = false;
+            try self.reply("200 Protection set to Clear");
+        } else {
+            try self.reply("504 Unknown protection level");
+        }
+        return true;
     }
 
     fn startPassive(self: *Session, extended: bool) Error!bool {
@@ -300,11 +406,11 @@ const Session = struct {
             return true;
         }
         const delimiter = arg[0];
-        const family_end = std.mem.indexOfScalarPos(u8, arg, 1, delimiter) orelse {
+        const familyEnd = std.mem.indexOfScalarPos(u8, arg, 1, delimiter) orelse {
             try self.reply("501 Invalid EPRT");
             return true;
         };
-        const host_end = std.mem.indexOfScalarPos(u8, arg, family_end + 1, delimiter) orelse {
+        const host_end = std.mem.indexOfScalarPos(u8, arg, familyEnd + 1, delimiter) orelse {
             try self.reply("501 Invalid EPRT");
             return true;
         };
@@ -316,7 +422,7 @@ const Session = struct {
             try self.reply("501 Invalid EPRT");
             return true;
         }
-        if (!std.mem.eql(u8, arg[1..family_end], "1")) {
+        if (!std.mem.eql(u8, arg[1..familyEnd], "1")) {
             try self.reply("522 Network protocol unsupported");
             return true;
         }
@@ -325,7 +431,7 @@ const Session = struct {
             return true;
         };
         var base = address_mod.Address{ .family = .ip4, .port = 0 };
-        var addr = base.parseIp(arg[family_end + 1 .. host_end]) catch {
+        var addr = base.parseIp(arg[familyEnd + 1 .. host_end]) catch {
             try self.reply("501 Invalid EPRT");
             return true;
         };
@@ -339,7 +445,75 @@ const Session = struct {
         return true;
     }
 
-    fn acceptData(self: *Session) Error!tcp.Socket {
+    /// Heap box for a TLS-wrapped data connection. `TlsServerConn`
+    /// borrows its socket, and `acceptData` returns the channel by value,
+    /// so a stable heap address is the only sound home for the pair (a
+    /// by-value channel would dangle its own borrow on return — a
+    /// use-after-free that Debug tolerates but ReleaseFast crashes on).
+    const DataTlsBox = struct {
+        socket: tcp.Socket,
+        conn: tlsServerMod.TlsServerConn,
+    };
+
+    /// An accepted data connection, TLS-wrapped when `PROT P` is active.
+    const DataChannel = union(enum) {
+        plain: tcp.Socket,
+        tls: *DataTlsBox,
+
+        fn read(self: DataChannel, buf: []u8) Error!usize {
+            return switch (self) {
+                .plain => |s| s.read(buf) catch error.ReadFailed,
+                .tls => |b| b.conn.read(buf) catch error.ReadFailed,
+            };
+        }
+
+        fn writeAll(self: DataChannel, bytes: []const u8) Error!void {
+            switch (self) {
+                .plain => |s| s.writeAll(bytes) catch return error.WriteFailed,
+                .tls => |b| b.conn.writeAll(bytes) catch return error.WriteFailed,
+            }
+        }
+    };
+
+    /// Closes a data connection, freeing the TLS box when present.
+    /// Single-shot (not idempotent): call exactly once per accept; use
+    /// `errdefer` for the failure path, never `defer` + explicit close.
+    fn closeData(self: *Session, dc: DataChannel) void {
+        switch (dc) {
+            .plain => |s| s.close(),
+            .tls => |box| {
+                box.conn.deinit();
+                box.socket.close();
+                self.allocator.destroy(box);
+            },
+        }
+    }
+
+    fn acceptData(self: *Session) Error!DataChannel {
+        const plain = try self.acceptSocket();
+        if (!self.protPrivate or self.tlsConn == null) return .{ .plain = plain };
+        const box = self.allocator.create(DataTlsBox) catch {
+            plain.close();
+            return error.OutOfMemory;
+        };
+        errdefer self.allocator.destroy(box);
+        box.socket = plain;
+        var srv = tlsServerMod.TlsServer.init(.{
+            .allocator = self.allocator,
+            .defaultIdentity = .{
+                .certChainPem = self.cfg.certChainPem.?,
+                .privateKeyPem = self.cfg.privateKeyPem.?,
+            },
+            .alpnProtocols = &.{},
+        });
+        box.conn = srv.handshake(self.io, &box.socket) catch {
+            box.socket.close();
+            return error.TlsHandshakeFailed;
+        };
+        return .{ .tls = box };
+    }
+
+    fn acceptSocket(self: *Session) Error!tcp.Socket {
         if (self.passive) |*p| {
             const data = p.accept(self.io) catch {
                 p.close(self.io);
@@ -372,8 +546,9 @@ const Session = struct {
             try self.reply("425 Can't open data connection");
             return true;
         };
-        defer data.close();
-        data.writeAll(f(self.cfg.callbacks.context, path)) catch return error.WriteFailed;
+        errdefer self.closeData(data);
+        try data.writeAll(f(self.cfg.callbacks.context, path));
+        self.closeData(data);
         try self.reply("226 Transfer complete");
         return true;
     }
@@ -387,8 +562,9 @@ const Session = struct {
             try self.reply("425 Can't open data connection");
             return true;
         };
-        defer data.close();
-        data.writeAll(f(self.cfg.callbacks.context, path)) catch return error.WriteFailed;
+        errdefer self.closeData(data);
+        try data.writeAll(f(self.cfg.callbacks.context, path));
+        self.closeData(data);
         try self.reply("226 Transfer complete");
         return true;
     }
@@ -402,7 +578,7 @@ const Session = struct {
             try self.reply("425 Can't open data connection");
             return true;
         };
-        defer data.close();
+        errdefer self.closeData(data);
         var bytes: std.ArrayList(u8) = .empty;
         defer bytes.deinit(self.allocator);
         var b: [16384]u8 = undefined;
@@ -411,6 +587,7 @@ const Session = struct {
             if (n == 0) break;
             bytes.appendSlice(self.allocator, b[0..n]) catch return error.OutOfMemory;
         }
+        self.closeData(data); // Close data connection before the completion reply.
         try self.reply(if (f(self.cfg.callbacks.context, path, bytes.items)) "226 Transfer complete" else "552 Transfer failed");
         return true;
     }

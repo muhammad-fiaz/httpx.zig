@@ -47,7 +47,7 @@ pub fn main() !void {
 ## Run
 
 ```bash
-zig build run-all-tls_server
+zig build run-tls-server
 ```
 
 ## Checklist

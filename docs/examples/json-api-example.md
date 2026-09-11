@@ -5,7 +5,7 @@ Typed JSON over the URL-first client: fetch with `client.fetch`, decode with
 `examples/post_json.zig`.
 
 ```zig
-const User = struct { id: u64, name: []const u8, email: []const u8 };
+const Posted = struct { name: []const u8, role: []const u8 };
 
 var post = try client.fetch("https://httpbun.com/post", .{
     .method = .POST,
@@ -13,7 +13,10 @@ var post = try client.fetch("https://httpbun.com/post", .{
 });
 defer post.deinit();
 
-const user = try post.json(User);
+// httpbun echoes our JSON under the "json" envelope key.
+const Echo = struct { json: ?Posted = null };
+const echo = try post.json(Echo);
+if (echo.json) |back| std.debug.print("name={s} role={s}\n", .{ back.name, back.role });
 ```
 
 Server side, parse request bodies with `ctx.json(T)` and render with

@@ -1,6 +1,6 @@
 # Cloud HTTPS Server Example
 
-Demonstrates setting up a production-ready HTTP server for cloud deployment with TLS configuration, middleware stacking, health checks, and self-verification. Designed to run behind a TLS-terminating reverse proxy (e.g., Nginx, AWS ALB).
+Demonstrates setting up an HTTP server for cloud deployment with TLS configuration, middleware stacking, health checks, and self-verification. Designed to run behind a TLS-terminating reverse proxy (e.g., Nginx, AWS ALB).
 
 ## Features Covered
 

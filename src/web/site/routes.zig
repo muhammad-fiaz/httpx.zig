@@ -125,9 +125,9 @@ fn validSegment(seg: []const u8) bool {
 }
 
 fn trimBase(base: []const u8) []const u8 {
-    var b = if (base.len == 0) @as([]const u8, "/") else base;
-    while (b.len > 1 and b[b.len - 1] == '/') b = b[0 .. b.len - 1];
-    return b;
+    const b = if (base.len == 0) @as([]const u8, "/") else base;
+    const trimmed = std.mem.trimEnd(u8, b, "/");
+    return if (trimmed.len == 0) b[0..1] else trimmed;
 }
 
 fn joinBase(allocator: Allocator, base: []const u8, route: []const u8) ![]u8 {
@@ -485,10 +485,10 @@ fn placeCandidate(
     pend: Pending,
 ) !void {
     var foes: [9]usize = undefined;
-    var foe_count: usize = 0;
-    collectFoe(byKey, pend.clean, &foes, &foe_count);
-    if (pend.ext) |e| collectFoe(byKey, e, &foes, &foe_count);
-    for (pend.aliases) |a| collectFoe(byKey, a, &foes, &foe_count);
+    var foeCount: usize = 0;
+    collectFoe(byKey, pend.clean, &foes, &foeCount);
+    if (pend.ext) |e| collectFoe(byKey, e, &foes, &foeCount);
+    for (pend.aliases) |a| collectFoe(byKey, a, &foes, &foeCount);
 
     const shape = try shapeKey(allocator, pend.clean);
     defer allocator.free(shape);
@@ -498,17 +498,17 @@ fn placeCandidate(
     }
     if (shape_hit) |idx| {
         var dup = false;
-        for (foes[0..foe_count]) |f| if (f == idx) {
+        for (foes[0..foeCount]) |f| if (f == idx) {
             dup = true;
             break;
         };
-        if (!dup and foe_count < foes.len) {
-            foes[foe_count] = idx;
-            foe_count += 1;
+        if (!dup and foeCount < foes.len) {
+            foes[foeCount] = idx;
+            foeCount += 1;
         }
     }
 
-    if (foe_count == 0) {
+    if (foeCount == 0) {
         const idx = routes.items.len;
         errdefer {
             // Roll back a half-registered entry on OOM.
@@ -536,7 +536,7 @@ fn placeCandidate(
 
     var best_file: []const u8 = pend.file;
     var cand_wins = true;
-    for (foes[0..foe_count]) |idx| {
+    for (foes[0..foeCount]) |idx| {
         const o = &routes.items[idx];
         if (!beats(pend.rank, pend.file, o.rank, o.file)) {
             cand_wins = false;
@@ -555,12 +555,12 @@ fn placeCandidate(
     }
 
     // Candidate beats every foe: evict losers (descending), record each.
-    std.mem.sort(usize, foes[0..foe_count], {}, struct {
+    std.mem.sort(usize, foes[0..foeCount], {}, struct {
         fn less(_: void, a: usize, b: usize) bool {
             return a > b;
         }
     }.less);
-    for (foes[0..foe_count]) |idx| {
+    for (foes[0..foeCount]) |idx| {
         const o = routes.items[idx];
         try collisions.append(allocator, .{
             .route = try allocator.dupe(u8, pend.clean),
@@ -701,19 +701,19 @@ fn evictAt(
     // Collect victim keys first (never mutate a map while iterating it),
     // then fix swapped-slot references in a second pass.
     var drop: [10][]const u8 = undefined;
-    var drop_count: usize = 0;
+    var dropCount: usize = 0;
     var it = byKey.iterator();
     while (it.next()) |kv| {
-        if (kv.value_ptr.* == idx and drop_count < drop.len) {
-            drop[drop_count] = kv.key_ptr.*;
-            drop_count += 1;
+        if (kv.value_ptr.* == idx and dropCount < drop.len) {
+            drop[dropCount] = kv.key_ptr.*;
+            dropCount += 1;
         }
     }
     var it2 = byKey.iterator();
     while (it2.next()) |kv| {
         if (kv.value_ptr.* == last) kv.value_ptr.* = idx;
     }
-    for (drop[0..drop_count]) |k| _ = byKey.remove(k);
+    for (drop[0..dropCount]) |k| _ = byKey.remove(k);
     // Drop victim shape entries.
     var si: usize = 0;
     while (si < shapes.items.len) {

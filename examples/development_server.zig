@@ -96,8 +96,9 @@ pub fn main() !void {
 
     // Test incremental update directly on Document
     const edit = doc.computeEdit(0, 0, 0, dev_template);
-    std.debug.print("Document incremental edit verified (start_byte: {d})\n", .{edit.start_byte});
-    try doc.incrementalUpdate(dev_template);
+    std.debug.print("Document incremental edit verified (startByte: {d})\n", .{edit.startByte});
+    const changed = try doc.incrementalUpdate(dev_template);
+    std.debug.print("Document incremental reparse detected {d} changed range(s)\n", .{changed});
 
     std.debug.print("\nDevelopment server verification successful.\n", .{});
     watcher.stop();

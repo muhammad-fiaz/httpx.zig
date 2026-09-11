@@ -11,7 +11,11 @@
 //!   - Concurrency & Threading (Worker pool task submit, Bounded MPMC queue)
 //!   - DNS Resolution Subsystem (Thread-safe DNS cache hit lookup)
 //!   - HTTP/2 & QUIC/HTTP/3 Primitives (Frame header, HPACK integer, QUIC varint)
+//!   - TLS Cryptography (Record AEAD seal, X.509 chain parse)
 //!   - Local Loopback Client/Server (End-to-end HTTP/1.1 keep-alive requests)
+//!   - HTTP/2 Pooled Requests (amortized H2c GET via the session pool)
+//!   - HTTP/3 Live Requests (full QUIC+TLS handshake + GET per op)
+//!   - TLS Handshakes (full vs PSK-resumed abbreviated handshake)
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -109,7 +113,7 @@ var bench_allocator: std.mem.Allocator = undefined;
 var bench_pool: *httpx.WorkerPool = undefined;
 var bench_queue: httpx.concurrency.queue.BoundedQueue(usize) = undefined;
 var bench_router: httpx.router.Router = undefined;
-var bench_dns_cache: *httpx.dns.cache.Cache = undefined;
+var bench_dns_cache: *httpx.dns.Cache = undefined;
 
 var sample_compress_raw: []const u8 = undefined;
 var sample_gzip_payload: []const u8 = undefined;
@@ -196,6 +200,30 @@ fn benchRouterDispatch() void {
     _ = bench_router.dispatch(&ctx);
 }
 
+fn benchRouterTypedMatch() void {
+    var ctx = httpx.router.Context{
+        .allocator = bench_allocator,
+        .path = "/users/42/posts/99",
+        .method = .GET,
+    };
+    _ = bench_router.match(.GET, "/users/42/posts/99", &ctx);
+}
+
+fn benchRouterMiss() void {
+    var ctx = httpx.router.Context{
+        .allocator = bench_allocator,
+        .path = "/no/such/route",
+        .method = .GET,
+    };
+    _ = bench_router.dispatch(&ctx);
+}
+
+fn benchRouterReverse() void {
+    const u = bench_router.url("bench_user_post", .{ .userId = 7, .postId = 9 }) catch return;
+    defer bench_allocator.free(u);
+    std.mem.doNotOptimizeAway(u.len);
+}
+
 // Group 3: Data Serialization
 
 const UserProfile = struct {
@@ -231,8 +259,8 @@ fn benchJsonParse() void {
 // Group 4: Auth & Security
 
 fn benchBasicAuthEncode() void {
-    var out_buf: [256]u8 = undefined;
-    _ = httpx.auth.basic.encodeHeaderValue(&out_buf, "benchmark_user", "password123!");
+    var outBuf: [256]u8 = undefined;
+    _ = httpx.auth.basic.encodeHeaderValue(&outBuf, "benchmark_user", "password123!");
 }
 
 fn benchBasicAuthDecode() void {
@@ -292,6 +320,52 @@ fn benchHtmlParse() void {
     _ = httpx.parsing.html.parse(arena.allocator(), sample_html_doc, .{}) catch return;
 }
 
+const sample_template_src = "<h1>{{ title }}</h1>{% for item in items %}<p>{{ item }}</p>{% endfor %}";
+
+fn benchTemplateParse() void {
+    var parser = httpx.templates.parser.Parser.init(bench_allocator, "bench.html", sample_template_src);
+    var ast = parser.parse() catch return;
+    defer ast.deinit();
+}
+
+var bench_template_ast: ?httpx.templates.parser.TemplateAst = null;
+
+fn benchTemplateRender() void {
+    const ast = bench_template_ast orelse return;
+    var ctx = httpx.templates.Context.init(bench_allocator, .{
+        .title = "Bench",
+        .items = [_][]const u8{ "a", "b", "c" },
+    }) catch return;
+    defer ctx.deinit();
+    const renderer = httpx.templates.renderer.Renderer{};
+    const out = renderer.renderToString(bench_allocator, &ast, &ctx, null) catch return;
+    defer bench_allocator.free(out);
+    std.mem.doNotOptimizeAway(out.len);
+}
+
+fn benchTemplateIncremental() void {
+    _ = httpx.parsing.html.changedRanges(bench_allocator, sample_html_doc, sample_html_doc) catch return;
+}
+
+var bench_watcher: ?*httpx.Watcher = null;
+
+fn benchWatcherScan() void {
+    const w = bench_watcher orelse return;
+    _ = w.scan() catch false;
+}
+
+var bench_dep_graph: ?*httpx.web.watcherDependency.DependencyGraph = null;
+
+fn benchWatcherDeps() void {
+    const g = bench_dep_graph orelse return;
+    const affected = g.affectedSet(bench_allocator, "base.html") catch return;
+    defer {
+        for (affected) |s| bench_allocator.free(s);
+        bench_allocator.free(affected);
+    }
+    std.mem.doNotOptimizeAway(affected.len);
+}
+
 // Group 7: Concurrency & Queues
 
 fn benchWorkerPoolSubmit() void {
@@ -313,15 +387,14 @@ fn dummyDnsLookup(
     _: std.Io,
     _: []const u8,
     alloc: std.mem.Allocator,
-) httpx.dns.cache.LookupError![]const []const u8 {
+) httpx.dns.LookupError![]const []const u8 {
     const list = alloc.alloc([]const u8, 1) catch return error.OutOfMemory;
     list[0] = alloc.dupe(u8, "64.23.183.159") catch return error.OutOfMemory;
     return list;
 }
 
 fn benchDnsCacheHit() void {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    const addrs = bench_dns_cache.resolve(io, "httpbun.com") catch return;
+    const addrs = bench_dns_cache.resolve("httpbun.com") catch return;
     defer {
         for (addrs) |a| bench_allocator.free(a);
         bench_allocator.free(addrs);
@@ -332,15 +405,15 @@ fn benchDnsCacheHit() void {
 // Group 9: HTTP/2 & QUIC / HTTP/3 Primitives
 
 fn benchHttp2FrameHeader() void {
-    const header = httpx.http2.frame.FrameHeader{
+    const header = httpx.http2.FrameHeader{
         .length = 1024,
-        .frame_type = .data,
+        .frameType = .data,
         .flags = 0x01,
-        .stream_id = 1,
+        .streamId = 1,
     };
     var serialized: [httpx.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
     header.serialize(&serialized);
-    _ = httpx.http2.frame.FrameHeader.parse(&serialized);
+    _ = httpx.http2.FrameHeader.parse(&serialized);
 }
 
 fn benchHpackIntEncode() void {
@@ -365,7 +438,44 @@ fn benchH3VarIntDecode() void {
     _ = httpx.quic.varint.decode(&encoded, &offset) catch return;
 }
 
-// Group 10: Loopback End-to-End Client/Server Request
+// Group 10: TLS Record Cryptography & X.509 Parsing
+
+var sample_tls_payload: [1024]u8 = undefined;
+const sample_tls_key: [32]u8 = [_]u8{0x42} ** 32;
+const sample_tls_iv: [12]u8 = [_]u8{0x24} ** 12;
+const sample_cert_pem =
+    \\-----BEGIN CERTIFICATE-----
+    \\MIIBmTCCAT+gAwIBAgIURhx0CMJWTUTFJXV9z2OlmW/cNlcwCgYIKoZIzj0EAwIw
+    \\FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDkwOTE4MTczOFoXDTM2MDkwNjE4
+    \\MTczOFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D
+    \\AQcDQgAE71D4pM0SAPK8sdt+xlEESZX/EJoKHUC+4IpPuSlOiQuCXOkN04ozVGKA
+    \\mrmUtDqQCdvmdjHbjqGY6TCszXTCnKNvMG0wHQYDVR0OBBYEFFjYJYGodkVKyvXf
+    \\4qrn7rvQx+PFMB8GA1UdIwQYMBaAFFjYJYGodkVKyvXf4qrn7rvQx+PFMA8GA1Ud
+    \\EwEB/wQFMAMBAf8wGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAoGCCqGSM49
+    \\BAMCA0gAMEUCIQD0sAcuw/jdWdfBrxLXY1ur2cU8F0CAkPCvS2qKn7XK4QIgAP71
+    \\95toW+Gsh8/VZlNoHL2s14olRp5zl3cYDPzKM10=
+    \\-----END CERTIFICATE-----
+;
+
+fn benchTlsRecordSeal() void {
+    const rec = httpx.tls.record.encodeRecord(
+        .application_data,
+        &sample_tls_payload,
+        0,
+        &sample_tls_key,
+        &sample_tls_iv,
+        .chacha20_poly1305,
+    ) catch return;
+    std.mem.doNotOptimizeAway(rec.len);
+}
+
+fn benchCertParse() void {
+    var chain = httpx.tls.certificate.parseCertificateChainPem(bench_allocator, sample_cert_pem) catch return;
+    defer chain.deinit();
+    std.mem.doNotOptimizeAway(chain.count());
+}
+
+// Group 11: Loopback End-to-End Client/Server Request
 
 var loopback_server: *httpx.Server = undefined;
 var loopback_thread: std.Thread = undefined;
@@ -385,6 +495,205 @@ fn benchClientServerLoopback() void {
     var res = loopback_client.get(loopback_url_slice, .{}) catch return;
     defer res.deinit();
     std.mem.doNotOptimizeAway(res.status);
+}
+
+// Group 12: HTTP/2 pooled loopback (h2c prior knowledge, one server conn)
+
+var h2_bench_listener: httpx.tcp.Listener = undefined;
+var h2_bench_thread: std.Thread = undefined;
+var h2_bench_client: httpx.Client = undefined;
+var h2_bench_url: [64]u8 = undefined;
+var h2_bench_url_slice: []const u8 = undefined;
+var h2_bench_io: std.Io = undefined;
+
+fn h2BenchHandler(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const httpx.http2.transport.Header, _: []const u8) anyerror!httpx.http2.transport.HandlerResponse {
+    if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/ping")) {
+        return .{ .status = 200, .body = "pong" };
+    }
+    return .{ .status = 404, .body = "nope" };
+}
+
+fn h2BenchServe() void {
+    var conn = h2_bench_listener.accept(h2_bench_io) catch return;
+    defer conn.close();
+    httpx.http2.transport.serveConnection(bench_allocator, &conn, h2BenchHandler, null) catch {};
+}
+
+fn benchH2PooledGet() void {
+    var res = h2_bench_client.get(h2_bench_url_slice, .{ .httpVersion = .http2 }) catch return;
+    defer res.deinit();
+    std.mem.doNotOptimizeAway(res.status);
+}
+
+// Group 13: HTTP/3 live loopback (fresh QUIC+TLS handshake per op)
+
+var h3_bench_server: H3BenchServer = undefined;
+var h3_bench_thread: std.Thread = undefined;
+var h3_bench_client: httpx.Client = undefined;
+var h3_bench_url: [128]u8 = undefined;
+var h3_bench_url_slice: []const u8 = undefined;
+var h3_bench_stop: std.atomic.Value(bool) = .init(false);
+
+const H3BenchServer = struct {
+    ep: httpx.quic.Endpoint = undefined,
+    pump: httpx.quic.Pump = undefined,
+
+    const Acc = struct {
+        sid: u64 = std.math.maxInt(u64),
+        buf: std.ArrayList(u8) = .empty,
+        fin: bool = false,
+    };
+
+    fn onStream(c: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
+        const acc: *Acc = @ptrCast(@alignCast(c.?));
+        if (acc.sid == std.math.maxInt(u64) and sid % 4 == 0) acc.sid = sid;
+        if (sid != acc.sid) return;
+        acc.buf.appendSlice(bench_allocator, data) catch return;
+        if (fin) acc.fin = true;
+    }
+
+    fn run(srv: *H3BenchServer) void {
+        while (!h3_bench_stop.load(.acquire)) {
+            serveOne(srv) catch continue;
+        }
+    }
+
+    fn serveOne(srv: *H3BenchServer) !void {
+        const alloc = bench_allocator;
+        var qconn = try httpx.quic.Connection.init(alloc, .server, .{}, 0xB1);
+        defer qconn.deinit();
+        srv.ep.conn = qconn;
+        var drv = httpx.quic.HandshakeDriver.initServer(alloc, .{ .certChainPem = bench_cert_pem, .privateKeyPem = bench_key_pem });
+        defer drv.deinit();
+        qconn.tls = .{ .ctx = &drv, .start = httpx.quic.HandshakeDriver.clientStart, .onData = httpx.quic.HandshakeDriver.onData };
+        try httpx.quic.handshake.serveHandshake(&srv.ep, &srv.pump, &drv, 10_000);
+        var h3 = httpx.http3.Connection.init(alloc, .server);
+        defer h3.deinit();
+        var acc = Acc{};
+        defer acc.buf.deinit(alloc);
+        qconn.cbs = .{ .ctx = &acc, .onStreamData = onStream };
+        const start: u64 = @intCast(@divTrunc(std.Io.Timestamp.now(h3_bench_io, .awake).toNanoseconds(), 1_000_000));
+        while (true) {
+            const now: u64 = @intCast(@divTrunc(std.Io.Timestamp.now(h3_bench_io, .awake).toNanoseconds(), 1_000_000));
+            if (now -| start > 10_000) return error.Timeout;
+            try httpx.quic.handshake.feedPumped(&srv.ep, &srv.pump, null, 200, now);
+            if (!acc.fin) continue;
+            var off: usize = 0;
+            const fr = try httpx.http3.frame.parseFrame(acc.buf.items, &off);
+            const fields = try h3.qdec.decodeSectionWithPrefix(fr.payload);
+            defer h3.qdec.freeFields(fields);
+            var rs = httpx.http3.RequestStream{ .id = acc.sid, .allocator = alloc, .qpack = httpx.http3.qpack.Encoder.init(alloc) };
+            defer rs.qpack.deinit();
+            const rhead = try rs.buildResponseHeaders(200, &.{});
+            defer alloc.free(rhead);
+            const rdata = try rs.buildData("pong");
+            defer alloc.free(rdata);
+            var wire = std.ArrayList(u8).empty;
+            defer wire.deinit(alloc);
+            try wire.appendSlice(alloc, rhead);
+            try wire.appendSlice(alloc, rdata);
+            try sendH3(qconn, acc.sid, wire.items);
+            _ = try srv.ep.flush(null);
+            return;
+        }
+    }
+
+    fn sendH3(conn: *httpx.quic.Connection, sid: u64, bytes: []const u8) !void {
+        const B = struct {
+            var s_id: u64 = 0;
+            var s_data: []const u8 = "";
+            pub fn build(gpa: std.mem.Allocator, payload: *std.ArrayList(u8)) httpx.quic.connection.Error!void {
+                httpx.quic.frames.encode(payload, gpa, .{ .stream = .{ .id = s_id, .offset = 0, .data = s_data, .fin = true } }) catch
+                    return httpx.quic.connection.Error.OutOfMemory;
+            }
+        };
+        B.s_id = sid;
+        B.s_data = bytes;
+        try conn.sendFrames(.application, B.build, 0);
+    }
+};
+
+var h3_bench_io: std.Io = undefined;
+
+fn benchH3Get() void {
+    var res = h3_bench_client.get(h3_bench_url_slice, .{
+        .httpVersion = .http3,
+        .tls = .{ .verify = .caBundle, .caPem = bench_cert_pem },
+        .timeoutMs = 10_000,
+    }) catch return;
+    defer res.deinit();
+    std.mem.doNotOptimizeAway(res.status);
+}
+
+// Group 14: TLS handshakes, full vs PSK-resumed (raw native client)
+
+const bench_cert_pem = sample_cert_pem;
+const bench_key_pem =
+    \\-----BEGIN PRIVATE KEY-----
+    \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyp549r9FrXbm02Cn
+    \\81gAdAbUzHatPYQWVDIWnQdCMPChRANCAATvUPikzRIA8ryx237GUQRJlf8Qmgod
+    \\QL7gik+5KU6JC4Jc6Q3TijNUYoCauZS0OpAJ2+Z2MduOoZjpMKzNdMKc
+    \\-----END PRIVATE KEY-----
+;
+
+var tls_bench_listener: httpx.tcp.Listener = undefined;
+var tls_bench_thread: std.Thread = undefined;
+var tls_bench_port: u16 = 0;
+var tls_bench_stop: std.atomic.Value(bool) = .init(false);
+var tls_bench_io: std.Io = undefined;
+var tls_bench_session: ?httpx.tls.ClientSession = null;
+
+fn tlsBenchServe() void {
+    while (!tls_bench_stop.load(.acquire)) {
+        var sock = tls_bench_listener.accept(tls_bench_io) catch {
+            if (tls_bench_stop.load(.acquire)) return;
+            continue;
+        };
+        defer sock.close();
+        var srv = httpx.tls.TlsServer.init(.{
+            .allocator = bench_allocator,
+            .defaultIdentity = .{ .certChainPem = bench_cert_pem, .privateKeyPem = bench_key_pem },
+            .ticketKeys = .{ .current = [_]u8{0xBE} ** 32 },
+        });
+        var conn = srv.handshake(tls_bench_io, &sock) catch continue;
+        defer conn.deinit();
+        var b: [8]u8 = undefined;
+        _ = conn.read(&b) catch continue;
+        conn.writeAll("ok") catch continue;
+    }
+}
+
+fn tlsBenchDial(session: ?*const httpx.tls.ClientSession) void {
+    var sock = httpx.tcp.connect(tls_bench_io, "127.0.0.1", tls_bench_port) catch return;
+    defer sock.close();
+    var cli = httpx.tls.TlsClient.init(.{
+        .allocator = bench_allocator,
+        .verify = .caBundle,
+        .caPem = bench_cert_pem,
+        .session = session,
+        .captureSession = true,
+    });
+    var conn = cli.handshake(tls_bench_io, &sock, "127.0.0.1") catch return;
+    defer conn.deinit();
+    conn.writeAll("ping") catch return;
+    var b: [8]u8 = undefined;
+    var got: usize = 0;
+    while (got < 2) {
+        const n = conn.read(b[got..]) catch return;
+        if (n == 0) return;
+        got += n;
+    }
+    std.mem.doNotOptimizeAway(got);
+}
+
+fn benchTlsFullHandshake() void {
+    tlsBenchDial(null);
+}
+
+fn benchTlsResumedHandshake() void {
+    if (tls_bench_session) |*s| {
+        tlsBenchDial(s);
+    }
 }
 
 pub fn main() !void {
@@ -407,28 +716,43 @@ pub fn main() !void {
     // 3. Initialize Router with diverse routes
     bench_router = httpx.router.Router.init(bench_allocator);
     defer bench_router.deinit();
-    try bench_router.get("/", dummyHandler);
-    try bench_router.get("/api/v1/health", dummyHandler);
-    try bench_router.get("/api/v1/status", dummyHandler);
-    try bench_router.get("/users/:id", dummyHandler);
-    try bench_router.get("/users/:id/profile", dummyHandler);
-    try bench_router.get("/users/:id/posts", dummyHandler);
-    try bench_router.get("/items/:category/:id", dummyHandler);
-    try bench_router.get("/docs", dummyHandler);
-    try bench_router.get("/openapi.json", dummyHandler);
+    try bench_router.get("/", dummyHandler, .{});
+    try bench_router.get("/api/v1/health", dummyHandler, .{});
+    try bench_router.get("/api/v1/status", dummyHandler, .{});
+    try bench_router.get("/users/{id}", dummyHandler, .{});
+    try bench_router.get("/users/{id}/profile", dummyHandler, .{});
+    try bench_router.get("/users/{id}/posts", dummyHandler, .{});
+    try bench_router.get("/items/{category}/{id}", dummyHandler, .{});
+    try bench_router.get("/docs", dummyHandler, .{});
+    try bench_router.get("/users/{userId:int}/posts/{postId:int}", dummyHandler, .{ .name = "bench_user_post" });
+    try bench_router.get("/openapi.json", dummyHandler, .{});
 
     // 4. Initialize DNS Cache
-    var dns_cache = httpx.dns.cache.Cache.init(bench_allocator, .{}, dummyDnsLookup, null);
+    var dns_cache = httpx.dns.Cache.init(bench_allocator, io, .{}, dummyDnsLookup, null);
     defer dns_cache.deinit();
     bench_dns_cache = &dns_cache;
     // Prime the cache with an entry
-    const primed = try bench_dns_cache.resolve(io, "httpbun.com");
+    const primed = try bench_dns_cache.resolve("httpbun.com");
     defer {
         for (primed) |a| bench_allocator.free(a);
         bench_allocator.free(primed);
     }
 
-    // 5. Initialize Compression Sample Data (1024 bytes repetitive JSON payload)
+    // 5. Initialize watcher + dependency graph for watcher benchmarks.
+    var bench_w = try httpx.Watcher.init(bench_allocator, io, .{ .dirPath = "examples/web/templates" });
+    defer bench_w.deinit();
+    bench_watcher = bench_w;
+    var bench_g = httpx.web.watcherDependency.DependencyGraph.init(bench_allocator);
+    defer bench_g.deinit();
+    var gi: usize = 0;
+    while (gi < 64) : (gi += 1) {
+        var nb: [32]u8 = undefined;
+        const dep = try std.fmt.bufPrint(&nb, "page-{d}.html", .{gi});
+        bench_g.addEdge(dep, "base.html") catch {};
+    }
+    bench_dep_graph = &bench_g;
+
+    // 6. Initialize Compression Sample Data (1024 bytes repetitive JSON payload)
     const json_chunk = "{\"id\":1001,\"name\":\"Benchmark Item\",\"active\":true,\"category\":\"networking\"},";
     var comp_raw = std.ArrayList(u8).empty;
     defer comp_raw.deinit(bench_allocator);
@@ -448,7 +772,7 @@ pub fn main() !void {
         .keepAlive = true,
         .maxConnections = 100000,
     });
-    try srv.router.get("/ping", loopbackPingHandler);
+    try srv.router.get("/ping", loopbackPingHandler, .{});
     loopback_server = &srv;
 
     loopback_thread = try std.Thread.spawn(.{}, httpx.Server.run, .{&srv});
@@ -459,8 +783,8 @@ pub fn main() !void {
         srv.deinit();
     }
 
-    const bound_port = srv.localPort();
-    loopback_url_slice = try std.fmt.bufPrint(&loopback_url, "http://127.0.0.1:{d}/ping", .{bound_port});
+    const boundPort = srv.localPort();
+    loopback_url_slice = try std.fmt.bufPrint(&loopback_url, "http://127.0.0.1:{d}/ping", .{boundPort});
     loopback_client = httpx.Client.init(bench_allocator, io, .{});
 
     // Warm up loopback connection
@@ -468,6 +792,80 @@ pub fn main() !void {
         var warmup_res = try loopback_client.get(loopback_url_slice, .{});
         warmup_res.deinit();
     }
+
+    // 7. HTTP/2 pooled loopback (h2c, one server connection, pooled client).
+    // Each teardown defer is registered only after its setup succeeds,
+    // so a fatal setup error exits without joining garbage threads.
+    h2_bench_io = io;
+    h2_bench_listener = try httpx.tcp.Listener.bind(io, 0);
+    const h2port = h2_bench_listener.localPort();
+    h2_bench_thread = try std.Thread.spawn(.{}, h2BenchServe, .{});
+    h2_bench_url_slice = try std.fmt.bufPrint(&h2_bench_url, "http://127.0.0.1:{d}/ping", .{h2port});
+    h2_bench_client = httpx.Client.init(bench_allocator, io, .{});
+    {
+        var warmup_res = try h2_bench_client.get(h2_bench_url_slice, .{ .httpVersion = .http2 });
+        warmup_res.deinit();
+    }
+    defer {
+        // Client close unblocks the single-connection server; then join.
+        h2_bench_client.deinit();
+        h2_bench_thread.join();
+        h2_bench_listener.close(io);
+    }
+
+    // 8. HTTP/3 live loopback (fresh QUIC+TLS handshake per op)
+    h3_bench_io = io;
+    h3_bench_server.ep = try httpx.quic.transport.Endpoint.initPort(bench_allocator, io, try httpx.quic.Connection.init(bench_allocator, .server, .{}, 0xB1), 0);
+    const h3port = h3_bench_server.ep.localPort();
+    try h3_bench_server.pump.start(&h3_bench_server.ep, bench_allocator);
+    h3_bench_thread = try std.Thread.spawn(.{}, H3BenchServer.run, .{&h3_bench_server});
+    h3_bench_url_slice = try std.fmt.bufPrint(&h3_bench_url, "https://127.0.0.1:{d}/ping", .{h3port});
+    h3_bench_client = httpx.Client.init(bench_allocator, io, .{});
+    defer {
+        // Stop flag + pump stop abort in-flight server waits instantly;
+        // then join, then release client and endpoint.
+        h3_bench_stop.store(true, .release);
+        h3_bench_server.pump.stop();
+        h3_bench_thread.join();
+        h3_bench_client.deinit();
+        h3_bench_server.ep.deinit();
+    }
+
+    // 9. TLS loopback server (tickets enabled) + one captured session
+    tls_bench_io = io;
+    tls_bench_listener = try httpx.tcp.Listener.bind(io, 0);
+    tls_bench_port = tls_bench_listener.localPort();
+    tls_bench_thread = try std.Thread.spawn(.{}, tlsBenchServe, .{});
+    defer {
+        tls_bench_stop.store(true, .release);
+        tls_bench_listener.close(io);
+        tls_bench_thread.join();
+    }
+    {
+        // Prime the resumption session (full handshake + read captures NST).
+        var sock = try httpx.tcp.connect(io, "127.0.0.1", tls_bench_port);
+        defer sock.close();
+        var cli = httpx.tls.TlsClient.init(.{
+            .allocator = bench_allocator,
+            .verify = .caBundle,
+            .caPem = bench_cert_pem,
+            .captureSession = true,
+        });
+        var conn = try cli.handshake(io, &sock, "127.0.0.1");
+        defer conn.deinit();
+        try conn.writeAll("ping");
+        var b: [8]u8 = undefined;
+        var got: usize = 0;
+        while (got < 2) {
+            const n = try conn.read(b[got..]);
+            if (n == 0) break;
+            got += n;
+        }
+        if (conn.takeCapturedSession()) |taken| {
+            tls_bench_session = taken;
+        } else return error.NoSessionCaptured;
+    }
+    defer if (tls_bench_session) |*s| s.deinit(bench_allocator);
 
     std.debug.print("=================================================================================\n", .{});
     std.debug.print("                         httpx.zig Benchmark Suite                              \n", .{});
@@ -483,6 +881,11 @@ pub fn main() !void {
     const core_cfg = BenchConfig{ .iterations = 200_000, .warmup_iterations = 5_000, .rounds = 5 };
     const med_cfg = BenchConfig{ .iterations = 50_000, .warmup_iterations = 1_000, .rounds = 5 };
     const io_cfg = BenchConfig{ .iterations = 5_000, .warmup_iterations = 200, .rounds = 5 };
+    const tls_cfg = BenchConfig{ .iterations = 5_000, .warmup_iterations = 100, .rounds = 5 };
+    const net_cfg = BenchConfig{ .iterations = 1_000, .warmup_iterations = 50, .rounds = 3 };
+    const hs_cfg = BenchConfig{ .iterations = 100, .warmup_iterations = 10, .rounds = 3 };
+    const h3_cfg = BenchConfig{ .iterations = 20, .warmup_iterations = 2, .rounds = 3 };
+    @memset(&sample_tls_payload, 0xAB);
 
     std.debug.print("[1] Core Operations & Parsing:\n", .{});
     runBench("Core Operations", "headers_parse", "ops/sec", core_cfg, benchHeadersParse);
@@ -496,6 +899,9 @@ pub fn main() !void {
     runBench("Routing", "router_static_match", "ops/sec", core_cfg, benchRouterStaticMatch);
     runBench("Routing", "router_param_match", "ops/sec", core_cfg, benchRouterParamMatch);
     runBench("Routing", "router_dispatch", "ops/sec", core_cfg, benchRouterDispatch);
+    runBench("Routing", "router_typed_match", "ops/sec", core_cfg, benchRouterTypedMatch);
+    runBench("Routing", "router_miss_404", "ops/sec", core_cfg, benchRouterMiss);
+    runBench("Routing", "router_reverse", "ops/sec", core_cfg, benchRouterReverse);
 
     std.debug.print("\n[3] Data Serialization:\n", .{});
     runBench("Serialization", "json_stringify", "ops/sec", core_cfg, benchJsonStringify);
@@ -514,6 +920,16 @@ pub fn main() !void {
 
     std.debug.print("\n[6] Web & Document Parsing:\n", .{});
     runBench("Parsing", "html_parse", "ops/sec", med_cfg, benchHtmlParse);
+    runBench("Parsing", "template_parse", "ops/sec", med_cfg, benchTemplateParse);
+    {
+        var parser = httpx.templates.parser.Parser.init(bench_allocator, "bench.html", sample_template_src);
+        bench_template_ast = parser.parse() catch null;
+    }
+    runBench("Parsing", "template_render", "ops/sec", med_cfg, benchTemplateRender);
+    if (bench_template_ast) |*ast| ast.deinit();
+    runBench("Parsing", "template_incremental", "ops/sec", med_cfg, benchTemplateIncremental);
+    runBench("Watcher", "watcher_scan", "ops/sec", med_cfg, benchWatcherScan);
+    runBench("Watcher", "watcher_deps", "ops/sec", med_cfg, benchWatcherDeps);
 
     std.debug.print("\n[7] Concurrency & Queues:\n", .{});
     runBench("Concurrency", "worker_pool_submit", "ops/sec", core_cfg, benchWorkerPoolSubmit);
@@ -529,8 +945,22 @@ pub fn main() !void {
     runBench("Protocols", "h3_varint_encode", "ops/sec", fast_cfg, benchH3VarIntEncode);
     runBench("Protocols", "h3_varint_decode", "ops/sec", fast_cfg, benchH3VarIntDecode);
 
-    std.debug.print("\n[10] Local Loopback Client/Server (HTTP/1.1 keep-alive):\n", .{});
+    std.debug.print("\n[10] TLS Cryptography (1 KiB record, P-256 chain):\n", .{});
+    runBench("TLS", "tls_record_seal", "ops/sec", core_cfg, benchTlsRecordSeal);
+    runBench("TLS", "tls_cert_parse", "ops/sec", tls_cfg, benchCertParse);
+
+    std.debug.print("\n[11] Local Loopback Client/Server (HTTP/1.1 keep-alive):\n", .{});
     runBench("Network", "client_server_get", "req/sec", io_cfg, benchClientServerLoopback);
+
+    std.debug.print("\n[12] HTTP/2 Pooled Requests (h2c, amortized via session pool):\n", .{});
+    runBench("Network", "h2_pooled_get", "req/sec", net_cfg, benchH2PooledGet);
+
+    std.debug.print("\n[13] HTTP/3 Live Requests (fresh QUIC+TLS handshake per op):\n", .{});
+    runBench("Network", "h3_get", "req/sec", h3_cfg, benchH3Get);
+
+    std.debug.print("\n[14] TLS Handshakes (full vs PSK-resumed, loopback):\n", .{});
+    runBench("TLS", "tls_full_handshake", "ops/sec", hs_cfg, benchTlsFullHandshake);
+    runBench("TLS", "tls_resumed_handshake", "ops/sec", hs_cfg, benchTlsResumedHandshake);
 
     std.debug.print("\n=================================================================================\n", .{});
     std.debug.print("                         Generated Markdown Table                                \n", .{});

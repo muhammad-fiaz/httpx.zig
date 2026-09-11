@@ -21,47 +21,47 @@ pub const State = enum {
 pub const PathValidator = struct {
     state: State = .idle,
     /// Probe queue for the current round: [head..len) are issued-but-
-    /// unanswered; [answer_head..len) still need to go on the wire.
-    queue: [MAX_PROBES_PER_ROUND]struct { data: [CHALLENGE_LEN]u8, ts_ms: u64 } = undefined,
-    answer_head: usize = 0,
+    /// unanswered; [answerHead..len) still need to go on the wire.
+    queue: [MAX_PROBES_PER_ROUND]struct { data: [CHALLENGE_LEN]u8, tsMs: u64 } = undefined,
+    answerHead: usize = 0,
     len: usize = 0,
     round: u32 = 0,
-    started_ts_ms: u64 = 0,
+    startedTsMs: u64 = 0,
 
-    pto_base_ms: u64,
+    ptoBaseMs: u64,
 
-    pub fn init(pto_base_ms: u64) PathValidator {
-        return .{ .pto_base_ms = @max(pto_base_ms, 1) };
+    pub fn init(ptoBaseMs: u64) PathValidator {
+        return .{ .ptoBaseMs = @max(ptoBaseMs, 1) };
     }
 
     /// Begins (or re-begins) validation toward the current path.
-    pub fn start(self: *PathValidator, now_ms: u64, rng: std.Random) void {
+    pub fn start(self: *PathValidator, nowMs: u64, rng: std.Random) void {
         if (self.state == .validated or self.state == .failed) return;
         self.state = .validating;
-        if (self.started_ts_ms == 0) self.started_ts_ms = now_ms;
-        if (self.len == 0) self.refill(now_ms, rng);
+        if (self.startedTsMs == 0) self.startedTsMs = nowMs;
+        if (self.len == 0) self.refill(nowMs, rng);
     }
 
-    fn refill(self: *PathValidator, now_ms: u64, rng: std.Random) void {
-        self.answer_head = 0;
+    fn refill(self: *PathValidator, nowMs: u64, rng: std.Random) void {
+        self.answerHead = 0;
         self.len = 0;
         while (self.len < MAX_PROBES_PER_ROUND) {
             var c: [CHALLENGE_LEN]u8 = undefined;
             rng.bytes(&c);
-            self.queue[self.len] = .{ .data = c, .ts_ms = now_ms };
+            self.queue[self.len] = .{ .data = c, .tsMs = nowMs };
             self.len += 1;
         }
     }
 
     /// Next pending PATH_CHALLENGE payload to put on the wire.
     pub fn nextChallenge(self: *PathValidator) ?[CHALLENGE_LEN]u8 {
-        if (self.answer_head >= self.len) return null;
-        return self.queue[self.answer_head].data;
+        if (self.answerHead >= self.len) return null;
+        return self.queue[self.answerHead].data;
     }
 
     /// Marks one challenge as handed to the packetizer.
     pub fn markSent(self: *PathValidator) void {
-        if (self.answer_head < self.len) self.answer_head += 1;
+        if (self.answerHead < self.len) self.answerHead += 1;
     }
 
     /// Checks a received PATH_RESPONSE. Returns true when it matches an
@@ -72,7 +72,7 @@ pub const PathValidator = struct {
             if (std.mem.eql(u8, q.data[0..], data[0..])) {
                 self.state = .validated;
                 self.len = 0;
-                self.answer_head = 0;
+                self.answerHead = 0;
                 return true;
             }
         }
@@ -81,13 +81,13 @@ pub const PathValidator = struct {
 
     /// Timer expiry handling. Returns true when validation finished
     /// (success or failure).
-    pub fn onTimeout(self: *PathValidator, now_ms: u64, rng: std.Random) bool {
+    pub fn onTimeout(self: *PathValidator, nowMs: u64, rng: std.Random) bool {
         if (self.state != .validating) return false;
 
         const timeout = self.probeTimeoutMs();
         var expired = false;
         for (self.queue[0..self.len]) |q| {
-            if (now_ms >= q.ts_ms + timeout) {
+            if (nowMs >= q.tsMs + timeout) {
                 expired = true;
                 break;
             }
@@ -96,19 +96,19 @@ pub const PathValidator = struct {
 
         self.round += 1;
         if (self.round > MAX_ROUNDS or
-            now_ms >= self.started_ts_ms +| self.totalTimeoutMs())
+            nowMs >= self.startedTsMs +| self.totalTimeoutMs())
         {
             self.state = .failed;
             self.len = 0;
-            self.answer_head = 0;
+            self.answerHead = 0;
             return true;
         }
-        self.refill(now_ms, rng);
+        self.refill(nowMs, rng);
         return false;
     }
 
     fn probeTimeoutMs(self: *const PathValidator) u64 {
-        return 3 * self.pto_base_ms;
+        return 3 * self.ptoBaseMs;
     }
 
     pub fn totalTimeoutMs(self: *const PathValidator) u64 {
@@ -120,7 +120,7 @@ pub const PathValidator = struct {
     }
 
     pub fn reset(self: *PathValidator) void {
-        self.* = .{ .pto_base_ms = self.pto_base_ms };
+        self.* = .{ .ptoBaseMs = self.ptoBaseMs };
     }
 };
 

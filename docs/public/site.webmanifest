@@ -1,7 +1,7 @@
 {
     "name": "httpx.zig",
     "short_name": "httpx",
-    "description": "Production-ready HTTP client and server library for Zig",
+    "description": "Production-grade HTTP client and server library for Zig",
     "icons": [
         {
             "src": "/httpx.zig/android-chrome-192x192.png",

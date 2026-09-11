@@ -55,7 +55,7 @@ var response = try httpx.get("https://api.example.com/users");
 defer response.deinit();
 
 // Dot notation module access:
-var post_res = try httpx.client.post("https://api.example.com/users", .{ .json = .{ .name = "Alice", .role = "developer" },
+var post_res = try httpx.post("https://api.example.com/users", .{ .json = .{ .name = "Alice", .role = "developer" },
 });
 defer post_res.deinit();
 ```
@@ -194,13 +194,13 @@ All methods are URL-first (`url`, then options):
 | `request(url, options)` | Generic request (method set via `options.method`) |
 | `getAll(urls)` | Concurrent GETs; deinit each response, free the slice |
 | `requestAll(reqs)` | Concurrent requests; same ownership |
-| `download(url, dest, options)` | Streaming file download with resume/verify |
+| `download(url, options)` | Streaming file download with resume/verify (destination via `options.path`) |
 | `downloadBatch(tasks, options)` | Concurrent downloads |
 | `lookupFileInfo(url, options)` | Remote metadata without body download |
-| `updateFile(url, path, options)` | Atomic file update with rollback |
+| `updateFile(url, options)` | Atomic file update with rollback (target via `options.path`) |
 | `graphql(url, query, variables, options)` | GraphQL request |
 | `fetchDocument/fetchHtml/fetchXml/fetchFeed/fetchRobots/fetchSitemap(url, options)` | Fetch + parse documents |
-| `resolve(host, port, options)` / `resolveUrl(url, options)` | DNS resolution |
+| `resolve(host, options)` / `resolveUrl(url, options)` | DNS resolution (port via `options.port`) |
 | `close()` | Purge the connection pool |
 | `reset()` | Close + clear DNS cache |
 
@@ -265,7 +265,7 @@ For complete copy/paste demos, see these example pages:
 
 - [Simple Get](/examples/simple-get)
 - [Simple Get Deserialize](/examples/simple-get-deserialize)
-- [JSON API](/examples/json-api-example) - getJson, postJsonAndParse, Response.json, server ctx.jsonBody + ctx.json
+- [JSON API](/examples/json-api-example) - typed `.json` bodies, `Response.json(r)`, server `ctx.json(r)` + `ctx.renderJson(value)`
 - [Post JSON](/examples/post-json)
 - [Custom Headers](/examples/custom-headers)
 - [Concurrent Requests](/examples/concurrent-requests)
@@ -342,9 +342,10 @@ defer resp.deinit();
 > large multipart data as a single body, `winsock.send()` may stall.
 >
 > httpx.zig 0.1.8+ automatically caps each send call to 64 KB, so most uploads
-> now work without application changes. For extra safety—especially for payloads
-> larger than a few hundred KB—keep each `MultipartFile.data` slice under
-> `httpx.MultipartMaxChunk` (64 KB) and issue one request per slice.
+> now work without application changes. For extra safety — especially for payloads
+> larger than a few hundred KB — build the body with
+> `httpx.multipart.encoder.Multipart` (or post a single part inline with the
+> `.multipart` request option) and issue one request per slice.
 > See the [Multipart Guide](../guide/multipart.md#large-file-uploads--windows-compatibility)
 > for a complete resumable upload example.
 

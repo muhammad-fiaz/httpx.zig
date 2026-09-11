@@ -3,7 +3,7 @@
 
 pub const Sym = struct { len: u8, code: u32 };
 
-pub const sym_table = [256]Sym{
+pub const symTable = [256]Sym{
     .{ .len = 13, .code = 0xFFC00000 }, .{ .len = 23, .code = 0xFFFFB000 }, .{ .len = 28, .code = 0xFFFFFE20 }, .{ .len = 28, .code = 0xFFFFFE30 },
     .{ .len = 28, .code = 0xFFFFFE40 }, .{ .len = 28, .code = 0xFFFFFE50 }, .{ .len = 28, .code = 0xFFFFFE60 }, .{ .len = 28, .code = 0xFFFFFE70 },
     .{ .len = 28, .code = 0xFFFFFE80 }, .{ .len = 24, .code = 0xFFFFEA00 }, .{ .len = 30, .code = 0xFFFFFFF0 }, .{ .len = 28, .code = 0xFFFFFE90 },

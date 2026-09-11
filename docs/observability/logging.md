@@ -10,31 +10,39 @@ HTTPX follows a strict zero-print architecture: the core library never invokes `
 
 ## Logging Middleware
 
-Attach a logging middleware to your HTTPX server to log all incoming HTTP requests:
+Attach the built-in logging middleware to your HTTPX server. Middleware has
+the shape `fn (ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response`
+and must return the downstream response:
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn requestLoggerMiddleware(ctx: *httpx.Context) !void {
-    const start_time = std.time.nanoTimestamp();
+try server.use(httpx.middleware.logging);
+```
 
-    // Proceed with route handler
-    try ctx.next();
+For structured production events (method, path, status, duration, bytes —
+never secrets), set the server logging callback instead; HTTPX emits nothing
+unless you provide one:
 
-    const elapsed_ms = @as(f64, @floatFromInt(std.time.nanoTimestamp() - start_time)) / 1_000_000.0;
-    std.log.info("{s} {s} {d} - {d:.2}ms", .{
-        ctx.request.method.toString(),
-        ctx.request.path,
-        ctx.response.status,
-        elapsed_ms,
-    });
+```zig
+fn onEvent(event: httpx.ServerEvent) void {
+    if (event.kind == .requestCompleted) {
+        std.debug.print("{s} {s} {d} {d}ms\n", .{
+            event.method, event.path, event.status, event.durationMs,
+        });
+    }
 }
+
+var server = try httpx.Server.init(allocator, io, .{
+    .logging = .{ .callback = onEvent },
+});
 ```
 
 ## Redacting Sensitive Information
 
-When logging headers, use `httpx.logging.redactHeader(name, value)`:
+When logging headers, use `httpx.logging.isSensitiveHeader(name)` to decide
+what to redact:
 
 ```zig
 pub fn formatHeaderSafe(name: []const u8, value: []const u8) []const u8 {

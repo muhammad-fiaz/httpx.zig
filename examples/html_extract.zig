@@ -23,7 +23,7 @@ pub fn main() !void {
         \\<html lang="en">
         \\<head>
         \\  <title>HTTPX Complete Extraction Guide</title>
-        \\  <meta name="description" content="Production-ready networking in Zig">
+         \\  <meta name="description" content="Actively developed networking in Zig">
         \\  <meta property="og:title" content="HTTPX Networking">
         \\  <meta property="og:url" content="https://example.com/guide">
         \\  <link rel="canonical" href="https://example.com/canonical-guide">

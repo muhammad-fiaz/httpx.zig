@@ -45,7 +45,7 @@ pub fn main() !void {
     // Server processes client settings (skip 1-byte stream type prefix)
     var off: usize = 1;
     const parsed = try httpx.http3.frame.parseFrame(client_ctrl, &off);
-    try server_conn.processControlFrame(parsed.frame_type, parsed.payload);
+    try server_conn.processControlFrame(parsed.frameType, parsed.payload);
 
     std.debug.print("2. HTTP/3 control stream SETTINGS exchanged successfully\n", .{});
 

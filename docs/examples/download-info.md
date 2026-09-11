@@ -29,7 +29,7 @@ pub fn main() !void {
     std.debug.print("Remote File Metadata:\n", .{});
     std.debug.print("  - Status:           {d}\n", .{info.status});
     std.debug.print("  - File Name:        {s}\n", .{info.fileName()});
-    std.debug.print("  - File Size:        {?d} bytes ({s})\n", .{ info.file_size, info.formatSize(&size_buf) });
+    std.debug.print("  - File Size:        {?d} bytes ({s})\n", .{ info.fileSize, info.formatSize(&size_buf) });
     std.debug.print("  - Content Type:     {?s}\n", .{info.contentType()});
     std.debug.print("  - Accepts Ranges:   {any}\n", .{info.acceptsRanges});
     std.debug.print("  - ETag:             {?s}\n", .{info.etag()});

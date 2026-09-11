@@ -152,6 +152,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "custom-responses", .path = "examples/custom_responses.zig" },
         .{ .name = "browser-demo-server", .path = "examples/browser_demo_server.zig" },
         .{ .name = "simple-server", .path = "examples/simple_server.zig" },
+        .{ .name = "routing-demo", .path = "examples/routing_demo.zig" },
         .{ .name = "static-files", .path = "examples/static_files.zig" },
         .{ .name = "health-check", .path = "examples/health_check.zig" },
         .{ .name = "tls-get", .path = "examples/tls_get.zig" },
@@ -161,6 +162,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "http11-client", .path = "examples/http11_client.zig" },
         .{ .name = "http11-server", .path = "examples/http11_server.zig" },
         .{ .name = "http2-client", .path = "examples/http2_client.zig" },
+        .{ .name = "http2-tls", .path = "examples/http2_tls.zig" },
         .{ .name = "http2-multiplex", .path = "examples/http2_multiplex.zig" },
         .{ .name = "http3-client", .path = "examples/http3_client.zig" },
         .{ .name = "http3-quic", .path = "examples/http3_quic.zig" },
@@ -223,6 +225,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "template-loops", .path = "examples/web/templates/loops/main.zig" },
         .{ .name = "template-includes", .path = "examples/web/templates/includes/main.zig" },
         .{ .name = "template-live-reload", .path = "examples/web/templates/live_reload/main.zig" },
+        .{ .name = "template-jinja", .path = "examples/web/templates/jinja/main.zig" },
         .{ .name = "website", .path = "examples/website/main.zig" },
     };
 

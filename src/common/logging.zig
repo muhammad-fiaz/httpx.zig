@@ -439,16 +439,16 @@ test "disabled logger swallows everything" {
 test "custom external logger receives structured records" {
     const Capture = struct {
         seen: usize = 0,
-        last_component: []const u8 = "",
-        last_message: []const u8 = "",
-        last_level: Level = .debug,
+        lastComponent: []const u8 = "",
+        lastMessage: []const u8 = "",
+        lastLevel: Level = .debug,
 
         fn logImpl(ptr: *anyopaque, record: Record) void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.seen += 1;
-            self.last_component = record.component;
-            self.last_message = record.message;
-            self.last_level = record.level;
+            self.lastComponent = record.component;
+            self.lastMessage = record.message;
+            self.lastLevel = record.level;
         }
 
         fn sink(self: *@This()) Sink {
@@ -459,9 +459,9 @@ test "custom external logger receives structured records" {
     const l = Logger.custom(cap.sink(), .debug, true);
     l.log(.warn, "http", "{s} {s} -> {d}", .{ "GET", "/x", 404 });
     try std.testing.expectEqual(@as(usize, 1), cap.seen);
-    try std.testing.expectEqualStrings("http", cap.last_component);
-    try std.testing.expectEqualStrings("GET /x -> 404", cap.last_message);
-    try std.testing.expectEqual(Level.warn, cap.last_level);
+    try std.testing.expectEqualStrings("http", cap.lastComponent);
+    try std.testing.expectEqualStrings("GET /x -> 404", cap.lastMessage);
+    try std.testing.expectEqual(Level.warn, cap.lastLevel);
 }
 
 test "fields render as key=value" {
@@ -490,9 +490,9 @@ test "redaction list" {
 test "ServerEvent callback receives structured data" {
     const Capture = struct {
         seen: usize = 0,
-        last_kind: ServerEventKind = .serverStarted,
-        last_status: u16 = 0,
-        last_method: []const u8 = "",
+        lastKind: ServerEventKind = .serverStarted,
+        lastStatus: u16 = 0,
+        lastMethod: []const u8 = "",
 
         fn cb(event: ServerEvent) void {
             // Access through a threadlocal to capture in test — use a global

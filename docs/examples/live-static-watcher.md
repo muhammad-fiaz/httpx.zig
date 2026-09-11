@@ -52,7 +52,7 @@ fn styleCssHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = css,
-        .content_type = "text/css; charset=utf-8",
+        .contentType = "text/css; charset=utf-8",
     };
 }
 
@@ -67,7 +67,7 @@ fn appJsHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{
         .status = 200,
         .body = js,
-        .content_type = "text/javascript; charset=utf-8",
+        .contentType = "text/javascript; charset=utf-8",
     };
 }
 
@@ -95,8 +95,8 @@ pub fn main() !void {
 
     // 2. Initialize Watcher with reload callbacks
     var file_watcher = try httpx.static.Watcher.init(allocator, io, .{
-        .dir_path = ".",
-        .poll_interval_ms = 50,
+        .dirPath = ".",
+        .pollIntervalMs = 50,
     });
     defer file_watcher.deinit();
     try file_watcher.watchFile(test_asset);

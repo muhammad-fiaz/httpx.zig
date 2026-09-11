@@ -20,7 +20,7 @@ GUID, SHA-1 hashes the result, and base64-encodes it:
 
 ```zig
 var accept: [28]u8 = undefined;
-httpx.websocket.computeAccept(client_key, &accept);
+httpx.websocket.computeAccept(clientKey, &accept);
 // Set as Sec-WebSocket-Accept header value in your 101 response
 ```
 
@@ -34,7 +34,7 @@ defer allocator.free(req);
 ```
 
 Validate a `101` response with
-`Handshake.validateUpgradeResponse(head, &expected_accept)`.
+`Handshake.validateUpgradeResponse(head, &expectedAccept)`.
 
 ## Encoding Frames
 

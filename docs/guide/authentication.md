@@ -9,19 +9,16 @@ Authentication credentials can be configured per request using the unified reque
 ### Basic Authentication
 ```zig
 const response = try client.get("https://api.example.com/protected", .{
-    .basic_auth = .{
-        .username = "admin",
-        .password = "secret123",
-    },
+    .basicAuth = "admin:secret123",
 });
 defer response.deinit();
 ```
-Under the hood, HTTPX automatically base64-encodes the credentials and injects the `Authorization: Basic <base64>` header.
+Under the hood, HTTPX automatically base64-encodes the `user:pass` pair and injects the `Authorization: Basic <base64>` header.
 
 ### Bearer Token Authentication
 ```zig
 const response = try client.post("https://api.example.com/v1/orders", .{
-    .bearer_auth = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    .bearerAuth = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
     .json = .{ .item_id = 901, .quantity = 2 },
 });
 defer response.deinit();
@@ -50,18 +47,15 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn requireApiKey(ctx: *httpx.Context) !bool {
-    const key = ctx.header("X-API-Key") orelse {
-        ctx.status(401);
-        try ctx.json(.{ .error = "Missing X-API-Key header" });
-        return false;
-    };
+    const key = ctx.header("X-API-Key") orelse return false;
+    return std.mem.eql(u8, key, "expected-secret-key");
+}
 
-    if (!std.mem.eql(u8, key, "expected-secret-key")) {
-        ctx.status(403);
-        try ctx.json(.{ .error = "Invalid API Key" });
-        return false;
+fn secureHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    if (!try requireApiKey(ctx)) {
+        return ctx.textStatus(401, "Missing or invalid X-API-Key header");
     }
-    return true;
+    return ctx.renderJson(.{ .status = "access granted", .data = 42 });
 }
 
 pub fn main() !void {
@@ -73,13 +67,8 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
-    // Secure endpoint using middleware check
-    server.get("/secure/data", struct {
-        fn handle(ctx: *httpx.Context) !void {
-            if (!try requireApiKey(ctx)) return;
-            try ctx.json(.{ .status = "access granted", .data = 42 });
-        }
-    }.handle);
+    // Secure endpoint using the check above
+    try server.get("/secure/data", secureHandler);
 
     try server.run();
 }

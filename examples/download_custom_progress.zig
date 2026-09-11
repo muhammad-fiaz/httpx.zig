@@ -49,8 +49,8 @@ pub fn main() !void {
 
     _ = client.download(
         sample_url,
-        "downloads/observed_download.bin",
         .{
+            .path = "downloads/observed_download.bin",
             .progress = .custom,
             .onProgress = DownloadObserver.onProgress,
             .userData = &observer,
@@ -65,8 +65,8 @@ pub fn main() !void {
     std.debug.print("\n==> Testing 404 Not Found error handling on https://httpbun.com/status/404...\n", .{});
     _ = client.download(
         "https://httpbun.com/status/404",
-        "downloads/not_found.bin",
         .{
+            .path = "downloads/not_found.bin",
             .progress = .quiet,
         },
     ) catch |err| {
@@ -79,8 +79,8 @@ pub fn main() !void {
     std.debug.print("\n==> Testing invalid URL error handling...\n", .{});
     _ = client.download(
         "http://invalid.nonexistent.domain.xyz12345/nonexistent",
-        "downloads/invalid.bin",
         .{
+            .path = "downloads/invalid.bin",
             .progress = .quiet,
             .maxRetries = 0,
         },

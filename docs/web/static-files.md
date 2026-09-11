@@ -32,8 +32,8 @@ HTTPX servers feature built-in directory watching, event debouncing, and Server-
 var server = try httpx.Server.init(allocator, io, .{
     .port = 8080,
     .watch = true,
-    .watch_dir = "./public",
-    .live_reload = true,
+    .watchDir = "./public",
+    .liveReload = true,
 });
 defer server.deinit();
 
@@ -41,11 +41,11 @@ try server.static("/", "./public");
 server.run();
 ```
 
-When files within `watch_dir` are created, modified, or deleted:
-1. Filesystem notifications normalize across Windows (`ReadDirectoryChangesW`) and Linux (`inotify`).
-2. Rapid editor saves are debounced and coalesced.
+When files within `watchDir` are created, modified, deleted, or renamed:
+1. Native filesystem notifications normalize across Windows (`ReadDirectoryChangesW`), Linux (`inotify`), and macOS (kqueue), with recursive watching and rename pairing.
+2. Rapid editor saves (including atomic save+rename) are debounced and coalesced into one logical change.
 3. CSS changes trigger instant in-place style refreshes (`hot_reload`).
-4. HTML/template modifications trigger page reloads (`warm_reload`).
+4. HTML/template modifications run Tree-sitter incremental analysis, invalidate exactly the affected cache entries via the dependency graph, and trigger page reloads (`warm_reload`).
 
 ## Key Capabilities
 

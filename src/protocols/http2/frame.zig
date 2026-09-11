@@ -29,12 +29,12 @@ pub const FrameType = enum(u8) {
     data = 0x0,
     headers = 0x1,
     priority = 0x2,
-    rst_stream = 0x3,
+    rstStream = 0x3,
     settings = 0x4,
-    push_promise = 0x5,
+    pushPromise = 0x5,
     ping = 0x6,
     goaway = 0x7,
-    window_update = 0x8,
+    windowUpdate = 0x8,
     continuation = 0x9,
     _,
 
@@ -69,12 +69,12 @@ pub fn validFlags(t: FrameType) u8 {
         .data => END_FLAG | PADDED_FLAG,
         .headers => END_FLAG | END_HEADERS | PADDED_FLAG | PRIORITY_F,
         .priority => 0,
-        .rst_stream => 0,
+        .rstStream => 0,
         .settings => ACK,
-        .push_promise => END_HEADERS | PADDED_FLAG,
+        .pushPromise => END_HEADERS | PADDED_FLAG,
         .ping => ACK,
         .goaway => 0,
-        .window_update => 0,
+        .windowUpdate => 0,
         .continuation => END_HEADERS,
         _ => 0xFF, // unknown types: leave untouched
     };
@@ -88,10 +88,10 @@ const ACK: u8 = Flags.ACK;
 
 pub const FrameHeader = struct {
     length: u24,
-    frame_type: FrameType,
+    frameType: FrameType,
     /// Only valid bits retained.
     flags: u8,
-    stream_id: u31,
+    streamId: u31,
 
     pub fn parse(buf: *const [FRAME_HEADER_SIZE]u8) FrameHeader {
         const length: u24 = (@as(u24, buf[0]) << 16) | (@as(u24, buf[1]) << 8) | buf[2];
@@ -102,9 +102,9 @@ pub const FrameHeader = struct {
         if (ft.isKnown()) flags &= validFlags(ft);
         return .{
             .length = length,
-            .frame_type = ft,
+            .frameType = ft,
             .flags = flags,
-            .stream_id = @intCast(raw_sid & 0x7FFFFFFF),
+            .streamId = @intCast(raw_sid & 0x7FFFFFFF),
         };
     }
 
@@ -112,28 +112,28 @@ pub const FrameHeader = struct {
         buf[0] = @intCast((self.length >> 16) & 0xFF);
         buf[1] = @intCast((self.length >> 8) & 0xFF);
         buf[2] = @intCast(self.length & 0xFF);
-        buf[3] = @intFromEnum(self.frame_type);
+        buf[3] = @intFromEnum(self.frameType);
         buf[4] = self.flags;
-        std.mem.writeInt(u32, buf[5..9], self.stream_id, .big);
+        std.mem.writeInt(u32, buf[5..9], self.streamId, .big);
     }
 
     pub fn hasEndStream(self: FrameHeader) bool {
-        return switch (self.frame_type) {
+        return switch (self.frameType) {
             .headers, .data => self.flags & END_FLAG != 0,
             else => false,
         };
     }
 
     pub fn hasAck(self: FrameHeader) bool {
-        return switch (self.frame_type) {
+        return switch (self.frameType) {
             .settings, .ping => self.flags & ACK != 0,
             else => false,
         };
     }
 
     pub fn hasEndHeaders(self: FrameHeader) bool {
-        return switch (self.frame_type) {
-            .headers, .push_promise, .continuation => self.flags & END_HEADERS != 0,
+        return switch (self.frameType) {
+            .headers, .pushPromise, .continuation => self.flags & END_HEADERS != 0,
             else => false,
         };
     }
@@ -142,12 +142,12 @@ pub const FrameHeader = struct {
 // SETTINGS
 
 pub const SettingsId = enum(u16) {
-    header_table_size = 0x1,
-    enable_push = 0x2,
-    max_concurrent_streams = 0x3,
-    initial_window_size = 0x4,
-    max_frame_size = 0x5,
-    max_header_list_size = 0x6,
+    headerTableSize = 0x1,
+    enablePush = 0x2,
+    maxConcurrentStreams = 0x3,
+    initialWindowSize = 0x4,
+    maxFrameSize = 0x5,
+    maxHeaderListSize = 0x6,
     _,
 };
 
@@ -157,9 +157,9 @@ pub const SettingEntry = struct { id: u16, value: u32 };
 /// (null when fine). Unknown IDs pass through untouched (must be ignored).
 pub fn validateSetting(id: SettingsId, value: u32) ?u32 {
     return switch (id) {
-        .enable_push => if (value > 1) 1 else null, // PROTOCOL_ERROR
-        .initial_window_size => if (value > MAX_WINDOW) 3 else null, // FLOW_CONTROL_ERROR
-        .max_frame_size => if (value < DEFAULT_MAX_FRAME_SIZE or value > MAX_ALLOWED_FRAME_SIZE) 1 else null,
+        .enablePush => if (value > 1) 1 else null, // PROTOCOL_ERROR
+        .initialWindowSize => if (value > MAX_WINDOW) 3 else null, // FLOW_CONTROL_ERROR
+        .maxFrameSize => if (value < DEFAULT_MAX_FRAME_SIZE or value > MAX_ALLOWED_FRAME_SIZE) 1 else null,
         else => null,
     };
 }
@@ -173,49 +173,49 @@ pub fn serializeSetting(buf: *[6]u8, id: u16, value: u32) void {
 
 pub const Data = struct {
     data: []const u8,
-    end_stream: bool,
+    endStream: bool,
 };
 
 pub const Headers = struct {
     block: []const u8,
-    end_stream: bool,
-    end_headers: bool,
+    endStream: bool,
+    endHeaders: bool,
     exclusive: bool = false,
-    stream_dep: u31 = 0,
+    streamDep: u31 = 0,
     weight: u8 = 255,
 };
 
 pub const Priority = struct {
     exclusive: bool,
-    stream_dep: u31,
+    streamDep: u31,
     weight: u8,
 };
 
-pub const RstStream = struct { error_code: u32 };
+pub const RstStream = struct { errorCode: u32 };
 
-pub const Ping = struct { opaque_data: [8]u8 };
+pub const Ping = struct { opaqueData: [8]u8 };
 
 pub const Goaway = struct {
-    last_stream_id: u31,
-    error_code: u32,
-    debug_data: []const u8,
+    lastStreamId: u31,
+    errorCode: u32,
+    debugData: []const u8,
 };
 
 pub const WindowUpdate = struct { increment: u31 };
 
 pub const PushPromise = struct {
-    promised_stream_id: u31,
+    promisedStreamId: u31,
     block: []const u8,
-    end_headers: bool,
+    endHeaders: bool,
 };
 
 pub const Continuation = struct {
     block: []const u8,
-    end_headers: bool,
+    endHeaders: bool,
 };
 
 pub const Unknown = struct {
-    frame_type: u8,
+    frameType: u8,
     flags: u8,
     payload: []const u8,
 };
@@ -225,12 +225,12 @@ pub const Frame = union(enum) {
     data: Data,
     headers: Headers,
     priority: Priority,
-    rst_stream: RstStream,
+    rstStream: RstStream,
     settings: []SettingEntry,
-    push_promise: PushPromise,
+    pushPromise: PushPromise,
     ping: Ping,
     goaway: Goaway,
-    window_update: WindowUpdate,
+    windowUpdate: WindowUpdate,
     continuation: Continuation,
     unknown: Unknown,
 
@@ -242,13 +242,13 @@ pub const Frame = union(enum) {
     pub fn parse(hdr: FrameHeader, payload: []const u8, allocator: Allocator) Error!Frame {
         // RFC 9113 Section 4.1: stream 0 is reserved for connection-level
         // frames, while request/stream frames require a non-zero identifier.
-        switch (hdr.frame_type) {
-            .data, .headers, .priority, .rst_stream, .push_promise, .continuation => if (hdr.stream_id == 0) return Error.InvalidStreamId,
-            .settings, .ping, .goaway => if (hdr.stream_id != 0) return Error.InvalidStreamId,
-            .window_update => {}, // valid on stream 0 or a non-zero stream
+        switch (hdr.frameType) {
+            .data, .headers, .priority, .rstStream, .pushPromise, .continuation => if (hdr.streamId == 0) return Error.InvalidStreamId,
+            .settings, .ping, .goaway => if (hdr.streamId != 0) return Error.InvalidStreamId,
+            .windowUpdate => {}, // valid on stream 0 or a non-zero stream
             _ => {},
         }
-        switch (hdr.frame_type) {
+        switch (hdr.frameType) {
             .data => {
                 if (hdr.flags & PADDED_FLAG != 0) {
                     if (payload.len < 1) return Error.InvalidPayload;
@@ -256,12 +256,12 @@ pub const Frame = union(enum) {
                     if (@as(usize, pad_len) + 1 > payload.len) return Error.ProtocolError; // pad+field > len
                     return .{ .data = .{
                         .data = payload[1 .. payload.len - pad_len],
-                        .end_stream = hdr.flags & END_FLAG != 0,
+                        .endStream = hdr.flags & END_FLAG != 0,
                     } };
                 }
                 return .{ .data = .{
                     .data = payload,
-                    .end_stream = hdr.flags & END_FLAG != 0,
+                    .endStream = hdr.flags & END_FLAG != 0,
                 } };
             },
             .headers => {
@@ -280,32 +280,32 @@ pub const Frame = union(enum) {
                     const raw = std.mem.readInt(u32, rest[0..4], .big);
                     exclusive = raw >> 31 != 0;
                     dep = @intCast(raw & 0x7FFFFFFF);
-                    if (dep == hdr.stream_id) return Error.InvalidPayload;
+                    if (dep == hdr.streamId) return Error.InvalidPayload;
                     weight = rest[4];
                     rest = rest[5..];
                 }
                 return .{ .headers = .{
                     .block = rest,
-                    .end_stream = hdr.flags & END_FLAG != 0,
-                    .end_headers = hdr.flags & END_HEADERS != 0,
+                    .endStream = hdr.flags & END_FLAG != 0,
+                    .endHeaders = hdr.flags & END_HEADERS != 0,
                     .exclusive = exclusive,
-                    .stream_dep = dep,
+                    .streamDep = dep,
                     .weight = weight,
                 } };
             },
             .priority => {
                 if (payload.len != 5) return Error.InvalidPayload;
                 const raw = std.mem.readInt(u32, payload[0..4], .big);
-                if ((raw & 0x7FFFFFFF) == hdr.stream_id) return Error.InvalidPayload;
+                if ((raw & 0x7FFFFFFF) == hdr.streamId) return Error.InvalidPayload;
                 return .{ .priority = .{
                     .exclusive = raw >> 31 != 0,
-                    .stream_dep = @intCast(raw & 0x7FFFFFFF),
+                    .streamDep = @intCast(raw & 0x7FFFFFFF),
                     .weight = payload[4],
                 } };
             },
-            .rst_stream => {
+            .rstStream => {
                 if (payload.len != 4) return Error.InvalidPayload;
-                return .{ .rst_stream = .{ .error_code = std.mem.readInt(u32, payload[0..4], .big) } };
+                return .{ .rstStream = .{ .errorCode = std.mem.readInt(u32, payload[0..4], .big) } };
             },
             .settings => {
                 if (hdr.hasAck()) {
@@ -324,7 +324,7 @@ pub const Frame = union(enum) {
                 }
                 return .{ .settings = entries };
             },
-            .push_promise => {
+            .pushPromise => {
                 var rest = payload;
                 if (hdr.flags & PADDED_FLAG != 0) {
                     if (rest.len < 1) return Error.InvalidPayload;
@@ -335,42 +335,42 @@ pub const Frame = union(enum) {
                 if (rest.len < 4) return Error.InvalidPayload;
                 const promised = std.mem.readInt(u32, rest[0..4], .big) & 0x7FFFFFFF;
                 if (promised == 0) return Error.InvalidStreamId;
-                return .{ .push_promise = .{
-                    .promised_stream_id = @intCast(promised),
+                return .{ .pushPromise = .{
+                    .promisedStreamId = @intCast(promised),
                     .block = rest[4..],
-                    .end_headers = hdr.flags & END_HEADERS != 0,
+                    .endHeaders = hdr.flags & END_HEADERS != 0,
                 } };
             },
             .ping => {
                 if (payload.len != 8) return Error.InvalidPayload;
                 var p: Ping = undefined;
-                @memcpy(&p.opaque_data, payload[0..8]);
+                @memcpy(&p.opaqueData, payload[0..8]);
                 return .{ .ping = p };
             },
             .goaway => {
                 if (payload.len < 8) return Error.InvalidPayload;
                 return .{ .goaway = .{
-                    .last_stream_id = @intCast(std.mem.readInt(u32, payload[0..4], .big) & 0x7FFFFFFF),
-                    .error_code = std.mem.readInt(u32, payload[4..8], .big),
-                    .debug_data = payload[8..],
+                    .lastStreamId = @intCast(std.mem.readInt(u32, payload[0..4], .big) & 0x7FFFFFFF),
+                    .errorCode = std.mem.readInt(u32, payload[4..8], .big),
+                    .debugData = payload[8..],
                 } };
             },
-            .window_update => {
+            .windowUpdate => {
                 if (payload.len != 4) return Error.InvalidPayload;
                 const inc = std.mem.readInt(u32, payload[0..4], .big) & 0x7FFFFFFF;
                 if (inc == 0) return Error.InvalidPayload;
-                return .{ .window_update = .{ .increment = @intCast(inc) } };
+                return .{ .windowUpdate = .{ .increment = @intCast(inc) } };
             },
             .continuation => {
                 return .{ .continuation = .{
                     .block = payload,
-                    .end_headers = hdr.flags & END_HEADERS != 0,
+                    .endHeaders = hdr.flags & END_HEADERS != 0,
                 } };
             },
             // RFC 9113 Section 4.1: extensions and unknown frame types are
             // ignored after their length-delimited payload is consumed.
             _ => return .{ .unknown = .{
-                .frame_type = @intFromEnum(hdr.frame_type),
+                .frameType = @intFromEnum(hdr.frameType),
                 .flags = hdr.flags,
                 .payload = payload,
             } },
@@ -380,16 +380,16 @@ pub const Frame = union(enum) {
 
 // Writers
 
-pub fn writeHeader(out: *std.ArrayList(u8), gpa: Allocator, length: usize, t: FrameType, flags: u8, stream_id: u31) !void {
-    var h: FrameHeader = .{ .length = @intCast(length), .frame_type = t, .flags = flags, .stream_id = stream_id };
+pub fn writeHeader(out: *std.ArrayList(u8), gpa: Allocator, length: usize, t: FrameType, flags: u8, streamId: u31) !void {
+    var h: FrameHeader = .{ .length = @intCast(length), .frameType = t, .flags = flags, .streamId = streamId };
     var b: [FRAME_HEADER_SIZE]u8 = undefined;
     h.serialize(&b);
     try out.appendSlice(gpa, &b);
 }
 
-pub fn writeData(out: *std.ArrayList(u8), gpa: Allocator, sid: u31, data: []const u8, end_stream: bool) !void {
+pub fn writeData(out: *std.ArrayList(u8), gpa: Allocator, sid: u31, data: []const u8, endStream: bool) !void {
     var flags: u8 = 0;
-    if (end_stream) flags |= END_FLAG;
+    if (endStream) flags |= END_FLAG;
     try writeHeader(out, gpa, data.len, .data, flags, sid);
     try out.appendSlice(gpa, data);
 }
@@ -397,7 +397,7 @@ pub fn writeData(out: *std.ArrayList(u8), gpa: Allocator, sid: u31, data: []cons
 pub fn writeRstStream(out: *std.ArrayList(u8), gpa: Allocator, sid: u31, code: u32) !void {
     var b: [4]u8 = undefined;
     std.mem.writeInt(u32, b[0..4], code, .big);
-    try writeHeader(out, gpa, 4, .rst_stream, 0, sid);
+    try writeHeader(out, gpa, 4, .rstStream, 0, sid);
     try out.appendSlice(gpa, &b);
 }
 
@@ -414,30 +414,30 @@ pub fn writeSettingsAck(out: *std.ArrayList(u8), gpa: Allocator) !void {
     try writeHeader(out, gpa, 0, .settings, ACK, 0);
 }
 
-pub fn writePing(out: *std.ArrayList(u8), gpa: Allocator, ack: bool, opaque_data: [8]u8) !void {
+pub fn writePing(out: *std.ArrayList(u8), gpa: Allocator, ack: bool, opaqueData: [8]u8) !void {
     try writeHeader(out, gpa, 8, .ping, if (ack) ACK else 0, 0);
-    try out.appendSlice(gpa, &opaque_data);
+    try out.appendSlice(gpa, &opaqueData);
 }
 
 pub fn writeWindowUpdate(out: *std.ArrayList(u8), gpa: Allocator, sid: u31, increment: u31) !void {
     var b: [4]u8 = undefined;
     std.mem.writeInt(u32, b[0..4], increment, .big);
-    try writeHeader(out, gpa, 4, .window_update, 0, sid);
+    try writeHeader(out, gpa, 4, .windowUpdate, 0, sid);
     try out.appendSlice(gpa, &b);
 }
 
-pub fn writeGoaway(out: *std.ArrayList(u8), gpa: Allocator, last_sid: u31, code: u32, debug_data: []const u8) !void {
-    try writeHeader(out, gpa, 8 + debug_data.len, .goaway, 0, 0);
+pub fn writeGoaway(out: *std.ArrayList(u8), gpa: Allocator, last_sid: u31, code: u32, debugData: []const u8) !void {
+    try writeHeader(out, gpa, 8 + debugData.len, .goaway, 0, 0);
     var b: [8]u8 = undefined;
     std.mem.writeInt(u32, b[0..4], last_sid, .big);
     std.mem.writeInt(u32, b[4..8], code, .big);
     try out.appendSlice(gpa, &b);
-    try out.appendSlice(gpa, debug_data);
+    try out.appendSlice(gpa, debugData);
 }
 
 pub fn writePriority(out: *std.ArrayList(u8), gpa: Allocator, sid: u31, p: Priority) !void {
     var b: [5]u8 = undefined;
-    const raw: u32 = (@as(u32, if (p.exclusive) 1 else 0) << 31) | p.stream_dep;
+    const raw: u32 = (@as(u32, if (p.exclusive) 1 else 0) << 31) | p.streamDep;
     std.mem.writeInt(u32, b[0..4], raw, .big);
     b[4] = p.weight;
     try writeHeader(out, gpa, 5, .priority, 0, sid);

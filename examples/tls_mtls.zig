@@ -1,58 +1,42 @@
+//! Mutual TLS end to end over loopback using the high-level API: the
+//! server requires client certificates (`.clientAuth = .required`) and
+//! serves HTTP only to clients that present a trusted certificate.
+//! `httpx.Client.get(url, .{ .tls = .{ .clientCertPem, .clientKeyPem } })`
+//! drives the native TLS 1.3 client under the hood; a second request
+//! without a certificate is rejected during the handshake.
+
 const std = @import("std");
 const httpx = @import("httpx");
 
-const cert =
+const cert_pem =
     \\-----BEGIN CERTIFICATE-----
-    \\MIIDGjCCAgKgAwIBAgIUF2ynt8EnHkZmDJ2Ori/tSI5VFC0wDQYJKoZIhvcNAQEL
-    \\BQAwFDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDgzMDIxNTMzM1oXDTM2MDgy
-    \\NzIxNTMzM1owFDESMBAGA1UEAwwJMTI3LjAuMC4xMIIBIjANBgkqhkiG9w0BAQEF
-    \\AAOCAQ8AMIIBCgKCAQEAo/S6JY2+KY17DaElEHGGOEBbiGeXoqxANA/Qt3gsdHEk
-    \\Vlk8wqL0W+/bzgB9iYHaqVZ+Z0D1Ley6/+nqxrw2hVkAt83Na9sOsmUVHTT9xjWC
-    \\wp7E1DV2EqwAjl+3kOOKu4meQdbDaRS0P9lAUzOMrWJQpXBG4cMiNAyTRownXSFy
-    \\9dQvq85JJeeV/+akclRzliXOZ6nlVnzSmk56eRwkVbA8iTX1BOLcKJ3+euP7uo3R
-    \\+pXfVTZIFePgVK4a7zbMR/j8lotRkTu44lXo3zBAlN/qHKAXpdeZqI3LhASd6bm0
-    \\kf3tkdyoOgmatlH53WXEIB+QmCvRs9jk7daHYGtazwIDAQABo2QwYjAdBgNVHQ4E
-    \\FgQU8sm3Nw+TMraXDsP3vXV/w6ah3fYwHwYDVR0jBBgwFoAU8sm3Nw+TMraXDsP3
-    \\vXV/w6ah3fYwDwYDVR0TAQH/BAUwAwEB/zAPBgNVHREECDAGhwR/AAABMA0GCSqG
-    \\SIb3DQEBCwUAA4IBAQBnD8hgxaqVBfV2u6EI31fzmNEn34NRAimt3Ce5PqnxbAxR
-    \\iy4fUK1peI7gJfMa8BfQ4LLXCn6lFc4nNLSDzfgCJLR3TSLl5fnxnnVufTsrUwAf
-    \\xxCRkUl3pvodoriiJFsCmxmtSNDtkZhnqka6oQpOUu9N1M8tVL7XcKosBtYDFnh6
-    \\c9MFuHwF3qUNcBriAQ9GenAiID2oRi6dBk05gWLQJn++R6jY/GOwAeATmlc+KqOZ
-    \\eivaBnubzKzTBhAuURkf0Kdcl5jyH4xCsPriG/oAapuC2+fW/a+CeJqVNp26fXgp
-    \\oKd0+wWE9hdoE0Wq9xAkUdbQRFBoOG2ZKW7ydO/L
+    \\MIIBmTCCAT+gAwIBAgIURhx0CMJWTUTFJXV9z2OlmW/cNlcwCgYIKoZIzj0EAwIw
+    \\FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDkwOTE4MTczOFoXDTM2MDkwNjE4
+    \\MTczOFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D
+    \\AQcDQgAE71D4pM0SAPK8sdt+xlEESZX/EJoKHUC+4IpPuSlOiQuCXOkN04ozVGKA
+    \\mrmUtDqQCdvmdjHbjqGY6TCszXTCnKNvMG0wHQYDVR0OBBYEFFjYJYGodkVKyvXf
+    \\4qrn7rvQx+PFMB8GA1UdIwQYMBaAFFjYJYGodkVKyvXf4qrn7rvQx+PFMA8GA1Ud
+    \\EwEB/wQFMAMBAf8wGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAoGCCqGSM49
+    \\BAMCA0gAMEUCIQD0sAcuw/jdWdfBrxLXY1ur2cU8F0CAkPCvS2qKn7XK4QIgAP71
+    \\95toW+Gsh8/VZlNoHL2s14olRp5zl3cYDPzKM10=
     \\-----END CERTIFICATE-----
 ;
 
-const key =
+const key_pem =
     \\-----BEGIN PRIVATE KEY-----
-    \\MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCj9Loljb4pjXsN
-    \\oSUQcYY4QFuIZ5eirEA0D9C3eCx0cSRWWTzCovRb79vOAH2JgdqpVn5nQPUt7Lr/
-    \\6erGvDaFWQC3zc1r2w6yZRUdNP3GNYLCnsTUNXYSrACOX7eQ44q7iZ5B1sNpFLQ/
-    \\2UBTM4ytYlClcEbhwyI0DJNGjCddIXL11C+rzkkl55X/5qRyVHOWJc5nqeVWfNKa
-    \\Tnp5HCRVsDyJNfUE4twonf564/u6jdH6ld9VNkgV4+BUrhrvNsxH+PyWi1GRO7ji
-    \\VejfMECU3+ocoBel15mojcuEBJ3pubSR/e2R3Kg6CZq2UfndZcQgH5CYK9Gz2OTt
-    \\1odga1rPAgMBAAECggEACh2h1IpTxsWLZ5JfMo4GjXbvDtHxaaB+D5hANOmtuHt4
-    \\lflIheu+7uM0KRgfprnDz3neL6my1uQJv5tjmGJpbL3KjQyeFX78/6W78ULhO3b2
-    \\u+JG2572y30gRaiDL2XSm/KIOKCzCsszudLCJMAD+Hid6C8uuGQtOo/iEFK6ZQT/
-    \\hYo6mbZPkaAt2kmH63BiqLEcEtJTtF2po2TgCh0NhrU+FjFMSgf1aIFpkVqTvA6e
-    \\AqU9hTnUfcm76m4EdlSHpyC6ZzlM491ArVtp/hCX9+1V6DRybwnFI8h/4AH5xorA
-    \\a5+WIojNatpFqBqzVgYfQSHa8tCRwFAZwgL8JFepvQKBgQDQPfgPUFVmLM0eJ0jI
-    \\FRENu4XF3YwA73snCgPs8qojOuLiqAAY90UemMeC9HdeDxwe0xf3sU7TPszKME+b
-    \\O6yU69cjlIHugWWkfEjkR13mVbf9bHNn/WyWS/GbCvzyIc1QBH+LC80Jokc5GxQV
-    \\yTF8/TCk02Vc5CEE1wj8ClMCIwKBgQDJjrEIttYYUSdqrfO6z6XXTaUlENF5PEeY
-    \\8kvrEZEEojVabAczPnH+/x5+pGSiD7UPGPpFDvkrfIJCi3HItYjjRbIh8iHx0Z+p
-    \\LHaZcJAog6PFt6eQot2IR+YAIk18U+9e7QfBIpIrvGeXjj2DzLJQPLnMKlt8w7LO
-    \\UrY8ZdchZQKBgBLaGVPhlOmcErGxIsCiT5nrqQ+hn+QRyhddq79OtKJd2V5lkSSx
-    \\dftwH1e2o/vK6GPN/nR5A8bR/54qQ3qtK1GMDDz3W8/ovPfoHH02DMUma3Kw173J
-    \\ToRIucWsd/u/naOp1JYU6mn92+7KicXzIdzL2xSA4sNHD8otYW3XzW37AoGAPHOX
-    \\lU2BGPn+IHjbyQPOcazQAzXwHbR+pNjG/FHgdMtRxTTxU+U+u4Q42TLlG9YqL8UG
-    \\CwBaqzhEuUCpd9E6pS+aJaRBmg2NHWhAifTAx+XzkLFsiGzQlLc7vH6NTuS9vnLJ
-    \\CJwdyxBO4Z2/xW/3aylLcHijx9/KGSelkKfaxiECgYEAr1ur2S1LiYuyATEeuWvm
-    \\/20I03cra7etMUqQl/e62OWqUUVK8oREyYuTpAqFn/QzHZb7T2Io6LO0Z+9IG70w
-    \\FXzbaDWcKT0Sz9eAu6/CCs4GsM8DyuMSMV6NkAR8Xum1JYaVVUN0Fh5t3QTRNh74
-    \\Ihtbl8l4ysfZvOPF0m5cXVw=
+    \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyp549r9FrXbm02Cn
+    \\81gAdAbUzHatPYQWVDIWnQdCMPChRANCAATvUPikzRIA8ryx237GUQRJlf8Qmgod
+    \\QL7gik+5KU6JC4Jc6Q3TijNUYoCauZS0OpAJ2+Z2MduOoZjpMKzNdMKc
     \\-----END PRIVATE KEY-----
 ;
+
+fn handler(_: httpx.tls.Request) anyerror!httpx.tls.Response {
+    return .{ .status = 200, .body = "mutual-hello" };
+}
+
+fn runServer(listener: *httpx.tls.Listener) void {
+    listener.run(handler) catch |err| std.debug.print("server error: {s}\n", .{@errorName(err)});
+}
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -60,25 +44,55 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var tls_listener = try httpx.tls.Listener.init(allocator, io, .{
-        .port = 8448,
-        .defaultIdentity = .{
-            .certChainPem = cert,
-            .privateKeyPem = key,
-        },
+    var listener = try httpx.tls.Listener.init(allocator, io, .{
+        .port = 0,
+        .defaultIdentity = .{ .certChainPem = cert_pem, .privateKeyPem = key_pem },
+        .clientAuth = .required,
+        .clientCaPem = cert_pem,
     });
-    defer tls_listener.deinit();
+    defer listener.deinit();
+    const port = listener.localPort();
+    const th = try std.Thread.spawn(.{}, runServer, .{&listener});
+    defer th.join();
+    defer listener.stop();
 
-    std.debug.print("TLS listener initialized on port {d}, config verified\n", .{tls_listener.localPort()});
-}
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
 
-fn runServer(listener: *httpx.tls.Listener) void {
-    listener.run(handleRequest) catch |err| std.debug.print("TLS server error: {s}\n", .{@errorName(err)});
-}
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://127.0.0.1:{d}/", .{port});
 
-fn handleRequest(_: httpx.tls.Request) anyerror!httpx.tls.Response {
-    return .{
-        .status = 200,
-        .body = "Hello from mTLS server!",
-    };
+    // 1. Client WITH a trusted certificate: full HTTPS over mTLS.
+    {
+        var res = try client.get(url, .{
+            .tls = .{
+                .verify = .caBundle,
+                .caPem = cert_pem,
+                .clientCertPem = cert_pem,
+                .clientKeyPem = key_pem,
+            },
+            .timeoutMs = 15_000,
+        });
+        defer res.deinit();
+        if (res.status != 200) return error.UnexpectedStatus;
+        if (std.mem.indexOf(u8, res.body, "mutual-hello") == null) return error.UnexpectedBody;
+        std.debug.print("mTLS HTTPS: status={d} mutual-hello present\n", .{res.status});
+    }
+
+    // 2. Client WITHOUT a certificate: rejected during the handshake.
+    {
+        if (client.get(url, .{
+            .tls = .{ .verify = .caBundle, .caPem = cert_pem },
+            .timeoutMs = 15_000,
+        })) |res| {
+            var r = res;
+            r.deinit();
+            std.debug.print("UNEXPECTED: empty-cert request served\n", .{});
+            return error.UnexpectedSuccess;
+        } else |_| {
+            std.debug.print("mTLS enforcement: empty-cert client rejected\n", .{});
+        }
+    }
+
+    std.debug.print("MTLS DEMO VERIFICATION PASSED\n", .{});
 }

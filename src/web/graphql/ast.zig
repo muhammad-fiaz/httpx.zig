@@ -66,8 +66,8 @@ pub const Directive = struct {
 
 pub const Selection = union(enum) {
     field: Field,
-    fragment_spread: FragmentSpread,
-    inline_fragment: InlineFragment,
+    fragmentSpread: FragmentSpread,
+    inlineFragment: InlineFragment,
 };
 
 pub const Field = struct {
@@ -75,7 +75,7 @@ pub const Field = struct {
     name: []const u8,
     arguments: []const Argument = &.{},
     directives: []const Directive = &.{},
-    selection_set: []const Selection = &.{},
+    selectionSet: []const Selection = &.{},
 };
 
 pub const FragmentSpread = struct {
@@ -86,7 +86,7 @@ pub const FragmentSpread = struct {
 pub const InlineFragment = struct {
     typeCondition: ?[]const u8 = null,
     directives: []const Directive = &.{},
-    selection_set: []const Selection = &.{},
+    selectionSet: []const Selection = &.{},
 };
 
 pub const OperationType = enum {
@@ -98,24 +98,24 @@ pub const OperationType = enum {
 pub const VariableDefinition = struct {
     name: []const u8,
     typeName: []const u8,
-    is_non_null: bool = false,
+    isNonNull: bool = false,
     isList: bool = false,
-    default_value: ?Value = null,
+    defaultValue: ?Value = null,
 };
 
 pub const OperationDefinition = struct {
-    operation_type: OperationType,
+    operationType: OperationType,
     name: ?[]const u8 = null,
-    variable_definitions: []const VariableDefinition = &.{},
+    variableDefinitions: []const VariableDefinition = &.{},
     directives: []const Directive = &.{},
-    selection_set: []const Selection = &.{},
+    selectionSet: []const Selection = &.{},
 };
 
 pub const FragmentDefinition = struct {
     name: []const u8,
     typeCondition: []const u8,
     directives: []const Directive = &.{},
-    selection_set: []const Selection = &.{},
+    selectionSet: []const Selection = &.{},
 };
 
 pub const Definition = union(enum) {

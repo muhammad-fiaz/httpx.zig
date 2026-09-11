@@ -58,23 +58,23 @@ pub const LongHeader = struct {
     scid: []const u8,
     token: []const u8 = "",
     /// Offset of the packet number within the buffer.
-    pn_offset: usize = 0,
+    pnOffset: usize = 0,
     /// Value of the Length varint: PN bytes + protected payload + tag.
     length: u64 = 0,
 };
 
 pub const ShortHeader = struct {
     dcid: []const u8 = "",
-    key_phase: bool = false,
-    pn_offset: usize = 0,
-    pn_len: usize = 0,
+    keyPhase: bool = false,
+    pnOffset: usize = 0,
+    pnLen: usize = 0,
 };
 
-pub fn isLongHeader(first_byte: u8) bool {
-    return (first_byte & 0x80) != 0;
+pub fn isLongHeader(firstByte: u8) bool {
+    return (firstByte & 0x80) != 0;
 }
 
-pub const ParseResult = struct { header: LongHeader, payload_offset: usize };
+pub const ParseResult = struct { header: LongHeader, payloadOffset: usize };
 
 fn take(data: []const u8, offset: *usize, length: u64) HeaderError![]const u8 {
     const len = std.math.cast(usize, length) orelse return HeaderError.TooLarge;
@@ -85,7 +85,7 @@ fn take(data: []const u8, offset: *usize, length: u64) HeaderError![]const u8 {
 }
 
 /// Parses an UNPROTECTED long header starting at data[0]. Slices point
-/// into data; `payload_offset` is where the packet number begins.
+/// into data; `payloadOffset` is where the packet number begins.
 pub fn parseLongHeader(data: []const u8) HeaderError!ParseResult {
     if (data.len < 6) return HeaderError.Truncated;
     const first = data[0];
@@ -102,16 +102,16 @@ pub fn parseLongHeader(data: []const u8) HeaderError!ParseResult {
         .scid = "",
     };
 
-    const dcid_len: usize = data[offset];
+    const dcidLen: usize = data[offset];
     offset += 1;
-    if (dcid_len > 20) return HeaderError.InvalidPacket;
-    h.dcid = try take(data, &offset, dcid_len);
+    if (dcidLen > 20) return HeaderError.InvalidPacket;
+    h.dcid = try take(data, &offset, dcidLen);
 
     if (offset >= data.len) return HeaderError.Truncated;
-    const scid_len: usize = data[offset];
+    const scidLen: usize = data[offset];
     offset += 1;
-    if (scid_len > 20) return HeaderError.InvalidPacket;
-    h.scid = try take(data, &offset, scid_len);
+    if (scidLen > 20) return HeaderError.InvalidPacket;
+    h.scid = try take(data, &offset, scidLen);
 
     if (pkt_type == .initial) {
         const tok_len_raw = try varint.decode(data, &offset);
@@ -122,30 +122,30 @@ pub fn parseLongHeader(data: []const u8) HeaderError!ParseResult {
     h.length = length_raw;
 
     // Packet number sits AFTER the Length varint.
-    h.pn_offset = offset;
+    h.pnOffset = offset;
 
     // Retry/VN have no Length/PN; this parser handles Initial/0RTT/Handshake.
     if (pkt_type == .retry) return HeaderError.InvalidPacket;
 
-    return .{ .header = h, .payload_offset = offset };
+    return .{ .header = h, .payloadOffset = offset };
 }
 
 /// Parses an UNPROTECTED short header (1-RTT) starting at data[0].
-/// `dcid_len` is the length of the destination CID expected for this connection (0..20).
-pub fn parseShortHeader(data: []const u8, dcid_len: usize) HeaderError!ShortHeader {
-    if (dcid_len > 20) return HeaderError.InvalidPacket;
-    if (data.len < 1 + dcid_len) return HeaderError.Truncated;
+/// `dcidLen` is the length of the destination CID expected for this connection (0..20).
+pub fn parseShortHeader(data: []const u8, dcidLen: usize) HeaderError!ShortHeader {
+    if (dcidLen > 20) return HeaderError.InvalidPacket;
+    if (data.len < 1 + dcidLen) return HeaderError.Truncated;
     const first = data[0];
     if ((first & 0x80) != 0) return HeaderError.InvalidPacket;
     if ((first & 0x40) == 0) return HeaderError.InvalidPacket;
-    const key_phase = (first & 0x04) != 0;
-    const pn_len: usize = @as(usize, first & 0x03) + 1;
-    if (data.len < 1 + dcid_len + pn_len) return HeaderError.Truncated;
+    const keyPhase = (first & 0x04) != 0;
+    const pnLen: usize = @as(usize, first & 0x03) + 1;
+    if (data.len < 1 + dcidLen + pnLen) return HeaderError.Truncated;
     return .{
-        .dcid = data[1..][0..dcid_len],
-        .key_phase = key_phase,
-        .pn_offset = 1 + dcid_len,
-        .pn_len = pn_len,
+        .dcid = data[1..][0..dcidLen],
+        .keyPhase = keyPhase,
+        .pnOffset = 1 + dcidLen,
+        .pnLen = pnLen,
     };
 }
 
@@ -157,24 +157,24 @@ pub const BuildInfo = struct {
     dcid: []const u8,
     scid: []const u8,
     token: []const u8 = "",
-    pn_len: usize,
+    pnLen: usize,
     /// Payload bytes INCLUDING the AEAD tag (Length field value minus pn).
-    protected_payload_len: usize,
+    protectedPayloadLen: usize,
 };
 
 /// Writes the long header up to (not including) the packet number.
 /// Returns the number of header bytes written; the caller appends
-/// pn_len packet-number bytes then the protected payload.
+/// pnLen packet-number bytes then the protected payload.
 pub fn writeLongHeader(buf: []u8, info: BuildInfo) HeaderError!usize {
     if (info.dcid.len > 20 or info.scid.len > 20) return HeaderError.InvalidPacket;
-    if (info.pn_len == 0 or info.pn_len > 4) return HeaderError.InvalidPacket;
+    if (info.pnLen == 0 or info.pnLen > 4) return HeaderError.InvalidPacket;
     const token_varint_len = if (info.type == .initial) varintWidth(info.token.len) else 0;
-    const length_value = std.math.add(usize, info.protected_payload_len, info.pn_len) catch return HeaderError.TooLarge;
+    const length_value = std.math.add(usize, info.protectedPayloadLen, info.pnLen) catch return HeaderError.TooLarge;
     const needed = 5 + 1 + info.dcid.len + 1 + info.scid.len + token_varint_len + info.token.len + varintWidth(length_value);
     if (buf.len < needed) return HeaderError.BufferTooSmall;
 
     const wt = info.type.wireType(info.version);
-    buf[0] = 0xC0 | (@as(u8, wt) << 4) | (@as(u8, @intCast(info.pn_len - 1)) & 0x03);
+    buf[0] = 0xC0 | (@as(u8, wt) << 4) | (@as(u8, @intCast(info.pnLen - 1)) & 0x03);
     std.mem.writeInt(u32, buf[1..5], info.version, .big);
 
     var pos: usize = 5;
@@ -213,16 +213,16 @@ fn varintWidth(value: usize) usize {
 }
 
 pub const ShortBuildInfo = struct {
-    key_phase: bool = false,
+    keyPhase: bool = false,
     dcid: []const u8,
-    pn_len: usize,
+    pnLen: usize,
 };
 
 /// Writes the short header up to the packet number. Returns bytes written.
 pub fn writeShortHeader(buf: []u8, info: ShortBuildInfo) HeaderError!usize {
-    if (info.dcid.len > 20 or info.pn_len == 0 or info.pn_len > 4) return HeaderError.InvalidPacket;
+    if (info.dcid.len > 20 or info.pnLen == 0 or info.pnLen > 4) return HeaderError.InvalidPacket;
     if (buf.len < 1 + info.dcid.len) return HeaderError.BufferTooSmall;
-    buf[0] = 0x40 | (@as(u8, if (info.key_phase) 1 else 0) << 2) | @as(u8, @intCast(info.pn_len - 1));
+    buf[0] = 0x40 | (@as(u8, if (info.keyPhase) 1 else 0) << 2) | @as(u8, @intCast(info.pnLen - 1));
     var pos: usize = 1;
     @memcpy(buf[pos..][0..info.dcid.len], info.dcid);
     pos += info.dcid.len;
@@ -248,8 +248,8 @@ test "long header write/parse roundtrip with token" {
         .dcid = dcid[0..],
         .scid = scid[0..],
         .token = token,
-        .pn_len = 2,
-        .protected_payload_len = 100,
+        .pnLen = 2,
+        .protectedPayloadLen = 100,
     });
 
     const res = try parseLongHeader(buf[0..n]);
@@ -259,8 +259,8 @@ test "long header write/parse roundtrip with token" {
     try std.testing.expectEqualSlices(u8, scid[0..], res.header.scid);
     try std.testing.expectEqualStrings(token, res.header.token);
     try std.testing.expectEqual(@as(u64, 102), res.header.length);
-    try std.testing.expectEqual(@as(usize, n), res.payload_offset);
-    try std.testing.expectEqual(@as(usize, n), res.header.pn_offset);
+    try std.testing.expectEqual(@as(usize, n), res.payloadOffset);
+    try std.testing.expectEqual(@as(usize, n), res.header.pnOffset);
 }
 
 test "v2 wire type remapping roundtrips" {
@@ -271,8 +271,8 @@ test "v2 wire type remapping roundtrips" {
         .version = 0x6B3343CF,
         .dcid = dcid[0..],
         .scid = "",
-        .pn_len = 1,
-        .protected_payload_len = 10,
+        .pnLen = 1,
+        .protectedPayloadLen = 10,
     });
     // v2 Handshake wire type 3 -> first byte 0b1111_0000.
     try std.testing.expectEqual(@as(u8, 0xF0), buf[0]);
@@ -285,8 +285,8 @@ test "v2 wire type remapping roundtrips" {
 test "short header roundtrip" {
     var buf: [64]u8 = undefined;
     const dcid = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF } ++ [4]u8{ 1, 2, 3, 4 };
-    const n = try writeShortHeader(buf[0..], .{ .key_phase = true, .dcid = dcid[0..], .pn_len = 3 });
-    try std.testing.expectEqual(@as(u8, 0x46), buf[0]); // 0x40 | kp(0x04) | pn_len-1(2)
+    const n = try writeShortHeader(buf[0..], .{ .keyPhase = true, .dcid = dcid[0..], .pnLen = 3 });
+    try std.testing.expectEqual(@as(u8, 0x46), buf[0]); // 0x40 | kp(0x04) | pnLen-1(2)
     try std.testing.expectEqual(@as(usize, 9), n);
     try std.testing.expectEqualSlices(u8, dcid[0..], buf[1..n]);
 }
@@ -299,8 +299,8 @@ test "truncated headers rejected cleanly at every cut" {
         .dcid = &.{ 1, 2, 3 },
         .scid = &.{},
         .token = "t",
-        .pn_len = 1,
-        .protected_payload_len = 5,
+        .pnLen = 1,
+        .protectedPayloadLen = 5,
     });
     for (0..n) |cut| {
         try std.testing.expectError(

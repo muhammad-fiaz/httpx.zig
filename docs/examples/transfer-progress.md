@@ -17,7 +17,8 @@ const Observer = struct {
 };
 
 var observer = Observer{ .taskId = 101 };
-_ = try client.download(url, "downloads/out.bin", .{
+_ = try client.download(url, .{
+    .path = "downloads/out.bin",
     .progress = .custom, // .auto / .enabled / .disabled / .quiet
     .onProgress = Observer.onProgress,
     .userData = &observer,

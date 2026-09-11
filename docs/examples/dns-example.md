@@ -8,7 +8,7 @@ A normal HTTPX user does not need to understand low-level resolver construction,
 
 ## Basic Example
 
-The standard way to resolve a hostname is via `client.resolve(host, port, .{})`:
+The standard way to resolve a hostname is via `client.resolve(host, .{ .port = 443 })`:
 
 ```zig
 const std = @import("std");
@@ -25,7 +25,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // Resolve hostname to candidate addresses
-    var addresses = try client.resolve("httpbun.com", 443, .{});
+    var addresses = try client.resolve("httpbun.com", .{ .port = 443 });
     defer addresses.deinit();
 
     // Iterate through returned addresses
@@ -45,13 +45,15 @@ By default, resolution returns dual-stack addresses in system order. You can res
 
 ```zig
 // Force IPv4 only
-var v4 = try client.resolve("httpbun.com", 443, .{
+var v4 = try client.resolve("httpbun.com", .{
+    .port = 443,
     .family = .ipv4,
 });
 defer v4.deinit();
 
 // Force IPv6 only
-var v6 = try client.resolve("httpbun.com", 443, .{
+var v6 = try client.resolve("httpbun.com", .{
+    .port = 443,
     .family = .ipv6,
 });
 defer v6.deinit();
@@ -87,8 +89,9 @@ defer client.deinit();
 To bypass the cache for a single query:
 
 ```zig
-var fresh = try client.resolve("httpbun.com", 443, .{
-    .use_cache = false,
+var fresh = try client.resolve("httpbun.com", .{
+    .port = 443,
+    .useCache = false,
 });
 defer fresh.deinit();
 ```

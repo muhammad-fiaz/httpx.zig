@@ -10,17 +10,18 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const alpn = @import("alpn.zig");
-pub const cert_mod = @import("certificate.zig");
-pub const key_mod = @import("key.zig");
-pub const trust_mod = @import("trust_store.zig");
-pub const errors_mod = @import("errors.zig");
+pub const certMod = @import("certificate.zig");
+pub const keyMod = @import("key.zig");
+pub const trustMod = @import("trust_store.zig");
+pub const errorsMod = @import("errors.zig");
+pub const sessionMod = @import("session.zig");
 
-pub const CertificateChain = cert_mod.CertificateChain;
-pub const X509Certificate = cert_mod.X509Certificate;
-pub const PrivateKey = key_mod.PrivateKey;
-pub const TrustStore = trust_mod.TrustStore;
-pub const TrustMode = trust_mod.TrustMode;
-pub const TlsError = errors_mod.TlsError;
+pub const CertificateChain = certMod.CertificateChain;
+pub const X509Certificate = certMod.X509Certificate;
+pub const PrivateKey = keyMod.PrivateKey;
+pub const TrustStore = trustMod.TrustStore;
+pub const TrustMode = trustMod.TrustMode;
+pub const TlsError = errorsMod.TlsError;
 
 const fs_mod = @import("../../utils/fs.zig");
 
@@ -66,6 +67,13 @@ pub const ServerConfig = struct {
     /// Whether to allow cleartext HTTP requests on the TLS port (e.g. for dev/dual-mode).
     /// Defaults to false (strict HTTPS: plain HTTP gets 400 Bad Request).
     allowPlainHttp: bool = false,
+    /// Session-ticket keys for TLS 1.3 resumption (stateless: no
+    /// per-client storage). Null disables resumption: no tickets are
+    /// issued and PSK offers fall back to full handshakes. Generate with
+    /// `TicketKeys.generate()` and rotate periodically via `rotate`.
+    ticketKeys: ?sessionMod.TicketKeys = null,
+    /// Lifetime (seconds) stamped into issued session tickets.
+    ticketLifetimeSecs: u32 = 7200,
 
     pub fn init(allocator: Allocator) ServerConfig {
         return .{ .allocator = allocator };
@@ -85,7 +93,7 @@ pub const ServerConfig = struct {
     pub fn loadCertificates(self: *ServerConfig, certPemOrPath: []const u8, keyPemOrPath: []const u8) !void {
         var cert_buf: ?[]u8 = null;
         defer if (cert_buf) |b| self.allocator.free(b);
-        const cert_data = if (std.mem.indexOf(u8, certPemOrPath, "-----BEGIN") != null)
+        const certData = if (std.mem.indexOf(u8, certPemOrPath, "-----BEGIN") != null)
             certPemOrPath
         else blk: {
             cert_buf = try fs_mod.readFileLimited(self.allocator, certPemOrPath, 10 * 1024 * 1024);
@@ -104,8 +112,8 @@ pub const ServerConfig = struct {
             break :blk key_buf.?;
         };
 
-        self.certChain = try cert_mod.parseCertificateChainPem(self.allocator, cert_data);
-        const parsed_key = try key_mod.parsePrivateKeyPem(self.allocator, key_data);
+        self.certChain = try certMod.parseCertificateChainPem(self.allocator, certData);
+        const parsed_key = try keyMod.parsePrivateKeyPem(self.allocator, key_data);
         self.privateKeyDer = parsed_key.der;
     }
 
@@ -142,8 +150,8 @@ pub const ClientConfig = struct {
 };
 
 // Backwards-compatible aliases
-pub const parseCertificatePem = cert_mod.parseCertificateChainPem;
-pub const parsePrivateKeyPem = cert_mod.decodePemBlock;
+pub const parseCertificatePem = certMod.parseCertificateChainPem;
+pub const parsePrivateKeyPem = certMod.decodePemBlock;
 
 test "ServerConfig init and deinit" {
     const a = std.testing.allocator;

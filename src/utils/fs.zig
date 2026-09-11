@@ -7,7 +7,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
-pub const is_win = builtin.os.tag == .windows;
+pub const isWin = builtin.os.tag == .windows;
 
 pub const Stat = struct {
     size: u64,
@@ -15,9 +15,9 @@ pub const Stat = struct {
     isDir: bool,
 };
 
-const c_fs = struct {
-    pub const HANDLE = if (is_win) std.os.windows.HANDLE else c_int;
-    pub const INVALID_HANDLE_VALUE: HANDLE = if (is_win) @ptrFromInt(std.math.maxInt(usize)) else -1;
+const cFs = struct {
+    pub const HANDLE = if (isWin) std.os.windows.HANDLE else c_int;
+    pub const INVALID_HANDLE_VALUE: HANDLE = if (isWin) @ptrFromInt(std.math.maxInt(usize)) else -1;
     pub const BOOL = enum(c_int) { FALSE = 0, TRUE = 1 };
 
     pub const GENERIC_READ: u32 = 0x80000000;
@@ -73,7 +73,7 @@ const c_fs = struct {
         @memcpy(buf[0..path.len], path);
         buf[path.len] = 0;
 
-        if (is_win) {
+        if (isWin) {
             const h = CreateFileA(&buf, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, null);
             if (h == INVALID_HANDLE_VALUE) return null;
             return h;
@@ -90,7 +90,7 @@ const c_fs = struct {
         @memcpy(buf[0..path.len], path);
         buf[path.len] = 0;
 
-        if (is_win) {
+        if (isWin) {
             const h = CreateFileA(&buf, GENERIC_WRITE, FILE_SHARE_READ, null, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, null);
             if (h == INVALID_HANDLE_VALUE) return null;
             return h;
@@ -107,7 +107,7 @@ const c_fs = struct {
     }
 
     pub fn close(h: HANDLE) void {
-        if (is_win) {
+        if (isWin) {
             _ = CloseHandle(h);
         } else {
             _ = std.c.close(h);
@@ -117,21 +117,21 @@ const c_fs = struct {
 
 /// Writes `content` bytes to the file at `path`, replacing existing contents.
 pub fn writeFile(path: []const u8, content: []const u8) !void {
-    if (is_win) {
-        const h = c_fs.openWrite(path) orelse return error.WriteFailed;
-        defer c_fs.close(h);
+    if (isWin) {
+        const h = cFs.openWrite(path) orelse return error.WriteFailed;
+        defer cFs.close(h);
 
         var total_written: usize = 0;
         while (total_written < content.len) {
-            var bytes_written: u32 = 0;
+            var bytesWritten: u32 = 0;
             const to_write: u32 = @intCast(@min(content.len - total_written, std.math.maxInt(u32)));
-            if (c_fs.WriteFile(h, content[total_written..].ptr, to_write, &bytes_written, null) == .FALSE) return error.WriteFailed;
-            if (bytes_written == 0) return error.WriteFailed;
-            total_written += bytes_written;
+            if (cFs.WriteFile(h, content[total_written..].ptr, to_write, &bytesWritten, null) == .FALSE) return error.WriteFailed;
+            if (bytesWritten == 0) return error.WriteFailed;
+            total_written += bytesWritten;
         }
     } else {
-        const fd = c_fs.openWrite(path) orelse return error.WriteFailed;
-        defer c_fs.close(fd);
+        const fd = cFs.openWrite(path) orelse return error.WriteFailed;
+        defer cFs.close(fd);
 
         var total_written: usize = 0;
         while (total_written < content.len) {
@@ -152,31 +152,31 @@ pub fn readFileLimited(allocator: Allocator, path: []const u8, maxBytes: usize) 
     const buf = try allocator.alloc(u8, @intCast(stat.size));
     errdefer allocator.free(buf);
 
-    if (is_win) {
-        const h = c_fs.openRead(path) orelse return error.FileNotFound;
-        defer c_fs.close(h);
+    if (isWin) {
+        const h = cFs.openRead(path) orelse return error.FileNotFound;
+        defer cFs.close(h);
 
-        var total_read: usize = 0;
-        while (total_read < buf.len) {
+        var totalRead: usize = 0;
+        while (totalRead < buf.len) {
             var bytes_read: u32 = 0;
-            const to_read: u32 = @intCast(@min(buf.len - total_read, std.math.maxInt(u32)));
-            if (c_fs.ReadFile(h, buf[total_read..].ptr, to_read, &bytes_read, null) == .FALSE) return error.ReadFailed;
+            const to_read: u32 = @intCast(@min(buf.len - totalRead, std.math.maxInt(u32)));
+            if (cFs.ReadFile(h, buf[totalRead..].ptr, to_read, &bytes_read, null) == .FALSE) return error.ReadFailed;
             if (bytes_read == 0) break;
-            total_read += bytes_read;
+            totalRead += bytes_read;
         }
-        if (total_read < buf.len) return error.UnexpectedEof;
+        if (totalRead < buf.len) return error.UnexpectedEof;
     } else {
-        const fd = c_fs.openRead(path) orelse return error.FileNotFound;
-        defer c_fs.close(fd);
+        const fd = cFs.openRead(path) orelse return error.FileNotFound;
+        defer cFs.close(fd);
 
-        var total_read: usize = 0;
-        while (total_read < buf.len) {
-            const rc = std.c.read(fd, buf[total_read..].ptr, buf.len - total_read);
+        var totalRead: usize = 0;
+        while (totalRead < buf.len) {
+            const rc = std.c.read(fd, buf[totalRead..].ptr, buf.len - totalRead);
             if (rc < 0) return error.ReadFailed;
             if (rc == 0) break;
-            total_read += @intCast(rc);
+            totalRead += @intCast(rc);
         }
-        if (total_read < buf.len) return error.UnexpectedEof;
+        if (totalRead < buf.len) return error.UnexpectedEof;
     }
 
     return buf;
@@ -196,10 +196,10 @@ pub fn statPath(io: ?std.Io, path: []const u8) ?Stat {
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
 
-    if (is_win) {
+    if (isWin) {
         const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF;
         const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x00000010;
-        const attrs = c_fs.GetFileAttributesA(&buf);
+        const attrs = cFs.GetFileAttributesA(&buf);
         if (attrs == INVALID_FILE_ATTRIBUTES) return null;
         const isDirectory = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
@@ -211,14 +211,14 @@ pub fn statPath(io: ?std.Io, path: []const u8) ?Stat {
             };
         }
 
-        const h = c_fs.openRead(path) orelse return null;
-        defer c_fs.close(h);
+        const h = cFs.openRead(path) orelse return null;
+        defer cFs.close(h);
 
         var size: i64 = 0;
-        if (c_fs.GetFileSizeEx(h, &size) == .FALSE) return null;
+        if (cFs.GetFileSizeEx(h, &size) == .FALSE) return null;
 
         var ft: std.os.windows.FILETIME = undefined;
-        if (c_fs.GetFileTime(h, null, null, &ft) == .FALSE) return null;
+        if (cFs.GetFileTime(h, null, null, &ft) == .FALSE) return null;
 
         const ft_u64: u64 = (@as(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
         const windows_epoch_diff: i128 = 116444736000000000;
@@ -301,8 +301,8 @@ pub fn deleteFile(path: []const u8) !void {
     @memcpy(buf[0..path.len], path);
     buf[path.len] = 0;
 
-    if (is_win) {
-        if (c_fs.DeleteFileA(&buf) == .FALSE) return error.DeleteFailed;
+    if (isWin) {
+        if (cFs.DeleteFileA(&buf) == .FALSE) return error.DeleteFailed;
     } else {
         if (std.c.unlink(&buf) != 0) return error.DeleteFailed;
     }

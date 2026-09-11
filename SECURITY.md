@@ -8,7 +8,7 @@
 | 0.1.x   | :warning: migrate to 0.2.x |
 | < 0.1.5 | :x: |
 
-v0.2.0 is the production-grade release for long-term use. Versions in the
+v0.2.0 brings major new changes. Versions in the
 0.1.x line are legacy: please migrate to 0.2.x for better performance,
 stronger security defaults, and ongoing fixes. Versions below 0.1.5 are
 considered end-of-life and will not receive security fixes or updates.

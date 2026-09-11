@@ -21,8 +21,10 @@ HTTP/2 support is validated across Linux, Windows, and macOS targets:
 
 ## Features
 
-- **High-level Client Runtime** - `Client` can execute requests over HTTP/2 when `http2_enabled = true`
-- **High-level Server Runtime** - `Server` can serve routes over HTTP/2 when `http2_enabled = true`
+- **High-level Client Runtime** - `Client` negotiates HTTP/2 over TLS via ALPN
+  when `http2 = true` (default `false`; HTTP/1.x default `true`)
+- **High-level Server Runtime** - `Server` serves HTTP/2 when `http2 = true`
+  (default `true`) and the TLS handshake negotiates `h2`
 - **HPACK Header Compression** - Full RFC 7541 implementation with static and dynamic tables
 - **Stream Multiplexing** - Multiple concurrent streams over a single connection
 - **Flow Control** - Per-stream and connection-level flow control with WINDOW_UPDATE
@@ -32,10 +34,12 @@ HTTP/2 support is validated across Linux, Windows, and macOS targets:
 - **SETTINGS Enforcement** - Peer `MAX_CONCURRENT_STREAMS`, `MAX_FRAME_SIZE`, and `INITIAL_WINDOW_SIZE` values are parsed and enforced
 - **GOAWAY/RST_STREAM** - Graceful connection shutdown and stream cancellation with proper error codes
 - **HPACK Security** - `Without Indexing` / `Never Indexed` representations for volatile headers like `Authorization` and `Cookie`
-- **Trailer Support** - Server sends trailers via `sendHttp2Trailers()`; client decodes trailers after END_STREAM
+- **Trailer Support** - Trailers are parsed by the session layer; the
+  one-shot `Client`/`Server` API does not surface them yet (see below)
 - **Connection Preface Timeout** - Detects missing initial SETTINGS frame from peer
 - **ALPN Negotiation** - Client and server advertise `["h2", "http/1.1"]` during TLS handshake
-- **Connection Pooling** - HTTP/2 connections are pooled and reused across requests
+- **Connection Pooling** - HTTP/1.x keep-alive connections are pooled and
+  reused; HTTP/2 connections are currently per-request (no H2 pool yet)
 
 ## High-level Client Usage
 
@@ -45,21 +49,21 @@ Enable HTTP/2 in `ClientConfig`:
     const io = std.Io.Threaded.global_single_threaded.io();
 var client = httpx.Client.init(allocator, io, .{
     .http2 = true,
-    .http2_settings = .{
-        .max_frame_size = 16 * 1024,
-        .max_concurrent_streams = 100,
-    },
 });
 defer client.deinit();
 
 var res = try client.get("https://example.com/", .{});
 defer res.deinit();
 
-std.debug.print("version={s} status={d}\n", .{ res.version.toString(), res.status.code });
+std.debug.print("version={s} status={d}\n", .{ res.version.wireNameResolved(), res.status });
 ```
 
 ::: tip TLS & ALPN Protocol Negotiation
-httpx.zig natively performs ALPN protocol negotiation via a post-handshake HTTP/2 preface probe on TLS connections when `http2 = true`. If the server supports HTTP/2, the connection uses HTTP/2; otherwise it cleanly falls back to HTTP/1.1 without dropping data.
+Explicit `.http2` for an `https://` URL runs the native TLS client:
+it offers `h2` via ALPN, verifies the server chain and hostname, and
+fails loudly with `AlpnNegotiationFailed` when the server does not
+select `h2` — never silently downgraded. The std TLS wrapper (no ALPN
+hook) remains the transport for plain HTTPS/1.1 requests.
 :::
 
 ## High-level Server Usage
@@ -97,57 +101,49 @@ var gpa: std.heap.DebugAllocator(.{}) = .init;
 defer _ = gpa.deinit();
 const allocator = gpa.allocator();
 
-// Initialize HPACK context
-var ctx = httpx.HpackContext.init(allocator);
-defer ctx.deinit();
+// Encoder with a dynamic table (peer SETTINGS_HEADER_TABLE_SIZE via applySettingsSize).
+var enc = httpx.http2.hpack.Encoder.init(allocator);
+defer enc.deinit();
 
-// Define headers
-const headers = [_]httpx.hpack.HeaderEntry{
-    .{ .name = ":method", .value = "GET" },
-    .{ .name = ":path", .value = "/api/users" },
-    .{ .name = ":scheme", .value = "https" },
-    .{ .name = ":authority", .value = "api.example.com" },
-    .{ .name = "accept", .value = "application/json" },
-};
+var block = std.ArrayList(u8).empty;
+defer block.deinit(allocator);
 
-// Encode using HPACK
-const encoded = try httpx.hpack.encodeHeaders(&ctx, &headers, allocator);
-defer allocator.free(encoded);
+// Incremental indexing stores reusable fields; never-indexed keeps secrets
+// like Authorization/Cookie out of the dynamic table (see HPACK Security below).
+try enc.encode(&block, ":method", "GET", .incremental, false);
+try enc.encode(&block, ":path", "/api/users", .incremental, false);
+try enc.encode(&block, "accept", "application/json", .incremental, false);
+try enc.encode(&block, "authorization", "Bearer <token>", .never, false);
 
-std.debug.print("Encoded {d} headers into {d} bytes\n", .{headers.len, encoded.len});
+std.debug.print("Encoded 4 headers into {d} bytes\n", .{block.items.len});
 ```
 
 ### Decoding Headers
 
 ```zig
-var decode_ctx = httpx.HpackContext.init(allocator);
-defer decode_ctx.deinit();
+var dec = httpx.http2.hpack.Decoder.init(allocator);
+defer dec.deinit();
 
-const decoded = try httpx.hpack.decodeHeaders(&decode_ctx, encoded, allocator);
+const res = try dec.decode(block.items);
 defer {
-    for (decoded) |h| {
-        allocator.free(h.name);
-        allocator.free(h.value);
+    for (res.fields) |f| {
+        allocator.free(f.name);
+        allocator.free(f.value);
     }
-    allocator.free(decoded);
+    allocator.free(res.fields);
 }
 
-for (decoded) |h| {
+for (res.fields) |h| {
     std.debug.print("{s}: {s}\n", .{ h.name, h.value });
 }
+// res.totalSize tracks the decompressed list size for
+// SETTINGS_MAX_HEADER_LIST_SIZE enforcement.
 ```
 
-### Integer Encoding (RFC 7541 Section 5.1)
-
-```zig
-// Encode integer with prefix
-var buf: [10]u8 = undefined;
-const len = try httpx.hpack.encodeInteger(1337, 5, &buf);
-
-// Decode integer
-const result = try httpx.hpack.decodeInteger(buf[0..len], 5);
-std.debug.print("Value: {d}\n", .{result.value});
-```
+Integer coding (RFC 7541 Section 5.1) and Huffman coding live in
+`src/protocols/common/integer.zig` and `src/protocols/common/huffman.zig`;
+the RFC 7541 Appendix C vectors are covered by unit tests in
+`src/protocols/http2/hpack.zig`.
 
 ## Stream Management
 
@@ -156,13 +152,11 @@ HTTP/2 uses streams to multiplex requests/responses.
 ### Creating Streams
 
 ```zig
-// Client-side: uses odd stream IDs (1, 3, 5, ...)
-var manager = httpx.StreamManager.init(allocator, true);
-defer manager.deinit();
-
-const stream1 = try manager.createStream(); // ID: 1
-const stream2 = try manager.createStream(); // ID: 3
-const stream3 = try manager.createStream(); // ID: 5
+// Streams are owned by httpx.http2.Session; client-initiated
+// streams use odd IDs (1, 3, 5, ...). The per-stream state machine is
+// httpx.http2.Stream (states: idle/reserved/open/half-closed/closed).
+var st = httpx.http2.Stream.init(allocator, 1);
+defer st.deinit();
 ```
 
 ### Stream States
@@ -201,28 +195,32 @@ HTTP/2 streams follow a state machine:
 ```
 
 ```zig
-const stream = try manager.createStream();
+var stream = httpx.http2.Stream.init(allocator, 1);
+defer stream.deinit();
 
 // Open stream (sending HEADERS)
-try stream.open();
+try stream.onSendHeaders(false);
 
 // Send END_STREAM flag
-stream.sendEndStream(); // State: half_closed_local
+try stream.onSendData(true); // State: half-closed (local)
 
-// Receive END_STREAM flag
-stream.receiveEndStream(); // State: closed
+// Receive END_STREAM flag -> closed
+try stream.onRecvData(true);
 ```
 
 ### Stream Priority
 
-```zig
-const priority = httpx.StreamPriority{
-    .dependency = 0, // Root stream
-    .weight = 32,    // 1-256
-    .exclusive = false,
-};
+PRIORITY data travels in `httpx.http2.frame.Priority`
+(`exclusive`, `streamDep`, `weight`); HEADERS frames can also carry it
+(see `httpx.http2.frame.Headers`). Priority is advisory — the runtime
+currently favors correctness (fair delivery) over strict weighted scheduling:
 
-stream.priority = priority;
+```zig
+const prio = httpx.http2.frame.Priority{
+    .exclusive = false,
+    .streamDep = 0, // Root stream
+    .weight = 32,
+};
 ```
 
 ## HTTP/2 Framing
@@ -244,14 +242,17 @@ Every HTTP/2 frame has a 9-byte header:
 ```
 
 ```zig
-const frame_header = httpx.Http2FrameHeader{
-    .length = 100,
-    .frame_type = .headers,
-    .flags = 0x04, // END_HEADERS
-    .stream_id = 1,
-};
+// Parse a 9-byte frame header from the wire.
+var hdr_buf: [httpx.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
+// ... read 9 bytes into hdr_buf ...
+const hdr = httpx.http2.FrameHeader.parse(&hdr_buf);
+// hdr.length (u24), hdr.frameType (.headers/.data/...), hdr.flags, hdr.streamId (u31)
 
-const serialized = frame_header.serialize(); // 9 bytes
+// Frame payload shapes live in httpx.http2.frame (Data, Headers, RstStream,
+// Ping, Goaway, WindowUpdate, ...); connection and stream state machines in
+// httpx.http2.connection (Session) and httpx.http2.stream (Stream).
+// Most applications never touch these: use httpx.Server / httpx.Client or
+// the examples below.
 ```
 
 ### Frame Types
@@ -271,31 +272,20 @@ const serialized = frame_header.serialize(); // 9 bytes
 
 ### Building Frame Payloads
 
+Frame payloads are plain structs in `httpx.http2.frame`:
+
 ```zig
-// RST_STREAM frame
-const rst_payload = httpx.stream.buildRstStreamPayload(.no_error);
+// RST_STREAM carries an error code (see httpx.http2.ErrorCode).
+const rst = httpx.http2.frame.RstStream{ .errorCode = @intFromEnum(httpx.http2.ErrorCode.cancel) };
 
-// WINDOW_UPDATE frame
-const window_update = httpx.stream.buildWindowUpdatePayload(32768);
+// WINDOW_UPDATE carries a 31-bit increment.
+const wu = httpx.http2.frame.WindowUpdate{ .increment = 32768 };
 
-// GOAWAY frame
-const goaway = try httpx.stream.buildGoawayPayload(0, .no_error, null, allocator);
-defer allocator.free(goaway);
+// PING carries 8 opaque bytes.
+const ping = httpx.http2.frame.Ping{ .opaqueData = .{ 1, 2, 3, 4, 5, 6, 7, 8 } };
 
-// PING frame
-const ping = httpx.stream.buildPingPayload(.{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 });
-
-// HEADERS frame with HPACK-encoded headers
-const headers_result = try httpx.stream.buildHeadersFramePayload(
-    &stream_manager,
-    &[_]httpx.hpack.HeaderEntry{
-        .{ .name = ":method", .value = "POST" },
-        .{ .name = ":path", .value = "/api/data" },
-    },
-    null, // No priority
-    allocator,
-);
-defer allocator.free(headers_result.payload);
+// HEADERS bodies are HPACK blocks produced with httpx.http2.hpack.Encoder
+// (see HPACK section above).
 ```
 
 ## Flow Control
@@ -304,28 +294,23 @@ HTTP/2 uses flow control to prevent overwhelming receivers.
 
 ### Window Sizes
 
+Per-stream windows live on `httpx.http2.Stream`
+(`sendWindow`/`recvWindow`, default 65535 per RFC 7540); the connection-level
+window lives on `httpx.http2.Session`. The runtime enforces them
+automatically — the snippet below shows the accounting shape:
+
 ```zig
 // Default window size: 65535 bytes (RFC 7540)
-std.debug.print("Stream send window: {d}\n", .{stream.send_window});
-std.debug.print("Connection send window: {d}\n", .{manager.connection_send_window});
+std.debug.print("Stream send window: {d}\n", .{stream.sendWindow});
 
-// After sending data
-const data_size: i32 = 16384;
-stream.send_window -= data_size;
-manager.connection_send_window -= data_size;
-
-// After receiving WINDOW_UPDATE
-const increment: i32 = 32768;
-stream.send_window += increment;
-manager.connection_send_window += increment;
+// After sending data / receiving WINDOW_UPDATE the session adjusts the
+// windows and returns an error on flow-control violations.
 ```
 
 ### Parsing WINDOW_UPDATE
 
-```zig
-const wu_payload = httpx.stream.buildWindowUpdatePayload(65535);
-const parsed_increment = try httpx.stream.parseWindowUpdatePayload(&wu_payload);
-```
+`WINDOW_UPDATE` bodies decode to `httpx.http2.frame.WindowUpdate{ .increment }`
+(a 31-bit value; zero is a connection error of type `FLOW_CONTROL_ERROR`).
 
 ## Error Codes
 
@@ -350,83 +335,60 @@ HTTP/2 defines error codes for RST_STREAM and GOAWAY frames:
 
 ## CONTINUATION Frames
 
-When header blocks exceed `MAX_FRAME_SIZE`, httpx.zig automatically splits them across HEADERS + CONTINUATION frames:
-
-```zig
-// Headers are automatically split when they exceed max_frame_size
-const frames = try httpx.stream.buildHeadersAndContinuations(
-    &stream_manager,
-    1, // stream_id
-    &headers,
-    null, // priority (optional)
-    16384, // max_frame_size
-    false, // end_stream
-    allocator,
-);
-defer allocator.free(frames);
-// frames is a flat buffer of complete HTTP/2 frames ready to write
-```
+When header blocks exceed `MAX_FRAME_SIZE`, `httpx.http2.Session`
+automatically splits them across HEADERS + CONTINUATION frames on send
+(`sendHeaders`/`sendHeaderBlock`) and reassembles them on receipt before
+invoking the header callback — applications only ever see complete blocks.
 
 ## SETTINGS Enforcement
 
-Peer SETTINGS values are parsed and enforced:
+Peer SETTINGS values are stored on the session and enforced:
 
 ```zig
-// Apply peer settings
-const settings = httpx.Http2Settings{
-    .max_concurrent_streams = 100,
-    .max_frame_size = 16384,
-    .initial_window_size = 65535,
-};
-try manager.applyPeerSettings(settings);
+// Our limits (sent to the peer) and the peer's limits (enforced locally).
+session.localSettings.maxConcurrentStreams = 100;
+session.localSettings.maxFrameSize = 16384;
 
-// Check before opening streams
-if (!manager.canOpenStream()) {
-    std.debug.print("Max concurrent streams reached\n", .{});
-}
-
-// Validate frame sizes
-manager.validateFrameSize(frame_length) catch |err| {
-    std.debug.print("Frame too large for peer: {}\n", .{err});
-};
+// The HPACK encoder tracks the peer's header table size:
+// encoder.applySettingsSize(peer_header_table_size) on SETTINGS receipt.
 ```
+
+Oversized frames, too many concurrent streams, and unknown SETTINGS
+identifiers are rejected with connection errors (`FRAME_SIZE_ERROR` /
+`PROTOCOL_ERROR`); see `httpx.http2.frame.validateSetting.
 
 ## GOAWAY and RST_STREAM
 
-Both sending and receiving are supported:
+Both sending and receiving are supported via the session:
 
 ```zig
-// Build GOAWAY frame for clean shutdown
-const goaway = try httpx.stream.buildGoawayFrame(
-    last_stream_id,
-    .no_error,
-    "server shutting down",
-    allocator,
-);
-defer allocator.free(goaway);
+// RST_STREAM a single stream (e.g. cancel).
+try session.sendRstStream(1, .cancel);
 
-// Build RST_STREAM frame to cancel a specific stream
-const rst = httpx.stream.buildRstStreamFrame(1, .cancel);
+// Connection-level shutdown (GOAWAY + debug data).
+try session.sendConnectionClose(.no_error, "server shutting down");
 ```
+
+`ErrorCode` variants live in `httpx.http2` (`.no_error`,
+`.protocol_error`, `.cancel`, ...).
 
 ## HPACK Security: Without Indexing / Never Indexed
 
 For volatile headers like `Authorization` and `Cookie`, use non-indexing representations to prevent HPACK bomb attacks:
 
 ```zig
+var enc = httpx.http2.hpack.Encoder.init(allocator);
+defer enc.deinit();
+
 // Without Indexing: don't add to dynamic table
 var out = std.ArrayList(u8).empty;
 defer out.deinit(allocator);
-try httpx.hpack.encodeHeaderWithoutIndexing(
-    null, "Authorization", "Bearer token123", allocator, &out,
-);
+try enc.encode(&out, "Authorization", "Bearer token123", .without, false);
 
-// Never Indexed: explicitly tell decoder to never index
+// Never Indexed: explicitly tell the decoder to never index
 var out2 = std.ArrayList(u8).empty;
 defer out2.deinit(allocator);
-try httpx.hpack.encodeHeaderNeverIndexed(
-    null, "Cookie", "session=abc123", allocator, &out2,
-);
+try enc.encode(&out2, "Cookie", "session=abc123", .never, false);
 ```
 
 ::: tip Security Note
@@ -435,20 +397,11 @@ Using incremental indexing for `Authorization` or `Cookie` headers can pollute t
 
 ## Trailer Support
 
-Servers can send HTTP/2 trailers after the response body:
-
-```zig
-fn handler(ctx: *httpx.Context) anyerror!httpx.Response {
-    var resp = ctx.text("hello");
-    // Send trailers after the response body
-    try resp.sendHttp2Trailers(&.{
-        .{ "x-checksum", "abc123" },
-    });
-    return resp;
-}
-```
-
-Client receives trailers in the `Response.trailers` field after the response body is fully read.
+HTTP/2 trailers (HEADERS after DATA with END_STREAM) are parsed by
+`httpx.http2.Session` like any other header block. The
+high-level `httpx.Server`/`httpx.Client` one-shot API does not yet surface
+trailers — use the `httpx.http2.transport` stream APIs directly if you need
+them (see `examples/http2-client.zig` for the runtime path).
 
 ## Connection Preface Timeout
 
@@ -456,15 +409,11 @@ Both client and server detect if the peer never sends its initial SETTINGS frame
 
 ## Running the Example
 
-Run the low-level protocol, high-level runtime, and advanced HTTP/2 examples with:
+Run the client and multiplexing examples with:
 
 ```bash
-zig build run-all-http2_example
-./zig-out/bin/http2_example
-
-zig build run-all-http2_client_runtime
-zig build run-all-http2_server_runtime
-zig build run-all-http2_advanced
+zig build run-http2-client
+zig build run-http2-multiplex
 ```
 
 ## See Also

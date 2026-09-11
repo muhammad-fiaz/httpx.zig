@@ -19,17 +19,18 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
-    // API routes take precedence
-    server.get("/api/status", struct {
-        fn handle(ctx: *httpx.Context) !void {
-            try ctx.json(.{ .status = "ok" });
-        }
-    }.handle);
+    // API routes take precedence (register code routes before the SPA mount)
+    try server.get("/api/status", statusHandler);
 
     // SPA fallback: serves existing files from ./dist, or falls back to index.html
     try server.spa("/", "./dist");
 
     server.run();
+}
+
+fn statusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    _ = ctx;
+    return .{ .status = 200, .body = "{\"status\":\"ok\"}", .contentType = "application/json" };
 }
 ```
 

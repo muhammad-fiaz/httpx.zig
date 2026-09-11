@@ -245,36 +245,36 @@ pub fn mount(
     }
 
     if (cfg.openapi.enabled and st.openapiRoute.len > 0) {
-        try router.addMetaWithData(.GET, st.openapiRoute, openApiHandler, internal_meta, st);
+        try router.add(.GET, st.openapiRoute, openApiHandler, .{ .meta = internal_meta, .userData = st });
     }
     if (st.swaggerRoute) |route| {
-        try router.addMetaWithData(.GET, route, swaggerPageHandler, internal_meta, st);
+        try router.add(.GET, route, swaggerPageHandler, .{ .meta = internal_meta, .userData = st });
         for (assets.swaggerFiles) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
-            try router.addMeta(.GET, full, swaggerAssetHandler, internal_meta);
+            try router.add(.GET, full, swaggerAssetHandler, .{ .meta = internal_meta });
         }
     }
     if (st.redocRoute) |route| {
-        try router.addMetaWithData(.GET, route, redocPageHandler, internal_meta, st);
+        try router.add(.GET, route, redocPageHandler, .{ .meta = internal_meta, .userData = st });
         for (assets.redocFiles) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
-            try router.addMeta(.GET, full, redocAssetHandler, internal_meta);
+            try router.add(.GET, full, redocAssetHandler, .{ .meta = internal_meta });
         }
     }
     if (st.scalarRoute) |route| {
-        try router.addMetaWithData(.GET, route, scalarPageHandler, internal_meta, st);
+        try router.add(.GET, route, scalarPageHandler, .{ .meta = internal_meta, .userData = st });
         const full = try joinRoute(allocator, route, "standalone.js");
         defer allocator.free(full);
-        try router.addMeta(.GET, full, scalarAssetHandler, internal_meta);
+        try router.add(.GET, full, scalarAssetHandler, .{ .meta = internal_meta });
     }
     if (st.graphiqlRoute) |route| {
-        try router.addMetaWithData(.GET, route, graphiqlPageHandler, internal_meta, st);
+        try router.add(.GET, route, graphiqlPageHandler, .{ .meta = internal_meta, .userData = st });
         for (assets.graphiqlFiles) |f| {
             const full = try joinRoute(allocator, route, f.name);
             defer allocator.free(full);
-            try router.addMeta(.GET, full, graphiqlAssetHandler, internal_meta);
+            try router.add(.GET, full, graphiqlAssetHandler, .{ .meta = internal_meta });
         }
     }
     g_state = st;
@@ -477,7 +477,7 @@ test "mount registers spec, pages, and local assets" {
     const a = std.testing.allocator;
     var router = Router.init(a);
     defer router.deinit();
-    try router.get("/hello", helloHandler);
+    try router.get("/hello", helloHandler, .{});
 
     try mount(a, &router, .{}, .{ .title = "Demo" });
     defer unmount();
@@ -527,7 +527,7 @@ test "scalar opt-in mounts its page and bundle" {
     const a = std.testing.allocator;
     var router = Router.init(a);
     defer router.deinit();
-    try router.get("/users/{id}", helloHandler);
+    try router.get("/users/{id}", helloHandler, .{});
 
     try mount(a, &router, .{ .redoc = .{ .enabled = false }, .scalar = .{ .enabled = true } }, null);
     defer unmount();
@@ -552,11 +552,24 @@ test "disabled config registers nothing" {
     try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) == null);
 }
 
+test "disabled docs releases routes to the application" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    try mount(a, &router, .{ .enabled = false }, null);
+
+    // The application can now own /docs; requests reach its handler.
+    try router.get("/docs", helloHandler, .{});
+    const res = (try invoke(&router, .GET, "/docs", a)).?;
+    try std.testing.expectEqualStrings("hi", res.body);
+}
+
 test "openapi disabled option suppresses /openapi.json only" {
     const a = std.testing.allocator;
     var router = Router.init(a);
     defer router.deinit();
-    try router.get("/ping", helloHandler);
+    try router.get("/ping", helloHandler, .{});
 
     try mount(a, &router, .{ .openapi = .{ .enabled = false }, .swagger = .{ .enabled = true } }, null);
     defer unmount();
@@ -569,7 +582,7 @@ test "conflicting user route is reported, not overwritten" {
     const a = std.testing.allocator;
     var router = Router.init(a);
     defer router.deinit();
-    try router.get("/docs", helloHandler); // user already owns /docs
+    try router.get("/docs", helloHandler, .{}); // user already owns /docs
 
     try std.testing.expectError(error.DuplicateRoute, mount(a, &router, .{}, null));
     unmount(); // partial state cleaned up
@@ -579,7 +592,7 @@ test "graphiql opt-in mounts its page and all worker assets" {
     const a = std.testing.allocator;
     var router = Router.init(a);
     defer router.deinit();
-    try router.get("/graphql", helloHandler);
+    try router.get("/graphql", helloHandler, .{});
 
     try mount(a, &router, .{ .graphiql = .{ .enabled = true, .graphqlEndpoint = "/graphql" } }, null);
     defer unmount();
@@ -603,7 +616,7 @@ test "disabling swagger and redoc leaves scalar and spec" {
     const a = std.testing.allocator;
     var router = Router.init(a);
     defer router.deinit();
-    try router.get("/ping", helloHandler);
+    try router.get("/ping", helloHandler, .{});
 
     try mount(a, &router, .{ .swagger = .{ .enabled = false }, .redoc = .{ .enabled = false } }, null);
     defer unmount();

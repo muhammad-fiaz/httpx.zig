@@ -1,6 +1,6 @@
 # Metrics & Monitoring
 
-HTTPX includes a production-grade, thread-safe metrics registry compatible with Prometheus text format (v0.0.4) and zero-allocation point-in-time snapshots.
+HTTPX includes a thread-safe metrics registry compatible with Prometheus text format (v0.0.4) and zero-allocation point-in-time snapshots.
 
 ## Metrics Types
 

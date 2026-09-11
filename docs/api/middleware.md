@@ -15,7 +15,7 @@ try server.use(httpx.middleware.logging);
 ```
 
 The same values are also reachable under `httpx.web.middleware`
-(`cors`, `securityHeaders`, `recovery`, `logging`, `RateLimiter`).
+(`cors`, `helmet`, `recovery`, `logging`, `RateLimiter`).
 
 ## Built-in Middleware
 
@@ -46,7 +46,7 @@ const cfg = httpx.middleware.CorsConfig{
 if (!cfg.isOriginAllowed(origin)) return error.Forbidden;
 ```
 
-### `helmet` / `securityHeaders`
+### `helmet`
 
 Adds defensive security headers (`X-Content-Type-Options`, `X-Frame-Options`,
 `Referrer-Policy`, `Content-Security-Policy`).

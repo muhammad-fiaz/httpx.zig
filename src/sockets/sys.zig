@@ -76,12 +76,12 @@ pub const ws = if (is_windows) struct {
 
     const WSAData = extern struct {
         version: u16,
-        high_version: u16,
+        highVersion: u16,
         description: [257]u8,
-        system_status: [129]u8,
-        max_sockets: u16,
-        max_udp_dg: u16,
-        vendor_info: ?*anyopaque,
+        systemStatus: [129]u8,
+        maxSockets: u16,
+        maxUdpDg: u16,
+        vendorInfo: ?*anyopaque,
     };
 
     pub extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSAData) callconv(.c) i32;
@@ -185,28 +185,28 @@ pub const ws = if (is_windows) struct {
         return @intCast(n);
     }
 
-    pub fn waitReadable(s: usize, timeout_ms: u31) Error!bool {
+    pub fn waitReadable(s: usize, timeoutMs: u31) Error!bool {
         var set = FdSet.zero();
         set.add(s);
-        var tv = Timeval{ .sec = @intCast(timeout_ms / 1000), .usec = @intCast((timeout_ms % 1000) * 1000) };
+        var tv = Timeval{ .sec = @intCast(timeoutMs / 1000), .usec = @intCast((timeoutMs % 1000) * 1000) };
         const rc = select(0, &set, null, null, &tv);
         if (rc == SOCKET_ERROR) return map(WSAGetLastError());
         return rc > 0;
     }
 
-    pub fn setTimeouts(s: usize, timeout_ms: u31) void {
-        const ms: u32 = @intCast(timeout_ms);
+    pub fn setTimeouts(s: usize, timeoutMs: u31) void {
+        const ms: u32 = @intCast(timeoutMs);
         _ = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &ms, 4);
         _ = setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &ms, 4);
     }
 
-    pub fn setNoDelay(s: usize, no_delay: bool) void {
-        const opt: c_int = if (no_delay) 1 else 0;
+    pub fn setNoDelay(s: usize, noDelay: bool) void {
+        const opt: c_int = if (noDelay) 1 else 0;
         _ = setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &opt, @sizeOf(c_int));
     }
 
-    pub fn setKeepAlive(s: usize, idle_secs: u32) void {
-        _ = idle_secs;
+    pub fn setKeepAlive(s: usize, idleSecs: u32) void {
+        _ = idleSecs;
         const one: c_int = 1;
         _ = setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, @sizeOf(c_int));
     }
@@ -216,17 +216,17 @@ pub const ws = if (is_windows) struct {
         _ = setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, @sizeOf(c_int));
     }
 
-    pub fn setNonBlocking(s: usize, non_blocking: bool) void {
-        var mode: u32 = if (non_blocking) 1 else 0;
+    pub fn setNonBlocking(s: usize, nonBlocking: bool) void {
+        var mode: u32 = if (nonBlocking) 1 else 0;
         _ = ioctlsocket(s, FIONBIO, &mode);
     }
 } else struct {};
 
 // POSIX (libc)
 
-pub const posix_c = if (!is_windows and builtin.link_libc) struct {
-    pub const fd_t = i32;
-    pub const INVALID: fd_t = -1;
+pub const posixC = if (!is_windows and builtin.link_libc) struct {
+    pub const Fd = i32;
+    pub const INVALID: Fd = -1;
 
     const FdSet = extern struct {
         bits: [1024 / 32]u32,
@@ -234,7 +234,7 @@ pub const posix_c = if (!is_windows and builtin.link_libc) struct {
         pub fn zero() FdSet {
             return .{ .bits = [_]u32{0} ** (1024 / 32) };
         }
-        pub fn add(self: *FdSet, fd: fd_t) void {
+        pub fn add(self: *FdSet, fd: Fd) void {
             const idx: u32 = @intCast(@divFloor(fd, 32));
             self.bits[idx] |= @as(u32, 1) << @intCast(@mod(fd, 32));
         }
@@ -245,13 +245,13 @@ pub const posix_c = if (!is_windows and builtin.link_libc) struct {
         usec: isize,
     };
 
-    extern "c" fn recv(fd: fd_t, buf: [*]u8, len: usize, flags: c_int) isize;
-    extern "c" fn send(fd: fd_t, buf: [*]const u8, len: usize, flags: c_int) isize;
-    extern "c" fn shutdown(fd: fd_t, how: c_int) c_int;
-    extern "c" fn close(fd: fd_t) c_int;
+    extern "c" fn recv(fd: Fd, buf: [*]u8, len: usize, flags: c_int) isize;
+    extern "c" fn send(fd: Fd, buf: [*]const u8, len: usize, flags: c_int) isize;
+    extern "c" fn shutdown(fd: Fd, how: c_int) c_int;
+    extern "c" fn close(fd: Fd) c_int;
     extern "c" fn select(nfds: c_int, r: ?*FdSet, w: ?*FdSet, e: ?*FdSet, tv: ?*Timeval) c_int;
-    extern "c" fn setsockopt(fd: fd_t, level: c_int, optname: c_int, optval: ?*const anyopaque, optlen: u32) c_int;
-    extern "c" fn fcntl(fd: fd_t, cmd: c_int, ...) c_int;
+    extern "c" fn setsockopt(fd: Fd, level: c_int, optname: c_int, optval: ?*const anyopaque, optlen: u32) c_int;
+    extern "c" fn fcntl(fd: Fd, cmd: c_int, ...) c_int;
     extern "c" fn __errno_location() *c_int;
 
     pub const SOL_SOCKET: c_int = 1;
@@ -307,7 +307,7 @@ pub const posix_c = if (!is_windows and builtin.link_libc) struct {
         return mapErrno(__errno_location().*);
     }
 
-    pub fn recvRaw(fd: fd_t, buf: []u8) Error!usize {
+    pub fn recvRaw(fd: Fd, buf: []u8) Error!usize {
         while (true) {
             const n = recv(fd, buf.ptr, buf.len, 0);
             if (n < 0) {
@@ -319,7 +319,7 @@ pub const posix_c = if (!is_windows and builtin.link_libc) struct {
         }
     }
 
-    pub fn sendRaw(fd: fd_t, bytes: []const u8) Error!usize {
+    pub fn sendRaw(fd: Fd, bytes: []const u8) Error!usize {
         while (true) {
             const n = send(fd, bytes.ptr, bytes.len, MSG_NOSIGNAL);
             if (n < 0) {
@@ -331,12 +331,12 @@ pub const posix_c = if (!is_windows and builtin.link_libc) struct {
         }
     }
 
-    pub fn waitReadable(fd: fd_t, timeout_ms: u31) Error!bool {
+    pub fn waitReadable(fd: Fd, timeoutMs: u31) Error!bool {
         var set = FdSet.zero();
         set.add(fd);
         var tv = Timeval{
-            .sec = @intCast(timeout_ms / 1000),
-            .usec = @intCast((timeout_ms % 1000) * 1000),
+            .sec = @intCast(timeoutMs / 1000),
+            .usec = @intCast((timeoutMs % 1000) * 1000),
         };
         while (true) {
             const rc = select(fd + 1, &set, null, null, &tv);
@@ -349,24 +349,24 @@ pub const posix_c = if (!is_windows and builtin.link_libc) struct {
         }
     }
 
-    pub fn setTimeouts(fd: fd_t, timeout_ms: u31) void {
+    pub fn setTimeouts(fd: Fd, timeoutMs: u31) void {
         const tv = Timeval{
-            .sec = @intCast(timeout_ms / 1000),
-            .usec = @intCast((timeout_ms % 1000) * 1000),
+            .sec = @intCast(timeoutMs / 1000),
+            .usec = @intCast((timeoutMs % 1000) * 1000),
         };
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, @sizeOf(Timeval));
         _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, @sizeOf(Timeval));
     }
 
-    pub fn setNoDelay(fd: fd_t, no_delay: bool) void {
-        const one: c_int = if (no_delay) 1 else 0;
+    pub fn setNoDelay(fd: Fd, noDelay: bool) void {
+        const one: c_int = if (noDelay) 1 else 0;
         _ = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, @sizeOf(c_int));
     }
 
-    pub fn setKeepAlive(fd: fd_t, idle_secs: u32) void {
+    pub fn setKeepAlive(fd: Fd, idleSecs: u32) void {
         const one: c_int = 1;
         _ = setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, @sizeOf(c_int));
-        const idle: c_int = @intCast(idle_secs);
+        const idle: c_int = @intCast(idleSecs);
         switch (builtin.os.tag) {
             .linux => _ = setsockopt(fd, IPPROTO_TCP, 4, &idle, @sizeOf(c_int)), // TCP_KEEPIDLE
             .macos => _ = setsockopt(fd, IPPROTO_TCP, 0x10, &idle, @sizeOf(c_int)), // TCP_KEEPALIVE
@@ -374,15 +374,15 @@ pub const posix_c = if (!is_windows and builtin.link_libc) struct {
         }
     }
 
-    pub fn setReuseAddress(fd: fd_t, reuse: bool) void {
+    pub fn setReuseAddress(fd: Fd, reuse: bool) void {
         const one: c_int = if (reuse) 1 else 0;
         _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, @sizeOf(c_int));
     }
 
-    pub fn setNonBlocking(fd: fd_t, non_blocking: bool) void {
+    pub fn setNonBlocking(fd: Fd, nonBlocking: bool) void {
         const flags = fcntl(fd, F_GETFL, @as(c_int, 0));
         if (flags < 0) return;
-        const new_flags = if (non_blocking) (flags | O_NONBLOCK) else (flags & ~O_NONBLOCK);
+        const new_flags = if (nonBlocking) (flags | O_NONBLOCK) else (flags & ~O_NONBLOCK);
         _ = fcntl(fd, F_SETFL, new_flags);
     }
 } else struct {};
@@ -394,12 +394,12 @@ pub fn init() void {
     if (is_windows) ws.startup();
 }
 
-pub const Handle = if (is_windows) usize else if (builtin.link_libc) posix_c.fd_t else posix.fd_t;
+pub const Handle = if (is_windows) usize else if (builtin.link_libc) posixC.Fd else posix.fd_t;
 
 /// Blocking receive with full error mapping. n==0 means orderly peer close.
 pub fn read(h: Handle, buf: []u8) Error!usize {
     if (is_windows) return ws.recvRaw(h, buf);
-    if (builtin.link_libc) return posix_c.recvRaw(h, buf);
+    if (builtin.link_libc) return posixC.recvRaw(h, buf);
     const n = posix.read(h, buf) catch |err| return mapPosixError(err);
     return n;
 }
@@ -407,59 +407,59 @@ pub fn read(h: Handle, buf: []u8) Error!usize {
 /// Blocking send with full error mapping. Partial sends are normal.
 pub fn write(h: Handle, bytes: []const u8) Error!usize {
     if (is_windows) return ws.sendRaw(h, bytes);
-    if (builtin.link_libc) return posix_c.sendRaw(h, bytes);
+    if (builtin.link_libc) return posixC.sendRaw(h, bytes);
     const n = posix.write(h, bytes) catch |err| return mapPosixError(err);
     return n;
 }
 
 /// Poll for readability. Returns false on timeout.
-pub fn waitReadable(h: Handle, timeout_ms: u31) Error!bool {
-    if (is_windows) return ws.waitReadable(h, timeout_ms);
-    if (builtin.link_libc) return posix_c.waitReadable(h, timeout_ms);
+pub fn waitReadable(h: Handle, timeoutMs: u31) Error!bool {
+    if (is_windows) return ws.waitReadable(h, timeoutMs);
+    if (builtin.link_libc) return posixC.waitReadable(h, timeoutMs);
     var pfd = [_]posix.pollfd{.{
         .fd = h,
         .events = posix.POLL.IN,
         .revents = 0,
     }};
-    const rc = posix.poll(&pfd, timeout_ms) catch |err| return mapPosixError(err);
+    const rc = posix.poll(&pfd, timeoutMs) catch |err| return mapPosixError(err);
     return rc > 0;
 }
 
-pub fn setTimeouts(h: Handle, timeout_ms: u31) void {
+pub fn setTimeouts(h: Handle, timeoutMs: u31) void {
     if (is_windows) {
-        ws.setTimeouts(h, timeout_ms);
+        ws.setTimeouts(h, timeoutMs);
     } else if (builtin.link_libc) {
-        posix_c.setTimeouts(h, timeout_ms);
+        posixC.setTimeouts(h, timeoutMs);
     } else {
         const tv = posix.timeval{
-            .sec = @intCast(timeout_ms / 1000),
-            .usec = @intCast((timeout_ms % 1000) * 1000),
+            .sec = @intCast(timeoutMs / 1000),
+            .usec = @intCast((timeoutMs % 1000) * 1000),
         };
         _ = posix.setsockopt(h, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
         _ = posix.setsockopt(h, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
     }
 }
 
-pub fn setNoDelay(h: Handle, no_delay: bool) void {
+pub fn setNoDelay(h: Handle, noDelay: bool) void {
     if (is_windows) {
-        ws.setNoDelay(h, no_delay);
+        ws.setNoDelay(h, noDelay);
     } else if (builtin.link_libc) {
-        posix_c.setNoDelay(h, no_delay);
+        posixC.setNoDelay(h, noDelay);
     } else {
-        const opt: c_int = if (no_delay) 1 else 0;
+        const opt: c_int = if (noDelay) 1 else 0;
         posix.setsockopt(h, posix.IPPROTO.TCP, 1, std.mem.asBytes(&opt)) catch {};
     }
 }
 
-pub fn setKeepAlive(h: Handle, idle_secs: u32) void {
+pub fn setKeepAlive(h: Handle, idleSecs: u32) void {
     if (is_windows) {
-        ws.setKeepAlive(h, idle_secs);
+        ws.setKeepAlive(h, idleSecs);
     } else if (builtin.link_libc) {
-        posix_c.setKeepAlive(h, idle_secs);
+        posixC.setKeepAlive(h, idleSecs);
     } else {
         const one: c_int = 1;
         posix.setsockopt(h, posix.SOL.SOCKET, posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
-        const idle: c_int = @intCast(idle_secs);
+        const idle: c_int = @intCast(idleSecs);
         switch (builtin.os.tag) {
             .linux => posix.setsockopt(h, posix.IPPROTO.TCP, 4, std.mem.asBytes(&idle)) catch {},
             .macos => posix.setsockopt(h, posix.IPPROTO.TCP, 0x10, std.mem.asBytes(&idle)) catch {},
@@ -472,18 +472,18 @@ pub fn setReuseAddress(h: Handle, reuse: bool) void {
     if (is_windows) {
         ws.setReuseAddress(h, reuse);
     } else if (builtin.link_libc) {
-        posix_c.setReuseAddress(h, reuse);
+        posixC.setReuseAddress(h, reuse);
     } else {
         const opt: c_int = if (reuse) 1 else 0;
         posix.setsockopt(h, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&opt)) catch {};
     }
 }
 
-pub fn setNonBlocking(h: Handle, non_blocking: bool) void {
+pub fn setNonBlocking(h: Handle, nonBlocking: bool) void {
     if (is_windows) {
-        ws.setNonBlocking(h, non_blocking);
+        ws.setNonBlocking(h, nonBlocking);
     } else if (builtin.link_libc) {
-        posix_c.setNonBlocking(h, non_blocking);
+        posixC.setNonBlocking(h, nonBlocking);
     } else {
         // std.posix fallback
     }
@@ -493,7 +493,7 @@ pub fn shutdownSend(h: Handle) void {
     if (is_windows) {
         _ = ws.shutdown(h, ws.SD_SEND);
     } else if (builtin.link_libc) {
-        _ = posix_c.shutdown(h, 1); // SHUT_WR
+        _ = posixC.shutdown(h, 1); // SHUT_WR
     } else {
         posix.shutdown(h, .send) catch {};
     }
@@ -503,7 +503,7 @@ pub fn close(h: Handle) void {
     if (is_windows) {
         _ = ws.closesocket(h);
     } else if (builtin.link_libc) {
-        _ = posix_c.close(h);
+        _ = posixC.close(h);
     } else {
         posix.close(h);
     }
@@ -541,13 +541,13 @@ test "error taxonomy: every known winsock code maps to a named error" {
 
 test "error taxonomy: posix errno mapping" {
     if (!is_windows and builtin.link_libc) {
-        try std.testing.expectEqual(Error.WouldBlock, posix_c.mapErrno(11));
-        try std.testing.expectEqual(Error.ConnectionReset, posix_c.mapErrno(104));
-        try std.testing.expectEqual(Error.TimedOut, posix_c.mapErrno(110));
-        try std.testing.expectEqual(Error.ConnectionRefused, posix_c.mapErrno(111));
-        try std.testing.expectEqual(Error.AddressInUse, posix_c.mapErrno(98));
-        try std.testing.expectEqual(Error.AddressNotAvailable, posix_c.mapErrno(99));
-        try std.testing.expectEqual(Error.Unknown, posix_c.mapErrno(999999));
+        try std.testing.expectEqual(Error.WouldBlock, posixC.mapErrno(11));
+        try std.testing.expectEqual(Error.ConnectionReset, posixC.mapErrno(104));
+        try std.testing.expectEqual(Error.TimedOut, posixC.mapErrno(110));
+        try std.testing.expectEqual(Error.ConnectionRefused, posixC.mapErrno(111));
+        try std.testing.expectEqual(Error.AddressInUse, posixC.mapErrno(98));
+        try std.testing.expectEqual(Error.AddressNotAvailable, posixC.mapErrno(99));
+        try std.testing.expectEqual(Error.Unknown, posixC.mapErrno(999999));
     }
 }
 
