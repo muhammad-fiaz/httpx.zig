@@ -373,7 +373,11 @@ pub const Watcher = struct {
         }
         self.mutex.lock();
         defer self.mutex.unlock();
-        for (seen.items) |*f| {
+        // Unknown paths are rename-target candidates; emitting their
+        // created events is deferred until rename pairing runs below.
+        var created_idx = std.ArrayList(usize).empty;
+        defer created_idx.deinit(self.allocator);
+        for (seen.items, 0..) |*f, si| {
             if (self.entries.getPtr(f.path)) |val| {
                 if (val.mtimeNs != f.mtimeNs or val.size != f.size) {
                     val.mtimeNs = f.mtimeNs;
@@ -381,12 +385,7 @@ pub const Watcher = struct {
                     self.notifyChange(f.path, null, .modified);
                 }
             } else {
-                const owned_path = self.allocator.dupe(u8, f.path) catch continue;
-                self.entries.put(owned_path, .{ .path = owned_path, .mtimeNs = f.mtimeNs, .size = f.size }) catch {
-                    self.allocator.free(owned_path);
-                    continue;
-                };
-                self.notifyChange(f.path, null, .created);
+                created_idx.append(self.allocator, si) catch {};
             }
         }
         var gone = std.ArrayList([]const u8).empty;
@@ -405,11 +404,48 @@ pub const Watcher = struct {
                 gone.append(self.allocator, entry.key_ptr.*) catch {};
             }
         }
+        // Pair renames before emitting anything: a deleted entry and a
+        // created file with identical size AND mtime is a rename, not a
+        // delete+create (rename preserves mtime). Same shapes as the
+        // Linux/Windows native rename paths: silent drop of the old
+        // path, ingest of the new one, plus the paired rename event.
+        // Unpaired entries keep the previous created/deleted behavior.
+        // Paired targets leave created_idx via swapRemove, so the final
+        // loop only sees genuinely new files.
         for (gone.items) |del_path| {
-            if (self.entries.fetchRemove(del_path)) |kv| {
+            const old = self.entries.get(del_path) orelse continue;
+            var pair: ?usize = null;
+            for (created_idx.items, 0..) |si, ci| {
+                const f = &seen.items[si];
+                if (f.size == old.size and f.mtimeNs == old.mtimeNs) {
+                    pair = ci;
+                    break;
+                }
+            }
+            if (pair) |ci| {
+                const si = created_idx.swapRemove(ci);
+                const new_path = seen.items[si].path;
+                // Copy the old path BEFORE dropPathSilent frees the
+                // tracked key it borrows; emitting afterwards would
+                // duplicate freed memory.
+                const old_owned = self.allocator.dupe(u8, del_path) catch continue;
+                self.dropPathSilent(del_path);
+                self.ingestPath(new_path, .renamed);
+                self.emitRenameLocked(old_owned, new_path);
+                self.allocator.free(old_owned);
+            } else if (self.entries.fetchRemove(del_path)) |kv| {
                 self.notifyChange(del_path, null, .deleted);
                 self.allocator.free(kv.key);
             }
+        }
+        for (created_idx.items) |si| {
+            const f = &seen.items[si];
+            const owned_path = self.allocator.dupe(u8, f.path) catch continue;
+            self.entries.put(owned_path, .{ .path = owned_path, .mtimeNs = f.mtimeNs, .size = f.size }) catch {
+                self.allocator.free(owned_path);
+                continue;
+            };
+            self.notifyChange(f.path, null, .created);
         }
     }
 
@@ -1037,6 +1073,53 @@ test "rename pairing survives atomic save patterns" {
         clock.sleepMillis(10);
     }
     try std.testing.expect(saw_rename);
+}
+
+test "reconcileDir pairs renames from stat-walk diffs" {
+    // Backend-agnostic coverage for the directory-granularity path
+    // (macOS kqueue): a stat-walk diff that loses a tracked file and
+    // gains an untracked one with identical size+mtime is a rename.
+    const fs_mod = @import("../../utils/fs.zig");
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var path_buf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&path_buf, ".zig-cache/watch-reconcile-{d}", .{clock.millisNow()});
+    {
+        const cwd: std.Io.Dir = .cwd();
+        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
+        cwd.createDir(io, root, .default_dir) catch {};
+    }
+    defer cleanupTestDir(io, root);
+
+    var watcher = try Watcher.init(a, io, .{ .dirPath = root });
+    defer watcher.deinit();
+
+    var abuf: [512]u8 = undefined;
+    var bbuf: [512]u8 = undefined;
+    const apath = try std.fmt.bufPrint(&abuf, "{s}/a.txt", .{root});
+    const bpath = try std.fmt.bufPrint(&bbuf, "{s}/b.txt", .{root});
+    try fs_mod.writeFile(apath, "data");
+    try watcher.reconcileDir(root);
+    while (watcher.next()) |_| {}
+    {
+        const cwd: std.Io.Dir = .cwd();
+        try cwd.rename(apath, cwd, bpath, io);
+    }
+    try watcher.reconcileDir(root);
+    var saw_rename = false;
+    var saw_old = false;
+    // Tracked keys use path.join separators (backslash on Windows),
+    // so build the expectation the same way instead of assuming '/'.
+    const expected_old = try std.Io.Dir.path.join(a, &.{ root, "a.txt" });
+    defer a.free(expected_old);
+    while (watcher.next()) |e| {
+        if (e.kind == .renamed) {
+            saw_rename = true;
+            if (e.oldPath) |op| saw_old = saw_old or std.mem.eql(u8, op, expected_old);
+        }
+    }
+    try std.testing.expect(saw_rename);
+    try std.testing.expect(saw_old);
 }
 
 test "overflow marks dirty and rescans to reconcile" {
