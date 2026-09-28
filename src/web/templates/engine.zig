@@ -554,6 +554,39 @@ test "Engine invalidates dependents and reports render errors" {
     // (Covered precisely by the strict diagnostics test below.)
 }
 
+test "Engine render frees arena nodes pushed during rendering" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const fsMod = @import("../../utils/fs.zig");
+    const dir = "test_arena_free.tmp";
+    try makeTempDir(dir, &.{
+        .{ .name = "page.html", .src = "{% set greeting = \"hi\" %}{{ greeting }}" },
+    });
+    defer {
+        fsMod.deleteFile(dir ++ "/page.html") catch {};
+        var tmp: [512]u8 = undefined;
+        @memcpy(tmp[0..dir.len], dir);
+        tmp[dir.len] = 0;
+        _ = std.c.rmdir(tmp[0..dir.len :0]);
+    }
+    var engine = try Engine.init(alloc, undefined, .{ .directory = dir });
+    defer engine.deinit();
+
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(alloc);
+    var lw = rendererMod.ListWriter{ .list = &list, .allocator = alloc };
+
+    // Empty data means Context.init allocates nothing, so
+    // `ctx.arena.state.used_list` stays null until the render pushes a node.
+    // `{% set %}` allocates from `state.alloc` (the Context arena), which is
+    // exactly the mutation that `Renderer.render`'s `*const Context`
+    // parameter declares away as LLVM `readonly`: a caller may then prove
+    // the list is still null and fold `defer ctx.deinit()` into nothing,
+    // leaking the node. The test runner reports that as a leaked test.
+    try engine.render("page.html", .{}, &lw);
+    try testing.expectEqualStrings("hi", list.items);
+}
+
 test "Engine strict renderString surfaces diagnostics" {
     const testing = std.testing;
     const alloc = testing.allocator;

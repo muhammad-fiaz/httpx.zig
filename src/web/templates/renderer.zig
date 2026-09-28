@@ -2113,14 +2113,26 @@ pub const Renderer = struct {
     pub fn render(
         self: Renderer,
         ast: *const TemplateAst,
-        ctx: *const Context,
+        ctx: *Context,
         provider: ?TemplateProvider,
         writer: anytype,
     ) !void {
+        comptime {
+            if (@typeInfo(@TypeOf(ctx)).pointer.is_const) {
+                @compileError(
+                    "Renderer.render must take `*Context`: it mutates ctx.arena " ++
+                        "through arenaAlloc below, and a `*const` parameter is emitted " ++
+                        "as LLVM `readonly`, which lets callers prove " ++
+                        "ctx.arena.state.used_list is still null and fold " ++
+                        "`defer ctx.deinit()` away, leaking every arena node " ++
+                        "pushed during the render.",
+                );
+            }
+        }
         var depth: usize = 0;
         var chain = InheritChain{};
         var scope = contextMod.Scope{};
-        const arenaAlloc = @constCast(&ctx.arena).allocator();
+        const arenaAlloc = ctx.arena.allocator();
         defer scope.deinit(arenaAlloc);
         var macros = MacroTable.init(ctx.arena.child_allocator);
         defer macros.deinit();
@@ -2159,7 +2171,7 @@ pub const Renderer = struct {
         self: Renderer,
         allocator: Allocator,
         ast: *const TemplateAst,
-        ctx: *const Context,
+        ctx: *Context,
         provider: ?TemplateProvider,
     ) ![]u8 {
         var list = std.ArrayList(u8).empty;
