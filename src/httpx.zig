@@ -461,6 +461,7 @@ test {
     _ = @import("common/httpVersion.zig");
     _ = @import("common/io.zig");
     _ = @import("common/sync.zig");
+    _ = @import("interop_test.zig");
     _ = @import("concurrency/queue.zig");
     _ = @import("concurrency/workerPool.zig");
     _ = @import("common/logging.zig");

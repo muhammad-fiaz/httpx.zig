@@ -11,6 +11,13 @@ List Length: 2 octets (16-bit vector)
 Protocol Name: 1 octet length prefix + opaque ASCII string
 ```
 
+> **Status:** the server derives its ALPN preference from the protocols it
+> can actually speak, and does not advertise `h2` — HTTP/2 is not
+> implemented, so offering the identifier negotiated a protocol we then
+> failed on. The `h2` entry below lists the identifier as defined by the
+> RFCs, not as something currently served. An explicitly configured `alpn`
+> list is honoured as given.
+
 ## Supported Identifiers
 
 * `h2`: HTTP/2 over TLS (RFC 7540 / RFC 9113)

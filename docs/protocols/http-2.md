@@ -1,5 +1,11 @@
 # HTTP/2 Protocol
 
+> **Status: not implemented, and not advertised.** There is no HTTP/2
+> framing here, and the server no longer offers `h2` through ALPN, so no
+> client negotiates it and then fails. `Config.http2` exists and defaults to
+> `true` but is not wired to anything; do not read it as a capability. The
+> wire format below describes the target design, not current behaviour. See
+
 RFC 9113 defines HTTP/2, introducing a binary framing layer that multiplexes multiple concurrent request/response streams over a single TCP connection, eliminating head-of-line blocking at the transport layer.
 
 ## Architecture
