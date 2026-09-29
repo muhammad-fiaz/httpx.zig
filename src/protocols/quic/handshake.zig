@@ -315,7 +315,7 @@ pub const Driver = struct {
             switch (rec.kind) {
                 @intFromEnum(ths.HandshakeType.server_hello) => {
                     d.engine.processServerHello(rec.msg) catch return connMod.Error.TlsDriverFailed;
-                    const shared = d.engine.sharedSecret orelse return connMod.Error.TlsDriverFailed;
+                    const shared = d.engine.sharedSecret32() orelse return connMod.Error.TlsDriverFailed;
                     const chSh = d.engine.transcript.finish();
                     const hs = if (d.engine.resumptionPsk) |psk|
                         qtls.handshakeKeysWithEarly(qtls.earlySecret(psk), shared, chSh)
@@ -522,7 +522,7 @@ pub const Driver = struct {
         d.flight.appendSlice(a, flight.certificateVerify) catch return connMod.Error.OutOfMemory;
         d.flight.appendSlice(a, flight.finished) catch return connMod.Error.OutOfMemory;
 
-        const shared = d.engine.sharedSecret orelse return connMod.Error.TlsDriverFailed;
+        const shared = d.engine.sharedSecret32() orelse return connMod.Error.TlsDriverFailed;
         const hs = if (d.engine.resumptionPsk) |psk|
             qtls.handshakeKeysWithEarly(qtls.earlySecret(psk), shared, flight.hsHash)
         else
