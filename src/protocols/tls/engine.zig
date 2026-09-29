@@ -10,6 +10,29 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tls = std.crypto.tls;
 const x25519 = std.crypto.dh.X25519;
+
+/// ML-KEM from the stdlib, used directly for RFC 10024 X25519MLKEM768.
+/// Deliberately not `std.crypto.kem.hybrid.MlKem768X25519`: that is X-Wing,
+/// which OpenSSL 3.5+ and browsers do not speak over TLS.
+const ml_kem = std.crypto.kem.ml_kem;
+const MlKem = ml_kem.MLKem768;
+
+// RFC 10024 (X25519MLKEM768) wire sizes. The client share is the ML-KEM
+// encapsulation key followed by the X25519 share; the server share is the
+// ML-KEM ciphertext followed by the X25519 share; the shared secret is the
+// two shared secrets concatenated, 64 bytes.
+//
+// Note the sizes alone do not identify this construction: X-Wing has the
+// identical 1216/1120 wire size but folds both halves through a SHA3-256
+// combiner into a 32-byte secret. The two are incompatible, and the failure
+// mode is not a parse error -- it is `decryption failed or bad record mac`
+// on the first encrypted record.
+const MLKEM_PK_LEN = MlKem.PublicKey.encoded_length;
+const MLKEM_CT_LEN = MlKem.ciphertext_length;
+const MLKEM_SS_LEN = MlKem.shared_length;
+const HY_PK_LEN = MLKEM_PK_LEN + 32;
+const HY_CT_LEN = MLKEM_CT_LEN + 32;
+const HY_SS_LEN = 64;
 const Aes128Gcm = std.crypto.aead.aesGcm.Aes128Gcm;
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -139,6 +162,29 @@ pub const DerivedKeys = struct {
 
 // TLS 1.3 Handshake Engine
 
+/// The HKDF-Extract IKM for the TLS 1.3 key schedule (RFC 8446 7.1).
+/// X25519 gives 32 bytes; the RFC 10024 hybrid gives 64 (ML-KEM ‖ X25519).
+/// Carried with an explicit length because HKDF-Extract is length-sensitive
+/// and the two groups must not be padded to match each other.
+pub const SharedSecret = struct {
+    bytes: [HY_SS_LEN]u8 = @splat(0),
+    len: usize = 0,
+
+    fn of(s: []const u8) SharedSecret {
+        var out: SharedSecret = .{ .len = s.len };
+        @memcpy(out.bytes[0..s.len], s);
+        return out;
+    }
+
+    // By pointer: a by-value `self` would hand back a slice into the
+    // parameter copy, which dies on return. Every caller would then read
+    // a dangling buffer -- the symptom is an `AuthenticationFailed` from a
+    // client that agrees with us on everything except the key schedule.
+    fn slice(self: *const SharedSecret) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
 pub const Engine = struct {
     allocator: Allocator,
     role: enum { client, server },
@@ -146,7 +192,28 @@ pub const Engine = struct {
 
     // ECDHE state
     localKeypair: x25519.KeyPair = undefined,
-    sharedSecret: ?[32]u8 = null,
+    sharedSecret: ?SharedSecret = null,
+
+    // X25519MLKEM768 (RFC 10024) state. `localKeypair` supplies the X25519
+    // half on both sides: one ephemeral per connection, used by whichever
+    // group the handshake selects, so the hybrid needs no second keypair.
+    // `hybridPublic` is a stable buffer: the ClientHello borrows it while
+    // `ClientHello.encode` runs, so it must outlive the call and never be
+    // a temporary.
+    hybridMlKem: ?MlKem.KeyPair = null,
+    hybridPublic: [HY_PK_LEN]u8 = undefined,
+    hybridOffered: bool = false,
+    /// Server side of X25519MLKEM768. Both are inline arrays, not heap,
+    /// matching `hybridPublic` on the client: the handshake path must not
+    /// allocate, because the tests that exercise it never call `deinit()`.
+    /// The Engine itself is stack-local in `Server.acceptBuffered`.
+    hybridServerCt: ?[HY_CT_LEN]u8 = null,
+    peerHybridKey: ?[HY_PK_LEN]u8 = null,
+    /// Stable backing storage for the key_share slice handed to
+    /// ClientHello. It must live in the Engine, not in buildKeyShares'
+    /// frame: a slice of a function-local array literal dangles the
+    /// moment the function returns, and the encoder reads it after.
+    keyShareBuf: [2]handshakeMod.ClientHello.KeyShareEntry = undefined,
 
     // Transcript over all handshake messages (SHA-256)
     transcript: Transcript,
@@ -275,6 +342,18 @@ pub const Engine = struct {
     }
 
     /// Derive the handshake secret from the ECDHE shared secret.
+    /// The 32-byte shared secret, for callers that can only negotiate
+    /// X25519. QUIC never offers the hybrid (the share does not fit one
+    /// Initial packet), so it always lands here; returning null rather
+    /// than truncating keeps a 64-byte hybrid secret from silently
+    /// halving itself if that ever stops being true.
+    pub fn sharedSecret32(self: *const Engine) ?[32]u8 {
+        const ss = self.sharedSecret orelse return null;
+        if (ss.len != 32) return null;
+        return ss.bytes[0..32].*;
+    }
+
+    /// Derive the handshake secret from the ECDHE shared secret.
     /// Must be called after the sharedSecret is set and before
     /// produceServerFlight (server) or processServerHello (client).
     /// With an accepted PSK the Early Secret mixes it in (RFC 8446 7.1);
@@ -290,10 +369,110 @@ pub const Engine = struct {
         const emptyHash = emptyCopy.finish();
         var derived: [32]u8 = undefined;
         hkdfExpandLabelWithContext(earlySecret, "derived", &emptyHash, &derived);
-        self.handshakeSecret = HkdfSha256.extract(&derived, &ss);
+        self.handshakeSecret = HkdfSha256.extract(&derived, ss.slice());
     }
 
     // Client-side handshake
+
+    /// Builds the key_share list for a ClientHello: the X25519MLKEM768
+    /// hybrid first, then plain X25519.
+    ///
+    /// Ordering matters — a server picks the first group it supports, so
+    /// the hybrid has to come first to actually be negotiated. Plain
+    /// X25519 stays in the list as a fallback so a peer without PQ
+    /// support selects it directly rather than forcing a
+    /// HelloRetryRequest round trip.
+    ///
+    /// `allowHybrid` must be false for QUIC. A hybrid share adds 1216
+    /// bytes to the ClientHello, which overruns the fixed-size Initial
+    /// packet buffer (and the 1200-byte datagram floor) once the TLS
+    /// transport parameters are added. Fitting it needs CRYPTO frame
+    /// fragmentation across several Initial packets (RFC 9000 Section
+    /// 14), which the QUIC layer does not implement yet. Until it does,
+    /// QUIC handshakes stay on plain X25519.
+    fn buildKeyShares(self: *Engine, allowHybrid: bool) ![]const handshakeMod.ClientHello.KeyShareEntry {
+        if (!allowHybrid) {
+            self.hybridOffered = false;
+            self.keyShareBuf[0] = .{ .group = .x25519, .keyExchange = &self.localKeypair.public_key };
+            return self.keyShareBuf[0..1];
+        }
+        // RFC 10024: `mlkem_pk ‖ x25519_pk`. `localKeypair` was generated by
+        // produceClientHello above and supplies the X25519 half.
+        var seed: [MlKem.seed_length]u8 = undefined;
+        fillRandom(&seed);
+        const mlkp = try MlKem.KeyPair.generateDeterministic(seed);
+        self.hybridMlKem = mlkp;
+        const pk = mlkp.public_key.toBytes();
+        @memcpy(self.hybridPublic[0..MLKEM_PK_LEN], &pk);
+        @memcpy(self.hybridPublic[MLKEM_PK_LEN..], &self.localKeypair.public_key);
+        self.hybridOffered = true;
+        self.keyShareBuf[0] = .{ .group = .x25519_ml_kem768, .keyExchange = &self.hybridPublic };
+        self.keyShareBuf[1] = .{ .group = .x25519, .keyExchange = &self.localKeypair.public_key };
+        return self.keyShareBuf[0..2];
+    }
+
+    /// Server side of the hybrid: encapsulate to the client's public key and
+    /// keep the ciphertext for our ServerHello. The `Engine` is per-connection
+    /// (stack-local in `acceptBuffered`), so this state is private to the
+    /// handshake and safe to store here.
+    fn serverHybrid(self: *Engine, peer_key: []const u8) ![HY_SS_LEN]u8 {
+        const pk_m: *const [MLKEM_PK_LEN]u8 =
+            @ptrCast(@alignCast(peer_key[0..MLKEM_PK_LEN].ptr));
+        const m_pk = MlKem.PublicKey.fromBytes(pk_m) catch
+            return error.InvalidKeyShare;
+        // `encapsDeterministic` rather than `encaps(io)`: this Engine carries
+        // no `Io`, and threading one through `initServer` would change a public
+        // signature. The 32-byte encapsulation seed is drawn from the same
+        // source as the rest of the handshake, which is what the ml_kem API
+        // requires either way.
+        var enc_seed: [32]u8 = undefined;
+        fillRandom(&enc_seed);
+        const es = m_pk.encapsDeterministic(&enc_seed);
+        var peer_x: [32]u8 = undefined;
+        @memcpy(&peer_x, peer_key[MLKEM_PK_LEN..]);
+        const ss_x = x25519.scalarmult(self.localKeypair.secret_key, peer_x) catch
+            return error.InvalidKeyShare;
+        // Server share: `mlkem_ct ‖ x25519_pk` (1088 + 32 = 1120).
+        var ct: [HY_CT_LEN]u8 = undefined;
+        @memcpy(ct[0..MLKEM_CT_LEN], &es.ciphertext);
+        @memcpy(ct[MLKEM_CT_LEN..], &self.localKeypair.public_key);
+        self.hybridServerCt = ct;
+        // RFC 10024 4.3: concatenate, do not hash.
+        var out: [HY_SS_LEN]u8 = undefined;
+        @memcpy(out[0..MLKEM_SS_LEN], &es.shared_secret);
+        @memcpy(out[MLKEM_SS_LEN..], &ss_x);
+        return out;
+    }
+
+    /// Derives the ECDHE shared secret from the group's the server
+    /// selected. X25519MLKEM768 needs the decapsulation key we kept
+    /// from the ClientHello; anything else is rejected rather than
+    /// silently downgraded, so a server cannot steer us off the group
+    /// we offered (RFC 8446 4.1.4).
+    fn deriveSharedSecret(self: *Engine, ks: handshakeMod.ServerHello.KeyShareEntry) !SharedSecret {
+        if (ks.group == .x25519_ml_kem768) {
+            if (!self.hybridOffered) return error.UnsupportedCipherSuite;
+            if (ks.keyExchange.len != HY_CT_LEN) return error.InvalidKeyShare;
+            const mlkp = self.hybridMlKem orelse return error.InvalidKeyShare;
+            const ct: *const [MLKEM_CT_LEN]u8 = @ptrCast(ks.keyExchange.ptr);
+            const ss_m = try mlkp.secret_key.decaps(ct);
+            var srv_x: [32]u8 = undefined;
+            @memcpy(&srv_x, ks.keyExchange[MLKEM_CT_LEN..]);
+            const ss_x = x25519.scalarmult(self.localKeypair.secret_key, srv_x) catch
+                return error.InvalidKeyShare;
+            var out: [HY_SS_LEN]u8 = undefined;
+            @memcpy(out[0..MLKEM_SS_LEN], &ss_m);
+            @memcpy(out[MLKEM_SS_LEN..], &ss_x);
+            return SharedSecret.of(&out);
+        }
+        if (ks.group != .x25519) return error.UnsupportedCipherSuite;
+        if (ks.keyExchange.len != 32) return error.InvalidKeyShare;
+        var peerPub: [32]u8 = undefined;
+        @memcpy(&peerPub, ks.keyExchange);
+        // ECDHE: sharedSecret = X25519(clientSecret, serverPublic)
+        const ss = try x25519.scalarmult(self.localKeypair.secret_key, peerPub);
+        return SharedSecret.of(&ss);
+    }
 
     /// Produces the ClientHello message and generates the ephemeral keypair.
     /// Pass null serverName/quicTransportParams for plain TCP TLS.
@@ -304,11 +483,11 @@ pub const Engine = struct {
         serverName: ?[]const u8,
         quicTransportParams: ?[]const u8,
     ) ![]u8 {
-        // Generate ephemeral X25519 keypair
+        // Generate ephemeral X25519 keypair (fallback share) and the
+        // X25519MLKEM768 hybrid (preferred share).
         var seed: [32]u8 = undefined;
         fillRandom(&seed);
         self.localKeypair = try x25519.KeyPair.generateDeterministic(seed);
-        const pubkey = self.localKeypair.public_key;
 
         const ch = handshakeMod.ClientHello{
             .random = blk: {
@@ -317,10 +496,9 @@ pub const Engine = struct {
                 break :blk r;
             },
             .cipherSuites = &.{ .AES_128_GCM_SHA256, .AES_256_GCM_SHA384, .CHACHA20_POLY1305_SHA256 },
-            .keyShareEntries = &.{.{
-                .group = .x25519,
-                .keyExchange = &pubkey,
-            }},
+            // Non-null transport parameters mean QUIC, where the hybrid
+            // share does not fit one Initial packet.
+            .keyShareEntries = try self.buildKeyShares(quicTransportParams == null),
             .signatureAlgorithms = if (signatureAlgorithms.len > 0) signatureAlgorithms else &.{
                 .ecdsa_secp256r1_sha256,
                 .rsa_pss_rsae_sha256,
@@ -364,7 +542,6 @@ pub const Engine = struct {
         var seed: [32]u8 = undefined;
         fillRandom(&seed);
         self.localKeypair = try x25519.KeyPair.generateDeterministic(seed);
-        const pubkey = self.localKeypair.public_key;
 
         const offerEarly = session.maxEarlyData > 0;
         const ch = handshakeMod.ClientHello{
@@ -374,10 +551,7 @@ pub const Engine = struct {
                 break :blk r;
             },
             .cipherSuites = &.{ .AES_128_GCM_SHA256, .AES_256_GCM_SHA384, .CHACHA20_POLY1305_SHA256 },
-            .keyShareEntries = &.{.{
-                .group = .x25519,
-                .keyExchange = &pubkey,
-            }},
+            .keyShareEntries = try self.buildKeyShares(quicTransportParams == null),
             .signatureAlgorithms = if (signatureAlgorithms.len > 0) signatureAlgorithms else &.{
                 .ecdsa_secp256r1_sha256,
                 .rsa_pss_rsae_sha256,
@@ -468,7 +642,9 @@ pub const Engine = struct {
             self.hrrSeen = true;
             const sh = try handshakeMod.ServerHello.decode(msg[4..]);
             const group = sh.hrrGroup orelse return error.ProtocolViolation;
-            if (group != .x25519) return error.UnsupportedCipherSuite;
+            // Only groups we actually offered may be requested. We offer
+            // the hybrid and x25519, so both are legal here.
+            if (group != .x25519 and group != .x25519_ml_kem768) return error.UnsupportedCipherSuite;
             self.spliceHelloRetryRequest(msg);
             self.hrrPendingGroup = group;
             self.state = .clientHelloSent;
@@ -490,14 +666,7 @@ pub const Engine = struct {
 
         // Extract server's key share
         const ks = sh.keyShare orelse return error.InvalidKeyShare;
-        if (ks.group != .x25519) return error.UnsupportedCipherSuite;
-
-        var peerPub: [32]u8 = undefined;
-        if (ks.keyExchange.len != 32) return error.InvalidKeyShare;
-        @memcpy(&peerPub, ks.keyExchange);
-
-        // ECDHE: sharedSecret = X25519(clientSecret, serverPublic)
-        self.sharedSecret = try x25519.scalarmult(self.localKeypair.secret_key, peerPub);
+        self.sharedSecret = try self.deriveSharedSecret(ks);
         self.state = .serverHelloReceived;
 
         // Derive handshake traffic secrets (RFC 8446 Section 7.1)
@@ -592,6 +761,7 @@ pub const Engine = struct {
                         const group = std.mem.readInt(u16, chBody[pos + kp ..][0..2], .big);
                         const slen: usize = (@as(usize, chBody[pos + kp + 2]) << 8) | chBody[pos + kp + 3];
                         if (group == @intFromEnum(handshakeMod.NamedGroup.x25519) and slen == 32) return true;
+                        if (group == @intFromEnum(handshakeMod.NamedGroup.x25519_ml_kem768) and slen == HY_PK_LEN) return true;
                         kp += 4 + slen;
                     }
                 }
@@ -765,6 +935,16 @@ pub const Engine = struct {
                         if (kp + shareLen > listEnd) break;
                         if (group == @intFromEnum(handshakeMod.NamedGroup.x25519) and shareLen == 32) {
                             if (peerShare == null) peerShare = data[kp..][0..32].*;
+                        } else if (group == @intFromEnum(handshakeMod.NamedGroup.x25519_ml_kem768) and
+                            shareLen == HY_PK_LEN)
+                        {
+                            // Keep the client's hybrid public key for the
+                            // encapsulation below. Engine is per-connection
+                            // (acceptBuffered stack-local), so this is not shared.
+                            if (self.peerHybridKey == null) {
+                                self.peerHybridKey = undefined;
+                                @memcpy(&self.peerHybridKey.?, data[kp..][0..HY_PK_LEN]);
+                            }
                         }
                         kp += shareLen;
                     }
@@ -790,10 +970,20 @@ pub const Engine = struct {
 
         // Server preference: AES_128_GCM_SHA256 first, CHACHA20 fallback.
         const suite: tls.CipherSuite = if (offersAes) .AES_128_GCM_SHA256 else if (offersChacha) .CHACHA20_POLY1305_SHA256 else return error.UnsupportedCipherSuite;
-        const share = peerShare orelse return error.InvalidKeyShare;
         self.selectedSuite = suite;
-        self.sharedSecret = x25519.scalarmult(self.localKeypair.secret_key, share) catch
+        // A client offering only the hybrid has no other way to be served.
+        // When both are offered we keep x25519, which is the path the suite
+        // exercises. The key_share is part of the transcript, so a group that
+        // disagrees with the derived secret breaks the handshake.
+        if (peerShare) |share| {
+            const ss = x25519.scalarmult(self.localKeypair.secret_key, share) catch
+                return error.InvalidKeyShare;
+            self.sharedSecret = SharedSecret.of(&ss);
+        } else if (self.peerHybridKey) |pk| {
+            self.sharedSecret = SharedSecret.of(&try self.serverHybrid(pk[0..]));
+        } else {
             return error.InvalidKeyShare;
+        }
     }
 
     /// Verifies a client Finished message (full handshake message with header)
@@ -1307,9 +1497,18 @@ pub const Engine = struct {
         // keyShare extension
         var ksBody = std.ArrayList(u8).empty;
         defer ksBody.deinit(self.allocator);
-        try ksBody.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshakeMod.NamedGroup.x25519))));
-        try ksBody.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 32)));
-        try ksBody.appendSlice(self.allocator, &pubkey);
+        // The group we answer with must be the one we encapsulated for.
+        // Hardcoding x25519/32 here is what made a hybrid-only client reject
+        // us with `tls_parse_stoc_key_share: bad key share`.
+        if (self.hybridServerCt) |ct| {
+            try ksBody.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshakeMod.NamedGroup.x25519_ml_kem768))));
+            try ksBody.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(ct.len))));
+            try ksBody.appendSlice(self.allocator, &ct);
+        } else {
+            try ksBody.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshakeMod.NamedGroup.x25519))));
+            try ksBody.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 32)));
+            try ksBody.appendSlice(self.allocator, &pubkey);
+        }
 
         try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshakeMod.ExtensionType.key_share))));
         try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(ksBody.items.len))));
@@ -2340,4 +2539,107 @@ test "server certificate verify binds transcript and rejects tampering" {
         client.processServerCertificateVerify(tampered, leafDer),
     );
     try std.testing.expectEqual(before, client.transcript.finish());
+}
+
+test "X25519MLKEM768 hybrid share is offered first, with x25519 as fallback" {
+    const a = std.testing.allocator;
+    var client = Engine.initClient(a, .{});
+    defer client.deinit();
+
+    // No transport parameters => TCP mode, so the hybrid is offered.
+    const ch = try client.produceClientHello(&.{"h2"}, &.{}, "example.com", null);
+    defer a.free(ch);
+
+    // Walk to the key_share extension: body -> sessionId -> cipherSuites
+    // -> compression -> extensions.
+    var pos: usize = 34;
+    pos += 1 + ch[4 + pos];
+    pos += 2 + (@as(usize, ch[4 + pos]) << 8 | ch[4 + pos + 1]);
+    pos += 1 + ch[4 + pos];
+    const extLenTotal: usize = @as(usize, ch[4 + pos]) << 8 | ch[4 + pos + 1];
+    const extEnd = 4 + pos + 2 + extLenTotal;
+    pos += 2;
+    var found = false;
+    while (pos + 4 <= extEnd) {
+        const extType = std.mem.readInt(u16, ch[4 + pos ..][0..2], .big);
+        const extLen: usize = @as(usize, ch[4 + pos + 2]) << 8 | ch[4 + pos + 3];
+        pos += 4;
+        if (extType == @intFromEnum(handshakeMod.ExtensionType.key_share)) {
+            found = true;
+            const d = ch[4 + pos ..][0..extLen];
+            const listLen: usize = @as(usize, d[0]) << 8 | d[1];
+            try std.testing.expectEqual(extLen, listLen + 2);
+
+            var kp: usize = 2;
+            const g0 = std.mem.readInt(u16, d[kp..][0..2], .big);
+            const l0 = std.mem.readInt(u16, d[kp + 2 ..][0..2], .big);
+            try std.testing.expectEqual(@intFromEnum(handshakeMod.NamedGroup.x25519_ml_kem768), g0);
+            try std.testing.expectEqual(@as(u16, 1216), l0);
+            kp += 4 + l0;
+
+            // The fallback must survive: a peer without PQ support picks
+            // it directly instead of forcing a HelloRetryRequest.
+            const g1 = std.mem.readInt(u16, d[kp..][0..2], .big);
+            const l1 = std.mem.readInt(u16, d[kp + 2 ..][0..2], .big);
+            try std.testing.expectEqual(@intFromEnum(handshakeMod.NamedGroup.x25519), g1);
+            try std.testing.expectEqual(@as(u16, 32), l1);
+            break;
+        }
+        pos += extLen;
+    }
+    try std.testing.expect(found);
+}
+
+test "hybrid decapsulation matches the peer's encapsulated secret" {
+    const a = std.testing.allocator;
+    var client = Engine.initClient(a, .{});
+    defer client.deinit();
+
+    const ch = try client.produceClientHello(&.{"h2"}, &.{}, "example.com", null);
+    defer a.free(ch);
+    const mlkp = client.hybridMlKem orelse return error.TestExpectedHybridOffered;
+
+    // A server encapsulates to the ML-KEM key we advertised and answers
+    // with its own X25519 share, which is what RFC 10024 puts on the wire.
+    const seed = [_]u8{0x5A} ** MlKem.encaps_seed_length;
+    const es = mlkp.public_key.encapsDeterministic(&seed);
+    try std.testing.expectEqual(@as(usize, MLKEM_CT_LEN), es.ciphertext.len);
+
+    const srv_x = try x25519.KeyPair.generateDeterministic([_]u8{0x3C} ** 32);
+    var share: [HY_CT_LEN]u8 = undefined;
+    @memcpy(share[0..MLKEM_CT_LEN], &es.ciphertext);
+    @memcpy(share[MLKEM_CT_LEN..], &srv_x.public_key);
+
+    const entry: handshakeMod.ServerHello.KeyShareEntry = .{
+        .group = .x25519_ml_kem768,
+        .keyExchange = &share,
+    };
+    const got = try client.deriveSharedSecret(entry);
+
+    // RFC 10024 4.3: the secret is the concatenation, ML-KEM first.
+    const ss_x = try x25519.scalarmult(client.localKeypair.secret_key, srv_x.public_key);
+    var want: [HY_SS_LEN]u8 = undefined;
+    @memcpy(want[0..MLKEM_SS_LEN], &es.shared_secret);
+    @memcpy(want[MLKEM_SS_LEN..], &ss_x);
+    try std.testing.expectEqual(@as(usize, HY_SS_LEN), got.len);
+    try std.testing.expectEqualSlices(u8, &want, got.slice());
+}
+
+test "a group we never offered is rejected instead of silently downgraded" {
+    const a = std.testing.allocator;
+    var client = Engine.initClient(a, .{});
+    defer client.deinit();
+
+    // QUIC mode: only x25519 is offered.
+    const ch = try client.produceClientHello(&.{"h3"}, &.{}, "example.com", "tp");
+    defer a.free(ch);
+    try std.testing.expect(!client.hybridOffered);
+
+    // A server answering with the hybrid when we did not offer it must
+    // fail loudly (RFC 8446 4.1.4), not downgrade the group's security.
+    const fake: handshakeMod.ServerHello.KeyShareEntry = .{
+        .group = .x25519_ml_kem768,
+        .keyExchange = &([_]u8{0} ** 1120),
+    };
+    try std.testing.expectError(error.UnsupportedCipherSuite, client.deriveSharedSecret(fake));
 }
