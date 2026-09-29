@@ -1319,14 +1319,20 @@ pub const Engine = struct {
         try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshakeMod.ExtensionType.supported_versions))));
         try exts.appendSlice(self.allocator, &.{ 0x00, 0x02 });
         try exts.appendSlice(self.allocator, &.{ 0x03, 0x04 });
-
-        // serverName ack (empty) — only when the client sent SNI. An
-        // unsolicited ack violates RFC 8446 Section 4.2 and aborts strict
-        // clients (e.g. IP-literal handshakes carry no SNI).
-        if (self.sniHostname != null) {
-            try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshakeMod.ExtensionType.server_name))));
-            try exts.appendSlice(self.allocator, &.{ 0x00, 0x00 });
-        }
+        // No server_name acknowledgement in the TLS 1.3 ServerHello.
+        //
+        // OpenSSL rejects it. ssl/statem/extensions.c lists server_name as valid in
+        // SSL_EXT_CLIENT_HELLO, SSL_EXT_TLS1_2_SERVER_HELLO and
+        // SSL_EXT_TLS1_3_ENCRYPTED_EXTENSIONS -- but NOT
+        // SSL_EXT_TLS1_3_SERVER_HELLO -- so tls_validate_all_contexts fails and the
+        // client aborts with illegal_parameter before the handshake begins. Measured
+        // against curl over HTTPS and `openssl s_client`: both refused every
+        // connection that carried SNI, which is what every real client sends.
+        //
+        // The ack is pure acknowledgement. The client already knows the hostname it
+        // asked for and nothing downstream depends on the server echoing it back, so
+        // omitting it is both what interoperable peers do and the only form TLS 1.3
+        // clients accept.
 
         // preSharedKey ack: selectedIdentity 0 (we accept only the
         // first offered identity). Present only on the abbreviated flight.

@@ -105,6 +105,17 @@ pub const PortStrategy = enum {
     exit,
 };
 
+/// ALPN identifiers this server can actually speak.
+///
+/// `h2` is deliberately absent. `Config.http2` exists and defaults to true,
+/// but there is no HTTP/2 framing behind it, so advertising the identifier
+/// negotiates a protocol we then fail to speak: every browser and a default
+/// `curl` offer `h2`, and the exchange dies right after the handshake. The
+/// list has to come from what is implemented, not from what the config
+/// declares.
+const alpn_http11 = [_]alpnMod.Protocol{.@"http/1.1"};
+const alpn_http10_http11 = [_]alpnMod.Protocol{ .@"http/1.1", .@"http/1.0" };
+
 pub const Config = struct {
     host: []const u8 = "0.0.0.0",
     port: u16 = 8080,
@@ -327,6 +338,21 @@ pub const Server = struct {
                     effectiveCfg.http2 = false;
                     effectiveCfg.http3 = true;
                 },
+            }
+        }
+
+        // Correct the TLS ALPN preference to match what we serve.
+        //
+        // Done here, on the stored config, rather than at the construction
+        // site: certificate reload rebuilds the TLS server from
+        // `self.cfg.tls.?.alpn` and would otherwise fall back to
+        // DEFAULT_TCP_PREFERENCE and reintroduce `h2`.
+        //
+        // Only the default is replaced. An explicitly chosen list is the
+        // caller's decision, including a deliberate `h2`.
+        if (effectiveCfg.tls) |*tcfg| {
+            if (std.mem.eql(alpnMod.Protocol, tcfg.alpn, &alpnMod.DEFAULT_TCP_PREFERENCE)) {
+                tcfg.alpn = if (effectiveCfg.http10) &alpn_http10_http11 else &alpn_http11;
             }
         }
 
