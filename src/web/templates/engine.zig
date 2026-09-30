@@ -123,24 +123,72 @@ pub const Engine = struct {
     }
 
     /// Provides AST lookup for includes and inheritance.
+    /// Per-render state: where the renderer was when it failed, and the engine
+    /// that owns the render.
+    ///
+    /// This used to be the Engine's own `lastRenderLoc`, which is wrong twice
+    /// over. It is per-render state kept on shared storage, and cached renders
+    /// are concurrent by design (see `render`), so two threads walking two
+    /// templates overwrote each other's location: a failure could be reported
+    /// at another template's line, or at line 1 because the other thread had
+    /// just cleared it. The reset at the top of `render` and the read in
+    /// `captureRenderError` were both unsynchronised against the one write
+    /// that did take the lock, so this was a data race and not only a
+    /// last-writer-wins bug.
+    ///
+    /// Locking the field cannot fix that. The location and the error have to
+    /// move together to describe one render, and no lock binds them to the
+    /// same thread across the whole walk.
+    ///
+    /// Held by value in the render's own frame: no synchronisation needed, and
+    /// it cannot outlive the call that owns it.
+    const RenderCtx = struct {
+        engine: *Engine,
+        loc: ?rendererMod.ErrLoc = null,
+
+        fn provider(self: *RenderCtx) rendererMod.TemplateProvider {
+            return .{
+                .ptr = @ptrCast(self),
+                .getAstFn = getAstCallback,
+                .reportLocFn = reportLocCallback,
+            };
+        }
+    };
+
+    /// Provider for callers that drive the renderer themselves. Locations land
+    /// on the Engine rather than on a per-render context, so they are only
+    /// meaningful for one render at a time. `render` and `renderString` do not
+    /// use this; they carry a `RenderCtx`.
     pub fn provider(self: *Engine) rendererMod.TemplateProvider {
         return .{
             .ptr = @ptrCast(self),
-            .getAstFn = getAstCallback,
-            .reportLocFn = reportLocCallback,
+            .getAstFn = engineGetAst,
+            .reportLocFn = engineReportLoc,
         };
     }
 
+    fn getAstCallback(ptr: *const anyopaque, name: []const u8) ?*const parserMod.TemplateAst {
+        const rc: *RenderCtx = @ptrCast(@alignCast(@constCast(ptr)));
+        return rc.engine.getOrCompile(name) catch null;
+    }
+
+    /// No lock: `rc` is owned by the thread running this render and is not
+    /// reachable from any other.
     fn reportLocCallback(ptr: *const anyopaque, line: usize, col: usize, startByte: usize) void {
+        const rc: *RenderCtx = @ptrCast(@alignCast(@constCast(ptr)));
+        rc.loc = .{ .line = line, .col = col, .startByte = startByte };
+    }
+
+    fn engineGetAst(ptr: *const anyopaque, name: []const u8) ?*const parserMod.TemplateAst {
+        const self: *Engine = @ptrCast(@alignCast(@constCast(ptr)));
+        return self.getOrCompile(name) catch null;
+    }
+
+    fn engineReportLoc(ptr: *const anyopaque, line: usize, col: usize, startByte: usize) void {
         const self: *Engine = @ptrCast(@alignCast(@constCast(ptr)));
         self.lock.lock();
         defer self.lock.unlock();
         self.lastRenderLoc = .{ .line = line, .col = col, .startByte = startByte };
-    }
-
-    fn getAstCallback(ptr: *const anyopaque, name: []const u8) ?*const parserMod.TemplateAst {
-        const self: *Engine = @ptrCast(@alignCast(@constCast(ptr)));
-        return self.getOrCompile(name) catch null;
     }
 
     /// Compiles a template or retrieves it from cache.
@@ -179,7 +227,12 @@ pub const Engine = struct {
 
         var parser = parserMod.Parser.init(self.allocator, name, source);
         const ast = parser.parse() catch |err| {
+            // Cached renders are concurrent, and this is shared state, so the
+            // store is taken. Same lock as `captureRenderError`, which is the
+            // other writer of this field.
             if (parser.lastError) |diag| {
+                self.lock.lock();
+                defer self.lock.unlock();
                 self.lastError = diag;
             }
             return err;
@@ -226,9 +279,9 @@ pub const Engine = struct {
         var renderer = self.renderer;
         renderer.filters = &self.filters;
         renderer.globals = &self.globals;
-        self.lastRenderLoc = null;
-        renderer.render(ast, &ctx, self.provider(), writer) catch |err| {
-            self.captureRenderError(name, err);
+        var rc: RenderCtx = .{ .engine = self };
+        renderer.render(ast, &ctx, rc.provider(), writer) catch |err| {
+            self.captureRenderError(&rc, name, err);
             return err;
         };
     }
@@ -243,9 +296,18 @@ pub const Engine = struct {
         }
     }
 
-    fn captureRenderError(self: *Engine, templateName: []const u8, err: anyerror) void {
-        const loc = self.lastRenderLoc;
-        self.lastError = .{
+    /// Records a failed render as the Engine's `lastError`.
+    ///
+    /// The location comes from `rc`, the context of the render that actually
+    /// failed, so message and position always describe the same template.
+    ///
+    /// `lastError` is a single slot on shared storage, so with concurrent
+    /// renders the newest failure wins: it is a "most recent failure" summary
+    /// rather than per-render state. The lock is what keeps a reader from
+    /// seeing a half-written value.
+    fn captureRenderError(self: *Engine, rc: *const RenderCtx, templateName: []const u8, err: anyerror) void {
+        const loc = rc.loc;
+        const info: errMod.SourceError = .{
             .kind = .renderError,
             .templateName = templateName,
             .line = if (loc) |l| l.line else 1,
@@ -253,6 +315,9 @@ pub const Engine = struct {
             .byteOffset = if (loc) |l| l.startByte else 0,
             .message = @errorName(err),
         };
+        self.lock.lock();
+        defer self.lock.unlock();
+        self.lastError = info;
     }
 
     /// Renders a template to an allocated string.
@@ -293,9 +358,9 @@ pub const Engine = struct {
         var renderer = self.renderer;
         renderer.filters = &self.filters;
         renderer.globals = &self.globals;
-        self.lastRenderLoc = null;
-        renderer.render(&ast, &ctx, self.provider(), writer) catch |err| {
-            self.captureRenderError("<inline>", err);
+        var rc: RenderCtx = .{ .engine = self };
+        renderer.render(&ast, &ctx, rc.provider(), writer) catch |err| {
+            self.captureRenderError(&rc, "<inline>", err);
             return err;
         };
     }
@@ -648,4 +713,70 @@ test "Engine concurrent render with invalidation is safe" {
     var lw = rendererMod.ListWriter{ .list = &list, .allocator = alloc };
     try engine.render("page.html", .{ .v = @as(i32, 2) }, &lw);
     try testing.expectEqualStrings("B:p2", list.items);
+}
+
+test "Engine concurrent failing renders do not mix their diagnostics" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const fsMod = @import("../../utils/fs.zig");
+    const dir = "test_diag_race.tmp";
+    // Two templates that fail on different lines, so a report that mixes one
+    // template's name with the other's line is detectable rather than merely
+    // wrong. `strictUndefined` turns the missing variable into the failure.
+    try makeTempDir(dir, &.{
+        .{ .name = "a.html", .src = "one\n{{ missing_a }}\n" },
+        .{ .name = "b.html", .src = "one\ntwo\nthree\n{{ missing_b }}\n" },
+    });
+    defer {
+        fsMod.deleteFile(dir ++ "/a.html") catch {};
+        fsMod.deleteFile(dir ++ "/b.html") catch {};
+        var tmp: [512]u8 = undefined;
+        @memcpy(tmp[0..dir.len], dir);
+        tmp[dir.len] = 0;
+        _ = std.c.rmdir(tmp[0..dir.len :0]);
+    }
+    var engine = try Engine.init(alloc, undefined, .{ .directory = dir, .strictUndefined = true });
+    defer engine.deinit();
+
+    const Worker = struct {
+        fn run(eng: *Engine, which: usize) void {
+            const name = if (which % 2 == 0) "a.html" else "b.html";
+            var i: usize = 0;
+            while (i < 300) : (i += 1) {
+                var list = std.ArrayList(u8).empty;
+                defer list.deinit(std.testing.allocator);
+                var lw = rendererMod.ListWriter{ .list = &list, .allocator = std.testing.allocator };
+                eng.render(name, .{}, &lw) catch {};
+            }
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*th, n| th.* = try std.Thread.spawn(.{}, Worker.run, .{ &engine, n });
+    for (&threads) |*th| th.join();
+
+    // Threads are joined, so whatever is in `lastError` came from one finished
+    // render. What is asserted is that the report is self-consistent: the line
+    // belongs to the template named alongside it.
+    //
+    // Scope of this test, stated plainly: it does NOT catch the bug it was
+    // written for. Verified by reintroducing the shared field and running this
+    // at 4 threads x 2000 iterations over 8 cores -- it still passed, because
+    // the window between the render failing and the location being read is a
+    // few instructions and nothing in it is ever observed to go wrong on this
+    // machine. ThreadSanitizer is not an option either: `-fsanitize-thread`
+    // builds and links, but it fails to report a deliberately unsynchronised
+    // counter written by two threads, so it cannot be trusted to report
+    // anything here.
+    //
+    // So the fix rests on the ownership argument, not on this test: the
+    // location now lives in a `RenderCtx` owned by the thread running that
+    // render, so no interleaving can attribute another render's position to
+    // this one. Keeping the test is still worth it as a smoke test that
+    // concurrent failing renders leave the engine coherent, which is the
+    // property that would break first if the ownership were lost again.
+    const reported = engine.lastError orelse return error.TestExpectedErrorReported;
+    const self_consistent =
+        (std.mem.eql(u8, reported.templateName, "a.html") and reported.line == 2) or
+        (std.mem.eql(u8, reported.templateName, "b.html") and reported.line == 4);
+    try testing.expect(self_consistent);
 }
