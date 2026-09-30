@@ -170,7 +170,12 @@ pub const Engine = struct {
         }
 
         const source = try self.loader.load(self.allocator, name);
-        errdefer self.allocator.free(source);
+        // `source` is ours only until `put` takes it. A concurrent
+        // invalidate can make the `get` at the end of this function
+        // miss, and the resulting error must not free a buffer the
+        // cache is still holding.
+        var source_owned_by_cache = false;
+        errdefer if (!source_owned_by_cache) self.allocator.free(source);
 
         var parser = parserMod.Parser.init(self.allocator, name, source);
         const ast = parser.parse() catch |err| {
@@ -181,6 +186,7 @@ pub const Engine = struct {
         };
 
         try self.cache.put(name, source, ast);
+        source_owned_by_cache = true;
 
         // Preload any extends parent
         if (ast.extendsPath) |parent| {
