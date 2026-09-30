@@ -564,7 +564,7 @@ pub const Client = struct {
     ) !NativeConnection {
         const a = self.allocator;
 
-        var engine = engineMod.Engine.initClient(a, .{});
+        var engine = engineMod.Engine.initClient(self.io, a, .{});
         defer engine.deinit();
 
         // SNI only for DNS names; IP literals carry none.
@@ -1020,7 +1020,7 @@ test "tls client retries after hello retry request over loopback" {
                 return;
             };
             defer sock.close();
-            var eng = engineMod.Engine.initServer(std.heap.page_allocator, .{});
+            var eng = engineMod.Engine.initServer(std.Io.Threaded.global_single_threaded.io(), std.heap.page_allocator, .{});
             defer eng.deinit();
             // CH1 (with share — production client always offers; the HRR
             // here is unconditional to drive the retry path).

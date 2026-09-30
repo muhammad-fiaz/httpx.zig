@@ -295,8 +295,17 @@ pub const MockSocksServer = struct {
     }
 
     pub fn deinit(self: *MockSocksServer) void {
-        self.listener.close(self.io);
+        // Wake the blocked accept first, then join, then close. Without
+        // the dummy connection the server thread is parked in accept
+        // forever; closing the listener underneath it makes the woken
+        // accept observe a closed descriptor, which the standard library
+        // reports as a programmer bug (EBADF).
+        if (tcpMod.connect(self.io, "127.0.0.1", self.port)) |s| {
+            var dummy = s;
+            dummy.close();
+        } else |_| {}
         if (self.thread) |*t| t.join();
+        self.listener.close(self.io);
         std.testing.allocator.destroy(self);
     }
 

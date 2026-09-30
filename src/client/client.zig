@@ -2288,14 +2288,14 @@ test "client get over http3 serves loopback over real udp" {
             try conn.sendFrames(.application, B.build, 0);
         }
 
-        fn serveOne(srv: *@This(), seed: u64, deadlineMs: u64) !void {
+        fn serveOne(srv: *@This(), deadlineMs: u64) !void {
             const alloc = std.testing.allocator;
-            var qconn = try quicConn.Connection.init(alloc, .server, .{}, seed);
+            var qconn = try quicConn.Connection.init(alloc, std.Io.Threaded.global_single_threaded.io(), .server, .{});
             defer qconn.deinit();
             // The endpoint's conn pointer follows each fresh connection;
             // the previous one is already deinited by its own scope.
             srv.ep.conn = qconn;
-            var drv = quicHs.Driver.initServer(alloc, .{ .certChainPem = certPem, .privateKeyPem = keyPem });
+            var drv = quicHs.Driver.initServer(std.Io.Threaded.global_single_threaded.io(), alloc, .{ .certChainPem = certPem, .privateKeyPem = keyPem });
             defer drv.deinit();
             qconn.tls = .{ .ctx = &drv, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
             try quicHs.serveHandshake(&srv.ep, &srv.pump, &drv, deadlineMs);
@@ -2339,11 +2339,11 @@ test "client get over http3 serves loopback over real udp" {
         }
 
         fn run(srv: *@This(), out: *?anyerror) void {
-            serveOne(srv, 0x91, 15_000) catch |e| {
+            serveOne(srv, 15_000) catch |e| {
                 out.* = e;
                 return;
             };
-            serveOne(srv, 0x92, 15_000) catch |e| {
+            serveOne(srv, 15_000) catch |e| {
                 out.* = e;
                 return;
             };
@@ -2351,7 +2351,7 @@ test "client get over http3 serves loopback over real udp" {
             // verification and goes quiet, so the server must time out
             // (never complete). A completed third handshake would mean
             // the client accepted a forged chain — catastrophic.
-            if (serveOne(srv, 0x93, 5_000)) {
+            if (serveOne(srv, 5_000)) {
                 out.* = error.UnexpectedSuccess;
             } else |e| {
                 out.* = if (e == error.HandshakeTimeout) null else e;
@@ -2360,7 +2360,7 @@ test "client get over http3 serves loopback over real udp" {
     };
 
     // Placeholder conn: replaced by each serveOne before any feeding.
-    var placeholder = try quicConn.Connection.init(a, .server, .{}, 0x90);
+    var placeholder = try quicConn.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
     defer placeholder.deinit();
     var srv = Server{};
     srv.ep = try quicEp.Endpoint.init(a, ctx.io, placeholder, .{});
@@ -2735,12 +2735,12 @@ test "client get over http3 with 0-rtt early data resumes session" {
             try conn.sendFrames(.application, B.build, 0);
         }
 
-        fn serveOne(srv: *@This(), seed: u64, deadlineMs: u64, tkeys: sessionMod.TicketKeys, rcache: *sessionMod.ReplayCache) !void {
+        fn serveOne(srv: *@This(), deadlineMs: u64, tkeys: sessionMod.TicketKeys, rcache: *sessionMod.ReplayCache) !void {
             const alloc = std.testing.allocator;
-            var qconn = try quicConn.Connection.init(alloc, .server, .{}, seed);
+            var qconn = try quicConn.Connection.init(alloc, std.Io.Threaded.global_single_threaded.io(), .server, .{});
             defer qconn.deinit();
             srv.ep.conn = qconn;
-            var drv = quicHs.Driver.initServer(alloc, .{
+            var drv = quicHs.Driver.initServer(std.Io.Threaded.global_single_threaded.io(), alloc, .{
                 .certChainPem = certPem,
                 .privateKeyPem = keyPem,
                 .ticketKeys = tkeys,
@@ -2789,11 +2789,11 @@ test "client get over http3 with 0-rtt early data resumes session" {
         }
 
         fn run(srv: *@This(), out: *?anyerror, tkeys: sessionMod.TicketKeys, rcache: *sessionMod.ReplayCache) void {
-            serveOne(srv, 0x95, 15_000, tkeys, rcache) catch |e| {
+            serveOne(srv, 15_000, tkeys, rcache) catch |e| {
                 out.* = e;
                 return;
             };
-            serveOne(srv, 0x96, 15_000, tkeys, rcache) catch |e| {
+            serveOne(srv, 15_000, tkeys, rcache) catch |e| {
                 out.* = e;
                 return;
             };
@@ -2801,7 +2801,7 @@ test "client get over http3 with 0-rtt early data resumes session" {
         }
     };
 
-    var placeholder = try quicConn.Connection.init(a, .server, .{}, 0x94);
+    var placeholder = try quicConn.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
     defer placeholder.deinit();
     var srv = Server{};
     srv.ep = try quicEp.Endpoint.init(a, ctx.io, placeholder, .{});

@@ -243,9 +243,9 @@ test "quic endpoints exchange protected initial packets over real udp" {
 
     defer ctx.deinit();
 
-    var client = try connMod.Connection.init(a, .client, .{}, 11);
+    var client = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
     defer client.deinit();
-    var server = try connMod.Connection.init(a, .server, .{}, 22);
+    var server = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
     defer server.deinit();
 
     // Queue a real Initial-space flight (keys derive from DCID alone, so
