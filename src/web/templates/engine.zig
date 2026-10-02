@@ -222,8 +222,8 @@ pub const Engine = struct {
         // invalidate can make the `get` at the end of this function
         // miss, and the resulting error must not free a buffer the
         // cache is still holding.
-        var source_owned_by_cache = false;
-        errdefer if (!source_owned_by_cache) self.allocator.free(source);
+        var sourceOwnedByCache = false;
+        errdefer if (!sourceOwnedByCache) self.allocator.free(source);
 
         var parser = parserMod.Parser.init(self.allocator, name, source);
         const ast = parser.parse() catch |err| {
@@ -239,7 +239,7 @@ pub const Engine = struct {
         };
 
         try self.cache.put(name, source, ast);
-        source_owned_by_cache = true;
+        sourceOwnedByCache = true;
 
         // Preload any extends parent
         if (ast.extendsPath) |parent| {
@@ -775,8 +775,8 @@ test "Engine concurrent failing renders do not mix their diagnostics" {
     // concurrent failing renders leave the engine coherent, which is the
     // property that would break first if the ownership were lost again.
     const reported = engine.lastError orelse return error.TestExpectedErrorReported;
-    const self_consistent =
+    const selfConsistent =
         (std.mem.eql(u8, reported.templateName, "a.html") and reported.line == 2) or
         (std.mem.eql(u8, reported.templateName, "b.html") and reported.line == 4);
-    try testing.expect(self_consistent);
+    try testing.expect(selfConsistent);
 }
