@@ -775,8 +775,8 @@ test "Engine concurrent failing renders do not mix their diagnostics" {
     // concurrent failing renders leave the engine coherent, which is the
     // property that would break first if the ownership were lost again.
     const reported = engine.lastError orelse return error.TestExpectedErrorReported;
-    const self_consistent =
+    const selfConsistent =
         (std.mem.eql(u8, reported.templateName, "a.html") and reported.line == 2) or
         (std.mem.eql(u8, reported.templateName, "b.html") and reported.line == 4);
-    try testing.expect(self_consistent);
+    try testing.expect(selfConsistent);
 }

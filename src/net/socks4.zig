@@ -213,8 +213,12 @@ pub const MockSocks4Server = struct {
             var dummy = s;
             dummy.close();
         } else |_| {}
-        self.listener.close(self.io);
+        // Join BEFORE closing. The dummy connection above is what releases
+        // the pending accept; closing the listener first can make the
+        // woken accept observe an already-closed descriptor, which the
+        // standard library reports as a programmer bug (EBADF).
         if (self.thread) |*t| t.join();
+        self.listener.close(self.io);
         std.testing.allocator.destroy(self);
     }
 

@@ -434,12 +434,12 @@ test "release then acquire reuses connection" {
     var ctx = tTcp.IoContext.init(std.testing.allocator) catch return;
     defer ctx.deinit();
     var l = tTcp.Listener.bind(ctx.io, 0) catch return;
-    // Defer order matters: th.join() is declared LAST so it runs FIRST in
-    // LIFO — but the listener must be closed BEFORE join to wake a blocked
-    // accept. So: declare close AFTER join (runs before it).
+    // LIFO runs these in reverse: release the accept, join, then close.
     const th = spawnEchoServer(&l, ctx.io, 1);
-    defer th.join();
     defer l.close(ctx.io);
+    defer th.join();
+    defer releaseAcceptor(&l, ctx.io);
+    defer releaseAcceptor(&l, ctx.io);
 
     const a = std.testing.allocator;
     var p = Pool.init(a, ctx.io, .{});
@@ -462,10 +462,24 @@ test "release then acquire reuses connection" {
     try std.testing.expectEqual(@as(u64, 0), st2.misses);
 }
 
+/// Releases a blocked `accept` by connecting once and immediately closing,
+/// so the acceptor thread sees EOF and returns.
+///
+/// This is what makes the join safe. Joining first would hang whenever
+/// fewer than `count` connections arrive; closing the listener first would
+/// let the woken `accept` observe a closed descriptor, which the standard
+/// library reports as a programmer bug (EBADF). Neither order works alone:
+/// the accept must be released, then joined, then the listener closed.
+fn releaseAcceptor(l: *tTcp.Listener, io: std.Io) void {
+    if (tTcp.connect(io, "127.0.0.1", l.localPort())) |s| {
+        var waker = s;
+        waker.close();
+    } else |_| {}
+}
+
 /// Spawns a mock server accepting exactly `count` connections, reading once
-/// per connection. Returns the thread; caller MUST `defer th.join()` and
-/// `defer listener.close()` (close declared after join so LIFO closes first,
-/// guaranteeing join can never hang on a blocked accept).
+/// per connection. Call `releaseAcceptor`, then `th.join()`, then
+/// `listener.close()` — in that order.
 fn spawnEchoServer(l: *tTcp.Listener, io: std.Io, count: usize) std.Thread {
     // Each connection gets its OWN thread: a client that parks (never writes)
     // must not block acceptance/service of other connections.
@@ -502,6 +516,7 @@ test "maxPerHost parking cap enforced" {
     const th = spawnEchoServer(&l, ctx.io, 2);
     defer l.close(ctx.io);
     defer th.join();
+    defer releaseAcceptor(&l, ctx.io);
 
     const a = std.testing.allocator;
     var p = Pool.init(a, ctx.io, .{ .maxPerHost = 1 });
@@ -538,6 +553,7 @@ test "lazy sweep evicts expired idle connections without a reaper thread" {
     const th = spawnEchoServer(&l, ctx.io, 1);
     defer l.close(ctx.io);
     defer th.join();
+    defer releaseAcceptor(&l, ctx.io);
 
     const a = std.testing.allocator;
     // Negative idle timeout: every parked connection is instantly stale,

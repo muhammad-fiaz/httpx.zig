@@ -90,6 +90,56 @@ jobs:
           ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
           ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
 
+  interop:
+    # Real third-party clients against a real server. The unit suite talks to
+    # httpx with httpx, so a wire-format or handshake regression that stays
+    # self-consistent is invisible to it; curl and openssl are independent
+    # implementations, so agreeing with them is actual evidence.
+    #
+    # Opt-in via HTTPX_INTEROP so the three-OS matrix above stays hermetic and
+    # never depends on these binaries being present.
+    name: Interop (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux
+          - os: macos-latest
+            name: macOS
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # X25519MLKEM768 needs OpenSSL 3.5+, and neither runner ships it:
+      # macOS provides LibreSSL, Ubuntu 24.04 provides 3.0. The tests detect
+      # the capability rather than assume it, so this is about making the
+      # post-quantum path reachable at all, not about making the build green.
+      - name: Install OpenSSL 3.5 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install openssl@3.5 || brew install openssl@3
+          echo "$(brew --prefix openssl@3.5 2>/dev/null || brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+          openssl version
+
+      - name: OpenSSL capabilities
+        run: openssl version && (openssl list -kem-algorithms || true)
+
+      - name: Interop tests
+        shell: bash
+        run: zig build test --summary all --test-timeout 180s
+        env:
+          HTTPX_INTEROP: '1'
+          ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+          ZIG_LOCAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache
+
   cross-check:
     name: Cross Check (${{ matrix.name }})
     runs-on: ubuntu-latest

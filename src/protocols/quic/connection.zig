@@ -267,15 +267,16 @@ pub const Connection = struct {
     /// Serialized output accumulated by send operations.
     outbuf: std.ArrayList(u8) = .empty,
 
-    rng: std.Random.DefaultPrng,
-
-    pub fn init(allocator: Allocator, role: Role, cfg: Config, seed: u64) !*Connection {
+    /// `io` supplies the entropy for the connection IDs. There is
+    /// deliberately no seed parameter: one invites callers to pass a
+    /// clock value, and a predictable CID lets an off-path attacker
+    /// correlate or hijack a flow (RFC 9000 Section 8.2).
+    pub fn init(allocator: Allocator, io: std.Io, role: Role, cfg: Config) !*Connection {
         const self = try allocator.create(Connection);
         self.* = .{
             .allocator = allocator,
             .role = role,
             .cfg = cfg,
-            .rng = std.Random.DefaultPrng.init(seed ^ 0x9E3779B97F4A7C15),
         };
         for (0..3) |i| {
             self.spaces[i] = PnSpace.init(allocator, @enumFromInt(i));
@@ -290,12 +291,14 @@ pub const Connection = struct {
         self.sendStreamEnd = std.AutoHashMap(u64, u64).init(allocator);
         self.streams = std.AutoHashMap(u64, *qstream.Stream).init(allocator);
 
-        // Random local CIDs (8-byte default for initial handshake).
+        // Local CIDs from OS entropy (8-byte default for the initial
+        // handshake). Unpredictable, so an off-path observer cannot use
+        // them to track or inject into a flow.
         self.scidLen = 8;
-        self.rng.random().bytes(self.scid[0..self.scidLen]);
+        try io.randomSecure(self.scid[0..self.scidLen]);
         if (role == .client) {
             self.dcidLen = 8;
-            self.rng.random().bytes(self.dcid[0..self.dcidLen]); // chosen DCID for Initial
+            try io.randomSecure(self.dcid[0..self.dcidLen]); // chosen DCID for Initial
             @memcpy(self.origDcid[0..self.dcidLen], self.dcid[0..self.dcidLen]);
             self.origDcidLen = self.dcidLen;
         }
@@ -1439,9 +1442,9 @@ fn fe(gpa: Allocator, payload: *std.ArrayList(u8), f: frames.Frame) Error!void {
 test "loopback connection pair completes protected handshake and stream" {
     const a = std.testing.allocator;
 
-    var client = try Connection.init(a, .client, .{}, 11);
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
     defer client.deinit();
-    var server = try Connection.init(a, .server, .{}, 22);
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
     defer server.deinit();
 
     const Hs = struct {
@@ -1655,7 +1658,7 @@ const TlsHandshakeDriver = struct {
         d.flight.appendSlice(conn.allocator, flight.certificateVerify) catch return Error.OutOfMemory;
         d.flight.appendSlice(conn.allocator, flight.finished) catch return Error.OutOfMemory;
 
-        const shared = d.engine.sharedSecret orelse return Error.TlsDriverFailed;
+        const shared = d.engine.sharedSecret32() orelse return Error.TlsDriverFailed;
         d.shared = shared;
         const chSh = hashConcat(&.{ chMsg, flight.serverHello });
         const hs = qtls.handshakeKeys(shared, chSh);
@@ -1699,7 +1702,7 @@ const TlsHandshakeDriver = struct {
             switch (rec.kind) {
                 @intFromEnum(ths.HandshakeType.server_hello) => {
                     d.engine.processServerHello(rec.msg) catch return Error.TlsDriverFailed;
-                    const shared = d.engine.sharedSecret orelse return Error.TlsDriverFailed;
+                    const shared = d.engine.sharedSecret32() orelse return Error.TlsDriverFailed;
                     d.shared = shared;
                     const chSh = hashConcat(&.{ d.flight.items, rec.msg });
                     const hs = qtls.handshakeKeys(shared, chSh);
@@ -1779,18 +1782,18 @@ fn runTlsHandshake(
 test "quic carries TLS 1.3 handshake end to end" {
     const a = std.testing.allocator;
 
-    var cliD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initClient(a, .{}) };
+    var cliD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{}) };
     defer cliD.flight.deinit(a);
     defer cliD.incoming.deinit(a);
     defer cliD.peerFlight.deinit(a);
-    var srvD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initServer(a, .{}) };
+    var srvD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{}) };
     defer srvD.flight.deinit(a);
     defer srvD.incoming.deinit(a);
     defer srvD.peerFlight.deinit(a);
 
-    var client = try Connection.init(a, .client, .{}, 0xC11E);
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
     defer client.deinit();
-    var server = try Connection.init(a, .server, .{}, 0x5EED);
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
     defer server.deinit();
 
     try runTlsHandshake(a, client, server, &cliD, &srvD);
@@ -1934,18 +1937,18 @@ test "http3 request over quic loopback reaches handler and returns response" {
     const a = std.testing.allocator;
     H3LoopSink.reset();
 
-    var cliD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initClient(a, .{}) };
+    var cliD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{}) };
     defer cliD.flight.deinit(a);
     defer cliD.incoming.deinit(a);
     defer cliD.peerFlight.deinit(a);
-    var srvD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initServer(a, .{}) };
+    var srvD = TlsHandshakeDriver{ .engine = tlsEngine.Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{}) };
     defer srvD.flight.deinit(a);
     defer srvD.incoming.deinit(a);
     defer srvD.peerFlight.deinit(a);
 
-    var client = try Connection.init(a, .client, .{}, 0xB311);
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
     defer client.deinit();
-    var server = try Connection.init(a, .server, .{}, 0xB312);
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
     defer server.deinit();
     client.cbs = .{ .onStreamData = H3LoopSink.onCliStream };
     server.cbs = .{ .onStreamData = H3LoopSink.onSrvStream };
@@ -2130,7 +2133,7 @@ test "http3 request over quic loopback reaches handler and returns response" {
 
 test "crypto transmit queue preserves offsets across partial drains" {
     const a = std.testing.allocator;
-    var conn = try Connection.init(a, .client, .{}, 91);
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
     defer conn.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), try conn.queueCrypto(.initial, "client-hello"));
@@ -2151,7 +2154,7 @@ test "crypto transmit queue preserves offsets across partial drains" {
 
 test "crypto receive reassembles reordered and overlapping segments" {
     const a = std.testing.allocator;
-    var conn = try Connection.init(a, .client, .{}, 92);
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
     defer conn.deinit();
 
     try conn.receiveCrypto(.initial, 5, " world", 100);
@@ -2172,9 +2175,9 @@ const CtlPair = struct {
     server: *Connection,
 
     fn init(a: Allocator) !CtlPair {
-        const client = try Connection.init(a, .client, .{}, 77);
+        const client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
         errdefer client.deinit();
-        const server = try Connection.init(a, .server, .{}, 78);
+        const server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
         errdefer server.deinit();
         // Mirrored 1-RTT secrets (same loopback convention as the
         // handshake tests); CIDs need no alignment for short headers.

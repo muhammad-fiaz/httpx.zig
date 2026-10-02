@@ -1,5 +1,12 @@
 # TLS 1.3 Protocol
 
+> **X25519MLKEM768 is implemented for both roles, as RFC 10024.** We offer the
+> hybrid group first as a client and accept it as a server, so a client that
+> offers only the hybrid — the default for OpenSSL 3.5+ — completes the
+> handshake. Note that `X25519MLKEM768` names a key-share encoding, not a
+> shared-secret rule: Zig's std `MlKem768X25519` is X-Wing, which encodes it
+> identically and produces a different secret.
+
 RFC 8446 defines Transport Layer Security Version 1.3, delivering major security and performance improvements over previous TLS versions.
 
 ## Key Improvements in TLS 1.3
