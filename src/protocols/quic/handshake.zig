@@ -111,11 +111,11 @@ pub const Driver = struct {
     certChainPem: []const u8 = "",
     privateKeyPem: []const u8 = "",
 
-    pub fn initClient(allocator: Allocator, cfg: ClientConfig) Driver {
+    pub fn initClient(io: std.Io, allocator: Allocator, cfg: ClientConfig) Driver {
         return .{
             .allocator = allocator,
             .role = .client,
-            .engine = tlsEngine.Engine.initClient(allocator, .{}),
+            .engine = tlsEngine.Engine.initClient(io, allocator, .{}),
             .host = cfg.host,
             .verify = cfg.verify,
             .caPem = cfg.caPem,
@@ -125,8 +125,8 @@ pub const Driver = struct {
         };
     }
 
-    pub fn initServer(allocator: Allocator, cfg: ServerConfig) Driver {
-        var eng = tlsEngine.Engine.initServer(allocator, .{});
+    pub fn initServer(io: std.Io, allocator: Allocator, cfg: ServerConfig) Driver {
+        var eng = tlsEngine.Engine.initServer(io, allocator, .{});
         eng.ticketKeys = cfg.ticketKeys;
         eng.maxEarlyData = cfg.maxEarlyData;
         eng.replayCache = cfg.replayCache;
@@ -315,7 +315,7 @@ pub const Driver = struct {
             switch (rec.kind) {
                 @intFromEnum(ths.HandshakeType.server_hello) => {
                     d.engine.processServerHello(rec.msg) catch return connMod.Error.TlsDriverFailed;
-                    const shared = d.engine.sharedSecret orelse return connMod.Error.TlsDriverFailed;
+                    const shared = d.engine.sharedSecret32() orelse return connMod.Error.TlsDriverFailed;
                     const chSh = d.engine.transcript.finish();
                     const hs = if (d.engine.resumptionPsk) |psk|
                         qtls.handshakeKeysWithEarly(qtls.earlySecret(psk), shared, chSh)
@@ -522,7 +522,7 @@ pub const Driver = struct {
         d.flight.appendSlice(a, flight.certificateVerify) catch return connMod.Error.OutOfMemory;
         d.flight.appendSlice(a, flight.finished) catch return connMod.Error.OutOfMemory;
 
-        const shared = d.engine.sharedSecret orelse return connMod.Error.TlsDriverFailed;
+        const shared = d.engine.sharedSecret32() orelse return connMod.Error.TlsDriverFailed;
         const hs = if (d.engine.resumptionPsk) |psk|
             qtls.handshakeKeysWithEarly(qtls.earlySecret(psk), shared, flight.hsHash)
         else
@@ -697,9 +697,9 @@ test "live handshake over real udp loopback establishes both ends" {
     var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    var cliConn = try connMod.Connection.init(a, .client, .{}, 0x4311);
+    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
     defer cliConn.deinit();
-    var srvConn = try connMod.Connection.init(a, .server, .{}, 0x4312);
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
     defer srvConn.deinit();
 
     var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -708,9 +708,9 @@ test "live handshake over real udp loopback establishes both ends" {
     defer srvEp.deinit();
     const sport = srvEp.localPort();
 
-    var cliDrv = Driver.initClient(a, .{ .host = "127.0.0.1", .caPem = hsTestCertPem });
+    var cliDrv = Driver.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{ .host = "127.0.0.1", .caPem = hsTestCertPem });
     defer cliDrv.deinit();
-    var srvDrv = Driver.initServer(a, .{ .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
+    var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{ .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
     defer srvDrv.deinit();
     cliConn.tls = .{ .ctx = &cliDrv, .start = Driver.clientStart, .onData = Driver.onData };
     srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
@@ -809,7 +809,7 @@ pub fn performHandshake(
 
 test "peer transport parameters apply to connection windows" {
     const a = std.testing.allocator;
-    var conn = try connMod.Connection.init(a, .client, .{}, 0x7771);
+    var conn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
     defer conn.deinit();
 
     const putCid = struct {
@@ -890,17 +890,17 @@ test "peer transport parameters apply to connection windows" {
 
 test "server closes unknown alpn with no_application_protocol" {
     const a = std.testing.allocator;
-    var srvConn = try connMod.Connection.init(a, .server, .{}, 0x7772);
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
     defer srvConn.deinit();
     // Initial keys + validated address so the close packet can fly.
     try srvConn.installInitialKeys();
     srvConn.addressValidated = true;
-    var srvDrv = Driver.initServer(a, .{ .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
+    var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{ .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
     defer srvDrv.deinit();
     srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
 
     // A ClientHello offering only HTTP/1.1, no h3.
-    var tmp = tlsEngine.Engine.initClient(a, .{});
+    var tmp = tlsEngine.Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer tmp.deinit();
     const ch = try tmp.produceClientHello(&.{"http/1.1"}, &.{}, "localhost", null);
     defer a.free(ch);
@@ -938,9 +938,9 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
     var sessionCaptured = false;
 
     {
-        var cliConn = try connMod.Connection.init(a, .client, .{}, 0x5101);
+        var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
         defer cliConn.deinit();
-        var srvConn = try connMod.Connection.init(a, .server, .{}, 0x5102);
+        var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
         defer srvConn.deinit();
 
         var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -949,14 +949,14 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         defer srvEp.deinit();
         const sport = srvEp.localPort();
 
-        var cliDrv = Driver.initClient(a, .{
+        var cliDrv = Driver.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{
             .host = "127.0.0.1",
             .caPem = hsTestCertPem,
             .sessionOut = &savedSession,
         });
         defer cliDrv.deinit();
 
-        var srvDrv = Driver.initServer(a, .{
+        var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{
             .certChainPem = hsTestCertPem,
             .privateKeyPem = hsTestKeyPem,
             .ticketKeys = tk,
@@ -998,9 +998,9 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
 
     // 2. Resumed Connection: Client uses savedSession and sends 0-RTT early data
     {
-        var cliConn = try connMod.Connection.init(a, .client, .{}, 0x5201);
+        var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
         defer cliConn.deinit();
-        var srvConn = try connMod.Connection.init(a, .server, .{}, 0x5202);
+        var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
         defer srvConn.deinit();
 
         var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -1009,7 +1009,7 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         defer srvEp.deinit();
         const sport = srvEp.localPort();
 
-        var cliDrv = Driver.initClient(a, .{
+        var cliDrv = Driver.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{
             .host = "127.0.0.1",
             .caPem = hsTestCertPem,
             .session = &savedSession,
@@ -1017,7 +1017,7 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         });
         defer cliDrv.deinit();
 
-        var srvDrv = Driver.initServer(a, .{
+        var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{
             .certChainPem = hsTestCertPem,
             .privateKeyPem = hsTestKeyPem,
             .ticketKeys = tk,

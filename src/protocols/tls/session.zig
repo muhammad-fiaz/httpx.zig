@@ -29,6 +29,15 @@ const clockMod = @import("../../common/clock.zig");
 const syncMod = @import("../../common/sync.zig");
 const handshakeMod = @import("handshake.zig");
 
+/// Shared Io for tests. `Threaded.global_single_threaded` is documented as
+/// debug-only, but in tests it is the simplest real implementation and it
+/// still routes randomSecure to the OS CSPRNG.
+pub const testIo = struct {
+    pub fn get() std.Io {
+        return std.Io.Threaded.global_single_threaded.io();
+    }
+};
+
 /// Origin-keyed client session cache for TLS 1.3 resumption. Bounded
 /// (default 32 entries, oldest evicted); internally synchronized for
 /// sharing across threads. Stored sessions are duped on the way in and
@@ -348,9 +357,12 @@ pub const TicketKeys = struct {
     current: [32]u8,
     previous: ?[32]u8 = null,
 
-    pub fn generate() TicketKeys {
+    /// Generates a fresh sealing key from OS entropy. Fails rather than
+    /// falling back to a software PRNG: a predictable key would let
+    /// anyone mint a valid session ticket.
+    pub fn generate(io: std.Io) !TicketKeys {
         var k: TicketKeys = .{ .current = undefined };
-        fillRandom(&k.current);
+        try io.randomSecure(&k.current);
         return k;
     }
 
@@ -360,8 +372,10 @@ pub const TicketKeys = struct {
     }
 
     /// Seals a ticket with optional maxEarlyData and ALPN binding.
+    /// The ticket nonce comes from OS entropy, so this can fail.
     pub fn seal(
         self: *const TicketKeys,
+        io: std.Io,
         psk: [32]u8,
         suite: tls.CipherSuite,
         createdMs: u64,
@@ -369,7 +383,7 @@ pub const TicketKeys = struct {
         ageAdd: u32,
         maxEarlyData: u32,
         alpn: []const u8,
-    ) [ticketBlobLen]u8 {
+    ) ![ticketBlobLen]u8 {
         var plain: [ticketPlainLen]u8 = undefined;
         @memcpy(plain[0..4], &ticketMagic);
         std.mem.writeInt(u16, plain[4..6], @intFromEnum(suite), .big);
@@ -384,7 +398,7 @@ pub const TicketKeys = struct {
         @memcpy(plain[43..75], &psk);
 
         var out: [ticketBlobLen]u8 = undefined;
-        fillRandom(out[0..ticketNonceLen]);
+        try io.randomSecure(out[0..ticketNonceLen]);
         var tag: [ChaCha20Poly1305.tag_length]u8 = undefined;
         ChaCha20Poly1305.encrypt(
             out[ticketNonceLen..][0..ticketPlainLen],
@@ -470,24 +484,10 @@ pub const TicketKeys = struct {
     }
 };
 
-fn fillRandom(buf: []u8) void {
-    if (@hasDecl(std.posix, "getrandom")) {
-        std.posix.getrandom(buf) catch {
-            var counter: u64 = 0x9E3779B97F4A7C15;
-            counter +%= buf.len;
-            var prng = std.Random.DefaultPrng.init(counter ^ 0x123456789ABCDEF0);
-            prng.random().bytes(buf);
-        };
-        return;
-    }
-    var prng = std.Random.DefaultPrng.init(0x123456789ABCDEF0 ^ @as(u64, @intCast(buf.len)));
-    prng.random().bytes(buf);
-}
-
 test "ticket seal/open round trip with expiry and rotation" {
     var keys = TicketKeys{ .current = [_]u8{0x11} ** 32 };
     const psk = [_]u8{0x42} ** 32;
-    const blob = keys.seal(psk, .AES_128_GCM_SHA256, 1_000_000, 3600, 0xA11CE, 0xFFFFFFFF, "h3");
+    const blob = try keys.seal(testIo.get(), psk, .AES_128_GCM_SHA256, 1_000_000, 3600, 0xA11CE, 0xFFFFFFFF, "h3");
     const opened = try keys.open(&blob, 1_000_000 + 1000);
     try std.testing.expectEqualSlices(u8, &psk, &opened.psk);
     try std.testing.expectEqual(tls.CipherSuite.AES_128_GCM_SHA256, opened.suite);

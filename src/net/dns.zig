@@ -338,11 +338,23 @@ const netMod = std.Io.net;
 
 pub var defaultNameserver: [4]u8 = .{ 127, 0, 0, 53 };
 
+/// Picks the DNS transaction ID.
+///
+/// RFC 1035 section 4.2.1 only requires a 16-bit identifier, but a
+/// predictable one enables cache-poisoning attempts against the
+/// recursive resolver, so it must not be derived from the clock. The
+/// resolver matches responses by this value, which is what makes it a
+/// security boundary rather than a formality.
+fn queryId(io: std.Io) u16 {
+    var raw: [2]u8 = undefined;
+    io.random(&raw);
+    return std.mem.readInt(u16, &raw, .big);
+}
+
 /// Resolves `name` against the configured nameserver over UDP.
 /// Returns A-record addresses. Caller frees slices and the Response.
 pub fn resolveA(allocator: std.mem.Allocator, io: std.Io, name: []const u8) ![]netMod.IpAddress.Ip4Address {
-    const prng = std.Random.DefaultPrng.init(@intCast(clock.millisNow() & 0x7FFFFFFF));
-    const id = prng.random().int(u16);
+    const id = queryId(io);
 
     const pkt = try buildQuery(allocator, id, name, .a);
     defer allocator.free(pkt);
@@ -377,8 +389,7 @@ pub fn resolveA(allocator: std.mem.Allocator, io: std.Io, name: []const u8) ![]n
 
 /// Resolves AAAA (IPv6) records. Same wire flow as `resolveA`.
 pub fn resolveAAAA(allocator: std.mem.Allocator, io: std.Io, name: []const u8) ![]netMod.IpAddress.Ip6Address {
-    const prng = std.Random.DefaultPrng.init(@intCast(clock.millisNow() & 0x7FFFFFFF));
-    const id = prng.random().int(u16);
+    const id = queryId(io);
 
     const pkt = try buildQuery(allocator, id, name, .aaaa);
     defer allocator.free(pkt);

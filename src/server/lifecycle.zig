@@ -105,6 +105,17 @@ pub const PortStrategy = enum {
     exit,
 };
 
+/// ALPN identifiers this server can actually speak.
+///
+/// `h2` is deliberately absent. `Config.http2` exists and defaults to true,
+/// but there is no HTTP/2 framing behind it, so advertising the identifier
+/// negotiates a protocol we then fail to speak: every browser and a default
+/// `curl` offer `h2`, and the exchange dies right after the handshake. The
+/// list has to come from what is implemented, not from what the config
+/// declares.
+const alpn_http11 = [_]alpnMod.Protocol{.@"http/1.1"};
+const alpn_http10_http11 = [_]alpnMod.Protocol{ .@"http/1.1", .@"http/1.0" };
+
 pub const Config = struct {
     host: []const u8 = "0.0.0.0",
     port: u16 = 8080,
@@ -330,6 +341,21 @@ pub const Server = struct {
             }
         }
 
+        // Correct the TLS ALPN preference to match what we serve.
+        //
+        // Done here, on the stored config, rather than at the construction
+        // site: certificate reload rebuilds the TLS server from
+        // `self.cfg.tls.?.alpn` and would otherwise fall back to
+        // DEFAULT_TCP_PREFERENCE and reintroduce `h2`.
+        //
+        // Only the default is replaced. An explicitly chosen list is the
+        // caller's decision, including a deliberate `h2`.
+        if (effectiveCfg.tls) |*tcfg| {
+            if (std.mem.eql(alpnMod.Protocol, tcfg.alpn, &alpnMod.DEFAULT_TCP_PREFERENCE)) {
+                tcfg.alpn = if (effectiveCfg.http10) &alpn_http10_http11 else &alpn_http11;
+            }
+        }
+
         var templateEngine: ?*templatesMod.Engine = null;
         const shouldInitTemplates = if (effectiveCfg.templates) |tc| tc.enabled else blk: {
             const cwd: std.Io.Dir = .cwd();
@@ -379,7 +405,7 @@ pub const Server = struct {
         var h3Ep_opt: ?quicTransport.Endpoint = null;
         var h3Placeholder_opt: ?*quicConn.Connection = null;
         if (effectiveCfg.http3 and loadedCertPem != null and loadedKeyPem != null) {
-            const placeholder = try quicConn.Connection.init(allocator, .server, .{}, 0x4833);
+            const placeholder = try quicConn.Connection.init(allocator, io, .server, .{});
             errdefer placeholder.deinit();
             const ep = quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = listener.localPort() }) catch |err| {
                 placeholder.deinit();
@@ -1117,9 +1143,8 @@ pub const Server = struct {
         const certPem = self.tlsCertPemLoaded orelse return error.NoCertificate;
         const keyPem = self.tlsKeyPemLoaded orelse return error.NoPrivateKey;
 
-        const seed: u64 = @as(u64, @intCast(clock.millisNow())) ^ 0x4833;
         const oldConn = ep.conn;
-        const qconn = try quicConn.Connection.init(self.allocator, .server, .{}, seed);
+        const qconn = try quicConn.Connection.init(self.allocator, self.io, .server, .{});
         defer {
             qconn.deinit();
             ep.conn = oldConn;
@@ -1129,9 +1154,25 @@ pub const Server = struct {
         var replayCache = tlsSessionMod.ReplayCache.init(self.allocator, 256);
         defer replayCache.deinit();
 
-        const ticketKeys = if (self.cfg.tls) |t| t.ticketKeys orelse tlsSessionMod.TicketKeys{ .current = [_]u8{0x5A} ** 32 } else tlsSessionMod.TicketKeys{ .current = [_]u8{0x5A} ** 32 };
+        // Prefer the configured keys; otherwise mint a fresh one from OS
+        // entropy so HTTP/3 keeps 0-RTT without falling back to a shared
+        // secret. A hardcoded key here would seal every ticket with a
+        // publicly known value, letting anyone forge one and resume as
+        // any client. If the OS entropy source is unavailable we issue no
+        // tickets, which is what the TCP path does when unconfigured.
+        var generatedKeys: ?tlsSessionMod.TicketKeys = null;
+        const ticketKeys: ?tlsSessionMod.TicketKeys = if (self.cfg.tls) |t|
+            t.ticketKeys
+        else if (tlsSessionMod.TicketKeys.generate(self.io)) |k| blk: {
+            generatedKeys = k;
+            break :blk k;
+        } else |_| null;
+        defer if (generatedKeys != null) {
+            // Wipe the sealing key once this connection is done with it.
+            std.crypto.secureZero(u8, &generatedKeys.?.current);
+        };
 
-        var drv = quicHs.Driver.initServer(self.allocator, .{
+        var drv = quicHs.Driver.initServer(self.io, self.allocator, .{
             .certChainPem = certPem,
             .privateKeyPem = keyPem,
             .ticketKeys = ticketKeys,
