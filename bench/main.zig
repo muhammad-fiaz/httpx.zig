@@ -37,9 +37,22 @@ pub const BenchMetric = struct {
     maxNs: f64,
     opsPerSec: u64,
     unit: []const u8,
+    /// Iterations that could not complete. A benchmark that failed every
+    /// iteration still reports a timing, which is worse than no number at
+    /// all, so the count is surfaced and fails the run.
+    failures: usize = 0,
 };
 
 var recordedMetrics: std.ArrayList(BenchMetric) = .empty;
+
+/// Iterations across the whole run that could not complete.
+var benchFailures: usize = 0;
+
+/// Records one failed iteration. Bench bodies return `void`, so a failure
+/// would otherwise be indistinguishable from a very fast success.
+fn noteFailure() void {
+    benchFailures += 1;
+}
 
 /// Held once rather than rebuilt per call: `nowNanos` runs twice per round
 /// across every benchmark, and re-acquiring the `Io` each time would put
@@ -71,6 +84,7 @@ fn runBench(
     cfg: BenchConfig,
     func: *const fn () void,
 ) void {
+    const failuresBefore = benchFailures;
     for (0..cfg.warmupIterations) |_| {
         func();
     }
@@ -102,7 +116,9 @@ fn runBench(
     else
         0;
 
-    std.debug.print("  {s: <24} rounds={d} iters={d: >7} min={d: >8.2}ns avg={d: >8.2}ns max={d: >8.2}ns throughput={d: >10} {s}\n", .{
+    const failures = benchFailures - failuresBefore;
+
+    std.debug.print("  {s: <24} rounds={d} iters={d: >7} min={d: >8.2}ns avg={d: >8.2}ns max={d: >8.2}ns throughput={d: >10} {s}", .{
         name,
         cfg.rounds,
         cfg.iterations,
@@ -112,6 +128,10 @@ fn runBench(
         throughput,
         unit,
     });
+    if (failures != 0) {
+        std.debug.print("  !! {d} ITERATIONS FAILED", .{failures});
+    }
+    std.debug.print("\n", .{});
 
     recordedMetrics.append(benchAllocator, .{
         .name = name,
@@ -123,6 +143,7 @@ fn runBench(
         .maxNs = maxNsPerOp,
         .opsPerSec = throughput,
         .unit = unit,
+        .failures = failures,
     }) catch {};
 }
 
@@ -555,7 +576,10 @@ fn loopbackPingHandler(_: *httpx.router.Context) anyerror!httpx.router.Response 
 }
 
 fn benchClientServerLoopback() void {
-    var res = loopbackClient.get(loopbackUrlSlice, .{}) catch return;
+    var res = loopbackClient.get(loopbackUrlSlice, .{}) catch {
+        noteFailure();
+        return;
+    };
     defer res.deinit();
     std.mem.doNotOptimizeAway(res.status);
 }
@@ -590,7 +614,10 @@ fn h2BenchServe() void {
 }
 
 fn benchH2PooledGet() void {
-    var res = h2BenchClient.get(h2BenchUrlSlice, .{ .httpVersion = .http2 }) catch return;
+    var res = h2BenchClient.get(h2BenchUrlSlice, .{ .httpVersion = .http2 }) catch {
+        noteFailure();
+        return;
+    };
     defer res.deinit();
     std.mem.doNotOptimizeAway(res.status);
 }
@@ -734,7 +761,10 @@ fn benchH3Get() void {
         .httpVersion = .http3,
         .tls = .{ .verify = .caBundle, .caPem = benchCertPem },
         .timeoutMs = 10_000,
-    }) catch return;
+    }) catch {
+        noteFailure();
+        return;
+    };
     defer res.deinit();
     std.mem.doNotOptimizeAway(res.status);
 }
@@ -779,9 +809,15 @@ fn tlsBenchServe() void {
 }
 
 fn tlsBenchDial(session: ?*const httpx.tls.Session) void {
-    var sock = httpx.tcp.connect(tlsBenchIo, "127.0.0.1", tlsBenchPort) catch return;
+    var sock = httpx.tcp.connect(tlsBenchIo, "127.0.0.1", tlsBenchPort) catch {
+        noteFailure();
+        return;
+    };
     defer sock.close();
-    var cli = httpx.tls.Client.init(benchAllocator, tlsBenchIo, .{}) catch return;
+    var cli = httpx.tls.Client.init(benchAllocator, tlsBenchIo, .{}) catch {
+        noteFailure();
+        return;
+    };
     defer cli.deinit();
     var conn = cli.connect(&sock, "127.0.0.1", .{
         .verify = .caBundle,
@@ -789,13 +825,22 @@ fn tlsBenchDial(session: ?*const httpx.tls.Session) void {
         .transport = .native,
         .session = session,
         .captureSession = true,
-    }) catch return;
+    }) catch {
+        noteFailure();
+        return;
+    };
     defer conn.deinit();
-    conn.writeAll("ping") catch return;
+    conn.writeAll("ping") catch {
+        noteFailure();
+        return;
+    };
     var b: [8]u8 = undefined;
     var got: usize = 0;
     while (got < 2) {
-        const n = conn.read(b[got..]) catch return;
+        const n = conn.read(b[got..]) catch {
+            noteFailure();
+            return;
+        };
         if (n == 0) return;
         got += n;
     }
@@ -1129,4 +1174,21 @@ pub fn main() !void {
     }
 
     std.debug.print("\n=== Benchmark Complete ===\n", .{});
+
+    if (benchFailures != 0) {
+        std.debug.print("\n", .{});
+        for (recordedMetrics.items) |m| {
+            if (m.failures == 0) continue;
+            std.debug.print("  {s: <24} {d} of {d} iterations failed\n", .{
+                m.name,
+                m.failures,
+                m.iterations * (m.rounds + 1),
+            });
+        }
+        std.debug.print(
+            "\n{d} benchmark iterations failed. The timings above are not valid for those rows.\n",
+            .{benchFailures},
+        );
+        return error.BenchmarkFailed;
+    }
 }

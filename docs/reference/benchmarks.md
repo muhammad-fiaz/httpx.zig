@@ -30,6 +30,10 @@ Each benchmark reports `min`, `avg`, and `max` nanoseconds per operation across 
 
 Benchmarks feed their result to `std.mem.doNotOptimizeAway`, and iterate over a runtime array of inputs rather than a single constant, so the optimiser cannot fold the work away and report a meaningless sub-nanosecond figure.
 
+Benchmarks that perform I/O also count their failures. A benchmark body returns `void`, so a request that errored would otherwise be indistinguishable from a very fast success and the harness would print a confident throughput for work that never happened. Any failed iteration is printed as `!! N ITERATIONS FAILED` next to the row, listed again in a summary at the end, and makes the run exit non-zero. A benchmark row is only meaningful when no failures were reported for it.
+
+`client_server_get` is the one row that still reports a small number of failures on some runs: the HTTP/1.1 keep-alive connection is occasionally closed by the server between the client's reuse and its next write. That is a real reuse race in the loopback path rather than a measurement artefact, and it is why the row is marked rather than quietly averaged away.
+
 ### Reading the numbers
 
 Latency figures move between runs; they are not a contract. On the machine used for the table above, a repeat run on the same day landed within a few percent for the network and handshake benchmarks (`client_server_get`, `h2_pooled_get`, `tls_full_handshake` all agreed to within 1%) and within roughly 10-25% for the allocator-bound parsing benchmarks (`html_parse`, `json_feed_parse`, `live_reload_inject`). Prefer the trend across a change over any single figure, and treat anything under 5 ns/op as a lower bound on the operation rather than a measurement of it.
@@ -42,50 +46,50 @@ Latency figures move between runs; they are not a contract. On the machine used 
 
 | Benchmark | Category | Avg Latency | Throughput | Target |
 | :--- | :--- | :---: | :---: | :---: |
-| `headers_parse` | Core Operations | 365.64 ns/op | **2734908 ops/sec** | `x86_64-windows` |
-| `uri_parse` | Core Operations | 33.81 ns/op | **29580460 ops/sec** | `x86_64-windows` |
-| `status_lookup` | Core Operations | 2.68 ns/op | **372929773 ops/sec** | `x86_64-windows` |
-| `method_lookup` | Core Operations | 21.66 ns/op | **46168073 ops/sec** | `x86_64-windows` |
-| `http1_request_head` | Core Operations | 23.55 ns/op | **42454372 ops/sec** | `x86_64-windows` |
-| `http1_header_block` | Core Operations | 257.05 ns/op | **3890293 ops/sec** | `x86_64-windows` |
-| `router_static_match` | Routing | 1.24 ┬╡s/op | **806411 ops/sec** | `x86_64-windows` |
-| `router_param_match` | Routing | 1.25 ┬╡s/op | **801630 ops/sec** | `x86_64-windows` |
-| `router_dispatch` | Routing | 1.26 ┬╡s/op | **795854 ops/sec** | `x86_64-windows` |
-| `router_typed_match` | Routing | 1.54 ┬╡s/op | **647704 ops/sec** | `x86_64-windows` |
-| `router_miss_404` | Routing | 2.00 ┬╡s/op | **500509 ops/sec** | `x86_64-windows` |
-| `router_reverse` | Routing | 83.98 ns/op | **11908206 ops/sec** | `x86_64-windows` |
-| `json_stringify` | Serialization | 276.36 ns/op | **3618459 ops/sec** | `x86_64-windows` |
-| `json_parse` | Serialization | 343.94 ns/op | **2907485 ops/sec** | `x86_64-windows` |
-| `basic_auth_encode` | Security | 25.63 ns/op | **39014646 ops/sec** | `x86_64-windows` |
-| `basic_auth_decode` | Security | 23.96 ns/op | **41737794 ops/sec** | `x86_64-windows` |
-| `bearer_token_parse` | Security | 10.96 ns/op | **91241791 ops/sec** | `x86_64-windows` |
-| `gzip_compress` | Compression | 76.54 ┬╡s/op | **13065 ops/sec** | `x86_64-windows` |
-| `gzip_decompress` | Compression | 11.19 ┬╡s/op | **89353 ops/sec** | `x86_64-windows` |
-| `deflate_compress` | Compression | 50.75 ┬╡s/op | **19702 ops/sec** | `x86_64-windows` |
-| `deflate_decompress` | Compression | 6.65 ┬╡s/op | **150313 ops/sec** | `x86_64-windows` |
-| `html_parse` | Parsing | 19.21 ┬╡s/op | **52057 ops/sec** | `x86_64-windows` |
-| `template_parse` | Parsing | 2.90 ┬╡s/op | **345276 ops/sec** | `x86_64-windows` |
-| `template_render` | Parsing | 1.53 ┬╡s/op | **651719 ops/sec** | `x86_64-windows` |
-| `template_incremental` | Parsing | 20.60 ┬╡s/op | **48548 ops/sec** | `x86_64-windows` |
-| `json_feed_parse` | Parsing | 4.06 ┬╡s/op | **246242 ops/sec** | `x86_64-windows` |
-| `live_reload_inject` | Parsing | 453.54 ns/op | **2204869 ops/sec** | `x86_64-windows` |
-| `watcher_scan` | Watcher | 1.15 ms/op | **873 ops/sec** | `x86_64-windows` |
-| `watcher_deps` | Watcher | 3.87 ┬╡s/op | **258305 ops/sec** | `x86_64-windows` |
-| `worker_pool_submit` | Concurrency | 218.84 ns/op | **4569510 ops/sec** | `x86_64-windows` |
-| `concurrency_queue` | Concurrency | 42.82 ns/op | **23353082 ops/sec** | `x86_64-windows` |
-| `dns_cache_hit` | DNS | 54.96 ns/op | **18196507 ops/sec** | `x86_64-windows` |
-| `h2_frame_header` | Protocols | 1.14 ns/op | **873835614 ops/sec** | `x86_64-windows` |
-| `hpack_int_encode` | Protocols | 0.91 ns/op | **1095338240 ops/sec** | `x86_64-windows` |
-| `hpack_int_decode` | Protocols | 1.50 ns/op | **668127639 ops/sec** | `x86_64-windows` |
-| `h3_varint_encode` | Protocols | 1.82 ns/op | **550518312 ops/sec** | `x86_64-windows` |
-| `h3_varint_decode` | Protocols | 1.78 ns/op | **562667041 ops/sec** | `x86_64-windows` |
-| `tls_record_seal` | TLS | 1.52 ┬╡s/op | **658921 ops/sec** | `x86_64-windows` |
-| `tls_cert_parse` | TLS | 1.05 ┬╡s/op | **955103 ops/sec** | `x86_64-windows` |
-| `client_server_get` | Network | 385.93 ┬╡s/op | **2591 req/sec** | `x86_64-windows` |
-| `h2_pooled_get` | Network | 53.50 ┬╡s/op | **18691 req/sec** | `x86_64-windows` |
-| `h3_get` | Network | 206.05 ms/op | **4 req/sec** | `x86_64-windows` |
-| `tls_full_handshake` | TLS | 4.34 ms/op | **230 ops/sec** | `x86_64-windows` |
-| `tls_resumed_handshake` | TLS | 2.82 ms/op | **354 ops/sec** | `x86_64-windows` |
+| `headers_parse` | Core Operations | 257.49 ns/op | **3883591 ops/sec** | `x86_64-windows` |
+| `uri_parse` | Core Operations | 35.65 ns/op | **28046635 ops/sec** | `x86_64-windows` |
+| `status_lookup` | Core Operations | 2.23 ns/op | **449147518 ops/sec** | `x86_64-windows` |
+| `method_lookup` | Core Operations | 19.74 ns/op | **50650119 ops/sec** | `x86_64-windows` |
+| `http1_request_head` | Core Operations | 24.58 ns/op | **40687786 ops/sec** | `x86_64-windows` |
+| `http1_header_block` | Core Operations | 263.30 ns/op | **3797967 ops/sec** | `x86_64-windows` |
+| `router_static_match` | Routing | 1.02 µs/op | **977952 ops/sec** | `x86_64-windows` |
+| `router_param_match` | Routing | 1.06 µs/op | **944143 ops/sec** | `x86_64-windows` |
+| `router_dispatch` | Routing | 1.03 µs/op | **970782 ops/sec** | `x86_64-windows` |
+| `router_typed_match` | Routing | 1.14 µs/op | **880393 ops/sec** | `x86_64-windows` |
+| `router_miss_404` | Routing | 1.81 µs/op | **550989 ops/sec** | `x86_64-windows` |
+| `router_reverse` | Routing | 68.65 ns/op | **14565687 ops/sec** | `x86_64-windows` |
+| `json_stringify` | Serialization | 245.93 ns/op | **4066174 ops/sec** | `x86_64-windows` |
+| `json_parse` | Serialization | 312.18 ns/op | **3203298 ops/sec** | `x86_64-windows` |
+| `basic_auth_encode` | Security | 24.20 ns/op | **41328974 ops/sec** | `x86_64-windows` |
+| `basic_auth_decode` | Security | 23.31 ns/op | **42897466 ops/sec** | `x86_64-windows` |
+| `bearer_token_parse` | Security | 7.82 ns/op | **127813494 ops/sec** | `x86_64-windows` |
+| `gzip_compress` | Compression | 53.11 µs/op | **18830 ops/sec** | `x86_64-windows` |
+| `gzip_decompress` | Compression | 6.64 µs/op | **150626 ops/sec** | `x86_64-windows` |
+| `deflate_compress` | Compression | 63.54 µs/op | **15737 ops/sec** | `x86_64-windows` |
+| `deflate_decompress` | Compression | 6.48 µs/op | **154405 ops/sec** | `x86_64-windows` |
+| `html_parse` | Parsing | 20.13 µs/op | **49668 ops/sec** | `x86_64-windows` |
+| `template_parse` | Parsing | 2.90 µs/op | **345360 ops/sec** | `x86_64-windows` |
+| `template_render` | Parsing | 1.46 µs/op | **683819 ops/sec** | `x86_64-windows` |
+| `template_incremental` | Parsing | 22.94 µs/op | **43597 ops/sec** | `x86_64-windows` |
+| `json_feed_parse` | Parsing | 3.78 µs/op | **264404 ops/sec** | `x86_64-windows` |
+| `live_reload_inject` | Parsing | 230.33 ns/op | **4341596 ops/sec** | `x86_64-windows` |
+| `watcher_scan` | Watcher | 1.14 ms/op | **879 ops/sec** | `x86_64-windows` |
+| `watcher_deps` | Watcher | 4.21 µs/op | **237375 ops/sec** | `x86_64-windows` |
+| `worker_pool_submit` | Concurrency | 228.54 ns/op | **4375553 ops/sec** | `x86_64-windows` |
+| `concurrency_queue` | Concurrency | 37.93 ns/op | **26365676 ops/sec** | `x86_64-windows` |
+| `dns_cache_hit` | DNS | 48.49 ns/op | **20623531 ops/sec** | `x86_64-windows` |
+| `h2_frame_header` | Protocols | 1.09 ns/op | **921523093 ops/sec** | `x86_64-windows` |
+| `hpack_int_encode` | Protocols | 1.04 ns/op | **963131332 ops/sec** | `x86_64-windows` |
+| `hpack_int_decode` | Protocols | 1.42 ns/op | **704508147 ops/sec** | `x86_64-windows` |
+| `h3_varint_encode` | Protocols | 1.58 ns/op | **632739191 ops/sec** | `x86_64-windows` |
+| `h3_varint_decode` | Protocols | 1.59 ns/op | **627817330 ops/sec** | `x86_64-windows` |
+| `tls_record_seal` | TLS | 1.62 µs/op | **619051 ops/sec** | `x86_64-windows` |
+| `tls_cert_parse` | TLS | 1.07 µs/op | **938620 ops/sec** | `x86_64-windows` |
+| `client_server_get` | Network | 387.84 µs/op | **2578 req/sec** | `x86_64-windows` |
+| `h2_pooled_get` | Network | 55.89 µs/op | **17891 req/sec** | `x86_64-windows` |
+| `h3_get` | Network | 205.89 ms/op | **4 req/sec** | `x86_64-windows` |
+| `tls_full_handshake` | TLS | 4.35 ms/op | **230 ops/sec** | `x86_64-windows` |
+| `tls_resumed_handshake` | TLS | 2.94 ms/op | **339 ops/sec** | `x86_64-windows` |
 
 ---
 
@@ -147,15 +151,15 @@ Compression is ~7x more expensive than decompression, which is the usual shape f
 These are the cheapest operations in the suite, as expected: fixed-size header arithmetic with no branching on content.
 
 ### TLS
-- **Record seal**: ChaCha20-Poly1305 AEAD seal of a 1 KiB record in ~1.52 µs (~659,000 ops/sec).
-- **Certificate parse**: PEM decode plus DER parse of a P-256 chain in ~1.05 µs (~955,000 ops/sec).
-- **Full handshake**: ~4.34 ms per handshake over loopback (~230/sec).
-- **Resumed handshake**: ~2.82 ms per handshake (~354/sec), about 35% faster than a full handshake. The gap is narrower than TLS 1.3 0-RTT would suggest because the benchmark measures a full TCP connect and a PSK resumption over loopback, where connection setup and record-layer work dominate rather than key agreement.
+- **Record seal**: ChaCha20-Poly1305 AEAD seal of a 1 KiB record in ~1.62 µs (~619,000 ops/sec).
+- **Certificate parse**: PEM decode plus DER parse of a P-256 chain in ~1.07 µs (~939,000 ops/sec).
+- **Full handshake**: ~4.35 ms per handshake over loopback (~230/sec).
+- **Resumed handshake**: ~2.94 ms per handshake (~339/sec), about 32% faster than a full handshake. The gap is narrower than TLS 1.3 0-RTT would suggest because the benchmark measures a full TCP connect and a PSK resumption over loopback, where connection setup and record-layer work dominate rather than key agreement.
 
 ### End-to-End Loopback Requests
-- **HTTP/1.1 keep-alive GET** (`client_server_get`): ~385.9 µs per request, ~2,591 req/sec, between a live `httpx.Client` and a live `httpx.Server` on `127.0.0.1`, single-threaded and synchronous.
-- **HTTP/2 pooled GET** (`h2_pooled_get`): ~53.5 µs, ~18,691 req/sec. One h2c connection is reused, so a request costs a frame exchange instead of a new connection - roughly 7x the HTTP/1.1 figure.
-- **HTTP/3 GET** (`h3_get`): ~206 ms per request, ~4 req/sec, because each operation performs a fresh QUIC plus TLS 1.3 handshake rather than reusing a session. This is a deliberate worst case, not a steady-state HTTP/3 number.
+- **HTTP/1.1 keep-alive GET** (`client_server_get`): ~387.8 µs per request, ~2,578 req/sec, between a live `httpx.Client` and a live `httpx.Server` on `127.0.0.1`, single-threaded and synchronous.
+- **HTTP/2 pooled GET** (`h2_pooled_get`): ~55.9 µs, ~17,891 req/sec. One h2c connection is reused, so a request costs a frame exchange instead of a new connection - roughly 7x the HTTP/1.1 figure.
+- **HTTP/3 GET** (`h3_get`): ~205.9 ms per request, ~4 req/sec, because each operation performs a fresh QUIC plus TLS 1.3 handshake rather than reusing a session. This is a deliberate worst case, not a steady-state HTTP/3 number.
 
 ---
 
