@@ -51,6 +51,23 @@ pub const CorsConfig = struct {
 /// cookie token. 32-byte random tokens base64url encoded (43 chars).
 pub const CSRF_TOKEN_LEN: usize = 43;
 
+/// Mints a CSRF token from OS entropy. This is the one to use.
+///
+/// The token is the entire secret behind the double-submit pattern: a
+/// predictable token means an attacker who can read one victim's page
+/// can forge that victim's request, so the source has to be a CSPRNG.
+pub fn generateCsrfTokenSecure(io: std.Io, out: *[CSRF_TOKEN_LEN]u8) ![]const u8 {
+    var raw: [32]u8 = undefined;
+    try io.randomSecure(&raw);
+    return std.base64.url_safe_no_pad.Encoder.encode(out, &raw);
+}
+
+/// Mints a CSRF token from a caller-supplied generator.
+///
+/// **Test-only.** `std.Random` carries no secrecy guarantee, so passing
+/// a `DefaultPrng` here yields a token an attacker can predict, which
+/// silently defeats CSRF protection. Use `generateCsrfTokenSecure` in
+/// server code; this variant exists so tests can pin the value.
 pub fn generateCsrfToken(random: std.Random, out: *[CSRF_TOKEN_LEN]u8) []const u8 {
     var raw: [32]u8 = undefined;
     random.bytes(&raw);
