@@ -25,7 +25,7 @@ pub fn main() !void {
         .httpVersion = .http11,
         .headers = &.{
             .{ .name = "Accept", .value = "application/json" },
-            .{ .name = "User-Agent", .value = "httpx-http11-client/0.2.0" },
+            .{ .name = "User-Agent", .value = "httpx-http11-client/0.2.1" },
         },
         .query = &.{
             .{ .name = "protocol", .value = "http11" },

@@ -40,38 +40,55 @@ features:
 
 ## Latest Benchmark Snapshot
 
-Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-09-07).
+Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-02).
 
 | Benchmark | Category | Avg Latency | Throughput | Target |
 | :--- | :--- | :---: | :---: | :---: |
-| `headers_parse` | Core Operations | 273.73 ns/op | **3,653,226 ops/sec** | `x86_64-windows` |
-| `uri_parse` | Core Operations | 34.36 ns/op | **29,105,048 ops/sec** | `x86_64-windows` |
-| `status_lookup` | Core Operations | 1.06 ns/op | **940,698,374 ops/sec** | `x86_64-windows` |
-| `method_lookup` | Core Operations | 10.25 ns/op | **97,558,596 ops/sec** | `x86_64-windows` |
-| `http1_request_head` | Core Operations | 23.81 ns/op | **42,002,864 ops/sec** | `x86_64-windows` |
-| `http1_header_block` | Core Operations | 224.34 ns/op | **4,457,450 ops/sec** | `x86_64-windows` |
-| `router_static_match` | Routing | 1.01 µs/op | **988,272 ops/sec** | `x86_64-windows` |
-| `router_param_match` | Routing | 1.10 µs/op | **912,934 ops/sec** | `x86_64-windows` |
-| `router_dispatch` | Routing | 1.10 µs/op | **911,344 ops/sec** | `x86_64-windows` |
-| `json_stringify` | Serialization | 293.18 ns/op | **3,410,848 ops/sec** | `x86_64-windows` |
-| `json_parse` | Serialization | 441.95 ns/op | **2,262,686 ops/sec** | `x86_64-windows` |
-| `basic_auth_encode` | Security | 54.86 ns/op | **18,227,253 ops/sec** | `x86_64-windows` |
-| `basic_auth_decode` | Security | 26.43 ns/op | **37,834,933 ops/sec** | `x86_64-windows` |
-| `bearer_token_parse` | Security | 8.17 ns/op | **122,465,274 ops/sec** | `x86_64-windows` |
-| `gzip_compress` | Compression | 68.65 µs/op | **14,566 ops/sec** | `x86_64-windows` |
-| `gzip_decompress` | Compression | 8.80 µs/op | **113,688 ops/sec** | `x86_64-windows` |
-| `deflate_compress` | Compression | 67.62 µs/op | **14,789 ops/sec** | `x86_64-windows` |
-| `deflate_decompress` | Compression | 8.11 µs/op | **123,295 ops/sec** | `x86_64-windows` |
-| `html_parse` | Parsing | 1.51 µs/op | **661,640 ops/sec** | `x86_64-windows` |
-| `worker_pool_submit` | Concurrency | 206.42 ns/op | **4,844,557 ops/sec** | `x86_64-windows` |
-| `concurrency_queue` | Concurrency | 68.82 ns/op | **14,529,667 ops/sec** | `x86_64-windows` |
-| `dns_cache_hit` | DNS | 68.99 ns/op | **14,494,140 ops/sec** | `x86_64-windows` |
-| `h2_frame_header` | Protocols | 1.19 ns/op | **840,703,500 ops/sec** | `x86_64-windows` |
-| `hpack_int_encode` | Protocols | 1.02 ns/op | **976,247,888 ops/sec** | `x86_64-windows` |
-| `hpack_int_decode` | Protocols | 1.53 ns/op | **653,906,765 ops/sec** | `x86_64-windows` |
-| `h3_varint_encode` | Protocols | 0.91 ns/op | **1,097,526,175 ops/sec** | `x86_64-windows` |
-| `h3_varint_decode` | Protocols | 1.15 ns/op | **869,920,750 ops/sec** | `x86_64-windows` |
-| `client_server_get` | Network | 376.20 µs/op | **2,658 req/sec** | `x86_64-windows` |
+| `headers_parse` | Core Operations | 365.64 ns/op | **2734908 ops/sec** | `x86_64-windows` |
+| `uri_parse` | Core Operations | 33.81 ns/op | **29580460 ops/sec** | `x86_64-windows` |
+| `status_lookup` | Core Operations | 2.68 ns/op | **372929773 ops/sec** | `x86_64-windows` |
+| `method_lookup` | Core Operations | 21.66 ns/op | **46168073 ops/sec** | `x86_64-windows` |
+| `http1_request_head` | Core Operations | 23.55 ns/op | **42454372 ops/sec** | `x86_64-windows` |
+| `http1_header_block` | Core Operations | 257.05 ns/op | **3890293 ops/sec** | `x86_64-windows` |
+| `router_static_match` | Routing | 1.24 ┬╡s/op | **806411 ops/sec** | `x86_64-windows` |
+| `router_param_match` | Routing | 1.25 ┬╡s/op | **801630 ops/sec** | `x86_64-windows` |
+| `router_dispatch` | Routing | 1.26 ┬╡s/op | **795854 ops/sec** | `x86_64-windows` |
+| `router_typed_match` | Routing | 1.54 ┬╡s/op | **647704 ops/sec** | `x86_64-windows` |
+| `router_miss_404` | Routing | 2.00 ┬╡s/op | **500509 ops/sec** | `x86_64-windows` |
+| `router_reverse` | Routing | 83.98 ns/op | **11908206 ops/sec** | `x86_64-windows` |
+| `json_stringify` | Serialization | 276.36 ns/op | **3618459 ops/sec** | `x86_64-windows` |
+| `json_parse` | Serialization | 343.94 ns/op | **2907485 ops/sec** | `x86_64-windows` |
+| `basic_auth_encode` | Security | 25.63 ns/op | **39014646 ops/sec** | `x86_64-windows` |
+| `basic_auth_decode` | Security | 23.96 ns/op | **41737794 ops/sec** | `x86_64-windows` |
+| `bearer_token_parse` | Security | 10.96 ns/op | **91241791 ops/sec** | `x86_64-windows` |
+| `gzip_compress` | Compression | 76.54 ┬╡s/op | **13065 ops/sec** | `x86_64-windows` |
+| `gzip_decompress` | Compression | 11.19 ┬╡s/op | **89353 ops/sec** | `x86_64-windows` |
+| `deflate_compress` | Compression | 50.75 ┬╡s/op | **19702 ops/sec** | `x86_64-windows` |
+| `deflate_decompress` | Compression | 6.65 ┬╡s/op | **150313 ops/sec** | `x86_64-windows` |
+| `html_parse` | Parsing | 19.21 ┬╡s/op | **52057 ops/sec** | `x86_64-windows` |
+| `template_parse` | Parsing | 2.90 ┬╡s/op | **345276 ops/sec** | `x86_64-windows` |
+| `template_render` | Parsing | 1.53 ┬╡s/op | **651719 ops/sec** | `x86_64-windows` |
+| `template_incremental` | Parsing | 20.60 ┬╡s/op | **48548 ops/sec** | `x86_64-windows` |
+| `json_feed_parse` | Parsing | 4.06 ┬╡s/op | **246242 ops/sec** | `x86_64-windows` |
+| `live_reload_inject` | Parsing | 453.54 ns/op | **2204869 ops/sec** | `x86_64-windows` |
+| `watcher_scan` | Watcher | 1.15 ms/op | **873 ops/sec** | `x86_64-windows` |
+| `watcher_deps` | Watcher | 3.87 ┬╡s/op | **258305 ops/sec** | `x86_64-windows` |
+| `worker_pool_submit` | Concurrency | 218.84 ns/op | **4569510 ops/sec** | `x86_64-windows` |
+| `concurrency_queue` | Concurrency | 42.82 ns/op | **23353082 ops/sec** | `x86_64-windows` |
+| `dns_cache_hit` | DNS | 54.96 ns/op | **18196507 ops/sec** | `x86_64-windows` |
+| `h2_frame_header` | Protocols | 1.14 ns/op | **873835614 ops/sec** | `x86_64-windows` |
+| `hpack_int_encode` | Protocols | 0.91 ns/op | **1095338240 ops/sec** | `x86_64-windows` |
+| `hpack_int_decode` | Protocols | 1.50 ns/op | **668127639 ops/sec** | `x86_64-windows` |
+| `h3_varint_encode` | Protocols | 1.82 ns/op | **550518312 ops/sec** | `x86_64-windows` |
+| `h3_varint_decode` | Protocols | 1.78 ns/op | **562667041 ops/sec** | `x86_64-windows` |
+| `tls_record_seal` | TLS | 1.52 ┬╡s/op | **658921 ops/sec** | `x86_64-windows` |
+| `tls_cert_parse` | TLS | 1.05 ┬╡s/op | **955103 ops/sec** | `x86_64-windows` |
+| `client_server_get` | Network | 385.93 ┬╡s/op | **2591 req/sec** | `x86_64-windows` |
+| `h2_pooled_get` | Network | 53.50 ┬╡s/op | **18691 req/sec** | `x86_64-windows` |
+| `h3_get` | Network | 206.05 ms/op | **4 req/sec** | `x86_64-windows` |
+| `tls_full_handshake` | TLS | 4.34 ms/op | **230 ops/sec** | `x86_64-windows` |
+| `tls_resumed_handshake` | TLS | 2.82 ms/op | **354 ops/sec** | `x86_64-windows` |
+
 
 Detailed methodology and analysis: [Benchmarks Reference](/reference/benchmarks).
 
@@ -79,10 +96,10 @@ Detailed methodology and analysis: [Benchmarks Reference](/reference/benchmarks)
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.0)**
+**Latest Release (v0.2.1)**
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
 ```
 
 **Previous Release (v0.1.8)**
@@ -92,9 +109,9 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 ```
 
 > [!WARNING]
-> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.0**.
+> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.1**.
 
-### Method 2: Zig Fetch (Latest / v0.2.0 in development)
+### Method 2: Zig Fetch (Latest / v0.2.1 in development)
 
 Use this for the latest in-development version from the `main` branch:
 
@@ -107,7 +124,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz",
     .hash = "...",
   },
 },

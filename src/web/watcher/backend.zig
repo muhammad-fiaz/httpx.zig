@@ -31,8 +31,8 @@ pub const Config = struct {
     extensions: []const []const u8 = &.{},
     pollIntervalMs: u64 = 50,
     debounceMs: i64 = 50,
-    /// Top-level directory names skipped during scans (generated trees).
-    /// Empty disables skipping.
+    /// Directory names pruned from the walk at any depth (generated trees).
+    /// Empty disables pruning.
     ignoredDirs: []const []const u8 = &.{ "node_modules", ".git", ".zig-cache", "zig-out", "zig-pkg", ".cache", "dist" },
     /// Callback triggered when a file modification is detected.
     onChange: ?*const fn (event: WatchEvent, userData: ?*anyopaque) void = null,
@@ -70,6 +70,11 @@ pub const Watcher = struct {
     _change_count: std.atomic.Value(usize) = .init(0),
     eventQueue: std.ArrayList(OwnedWatchEvent) = .empty,
     currentEvent: ?OwnedWatchEvent = null,
+    /// `onChange` invocations waiting to run. Producers only ever append
+    /// here, so a callback that calls back into the watcher cannot deadlock
+    /// against the index lock the producer was holding.
+    callbackQueue: std.ArrayList(OwnedWatchEvent) = .empty,
+    callbackMutex: sync.Spinlock = .{},
     coalescer: events.Coalescer = .{},
     native: ?PlatformBackend = null,
     nativeFailed: bool = false,
@@ -79,7 +84,6 @@ pub const Watcher = struct {
 
     pub fn init(allocator: Allocator, io: std.Io, config: Config) !*Watcher {
         const w = try allocator.create(Watcher);
-        errdefer allocator.destroy(w);
         w.* = .{
             .allocator = allocator,
             .io = io,
@@ -89,8 +93,11 @@ pub const Watcher = struct {
         };
         errdefer w.deinit();
         _ = try w.scan();
-        // Drain any baseline scan events so watcher starts clean
+        // The first walk reports every existing file as created. That is a
+        // baseline, not a change, so the queues are emptied without ever
+        // delivering a callback.
         while (w.next()) |_| {}
+        w.clearCallbacks();
         w._change_count.store(0, .release);
         w.startNative();
         return w;
@@ -108,6 +115,10 @@ pub const Watcher = struct {
             ev.deinit(self.allocator);
         }
         self.eventQueue.deinit(self.allocator);
+        for (self.callbackQueue.items) |*ev| {
+            ev.deinit(self.allocator);
+        }
+        self.callbackQueue.deinit(self.allocator);
         var it = self.entries.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.value_ptr.path);
@@ -187,8 +198,66 @@ pub const Watcher = struct {
             return;
         };
 
-        if (self.config.onChange) |cb| {
-            cb(ev.asView(), self.config.userData);
+        self.enqueueCallback(ev);
+    }
+
+    /// Takes an independent copy of `ev` for the callback queue. The event is
+    /// already owned by `eventQueue`, and both queues hand their copies to
+    /// `OwnedWatchEvent.deinit`, so the paths must be duplicated rather than
+    /// shared.
+    fn enqueueCallback(self: *Watcher, ev: OwnedWatchEvent) void {
+        if (self.config.onChange == null) return;
+        const path = self.allocator.dupe(u8, ev.path) catch return;
+        errdefer self.allocator.free(path);
+        const oldPath: ?[]u8 = if (ev.oldPath) |op| (self.allocator.dupe(u8, op) catch null) else null;
+
+        const copy = OwnedWatchEvent{
+            .path = path,
+            .oldPath = oldPath,
+            .kind = ev.kind,
+            .strategy = ev.strategy,
+            .isDirectory = ev.isDirectory,
+            .timestampMs = ev.timestampMs,
+        };
+        self.callbackMutex.lock();
+        defer self.callbackMutex.unlock();
+        if (self.callbackQueue.items.len >= 1024) {
+            var dropped = self.callbackQueue.orderedRemove(0);
+            dropped.deinit(self.allocator);
+            self.dirty.store(true, .release);
+        }
+        self.callbackQueue.append(self.allocator, copy) catch {
+            var mut = copy;
+            mut.deinit(self.allocator);
+        };
+    }
+
+    /// Drops queued callbacks without invoking them. Used to discard the
+    /// baseline the first walk produces.
+    fn clearCallbacks(self: *Watcher) void {
+        self.callbackMutex.lock();
+        defer self.callbackMutex.unlock();
+        for (self.callbackQueue.items) |*ev| ev.deinit(self.allocator);
+        self.callbackQueue.clearRetainingCapacity();
+    }
+
+    /// Runs queued `onChange` callbacks. Called by the worker loop with no
+    /// watcher lock held, so a callback may safely call `next`,
+    /// `changeCount`, or `stop`.
+    pub fn dispatchCallbacks(self: *Watcher) void {
+        const cb = self.config.onChange orelse return;
+        while (true) {
+            self.callbackMutex.lock();
+            if (self.callbackQueue.items.len == 0) {
+                self.callbackMutex.unlock();
+                return;
+            }
+            var ev = self.callbackQueue.orderedRemove(0);
+            self.callbackMutex.unlock();
+            {
+                defer ev.deinit(self.allocator);
+                cb(ev.asView(), self.config.userData);
+            }
         }
     }
 
@@ -197,14 +266,6 @@ pub const Watcher = struct {
         mtimeNs: i128,
         size: u64,
     };
-
-    fn pathDepth(path: []const u8) usize {
-        var n: usize = 0;
-        for (path) |c| {
-            if (c == '/' or c == '\\') n += 1;
-        }
-        return n;
-    }
 
     /// Performs one scan and returns true if any file was modified, created, or deleted.
     ///
@@ -229,13 +290,18 @@ pub const Watcher = struct {
 
             if (dir) |*d| {
                 defer d.close(io);
-                var walker = d.walk(self.allocator) catch null;
+                var walker = d.walkSelectively(self.allocator) catch null;
                 if (walker) |*w| {
                     defer w.deinit();
                     while (w.next(io) catch null) |entry| {
                         if (seen.items.len >= self.config.maxFiles) break;
+                        if (entry.depth() > self.config.maxDepth) continue;
+                        if (entry.kind == .directory) {
+                            if (self.isIgnoredPath(entry.path)) continue;
+                            w.enter(io, entry) catch continue;
+                            continue;
+                        }
                         if (entry.kind != .file) continue;
-                        if (pathDepth(entry.path) > self.config.maxDepth) continue;
 
                         // Check extension filter
                         if (self.config.extensions.len > 0) {
@@ -354,13 +420,19 @@ pub const Watcher = struct {
         const cwd: std.Io.Dir = .cwd();
         var d = cwd.openDir(io, dir, .{ .iterate = true }) catch return;
         defer d.close(io);
-        var walker = d.walk(self.allocator) catch return;
+        var walker = d.walkSelectively(self.allocator) catch return;
         defer walker.deinit();
         while (walker.next(io) catch null) |entry| {
             if (seen.items.len >= self.config.maxFiles) break;
+            if (entry.depth() > self.config.maxDepth) continue;
+            if (entry.kind == .directory) {
+                if (self.isIgnoredPath(entry.path)) continue;
+                walker.enter(io, entry) catch continue;
+                continue;
+            }
             if (entry.kind != .file) continue;
-            if (pathDepth(entry.path) > self.config.maxDepth) continue;
             if (events.isEditorTempFile(entry.path)) continue;
+            if (self.isIgnoredPath(entry.path)) continue;
             const fullPath = std.Io.Dir.path.join(self.allocator, &.{ dir, entry.path }) catch continue;
             if (staticMod.statPath(io, fullPath)) |st| {
                 seen.append(self.allocator, .{ .path = fullPath, .mtimeNs = st.mtimeNs, .size = st.size }) catch {
@@ -469,18 +541,18 @@ pub const Watcher = struct {
         }
     }
 
-    /// True when the walk-relative path lives under an ignored top-level
-    /// directory (generated trees such as nodeModules or build caches).
-    /// Matches the first path component exactly.
+    /// True when any component of `path` names an ignored directory.
+    /// Matching every component rather than only the first is what keeps a
+    /// watch rooted at `.` from descending into `docs/node_modules`, which
+    /// is where the overwhelming majority of a JS-hosting repo's files live.
     pub fn isIgnoredPath(self: *const Watcher, path: []const u8) bool {
         if (self.config.ignoredDirs.len == 0) return false;
-        var p = path;
-        while (p.len > 0 and (p[0] == '/' or p[0] == '\\')) p = p[1..];
-        var end: usize = 0;
-        while (end < p.len and p[end] != '/' and p[end] != '\\') end += 1;
-        const top = p[0..end];
-        for (self.config.ignoredDirs) |ignored| {
-            if (std.mem.eql(u8, top, ignored)) return true;
+        var it = std.mem.splitAny(u8, path, "/\\");
+        while (it.next()) |part| {
+            if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) continue;
+            for (self.config.ignoredDirs) |ignored| {
+                if (std.mem.eql(u8, part, ignored)) return true;
+            }
         }
         return false;
     }
@@ -530,15 +602,18 @@ pub const Watcher = struct {
             var spins: usize = 0;
             while (self.running.load(.acquire)) {
                 _ = self.drainNative();
+                self.dispatchCallbacks();
                 spins += 1;
                 if (spins % 100 == 0) self.pollExternals();
             }
         } else {
             while (self.running.load(.acquire)) {
                 _ = self.scan() catch false;
+                self.dispatchCallbacks();
                 clock.sleepMillis(self.config.pollIntervalMs);
             }
         }
+        self.dispatchCallbacks();
     }
 
     /// Single native drain step (also directly testable).
@@ -769,9 +844,7 @@ pub const Watcher = struct {
             mutEv.deinit(self.allocator);
             return;
         };
-        if (self.config.onChange) |cb| {
-            cb(ev.asView(), self.config.userData);
-        }
+        self.enqueueCallback(ev);
     }
 
     /// Drops one index entry, emitting the given kind. Caller holds the mutex.
@@ -836,46 +909,6 @@ pub const Watcher = struct {
         return self.eventQueue.items.len > 0;
     }
 
-    /// Returns the live-reload client JS script (SSE). Correct against
-    /// one-shot poll endpoints AND long-lived streams alike:
-    ///   * reloads only when the event id CHANGES (not on every connect),
-    ///   * hot-swaps stylesheets on `hotReload` without a full reload,
-    ///   * never reloads on stream close/error — EventSource reconnects
-    ///     on its own, and reloading there loops forever.
-    pub fn liveReloadScript(allocator: Allocator, sseUrl: []const u8) ![]u8 {
-        return std.fmt.allocPrint(allocator,
-            \\<script>
-            \\(function() {{
-            \\  var lastId = null;
-            \\  var es = new EventSource("{s}");
-            \\  es.onmessage = function(e) {{
-            \\    var id = e.lastEventId || null;
-            \\    if (id === null || id === lastId) return;
-            \\    var first = (lastId === null);
-            \\    lastId = id;
-            \\    if (first) return;
-            \\    if (e.data === "hotReload") {{
-            \\      console.log("[httpx live-reload] Hot-reloading styles...");
-            \\      const links = document.querySelectorAll('link[rel="stylesheet"]');
-            \\      for (let i = 0; i < links.length; i++) {{
-            \\        const link = links[i];
-            \\        const url = new URL(link.href, window.location.href);
-            \\        url.searchParams.set('_httpx_t', Date.now());
-            \\        link.href = url.href;
-            \\      }}
-            \\    }} else {{
-            \\      console.log("[httpx live-reload] Reloading page...");
-            \\      location.reload();
-            \\    }}
-            \\  }};
-            \\  es.onerror = function() {{
-            \\    console.log("[httpx live-reload] stream closed, reconnecting...");
-            \\  }};
-            \\}})();
-            \\</script>
-        , .{sseUrl});
-    }
-
     /// Returns the total count of file changes detected since watcher started.
     pub fn changeCount(self: *const Watcher) u64 {
         return self._change_count.load(.acquire);
@@ -903,12 +936,112 @@ test "ignored dirs skip generated trees" {
     try std.testing.expect(!watcher.isIgnoredPath("a.js"));
 }
 
+test "ignored dirs match at any depth, not just the root" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var watcher = try Watcher.init(a, io, .{});
+    defer watcher.deinit();
+
+    // A watch rooted at "." must not descend into a nested dependency tree,
+    // which is where a JS-hosting repo keeps the bulk of its files.
+    try std.testing.expect(watcher.isIgnoredPath("docs/node_modules/vitepress/dist/index.js"));
+    try std.testing.expect(watcher.isIgnoredPath("examples/web/node_modules/x/y.js"));
+    try std.testing.expect(watcher.isIgnoredPath("a/b/c/.git/HEAD"));
+    try std.testing.expect(watcher.isIgnoredPath(".zig-cache/o/abc/x.o"));
+    try std.testing.expect(watcher.isIgnoredPath("build/zig-out/bin/app"));
+
+    // Windows separators arrive from the native backends.
+    try std.testing.expect(watcher.isIgnoredPath("docs\\node_modules\\x\\y.js"));
+
+    // Real content still counts.
+    try std.testing.expect(!watcher.isIgnoredPath("src/main.zig"));
+    try std.testing.expect(!watcher.isIgnoredPath("docs/node_modules.md"));
+    try std.testing.expect(!watcher.isIgnoredPath("a/node_modules_helper/b.js"));
+}
+
+test "scan prunes ignored directories instead of only filtering their files" {
+    const fsMod = @import("../../utils/fs.zig");
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var pathBuf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-prune-{d}", .{clock.millisNow()});
+    var subbuf: [512]u8 = undefined;
+    const keptPath = try std.fmt.bufPrint(&subbuf, "{s}/kept.txt", .{root});
+    const modulesPath = try std.fmt.allocPrint(a, "{s}/node_modules", .{root});
+    defer a.free(modulesPath);
+    const pkgPath = try std.fmt.allocPrint(a, "{s}/pkg", .{modulesPath});
+    defer a.free(pkgPath);
+    const droppedPath = try std.fmt.allocPrint(a, "{s}/dropped.txt", .{pkgPath});
+    defer a.free(droppedPath);
+
+    const cwd: std.Io.Dir = .cwd();
+    cwd.createDir(io, ".zig-cache", .default_dir) catch {};
+    cwd.createDir(io, root, .default_dir) catch {};
+    cwd.createDir(io, modulesPath, .default_dir) catch {};
+    cwd.createDir(io, pkgPath, .default_dir) catch {};
+    defer cleanupTestDir(io, root);
+
+    try fsMod.writeFile(keptPath, "keep");
+    try fsMod.writeFile(droppedPath, "drop");
+
+    var watcher = try Watcher.init(a, io, .{ .dirPath = root });
+    defer watcher.deinit();
+
+    var sawKept = false;
+    var it = watcher.entries.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.indexOf(u8, entry.key_ptr.*, "node_modules") != null) {
+            return error.IgnoredDirectoryWasIndexed;
+        }
+        if (std.mem.endsWith(u8, entry.key_ptr.*, "kept.txt")) sawKept = true;
+    }
+    try std.testing.expect(sawKept);
+}
+
 test "watcher tracks registered files" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var watcher = try Watcher.init(a, io, .{});
     defer watcher.deinit();
     try std.testing.expectEqual(@as(usize, 0), watcher.entries.count());
+}
+
+test "the initial scan reports nothing to observers" {
+    // Every file present at startup arrives as `created` from the first
+    // walk. Those are the baseline, so neither the event queue, the callback
+    // queue, nor the change count may report them.
+    const fsMod = @import("../../utils/fs.zig");
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var pathBuf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-baseline-{d}", .{clock.millisNow()});
+    {
+        const cwd: std.Io.Dir = .cwd();
+        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
+        cwd.createDir(io, root, .default_dir) catch {};
+    }
+    defer cleanupTestDir(io, root);
+
+    var fbuf: [512]u8 = undefined;
+    const fpath = try std.fmt.bufPrint(&fbuf, "{s}/a.txt", .{root});
+    try fsMod.writeFile(fpath, "v1");
+    const f2 = try std.fmt.bufPrint(&fbuf, "{s}/b.txt", .{root});
+    try fsMod.writeFile(f2, "v2");
+
+    BaselineProbe.calls = 0;
+    var watcher = try Watcher.init(a, io, .{ .dirPath = root, .onChange = BaselineProbe.onChange });
+    defer watcher.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), BaselineProbe.calls);
+    try std.testing.expectEqual(@as(u64, 0), watcher.changeCount());
+    try std.testing.expect(!watcher.hasChanges());
+
+    // A real change after startup still reports.
+    try fsMod.writeFile(fpath, "v1-longer");
+    _ = try watcher.scan();
+    watcher.dispatchCallbacks();
+    try std.testing.expect(BaselineProbe.calls >= 1);
+    try std.testing.expect(watcher.changeCount() >= 1);
 }
 
 test "reload strategy maps extensions correctly" {
@@ -1136,4 +1269,122 @@ test "overflow marks dirty and rescans to reconcile" {
     try std.testing.expect(watcher.drainNative() or !watcher.usingNative());
     try std.testing.expect(!watcher.dirty.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), watcher.rescans.load(.acquire));
+}
+
+/// Test sink proving an `onChange` callback can re-enter the watcher.
+/// File scope so the callback body can reference the struct itself.
+const ReentrantProbe = struct {
+    var watcher: ?*Watcher = null;
+    var calls: usize = 0;
+    var dequeued: bool = false;
+
+    fn reset() void {
+        watcher = null;
+        calls = 0;
+        dequeued = false;
+    }
+
+    fn onChange(_: WatchEvent, _: ?*anyopaque) void {
+        const w = watcher orelse return;
+        calls += 1;
+        // Both take the index lock the producer held while queuing.
+        _ = w.changeCount();
+        if (w.next() != null) dequeued = true;
+    }
+};
+
+test "onChange callback may re-enter the watcher without deadlocking" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    ReentrantProbe.reset();
+
+    var watcher = try Watcher.init(a, io, .{ .onChange = ReentrantProbe.onChange });
+    defer watcher.deinit();
+    ReentrantProbe.watcher = watcher;
+
+    watcher.notifyChange("reentrant.css", null, .created);
+    watcher.dispatchCallbacks();
+
+    try std.testing.expectEqual(@as(usize, 1), ReentrantProbe.calls);
+    try std.testing.expect(ReentrantProbe.dequeued);
+    try std.testing.expectEqual(@as(u64, 1), watcher.changeCount());
+}
+
+/// Test sink for path-ownership: records calls without draining the queue,
+/// so an event stays live in both queues at `deinit`.
+const DrainProbe = struct {
+    var calls: usize = 0;
+
+    fn onChange(_: WatchEvent, _: ?*anyopaque) void {
+        calls += 1;
+    }
+};
+
+/// Test sink counting how many change callbacks a watcher has delivered.
+const BaselineProbe = struct {
+    var calls: usize = 0;
+
+    fn onChange(_: WatchEvent, _: ?*anyopaque) void {
+        calls += 1;
+    }
+};
+
+test "callback and event queues own separate copies of each path" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    DrainProbe.calls = 0;
+
+    var watcher = try Watcher.init(a, io, .{ .onChange = DrainProbe.onChange });
+    defer watcher.deinit();
+
+    // Left undrained in both queues on purpose: deinit frees each queue's
+    // copies, so sharing the pointer would be a double free here.
+    watcher.notifyChange("shared.css", null, .created);
+    watcher.dispatchCallbacks();
+    try std.testing.expectEqual(@as(usize, 1), DrainProbe.calls);
+    try std.testing.expect(watcher.hasChanges());
+}
+
+test "stop joins the worker so no callback outlives the watcher" {
+    const fsMod = @import("../../utils/fs.zig");
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var pathBuf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-stop-{d}", .{clock.millisNow()});
+    {
+        const cwd: std.Io.Dir = .cwd();
+        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
+        cwd.createDir(io, root, .default_dir) catch {};
+    }
+    defer cleanupTestDir(io, root);
+
+    const Counter = struct {
+        var afterStop: usize = 0;
+        var stopped: bool = false;
+
+        fn onChange(_: WatchEvent, _: ?*anyopaque) void {
+            if (stopped) afterStop += 1;
+        }
+    };
+    Counter.afterStop = 0;
+    Counter.stopped = false;
+
+    var watcher = try Watcher.init(a, io, .{ .dirPath = root, .onChange = Counter.onChange });
+    try watcher.start();
+    try std.testing.expect(watcher.isRunning());
+
+    var fbuf: [512]u8 = undefined;
+    const fpath = try std.fmt.bufPrint(&fbuf, "{s}/a.txt", .{root});
+    try fsMod.writeFile(fpath, "v1");
+
+    watcher.stop();
+    Counter.stopped = true;
+    try std.testing.expect(!watcher.isRunning());
+    try std.testing.expect(watcher.thread == null);
+
+    // Nothing may fire after stop() returns.
+    clock.sleepMillis(50);
+    try std.testing.expectEqual(@as(usize, 0), Counter.afterStop);
+
+    watcher.deinit();
 }

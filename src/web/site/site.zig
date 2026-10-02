@@ -29,6 +29,7 @@ const templatesMod = @import("../templates/templates.zig");
 const staticFiles = @import("../static_files/serve.zig");
 const spa = @import("../spa/serve.zig");
 const watcherMod = @import("../watcher/backend.zig");
+const reload = @import("../watcher/client.zig");
 const Server = @import("../../server/lifecycle.zig").Server;
 const routesMod = @import("routes.zig");
 
@@ -516,8 +517,7 @@ fn servePage(ctx: *Context) anyerror!Response {
     });
     if (ctx.method == .HEAD) resp.body = @constCast("");
     if (site.config.reload and ctx.method != .HEAD) {
-        const script = try watcherMod.Watcher.liveReloadScript(ctx.allocator, site.ssePath);
-        resp.body = try std.fmt.allocPrint(ctx.allocator, "{s}\n{s}", .{ resp.body, script });
+        resp.body = try reload.inject(ctx.allocator, resp.body, site.ssePath);
     }
     return resp;
 }

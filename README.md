@@ -27,8 +27,6 @@
 
 `httpx.zig` is a modern, high-performance HTTP library for Zig, providing everything needed to build fast and reliable networked applications, including HTTP clients, servers, APIs, web services, reverse proxies, and full-featured websites.
 
-> [!IMPORTANT]
-> **v0.2.0 brings major new changes.** It delivers better performance, stronger security defaults, and a unified client API. If you are on any version below 0.2.0, please migrate to v0.2.0. Note that v0.2.0 introduces breaking API changes over 0.1.x, so review the updated usage below when migrating. The live docs site documents v0.2.0. The project is still in active development and contributions are welcome.
 
 > [!TIP]
 > If you build with httpx.zig, make sure to give it a star.
@@ -161,10 +159,10 @@ zig build -Dtarget=x86-windows
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.0)**
+**Latest Release (v0.2.1)**
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
 ```
 
 **Previous Release (v0.1.8)**
@@ -174,7 +172,7 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 ```
 
 > [!WARNING]
-> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.0**.
+> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.1**.
 
 ### Method 2: Zig Fetch (Latest Development Build)
 
@@ -189,7 +187,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz",
         .hash = "...", // Run `zig fetch --save <url>` to generate the hash.
     },
 },
@@ -577,25 +575,46 @@ Visiting `/metrics` provides standard Prometheus metrics:
 
 ## Live File Watcher & Reload Engine
 
-Native OS events (ReadDirectoryChangesW / inotify / kqueue) with recursive watching, rename pairing, and Tree-sitter structural hot reload for templates. Monitor directory trees for development asset updates with a safe, bounded event queue:
+Native OS events (ReadDirectoryChangesW / inotify / kqueue) with recursive watching and rename pairing. The walk prunes generated trees (`node_modules`, `.git`, `.zig-cache`, `zig-out`, `zig-pkg`, `.cache`, `dist`) at any depth, so watching a repository root does not drown in dependency files.
+
+Each changed file is classified into a reload strategy, and the browser client acts on it over SSE:
+
+| Change | Strategy | Browser behaviour |
+| --- | --- | --- |
+| `.css` | `hotReload` | Stylesheet `<link>`s are cache-busted and refetched in place; no document reload, no lost script state |
+| `.html`, `.htm`, templates, assets | `warmReload` | Document reload |
+| `.json`, `.env`, `.toml`, `.yaml`, `.conf` | `coldReload` | Document reload |
+| `.zig` | `restart` | Document reload |
+
+Setting `liveReload = true` on the server wires it up for you: the SSE endpoint is mounted at `liveReloadPath`, and the client script is injected into every HTML response — handler-written pages, static files, and the site generator alike.
+
+```zig
+var server = try httpx.Server.init(allocator, io, .{
+    .host = "127.0.0.1",
+    .port = 8080,
+    .liveReload = true,      // SSE endpoint + client injection
+    .watch = true,           // watch watchDir
+    .watchDir = "./public",
+});
+```
+
+`onChange` is invoked on the watcher thread with no internal lock held, so a callback may safely call `next()`, `changeCount()`, or `stop()`:
 
 ```zig
 var watcher = try httpx.static.Watcher.init(allocator, io, .{
     .dirPath = "./public",
     .pollIntervalMs = 50,
+    .onChange = onFileChanged,
 });
 defer watcher.deinit();
 
 try watcher.start();
+```
 
-// Drain detected file events
-while (watcher.next()) |event| {
-    std.debug.print("Changed: {s} (kind={s})\n", .{ event.path, @tagName(event.kind) });
-}
+If you build the page yourself, the same script is available directly:
 
-// Inspect cumulative change count
-const count = watcher.changeCount();
-std.debug.print("Total changes: {d}\n", .{count});
+```zig
+const html = try httpx.static.reload.inject(allocator, body, "/__httpx_liveReload");
 ```
 
 ## TLS Listener Lifecycle
@@ -746,7 +765,7 @@ The `examples/` directory contains runnable examples demonstrating all features 
 - [`parse_html`](examples/parseHtml.zig) - HTML DOM, CSS Selectors, RSS feeds, robots.txt, and sitemaps
 
 **File Watching, Static Assets & Live Reload:**
-- [`file_watcher`](examples/fileWatcher.zig) - OS-native file monitoring (Windows ReadDirectoryChangesW, Linux inotify, macOS kqueue) with rename pairing and Tree-sitter hot reload
+- [`file_watcher`](examples/fileWatcher.zig) - OS-native file monitoring (Windows ReadDirectoryChangesW, Linux inotify, macOS kqueue) with rename pairing and browser live reload
 - [`live_reload`](examples/liveReload.zig) - Live reload dev server with CSS hot reload vs HTML page reload
 - [`static_site`](examples/staticSite.zig) - Static site directory mounting with ETag caching and conditional GET
 - [`spa_server`](examples/spaServer.zig) - Single Page Application server with client-side route fallback
@@ -826,41 +845,54 @@ Run benchmarks:
 zig build bench
 ```
 
-Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-09-07).
+Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-02).
 
 | Benchmark | Category | Avg Latency | Throughput | Target |
 | :--- | :--- | :---: | :---: | :---: |
-| `headers_parse` | Core Operations | 273.73 ns/op | **3,653,226 ops/sec** | `x86_64-windows` |
-| `uri_parse` | Core Operations | 34.36 ns/op | **29,105,048 ops/sec** | `x86_64-windows` |
-| `status_lookup` | Core Operations | 1.06 ns/op | **940,698,374 ops/sec** | `x86_64-windows` |
-| `method_lookup` | Core Operations | 10.25 ns/op | **97,558,596 ops/sec** | `x86_64-windows` |
-| `http1_request_head` | Core Operations | 23.81 ns/op | **42,002,864 ops/sec** | `x86_64-windows` |
-| `http1_header_block` | Core Operations | 224.34 ns/op | **4,457,450 ops/sec** | `x86_64-windows` |
-| `router_static_match` | Routing | 1.01 µs/op | **988,272 ops/sec** | `x86_64-windows` |
-| `router_param_match` | Routing | 1.10 µs/op | **912,934 ops/sec** | `x86_64-windows` |
-| `router_dispatch` | Routing | 1.10 µs/op | **911,344 ops/sec** | `x86_64-windows` |
-| `router_typed_match` | Routing | 1.55 µs/op | **645,448 ops/sec** | `x86_64-windows` |
-| `router_miss_404` | Routing | 2.31 µs/op | **432,102 ops/sec** | `x86_64-windows` |
-| `router_reverse` | Routing | 111.39 ns/op | **8,977,289 ops/sec** | `x86_64-windows` |
-| `json_stringify` | Serialization | 293.18 ns/op | **3,410,848 ops/sec** | `x86_64-windows` |
-| `json_parse` | Serialization | 441.95 ns/op | **2,262,686 ops/sec** | `x86_64-windows` |
-| `basic_auth_encode` | Security | 54.86 ns/op | **18,227,253 ops/sec** | `x86_64-windows` |
-| `basic_auth_decode` | Security | 26.43 ns/op | **37,834,933 ops/sec** | `x86_64-windows` |
-| `bearer_token_parse` | Security | 8.17 ns/op | **122,465,274 ops/sec** | `x86_64-windows` |
-| `gzip_compress` | Compression | 68.65 µs/op | **14,566 ops/sec** | `x86_64-windows` |
-| `gzip_decompress` | Compression | 8.80 µs/op | **113,688 ops/sec** | `x86_64-windows` |
-| `deflate_compress` | Compression | 67.62 µs/op | **14,789 ops/sec** | `x86_64-windows` |
-| `deflate_decompress` | Compression | 8.11 µs/op | **123,295 ops/sec** | `x86_64-windows` |
-| `html_parse` | Parsing | 1.51 µs/op | **661,640 ops/sec** | `x86_64-windows` |
-| `worker_pool_submit` | Concurrency | 206.42 ns/op | **4,844,557 ops/sec** | `x86_64-windows` |
-| `concurrency_queue` | Concurrency | 68.82 ns/op | **14,529,667 ops/sec** | `x86_64-windows` |
-| `dns_cache_hit` | DNS | 68.99 ns/op | **14,494,140 ops/sec** | `x86_64-windows` |
-| `h2_frame_header` | Protocols | 1.19 ns/op | **840,703,500 ops/sec** | `x86_64-windows` |
-| `hpack_int_encode` | Protocols | 1.02 ns/op | **976,247,888 ops/sec** | `x86_64-windows` |
-| `hpack_int_decode` | Protocols | 1.53 ns/op | **653,906,765 ops/sec** | `x86_64-windows` |
-| `h3_varint_encode` | Protocols | 0.91 ns/op | **1,097,526,175 ops/sec** | `x86_64-windows` |
-| `h3_varint_decode` | Protocols | 1.15 ns/op | **869,920,750 ops/sec** | `x86_64-windows` |
-| `client_server_get` | Network | 376.20 µs/op | **2,658 req/sec** | `x86_64-windows` |
+| `headers_parse` | Core Operations | 365.64 ns/op | **2734908 ops/sec** | `x86_64-windows` |
+| `uri_parse` | Core Operations | 33.81 ns/op | **29580460 ops/sec** | `x86_64-windows` |
+| `status_lookup` | Core Operations | 2.68 ns/op | **372929773 ops/sec** | `x86_64-windows` |
+| `method_lookup` | Core Operations | 21.66 ns/op | **46168073 ops/sec** | `x86_64-windows` |
+| `http1_request_head` | Core Operations | 23.55 ns/op | **42454372 ops/sec** | `x86_64-windows` |
+| `http1_header_block` | Core Operations | 257.05 ns/op | **3890293 ops/sec** | `x86_64-windows` |
+| `router_static_match` | Routing | 1.24 ┬╡s/op | **806411 ops/sec** | `x86_64-windows` |
+| `router_param_match` | Routing | 1.25 ┬╡s/op | **801630 ops/sec** | `x86_64-windows` |
+| `router_dispatch` | Routing | 1.26 ┬╡s/op | **795854 ops/sec** | `x86_64-windows` |
+| `router_typed_match` | Routing | 1.54 ┬╡s/op | **647704 ops/sec** | `x86_64-windows` |
+| `router_miss_404` | Routing | 2.00 ┬╡s/op | **500509 ops/sec** | `x86_64-windows` |
+| `router_reverse` | Routing | 83.98 ns/op | **11908206 ops/sec** | `x86_64-windows` |
+| `json_stringify` | Serialization | 276.36 ns/op | **3618459 ops/sec** | `x86_64-windows` |
+| `json_parse` | Serialization | 343.94 ns/op | **2907485 ops/sec** | `x86_64-windows` |
+| `basic_auth_encode` | Security | 25.63 ns/op | **39014646 ops/sec** | `x86_64-windows` |
+| `basic_auth_decode` | Security | 23.96 ns/op | **41737794 ops/sec** | `x86_64-windows` |
+| `bearer_token_parse` | Security | 10.96 ns/op | **91241791 ops/sec** | `x86_64-windows` |
+| `gzip_compress` | Compression | 76.54 ┬╡s/op | **13065 ops/sec** | `x86_64-windows` |
+| `gzip_decompress` | Compression | 11.19 ┬╡s/op | **89353 ops/sec** | `x86_64-windows` |
+| `deflate_compress` | Compression | 50.75 ┬╡s/op | **19702 ops/sec** | `x86_64-windows` |
+| `deflate_decompress` | Compression | 6.65 ┬╡s/op | **150313 ops/sec** | `x86_64-windows` |
+| `html_parse` | Parsing | 19.21 ┬╡s/op | **52057 ops/sec** | `x86_64-windows` |
+| `template_parse` | Parsing | 2.90 ┬╡s/op | **345276 ops/sec** | `x86_64-windows` |
+| `template_render` | Parsing | 1.53 ┬╡s/op | **651719 ops/sec** | `x86_64-windows` |
+| `template_incremental` | Parsing | 20.60 ┬╡s/op | **48548 ops/sec** | `x86_64-windows` |
+| `json_feed_parse` | Parsing | 4.06 ┬╡s/op | **246242 ops/sec** | `x86_64-windows` |
+| `live_reload_inject` | Parsing | 453.54 ns/op | **2204869 ops/sec** | `x86_64-windows` |
+| `watcher_scan` | Watcher | 1.15 ms/op | **873 ops/sec** | `x86_64-windows` |
+| `watcher_deps` | Watcher | 3.87 ┬╡s/op | **258305 ops/sec** | `x86_64-windows` |
+| `worker_pool_submit` | Concurrency | 218.84 ns/op | **4569510 ops/sec** | `x86_64-windows` |
+| `concurrency_queue` | Concurrency | 42.82 ns/op | **23353082 ops/sec** | `x86_64-windows` |
+| `dns_cache_hit` | DNS | 54.96 ns/op | **18196507 ops/sec** | `x86_64-windows` |
+| `h2_frame_header` | Protocols | 1.14 ns/op | **873835614 ops/sec** | `x86_64-windows` |
+| `hpack_int_encode` | Protocols | 0.91 ns/op | **1095338240 ops/sec** | `x86_64-windows` |
+| `hpack_int_decode` | Protocols | 1.50 ns/op | **668127639 ops/sec** | `x86_64-windows` |
+| `h3_varint_encode` | Protocols | 1.82 ns/op | **550518312 ops/sec** | `x86_64-windows` |
+| `h3_varint_decode` | Protocols | 1.78 ns/op | **562667041 ops/sec** | `x86_64-windows` |
+| `tls_record_seal` | TLS | 1.52 ┬╡s/op | **658921 ops/sec** | `x86_64-windows` |
+| `tls_cert_parse` | TLS | 1.05 ┬╡s/op | **955103 ops/sec** | `x86_64-windows` |
+| `client_server_get` | Network | 385.93 ┬╡s/op | **2591 req/sec** | `x86_64-windows` |
+| `h2_pooled_get` | Network | 53.50 ┬╡s/op | **18691 req/sec** | `x86_64-windows` |
+| `h3_get` | Network | 206.05 ms/op | **4 req/sec** | `x86_64-windows` |
+| `tls_full_handshake` | TLS | 4.34 ms/op | **230 ops/sec** | `x86_64-windows` |
+| `tls_resumed_handshake` | TLS | 2.82 ms/op | **354 ops/sec** | `x86_64-windows` |
 
 See [docs/reference/benchmarks.md](docs/reference/benchmarks.md) for full methodology and detailed analysis.
 
@@ -903,7 +935,12 @@ httpx.zig/
 │   │   ├── auth/                    # Basic & Bearer auth helpers
 │   │   ├── templates/               # Flask-style template engine (Tree-sitter syntax, cached AST)
 │   │   ├── site/                    # File-based website routing
-│   │   └── watcher/                 # Native watcher (backend/events/reload/dependency + platform)
+│   │   ├── watcher/                 # File watcher + browser live-reload client
+│   │   ─   ─   ─   ─   backend.zig          # Watcher facade, index, queue, debounce
+│   │   ─   ─   ─   ─   events.zig           # Event model, classification, coalescing
+│   │   ─   ─   ─   ─   client.zig           # Browser-side SSE live-reload script
+│   │   ─   ─   ─   ─   dependency.zig       # Dependency graph for reload invalidation
+│   │   ─   ─   ─   ─   windows/linux/macos.zig  # Native backends (RDC/inotify/kqueue)
 │   ├── protocols/
 │   │   ├── http1/                   # HTTP/1.x parser & writer
 │   │   ├── http2/                   # HTTP/2 frame, HPACK, transport
@@ -961,3 +998,4 @@ httpx.zig/
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+

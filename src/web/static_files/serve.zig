@@ -23,6 +23,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const routerMod = @import("../router/router.zig");
+const reload = @import("../watcher/client.zig");
 const Context = routerMod.Context;
 const Response = routerMod.Response;
 const Method = @import("../../common/method.zig").Method;
@@ -665,20 +666,7 @@ fn respondWithEmbedded(ctx: *Context, st: *State, asset: @import("../assets.zig"
     }
 
     if (st.liveReload and !isHead and std.mem.startsWith(u8, asset.contentType, "text/html")) {
-        const reloadScript = try std.fmt.allocPrint(a,
-            \\<script>
-            \\(function() {{
-            \\  const es = new EventSource("{s}");
-            \\  es.onmessage = function(e) {{
-            \\    if (e.data === "reload") {{
-            \\      console.log("[httpx live-reload] Static file changed, reloading...");
-            \\      location.reload();
-            \\    }}
-            \\  }};
-            \\}})();
-            \\</script>
-        , .{st.reloadSsePath});
-        const fullBody = try std.fmt.allocPrint(a, "{s}\n{s}", .{ asset.content, reloadScript });
+        const fullBody = try reload.inject(a, asset.content, st.reloadSsePath);
         return .{
             .status = 200,
             .contentType = asset.contentType,
@@ -809,30 +797,13 @@ fn respondWithFile(ctx: *Context, st: *State, path: []const u8, meta: FileMeta) 
 
     if (meta.size > st.maxSize) return errText(413, "file too large");
 
-    var body = a.alloc(u8, @intCast(meta.size)) catch return Allocator.Error.OutOfMemory;
-    readAll(ctx.io, path, body) catch return errText(500, "read error");
+    const raw = a.alloc(u8, @intCast(meta.size)) catch return Allocator.Error.OutOfMemory;
+    readAll(ctx.io, path, raw) catch return errText(500, "read error");
 
-    if (st.liveReload and !isHead and std.mem.startsWith(u8, contentType, "text/html")) {
-        const reloadScript = try std.fmt.allocPrint(a,
-            \\<script>
-            \\(function() {{
-            \\  const es = new EventSource("{s}");
-            \\  es.onmessage = function(e) {{
-            \\    if (e.data === "reload") {{
-            \\      console.log("[httpx live-reload] Static file changed, reloading...");
-            \\      location.reload();
-            \\    }}
-            \\  }};
-            \\}})();
-            \\</script>
-        , .{st.reloadSsePath});
-
-        if (std.mem.indexOf(u8, body, "</body>")) |idx| {
-            body = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ body[0..idx], reloadScript, body[idx..] });
-        } else {
-            body = try std.fmt.allocPrint(a, "{s}{s}", .{ body, reloadScript });
-        }
-    }
+    const body: []const u8 = if (st.liveReload and !isHead and std.mem.startsWith(u8, contentType, "text/html"))
+        try reload.inject(a, raw, st.reloadSsePath)
+    else
+        raw;
 
     return .{
         .status = 200,

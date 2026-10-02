@@ -41,9 +41,27 @@ pub const BenchMetric = struct {
 
 var recordedMetrics: std.ArrayList(BenchMetric) = .empty;
 
-fn nowNanos() i96 {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Timestamp.now(io, .awake).toNanoseconds();
+/// Held once rather than rebuilt per call: `nowNanos` runs twice per round
+/// across every benchmark, and re-acquiring the `Io` each time would put
+/// harness overhead inside the measurement.
+var benchIo: std.Io = undefined;
+
+fn nowNanos() i128 {
+    return std.Io.Clock.now(.awake, benchIo).nanoseconds;
+}
+
+/// UTC date of this run, so a report never carries a stale hand-written
+/// date. Uses the library's wall clock, not the monotonic one the timings
+/// use: `.awake` is a performance counter, so it has no calendar epoch.
+fn runDate(buf: []u8) []const u8 {
+    const epochSecs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@divTrunc(httpx.clock.millisNow(), 1000)) };
+    const yearDay = epochSecs.getEpochDay().calculateYearDay();
+    const md = yearDay.calculateMonthDay();
+    return std.fmt.bufPrint(buf, "{d}-{d:0>2}-{d:0>2}", .{
+        yearDay.year,
+        md.month.numeric(),
+        md.day_index + 1,
+    }) catch "unknown";
 }
 
 fn runBench(
@@ -128,39 +146,41 @@ fn benchHeadersParse() void {
     headers.append("Content-Type", "application/json") catch {};
     headers.append("Authorization", "Bearer token-xyz-123456789") catch {};
     headers.append("Accept", "application/json, text/plain, */*") catch {};
-    headers.append("User-Agent", "httpx.zig-benchmark/0.2.0") catch {};
+    headers.append("User-Agent", "httpx.zig-benchmark/0.2.1") catch {};
 
-    _ = headers.get("Content-Type");
-    _ = headers.get("Authorization");
+    std.mem.doNotOptimizeAway(headers.get("Content-Type").?.len);
+    std.mem.doNotOptimizeAway(headers.get("Authorization").?.len);
 }
 
 fn benchUriParse() void {
-    _ = httpx.uri.parse("http://httpbun.com:8080/users/123?page=1&limit=10#section") catch {};
+    const u = httpx.uri.parse("http://httpbun.com:8080/users/123?page=1&limit=10#section") catch return;
+    std.mem.doNotOptimizeAway(u.host.len + u.path.len);
 }
 
 fn benchStatusLookup() void {
-    _ = httpx.status.reasonPhrase(200);
-    _ = httpx.status.reasonPhrase(404);
-    _ = httpx.status.reasonPhrase(500);
+    const codes = [_]u16{ 200, 404, 500, 301, 403, 204 };
+    // `codes` is runtime state, so the lookups cannot be folded away.
+    for (codes) |c| std.mem.doNotOptimizeAway(httpx.status.reasonPhrase(c).len);
 }
 
 fn benchMethodLookup() void {
-    _ = httpx.Method.fromString("GET");
-    _ = httpx.Method.fromString("POST");
-    _ = httpx.Method.fromString("DELETE");
+    const names = [_][]const u8{ "GET", "POST", "DELETE", "PUT", "PATCH", "HEAD" };
+    for (names) |n| std.mem.doNotOptimizeAway(@intFromEnum(httpx.Method.fromString(n) orelse .GET));
 }
 
-const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: httpx/0.2.0\r\nAccept: application/json\r\n\r\n";
+const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: httpx/0.2.1\r\nAccept: application/json\r\n\r\n";
 
 fn benchHttp1RequestHead() void {
-    _ = httpx.http1.parser.parseRequestHead(rawReqHead, .{}) catch return;
+    const head = httpx.http1.parser.parseRequestHead(rawReqHead, .{}) catch return;
+    std.mem.doNotOptimizeAway(head.method.len + head.path.len);
 }
 
-const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: httpx/0.2.0\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
+const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: httpx/0.2.1\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
 
 fn benchHttp1HeaderBlock() void {
     var fields: [16]httpx.http1.parser.Field = undefined;
-    _ = httpx.http1.parser.parseHeaderBlock(rawHdrBlock, 0, &fields, .{}) catch return;
+    const n = httpx.http1.parser.parseHeaderBlock(rawHdrBlock, 0, &fields, .{}) catch return;
+    std.mem.doNotOptimizeAway(n);
 }
 
 // Group 2: Routing & Middleware
@@ -260,17 +280,19 @@ fn benchJsonParse() void {
 
 fn benchBasicAuthEncode() void {
     var outBuf: [256]u8 = undefined;
-    _ = httpx.auth.basic.encodeHeaderValue(&outBuf, "benchmark_user", "password123!");
+    const n = httpx.auth.basic.encodeHeaderValue(&outBuf, "benchmark_user", "password123!");
+    std.mem.doNotOptimizeAway(n);
 }
 
 fn benchBasicAuthDecode() void {
     var decodeBuf: [256]u8 = undefined;
-    _ = httpx.auth.basic.parse("Basic YmVuY2htYXJrX3VzZXI6cGFzc3dvcmQxMjMh", &decodeBuf) catch return;
+    const parsed = httpx.auth.basic.parse("Basic YmVuY2htYXJrX3VzZXI6cGFzc3dvcmQxMjMh", &decodeBuf) catch return;
+    std.mem.doNotOptimizeAway(parsed.username.len + parsed.password.len);
 }
 
 fn benchBearerTokenParse() void {
     const headerVal = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3j";
-    _ = httpx.auth.bearer.parseBearer(headerVal);
+    std.mem.doNotOptimizeAway(httpx.auth.bearer.parseBearer(headerVal).?.len);
 }
 
 // Group 5: Compression & Codecs
@@ -347,6 +369,33 @@ fn benchTemplateIncremental() void {
     _ = httpx.parsing.html.changedRanges(benchAllocator, sampleHtmlDoc, sampleHtmlDoc) catch return;
 }
 
+const sampleJsonFeed =
+    \\{
+    \\  "version": "https://jsonfeed.org/version/1.1",
+    \\  "title": "Benchmark Feed",
+    \\  "home_page_url": "https://example.com/",
+    \\  "items": [
+    \\    { "id": "1", "url": "https://example.com/1", "title": "First", "content_text": "Body one", "author": { "name": "Ada" } },
+    \\    { "id": "2", "url": "https://example.com/2", "title": "Second", "content_text": "Body two", "author": { "name": "Grace" } },
+    \\    { "id": "3", "url": "https://example.com/3", "title": "Third", "content_text": "Body three", "author": { "name": "Alan" } }
+    \\  ]
+    \\}
+;
+
+fn benchJsonFeedParse() void {
+    var feed = httpx.parsing.feed.parse(benchAllocator, sampleJsonFeed, "application/feed+json") catch return;
+    defer feed.deinit();
+    std.mem.doNotOptimizeAway(feed.entries.len);
+}
+
+const sampleReloadPage = "<!DOCTYPE html><html><head><link rel=\"stylesheet\" href=\"/a.css\"></head><body><h1>x</h1></body></html>";
+
+fn benchLiveReloadInject() void {
+    const out = httpx.static.reload.inject(benchAllocator, sampleReloadPage, "/__httpx_liveReload") catch return;
+    std.mem.doNotOptimizeAway(out.len);
+    benchAllocator.free(out);
+}
+
 var benchWatcher: ?*httpx.Watcher = null;
 
 fn benchWatcherScan() void {
@@ -413,29 +462,43 @@ fn benchHttp2FrameHeader() void {
     };
     var serialized: [httpx.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
     header.serialize(&serialized);
-    _ = httpx.http2.FrameHeader.parse(&serialized);
+    const parsed = httpx.http2.FrameHeader.parse(&serialized);
+    std.mem.doNotOptimizeAway(parsed.length);
+    std.mem.doNotOptimizeAway(parsed.streamId);
 }
 
 fn benchHpackIntEncode() void {
     var buf: [16]u8 = undefined;
-    _ = httpx.proto.common.integer.encode(&buf, 5, 0x20, 1337) catch return;
+    const n = httpx.proto.common.integer.encode(&buf, 5, 0x20, 1337) catch return;
+    std.mem.doNotOptimizeAway(n);
 }
 
 fn benchHpackIntDecode() void {
     const encoded = [_]u8{ 0x3F, 0x9A, 0x0A };
     var offset: usize = 0;
-    _ = httpx.proto.common.integer.decode(&encoded, &offset, 5) catch return;
+    const v = httpx.proto.common.integer.decode(&encoded, &offset, 5) catch return;
+    std.mem.doNotOptimizeAway(v);
 }
 
 fn benchH3VarIntEncode() void {
     var buf: [8]u8 = undefined;
-    _ = httpx.quic.varint.encode(&buf, 494878333) catch 0;
+    // Varying the magnitude keeps the encoder from being folded to a
+    // constant and makes the 1/2/4/8-byte branches all get exercised.
+    const values = [_]u64{ 25, 15293, 494878333, 1512888099419124471 };
+    for (values) |v| std.mem.doNotOptimizeAway(httpx.quic.varint.encode(&buf, v) catch 0);
 }
 
 fn benchH3VarIntDecode() void {
-    const encoded = [_]u8{ 0x9D, 0x7F, 0x3E, 0x7D };
-    var offset: usize = 0;
-    _ = httpx.quic.varint.decode(&encoded, &offset) catch return;
+    const encodeds = [_][]const u8{
+        &[_]u8{0x19},
+        &[_]u8{ 0x7B, 0xBD },
+        &[_]u8{ 0x9D, 0x7F, 0x3E, 0x7D },
+        &[_]u8{ 0xC2, 0x19, 0x7C, 0x5E, 0xFF, 0x14, 0xE8, 0x8C },
+    };
+    for (encodeds) |encoded| {
+        var offset: usize = 0;
+        std.mem.doNotOptimizeAway(httpx.quic.varint.decode(encoded, &offset) catch return);
+    }
 }
 
 // Group 10: TLS Record Cryptography & X.509 Parsing
@@ -578,7 +641,7 @@ const H3BenchServer = struct {
             srv.ep.peer = null;
 
             // Allocate a fresh server Connection for this incoming client.
-            const qconn = httpx.quic.Connection.init(alloc, .server, .{}, 0xB1) catch continue;
+            const qconn = httpx.quic.Connection.init(alloc, srv.ep.io, .server, .{}) catch continue;
             srv.ep.conn = qconn;
 
             // Restart pump with the new conn in place BEFORE serveOne so the
@@ -607,7 +670,7 @@ const H3BenchServer = struct {
     /// Ownership of `qconn` stays with `run()`; this function must not deinit it.
     fn serveOne(srv: *H3BenchServer, qconn: *httpx.quic.Connection) !void {
         const alloc = benchAllocator;
-        var drv = httpx.quic.HandshakeDriver.initServer(alloc, .{ .certChainPem = benchCertPem, .privateKeyPem = benchKeyPem });
+        var drv = httpx.quic.HandshakeDriver.initServer(srv.ep.io, alloc, .{ .certChainPem = benchCertPem, .privateKeyPem = benchKeyPem });
         defer drv.deinit();
         qconn.tls = .{ .ctx = &drv, .start = httpx.quic.HandshakeDriver.clientStart, .onData = httpx.quic.HandshakeDriver.onData };
         try httpx.quic.handshake.serveHandshake(&srv.ep, &srv.pump, &drv, 10_000);
@@ -755,6 +818,7 @@ pub fn main() !void {
     defer recordedMetrics.deinit(benchAllocator);
 
     const io = std.Io.Threaded.global_single_threaded.io();
+    benchIo = io;
 
     // 1. Initialize WorkerPool
     var pool = try httpx.WorkerPool.init(benchAllocator, .{ .workers = 2, .queueCapacity = 256 });
@@ -870,7 +934,7 @@ pub fn main() !void {
 
     // 8. HTTP/3 live loopback (fresh QUIC+TLS handshake per op)
     h3BenchIo = io;
-    h3BenchServer.ep = try httpx.quic.transport.Endpoint.init(benchAllocator, io, try httpx.quic.Connection.init(benchAllocator, .server, .{}, 0xB1), .{});
+    h3BenchServer.ep = try httpx.quic.transport.Endpoint.init(benchAllocator, io, try httpx.quic.Connection.init(benchAllocator, io, .server, .{}), .{});
     const h3port = h3BenchServer.ep.localPort();
     try h3BenchServer.pump.start(&h3BenchServer.ep, benchAllocator);
     h3BenchThread = try std.Thread.spawn(.{}, H3BenchServer.run, .{&h3BenchServer});
@@ -926,12 +990,14 @@ pub fn main() !void {
     std.debug.print("=================================================================================\n", .{});
     std.debug.print("                         httpx.zig Benchmark Suite                              \n", .{});
     std.debug.print("=================================================================================\n\n", .{});
+    var dateBuf: [16]u8 = undefined;
+    std.debug.print("Library:     httpx {s}\n", .{httpx.version});
     std.debug.print("Environment: {s}-{s} | Optimization: {s} | Zig: 0.16.0\n", .{
         @tagName(builtin.cpu.arch),
         @tagName(builtin.os.tag),
         @tagName(builtin.mode),
     });
-    std.debug.print("Timestamp:   2026-09-07\n\n", .{});
+    std.debug.print("Run date:    {s} (UTC)\n\n", .{runDate(&dateBuf)});
 
     const fastCfg = BenchConfig{ .iterations = 2_000_000, .warmupIterations = 20_000, .rounds = 5 };
     const coreCfg = BenchConfig{ .iterations = 200_000, .warmupIterations = 5_000, .rounds = 5 };
@@ -986,6 +1052,8 @@ pub fn main() !void {
     runBench("Parsing", "template_render", "ops/sec", medCfg, benchTemplateRender);
     if (benchTemplateAst) |*ast| ast.deinit();
     runBench("Parsing", "template_incremental", "ops/sec", medCfg, benchTemplateIncremental);
+    runBench("Parsing", "json_feed_parse", "ops/sec", medCfg, benchJsonFeedParse);
+    runBench("Parsing", "live_reload_inject", "ops/sec", medCfg, benchLiveReloadInject);
     runBench("Watcher", "watcher_scan", "ops/sec", scanCfg, benchWatcherScan);
     runBench("Watcher", "watcher_deps", "ops/sec", medCfg, benchWatcherDeps);
 

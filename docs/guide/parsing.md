@@ -5,39 +5,37 @@ different engines. This page documents where each lives and why.
 
 ## Tree-sitter usage
 
-HTTPX uses Tree-sitter internally for structured-text edit vocabulary
-(points, ranges, text edits) shared by the document/template/watcher
-pipeline, so a future grammar can plug in without changing call sites.
+Tree-sitter is used where a real grammar beats a hand-written scanner.
+Each parsing module imports the `treesitter` dependency directly, because
+there is no shared wrapper to route through:
 
-Tree-sitter is intentionally hidden from the normal HTTPX API: user code
-only needs `@import("httpx")`. Each parsing module imports the
-`treesitter` dependency directly where Tree-sitter is the parsing
-foundation (no shared wrapper): `src/parsing/html.zig` (HTML grammar),
-`src/parsing/xml.zig` (XML grammar), `src/parsing/feed.zig` (JSON
-grammar), `src/parsing/document.zig` (incremental edits, queries),
-`src/web/templates/parser.zig` (template grammar), and
-`src/web/watcher/reload.zig` + `src/web/watcher/backend.zig` (incremental analysis and event intake).
+- `src/parsing/html.zig` - HTML grammar, plus incremental reparse
+- `src/parsing/xml.zig` - XML grammar
+- `src/parsing/document.zig` - incremental edits, edits and queries over
+  whichever grammar the content kind selects
+- `src/web/templates/parser.zig` - the template grammar
+
+Tree-sitter is intentionally hidden from the public API: user code only
+needs `@import("httpx")`.
 
 Used by:
 
-- Templates — edit descriptors for development invalidation
-  (`Document.computeEdit`, consumed by the dev watcher flow)
-- HTML/document parsing — source positions for incremental updates
-- Incremental development parsing — offsets/points shared with the watcher
-- JSON Feed — syntax layer: the bundled JSON grammar parses the document
-  into a syntax tree (`feed.zig` maps it onto feed semantics; malformed
-  input fails closed, escapes/surrogates decode per RFC 8259)
+- HTML/document parsing - source positions for incremental updates
+- Template parsing - the full Jinja language surface
 
 Not used for:
 
 - HTTP wire parsing
 - HTTP/2 frames
-- HTTP/3 frames
+- HTTP/3 frames and QPACK
 - QUIC
 - TLS
 - DNS wire format
 - WebSocket frames
 - FTP wire protocol
+- JSON and JSON Feed, which use `std.json`
+- Robots.txt and sitemaps, which use their own scanners
+- The file watcher, which compares stat results and never parses content
 - compression
 - other binary/protocol parsing
 

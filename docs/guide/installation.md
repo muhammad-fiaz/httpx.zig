@@ -7,11 +7,11 @@ This guide covers all supported installation methods for `httpx.zig`.
 - **Zig Version**: 0.16.0 or later
 - **Operating System**: Windows, Linux, or macOS
 
-::: warning v0.2.0 release and Zig 0.15 deprecation
-`v0.2.0` is the current release and targets Zig `0.16.0+`.
+::: warning v0.2.1 release and Zig 0.15 deprecation
+`v0.2.1` is the current release and targets Zig `0.16.0+`.
 `v0.1.8` is the previous release.
 Zig `0.15` support is legacy and remains available only through `0.0.7`.
-New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.0**.
+New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.1**.
 :::
 
 ## Platform Support
@@ -50,10 +50,10 @@ zig build -Dtarget=aarch64-macos
 
 ## Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.0)**
+**Latest Release (v0.2.1)**
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
 ```
 
 **Previous Release (v0.1.8)**
@@ -63,9 +63,9 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 ```
 
 > [!WARNING]
-> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.0**.
+> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.1**.
 
-## Method 2: Zig Fetch (Latest / v0.2.0 in development)
+## Method 2: Zig Fetch (Latest / v0.2.1 in development)
 
 Use this for the latest in-development version from the `main` branch:
 
@@ -78,10 +78,10 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .{
     .name = "my-project",
-    .version = "0.2.0",
+    .version = "0.2.1",
     .dependencies = .{
         .httpx = .{
-            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz",
+            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz",
             .hash = "...", // Run `zig fetch --save <url>` to generate the hash.
         },
     },

@@ -27,6 +27,8 @@ const docs = @import("../web/docs/docs.zig");
 const httpVersion = @import("../common/httpVersion.zig");
 pub const HttpVersion = httpVersion.HttpVersion;
 const watcherMod = @import("../web/watcher/backend.zig");
+const reload = @import("../web/watcher/client.zig");
+const udpMod = @import("../sockets/udp.zig");
 const templatesMod = @import("../web/templates/templates.zig");
 const tlsServerMod = @import("../protocols/tls/server.zig");
 const fsMod = @import("../utils/fs.zig");
@@ -407,7 +409,15 @@ pub const Server = struct {
         if (effectiveCfg.http3 and loadedCertPem != null and loadedKeyPem != null) {
             const placeholder = try quicConn.Connection.init(allocator, io, .server, .{});
             errdefer placeholder.deinit();
-            const ep = quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = listener.localPort() }) catch |err| {
+            // RFC 9114 Section 3: HTTP/3 lives on the same port number as
+            // HTTP/1.1 and HTTP/2. That only makes sense for a port the
+            // operator chose. With an ephemeral TCP port the number is not
+            // knowable by any client, so the UDP side takes its own one --
+            // which also avoids Windows refusing a bind into one of the
+            // dynamic UDP port ranges the stack keeps reserved.
+            const tcpPort = listener.localPort();
+            const requested: u16 = if (effectiveCfg.port != 0) tcpPort else 0;
+            const ep = quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = requested }) catch |err| {
                 placeholder.deinit();
                 return err;
             };
@@ -699,6 +709,15 @@ pub const Server = struct {
 
     pub fn localPort(self: *const Server) u16 {
         return self.listener.localPort();
+    }
+
+    /// UDP port the HTTP/3 endpoint is bound to, or null when HTTP/3 is off.
+    /// Equal to `localPort` whenever the server was configured with an
+    /// explicit port (RFC 9114 Section 3), and independently chosen when the
+    /// TCP port was ephemeral.
+    pub fn http3Port(self: *const Server) ?u16 {
+        const ep = self.h3Endpoint orelse return null;
+        return ep.localPort();
     }
 
     /// Signals the accept loop to stop and wakes a blocked accept() by
@@ -1551,7 +1570,7 @@ pub const Server = struct {
         };
         const res: Response = self.router.dispatch(&ctx);
 
-        const bytesOut = writeResponse(conn, arena, reqHead.minorVersion, res, isHead, if (clientClose) "close" else "keep-alive", ctx.header("Accept-Encoding")) catch {
+        const bytesOut = writeResponse(conn, arena, reqHead.minorVersion, try self.withLiveReload(arena, res, isHead), isHead, if (clientClose) "close" else "keep-alive", ctx.header("Accept-Encoding")) catch {
             self.metricsRegistry.recordError();
             return false;
         };
@@ -1559,6 +1578,20 @@ pub const Server = struct {
         self.metricsRegistry.recordResponseFull(res.status, durNs, bytesOut);
         self.emitAccess(reqHead.method, reqHead.path, res.status, body.len, bytesOut, t0);
         return !clientClose;
+    }
+
+    /// Attaches the browser live-reload client to HTML responses while
+    /// `liveReload` is on, so handler-written pages reload the same way
+    /// static files do. `inject` is idempotent, so a response that already
+    /// carries the script (static files, the site generator) is untouched.
+    fn withLiveReload(self: *Server, arena: Allocator, res: Response, isHead: bool) !Response {
+        if (!self.cfg.liveReload or isHead or res.status == 204 or res.status == 304) return res;
+        const ct = res.contentType orelse return res;
+        if (!std.mem.startsWith(u8, ct, "text/html")) return res;
+        if (reload.isInjected(res.body)) return res;
+        var out = res;
+        out.body = try reload.inject(arena, res.body, self.cfg.liveReloadPath);
+        return out;
     }
 
     /// Deliver a requestCompleted event to the application callback.
@@ -1736,6 +1769,84 @@ test "template route renders through tree-sitter pipeline end to end" {
     try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "<p>bob</p>") != null);
 
     srv.requestShutdown();
+}
+
+fn pageHandler(_: *Context) anyerror!Response {
+    return .{ .body = "<html><head><link rel=\"stylesheet\" href=\"/a.css\"></head><body><h1>hi</h1></body></html>", .contentType = "text/html" };
+}
+
+test "live reload attaches the browser client to a plain handler's HTML" {
+    // liveReload must not require the static file handler: a handler that
+    // returns HTML gets the same client-side script, so hot/warm/cold
+    // reloads work for framework responses too.
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = Server.init(a, ctx.io, .{
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 2,
+        .liveReload = true,
+    }) catch return;
+    defer srv.deinit();
+    try srv.router.get("/", pageHandler, .{});
+
+    const Runner = struct {
+        fn run(s: *Server) void {
+            s.run();
+        }
+    };
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    defer t.join();
+
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    defer client.close();
+    try client.writeAll("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+
+    var buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = client.read(buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    const wire = buf[0..total];
+    try std.testing.expect(std.mem.startsWith(u8, wire, "HTTP/1.1 200 OK"));
+    try std.testing.expect(std.mem.indexOf(u8, wire, srv.cfg.liveReloadPath) != null);
+    // Handles the hot-reload payload, so a CSS edit swaps the stylesheet
+    // instead of reloading the document.
+    try std.testing.expect(std.mem.indexOf(u8, wire, "hotReload") != null);
+    const markerAt = std.mem.lastIndexOf(u8, wire, reload.marker) orelse return error.MarkerMissing;
+    const bodyEnd = std.mem.lastIndexOf(u8, wire, "</body>") orelse return error.BodyEndMissing;
+    try std.testing.expect(markerAt < bodyEnd);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "<h1>hi</h1>") != null);
+    // Injected exactly once.
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, wire[markerAt + 1 ..], reload.marker));
+
+    srv.requestShutdown();
+}
+
+test "live reload is off by default and skips non-HTML responses" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+    defer srv.deinit();
+    try std.testing.expect(!srv.cfg.liveReload);
+
+    const res: Response = .{ .body = "<html><body>x</body></html>", .contentType = "text/html" };
+    const out = try srv.withLiveReload(a, res, false);
+    try std.testing.expect(!reload.isInjected(out.body));
+
+    const plain: Response = .{ .body = "hi", .contentType = "text/plain" };
+    const outPlain = try srv.withLiveReload(a, plain, false);
+    try std.testing.expectEqualStrings("hi", outPlain.body);
+
+    // HEAD never carries a body, so nothing is injected.
+    const outHead = try srv.withLiveReload(a, res, true);
+    try std.testing.expectEqualStrings("<html><body>x</body></html>", outHead.body);
 }
 
 test "server handles POST with content-length body" {
@@ -2347,39 +2458,42 @@ test "port zero allocates ephemeral port; strict rejects occupied port" {
     try std.testing.expect(second.localPort() != 0);
 }
 
+/// Self-signed localhost credential used by the HTTP/3 tests. ECDSA
+/// P-256, valid for the `127.0.0.1` SAN.
+const h3TestCertPem =
+    \\-----BEGIN CERTIFICATE-----
+    \\MIIBmTCCAT+gAwIBAgIURhx0CMJWTUTFJXV9z2OlmW/cNlcwCgYIKoZIzj0EAwIw
+    \\FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDkwOTE4MTczOFoXDTM2MDkwNjE4
+    \\MTczOFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D
+    \\AQcDQgAE71D4pM0SAPK8sdt+xlEESZX/EJoKHUC+4IpPuSlOiQuCXOkN04ozVGKA
+    \\mrmUtDqQCdvmdjHbjqGY6TCszXTCnKNvMG0wHQYDVR0OBBYEFFjYJYGodkVKyvXf
+    \\4qrn7rvQx+PFMB8GA1UdIwQYMBaAFFjYJYGodkVKyvXf4qrn7rvQx+PFMA8GA1Ud
+    \\EwEB/wQFMAMBAf8wGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAoGCCqGSM49
+    \\BAMCA0gAMEUCIQD0sAcuw/jdWdfBrxLXY1ur2cU8F0CAkPCvS2qKn7XK4QIgAP71
+    \\95toW+Gsh8/VZlNoHL2s14olRp5zl3cYDPzKM10=
+    \\-----END CERTIFICATE-----
+;
+
+const h3TestKeyPem =
+    \\-----BEGIN PRIVATE KEY-----
+    \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyp549r9FrXbm02Cn
+    \\81gAdAbUzHatPYQWVDIWnQdCMPChRANCAATvUPikzRIA8ryx237GUQRJlf8Qmgod
+    \\QL7gik+5KU6JC4Jc6Q3TijNUYoCauZS0OpAJ2+Z2MduOoZjpMKzNdMKc
+    \\-----END PRIVATE KEY-----
+;
+
 test "Server high-level HTTP/3 initialization and endpoint lifecycle" {
     const a = std.testing.allocator;
     var ctx = tcp.IoContext.init(a) catch return;
     defer ctx.deinit();
-
-    const certPem =
-        \\-----BEGIN CERTIFICATE-----
-        \\MIIBmTCCAT+gAwIBAgIURhx0CMJWTUTFJXV9z2OlmW/cNlcwCgYIKoZIzj0EAwIw
-        \\FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDkwOTE4MTczOFoXDTM2MDkwNjE4
-        \\MTczOFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D
-        \\AQcDQgAE71D4pM0SAPK8sdt+xlEESZX/EJoKHUC+4IpPuSlOiQuCXOkN04ozVGKA
-        \\mrmUtDqQCdvmdjHbjqGY6TCszXTCnKNvMG0wHQYDVR0OBBYEFFjYJYGodkVKyvXf
-        \\4qrn7rvQx+PFMB8GA1UdIwQYMBaAFFjYJYGodkVKyvXf4qrn7rvQx+PFMA8GA1Ud
-        \\EwEB/wQFMAMBAf8wGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAoGCCqGSM49
-        \\BAMCA0gAMEUCIQD0sAcuw/jdWdfBrxLXY1ur2cU8F0CAkPCvS2qKn7XK4QIgAP71
-        \\95toW+Gsh8/VZlNoHL2s14olRp5zl3cYDPzKM10=
-        \\-----END CERTIFICATE-----
-    ;
-    const keyPem =
-        \\-----BEGIN PRIVATE KEY-----
-        \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyp549r9FrXbm02Cn
-        \\81gAdAbUzHatPYQWVDIWnQdCMPChRANCAATvUPikzRIA8ryx237GUQRJlf8Qmgod
-        \\QL7gik+5KU6JC4Jc6Q3TijNUYoCauZS0OpAJ2+Z2MduOoZjpMKzNdMKc
-        \\-----END PRIVATE KEY-----
-    ;
 
     var srv = Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
         .http3 = true,
         .tls = .{
-            .certificatePem = certPem,
-            .privateKeyPem = keyPem,
+            .certificatePem = h3TestCertPem,
+            .privateKeyPem = h3TestKeyPem,
         },
         .enableDocs = false,
     }) catch return;
@@ -2387,5 +2501,59 @@ test "Server high-level HTTP/3 initialization and endpoint lifecycle" {
 
     try std.testing.expect(srv.h3Endpoint != null);
     try std.testing.expect(srv.h3Pump == null);
-    try std.testing.expectEqual(srv.localPort(), srv.h3Endpoint.?.localPort());
+    // Port 0 was requested, so the UDP side picked its own port. It must be
+    // a real, non-zero, reachable number regardless.
+    try std.testing.expect(srv.http3Port() != null);
+    try std.testing.expect(srv.http3Port().? != 0);
+}
+
+test "Server shares one port number between HTTP/1.1 and HTTP/3 when the port is explicit" {
+    // RFC 9114 Section 3 requires a configured port to carry both. Probing
+    // for a free port first keeps the test off a port another process holds.
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    // Probe with UDP, not TCP. Windows keeps the dynamic port ranges for TCP
+    // and UDP separate, so a TCP-chosen port can land in a range the UDP
+    // stack refuses to bind, which is exactly the port HTTP/3 needs.
+    const freePort = blk: {
+        var probe = udpMod.UdpSocket.bind(ctx.io, 0) catch break :blk @as(u16, 0);
+        defer probe.close();
+        break :blk switch (probe.socket.address) {
+            .ip4 => |v| v.port,
+            .ip6 => |v| v.port,
+        };
+    };
+    if (freePort == 0) return;
+
+    var srv = Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = freePort,
+        .http3 = true,
+        .tls = .{
+            .certificatePem = h3TestCertPem,
+            .privateKeyPem = h3TestKeyPem,
+        },
+        .enableDocs = false,
+    }) catch return;
+    defer srv.deinit();
+
+    try std.testing.expectEqual(freePort, srv.localPort());
+    try std.testing.expectEqual(freePort, srv.http3Port().?);
+}
+
+test "Server reports no HTTP/3 port when HTTP/3 is disabled" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+    }) catch return;
+    defer srv.deinit();
+
+    try std.testing.expectEqual(@as(?u16, null), srv.http3Port());
 }

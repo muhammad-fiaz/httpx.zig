@@ -88,7 +88,7 @@ pub fn main() !void {
         .enableDocs = true,
         .docs = .{
             .title = "HTTPX Modern API Suite",
-            .version = "0.2.0",
+            .version = "0.2.1",
             .description = "Full-featured native HTTP server with OpenAPI & GraphQL documentation.",
             .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
             .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },

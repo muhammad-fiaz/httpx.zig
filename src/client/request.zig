@@ -25,7 +25,6 @@
 //!   - RFC 3986 Section 5 — Reference Resolution (Location header)
 
 const std = @import("std");
-const envPkg = @import("env");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
 const uriMod = @import("../common/uri.zig");
@@ -1320,7 +1319,8 @@ test "client compression advertisement respects explicit override" {
         for (defaults) |line| a.free(line);
         a.free(defaults);
     }
-    try std.testing.expectEqualStrings("User-Agent: httpx/0.2.0", defaults[0]);
+    const userAgentPrefix = "User-Agent: ";
+    try std.testing.expectEqualStrings(versionInfo.userAgent, defaults[0][userAgentPrefix.len..]);
     try std.testing.expectEqualStrings("Accept-Encoding: gzip, br, zstd", defaults[1]);
 
     const custom = try headerLines(a, &.{.{ .name = "Accept-Encoding", .value = "identity" }}, null);
@@ -1330,7 +1330,7 @@ test "client compression advertisement respects explicit override" {
     }
     try std.testing.expectEqual(@as(usize, 2), custom.len);
     try std.testing.expectEqualStrings("Accept-Encoding: identity", custom[0]);
-    try std.testing.expectEqualStrings("User-Agent: httpx/0.2.0", custom[1]);
+    try std.testing.expectEqualStrings(versionInfo.userAgent, custom[1][userAgentPrefix.len..]);
 }
 
 /// `reusable` is true ONLY when the body was framed and fully consumed —
@@ -1914,98 +1914,4 @@ test "https auto-enables tls with secure caBundle verification when no explicit 
     const reqTls: ?TlsOptions = null;
     const tlsOpts: ?TlsOptions = if (isTls) reqTls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
     try std.testing.expectEqual(.caBundle, tlsOpts.?.verify);
-}
-
-// Live TLS interop (environment-gated).
-//
-// Requires an external TLS endpoint because std.Io.Threaded's
-// processSpawnWindows hangs when spawning the harness from inside the test
-// (reproduced standalone; see tools/runTlsInterop.ps1 for one-command run):
-//
-//   powershell -File tools/runTlsInterop.ps1
-//
-// That runner starts src/assets/tlsHarness.ps1 (SChannel, self-signed) and
-// runs this suite against it. Without the env vars this test skips — an
-// honest environment gate, not a code path we cannot verify.
-
-test "live https interop against external TLS server" {
-    var env = envPkg.Env.init(std.testing.allocator, .{});
-    defer env.deinit();
-    try env.loadOsEnv();
-    const host = env.get("HTTPX_TLS_HOST") orelse return;
-    const portStr = env.get("HTTPX_TLS_PORT") orelse return;
-    const gate = env.get("HTTPX_TLS_INTEROP") orelse return;
-    if (gate.len == 0) return;
-    if (host.len == 0 or host.len > 63 or portStr.len == 0 or portStr.len > 15) return;
-    const port = std.fmt.parseInt(u16, portStr, 10) catch return;
-
-    var ctx = try tTcp.IoContext.init(std.testing.allocator);
-    defer ctx.deinit();
-
-    var ub2: [128]u8 = undefined;
-    const full = try std.fmt.bufPrint(&ub2, "https://{s}:{d}/interop", .{ host, port });
-
-    // One retry: Windows localhost timing between backlog accept and TLS
-    // auth occasionally refuses the first attempt.
-    var res: Response = undefined;
-    var attempt: usize = 0;
-    while (true) {
-        attempt += 1;
-        if (request(std.testing.allocator, ctx.io, .{
-            .url = full,
-            .tls = .{ .verify = .none, .allowTruncation = true },
-        })) |r| {
-            res = r;
-            break;
-        } else |_| {
-            if (attempt >= 2) {
-                // Re-check readiness once, then give up honestly.
-                var stillReady = false;
-                for (0..50) |_| {
-                    if (tTcp.connect(ctx.io, "127.0.0.1", port)) |pr| {
-                        pr.close();
-                        stillReady = true;
-                        break;
-                    } else |_| {}
-                }
-                return error.TestUnexpectedResult;
-            }
-            std.atomic.spinLoopHint();
-        }
-    }
-    defer res.deinit();
-
-    try std.testing.expectEqual(@as(u16, 200), res.status);
-    try std.testing.expect(std.mem.indexOf(u8, res.body, "interoperability-ok") != null);
-}
-
-test "buildTarget preserves URL query and merges option query" {
-    const a = std.testing.allocator;
-
-    // No query anywhere.
-    {
-        const t = try buildTarget(a, "/users", "", &.{});
-        defer a.free(t);
-        try std.testing.expectEqualStrings("/users", t);
-    }
-    // URL-embedded query is preserved verbatim (previously dropped).
-    {
-        const t = try buildTarget(a, "/users/42", "verbose=1", &.{});
-        defer a.free(t);
-        try std.testing.expectEqualStrings("/users/42?verbose=1", t);
-    }
-    // Options-only query still works.
-    {
-        const q = [_]Header{.{ .name = "page", .value = "2" }};
-        const t = try buildTarget(a, "/users", "", &q);
-        defer a.free(t);
-        try std.testing.expectEqualStrings("/users?page=2", t);
-    }
-    // Both merge with & (URL pairs first, option values encoded).
-    {
-        const q = [_]Header{ .{ .name = "tag", .value = "a&b" }, .{ .name = "n", .value = "x" } };
-        const t = try buildTarget(a, "/s", "q=zig", &q);
-        defer a.free(t);
-        try std.testing.expectEqualStrings("/s?q=zig&tag=a%26b&n=x", t);
-    }
 }

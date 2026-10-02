@@ -8,20 +8,27 @@
 //! - Server Name Indication (SNI)
 //! - Mutual TLS (mTLS) client certificate authentication
 //! - Secure private key handling with memory zeroing
-//! - Optional OpenSSL backend integration
+//! - X25519MLKEM768 post-quantum key exchange
+//!
+//! This file is the entry point for the subsystem: every module in this
+//! directory is reachable from here, either as a named value (`Client`,
+//! `Server`, `Session`) or as a module alias (`record`, `engine`, ...).
 
-// Public TLS owners and value types. Everything else in this directory
-// (engine, handshake, records, transports, verification internals) is an
-// implementation detail imported directly by file path where needed.
+const alpnMod = @import("alpn.zig");
+const certificateMod = @import("certificate.zig");
 const clientMod = @import("client.zig");
+const configMod = @import("config.zig");
+const engineMod = @import("engine.zig");
+const errorsMod = @import("errors.zig");
+const handshakeMod = @import("handshake.zig");
+const keyMod = @import("key.zig");
+const quicTlsMod = @import("quicTls.zig");
+const recordMod = @import("record.zig");
 const serverMod = @import("server.zig");
 const sessionMod = @import("session.zig");
-const certificateMod = @import("certificate.zig");
-const trustStoreMod = @import("trustStore.zig");
 const transportMod = @import("transport.zig");
-const configMod = @import("config.zig");
-const errorsMod = @import("errors.zig");
-const alpnMod = @import("alpn.zig");
+const trustStoreMod = @import("trustStore.zig");
+const verifyMod = @import("verify.zig");
 
 /// TLS client owner: configuration, trust and identity, connection factory.
 pub const Client = clientMod.Client;
@@ -49,8 +56,20 @@ pub const TlsVersion = configMod.TlsVersion;
 pub const ClientAuthMode = configMod.ClientAuthMode;
 pub const TlsError = errorsMod.TlsError;
 pub const AlpnProtocol = alpnMod.Protocol;
-pub const record = @import("record.zig");
+
+// Module aliases.
+pub const alpn = alpnMod;
 pub const certificate = certificateMod;
+pub const config = configMod;
+pub const engine = engineMod;
+pub const errors = errorsMod;
+pub const handshake = handshakeMod;
+pub const key = keyMod;
+pub const quicTls = quicTlsMod;
+pub const record = recordMod;
+pub const transport = transportMod;
+pub const trustStore = trustStoreMod;
+pub const verify = verifyMod;
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
