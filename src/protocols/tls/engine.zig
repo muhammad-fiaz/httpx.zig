@@ -54,22 +54,6 @@ const quicTls = @import("quicTls.zig");
 
 // Random helper — OS CSPRNG when available, otherwise deterministic PRNG
 
-var randomCounter: u64 = 0x9E3779B97F4A7C15;
-
-fn fillRandom(buf: []u8) void {
-    if (@hasDecl(std.posix, "getrandom")) {
-        std.posix.getrandom(buf) catch {
-            randomCounter +%= 1;
-            var prng = std.Random.DefaultPrng.init(randomCounter ^ 0x123456789ABCDEF0);
-            prng.random().bytes(buf);
-        };
-        return;
-    }
-    randomCounter +%= 1;
-    var prng = std.Random.DefaultPrng.init(randomCounter ^ 0x123456789ABCDEF0);
-    prng.random().bytes(buf);
-}
-
 // HKDF-Expand-Label (RFC 8446 Section 7.1)
 // info = uint16(len) || uint8(6 + label.len) || "tls13 " || label || uint8(contextLen) || context
 // For Derive-Secret, context is the transcript hash; for key/iv expansion, context is empty.
@@ -187,6 +171,10 @@ pub const SharedSecret = struct {
 
 pub const Engine = struct {
     allocator: Allocator,
+    /// Entropy source for every key, nonce and random value this engine
+    /// generates. Supplied by the caller because the whole TLS layer is
+    /// already Io-based; there is no global to fall back on.
+    io: std.Io,
     role: enum { client, server },
     cbs: Callbacks,
 
@@ -302,8 +290,9 @@ pub const Engine = struct {
         serverFinishedSent,
     };
 
-    pub fn initClient(allocator: Allocator, cbs: Callbacks) Engine {
+    pub fn initClient(io: std.Io, allocator: Allocator, cbs: Callbacks) Engine {
         return .{
+            .io = io,
             .allocator = allocator,
             .role = .client,
             .cbs = cbs,
@@ -311,8 +300,9 @@ pub const Engine = struct {
         };
     }
 
-    pub fn initServer(allocator: Allocator, cbs: Callbacks) Engine {
+    pub fn initServer(io: std.Io, allocator: Allocator, cbs: Callbacks) Engine {
         return .{
+            .io = io,
             .allocator = allocator,
             .role = .server,
             .cbs = cbs,
@@ -486,13 +476,13 @@ pub const Engine = struct {
         // Generate ephemeral X25519 keypair (fallback share) and the
         // X25519MLKEM768 hybrid (preferred share).
         var seed: [32]u8 = undefined;
-        fillRandom(&seed);
+        try self.io.randomSecure(&seed);
         self.localKeypair = try x25519.KeyPair.generateDeterministic(seed);
 
         const ch = handshakeMod.ClientHello{
             .random = blk: {
                 var r: [32]u8 = undefined;
-                fillRandom(&r);
+                try self.io.randomSecure(&r);
                 break :blk r;
             },
             .cipherSuites = &.{ .AES_128_GCM_SHA256, .AES_256_GCM_SHA384, .CHACHA20_POLY1305_SHA256 },
@@ -540,14 +530,14 @@ pub const Engine = struct {
         quicTransportParams: ?[]const u8,
     ) ![]u8 {
         var seed: [32]u8 = undefined;
-        fillRandom(&seed);
+        try self.io.randomSecure(&seed);
         self.localKeypair = try x25519.KeyPair.generateDeterministic(seed);
 
         const offerEarly = session.maxEarlyData > 0;
         const ch = handshakeMod.ClientHello{
             .random = blk: {
                 var r: [32]u8 = undefined;
-                fillRandom(&r);
+                try self.io.randomSecure(&r);
                 break :blk r;
             },
             .cipherSuites = &.{ .AES_128_GCM_SHA256, .AES_256_GCM_SHA384, .CHACHA20_POLY1305_SHA256 },
@@ -1149,7 +1139,7 @@ pub const Engine = struct {
         const hsHash = hsCopy.finalResult();
         @memcpy(cvContent[64 + 33 + 1 ..], &hsHash);
         var cvNoise: [EcdsaP256.noise_length]u8 = undefined;
-        fillRandom(&cvNoise);
+        try self.io.randomSecure(&cvNoise);
         const ecSig = try ecKeypair.sign(&cvContent, cvNoise);
         var out: ClientSignature = undefined;
         const sigSlice = ecSig.toDer(&out.der);
@@ -1438,7 +1428,7 @@ pub const Engine = struct {
     ) !ServerFlight {
         if (self.sharedSecret == null) {
             var seed: [32]u8 = undefined;
-            fillRandom(&seed);
+            try self.io.randomSecure(&seed);
             self.localKeypair = try x25519.KeyPair.generateDeterministic(seed);
             try self.negotiateClientHello(clientHelloBody);
         }
@@ -1475,7 +1465,7 @@ pub const Engine = struct {
 
         // serverRandom (32 bytes)
         var serverRandom: [32]u8 = undefined;
-        fillRandom(&serverRandom);
+        try self.io.randomSecure(&serverRandom);
         try shBody.appendSlice(self.allocator, &serverRandom);
 
         // legacySessionIdEcho
@@ -1518,14 +1508,20 @@ pub const Engine = struct {
         try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshakeMod.ExtensionType.supported_versions))));
         try exts.appendSlice(self.allocator, &.{ 0x00, 0x02 });
         try exts.appendSlice(self.allocator, &.{ 0x03, 0x04 });
-
-        // serverName ack (empty) — only when the client sent SNI. An
-        // unsolicited ack violates RFC 8446 Section 4.2 and aborts strict
-        // clients (e.g. IP-literal handshakes carry no SNI).
-        if (self.sniHostname != null) {
-            try exts.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(handshakeMod.ExtensionType.server_name))));
-            try exts.appendSlice(self.allocator, &.{ 0x00, 0x00 });
-        }
+        // No server_name acknowledgement in the TLS 1.3 ServerHello.
+        //
+        // OpenSSL rejects it. ssl/statem/extensions.c lists server_name as valid in
+        // SSL_EXT_CLIENT_HELLO, SSL_EXT_TLS1_2_SERVER_HELLO and
+        // SSL_EXT_TLS1_3_ENCRYPTED_EXTENSIONS -- but NOT
+        // SSL_EXT_TLS1_3_SERVER_HELLO -- so tls_validate_all_contexts fails and the
+        // client aborts with illegal_parameter before the handshake begins. Measured
+        // against curl over HTTPS and `openssl s_client`: both refused every
+        // connection that carried SNI, which is what every real client sends.
+        //
+        // The ack is pure acknowledgement. The client already knows the hostname it
+        // asked for and nothing downstream depends on the server echoing it back, so
+        // omitting it is both what interoperable peers do and the only form TLS 1.3
+        // clients accept.
 
         // preSharedKey ack: selectedIdentity 0 (we accept only the
         // first offered identity). Present only on the abbreviated flight.
@@ -1722,7 +1718,7 @@ pub const Engine = struct {
                 @memcpy(cvContent[64 + 33 + 1 ..], &hsHash);
             }
             var cvNoise: [EcdsaP256.noise_length]u8 = undefined;
-            fillRandom(&cvNoise);
+            try self.io.randomSecure(&cvNoise);
             const ecSig = try ecKeypair.sign(&cvContent, cvNoise);
             var sigDer: [EcdsaP256.Signature.der_encoded_length_max]u8 = undefined;
             const sigDerSlice = ecSig.toDer(&sigDer);
@@ -1804,15 +1800,15 @@ pub const Engine = struct {
     ) ![]u8 {
         const keys = self.ticketKeys orelse return error.HandshakeFailed;
         var nonce: [32]u8 = undefined;
-        fillRandom(&nonce);
+        try self.io.randomSecure(&nonce);
         var psk: [32]u8 = undefined;
         hkdfExpandLabelWithContext(resumptionMaster, "resumption", &nonce, &psk);
         defer std.crypto.secureZero(u8, &psk);
         var ageAdd: [4]u8 = undefined;
-        fillRandom(&ageAdd);
+        try self.io.randomSecure(&ageAdd);
         const ageAddV = std.mem.readInt(u32, &ageAdd, .big);
         const alpnWire = if (self.negotiatedAlpn) |a| a else "";
-        const blob = keys.seal(psk, suite, nowMs, lifetimeSecs, ageAddV, self.maxEarlyData, alpnWire);
+        const blob = try keys.seal(self.io, psk, suite, nowMs, lifetimeSecs, ageAddV, self.maxEarlyData, alpnWire);
         const maxEd: ?u32 = if (self.maxEarlyData > 0) self.maxEarlyData else null;
         const nst = handshakeMod.NewSessionTicket{
             .lifetimeSecs = lifetimeSecs,
@@ -1996,7 +1992,7 @@ pub const ServerFlight = struct {
 
 test "client produces valid ClientHello" {
     const a = std.testing.allocator;
-    var engine = Engine.initClient(a, .{});
+    var engine = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
 
     const ch = try engine.produceClientHello(&.{"h2"}, &.{}, null, null);
     defer a.free(ch);
@@ -2011,8 +2007,8 @@ test "client produces valid ClientHello" {
 test "handshake engine client-server key exchange" {
     const a = std.testing.allocator;
 
-    var client = Engine.initClient(a, .{});
-    var server = Engine.initServer(a, .{});
+    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
 
     // Client produces ClientHello
     const ch = try client.produceClientHello(&.{"h2"}, &.{}, null, null);
@@ -2081,8 +2077,8 @@ test "mutual TLS client certificate round trip" {
     const clientKeyPem = @embedFile("testdata/localhostKey.pem");
     const nowSec: i64 = @divFloor(clockMod.millisNow(), 1000);
 
-    var client = Engine.initClient(a, .{});
-    var server = Engine.initServer(a, .{});
+    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
     server.requestClientCert = true;
 
     const ch = try client.produceClientHello(&.{}, &.{}, null, null);
@@ -2175,7 +2171,7 @@ test "mutual TLS rejects untrusted client certificate" {
 
 test "mutual TLS rejects malformed client Certificate framing" {
     const a = std.testing.allocator;
-    var server = Engine.initServer(a, .{});
+    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
 
     // Truncated DER entry: structural guard fails closed, no panic.
     const bad = [_]u8{ 0x0B, 0x00, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x05, 0x30, 0x05, 0x00, 0x01, 0x02 };
@@ -2192,8 +2188,8 @@ test "mutual TLS rejects forged client CertificateVerify" {
     const clientCertPem = @embedFile("testdata/localhostCert.pem");
     const clientKeyPem = @embedFile("testdata/localhostKey.pem");
 
-    var client = Engine.initClient(a, .{});
-    var server = Engine.initServer(a, .{});
+    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
     server.requestClientCert = true;
 
     const ch = try client.produceClientHello(&.{}, &.{}, null, null);
@@ -2244,7 +2240,7 @@ test "mutual TLS rejects forged client CertificateVerify" {
 
 test "alpn negotiation through handshake" {
     const a = std.testing.allocator;
-    var client = Engine.initClient(a, .{});
+    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
 
     const ch = try client.produceClientHello(&.{ "h2", "http/1.1" }, &.{}, null, null);
     defer a.free(ch);
@@ -2264,9 +2260,9 @@ test "alpn negotiation through handshake" {
 
 test "server flight carries negotiated alpn selection" {
     const a = std.testing.allocator;
-    var client = Engine.initClient(a, .{});
+    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer client.deinit();
-    var server = Engine.initServer(a, .{});
+    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer server.deinit();
 
     const ch = try client.produceClientHello(&.{ "h2", "http/1.1" }, &.{}, null, null);
@@ -2307,9 +2303,9 @@ test "psk abbreviated handshake resynchronizes application keys" {
     const now: u64 = 1_000_000;
 
     // --- Full handshake first (mirrors the key-exchange test) ---
-    var client = Engine.initClient(a, .{});
+    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer client.deinit();
-    var server = Engine.initServer(a, .{});
+    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer server.deinit();
     server.ticketKeys = sessionMod.TicketKeys{ .current = [_]u8{0x1A} ** 32 };
 
@@ -2350,9 +2346,9 @@ test "psk abbreviated handshake resynchronizes application keys" {
     try std.testing.expect(!session.isUsable("other.com", now + 1000));
 
     // --- Abbreviated handshake with the captured session ---
-    var client2 = Engine.initClient(a, .{});
+    var client2 = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer client2.deinit();
-    var server2 = Engine.initServer(a, .{});
+    var server2 = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer server2.deinit();
     server2.ticketKeys = server.ticketKeys;
     const ch2 = try client2.produceClientHelloResumption(&.{"h2"}, &.{}, "example.com", &session, now + 2000, null);
@@ -2379,9 +2375,9 @@ test "psk abbreviated handshake resynchronizes application keys" {
     try std.testing.expectEqualSlices(u8, client2.apKeys.?.serverKeySlice(), server2.apKeys.?.serverKeySlice());
 
     // --- Negative paths: tampered binder and expired ticket fall back ---
-    var client3 = Engine.initClient(a, .{});
+    var client3 = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer client3.deinit();
-    var server3 = Engine.initServer(a, .{});
+    var server3 = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer server3.deinit();
     server3.ticketKeys = server.ticketKeys;
     const ch3 = try client3.produceClientHelloResumption(&.{"h2"}, &.{}, "example.com", &session, now + 3000, null);
@@ -2400,8 +2396,8 @@ test "psk abbreviated handshake resynchronizes application keys" {
 test "hello retry request completes a full handshake after retry" {
     const a = std.testing.allocator;
 
-    var client = Engine.initClient(a, .{});
-    var server = Engine.initServer(a, .{});
+    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
 
     // Shareless ClientHello1 (crafted directly: the normal producer
     // always offers x25519). The predicate must spot the gap.
@@ -2455,9 +2451,9 @@ test "hello retry request completes a full handshake after retry" {
 }
 test "quic transport parameters roundtrip through hello and ee" {
     const a = std.testing.allocator;
-    var client = Engine.initClient(a, .{});
+    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer client.deinit();
-    var server = Engine.initServer(a, .{});
+    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer server.deinit();
 
     // Hand-rolled TP block: initialMaxData = 2MiB, maxIdleTimeout = 30s.
@@ -2504,9 +2500,9 @@ test "server certificate verify binds transcript and rejects tampering" {
     const serverCertPem = @embedFile("testdata/localhostCert.pem");
     const serverKeyPem = @embedFile("testdata/localhostKey.pem");
 
-    var client = Engine.initClient(a, .{});
+    var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer client.deinit();
-    var server = Engine.initServer(a, .{});
+    var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
     defer server.deinit();
 
     const ch = try client.produceClientHello(&.{"h3"}, &.{}, "example.com", null);

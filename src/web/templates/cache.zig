@@ -12,11 +12,10 @@ pub const CachedTemplate = struct {
 };
 
 /// An evicted entry awaiting safe release once no render references it.
-pub const GarbageEntry = struct {
-    name: []const u8,
-    ast: TemplateAst,
-    source: []const u8,
-};
+/// An evicted entry awaiting safe release once no render references it.
+/// Holds the same heap allocation the map owned, so a parked borrow
+/// keeps pointing at live memory.
+pub const GarbageEntry = *CachedTemplate;
 
 pub const CacheConfig = struct {
     enabled: bool = true,
@@ -30,7 +29,9 @@ pub const Cache = struct {
     config: CacheConfig,
     lock: sync.Spinlock = .{},
     // map templateName -> CachedTemplate
-    entries: std.StringHashMap(CachedTemplate),
+    // templateName -> heap CachedTemplate. The value must not live inline,
+    // or a borrow can outlive the map slot it points into.
+    entries: std.StringHashMap(*CachedTemplate),
     // map dependencyName -> list of dependents
     // e.g. "base.html" -> ["index.html", "about.html"]
     dependents: std.StringHashMap(std.ArrayList([]const u8)),
@@ -39,13 +40,13 @@ pub const Cache = struct {
     /// concurrent `invalidate`/`put` can never free an AST under an
     /// in-flight render. Drained when the last render ends.
     activeRenders: usize = 0,
-    garbage: std.ArrayList(GarbageEntry) = .empty,
+    garbage: std.ArrayList(*CachedTemplate) = .empty,
 
     pub fn init(allocator: Allocator, config: CacheConfig) Cache {
         return .{
             .allocator = allocator,
             .config = config,
-            .entries = std.StringHashMap(CachedTemplate).init(allocator),
+            .entries = std.StringHashMap(*CachedTemplate).init(allocator),
             .dependents = std.StringHashMap(std.ArrayList([]const u8)).init(allocator),
         };
     }
@@ -65,26 +66,29 @@ pub const Cache = struct {
         if (self.activeRenders == 0) self.drainGarbageLocked();
     }
 
-    fn freeEntry(self: *Cache, name: []const u8, ast: *TemplateAst, source: []const u8) void {
-        self.allocator.free(name);
-        self.allocator.free(source);
-        ast.deinit();
+    /// Releases an entry's payload. The name is NOT freed here: a
+    /// StringHashMap stores its key slice without copying, so
+    /// `entry.name` and the map key are the same allocation and the
+    /// caller that removed the entry owns freeing it.
+    fn freeEntry(self: *Cache, entry: *CachedTemplate) void {
+        self.allocator.free(entry.source);
+        entry.ast.deinit();
+        self.allocator.destroy(entry);
     }
 
-    fn retireLocked(self: *Cache, name: []const u8, ast: TemplateAst, source: []const u8) void {
+    fn retireLocked(self: *Cache, entry: *CachedTemplate) void {
         if (self.activeRenders > 0) {
-            self.garbage.append(self.allocator, .{ .name = name, .ast = ast, .source = source }) catch {
+            self.garbage.append(self.allocator, entry) catch {
                 // OOM while parking: leak rather than use-after-free.
                 return;
             };
             return;
         }
-        var mutAst = ast;
-        self.freeEntry(name, &mutAst, source);
+        self.freeEntry(entry);
     }
 
     fn drainGarbageLocked(self: *Cache) void {
-        for (self.garbage.items) |*g| self.freeEntry(g.name, &g.ast, g.source);
+        for (self.garbage.items) |g| self.freeEntry(g);
         self.garbage.clearRetainingCapacity();
     }
 
@@ -95,8 +99,7 @@ pub const Cache = struct {
         var it = self.entries.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.source);
-            entry.value_ptr.ast.deinit();
+            self.freeEntry(entry.value_ptr.*);
         }
         self.entries.deinit();
 
@@ -110,7 +113,7 @@ pub const Cache = struct {
         }
         self.dependents.deinit();
 
-        for (self.garbage.items) |*g| self.freeEntry(g.name, &g.ast, g.source);
+        for (self.garbage.items) |g| self.freeEntry(g);
         self.garbage.deinit(self.allocator);
     }
 
@@ -121,7 +124,7 @@ pub const Cache = struct {
         self.lock.lock();
         defer self.lock.unlock();
 
-        if (self.entries.getPtr(name)) |entry| {
+        if (self.entries.get(name)) |entry| {
             return &entry.ast;
         }
         return null;
@@ -146,17 +149,29 @@ pub const Cache = struct {
 
         // If existing entry, retire it first (parked while renders borrow it)
         if (self.entries.fetchRemove(name)) |kv| {
-            self.retireLocked(kv.key, kv.value.ast, kv.value.source);
+            // The map key and entry.name alias, so the key is freed here
+            // and retireLocked handles only the payload.
+            self.allocator.free(kv.key);
+            self.retireLocked(kv.value);
         }
 
-        const ownedName = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(ownedName);
+        const ownedName = self.allocator.dupe(u8, name) catch |err| return err;
+        const entry = self.allocator.create(CachedTemplate) catch |err| {
+            self.allocator.free(ownedName);
+            return err;
+        };
+        entry.* = .{ .name = ownedName, .ast = ast, .source = source };
 
-        try self.entries.put(ownedName, .{
-            .name = ownedName,
-            .ast = ast,
-            .source = source,
-        });
+        // Ownership of `entry` — and of its `name`, `ast` and `source` —
+        // transfers to the map here. No errdefer may stay armed past this
+        // point: addDependencyInternal below can fail, and freeing the
+        // name on that path would leave the map holding freed memory,
+        // which freeEntry would then free a second time.
+        self.entries.put(ownedName, entry) catch |err| {
+            self.allocator.destroy(entry);
+            self.allocator.free(ownedName);
+            return err;
+        };
 
         // Track dependencies: if this template extends a parent or includes partials,
         // register this template as a dependent of those parent/partial templates.
@@ -195,7 +210,10 @@ pub const Cache = struct {
     fn invalidateRecursive(self: *Cache, name: []const u8) void {
         // Invalidate target
         if (self.entries.fetchRemove(name)) |kv| {
-            self.retireLocked(kv.key, kv.value.ast, kv.value.source);
+            // The map key and entry.name alias, so the key is freed here
+            // and retireLocked handles only the payload.
+            self.allocator.free(kv.key);
+            self.retireLocked(kv.value);
         }
 
         // Invalidate dependents
