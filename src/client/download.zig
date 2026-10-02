@@ -620,14 +620,31 @@ pub fn sanitizeFilename(name: []const u8) []const u8 {
     if (std.mem.indexOfScalar(u8, s, '?')) |idx| s = s[0..idx];
     if (std.mem.indexOfScalar(u8, s, '#')) |idx| s = s[0..idx];
 
-    // Get the base filename
-    s = std.fs.path.basename(s);
+    // Get the base filename. Both separators are handled on every platform
+    // rather than deferring to `std.fs.path.basename`, which only splits on
+    // `\` on Windows: a `Content-Disposition` name arrives from a remote
+    // server, so `..\..\evil` must not survive intact just because the
+    // downloader happens to be running on POSIX, and the result may be
+    // joined onto a destination path built with either separator.
+    s = baseName(s);
 
     // If completely empty or dot, default to downloadedFile
     if (s.len == 0 or std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, "..")) {
         return "downloaded_file";
     }
 
+    return s;
+}
+
+/// Substring after the last `/` or `\`, or the whole input when it holds
+/// neither. A trailing separator leaves an empty name, which the caller
+/// turns into the default.
+fn baseName(s: []const u8) []const u8 {
+    var i = s.len;
+    while (i > 0) {
+        i -= 1;
+        if (s[i] == '/' or s[i] == '\\') return s[i + 1 ..];
+    }
     return s;
 }
 
@@ -1562,6 +1579,33 @@ test "filename sanitization protects against path traversal" {
     try std.testing.expectEqualStrings("downloaded_file", sanitizeFilename(""));
     try std.testing.expectEqualStrings("downloaded_file", sanitizeFilename("."));
     try std.testing.expectEqualStrings("downloaded_file", sanitizeFilename(".."));
+}
+
+test "filename sanitization is identical on every platform" {
+    // Regression: this used to route through `std.fs.path.basename`, which
+    // only treats `\` as a separator on Windows, so the same server-supplied
+    // name was sanitized on Windows and passed through untouched on Linux
+    // and macOS. Traversal must not depend on the host.
+    const cases = [_]struct { in: []const u8, want: []const u8 }{
+        .{ .in = "..\\..\\..\\etc\\passwd", .want = "passwd" },
+        .{ .in = "../../../etc/passwd", .want = "passwd" },
+        .{ .in = "..\\../mixed/separators.bin", .want = "separators.bin" },
+        .{ .in = "../mixed\\separators.bin", .want = "separators.bin" },
+        .{ .in = "C:\\Windows\\System32\\evil.dll", .want = "evil.dll" },
+        .{ .in = "C:\\temp\\report.pdf?v=2", .want = "report.pdf" },
+        .{ .in = "dir/sub/name with spaces.txt", .want = "name with spaces.txt" },
+        // A trailing separator leaves nothing behind, so the default wins.
+        .{ .in = "dir/", .want = "downloaded_file" },
+        .{ .in = "dir\\", .want = "downloaded_file" },
+        .{ .in = "..\\", .want = "downloaded_file" },
+        // A bare traversal component is never a usable filename.
+        .{ .in = "..", .want = "downloaded_file" },
+        .{ .in = "../..", .want = "downloaded_file" },
+        .{ .in = "..\\..", .want = "downloaded_file" },
+    };
+    for (cases) |c| {
+        try std.testing.expectEqualStrings(c.want, sanitizeFilename(c.in));
+    }
 }
 
 test "parse checksum file formats" {

@@ -20,7 +20,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // Canonical request via fetch
-    const resp = try client.fetch("https://httpbin.org/post", .{
+    const resp = try client.fetch("https://httpbun.com/post", .{
         .method = .POST,
         .headers = &.{
             .{ .name = "Accept", .value = "application/json" },

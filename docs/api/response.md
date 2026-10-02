@@ -19,7 +19,7 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    const resp = try client.get("https://httpbin.org/json", .{});
+    const resp = try client.get("https://httpbun.com/json", .{});
     defer resp.deinit();
 
     std.debug.print("Status: {d}\n", .{resp.status});

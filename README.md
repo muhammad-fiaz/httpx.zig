@@ -165,10 +165,10 @@ zig build -Dtarget=x86-windows
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
 ```
 
-**Previous Release (v0.1.8)**
+**Previous Release (v0.2.0)**
 
 ```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.8.tar.gz
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz
 ```
 
 > [!WARNING]
