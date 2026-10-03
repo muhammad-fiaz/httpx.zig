@@ -115,8 +115,8 @@ pub const PortStrategy = enum {
 /// `curl` offer `h2`, and the exchange dies right after the handshake. The
 /// list has to come from what is implemented, not from what the config
 /// declares.
-const alpn_http11 = [_]alpnMod.Protocol{.@"http/1.1"};
-const alpn_http10_http11 = [_]alpnMod.Protocol{ .@"http/1.1", .@"http/1.0" };
+const alpnHttp11 = [_]alpnMod.Protocol{.@"http/1.1"};
+const alpnHttp10Http11 = [_]alpnMod.Protocol{ .@"http/1.1", .@"http/1.0" };
 
 pub const Config = struct {
     host: []const u8 = "0.0.0.0",
@@ -373,7 +373,7 @@ pub const Server = struct {
         // caller's decision, including a deliberate `h2`.
         if (effectiveCfg.tls) |*tcfg| {
             if (std.mem.eql(alpnMod.Protocol, tcfg.alpn, &alpnMod.DEFAULT_TCP_PREFERENCE)) {
-                tcfg.alpn = if (effectiveCfg.http10) &alpn_http10_http11 else &alpn_http11;
+                tcfg.alpn = if (effectiveCfg.http10) &alpnHttp10Http11 else &alpnHttp11;
             }
         }
 
