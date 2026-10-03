@@ -1735,7 +1735,22 @@ pub fn reasonFor(status: u16) []const u8 {
 
 fn helloHandler(ctx: *Context) anyerror!Response {
     if (std.mem.eql(u8, ctx.path, "/hello")) {
-        return .{ .body = "hi", .contentType = "text/plain" };
+        // Issue 47: `Content-Security-Policy-Report-Only` is 35 bytes and
+        // was rejected by the old 32-byte field-name cap, which broke every
+        // proxy built on httpx that forwarded Google's headers. It is
+        // emitted here so the existing loopback test asserts the long name
+        // survives response assembly and reaches the wire, rather than only
+        // asserting `validToken` in isolation.
+        return .{
+            .body = "hi",
+            .contentType = "text/plain",
+            .headers = &.{
+                .{
+                    .name = "Content-Security-Policy-Report-Only",
+                    .value = "default-src 'self'; report-uri /csp-report",
+                },
+            },
+        };
     }
     return .{ .status = 404, .body = "" };
 }
@@ -2103,10 +2118,15 @@ test "server serves routed GET end to end" {
         total += n;
         if (std.mem.indexOf(u8, buf[0..total], "Content-Encoding: gzip") != null and
             std.mem.indexOf(u8, buf[0..total], "\r\n\x1f\x8b") != null) break;
+        // Issue 47: the 35-byte field name has to be present in the bytes
+        // the client actually receives, not merely accepted by the writer.
+        if (std.mem.indexOf(u8, buf[0..total], "report-uri /csp-report") != null and
+            std.mem.indexOf(u8, buf[0..total], "\r\n\x1f\x8b") != null) break;
     }
     try std.testing.expect(std.mem.startsWith(u8, buf[0..total], "HTTP/1.1 200 OK"));
     try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "Content-Encoding: gzip") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "Vary: Accept-Encoding") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "Content-Security-Policy-Report-Only: default-src 'self'; report-uri /csp-report\r\n") != null);
     try std.testing.expect(total > 20);
 
     srv.requestShutdown();
