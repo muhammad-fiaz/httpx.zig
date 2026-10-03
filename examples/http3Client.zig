@@ -135,7 +135,9 @@ fn liveLoopbackDemo(allocator: std.mem.Allocator, io: std.Io) !void {
         srvThread.join();
     }
 
-    const port = server.localPort();
+    // HTTP/3 normally shares the TCP port, but falls back to its own if
+    // that UDP bind fails, so ask the server which port it actually got.
+    const port = server.http3.port() orelse return error.NoHttp3Endpoint;
 
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();

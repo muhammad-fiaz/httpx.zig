@@ -139,7 +139,8 @@ pub const Version = enum { http10, http11 };
 pub const ConnectionDirective = enum { keepAlive, close, unspecified };
 
 /// Extracts the strongest Connection token relevant to persistence.
-pub fn connectionDirective(headers: []const @import("../http1/parser.zig").Field) ConnectionDirective {
+/// Works with any header slice whose entries have `name` and `value` fields.
+pub fn connectionDirective(headers: anytype) ConnectionDirective {
     var result: ConnectionDirective = .unspecified;
     for (headers) |h| {
         if (!std.ascii.eqlIgnoreCase(h.name, "Connection")) continue;
@@ -156,7 +157,7 @@ pub fn connectionDirective(headers: []const @import("../http1/parser.zig").Field
 /// Whether the connection may process another message afterwards.
 pub fn shouldKeepAlive(
     version: Version,
-    headers: []const @import("../http1/parser.zig").Field,
+    headers: anytype,
 ) bool {
     return switch (connectionDirective(headers)) {
         .close => false,
@@ -259,6 +260,14 @@ test "keep-alive decision by version and directives" {
 
     const multi = [_]F{.{ .name = "connection", .value = "foo, close" }};
     try std.testing.expect(!shouldKeepAlive(.http11, multi[0..]));
+
+    const tricky = [_]F{.{ .name = "Connection", .value = "keep-aliveness, preclose" }};
+    try std.testing.expect(!shouldKeepAlive(.http10, tricky[0..]));
+    try std.testing.expect(shouldKeepAlive(.http11, tricky[0..]));
+
+    const keep = [_]F{.{ .name = "Connection", .value = "Upgrade, Keep-Alive" }};
+    try std.testing.expect(shouldKeepAlive(.http10, keep[0..]));
+    try std.testing.expect(shouldKeepAlive(.http11, keep[0..]));
 }
 
 test "expect and bodyless rules" {

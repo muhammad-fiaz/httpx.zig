@@ -115,8 +115,8 @@ pub const PortStrategy = enum {
 /// `curl` offer `h2`, and the exchange dies right after the handshake. The
 /// list has to come from what is implemented, not from what the config
 /// declares.
-const alpn_http11 = [_]alpnMod.Protocol{.@"http/1.1"};
-const alpn_http10_http11 = [_]alpnMod.Protocol{ .@"http/1.1", .@"http/1.0" };
+const alpnHttp11 = [_]alpnMod.Protocol{.@"http/1.1"};
+const alpnHttp10Http11 = [_]alpnMod.Protocol{ .@"http/1.1", .@"http/1.0" };
 
 pub const Config = struct {
     host: []const u8 = "0.0.0.0",
@@ -217,6 +217,22 @@ extern "kernel32" fn SetConsoleCtrlHandler(
 ) callconv(.winapi) std.os.windows.BOOL;
 
 pub const Server = struct {
+    /// HTTP/3 endpoint information, namespaced so protocol-specific
+    /// helpers do not accumulate as flat methods on `Server`.
+    pub const Http3 = struct {
+        /// UDP port to dial for HTTP/3, or null when HTTP/3 is off.
+        /// HTTP/3 normally shares the TCP port (RFC 9114 Section 3); it
+        /// differs only when that UDP bind failed and the endpoint fell
+        /// back to an ephemeral port. Prefer this over `localPort()`.
+        udpPort: ?u16 = null,
+        /// True when the endpoint could not reuse the TCP port.
+        portFallback: bool = false,
+
+        pub fn port(self: Http3) ?u16 {
+            return self.udpPort;
+        }
+    };
+
     io: std.Io,
     allocator: Allocator,
     listener: tcp.Listener,
@@ -247,6 +263,9 @@ pub const Server = struct {
     tlsCertPemLoaded: ?[]const u8 = null,
     tlsKeyPemLoaded: ?[]const u8 = null,
     h3Endpoint: ?quicTransport.Endpoint = null,
+    /// HTTP/3 endpoint information, namespaced so protocol-specific
+    /// helpers do not accumulate as flat methods on `Server`.
+    http3: Http3 = .{},
     h3PlaceholderConn: ?*quicConn.Connection = null,
     h3Pump: ?*quicTransport.Pump = null,
     h3Thread: ?std.Thread = null,
@@ -354,7 +373,7 @@ pub const Server = struct {
         // caller's decision, including a deliberate `h2`.
         if (effectiveCfg.tls) |*tcfg| {
             if (std.mem.eql(alpnMod.Protocol, tcfg.alpn, &alpnMod.DEFAULT_TCP_PREFERENCE)) {
-                tcfg.alpn = if (effectiveCfg.http10) &alpn_http10_http11 else &alpn_http11;
+                tcfg.alpn = if (effectiveCfg.http10) &alpnHttp10Http11 else &alpnHttp11;
             }
         }
 
@@ -409,17 +428,27 @@ pub const Server = struct {
         if (effectiveCfg.http3 and loadedCertPem != null and loadedKeyPem != null) {
             const placeholder = try quicConn.Connection.init(allocator, io, .server, .{});
             errdefer placeholder.deinit();
-            // RFC 9114 Section 3: HTTP/3 lives on the same port number as
-            // HTTP/1.1 and HTTP/2. That only makes sense for a port the
-            // operator chose. With an ephemeral TCP port the number is not
-            // knowable by any client, so the UDP side takes its own one --
-            // which also avoids Windows refusing a bind into one of the
-            // dynamic UDP port ranges the stack keeps reserved.
+            // RFC 9114 Section 3: HTTP/3 shares the HTTP/1.1 and HTTP/2
+            // port number, so the UDP endpoint mirrors the TCP one. That
+            // also holds for an ephemeral port, because a caller that asked
+            // for port 0 discovers the number with `localPort()` and then
+            // dials HTTP/3 on it.
+            //
+            // If that bind fails, retry ephemerally rather than refusing to
+            // start. Windows keeps dynamic port ranges for TCP and UDP
+            // separate, so a TCP-chosen ephemeral port can fall inside a
+            // range the UDP stack will not bind. `http3.port()` reports
+            // whichever port was actually taken.
             const tcpPort = listener.localPort();
-            const requested: u16 = if (effectiveCfg.port != 0) tcpPort else 0;
-            const ep = quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = requested }) catch |err| {
-                placeholder.deinit();
-                return err;
+            const ep = quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = tcpPort }) catch |err| blk: {
+                std.log.scoped(.httpx).warn(
+                    "HTTP/3 could not bind UDP port {d} ({s}); falling back to an ephemeral port. Clients must use http3.port().",
+                    .{ tcpPort, @errorName(err) },
+                );
+                break :blk quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = 0 }) catch {
+                    placeholder.deinit();
+                    return err;
+                };
             };
             h3Ep_opt = ep;
             h3Placeholder_opt = placeholder;
@@ -439,6 +468,10 @@ pub const Server = struct {
             .tlsCertPemLoaded = loadedCertPem,
             .tlsKeyPemLoaded = loadedKeyPem,
             .h3Endpoint = h3Ep_opt,
+            .http3 = if (h3Ep_opt) |ep| .{
+                .udpPort = ep.localPort(),
+                .portFallback = ep.localPort() != listener.localPort(),
+            } else .{},
             .h3PlaceholderConn = h3Placeholder_opt,
             .h3Pump = null,
             .startTimeMs = clock.millisNow(),
@@ -709,15 +742,6 @@ pub const Server = struct {
 
     pub fn localPort(self: *const Server) u16 {
         return self.listener.localPort();
-    }
-
-    /// UDP port the HTTP/3 endpoint is bound to, or null when HTTP/3 is off.
-    /// Equal to `localPort` whenever the server was configured with an
-    /// explicit port (RFC 9114 Section 3), and independently chosen when the
-    /// TCP port was ephemeral.
-    pub fn http3Port(self: *const Server) ?u16 {
-        const ep = self.h3Endpoint orelse return null;
-        return ep.localPort();
     }
 
     /// Signals the accept loop to stop and wakes a blocked accept() by
@@ -1711,7 +1735,22 @@ pub fn reasonFor(status: u16) []const u8 {
 
 fn helloHandler(ctx: *Context) anyerror!Response {
     if (std.mem.eql(u8, ctx.path, "/hello")) {
-        return .{ .body = "hi", .contentType = "text/plain" };
+        // Issue 47: `Content-Security-Policy-Report-Only` is 35 bytes and
+        // was rejected by the old 32-byte field-name cap, which broke every
+        // proxy built on httpx that forwarded Google's headers. It is
+        // emitted here so the existing loopback test asserts the long name
+        // survives response assembly and reaches the wire, rather than only
+        // asserting `validToken` in isolation.
+        return .{
+            .body = "hi",
+            .contentType = "text/plain",
+            .headers = &.{
+                .{
+                    .name = "Content-Security-Policy-Report-Only",
+                    .value = "default-src 'self'; report-uri /csp-report",
+                },
+            },
+        };
     }
     return .{ .status = 404, .body = "" };
 }
@@ -2079,10 +2118,15 @@ test "server serves routed GET end to end" {
         total += n;
         if (std.mem.indexOf(u8, buf[0..total], "Content-Encoding: gzip") != null and
             std.mem.indexOf(u8, buf[0..total], "\r\n\x1f\x8b") != null) break;
+        // Issue 47: the 35-byte field name has to be present in the bytes
+        // the client actually receives, not merely accepted by the writer.
+        if (std.mem.indexOf(u8, buf[0..total], "report-uri /csp-report") != null and
+            std.mem.indexOf(u8, buf[0..total], "\r\n\x1f\x8b") != null) break;
     }
     try std.testing.expect(std.mem.startsWith(u8, buf[0..total], "HTTP/1.1 200 OK"));
     try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "Content-Encoding: gzip") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "Vary: Accept-Encoding") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "Content-Security-Policy-Report-Only: default-src 'self'; report-uri /csp-report\r\n") != null);
     try std.testing.expect(total > 20);
 
     srv.requestShutdown();
@@ -2501,15 +2545,41 @@ test "Server high-level HTTP/3 initialization and endpoint lifecycle" {
 
     try std.testing.expect(srv.h3Endpoint != null);
     try std.testing.expect(srv.h3Pump == null);
-    // Port 0 was requested, so the UDP side picked its own port. It must be
-    // a real, non-zero, reachable number regardless.
-    try std.testing.expect(srv.http3Port() != null);
-    try std.testing.expect(srv.http3Port().? != 0);
+    // Port 0 was requested. HTTP/3 normally shares the port the TCP
+    // listener was given, because that is the number a caller discovers
+    // with `localPort()`. It only differs when that UDP bind failed and
+    // the endpoint fell back to an ephemeral port, so the contract is
+    // "always a real, reachable port", not a specific number.
+    const port = srv.http3.port() orelse return error.MissingHttp3Port;
+    try std.testing.expect(port != 0);
+}
+
+test "HTTP/3 endpoint reports the port HTTP/1.1 does not share" {
+    // The named accessor is the supported way to find the UDP port, so it
+    // must agree with the endpoint even when the two ports diverge.
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .http3 = true,
+        .tls = .{
+            .certificatePem = h3TestCertPem,
+            .privateKeyPem = h3TestKeyPem,
+        },
+        .enableDocs = false,
+    }) catch return;
+    defer srv.deinit();
+
+    const reported = srv.http3.port().?;
+    const actual = srv.h3Endpoint.?.localPort();
+    try std.testing.expectEqual(actual, reported);
+    try std.testing.expect(reported != 0);
 }
 
 test "Server shares one port number between HTTP/1.1 and HTTP/3 when the port is explicit" {
-    // RFC 9114 Section 3 requires a configured port to carry both. Probing
-    // for a free port first keeps the test off a port another process holds.
     const a = std.testing.allocator;
     var ctx = tcp.IoContext.init(a) catch return;
     defer ctx.deinit();
@@ -2540,7 +2610,7 @@ test "Server shares one port number between HTTP/1.1 and HTTP/3 when the port is
     defer srv.deinit();
 
     try std.testing.expectEqual(freePort, srv.localPort());
-    try std.testing.expectEqual(freePort, srv.http3Port().?);
+    try std.testing.expectEqual(freePort, srv.http3.port().?);
 }
 
 test "Server reports no HTTP/3 port when HTTP/3 is disabled" {
@@ -2555,5 +2625,5 @@ test "Server reports no HTTP/3 port when HTTP/3 is disabled" {
     }) catch return;
     defer srv.deinit();
 
-    try std.testing.expectEqual(@as(?u16, null), srv.http3Port());
+    try std.testing.expectEqual(@as(?u16, null), srv.http3.port());
 }

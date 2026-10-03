@@ -20,7 +20,7 @@ When making client requests, HTTPX automatically adds the `Accept-Encoding: gzip
 When the server returns `Content-Encoding: gzip` (or `br`, `zstd`), HTTPX decodes the body transparently before returning it to the caller:
 
 ```zig
-const response = try client.get("https://httpbin.org/gzip", .{});
+const response = try client.get("https://httpbun.com/gzip", .{});
 defer response.deinit();
 
 // response.body is already decompressed plaintext bytes

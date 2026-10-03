@@ -67,8 +67,9 @@ pub const HttpVersion = enum {
 
     /// Parses user-facing selection text. Canonical forms are the wire
     /// identifiers plus "auto"; convenience aliases ("1.0", "1", "1.1",
-    /// "2", "3", "http1", "http2", "http3", "http/2") map to canonical
-    /// values. Unknown text is an error, never a silent fallback.
+    /// "2", "3", "http1", "http11", "http1.1", "http2", "http3", "http/1",
+    /// "http/1.1", "http/2") map to canonical values. Unknown text is an
+    /// error, never a silent fallback.
     pub fn parse(text: []const u8) Error!HttpVersion {
         const eq = std.mem.eql;
         if (eq(u8, text, "auto")) return .auto;
@@ -78,7 +79,7 @@ pub const HttpVersion = enum {
 
         // Convenience aliases (documented; output stays canonical).
         if (eq(u8, text, "1") or eq(u8, text, "1.0") or eq(u8, text, "http1") or eq(u8, text, "http/1")) return .http10;
-        if (eq(u8, text, "1.1") or eq(u8, text, "http11") or eq(u8, text, "http/1.1x")) return .http11;
+        if (eq(u8, text, "1.1") or eq(u8, text, "http11") or eq(u8, text, "http1.1") or eq(u8, text, "http/1.1")) return .http11;
         // NOTE: bare "1" is ambiguous; treated as HTTP/1.0's family alias.
         if (eq(u8, text, "2") or eq(u8, text, "http2") or eq(u8, text, "http/2") or eq(u8, text, "h2")) return .http2;
         if (eq(u8, text, "3") or eq(u8, text, "http3") or eq(u8, text, "http/3") or eq(u8, text, "h3")) return .http3;
@@ -235,6 +236,34 @@ test "aliases parse to canonical values" {
     try std.testing.expectEqual(HttpVersion.http2, try HttpVersion.parse("http/2"));
     try std.testing.expectEqual(HttpVersion.http3, try HttpVersion.parse("3"));
     try std.testing.expectEqual(HttpVersion.http3, try HttpVersion.parse("http3"));
+}
+
+test "every documented alias resolves" {
+    // The alias list is part of the public contract, so each entry is
+    // checked rather than assumed. "http/1.1" is the form a user is most
+    // likely to type, and "http1.1" the one most likely to be missed.
+    const cases = [_]struct { text: []const u8, want: HttpVersion }{
+        .{ .text = "1", .want = .http10 },
+        .{ .text = "1.0", .want = .http10 },
+        .{ .text = "http1", .want = .http10 },
+        .{ .text = "http/1", .want = .http10 },
+        .{ .text = "http/1.0", .want = .http10 },
+        .{ .text = "1.1", .want = .http11 },
+        .{ .text = "http11", .want = .http11 },
+        .{ .text = "http1.1", .want = .http11 },
+        .{ .text = "http/1.1", .want = .http11 },
+        .{ .text = "2", .want = .http2 },
+        .{ .text = "http2", .want = .http2 },
+        .{ .text = "http/2", .want = .http2 },
+        .{ .text = "h2", .want = .http2 },
+        .{ .text = "3", .want = .http3 },
+        .{ .text = "http3", .want = .http3 },
+        .{ .text = "http/3", .want = .http3 },
+        .{ .text = "h3", .want = .http3 },
+    };
+    for (cases) |c| {
+        try std.testing.expectEqual(c.want, try HttpVersion.parse(c.text));
+    }
 }
 
 test "invalid version strings error, never fall back" {

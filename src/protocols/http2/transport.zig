@@ -193,31 +193,31 @@ pub const Client = struct {
             a: Allocator,
 
             fn onHeaders(ctx: ?*anyopaque, s: u31, flds: []hpack.HeaderField, endStream: bool) anyerror!void {
-                const self_: *@This() = @ptrCast(@alignCast(ctx.?));
-                if (s != self_.sid) return;
+                const selfPtr: *@This() = @ptrCast(@alignCast(ctx.?));
+                if (s != selfPtr.sid) return;
                 for (flds) |f| {
                     if (std.mem.eql(u8, f.name, ":status")) {
-                        self_.status.* = std.fmt.parseInt(u16, f.value, 10) catch 500;
+                        selfPtr.status.* = std.fmt.parseInt(u16, f.value, 10) catch 500;
                         continue;
                     }
-                    try self_.headers.append(self_.a, .{
-                        .name = try self_.a.dupe(u8, f.name),
-                        .value = try self_.a.dupe(u8, f.value),
+                    try selfPtr.headers.append(selfPtr.a, .{
+                        .name = try selfPtr.a.dupe(u8, f.name),
+                        .value = try selfPtr.a.dupe(u8, f.value),
                     });
                 }
-                if (endStream) self_.done.* = true;
+                if (endStream) selfPtr.done.* = true;
             }
             fn onData(ctx: ?*anyopaque, s: u31, data: []const u8) anyerror!void {
-                const self_: *@This() = @ptrCast(@alignCast(ctx.?));
-                if (s != self_.sid) return;
-                if (self_.body.items.len > maxResponseBodySize -| data.len)
+                const selfPtr: *@This() = @ptrCast(@alignCast(ctx.?));
+                if (s != selfPtr.sid) return;
+                if (selfPtr.body.items.len > maxResponseBodySize -| data.len)
                     return error.ResponseTooLarge;
-                try self_.body.appendSlice(self_.a, data);
+                try selfPtr.body.appendSlice(selfPtr.a, data);
             }
             fn onEnd(ctx: ?*anyopaque, s: u31) anyerror!void {
-                const self_: *@This() = @ptrCast(@alignCast(ctx.?));
-                if (s != self_.sid) return;
-                self_.done.* = true;
+                const selfPtr: *@This() = @ptrCast(@alignCast(ctx.?));
+                if (s != selfPtr.sid) return;
+                selfPtr.done.* = true;
             }
         };
 

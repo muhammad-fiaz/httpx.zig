@@ -36,7 +36,7 @@ pub fn main() !void {
     });
     defer client.deinit();
 
-    const res = try client.get("https://httpbin.org/get", .{});
+    const res = try client.get("https://httpbun.com/get", .{});
     defer res.deinit();
 }
 ```

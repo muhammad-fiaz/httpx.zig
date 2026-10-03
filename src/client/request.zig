@@ -30,6 +30,7 @@ const tcp = @import("../sockets/tcp.zig");
 const uriMod = @import("../common/uri.zig");
 const Method = @import("../common/method.zig").Method;
 const parserMod = @import("../protocols/http1/parser.zig");
+const semanticsMod = @import("../protocols/http1/semantics.zig");
 const writerMod = @import("../protocols/http1/writer.zig");
 const tlsTransport = @import("../protocols/tls/transport.zig");
 const tlsClientMod = @import("../protocols/tls/client.zig");
@@ -1253,7 +1254,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 }
 
 /// Returns the response to the caller; for plain connections with a fully
-/// framed body and no "Connection: close", parks the socket in the pool.
+/// framed body and a reusable connection, parks the socket in the pool.
 fn finishPlain(
     pool: ?*Pool,
     isTls: bool,
@@ -1266,20 +1267,13 @@ fn finishPlain(
     resp: Response,
 ) Response {
     if (pool) |p| {
-        if (!isTls and !hasProxy and full.reusable and !respSaysClose(&resp)) {
+        const version: semanticsMod.Version = if (resp.version == .http10) .http10 else .http11;
+        if (!isTls and !hasProxy and full.reusable and semanticsMod.shouldKeepAlive(version, resp.headers)) {
             p.release(host, port, transport.plain);
             pooledOut.* = true;
         }
     }
     return resp;
-}
-
-fn respSaysClose(resp: *const Response) bool {
-    for (resp.headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "connection") and
-            std.ascii.indexOfIgnoreCase(h.value, "close") != null) return true;
-    }
-    return false;
 }
 
 pub const FullResponse = struct { resp: Response, reusable: bool };
@@ -1815,6 +1809,176 @@ test "keep-alive: second request reuses pooled connection" {
     client.deinit();
 }
 
+test "HTTP/1.0 request serialization and keep-alive pooling" {
+    // RFC 9112 Section 9.3: HTTP/1.0 keep-alive is opt-in, so a server that
+    // omits `Connection: keep-alive` closes the connection after the
+    // response. Parking that socket would hand the next request a dead
+    // connection. A raw TCP server is used so the request line the client
+    // actually sent is asserted, not just the response it received.
+    const a = std.testing.allocator;
+    var ctx = try tTcp.IoContext.init(a);
+    defer ctx.deinit();
+    const io = ctx.io;
+    const closeResp = "HTTP/1.0 200 OK\r\nContent-Length: 1\r\n\r\nv";
+
+    var listener = try tTcp.Listener.bind(io, 0);
+    defer listener.close(io);
+    const port = listener.localPort();
+
+    const Rec = struct {
+        lines: std.ArrayList([]u8) = .empty,
+        conns: usize = 0,
+
+        fn deinit(self: *@This()) void {
+            for (self.lines.items) |l| a.free(l);
+            self.lines.deinit(a);
+        }
+    };
+    var rec = Rec{};
+    defer rec.deinit();
+
+    const Srv = struct {
+        // Two requests are expected and each gets its own connection, so the
+        // server exits once both are served. Terminating on a request budget
+        // keeps the thread out of accept(); closing the listener instead
+        // wakes that accept as CANCELLED, which the Threaded backend treats
+        // as unreachable.
+        fn run(l: *tTcp.Listener, r: *Rec, srvIo: std.Io) void {
+            for (0..2) |_| {
+                var conn = l.accept(srvIo) catch return;
+                r.conns += 1;
+                var buf: [1024]u8 = undefined;
+                var got: usize = 0;
+                while (got < buf.len) {
+                    const n = conn.read(buf[got..]) catch {
+                        conn.close();
+                        return;
+                    };
+                    if (n == 0) {
+                        conn.close();
+                        return;
+                    }
+                    got += n;
+                    if (std.mem.indexOf(u8, buf[0..got], "\r\n\r\n") != null) break;
+                }
+                const lineEnd = std.mem.indexOf(u8, buf[0..got], "\r\n") orelse {
+                    conn.close();
+                    return;
+                };
+                const line = a.dupe(u8, buf[0..lineEnd]) catch {
+                    conn.close();
+                    return;
+                };
+                r.lines.append(a, line) catch {
+                    conn.close();
+                    return;
+                };
+                conn.writeAll(closeResp) catch {
+                    conn.close();
+                    return;
+                };
+                conn.close();
+            }
+        }
+    };
+    const th = try std.Thread.spawn(.{}, Srv.run, .{ &listener, &rec, io });
+    defer th.join();
+
+    var client = @import("client.zig").Client.init(a, io, .{ .httpVersion = .http10 });
+    defer client.deinit();
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/x", .{port});
+    defer a.free(url);
+
+    var r1 = try client.get(url, .{});
+    defer r1.deinit();
+    try std.testing.expectEqual(@as(u16, 200), r1.status);
+    try std.testing.expectEqual(@as(u64, 0), client.pool.statsSnapshot().released);
+
+    var r2 = try client.get(url, .{});
+    defer r2.deinit();
+    try std.testing.expectEqual(@as(u16, 200), r2.status);
+    try std.testing.expectEqual(@as(u64, 0), client.pool.statsSnapshot().hits);
+
+    // Both requests went out as HTTP/1.0 on the wire.
+    try std.testing.expectEqual(@as(usize, 2), rec.lines.items.len);
+    for (rec.lines.items) |line| {
+        try std.testing.expect(std.mem.startsWith(u8, line, "GET /x HTTP/1.0"));
+    }
+}
+
+test "HTTP/1.0 keep-alive reuses one connection" {
+    // The opt-in case: an explicit `Connection: keep-alive` means the server
+    // keeps the socket open, so the client may reuse it.
+    const a = std.testing.allocator;
+    var ctx = try tTcp.IoContext.init(a);
+    defer ctx.deinit();
+    const io = ctx.io;
+    const kaResp = "HTTP/1.0 200 OK\r\nContent-Length: 1\r\nConnection: keep-alive\r\n\r\nv";
+
+    var listener = try tTcp.Listener.bind(io, 0);
+    defer listener.close(io);
+    const port = listener.localPort();
+
+    const Rec = struct {
+        lines: std.ArrayList([]u8) = .empty,
+        conns: usize = 0,
+
+        fn deinit(self: *@This()) void {
+            for (self.lines.items) |l| a.free(l);
+            self.lines.deinit(a);
+        }
+    };
+    var rec = Rec{};
+    defer rec.deinit();
+
+    const Srv = struct {
+        fn run(l: *tTcp.Listener, r: *Rec, srvIo: std.Io) void {
+            var conn = l.accept(srvIo) catch return;
+            defer conn.close();
+            r.conns += 1;
+            while (true) {
+                var buf: [1024]u8 = undefined;
+                var got: usize = 0;
+                while (got < buf.len) {
+                    const n = conn.read(buf[got..]) catch return;
+                    if (n == 0) return;
+                    got += n;
+                    if (std.mem.indexOf(u8, buf[0..got], "\r\n\r\n") != null) break;
+                }
+                const lineEnd = std.mem.indexOf(u8, buf[0..got], "\r\n") orelse return;
+                const line = a.dupe(u8, buf[0..lineEnd]) catch return;
+                r.lines.append(a, line) catch return;
+                conn.writeAll(kaResp) catch return;
+            }
+        }
+    };
+    const th = try std.Thread.spawn(.{}, Srv.run, .{ &listener, &rec, io });
+    defer th.join();
+
+    var client = @import("client.zig").Client.init(a, io, .{ .httpVersion = .http10 });
+    defer client.deinit();
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/x", .{port});
+    defer a.free(url);
+
+    var r1 = try client.get(url, .{});
+    defer r1.deinit();
+    try std.testing.expectEqual(@as(u16, 200), r1.status);
+    try std.testing.expectEqual(@as(u64, 1), client.pool.statsSnapshot().released);
+
+    var r2 = try client.get(url, .{});
+    defer r2.deinit();
+    try std.testing.expectEqual(@as(u16, 200), r2.status);
+    try std.testing.expectEqual(@as(u64, 1), client.pool.statsSnapshot().hits);
+
+    // Both requests travelled on one connection, both as HTTP/1.0.
+    try std.testing.expectEqual(@as(usize, 1), rec.conns);
+    try std.testing.expectEqual(@as(usize, 2), rec.lines.items.len);
+    for (rec.lines.items) |line| {
+        try std.testing.expect(std.mem.startsWith(u8, line, "GET /x HTTP/1.0"));
+    }
+}
 test "connection close response is not pooled" {
     const a = std.testing.allocator;
     const lifecycle = @import("../server/lifecycle.zig");

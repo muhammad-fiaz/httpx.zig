@@ -23,7 +23,30 @@ HTTP/3 support is validated across Linux, Windows, and macOS targets:
 ## Features
 
 - **High-level Client Runtime** - `Client` executes real requests over HTTP/3: `client.get("https://host/", .{ .httpVersion = .http3 })` performs a live QUIC + TLS 1.3 handshake (ALPN `h3`, verified chain) over UDP and returns the response.
-- **Protocol-level Server Runtime** - serve H3 over QUIC with `httpx.quic` (Endpoint + Pump + HandshakeDriver) and `httpx.http3` builders; see `examples/http3Client.zig` for a complete loopback server. `httpx.Server` has no UDP front-end yet (TCP only).
+- **High-level Server Runtime** - `httpx.Server` serves HTTP/1.1, HTTP/2 and HTTP/3 from one port. Set `.http3 = true` together with a TLS identity and the server binds a UDP endpoint alongside the TCP listener; existing routes, middleware and handlers are unchanged. HTTP/3 follows the same handlers, so nothing has to be registered twice.
+- **Protocol-level Server Runtime** - serve H3 over QUIC directly with `httpx.quic` (Endpoint + Pump + HandshakeDriver) and `httpx.http3` builders; see `examples/http3Client.zig` for a complete loopback server.
+
+### Finding the HTTP/3 port
+
+HTTP/3 shares the HTTP/1.1 port number (RFC 9114 Section 3), so a client normally dials the port it already knows. When the UDP bind for that number is refused - Windows keeps separate reserved dynamic ranges for TCP and UDP, so a TCP-chosen ephemeral port can land in a range the UDP stack will not take - the endpoint falls back to an ephemeral port of its own. Read the port the server actually bound rather than assuming:
+
+```zig
+const server = try httpx.Server.init(allocator, io, .{
+    .host = "127.0.0.1",
+    .port = 0,
+    .http3 = true,
+    .tls = .{ .certificatePem = certPem, .privateKeyPem = keyPem },
+});
+
+const udpPort = server.http3.port() orelse return error.Http3Disabled;
+
+// True only when the UDP bind could not reuse the TCP port.
+if (server.http3.portFallback) {
+    std.debug.print("HTTP/3 fell back to its own port {d}\n", .{udpPort});
+}
+```
+
+Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP/3.
 - **QPACK Header Compression** - RFC 9204 static-table encode/decode with encoder/decoder stream prefixes.
 - **QUIC Transport Framing** - STREAM, CRYPTO, ACK, HANDSHAKE_DONE, RESET_STREAM/STOP_SENDING stubs, version negotiation, and transport parameters.
 - **Variable-Length Integers** - QUIC varint encoding/decoding.

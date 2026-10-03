@@ -31,8 +31,19 @@ pub const Error = error{
 
 // Validators
 
+/// Upper bound on a field name (and on a method token).
+///
+/// RFC 9110 Section 5.6.2 defines `token` purely by its grammar,
+/// `[a-zA-Z0-9!#$%&'*+-.^_`|~]+`, and sets no length limit; the 32-byte
+/// cap this replaces rejected real headers such as
+/// `Content-Security-Policy-Report-Only` and
+/// `Access-Control-Allow-Private-Network`, both 36 bytes. The bound here
+/// is only there to stop an unbounded allocation of a token used as a map
+/// key, and matches the field-value ceiling below.
+pub const maxTokenLength: usize = 256;
+
 pub fn validToken(s: []const u8) bool {
-    if (s.len == 0 or s.len > 32) return false;
+    if (s.len == 0 or s.len > maxTokenLength) return false;
     for (s) |c| {
         switch (c) {
             '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => {},
@@ -461,4 +472,48 @@ test "header injection attempts rejected" {
 
     try std.testing.expectError(Error.InvalidTarget, buildRequest(a, "GET", "/a\r\nX: y", null, .{}));
     try std.testing.expectError(Error.InvalidReason, buildResponse(a, 200, "OK\r\nEvil: x", null, .{}, false));
+}
+
+test "long but legal field names are accepted" {
+    // Issue 47: the previous 32-byte cap rejected these real headers, so a
+    // proxy forwarding them failed validation. RFC 9110 Section 5.6.2 puts
+    // no length limit on a token.
+    const a = std.testing.allocator;
+    const longNames = [_][]const u8{
+        "Content-Security-Policy-Report-Only",
+        "Access-Control-Allow-Private-Network",
+        "Access-Control-Expose-Headers",
+        "Access-Control-Allow-Credentials",
+        "Sec-WebSocket-Accept",
+        "X-Forwarded-Proto",
+    };
+    for (longNames) |name| {
+        try std.testing.expect(validToken(name));
+        const raw = try buildResponse(a, 200, "OK", "x", .{
+            .headers = &.{.{ .name = name, .value = "v" }},
+        }, false);
+        defer a.free(raw);
+        try std.testing.expect(std.mem.indexOf(u8, raw, name) != null);
+    }
+}
+
+test "field names stay bounded and stay token-shaped" {
+    // The bound still exists, so an unbounded token cannot be allocated.
+    var tooLong: [maxTokenLength + 1]u8 = undefined;
+    @memset(&tooLong, 'a');
+    try std.testing.expect(!validToken(&tooLong));
+
+    // Exactly at the bound is still fine.
+    var atLimit: [maxTokenLength]u8 = undefined;
+    @memset(&atLimit, 'a');
+    try std.testing.expect(validToken(&atLimit));
+
+    // And the character grammar is unchanged: separators, whitespace and
+    // control characters stay rejected however long the name is.
+    try std.testing.expect(!validToken(""));
+    try std.testing.expect(!validToken("has space"));
+    try std.testing.expect(!validToken("has:colon"));
+    try std.testing.expect(!validToken("has\r\nnewline"));
+    try std.testing.expect(!validToken("Content-Security-Policy-Report-Only "));
+    try std.testing.expect(validToken("X-a_b.c~d!e#f$g%h&i'j*k+l"));
 }
