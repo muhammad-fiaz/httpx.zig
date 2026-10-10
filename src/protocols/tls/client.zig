@@ -188,7 +188,7 @@ const NativeConnection = struct {
             }
 
             const contentTypeByte = wireBuf[0];
-            if (contentTypeByte != @intFromEnum(recordMod.ContentType.application_data)) {
+            if (contentTypeByte != @backingInt(recordMod.ContentType.application_data)) {
                 return error.TlsRecordError;
             }
 
@@ -236,7 +236,7 @@ const NativeConnection = struct {
         const master = self.resumptionMaster orelse return error.TlsRecordError;
         const host = self.sessionHost orelse return error.TlsRecordError;
         if (plaintext.len < 4) return error.TlsRecordError;
-        if (plaintext[0] != @intFromEnum(handshakeMod.HandshakeType.new_session_ticket)) {
+        if (plaintext[0] != @backingInt(handshakeMod.HandshakeType.new_session_ticket)) {
             return error.TlsRecordError;
         }
         const nst = handshakeMod.NewSessionTicket.decode(plaintext[4..]) catch return error.TlsRecordError;
@@ -636,11 +636,11 @@ pub const Client = struct {
                 const blen: usize = (@as(usize, hsBuf.items[1]) << 16) | (@as(usize, hsBuf.items[2]) << 8) | hsBuf.items[3];
                 if (hsBuf.items.len < 4 + blen) break;
                 const msg = hsBuf.items[0 .. 4 + blen];
-                const ee = @intFromEnum(handshakeMod.HandshakeType.encrypted_extensions);
-                const cr = @intFromEnum(handshakeMod.HandshakeType.certificate_request);
-                const cert = @intFromEnum(handshakeMod.HandshakeType.certificate);
-                const cv = @intFromEnum(handshakeMod.HandshakeType.certificate_verify);
-                const fin = @intFromEnum(handshakeMod.HandshakeType.finished);
+                const ee = @backingInt(handshakeMod.HandshakeType.encrypted_extensions);
+                const cr = @backingInt(handshakeMod.HandshakeType.certificate_request);
+                const cert = @backingInt(handshakeMod.HandshakeType.certificate);
+                const cv = @backingInt(handshakeMod.HandshakeType.certificate_verify);
+                const fin = @backingInt(handshakeMod.HandshakeType.finished);
                 if (t == ee) {
                     try engine.processEncryptedExtensions(msg);
                 } else if (t == cr) {
@@ -788,7 +788,7 @@ pub const Client = struct {
             if (n == 0) return error.TlsHandshakeFailed;
             have += n;
         }
-        if (hdr[0] != @intFromEnum(recordMod.ContentType.handshake)) return error.TlsHandshakeFailed;
+        if (hdr[0] != @backingInt(recordMod.ContentType.handshake)) return error.TlsHandshakeFailed;
         const len: usize = (@as(usize, hdr[3]) << 8) | hdr[4];
         if (len > recordMod.maxRecordPlaintext + 16) return error.TlsHandshakeFailed;
         const body = try a.alloc(u8, len);
@@ -836,7 +836,7 @@ pub const Client = struct {
                 if (n == 0) return error.TlsHandshakeFailed;
                 have += n;
             }
-            if (hdr[0] == @intFromEnum(recordMod.ContentType.change_cipher_spec)) {
+            if (hdr[0] == @backingInt(recordMod.ContentType.change_cipher_spec)) {
                 const skipLen: usize = (@as(usize, hdr[3]) << 8) | hdr[4];
                 var skipped: usize = 0;
                 var tmp: [64]u8 = undefined;
@@ -848,7 +848,7 @@ pub const Client = struct {
                 }
                 continue;
             }
-            if (hdr[0] != @intFromEnum(recordMod.ContentType.application_data)) {
+            if (hdr[0] != @backingInt(recordMod.ContentType.application_data)) {
                 return error.TlsHandshakeFailed;
             }
             const recLen: usize = (@as(usize, hdr[3]) << 8) | hdr[4];
@@ -903,7 +903,7 @@ test "tls resumption over loopback abbreviates the second handshake" {
     var server = try serverMod.Server.init(a, ctx.io, .{
         .certificatePem = testCertPem,
         .privateKeyPem = testKeyPem,
-        .ticketKeys = .{ .current = [_]u8{0x5E} ** 32 },
+        .ticketKeys = .{ .current = (@as([32]u8, @splat(0x5E))) },
     });
     defer server.deinit();
     const Acceptor = struct {

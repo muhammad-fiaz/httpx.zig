@@ -1471,7 +1471,7 @@ fn filterRandom(allocator: Allocator, value: Value, args: []const Value, kwargs:
     var n: usize = 0;
     for (value.list) |item| {
         if (n >= 8) break;
-        h.update(std.mem.asBytes(&@as(u64, @intFromEnum(item))));
+        h.update(std.mem.asBytes(&@as(u64, @backingInt(item))));
         n += 1;
     }
     var seed = h.final();
@@ -2118,7 +2118,7 @@ pub const Renderer = struct {
         writer: anytype,
     ) !void {
         comptime {
-            if (@typeInfo(@TypeOf(ctx)).pointer.is_const) {
+            if (@typeInfo(@TypeOf(ctx)).pointer.attrs.@"const") {
                 @compileError(
                     "Renderer.render must take `*Context`: it mutates ctx.arena " ++
                         "through arenaAlloc below, and a `*const` parameter is emitted " ++

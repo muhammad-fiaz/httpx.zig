@@ -122,7 +122,7 @@ pub const SessionCache = struct {
             self.allocator.free(fresh.host);
         }
         var entry = CachedEntry{
-            .host = [_]u8{0} ** 64,
+            .host = (@as([64]u8, @splat(0))),
             .hostLen = @intCast(host.len),
             .port = port,
             .session = fresh,
@@ -254,7 +254,7 @@ pub fn clientSessionFromTicketWithAlpn(
     var psk: [32]u8 = undefined;
     expandLabel(resumptionMaster, "resumption", nst.nonce, &psk);
     errdefer std.crypto.secureZero(u8, &psk);
-    var alpnBuf: [16]u8 = [_]u8{0} ** 16;
+    var alpnBuf: [16]u8 = (@as([16]u8, @splat(0)));
     var alpnLen: u8 = 0;
     if (alpn) |a| {
         alpnLen = @intCast(@min(a.len, 16));
@@ -300,7 +300,7 @@ pub const ClientSession = struct {
     suite: tls.CipherSuite,
     host: []u8,
     maxEarlyData: u32 = 0,
-    alpn: [16]u8 = [_]u8{0} ** 16,
+    alpn: [16]u8 = (@as([16]u8, @splat(0))),
     alpnLen: u8 = 0,
 
     pub fn deinit(self: *ClientSession, allocator: Allocator) void {
@@ -386,7 +386,7 @@ pub const TicketKeys = struct {
     ) ![ticketBlobLen]u8 {
         var plain: [ticketPlainLen]u8 = undefined;
         @memcpy(plain[0..4], &ticketMagic);
-        std.mem.writeInt(u16, plain[4..6], @intFromEnum(suite), .big);
+        std.mem.writeInt(u16, plain[4..6], @backingInt(suite), .big);
         std.mem.writeInt(u64, plain[6..14], createdMs, .big);
         std.mem.writeInt(u32, plain[14..18], lifetimeSecs, .big);
         std.mem.writeInt(u32, plain[18..22], ageAdd, .big);
@@ -448,7 +448,7 @@ pub const TicketKeys = struct {
 
         const magic = if (isV2) ticketMagic else ticketMagicV1;
         if (!std.mem.eql(u8, plain[0..4], &magic)) return error.InvalidTicket;
-        const suite: tls.CipherSuite = @enumFromInt(std.mem.readInt(u16, plain[4..6], .big));
+        const suite: tls.CipherSuite = @fromBackingInt(@intCast(std.mem.readInt(u16, plain[4..6], .big)));
         const created = std.mem.readInt(u64, plain[6..14], .big);
         const lifetime = std.mem.readInt(u32, plain[14..18], .big);
         const ageAdd = std.mem.readInt(u32, plain[18..22], .big);
@@ -459,7 +459,7 @@ pub const TicketKeys = struct {
         }
 
         var maxEarlyData: u32 = 0;
-        var alpn: [16]u8 = [_]u8{0} ** 16;
+        var alpn: [16]u8 = (@as([16]u8, @splat(0)));
         var alpnLen: u8 = 0;
         var psk: [32]u8 = undefined;
         if (isV2) {
@@ -485,8 +485,8 @@ pub const TicketKeys = struct {
 };
 
 test "ticket seal/open round trip with expiry and rotation" {
-    var keys = TicketKeys{ .current = [_]u8{0x11} ** 32 };
-    const psk = [_]u8{0x42} ** 32;
+    var keys = TicketKeys{ .current = (@as([32]u8, @splat(0x11))) };
+    const psk = (@as([32]u8, @splat(0x42)));
     const blob = try keys.seal(testIo.get(), psk, .AES_128_GCM_SHA256, 1_000_000, 3600, 0xA11CE, 0xFFFFFFFF, "h3");
     const opened = try keys.open(&blob, 1_000_000 + 1000);
     try std.testing.expectEqualSlices(u8, &psk, &opened.psk);
@@ -506,10 +506,10 @@ test "ticket seal/open round trip with expiry and rotation" {
     try std.testing.expectError(error.InvalidTicket, keys.open(&bad, 1_000_000 + 1000));
 
     // Rotation: old tickets still verify via `previous`, then die.
-    keys.rotate([_]u8{0x22} ** 32);
+    keys.rotate((@as([32]u8, @splat(0x22))));
     const reopened = try keys.open(&blob, 1_000_000 + 1000);
     try std.testing.expectEqualSlices(u8, &psk, &reopened.psk);
-    keys.rotate([_]u8{0x33} ** 32);
+    keys.rotate((@as([32]u8, @splat(0x33))));
     try std.testing.expectError(error.InvalidTicket, keys.open(&blob, 1_000_000 + 1000));
 }
 
@@ -535,7 +535,7 @@ test "client session usability is host-bound and time-bound" {
     const a = std.testing.allocator;
     var s = ClientSession{
         .ticket = try a.dupe(u8, "tok"),
-        .psk = [_]u8{0} ** 32,
+        .psk = (@as([32]u8, @splat(0))),
         .ageAdd = 7,
         .createdMs = 5_000,
         .lifetimeSecs = 10,

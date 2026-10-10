@@ -92,12 +92,12 @@ pub const Cipher = enum { aes128Gcm, aes256Gcm, chacha20Poly1305 };
 /// Packet-protection keys for one direction at one encryption level.
 pub const ProtectionKeys = struct {
     /// AEAD key (16 bytes for AES-128-GCM, 32 for AES-256-GCM/ChaCha20-Poly1305).
-    key: [32]u8 = [_]u8{0} ** 32,
+    key: [32]u8 = (@as([32]u8, @splat(0))),
     keyLen: usize = 16,
     /// Nonce construction IV (12 bytes).
     iv: [12]u8,
     /// Header-protection key (16 bytes for AES, 32 for ChaCha20).
-    hp: [32]u8 = [_]u8{0} ** 32,
+    hp: [32]u8 = (@as([32]u8, @splat(0))),
     hpLen: usize = 16,
     cipher: Cipher = .aes128Gcm,
 
@@ -181,7 +181,7 @@ pub fn nextApplicationSecret(current: [32]u8) [32]u8 {
 
 test "hkdfExpandLabel produces tls13-prefixed info" {
     // Structural check: same prk+label yields deterministic equal output.
-    var prk: [32]u8 = .{0xAB} ** 32;
+    var prk: [32]u8 = @splat(0xAB);
     var a: [16]u8 = undefined;
     var b: [16]u8 = undefined;
     hkdfExpandLabel(prk, "quic key", a[0..]);

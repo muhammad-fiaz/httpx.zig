@@ -38,7 +38,7 @@ pub const RobotsFile = struct {
         for (self.groups) |*g| {
             if (std.mem.eql(u8, g.userAgent, "*")) {
                 wildcardGroup = g;
-            } else if (std.ascii.indexOfIgnoreCase(userAgent, g.userAgent) != null) {
+            } else if (std.ascii.findIgnoreCase(userAgent, g.userAgent) != null) {
                 bestGroup = g;
                 break;
             }

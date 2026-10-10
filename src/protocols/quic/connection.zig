@@ -279,7 +279,7 @@ pub const Connection = struct {
             .cfg = cfg,
         };
         for (0..3) |i| {
-            self.spaces[i] = PnSpace.init(allocator, @enumFromInt(i));
+            self.spaces[i] = PnSpace.init(allocator, @fromBackingInt(@intCast(i)));
         }
         for (&self.cryptoBuf) |*b| b.* = .empty;
         for (&self.cryptoOut) |*b| b.* = .empty;
@@ -364,7 +364,7 @@ pub const Connection = struct {
         txSecret: [32]u8,
         rxSecret: [32]u8,
     ) !void {
-        const sp = &self.spaces[@intFromEnum(kind)];
+        const sp = &self.spaces[@backingInt(kind)];
         var ktx = crypto.deriveProtectionKeys(txSecret);
         var krx = crypto.deriveProtectionKeys(rxSecret);
         // AES-128-GCM suite for this build; HP key same width.
@@ -393,7 +393,7 @@ pub const Connection = struct {
     /// Queues TLS handshake bytes for later packetization as CRYPTO frames.
     pub fn queueCrypto(self: *Connection, kind: SpaceKind, data: []const u8) Error!u64 {
         if (data.len > MAX_DATAGRAM) return Error.BufferTooSmall;
-        const idx = @intFromEnum(kind);
+        const idx = @backingInt(kind);
         const offset = self.cryptoSendOff[idx];
         self.cryptoSendOff[idx] = std.math.add(u64, offset, data.len) catch return Error.BufferTooSmall;
         self.cryptoOut[idx].appendSlice(self.allocator, data) catch return Error.OutOfMemory;
@@ -403,7 +403,7 @@ pub const Connection = struct {
     /// Peeks queued CRYPTO bytes while retaining their absolute stream offset.
     /// Call `consumeCrypto` after the frame has been serialized.
     pub fn takeCrypto(self: *Connection, kind: SpaceKind, maxBytes: usize) ?CryptoChunk {
-        const idx = @intFromEnum(kind);
+        const idx = @backingInt(kind);
         const queued = self.cryptoOut[idx].items;
         if (queued.len == 0) return null;
         const take = @min(maxBytes, queued.len);
@@ -413,7 +413,7 @@ pub const Connection = struct {
 
     /// Consumes bytes previously returned by `takeCrypto` after packetization.
     pub fn consumeCrypto(self: *Connection, kind: SpaceKind, count: usize) bool {
-        const idx = @intFromEnum(kind);
+        const idx = @backingInt(kind);
         if (count > self.cryptoOut[idx].items.len) return false;
         self.cryptoOut[idx].replaceRange(self.allocator, 0, count, &.{}) catch return false;
         return true;
@@ -585,7 +585,7 @@ pub const Connection = struct {
             .closing, .draining, .closed => return Error.ConnectionClosed,
             else => {},
         }
-        const sp = &self.spaces[@intFromEnum(kind)];
+        const sp = &self.spaces[@backingInt(kind)];
         const isZeroRtt = (kind == .application and sp.keysTx == null and self.zeroRttKeysTx != null);
         const keys = if (isZeroRtt)
             self.zeroRttKeysTx.?
@@ -863,7 +863,7 @@ pub const Connection = struct {
     /// bare PING. Probes bypass the congestion gate (one packet only).
     fn sendProbe(self: *Connection, spaceIdx: usize, nowMs: u64) Error!void {
         const sp = &self.spaces[spaceIdx];
-        const kind: SpaceKind = @enumFromInt(spaceIdx);
+        const kind: SpaceKind = @fromBackingInt(@intCast(spaceIdx));
         if (sp.sent.items.len > 0) {
             try self.retransmitEntry(sp, 0, nowMs);
             return;
@@ -1331,7 +1331,7 @@ pub const Connection = struct {
     }
 
     fn receiveCrypto(self: *Connection, kind: SpaceKind, offset: u64, data: []const u8, nowMs: u64) Error!void {
-        const idx = @intFromEnum(kind);
+        const idx = @backingInt(kind);
         if (data.len == 0) return;
         const end = std.math.add(u64, offset, data.len) catch return Error.ProtocolViolation;
         const received = self.cryptoRecvOff[idx];
@@ -1590,7 +1590,7 @@ const TlsHandshakeDriver = struct {
     shared: ?[32]u8 = null,
     hsSecret: ?[32]u8 = null,
     flightDone: bool = false,
-    sec1: [39]u8 = .{0} ** 39,
+    sec1: [39]u8 = @splat(0),
 
     fn hashConcat(parts: []const []const u8) [32]u8 {
         var h = std.crypto.hash.sha2.Sha256.init(.{});
@@ -1646,7 +1646,7 @@ const TlsHandshakeDriver = struct {
         if (d.flightDone) return;
         d.incoming.appendSlice(conn.allocator, data) catch return Error.OutOfMemory;
         const rec = takeRecord(&d.incoming) orelse return;
-        if (rec.kind != @intFromEnum(ths.HandshakeType.client_hello)) return Error.ProtocolViolation;
+        if (rec.kind != @backingInt(ths.HandshakeType.client_hello)) return Error.ProtocolViolation;
         const chMsg = rec.msg;
         d.engine.processClientHello(chMsg) catch return Error.TlsDriverFailed;
         var flight = d.engine.produceServerFlight(chMsg[4..], "", &d.sec1, &.{}, &.{}, null) catch return Error.TlsDriverFailed;
@@ -1700,7 +1700,7 @@ const TlsHandshakeDriver = struct {
         d.peerFlight.appendSlice(conn.allocator, data) catch return Error.OutOfMemory;
         while (takeRecord(&d.incoming)) |rec| {
             switch (rec.kind) {
-                @intFromEnum(ths.HandshakeType.server_hello) => {
+                @backingInt(ths.HandshakeType.server_hello) => {
                     d.engine.processServerHello(rec.msg) catch return Error.TlsDriverFailed;
                     const shared = d.engine.sharedSecret32() orelse return Error.TlsDriverFailed;
                     d.shared = shared;
@@ -1710,16 +1710,16 @@ const TlsHandshakeDriver = struct {
                     try conn.installKeys(.handshake, hs.keys.txSecret, hs.keys.rxSecret);
                     conn.discardInitialKeys();
                 },
-                @intFromEnum(ths.HandshakeType.encrypted_extensions) => {
+                @backingInt(ths.HandshakeType.encrypted_extensions) => {
                     d.engine.processEncryptedExtensions(rec.msg) catch return Error.TlsDriverFailed;
                 },
-                @intFromEnum(ths.HandshakeType.certificate) => {
+                @backingInt(ths.HandshakeType.certificate) => {
                     d.engine.processCertificate(rec.msg) catch return Error.TlsDriverFailed;
                 },
-                @intFromEnum(ths.HandshakeType.certificate_verify) => {
+                @backingInt(ths.HandshakeType.certificate_verify) => {
                     d.engine.processCertificateVerify(rec.msg) catch return Error.TlsDriverFailed;
                 },
-                @intFromEnum(ths.HandshakeType.finished) => {
+                @backingInt(ths.HandshakeType.finished) => {
                     // HMAC over the shared transcript: proves both sides
                     // agree on every handshake byte before 1-RTT starts.
                     d.engine.processFinished(rec.msg) catch return Error.TlsDriverFailed;
@@ -1749,7 +1749,7 @@ fn runTlsHandshake(
     // Deterministic P-256 signing identity (same construction as the
     // engine unit test): ECDSA signatures without PKI involvement.
     const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
-    const ecKp = try EcdsaP256.KeyPair.generateDeterministic([_]u8{0x42} ** 32);
+    const ecKp = try EcdsaP256.KeyPair.generateDeterministic((@as([32]u8, @splat(0x42))));
     const ecSec = ecKp.secret_key.toBytes();
     var sec1: [39]u8 = undefined;
     sec1[0] = 0x30;
@@ -1871,21 +1871,21 @@ fn sendH3Stream(conn: *Connection, sid: u64, offset: u64, bytes: []const u8, fin
 /// Direction-aware STREAM accumulator for the HTTP/3 loopback test.
 const H3LoopSink = struct {
     var cliBufs: [8][2048]u8 = undefined;
-    var cliLens: [8]usize = .{0} ** 8;
-    var cliFins: [8]bool = .{false} ** 8;
-    var cliSids: [8]u64 = .{std.math.maxInt(u64)} ** 8;
+    var cliLens: [8]usize = @splat(0);
+    var cliFins: [8]bool = @splat(false);
+    var cliSids: [8]u64 = @splat(std.math.maxInt(u64));
     var srvBufs: [8][2048]u8 = undefined;
-    var srvLens: [8]usize = .{0} ** 8;
-    var srvFins: [8]bool = .{false} ** 8;
-    var srvSids: [8]u64 = .{std.math.maxInt(u64)} ** 8;
+    var srvLens: [8]usize = @splat(0);
+    var srvFins: [8]bool = @splat(false);
+    var srvSids: [8]u64 = @splat(std.math.maxInt(u64));
 
     fn reset() void {
-        cliLens = .{0} ** 8;
-        cliFins = .{false} ** 8;
-        cliSids = .{std.math.maxInt(u64)} ** 8;
-        srvLens = .{0} ** 8;
-        srvFins = .{false} ** 8;
-        srvSids = .{std.math.maxInt(u64)} ** 8;
+        cliLens = @splat(0);
+        cliFins = @splat(false);
+        cliSids = @splat(std.math.maxInt(u64));
+        srvLens = @splat(0);
+        srvFins = @splat(false);
+        srvSids = @splat(std.math.maxInt(u64));
     }
 
     fn slot(sids: *[8]u64, sid: u64) usize {
@@ -2181,7 +2181,7 @@ const CtlPair = struct {
         errdefer server.deinit();
         // Mirrored 1-RTT secrets (same loopback convention as the
         // handshake tests); CIDs need no alignment for short headers.
-        const secret = [_]u8{0xA5} ** 32;
+        const secret = (@as([32]u8, @splat(0xA5)));
         try client.installKeys(.application, secret, secret);
         try server.installKeys(.application, secret, secret);
         server.addressValidated = true;
@@ -2307,7 +2307,7 @@ test "send stream checked gates windows and accounts once" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
     defer pair.deinit();
-    const data = [_]u8{0xAB} ** 100;
+    const data = (@as([100]u8, @splat(0xAB)));
 
     try pair.client.sendStreamChecked(0, 0, &data, false, 100);
     try std.testing.expectEqual(@as(u64, 100), pair.client.dataSent);
@@ -2346,7 +2346,7 @@ test "receive flow control violation enforced" {
     defer pair.deinit();
     pair.server.maxData = 10;
 
-    const data = [_]u8{0xCD} ** 100;
+    const data = (@as([100]u8, @splat(0xCD)));
     try pair.client.sendStreamChecked(0, 0, &data, false, 100);
     const out = try pair.client.takeOutput(a);
     defer a.free(out);
@@ -2372,7 +2372,7 @@ test "stream data blocked raises the stream window" {
     var pair = try CtlPair.init(a);
     defer pair.deinit();
 
-    const data = [_]u8{0xEF} ** 10;
+    const data = (@as([10]u8, @splat(0xEF)));
     try pair.client.sendStreamChecked(0, 0, &data, false, 100);
     try pair.pumpCS(a);
     const st = pair.server.streams.get(0) orelse return error.TestUnexpectedResult;
@@ -2412,7 +2412,7 @@ test "acks arm on second packet and roundtrip through peer" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
     defer pair.deinit();
-    const d = [_]u8{0x11} ** 10;
+    const d = (@as([10]u8, @splat(0x11)));
 
     try pair.client.sendStreamChecked(0, 0, &d, false, 100);
     try pair.pumpCS(a);
@@ -2434,7 +2434,7 @@ test "duplicate packets drop without redelivery" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
     defer pair.deinit();
-    const d = [_]u8{0x22} ** 10;
+    const d = (@as([10]u8, @splat(0x22)));
 
     try pair.client.sendStreamChecked(0, 0, &d, false, 100);
     const out = try pair.client.takeOutput(a);
@@ -2453,7 +2453,7 @@ test "rtt samples use real send and ack timestamps" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
     defer pair.deinit();
-    const d = [_]u8{0x33} ** 10;
+    const d = (@as([10]u8, @splat(0x33)));
 
     try pair.client.sendStreamChecked(0, 0, &d, false, 100);
     {
@@ -2482,7 +2482,7 @@ test "pto probe retransmits unacked data for real delivery" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
     defer pair.deinit();
-    const d = [_]u8{0x44} ** 10;
+    const d = (@as([10]u8, @splat(0x44)));
 
     try pair.client.sendStreamChecked(0, 0, &d, false, 100);
     const orig = try pair.client.takeOutput(a);
@@ -2513,7 +2513,7 @@ test "loss declaration halves cwnd and retransmits for real delivery" {
     var pkts: [5][]u8 = undefined;
     var i: usize = 0;
     while (i < 5) : (i += 1) {
-        const one = [_]u8{@intCast(0x50 + i)} ** 1;
+        const one = (@as([1]u8, @splat(@intCast(0x50 + i))));
         try pair.client.sendStreamChecked(0, i, &one, false, 100 + i);
         pkts[i] = try pair.client.takeOutput(a);
     }
@@ -2552,7 +2552,7 @@ test "send blocks when congestion window exhausted" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
     defer pair.deinit();
-    const chunk = [_]u8{0xAA} ** 500;
+    const chunk = (@as([500]u8, @splat(0xAA)));
     var blockedAt: usize = 0;
     var i: usize = 0;
     while (i < 500) : (i += 1) {
@@ -2570,7 +2570,7 @@ test "out of order receipt acks immediately" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
     defer pair.deinit();
-    const d = [_]u8{0x55} ** 10;
+    const d = (@as([10]u8, @splat(0x55)));
 
     var outs: [6][]u8 = undefined;
     var i: usize = 0;

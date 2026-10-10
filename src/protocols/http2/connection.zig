@@ -55,12 +55,12 @@ pub const Settings = struct {
 
     pub fn entries(self: *const Settings) [6]frameMod.SettingEntry {
         return .{
-            .{ .id = @intFromEnum(frameMod.SettingsId.headerTableSize), .value = self.headerTableSize },
-            .{ .id = @intFromEnum(frameMod.SettingsId.enablePush), .value = self.enablePush },
-            .{ .id = @intFromEnum(frameMod.SettingsId.maxConcurrentStreams), .value = self.maxConcurrentStreams },
-            .{ .id = @intFromEnum(frameMod.SettingsId.initialWindowSize), .value = self.initialWindowSize },
-            .{ .id = @intFromEnum(frameMod.SettingsId.maxFrameSize), .value = self.maxFrameSize },
-            .{ .id = @intFromEnum(frameMod.SettingsId.maxHeaderListSize), .value = self.maxHeaderListSize },
+            .{ .id = @backingInt(frameMod.SettingsId.headerTableSize), .value = self.headerTableSize },
+            .{ .id = @backingInt(frameMod.SettingsId.enablePush), .value = self.enablePush },
+            .{ .id = @backingInt(frameMod.SettingsId.maxConcurrentStreams), .value = self.maxConcurrentStreams },
+            .{ .id = @backingInt(frameMod.SettingsId.initialWindowSize), .value = self.initialWindowSize },
+            .{ .id = @backingInt(frameMod.SettingsId.maxFrameSize), .value = self.maxFrameSize },
+            .{ .id = @backingInt(frameMod.SettingsId.maxHeaderListSize), .value = self.maxHeaderListSize },
         };
     }
 };
@@ -339,9 +339,9 @@ pub const Session = struct {
     fn applyPeerSettings(self: *Session, entries: []frameMod.SettingEntry) Error!void {
         var windowDelta: i64 = 0;
         for (entries) |e| {
-            const sid: frameMod.SettingsId = @enumFromInt(e.id);
+            const sid: frameMod.SettingsId = @fromBackingInt(@intCast(e.id));
             if (frameMod.validateSetting(sid, e.value)) |code| {
-                return self.connError(@enumFromInt(code));
+                return self.connError(@fromBackingInt(@intCast(code)));
             }
             switch (sid) {
                 .headerTableSize => {
@@ -696,7 +696,7 @@ pub const Session = struct {
 
     pub fn sendRstStream(self: *Session, sid: u31, code: ErrorCode) !void {
         if (self.streamPtr(sid)) |st| st.onSendRst();
-        try frameMod.writeRstStream(&self.outbound, self.allocator, sid, @intFromEnum(code));
+        try frameMod.writeRstStream(&self.outbound, self.allocator, sid, @backingInt(code));
         self.reapClosedStream(sid);
     }
 
@@ -740,7 +740,7 @@ pub const Session = struct {
     }
 
     pub fn sendConnectionClose(self: *Session, code: ErrorCode, debug: []const u8) !void {
-        try frameMod.writeGoaway(&self.outbound, self.allocator, 0x7FFFFFFF, @intFromEnum(code), debug);
+        try frameMod.writeGoaway(&self.outbound, self.allocator, 0x7FFFFFFF, @backingInt(code), debug);
     }
 
     /// Queues a fatal GOAWAY then returns the mapped protocol error.
@@ -752,7 +752,7 @@ pub const Session = struct {
                 &self.outbound,
                 self.allocator,
                 lastSid,
-                @intFromEnum(code),
+                @backingInt(code),
                 @tagName(code),
             ) catch {};
         }

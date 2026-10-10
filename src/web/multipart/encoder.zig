@@ -409,7 +409,12 @@ test "boundary validation" {
     try std.testing.expect(validateBoundary("simple-boundary"));
     try std.testing.expect(validateBoundary("0123456789"));
     try std.testing.expect(!validateBoundary(""));
-    try std.testing.expect(!validateBoundary("a" ++ "b" ** 70));
+    const tooLong: [71]u8 = comptime blk: {
+        var out: [71]u8 = @splat('b');
+        out[0] = 'a';
+        break :blk out;
+    };
+    try std.testing.expect(!validateBoundary(&tooLong));
     try std.testing.expect(!validateBoundary("has space"));
     try std.testing.expect(!validateBoundary("has\x00null"));
 }

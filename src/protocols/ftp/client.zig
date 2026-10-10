@@ -745,7 +745,7 @@ test "reply parser rejects an out-of-range cursor" {
 test "ftp command line validation rejects injection and oversized input" {
     try std.testing.expect(validCommandLine("USER anonymous"));
     try std.testing.expect(!validCommandLine("USER guest\r\nQUIT"));
-    const oversized = [_]u8{'x'} ** (maxCommandBytes + 1);
+    const oversized = (@as([(maxCommandBytes + 1)]u8, @splat('x')));
     try std.testing.expect(!validCommandLine(&oversized));
 }
 

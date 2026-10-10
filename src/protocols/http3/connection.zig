@@ -70,7 +70,7 @@ pub const RequestStream = struct {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
         var fh: [16]u8 = undefined;
-        const n = try frameMod.encodeFrameHeader(&fh, @intFromEnum(frameMod.FrameType.headers), prefix.items.len + block.items.len);
+        const n = try frameMod.encodeFrameHeader(&fh, @backingInt(frameMod.FrameType.headers), prefix.items.len + block.items.len);
         try out.appendSlice(self.allocator, fh[0..n]);
         try out.appendSlice(self.allocator, prefix.items);
         try out.appendSlice(self.allocator, block.items);
@@ -109,7 +109,7 @@ pub const RequestStream = struct {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
         var fh: [16]u8 = undefined;
-        const n = try frameMod.encodeFrameHeader(&fh, @intFromEnum(frameMod.FrameType.headers), prefix.items.len + block.items.len);
+        const n = try frameMod.encodeFrameHeader(&fh, @backingInt(frameMod.FrameType.headers), prefix.items.len + block.items.len);
         try out.appendSlice(self.allocator, fh[0..n]);
         try out.appendSlice(self.allocator, prefix.items);
         try out.appendSlice(self.allocator, block.items);
@@ -122,7 +122,7 @@ pub const RequestStream = struct {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
         var fh: [16]u8 = undefined;
-        const n = try frameMod.encodeFrameHeader(&fh, @intFromEnum(frameMod.FrameType.data), body.len);
+        const n = try frameMod.encodeFrameHeader(&fh, @backingInt(frameMod.FrameType.data), body.len);
         try out.appendSlice(self.allocator, fh[0..n]);
         try out.appendSlice(self.allocator, body);
         return out.toOwnedSlice(self.allocator);
@@ -143,7 +143,7 @@ pub fn buildSettingsFrame(allocator: Allocator, entries: []const frameMod.Settin
     try out.appendSlice(allocator, vb[0..n]);
 
     // SETTINGS frame
-    n = try frameMod.encodeFrameHeader(&vb, @intFromEnum(frameMod.FrameType.settings), payload.len);
+    n = try frameMod.encodeFrameHeader(&vb, @backingInt(frameMod.FrameType.settings), payload.len);
     try out.appendSlice(allocator, vb[0..n]);
     try out.appendSlice(allocator, payload);
     return out.toOwnedSlice(allocator);
@@ -360,7 +360,7 @@ pub const Connection = struct {
     pub fn buildGoawayFrame(self: *Connection, streamId: u64) ![]u8 {
         const out = try frameMod.encodeSingleVarintFrame(
             self.allocator,
-            @intFromEnum(frameMod.FrameType.goaway),
+            @backingInt(frameMod.FrameType.goaway),
             streamId,
         );
         self.goawaySent = true;
@@ -715,7 +715,7 @@ pub const Connection = struct {
     /// stops tracking the stream for inbound bytes.
     pub fn resetStream(self: *Connection, quic: anytype, sid: u64, code: frameMod.H3Error, nowMs: u64) !void {
         const finalSize = quic.sendStreamEnd.get(sid) orelse 0;
-        try quic.sendResetStream(sid, @intFromEnum(code), finalSize, nowMs);
+        try quic.sendResetStream(sid, @backingInt(code), finalSize, nowMs);
         if (self.streams.getPtr(sid)) |stp| stp.failed = true;
     }
 };
@@ -941,7 +941,7 @@ test "h3conn reset sends offset and drops the stream" {
     defer mq.deinit();
 
     const sid = try conn.openRequestStream();
-    const body = [_]u8{0xAA} ** 100;
+    const body = (@as([100]u8, @splat(0xAA)));
     try conn.sendStreamBytes(&mq, sid, &body, false, 100);
     try conn.resetStream(&mq, sid, .requestCancelled, 101);
     try std.testing.expectEqual(@as(usize, 1), mq.resets.items.len);

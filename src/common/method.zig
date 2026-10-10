@@ -28,9 +28,10 @@ pub const Method = enum {
     }
 
     pub fn fromString(s: []const u8) ?Method {
-        inline for (@typeInfo(Method).@"enum".fields) |f| {
-            if (std.ascii.eqlIgnoreCase(s, f.name)) {
-                return @enumFromInt(f.value);
+        const methodInfo = @typeInfo(Method).@"enum";
+        inline for (methodInfo.field_names, methodInfo.field_values) |fname, fvalue| {
+            if (std.ascii.eqlIgnoreCase(s, fname)) {
+                return @fromBackingInt(@intCast(fvalue));
             }
         }
         return null;

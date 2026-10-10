@@ -21,7 +21,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const loaders = @import("loaders");
-const tint = loaders.tint;
+const tint = @import("tint");
 const clock = @import("../common/clock.zig");
 const Method = @import("../common/method.zig").Method;
 const Status = @import("../common/status.zig").Status;
@@ -127,22 +127,22 @@ pub const RemoteFileInfo = struct {
     fileSize: ?u64 = null,
     acceptsRanges: bool = false,
 
-    urlBuf: [256]u8 = [_]u8{0} ** 256,
+    urlBuf: [256]u8 = (@as([256]u8, @splat(0))),
     urlLen: usize = 0,
 
-    fileNameBuf: [128]u8 = [_]u8{0} ** 128,
+    fileNameBuf: [128]u8 = (@as([128]u8, @splat(0))),
     fileNameLen: usize = 0,
 
-    contentTypeBuf: [64]u8 = [_]u8{0} ** 64,
+    contentTypeBuf: [64]u8 = (@as([64]u8, @splat(0))),
     contentTypeLen: usize = 0,
 
-    etagBuf: [64]u8 = [_]u8{0} ** 64,
+    etagBuf: [64]u8 = (@as([64]u8, @splat(0))),
     etagLen: usize = 0,
 
-    lastModifiedBuf: [64]u8 = [_]u8{0} ** 64,
+    lastModifiedBuf: [64]u8 = (@as([64]u8, @splat(0))),
     lastModifiedLen: usize = 0,
 
-    contentEncodingBuf: [32]u8 = [_]u8{0} ** 32,
+    contentEncodingBuf: [32]u8 = (@as([32]u8, @splat(0))),
     contentEncodingLen: usize = 0,
 
     pub fn url(self: *const RemoteFileInfo) []const u8 {
@@ -244,7 +244,7 @@ pub const DownloadOptions = struct {
 };
 
 pub const DownloadResult = struct {
-    destinationBuf: [1024]u8 = [_]u8{0} ** 1024,
+    destinationBuf: [1024]u8 = (@as([1024]u8, @splat(0))),
     destinationLen: usize = 0,
     destination: []const u8 = "",
     downloadedBytes: u64,
@@ -692,7 +692,7 @@ pub fn resolveDestination(
 
 fn extractFilenameFromContentDisposition(cd: []const u8) ?[]const u8 {
     const needle = "filename=";
-    const idx = std.ascii.indexOfIgnoreCase(cd, needle) orelse return null;
+    const idx = std.ascii.findIgnoreCase(cd, needle) orelse return null;
     var rem = std.mem.trim(u8, cd[idx + needle.len ..], " \t");
     if (rem.len == 0) return null;
     if (rem[0] == '"') {
@@ -1133,10 +1133,10 @@ pub const ProgressTracker = struct {
                     .filled = "=",
                     .empty = "-",
                     .head = ">",
-                    .left_bracket = "[",
-                    .right_bracket = "]",
+                    .leftBracket = "[",
+                    .rightBracket = "]",
                 },
-                .color = tint.fg(.{ .ansi4 = .cyan }),
+                .color = tint.color.ansi4.cyan.fg(),
                 .template = if (totalSize != null)
                     "{prefix} {bar} {percent}% | {elapsed} | {speed} | ETA: {eta}"
                 else
@@ -1541,7 +1541,7 @@ fn parseRemoteFileInfo(sourceUrl: []const u8, status: u16, headers: []const Head
             @memcpy(info.lastModifiedBuf[0..len], val[0..len]);
             info.lastModifiedLen = len;
         } else if (std.ascii.eqlIgnoreCase(h.name, "Accept-Ranges")) {
-            if (std.ascii.indexOfIgnoreCase(h.value, "bytes") != null) {
+            if (std.ascii.findIgnoreCase(h.value, "bytes") != null) {
                 info.acceptsRanges = true;
             }
         } else if (std.ascii.eqlIgnoreCase(h.name, "Content-Encoding")) {

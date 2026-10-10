@@ -39,12 +39,12 @@ pub const FrameType = enum(u8) {
     _,
 
     pub fn toString(self: FrameType) []const u8 {
-        if (@intFromEnum(self) <= 9) return @tagName(self);
+        if (@backingInt(self) <= 9) return @tagName(self);
         return "unknown";
     }
 
     pub fn isKnown(self: FrameType) bool {
-        return @intFromEnum(self) <= 9;
+        return @backingInt(self) <= 9;
     }
 };
 
@@ -96,7 +96,7 @@ pub const FrameHeader = struct {
     pub fn parse(buf: *const [FRAME_HEADER_SIZE]u8) FrameHeader {
         const length: u24 = (@as(u24, buf[0]) << 16) | (@as(u24, buf[1]) << 8) | buf[2];
         const ftRaw = buf[3];
-        const ft: FrameType = @enumFromInt(ftRaw);
+        const ft: FrameType = @fromBackingInt(@intCast(ftRaw));
         const rawSid = std.mem.readInt(u32, buf[5..9], .big);
         var flags = buf[4];
         if (ft.isKnown()) flags &= validFlags(ft);
@@ -112,7 +112,7 @@ pub const FrameHeader = struct {
         buf[0] = @intCast((self.length >> 16) & 0xFF);
         buf[1] = @intCast((self.length >> 8) & 0xFF);
         buf[2] = @intCast(self.length & 0xFF);
-        buf[3] = @intFromEnum(self.frameType);
+        buf[3] = @backingInt(self.frameType);
         buf[4] = self.flags;
         std.mem.writeInt(u32, buf[5..9], self.streamId, .big);
     }
@@ -370,7 +370,7 @@ pub const Frame = union(enum) {
             // RFC 9113 Section 4.1: extensions and unknown frame types are
             // ignored after their length-delimited payload is consumed.
             _ => return .{ .unknown = .{
-                .frameType = @intFromEnum(hdr.frameType),
+                .frameType = @backingInt(hdr.frameType),
                 .flags = hdr.flags,
                 .payload = payload,
             } },

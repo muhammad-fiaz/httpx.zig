@@ -1,7 +1,7 @@
 //! httpx.zig Comprehensive Performance Benchmark Suite
 //!
 //! Measures real-world performance of all core HTTPX subsystems targeting
-//! Zig 0.16.0 ReleaseFast:
+//! Zig 0.17.0 ReleaseFast:
 //!   - Core Operations & Parsing (Headers, URI, Status, Method, HTTP/1.1 parser)
 //!   - Server Routing & Dispatch (Static routes, Parameterized routes, Dispatch)
 //!   - Data Serialization (JSON stringify & typed parsing)
@@ -167,7 +167,7 @@ fn benchHeadersParse() void {
     headers.append("Content-Type", "application/json") catch {};
     headers.append("Authorization", "Bearer token-xyz-123456789") catch {};
     headers.append("Accept", "application/json, text/plain, */*") catch {};
-    headers.append("User-Agent", "httpx.zig-benchmark/0.2.1") catch {};
+    headers.append("User-Agent", "httpx.zig-benchmark/0.2.2") catch {};
 
     std.mem.doNotOptimizeAway(headers.get("Content-Type").?.len);
     std.mem.doNotOptimizeAway(headers.get("Authorization").?.len);
@@ -186,17 +186,17 @@ fn benchStatusLookup() void {
 
 fn benchMethodLookup() void {
     const names = [_][]const u8{ "GET", "POST", "DELETE", "PUT", "PATCH", "HEAD" };
-    for (names) |n| std.mem.doNotOptimizeAway(@intFromEnum(httpx.Method.fromString(n) orelse .GET));
+    for (names) |n| std.mem.doNotOptimizeAway(@backingInt(httpx.Method.fromString(n) orelse .GET));
 }
 
-const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: httpx/0.2.1\r\nAccept: application/json\r\n\r\n";
+const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: httpx/0.2.2\r\nAccept: application/json\r\n\r\n";
 
 fn benchHttp1RequestHead() void {
     const head = httpx.http1.parser.parseRequestHead(rawReqHead, .{}) catch return;
     std.mem.doNotOptimizeAway(head.method.len + head.path.len);
 }
 
-const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: httpx/0.2.1\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
+const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: httpx/0.2.2\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
 
 fn benchHttp1HeaderBlock() void {
     var fields: [16]httpx.http1.parser.Field = undefined;
@@ -525,8 +525,8 @@ fn benchH3VarIntDecode() void {
 // Group 10: TLS Record Cryptography & X.509 Parsing
 
 var sampleTlsPayload: [1024]u8 = undefined;
-const sampleTlsKey: [32]u8 = [_]u8{0x42} ** 32;
-const sampleTlsIv: [12]u8 = [_]u8{0x24} ** 12;
+const sampleTlsKey: [32]u8 = (@as([32]u8, @splat(0x42)));
+const sampleTlsIv: [12]u8 = (@as([12]u8, @splat(0x24)));
 const sampleCertPem =
     \\-----BEGIN CERTIFICATE-----
     \\MIIBmTCCAT+gAwIBAgIURhx0CMJWTUTFJXV9z2OlmW/cNlcwCgYIKoZIzj0EAwIw
@@ -797,7 +797,7 @@ fn tlsBenchServe() void {
         var srv = httpx.tls.Server.init(benchAllocator, tlsBenchIo, .{
             .certificatePem = benchCertPem,
             .privateKeyPem = benchKeyPem,
-            .ticketKeys = .{ .current = [_]u8{0xBE} ** 32 },
+            .ticketKeys = .{ .current = (@as([32]u8, @splat(0xBE))) },
         }) catch continue;
         defer srv.deinit();
         var conn = srv.accept(&sock) catch continue;
@@ -1037,10 +1037,11 @@ pub fn main() !void {
     std.debug.print("=================================================================================\n\n", .{});
     var dateBuf: [16]u8 = undefined;
     std.debug.print("Library:     httpx {s}\n", .{httpx.version});
-    std.debug.print("Environment: {s}-{s} | Optimization: {s} | Zig: 0.16.0\n", .{
+    std.debug.print("Environment: {s}-{s} | Optimization: {s} | Zig: {f}\n", .{
         @tagName(builtin.cpu.arch),
         @tagName(builtin.os.tag),
         @tagName(builtin.mode),
+        builtin.zig_version,
     });
     std.debug.print("Run date:    {s} (UTC)\n\n", .{runDate(&dateBuf)});
 

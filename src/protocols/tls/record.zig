@@ -70,7 +70,7 @@ pub fn encodeRecord(
     // Build inner plaintext: content || ContentType(1 byte)
     var inner: [maxRecordPlaintext + 1]u8 = undefined;
     @memcpy(inner[0..plaintext.len], plaintext);
-    inner[plaintext.len] = @intFromEnum(contentType);
+    inner[plaintext.len] = @backingInt(contentType);
     const total = plaintext.len + 1;
 
     // Construct nonce: ivBase XOR sequenceNumber (96-bit big-endian)
@@ -89,7 +89,7 @@ pub fn encodeRecord(
 
     // Associated data = record header (5 bytes)
     var header: [5]u8 = undefined;
-    header[0] = @intFromEnum(ContentType.application_data); // Always opaque in TLS 1.3
+    header[0] = @backingInt(ContentType.application_data); // Always opaque in TLS 1.3
     header[1] = 3; // legacyMajor
     header[2] = 3; // legacyMinor
     const ctLen: u16 = @intCast(total + cipher.tagLen());
@@ -146,11 +146,11 @@ pub fn decodeRecord(
     const recordLen: usize = (@as(usize, header[3]) << 8) | header[4];
     // TLS 1.3 outer type is always applicationData, but allow
     // changeCipherSpec (0x14) for middlebox compatibility (RFC 8446 Section 5.4).
-    if (header[0] == @intFromEnum(ContentType.change_cipher_spec)) {
+    if (header[0] == @backingInt(ContentType.change_cipher_spec)) {
         if (recordLen != 1 or wire.len < 6 or wire[5] != 0x01) return error.InvalidContentType;
         return .{ .contentType = .change_cipher_spec, .plaintext = outBuf[0..0] };
     }
-    if (header[0] != @intFromEnum(ContentType.application_data)) return error.InvalidContentType;
+    if (header[0] != @backingInt(ContentType.application_data)) return error.InvalidContentType;
     const legacyMajor = header[1];
     const legacyMinor = header[2];
     if (legacyMajor != 3 or legacyMinor != 3) return error.InvalidRecordVersion;
@@ -207,10 +207,10 @@ pub fn decodeRecord(
     if (end == 0) return error.EmptyPlaintext;
     const innerCt = outBuf[end - 1];
     const innerCtEnum: ContentType = switch (innerCt) {
-        @intFromEnum(ContentType.change_cipher_spec) => .change_cipher_spec,
-        @intFromEnum(ContentType.alert) => .alert,
-        @intFromEnum(ContentType.handshake) => .handshake,
-        @intFromEnum(ContentType.application_data) => .application_data,
+        @backingInt(ContentType.change_cipher_spec) => .change_cipher_spec,
+        @backingInt(ContentType.alert) => .alert,
+        @backingInt(ContentType.handshake) => .handshake,
+        @backingInt(ContentType.application_data) => .application_data,
         else => return error.InvalidContentType,
     };
 
@@ -223,8 +223,8 @@ pub fn decodeRecord(
 // Tests
 
 test "record roundtrip aes-128-gcm" {
-    const testKey = [_]u8{0x42} ** 16;
-    const testIv = [_]u8{0x24} ** 12;
+    const testKey = (@as([16]u8, @splat(0x42)));
+    const testIv = (@as([12]u8, @splat(0x24)));
 
     const encoded = try encodeRecord(.handshake, "hello TLS 1.3 world", 0, &testKey, &testIv, .aes128Gcm);
 
@@ -235,8 +235,8 @@ test "record roundtrip aes-128-gcm" {
 }
 
 test "record roundtrip aes-256-gcm" {
-    const testKey = [_]u8{0x42} ** 32;
-    const testIv = [_]u8{0x24} ** 12;
+    const testKey = (@as([32]u8, @splat(0x42)));
+    const testIv = (@as([12]u8, @splat(0x24)));
 
     const encoded = try encodeRecord(.handshake, "AES-256-GCM record", 0, &testKey, &testIv, .aes256Gcm);
 
@@ -247,8 +247,8 @@ test "record roundtrip aes-256-gcm" {
 }
 
 test "record roundtrip chacha20-poly1305" {
-    const testKey = [_]u8{0x42} ** 32;
-    const testIv = [_]u8{0x24} ** 12;
+    const testKey = (@as([32]u8, @splat(0x42)));
+    const testIv = (@as([12]u8, @splat(0x24)));
 
     const encoded = try encodeRecord(.handshake, "ChaCha20 record", 0, &testKey, &testIv, .chacha20Poly1305);
 
@@ -259,8 +259,8 @@ test "record roundtrip chacha20-poly1305" {
 }
 
 test "different sequence numbers produce different ciphertexts" {
-    const key = [_]u8{0xAA} ** 16;
-    const iv = [_]u8{0xBB} ** 12;
+    const key = (@as([16]u8, @splat(0xAA)));
+    const iv = (@as([12]u8, @splat(0xBB)));
     const msg = "test";
 
     const r0 = try encodeRecord(.application_data, msg, 0, &key, &iv, .aes128Gcm);
@@ -271,9 +271,9 @@ test "different sequence numbers produce different ciphertexts" {
 }
 
 test "decryption failure on wrong key" {
-    const key = [_]u8{0x42} ** 16;
-    const iv = [_]u8{0x24} ** 12;
-    const wrongKey = [_]u8{0xFF} ** 16;
+    const key = (@as([16]u8, @splat(0x42)));
+    const iv = (@as([12]u8, @splat(0x24)));
+    const wrongKey = (@as([16]u8, @splat(0xFF)));
 
     const encoded = try encodeRecord(.handshake, "secret", 0, &key, &iv, .aes128Gcm);
 
@@ -283,25 +283,25 @@ test "decryption failure on wrong key" {
 }
 
 test "empty plaintext rejected" {
-    const key = [_]u8{0x42} ** 16;
-    const iv = [_]u8{0x24} ** 12;
+    const key = (@as([16]u8, @splat(0x42)));
+    const iv = (@as([12]u8, @splat(0x24)));
     const result = encodeRecord(.handshake, "", 0, &key, &iv, .aes128Gcm);
     try std.testing.expectEqual(@as(usize, 5 + 1 + Aes128Gcm.tag_length), (try result).len);
 }
 
 test "encrypted records reject a non-application outer content type" {
-    const key = [_]u8{0x42} ** 16;
-    const iv = [_]u8{0x24} ** 12;
+    const key = (@as([16]u8, @splat(0x42)));
+    const iv = (@as([12]u8, @splat(0x24)));
     const encoded = try encodeRecord(.handshake, "payload", 0, &key, &iv, .aes128Gcm);
     var wire = encoded;
-    wire.bytes[0] = @intFromEnum(ContentType.handshake);
+    wire.bytes[0] = @backingInt(ContentType.handshake);
     var out: [maxRecordPlaintext]u8 = undefined;
     try std.testing.expectError(error.InvalidContentType, decodeRecord(wire.bytes[0..wire.len], &out, 0, &key, &iv, .aes128Gcm));
 }
 
 test "tampered ciphertext fails authentication" {
-    const key = [_]u8{0x42} ** 16;
-    const iv = [_]u8{0x24} ** 12;
+    const key = (@as([16]u8, @splat(0x42)));
+    const iv = (@as([12]u8, @splat(0x24)));
     const encoded = try encodeRecord(.application_data, "sensitive", 3, &key, &iv, .aes128Gcm);
     var wire = encoded;
     // Flip a bit in the ciphertext body (not the header).
@@ -311,8 +311,8 @@ test "tampered ciphertext fails authentication" {
 }
 
 test "wrong sequence number fails nonce authentication" {
-    const key = [_]u8{0x42} ** 16;
-    const iv = [_]u8{0x24} ** 12;
+    const key = (@as([16]u8, @splat(0x42)));
+    const iv = (@as([12]u8, @splat(0x24)));
     const encoded = try encodeRecord(.application_data, "ordered", 7, &key, &iv, .aes128Gcm);
     var out: [maxRecordPlaintext]u8 = undefined;
     // Same keys, replayed/stale sequence number must not decrypt.

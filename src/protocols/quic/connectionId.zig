@@ -196,7 +196,7 @@ pub const Registry = struct {
 test "initial NEW_CONNECTION_ID becomes active" {
     var r = Registry.init(std.testing.allocator);
     defer r.deinit();
-    var tok: [16]u8 = .{0xAA} ** 16;
+    var tok: [16]u8 = @splat(0xAA);
 
     const res = try r.onNewConnectionId(0, 0, &.{ 1, 2, 3, 4 }, &tok);
     try std.testing.expectEqual(@as(usize, 0), res.newlyRetired().len);
@@ -206,7 +206,7 @@ test "initial NEW_CONNECTION_ID becomes active" {
 test "retransmission must match exactly" {
     var r = Registry.init(std.testing.allocator);
     defer r.deinit();
-    var tok: [16]u8 = .{0} ** 16;
+    var tok: [16]u8 = @splat(0);
     _ = try r.onNewConnectionId(1, 0, &.{ 9, 9 }, &tok);
 
     // Same seq + same cid: OK.
@@ -218,7 +218,7 @@ test "retransmission must match exactly" {
 test "distinct sequences cannot share a CID" {
     var r = Registry.init(std.testing.allocator);
     defer r.deinit();
-    var tok: [16]u8 = .{7} ** 16;
+    var tok: [16]u8 = @splat(7);
     _ = try r.onNewConnectionId(1, 0, &.{ 5, 5 }, &tok);
     try std.testing.expectError(Error.ProtocolViolation, r.onNewConnectionId(2, 0, &.{ 5, 5 }, &tok));
 }
@@ -226,7 +226,7 @@ test "distinct sequences cannot share a CID" {
 test "retirePriorTo rotates active and queues retirements" {
     var r = Registry.init(std.testing.allocator);
     defer r.deinit();
-    var tok: [16]u8 = .{1} ** 16;
+    var tok: [16]u8 = @splat(1);
 
     _ = try r.onNewConnectionId(0, 0, &.{ 0xA0, 0xA0 }, &tok); // active
     _ = try r.onNewConnectionId(1, 0, &.{ 0xA1, 0xA1 }, &tok);
@@ -250,7 +250,7 @@ test "retirePriorTo rotates active and queues retirements" {
 test "invalid retirePriorTo rejected" {
     var r = Registry.init(std.testing.allocator);
     defer r.deinit();
-    var tok: [16]u8 = .{0} ** 16;
+    var tok: [16]u8 = @splat(0);
     try std.testing.expectError(
         Error.ProtocolViolation,
         r.onNewConnectionId(1, 5, &.{ 1, 1 }, &tok), // rpt > sequence

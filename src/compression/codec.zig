@@ -92,8 +92,9 @@ pub fn parseAcceptEncoding(allocator: Allocator, headerValue: []const u8) ![]Par
 
         if (tok.len == 1 and tok[0] == '*') {
             // Wildcard: expand to all codings not explicitly listed
-            inline for (@typeInfo(Encoding).@"enum".fields) |f| {
-                const enc: Encoding = @enumFromInt(f.value);
+            const encodingInfo = @typeInfo(Encoding).@"enum";
+            inline for (encodingInfo.field_names, encodingInfo.field_values) |_, fvalue| {
+                const enc: Encoding = @fromBackingInt(@intCast(fvalue));
                 try results.append(allocator, .{ .encoding = enc, .q = q });
             }
             continue;
@@ -129,7 +130,7 @@ pub fn negotiate(headerValue: []const u8) Encoding {
             }
         }
         if (Encoding.fromToken(tok)) |enc| {
-            explicit[@intFromEnum(enc)] = q;
+            explicit[@backingInt(enc)] = q;
         } else if (tok.len == 1 and tok[0] == '*') {
             wildcard = q;
         }
@@ -138,9 +139,10 @@ pub fn negotiate(headerValue: []const u8) Encoding {
     var best: Encoding = .identity;
     var bestQ: f32 = 0.0;
     var found = false;
-    inline for (@typeInfo(Encoding).@"enum".fields) |field| {
-        const enc: Encoding = @enumFromInt(field.value);
-        const q = explicit[@intFromEnum(enc)] orelse wildcard orelse
+    const negotiateInfo = @typeInfo(Encoding).@"enum";
+    inline for (negotiateInfo.field_names, negotiateInfo.field_values) |_, fvalue| {
+        const enc: Encoding = @fromBackingInt(@intCast(fvalue));
+        const q = explicit[@backingInt(enc)] orelse wildcard orelse
             if (enc == .identity and !hasEntry) @as(f32, 1.0) else @as(f32, 0.0);
         if (q > 0 and (!found or q > bestQ or (q == bestQ and preference(enc) > preference(best)))) {
             best = enc;
@@ -224,7 +226,7 @@ pub fn decompressLimited(allocator: Allocator, encoding: Encoding, data: []const
     return switch (encoding) {
         .identity => if (data.len > maxSize) Error.DecompressedTooLarge else allocator.dupe(u8, data),
         .zstd => {
-            const bound = zstdMod.decompressBound(data) catch return Error.CorruptData;
+            const bound = zstdMod.decompressBound(allocator, data) catch return Error.CorruptData;
             if (bound > maxSize) return Error.DecompressedTooLarge;
             return zstdMod.decompress(allocator, data) catch Error.CorruptData;
         },
@@ -376,11 +378,16 @@ test "limited decompression rejects oversized identity and zstd output" {
 
 test "limited brotli decompression grows within the configured bound" {
     const a = std.testing.allocator;
-    const original = "brotli bounded output " ** 512;
-    const compressed = try compress(a, .br, original);
+    const pat = "brotli bounded output ";
+    const original: [pat.len * 512]u8 = comptime blk: {
+        var out: [pat.len * 512]u8 = undefined;
+        for (0..512) |i| @memcpy(out[i * pat.len ..][0..pat.len], pat);
+        break :blk out;
+    };
+    const compressed = try compress(a, .br, &original);
     defer a.free(compressed);
     try std.testing.expectError(Error.DecompressedTooLarge, decompressLimited(a, .br, compressed, original.len - 1));
     const restored = try decompressLimited(a, .br, compressed, original.len);
     defer a.free(restored);
-    try std.testing.expectEqualStrings(original, restored);
+    try std.testing.expectEqualStrings(&original, restored);
 }

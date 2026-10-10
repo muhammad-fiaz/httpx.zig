@@ -147,7 +147,7 @@ fn connectInternal(
     var pos: usize = 0;
     req[pos] = 0x05; // VER
     pos += 1;
-    req[pos] = @intFromEnum(Command.connect);
+    req[pos] = @backingInt(Command.connect);
     pos += 1;
     req[pos] = 0x00; // RSV
     pos += 1;

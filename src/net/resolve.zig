@@ -113,7 +113,7 @@ const SockaddrIn = extern struct {
     family: u16,
     port: u16, // network order
     addr: [4]u8,
-    zero: [8]u8 = [_]u8{0} ** 8,
+    zero: [8]u8 = (@as([8]u8, @splat(0))),
 };
 
 const SockaddrIn6 = extern struct {
@@ -126,7 +126,7 @@ const SockaddrIn6 = extern struct {
 
 const GenericSockaddr = extern struct {
     family: u16,
-    data: [126]u8 = [_]u8{0} ** 126,
+    data: [126]u8 = (@as([126]u8, @splat(0))),
 };
 
 fn decodeIn(sa: *const GenericSockaddr) addressMod.Address {

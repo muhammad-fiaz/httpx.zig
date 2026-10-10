@@ -203,9 +203,10 @@ fn normalizeMethod(raw: anytype) Method {
     if (T == Method) return raw;
     if (comptime @typeInfo(T) == .enum_literal) {
         const tag = @tagName(raw);
-        inline for (@typeInfo(Method).@"enum".fields) |f| {
-            if (std.ascii.eqlIgnoreCase(tag, f.name)) {
-                return @enumFromInt(f.value);
+        const methodInfo = @typeInfo(Method).@"enum";
+        inline for (methodInfo.field_names, methodInfo.field_values) |fname, fvalue| {
+            if (std.ascii.eqlIgnoreCase(tag, fname)) {
+                return @fromBackingInt(@intCast(fvalue));
             }
         }
     }
@@ -474,20 +475,22 @@ pub const Client = struct {
     fn coerceDownloadOptions(opts: anytype) DownloadOptions {
         if (@TypeOf(opts) == DownloadOptions) return opts;
         var o = DownloadOptions{};
-        inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
-            if (comptime std.mem.eql(u8, f.name, "verify")) {
-                const v = @field(opts, f.name);
+        const downloadOptsInfo = @typeInfo(@TypeOf(opts)).@"struct";
+        inline for (downloadOptsInfo.field_names) |fname| {
+            if (comptime std.mem.eql(u8, fname, "verify")) {
+                const v = @field(opts, fname);
                 if (@TypeOf(v) == VerifyOptions) {
                     o.verify = v;
                 } else {
-                    inline for (@typeInfo(@TypeOf(v)).@"struct".fields) |vf| {
-                        if (@hasField(VerifyOptions, vf.name)) {
-                            @field(o.verify, vf.name) = @field(v, vf.name);
+                    const verifyInfo = @typeInfo(@TypeOf(v)).@"struct";
+                    inline for (verifyInfo.field_names) |vfname| {
+                        if (@hasField(VerifyOptions, vfname)) {
+                            @field(o.verify, vfname) = @field(v, vfname);
                         }
                     }
                 }
-            } else if (@hasField(DownloadOptions, f.name)) {
-                @field(o, f.name) = @field(opts, f.name);
+            } else if (@hasField(DownloadOptions, fname)) {
+                @field(o, fname) = @field(opts, fname);
             }
         }
         return o;
@@ -600,20 +603,22 @@ pub const Client = struct {
     pub fn updateFile(self: *Client, url: []const u8, opts: anytype) DownloadError!DownloadResult {
         const updateOptions: UpdateOptions = if (@TypeOf(opts) == UpdateOptions) opts else blk: {
             var o = UpdateOptions{};
-            inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
-                if (comptime std.mem.eql(u8, f.name, "verify")) {
-                    const v = @field(opts, f.name);
+            const updateOptsInfo = @typeInfo(@TypeOf(opts)).@"struct";
+            inline for (updateOptsInfo.field_names) |fname| {
+                if (comptime std.mem.eql(u8, fname, "verify")) {
+                    const v = @field(opts, fname);
                     if (@TypeOf(v) == VerifyOptions) {
                         o.verify = v;
                     } else {
-                        inline for (@typeInfo(@TypeOf(v)).@"struct".fields) |vf| {
-                            if (@hasField(VerifyOptions, vf.name)) {
-                                @field(o.verify, vf.name) = @field(v, vf.name);
+                        const verifyInfo = @typeInfo(@TypeOf(v)).@"struct";
+                        inline for (verifyInfo.field_names) |vfname| {
+                            if (@hasField(VerifyOptions, vfname)) {
+                                @field(o.verify, vfname) = @field(v, vfname);
                             }
                         }
                     }
-                } else if (@hasField(UpdateOptions, f.name)) {
-                    @field(o, f.name) = @field(opts, f.name);
+                } else if (@hasField(UpdateOptions, fname)) {
+                    @field(o, fname) = @field(opts, fname);
                 }
             }
             break :blk o;
@@ -667,9 +672,10 @@ pub const Client = struct {
         const resolveOpts: ResolveOptions = blk: {
             if (@TypeOf(opts) == ResolveOptions) break :blk opts;
             var r = ResolveOptions{};
-            inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
-                if (@hasField(ResolveOptions, f.name)) {
-                    @field(r, f.name) = @field(opts, f.name);
+            const resolveOptsInfo = @typeInfo(@TypeOf(opts)).@"struct";
+            inline for (resolveOptsInfo.field_names) |fname| {
+                if (@hasField(ResolveOptions, fname)) {
+                    @field(r, fname) = @field(opts, fname);
                 }
             }
             break :blk r;
@@ -771,10 +777,11 @@ pub const Client = struct {
         }
         // Anonymous options: copy known fields, then stamp the URL port.
         var r = ResolveOptions{};
-        inline for (@typeInfo(@TypeOf(opts)).@"struct".fields) |f| {
-            if (comptime std.mem.eql(u8, f.name, "port")) continue;
-            if (@hasField(ResolveOptions, f.name)) {
-                @field(r, f.name) = @field(opts, f.name);
+        const resolveUrlOptsInfo = @typeInfo(@TypeOf(opts)).@"struct";
+        inline for (resolveUrlOptsInfo.field_names) |fname| {
+            if (comptime std.mem.eql(u8, fname, "port")) continue;
+            if (@hasField(ResolveOptions, fname)) {
+                @field(r, fname) = @field(opts, fname);
             }
         }
         r.port = p;
@@ -859,16 +866,17 @@ pub const Client = struct {
                     hdrs.append(self.allocator, h) catch return Error.OutOfMemory;
                 }
             } else if (comptime @typeInfo(H) == .@"struct") {
-                inline for (@typeInfo(H).@"struct".fields) |field| {
+                const headersInfo = @typeInfo(H).@"struct";
+                inline for (headersInfo.field_names) |fname| {
                     const normName = comptime blk: {
-                        if (std.mem.eql(u8, field.name, "contentType")) break :blk "Content-Type";
-                        if (std.mem.eql(u8, field.name, "userAgent")) break :blk "User-Agent";
-                        if (std.mem.eql(u8, field.name, "authorization")) break :blk "Authorization";
-                        if (std.mem.eql(u8, field.name, "acceptEncoding")) break :blk "Accept-Encoding";
-                        break :blk field.name;
+                        if (std.mem.eql(u8, fname, "contentType")) break :blk "Content-Type";
+                        if (std.mem.eql(u8, fname, "userAgent")) break :blk "User-Agent";
+                        if (std.mem.eql(u8, fname, "authorization")) break :blk "Authorization";
+                        if (std.mem.eql(u8, fname, "acceptEncoding")) break :blk "Accept-Encoding";
+                        break :blk fname;
                     };
                     if (std.ascii.eqlIgnoreCase(normName, "content-type")) userHasContentType = true;
-                    const v = @field(opts.headers, field.name);
+                    const v = @field(opts.headers, fname);
                     const valStr: []const u8 = blk: {
                         const T = @TypeOf(v);
                         const info = @typeInfo(T);
@@ -957,8 +965,9 @@ pub const Client = struct {
             if (comptime @typeInfo(Q) == .pointer and @typeInfo(Q).pointer.size == .slice) {
                 for (opts.query) |q| queryList.append(self.allocator, q) catch return Error.OutOfMemory;
             } else if (comptime @typeInfo(Q) == .@"struct") {
-                inline for (@typeInfo(Q).@"struct".fields) |field| {
-                    const v = @field(opts.query, field.name);
+                const queryInfo = @typeInfo(Q).@"struct";
+                inline for (queryInfo.field_names) |fname| {
+                    const v = @field(opts.query, fname);
                     const vs: []const u8 = blk: {
                         const T = @TypeOf(v);
                         const info = @typeInfo(T);
@@ -1002,7 +1011,7 @@ pub const Client = struct {
                             },
                         }
                     };
-                    queryList.append(self.allocator, .{ .name = field.name, .value = vs }) catch return Error.OutOfMemory;
+                    queryList.append(self.allocator, .{ .name = fname, .value = vs }) catch return Error.OutOfMemory;
                 }
             }
         }
@@ -1539,7 +1548,7 @@ test "struct headers/query string literals serialize as strings on the wire" {
     const port = listener.localPort();
 
     const Capture = struct {
-        buf: [4096]u8 = [_]u8{0} ** 4096,
+        buf: [4096]u8 = (@as([4096]u8, @splat(0))),
         len: usize = 0,
         done: std.atomic.Value(bool) = .init(false),
         fn run(self: *@This(), l: *tcp.Listener, ioIn: std.Io) void {
@@ -2177,7 +2186,7 @@ test "client resumes h2-tls across fresh handshakes via session cache" {
                 var srv = tlsServerMod.Server.init(std.heap.page_allocator, io2, .{
                     .certificatePem = certPem,
                     .privateKeyPem = keyPem,
-                    .ticketKeys = .{ .current = [_]u8{0x5E} ** 32 },
+                    .ticketKeys = .{ .current = (@as([32]u8, @splat(0x5E))) },
                 }) catch |e| {
                     out.* = e;
                     return;
@@ -2697,7 +2706,7 @@ test "client get over http3 with 0-rtt early data resumes session" {
     const certPem = @embedFile("../protocols/tls/testdata/localhostCert.pem");
     const keyPem = @embedFile("../protocols/tls/testdata/localhostKey.pem");
 
-    const tk = sessionMod.TicketKeys{ .current = [_]u8{0x77} ** 32 };
+    const tk = sessionMod.TicketKeys{ .current = (@as([32]u8, @splat(0x77))) };
     var replayCache = sessionMod.ReplayCache.init(a, 64);
     defer replayCache.deinit();
 

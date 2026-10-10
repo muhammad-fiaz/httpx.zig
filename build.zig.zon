@@ -1,28 +1,32 @@
 .{
     .fingerprint = 0xa924bc2e7af6a8f2,
     .name = .httpx,
-    .version = "0.2.1",
-    .minimum_zig_version = "0.16.0",
+    .version = "0.2.2",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zstd = .{
-            .url = "https://github.com/muhammad-fiaz/zstd.zig/archive/refs/tags/0.0.3.tar.gz",
-            .hash = "zstd-0.0.3-biH4jDimBAD0PHm3NyvoEj19M-Y3_8W0_mgNBbiUcI1a",
+            .url = "https://github.com/muhammad-fiaz/zstd.zig/archive/refs/tags/0.0.4.tar.gz",
+            .hash = "zstd-0.0.4-biH4jKzCDwAuLAIDx_AcpVJs2PckXKHQ1jYi0UfSYD8G",
         },
         .brotli = .{
-            .url = "https://github.com/muhammad-fiaz/brotli.zig/archive/refs/tags/0.0.3.tar.gz",
-            .hash = "brotli-0.0.3-utAAyElaCQDYD5YHF9fRTrOpepnxcULV_7-2dP3ogzC-",
-        },
-        .env = .{
-            .url = "https://github.com/muhammad-fiaz/env.zig/archive/refs/tags/0.0.2.tar.gz",
-            .hash = "env-0.0.2-TMsAe4W0AgASsiE9dbVmd5L8xSduIybTGPONqK9AZ-_e",
+            .url = "https://github.com/muhammad-fiaz/brotli.zig/archive/refs/tags/0.0.4.tar.gz",
+            .hash = "brotli-0.0.4-utAAyNAhCgC-Qnj9sNoERwSLIcmIrUn_gZaxX1RZRcRk",
         },
         .loaders = .{
-            .url = "https://github.com/muhammad-fiaz/loaders.zig/archive/refs/tags/0.0.6.tar.gz",
-            .hash = "loaders-0.0.6-lPpNad1mAgBBPiQ4G94Ywn7kGP21S-CxMtv7noE5lhdT",
+            .url = "https://github.com/muhammad-fiaz/loaders.zig/archive/refs/tags/0.0.7.tar.gz",
+            .hash = "loaders-0.0.7-lPpNafF8AgDS1wJVZSP3lcutWicQwUML8PPby0waj8An",
         },
         .treesitter = .{
-            .url = "https://github.com/muhammad-fiaz/tree-sitter.zig/archive/refs/tags/0.0.1.tar.gz",
-            .hash = "treesitter-0.0.1-QlQpWG_bBgDu5W6swtL7ROwFKek4n-gWzfnWUgUB9jcC",
+            .url = "https://github.com/muhammad-fiaz/tree-sitter.zig/archive/refs/tags/0.0.2.tar.gz",
+            .hash = "treesitter-0.0.2-QlQpWPXYBwAXO8kLp1Uz6NpLEu165izSbXw1abDxHlfp",
+        },
+        .tint = .{
+            .url = "https://github.com/muhammad-fiaz/tint.zig/archive/refs/tags/0.0.2.tar.gz",
+            .hash = "tint-0.0.2-UOf2-TBCAwDT7f7OwJbI3YhvbKCI9fO_UPlpYb0nPLMF",
+        },
+        .env = .{
+            .url = "https://github.com/muhammad-fiaz/env.zig/archive/refs/tags/0.0.3.tar.gz",
+            .hash = "env-0.0.3-TMsAe4vyAgCb2xcombEB6bUjfn4ImXz4yKhNzLOP500W",
         },
     },
     .paths = .{
@@ -32,6 +36,7 @@
         "examples",
         "bench",
         "README.md",
+        "CHANGELOG.md",
         "LICENSE",
     },
 }

@@ -280,8 +280,8 @@ pub const Server = struct {
 
             // Check content type
             const contentTypeByte = wireBuf[0];
-            if (contentTypeByte != @intFromEnum(recordMod.ContentType.application_data)) {
-                if (contentTypeByte == @intFromEnum(recordMod.ContentType.alert)) {
+            if (contentTypeByte != @backingInt(recordMod.ContentType.application_data)) {
+                if (contentTypeByte == @backingInt(recordMod.ContentType.alert)) {
                     // Try to decrypt to read alert description
                     var decryptBuf: [recordMod.maxRecordPlaintext + 1]u8 = undefined;
                     const result = recordMod.decodeRecord(
@@ -503,7 +503,7 @@ pub const Server = struct {
                         if (n == 0) return error.TlsHandshakeFailed;
                         have += n;
                     }
-                    if (hdr[0] == @intFromEnum(recordMod.ContentType.change_cipher_spec)) {
+                    if (hdr[0] == @backingInt(recordMod.ContentType.change_cipher_spec)) {
                         const skipLen: usize = (@as(usize, hdr[3]) << 8) | hdr[4];
                         var skipped: usize = 0;
                         var tmp: [64]u8 = undefined;
@@ -515,7 +515,7 @@ pub const Server = struct {
                         }
                         continue;
                     }
-                    if (hdr[0] != @intFromEnum(recordMod.ContentType.application_data)) {
+                    if (hdr[0] != @backingInt(recordMod.ContentType.application_data)) {
                         return error.TlsHandshakeFailed;
                     }
                     const recLen: usize = (@as(usize, hdr[3]) << 8) | hdr[4];
@@ -619,7 +619,7 @@ pub const Server = struct {
         while (split == null) {
             guard += 1;
             if (guard > 32 or hsBuf.items.len > 1 << 20) return error.TlsHandshakeFailed;
-            if (hsBuf.items.len >= 1 and hsBuf.items[0] != @intFromEnum(handshakeMod.HandshakeType.certificate)) {
+            if (hsBuf.items.len >= 1 and hsBuf.items[0] != @backingInt(handshakeMod.HandshakeType.certificate)) {
                 return error.TlsHandshakeFailed;
             }
             try readClientHandshakeRecord(socket, hsKeys, &rxSeq, &hsBuf, a);
@@ -658,9 +658,9 @@ pub const Server = struct {
     /// Splits a reassembled client flight into Certificate [+ CV] + Finished.
     /// Returns null while more handshake bytes are needed.
     fn splitClientFlight(buf: []const u8) ?ClientFlightSplit {
-        const certType = @intFromEnum(handshakeMod.HandshakeType.certificate);
-        const cvType = @intFromEnum(handshakeMod.HandshakeType.certificate_verify);
-        const finType = @intFromEnum(handshakeMod.HandshakeType.finished);
+        const certType = @backingInt(handshakeMod.HandshakeType.certificate);
+        const cvType = @backingInt(handshakeMod.HandshakeType.certificate_verify);
+        const finType = @backingInt(handshakeMod.HandshakeType.finished);
         if (buf.len < 4 or buf[0] != certType) return null;
         const certLen: usize = (@as(usize, buf[1]) << 16) | (@as(usize, buf[2]) << 8) | buf[3];
         if (buf.len < 4 + certLen) return null;
@@ -711,7 +711,7 @@ pub const Server = struct {
                 if (n == 0) return error.TlsHandshakeFailed;
                 have += n;
             }
-            if (hdr[0] == @intFromEnum(recordMod.ContentType.change_cipher_spec)) {
+            if (hdr[0] == @backingInt(recordMod.ContentType.change_cipher_spec)) {
                 const skipLen: usize = (@as(usize, hdr[3]) << 8) | hdr[4];
                 var skipped: usize = 0;
                 var tmp: [64]u8 = undefined;
@@ -723,7 +723,7 @@ pub const Server = struct {
                 }
                 continue;
             }
-            if (hdr[0] != @intFromEnum(recordMod.ContentType.application_data)) {
+            if (hdr[0] != @backingInt(recordMod.ContentType.application_data)) {
                 return error.TlsHandshakeFailed;
             }
             const recLen: usize = (@as(usize, hdr[3]) << 8) | hdr[4];
@@ -795,7 +795,7 @@ pub const Server = struct {
             if (n == 0) return error.TlsHandshakeFailed;
             totalRead += n;
         }
-        if (buf[0] == @intFromEnum(recordMod.ContentType.handshake)) {
+        if (buf[0] == @backingInt(recordMod.ContentType.handshake)) {
             // Standard framed TLS Record: [0]=0x16, [1..2]=version,
             // [3..4]=recordLen, [5..]=handshake.
             const recordLen = std.mem.readInt(u16, buf[3..5], .big);
@@ -806,7 +806,7 @@ pub const Server = struct {
                 if (n == 0) return error.TlsHandshakeFailed;
                 totalRead += n;
             }
-            if (buf[5] != @intFromEnum(handshakeMod.HandshakeType.client_hello)) {
+            if (buf[5] != @backingInt(handshakeMod.HandshakeType.client_hello)) {
                 return error.TlsHandshakeFailed;
             }
             const bodyLen: u24 = @as(u24, @intCast(buf[6])) << 16 |
@@ -814,7 +814,7 @@ pub const Server = struct {
                 @as(u24, @intCast(buf[8]));
             if (bodyLen > maxHandshakeBody or 5 + 4 + bodyLen > totalRead) return error.TlsHandshakeFailed;
             return .{ .offset = 5, .bodyLen = bodyLen };
-        } else if (buf[0] == @intFromEnum(handshakeMod.HandshakeType.client_hello)) {
+        } else if (buf[0] == @backingInt(handshakeMod.HandshakeType.client_hello)) {
             // Raw Handshake framing without record layer.
             const bodyLen: u24 = @as(u24, @intCast(buf[1])) << 16 |
                 @as(u24, @intCast(buf[2])) << 8 |
@@ -895,9 +895,9 @@ fn parseClientHelloExtensions(allocator: Allocator, body: []const u8) !ParsedCli
         const dataEnd = std.math.add(usize, pos, extDataLen) catch return error.TlsHandshakeFailed;
         if (dataEnd > extEnd) return error.TlsHandshakeFailed;
 
-        if (extType == @intFromEnum(handshakeMod.ExtensionType.server_name)) {
+        if (extType == @backingInt(handshakeMod.ExtensionType.server_name)) {
             result.sni = try parseSniExtension(body[pos..][0..extDataLen]);
-        } else if (extType == @intFromEnum(handshakeMod.ExtensionType.application_layer_protocol_negotiation)) {
+        } else if (extType == @backingInt(handshakeMod.ExtensionType.application_layer_protocol_negotiation)) {
             result.alpnProtocols = try parseAlpnExtension(allocator, body[pos..][0..extDataLen]);
         }
 
@@ -1112,13 +1112,13 @@ const MtlsScript = struct {
         while (!sawFin) {
             const rec = try self.readRecord();
             defer self.allocator.free(rec.body);
-            if (rec.typ == @intFromEnum(recordMod.ContentType.change_cipher_spec)) continue;
-            if (rec.typ == @intFromEnum(recordMod.ContentType.handshake)) {
+            if (rec.typ == @backingInt(recordMod.ContentType.change_cipher_spec)) continue;
+            if (rec.typ == @backingInt(recordMod.ContentType.handshake)) {
                 // Plaintext ServerHello (first flight message).
                 try self.eng.processServerHello(rec.body);
                 continue;
             }
-            if (rec.typ != @intFromEnum(recordMod.ContentType.application_data)) return error.TlsHandshakeFailed;
+            if (rec.typ != @backingInt(recordMod.ContentType.application_data)) return error.TlsHandshakeFailed;
             const hsKeys = self.eng.hsKeys orelse return error.TlsHandshakeFailed;
             var wire = std.ArrayList(u8).empty;
             defer wire.deinit(self.allocator);
@@ -1146,11 +1146,11 @@ const MtlsScript = struct {
                 const blen: usize = (@as(usize, hsBuf.items[1]) << 16) | (@as(usize, hsBuf.items[2]) << 8) | hsBuf.items[3];
                 if (hsBuf.items.len < 4 + blen) break;
                 const msg = hsBuf.items[0 .. 4 + blen];
-                const ee = @intFromEnum(handshakeMod.HandshakeType.encrypted_extensions);
-                const cr = @intFromEnum(handshakeMod.HandshakeType.certificate_request);
-                const cert = @intFromEnum(handshakeMod.HandshakeType.certificate);
-                const cv = @intFromEnum(handshakeMod.HandshakeType.certificate_verify);
-                const fin = @intFromEnum(handshakeMod.HandshakeType.finished);
+                const ee = @backingInt(handshakeMod.HandshakeType.encrypted_extensions);
+                const cr = @backingInt(handshakeMod.HandshakeType.certificate_request);
+                const cert = @backingInt(handshakeMod.HandshakeType.certificate);
+                const cv = @backingInt(handshakeMod.HandshakeType.certificate_verify);
+                const fin = @backingInt(handshakeMod.HandshakeType.finished);
                 if (t == ee) {
                     try self.eng.processEncryptedExtensions(msg);
                 } else if (t == cr) {
@@ -1216,7 +1216,7 @@ const MtlsScript = struct {
 
         const rec = try self.readRecord();
         defer self.allocator.free(rec.body);
-        if (rec.typ != @intFromEnum(recordMod.ContentType.application_data)) return error.TlsHandshakeFailed;
+        if (rec.typ != @backingInt(recordMod.ContentType.application_data)) return error.TlsHandshakeFailed;
         var wire = std.ArrayList(u8).empty;
         defer wire.deinit(self.allocator);
         try wire.appendSlice(self.allocator, &.{ rec.typ, 0x03, 0x03 });

@@ -169,7 +169,7 @@ pub fn main() !void {
     var replayCache = httpx.tls.session.ReplayCache.init(allocator, 1024);
     defer replayCache.deinit();
 
-    const ticketKeys = httpx.tls.session.TicketKeys{ .current = [_]u8{0x42} ** 32 };
+    const ticketKeys = httpx.tls.session.TicketKeys{ .current = (@as([32]u8, @splat(0x42))) };
 
     // 2. Start Loopback HTTP/3 Server with 0-RTT and Session Resumption
     var placeholder = try httpx.quic.Connection.init(allocator, io, .server, .{});

@@ -125,18 +125,19 @@ pub const Context = struct {
     pub fn bindParams(self: *const Context, comptime T: type) ParamError!T {
         const info = @typeInfo(T);
         if (info != .@"struct") @compileError("bindParams requires a struct type");
+        const structInfo = info.@"struct";
         var out: T = undefined;
-        inline for (info.@"struct".fields) |field| {
-            const FT = field.type;
+        inline for (structInfo.field_names, structInfo.field_types, structInfo.field_attrs) |fname, FType, fattrs| {
+            const FT = FType;
             const fti = @typeInfo(FT);
             const isOptional = fti == .optional;
             const inner = if (isOptional) @typeInfo(fti.optional.child) else fti;
-            const raw = self.param(field.name);
+            const raw = self.param(fname);
             if (raw == null and isOptional) {
-                @field(out, field.name) = null;
-            } else if (raw == null and field.default_value_ptr != null) {
-                const dvPtr: *const field.type = @ptrCast(@alignCast(field.default_value_ptr.?));
-                @field(out, field.name) = dvPtr.*;
+                @field(out, fname) = null;
+            } else if (raw == null and fattrs.default_value_ptr != null) {
+                const dvPtr: *const FT = @ptrCast(@alignCast(fattrs.default_value_ptr.?));
+                @field(out, fname) = dvPtr.*;
             } else if (raw == null) {
                 return ParamError.MissingParam;
             } else {
@@ -145,12 +146,12 @@ pub const Context = struct {
                     .int => {
                         const ChildT = if (isOptional) fti.optional.child else FT;
                         const parsed = std.fmt.parseInt(ChildT, v, 10) catch return ParamError.InvalidParamValue;
-                        @field(out, field.name) = parsed;
+                        @field(out, fname) = parsed;
                     },
                     .float => {
                         const ChildT = if (isOptional) fti.optional.child else FT;
                         const parsed = std.fmt.parseFloat(ChildT, v) catch return ParamError.InvalidParamValue;
-                        @field(out, field.name) = parsed;
+                        @field(out, fname) = parsed;
                     },
                     .bool => {
                         const b = if (std.mem.eql(u8, v, "true"))
@@ -159,15 +160,15 @@ pub const Context = struct {
                             false
                         else
                             return ParamError.InvalidParamValue;
-                        @field(out, field.name) = b;
+                        @field(out, fname) = b;
                     },
                     .pointer => |ptr| {
                         if (ptr.size == .slice and ptr.child == u8) {
-                            @field(out, field.name) = v;
+                            @field(out, fname) = v;
                         } else return ParamError.UnsupportedField;
                     },
                     .optional => return ParamError.UnsupportedField, // nested optionals unsupported
-                    else => @compileError("bindParams: unsupported field type for '" ++ field.name ++ "'"),
+                    else => @compileError("bindParams: unsupported field type for '" ++ fname ++ "'"),
                 }
             }
         }
@@ -1115,16 +1116,16 @@ pub const Router = struct {
         var out = std.ArrayList(u8).empty;
         errdefer out.deinit(self.allocator);
         try out.append(self.allocator, '/');
-        const fields = @typeInfo(P).@"struct".fields;
+        const paramsInfo = @typeInfo(P).@"struct";
         for (entry.pattern.segments[0..entry.pattern.count], 0..) |seg, i| {
             if (i > 0) try out.append(self.allocator, '/');
             switch (seg.kind) {
                 .literal => try out.appendSlice(self.allocator, seg.text),
                 .wildcard => {
                     var done = false;
-                    inline for (fields) |f| {
-                        if (!done and std.mem.eql(u8, f.name, seg.text)) {
-                            try writeParamField(&out, self.allocator, params, f.name);
+                    inline for (paramsInfo.field_names) |fname| {
+                        if (!done and std.mem.eql(u8, fname, seg.text)) {
+                            try writeParamField(&out, self.allocator, params, fname);
                             done = true;
                         }
                     }
@@ -1133,9 +1134,9 @@ pub const Router = struct {
                 .parameter => {
                     const start = out.items.len;
                     var done = false;
-                    inline for (fields) |f| {
-                        if (!done and std.mem.eql(u8, f.name, seg.text)) {
-                            try writeParamField(&out, self.allocator, params, f.name);
+                    inline for (paramsInfo.field_names) |fname| {
+                        if (!done and std.mem.eql(u8, fname, seg.text)) {
+                            try writeParamField(&out, self.allocator, params, fname);
                             done = true;
                         }
                     }
@@ -1153,10 +1154,10 @@ pub const Router = struct {
             }
         }
         // Reject unknown params: every supplied field must be consumed.
-        inline for (fields) |f| {
+        inline for (paramsInfo.field_names) |fname| {
             var consumed = false;
             for (entry.pattern.segments[0..entry.pattern.count]) |seg| {
-                if ((seg.kind == .parameter or seg.kind == .wildcard) and std.mem.eql(u8, seg.text, f.name)) {
+                if ((seg.kind == .parameter or seg.kind == .wildcard) and std.mem.eql(u8, seg.text, fname)) {
                     consumed = true;
                     break;
                 }

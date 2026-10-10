@@ -88,8 +88,8 @@ fn buildAutomaton() [256][16]Entry {
     const NONE: u32 = 0xFFFF_FFFF;
 
     // Phase 0: plain binary code trie.
-    var child: [MAXN][2]u32 = [_][2]u32{.{ NONE, NONE }} ** MAXN;
-    var symAt: [MAXN]u16 = [_]u16{0xFFFF} ** MAXN;
+    var child: [MAXN][2]u32 = (@as([MAXN][2]u32, @splat(.{ NONE, NONE })));
+    var symAt: [MAXN]u16 = (@as([MAXN]u16, @splat(0xFFFF)));
     var n: usize = 1; // node 0 = root
 
     for (0..256) |si| {
@@ -108,12 +108,12 @@ fn buildAutomaton() [256][16]Entry {
     }
 
     // Phase 1: evaluate every (node, nibble) pair deterministically.
-    var eNext: [MAXN][16]u32 = [_][16]u32{[_]u32{NONE} ** 16} ** MAXN;
-    var eFlags: [MAXN][16]u8 = [_][16]u8{[_]u8{0} ** 16} ** MAXN;
-    var eSym: [MAXN][16]u8 = [_][16]u8{[_]u8{0} ** 16} ** MAXN;
+    var eNext: [MAXN][16]u32 = (@as([MAXN][16]u32, @splat((@as([16]u32, @splat(NONE))))));
+    var eFlags: [MAXN][16]u8 = (@as([MAXN][16]u8, @splat((@as([16]u8, @splat(0))))));
+    var eSym: [MAXN][16]u8 = (@as([MAXN][16]u8, @splat((@as([16]u8, @splat(0))))));
 
     // EOS-path chain nodes at depths 1..7 (legal pure-padding stops).
-    var eosChain: [8]u32 = .{0} ** 8; // [d] = node after d ones from root
+    var eosChain: [8]u32 = @splat(0); // [d] = node after d ones from root
     {
         var w: u32 = 0;
         var d: usize = 1;
@@ -194,11 +194,11 @@ fn buildAutomaton() [256][16]Entry {
     }
 
     // Phase 2: flatten via BFS over reachable states.
-    var finalIds: [MAXN]u16 = [_]u16{0xFFFF} ** MAXN;
+    var finalIds: [MAXN]u16 = (@as([MAXN]u16, @splat(0xFFFF)));
     var queue: [MAXN]u32 = undefined;
     var qh: usize = 0;
     var qt: usize = 0;
-    var out: [256][16]Entry = [_][16]Entry{[_]Entry{.{}} ** 16} ** 256;
+    var out: [256][16]Entry = (@as([256][16]Entry, @splat((@as([16]Entry, @splat(.{}))))));
     var nOut: usize = 1;
 
     finalIds[0] = 0;
@@ -237,8 +237,8 @@ const decodeTable = buildAutomaton();
 /// Number of reachable DFA states (diagnostics).
 pub const dfaStateCount: usize = blk: {
     @setEvalBranchQuota(1_000_000);
-    var seen = [_]bool{false} ** 256;
-    var queue: [512]u16 = .{0} ** 512;
+    var seen = (@as([256]bool, @splat(false)));
+    var queue: [512]u16 = @splat(0);
     var qh: usize = 0;
     var qt: usize = 1;
     var count: usize = 0;

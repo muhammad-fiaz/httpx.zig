@@ -17,7 +17,7 @@
 const std = @import("std");
 
 // External dependencies
-pub const tint = @import("loaders").tint;
+pub const tint = @import("tint");
 pub const loaders = @import("loaders");
 pub const brotli = @import("brotli");
 pub const zstd = @import("zstd");
@@ -571,6 +571,16 @@ test {
     _ = Client;
     _ = ClientResponse;
     _ = Download;
+}
+
+test "tint is wired directly and independently of loaders" {
+    const testing = std.testing;
+    // The tint package is a direct dependency: this uses its namespaced
+    // API without going through loaders.
+    try testing.expectEqualStrings("\x1b[31m", tint.color.ansi4.red.fg().slice());
+    try testing.expectEqualStrings("\x1b[32m", tint.color.ansi4.green.fg().slice());
+    try testing.expectEqualStrings("\x1b[0m", tint.ansi.reset.all);
+    try testing.expectEqualStrings("0.0.2", tint.version);
 }
 
 test "Full template engine integration: variables, loops, conditionals, and raw HTML" {

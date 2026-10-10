@@ -189,12 +189,12 @@ fn installShutdownHandler(self: *Server) void {
                 fn callback(ctrlType: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
                     if (ctrlType <= 2) {
                         if (gActiveServer) |s| s.requestShutdown();
-                        return @enumFromInt(1);
+                        return @fromBackingInt(@intCast(1));
                     }
-                    return @enumFromInt(0);
+                    return @fromBackingInt(@intCast(0));
                 }
             };
-            _ = SetConsoleCtrlHandler(&handlerFn.callback, @enumFromInt(1));
+            _ = SetConsoleCtrlHandler(&handlerFn.callback, @fromBackingInt(@intCast(1)));
         },
         else => {
             const handlerFn = struct {
@@ -837,7 +837,7 @@ pub const Server = struct {
                 fn onChange(event: watcherMod.WatchEvent, userData: ?*anyopaque) void {
                     const s: *Server = @ptrCast(@alignCast(userData.?));
                     _ = s.liveReloadEventId.fetchAdd(1, .release);
-                    s.liveReloadStrategy.store(@intFromEnum(event.strategy), .release);
+                    s.liveReloadStrategy.store(@backingInt(event.strategy), .release);
                     if (s.templateEngine) |te| {
                         te.invalidate(event.path);
                     }
@@ -870,7 +870,7 @@ pub const Server = struct {
                     fn handle(ctx: *Context) anyerror!Response {
                         const s: *Server = @ptrCast(@alignCast(ctx.userData.?));
                         const currentId = s.liveReloadEventId.load(.acquire);
-                        const strat: watcherMod.ReloadStrategy = @enumFromInt(s.liveReloadStrategy.load(.acquire));
+                        const strat: watcherMod.ReloadStrategy = @fromBackingInt(@intCast(s.liveReloadStrategy.load(.acquire)));
                         // CSS-only changes hot-swap in the browser; anything
                         // else is a full page reload (see liveReloadScript).
                         const payload: []const u8 = if (strat == .hotReload) "hotReload" else "reload";
@@ -948,7 +948,7 @@ pub const Server = struct {
     /// No-op when callback is null (the default). Level filtering applied here.
     fn emit(self: *const Server, event: logging.ServerEvent) void {
         const cb = self.eventCallback orelse return;
-        if (@intFromEnum(event.level) < @intFromEnum(self.cfg.logging.level)) return;
+        if (@backingInt(event.level) < @backingInt(self.cfg.logging.level)) return;
         cb(event);
     }
 
@@ -1470,8 +1470,8 @@ pub const Server = struct {
         var clientKa10 = false;
         for (hdrs) |h| {
             if (!std.ascii.eqlIgnoreCase(h.name, "connection")) continue;
-            if (std.ascii.indexOfIgnoreCase(h.value, "close") != null) clientClose = true;
-            if (std.ascii.indexOfIgnoreCase(h.value, "keep-alive") != null) clientKa10 = true;
+            if (std.ascii.findIgnoreCase(h.value, "close") != null) clientClose = true;
+            if (std.ascii.findIgnoreCase(h.value, "keep-alive") != null) clientKa10 = true;
         }
         if (reqHead.minorVersion == 0 and clientKa10) clientClose = false;
 

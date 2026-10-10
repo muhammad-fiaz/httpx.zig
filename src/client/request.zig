@@ -282,14 +282,14 @@ pub fn headersFromStruct(allocator: Allocator, value: anytype) ![]Header {
         }
         list.deinit(allocator);
     }
-    inline for (info.@"struct".fields) |field| {
-        const v = @field(value, field.name);
-        const name = try allocator.dupe(u8, field.name);
+    inline for (info.@"struct".field_names, info.@"struct".field_types) |fname, FType| {
+        const v = @field(value, fname);
+        const name = try allocator.dupe(u8, fname);
         errdefer allocator.free(name);
         var buf: [64]u8 = undefined;
-        const valStr = switch (@typeInfo(field.type)) {
+        const valStr = switch (@typeInfo(FType)) {
             .int, .comptime_int => std.fmt.bufPrint(&buf, "{d}", .{v}) catch try std.fmt.allocPrint(allocator, "{d}", .{v}),
-            .float, .comptimeFloat => std.fmt.bufPrint(&buf, "{d}", .{v}) catch try std.fmt.allocPrint(allocator, "{d}", .{v}),
+            .float, .comptime_float => std.fmt.bufPrint(&buf, "{d}", .{v}) catch try std.fmt.allocPrint(allocator, "{d}", .{v}),
             .bool => if (v) "true" else "false",
             .pointer => |ptr| if (ptr.size == .slice and ptr.child == u8) v else if (ptr.size == .one and @typeInfo(ptr.child) == .array and @typeInfo(ptr.child).array.child == u8) v[0..] else try std.fmt.allocPrint(allocator, "{any}", .{v}),
             else => try std.fmt.allocPrint(allocator, "{any}", .{v}),
@@ -579,7 +579,7 @@ fn h3DoRequest(
         .suite = undefined,
         .host = "",
         .maxEarlyData = 0,
-        .alpn = [_]u8{0} ** 16,
+        .alpn = (@as([16]u8, @splat(0))),
         .alpnLen = 0,
     };
     defer if (capturedSession.ticket.len > 0) capturedSession.deinit(a);
@@ -1406,7 +1406,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
     var clen: usize = 0;
     for (fields[0..blk.count]) |f| {
         if (std.ascii.eqlIgnoreCase(f.name, "transfer-encoding") and
-            std.ascii.indexOfIgnoreCase(f.value, "chunked") != null) chunked = true;
+            std.ascii.findIgnoreCase(f.value, "chunked") != null) chunked = true;
         if (std.ascii.eqlIgnoreCase(f.name, "content-length"))
             clen = std.fmt.parseInt(usize, std.mem.trim(u8, f.value, " "), 10) catch 0;
     }

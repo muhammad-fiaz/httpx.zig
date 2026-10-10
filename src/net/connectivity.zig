@@ -41,7 +41,7 @@ pub const ConnectivityResult = struct {
     /// Latency of the first successful probe in milliseconds.
     latencyMs: ?u32,
     /// The endpoint IP that succeeded, zero-terminated ASCII, or empty.
-    endpoint: [46]u8 = [_]u8{0} ** 46,
+    endpoint: [46]u8 = (@as([46]u8, @splat(0))),
     endpointLen: u8 = 0,
 
     /// Slice of the successful endpoint string.

@@ -26,7 +26,7 @@
 
 const std = @import("std");
 const sync = @import("sync.zig");
-const tint = @import("loaders").tint;
+const tint = @import("tint");
 
 // Levels
 
@@ -49,14 +49,14 @@ pub const Level = enum(u8) {
         };
     }
 
-    pub fn colorCode(self: Level) []const u8 {
+    pub fn colorCode(self: Level) tint.ansi.Sequence {
         return switch (self) {
-            .trace => tint.fg(.{ .ansi4 = .bright_black }),
-            .debug => tint.fg(.{ .ansi4 = .bright_black }),
-            .info => tint.fg(.{ .ansi4 = .green }),
-            .warn => tint.fg(.{ .ansi4 = .yellow }),
-            .err => tint.fg(.{ .ansi4 = .red }),
-            .fatal => tint.fg(.{ .ansi4 = .magenta }),
+            .trace => tint.color.ansi4.brightBlack.fg(),
+            .debug => tint.color.ansi4.brightBlack.fg(),
+            .info => tint.color.ansi4.green.fg(),
+            .warn => tint.color.ansi4.yellow.fg(),
+            .err => tint.color.ansi4.red.fg(),
+            .fatal => tint.color.ansi4.magenta.fg(),
         };
     }
 };
@@ -306,7 +306,7 @@ pub const Logger = struct {
 
     pub fn log(self: *const Logger, level: Level, comptime component: []const u8, comptime fmt: []const u8, args: anytype) void {
         if (!self.enabled) return;
-        if (@intFromEnum(level) < @intFromEnum(self.minLevel)) return;
+        if (@backingInt(level) < @backingInt(self.minLevel)) return;
 
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch blk: {
@@ -323,7 +323,7 @@ pub const Logger = struct {
     /// Log with structured fields appended after the message.
     pub fn logFields(self: *const Logger, level: Level, comptime component: []const u8, fields: []const Field, comptime fmt: []const u8, args: anytype) void {
         if (!self.enabled) return;
-        if (@intFromEnum(level) < @intFromEnum(self.minLevel)) return;
+        if (@backingInt(level) < @backingInt(self.minLevel)) return;
 
         var buf: [1024]u8 = undefined;
         var fbs = std.Io.Writer.fixed(&buf);
@@ -366,9 +366,9 @@ pub const WriterSink = struct {
         self.mu.lock();
         defer self.mu.unlock();
         const w = self.w;
-        if (self.color) w.writeAll(record.level.colorCode()) catch return;
+        if (self.color) w.writeAll(record.level.colorCode().slice()) catch return;
         w.writeAll(record.level.label()) catch return;
-        if (self.color) w.writeAll(tint.reset) catch return;
+        if (self.color) w.writeAll(tint.ansi.reset.all) catch return;
         w.print(" [{s}] {s}", .{ record.component, record.message }) catch return;
         for (record.fields) |f| {
             w.print(" {s}={s}", .{ f.name, f.value }) catch return;

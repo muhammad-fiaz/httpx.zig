@@ -401,9 +401,10 @@ pub const Site = struct {
 fn paramValue(allocator: Allocator, params: anytype, name: []const u8) ![]u8 {
     const P = @TypeOf(params);
     if (@typeInfo(P) != .@"struct") return error.MissingRouteParam;
-    inline for (@typeInfo(P).@"struct".fields) |f| {
-        if (std.mem.eql(u8, f.name, name)) {
-            return encodeParamValue(allocator, @field(params, f.name));
+    const paramsInfo = @typeInfo(P).@"struct";
+    inline for (paramsInfo.field_names) |fname| {
+        if (std.mem.eql(u8, fname, name)) {
+            return encodeParamValue(allocator, @field(params, fname));
         }
     }
     return error.MissingRouteParam;
@@ -464,10 +465,11 @@ fn appendQuery(allocator: Allocator, out: *std.ArrayList(u8), query: anytype) !v
     const info = @typeInfo(Q);
     if (info != .@"struct") return error.MissingRouteParam;
     var first = true;
-    inline for (info.@"struct".fields) |f| {
-        const v = @field(query, f.name);
+    const queryInfo = info.@"struct";
+    inline for (queryInfo.field_names) |fname| {
+        const v = @field(query, fname);
         if (@TypeOf(v) == @TypeOf(null)) continue;
-        const encK = try encodeOwned(allocator, f.name);
+        const encK = try encodeOwned(allocator, fname);
         defer allocator.free(encK);
         const encV = try encodeParamValue(allocator, v);
         defer allocator.free(encV);

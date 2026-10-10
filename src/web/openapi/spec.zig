@@ -111,7 +111,7 @@ pub fn generate(router: *const Router, info: Info) GenerateError![]u8 {
         // Deterministic ordering within a path; at most one operation per
         // method even when multiple router shapes render to the same path.
         const order = [_]Method{ .GET, .POST, .PUT, .PATCH, .DELETE, .HEAD, .OPTIONS, .TRACE, .CONNECT };
-        var emitted = [_]bool{false} ** order.len;
+        var emitted = (@as([order.len]bool, @splat(false)));
         const allEntries = router.entries();
         for (order, 0..) |m, mi| {
             for (g.entryIdx.items) |ei| {

@@ -172,7 +172,7 @@ pub const CertificateChain = struct {
 /// but well-framed inputs still fail later with clean errors.
 pub fn checkDerStructure(der: []const u8) bool {
     if (der.len < 2 or der.len > 16 * 1024 * 1024) return false;
-    var stack: [33]usize = .{0} ** 33;
+    var stack: [33]usize = @splat(0);
     var depth: usize = 0;
     stack[0] = der.len;
     var end: usize = der.len;

@@ -57,7 +57,7 @@ pub fn validateUpgradeResponse(responseHead: []const u8, expectedAccept: *const 
 
     // Find Sec-WebSocket-Accept value
     const needle = "sec-websocket-accept:";
-    const idx = std.ascii.indexOfIgnoreCase(responseHead, needle) orelse return false;
+    const idx = std.ascii.findIgnoreCase(responseHead, needle) orelse return false;
     const lineEnd = std.mem.indexOfPos(u8, responseHead, idx, "\r\n") orelse return false;
     const value = std.mem.trim(u8, responseHead[idx + needle.len .. lineEnd], " \t");
     return std.mem.eql(u8, value, expectedAccept);

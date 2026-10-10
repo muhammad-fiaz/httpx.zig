@@ -129,6 +129,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // tint is a direct dependency of httpx (terminal colors in logging,
+    // download progress), independent of loaders. It must be resolved with
+    // the same empty options loaders itself uses (`b.dependency("tint",
+    // .{})`), so both imports share ONE module instance: Zig forbids the
+    // same source file from belonging to two modules (`tint` vs `tint0`
+    // error). Passing .target/.optimize here would create a second
+    // instance. The top-level `tint` entry in build.zig.zon pins the version.
+    const tintDep = loadersDep.builder.dependency("tint", .{});
+
     // Create the public module that will be exported as "httpx" to consumers.
     // Dependencies must be added here so they propagate to downstream packages.
     const httpxModule = b.addModule("httpx", .{
@@ -140,6 +149,7 @@ pub fn build(b: *std.Build) void {
     httpxModule.addImport("env", envDep.module("env"));
     httpxModule.addImport("loaders", loadersDep.module("loaders"));
     httpxModule.addImport("treesitter", treesitterDep.module("treesitter"));
+    httpxModule.addImport("tint", tintDep.module("tint"));
 
     const examples = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "simple-get", .path = "examples/simpleGet.zig" },
@@ -303,6 +313,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("env", envDep.module("env"));
     tests.root_module.addImport("loaders", loadersDep.module("loaders"));
     tests.root_module.addImport("treesitter", treesitterDep.module("treesitter"));
+    tests.root_module.addImport("tint", tintDep.module("tint"));
     linkPlatformLibs(tests, target);
 
     const runTests = b.addRunArtifact(tests);
@@ -345,6 +356,7 @@ pub fn build(b: *std.Build) void {
     librootModule.addImport("env", envDep.module("env"));
     librootModule.addImport("loaders", loadersDep.module("loaders"));
     librootModule.addImport("treesitter", treesitterDep.module("treesitter"));
+    librootModule.addImport("tint", tintDep.module("tint"));
 
     const lib = b.addLibrary(.{
         .name = "httpx",

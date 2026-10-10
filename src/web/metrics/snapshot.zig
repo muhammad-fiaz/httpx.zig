@@ -34,7 +34,7 @@ pub const MetricsSnapshot = struct {
     // Duration Histogram
     durationCount: u64 = 0,
     durationSumSeconds: f64 = 0.0,
-    durationBuckets: [LATENCY_BUCKET_COUNT]u64 = [_]u64{0} ** LATENCY_BUCKET_COUNT,
+    durationBuckets: [LATENCY_BUCKET_COUNT]u64 = (@as([LATENCY_BUCKET_COUNT]u64, @splat(0))),
 
     /// Returns the fraction of requests that resulted in an error (0.0 to 1.0).
     pub fn errorRate(self: MetricsSnapshot) f64 {

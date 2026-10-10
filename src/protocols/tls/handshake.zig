@@ -116,7 +116,7 @@ pub const ClientHello = struct {
         const csLen: u16 = @intCast(self.cipherSuites.len * 2);
         try body.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, csLen)));
         for (self.cipherSuites) |cs| {
-            try body.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(cs))));
+            try body.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(cs))));
         }
 
         // compressionMethods: [0x00] (null compression)
@@ -129,7 +129,7 @@ pub const ClientHello = struct {
         // serverName (SNI) - RFC 6066 Section 3
         if (self.serverName) |hostname| {
             const sniLen: u16 = @intCast(5 + hostname.len);
-            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.server_name))));
+            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(ExtensionType.server_name))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, sniLen)));
             const nameTotal: u16 = @intCast(3 + hostname.len);
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, nameTotal)));
@@ -143,9 +143,9 @@ pub const ClientHello = struct {
             var sgBody = std.ArrayList(u8).empty;
             defer sgBody.deinit(allocator);
             for (self.keyShareEntries) |e| {
-                try sgBody.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(e.group))));
+                try sgBody.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(e.group))));
             }
-            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.supported_groups))));
+            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(ExtensionType.supported_groups))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(sgBody.items.len + 2))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(sgBody.items.len))));
             try exts.appendSlice(allocator, sgBody.items);
@@ -156,11 +156,11 @@ pub const ClientHello = struct {
             var ksBody = std.ArrayList(u8).empty;
             defer ksBody.deinit(allocator);
             for (self.keyShareEntries) |e| {
-                try ksBody.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(e.group))));
+                try ksBody.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(e.group))));
                 try ksBody.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(e.keyExchange.len))));
                 try ksBody.appendSlice(allocator, e.keyExchange);
             }
-            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.key_share))));
+            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(ExtensionType.key_share))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(ksBody.items.len + 2))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(ksBody.items.len))));
             try exts.appendSlice(allocator, ksBody.items);
@@ -171,9 +171,9 @@ pub const ClientHello = struct {
             var saBody = std.ArrayList(u8).empty;
             defer saBody.deinit(allocator);
             for (self.signatureAlgorithms) |sa| {
-                try saBody.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(sa))));
+                try saBody.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(sa))));
             }
-            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.signature_algorithms))));
+            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(ExtensionType.signature_algorithms))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(saBody.items.len + 2))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(saBody.items.len))));
             try exts.appendSlice(allocator, saBody.items);
@@ -187,7 +187,7 @@ pub const ClientHello = struct {
                 try alpnBody.append(allocator, @intCast(proto.len));
                 try alpnBody.appendSlice(allocator, proto);
             }
-            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.application_layer_protocol_negotiation))));
+            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(ExtensionType.application_layer_protocol_negotiation))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(alpnBody.items.len + 2))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(alpnBody.items.len))));
             try exts.appendSlice(allocator, alpnBody.items);
@@ -208,7 +208,7 @@ pub const ClientHello = struct {
             for (self.supportedVersions) |v| {
                 try svBody.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, v)));
             }
-            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.supported_versions))));
+            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(ExtensionType.supported_versions))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(svBody.items.len + 1))));
             try exts.append(allocator, @intCast(svBody.items.len));
             try exts.appendSlice(allocator, svBody.items);
@@ -216,7 +216,7 @@ pub const ClientHello = struct {
 
         // pskKeyExchangeModes (RFC 8446 Section 4.2.9: u8 length + u8 modes)
         if (self.pskModes.len > 0) {
-            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.psk_key_exchange_modes))));
+            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(ExtensionType.psk_key_exchange_modes))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(self.pskModes.len + 1))));
             try exts.append(allocator, @intCast(self.pskModes.len));
             try exts.appendSlice(allocator, self.pskModes);
@@ -225,7 +225,7 @@ pub const ClientHello = struct {
         // early_data (RFC 8446 Section 4.2.10): type 42, length 0 in ClientHello.
         // Signals intent to send early application data. Must precede pre_shared_key.
         if (self.earlyData) {
-            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.early_data))));
+            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(ExtensionType.early_data))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0)));
         }
 
@@ -247,7 +247,7 @@ pub const ClientHello = struct {
             const binderBytes: usize = self.pskIdentities.len * HashLen;
             try pskBody.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(binderBytes))));
             try pskBody.appendNTimes(allocator, 0, binderBytes);
-            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.pre_shared_key))));
+            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(ExtensionType.pre_shared_key))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(pskBody.items.len))));
             try exts.appendSlice(allocator, pskBody.items);
         }
@@ -257,7 +257,7 @@ pub const ClientHello = struct {
         try body.appendSlice(allocator, exts.items);
 
         // Prepend handshake type + u24 length
-        const msgTypeByte: u8 = @intFromEnum(HandshakeType.client_hello);
+        const msgTypeByte: u8 = @backingInt(HandshakeType.client_hello);
         const bodyLen: u24 = @intCast(body.items.len);
         var header: [4]u8 = undefined;
         header[0] = msgTypeByte;
@@ -306,7 +306,7 @@ fn pskExtBody(msg: []const u8) !struct { start: usize, len: usize } {
         p += 4 + l;
     }
     if (p != extEnd) return error.ProtocolViolation;
-    if (lastType != @intFromEnum(ExtensionType.pre_shared_key)) return error.ProtocolViolation;
+    if (lastType != @backingInt(ExtensionType.pre_shared_key)) return error.ProtocolViolation;
     return .{ .start = lastStart, .len = lastLen };
 }
 
@@ -359,7 +359,7 @@ pub fn hasEarlyDataExtension(msg: []const u8) bool {
         const t = std.mem.readInt(u16, msg[p..][0..2], .big);
         const l: usize = (@as(usize, msg[p + 2]) << 8) | msg[p + 3];
         if (p + 4 + l > extEnd) return false;
-        if (t == @intFromEnum(ExtensionType.early_data)) {
+        if (t == @backingInt(ExtensionType.early_data)) {
             return l == 0; // RFC 8446 Section 4.2.10: ClientHello early_data must have 0-length body
         }
         p += 4 + l;
@@ -462,7 +462,7 @@ pub const ServerHello = struct {
         var pos: usize = 0;
         // Explicit base: every optional defaults to null (a bare
         // `= undefined` would leave them as garbage to read).
-        var result: ServerHello = .{ .random = [_]u8{0} ** 32, .cipherSuite = .AES_128_GCM_SHA256 };
+        var result: ServerHello = .{ .random = (@as([32]u8, @splat(0))), .cipherSuite = .AES_128_GCM_SHA256 };
 
         if (body.len >= 34 and !isLegacyFraming(body)) {
             // Standard TLS 1.3 ServerHello with legacyVersion (2 bytes) + random (32 bytes)
@@ -472,14 +472,14 @@ pub const ServerHello = struct {
             pos = 35 + sidLen;
             if (pos + 3 > body.len) return error.ServerHelloTooShort;
             const cs = std.mem.readInt(u16, body[pos..][0..2], .big);
-            result.cipherSuite = @enumFromInt(cs);
+            result.cipherSuite = @fromBackingInt(@intCast(cs));
             pos += 2 + 1; // skip cipherSuite + compression
         } else {
             // Fallback for short/legacy test vectors starting directly with random (32 bytes)
             if (body.len < 34) return error.ServerHelloTooShort;
             @memcpy(&result.random, body[0..32]);
             const cs = std.mem.readInt(u16, body[32..34], .big);
-            result.cipherSuite = @enumFromInt(cs);
+            result.cipherSuite = @fromBackingInt(@intCast(cs));
             pos = 34;
         }
 
@@ -496,22 +496,22 @@ pub const ServerHello = struct {
             pos += 4;
             if (pos + extDataLen > extEnd) return error.ServerHelloTruncated;
 
-            if (extType == @intFromEnum(ExtensionType.key_share)) {
+            if (extType == @backingInt(ExtensionType.key_share)) {
                 if (extDataLen == 2) {
                     // HelloRetryRequest form: selected group only, no
                     // keyExchange bytes (RFC 8446 Section 4.1.4).
-                    result.hrrGroup = @enumFromInt(std.mem.readInt(u16, body[pos..][0..2], .big));
+                    result.hrrGroup = @fromBackingInt(@intCast(std.mem.readInt(u16, body[pos..][0..2], .big)));
                 } else if (extDataLen >= 4) {
                     const group = std.mem.readInt(u16, body[pos..][0..2], .big);
                     const ksLen: usize = (@as(usize, body[pos + 2]) << 8) | body[pos + 3];
                     if (pos + 4 + ksLen <= extEnd) {
                         result.keyShare = .{
-                            .group = @enumFromInt(group),
+                            .group = @fromBackingInt(@intCast(group)),
                             .keyExchange = body[pos + 4 ..][0..ksLen],
                         };
                     }
                 }
-            } else if (extType == @intFromEnum(ExtensionType.pre_shared_key)) {
+            } else if (extType == @backingInt(ExtensionType.pre_shared_key)) {
                 // ServerHello preSharedKey: selectedIdentity u16.
                 if (extDataLen == 2) {
                     result.selectedPskIdentity = std.mem.readInt(u16, body[pos..][0..2], .big);
@@ -555,7 +555,7 @@ pub const NewSessionTicket = struct {
         var exts = std.ArrayList(u8).empty;
         defer exts.deinit(allocator);
         if (self.maxEarlyData) |med| {
-            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.early_data))));
+            try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(ExtensionType.early_data))));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 4)));
             try exts.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, med)));
         }
@@ -564,7 +564,7 @@ pub const NewSessionTicket = struct {
 
         var msg = std.ArrayList(u8).empty;
         errdefer msg.deinit(allocator);
-        try msg.append(allocator, @intFromEnum(HandshakeType.new_session_ticket));
+        try msg.append(allocator, @backingInt(HandshakeType.new_session_ticket));
         const bodyLen: u24 = @intCast(body.items.len);
         try msg.append(allocator, @intCast((bodyLen >> 16) & 0xFF));
         try msg.append(allocator, @intCast((bodyLen >> 8) & 0xFF));
@@ -598,7 +598,7 @@ pub const NewSessionTicket = struct {
         while (ep + 4 <= body.len) {
             const t = std.mem.readInt(u16, body[ep..][0..2], .big);
             const l: usize = std.mem.readInt(u16, body[ep + 2 ..][0..2], .big);
-            if (t == @intFromEnum(ExtensionType.early_data)) {
+            if (t == @backingInt(ExtensionType.early_data)) {
                 if (l != 4 or ep + 4 + l > body.len) return error.ProtocolViolation;
                 maxEarlyData = std.mem.readInt(u32, body[ep + 4 ..][0..4], .big);
             }
@@ -639,7 +639,7 @@ pub const EncryptedExtensions = struct {
             pos += 4;
             if (pos + extDataLen > extEnd) return error.EncryptedExtensionsTruncated;
 
-            if (extType == @intFromEnum(ExtensionType.application_layer_protocol_negotiation)) {
+            if (extType == @backingInt(ExtensionType.application_layer_protocol_negotiation)) {
                 if (extDataLen >= 3) {
                     const listLen: usize = (@as(usize, body[pos]) << 8) | body[pos + 1];
                     if (listLen >= 1 and extDataLen >= 2 + listLen) {
@@ -651,7 +651,7 @@ pub const EncryptedExtensions = struct {
                 }
             } else if (extType == QUIC_TRANSPORT_PARAMETERS_ID) {
                 result.quicTransportParams = body[pos..][0..extDataLen];
-            } else if (extType == @intFromEnum(ExtensionType.early_data)) {
+            } else if (extType == @backingInt(ExtensionType.early_data)) {
                 if (extDataLen == 0) {
                     result.earlyDataAccepted = true;
                 } else {
@@ -683,7 +683,7 @@ pub const CertificateVerify = struct {
         const sigLen: usize = (@as(usize, body[2]) << 8) | body[3];
         if (4 + sigLen != body.len) return error.CertificateVerifyTruncated;
         return .{
-            .algorithm = @enumFromInt(alg),
+            .algorithm = @fromBackingInt(@intCast(alg)),
             .signature = body[4..][0..sigLen],
         };
     }
@@ -754,13 +754,13 @@ pub const Alert = struct {
     description: AlertDescription,
 
     pub fn encode(self: Alert) [2]u8 {
-        return .{ @intFromEnum(self.level), @intFromEnum(self.description) };
+        return .{ @backingInt(self.level), @backingInt(self.description) };
     }
 
     pub fn decode(data: [2]u8) Alert {
         return .{
-            .level = @enumFromInt(data[0]),
-            .description = @enumFromInt(data[1]),
+            .level = @fromBackingInt(@intCast(data[0])),
+            .description = @fromBackingInt(@intCast(data[1])),
         };
     }
 };
@@ -787,11 +787,11 @@ test "transcript hash accumulates" {
 
 test "ClientHello encode produces valid frame" {
     const ch = ClientHello{
-        .random = [_]u8{0xAA} ** 32,
+        .random = (@as([32]u8, @splat(0xAA))),
         .cipherSuites = &.{.AES_128_GCM_SHA256},
         .keyShareEntries = &.{.{
             .group = .x25519,
-            .keyExchange = &[_]u8{0xBB} ** 32,
+            .keyExchange = &(@as([32]u8, @splat(0xBB))),
         }},
         .signatureAlgorithms = &.{.ecdsa_secp256r1_sha256},
         .alpnProtocols = &.{"h2"},
@@ -816,7 +816,7 @@ test "ServerHello decode roundtrip" {
     var body: [64]u8 = undefined;
     @memset(&body, 0);
     // random (32 bytes at offset 0)
-    @memcpy(body[0..32], &[_]u8{0x11} ** 32);
+    @memcpy(body[0..32], &(@as([32]u8, @splat(0x11))));
     // cipherSuite (2 bytes at offset 32)
     body[32] = 0x13;
     body[33] = 0x01; // TLS_AES_128_GCM_SHA256
@@ -838,11 +838,11 @@ test "Alert encode/decode roundtrip" {
 
 test "ClientHello with earlyData and PSK offers early_data and computes pskTruncatedLen" {
     const ch = ClientHello{
-        .random = [_]u8{0x55} ** 32,
+        .random = (@as([32]u8, @splat(0x55))),
         .cipherSuites = &.{.AES_128_GCM_SHA256},
         .keyShareEntries = &.{.{
             .group = .x25519,
-            .keyExchange = &[_]u8{0x66} ** 32,
+            .keyExchange = &(@as([32]u8, @splat(0x66))),
         }},
         .signatureAlgorithms = &.{.ecdsa_secp256r1_sha256},
         .alpnProtocols = &.{"h3"},
@@ -868,7 +868,7 @@ test "NewSessionTicket encodes and decodes maxEarlyData" {
         .lifetimeSecs = 7200,
         .ageAdd = 12345,
         .nonce = &[_]u8{ 1, 2, 3, 4 },
-        .ticket = &[_]u8{0xAA} ** 40,
+        .ticket = &(@as([40]u8, @splat(0xAA))),
         .maxEarlyData = 0xFFFFFFFF,
     };
 
@@ -893,7 +893,7 @@ test "EncryptedExtensions decodes earlyDataAccepted" {
     defer exts.deinit(std.testing.allocator);
 
     // ext 42, len 0
-    try exts.appendSlice(std.testing.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(ExtensionType.early_data))));
+    try exts.appendSlice(std.testing.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @backingInt(ExtensionType.early_data))));
     try exts.appendSlice(std.testing.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0)));
 
     try body.appendSlice(std.testing.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(exts.items.len))));

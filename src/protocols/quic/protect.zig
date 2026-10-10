@@ -36,7 +36,7 @@ const chachaCore = std.crypto.stream.chacha.ChaCha20IETF;
 pub fn hpMaskChacha(key: [32]u8, sample: *const [16]u8) [5]u8 {
     var nonce: [12]u8 = undefined;
     @memcpy(&nonce, sample[4..16]);
-    var zeros: [16]u8 = .{0} ** 16;
+    var zeros: [16]u8 = @splat(0);
     var ks: [16]u8 = undefined;
     chachaCore.xor(&ks, &zeros, 0, key, nonce);
     return .{ ks[0], ks[1], ks[2], ks[3], ks[4] };
