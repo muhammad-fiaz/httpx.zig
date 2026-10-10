@@ -615,6 +615,43 @@ pub const NewSessionTicket = struct {
     }
 };
 
+// Post-handshake record framing (RFC 8446 Section 5.1)
+//
+// A single TLS record may carry several concatenated handshake messages,
+// each framed as a 1-byte type plus a u24 length. Servers commonly coalesce
+// multiple NewSessionTicket messages into one record.
+
+/// One framed handshake message borrowed from a record's plaintext.
+pub const FramedMessage = struct {
+    msgType: HandshakeType,
+    /// Exactly the declared length; borrows from the record.
+    body: []const u8,
+};
+
+/// Splits concatenated handshake messages with strict bounds checking.
+/// Truncated headers, declared lengths overrunning the buffer, and trailing
+/// garbage all fail loudly instead of producing partial messages.
+pub const MessageIterator = struct {
+    rest: []const u8,
+
+    pub fn init(record: []const u8) MessageIterator {
+        return .{ .rest = record };
+    }
+
+    pub fn next(self: *MessageIterator) !?FramedMessage {
+        if (self.rest.len == 0) return null;
+        if (self.rest.len < 4) return error.ProtocolViolation;
+        const msgType: HandshakeType = @fromBackingInt(@intCast(self.rest[0]));
+        const bodyLen: usize = (@as(usize, self.rest[1]) << 16) |
+            (@as(usize, self.rest[2]) << 8) | self.rest[3];
+        // Subtractive check avoids any overflow on huge declared lengths.
+        if (bodyLen > self.rest.len - 4) return error.ProtocolViolation;
+        const body = self.rest[4..][0..bodyLen];
+        self.rest = self.rest[4 + bodyLen ..];
+        return .{ .msgType = msgType, .body = body };
+    }
+};
+
 // EncryptedExtensions (RFC 8446 Section 4.3.1)
 
 pub const EncryptedExtensions = struct {
@@ -882,6 +919,124 @@ test "NewSessionTicket encodes and decodes maxEarlyData" {
     try std.testing.expectEqualSlices(u8, nst.nonce, decoded.nonce);
     try std.testing.expectEqualSlices(u8, nst.ticket, decoded.ticket);
     try std.testing.expectEqual(@as(?u32, 0xFFFFFFFF), decoded.maxEarlyData);
+}
+
+test "MessageIterator splits coalesced NewSessionTicket messages" {
+    const a = std.testing.allocator;
+    const first = NewSessionTicket{
+        .lifetimeSecs = 100,
+        .ageAdd = 1,
+        .nonce = &[_]u8{0xA1},
+        .ticket = &(@as([8]u8, @splat(0x11))),
+    };
+    const second = NewSessionTicket{
+        .lifetimeSecs = 200,
+        .ageAdd = 2,
+        .nonce = &[_]u8{ 0xB2, 0xB3 },
+        .ticket = &(@as([8]u8, @splat(0x22))),
+        .maxEarlyData = 16384,
+    };
+    const m1 = try first.encode(a);
+    defer a.free(m1);
+    const m2 = try second.encode(a);
+    defer a.free(m2);
+
+    // Two tickets concatenated in one record, as servers coalesce them.
+    var rec = std.ArrayList(u8).empty;
+    defer rec.deinit(a);
+    try rec.appendSlice(a, m1);
+    try rec.appendSlice(a, m2);
+
+    var it = MessageIterator.init(rec.items);
+    const one = (try it.next()).?;
+    try std.testing.expectEqual(HandshakeType.new_session_ticket, one.msgType);
+    const d1 = try NewSessionTicket.decode(one.body);
+    try std.testing.expectEqual(@as(u32, 100), d1.lifetimeSecs);
+    const two = (try it.next()).?;
+    try std.testing.expectEqual(HandshakeType.new_session_ticket, two.msgType);
+    const d2 = try NewSessionTicket.decode(two.body);
+    try std.testing.expectEqual(@as(u32, 200), d2.lifetimeSecs);
+    try std.testing.expectEqual(@as(?u32, 16384), d2.maxEarlyData);
+    try std.testing.expect(try it.next() == null);
+}
+
+test "MessageIterator dispatches mixed handshake types by length" {
+    const a = std.testing.allocator;
+    const ticket = NewSessionTicket{
+        .lifetimeSecs = 100,
+        .ageAdd = 1,
+        .nonce = &[_]u8{0xA1},
+        .ticket = &(@as([8]u8, @splat(0x11))),
+    };
+    const msg = try ticket.encode(a);
+    defer a.free(msg);
+
+    // Valid ticket followed by a KeyUpdate message (type 24).
+    var rec = std.ArrayList(u8).empty;
+    defer rec.deinit(a);
+    try rec.appendSlice(a, msg);
+    try rec.appendSlice(a, &.{ 24, 0, 0, 1, 0xAA });
+
+    var it = MessageIterator.init(rec.items);
+    const one = (try it.next()).?;
+    try std.testing.expectEqual(HandshakeType.new_session_ticket, one.msgType);
+    _ = try NewSessionTicket.decode(one.body);
+    const two = (try it.next()).?;
+    try std.testing.expectEqual(HandshakeType.key_update, two.msgType);
+    try std.testing.expectEqualSlices(u8, &.{0xAA}, two.body);
+    try std.testing.expect(try it.next() == null);
+}
+
+test "MessageIterator rejects truncated and overrunning frames" {
+    var it = MessageIterator.init(&.{});
+    try std.testing.expect(try it.next() == null);
+
+    // Truncated 3-byte header.
+    var short = MessageIterator.init(&.{ 4, 0, 0 });
+    try std.testing.expectError(error.ProtocolViolation, short.next());
+
+    // Declared length overruns the buffer.
+    var over = MessageIterator.init(&.{ 4, 0, 1, 0 });
+    try std.testing.expectError(error.ProtocolViolation, over.next());
+
+    // Trailing garbage byte after a complete message.
+    const a = std.testing.allocator;
+    const ticket = NewSessionTicket{
+        .lifetimeSecs = 100,
+        .ageAdd = 1,
+        .nonce = &[_]u8{0xA1},
+        .ticket = &(@as([8]u8, @splat(0x11))),
+    };
+    const msg = try ticket.encode(a);
+    defer a.free(msg);
+    var rec = std.ArrayList(u8).empty;
+    defer rec.deinit(a);
+    try rec.appendSlice(a, msg);
+    try rec.append(a, 0xFF);
+    var trailing = MessageIterator.init(rec.items);
+    _ = (try trailing.next()).?;
+    try std.testing.expectError(error.ProtocolViolation, trailing.next());
+}
+
+test "NewSessionTicket decode rejects malformed bodies" {
+    // Too short for fixed fields.
+    try std.testing.expectError(error.ProtocolViolation, NewSessionTicket.decode(&(@as([11]u8, @splat(0)))));
+
+    // Truncated nonce.
+    var short = [_]u8{ 0, 0, 0, 100, 0, 0, 0, 1, 8, 0xA1 };
+    try std.testing.expectError(error.ProtocolViolation, NewSessionTicket.decode(&short));
+
+    // Zero-length ticket.
+    var emptyTicket = [_]u8{ 0, 0, 0, 100, 0, 0, 0, 1, 1, 0xA1, 0, 0, 0, 0 };
+    try std.testing.expectError(error.ProtocolViolation, NewSessionTicket.decode(&emptyTicket));
+
+    // Extension length overruns the body.
+    var badExt = [_]u8{ 0, 0, 0, 100, 0, 0, 0, 1, 1, 0xA1, 0, 1, 0xAA, 0, 9, 0, 0 };
+    try std.testing.expectError(error.ProtocolViolation, NewSessionTicket.decode(&badExt));
+
+    // Zero lifetime.
+    var zeroLife = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 1, 1, 0xA1, 0, 1, 0xAA, 0, 0 };
+    try std.testing.expectError(error.ProtocolViolation, NewSessionTicket.decode(&zeroLife));
 }
 
 test "EncryptedExtensions decodes earlyDataAccepted" {

@@ -227,31 +227,39 @@ const NativeConnection = struct {
         }
     }
 
-    /// Captures one post-handshake NewSessionTicket record's plaintext
-    /// (full handshake message: type 4 + body, single record). Replaces
-    /// any previously captured session. Unparseable or unusable tickets
-    /// fail loudly: a corrupt ticket stream must never silently downgrade
-    /// resumption bookkeeping.
+    /// Captures post-handshake NewSessionTicket messages from one record's
+    /// plaintext, which may hold several concatenated handshake messages
+    /// (RFC 8446 Section 5.1 framing). Each message is dispatched by type
+    /// and declared length; every ticket is captured and the latest one
+    /// replaces any previously captured session. Truncated headers,
+    /// overrunning lengths, trailing garbage, empty records, and
+    /// non-ticket messages fail loudly: a corrupt ticket stream must
+    /// never silently downgrade resumption bookkeeping. A handshake
+    /// message split across records is not reassembled and fails loudly;
+    /// servers emit tickets whole within one record in practice.
     fn captureTicketRecord(self: *NativeConnection, plaintext: []const u8) Error!void {
         const master = self.resumptionMaster orelse return error.TlsRecordError;
         const host = self.sessionHost orelse return error.TlsRecordError;
-        if (plaintext.len < 4) return error.TlsRecordError;
-        if (plaintext[0] != @backingInt(handshakeMod.HandshakeType.new_session_ticket)) {
-            return error.TlsRecordError;
+        var it = handshakeMod.MessageIterator.init(plaintext);
+        var sawTicket = false;
+        while (it.next() catch return error.TlsRecordError) |msg| {
+            if (msg.msgType != .new_session_ticket) return error.TlsRecordError;
+            const nst = handshakeMod.NewSessionTicket.decode(msg.body) catch return error.TlsRecordError;
+            const nowMs: u64 = @intCast(clockMod.millisNow());
+            var fresh = sessionMod.clientSessionFromTicket(
+                self.allocator,
+                nst,
+                master,
+                self.suite,
+                host,
+                nowMs,
+            ) catch return error.TlsRecordError;
+            errdefer fresh.deinit(self.allocator);
+            if (self.pendingSession) |*old| old.deinit(self.allocator);
+            self.pendingSession = fresh;
+            sawTicket = true;
         }
-        const nst = handshakeMod.NewSessionTicket.decode(plaintext[4..]) catch return error.TlsRecordError;
-        const nowMs: u64 = @intCast(clockMod.millisNow());
-        var fresh = sessionMod.clientSessionFromTicket(
-            self.allocator,
-            nst,
-            master,
-            self.suite,
-            host,
-            nowMs,
-        ) catch return error.TlsRecordError;
-        errdefer fresh.deinit(self.allocator);
-        if (self.pendingSession) |*old| old.deinit(self.allocator);
-        self.pendingSession = fresh;
+        if (!sawTicket) return error.TlsRecordError;
     }
 };
 
@@ -1001,6 +1009,85 @@ test "tls resumption over loopback abbreviates the second handshake" {
 
     th.join();
     try std.testing.expect(result == null);
+}
+
+test "captureTicketRecord handles coalesced tickets, last wins" {
+    const a = std.testing.allocator;
+    const first = handshakeMod.NewSessionTicket{
+        .lifetimeSecs = 100,
+        .ageAdd = 1,
+        .nonce = &[_]u8{0xA1},
+        .ticket = &(@as([8]u8, @splat(0x11))),
+    };
+    const second = handshakeMod.NewSessionTicket{
+        .lifetimeSecs = 200,
+        .ageAdd = 2,
+        .nonce = &[_]u8{ 0xB2, 0xB3 },
+        .ticket = &(@as([8]u8, @splat(0x22))),
+    };
+    const m1 = try first.encode(a);
+    defer a.free(m1);
+    const m2 = try second.encode(a);
+    defer a.free(m2);
+
+    // Two tickets concatenated in one record, as servers coalesce them
+    // (issue #52: this used to fail with ProtocolViolation).
+    var rec = std.ArrayList(u8).empty;
+    defer rec.deinit(a);
+    try rec.appendSlice(a, m1);
+    try rec.appendSlice(a, m2);
+
+    const writeBuf = try a.alloc(u8, 64);
+    const readBuf = try a.alloc(u8, 64);
+    var conn = NativeConnection{
+        .socket = undefined,
+        .allocator = a,
+        .appKeys = undefined,
+        .writeBuf = writeBuf,
+        .readBuf = readBuf,
+        .resumptionMaster = @as([32]u8, @splat(0x33)),
+        .sessionHost = try a.dupe(u8, "example.com"),
+        .captureSession = true,
+    };
+    defer conn.deinit();
+
+    try conn.captureTicketRecord(rec.items);
+    var sess = conn.takeCapturedSession().?;
+    defer sess.deinit(a);
+    // Latest ticket replaces the earlier one.
+    try std.testing.expectEqualSlices(u8, &@as([8]u8, @splat(0x22)), sess.ticket);
+    try std.testing.expectEqual(@as(u32, 200), sess.lifetimeSecs);
+
+    // A single ticket still captures.
+    try conn.captureTicketRecord(m1);
+    var single = conn.takeCapturedSession().?;
+    defer single.deinit(a);
+    try std.testing.expectEqualSlices(u8, &@as([8]u8, @splat(0x11)), single.ticket);
+
+    // Empty, truncated, overrunning, and garbage-suffixed records fail loudly.
+    try std.testing.expectError(error.TlsRecordError, conn.captureTicketRecord(&.{}));
+    try std.testing.expectError(error.TlsRecordError, conn.captureTicketRecord(&.{ 4, 0, 0 }));
+    try std.testing.expectError(error.TlsRecordError, conn.captureTicketRecord(&.{ 4, 0, 1, 0 }));
+    var dirty = std.ArrayList(u8).empty;
+    defer dirty.deinit(a);
+    try dirty.appendSlice(a, m1);
+    try dirty.append(a, 0xFF);
+    try std.testing.expectError(error.TlsRecordError, conn.captureTicketRecord(dirty.items));
+
+    // A valid ticket followed by a non-ticket message fails loudly. The
+    // valid ticket is still captured (single pass); drain it here.
+    var mixed = std.ArrayList(u8).empty;
+    defer mixed.deinit(a);
+    try mixed.appendSlice(a, m1);
+    try mixed.appendSlice(a, &.{ 24, 0, 0, 1, 0xAA });
+    try std.testing.expectError(error.TlsRecordError, conn.captureTicketRecord(mixed.items));
+    if (conn.takeCapturedSession()) |s| {
+        var leftover = s;
+        leftover.deinit(a);
+    }
+
+    // Rejections without any valid ticket leave nothing behind.
+    try std.testing.expect(conn.pendingSession == null);
 }
 
 test "tls client retries after hello retry request over loopback" {
