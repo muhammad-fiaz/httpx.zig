@@ -246,7 +246,6 @@ pub fn build(b: *std.Build) void {
 
     const buildAllExamples = b.step("build-all-examples", "Build all example executables");
     const runAllExamples = b.step("run-all-examples", "Run all examples sequentially");
-    var previousRunStep: ?*std.Build.Step = null;
 
     inline for (examples) |example| {
         const exe = b.addExecutable(.{
@@ -271,17 +270,11 @@ pub fn build(b: *std.Build) void {
         const runExe = b.addRunArtifact(exe);
         runExe.has_side_effects = true;
         runExe.step.dependOn(&installExe.step);
-        if (previousRunStep) |prev| {
-            runExe.step.dependOn(prev);
-        }
-        previousRunStep = &runExe.step;
 
         const runStep = b.step("run-" ++ example.name, "Run " ++ example.name ++ " example");
         runStep.dependOn(&runExe.step);
-    }
 
-    if (previousRunStep) |last| {
-        runAllExamples.dependOn(last);
+        runAllExamples.dependOn(&runExe.step);
     }
 
     const tests = b.addTest(.{
