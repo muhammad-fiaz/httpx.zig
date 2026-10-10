@@ -154,6 +154,7 @@ pub const Client = struct {
     /// One full request/response exchange on a fresh stream.
     /// `scheme`/`authority` are caller-supplied (:scheme https and the
     /// real host for TLS; http/localhost for cleartext loopback tests).
+    /// `body`: optional request payload. If non-empty, transmitted via DATA frames.
     pub fn request(
         self: *Client,
         method: []const u8,
@@ -161,6 +162,7 @@ pub const Client = struct {
         extra: []const Header,
         scheme: []const u8,
         authority: []const u8,
+        reqBody: ?[]const u8,
     ) !Response {
         const a = self.allocator;
         const sid = try self.session.nextClientStreamId();
@@ -173,7 +175,10 @@ pub const Client = struct {
         try fields.append(a, .{ .name = ":authority", .value = authority });
         for (extra) |h| try fields.append(a, .{ .name = h.name, .value = h.value });
 
-        try self.session.sendHeaders(sid, fields.items, true);
+        const toSend = reqBody orelse "";
+        const hasReqBody = toSend.len > 0;
+
+        try self.session.sendHeaders(sid, fields.items, !hasReqBody);
         try self.flush();
 
         // Collectors wired through session callbacks.
@@ -236,6 +241,18 @@ pub const Client = struct {
             .onStreamEnd = Collector.onEnd,
         };
         defer self.session.cbs = .{};
+
+        if (hasReqBody) {
+            var bodySent: usize = 0;
+            while (bodySent < toSend.len) {
+                const sent = try self.session.sendData(sid, toSend[bodySent..], true);
+                bodySent += sent;
+                try self.flush();
+                if (bodySent < toSend.len) {
+                    try self.pump();
+                }
+            }
+        }
 
         while (!done and !self.session.closed and !self.session.goawayReceived) {
             try self.pump();
@@ -321,8 +338,9 @@ pub const PooledConn = struct {
         extra: []const Header,
         scheme: []const u8,
         authority: []const u8,
+        reqBody: ?[]const u8,
     ) !Response {
-        return self.client.request(method, path, extra, scheme, authority);
+        return self.client.request(method, path, extra, scheme, authority, reqBody);
     }
 
     /// Takes ownership of a captured resumption session from the
@@ -410,6 +428,12 @@ fn svrOnData(ctx: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
     try s.body.appendSlice(s.arena, data);
 }
 
+fn svrOnStreamEnd(ctx: ?*anyopaque, sid: u31) anyerror!void {
+    const s: *ServerCtx = @ptrCast(@alignCast(ctx.?));
+    if (sid != s.sid) return;
+    s.dispatched = true;
+}
+
 /// Serves h2 requests on an established native TLS session until
 /// close/GOAWAY. Same dispatch as serveConnection; only the byte mover
 /// differs (TLS records instead of TCP).
@@ -454,6 +478,7 @@ fn serveStream(
         .ctx = &sc,
         .onHeaders = svrOnHeaders,
         .onData = svrOnData,
+        .onStreamEnd = svrOnStreamEnd,
     };
 
     var buf: [16 * 1024]u8 = undefined;
@@ -532,16 +557,59 @@ test "http2 client and server exchange over real tcp (h2c)" {
     };
     defer hc.deinit();
 
-    const r = try hc.request("GET", "/h2", &[_]Header{}, "http", "localhost");
+    const r = try hc.request("GET", "/h2", &[_]Header{}, "http", "localhost", null);
     defer r.deinit();
 
     try std.testing.expectEqual(@as(u16, 200), r.status);
     try std.testing.expectEqualStrings("hello-h2", r.body);
 
     // Second request on the SAME connection proves multiplexing-ready reuse.
-    const r404 = try hc.request("GET", "/missing", &[_]Header{}, "http", "localhost");
+    const r404 = try hc.request("GET", "/missing", &[_]Header{}, "http", "localhost", null);
     defer r404.deinit();
     try std.testing.expectEqual(@as(u16, 404), r404.status);
+}
+
+test "http2 client and server exchange with request body (POST)" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const Header, reqBody: []const u8) anyerror!HandlerResponse {
+            if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/echo")) {
+                return .{ .status = 200, .body = reqBody };
+            }
+            return .{ .status = 404, .body = "nope" };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io: std.Io) void {
+            var conn = lst.accept(io) catch return;
+            defer conn.close();
+            serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    defer thread.join();
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+
+    var hc = Client.connect(a, sock) catch |err| {
+        sock.close();
+        return err;
+    };
+    defer hc.deinit();
+
+    const payload = "Hello HTTP/2 request payload body!";
+    const r = try hc.request("POST", "/echo", &[_]Header{}, "http", "localhost", payload);
+    defer r.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), r.status);
+    try std.testing.expectEqualStrings(payload, r.body);
 }
 
 test "http2 over native tls loopback negotiates h2 via alpn" {
@@ -616,7 +684,7 @@ test "http2 over native tls loopback negotiates h2 via alpn" {
 
         const negotiated = tlsConn.alpn() orelse return error.AlpnMissing;
         try std.testing.expect(negotiated == .h2);
-        const r = try hc.request("GET", "/h2s", &[_]Header{}, "https", "127.0.0.1");
+        const r = try hc.request("GET", "/h2s", &[_]Header{}, "https", "127.0.0.1", null);
         defer r.deinit();
         try std.testing.expectEqual(@as(u16, 200), r.status);
         try std.testing.expectEqualStrings("hello-h2-tls", r.body);

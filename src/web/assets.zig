@@ -219,6 +219,17 @@ pub fn hasEmbedded(rawPath: []const u8) bool {
     return getEmbedded(rawPath) != null;
 }
 
+/// Deinitializes and frees the global asset store, resetting it to null.
+pub fn deinitGlobalStore() void {
+    gAssetLock.lock();
+    defer gAssetLock.unlock();
+
+    if (gAssetStore) |*store| {
+        store.deinit();
+        gAssetStore = null;
+    }
+}
+
 test "AssetStore register and lookup" {
     const alloc = std.testing.allocator;
     var store = AssetStore.init(alloc);
@@ -240,4 +251,16 @@ test "AssetStore register and lookup" {
 
     // Test missing asset
     try std.testing.expect(store.get("missing.js") == null);
+}
+
+test "globalStore register, lookup, and deinitGlobalStore" {
+    const alloc = std.testing.allocator;
+    defer deinitGlobalStore();
+
+    try registerEmbedded(alloc, "spa/app.js", "console.log('spa');", null);
+    const asset = getEmbedded("spa/app.js");
+    try std.testing.expect(asset != null);
+    try std.testing.expectEqualStrings("console.log('spa');", asset.?.content);
+    try std.testing.expect(hasEmbedded("spa/app.js"));
+    try std.testing.expect(!hasEmbedded("spa/other.js"));
 }

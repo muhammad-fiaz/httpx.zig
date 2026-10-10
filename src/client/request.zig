@@ -686,9 +686,10 @@ fn h2DoRequest(
     pc: *http2Transport.PooledConn,
     method: []const u8,
     target: []const u8,
-    reqHeaders: []const Header,
+    reqHeaders: []const writerMod.Header,
     scheme: []const u8,
     authority: []const u8,
+    reqBody: ?[]const u8,
 ) Error!Response {
     var hasAcceptEncoding = false;
     for (reqHeaders) |h| {
@@ -698,7 +699,7 @@ fn h2DoRequest(
     defer a.free(conv);
     for (reqHeaders, 0..) |h, i| conv[i] = .{ .name = h.name, .value = h.value };
     if (!hasAcceptEncoding) conv[reqHeaders.len] = .{ .name = "accept-encoding", .value = "gzip, br, zstd" };
-    const r = pc.request(method, target, conv, scheme, authority) catch |e| switch (e) {
+    const r = pc.request(method, target, conv, scheme, authority, reqBody) catch |e| switch (e) {
         error.OutOfMemory => return Error.OutOfMemory,
         else => return Error.ProtocolViolation,
     };
@@ -824,7 +825,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             if (req.pool) |p| {
                 if (p.acquireH2(hostCopy[0..hl], port, isTls)) |pc| {
                     const scheme: []const u8 = if (isTls) "https" else "http";
-                    const resp = h2DoRequest(a, pc, method.toString(), target, req.headers, scheme, hostCopy[0..hl]) catch |e| {
+                    const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, scheme, hostCopy[0..hl], bodyOut) catch |e| {
                         pc.deinit();
                         return e;
                     };
@@ -1122,7 +1123,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 // wrapTls already closed the socket and freed the box.
                 return Error.ProtocolViolation;
             };
-            const resp = h2DoRequest(a, pc, method.toString(), target, req.headers, "https", hostCopy[0..hl]) catch |e| {
+            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "https", hostCopy[0..hl], bodyOut) catch |e| {
                 pc.deinit();
                 return e;
             };
@@ -1151,7 +1152,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 tcpSock.close();
                 return Error.ProtocolViolation;
             };
-            const resp = h2DoRequest(a, pc, method.toString(), target, req.headers, "http", hostCopy[0..hl]) catch |e| {
+            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "http", hostCopy[0..hl], bodyOut) catch |e| {
                 pc.deinit();
                 return e;
             };
