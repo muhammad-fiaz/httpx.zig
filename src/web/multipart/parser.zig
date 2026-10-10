@@ -314,7 +314,9 @@ pub const StreamParser = struct {
     }
 };
 
-/// Parses a full multipart body with default limits. All returned slices borrow from `body`.
+/// Parses a full multipart body with default limits. Field names, data, and
+/// values borrow from `body`; per-part `headers` are owned — release the
+/// result with `freeFields`.
 pub fn parse(body: []const u8, boundary: []const u8) ParseError![]Field {
     return parseMultipart(std.heap.page_allocator, body, boundary, .{});
 }
@@ -427,7 +429,7 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
 }
 
 pub fn freeFields(fields: []Field) void {
-    std.heap.page_allocator.free(fields);
+    freeFieldsAlloc(std.heap.page_allocator, fields);
 }
 
 pub fn freeFieldsAlloc(allocator: Allocator, fields: []Field) void {
@@ -562,7 +564,7 @@ test "parses field and binary file parts" {
         "--XBOUND--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 2), fields.len);
     try std.testing.expectEqualStrings("note", fields[0].name);
@@ -580,6 +582,24 @@ test "rejects missing final delimiter and wrong boundary" {
         "--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ndata",
         "B",
     ));
+}
+
+test "parseMultipart roundtrip frees without leaks" {
+    // testing.allocator fails on any leak, covering per-part headers.
+    const a = std.testing.allocator;
+    const boundary = "XBOUND";
+    const body =
+        "--XBOUND\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n" ++
+        "Content-Type: application/octet-stream\r\n" ++
+        "X-Custom: yes\r\n" ++
+        "\r\n" ++
+        "data\r\n" ++
+        "--XBOUND--\r\n";
+    const fields = try parseMultipart(a, body, boundary, .{});
+    defer freeFieldsAlloc(a, fields);
+    try std.testing.expectEqual(@as(usize, 1), fields.len);
+    try std.testing.expectEqual(@as(usize, 1), fields[0].headers.len);
+    try std.testing.expectEqualStrings("X-Custom", fields[0].headers[0].name);
 }
 
 test "extracts boundary from Content-Type" {
@@ -630,7 +650,7 @@ test "parses filename* parameter" {
         "--B--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 1), fields.len);
     try std.testing.expect(fields[0].filenameStar != null);
@@ -649,7 +669,7 @@ test "parses Content-Transfer-Encoding" {
         "--B--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 1), fields.len);
     try std.testing.expectEqualStrings("base64", fields[0].contentTransferEncoding.?);
@@ -659,7 +679,7 @@ test "empty parts list" {
     const boundary = "B";
     const body = "--B--\r\n";
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
     try std.testing.expectEqual(@as(usize, 0), fields.len);
 }
 
@@ -671,7 +691,7 @@ test "parses multiple empty parts" {
         "--B--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 2), fields.len);
     try std.testing.expectEqualStrings("", fields[0].data);
@@ -686,7 +706,7 @@ test "parses duplicate field names" {
         "--B--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 2), fields.len);
     try std.testing.expectEqualStrings("tag", fields[0].name);
@@ -712,7 +732,7 @@ test "parses extra headers" {
         "--B--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 1), fields.len);
     try std.testing.expect(fields[0].headers.len == 2);
