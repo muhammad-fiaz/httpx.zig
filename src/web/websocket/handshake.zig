@@ -8,6 +8,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const frame = @import("frame.zig");
+const parseMod = @import("../../common/parse.zig");
 
 /// Magic GUID from RFC 6455 section 1.3 used in Sec-WebSocket-Accept.
 pub const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -74,10 +75,7 @@ fn hasHeaderToken(head: []const u8, name: []const u8, wanted: []const u8) bool {
         if (std.mem.indexOfScalar(u8, line, ':')) |colon| {
             const fieldName = std.mem.trim(u8, line[0..colon], " \t");
             if (std.ascii.eqlIgnoreCase(fieldName, name)) {
-                var tokens = std.mem.splitScalar(u8, line[colon + 1 ..], ',');
-                while (tokens.next()) |token| {
-                    if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, token, " \t"), wanted)) return true;
-                }
+                if (parseMod.hasToken(line[colon + 1 ..], wanted)) return true;
             }
         }
         pos = end + 2;

@@ -17,6 +17,7 @@
 const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
+const parseMod = @import("../common/parse.zig");
 
 pub const Error = error{ InvalidAddress, InvalidPort, BufferTooSmall };
 
@@ -72,29 +73,11 @@ pub const Address = struct {
     /// Parses "host" or "[v6]:port" or "host:port" or bare host.
     /// Bare hosts without an explicit port use `defaultPort`.
     pub fn parse(text: []const u8, defaultPort: u16) Error!struct { addr: []const u8, port: u16 } {
-        // Bracketed IPv6 [::1]:8080
-        if (text.len > 0 and text[0] == '[') {
-            const close = std.mem.indexOfScalar(u8, text, ']') orelse return Error.InvalidAddress;
-            const rest = text[close + 1 ..];
-            if (rest.len == 0) {
-                return .{ .addr = text[1..close], .port = defaultPort };
-            }
-            if (rest[0] != ':') return Error.InvalidAddress;
-            const p = std.fmt.parseInt(u16, rest[1..], 10) catch return Error.InvalidPort;
-            return .{ .addr = text[1..close], .port = p };
-        }
-        // Bare IPv4 host:port - count colons; >1 colon without brackets means raw v6
-        var colons: usize = 0;
-        for (text) |c| {
-            if (c == ':') colons += 1;
-        }
-        if (colons == 1) {
-            const colon = std.mem.indexOfScalar(u8, text, ':').?;
-            const p = std.fmt.parseInt(u16, text[colon + 1 ..], 10) catch return Error.InvalidPort;
-            return .{ .addr = text[0..colon], .port = p };
-        }
-        // Raw host or unbracketed IPv6 without port
-        return .{ .addr = text, .port = defaultPort };
+        const auth = parseMod.parseAuthority(text) orelse return Error.InvalidAddress;
+        return .{
+            .addr = auth.host,
+            .port = auth.port orelse defaultPort,
+        };
     }
 
     pub fn parseIp(self: *const Address, text: []const u8) Error!Address {

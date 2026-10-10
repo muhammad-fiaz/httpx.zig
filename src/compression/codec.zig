@@ -19,6 +19,7 @@ const flate = std.compress.flate;
 
 const zstdMod = @import("zstd");
 const brotliMod = @import("brotli");
+const parseMod = @import("../common/parse.zig");
 
 pub const Error = error{
     UnsupportedEncoding,
@@ -74,19 +75,16 @@ pub fn parseAcceptEncoding(allocator: Allocator, headerValue: []const u8) ![]Par
     var results = std.ArrayList(ParsedEncoding).empty;
     errdefer results.deinit(allocator);
 
-    var it = std.mem.splitScalar(u8, headerValue, ',');
-    while (it.next()) |raw| {
-        const part = std.mem.trim(u8, raw, " \t");
-        if (part.len == 0) continue;
-
-        var segIt = std.mem.splitScalar(u8, part, ';');
-        const tok = std.mem.trim(u8, segIt.next() orelse continue, " \t");
+    var it = parseMod.TokenListIterator.init(headerValue);
+    while (it.next()) |part| {
+        var paramIt = parseMod.ParamIterator.init(part);
+        const firstParam = paramIt.next() orelse continue;
+        const tok = firstParam.key;
         var q: f32 = 1.0;
 
-        if (segIt.next()) |qpartRaw| {
-            const qpart = std.mem.trim(u8, qpartRaw, " \t");
-            if (std.ascii.startsWithIgnoreCase(qpart, "q=")) {
-                q = parseQuality(qpart[2..]);
+        while (paramIt.next()) |param| {
+            if (parseMod.eqlIgnoreCase(param.key, "q")) {
+                q = parseQuality(param.value);
             }
         }
 
@@ -114,21 +112,20 @@ pub fn negotiate(headerValue: []const u8) Encoding {
     var wildcard: ?f32 = null;
     var hasEntry = false;
 
-    var it = std.mem.splitScalar(u8, headerValue, ',');
-    while (it.next()) |raw| {
-        const part = std.mem.trim(u8, raw, " \t");
-        if (part.len == 0) continue;
-
-        var segIt = std.mem.splitScalar(u8, part, ';');
+    var it = parseMod.TokenListIterator.init(headerValue);
+    while (it.next()) |part| {
+        var paramIt = parseMod.ParamIterator.init(part);
+        const firstParam = paramIt.next() orelse continue;
         hasEntry = true;
-        const tok = std.mem.trim(u8, segIt.next() orelse continue, " \t");
+        const tok = firstParam.key;
         var q: f32 = 1.0;
-        if (segIt.next()) |qpRaw| {
-            const qp = std.mem.trim(u8, qpRaw, " \t");
-            if (std.ascii.startsWithIgnoreCase(qp, "q=")) {
-                q = parseQuality(qp[2..]);
+
+        while (paramIt.next()) |param| {
+            if (parseMod.eqlIgnoreCase(param.key, "q")) {
+                q = parseQuality(param.value);
             }
         }
+
         if (Encoding.fromToken(tok)) |enc| {
             explicit[@backingInt(enc)] = q;
         } else if (tok.len == 1 and tok[0] == '*') {

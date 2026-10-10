@@ -79,55 +79,30 @@ pub fn classifyTarget(method: []const u8, target: []const u8) ?TargetForm {
     return if (TargetForm.allowsForm(method, .authority)) .authority else null;
 }
 
+const parseMod = @import("../../common/parse.zig");
+
 // Host / authority validation (RFC 9112 section 3.2 + RFC 3986)
 
 /// Validates a Host (or :authority-style) value: reg-name, IPv4 literal,
 /// or bracketed IPv6 literal with optional [:port].
 pub fn validAuthority(value: []const u8) bool {
     if (value.len == 0 or value.len > 255) return false;
-
-    var hostPart = value;
-    var portPart: ?[]const u8 = null;
-
-    if (value[0] == '[') {
-        const close = std.mem.indexOfScalar(u8, value, ']') orelse return false;
-        if (close < 3) return false; // [] minimum
-        hostPart = value[0 .. close + 1];
-        const rest = value[close + 1 ..];
-        if (rest.len > 0) {
-            if (rest[0] != ':') return false;
-            portPart = rest[1..];
-        }
-        // Rough IPv6 shape inside brackets: hex digits, colons, dots, %zone.
-        const inner = value[1..close];
-        if (inner.len == 0) return false;
-        for (inner) |c| {
+    const auth = parseMod.parseAuthority(value) orelse return false;
+    if (auth.host.len == 0) return false;
+    if (auth.isIpv6) {
+        for (auth.host) |c| {
             switch (c) {
                 ':', '.', '%' => {},
                 else => if (!std.ascii.isHex(c)) return false,
             }
         }
     } else {
-        if (std.mem.lastIndexOfScalar(u8, value, ':')) |colon| {
-            hostPart = value[0..colon];
-            portPart = value[colon + 1 ..];
-        }
-        if (hostPart.len == 0) return false;
-        for (hostPart) |c| {
+        for (auth.host) |c| {
             switch (c) {
                 '-', '.', '_' => {},
                 else => if (!std.ascii.isAlphanumeric(c)) return false,
             }
         }
-    }
-
-    if (portPart) |p| {
-        if (p.len == 0 or p.len > 5) return false;
-        for (p) |c| {
-            if (!std.ascii.isDigit(c)) return false;
-        }
-        const n = std.fmt.parseInt(u16, p, 10) catch return false;
-        _ = n;
     }
     return true;
 }
@@ -143,12 +118,11 @@ pub const ConnectionDirective = enum { keepAlive, close, unspecified };
 pub fn connectionDirective(headers: anytype) ConnectionDirective {
     var result: ConnectionDirective = .unspecified;
     for (headers) |h| {
-        if (!std.ascii.eqlIgnoreCase(h.name, "Connection")) continue;
-        var it = std.mem.splitScalar(u8, h.value, ',');
-        while (it.next()) |tokRaw| {
-            const tok = std.mem.trim(u8, tokRaw, " \t");
-            if (std.ascii.eqlIgnoreCase(tok, "keep-alive")) result = .keepAlive;
-            if (std.ascii.eqlIgnoreCase(tok, "close")) result = .close;
+        if (!parseMod.eqlIgnoreCase(h.name, "Connection")) continue;
+        var it = parseMod.TokenListIterator.init(h.value);
+        while (it.next()) |tok| {
+            if (parseMod.eqlIgnoreCase(tok, "keep-alive")) result = .keepAlive;
+            if (parseMod.eqlIgnoreCase(tok, "close")) result = .close;
         }
     }
     return result;
