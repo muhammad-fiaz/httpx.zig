@@ -10,7 +10,7 @@ Thank you for your interest in contributing to httpx.zig.
 
 ## Development Setup
 
-1. Install Zig 0.16.0 or newer.
+1. Install Zig 0.17.0 or newer.
 2. Clone the repository.
 3. From the repository root, run:
 

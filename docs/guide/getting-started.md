@@ -33,13 +33,13 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN suppor
 
 ## Requirements
 
-- **Zig Version**: 0.16.0 or later
+- **Zig Version**: 0.17.0 or later
 - **Operating System**: Windows, Linux, or macOS
 
-::: warning Upgrading from 0.1.x
-v0.2.1 is a breaking release (Zig `0.16.0` required) with no
+::: warning Upgrading from 0.2.x and older
+v0.2.2 is a breaking release (Zig `0.17.0` required) with no
 compatibility wrappers. Review the updated Client/Server/Router usage
-in this guide when migrating from any `0.1.x` (or older).
+in this guide when migrating from `0.2.1` (or older).
 :::
 
 ## Platform Support
