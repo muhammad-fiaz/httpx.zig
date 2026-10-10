@@ -5,8 +5,8 @@ fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.Resolved
     compile.root_module.link_libc = true;
     if (target.result.os.tag == .windows) {
         // Winsock symbols are provided by these system libraries on Windows.
-        compile.root_module.linkSystemLibrary("ws2_32", .{});
-        compile.root_module.linkSystemLibrary("mswsock", .{});
+        compile.root_module.linkSystemLibrary("ws2_32", .{ .use_pkg_config = .no });
+        compile.root_module.linkSystemLibrary("mswsock", .{ .use_pkg_config = .no });
     }
 }
 
@@ -245,23 +245,8 @@ pub fn build(b: *std.Build) void {
     };
 
     const buildAllExamples = b.step("build-all-examples", "Build all example executables");
-
-    const runnerExe = b.addExecutable(.{
-        .name = "example-runner",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/runner.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    linkPlatformLibs(runnerExe, target);
-
-    const runRunner = b.addRunArtifact(runnerExe);
-    runRunner.step.dependOn(buildAllExamples);
-    runRunner.addArg("--timeout");
-    runRunner.addArg("15000");
-    runRunner.addArg("--suite-timeout");
-    runRunner.addArg("1800000");
+    const runAllExamples = b.step("run-all-examples", "Run all examples sequentially");
+    var previousRunStep: ?*std.Build.Step = null;
 
     inline for (examples) |example| {
         const exe = b.addExecutable(.{
@@ -284,17 +269,20 @@ pub fn build(b: *std.Build) void {
         exampleStep.dependOn(&installExe.step);
 
         const runExe = b.addRunArtifact(exe);
+        runExe.has_side_effects = true;
         runExe.step.dependOn(&installExe.step);
+        if (previousRunStep) |prev| {
+            runExe.step.dependOn(prev);
+        }
+        previousRunStep = &runExe.step;
+
         const runStep = b.step("run-" ++ example.name, "Run " ++ example.name ++ " example");
         runStep.dependOn(&runExe.step);
-
-        runRunner.addArg("--example");
-        runRunner.addArg(example.name);
-        runRunner.addArtifactArg(exe);
     }
 
-    const runAllExamples = b.step("run-all-examples", "Run all examples sequentially with timeouts and diagnostics");
-    runAllExamples.dependOn(&runRunner.step);
+    if (previousRunStep) |last| {
+        runAllExamples.dependOn(last);
+    }
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
