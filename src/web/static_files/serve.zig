@@ -664,6 +664,7 @@ fn respondWithEmbedded(ctx: *Context, st: *State, asset: @import("../assets.zig"
 
     var headers: std.ArrayList(routerMod.Header) = .empty;
     headers.append(a, .{ .name = "ETag", .value = asset.etag }) catch return Allocator.Error.OutOfMemory;
+    headers.append(a, .{ .name = "Accept-Ranges", .value = "bytes" }) catch return Allocator.Error.OutOfMemory;
     if (st.cacheControl.len > 0)
         headers.append(a, .{ .name = "Cache-Control", .value = st.cacheControl }) catch return Allocator.Error.OutOfMemory;
     if (isHead) {
@@ -799,6 +800,7 @@ fn respondWithFile(ctx: *Context, st: *State, path: []const u8, meta: FileMeta) 
     var headers: std.ArrayList(routerMod.Header) = .empty;
     headers.append(a, .{ .name = "ETag", .value = etag }) catch return Allocator.Error.OutOfMemory;
     headers.append(a, .{ .name = "Last-Modified", .value = lastModified }) catch return Allocator.Error.OutOfMemory;
+    headers.append(a, .{ .name = "Accept-Ranges", .value = "bytes" }) catch return Allocator.Error.OutOfMemory;
     if (st.cacheControl.len > 0)
         headers.append(a, .{ .name = "Cache-Control", .value = st.cacheControl }) catch return Allocator.Error.OutOfMemory;
     if (isHead) {
