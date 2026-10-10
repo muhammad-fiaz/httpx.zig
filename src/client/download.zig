@@ -31,7 +31,7 @@ const req = @import("request.zig");
 const clientNs = @import("client.zig");
 const Client = clientNs.Client;
 const ftpClientMod = @import("../protocols/ftp/client.zig");
-const serveMod = @import("../web/static_files/serve.zig");
+const serveMod = @import("../web/staticFiles/serve.zig");
 const cFs = serveMod.cFs;
 
 pub const DownloadError = error{

@@ -13,7 +13,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const clock = @import("../../common/clock.zig");
 const sync = @import("../../common/sync.zig");
-const staticMod = @import("../static_files/serve.zig");
+const staticMod = @import("../staticFiles/serve.zig");
 const events = @import("events.zig");
 
 const windows = @import("windows.zig");

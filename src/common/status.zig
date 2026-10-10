@@ -18,6 +18,20 @@ pub const Status = struct {
     code: u16,
     reason: []const u8,
 
+    pub const ok: Status = .{ .code = 200, .reason = "OK" };
+    pub const created: Status = .{ .code = 201, .reason = "Created" };
+    pub const accepted: Status = .{ .code = 202, .reason = "Accepted" };
+    pub const noContent: Status = .{ .code = 204, .reason = "No Content" };
+    pub const badRequest: Status = .{ .code = 400, .reason = "Bad Request" };
+    pub const unauthorized: Status = .{ .code = 401, .reason = "Unauthorized" };
+    pub const forbidden: Status = .{ .code = 403, .reason = "Forbidden" };
+    pub const notFound: Status = .{ .code = 404, .reason = "Not Found" };
+    pub const internalServerError: Status = .{ .code = 500, .reason = "Internal Server Error" };
+
+    pub fn fromCode(c: u16) Status {
+        return .{ .code = c, .reason = reasonPhrase(c) };
+    }
+
     pub fn isInformational(self: Status) bool {
         return self.code >= 100 and self.code < 200;
     }

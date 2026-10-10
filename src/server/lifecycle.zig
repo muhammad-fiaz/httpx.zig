@@ -563,7 +563,7 @@ pub const Server = struct {
 
     /// Mounts a directory of static files under a URL prefix.
     pub fn static(self: *Server, mountPath: []const u8, dirPath: []const u8) !void {
-        const staticMod = @import("../web/static_files/serve.zig");
+        const staticMod = @import("../web/staticFiles/serve.zig");
         try staticMod.register(&self.router, .{
             .mount = mountPath,
             .root = dirPath,
@@ -2620,6 +2620,7 @@ test "Server shares one port number between HTTP/1.1 and HTTP/3 when the port is
     var srv = Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = freePort,
+        .portStrategy = .strict,
         .http3 = true,
         .tls = .{
             .certificatePem = h3TestCertPem,

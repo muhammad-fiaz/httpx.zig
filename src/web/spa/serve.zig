@@ -9,7 +9,7 @@ const routerMod = @import("../router/router.zig");
 const Router = routerMod.Router;
 const Context = routerMod.Context;
 const Response = routerMod.Response;
-const staticFiles = @import("../static_files/serve.zig");
+const staticFiles = @import("../staticFiles/serve.zig");
 
 pub const Config = struct {
     /// The filesystem path to the SPA directory (e.g. "./dist").

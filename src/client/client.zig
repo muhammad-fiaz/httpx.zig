@@ -300,6 +300,35 @@ pub const Client = struct {
         return self.doRequestWithOverride(.POST, url, opts);
     }
 
+    /// POST request with typed struct or JSON payload.
+    ///   const res = try client.postJson("https://example.com/api", payload, .{});
+    pub fn postJson(self: *Client, url: []const u8, payload: anytype, opts: anytype) Error!Response {
+        const P = @TypeOf(payload);
+        if (P == []const u8 or P == []u8) {
+            return self.doRequestWithOverride(.POST, url, .{
+                .json = payload,
+                .headers = if (@hasField(@TypeOf(opts), "headers")) opts.headers else null,
+                .timeoutMs = if (@hasField(@TypeOf(opts), "timeoutMs")) opts.timeoutMs else null,
+                .bearerAuth = if (@hasField(@TypeOf(opts), "bearerAuth")) opts.bearerAuth else null,
+                .basicAuth = if (@hasField(@TypeOf(opts), "basicAuth")) opts.basicAuth else null,
+                .tls = if (@hasField(@TypeOf(opts), "tls")) opts.tls else null,
+                .proxy = if (@hasField(@TypeOf(opts), "proxy")) opts.proxy else null,
+            });
+        } else {
+            const jsonBytes = std.json.Stringify.valueAlloc(self.allocator, payload, .{}) catch return Error.OutOfMemory;
+            defer self.allocator.free(jsonBytes);
+            return self.doRequestWithOverride(.POST, url, .{
+                .json = jsonBytes,
+                .headers = if (@hasField(@TypeOf(opts), "headers")) opts.headers else null,
+                .timeoutMs = if (@hasField(@TypeOf(opts), "timeoutMs")) opts.timeoutMs else null,
+                .bearerAuth = if (@hasField(@TypeOf(opts), "bearerAuth")) opts.bearerAuth else null,
+                .basicAuth = if (@hasField(@TypeOf(opts), "basicAuth")) opts.basicAuth else null,
+                .tls = if (@hasField(@TypeOf(opts), "tls")) opts.tls else null,
+                .proxy = if (@hasField(@TypeOf(opts), "proxy")) opts.proxy else null,
+            });
+        }
+    }
+
     /// PUT request.
     ///   const res = try client.put("https://example.com/api/1", .{ .json = payload });
     pub fn put(self: *Client, url: []const u8, opts: anytype) Error!Response {

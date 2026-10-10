@@ -496,6 +496,71 @@ pub fn main() !void {
 }
 ```
 
+### Modern App Facade & Zig-Native REST Framework
+
+`httpx.zig` provides a high-level `App` facade and a type-driven `Rest` subsystem. REST routes automatically bind request payloads, execute typed handlers, serialize response structs to JSON, and derive an OpenAPI 3.1 specification via compile-time reflection.
+
+```zig
+const std = @import("std");
+const httpx = @import("httpx");
+
+const CreateItemRequest = struct {
+    name: []const u8,
+    price: u64,
+};
+
+const ItemResponse = struct {
+    id: u64,
+    name: []const u8,
+    price: u64,
+};
+
+fn createItem(ctx: *httpx.Context, req: CreateItemRequest) !httpx.ApiResult(ItemResponse) {
+    _ = ctx;
+    return .created(.{
+        .id = 101,
+        .name = req.name,
+        .price = req.price,
+    });
+}
+
+fn getItem(ctx: *httpx.Context, req: struct { id: u64 }) !httpx.ApiResult(ItemResponse) {
+    _ = ctx;
+    return .ok(.{
+        .id = req.id,
+        .name = "Widget",
+        .price = 499,
+    });
+}
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var app = try httpx.App.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 8080,
+    });
+    defer app.deinit();
+
+    // Register typed REST endpoints (drives router + OpenAPI 3.1 schema)
+    try app.restPost("/api/items", createItem);
+    try app.restGet("/api/items/{id}", getItem);
+
+    // Mount interactive documentation UIs with local embedded vendor assets
+    try app.docs(.{
+        .openapi = .{ .enabled = true, .path = "/openapi.json", .title = "Items API", .version = "1.0.0" },
+        .swaggerUi = .{ .enabled = true, .path = "/docs" },
+        .redoc = .{ .enabled = true, .path = "/redoc" },
+        .scalar = .{ .enabled = true, .path = "/scalar" },
+    });
+
+    try app.run();
+}
+```
+
 ### TLS Server
 
 ```zig
@@ -721,6 +786,7 @@ The `examples/` directory contains runnable examples demonstrating all features 
 
 **Server:**
 - [`simple_server`](examples/simpleServer.zig) - Minimal HTTP server
+- [`rest_api`](examples/restApi.zig) - Typed REST endpoints with automatic OpenAPI 3.1 & Docs
 - [`custom_responses`](examples/customResponses.zig) - Rich response generation (HTML, JSON, XML, RSS, Atom, robots.txt, sitemap.xml, binary)
 - [`static_files`](examples/staticFiles.zig) - Static file serving with ETag
 - [`health_check`](examples/healthCheck.zig) - Liveness/readiness probes
