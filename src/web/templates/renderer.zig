@@ -727,7 +727,7 @@ fn appendJsonString(out: *std.ArrayList(u8), allocator: Allocator, s: []const u8
     try out.append(allocator, '"');
 }
 
-fn writeJsonValue(out: *std.ArrayList(u8), allocator: Allocator, v: Value, indent: ?usize, level: usize) anyerror!void {
+fn writeJsonValue(out: *std.ArrayList(u8), allocator: Allocator, v: Value, indent: ?usize, level: usize) Allocator.Error!void {
     switch (v) {
         .nullVal, .missing, .macro => try out.appendSlice(allocator, "null"),
         .boolean => |b| try out.appendSlice(allocator, if (b) "true" else "false"),
@@ -803,7 +803,7 @@ fn writeJsonValue(out: *std.ArrayList(u8), allocator: Allocator, v: Value, inden
     }
 }
 
-fn appendPprint(out: *std.ArrayList(u8), allocator: Allocator, v: Value, verbose: bool) anyerror!void {
+fn appendPprint(out: *std.ArrayList(u8), allocator: Allocator, v: Value, verbose: bool) Allocator.Error!void {
     switch (v) {
         .nullVal => try out.appendSlice(allocator, "None"),
         .missing => try out.appendSlice(allocator, "Undefined"),
