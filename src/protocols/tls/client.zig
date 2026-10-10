@@ -143,12 +143,12 @@ const NativeConnection = struct {
 
     /// Read and decrypt one record worth of application data.
     ///
-    /// Post-handshake handshake records (NewSessionTicket) are consumed
-    /// transparently when capture is enabled: the ticket is stored and
-    /// reading continues with the next record, so callers only ever see
-    /// application bytes. Any other post-handshake handshake content
-    /// (e.g. KeyUpdate, unimplemented) fails loudly instead of leaking
-    /// handshake plaintext as application data.
+    /// Post-handshake NewSessionTicket records are consumed transparently:
+    /// the ticket is stored when capture is enabled (RFC 8446 §4.6.1) and
+    /// otherwise discarded; reading continues with the next record either
+    /// way, so callers only ever see application bytes. Other post-handshake
+    /// handshake content (e.g. KeyUpdate, unimplemented) fails loudly
+    /// instead of leaking handshake plaintext as application data.
     pub fn read(self: *NativeConnection, buf: []u8) Error!usize {
         if (self.leftoverLen > 0) {
             const n = @min(self.leftoverLen, buf.len);
@@ -204,11 +204,17 @@ const NativeConnection = struct {
             self.rxSeq +%= 1;
 
             if (result.contentType == .handshake) {
-                // Post-handshake handshake message: capture NST tickets,
-                // reject everything else. The rx sequence already advanced,
-                // so continuing with the next record stays in sync.
-                if (!self.captureSession) return error.TlsRecordError;
-                try self.captureTicketRecord(result.plaintext);
+                // Post-handshake handshake records this engine accepts are
+                // NewSessionTicket only. A client that does not want to
+                // resume ignores them (RFC 8446 §4.6.1); other handshake
+                // content (e.g. KeyUpdate) is rejected rather than consumed
+                // as application data.
+                if (result.plaintext.len < 1 or
+                    result.plaintext[0] != @intFromEnum(handshakeMod.HandshakeType.new_session_ticket))
+                {
+                    return error.TlsRecordError;
+                }
+                if (self.captureSession) try self.captureTicketRecord(result.plaintext);
                 continue;
             }
 
@@ -998,6 +1004,80 @@ test "tls resumption over loopback abbreviates the second handshake" {
     }
     try std.testing.expectEqualStrings("pong", buf2[0..got2]);
     sock2.close();
+
+    th.join();
+    try std.testing.expect(result == null);
+}
+
+test "post-handshake NewSessionTicket is discarded when capture is off" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    // Server issues a NewSessionTicket after the handshake (ticketKeys set);
+    // the client declines to capture it. Without discarding the NST record,
+    // the first application read would fail with error.TlsRecordError.
+    var server = try serverMod.Server.init(a, ctx.io, .{
+        .certificatePem = testCertPem,
+        .privateKeyPem = testKeyPem,
+        .ticketKeys = .{ .current = [_]u8{0x5E} ** 32 },
+    });
+    defer server.deinit();
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io, srv: *serverMod.Server, out: *?anyerror) void {
+            var sock = lst.accept(io2) catch {
+                out.* = error.AcceptFailed;
+                return;
+            };
+            defer sock.close();
+            var conn = srv.accept(&sock) catch |e| {
+                out.* = e;
+                return;
+            };
+            defer conn.deinit();
+            var buf: [16]u8 = undefined;
+            const n = conn.read(&buf) catch |e| {
+                out.* = e;
+                return;
+            };
+            if (!std.mem.eql(u8, buf[0..n], "ping")) {
+                out.* = error.BadReply;
+                return;
+            }
+            conn.writeAll("pong") catch |e| {
+                out.* = e;
+                return;
+            };
+            out.* = null;
+        }
+    };
+    var result: ?anyerror = error.NotRun;
+    const th = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io, &server, &result });
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+    errdefer sock.close();
+    var cli = try Client.init(a, ctx.io, .{});
+    defer cli.deinit();
+    var conn = try cli.connect(&sock, "127.0.0.1", .{
+        .verify = .caBundle,
+        .caPem = testCertPem,
+        .captureSession = false,
+    });
+    defer conn.deinit();
+    try conn.writeAll("ping");
+    var buf: [16]u8 = undefined;
+    var got: usize = 0;
+    while (got < "pong".len) {
+        const n = try conn.read(buf[got..]);
+        if (n == 0) break;
+        got += n;
+    }
+    try std.testing.expectEqualStrings("pong", buf[0..got]);
+    try std.testing.expect(conn.takeCapturedSession() == null);
+    sock.close();
 
     th.join();
     try std.testing.expect(result == null);
