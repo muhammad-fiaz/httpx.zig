@@ -136,6 +136,8 @@ pub fn build(b: *std.Build) void {
     // same source file from belonging to two modules (`tint` vs `tint0`
     // error). Passing .target/.optimize here would create a second
     // instance. The top-level `tint` entry in build.zig.zon pins the version.
+    // Upstream: https://codeberg.org/ziglang/zig/issues/36694 (same
+    // duplicate-module error; resolved with empty dependency options).
     const tintDep = loadersDep.builder.dependency("tint", .{});
 
     // Create the public module that will be exported as "httpx" to consumers.
