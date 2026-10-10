@@ -188,12 +188,11 @@ pub const Value = union(enum) {
                 }
             },
             .@"struct" => |st| {
-                const fields = st.fields;
-                const entries = try allocator.alloc(Entry, fields.len);
-                inline for (fields, 0..) |field, i| {
-                    const fieldVal = @field(val, field.name);
+                const entries = try allocator.alloc(Entry, st.field_names.len);
+                inline for (st.field_names, 0..) |fname, i| {
+                    const fieldVal = @field(val, fname);
                     entries[i] = .{
-                        .key = field.name,
+                        .key = fname,
                         .value = try from(allocator, fieldVal),
                     };
                 }

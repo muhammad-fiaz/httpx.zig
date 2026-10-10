@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const parseMod = @import("../../common/parse.zig");
 
 // Limits
 
@@ -314,7 +315,9 @@ pub const StreamParser = struct {
     }
 };
 
-/// Parses a full multipart body with default limits. All returned slices borrow from `body`.
+/// Parses a full multipart body with default limits. Field names, data, and
+/// values borrow from `body`; per-part `headers` are owned — release the
+/// result with `freeFields`.
 pub fn parse(body: []const u8, boundary: []const u8) ParseError![]Field {
     return parseMultipart(std.heap.page_allocator, body, boundary, .{});
 }
@@ -427,7 +430,7 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
 }
 
 pub fn freeFields(fields: []Field) void {
-    std.heap.page_allocator.free(fields);
+    freeFieldsAlloc(std.heap.page_allocator, fields);
 }
 
 pub fn freeFieldsAlloc(allocator: Allocator, fields: []Field) void {
@@ -440,16 +443,11 @@ pub fn freeFieldsAlloc(allocator: Allocator, fields: []Field) void {
 // Extract boundary from Content-Type
 
 pub fn extractBoundary(contentType: []const u8) ?[]const u8 {
-    var it = std.mem.splitScalar(u8, contentType, ';');
+    var it = parseMod.ParamIterator.init(contentType);
     _ = it.next();
-    while (it.next()) |paramRaw| {
-        const param = std.mem.trim(u8, paramRaw, " ");
-        if (std.mem.startsWith(u8, param, "boundary=")) {
-            var val = param[9..];
-            if (val.len >= 2 and val[0] == '"' and val[val.len - 1] == '"') {
-                val = val[1 .. val.len - 1];
-            }
-            return val;
+    while (it.next()) |param| {
+        if (parseMod.eqlIgnoreCase(param.key, "boundary")) {
+            return param.value;
         }
     }
     return null;
@@ -458,8 +456,9 @@ pub fn extractBoundary(contentType: []const u8) ?[]const u8 {
 // Subtype detection
 
 pub fn detectSubtype(contentType: []const u8) ?[]const u8 {
-    var it = std.mem.splitScalar(u8, contentType, ';');
-    const main = std.mem.trim(u8, it.next() orelse return null, " ");
+    var it = parseMod.ParamIterator.init(contentType);
+    const mainParam = it.next() orelse return null;
+    const main = mainParam.key;
     if (std.mem.startsWith(u8, main, "multipart/")) {
         return main[10..];
     }
@@ -480,8 +479,8 @@ fn headerValue(headers: []const u8, name: []const u8) ?[]const u8 {
     var it = std.mem.splitSequence(u8, headers, "\r\n");
     while (it.next()) |line| {
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " "), name)) {
-            return std.mem.trim(u8, line[colon + 1 ..], " ");
+        if (parseMod.eqlIgnoreCase(parseMod.trimOws(line[0..colon]), name)) {
+            return parseMod.trimOws(line[colon + 1 ..]);
         }
     }
     return null;
@@ -489,23 +488,18 @@ fn headerValue(headers: []const u8, name: []const u8) ?[]const u8 {
 
 fn dispositionField(headers: []const u8, field: []const u8) ?[]const u8 {
     const cd = headerValue(headers, "Content-Disposition") orelse return null;
-    if (!std.ascii.startsWithIgnoreCase(cd, "form-data") and
-        !std.ascii.startsWithIgnoreCase(cd, "attachment") and
-        !std.ascii.startsWithIgnoreCase(cd, "inline"))
+    var it = parseMod.ParamIterator.init(cd);
+    const mainParam = it.next() orelse return null;
+    const main = mainParam.key;
+    if (!parseMod.eqlIgnoreCase(main, "form-data") and
+        !parseMod.eqlIgnoreCase(main, "attachment") and
+        !parseMod.eqlIgnoreCase(main, "inline"))
         return null;
 
-    var it = std.mem.splitScalar(u8, cd, ';');
-    _ = it.next();
-    while (it.next()) |paramRaw| {
-        const param = std.mem.trim(u8, paramRaw, " ");
-        const eq = std.mem.indexOfScalar(u8, param, '=') orelse continue;
-        const key = param[0..eq];
-        if (!std.ascii.eqlIgnoreCase(key, field)) continue;
-        var val = param[eq + 1 ..];
-        if (val.len >= 2 and val[0] == '"' and val[val.len - 1] == '"') {
-            val = val[1 .. val.len - 1];
+    while (it.next()) |param| {
+        if (parseMod.eqlIgnoreCase(param.key, field)) {
+            return param.value;
         }
-        return val;
     }
     return null;
 }
@@ -562,7 +556,7 @@ test "parses field and binary file parts" {
         "--XBOUND--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 2), fields.len);
     try std.testing.expectEqualStrings("note", fields[0].name);
@@ -580,6 +574,24 @@ test "rejects missing final delimiter and wrong boundary" {
         "--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\ndata",
         "B",
     ));
+}
+
+test "parseMultipart roundtrip frees without leaks" {
+    // testing.allocator fails on any leak, covering per-part headers.
+    const a = std.testing.allocator;
+    const boundary = "XBOUND";
+    const body =
+        "--XBOUND\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n" ++
+        "Content-Type: application/octet-stream\r\n" ++
+        "X-Custom: yes\r\n" ++
+        "\r\n" ++
+        "data\r\n" ++
+        "--XBOUND--\r\n";
+    const fields = try parseMultipart(a, body, boundary, .{});
+    defer freeFieldsAlloc(a, fields);
+    try std.testing.expectEqual(@as(usize, 1), fields.len);
+    try std.testing.expectEqual(@as(usize, 1), fields[0].headers.len);
+    try std.testing.expectEqualStrings("X-Custom", fields[0].headers[0].name);
 }
 
 test "extracts boundary from Content-Type" {
@@ -630,7 +642,7 @@ test "parses filename* parameter" {
         "--B--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 1), fields.len);
     try std.testing.expect(fields[0].filenameStar != null);
@@ -649,7 +661,7 @@ test "parses Content-Transfer-Encoding" {
         "--B--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 1), fields.len);
     try std.testing.expectEqualStrings("base64", fields[0].contentTransferEncoding.?);
@@ -659,7 +671,7 @@ test "empty parts list" {
     const boundary = "B";
     const body = "--B--\r\n";
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
     try std.testing.expectEqual(@as(usize, 0), fields.len);
 }
 
@@ -671,7 +683,7 @@ test "parses multiple empty parts" {
         "--B--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 2), fields.len);
     try std.testing.expectEqualStrings("", fields[0].data);
@@ -686,7 +698,7 @@ test "parses duplicate field names" {
         "--B--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 2), fields.len);
     try std.testing.expectEqualStrings("tag", fields[0].name);
@@ -712,7 +724,7 @@ test "parses extra headers" {
         "--B--\r\n";
 
     const fields = try parse(body, boundary);
-    defer std.heap.page_allocator.free(fields);
+    defer freeFields(fields);
 
     try std.testing.expectEqual(@as(usize, 1), fields.len);
     try std.testing.expect(fields[0].headers.len == 2);

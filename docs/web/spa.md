@@ -34,11 +34,31 @@ fn statusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 }
 ```
 
-## Resolution Flow
+## Resolution Flow & Fallback Policy
 
-1. Match API routes first.
-2. Check if the request path maps to a physical file in `./dist` (e.g. `/assets/app.js`, `/favicon.ico`).
-3. If not found and request accepts `text/html`, serve `./dist/index.html` with status 200.
+HTTPX uses an explicit, controlled SPA fallback policy rather than returning `index.html` indiscriminately:
+
+1. **API & Explicit Code Routes**: Checked first. Known routes and handlers registered before `server.spa()` execute with their normal responses.
+2. **Physical Asset Resolution**: If the request path maps to a real file in the document root (or embedded asset registry), it is served with appropriate MIME types, `ETag`, and conditional request caching.
+3. **Controlled Fallback Determination (`shouldSpaFallback`)**:
+   - **HTTP Method**: Fallback is restricted to `GET` and `HEAD` requests. Other methods (POST, PUT, DELETE) return `404 Not Found`.
+   - **Excluded Prefixes**: Paths starting with configured `excludePrefixes` (e.g. `/api`, `/auth`) never fall back and return `404 Not Found`.
+   - **Asset Requests**: Missing files with asset extensions (e.g. `.js`, `.mjs`, `.css`, `.png`, `.jpg`, `.svg`, `.ico`, `.woff2`, `.map`, `.json`, `.wasm`) return `404 Not Found` rather than `index.html`, preventing browser syntax errors (`Unexpected token '<'`).
+   - **Content Negotiation**: If the client provides an `Accept` header that explicitly does not permit `text/html` (e.g. `Accept: application/json` or `Accept: image/*`), fallback is declined.
+4. **Application Navigation**: Deep links and client routes (e.g. `/dashboard`, `/users/42/profile`, `/settings`) that pass these checks receive the SPA fallback (`index.html`) with status 200.
+
+## Configuration Options
+
+```zig
+try httpx.web.spa.register(&server.router, .{
+    .root = "./dist",
+    .fallback = "index.html",
+    .mount = "/",
+    .excludePrefixes = &.{ "/api", "/auth" },
+    .cacheControl = "public, max-age=3600",
+    .liveReload = true,
+});
+```
 
 ## Related
 

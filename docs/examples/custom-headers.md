@@ -17,19 +17,27 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var res = try client.get("https://httpbun.com/headers", .{
-        .headers = &.{
-            .{ "Authorization", "Bearer demo-token" },
-            .{ "X-Request-ID", "req-001" },
-            .{ "X-Client", "httpx.zig" },
+    // Custom headers
+    var response = try client.get("https://httpbun.com/headers", .{
+        .headers = .{
+            .authorization = "Bearer my-token",
+            .xCustom = "my-value",
         },
     });
-    defer res.deinit();
+    defer response.deinit();
 
-    std.debug.print("status={d}\n", .{res.status.code});
-    std.debug.print("body={s}\n", .{res.text() orelse ""});
-}
+    std.debug.print("Status: {d}\n", .{response.status});
+    std.debug.print("Body: {s}\n", .{response.body});
 ```
+
+## Expected Output
+
+```text
+Status: 200
+Body: {"headers":{"Authorization":"Bearer my-token","X-Custom":"my-value","Host":"httpbun.com"}}
+```
+
+The status reflects the live endpoint and the echoed body varies with the server's response shape.
 
 ## Run
 

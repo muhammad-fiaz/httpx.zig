@@ -217,8 +217,10 @@ test "canonical wire names" {
 }
 
 test "wire parsing and roundtrips" {
-    inline for (@typeInfo(HttpVersion).@"enum".fields) |f| {
-        const v: HttpVersion = @enumFromInt(f.value);
+    const httpVersionInfo = @typeInfo(HttpVersion).@"enum";
+    inline for (httpVersionInfo.field_names, httpVersionInfo.field_values) |fname, fvalue| {
+        _ = fname;
+        const v: HttpVersion = @fromBackingInt(@intCast(fvalue));
         if (v.wireName()) |w| {
             try std.testing.expectEqual(v, HttpVersion.fromWire(w).?);
             try std.testing.expectEqual(v, try HttpVersion.parse(w));

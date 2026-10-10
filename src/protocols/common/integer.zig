@@ -134,7 +134,7 @@ test "rejects truncated and oversized input" {
 
 test "overflow guard rejects absurd continuation chains" {
     // 11 continuation bytes each claiming maximum weight -> overflow.
-    const evil = [_]u8{0xFF} ** 11 ++ [_]u8{0x00};
+    const evil = (@as([11]u8, @splat(0xFF))) ++ [_]u8{0x00};
     var off: usize = 0;
     try std.testing.expectError(Error.IntegerOverflow, decode(&evil, &off, 7));
 }

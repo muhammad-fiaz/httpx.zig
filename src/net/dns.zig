@@ -117,7 +117,7 @@ pub const Question = struct {
     pub fn encode(self: *const Question, out: []u8) !usize {
         const pos = try encodeName(out, self.name);
         if (pos + 4 > out.len) return error.NameTooLong;
-        std.mem.writeInt(u16, out[pos..][0..2], @intFromEnum(self.qtype), .big);
+        std.mem.writeInt(u16, out[pos..][0..2], @backingInt(self.qtype), .big);
         std.mem.writeInt(u16, out[pos + 2 ..][0 .. 4 - 2], self.qclass, .big);
         return pos + 4;
     }
@@ -175,7 +175,7 @@ pub const ResourceRecord = struct {
     rtype: RecordType,
     ttl: u32,
     /// For A/AAAA: raw address bytes (4 or 16). Otherwise empty.
-    addrBytes: [16]u8 = [_]u8{0} ** 16,
+    addrBytes: [16]u8 = (@as([16]u8, @splat(0))),
     addrLen: usize = 0,
 
     pub fn deinit(self: *ResourceRecord, allocator: Allocator) void {
@@ -219,7 +219,7 @@ pub fn parseResponse(allocator: Allocator, msg: []const u8) !Response {
     if (msg.len < HEADER_SIZE) return error.Truncated;
     const hdr = Header.read(msg[0..HEADER_SIZE]);
     const flagsRaw = hdr.flags;
-    const rcode: Rcode = @enumFromInt(@as(u4, @truncate(flagsRaw)));
+    const rcode: Rcode = @fromBackingInt(@intCast(@as(u4, @truncate(flagsRaw))));
 
     var answers = std.ArrayList(ResourceRecord).empty;
     errdefer answers.deinit(allocator);
@@ -256,7 +256,7 @@ pub fn parseResponse(allocator: Allocator, msg: []const u8) !Response {
 
         var rr = ResourceRecord{
             .name = name,
-            .rtype = @enumFromInt(rtypeRaw),
+            .rtype = @fromBackingInt(@intCast(rtypeRaw)),
             .ttl = ttl,
         };
 
@@ -399,7 +399,7 @@ pub fn resolveAAAA(allocator: std.mem.Allocator, io: std.Io, name: []const u8) !
 
     var nsAddr = netMod.IpAddress.parseIp6("::1", 53) catch blk: {
         // Fall back to the v4 loopback resolver stub if v6 parse unavailable.
-        break :blk netMod.IpAddress{ .v6 = .{ .bytes = [_]u8{0} ** 15 ++ [_]u8{1}, .port = 53, .flowLabel = 0, .scopeId = 0 } };
+        break :blk netMod.IpAddress{ .v6 = .{ .bytes = (@as([15]u8, @splat(0))) ++ [_]u8{1}, .port = 53, .flowLabel = 0, .scopeId = 0 } };
     };
     _ = &nsAddr;
     try sock.sendTo(&nsAddr, pkt);

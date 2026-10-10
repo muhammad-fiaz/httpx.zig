@@ -10,22 +10,53 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
+fn htmlHandler(_: *httpx.Context) anyerror!httpx.Response {
+    return .{
+        .status = 200,
+        .body =
+        \\<!DOCTYPE html>
+        \\<html>
+        \\<head><title>Httpx HTML Client Test</title></head>
+        \\<body>
+        \\  <h1>Welcome to Local HTML Test</h1>
+        \\  <p>Testing response.html() parsing end-to-end.</p>
+        \\  <a href="/about">About Us</a>
+        \\  <a href="/docs">Documentation</a>
+        \\</body>
+        \\</html>
+        ,
+        .contentType = "text/html; charset=utf-8",
+    };
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    std.debug.print("==> HTTPX HTML Client Demo (httpbun.com)\n\n", .{});
+    std.debug.print("==> HTTPX HTML Client Demo (local loopback)\n\n", .{});
+
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 1,
+    });
+    defer server.deinit();
+    try server.router.add(.GET, "/html", htmlHandler, .{});
+    const port = server.localPort();
+    const thread = try server.start();
+    defer thread.join();
 
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    // Fetch HTML from httpbun.com
-    var response = client.get("http://httpbun.com/html", .{}) catch |err| {
-        std.debug.print("Network fetch failed ({s}), demonstrating parser on response body mock...\n", .{@errorName(err)});
-        return;
-    };
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/html", .{port});
+
+    // Fetch HTML from local server
+    var response = try client.get(url, .{});
     defer response.deinit();
 
     std.debug.print("Status: {d}\n", .{response.status});

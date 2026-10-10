@@ -11,6 +11,7 @@
 //! of being downgraded.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const tcpMod = @import("../sockets/tcp.zig");
 const addressMod = @import("address.zig");
 const resolveMod = @import("resolve.zig");
@@ -33,6 +34,7 @@ const extMarker: u32 = 0x00000001;
 /// extension (the name is sent unresolved). Returns a Socket tunneled to
 /// `destHost:destPort` ready for app traffic.
 pub fn connect(
+    allocator: Allocator,
     io: std.Io,
     proxyHost: []const u8,
     proxyPort: u16,
@@ -40,11 +42,12 @@ pub fn connect(
     destPort: u16,
     userId: ?[]const u8,
 ) !tcpMod.Socket {
-    return connectInternal(io, proxyHost, proxyPort, destHost, destPort, userId, false);
+    return connectInternal(allocator, io, proxyHost, proxyPort, destHost, destPort, userId, false);
 }
 
 /// Connects with stream-backed socket handle (required for TLS encapsulation on Windows).
 pub fn connectStream(
+    allocator: Allocator,
     io: std.Io,
     proxyHost: []const u8,
     proxyPort: u16,
@@ -52,10 +55,11 @@ pub fn connectStream(
     destPort: u16,
     userId: ?[]const u8,
 ) !tcpMod.Socket {
-    return connectInternal(io, proxyHost, proxyPort, destHost, destPort, userId, true);
+    return connectInternal(allocator, io, proxyHost, proxyPort, destHost, destPort, userId, true);
 }
 
 fn connectInternal(
+    allocator: Allocator,
     io: std.Io,
     proxyHost: []const u8,
     proxyPort: u16,
@@ -74,9 +78,8 @@ fn connectInternal(
             break :blk tcpMod.connectAddress(io, &addr) catch return Error.ProxyConnectFailed;
         }
     } else |_| blk: {
-        const a = std.heap.page_allocator;
-        const addrs = (resolveMod.Resolver.init(a, io)).lookup(proxyHost, .{ .port = proxyPort }) catch return Error.ProxyConnectFailed;
-        defer a.free(addrs);
+        const addrs = (resolveMod.Resolver.init(allocator, io)).lookup(proxyHost, .{ .port = proxyPort }) catch return Error.ProxyConnectFailed;
+        defer allocator.free(addrs);
         if (addrs.len == 0) return Error.ProxyConnectFailed;
         for (addrs) |*raddr| {
             if (isStream) {
@@ -283,7 +286,7 @@ test "socks4 ipv4 connect sends ip and userid" {
     var mock = try MockSocks4Server.start(ctx.io, 0x5A);
     defer mock.deinit();
 
-    var sock = try connect(ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, "bob");
+    var sock = try connect(std.testing.allocator, ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, "bob");
     defer sock.close();
 
     try sock.writeAll("hello-socks4");
@@ -304,7 +307,7 @@ test "socks4a hostname forwarded unresolved" {
     var mock = try MockSocks4Server.start(ctx.io, 0x5A);
     defer mock.deinit();
 
-    var sock = try connect(ctx.io, "127.0.0.1", mock.port, "unresolvable-internal-domain.local", 443, null);
+    var sock = try connect(std.testing.allocator, ctx.io, "127.0.0.1", mock.port, "unresolvable-internal-domain.local", 443, null);
     defer sock.close();
 
     try std.testing.expect(mock.sawExtension);
@@ -320,7 +323,7 @@ test "socks4 reject maps to ProxyRequestRejected" {
     var mock = try MockSocks4Server.start(ctx.io, 0x5B);
     defer mock.deinit();
 
-    const res = connect(ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, null);
+    const res = connect(std.testing.allocator, ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, null);
     try std.testing.expectError(Error.ProxyRequestRejected, res);
 }
 
@@ -332,6 +335,6 @@ test "socks4 ipv6 destination is rejected loudly" {
     var mock = try MockSocks4Server.start(ctx.io, 0x5A);
     defer mock.deinit();
 
-    const res = connect(ctx.io, "127.0.0.1", mock.port, "::1", 80, null);
+    const res = connect(std.testing.allocator, ctx.io, "127.0.0.1", mock.port, "::1", 80, null);
     try std.testing.expectError(Error.AddressTypeUnsupported, res);
 }

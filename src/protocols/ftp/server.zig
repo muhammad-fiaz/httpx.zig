@@ -401,7 +401,7 @@ const Session = struct {
                 @as(u8, @intCast(values[1])),
                 @as(u8, @intCast(values[2])),
                 @as(u8, @intCast(values[3])),
-            } ++ .{0} ** 12,
+            } ++ @as([12]u8, @splat(0)),
         };
         if (self.passive) |*p| {
             p.close(self.io);

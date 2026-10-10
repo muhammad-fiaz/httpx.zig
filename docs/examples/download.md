@@ -24,8 +24,8 @@ pub fn main() !void {
     // 1. Download to a specific directory (automatically uses URL basename "1048576")
     const result1 = client.download(
         sampleUrl,
-        "downloads/",
         .{
+            .path = "downloads/",
             .progress = .enabled,
             .existing = .overwrite,
             .createDirs = true,
@@ -44,8 +44,8 @@ pub fn main() !void {
     // 2. Download with explicit custom destination filename
     const result2 = client.download(
         sampleUrl,
-        "downloads/custom_named_doc.bin",
         .{
+            .path = "downloads/custom_named_doc.bin",
             .progress = .enabled,
             .existing = .overwrite,
             .createDirs = true,
@@ -61,6 +61,16 @@ pub fn main() !void {
     });
 }
 ```
+
+## Expected Output
+
+```text
+==> Downloading https://httpbun.com/bytes/90 with zero-config progress bar...
+Downloaded with auto filename: downloads/90 (90 bytes in 123 ms)
+Downloaded with explicit filename: downloads/custom_named_doc.bin (90 bytes)
+```
+
+Byte counts (90 bytes in this example), elapsed milliseconds, and auto-derived filenames vary with the endpoint and timing; only the line format above is stable.
 
 ## How to Run
 

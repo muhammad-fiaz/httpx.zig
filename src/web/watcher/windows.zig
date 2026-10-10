@@ -140,7 +140,7 @@ pub const Backend = struct {
             null,
         );
         if (self.dirHandle == INVALID_HANDLE_VALUE) return error.WatchInitFailed;
-        const ev = CreateEventW(null, @enumFromInt(1), @enumFromInt(0), null);
+        const ev = CreateEventW(null, @fromBackingInt(@intCast(1)), @fromBackingInt(@intCast(0)), null);
         const evInt: usize = @intFromPtr(ev);
         if (evInt == 0) return error.WatchInitFailed;
         self.eventHandle = ev;
@@ -195,7 +195,7 @@ pub const Backend = struct {
                 self.dirHandle,
                 &self.buf,
                 self.buf.len,
-                @enumFromInt(1),
+                @fromBackingInt(@intCast(1)),
                 FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
                     FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
                     FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION,
@@ -203,7 +203,7 @@ pub const Backend = struct {
                 &self.overlapped,
                 null,
             );
-            if (@intFromEnum(started) == 0) {
+            if (@backingInt(started) == 0) {
                 if (windows.GetLastError() != .IO_PENDING) {
                     self.dirty = true;
                     return out.toOwnedSlice(allocator);
@@ -222,7 +222,7 @@ pub const Backend = struct {
             return out.toOwnedSlice(allocator);
         }
         var bytes: DWORD = 0;
-        if (@intFromEnum(GetOverlappedResult(self.dirHandle, &self.overlapped, &bytes, @enumFromInt(0))) == 0) {
+        if (@backingInt(GetOverlappedResult(self.dirHandle, &self.overlapped, &bytes, @fromBackingInt(@intCast(0)))) == 0) {
             if (windows.GetLastError() == .NOTIFY_ENUM_DIR) self.dirty = true;
             self.readPending = false;
             return out.toOwnedSlice(allocator);

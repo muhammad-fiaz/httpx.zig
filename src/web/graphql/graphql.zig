@@ -5,7 +5,7 @@
 //! - Lexer & Parser (parser.zig)
 //! - Schema, Type System, Resolvers, and Introspection (schema.zig)
 //! - HTTP Endpoint & Handler (server.zig)
-//! - GraphiQL 5.3.0 UI integration via `httpx.docs` or `httpx.graphql.mount`
+//! - GraphiQL 5.4.0 UI integration via `httpx.docs` or `httpx.graphql.mount`
 
 pub const ast = @import("ast.zig");
 pub const parser = @import("parser.zig");

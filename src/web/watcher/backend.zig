@@ -26,23 +26,64 @@ pub const OwnedWatchEvent = events.OwnedWatchEvent;
 pub const ReloadStrategy = events.ReloadStrategy;
 pub const WatcherConfig = Config;
 
+pub const BackendMode = enum {
+    auto,
+    native,
+    polling,
+};
+
+pub const BackendKind = enum {
+    windows,
+    linux,
+    macos,
+    bsd,
+    polling,
+    none,
+};
+
+pub const BackendCapabilities = struct {
+    native: bool,
+    preciseEvents: bool,
+    renameDetection: bool,
+    subtrees: bool,
+    overflowDetection: bool,
+};
+
+pub const WatcherStatus = enum {
+    initialized,
+    nativeActive,
+    pollingActive,
+    fallbackActivated,
+    overflowDetected,
+    reconciled,
+    stopped,
+};
+
+pub const StatusCallback = *const fn (status: WatcherStatus, detail: ?[]const u8, userData: ?*anyopaque) void;
+
 pub const Config = struct {
     dirPath: []const u8 = "",
     extensions: []const []const u8 = &.{},
     pollIntervalMs: u64 = 50,
     debounceMs: i64 = 50,
+    mode: BackendMode = .auto,
+    allowFallback: bool = true,
+    recursive: bool = true,
     /// Directory names pruned from the walk at any depth (generated trees).
     /// Empty disables pruning.
     ignoredDirs: []const []const u8 = &.{ "node_modules", ".git", ".zig-cache", "zig-out", "zig-pkg", ".cache", "dist" },
     /// Callback triggered when a file modification is detected.
     onChange: ?*const fn (event: WatchEvent, userData: ?*anyopaque) void = null,
+    /// Callback triggered on status / lifecycle transitions (e.g. backend selection, overflow, fallback).
+    onStatus: ?StatusCallback = null,
     userData: ?*anyopaque = null,
     /// Bounds for runaway trees (symlink cycles, huge monorepos).
     maxFiles: usize = 100_000,
     maxDepth: usize = 32,
 };
 
-const hasNative = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos;
+const hasNative = builtin.os.tag == .windows or builtin.os.tag == .linux or builtin.os.tag == .macos or
+    builtin.os.tag == .freebsd or builtin.os.tag == .openbsd or builtin.os.tag == .netbsd or builtin.os.tag == .dragonfly;
 
 const PlatformBackend = if (!hasNative)
     struct {}
@@ -64,6 +105,7 @@ pub const Watcher = struct {
     io: std.Io,
     config: Config,
     entries: std.StringHashMap(FileEntry),
+    trackedDirs: std.StringHashMap(void),
     mutex: sync.Spinlock = .{},
     running: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
@@ -89,6 +131,7 @@ pub const Watcher = struct {
             .io = io,
             .config = config,
             .entries = std.StringHashMap(FileEntry).init(allocator),
+            .trackedDirs = std.StringHashMap(void).init(allocator),
             .coalescer = .{ .windowMs = config.debounceMs },
         };
         errdefer w.deinit();
@@ -99,13 +142,27 @@ pub const Watcher = struct {
         while (w.next()) |_| {}
         w.clearCallbacks();
         w._change_count.store(0, .release);
-        w.startNative();
+
+        if (config.mode != .polling) {
+            w.startNative() catch |err| {
+                if (config.mode == .native and !config.allowFallback) {
+                    return err;
+                }
+                w.notifyStatus(.fallbackActivated, "native backend unavailable; fell back to polling");
+            };
+        }
+        if (w.native != null) {
+            w.notifyStatus(.nativeActive, null);
+        } else {
+            w.notifyStatus(.pollingActive, null);
+        }
         return w;
     }
 
     pub fn deinit(self: *Watcher) void {
         self.stop();
         self.stopNative();
+        self.notifyStatus(.stopped, null);
         self.mutex.lock();
         if (self.currentEvent) |*ev| {
             ev.deinit(self.allocator);
@@ -124,6 +181,11 @@ pub const Watcher = struct {
             self.allocator.free(entry.value_ptr.path);
         }
         self.entries.deinit();
+        var dit = self.trackedDirs.iterator();
+        while (dit.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.trackedDirs.deinit();
         self.mutex.unlock();
         self.allocator.destroy(self);
     }
@@ -133,23 +195,108 @@ pub const Watcher = struct {
         return self.native != null;
     }
 
-    fn startNative(self: *Watcher) void {
-        if (!hasNative) return;
+    pub fn getBackendKind(self: *const Watcher) BackendKind {
+        if (self.native != null) {
+            if (builtin.os.tag == .windows) return .windows;
+            if (builtin.os.tag == .linux) return .linux;
+            if (builtin.os.tag == .macos) return .macos;
+            if (builtin.os.tag == .freebsd or builtin.os.tag == .openbsd or builtin.os.tag == .netbsd or builtin.os.tag == .dragonfly) return .bsd;
+            return .polling;
+        }
+        return .polling;
+    }
+
+    pub fn getCapabilities(self: *const Watcher) BackendCapabilities {
+        const kind = self.getBackendKind();
+        return switch (kind) {
+            .windows => .{
+                .native = true,
+                .preciseEvents = true,
+                .renameDetection = true,
+                .subtrees = true,
+                .overflowDetection = true,
+            },
+            .linux => .{
+                .native = true,
+                .preciseEvents = true,
+                .renameDetection = true,
+                .subtrees = true,
+                .overflowDetection = true,
+            },
+            .macos, .bsd => .{
+                .native = true,
+                .preciseEvents = false,
+                .renameDetection = true,
+                .subtrees = true,
+                .overflowDetection = true,
+            },
+            .polling => .{
+                .native = false,
+                .preciseEvents = false,
+                .renameDetection = true,
+                .subtrees = self.config.recursive,
+                .overflowDetection = false,
+            },
+            .none => .{
+                .native = false,
+                .preciseEvents = false,
+                .renameDetection = false,
+                .subtrees = false,
+                .overflowDetection = false,
+            },
+        };
+    }
+
+    pub fn getActiveMode(self: *const Watcher) BackendMode {
+        if (self.native != null) return .native;
+        return .polling;
+    }
+
+    pub fn switchToPolling(self: *Watcher) !void {
+        if (self.native == null) return;
+        self.stopNative();
+        self.notifyStatus(.fallbackActivated, "explicit switch to polling backend");
+        _ = try self.reconcile();
+    }
+
+    pub fn reconcile(self: *Watcher) !bool {
+        _ = self.rescans.fetchAdd(1, .release);
+        const changed = try self.scan();
+        self.notifyStatus(.reconciled, null);
+        return changed;
+    }
+
+    pub fn reportOverflow(self: *Watcher) void {
+        self.dirty.store(true, .release);
+        self.notifyStatus(.overflowDetected, "event queue overflow detected; reconciliation scheduled");
+    }
+
+    fn notifyStatus(self: *Watcher, status: WatcherStatus, detail: ?[]const u8) void {
+        if (self.config.onStatus) |cb| {
+            cb(status, detail, self.config.userData);
+        }
+    }
+
+    fn startNative(self: *Watcher) !void {
+        if (!hasNative) {
+            self.nativeFailed = true;
+            return error.NativeWatchUnavailable;
+        }
         if (self.config.dirPath.len == 0) return;
         if (builtin.os.tag == .windows) {
-            self.native = windows.Backend.init(self.allocator, self.config.dirPath) catch {
+            self.native = windows.Backend.init(self.allocator, self.config.dirPath) catch |err| {
                 self.nativeFailed = true;
-                return;
+                return err;
             };
         } else if (builtin.os.tag == .linux) {
-            self.native = linux.Backend.init(self.allocator, self.io, self.config.dirPath) catch {
+            self.native = linux.Backend.init(self.allocator, self.io, self.config.dirPath) catch |err| {
                 self.nativeFailed = true;
-                return;
+                return err;
             };
-        } else if (builtin.os.tag == .macos) {
-            self.native = macos.Backend.init(self.allocator, self.io, self.config.dirPath) catch {
+        } else {
+            self.native = macos.Backend.init(self.allocator, self.io, self.config.dirPath) catch |err| {
                 self.nativeFailed = true;
-                return;
+                return err;
             };
         }
     }
@@ -160,7 +307,7 @@ pub const Watcher = struct {
             if (self.native) |*nb| nb.deinit();
         } else if (builtin.os.tag == .linux) {
             if (self.native) |*nb| nb.deinit();
-        } else if (builtin.os.tag == .macos) {
+        } else {
             if (self.native) |*nb| nb.deinit();
         }
         self.native = null;
@@ -284,6 +431,11 @@ pub const Watcher = struct {
             for (seen.items) |*f| self.allocator.free(f.path);
             seen.deinit(self.allocator);
         }
+        var seenDirs = std.ArrayList([]u8).empty;
+        defer {
+            for (seenDirs.items) |dp| self.allocator.free(dp);
+            seenDirs.deinit(self.allocator);
+        }
         if (self.config.dirPath.len > 0) {
             const cwd: std.Io.Dir = .cwd();
             var dir = cwd.openDir(io, self.config.dirPath, .{ .iterate = true }) catch null;
@@ -298,7 +450,13 @@ pub const Watcher = struct {
                         if (entry.depth() > self.config.maxDepth) continue;
                         if (entry.kind == .directory) {
                             if (self.isIgnoredPath(entry.path)) continue;
-                            w.enter(io, entry) catch continue;
+                            const fullDirPath = std.Io.Dir.path.join(self.allocator, &.{ self.config.dirPath, entry.path }) catch continue;
+                            seenDirs.append(self.allocator, fullDirPath) catch {
+                                self.allocator.free(fullDirPath);
+                            };
+                            if (self.config.recursive) {
+                                w.enter(io, entry) catch continue;
+                            }
                             continue;
                         }
                         if (entry.kind != .file) continue;
@@ -347,12 +505,52 @@ pub const Watcher = struct {
             seenSet.put(f.path, {}) catch continue;
         }
 
+        var seenDirSet = std.StringHashMap(void).init(self.allocator);
+        defer seenDirSet.deinit();
+        for (seenDirs.items) |dp| {
+            seenDirSet.put(dp, {}) catch continue;
+        }
+
         // Phase 2 (brief lock): diff scratch against tracked entries.
         self.mutex.lock();
         defer self.mutex.unlock();
 
         var changed = false;
-        for (seen.items) |*f| {
+
+        // Directory changes (created)
+        for (seenDirs.items) |dp| {
+            if (!self.trackedDirs.contains(dp)) {
+                const ownedDir = self.allocator.dupe(u8, dp) catch continue;
+                self.trackedDirs.put(ownedDir, {}) catch {
+                    self.allocator.free(ownedDir);
+                    continue;
+                };
+                changed = true;
+                self.notifyChangeFull(dp, null, .directoryCreated, true);
+            }
+        }
+
+        // Directory changes (deleted)
+        var deletedDirs = std.ArrayList([]const u8).empty;
+        defer deletedDirs.deinit(self.allocator);
+        var dirIt = self.trackedDirs.iterator();
+        while (dirIt.next()) |entry| {
+            if (!seenDirSet.contains(entry.key_ptr.*)) {
+                deletedDirs.append(self.allocator, entry.key_ptr.*) catch {};
+            }
+        }
+        for (deletedDirs.items) |delDir| {
+            if (self.trackedDirs.fetchRemove(delDir)) |kv| {
+                changed = true;
+                self.notifyChangeFull(delDir, null, .directoryDeleted, true);
+                self.allocator.free(kv.key);
+            }
+        }
+
+        var createdFiles = std.ArrayList(usize).empty;
+        defer createdFiles.deinit(self.allocator);
+
+        for (seen.items, 0..) |*f, idx| {
             if (self.entries.getPtr(f.path)) |val| {
                 if (val.mtimeNs != f.mtimeNs or val.size != f.size) {
                     val.mtimeNs = f.mtimeNs;
@@ -361,23 +559,11 @@ pub const Watcher = struct {
                     self.notifyChange(f.path, null, .modified);
                 }
             } else {
-                // New file detected; ownership moves into the map.
-                const ownedPath = self.allocator.dupe(u8, f.path) catch continue;
-                self.entries.put(ownedPath, .{
-                    .path = ownedPath,
-                    .mtimeNs = f.mtimeNs,
-                    .size = f.size,
-                }) catch {
-                    self.allocator.free(ownedPath);
-                    continue;
-                };
-                changed = true;
-                self.notifyChange(f.path, null, .created);
+                createdFiles.append(self.allocator, idx) catch {};
             }
         }
 
         // Tracked files absent from the walk (watchFile extras, deletions):
-        // stat once here — files covered by the walk are never re-statted.
         var deletedKeys = std.ArrayList([]const u8).empty;
         defer deletedKeys.deinit(self.allocator);
 
@@ -396,12 +582,46 @@ pub const Watcher = struct {
             }
         }
 
+        // Rename pairing: match deleted files with newly created files with identical size & mtime
         for (deletedKeys.items) |delPath| {
-            if (self.entries.fetchRemove(delPath)) |kv| {
+            const old = self.entries.get(delPath) orelse continue;
+            var pairIdx: ?usize = null;
+            for (createdFiles.items, 0..) |cIdx, ci| {
+                const f = &seen.items[cIdx];
+                if (f.size == old.size and f.mtimeNs == old.mtimeNs) {
+                    pairIdx = ci;
+                    break;
+                }
+            }
+            if (pairIdx) |ci| {
+                const cIdx = createdFiles.swapRemove(ci);
+                const newPath = seen.items[cIdx].path;
+                const oldOwned = self.allocator.dupe(u8, delPath) catch continue;
+                self.dropPathSilent(delPath);
+                self.ingestPath(newPath, .renamed);
+                self.emitRenameLocked(oldOwned, newPath);
+                self.allocator.free(oldOwned);
+                changed = true;
+            } else if (self.entries.fetchRemove(delPath)) |kv| {
                 changed = true;
                 self.notifyChange(delPath, null, .deleted);
                 self.allocator.free(kv.key);
             }
+        }
+
+        for (createdFiles.items) |cIdx| {
+            const f = &seen.items[cIdx];
+            const ownedPath = self.allocator.dupe(u8, f.path) catch continue;
+            self.entries.put(ownedPath, .{
+                .path = ownedPath,
+                .mtimeNs = f.mtimeNs,
+                .size = f.size,
+            }) catch {
+                self.allocator.free(ownedPath);
+                continue;
+            };
+            changed = true;
+            self.notifyChange(f.path, null, .created);
         }
 
         return changed;
@@ -641,7 +861,7 @@ pub const Watcher = struct {
             self.ingestWindows(evs);
             if (nb.dirty) {
                 nb.dirty = false;
-                self.dirty.store(true, .release);
+                self.reportOverflow();
             }
         } else if (builtin.os.tag == .linux) {
             const nb = &(self.native orelse return false);
@@ -657,7 +877,7 @@ pub const Watcher = struct {
             self.ingestLinux(evs);
             if (nb.dirty) {
                 nb.dirty = false;
-                self.dirty.store(true, .release);
+                self.reportOverflow();
             }
         } else if (builtin.os.tag == .macos) {
             const nb = &(self.native orelse return false);
@@ -673,12 +893,13 @@ pub const Watcher = struct {
             self.ingestMacos(evs);
             if (nb.dirty) {
                 nb.dirty = false;
-                self.dirty.store(true, .release);
+                self.reportOverflow();
             }
         }
         if (self.dirty.swap(false, .acq_rel)) {
             _ = self.rescans.fetchAdd(1, .release);
             _ = self.scan() catch false;
+            self.notifyStatus(.reconciled, "reconciled filesystem state after event overflow");
             return true;
         }
         return false;
@@ -1387,4 +1608,138 @@ test "stop joins the worker so no callback outlives the watcher" {
     try std.testing.expectEqual(@as(usize, 0), Counter.afterStop);
 
     watcher.deinit();
+}
+
+test "explicit polling mode and capabilities" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const StatusProbe = struct {
+        var sawPollingActive = false;
+        var sawStopped = false;
+
+        fn onStatus(status: WatcherStatus, _: ?[]const u8, _: ?*anyopaque) void {
+            if (status == .pollingActive) sawPollingActive = true;
+            if (status == .stopped) sawStopped = true;
+        }
+    };
+    StatusProbe.sawPollingActive = false;
+    StatusProbe.sawStopped = false;
+
+    var watcher = try Watcher.init(a, io, .{
+        .mode = .polling,
+        .onStatus = StatusProbe.onStatus,
+    });
+    defer watcher.deinit();
+
+    try std.testing.expectEqual(BackendMode.polling, watcher.getActiveMode());
+    try std.testing.expectEqual(BackendKind.polling, watcher.getBackendKind());
+    try std.testing.expect(!watcher.usingNative());
+    const caps = watcher.getCapabilities();
+    try std.testing.expect(!caps.native);
+    try std.testing.expect(caps.renameDetection);
+    try std.testing.expect(StatusProbe.sawPollingActive);
+}
+
+test "polling scan detects directory creation and deletion" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var pathBuf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-dir-{d}", .{clock.millisNow()});
+    {
+        const cwd: std.Io.Dir = .cwd();
+        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
+        cwd.createDir(io, root, .default_dir) catch {};
+    }
+    defer cleanupTestDir(io, root);
+
+    var watcher = try Watcher.init(a, io, .{
+        .dirPath = root,
+        .mode = .polling,
+    });
+    defer watcher.deinit();
+
+    var subBuf: [512]u8 = undefined;
+    const subPath = try std.fmt.bufPrint(&subBuf, "{s}/new_dir", .{root});
+    {
+        const cwd: std.Io.Dir = .cwd();
+        try cwd.createDir(io, subPath, .default_dir);
+    }
+
+    const changed = try watcher.scan();
+    try std.testing.expect(changed);
+
+    var sawDirCreated = false;
+    while (watcher.next()) |e| {
+        if (e.kind == .directoryCreated and e.isDirectory) {
+            sawDirCreated = true;
+            break;
+        }
+    }
+    try std.testing.expect(sawDirCreated);
+
+    // Now delete directory
+    {
+        const cwd: std.Io.Dir = .cwd();
+        try cwd.deleteDir(io, subPath);
+    }
+
+    const changedDel = try watcher.scan();
+    try std.testing.expect(changedDel);
+
+    var sawDirDeleted = false;
+    while (watcher.next()) |e| {
+        if (e.kind == .directoryDeleted and e.isDirectory) {
+            sawDirDeleted = true;
+            break;
+        }
+    }
+    try std.testing.expect(sawDirDeleted);
+}
+
+test "polling scan pairs renames when file size and mtime match" {
+    const fsMod = @import("../../utils/fs.zig");
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var pathBuf: [256]u8 = undefined;
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-poll-rename-{d}", .{clock.millisNow()});
+    {
+        const cwd: std.Io.Dir = .cwd();
+        cwd.createDir(io, ".zig-cache", .default_dir) catch {};
+        cwd.createDir(io, root, .default_dir) catch {};
+    }
+    defer cleanupTestDir(io, root);
+
+    var watcher = try Watcher.init(a, io, .{
+        .dirPath = root,
+        .mode = .polling,
+    });
+    defer watcher.deinit();
+
+    var abuf: [512]u8 = undefined;
+    var bbuf: [512]u8 = undefined;
+    const apath = try std.fmt.bufPrint(&abuf, "{s}/file_a.txt", .{root});
+    const bpath = try std.fmt.bufPrint(&bbuf, "{s}/file_b.txt", .{root});
+    try fsMod.writeFile(apath, "consistent payload for rename pairing");
+
+    _ = try watcher.scan();
+    while (watcher.next()) |_| {}
+
+    // Atomic filesystem rename preserves timestamps and file size
+    {
+        const cwd: std.Io.Dir = .cwd();
+        try cwd.rename(apath, cwd, bpath, io);
+    }
+
+    const changed = try watcher.scan();
+    try std.testing.expect(changed);
+
+    var sawRename = false;
+    while (watcher.next()) |e| {
+        if (e.kind == .renamed and e.oldPath != null) {
+            sawRename = true;
+            break;
+        }
+    }
+    try std.testing.expect(sawRename);
 }

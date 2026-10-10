@@ -76,26 +76,26 @@ pub fn encode(out: *std.ArrayList(u8), gpa: Allocator, p: Params) !void {
     if (p.activeConnectionIdLimit < 2) return Error.InvalidParameter;
     // Only emit non-default values where the spec allows omission.
     if (p.maxIdleTimeoutMs != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.maxIdleTimeout), &u64be(p.maxIdleTimeoutMs));
-    try putParam(out, gpa, @intFromEnum(ParamId.maxUdpPayloadSize), &u64be(p.maxUdpPayloadSize));
+        try putParam(out, gpa, @backingInt(ParamId.maxIdleTimeout), &u64be(p.maxIdleTimeoutMs));
+    try putParam(out, gpa, @backingInt(ParamId.maxUdpPayloadSize), &u64be(p.maxUdpPayloadSize));
     if (p.initialMaxData != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initialMaxData), &u64be(p.initialMaxData));
+        try putParam(out, gpa, @backingInt(ParamId.initialMaxData), &u64be(p.initialMaxData));
     if (p.initialMaxStreamDataBidiLocal != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initialMaxStreamDataBidiLocal), &u64be(p.initialMaxStreamDataBidiLocal));
+        try putParam(out, gpa, @backingInt(ParamId.initialMaxStreamDataBidiLocal), &u64be(p.initialMaxStreamDataBidiLocal));
     if (p.initialMaxStreamDataBidiRemote != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initialMaxStreamDataBidiRemote), &u64be(p.initialMaxStreamDataBidiRemote));
+        try putParam(out, gpa, @backingInt(ParamId.initialMaxStreamDataBidiRemote), &u64be(p.initialMaxStreamDataBidiRemote));
     if (p.initialMaxStreamDataUni != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initialMaxStreamDataUni), &u64be(p.initialMaxStreamDataUni));
+        try putParam(out, gpa, @backingInt(ParamId.initialMaxStreamDataUni), &u64be(p.initialMaxStreamDataUni));
     if (p.initialMaxStreamsBidi != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initialMaxStreamsBidi), &u64be(p.initialMaxStreamsBidi));
+        try putParam(out, gpa, @backingInt(ParamId.initialMaxStreamsBidi), &u64be(p.initialMaxStreamsBidi));
     if (p.initialMaxStreamsUni != 0)
-        try putParam(out, gpa, @intFromEnum(ParamId.initialMaxStreamsUni), &u64be(p.initialMaxStreamsUni));
+        try putParam(out, gpa, @backingInt(ParamId.initialMaxStreamsUni), &u64be(p.initialMaxStreamsUni));
     if (p.ackDelayExponent != 3)
-        try putParam(out, gpa, @intFromEnum(ParamId.ackDelayExponent), &u64be(p.ackDelayExponent));
+        try putParam(out, gpa, @backingInt(ParamId.ackDelayExponent), &u64be(p.ackDelayExponent));
     if (p.maxAckDelayMs != 25)
-        try putParam(out, gpa, @intFromEnum(ParamId.maxAckDelay), &u64be(p.maxAckDelayMs));
+        try putParam(out, gpa, @backingInt(ParamId.maxAckDelay), &u64be(p.maxAckDelayMs));
     if (p.activeConnectionIdLimit != 2)
-        try putParam(out, gpa, @intFromEnum(ParamId.activeConnectionIdLimit), &u64be(p.activeConnectionIdLimit));
+        try putParam(out, gpa, @backingInt(ParamId.activeConnectionIdLimit), &u64be(p.activeConnectionIdLimit));
 }
 
 fn dv(data: []const u8, pos: *usize) Error!u64 {
@@ -108,7 +108,7 @@ fn dv(data: []const u8, pos: *usize) Error!u64 {
 /// duplicate known IDs rejected.
 pub fn decode(data: []const u8) Error!Params {
     var p: Params = .{};
-    var seen = std.StaticBitSet(17).initEmpty();
+    var seen = std.StaticBitSet(17).empty;
     var pos: usize = 0;
 
     while (pos < data.len) {
@@ -117,10 +117,10 @@ pub fn decode(data: []const u8) Error!Params {
         const len = std.math.cast(usize, lenRaw) orelse return Error.InvalidParameter;
         if (pos > data.len or len > data.len - pos) return Error.Truncated;
 
-        const id: ParamId = @enumFromInt(idRaw);
-        if (@intFromEnum(id) < 17) {
-            if (seen.isSet(@intCast(@intFromEnum(id)))) return Error.DuplicateParameter;
-            seen.set(@intCast(@intFromEnum(id)));
+        const id: ParamId = @fromBackingInt(@intCast(idRaw));
+        if (@backingInt(id) < 17) {
+            if (seen.isSet(@intCast(@backingInt(id)))) return Error.DuplicateParameter;
+            seen.set(@intCast(@backingInt(id)));
         }
 
         switch (id) {
@@ -287,22 +287,22 @@ test "validation bounds reject hostile values" {
         }
     };
     {
-        const bad = try mk.enc(@intFromEnum(ParamId.maxUdpPayloadSize), 1199);
+        const bad = try mk.enc(@backingInt(ParamId.maxUdpPayloadSize), 1199);
         defer std.testing.allocator.free(bad);
         try std.testing.expectError(Error.InvalidParameter, decode(bad));
     }
     {
-        const bad = try mk.enc(@intFromEnum(ParamId.ackDelayExponent), 21);
+        const bad = try mk.enc(@backingInt(ParamId.ackDelayExponent), 21);
         defer std.testing.allocator.free(bad);
         try std.testing.expectError(Error.InvalidParameter, decode(bad));
     }
     {
-        const bad = try mk.enc(@intFromEnum(ParamId.maxAckDelay), 1 << 14);
+        const bad = try mk.enc(@backingInt(ParamId.maxAckDelay), 1 << 14);
         defer std.testing.allocator.free(bad);
         try std.testing.expectError(Error.InvalidParameter, decode(bad));
     }
     {
-        const bad = try mk.enc(@intFromEnum(ParamId.activeConnectionIdLimit), 1);
+        const bad = try mk.enc(@backingInt(ParamId.activeConnectionIdLimit), 1);
         defer std.testing.allocator.free(bad);
         try std.testing.expectError(Error.InvalidParameter, decode(bad));
     }

@@ -22,16 +22,25 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var res = try client.fetch("https://httpbun.com/post", .{
+    var response = try client.fetch("https://httpbun.com/post", .{
         .method = .POST,
-        .json = CreateUser{ .name = "httpx", .role = "demo" },
+        .json = CreateUser{ .name = "Alice", .role = "developer" },
     });
-    defer res.deinit();
+    defer response.deinit();
 
-    std.debug.print("status={d}\n", .{res.status});
-    std.debug.print("json={s}\n", .{res.bytes()});
+    std.debug.print("Status: {d}\n", .{response.status});
+    std.debug.print("Body: {s}\n", .{response.bytes()});
 }
 ```
+
+## Expected Output
+
+```text
+Status: 200
+Body: {"json":{"name":"Alice","role":"developer"},...}
+```
+
+The status code and echoed body depend on the remote server's response; the body shape varies with what the server echoes back.
 
 ## Run
 

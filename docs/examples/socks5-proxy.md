@@ -20,6 +20,18 @@ defer response.deinit();
 `socks5h://` delegates hostname resolution to the proxy; `socks5://`
 resolves locally. `http://` selects an HTTP forward proxy.
 
+## Expected Output
+
+The snippet itself prints nothing; `examples/proxyDemo.zig` prints lines
+in this format (representative values shown):
+
+```text
+Status: 200
+Body length: 512
+```
+
+On failure it prints `Proxy request failed: <ErrorName>`. Statuses, lengths, and error names vary with the proxy and target.
+
 ## Run
 
 ```bash

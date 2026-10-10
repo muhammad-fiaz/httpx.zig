@@ -58,6 +58,11 @@ pub fn defaultPort(scheme: []const u8) u16 {
     return 0;
 }
 
+const parseMod = @import("parse.zig");
+
+pub const QueryIterator = parseMod.QueryIterator;
+pub const lookupQuery = parseMod.lookupQuery;
+
 /// Parses a URI from `input`. The returned Uri references slices of `input`.
 pub fn parse(input: []const u8) !Uri {
     var uri = Uri{};
@@ -94,31 +99,15 @@ pub fn parse(input: []const u8) !Uri {
     const authorityStr = rest[0..authorityEnd];
 
     // Userinfo
+    var hostAndPort = authorityStr;
     if (std.mem.lastIndexOfScalar(u8, authorityStr, '@')) |idx| {
         uri.userinfo = authorityStr[0..idx];
-        uri.host = authorityStr[idx + 1 ..];
-    } else {
-        uri.host = authorityStr;
+        hostAndPort = authorityStr[idx + 1 ..];
     }
 
-    // Port  handle both regular hosts and bracketed IPv6 literals
-    if (uri.host.len > 0 and uri.host[0] == '[') {
-        // IPv6 literal: [::1]:8080
-        if (std.mem.indexOfScalar(u8, uri.host, ']')) |close| {
-            const inner = uri.host[1..close]; // strip [ ]
-            const after = uri.host[close + 1 ..];
-            uri.host = inner;
-            if (after.len > 0 and after[0] == ':') {
-                uri.port = std.fmt.parseInt(u16, after[1..], 10) catch return error.InvalidUri;
-            }
-        }
-    } else {
-        // Regular hostname or bare IPv4
-        if (std.mem.lastIndexOfScalar(u8, uri.host, ':')) |idx| {
-            uri.port = std.fmt.parseInt(u16, uri.host[idx + 1 ..], 10) catch return error.InvalidUri;
-            uri.host = uri.host[0..idx];
-        }
-    }
+    const auth = parseMod.parseAuthority(hostAndPort) orelse return error.InvalidUri;
+    uri.host = auth.host;
+    if (auth.port) |p| uri.port = p;
 
     // Path
     uri.path = rest[authorityEnd..];
@@ -128,79 +117,19 @@ pub fn parse(input: []const u8) !Uri {
 }
 
 fn isIpv6Literal(host: []const u8) bool {
-    // IPv6 literals are wrapped in brackets: [::1]:8080
     return host.len > 0 and host[0] == '[';
 }
 
 /// Percent-decodes a string in place into `buf`. Returns decoded slice or error if truncated.
-pub fn percentDecode(buf: []u8, input: []const u8) ![]const u8 {
-    if (input.len > buf.len * 3) return error.BufferTooSmall;
-    var out: usize = 0;
-    var i: usize = 0;
-    while (i < input.len) {
-        if (out >= buf.len) return error.BufferTooSmall;
-        if (input[i] == '%') {
-            if (i + 2 >= input.len) {
-                buf[out] = input[i];
-                out += 1;
-                i += 1;
-                continue;
-            }
-            const hi = std.fmt.charToDigit(input[i + 1], 16) catch {
-                buf[out] = input[i];
-                out += 1;
-                i += 1;
-                continue;
-            };
-            const lo = std.fmt.charToDigit(input[i + 2], 16) catch {
-                buf[out] = input[i];
-                out += 1;
-                i += 1;
-                continue;
-            };
-            buf[out] = (hi << 4) | lo;
-            out += 1;
-            i += 3;
-        } else {
-            buf[out] = input[i];
-            out += 1;
-            i += 1;
-        }
-    }
-    return buf[0..out];
-}
+pub const percentDecode = parseMod.percentDecode;
 
 /// Percent-encodes a string into `buf` (RFC 3986 unreserved set kept as-is).
-/// Encoded output never exceeds `3 * input.len` bytes; errors BufferTooSmall
-/// when `buf` is too short. Suitable for path segments, where `/` must
-/// always be encoded, and for query values.
-pub fn percentEncode(buf: []u8, input: []const u8) ![]const u8 {
-    const hexd = "0123456789ABCDEF";
-    if (input.len > buf.len) {
-        var need: usize = 0;
-        for (input) |c| need += if (isUnreserved(c)) 1 else 3;
-        if (need > buf.len) return error.BufferTooSmall;
-    }
-    var out: usize = 0;
-    for (input) |c| {
-        if (isUnreserved(c)) {
-            if (out >= buf.len) return error.BufferTooSmall;
-            buf[out] = c;
-            out += 1;
-        } else {
-            if (out + 3 > buf.len) return error.BufferTooSmall;
-            buf[out] = '%';
-            buf[out + 1] = hexd[c >> 4];
-            buf[out + 2] = hexd[c & 15];
-            out += 3;
-        }
-    }
-    return buf[0..out];
-}
+pub const percentEncode = parseMod.percentEncode;
 
-fn isUnreserved(c: u8) bool {
-    return std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~';
-}
+pub const isUnreserved = parseMod.isUnreservedChar;
+
+/// Percent-encodes into an owned slice in a single pass.
+pub const percentEncodeAlloc = parseMod.percentEncodeAlloc;
 
 /// Checks whether a path contains traversal sequences after decoding.
 pub fn hasPathTraversal(decodedPath: []const u8) bool {

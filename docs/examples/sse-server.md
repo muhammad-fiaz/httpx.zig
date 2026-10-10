@@ -36,9 +36,9 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [128]u8 = undefined;
-    const url_events = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/events", .{port});
-    var res = try client.get(url_events, .{});
+    var urlBuf: [128]u8 = undefined;
+    const urlEvents = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/events", .{port});
+    var res = try client.get(urlEvents, .{});
     std.debug.print("GET /events -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
@@ -47,10 +47,41 @@ pub fn main() !void {
     std.debug.print("SSE server verification completed successfully.\n", .{});
 }
 
-fn sseHandler(_: *httpx.Context) anyerror!httpx.Response {
-    return .{ .status = 200, .body = "<h1>SSE endpoint</h1><p>EventSource clients can subscribe here.</p>", .contentType = "text/html" };
+fn sseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    var out = std.ArrayList(u8).empty;
+    var writer = httpx.sse.Writer.EventWriter.init(ctx.allocator);
+    try writer.writeEvent(&out, &[_][]const u8{"Connected to SSE live stream"}, "status", 1, 5000);
+    try writer.writeEvent(&out, &[_][]const u8{"First data packet"}, "message", 2, null);
+
+    return .{
+        .status = 200,
+        .body = out.items,
+        .contentType = "text/event-stream; charset=utf-8",
+        .headers = try ctx.allocator.dupe(httpx.router.Header, &[_]httpx.router.Header{
+            .{ .name = "Cache-Control", .value = "no-cache" },
+            .{ .name = "Connection", .value = "keep-alive" },
+        }),
+    };
 }
 ```
+
+## Expected Output
+
+```text
+SSE server running on http://127.0.0.1:41237
+GET /events -> status=200, body=retry:5000
+id:1
+event:status
+data:Connected to SSE live stream
+
+id:2
+event:message
+data:First data packet
+
+SSE server verification completed successfully.
+```
+
+Statuses, event payloads, ids, retry intervals, URLs, and ports vary with the handler logic and the ephemeral port selected at runtime.
 
 ## How to Run
 

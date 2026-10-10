@@ -4,7 +4,7 @@ Multipart bodies with `httpx.multipart.encoder.Multipart`, parsed back with
 `httpx.multipart.parser`. See `examples/multipart.zig`.
 
 ```zig
-var form = httpx.multipart.encoder.Multipart.init(allocator);
+var form = httpx.multipart.encoder.Multipart.init(allocator, .formData);
 defer form.deinit();
 
 try form.field("username", "alice");
@@ -46,6 +46,15 @@ defer res.deinit();
 ```
 
 Boundary extraction: `httpx.multipart.parser.extractBoundary(contentType)`.
+
+## Expected Output
+
+```text
+Part: username, Content-Type: text/plain, Data Size: 5
+Part: avatar, Content-Type: image/png, Data Size: 4
+```
+
+Part names, content types, and data sizes reflect the fields added to the form; they vary with the encoded payload.
 
 ## Run
 

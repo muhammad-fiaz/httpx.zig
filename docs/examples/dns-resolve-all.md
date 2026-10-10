@@ -49,6 +49,18 @@ pub fn main() !void {
 }
 ```
 
+## Expected Output
+
+```text
+Found 2 candidate address(es):
+  [0] 54.147.165.56:443 (ipv4)
+  [1] 34.231.23.46:443 (ipv4)
+
+Direct IP target: 127.0.0.1:8080
+```
+
+Candidate counts, addresses, families, and ordering vary by network, DNS records, and time; only the line format above is stable. The `127.0.0.1:8080` line is fixed because IP literals bypass DNS.
+
 ## Related
 
 * [Guide: DNS Resolution](/guide/dns)

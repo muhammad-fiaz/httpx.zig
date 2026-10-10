@@ -452,7 +452,7 @@ test "Engine renders safely under concurrent load" {
             out.* = std.testing.allocator.dupe(u8, list.items) catch null;
         }
     };
-    var outs: [8]?[]const u8 = .{null} ** 8;
+    var outs: [8]?[]const u8 = @splat(null);
     defer for (outs) |o| {
         if (o) |s| alloc.free(s);
     };

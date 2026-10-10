@@ -22,6 +22,18 @@ batches and `isOnline` / `checkConnectivity` probes. Downloads, GraphQL,
 and DNS live on the client namespace (`client.download`,
 `client.graphql`, `client.resolve`, `client.resolveUrl`).
 
+## Expected Output
+
+The helpers print nothing themselves; `examples/simpleGet.zig` prints
+lines in this format (representative values shown):
+
+```text
+Status: 200
+Body: {"args":{},"headers":{"Host":"httpbun.com"},"url":"https://httpbun.com/get"}
+```
+
+Status codes and bodies vary with the target URL and verb.
+
 ## Run
 
 ```bash

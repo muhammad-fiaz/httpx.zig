@@ -20,7 +20,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // HTTP/1.0 request
-    var response = try client.get("http://httpbun.com/get", .{
+    var response = try client.get("https://httpbun.com/get", .{
         .httpVersion = .http10,
     });
     defer response.deinit();
@@ -28,6 +28,14 @@ pub fn main() !void {
     std.debug.print("Status: {d}\n", .{response.status});
 }
 ```
+
+## Expected Output
+
+```text
+Status: 200
+```
+
+Status code varies with the remote endpoint and network (200 on success).
 
 ## How to Run
 

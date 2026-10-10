@@ -104,7 +104,7 @@ pub const Backend = struct {
     }
 
     fn watchDir(self: *Backend, path: []const u8) void {
-        const cpath = self.allocator.dupeZ(u8, path) catch return;
+        const cpath = self.allocator.dupeSentinel(u8, path, 0) catch return;
         defer self.allocator.free(cpath);
         const wd: i32 = syscallFd(linux.inotify_add_watch(self.fd, cpath, WATCH_MASK | IN_ONLYDIR)) catch return;
         if (self.watches.getPtr(wd)) |old| {

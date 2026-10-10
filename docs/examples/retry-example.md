@@ -14,6 +14,17 @@ defer client.deinit();
 
 Set `.maxRetries = 0` (the default) to disable retries.
 
+## Expected Output
+
+The configuration snippet itself prints nothing; `examples/retryDemo.zig`
+prints lines in this format (representative values shown):
+
+```text
+Status: 200
+```
+
+On failure it prints `Attempt 1 failed: <ErrorName>` per attempt and finally `All retries exhausted`. Status codes, attempt counts, and error names vary with network conditions.
+
 ## Run
 
 ```bash

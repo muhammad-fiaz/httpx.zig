@@ -37,9 +37,9 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [128]u8 = undefined;
-    const url_parse = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/parse", .{port});
-    var res = try client.post(url_parse, .{ .body = "{\"test\":123}" });
+    var urlBuf: [128]u8 = undefined;
+    const urlParse = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/parse", .{port});
+    var res = try client.post(urlParse, .{ .body = "{\"test\":123}" });
     std.debug.print("POST /api/parse -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
@@ -62,6 +62,16 @@ fn parseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     });
 }
 ```
+
+## Expected Output
+
+```text
+Body parser server running on http://127.0.0.1:54321
+POST /api/parse -> status=200, body={"received":true,"length":12}
+Body parser server verification completed successfully.
+```
+
+The port is ephemeral so it varies on every run; the body length reflects the 12-byte `{"test":123}` payload sent by the example client.
 
 ## How to Run
 

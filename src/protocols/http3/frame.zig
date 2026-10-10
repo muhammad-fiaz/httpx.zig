@@ -57,7 +57,7 @@ pub const FrameType = enum(u64) {
     _,
 
     pub fn fromInt(v: u64) FrameType {
-        return @enumFromInt(v);
+        return @fromBackingInt(@intCast(v));
     }
 };
 
@@ -467,9 +467,9 @@ test "codec errors map to connection error codes" {
     try std.testing.expectEqual(H3Error.internalError, mapCodecError(Error.OutOfMemory));
     try std.testing.expectEqual(H3Error.internalError, mapCodecError(Error.BufferTooSmall));
     // H3Error values are the QUIC application wire codes.
-    try std.testing.expectEqual(@as(u64, 0x0105), @intFromEnum(H3Error.frameUnexpected));
-    try std.testing.expectEqual(@as(u64, 0x0100), @intFromEnum(H3Error.noError));
-    try std.testing.expectEqual(@as(u64, 0x0201), @intFromEnum(H3Error.qpackEncoderStreamError));
+    try std.testing.expectEqual(@as(u64, 0x0105), @backingInt(H3Error.frameUnexpected));
+    try std.testing.expectEqual(@as(u64, 0x0100), @backingInt(H3Error.noError));
+    try std.testing.expectEqual(@as(u64, 0x0201), @backingInt(H3Error.qpackEncoderStreamError));
 }
 
 test "frame header codec reports exhaustion" {

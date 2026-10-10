@@ -19,7 +19,7 @@ pub fn main() !void {
 
     // HTTP proxy (if you have one running)
     // Note: proxy config is set on the request, not client
-    var response = client.get("http://httpbun.com/get", .{}) catch |err| {
+    var response = client.get("https://httpbun.com/get", .{}) catch |err| {
         std.debug.print("Proxy request failed: {s}\n", .{@errorName(err)});
         return;
     };
@@ -29,6 +29,15 @@ pub fn main() !void {
     std.debug.print("Body length: {d}\n", .{response.body.len});
 }
 ```
+
+## Expected Output
+
+```text
+Status: 200
+Body length: 1234
+```
+
+The status code and body length depend on the remote server's response; on proxy failure the program prints `Proxy request failed: <ErrorName>` and returns instead.
 
 ## How to Run
 

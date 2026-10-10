@@ -21,12 +21,20 @@ pub fn main() !void {
     defer client.deinit();
 
     // Follows redirects automatically
-    var response = try client.get("http://httpbun.com/redirect/2", .{});
+    var response = try client.get("https://httpbun.com/redirect/2", .{});
     defer response.deinit();
 
     std.debug.print("Final Status: {d}\n", .{response.status});
 }
 ```
+
+## Expected Output
+
+```text
+Final Status: 200
+```
+
+The status code reflects the final response after following redirects and varies with the target URL and redirect chain.
 
 ## How to Run
 

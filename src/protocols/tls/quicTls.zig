@@ -42,7 +42,7 @@ fn emptyHash() [32]u8 {
 
 /// Derives Early Secret from a PSK (RFC 8446 Section 7.1).
 pub fn earlySecret(psk: [32]u8) [32]u8 {
-    const zero: [32]u8 = .{0} ** 32;
+    const zero: [32]u8 = @splat(0);
     return HkdfSha256.extract(&zero, &psk);
 }
 
@@ -91,7 +91,7 @@ pub fn handshakeKeysWithEarly(earlySec: [32]u8, sharedSecret: [32]u8, chShHash: 
 /// Section 7.2): early=Extract(0,0); derived=Derive(early,"derived","").
 /// hs=Extract(derived,shared); c/s hs traffic=Derive(hs,...,hash).
 pub fn handshakeKeys(sharedSecret: [32]u8, chShHash: [32]u8) HandshakeKeysResult {
-    const zero: [32]u8 = .{0} ** 32;
+    const zero: [32]u8 = @splat(0);
     const early = earlySecret(zero);
     return handshakeKeysWithEarly(early, sharedSecret, chShHash);
 }
@@ -102,7 +102,7 @@ pub fn handshakeKeys(sharedSecret: [32]u8, chShHash: [32]u8) HandshakeKeysResult
 pub fn applicationKeys(hsSecret: [32]u8, chSfHash: [32]u8) struct { apSecret: [32]u8, keys: LevelKeys } {
     const eh = emptyHash();
     const derived = qcrypto.deriveSecretWithContext(hsSecret, "derived", &eh);
-    const zero: [32]u8 = .{0} ** 32;
+    const zero: [32]u8 = @splat(0);
     const master = HkdfSha256.extract(&derived, &zero);
     const cAp = qcrypto.deriveSecretWithContext(master, "c ap traffic", &chSfHash);
     const sAp = qcrypto.deriveSecretWithContext(master, "s ap traffic", &chSfHash);
@@ -126,8 +126,8 @@ test "handshake -> application chain is deterministic and symmetric" {
     var shared: [32]u8 = undefined;
     var prng = std.Random.DefaultPrng.init(0xA11CE);
     prng.random().bytes(&shared);
-    const h1: [32]u8 = .{0x11} ** 32;
-    const h2: [32]u8 = .{0x22} ** 32;
+    const h1: [32]u8 = @splat(0x11);
+    const h2: [32]u8 = @splat(0x22);
 
     const hs = handshakeKeys(shared, h1);
     // Client/server secrets differ but derive from one chain point.
@@ -150,7 +150,7 @@ test "handshake -> application chain is deterministic and symmetric" {
 }
 
 test "key update chains forward without reusing old secrets" {
-    var s: [32]u8 = .{7} ** 32;
+    var s: [32]u8 = @splat(7);
     const k1 = updateSecret(s);
     const k2 = updateSecret(k1);
     try std.testing.expect(!std.mem.eql(u8, &s, &k1));
@@ -158,12 +158,12 @@ test "key update chains forward without reusing old secrets" {
 }
 
 test "0-RTT earlyKeys derives keys and chains into handshake and application keys" {
-    const psk: [32]u8 = .{0xAA} ** 32;
-    const chHash: [32]u8 = .{0x12} ** 32;
+    const psk: [32]u8 = @splat(0xAA);
+    const chHash: [32]u8 = @splat(0x12);
     const early = earlyKeys(psk, chHash);
 
     // Early secret and client early traffic secret are not all-zero and distinct
-    const zero: [32]u8 = .{0} ** 32;
+    const zero: [32]u8 = @splat(0);
     try std.testing.expect(!std.mem.eql(u8, &early.earlySec, &zero));
     try std.testing.expect(!std.mem.eql(u8, &early.cEarlySecret, &zero));
     try std.testing.expect(!std.mem.eql(u8, &early.earlySec, &early.cEarlySecret));
@@ -173,12 +173,12 @@ test "0-RTT earlyKeys derives keys and chains into handshake and application key
     try std.testing.expectEqual(@as(usize, 16), early.keys.hpLen);
 
     // Chaining: earlySecret -> handshakeKeysWithEarly -> applicationKeys
-    const shared: [32]u8 = .{0xBB} ** 32;
-    const chShHash: [32]u8 = .{0x34} ** 32;
+    const shared: [32]u8 = @splat(0xBB);
+    const chShHash: [32]u8 = @splat(0x34);
     const hs = handshakeKeysWithEarly(early.earlySec, shared, chShHash);
     try std.testing.expect(!std.mem.eql(u8, &hs.hsSecret, &early.earlySec));
 
-    const chSfHash: [32]u8 = .{0x56} ** 32;
+    const chSfHash: [32]u8 = @splat(0x56);
     const ap = applicationKeys(hs.hsSecret, chSfHash);
     try std.testing.expect(!std.mem.eql(u8, &ap.apSecret, &hs.hsSecret));
 }

@@ -10,7 +10,7 @@ Demonstrates browserDemoServer.zig using the canonical HTTPX API.
 const std = @import("std");
 const httpx = @import("httpx");
 
-const html_v1 =
+const htmlV1 =
     \\<!DOCTYPE html>
     \\<html lang="en">
     \\<head>
@@ -44,7 +44,7 @@ const html_v1 =
     \\      <a id="link-robots" href="/robots.txt" target="_blank">robots.txt</a>
     \\    </div>
     \\  </div>
-    \\  &lt;script&gt;
+    \\  <script>
     \\    async function loadStatus() {
     \\      try {
     \\        const res = await fetch('/api/status');
@@ -54,12 +54,12 @@ const html_v1 =
     \\        document.getElementById('status-output').textContent = 'Error: ' + err.message;
     \\      }
     \\    }
-    \\  &lt;/script&gt;
+    \\  </script>
     \\</body>
     \\</html>
 ;
 
-const html_v2 =
+const htmlV2 =
     \\<!DOCTYPE html>
     \\<html lang="en">
     \\<head>
@@ -85,25 +85,25 @@ const html_v2 =
     \\    <button id="btn-status" onclick="loadStatus()">Fetch Server Status</button>
     \\    <pre id="status-output">Hot reload successful! Live watcher verified.</pre>
     \\  </div>
-    \\  &lt;script&gt;
+    \\  <script>
     \\    async function loadStatus() {
     \\      const res = await fetch('/api/status');
     \\      const data = await res.json();
     \\      document.getElementById('status-output').textContent = JSON.stringify(data, null, 2);
     \\    }
-    \\  &lt;/script&gt;
+    \\  </script>
     \\</body>
     \\</html>
 ;
 
-var current_version = std.atomic.Value(u32).init(1);
+var currentVersion = std.atomic.Value(u32).init(1);
 
 fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    const v = current_version.load(.acquire);
+    const v = currentVersion.load(.acquire);
     if (v == 1) {
-        return ctx.html(html_v1);
+        return ctx.html(htmlV1);
     } else {
-        return ctx.html(html_v2);
+        return ctx.html(htmlV2);
     }
 }
 
@@ -112,7 +112,7 @@ fn statusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
         .status = "online",
         .engine = "httpx.zig",
         .protocols = [_][]const u8{ "HTTP/1.1", "HTTP/2", "HTTP/3", "QUIC", "TLS 1.2", "TLS 1.3" },
-        .version = if (current_version.load(.acquire) == 1) "1.0.0" else "2.0.0-reloaded",
+        .version = if (currentVersion.load(.acquire) == 1) "1.0.0" else "2.0.0-reloaded",
         .uptimeMs = 42000,
         .hotReloadActive = true,
     });
@@ -135,7 +135,7 @@ fn robotsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 }
 
 fn triggerReloadHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    current_version.store(2, .release);
+    currentVersion.store(2, .release);
     return ctx.renderJson(.{ .reloaded = true, .version = 2 });
 }
 
@@ -173,14 +173,15 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [128]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/status", .{port});
+    var urlBuf: [128]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/status", .{port});
     var res = try client.get(url, .{});
     std.debug.print("GET /api/status -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
-    const trigger_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/trigger-reload", .{port});
-    var res2 = try client.post(trigger_url, .{ .body = "{}" });
+    var triggerBuf: [128]u8 = undefined;
+    const triggerUrl = try std.fmt.bufPrint(&triggerBuf, "http://127.0.0.1:{d}/api/trigger-reload", .{port});
+    var res2 = try client.post(triggerUrl, .{ .body = "{}" });
     std.debug.print("POST /api/trigger-reload -> status={d}\n", .{res2.status});
     res2.deinit();
 
@@ -193,6 +194,18 @@ pub fn main() !void {
     std.debug.print("Browser demo server verification completed successfully.\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+Demo server listening on http://127.0.0.1:54321
+GET /api/status -> status=200, body={"status":"online","engine":"httpx.zig","protocols":["HTTP/1.1","HTTP/2","HTTP/3","QUIC","TLS 1.2","TLS 1.3"],"version":"1.0.0","uptimeMs":42000,"hotReloadActive":true}
+POST /api/trigger-reload -> status=200
+GET /api/status (reloaded) -> status=200, body={"status":"online","engine":"httpx.zig","protocols":["HTTP/1.1","HTTP/2","HTTP/3","QUIC","TLS 1.2","TLS 1.3"],"version":"2.0.0-reloaded","uptimeMs":42000,"hotReloadActive":true}
+Browser demo server verification completed successfully.
+```
+
+The port is ephemeral so it varies on every run; response bodies show the representative JSON payload shape.
 
 ## How to Run
 

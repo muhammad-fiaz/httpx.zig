@@ -39,6 +39,18 @@ pub fn main() !void {
 Built-ins: `cors`, `helmet`, `recovery`, `logging`,
 plus `RateLimiter` and CSRF token helpers. See [Middleware](/api/middleware).
 
+## Expected Output
+
+When run via the helmet server target, the output follows that program's print format:
+
+```text
+Secure server running on http://127.0.0.1:54321
+GET / -> status=200, body={"message":"Security headers enabled"}
+Helmet server verification completed successfully.
+```
+
+The port number varies per run; unauthenticated requests against the `auth` snippet above return `401` with the `"missing auth"` body instead of `200`.
+
 ## Run
 
 ```bash

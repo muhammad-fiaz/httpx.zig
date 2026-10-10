@@ -33,7 +33,7 @@ const reload = @import("../watcher/client.zig");
 const Server = @import("../../server/lifecycle.zig").Server;
 const routesMod = @import("routes.zig");
 
-pub const TrailingSlash = enum { serveBoth, redirectSlash, redirectNoSlash, strict };
+pub const TrailingSlash = routerMod.TrailingSlash;
 
 /// Re-exported route-table vocabulary so site users import one namespace.
 pub const UrlStyle = routesMod.UrlStyle;
@@ -296,10 +296,103 @@ pub const Site = struct {
             if (self.config.watch) {
                 server.cfg.watch = true;
                 server.cfg.watchDir = self.rootDir();
+                const SiteReloader = struct {
+                    fn reload(sitePtr: ?*anyopaque, s: *Server) void {
+                        if (sitePtr) |sp| {
+                            const siteInstance: *Site = @ptrCast(@alignCast(sp));
+                            siteInstance.refresh(s) catch {};
+                        }
+                    }
+                };
+                server.sitePtr = self;
+                server.siteReloadFn = SiteReloader.reload;
             }
             if (self.config.reload) server.cfg.liveReload = true;
         }
         self.mounted = true;
+    }
+
+    /// Refreshes filesystem routes dynamically during development.
+    /// Safely builds a replacement route snapshot and updates the router.
+    /// If file discovery or table building fails, existing routes remain untouched.
+    pub fn refresh(self: *Site, server: *Server) !void {
+        if (self.embedded) return;
+
+        var files: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (files.items) |f| self.allocator.free(f);
+            files.deinit(self.allocator);
+        }
+        try discoverFiles(self.allocator, self.io, self.root, &files);
+
+        if (self.config.templateDir) |td| {
+            var kept: std.ArrayList([]const u8) = .empty;
+            defer kept.deinit(self.allocator);
+            for (files.items) |f| {
+                if (isReservedPath(f, td)) {
+                    self.allocator.free(f);
+                } else {
+                    try kept.append(self.allocator, f);
+                }
+            }
+            files.clearRetainingCapacity();
+            try files.appendSlice(self.allocator, kept.items);
+        }
+
+        var newTable = try routesMod.buildRoutes(self.allocator, files.items, .{
+            .base = self.config.base,
+            .urls = self.config.urls,
+            .indexBase = self.config.indexBase,
+            .custom = self.config.custom,
+        });
+        errdefer newTable.deinit(self.allocator);
+
+        // Pre-check new routes against server router (excluding old routes owned by this Site)
+        for (newTable.routes) |*r| {
+            var isOwnOld = false;
+            for (self.table.routes) |oldR| {
+                if (std.mem.eql(u8, oldR.route, r.route)) {
+                    isOwnOld = true;
+                    break;
+                }
+            }
+            if (!isOwnOld and server.router.hasConflict(.GET, r.route)) {
+                return error.DuplicateRoute;
+            }
+        }
+
+        // Unregister old page routes from router
+        for (self.table.routes) |r| {
+            _ = server.router.remove(.GET, r.route);
+            if (r.extRoute) |e| _ = server.router.remove(.GET, e);
+            for (r.aliases) |a| _ = server.router.remove(.GET, a);
+        }
+
+        // Swap tables atomically
+        self.table.deinit(self.allocator);
+        self.table = newTable;
+
+        // Rebuild targets and register new routes
+        self.targets.clearRetainingCapacity();
+        for (self.table.routes) |*r| {
+            const target = try self.targets.addOne(self.allocator);
+            target.* = .{ .site = self, .route = r };
+            try server.router.get(r.route, servePage, .{ .userData = target });
+            if (r.extRoute) |e| {
+                try server.router.get(e, servePage, .{ .userData = target });
+            }
+            for (r.aliases) |a| {
+                try server.router.get(a, servePage, .{ .userData = target });
+            }
+        }
+
+        // Rebuild navigation model
+        for (self.nav.items) |e| {
+            self.allocator.free(e.name);
+            self.allocator.free(e.url);
+        }
+        self.nav.clearRetainingCapacity();
+        try self.buildNav();
     }
 
     /// Mirrors staticFiles mount pattern construction (`/` + `/*path`).
@@ -401,9 +494,10 @@ pub const Site = struct {
 fn paramValue(allocator: Allocator, params: anytype, name: []const u8) ![]u8 {
     const P = @TypeOf(params);
     if (@typeInfo(P) != .@"struct") return error.MissingRouteParam;
-    inline for (@typeInfo(P).@"struct".fields) |f| {
-        if (std.mem.eql(u8, f.name, name)) {
-            return encodeParamValue(allocator, @field(params, f.name));
+    const paramsInfo = @typeInfo(P).@"struct";
+    inline for (paramsInfo.field_names) |fname| {
+        if (std.mem.eql(u8, fname, name)) {
+            return encodeParamValue(allocator, @field(params, fname));
         }
     }
     return error.MissingRouteParam;
@@ -451,11 +545,7 @@ fn encodeParamValue(allocator: Allocator, v: anytype) ![]u8 {
 }
 
 fn encodeOwned(allocator: Allocator, s: []const u8) ![]u8 {
-    var buf: [1024]u8 = undefined;
-    if (s.len * 3 <= buf.len) return allocator.dupe(u8, try uri.percentEncode(&buf, s));
-    const big = try allocator.alloc(u8, s.len * 3);
-    defer allocator.free(big);
-    return allocator.dupe(u8, try uri.percentEncode(big, s));
+    return uri.percentEncodeAlloc(allocator, s);
 }
 
 fn appendQuery(allocator: Allocator, out: *std.ArrayList(u8), query: anytype) !void {
@@ -464,10 +554,11 @@ fn appendQuery(allocator: Allocator, out: *std.ArrayList(u8), query: anytype) !v
     const info = @typeInfo(Q);
     if (info != .@"struct") return error.MissingRouteParam;
     var first = true;
-    inline for (info.@"struct".fields) |f| {
-        const v = @field(query, f.name);
+    const queryInfo = info.@"struct";
+    inline for (queryInfo.field_names) |fname| {
+        const v = @field(query, fname);
         if (@TypeOf(v) == @TypeOf(null)) continue;
-        const encK = try encodeOwned(allocator, f.name);
+        const encK = try encodeOwned(allocator, fname);
         defer allocator.free(encK);
         const encV = try encodeParamValue(allocator, v);
         defer allocator.free(encV);

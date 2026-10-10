@@ -37,9 +37,9 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [128]u8 = undefined;
-    const url_root = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
-    var res = try client.get(url_root, .{});
+    var urlBuf: [128]u8 = undefined;
+    const urlRoot = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/", .{port});
+    var res = try client.get(urlRoot, .{});
     std.debug.print("GET / -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
@@ -56,6 +56,16 @@ fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 ```
+
+## Expected Output
+
+```text
+Server running on http://127.0.0.1:54321
+GET / -> status=200, body={"message":"Request example"}
+Interceptor example verification completed successfully.
+```
+
+The port number varies per run (the server binds an ephemeral port via `.port = 0`).
 
 ## How to Run
 

@@ -33,7 +33,8 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
-        .maxConnections = 4,
+        .enableDocs = false,
+        .maxConnections = 1,
     });
     defer server.deinit();
 
@@ -43,19 +44,14 @@ pub fn main() !void {
     const port = server.localPort();
     std.debug.print("HTTP/1.1 server listening on 127.0.0.1:{d}\n", .{port});
 
-    const Worker = struct {
-        fn run(s: *httpx.Server) void {
-            s.run();
-        }
-    };
-    const thread = try std.Thread.spawn(.{}, Worker.run, .{&server});
+    const thread = try server.start();
 
     // Client request to verify keep-alive on the server
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [64]u8 = undefined;
-    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/status", .{port});
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/status", .{port});
 
     var resp = try client.get(url, .{
         .httpVersion = .http11,
@@ -65,10 +61,19 @@ pub fn main() !void {
     std.debug.print("Client verified status: {d}\n", .{resp.status});
     std.debug.print("Response: {s}\n", .{resp.body});
 
-    server.requestShutdown();
     thread.join();
 }
 ```
+
+## Expected Output
+
+```text
+HTTP/1.1 server listening on 127.0.0.1:54321
+Client verified status: 200
+Response: {"status":"healthy","protocol":"HTTP/1.1"}
+```
+
+Port varies per run (ephemeral port); status is 200 on success with the JSON body shown.
 
 ## How to Run
 
@@ -79,7 +84,7 @@ zig build run-http11-server
 ## Key Highlights
 
 1. **Router Registration**: Maps routes with clean value responses (`httpx.Response`).
-2. **Graceful Shutdown**: Calls `server.shutdown()` and joins the worker thread deterministically without race-prone sleep hacks.
+2. **Graceful Shutdown**: Calls `server.start()` and joins the worker thread deterministically without race-prone sleep hacks.
 3. **HTTP/1.1 Concurrency**: Reuses TCP connections efficiently across multiple requests.
 
 ## Related

@@ -61,7 +61,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     var tlsListener = try httpx.tls.Listener.init(allocator, io, .{
-        .port = 8447,
+        .port = 0,
         .defaultIdentity = .{
             .certChainPem = cert,
             .privateKeyPem = key,

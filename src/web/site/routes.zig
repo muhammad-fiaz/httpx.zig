@@ -29,6 +29,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const uri = @import("../../common/uri.zig");
+const patternMod = @import("../router/pattern.zig");
 
 pub const UrlStyle = enum { clean, extension, both };
 
@@ -113,6 +114,22 @@ fn looksHtml(file: []const u8) bool {
     return isHtmlExt(base[dot..]);
 }
 
+/// True when a path lives in a private directory (starts with '_' or '.'),
+/// or represents a layout template ('layout.html', '_layout.html').
+fn isIgnoredOrLayout(file: []const u8) bool {
+    var it = std.mem.splitScalar(u8, file, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0) continue;
+        if (std.mem.eql(u8, seg, ".") or std.mem.eql(u8, seg, "..")) return false;
+        if (seg[0] == '_' or (seg[0] == '.' and seg.len > 1 and !std.mem.eql(u8, seg, ".."))) return true;
+    }
+    const base = if (std.mem.lastIndexOfScalar(u8, file, '/')) |s| file[s + 1 ..] else file;
+    const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return false;
+    const stem = base[0..dot];
+    if (std.mem.eql(u8, stem, "layout") or std.mem.eql(u8, stem, "_layout")) return true;
+    return false;
+}
+
 fn validSegment(seg: []const u8) bool {
     if (seg.len == 0 or std.mem.eql(u8, seg, ".") or std.mem.eql(u8, seg, "..")) return false;
     if (std.mem.indexOfScalar(u8, seg, 0) != null) return false;
@@ -178,13 +195,7 @@ fn shapeKey(allocator: Allocator, pattern: []const u8) ![]u8 {
 }
 
 fn encodeSegment(allocator: Allocator, seg: []const u8) ![]u8 {
-    var buf: [1024]u8 = undefined;
-    if (seg.len * 3 <= buf.len) {
-        return allocator.dupe(u8, try uri.percentEncode(&buf, seg));
-    }
-    const big = try allocator.alloc(u8, seg.len * 3);
-    defer allocator.free(big);
-    return allocator.dupe(u8, try uri.percentEncode(big, seg));
+    return uri.percentEncodeAlloc(allocator, seg);
 }
 
 const ParsedFile = struct {
@@ -225,6 +236,12 @@ fn parseFile(
         idx += 1;
         const last = idx == count;
         if (!last) {
+            if (seg.len >= 2 and seg[0] == '(' and seg[seg.len - 1] == ')') {
+                const inner = seg[1 .. seg.len - 1];
+                if (inner.len == 0) return error.InvalidFilePath;
+                // Route group: organize filesystem without altering URL path
+                continue;
+            }
             if (seg.len >= 2 and seg[0] == '[' and seg[seg.len - 1] == ']') {
                 const inner = seg[1 .. seg.len - 1];
                 if (inner.len == 0 or std.mem.startsWith(u8, inner, "...")) return error.InvalidFilePath;
@@ -306,6 +323,7 @@ fn freePending(allocator: Allocator, p: Pending) void {
 /// Returns null for skipped non-page files; errors loudly otherwise.
 fn buildOne(allocator: Allocator, file: []const u8, options: Options, customs: *std.StringHashMap(CustomRoute)) !?Pending {
     if (!looksHtml(file)) return null;
+    if (isIgnoredOrLayout(file)) return null;
     var parsed = parseFile(allocator, file, options.indexBase) catch |err| switch (err) {
         error.InvalidFilePath => return error.InvalidFilePath,
         error.OutOfMemory => return error.OutOfMemory,
@@ -333,6 +351,7 @@ fn buildOne(allocator: Allocator, file: []const u8, options: Options, customs: *
     // (`{param}`/`*rest`) as their clean route.
     const relClean: []u8 = if (custom) |c| blk: {
         if (c.route.len == 0 or c.route[0] != '/') return error.InvalidFilePath;
+        _ = patternMod.parsePattern(c.route) catch return error.InvalidFilePath;
         break :blk try allocator.dupe(u8, c.route);
     } else try joinSlashed(allocator, "/", parsed.segments.items);
     defer allocator.free(relClean);
@@ -340,6 +359,8 @@ fn buildOne(allocator: Allocator, file: []const u8, options: Options, customs: *
     defer allocator.free(relRoute);
     const clean: []u8 = try joinBase(allocator, options.base, relRoute);
     errdefer allocator.free(clean);
+
+    _ = patternMod.parsePattern(clean) catch return error.InvalidFilePath;
 
     // Extension URLs keep the on-disk form and only exist for static
     // pages; dynamic files serve clean routes only.
@@ -687,6 +708,26 @@ test "routes: rejects structural hazards loudly" {
     try std.testing.expectError(error.InvalidFilePath, buildRoutes(std.testing.allocator, &wild, .{}));
     const brace = [_][]const u8{"a{b}.html"};
     try std.testing.expectError(error.InvalidFilePath, buildRoutes(std.testing.allocator, &brace, .{}));
+}
+
+test "routes: route groups and ignored files" {
+    const files = [_][]const u8{
+        "(marketing)/about.html",
+        "(marketing)/pricing/index.html",
+        "(auth)/login.html",
+        "_components/card.html",
+        "_layout.html",
+        "admin/layout.html",
+        ".hidden/secret.html",
+        "dashboard.html",
+    };
+    var res = try buildRoutes(std.testing.allocator, &files, .{ .urls = .clean });
+    defer res.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), res.routes.len);
+    try std.testing.expectEqualStrings("/about", res.routes[0].route);
+    try std.testing.expectEqualStrings("/dashboard", res.routes[1].route);
+    try std.testing.expectEqualStrings("/login", res.routes[2].route);
+    try std.testing.expectEqualStrings("/pricing", res.routes[3].route);
 }
 
 fn evictAt(

@@ -21,6 +21,8 @@ pub fn main() !void {
     });
     defer server.deinit();
 
+    try server.use(httpx.middleware.cors);
+
     try server.get("/api/data", dataHandler);
     try server.post("/api/data", createHandler);
 
@@ -37,9 +39,9 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [128]u8 = undefined;
-    const url_data = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/data", .{port});
-    var res = try client.get(url_data, .{});
+    var urlBuf: [128]u8 = undefined;
+    const urlData = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/data", .{port});
+    var res = try client.get(urlData, .{});
     std.debug.print("GET /api/data -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
@@ -56,6 +58,16 @@ fn createHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{ .status = 201, .body = "{\"created\":true}", .contentType = "application/json" };
 }
 ```
+
+## Expected Output
+
+```text
+CORS server running on http://127.0.0.1:54321
+GET /api/data -> status=200, body={"data":"CORS enabled"}
+CORS server verification completed successfully.
+```
+
+The port is ephemeral so it varies on every run; the body shows the representative JSON payload.
 
 ## How to Run
 

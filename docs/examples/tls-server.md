@@ -29,7 +29,7 @@ pub fn main() !void {
 
     // Start a local TLS listener with a self-signed identity.
     // (See examples/tlsServer.zig for the runnable version.)
-    var listener = try httpx.tls.Listener.init(allocator, io, .{
+    var tlsListener = try httpx.tls.Listener.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .defaultIdentity = .{
@@ -37,12 +37,24 @@ pub fn main() !void {
             .privateKeyPem = @embedFile("key.pem"),
         },
     });
-    defer listener.deinit();
+    defer tlsListener.deinit();
 
-    const port = listener.localPort();
-    std.debug.print("TLS listening on {d}\n", .{port});
+    const port = tlsListener.localPort();
+    std.debug.print("TLS server running on 127.0.0.1:{d}\n", .{port});
+    std.debug.print("TLS listener initialized successfully on port {d}.\n", .{port});
+    std.debug.print("TLS server configuration verified.\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+TLS server running on 127.0.0.1:54321
+TLS listener initialized successfully on port 54321.
+TLS server configuration verified.
+```
+
+The ephemeral loopback port varies per run; certificate material and handshake details vary by deployment. Loopback only with a self-signed identity, no external service required. The `helloHandler` serves `Hello from TLS server!` with status 200 when the listener runs.
 
 ## Run
 

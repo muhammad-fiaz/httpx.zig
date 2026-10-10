@@ -9,7 +9,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 const DownloadTask = struct {
-    task_id: usize,
+    taskId: usize,
     url: []const u8,
     dest: []const u8,
 
@@ -37,9 +37,9 @@ pub fn main() !void {
     const sampleUrl = "https://httpbun.com/bytes/90";
 
     var tasks = [_]DownloadTask{
-        .{ .task_id = 1, .url = sampleUrl, .dest = "downloads/batch_file1.bin" },
-        .{ .task_id = 2, .url = sampleUrl, .dest = "downloads/batch_file2.bin" },
-        .{ .task_id = 3, .url = sampleUrl, .dest = "downloads/batch_file3.bin" },
+        .{ .taskId = 1, .url = sampleUrl, .dest = "downloads/batch_file1.bin" },
+        .{ .taskId = 2, .url = sampleUrl, .dest = "downloads/batch_file2.bin" },
+        .{ .taskId = 3, .url = sampleUrl, .dest = "downloads/batch_file3.bin" },
     };
 
     var pool = try httpx.WorkerPool.init(allocator, .{
@@ -59,6 +59,15 @@ pub fn main() !void {
     std.debug.print("Batch download completed successfully.\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+==> Starting concurrent batch download with built-in zero-config progress bar...
+Batch download completed successfully.
+```
+
+A live progress bar for each worker may interleave between these two lines. File sizes (90 bytes per file in this example) and timings vary; only the line format above is stable.
 
 ## How to Run
 

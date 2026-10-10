@@ -202,7 +202,7 @@ fn parseIpv6(text: []const u8) ?[16]u8 {
     } else if (headLen + tailLen >= 8) {
         return null;
     }
-    var out: [16]u8 = [_]u8{0} ** 16;
+    var out: [16]u8 = (@as([16]u8, @splat(0)));
     for (head[0..headLen], 0..) |g, i| std.mem.writeInt(u16, out[i * 2 ..][0..2], g, .big);
     const tailOff = 16 - tailLen * 2;
     for (tail[0..tailLen], 0..) |g, i| std.mem.writeInt(u16, out[tailOff + i * 2 ..][0..2], g, .big);
@@ -335,7 +335,7 @@ test "IP literal parsing covers v4, v6, and garbage" {
     try std.testing.expect(parseIpLiteral("example.com") == null);
     try std.testing.expect(parseIpLiteral("") == null);
     const v6 = parseIpLiteral("::1").?.v6;
-    var want: [16]u8 = [_]u8{0} ** 16;
+    var want: [16]u8 = (@as([16]u8, @splat(0)));
     want[15] = 1;
     try std.testing.expectEqual(want, v6);
     const full = parseIpLiteral("2001:db8:0:0:0:0:2:1").?.v6;

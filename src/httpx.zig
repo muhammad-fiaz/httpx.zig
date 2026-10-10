@@ -17,7 +17,7 @@
 const std = @import("std");
 
 // External dependencies
-pub const tint = @import("loaders").tint;
+pub const tint = @import("tint");
 pub const loaders = @import("loaders");
 pub const brotli = @import("brotli");
 pub const zstd = @import("zstd");
@@ -34,6 +34,7 @@ pub const status = @import("common/status.zig");
 pub const headers = @import("common/headers.zig");
 pub const uri = @import("common/uri.zig");
 pub const method = @import("common/method.zig");
+pub const parse = @import("common/parse.zig");
 pub const httpVersion = @import("common/httpVersion.zig");
 pub const HttpVersion = httpVersion.HttpVersion;
 pub const common = struct {
@@ -42,6 +43,7 @@ pub const common = struct {
     pub const version = @import("common/version.zig");
     pub const httpVersion = @import("common/httpVersion.zig");
     pub const io = @import("common/io.zig");
+    pub const parse = @import("common/parse.zig");
 };
 pub const clock = common.clock;
 pub const sync = common.sync;
@@ -184,6 +186,8 @@ pub const siteRoutes = @import("web/site/routes.zig");
 pub const Site = site.Site;
 pub const static = struct {
     pub const files = @import("web/static_files/serve.zig");
+    pub const safeJoin = files.safeJoin;
+    pub const shouldSpaFallback = files.shouldSpaFallback;
     pub const spa = @import("web/spa/serve.zig");
     pub const watcher = @import("web/watcher/backend.zig");
     pub const Watcher = watcher.Watcher;
@@ -191,6 +195,10 @@ pub const static = struct {
     pub const WatchEvent = watcher.WatchEvent;
     pub const WatchEventKind = watcher.WatchEventKind;
     pub const WatcherConfig = watcher.WatcherConfig;
+    pub const BackendMode = watcher.BackendMode;
+    pub const BackendKind = watcher.BackendKind;
+    pub const BackendCapabilities = watcher.BackendCapabilities;
+    pub const WatcherStatus = watcher.WatcherStatus;
     pub const events = @import("web/watcher/events.zig");
     pub const dependency = @import("web/watcher/dependency.zig");
     /// Browser-side live reload: the script served into HTML pages plus the
@@ -201,6 +209,10 @@ pub const Watcher = static.Watcher;
 pub const ReloadStrategy = static.ReloadStrategy;
 pub const WatchEvent = static.WatchEvent;
 pub const WatchEventKind = static.WatchEventKind;
+pub const BackendMode = static.BackendMode;
+pub const BackendKind = static.BackendKind;
+pub const BackendCapabilities = static.BackendCapabilities;
+pub const WatcherStatus = static.WatcherStatus;
 pub const health = @import("web/health/endpoints.zig");
 pub const metrics = @import("web/metrics/registry.zig");
 pub const mime = @import("utils/mime.zig");
@@ -571,6 +583,16 @@ test {
     _ = Client;
     _ = ClientResponse;
     _ = Download;
+}
+
+test "tint is wired directly and independently of loaders" {
+    const testing = std.testing;
+    // The tint package is a direct dependency: this uses its namespaced
+    // API without going through loaders.
+    try testing.expectEqualStrings("\x1b[31m", tint.color.ansi4.red.fg().slice());
+    try testing.expectEqualStrings("\x1b[32m", tint.color.ansi4.green.fg().slice());
+    try testing.expectEqualStrings("\x1b[0m", tint.ansi.reset.all);
+    try testing.expectEqualStrings("0.0.2", tint.version);
 }
 
 test "Full template engine integration: variables, loops, conditionals, and raw HTML" {

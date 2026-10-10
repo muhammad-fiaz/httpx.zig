@@ -212,11 +212,6 @@ pub const CollectSink = struct {
 
 // Tests
 
-fn collect(gpa: Allocator) struct { s: Stream, out: std.ArrayList(u8), cs: *CollectSink } {
-    _ = gpa;
-    unreachable;
-}
-
 test "in-order delivery passes straight through" {
     const a = std.testing.allocator;
     var st = Stream.init(a, 4, true, true);

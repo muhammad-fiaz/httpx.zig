@@ -20,7 +20,7 @@ pub fn main() !void {
     // Simple retry loop
     var attempts: u32 = 0;
     while (attempts < 3) : (attempts += 1) {
-        var response = client.get("http://httpbun.com/get", .{}) catch |err| {
+        var response = client.get("https://httpbun.com/get", .{}) catch |err| {
             std.debug.print("Attempt {d} failed: {s}\n", .{ attempts + 1, @errorName(err) });
             httpx.clock.sleepMillis(1000);
             continue;
@@ -32,6 +32,14 @@ pub fn main() !void {
     std.debug.print("All retries exhausted\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+Status: 200
+```
+
+On transient failure the loop instead prints `Attempt 1 failed: <ErrorName>` lines (and sleeps 1000 ms between attempts), ending with `All retries exhausted` if all 3 attempts fail. Status codes and error names vary with network conditions.
 
 ## How to Run
 

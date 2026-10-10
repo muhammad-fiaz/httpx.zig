@@ -14,18 +14,29 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = httpx.Client.init(allocator, io, .{
-        .pool = .{ .maxConnections = 32, .maxPerHost = 8 },
-    });
+    var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    inline for (0..5) |_| {
-        var res = try client.get("https://httpbun.com/get", .{});
-        defer res.deinit();
-        std.debug.print("status={d}, len={d}\n", .{ res.status, res.body.len });
-    }
+    // Multiple requests reuse connection
+    var r1 = try client.get("https://httpbun.com/get", .{});
+    defer r1.deinit();
+
+    var r2 = try client.get("https://httpbun.com/headers", .{});
+    defer r2.deinit();
+
+    std.debug.print("R1 Status: {d}\n", .{r1.status});
+    std.debug.print("R2 Status: {d}\n", .{r2.status});
 }
 ```
+
+## Expected Output
+
+```text
+R1 Status: 200
+R2 Status: 200
+```
+
+Status values reflect the live endpoints.
 
 ## Run
 

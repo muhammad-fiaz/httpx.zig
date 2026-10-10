@@ -20,6 +20,14 @@ pub const Config = struct {
     mount: []const u8 = "/",
     /// Serve from the embedded registry only; never touch the filesystem.
     filesystem: bool = true,
+    /// URL prefixes that must NEVER fall back to the SPA entry file (e.g. &[_][]const u8{"/api", "/auth"}).
+    excludePrefixes: []const []const u8 = &.{},
+    /// Live reload / hot reload for development.
+    liveReload: bool = false,
+    /// SSE endpoint path for live-reload broadcast (default: "/__httpx_liveReload").
+    reloadSsePath: []const u8 = "/__httpx_liveReload",
+    /// Cache-Control on success responses.
+    cacheControl: []const u8 = "public, max-age=3600",
 };
 
 /// Register the SPA's static assets on the router.
@@ -33,7 +41,11 @@ pub fn register(router: *Router, cfg: Config) !void {
         .mount = cfg.mount,
         .indexFile = cfg.fallback,
         .spaFallback = cfg.fallback,
+        .spaExcludePrefixes = cfg.excludePrefixes,
         .filesystem = cfg.filesystem,
+        .liveReload = cfg.liveReload,
+        .reloadSsePath = cfg.reloadSsePath,
+        .cacheControl = cfg.cacheControl,
     });
 }
 
@@ -41,4 +53,6 @@ test "spa config defaults" {
     const cfg = Config{ .root = "./dist" };
     try std.testing.expectEqualStrings("index.html", cfg.fallback);
     try std.testing.expectEqualStrings("/", cfg.mount);
+    try std.testing.expectEqual(@as(usize, 0), cfg.excludePrefixes.len);
+    try std.testing.expect(!cfg.liveReload);
 }

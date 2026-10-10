@@ -313,7 +313,7 @@ pub const Driver = struct {
         d.peerFlight.appendSlice(a, data) catch return connMod.Error.OutOfMemory;
         while (takeRecord(&d.incoming)) |rec| {
             switch (rec.kind) {
-                @intFromEnum(ths.HandshakeType.server_hello) => {
+                @backingInt(ths.HandshakeType.server_hello) => {
                     d.engine.processServerHello(rec.msg) catch return connMod.Error.TlsDriverFailed;
                     const shared = d.engine.sharedSecret32() orelse return connMod.Error.TlsDriverFailed;
                     const chSh = d.engine.transcript.finish();
@@ -325,7 +325,7 @@ pub const Driver = struct {
                     try conn.installKeys(.handshake, hs.keys.txSecret, hs.keys.rxSecret);
                     conn.discardInitialKeys();
                 },
-                @intFromEnum(ths.HandshakeType.encrypted_extensions) => {
+                @backingInt(ths.HandshakeType.encrypted_extensions) => {
                     d.engine.processEncryptedExtensions(rec.msg) catch return connMod.Error.TlsDriverFailed;
                     conn.earlyDataAccepted = d.engine.earlyDataAccepted;
                     if (d.engine.earlyDataOffered and !d.engine.earlyDataAccepted) {
@@ -348,7 +348,7 @@ pub const Driver = struct {
                         };
                     }
                 },
-                @intFromEnum(ths.HandshakeType.certificate) => {
+                @backingInt(ths.HandshakeType.certificate) => {
                     var presented = d.engine.processClientCertificate(rec.msg) catch
                         return connMod.Error.TlsDriverFailed;
                     defer presented.deinit();
@@ -360,7 +360,7 @@ pub const Driver = struct {
                         };
                     }
                 },
-                @intFromEnum(ths.HandshakeType.certificate_verify) => {
+                @backingInt(ths.HandshakeType.certificate_verify) => {
                     // Full verification (decode + signature + feed) in one
                     // step: calling the decode-only processCertificateVerify
                     // first would feed twice and verify against the wrong
@@ -374,7 +374,7 @@ pub const Driver = struct {
                         return connMod.Error.TlsDriverFailed;
                     };
                 },
-                @intFromEnum(ths.HandshakeType.finished) => {
+                @backingInt(ths.HandshakeType.finished) => {
                     d.engine.processFinished(rec.msg) catch return connMod.Error.TlsDriverFailed;
                     // Chain verification BEFORE installing application
                     // keys: never encrypt to an untrusted peer (omitted on PSK resumption).
@@ -395,7 +395,7 @@ pub const Driver = struct {
                     _ = conn.queueCrypto(.handshake, fin) catch return connMod.Error.TlsDriverFailed;
                     try sendQueued(conn, .handshake, nowMs);
                 },
-                @intFromEnum(ths.HandshakeType.new_session_ticket) => {
+                @backingInt(ths.HandshakeType.new_session_ticket) => {
                     if (d.engine.deriveResumptionMaster()) |rm| {
                         var session = d.engine.processNewSessionTicket(rec.msg, rm, d.host, nowMs) catch null;
                         if (session) |*sess| {
@@ -419,7 +419,7 @@ pub const Driver = struct {
             // Post-flight: only the client's Finished is expected.
             d.incoming.appendSlice(a, data) catch return connMod.Error.OutOfMemory;
             while (takeRecord(&d.incoming)) |rec| {
-                if (rec.kind != @intFromEnum(ths.HandshakeType.finished)) {
+                if (rec.kind != @backingInt(ths.HandshakeType.finished)) {
                     return connMod.Error.ProtocolViolation;
                 }
                 d.engine.verifyClientFinished(rec.msg) catch return connMod.Error.TlsDriverFailed;
@@ -458,7 +458,7 @@ pub const Driver = struct {
         }
         d.incoming.appendSlice(a, data) catch return connMod.Error.OutOfMemory;
         const rec = takeRecord(&d.incoming) orelse return;
-        if (rec.kind != @intFromEnum(ths.HandshakeType.client_hello)) return connMod.Error.ProtocolViolation;
+        if (rec.kind != @backingInt(ths.HandshakeType.client_hello)) return connMod.Error.ProtocolViolation;
         const chMsg = rec.msg;
         d.engine.processClientHello(chMsg) catch return connMod.Error.TlsDriverFailed;
         const clientAlpn = parseOfferedAlpn(a, chMsg[4..]) catch return connMod.Error.TlsDriverFailed;
@@ -833,7 +833,7 @@ test "peer transport parameters apply to connection windows" {
     p.maxAckDelayMs = 42;
 
     const fakeIscid = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD, 0x01, 0x02, 0x03, 0x04 };
-    const wrongCid = [_]u8{0x11} ** 8;
+    const wrongCid = (@as([8]u8, @splat(0x11)));
 
     // Server first flight: odcid echoes our original DCID.
     var block = std.ArrayList(u8).empty;
@@ -921,14 +921,14 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
     var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    const tk = sessionMod.TicketKeys{ .current = [_]u8{0x5A} ** 32 };
+    const tk = sessionMod.TicketKeys{ .current = (@as([32]u8, @splat(0x5A))) };
     var replayCache = sessionMod.ReplayCache.init(a, 100);
     defer replayCache.deinit();
 
     // 1. Initial Connection: Establish full handshake and obtain NewSessionTicket
     var savedSession: sessionMod.ClientSession = .{
         .ticket = &.{},
-        .psk = [_]u8{0} ** 32,
+        .psk = (@as([32]u8, @splat(0))),
         .ageAdd = 0,
         .createdMs = 0,
         .lifetimeSecs = 0,

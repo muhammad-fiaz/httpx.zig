@@ -18,6 +18,7 @@ const std = @import("std");
 const clock = @import("../common/clock.zig");
 const Allocator = std.mem.Allocator;
 const sync = @import("../common/sync.zig");
+const parseMod = @import("../common/parse.zig");
 
 pub const Cookie = struct {
     name: []const u8,
@@ -79,41 +80,38 @@ pub const Jar = struct {
         var httpOnly = false;
         var sameSite: Cookie.SameSite = .lax;
 
-        var iter = std.mem.splitScalar(u8, setCookie, ';');
+        var it = parseMod.ParamIterator.init(setCookie);
         var first = true;
-        while (iter.next()) |part| {
-            const trimmed = std.mem.trim(u8, part, " \t");
-            if (trimmed.len == 0) continue;
+        while (it.next()) |param| {
             if (first) {
                 first = false;
-                if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
-                    name = std.mem.trim(u8, trimmed[0..eq], " \t");
-                    value = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
-                }
+                name = param.key;
+                value = param.value;
                 continue;
             }
-            if (std.ascii.eqlIgnoreCase(trimmed, "secure")) {
+            if (parseMod.eqlIgnoreCase(param.key, "secure")) {
                 secure = true;
-            } else if (std.ascii.eqlIgnoreCase(trimmed, "httponly")) {
+            } else if (parseMod.eqlIgnoreCase(param.key, "httponly")) {
                 httpOnly = true;
-            } else if (std.ascii.startsWithIgnoreCase(trimmed, "domain=")) {
-                domain = std.mem.trim(u8, trimmed[7..], "\" ");
-            } else if (std.ascii.startsWithIgnoreCase(trimmed, "path=")) {
-                path = std.mem.trim(u8, trimmed[5..], "\" ");
-            } else if (std.ascii.startsWithIgnoreCase(trimmed, "max-age=")) {
-                const secs = std.fmt.parseInt(i64, trimmed[8..], 10) catch continue;
+            } else if (parseMod.eqlIgnoreCase(param.key, "domain")) {
+                domain = param.value;
+            } else if (parseMod.eqlIgnoreCase(param.key, "path")) {
+                path = param.value;
+            } else if (parseMod.eqlIgnoreCase(param.key, "max-age")) {
+                const secs = parseMod.parseUint(i64, param.value) orelse continue;
                 expiresMs = clock.millisNow() + (secs * 1000);
-            } else if (std.ascii.startsWithIgnoreCase(trimmed, "expires=")) {
-                // HTTP-date parsing handled via staticFiles.parseHttpDate.
-                if (@import("../web/static_files/serve.zig").parseHttpDate(trimmed[8..])) |secs| {
+            } else if (parseMod.eqlIgnoreCase(param.key, "expires")) {
+                if (parseMod.parseHttpDate(param.value)) |secs| {
                     expiresMs = secs * 1000;
                 }
-            } else if (std.ascii.eqlIgnoreCase(trimmed, "samesite=strict")) {
-                sameSite = .strict;
-            } else if (std.ascii.eqlIgnoreCase(trimmed, "samesite=none")) {
-                sameSite = .none;
-            } else if (std.ascii.eqlIgnoreCase(trimmed, "samesite=lax")) {
-                sameSite = .lax;
+            } else if (parseMod.eqlIgnoreCase(param.key, "samesite")) {
+                if (parseMod.eqlIgnoreCase(param.value, "strict")) {
+                    sameSite = .strict;
+                } else if (parseMod.eqlIgnoreCase(param.value, "none")) {
+                    sameSite = .none;
+                } else if (parseMod.eqlIgnoreCase(param.value, "lax")) {
+                    sameSite = .lax;
+                }
             }
         }
 

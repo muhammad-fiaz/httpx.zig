@@ -23,8 +23,8 @@ pub fn main() !void {
     // Policy 1: Verify on-disk file size/checksum first; if valid, skip downloading!
     const res1 = client.download(
         sampleUrl,
-        "downloads/existing-sample.pdf",
         .{
+            .path = "downloads/existing-sample.pdf",
             .existing = .verifyExisting,
             .verify = .{
                 .minSize = 100,
@@ -40,8 +40,8 @@ pub fn main() !void {
     // Policy 2: Fail if destination already exists
     const res2 = client.download(
         sampleUrl,
-        "downloads/existing-sample.pdf",
         .{
+            .path = "downloads/existing-sample.pdf",
             .existing = .fail,
         },
     );
@@ -50,6 +50,16 @@ pub fn main() !void {
     }
 }
 ```
+
+## Expected Output
+
+```text
+==> Demonstrating existing-file policies (.skip, .verifyExisting, .fail)...
+Download 1 result: skipped=false, verified=true
+Download 2 (expect fail): caught FileAlreadyExists
+```
+
+The `skipped`/`verified` flags and the exact error name vary with local file state; only the line format above is stable.
 
 ## How to Run
 

@@ -189,12 +189,12 @@ fn installShutdownHandler(self: *Server) void {
                 fn callback(ctrlType: std.os.windows.DWORD) callconv(.winapi) std.os.windows.BOOL {
                     if (ctrlType <= 2) {
                         if (gActiveServer) |s| s.requestShutdown();
-                        return @enumFromInt(1);
+                        return @fromBackingInt(@intCast(1));
                     }
-                    return @enumFromInt(0);
+                    return @fromBackingInt(@intCast(0));
                 }
             };
-            _ = SetConsoleCtrlHandler(&handlerFn.callback, @enumFromInt(1));
+            _ = SetConsoleCtrlHandler(&handlerFn.callback, @fromBackingInt(@intCast(1)));
         },
         else => {
             const handlerFn = struct {
@@ -253,6 +253,8 @@ pub const Server = struct {
     paused: std.atomic.Value(bool) = .init(false),
     docsMounted: bool = false,
     watcher: ?*watcherMod.Watcher = null,
+    sitePtr: ?*anyopaque = null,
+    siteReloadFn: ?*const fn (sitePtr: ?*anyopaque, server: *Server) void = null,
     liveReloadEventId: std.atomic.Value(usize) = .init(1),
     /// Last reload strategy reported by the watcher (as a
     /// `watcherMod.ReloadStrategy` tag). The SSE endpoint maps it to
@@ -330,6 +332,8 @@ pub const Server = struct {
             }
             if (!bound) return error.AddressInUse;
         }
+        // Bound here: any later init failure must release the port.
+        errdefer listener.close(io);
 
         var effectiveCfg = cfg;
         if (cfg.httpVersion) |v| {
@@ -540,6 +544,16 @@ pub const Server = struct {
     /// Mounts another router's entries under `prefix`.
     pub fn mount(self: *Server, prefix: []const u8, other: *routerMod.Router, opts: routerMod.MountOptions) routerMod.RouteError!void {
         try self.router.mount(prefix, other, opts);
+    }
+
+    /// Registers a compile-time validated static slice of route declarations on the server.
+    pub fn registerStatic(self: *Server, comptime routes: []const routerMod.RouteDecl) routerMod.RouteError!void {
+        try self.router.registerStatic(routes);
+    }
+
+    /// Registers a dynamic route table with runtime conflict validation on the server.
+    pub fn registerRouteTable(self: *Server, routes: []const routerMod.RouteDecl) routerMod.RouteError!void {
+        try self.router.registerRouteTable(routes);
     }
 
     /// Attaches a global middleware to the server's routing pipeline.
@@ -837,9 +851,14 @@ pub const Server = struct {
                 fn onChange(event: watcherMod.WatchEvent, userData: ?*anyopaque) void {
                     const s: *Server = @ptrCast(@alignCast(userData.?));
                     _ = s.liveReloadEventId.fetchAdd(1, .release);
-                    s.liveReloadStrategy.store(@intFromEnum(event.strategy), .release);
+                    s.liveReloadStrategy.store(@backingInt(event.strategy), .release);
                     if (s.templateEngine) |te| {
                         te.invalidate(event.path);
+                    }
+                    if (s.siteReloadFn) |reloadFn| {
+                        if (event.kind == .created or event.kind == .deleted or event.kind == .renamed or event.isDirectory) {
+                            reloadFn(s.sitePtr, s);
+                        }
                     }
                     s.emit(.{
                         .kind = .serverStarted,
@@ -870,7 +889,7 @@ pub const Server = struct {
                     fn handle(ctx: *Context) anyerror!Response {
                         const s: *Server = @ptrCast(@alignCast(ctx.userData.?));
                         const currentId = s.liveReloadEventId.load(.acquire);
-                        const strat: watcherMod.ReloadStrategy = @enumFromInt(s.liveReloadStrategy.load(.acquire));
+                        const strat: watcherMod.ReloadStrategy = @fromBackingInt(@intCast(s.liveReloadStrategy.load(.acquire)));
                         // CSS-only changes hot-swap in the browser; anything
                         // else is a full page reload (see liveReloadScript).
                         const payload: []const u8 = if (strat == .hotReload) "hotReload" else "reload";
@@ -948,7 +967,7 @@ pub const Server = struct {
     /// No-op when callback is null (the default). Level filtering applied here.
     fn emit(self: *const Server, event: logging.ServerEvent) void {
         const cb = self.eventCallback orelse return;
-        if (@intFromEnum(event.level) < @intFromEnum(self.cfg.logging.level)) return;
+        if (@backingInt(event.level) < @backingInt(self.cfg.logging.level)) return;
         cb(event);
     }
 
@@ -1004,7 +1023,7 @@ pub const Server = struct {
             fn handle(respAlloc: Allocator, ctxPtr: ?*anyopaque, isTlsFlag: bool, mStr: []const u8, pStr: []const u8, hdrs: []const @import("../protocols/http2/transport.zig").Header, bStr: []const u8) anyerror!@import("../protocols/http2/transport.zig").HandlerResponse {
                 const serverPtr: *Server = @ptrCast(@alignCast(ctxPtr.?));
                 const method = Method.fromString(mStr) orelse .GET;
-                var arenaH2 = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                var arenaH2 = std.heap.ArenaAllocator.init(serverPtr.allocator);
                 defer arenaH2.deinit();
                 const a = arenaH2.allocator();
 
@@ -1236,6 +1255,7 @@ pub const Server = struct {
         defer h3.deinit();
 
         const Acc = struct {
+            allocator: Allocator,
             sid: u64 = std.math.maxInt(u64),
             buf: std.ArrayList(u8) = .empty,
             fin: bool = false,
@@ -1244,13 +1264,13 @@ pub const Server = struct {
                 const acc: *@This() = @ptrCast(@alignCast(c.?));
                 if (acc.sid == std.math.maxInt(u64) and sid % 4 == 0) acc.sid = sid;
                 if (sid != acc.sid) return;
-                acc.buf.appendSlice(std.heap.page_allocator, data) catch return;
+                acc.buf.appendSlice(acc.allocator, data) catch return;
                 if (fin) acc.fin = true;
             }
         };
 
-        var acc = Acc{};
-        defer acc.buf.deinit(std.heap.page_allocator);
+        var acc = Acc{ .allocator = self.allocator };
+        defer acc.buf.deinit(self.allocator);
         qconn.cbs = .{ .ctx = &acc, .onStreamData = Acc.onStream };
 
         const startMs: u64 = @intCast(clock.millisNow());
@@ -1277,7 +1297,7 @@ pub const Server = struct {
                 } else |_| {}
             }
 
-            var arenaH3 = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            var arenaH3 = std.heap.ArenaAllocator.init(self.allocator);
             defer arenaH3.deinit();
             const a = arenaH3.allocator();
 
@@ -1470,8 +1490,8 @@ pub const Server = struct {
         var clientKa10 = false;
         for (hdrs) |h| {
             if (!std.ascii.eqlIgnoreCase(h.name, "connection")) continue;
-            if (std.ascii.indexOfIgnoreCase(h.value, "close") != null) clientClose = true;
-            if (std.ascii.indexOfIgnoreCase(h.value, "keep-alive") != null) clientKa10 = true;
+            if (std.ascii.findIgnoreCase(h.value, "close") != null) clientClose = true;
+            if (std.ascii.findIgnoreCase(h.value, "keep-alive") != null) clientKa10 = true;
         }
         if (reqHead.minorVersion == 0 and clientKa10) clientClose = false;
 

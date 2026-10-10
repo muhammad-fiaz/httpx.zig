@@ -28,10 +28,37 @@ pub const Method = enum {
     }
 
     pub fn fromString(s: []const u8) ?Method {
-        inline for (@typeInfo(Method).@"enum".fields) |f| {
-            if (std.ascii.eqlIgnoreCase(s, f.name)) {
-                return @enumFromInt(f.value);
-            }
+        if (s.len < 3 or s.len > 7) return null;
+        switch (s.len) {
+            3 => {
+                if (s[0] == 'G' and s[1] == 'E' and s[2] == 'T') return .GET;
+                if (s[0] == 'P' and s[1] == 'U' and s[2] == 'T') return .PUT;
+                if (std.ascii.eqlIgnoreCase(s, "GET")) return .GET;
+                if (std.ascii.eqlIgnoreCase(s, "PUT")) return .PUT;
+            },
+            4 => {
+                if (s[0] == 'P' and s[1] == 'O' and s[2] == 'S' and s[3] == 'T') return .POST;
+                if (s[0] == 'H' and s[1] == 'E' and s[2] == 'A' and s[3] == 'D') return .HEAD;
+                if (std.ascii.eqlIgnoreCase(s, "POST")) return .POST;
+                if (std.ascii.eqlIgnoreCase(s, "HEAD")) return .HEAD;
+            },
+            5 => {
+                if (s[0] == 'P' and s[1] == 'A' and s[2] == 'T' and s[3] == 'C' and s[4] == 'H') return .PATCH;
+                if (s[0] == 'T' and s[1] == 'R' and s[2] == 'A' and s[3] == 'C' and s[4] == 'E') return .TRACE;
+                if (std.ascii.eqlIgnoreCase(s, "PATCH")) return .PATCH;
+                if (std.ascii.eqlIgnoreCase(s, "TRACE")) return .TRACE;
+            },
+            6 => {
+                if (s[0] == 'D' and s[1] == 'E' and s[2] == 'L' and s[3] == 'E' and s[4] == 'T' and s[5] == 'E') return .DELETE;
+                if (std.ascii.eqlIgnoreCase(s, "DELETE")) return .DELETE;
+            },
+            7 => {
+                if (s[0] == 'O' and s[1] == 'P' and s[2] == 'T' and s[3] == 'I' and s[4] == 'O' and s[5] == 'N' and s[6] == 'S') return .OPTIONS;
+                if (s[0] == 'C' and s[1] == 'O' and s[2] == 'N' and s[3] == 'N' and s[4] == 'E' and s[5] == 'C' and s[6] == 'T') return .CONNECT;
+                if (std.ascii.eqlIgnoreCase(s, "OPTIONS")) return .OPTIONS;
+                if (std.ascii.eqlIgnoreCase(s, "CONNECT")) return .CONNECT;
+            },
+            else => return null,
         }
         return null;
     }

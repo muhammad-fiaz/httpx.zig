@@ -5,7 +5,7 @@ deflate, brotli, and zstd. See `examples/compressionDemo.zig`.
 
 ```zig
 // Advertise encodings; the client decodes transparently.
-var response = try client.get("http://httpbun.com/get", .{
+var response = try client.get("https://httpbun.com/get", .{
     .headers = .{ .acceptEncoding = "gzip, deflate, br" },
 });
 defer response.deinit();
@@ -22,6 +22,15 @@ defer allocator.free(limited);
 Negotiate with `httpx.compression.negotiate(headerValue)` and parse offers
 with `httpx.compression.parseAcceptEncoding(allocator, headerValue)`.
 Decompression is always size-bounded (`MAX_DECOMPRESSED_SIZE`).
+
+## Expected Output
+
+```text
+Status: 200
+Body length: 1234
+```
+
+The status reflects the live endpoint and the body length varies with the decoded response payload.
 
 ## Run
 

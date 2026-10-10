@@ -52,16 +52,9 @@ pub const Options = struct {
     allowLfLineEndings: bool = false,
 };
 
-fn isCtl(c: u8) bool {
-    return c <= 0x1F or c == 0x7F;
-}
-
-fn isTokenChar(c: u8) bool {
-    return switch (c) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        else => std.ascii.isAlphanumeric(c),
-    };
-}
+const parseMod = @import("../../common/parse.zig");
+const isCtl = parseMod.isCtl;
+const isTokenChar = parseMod.isTokenChar;
 
 /// Finds the next LF starting from `pos`; rejects bare control chars
 /// outside CR/LF/HTAB so malformed binary can't scan unbounded.
@@ -193,10 +186,7 @@ pub fn parseResponseHead(buf: []const u8, opts: Options) ParseError!HeadResult {
 
     // Exactly three digits followed by space or EOL.
     const codeStart = pos + 9;
-    for (codeStart..codeStart + 3) |i| {
-        if (!std.ascii.isDigit(buf[i])) return ParseError.MalformedStatusLine;
-    }
-    r.statusCode = std.fmt.parseInt(u16, buf[codeStart..][0..3], 10) catch unreachable;
+    r.statusCode = parseMod.parse3DigitStatus(buf[codeStart..][0..3]) orelse return ParseError.MalformedStatusLine;
     var end = codeStart + 3;
 
     if (end < buf.len and buf[end] != '\r' and buf[end] != '\n') {
@@ -366,11 +356,7 @@ pub fn framingFull(fields: []const Field, ctx: FramingContext) ParseError!Framin
     for (fields) |f| {
         if (std.ascii.eqlIgnoreCase(f.name, "Content-Length")) {
             // Digits only; reject "+5", " 5", "5 ", hex, empty.
-            if (f.value.len == 0) return ParseError.InvalidContentLength;
-            for (f.value) |c| {
-                if (!std.ascii.isDigit(c)) return ParseError.InvalidContentLength;
-            }
-            const v = std.fmt.parseInt(usize, f.value, 10) catch return ParseError.InvalidContentLength;
+            const v = parseMod.parseUint(usize, f.value) orelse return ParseError.InvalidContentLength;
             if (v > ctx.maxBody) return ParseError.InvalidContentLength;
             if (hasCl and cl != v) return ParseError.AmbiguousFraming; // differing duplicates
             hasCl = true;
@@ -468,7 +454,7 @@ pub const ChunkedDecoder = struct {
                         '\r' => self.state = .sizeCr,
                         '\n' => try self.endSizeLine(),
                         else => {
-                            const d = std.fmt.charToDigit(c, 16) catch return ParseError.InvalidChunkSize;
+                            const d = parseMod.hexNibble(c) orelse return ParseError.InvalidChunkSize;
                             self.pushDigit(d);
                         },
                     }

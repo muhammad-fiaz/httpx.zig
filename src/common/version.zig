@@ -11,24 +11,24 @@
 const std = @import("std");
 
 pub const name = "httpx";
-pub const version = "0.2.1";
-pub const userAgent = "httpx/0.2.1";
+pub const version = "0.2.2";
+pub const userAgent = "httpx/0.2.2";
 
 pub const Info = struct {
     title: []const u8 = "HTTPX API",
-    version: []const u8 = "0.2.1",
+    version: []const u8 = "0.2.2",
     description: []const u8 = "Fast, modern web framework for Zig with automated OpenAPI & GraphQL documentation.",
 };
 
 pub const defaultInfo: Info = .{};
 
-/// Server header value, e.g. "httpx/0.2.1".
+/// Server header value, e.g. "httpx/0.2.2".
 pub fn serverToken(buf: []u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ name, version }) catch "";
 }
 
 test "server token format" {
     var buf: [32]u8 = undefined;
-    try std.testing.expectEqualStrings("httpx/0.2.1", serverToken(&buf));
-    try std.testing.expectEqualStrings("httpx/0.2.1", userAgent);
+    try std.testing.expectEqualStrings("httpx/0.2.2", serverToken(&buf));
+    try std.testing.expectEqualStrings("httpx/0.2.2", userAgent);
 }

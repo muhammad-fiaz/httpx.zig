@@ -48,12 +48,16 @@ pub fn parse(headerValue: []const u8, decoded: []u8) ParseError!Credentials {
 
 /// Builds a "Basic <base64(user:pass)>" header value into `buf`.
 pub fn encodeHeaderValue(buf: []u8, username: []const u8, password: []const u8) []const u8 {
+    const prefix = "Basic ";
+    if (buf.len < prefix.len) return "";
     var payloadBuf: [512]u8 = undefined;
     const payload = std.fmt.bufPrint(&payloadBuf, "{s}:{s}", .{ username, password }) catch return "";
     const enc = std.base64.standard.Encoder;
-    var b64Buf: [700]u8 = undefined;
-    const b64 = enc.encode(&b64Buf, payload);
-    return std.fmt.bufPrint(buf, "Basic {s}", .{b64}) catch "";
+    const encLen = enc.calcSize(payload.len);
+    if (buf.len < prefix.len + encLen) return "";
+    @memcpy(buf[0..prefix.len], prefix);
+    _ = enc.encode(buf[prefix.len .. prefix.len + encLen], payload);
+    return buf[0 .. prefix.len + encLen];
 }
 
 /// Constant-time equality for byte slices (length-independent branches).

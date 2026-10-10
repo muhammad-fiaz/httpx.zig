@@ -22,6 +22,16 @@ Servers record automatically; mount `try server.metrics("/metrics");` for
 live Prometheus exposition, or read `server.snapshot()` /
 `server.metricsSnapshot()`.
 
+## Expected Output
+
+```text
+Total Requests: 2
+Error Rate:     50.0%
+Avg Latency:    2.850ms
+```
+
+The values reflect the recorded traffic (2 requests, one 200 and one 500 in the snippet); counts, rates, and latencies vary with the actual requests recorded.
+
 ## Run
 
 ```bash

@@ -15,7 +15,7 @@ pub const Version = enum(u32) {
     _,
 
     pub fn isSupported(v: u32) bool {
-        return v == @intFromEnum(Version.version1) or v == @intFromEnum(Version.version2);
+        return v == @backingInt(Version.version1) or v == @backingInt(Version.version2);
     }
 };
 
@@ -27,7 +27,7 @@ pub const LongType = enum(u2) {
 
     /// Wire type bits differ for QUIC v2 (RFC 9369 section 3.2).
     pub fn wireType(self: LongType, version: u32) u2 {
-        if (version == 0x00000001) return @intFromEnum(self);
+        if (version == 0x00000001) return @backingInt(self);
         // v2 mapping: Initial=1, 0-RTT=2, Handshake=3, Retry=0
         return switch (self) {
             .initial => 1,
@@ -38,7 +38,7 @@ pub const LongType = enum(u2) {
     }
 
     pub fn fromWire(version: u32, w: u2) LongType {
-        if (version == 0x00000001) return @enumFromInt(w);
+        if (version == 0x00000001) return @fromBackingInt(@intCast(w));
         return switch (w) {
             0 => .retry,
             1 => .initial,

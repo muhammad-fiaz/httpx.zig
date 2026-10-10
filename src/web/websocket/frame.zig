@@ -51,18 +51,18 @@ pub fn parseFrameHeader(buf: []const u8) Error!struct { hdr: FrameHeader, consum
     const hdr = FrameHeader{
         .fin = b0 & 0x80 != 0,
         .rsv1 = b0 & 0x40 != 0,
-        .opcode = @enumFromInt(@as(u4, @truncate(b0 & 0x0F))),
+        .opcode = @fromBackingInt(@intCast(@as(u4, @truncate(b0 & 0x0F)))),
         .masked = b1 & 0x80 != 0,
         .payloadLen = b1 & 0x7F,
     };
 
     // Reject reserved opcodes and enforce control-frame wire invariants
     // before any payload allocation or masking work.
-    if (@intFromEnum(hdr.opcode) == 0x3 or @intFromEnum(hdr.opcode) == 0x4 or
-        @intFromEnum(hdr.opcode) == 0x5 or @intFromEnum(hdr.opcode) == 0x6 or
-        @intFromEnum(hdr.opcode) == 0x7 or @intFromEnum(hdr.opcode) == 0xB or
-        @intFromEnum(hdr.opcode) == 0xC or @intFromEnum(hdr.opcode) == 0xD or
-        @intFromEnum(hdr.opcode) == 0xE or @intFromEnum(hdr.opcode) == 0xF) return Error.InvalidFrame;
+    if (@backingInt(hdr.opcode) == 0x3 or @backingInt(hdr.opcode) == 0x4 or
+        @backingInt(hdr.opcode) == 0x5 or @backingInt(hdr.opcode) == 0x6 or
+        @backingInt(hdr.opcode) == 0x7 or @backingInt(hdr.opcode) == 0xB or
+        @backingInt(hdr.opcode) == 0xC or @backingInt(hdr.opcode) == 0xD or
+        @backingInt(hdr.opcode) == 0xE or @backingInt(hdr.opcode) == 0xF) return Error.InvalidFrame;
     if (hdr.opcode.isControl() and (!hdr.fin or hdr.payloadLen > 125)) return Error.ProtocolViolation;
 
     var pos: usize = 2;
@@ -98,7 +98,7 @@ pub fn parseFrameHeader(buf: []const u8) Error!struct { hdr: FrameHeader, consum
 /// Serializes a frame header into out. Returns bytes written.
 pub fn buildFrameHeader(out: []u8, fin: bool, opcode: Opcode, payloadLen: usize, maskKey: ?[4]u8) usize {
     var pos: usize = 0;
-    var b0: u8 = @intFromEnum(opcode);
+    var b0: u8 = @backingInt(opcode);
     if (fin) b0 |= 0x80;
     out[pos] = b0;
     pos += 1;

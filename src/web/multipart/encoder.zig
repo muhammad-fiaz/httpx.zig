@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const mimeMod = @import("../../utils/mime.zig");
 
 // Subtypes
 
@@ -30,7 +31,7 @@ pub const Part = struct {
     name: []const u8,
     filename: ?[]const u8 = null,
     filenameStar: ?FilenameStar = null,
-    contentType: []const u8 = "application/octet-stream",
+    contentType: []const u8 = mimeMod.octetStream,
     contentTransferEncoding: ?[]const u8 = null,
     data: []const u8,
     headers: ?[]const Header = null,
@@ -88,7 +89,7 @@ pub const Multipart = struct {
             .name = name,
             .filename = opts.filename,
             .filenameStar = opts.filenameStar,
-            .contentType = opts.contentType orelse "application/octet-stream",
+            .contentType = opts.contentType orelse mimeMod.octetStream,
             .contentTransferEncoding = opts.contentTransferEncoding,
             .data = data,
             .headers = opts.headers,
@@ -409,7 +410,12 @@ test "boundary validation" {
     try std.testing.expect(validateBoundary("simple-boundary"));
     try std.testing.expect(validateBoundary("0123456789"));
     try std.testing.expect(!validateBoundary(""));
-    try std.testing.expect(!validateBoundary("a" ++ "b" ** 70));
+    const tooLong: [71]u8 = comptime blk: {
+        var out: [71]u8 = @splat('b');
+        out[0] = 'a';
+        break :blk out;
+    };
+    try std.testing.expect(!validateBoundary(&tooLong));
     try std.testing.expect(!validateBoundary("has space"));
     try std.testing.expect(!validateBoundary("has\x00null"));
 }

@@ -36,9 +36,9 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [128]u8 = undefined;
-    const url_root = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
-    var res = try client.get(url_root, .{});
+    var urlBuf: [128]u8 = undefined;
+    const urlRoot = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/", .{port});
+    var res = try client.get(urlRoot, .{});
     std.debug.print("GET / -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
@@ -51,6 +51,16 @@ fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{ .status = 200, .body = "<h1>SPA Fallback Example</h1>", .contentType = "text/html" };
 }
 ```
+
+## Expected Output
+
+```text
+SPA server running on http://127.0.0.1:41237
+GET / -> status=200, body=<h1>SPA Fallback Example</h1>
+SPA fallback verification completed successfully.
+```
+
+Statuses, bodies, URLs, and ports vary with the request and the ephemeral port selected at runtime.
 
 ## How to Run
 

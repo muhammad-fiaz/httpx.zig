@@ -18,6 +18,16 @@ defer thread.join();
 defer server.requestShutdown();
 ```
 
+## Expected Output
+
+```text
+=== HTTP/3 live loopback (QUIC + TLS 1.3 over UDP) ===
+5. LIVE client.get: status=200 version=http3 body={"path":"/api/v1/resource","protocol":"HTTP/3"}
+H3 LIVE DEMO VERIFICATION PASSED
+```
+
+Status is 200 on success; port, stream IDs, and body path vary by route. See `examples/http3Client.zig` for the full loopback demo.
+
 ## Run
 
 ```bash

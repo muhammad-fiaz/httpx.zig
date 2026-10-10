@@ -4,14 +4,17 @@ This guide covers all supported installation methods for `httpx.zig`.
 
 ## Requirements
 
-- **Zig Version**: 0.16.0 or later
+- **Zig Version**: 0.17.0 or later
 - **Operating System**: Windows, Linux, or macOS
 
-::: warning v0.2.1 release and Zig 0.15 deprecation
-`v0.2.1` is the current release and targets Zig `0.16.0+`.
-`v0.1.8` is the previous release.
-Zig `0.15` support is legacy and remains available only through `0.0.7`.
-New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.1**.
+> [!IMPORTANT]
+> `httpx.zig` v0.2.2 requires Zig 0.17.0 or newer. Zig 0.16.0 is not supported by this release.
+
+::: warning v0.2.2 release and Zig 0.16 deprecation
+`v0.2.2` is the current release and targets Zig `0.17.0+`.
+`v0.2.1` is the previous release.
+Zig `0.16` support is legacy and remains available only through `0.2.1`.
+New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.2**.
 :::
 
 ## Platform Support
@@ -50,24 +53,26 @@ zig build -Dtarget=aarch64-macos
 
 ## Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.1)**
+**Latest Release (v0.2.2)**
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz
+```
+
+This installs the released package as a dependency in your project's `build.zig.zon`. Use this once the `0.2.2` tag is published.
+
+**Previous Release (v0.2.1)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
 ```
 
-**Previous Release (v0.1.8)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.1.8.tar.gz
-```
-
 > [!WARNING]
-> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.1**.
+> Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.2**.
 
-## Method 2: Zig Fetch (Latest / v0.2.1 in development)
+## Method 2: Zig Fetch (Latest Development Build)
 
-Use this for the latest in-development version from the `main` branch:
+Use this for the latest in-development version from the `main` branch. It may contain unreleased changes:
 
 ```bash
 zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
@@ -78,11 +83,13 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .{
     .name = "my-project",
-    .version = "0.2.1",
+    .version = "0.1.0",
     .dependencies = .{
         .httpx = .{
-            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz",
-            .hash = "...", // Run `zig fetch --save <url>` to generate the hash.
+            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz",
+            // Replace with the real hash below. Never invent one:
+            // run `zig fetch --save <url>` and copy the hash it prints.
+            .hash = "<actual-hash-generated-by-zig-fetch>",
         },
     },
     .paths = .{
@@ -91,9 +98,9 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 }
 ```
 
-## Method 6: Local Source Checkout
+## Method 4: Local Source Checkout
 
-Clone and build directly:
+Clone and build directly (the installed compiler must be Zig 0.17.0 or newer):
 
 ```bash
 git clone https://github.com/muhammad-fiaz/httpx.zig.git
@@ -113,7 +120,7 @@ To use a local checkout from another project:
 
 ## Configure `build.zig`
 
-After adding the dependency, expose the module in your build script:
+After adding the dependency, expose the module in your build script (Zig 0.17.0 build API):
 
 ```zig
 pub fn build(b: *std.Build) void {
@@ -127,15 +134,20 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "my-app",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
     b.installArtifact(exe);
 }
 ```
+
+> [!NOTE]
+> If the build fails with `file exists in modules 'X' and 'X0'`, a dependency on the client side is being resolved twice with different options — usually a transitive dependency the project also declares directly. Resolve shared dependencies with empty options (`.{}`) instead of re-passing `.target`/`.optimize`, so every importer shares one module instance. See https://codeberg.org/ziglang/zig/issues/36694.
 
 ## Import in your code
 

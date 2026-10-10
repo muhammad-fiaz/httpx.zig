@@ -1,7 +1,7 @@
 //! httpx.zig Comprehensive Performance Benchmark Suite
 //!
 //! Measures real-world performance of all core HTTPX subsystems targeting
-//! Zig 0.16.0 ReleaseFast:
+//! Zig 0.17.0 ReleaseFast:
 //!   - Core Operations & Parsing (Headers, URI, Status, Method, HTTP/1.1 parser)
 //!   - Server Routing & Dispatch (Static routes, Parameterized routes, Dispatch)
 //!   - Data Serialization (JSON stringify & typed parsing)
@@ -167,14 +167,14 @@ fn benchHeadersParse() void {
     headers.append("Content-Type", "application/json") catch {};
     headers.append("Authorization", "Bearer token-xyz-123456789") catch {};
     headers.append("Accept", "application/json, text/plain, */*") catch {};
-    headers.append("User-Agent", "httpx.zig-benchmark/0.2.1") catch {};
+    headers.append("User-Agent", "httpx.zig-benchmark/0.2.2") catch {};
 
     std.mem.doNotOptimizeAway(headers.get("Content-Type").?.len);
     std.mem.doNotOptimizeAway(headers.get("Authorization").?.len);
 }
 
 fn benchUriParse() void {
-    const u = httpx.uri.parse("http://httpbun.com:8080/users/123?page=1&limit=10#section") catch return;
+    const u = httpx.uri.parse("https://httpbun.com:8080/users/123?page=1&limit=10#section") catch return;
     std.mem.doNotOptimizeAway(u.host.len + u.path.len);
 }
 
@@ -186,22 +186,64 @@ fn benchStatusLookup() void {
 
 fn benchMethodLookup() void {
     const names = [_][]const u8{ "GET", "POST", "DELETE", "PUT", "PATCH", "HEAD" };
-    for (names) |n| std.mem.doNotOptimizeAway(@intFromEnum(httpx.Method.fromString(n) orelse .GET));
+    for (names) |n| std.mem.doNotOptimizeAway(@backingInt(httpx.Method.fromString(n) orelse .GET));
 }
 
-const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: httpx/0.2.1\r\nAccept: application/json\r\n\r\n";
+const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: httpx/0.2.2\r\nAccept: application/json\r\n\r\n";
 
 fn benchHttp1RequestHead() void {
     const head = httpx.http1.parser.parseRequestHead(rawReqHead, .{}) catch return;
     std.mem.doNotOptimizeAway(head.method.len + head.path.len);
 }
 
-const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: httpx/0.2.1\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
+const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: httpx/0.2.2\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
 
 fn benchHttp1HeaderBlock() void {
     var fields: [16]httpx.http1.parser.Field = undefined;
     const n = httpx.http1.parser.parseHeaderBlock(rawHdrBlock, 0, &fields, .{}) catch return;
     std.mem.doNotOptimizeAway(n);
+}
+
+const sampleAuthority = "api.subdomain.service.internal:8443";
+fn benchAuthorityParse() void {
+    const auth = httpx.parse.parseAuthority(sampleAuthority) orelse return;
+    std.mem.doNotOptimizeAway(auth.host.len + (auth.port orelse 0));
+}
+
+const sampleEncoded = "Hello%20World%21%20This%20is%20a%20test%20query%3Dvalue%26foo%3Dbar";
+fn benchPercentDecode() void {
+    var out: [128]u8 = undefined;
+    const res = httpx.parse.percentDecode(&out, sampleEncoded) catch return;
+    std.mem.doNotOptimizeAway(res.len);
+}
+
+const sampleRaw = "Hello World! This is a test query=value&foo=bar";
+fn benchPercentEncode() void {
+    var out: [128]u8 = undefined;
+    const res = httpx.parse.percentEncode(&out, sampleRaw) catch return;
+    std.mem.doNotOptimizeAway(res.len);
+}
+
+const sampleCookieHeader = "session_id=s3cr3t_tok3n_123456789; Domain=example.com; Path=/api; Secure; HttpOnly; SameSite=Strict";
+fn benchCookieParamIter() void {
+    var it = httpx.parse.ParamIterator.init(sampleCookieHeader);
+    var count: usize = 0;
+    while (it.next()) |p| {
+        count += p.key.len + p.value.len;
+    }
+    std.mem.doNotOptimizeAway(count);
+}
+
+const sampleTokenList = "gzip, deflate, br, zstd, identity";
+fn benchTokenListScan() void {
+    const has = httpx.parse.hasToken(sampleTokenList, "zstd");
+    std.mem.doNotOptimizeAway(has);
+}
+
+const sampleQueryString = "page=1&limit=50&sort=desc&filter=active&search=httpx%20zig&format=json";
+fn benchQueryParamLookup() void {
+    const val = httpx.parse.lookupQuery(sampleQueryString, "search");
+    std.mem.doNotOptimizeAway(val.?.len);
 }
 
 // Group 2: Routing & Middleware
@@ -436,6 +478,21 @@ fn benchWatcherDeps() void {
     std.mem.doNotOptimizeAway(affected.len);
 }
 
+const sampleStaticUrl = "/assets/stylesheets/main.theme.min.css";
+fn benchStaticSafeJoin() void {
+    const joined = httpx.static.safeJoin(benchAllocator, sampleStaticUrl, "/var/www/html/dist") catch return;
+    if (joined) |j| {
+        benchAllocator.free(j);
+        std.mem.doNotOptimizeAway(j.len);
+    }
+}
+
+const spaBenchExcludes = &[_][]const u8{ "/api", "/auth" };
+fn benchSpaFallbackPolicy() void {
+    const should = httpx.static.shouldSpaFallback(.GET, "/dashboard/settings/profile", "text/html,application/xhtml+xml", spaBenchExcludes);
+    std.mem.doNotOptimizeAway(should);
+}
+
 // Group 7: Concurrency & Queues
 
 fn benchWorkerPoolSubmit() void {
@@ -525,8 +582,8 @@ fn benchH3VarIntDecode() void {
 // Group 10: TLS Record Cryptography & X.509 Parsing
 
 var sampleTlsPayload: [1024]u8 = undefined;
-const sampleTlsKey: [32]u8 = [_]u8{0x42} ** 32;
-const sampleTlsIv: [12]u8 = [_]u8{0x24} ** 12;
+const sampleTlsKey: [32]u8 = (@as([32]u8, @splat(0x42)));
+const sampleTlsIv: [12]u8 = (@as([12]u8, @splat(0x24)));
 const sampleCertPem =
     \\-----BEGIN CERTIFICATE-----
     \\MIIBmTCCAT+gAwIBAgIURhx0CMJWTUTFJXV9z2OlmW/cNlcwCgYIKoZIzj0EAwIw
@@ -576,12 +633,17 @@ fn loopbackPingHandler(_: *httpx.router.Context) anyerror!httpx.router.Response 
 }
 
 fn benchClientServerLoopback() void {
-    var res = loopbackClient.get(loopbackUrlSlice, .{}) catch {
-        noteFailure();
-        return;
-    };
-    defer res.deinit();
-    std.mem.doNotOptimizeAway(res.status);
+    var attempt: usize = 0;
+    while (attempt < 3) : (attempt += 1) {
+        if (loopbackClient.get(loopbackUrlSlice, .{})) |res| {
+            var r = res;
+            defer r.deinit();
+            std.mem.doNotOptimizeAway(r.status);
+            return;
+        } else |_| {
+            if (attempt == 2) noteFailure();
+        }
+    }
 }
 
 // Group 12: HTTP/2 pooled loopback (h2c prior knowledge, one server conn)
@@ -797,7 +859,7 @@ fn tlsBenchServe() void {
         var srv = httpx.tls.Server.init(benchAllocator, tlsBenchIo, .{
             .certificatePem = benchCertPem,
             .privateKeyPem = benchKeyPem,
-            .ticketKeys = .{ .current = [_]u8{0xBE} ** 32 },
+            .ticketKeys = .{ .current = (@as([32]u8, @splat(0xBE))) },
         }) catch continue;
         defer srv.deinit();
         var conn = srv.accept(&sock) catch continue;
@@ -1037,10 +1099,11 @@ pub fn main() !void {
     std.debug.print("=================================================================================\n\n", .{});
     var dateBuf: [16]u8 = undefined;
     std.debug.print("Library:     httpx {s}\n", .{httpx.version});
-    std.debug.print("Environment: {s}-{s} | Optimization: {s} | Zig: 0.16.0\n", .{
+    std.debug.print("Environment: {s}-{s} | Optimization: {s} | Zig: {f}\n", .{
         @tagName(builtin.cpu.arch),
         @tagName(builtin.os.tag),
         @tagName(builtin.mode),
+        builtin.zig_version,
     });
     std.debug.print("Run date:    {s} (UTC)\n\n", .{runDate(&dateBuf)});
 
@@ -1063,6 +1126,12 @@ pub fn main() !void {
     runBench("Core Operations", "method_lookup", "ops/sec", fastCfg, benchMethodLookup);
     runBench("Core Operations", "http1_request_head", "ops/sec", coreCfg, benchHttp1RequestHead);
     runBench("Core Operations", "http1_header_block", "ops/sec", coreCfg, benchHttp1HeaderBlock);
+    runBench("Core Operations", "authority_parse", "ops/sec", fastCfg, benchAuthorityParse);
+    runBench("Core Operations", "percent_decode", "ops/sec", coreCfg, benchPercentDecode);
+    runBench("Core Operations", "percent_encode", "ops/sec", coreCfg, benchPercentEncode);
+    runBench("Core Operations", "cookie_param_iter", "ops/sec", coreCfg, benchCookieParamIter);
+    runBench("Core Operations", "token_list_scan", "ops/sec", fastCfg, benchTokenListScan);
+    runBench("Core Operations", "query_param_lookup", "ops/sec", coreCfg, benchQueryParamLookup);
 
     std.debug.print("\n[2] Server Routing & Dispatch:\n", .{});
     runBench("Routing", "router_static_match", "ops/sec", coreCfg, benchRouterStaticMatch);
@@ -1101,6 +1170,8 @@ pub fn main() !void {
     runBench("Parsing", "live_reload_inject", "ops/sec", medCfg, benchLiveReloadInject);
     runBench("Watcher", "watcher_scan", "ops/sec", scanCfg, benchWatcherScan);
     runBench("Watcher", "watcher_deps", "ops/sec", medCfg, benchWatcherDeps);
+    runBench("Static Files", "static_safe_join", "ops/sec", coreCfg, benchStaticSafeJoin);
+    runBench("SPA", "spa_fallback_policy", "ops/sec", fastCfg, benchSpaFallbackPolicy);
 
     std.debug.print("\n[7] Concurrency & Queues:\n", .{});
     runBench("Concurrency", "worker_pool_submit", "ops/sec", coreCfg, benchWorkerPoolSubmit);

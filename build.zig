@@ -5,8 +5,8 @@ fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.Resolved
     compile.root_module.link_libc = true;
     if (target.result.os.tag == .windows) {
         // Winsock symbols are provided by these system libraries on Windows.
-        compile.root_module.linkSystemLibrary("ws2_32", .{});
-        compile.root_module.linkSystemLibrary("mswsock", .{});
+        compile.root_module.linkSystemLibrary("ws2_32", .{ .use_pkg_config = .no });
+        compile.root_module.linkSystemLibrary("mswsock", .{ .use_pkg_config = .no });
     }
 }
 
@@ -129,6 +129,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // tint is a direct dependency of httpx (terminal colors in logging,
+    // download progress), independent of loaders. It must be resolved with
+    // the same empty options loaders itself uses (`b.dependency("tint",
+    // .{})`), so both imports share ONE module instance: Zig forbids the
+    // same source file from belonging to two modules (`tint` vs `tint0`
+    // error). Passing .target/.optimize here would create a second
+    // instance. The top-level `tint` entry in build.zig.zon pins the version.
+    // Upstream: https://codeberg.org/ziglang/zig/issues/36694 (same
+    // duplicate-module error; resolved with empty dependency options).
+    const tintDep = loadersDep.builder.dependency("tint", .{});
+
     // Create the public module that will be exported as "httpx" to consumers.
     // Dependencies must be added here so they propagate to downstream packages.
     const httpxModule = b.addModule("httpx", .{
@@ -140,6 +151,7 @@ pub fn build(b: *std.Build) void {
     httpxModule.addImport("env", envDep.module("env"));
     httpxModule.addImport("loaders", loadersDep.module("loaders"));
     httpxModule.addImport("treesitter", treesitterDep.module("treesitter"));
+    httpxModule.addImport("tint", tintDep.module("tint"));
 
     const examples = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "simple-get", .path = "examples/simpleGet.zig" },
@@ -220,6 +232,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "spa-server", .path = "examples/spaServer.zig" },
         .{ .name = "development-server", .path = "examples/developmentServer.zig" },
         .{ .name = "connectivity", .path = "examples/connectivity.zig" },
+        .{ .name = "tcp-local", .path = "examples/tcpLocal.zig" },
+        .{ .name = "udp-local", .path = "examples/udpLocal.zig" },
         .{ .name = "full-integration", .path = "examples/fullIntegration.zig" },
         .{ .name = "template-basic", .path = "examples/web/templates/basic/main.zig" },
         .{ .name = "template-inheritance", .path = "examples/web/templates/inheritance/main.zig" },
@@ -231,6 +245,8 @@ pub fn build(b: *std.Build) void {
     };
 
     const buildAllExamples = b.step("build-all-examples", "Build all example executables");
+    const runAllExamples = b.step("run-all-examples", "Run all examples sequentially");
+    var previousRunStep: ?*std.Build.Step = null;
 
     inline for (examples) |example| {
         const exe = b.addExecutable(.{
@@ -253,38 +269,15 @@ pub fn build(b: *std.Build) void {
         exampleStep.dependOn(&installExe.step);
 
         const runExe = b.addRunArtifact(exe);
+        runExe.has_side_effects = true;
         runExe.step.dependOn(&installExe.step);
+        if (previousRunStep) |prev| {
+            runExe.step.dependOn(prev);
+        }
+        previousRunStep = &runExe.step;
+
         const runStep = b.step("run-" ++ example.name, "Run " ++ example.name ++ " example");
         runStep.dependOn(&runExe.step);
-    }
-
-    const runAllExamples = b.step("run-all-examples", "Run all examples sequentially");
-    var previousRunStep: ?*std.Build.Step = null;
-
-    inline for (examples) |example| {
-        const exe = b.addExecutable(.{
-            .name = "run-all-" ++ example.name,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(example.path),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        exe.root_module.addImport("httpx", httpxModule);
-        linkPlatformLibs(exe, target);
-        if (comptime std.mem.eql(u8, example.name, "website")) {
-            embedDir(b, exe, httpxModule, "examples/website/dist", "embed_website");
-        }
-
-        const installExe = b.addInstallArtifact(exe, .{});
-        if (previousRunStep) |prev| {
-            exe.step.dependOn(prev);
-            installExe.step.dependOn(prev);
-        }
-        const runExe = b.addRunArtifact(exe);
-        runExe.step.dependOn(&installExe.step);
-
-        previousRunStep = &runExe.step;
     }
 
     if (previousRunStep) |last| {
@@ -303,6 +296,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("env", envDep.module("env"));
     tests.root_module.addImport("loaders", loadersDep.module("loaders"));
     tests.root_module.addImport("treesitter", treesitterDep.module("treesitter"));
+    tests.root_module.addImport("tint", tintDep.module("tint"));
     linkPlatformLibs(tests, target);
 
     const runTests = b.addRunArtifact(tests);
@@ -345,6 +339,7 @@ pub fn build(b: *std.Build) void {
     librootModule.addImport("env", envDep.module("env"));
     librootModule.addImport("loaders", loadersDep.module("loaders"));
     librootModule.addImport("treesitter", treesitterDep.module("treesitter"));
+    librootModule.addImport("tint", tintDep.module("tint"));
 
     const lib = b.addLibrary(.{
         .name = "httpx",

@@ -22,8 +22,8 @@ pub fn main() !void {
 
     const result = client.download(
         sampleUrl,
-        "downloads/verified-sample.pdf",
         .{
+            .path = "downloads/verified-sample.pdf",
             .verify = .{
                 .minSize = 100,
                 .maxSize = 50 * 1024 * 1024,
@@ -41,12 +41,22 @@ pub fn main() !void {
         std.debug.print("File verified and saved successfully to: {s}\n", .{
             result.destinationPath(),
         });
-        if (result.sha256_hex) |h| {
+        if (result.sha256Hex) |h| {
             std.debug.print("SHA-256: {s}\n", .{h});
         }
     }
 }
 ```
+
+## Expected Output
+
+```text
+==> Downloading https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf with size and cryptographic verification...
+File verified and saved successfully to: downloads/verified-sample.pdf
+SHA-256: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+```
+
+Destinations, byte counts, and hash values vary with the remote file; the `SHA-256` line only prints when a hash is available. Only the line format above is stable.
 
 ## How to Run
 

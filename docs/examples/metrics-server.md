@@ -38,20 +38,20 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [128]u8 = undefined;
+    var urlBuf: [128]u8 = undefined;
 
     // 1. Call API endpoint
-    const url_data = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/data", .{port});
-    var res1 = try client.get(url_data, .{});
+    const urlData = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/data", .{port});
+    var res1 = try client.get(urlData, .{});
     std.debug.print("GET /api/data -> status={d}, body={s}\n", .{ res1.status, res1.body });
     res1.deinit();
 
     // 2. Fetch live Prometheus metrics from /metrics
-    const url_metrics = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/metrics", .{port});
-    var res_metrics = try client.get(url_metrics, .{});
-    std.debug.print("GET /metrics -> status={d}, size={d} bytes\n", .{ res_metrics.status, res_metrics.body.len });
-    std.debug.print("--- Live Prometheus Output ---\n{s}\n------------------------------\n", .{res_metrics.body});
-    res_metrics.deinit();
+    const urlMetrics = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/metrics", .{port});
+    var resMetrics = try client.get(urlMetrics, .{});
+    std.debug.print("GET /metrics -> status={d}, size={d} bytes\n", .{ resMetrics.status, resMetrics.body.len });
+    std.debug.print("--- Live Prometheus Output ---\n{s}\n------------------------------\n", .{resMetrics.body});
+    resMetrics.deinit();
 
     // 3. Inspect in-memory snapshot
     const snap = server.snapshot();
@@ -74,6 +74,23 @@ fn dataHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{ .status = 200, .body = "{\"data\":\"some value\",\"count\":42}", .contentType = "application/json" };
 }
 ```
+
+## Expected Output
+
+```text
+Metrics server running on http://127.0.0.1:54321
+GET /api/data -> status=200, body={"data":"some value","count":42}
+GET /metrics -> status=200, size=1234 bytes
+--- Live Prometheus Output ---
+# HELP http_requests_total Total HTTP requests
+# TYPE http_requests_total counter
+http_requests_total 2
+------------------------------
+Server snapshot: uptime=150ms, requestsTotal=2, errorRate=0.00%
+Metrics server verification completed successfully.
+```
+
+The port, byte sizes, Prometheus body, and snapshot counters/timings vary per run; the line shapes above follow the example's print statements exactly.
 
 ## How to Run
 

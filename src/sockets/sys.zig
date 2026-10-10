@@ -59,7 +59,7 @@ pub const ws = if (isWindows) struct {
         array: [FD_SETSIZE]usize,
 
         pub fn zero() FdSet {
-            return .{ .count = 0, .array = [_]usize{0} ** FD_SETSIZE };
+            return .{ .count = 0, .array = (@as([FD_SETSIZE]usize, @splat(0))) };
         }
         pub fn add(self: *FdSet, s: usize) void {
             if (self.count < FD_SETSIZE) {
@@ -232,7 +232,7 @@ pub const posixC = if (!isWindows and builtin.link_libc) struct {
         bits: [1024 / 32]u32,
 
         pub fn zero() FdSet {
-            return .{ .bits = [_]u32{0} ** (1024 / 32) };
+            return .{ .bits = (@as([(1024 / 32)]u32, @splat(0))) };
         }
         pub fn add(self: *FdSet, fd: Fd) void {
             const idx: u32 = @intCast(@divFloor(fd, 32));

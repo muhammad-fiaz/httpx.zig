@@ -16,8 +16,8 @@ var listener = try httpx.tls.Listener.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
     .defaultIdentity = .{
-        .certChainPem = cert_pem,
-        .privateKeyPem = key_pem,
+        .certChainPem = certPem,
+        .privateKeyPem = keyPem,
     },
 });
 defer listener.deinit();
@@ -25,6 +25,15 @@ defer listener.deinit();
 const port = listener.localPort();
 std.debug.print("TLS listening on {d}\n", .{port});
 ```
+
+## Expected Output
+
+```text
+TLS listening on 54321
+HTTPS status: 200
+```
+
+The ephemeral loopback port varies per run; certificate material varies by deployment. Loopback only with a self-signed identity (`examples/tlsGet.zig` via `run-tls-get`, `examples/httpsClient.zig` via `run-https-client`), no external service required for the local listener. External `https://example.com/` fetch requires network access and system CA trust.
 
 ## Run
 

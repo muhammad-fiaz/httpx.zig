@@ -14,7 +14,7 @@ GET /api/users?page=1 HTTP/1.1
 
 Host: api.example.com
 
-User-Agent: httpx/0.2.1
+User-Agent: httpx/0.2.2
 
 Accept: application/json
 
@@ -75,7 +75,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // Explicit HTTP/1.1 request
-    var response = try client.get("http://httpbun.com/get", .{
+    var response = try client.get("https://httpbun.com/get", .{
         .httpVersion = .http11,
         .headers = &.{
             .{ .name = "Accept", .value = "application/json" },

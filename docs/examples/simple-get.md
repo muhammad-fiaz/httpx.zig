@@ -18,13 +18,22 @@ pub fn main() !void {
     defer client.deinit();
 
     // Unified fetch request
-    var res = try client.fetch("https://httpbun.com/get", .{});
-    defer res.deinit();
+    var response = try client.fetch("https://httpbun.com/get", .{});
+    defer response.deinit();
 
-    std.debug.print("status={d}\n", .{res.status});
-    std.debug.print("body={s}\n", .{res.bytes()});
+    std.debug.print("Status: {d}\n", .{response.status});
+    std.debug.print("Body: {s}\n", .{response.bytes()});
 }
 ```
+
+## Expected Output
+
+```text
+Status: 200
+Body: {"args":{},"headers":{"Host":"httpbun.com"},"url":"https://httpbun.com/get"}
+```
+
+The status code is the numeric HTTP status and the body is the raw response text; both vary with the target URL and network conditions.
 
 ## Run
 

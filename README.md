@@ -2,7 +2,7 @@
 <img src="https://github.com/user-attachments/assets/ae3e1cc2-41f8-4326-b757-c9afcf6c8fea" alt="httpx.zig logo" width="400" />
 
 <a href="https://muhammad-fiaz.github.io/httpx.zig/"><img src="https://img.shields.io/badge/docs-muhammad--fiaz.github.io-blue" alt="Documentation"></a>
-<a href="https://ziglang.org/"><img src="https://img.shields.io/badge/Zig-0.16.0-orange.svg?logo=zig" alt="Zig Version"></a>
+<a href="https://ziglang.org/"><img src="https://img.shields.io/badge/Zig-0.17.0-orange.svg?logo=zig" alt="Zig Version"></a>
 <a href="https://github.com/muhammad-fiaz/httpx.zig"><img src="https://img.shields.io/github/stars/muhammad-fiaz/httpx.zig" alt="GitHub stars"></a>
 <a href="https://github.com/muhammad-fiaz/httpx.zig/issues"><img src="https://img.shields.io/github/issues/muhammad-fiaz/httpx.zig" alt="GitHub issues"></a>
 <a href="https://github.com/muhammad-fiaz/httpx.zig/pulls"><img src="https://img.shields.io/github/issues-pr/muhammad-fiaz/httpx.zig" alt="GitHub pull requests"></a>
@@ -53,6 +53,7 @@
 - For **TUI** support, check out **[tui.zig](https://github.com/muhammad-fiaz/tui.zig)**.
 - For **ZON file format** support, check out **[zon.zig](https://github.com/muhammad-fiaz/zon.zig)**.
 - For **Spinners/loading/progress bar** support, check out **[loaders.zig](https://github.com/muhammad-fiaz/loaders.zig)**.
+- For **Terminal colors & text styles** support, check out **[tint.zig](https://github.com/muhammad-fiaz/tint.zig)**.
 - For **MCP** support, check out **[mcp.zig](https://github.com/muhammad-fiaz/mcp.zig)**.
 - For **API framework** support, check out **[api.zig](https://github.com/muhammad-fiaz/api.zig)**.
 - For **Web framework** support, check out **[zix](https://github.com/muhammad-fiaz/zix)**.
@@ -119,11 +120,11 @@
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
-| **Zig** | **0.16.0** (recommended) | Download from [ziglang.org](https://ziglang.org/download/) |
+| **Zig** | **0.17.0** (required) | Download from [ziglang.org](https://ziglang.org/download/) |
 | **Operating System** | Windows 10+, Linux, macOS | Cross-platform networking support |
 
 > [!IMPORTANT]
-> **Zig 0.16.0 is required.** This project targets the stable Zig 0.16.0 release. Please use Zig 0.16.0 for all builds.
+> **Zig 0.17.0 is required.** This project targets the stable Zig 0.17.0 release. Please use Zig 0.17.0 for all builds. Zig 0.16.0 is not supported by this release.
 
 ---
 
@@ -159,20 +160,20 @@ zig build -Dtarget=x86-windows
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.1)**
+**Latest Release (v0.2.2)**
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz
+```
+
+**Previous Release (v0.2.1)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
 ```
 
-**Previous Release (v0.2.0)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.0.tar.gz
-```
-
 > [!WARNING]
-> Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.16.0+** with **httpx.zig v0.2.1**.
+> Zig **0.17** is required by **v0.2.2**. Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.2**.
 
 ### Method 2: Zig Fetch (Latest Development Build)
 
@@ -187,7 +188,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz",
         .hash = "...", // Run `zig fetch --save <url>` to generate the hash.
     },
 },
@@ -220,6 +221,9 @@ const httpx_dep = b.dependency("httpx", .{
 });
 exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 ```
+
+> [!NOTE]
+> If you encounter `file exists in modules 'X' and 'X0'`, try removing `.target = target` and `.optimize = optimize` from your dependency options in the root `build.zig` and use `.{}` instead. This can help prevent duplicate module instances when multiple dependencies resolve the same module. See [Zig issue #36694](https://codeberg.org/ziglang/zig/issues/36694).
 
 ## Quick Start
 

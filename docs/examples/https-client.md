@@ -29,6 +29,14 @@ var listener = try httpx.tls.Listener.init(allocator, io, .{
 defer listener.deinit();
 ```
 
+## Expected Output
+
+```text
+TLS listener initialized on port 54321, config verified
+```
+
+Port varies per run (ephemeral port); external `client.get("https://example.com/")` returns 200 when network permits.
+
 ## Run
 
 ```bash

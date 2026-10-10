@@ -11,6 +11,14 @@ const v = try httpx.quic.varint.decode(&buf, &off);
 std.debug.print("h3 varint encoded={d} decoded={d}\n", .{ n, v });
 ```
 
+## Expected Output
+
+```text
+h3 varint encoded=2 decoded=1337
+```
+
+Encoded size follows QUIC varint rules for the input value (1337 encodes in 2 bytes); decoded value matches the input.
+
 ## Run
 
 ```bash

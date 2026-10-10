@@ -67,16 +67,16 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var tls_listener = try httpx.tls.Listener.init(allocator, io, .{
+    var tlsListener = try httpx.tls.Listener.init(allocator, io, .{
         .port = 8445,
         .defaultIdentity = .{
             .certChainPem = cert,
             .privateKeyPem = key,
         },
     });
-    defer tls_listener.deinit();
+    defer tlsListener.deinit();
 
-    std.debug.print("TLS listener initialized on port {d}, config verified\n", .{tls_listener.localPort()});
+    std.debug.print("TLS listener initialized on port {d}, config verified\n", .{tlsListener.localPort()});
 }
 
 fn runServer(listener: *httpx.tls.Listener) void {
@@ -90,6 +90,14 @@ fn handleRequest(_: httpx.tls.Request) anyerror!httpx.tls.Response {
     };
 }
 ```
+
+## Expected Output
+
+```text
+TLS listener initialized on port 8445, config verified
+```
+
+The port reflects the fixed `8445` in this example; certificate material varies by deployment. Loopback only with an embedded self-signed certificate negotiating TLS 1.3, no external service required.
 
 ## How to Run
 

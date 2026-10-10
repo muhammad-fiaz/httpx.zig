@@ -29,10 +29,10 @@ pub fn main() !void {
     var dec = httpx.http2.hpack.Decoder.init(allocator);
     defer dec.deinit();
 
-    var out_encoded = std.ArrayList(u8).empty;
-    defer out_encoded.deinit(allocator);
+    var outEncoded = std.ArrayList(u8).empty;
+    defer outEncoded.deinit(allocator);
 
-    const test_headers = [_]httpx.http2.hpack.HeaderField{
+    const testHeaders = [_]httpx.http2.hpack.HeaderField{
         .{ .name = ":method", .value = "POST" },
         .{ .name = ":scheme", .value = "https" },
         .{ .name = ":path", .value = "/api/v2/stream" },
@@ -40,16 +40,16 @@ pub fn main() !void {
         .{ .name = "x-custom-trace", .value = "trace-id-998877" },
     };
 
-    for (test_headers) |h| {
-        try enc.encode(&out_encoded, h.name, h.value, .incremental, false);
+    for (testHeaders) |h| {
+        try enc.encode(&outEncoded, h.name, h.value, .incremental, false);
     }
     std.debug.print("1. HPACK Encoded {d} headers into {d} compressed bytes (dynamic table entries: {d})\n", .{
-        test_headers.len,
-        out_encoded.items.len,
+        testHeaders.len,
+        outEncoded.items.len,
         enc.dyn.entries.items.len,
     });
 
-    const decoded = try dec.decode(out_encoded.items);
+    const decoded = try dec.decode(outEncoded.items);
     defer {
         for (decoded.fields) |h| {
             allocator.free(h.name);
@@ -63,50 +63,68 @@ pub fn main() !void {
     }
 
     // 2. HTTP/2 Session Multiplexing & Frame Processing (RFC 9113)
-    var client_sess = try httpx.http2.Session.init(allocator, .client, .{});
-    defer client_sess.deinit();
-    var server_sess = try httpx.http2.Session.init(allocator, .server, .{});
-    defer server_sess.deinit();
+    var clientSess = try httpx.http2.Session.init(allocator, .client, .{});
+    defer clientSess.deinit();
+    var serverSess = try httpx.http2.Session.init(allocator, .server, .{});
+    defer serverSess.deinit();
 
     // Client starts handshake (connection preface + initial settings)
-    try client_sess.startHandshake();
-    try server_sess.startHandshake();
+    try clientSess.startHandshake();
+    try serverSess.startHandshake();
 
     // Exchange prefaces & initial frames
-    try server_sess.feed(client_sess.outbound.items);
-    client_sess.outbound.clearRetainingCapacity();
+    try serverSess.feed(clientSess.outbound.items);
+    clientSess.outbound.clearRetainingCapacity();
 
-    try client_sess.feed(server_sess.outbound.items);
-    server_sess.outbound.clearRetainingCapacity();
+    try clientSess.feed(serverSess.outbound.items);
+    serverSess.outbound.clearRetainingCapacity();
 
     std.debug.print("2. Handshake exchanged: Client & Server synchronized SETTINGS\n", .{});
 
     // 3. Multiplexing 3 Concurrent Streams
-    const sid1 = try client_sess.nextClientStreamId();
-    const sid2 = try client_sess.nextClientStreamId();
-    const sid3 = try client_sess.nextClientStreamId();
+    const sid1 = try clientSess.nextClientStreamId();
+    const sid2 = try clientSess.nextClientStreamId();
+    const sid3 = try clientSess.nextClientStreamId();
 
-    try client_sess.sendHeaders(sid1, &test_headers, false);
-    _ = try client_sess.sendData(sid1, "{\"item\":1}", true);
+    try clientSess.sendHeaders(sid1, &testHeaders, false);
+    _ = try clientSess.sendData(sid1, "{\"item\":1}", true);
 
-    try client_sess.sendHeaders(sid2, &test_headers, false);
-    _ = try client_sess.sendData(sid2, "{\"item\":2}", true);
+    try clientSess.sendHeaders(sid2, &testHeaders, false);
+    _ = try clientSess.sendData(sid2, "{\"item\":2}", true);
 
-    try client_sess.sendHeaders(sid3, &test_headers, true);
+    try clientSess.sendHeaders(sid3, &testHeaders, true);
 
     std.debug.print("3. Multiplexed streams {d}, {d}, {d} (outbound: {d} bytes)\n", .{
         sid1,
         sid2,
         sid3,
-        client_sess.outbound.items.len,
+        clientSess.outbound.items.len,
     });
 
-    try server_sess.feed(client_sess.outbound.items);
-    client_sess.outbound.clearRetainingCapacity();
+    try serverSess.feed(clientSess.outbound.items);
+    clientSess.outbound.clearRetainingCapacity();
 
     std.debug.print("HTTP/2 multiplexing demonstration completed successfully.\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+=== HTTP/2 Advanced Protocol & Multiplexing ===
+1. HPACK Encoded 5 headers into 87 bytes (dynamic table entries: 5)
+   Decoded 5 headers successfully:
+     :method: POST
+     :scheme: https
+     :path: /api/v2/stream
+     content-type: application/json
+     x-custom-trace: trace-id-998877
+2. Handshake exchanged: Client & Server synchronized SETTINGS
+3. Multiplexed streams 1, 3, 5 (outbound: 1234 bytes)
+HTTP/2 multiplexing demonstration completed successfully.
+```
+
+Compressed sizes, outbound bytes, and stream IDs vary; headers reflect the demo set.
 
 ## How to Run
 

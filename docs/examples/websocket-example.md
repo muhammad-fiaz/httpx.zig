@@ -21,6 +21,14 @@ const frameHdr = parsed.hdr; // fin, opcode, masked, payloadLen, maskKey
 Opcodes live on `httpx.websocket.Frame.Opcode` (`.text`, `.binary`,
 `.close`, `.ping`, `.pong`); `applyMask` masks payloads in place.
 
+## Expected Output
+
+```text
+(no output - framing primitives only; RFC 6455 accept for "dGhlIHNhbXBsZSBub25jZQ==" is "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+```
+
+This snippet produces no printed output; frame header lengths and accept bytes vary with inputs. The RFC 6455 test vector above is fixed. See `examples/websocketServer.zig` (`run-websocket-server`) for the runnable server.
+
 ## Run
 
 ```bash

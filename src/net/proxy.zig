@@ -13,6 +13,7 @@
 //! not consult the local resolver when `needsLocalDns()` is false.
 
 const std = @import("std");
+const parseMod = @import("../common/parse.zig");
 
 pub const Scheme = enum {
     http,
@@ -118,29 +119,17 @@ pub fn parseProxyUrl(url: []const u8) ?struct { kind: ProxyKind, host: []const u
         }
     }
 
-    var host = rest;
-    var port: u16 = switch (kind) {
+    const defaultPort: u16 = switch (kind) {
         .httpConnect => 80,
         else => 1080,
     };
-    if (std.mem.lastIndexOfScalar(u8, rest, ':')) |colon| {
-        // Do not split inside a bracketed IPv6 literal.
-        const bracketed = std.mem.indexOfScalar(u8, rest, '[') != null;
-        if (!bracketed or std.mem.lastIndexOfScalar(u8, rest, ']') orelse 0 < colon) {
-            port = std.fmt.parseInt(u16, rest[colon + 1 ..], 10) catch return null;
-            host = rest[0..colon];
-        }
-    }
-    // Strip IPv6 brackets for the dial address itself.
-    if (host.len >= 2 and host[0] == '[' and host[host.len - 1] == ']') {
-        host = host[1 .. host.len - 1];
-    }
-    if (host.len == 0) return null;
+    const auth = parseMod.parseAuthority(rest) orelse return null;
+    if (auth.host.len == 0) return null;
 
     return .{
         .kind = kind,
-        .host = host,
-        .port = port,
+        .host = auth.host,
+        .port = auth.port orelse defaultPort,
         .username = username,
         .password = password,
         .remoteDns = remote,

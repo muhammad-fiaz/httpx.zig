@@ -15,6 +15,8 @@ pub fn main() !void {
     var listener = try httpx.tcp.Listener.bindAddress(io, &addr);
     defer listener.close(io);
     const port = listener.localPort();
+    std.debug.print("listening on 127.0.0.1:{d}\n", .{port});
+    addr.port = port;
 
     const ServerCtx = struct {
         listener: *httpx.tcp.Listener,
@@ -42,4 +44,19 @@ pub fn main() !void {
     const n = try client.read(&outBuf);
     std.debug.print("got: {s}\n", .{outBuf[0..n]});
 }
+```
+
+## Expected Output
+
+```text
+listening on 127.0.0.1:54321
+got: pong
+```
+
+The ephemeral loopback port varies per run; the `pong` payload is fixed by the exchange. Loopback only, no external prerequisites.
+
+## How to Run
+
+```bash
+zig build run-tcp-local
 ```

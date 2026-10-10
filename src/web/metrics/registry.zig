@@ -120,7 +120,7 @@ pub const Gauge = struct {
 
 /// Thread-safe cumulative histogram for request latency distribution.
 pub const Histogram = struct {
-    buckets: [LATENCY_BUCKET_COUNT]Counter = [_]Counter{.{}} ** LATENCY_BUCKET_COUNT,
+    buckets: [LATENCY_BUCKET_COUNT]Counter = (@as([LATENCY_BUCKET_COUNT]Counter, @splat(.{}))),
     count: Counter = .{},
     sumNanos: Counter = .{},
 

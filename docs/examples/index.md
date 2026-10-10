@@ -77,3 +77,17 @@ zig build run-http3-client -Dtarget=aarch64-macos
 - [Redirect](/examples/redirect-example): Redirect following and policy.
 - [Batch Concurrent](/examples/batch-concurrent): Batch concurrent requests.
 - [Reverse Proxy Middleware](/examples/reverse-proxy-middleware): Server-side reverse proxy.
+
+## Expected Output
+
+Example programs print a server startup line, a per-request exchange line,
+and a final verification line, following this shape:
+
+```text
+Server running on http://127.0.0.1:54321
+GET / -> status=200, body={"message":"..."}
+<Example> verification completed successfully.
+```
+
+Port numbers, timings, and body contents vary per example and per run; see
+each example page for its exact output format.

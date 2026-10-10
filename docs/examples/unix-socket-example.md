@@ -13,5 +13,13 @@ defer server.deinit();
 const port = server.localPort();
 ```
 
+## Expected Output
+
+```text
+(no output - snippet only binds an ephemeral loopback port)
+```
+
+This snippet produces no printed output; the ephemeral loopback port varies per run. Loopback only, no external prerequisites.
+
 See [TCP Local](/examples/tcp-local) for a loopback round trip and
 [Simple Server](/examples/simple-server) for the standard lifecycle.

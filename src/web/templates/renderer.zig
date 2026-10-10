@@ -727,7 +727,7 @@ fn appendJsonString(out: *std.ArrayList(u8), allocator: Allocator, s: []const u8
     try out.append(allocator, '"');
 }
 
-fn writeJsonValue(out: *std.ArrayList(u8), allocator: Allocator, v: Value, indent: ?usize, level: usize) anyerror!void {
+fn writeJsonValue(out: *std.ArrayList(u8), allocator: Allocator, v: Value, indent: ?usize, level: usize) Allocator.Error!void {
     switch (v) {
         .nullVal, .missing, .macro => try out.appendSlice(allocator, "null"),
         .boolean => |b| try out.appendSlice(allocator, if (b) "true" else "false"),
@@ -803,7 +803,7 @@ fn writeJsonValue(out: *std.ArrayList(u8), allocator: Allocator, v: Value, inden
     }
 }
 
-fn appendPprint(out: *std.ArrayList(u8), allocator: Allocator, v: Value, verbose: bool) anyerror!void {
+fn appendPprint(out: *std.ArrayList(u8), allocator: Allocator, v: Value, verbose: bool) Allocator.Error!void {
     switch (v) {
         .nullVal => try out.appendSlice(allocator, "None"),
         .missing => try out.appendSlice(allocator, "Undefined"),
@@ -1471,7 +1471,7 @@ fn filterRandom(allocator: Allocator, value: Value, args: []const Value, kwargs:
     var n: usize = 0;
     for (value.list) |item| {
         if (n >= 8) break;
-        h.update(std.mem.asBytes(&@as(u64, @intFromEnum(item))));
+        h.update(std.mem.asBytes(&@as(u64, @backingInt(item))));
         n += 1;
     }
     var seed = h.final();
@@ -2118,7 +2118,7 @@ pub const Renderer = struct {
         writer: anytype,
     ) !void {
         comptime {
-            if (@typeInfo(@TypeOf(ctx)).pointer.is_const) {
+            if (@typeInfo(@TypeOf(ctx)).pointer.attrs.@"const") {
                 @compileError(
                     "Renderer.render must take `*Context`: it mutates ctx.arena " ++
                         "through arenaAlloc below, and a `*const` parameter is emitted " ++

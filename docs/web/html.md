@@ -62,7 +62,7 @@ When executing HTTP requests, responses can be parsed directly into an HTML docu
 var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 
-var response = try client.get("http://httpbun.com/html", .{});
+var response = try client.get("https://httpbun.com/html", .{});
 defer response.deinit();
 
 var doc = try response.html();

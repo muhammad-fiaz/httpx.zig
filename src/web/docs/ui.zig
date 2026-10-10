@@ -612,6 +612,64 @@ test "graphiql opt-in mounts its page and all worker assets" {
     try std.testing.expectEqual(assets.graphiqlGraphqlWorkerJs.len, worker.body.len);
 }
 
+test "all vendored assets serve with correct mime and markers" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+    try router.get("/hello", helloHandler, .{});
+
+    try mount(a, &router, .{}, .{ .title = "Demo" });
+    defer unmount();
+
+    const Case = struct {
+        path: []const u8,
+        mime: []const u8,
+        marker: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        // Swagger UI.
+        .{ .path = "/docs/swagger-ui-bundle.js", .mime = "text/javascript; charset=utf-8", .marker = "SwaggerUIBundle" },
+        .{ .path = "/docs/swagger-ui-standalone-preset.js", .mime = "text/javascript; charset=utf-8", .marker = "SwaggerUIStandalonePreset" },
+        .{ .path = "/docs/swagger-ui.css", .mime = "text/css; charset=utf-8", .marker = ".swagger-ui" },
+        .{ .path = "/docs/oauth2-redirect.html", .mime = "text/html; charset=utf-8", .marker = "oauth2-redirect.js" },
+        .{ .path = "/docs/oauth2-redirect.js", .mime = "text/javascript; charset=utf-8" },
+        .{ .path = "/docs/favicon-16x16.png", .mime = "image/png" },
+        .{ .path = "/docs/favicon-32x32.png", .mime = "image/png" },
+        // ReDoc.
+        .{ .path = "/redoc/redoc.standalone.js", .mime = "text/javascript; charset=utf-8", .marker = "Redoc" },
+        // Scalar.
+        .{ .path = "/scalar/standalone.js", .mime = "text/javascript; charset=utf-8", .marker = "api-reference" },
+        // GraphiQL UI, stylesheet, and Monaco workers.
+        .{ .path = "/graphiql/graphiql.js", .mime = "text/javascript; charset=utf-8", .marker = "renderGraphiQL" },
+        .{ .path = "/graphiql/graphiql.css", .mime = "text/css; charset=utf-8", .marker = ".graphiql-container" },
+        .{ .path = "/graphiql/editor.worker.js", .mime = "text/javascript; charset=utf-8" },
+        .{ .path = "/graphiql/json.worker.js", .mime = "text/javascript; charset=utf-8" },
+        .{ .path = "/graphiql/graphql.worker.js", .mime = "text/javascript; charset=utf-8" },
+    };
+    for (cases) |c| {
+        const res = (try invoke(&router, .GET, c.path, a)).?;
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+        try std.testing.expectEqualStrings(c.mime, res.contentType.?);
+        try std.testing.expect(res.body.len > 0);
+        if (c.marker) |m| try std.testing.expect(std.mem.indexOf(u8, res.body, m) != null);
+    }
+
+    // Favicons are real PNG images.
+    const fav = (try invoke(&router, .GET, "/docs/favicon-32x32.png", a)).?;
+    try std.testing.expect(fav.body.len > 8);
+    try std.testing.expectEqualSlices(u8, &.{ 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' }, fav.body[0..8]);
+
+    // Pages reference the served local assets (workers included).
+    const swaggerPage = (try invoke(&router, .GET, "/docs", a)).?;
+    try std.testing.expect(std.mem.indexOf(u8, swaggerPage.body, "oauth2-redirect.html") != null);
+    const graphiqlPage = (try invoke(&router, .GET, "/graphiql", a)).?;
+    // Workers are lazy-loaded by the bundle at runtime, not linked in the page.
+    for ([_][]const u8{ "editor.worker.js", "json.worker.js", "graphql.worker.js" }) |asset| {
+        try std.testing.expect(std.mem.indexOf(u8, graphiqlPage.body, asset) == null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, graphiqlPage.body, "/graphiql/graphiql.js") != null);
+}
+
 test "disabling swagger and redoc leaves scalar and spec" {
     const a = std.testing.allocator;
     var router = Router.init(a);

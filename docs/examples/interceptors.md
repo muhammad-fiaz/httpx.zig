@@ -17,6 +17,16 @@ try server.use(timing);
 try server.use(httpx.middleware.logging);
 ```
 
+## Expected Output
+
+```text
+Server running on http://127.0.0.1:54321
+GET / -> status=200, body={"message":"Request example"}
+Interceptor example verification completed successfully.
+```
+
+This is the output format of `zig build run-interceptor-example` (see `examples/interceptorExample.zig`); the port number varies per run.
+
 ## Run
 
 ```bash

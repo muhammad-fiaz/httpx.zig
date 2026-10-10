@@ -22,6 +22,14 @@ if (echo.json) |back| std.debug.print("name={s} role={s}\n", .{ back.name, back.
 Server side, parse request bodies with `ctx.json(T)` and render with
 `ctx.renderJson(value)`.
 
+## Expected Output
+
+```text
+name=Alice role=admin
+```
+
+The printed values reflect whatever JSON the server echoes back; names, roles, and ordering vary with the request payload and server response.
+
 ## Run
 
 ```bash

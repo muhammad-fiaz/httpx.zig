@@ -19,6 +19,7 @@ const flate = std.compress.flate;
 
 const zstdMod = @import("zstd");
 const brotliMod = @import("brotli");
+const parseMod = @import("../common/parse.zig");
 
 pub const Error = error{
     UnsupportedEncoding,
@@ -74,26 +75,24 @@ pub fn parseAcceptEncoding(allocator: Allocator, headerValue: []const u8) ![]Par
     var results = std.ArrayList(ParsedEncoding).empty;
     errdefer results.deinit(allocator);
 
-    var it = std.mem.splitScalar(u8, headerValue, ',');
-    while (it.next()) |raw| {
-        const part = std.mem.trim(u8, raw, " \t");
-        if (part.len == 0) continue;
-
-        var segIt = std.mem.splitScalar(u8, part, ';');
-        const tok = std.mem.trim(u8, segIt.next() orelse continue, " \t");
+    var it = parseMod.TokenListIterator.init(headerValue);
+    while (it.next()) |part| {
+        var paramIt = parseMod.ParamIterator.init(part);
+        const firstParam = paramIt.next() orelse continue;
+        const tok = firstParam.key;
         var q: f32 = 1.0;
 
-        if (segIt.next()) |qpartRaw| {
-            const qpart = std.mem.trim(u8, qpartRaw, " \t");
-            if (std.ascii.startsWithIgnoreCase(qpart, "q=")) {
-                q = parseQuality(qpart[2..]);
+        while (paramIt.next()) |param| {
+            if (parseMod.eqlIgnoreCase(param.key, "q")) {
+                q = parseQuality(param.value);
             }
         }
 
         if (tok.len == 1 and tok[0] == '*') {
             // Wildcard: expand to all codings not explicitly listed
-            inline for (@typeInfo(Encoding).@"enum".fields) |f| {
-                const enc: Encoding = @enumFromInt(f.value);
+            const encodingInfo = @typeInfo(Encoding).@"enum";
+            inline for (encodingInfo.field_names, encodingInfo.field_values) |_, fvalue| {
+                const enc: Encoding = @fromBackingInt(@intCast(fvalue));
                 try results.append(allocator, .{ .encoding = enc, .q = q });
             }
             continue;
@@ -113,23 +112,22 @@ pub fn negotiate(headerValue: []const u8) Encoding {
     var wildcard: ?f32 = null;
     var hasEntry = false;
 
-    var it = std.mem.splitScalar(u8, headerValue, ',');
-    while (it.next()) |raw| {
-        const part = std.mem.trim(u8, raw, " \t");
-        if (part.len == 0) continue;
-
-        var segIt = std.mem.splitScalar(u8, part, ';');
+    var it = parseMod.TokenListIterator.init(headerValue);
+    while (it.next()) |part| {
+        var paramIt = parseMod.ParamIterator.init(part);
+        const firstParam = paramIt.next() orelse continue;
         hasEntry = true;
-        const tok = std.mem.trim(u8, segIt.next() orelse continue, " \t");
+        const tok = firstParam.key;
         var q: f32 = 1.0;
-        if (segIt.next()) |qpRaw| {
-            const qp = std.mem.trim(u8, qpRaw, " \t");
-            if (std.ascii.startsWithIgnoreCase(qp, "q=")) {
-                q = parseQuality(qp[2..]);
+
+        while (paramIt.next()) |param| {
+            if (parseMod.eqlIgnoreCase(param.key, "q")) {
+                q = parseQuality(param.value);
             }
         }
+
         if (Encoding.fromToken(tok)) |enc| {
-            explicit[@intFromEnum(enc)] = q;
+            explicit[@backingInt(enc)] = q;
         } else if (tok.len == 1 and tok[0] == '*') {
             wildcard = q;
         }
@@ -138,9 +136,10 @@ pub fn negotiate(headerValue: []const u8) Encoding {
     var best: Encoding = .identity;
     var bestQ: f32 = 0.0;
     var found = false;
-    inline for (@typeInfo(Encoding).@"enum".fields) |field| {
-        const enc: Encoding = @enumFromInt(field.value);
-        const q = explicit[@intFromEnum(enc)] orelse wildcard orelse
+    const negotiateInfo = @typeInfo(Encoding).@"enum";
+    inline for (negotiateInfo.field_names, negotiateInfo.field_values) |_, fvalue| {
+        const enc: Encoding = @fromBackingInt(@intCast(fvalue));
+        const q = explicit[@backingInt(enc)] orelse wildcard orelse
             if (enc == .identity and !hasEntry) @as(f32, 1.0) else @as(f32, 0.0);
         if (q > 0 and (!found or q > bestQ or (q == bestQ and preference(enc) > preference(best)))) {
             best = enc;
@@ -224,7 +223,7 @@ pub fn decompressLimited(allocator: Allocator, encoding: Encoding, data: []const
     return switch (encoding) {
         .identity => if (data.len > maxSize) Error.DecompressedTooLarge else allocator.dupe(u8, data),
         .zstd => {
-            const bound = zstdMod.decompressBound(data) catch return Error.CorruptData;
+            const bound = zstdMod.decompressBound(allocator, data) catch return Error.CorruptData;
             if (bound > maxSize) return Error.DecompressedTooLarge;
             return zstdMod.decompress(allocator, data) catch Error.CorruptData;
         },
@@ -376,11 +375,16 @@ test "limited decompression rejects oversized identity and zstd output" {
 
 test "limited brotli decompression grows within the configured bound" {
     const a = std.testing.allocator;
-    const original = "brotli bounded output " ** 512;
-    const compressed = try compress(a, .br, original);
+    const pat = "brotli bounded output ";
+    const original: [pat.len * 512]u8 = comptime blk: {
+        var out: [pat.len * 512]u8 = undefined;
+        for (0..512) |i| @memcpy(out[i * pat.len ..][0..pat.len], pat);
+        break :blk out;
+    };
+    const compressed = try compress(a, .br, &original);
     defer a.free(compressed);
     try std.testing.expectError(Error.DecompressedTooLarge, decompressLimited(a, .br, compressed, original.len - 1));
     const restored = try decompressLimited(a, .br, compressed, original.len);
     defer a.free(restored);
-    try std.testing.expectEqualStrings(original, restored);
+    try std.testing.expectEqualStrings(&original, restored);
 }

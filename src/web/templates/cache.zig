@@ -231,9 +231,20 @@ pub const Cache = struct {
 
         var it = self.entries.iterator();
         while (it.next()) |entry| {
-            self.retireLocked(entry.key_ptr.*, entry.value_ptr.ast, entry.value_ptr.source);
+            self.allocator.free(entry.key_ptr.*);
+            self.retireLocked(entry.value_ptr.*);
         }
         self.entries.clearRetainingCapacity();
+
+        var depIt = self.dependents.iterator();
+        while (depIt.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            for (entry.value_ptr.items) |dep| {
+                self.allocator.free(dep);
+            }
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.dependents.clearRetainingCapacity();
     }
 };
 
@@ -263,4 +274,13 @@ test "Cache stores and invalidates with dependency tracking" {
     cache.invalidate("base.html");
     try testing.expect(cache.get("base.html") == null);
     try testing.expect(cache.get("index.html") == null);
+
+    // Re-insert and test invalidateAll
+    const newBaseSrc = try alloc.dupe(u8, "<html>new</html>");
+    var newParser = parserMod.Parser.init(alloc, "new.html", newBaseSrc);
+    const newAst = try newParser.parse();
+    try cache.put("new.html", newBaseSrc, newAst);
+    try testing.expect(cache.get("new.html") != null);
+    cache.invalidateAll();
+    try testing.expect(cache.get("new.html") == null);
 }

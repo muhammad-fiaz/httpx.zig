@@ -33,6 +33,23 @@ fn createUser(ctx: *httpx.Context) anyerror!httpx.Response {
 See `examples/customHeaders.zig`, `examples/customResponses.zig`, and
 `examples/customServer.zig`.
 
+## Expected Output
+
+The snippet itself prints nothing; the referenced examples print lines in
+these formats (representative values shown):
+
+```text
+Status: 200
+Body: {"headers":{"Authorization":"Bearer my-token","X-Custom":"my-value"}}
+1. GET /html -> status=200, content-type=text/html; charset=utf-8
+2. GET /json -> status=200, content-type=application/json, body={"status":"ok","version":"1.0.0"}
+Server running on http://127.0.0.1:41237
+GET / -> status=200, body={"message":"Custom request/response example"}
+Custom server verification completed successfully.
+```
+
+Status codes, content types, bodies, URLs, and ports vary with the request, server config, and ephemeral port selected at runtime.
+
 ## Run
 
 ```bash

@@ -85,6 +85,20 @@ never registered, so they return 404 like any unknown path.
 * **Scalar** (`/scalar`): Next-generation developer portal with integrated dark mode, multi-language client SDK generation, and instant search.
 * **GraphiQL** (`/graphiql`): Full GraphQL explorer with auto-completion, inline docs introspection, query history, and variable editor.
 
+## Bundled Versions
+
+> [!NOTE]
+> The API documentation interfaces are bundled locally and served by `httpx.zig` — no CDN JavaScript is loaded at runtime. (The ReDoc page template links Google Fonts for typography.)
+
+| Component | Installed version | Upstream source |
+|---|---|---|
+| Swagger UI | 5.33.1 | https://github.com/swagger-api/swagger-ui |
+| ReDoc | 2.5.4 | https://github.com/Redocly/redoc |
+| Scalar (`@scalar/api-reference`) | 1.73.1 | https://github.com/scalar/scalar |
+| GraphiQL | 5.4.0 | https://github.com/graphql/graphiql |
+
+The exact distribution files and download URLs are recorded in `src/assets/<component>/VERSION.txt`, and `src/web/docs/assets.zig` pins the same versions in tests. GraphiQL ships with Monaco editor workers (`editor.worker.js`, `json.worker.js`, `graphql.worker.js`) served under the GraphiQL route; the Swagger UI bundle includes its OAuth2 redirect page (`oauth2-redirect.html` + `oauth2-redirect.js`).
+
 ## Related
 
 * [Web: OpenAPI](/web/openapi)

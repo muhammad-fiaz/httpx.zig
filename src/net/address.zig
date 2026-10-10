@@ -17,6 +17,7 @@
 const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
+const parseMod = @import("../common/parse.zig");
 
 pub const Error = error{ InvalidAddress, InvalidPort, BufferTooSmall };
 
@@ -25,21 +26,21 @@ pub const Family = enum { ip4, ip6 };
 pub const Address = struct {
     family: Family,
     /// Big-endian address bytes (4 for ip4, 16 for ip6).
-    bytes: [16]u8 = [_]u8{0} ** 16,
+    bytes: [16]u8 = (@as([16]u8, @splat(0))),
     port: u16,
     /// IPv6 scope/zone id (interface index); 0 = none.
     zone: u32 = 0,
 
     pub fn loopback4(port: u16) Address {
         return .{ .family = .ip4, .port = port, .bytes = blk: {
-            var b = [_]u8{0} ** 16;
+            var b = (@as([16]u8, @splat(0)));
             b[0..4].* = .{ 127, 0, 0, 1 };
             break :blk b;
         } };
     }
 
     pub fn loopback6(port: u16) Address {
-        var a = Address{ .family = .ip6, .bytes = [_]u8{0} ** 16, .port = port };
+        var a = Address{ .family = .ip6, .bytes = (@as([16]u8, @splat(0))), .port = port };
         a.bytes[15] = 1;
         return a;
     }
@@ -72,29 +73,11 @@ pub const Address = struct {
     /// Parses "host" or "[v6]:port" or "host:port" or bare host.
     /// Bare hosts without an explicit port use `defaultPort`.
     pub fn parse(text: []const u8, defaultPort: u16) Error!struct { addr: []const u8, port: u16 } {
-        // Bracketed IPv6 [::1]:8080
-        if (text.len > 0 and text[0] == '[') {
-            const close = std.mem.indexOfScalar(u8, text, ']') orelse return Error.InvalidAddress;
-            const rest = text[close + 1 ..];
-            if (rest.len == 0) {
-                return .{ .addr = text[1..close], .port = defaultPort };
-            }
-            if (rest[0] != ':') return Error.InvalidAddress;
-            const p = std.fmt.parseInt(u16, rest[1..], 10) catch return Error.InvalidPort;
-            return .{ .addr = text[1..close], .port = p };
-        }
-        // Bare IPv4 host:port - count colons; >1 colon without brackets means raw v6
-        var colons: usize = 0;
-        for (text) |c| {
-            if (c == ':') colons += 1;
-        }
-        if (colons == 1) {
-            const colon = std.mem.indexOfScalar(u8, text, ':').?;
-            const p = std.fmt.parseInt(u16, text[colon + 1 ..], 10) catch return Error.InvalidPort;
-            return .{ .addr = text[0..colon], .port = p };
-        }
-        // Raw host or unbracketed IPv6 without port
-        return .{ .addr = text, .port = defaultPort };
+        const auth = parseMod.parseAuthority(text) orelse return Error.InvalidAddress;
+        return .{
+            .addr = auth.host,
+            .port = auth.port orelse defaultPort,
+        };
     }
 
     pub fn parseIp(self: *const Address, text: []const u8) Error!Address {
@@ -108,7 +91,7 @@ pub const Address = struct {
         return parseIp6Text(text);
     }
 
-    /// Standard Zig format method: enables `{f}` formatting in Zig 0.16.0.
+    /// Standard Zig format method: enables `{f}` formatting in Zig 0.17.0.
     /// Example: `std.debug.print("{f}\n", .{addr})` or `std.fmt.allocPrint(a, "{f}", .{addr})`.
     pub fn format(self: Address, writer: anytype) !void {
         var buf: [64]u8 = undefined;
@@ -214,7 +197,7 @@ pub const Address = struct {
     pub fn fromStd(a: net.IpAddress) Address {
         return switch (a) {
             .ip4 => |v| blk: {
-                var out = Address{ .family = .ip4, .bytes = [_]u8{0} ** 16, .port = v.port };
+                var out = Address{ .family = .ip4, .bytes = (@as([16]u8, @splat(0))), .port = v.port };
                 out.bytes[0..4].* = v.bytes;
                 break :blk out;
             },
@@ -269,9 +252,9 @@ fn parseIp6Text(textIn: []const u8) Error!Address {
 
     // Find "::" compression point
     const doubleColon = std.mem.indexOf(u8, text, "::");
-    var headGroups: [8]u16 = [_]u16{0} ** 8;
+    var headGroups: [8]u16 = (@as([8]u16, @splat(0)));
     var headCount: usize = 0;
-    var tailGroups: [8]u16 = [_]u16{0} ** 8;
+    var tailGroups: [8]u16 = (@as([8]u16, @splat(0)));
     var tailCount: usize = 0;
 
     var headPart: []const u8 = "";

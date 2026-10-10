@@ -18,8 +18,8 @@ pub fn main() !void {
     defer client.deinit();
 
     // GET with compression
-    var response = client.get("http://httpbun.com/get", .{
-        .headers = .{ .accept_encoding = "gzip, deflate, br" },
+    var response = client.get("https://httpbun.com/get", .{
+        .headers = .{ .acceptEncoding = "gzip, deflate, br" },
     }) catch |err| {
         std.debug.print("Compression request failed: {s}\n", .{@errorName(err)});
         return;
@@ -30,6 +30,15 @@ pub fn main() !void {
     std.debug.print("Body length: {d}\n", .{response.body.len});
 }
 ```
+
+## Expected Output
+
+```text
+Status: 200
+Body length: 1234
+```
+
+The status reflects the live endpoint and the body length varies with the decoded response payload.
 
 ## How to Run
 

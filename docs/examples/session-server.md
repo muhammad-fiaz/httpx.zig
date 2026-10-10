@@ -38,9 +38,9 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [128]u8 = undefined;
-    const url_login = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/login", .{port});
-    var res = try client.get(url_login, .{});
+    var urlBuf: [128]u8 = undefined;
+    const urlLogin = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/login", .{port});
+    var res = try client.get(urlLogin, .{});
     std.debug.print("GET /login -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
@@ -73,6 +73,16 @@ fn logoutHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 ```
+
+## Expected Output
+
+```text
+Session server running on http://127.0.0.1:41237
+GET /login -> status=200, body={"message":"Logged in","user":"alice"}
+Session server verification completed successfully.
+```
+
+Statuses, bodies, URLs, and ports vary with the request and the ephemeral port selected at runtime.
 
 ## How to Run
 

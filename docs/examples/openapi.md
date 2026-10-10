@@ -37,11 +37,11 @@ pub fn main() !void {
 
     var router = httpx.Router.init(allocator);
     defer router.deinit();
-    try router.add("/widgets", listHandler, .{.meta = .{
+    try router.add(.GET, "/widgets", listHandler, .{.meta = .{
         .summary = "List all widgets",
         .description = "Returns the full set of widgets.",
     }});
-    try router.add("/widgets/{id}", getHandler, .{.meta = .{
+    try router.add(.GET, "/widgets/{id}", getHandler, .{.meta = .{
         .summary = "Fetch a single widget",
         .description = "Looks up a widget by its opaque id.",
     }});
@@ -58,6 +58,14 @@ pub fn main() !void {
     std.debug.print("{s}\n", .{spec});
 }
 ```
+
+## Expected Output
+
+```text
+{"openapi":"3.1.0","info":{"title":"Widgets API","version":"1.0.0","description":"Demonstration OpenAPI document generated at build time."},"paths":{"/widgets":{...},"/widgets/{id}":{...}}}
+```
+
+The program prints the generated OpenAPI JSON document to stdout; the exact JSON grows with the registered routes and their metadata.
 
 ## How to Run
 

@@ -50,7 +50,7 @@ const ws = if (isWindows) struct {
         family: u16,
         port: u16, // big-endian
         addr: [4]u8,
-        zero: [8]u8 = .{0} ** 8,
+        zero: [8]u8 = @splat(0),
     };
 
     pub const sockaddrIn6 = extern struct {
@@ -235,7 +235,7 @@ pub const UploadStream = struct {
                 .family = posix.AF.INET,
                 .port = std.mem.nativeToBig(u16, port),
                 .addr = std.mem.nativeToBig(u32, std.mem.readInt(u32, &host, .big)),
-                .zero = [_]u8{0} ** 8,
+                .zero = (@as([8]u8, @splat(0))),
             };
             if (std.c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in)) != 0) {
                 _ = std.c.close(fd);
@@ -452,12 +452,16 @@ pub const Socket = struct {
             },
             .stream => |st| {
                 var data: [1][]u8 = .{buf};
-                const n = self.io.vtable.netRead(self.io.userdata, st.socket.handle, &data) catch |err| switch (err) {
+                const result = self.io.operate(.{ .net_read = .{
+                    .socket_handle = st.socket.handle,
+                    .data = &data,
+                } }) catch return ReadError.ReadFailed;
+                const rr = result.net_read catch |err| switch (err) {
                     error.ConnectionResetByPeer, error.Unexpected => return ReadError.ConnectionReset,
                     else => return ReadError.ReadFailed,
                 };
-                if (n == 0) return 0; // EOF
-                return n;
+                if (rr.data_len == 0) return 0; // EOF
+                return rr.data_len;
             },
         }
     }
@@ -478,7 +482,11 @@ pub const Socket = struct {
             },
             .stream => |st| {
                 const chunk = data[0..@min(data.len, 4096)];
-                const n = self.io.vtable.netWrite(self.io.userdata, st.socket.handle, chunk, &.{""}, 0) catch |err| switch (err) {
+                const result = self.io.operate(.{ .net_write = .{
+                    .socket_handle = st.socket.handle,
+                    .data = &.{chunk},
+                } }) catch return WriteError.WriteFailed;
+                const n = result.net_write catch |err| switch (err) {
                     error.ConnectionResetByPeer, error.Unexpected => return WriteError.ConnectionReset,
                     else => return WriteError.WriteFailed,
                 };
@@ -588,7 +596,7 @@ pub fn wakeListenerPort(port: u16) void {
             .family = posix.AF.INET,
             .port = std.mem.nativeToBig(u16, port),
             .addr = std.mem.nativeToBig(u32, 0x7F000001),
-            .zero = [_]u8{0} ** 8,
+            .zero = (@as([8]u8, @splat(0))),
         };
         _ = std.c.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.in));
     }

@@ -89,7 +89,7 @@ pub const Backend = struct {
 
     fn watchOne(self: *Backend, path: []const u8) void {
         if (self.byPath.contains(path)) return;
-        const cpath = self.allocator.dupeZ(u8, path) catch return;
+        const cpath = self.allocator.dupeSentinel(u8, path, 0) catch return;
         defer self.allocator.free(cpath);
         const fd = std.posix.openat(std.posix.AT.FDCWD, cpath, .{ .ACCMODE = .RDONLY }, 0) catch return;
         // Single ownership: dirs[].path owns the bytes; byPath only
