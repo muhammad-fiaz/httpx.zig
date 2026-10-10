@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const mimeMod = @import("../../utils/mime.zig");
 const Method = @import("../../common/method.zig").Method;
 const patternMod = @import("pattern.zig");
 const Pattern = patternMod.Pattern;
@@ -533,7 +534,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = bytes,
-            .contentType = contentType orelse "application/octet-stream",
+            .contentType = contentType orelse mimeMod.octetStream,
         };
     }
 

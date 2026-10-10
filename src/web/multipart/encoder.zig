@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const mimeMod = @import("../../utils/mime.zig");
 
 // Subtypes
 
@@ -30,7 +31,7 @@ pub const Part = struct {
     name: []const u8,
     filename: ?[]const u8 = null,
     filenameStar: ?FilenameStar = null,
-    contentType: []const u8 = "application/octet-stream",
+    contentType: []const u8 = mimeMod.octetStream,
     contentTransferEncoding: ?[]const u8 = null,
     data: []const u8,
     headers: ?[]const Header = null,
@@ -88,7 +89,7 @@ pub const Multipart = struct {
             .name = name,
             .filename = opts.filename,
             .filenameStar = opts.filenameStar,
-            .contentType = opts.contentType orelse "application/octet-stream",
+            .contentType = opts.contentType orelse mimeMod.octetStream,
             .contentTransferEncoding = opts.contentTransferEncoding,
             .data = data,
             .headers = opts.headers,

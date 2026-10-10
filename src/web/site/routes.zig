@@ -178,13 +178,7 @@ fn shapeKey(allocator: Allocator, pattern: []const u8) ![]u8 {
 }
 
 fn encodeSegment(allocator: Allocator, seg: []const u8) ![]u8 {
-    var buf: [1024]u8 = undefined;
-    if (seg.len * 3 <= buf.len) {
-        return allocator.dupe(u8, try uri.percentEncode(&buf, seg));
-    }
-    const big = try allocator.alloc(u8, seg.len * 3);
-    defer allocator.free(big);
-    return allocator.dupe(u8, try uri.percentEncode(big, seg));
+    return uri.percentEncodeAlloc(allocator, seg);
 }
 
 const ParsedFile = struct {

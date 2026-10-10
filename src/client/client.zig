@@ -20,6 +20,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
+const mimeMod = @import("../utils/mime.zig");
 const sync = @import("../common/sync.zig");
 const logging = @import("../common/logging.zig");
 const Method = @import("../common/method.zig").Method;
@@ -1102,12 +1103,12 @@ pub const Client = struct {
                 break :blk @as(?[]const u8, v);
             };
             const contentTypeVal: []const u8 = blk: {
-                if (!@hasField(@TypeOf(mp), "contentType")) break :blk "application/octet-stream";
+                if (!@hasField(@TypeOf(mp), "contentType")) break :blk mimeMod.octetStream;
                 const v = mp.contentType;
                 const T = @TypeOf(v);
                 if (@typeInfo(T) == .optional) {
                     if (v) |val| break :blk val;
-                    break :blk "application/octet-stream";
+                    break :blk mimeMod.octetStream;
                 } else {
                     break :blk v;
                 }

@@ -7,6 +7,7 @@
 //! Thread-safety: immutable after registration; safe to read concurrently.
 
 const std = @import("std");
+const mimeMod = @import("../../utils/mime.zig");
 
 /// Parameter location.
 pub const Location = enum {
@@ -71,7 +72,7 @@ pub const ContentType = enum {
             .multipart => "multipart/form-data",
             .textPlain => "text/plain",
             .html => "text/html",
-            .octetStream => "application/octet-stream",
+            .octetStream => mimeMod.octetStream,
         };
     }
 };

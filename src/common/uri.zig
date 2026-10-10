@@ -202,6 +202,16 @@ fn isUnreserved(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~';
 }
 
+/// Percent-encodes into an owned slice: stack-buffer fast path with heap
+/// fallback for long inputs. The caller owns the result and must free it.
+pub fn percentEncodeAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var buf: [1024]u8 = undefined;
+    if (input.len * 3 <= buf.len) return allocator.dupe(u8, try percentEncode(&buf, input));
+    const big = try allocator.alloc(u8, input.len * 3);
+    defer allocator.free(big);
+    return allocator.dupe(u8, try percentEncode(big, input));
+}
+
 /// Checks whether a path contains traversal sequences after decoding.
 pub fn hasPathTraversal(decodedPath: []const u8) bool {
     if (decodedPath.len == 0) return false;

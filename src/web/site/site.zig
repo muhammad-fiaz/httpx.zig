@@ -452,11 +452,7 @@ fn encodeParamValue(allocator: Allocator, v: anytype) ![]u8 {
 }
 
 fn encodeOwned(allocator: Allocator, s: []const u8) ![]u8 {
-    var buf: [1024]u8 = undefined;
-    if (s.len * 3 <= buf.len) return allocator.dupe(u8, try uri.percentEncode(&buf, s));
-    const big = try allocator.alloc(u8, s.len * 3);
-    defer allocator.free(big);
-    return allocator.dupe(u8, try uri.percentEncode(big, s));
+    return uri.percentEncodeAlloc(allocator, s);
 }
 
 fn appendQuery(allocator: Allocator, out: *std.ArrayList(u8), query: anytype) !void {
