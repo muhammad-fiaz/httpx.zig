@@ -5,7 +5,7 @@ Demonstrates graphqlServer.zig using the canonical HTTPX API.
 ## Complete Example
 
 ```zig
-//! Example: GraphQL Server with GraphiQL 5.3.0 Explorer
+//! Example: GraphQL Server with GraphiQL 5.4.0 Explorer
 //!
 //! Demonstrates:
 //! - Defining GraphQL Object Types and Resolvers
@@ -79,7 +79,7 @@ pub fn main() !void {
         .docs = .{
             .title = "HTTPX GraphQL & REST API",
             .version = "0.2.0",
-            .description = "Full-featured native HTTP server with OpenAPI & GraphiQL 5.3.0 documentation.",
+            .description = "Full-featured native HTTP server with OpenAPI & GraphiQL 5.4.0 documentation.",
             .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
             .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
             .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar Reference" },

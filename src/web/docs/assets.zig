@@ -9,10 +9,10 @@
 
 const std = @import("std");
 
-pub const swaggerUiVersion = "5.32.14";
-pub const redocVersion = "2.5.3";
-pub const scalarVersion = "1.66.1";
-pub const graphiqlVersion = "5.3.0";
+pub const swaggerUiVersion = "5.33.1";
+pub const redocVersion = "2.5.4";
+pub const scalarVersion = "1.73.1";
+pub const graphiqlVersion = "5.4.0";
 
 /// A single embedded asset file.
 pub const File = struct {
@@ -43,6 +43,7 @@ pub const swaggerFiles = [_]File{
     .{ .name = "swagger-ui-standalone-preset.js", .contentType = "text/javascript; charset=utf-8", .data = swaggerUiStandalonePresetJs },
     .{ .name = "swagger-ui.css", .contentType = "text/css; charset=utf-8", .data = swaggerUiCss },
     .{ .name = "oauth2-redirect.html", .contentType = "text/html; charset=utf-8", .data = oauth2RedirectHtml },
+    .{ .name = "oauth2-redirect.js", .contentType = "text/javascript; charset=utf-8", .data = oauth2RedirectJs },
     .{ .name = "favicon-16x16.png", .contentType = "image/png", .data = favicon16Png },
     .{ .name = "favicon-32x32.png", .contentType = "image/png", .data = favicon32Png },
 };
@@ -67,6 +68,7 @@ pub const swaggerUiBundleJs = @embedFile("../../assets/swagger-ui/swagger-ui-bun
 pub const swaggerUiStandalonePresetJs = @embedFile("../../assets/swagger-ui/swagger-ui-standalone-preset.js");
 pub const swaggerUiCss = @embedFile("../../assets/swagger-ui/swagger-ui.css");
 pub const oauth2RedirectHtml = @embedFile("../../assets/swagger-ui/oauth2-redirect.html");
+pub const oauth2RedirectJs = @embedFile("../../assets/swagger-ui/oauth2-redirect.js");
 pub const favicon16Png = @embedFile("../../assets/swagger-ui/favicon-16x16.png");
 pub const favicon32Png = @embedFile("../../assets/swagger-ui/favicon-32x32.png");
 pub const redocStandaloneJs = @embedFile("../../assets/redoc/redoc.standalone.js");
@@ -122,16 +124,16 @@ test "lookup miss returns null" {
 }
 
 test "vendored versions are the pinned releases" {
-    try std.testing.expectEqualStrings("5.32.14", swaggerUiVersion);
-    try std.testing.expectEqualStrings("2.5.3", redocVersion);
-    try std.testing.expectEqualStrings("1.66.1", scalarVersion);
-    try std.testing.expectEqualStrings("5.3.0", graphiqlVersion);
+    try std.testing.expectEqualStrings("5.33.1", swaggerUiVersion);
+    try std.testing.expectEqualStrings("2.5.4", redocVersion);
+    try std.testing.expectEqualStrings("1.73.1", scalarVersion);
+    try std.testing.expectEqualStrings("5.4.0", graphiqlVersion);
 }
 
 test "bundles carry their version markers" {
     // Guards against silently re-vendoring the wrong release.
-    try std.testing.expect(std.mem.indexOf(u8, swaggerUiBundleJs, "5.32.14") != null);
-    try std.testing.expect(std.mem.indexOf(u8, redocStandaloneJs, "2.5.3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, scalarStandaloneJs, "1.66.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swaggerUiBundleJs, "5.33.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redocStandaloneJs, "2.5.4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scalarStandaloneJs, "1.73.1") != null);
     try std.testing.expect(graphiqlJs.len > 1000);
 }
