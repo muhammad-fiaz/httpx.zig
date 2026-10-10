@@ -253,6 +253,8 @@ pub const Server = struct {
     paused: std.atomic.Value(bool) = .init(false),
     docsMounted: bool = false,
     watcher: ?*watcherMod.Watcher = null,
+    sitePtr: ?*anyopaque = null,
+    siteReloadFn: ?*const fn (sitePtr: ?*anyopaque, server: *Server) void = null,
     liveReloadEventId: std.atomic.Value(usize) = .init(1),
     /// Last reload strategy reported by the watcher (as a
     /// `watcherMod.ReloadStrategy` tag). The SSE endpoint maps it to
@@ -842,6 +844,11 @@ pub const Server = struct {
                     s.liveReloadStrategy.store(@backingInt(event.strategy), .release);
                     if (s.templateEngine) |te| {
                         te.invalidate(event.path);
+                    }
+                    if (s.siteReloadFn) |reloadFn| {
+                        if (event.kind == .created or event.kind == .deleted or event.kind == .renamed or event.isDirectory) {
+                            reloadFn(s.sitePtr, s);
+                        }
                     }
                     s.emit(.{
                         .kind = .serverStarted,

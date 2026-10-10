@@ -14,6 +14,7 @@ const Method = @import("../../common/method.zig").Method;
 const patternMod = @import("pattern.zig");
 const Pattern = patternMod.Pattern;
 const SegmentKind = patternMod.SegmentKind;
+const parseMod = @import("../../common/parse.zig");
 
 pub const HandlerFn = *const fn (*Context) anyerror!Response;
 pub const NextFn = *const fn (*Context) anyerror!Response;
@@ -78,13 +79,7 @@ pub const Context = struct {
         if (self.activeHandler) |h| {
             return h(self);
         }
-        if (r.notFoundHandler) |nf| {
-            return nf(self) catch Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
-        } else if (r.statusHandlers.get(404)) |sh| {
-            return sh(self) catch Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
-        } else {
-            return Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
-        }
+        return r.notFoundResponse(self);
     }
 
     pub fn param(self: *const Context, name: []const u8) ?[]const u8 {
@@ -389,14 +384,10 @@ pub const Context = struct {
     pub fn cookie(self: *const Context, name: []const u8) ?[]const u8 {
         for (self.headers) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, "Cookie")) {
-                var iter = std.mem.splitScalar(u8, h.value, ';');
-                while (iter.next()) |pair| {
-                    const trimmed = std.mem.trim(u8, pair, " \t");
-                    if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
-                        const k = std.mem.trim(u8, trimmed[0..eq], " \t");
-                        if (std.mem.eql(u8, k, name)) {
-                            return std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
-                        }
+                var it = parseMod.ParamIterator.init(h.value);
+                while (it.next()) |p| {
+                    if (std.mem.eql(u8, p.key, name)) {
+                        return p.value;
                     }
                 }
             }
@@ -729,6 +720,17 @@ pub const Group = struct {
     }
 };
 
+pub const TrailingSlash = enum {
+    serveBoth,
+    redirectSlash,
+    redirectNoSlash,
+    strict,
+};
+
+pub const RouterConfig = struct {
+    trailingSlash: TrailingSlash = .serveBoth,
+};
+
 pub const Router = struct {
     allocator: Allocator,
     routes: std.ArrayList(RouteEntry) = .empty,
@@ -737,11 +739,17 @@ pub const Router = struct {
     errorHandler: ?ErrorHandlerFn = null,
     statusHandlers: std.AutoHashMap(u16, HandlerFn),
     templateEngine: ?*anyopaque = null,
+    trailingSlash: TrailingSlash = .serveBoth,
 
     pub fn init(allocator: Allocator) Router {
+        return initWithConfig(allocator, .{});
+    }
+
+    pub fn initWithConfig(allocator: Allocator, config: RouterConfig) Router {
         return .{
             .allocator = allocator,
             .statusHandlers = std.AutoHashMap(u16, HandlerFn).init(allocator),
+            .trailingSlash = config.trailingSlash,
         };
     }
 
@@ -1174,6 +1182,45 @@ pub const Router = struct {
     /// with no explicit OPTIONS route but other methods on the path gets an
     /// automatic `204 No Content` + `Allow` response.
     pub fn dispatch(self: *Router, ctx: *Context) Response {
+        const clean = cleanRequestPath(ctx.path);
+
+        if (self.trailingSlash != .serveBoth and !std.mem.eql(u8, clean, "/")) {
+            switch (self.trailingSlash) {
+                .serveBoth => {},
+                .redirectSlash => {
+                    if (!std.mem.endsWith(u8, clean, "/")) {
+                        const q = queryStringOf(ctx.path);
+                        const loc = if (q.len > 0)
+                            std.fmt.allocPrint(ctx.allocator, "{s}/?{s}", .{ clean, q }) catch return Response{ .status = 500, .body = "Internal Server Error" }
+                        else
+                            std.fmt.allocPrint(ctx.allocator, "{s}/", .{clean}) catch return Response{ .status = 500, .body = "Internal Server Error" };
+                        return ctx.redirect(loc, 301) catch return Response{ .status = 500, .body = "Internal Server Error" };
+                    }
+                },
+                .redirectNoSlash => {
+                    if (std.mem.endsWith(u8, clean, "/")) {
+                        var end = clean.len;
+                        while (end > 1 and clean[end - 1] == '/') end -= 1;
+                        const trimmed = clean[0..end];
+                        const q = queryStringOf(ctx.path);
+                        const loc = if (q.len > 0)
+                            std.fmt.allocPrint(ctx.allocator, "{s}?{s}", .{ trimmed, q }) catch return Response{ .status = 500, .body = "Internal Server Error" }
+                        else
+                            ctx.allocator.dupe(u8, trimmed) catch return Response{ .status = 500, .body = "Internal Server Error" };
+                        return ctx.redirect(loc, 301) catch return Response{ .status = 500, .body = "Internal Server Error" };
+                    }
+                },
+                .strict => {
+                    if (self.matchEntry(ctx.method, ctx.path, ctx)) |entry| {
+                        const entryClean = cleanRequestPath(entry.path);
+                        if (std.mem.endsWith(u8, clean, "/") != std.mem.endsWith(u8, entryClean, "/")) {
+                            return self.notFoundResponse(ctx);
+                        }
+                    }
+                },
+            }
+        }
+
         const maybeHandler = self.match(ctx.method, ctx.path, ctx);
         if (maybeHandler == null) {
             var allowBuf: [9]Method = undefined;
@@ -1189,6 +1236,16 @@ pub const Router = struct {
         ctx.activeHandler = maybeHandler;
         ctx.middlewareIndex = 0;
         return ctx.next() catch |err| self.handleError(ctx, err);
+    }
+
+    pub fn notFoundResponse(self: *Router, ctx: *Context) Response {
+        if (self.notFoundHandler) |nf| {
+            return nf(ctx) catch Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
+        } else if (self.statusHandlers.get(404)) |sh| {
+            return sh(ctx) catch Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
+        } else {
+            return Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
+        }
     }
 
     fn methodNotAllowedResponse(self: *Router, ctx: *Context, allowed: []const Method, status: u16, body: []const u8) Response {
@@ -1289,16 +1346,7 @@ fn queryStringOf(path: []const u8) []const u8 {
 }
 
 fn lookupQuery(query: []const u8, name: []const u8) ?[]const u8 {
-    var iter = std.mem.splitScalar(u8, query, '&');
-    while (iter.next()) |pair| {
-        if (pair.len == 0) continue;
-        if (std.mem.indexOfScalar(u8, pair, '=')) |eq| {
-            if (std.mem.eql(u8, pair[0..eq], name)) return pair[eq + 1 ..];
-        } else if (std.mem.eql(u8, pair, name)) {
-            return "";
-        }
-    }
-    return null;
+    return parseMod.lookupQuery(query, name);
 }
 
 // Tests
@@ -1932,4 +1980,67 @@ test "dynamic websocket-style route matches" {
     var ctx = Context{ .allocator = a };
     _ = router.match(.GET, "/ws/lobby", &ctx);
     try std.testing.expectEqualStrings("lobby", ctx.param("roomId").?);
+}
+
+test "router trailing slash policies: redirectSlash, redirectNoSlash, strict" {
+    const a = std.testing.allocator;
+
+    // redirectSlash policy
+    {
+        var r = Router.initWithConfig(a, .{ .trailingSlash = .redirectSlash });
+        defer r.deinit();
+        try r.get("/users", dummyHandler, .{});
+
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const aa = arena.allocator();
+
+        var ctx1 = Context{ .allocator = aa, .method = .GET, .path = "/users" };
+        const resp1 = r.dispatch(&ctx1);
+        try std.testing.expectEqual(@as(u16, 301), resp1.status);
+        try std.testing.expectEqualStrings("/users/", resp1.headers[0].value);
+
+        var ctx2 = Context{ .allocator = aa, .method = .GET, .path = "/users/" };
+        const resp2 = r.dispatch(&ctx2);
+        try std.testing.expectEqual(@as(u16, 200), resp2.status);
+    }
+
+    // redirectNoSlash policy
+    {
+        var r = Router.initWithConfig(a, .{ .trailingSlash = .redirectNoSlash });
+        defer r.deinit();
+        try r.get("/about", dummyHandler, .{});
+
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const aa = arena.allocator();
+
+        var ctx1 = Context{ .allocator = aa, .method = .GET, .path = "/about/" };
+        const resp1 = r.dispatch(&ctx1);
+        try std.testing.expectEqual(@as(u16, 301), resp1.status);
+        try std.testing.expectEqualStrings("/about", resp1.headers[0].value);
+
+        var ctx2 = Context{ .allocator = aa, .method = .GET, .path = "/about" };
+        const resp2 = r.dispatch(&ctx2);
+        try std.testing.expectEqual(@as(u16, 200), resp2.status);
+    }
+
+    // strict policy
+    {
+        var r = Router.initWithConfig(a, .{ .trailingSlash = .strict });
+        defer r.deinit();
+        try r.get("/api/v1", dummyHandler, .{});
+
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const aa = arena.allocator();
+
+        var ctx1 = Context{ .allocator = aa, .method = .GET, .path = "/api/v1" };
+        const resp1 = r.dispatch(&ctx1);
+        try std.testing.expectEqual(@as(u16, 200), resp1.status);
+
+        var ctx2 = Context{ .allocator = aa, .method = .GET, .path = "/api/v1/" };
+        const resp2 = r.dispatch(&ctx2);
+        try std.testing.expectEqual(@as(u16, 404), resp2.status);
+    }
 }

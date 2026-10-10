@@ -23,6 +23,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const routerMod = @import("../router/router.zig");
+const parseMod = @import("../../common/parse.zig");
 const reload = @import("../watcher/client.zig");
 const Context = routerMod.Context;
 const Response = routerMod.Response;
@@ -46,6 +47,8 @@ pub const Config = struct {
     reloadSsePath: []const u8 = "/__httpx_liveReload",
     /// SPA fallback file (e.g. "index.html") when requested path does not exist on disk.
     spaFallback: ?[]const u8 = null,
+    /// URL prefixes that must NEVER fall back to the SPA entry file (e.g. &[_][]const u8{"/api", "/auth"}).
+    spaExcludePrefixes: []const []const u8 = &.{},
     /// Serve from the embedded asset registry only; never touch the
     /// filesystem. Used for single-executable production deployments where
     /// the source directory may not exist at runtime.
@@ -67,11 +70,22 @@ const State = struct {
     liveReload: bool,
     reloadSsePath: []u8,
     spaFallback: ?[]u8,
+    spaExcludePrefixes: [][]u8,
     filesystem: bool,
 
     fn create(a: Allocator, cfg: Config) !*State {
         const st = try a.create(State);
         errdefer a.destroy(st);
+
+        var prefixes: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (prefixes.items) |p| a.free(p);
+            prefixes.deinit(a);
+        }
+        for (cfg.spaExcludePrefixes) |p| {
+            try prefixes.append(a, try a.dupe(u8, p));
+        }
+
         st.* = .{
             .allocator = a,
             .root = try normalizeDir(a, cfg.root),
@@ -81,6 +95,7 @@ const State = struct {
             .liveReload = cfg.liveReload,
             .reloadSsePath = try a.dupe(u8, cfg.reloadSsePath),
             .spaFallback = if (cfg.spaFallback) |fb| try a.dupe(u8, fb) else null,
+            .spaExcludePrefixes = try prefixes.toOwnedSlice(a),
             .filesystem = cfg.filesystem,
         };
         return st;
@@ -92,6 +107,8 @@ const State = struct {
         a.free(self.index);
         a.free(self.cacheControl);
         a.free(self.reloadSsePath);
+        for (self.spaExcludePrefixes) |p| a.free(p);
+        a.free(self.spaExcludePrefixes);
         if (self.spaFallback) |fb| a.free(fb);
         a.destroy(self);
     }
@@ -554,49 +571,7 @@ pub fn formatHttpDate(buf: []u8, epochSecs: i64) []const u8 {
 }
 
 /// Parses IMF-fixdate to epoch seconds; null on malformed input.
-pub fn parseHttpDate(s: []const u8) ?i64 {
-    var it = std.mem.tokenizeAny(u8, s, " ,");
-    _ = it.next() orelse return null;
-    const dayS = it.next() orelse return null;
-    const monS = it.next() orelse return null;
-    const yearS = it.next() orelse return null;
-    const timeS = it.next() orelse return null;
-
-    const day = std.fmt.parseInt(u16, dayS, 10) catch return null;
-    var month: ?u4 = null;
-    for (monthNames, 0..) |m, i| {
-        if (std.ascii.startsWithIgnoreCase(monS, m)) month = @intCast(i + 1);
-    }
-    const mon = month orelse return null;
-    const year = std.fmt.parseInt(i32, yearS, 10) catch return null;
-
-    var tit = std.mem.splitScalar(u8, timeS, ':');
-    const hh = std.fmt.parseInt(u8, tit.next() orelse return null, 10) catch return null;
-    const mm = std.fmt.parseInt(u8, tit.next() orelse return null, 10) catch return null;
-    const ss = std.fmt.parseInt(u8, tit.next() orelse return null, 10) catch return null;
-    if (hh >= 24 or mm >= 60 or ss > 60 or day == 0 or day > daysInMonth(year, mon)) return null;
-
-    const days = daysFromCivil(year, mon, day);
-    return days * 86400 + @as(i64, hh) * 3600 + @as(i64, mm) * 60 + ss;
-}
-
-fn daysInMonth(year: i32, month: u4) u16 {
-    return switch (month) {
-        2 => if (@mod(year, 400) == 0 or (@mod(year, 4) == 0 and @mod(year, 100) != 0)) 29 else 28,
-        4, 6, 9, 11 => 30,
-        else => 31,
-    };
-}
-
-fn daysFromCivil(yIn: i32, m: u4, d: u16) i64 {
-    const y: i64 = if (m <= 2) yIn - 1 else yIn;
-    const era = @divFloor(y, 400);
-    const yoe = y - era * 400;
-    const mp: i64 = @mod(@as(i64, m) + 9, 12);
-    const doy = @divFloor(153 * mp + 2, 5) + d - 1;
-    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
-    return era * 146097 + doe - 719468;
-}
+pub const parseHttpDate = parseMod.parseHttpDate;
 
 // ranges
 
@@ -627,6 +602,53 @@ pub fn parseRange(spec: []const u8, size: u64) ?RangeSpec {
     return RangeSpec{ .start = start, .end = @min(end, size - 1) };
 }
 
+// SPA fallback policy
+
+/// True when a path represents an asset request (has a non-HTML file extension).
+pub fn isAssetPath(path: []const u8) bool {
+    const lastSlash = std.mem.lastIndexOfScalar(u8, path, '/');
+    const segment = if (lastSlash) |s| path[s + 1 ..] else path;
+    const dot = std.mem.lastIndexOfScalar(u8, segment, '.') orelse return false;
+    const ext = segment[dot..];
+    if (std.ascii.eqlIgnoreCase(ext, ".html") or std.ascii.eqlIgnoreCase(ext, ".htm")) {
+        return false;
+    }
+    return true;
+}
+
+/// Checks whether the request Accept header permits HTML responses.
+pub fn acceptsHtml(acceptHeader: ?[]const u8) bool {
+    const h = acceptHeader orelse return true;
+    return std.mem.indexOf(u8, h, "text/html") != null or std.mem.indexOf(u8, h, "*/*") != null;
+}
+
+/// Checks if path starts with any excluded prefix.
+pub fn isExcludedPrefix(path: []const u8, excludes: []const []const u8) bool {
+    for (excludes) |prefix| {
+        if (prefix.len == 0) continue;
+        if (std.mem.startsWith(u8, path, prefix)) {
+            if (path.len == prefix.len or prefix[prefix.len - 1] == '/' or path[prefix.len] == '/') {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Determines whether a missing resource should fall back to the SPA entry file.
+pub fn shouldSpaFallback(
+    method: Method,
+    urlPath: []const u8,
+    acceptHeader: ?[]const u8,
+    excludes: []const []const u8,
+) bool {
+    if (method != .GET and method != .HEAD) return false;
+    if (isExcludedPrefix(urlPath, excludes)) return false;
+    if (isAssetPath(urlPath)) return false;
+    if (!acceptsHtml(acceptHeader)) return false;
+    return true;
+}
+
 // serving
 
 fn respondWithEmbedded(ctx: *Context, st: *State, asset: @import("../assets.zig").Asset) anyerror!Response {
@@ -644,6 +666,10 @@ fn respondWithEmbedded(ctx: *Context, st: *State, asset: @import("../assets.zig"
     headers.append(a, .{ .name = "ETag", .value = asset.etag }) catch return Allocator.Error.OutOfMemory;
     if (st.cacheControl.len > 0)
         headers.append(a, .{ .name = "Cache-Control", .value = st.cacheControl }) catch return Allocator.Error.OutOfMemory;
+    if (isHead) {
+        const clStr = std.fmt.allocPrint(a, "{d}", .{asset.content.len}) catch return Allocator.Error.OutOfMemory;
+        headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
+    }
 
     // Single range request over the stored bytes (no live-reload injection:
     // ranges address the asset as stored).
@@ -706,9 +732,14 @@ fn servePath(ctx: *Context, st: *State, rawUrlPath: []const u8) anyerror!Respons
 
     var joined: []const u8 = "";
     var meta: ?FileMeta = null;
+    const fallbackAllowed = if (st.spaFallback != null)
+        shouldSpaFallback(ctx.method, formattedPath, ctx.header("Accept"), st.spaExcludePrefixes)
+    else
+        false;
+
     if (!st.filesystem) {
-        if (st.spaFallback) |fb| {
-            if (assetsMod.getEmbedded(fb)) |embeddedFb| {
+        if (st.spaFallback != null and fallbackAllowed) {
+            if (assetsMod.getEmbedded(st.spaFallback.?)) |embeddedFb| {
                 return respondWithEmbedded(ctx, st, embeddedFb);
             }
         }
@@ -727,7 +758,7 @@ fn servePath(ctx: *Context, st: *State, rawUrlPath: []const u8) anyerror!Respons
         meta = statPath(ctx.io, withIndex);
         if (meta != null) joined = withIndex;
     }
-    if (meta == null and st.spaFallback != null) {
+    if (meta == null and st.spaFallback != null and fallbackAllowed) {
         // Check embedded fallback first
         if (assetsMod.getEmbedded(st.spaFallback.?)) |embeddedFb| {
             return respondWithEmbedded(ctx, st, embeddedFb);
@@ -770,6 +801,10 @@ fn respondWithFile(ctx: *Context, st: *State, path: []const u8, meta: FileMeta) 
     headers.append(a, .{ .name = "Last-Modified", .value = lastModified }) catch return Allocator.Error.OutOfMemory;
     if (st.cacheControl.len > 0)
         headers.append(a, .{ .name = "Cache-Control", .value = st.cacheControl }) catch return Allocator.Error.OutOfMemory;
+    if (isHead) {
+        const clStr = std.fmt.allocPrint(a, "{d}", .{meta.size}) catch return Allocator.Error.OutOfMemory;
+        headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
+    }
 
     const contentType = mime.fromPath(path);
 
@@ -952,4 +987,42 @@ test "embedded asset serves byte ranges like filesystem files" {
         const res = try respondWithEmbedded(&ctx, st, asset);
         try std.testing.expectEqual(@as(u16, 416), res.status);
     }
+}
+
+test "SPA fallback policy differentiates client routes from assets and API" {
+    const testing = std.testing;
+
+    // Asset extensions are never treated as SPA routes
+    try testing.expect(isAssetPath("/bundle.js"));
+    try testing.expect(isAssetPath("/style.css"));
+    try testing.expect(isAssetPath("/images/logo.png"));
+    try testing.expect(isAssetPath("/favicon.ico"));
+    try testing.expect(isAssetPath("/app.js.map"));
+    try testing.expect(isAssetPath("/data.json"));
+    try testing.expect(!isAssetPath("/users/profile"));
+    try testing.expect(!isAssetPath("/dashboard"));
+    try testing.expect(!isAssetPath("/about.html"));
+
+    // Accept headers
+    try testing.expect(acceptsHtml(null));
+    try testing.expect(acceptsHtml("text/html,application/xhtml+xml"));
+    try testing.expect(acceptsHtml("*/*"));
+    try testing.expect(!acceptsHtml("application/json"));
+    try testing.expect(!acceptsHtml("image/png"));
+
+    // Excluded prefixes
+    const excludes = &[_][]const u8{ "/api", "/auth" };
+    try testing.expect(isExcludedPrefix("/api/users", excludes));
+    try testing.expect(isExcludedPrefix("/api", excludes));
+    try testing.expect(isExcludedPrefix("/auth/login", excludes));
+    try testing.expect(!isExcludedPrefix("/app", excludes));
+    try testing.expect(!isExcludedPrefix("/dashboard", excludes));
+
+    // shouldSpaFallback policy
+    try testing.expect(shouldSpaFallback(.GET, "/dashboard", "text/html", excludes));
+    try testing.expect(shouldSpaFallback(.HEAD, "/dashboard", "text/html", excludes));
+    try testing.expect(!shouldSpaFallback(.POST, "/dashboard", "text/html", excludes));
+    try testing.expect(!shouldSpaFallback(.GET, "/bundle.js", "text/html", excludes));
+    try testing.expect(!shouldSpaFallback(.GET, "/api/data", "text/html", excludes));
+    try testing.expect(!shouldSpaFallback(.GET, "/dashboard", "application/json", excludes));
 }
