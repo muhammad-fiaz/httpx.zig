@@ -930,9 +930,14 @@ pub const Engine = struct {
                             // Keep the client's hybrid public key for the
                             // encapsulation below. Engine is per-connection
                             // (acceptBuffered stack-local), so this is not shared.
+                            // Assign through a local: unwrapping the optional
+                            // right after storing `undefined` into it is
+                            // undefined behavior (the store may be elided,
+                            // leaving a null tag) and faults on some backends.
                             if (self.peerHybridKey == null) {
-                                self.peerHybridKey = undefined;
-                                @memcpy(&self.peerHybridKey.?, data[kp..][0..HY_PK_LEN]);
+                                var slot: [HY_PK_LEN]u8 = undefined;
+                                @memcpy(&slot, data[kp..][0..HY_PK_LEN]);
+                                self.peerHybridKey = slot;
                             }
                         }
                         kp += shareLen;
