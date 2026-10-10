@@ -27,6 +27,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
+const mimeMod = @import("../utils/mime.zig");
 const uriMod = @import("../common/uri.zig");
 const Method = @import("../common/method.zig").Method;
 const parserMod = @import("../protocols/http1/parser.zig");
@@ -858,6 +859,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                         }
                         if (isTls) {
                             break :blk socks4.connectStream(
+                                a,
                                 io,
                                 pInfo.host,
                                 pInfo.port,
@@ -867,6 +869,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                             ) catch return Error.ConnectFailed;
                         } else {
                             break :blk socks4.connect(
+                                a,
                                 io,
                                 pInfo.host,
                                 pInfo.port,
@@ -892,6 +895,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                         }
                         if (isTls) {
                             break :blk socks5.connectStream(
+                                a,
                                 io,
                                 pInfo.host,
                                 pInfo.port,
@@ -902,6 +906,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                             ) catch return Error.ConnectFailed;
                         } else {
                             break :blk socks5.connect(
+                                a,
                                 io,
                                 pInfo.host,
                                 pInfo.port,
@@ -1719,7 +1724,7 @@ pub fn postMultipartFile(
     var bodyBuf: std.Io.Writer.Allocating = .init(a);
     defer bodyBuf.deinit();
     mpEncoder.encode(&bodyBuf.writer, boundary, &.{
-        .{ .name = fieldName, .filename = fname, .contentType = "application/octet-stream", .data = fileData },
+        .{ .name = fieldName, .filename = fname, .contentType = mimeMod.octetStream, .data = fileData },
     }) catch return Error.OutOfMemory;
 
     return request(a, io, .{

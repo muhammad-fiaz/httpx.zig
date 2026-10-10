@@ -43,6 +43,7 @@ pub const Command = enum(u8) {
 /// Performs SOCKS5 handshake + CONNECT through `proxyHost:proxyPort`.
 /// Returns a Socket tunneled to `destHost:destPort` ready for app traffic.
 pub fn connect(
+    allocator: Allocator,
     io: std.Io,
     proxyHost: []const u8,
     proxyPort: u16,
@@ -51,11 +52,12 @@ pub fn connect(
     username: ?[]const u8,
     password: ?[]const u8,
 ) !tcpMod.Socket {
-    return connectInternal(io, proxyHost, proxyPort, destHost, destPort, username, password, false);
+    return connectInternal(allocator, io, proxyHost, proxyPort, destHost, destPort, username, password, false);
 }
 
 /// Connects with stream-backed socket handle (required for TLS encapsulation on Windows).
 pub fn connectStream(
+    allocator: Allocator,
     io: std.Io,
     proxyHost: []const u8,
     proxyPort: u16,
@@ -64,10 +66,11 @@ pub fn connectStream(
     username: ?[]const u8,
     password: ?[]const u8,
 ) !tcpMod.Socket {
-    return connectInternal(io, proxyHost, proxyPort, destHost, destPort, username, password, true);
+    return connectInternal(allocator, io, proxyHost, proxyPort, destHost, destPort, username, password, true);
 }
 
 fn connectInternal(
+    allocator: Allocator,
     io: std.Io,
     proxyHost: []const u8,
     proxyPort: u16,
@@ -87,9 +90,8 @@ fn connectInternal(
             break :blk tcpMod.connectAddress(io, &addr) catch return Error.ProxyConnectFailed;
         }
     } else |_| blk: {
-        const a = std.heap.page_allocator;
-        const addrs = (resolveMod.Resolver.init(a, io)).lookup(proxyHost, .{ .port = proxyPort }) catch return Error.ProxyConnectFailed;
-        defer a.free(addrs);
+        const addrs = (resolveMod.Resolver.init(allocator, io)).lookup(proxyHost, .{ .port = proxyPort }) catch return Error.ProxyConnectFailed;
+        defer allocator.free(addrs);
         if (addrs.len == 0) return Error.ProxyConnectFailed;
         for (addrs) |*raddr| {
             if (isStream) {
@@ -405,7 +407,7 @@ test "socks5 mock server no-auth connect and echo" {
     var mock = try MockSocksServer.start(ctx.io, false, 0x00);
     defer mock.deinit();
 
-    var sock = try connect(ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, null, null);
+    var sock = try connect(std.testing.allocator, ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, null, null);
     defer sock.close();
 
     try sock.writeAll("hello-socks5");
@@ -424,7 +426,7 @@ test "socks5h domain name destination sent to proxy" {
     defer mock.deinit();
 
     // SOCKS5H sends unresolvable raw domain directly to proxy
-    var sock = try connect(ctx.io, "127.0.0.1", mock.port, "unresolvable-internal-domain.local", 443, null, null);
+    var sock = try connect(std.testing.allocator, ctx.io, "127.0.0.1", mock.port, "unresolvable-internal-domain.local", 443, null, null);
     defer sock.close();
 
     // Verify proxy received ATYP=0x03 (domain)
@@ -439,7 +441,7 @@ test "socks5 username password authentication success" {
     var mock = try MockSocksServer.start(ctx.io, true, 0x00);
     defer mock.deinit();
 
-    var sock = try connect(ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, "alice", "secret");
+    var sock = try connect(std.testing.allocator, ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, "alice", "secret");
     defer sock.close();
 
     try sock.writeAll("auth-ok");
@@ -456,7 +458,7 @@ test "socks5 wrong password fails with AuthFailed" {
     var mock = try MockSocksServer.start(ctx.io, true, 0x00);
     defer mock.deinit();
 
-    const res = connect(ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, "alice", "wrong-password");
+    const res = connect(std.testing.allocator, ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, "alice", "wrong-password");
     try std.testing.expectError(Error.AuthFailed, res);
 }
 
@@ -469,14 +471,14 @@ test "socks5 proxy error reply codes mapped" {
     {
         var mock = try MockSocksServer.start(ctx.io, false, 0x05);
         defer mock.deinit();
-        const res = connect(ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, null, null);
+        const res = connect(std.testing.allocator, ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, null, null);
         try std.testing.expectError(Error.ProxyConnectionRefused, res);
     }
     // Test 0x04 Host Unreachable
     {
         var mock = try MockSocksServer.start(ctx.io, false, 0x04);
         defer mock.deinit();
-        const res = connect(ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, null, null);
+        const res = connect(std.testing.allocator, ctx.io, "127.0.0.1", mock.port, "127.0.0.1", 8080, null, null);
         try std.testing.expectError(Error.ProxyHostUnreachable, res);
     }
 }
