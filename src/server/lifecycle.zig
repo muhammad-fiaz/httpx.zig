@@ -330,6 +330,8 @@ pub const Server = struct {
             }
             if (!bound) return error.AddressInUse;
         }
+        // Bound here: any later init failure must release the port.
+        errdefer listener.close(io);
 
         var effectiveCfg = cfg;
         if (cfg.httpVersion) |v| {
