@@ -246,6 +246,23 @@ pub fn build(b: *std.Build) void {
 
     const buildAllExamples = b.step("build-all-examples", "Build all example executables");
 
+    const runnerExe = b.addExecutable(.{
+        .name = "example-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    linkPlatformLibs(runnerExe, target);
+
+    const runRunner = b.addRunArtifact(runnerExe);
+    runRunner.step.dependOn(buildAllExamples);
+    runRunner.addArg("--timeout");
+    runRunner.addArg("15000");
+    runRunner.addArg("--suite-timeout");
+    runRunner.addArg("1800000");
+
     inline for (examples) |example| {
         const exe = b.addExecutable(.{
             .name = example.name,
@@ -270,40 +287,14 @@ pub fn build(b: *std.Build) void {
         runExe.step.dependOn(&installExe.step);
         const runStep = b.step("run-" ++ example.name, "Run " ++ example.name ++ " example");
         runStep.dependOn(&runExe.step);
+
+        runRunner.addArg("--example");
+        runRunner.addArg(example.name);
+        runRunner.addArtifactArg(exe);
     }
 
-    const runAllExamples = b.step("run-all-examples", "Run all examples sequentially");
-    var previousRunStep: ?*std.Build.Step = null;
-
-    inline for (examples) |example| {
-        const exe = b.addExecutable(.{
-            .name = "run-all-" ++ example.name,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(example.path),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        exe.root_module.addImport("httpx", httpxModule);
-        linkPlatformLibs(exe, target);
-        if (comptime std.mem.eql(u8, example.name, "website")) {
-            embedDir(b, exe, httpxModule, "examples/website/dist", "embed_website");
-        }
-
-        const installExe = b.addInstallArtifact(exe, .{});
-        if (previousRunStep) |prev| {
-            exe.step.dependOn(prev);
-            installExe.step.dependOn(prev);
-        }
-        const runExe = b.addRunArtifact(exe);
-        runExe.step.dependOn(&installExe.step);
-
-        previousRunStep = &runExe.step;
-    }
-
-    if (previousRunStep) |last| {
-        runAllExamples.dependOn(last);
-    }
+    const runAllExamples = b.step("run-all-examples", "Run all examples sequentially with timeouts and diagnostics");
+    runAllExamples.dependOn(&runRunner.step);
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{

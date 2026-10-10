@@ -1743,4 +1743,3 @@ test "polling scan pairs renames when file size and mtime match" {
     }
     try std.testing.expect(sawRename);
 }
-

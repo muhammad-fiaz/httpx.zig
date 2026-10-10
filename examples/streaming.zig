@@ -10,16 +10,41 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
+fn bytesHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+    const data = try ctx.allocator.alloc(u8, 4096);
+    @memset(data, 'A');
+    return .{
+        .status = 200,
+        .body = data,
+        .contentType = "application/octet-stream",
+    };
+}
+
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 1,
+    });
+    defer server.deinit();
+    try server.router.add(.GET, "/bytes/4096", bytesHandler, .{});
+    const port = server.localPort();
+    const thread = try server.start();
+    defer thread.join();
+
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var response = try client.get("https://httpbun.com/bytes/4096", .{
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/bytes/4096", .{port});
+
+    var response = try client.get(url, .{
         .maxResponseSize = 8 * 1024 * 1024,
     });
     defer response.deinit();
