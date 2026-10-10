@@ -1469,12 +1469,15 @@ fn decodeChunked(a: Allocator, wireIn: []const u8) ![]u8 {
     defer a.free(wire);
 
     var dec = parserMod.ChunkedDecoder{};
-    const tail = dec.decode(wire) catch |e| switch (e) {
+    _ = dec.decode(wire) catch |e| switch (e) {
         error.Incomplete => return error.Incomplete,
         else => return e,
     };
-    const produced = wire.len - tail;
-    return a.dupe(u8, wire[0..produced]);
+    // ChunkedDecoder decodes in place: the decoded payload occupies
+    // wire[0..decodedLen]. The decode() return value is bytes consumed
+    // from the input (equals wire.len on a complete body), not the
+    // produced length — using it as a length yields an empty slice.
+    return a.dupe(u8, wire[0..dec.decodedLen]);
 }
 
 fn isRedirect(status: u16) bool {
@@ -2054,6 +2057,15 @@ test "connection-close body without Content-Length is read to EOF" {
 
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expectEqualStrings("close-delimited-body", resp.body);
+}
+
+test "decodeChunked returns the decoded payload, not an empty slice" {
+    const a = std.testing.allocator;
+    // Two chunks ("hello", " world") plus the terminating zero-length chunk.
+    const wire = "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+    const decoded = try decodeChunked(a, wire);
+    defer a.free(decoded);
+    try std.testing.expectEqualStrings("hello world", decoded);
 }
 
 test "resolveLocation handles relative paths and dot segments" {
