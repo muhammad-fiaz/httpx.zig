@@ -546,6 +546,16 @@ pub const Server = struct {
         try self.router.mount(prefix, other, opts);
     }
 
+    /// Registers a compile-time validated static slice of route declarations on the server.
+    pub fn registerStatic(self: *Server, comptime routes: []const routerMod.RouteDecl) routerMod.RouteError!void {
+        try self.router.registerStatic(routes);
+    }
+
+    /// Registers a dynamic route table with runtime conflict validation on the server.
+    pub fn registerRouteTable(self: *Server, routes: []const routerMod.RouteDecl) routerMod.RouteError!void {
+        try self.router.registerRouteTable(routes);
+    }
+
     /// Attaches a global middleware to the server's routing pipeline.
     pub fn use(self: *Server, mw: routerMod.MiddlewareFn) !void {
         try self.router.use(mw);
@@ -1013,7 +1023,7 @@ pub const Server = struct {
             fn handle(respAlloc: Allocator, ctxPtr: ?*anyopaque, isTlsFlag: bool, mStr: []const u8, pStr: []const u8, hdrs: []const @import("../protocols/http2/transport.zig").Header, bStr: []const u8) anyerror!@import("../protocols/http2/transport.zig").HandlerResponse {
                 const serverPtr: *Server = @ptrCast(@alignCast(ctxPtr.?));
                 const method = Method.fromString(mStr) orelse .GET;
-                var arenaH2 = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                var arenaH2 = std.heap.ArenaAllocator.init(serverPtr.allocator);
                 defer arenaH2.deinit();
                 const a = arenaH2.allocator();
 
@@ -1245,6 +1255,7 @@ pub const Server = struct {
         defer h3.deinit();
 
         const Acc = struct {
+            allocator: Allocator,
             sid: u64 = std.math.maxInt(u64),
             buf: std.ArrayList(u8) = .empty,
             fin: bool = false,
@@ -1253,13 +1264,13 @@ pub const Server = struct {
                 const acc: *@This() = @ptrCast(@alignCast(c.?));
                 if (acc.sid == std.math.maxInt(u64) and sid % 4 == 0) acc.sid = sid;
                 if (sid != acc.sid) return;
-                acc.buf.appendSlice(std.heap.page_allocator, data) catch return;
+                acc.buf.appendSlice(acc.allocator, data) catch return;
                 if (fin) acc.fin = true;
             }
         };
 
-        var acc = Acc{};
-        defer acc.buf.deinit(std.heap.page_allocator);
+        var acc = Acc{ .allocator = self.allocator };
+        defer acc.buf.deinit(self.allocator);
         qconn.cbs = .{ .ctx = &acc, .onStreamData = Acc.onStream };
 
         const startMs: u64 = @intCast(clock.millisNow());
@@ -1286,7 +1297,7 @@ pub const Server = struct {
                 } else |_| {}
             }
 
-            var arenaH3 = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+            var arenaH3 = std.heap.ArenaAllocator.init(self.allocator);
             defer arenaH3.deinit();
             const a = arenaH3.allocator();
 

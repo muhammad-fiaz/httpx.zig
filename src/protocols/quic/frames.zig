@@ -107,8 +107,13 @@ pub const Ack = struct {
     /// First range: number of CONTIGUOUS additional packets below largest.
     firstRange: u64,
     /// Alternating gap/range pairs below the first range (ascending gaps).
-    ranges: []AckRange,
+    rangesBuf: [64]AckRange = undefined,
+    rangeCount: usize = 0,
     ecn: ?struct { ect0: u64, ect1: u64, ce: u64 } = null,
+
+    pub fn ranges(self: *const Ack) []const AckRange {
+        return self.rangesBuf[0..self.rangeCount];
+    }
 };
 
 /// Decodes one frame starting at `data[pos.*]`. Advances pos past it.
@@ -172,17 +177,15 @@ pub fn decode(data: []const u8, pos: *usize) Error!Frame {
                 prevLow = curHigh + 1 - len;
             }
 
-            var resultRanges: []AckRange = &.{};
-            if (rangeCount > 0) {
-                resultRanges = try allocRanges(rangesBuf[0..rangeCount]);
-            }
-
             var f = Ack{
                 .largestAcknowledged = largest,
                 .ackDelay = delay,
                 .firstRange = firstRange,
-                .ranges = resultRanges,
+                .rangeCount = rangeCount,
             };
+            if (rangeCount > 0) {
+                @memcpy(f.rangesBuf[0..rangeCount], rangesBuf[0..rangeCount]);
+            }
 
             if (raw == 0x03) {
                 const ect0 = try dv(data, pos);
@@ -318,12 +321,6 @@ pub fn decode(data: []const u8, pos: *usize) Error!Frame {
         },
         else => return Error.InvalidFrame,
     }
-}
-
-fn allocRanges(src: []const AckRange) Error![]AckRange {
-    const out = std.heap.page_allocator.alloc(AckRange, src.len) catch return Error.OutOfMemory;
-    @memcpy(out, src);
-    return out;
 }
 
 // Encoding
@@ -548,9 +545,9 @@ test "ack frame roundtrip two blocks with gap" { // Acked packets: {10}, {7,6,5}
     const f = try decode(list.items, &pos);
     try std.testing.expectEqual(@as(u64, 10), f.ack.largestAcknowledged);
     try std.testing.expectEqual(@as(u64, 0), f.ack.firstRange); // single pkt
-    try std.testing.expectEqual(@as(usize, 1), f.ack.ranges.len);
-    try std.testing.expectEqual(@as(u64, 1), f.ack.ranges[0].gap); // pkts 9,8 missing
-    try std.testing.expectEqual(@as(u64, 2), f.ack.ranges[0].length); // len-1 for 3 pkts
+    try std.testing.expectEqual(@as(usize, 1), f.ack.ranges().len);
+    try std.testing.expectEqual(@as(u64, 1), f.ack.ranges()[0].gap); // pkts 9,8 missing
+    try std.testing.expectEqual(@as(u64, 2), f.ack.ranges()[0].length); // len-1 for 3 pkts
 }
 
 test "ack rejects malformed ranges" {

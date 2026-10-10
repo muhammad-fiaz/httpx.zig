@@ -782,7 +782,7 @@ pub const Connection = struct {
         const firstLo = a.largestAcknowledged -| a.firstRange;
         try self.ackRangeRemove(sp, firstLo, a.largestAcknowledged);
         var prevLow = firstLo;
-        for (a.ranges) |r| {
+        for (a.ranges()) |r| {
             if (r.gap + 2 > prevLow) break;
             const curHigh = prevLow - r.gap - 2;
             const curLo = curHigh -| r.length;
@@ -1139,7 +1139,6 @@ pub const Connection = struct {
                 .padding, .ping => {},
                 .ack => |a| {
                     try self.onAckFrame(sp, a, nowMs);
-                    if (a.ranges.len > 0) std.heap.page_allocator.free(a.ranges);
                 },
                 .crypto => |c| {
                     try self.receiveCrypto(sp.kind, c.offset, c.data, nowMs);

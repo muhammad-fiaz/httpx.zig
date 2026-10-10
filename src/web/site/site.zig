@@ -33,7 +33,7 @@ const reload = @import("../watcher/client.zig");
 const Server = @import("../../server/lifecycle.zig").Server;
 const routesMod = @import("routes.zig");
 
-pub const TrailingSlash = enum { serveBoth, redirectSlash, redirectNoSlash, strict };
+pub const TrailingSlash = routerMod.TrailingSlash;
 
 /// Re-exported route-table vocabulary so site users import one namespace.
 pub const UrlStyle = routesMod.UrlStyle;

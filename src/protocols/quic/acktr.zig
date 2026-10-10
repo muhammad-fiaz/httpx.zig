@@ -193,7 +193,7 @@ test "ack frame generation matches wire expectations" {
     const f = try frames.decode(wire.items, &pos);
     try std.testing.expectEqual(@as(u64, 10), f.ack.largestAcknowledged);
     try std.testing.expectEqual(@as(u64, 0), f.ack.firstRange);
-    try std.testing.expectEqual(@as(usize, 1), f.ack.ranges.len);
-    try std.testing.expectEqual(@as(u64, 1), f.ack.ranges[0].gap); // 9,8 missing
-    try std.testing.expectEqual(@as(u64, 2), f.ack.ranges[0].length); // covers len-1
+    try std.testing.expectEqual(@as(usize, 1), f.ack.ranges().len);
+    try std.testing.expectEqual(@as(u64, 1), f.ack.ranges()[0].gap); // 9,8 missing
+    try std.testing.expectEqual(@as(u64, 2), f.ack.ranges()[0].length); // covers len-1
 }

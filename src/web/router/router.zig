@@ -564,6 +564,164 @@ pub const ParamError = error{
 
 const metaMod = @import("metadata.zig");
 
+/// A statically declared route definition for compile-time or declarative route tables.
+pub const RouteDecl = struct {
+    method: Method = .GET,
+    path: []const u8,
+    name: ?[]const u8 = null,
+    handler: ?HandlerFn = null,
+    meta: metaMod.Metadata = .{},
+    middleware: []const MiddlewareFn = &.{},
+    userData: ?*anyopaque = null,
+    deinitData: ?*const fn (?*anyopaque) void = null,
+};
+
+/// Specific classification for detected route conflicts.
+pub const ConflictReason = enum {
+    invalidPath,
+    emptyParameterName,
+    invalidWildcardPlacement,
+    unknownConverter,
+    duplicateParameter,
+    tooManySegments,
+    duplicatePath,
+    identicalShape,
+    duplicateRouteName,
+};
+
+/// Detailed report on a discovered route conflict.
+pub const ConflictDetail = struct {
+    method: Method,
+    route1: []const u8,
+    route2: []const u8 = "",
+    name: ?[]const u8 = null,
+    reason: ConflictReason,
+    message: []const u8,
+};
+
+/// Validates an array of route declarations for conflicts and malformed patterns.
+/// Operates uniformly at compile time and runtime.
+pub fn validateRouteDeclarations(routes: []const RouteDecl) ?ConflictDetail {
+    @setEvalBranchQuota(100_000);
+    // 1. Validate individual routes
+    for (routes) |r| {
+        if (r.path.len == 0 or r.path[0] != '/') {
+            return ConflictDetail{
+                .method = r.method,
+                .route1 = r.path,
+                .reason = .invalidPath,
+                .message = "Route path must start with '/'",
+            };
+        }
+        if (std.mem.indexOfAny(u8, r.path, "?#") != null) {
+            return ConflictDetail{
+                .method = r.method,
+                .route1 = r.path,
+                .reason = .invalidPath,
+                .message = "Route path cannot contain '?' or '#'",
+            };
+        }
+        _ = patternMod.parsePattern(r.path) catch |err| {
+            return switch (err) {
+                error.EmptyParameterName => ConflictDetail{
+                    .method = r.method,
+                    .route1 = r.path,
+                    .reason = .emptyParameterName,
+                    .message = "Empty parameter name in route pattern",
+                },
+                error.InvalidWildcardPlacement => ConflictDetail{
+                    .method = r.method,
+                    .route1 = r.path,
+                    .reason = .invalidWildcardPlacement,
+                    .message = "Wildcard must be the final segment in route pattern",
+                },
+                error.UnknownConverter => ConflictDetail{
+                    .method = r.method,
+                    .route1 = r.path,
+                    .reason = .unknownConverter,
+                    .message = "Unknown converter in route pattern",
+                },
+                error.DuplicateParameter => ConflictDetail{
+                    .method = r.method,
+                    .route1 = r.path,
+                    .reason = .duplicateParameter,
+                    .message = "Duplicate parameter name in route pattern",
+                },
+                error.TooManySegments => ConflictDetail{
+                    .method = r.method,
+                    .route1 = r.path,
+                    .reason = .tooManySegments,
+                    .message = "Route pattern exceeds maximum segment count (32)",
+                },
+            };
+        };
+    }
+
+    // 2. Pairwise conflict checks
+    for (routes, 0..) |r1, i| {
+        const pat1 = patternMod.parsePattern(r1.path) catch continue;
+        var buf1: [512]u8 = undefined;
+        const shape1 = pat1.shape(&buf1) catch continue;
+
+        for (routes[i + 1 ..]) |r2| {
+            // Check duplicate named-route identifiers
+            if (r1.name) |n1| {
+                if (r2.name) |n2| {
+                    if (std.mem.eql(u8, n1, n2)) {
+                        return ConflictDetail{
+                            .method = r1.method,
+                            .route1 = r1.path,
+                            .route2 = r2.path,
+                            .name = n1,
+                            .reason = .duplicateRouteName,
+                            .message = "Duplicate named-route identifier",
+                        };
+                    }
+                }
+            }
+
+            // Same HTTP method is required for path collisions
+            if (r1.method != r2.method) continue;
+
+            // Check exact duplicate path
+            if (std.mem.eql(u8, r1.path, r2.path)) {
+                return ConflictDetail{
+                    .method = r1.method,
+                    .route1 = r1.path,
+                    .route2 = r2.path,
+                    .reason = .duplicatePath,
+                    .message = "Duplicate route declaration with identical path and method",
+                };
+            }
+
+            // Check identical parameter shape
+            const pat2 = patternMod.parsePattern(r2.path) catch continue;
+            var buf2: [512]u8 = undefined;
+            const shape2 = pat2.shape(&buf2) catch continue;
+
+            if (std.mem.eql(u8, shape1, shape2)) {
+                return ConflictDetail{
+                    .method = r1.method,
+                    .route1 = r1.path,
+                    .route2 = r2.path,
+                    .reason = .identicalShape,
+                    .message = "Conflicting route declarations resolve to identical pattern shape",
+                };
+            }
+        }
+    }
+
+    return null;
+}
+
+/// Compile-time route conflict validator. Emits actionable @compileError if any conflicts exist.
+pub fn validateRoutesComptime(comptime routes: []const RouteDecl) void {
+    @setEvalBranchQuota(100_000);
+    if (comptime validateRouteDeclarations(routes)) |conflict| {
+        @compileError("Compile-time route conflict: " ++ conflict.message ++ " (" ++ @tagName(conflict.method) ++ " " ++ conflict.route1 ++ (if (conflict.route2.len > 0) " vs " ++ conflict.route2 else "") ++ ")");
+    }
+}
+
 const RouteEntry = struct {
     method: Method,
     /// Owned copy of the registered path. Pattern segments point into this
@@ -792,9 +950,52 @@ pub const Router = struct {
         try self.statusHandlers.put(statusCode, handler);
     }
 
+    /// Registers a compile-time validated static slice of route declarations.
+    /// Emits a compile-time error if any conflicts (duplicate paths, shape collisions,
+    /// duplicate names, invalid patterns) are detected.
+    pub fn registerStatic(self: *Router, comptime routes: []const RouteDecl) RouteError!void {
+        comptime validateRoutesComptime(routes);
+        for (routes) |r| {
+            if (r.handler) |h| {
+                try self.add(r.method, r.path, h, .{
+                    .name = r.name,
+                    .meta = r.meta,
+                    .middleware = r.middleware,
+                    .userData = r.userData,
+                    .deinitData = r.deinitData,
+                });
+            }
+        }
+    }
+
+    /// Registers a dynamic route table with runtime conflict validation.
+    /// Returns DuplicateRoute or InvalidPattern if any conflicts are detected,
+    /// without modifying the active route table.
+    pub fn registerRouteTable(self: *Router, routes: []const RouteDecl) RouteError!void {
+        if (validateRouteDeclarations(routes)) |conflict| {
+            return switch (conflict.reason) {
+                .duplicateRouteName => RouteError.DuplicateName,
+                .invalidPath, .emptyParameterName, .invalidWildcardPlacement, .unknownConverter, .duplicateParameter, .tooManySegments => RouteError.InvalidPattern,
+                .duplicatePath, .identicalShape => RouteError.DuplicateRoute,
+            };
+        }
+        for (routes) |r| {
+            if (r.handler) |h| {
+                try self.add(r.method, r.path, h, .{
+                    .name = r.name,
+                    .meta = r.meta,
+                    .middleware = r.middleware,
+                    .userData = r.userData,
+                    .deinitData = r.deinitData,
+                });
+            }
+        }
+    }
+
     pub fn add(self: *Router, method: Method, path: []const u8, handler: *const fn (*Context) anyerror!Response, opts: RouteOptions) RouteError!void {
-        // Registration paths must be clean patterns; query/fragment belong
+        // Registration paths must be clean patterns starting with '/'; query/fragment belong
         // to requests, never to route definitions.
+        if (path.len == 0 or path[0] != '/') return RouteError.InvalidPattern;
         if (std.mem.indexOfAny(u8, path, "?#") != null) return RouteError.InvalidPattern;
         // Parse from an owned copy so pattern segments outlive the call.
         const owned = try self.allocator.dupe(u8, path);
@@ -2043,4 +2244,161 @@ test "router trailing slash policies: redirectSlash, redirectNoSlash, strict" {
         const resp2 = r.dispatch(&ctx2);
         try std.testing.expectEqual(@as(u16, 404), resp2.status);
     }
+}
+
+test "comptime and static route registration with compile-time conflict detection" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    const staticRoutes = [_]RouteDecl{
+        .{ .method = .GET, .path = "/", .name = "home", .handler = dummyHandler },
+        .{ .method = .GET, .path = "/users", .name = "user_list", .handler = dummyHandler },
+        .{ .method = .GET, .path = "/users/{id:int}", .name = "user_detail", .handler = dummyHandler },
+        .{ .method = .POST, .path = "/users", .handler = dummyHandler },
+        .{ .method = .GET, .path = "/files/{path:path}", .name = "file_serve", .handler = dummyHandler },
+    };
+
+    // Validates at comptime and registers all static declarations
+    try router.registerStatic(&staticRoutes);
+
+    var ctx = Context{ .allocator = a };
+    const h1 = router.match(.GET, "/users/123", &ctx);
+    try std.testing.expect(h1 != null);
+    try std.testing.expectEqualStrings("123", ctx.param("id").?);
+
+    const h2 = router.match(.POST, "/users", &ctx);
+    try std.testing.expect(h2 != null);
+
+    const h3 = router.match(.GET, "/files/docs/readme.txt", &ctx);
+    try std.testing.expect(h3 != null);
+    try std.testing.expectEqualStrings("docs/readme.txt", ctx.param("path").?);
+}
+
+test "route conflict validation catches duplicate paths, shape collisions, and invalid patterns" {
+    // 1. Duplicate static route with same method
+    {
+        const dupStatic = [_]RouteDecl{
+            .{ .method = .GET, .path = "/dashboard", .handler = dummyHandler },
+            .{ .method = .GET, .path = "/dashboard", .handler = dummyHandler },
+        };
+        const c = validateRouteDeclarations(&dupStatic);
+        try std.testing.expect(c != null);
+        try std.testing.expectEqual(ConflictReason.duplicatePath, c.?.reason);
+    }
+
+    // 2. Identical path with DIFFERENT methods is valid (no conflict)
+    {
+        const diffMethods = [_]RouteDecl{
+            .{ .method = .GET, .path = "/profile", .handler = dummyHandler },
+            .{ .method = .POST, .path = "/profile", .handler = dummyHandler },
+        };
+        try std.testing.expect(validateRouteDeclarations(&diffMethods) == null);
+    }
+
+    // 3. Shape collision between parameterized routes
+    {
+        const shapeCollision = [_]RouteDecl{
+            .{ .method = .GET, .path = "/items/{id}", .handler = dummyHandler },
+            .{ .method = .GET, .path = "/items/{slug}", .handler = dummyHandler },
+        };
+        const c = validateRouteDeclarations(&shapeCollision);
+        try std.testing.expect(c != null);
+        try std.testing.expectEqual(ConflictReason.identicalShape, c.?.reason);
+    }
+
+    // 4. Shape collision between catch-all wildcards
+    {
+        const wildCollision = [_]RouteDecl{
+            .{ .method = .GET, .path = "/assets/*all", .handler = dummyHandler },
+            .{ .method = .GET, .path = "/assets/*rest", .handler = dummyHandler },
+        };
+        const c = validateRouteDeclarations(&wildCollision);
+        try std.testing.expect(c != null);
+        try std.testing.expectEqual(ConflictReason.identicalShape, c.?.reason);
+    }
+
+    // 5. Duplicate route name
+    {
+        const dupName = [_]RouteDecl{
+            .{ .method = .GET, .path = "/home", .name = "main", .handler = dummyHandler },
+            .{ .method = .GET, .path = "/landing", .name = "main", .handler = dummyHandler },
+        };
+        const c = validateRouteDeclarations(&dupName);
+        try std.testing.expect(c != null);
+        try std.testing.expectEqual(ConflictReason.duplicateRouteName, c.?.reason);
+    }
+
+    // 6. Invalid pattern: missing leading slash
+    {
+        const noSlash = [_]RouteDecl{
+            .{ .method = .GET, .path = "api/v1", .handler = dummyHandler },
+        };
+        const c = validateRouteDeclarations(&noSlash);
+        try std.testing.expect(c != null);
+        try std.testing.expectEqual(ConflictReason.invalidPath, c.?.reason);
+    }
+
+    // 7. Invalid pattern: empty parameter name
+    {
+        const emptyParam = [_]RouteDecl{
+            .{ .method = .GET, .path = "/items/{}", .handler = dummyHandler },
+        };
+        const c = validateRouteDeclarations(&emptyParam);
+        try std.testing.expect(c != null);
+        try std.testing.expectEqual(ConflictReason.emptyParameterName, c.?.reason);
+    }
+
+    // 8. Invalid pattern: misplaced wildcard
+    {
+        const badWild = [_]RouteDecl{
+            .{ .method = .GET, .path = "/files/*a/extra", .handler = dummyHandler },
+        };
+        const c = validateRouteDeclarations(&badWild);
+        try std.testing.expect(c != null);
+        try std.testing.expectEqual(ConflictReason.invalidWildcardPlacement, c.?.reason);
+    }
+
+    // 9. Invalid pattern: unknown converter
+    {
+        const badConv = [_]RouteDecl{
+            .{ .method = .GET, .path = "/users/{id:unknown}", .handler = dummyHandler },
+        };
+        const c = validateRouteDeclarations(&badConv);
+        try std.testing.expect(c != null);
+        try std.testing.expectEqual(ConflictReason.unknownConverter, c.?.reason);
+    }
+
+    // 10. Invalid pattern: duplicate parameter in single route
+    {
+        const dupParam = [_]RouteDecl{
+            .{ .method = .GET, .path = "/users/{id}/friends/{id}", .handler = dummyHandler },
+        };
+        const c = validateRouteDeclarations(&dupParam);
+        try std.testing.expect(c != null);
+        try std.testing.expectEqual(ConflictReason.duplicateParameter, c.?.reason);
+    }
+}
+
+test "registerRouteTable rejects conflicting update without corrupting table" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+
+    const good = [_]RouteDecl{
+        .{ .method = .GET, .path = "/api/status", .handler = dummyHandler },
+    };
+    try router.registerRouteTable(&good);
+
+    // Attempt to register table with collision
+    const conflicting = [_]RouteDecl{
+        .{ .method = .GET, .path = "/u/{id}", .handler = dummyHandler },
+        .{ .method = .GET, .path = "/u/{name}", .handler = dummyHandler },
+    };
+    try std.testing.expectError(RouteError.DuplicateRoute, router.registerRouteTable(&conflicting));
+
+    // Active route table remains intact and functional
+    var ctx = Context{ .allocator = a };
+    const h = router.match(.GET, "/api/status", &ctx);
+    try std.testing.expect(h != null);
 }

@@ -206,10 +206,10 @@ pub fn parsePattern(path: []const u8) ParseError!Pattern {
         if (pattern.count >= 32) return ParseError.TooManySegments;
 
         if (seg.len >= 2 and seg[0] == '{' and seg[seg.len - 1] == '}') {
-            const inner = seg[1 .. seg.len - 1];
+            const inner: []const u8 = seg[1 .. seg.len - 1];
             if (inner.len == 0) return ParseError.EmptyParameterName;
             if (std.mem.indexOfAny(u8, inner, "{}*") != null) return ParseError.EmptyParameterName;
-            var name = inner;
+            var name: []const u8 = inner;
             var converter: Converter = .str;
             if (std.mem.indexOfScalar(u8, inner, ':')) |ci| {
                 name = inner[0..ci];

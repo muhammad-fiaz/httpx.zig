@@ -88,6 +88,47 @@ defer allocator.free(url);
 
 Missing, unknown, or invalid values are errors — never silent bad URLs.
 
+## Compile-Time Route Validation
+
+When routes and their patterns are known at compile time, `httpx.zig` validates them at **comptime** using Zig's type system:
+
+```zig
+const staticRoutes = [_]httpx.router.RouteDecl{
+    .{ .method = .GET, .path = "/", .name = "home", .handler = homeHandler },
+    .{ .method = .GET, .path = "/users", .name = "users_list", .handler = listUsers },
+    .{ .method = .GET, .path = "/users/{id:int}", .name = "user_detail", .handler = getUser },
+    .{ .method = .POST, .path = "/users", .handler = createUser },
+    .{ .method = .GET, .path = "/files/{path:path}", .name = "files", .handler = fileHandler },
+};
+
+// Validates all routes at comptime and registers into the active router:
+try server.registerStatic(&staticRoutes);
+```
+
+### Detected Conflicts:
+- **Duplicate static routes**: Same HTTP method and identical path (e.g. two `GET /users`).
+- **Shape collisions**: Parameter routes with ambiguous matching (e.g. `GET /users/{id}` vs `GET /users/{name}` produce identical shape `/users/{}`).
+- **Wildcard collisions**: Overlapping catch-alls (e.g. `GET /files/*a` vs `GET /files/*b`).
+- **Duplicate route names**: Routes sharing the same `.name` identifier for URL reversing.
+- **Structural errors**: Missing leading `/`, unclosed `{...}`, empty parameter names `{}`, or misplaced catch-alls before trailing segments.
+
+Any violation produces an actionable **`@compileError`** identifying the conflicting routes at build time.
+
+### Runtime Route Table Registration
+
+Dynamic routes discovered at runtime use `registerRouteTable(&routes)`, applying the identical validation logic and returning structured `RouteError.DuplicateRoute`, `RouteError.DuplicateName`, or `RouteError.InvalidPattern` without corrupting the active route table.
+
+## File-Based Routing Conventions
+
+`httpx.site.Site` unifies filesystem discovery with the core router:
+- **Static & nested**: `about/team.html` -> `/about/team`.
+- **Index files**: `index.html` -> `/`, `blog/index.html` -> `/blog`.
+- **Dynamic segments**: `users/[id].html` -> `/users/{id}`, `users/[id:int].html` -> `/users/{id:int}`.
+- **Catch-all segments**: `files/[...path].html` -> `/files/*path`.
+- **Route groups**: Directories enclosed in parentheses `(group)` organize code without altering URLs (e.g. `(marketing)/pricing.html` -> `/pricing`).
+- **Ignored files & components**: Directories or files starting with `_` or `.` (e.g. `_components/card.html`, `.git/`) and layout files (`layout.html`, `_layout.html`) are excluded from page routes.
+- **Validation**: All discovered file patterns pass the exact same pattern validation as code-based routes.
+
 ## Conflicts and priority
 
 - `/users/{id}` vs `/users/{name}` → registration error (`DuplicateRoute`).
@@ -117,10 +158,15 @@ try server.router.get("/m", handler, .{ .middleware = &.{authMw} }); // route-le
 Path and query stay separate: `/users/42?page=2` gives `param("id")`
 plus `queryParam("page")`. Never put query strings in patterns.
 
-## Trailing slashes and normalization
+## Trailing slashes and policies
 
-Matching is lenient: `/users` and `/users/` (even `//users//`) match the
-same pattern. Query strings and fragments are stripped before matching.
+Configured via authoritative `httpx.router.TrailingSlash`:
+- `.serveBoth` (default): Lenient matching accepts both `/path` and `/path/`.
+- `.redirectSlash`: Permanent 301 redirect to canonical trailing slash `/path/`.
+- `.redirectNoSlash`: Permanent 301 redirect to canonical non-slash `/path`.
+- `.strict`: Strict exact-match policy (returns 404 on trailing slash mismatch).
+
+Shared across code-based routing, file-based routing, and website serving.
 
 ## OpenAPI
 
