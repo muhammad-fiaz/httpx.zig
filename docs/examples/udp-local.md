@@ -37,6 +37,12 @@ Recv: hello over udp
 
 The ephemeral loopback ports vary per run; the datagram payload is fixed by the exchange. Loopback only, no external prerequisites.
 
+## How to Run
+
+```bash
+zig build run-udp-local
+```
+
 ## What to Verify
 
 - UDP bind succeeds on the local interface.

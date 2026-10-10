@@ -232,6 +232,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "spa-server", .path = "examples/spaServer.zig" },
         .{ .name = "development-server", .path = "examples/developmentServer.zig" },
         .{ .name = "connectivity", .path = "examples/connectivity.zig" },
+        .{ .name = "tcp-local", .path = "examples/tcpLocal.zig" },
+        .{ .name = "udp-local", .path = "examples/udpLocal.zig" },
         .{ .name = "full-integration", .path = "examples/fullIntegration.zig" },
         .{ .name = "template-basic", .path = "examples/web/templates/basic/main.zig" },
         .{ .name = "template-inheritance", .path = "examples/web/templates/inheritance/main.zig" },
