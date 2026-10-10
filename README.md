@@ -223,7 +223,7 @@ exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 ```
 
 > [!NOTE]
-> **Shared (diamond) dependencies:** `httpx.zig` depends on several packages (`zstd`, `brotli`, `env`, `loaders`, `tint`, `treesitter`), and some of those depend on each other — for example, `loaders.zig` itself depends on `tint.zig`, which `httpx.zig` also uses directly. When you (or your own dependencies) resolve a package that is already resolved transitively, resolve it with **empty options** (`.{}`) instead of re-passing `.target`/`.optimize`, so every importer shares **one** module instance. Passing different options creates a second instance of the same source files, and the build fails with `file exists in modules 'tint' and 'tint0'` (files must belong to only one module). As a rule: at the root of your project, only pass `.target`/`.optimize` to your *direct* dependencies, and leave shared transitive dependencies at their defaults. Upstream reference: https://codeberg.org/ziglang/zig/issues/36694.
+> If you encounter `file exists in modules 'X' and 'X0'`, try removing `.target = target` and `.optimize = optimize` from your dependency options in the root `build.zig` and use `.{}` instead. This can help prevent duplicate module instances when multiple dependencies resolve the same module. See [Zig issue #36694](https://codeberg.org/ziglang/zig/issues/36694).
 
 ## Quick Start
 

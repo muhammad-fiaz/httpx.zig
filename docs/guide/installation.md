@@ -147,7 +147,7 @@ pub fn build(b: *std.Build) void {
 ```
 
 > [!NOTE]
-> **Shared (diamond) dependencies:** `httpx.zig` depends on several packages, and some of those depend on each other — for example, `loaders.zig` itself depends on `tint.zig`, which `httpx.zig` also uses directly. When you resolve a package that is already resolved transitively, use the **same options** the other consumer uses (for leaf packages this is usually empty options, `.{}`) instead of re-passing `.target`/`.optimize`, so every importer shares **one** module instance. Passing different options creates a second instance of the same source files, and the build fails with `file exists in modules 'tint' and 'tint0'`. As a rule: at the root of your project, only pass `.target`/`.optimize` to your *direct* dependencies, and leave shared transitive dependencies at their defaults. Upstream reference: https://codeberg.org/ziglang/zig/issues/36694.
+> If the build fails with `file exists in modules 'X' and 'X0'`, a dependency on the client side is being resolved twice with different options — usually a transitive dependency the project also declares directly. Resolve shared dependencies with empty options (`.{}`) instead of re-passing `.target`/`.optimize`, so every importer shares one module instance. See https://codeberg.org/ziglang/zig/issues/36694.
 
 ## Import in your code
 
