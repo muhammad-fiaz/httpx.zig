@@ -19,7 +19,7 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var response = try client.get("http://httpbun.com/bytes/4096", .{
+    var response = try client.get("https://httpbun.com/bytes/4096", .{
         .maxResponseSize = 8 * 1024 * 1024,
     });
     defer response.deinit();

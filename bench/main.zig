@@ -174,7 +174,7 @@ fn benchHeadersParse() void {
 }
 
 fn benchUriParse() void {
-    const u = httpx.uri.parse("http://httpbun.com:8080/users/123?page=1&limit=10#section") catch return;
+    const u = httpx.uri.parse("https://httpbun.com:8080/users/123?page=1&limit=10#section") catch return;
     std.mem.doNotOptimizeAway(u.host.len + u.path.len);
 }
 

@@ -13,9 +13,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
 
     const urls = [_][]const u8{
-        "http://httpbun.com/get",
-        "http://httpbun.com/headers",
-        "http://httpbun.com/ip",
+        "https://httpbun.com/get",
+        "https://httpbun.com/headers",
+        "https://httpbun.com/ip",
     };
 
     // Run all requests concurrently (array passed directly, no explicit & needed)
@@ -34,9 +34,9 @@ pub fn main() !void {
 
     // Request with options
     const reqs = [_]httpx.RequestOptions{
-        .{ .method = .GET, .url = "http://httpbun.com/get" },
-        .{ .method = .GET, .url = "http://httpbun.com/headers" },
-        .{ .method = .GET, .url = "http://httpbun.com/ip" },
+        .{ .method = .GET, .url = "https://httpbun.com/get" },
+        .{ .method = .GET, .url = "https://httpbun.com/headers" },
+        .{ .method = .GET, .url = "https://httpbun.com/ip" },
     };
 
     const results2 = httpx.requestAll(reqs) catch |err| {

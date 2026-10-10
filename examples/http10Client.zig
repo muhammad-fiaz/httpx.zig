@@ -13,7 +13,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // HTTP/1.0 request
-    var response = try client.get("http://httpbun.com/get", .{
+    var response = try client.get("https://httpbun.com/get", .{
         .httpVersion = .http10,
     });
     defer response.deinit();

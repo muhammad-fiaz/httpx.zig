@@ -11,7 +11,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // Custom headers
-    var response = try client.get("http://httpbun.com/headers", .{
+    var response = try client.get("https://httpbun.com/headers", .{
         .headers = .{
             .authorization = "Bearer my-token",
             .xCustom = "my-value",

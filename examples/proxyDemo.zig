@@ -12,7 +12,7 @@ pub fn main() !void {
 
     // HTTP proxy (if you have one running)
     // Note: proxy config is set on the request, not client
-    var response = client.get("http://httpbun.com/get", .{}) catch |err| {
+    var response = client.get("https://httpbun.com/get", .{}) catch |err| {
         std.debug.print("Proxy request failed: {s}\n", .{@errorName(err)});
         return;
     };

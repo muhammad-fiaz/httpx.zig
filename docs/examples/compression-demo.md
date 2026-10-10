@@ -18,7 +18,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // GET with compression
-    var response = client.get("http://httpbun.com/get", .{
+    var response = client.get("https://httpbun.com/get", .{
         .headers = .{ .acceptEncoding = "gzip, deflate, br" },
     }) catch |err| {
         std.debug.print("Compression request failed: {s}\n", .{@errorName(err)});

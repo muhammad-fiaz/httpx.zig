@@ -16,7 +16,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // First request - DNS lookup + cache
-    var r1 = client.get("http://httpbun.com/get", .{}) catch |err| {
+    var r1 = client.get("https://httpbun.com/get", .{}) catch |err| {
         std.debug.print("R1 failed: {s}\n", .{@errorName(err)});
         return;
     };
@@ -24,7 +24,7 @@ pub fn main() !void {
     std.debug.print("R1 Status: {d}\n", .{r1.status});
 
     // Second request - uses cached DNS
-    var r2 = client.get("http://httpbun.com/headers", .{}) catch |err| {
+    var r2 = client.get("https://httpbun.com/headers", .{}) catch |err| {
         std.debug.print("R2 failed: {s}\n", .{@errorName(err)});
         return;
     };

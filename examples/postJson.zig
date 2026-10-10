@@ -16,7 +16,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // POST with typed JSON struct using unified fetch
-    var response = try client.fetch("http://httpbun.com/post", .{
+    var response = try client.fetch("https://httpbun.com/post", .{
         .method = .POST,
         .json = CreateUser{ .name = "Alice", .role = "developer" },
     });

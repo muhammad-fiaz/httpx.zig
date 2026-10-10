@@ -13,7 +13,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // Dedicated HTTP/1.1 request with headers and query parameters
-    var response = try client.get("http://httpbun.com/get", .{
+    var response = try client.get("https://httpbun.com/get", .{
         .httpVersion = .http11,
         .headers = &.{
             .{ .name = "Accept", .value = "application/json" },

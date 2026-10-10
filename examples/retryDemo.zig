@@ -13,7 +13,7 @@ pub fn main() !void {
     // Simple retry loop
     var attempts: u32 = 0;
     while (attempts < 3) : (attempts += 1) {
-        var response = client.get("http://httpbun.com/get", .{}) catch |err| {
+        var response = client.get("https://httpbun.com/get", .{}) catch |err| {
             std.debug.print("Attempt {d} failed: {s}\n", .{ attempts + 1, @errorName(err) });
             httpx.clock.sleepMillis(1000);
             continue;

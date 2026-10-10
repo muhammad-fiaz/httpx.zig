@@ -18,10 +18,10 @@ pub fn main() !void {
     defer client.deinit();
 
     // Multiple requests reuse connection
-    var r1 = try client.get("http://httpbun.com/get", .{});
+    var r1 = try client.get("https://httpbun.com/get", .{});
     defer r1.deinit();
 
-    var r2 = try client.get("http://httpbun.com/headers", .{});
+    var r2 = try client.get("https://httpbun.com/headers", .{});
     defer r2.deinit();
 
     std.debug.print("R1 Status: {d}\n", .{r1.status});

@@ -16,7 +16,7 @@ std.debug.print("  maxRedirects:    {d}\n", .{client.config.maxRedirects});
 std.debug.print("  followRedirects: {}\n", .{client.config.followRedirects});
 
 // Per-request override: do not follow redirects for this call.
-var res = try client.get("http://httpbun.com/redirect/2", .{ .followRedirects = false });
+var res = try client.get("https://httpbun.com/redirect/2", .{ .followRedirects = false });
 defer res.deinit();
 ```
 

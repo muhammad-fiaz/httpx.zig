@@ -11,7 +11,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // Unified fetch request
-    var response = try client.fetch("http://httpbun.com/get", .{});
+    var response = try client.fetch("https://httpbun.com/get", .{});
     defer response.deinit();
 
     std.debug.print("Status: {d}\n", .{response.status});

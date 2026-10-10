@@ -18,7 +18,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // Unified fetch request
-    var response = try client.fetch("http://httpbun.com/get", .{});
+    var response = try client.fetch("https://httpbun.com/get", .{});
     defer response.deinit();
 
     std.debug.print("Status: {d}\n", .{response.status});
@@ -30,7 +30,7 @@ pub fn main() !void {
 
 ```text
 Status: 200
-Body: {"args":{},"headers":{"Host":"httpbun.com"},"url":"http://httpbun.com/get"}
+Body: {"args":{},"headers":{"Host":"httpbun.com"},"url":"https://httpbun.com/get"}
 ```
 
 The status code is the numeric HTTP status and the body is the raw response text; both vary with the target URL and network conditions.

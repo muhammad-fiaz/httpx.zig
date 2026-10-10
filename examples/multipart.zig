@@ -16,7 +16,7 @@ pub fn main() !void {
 
     const fileData = "hello, world!";
 
-    var response = try client.post("http://httpbun.com/post", .{
+    var response = try client.post("https://httpbun.com/post", .{
         .multipart = .{
             .name = "upload",
             .filename = "hello.txt",

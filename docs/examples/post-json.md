@@ -22,7 +22,7 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var response = try client.fetch("http://httpbun.com/post", .{
+    var response = try client.fetch("https://httpbun.com/post", .{
         .method = .POST,
         .json = CreateUser{ .name = "Alice", .role = "developer" },
     });

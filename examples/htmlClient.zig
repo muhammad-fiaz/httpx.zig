@@ -22,7 +22,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // Fetch HTML from httpbun.com
-    var response = client.get("http://httpbun.com/html", .{}) catch |err| {
+    var response = client.get("https://httpbun.com/html", .{}) catch |err| {
         std.debug.print("Network fetch failed ({s}), demonstrating parser on response body mock...\n", .{@errorName(err)});
         return;
     };

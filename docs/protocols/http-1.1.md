@@ -75,7 +75,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // Explicit HTTP/1.1 request
-    var response = try client.get("http://httpbun.com/get", .{
+    var response = try client.get("https://httpbun.com/get", .{
         .httpVersion = .http11,
         .headers = &.{
             .{ .name = "Accept", .value = "application/json" },

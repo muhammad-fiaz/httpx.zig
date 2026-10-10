@@ -29,7 +29,7 @@ lines in this format (representative values shown):
 
 ```text
 Status: 200
-Body: {"args":{},"headers":{"Host":"httpbun.com"},"url":"http://httpbun.com/get"}
+Body: {"args":{},"headers":{"Host":"httpbun.com"},"url":"https://httpbun.com/get"}
 ```
 
 Status codes and bodies vary with the target URL and verb.

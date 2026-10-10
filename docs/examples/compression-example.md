@@ -5,7 +5,7 @@ deflate, brotli, and zstd. See `examples/compressionDemo.zig`.
 
 ```zig
 // Advertise encodings; the client decodes transparently.
-var response = try client.get("http://httpbun.com/get", .{
+var response = try client.get("https://httpbun.com/get", .{
     .headers = .{ .acceptEncoding = "gzip, deflate, br" },
 });
 defer response.deinit();
