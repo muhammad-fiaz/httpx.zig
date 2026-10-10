@@ -106,6 +106,15 @@ When communicating through proxies:
 
 See the [Proxy Protocol Documentation](/protocols/proxies) and [SOCKS5H Guide](/protocols/socks5h) for details.
 
+## Expected Output
+
+```text
+Address: 54.147.165.56:443 (family: ipv4)
+Address: 34.231.23.46:443 (family: ipv4)
+```
+
+One line is printed per candidate address in the format `Address: {ip}:{port} (family: {family})`. Addresses, families, counts, and ordering vary by network, DNS records, and time; only the line format above is stable.
+
 ## Related Resources
 
 * [API: Client](/api/client)

@@ -35,6 +35,15 @@ pub fn main() !void {
 }
 ```
 
+## Expected Output
+
+```text
+==> Downloading file over FTP with progress and verification...
+FTP download finished: downloads/archive.tar.gz (12345 bytes)
+```
+
+Destinations, byte counts, and file sizes vary with the remote file; only the line format above is stable.
+
 ## How to Run
 
 ```bash

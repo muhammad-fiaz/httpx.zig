@@ -41,7 +41,7 @@ fn customNotFound(ctx: *httpx.Context) anyerror!httpx.Response {
 fn customErrorHandler(ctx: *httpx.Context, err: anyerror) anyerror!httpx.Response {
     return try ctx.renderJsonStatus(500, .{
         .status = 500,
-        .error_name = @errorName(err),
+        .errorName = @errorName(err),
         .message = "An unhandled server exception occurred.",
     });
 }
@@ -115,23 +115,23 @@ pub fn main() !void {
 
     // Spawn server accept loop on a background thread
     const port = server.localPort();
-    const server_thread = try std.Thread.spawn(.{}, (struct {
+    const serverThread = try std.Thread.spawn(.{}, (struct {
         fn run(s: *httpx.Server) void {
             s.run();
         }
     }).run, .{&server});
     defer {
         server.requestShutdown();
-        server_thread.join();
+        serverThread.join();
     }
 
     std.debug.print("=== Custom Error & Auth Security Validation ===\n", .{});
 
     // 2. Validate Custom 404 HTML Page
     {
-        var url_buf: [128]u8 = undefined;
-        const not_found_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/invalid/path/404", .{port});
-        var resp = try httpx.get(not_found_url, .{});
+        var urlBuf: [128]u8 = undefined;
+        const notFoundUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/invalid/path/404", .{port});
+        var resp = try httpx.get(notFoundUrl, .{});
         defer resp.deinit();
 
         std.debug.print("1. Custom 404 Response Status: {d}\n", .{resp.status});
@@ -140,9 +140,9 @@ pub fn main() !void {
 
     // 3. Validate Custom 500 Error Envelope
     {
-        var url_buf: [128]u8 = undefined;
-        const faulty_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/faulty", .{port});
-        var resp = try httpx.get(faulty_url, .{});
+        var urlBuf: [128]u8 = undefined;
+        const faultyUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/v1/faulty", .{port});
+        var resp = try httpx.get(faultyUrl, .{});
         defer resp.deinit();
 
         std.debug.print("2. Custom 500 Response Status: {d}\n", .{resp.status});
@@ -151,9 +151,9 @@ pub fn main() !void {
 
     // 4. Validate Bearer Auth - Unauthorized (No Token)
     {
-        var url_buf: [128]u8 = undefined;
-        const bearer_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/protected/bearer", .{port});
-        var resp = try httpx.get(bearer_url, .{});
+        var urlBuf: [128]u8 = undefined;
+        const bearerUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/v1/protected/bearer", .{port});
+        var resp = try httpx.get(bearerUrl, .{});
         defer resp.deinit();
 
         std.debug.print("3. Missing Bearer Token Status: {d}\n", .{resp.status});
@@ -161,9 +161,9 @@ pub fn main() !void {
 
     // 5. Validate Bearer Auth - Authorized (Valid Token)
     {
-        var url_buf: [128]u8 = undefined;
-        const bearer_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/protected/bearer", .{port});
-        var resp = try httpx.get(bearer_url, .{
+        var urlBuf: [128]u8 = undefined;
+        const bearerUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/v1/protected/bearer", .{port});
+        var resp = try httpx.get(bearerUrl, .{
             .bearerAuth = "secret-token-xyz",
         });
         defer resp.deinit();
@@ -174,9 +174,9 @@ pub fn main() !void {
 
     // 6. Validate Basic Auth - Authorized (Valid Credentials)
     {
-        var url_buf: [128]u8 = undefined;
-        const basic_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/v1/protected/basic", .{port});
-        var resp = try httpx.get(basic_url, .{
+        var urlBuf: [128]u8 = undefined;
+        const basicUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/v1/protected/basic", .{port});
+        var resp = try httpx.get(basicUrl, .{
             .basicAuth = "admin:pass123",
         });
         defer resp.deinit();
@@ -188,6 +188,24 @@ pub fn main() !void {
     std.debug.print("Custom Error Pages, 404 Fallback & Auth validation completed successfully.\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+=== Custom Error & Auth Security Validation ===
+1. Custom 404 Response Status: 404
+   Contains Custom HTML: true
+2. Custom 500 Response Status: 500
+   Contains JSON Error: true
+3. Missing Bearer Token Status: 401
+4. Valid Bearer Token Status: 200
+   Protected Payload: {"role":"admin","secretCode":"ALPHA-OMEGA-99"}
+5. Valid Basic Auth Status: 200
+   Protected Payload: {"role":"manager","secretCode":"BETA-KAPPA-42"}
+Custom Error Pages, 404 Fallback & Auth validation completed successfully.
+```
+
+The port in the request URLs is the ephemeral port assigned at startup, so it varies on every run; payload bodies show representative values.
 
 ## How to Run
 

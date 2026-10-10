@@ -78,7 +78,7 @@ pub fn main() !void {
         .enableDocs = true,
         .docs = .{
             .title = "HTTPX GraphQL & REST API",
-            .version = "0.2.1",
+            .version = "0.2.0",
             .description = "Full-featured native HTTP server with OpenAPI & GraphiQL 5.3.0 documentation.",
             .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
             .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
@@ -97,7 +97,7 @@ pub fn main() !void {
     const schema = httpx.graphql.Schema.init(allocator, .{
         .query = QueryType,
         .types = &.{UserType},
-        .introspection = true,
+        .enableIntrospection = true,
     });
     try httpx.graphql.mount(&server.router, schema, .{ .endpoint = "/graphql" });
 
@@ -114,24 +114,36 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [128]u8 = undefined;
-    const url_root = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
-    var res = try client.get(url_root, .{});
+    var urlBuf: [128]u8 = undefined;
+    const urlRoot = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/", .{port});
+    var res = try client.get(urlRoot, .{});
     std.debug.print("GET / -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
-    var gql_buf: [128]u8 = undefined;
-    const url_graphql = try std.fmt.bufPrint(&gql_buf, "http://127.0.0.1:{d}/graphql", .{port});
-    var gql_res = try client.graphql(url_graphql, "{ me { id name email role } }", null, .{});
-    std.debug.print("POST /graphql -> status={d}, body={s}\n", .{ gql_res.status, gql_res.body });
-    gql_res.deinit();
+    var gqlBuf: [128]u8 = undefined;
+    const urlGraphql = try std.fmt.bufPrint(&gqlBuf, "http://127.0.0.1:{d}/graphql", .{port});
+    var gqlRes = try client.graphql(urlGraphql, "{ me { id name email role } }", null, .{});
+    std.debug.print("POST /graphql -> status={d}, body={s}\n", .{ gqlRes.status, gqlRes.body });
+    gqlRes.deinit();
 
     server.requestShutdown();
     t.join();
+    httpx.graphql.unmount(&server.router, .{ .endpoint = "/graphql" });
     httpx.docs.unmount();
     std.debug.print("GraphQL server and client verification completed successfully.\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+GraphQL server listening on http://127.0.0.1:54321
+GET / -> status=200, body={"message":"Hello from httpx! Visit /graphiql, /docs, /redoc, or /scalar","status":"operational"}
+POST /graphql -> status=200, body={"data":{"me":{"id":"usr_101","name":"Muhammad Fiaz"}}}
+GraphQL server and client verification completed successfully.
+```
+
+The port is ephemeral and varies on every run; body lengths vary with the payload. Only the line format above is stable.
 
 ## How to Run
 

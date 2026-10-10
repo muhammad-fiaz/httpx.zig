@@ -28,6 +28,14 @@ pub fn main() !void {
 }
 ```
 
+## Expected Output
+
+```text
+Final Status: 200
+```
+
+The status code reflects the final response after following redirects and varies with the target URL and redirect chain.
+
 ## How to Run
 
 ```bash

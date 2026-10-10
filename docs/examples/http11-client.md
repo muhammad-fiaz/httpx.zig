@@ -25,7 +25,7 @@ pub fn main() !void {
         .httpVersion = .http11,
         .headers = &.{
             .{ .name = "Accept", .value = "application/json" },
-            .{ .name = "User-Agent", .value = "httpx-http11-client/0.2.1" },
+            .{ .name = "User-Agent", .value = "httpx-http11-client/0.2.0" },
         },
         .query = &.{
             .{ .name = "protocol", .value = "http11" },
@@ -42,6 +42,17 @@ pub fn main() !void {
     std.debug.print("Body length: {d} bytes\n", .{response.body.len});
 }
 ```
+
+## Expected Output
+
+```text
+Status: 200
+Protocol Version: http11
+Content-Type: application/json
+Body length: 1234 bytes
+```
+
+Status, Content-Type, and body length vary with the remote endpoint; version reflects the requested `.http11`.
 
 ## How to Run
 

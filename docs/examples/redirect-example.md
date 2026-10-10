@@ -20,6 +20,15 @@ var res = try client.get("http://httpbun.com/redirect/2", .{ .followRedirects = 
 defer res.deinit();
 ```
 
+## Expected Output
+
+```text
+  maxRedirects:    5
+  followRedirects: true
+```
+
+Values reflect the client config shown above and vary if `maxRedirects` / `followRedirects` are configured differently.
+
 ## Run
 
 ```

@@ -25,11 +25,9 @@ const insecure = httpx.TlsOptions{ .verify = .none };
 var server = try httpx.Server.init(allocator, io, .{
     .port = 8443,
     .tls = .{
-        .certPem = @embedFile("cert.pem"),
-        .keyPem = @embedFile("key.pem"),
-        .minVersion = .tls12,
-        .maxVersion = .tls13,
-        .alpnProtocols = &.{ .h2, .@"http/1.1" },
+        .certificatePem = @embedFile("cert.pem"),
+        .privateKeyPem = @embedFile("key.pem"),
+        .alpn = &.{ .h2, .@"http/1.1" },
         .allowPlainHttp = false,
     },
 });
@@ -46,6 +44,14 @@ var listener = try httpx.tls.Listener.init(allocator, io, .{
     },
 });
 ```
+
+## Expected Output
+
+```text
+(no output - configuration snippets only)
+```
+
+This page shows configuration shapes only; there is no runnable output. Ports, certificates, and negotiated ALPN/TLS versions vary by deployment. TLS 1.2 and 1.3 are supported by default with no version fields to set.
 
 ## Related
 

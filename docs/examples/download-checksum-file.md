@@ -20,23 +20,23 @@ pub fn main() !void {
     std.debug.print("==> Downloading with SHA256SUMS file parsing & verification...\n", .{});
 
     // Sample checksum file format simulation
-    const checksum_manifest =
+    const checksumManifest =
         \\# Official Release Hashes
         \\ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  sample-local-pdf.pdf
         \\
     ;
 
-    const target_filename = "sample-local-pdf.pdf";
-    const expected_hash = httpx.parseChecksumFile(checksum_manifest, target_filename);
+    const targetFilename = "sample-local-pdf.pdf";
+    const expectedHash = httpx.parseChecksumFile(checksumManifest, targetFilename);
 
-    if (expected_hash) |hash| {
-        std.debug.print("Parsed hash for {s}: {s}\n", .{ target_filename, hash });
+    if (expectedHash) |hash| {
+        std.debug.print("Parsed hash for {s}: {s}\n", .{ targetFilename, hash });
 
         const sampleUrl = "https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf";
-        const dl_res = client.download(
+        const dlRes = client.download(
             sampleUrl,
-            "downloads/",
             .{
+                .path = "downloads/",
                 .verify = .{
                     .minSize = 100,
                 },
@@ -48,10 +48,20 @@ pub fn main() !void {
             return;
         };
 
-        std.debug.print("Successfully downloaded to {s} ({d} bytes)\n", .{ dl_res.destination, dl_res.downloadedBytes });
+        std.debug.print("Successfully downloaded to {s} ({d} bytes)\n", .{ dlRes.destination, dlRes.downloadedBytes });
     }
 }
 ```
+
+## Expected Output
+
+```text
+==> Downloading with SHA256SUMS file parsing & verification...
+Parsed hash for sample-local-pdf.pdf: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+Successfully downloaded to downloads/sample-local-pdf.pdf (12345 bytes)
+```
+
+The destination path, byte count, and file size vary with the remote file; only the line format above is stable.
 
 ## How to Run
 

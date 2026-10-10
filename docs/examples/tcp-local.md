@@ -43,3 +43,11 @@ pub fn main() !void {
     std.debug.print("got: {s}\n", .{outBuf[0..n]});
 }
 ```
+
+## Expected Output
+
+```text
+got: pong
+```
+
+The ephemeral loopback port varies per run; the `pong` payload is fixed by the exchange. Loopback only, no external prerequisites.

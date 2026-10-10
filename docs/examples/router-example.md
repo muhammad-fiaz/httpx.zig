@@ -33,6 +33,18 @@ pub fn main() !void {
 Routes support static segments, `{param}` parameters (via `ctx.param`),
 and wildcards. See [Router](/api/router) and `examples/customServer.zig`.
 
+## Expected Output
+
+The snippet itself prints nothing; a client exchange against it looks like
+(representative values shown):
+
+```text
+GET /users/42 -> status=200 body={"id":"42"}
+POST /users -> status=201 body=created
+```
+
+Statuses, bodies, and ids vary with the request path and handler logic.
+
 ## Run
 
 ```bash

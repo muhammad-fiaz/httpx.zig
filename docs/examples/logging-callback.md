@@ -49,6 +49,15 @@ pub fn main() !void {
 }
 ```
 
+## Expected Output
+
+```text
+[SRV] GET / 200 3ms
+[CLI] GET http://127.0.0.1:54321/ 200
+```
+
+Each line follows the callback's print format (`method path status duration` for server events, `method url status` for client events); the concrete method, path, URL, status, and timings vary with the traffic observed.
+
 ## Run
 
 There is no single runnable file for this page; the pattern above is used

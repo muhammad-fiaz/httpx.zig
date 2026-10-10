@@ -34,10 +34,10 @@ pub fn main() !void {
     std.debug.print("FTP server running on 127.0.0.1:{d}\n", .{port});
 
     const ClientThread = struct {
-        fn run(server_port: u16) void {
-            var client = httpx.ftp.Client.connect(.{
+        fn run(serverPort: u16, threadAllocator: std.mem.Allocator) void {
+            var client = httpx.ftp.Client.connect(threadAllocator, .{
                 .host = "127.0.0.1",
-                .port = server_port,
+                .port = serverPort,
                 .user = "demo",
                 .password = "password",
             }) catch |err| {
@@ -49,7 +49,7 @@ pub fn main() !void {
         }
     };
 
-    const t = try std.Thread.spawn(.{}, ClientThread.run, .{port});
+    const t = try std.Thread.spawn(.{}, ClientThread.run, .{ port, allocator });
     server.run(1) catch |err| {
         std.debug.print("FTP server run failed: {s}\n", .{@errorName(err)});
     };
@@ -82,6 +82,16 @@ fn handleRemove(_: ?*anyopaque, _: []const u8) bool {
     return true;
 }
 ```
+
+## Expected Output
+
+```text
+FTP server running on 127.0.0.1:54321
+FTP client connected and verified.
+FTP server verification completed successfully.
+```
+
+The port is ephemeral and varies on every run; only the line format above is stable.
 
 ## How to Run
 

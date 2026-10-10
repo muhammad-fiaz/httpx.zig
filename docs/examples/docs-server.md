@@ -8,7 +8,7 @@ Demonstrates docsServer.zig using the canonical HTTPX API.
 const std = @import("std");
 const httpx = @import("httpx");
 
-pub const std_options: std.Options = .{
+pub const stdOptions: std.Options = .{
     .unexpected_error_tracing = false,
 };
 
@@ -24,9 +24,9 @@ fn listItemsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 }
 
 fn getItemHandler(ctx: *httpx.Context) anyerror!httpx.Response {
-    const item_id = ctx.param("id") orelse "0";
+    const itemId = ctx.param("id") orelse "0";
     return ctx.renderJson(.{
-        .id = item_id,
+        .id = itemId,
         .name = "Queried Item",
         .status = "available",
         .engine = "httpx.zig",
@@ -88,7 +88,7 @@ pub fn main() !void {
         .enableDocs = true,
         .docs = .{
             .title = "HTTPX Modern API Suite",
-            .version = "0.2.1",
+            .version = "0.2.0",
             .description = "Full-featured native HTTP server with OpenAPI & GraphQL documentation.",
             .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
             .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
@@ -117,9 +117,9 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [128]u8 = undefined;
-    const url_items = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/api/items", .{port});
-    var res = try client.get(url_items, .{});
+    var urlBuf: [128]u8 = undefined;
+    const urlItems = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/items", .{port});
+    var res = try client.get(urlItems, .{});
     std.debug.print("GET /api/items -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
@@ -129,6 +129,17 @@ pub fn main() !void {
     std.debug.print("Docs server verification completed successfully.\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+=== Starting httpx Documentation & API Server ===
+[INFO] Server started on http://127.0.0.1:54321
+GET /api/items -> status=200, body={"items":[{"id":101,"name":"Pro Router Widget","price":49.99}],"count":3}
+Docs server verification completed successfully.
+```
+
+The port is ephemeral and varies on every run; body length and JSON spacing vary with the payload. Only the line format above is stable.
 
 ## How to Run
 

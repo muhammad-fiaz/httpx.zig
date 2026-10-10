@@ -23,6 +23,15 @@ Negotiate with `httpx.compression.negotiate(headerValue)` and parse offers
 with `httpx.compression.parseAcceptEncoding(allocator, headerValue)`.
 Decompression is always size-bounded (`MAX_DECOMPRESSED_SIZE`).
 
+## Expected Output
+
+```text
+Status: 200
+Body length: 1234
+```
+
+The status reflects the live endpoint and the body length varies with the decoded response payload.
+
 ## Run
 
 ```bash

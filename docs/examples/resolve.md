@@ -35,6 +35,16 @@ pub fn main() !void {
 }
 ```
 
+## Expected Output
+
+```text
+Resolved 2 address(es) for httpbun.com:
+  44.210.120.28:443 (family: ipv4)
+  2600:1f18:1234:5678::1:443 (family: ipv6)
+```
+
+The address count, IP literals, ports, and families vary with DNS records and network configuration at runtime.
+
 ## How to Run
 
 ```bash

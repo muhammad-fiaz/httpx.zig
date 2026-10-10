@@ -23,8 +23,8 @@ pub fn main() !void {
     // Uses .resumePartial (clean non-reserved keyword name)
     const result = client.download(
         sampleUrl,
-        "downloads/resumable-sample.pdf",
         .{
+            .path = "downloads/resumable-sample.pdf",
             .existing = .resumePartial,
             .progress = .auto,
             .maxRetries = 3,
@@ -42,6 +42,15 @@ pub fn main() !void {
     });
 }
 ```
+
+## Expected Output
+
+```text
+==> Downloading https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf with Range resume policy (.resumePartial)...
+Download status: resumed=false, downloaded=12345 bytes to downloads/resumable-sample.pdf
+```
+
+The `resumed` flag, byte count, and destination vary with local partial-file state and the remote file; only the line format above is stable.
 
 ## How to Run
 

@@ -32,6 +32,14 @@ _ = try client.download(url, .{
 (`starting`, `downloading`, `verifying`, `completed`, `failed`,
 `cancelled`).
 
+## Expected Output
+
+```text
+[Task 101] 100.0% (90 bytes) 12000 B/s ETA: 0s
+```
+
+Percentages, byte counts, speeds, and ETAs vary continuously during the transfer; task IDs reflect the observer setup. Requires network access to the download URL. See `examples/downloadCustomProgress.zig` (`run-download-custom-progress`).
+
 ## Run
 
 ```bash

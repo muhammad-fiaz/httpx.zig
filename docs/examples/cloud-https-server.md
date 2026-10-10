@@ -59,11 +59,22 @@ pub fn main() !void {
 }
 ```
 
-## Running the Example
+## Expected Output
 
-```bash
-zig build run-all-cloud_https_server
+The example prints no startup line; the server binds `127.0.0.1:8080`
+(or the next free port per the `incremental` port strategy) and serves
+in the background. Verify with a client request, which has this format:
+
+```text
+$ curl -i http://127.0.0.1:8080/health
+HTTP/1.1 200 OK
+content-type: application/json
+content-length: 20
+
+{"status":"healthy"}
 ```
+
+The bound port varies if `8080` is already taken; response bodies show representative values.
 
 ## Cloud Deployment Notes
 

@@ -17,6 +17,19 @@ const parsed = try res.jsonAlloc(User, allocator);
 defer parsed.deinit();
 ```
 
+## Expected Output
+
+The snippet itself prints nothing; `examples/postJson.zig` (which posts the
+typed struct and echoes it back) prints lines in this format
+(representative values shown):
+
+```text
+Status: 200
+Body: {"name":"Alice","role":"developer"}
+```
+
+Status codes and bodies vary with the target URL and payload.
+
 ## Run
 
 ```bash

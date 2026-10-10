@@ -33,6 +33,14 @@ pub fn main() !void {
 }
 ```
 
+## Expected Output
+
+```text
+Status: 200
+```
+
+On transient failure the loop instead prints `Attempt 1 failed: <ErrorName>` lines (and sleeps 1000 ms between attempts), ending with `All retries exhausted` if all 3 attempts fail. Status codes and error names vary with network conditions.
+
 ## How to Run
 
 ```bash

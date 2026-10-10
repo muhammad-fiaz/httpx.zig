@@ -21,14 +21,14 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    const file_data = "hello, world!";
+    const fileData = "hello, world!";
 
     var response = try client.post("http://httpbun.com/post", .{
         .multipart = .{
             .name = "upload",
             .filename = "hello.txt",
             .contentType = "text/plain",
-            .data = file_data,
+            .data = fileData,
         },
     });
     defer response.deinit();
@@ -37,6 +37,15 @@ pub fn main() !void {
     std.debug.print("body: {s}\n", .{response.body});
 }
 ```
+
+## Expected Output
+
+```text
+status: 200
+body: {"files":{"upload":"hello, world!"},"form":{...}}
+```
+
+The status code and echoed body depend on the remote server's response; the body shape varies with what the server echoes back.
 
 ## How to Run
 

@@ -25,6 +25,7 @@ pub fn main() !void {
     };
     defer {
         for (results) |*r| r.deinit();
+        std.heap.page_allocator.free(results);
     }
 
     for (results, 0..) |result, i| {
@@ -44,6 +45,7 @@ pub fn main() !void {
     };
     defer {
         for (results2) |*r| r.deinit();
+        std.heap.page_allocator.free(results2);
     }
 
     for (results2) |result| {
@@ -51,6 +53,19 @@ pub fn main() !void {
     }
 }
 ```
+
+## Expected Output
+
+```text
+Request 1: status=200 bodyLen=1234
+Request 2: status=200 bodyLen=567
+Request 3: status=200 bodyLen=89
+Status: 200
+Status: 200
+Status: 200
+```
+
+Status values reflect the live endpoints and body lengths vary per response.
 
 ## How to Run
 

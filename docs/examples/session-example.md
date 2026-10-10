@@ -27,6 +27,19 @@ fn dashboardHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 There is no built-in session store; keep server-side state in your own
 structures keyed by the session cookie value.
 
+## Expected Output
+
+The handlers print nothing themselves; `examples/sessionServer.zig`
+verifies them with lines in this format (representative values shown):
+
+```text
+Session server running on http://127.0.0.1:41237
+GET /login -> status=200, body={"message":"Logged in","user":"alice"}
+Session server verification completed successfully.
+```
+
+Statuses, bodies, URLs, and ports vary with the request and the ephemeral port selected at runtime.
+
 ## Run
 
 ```bash

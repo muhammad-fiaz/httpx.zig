@@ -38,9 +38,9 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var url_buf: [128]u8 = undefined;
-    const url_get = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/get", .{port});
-    var res = try client.get(url_get, .{});
+    var urlBuf: [128]u8 = undefined;
+    const urlGet = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/get", .{port});
+    var res = try client.get(urlGet, .{});
     std.debug.print("GET /get -> status={d}, body={s}\n", .{ res.status, res.body });
     res.deinit();
 
@@ -65,6 +65,16 @@ fn clearCookieHandler(_: *httpx.Context) anyerror!httpx.Response {
     return .{ .status = 200, .body = "{\"message\":\"Cookie cleared\"}", .contentType = "application/json" };
 }
 ```
+
+## Expected Output
+
+```text
+Cookie server running on http://127.0.0.1:54321
+GET /get -> status=200, body={"username":"anonymous"}
+Cookie server verification completed successfully.
+```
+
+The port is ephemeral so it varies on every run; the body shows the representative JSON payload for an unset cookie.
 
 ## How to Run
 

@@ -64,21 +64,31 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    const health_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/healthz", .{port});
-    defer allocator.free(health_url);
-    var health_res = try client.get(health_url, .{});
-    defer health_res.deinit();
-    std.debug.print("GET /healthz -> {d} {s}\n", .{ health_res.status, health_res.body });
+    const healthUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/healthz", .{port});
+    defer allocator.free(healthUrl);
+    var healthRes = try client.get(healthUrl, .{});
+    defer healthRes.deinit();
+    std.debug.print("GET /healthz -> {d} {s}\n", .{ healthRes.status, healthRes.body });
 
-    const ready_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/readyz", .{port});
-    defer allocator.free(ready_url);
-    var ready_res = try client.get(ready_url, .{});
-    defer ready_res.deinit();
-    std.debug.print("GET /readyz -> {d} {s}\n", .{ ready_res.status, ready_res.body });
+    const readyUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/readyz", .{port});
+    defer allocator.free(readyUrl);
+    var readyRes = try client.get(readyUrl, .{});
+    defer readyRes.deinit();
+    std.debug.print("GET /readyz -> {d} {s}\n", .{ readyRes.status, readyRes.body });
 
     t.join();
 }
 ```
+
+## Expected Output
+
+```text
+endpoints on 127.0.0.1:54321
+GET /healthz -> 200 {"status":"healthy"}
+GET /readyz -> 200 {"status":"ready"}
+```
+
+The port is ephemeral and varies on every run; only the line format above is stable.
 
 ## How to Run
 

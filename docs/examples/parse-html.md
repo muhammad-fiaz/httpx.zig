@@ -118,9 +118,9 @@ pub fn main() !void {
 
     // CSS Selectors
     std.debug.print("\n  CSS Selectors:\n", .{});
-    var nav_links = try doc.select("nav a");
-    defer nav_links.deinit();
-    std.debug.print("  nav a  -> {d} elements\n", .{nav_links.len()});
+    var navLinks = try doc.select("nav a");
+    defer navLinks.deinit();
+    std.debug.print("  nav a  -> {d} elements\n", .{navLinks.len()});
 
     if (try doc.selectFirst("h1.hero-title")) |h1| {
         std.debug.print("  h1.hero-title: tag=<{s}>, text=\"{s}\"\n", .{ h1.tag(), try h1.text() });
@@ -128,7 +128,7 @@ pub fn main() !void {
 
     // 2. RSS Feed Parsing
     std.debug.print("\n2. RSS Feed Parsing\n", .{});
-    const rss_src =
+    const rssSrc =
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<rss version="2.0">
         \\  <channel>
@@ -144,7 +144,7 @@ pub fn main() !void {
         \\</rss>
     ;
 
-    var feed = try p.parseFeed(rss_src, "application/rss+xml");
+    var feed = try p.parseFeed(rssSrc, "application/rss+xml");
     defer feed.deinit();
     std.debug.print("  Feed Title: {s}\n", .{feed.title});
     std.debug.print("  Feed Link:  {s}\n", .{feed.link});
@@ -155,7 +155,7 @@ pub fn main() !void {
 
     // 3. robots.txt Parsing
     std.debug.print("\n3. robots.txt Parsing\n", .{});
-    const robots_src =
+    const robotsSrc =
         \\User-agent: *
         \\Disallow: /admin/
         \\Disallow: /private/
@@ -163,7 +163,7 @@ pub fn main() !void {
         \\Sitemap: https://httpx.zig/sitemap.xml
     ;
 
-    var r = try p.parseRobots(robots_src);
+    var r = try p.parseRobots(robotsSrc);
     defer r.deinit();
     std.debug.print("  Allowed '/' ? {}\n", .{r.isAllowed("MyBot", "/")});
     std.debug.print("  Allowed '/admin/dashboard' ? {}\n", .{r.isAllowed("MyBot", "/admin/dashboard")});
@@ -172,7 +172,7 @@ pub fn main() !void {
 
     // 4. XML Sitemap Parsing
     std.debug.print("\n4. XML Sitemap Parsing\n", .{});
-    const sitemap_src =
+    const sitemapSrc =
         \\<?xml version="1.0" encoding="UTF-8"?>
         \\<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
         \\  <url>
@@ -189,7 +189,7 @@ pub fn main() !void {
         \\</urlset>
     ;
 
-    var sm = try p.parseSitemap(sitemap_src);
+    var sm = try p.parseSitemap(sitemapSrc);
     defer sm.deinit();
     std.debug.print("  Sitemap URLs ({d}):\n", .{sm.urls.len});
     for (sm.urls) |u| {
@@ -199,6 +199,56 @@ pub fn main() !void {
     std.debug.print("\nAll parsing tests and demonstrations completed successfully.\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+==> httpx.zig Unified Parsing & Inspection Subsystem Demo
+
+1. HTML Parsing & DOM Inspection
+  Title: httpx Parsing Demo
+  Description: A demo of httpx parsing
+  OG title: httpx Demo
+  OG image: https://example.com/img.png
+  Canonical: https://example.com/demo
+  Language: en
+  Links (3):
+    [nav] / (text: Home)
+    [nav] /about (text: About)
+    [nav] /blog (text: Blog)
+  Images (2):
+    src=logo.png alt=httpx logo
+    src=banner.jpg alt=Banner
+  Forms (1):
+    action=/search method=get fields=3
+  Stylesheets (2)
+  Scripts (2)
+
+  CSS Selectors:
+  nav a  -> 3 elements
+  h1.hero-title: tag=<h1>, text="Welcome to httpx"
+
+2. RSS Feed Parsing
+  Feed Title: httpx Blog
+  Feed Link:  https://httpx.zig/blog
+  Entries (1):
+    - Version 0.2.0 Released: https://httpx.zig/blog/v0.2.0
+
+3. robots.txt Parsing
+  Allowed '/' ? true
+  Allowed '/admin/dashboard' ? false
+  Allowed '/admin/public/login' ? true
+  Sitemaps found: 1
+
+4. XML Sitemap Parsing
+  Sitemap URLs (2):
+    loc=https://httpx.zig/ lastMod=2026-08-30 prio=1.0
+    loc=https://httpx.zig/docs lastMod= prio=0.8
+
+All parsing tests and demonstrations completed successfully.
+```
+
+Counts, URLs, titles, and boolean results follow the embedded demo inputs above; they vary only if those inputs change.
 
 ## How to Run
 

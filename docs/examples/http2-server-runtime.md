@@ -19,6 +19,16 @@ defer thread.join();
 defer server.requestShutdown();
 ```
 
+## Expected Output
+
+```text
+HTTP/2 Server received: GET /h2
+HTTP/2 response status: 200
+body: {"status":200,"protocol":"HTTP/2","message":"Hello from HTTP/2"}
+```
+
+Method/path reflect the demo route; status is 200 on success.
+
 ## Run
 
 ```bash

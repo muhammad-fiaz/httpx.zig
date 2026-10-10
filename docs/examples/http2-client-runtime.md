@@ -14,6 +14,14 @@ defer response.deinit();
 std.debug.print("status={d}\n", .{response.status});
 ```
 
+## Expected Output
+
+```text
+status=200
+```
+
+Status is 200 on success against the loopback h2c server; URL/port vary per run.
+
 ## Run
 
 ```bash

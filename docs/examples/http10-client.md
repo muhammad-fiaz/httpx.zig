@@ -29,6 +29,14 @@ pub fn main() !void {
 }
 ```
 
+## Expected Output
+
+```text
+Status: 200
+```
+
+Status code varies with the remote endpoint and network (200 on success).
+
 ## How to Run
 
 ```bash

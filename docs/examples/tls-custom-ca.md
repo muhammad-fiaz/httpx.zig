@@ -49,6 +49,14 @@ pub fn main() !void {
 }
 ```
 
+## Expected Output
+
+```text
+Response: 26 bytes
+```
+
+The byte count reflects the `Served with custom CA cert` body and varies with the served content; the ephemeral loopback port varies per run. Requires local `cert.pem`/`key.pem` self-signed identity material. Development-only `.verify = .none` bypass; never use in production.
+
 ## Run
 
 ```bash
@@ -58,6 +66,6 @@ zig build run-tls-mtls
 ## Production CA Workflow
 
 1. Generate CA: `openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 365 -subj '/CN=MyCA'`
-2. Embed in Zig: `const ca_pem = @embedFile("ca.crt");`
+2. Embed in Zig: `const caPem = @embedFile("ca.crt");`
 3. Serve via `httpx.tls.Listener` with `defaultIdentity`, and verify with a
    populated CA bundle (never `.verify = .none` in production).

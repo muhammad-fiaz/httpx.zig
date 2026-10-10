@@ -29,58 +29,75 @@ pub fn main() !void {
     std.debug.print("1. HTTP/3 client configured: protocol={s}\n", .{@tagName(client.config.httpVersion.?)});
 
     // 2. Client & Server HTTP/3 Connection Engines (RFC 9114)
-    var client_conn = httpx.http3.Connection.init(allocator, .client);
-    defer client_conn.deinit();
+    var clientConn = httpx.http3.Connection.init(allocator, .client);
+    defer clientConn.deinit();
 
-    var server_conn = httpx.http3.Connection.init(allocator, .server);
-    defer server_conn.deinit();
+    var serverConn = httpx.http3.Connection.init(allocator, .server);
+    defer serverConn.deinit();
 
     // Exchange control stream SETTINGS
-    const client_ctrl = try client_conn.buildControlStream();
-    defer allocator.free(client_ctrl);
+    const clientCtrl = try clientConn.buildControlStream();
+    defer allocator.free(clientCtrl);
 
-    const server_ctrl = try server_conn.buildControlStream();
-    defer allocator.free(server_ctrl);
+    const serverCtrl = try serverConn.buildControlStream();
+    defer allocator.free(serverCtrl);
 
     // Server processes client settings (skip 1-byte stream type prefix)
     var off: usize = 1;
-    const parsed = try httpx.http3.frame.parseFrame(client_ctrl, &off);
-    try server_conn.processControlFrame(parsed.frameType, parsed.payload);
+    const parsed = try httpx.http3.frame.parseFrame(clientCtrl, &off);
+    try serverConn.processControlFrame(parsed.frameType, parsed.payload);
 
     std.debug.print("2. HTTP/3 control stream SETTINGS exchanged successfully\n", .{});
 
     // 3. HTTP/3 Request & Response Stream with QPACK encoding
-    const bidi_stream_id = client_conn.nextBidiStreamId();
-    var req_stream = client_conn.createRequestStream(bidi_stream_id);
+    const bidiStreamId = clientConn.nextBidiStreamId();
+    var reqStream = clientConn.createRequestStream(bidiStreamId);
 
-    const extra_headers = [_]httpx.http3.qpack.FieldLine{
+    const extraHeaders = [_]httpx.http3.qpack.FieldLine{
         .{ .name = "user-agent", .value = "httpx.zig-http3" },
         .{ .name = "accept", .value = "application/json" },
     };
 
-    const req_frame = try req_stream.buildRequestHeaders("GET", "https", "example.com", "/api/v1/resource", &extra_headers);
-    defer allocator.free(req_frame);
+    const reqFrame = try reqStream.buildRequestHeaders("GET", "https", "example.com", "/api/v1/resource", &extraHeaders);
+    defer allocator.free(reqFrame);
 
-    std.debug.print("3. Built HTTP/3 request on stream {d} ({d} bytes QPACK payload)\n", .{ bidi_stream_id, req_frame.len });
+    std.debug.print("3. Built HTTP/3 request on stream {d} ({d} bytes QPACK payload)\n", .{ bidiStreamId, reqFrame.len });
 
     // Server response stream
-    var resp_stream = server_conn.createRequestStream(bidi_stream_id);
+    var respStream = serverConn.createRequestStream(bidiStreamId);
 
-    const resp_headers = [_]httpx.http3.qpack.FieldLine{
+    const respHeaders = [_]httpx.http3.qpack.FieldLine{
         .{ .name = "content-type", .value = "application/json" },
         .{ .name = "server", .value = "httpx.zig/0.1.0" },
     };
 
-    const resp_head = try resp_stream.buildResponseHeaders(200, &resp_headers);
-    defer allocator.free(resp_head);
+    const respHead = try respStream.buildResponseHeaders(200, &respHeaders);
+    defer allocator.free(respHead);
 
-    const resp_body = try resp_stream.buildData("{\"status\":\"ok\",\"protocol\":\"HTTP/3\"}");
-    defer allocator.free(resp_body);
+    const respBody = try respStream.buildData("{\"status\":\"ok\",\"protocol\":\"HTTP/3\"}");
+    defer allocator.free(respBody);
 
-    std.debug.print("4. Server generated HTTP/3 response: HEADERS ({d} bytes), DATA ({d} bytes)\n", .{ resp_head.len, resp_body.len });
+    std.debug.print("4. Server generated HTTP/3 response: HEADERS ({d} bytes), DATA ({d} bytes)\n", .{ respHead.len, respBody.len });
     std.debug.print("HTTP/3 client-server protocol validation complete.\n", .{});
+
+    try liveLoopbackDemo(allocator, io);
 }
 ```
+
+## Expected Output
+
+```text
+1. HTTP/3 client configured: protocol=http3
+2. HTTP/3 control stream SETTINGS exchanged successfully
+3. Built HTTP/3 request on stream 0 (67 bytes QPACK payload)
+4. Server generated HTTP/3 response: HEADERS (32 bytes), DATA (45 bytes)
+HTTP/3 client-server protocol validation complete.
+=== HTTP/3 live loopback (QUIC + TLS 1.3 over UDP) ===
+5. LIVE client.get: status=200 version=http3 body={"path":"/api/v1/resource","protocol":"HTTP/3"}
+H3 LIVE DEMO VERIFICATION PASSED
+```
+
+Stream IDs, QPACK byte counts, and ports vary per run; status is 200 on success. See `examples/http3Client.zig` for the full `liveLoopbackDemo` helper.
 
 ## How to Run
 

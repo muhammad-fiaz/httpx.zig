@@ -38,3 +38,22 @@ defer opts.deinit();
 
 `Method.toString()` renders the wire token; `fromString` returns `null` for
 unknown methods.
+
+## Expected Output
+
+Representative HTTP exchange format (status codes, ports, and bodies vary by route):
+
+```text
+GET /resource HTTP/1.1
+Host: 127.0.0.1:54321
+
+HTTP/1.1 200 OK
+Content-Length: 17
+
+POST /resource HTTP/1.1
+Host: 127.0.0.1:54321
+Content-Length: 6
+
+create
+HTTP/1.1 201 Created
+```

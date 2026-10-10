@@ -75,7 +75,7 @@ pub fn main() !void {
                 \\  <item>
                 \\    <title>v1.0.0 Released</title>
                 \\    <link>https://github.com/muhammad-fiaz/httpx.zig/releases/tag/v1.0.0</link>
-                 \\    <description>HTTP stack for Zig</description>
+                \\    <description>HTTP stack for Zig</description>
                 \\  </item>
                 \\</channel>
                 \\</rss>
@@ -157,57 +157,57 @@ pub fn main() !void {
     defer client.deinit();
 
     // Verify /html
-    var url_buf: [128]u8 = undefined;
-    const html_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/html", .{port});
-    var res = try client.get(html_url, .{});
+    var urlBuf: [128]u8 = undefined;
+    const htmlUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/html", .{port});
+    var res = try client.get(htmlUrl, .{});
     std.debug.print("1. GET /html -> status={d}, content-type={?s}\n", .{ res.status, res.header("content-type") });
     res.deinit();
 
     // Verify /json
-    const json_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/json", .{port});
-    res = try client.get(json_url, .{});
+    const jsonUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/json", .{port});
+    res = try client.get(jsonUrl, .{});
     std.debug.print("2. GET /json -> status={d}, content-type={?s}, body={s}\n", .{ res.status, res.header("content-type"), res.body });
     res.deinit();
 
     // Verify /xml
-    const xml_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/xml", .{port});
-    res = try client.get(xml_url, .{});
+    const xmlUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/xml", .{port});
+    res = try client.get(xmlUrl, .{});
     std.debug.print("3. GET /xml -> status={d}, content-type={?s}\n", .{ res.status, res.header("content-type") });
     res.deinit();
 
     // Verify /rss.xml
-    const rss_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/rss.xml", .{port});
-    res = try client.get(rss_url, .{});
+    const rssUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/rss.xml", .{port});
+    res = try client.get(rssUrl, .{});
     std.debug.print("4. GET /rss.xml -> status={d}, content-type={?s}\n", .{ res.status, res.header("content-type") });
     res.deinit();
 
     // Verify /atom.xml
-    const atom_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/atom.xml", .{port});
-    res = try client.get(atom_url, .{});
+    const atomUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/atom.xml", .{port});
+    res = try client.get(atomUrl, .{});
     std.debug.print("5. GET /atom.xml -> status={d}, content-type={?s}\n", .{ res.status, res.header("content-type") });
     res.deinit();
 
     // Verify /robots.txt
-    const robots_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/robots.txt", .{port});
-    res = try client.get(robots_url, .{});
+    const robotsUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/robots.txt", .{port});
+    res = try client.get(robotsUrl, .{});
     std.debug.print("6. GET /robots.txt -> status={d}, content-type={?s}\n", .{ res.status, res.header("content-type") });
     res.deinit();
 
     // Verify /sitemap.xml
-    const sitemap_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/sitemap.xml", .{port});
-    res = try client.get(sitemap_url, .{});
+    const sitemapUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/sitemap.xml", .{port});
+    res = try client.get(sitemapUrl, .{});
     std.debug.print("7. GET /sitemap.xml -> status={d}, content-type={?s}\n", .{ res.status, res.header("content-type") });
     res.deinit();
 
     // Verify /binary
-    const binary_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/binary", .{port});
-    res = try client.get(binary_url, .{});
+    const binaryUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/binary", .{port});
+    res = try client.get(binaryUrl, .{});
     std.debug.print("8. GET /binary -> status={d}, content-type={?s}, bytes_len={d}\n", .{ res.status, res.header("content-type"), res.body.len });
     res.deinit();
 
     // Verify /custom
-    const custom_url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/custom", .{port});
-    res = try client.get(custom_url, .{});
+    const customUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/custom", .{port});
+    res = try client.get(customUrl, .{});
     std.debug.print("9. GET /custom -> status={d}, content-type={?s}\n", .{ res.status, res.header("content-type") });
     res.deinit();
 
@@ -215,6 +215,24 @@ pub fn main() !void {
     std.debug.print("Custom HTTP Responses verification completed successfully.\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+=== Custom HTTP Responses Server running on 127.0.0.1:54321 ===
+1. GET /html -> status=200, content-type=text/html
+2. GET /json -> status=200, content-type=application/json, body={"status":"ok","version":"1.0.0","features":["html","json","xml","rss","atom","sitemap","robots"]}
+3. GET /xml -> status=200, content-type=application/xml
+4. GET /rss.xml -> status=200, content-type=application/rss+xml
+5. GET /atom.xml -> status=200, content-type=application/atom+xml
+6. GET /robots.txt -> status=200, content-type=text/plain
+7. GET /sitemap.xml -> status=200, content-type=application/xml
+8. GET /binary -> status=200, content-type=application/octet-stream, bytes_len=8
+9. GET /custom -> status=201, content-type=application/vnd.api+json
+Custom HTTP Responses verification completed successfully.
+```
+
+The port is ephemeral so it varies on every run; bodies show representative values and the binary length reflects the 8 PNG magic bytes served by the example.
 
 ## How to Run
 

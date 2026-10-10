@@ -1,6 +1,6 @@
 # Simple Server
 
-Start a minimal server and return JSON from a single route.
+Start a minimal server with plain-text and JSON routes.
 
 ## Demo Program
 
@@ -8,8 +8,20 @@ Start a minimal server and return JSON from a single route.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn health(ctx: *httpx.Context) anyerror!httpx.Response {
-    return ctx.renderJson(.{ .ok = true, .service = "demo" });
+fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
+    return .{
+        .status = 200,
+        .body = "hello, world!",
+        .contentType = "text/plain; charset=utf-8",
+    };
+}
+
+fn jsonHandler(_: *httpx.Context) anyerror!httpx.Response {
+    return .{
+        .status = 200,
+        .body = "{\"ok\":true}",
+        .contentType = "application/json",
+    };
 }
 
 pub fn main() !void {
@@ -20,18 +32,52 @@ pub fn main() !void {
 
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
-        .port = 8080,
-        .portStrategy = .incremental,
-        .maxPortAttempts = 32,
-        .maxConnections = 1000,
-        .keepAlive = true,
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 2,
     });
     defer server.deinit();
 
-    try server.get("/health", health);
-    server.run();
+    try server.router.add(.GET, "/", indexHandler, .{});
+    try server.router.add(.GET, "/json", jsonHandler, .{});
+
+    const port = server.localPort();
+    std.debug.print("listening on 127.0.0.1:{d}\n", .{port});
+
+    const ServerThread = struct {
+        fn run(s: *httpx.Server) void {
+            s.run();
+        }
+    };
+    const t = try std.Thread.spawn(.{}, ServerThread.run, .{&server});
+
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+    const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{port});
+    defer allocator.free(url);
+    var response = try client.get(url, .{});
+    defer response.deinit();
+    std.debug.print("GET / -> {d} {s}\n", .{ response.status, response.body });
+
+    const jsonUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/json", .{port});
+    defer allocator.free(jsonUrl);
+    var jsonResponse = try client.get(jsonUrl, .{});
+    defer jsonResponse.deinit();
+    std.debug.print("GET /json -> {d} {s}\n", .{ jsonResponse.status, jsonResponse.body });
+
+    t.join();
 }
 ```
+
+## Expected Output
+
+```text
+listening on 127.0.0.1:41237
+GET / -> 200 hello, world!
+GET /json -> 200 {"ok":true}
+```
+
+The port is the ephemeral port selected at runtime, and statuses/bodies vary with the registered routes and requests.
 
 ## Run
 
@@ -41,7 +87,7 @@ zig build run-simple-server
 
 ## What to Verify
 
-- `GET /health` returns JSON response.
+- `GET /` returns `hello, world!` as plain text.
+- `GET /json` returns `{"ok":true}` as JSON.
 - Server starts without route registration errors.
-- If `8080` is occupied, server startup can automatically move to the next port based on config.
-- Browser request to `http://127.0.0.1:<effective-port>/health` returns immediately.
+- A client request to `http://127.0.0.1:<effective-port>/` returns immediately.

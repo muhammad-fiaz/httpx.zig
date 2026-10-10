@@ -21,6 +21,16 @@ defer profileRes.deinit();
 // Server side: read cookies with ctx.cookie(name).
 ```
 
+## Expected Output
+
+```text
+Cookie server running on http://127.0.0.1:54321
+GET /get -> status=200, body={"username":"anonymous"}
+Cookie server verification completed successfully.
+```
+
+The port is ephemeral so it varies on every run; the body shows the representative JSON payload for the requested cookie state.
+
 ## Run
 
 ```bash

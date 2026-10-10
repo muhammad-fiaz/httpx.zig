@@ -23,6 +23,17 @@ With `http://`, the client keeps forward-proxy behavior and supports
 CONNECT tunnels for TLS endpoints. With `socks5h://`, the proxy resolves
 the target host remotely.
 
+## Expected Output
+
+When run via the proxy demo target, the output follows that program's print format:
+
+```text
+Status: 200
+Body length: 1234
+```
+
+The status code and body length depend on the remote server's response; on proxy failure the program prints `Proxy request failed: <ErrorName>` instead.
+
 ## Run
 
 ```bash

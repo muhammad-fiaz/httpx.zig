@@ -51,7 +51,7 @@ pub fn main() !void {
 For specialized network applications, the standalone cache in `src/net/dns/cache.zig` can be used directly:
 
 ```zig
-const cache_mod = @import("httpx").dnsCache; // or @import("src/net/dns/cache.zig")
+const cacheMod = @import("httpx").dnsCache; // or @import("src/net/dns/cache.zig")
 ```
 
 The cache exposes atomic observability counters:
@@ -59,6 +59,21 @@ The cache exposes atomic observability counters:
 * `misses`: Number of lookups that required network I/O.
 * `lookups_started`: Number of network lookups initiated.
 * `lookups_coalesced`: Number of concurrent requests joined to an in-flight lookup.
+
+## Expected Output
+
+```text
+R1 Status: 200
+R2 Status: 200
+```
+
+Statuses reflect the live endpoints; on DNS or connection failure the corresponding `R1 failed: <ErrorName>` / `R2 failed: <ErrorName>` line prints instead.
+
+## How to Run
+
+```bash
+zig build run-dns-cache
+```
 
 ## Related
 

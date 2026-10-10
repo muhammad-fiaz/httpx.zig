@@ -96,22 +96,22 @@ pub fn main() !void {
     defer client.deinit();
 
     // 5. Client GET request
-    const root_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{port});
-    defer allocator.free(root_url);
+    const rootUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{port});
+    defer allocator.free(rootUrl);
 
-    std.debug.print("[integration] Client sending GET {s}...\n", .{root_url});
-    var res1 = try client.get(root_url, .{});
+    std.debug.print("[integration] Client sending GET {s}...\n", .{rootUrl});
+    var res1 = try client.get(rootUrl, .{});
     defer res1.deinit();
 
     std.debug.print("[integration] Response: status={d}, body=\"{s}\"\n", .{ res1.status, res1.body });
     if (res1.status != 200) return error.TestFailed;
 
     // 6. Client POST request with JSON payload
-    const users_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/api/users", .{port});
-    defer allocator.free(users_url);
+    const usersUrl = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/api/users", .{port});
+    defer allocator.free(usersUrl);
 
-    std.debug.print("[integration] Client sending POST {s} with JSON...\n", .{users_url});
-    var res2 = try client.post(users_url, .{
+    std.debug.print("[integration] Client sending POST {s} with JSON...\n", .{usersUrl});
+    var res2 = try client.post(usersUrl, .{
         .json = UserPayload{
             .name = "Alice",
             .role = "Administrator",
@@ -130,6 +130,20 @@ pub fn main() !void {
     std.debug.print("[integration] Complete integration cycle verified with zero leaks.\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+[integration] Server configured and listening on 127.0.0.1:54321
+[integration] Client sending GET http://127.0.0.1:54321/...
+[integration] Response: status=200, body="HTTPX production server running"
+[integration] Client sending POST http://127.0.0.1:54321/api/users with JSON...
+[integration] Response: status=201, body="{"created":true,"name":"Alice","role":"Administrator"}"
+[integration] Shutting down server and joining worker...
+[integration] Complete integration cycle verified with zero leaks.
+```
+
+The port is ephemeral and varies on every run; body lengths vary with the payload. Only the line format above is stable.
 
 ## How to Run
 

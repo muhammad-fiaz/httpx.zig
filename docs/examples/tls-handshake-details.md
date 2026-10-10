@@ -42,8 +42,10 @@ pub fn main() !void {
 }
 ```
 
-## Run
+## Expected Output
 
-```bash
-zig build run-all-tls_handshake_details
+```text
+TLS listening on 54321 (TLS 1.2/1.3, ALPN h2 + http/1.1)
 ```
+
+The ephemeral loopback port varies per run; negotiated protocol, cipher suite, and key exchange details vary per handshake and certificate. Requires local `cert.pem`/`key.pem` self-signed identity material; loopback only, no external service.

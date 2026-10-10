@@ -22,8 +22,8 @@ pub fn main() !void {
 
     const res = client.updateFile(
         sampleUrl,
-        "downloads/app-asset.pdf",
         .{
+            .path = "downloads/app-asset.pdf",
             .backupExisting = true,
             .backupSuffix = ".bak",
             .verify = .{
@@ -38,6 +38,15 @@ pub fn main() !void {
     std.debug.print("Update succeeded: {s} ({d} bytes)\n", .{ res.destination, res.downloadedBytes });
 }
 ```
+
+## Expected Output
+
+```text
+==> Updating local application asset from https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf with rollback backup...
+Update succeeded: downloads/app-asset.pdf (12345 bytes)
+```
+
+Destinations, byte counts, and file sizes vary with the remote file; only the line format above is stable.
 
 ## How to Run
 

@@ -47,6 +47,16 @@ Mount options (all fields use camelCase): `root`, `mount`, `indexFile`,
 `maxFileSize`, `cacheControl`, `liveReload`, `reloadSsePath`,
 `spaFallback`, `filesystem` (set `false` for embedded-only deployments).
 
+## Expected Output
+
+```text
+serving examples/static on http://127.0.0.1:41237/static
+health endpoint on http://127.0.0.1:41237/healthz
+GET /static/index.html -> 200 (4821 bytes)
+```
+
+The port is the ephemeral port selected at runtime; the status code and byte count vary with the requested file.
+
 ## Run
 
 ```bash

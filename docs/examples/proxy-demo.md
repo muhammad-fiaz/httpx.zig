@@ -30,6 +30,15 @@ pub fn main() !void {
 }
 ```
 
+## Expected Output
+
+```text
+Status: 200
+Body length: 1234
+```
+
+The status code and body length depend on the remote server's response; on proxy failure the program prints `Proxy request failed: <ErrorName>` and returns instead.
+
 ## How to Run
 
 ```bash

@@ -13,9 +13,9 @@ the handshake.
 var res = try client.get(url, .{
     .tls = .{
         .verify = .caBundle,
-        .caPem = ca_pem,
-        .clientCertPem = cert_pem, // presented when the server asks
-        .clientKeyPem = key_pem,   // P-256 ECDSA key for the chain
+        .caPem = caPem,
+        .clientCertPem = certPem, // presented when the server asks
+        .clientKeyPem = keyPem,   // P-256 ECDSA key for the chain
     },
     .timeoutMs = 15_000,
 });
@@ -41,20 +41,20 @@ var listener = try httpx.tls.Listener.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
     .defaultIdentity = .{
-        .certChainPem = cert_pem,
-        .privateKeyPem = key_pem,
+        .certChainPem = certPem,
+        .privateKeyPem = keyPem,
     },
-    // Require every client to present a certificate chaining to ca_pem.
+    // Require every client to present a certificate chaining to caPem.
     // Use `.optional` to allow cert-less clients through instead.
     .clientAuth = .required,
-    .clientCaPem = ca_pem,
+    .clientCaPem = caPem,
 });
 defer listener.deinit();
 ```
 
 The same fields exist one layer down: `tls.Server.Config.clientAuth` /
 `clientCaPem`, fed from `Server.init`'s `.tls = .{ .clientAuth =
-.required, .clientCaPem = ca_pem }`. Presented chains are verified with
+.required, .clientCaPem = caPem }`. Presented chains are verified with
 `verifyCertificateChain` (expiry, CA-ness, anchor match; no hostname
 check — client certificates identify a principal, not a host), the
 `CertificateVerify` P-256 signature is checked over the live transcript,
@@ -66,6 +66,16 @@ closed via structural validation, never a panic.
 ```bash
 zig build run-tls-mtls
 ```
+
+## Expected Output
+
+```text
+mTLS HTTPS: status=200 mutual-hello present
+mTLS enforcement: empty-cert client rejected
+MTLS DEMO VERIFICATION PASSED
+```
+
+The ephemeral loopback port varies per run; certificate material and handshake details vary by deployment. Loopback only with an embedded P-256 self-signed identity, no external service required.
 
 ## What to Verify
 

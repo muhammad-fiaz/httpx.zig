@@ -55,7 +55,7 @@ pub fn main() !void {
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `.dnsCache.enabled` | `bool` | `true` | Enables thread-safe in-memory resolution caching |
+| `.dnsCache.enable` | `bool` | `true` | Enables thread-safe in-memory resolution caching |
 | `.dnsCache.ttlMs` | `i64` | `60_000` (60s) | Cache lifetime for successful resolutions |
 | `.dnsCache.negativeTtlMs` | `i64` | `5_000` (5s) | Cache lifetime for failed host resolutions |
 | `.dnsCache.maxEntries` | `u32` | `1024` | Maximum bounded entries before eviction |
@@ -70,6 +70,19 @@ pub fn main() !void {
 | `.port` | `u16` | `443` | Port stamped onto every returned address |
 
 Passing `.{}` uses HTTPX defaults.
+
+## Expected Output
+
+```text
+Resolved 2 address(es):
+  93.184.216.34:443
+  2606:2800:220:1:248:1893:25c8:1946:443
+
+IPv4 addresses:
+  93.184.216.34:443
+```
+
+Addresses, counts, and families vary with DNS resolution at runtime; values above are representative.
 
 ## Related
 

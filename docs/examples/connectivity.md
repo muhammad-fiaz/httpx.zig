@@ -35,13 +35,13 @@ pub fn main() !void {
     std.debug.print("\n=== Detailed connectivity probe ===\n", .{});
     const result = httpx.checkConnectivity(.{ .timeoutMs = 3000 });
     if (result.online) {
-        const fam_str: []const u8 = if (result.family) |f| switch (f) {
+        const famStr: []const u8 = if (result.family) |f| switch (f) {
             .ip4 => "IPv4",
             .ip6 => "IPv6",
         } else "?";
         std.debug.print(
             "Online: endpoint={s} family={s} latency={?d}ms\n",
-            .{ result.endpointStr(), fam_str, result.latency_ms },
+            .{ result.endpointStr(), famStr, result.latencyMs },
         );
     } else {
         std.debug.print("Offline: all probes failed.\n", .{});
@@ -52,11 +52,11 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    const client_result = client.checkConnectivity(.{});
-    if (client_result.online) {
+    const clientResult = client.checkConnectivity(.{});
+    if (clientResult.online) {
         std.debug.print("Client: online via {s} ({?d}ms)\n", .{
-            client_result.endpointStr(),
-            client_result.latency_ms,
+            clientResult.endpointStr(),
+            clientResult.latencyMs,
         });
     } else {
         std.debug.print("Client: offline.\n", .{});
@@ -65,6 +65,23 @@ pub fn main() !void {
     std.debug.print("\nDone.\n", .{});
 }
 ```
+
+## Expected Output
+
+```text
+=== Zero-config check ===
+Internet is available.
+
+=== Detailed connectivity probe ===
+Online: endpoint=1.1.1.1:443 family=IPv4 latency=42ms
+
+=== Via Client ===
+Client: online via 1.1.1.1:443 (42ms)
+
+Done.
+```
+
+The endpoint address, family, and latency values vary with the network path; when offline the corresponding `No internet connection detected.` / `Offline: all probes failed.` / `Client: offline.` lines print instead.
 
 ## How to Run
 

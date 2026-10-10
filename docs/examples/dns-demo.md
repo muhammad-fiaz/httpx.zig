@@ -32,29 +32,45 @@ pub fn main() !void {
 
     // 3. IPv4-only resolution
     std.debug.print("\n--- IPv4-Only Resolution (httpbun.com:443) ---\n", .{});
-    var v4_addresses = client.resolve("httpbun.com", .{ .port = 443, .family = .ipv4 }) catch |err| {
+    var v4Addresses = client.resolve("httpbun.com", .{ .port = 443, .family = .ipv4 }) catch |err| {
         std.debug.print("IPv4 lookup failed: {s}\n", .{@errorName(err)});
         return;
     };
-    defer v4_addresses.deinit();
+    defer v4Addresses.deinit();
 
-    for (v4_addresses.items) |addr| {
+    for (v4Addresses.items) |addr| {
         std.debug.print("  IPv4: {f}:{d}\n", .{ addr, addr.port });
     }
 
     // 4. URL-based resolution
     std.debug.print("\n--- URL Resolution (https://httpbun.com/get) ---\n", .{});
-    var url_addresses = client.resolveUrl("https://httpbun.com/get", .{}) catch |err| {
+    var urlAddresses = client.resolveUrl("https://httpbun.com/get", .{}) catch |err| {
         std.debug.print("URL resolution failed: {s}\n", .{@errorName(err)});
         return;
     };
-    defer url_addresses.deinit();
+    defer urlAddresses.deinit();
 
-    for (url_addresses.items) |addr| {
+    for (urlAddresses.items) |addr| {
         std.debug.print("  Target address: {f}:{d}\n", .{ addr, addr.port });
     }
 }
 ```
+
+## Expected Output
+
+```text
+--- Dual-Stack Resolution (httpbun.com:443) ---
+  Address: 54.147.165.56:443 (family: ipv4)
+  Address: 34.231.23.46:443 (family: ipv4)
+--- IPv4-Only Resolution (httpbun.com:443) ---
+  IPv4: 54.147.165.56:443
+  IPv4: 34.231.23.46:443
+--- URL Resolution (https://httpbun.com/get) ---
+  Target address: 54.147.165.56:443
+  Target address: 34.231.23.46:443
+```
+
+Addresses, families, counts, and ordering vary by network, DNS records, and time; only the line format above is stable.
 
 ## How to Run
 

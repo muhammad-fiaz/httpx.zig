@@ -22,6 +22,15 @@ fn readyHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 `httpx.health.Status` (`.healthy`, `.ready`, ...) renders standard JSON
 bodies via `jsonBody()` with matching HTTP status codes.
 
+## Expected Output
+
+```text
+GET /healthz -> 200 {"status":"healthy"}
+GET /readyz -> 200 {"status":"ready"}
+```
+
+Bodies follow the format printed by the `healthz`/`readyz` handlers (`{d} {s}` with status code and JSON body). Only the line format above is stable.
+
 ## Run
 
 ```bash
