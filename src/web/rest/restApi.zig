@@ -368,4 +368,3 @@ test "REST endpoint execution and automatic OpenAPI spec derivation" {
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"id\":42") != null);
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "\"name\":\"Muhammad\"") != null);
 }
-

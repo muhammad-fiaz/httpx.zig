@@ -222,7 +222,7 @@ pub const health = @import("web/health/healthEndpoints.zig");
 pub const metrics = @import("web/metrics/metricsRegistry.zig");
 pub const mime = @import("utils/mime.zig");
 pub const fs = @import("utils/fs.zig");
-pub const rest = @import("web/rest/rest.zig");
+pub const rest = @import("web/rest/restApi.zig");
 pub const Rest = rest.Rest;
 pub const ApiResult = rest.ApiResult;
 pub const app = @import("web/app.zig");
@@ -284,7 +284,7 @@ pub const web = struct {
     };
     pub const health = @import("web/health/healthEndpoints.zig");
     pub const metrics = @import("web/metrics/metricsRegistry.zig");
-    pub const rest = @import("web/rest/rest.zig");
+    pub const rest = @import("web/rest/restApi.zig");
     pub const app = @import("web/app.zig");
     pub const openapi = @import("web/openApi/openApiSpec.zig");
     pub const docs = @import("web/docs/docs.zig");
