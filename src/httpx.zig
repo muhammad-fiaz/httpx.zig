@@ -67,8 +67,8 @@ pub const udp = @import("sockets/udp.zig");
 
 // Network layer
 pub const address = @import("net/address.zig");
-pub const dns = @import("net/dns.zig");
-pub const dnsCache = @import("net/dns/cache.zig");
+pub const dns = @import("net/dns/dnsResolver.zig");
+pub const dnsCache = @import("net/dns/dnsCache.zig");
 pub const resolve = @import("net/resolve.zig");
 pub const connectivity = @import("net/connectivity.zig");
 pub const socks5 = @import("net/socks5.zig");

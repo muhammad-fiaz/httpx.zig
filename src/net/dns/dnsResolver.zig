@@ -12,11 +12,11 @@
 //!   - RFC 1034 — Domain Names: Concepts and Facilities
 
 const std = @import("std");
-const clock = @import("../common/clock.zig");
+const clock = @import("../../common/clock.zig");
 const Allocator = std.mem.Allocator;
 const net = std.Io.net;
-const udpMod = @import("../sockets/udp.zig");
-const cacheMod = @import("dns/cache.zig");
+const udpMod = @import("../../sockets/udp.zig");
+const cacheMod = @import("dnsCache.zig");
 /// DNS response cache: `httpx.dns.Cache` is the one canonical path.
 pub const Cache = cacheMod.Cache;
 pub const CacheConfig = cacheMod.Config;
