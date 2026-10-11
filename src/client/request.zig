@@ -504,6 +504,7 @@ fn h3DoRequest(
     port: u16,
     authority: []const u8,
     target: []const u8,
+    reqBody: ?[]const u8,
 ) Error!Response {
     if (host.len == 0) return Error.InvalidUrl;
     const deadlineMs = req.timeoutMs orelse 30_000;
@@ -629,6 +630,7 @@ fn h3DoRequest(
         authority,
         target,
         conv.items,
+        reqBody,
         &pump,
         dest,
         deadlineMs,
@@ -812,7 +814,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             // cannot exist, so this is an invalid URL+version pairing.
             if (!isTls) return Error.InvalidUrl;
             if (req.proxy != null) return Error.Http3ProxyUnsupported;
-            return h3DoRequest(a, io, req, tlsOpts, hostCopy[0..hl], port, authorityStr, target);
+            return h3DoRequest(a, io, req, tlsOpts, hostCopy[0..hl], port, authorityStr, target, bodyOut);
         }
 
         // HTTP/2 pooled fast path BEFORE any dial: a parked session

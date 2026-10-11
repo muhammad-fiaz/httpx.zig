@@ -116,9 +116,10 @@ pub const Client = struct {
         self.controlDone = true;
     }
 
-    /// One GET-style exchange over an already-started pump. Against an
-    /// external server the peer pumps itself; in loopback tests the
-    /// server thread runs its own pump concurrently.
+    /// One request/response exchange over an already-started pump. Supports
+    /// request and response bodies (GET, POST, PUT, DELETE, PATCH, etc.).
+    /// Against an external server the peer pumps itself; in loopback tests
+    /// the server thread runs its own pump concurrently.
     pub fn request(
         self: *Client,
         method: []const u8,
@@ -126,6 +127,7 @@ pub const Client = struct {
         authority: []const u8,
         path: []const u8,
         extra: []const Header,
+        body: ?[]const u8,
         pump: *quicEp.Pump,
         dest: std.Io.net.IpAddress,
         deadlineMs: u64,
@@ -145,8 +147,34 @@ pub const Client = struct {
         for (extra) |h| try qextra.append(a, .{ .name = h.name, .value = h.value });
         const head = try rs.buildRequestHeaders(method, scheme, authority, path, qextra.items);
         defer a.free(head);
-        try sendStream(self.ep.conn, sid, 0, head, true, @intCast(clockMod.millisNow()));
-        _ = try self.ep.flush(dest);
+
+        const hasBody = body != null and body.?.len > 0;
+        if (!hasBody) {
+            try sendStream(self.ep.conn, sid, 0, head, true, @intCast(clockMod.millisNow()));
+            _ = try self.ep.flush(dest);
+        } else {
+            const bodyBytes = body.?;
+            const dhead = try rs.buildData(bodyBytes);
+            defer a.free(dhead);
+
+            var streamOff: u64 = 0;
+            try sendStream(self.ep.conn, sid, streamOff, head, false, @intCast(clockMod.millisNow()));
+            streamOff += head.len;
+            _ = try self.ep.flush(dest);
+
+            // Chunk the H3 DATA frame across QUIC packets if large (MTU friendly, <= 1200 bytes per chunk)
+            var bodyCursor: usize = 0;
+            const maxChunkSize: usize = 1200;
+            while (bodyCursor < dhead.len) {
+                const chunkEnd = @min(bodyCursor + maxChunkSize, dhead.len);
+                const chunk = dhead[bodyCursor..chunkEnd];
+                const isFinal = chunkEnd == dhead.len;
+                try sendStream(self.ep.conn, sid, streamOff, chunk, isFinal, @intCast(clockMod.millisNow()));
+                streamOff += chunk.len;
+                bodyCursor = chunkEnd;
+                _ = try self.ep.flush(dest);
+            }
+        }
 
         const start: u64 = @intCast(clockMod.millisNow());
         while (true) {
@@ -180,6 +208,9 @@ pub const Client = struct {
         var off: usize = 0;
         while (off < bytes.len) {
             const fr = try h3frame.parseFrame(bytes, &off);
+            if (h3frame.checkFrameAllowed(.requestBidi, fr.frameType)) |_| {
+                return error.ProtocolViolation;
+            }
             if (fr.frameType == 0x1) {
                 const fields = try self.h3.qdec.decodeSectionCounted(fr.payload, 0, null);
                 defer self.h3.qdec.freeFields(fields);
@@ -197,7 +228,8 @@ pub const Client = struct {
             } else if (fr.frameType == 0x0) {
                 try body.appendSlice(a, fr.payload);
             } else {
-                return error.ProtocolViolation;
+                // Unknown/extension frames allowed on request streams per RFC 9114 Section 7.2.8:
+                // payload already skipped past by parseFrame.
             }
         }
         if (status == 0) return error.TruncatedResponse;

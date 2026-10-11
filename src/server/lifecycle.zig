@@ -1287,19 +1287,19 @@ pub const Server = struct {
 
             var mStr: []const u8 = "GET";
             var pStr: []const u8 = "/";
-            var reqBody: []const u8 = "";
-            if (off < acc.buf.items.len) {
-                var bodyOff = off;
-                if (http3Frame.parseFrame(acc.buf.items, &bodyOff)) |dfr| {
-                    if (dfr.frameType == 0x00) {
-                        reqBody = dfr.payload;
-                    }
-                } else |_| {}
-            }
-
             var arenaH3 = std.heap.ArenaAllocator.init(self.allocator);
             defer arenaH3.deinit();
             const a = arenaH3.allocator();
+
+            var reqBodyList = std.ArrayList(u8).empty;
+            while (off < acc.buf.items.len) {
+                if (http3Frame.parseFrame(acc.buf.items, &off)) |dfr| {
+                    if (dfr.frameType == 0x00) {
+                        try reqBodyList.appendSlice(a, dfr.payload);
+                    }
+                } else |_| break;
+            }
+            const reqBody = reqBodyList.items;
 
             var ctxHdrs = try a.alloc(routerMod.Header, fields.len);
             var hdrCount: usize = 0;
@@ -1358,22 +1358,48 @@ pub const Server = struct {
             const rdata = try rs.buildData(res.body);
             defer self.allocator.free(rdata);
 
-            const SendHelper = struct {
+            const SendChunkHelper = struct {
                 var sId: u64 = 0;
-                var sHead: []const u8 = "";
+                var sOff: u64 = 0;
                 var sData: []const u8 = "";
+                var sFin: bool = false;
                 pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) quicConn.Error!void {
-                    quicFrames.encode(payload, gpa, .{ .stream = .{ .id = sId, .offset = 0, .data = sHead, .fin = false } }) catch
-                        return quicConn.Error.OutOfMemory;
-                    quicFrames.encode(payload, gpa, .{ .stream = .{ .id = sId, .offset = sHead.len, .data = sData, .fin = true } }) catch
+                    quicFrames.encode(payload, gpa, .{ .stream = .{ .id = sId, .offset = sOff, .data = sData, .fin = sFin } }) catch
                         return quicConn.Error.OutOfMemory;
                 }
             };
-            SendHelper.sId = acc.sid;
-            SendHelper.sHead = rhead;
-            SendHelper.sData = rdata;
-            try qconn.sendFrames(.application, SendHelper.build, 0);
-            _ = try ep.flush(null);
+            SendChunkHelper.sId = acc.sid;
+
+            var streamOff: u64 = 0;
+            if (rdata.len == 0) {
+                SendChunkHelper.sOff = 0;
+                SendChunkHelper.sData = rhead;
+                SendChunkHelper.sFin = true;
+                try qconn.sendFrames(.application, SendChunkHelper.build, 0);
+                _ = try ep.flush(null);
+            } else {
+                SendChunkHelper.sOff = 0;
+                SendChunkHelper.sData = rhead;
+                SendChunkHelper.sFin = false;
+                try qconn.sendFrames(.application, SendChunkHelper.build, 0);
+                streamOff += rhead.len;
+                _ = try ep.flush(null);
+
+                var cursor: usize = 0;
+                const maxChunk: usize = 1200;
+                while (cursor < rdata.len) {
+                    const chunkEnd = @min(cursor + maxChunk, rdata.len);
+                    const chunk = rdata[cursor..chunkEnd];
+                    const isFinal = chunkEnd == rdata.len;
+                    SendChunkHelper.sOff = streamOff;
+                    SendChunkHelper.sData = chunk;
+                    SendChunkHelper.sFin = isFinal;
+                    try qconn.sendFrames(.application, SendChunkHelper.build, 0);
+                    streamOff += chunk.len;
+                    cursor = chunkEnd;
+                    _ = try ep.flush(null);
+                }
+            }
             return;
         }
     }

@@ -1869,11 +1869,11 @@ fn sendH3Stream(conn: *Connection, sid: u64, offset: u64, bytes: []const u8, fin
 
 /// Direction-aware STREAM accumulator for the HTTP/3 loopback test.
 const H3LoopSink = struct {
-    var cliBufs: [8][2048]u8 = undefined;
+    var cliBufs: [8][16384]u8 = undefined;
     var cliLens: [8]usize = @splat(0);
     var cliFins: [8]bool = @splat(false);
     var cliSids: [8]u64 = @splat(std.math.maxInt(u64));
-    var srvBufs: [8][2048]u8 = undefined;
+    var srvBufs: [8][16384]u8 = undefined;
     var srvLens: [8]usize = @splat(0);
     var srvFins: [8]bool = @splat(false);
     var srvSids: [8]u64 = @splat(std.math.maxInt(u64));
@@ -1902,7 +1902,7 @@ const H3LoopSink = struct {
         unreachable;
     }
 
-    fn store(bufs: *[8][2048]u8, lens: *[8]usize, fins: *[8]bool, sids: *[8]u64, sid: u64, data: []const u8, fin: bool) void {
+    fn store(bufs: *[8][16384]u8, lens: *[8]usize, fins: *[8]bool, sids: *[8]u64, sid: u64, data: []const u8, fin: bool) void {
         const i = slot(sids, sid);
         std.debug.assert(lens.*[i] + data.len <= bufs.*[i].len);
         @memcpy(bufs.*[i][lens.*[i]..][0..data.len], data);
@@ -1918,7 +1918,7 @@ const H3LoopSink = struct {
         store(&srvBufs, &srvLens, &srvFins, &srvSids, sid, data, fin);
     }
 
-    fn find(sids: *[8]u64, lens: *[8]usize, bufs: *[8][2048]u8, sid: u64) ?[]const u8 {
+    fn find(sids: *[8]u64, lens: *[8]usize, bufs: *[8][16384]u8, sid: u64) ?[]const u8 {
         for (sids.*, 0..) |s, i| if (s == sid) return bufs.*[i][0..lens.*[i]];
         return null;
     }
@@ -2107,7 +2107,219 @@ test "http3 request over quic loopback reaches handler and returns response" {
         try std.testing.expectEqualStrings("not-found", r.body);
     }
 
-    // 5. Graceful shutdown: GOAWAY on the server control stream.
+    // 5. Request 3: POST /echo with request body on client bidi stream 8.
+    {
+        var cliQenc3 = h3qpack.Encoder.init(a);
+        defer cliQenc3.deinit();
+        var rs3 = h3conn.RequestStream{ .id = 8, .allocator = a, .qpack = &cliQenc3 };
+        const req3Head = try rs3.buildRequestHeaders("POST", "https", "example.com", "/echo", &.{});
+        defer a.free(req3Head);
+        const req3Data = try rs3.buildData("{\"name\":\"zig-h3\",\"magic\":42}");
+        defer a.free(req3Data);
+
+        var req3Wire = std.ArrayList(u8).empty;
+        defer req3Wire.deinit(a);
+        try req3Wire.appendSlice(a, req3Head);
+        try req3Wire.appendSlice(a, req3Data);
+
+        try sendH3Stream(client, 8, 0, req3Wire.items, true, 514);
+        try pumpH3(client, server, 515);
+
+        // Server receives stream 8, decodes HEADERS and DATA frames, responds with echo.
+        const got = H3LoopSink.srvBytes(8).?;
+        var off: usize = 0;
+        const frH = try h3frame.parseFrame(got, &off);
+        try std.testing.expectEqual(@as(u64, 0x1), frH.frameType);
+        const fields = try srvH3.qdec.decodeSectionCounted(frH.payload, 0, null);
+        defer srvH3.qdec.freeFields(fields);
+        var postMethod: []const u8 = "";
+        for (fields) |f| {
+            if (std.mem.eql(u8, f.name, ":method")) postMethod = f.value;
+        }
+        try std.testing.expectEqualStrings("POST", postMethod);
+
+        const frD = try h3frame.parseFrame(got, &off);
+        try std.testing.expectEqual(@as(u64, 0x0), frD.frameType);
+        try std.testing.expectEqualStrings("{\"name\":\"zig-h3\",\"magic\":42}", frD.payload);
+
+        // Server returns 201 Created and echoes back the body
+        var srvQenc3 = h3qpack.Encoder.init(a);
+        defer srvQenc3.deinit();
+        var srs3 = h3conn.RequestStream{ .id = 8, .allocator = a, .qpack = &srvQenc3 };
+        const resp3Head = try srs3.buildResponseHeaders(201, &.{});
+        defer a.free(resp3Head);
+        const resp3Data = try srs3.buildData(frD.payload);
+        defer a.free(resp3Data);
+        var resp3Wire = std.ArrayList(u8).empty;
+        defer resp3Wire.deinit(a);
+        try resp3Wire.appendSlice(a, resp3Head);
+        try resp3Wire.appendSlice(a, resp3Data);
+        try sendH3Stream(server, 8, 0, resp3Wire.items, true, 516);
+        try pumpH3(server, client, 517);
+
+        const cliGot = H3LoopSink.cliBytes(8).?;
+        var cliOff: usize = 0;
+        var postStatus: u16 = 0;
+        var postRespBody: []const u8 = "";
+        while (cliOff < cliGot.len) {
+            const fr = try h3frame.parseFrame(cliGot, &cliOff);
+            if (fr.frameType == 0x1) {
+                const sfields = try cliH3.qdec.decodeSectionCounted(fr.payload, 0, null);
+                defer cliH3.qdec.freeFields(sfields);
+                for (sfields) |f| {
+                    if (std.mem.eql(u8, f.name, ":status")) {
+                        postStatus = try std.fmt.parseInt(u16, f.value, 10);
+                    }
+                }
+            } else if (fr.frameType == 0x0) {
+                postRespBody = fr.payload;
+            }
+        }
+        try std.testing.expectEqual(@as(u16, 201), postStatus);
+        try std.testing.expectEqualStrings("{\"name\":\"zig-h3\",\"magic\":42}", postRespBody);
+    }
+
+    // 6. Request 4: PUT /upload with large multi-frame body (>4KB) on client bidi stream 12.
+    {
+        var cliQenc4 = h3qpack.Encoder.init(a);
+        defer cliQenc4.deinit();
+        var rs4 = h3conn.RequestStream{ .id = 12, .allocator = a, .qpack = &cliQenc4 };
+        const req4Head = try rs4.buildRequestHeaders("PUT", "https", "example.com", "/upload", &.{});
+        defer a.free(req4Head);
+
+        // Build a 4500-byte test body
+        const bigPayload = try a.alloc(u8, 4500);
+        defer a.free(bigPayload);
+        for (bigPayload, 0..) |*b, i| b.* = @intCast(i % 251);
+
+        // Send HEADERS first with fin=false
+        try sendH3Stream(client, 12, 0, req4Head, false, 518);
+        try pumpH3(client, server, 519);
+
+        // Send 4 DATA frames of ~1125 bytes each
+        var uploaded: usize = 0;
+        var putStreamOff: u64 = req4Head.len;
+        while (uploaded < bigPayload.len) {
+            const end = @min(uploaded + 1125, bigPayload.len);
+            const chunk = bigPayload[uploaded..end];
+            const isLast = end == bigPayload.len;
+            const dfr = try rs4.buildData(chunk);
+            defer a.free(dfr);
+            try sendH3Stream(client, 12, putStreamOff, dfr, isLast, 520 + @as(u64, @intCast(uploaded)));
+            putStreamOff += dfr.len;
+            uploaded = end;
+            try pumpH3(client, server, 521 + @as(u64, @intCast(uploaded)));
+        }
+
+        // Server receives stream 12, validates all DATA frames reconstruct into bigPayload
+        const got = H3LoopSink.srvBytes(12).?;
+        var off: usize = 0;
+        const frH = try h3frame.parseFrame(got, &off);
+        try std.testing.expectEqual(@as(u64, 0x1), frH.frameType);
+        const fields = try srvH3.qdec.decodeSectionCounted(frH.payload, 0, null);
+        defer srvH3.qdec.freeFields(fields);
+
+        var assembledBody = std.ArrayList(u8).empty;
+        defer assembledBody.deinit(a);
+        while (off < got.len) {
+            const dfr = try h3frame.parseFrame(got, &off);
+            if (dfr.frameType == 0x0) {
+                try assembledBody.appendSlice(a, dfr.payload);
+            }
+        }
+        try std.testing.expectEqualSlices(u8, bigPayload, assembledBody.items);
+
+        // Server responds with 200 and a 3000-byte streaming response
+        var srvQenc4 = h3qpack.Encoder.init(a);
+        defer srvQenc4.deinit();
+        var srs4 = h3conn.RequestStream{ .id = 12, .allocator = a, .qpack = &srvQenc4 };
+        const resp4Head = try srs4.buildResponseHeaders(200, &.{});
+        defer a.free(resp4Head);
+
+        const bigResp = try a.alloc(u8, 3000);
+        defer a.free(bigResp);
+        for (bigResp, 0..) |*b, i| b.* = @intCast((i + 13) % 251);
+
+        try sendH3Stream(server, 12, 0, resp4Head, false, 600);
+        try pumpH3(server, client, 601);
+
+        var srvStreamOff: u64 = resp4Head.len;
+        var srvSent: usize = 0;
+        while (srvSent < bigResp.len) {
+            const end = @min(srvSent + 1000, bigResp.len);
+            const chunk = bigResp[srvSent..end];
+            const isLast = end == bigResp.len;
+            const dfr = try srs4.buildData(chunk);
+            defer a.free(dfr);
+            try sendH3Stream(server, 12, srvStreamOff, dfr, isLast, 602 + @as(u64, @intCast(srvSent)));
+            srvStreamOff += dfr.len;
+            srvSent = end;
+            try pumpH3(server, client, 603 + @as(u64, @intCast(srvSent)));
+        }
+
+        const cliGot = H3LoopSink.cliBytes(12).?;
+        var cliOff: usize = 0;
+        _ = try h3frame.parseFrame(cliGot, &cliOff); // headers
+        var cliAssembled = std.ArrayList(u8).empty;
+        defer cliAssembled.deinit(a);
+        while (cliOff < cliGot.len) {
+            const fr = try h3frame.parseFrame(cliGot, &cliOff);
+            if (fr.frameType == 0x0) {
+                try cliAssembled.appendSlice(a, fr.payload);
+            }
+        }
+        try std.testing.expectEqualSlices(u8, bigResp, cliAssembled.items);
+    }
+
+    // 7. Request 5: DELETE /item/99 on client bidi stream 16 with body and unknown frame skipping.
+    {
+        var cliQenc5 = h3qpack.Encoder.init(a);
+        defer cliQenc5.deinit();
+        var rs5 = h3conn.RequestStream{ .id = 16, .allocator = a, .qpack = &cliQenc5 };
+        const req5Head = try rs5.buildRequestHeaders("DELETE", "https", "example.com", "/item/99", &.{});
+        defer a.free(req5Head);
+        const req5Data = try rs5.buildData("{\"reason\":\"test\"}");
+        defer a.free(req5Data);
+
+        // Synthesize an unknown extension frame (type 0xbeef, len 4) to ensure RFC 9114 7.2.8 compliance
+        var unkFrame: [16]u8 = undefined;
+        const unkHlen = try h3frame.encodeFrameHeader(&unkFrame, 0xbeef, 4);
+        @memcpy(unkFrame[unkHlen..][0..4], "test");
+        const unkTotal = unkHlen + 4;
+
+        var req5Wire = std.ArrayList(u8).empty;
+        defer req5Wire.deinit(a);
+        try req5Wire.appendSlice(a, req5Head);
+        try req5Wire.appendSlice(a, unkFrame[0..unkTotal]);
+        try req5Wire.appendSlice(a, req5Data);
+
+        try sendH3Stream(client, 16, 0, req5Wire.items, true, 700);
+        try pumpH3(client, server, 701);
+
+        const got = H3LoopSink.srvBytes(16).?;
+        var off: usize = 0;
+        const frH = try h3frame.parseFrame(got, &off);
+        try std.testing.expectEqual(@as(u64, 0x1), frH.frameType);
+        const fields = try srvH3.qdec.decodeSectionCounted(frH.payload, 0, null);
+        defer srvH3.qdec.freeFields(fields);
+        var delMethod: []const u8 = "";
+        for (fields) |f| {
+            if (std.mem.eql(u8, f.name, ":method")) delMethod = f.value;
+        }
+        try std.testing.expectEqualStrings("DELETE", delMethod);
+
+        // Unknown frame should be parsed and skipped cleanly
+        const frUnk = try h3frame.parseFrame(got, &off);
+        try std.testing.expectEqual(@as(u64, 0xbeef), frUnk.frameType);
+        try std.testing.expectEqualStrings("test", frUnk.payload);
+
+        // Following DATA frame arrives intact
+        const frD = try h3frame.parseFrame(got, &off);
+        try std.testing.expectEqual(@as(u64, 0x0), frD.frameType);
+        try std.testing.expectEqualStrings("{\"reason\":\"test\"}", frD.payload);
+    }
+
+    // 8. Graceful shutdown: GOAWAY on the server control stream.
     var idbuf: [8]u8 = undefined;
     const idlen = try varint.encode(&idbuf, 4);
     var go: [32]u8 = undefined;
