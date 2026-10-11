@@ -1,7 +1,7 @@
 //! Production metrics registry: atomics, latency histograms, and Prometheus text exposition.
 
 const std = @import("std");
-pub const snapshotMod = @import("snapshot.zig");
+pub const snapshotMod = @import("metricsSnapshot.zig");
 pub const MetricsSnapshot = snapshotMod.MetricsSnapshot;
 pub const ServerSnapshot = snapshotMod.ServerSnapshot;
 pub const ClientSnapshot = snapshotMod.ClientSnapshot;

@@ -23,9 +23,9 @@ const Router = routerMod.Router;
 const Response = routerMod.Response;
 const Context = routerMod.Context;
 const Method = @import("../../common/method.zig").Method;
-const openapi = @import("../openapi/spec.zig");
+const openapi = @import("../openApi/openApiSpec.zig");
 const assets = @import("assets.zig");
-const metaMod = @import("../router/metadata.zig");
+const metaMod = @import("../router/routeMetadata.zig");
 
 pub const SwaggerConfig = struct {
     enabled: bool = true,

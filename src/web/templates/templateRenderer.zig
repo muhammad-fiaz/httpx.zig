@@ -11,9 +11,9 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const contextMod = @import("context.zig");
-const parserMod = @import("parser.zig");
-const errMod = @import("error.zig");
+const contextMod = @import("templateContext.zig");
+const parserMod = @import("templateParser.zig");
+const errMod = @import("templateError.zig");
 const clockMod = @import("../../common/clock.zig");
 
 pub const Value = contextMod.Value;

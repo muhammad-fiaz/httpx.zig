@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const errMod = @import("error.zig");
+const errMod = @import("templateError.zig");
 const ts = @import("treesitter");
 pub const TemplateError = errMod.TemplateError;
 pub const SourceError = errMod.SourceError;

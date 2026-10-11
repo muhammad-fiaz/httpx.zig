@@ -15,7 +15,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ast = @import("ast.zig");
-const parserMod = @import("parser.zig");
+const parserMod = @import("graphQlParser.zig");
 
 pub const TypeKind = enum {
     scalar,

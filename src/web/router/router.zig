@@ -11,7 +11,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const mimeMod = @import("../../utils/mime.zig");
 const Method = @import("../../common/method.zig").Method;
-const patternMod = @import("pattern.zig");
+const patternMod = @import("routePattern.zig");
 const Pattern = patternMod.Pattern;
 const SegmentKind = patternMod.SegmentKind;
 const parseMod = @import("../../common/parse.zig");
@@ -562,7 +562,7 @@ pub const ParamError = error{
     UnsupportedField,
 };
 
-const metaMod = @import("metadata.zig");
+const metaMod = @import("routeMetadata.zig");
 
 /// A statically declared route definition for compile-time or declarative route tables.
 pub const RouteDecl = struct {

@@ -29,7 +29,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const uri = @import("../../common/uri.zig");
-const patternMod = @import("../router/pattern.zig");
+const patternMod = @import("../router/routePattern.zig");
 
 pub const UrlStyle = enum { clean, extension, both };
 

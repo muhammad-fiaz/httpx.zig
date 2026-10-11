@@ -21,7 +21,7 @@ pub const Entry = struct {
     value: Value,
 };
 
-const parserMod = @import("parser.zig");
+const parserMod = @import("templateParser.zig");
 
 /// Tagged union representing dynamic values inside template evaluation.
 /// `.missing` marks an unresolvable lookup (distinct from explicit null):

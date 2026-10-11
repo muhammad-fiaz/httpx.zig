@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const parserMod = @import("parser.zig");
+const parserMod = @import("templateParser.zig");
 pub const TemplateAst = parserMod.TemplateAst;
 
 pub const CachedTemplate = struct {

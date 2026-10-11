@@ -26,12 +26,12 @@ const Response = routerMod.Response;
 const uri = @import("../../common/uri.zig");
 const assetsMod = @import("../assets/assetStore.zig");
 const templatesMod = @import("../templates/templates.zig");
-const staticFiles = @import("../staticFiles/serve.zig");
-const spa = @import("../spa/serve.zig");
-const watcherMod = @import("../watcher/backend.zig");
-const reload = @import("../watcher/client.zig");
+const staticFiles = @import("../staticFiles/staticFileServer.zig");
+const spa = @import("../spa/spaServer.zig");
+const watcherMod = @import("../watcher/watcherBackend.zig");
+const reload = @import("../watcher/fileWatcher.zig");
 const Server = @import("../../server/lifecycle.zig").Server;
-const routesMod = @import("routes.zig");
+const routesMod = @import("siteRoutes.zig");
 
 pub const TrailingSlash = routerMod.TrailingSlash;
 

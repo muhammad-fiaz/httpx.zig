@@ -81,7 +81,7 @@ pub fn verifyCsrfToken(a: []const u8, b: []const u8) bool {
 }
 
 // Rate limiting
-pub const rateLimit = @import("rateLimit.zig");
+pub const rateLimit = @import("rateLimiter.zig");
 pub const RateLimiter = rateLimit.RateLimiter;
 pub const RateLimitError = rateLimit.RateLimitError;
 pub const RateLimitDimension = rateLimit.RateLimitDimension;

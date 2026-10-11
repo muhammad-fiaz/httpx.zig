@@ -16,8 +16,8 @@ const Context = routerMod.Context;
 const Response = routerMod.Response;
 const Router = routerMod.Router;
 const Method = @import("../../common/method.zig").Method;
-const metaMod = @import("../router/metadata.zig");
-const patternMod = @import("../router/pattern.zig");
+const metaMod = @import("../router/routeMetadata.zig");
+const patternMod = @import("../router/routePattern.zig");
 pub const Info = @import("../../common/version.zig").Info;
 
 const PathGroup = struct {
@@ -592,7 +592,7 @@ test "operation ids are de-duplicated on sanitizer collision" {
 
 // Metadata-driven generation ("define once" verification)
 
-const tmeta = @import("../router/metadata.zig");
+const tmeta = @import("../router/routeMetadata.zig");
 
 const UserSchema = tmeta.Schema{
     .object = &.{

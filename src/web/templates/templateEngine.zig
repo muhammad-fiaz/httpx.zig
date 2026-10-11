@@ -5,12 +5,12 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const loaderMod = @import("loader.zig");
-const cacheMod = @import("cache.zig");
-const parserMod = @import("parser.zig");
-const rendererMod = @import("renderer.zig");
-const contextMod = @import("context.zig");
-const errMod = @import("error.zig");
+const loaderMod = @import("templateLoader.zig");
+const cacheMod = @import("templateCache.zig");
+const parserMod = @import("templateParser.zig");
+const rendererMod = @import("templateRenderer.zig");
+const contextMod = @import("templateContext.zig");
+const errMod = @import("templateError.zig");
 
 const sync = @import("../../common/sync.zig");
 

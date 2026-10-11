@@ -1117,7 +1117,7 @@ pub const Client = struct {
         defer if (multipartBuf) |b| self.allocator.free(b);
         if (bodyKind == .none and @hasField(@TypeOf(opts), "multipart")) {
             const mp = opts.multipart;
-            const mpEncoder = @import("../web/multipart/encoder.zig");
+            const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
             var boundaryBuf: [32]u8 = undefined;
             const boundary = mpEncoder.generateBoundary(&boundaryBuf);
             var ctBuf: [128]u8 = undefined;

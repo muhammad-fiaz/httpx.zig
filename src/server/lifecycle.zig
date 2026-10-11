@@ -26,14 +26,14 @@ const Method = @import("../common/method.zig").Method;
 const docs = @import("../web/docs/docs.zig");
 const httpVersion = @import("../common/httpVersion.zig");
 pub const HttpVersion = httpVersion.HttpVersion;
-const watcherMod = @import("../web/watcher/backend.zig");
-const reload = @import("../web/watcher/client.zig");
+const watcherMod = @import("../web/watcher/watcherBackend.zig");
+const reload = @import("../web/watcher/fileWatcher.zig");
 const udpMod = @import("../sockets/udp.zig");
 const templatesMod = @import("../web/templates/templates.zig");
 const tlsServerMod = @import("../protocols/tls/tlsServer.zig");
 const fsMod = @import("../utils/fs.zig");
 const alpnMod = @import("../protocols/tls/alpn.zig");
-const metricsMod = @import("../web/metrics/registry.zig");
+const metricsMod = @import("../web/metrics/metricsRegistry.zig");
 const tlsSessionMod = @import("../protocols/tls/tlsSession.zig");
 const quicTransport = @import("../protocols/quic/transport.zig");
 const quicConn = @import("../protocols/quic/connection.zig");
@@ -563,7 +563,7 @@ pub const Server = struct {
 
     /// Mounts a directory of static files under a URL prefix.
     pub fn static(self: *Server, mountPath: []const u8, dirPath: []const u8) !void {
-        const staticMod = @import("../web/staticFiles/serve.zig");
+        const staticMod = @import("../web/staticFiles/staticFileServer.zig");
         try staticMod.register(&self.router, .{
             .mount = mountPath,
             .root = dirPath,
@@ -572,7 +572,7 @@ pub const Server = struct {
 
     /// Mounts a Single Page Application (SPA) with index fallback.
     pub fn spa(self: *Server, mountPath: []const u8, dirPath: []const u8) !void {
-        const spaMod = @import("../web/spa/serve.zig");
+        const spaMod = @import("../web/spa/spaServer.zig");
         try spaMod.register(&self.router, .{
             .mount = mountPath,
             .root = dirPath,
@@ -1802,8 +1802,8 @@ fn helloHandler(ctx: *Context) anyerror!Response {
 }
 
 test "template route renders through tree-sitter pipeline end to end" {
-    const tmplEngineMod = @import("../web/templates/engine.zig");
-    const tmplRendererMod = @import("../web/templates/renderer.zig");
+    const tmplEngineMod = @import("../web/templates/templateEngine.zig");
+    const tmplRendererMod = @import("../web/templates/templateRenderer.zig");
     const a = std.testing.allocator;
     var ctx = tcp.IoContext.init(a) catch return;
     defer ctx.deinit();

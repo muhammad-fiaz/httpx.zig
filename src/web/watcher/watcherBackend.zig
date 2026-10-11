@@ -13,12 +13,12 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const clock = @import("../../common/clock.zig");
 const sync = @import("../../common/sync.zig");
-const staticMod = @import("../staticFiles/serve.zig");
-const events = @import("events.zig");
+const staticMod = @import("../staticFiles/staticFileServer.zig");
+const events = @import("watcherEvents.zig");
 
-const windows = @import("windows.zig");
-const linux = @import("linux.zig");
-const macos = @import("macos.zig");
+const windows = @import("windowsWatcher.zig");
+const linux = @import("linuxWatcher.zig");
+const macos = @import("macosWatcher.zig");
 
 pub const WatchEventKind = events.WatchEventKind;
 pub const WatchEvent = events.WatchEvent;

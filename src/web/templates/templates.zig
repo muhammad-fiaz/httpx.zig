@@ -1,12 +1,12 @@
 //! Public facade for the HTTPX native template engine subsystem.
 
-pub const engine = @import("engine.zig");
-pub const context = @import("context.zig");
-pub const parser = @import("parser.zig");
-pub const renderer = @import("renderer.zig");
-pub const loader = @import("loader.zig");
-pub const cache = @import("cache.zig");
-pub const errors = @import("error.zig");
+pub const engine = @import("templateEngine.zig");
+pub const context = @import("templateContext.zig");
+pub const parser = @import("templateParser.zig");
+pub const renderer = @import("templateRenderer.zig");
+pub const loader = @import("templateLoader.zig");
+pub const cache = @import("templateCache.zig");
+pub const errors = @import("templateError.zig");
 
 pub const Engine = engine.Engine;
 pub const Config = engine.Config;

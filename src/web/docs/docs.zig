@@ -11,7 +11,7 @@
 //! // GET /scalar        -> Scalar (opt-in via config)
 //! ```
 
-pub const openapi = @import("../openapi/spec.zig");
+pub const openapi = @import("../openApi/openApiSpec.zig");
 pub const ui = @import("ui.zig");
 pub const assets = @import("assets.zig");
 

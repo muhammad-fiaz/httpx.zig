@@ -8,9 +8,9 @@
 //! - GraphiQL 5.4.0 UI integration via `httpx.docs` or `httpx.graphql.mount`
 
 pub const ast = @import("ast.zig");
-pub const parser = @import("parser.zig");
-pub const schema = @import("schema.zig");
-pub const server = @import("server.zig");
+pub const parser = @import("graphQlParser.zig");
+pub const schema = @import("graphQlSchema.zig");
+pub const server = @import("graphQlServer.zig");
 
 pub const Schema = schema.Schema;
 pub const SchemaConfig = schema.SchemaConfig;

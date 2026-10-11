@@ -33,7 +33,7 @@ pub fn parseApiKey(headerValue: []const u8, scheme: []const u8) ?[]const u8 {
 
 /// Constant-time token comparison.
 pub fn verifyToken(actual: []const u8, expected: []const u8) bool {
-    return @import("basic.zig").ctEql(actual, expected);
+    return @import("basicAuth.zig").ctEql(actual, expected);
 }
 
 /// Convenience: authorize a request context against one expected Bearer token.

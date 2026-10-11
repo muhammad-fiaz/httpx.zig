@@ -1713,7 +1713,7 @@ pub fn postMultipartFile(
     };
     defer a.free(fileData);
 
-    const mpEncoder = @import("../web/multipart/encoder.zig");
+    const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
 
     // Content-Type header value.
     var ctBuf: [128]u8 = undefined;
