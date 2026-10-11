@@ -18,13 +18,13 @@
 //! ```
 
 const std = @import("std");
-const routerMod = @import("router/router.zig");
+const routerMod = @import("../router/router.zig");
 const Context = routerMod.Context;
 const Response = routerMod.Response;
 const Router = routerMod.Router;
-const Method = @import("../common/method.zig").Method;
-const Status = @import("../common/status.zig").Status;
-const metaMod = @import("router/metadata.zig");
+const Method = @import("../../common/method.zig").Method;
+const Status = @import("../../common/status.zig").Status;
+const metaMod = @import("../router/metadata.zig");
 const Schema = metaMod.Schema;
 const Param = metaMod.Param;
 const Location = metaMod.Location;
@@ -338,7 +338,7 @@ test "REST endpoint execution and automatic OpenAPI spec derivation" {
     try std.testing.expectEqual(@as(usize, 2), router.entries().len);
 
     // 2. Verify OpenAPI spec generation reflects the REST endpoints
-    const openapi = @import("openapi/spec.zig");
+    const openapi = @import("../openapi/spec.zig");
     const specJson = try openapi.generate(&router, .{
         .title = "REST Test API",
         .version = "1.0.0",

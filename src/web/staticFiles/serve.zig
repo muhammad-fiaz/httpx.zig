@@ -651,7 +651,7 @@ pub fn shouldSpaFallback(
 
 // serving
 
-fn respondWithEmbedded(ctx: *Context, st: *State, asset: @import("../assets.zig").Asset) anyerror!Response {
+fn respondWithEmbedded(ctx: *Context, st: *State, asset: @import("../assets/assetStore.zig").Asset) anyerror!Response {
     const a = ctx.allocator;
     const isHead = ctx.method == .HEAD;
 
@@ -719,7 +719,7 @@ fn servePath(ctx: *Context, st: *State, rawUrlPath: []const u8) anyerror!Respons
         std.fmt.allocPrint(a, "/{s}", .{rawUrlPath}) catch return Allocator.Error.OutOfMemory;
 
     // 1. Check embedded assets registry first for zero disk I/O single-file deployment
-    const assetsMod = @import("../assets.zig");
+    const assetsMod = @import("../assets/assetStore.zig");
     const cleanRel = if (formattedPath.len > 0 and formattedPath[0] == '/') formattedPath[1..] else formattedPath;
     if (assetsMod.getEmbedded(cleanRel) orelse (if (cleanRel.len == 0) assetsMod.getEmbedded(st.index) else null)) |embedded| {
         return respondWithEmbedded(ctx, st, embedded);
@@ -935,7 +935,7 @@ test "etag matching handles lists, star, and weak forms" {
 
 test "embedded asset serves byte ranges like filesystem files" {
     const a = std.testing.allocator;
-    const assetsMod = @import("../assets.zig");
+    const assetsMod = @import("../assets/assetStore.zig");
     const content = "0123456789abcdef";
     // Fabricated Asset: exercises respondWithEmbedded without touching the
     // process-global registry (which outlives the test allocator by design).

@@ -63,7 +63,7 @@ pub const Loader = struct {
     /// first (single-file deployment), then the filesystem.
     pub fn load(self: Loader, allocator: Allocator, name: []const u8) ![]u8 {
         // 1. Check embedded assets registry first for single-file deployment
-        const assetsMod = @import("../assets.zig");
+        const assetsMod = @import("../assets/assetStore.zig");
         if (assetsMod.getEmbedded(name)) |embedded| {
             if (embedded.content.len > self.maxFileSize) return TemplateError.SizeLimitExceeded;
             return allocator.dupe(u8, embedded.content);

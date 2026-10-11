@@ -10,8 +10,8 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const mime = @import("../utils/mime.zig");
-const sync = @import("../common/sync.zig");
+const mime = @import("../../utils/mime.zig");
+const sync = @import("../../common/sync.zig");
 
 /// A single web asset (HTML, template, CSS, JS, image, font, etc.).
 pub const Asset = struct {
