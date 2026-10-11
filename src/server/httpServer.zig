@@ -769,15 +769,10 @@ pub const Server = struct {
         self.h3Stop.store(true, .release);
         if (self.h3Pump) |p| p.stop();
 
-        // On Windows (Zig 0.16), the AFD-backed listener uses IOCP for accept().
-        // Closing the listening socket while a thread is blocked in netAcceptWindows
-        // returns STATUS_CANCELLED, which the stdlib marks `unreachable` → panic.
-        // tcp.wakeListenerPort() connects a dummy socket to the port instead,
-        // waking accept() naturally. The accept loop then sees stop==true and exits.
-        // On POSIX, wakeListenerPort is a no-op and we close the listener directly.
-        if (self.inAccept.load(.acquire)) {
-            tcp.wakeListenerPort(self.listener.localPort());
-        }
+        // Wake any blocked accept call on the listener socket.
+        // Connecting a loopback dummy socket wakes accept() cleanly across all platforms
+        // (Windows IOCP, macOS kqueue, Linux epoll) so the loop unblocks and checks stopFlag.
+        tcp.wakeListenerPort(self.listener.localPort());
         if (@import("builtin").os.tag != .windows) {
             self.listener.close(self.io);
         }
