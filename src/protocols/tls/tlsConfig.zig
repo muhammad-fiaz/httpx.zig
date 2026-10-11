@@ -11,10 +11,10 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const alpn = @import("alpn.zig");
 pub const certMod = @import("certificate.zig");
-pub const keyMod = @import("key.zig");
+pub const keyMod = @import("tlsKey.zig");
 pub const trustMod = @import("trustStore.zig");
-pub const errorsMod = @import("errors.zig");
-pub const sessionMod = @import("session.zig");
+pub const errorsMod = @import("tlsErrors.zig");
+pub const sessionMod = @import("tlsSession.zig");
 
 pub const CertificateChain = certMod.CertificateChain;
 pub const X509Certificate = certMod.X509Certificate;

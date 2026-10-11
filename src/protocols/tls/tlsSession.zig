@@ -27,7 +27,7 @@ const ChaCha20Poly1305 = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 const clockMod = @import("../../common/clock.zig");
 const syncMod = @import("../../common/sync.zig");
-const handshakeMod = @import("handshake.zig");
+const handshakeMod = @import("tlsHandshake.zig");
 
 /// Shared Io for tests. `Threaded.global_single_threaded` is documented as
 /// debug-only, but in tests it is the simplest real implementation and it

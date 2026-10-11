@@ -16,19 +16,19 @@
 
 const alpnMod = @import("alpn.zig");
 const certificateMod = @import("certificate.zig");
-const clientMod = @import("client.zig");
-const configMod = @import("config.zig");
-const engineMod = @import("engine.zig");
-const errorsMod = @import("errors.zig");
-const handshakeMod = @import("handshake.zig");
-const keyMod = @import("key.zig");
+const clientMod = @import("tlsClient.zig");
+const configMod = @import("tlsConfig.zig");
+const engineMod = @import("tlsEngine.zig");
+const errorsMod = @import("tlsErrors.zig");
+const handshakeMod = @import("tlsHandshake.zig");
+const keyMod = @import("tlsKey.zig");
 const quicTlsMod = @import("quicTls.zig");
-const recordMod = @import("record.zig");
-const serverMod = @import("server.zig");
-const sessionMod = @import("session.zig");
-const transportMod = @import("transport.zig");
+const recordMod = @import("tlsRecord.zig");
+const serverMod = @import("tlsServer.zig");
+const sessionMod = @import("tlsSession.zig");
+const transportMod = @import("tlsTransport.zig");
 const trustStoreMod = @import("trustStore.zig");
-const verifyMod = @import("verify.zig");
+const verifyMod = @import("certificateVerification.zig");
 
 /// TLS client owner: configuration, trust and identity, connection factory.
 pub const Client = clientMod.Client;

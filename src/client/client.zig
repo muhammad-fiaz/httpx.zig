@@ -27,7 +27,7 @@ const Method = @import("../common/method.zig").Method;
 const req = @import("request.zig");
 const Pool = @import("pool.zig").Pool;
 const PoolConfig = @import("pool.zig").PoolConfig;
-const tlsSessionCache = @import("../protocols/tls/session.zig");
+const tlsSessionCache = @import("../protocols/tls/tlsSession.zig");
 const dnsCache = @import("../net/dns/cache.zig");
 const clock = @import("../common/clock.zig");
 const HttpVersion = @import("../common/httpVersion.zig").HttpVersion;
@@ -1904,7 +1904,7 @@ test "client get over https negotiates h2 end to end" {
     defer ctx.deinit();
 
     const h2t = @import("../protocols/http2/transport.zig");
-    const tlsServerMod = @import("../protocols/tls/server.zig");
+    const tlsServerMod = @import("../protocols/tls/tlsServer.zig");
     const certPem = @embedFile("../protocols/tls/testdata/localhostCert.pem");
     const keyPem = @embedFile("../protocols/tls/testdata/localhostKey.pem");
 
@@ -2102,7 +2102,7 @@ test "client pools h2-tls sessions across sequential requests" {
     defer ctx.deinit();
 
     const h2t = @import("../protocols/http2/transport.zig");
-    const tlsServerMod = @import("../protocols/tls/server.zig");
+    const tlsServerMod = @import("../protocols/tls/tlsServer.zig");
     const certPem = @embedFile("../protocols/tls/testdata/localhostCert.pem");
     const keyPem = @embedFile("../protocols/tls/testdata/localhostKey.pem");
 
@@ -2188,7 +2188,7 @@ test "client resumes h2-tls across fresh handshakes via session cache" {
     defer ctx.deinit();
 
     const h2t = @import("../protocols/http2/transport.zig");
-    const tlsServerMod = @import("../protocols/tls/server.zig");
+    const tlsServerMod = @import("../protocols/tls/tlsServer.zig");
     const certPem = @embedFile("../protocols/tls/testdata/localhostCert.pem");
     const keyPem = @embedFile("../protocols/tls/testdata/localhostKey.pem");
 
@@ -2474,7 +2474,7 @@ test "client get over mtls presents certificate through high-level api" {
                 return;
             };
             defer conn.close();
-            const tlsServerMod = @import("../protocols/tls/server.zig");
+            const tlsServerMod = @import("../protocols/tls/tlsServer.zig");
             var srv = tlsServerMod.Server.init(std.heap.page_allocator, io2, .{
                 .certificatePem = certPem,
                 .privateKeyPem = keyPem,
@@ -2732,7 +2732,7 @@ test "client get over http3 with 0-rtt early data resumes session" {
     const h3conn = @import("../protocols/http3/connection.zig");
     const h3frame = @import("../protocols/http3/frame.zig");
     const h3qpack = @import("../protocols/http3/qpack.zig");
-    const sessionMod = @import("../protocols/tls/session.zig");
+    const sessionMod = @import("../protocols/tls/tlsSession.zig");
     const certPem = @embedFile("../protocols/tls/testdata/localhostCert.pem");
     const keyPem = @embedFile("../protocols/tls/testdata/localhostKey.pem");
 

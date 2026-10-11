@@ -13,9 +13,9 @@ const crypto = std.crypto;
 const Certificate = crypto.Certificate;
 const certMod = @import("certificate.zig");
 const trustStoreMod = @import("trustStore.zig");
-const transportMod = @import("transport.zig");
+const transportMod = @import("tlsTransport.zig");
 const clockMod = @import("../../common/clock.zig");
-const errorsMod = @import("errors.zig");
+const errorsMod = @import("tlsErrors.zig");
 pub const TlsError = errorsMod.TlsError;
 
 /// Verifies a presented server chain (DER list) against the configured

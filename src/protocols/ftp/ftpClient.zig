@@ -18,8 +18,8 @@ const Allocator = std.mem.Allocator;
 const tcp = @import("../../sockets/tcp.zig");
 const addressMod = @import("../../net/address.zig");
 const netResolve = @import("../../net/resolve.zig");
-const tlsClientMod = @import("../tls/client.zig");
-const tlsTransport = @import("../tls/transport.zig");
+const tlsClientMod = @import("../tls/tlsClient.zig");
+const tlsTransport = @import("../tls/tlsTransport.zig");
 
 pub const Options = struct {
     host: []const u8,
@@ -825,7 +825,7 @@ const FtpsDownloader = struct {
 };
 
 test "ftps loopback login/list/upload/download over AUTH TLS and PROT P" {
-    const ftpServerMod = @import("server.zig");
+    const ftpServerMod = @import("ftpServer.zig");
     const a = std.testing.allocator;
     var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
@@ -881,7 +881,7 @@ test "ftps loopback login/list/upload/download over AUTH TLS and PROT P" {
 }
 
 test "ftps fails closed against a plaintext server" {
-    const ftpServerMod = @import("server.zig");
+    const ftpServerMod = @import("ftpServer.zig");
     const a = std.testing.allocator;
     var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();

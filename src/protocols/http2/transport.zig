@@ -16,9 +16,9 @@ const clock = @import("../../common/clock.zig");
 const sessionMod = @import("connection.zig");
 const Session = sessionMod.Session;
 const hpack = @import("hpack.zig");
-const tlsClientMod = @import("../tls/client.zig");
-const tlsServerMod = @import("../tls/server.zig");
-const tlsSessionMod = @import("../tls/session.zig");
+const tlsClientMod = @import("../tls/tlsClient.zig");
+const tlsServerMod = @import("../tls/tlsServer.zig");
+const tlsSessionMod = @import("../tls/tlsSession.zig");
 pub const Error = error{
     ProtocolViolation,
     HandshakeFailed,

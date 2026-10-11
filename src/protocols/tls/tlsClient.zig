@@ -14,20 +14,20 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const engineMod = @import("engine.zig");
-const handshakeMod = @import("handshake.zig");
-const recordMod = @import("record.zig");
+const engineMod = @import("tlsEngine.zig");
+const handshakeMod = @import("tlsHandshake.zig");
+const recordMod = @import("tlsRecord.zig");
 const alpnMod = @import("alpn.zig");
 const certMod = @import("certificate.zig");
-const keyMod = @import("key.zig");
-const verifyMod = @import("verify.zig");
+const keyMod = @import("tlsKey.zig");
+const verifyMod = @import("certificateVerification.zig");
 const trustStoreMod = @import("trustStore.zig");
 const clockMod = @import("../../common/clock.zig");
 const addressMod = @import("../../net/address.zig");
 const tcp = @import("../../sockets/tcp.zig");
-const serverMod = @import("server.zig");
-const transportMod = @import("transport.zig");
-const sessionMod = @import("session.zig");
+const serverMod = @import("tlsServer.zig");
+const transportMod = @import("tlsTransport.zig");
+const sessionMod = @import("tlsSession.zig");
 
 // Errors
 

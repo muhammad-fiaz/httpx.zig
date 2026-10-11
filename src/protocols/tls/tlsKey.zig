@@ -7,7 +7,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const crypto = std.crypto;
 const certMod = @import("certificate.zig");
-const errorsMod = @import("errors.zig");
+const errorsMod = @import("tlsErrors.zig");
 pub const TlsError = errorsMod.TlsError;
 
 pub const KeyType = enum {

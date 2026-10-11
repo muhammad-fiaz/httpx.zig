@@ -33,11 +33,11 @@ const Connection = connMod.Connection;
 const SpaceKind = connMod.SpaceKind;
 const transportMod = @import("transport.zig");
 const Endpoint = transportMod.Endpoint;
-const tlsEngine = @import("../tls/engine.zig");
+const tlsEngine = @import("../tls/tlsEngine.zig");
 const qtls = @import("../tls/quicTls.zig");
-const ths = @import("../tls/handshake.zig");
-const verifyMod = @import("../tls/verify.zig");
-const transportTls = @import("../tls/transport.zig");
+const ths = @import("../tls/tlsHandshake.zig");
+const verifyMod = @import("../tls/certificateVerification.zig");
+const transportTls = @import("../tls/tlsTransport.zig");
 const packetMod = @import("packet.zig");
 const frames = @import("frames.zig");
 const paramsMod = @import("transportParameters.zig");
@@ -45,7 +45,7 @@ const quicVarint = @import("varint.zig");
 const clockMod = @import("../../common/clock.zig");
 const addressMod = @import("../../net/address.zig");
 
-const sessionMod = @import("../tls/session.zig");
+const sessionMod = @import("../tls/tlsSession.zig");
 
 pub const ClientConfig = struct {
     /// Server hostname: SNI (DNS names) + chain hostname check + ticket binding.

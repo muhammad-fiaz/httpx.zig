@@ -37,19 +37,19 @@ const Aes128Gcm = std.crypto.aead.aesGcm.Aes128Gcm;
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-const recordMod = @import("record.zig");
-const handshakeMod = @import("handshake.zig");
+const recordMod = @import("tlsRecord.zig");
+const handshakeMod = @import("tlsHandshake.zig");
 const Transcript = handshakeMod.Transcript;
 const HashLen = handshakeMod.HashLen;
 const EcdsaP256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const P256 = std.crypto.ecc.P256;
 const certMod = @import("certificate.zig");
-const verifyMod = @import("verify.zig");
+const verifyMod = @import("certificateVerification.zig");
 const trustStoreMod = @import("trustStore.zig");
 const clockMod = @import("../../common/clock.zig");
 
 const alpnMod = @import("alpn.zig");
-const sessionMod = @import("session.zig");
+const sessionMod = @import("tlsSession.zig");
 const quicTls = @import("quicTls.zig");
 
 // Random helper — OS CSPRNG when available, otherwise deterministic PRNG

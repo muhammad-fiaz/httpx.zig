@@ -12,7 +12,7 @@ const Allocator = std.mem.Allocator;
 const crypto = std.crypto;
 const Certificate = crypto.Certificate;
 const Bundle = Certificate.Bundle;
-const errorsMod = @import("errors.zig");
+const errorsMod = @import("tlsErrors.zig");
 pub const TlsError = errorsMod.TlsError;
 const clock = @import("../../common/clock.zig");
 

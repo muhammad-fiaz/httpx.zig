@@ -451,12 +451,12 @@ pub const AlpnProtocol = tls.AlpnProtocol;
 
 // FTP (isolated protocol subsystem)
 pub const ftp = struct {
-    const ftpClientMod = @import("protocols/ftp/client.zig");
+    const ftpClientMod = @import("protocols/ftp/ftpClient.zig");
     pub const Client = ftpClientMod.Client;
     pub const Options = ftpClientMod.Options;
     pub const Reply = ftpClientMod.Reply;
     pub const FtpError = ftpClientMod.FtpError;
-    const ftpServer = @import("protocols/ftp/server.zig");
+    const ftpServer = @import("protocols/ftp/ftpServer.zig");
     pub const Server = ftpServer.Server;
     pub const Config = ftpServer.Config;
     pub const Callbacks = ftpServer.Callbacks;

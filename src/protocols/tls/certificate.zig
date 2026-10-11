@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 const crypto = std.crypto;
 const Certificate = crypto.Certificate;
 const derMod = Certificate.der;
-const errorsMod = @import("errors.zig");
+const errorsMod = @import("tlsErrors.zig");
 pub const TlsError = errorsMod.TlsError;
 
 /// A single X.509 Certificate with raw DER representation and parsed metadata.

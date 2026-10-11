@@ -30,7 +30,7 @@ const Response = @import("request.zig").Response;
 const req = @import("request.zig");
 const clientNs = @import("client.zig");
 const Client = clientNs.Client;
-const ftpClientMod = @import("../protocols/ftp/client.zig");
+const ftpClientMod = @import("../protocols/ftp/ftpClient.zig");
 const serveMod = @import("../web/staticFiles/serve.zig");
 const cFs = serveMod.cFs;
 
