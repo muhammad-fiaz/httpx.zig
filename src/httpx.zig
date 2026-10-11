@@ -321,6 +321,7 @@ pub const Headers = headers.Headers;
 pub const CookieJar = cookies.Jar;
 pub const ConnectionPool = pool.Pool;
 pub const PoolConfig = pool.PoolConfig;
+pub const RequestBuilder = Client.RequestBuilder;
 
 // Zero-config client functions & canonical HTTP verbs
 pub const fetch = @import("client/httpClient.zig").globalFetch;

@@ -629,6 +629,93 @@ pub const Client = struct {
         });
     }
 
+    /// Fluent, type-safe RequestBuilder chained builder.
+    pub fn requestBuilder(self: *Client, m: Method, url: []const u8) RequestBuilder {
+        return RequestBuilder.init(self, m, url);
+    }
+
+    pub const RequestBuilder = struct {
+        client: *Client,
+        method: Method,
+        url: []const u8,
+        headersList: std.ArrayList(req.Header),
+        queryList: std.ArrayList(req.Header),
+        bodyBytes: ?[]const u8 = null,
+        jsonAllocated: ?[]u8 = null,
+        timeoutMs: ?u64 = null,
+        bearerAuth: ?[]const u8 = null,
+        basicAuth: ?[]const u8 = null,
+
+        pub fn init(client: *Client, m: Method, url: []const u8) RequestBuilder {
+            return .{
+                .client = client,
+                .method = m,
+                .url = url,
+                .headersList = std.ArrayList(req.Header).empty,
+                .queryList = std.ArrayList(req.Header).empty,
+            };
+        }
+
+        pub fn deinit(self: *RequestBuilder) void {
+            if (self.jsonAllocated) |j| self.client.allocator.free(j);
+            self.headersList.deinit(self.client.allocator);
+            self.queryList.deinit(self.client.allocator);
+        }
+
+        pub fn header(self: *RequestBuilder, name: []const u8, value: []const u8) !*RequestBuilder {
+            try self.headersList.append(self.client.allocator, .{ .name = name, .value = value });
+            return self;
+        }
+
+        pub fn query(self: *RequestBuilder, name: []const u8, value: []const u8) !*RequestBuilder {
+            try self.queryList.append(self.client.allocator, .{ .name = name, .value = value });
+            return self;
+        }
+
+        pub fn timeout(self: *RequestBuilder, ms: u64) *RequestBuilder {
+            self.timeoutMs = ms;
+            return self;
+        }
+
+        pub fn bearer(self: *RequestBuilder, tok: []const u8) *RequestBuilder {
+            self.bearerAuth = tok;
+            return self;
+        }
+
+        pub fn basic(self: *RequestBuilder, creds: []const u8) *RequestBuilder {
+            self.basicAuth = creds;
+            return self;
+        }
+
+        pub fn body(self: *RequestBuilder, b: []const u8) *RequestBuilder {
+            self.bodyBytes = b;
+            return self;
+        }
+
+        pub fn json(self: *RequestBuilder, value: anytype) !*RequestBuilder {
+            if (self.jsonAllocated) |j| {
+                self.client.allocator.free(j);
+                self.jsonAllocated = null;
+            }
+            const jBytes = try std.json.Stringify.valueAlloc(self.client.allocator, value, .{});
+            self.jsonAllocated = jBytes;
+            self.bodyBytes = jBytes;
+            _ = try self.header("content-type", "application/json");
+            return self;
+        }
+
+        pub fn send(self: *RequestBuilder) !Response {
+            return self.client.doRequestWithOverride(self.method, self.url, .{
+                .headers = self.headersList.items,
+                .query = self.queryList.items,
+                .body = self.bodyBytes orelse "",
+                .timeoutMs = self.timeoutMs,
+                .bearerAuth = self.bearerAuth,
+                .basicAuth = self.basicAuth,
+            });
+        }
+    };
+
     /// Safely updates an executable or asset on disk with rollback preservation.
     pub fn updateFile(self: *Client, url: []const u8, opts: anytype) DownloadError!DownloadResult {
         const updateOptions: UpdateOptions = if (@TypeOf(opts) == UpdateOptions) opts else blk: {
@@ -2889,4 +2976,34 @@ test "client get over http3 with 0-rtt early data resumes session" {
     client.deinit();
     th.join();
     try std.testing.expect(result == null);
+}
+
+test "RequestBuilder fluent API constructs and validates request" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = Client.init(a, io, .{});
+    defer client.deinit();
+
+    var builder = client.requestBuilder(.POST, "http://127.0.0.1:8080/test");
+    defer builder.deinit();
+
+    _ = try builder.header("X-Custom-Header", "Value123");
+    _ = try builder.query("page", "2");
+    _ = builder.timeout(5000);
+    _ = builder.bearer("my-test-token");
+    _ = try builder.json(.{ .user = "Alice", .active = true });
+
+    try std.testing.expectEqual(Method.POST, builder.method);
+    try std.testing.expectEqualStrings("http://127.0.0.1:8080/test", builder.url);
+    try std.testing.expectEqual(@as(usize, 2), builder.headersList.items.len);
+    try std.testing.expectEqualStrings("X-Custom-Header", builder.headersList.items[0].name);
+    try std.testing.expectEqualStrings("Value123", builder.headersList.items[0].value);
+    try std.testing.expectEqualStrings("content-type", builder.headersList.items[1].name);
+    try std.testing.expectEqualStrings("application/json", builder.headersList.items[1].value);
+    try std.testing.expectEqual(@as(usize, 1), builder.queryList.items.len);
+    try std.testing.expectEqualStrings("page", builder.queryList.items[0].name);
+    try std.testing.expectEqualStrings("2", builder.queryList.items[0].value);
+    try std.testing.expectEqual(@as(?u64, 5000), builder.timeoutMs);
+    try std.testing.expectEqualStrings("my-test-token", builder.bearerAuth.?);
+    try std.testing.expect(std.mem.indexOf(u8, builder.bodyBytes.?, "\"user\":\"Alice\"") != null);
 }

@@ -139,6 +139,11 @@ fn liveLoopbackDemo(allocator: std.mem.Allocator, io: std.Io) !void {
     // that UDP bind fails, so ask the server which port it actually got.
     const port = server.http3.port() orelse return error.NoHttp3Endpoint;
 
+    // Wait for the background thread to start the HTTP/3 pump and accept loop
+    while (server.h3Pump == null) {
+        httpx.clock.sleepMillis(10);
+    }
+
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
