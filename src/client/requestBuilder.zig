@@ -36,7 +36,7 @@ const writerMod = @import("../protocols/http1/writer.zig");
 const tlsTransport = @import("../protocols/tls/tlsTransport.zig");
 const tlsClientMod = @import("../protocols/tls/tlsClient.zig");
 const http2Transport = @import("../protocols/http2/transport.zig");
-const poolNs = @import("pool.zig");
+const poolNs = @import("connectionPool.zig");
 const Pool = poolNs.Pool;
 const tlsSession = @import("../protocols/tls/tlsSession.zig");
 const clockMod = @import("../common/clock.zig");
@@ -1750,8 +1750,8 @@ fn startTestServer(
     keepAlive: bool,
     comptime route: []const u8,
     comptime body: []const u8,
-) !struct { srv: @import("../server/lifecycle.zig").Server, ctx: tTcp.IoContext } {
-    const lifecycle = @import("../server/lifecycle.zig");
+) !struct { srv: @import("../server/httpServer.zig").Server, ctx: tTcp.IoContext } {
+    const lifecycle = @import("../server/httpServer.zig");
     const routerNs = @import("../web/router/router.zig");
     var ctx = try tTcp.IoContext.init(a);
     errdefer ctx.deinit();
@@ -1779,12 +1779,12 @@ test "keep-alive: second request reuses pooled connection" {
     defer srv.deinit();
     defer S.ctx.deinit();
 
-    const th = std.Thread.spawn(.{}, @import("../server/lifecycle.zig").Server.run, .{srv}) catch return;
+    const th = std.Thread.spawn(.{}, @import("../server/httpServer.zig").Server.run, .{srv}) catch return;
 
     // Client with pool; two requests over hostname.
     // Manual lifecycle: client must be FULLY torn down (releasing pooled
     // sockets -> server readers see EOF) BEFORE server shutdown/join.
-    var client = @import("client.zig").Client.init(a, S.ctx.io, .{});
+    var client = @import("httpClient.zig").Client.init(a, S.ctx.io, .{});
 
     var ub: [64]u8 = undefined;
     const port = srv.localPort();
@@ -1895,7 +1895,7 @@ test "HTTP/1.0 request serialization and keep-alive pooling" {
     const th = try std.Thread.spawn(.{}, Srv.run, .{ &listener, &rec, io });
     defer th.join();
 
-    var client = @import("client.zig").Client.init(a, io, .{ .httpVersion = .http10 });
+    var client = @import("httpClient.zig").Client.init(a, io, .{ .httpVersion = .http10 });
     defer client.deinit();
 
     const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/x", .{port});
@@ -1967,7 +1967,7 @@ test "HTTP/1.0 keep-alive reuses one connection" {
     const th = try std.Thread.spawn(.{}, Srv.run, .{ &listener, &rec, io });
     defer th.join();
 
-    var client = @import("client.zig").Client.init(a, io, .{ .httpVersion = .http10 });
+    var client = @import("httpClient.zig").Client.init(a, io, .{ .httpVersion = .http10 });
     defer client.deinit();
 
     const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/x", .{port});
@@ -1992,7 +1992,7 @@ test "HTTP/1.0 keep-alive reuses one connection" {
 }
 test "connection close response is not pooled" {
     const a = std.testing.allocator;
-    const lifecycle = @import("../server/lifecycle.zig");
+    const lifecycle = @import("../server/httpServer.zig");
     const routerNs = @import("../web/router/router.zig");
     var ctx = try tTcp.IoContext.init(a);
     defer ctx.deinit();
@@ -2012,7 +2012,7 @@ test "connection close response is not pooled" {
     };
     const th = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
 
-    var client = @import("client.zig").Client.init(a, ctx.io, .{});
+    var client = @import("httpClient.zig").Client.init(a, ctx.io, .{});
     defer client.deinit();
     var ub: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&ub, "http://127.0.0.1:{d}/x", .{srv.localPort()});

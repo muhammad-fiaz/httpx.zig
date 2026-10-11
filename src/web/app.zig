@@ -24,7 +24,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const serverMod = @import("../server/lifecycle.zig");
+const serverMod = @import("../server/httpServer.zig");
 const routerMod = @import("router/router.zig");
 const restMod = @import("rest/rest.zig");
 const docsMod = @import("docs/docs.zig");

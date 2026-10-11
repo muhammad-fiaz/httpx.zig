@@ -30,7 +30,7 @@ const staticFiles = @import("../staticFiles/staticFileServer.zig");
 const spa = @import("../spa/spaServer.zig");
 const watcherMod = @import("../watcher/watcherBackend.zig");
 const reload = @import("../watcher/fileWatcher.zig");
-const Server = @import("../../server/lifecycle.zig").Server;
+const Server = @import("../../server/httpServer.zig").Server;
 const routesMod = @import("siteRoutes.zig");
 
 pub const TrailingSlash = routerMod.TrailingSlash;

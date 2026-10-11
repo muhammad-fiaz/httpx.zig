@@ -309,41 +309,41 @@ pub const web = struct {
 
 // Client API (canonical paths live at the root: httpx.Client,
 // httpx.ClientConfig, httpx.RequestOptions, httpx.get, ...).
-pub const cookies = @import("client/cookies.zig");
-pub const pool = @import("client/pool.zig");
-pub const Client = @import("client/client.zig").Client;
-pub const ClientConfig = @import("client/client.zig").Config;
-pub const RequestOptions = @import("client/client.zig").RequestOptions;
-pub const ClientResponse = @import("client/request.zig").Response;
-pub const Header = @import("client/request.zig").Header;
-pub const TlsOptions = @import("client/request.zig").TlsOptions;
+pub const cookies = @import("client/cookieJar.zig");
+pub const pool = @import("client/connectionPool.zig");
+pub const Client = @import("client/httpClient.zig").Client;
+pub const ClientConfig = @import("client/httpClient.zig").Config;
+pub const RequestOptions = @import("client/httpClient.zig").RequestOptions;
+pub const ClientResponse = @import("client/requestBuilder.zig").Response;
+pub const Header = @import("client/requestBuilder.zig").Header;
+pub const TlsOptions = @import("client/requestBuilder.zig").TlsOptions;
 pub const Headers = headers.Headers;
 pub const CookieJar = cookies.Jar;
 pub const ConnectionPool = pool.Pool;
 pub const PoolConfig = pool.PoolConfig;
 
 // Zero-config client functions & canonical HTTP verbs
-pub const fetch = @import("client/client.zig").globalFetch;
-pub const request = @import("client/client.zig").globalRequest;
-pub const get = @import("client/client.zig").globalGet;
-pub const post = @import("client/client.zig").globalPost;
-pub const put = @import("client/client.zig").globalPut;
-pub const patch = @import("client/client.zig").globalPatch;
-pub const delete = @import("client/client.zig").globalDelete;
-pub const head = @import("client/client.zig").globalHead;
-pub const options = @import("client/client.zig").globalOptions;
-pub const trace = @import("client/client.zig").globalTrace;
-pub const connect = @import("client/client.zig").globalConnect;
-pub const getAll = @import("client/client.zig").globalGetAll;
-pub const requestAll = @import("client/client.zig").globalRequestAll;
-pub const isOnline = @import("client/client.zig").globalIsOnline;
-pub const checkConnectivity = @import("client/client.zig").globalCheckConnectivity;
-pub const ResolveOptions = @import("client/client.zig").ResolveOptions;
-pub const ResolvedAddresses = @import("client/client.zig").ResolvedAddresses;
-pub const AddressFamilyPreference = @import("client/client.zig").AddressFamilyPreference;
+pub const fetch = @import("client/httpClient.zig").globalFetch;
+pub const request = @import("client/httpClient.zig").globalRequest;
+pub const get = @import("client/httpClient.zig").globalGet;
+pub const post = @import("client/httpClient.zig").globalPost;
+pub const put = @import("client/httpClient.zig").globalPut;
+pub const patch = @import("client/httpClient.zig").globalPatch;
+pub const delete = @import("client/httpClient.zig").globalDelete;
+pub const head = @import("client/httpClient.zig").globalHead;
+pub const options = @import("client/httpClient.zig").globalOptions;
+pub const trace = @import("client/httpClient.zig").globalTrace;
+pub const connect = @import("client/httpClient.zig").globalConnect;
+pub const getAll = @import("client/httpClient.zig").globalGetAll;
+pub const requestAll = @import("client/httpClient.zig").globalRequestAll;
+pub const isOnline = @import("client/httpClient.zig").globalIsOnline;
+pub const checkConnectivity = @import("client/httpClient.zig").globalCheckConnectivity;
+pub const ResolveOptions = @import("client/httpClient.zig").ResolveOptions;
+pub const ResolvedAddresses = @import("client/httpClient.zig").ResolvedAddresses;
+pub const AddressFamilyPreference = @import("client/httpClient.zig").AddressFamilyPreference;
 
 // Download & Progress types
-pub const Download = @import("client/download.zig");
+pub const Download = @import("client/downloadManager.zig");
 pub const DownloadOptions = Download.DownloadOptions;
 pub const DownloadResult = Download.DownloadResult;
 pub const DownloadError = Download.DownloadError;
@@ -407,7 +407,7 @@ pub const parsing = struct {
 };
 
 // Server API
-pub const server = @import("server/lifecycle.zig");
+pub const server = @import("server/httpServer.zig");
 pub const Server = server.Server;
 pub const ServerConfig = server.Config;
 pub const PortStrategy = server.PortStrategy;
@@ -460,8 +460,8 @@ pub const ftp = struct {
     pub const Server = ftpServer.Server;
     pub const Config = ftpServer.Config;
     pub const Callbacks = ftpServer.Callbacks;
-    pub const download = @import("client/download.zig").ftpDownload;
-    pub const DownloadOptions = @import("client/download.zig").FtpDownloadOptions;
+    pub const download = @import("client/downloadManager.zig").ftpDownload;
+    pub const DownloadOptions = @import("client/downloadManager.zig").FtpDownloadOptions;
 };
 
 // Tests

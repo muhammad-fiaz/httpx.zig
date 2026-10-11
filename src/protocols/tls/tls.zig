@@ -73,7 +73,7 @@ pub const verify = verifyMod;
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const lifecycle = @import("../../server/lifecycle.zig");
+const lifecycle = @import("../../server/httpServer.zig");
 const routerMod = @import("../../web/router/router.zig");
 const methodMod = @import("../../common/method.zig");
 
@@ -196,7 +196,7 @@ test {
 }
 
 test "Listener.run wires handler for all requests" {
-    const httpClientMod = @import("../../client/client.zig");
+    const httpClientMod = @import("../../client/httpClient.zig");
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -246,7 +246,7 @@ test "local TLS handshake serves HTTPS end to end" {
     // both sides, then encrypted application data). Uses the committed
     // P-256 test identity; RSA keys are rejected loudly (no RSA private
     // operations in std).
-    const httpClientMod = @import("../../client/client.zig");
+    const httpClientMod = @import("../../client/httpClient.zig");
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
