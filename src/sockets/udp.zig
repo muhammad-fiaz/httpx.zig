@@ -18,7 +18,7 @@ pub const UdpSocket = struct {
     socket: net.Socket,
     io: std.Io,
     defaultDest: ?net.IpAddress = null,
-    closed: bool = false,
+    closed: std.atomic.Value(bool) = .init(false),
 
     /// Binds to 0.0.0.0:port. port=0 lets the OS choose (typical for clients).
     pub fn bind(io: std.Io, port: u16) !UdpSocket {
@@ -31,8 +31,7 @@ pub const UdpSocket = struct {
     /// close the same socket, and a second OS close could otherwise
     /// release an unrelated recycled descriptor.
     pub fn close(self: *UdpSocket) void {
-        if (self.closed) return;
-        self.closed = true;
+        if (self.closed.swap(true, .acq_rel)) return;
         self.socket.close(self.io);
     }
 
@@ -57,6 +56,24 @@ pub const UdpSocket = struct {
     pub fn receive(self: *UdpSocket, buffer: []u8) !struct { data: []const u8, from: net.IpAddress } {
         const msg = self.socket.receive(self.io, buffer) catch |err| switch (err) {
             error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
+            else => return error.ReadFailed,
+        };
+        return .{ .data = msg.data, .from = msg.from };
+    }
+
+    /// Receives one datagram before the supplied Zig 0.17 I/O timeout.
+    /// I/O backends that cannot perform concurrent timed operations return
+    /// `error.TimeoutUnsupported`; callers that require deadlines must handle
+    /// that explicitly rather than assuming socket options apply to std.Io.
+    pub fn receiveTimeout(
+        self: *UdpSocket,
+        buffer: []u8,
+        timeout: std.Io.Timeout,
+    ) !struct { data: []const u8, from: net.IpAddress } {
+        const msg = self.socket.receiveTimeout(self.io, buffer, timeout) catch |err| switch (err) {
+            error.Timeout => return error.Timeout,
+            error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
+            error.ConcurrencyUnavailable => return error.TimeoutUnsupported,
             else => return error.ReadFailed,
         };
         return .{ .data = msg.data, .from = msg.from };
@@ -89,4 +106,21 @@ test "udp bind and local datagram echo" {
     var buf: [64]u8 = undefined;
     const rx = b.receive(&buf) catch return;
     try std.testing.expectEqualStrings("ping", rx.data);
+}
+
+test "udp receive timeout is bounded or reports unsupported operation" {
+    var ctx = @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator) catch return;
+    defer ctx.deinit();
+    var socket = UdpSocket.bind(ctx.io, 0) catch return;
+    defer socket.close();
+
+    var buf: [16]u8 = undefined;
+    _ = socket.receiveTimeout(&buf, .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(10),
+        .clock = .awake,
+    } }) catch |err| switch (err) {
+        error.Timeout, error.TimeoutUnsupported => return,
+        else => return err,
+    };
+    return error.ExpectedTimeout;
 }
