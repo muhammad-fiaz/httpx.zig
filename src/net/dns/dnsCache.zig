@@ -158,7 +158,7 @@ pub const Cache = struct {
             self.mu.unlock();
             return error.OutOfMemory;
         };
-        node.* = .{ .sem = sync.Semaphore.init(0) };
+        node.* = .{ .sem = sync.Semaphore.init(self.io, 0) };
         const nameCopy = self.allocator.dupe(u8, name) catch {
             self.allocator.destroy(node);
             self.mu.unlock();

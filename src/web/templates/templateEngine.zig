@@ -57,7 +57,7 @@ pub const Engine = struct {
     /// Serializes cache-disabled renders: scratch slots are per-render
     /// state, so uncached renders must not interleave. Cached renders
     /// stay fully concurrent (the cache parks evictions instead).
-    noCacheGate: sync.Semaphore = sync.Semaphore.init(1),
+    noCacheGate: sync.Semaphore,
 
     pub const ScratchSlot = struct {
         ast: parserMod.TemplateAst,
@@ -69,6 +69,7 @@ pub const Engine = struct {
             .allocator = allocator,
             .io = io,
             .config = config,
+            .noCacheGate = sync.Semaphore.init(io, 1),
             .loader = loaderMod.Loader.init(.{
                 .directory = config.directory,
                 .maxFileSize = config.maxFileSize,
