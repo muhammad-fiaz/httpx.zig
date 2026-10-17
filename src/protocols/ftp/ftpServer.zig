@@ -102,7 +102,8 @@ pub const Server = struct {
         while (!self.stop.load(.acquire) and (maxConnections == 0 or served < maxConnections)) {
             var control = self.listener.accept(self.io) catch return error.AcceptFailed;
             defer control.close();
-            tcp.setTimeouts(control.netSocketHandle(), self.cfg.timeoutMs);
+            control.setReadInactivityTimeoutMs(self.cfg.timeoutMs);
+            control.setWriteInactivityTimeoutMs(self.cfg.timeoutMs);
             var session = Session.init(self.allocator, self.io, &control, self.cfg, if (self.tlsServer) |*s| s else null);
             session.run() catch {};
             served += 1;
@@ -522,23 +523,25 @@ const Session = struct {
 
     fn acceptSocket(self: *Session) Error!tcp.Socket {
         if (self.passive) |*p| {
-            const data = p.accept(self.io) catch {
+            var data = p.accept(self.io) catch {
                 p.close(self.io);
                 self.passive = null;
                 return error.AcceptFailed;
             };
             p.close(self.io);
             self.passive = null;
-            tcp.setTimeouts(data.netSocketHandle(), self.cfg.timeoutMs);
+            data.setReadInactivityTimeoutMs(self.cfg.timeoutMs);
+            data.setWriteInactivityTimeoutMs(self.cfg.timeoutMs);
             return data;
         }
         if (self.active) |*addr| {
-            const data = tcp.connectAddress(self.io, addr) catch {
+            var data = tcp.connectAddress(self.io, addr) catch {
                 self.active = null;
                 return error.AcceptFailed;
             };
             self.active = null;
-            tcp.setTimeouts(data.netSocketHandle(), self.cfg.timeoutMs);
+            data.setReadInactivityTimeoutMs(self.cfg.timeoutMs);
+            data.setWriteInactivityTimeoutMs(self.cfg.timeoutMs);
             return data;
         }
         return error.AcceptFailed;

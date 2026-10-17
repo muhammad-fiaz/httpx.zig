@@ -102,8 +102,7 @@ pub const SessionCache = struct {
                 std.mem.eql(u8, e.host[0..e.hostLen], host))
             {
                 const fresh = session.dupe(self.allocator) catch return;
-                self.allocator.free(e.session.ticket);
-                self.allocator.free(e.session.host);
+                e.session.deinit(self.allocator);
                 e.session = fresh;
                 return;
             }
@@ -116,11 +115,7 @@ pub const SessionCache = struct {
             var evicted = self.entries.swapRemove(oldest);
             evicted.session.deinit(self.allocator);
         }
-        const fresh = session.dupe(self.allocator) catch return;
-        errdefer {
-            self.allocator.free(fresh.ticket);
-            self.allocator.free(fresh.host);
-        }
+        var fresh = session.dupe(self.allocator) catch return;
         var entry = CachedEntry{
             .host = (@as([64]u8, @splat(0))),
             .hostLen = @intCast(host.len),
@@ -128,7 +123,10 @@ pub const SessionCache = struct {
             .session = fresh,
         };
         @memcpy(entry.host[0..host.len], host);
-        self.entries.append(self.allocator, entry) catch return;
+        self.entries.append(self.allocator, entry) catch {
+            fresh.deinit(self.allocator);
+            return;
+        };
     }
 };
 
@@ -251,27 +249,30 @@ pub fn clientSessionFromTicketWithAlpn(
     nowMs: u64,
 ) !ClientSession {
     if (!suiteSupportsResumption(suite)) return error.UnsupportedSuite;
-    var psk: [32]u8 = undefined;
-    expandLabel(resumptionMaster, "resumption", nst.nonce, &psk);
-    errdefer std.crypto.secureZero(u8, &psk);
     var alpnBuf: [16]u8 = (@as([16]u8, @splat(0)));
     var alpnLen: u8 = 0;
     if (alpn) |a| {
         alpnLen = @intCast(@min(a.len, 16));
         @memcpy(alpnBuf[0..alpnLen], a[0..alpnLen]);
     }
-    return .{
-        .ticket = try allocator.dupe(u8, nst.ticket),
-        .psk = psk,
+    var result = ClientSession{
+        .ticket = undefined,
+        .psk = undefined,
         .ageAdd = nst.ageAdd,
         .createdMs = nowMs,
         .lifetimeSecs = nst.lifetimeSecs,
         .suite = suite,
-        .host = try allocator.dupe(u8, host),
+        .host = undefined,
         .maxEarlyData = nst.maxEarlyData orelse 0,
         .alpn = alpnBuf,
         .alpnLen = alpnLen,
     };
+    expandLabel(resumptionMaster, "resumption", nst.nonce, &result.psk);
+    errdefer std.crypto.secureZero(u8, &result.psk);
+    result.ticket = try allocator.dupe(u8, nst.ticket);
+    errdefer allocator.free(result.ticket);
+    result.host = try allocator.dupe(u8, host);
+    return result;
 }
 
 /// Maximum ticket age the server will honor beyond nominal lifetime
@@ -311,18 +312,23 @@ pub const ClientSession = struct {
     }
 
     pub fn dupe(self: *const ClientSession, allocator: Allocator) !ClientSession {
-        return .{
-            .ticket = try allocator.dupe(u8, self.ticket),
+        var copy = ClientSession{
+            .ticket = undefined,
             .psk = self.psk,
             .ageAdd = self.ageAdd,
             .createdMs = self.createdMs,
             .lifetimeSecs = self.lifetimeSecs,
             .suite = self.suite,
-            .host = try allocator.dupe(u8, self.host),
+            .host = undefined,
             .maxEarlyData = self.maxEarlyData,
             .alpn = self.alpn,
             .alpnLen = self.alpnLen,
         };
+        errdefer std.crypto.secureZero(u8, &copy.psk);
+        copy.ticket = try allocator.dupe(u8, self.ticket);
+        errdefer allocator.free(copy.ticket);
+        copy.host = try allocator.dupe(u8, self.host);
+        return copy;
     }
 
     /// True when the ticket is still usable for `host` right now.
@@ -549,4 +555,23 @@ test "client session usability is host-bound and time-bound" {
     // Obfuscation round-trips through wrapping arithmetic.
     const obf = s.obfuscatedAge(9_000);
     try std.testing.expectEqual(@as(u32, 4000) +% 7, obf);
+}
+
+test "client session duplication frees ticket when host allocation fails" {
+    const allocator = std.testing.allocator;
+    var session = ClientSession{
+        .ticket = try allocator.dupe(u8, "ticket"),
+        .psk = @splat(0x5a),
+        .ageAdd = 0,
+        .createdMs = 1,
+        .lifetimeSecs = 60,
+        .suite = .AES_128_GCM_SHA256,
+        .host = try allocator.dupe(u8, "example.com"),
+    };
+    defer session.deinit(allocator);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 1 });
+    try std.testing.expectError(error.OutOfMemory, session.dupe(failing.allocator()));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(failing.allocations, failing.deallocations);
 }

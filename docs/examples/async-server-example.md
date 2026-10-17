@@ -5,7 +5,7 @@ results from normal handlers. See `examples/concurrentDemo.zig` for parallel
 client requests.
 
 ```zig
-var pool = try httpx.WorkerPool.init(allocator, .{
+var pool = try httpx.WorkerPool.init(allocator, io, .{
     .workers = 4,
     .queueCapacity = 1024,
     .autoStart = true,

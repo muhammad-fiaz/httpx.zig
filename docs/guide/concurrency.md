@@ -35,8 +35,12 @@ defer r.deinit();
 `httpx.WorkerPool` (`src/concurrency/workerPool.zig`) is a fixed-thread,
 bounded-queue pool with graceful drain:
 
+Pass a live Zig 0.17 `std.Io` to the pool. It backs blocking queue waits and
+must outlive the pool. `submit` applies backpressure when the queue is full;
+`trySubmit` fails immediately with `QueueFull` or `QueueBusy`.
+
 ```zig
-var pool = httpx.WorkerPool.init(allocator, .{
+var pool = try httpx.WorkerPool.init(allocator, io, .{
     .workers = 4,
     .queueCapacity = 1024,
     .autoStart = true,

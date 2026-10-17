@@ -1,13 +1,12 @@
-//! Shared synchronization primitives (Zig 0.16 std.Thread has no Mutex).
+//! Shared synchronization primitives for Zig 0.17 thread and I/O code.
 //!
-//! Lock-free and low-overhead primitives for the httpx concurrency model:
+//! Low-overhead primitives for the httpx concurrency model:
 //!
 //! - `Spinlock` — thin spinlock wrapping `std.atomic.Mutex` (tryLock/unlock).
-//! - `Semaphore` — counting semaphore with CAS-based acquire; no OS
-//!   futex dependency. Used for connection-pool throttling and
-//!   backpressure enforcement.
-//! - `Once` — one-shot initialization gate (`std.once` does not exist
-//!   in 0.16). Ensures a function runs exactly once across threads.
+//! - `Semaphore` — counting semaphore backed by Zig 0.17 `std.Io.Semaphore`.
+//!   Waits block through the I/O backend rather than spinning.
+//! - `Once` — one-shot initialization gate that ensures a function runs
+//!   exactly once across threads.
 //!
 //! These primitives underpin the worker pool and connection pool
 //! subsystems.
@@ -33,44 +32,32 @@ pub const Spinlock = struct {
     }
 };
 
-/// Counting semaphore. Blocking waits spin with a yield backoff — no OS
-/// futex dependency. Acquire uses CAS so permits can never be duplicated.
+/// Counting semaphore backed by Zig 0.17's futex-capable `std.Io.Semaphore`.
+/// Blocking waits suspend the kernel thread rather than polling. The I/O
+/// context is borrowed and must outlive the semaphore's users.
 pub const Semaphore = struct {
-    count: std.atomic.Value(u32),
+    io: std.Io,
+    inner: std.Io.Semaphore,
 
-    pub fn init(initial: u32) Semaphore {
-        return .{ .count = .init(initial) };
+    pub fn init(io: std.Io, initial: u32) Semaphore {
+        return .{ .io = io, .inner = .{ .permits = initial } };
     }
 
     pub fn post(self: *Semaphore) void {
-        _ = self.count.fetchAdd(1, .release);
+        self.inner.post(self.io);
     }
 
-    /// CAS-based acquire: decrements only when a positive count is observed,
-    /// so concurrent post/wait can never manufacture extra permits.
     pub fn wait(self: *Semaphore) void {
-        var spins: usize = 0;
-        while (true) {
-            const c = self.count.load(.acquire);
-            if (c > 0) {
-                if (self.count.cmpxchgWeak(c, c - 1, .acq_rel, .monotonic) == null) return;
-                continue;
-            }
-            spins += 1;
-            if (spins < 64) {
-                std.atomic.spinLoopHint();
-            } else {
-                std.Thread.yield() catch {};
-            }
-        }
+        self.inner.waitUncancelable(self.io);
     }
 
     pub fn tryWait(self: *Semaphore) bool {
-        while (true) {
-            const c = self.count.load(.acquire);
-            if (c == 0) return false;
-            if (self.count.cmpxchgWeak(c, c - 1, .acq_rel, .monotonic) == null) return true;
-        }
+        if (!self.inner.mutex.tryLock()) return false;
+        defer self.inner.mutex.unlock(self.io);
+        if (self.inner.permits == 0) return false;
+        self.inner.permits -= 1;
+        if (self.inner.permits > 0) self.inner.cond.signal(self.io);
+        return true;
     }
 };
 
@@ -115,7 +102,8 @@ test "spinlock basic" {
 }
 
 test "semaphore post/wait" {
-    var s = Semaphore.init(0);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var s = Semaphore.init(io, 0);
     try std.testing.expect(!s.tryWait());
     s.post();
     try std.testing.expect(s.tryWait());
@@ -123,7 +111,8 @@ test "semaphore post/wait" {
 }
 
 test "semaphore initial count" {
-    var s = Semaphore.init(3);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var s = Semaphore.init(io, 3);
     s.wait();
     s.wait();
     s.wait();

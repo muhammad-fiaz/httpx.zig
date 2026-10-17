@@ -26,8 +26,19 @@ defer {
 A fixed-thread, bounded-queue pool with graceful drain
 (`src/concurrency/workerPool.zig`).
 
+The pool borrows a Zig 0.17 `std.Io` value for blocking queue waits. Keep its
+backing I/O context alive until the pool is joined and deinitialized. `submit`
+blocks when the queue is full; `trySubmit` returns `QueueFull` or `QueueBusy`
+immediately. `shutdownDrain` rejects new submissions, wakes waiters, and lets
+queued tasks finish.
+
+Task callbacks have the type `fn (?*anyopaque, *std.atomic.Value(bool)) anyerror!void`.
+Successful callbacks increment `completed`; returned errors increment `failed`.
+The pool records aggregate outcomes in `Stats` and does not retain individual
+error values.
+
 ```zig
-var pool = httpx.WorkerPool.init(allocator, .{
+var pool = try httpx.WorkerPool.init(allocator, io, .{
     .workers = 4,
     .queueCapacity = 1024,
     .autoStart = true,
@@ -48,4 +59,5 @@ pub const Config = struct {
 ### Queue
 
 `httpx.Queue` (`src/concurrency/queue.zig`) is a thread-safe bounded queue
-used internally by the pool.
+used internally by the pool. Its initializer also takes the shared `std.Io`:
+`try httpx.Queue.init(allocator, io, capacity)`.

@@ -7,7 +7,7 @@
 //!
 //! Security posture:
 //!   * CL+TE together -> error.AmbiguousFraming (request smuggling)
-//!   * Transfer-Encoding whose final coding isn't "chunked" -> error
+//!   * Transfer-Encoding other than one supported "chunked" coding -> error
 //!   * conflicting duplicate Content-Length -> error
 //!   * obs-fold (continuation lines) -> error.ObsFold
 //!   * whitespace before header colon -> error.MalformedHeaderLine
@@ -351,7 +351,6 @@ pub fn framingFull(fields: []const Field, ctx: FramingContext) ParseError!Framin
     var hasCl = false;
     var cl: usize = 0;
     var hasTe = false;
-    var teChunkedFinal = false;
 
     for (fields) |f| {
         if (std.ascii.eqlIgnoreCase(f.name, "Content-Length")) {
@@ -362,13 +361,13 @@ pub fn framingFull(fields: []const Field, ctx: FramingContext) ParseError!Framin
             hasCl = true;
             cl = v;
         } else if (std.ascii.eqlIgnoreCase(f.name, "Transfer-Encoding")) {
+            // Only chunked is implemented. Accepting preceding or repeated
+            // transfer codings would expose still-encoded bytes to callers.
+            if (hasTe or !isChunkedOnly(f.value)) return ParseError.AmbiguousFraming;
             hasTe = true;
-            // Final coding must be chunked; list form "gzip, chunked" ok.
-            teChunkedFinal = endsWithCodingChunked(f.value);
         }
     }
 
-    if (hasTe and !teChunkedFinal) return ParseError.AmbiguousFraming;
     if (hasTe and hasCl) return ParseError.AmbiguousFraming; // classic smuggling vector
     if (hasTe and ctx.isHttp10) return ParseError.AmbiguousFraming; // 1.0 must not use chunked
     if (hasTe) return .{ .framing = .chunked, .length = 0 };
@@ -379,12 +378,9 @@ pub fn framingFull(fields: []const Field, ctx: FramingContext) ParseError!Framin
     return .{ .framing = .none, .length = 0 };
 }
 
-/// True when the last comma-separated coding of a TE value is "chunked".
-fn endsWithCodingChunked(value: []const u8) bool {
-    var it = std.mem.splitBackwardsScalar(u8, value, ',');
-    const lastRaw = it.next() orelse return false;
-    const last = std.mem.trim(u8, lastRaw, " \t");
-    return std.ascii.eqlIgnoreCase(last, "chunked");
+/// True when the only transfer coding is the supported `chunked` coding.
+fn isChunkedOnly(value: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, value, " \t"), "chunked");
 }
 
 // Chunked transfer decoding (RFC 9112 section 7.1)
@@ -661,8 +657,12 @@ test "framing decisions incl smuggling defenses" {
     const badte = [_]Field{.{ .name = "Transfer-Encoding", .value = "gzip" }};
     try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&badte, false, 0, 0));
     const gzipchunk = [_]Field{.{ .name = "Transfer-Encoding", .value = "gzip, chunked" }};
-    const d3 = try decideFraming(&gzipchunk, false, 0, 0);
-    try std.testing.expectEqual(Framing.chunked, d3.framing);
+    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&gzipchunk, false, 0, 0));
+    const repeatedTe = [_]Field{
+        .{ .name = "Transfer-Encoding", .value = "chunked" },
+        .{ .name = "Transfer-Encoding", .value = "chunked" },
+    };
+    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&repeatedTe, false, 0, 0));
 
     // conflicting duplicate CL
     const dupcl = [_]Field{
