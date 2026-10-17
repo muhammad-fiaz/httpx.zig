@@ -2511,10 +2511,15 @@ test "connection limit rejects overload then accepts clients after a stalled upl
         .maxConcurrentConnections = 1,
         .maxQueuedConnectionTasks = 1,
         .workerCount = 1,
-        .initialRequestTimeoutMs = 1_000,
-        .headerReadTimeoutMs = 1_000,
-        .requestBodyTimeoutMs = 250,
-        .writeTimeoutMs = 1_000,
+        .initialRequestTimeoutMs = 2_000,
+        .headerReadTimeoutMs = 2_000,
+        // Long enough that the stalled upload still owns the only slot while
+        // the overload connection below is admitted and rejected. A deadline
+        // shorter than the admission handshake made this test racy: on a
+        // loaded runner the upload expired first, the slot was released, and
+        // the overload connection was served instead of rejected.
+        .requestBodyTimeoutMs = 1_500,
+        .writeTimeoutMs = 2_000,
     });
     defer srv.deinit();
     try srv.router.get("/ok", returnOk, .{});
@@ -2527,28 +2532,35 @@ test "connection limit rejects overload then accepts clients after a stalled upl
     const thread = try std.Thread.spawn(.{}, Runner.run, .{&srv});
     defer thread.join();
 
+    const ActiveCount = struct {
+        fn get(server: *Server) usize {
+            server.connsMu.lock();
+            defer server.connsMu.unlock();
+            return server.activeConns.items.len;
+        }
+    };
+
     var stalled = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
     defer stalled.close();
+    // Every client socket is bounded: a missed server-side close then fails
+    // this test quickly instead of stalling the whole suite until the runner's
+    // global test timeout.
+    stalled.setReadTimeoutMs(10_000);
     try stalled.writeAll("POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\n\r\nabc");
 
     // Wait until the first socket owns the only connection slot before
     // opening the overload connection; this makes the admission assertion
     // deterministic instead of relying on accept scheduling.
     var spins: usize = 0;
-    while (spins < 200) : (spins += 1) {
-        srv.connsMu.lock();
-        const admitted = srv.activeConns.items.len == 1;
-        srv.connsMu.unlock();
-        if (admitted) break;
+    while (spins < 400) : (spins += 1) {
+        if (ActiveCount.get(&srv) == 1) break;
         clock.sleepMillis(5);
     }
-    srv.connsMu.lock();
-    const firstAdmitted = srv.activeConns.items.len == 1;
-    srv.connsMu.unlock();
-    try std.testing.expect(firstAdmitted);
+    try std.testing.expectEqual(@as(usize, 1), ActiveCount.get(&srv));
 
     var overloaded = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
     defer overloaded.close();
+    overloaded.setReadTimeoutMs(5_000);
     var byte: [1]u8 = undefined;
     const overloadedRead = overloaded.read(&byte);
     if (overloadedRead) |n| {
@@ -2557,8 +2569,20 @@ test "connection limit rejects overload then accepts clients after a stalled upl
         try std.testing.expect(err == error.ConnectionReset or err == error.ConnectionClosed or err == error.ReadFailed);
     }
 
-    // The deadline releases the only worker and connection slot. A later
-    // ordinary request must still be accepted and served successfully.
+    // The body deadline releases the only worker and connection slot. Observe
+    // that release instead of assuming a fixed delay, so recovery is asserted
+    // without racing the deadline.
+    var released = false;
+    var waited: usize = 0;
+    while (waited < 2_000) : (waited += 1) {
+        if (ActiveCount.get(&srv) == 0) {
+            released = true;
+            break;
+        }
+        clock.sleepMillis(5);
+    }
+    try std.testing.expect(released);
+
     var one: [1]u8 = undefined;
     const stalledRead = stalled.read(&one);
     if (stalledRead) |n| {
@@ -2567,9 +2591,10 @@ test "connection limit rejects overload then accepts clients after a stalled upl
         try std.testing.expect(err == error.ConnectionReset or err == error.ConnectionClosed or err == error.ReadFailed);
     }
 
+    // A later ordinary request must still be accepted and served successfully.
     var recovered = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
     defer recovered.close();
-    recovered.setReadTimeoutMs(2_000);
+    recovered.setReadTimeoutMs(5_000);
     try recovered.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     var response: [1024]u8 = undefined;
     var total: usize = 0;
