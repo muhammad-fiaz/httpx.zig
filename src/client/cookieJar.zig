@@ -45,6 +45,7 @@ pub const Jar = struct {
         domain: []const u8,
         path: []const u8,
         expiresMs: ?i64,
+        hostOnly: bool,
         secure: bool,
         httpOnly: bool,
         sameSite: Cookie.SameSite,
@@ -118,9 +119,11 @@ pub const Jar = struct {
 
         const n = name orelse return;
         const v = value orelse "";
+        const hostOnly = domain == null;
         const d = domain orelse requestHost;
         const p = path orelse "/";
         if (n.len == 0) return;
+        if (!hostOnly and !domainMatches(requestHost, d)) return;
         for (n) |c| if (!parseMod.isTokenChar(c)) return;
         for (v) |c| if (c < 0x20 or c == 0x7f) return;
         if (maxAgeExpiresMs) |expiry| expiresMs = expiry;
@@ -171,6 +174,7 @@ pub const Jar = struct {
             .domain = ownedDomain,
             .path = ownedPath,
             .expiresMs = expiresMs,
+            .hostOnly = hostOnly,
             .secure = secure,
             .httpOnly = httpOnly,
             .sameSite = sameSite,
@@ -215,7 +219,9 @@ pub const Jar = struct {
             if (c.expiresMs) |exp| {
                 if (now >= exp) continue;
             }
-            if (!domainMatches(host, c.domain)) continue;
+            if (c.hostOnly) {
+                if (!std.ascii.eqlIgnoreCase(host, c.domain)) continue;
+            } else if (!domainMatches(host, c.domain)) continue;
             if (!pathMatches(path, c.path)) continue;
             if (c.secure and !secure) continue; // Secure cookies need TLS
             const sep = if (wrote) "; " else "";
