@@ -68,9 +68,11 @@ pub const Pool = struct {
             if (n > 16) n = 16;
             if (n < 1) n = 1;
         }
+        var queue = try BoundedQueue(Job).init(allocator, cap);
+        errdefer queue.deinit();
         return .{
             .allocator = allocator,
-            .queue = try BoundedQueue(Job).init(allocator, cap),
+            .queue = queue,
             .threads = try allocator.alloc(std.Thread, n),
             .cfg = cfg,
         };
@@ -84,6 +86,7 @@ pub const Pool = struct {
         for (self.threads, 0..) |*t, i| {
             t.* = std.Thread.spawn(.{}, workerMain, .{ self, @as(u32, @intCast(i)) }) catch |e| {
                 // Roll back already-spawned workers cleanly.
+                self.shuttingDown.store(true, .release);
                 self.queue.close();
                 for (self.threads[0..i]) |*prev| prev.join();
                 return e;
@@ -158,7 +161,6 @@ pub const Pool = struct {
         while (self.queue.tryPop()) |job| {
             if (job.cancel) |flag| flag.store(true, .release);
             _ = self.stats.cancelled.fetchAdd(1, .monotonic);
-            _ = self.stats.submitted.fetchSub(1, .monotonic);
         }
     }
 
@@ -232,6 +234,10 @@ test "pool cancel queued tasks" {
     var cancelFlag = std.atomic.Value(bool).init(false);
     try p.submit(dummy, null, &cancelFlag);
     p.cancelQueued();
+    // Statistics are cumulative: cancellation changes the terminal outcome,
+    // not whether a task was accepted by the pool.
+    try std.testing.expectEqual(@as(usize, 1), p.stats.submitted.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), p.stats.cancelled.load(.monotonic));
     try p.start();
     p.shutdownDrain();
 }
