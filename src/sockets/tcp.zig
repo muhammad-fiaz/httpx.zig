@@ -29,6 +29,7 @@ const net = std.Io.net;
 const Allocator = std.mem.Allocator;
 const addressMod = @import("../net/address.zig");
 const sync = @import("../common/sync.zig");
+const clock = @import("../common/clock.zig");
 const posix = std.posix;
 const builtin = @import("builtin");
 
@@ -45,6 +46,8 @@ const ws = if (isWindows) struct {
     pub const AF_INET6: i32 = 23;
     pub const SOCK_STREAM: i32 = 1;
     pub const IPPROTO_TCP: i32 = 6;
+    pub const SO_REUSEADDR: i32 = 4;
+    pub const SOMAXCONN: i32 = 0x7fffffff;
 
     pub const sockaddrIn = extern struct {
         family: u16,
@@ -83,6 +86,10 @@ const ws = if (isWindows) struct {
     pub extern "ws2_32" fn WSAGetLastError() callconv(.c) i32;
     pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(.c) i32;
     pub extern "ws2_32" fn socket(af: i32, sockType: i32, protocol: i32) callconv(.c) SOCKET;
+    pub extern "ws2_32" fn bind(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(.c) i32;
+    pub extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(.c) i32;
+    pub extern "ws2_32" fn accept(s: SOCKET, addr: ?*anyopaque, addrlen: ?*i32) callconv(.c) SOCKET;
+    pub extern "ws2_32" fn getsockname(s: SOCKET, name: *anyopaque, namelen: *i32) callconv(.c) i32;
     pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(.c) i32;
     pub extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: i32, flags: i32) callconv(.c) i32;
     pub extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: i32, flags: i32) callconv(.c) i32;
@@ -136,16 +143,32 @@ const ws = if (isWindows) struct {
 /// Works on Windows sockets and POSIX fds alike (both take the option at
 /// SOL_SOCKET level; Windows wants a DWORD ms, POSIX a timeval).
 pub fn setTimeouts(sock: net.Socket.Handle, timeoutMs: u31) void {
+    setReadSocketTimeout(sock, timeoutMs);
+    setWriteSocketTimeout(sock, timeoutMs);
+}
+
+fn setReadSocketTimeout(sock: net.Socket.Handle, timeoutMs: u31) void {
     if (isWindows) {
         const ms: u32 = @intCast(timeoutMs);
         _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.SOL_SOCKET, ws.SO_RCVTIMEO, &ms, 4);
-        _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.SOL_SOCKET, ws.SO_SNDTIMEO, &ms, 4);
     } else {
         const tv = posix.timeval{
             .sec = @intCast(timeoutMs / 1000),
             .usec = @intCast((timeoutMs % 1000) * 1000),
         };
         _ = posix.setsockopt(sock, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+    }
+}
+
+fn setWriteSocketTimeout(sock: net.Socket.Handle, timeoutMs: u31) void {
+    if (isWindows) {
+        const ms: u32 = @intCast(timeoutMs);
+        _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.SOL_SOCKET, ws.SO_SNDTIMEO, &ms, 4);
+    } else {
+        const tv = posix.timeval{
+            .sec = @intCast(timeoutMs / 1000),
+            .usec = @intCast((timeoutMs % 1000) * 1000),
+        };
         _ = posix.setsockopt(sock, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
     }
 }
@@ -291,11 +314,13 @@ pub const ReadError = error{
     ConnectionReset,
     ConnectionClosed,
     ReadFailed,
+    Timeout,
 };
 
 pub const WriteError = error{
     ConnectionReset,
     WriteFailed,
+    Timeout,
 };
 
 pub const ConnectError = error{
@@ -359,6 +384,17 @@ pub const Socket = struct {
     io: std.Io,
     /// Idempotent-teardown guard.
     closeFlag: std.atomic.Value(bool) = .init(false),
+    /// Absolute operation deadlines. A caller resets these at protocol phase
+    /// boundaries, so a peer cannot keep a request alive by sending one byte
+    /// just before each per-read socket timeout.
+    readDeadline: ?std.Io.Clock.Timestamp = null,
+    writeDeadline: ?std.Io.Clock.Timestamp = null,
+    readDeadlineMs: std.atomic.Value(i64) = .init(0),
+    writeDeadlineMs: std.atomic.Value(i64) = .init(0),
+    readActive: std.atomic.Value(bool) = .init(false),
+    writeActive: std.atomic.Value(bool) = .init(false),
+    readInterrupted: std.atomic.Value(bool) = .init(false),
+    writeInterrupted: std.atomic.Value(bool) = .init(false),
 
     const Inner = union(enum) {
         /// Raw ws232 SOCKET — used on Windows for client connections.
@@ -408,6 +444,31 @@ pub const Socket = struct {
         }
     }
 
+    fn shutdownRead(self: *const Socket) void {
+        switch (self.inner) {
+            .winsock => |s| if (isWindows) {
+                _ = ws.shutdown(s, 0); // SD_RECEIVE
+            },
+            .stream => |st| st.shutdown(self.io, .recv) catch {},
+        }
+    }
+
+    fn shutdownWriteOnly(self: *const Socket) void {
+        switch (self.inner) {
+            .winsock => |s| if (isWindows) {
+                _ = ws.shutdown(s, ws.SD_SEND);
+            },
+            .stream => |st| st.shutdown(self.io, .send) catch {},
+        }
+    }
+
+    /// Interrupts pending I/O while leaving final handle cleanup to the
+    /// socket owner. This avoids racing Windows AFD completion with netClose.
+    pub fn interruptIo(self: *const Socket) void {
+        self.shutdownRead();
+        self.shutdownWriteOnly();
+    }
+
     /// Graceful close: half-close write, drain, then close.
     pub fn drainThenClose(self: *const Socket) void {
         if (!self.acquireClose()) return;
@@ -431,6 +492,93 @@ pub const Socket = struct {
         return !self.closeFlag.load(.monotonic);
     }
 
+    /// Sets an absolute read deadline relative to now; zero disables it.
+    pub fn setReadTimeoutMs(self: *Socket, timeoutMs: u32) void {
+        self.readDeadline = deadlineAfterMs(self.io, timeoutMs);
+        self.readInterrupted.store(false, .release);
+        self.readDeadlineMs.store(if (timeoutMs == 0) 0 else clock.monotonicMillis() +| @as(i64, @intCast(timeoutMs)), .release);
+        switch (self.inner) {
+            .winsock => |s| if (isWindows) {
+                const ms: u32 = timeoutMs;
+                _ = ws.setsockopt(s, ws.SOL_SOCKET, ws.SO_RCVTIMEO, &ms, @sizeOf(u32));
+            },
+            .stream => |st| setReadSocketTimeout(st.socket.handle, @intCast(@min(timeoutMs, std.math.maxInt(u31)))),
+        }
+    }
+
+    /// Sets an absolute write deadline relative to now; zero disables it.
+    pub fn setWriteTimeoutMs(self: *Socket, timeoutMs: u32) void {
+        self.writeDeadline = deadlineAfterMs(self.io, timeoutMs);
+        self.writeInterrupted.store(false, .release);
+        self.writeDeadlineMs.store(if (timeoutMs == 0) 0 else clock.monotonicMillis() +| @as(i64, @intCast(timeoutMs)), .release);
+        switch (self.inner) {
+            .winsock => |s| if (isWindows) {
+                const ms: u32 = timeoutMs;
+                _ = ws.setsockopt(s, ws.SOL_SOCKET, ws.SO_SNDTIMEO, &ms, @sizeOf(u32));
+            },
+            .stream => |st| setWriteSocketTimeout(st.socket.handle, @intCast(@min(timeoutMs, std.math.maxInt(u31)))),
+        }
+    }
+
+    /// Sets a per-system-call timeout that restarts for each read. Use this
+    /// for protocols such as FTP whose legacy timeout is an inactivity limit.
+    pub fn setReadInactivityTimeoutMs(self: *Socket, timeoutMs: u32) void {
+        self.readDeadline = null;
+        self.readDeadlineMs.store(0, .release);
+        switch (self.inner) {
+            .winsock => |s| if (isWindows) {
+                const ms: u32 = timeoutMs;
+                _ = ws.setsockopt(s, ws.SOL_SOCKET, ws.SO_RCVTIMEO, &ms, @sizeOf(u32));
+            },
+            .stream => |st| setReadSocketTimeout(st.socket.handle, @intCast(@min(timeoutMs, std.math.maxInt(u31)))),
+        }
+    }
+
+    /// Sets a per-system-call send timeout that restarts for each write.
+    pub fn setWriteInactivityTimeoutMs(self: *Socket, timeoutMs: u32) void {
+        self.writeDeadline = null;
+        self.writeDeadlineMs.store(0, .release);
+        switch (self.inner) {
+            .winsock => |s| if (isWindows) {
+                const ms: u32 = timeoutMs;
+                _ = ws.setsockopt(s, ws.SOL_SOCKET, ws.SO_SNDTIMEO, &ms, @sizeOf(u32));
+            },
+            .stream => |st| setWriteSocketTimeout(st.socket.handle, @intCast(@min(timeoutMs, std.math.maxInt(u31)))),
+        }
+    }
+
+    fn deadlineAfterMs(io: std.Io, timeoutMs: u32) ?std.Io.Clock.Timestamp {
+        if (timeoutMs == 0) return null;
+        const duration: std.Io.Clock.Duration = .{
+            .raw = .fromMilliseconds(@intCast(timeoutMs)),
+            .clock = .awake,
+        };
+        return .fromNow(io, duration);
+    }
+
+    fn remainingTimeoutMs(deadline: ?std.Io.Clock.Timestamp, io: std.Io) ?u31 {
+        const until = deadline orelse return null;
+        const remaining = until.durationFromNow(io).raw.nanoseconds;
+        if (remaining <= 0) return 0;
+        const ms = @divTrunc(remaining + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+        return @intCast(@min(ms, std.math.maxInt(u31)));
+    }
+
+    /// Called by the server's deadline monitor. Half-closing the timed-out
+    /// direction wakes its pending I/O without racing a full close against
+    /// Windows AFD completion processing.
+    pub fn closeIfIoDeadlineExpired(self: *const Socket, nowMs: i64) void {
+        const readDeadline = @constCast(&self.readDeadlineMs).load(.acquire);
+        const readExpired = readDeadline != 0 and nowMs >= readDeadline and self.readActive.load(.acquire);
+        const writeDeadline = @constCast(&self.writeDeadlineMs).load(.acquire);
+        const writeExpired = writeDeadline != 0 and nowMs >= writeDeadline and self.writeActive.load(.acquire);
+        if (readExpired and !@constCast(&self.readInterrupted).swap(true, .acq_rel)) {
+            self.shutdownRead();
+            self.shutdownWriteOnly();
+        }
+        if (writeExpired and !@constCast(&self.writeInterrupted).swap(true, .acq_rel)) self.shutdownWriteOnly();
+    }
+
     // I/O
 
     /// Reads up to buf.len bytes; partial reads are normal.
@@ -439,10 +587,18 @@ pub const Socket = struct {
         switch (self.inner) {
             .winsock => |s| {
                 if (!isWindows) unreachable;
+                if (remainingTimeoutMs(self.readDeadline, self.io)) |ms| {
+                    if (ms == 0) return ReadError.Timeout;
+                    const timeout: u32 = ms;
+                    _ = ws.setsockopt(s, ws.SOL_SOCKET, ws.SO_RCVTIMEO, &timeout, @sizeOf(u32));
+                }
+                @constCast(&self.readActive).store(true, .release);
+                defer @constCast(&self.readActive).store(false, .release);
                 const rc = ws.recv(s, buf.ptr, @intCast(@min(buf.len, 65536)), 0);
                 if (rc == ws.SOCKET_ERROR) {
                     return switch (ws.WSAGetLastError()) {
                         10054 => ReadError.ConnectionReset, // WSAECONNRESET
+                        ws.WSAETIMEDOUT => ReadError.Timeout,
                         0 => ReadError.ConnectionClosed,
                         else => ReadError.ReadFailed,
                     };
@@ -452,12 +608,20 @@ pub const Socket = struct {
             },
             .stream => |st| {
                 var data: [1][]u8 = .{buf};
-                const result = self.io.operate(.{ .net_read = .{
+                const operation: std.Io.Operation = .{ .net_read = .{
                     .socket_handle = st.socket.handle,
                     .data = &data,
-                } }) catch return ReadError.ReadFailed;
+                } };
+                if (remainingTimeoutMs(self.readDeadline, self.io)) |ms| {
+                    if (ms == 0) return ReadError.Timeout;
+                    setReadSocketTimeout(st.socket.handle, @max(1, ms));
+                }
+                @constCast(&self.readActive).store(true, .release);
+                defer @constCast(&self.readActive).store(false, .release);
+                const result = self.io.operate(operation) catch return ReadError.ReadFailed;
                 const rr = result.net_read catch |err| switch (err) {
                     error.ConnectionResetByPeer, error.Unexpected => return ReadError.ConnectionReset,
+                    error.ConnectionTimedOut => return ReadError.Timeout,
                     else => return ReadError.ReadFailed,
                 };
                 if (rr.data_len == 0) return 0; // EOF
@@ -471,10 +635,18 @@ pub const Socket = struct {
         switch (self.inner) {
             .winsock => |s| {
                 if (!isWindows) unreachable;
+                if (remainingTimeoutMs(self.writeDeadline, self.io)) |ms| {
+                    if (ms == 0) return WriteError.Timeout;
+                    const timeout: u32 = ms;
+                    _ = ws.setsockopt(s, ws.SOL_SOCKET, ws.SO_SNDTIMEO, &timeout, @sizeOf(u32));
+                }
+                @constCast(&self.writeActive).store(true, .release);
+                defer @constCast(&self.writeActive).store(false, .release);
                 const rc = ws.send(s, data.ptr, @intCast(@min(data.len, 65536)), 0);
                 if (rc == ws.SOCKET_ERROR) {
                     return switch (ws.WSAGetLastError()) {
                         10054, 10053 => WriteError.ConnectionReset, // WSAECONNRESET, WSAECONNABORTED
+                        ws.WSAETIMEDOUT => WriteError.Timeout,
                         else => WriteError.WriteFailed,
                     };
                 }
@@ -482,12 +654,20 @@ pub const Socket = struct {
             },
             .stream => |st| {
                 const chunk = data[0..@min(data.len, 4096)];
-                const result = self.io.operate(.{ .net_write = .{
+                const operation: std.Io.Operation = .{ .net_write = .{
                     .socket_handle = st.socket.handle,
                     .data = &.{chunk},
-                } }) catch return WriteError.WriteFailed;
+                } };
+                if (remainingTimeoutMs(self.writeDeadline, self.io)) |ms| {
+                    if (ms == 0) return WriteError.Timeout;
+                    setWriteSocketTimeout(st.socket.handle, @max(1, ms));
+                }
+                @constCast(&self.writeActive).store(true, .release);
+                defer @constCast(&self.writeActive).store(false, .release);
+                const result = self.io.operate(operation) catch return WriteError.WriteFailed;
                 const n = result.net_write catch |err| switch (err) {
                     error.ConnectionResetByPeer, error.Unexpected => return WriteError.ConnectionReset,
+                    error.ConnectionTimedOut => return WriteError.Timeout,
                     else => return WriteError.WriteFailed,
                 };
                 return n;
@@ -522,7 +702,11 @@ pub const Socket = struct {
 // Listener
 
 pub const Listener = struct {
-    server: net.Server,
+    inner: union(enum) {
+        winsock: if (isWindows) ws.SOCKET else void,
+        stream: net.Server,
+    },
+    address: net.IpAddress,
     boundPort: u16,
     family: addressMod.Family = .ip4,
     closed: bool = false,
@@ -535,14 +719,63 @@ pub const Listener = struct {
 
     /// Bind on an explicit Address - enables IPv6 ("::")  listeners.
     pub fn bindAddress(io: std.Io, addr: *const addressMod.Address) !Listener {
+        if (isWindows) return bindWinsock(addr);
         var stdAddr = addr.toStd(null);
         const server = try stdAddr.listen(io, .{ .reuse_address = true });
         return .{
-            .server = server,
+            .inner = .{ .stream = server },
+            .address = server.socket.address,
             .boundPort = switch (server.socket.address) {
                 .ip4 => |v| v.port,
                 .ip6 => |v| v.port,
             },
+            .family = addr.family,
+        };
+    }
+
+    fn bindWinsock(addr: *const addressMod.Address) !Listener {
+        ws.startup();
+        const family: i32 = if (addr.family == .ip4) ws.AF_INET else ws.AF_INET6;
+        const sock = ws.socket(family, ws.SOCK_STREAM, ws.IPPROTO_TCP);
+        if (sock == ws.INVALID_SOCKET) return error.AddressInUse;
+        errdefer _ = ws.closesocket(sock);
+
+        const reuse: c_int = 1;
+        _ = ws.setsockopt(sock, ws.SOL_SOCKET, ws.SO_REUSEADDR, &reuse, @sizeOf(c_int));
+        var actualPort = addr.port;
+        if (addr.family == .ip4) {
+            var native = ws.sockaddrIn{
+                .family = @intCast(ws.AF_INET),
+                .port = std.mem.nativeToBig(u16, addr.port),
+                .addr = addr.bytes[0..4].*,
+            };
+            if (ws.bind(sock, &native, @sizeOf(ws.sockaddrIn)) == ws.SOCKET_ERROR) return error.AddressInUse;
+            if (ws.listen(sock, ws.SOMAXCONN) == ws.SOCKET_ERROR) return error.AddressInUse;
+            if (addr.port == 0) {
+                var len: i32 = @sizeOf(ws.sockaddrIn);
+                if (ws.getsockname(sock, &native, &len) == ws.SOCKET_ERROR) return error.AddressInUse;
+                actualPort = std.mem.bigToNative(u16, native.port);
+            }
+        } else {
+            var native = ws.sockaddrIn6{
+                .family = @intCast(ws.AF_INET6),
+                .port = std.mem.nativeToBig(u16, addr.port),
+                .addr = addr.bytes,
+                .scopeId = addr.zone,
+            };
+            if (ws.bind(sock, &native, @sizeOf(ws.sockaddrIn6)) == ws.SOCKET_ERROR) return error.AddressInUse;
+            if (ws.listen(sock, ws.SOMAXCONN) == ws.SOCKET_ERROR) return error.AddressInUse;
+            if (addr.port == 0) {
+                var len: i32 = @sizeOf(ws.sockaddrIn6);
+                if (ws.getsockname(sock, &native, &len) == ws.SOCKET_ERROR) return error.AddressInUse;
+                actualPort = std.mem.bigToNative(u16, native.port);
+            }
+        }
+
+        return .{
+            .inner = .{ .winsock = sock },
+            .address = addr.toStd(actualPort),
+            .boundPort = actualPort,
             .family = addr.family,
         };
     }
@@ -553,15 +786,34 @@ pub const Listener = struct {
 
     /// Accepts a connection.
     pub fn accept(self: *Listener, io: std.Io) !Socket {
-        const conn = self.server.accept(io) catch return error.AcceptFailed;
-        return Socket.init(conn, io);
+        return switch (self.inner) {
+            .winsock => |s| blk: {
+                if (!isWindows) unreachable;
+                const conn = ws.accept(s, null, null);
+                if (conn == ws.INVALID_SOCKET) return error.AcceptFailed;
+                break :blk Socket.fromWinsock(conn, io);
+            },
+            .stream => |*server| blk: {
+                const conn = server.accept(io) catch return error.AcceptFailed;
+                break :blk Socket.init(conn, io);
+            },
+        };
     }
 
     /// Closes the listening socket. Idempotent; wakes a concurrent accept().
     pub fn close(self: *Listener, io: std.Io) void {
         if (self.closed) return;
         self.closed = true;
-        self.server.deinit(io);
+        switch (self.inner) {
+            .winsock => |s| if (isWindows) {
+                _ = ws.closesocket(s);
+            },
+            .stream => |*server| server.deinit(io),
+        }
+    }
+
+    pub fn localAddress(self: *const Listener) net.IpAddress {
+        return self.address;
     }
 };
 

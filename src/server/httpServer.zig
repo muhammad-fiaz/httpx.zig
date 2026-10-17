@@ -1,8 +1,8 @@
 //! HTTP/1.1 server: accept loop -> parser -> router dispatch -> writer.
 //!
-//! One connection per iteration with Connection: close framing; a fresh
-//! request arena backs each connection so handlers can allocate freely and
-//! everything is released when the response is written.
+//! Accepted connections run on a fixed worker pool with bounded admission and
+//! queue capacity. A fresh request arena backs each connection so handlers can
+//! allocate freely and everything is released when the connection completes.
 //!
 //! API documentation routes (OpenAPI + Swagger UI + ReDoc) are mounted by
 //! default; disable with `Config.enableDocs = false` or customize through
@@ -50,6 +50,20 @@ pub const maxHeadBytes = 32 * 1024;
 pub const StreamConn = union(enum) {
     plain: *tcp.Socket,
     tls: *tlsServerMod.Server.Connection,
+
+    pub fn setReadTimeoutMs(self: StreamConn, timeoutMs: u32) void {
+        switch (self) {
+            .plain => |socket| socket.setReadTimeoutMs(timeoutMs),
+            .tls => |connection| connection.socket.setReadTimeoutMs(timeoutMs),
+        }
+    }
+
+    pub fn setWriteTimeoutMs(self: StreamConn, timeoutMs: u32) void {
+        switch (self) {
+            .plain => |socket| socket.setWriteTimeoutMs(timeoutMs),
+            .tls => |connection| connection.socket.setWriteTimeoutMs(timeoutMs),
+        }
+    }
 
     pub fn read(self: StreamConn, buf: []u8) anyerror!usize {
         return switch (self) {
@@ -128,9 +142,28 @@ pub const Config = struct {
     /// Largest accepted request body.
     maxBody: usize = 8 * 1024 * 1024,
     /// Total connections run() serves before returning (0 = unlimited).
-    /// Tests use small values to join the run thread deterministically;
-    /// production servers leave this 0 and shut down via requestShutdown().
+    /// Counts successfully queued connections, not simultaneous connections.
+    /// Tests use small values to join the run thread deterministically.
     maxConnections: usize = 0,
+    /// Maximum accepted connections being processed or waiting in the bounded
+    /// worker queue. Excess connections are closed immediately.
+    maxConcurrentConnections: usize = 128,
+    /// Maximum connections waiting for a worker. A full queue closes the newly
+    /// accepted socket, keeping memory and pending work bounded.
+    maxQueuedConnectionTasks: usize = 128,
+    /// Fixed worker count. Zero selects up to 16 CPUs, capped by
+    /// maxConcurrentConnections.
+    workerCount: u16 = 0,
+    /// Deadline for the first bytes and protocol sniff after accept; zero disables.
+    initialRequestTimeoutMs: u32 = 5_000,
+    /// Absolute deadline to finish an HTTP request header after its first byte; zero disables.
+    headerReadTimeoutMs: u32 = 10_000,
+    /// Absolute deadline to receive a complete request body; zero disables.
+    requestBodyTimeoutMs: u32 = 30_000,
+    /// Absolute write deadline for interim and final responses; zero disables.
+    writeTimeoutMs: u32 = 30_000,
+    /// Deadline waiting for the next request on an HTTP/1 keep-alive connection; zero disables.
+    keepAliveIdleTimeoutMs: u32 = 30_000,
     /// Mount /openapi.json, /docs (Swagger UI), /redoc by default.
     enableDocs: bool = true,
     /// Overrides for docs routes when enabled.
@@ -254,6 +287,8 @@ pub const Server = struct {
     docsMounted: bool = false,
     watcher: ?*watcherMod.Watcher = null,
     sitePtr: ?*anyopaque = null,
+    deadlineMonitorStop: std.atomic.Value(bool) = .init(false),
+    deadlineMonitorThread: ?std.Thread = null,
     siteReloadFn: ?*const fn (sitePtr: ?*anyopaque, server: *Server) void = null,
     liveReloadEventId: std.atomic.Value(usize) = .init(1),
     /// Last reload strategy reported by the watcher (as a
@@ -284,6 +319,13 @@ pub const Server = struct {
     fn initInternal(
         allocator: Allocator,
         io: std.Io,
+    const ConnectionTask = struct {
+        server: *Server,
+        socket: tcp.Socket,
+    };
+
+    const ConnectionPool = @import("../concurrency/workerPool.zig").Pool;
+
         ownsIo: bool,
         ioThreaded: ?*std.Io.Threaded,
         cfg: Config,
@@ -297,6 +339,9 @@ pub const Server = struct {
         };
 
         // Default: all-interfaces IPv4. Explicit literals (incl. "::") bind
+        if (cfg.maxConcurrentConnections == 0 or cfg.maxQueuedConnectionTasks == 0) {
+            return error.InvalidConcurrencyLimits;
+        }
         // their family; anything unparsable falls back to 0.0.0.0.
         var addr: addressMod.Address = blk: {
             if (std.mem.eql(u8, cfg.host, "0.0.0.0")) break :blk addressMod.Address.unspecified4(cfg.port);
@@ -758,8 +803,9 @@ pub const Server = struct {
         return self.listener.localPort();
     }
 
-    /// Signals the accept loop to stop and wakes a blocked accept() by
-    /// closing the listening socket (POSIX) or connecting a dummy socket (Windows).
+    /// Stops accepting and lets active requests finish. Active I/O is bounded
+    /// by the configured phase deadlines; queued sockets are closed by workers
+    /// without beginning new requests. Use stop() for immediate cancellation.
     /// Safe to call multiple times.
     pub fn requestShutdown(self: *Server) void {
         if (!self.loggedStop.swap(true, .acq_rel)) {
@@ -776,17 +822,10 @@ pub const Server = struct {
         if (@import("builtin").os.tag != .windows) {
             self.listener.close(self.io);
         }
-
-        // A keep-alive worker may be blocked in recv() and therefore never
-        // reach accept(). Wake those readers immediately; Socket.close is
-        // idempotent and the worker's deferred close will observe the same close flag.
-        self.connsMu.lock();
-        for (self.activeConns.items) |conn| conn.close();
-        self.connsMu.unlock();
     }
 
-    /// Immediate shutdown (no graceful drain). Sets stop flag and shuts down
-    /// the listener + all connections cleanly without triggering Windows AFD panic.
+    /// Immediate shutdown (no graceful drain). Stops the listener and
+    /// interrupts active socket I/O; each worker owns final socket cleanup.
     pub fn stop(self: *Server) void {
         self.requestShutdown();
     }
@@ -798,6 +837,9 @@ pub const Server = struct {
 
     /// Non-blocking server start. Spawns a thread that calls `run()`.
     /// Returns the thread handle so the caller can join.
+        self.connsMu.lock();
+        for (self.activeConns.items) |conn| conn.interruptIo();
+        self.connsMu.unlock();
     pub fn start(self: *Server) !std.Thread {
         return std.Thread.spawn(.{}, (struct {
             fn run(s: *Server) void {
@@ -821,12 +863,14 @@ pub const Server = struct {
 
     /// Return the full bound address. Supports IPv4 and IPv6.
     pub fn localAddress(self: *const Server) std.Io.net.IpAddress {
-        return self.listener.server.socket.address;
+        return self.listener.localAddress();
     }
 
-    /// Blocking accept loop. `requestShutdown()` takes effect between
-    /// accepts; `maxConnections` (when nonzero) makes run() return after
-    /// that many connections, which is how tests join deterministically.
+    /// Blocking accept loop. Connections are handed to a fixed-size worker
+    /// pool. Active plus queued connections are bounded by
+    /// maxConcurrentConnections; overload is handled by closing the newest
+    /// accepted socket. requestShutdown stops acceptance and drains in-flight
+    /// work; stop additionally closes active sockets immediately.
     /// Installs a Ctrl+C handler for graceful shutdown.
     pub fn run(self: *Server) void {
         // Mount docs here (not in init) because init returns by value,
@@ -923,9 +967,29 @@ pub const Server = struct {
                 }
             }
         }
-        var served: usize = 0;
+        var workerCount: usize = self.cfg.workerCount;
+        if (workerCount == 0) {
+            workerCount = std.Thread.getCpuCount() catch 4;
+            workerCount = @min(workerCount, 16);
+        }
+        workerCount = @max(1, @min(workerCount, self.cfg.maxConcurrentConnections));
+        var workers = ConnectionPool.init(self.allocator, .{
+            .workers = @intCast(workerCount),
+            .queueCapacity = @intCast(@min(self.cfg.maxQueuedConnectionTasks, std.math.maxInt(u32))),
+            .autoStart = false,
+        }) catch return;
+        defer workers.deinit();
+        workers.start() catch return;
+        self.deadlineMonitorStop.store(false, .release);
+        self.deadlineMonitorThread = std.Thread.spawn(.{}, monitorConnectionDeadlines, .{self}) catch {
+            workers.shutdownDrain();
+            workers.join();
+            return;
+        };
+
+        var accepted: usize = 0;
         while (!self.stopFlag.load(.acquire)) {
-            if (self.cfg.maxConnections != 0 and served >= self.cfg.maxConnections) break;
+            if (self.cfg.maxConnections != 0 and accepted >= self.cfg.maxConnections) break;
             // Yield when paused
             while (self.paused.load(.acquire) and !self.stopFlag.load(.acquire)) {
                 clock.sleepMillis(10);
@@ -936,11 +1000,34 @@ pub const Server = struct {
                 break;
             };
             self.inAccept.store(false, .release);
-            defer conn.close();
-            var arena = std.heap.ArenaAllocator.init(self.allocator);
-            defer arena.deinit();
-            self.serveConnection(&conn, arena.allocator()) catch {};
-            served += 1;
+            conn.setReadTimeoutMs(self.cfg.initialRequestTimeoutMs);
+            const task = self.allocator.create(ConnectionTask) catch {
+                conn.close();
+                continue;
+            };
+            task.* = .{ .server = self, .socket = conn };
+
+            const sock = &task.socket;
+            self.connsMu.lock();
+            var admitted = false;
+            if (!self.stopFlag.load(.acquire) and self.activeConns.items.len < self.cfg.maxConcurrentConnections) {
+                self.activeConns.append(self.allocator, sock) catch {};
+                admitted = self.activeConns.items.len > 0 and self.activeConns.items[self.activeConns.items.len - 1] == sock;
+            }
+            self.connsMu.unlock();
+            if (!admitted) {
+                sock.close();
+                self.allocator.destroy(task);
+                continue;
+            }
+
+            workers.trySubmit(runConnectionTask, task, null) catch {
+                self.removeActiveConnection(sock);
+                sock.close();
+                self.allocator.destroy(task);
+                continue;
+            };
+            accepted += 1;
 
             // Stop before blocking on the next accept when asked.
             if (self.stopFlag.load(.acquire)) break;
@@ -954,6 +1041,13 @@ pub const Server = struct {
         if (self.h3Pump) |p| {
             self.allocator.destroy(p);
             self.h3Pump = null;
+        workers.shutdownDrain();
+        workers.join();
+        self.deadlineMonitorStop.store(true, .release);
+        if (self.deadlineMonitorThread) |thread| {
+            thread.join();
+            self.deadlineMonitorThread = null;
+        }
         }
         self.emit(.{ .kind = .serverStopped, .level = .info, .message = "shutdown complete" });
     }
@@ -967,6 +1061,42 @@ pub const Server = struct {
     }
 
     fn serveConnection(self: *Server, conn: *tcp.Socket, arenaIn: Allocator) !void {
+    fn runConnectionTask(ctx: ?*anyopaque, _: *std.atomic.Value(bool)) void {
+        const task: *ConnectionTask = @ptrCast(@alignCast(ctx.?));
+        const server = task.server;
+        const socket = &task.socket;
+        defer {
+            socket.close();
+            server.removeActiveConnection(socket);
+            server.allocator.destroy(task);
+        }
+        if (server.stopFlag.load(.acquire)) return;
+        var arena = std.heap.ArenaAllocator.init(server.allocator);
+        defer arena.deinit();
+        server.serveConnection(socket, arena.allocator()) catch {};
+    }
+
+    fn monitorConnectionDeadlines(server: *Server) void {
+        while (!server.deadlineMonitorStop.load(.acquire)) {
+            const now = clock.monotonicMillis();
+            server.connsMu.lock();
+            for (server.activeConns.items) |socket| socket.closeIfIoDeadlineExpired(now);
+            server.connsMu.unlock();
+            clock.sleepMillis(5);
+        }
+    }
+
+    fn removeActiveConnection(self: *Server, socket: *tcp.Socket) void {
+        self.connsMu.lock();
+        defer self.connsMu.unlock();
+        for (self.activeConns.items, 0..) |active, i| {
+            if (active == socket) {
+                _ = self.activeConns.swapRemove(i);
+                return;
+            }
+        }
+    }
+
         _ = arenaIn;
         self.metricsRegistry.connectionOpened();
         defer self.metricsRegistry.connectionClosed();
@@ -1090,6 +1220,7 @@ pub const Server = struct {
 
         var arenaState = std.heap.ArenaAllocator.init(self.allocator);
         defer arenaState.deinit();
+        conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
         const transportMod = @import("../protocols/http2/transport.zig");
 
         // ServerCtx accumulates streams
@@ -1218,10 +1349,12 @@ pub const Server = struct {
         // any client. If the OS entropy source is unavailable we issue no
         // tickets, which is what the TCP path does when unconfigured.
         var generatedKeys: ?tlsSessionMod.TicketKeys = null;
+                    conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
         const ticketKeys: ?tlsSessionMod.TicketKeys = if (self.cfg.tls) |t|
             t.ticketKeys
         else if (tlsSessionMod.TicketKeys.generate(self.io)) |k| blk: {
             generatedKeys = k;
+            conn.setReadTimeoutMs(self.cfg.keepAliveIdleTimeoutMs);
             break :blk k;
         } else |_| null;
         defer if (generatedKeys != null) {
@@ -1386,28 +1519,6 @@ pub const Server = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
 
-        const sock: *tcp.Socket = switch (conn) {
-            .plain => |p| p,
-            .tls => |t| t.socket,
-        };
-
-        self.connsMu.lock();
-        self.activeConns.append(self.allocator, sock) catch |err| {
-            self.connsMu.unlock();
-            return err;
-        };
-        self.connsMu.unlock();
-        defer {
-            self.connsMu.lock();
-            for (self.activeConns.items, 0..) |sc, i| {
-                if (sc == sock) {
-                    _ = self.activeConns.swapRemove(i);
-                    break;
-                }
-            }
-            self.connsMu.unlock();
-        }
-
         var servedN: usize = 0;
         while (servedN < self.cfg.maxRequestsPerConn) : (servedN += 1) {
             _ = arena.reset(.retain_capacity);
@@ -1421,7 +1532,7 @@ pub const Server = struct {
         return self.serveOneRequestBuffered(conn, arena, idx, forceClose, "", isTlsConn);
     }
 
-    fn serveOneRequestBuffered(self: *Server, conn: StreamConn, arena: Allocator, _: usize, forceClose: bool, initial: []const u8, isTlsConn: bool) !bool {
+    fn serveOneRequestBuffered(self: *Server, conn: StreamConn, arena: Allocator, requestIndex: usize, forceClose: bool, initial: []const u8, isTlsConn: bool) !bool {
         const t0 = clock.millisNow();
         self.metricsRegistry.recordRequest();
         var headBuf: [maxHeadBytes]u8 = undefined;
@@ -1483,6 +1594,7 @@ pub const Server = struct {
         // Connection reuse decision (RFC 9112 Section 7): explicit "close" wins;
         // HTTP/1.0 defaults to close unless it requested keep-alive.
         var clientClose = forceClose or reqHead.minorVersion == 0;
+            if (self.stopFlag.load(.acquire)) break;
         var clientKa10 = false;
         for (hdrs) |h| {
             if (!std.ascii.eqlIgnoreCase(h.name, "connection")) continue;
@@ -1504,6 +1616,12 @@ pub const Server = struct {
                 if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, field.value, " \t"), "100-continue")) {
                     _ = sendSimpleError(conn, 417, "expectation failed") catch 0;
                     return false;
+        var headerDeadlineStarted = filled != 0;
+        if (headerDeadlineStarted) {
+            conn.setReadTimeoutMs(self.cfg.headerReadTimeoutMs);
+        } else {
+            conn.setReadTimeoutMs(if (requestIndex == 0) self.cfg.initialRequestTimeoutMs else self.cfg.keepAliveIdleTimeoutMs);
+        }
                 }
             }
         }
@@ -1522,6 +1640,10 @@ pub const Server = struct {
                     }
                     body = arena.alloc(u8, fr.length) catch return false;
                     // How many body bytes were already pulled in by the header reads.
+            if (!headerDeadlineStarted) {
+                headerDeadlineStarted = true;
+                conn.setReadTimeoutMs(self.cfg.headerReadTimeoutMs);
+            }
                     const buffered = if (filled > blk.end) filled - blk.end else 0;
                     if (buffered > fr.length) clientClose = true;
                     const take = @min(buffered, fr.length);
@@ -1583,6 +1705,7 @@ pub const Server = struct {
             return false;
         };
 
+            conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
         const isHead = method == .HEAD;
 
         const rawPath = reqHead.path;
@@ -1600,6 +1723,7 @@ pub const Server = struct {
         var ctx = Context{
             .allocator = arena,
             .io = self.io,
+                    if (fr.length > 0) conn.setReadTimeoutMs(self.cfg.requestBodyTimeoutMs);
             .headers = hdrs,
             .path = cleanPath,
             .query = queryPart,
@@ -1610,11 +1734,13 @@ pub const Server = struct {
         };
         const res: Response = self.router.dispatch(&ctx);
 
+        conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
         const bytesOut = writeResponse(conn, arena, reqHead.minorVersion, try self.withLiveReload(arena, res, isHead), isHead, if (clientClose) "close" else "keep-alive", ctx.header("Accept-Encoding")) catch {
             self.metricsRegistry.recordError();
             return false;
         };
         const durNs: u64 = @intCast(@max(0, (clock.millisNow() -| t0) * 1_000_000));
+                    conn.setReadTimeoutMs(self.cfg.requestBodyTimeoutMs);
         self.metricsRegistry.recordResponseFull(res.status, durNs, bytesOut);
         self.emitAccess(reqHead.method, reqHead.path, res.status, body.len, bytesOut, t0);
         return !clientClose;
@@ -2145,6 +2271,199 @@ test "server serves routed GET end to end" {
     try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "Content-Security-Policy-Report-Only: default-src 'self'; report-uri /csp-report\r\n") != null);
     try std.testing.expect(total > 20);
 
+    srv.requestShutdown();
+}
+
+
+test "idle and incomplete headers cannot block a normal request" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = try Server.init(a, ctx.io, .{
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 3,
+        .maxConcurrentConnections = 3,
+        .maxQueuedConnectionTasks = 3,
+        .workerCount = 3,
+        .initialRequestTimeoutMs = 1_000,
+        .headerReadTimeoutMs = 1_000,
+        .writeTimeoutMs = 1_000,
+    });
+    defer srv.deinit();
+    try srv.router.get("/ok", returnOk, .{});
+
+    const Runner = struct {
+        fn run(server: *Server) void {
+            server.run();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&srv});
+    defer thread.join();
+
+    var idle = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    defer idle.close();
+
+    var incomplete = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    defer incomplete.close();
+    try incomplete.writeAll("GET /ok HTTP/1.1\r\nHost: ");
+
+    var client = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    defer client.close();
+    client.setReadTimeoutMs(2_000);
+    try client.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+
+    var response: [1024]u8 = undefined;
+    var total: usize = 0;
+    while (total < response.len) {
+        const n = try client.read(response[total..]);
+        if (n == 0) break;
+        total += n;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, response[0..total], "HTTP/1.1 200 OK") != null);
+    try std.testing.expect(std.mem.endsWith(u8, response[0..total], "ok"));
+    idle.close();
+    incomplete.close();
+}
+
+test "stalled request body is timed out without blocking another client" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = try Server.init(a, ctx.io, .{
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 2,
+        .maxConcurrentConnections = 2,
+        .maxQueuedConnectionTasks = 2,
+        .workerCount = 1,
+        .initialRequestTimeoutMs = 1_000,
+        .headerReadTimeoutMs = 1_000,
+        .requestBodyTimeoutMs = 300,
+        .writeTimeoutMs = 1_000,
+    });
+    defer srv.deinit();
+    try srv.router.get("/ok", returnOk, .{});
+
+    const Runner = struct {
+        fn run(server: *Server) void {
+            server.run();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&srv});
+    defer thread.join();
+
+    var stalled = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    defer stalled.close();
+    stalled.setReadTimeoutMs(2_000);
+    try stalled.writeAll("POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\n\r\nabc");
+
+    var client = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    defer client.close();
+    client.setReadTimeoutMs(2_000);
+    try client.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+
+    var response: [1024]u8 = undefined;
+    var total: usize = 0;
+    while (total < response.len) {
+        const n = try client.read(response[total..]);
+        if (n == 0) break;
+        total += n;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, response[0..total], "HTTP/1.1 200 OK") != null);
+    // The incomplete upload owns only one worker for the configured body
+    // deadline, after which the server closes it and releases its slot.
+    var one: [1]u8 = undefined;
+    const stalledRead = stalled.read(&one);
+    if (stalledRead) |n| {
+        try std.testing.expectEqual(@as(usize, 0), n);
+    } else |err| {
+        try std.testing.expect(err == error.ConnectionReset or err == error.ConnectionClosed or err == error.ReadFailed);
+    }
+}
+
+test "connection limit rejects overload then accepts clients after a stalled upload expires" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = try Server.init(a, ctx.io, .{
+        .port = 0,
+        .enableDocs = false,
+        .maxConcurrentConnections = 1,
+        .maxQueuedConnectionTasks = 1,
+        .workerCount = 1,
+        .initialRequestTimeoutMs = 1_000,
+        .headerReadTimeoutMs = 1_000,
+        .requestBodyTimeoutMs = 250,
+        .writeTimeoutMs = 1_000,
+    });
+    defer srv.deinit();
+    try srv.router.get("/ok", returnOk, .{});
+
+    const Runner = struct {
+        fn run(server: *Server) void {
+            server.run();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&srv});
+    defer thread.join();
+
+    var stalled = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    defer stalled.close();
+    try stalled.writeAll("POST /ok HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\n\r\nabc");
+
+    // Wait until the first socket owns the only connection slot before
+    // opening the overload connection; this makes the admission assertion
+    // deterministic instead of relying on accept scheduling.
+    var spins: usize = 0;
+    while (spins < 200) : (spins += 1) {
+        srv.connsMu.lock();
+        const admitted = srv.activeConns.items.len == 1;
+        srv.connsMu.unlock();
+        if (admitted) break;
+        clock.sleepMillis(5);
+    }
+    srv.connsMu.lock();
+    const firstAdmitted = srv.activeConns.items.len == 1;
+    srv.connsMu.unlock();
+    try std.testing.expect(firstAdmitted);
+
+    var overloaded = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    defer overloaded.close();
+    var byte: [1]u8 = undefined;
+    const overloadedRead = overloaded.read(&byte);
+    if (overloadedRead) |n| {
+        try std.testing.expectEqual(@as(usize, 0), n);
+    } else |err| {
+        try std.testing.expect(err == error.ConnectionReset or err == error.ConnectionClosed or err == error.ReadFailed);
+    }
+
+    // The deadline releases the only worker and connection slot. A later
+    // ordinary request must still be accepted and served successfully.
+    var one: [1]u8 = undefined;
+    const stalledRead = stalled.read(&one);
+    if (stalledRead) |n| {
+        try std.testing.expectEqual(@as(usize, 0), n);
+    } else |err| {
+        try std.testing.expect(err == error.ConnectionReset or err == error.ConnectionClosed or err == error.ReadFailed);
+    }
+
+    var recovered = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    defer recovered.close();
+    recovered.setReadTimeoutMs(2_000);
+    try recovered.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    var response: [1024]u8 = undefined;
+    var total: usize = 0;
+    while (total < response.len) {
+        const n = try recovered.read(response[total..]);
+        if (n == 0) break;
+        total += n;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, response[0..total], "HTTP/1.1 200 OK") != null);
+    try std.testing.expect(std.mem.endsWith(u8, response[0..total], "ok"));
     srv.requestShutdown();
 }
 

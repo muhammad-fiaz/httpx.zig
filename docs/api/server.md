@@ -64,7 +64,15 @@ defer server.deinit();
 | `portStrategy` | `PortStrategy` | `.incremental` | Startup behavior when the port is occupied (`.incremental`, `.strict`, `.exit`). |
 | `maxPortAttempts` | `u16` | `50` | Port candidates to try when `portStrategy = .incremental`. |
 | `maxBody` | `usize` | `8MB` | Largest accepted request body. |
-| `maxConnections` | `usize` | `0` | Total connections `run()` serves before returning (`0` = unlimited; tests use small values to join deterministically). |
+| `maxConnections` | `usize` | `0` | Total connections successfully queued before `run()` stops accepting (`0` = unlimited). |
+| `maxConcurrentConnections` | `usize` | `128` | Bound across connections being processed or queued. New connections above the limit are closed. Must be greater than zero. |
+| `maxQueuedConnectionTasks` | `usize` | `128` | Bounded worker queue capacity. Newly accepted sockets are closed when the queue is full. Must be greater than zero. |
+| `workerCount` | `u16` | `0` | Fixed worker count; zero selects up to 16 CPUs, capped by `maxConcurrentConnections`. |
+| `initialRequestTimeoutMs` | `u32` | `5000` | Maximum time from accept to the first request bytes and protocol sniff. Zero disables the deadline. |
+| `headerReadTimeoutMs` | `u32` | `10000` | Absolute time to finish request headers after the first byte. Zero disables the deadline. |
+| `requestBodyTimeoutMs` | `u32` | `30000` | Absolute time to receive a complete body. Zero disables the deadline. |
+| `writeTimeoutMs` | `u32` | `30000` | Absolute time allowed for an interim or final response write. Zero disables the deadline. |
+| `keepAliveIdleTimeoutMs` | `u32` | `30000` | Maximum wait for the next request on an HTTP/1 keep-alive connection. Zero disables the deadline. |
 | `maxRequestsPerConn` | `usize` | `1000` | Max requests served per keep-alive connection. |
 | `keepAlive` | `bool` | `false` | Honor HTTP/1.1 keep-alive on connections. |
 | `allowLfLineEndings` | `bool` | `false` | Accept bare LF line endings when parsing requests. |
@@ -87,6 +95,29 @@ defer server.deinit();
 | `tls` | `?tls.Server.Config` | `null` | TLS/HTTPS config (certificate + private key). |
 
 All `ServerConfig` fields are optional customizations. Omitted fields use the built-in defaults; `. {}` is the safe default.
+
+### Connection handling and concurrency
+
+The accept loop submits connections to a fixed worker pool. `maxConcurrentConnections`
+counts both active workers and queued sockets; the queue itself is bounded by
+`maxQueuedConnectionTasks`. When either limit is reached, the server closes
+the newest accepted socket. `maxConnections` is a separate lifetime limit and
+counts successfully queued connections.
+
+The timeout fields are absolute deadlines for each I/O phase, not inactivity
+windows that restart after every byte. On Windows the server monitors pending
+socket operations and shuts down the timed-out direction to release a blocked
+worker; POSIX socket timeout options are also applied. A zero timeout disables
+the corresponding deadline. Graceful `requestShutdown()` stops acceptance,
+lets active requests finish within their I/O deadlines, and closes queued
+sockets without starting new requests. `stop()` closes active sockets
+immediately. A user handler that blocks without returning is not forcibly
+cancelled.
+
+Route registration and configuration must finish before `run()` starts.
+Handlers and the logging callback may be invoked concurrently from different
+worker threads, so shared application state must be synchronized by the
+application.
 
 ### Server Lifecycle
 
@@ -165,7 +196,7 @@ _ = p;
 
 #### `stop`
 
-Stops the server gracefully.
+Stops the server immediately and closes active sockets.
 
 ```zig
 server.stop();
