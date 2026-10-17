@@ -57,6 +57,12 @@ Connection: keep-alive
 3. **100 Continue Handling**: The client automatically handles `Expect: 100-continue` for large file uploads, verifying server authorization before transmitting large request bodies.
 4. **Header Normalization**: Headers are parsed case-insensitively while preserving RFC 9110 formatting.
 
+HTTPX currently decodes the `chunked` transfer coding only. It rejects repeated
+`Transfer-Encoding` fields and coding chains such as `gzip, chunked` instead of
+passing transfer-encoded bytes to the application as if they were the message
+content. Representation codings such as `Content-Encoding: gzip` are handled by
+the separate compression layer.
+
 ## Client Usage Example
 
 ```zig
