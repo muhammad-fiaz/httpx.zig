@@ -57,7 +57,7 @@ pub fn main() !void {
         .{ .taskId = 3, .url = sampleUrl, .dest = "downloads/batch_file3.bin" },
     };
 
-    var pool = try httpx.WorkerPool.init(allocator, .{
+    var pool = try httpx.WorkerPool.init(allocator, io, .{
         .workers = 4,
     });
     defer pool.deinit();

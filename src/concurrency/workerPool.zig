@@ -41,10 +41,11 @@ pub const Stats = struct {
     }
 };
 
-pub const SubmitError = error{ QueueFull, ShuttingDown, OutOfMemory };
+pub const SubmitError = error{ QueueFull, QueueBusy, ShuttingDown, OutOfMemory };
 
 pub const Pool = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     queue: BoundedQueue(Job),
     threads: []std.Thread,
     stats: Stats = .{},
@@ -60,7 +61,7 @@ pub const Pool = struct {
         cancel: ?*std.atomic.Value(bool),
     };
 
-    pub fn init(allocator: std.mem.Allocator, cfg: Config) !Pool {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, cfg: Config) !Pool {
         const cap: usize = @max(1, @as(usize, cfg.queueCapacity));
         var n: usize = cfg.workers;
         if (n == 0) {
@@ -68,10 +69,11 @@ pub const Pool = struct {
             if (n > 16) n = 16;
             if (n < 1) n = 1;
         }
-        var queue = try BoundedQueue(Job).init(allocator, cap);
+        var queue = try BoundedQueue(Job).init(allocator, io, cap);
         errdefer queue.deinit();
         return .{
             .allocator = allocator,
+            .io = io,
             .queue = queue,
             .threads = try allocator.alloc(std.Thread, n),
             .cfg = cfg,
@@ -140,6 +142,10 @@ pub const Pool = struct {
                 _ = self.stats.rejected.fetchAdd(1, .monotonic);
                 return error.QueueFull;
             },
+            error.Busy => {
+                _ = self.stats.rejected.fetchAdd(1, .monotonic);
+                return error.QueueBusy;
+            },
             error.Closed => {
                 _ = self.stats.rejected.fetchAdd(1, .monotonic);
                 return error.ShuttingDown;
@@ -199,7 +205,8 @@ test "pool executes submitted tasks" {
         }
     };
     var ctx = Ctx{};
-    var p = try Pool.init(std.testing.allocator, .{ .workers = 2, .queueCapacity = 8 });
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var p = try Pool.init(std.testing.allocator, io, .{ .workers = 2, .queueCapacity = 8 });
     defer p.deinit();
     try p.start();
     var i: usize = 0;
@@ -214,21 +221,24 @@ test "pool executes submitted tasks" {
 }
 
 test "pool rejects when shut down" {
-    var p = try Pool.init(std.testing.allocator, .{ .workers = 1 });
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var p = try Pool.init(std.testing.allocator, io, .{ .workers = 1 });
     defer p.deinit();
     p.shutdownDrain();
     try std.testing.expectError(error.ShuttingDown, p.submit(dummy, null, null));
 }
 
 test "zero workers auto-configures" {
-    var p = try Pool.init(std.testing.allocator, .{});
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var p = try Pool.init(std.testing.allocator, io, .{});
     defer p.deinit();
     try p.start();
     try std.testing.expect(p.threads.len >= 1);
 }
 
 test "pool cancel queued tasks" {
-    var p = try Pool.init(std.testing.allocator, .{ .workers = 1, .queueCapacity = 16 });
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var p = try Pool.init(std.testing.allocator, io, .{ .workers = 1, .queueCapacity = 16 });
     defer p.deinit();
 
     var cancelFlag = std.atomic.Value(bool).init(false);

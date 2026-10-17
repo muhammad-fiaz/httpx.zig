@@ -982,7 +982,7 @@ pub const Server = struct {
             workerCount = @min(workerCount, 16);
         }
         workerCount = @max(1, @min(workerCount, self.cfg.maxConcurrentConnections));
-        var workers = ConnectionPool.init(self.allocator, .{
+        var workers = ConnectionPool.init(self.allocator, self.io, .{
             .workers = @intCast(workerCount),
             .queueCapacity = @intCast(@min(self.cfg.maxQueuedConnectionTasks, std.math.maxInt(u32))),
             .autoStart = false,

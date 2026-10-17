@@ -928,13 +928,13 @@ pub fn main() !void {
     benchIo = io;
 
     // 1. Initialize WorkerPool
-    var pool = try httpx.WorkerPool.init(benchAllocator, .{ .workers = 2, .queueCapacity = 256 });
+    var pool = try httpx.WorkerPool.init(benchAllocator, io, .{ .workers = 2, .queueCapacity = 256 });
     try pool.start();
     defer pool.deinit();
     benchPool = &pool;
 
     // 2. Initialize BoundedQueue
-    benchQueue = try httpx.concurrency.queue.BoundedQueue(usize).init(benchAllocator, 1024);
+    benchQueue = try httpx.concurrency.queue.BoundedQueue(usize).init(benchAllocator, io, 1024);
     defer benchQueue.deinit();
 
     // 3. Initialize Router with diverse routes
