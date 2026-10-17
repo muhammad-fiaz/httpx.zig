@@ -389,8 +389,8 @@ pub const Socket = struct {
     /// just before each per-read socket timeout.
     readDeadline: ?std.Io.Clock.Timestamp = null,
     writeDeadline: ?std.Io.Clock.Timestamp = null,
-    readDeadlineMs: std.atomic.Value(i64) = .init(0),
-    writeDeadlineMs: std.atomic.Value(i64) = .init(0),
+    readDeadlineMs: std.atomic.Value(u32) = .init(0),
+    writeDeadlineMs: std.atomic.Value(u32) = .init(0),
     readActive: std.atomic.Value(bool) = .init(false),
     writeActive: std.atomic.Value(bool) = .init(false),
     readInterrupted: std.atomic.Value(bool) = .init(false),
@@ -496,7 +496,7 @@ pub const Socket = struct {
     pub fn setReadTimeoutMs(self: *Socket, timeoutMs: u32) void {
         self.readDeadline = deadlineAfterMs(self.io, timeoutMs);
         self.readInterrupted.store(false, .release);
-        self.readDeadlineMs.store(if (timeoutMs == 0) 0 else clock.monotonicMillis() +| @as(i64, @intCast(timeoutMs)), .release);
+        self.readDeadlineMs.store(deadlineTicksNow(timeoutMs), .release);
         switch (self.inner) {
             .winsock => |s| if (isWindows) {
                 const ms: u32 = timeoutMs;
@@ -510,7 +510,7 @@ pub const Socket = struct {
     pub fn setWriteTimeoutMs(self: *Socket, timeoutMs: u32) void {
         self.writeDeadline = deadlineAfterMs(self.io, timeoutMs);
         self.writeInterrupted.store(false, .release);
-        self.writeDeadlineMs.store(if (timeoutMs == 0) 0 else clock.monotonicMillis() +| @as(i64, @intCast(timeoutMs)), .release);
+        self.writeDeadlineMs.store(deadlineTicksNow(timeoutMs), .release);
         switch (self.inner) {
             .winsock => |s| if (isWindows) {
                 const ms: u32 = timeoutMs;
@@ -556,6 +556,27 @@ pub const Socket = struct {
         return .fromNow(io, duration);
     }
 
+    /// Millisecond deadlines are published to the deadline monitor as 32-bit
+    /// tick counts: `std.atomic.Value` rejects 64-bit integers wherever pointers
+    /// are 32 bits wide, so an `i64` field breaks every 32-bit target. A zero
+    /// count keeps the "no deadline" meaning of a zero timeout.
+    fn toDeadlineTicks(ms: i64) u32 {
+        return @truncate(@as(u64, @bitCast(ms)));
+    }
+
+    fn deadlineTicksNow(timeoutMs: u32) u32 {
+        if (timeoutMs == 0) return 0;
+        return toDeadlineTicks(clock.monotonicMillis() + @as(i64, @intCast(timeoutMs)));
+    }
+
+    /// Wrapping comparison: a deadline counts as expired while it lies less
+    /// than 2^31 ms (~24.8 days) in the past, which is the only direction a
+    /// live I/O deadline can be in.
+    fn deadlineExpired(nowMs: i64, deadlineTicks: u32) bool {
+        if (deadlineTicks == 0) return false;
+        return (toDeadlineTicks(nowMs) -% deadlineTicks) < (@as(u32, 1) << 31);
+    }
+
     fn remainingTimeoutMs(deadline: ?std.Io.Clock.Timestamp, io: std.Io) ?u31 {
         const until = deadline orelse return null;
         const remaining = until.durationFromNow(io).raw.nanoseconds;
@@ -569,9 +590,9 @@ pub const Socket = struct {
     /// Windows AFD completion processing.
     pub fn closeIfIoDeadlineExpired(self: *const Socket, nowMs: i64) void {
         const readDeadline = @constCast(&self.readDeadlineMs).load(.acquire);
-        const readExpired = readDeadline != 0 and nowMs >= readDeadline and self.readActive.load(.acquire);
+        const readExpired = deadlineExpired(nowMs, readDeadline) and self.readActive.load(.acquire);
         const writeDeadline = @constCast(&self.writeDeadlineMs).load(.acquire);
-        const writeExpired = writeDeadline != 0 and nowMs >= writeDeadline and self.writeActive.load(.acquire);
+        const writeExpired = deadlineExpired(nowMs, writeDeadline) and self.writeActive.load(.acquire);
         if (readExpired and !@constCast(&self.readInterrupted).swap(true, .acq_rel)) {
             self.shutdownRead();
             self.shutdownWriteOnly();
@@ -960,6 +981,34 @@ pub fn connect(io: std.Io, host: []const u8, port: u16) ConnectError!Socket {
 }
 
 // Tests
+
+test "deadline ticks stay 32-bit safe and expire only in the past" {
+    // Deadline state is published through `std.atomic.Value`, which rejects
+    // 64-bit integers on 32-bit targets, so the encoding must fit in u32.
+    comptime {
+        std.debug.assert(@sizeOf(@FieldType(Socket, "readDeadlineMs")) == @sizeOf(u32));
+        std.debug.assert(@sizeOf(@FieldType(Socket, "writeDeadlineMs")) == @sizeOf(u32));
+    }
+
+    const base: i64 = 5_000;
+    const deadline = Socket.toDeadlineTicks(base + 250);
+    try std.testing.expect(!Socket.deadlineExpired(base, deadline));
+    try std.testing.expect(!Socket.deadlineExpired(base + 249, deadline));
+    try std.testing.expect(Socket.deadlineExpired(base + 250, deadline));
+    try std.testing.expect(Socket.deadlineExpired(base + 10_000, deadline));
+
+    // A zero timeout keeps the "no deadline" meaning.
+    try std.testing.expectEqual(@as(u32, 0), Socket.deadlineTicksNow(0));
+    try std.testing.expect(!Socket.deadlineExpired(base + 1_000_000, 0));
+
+    // Wrapping: a deadline recorded just before the 32-bit tick counter wraps
+    // must still read as expired afterwards.
+    const near_wrap: i64 = @as(i64, @intCast(std.math.maxInt(u32))) - 100;
+    const wrapped = Socket.toDeadlineTicks(near_wrap + 50);
+    try std.testing.expect(!Socket.deadlineExpired(near_wrap, wrapped));
+    try std.testing.expect(Socket.deadlineExpired(near_wrap + 60, wrapped));
+    try std.testing.expect(Socket.deadlineExpired(near_wrap + 1_000, wrapped));
+}
 
 test "listener binds and reports port" {
     var ctx = IoContext.init(std.testing.allocator) catch return;
