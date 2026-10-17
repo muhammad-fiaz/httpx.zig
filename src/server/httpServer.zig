@@ -208,6 +208,15 @@ pub const Config = struct {
     /// Production-grade TLS / HTTPS configuration.
     /// When provided with certificate & private key (PEM or file path), enables HTTPS server.
     tls: ?tlsServerMod.Server.Config = null,
+    /// Response content-coding settings: codec tuning plus the smaller-wins
+    /// fallback that keeps `Content-Encoding` from being sent for a body the
+    /// codec made bigger. Only applies to bodies under `maxCompressionInput`.
+    compression: compression.Config = .{},
+    /// Bodies larger than this are sent uncompressed, bounding the memory one
+    /// request can hold to roughly input plus compressed copy. Raise it to
+    /// compress large document assets (OpenAPI specs, bundled doc UIs), at the
+    /// cost of that extra copy per in-flight request.
+    maxCompressionInput: usize = 128 * 1024,
 };
 
 /// Global pointer to the active server for the Ctrl+C handler.
@@ -278,6 +287,8 @@ pub const Server = struct {
     /// Live connections (keep-alive readers) so shutdown can wake them.
     connsMu: sync.Spinlock = .{},
     activeConns: std.ArrayList(*tcp.Socket) = .empty,
+    deadlineMonitorStop: std.atomic.Value(bool) = .init(false),
+    deadlineMonitorThread: ?std.Thread = null,
     /// True while the run-thread sits inside accept(); shutdown waits for
     /// this before closing the listener (removes the close/enter race).
     inAccept: std.atomic.Value(bool) = .init(false),
@@ -287,8 +298,6 @@ pub const Server = struct {
     docsMounted: bool = false,
     watcher: ?*watcherMod.Watcher = null,
     sitePtr: ?*anyopaque = null,
-    deadlineMonitorStop: std.atomic.Value(bool) = .init(false),
-    deadlineMonitorThread: ?std.Thread = null,
     siteReloadFn: ?*const fn (sitePtr: ?*anyopaque, server: *Server) void = null,
     liveReloadEventId: std.atomic.Value(usize) = .init(1),
     /// Last reload strategy reported by the watcher (as a
@@ -310,6 +319,13 @@ pub const Server = struct {
     metricsRegistry: metricsMod.Registry = .{},
     startTimeMs: i64 = 0,
 
+    const ConnectionTask = struct {
+        server: *Server,
+        socket: tcp.Socket,
+    };
+
+    const ConnectionPool = @import("../concurrency/workerPool.zig").Pool;
+
     /// Initializes server with explicit allocator, shared IO, and configuration.
     /// Matches `var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });`
     pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Server {
@@ -319,17 +335,13 @@ pub const Server = struct {
     fn initInternal(
         allocator: Allocator,
         io: std.Io,
-    const ConnectionTask = struct {
-        server: *Server,
-        socket: tcp.Socket,
-    };
-
-    const ConnectionPool = @import("../concurrency/workerPool.zig").Pool;
-
         ownsIo: bool,
         ioThreaded: ?*std.Io.Threaded,
         cfg: Config,
     ) !Server {
+        if (cfg.maxConcurrentConnections == 0 or cfg.maxQueuedConnectionTasks == 0) {
+            return error.InvalidConcurrencyLimits;
+        }
         const addressMod = @import("../net/address.zig");
         errdefer if (ownsIo) {
             if (ioThreaded) |th| {
@@ -339,9 +351,6 @@ pub const Server = struct {
         };
 
         // Default: all-interfaces IPv4. Explicit literals (incl. "::") bind
-        if (cfg.maxConcurrentConnections == 0 or cfg.maxQueuedConnectionTasks == 0) {
-            return error.InvalidConcurrencyLimits;
-        }
         // their family; anything unparsable falls back to 0.0.0.0.
         var addr: addressMod.Address = blk: {
             if (std.mem.eql(u8, cfg.host, "0.0.0.0")) break :blk addressMod.Address.unspecified4(cfg.port);
@@ -828,6 +837,9 @@ pub const Server = struct {
     /// interrupts active socket I/O; each worker owns final socket cleanup.
     pub fn stop(self: *Server) void {
         self.requestShutdown();
+        self.connsMu.lock();
+        for (self.activeConns.items) |conn| conn.interruptIo();
+        self.connsMu.unlock();
     }
 
     /// Canonical alias for run(). Starts the blocking request serving loop.
@@ -837,9 +849,6 @@ pub const Server = struct {
 
     /// Non-blocking server start. Spawns a thread that calls `run()`.
     /// Returns the thread handle so the caller can join.
-        self.connsMu.lock();
-        for (self.activeConns.items) |conn| conn.interruptIo();
-        self.connsMu.unlock();
     pub fn start(self: *Server) !std.Thread {
         return std.Thread.spawn(.{}, (struct {
             fn run(s: *Server) void {
@@ -1032,6 +1041,13 @@ pub const Server = struct {
             // Stop before blocking on the next accept when asked.
             if (self.stopFlag.load(.acquire)) break;
         }
+        workers.shutdownDrain();
+        workers.join();
+        self.deadlineMonitorStop.store(true, .release);
+        if (self.deadlineMonitorThread) |thread| {
+            thread.join();
+            self.deadlineMonitorThread = null;
+        }
         self.h3Stop.store(true, .release);
         if (self.h3Pump) |p| p.stop();
         if (self.h3Thread) |th| {
@@ -1041,26 +1057,10 @@ pub const Server = struct {
         if (self.h3Pump) |p| {
             self.allocator.destroy(p);
             self.h3Pump = null;
-        workers.shutdownDrain();
-        workers.join();
-        self.deadlineMonitorStop.store(true, .release);
-        if (self.deadlineMonitorThread) |thread| {
-            thread.join();
-            self.deadlineMonitorThread = null;
-        }
         }
         self.emit(.{ .kind = .serverStopped, .level = .info, .message = "shutdown complete" });
     }
 
-    /// Deliver a structured event to the application callback.
-    /// No-op when callback is null (the default). Level filtering applied here.
-    fn emit(self: *const Server, event: logging.ServerEvent) void {
-        const cb = self.eventCallback orelse return;
-        if (@backingInt(event.level) < @backingInt(self.cfg.logging.level)) return;
-        cb(event);
-    }
-
-    fn serveConnection(self: *Server, conn: *tcp.Socket, arenaIn: Allocator) !void {
     fn runConnectionTask(ctx: ?*anyopaque, _: *std.atomic.Value(bool)) void {
         const task: *ConnectionTask = @ptrCast(@alignCast(ctx.?));
         const server = task.server;
@@ -1097,6 +1097,15 @@ pub const Server = struct {
         }
     }
 
+    /// Deliver a structured event to the application callback.
+    /// No-op when callback is null (the default). Level filtering applied here.
+    fn emit(self: *const Server, event: logging.ServerEvent) void {
+        const cb = self.eventCallback orelse return;
+        if (@backingInt(event.level) < @backingInt(self.cfg.logging.level)) return;
+        cb(event);
+    }
+
+    fn serveConnection(self: *Server, conn: *tcp.Socket, arenaIn: Allocator) !void {
         _ = arenaIn;
         self.metricsRegistry.connectionOpened();
         defer self.metricsRegistry.connectionClosed();
@@ -1211,6 +1220,7 @@ pub const Server = struct {
         var session = try @import("../protocols/http2/connection.zig").Session.init(self.allocator, .server, .{});
         defer session.deinit();
         try session.startHandshake();
+        conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
         conn.writeAll(session.outbound.items) catch return error.WriteFailed;
         session.outbound.clearRetainingCapacity();
 
@@ -1220,7 +1230,6 @@ pub const Server = struct {
 
         var arenaState = std.heap.ArenaAllocator.init(self.allocator);
         defer arenaState.deinit();
-        conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
         const transportMod = @import("../protocols/http2/transport.zig");
 
         // ServerCtx accumulates streams
@@ -1277,39 +1286,85 @@ pub const Server = struct {
         var buf: [16 * 1024]u8 = undefined;
         while (!session.closed and !session.goawayReceived) {
             if (session.outbound.items.len > 0) {
+                conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
                 conn.writeAll(session.outbound.items) catch break;
                 session.outbound.clearRetainingCapacity();
             }
             if (sc.dispatched and !sc.responded) {
                 sc.responded = true;
-                const resp = H2Bridge.handle(arenaState.allocator(), self, isTlsConn, sc.method.items, sc.path.items, sc.hdrs.items, sc.body.items) catch transportMod.HandlerResponse{ .status = 500 };
+                var resp = H2Bridge.handle(arenaState.allocator(), self, isTlsConn, sc.method.items, sc.path.items, sc.hdrs.items, sc.body.items) catch transportMod.HandlerResponse{ .status = 500 };
+
+                // The same content coding the HTTP/1 path applies, so one
+                // handler behaves identically across protocol versions.
+                const isHead = std.ascii.eqlIgnoreCase(sc.method.items, "HEAD");
+                var clientAcceptEncoding: ?[]const u8 = null;
+                for (sc.hdrs.items) |h| {
+                    if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) clientAcceptEncoding = h.value;
+                }
+
+                const arena = arenaState.allocator();
+                var codedBody: ?[]u8 = null;
+                defer if (codedBody) |b| arena.free(b);
+                var outBody: []const u8 = resp.body;
+                var contentEncoding: ?[]const u8 = null;
+                var varyAcceptEncoding = false;
+                if (!isHead and resp.status != 204 and resp.status != 304) {
+                    const coding = compression.encodeResponseBody(
+                        arena,
+                        resp.body,
+                        clientAcceptEncoding,
+                        self.cfg.compression,
+                        self.cfg.maxCompressionInput,
+                    ) catch |err| switch (err) {
+                        error.NotAcceptable => blk: {
+                            resp.status = 406;
+                            resp.body = "";
+                            outBody = "";
+                            break :blk null;
+                        },
+                        else => return err,
+                    };
+                    if (coding) |c| {
+                        outBody = c.body;
+                        codedBody = if (c.contentEncoding != null) @constCast(c.body) else null;
+                        contentEncoding = c.contentEncoding;
+                        varyAcceptEncoding = c.varyAcceptEncoding;
+                    }
+                }
 
                 var outFields = std.ArrayList(@import("../protocols/http2/hpack.zig").HeaderField).empty;
                 defer outFields.deinit(self.allocator);
                 var stBuf: [8]u8 = undefined;
-                var clBuf: [8]u8 = undefined;
+                var clBuf: [20]u8 = undefined;
                 const st = std.fmt.bufPrint(&stBuf, "{d}", .{resp.status}) catch "500";
-                const cl = std.fmt.bufPrint(&clBuf, "{d}", .{resp.body.len}) catch "0";
+                // content-length must describe the bytes actually sent, so it
+                // is derived after coding, never from the handler's body.
+                const cl = clBuf[0..std.fmt.printInt(&clBuf, outBody.len, 10, .lower, .{})];
                 try outFields.append(self.allocator, .{ .name = ":status", .value = st });
                 try outFields.append(self.allocator, .{ .name = "content-length", .value = cl });
+                if (contentEncoding) |ce| {
+                    try outFields.append(self.allocator, .{ .name = "content-encoding", .value = ce });
+                }
+                if (varyAcceptEncoding) try outFields.append(self.allocator, .{ .name = "vary", .value = "Accept-Encoding" });
                 for (resp.headers) |h| {
                     try outFields.append(self.allocator, .{ .name = h.name, .value = h.value });
                 }
 
-                try session.sendHeaders(sc.sid, outFields.items, resp.body.len == 0);
+                try session.sendHeaders(sc.sid, outFields.items, outBody.len == 0);
                 // HEAD responses carry headers (with content-length) but no
                 // DATA frames, mirroring the HTTP/1 transport.
-                const isHead = std.ascii.eqlIgnoreCase(sc.method.items, "HEAD");
-                if (resp.body.len > 0 and !isHead) {
-                    _ = try session.sendData(sc.sid, resp.body, true);
-                } else if (isHead and resp.body.len > 0) {
+                if (outBody.len > 0 and !isHead) {
+                    _ = try session.sendData(sc.sid, outBody, true);
+                } else if (isHead and outBody.len > 0) {
                     _ = try session.sendData(sc.sid, "", true);
                 }
                 if (session.outbound.items.len > 0) {
+                    conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
                     conn.writeAll(session.outbound.items) catch break;
                     session.outbound.clearRetainingCapacity();
                 }
             }
+            conn.setReadTimeoutMs(self.cfg.keepAliveIdleTimeoutMs);
             const n = conn.read(&buf) catch break;
             if (n == 0) break;
             session.feed(buf[0..n]) catch break;
@@ -1349,12 +1404,10 @@ pub const Server = struct {
         // any client. If the OS entropy source is unavailable we issue no
         // tickets, which is what the TCP path does when unconfigured.
         var generatedKeys: ?tlsSessionMod.TicketKeys = null;
-                    conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
         const ticketKeys: ?tlsSessionMod.TicketKeys = if (self.cfg.tls) |t|
             t.ticketKeys
         else if (tlsSessionMod.TicketKeys.generate(self.io)) |k| blk: {
             generatedKeys = k;
-            conn.setReadTimeoutMs(self.cfg.keepAliveIdleTimeoutMs);
             break :blk k;
         } else |_| null;
         defer if (generatedKeys != null) {
@@ -1466,7 +1519,44 @@ pub const Server = struct {
                 .trustForwarded = self.cfg.trustForwardedHeaders,
             };
 
-            const res = self.router.dispatch(&ctx);
+            var res = self.router.dispatch(&ctx);
+
+            // The same content coding the HTTP/1 and HTTP/2 paths apply, so one
+            // handler behaves identically across protocol versions.
+            var clientAcceptEncoding: ?[]const u8 = null;
+            for (ctxHdrs[0..hdrCount]) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) clientAcceptEncoding = h.value;
+            }
+
+            var codedBody: ?[]u8 = null;
+            defer if (codedBody) |b| a.free(b);
+            var outBody: []const u8 = res.body;
+            var contentEncoding: ?[]const u8 = null;
+            var varyAcceptEncoding = false;
+            if (res.status != 204 and res.status != 304) {
+                const coding = compression.encodeResponseBody(
+                    a,
+                    res.body,
+                    clientAcceptEncoding,
+                    self.cfg.compression,
+                    self.cfg.maxCompressionInput,
+                ) catch |err| switch (err) {
+                    error.NotAcceptable => blk: {
+                        res.status = 406;
+                        res.body = "";
+                        res.contentType = null;
+                        outBody = "";
+                        break :blk null;
+                    },
+                    else => return err,
+                };
+                if (coding) |c| {
+                    outBody = c.body;
+                    codedBody = if (c.contentEncoding != null) @constCast(c.body) else null;
+                    contentEncoding = c.contentEncoding;
+                    varyAcceptEncoding = c.varyAcceptEncoding;
+                }
+            }
 
             var qenc = http3Qpack.Encoder.init(self.allocator);
             defer qenc.deinit();
@@ -1480,10 +1570,14 @@ pub const Server = struct {
             if (res.contentType) |ct| {
                 try respHeaders.append(a, .{ .name = "content-type", .value = ct });
             }
+            if (contentEncoding) |ce| {
+                try respHeaders.append(a, .{ .name = "content-encoding", .value = ce });
+            }
+            if (varyAcceptEncoding) try respHeaders.append(a, .{ .name = "vary", .value = "Accept-Encoding" });
 
             const rhead = try rs.buildResponseHeaders(res.status, respHeaders.items);
             defer self.allocator.free(rhead);
-            const rdata = try rs.buildData(res.body);
+            const rdata = try rs.buildData(outBody);
             defer self.allocator.free(rdata);
 
             var wire = std.ArrayList(u8).empty;
@@ -1521,6 +1615,7 @@ pub const Server = struct {
 
         var servedN: usize = 0;
         while (servedN < self.cfg.maxRequestsPerConn) : (servedN += 1) {
+            if (self.stopFlag.load(.acquire)) break;
             _ = arena.reset(.retain_capacity);
             const initBytes = if (servedN == 0) initial else "";
             const wantMore = self.serveOneRequestBuffered(conn, arena.allocator(), servedN, false, initBytes, isTlsConn) catch return;
@@ -1542,6 +1637,12 @@ pub const Server = struct {
             @memcpy(headBuf[0..take], initial[0..take]);
             filled = take;
         }
+        var headerDeadlineStarted = filled != 0;
+        if (headerDeadlineStarted) {
+            conn.setReadTimeoutMs(self.cfg.headerReadTimeoutMs);
+        } else {
+            conn.setReadTimeoutMs(if (requestIndex == 0) self.cfg.initialRequestTimeoutMs else self.cfg.keepAliveIdleTimeoutMs);
+        }
         const allowLf = self.cfg.allowLfLineEndings;
         while (filled < headBuf.len) {
             if (std.mem.indexOf(u8, headBuf[0..filled], "\r\n\r\n") != null) break;
@@ -1560,6 +1661,10 @@ pub const Server = struct {
             const n = conn.read(headBuf[filled..]) catch return false;
             if (n == 0) return false; // peer closed
             filled += n;
+            if (!headerDeadlineStarted) {
+                headerDeadlineStarted = true;
+                conn.setReadTimeoutMs(self.cfg.headerReadTimeoutMs);
+            }
         }
         self.metricsRegistry.recordBytesIn(filled);
 
@@ -1594,7 +1699,6 @@ pub const Server = struct {
         // Connection reuse decision (RFC 9112 Section 7): explicit "close" wins;
         // HTTP/1.0 defaults to close unless it requested keep-alive.
         var clientClose = forceClose or reqHead.minorVersion == 0;
-            if (self.stopFlag.load(.acquire)) break;
         var clientKa10 = false;
         for (hdrs) |h| {
             if (!std.ascii.eqlIgnoreCase(h.name, "connection")) continue;
@@ -1616,18 +1720,13 @@ pub const Server = struct {
                 if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, field.value, " \t"), "100-continue")) {
                     _ = sendSimpleError(conn, 417, "expectation failed") catch 0;
                     return false;
-        var headerDeadlineStarted = filled != 0;
-        if (headerDeadlineStarted) {
-            conn.setReadTimeoutMs(self.cfg.headerReadTimeoutMs);
-        } else {
-            conn.setReadTimeoutMs(if (requestIndex == 0) self.cfg.initialRequestTimeoutMs else self.cfg.keepAliveIdleTimeoutMs);
-        }
                 }
             }
         }
         if (hasExpect and reqHead.minorVersion == 1 and framing.framing != .none) {
             const interim = writerMod.buildInformational(arena, 100, &.{}) catch return false;
             defer arena.free(interim);
+            conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
             conn.writeAll(interim) catch return false;
         }
         {
@@ -1640,15 +1739,12 @@ pub const Server = struct {
                     }
                     body = arena.alloc(u8, fr.length) catch return false;
                     // How many body bytes were already pulled in by the header reads.
-            if (!headerDeadlineStarted) {
-                headerDeadlineStarted = true;
-                conn.setReadTimeoutMs(self.cfg.headerReadTimeoutMs);
-            }
                     const buffered = if (filled > blk.end) filled - blk.end else 0;
                     if (buffered > fr.length) clientClose = true;
                     const take = @min(buffered, fr.length);
                     @memcpy(body[0..take], headBuf[blk.end..][0..take]);
                     var have: usize = take;
+                    if (fr.length > 0) conn.setReadTimeoutMs(self.cfg.requestBodyTimeoutMs);
                     while (have < fr.length) {
                         // Bounded window keeps behavior uniform across platforms.
                         const want = @min(4096, fr.length - have);
@@ -1664,6 +1760,7 @@ pub const Server = struct {
                     var raw: std.ArrayList(u8) = .empty;
                     raw.appendSlice(arena, headBuf[blk.end..filled]) catch return false;
                     var unparsed: usize = 0;
+                    conn.setReadTimeoutMs(self.cfg.requestBodyTimeoutMs);
                     while (true) {
                         const tail = dec.decode(raw.items[unparsed..]) catch |e| switch (e) {
                             error.Incomplete => {
@@ -1705,7 +1802,6 @@ pub const Server = struct {
             return false;
         };
 
-            conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
         const isHead = method == .HEAD;
 
         const rawPath = reqHead.path;
@@ -1723,7 +1819,6 @@ pub const Server = struct {
         var ctx = Context{
             .allocator = arena,
             .io = self.io,
-                    if (fr.length > 0) conn.setReadTimeoutMs(self.cfg.requestBodyTimeoutMs);
             .headers = hdrs,
             .path = cleanPath,
             .query = queryPart,
@@ -1735,12 +1830,11 @@ pub const Server = struct {
         const res: Response = self.router.dispatch(&ctx);
 
         conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
-        const bytesOut = writeResponse(conn, arena, reqHead.minorVersion, try self.withLiveReload(arena, res, isHead), isHead, if (clientClose) "close" else "keep-alive", ctx.header("Accept-Encoding")) catch {
+        const bytesOut = writeResponse(conn, arena, reqHead.minorVersion, try self.withLiveReload(arena, res, isHead), isHead, if (clientClose) "close" else "keep-alive", ctx.header("Accept-Encoding"), self.cfg.compression, self.cfg.maxCompressionInput) catch {
             self.metricsRegistry.recordError();
             return false;
         };
         const durNs: u64 = @intCast(@max(0, (clock.millisNow() -| t0) * 1_000_000));
-                    conn.setReadTimeoutMs(self.cfg.requestBodyTimeoutMs);
         self.metricsRegistry.recordResponseFull(res.status, durNs, bytesOut);
         self.emitAccess(reqHead.method, reqHead.path, res.status, body.len, bytesOut, t0);
         return !clientClose;
@@ -1776,7 +1870,7 @@ pub const Server = struct {
         });
     }
 
-    fn writeResponse(conn: StreamConn, arena: Allocator, minor: u8, res: Response, isHead: bool, connHdr: []const u8, acceptEncoding: ?[]const u8) !usize {
+    fn writeResponse(conn: StreamConn, arena: Allocator, minor: u8, res: Response, isHead: bool, connHdr: []const u8, acceptEncoding: ?[]const u8, compressionConfig: compression.Config, maxCompressionInput: usize) !usize {
         // connHdr selects the Connection header emitted ("" -> legacy close).
         var lines: std.ArrayList([]const u8) = .empty;
         defer lines.deinit(arena);
@@ -1799,19 +1893,34 @@ pub const Server = struct {
         defer if (encodedBody) |b| arena.free(b);
         var bodyOut: []const u8 = if (isHead) "" else res.body;
         var contentEncoding: ?[]const u8 = null;
-        const isHugeAsset = res.body.len > 128 * 1024;
-        if (!isHead and !isHugeAsset and res.body.len > 0 and res.status != 204 and res.status != 304 and acceptEncoding != null) {
-            const selected = compression.negotiate(acceptEncoding.?);
-            if (selected != .identity) {
-                encodedBody = compression.compress(arena, selected, res.body) catch null;
-                if (encodedBody) |b| {
-                    bodyOut = b;
-                    contentEncoding = selected.token();
-                }
-            }
+        // 204 and 304 never carry a body, so there is nothing to code.
+        if (!isHead and res.status != 204 and res.status != 304) {
+            const coding = compression.encodeResponseBody(
+                arena,
+                res.body,
+                acceptEncoding,
+                compressionConfig,
+                maxCompressionInput,
+            ) catch |err| switch (err) {
+                error.NotAcceptable => return writeResponse(
+                    conn,
+                    arena,
+                    minor,
+                    .{ .status = 406, .body = "" },
+                    isHead,
+                    connHdr,
+                    null,
+                    compressionConfig,
+                    maxCompressionInput,
+                ),
+                else => return err,
+            };
+            bodyOut = coding.body;
+            encodedBody = if (coding.contentEncoding != null) @constCast(coding.body) else null;
+            contentEncoding = coding.contentEncoding;
+            if (coding.varyAcceptEncoding) lines.append(arena, "Vary: Accept-Encoding") catch return 0;
         }
         if (contentEncoding) |ce| {
-            lines.append(arena, "Vary: Accept-Encoding") catch return 0;
             const line = std.fmt.allocPrint(arena, "Content-Encoding: {s}", .{ce}) catch return 0;
             lines.append(arena, line) catch return 0;
         }
@@ -1883,8 +1992,13 @@ fn helloHandler(ctx: *Context) anyerror!Response {
         // emitted here so the existing loopback test asserts the long name
         // survives response assembly and reaches the wire, rather than only
         // asserting `validToken` in isolation.
+        //
+        // The body is deliberately repetitive so gzip actually shrinks it:
+        // response compression skips a coding that fails to make the payload
+        // smaller, and a two-byte body would legitimately stay uncompressed
+        // and stop exercising the gzip framing this test is here to check.
         return .{
-            .body = "hi",
+            .body = "hi from httpx, hi from httpx, hi from httpx, hi from httpx, hi from httpx\n",
             .contentType = "text/plain",
             .headers = &.{
                 .{
@@ -2274,7 +2388,6 @@ test "server serves routed GET end to end" {
     srv.requestShutdown();
 }
 
-
 test "idle and incomplete headers cannot block a normal request" {
     const a = std.testing.allocator;
     var ctx = tcp.IoContext.init(a) catch return;
@@ -2465,6 +2578,92 @@ test "connection limit rejects overload then accepts clients after a stalled upl
     try std.testing.expect(std.mem.indexOf(u8, response[0..total], "HTTP/1.1 200 OK") != null);
     try std.testing.expect(std.mem.endsWith(u8, response[0..total], "ok"));
     srv.requestShutdown();
+}
+
+test "server compresses a large body once the input ceiling allows it" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    // 200 KiB of compressible text: above the default ceiling, so raising it is
+    // what makes the response coded.
+    const BigH = struct {
+        fn h(c: *Context) anyerror!Response {
+            const unit = "the server must code a large body once told it may ";
+            const out = try c.allocator.alloc(u8, unit.len * 2600);
+            for (out, 0..) |*b, i| b.* = unit[i % unit.len];
+            return .{ .body = out, .contentType = "text/plain" };
+        }
+    };
+
+    const Runner = struct {
+        fn run(s: *Server) void {
+            s.run();
+        }
+    };
+
+    // Reads a whole response off the socket and returns the bytes.
+    const fetch = struct {
+        fn go(c: tcp.Socket) ![]u8 {
+            try c.writeAll("GET /big HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n");
+            var out = std.ArrayList(u8).empty;
+            errdefer out.deinit(std.testing.allocator);
+            var buf: [4096]u8 = undefined;
+            while (true) {
+                const n = c.read(&buf) catch break;
+                if (n == 0) break;
+                try out.appendSlice(std.testing.allocator, buf[0..n]);
+            }
+            return out.toOwnedSlice(std.testing.allocator);
+        }
+    };
+
+    // Default ceiling: the body is served as-is.
+    {
+        var srv = Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+        defer srv.deinit();
+        try srv.router.get("/big", BigH.h, .{});
+        const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+        defer t.join();
+
+        var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+        defer client.close();
+        const wire = fetch.go(client) catch return;
+        defer a.free(wire);
+        try std.testing.expect(std.mem.indexOf(u8, wire, "Content-Encoding") == null);
+        try std.testing.expect(std.mem.indexOf(u8, wire, "the server must code a large body") != null);
+        srv.requestShutdown();
+    }
+
+    // Raised ceiling: the same handler is now coded, and Content-Length
+    // describes the coded bytes rather than the original body.
+    {
+        var srv = Server.init(a, ctx.io, .{
+            .port = 0,
+            .enableDocs = false,
+            .maxConnections = 1,
+            .maxCompressionInput = 1024 * 1024,
+        }) catch return;
+        defer srv.deinit();
+        try srv.router.get("/big", BigH.h, .{});
+        const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+        defer t.join();
+
+        var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+        defer client.close();
+        const wire = fetch.go(client) catch return;
+        defer a.free(wire);
+
+        const headEnd = std.mem.indexOf(u8, wire, "\r\n\r\n") orelse return error.Malformed;
+        const head = wire[0..headEnd];
+        try std.testing.expect(std.mem.indexOf(u8, head, "Content-Encoding: gzip") != null);
+        try std.testing.expect(std.mem.indexOf(u8, head, "Vary: Accept-Encoding") != null);
+        try std.testing.expect(std.mem.indexOf(u8, wire[headEnd + 4 ..], "the server must code a large body") == null);
+
+        const bodyLen = std.mem.indexOf(u8, wire[headEnd + 4 ..], "\x1f\x8b") orelse return error.Malformed;
+        try std.testing.expect(bodyLen < 100 * 1024);
+        srv.requestShutdown();
+    }
 }
 
 test "raw socket 200KB content-length body roundtrip" {

@@ -5,12 +5,12 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zstd = .{
-            .url = "https://github.com/muhammad-fiaz/zstd.zig/archive/refs/tags/0.0.4.tar.gz",
-            .hash = "zstd-0.0.4-biH4jKzCDwAuLAIDx_AcpVJs2PckXKHQ1jYi0UfSYD8G",
+            .url = "https://github.com/muhammad-fiaz/zstd.zig/archive/refs/tags/0.0.5.tar.gz",
+            .hash = "zstd-0.0.5-biH4jJKuEQCetrZbOjd3uTyQdcMT8BGkkV1HF0jgujkH",
         },
         .brotli = .{
-            .url = "https://github.com/muhammad-fiaz/brotli.zig/archive/refs/tags/0.0.4.tar.gz",
-            .hash = "brotli-0.0.4-utAAyNAhCgC-Qnj9sNoERwSLIcmIrUn_gZaxX1RZRcRk",
+            .url = "https://github.com/muhammad-fiaz/brotli.zig/archive/refs/tags/0.0.5.tar.gz",
+            .hash = "brotli-0.0.5-utAAyArtFgDTBxb5Y9S1M8zGXHxyKOuIdDe5DCDCU8Tw",
         },
         .loaders = .{
             .url = "https://github.com/muhammad-fiaz/loaders.zig/archive/refs/tags/0.0.7.tar.gz",

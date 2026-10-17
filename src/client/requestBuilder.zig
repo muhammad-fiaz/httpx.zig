@@ -464,7 +464,7 @@ fn headerLinesWithAuth(a: Allocator, hdrs: []const Header, contentType: ?[]const
         }
     }
     if (!hasAcceptEncoding) {
-        const l = try a.dupe(u8, "Accept-Encoding: gzip, br, zstd");
+        const l = try std.fmt.allocPrint(a, "Accept-Encoding: {s}", .{compression.acceptEncodingValue()});
         try lines.append(a, l);
     }
     return lines.toOwnedSlice(a);
@@ -622,7 +622,7 @@ fn h3DoRequest(
     defer conv.deinit(a);
     for (req.headers) |h| conv.append(a, .{ .name = h.name, .value = h.value }) catch return Error.OutOfMemory;
     if (!hasAcceptEncoding) {
-        conv.append(a, .{ .name = "accept-encoding", .value = "gzip, br, zstd" }) catch return Error.OutOfMemory;
+        conv.append(a, .{ .name = "accept-encoding", .value = compression.acceptEncodingValue() }) catch return Error.OutOfMemory;
     }
     const h3respRaw = h3c.request(
         req.method.toString(),
@@ -700,7 +700,7 @@ fn h2DoRequest(
     var conv: []http2Transport.Header = try a.alloc(http2Transport.Header, reqHeaders.len + @as(usize, if (hasAcceptEncoding) 0 else 1));
     defer a.free(conv);
     for (reqHeaders, 0..) |h, i| conv[i] = .{ .name = h.name, .value = h.value };
-    if (!hasAcceptEncoding) conv[reqHeaders.len] = .{ .name = "accept-encoding", .value = "gzip, br, zstd" };
+    if (!hasAcceptEncoding) conv[reqHeaders.len] = .{ .name = "accept-encoding", .value = compression.acceptEncodingValue() };
     const r = pc.request(method, target, conv, scheme, authority, reqBody) catch |e| switch (e) {
         error.OutOfMemory => return Error.OutOfMemory,
         else => return Error.ProtocolViolation,
@@ -1286,21 +1286,98 @@ fn finishPlain(
 
 pub const FullResponse = struct { resp: Response, reusable: bool };
 
-fn decodeResponseBody(a: Allocator, headers: []const Header, body: []u8) Error![]u8 {
+/// Replaces the value of the first header named `name`, freeing the old one.
+fn replaceHeaderValue(a: Allocator, headers: []Header, name: []const u8, value: []const u8) !void {
+    for (headers) |*h| {
+        if (!std.ascii.eqlIgnoreCase(h.name, name)) continue;
+        const fresh = try a.dupe(u8, value);
+        a.free(h.value);
+        h.value = fresh;
+        return;
+    }
+}
+
+/// Restates the framing headers after a coded body has been decoded.
+///
+/// `Content-Length` counted the compressed transfer, so leaving it in place
+/// would make every consumer that reads it — progress reporting, size limits,
+/// checksum verification — measure against bytes the caller never receives.
+/// `Content-Encoding` is restated rather than dropped: the header array is a
+/// single allocation that `Response.deinit` frees whole, so removing an entry
+/// would desynchronise the slice from its allocation.
+fn restateContentCoding(a: Allocator, headers: []Header, decoded_len: usize) Error!void {
+    var buf: [24]u8 = undefined;
+    // A usize needs at most 20 digits, so the buffer can never be too small.
+    const len_text = buf[0..std.fmt.printInt(&buf, decoded_len, 10, .lower, .{})];
+    try replaceHeaderValue(a, headers, "content-length", len_text);
+    try replaceHeaderValue(a, headers, "content-encoding", "identity");
+}
+
+/// Decodes a content-coded response body and brings the headers back in line
+/// with the bytes actually returned.
+fn decodeResponseBody(a: Allocator, headers: []Header, body: []u8) Error![]u8 {
+    // Content codings are applied in header order and removed in reverse.
+    // Bound the number of layers so an attacker cannot induce unbounded decode
+    // work or stack-like allocation growth with a long coding list.
+    const maxCodingLayers = 8;
+    var codings: [maxCodingLayers]compression.Encoding = undefined;
+    var codingCount: usize = 0;
     for (headers) |h| {
         if (!std.ascii.eqlIgnoreCase(h.name, "content-encoding")) continue;
-        const encoding = compression.Encoding.fromToken(std.mem.trim(u8, h.value, " \t")) orelse
-            return body;
-        if (encoding == .identity) return body;
-        const decoded = compression.decompressLimited(a, encoding, body, maxResponseBodySize) catch |err| switch (err) {
+        var it = std.mem.splitScalar(u8, h.value, ',');
+        while (it.next()) |raw| {
+            const token = std.mem.trim(u8, raw, " \t");
+            if (token.len == 0) return Error.MalformedResponse;
+            if (codingCount == codings.len) return Error.MalformedResponse;
+            codings[codingCount] = compression.Encoding.fromToken(token) orelse return Error.MalformedResponse;
+            codingCount += 1;
+        }
+    }
+    if (codingCount == 0) return body;
+
+    var current = body;
+    var currentOwned = false;
+    var decodedAny = false;
+    errdefer if (currentOwned) a.free(current);
+    while (codingCount > 0) {
+        codingCount -= 1;
+        const encoding = codings[codingCount];
+        if (encoding == .identity) continue;
+        const decoded = compression.decompressLimited(a, encoding, current, maxResponseBodySize) catch |err| switch (err) {
             error.DecompressedTooLarge => return Error.ResponseTooLarge,
             error.OutOfMemory => return Error.OutOfMemory,
             else => return Error.MalformedResponse,
         };
-        a.free(body);
-        return decoded;
+        if (currentOwned) a.free(current);
+        current = decoded;
+        currentOwned = true;
+        decodedAny = true;
     }
-    return body;
+    if (!decodedAny) return body;
+    // Transfer decoded ownership to the caller after headers match the bytes.
+    try restateContentCoding(a, headers, current.len);
+    a.free(body);
+    currentOwned = false;
+    return current;
+}
+
+/// Builds allocator-owned headers, matching how the response paths populate
+/// them. `decodeResponseBody` frees and rewrites these strings, so tests must
+/// hand it memory it really owns rather than string literals.
+fn ownedTestHeaders(a: Allocator, pairs: []const [2][]const u8) ![]Header {
+    const headers = try a.alloc(Header, pairs.len);
+    for (pairs, 0..) |pair, i| {
+        headers[i] = .{ .name = try a.dupe(u8, pair[0]), .value = try a.dupe(u8, pair[1]) };
+    }
+    return headers;
+}
+
+fn freeTestHeaders(a: Allocator, headers: []Header) void {
+    for (headers) |h| {
+        a.free(h.name);
+        a.free(h.value);
+    }
+    a.free(headers);
 }
 
 test "client decodes bounded compressed response bodies" {
@@ -1308,10 +1385,66 @@ test "client decodes bounded compressed response bodies" {
     const plain = "compressed response";
     const wire = try compression.compress(a, .gzip, plain);
     defer a.free(wire);
-    const headers = [_]Header{.{ .name = "content-encoding", .value = "gzip" }};
-    const decoded = try decodeResponseBody(a, &headers, try a.dupe(u8, wire));
+
+    const headers = try ownedTestHeaders(a, &.{.{ "content-encoding", "gzip" }});
+    defer freeTestHeaders(a, headers);
+
+    const decoded = try decodeResponseBody(a, headers, try a.dupe(u8, wire));
     defer a.free(decoded);
     try std.testing.expectEqualStrings(plain, decoded);
+}
+
+test "client restates framing headers after decoding" {
+    const a = std.testing.allocator;
+    const plain = "a body whose compressed length differs from its decoded length";
+    const wire = try compression.compress(a, .zstd, plain);
+    defer a.free(wire);
+
+    const headers = try ownedTestHeaders(a, &.{
+        .{ "content-type", "text/plain" },
+        .{ "content-length", "999" },
+        .{ "content-encoding", "zstd" },
+    });
+    defer freeTestHeaders(a, headers);
+
+    const decoded = try decodeResponseBody(a, headers, try a.dupe(u8, wire));
+    defer a.free(decoded);
+    try std.testing.expectEqualStrings(plain, decoded);
+
+    // The coding no longer applies, and the length describes the decoded body.
+    try std.testing.expectEqual(@as(usize, 3), headers.len);
+    try std.testing.expectEqualStrings("content-type", headers[0].name);
+    try std.testing.expectEqualStrings("text/plain", headers[0].value);
+    try std.testing.expectEqualStrings("content-length", headers[1].name);
+    try std.testing.expectEqualStrings(std.fmt.comptimePrint("{d}", .{plain.len}), headers[1].value);
+    try std.testing.expectEqualStrings("content-encoding", headers[2].name);
+    try std.testing.expectEqualStrings("identity", headers[2].value);
+}
+
+test "client rejects an unsupported response coding" {
+    const a = std.testing.allocator;
+    const headers = try ownedTestHeaders(a, &.{.{ "content-encoding", "exi" }});
+    defer freeTestHeaders(a, headers);
+
+    const body = try a.dupe(u8, "opaque bytes");
+    defer a.free(body);
+    try std.testing.expectError(Error.MalformedResponse, decodeResponseBody(a, headers, body));
+}
+
+test "client decodes stacked response codings in reverse order" {
+    const a = std.testing.allocator;
+    const plain = "stacked content codings are decoded in reverse order";
+    const gzip = try compression.compress(a, .gzip, plain);
+    defer a.free(gzip);
+    const wire = try compression.compress(a, .br, gzip);
+    defer a.free(wire);
+
+    const headers = try ownedTestHeaders(a, &.{.{ "content-encoding", "gzip, br" }});
+    defer freeTestHeaders(a, headers);
+    const decoded = try decodeResponseBody(a, headers, try a.dupe(u8, wire));
+    defer a.free(decoded);
+    try std.testing.expectEqualStrings(plain, decoded);
+    try std.testing.expectEqualStrings("identity", headers[0].value);
 }
 
 test "client compression advertisement respects explicit override" {
@@ -1323,7 +1456,9 @@ test "client compression advertisement respects explicit override" {
     }
     const userAgentPrefix = "User-Agent: ";
     try std.testing.expectEqualStrings(versionInfo.userAgent, defaults[0][userAgentPrefix.len..]);
-    try std.testing.expectEqualStrings("Accept-Encoding: gzip, br, zstd", defaults[1]);
+    const aePrefix = "Accept-Encoding: ";
+    try std.testing.expectEqualStrings(aePrefix, defaults[1][0..aePrefix.len]);
+    try std.testing.expectEqualStrings(compression.acceptEncodingValue(), defaults[1][aePrefix.len..]);
 
     const custom = try headerLines(a, &.{.{ .name = "Accept-Encoding", .value = "identity" }}, null);
     defer {
