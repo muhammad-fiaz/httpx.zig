@@ -9,7 +9,6 @@
 //!   - Thread-safe across multiple concurrent submitters and threads.
 
 const std = @import("std");
-const sync = @import("../common/sync.zig");
 const BoundedQueue = @import("queue.zig").BoundedQueue;
 
 pub const TaskFn = *const fn (ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) anyerror!void;
@@ -52,8 +51,11 @@ pub const Pool = struct {
     shuttingDown: std.atomic.Value(bool) = .init(false),
     drainMode: std.atomic.Value(bool) = .init(false),
     cfg: Config,
-    mu: sync.Spinlock = .{},
+    lifecycleMutex: std.Io.Mutex = .init,
+    lifecycleChanged: std.Io.Condition = .init,
     started: bool = false,
+    starting: bool = false,
+    joining: bool = false,
 
     const Job = struct {
         run: TaskFn,
@@ -82,19 +84,40 @@ pub const Pool = struct {
 
     /// Spawns worker threads. Safe to call multiple times (subsequent calls are no-ops).
     pub fn start(self: *Pool) !void {
-        self.mu.lock();
-        defer self.mu.unlock();
-        if (self.started) return;
+        self.lifecycleMutex.lockUncancelable(self.io);
+        while (self.starting or self.joining) {
+            self.lifecycleChanged.waitUncancelable(self.io, &self.lifecycleMutex);
+        }
+        if (self.started) {
+            self.lifecycleMutex.unlock(self.io);
+            return;
+        }
+        if (self.shuttingDown.load(.acquire)) {
+            self.lifecycleMutex.unlock(self.io);
+            return error.ShuttingDown;
+        }
+        self.starting = true;
+        self.lifecycleMutex.unlock(self.io);
+
         for (self.threads, 0..) |*t, i| {
             t.* = std.Thread.spawn(.{}, workerMain, .{ self, @as(u32, @intCast(i)) }) catch |e| {
                 // Roll back already-spawned workers cleanly.
                 self.shuttingDown.store(true, .release);
                 self.queue.close();
                 for (self.threads[0..i]) |*prev| prev.join();
+                self.lifecycleMutex.lockUncancelable(self.io);
+                self.starting = false;
+                self.lifecycleChanged.broadcast(self.io);
+                self.lifecycleMutex.unlock(self.io);
                 return e;
             };
         }
+
+        self.lifecycleMutex.lockUncancelable(self.io);
         self.started = true;
+        self.starting = false;
+        self.lifecycleChanged.broadcast(self.io);
+        self.lifecycleMutex.unlock(self.io);
     }
 
     pub fn deinit(self: *Pool) void {
@@ -106,21 +129,34 @@ pub const Pool = struct {
 
     /// Blocks until all running worker threads exit.
     pub fn join(self: *Pool) void {
-        self.mu.lock();
-        const wasStarted = self.started;
-        self.started = false;
-        self.mu.unlock();
-
-        if (wasStarted) {
-            for (self.threads) |*t| t.join();
+        self.lifecycleMutex.lockUncancelable(self.io);
+        while (self.starting or self.joining) {
+            self.lifecycleChanged.waitUncancelable(self.io, &self.lifecycleMutex);
         }
+        if (!self.started) {
+            self.lifecycleMutex.unlock(self.io);
+            return;
+        }
+        self.joining = true;
+        self.started = false;
+        self.lifecycleMutex.unlock(self.io);
+
+        for (self.threads) |*t| t.join();
+
+        self.lifecycleMutex.lockUncancelable(self.io);
+        self.joining = false;
+        self.lifecycleChanged.broadcast(self.io);
+        self.lifecycleMutex.unlock(self.io);
     }
 
     /// Submits a task for asynchronous execution. Blocks if the queue is full (applying backpressure).
     pub fn submit(self: *Pool, run: TaskFn, ctx: ?*anyopaque, cancel: ?*std.atomic.Value(bool)) SubmitError!void {
         if (self.shuttingDown.load(.acquire)) return error.ShuttingDown;
         if (self.cfg.autoStart and !self.isStarted()) {
-            self.start() catch return error.OutOfMemory;
+            self.start() catch |err| return switch (err) {
+                error.ShuttingDown => error.ShuttingDown,
+                else => error.OutOfMemory,
+            };
         }
 
         self.queue.push(.{ .run = run, .ctx = ctx, .cancel = cancel }) catch {
@@ -134,7 +170,10 @@ pub const Pool = struct {
     pub fn trySubmit(self: *Pool, run: TaskFn, ctx: ?*anyopaque, cancel: ?*std.atomic.Value(bool)) SubmitError!void {
         if (self.shuttingDown.load(.acquire)) return error.ShuttingDown;
         if (self.cfg.autoStart and !self.isStarted()) {
-            self.start() catch return error.OutOfMemory;
+            self.start() catch |err| return switch (err) {
+                error.ShuttingDown => error.ShuttingDown,
+                else => error.OutOfMemory,
+            };
         }
 
         self.queue.tryPush(.{ .run = run, .ctx = ctx, .cancel = cancel }) catch |err| switch (err) {
@@ -171,8 +210,8 @@ pub const Pool = struct {
     }
 
     pub fn isStarted(self: *Pool) bool {
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.lifecycleMutex.lockUncancelable(self.io);
+        defer self.lifecycleMutex.unlock(self.io);
         return self.started;
     }
 
@@ -234,6 +273,77 @@ test "pool counts task errors as failures rather than completions" {
     try std.testing.expectEqual(@as(usize, 1), p.stats.submitted.load(.monotonic));
     try std.testing.expectEqual(@as(usize, 0), p.stats.completed.load(.monotonic));
     try std.testing.expectEqual(@as(usize, 1), p.stats.failed.load(.monotonic));
+}
+
+test "concurrent pool joins wait for the active join to finish" {
+    const JoinCtx = struct {
+        pool: *Pool,
+        taskStarted: std.atomic.Value(bool) = .init(false),
+        releaseTask: std.atomic.Value(bool) = .init(false),
+        secondEntered: std.atomic.Value(bool) = .init(false),
+        secondDone: std.atomic.Value(bool) = .init(false),
+
+        fn blockingTask(raw: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.taskStarted.store(true, .release);
+            while (!self.releaseTask.load(.acquire)) std.Thread.yield() catch {};
+        }
+
+        fn firstJoin(raw: *@This()) void {
+            raw.pool.join();
+        }
+
+        fn secondJoin(raw: *@This()) void {
+            raw.secondEntered.store(true, .release);
+            raw.pool.join();
+            raw.secondDone.store(true, .release);
+        }
+    };
+
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var pool = try Pool.init(std.testing.allocator, io, .{ .workers = 1 });
+    defer pool.deinit();
+    var ctx = JoinCtx{ .pool = &pool };
+    defer ctx.releaseTask.store(true, .release);
+    try pool.start();
+    try pool.submit(JoinCtx.blockingTask, &ctx, null);
+
+    var spins: usize = 0;
+    while (!ctx.taskStarted.load(.acquire) and spins < 100_000) : (spins += 1) {
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(ctx.taskStarted.load(.acquire));
+    pool.shutdownDrain();
+
+    const first = try std.Thread.spawn(.{}, JoinCtx.firstJoin, .{&ctx});
+    defer first.join();
+    spins = 0;
+    while (true) : (spins += 1) {
+        pool.lifecycleMutex.lockUncancelable(io);
+        const joining = pool.joining;
+        pool.lifecycleMutex.unlock(io);
+        if (joining) break;
+        if (spins == 100_000) return error.TestTimeout;
+        std.Thread.yield() catch {};
+    }
+
+    const second = try std.Thread.spawn(.{}, JoinCtx.secondJoin, .{&ctx});
+    defer second.join();
+    spins = 0;
+    while (!ctx.secondEntered.load(.acquire) and spins < 100_000) : (spins += 1) {
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(ctx.secondEntered.load(.acquire));
+    for (0..1000) |_| std.Thread.yield() catch {};
+    try std.testing.expect(!ctx.secondDone.load(.acquire));
+
+    ctx.releaseTask.store(true, .release);
+    spins = 0;
+    while (!ctx.secondDone.load(.acquire) and spins < 100_000) : (spins += 1) {
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(ctx.secondDone.load(.acquire));
+    try std.testing.expect(!pool.isStarted());
 }
 
 test "pool rejects when shut down" {
