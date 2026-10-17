@@ -1061,7 +1061,7 @@ pub const Server = struct {
         self.emit(.{ .kind = .serverStopped, .level = .info, .message = "shutdown complete" });
     }
 
-    fn runConnectionTask(ctx: ?*anyopaque, _: *std.atomic.Value(bool)) void {
+    fn runConnectionTask(ctx: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {
         const task: *ConnectionTask = @ptrCast(@alignCast(ctx.?));
         const server = task.server;
         const socket = &task.socket;
@@ -1073,7 +1073,10 @@ pub const Server = struct {
         if (server.stopFlag.load(.acquire)) return;
         var arena = std.heap.ArenaAllocator.init(server.allocator);
         defer arena.deinit();
-        server.serveConnection(socket, arena.allocator()) catch {};
+        server.serveConnection(socket, arena.allocator()) catch |err| {
+            server.metricsRegistry.recordError();
+            return err;
+        };
     }
 
     fn monitorConnectionDeadlines(server: *Server) void {

@@ -32,6 +32,11 @@ blocks when the queue is full; `trySubmit` returns `QueueFull` or `QueueBusy`
 immediately. `shutdownDrain` rejects new submissions, wakes waiters, and lets
 queued tasks finish.
 
+Task callbacks have the type `fn (?*anyopaque, *std.atomic.Value(bool)) anyerror!void`.
+Successful callbacks increment `completed`; returned errors increment `failed`.
+The pool records aggregate outcomes in `Stats` and does not retain individual
+error values.
+
 ```zig
 var pool = try httpx.WorkerPool.init(allocator, io, .{
     .workers = 4,

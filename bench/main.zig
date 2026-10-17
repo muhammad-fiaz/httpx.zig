@@ -497,7 +497,7 @@ fn benchSpaFallbackPolicy() void {
 
 fn benchWorkerPoolSubmit() void {
     const Noop = struct {
-        fn run(_: ?*anyopaque, _: *std.atomic.Value(bool)) void {}
+        fn run(_: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {}
     };
     benchPool.submit(Noop.run, null, null) catch return;
 }

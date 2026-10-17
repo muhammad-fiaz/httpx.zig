@@ -12,7 +12,7 @@ const std = @import("std");
 const sync = @import("../common/sync.zig");
 const BoundedQueue = @import("queue.zig").BoundedQueue;
 
-pub const TaskFn = *const fn (ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) void;
+pub const TaskFn = *const fn (ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) anyerror!void;
 
 pub const Config = struct {
     /// 0 => auto (CPU count clamped 1..16).
@@ -185,7 +185,10 @@ pub const Pool = struct {
                     continue;
                 }
             }
-            job.run(job.ctx, job.cancel orelse noopCancel());
+            job.run(job.ctx, job.cancel orelse noopCancel()) catch {
+                _ = self.stats.failed.fetchAdd(1, .monotonic);
+                continue;
+            };
             _ = self.stats.completed.fetchAdd(1, .monotonic);
         }
     }
@@ -199,7 +202,7 @@ pub const Pool = struct {
 test "pool executes submitted tasks" {
     const Ctx = struct {
         counter: std.atomic.Value(u32) = .init(0),
-        fn run(ctx: ?*anyopaque, _: *std.atomic.Value(bool)) void {
+        fn run(ctx: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {
             const c: *@This() = @ptrCast(@alignCast(ctx.?));
             _ = c.counter.fetchAdd(1, .monotonic);
         }
@@ -218,6 +221,19 @@ test "pool executes submitted tasks" {
     }
     try std.testing.expectEqual(@as(u64, 10), p.stats.completed.load(.monotonic));
     try std.testing.expectEqual(@as(u32, 10), ctx.counter.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), p.stats.failed.load(.monotonic));
+}
+
+test "pool counts task errors as failures rather than completions" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var p = try Pool.init(std.testing.allocator, io, .{ .workers = 1, .queueCapacity = 1 });
+    defer p.deinit();
+    try p.submit(failTask, null, null);
+    p.shutdownDrain();
+    p.join();
+    try std.testing.expectEqual(@as(usize, 1), p.stats.submitted.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), p.stats.completed.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), p.stats.failed.load(.monotonic));
 }
 
 test "pool rejects when shut down" {
@@ -252,4 +268,8 @@ test "pool cancel queued tasks" {
     p.shutdownDrain();
 }
 
-fn dummy(_: ?*anyopaque, _: *std.atomic.Value(bool)) void {}
+fn dummy(_: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {}
+
+fn failTask(_: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {
+    return error.TaskFailed;
+}

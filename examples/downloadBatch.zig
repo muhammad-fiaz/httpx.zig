@@ -6,19 +6,19 @@ const DownloadTask = struct {
     url: []const u8,
     dest: []const u8,
 
-    fn run(ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) void {
+    fn run(ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(ctx.?));
         const io = std.Io.Threaded.global_single_threaded.io();
         var c = httpx.Client.init(std.heap.smp_allocator, io, .{});
         defer c.deinit();
 
-        _ = c.download(self.url, .{
+        _ = try c.download(self.url, .{
             .path = self.dest,
             .progress = .enabled,
             .existing = .overwrite,
             .cancelFlag = cancel,
             .createDirs = true,
-        }) catch {};
+        });
     }
 };
 
