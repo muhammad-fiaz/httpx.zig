@@ -76,9 +76,11 @@ pub const Jar = struct {
         var domain: ?[]const u8 = null;
         var path: ?[]const u8 = "/";
         var expiresMs: ?i64 = null;
+        var maxAgeExpiresMs: ?i64 = null;
         var secure = false;
         var httpOnly = false;
         var sameSite: Cookie.SameSite = .lax;
+        const now = clock.millisNow();
 
         var it = parseMod.ParamIterator.init(setCookie);
         var first = true;
@@ -98,11 +100,10 @@ pub const Jar = struct {
             } else if (parseMod.eqlIgnoreCase(param.key, "path")) {
                 path = param.value;
             } else if (parseMod.eqlIgnoreCase(param.key, "max-age")) {
-                const secs = parseMod.parseUint(i64, param.value) orelse continue;
-                expiresMs = clock.millisNow() + (secs * 1000);
+                maxAgeExpiresMs = parseMaxAgeExpiry(param.value, now) orelse continue;
             } else if (parseMod.eqlIgnoreCase(param.key, "expires")) {
                 if (parseMod.parseHttpDate(param.value)) |secs| {
-                    expiresMs = secs * 1000;
+                    expiresMs = secondsToMillisSaturated(secs);
                 }
             } else if (parseMod.eqlIgnoreCase(param.key, "samesite")) {
                 if (parseMod.eqlIgnoreCase(param.value, "strict")) {
@@ -119,38 +120,86 @@ pub const Jar = struct {
         const v = value orelse "";
         const d = domain orelse requestHost;
         const p = path orelse "/";
+        if (n.len == 0) return;
+        for (n) |c| if (!parseMod.isTokenChar(c)) return;
+        for (v) |c| if (c < 0x20 or c == 0x7f) return;
+        if (maxAgeExpiresMs) |expiry| expiresMs = expiry;
+
+        if (expiresMs) |expiry| {
+            if (now >= expiry) {
+                self.mu.lock();
+                defer self.mu.unlock();
+                var i: usize = 0;
+                while (i < self.cookies.items.len) {
+                    const c = &self.cookies.items[i];
+                    if (std.mem.eql(u8, c.name, n) and std.mem.eql(u8, c.domain, d) and std.mem.eql(u8, c.path, p)) {
+                        self.freeCookieFields(c.name, c.value, c.domain, c.path);
+                        _ = self.cookies.swapRemove(i);
+                        break;
+                    }
+                    i += 1;
+                }
+                return;
+            }
+        }
+
+        // Allocate the replacement before taking the lock or removing the
+        // previous cookie. A partial allocation failure leaves jar state intact.
+        const ownedName = self.allocator.dupe(u8, n) catch return;
+        const ownedValue = self.allocator.dupe(u8, v) catch {
+            self.allocator.free(ownedName);
+            return;
+        };
+        const ownedDomain = self.allocator.dupe(u8, d) catch {
+            self.allocator.free(ownedName);
+            self.allocator.free(ownedValue);
+            return;
+        };
+        const ownedPath = self.allocator.dupe(u8, p) catch {
+            self.allocator.free(ownedName);
+            self.allocator.free(ownedValue);
+            self.allocator.free(ownedDomain);
+            return;
+        };
 
         self.mu.lock();
         defer self.mu.unlock();
 
-        // Replace existing cookie with same name+domain+path.
-        var i: usize = 0;
-        while (i < self.cookies.items.len) {
-            const c = &self.cookies.items[i];
-            if (std.mem.eql(u8, c.name, n) and std.mem.eql(u8, c.domain, d) and std.mem.eql(u8, c.path, p)) {
-                self.allocator.free(c.name);
-                self.allocator.free(c.value);
-                self.allocator.free(c.domain);
-                self.allocator.free(c.path);
-                _ = self.cookies.swapRemove(i);
-                break;
-            }
-            i += 1;
-        }
-
-        // Enforce limit.
-        if (self.cookies.items.len >= self.maxCookies) return;
-
-        self.cookies.append(self.allocator, .{
-            .name = self.allocator.dupe(u8, n) catch return,
-            .value = self.allocator.dupe(u8, v) catch return,
-            .domain = self.allocator.dupe(u8, d) catch return,
-            .path = self.allocator.dupe(u8, p) catch return,
+        const newCookie = CookieEntry{
+            .name = ownedName,
+            .value = ownedValue,
+            .domain = ownedDomain,
+            .path = ownedPath,
             .expiresMs = expiresMs,
             .secure = secure,
             .httpOnly = httpOnly,
             .sameSite = sameSite,
-        }) catch return;
+        };
+
+        // Replace in place so an allocation failure cannot remove the old
+        // cookie after the replacement has already been prepared.
+        for (self.cookies.items, 0..) |*c, i| {
+            if (std.mem.eql(u8, c.name, n) and std.mem.eql(u8, c.domain, d) and std.mem.eql(u8, c.path, p)) {
+                self.freeCookieFields(c.name, c.value, c.domain, c.path);
+                self.cookies.items[i] = newCookie;
+                return;
+            }
+        }
+
+        // Enforce limit.
+        if (self.cookies.items.len >= self.maxCookies) {
+            self.freeCookieFields(ownedName, ownedValue, ownedDomain, ownedPath);
+            return;
+        }
+
+        self.cookies.append(self.allocator, newCookie) catch self.freeCookieFields(ownedName, ownedValue, ownedDomain, ownedPath);
+    }
+
+    fn freeCookieFields(self: *Jar, name: []const u8, value: []const u8, domain: []const u8, path: []const u8) void {
+        self.allocator.free(name);
+        self.allocator.free(value);
+        self.allocator.free(domain);
+        self.allocator.free(path);
     }
 
     /// Build a "Cookie: name=value; name2=value2" header for the given host/path.
@@ -200,6 +249,24 @@ pub const Jar = struct {
         }
     }
 };
+
+fn parseMaxAgeExpiry(value: []const u8, nowMs: i64) ?i64 {
+    if (value.len == 0) return null;
+    if (value[0] == '-') {
+        const magnitude = parseMod.parseUint(u64, value[1..]) orelse return null;
+        _ = magnitude;
+        return nowMs;
+    }
+    const seconds = parseMod.parseUint(u64, value) orelse return null;
+    if (seconds == 0) return nowMs;
+    const now: u64 = @intCast(@max(nowMs, 0));
+    const delta = std.math.mul(u64, seconds, 1000) catch std.math.maxInt(u64);
+    return @intCast(@min(now +| delta, std.math.maxInt(i64)));
+}
+
+fn secondsToMillisSaturated(seconds: i64) i64 {
+    return std.math.mul(i64, seconds, 1000) catch if (seconds < 0) std.math.minInt(i64) else std.math.maxInt(i64);
+}
 
 fn domainMatches(host: []const u8, domainIn: []const u8) bool {
     // RFC 6265 Section 5.1.2: a leading dot is ignored for matching purposes.
@@ -251,6 +318,34 @@ test "cookie jar expiry" {
     var buf: [1024]u8 = undefined;
     const h = jar.cookieHeader("example.com", "/", false, &buf);
     try std.testing.expect(h == null);
+}
+
+test "cookie max-age overrides expires and accepts negative deletion values" {
+    var jar = Jar.init(std.testing.allocator);
+    defer jar.deinit();
+    jar.setFromHeader("session=old", "example.com");
+    jar.setFromHeader("session=present; Expires=Sun, 01 Jan 2147483647 00:00:00 GMT; Max-Age=-1", "example.com");
+    var buf: [128]u8 = undefined;
+    try std.testing.expect(jar.cookieHeader("example.com", "/", false, &buf) == null);
+    try std.testing.expectEqual(@as(usize, 0), jar.cookies.items.len);
+
+    jar.setFromHeader("session=present; Max-Age=9223372036854775807", "example.com");
+    const header = jar.cookieHeader("example.com", "/", false, &buf);
+    try std.testing.expect(header != null);
+    try std.testing.expectEqualStrings("session=present", header.?);
+}
+
+test "cookie allocation failure preserves an existing replacement" {
+    var jar = Jar.init(std.testing.allocator);
+    defer jar.deinit();
+    jar.setFromHeader("session=old", "example.com");
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    jar.allocator = failing.allocator();
+    jar.setFromHeader("session=new", "example.com");
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("old", jar.cookies.items[0].value);
+    try std.testing.expectEqual(failing.allocations, failing.deallocations);
 }
 
 test "secure cookies require TLS transport" {
