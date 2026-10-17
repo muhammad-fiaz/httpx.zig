@@ -2,7 +2,7 @@
 //!
 //! Platform-abstracted time sources (Windows `GetSystemTimeAsFileTime` /
 //! `QueryPerformanceCounter`, POSIX `clock_gettime` / `gettimeofday`,
-//! macOS `machAbsoluteTime`). Used for timestamping, timeout
+//! macOS `mach_absolute_time`). Used for timestamping, timeout
 //! calculations, and connection-lifetime tracking.
 //!
 //! References:
@@ -70,15 +70,14 @@ pub fn monotonicMillis() i64 {
             return @as(i64, @intCast(t.sec)) * 1000 + @divFloor(@as(i64, @intCast(t.nsec)), 1_000_000);
         },
         .macos, .ios, .tvos, .watchos => {
-            const c = struct {
-                extern "c" fn machAbsoluteTime() u64;
-                extern "c" fn machTimebaseInfo(info: *TimebaseInfo) c_int;
-                const TimebaseInfo = extern struct { numer: u32, denom: u32 };
-            };
-            var info: c.TimebaseInfo = .{ .numer = 0, .denom = 0 };
-            _ = c.machTimebaseInfo(&info);
-            const t = c.machAbsoluteTime();
+            // Zig mangles `extern "c"` names literally, so the mach entry points
+            // must be declared with their C spelling. Hand-rolled declarations
+            // such as `machAbsoluteTime` link to `_machAbsoluteTime`, which does
+            // not exist; these bindings resolve to the real symbols.
+            var info: std.c.mach_timebase_info_data = undefined;
+            if (std.c.mach_timebase_info(&info) != 0) return wallMillis();
             if (info.denom == 0) return wallMillis();
+            const t = std.c.mach_absolute_time();
             const nanos = t *% @as(u64, info.numer) / @as(u64, info.denom);
             return @intCast(nanos / 1_000_000);
         },
@@ -110,4 +109,15 @@ test "millisNow plausible" {
     // Sometime after 2024-01-01 and before year 2100.
     try std.testing.expect(now > 1_704_067_200_000);
     try std.testing.expect(now < 4_102_444_800_000);
+}
+
+test "monotonicMillis is linked and never goes backwards" {
+    // Calling this from a test keeps every platform branch referenced, so a
+    // wrong `extern "c"` spelling fails at link time instead of rotting as
+    // unreferenced code until a caller appears.
+    const first = monotonicMillis();
+    try std.testing.expect(first > 0);
+    sleepMillis(2);
+    const second = monotonicMillis();
+    try std.testing.expect(second >= first);
 }
