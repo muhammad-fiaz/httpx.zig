@@ -244,6 +244,20 @@ pub const Client = struct {
     }
 };
 
+test "http3 response collector rejects a chunk beyond its configured limit" {
+    const a = std.testing.allocator;
+    var endpoint: quicEp.Endpoint = undefined;
+    var client = Client.init(a, &endpoint);
+    defer client.deinit();
+    client.maxBytes = 3;
+    client.resp.sid = 0;
+
+    Client.onStream(&client, 0, "data", true);
+
+    try std.testing.expect(client.resp.overflow);
+    try std.testing.expectEqual(@as(usize, 0), client.resp.buf.items.len);
+}
+
 /// Sends `bytes` as one QUIC STREAM frame on `sid`.
 fn sendStream(conn: *quicConn.Connection, sid: u64, offset: u64, bytes: []const u8, fin: bool, nowMs: u64) !void {
     const B = struct {
