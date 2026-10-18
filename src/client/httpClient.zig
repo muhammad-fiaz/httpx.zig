@@ -2413,9 +2413,9 @@ test "client get over http3 serves loopback over real udp" {
     const certPem = @embedFile("../protocols/tls/testdata/localhostCert.pem");
     const keyPem = @embedFile("../protocols/tls/testdata/localhostKey.pem");
 
-    // In-process H3/QUIC server: two sequential connections on one UDP
-    // socket, one GET each. Pumps itself on its own thread; the client
-    // under test pumps only itself (the external-peer path).
+    // In-process H3/QUIC server: sequential requests on one UDP socket.
+    // Pumps itself on its own thread; the client under test pumps only
+    // itself (the external-peer path).
     const Server = struct {
         ep: quicEp.Endpoint = undefined,
         pump: quicEp.Pump = undefined,
@@ -2482,16 +2482,28 @@ test "client get over http3 serves loopback over real udp" {
                 const fields = try h3.qdec.decodeSectionCounted(fr.payload, 0, null);
                 defer h3.qdec.freeFields(fields);
                 var path: []const u8 = "";
+                var method: []const u8 = "";
                 for (fields) |f| {
                     if (std.mem.eql(u8, f.name, ":path")) path = f.value;
+                    if (std.mem.eql(u8, f.name, ":method")) method = f.value;
                 }
                 const isHello = std.mem.eql(u8, path, "/hello");
+                var requestBody: []const u8 = "";
+                if (off < acc.buf.items.len) {
+                    const dataFrame = try h3frame.parseFrame(acc.buf.items, &off);
+                    if (dataFrame.frameType != 0x0) return error.InvalidRequestFrame;
+                    requestBody = dataFrame.payload;
+                }
+                const isUpload = std.mem.eql(u8, method, "POST") and
+                    std.mem.eql(u8, path, "/upload") and
+                    std.mem.eql(u8, requestBody, "h3 request payload");
                 var qenc = h3qpack.Encoder.init(alloc);
                 defer qenc.deinit();
                 var rs = h3conn.RequestStream{ .id = acc.sid, .allocator = alloc, .qpack = &qenc };
-                const rhead = try rs.buildResponseHeaders(if (isHello) 200 else 404, &.{});
+                const rhead = try rs.buildResponseHeaders(if (isHello or isUpload) 200 else 404, &.{});
                 defer alloc.free(rhead);
-                const rdata = try rs.buildData(if (isHello) "hello-h3" else "not-found");
+                const responseBody = if (isHello) "hello-h3" else if (isUpload) "body-received" else "not-found";
+                const rdata = try rs.buildData(responseBody);
                 defer alloc.free(rdata);
                 var wire = std.ArrayList(u8).empty;
                 defer wire.deinit(alloc);
@@ -2512,7 +2524,11 @@ test "client get over http3 serves loopback over real udp" {
                 out.* = e;
                 return;
             };
-            // Third connection: untrusted client. It fails chain
+            serveOne(srv, 15_000) catch |e| {
+                out.* = e;
+                return;
+            };
+            // Fourth connection: untrusted client. It fails chain
             // verification and goes quiet, so the server must time out
             // (never complete). A completed third handshake would mean
             // the client accepted a forged chain — catastrophic.
@@ -2536,9 +2552,11 @@ test "client get over http3 serves loopback over real udp" {
 
     var result: ?anyerror = error.NotRun;
     const th = try std.Thread.spawn(.{}, Server.run, .{ &srv, &result });
+    var serverJoined = false;
+    defer if (!serverJoined) th.join();
 
     // Explicit teardown (no defer join): the server exits on its own
-    // after two requests, so join-then-assert is exact. errdefer covers
+    // after three requests, so join-then-assert is exact. errdefer covers
     // failures (server times out internally and exits by itself).
     var client = Client.init(a, ctx.io, .{});
     errdefer client.deinit();
@@ -2564,6 +2582,17 @@ test "client get over http3 serves loopback over real udp" {
     defer res404.deinit();
     try std.testing.expectEqual(@as(u16, 404), res404.status);
 
+    const uploadUrl = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/upload", .{port});
+    var uploadResponse = try client.post(uploadUrl, .{
+        .body = "h3 request payload",
+        .httpVersion = .http3,
+        .tls = .{ .verify = .caBundle, .caPem = certPem },
+        .timeoutMs = 15_000,
+    });
+    defer uploadResponse.deinit();
+    try std.testing.expectEqual(@as(u16, 200), uploadResponse.status);
+    try std.testing.expectEqualStrings("body-received", uploadResponse.body);
+
     // Untrusted chain fails fast and loudly (no 15s deadline burn: the
     // doomed handshake aborts as soon as the driver rejects the chain).
     const bad = client.get(url, .{
@@ -2575,6 +2604,7 @@ test "client get over http3 serves loopback over real udp" {
 
     client.deinit();
     th.join();
+    serverJoined = true;
     // Server side: two clean serves, then the quiet-abort timeout.
     try std.testing.expect(result == null);
 }

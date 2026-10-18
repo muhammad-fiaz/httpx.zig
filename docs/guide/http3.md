@@ -60,7 +60,8 @@ Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP
 - One request per QUIC connection (no H3 pooling yet); proxy routes are rejected loudly (`Http3ProxyUnsupported`).
 - Full handshakes only: no PSK resumption or HRR over QUIC yet (both exist on the TCP/TLS paths).
 - No transport-parameter negotiation (both ends run compiled-in defaults), no Retry/token round trip, no loss recovery or congestion control: reliable paths (loopback/LAN) only.
-- Request bodies are not sent yet (GET/HEAD-style exchanges).
+- The client sends buffered request bodies in HTTP/3 DATA frames. Streaming
+  uploads and downloads are not provided by this one-shot API.
 
 ## High-level Client Usage
 

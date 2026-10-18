@@ -11,7 +11,8 @@
 //!   * Response QPACK sections must decode with connection state plus
 //!     the static table: servers using dynamic-table insertions that
 //!     require decoder-stream traffic will fail the decode loudly.
-//!   * Request bodies are not sent yet (GET/HEAD-style exchanges).
+//!   * Request bodies are sent as buffered DATA frames; streaming uploads are
+//!     not provided by this one-shot client API.
 //!   * GOAWAY is not specially handled: a connection that goes away
 //!     mid-request surfaces as a truncated response error.
 //!
