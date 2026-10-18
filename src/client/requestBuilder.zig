@@ -1512,29 +1512,57 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
     defer acc.deinit(a);
     var buf: [8192]u8 = undefined;
 
-    var headEnd: usize = 0;
-    while (true) {
-        if (std.mem.indexOf(u8, acc.items, "\r\n\r\n")) |idx| {
-            headEnd = idx + 4;
-            break;
-        }
-        if (opts.allowLfLineEndings) {
-            if (std.mem.indexOf(u8, acc.items, "\n\n")) |idx| {
-                // Ensure not already counted as \r\n\r\n (avoid double)
-                if (idx == 0 or acc.items[idx - 1] != '\r') {
-                    headEnd = idx + 2;
+    const parsed = blk: {
+        var interimCount: u8 = 0;
+        while (true) {
+            var headEnd: usize = 0;
+            while (true) {
+                if (std.mem.indexOf(u8, acc.items, "\r\n\r\n")) |idx| {
+                    headEnd = idx + 4;
                     break;
                 }
+                if (opts.allowLfLineEndings) {
+                    if (std.mem.indexOf(u8, acc.items, "\n\n")) |idx| {
+                        // Ensure not already counted as \r\n\r\n (avoid double)
+                        if (idx == 0 or acc.items[idx - 1] != '\r') {
+                            headEnd = idx + 2;
+                            break;
+                        }
+                    }
+                }
+                const n = conn.read(buf[0..]) catch return Error.ReadFailed;
+                if (n == 0) return Error.MalformedResponse;
+                acc.appendSlice(a, buf[0..n]) catch return Error.OutOfMemory;
+                if (acc.items.len > 128 * 1024) return Error.MalformedResponse;
             }
-        }
-        const n = conn.read(buf[0..]) catch return Error.ReadFailed;
-        if (n == 0) return Error.MalformedResponse;
-        acc.appendSlice(a, buf[0..n]) catch return Error.OutOfMemory;
-        if (acc.items.len > 128 * 1024) return Error.MalformedResponse;
-    }
 
+            const optsParser: parserMod.Options = .{ .allowLfLineEndings = opts.allowLfLineEndings };
+            const respHead = parserMod.parseResponseHead(acc.items, optsParser) catch return Error.MalformedResponse;
+            if (respHead.statusCode < 100 or respHead.statusCode >= 200 or respHead.statusCode == 101) {
+                break :blk .{ .headEnd = headEnd, .respHead = respHead };
+            }
+
+            // Informational responses end at the header terminator. Validate
+            // their fields and reject body framing before moving on to the
+            // final response. Preserve bytes already read for the next head.
+            var interimFields: [parserMod.DEFAULT_MAX_HEADERS]parserMod.Field = undefined;
+            const interim = parserMod.parseHeaderBlock(acc.items[0..headEnd], respHead.headEnd, interimFields[0..], optsParser) catch
+                return Error.MalformedResponse;
+            for (interimFields[0..interim.count]) |field| {
+                if (std.ascii.eqlIgnoreCase(field.name, "Content-Length") or
+                    std.ascii.eqlIgnoreCase(field.name, "Transfer-Encoding")) return Error.MalformedResponse;
+            }
+            interimCount += 1;
+            if (interimCount > 16) return Error.MalformedResponse;
+
+            const remaining = acc.items.len - headEnd;
+            std.mem.copyForwards(u8, acc.items[0..remaining], acc.items[headEnd..]);
+            acc.items.len = remaining;
+        }
+    };
+    const headEnd = parsed.headEnd;
+    const respHead = parsed.respHead;
     const optsParser: parserMod.Options = .{ .allowLfLineEndings = opts.allowLfLineEndings };
-    const respHead = parserMod.parseResponseHead(acc.items, optsParser) catch return Error.MalformedResponse;
 
     var fields: [parserMod.DEFAULT_MAX_HEADERS]parserMod.Field = undefined;
     const blk = parserMod.parseHeaderBlock(acc.items[0..headEnd], respHead.headEnd, fields[0..], optsParser) catch
@@ -1565,7 +1593,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
         headerCount += 1;
     }
 
-    if (isHead or respHead.statusCode < 200 or respHead.statusCode == 204 or respHead.statusCode == 304 or
+    if (isHead or respHead.statusCode < 200 or respHead.statusCode == 101 or respHead.statusCode == 204 or respHead.statusCode == 304 or
         (framing.framing == .contentLength and framing.length == 0))
     {
         return .{ .resp = .{
@@ -1573,7 +1601,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
             .status = respHead.statusCode,
             .headers = headers,
             .body = try a.alloc(u8, 0),
-        }, .reusable = acc.items.len == headEnd };
+        }, .reusable = respHead.statusCode != 101 and acc.items.len == headEnd };
     }
 
     var body: std.ArrayList(u8) = .empty;
@@ -1719,6 +1747,53 @@ test "client trims content-length response and rejects connection reuse after tr
     defer full.resp.deinit();
     try std.testing.expectEqualStrings("abc", full.resp.body);
     try std.testing.expect(!full.reusable);
+}
+
+test "client skips informational responses and returns the final response" {
+    const MockConn = struct {
+        wire: []const u8,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            const n = @min(dest.len, self.wire.len);
+            @memcpy(dest[0..n], self.wire[0..n]);
+            self.wire = self.wire[n..];
+            return n;
+        }
+    };
+    const a = std.testing.allocator;
+    var conn = MockConn{
+        .wire = "HTTP/1.1 100 Continue\r\n\r\n" ++
+            "HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n" ++
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
+    };
+    var full = try readFullResponse(a, &conn, false);
+    defer full.resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), full.resp.status);
+    try std.testing.expectEqualStrings("OK", full.resp.body);
+    try std.testing.expect(full.reusable);
+}
+
+test "client returns switching-protocols response without reading tunnel data" {
+    const MockConn = struct {
+        wire: []const u8,
+        reads: usize = 0,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            self.reads += 1;
+            const n = @min(dest.len, self.wire.len);
+            @memcpy(dest[0..n], self.wire[0..n]);
+            self.wire = self.wire[n..];
+            return n;
+        }
+    };
+    const a = std.testing.allocator;
+    var conn = MockConn{ .wire = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\nframe" };
+    var full = try readFullResponse(a, &conn, false);
+    defer full.resp.deinit();
+    try std.testing.expectEqual(@as(u16, 101), full.resp.status);
+    try std.testing.expectEqual(@as(usize, 0), full.resp.body.len);
+    try std.testing.expect(!full.reusable);
+    try std.testing.expectEqual(@as(usize, 1), conn.reads);
 }
 
 fn isRedirect(status: u16) bool {
