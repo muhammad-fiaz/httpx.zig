@@ -82,19 +82,21 @@ const ws = if (isWindows) struct {
         lpVendorInfo: ?[*:0]u8,
     };
 
-    pub extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSADATA) callconv(.c) i32;
-    pub extern "ws2_32" fn WSAGetLastError() callconv(.c) i32;
-    pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(.c) i32;
-    pub extern "ws2_32" fn socket(af: i32, sockType: i32, protocol: i32) callconv(.c) SOCKET;
-    pub extern "ws2_32" fn bind(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn accept(s: SOCKET, addr: ?*anyopaque, addrlen: ?*i32) callconv(.c) SOCKET;
-    pub extern "ws2_32" fn getsockname(s: SOCKET, name: *anyopaque, namelen: *i32) callconv(.c) i32;
-    pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: i32, flags: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: i32, flags: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn setsockopt(s: SOCKET, level: i32, optname: i32, optval: ?*const anyopaque, optlen: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn shutdown(s: SOCKET, how: i32) callconv(.c) i32;
+    const wsCall: std.lang.CallingConvention = if (builtin.os.tag == .windows) std.lang.CallingConvention.winapi else std.lang.CallingConvention.c;
+
+    pub extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSADATA) callconv(wsCall) i32;
+    pub extern "ws2_32" fn WSAGetLastError() callconv(wsCall) i32;
+    pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(wsCall) i32;
+    pub extern "ws2_32" fn socket(af: i32, sockType: i32, protocol: i32) callconv(wsCall) SOCKET;
+    pub extern "ws2_32" fn bind(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn accept(s: SOCKET, addr: ?*anyopaque, addrlen: ?*i32) callconv(wsCall) SOCKET;
+    pub extern "ws2_32" fn getsockname(s: SOCKET, name: *anyopaque, namelen: *i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: i32, flags: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: i32, flags: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn setsockopt(s: SOCKET, level: i32, optname: i32, optval: ?*const anyopaque, optlen: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn shutdown(s: SOCKET, how: i32) callconv(wsCall) i32;
 
     pub const SOL_SOCKET: i32 = 0xFFFF;
     pub const SO_RCVTIMEO: i32 = 0x1006;

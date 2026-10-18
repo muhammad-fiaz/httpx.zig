@@ -84,15 +84,17 @@ pub const ws = if (isWindows) struct {
         vendorInfo: ?*anyopaque,
     };
 
-    pub extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSAData) callconv(.c) i32;
-    pub extern "ws2_32" fn WSAGetLastError() callconv(.c) i32;
-    pub extern "ws2_32" fn recv(s: usize, buf: [*]u8, len: i32, flags: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn send(s: usize, buf: [*]const u8, len: i32, flags: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn shutdown(s: usize, how: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn closesocket(s: usize) callconv(.c) i32;
-    pub extern "ws2_32" fn select(nfds: i32, readfds: ?*FdSet, writefds: ?*FdSet, exceptfds: ?*FdSet, timeout: ?*Timeval) callconv(.c) i32;
-    pub extern "ws2_32" fn setsockopt(s: usize, level: i32, optname: i32, optval: ?*const anyopaque, optlen: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn ioctlsocket(s: usize, cmd: i32, argp: *u32) callconv(.c) i32;
+    const wsCall: std.lang.CallingConvention = if (builtin.os.tag == .windows) std.lang.CallingConvention.winapi else std.lang.CallingConvention.c;
+
+    pub extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSAData) callconv(wsCall) i32;
+    pub extern "ws2_32" fn WSAGetLastError() callconv(wsCall) i32;
+    pub extern "ws2_32" fn recv(s: usize, buf: [*]u8, len: i32, flags: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn send(s: usize, buf: [*]const u8, len: i32, flags: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn shutdown(s: usize, how: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn closesocket(s: usize) callconv(wsCall) i32;
+    pub extern "ws2_32" fn select(nfds: i32, readfds: ?*FdSet, writefds: ?*FdSet, exceptfds: ?*FdSet, timeout: ?*Timeval) callconv(wsCall) i32;
+    pub extern "ws2_32" fn setsockopt(s: usize, level: i32, optname: i32, optval: ?*const anyopaque, optlen: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn ioctlsocket(s: usize, cmd: i32, argp: *u32) callconv(wsCall) i32;
 
     pub const SOL_SOCKET: i32 = 0xFFFF;
     pub const SO_REUSEADDR: i32 = 0x0004;

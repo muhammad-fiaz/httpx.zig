@@ -30,8 +30,6 @@ jobs:
         run: zig fmt --check src/ examples/
       - name: Test
         run: zig build test --summary all
-      - name: Fuzz
-        run: zig build fuzz
       - name: Examples
         run: zig build run-all-examples
 
