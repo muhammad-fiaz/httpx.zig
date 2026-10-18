@@ -735,6 +735,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
     var redirects: u8 = 0;
     var method = req.method;
     var credentialsStripped = false;
+    var bodyStripped = false;
     var redirectedHeaders: ?[]Header = null;
     defer if (redirectedHeaders) |headers| a.free(headers);
 
@@ -760,15 +761,15 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         const target = try buildTarget(a, u.path, u.query, req.query);
         defer a.free(target);
 
-        const ct: ?[]const u8 = switch (req.bodyKind) {
+        const ct: ?[]const u8 = if (bodyStripped) null else switch (req.bodyKind) {
             .json => "application/json",
             .form => "application/x-www-form-urlencoded",
             else => null,
         };
-        const hasBody = req.body.len > 0 or switch (req.bodyKind) {
+        const hasBody = !bodyStripped and (req.body.len > 0 or switch (req.bodyKind) {
             .json, .form => true,
             else => false,
-        };
+        });
         const bodyOut: ?[]const u8 = if (hasBody) req.body else null;
 
         const requestHeaders = redirectedHeaders orelse req.headers;
@@ -1270,20 +1271,36 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 return resp;
             };
             const wasSameOrigin = sameOrigin(&u, &nextUri);
+            var nextMethod = method;
+            var nextBodyStripped = bodyStripped;
+            switch (resp.status) {
+                301, 302 => if (method == .POST) {
+                    nextMethod = .GET;
+                    nextBodyStripped = true;
+                },
+                303 => {
+                    if (method != .HEAD) nextMethod = .GET;
+                    nextBodyStripped = true;
+                },
+                else => {},
+            }
+            const nextCredentialsStripped = credentialsStripped or !wasSameOrigin;
 
-            if (!wasSameOrigin and !credentialsStripped) {
-                redirectedHeaders = filterSensitiveHeaders(a, req.headers) catch {
+            if (nextCredentialsStripped != credentialsStripped or nextBodyStripped != bodyStripped) {
+                const filtered = filterRedirectHeaders(a, req.headers, nextCredentialsStripped, nextBodyStripped) catch {
                     a.free(next);
                     resp.deinit();
                     return Error.OutOfMemory;
                 };
-                credentialsStripped = true;
+                if (redirectedHeaders) |old| a.free(old);
+                redirectedHeaders = filtered;
             }
+            credentialsStripped = nextCredentialsStripped;
+            bodyStripped = nextBodyStripped;
+            method = nextMethod;
 
             a.free(currentUrl);
             currentUrl = next;
-
-            if (resp.status == 301 or resp.status == 302 or resp.status == 303) method = .GET;
             resp.deinit();
             continue;
         }
@@ -1834,13 +1851,16 @@ fn sameOrigin(base: *const uriMod.Uri, target: *const uriMod.Uri) bool {
         base.effectivePort() == target.effectivePort();
 }
 
-fn filterSensitiveHeaders(a: Allocator, hdrs: []const Header) ![]Header {
+fn filterRedirectHeaders(a: Allocator, hdrs: []const Header, stripCredentials: bool, stripBody: bool) ![]Header {
     var filtered: std.ArrayList(Header) = .empty;
     errdefer filtered.deinit(a);
     for (hdrs) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "Authorization") or
+        if (stripCredentials and (std.ascii.eqlIgnoreCase(h.name, "Authorization") or
             std.ascii.eqlIgnoreCase(h.name, "Cookie") or
-            std.ascii.eqlIgnoreCase(h.name, "Proxy-Authorization")) continue;
+            std.ascii.eqlIgnoreCase(h.name, "Proxy-Authorization"))) continue;
+        const isContentHeader = h.name.len >= 8 and std.ascii.eqlIgnoreCase(h.name[0..8], "content-");
+        if (stripBody and (isContentHeader or std.ascii.eqlIgnoreCase(h.name, "Transfer-Encoding") or
+            std.ascii.eqlIgnoreCase(h.name, "Trailer") or std.ascii.eqlIgnoreCase(h.name, "Expect"))) continue;
         try filtered.append(a, h);
     }
     return filtered.toOwnedSlice(a);
@@ -2553,14 +2573,94 @@ test "cross-origin redirect strips credential options without mutating caller he
     try std.testing.expectEqualStrings("Basic proxy-secret", suppliedHeaders[0].value);
 }
 
-test "filterSensitiveHeaders leaves original authorization data untouched" {
+test "303 redirect changes POST to GET and removes body framing headers" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+
+    const Capture = struct {
+        bytes: [2048]u8 = undefined,
+        len: usize = 0,
+    };
+    const RawServer = struct {
+        fn readRequest(conn: *tcp.Socket, capture: *Capture, includeBody: bool) void {
+            while (capture.len < capture.bytes.len) {
+                const n = conn.read(capture.bytes[capture.len..]) catch return;
+                if (n == 0) return;
+                capture.len += n;
+                const data = capture.bytes[0..capture.len];
+                const headEnd = (std.mem.indexOf(u8, data, "\r\n\r\n") orelse continue) + 4;
+                if (!includeBody) return;
+                const clStart = std.mem.indexOf(u8, data[0..headEnd], "Content-Length: ") orelse return;
+                const valueStart = clStart + "Content-Length: ".len;
+                const valueEnd = std.mem.indexOf(u8, data[valueStart..headEnd], "\r\n") orelse return;
+                const bodyLen = std.fmt.parseInt(usize, data[valueStart .. valueStart + valueEnd], 10) catch return;
+                if (capture.len >= headEnd + bodyLen) return;
+            }
+        }
+
+        fn run(listenerPtr: *tcp.Listener, first: *Capture, second: *Capture, io: std.Io) void {
+            {
+                var conn = listenerPtr.accept(io) catch return;
+                defer conn.close();
+                readRequest(&conn, first, true);
+                conn.writeAll("HTTP/1.1 303 See Other\r\nLocation: /next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch return;
+            }
+            var conn = listenerPtr.accept(io) catch return;
+            defer conn.close();
+            readRequest(&conn, second, false);
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+        }
+    };
+
+    var first = Capture{};
+    var second = Capture{};
+    const thread = try std.Thread.spawn(.{}, RawServer.run, .{ &listener, &first, &second, ctx.io });
+    var joined = false;
+    errdefer if (!joined) thread.join();
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/start", .{listener.localPort()});
+    defer a.free(url);
+    const headers = [_]Header{
+        .{ .name = "Content-Type", .value = "text/plain" },
+        .{ .name = "Content-Length", .value = "7" },
+        .{ .name = "Expect", .value = "100-continue" },
+        .{ .name = "X-Keep", .value = "yes" },
+    };
+    var response = try request(a, ctx.io, .{
+        .method = .POST,
+        .url = url,
+        .bodyKind = .raw,
+        .body = "payload",
+        .headers = &headers,
+    });
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    thread.join();
+    joined = true;
+
+    const firstRequest = first.bytes[0..first.len];
+    try std.testing.expect(std.mem.startsWith(u8, firstRequest, "POST /start HTTP/1.1\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, firstRequest, "payload"));
+    const secondRequest = second.bytes[0..second.len];
+    try std.testing.expect(std.mem.startsWith(u8, secondRequest, "GET /next HTTP/1.1\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, secondRequest, "Content-Length:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, secondRequest, "Content-Type:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, secondRequest, "Expect:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, secondRequest, "X-Keep: yes") != null);
+    try std.testing.expectEqualStrings("7", headers[1].value);
+}
+
+test "filterRedirectHeaders leaves original authorization data untouched" {
     const a = std.testing.allocator;
     const original = [_]Header{
         .{ .name = "Authorization", .value = "Bearer keep-in-caller" },
         .{ .name = "Cookie", .value = "secret=keep-in-caller" },
         .{ .name = "X-Keep", .value = "yes" },
     };
-    const filtered = try filterSensitiveHeaders(a, &original);
+    const filtered = try filterRedirectHeaders(a, &original, true, false);
     defer a.free(filtered);
     try std.testing.expectEqual(@as(usize, 1), filtered.len);
     try std.testing.expectEqualStrings("X-Keep", filtered[0].name);
