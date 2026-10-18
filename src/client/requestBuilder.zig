@@ -11,9 +11,9 @@
 //!
 //! Scope: HTTP/1.x over TCP (http://). https:// requires explicit TLS
 //! configuration (TlsOptions). Follows 301/302/303 (-> GET) and
-//! 307/308 (method preserved), stripping Authorization on cross-origin hops
-//! per RFC 7235 Section 2.2. Content-Length and chunked transfer-encoding
-//! response bodies are both decoded.
+//! 307/308 (method preserved), stripping credentials on cross-origin hops.
+//! Content-Length and chunked transfer-encoding response bodies are both
+//! decoded.
 //!
 //! References:
 //!   - RFC 9110 Section 5.3 — Request Target
@@ -734,13 +734,22 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 
     var redirects: u8 = 0;
     var method = req.method;
+    var credentialsStripped = false;
+    var redirectedHeaders: ?[]Header = null;
+    defer if (redirectedHeaders) |headers| a.free(headers);
 
     while (true) {
         const u = uriMod.parse(currentUrl) catch return Error.InvalidUrl;
         const isTls = std.mem.eql(u8, u.scheme, "https");
         if (!isTls and !std.mem.eql(u8, u.scheme, "http")) return Error.InvalidUrl;
         // Auto-enable TLS for HTTPS with safe default verification (.caBundle).
-        const tlsOpts = if (isTls) req.tls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
+        var tlsOpts = if (isTls) req.tls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
+        if (credentialsStripped) {
+            if (tlsOpts) |*opts| {
+                opts.clientCertPem = null;
+                opts.clientKeyPem = null;
+            }
+        }
 
         var port = u.effectivePort();
         if (port == 0) return Error.InvalidUrl;
@@ -762,7 +771,15 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         };
         const bodyOut: ?[]const u8 = if (hasBody) req.body else null;
 
-        const extra = try headerLinesWithAuth(a, req.headers, ct, req.cookie, req.basicAuth, req.bearerAuth);
+        const requestHeaders = redirectedHeaders orelse req.headers;
+        const extra = try headerLinesWithAuth(
+            a,
+            requestHeaders,
+            ct,
+            if (credentialsStripped) null else req.cookie,
+            if (credentialsStripped) null else req.basicAuth,
+            if (credentialsStripped) null else req.bearerAuth,
+        );
         defer {
             for (extra) |l| a.free(l);
             a.free(extra);
@@ -1249,11 +1266,17 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             redirects += 1;
             const wasSameOrigin = sameOrigin(&u, loc);
 
+            if (!wasSameOrigin and !credentialsStripped) {
+                redirectedHeaders = filterSensitiveHeaders(a, req.headers) catch {
+                    resp.deinit();
+                    return Error.OutOfMemory;
+                };
+                credentialsStripped = true;
+            }
+
             const next = resolveLocation(a, currentUrl, loc) catch return resp;
             a.free(currentUrl);
             currentUrl = next;
-
-            if (!wasSameOrigin) stripAuth(@constCast(req.headers));
 
             if (resp.status == 301 or resp.status == 302 or resp.status == 303) method = .GET;
             resp.deinit();
@@ -1808,10 +1831,16 @@ fn sameOrigin(base: *const uriMod.Uri, location: []const u8) bool {
         base.effectivePort() == parsed.effectivePort();
 }
 
-fn stripAuth(hdrs: []Header) void {
-    for (hdrs) |*h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "Authorization")) h.value = "";
+fn filterSensitiveHeaders(a: Allocator, hdrs: []const Header) ![]Header {
+    var filtered: std.ArrayList(Header) = .empty;
+    errdefer filtered.deinit(a);
+    for (hdrs) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "Authorization") or
+            std.ascii.eqlIgnoreCase(h.name, "Cookie") or
+            std.ascii.eqlIgnoreCase(h.name, "Proxy-Authorization")) continue;
+        try filtered.append(a, h);
     }
+    return filtered.toOwnedSlice(a);
 }
 
 /// Resolves Location against the previous URL (RFC 3986 Section 5),
@@ -2409,6 +2438,106 @@ test "redirect origin comparison includes scheme host and effective port" {
     try std.testing.expect(!sameOrigin(&base, "https://example.com:444/next"));
     try std.testing.expect(!sameOrigin(&base, "http://example.com:443/next"));
     try std.testing.expect(sameOrigin(&base, "/relative"));
+}
+
+test "cross-origin redirect strips credential options without mutating caller headers" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var redirectListener = try tcp.Listener.bind(ctx.io, 0);
+    defer redirectListener.close(ctx.io);
+    var targetListener = try tcp.Listener.bind(ctx.io, 0);
+    defer targetListener.close(ctx.io);
+
+    const Capture = struct {
+        bytes: [2048]u8 = undefined,
+        len: usize = 0,
+    };
+    const RawServer = struct {
+        fn readRequest(conn: *tcp.Socket, capture: *Capture) void {
+            while (capture.len < capture.bytes.len) {
+                const n = conn.read(capture.bytes[capture.len..]) catch return;
+                if (n == 0) return;
+                capture.len += n;
+                if (std.mem.indexOf(u8, capture.bytes[0..capture.len], "\r\n\r\n") != null) return;
+            }
+        }
+
+        fn redirect(listener: *tcp.Listener, targetPort: u16, capture: *Capture, io: std.Io) void {
+            var conn = listener.accept(io) catch return;
+            defer conn.close();
+            readRequest(&conn, capture);
+            var response: [256]u8 = undefined;
+            const wire = std.fmt.bufPrint(
+                &response,
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{d}/target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                .{targetPort},
+            ) catch return;
+            conn.writeAll(wire) catch {};
+        }
+
+        fn target(listener: *tcp.Listener, capture: *Capture, io: std.Io) void {
+            var conn = listener.accept(io) catch return;
+            defer conn.close();
+            readRequest(&conn, capture);
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+        }
+    };
+
+    var firstCapture = Capture{};
+    var targetCapture = Capture{};
+    const targetThread = try std.Thread.spawn(.{}, RawServer.target, .{ &targetListener, &targetCapture, ctx.io });
+    var targetJoined = false;
+    errdefer if (!targetJoined) targetThread.join();
+    const redirectThread = try std.Thread.spawn(.{}, RawServer.redirect, .{ &redirectListener, targetListener.localPort(), &firstCapture, ctx.io });
+    var redirectJoined = false;
+    errdefer if (!redirectJoined) redirectThread.join();
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/start", .{redirectListener.localPort()});
+    defer a.free(url);
+    const suppliedHeaders = [_]Header{
+        .{ .name = "Proxy-Authorization", .value = "Basic proxy-secret" },
+        .{ .name = "X-Keep", .value = "yes" },
+    };
+    var response = try request(a, ctx.io, .{
+        .url = url,
+        .headers = &suppliedHeaders,
+        .cookie = "option-cookie=secret",
+        .basicAuth = "user:password",
+        .bearerAuth = "option-secret",
+    });
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+
+    targetThread.join();
+    targetJoined = true;
+    redirectThread.join();
+    redirectJoined = true;
+    const firstRequest = firstCapture.bytes[0..firstCapture.len];
+    try std.testing.expect(std.mem.indexOf(u8, firstRequest, "Authorization: Bearer option-secret") != null);
+    try std.testing.expect(std.mem.indexOf(u8, firstRequest, "Cookie: option-cookie=secret") != null);
+    try std.testing.expect(std.mem.indexOf(u8, firstRequest, "Proxy-Authorization: Basic proxy-secret") != null);
+    const targetRequest = targetCapture.bytes[0..targetCapture.len];
+    try std.testing.expect(std.mem.indexOf(u8, targetRequest, "Authorization:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, targetRequest, "Cookie:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, targetRequest, "Proxy-Authorization:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, targetRequest, "X-Keep: yes") != null);
+    try std.testing.expectEqualStrings("Basic proxy-secret", suppliedHeaders[0].value);
+}
+
+test "filterSensitiveHeaders leaves original authorization data untouched" {
+    const a = std.testing.allocator;
+    const original = [_]Header{
+        .{ .name = "Authorization", .value = "Bearer keep-in-caller" },
+        .{ .name = "Cookie", .value = "secret=keep-in-caller" },
+        .{ .name = "X-Keep", .value = "yes" },
+    };
+    const filtered = try filterSensitiveHeaders(a, &original);
+    defer a.free(filtered);
+    try std.testing.expectEqual(@as(usize, 1), filtered.len);
+    try std.testing.expectEqualStrings("X-Keep", filtered[0].name);
+    try std.testing.expectEqualStrings("Bearer keep-in-caller", original[0].value);
+    try std.testing.expectEqualStrings("secret=keep-in-caller", original[1].value);
 }
 
 test "https auto-enables tls with secure caBundle verification when no explicit options provided" {
