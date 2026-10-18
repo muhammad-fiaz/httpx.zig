@@ -1803,7 +1803,9 @@ fn isRedirect(status: u16) bool {
 fn sameOrigin(base: *const uriMod.Uri, location: []const u8) bool {
     if (std.mem.indexOf(u8, location, "://") == null) return true;
     const parsed = uriMod.parse(location) catch return false;
-    return std.mem.eql(u8, base.scheme, parsed.scheme) and std.mem.eql(u8, base.host, parsed.host);
+    return std.ascii.eqlIgnoreCase(base.scheme, parsed.scheme) and
+        std.ascii.eqlIgnoreCase(base.host, parsed.host) and
+        base.effectivePort() == parsed.effectivePort();
 }
 
 fn stripAuth(hdrs: []Header) void {
@@ -2399,6 +2401,14 @@ test "resolveLocation handles relative paths and dot segments" {
         defer a.free(got);
         try std.testing.expectEqualStrings(c.want, got);
     }
+}
+
+test "redirect origin comparison includes scheme host and effective port" {
+    const base = try uriMod.parse("https://Example.com:443/start");
+    try std.testing.expect(sameOrigin(&base, "https://example.COM/next"));
+    try std.testing.expect(!sameOrigin(&base, "https://example.com:444/next"));
+    try std.testing.expect(!sameOrigin(&base, "http://example.com:443/next"));
+    try std.testing.expect(sameOrigin(&base, "/relative"));
 }
 
 test "https auto-enables tls with secure caBundle verification when no explicit options provided" {
