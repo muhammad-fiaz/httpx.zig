@@ -1058,10 +1058,13 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         };
 
         if (req.timeoutMs) |tMs| {
-            if (tMs > 0) {
-                if (tcpSock.inner == .stream) {
-                    tcp.setTimeouts(tcpSock.netSocketHandle(), @intCast(@min(tMs, 2147483647)));
-                }
+            if (tMs > 0 and tcpSock.inner == .stream) {
+                // The budget travels with each operation: SO_RCVTIMEO on a
+                // std.Io socket makes Zig's net_read abort the process when it
+                // fires. Raw winsock sockets are left untouched here.
+                const ms: u32 = @intCast(@min(tMs, std.math.maxInt(u32)));
+                tcpSock.setReadInactivityTimeoutMs(ms);
+                tcpSock.setWriteInactivityTimeoutMs(ms);
             }
         }
 

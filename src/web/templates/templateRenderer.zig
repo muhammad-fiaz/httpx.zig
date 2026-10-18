@@ -1479,7 +1479,8 @@ fn filterRandom(allocator: Allocator, value: Value, args: []const Value, kwargs:
     seed ^= seed >> 7;
     seed ^= seed << 17;
     if (seed == 0) seed = 0x9E3779B97F4A7C15;
-    return value.list[seed % value.list.len];
+    const index: usize = @intCast(seed % @as(u64, @intCast(value.list.len)));
+    return value.list[index];
 }
 
 fn filterSelectReject(allocator: Allocator, value: Value, args: []const Value, kwargs: []const FilterKwarg, want: bool) !Value {
