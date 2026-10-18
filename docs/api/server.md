@@ -98,11 +98,13 @@ All `ServerConfig` fields are optional customizations. Omitted fields use the bu
 
 ### Connection handling and concurrency
 
-The accept loop submits connections to a fixed worker pool. `maxConcurrentConnections`
-counts both active workers and queued sockets; the queue itself is bounded by
-`maxQueuedConnectionTasks`. When either limit is reached, the server closes
-the newest accepted socket. `maxConnections` is a separate lifetime limit and
-counts successfully queued connections.
+The accept loop submits connections to a fixed worker pool. The server tracks
+active and queued connections together and admits no more than
+`maxConcurrentConnections`; the worker queue independently holds at most
+`maxQueuedConnectionTasks`. A full queue or connection limit closes the newly
+accepted socket, so the effective queued capacity is bounded by both settings.
+`maxConnections` is a separate lifetime limit and counts successfully queued
+connections.
 
 The timeout fields are absolute deadlines for each I/O phase, not inactivity
 windows that restart after every byte. A server-owned monitor interrupts the
