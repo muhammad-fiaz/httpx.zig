@@ -66,6 +66,11 @@ fn findEolWithOptions(buf: []const u8, pos: usize, opts: Options) ParseError!usi
     var i = pos;
     while (i < buf.len) : (i += 1) {
         const c = buf[i];
+        if (c == '\r') {
+            if (i + 1 >= buf.len) return ParseError.Incomplete;
+            if (buf[i + 1] != '\n') return ParseError.MalformedHeaderLine;
+            continue;
+        }
         if (c == '\n') {
             // In strict mode (allowLfLineEndings == false), line must end in \r\n
             if (!opts.allowLfLineEndings) {
@@ -75,8 +80,8 @@ fn findEolWithOptions(buf: []const u8, pos: usize, opts: Options) ParseError!usi
             }
             return i;
         }
-        // Bare control character check (excluding \r and \t)
-        if (isCtl(c) and c != '\r' and c != '\t') return ParseError.MalformedHeaderLine;
+        // Bare control character check (excluding HTAB).
+        if (isCtl(c) and c != '\t') return ParseError.MalformedHeaderLine;
     }
     return ParseError.Incomplete;
 }
@@ -284,7 +289,7 @@ pub fn parseHeaderBlock(buf: []const u8, start: usize, fields: []Field, opts: Op
         }
 
         if (name.len > 256) return ParseError.HeaderTooLarge;
-        if (vs - (pos + colon + 1) + ve > DEFAULT_MAX_HEADER_BYTES) return ParseError.HeaderTooLarge;
+        if (colon + (ve - vs) > DEFAULT_MAX_HEADER_BYTES) return ParseError.HeaderTooLarge;
 
         if (n >= fields.len) return ParseError.TooManyHeaders;
         fields[n] = .{ .name = name, .value = buf[vs..ve] };
@@ -824,13 +829,11 @@ test "chunked decoder rejects excessive chunk overhead amplification" {
     try std.testing.expectError(ParseError.InvalidChunkSize, dec.decode(buf[0..input.len]));
 }
 
-test "lone CR inside header value is treated as data byte, not line terminator" {
-    // Header with a lone \r inside value
-    const raw = "HTTP/1.1 200 OK\r\nHeader: v\rX: y\r\n\r\n";
+test "lone CR inside header value is rejected" {
+    const raw = "Header: v\rX: y\r\n\r\n";
     var fields: [4]Field = undefined;
+    try std.testing.expectError(ParseError.MalformedHeaderLine, parseHeaderBlock(raw, 0, fields[0..], .{}));
 
-    const res = try parseHeaderBlock(raw, 17, fields[0..], .{ .allowLfLineEndings = true });
-    try std.testing.expectEqual(@as(usize, 1), res.count);
-    try std.testing.expectEqualStrings("Header", fields[0].name);
-    try std.testing.expectEqualStrings("v\rX: y", fields[0].value);
+    const response = "HTTP/1.1 200 OK\rX: y\r\n\r\n";
+    try std.testing.expectError(ParseError.MalformedStatusLine, parseResponseHead(response, .{}));
 }
