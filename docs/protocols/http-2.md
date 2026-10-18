@@ -1,10 +1,13 @@
 # HTTP/2 Protocol
 
-> **Status: not implemented, and not advertised.** There is no HTTP/2
-> framing here, and the server no longer offers `h2` through ALPN, so no
-> client negotiates it and then fails. `Config.http2` exists and defaults to
-> `true` but is not wired to anything; do not read it as a capability. The
-> wire format below describes the target design, not current behaviour. See
+> **Status: implemented with limits.** The repository has HTTP/2 framing,
+> HPACK, a client transport, and server connection handlers. The client
+> supports h2c prior knowledge and TLS with `h2` ALPN; the server supports
+> h2c and TLS when its ALPN configuration selects `h2`. Client calls perform
+> one exchange at a time on a connection, while the pool can reuse a
+> connection across sequential requests. This does not establish complete
+> RFC interoperability or concurrent-stream guarantees; see the guide for
+> current runtime details.
 
 RFC 9113 defines HTTP/2, introducing a binary framing layer that multiplexes multiple concurrent request/response streams over a single TCP connection, eliminating head-of-line blocking at the transport layer.
 
