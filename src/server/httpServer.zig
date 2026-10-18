@@ -1066,8 +1066,11 @@ pub const Server = struct {
         const server = task.server;
         const socket = &task.socket;
         defer {
-            socket.close();
+            // Unregister under connsMu before closing the handle. The deadline
+            // monitor holds that lock while it may interrupt this socket; if
+            // we closed first, it could race shutdown against final close.
             server.removeActiveConnection(socket);
+            socket.close();
             server.allocator.destroy(task);
         }
         if (server.stopFlag.load(.acquire)) return;
