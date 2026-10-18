@@ -267,6 +267,50 @@ pub fn safeJoin(alloc: Allocator, urlPath: []const u8, root: []const u8) !?[]u8 
     return out.toOwnedSlice() catch Allocator.Error.OutOfMemory;
 }
 
+/// Decodes and normalizes a URL path into a root-relative path. Rejects
+/// malformed percent escapes, NUL bytes, and platform separator ambiguity.
+fn normalizedRelativePath(alloc: Allocator, urlPath: []const u8) !?[]u8 {
+    var i: usize = 0;
+    while (i < urlPath.len) : (i += 1) {
+        if (urlPath[i] != '%') continue;
+        if (i + 2 >= urlPath.len or !std.ascii.isHex(urlPath[i + 1]) or !std.ascii.isHex(urlPath[i + 2])) return null;
+        i += 2;
+    }
+    const decoded = try percentDecode(alloc, urlPath);
+    defer alloc.free(decoded);
+    for (decoded) |c| {
+        if (c == 0 or c == '\\' or c == ':') return null;
+    }
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(alloc);
+    var it = std.mem.splitScalar(u8, decoded, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (parts.items.len == 0) return null;
+            _ = parts.pop();
+        } else {
+            try parts.append(alloc, seg);
+        }
+    }
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    for (parts.items, 0..) |seg, idx| {
+        if (idx != 0) try out.writer.writeByte('/');
+        try out.writer.writeAll(seg);
+    }
+    return try out.toOwnedSlice();
+}
+
+fn resolveRootedRelative(alloc: Allocator, root: []const u8, relative: []const u8, leaf: []const u8) !?[]u8 {
+    const combined = if (relative.len == 0)
+        try alloc.dupe(u8, leaf)
+    else
+        try std.fmt.allocPrint(alloc, "{s}/{s}", .{ relative, leaf });
+    defer alloc.free(combined);
+    return safeJoin(alloc, combined, root);
+}
+
 // filesystem
 
 pub const FileMeta = struct { size: u64, mtimeNs: i128 };
@@ -747,15 +791,22 @@ fn servePath(ctx: *Context, st: *State, rawUrlPath: []const u8) anyerror!Respons
         return errText(404, "not found");
     }
 
-    joined = (try safeJoin(a, formattedPath, st.root)) orelse
+    // Normalize before consulting either the filesystem or the embedded store:
+    // the route parameter may still contain percent-encoded traversal.
+    const safeRelative = try normalizedRelativePath(a, formattedPath) orelse
+        return errText(403, "forbidden");
+    defer a.free(safeRelative);
+    if (assetsMod.getEmbedded(safeRelative) orelse (if (safeRelative.len == 0) assetsMod.getEmbedded(st.index) else null)) |embedded| {
+        return respondWithEmbedded(ctx, st, embedded);
+    }
+
+    joined = try safeJoin(a, safeRelative, st.root) orelse
         return errText(403, "forbidden");
 
     meta = statPath(ctx.io, joined);
     if (meta == null) {
-        const withIndex = if (std.mem.endsWith(u8, joined, "/"))
-            std.fmt.allocPrint(a, "{s}{s}", .{ joined, st.index }) catch return Allocator.Error.OutOfMemory
-        else
-            std.fmt.allocPrint(a, "{s}/{s}", .{ joined, st.index }) catch return Allocator.Error.OutOfMemory;
+        const withIndex = try resolveRootedRelative(a, st.root, safeRelative, st.index) orelse
+            return errText(403, "forbidden");
         meta = statPath(ctx.io, withIndex);
         if (meta != null) joined = withIndex;
     }
@@ -764,10 +815,8 @@ fn servePath(ctx: *Context, st: *State, rawUrlPath: []const u8) anyerror!Respons
         if (assetsMod.getEmbedded(st.spaFallback.?)) |embeddedFb| {
             return respondWithEmbedded(ctx, st, embeddedFb);
         }
-        const fallbackPath = if (std.mem.endsWith(u8, st.root, "/"))
-            std.fmt.allocPrint(a, "{s}{s}", .{ st.root, st.spaFallback.? }) catch return Allocator.Error.OutOfMemory
-        else
-            std.fmt.allocPrint(a, "{s}/{s}", .{ st.root, st.spaFallback.? }) catch return Allocator.Error.OutOfMemory;
+        const fallbackPath = try resolveRootedRelative(a, st.root, "", st.spaFallback.?) orelse
+            return errText(403, "forbidden");
         meta = statPath(ctx.io, fallbackPath);
         if (meta != null) joined = fallbackPath;
     }
@@ -889,6 +938,28 @@ test "safeJoin rejects traversal, encoding tricks, and windows separators" {
     const dots = (try safeJoin(a, "/css/./x.css", root)).?;
     defer a.free(dots);
     try std.testing.expectEqualStrings("/srv/public/css/x.css", dots);
+}
+
+test "normalizedRelativePath decodes once and rejects malformed or rooted input" {
+    const a = std.testing.allocator;
+    const normal = (try normalizedRelativePath(a, "/images/a%20b.png")).?;
+    defer a.free(normal);
+    try std.testing.expectEqualStrings("images/a b.png", normal);
+    try std.testing.expect((try normalizedRelativePath(a, "/%2e%2e/secret")) == null);
+    const doubleEncoded = (try normalizedRelativePath(a, "/%252e%252e/secret")).?;
+    defer a.free(doubleEncoded);
+    try std.testing.expectEqualStrings("%2e%2e/secret", doubleEncoded);
+    try std.testing.expect((try normalizedRelativePath(a, "/bad%2")) == null);
+    try std.testing.expect((try normalizedRelativePath(a, "/C:/secret")) == null);
+    try std.testing.expect((try normalizedRelativePath(a, "/a%00b")) == null);
+}
+
+test "rooted index and fallback candidates cannot escape the mount" {
+    const a = std.testing.allocator;
+    const index = (try resolveRootedRelative(a, "/srv/public", "docs", "index.html")).?;
+    defer a.free(index);
+    try std.testing.expectEqualStrings("/srv/public/docs/index.html", index);
+    try std.testing.expect((try resolveRootedRelative(a, "/srv/public", "", "../secret.html")) == null);
 }
 
 test "http date roundtrip rejects garbage" {
