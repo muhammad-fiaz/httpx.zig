@@ -1757,38 +1757,37 @@ pub const Server = struct {
                     }
                 },
                 .chunked => {
-                    // Persistent decoder + explicit unparsed cursor.
-                    var dec: parserMod.ChunkedDecoder = .{};
+                    // Persistent decoder with bounded retained wire data.
+                    var dec = parserMod.ChunkedDecoder.init();
                     var acc: std.ArrayList(u8) = .empty;
                     var raw: std.ArrayList(u8) = .empty;
                     raw.appendSlice(arena, headBuf[blk.end..filled]) catch return false;
-                    var unparsed: usize = 0;
                     conn.setReadTimeoutMs(self.cfg.requestBodyTimeoutMs);
                     while (true) {
-                        const tail = dec.decode(raw.items[unparsed..]) catch |e| switch (e) {
-                            error.Incomplete => {
-                                const n = conn.read(headBuf[0..]) catch return false;
-                                if (n == 0) return false;
-                                raw.appendSlice(arena, headBuf[0..n]) catch return false;
-                                continue;
-                            },
+                        _ = dec.decode(raw.items) catch |e| switch (e) {
+                            error.Incomplete => 0,
                             else => return false,
                         };
-                        const produced = raw.items.len - unparsed - tail;
-                        acc.appendSlice(arena, raw.items[unparsed..][0..produced]) catch return false;
-                        unparsed += produced;
-                        if (dec.state == .done) break;
+                        if (dec.totalDecoded > self.cfg.maxBody) {
+                            _ = sendSimpleError(conn, 413, "payload too large") catch 0;
+                            return false;
+                        }
+                        acc.appendSlice(arena, raw.items[0..dec.decodedLen]) catch return false;
+                        if (dec.rawConsumed > raw.items.len) return false;
+                        const pending = raw.items.len - dec.rawConsumed;
+                        if (pending > 0) std.mem.copyForwards(u8, raw.items[0..pending], raw.items[dec.rawConsumed..]);
+                        raw.items.len = pending;
+
+                        if (dec.isDone()) {
+                            // The request body is complete; any bytes already
+                            // read beyond it cannot be retained for the next
+                            // request, so force connection close.
+                            if (pending != 0) clientClose = true;
+                            break;
+                        }
                         const n = conn.read(headBuf[0..]) catch return false;
                         if (n == 0) return false;
                         raw.appendSlice(arena, headBuf[0..n]) catch return false;
-                    }
-                    // Any bytes after the terminating chunk are currently not
-                    // retained for the next request, so do not reuse this
-                    // connection when the read crossed message boundaries.
-                    if (unparsed < raw.items.len) clientClose = true;
-                    if (acc.items.len > self.cfg.maxBody) {
-                        _ = sendSimpleError(conn, 413, "payload too large") catch 0;
-                        return false;
                     }
                     body = acc.items;
                 },
@@ -2183,6 +2182,40 @@ test "server handles POST with content-length body" {
 
     try std.testing.expect(std.mem.startsWith(u8, buf[0..total], "HTTP/1.1 200"));
     try std.testing.expect(std.mem.endsWith(u8, buf[0..total], payload));
+}
+
+test "server decodes chunked request body before dispatch" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = Server.init(a, ctx.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+    defer srv.deinit();
+    try srv.router.post("/echo", echoRawHandler, .{});
+
+    const Runner = struct {
+        fn run(s: *Server) void {
+            s.run();
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    defer thread.join();
+
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    defer client.close();
+    try client.writeAll("POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\nX-Checksum: yes\r\n\r\n");
+
+    var buf: [512]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = client.read(buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+        if (std.mem.indexOf(u8, buf[0..total], "hello") != null) break;
+    }
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..total], "HTTP/1.1 200 OK"));
+    try std.testing.expect(std.mem.endsWith(u8, buf[0..total], "hello"));
+    srv.requestShutdown();
 }
 
 fn echoRawHandler(ctx: *Context) anyerror!Response {
