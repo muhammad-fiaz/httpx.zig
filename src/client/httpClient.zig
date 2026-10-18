@@ -454,23 +454,26 @@ pub const Client = struct {
             .nextIdx = &nextIdx,
         };
 
-        const maxWorkers = @min(@as(usize, 16), slice.len);
-        var threads = self.allocator.alloc(?std.Thread, maxWorkers) catch |e| {
+        // Keep batch fan-out bounded independently of batch size. A failed
+        // thread spawn leaves its work for the workers that did start (or
+        // the caller below), rather than running an untracked extra worker.
+        const workerCount = @min(@as(usize, 16), slice.len);
+        var threads = self.allocator.alloc(std.Thread, workerCount - 1) catch |e| {
             self.allocator.free(out);
             return e;
         };
         defer self.allocator.free(threads);
 
-        for (0..maxWorkers) |w| {
-            threads[w] = std.Thread.spawn(.{}, TaskCtx.worker, .{&taskCtx}) catch null;
-            if (threads[w] == null) {
-                TaskCtx.worker(&taskCtx);
-            }
+        var started: usize = 0;
+        while (started < threads.len) : (started += 1) {
+            threads[started] = std.Thread.spawn(.{}, TaskCtx.worker, .{&taskCtx}) catch break;
         }
 
-        for (threads) |mTh| {
-            if (mTh) |th| th.join();
-        }
+        // Always run one worker on the calling thread; this also covers
+        // batches where every additional thread spawn failed.
+        TaskCtx.worker(&taskCtx);
+
+        for (threads[0..started]) |th| th.join();
 
         if (taskCtx.firstErr) |e| {
             for (0..slice.len) |i| {
@@ -2113,6 +2116,42 @@ test "client pools h2c sessions across sequential requests" {
     try std.testing.expectEqual(@as(usize, 1), client.pool.parkedCount());
 }
 
+test "client enforces configured response size on h2c" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    const h2t = @import("../protocols/http2/transport.zig");
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const h2t.Header, _: []const u8) anyerror!h2t.HandlerResponse {
+            return .{ .status = 200, .body = "too large" };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io) void {
+            var conn = lst.accept(io2) catch return;
+            defer conn.close();
+            h2t.serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const th = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io });
+    defer th.join();
+
+    var client = Client.init(a, ctx.io, .{});
+    defer client.deinit();
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/limit", .{port});
+    try std.testing.expectError(
+        Error.ResponseTooLarge,
+        client.get(url, .{ .httpVersion = .http2, .maxResponseSize = 3, .timeoutMs = 15_000 }),
+    );
+}
+
 test "client reaps h2 streams past maxConcurrentStreams" {
     const a = std.testing.allocator;
     const IoContext = tcp.IoContext;
@@ -2374,12 +2413,12 @@ test "client get over http3 serves loopback over real udp" {
     const certPem = @embedFile("../protocols/tls/testdata/localhostCert.pem");
     const keyPem = @embedFile("../protocols/tls/testdata/localhostKey.pem");
 
-    // In-process H3/QUIC server: two sequential connections on one UDP
-    // socket, one GET each. Pumps itself on its own thread; the client
-    // under test pumps only itself (the external-peer path).
+    // In-process H3/QUIC server: sequential requests on one UDP socket.
+    // Pumps itself on its own thread; the client under test pumps only
+    // itself (the external-peer path).
     const Server = struct {
         ep: quicEp.Endpoint = undefined,
-        pump: quicEp.Pump = undefined,
+        pump: quicEp.Pump = .{},
 
         // One client-bidi request stream's bytes until FIN. Control and
         // QPACK uni streams are ignored (static-table responses need no
@@ -2443,16 +2482,28 @@ test "client get over http3 serves loopback over real udp" {
                 const fields = try h3.qdec.decodeSectionCounted(fr.payload, 0, null);
                 defer h3.qdec.freeFields(fields);
                 var path: []const u8 = "";
+                var method: []const u8 = "";
                 for (fields) |f| {
                     if (std.mem.eql(u8, f.name, ":path")) path = f.value;
+                    if (std.mem.eql(u8, f.name, ":method")) method = f.value;
                 }
                 const isHello = std.mem.eql(u8, path, "/hello");
+                var requestBody: []const u8 = "";
+                if (off < acc.buf.items.len) {
+                    const dataFrame = try h3frame.parseFrame(acc.buf.items, &off);
+                    if (dataFrame.frameType != 0x0) return error.InvalidRequestFrame;
+                    requestBody = dataFrame.payload;
+                }
+                const isUpload = std.mem.eql(u8, method, "POST") and
+                    std.mem.eql(u8, path, "/upload") and
+                    std.mem.eql(u8, requestBody, "h3 request payload");
                 var qenc = h3qpack.Encoder.init(alloc);
                 defer qenc.deinit();
                 var rs = h3conn.RequestStream{ .id = acc.sid, .allocator = alloc, .qpack = &qenc };
-                const rhead = try rs.buildResponseHeaders(if (isHello) 200 else 404, &.{});
+                const rhead = try rs.buildResponseHeaders(if (isHello or isUpload) 200 else 404, &.{});
                 defer alloc.free(rhead);
-                const rdata = try rs.buildData(if (isHello) "hello-h3" else "not-found");
+                const responseBody = if (isHello) "hello-h3" else if (isUpload) "body-received" else "not-found";
+                const rdata = try rs.buildData(responseBody);
                 defer alloc.free(rdata);
                 var wire = std.ArrayList(u8).empty;
                 defer wire.deinit(alloc);
@@ -2473,7 +2524,11 @@ test "client get over http3 serves loopback over real udp" {
                 out.* = e;
                 return;
             };
-            // Third connection: untrusted client. It fails chain
+            serveOne(srv, 15_000) catch |e| {
+                out.* = e;
+                return;
+            };
+            // Fourth connection: untrusted client. It fails chain
             // verification and goes quiet, so the server must time out
             // (never complete). A completed third handshake would mean
             // the client accepted a forged chain — catastrophic.
@@ -2497,9 +2552,11 @@ test "client get over http3 serves loopback over real udp" {
 
     var result: ?anyerror = error.NotRun;
     const th = try std.Thread.spawn(.{}, Server.run, .{ &srv, &result });
+    var serverJoined = false;
+    defer if (!serverJoined) th.join();
 
     // Explicit teardown (no defer join): the server exits on its own
-    // after two requests, so join-then-assert is exact. errdefer covers
+    // after three requests, so join-then-assert is exact. errdefer covers
     // failures (server times out internally and exits by itself).
     var client = Client.init(a, ctx.io, .{});
     errdefer client.deinit();
@@ -2525,6 +2582,17 @@ test "client get over http3 serves loopback over real udp" {
     defer res404.deinit();
     try std.testing.expectEqual(@as(u16, 404), res404.status);
 
+    const uploadUrl = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/upload", .{port});
+    var uploadResponse = try client.post(uploadUrl, .{
+        .body = "h3 request payload",
+        .httpVersion = .http3,
+        .tls = .{ .verify = .caBundle, .caPem = certPem },
+        .timeoutMs = 15_000,
+    });
+    defer uploadResponse.deinit();
+    try std.testing.expectEqual(@as(u16, 200), uploadResponse.status);
+    try std.testing.expectEqualStrings("body-received", uploadResponse.body);
+
     // Untrusted chain fails fast and loudly (no 15s deadline burn: the
     // doomed handshake aborts as soon as the driver rejects the chain).
     const bad = client.get(url, .{
@@ -2536,6 +2604,7 @@ test "client get over http3 serves loopback over real udp" {
 
     client.deinit();
     th.join();
+    serverJoined = true;
     // Server side: two clean serves, then the quiet-abort timeout.
     try std.testing.expect(result == null);
 }
@@ -2829,7 +2898,7 @@ test "client get over http3 with 0-rtt early data resumes session" {
 
     const Server = struct {
         ep: quicEp.Endpoint = undefined,
-        pump: quicEp.Pump = undefined,
+        pump: quicEp.Pump = .{},
 
         const Acc = struct {
             sid: u64 = std.math.maxInt(u64),

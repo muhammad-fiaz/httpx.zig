@@ -267,9 +267,120 @@ pub fn safeJoin(alloc: Allocator, urlPath: []const u8, root: []const u8) !?[]u8 
     return out.toOwnedSlice() catch Allocator.Error.OutOfMemory;
 }
 
+/// Decodes and normalizes a URL path into a root-relative path. Rejects
+/// malformed percent escapes, NUL bytes, and platform separator ambiguity.
+fn normalizedRelativePath(alloc: Allocator, urlPath: []const u8) !?[]u8 {
+    var i: usize = 0;
+    while (i < urlPath.len) : (i += 1) {
+        if (urlPath[i] != '%') continue;
+        if (i + 2 >= urlPath.len or !std.ascii.isHex(urlPath[i + 1]) or !std.ascii.isHex(urlPath[i + 2])) return null;
+        i += 2;
+    }
+    const decoded = try percentDecode(alloc, urlPath);
+    defer alloc.free(decoded);
+    for (decoded) |c| {
+        if (c == 0 or c == '\\' or c == ':') return null;
+    }
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(alloc);
+    var it = std.mem.splitScalar(u8, decoded, '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+        if (std.mem.eql(u8, seg, "..")) {
+            if (parts.items.len == 0) return null;
+            _ = parts.pop();
+        } else {
+            try parts.append(alloc, seg);
+        }
+    }
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    errdefer out.deinit();
+    for (parts.items, 0..) |seg, idx| {
+        if (idx != 0) try out.writer.writeByte('/');
+        try out.writer.writeAll(seg);
+    }
+    return try out.toOwnedSlice();
+}
+
+fn resolveRelativePath(alloc: Allocator, relative: []const u8, leaf: []const u8) !?[]u8 {
+    const combined = if (relative.len == 0)
+        try alloc.dupe(u8, leaf)
+    else
+        try std.fmt.allocPrint(alloc, "{s}/{s}", .{ relative, leaf });
+    defer alloc.free(combined);
+    return normalizedRelativePath(alloc, combined);
+}
+
 // filesystem
 
 pub const FileMeta = struct { size: u64, mtimeNs: i128 };
+
+const OpenedAsset = struct {
+    file: std.Io.File,
+    stat: std.Io.File.Stat,
+
+    fn close(self: OpenedAsset, io: std.Io) void {
+        self.file.close(io);
+    }
+};
+
+/// Opens a configured-root-relative path without following any symlink or
+/// reparse point. Every component is opened relative to a live directory
+/// handle, so the checked path and the file ultimately read are the same.
+fn openAssetNoFollow(io: std.Io, root: []const u8, relative: []const u8) !OpenedAsset {
+    const openOpts: std.Io.Dir.OpenOptions = .{ .access_sub_paths = true, .follow_symlinks = false };
+    var dir = if (std.fs.path.isAbsolute(root))
+        try std.Io.Dir.openDirAbsolute(io, root, openOpts)
+    else
+        try std.Io.Dir.cwd().openDir(io, root, openOpts);
+    defer dir.close(io);
+
+    var parts = std.mem.splitScalar(u8, relative, '/');
+    var component = parts.next() orelse return error.FileNotFound;
+    while (parts.next()) |next| {
+        if (component.len == 0) return error.FileNotFound;
+        const child = dir.openDir(io, component, .{ .access_sub_paths = true, .follow_symlinks = false }) catch |err| switch (err) {
+            // POSIX reports a no-follow rejection of a symlinked intermediate
+            // directory as ENOTDIR (Zig: NotDir) and of a symlink loop as
+            // ELOOP; Windows reports both as not-found. Surface all of them
+            // as FileNotFound so the no-follow behavior is identical on
+            // every platform.
+            error.NotDir, error.SymLinkLoop => return error.FileNotFound,
+            else => return err,
+        };
+        dir.close(io);
+        dir = child;
+        component = next;
+    }
+    if (component.len == 0) return error.FileNotFound;
+    const file = dir.openFile(io, component, .{ .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
+        // POSIX reports an O_NOFOLLOW rejection of the final component as
+        // ELOOP ("symlink loop"); Windows reports it as not-found. Surface
+        // both as FileNotFound so the no-follow behavior is identical
+        // everywhere: the path is not a regular file reachable without
+        // following symlinks.
+        error.SymLinkLoop => return error.FileNotFound,
+        else => return err,
+    };
+    errdefer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file) return error.FileNotFound;
+    return .{ .file = file, .stat = stat };
+}
+
+fn fileMeta(stat: std.Io.File.Stat) FileMeta {
+    return .{ .size = stat.size, .mtimeNs = stat.mtime.nanoseconds };
+}
+
+fn readOpenedAll(io: std.Io, file: std.Io.File, dest: []u8) !void {
+    const n = try file.readPositionalAll(io, dest, 0);
+    if (n != dest.len) return error.UnexpectedEof;
+}
+
+fn readOpenedRange(io: std.Io, file: std.Io.File, offset: u64, dest: []u8) !void {
+    const n = try file.readPositionalAll(io, dest, offset);
+    if (n != dest.len) return error.UnexpectedEof;
+}
 
 pub const cFs = struct {
     pub const isWin = builtin.os.tag == .windows;
@@ -731,8 +842,7 @@ fn servePath(ctx: *Context, st: *State, rawUrlPath: []const u8) anyerror!Respons
         }
     } else |_| {}
 
-    var joined: []const u8 = "";
-    var meta: ?FileMeta = null;
+    var opened: ?OpenedAsset = null;
     const fallbackAllowed = if (st.spaFallback != null)
         shouldSpaFallback(ctx.method, formattedPath, ctx.header("Accept"), st.spaExcludePrefixes)
     else
@@ -747,35 +857,43 @@ fn servePath(ctx: *Context, st: *State, rawUrlPath: []const u8) anyerror!Respons
         return errText(404, "not found");
     }
 
-    joined = (try safeJoin(a, formattedPath, st.root)) orelse
+    // Normalize before consulting either the filesystem or the embedded store:
+    // the route parameter may still contain percent-encoded traversal.
+    const safeRelative = try normalizedRelativePath(a, formattedPath) orelse
         return errText(403, "forbidden");
-
-    meta = statPath(ctx.io, joined);
-    if (meta == null) {
-        const withIndex = if (std.mem.endsWith(u8, joined, "/"))
-            std.fmt.allocPrint(a, "{s}{s}", .{ joined, st.index }) catch return Allocator.Error.OutOfMemory
-        else
-            std.fmt.allocPrint(a, "{s}/{s}", .{ joined, st.index }) catch return Allocator.Error.OutOfMemory;
-        meta = statPath(ctx.io, withIndex);
-        if (meta != null) joined = withIndex;
+    defer a.free(safeRelative);
+    var selectedRelative = safeRelative;
+    if (assetsMod.getEmbedded(safeRelative) orelse (if (safeRelative.len == 0) assetsMod.getEmbedded(st.index) else null)) |embedded| {
+        return respondWithEmbedded(ctx, st, embedded);
     }
-    if (meta == null and st.spaFallback != null and fallbackAllowed) {
+
+    if (safeRelative.len != 0) {
+        opened = openAssetNoFollow(ctx.io, st.root, safeRelative) catch null;
+    }
+    if (opened == null) {
+        const indexRelative = try resolveRelativePath(a, safeRelative, st.index) orelse
+            return errText(403, "forbidden");
+        defer a.free(indexRelative);
+        opened = openAssetNoFollow(ctx.io, st.root, indexRelative) catch null;
+        if (opened != null) selectedRelative = indexRelative;
+    }
+    if (opened == null and st.spaFallback != null and fallbackAllowed) {
         // Check embedded fallback first
         if (assetsMod.getEmbedded(st.spaFallback.?)) |embeddedFb| {
             return respondWithEmbedded(ctx, st, embeddedFb);
         }
-        const fallbackPath = if (std.mem.endsWith(u8, st.root, "/"))
-            std.fmt.allocPrint(a, "{s}{s}", .{ st.root, st.spaFallback.? }) catch return Allocator.Error.OutOfMemory
-        else
-            std.fmt.allocPrint(a, "{s}/{s}", .{ st.root, st.spaFallback.? }) catch return Allocator.Error.OutOfMemory;
-        meta = statPath(ctx.io, fallbackPath);
-        if (meta != null) joined = fallbackPath;
+        const fallbackRelative = try normalizedRelativePath(a, st.spaFallback.?) orelse
+            return errText(403, "forbidden");
+        defer a.free(fallbackRelative);
+        opened = openAssetNoFollow(ctx.io, st.root, fallbackRelative) catch null;
+        if (opened != null) selectedRelative = fallbackRelative;
     }
-    const m = meta orelse return errText(404, "not found");
-    return respondWithFile(ctx, st, joined, m);
+    var asset = opened orelse return errText(404, "not found");
+    defer asset.close(ctx.io);
+    return respondWithFile(ctx, st, asset.file, selectedRelative, fileMeta(asset.stat));
 }
 
-fn respondWithFile(ctx: *Context, st: *State, path: []const u8, meta: FileMeta) anyerror!Response {
+fn respondWithFile(ctx: *Context, st: *State, file: std.Io.File, relativePath: []const u8, meta: FileMeta) anyerror!Response {
     const a = ctx.allocator;
     const isHead = ctx.method == .HEAD;
 
@@ -808,7 +926,7 @@ fn respondWithFile(ctx: *Context, st: *State, path: []const u8, meta: FileMeta) 
         headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
     }
 
-    const contentType = mime.fromPath(path);
+    const contentType = mime.fromPath(relativePath);
 
     // Single range request.
     if (ctx.header("Range")) |spec| {
@@ -816,7 +934,7 @@ fn respondWithFile(ctx: *Context, st: *State, path: []const u8, meta: FileMeta) 
             const len: usize = @intCast(r.end - r.start + 1);
             if (len > st.maxSize) return errText(413, "range too large");
             const body = a.alloc(u8, len) catch return Allocator.Error.OutOfMemory;
-            readRange(ctx.io, path, r.start, body) catch return errText(500, "read error");
+            readOpenedRange(ctx.io, file, r.start, body) catch return errText(500, "read error");
             const cr = std.fmt.allocPrint(a, "bytes {d}-{d}/{d}", .{ r.start, r.end, meta.size }) catch return Allocator.Error.OutOfMemory;
             headers.append(a, .{ .name = "Content-Range", .value = cr }) catch return Allocator.Error.OutOfMemory;
             return .{
@@ -835,7 +953,7 @@ fn respondWithFile(ctx: *Context, st: *State, path: []const u8, meta: FileMeta) 
     if (meta.size > st.maxSize) return errText(413, "file too large");
 
     const raw = a.alloc(u8, @intCast(meta.size)) catch return Allocator.Error.OutOfMemory;
-    readAll(ctx.io, path, raw) catch return errText(500, "read error");
+    readOpenedAll(ctx.io, file, raw) catch return errText(500, "read error");
 
     const body: []const u8 = if (st.liveReload and !isHead and std.mem.startsWith(u8, contentType, "text/html"))
         try reload.inject(a, raw, st.reloadSsePath)
@@ -889,6 +1007,62 @@ test "safeJoin rejects traversal, encoding tricks, and windows separators" {
     const dots = (try safeJoin(a, "/css/./x.css", root)).?;
     defer a.free(dots);
     try std.testing.expectEqualStrings("/srv/public/css/x.css", dots);
+}
+
+test "normalizedRelativePath decodes once and rejects malformed or rooted input" {
+    const a = std.testing.allocator;
+    const normal = (try normalizedRelativePath(a, "/images/a%20b.png")).?;
+    defer a.free(normal);
+    try std.testing.expectEqualStrings("images/a b.png", normal);
+    try std.testing.expect((try normalizedRelativePath(a, "/%2e%2e/secret")) == null);
+    const doubleEncoded = (try normalizedRelativePath(a, "/%252e%252e/secret")).?;
+    defer a.free(doubleEncoded);
+    try std.testing.expectEqualStrings("%2e%2e/secret", doubleEncoded);
+    try std.testing.expect((try normalizedRelativePath(a, "/bad%2")) == null);
+    try std.testing.expect((try normalizedRelativePath(a, "/C:/secret")) == null);
+    try std.testing.expect((try normalizedRelativePath(a, "/a%00b")) == null);
+}
+
+test "rooted index and fallback candidates cannot escape the mount" {
+    const a = std.testing.allocator;
+    const index = (try resolveRelativePath(a, "docs", "index.html")).?;
+    defer a.free(index);
+    try std.testing.expectEqualStrings("docs/index.html", index);
+    try std.testing.expect((try resolveRelativePath(a, "", "../secret.html")) == null);
+}
+
+test "openAssetNoFollow rejects symlinked parent and final components" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "root", .default_dir);
+    try tmp.dir.createDir(io, "outside", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "outside/secret.txt", .data = "secret" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "root/public.txt", .data = "public" });
+
+    const rootPath = try tmp.dir.realPathFileAlloc(io, "root", std.testing.allocator);
+    defer std.testing.allocator.free(rootPath);
+    const secretPath = try tmp.dir.realPathFileAlloc(io, "outside/secret.txt", std.testing.allocator);
+    defer std.testing.allocator.free(secretPath);
+
+    tmp.dir.symLink(io, secretPath, "root/link.txt", .{}) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+    tmp.dir.symLink(io, "../outside", "root/linked-dir", .{ .is_directory = true }) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var valid = try openAssetNoFollow(io, rootPath, "public.txt");
+    defer valid.close(io);
+    try std.testing.expectEqualStrings("public", blk: {
+        var buf: [6]u8 = undefined;
+        try readOpenedAll(io, valid.file, &buf);
+        break :blk &buf;
+    });
+    try std.testing.expectError(error.FileNotFound, openAssetNoFollow(io, rootPath, "link.txt"));
+    try std.testing.expectError(error.FileNotFound, openAssetNoFollow(io, rootPath, "linked-dir/secret.txt"));
 }
 
 test "http date roundtrip rejects garbage" {

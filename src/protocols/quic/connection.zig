@@ -1180,7 +1180,8 @@ pub const Connection = struct {
                     }
                     if (self.dataReceived > self.maxData) return Error.FlowControlViolation;
                     try self.maybeBumpMaxData();
-                    if (s.fin and st.finOffset != null and st.recvOffset == st.finOffset.?) {
+                    if (!st.finNotified and st.finOffset != null and st.recvOffset == st.finOffset.?) {
+                        st.finNotified = true;
                         if (self.cbs.onStreamData) |cb| cb(self.cbs.ctx, s.id, &.{}, true);
                     }
                 },

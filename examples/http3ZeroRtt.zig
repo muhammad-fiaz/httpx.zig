@@ -38,7 +38,7 @@ const demoKeyPem =
 
 const DemoServer = struct {
     ep: httpx.quic.Endpoint = undefined,
-    pump: httpx.quic.Pump = undefined,
+    pump: httpx.quic.Pump = .{},
 
     const Acc = struct {
         sid: u64 = std.math.maxInt(u64),

@@ -33,12 +33,14 @@ const Connection = connMod.Connection;
 /// connection locking is needed anywhere.
 ///
 /// Lifecycle: `start` spawns the reader; `next` pops (owned slice) until
-/// the deadline; `stop` wakes the reader via socket close, joins it, and
-/// drains the queue. Stopping consumes the endpoint's socket: one `Pump`
-/// spans the whole connection use (handshake through exchange).
+/// the deadline; `stop` wakes the reader, joins it, and drains the queue.
+/// The endpoint's socket stays open; one `Pump` spans the whole connection
+/// use (handshake through exchange). Initialize
+/// with `.{};` before starting. A second `start` before `stop` returns
+/// `error.AlreadyRunning` without replacing the live reader thread.
 pub const Pump = struct {
-    ep: *Endpoint,
-    allocator: Allocator,
+    ep: *Endpoint = undefined,
+    allocator: Allocator = undefined,
     thread: std.Thread = undefined,
     running: bool = false,
     stopFlag: std.atomic.Value(bool) = .init(false),
@@ -58,6 +60,7 @@ pub const Pump = struct {
     };
 
     pub fn start(self: *Pump, ep: *Endpoint, allocator: Allocator) !void {
+        if (self.running) return error.AlreadyRunning;
         self.* = .{
             .ep = ep,
             .allocator = allocator,
@@ -233,6 +236,22 @@ pub const Endpoint = struct {
         return sent;
     }
 };
+
+test "quic pump rejects a duplicate start without losing its reader" {
+    const a = std.testing.allocator;
+    var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
+    defer ctx.deinit();
+    var conn = try connMod.Connection.init(a, ctx.io, .client, .{});
+    defer conn.deinit();
+    var ep = try Endpoint.init(a, ctx.io, conn, .{});
+    defer ep.deinit();
+    var pump: Pump = .{};
+    try pump.start(&ep, a);
+    defer pump.stop();
+
+    try std.testing.expectError(error.AlreadyRunning, pump.start(&ep, a));
+    try std.testing.expect(pump.running);
+}
 
 // Loopback integration: two Endpoints over REAL kernel UDP sockets
 // exchanging protected Initial-space traffic (RFC 9001 initial secrets).

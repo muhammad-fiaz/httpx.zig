@@ -192,13 +192,14 @@ const WinHints = extern struct {
     next: ?*WinAddrinfoW = null,
 };
 const ws2Ffi = struct {
+    const wsCall: std.lang.CallingConvention = if (builtin.os.tag == .windows) std.lang.CallingConvention.winapi else std.lang.CallingConvention.c;
     extern "ws2_32" fn GetAddrInfoW(
         nodename: [*:0]const u16,
         service: [*:0]const u16,
         hints: ?*const WinHints,
         res: *?*WinAddrinfoW,
-    ) callconv(.c) i32;
-    extern "ws2_32" fn FreeAddrInfoW(res: *WinAddrinfoW) callconv(.c) void;
+    ) callconv(wsCall) i32;
+    extern "ws2_32" fn FreeAddrInfoW(res: *WinAddrinfoW) callconv(wsCall) void;
 };
 
 // Wire ABI for libc getaddrinfo.

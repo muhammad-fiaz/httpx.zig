@@ -33,6 +33,7 @@ pub const Stream = struct {
     /// Highest offset ever received (for final-size checks).
     maxSeenOffset: u64 = 0,
     finOffset: ?u64 = null,
+    finNotified: bool = false,
     resetError: ?u64 = null,
 
     /// Buffered out-of-order chunks awaiting earlier bytes. Sorted by

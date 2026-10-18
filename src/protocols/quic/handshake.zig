@@ -715,10 +715,10 @@ test "live handshake over real udp loopback establishes both ends" {
     cliConn.tls = .{ .ctx = &cliDrv, .start = Driver.clientStart, .onData = Driver.onData };
     srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
 
-    var cliPump: transportMod.Pump = undefined;
+    var cliPump: transportMod.Pump = .{};
     try cliPump.start(&cliEp, a);
     defer cliPump.stop();
-    var srvPump: transportMod.Pump = undefined;
+    var srvPump: transportMod.Pump = .{};
     try srvPump.start(&srvEp, a);
     defer srvPump.stop();
 
@@ -968,10 +968,10 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         cliConn.tls = .{ .ctx = &cliDrv, .start = Driver.clientStart, .onData = Driver.onData };
         srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
 
-        var cliPump: transportMod.Pump = undefined;
+        var cliPump: transportMod.Pump = .{};
         try cliPump.start(&cliEp, a);
         defer cliPump.stop();
-        var srvPump: transportMod.Pump = undefined;
+        var srvPump: transportMod.Pump = .{};
         try srvPump.start(&srvEp, a);
         defer srvPump.stop();
 
@@ -1029,10 +1029,10 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         cliConn.tls = .{ .ctx = &cliDrv, .start = Driver.clientStart, .onData = Driver.onData };
         srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
 
-        var cliPump: transportMod.Pump = undefined;
+        var cliPump: transportMod.Pump = .{};
         try cliPump.start(&cliEp, a);
         defer cliPump.stop();
-        var srvPump: transportMod.Pump = undefined;
+        var srvPump: transportMod.Pump = .{};
         try srvPump.start(&srvEp, a);
         defer srvPump.stop();
 

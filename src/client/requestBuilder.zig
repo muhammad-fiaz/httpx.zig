@@ -11,9 +11,9 @@
 //!
 //! Scope: HTTP/1.x over TCP (http://). https:// requires explicit TLS
 //! configuration (TlsOptions). Follows 301/302/303 (-> GET) and
-//! 307/308 (method preserved), stripping Authorization on cross-origin hops
-//! per RFC 7235 Section 2.2. Content-Length and chunked transfer-encoding
-//! response bodies are both decoded.
+//! 307/308 (method preserved), stripping credentials on cross-origin hops.
+//! Content-Length and chunked transfer-encoding response bodies are both
+//! decoded.
 //!
 //! References:
 //!   - RFC 9110 Section 5.3 — Request Target
@@ -597,8 +597,8 @@ fn h3DoRequest(
     defer driver.deinit();
     conn.tls = .{ .ctx = &driver, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
 
-    // One pump spans handshake + exchange (stopping closes the socket).
-    var pump: quicEp.Pump = undefined;
+    // One pump spans handshake + exchange; stopping joins its reader thread.
+    var pump: quicEp.Pump = .{};
     pump.start(&ep, a) catch return Error.OutOfMemory;
     defer pump.stop();
 
@@ -634,6 +634,7 @@ fn h3DoRequest(
         &pump,
         dest,
         deadlineMs,
+        @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize),
     ) catch |e| switch (e) {
         error.OutOfMemory => return Error.OutOfMemory,
         error.Timeout => return Error.Timeout,
@@ -644,9 +645,18 @@ fn h3DoRequest(
     // Convert header type (same shape, different namespace); the
     // transport allocator IS `a`, so ownership transfers cleanly, and
     // decodeResponseBody consumes the body exactly like h2DoRequest.
-    var outHdrs = try a.alloc(Header, h3resp.headers.len);
+    var outHdrs = a.alloc(Header, h3resp.headers.len) catch {
+        for (h3resp.headers) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(h3resp.headers);
+        a.free(h3resp.body);
+        return Error.OutOfMemory;
+    };
     for (h3resp.headers, 0..) |h, i| outHdrs[i] = .{ .name = h.name, .value = h.value };
-    const decodedBody = decodeResponseBody(a, outHdrs, h3resp.body) catch |e| {
+    const maxSize = @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize);
+    const decodedBody = decodeResponseBodyLimited(a, outHdrs, h3resp.body, maxSize) catch |e| {
         for (outHdrs) |h| {
             a.free(h.name);
             a.free(h.value);
@@ -692,6 +702,7 @@ fn h2DoRequest(
     scheme: []const u8,
     authority: []const u8,
     reqBody: ?[]const u8,
+    maxSize: usize,
 ) Error!Response {
     var hasAcceptEncoding = false;
     for (reqHeaders) |h| {
@@ -701,15 +712,24 @@ fn h2DoRequest(
     defer a.free(conv);
     for (reqHeaders, 0..) |h, i| conv[i] = .{ .name = h.name, .value = h.value };
     if (!hasAcceptEncoding) conv[reqHeaders.len] = .{ .name = "accept-encoding", .value = compression.acceptEncodingValue() };
-    const r = pc.request(method, target, conv, scheme, authority, reqBody) catch |e| switch (e) {
+    const r = pc.request(method, target, conv, scheme, authority, reqBody, maxSize) catch |e| switch (e) {
         error.OutOfMemory => return Error.OutOfMemory,
+        error.ResponseTooLarge => return Error.ResponseTooLarge,
         else => return Error.ProtocolViolation,
     };
     // Convert header type (same shape, different namespace); the
     // transport allocator IS `a`, so ownership transfers cleanly.
-    var outHdrs = try a.alloc(Header, r.headers.len);
+    var outHdrs = a.alloc(Header, r.headers.len) catch {
+        for (r.headers) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(r.headers);
+        a.free(r.body);
+        return Error.OutOfMemory;
+    };
     for (r.headers, 0..) |h, i| outHdrs[i] = .{ .name = h.name, .value = h.value };
-    const decodedBody = decodeResponseBody(a, outHdrs, r.body) catch |e| {
+    const decodedBody = decodeResponseBodyLimited(a, outHdrs, r.body, @min(maxSize, maxResponseBodySize)) catch |e| {
         for (outHdrs) |h| {
             a.free(h.name);
             a.free(h.value);
@@ -734,13 +754,23 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 
     var redirects: u8 = 0;
     var method = req.method;
+    var credentialsStripped = false;
+    var bodyStripped = false;
+    var redirectedHeaders: ?[]Header = null;
+    defer if (redirectedHeaders) |headers| a.free(headers);
 
     while (true) {
         const u = uriMod.parse(currentUrl) catch return Error.InvalidUrl;
-        const isTls = std.mem.eql(u8, u.scheme, "https");
-        if (!isTls and !std.mem.eql(u8, u.scheme, "http")) return Error.InvalidUrl;
+        const isTls = std.ascii.eqlIgnoreCase(u.scheme, "https");
+        if (!isTls and !std.ascii.eqlIgnoreCase(u.scheme, "http")) return Error.InvalidUrl;
         // Auto-enable TLS for HTTPS with safe default verification (.caBundle).
-        const tlsOpts = if (isTls) req.tls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
+        var tlsOpts = if (isTls) req.tls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
+        if (credentialsStripped) {
+            if (tlsOpts) |*opts| {
+                opts.clientCertPem = null;
+                opts.clientKeyPem = null;
+            }
+        }
 
         var port = u.effectivePort();
         if (port == 0) return Error.InvalidUrl;
@@ -751,18 +781,26 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         const target = try buildTarget(a, u.path, u.query, req.query);
         defer a.free(target);
 
-        const ct: ?[]const u8 = switch (req.bodyKind) {
+        const ct: ?[]const u8 = if (bodyStripped) null else switch (req.bodyKind) {
             .json => "application/json",
             .form => "application/x-www-form-urlencoded",
             else => null,
         };
-        const hasBody = req.body.len > 0 or switch (req.bodyKind) {
+        const hasBody = !bodyStripped and (req.body.len > 0 or switch (req.bodyKind) {
             .json, .form => true,
             else => false,
-        };
+        });
         const bodyOut: ?[]const u8 = if (hasBody) req.body else null;
 
-        const extra = try headerLinesWithAuth(a, req.headers, ct, req.cookie, req.basicAuth, req.bearerAuth);
+        const requestHeaders = redirectedHeaders orelse req.headers;
+        const extra = try headerLinesWithAuth(
+            a,
+            requestHeaders,
+            ct,
+            if (credentialsStripped) null else req.cookie,
+            if (credentialsStripped) null else req.basicAuth,
+            if (credentialsStripped) null else req.bearerAuth,
+        );
         defer {
             for (extra) |l| a.free(l);
             a.free(extra);
@@ -827,7 +865,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             if (req.pool) |p| {
                 if (p.acquireH2(hostCopy[0..hl], port, isTls)) |pc| {
                     const scheme: []const u8 = if (isTls) "https" else "http";
-                    const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, scheme, hostCopy[0..hl], bodyOut) catch |e| {
+                    const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, scheme, hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
                         pc.deinit();
                         return e;
                     };
@@ -1058,10 +1096,13 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         };
 
         if (req.timeoutMs) |tMs| {
-            if (tMs > 0) {
-                if (tcpSock.inner == .stream) {
-                    tcp.setTimeouts(tcpSock.netSocketHandle(), @intCast(@min(tMs, 2147483647)));
-                }
+            if (tMs > 0 and tcpSock.inner == .stream) {
+                // The budget travels with each operation: SO_RCVTIMEO on a
+                // std.Io socket makes Zig's net_read abort the process when it
+                // fires. Raw winsock sockets are left untouched here.
+                const ms: u32 = @intCast(@min(tMs, std.math.maxInt(u32)));
+                tcpSock.setReadInactivityTimeoutMs(ms);
+                tcpSock.setWriteInactivityTimeoutMs(ms);
             }
         }
 
@@ -1125,7 +1166,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 // wrapTls already closed the socket and freed the box.
                 return Error.ProtocolViolation;
             };
-            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "https", hostCopy[0..hl], bodyOut) catch |e| {
+            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "https", hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
                 pc.deinit();
                 return e;
             };
@@ -1154,7 +1195,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 tcpSock.close();
                 return Error.ProtocolViolation;
             };
-            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "http", hostCopy[0..hl], bodyOut) catch |e| {
+            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "http", hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
                 pc.deinit();
                 return e;
             };
@@ -1233,7 +1274,8 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 
         transport.writeAll(raw) catch return Error.WriteFailed;
 
-        const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings });
+        const responseLimit = @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize);
+        const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings }, responseLimit);
         var resp = full.resp;
 
         if (req.followRedirects and isRedirect(resp.status)) {
@@ -1244,15 +1286,42 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 return Error.TooManyRedirects;
             }
             redirects += 1;
-            const wasSameOrigin = sameOrigin(&u, loc);
-
             const next = resolveLocation(a, currentUrl, loc) catch return resp;
+            const nextUri = uriMod.parse(next) catch {
+                a.free(next);
+                return resp;
+            };
+            const wasSameOrigin = sameOrigin(&u, &nextUri);
+            var nextMethod = method;
+            var nextBodyStripped = bodyStripped;
+            switch (resp.status) {
+                301, 302 => if (method == .POST) {
+                    nextMethod = .GET;
+                    nextBodyStripped = true;
+                },
+                303 => {
+                    if (method != .HEAD) nextMethod = .GET;
+                    nextBodyStripped = true;
+                },
+                else => {},
+            }
+            const nextCredentialsStripped = credentialsStripped or !wasSameOrigin;
+
+            if (nextCredentialsStripped != credentialsStripped or nextBodyStripped != bodyStripped) {
+                const filtered = filterRedirectHeaders(a, req.headers, nextCredentialsStripped, nextBodyStripped) catch {
+                    a.free(next);
+                    resp.deinit();
+                    return Error.OutOfMemory;
+                };
+                if (redirectedHeaders) |old| a.free(old);
+                redirectedHeaders = filtered;
+            }
+            credentialsStripped = nextCredentialsStripped;
+            bodyStripped = nextBodyStripped;
+            method = nextMethod;
+
             a.free(currentUrl);
             currentUrl = next;
-
-            if (!wasSameOrigin) stripAuth(@constCast(req.headers));
-
-            if (resp.status == 301 or resp.status == 302 or resp.status == 303) method = .GET;
             resp.deinit();
             continue;
         }
@@ -1286,14 +1355,13 @@ fn finishPlain(
 
 pub const FullResponse = struct { resp: Response, reusable: bool };
 
-/// Replaces the value of the first header named `name`, freeing the old one.
-fn replaceHeaderValue(a: Allocator, headers: []Header, name: []const u8, value: []const u8) !void {
+/// Replaces every value of a repeated header, freeing each old value.
+fn replaceHeaderValues(a: Allocator, headers: []Header, name: []const u8, value: []const u8) !void {
     for (headers) |*h| {
         if (!std.ascii.eqlIgnoreCase(h.name, name)) continue;
         const fresh = try a.dupe(u8, value);
         a.free(h.value);
         h.value = fresh;
-        return;
     }
 }
 
@@ -1309,13 +1377,17 @@ fn restateContentCoding(a: Allocator, headers: []Header, decoded_len: usize) Err
     var buf: [24]u8 = undefined;
     // A usize needs at most 20 digits, so the buffer can never be too small.
     const len_text = buf[0..std.fmt.printInt(&buf, decoded_len, 10, .lower, .{})];
-    try replaceHeaderValue(a, headers, "content-length", len_text);
-    try replaceHeaderValue(a, headers, "content-encoding", "identity");
+    try replaceHeaderValues(a, headers, "content-length", len_text);
+    try replaceHeaderValues(a, headers, "content-encoding", "identity");
 }
 
 /// Decodes a content-coded response body and brings the headers back in line
 /// with the bytes actually returned.
 fn decodeResponseBody(a: Allocator, headers: []Header, body: []u8) Error![]u8 {
+    return decodeResponseBodyLimited(a, headers, body, maxResponseBodySize);
+}
+
+fn decodeResponseBodyLimited(a: Allocator, headers: []Header, body: []u8, maxSize: usize) Error![]u8 {
     // Content codings are applied in header order and removed in reverse.
     // Bound the number of layers so an attacker cannot induce unbounded decode
     // work or stack-like allocation growth with a long coding list.
@@ -1343,7 +1415,7 @@ fn decodeResponseBody(a: Allocator, headers: []Header, body: []u8) Error![]u8 {
         codingCount -= 1;
         const encoding = codings[codingCount];
         if (encoding == .identity) continue;
-        const decoded = compression.decompressLimited(a, encoding, current, maxResponseBodySize) catch |err| switch (err) {
+        const decoded = compression.decompressLimited(a, encoding, current, maxSize) catch |err| switch (err) {
             error.DecompressedTooLarge => return Error.ResponseTooLarge,
             error.OutOfMemory => return Error.OutOfMemory,
             else => return Error.MalformedResponse,
@@ -1392,6 +1464,21 @@ test "client decodes bounded compressed response bodies" {
     const decoded = try decodeResponseBody(a, headers, try a.dupe(u8, wire));
     defer a.free(decoded);
     try std.testing.expectEqualStrings(plain, decoded);
+}
+
+test "client applies configured limit to decompressed response bodies" {
+    const a = std.testing.allocator;
+    const plain = "decoded output exceeds the request limit";
+    const wire = try compression.compress(a, .gzip, plain);
+    defer a.free(wire);
+    const headers = try ownedTestHeaders(a, &.{.{ "content-encoding", "gzip" }});
+    defer freeTestHeaders(a, headers);
+    const body = try a.dupe(u8, wire);
+    defer a.free(body);
+    try std.testing.expectError(
+        Error.ResponseTooLarge,
+        decodeResponseBodyLimited(a, headers, body, plain.len - 1),
+    );
 }
 
 test "client restates framing headers after decoding" {
@@ -1447,6 +1534,35 @@ test "client decodes stacked response codings in reverse order" {
     try std.testing.expectEqualStrings("identity", headers[0].value);
 }
 
+test "client restates every repeated content encoding after decoding" {
+    const a = std.testing.allocator;
+    const plain = "stacked codings can arrive in repeated header fields";
+    const gzip = try compression.compress(a, .gzip, plain);
+    defer a.free(gzip);
+    const wire = try compression.compress(a, .br, gzip);
+    defer a.free(wire);
+
+    const headers = try ownedTestHeaders(a, &.{
+        .{ "content-encoding", "gzip" },
+        .{ "Content-Encoding", "br" },
+        .{ "content-length", "999" },
+        .{ "CONTENT-LENGTH", "1000" },
+    });
+    defer freeTestHeaders(a, headers);
+
+    const decoded = try decodeResponseBody(a, headers, try a.dupe(u8, wire));
+    defer a.free(decoded);
+    try std.testing.expectEqualStrings(plain, decoded);
+    const expectedLength = std.fmt.comptimePrint("{d}", .{plain.len});
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "content-encoding")) {
+            try std.testing.expectEqualStrings("identity", header.value);
+        } else if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
+            try std.testing.expectEqualStrings(expectedLength, header.value);
+        }
+    }
+}
+
 test "client compression advertisement respects explicit override" {
     const a = std.testing.allocator;
     const defaults = try headerLines(a, &.{}, null);
@@ -1473,37 +1589,65 @@ test "client compression advertisement respects explicit override" {
 /// `reusable` is true ONLY when the body was framed and fully consumed —
 /// the precondition for parking a connection back into the keep-alive pool.
 fn readFullResponse(a: Allocator, conn: anytype, isHead: bool) Error!FullResponse {
-    return readFullResponseWithOptions(a, conn, isHead, .{});
+    return readFullResponseWithOptions(a, conn, isHead, .{}, maxResponseBodySize);
 }
 
-fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: parserMod.Options) Error!FullResponse {
+fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: parserMod.Options, maxSize: usize) Error!FullResponse {
     var acc: std.ArrayList(u8) = .empty;
     defer acc.deinit(a);
     var buf: [8192]u8 = undefined;
 
-    var headEnd: usize = 0;
-    while (true) {
-        if (std.mem.indexOf(u8, acc.items, "\r\n\r\n")) |idx| {
-            headEnd = idx + 4;
-            break;
-        }
-        if (opts.allowLfLineEndings) {
-            if (std.mem.indexOf(u8, acc.items, "\n\n")) |idx| {
-                // Ensure not already counted as \r\n\r\n (avoid double)
-                if (idx == 0 or acc.items[idx - 1] != '\r') {
-                    headEnd = idx + 2;
+    const parsed = blk: {
+        var interimCount: u8 = 0;
+        while (true) {
+            var headEnd: usize = 0;
+            while (true) {
+                if (std.mem.indexOf(u8, acc.items, "\r\n\r\n")) |idx| {
+                    headEnd = idx + 4;
                     break;
                 }
+                if (opts.allowLfLineEndings) {
+                    if (std.mem.indexOf(u8, acc.items, "\n\n")) |idx| {
+                        // Ensure not already counted as \r\n\r\n (avoid double)
+                        if (idx == 0 or acc.items[idx - 1] != '\r') {
+                            headEnd = idx + 2;
+                            break;
+                        }
+                    }
+                }
+                const n = conn.read(buf[0..]) catch return Error.ReadFailed;
+                if (n == 0) return Error.MalformedResponse;
+                acc.appendSlice(a, buf[0..n]) catch return Error.OutOfMemory;
+                if (acc.items.len > 128 * 1024) return Error.MalformedResponse;
             }
-        }
-        const n = conn.read(buf[0..]) catch return Error.ReadFailed;
-        if (n == 0) return Error.MalformedResponse;
-        acc.appendSlice(a, buf[0..n]) catch return Error.OutOfMemory;
-        if (acc.items.len > 128 * 1024) return Error.MalformedResponse;
-    }
 
+            const optsParser: parserMod.Options = .{ .allowLfLineEndings = opts.allowLfLineEndings };
+            const respHead = parserMod.parseResponseHead(acc.items, optsParser) catch return Error.MalformedResponse;
+            if (respHead.statusCode < 100 or respHead.statusCode >= 200 or respHead.statusCode == 101) {
+                break :blk .{ .headEnd = headEnd, .respHead = respHead };
+            }
+
+            // Informational responses end at the header terminator. Validate
+            // their fields and reject body framing before moving on to the
+            // final response. Preserve bytes already read for the next head.
+            var interimFields: [parserMod.DEFAULT_MAX_HEADERS]parserMod.Field = undefined;
+            const interim = parserMod.parseHeaderBlock(acc.items[0..headEnd], respHead.headEnd, interimFields[0..], optsParser) catch
+                return Error.MalformedResponse;
+            for (interimFields[0..interim.count]) |field| {
+                if (std.ascii.eqlIgnoreCase(field.name, "Content-Length") or
+                    std.ascii.eqlIgnoreCase(field.name, "Transfer-Encoding")) return Error.MalformedResponse;
+            }
+            interimCount += 1;
+            if (interimCount > 16) return Error.MalformedResponse;
+
+            const remaining = acc.items.len - headEnd;
+            std.mem.copyForwards(u8, acc.items[0..remaining], acc.items[headEnd..]);
+            acc.items.len = remaining;
+        }
+    };
+    const headEnd = parsed.headEnd;
+    const respHead = parsed.respHead;
     const optsParser: parserMod.Options = .{ .allowLfLineEndings = opts.allowLfLineEndings };
-    const respHead = parserMod.parseResponseHead(acc.items, optsParser) catch return Error.MalformedResponse;
 
     var fields: [parserMod.DEFAULT_MAX_HEADERS]parserMod.Field = undefined;
     const blk = parserMod.parseHeaderBlock(acc.items[0..headEnd], respHead.headEnd, fields[0..], optsParser) catch
@@ -1534,7 +1678,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
         headerCount += 1;
     }
 
-    if (isHead or respHead.statusCode < 200 or respHead.statusCode == 204 or respHead.statusCode == 304 or
+    if (isHead or respHead.statusCode < 200 or respHead.statusCode == 101 or respHead.statusCode == 204 or respHead.statusCode == 304 or
         (framing.framing == .contentLength and framing.length == 0))
     {
         return .{ .resp = .{
@@ -1542,57 +1686,43 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
             .status = respHead.statusCode,
             .headers = headers,
             .body = try a.alloc(u8, 0),
-        }, .reusable = true };
-    }
-
-    var chunked = false;
-    var clen: usize = 0;
-    for (fields[0..blk.count]) |f| {
-        if (std.ascii.eqlIgnoreCase(f.name, "transfer-encoding") and
-            std.ascii.findIgnoreCase(f.value, "chunked") != null) chunked = true;
-        if (std.ascii.eqlIgnoreCase(f.name, "content-length"))
-            clen = std.fmt.parseInt(usize, std.mem.trim(u8, f.value, " "), 10) catch 0;
+        }, .reusable = respHead.statusCode != 101 and acc.items.len == headEnd };
     }
 
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(a);
-    if (acc.items.len - headEnd > maxResponseBodySize) return Error.ResponseTooLarge;
+    if (acc.items.len - headEnd > maxSize) return Error.ResponseTooLarge;
     try body.appendSlice(a, acc.items[headEnd..]);
 
-    if (chunked) {
-        while (std.mem.indexOf(u8, body.items, "\r\n0\r\n\r\n") == null and
-            std.mem.indexOf(u8, body.items, "0\r\n\r\n") == null)
-        {
-            const n = conn.read(buf[0..]) catch return Error.ReadFailed;
-            if (n == 0) break;
-            if (body.items.len > maxResponseBodySize -| n) return Error.ResponseTooLarge;
-            try body.appendSlice(a, buf[0..n]);
-        }
-        const decoded = decodeChunked(a, body.items) catch return Error.MalformedResponse;
+    if (framing.framing == .chunked) {
+        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..], maxSize);
         return .{ .resp = .{
             .allocator = a,
             .status = respHead.statusCode,
             .version = if (respHead.minorVersion == 0) .http10 else .http11,
             .headers = headers,
-            .body = try decodeResponseBody(a, headers, decoded),
-        }, .reusable = true };
+            .body = try decodeResponseBodyLimited(a, headers, chunkedBody.body, maxSize),
+        }, .reusable = chunkedBody.reusable };
     }
 
     var complete = false;
-    if (clen > 0) {
-        if (clen > maxResponseBodySize) return Error.ResponseTooLarge;
+    if (framing.framing == .contentLength) {
+        const clen = framing.length;
+        if (clen > maxSize) return Error.ResponseTooLarge;
         while (body.items.len < clen) {
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
             if (n == 0) break;
-            if (body.items.len > maxResponseBodySize -| n) return Error.ResponseTooLarge;
+            if (n > maxSize -| body.items.len) return Error.ResponseTooLarge;
             try body.appendSlice(a, buf[0..n]);
         }
-        complete = body.items.len >= clen;
+        complete = body.items.len == clen;
+        if (body.items.len < clen) return Error.MalformedResponse;
+        body.items.len = clen;
     } else {
         while (true) {
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
             if (n == 0) break;
-            if (body.items.len > maxResponseBodySize -| n) return Error.ResponseTooLarge;
+            if (n > maxSize -| body.items.len) return Error.ResponseTooLarge;
             try body.appendSlice(a, buf[0..n]);
         }
     }
@@ -1603,40 +1733,205 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
         .status = respHead.statusCode,
         .version = if (respHead.minorVersion == 0) .http10 else .http11,
         .headers = headers,
-        .body = try decodeResponseBody(a, headers, ownedBody),
+        .body = try decodeResponseBodyLimited(a, headers, ownedBody, maxSize),
     }, .reusable = complete };
+}
+
+const ChunkedResponseBody = struct { body: []u8, reusable: bool };
+
+fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8, readBuf: []u8, maxSize: usize) Error!ChunkedResponseBody {
+    var wire: std.ArrayList(u8) = .empty;
+    defer wire.deinit(a);
+    wire.appendSlice(a, initialWire) catch return Error.OutOfMemory;
+
+    var decoded: std.ArrayList(u8) = .empty;
+    errdefer decoded.deinit(a);
+    var decoder = parserMod.ChunkedDecoder.init();
+
+    while (true) {
+        _ = decoder.decode(wire.items) catch |err| switch (err) {
+            error.Incomplete => {},
+            error.OutOfMemory => return Error.OutOfMemory,
+            else => return Error.MalformedResponse,
+        };
+        if (decoder.decodedLen > maxSize -| decoded.items.len) return Error.ResponseTooLarge;
+        decoded.appendSlice(a, wire.items[0..decoder.decodedLen]) catch return Error.OutOfMemory;
+
+        const consumed = decoder.rawConsumed;
+        if (consumed > wire.items.len) return Error.MalformedResponse;
+        const pending = wire.items.len - consumed;
+        if (pending > 0) std.mem.copyForwards(u8, wire.items[0..pending], wire.items[consumed..]);
+        wire.items.len = pending;
+
+        if (decoder.isDone()) return .{
+            .body = decoded.toOwnedSlice(a) catch return Error.OutOfMemory,
+            .reusable = pending == 0,
+        };
+
+        if (decoder.totalRead > maxSize) return Error.ResponseTooLarge;
+        const consumedWire: usize = @intCast(decoder.totalRead);
+        if (wire.items.len > maxSize - consumedWire) {
+            return Error.ResponseTooLarge;
+        }
+        const n = conn.read(readBuf) catch return Error.ReadFailed;
+        if (n == 0) return Error.MalformedResponse;
+        const remainingCapacity = maxSize - consumedWire - wire.items.len;
+        if (n > remainingCapacity) return Error.ResponseTooLarge;
+        wire.appendSlice(a, readBuf[0..n]) catch return Error.OutOfMemory;
+    }
 }
 
 fn decodeChunked(a: Allocator, wireIn: []const u8) ![]u8 {
     const wire = try a.dupe(u8, wireIn);
     defer a.free(wire);
+    var decoder = parserMod.ChunkedDecoder.init();
+    _ = try decoder.decode(wire);
+    if (!decoder.isDone()) return error.Incomplete;
+    return a.dupe(u8, wire[0..decoder.decodedLen]);
+}
 
-    var dec = parserMod.ChunkedDecoder{};
-    _ = dec.decode(wire) catch |e| switch (e) {
-        error.Incomplete => return error.Incomplete,
-        else => return e,
+test "chunked client response reads trailers incrementally and ignores marker-like payload" {
+    const MockConn = struct {
+        tail: []const u8,
+        reads: usize = 0,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            self.reads += 1;
+            if (self.tail.len == 0) return 0;
+            const n = @min(dest.len, self.tail.len);
+            @memcpy(dest[0..n], self.tail[0..n]);
+            self.tail = self.tail[n..];
+            return n;
+        }
     };
-    // ChunkedDecoder decodes in place: the decoded payload occupies
-    // wire[0..decodedLen]. The decode() return value is bytes consumed
-    // from the input (equals wire.len on a complete body), not the
-    // produced length — using it as a length yields an empty slice.
-    return a.dupe(u8, wire[0..dec.decodedLen]);
+    const a = std.testing.allocator;
+    var conn = MockConn{ .tail = "\r\nNEXT" };
+    const wire = "5\r\n0\r\n\r\n\r\n0\r\nX-Checksum: yes\r\n";
+    var readBuf: [8]u8 = undefined;
+    const result = try readChunkedResponseBody(a, &conn, wire, &readBuf, maxResponseBodySize);
+    defer a.free(result.body);
+    try std.testing.expectEqualStrings("0\r\n\r\n", result.body);
+    try std.testing.expectEqual(@as(usize, 1), conn.reads);
+    try std.testing.expect(!result.reusable);
+}
+
+test "client trims content-length response and rejects connection reuse after trailing bytes" {
+    const MockConn = struct {
+        wire: []const u8,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            const n = @min(dest.len, self.wire.len);
+            @memcpy(dest[0..n], self.wire[0..n]);
+            self.wire = self.wire[n..];
+            return n;
+        }
+    };
+    const a = std.testing.allocator;
+    var conn = MockConn{ .wire = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabcNEXT" };
+    var full = try readFullResponse(a, &conn, false);
+    defer full.resp.deinit();
+    try std.testing.expectEqualStrings("abc", full.resp.body);
+    try std.testing.expect(!full.reusable);
+}
+
+test "client enforces configured response size before buffering the full body" {
+    const MockConn = struct {
+        bodyOffset: usize = 0,
+        headerSent: bool = false,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            const header = "HTTP/1.1 200 OK\r\n\r\n";
+            const body = "data";
+            if (!self.headerSent) {
+                const n = @min(dest.len, header.len);
+                @memcpy(dest[0..n], header[0..n]);
+                self.headerSent = n == header.len;
+                return n;
+            }
+            const n = @min(dest.len, body.len - self.bodyOffset);
+            @memcpy(dest[0..n], body[self.bodyOffset .. self.bodyOffset + n]);
+            self.bodyOffset += n;
+            return n;
+        }
+    };
+    const a = std.testing.allocator;
+    var conn = MockConn{};
+    try std.testing.expectError(
+        Error.ResponseTooLarge,
+        readFullResponseWithOptions(a, &conn, false, .{}, 3),
+    );
+}
+
+test "client skips informational responses and returns the final response" {
+    const MockConn = struct {
+        wire: []const u8,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            const n = @min(dest.len, self.wire.len);
+            @memcpy(dest[0..n], self.wire[0..n]);
+            self.wire = self.wire[n..];
+            return n;
+        }
+    };
+    const a = std.testing.allocator;
+    var conn = MockConn{
+        .wire = "HTTP/1.1 100 Continue\r\n\r\n" ++
+            "HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n" ++
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
+    };
+    var full = try readFullResponse(a, &conn, false);
+    defer full.resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), full.resp.status);
+    try std.testing.expectEqualStrings("OK", full.resp.body);
+    try std.testing.expect(full.reusable);
+}
+
+test "client returns switching-protocols response without reading tunnel data" {
+    const MockConn = struct {
+        wire: []const u8,
+        reads: usize = 0,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            self.reads += 1;
+            const n = @min(dest.len, self.wire.len);
+            @memcpy(dest[0..n], self.wire[0..n]);
+            self.wire = self.wire[n..];
+            return n;
+        }
+    };
+    const a = std.testing.allocator;
+    var conn = MockConn{ .wire = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\nframe" };
+    var full = try readFullResponse(a, &conn, false);
+    defer full.resp.deinit();
+    try std.testing.expectEqual(@as(u16, 101), full.resp.status);
+    try std.testing.expectEqual(@as(usize, 0), full.resp.body.len);
+    try std.testing.expect(!full.reusable);
+    try std.testing.expectEqual(@as(usize, 1), conn.reads);
 }
 
 fn isRedirect(status: u16) bool {
     return status == 301 or status == 302 or status == 303 or status == 307 or status == 308;
 }
 
-fn sameOrigin(base: *const uriMod.Uri, location: []const u8) bool {
-    if (std.mem.indexOf(u8, location, "://") == null) return true;
-    const parsed = uriMod.parse(location) catch return false;
-    return std.mem.eql(u8, base.scheme, parsed.scheme) and std.mem.eql(u8, base.host, parsed.host);
+fn sameOrigin(base: *const uriMod.Uri, target: *const uriMod.Uri) bool {
+    return std.ascii.eqlIgnoreCase(base.scheme, target.scheme) and
+        std.ascii.eqlIgnoreCase(base.host, target.host) and
+        base.effectivePort() == target.effectivePort();
 }
 
-fn stripAuth(hdrs: []Header) void {
-    for (hdrs) |*h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "Authorization")) h.value = "";
+fn filterRedirectHeaders(a: Allocator, hdrs: []const Header, stripCredentials: bool, stripBody: bool) ![]Header {
+    var filtered: std.ArrayList(Header) = .empty;
+    errdefer filtered.deinit(a);
+    for (hdrs) |h| {
+        if (stripCredentials and (std.ascii.eqlIgnoreCase(h.name, "Authorization") or
+            std.ascii.eqlIgnoreCase(h.name, "Cookie") or
+            std.ascii.eqlIgnoreCase(h.name, "Proxy-Authorization"))) continue;
+        const isContentHeader = h.name.len >= 8 and std.ascii.eqlIgnoreCase(h.name[0..8], "content-");
+        if (stripBody and (isContentHeader or std.ascii.eqlIgnoreCase(h.name, "Transfer-Encoding") or
+            std.ascii.eqlIgnoreCase(h.name, "Trailer") or std.ascii.eqlIgnoreCase(h.name, "Expect"))) continue;
+        try filtered.append(a, h);
     }
+    return filtered.toOwnedSlice(a);
 }
 
 /// Resolves Location against the previous URL (RFC 3986 Section 5),
@@ -1644,44 +1939,63 @@ fn stripAuth(hdrs: []Header) void {
 fn resolveLocation(a: Allocator, baseUrl: []const u8, loc: []const u8) ![]u8 {
     if (std.mem.indexOf(u8, loc, "://") != null) return a.dupe(u8, loc);
     const base = try uriMod.parse(baseUrl);
+
+    // Network-path references inherit the scheme but replace the authority.
+    if (std.mem.startsWith(u8, loc, "//")) {
+        return std.fmt.allocPrint(a, "{s}:{s}", .{ base.scheme, loc });
+    }
+
+    var referenceEnd = loc.len;
+    var fragment: ?[]const u8 = null;
+    if (std.mem.indexOfScalar(u8, loc, '#')) |idx| {
+        referenceEnd = idx;
+        fragment = loc[idx + 1 ..];
+    }
+    var query: ?[]const u8 = null;
+    if (std.mem.indexOfScalar(u8, loc[0..referenceEnd], '?')) |idx| {
+        query = loc[idx + 1 .. referenceEnd];
+        referenceEnd = idx;
+    }
+    const referencePath = loc[0..referenceEnd];
+
+    var resolvedPath: []u8 = undefined;
+    if (referencePath.len == 0) {
+        resolvedPath = try a.dupe(u8, base.path);
+    } else if (referencePath[0] == '/') {
+        resolvedPath = try removeDotSegments(a, referencePath);
+    } else {
+        var merged: std.ArrayList(u8) = .empty;
+        defer merged.deinit(a);
+        const lastSlash = std.mem.lastIndexOfScalar(u8, base.path, '/');
+        const dir = if (lastSlash) |idx| base.path[0..idx] else "";
+        try merged.appendSlice(a, dir);
+        if (dir.len == 0 or dir[dir.len - 1] != '/') try merged.append(a, '/');
+        try merged.appendSlice(a, referencePath);
+        resolvedPath = try removeDotSegments(a, merged.items);
+    }
+    defer a.free(resolvedPath);
+
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
     try out.appendSlice(a, base.scheme);
     try out.appendSlice(a, "://");
     var ab: [512]u8 = undefined;
     try out.appendSlice(a, base.authority(&ab));
-
-    // Split off fragment and query; they survive dot-segment removal untouched.
-    var pathEnd = loc.len;
-    var suffix: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, loc, '#')) |hi| {
-        pathEnd = hi;
-        suffix = loc[hi..];
+    try out.appendSlice(a, resolvedPath);
+    if (query) |q| {
+        try out.append(a, '?');
+        try out.appendSlice(a, q);
+    } else if (referencePath.len == 0) {
+        const baseRefEnd = std.mem.indexOfScalar(u8, baseUrl, '#') orelse baseUrl.len;
+        if (std.mem.indexOfScalar(u8, baseUrl[0..baseRefEnd], '?') != null) {
+            try out.append(a, '?');
+            try out.appendSlice(a, base.query);
+        }
     }
-    var query: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, loc[0..pathEnd], '?')) |qi| {
-        query = loc[qi..pathEnd];
-        pathEnd = qi;
+    if (fragment) |f| {
+        try out.append(a, '#');
+        try out.appendSlice(a, f);
     }
-    const locPath = loc[0..pathEnd];
-
-    var merged: std.ArrayList(u8) = .empty;
-    defer merged.deinit(a);
-    if (locPath.len > 0 and locPath[0] == '/') {
-        try merged.appendSlice(a, locPath);
-    } else {
-        const basePath = base.path;
-        const lastSlash = std.mem.lastIndexOfScalar(u8, basePath, '/');
-        const dir = if (lastSlash) |idx| basePath[0..idx] else "";
-        try merged.appendSlice(a, dir);
-        if (dir.len == 0 or dir[dir.len - 1] != '/') try merged.append(a, '/');
-        try merged.appendSlice(a, locPath);
-    }
-    const clean = try removeDotSegments(a, merged.items);
-    defer a.free(clean);
-    try out.appendSlice(a, clean);
-    try out.appendSlice(a, query);
-    try out.appendSlice(a, suffix);
     return out.toOwnedSlice(a);
 }
 
@@ -2219,6 +2533,10 @@ test "resolveLocation handles relative paths and dot segments" {
         .{ .base = "http://h/a/b/c", .loc = "/x", .want = "http://h/x" },
         .{ .base = "http://h/a/b/", .loc = "../../z?q=1#frag", .want = "http://h/z?q=1#frag" },
         .{ .base = "http://h/a/./b", .loc = "./c", .want = "http://h/a/c" },
+        .{ .base = "http://h/a/b?old=1#old", .loc = "?q=2", .want = "http://h/a/b?q=2" },
+        .{ .base = "http://h/a/b?old=1#old", .loc = "#new", .want = "http://h/a/b?old=1#new" },
+        .{ .base = "http://h/a/b?old=1#old", .loc = "", .want = "http://h/a/b?old=1" },
+        .{ .base = "http://h/a/b", .loc = "//other:8080/x", .want = "http://other:8080/x" },
         .{ .base = "http://h/old", .loc = "https://other.new/path", .want = "https://other.new/path" },
     };
     for (cases) |c| {
@@ -2226,6 +2544,196 @@ test "resolveLocation handles relative paths and dot segments" {
         defer a.free(got);
         try std.testing.expectEqualStrings(c.want, got);
     }
+}
+
+test "redirect origin comparison includes scheme host and effective port" {
+    const base = try uriMod.parse("https://Example.com:443/start");
+    const defaultPort = try uriMod.parse("https://example.COM/next");
+    const otherPort = try uriMod.parse("https://example.com:444/next");
+    const otherScheme = try uriMod.parse("http://example.com:443/next");
+    try std.testing.expect(sameOrigin(&base, &defaultPort));
+    try std.testing.expect(!sameOrigin(&base, &otherPort));
+    try std.testing.expect(!sameOrigin(&base, &otherScheme));
+}
+
+test "cross-origin redirect strips credential options without mutating caller headers" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var redirectListener = try tcp.Listener.bind(ctx.io, 0);
+    defer redirectListener.close(ctx.io);
+    var targetListener = try tcp.Listener.bind(ctx.io, 0);
+    defer targetListener.close(ctx.io);
+
+    const Capture = struct {
+        bytes: [2048]u8 = undefined,
+        len: usize = 0,
+    };
+    const RawServer = struct {
+        fn readRequest(conn: *tcp.Socket, capture: *Capture) void {
+            while (capture.len < capture.bytes.len) {
+                const n = conn.read(capture.bytes[capture.len..]) catch return;
+                if (n == 0) return;
+                capture.len += n;
+                if (std.mem.indexOf(u8, capture.bytes[0..capture.len], "\r\n\r\n") != null) return;
+            }
+        }
+
+        fn redirect(listener: *tcp.Listener, targetPort: u16, capture: *Capture, io: std.Io) void {
+            var conn = listener.accept(io) catch return;
+            defer conn.close();
+            readRequest(&conn, capture);
+            var response: [256]u8 = undefined;
+            const wire = std.fmt.bufPrint(
+                &response,
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{d}/target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                .{targetPort},
+            ) catch return;
+            conn.writeAll(wire) catch {};
+        }
+
+        fn target(listener: *tcp.Listener, capture: *Capture, io: std.Io) void {
+            var conn = listener.accept(io) catch return;
+            defer conn.close();
+            readRequest(&conn, capture);
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+        }
+    };
+
+    var firstCapture = Capture{};
+    var targetCapture = Capture{};
+    const targetThread = try std.Thread.spawn(.{}, RawServer.target, .{ &targetListener, &targetCapture, ctx.io });
+    var targetJoined = false;
+    errdefer if (!targetJoined) targetThread.join();
+    const redirectThread = try std.Thread.spawn(.{}, RawServer.redirect, .{ &redirectListener, targetListener.localPort(), &firstCapture, ctx.io });
+    var redirectJoined = false;
+    errdefer if (!redirectJoined) redirectThread.join();
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/start", .{redirectListener.localPort()});
+    defer a.free(url);
+    const suppliedHeaders = [_]Header{
+        .{ .name = "Proxy-Authorization", .value = "Basic proxy-secret" },
+        .{ .name = "X-Keep", .value = "yes" },
+    };
+    var response = try request(a, ctx.io, .{
+        .url = url,
+        .headers = &suppliedHeaders,
+        .cookie = "option-cookie=secret",
+        .basicAuth = "user:password",
+        .bearerAuth = "option-secret",
+    });
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+
+    targetThread.join();
+    targetJoined = true;
+    redirectThread.join();
+    redirectJoined = true;
+    const firstRequest = firstCapture.bytes[0..firstCapture.len];
+    try std.testing.expect(std.mem.indexOf(u8, firstRequest, "Authorization: Bearer option-secret") != null);
+    try std.testing.expect(std.mem.indexOf(u8, firstRequest, "Cookie: option-cookie=secret") != null);
+    try std.testing.expect(std.mem.indexOf(u8, firstRequest, "Proxy-Authorization: Basic proxy-secret") != null);
+    const targetRequest = targetCapture.bytes[0..targetCapture.len];
+    try std.testing.expect(std.mem.indexOf(u8, targetRequest, "Authorization:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, targetRequest, "Cookie:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, targetRequest, "Proxy-Authorization:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, targetRequest, "X-Keep: yes") != null);
+    try std.testing.expectEqualStrings("Basic proxy-secret", suppliedHeaders[0].value);
+}
+
+test "303 redirect changes POST to GET and removes body framing headers" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+
+    const Capture = struct {
+        bytes: [2048]u8 = undefined,
+        len: usize = 0,
+    };
+    const RawServer = struct {
+        fn readRequest(conn: *tcp.Socket, capture: *Capture, includeBody: bool) void {
+            while (capture.len < capture.bytes.len) {
+                const n = conn.read(capture.bytes[capture.len..]) catch return;
+                if (n == 0) return;
+                capture.len += n;
+                const data = capture.bytes[0..capture.len];
+                const headEnd = (std.mem.indexOf(u8, data, "\r\n\r\n") orelse continue) + 4;
+                if (!includeBody) return;
+                const clStart = std.mem.indexOf(u8, data[0..headEnd], "Content-Length: ") orelse return;
+                const valueStart = clStart + "Content-Length: ".len;
+                const valueEnd = std.mem.indexOf(u8, data[valueStart..headEnd], "\r\n") orelse return;
+                const bodyLen = std.fmt.parseInt(usize, data[valueStart .. valueStart + valueEnd], 10) catch return;
+                if (capture.len >= headEnd + bodyLen) return;
+            }
+        }
+
+        fn run(listenerPtr: *tcp.Listener, first: *Capture, second: *Capture, io: std.Io) void {
+            {
+                var conn = listenerPtr.accept(io) catch return;
+                defer conn.close();
+                readRequest(&conn, first, true);
+                conn.writeAll("HTTP/1.1 303 See Other\r\nLocation: /next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n") catch return;
+            }
+            var conn = listenerPtr.accept(io) catch return;
+            defer conn.close();
+            readRequest(&conn, second, false);
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+        }
+    };
+
+    var first = Capture{};
+    var second = Capture{};
+    const thread = try std.Thread.spawn(.{}, RawServer.run, .{ &listener, &first, &second, ctx.io });
+    var joined = false;
+    errdefer if (!joined) thread.join();
+
+    const url = try std.fmt.allocPrint(a, "HTTP://127.0.0.1:{d}/start", .{listener.localPort()});
+    defer a.free(url);
+    const headers = [_]Header{
+        .{ .name = "Content-Type", .value = "text/plain" },
+        .{ .name = "Content-Length", .value = "7" },
+        .{ .name = "Expect", .value = "100-continue" },
+        .{ .name = "X-Keep", .value = "yes" },
+    };
+    var response = try request(a, ctx.io, .{
+        .method = .POST,
+        .url = url,
+        .bodyKind = .raw,
+        .body = "payload",
+        .headers = &headers,
+    });
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    thread.join();
+    joined = true;
+
+    const firstRequest = first.bytes[0..first.len];
+    try std.testing.expect(std.mem.startsWith(u8, firstRequest, "POST /start HTTP/1.1\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, firstRequest, "payload"));
+    const secondRequest = second.bytes[0..second.len];
+    try std.testing.expect(std.mem.startsWith(u8, secondRequest, "GET /next HTTP/1.1\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, secondRequest, "Content-Length:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, secondRequest, "Content-Type:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, secondRequest, "Expect:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, secondRequest, "X-Keep: yes") != null);
+    try std.testing.expectEqualStrings("7", headers[1].value);
+}
+
+test "filterRedirectHeaders leaves original authorization data untouched" {
+    const a = std.testing.allocator;
+    const original = [_]Header{
+        .{ .name = "Authorization", .value = "Bearer keep-in-caller" },
+        .{ .name = "Cookie", .value = "secret=keep-in-caller" },
+        .{ .name = "X-Keep", .value = "yes" },
+    };
+    const filtered = try filterRedirectHeaders(a, &original, true, false);
+    defer a.free(filtered);
+    try std.testing.expectEqual(@as(usize, 1), filtered.len);
+    try std.testing.expectEqualStrings("X-Keep", filtered[0].name);
+    try std.testing.expectEqualStrings("Bearer keep-in-caller", original[0].value);
+    try std.testing.expectEqualStrings("secret=keep-in-caller", original[1].value);
 }
 
 test "https auto-enables tls with secure caBundle verification when no explicit options provided" {

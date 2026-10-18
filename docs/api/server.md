@@ -98,21 +98,22 @@ All `ServerConfig` fields are optional customizations. Omitted fields use the bu
 
 ### Connection handling and concurrency
 
-The accept loop submits connections to a fixed worker pool. `maxConcurrentConnections`
-counts both active workers and queued sockets; the queue itself is bounded by
-`maxQueuedConnectionTasks`. When either limit is reached, the server closes
-the newest accepted socket. `maxConnections` is a separate lifetime limit and
-counts successfully queued connections.
+The accept loop submits connections to a fixed worker pool. The server tracks
+active and queued connections together and admits no more than
+`maxConcurrentConnections`; the worker queue independently holds at most
+`maxQueuedConnectionTasks`. A full queue or connection limit closes the newly
+accepted socket, so the effective queued capacity is bounded by both settings.
+`maxConnections` is a separate lifetime limit and counts successfully queued
+connections.
 
 The timeout fields are absolute deadlines for each I/O phase, not inactivity
-windows that restart after every byte. On Windows the server monitors pending
-socket operations and shuts down the timed-out direction to release a blocked
-worker; POSIX socket timeout options are also applied. A zero timeout disables
-the corresponding deadline. Graceful `requestShutdown()` stops acceptance,
-lets active requests finish within their I/O deadlines, and closes queued
-sockets without starting new requests. `stop()` closes active sockets
-immediately. A user handler that blocks without returning is not forcibly
-cancelled.
+windows that restart after every byte. A server-owned monitor interrupts the
+timed-out direction on accepted sockets so a blocked I/O operation releases
+its worker. A zero timeout disables the corresponding deadline. Graceful
+`requestShutdown()` stops acceptance, lets active requests finish within their
+I/O deadlines, and closes queued sockets without starting new requests.
+`stop()` interrupts active socket I/O immediately. A user handler that blocks
+without returning is not forcibly cancelled.
 
 Route registration and configuration must finish before `run()` starts.
 Handlers and the logging callback may be invoked concurrently from different

@@ -11,7 +11,8 @@
 //!   * Response QPACK sections must decode with connection state plus
 //!     the static table: servers using dynamic-table insertions that
 //!     require decoder-stream traffic will fail the decode loudly.
-//!   * Request bodies are not sent yet (GET/HEAD-style exchanges).
+//!   * Request bodies are sent as buffered DATA frames; streaming uploads are
+//!     not provided by this one-shot client API.
 //!   * GOAWAY is not specially handled: a connection that goes away
 //!     mid-request surfaces as a truncated response error.
 //!
@@ -89,7 +90,7 @@ pub const Client = struct {
     fn onStream(ctx: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
         const self: *Client = @ptrCast(@alignCast(ctx.?));
         if (sid != self.resp.sid) return;
-        if (self.resp.buf.items.len + data.len > self.maxBytes) {
+        if (data.len > self.maxBytes -| self.resp.buf.items.len) {
             self.resp.overflow = true;
             return;
         }
@@ -131,7 +132,9 @@ pub const Client = struct {
         pump: *quicEp.Pump,
         dest: std.Io.net.IpAddress,
         deadlineMs: u64,
+        maxBytes: usize,
     ) !H3Response {
+        self.maxBytes = @min(maxBytes, 64 * 1024 * 1024);
         const a = self.allocator;
         self.ep.conn.cbs = .{ .ctx = self, .onStreamData = onStream };
         try self.setupStreams(@intCast(clockMod.millisNow()));
@@ -241,6 +244,20 @@ pub const Client = struct {
         };
     }
 };
+
+test "http3 response collector rejects a chunk beyond its configured limit" {
+    const a = std.testing.allocator;
+    var endpoint: quicEp.Endpoint = undefined;
+    var client = Client.init(a, &endpoint);
+    defer client.deinit();
+    client.maxBytes = 3;
+    client.resp.sid = 0;
+
+    Client.onStream(&client, 0, "data", true);
+
+    try std.testing.expect(client.resp.overflow);
+    try std.testing.expectEqual(@as(usize, 0), client.resp.buf.items.len);
+}
 
 /// Sends `bytes` as one QUIC STREAM frame on `sid`.
 fn sendStream(conn: *quicConn.Connection, sid: u64, offset: u64, bytes: []const u8, fin: bool, nowMs: u64) !void {

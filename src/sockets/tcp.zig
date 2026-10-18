@@ -82,19 +82,21 @@ const ws = if (isWindows) struct {
         lpVendorInfo: ?[*:0]u8,
     };
 
-    pub extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSADATA) callconv(.c) i32;
-    pub extern "ws2_32" fn WSAGetLastError() callconv(.c) i32;
-    pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(.c) i32;
-    pub extern "ws2_32" fn socket(af: i32, sockType: i32, protocol: i32) callconv(.c) SOCKET;
-    pub extern "ws2_32" fn bind(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn accept(s: SOCKET, addr: ?*anyopaque, addrlen: ?*i32) callconv(.c) SOCKET;
-    pub extern "ws2_32" fn getsockname(s: SOCKET, name: *anyopaque, namelen: *i32) callconv(.c) i32;
-    pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: i32, flags: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: i32, flags: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn setsockopt(s: SOCKET, level: i32, optname: i32, optval: ?*const anyopaque, optlen: i32) callconv(.c) i32;
-    pub extern "ws2_32" fn shutdown(s: SOCKET, how: i32) callconv(.c) i32;
+    const wsCall: std.lang.CallingConvention = if (builtin.os.tag == .windows) std.lang.CallingConvention.winapi else std.lang.CallingConvention.c;
+
+    pub extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSADATA) callconv(wsCall) i32;
+    pub extern "ws2_32" fn WSAGetLastError() callconv(wsCall) i32;
+    pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(wsCall) i32;
+    pub extern "ws2_32" fn socket(af: i32, sockType: i32, protocol: i32) callconv(wsCall) SOCKET;
+    pub extern "ws2_32" fn bind(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn accept(s: SOCKET, addr: ?*anyopaque, addrlen: ?*i32) callconv(wsCall) SOCKET;
+    pub extern "ws2_32" fn getsockname(s: SOCKET, name: *anyopaque, namelen: *i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: i32, flags: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: i32, flags: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn setsockopt(s: SOCKET, level: i32, optname: i32, optval: ?*const anyopaque, optlen: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn shutdown(s: SOCKET, how: i32) callconv(wsCall) i32;
 
     pub const SOL_SOCKET: i32 = 0xFFFF;
     pub const SO_RCVTIMEO: i32 = 0x1006;
@@ -142,6 +144,11 @@ const ws = if (isWindows) struct {
 /// Applies SO_RCVTIMEO/SO_SNDTIMEO (milliseconds; 0 = none).
 /// Works on Windows sockets and POSIX fds alike (both take the option at
 /// SOL_SOCKET level; Windows wants a DWORD ms, POSIX a timeval).
+///
+/// Only for sockets whose I/O does not run through `std.Io`. A fired
+/// `SO_RCVTIMEO` makes `recv` report `EAGAIN`, which Zig's `net_read` treats as
+/// a programmer bug and aborts on, so use `Socket.setReadTimeoutMs` or
+/// `Socket.setReadInactivityTimeoutMs` for `std.Io` sockets instead.
 pub fn setTimeouts(sock: net.Socket.Handle, timeoutMs: u31) void {
     setReadSocketTimeout(sock, timeoutMs);
     setWriteSocketTimeout(sock, timeoutMs);
@@ -391,6 +398,11 @@ pub const Socket = struct {
     writeDeadline: ?std.Io.Clock.Timestamp = null,
     readDeadlineMs: std.atomic.Value(u32) = .init(0),
     writeDeadlineMs: std.atomic.Value(u32) = .init(0),
+    /// Rolling per-call budgets for callers whose timeout restarts after every
+    /// operation (FTP inactivity limits, client request deadlines). Zero
+    /// disables the budget; the absolute deadlines above take precedence.
+    readInactivityMs: std.atomic.Value(u32) = .init(0),
+    writeInactivityMs: std.atomic.Value(u32) = .init(0),
     readActive: std.atomic.Value(bool) = .init(false),
     writeActive: std.atomic.Value(bool) = .init(false),
     readInterrupted: std.atomic.Value(bool) = .init(false),
@@ -497,12 +509,17 @@ pub const Socket = struct {
         self.readDeadline = deadlineAfterMs(self.io, timeoutMs);
         self.readInterrupted.store(false, .release);
         self.readDeadlineMs.store(deadlineTicksNow(timeoutMs), .release);
+        // An absolute deadline supersedes a rolling inactivity budget.
+        self.readInactivityMs.store(0, .release);
         switch (self.inner) {
+            // Winsock reads are plain blocking recv calls, where SO_RCVTIMEO is
+            // honoured and reports WSAETIMEDOUT. std.Io sockets must not use
+            // the option; see read().
             .winsock => |s| if (isWindows) {
                 const ms: u32 = timeoutMs;
                 _ = ws.setsockopt(s, ws.SOL_SOCKET, ws.SO_RCVTIMEO, &ms, @sizeOf(u32));
             },
-            .stream => |st| setReadSocketTimeout(st.socket.handle, @intCast(@min(timeoutMs, std.math.maxInt(u31)))),
+            .stream => {},
         }
     }
 
@@ -511,12 +528,13 @@ pub const Socket = struct {
         self.writeDeadline = deadlineAfterMs(self.io, timeoutMs);
         self.writeInterrupted.store(false, .release);
         self.writeDeadlineMs.store(deadlineTicksNow(timeoutMs), .release);
+        self.writeInactivityMs.store(0, .release);
         switch (self.inner) {
             .winsock => |s| if (isWindows) {
                 const ms: u32 = timeoutMs;
                 _ = ws.setsockopt(s, ws.SOL_SOCKET, ws.SO_SNDTIMEO, &ms, @sizeOf(u32));
             },
-            .stream => |st| setWriteSocketTimeout(st.socket.handle, @intCast(@min(timeoutMs, std.math.maxInt(u31)))),
+            .stream => {},
         }
     }
 
@@ -525,12 +543,13 @@ pub const Socket = struct {
     pub fn setReadInactivityTimeoutMs(self: *Socket, timeoutMs: u32) void {
         self.readDeadline = null;
         self.readDeadlineMs.store(0, .release);
+        self.readInactivityMs.store(timeoutMs, .release);
         switch (self.inner) {
             .winsock => |s| if (isWindows) {
                 const ms: u32 = timeoutMs;
                 _ = ws.setsockopt(s, ws.SOL_SOCKET, ws.SO_RCVTIMEO, &ms, @sizeOf(u32));
             },
-            .stream => |st| setReadSocketTimeout(st.socket.handle, @intCast(@min(timeoutMs, std.math.maxInt(u31)))),
+            .stream => {},
         }
     }
 
@@ -538,13 +557,41 @@ pub const Socket = struct {
     pub fn setWriteInactivityTimeoutMs(self: *Socket, timeoutMs: u32) void {
         self.writeDeadline = null;
         self.writeDeadlineMs.store(0, .release);
+        self.writeInactivityMs.store(timeoutMs, .release);
         switch (self.inner) {
             .winsock => |s| if (isWindows) {
                 const ms: u32 = timeoutMs;
                 _ = ws.setsockopt(s, ws.SOL_SOCKET, ws.SO_SNDTIMEO, &ms, @sizeOf(u32));
             },
-            .stream => |st| setWriteSocketTimeout(st.socket.handle, @intCast(@min(timeoutMs, std.math.maxInt(u31)))),
+            .stream => {},
         }
+    }
+
+    /// Timeout handed to `std.Io` for the next read.
+    ///
+    /// Socket-option timeouts are unusable on `std.Io` sockets: Zig's own
+    /// `net_read` treats the `EAGAIN` a fired `SO_RCVTIMEO` produces as a
+    /// programmer bug and aborts the whole process. The deadline therefore
+    /// travels with the operation and the Io implementation bounds it.
+    fn ioReadTimeout(self: *const Socket) std.Io.Timeout {
+        if (self.readDeadline) |deadline| return .{ .deadline = deadline };
+        const inactivity = @constCast(&self.readInactivityMs).load(.acquire);
+        if (inactivity == 0) return .none;
+        return .{ .duration = .{
+            .raw = .fromMilliseconds(@intCast(inactivity)),
+            .clock = .awake,
+        } };
+    }
+
+    /// Timeout handed to `std.Io` for the next write. See ioReadTimeout.
+    fn ioWriteTimeout(self: *const Socket) std.Io.Timeout {
+        if (self.writeDeadline) |deadline| return .{ .deadline = deadline };
+        const inactivity = @constCast(&self.writeInactivityMs).load(.acquire);
+        if (inactivity == 0) return .none;
+        return .{ .duration = .{
+            .raw = .fromMilliseconds(@intCast(inactivity)),
+            .clock = .awake,
+        } };
     }
 
     fn deadlineAfterMs(io: std.Io, timeoutMs: u32) ?std.Io.Clock.Timestamp {
@@ -633,13 +680,21 @@ pub const Socket = struct {
                     .socket_handle = st.socket.handle,
                     .data = &data,
                 } };
-                if (remainingTimeoutMs(self.readDeadline, self.io)) |ms| {
-                    if (ms == 0) return ReadError.Timeout;
-                    setReadSocketTimeout(st.socket.handle, @max(1, ms));
-                }
                 @constCast(&self.readActive).store(true, .release);
                 defer @constCast(&self.readActive).store(false, .release);
-                const result = self.io.operate(operation) catch return ReadError.ReadFailed;
+                const result: std.Io.Operation.Result = blk: {
+                    const timeout = self.ioReadTimeout();
+                    if (timeout == .none) break :blk self.io.operate(operation) catch return ReadError.ReadFailed;
+                    break :blk self.io.operateTimeout(operation, timeout) catch |err| switch (err) {
+                        error.Timeout => return ReadError.Timeout,
+                        error.Canceled => return ReadError.ConnectionClosed,
+                        // An Io implementation without concurrency support
+                        // cannot bound an operation. Fall back to an unbounded
+                        // read rather than failing the connection: the caller's
+                        // deadline monitor still interrupts this socket.
+                        error.ConcurrencyUnavailable => break :blk self.io.operate(operation) catch return ReadError.ReadFailed,
+                    };
+                };
                 const rr = result.net_read catch |err| switch (err) {
                     error.ConnectionResetByPeer, error.Unexpected => return ReadError.ConnectionReset,
                     error.ConnectionTimedOut => return ReadError.Timeout,
@@ -679,13 +734,17 @@ pub const Socket = struct {
                     .socket_handle = st.socket.handle,
                     .data = &.{chunk},
                 } };
-                if (remainingTimeoutMs(self.writeDeadline, self.io)) |ms| {
-                    if (ms == 0) return WriteError.Timeout;
-                    setWriteSocketTimeout(st.socket.handle, @max(1, ms));
-                }
                 @constCast(&self.writeActive).store(true, .release);
                 defer @constCast(&self.writeActive).store(false, .release);
-                const result = self.io.operate(operation) catch return WriteError.WriteFailed;
+                const result: std.Io.Operation.Result = blk: {
+                    const timeout = self.ioWriteTimeout();
+                    if (timeout == .none) break :blk self.io.operate(operation) catch return WriteError.WriteFailed;
+                    break :blk self.io.operateTimeout(operation, timeout) catch |err| switch (err) {
+                        error.Timeout => return WriteError.Timeout,
+                        error.Canceled => return WriteError.ConnectionReset,
+                        error.ConcurrencyUnavailable => break :blk self.io.operate(operation) catch return WriteError.WriteFailed,
+                    };
+                };
                 const n = result.net_write catch |err| switch (err) {
                     error.ConnectionResetByPeer, error.Unexpected => return WriteError.ConnectionReset,
                     error.ConnectionTimedOut => return WriteError.Timeout,

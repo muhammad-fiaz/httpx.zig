@@ -24,12 +24,16 @@ HTTP/2 support is validated across Linux, Windows, and macOS targets:
 - **High-level Client Runtime** - `Client` negotiates HTTP/2 over TLS via ALPN
   when `http2 = true` (default `false`; HTTP/1.x default `true`)
 - **High-level Server Runtime** - `Server` serves HTTP/2 when `http2 = true`
-  (default `true`) and the TLS handshake negotiates `h2`
+  (default `true`). TLS deployments must configure ALPN to select `h2`; the
+  server's default ALPN list does not include HTTP/2.
 - **HPACK Header Compression** - Full RFC 7541 implementation with static and dynamic tables
-- **Stream Multiplexing** - Multiple concurrent streams over a single connection
+- **Stream Multiplexing** - The session tracks HTTP/2 streams, but the
+  high-level client performs one exchange at a time on a connection.
 - **Flow Control** - Per-stream and connection-level flow control with WINDOW_UPDATE
-- **Stream Priority** - Dependency-based prioritization
-- **Frame Encoding/Decoding** - All HTTP/2 frame types supported
+- **Stream Priority** - PRIORITY frames are parsed and tolerated; priority-based
+  scheduling is not implemented.
+- **Frame Encoding/Decoding** - Core HTTP/2 frame types are encoded and decoded;
+  this does not imply complete extension-frame interoperability.
 - **CONTINUATION Frames** - Header blocks exceeding `MAX_FRAME_SIZE` are automatically split across HEADERS + CONTINUATION frames
 - **SETTINGS Enforcement** - Peer `MAX_CONCURRENT_STREAMS`, `MAX_FRAME_SIZE`, and `INITIAL_WINDOW_SIZE` values are parsed and enforced
 - **GOAWAY/RST_STREAM** - Graceful connection shutdown and stream cancellation with proper error codes
@@ -37,9 +41,10 @@ HTTP/2 support is validated across Linux, Windows, and macOS targets:
 - **Trailer Support** - Trailers are parsed by the session layer; the
   one-shot `Client`/`Server` API does not surface them yet (see below)
 - **Connection Preface Timeout** - Detects missing initial SETTINGS frame from peer
-- **ALPN Negotiation** - Client and server advertise `["h2", "http/1.1"]` during TLS handshake
-- **Connection Pooling** - HTTP/1.x keep-alive connections are pooled and
-  reused; HTTP/2 connections are currently per-request (no H2 pool yet)
+- **ALPN Negotiation** - The client offers `h2` for explicit HTTP/2 requests;
+  the server selects it only when configured to do so.
+- **Connection Pooling** - HTTP/1.x keep-alive and HTTP/2 sessions can be
+  reused across sequential requests.
 
 ## High-level Client Usage
 
@@ -295,12 +300,12 @@ HTTP/2 uses flow control to prevent overwhelming receivers.
 ### Window Sizes
 
 Per-stream windows live on `httpx.http2.Stream`
-(`sendWindow`/`recvWindow`, default 65535 per RFC 7540); the connection-level
+(`sendWindow`/`recvWindow`, default 65535 per RFC 9113); the connection-level
 window lives on `httpx.http2.Session`. The runtime enforces them
 automatically — the snippet below shows the accounting shape:
 
 ```zig
-// Default window size: 65535 bytes (RFC 7540)
+// Default window size: 65535 bytes (RFC 9113)
 std.debug.print("Stream send window: {d}\n", .{stream.sendWindow});
 
 // After sending data / receiving WINDOW_UPDATE the session adjusts the
@@ -420,5 +425,5 @@ zig build run-http2-multiplex
 
 - [Protocol API Reference](/api/protocol) - Full API documentation
 - [HTTP/3 Guide](/guide/http3) - QPACK and QUIC support
-- [RFC 7540](https://tools.ietf.org/html/rfc7540) - HTTP/2 specification
+- [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113.html) - HTTP/2 specification
 - [RFC 7541](https://tools.ietf.org/html/rfc7541) - HPACK specification
