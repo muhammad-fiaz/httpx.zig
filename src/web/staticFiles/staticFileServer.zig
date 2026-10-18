@@ -328,7 +328,11 @@ const OpenedAsset = struct {
 /// reparse point. Every component is opened relative to a live directory
 /// handle, so the checked path and the file ultimately read are the same.
 fn openAssetNoFollow(io: std.Io, root: []const u8, relative: []const u8) !OpenedAsset {
-    var dir = try std.Io.Dir.openDirAbsolute(io, root, .{ .access_sub_paths = true, .follow_symlinks = false });
+    const openOpts: std.Io.Dir.OpenOptions = .{ .access_sub_paths = true, .follow_symlinks = false };
+    var dir = if (std.fs.path.isAbsolute(root))
+        try std.Io.Dir.openDirAbsolute(io, root, openOpts)
+    else
+        try std.Io.Dir.cwd().openDir(io, root, openOpts);
     defer dir.close(io);
 
     var parts = std.mem.splitScalar(u8, relative, '/');
