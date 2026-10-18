@@ -1289,14 +1289,13 @@ fn finishPlain(
 
 pub const FullResponse = struct { resp: Response, reusable: bool };
 
-/// Replaces the value of the first header named `name`, freeing the old one.
-fn replaceHeaderValue(a: Allocator, headers: []Header, name: []const u8, value: []const u8) !void {
+/// Replaces every value of a repeated header, freeing each old value.
+fn replaceHeaderValues(a: Allocator, headers: []Header, name: []const u8, value: []const u8) !void {
     for (headers) |*h| {
         if (!std.ascii.eqlIgnoreCase(h.name, name)) continue;
         const fresh = try a.dupe(u8, value);
         a.free(h.value);
         h.value = fresh;
-        return;
     }
 }
 
@@ -1312,8 +1311,8 @@ fn restateContentCoding(a: Allocator, headers: []Header, decoded_len: usize) Err
     var buf: [24]u8 = undefined;
     // A usize needs at most 20 digits, so the buffer can never be too small.
     const len_text = buf[0..std.fmt.printInt(&buf, decoded_len, 10, .lower, .{})];
-    try replaceHeaderValue(a, headers, "content-length", len_text);
-    try replaceHeaderValue(a, headers, "content-encoding", "identity");
+    try replaceHeaderValues(a, headers, "content-length", len_text);
+    try replaceHeaderValues(a, headers, "content-encoding", "identity");
 }
 
 /// Decodes a content-coded response body and brings the headers back in line
@@ -1448,6 +1447,35 @@ test "client decodes stacked response codings in reverse order" {
     defer a.free(decoded);
     try std.testing.expectEqualStrings(plain, decoded);
     try std.testing.expectEqualStrings("identity", headers[0].value);
+}
+
+test "client restates every repeated content encoding after decoding" {
+    const a = std.testing.allocator;
+    const plain = "stacked codings can arrive in repeated header fields";
+    const gzip = try compression.compress(a, .gzip, plain);
+    defer a.free(gzip);
+    const wire = try compression.compress(a, .br, gzip);
+    defer a.free(wire);
+
+    const headers = try ownedTestHeaders(a, &.{
+        .{ "content-encoding", "gzip" },
+        .{ "Content-Encoding", "br" },
+        .{ "content-length", "999" },
+        .{ "CONTENT-LENGTH", "1000" },
+    });
+    defer freeTestHeaders(a, headers);
+
+    const decoded = try decodeResponseBody(a, headers, try a.dupe(u8, wire));
+    defer a.free(decoded);
+    try std.testing.expectEqualStrings(plain, decoded);
+    const expectedLength = std.fmt.comptimePrint("{d}", .{plain.len});
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "content-encoding")) {
+            try std.testing.expectEqualStrings("identity", header.value);
+        } else if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
+            try std.testing.expectEqualStrings(expectedLength, header.value);
+        }
+    }
 }
 
 test "client compression advertisement respects explicit override" {
