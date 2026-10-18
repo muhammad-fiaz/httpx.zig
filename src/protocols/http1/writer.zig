@@ -63,6 +63,24 @@ pub fn validHeaderValue(value: []const u8) bool {
     return true;
 }
 
+/// The serializer owns transfer framing. Caller headers may provide a
+/// matching Content-Length for buffered bodies, but may not override or
+/// combine framing mechanisms.
+fn validateFramingHeaders(headers: []const Header, chunked: bool, bodyLen: usize, metadataOnly: bool) Error!void {
+    var contentLength: ?usize = null;
+    for (headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "transfer-encoding")) return Error.InvalidHeader;
+        if (!std.ascii.eqlIgnoreCase(h.name, "content-length")) continue;
+        if (contentLength != null or chunked) return Error.InvalidHeader;
+        if (h.value.len == 0) return Error.InvalidHeader;
+        for (h.value) |c| if (!std.ascii.isDigit(c)) return Error.InvalidHeader;
+        contentLength = std.fmt.parseInt(usize, h.value, 10) catch return Error.InvalidHeader;
+    }
+    if (contentLength) |declared| {
+        if (!metadataOnly and declared != bodyLen) return Error.InvalidHeader;
+    }
+}
+
 pub fn validStatus(code: u16) bool {
     return code >= 100 and code <= 999;
 }
@@ -112,6 +130,10 @@ pub fn buildRequest(
     opts: RequestOptions,
 ) Error![]u8 {
     if (!validToken(method)) return Error.InvalidMethod;
+    if (opts.minorVersion > 1) return Error.UnsupportedForVersion;
+
+    const bodyLen = if (body) |bytes| bytes.len else 0;
+    try validateFramingHeaders(opts.headers, opts.chunked, bodyLen, false);
 
     const targetForm = @import("semantics.zig").classifyTarget(method, target) orelse
         return Error.InvalidTarget;
@@ -141,7 +163,7 @@ pub fn buildRequest(
         try appendHeader(&out, allocator, "Connection", opts.connection);
     }
 
-    const hasBody = body != null and body.?.len > 0;
+    const hasBody = bodyLen > 0;
     if (hasBody or opts.chunked) {
         var declared = false;
         for (opts.headers) |h| {
@@ -158,7 +180,12 @@ pub fn buildRequest(
     }
 
     out.appendSlice(allocator, "\r\n") catch return Error.OutOfMemory;
-    if (hasBody) out.appendSlice(allocator, body.?) catch return Error.OutOfMemory;
+    if (opts.chunked) {
+        if (hasBody) try writeChunk(&out, allocator, body.?);
+        try finishChunked(&out, allocator, &.{});
+    } else if (hasBody) {
+        out.appendSlice(allocator, body.?) catch return Error.OutOfMemory;
+    }
 
     return out.toOwnedSlice(allocator);
 }
@@ -247,6 +274,13 @@ pub fn buildResponse(
     opts: ResponseOptions,
     methodHead: bool,
 ) Error![]u8 {
+    if (opts.minorVersion > 1) return Error.UnsupportedForVersion;
+    const bodyLen = if (body) |bytes| bytes.len else 0;
+    const metadataOnly = methodHead or semantics.bodylessStatus(statusCode);
+    if (opts.chunked and metadataOnly) return Error.InvalidHeader;
+    if ((statusCode < 200 or statusCode == 204) and containsHeader(opts.headers, "content-length")) return Error.InvalidHeader;
+    try validateFramingHeaders(opts.headers, opts.chunked, bodyLen, metadataOnly);
+
     const reason = if (reasonIn.len > 0) reasonIn else reasonPhrase(statusCode);
 
     var lineBuf: [64]u8 = undefined;
@@ -289,9 +323,21 @@ pub fn buildResponse(
     }
 
     out.appendSlice(allocator, "\r\n") catch return Error.OutOfMemory;
-    if (wantsBody) out.appendSlice(allocator, body.?) catch return Error.OutOfMemory;
+    if (opts.chunked) {
+        if (wantsBody) try writeChunk(&out, allocator, body.?);
+        try finishChunked(&out, allocator, &.{});
+    } else if (wantsBody) {
+        out.appendSlice(allocator, body.?) catch return Error.OutOfMemory;
+    }
 
     return out.toOwnedSlice(allocator);
+}
+
+fn containsHeader(headers: []const Header, name: []const u8) bool {
+    for (headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, name)) return true;
+    }
+    return false;
 }
 
 /// Builds a bare informational response head (100 Continue, 103 Early Hints).
@@ -387,12 +433,41 @@ test "request content-length and chunked selection" {
     const te = try buildRequest(a, "POST", "/p", null, .{ .chunked = true, .host = "x" });
     defer a.free(te);
     try std.testing.expect(std.mem.indexOf(u8, te, "Transfer-Encoding: chunked\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, te, "\r\n\r\n0\r\n\r\n"));
 
     // HTTP/1.0 cannot use chunked.
     try std.testing.expectError(
         Error.UnsupportedForVersion,
         buildRequest(a, "POST", "/p", null, .{ .chunked = true, .minorVersion = 0, .host = "x" }),
     );
+}
+
+test "chunked request and response bodies have valid framing" {
+    const a = std.testing.allocator;
+    const req = try buildRequest(a, "POST", "/p", "hello", .{ .host = "x", .chunked = true });
+    defer a.free(req);
+    try std.testing.expect(std.mem.endsWith(u8, req, "\r\n\r\n5\r\nhello\r\n0\r\n\r\n"));
+
+    const res = try buildResponse(a, 200, "", "hello", .{ .chunked = true }, false);
+    defer a.free(res);
+    try std.testing.expect(std.mem.indexOf(u8, res, "Transfer-Encoding: chunked\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, res, "\r\n\r\n5\r\nhello\r\n0\r\n\r\n"));
+}
+
+test "serializer rejects conflicting and mismatched framing headers" {
+    const a = std.testing.allocator;
+    const clTe = [_]Header{
+        .{ .name = "Content-Length", .value = "5" },
+        .{ .name = "Transfer-Encoding", .value = "chunked" },
+    };
+    try std.testing.expectError(Error.InvalidHeader, buildRequest(a, "POST", "/", "hello", .{ .host = "x", .headers = &clTe, .chunked = true }));
+    try std.testing.expectError(Error.InvalidHeader, buildResponse(a, 200, "", "hello", .{ .headers = &clTe }, false));
+
+    const wrongLength = [_]Header{.{ .name = "Content-Length", .value = "4" }};
+    try std.testing.expectError(Error.InvalidHeader, buildRequest(a, "POST", "/", "hello", .{ .host = "x", .headers = &wrongLength }));
+    try std.testing.expectError(Error.InvalidHeader, buildResponse(a, 200, "", "hello", .{ .headers = &wrongLength }, false));
+    try std.testing.expectError(Error.InvalidHeader, buildResponse(a, 204, "", null, .{ .headers = &wrongLength }, false));
+    try std.testing.expectError(Error.InvalidHeader, buildResponse(a, 200, "", "hello", .{ .chunked = true }, true));
 }
 
 test "response bodyless statuses and HEAD" {
