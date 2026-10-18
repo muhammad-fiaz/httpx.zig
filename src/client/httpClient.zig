@@ -2418,7 +2418,7 @@ test "client get over http3 serves loopback over real udp" {
     // itself (the external-peer path).
     const Server = struct {
         ep: quicEp.Endpoint = undefined,
-        pump: quicEp.Pump = undefined,
+        pump: quicEp.Pump = .{},
 
         // One client-bidi request stream's bytes until FIN. Control and
         // QPACK uni streams are ignored (static-table responses need no
@@ -2898,7 +2898,7 @@ test "client get over http3 with 0-rtt early data resumes session" {
 
     const Server = struct {
         ep: quicEp.Endpoint = undefined,
-        pump: quicEp.Pump = undefined,
+        pump: quicEp.Pump = .{},
 
         const Acc = struct {
             sid: u64 = std.math.maxInt(u64),

@@ -597,8 +597,8 @@ fn h3DoRequest(
     defer driver.deinit();
     conn.tls = .{ .ctx = &driver, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
 
-    // One pump spans handshake + exchange (stopping closes the socket).
-    var pump: quicEp.Pump = undefined;
+    // One pump spans handshake + exchange; stopping joins its reader thread.
+    var pump: quicEp.Pump = .{};
     pump.start(&ep, a) catch return Error.OutOfMemory;
     defer pump.stop();
 
