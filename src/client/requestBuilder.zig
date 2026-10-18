@@ -634,6 +634,7 @@ fn h3DoRequest(
         &pump,
         dest,
         deadlineMs,
+        @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize),
     ) catch |e| switch (e) {
         error.OutOfMemory => return Error.OutOfMemory,
         error.Timeout => return Error.Timeout,
@@ -646,7 +647,8 @@ fn h3DoRequest(
     // decodeResponseBody consumes the body exactly like h2DoRequest.
     var outHdrs = try a.alloc(Header, h3resp.headers.len);
     for (h3resp.headers, 0..) |h, i| outHdrs[i] = .{ .name = h.name, .value = h.value };
-    const decodedBody = decodeResponseBody(a, outHdrs, h3resp.body) catch |e| {
+    const maxSize = @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize);
+    const decodedBody = decodeResponseBodyLimited(a, outHdrs, h3resp.body, maxSize) catch |e| {
         for (outHdrs) |h| {
             a.free(h.name);
             a.free(h.value);
@@ -692,6 +694,7 @@ fn h2DoRequest(
     scheme: []const u8,
     authority: []const u8,
     reqBody: ?[]const u8,
+    maxSize: usize,
 ) Error!Response {
     var hasAcceptEncoding = false;
     for (reqHeaders) |h| {
@@ -701,15 +704,16 @@ fn h2DoRequest(
     defer a.free(conv);
     for (reqHeaders, 0..) |h, i| conv[i] = .{ .name = h.name, .value = h.value };
     if (!hasAcceptEncoding) conv[reqHeaders.len] = .{ .name = "accept-encoding", .value = compression.acceptEncodingValue() };
-    const r = pc.request(method, target, conv, scheme, authority, reqBody) catch |e| switch (e) {
+    const r = pc.request(method, target, conv, scheme, authority, reqBody, maxSize) catch |e| switch (e) {
         error.OutOfMemory => return Error.OutOfMemory,
+        error.ResponseTooLarge => return Error.ResponseTooLarge,
         else => return Error.ProtocolViolation,
     };
     // Convert header type (same shape, different namespace); the
     // transport allocator IS `a`, so ownership transfers cleanly.
     var outHdrs = try a.alloc(Header, r.headers.len);
     for (r.headers, 0..) |h, i| outHdrs[i] = .{ .name = h.name, .value = h.value };
-    const decodedBody = decodeResponseBody(a, outHdrs, r.body) catch |e| {
+    const decodedBody = decodeResponseBodyLimited(a, outHdrs, r.body, @min(maxSize, maxResponseBodySize)) catch |e| {
         for (outHdrs) |h| {
             a.free(h.name);
             a.free(h.value);
@@ -845,7 +849,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             if (req.pool) |p| {
                 if (p.acquireH2(hostCopy[0..hl], port, isTls)) |pc| {
                     const scheme: []const u8 = if (isTls) "https" else "http";
-                    const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, scheme, hostCopy[0..hl], bodyOut) catch |e| {
+                    const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, scheme, hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
                         pc.deinit();
                         return e;
                     };
@@ -1146,7 +1150,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 // wrapTls already closed the socket and freed the box.
                 return Error.ProtocolViolation;
             };
-            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "https", hostCopy[0..hl], bodyOut) catch |e| {
+            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "https", hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
                 pc.deinit();
                 return e;
             };
@@ -1175,7 +1179,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 tcpSock.close();
                 return Error.ProtocolViolation;
             };
-            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "http", hostCopy[0..hl], bodyOut) catch |e| {
+            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "http", hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
                 pc.deinit();
                 return e;
             };
@@ -1254,7 +1258,8 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 
         transport.writeAll(raw) catch return Error.WriteFailed;
 
-        const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings });
+        const responseLimit = @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize);
+        const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings }, responseLimit);
         var resp = full.resp;
 
         if (req.followRedirects and isRedirect(resp.status)) {
@@ -1363,6 +1368,10 @@ fn restateContentCoding(a: Allocator, headers: []Header, decoded_len: usize) Err
 /// Decodes a content-coded response body and brings the headers back in line
 /// with the bytes actually returned.
 fn decodeResponseBody(a: Allocator, headers: []Header, body: []u8) Error![]u8 {
+    return decodeResponseBodyLimited(a, headers, body, maxResponseBodySize);
+}
+
+fn decodeResponseBodyLimited(a: Allocator, headers: []Header, body: []u8, maxSize: usize) Error![]u8 {
     // Content codings are applied in header order and removed in reverse.
     // Bound the number of layers so an attacker cannot induce unbounded decode
     // work or stack-like allocation growth with a long coding list.
@@ -1390,7 +1399,7 @@ fn decodeResponseBody(a: Allocator, headers: []Header, body: []u8) Error![]u8 {
         codingCount -= 1;
         const encoding = codings[codingCount];
         if (encoding == .identity) continue;
-        const decoded = compression.decompressLimited(a, encoding, current, maxResponseBodySize) catch |err| switch (err) {
+        const decoded = compression.decompressLimited(a, encoding, current, maxSize) catch |err| switch (err) {
             error.DecompressedTooLarge => return Error.ResponseTooLarge,
             error.OutOfMemory => return Error.OutOfMemory,
             else => return Error.MalformedResponse,
@@ -1439,6 +1448,21 @@ test "client decodes bounded compressed response bodies" {
     const decoded = try decodeResponseBody(a, headers, try a.dupe(u8, wire));
     defer a.free(decoded);
     try std.testing.expectEqualStrings(plain, decoded);
+}
+
+test "client applies configured limit to decompressed response bodies" {
+    const a = std.testing.allocator;
+    const plain = "decoded output exceeds the request limit";
+    const wire = try compression.compress(a, .gzip, plain);
+    defer a.free(wire);
+    const headers = try ownedTestHeaders(a, &.{.{ "content-encoding", "gzip" }});
+    defer freeTestHeaders(a, headers);
+    const body = try a.dupe(u8, wire);
+    defer a.free(body);
+    try std.testing.expectError(
+        Error.ResponseTooLarge,
+        decodeResponseBodyLimited(a, headers, body, plain.len - 1),
+    );
 }
 
 test "client restates framing headers after decoding" {
@@ -1549,10 +1573,10 @@ test "client compression advertisement respects explicit override" {
 /// `reusable` is true ONLY when the body was framed and fully consumed —
 /// the precondition for parking a connection back into the keep-alive pool.
 fn readFullResponse(a: Allocator, conn: anytype, isHead: bool) Error!FullResponse {
-    return readFullResponseWithOptions(a, conn, isHead, .{});
+    return readFullResponseWithOptions(a, conn, isHead, .{}, maxResponseBodySize);
 }
 
-fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: parserMod.Options) Error!FullResponse {
+fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: parserMod.Options, maxSize: usize) Error!FullResponse {
     var acc: std.ArrayList(u8) = .empty;
     defer acc.deinit(a);
     var buf: [8192]u8 = undefined;
@@ -1651,28 +1675,28 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
 
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(a);
-    if (acc.items.len - headEnd > maxResponseBodySize) return Error.ResponseTooLarge;
+    if (acc.items.len - headEnd > maxSize) return Error.ResponseTooLarge;
     try body.appendSlice(a, acc.items[headEnd..]);
 
     if (framing.framing == .chunked) {
-        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..]);
+        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..], maxSize);
         return .{ .resp = .{
             .allocator = a,
             .status = respHead.statusCode,
             .version = if (respHead.minorVersion == 0) .http10 else .http11,
             .headers = headers,
-            .body = try decodeResponseBody(a, headers, chunkedBody.body),
+            .body = try decodeResponseBodyLimited(a, headers, chunkedBody.body, maxSize),
         }, .reusable = chunkedBody.reusable };
     }
 
     var complete = false;
     if (framing.framing == .contentLength) {
         const clen = framing.length;
-        if (clen > maxResponseBodySize) return Error.ResponseTooLarge;
+        if (clen > maxSize) return Error.ResponseTooLarge;
         while (body.items.len < clen) {
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
             if (n == 0) break;
-            if (body.items.len > maxResponseBodySize -| n) return Error.ResponseTooLarge;
+            if (body.items.len > maxSize -| n) return Error.ResponseTooLarge;
             try body.appendSlice(a, buf[0..n]);
         }
         complete = body.items.len == clen;
@@ -1682,7 +1706,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
         while (true) {
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
             if (n == 0) break;
-            if (body.items.len > maxResponseBodySize -| n) return Error.ResponseTooLarge;
+            if (body.items.len > maxSize -| n) return Error.ResponseTooLarge;
             try body.appendSlice(a, buf[0..n]);
         }
     }
@@ -1693,13 +1717,13 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
         .status = respHead.statusCode,
         .version = if (respHead.minorVersion == 0) .http10 else .http11,
         .headers = headers,
-        .body = try decodeResponseBody(a, headers, ownedBody),
+        .body = try decodeResponseBodyLimited(a, headers, ownedBody, maxSize),
     }, .reusable = complete };
 }
 
 const ChunkedResponseBody = struct { body: []u8, reusable: bool };
 
-fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8, readBuf: []u8) Error!ChunkedResponseBody {
+fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8, readBuf: []u8, maxSize: usize) Error!ChunkedResponseBody {
     var wire: std.ArrayList(u8) = .empty;
     defer wire.deinit(a);
     wire.appendSlice(a, initialWire) catch return Error.OutOfMemory;
@@ -1714,7 +1738,7 @@ fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8,
             error.OutOfMemory => return Error.OutOfMemory,
             else => return Error.MalformedResponse,
         };
-        if (decoder.decodedLen > maxResponseBodySize -| decoded.items.len) return Error.ResponseTooLarge;
+        if (decoder.decodedLen > maxSize -| decoded.items.len) return Error.ResponseTooLarge;
         decoded.appendSlice(a, wire.items[0..decoder.decodedLen]) catch return Error.OutOfMemory;
 
         const consumed = decoder.rawConsumed;
@@ -1728,14 +1752,14 @@ fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8,
             .reusable = pending == 0,
         };
 
-        if (decoder.totalRead > maxResponseBodySize) return Error.ResponseTooLarge;
+        if (decoder.totalRead > maxSize) return Error.ResponseTooLarge;
         const consumedWire: usize = @intCast(decoder.totalRead);
-        if (wire.items.len > maxResponseBodySize - consumedWire) {
+        if (wire.items.len > maxSize - consumedWire) {
             return Error.ResponseTooLarge;
         }
         const n = conn.read(readBuf) catch return Error.ReadFailed;
         if (n == 0) return Error.MalformedResponse;
-        const remainingCapacity = maxResponseBodySize - consumedWire - wire.items.len;
+        const remainingCapacity = maxSize - consumedWire - wire.items.len;
         if (n > remainingCapacity) return Error.ResponseTooLarge;
         wire.appendSlice(a, readBuf[0..n]) catch return Error.OutOfMemory;
     }
@@ -1768,7 +1792,7 @@ test "chunked client response reads trailers incrementally and ignores marker-li
     var conn = MockConn{ .tail = "\r\nNEXT" };
     const wire = "5\r\n0\r\n\r\n\r\n0\r\nX-Checksum: yes\r\n";
     var readBuf: [8]u8 = undefined;
-    const result = try readChunkedResponseBody(a, &conn, wire, &readBuf);
+    const result = try readChunkedResponseBody(a, &conn, wire, &readBuf, maxResponseBodySize);
     defer a.free(result.body);
     try std.testing.expectEqualStrings("0\r\n\r\n", result.body);
     try std.testing.expectEqual(@as(usize, 1), conn.reads);
@@ -1792,6 +1816,25 @@ test "client trims content-length response and rejects connection reuse after tr
     defer full.resp.deinit();
     try std.testing.expectEqualStrings("abc", full.resp.body);
     try std.testing.expect(!full.reusable);
+}
+
+test "client enforces configured response size before buffering the full body" {
+    const MockConn = struct {
+        wire: []const u8,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            const n = @min(dest.len, self.wire.len);
+            @memcpy(dest[0..n], self.wire[0..n]);
+            self.wire = self.wire[n..];
+            return n;
+        }
+    };
+    const a = std.testing.allocator;
+    var conn = MockConn{ .wire = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata" };
+    try std.testing.expectError(
+        Error.ResponseTooLarge,
+        readFullResponseWithOptions(a, &conn, false, .{}, 3),
+    );
 }
 
 test "client skips informational responses and returns the final response" {

@@ -163,6 +163,7 @@ pub const Client = struct {
         scheme: []const u8,
         authority: []const u8,
         reqBody: ?[]const u8,
+        maxBytes: usize,
     ) !Response {
         const a = self.allocator;
         const sid = try self.session.nextClientStreamId();
@@ -188,6 +189,7 @@ pub const Client = struct {
         var body = std.ArrayList(u8).empty;
         errdefer body.deinit(a);
         var done = false;
+        var tooLarge = false;
 
         const Collector = struct {
             sid: u31,
@@ -196,6 +198,8 @@ pub const Client = struct {
             headers: *std.ArrayList(Header),
             body: *std.ArrayList(u8),
             a: Allocator,
+            maxBytes: usize,
+            tooLarge: *bool,
 
             fn onHeaders(ctx: ?*anyopaque, s: u31, flds: []hpack.HeaderField, endStream: bool) anyerror!void {
                 const selfPtr: *@This() = @ptrCast(@alignCast(ctx.?));
@@ -215,8 +219,10 @@ pub const Client = struct {
             fn onData(ctx: ?*anyopaque, s: u31, data: []const u8) anyerror!void {
                 const selfPtr: *@This() = @ptrCast(@alignCast(ctx.?));
                 if (s != selfPtr.sid) return;
-                if (selfPtr.body.items.len > maxResponseBodySize -| data.len)
-                    return error.ResponseTooLarge;
+                if (selfPtr.body.items.len > selfPtr.maxBytes -| data.len) {
+                    selfPtr.tooLarge.* = true;
+                    return;
+                }
                 try selfPtr.body.appendSlice(selfPtr.a, data);
             }
             fn onEnd(ctx: ?*anyopaque, s: u31) anyerror!void {
@@ -233,6 +239,8 @@ pub const Client = struct {
             .headers = &headers,
             .body = &body,
             .a = a,
+            .maxBytes = @min(maxBytes, maxResponseBodySize),
+            .tooLarge = &tooLarge,
         };
         self.session.cbs = .{
             .ctx = &col,
@@ -256,6 +264,7 @@ pub const Client = struct {
 
         while (!done and !self.session.closed and !self.session.goawayReceived) {
             try self.pump();
+            if (tooLarge) return error.ResponseTooLarge;
         }
         if (!done) return error.StreamClosed;
 
@@ -339,8 +348,9 @@ pub const PooledConn = struct {
         scheme: []const u8,
         authority: []const u8,
         reqBody: ?[]const u8,
+        maxBytes: usize,
     ) !Response {
-        return self.client.request(method, path, extra, scheme, authority, reqBody);
+        return self.client.request(method, path, extra, scheme, authority, reqBody, maxBytes);
     }
 
     /// Takes ownership of a captured resumption session from the
@@ -557,14 +567,14 @@ test "http2 client and server exchange over real tcp (h2c)" {
     };
     defer hc.deinit();
 
-    const r = try hc.request("GET", "/h2", &[_]Header{}, "http", "localhost", null);
+    const r = try hc.request("GET", "/h2", &[_]Header{}, "http", "localhost", null, maxResponseBodySize);
     defer r.deinit();
 
     try std.testing.expectEqual(@as(u16, 200), r.status);
     try std.testing.expectEqualStrings("hello-h2", r.body);
 
     // Second request on the SAME connection proves multiplexing-ready reuse.
-    const r404 = try hc.request("GET", "/missing", &[_]Header{}, "http", "localhost", null);
+    const r404 = try hc.request("GET", "/missing", &[_]Header{}, "http", "localhost", null, maxResponseBodySize);
     defer r404.deinit();
     try std.testing.expectEqual(@as(u16, 404), r404.status);
 }
@@ -605,7 +615,7 @@ test "http2 client and server exchange with request body (POST)" {
     defer hc.deinit();
 
     const payload = "Hello HTTP/2 request payload body!";
-    const r = try hc.request("POST", "/echo", &[_]Header{}, "http", "localhost", payload);
+    const r = try hc.request("POST", "/echo", &[_]Header{}, "http", "localhost", payload, maxResponseBodySize);
     defer r.deinit();
 
     try std.testing.expectEqual(@as(u16, 200), r.status);
@@ -684,7 +694,7 @@ test "http2 over native tls loopback negotiates h2 via alpn" {
 
         const negotiated = tlsConn.alpn() orelse return error.AlpnMissing;
         try std.testing.expect(negotiated == .h2);
-        const r = try hc.request("GET", "/h2s", &[_]Header{}, "https", "127.0.0.1", null);
+        const r = try hc.request("GET", "/h2s", &[_]Header{}, "https", "127.0.0.1", null, maxResponseBodySize);
         defer r.deinit();
         try std.testing.expectEqual(@as(u16, 200), r.status);
         try std.testing.expectEqualStrings("hello-h2-tls", r.body);

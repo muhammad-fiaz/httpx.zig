@@ -89,7 +89,7 @@ pub const Client = struct {
     fn onStream(ctx: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
         const self: *Client = @ptrCast(@alignCast(ctx.?));
         if (sid != self.resp.sid) return;
-        if (self.resp.buf.items.len + data.len > self.maxBytes) {
+        if (self.resp.buf.items.len > self.maxBytes -| data.len) {
             self.resp.overflow = true;
             return;
         }
@@ -131,7 +131,9 @@ pub const Client = struct {
         pump: *quicEp.Pump,
         dest: std.Io.net.IpAddress,
         deadlineMs: u64,
+        maxBytes: usize,
     ) !H3Response {
+        self.maxBytes = @min(maxBytes, 64 * 1024 * 1024);
         const a = self.allocator;
         self.ep.conn.cbs = .{ .ctx = self, .onStreamData = onStream };
         try self.setupStreams(@intCast(clockMod.millisNow()));
