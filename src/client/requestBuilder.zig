@@ -741,8 +741,8 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 
     while (true) {
         const u = uriMod.parse(currentUrl) catch return Error.InvalidUrl;
-        const isTls = std.mem.eql(u8, u.scheme, "https");
-        if (!isTls and !std.mem.eql(u8, u.scheme, "http")) return Error.InvalidUrl;
+        const isTls = std.ascii.eqlIgnoreCase(u.scheme, "https");
+        if (!isTls and !std.ascii.eqlIgnoreCase(u.scheme, "http")) return Error.InvalidUrl;
         // Auto-enable TLS for HTTPS with safe default verification (.caBundle).
         var tlsOpts = if (isTls) req.tls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
         if (credentialsStripped) {
@@ -2621,7 +2621,7 @@ test "303 redirect changes POST to GET and removes body framing headers" {
     var joined = false;
     errdefer if (!joined) thread.join();
 
-    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/start", .{listener.localPort()});
+    const url = try std.fmt.allocPrint(a, "HTTP://127.0.0.1:{d}/start", .{listener.localPort()});
     defer a.free(url);
     const headers = [_]Header{
         .{ .name = "Content-Type", .value = "text/plain" },
