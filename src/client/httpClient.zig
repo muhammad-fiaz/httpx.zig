@@ -454,23 +454,26 @@ pub const Client = struct {
             .nextIdx = &nextIdx,
         };
 
-        const maxWorkers = @min(@as(usize, 16), slice.len);
-        var threads = self.allocator.alloc(?std.Thread, maxWorkers) catch |e| {
+        // Keep batch fan-out bounded independently of batch size. A failed
+        // thread spawn leaves its work for the workers that did start (or
+        // the caller below), rather than running an untracked extra worker.
+        const workerCount = @min(@as(usize, 16), slice.len);
+        var threads = self.allocator.alloc(std.Thread, workerCount - 1) catch |e| {
             self.allocator.free(out);
             return e;
         };
         defer self.allocator.free(threads);
 
-        for (0..maxWorkers) |w| {
-            threads[w] = std.Thread.spawn(.{}, TaskCtx.worker, .{&taskCtx}) catch null;
-            if (threads[w] == null) {
-                TaskCtx.worker(&taskCtx);
-            }
+        var started: usize = 0;
+        while (started < threads.len) : (started += 1) {
+            threads[started] = std.Thread.spawn(.{}, TaskCtx.worker, .{&taskCtx}) catch break;
         }
 
-        for (threads) |mTh| {
-            if (mTh) |th| th.join();
-        }
+        // Always run one worker on the calling thread; this also covers
+        // batches where every additional thread spawn failed.
+        TaskCtx.worker(&taskCtx);
+
+        for (threads[0..started]) |th| th.join();
 
         if (taskCtx.firstErr) |e| {
             for (0..slice.len) |i| {
