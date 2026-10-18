@@ -1264,17 +1264,22 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 return Error.TooManyRedirects;
             }
             redirects += 1;
-            const wasSameOrigin = sameOrigin(&u, loc);
+            const next = resolveLocation(a, currentUrl, loc) catch return resp;
+            const nextUri = uriMod.parse(next) catch {
+                a.free(next);
+                return resp;
+            };
+            const wasSameOrigin = sameOrigin(&u, &nextUri);
 
             if (!wasSameOrigin and !credentialsStripped) {
                 redirectedHeaders = filterSensitiveHeaders(a, req.headers) catch {
+                    a.free(next);
                     resp.deinit();
                     return Error.OutOfMemory;
                 };
                 credentialsStripped = true;
             }
 
-            const next = resolveLocation(a, currentUrl, loc) catch return resp;
             a.free(currentUrl);
             currentUrl = next;
 
@@ -1823,12 +1828,10 @@ fn isRedirect(status: u16) bool {
     return status == 301 or status == 302 or status == 303 or status == 307 or status == 308;
 }
 
-fn sameOrigin(base: *const uriMod.Uri, location: []const u8) bool {
-    if (std.mem.indexOf(u8, location, "://") == null) return true;
-    const parsed = uriMod.parse(location) catch return false;
-    return std.ascii.eqlIgnoreCase(base.scheme, parsed.scheme) and
-        std.ascii.eqlIgnoreCase(base.host, parsed.host) and
-        base.effectivePort() == parsed.effectivePort();
+fn sameOrigin(base: *const uriMod.Uri, target: *const uriMod.Uri) bool {
+    return std.ascii.eqlIgnoreCase(base.scheme, target.scheme) and
+        std.ascii.eqlIgnoreCase(base.host, target.host) and
+        base.effectivePort() == target.effectivePort();
 }
 
 fn filterSensitiveHeaders(a: Allocator, hdrs: []const Header) ![]Header {
@@ -1848,44 +1851,63 @@ fn filterSensitiveHeaders(a: Allocator, hdrs: []const Header) ![]Header {
 fn resolveLocation(a: Allocator, baseUrl: []const u8, loc: []const u8) ![]u8 {
     if (std.mem.indexOf(u8, loc, "://") != null) return a.dupe(u8, loc);
     const base = try uriMod.parse(baseUrl);
+
+    // Network-path references inherit the scheme but replace the authority.
+    if (std.mem.startsWith(u8, loc, "//")) {
+        return std.fmt.allocPrint(a, "{s}:{s}", .{ base.scheme, loc });
+    }
+
+    var referenceEnd = loc.len;
+    var fragment: ?[]const u8 = null;
+    if (std.mem.indexOfScalar(u8, loc, '#')) |idx| {
+        referenceEnd = idx;
+        fragment = loc[idx + 1 ..];
+    }
+    var query: ?[]const u8 = null;
+    if (std.mem.indexOfScalar(u8, loc[0..referenceEnd], '?')) |idx| {
+        query = loc[idx + 1 .. referenceEnd];
+        referenceEnd = idx;
+    }
+    const referencePath = loc[0..referenceEnd];
+
+    var resolvedPath: []u8 = undefined;
+    if (referencePath.len == 0) {
+        resolvedPath = try a.dupe(u8, base.path);
+    } else if (referencePath[0] == '/') {
+        resolvedPath = try removeDotSegments(a, referencePath);
+    } else {
+        var merged: std.ArrayList(u8) = .empty;
+        defer merged.deinit(a);
+        const lastSlash = std.mem.lastIndexOfScalar(u8, base.path, '/');
+        const dir = if (lastSlash) |idx| base.path[0..idx] else "";
+        try merged.appendSlice(a, dir);
+        if (dir.len == 0 or dir[dir.len - 1] != '/') try merged.append(a, '/');
+        try merged.appendSlice(a, referencePath);
+        resolvedPath = try removeDotSegments(a, merged.items);
+    }
+    defer a.free(resolvedPath);
+
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
     try out.appendSlice(a, base.scheme);
     try out.appendSlice(a, "://");
     var ab: [512]u8 = undefined;
     try out.appendSlice(a, base.authority(&ab));
-
-    // Split off fragment and query; they survive dot-segment removal untouched.
-    var pathEnd = loc.len;
-    var suffix: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, loc, '#')) |hi| {
-        pathEnd = hi;
-        suffix = loc[hi..];
+    try out.appendSlice(a, resolvedPath);
+    if (query) |q| {
+        try out.append(a, '?');
+        try out.appendSlice(a, q);
+    } else if (referencePath.len == 0) {
+        const baseRefEnd = std.mem.indexOfScalar(u8, baseUrl, '#') orelse baseUrl.len;
+        if (std.mem.indexOfScalar(u8, baseUrl[0..baseRefEnd], '?') != null) {
+            try out.append(a, '?');
+            try out.appendSlice(a, base.query);
+        }
     }
-    var query: []const u8 = "";
-    if (std.mem.indexOfScalar(u8, loc[0..pathEnd], '?')) |qi| {
-        query = loc[qi..pathEnd];
-        pathEnd = qi;
+    if (fragment) |f| {
+        try out.append(a, '#');
+        try out.appendSlice(a, f);
     }
-    const locPath = loc[0..pathEnd];
-
-    var merged: std.ArrayList(u8) = .empty;
-    defer merged.deinit(a);
-    if (locPath.len > 0 and locPath[0] == '/') {
-        try merged.appendSlice(a, locPath);
-    } else {
-        const basePath = base.path;
-        const lastSlash = std.mem.lastIndexOfScalar(u8, basePath, '/');
-        const dir = if (lastSlash) |idx| basePath[0..idx] else "";
-        try merged.appendSlice(a, dir);
-        if (dir.len == 0 or dir[dir.len - 1] != '/') try merged.append(a, '/');
-        try merged.appendSlice(a, locPath);
-    }
-    const clean = try removeDotSegments(a, merged.items);
-    defer a.free(clean);
-    try out.appendSlice(a, clean);
-    try out.appendSlice(a, query);
-    try out.appendSlice(a, suffix);
     return out.toOwnedSlice(a);
 }
 
@@ -2423,6 +2445,10 @@ test "resolveLocation handles relative paths and dot segments" {
         .{ .base = "http://h/a/b/c", .loc = "/x", .want = "http://h/x" },
         .{ .base = "http://h/a/b/", .loc = "../../z?q=1#frag", .want = "http://h/z?q=1#frag" },
         .{ .base = "http://h/a/./b", .loc = "./c", .want = "http://h/a/c" },
+        .{ .base = "http://h/a/b?old=1#old", .loc = "?q=2", .want = "http://h/a/b?q=2" },
+        .{ .base = "http://h/a/b?old=1#old", .loc = "#new", .want = "http://h/a/b?old=1#new" },
+        .{ .base = "http://h/a/b?old=1#old", .loc = "", .want = "http://h/a/b?old=1" },
+        .{ .base = "http://h/a/b", .loc = "//other:8080/x", .want = "http://other:8080/x" },
         .{ .base = "http://h/old", .loc = "https://other.new/path", .want = "https://other.new/path" },
     };
     for (cases) |c| {
@@ -2434,10 +2460,12 @@ test "resolveLocation handles relative paths and dot segments" {
 
 test "redirect origin comparison includes scheme host and effective port" {
     const base = try uriMod.parse("https://Example.com:443/start");
-    try std.testing.expect(sameOrigin(&base, "https://example.COM/next"));
-    try std.testing.expect(!sameOrigin(&base, "https://example.com:444/next"));
-    try std.testing.expect(!sameOrigin(&base, "http://example.com:443/next"));
-    try std.testing.expect(sameOrigin(&base, "/relative"));
+    const defaultPort = try uriMod.parse("https://example.COM/next");
+    const otherPort = try uriMod.parse("https://example.com:444/next");
+    const otherScheme = try uriMod.parse("http://example.com:443/next");
+    try std.testing.expect(sameOrigin(&base, &defaultPort));
+    try std.testing.expect(!sameOrigin(&base, &otherPort));
+    try std.testing.expect(!sameOrigin(&base, &otherScheme));
 }
 
 test "cross-origin redirect strips credential options without mutating caller headers" {
