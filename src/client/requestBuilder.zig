@@ -1545,7 +1545,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
             .status = respHead.statusCode,
             .headers = headers,
             .body = try a.alloc(u8, 0),
-        }, .reusable = true };
+        }, .reusable = acc.items.len == headEnd };
     }
 
     var body: std.ArrayList(u8) = .empty;
@@ -1554,14 +1554,14 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
     try body.appendSlice(a, acc.items[headEnd..]);
 
     if (framing.framing == .chunked) {
-        const decoded = try readChunkedResponseBody(a, conn, body.items, buf[0..]);
+        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..]);
         return .{ .resp = .{
             .allocator = a,
             .status = respHead.statusCode,
             .version = if (respHead.minorVersion == 0) .http10 else .http11,
             .headers = headers,
-            .body = try decodeResponseBody(a, headers, decoded),
-        }, .reusable = true };
+            .body = try decodeResponseBody(a, headers, chunkedBody.body),
+        }, .reusable = chunkedBody.reusable };
     }
 
     var complete = false;
@@ -1575,6 +1575,8 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
             try body.appendSlice(a, buf[0..n]);
         }
         complete = body.items.len == clen;
+        if (body.items.len < clen) return Error.MalformedResponse;
+        body.items.len = clen;
     } else {
         while (true) {
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
@@ -1594,7 +1596,9 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
     }, .reusable = complete };
 }
 
-fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8, readBuf: []u8) Error![]u8 {
+const ChunkedResponseBody = struct { body: []u8, reusable: bool };
+
+fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8, readBuf: []u8) Error!ChunkedResponseBody {
     var wire: std.ArrayList(u8) = .empty;
     defer wire.deinit(a);
     wire.appendSlice(a, initialWire) catch return Error.OutOfMemory;
@@ -1618,7 +1622,10 @@ fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8,
         if (pending > 0) std.mem.copyForwards(u8, wire.items[0..pending], wire.items[consumed..]);
         wire.items.len = pending;
 
-        if (decoder.isDone()) return decoded.toOwnedSlice(a) catch Error.OutOfMemory;
+        if (decoder.isDone()) return .{
+            .body = decoded.toOwnedSlice(a) catch return Error.OutOfMemory,
+            .reusable = pending == 0,
+        };
 
         if (decoder.totalRead > maxResponseBodySize) return Error.ResponseTooLarge;
         const consumedWire: usize = @intCast(decoder.totalRead);
@@ -1657,13 +1664,33 @@ test "chunked client response reads trailers incrementally and ignores marker-li
         }
     };
     const a = std.testing.allocator;
-    var conn = MockConn{ .tail = "\r\n" };
+    var conn = MockConn{ .tail = "\r\nNEXT" };
     const wire = "5\r\n0\r\n\r\n\r\n0\r\nX-Checksum: yes\r\n";
     var readBuf: [8]u8 = undefined;
-    const body = try readChunkedResponseBody(a, &conn, wire, &readBuf);
-    defer a.free(body);
-    try std.testing.expectEqualStrings("0\r\n\r\n", body);
+    const result = try readChunkedResponseBody(a, &conn, wire, &readBuf);
+    defer a.free(result.body);
+    try std.testing.expectEqualStrings("0\r\n\r\n", result.body);
     try std.testing.expectEqual(@as(usize, 1), conn.reads);
+    try std.testing.expect(!result.reusable);
+}
+
+test "client trims content-length response and rejects connection reuse after trailing bytes" {
+    const MockConn = struct {
+        wire: []const u8,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            const n = @min(dest.len, self.wire.len);
+            @memcpy(dest[0..n], self.wire[0..n]);
+            self.wire = self.wire[n..];
+            return n;
+        }
+    };
+    const a = std.testing.allocator;
+    var conn = MockConn{ .wire = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabcNEXT" };
+    var full = try readFullResponse(a, &conn, false);
+    defer full.resp.deinit();
+    try std.testing.expectEqualStrings("abc", full.resp.body);
+    try std.testing.expect(!full.reusable);
 }
 
 fn isRedirect(status: u16) bool {
