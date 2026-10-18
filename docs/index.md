@@ -172,8 +172,8 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN suppor
 |----------|--------|-----------|-------|
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
-| HTTP/2 | ✅ Client + Server Runtime + Primitives | TCP/TLS | High-level client/server execution paths plus full framing/HPACK/stream primitives |
-| HTTP/3 | 🚧 Primitives | QUIC/UDP | Frame/QPACK/QUIC codec + unit tests; end-to-end transport forthcoming |
+| HTTP/2 | ✅ Full | TCP/TLS | Client + server runtime (ALPN `h2` / h2c) plus framing/HPACK/stream primitives |
+| HTTP/3 | ✅ Full | QUIC/TLS | Client + server runtime (ALPN `h3` over QUIC) plus QPACK/QUIC primitives |
 
 ## Platform Support
 

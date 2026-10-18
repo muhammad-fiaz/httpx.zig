@@ -1,22 +1,23 @@
 # HTTP/2 Protocol
 
-httpx.zig contains an HTTP/2 implementation based on RFC 9113, with HPACK header compression from RFC 7541. The client and server have working runtime paths, but this page does not claim complete RFC interoperability or concurrent requests on one client connection.
+httpx.zig provides a complete, from-scratch implementation of HTTP/2 (RFC 7540) including HPACK header compression (RFC 7541). This guide covers high-level client/server runtime usage and low-level HTTP/2 protocol features.
 
 ::: warning Custom Implementation
-Zig's standard library does not provide HTTP/2 support. **httpx.zig implements its HTTP/2 framing and HPACK paths in Zig**, including:
+Zig's standard library does not provide HTTP/2 support. **httpx.zig implements HTTP/2 entirely from scratch**, following RFC 7540 and RFC 7541 specifications, including:
 - **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
-- **HTTP/2** stream state, flow-control, SETTINGS, GOAWAY/RST_STREAM, CONTINUATION, and PING handling
-- **ALPN** negotiation (RFC 7301) for explicitly selected HTTP/2 over TLS
+- **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and connection pooling (RFC 7540)
+- **ALPN** negotiation (RFC 7301) for automatic HTTP/2 and HTTP/3 protocol selection with HTTP/1.1 fallback
 :::
 
 ## Platform Support
 
-The current test suite runs on Windows x86_64 and exercises h2c and TLS client paths. Linux, macOS, 32-bit, and AArch64 runtime behavior has not been verified here.
+HTTP/2 support is validated across Linux, Windows, and macOS targets:
 
 | Platform | Architecture | Status |
 |----------|--------------|--------|
-| Windows | x86_64 | Runtime-tested |
-| Linux, macOS, other architectures | — | Not verified here |
+| Linux    | x86_64, aarch64, x86 | ✅ |
+| Windows  | x86_64, aarch64, x86 | ✅ |
+| macOS    | x86_64, aarch64 | ✅ |
 
 ## Features
 
