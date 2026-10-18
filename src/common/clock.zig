@@ -44,7 +44,16 @@ fn wallMillis() i64 {
             _ = c.gettimeofday(&tv, null);
             return @as(i64, @intCast(tv.sec)) * 1000 + @divFloor(@as(i64, @intCast(tv.usec)), 1000);
         },
-        else => return std.time.milliTimestamp(),
+        .freebsd => {
+            var ts: std.c.timespec = .{ .sec = 0, .nsec = 0 };
+            if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts) != 0) return 0;
+            return @as(i64, @intCast(ts.sec)) * 1000 + @divFloor(@as(i64, @intCast(ts.nsec)), 1_000_000);
+        },
+        else => {
+            const io = std.Io.Threaded.global_single_threaded.io();
+            const timestamp = std.Io.Clock.Timestamp.now(io, .real);
+            return @intCast(@divTrunc(timestamp.raw.nanoseconds, 1_000_000));
+        },
     }
 }
 
@@ -80,6 +89,11 @@ pub fn monotonicMillis() i64 {
             const t = std.c.mach_absolute_time();
             const nanos = t *% @as(u64, info.numer) / @as(u64, info.denom);
             return @intCast(nanos / 1_000_000);
+        },
+        .freebsd => {
+            var ts: std.c.timespec = .{ .sec = 0, .nsec = 0 };
+            if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return wallMillis();
+            return @as(i64, @intCast(ts.sec)) * 1000 + @divFloor(@as(i64, @intCast(ts.nsec)), 1_000_000);
         },
         else => return wallMillis(),
     }
