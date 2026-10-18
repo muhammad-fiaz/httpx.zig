@@ -16,12 +16,19 @@ defer server.deinit();
 |---|---|---|
 | `maxBody` | `8 MB` | Rejects oversized payloads |
 | `maxRequestsPerConn` | `1000` | Bounds keep-alive reuse per connection |
+| `maxConcurrentConnections` | `128` | Caps active and queued connection tasks |
+| `maxQueuedConnectionTasks` | `128` | Bounds pending work; new connections are closed when full |
+| `initialRequestTimeoutMs` | `5000` | Bounds the wait for initial request bytes |
+| `headerReadTimeoutMs` | `10000` | Absolute deadline to finish request headers |
+| `requestBodyTimeoutMs` | `30000` | Absolute deadline to receive the complete body |
+| `writeTimeoutMs` | `30000` | Absolute response write deadline |
+| `keepAliveIdleTimeoutMs` | `30000` | Bounds idle keep-alive reads |
 
 Pair with `httpx.RateLimiter` middleware for per-IP request-rate enforcement.
 
 ## Slowloris Attack Mitigation
 
-Slowloris attacks send partial HTTP request headers at extremely slow rates (e.g. 1 byte every 10 seconds), exhausting the server's connection pool. Mitigate by capping `maxConnections`, pairing with a reverse proxy or LB idle timeout, and monitoring `server.snapshot()` error and connection counters.
+The server processes connections through a bounded worker pool, so a client waiting before sending data does not block the accept loop or unrelated workers. `maxConcurrentConnections` bounds active plus queued connections, and a full limit closes newly accepted sockets. The initial-byte, header, body, write, and keep-alive settings in `ServerConfig` use absolute phase deadlines; sending occasional bytes does not extend the header or body deadline. Set these deadlines to finite values for exposed services. Setting one to zero disables that deadline and can let a stalled peer occupy a worker until another limit or shutdown intervenes. A handler that blocks in application code is not forcibly cancelled. A reverse proxy or load balancer can add another independent resource boundary, but does not replace server-side limits.
 
 ## Related
 
