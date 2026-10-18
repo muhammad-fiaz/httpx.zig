@@ -185,7 +185,13 @@ pub const Client = struct {
         // Collectors wired through session callbacks.
         var status: u16 = 500;
         var headers = std.ArrayList(Header).empty;
-        errdefer headers.deinit(a);
+        errdefer {
+            for (headers.items) |h| {
+                a.free(h.name);
+                a.free(h.value);
+            }
+            headers.deinit(a);
+        }
         var body = std.ArrayList(u8).empty;
         errdefer body.deinit(a);
         var done = false;
@@ -209,17 +215,23 @@ pub const Client = struct {
                         selfPtr.status.* = std.fmt.parseInt(u16, f.value, 10) catch 500;
                         continue;
                     }
-                    try selfPtr.headers.append(selfPtr.a, .{
-                        .name = try selfPtr.a.dupe(u8, f.name),
-                        .value = try selfPtr.a.dupe(u8, f.value),
-                    });
+                    const name = try selfPtr.a.dupe(u8, f.name);
+                    const value = selfPtr.a.dupe(u8, f.value) catch |err| {
+                        selfPtr.a.free(name);
+                        return err;
+                    };
+                    selfPtr.headers.append(selfPtr.a, .{ .name = name, .value = value }) catch |err| {
+                        selfPtr.a.free(name);
+                        selfPtr.a.free(value);
+                        return err;
+                    };
                 }
                 if (endStream) selfPtr.done.* = true;
             }
             fn onData(ctx: ?*anyopaque, s: u31, data: []const u8) anyerror!void {
                 const selfPtr: *@This() = @ptrCast(@alignCast(ctx.?));
                 if (s != selfPtr.sid) return;
-                if (selfPtr.body.items.len > selfPtr.maxBytes -| data.len) {
+                if (data.len > selfPtr.maxBytes -| selfPtr.body.items.len) {
                     selfPtr.tooLarge.* = true;
                     return;
                 }

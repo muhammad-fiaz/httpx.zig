@@ -2116,6 +2116,42 @@ test "client pools h2c sessions across sequential requests" {
     try std.testing.expectEqual(@as(usize, 1), client.pool.parkedCount());
 }
 
+test "client enforces configured response size on h2c" {
+    const a = std.testing.allocator;
+    const IoContext = tcp.IoContext;
+    var ctx = try IoContext.init(a);
+    defer ctx.deinit();
+
+    const h2t = @import("../protocols/http2/transport.zig");
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const h2t.Header, _: []const u8) anyerror!h2t.HandlerResponse {
+            return .{ .status = 200, .body = "too large" };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io) void {
+            var conn = lst.accept(io2) catch return;
+            defer conn.close();
+            h2t.serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const th = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io });
+    defer th.join();
+
+    var client = Client.init(a, ctx.io, .{});
+    defer client.deinit();
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/limit", .{port});
+    try std.testing.expectError(
+        Error.ResponseTooLarge,
+        client.get(url, .{ .httpVersion = .http2, .maxResponseSize = 3, .timeoutMs = 15_000 }),
+    );
+}
+
 test "client reaps h2 streams past maxConcurrentStreams" {
     const a = std.testing.allocator;
     const IoContext = tcp.IoContext;

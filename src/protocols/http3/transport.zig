@@ -89,7 +89,7 @@ pub const Client = struct {
     fn onStream(ctx: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
         const self: *Client = @ptrCast(@alignCast(ctx.?));
         if (sid != self.resp.sid) return;
-        if (self.resp.buf.items.len > self.maxBytes -| data.len) {
+        if (data.len > self.maxBytes -| self.resp.buf.items.len) {
             self.resp.overflow = true;
             return;
         }

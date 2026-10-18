@@ -645,7 +645,15 @@ fn h3DoRequest(
     // Convert header type (same shape, different namespace); the
     // transport allocator IS `a`, so ownership transfers cleanly, and
     // decodeResponseBody consumes the body exactly like h2DoRequest.
-    var outHdrs = try a.alloc(Header, h3resp.headers.len);
+    var outHdrs = a.alloc(Header, h3resp.headers.len) catch {
+        for (h3resp.headers) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(h3resp.headers);
+        a.free(h3resp.body);
+        return Error.OutOfMemory;
+    };
     for (h3resp.headers, 0..) |h, i| outHdrs[i] = .{ .name = h.name, .value = h.value };
     const maxSize = @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize);
     const decodedBody = decodeResponseBodyLimited(a, outHdrs, h3resp.body, maxSize) catch |e| {
@@ -711,7 +719,15 @@ fn h2DoRequest(
     };
     // Convert header type (same shape, different namespace); the
     // transport allocator IS `a`, so ownership transfers cleanly.
-    var outHdrs = try a.alloc(Header, r.headers.len);
+    var outHdrs = a.alloc(Header, r.headers.len) catch {
+        for (r.headers) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(r.headers);
+        a.free(r.body);
+        return Error.OutOfMemory;
+    };
     for (r.headers, 0..) |h, i| outHdrs[i] = .{ .name = h.name, .value = h.value };
     const decodedBody = decodeResponseBodyLimited(a, outHdrs, r.body, @min(maxSize, maxResponseBodySize)) catch |e| {
         for (outHdrs) |h| {
@@ -1696,7 +1712,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
         while (body.items.len < clen) {
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
             if (n == 0) break;
-            if (body.items.len > maxSize -| n) return Error.ResponseTooLarge;
+            if (n > maxSize -| body.items.len) return Error.ResponseTooLarge;
             try body.appendSlice(a, buf[0..n]);
         }
         complete = body.items.len == clen;
@@ -1706,7 +1722,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
         while (true) {
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
             if (n == 0) break;
-            if (body.items.len > maxSize -| n) return Error.ResponseTooLarge;
+            if (n > maxSize -| body.items.len) return Error.ResponseTooLarge;
             try body.appendSlice(a, buf[0..n]);
         }
     }
@@ -1820,17 +1836,26 @@ test "client trims content-length response and rejects connection reuse after tr
 
 test "client enforces configured response size before buffering the full body" {
     const MockConn = struct {
-        wire: []const u8,
+        bodyOffset: usize = 0,
+        headerSent: bool = false,
 
         fn read(self: *@This(), dest: []u8) !usize {
-            const n = @min(dest.len, self.wire.len);
-            @memcpy(dest[0..n], self.wire[0..n]);
-            self.wire = self.wire[n..];
+            const header = "HTTP/1.1 200 OK\r\n\r\n";
+            const body = "data";
+            if (!self.headerSent) {
+                const n = @min(dest.len, header.len);
+                @memcpy(dest[0..n], header[0..n]);
+                self.headerSent = n == header.len;
+                return n;
+            }
+            const n = @min(dest.len, body.len - self.bodyOffset);
+            @memcpy(dest[0..n], body[self.bodyOffset .. self.bodyOffset + n]);
+            self.bodyOffset += n;
             return n;
         }
     };
     const a = std.testing.allocator;
-    var conn = MockConn{ .wire = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata" };
+    var conn = MockConn{};
     try std.testing.expectError(
         Error.ResponseTooLarge,
         readFullResponseWithOptions(a, &conn, false, .{}, 3),
