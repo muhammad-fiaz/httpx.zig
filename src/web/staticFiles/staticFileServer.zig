@@ -335,7 +335,15 @@ fn openAssetNoFollow(io: std.Io, root: []const u8, relative: []const u8) !Opened
     var component = parts.next() orelse return error.FileNotFound;
     while (parts.next()) |next| {
         if (component.len == 0) return error.FileNotFound;
-        const child = try dir.openDir(io, component, .{ .access_sub_paths = true, .follow_symlinks = false });
+        const child = dir.openDir(io, component, .{ .access_sub_paths = true, .follow_symlinks = false }) catch |err| switch (err) {
+            // POSIX reports a no-follow rejection of a symlinked intermediate
+            // directory as ENOTDIR (Zig: NotDir) and of a symlink loop as
+            // ELOOP; Windows reports both as not-found. Surface all of them
+            // as FileNotFound so the no-follow behavior is identical on
+            // every platform.
+            error.NotDir, error.SymLinkLoop => return error.FileNotFound,
+            else => return err,
+        };
         dir.close(io);
         dir = child;
         component = next;
