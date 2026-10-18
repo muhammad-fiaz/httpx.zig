@@ -341,7 +341,15 @@ fn openAssetNoFollow(io: std.Io, root: []const u8, relative: []const u8) !Opened
         component = next;
     }
     if (component.len == 0) return error.FileNotFound;
-    const file = try dir.openFile(io, component, .{ .allow_directory = false, .follow_symlinks = false });
+    const file = dir.openFile(io, component, .{ .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
+        // POSIX reports an O_NOFOLLOW rejection of the final component as
+        // ELOOP ("symlink loop"); Windows reports it as not-found. Surface
+        // both as FileNotFound so the no-follow behavior is identical
+        // everywhere: the path is not a regular file reachable without
+        // following symlinks.
+        error.SymLinkLoop => return error.FileNotFound,
+        else => return err,
+    };
     errdefer file.close(io);
     const stat = try file.stat(io);
     if (stat.kind != .file) return error.FileNotFound;
