@@ -1548,30 +1548,13 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
         }, .reusable = true };
     }
 
-    var chunked = false;
-    var clen: usize = 0;
-    for (fields[0..blk.count]) |f| {
-        if (std.ascii.eqlIgnoreCase(f.name, "transfer-encoding") and
-            std.ascii.findIgnoreCase(f.value, "chunked") != null) chunked = true;
-        if (std.ascii.eqlIgnoreCase(f.name, "content-length"))
-            clen = std.fmt.parseInt(usize, std.mem.trim(u8, f.value, " "), 10) catch 0;
-    }
-
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(a);
     if (acc.items.len - headEnd > maxResponseBodySize) return Error.ResponseTooLarge;
     try body.appendSlice(a, acc.items[headEnd..]);
 
-    if (chunked) {
-        while (std.mem.indexOf(u8, body.items, "\r\n0\r\n\r\n") == null and
-            std.mem.indexOf(u8, body.items, "0\r\n\r\n") == null)
-        {
-            const n = conn.read(buf[0..]) catch return Error.ReadFailed;
-            if (n == 0) break;
-            if (body.items.len > maxResponseBodySize -| n) return Error.ResponseTooLarge;
-            try body.appendSlice(a, buf[0..n]);
-        }
-        const decoded = decodeChunked(a, body.items) catch return Error.MalformedResponse;
+    if (framing.framing == .chunked) {
+        const decoded = try readChunkedResponseBody(a, conn, body.items, buf[0..]);
         return .{ .resp = .{
             .allocator = a,
             .status = respHead.statusCode,
@@ -1582,7 +1565,8 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
     }
 
     var complete = false;
-    if (clen > 0) {
+    if (framing.framing == .contentLength) {
+        const clen = framing.length;
         if (clen > maxResponseBodySize) return Error.ResponseTooLarge;
         while (body.items.len < clen) {
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
@@ -1590,7 +1574,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
             if (body.items.len > maxResponseBodySize -| n) return Error.ResponseTooLarge;
             try body.appendSlice(a, buf[0..n]);
         }
-        complete = body.items.len >= clen;
+        complete = body.items.len == clen;
     } else {
         while (true) {
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
@@ -1610,20 +1594,76 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
     }, .reusable = complete };
 }
 
+fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8, readBuf: []u8) Error![]u8 {
+    var wire: std.ArrayList(u8) = .empty;
+    defer wire.deinit(a);
+    wire.appendSlice(a, initialWire) catch return Error.OutOfMemory;
+
+    var decoded: std.ArrayList(u8) = .empty;
+    errdefer decoded.deinit(a);
+    var decoder = parserMod.ChunkedDecoder.init();
+
+    while (true) {
+        _ = decoder.decode(wire.items) catch |err| switch (err) {
+            error.Incomplete => {},
+            error.OutOfMemory => return Error.OutOfMemory,
+            else => return Error.MalformedResponse,
+        };
+        if (decoder.decodedLen > maxResponseBodySize -| decoded.items.len) return Error.ResponseTooLarge;
+        decoded.appendSlice(a, wire.items[0..decoder.decodedLen]) catch return Error.OutOfMemory;
+
+        const consumed = decoder.rawConsumed;
+        if (consumed > wire.items.len) return Error.MalformedResponse;
+        const pending = wire.items.len - consumed;
+        if (pending > 0) std.mem.copyForwards(u8, wire.items[0..pending], wire.items[consumed..]);
+        wire.items.len = pending;
+
+        if (decoder.isDone()) return decoded.toOwnedSlice(a) catch Error.OutOfMemory;
+
+        if (decoder.totalRead > maxResponseBodySize) return Error.ResponseTooLarge;
+        const consumedWire: usize = @intCast(decoder.totalRead);
+        if (wire.items.len > maxResponseBodySize - consumedWire) {
+            return Error.ResponseTooLarge;
+        }
+        const n = conn.read(readBuf) catch return Error.ReadFailed;
+        if (n == 0) return Error.MalformedResponse;
+        const remainingCapacity = maxResponseBodySize - consumedWire - wire.items.len;
+        if (n > remainingCapacity) return Error.ResponseTooLarge;
+        wire.appendSlice(a, readBuf[0..n]) catch return Error.OutOfMemory;
+    }
+}
+
 fn decodeChunked(a: Allocator, wireIn: []const u8) ![]u8 {
     const wire = try a.dupe(u8, wireIn);
     defer a.free(wire);
+    var decoder = parserMod.ChunkedDecoder.init();
+    _ = try decoder.decode(wire);
+    if (!decoder.isDone()) return error.Incomplete;
+    return a.dupe(u8, wire[0..decoder.decodedLen]);
+}
 
-    var dec = parserMod.ChunkedDecoder{};
-    _ = dec.decode(wire) catch |e| switch (e) {
-        error.Incomplete => return error.Incomplete,
-        else => return e,
+test "chunked client response reads trailers incrementally and ignores marker-like payload" {
+    const MockConn = struct {
+        tail: []const u8,
+        reads: usize = 0,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            self.reads += 1;
+            if (self.tail.len == 0) return 0;
+            const n = @min(dest.len, self.tail.len);
+            @memcpy(dest[0..n], self.tail[0..n]);
+            self.tail = self.tail[n..];
+            return n;
+        }
     };
-    // ChunkedDecoder decodes in place: the decoded payload occupies
-    // wire[0..decodedLen]. The decode() return value is bytes consumed
-    // from the input (equals wire.len on a complete body), not the
-    // produced length — using it as a length yields an empty slice.
-    return a.dupe(u8, wire[0..dec.decodedLen]);
+    const a = std.testing.allocator;
+    var conn = MockConn{ .tail = "\r\n" };
+    const wire = "5\r\n0\r\n\r\n\r\n0\r\nX-Checksum: yes\r\n";
+    var readBuf: [8]u8 = undefined;
+    const body = try readChunkedResponseBody(a, &conn, wire, &readBuf);
+    defer a.free(body);
+    try std.testing.expectEqualStrings("0\r\n\r\n", body);
+    try std.testing.expectEqual(@as(usize, 1), conn.reads);
 }
 
 fn isRedirect(status: u16) bool {
