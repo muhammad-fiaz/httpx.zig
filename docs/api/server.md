@@ -105,14 +105,13 @@ the newest accepted socket. `maxConnections` is a separate lifetime limit and
 counts successfully queued connections.
 
 The timeout fields are absolute deadlines for each I/O phase, not inactivity
-windows that restart after every byte. On Windows the server monitors pending
-socket operations and shuts down the timed-out direction to release a blocked
-worker; POSIX socket timeout options are also applied. A zero timeout disables
-the corresponding deadline. Graceful `requestShutdown()` stops acceptance,
-lets active requests finish within their I/O deadlines, and closes queued
-sockets without starting new requests. `stop()` closes active sockets
-immediately. A user handler that blocks without returning is not forcibly
-cancelled.
+windows that restart after every byte. A server-owned monitor interrupts the
+timed-out direction on accepted sockets so a blocked I/O operation releases
+its worker. A zero timeout disables the corresponding deadline. Graceful
+`requestShutdown()` stops acceptance, lets active requests finish within their
+I/O deadlines, and closes queued sockets without starting new requests.
+`stop()` interrupts active socket I/O immediately. A user handler that blocks
+without returning is not forcibly cancelled.
 
 Route registration and configuration must finish before `run()` starts.
 Handlers and the logging callback may be invoked concurrently from different
