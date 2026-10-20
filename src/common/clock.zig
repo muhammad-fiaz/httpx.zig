@@ -57,46 +57,13 @@ fn wallMillis() i64 {
     }
 }
 
-/// Monotonic milliseconds for timeouts (never goes backwards).
+/// Monotonic milliseconds from Zig 0.17's target-specific `std.Io` clock.
+/// The standard-library backend selects the appropriate OS clock, including
+/// Windows performance counters and POSIX monotonic clocks.
 pub fn monotonicMillis() i64 {
-    switch (builtin.os.tag) {
-        .windows => {
-            const kernel32 = struct {
-                extern "kernel32" fn QueryPerformanceCounter(lpPerformanceCount: *u64) callconv(.winapi) c_int;
-                extern "kernel32" fn QueryPerformanceFrequency(lpFrequency: *u64) callconv(.winapi) c_int;
-            };
-            var c: u64 = 0;
-            var f: u64 = 0;
-            _ = kernel32.QueryPerformanceCounter(&c);
-            _ = kernel32.QueryPerformanceFrequency(&f);
-            if (f == 0) return wallMillis();
-            return @intCast((c * 1000) / f);
-        },
-        .linux => {
-            const linux = std.os.linux;
-            var t: linux.timespec = .{ .sec = 0, .nsec = 0 };
-            _ = linux.clock_gettime(linux.CLOCK.MONOTONIC, &t);
-            return @as(i64, @intCast(t.sec)) * 1000 + @divFloor(@as(i64, @intCast(t.nsec)), 1_000_000);
-        },
-        .macos, .ios, .tvos, .watchos => {
-            // Zig mangles `extern "c"` names literally, so the mach entry points
-            // must be declared with their C spelling. Hand-rolled declarations
-            // such as `machAbsoluteTime` link to `_machAbsoluteTime`, which does
-            // not exist; these bindings resolve to the real symbols.
-            var info: std.c.mach_timebase_info_data = undefined;
-            if (std.c.mach_timebase_info(&info) != 0) return wallMillis();
-            if (info.denom == 0) return wallMillis();
-            const t = std.c.mach_absolute_time();
-            const nanos = t *% @as(u64, info.numer) / @as(u64, info.denom);
-            return @intCast(nanos / 1_000_000);
-        },
-        .freebsd => {
-            var ts: std.c.timespec = .{ .sec = 0, .nsec = 0 };
-            if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) != 0) return wallMillis();
-            return @as(i64, @intCast(ts.sec)) * 1000 + @divFloor(@as(i64, @intCast(ts.nsec)), 1_000_000);
-        },
-        else => return wallMillis(),
-    }
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const timestamp = std.Io.Clock.Timestamp.now(io, .awake);
+    return @intCast(@divTrunc(timestamp.raw.nanoseconds, 1_000_000));
 }
 
 /// Sleeps for the specified number of milliseconds.
