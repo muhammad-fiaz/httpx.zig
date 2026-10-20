@@ -1695,7 +1695,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
     try body.appendSlice(a, acc.items[headEnd..]);
 
     if (framing.framing == .chunked) {
-        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..], maxSize);
+        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..], maxSize, opts.allowLfLineEndings);
         return .{ .resp = .{
             .allocator = a,
             .status = respHead.statusCode,
@@ -1739,14 +1739,14 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
 
 const ChunkedResponseBody = struct { body: []u8, reusable: bool };
 
-fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8, readBuf: []u8, maxSize: usize) Error!ChunkedResponseBody {
+fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8, readBuf: []u8, maxSize: usize, allowLfLineEndings: bool) Error!ChunkedResponseBody {
     var wire: std.ArrayList(u8) = .empty;
     defer wire.deinit(a);
     wire.appendSlice(a, initialWire) catch return Error.OutOfMemory;
 
     var decoded: std.ArrayList(u8) = .empty;
     errdefer decoded.deinit(a);
-    var decoder = parserMod.ChunkedDecoder.init();
+    var decoder = parserMod.ChunkedDecoder.initWithOptions(.{ .allowLfLineEndings = allowLfLineEndings });
 
     while (true) {
         _ = decoder.decode(wire.items) catch |err| switch (err) {
@@ -1808,11 +1808,36 @@ test "chunked client response reads trailers incrementally and ignores marker-li
     var conn = MockConn{ .tail = "\r\nNEXT" };
     const wire = "5\r\n0\r\n\r\n\r\n0\r\nX-Checksum: yes\r\n";
     var readBuf: [8]u8 = undefined;
-    const result = try readChunkedResponseBody(a, &conn, wire, &readBuf, maxResponseBodySize);
+    const result = try readChunkedResponseBody(a, &conn, wire, &readBuf, maxResponseBodySize, false);
     defer a.free(result.body);
     try std.testing.expectEqualStrings("0\r\n\r\n", result.body);
     try std.testing.expectEqual(@as(usize, 1), conn.reads);
     try std.testing.expect(!result.reusable);
+}
+
+test "client chunked response honors strict and lenient LF framing options" {
+    const MockConn = struct {
+        wire: []const u8,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            const n = @min(dest.len, self.wire.len);
+            @memcpy(dest[0..n], self.wire[0..n]);
+            self.wire = self.wire[n..];
+            return n;
+        }
+    };
+    const a = std.testing.allocator;
+    const response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\na\n0\n\n";
+    var strictConn = MockConn{ .wire = response };
+    try std.testing.expectError(
+        Error.MalformedResponse,
+        readFullResponseWithOptions(a, &strictConn, false, .{}, maxResponseBodySize),
+    );
+
+    var lenientConn = MockConn{ .wire = response };
+    var full = try readFullResponseWithOptions(a, &lenientConn, false, .{ .allowLfLineEndings = true }, maxResponseBodySize);
+    defer full.resp.deinit();
+    try std.testing.expectEqualStrings("a", full.resp.body);
 }
 
 test "client trims content-length response and rejects connection reuse after trailing bytes" {

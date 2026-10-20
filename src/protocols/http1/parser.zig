@@ -410,6 +410,11 @@ pub const ChunkedDecoder = struct {
     /// Total bytes fed into the decoder.
     totalRead: u64 = 0,
 
+    /// Accept bare LF as a chunk-line or chunk-data delimiter. Disabled by
+    /// default; use only when the surrounding HTTP parser is configured for
+    /// lenient LF line endings.
+    allowLfLineEndings: bool = false,
+
     /// Optional sink for trailer fields. Field slices point into the most
     /// recent input buffer and are valid only until it is reused.
     /// When set, `trailerAllocator` must be set too (ArrayList is unmanaged).
@@ -433,6 +438,10 @@ pub const ChunkedDecoder = struct {
         return .{};
     }
 
+    pub fn initWithOptions(options: ChunkedDecoderOptions) ChunkedDecoder {
+        return .{ .allowLfLineEndings = options.allowLfLineEndings };
+    }
+
     pub fn isDone(self: *const ChunkedDecoder) bool {
         return self.state == .done;
     }
@@ -453,7 +462,10 @@ pub const ChunkedDecoder = struct {
                             self.state = .ext;
                         },
                         '\r' => self.state = .sizeCr,
-                        '\n' => try self.endSizeLine(),
+                        '\n' => {
+                            if (!self.allowLfLineEndings) return ParseError.InvalidChunkSize;
+                            try self.endSizeLine();
+                        },
                         else => {
                             const d = parseMod.hexNibble(c) orelse return ParseError.InvalidChunkSize;
                             self.pushDigit(d);
@@ -472,7 +484,10 @@ pub const ChunkedDecoder = struct {
                     src += 1;
                     switch (c) {
                         '\r' => self.state = .extCr,
-                        '\n' => try self.endSizeLine(),
+                        '\n' => {
+                            if (!self.allowLfLineEndings) return ParseError.InvalidChunkSize;
+                            try self.endSizeLine();
+                        },
                         '\t', ' ' => {},
                         else => if (isCtl(c)) return ParseError.InvalidChunkSize,
                     }
@@ -500,8 +515,7 @@ pub const ChunkedDecoder = struct {
                     src += 1;
                     if (c == '\r') {
                         self.state = .dataLf;
-                    } else if (c == '\n') {
-                        // Lax bare-LF between chunks (matches picohttpparser).
+                    } else if (c == '\n' and self.allowLfLineEndings) {
                         self.enterSize();
                     } else return ParseError.InvalidChunkSize;
                 },
@@ -513,7 +527,9 @@ pub const ChunkedDecoder = struct {
                 },
                 .trailer => {
                     var tfields: [DEFAULT_MAX_HEADERS]Field = undefined;
-                    const res = parseHeaderBlock(buf[src..], 0, tfields[0..], .{}) catch |err| switch (err) {
+                    const res = parseHeaderBlock(buf[src..], 0, tfields[0..], .{
+                        .allowLfLineEndings = self.allowLfLineEndings,
+                    }) catch |err| switch (err) {
                         ParseError.Incomplete => break :loop,
                         ParseError.TooManyHeaders => return ParseError.InvalidChunkSize,
                         else => return err,
@@ -572,6 +588,10 @@ pub const ChunkedDecoder = struct {
             self.state = .data;
         }
     }
+};
+
+pub const ChunkedDecoderOptions = struct {
+    allowLfLineEndings: bool = false,
 };
 
 // Tests
@@ -791,6 +811,29 @@ test "chunked decoder rejects malformed sizes and terminators" {
     @memcpy(b4[0..nodigit.len], nodigit);
     var d4 = ChunkedDecoder.init();
     try std.testing.expectError(ParseError.InvalidChunkSize, d4.decode(b4[0..nodigit.len]));
+}
+
+test "chunked decoder rejects bare LF unless explicitly enabled" {
+    const bareSizeLf = "5\nhello\r\n0\r\n\r\n";
+    var strictSizeBuf: [32]u8 = undefined;
+    @memcpy(strictSizeBuf[0..bareSizeLf.len], bareSizeLf);
+    var strictSize = ChunkedDecoder.init();
+    try std.testing.expectError(ParseError.InvalidChunkSize, strictSize.decode(strictSizeBuf[0..bareSizeLf.len]));
+
+    const bareDataLf = "1\r\na\n0\r\n\r\n";
+    var strictDataBuf: [32]u8 = undefined;
+    @memcpy(strictDataBuf[0..bareDataLf.len], bareDataLf);
+    var strictData = ChunkedDecoder.init();
+    try std.testing.expectError(ParseError.InvalidChunkSize, strictData.decode(strictDataBuf[0..bareDataLf.len]));
+
+    const lenientInput = "1\na\n0\nX-Ok: yes\n\n";
+    var lenientBuf: [32]u8 = undefined;
+    @memcpy(lenientBuf[0..lenientInput.len], lenientInput);
+    var lenient = ChunkedDecoder.initWithOptions(.{ .allowLfLineEndings = true });
+    const tail = try lenient.decode(lenientBuf[0..lenientInput.len]);
+    try std.testing.expect(lenient.isDone());
+    try std.testing.expectEqualStrings("a", lenientBuf[0..lenient.decodedLen]);
+    try std.testing.expectEqual(lenientInput.len, tail);
 }
 
 test "strict mode rejects bare LF in headers while lenient mode accepts it" {

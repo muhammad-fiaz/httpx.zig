@@ -1761,7 +1761,9 @@ pub const Server = struct {
                 },
                 .chunked => {
                     // Persistent decoder with bounded retained wire data.
-                    var dec = parserMod.ChunkedDecoder.init();
+                    var dec = parserMod.ChunkedDecoder.initWithOptions(.{
+                        .allowLfLineEndings = self.cfg.allowLfLineEndings,
+                    });
                     var acc: std.ArrayList(u8) = .empty;
                     var raw: std.ArrayList(u8) = .empty;
                     raw.appendSlice(arena, headBuf[blk.end..filled]) catch return false;
