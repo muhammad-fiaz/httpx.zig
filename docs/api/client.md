@@ -100,13 +100,18 @@ defer client.deinit();
 | `cookies` | `bool` | `true` | Enable cookie jar handling. |
 | `pool` | `PoolConfig` | `{}` | Connection pool limits (`maxConnections`, `maxPerHost`, `idleTimeoutMs`, `maxParkedMs`). |
 | `dnsCache` | `DnsCacheOptions` | `{}` | DNS cache settings (`enable`, `ttlMs`, `negativeTtlMs`, `maxEntries`). |
-| `tls` | `?TlsOptions` | `null` | Default TLS options for `https://` requests. |
+| `tls` | `?TlsOptions` | `null` | Default TLS overrides for `https://`; null uses system trust verification. |
 | `proxy` | `?[]const u8` | `null` | Default proxy URL (`http://`, `socks5://`, `socks5h://`). |
 | `maxResponseSize` | `?usize` | `null` | Default maximum response body size. |
 | `allowLfLineEndings` | `bool` | `false` | Accept bare LF line endings from non-compliant peers. |
 | `eventCallback` | `?ClientEventCallback` | `null` | Application callback for client events (silent by default). |
 
 If you do not set a field, the implicit default value is used. `.{}` is the safe default.
+
+HTTPS requests verify the server certificate against system trust roots by
+default, including when `tls` is omitted or null. TLS truncation is rejected
+unless explicitly enabled with `TlsOptions.allowTruncation`; set
+`verify = .none` only for controlled testing or development.
 
 ### Timeouts
 
@@ -302,7 +307,7 @@ client-level defaults.
 | `allowLfLineEndings` | `bool` | `false` | Accept bare LF line endings in the response. |
 | `httpVersion` | `?HttpVersion` | `null` | Force a request over a specific protocol runtime. |
 | `http10` / `http11` / `http2` / `http3` | `?bool` | `null` | Per-request protocol toggles. |
-| `tls` | `?TlsOptions` | `null` | Per-request TLS options for `https://`. |
+| `tls` | `?TlsOptions` | `null` | Per-request TLS overrides; null inherits the client default or system trust. |
 | `proxy` | `?[]const u8` | `null` | Per-request proxy URL override. |
 
 Request options are configured directly using struct literals:

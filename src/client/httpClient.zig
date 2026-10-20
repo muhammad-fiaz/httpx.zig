@@ -1290,24 +1290,24 @@ pub const Client = struct {
 
         const reqTls: ?req.TlsOptions = blk: {
             if (!@hasField(@TypeOf(opts), "tls")) {
-                // No per-request TLS: use client default, or auto-enable for HTTPS.
+                // No per-request TLS: use the client default, or system trust.
                 if (self.config.tls) |cTls| break :blk cTls;
-                break :blk req.TlsOptions{ .verify = .none, .allowTruncation = true };
+                break :blk req.TlsOptions{};
             }
             const v = opts.tls;
             const T = @TypeOf(v);
             // Untyped null (forwarded absence) inherits the client default.
             if (T == @TypeOf(null)) {
                 if (self.config.tls) |cTls| break :blk cTls;
-                break :blk req.TlsOptions{ .verify = .none, .allowTruncation = true };
+                break :blk req.TlsOptions{};
             }
             if (@typeInfo(T) == .optional) {
                 // Explicit null inherits the client default (null = no override).
-                break :blk v orelse if (self.config.tls) |cTls| cTls else req.TlsOptions{ .verify = .none, .allowTruncation = true };
+                break :blk v orelse if (self.config.tls) |cTls| cTls else req.TlsOptions{};
             } else {
                 // Anonymous struct: merge per field over the client default so
                 // specifying one sub-option keeps the rest.
-                const base = if (self.config.tls) |cTls| cTls else req.TlsOptions{ .verify = .none, .allowTruncation = true };
+                const base = if (self.config.tls) |cTls| cTls else req.TlsOptions{};
                 break :blk req.TlsOptions{
                     .verify = if (@hasField(@TypeOf(v), "verify")) v.verify else base.verify,
                     .caBundle = if (@hasField(@TypeOf(v), "caBundle")) v.caBundle else base.caBundle,
@@ -1985,6 +1985,46 @@ test "http CONNECT proxy 407 maps to ProxyAuthRequired" {
 
     const err = client.get("http://127.0.0.1:9/needs-auth", .{ .proxy = proxyUrl, .timeoutMs = 10_000 });
     try std.testing.expectError(error.ProxyAuthRequired, err);
+}
+
+test "HTTPS rejects an untrusted server certificate by default" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+
+    const tlsServerMod = @import("../protocols/tls/tlsServer.zig");
+    const certPem = @embedFile("../protocols/tls/testdata/localhostCert.pem");
+    const keyPem = @embedFile("../protocols/tls/testdata/localhostKey.pem");
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io, cert: []const u8, key: []const u8) void {
+            var conn = lst.accept(io2) catch return;
+            defer conn.close();
+            var server = tlsServerMod.Server.init(std.heap.page_allocator, io2, .{
+                .certificatePem = cert,
+                .privateKeyPem = key,
+            }) catch return;
+            defer server.deinit();
+            var tlsConn = server.accept(&conn) catch return;
+            defer tlsConn.deinit();
+            var requestByte: [1]u8 = undefined;
+            _ = tlsConn.read(&requestByte) catch {};
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io, certPem, keyPem });
+    defer thread.join();
+
+    var client = Client.init(a, ctx.io, .{});
+    defer client.deinit();
+    var urlBuf: [96]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "https://localhost:{d}/", .{port});
+    try std.testing.expectError(error.TlsCertificateNotVerified, client.get(url, .{
+        .httpVersion = .http11,
+        .timeoutMs = 5_000,
+    }));
 }
 
 test "client get over https negotiates h2 end to end" {

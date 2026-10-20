@@ -93,8 +93,8 @@ pub fn parseAddrString(s: []const u8, port: u16) ?addressMod.Address {
 }
 
 /// TLS verification policy for one request.
-/// Secure by construction: an https:// request WITHOUT `tls` options fails
-/// with TlsConfigRequired instead of silently skipping verification.
+/// Secure by construction: HTTPS defaults to system trust verification and
+/// rejects TLS truncation unless the caller explicitly opts in.
 pub const TlsOptions = struct {
     verify: tlsTransport.VerifyMode = .caBundle,
     /// CA bundle required when verify == .caBundle.
@@ -109,7 +109,7 @@ pub const TlsOptions = struct {
     /// Client private key (PEM, P-256 ECDSA) for `clientCertPem`.
     clientKeyPem: ?[]const u8 = null,
     /// Only safe when the caller validates completeness via framing.
-    allowTruncation: bool = true,
+    allowTruncation: bool = false,
 };
 
 /// Early data (0-RTT) options for TLS 1.3 / QUIC / HTTP/3.
@@ -556,7 +556,7 @@ fn h3DoRequest(
     if (!haveDest) return Error.DnsFailed;
     const dest = destAddr.toStd(null);
 
-    const t = tlsOpts orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true };
+    const t = tlsOpts orelse TlsOptions{};
     var conn = quicConn.Connection.init(a, io, .client, .{}) catch return Error.OutOfMemory;
     defer conn.deinit();
     var ep = quicEp.Endpoint.init(a, io, conn, .{}) catch return Error.ConnectFailed;
@@ -764,7 +764,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         const isTls = std.ascii.eqlIgnoreCase(u.scheme, "https");
         if (!isTls and !std.ascii.eqlIgnoreCase(u.scheme, "http")) return Error.InvalidUrl;
         // Auto-enable TLS for HTTPS with safe default verification (.caBundle).
-        var tlsOpts = if (isTls) req.tls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
+        var tlsOpts = if (isTls) req.tls orelse TlsOptions{} else null;
         if (credentialsStripped) {
             if (tlsOpts) |*opts| {
                 opts.clientCertPem = null;
@@ -1111,7 +1111,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             // wrapper has no ALPN hook, so explicit h2 uses the native
             // client transport. A server that does not select h2 fails
             // loudly instead of being silently downgraded.
-            const tlsOptsH2 = tlsOpts orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true };
+            const tlsOptsH2 = tlsOpts orelse TlsOptions{};
             // No second acquire here: the pre-dial fast path above already
             // tried. A concurrent park racing our dial simply becomes an
             // extra (correct, capped-at-park) connection — never a leak,
@@ -2739,6 +2739,7 @@ test "filterRedirectHeaders leaves original authorization data untouched" {
 test "https auto-enables tls with secure caBundle verification when no explicit options provided" {
     const isTls = true;
     const reqTls: ?TlsOptions = null;
-    const tlsOpts: ?TlsOptions = if (isTls) reqTls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
+    const tlsOpts: ?TlsOptions = if (isTls) reqTls orelse TlsOptions{} else null;
     try std.testing.expectEqual(.caBundle, tlsOpts.?.verify);
+    try std.testing.expect(!tlsOpts.?.allowTruncation);
 }

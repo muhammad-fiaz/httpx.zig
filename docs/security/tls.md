@@ -25,7 +25,7 @@ const response = try client.get("https://localhost:8443", .{
 });
 ```
 
-In production, leave `.verify = .caBundle` (the default) to validate against system root trust anchors.
+The HTTP client uses `.verify = .caBundle` by default and validates against system root trust anchors, even when no TLS options are supplied. TLS truncation is rejected by default; only enable `allowTruncation` when the application validates response completeness through message framing. Set `.verify = .none` only for controlled tests or development.
 
 ## Related
 
