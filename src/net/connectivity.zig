@@ -16,8 +16,6 @@
 //!   - Google 8.8.8.8 public resolver: https://dns.google
 
 const std = @import("std");
-const builtin = @import("builtin");
-const tcp = @import("../sockets/tcp.zig");
 const addressMod = @import("address.zig");
 
 /// Options controlling the connectivity probe.
@@ -98,11 +96,13 @@ const clock = @import("../common/clock.zig");
 
 /// Probe a single endpoint. Returns the latency in ms on success, or null.
 fn probeOne(io: std.Io, probe: Probe, timeoutMs: u32) ?u32 {
-    _ = timeoutMs; // We rely on the OS default connect timeout for now.
     const addr = parseIpLiteral(probe.ip, probe.port, probe.family) orelse return null;
     const t0 = clock.monotonicMillis();
-    const sock = tcp.connectAddress(io, &addr) catch return null;
-    sock.close();
+    const stream = addr.toStd(null).connect(io, .{
+        .mode = .stream,
+        .timeout = .{ .duration = .fromMilliseconds(timeoutMs) },
+    }) catch return null;
+    stream.close(io);
     const elapsed = clock.monotonicMillis() - t0;
     return @intCast(@max(0, elapsed));
 }
