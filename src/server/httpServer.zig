@@ -1259,6 +1259,8 @@ pub const Server = struct {
 
         // Initialize HTTP/2 session
         var session = try @import("../protocols/http2/connection.zig").Session.init(self.allocator, .server, .{});
+        session.localSettings.maxHeaderListSize = 64 * 1024;
+        session.hdec.maxHeaderList = 64 * 1024;
         defer session.deinit();
         try session.startHandshake();
         conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
@@ -1281,6 +1283,8 @@ pub const Server = struct {
             path: std.ArrayList(u8) = .empty,
             hdrs: std.ArrayList(transportMod.Header) = .empty,
             body: std.ArrayList(u8) = .empty,
+            bodyTooLarge: bool = false,
+            maxBody: usize,
             dispatched: bool = false,
             responded: bool = true,
 
@@ -1290,6 +1294,7 @@ pub const Server = struct {
                 s.path.clearRetainingCapacity();
                 s.hdrs.clearRetainingCapacity();
                 s.body.clearRetainingCapacity();
+                s.bodyTooLarge = false;
                 s.dispatched = false;
                 s.responded = false;
             }
@@ -1314,14 +1319,24 @@ pub const Server = struct {
             fn onData(ctxP: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
                 const s: *@This() = @ptrCast(@alignCast(ctxP.?));
                 if (sid != s.sid) return;
+                if (data.len > s.maxBody -| s.body.items.len) {
+                    s.bodyTooLarge = true;
+                    return;
+                }
                 try s.body.appendSlice(s.arena, data);
             }
-        }{ .arena = arenaState.allocator() };
+
+            fn onStreamEnd(ctxP: ?*anyopaque, sid: u31) anyerror!void {
+                const s: *@This() = @ptrCast(@alignCast(ctxP.?));
+                if (sid == s.sid) s.dispatched = true;
+            }
+        }{ .arena = arenaState.allocator(), .maxBody = self.cfg.maxBody };
 
         session.cbs = .{
             .ctx = &sc,
             .onHeaders = @TypeOf(sc).onHeaders,
             .onData = @TypeOf(sc).onData,
+            .onStreamEnd = @TypeOf(sc).onStreamEnd,
         };
 
         var buf: [16 * 1024]u8 = undefined;
@@ -1333,7 +1348,10 @@ pub const Server = struct {
             }
             if (sc.dispatched and !sc.responded) {
                 sc.responded = true;
-                var resp = H2Bridge.handle(arenaState.allocator(), self, isTlsConn, sc.method.items, sc.path.items, sc.hdrs.items, sc.body.items) catch transportMod.HandlerResponse{ .status = 500 };
+                var resp = if (sc.bodyTooLarge)
+                    transportMod.HandlerResponse{ .status = 413 }
+                else
+                    H2Bridge.handle(arenaState.allocator(), self, isTlsConn, sc.method.items, sc.path.items, sc.hdrs.items, sc.body.items) catch transportMod.HandlerResponse{ .status = 500 };
 
                 // The same content coding the HTTP/1 path applies, so one
                 // handler behaves identically across protocol versions.
@@ -1478,20 +1496,28 @@ pub const Server = struct {
 
         const Acc = struct {
             allocator: Allocator,
+            maxBytes: usize,
             sid: u64 = std.math.maxInt(u64),
             buf: std.ArrayList(u8) = .empty,
             fin: bool = false,
+            tooLarge: bool = false,
 
             fn onStream(c: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
                 const acc: *@This() = @ptrCast(@alignCast(c.?));
                 if (acc.sid == std.math.maxInt(u64) and sid % 4 == 0) acc.sid = sid;
                 if (sid != acc.sid) return;
+                if (data.len > acc.maxBytes -| acc.buf.items.len) {
+                    acc.tooLarge = true;
+                    return;
+                }
                 acc.buf.appendSlice(acc.allocator, data) catch return;
                 if (fin) acc.fin = true;
             }
         };
 
-        var acc = Acc{ .allocator = self.allocator };
+        const maxH3Overhead = 64 * 1024;
+        const maxH3Request = std.math.add(usize, self.cfg.maxBody, maxH3Overhead) catch std.math.maxInt(usize);
+        var acc = Acc{ .allocator = self.allocator, .maxBytes = maxH3Request };
         defer acc.buf.deinit(self.allocator);
         qconn.cbs = .{ .ctx = &acc, .onStreamData = Acc.onStream };
 
@@ -1500,6 +1526,7 @@ pub const Server = struct {
             const nowMs: u64 = @intCast(clock.monotonicMillis());
             if (nowMs -| startMs > 10_000) return error.Timeout;
             try quicHs.feedPumped(ep, pump, null, 200, nowMs);
+            if (acc.tooLarge) return error.PayloadTooLarge;
             if (!acc.fin) continue;
 
             var off: usize = 0;
@@ -1522,6 +1549,7 @@ pub const Server = struct {
                 } else |_| break;
             }
             const reqBody = reqBodyList.items;
+            if (reqBody.len > self.cfg.maxBody) return error.PayloadTooLarge;
 
             var ctxHdrs = try a.alloc(routerMod.Header, fields.len);
             var hdrCount: usize = 0;

@@ -42,7 +42,12 @@ pub const Error = frameMod.Error || hpackMod.Error || streamMod.Stream.RecvError
 pub const DEFAULT_HEADER_TABLE_SIZE: u32 = 4096;
 pub const DEFAULT_MAX_CONCURRENT: u32 = 100;
 pub const DEFAULT_INITIAL_WINDOW: u32 = 65535;
-pub const DEFAULT_MAX_HEADER_LIST: u32 = 0xFFFFFFFF;
+/// Finite decoded header-list budget applied to both complete and continued
+/// field blocks. This also bounds wire bytes retained before HPACK decoding.
+pub const DEFAULT_MAX_HEADER_LIST: u32 = 64 * 1024;
+/// Independent cap for encoded HEADERS plus CONTINUATION bytes retained
+/// before HPACK decoding. SETTINGS_MAX_HEADER_LIST_SIZE covers decoded size.
+pub const DEFAULT_MAX_HEADER_BLOCK_BYTES: usize = 256 * 1024;
 
 /// One direction of SETTINGS.
 pub const Settings = struct {
@@ -122,6 +127,7 @@ pub const Session = struct {
 
     /// END_STREAM flag carried by an in-progress HEADERS/CONTINUATION chain.
     continuationEndStream: bool = false,
+    maxHeaderBlockBytes: usize = DEFAULT_MAX_HEADER_BLOCK_BYTES,
     /// Last stream ID accepted by the peer's most recent GOAWAY.
     goawayLastStream: ?u31 = null,
 
@@ -371,6 +377,7 @@ pub const Session = struct {
     }
 
     fn handleHeadersStart(self: *Session, sid: u31, block: []const u8, endHeaders: bool, endStream: bool) Error!void {
+        if (block.len > self.maxHeaderBlockBytes) return self.connError(.enhanceYourCalm);
         var st: *Stream = blk: {
             if (self.streamPtr(sid)) |existing| break :blk existing;
             if (self.goawayLastStream) |last| {
@@ -419,6 +426,8 @@ pub const Session = struct {
     fn handleContinuation(self: *Session, sid: u31, block: []const u8, endHeaders: bool) Error!void {
         const st = self.continuationStream orelse return self.connError(.protocolError);
         if (st.id != sid) return self.connError(.protocolError);
+        const accumulated = st.headerBlock.?.items.len;
+        if (block.len > self.maxHeaderBlockBytes -| accumulated) return self.connError(.enhanceYourCalm);
         st.headerBlock.?.appendSlice(self.allocator, block) catch return Error.OutOfMemory;
         if (!endHeaders) return;
 
@@ -940,4 +949,15 @@ test "validatePseudoHeaders rejects uppercase, forbidden headers and mixed pseud
         .{ .name = ":method", .value = "GET" },
     };
     try std.testing.expect(!Session.validatePseudoHeaders(&badMixed));
+}
+
+test "continued header blocks are rejected before exceeding configured budget" {
+    var session = try Session.init(std.testing.allocator, .server, .{});
+    defer session.deinit();
+    session.maxHeaderBlockBytes = 5;
+
+    try session.handleHeadersStart(1, "1234", false, false);
+    try std.testing.expectError(Error.ProtocolViolation, session.handleContinuation(1, "56", true));
+    try std.testing.expect(session.closed);
+    try std.testing.expect(session.streamPtr(1).?.headerBlock.?.items.len <= 5);
 }

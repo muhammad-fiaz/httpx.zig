@@ -216,6 +216,22 @@ pub const Stream = struct {
         };
         if (fin) self.fin = true;
         self.parse();
+        self.compactConsumed();
+        if (self.done or self.failed) {
+            self.buf.deinit(self.allocator);
+            self.buf = .empty;
+            self.off = 0;
+        }
+    }
+
+    /// Drop bytes already parsed so a long lived request stream does not
+    /// retain its full history after each feed.
+    fn compactConsumed(self: *Stream) void {
+        if (self.off == 0) return;
+        const remaining = self.buf.items.len - self.off;
+        if (remaining > 0) std.mem.copyForwards(u8, self.buf.items[0..remaining], self.buf.items[self.off..]);
+        self.buf.items.len = remaining;
+        self.off = 0;
     }
 
     /// Retries a section parked on `error.Blocked` after encoder-stream
@@ -663,6 +679,21 @@ pub const Stream = struct {
         return null;
     }
 };
+
+test "HTTP/3 stream releases consumed bytes after incremental feed" {
+    const a = std.testing.allocator;
+    var qdec = qpackMod.Decoder.init(a);
+    defer qdec.deinit();
+    var qenc = qpackMod.Encoder.init(a);
+    defer qenc.deinit();
+    var stream = Stream.init(a, 3, .uni, .client, .{}, &qdec, &qenc);
+    defer stream.deinit();
+
+    stream.feed(&.{ 0x21, 'a', 'b', 'c' }, false);
+    try std.testing.expectEqual(@as(usize, 0), stream.buf.items.len);
+    try std.testing.expectEqual(@as(usize, 0), stream.off);
+    try std.testing.expectEqual(@as(u64, 3), stream.unknownSkipped);
+}
 
 // Tests
 
