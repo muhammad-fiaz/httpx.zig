@@ -1690,7 +1690,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
     }
 
     var body: std.ArrayList(u8) = .empty;
-    errdefer body.deinit(a);
+    defer body.deinit(a);
     if (acc.items.len - headEnd > maxSize) return Error.ResponseTooLarge;
     try body.appendSlice(a, acc.items[headEnd..]);
 
