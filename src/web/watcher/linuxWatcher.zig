@@ -75,13 +75,15 @@ pub const Backend = struct {
     /// wd -> watched directory path (owned).
     watches: std.AutoHashMap(i32, []u8),
     root: []u8 = &.{},
+    recursive: bool = true,
     dirty: bool = false,
 
-    pub fn init(allocator: Allocator, io: std.Io, root: []const u8) !Backend {
+    pub fn init(allocator: Allocator, io: std.Io, root: []const u8, recursive: bool) !Backend {
         var self = Backend{
             .allocator = allocator,
             .io = io,
             .watches = std.AutoHashMap(i32, []u8).init(allocator),
+            .recursive = recursive,
         };
         errdefer self.deinit();
         self.fd = try syscallFd(linux.inotify_init1(IN_NONBLOCK | IN_CLOEXEC));
@@ -120,6 +122,7 @@ pub const Backend = struct {
 
     fn watchRecursive(self: *Backend, root: []const u8) !void {
         self.watchDir(root);
+        if (!self.recursive) return;
         const cwd: std.Io.Dir = .cwd();
         var dir = cwd.openDir(self.io, root, .{ .iterate = true }) catch return;
         defer dir.close(self.io);
@@ -212,7 +215,7 @@ pub const Backend = struct {
         else
             null;
         const kind = baseKind orelse return;
-        if (kind == .created and isDir) {
+        if (kind == .created and isDir and self.recursive) {
             var buf: [1024]u8 = undefined;
             if (std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, name }) catch null) |full| {
                 self.watchDir(full);
@@ -243,7 +246,7 @@ test "inotify backend watches and reports a write" {
         const cwd: std.Io.Dir = .cwd();
         cwd.deleteDir(io, root) catch {};
     }
-    var backend = try Backend.init(a, io, root);
+    var backend = try Backend.init(a, io, root, true);
     defer backend.deinit();
     const fpath = try std.fmt.allocPrint(a, "{s}/w.txt", .{root});
     defer a.free(fpath);
@@ -258,4 +261,38 @@ test "inotify backend watches and reports a write" {
     }
     try std.testing.expect(evs.len > 0);
     try std.testing.expect(!backend.dirty);
+}
+
+test "inotify backend honors non-recursive mode" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const cwd: std.Io.Dir = .cwd();
+    const root = ".zig-cache/tmp-inotify-nonrecursive";
+    const nested = ".zig-cache/tmp-inotify-nonrecursive/sub";
+    cwd.createDir(io, ".zig-cache", .default_dir) catch {};
+    cwd.createDir(io, root, .default_dir) catch {};
+    defer {
+        cwd.deleteFile(io, ".zig-cache/tmp-inotify-nonrecursive/sub/file.txt") catch {};
+        cwd.deleteDir(io, nested) catch {};
+        cwd.deleteDir(io, root) catch {};
+    }
+
+    var backend = try Backend.init(a, io, root, false);
+    defer backend.deinit();
+    try cwd.createDir(io, nested, .default_dir);
+    const dirEvents = try backend.poll(a, 2000);
+    defer {
+        for (dirEvents) |*e| e.deinit(a);
+        a.free(dirEvents);
+    }
+    try std.testing.expect(dirEvents.len > 0);
+    const fsMod = @import("../../utils/fs.zig");
+    try fsMod.writeFile(".zig-cache/tmp-inotify-nonrecursive/sub/file.txt", "nested");
+    const evs = try backend.poll(a, 50);
+    defer {
+        for (evs) |*e| e.deinit(a);
+        a.free(evs);
+    }
+    try std.testing.expectEqual(@as(usize, 0), evs.len);
 }

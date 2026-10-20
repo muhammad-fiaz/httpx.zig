@@ -284,17 +284,17 @@ pub const Watcher = struct {
         }
         if (self.config.dirPath.len == 0) return;
         if (builtin.os.tag == .windows) {
-            self.native = windows.Backend.init(self.allocator, self.config.dirPath) catch |err| {
+            self.native = windows.Backend.init(self.allocator, self.config.dirPath, self.config.recursive) catch |err| {
                 self.nativeFailed = true;
                 return err;
             };
         } else if (builtin.os.tag == .linux) {
-            self.native = linux.Backend.init(self.allocator, self.io, self.config.dirPath) catch |err| {
+            self.native = linux.Backend.init(self.allocator, self.io, self.config.dirPath, self.config.recursive) catch |err| {
                 self.nativeFailed = true;
                 return err;
             };
         } else {
-            self.native = macos.Backend.init(self.allocator, self.io, self.config.dirPath) catch |err| {
+            self.native = macos.Backend.init(self.allocator, self.io, self.config.dirPath, self.config.recursive) catch |err| {
                 self.nativeFailed = true;
                 return err;
             };

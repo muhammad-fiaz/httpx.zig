@@ -118,11 +118,12 @@ pub const Backend = struct {
     buf: [65536]u8 align(@alignOf(u32)) = undefined,
     readPending: bool = false,
     root: []u8 = &.{},
+    recursive: bool = true,
     dirty: bool = false,
     reading: std.atomic.Value(bool) = .init(false),
 
-    pub fn init(allocator: Allocator, root: []const u8) !Backend {
-        var self = Backend{ .allocator = allocator };
+    pub fn init(allocator: Allocator, root: []const u8, recursive: bool) !Backend {
+        var self = Backend{ .allocator = allocator, .recursive = recursive };
         errdefer self.deinit();
         self.root = try allocator.dupe(u8, root);
         const wroot = try toLongWPath(allocator, root);
@@ -195,7 +196,7 @@ pub const Backend = struct {
                 self.dirHandle,
                 &self.buf,
                 self.buf.len,
-                @fromBackingInt(@intCast(1)),
+                @fromBackingInt(@intCast(@intFromBool(self.recursive))),
                 FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
                     FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
                     FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_CREATION,
@@ -379,7 +380,7 @@ test "rdc backend watches its root and reports a write" {
         const cwd: std.Io.Dir = .cwd();
         cwd.deleteDir(io, root) catch {};
     }
-    var backend = try Backend.init(a, root);
+    var backend = try Backend.init(a, root, true);
     defer backend.deinit();
     // Prime the read first: ReadDirectoryChangesW is edge-triggered and
     // only reports changes made after the call starts.
