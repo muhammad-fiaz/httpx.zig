@@ -1,29 +1,28 @@
 # HTTP/3 Protocol
 
-httpx.zig provides a complete, from-scratch implementation of HTTP/3 protocol primitives (RFC 9114) including QPACK header compression (RFC 9204) and QUIC transport framing (RFC 9000), plus high-level client/server runtime paths.
+httpx.zig provides HTTP/3 framing and QPACK primitives (RFC 9114, RFC 9204), a QUIC transport, and high-level client/server runtime paths.
 
 ::: warning Custom Implementation
 Zig's standard library does not provide HTTP/3 or QUIC support. **httpx.zig implements these protocols entirely from scratch**, following RFC 9114, RFC 9204, and RFC 9000 specifications, including:
 - **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
-- **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, version negotiation, and transport parameters
+- **QUIC** transport frame encoding/decoding (RFC 9000), TLS 1.3 handshake, RESET_STREAM/STOP_SENDING, and transport parameters
 - **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling
-- **Interop note:** strict TLS-in-QUIC server negotiation expectations may vary by endpoint deployment
+- **Limits:** no packet-loss recovery, congestion control, Retry/token round trip, or QUIC version negotiation. Use on reliable paths such as loopback and LAN; lossy network connections may time out.
 :::
 
 ## Platform Support
 
-HTTP/3 support is validated across Linux, Windows, and macOS targets:
+The HTTP/3 runtime has loopback integration coverage on the native test host. Cross-compilation checks establish that selected targets compile; they do not establish runtime support on those systems:
 
-| Platform | Architecture | Status |
-|----------|--------------|--------|
-| Linux    | x86_64, aarch64, x86 | ✅ |
-| Windows  | x86_64, aarch64, x86 | ✅ |
-| macOS    | x86_64, aarch64 | ✅ |
+| Target | Evidence |
+|--------|----------|
+| Native test host | Runtime loopback tests |
+| Other targets | Compile/link status only; runtime behavior not established here |
 
 ## Features
 
-- **High-level Client Runtime** - `Client` executes real requests over HTTP/3: `client.get("https://host/", .{ .httpVersion = .http3 })` performs a live QUIC + TLS 1.3 handshake (ALPN `h3`, verified chain) over UDP and returns the response.
-- **High-level Server Runtime** - `httpx.Server` serves HTTP/1.1, HTTP/2 and HTTP/3 from one port. Set `.http3 = true` together with a TLS identity and the server binds a UDP endpoint alongside the TCP listener; existing routes, middleware and handlers are unchanged. HTTP/3 follows the same handlers, so nothing has to be registered twice.
+- **High-level Client Runtime** - `Client` performs QUIC + TLS 1.3 with ALPN `h3` and certificate verification for supported reliable paths. Loss recovery and congestion control are not implemented.
+- **High-level Server Runtime** - `httpx.Server` can bind a UDP endpoint when `.http3 = true` and a default certificate/key identity are provided. It routes supported H3 requests through server handlers. The handshake requires that default identity; selector-only TLS configuration does not initialize the H3 endpoint.
 - **Protocol-level Server Runtime** - serve H3 over QUIC directly with `httpx.quic` (Endpoint + Pump + HandshakeDriver) and `httpx.http3` builders; see `examples/http3Client.zig` for a complete loopback server.
 
 ### Finding the HTTP/3 port

@@ -5,10 +5,11 @@
 //! binds one UDP socket; `pump()` drains the socket into the connection
 //! and flushes queued output datagrams to the last peer address seen.
 //!
-//! Scope note (honest): Initial-space packets are fully specified here —
-//! their keys derive from the DCID alone (RFC 9001 section 5.2), so endpoints can
-//! exchange protected Initial traffic without the TLS 1.3 driver. The
-//! full handshake driver remains the open item tracked separately.
+//! Initial-space packets derive their keys from the DCID (RFC 9001 section
+//! 5.2). The QUIC TLS 1.3 handshake is implemented by `handshake.zig`; the
+//! current transport still lacks loss recovery, congestion control, Retry,
+//! and version negotiation, so it is intended for reliable paths such as
+//! loopback and LAN rather than general Internet use.
 //!
 //! References:
 //!   - RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport

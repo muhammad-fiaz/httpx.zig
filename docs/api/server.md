@@ -9,7 +9,7 @@ The `httpx.zig` server module provides a robust HTTP server with middleware supp
 | HTTP/1.0 | ✅ Full | Basic request/response |
 | HTTP/1.1 | ✅ Full | Keep-Alive, chunked transfer, pipelining |
 | HTTP/2 | ✅ Full | High-level server runtime over TCP plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Full | High-level server runtime over UDP plus full HTTP/3/QPACK/QUIC primitives |
+| HTTP/3 | ⚠️ Reliable paths | High-level server runtime over UDP + QUIC/TLS 1.3; no loss recovery, congestion control, Retry, or version negotiation |
 
 ## Server
 

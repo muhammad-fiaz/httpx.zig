@@ -1,11 +1,11 @@
 # HTTP/3 Protocol
 
-> Status: live. `client.get(url, .{ .httpVersion = .http3 })` performs a
-> real QUIC + TLS 1.3 handshake (ALPN `h3`, verified chain) over UDP and
-> returns the response — verified over loopback (`run-http3-client`,
-> `566/566` tests). Reliable paths only for now (no loss recovery /
-> congestion control yet); outside its scope it fails loudly, never
-> silently downgraded. See README feature table.
+> Status: implemented for reliable paths. The high-level client performs a
+> real QUIC + TLS 1.3 handshake (ALPN `h3`, verified chain) over UDP; the
+> high-level server can serve routes over the same transport. Loopback
+> integration tests cover these paths. Packet-loss recovery, congestion
+> control, Retry/token exchange, and QUIC version negotiation are not
+> implemented, so lossy network paths can stall until timeout.
 
 ## Motivation
 
