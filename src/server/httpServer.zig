@@ -508,18 +508,18 @@ pub const Server = struct {
             // range the UDP stack will not bind. `http3.port()` reports
             // whichever port was actually taken.
             const tcpPort = listener.localPort();
+            var placeholderOwned = true;
+            errdefer if (placeholderOwned) placeholder.deinit();
             const ep = quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = tcpPort }) catch |err| blk: {
                 std.log.scoped(.httpx).warn(
                     "HTTP/3 could not bind UDP port {d} ({s}); falling back to an ephemeral port. Clients must use http3.port().",
                     .{ tcpPort, @errorName(err) },
                 );
-                break :blk quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = 0 }) catch {
-                    placeholder.deinit();
-                    return err;
-                };
+                break :blk quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = 0 }) catch return err;
             };
             h3Ep_opt = ep;
             h3Placeholder_opt = placeholder;
+            placeholderOwned = false;
         }
 
         var srv = Server{
