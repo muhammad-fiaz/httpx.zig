@@ -16,7 +16,7 @@ The HTTP/3 runtime has loopback integration coverage on the native test host. Cr
 
 | Target | Evidence |
 |--------|----------|
-| Native test host | Runtime loopback tests |
+| Windows x86_64 | Runtime loopback tests |
 | Other targets | Compile/link status only; runtime behavior not established here |
 
 ## Features

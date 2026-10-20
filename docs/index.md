@@ -23,7 +23,7 @@ hero:
 
 features:
   - title: All HTTP Versions
-    details: Full HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 client/server runtime support, plus full protocol primitives.
+    details: HTTP/1.0, HTTP/1.1, and HTTP/2 runtimes; HTTP/3 client/server runtime for reliable paths, with QUIC loss recovery and congestion control still unimplemented.
   - title: Robust Client
     details: Connection pooling, automatic retries, interceptors, typed API, and default-safe chainable config/option overrides.
   - title: Powerful Server
@@ -173,7 +173,7 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN suppor
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
 | HTTP/2 | ✅ Full | TCP/TLS | Client + server runtime (ALPN `h2` / h2c) plus framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Full | QUIC/TLS | Client + server runtime (ALPN `h3` over QUIC) plus QPACK/QUIC primitives |
+| HTTP/3 | ⚠️ Reliable paths | QUIC/TLS | Client + server runtime (ALPN `h3`); no loss recovery, congestion control, Retry, or version negotiation |
 
 ## Platform Support
 

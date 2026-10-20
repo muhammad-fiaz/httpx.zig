@@ -80,11 +80,11 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Protocol Support** | Full client + server runtime across HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3: HTTP/2 over TCP/TLS with ALPN `h2`, stream multiplexing, flow control, SETTINGS, and trailers; HTTP/3 over QUIC/UDP with native TLS 1.3, ALPN `h3`, QPACK encoder/decoder streams, dynamic table management, request/response streaming, and TLS 1.3 0-RTT early-data resumption. |
+| **Protocol Support** | HTTP/1.0, HTTP/1.1, and HTTP/2 client/server runtimes; HTTP/3 client/server runtime over QUIC/TLS 1.3 for reliable paths. HTTP/3 currently has no packet-loss recovery, congestion control, Retry/token exchange, or version negotiation. |
 | **Header Compression** | HPACK (RFC 7541) for HTTP/2; QPACK (RFC 9204) for HTTP/3 with static and dynamic table management. |
 | **HTTP/2 & HTTP/3 ALPN** | Server-side ALPN negotiation during the TLS handshake with graceful HTTP/1.1 fallback; the native client offers ALPN too, so explicit `.http2` over TLS negotiates `h2` end to end, and `.http3` over QUIC negotiates `h3` end to end. |
 | **Stream Multiplexing** | HTTP/2 and HTTP/3 stream state machines with flow control (WINDOW_UPDATE / MAX_STREAM_DATA), SETTINGS enforcement, GOAWAY/RST_STREAM, and trailers. |
-| **Connection Pooling** | Automatic reuse of TCP keep-alive connections, multiplexed HTTP/2 and HTTP/3 connections, and TLS session resumption caching. |
+| **Connection Pooling** | TCP keep-alive reuse, HTTP/2 multiplexing, and TLS session resumption caching. HTTP/3 connection reuse and pooling are not claimed here. |
 | **Unified DOM & Web Parsing** | Native parser for HTML5, XML, RSS/Atom/JSON feeds, robots.txt, and sitemaps with zero-leak arena architecture. |
 | **Streaming Downloader** | Resumable chunked file downloader powered by `loaders.zig` progress bars, ETA calculation, and hash verification. |
 | **Pattern-based Routing** | Intuitive server routing with typed parameters (`/users/{id:int}`), slugs, catch-alls, groups, mounting, named routes + reversing, 404/405 handling, and OpenAPI integration. |
