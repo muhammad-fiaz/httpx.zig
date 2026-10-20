@@ -532,7 +532,7 @@ pub const Server = struct {
             } else .{},
             .h3PlaceholderConn = h3Placeholder_opt,
             .h3Pump = null,
-            .startTimeMs = clock.millisNow(),
+            .startTimeMs = clock.monotonicMillis(),
         };
         srv.router.templateEngine = templateEngine;
         errdefer {
@@ -659,7 +659,7 @@ pub const Server = struct {
 
     /// Captures a comprehensive runtime snapshot of the server (uptime, throughput, error rate, active connections).
     pub fn snapshot(self: *const Server) metricsMod.ServerSnapshot {
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis();
         const uptime: u64 = if (self.startTimeMs > 0 and now >= self.startTimeMs)
             @intCast(now - self.startTimeMs)
         else
@@ -1460,9 +1460,9 @@ pub const Server = struct {
         defer acc.buf.deinit(self.allocator);
         qconn.cbs = .{ .ctx = &acc, .onStreamData = Acc.onStream };
 
-        const startMs: u64 = @intCast(clock.millisNow());
+        const startMs: u64 = @intCast(clock.monotonicMillis());
         while (!self.stopFlag.load(.acquire) and !self.h3Stop.load(.acquire)) {
-            const nowMs: u64 = @intCast(clock.millisNow());
+            const nowMs: u64 = @intCast(clock.monotonicMillis());
             if (nowMs -| startMs > 10_000) return error.Timeout;
             try quicHs.feedPumped(ep, pump, null, 200, nowMs);
             if (!acc.fin) continue;
@@ -1634,7 +1634,7 @@ pub const Server = struct {
     }
 
     fn serveOneRequestBuffered(self: *Server, conn: StreamConn, arena: Allocator, requestIndex: usize, forceClose: bool, initial: []const u8, isTlsConn: bool) !bool {
-        const t0 = clock.millisNow();
+        const t0 = clock.monotonicMillis();
         self.metricsRegistry.recordRequest();
         var headBuf: [maxHeadBytes]u8 = undefined;
         var filled: usize = 0;
@@ -1841,7 +1841,7 @@ pub const Server = struct {
             self.metricsRegistry.recordError();
             return false;
         };
-        const durNs: u64 = @intCast(@max(0, (clock.millisNow() -| t0) * 1_000_000));
+        const durNs: u64 = @intCast(@max(0, (clock.monotonicMillis() -| t0) * 1_000_000));
         self.metricsRegistry.recordResponseFull(res.status, durNs, bytesOut);
         self.emitAccess(reqHead.method, reqHead.path, res.status, body.len, bytesOut, t0);
         return !clientClose;
@@ -1864,7 +1864,7 @@ pub const Server = struct {
     /// Deliver a requestCompleted event to the application callback.
     /// Secrets never appear here: only method/path/status/timing/byte counts.
     fn emitAccess(self: *Server, method: []const u8, path: []const u8, status: u16, bytesIn: usize, bytesOut: usize, t0: i64) void {
-        const dur = clock.millisNow() -| t0;
+        const dur = clock.monotonicMillis() -| t0;
         self.emit(.{
             .kind = .requestCompleted,
             .level = .info,

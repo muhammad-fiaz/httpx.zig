@@ -147,7 +147,7 @@ pub const RateLimiter = struct {
             .defaultPolicy = p,
             .maxEntries = @max(1, config.maxEntries),
             .buckets = std.StringHashMap(BucketEntry).init(allocator),
-            .lastSweepMs = clock.millisNow(),
+            .lastSweepMs = clock.monotonicMillis(),
         };
     }
 
@@ -462,7 +462,7 @@ test "concurrent requests safety" {
             var keyBuf: [32]u8 = undefined;
             const key = std.fmt.bufPrint(&keyBuf, "thread:{d}", .{self.id}) catch return;
             for (0..50) |_| {
-                _ = self.limiter.check(key, clock.millisNow()) catch {};
+                _ = self.limiter.check(key, clock.monotonicMillis()) catch {};
             }
         }
     };

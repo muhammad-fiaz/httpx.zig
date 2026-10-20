@@ -314,7 +314,7 @@ pub const PooledConn = struct {
         const self = try allocator.create(PooledConn);
         errdefer allocator.destroy(self);
         const hc = try Client.connect(allocator, sock);
-        self.* = .{ .allocator = allocator, .tlsBox = null, .client = hc, .createdAtMs = clock.millisNow() };
+        self.* = .{ .allocator = allocator, .tlsBox = null, .client = hc, .createdAtMs = clock.monotonicMillis() };
         return self;
     }
 
@@ -329,7 +329,7 @@ pub const PooledConn = struct {
             allocator.destroy(box);
             return err;
         };
-        self.* = .{ .allocator = allocator, .tlsBox = box, .client = hc, .createdAtMs = clock.millisNow() };
+        self.* = .{ .allocator = allocator, .tlsBox = box, .client = hc, .createdAtMs = clock.monotonicMillis() };
         return self;
     }
 

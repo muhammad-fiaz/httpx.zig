@@ -100,10 +100,10 @@ const clock = @import("../common/clock.zig");
 fn probeOne(io: std.Io, probe: Probe, timeoutMs: u32) ?u32 {
     _ = timeoutMs; // We rely on the OS default connect timeout for now.
     const addr = parseIpLiteral(probe.ip, probe.port, probe.family) orelse return null;
-    const t0 = clock.millisNow();
+    const t0 = clock.monotonicMillis();
     const sock = tcp.connectAddress(io, &addr) catch return null;
     sock.close();
-    const elapsed = clock.millisNow() - t0;
+    const elapsed = clock.monotonicMillis() - t0;
     return @intCast(@max(0, elapsed));
 }
 

@@ -111,7 +111,7 @@ pub const Cache = struct {
     /// Resolve `name` via cache / inflight-join / fresh lookup.
     /// Caller owns returned slices.
     pub fn resolve(self: *Cache, name: []const u8) LookupError![]const []const u8 {
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis();
 
         self.mu.lock();
         if (self.entries.get(name)) |e| {
@@ -196,7 +196,7 @@ pub const Cache = struct {
                 if (self.entries.count() >= self.cfg.maxEntries) self.evictOneLocked();
                 self.entries.put(nameCopy, .{
                     .addrs = cl,
-                    .expiresAt = clock.millisNow() + self.cfg.ttlMs,
+                    .expiresAt = clock.monotonicMillis() + self.cfg.ttlMs,
                     .failed = false,
                 }) catch {
                     self.freeAddrs(cl);
@@ -241,7 +241,7 @@ pub const Cache = struct {
         if (self.entries.count() >= self.cfg.maxEntries) self.evictOneLocked();
         self.entries.put(nameOwned, .{
             .addrs = &.{},
-            .expiresAt = clock.millisNow() + self.cfg.negativeTtlMs,
+            .expiresAt = clock.monotonicMillis() + self.cfg.negativeTtlMs,
             .failed = true,
         }) catch {
             self.allocator.free(nameOwned);

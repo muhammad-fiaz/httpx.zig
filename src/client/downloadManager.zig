@@ -724,7 +724,7 @@ pub const Downloader = struct {
         url: []const u8,
         options: DownloadOptions,
     ) DownloadError!DownloadResult {
-        const startTime = clock.millisNow();
+        const startTime = clock.monotonicMillis();
 
         // 1. Resolve destination
         const dest = resolveDestination(self.allocator, options.path, url, null) catch return DownloadError.OutOfMemory;
@@ -745,13 +745,13 @@ pub const Downloader = struct {
             switch (options.existing) {
                 .fail => return DownloadError.DestinationExists,
                 .skip => {
-                    var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.millisNow() - startTime), 200);
+                    var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.monotonicMillis() - startTime), 200);
                     res.skipped = true;
                     return res;
                 },
                 .verifyExisting => {
                     if (verifyFile(dest, options.verify)) |_| {
-                        var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.millisNow() - startTime), 200);
+                        var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.monotonicMillis() - startTime), 200);
                         res.skipped = true;
                         res.verified = true;
                         return res;
@@ -841,7 +841,7 @@ pub const Downloader = struct {
             }
         }
 
-        result.elapsedMs = @intCast(clock.millisNow() - startTime);
+        result.elapsedMs = @intCast(clock.monotonicMillis() - startTime);
         return result;
     }
 
@@ -1105,8 +1105,8 @@ pub const ProgressTracker = struct {
             .url = url,
             .destination = destination,
             .options = options,
-            .startTime = clock.millisNow(),
-            .lastUpdateTime = clock.millisNow(),
+            .startTime = clock.monotonicMillis(),
+            .lastUpdateTime = clock.monotonicMillis(),
             .lastBytes = 0,
             .totalBytes = null,
             .bar = null,
@@ -1120,7 +1120,7 @@ pub const ProgressTracker = struct {
 
     pub fn start(self: *ProgressTracker, totalSize: ?u64) void {
         self.totalBytes = totalSize;
-        self.startTime = clock.millisNow();
+        self.startTime = clock.monotonicMillis();
         self.lastUpdateTime = self.startTime;
 
         const shouldRenderBar = (self.options.progress == .auto and self.isTty) or (self.options.progress == .enabled);
@@ -1171,7 +1171,7 @@ pub const ProgressTracker = struct {
     }
 
     pub fn update(self: *ProgressTracker, downloadedBytes: u64) void {
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis();
         const elapsedTotalS = @as(f64, @floatFromInt(now - self.startTime)) / 1000.0;
         const speedBps = if (elapsedTotalS > 0.01) @as(f64, @floatFromInt(downloadedBytes)) / elapsedTotalS else 0.0;
 
@@ -1223,7 +1223,7 @@ pub const ProgressTracker = struct {
                 .percentage = 100.0,
                 .speedBps = 0.0,
                 .etaSeconds = 0,
-                .elapsedMs = @intCast(@max(0, clock.millisNow() - self.startTime)),
+                .elapsedMs = @intCast(@max(0, clock.monotonicMillis() - self.startTime)),
                 .statusCode = 200,
                 .state = .completed,
             }, self.options.userData);
@@ -1241,7 +1241,7 @@ pub const ProgressTracker = struct {
                 .percentage = null,
                 .speedBps = 0.0,
                 .etaSeconds = null,
-                .elapsedMs = @intCast(@max(0, clock.millisNow() - self.startTime)),
+                .elapsedMs = @intCast(@max(0, clock.monotonicMillis() - self.startTime)),
                 .statusCode = 500,
                 .state = .failed,
             }, self.options.userData);
@@ -1259,7 +1259,7 @@ pub const ProgressTracker = struct {
                 .percentage = null,
                 .speedBps = 0.0,
                 .etaSeconds = null,
-                .elapsedMs = @intCast(@max(0, clock.millisNow() - self.startTime)),
+                .elapsedMs = @intCast(@max(0, clock.monotonicMillis() - self.startTime)),
                 .statusCode = 499,
                 .state = .cancelled,
             }, self.options.userData);
@@ -1352,7 +1352,7 @@ pub fn ftpDownload(
     allocator: Allocator,
     options: FtpDownloadOptions,
 ) DownloadError!DownloadResult {
-    const startTime = clock.millisNow();
+    const startTime = clock.monotonicMillis();
     const dest = resolveDestination(allocator, options.destinationPath, options.remotePath, null) catch return DownloadError.OutOfMemory;
     defer allocator.free(dest);
 
@@ -1438,7 +1438,7 @@ pub fn ftpDownload(
         .destination = dest,
         .downloadedBytes = ctx.written,
         .totalBytes = remoteSize,
-        .elapsedMs = @intCast(clock.millisNow() - startTime),
+        .elapsedMs = @intCast(clock.monotonicMillis() - startTime),
         .statusCode = 226,
         .verified = true,
         .sha256Hex = hasher.finalSha256Hex(),

@@ -318,7 +318,7 @@ pub const Watcher = struct {
     }
 
     fn notifyChangeFull(self: *Watcher, path: []const u8, oldPath: ?[]const u8, kind: WatchEventKind, isDir: bool) void {
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis();
         if (!self.coalescer.shouldEmit(now, path, kind)) return;
         _ = self._change_count.fetchAdd(1, .release);
 
@@ -330,7 +330,7 @@ pub const Watcher = struct {
             .kind = kind,
             .strategy = ReloadStrategy.forPath(path),
             .isDirectory = isDir,
-            .timestampMs = now,
+            .timestampMs = clock.millisNow(),
         };
 
         if (self.eventQueue.items.len >= 1024) {

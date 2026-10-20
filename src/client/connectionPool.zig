@@ -168,7 +168,7 @@ pub const Pool = struct {
             _ = self.stats.misses.fetchAdd(1, .monotonic);
             return null;
         };
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis();
         while (true) {
             self.mu.lock();
             self.sweepH2Locked(now);
@@ -210,7 +210,7 @@ pub const Pool = struct {
             client.deinit();
             return;
         }
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis();
         self.mu.lock();
         defer self.mu.unlock();
         if (!self.canParkH2Locked(key)) {
@@ -271,7 +271,7 @@ pub const Pool = struct {
             _ = self.stats.misses.fetchAdd(1, .monotonic);
             return null;
         };
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis();
         self.mu.lock();
         defer self.mu.unlock();
 
@@ -342,7 +342,7 @@ pub const Pool = struct {
             socket.drainThenClose();
             return;
         };
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis();
         self.mu.lock();
         defer self.mu.unlock();
 
@@ -394,7 +394,7 @@ pub const Pool = struct {
 
     /// Drop stale/expired entries opportunistically (plain and H2).
     pub fn sweepExpired(self: *Pool) void {
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis();
         self.mu.lock();
         self.sweepH2Locked(now);
         var i: usize = 0;
