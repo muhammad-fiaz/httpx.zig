@@ -52,6 +52,7 @@ pub const SessionCache = struct {
         host: [64]u8,
         hostLen: u8,
         port: u16,
+        policyHash: [32]u8,
         session: ClientSession,
     };
 
@@ -71,16 +72,22 @@ pub const SessionCache = struct {
     /// Returns an owned duplicate of the usable session for this origin,
     /// or null. Caller owns the result (`deinit` with an allocator).
     pub fn get(self: *SessionCache, host: []const u8, port: u16, nowMs: u64) ?ClientSession {
-        return self.getWithAlpn(host, port, nowMs, null);
+        return self.getWithAlpnPolicy(host, port, nowMs, null, @as([32]u8, @splat(0)));
     }
 
     /// Returns an owned duplicate of the usable session matching origin and ALPN (if requested).
     pub fn getWithAlpn(self: *SessionCache, host: []const u8, port: u16, nowMs: u64, targetAlpn: ?[]const u8) ?ClientSession {
+        return self.getWithAlpnPolicy(host, port, nowMs, targetAlpn, @as([32]u8, @splat(0)));
+    }
+
+    /// Same as `getWithAlpn`, additionally requiring an exact trust and
+    /// client identity policy fingerprint match.
+    pub fn getWithAlpnPolicy(self: *SessionCache, host: []const u8, port: u16, nowMs: u64, targetAlpn: ?[]const u8, policyHash: [32]u8) ?ClientSession {
         if (host.len == 0 or host.len > 64) return null;
         self.mu.lock();
         defer self.mu.unlock();
         for (self.entries.items) |*e| {
-            if (e.port == port and e.hostLen == host.len and
+            if (e.port == port and std.mem.eql(u8, &e.policyHash, &policyHash) and e.hostLen == host.len and
                 std.mem.eql(u8, e.host[0..e.hostLen], host))
             {
                 if (!e.session.isUsableWithAlpn(host, nowMs, targetAlpn)) return null;
@@ -93,12 +100,17 @@ pub const SessionCache = struct {
     /// Stores an owned copy. Evicts the oldest entry when full. The
     /// caller's `session` is NOT consumed.
     pub fn put(self: *SessionCache, host: []const u8, port: u16, session: *const ClientSession) void {
+        self.putWithPolicy(host, port, session, @as([32]u8, @splat(0)));
+    }
+
+    /// Stores a ticket under its verification and client identity policy.
+    pub fn putWithPolicy(self: *SessionCache, host: []const u8, port: u16, session: *const ClientSession, policyHash: [32]u8) void {
         if (host.len == 0 or host.len > 64) return;
         self.mu.lock();
         defer self.mu.unlock();
         // Replace any existing entry for this origin outright.
         for (self.entries.items) |*e| {
-            if (e.port == port and e.hostLen == host.len and
+            if (e.port == port and std.mem.eql(u8, &e.policyHash, &policyHash) and e.hostLen == host.len and
                 std.mem.eql(u8, e.host[0..e.hostLen], host))
             {
                 const fresh = session.dupe(self.allocator) catch return;
@@ -120,6 +132,7 @@ pub const SessionCache = struct {
             .host = (@as([64]u8, @splat(0))),
             .hostLen = @intCast(host.len),
             .port = port,
+            .policyHash = policyHash,
             .session = fresh,
         };
         @memcpy(entry.host[0..host.len], host);

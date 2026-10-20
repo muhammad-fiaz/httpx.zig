@@ -565,8 +565,9 @@ fn h3DoRequest(
     const nowMs: u64 = @intCast(clockMod.millisNow());
     var sessionToResume: ?tlsSession.ClientSession = null;
     defer if (sessionToResume) |*s| s.deinit(a);
+    const sessionPolicy = sessionPolicyFingerprint(t);
     if (req.sessionCache) |sc| {
-        sessionToResume = sc.getWithAlpn(host, port, nowMs, "h3");
+        sessionToResume = sc.getWithAlpnPolicy(host, port, nowMs, "h3", sessionPolicy);
     }
 
     const isMethodSafe = req.method == .GET or req.method == .HEAD or req.method == .OPTIONS;
@@ -608,7 +609,7 @@ fn h3DoRequest(
 
     if (capturedSession.ticket.len > 0) {
         if (req.sessionCache) |sc| {
-            sc.put(host, port, &capturedSession);
+            sc.putWithPolicy(host, port, &capturedSession, sessionPolicy);
         }
     }
 
@@ -1128,8 +1129,9 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             // lane). The cache hands out an owned duplicate; it is freed
             // once the handshake consumed it.
             const nowMs: u64 = @intCast(clockMod.millisNow());
+            const sessionPolicy = sessionPolicyFingerprint(tlsOptsH2);
             var offered: ?tlsSession.ClientSession = if (req.sessionCache) |sc|
-                sc.get(hostCopy[0..hl], port, nowMs)
+                sc.getWithAlpnPolicy(hostCopy[0..hl], port, nowMs, "h2", sessionPolicy)
             else
                 null;
             defer if (offered) |*s| s.deinit(a);
@@ -1176,7 +1178,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 if (pc.takeSession()) |taken| {
                     var owned = taken;
                     defer owned.deinit(a);
-                    sc.put(hostCopy[0..hl], port, &owned);
+                    sc.putWithPolicy(hostCopy[0..hl], port, &owned, sessionPolicy);
                 }
             }
             if (req.proxy == null) {
@@ -1291,6 +1293,10 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 a.free(next);
                 return resp;
             };
+            if (isSecureDowngrade(u.scheme, nextUri.scheme)) {
+                a.free(next);
+                return resp;
+            }
             const wasSameOrigin = sameOrigin(&u, &nextUri);
             var nextMethod = method;
             var nextBodyStripped = bodyStripped;
@@ -1944,6 +1950,32 @@ fn sameOrigin(base: *const uriMod.Uri, target: *const uriMod.Uri) bool {
         base.effectivePort() == target.effectivePort();
 }
 
+fn isSecureDowngrade(fromScheme: []const u8, toScheme: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(fromScheme, "https") and
+        std.ascii.eqlIgnoreCase(toScheme, "http");
+}
+
+/// Resumption authenticates possession of the cached PSK but omits a new
+/// certificate chain. The exact verification policy and client identity
+/// therefore participate in the cache key, so a ticket created under one
+/// policy cannot satisfy a request using another.
+pub fn sessionPolicyFingerprint(opts: TlsOptions) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(std.mem.asBytes(&opts.verify));
+    const bundleAddress: usize = if (opts.caBundle) |bundle| @intFromPtr(bundle) else 0;
+    hash.update(std.mem.asBytes(&bundleAddress));
+    updateSessionPolicyPart(&hash, opts.caPem);
+    updateSessionPolicyPart(&hash, opts.clientCertPem);
+    updateSessionPolicyPart(&hash, opts.clientKeyPem);
+    return hash.finalResult();
+}
+
+fn updateSessionPolicyPart(hash: *std.crypto.hash.sha2.Sha256, part: ?[]const u8) void {
+    const len: u64 = if (part) |bytes| bytes.len else std.math.maxInt(u64);
+    hash.update(std.mem.asBytes(&len));
+    if (part) |bytes| hash.update(bytes);
+}
+
 fn filterRedirectHeaders(a: Allocator, hdrs: []const Header, stripCredentials: bool, stripBody: bool) ![]Header {
     var filtered: std.ArrayList(Header) = .empty;
     errdefer filtered.deinit(a);
@@ -2579,6 +2611,20 @@ test "redirect origin comparison includes scheme host and effective port" {
     try std.testing.expect(sameOrigin(&base, &defaultPort));
     try std.testing.expect(!sameOrigin(&base, &otherPort));
     try std.testing.expect(!sameOrigin(&base, &otherScheme));
+}
+
+test "HTTPS redirects cannot downgrade to plaintext" {
+    try std.testing.expect(isSecureDowngrade("https", "http"));
+    try std.testing.expect(isSecureDowngrade("HTTPS", "HTTP"));
+    try std.testing.expect(!isSecureDowngrade("http", "https"));
+}
+
+test "TLS session policy fingerprint binds verification and client identity" {
+    const base = sessionPolicyFingerprint(.{});
+    try std.testing.expectEqualSlices(u8, &base, &sessionPolicyFingerprint(.{}));
+    try std.testing.expect(!std.mem.eql(u8, &base, &sessionPolicyFingerprint(.{ .verify = .none })));
+    try std.testing.expect(!std.mem.eql(u8, &base, &sessionPolicyFingerprint(.{ .caPem = "custom ca" })));
+    try std.testing.expect(!std.mem.eql(u8, &base, &sessionPolicyFingerprint(.{ .clientCertPem = "cert" })));
 }
 
 test "cross-origin redirect strips credential options without mutating caller headers" {

@@ -3064,7 +3064,8 @@ test "client get over http3 with 0-rtt early data resumes session" {
     try std.testing.expectEqualStrings("initial-1rtt", res1.body);
 
     // Verify session was captured in client session cache
-    var cached = client.sessionCache.getWithAlpn("127.0.0.1", port, @intCast(clock.millisNow()), "h3");
+    const cachePolicy = req.sessionPolicyFingerprint(.{ .verify = .caBundle, .caPem = certPem });
+    var cached = client.sessionCache.getWithAlpnPolicy("127.0.0.1", port, @intCast(clock.millisNow()), "h3", cachePolicy);
     try std.testing.expect(cached != null);
     if (cached) |*c| {
         c.deinit(a);
