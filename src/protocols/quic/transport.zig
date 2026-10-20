@@ -83,14 +83,14 @@ pub const Pump = struct {
     /// field is never shared across threads. Polls at ~1ms granularity;
     /// never blocks past the deadline.
     pub fn next(self: *Pump, deadlineMs: u64) !?Deliverable {
-        const t0: u64 = @intCast(clockMod.millisNow());
+        const t0: u64 = @intCast(clockMod.monotonicMillis());
         while (true) {
             if (self.dead.load(.acquire)) return error.PumpStopped;
             self.mu.lock();
             const item = self.queue.pop();
             self.mu.unlock();
             if (item) |q| return .{ .data = q.data, .from = q.from };
-            const now: u64 = @intCast(clockMod.millisNow());
+            const now: u64 = @intCast(clockMod.monotonicMillis());
             if (now -| t0 >= deadlineMs) return null;
             clockMod.sleepMillis(1);
         }

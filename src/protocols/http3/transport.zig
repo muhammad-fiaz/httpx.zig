@@ -137,7 +137,7 @@ pub const Client = struct {
         self.maxBytes = @min(maxBytes, 64 * 1024 * 1024);
         const a = self.allocator;
         self.ep.conn.cbs = .{ .ctx = self, .onStreamData = onStream };
-        try self.setupStreams(@intCast(clockMod.millisNow()));
+        try self.setupStreams(@intCast(clockMod.monotonicMillis()));
         _ = try self.ep.flush(dest);
 
         const sid = self.h3.nextBidiStreamId();
@@ -153,7 +153,7 @@ pub const Client = struct {
 
         const hasBody = body != null and body.?.len > 0;
         if (!hasBody) {
-            try sendStream(self.ep.conn, sid, 0, head, true, @intCast(clockMod.millisNow()));
+            try sendStream(self.ep.conn, sid, 0, head, true, @intCast(clockMod.monotonicMillis()));
             _ = try self.ep.flush(dest);
         } else {
             const bodyBytes = body.?;
@@ -161,7 +161,7 @@ pub const Client = struct {
             defer a.free(dhead);
 
             var streamOff: u64 = 0;
-            try sendStream(self.ep.conn, sid, streamOff, head, false, @intCast(clockMod.millisNow()));
+            try sendStream(self.ep.conn, sid, streamOff, head, false, @intCast(clockMod.monotonicMillis()));
             streamOff += head.len;
             _ = try self.ep.flush(dest);
 
@@ -172,16 +172,16 @@ pub const Client = struct {
                 const chunkEnd = @min(bodyCursor + maxChunkSize, dhead.len);
                 const chunk = dhead[bodyCursor..chunkEnd];
                 const isFinal = chunkEnd == dhead.len;
-                try sendStream(self.ep.conn, sid, streamOff, chunk, isFinal, @intCast(clockMod.millisNow()));
+                try sendStream(self.ep.conn, sid, streamOff, chunk, isFinal, @intCast(clockMod.monotonicMillis()));
                 streamOff += chunk.len;
                 bodyCursor = chunkEnd;
                 _ = try self.ep.flush(dest);
             }
         }
 
-        const start: u64 = @intCast(clockMod.millisNow());
+        const start: u64 = @intCast(clockMod.monotonicMillis());
         while (true) {
-            const now: u64 = @intCast(clockMod.millisNow());
+            const now: u64 = @intCast(clockMod.monotonicMillis());
             if (now -| start > deadlineMs) return error.Timeout;
             const remain = deadlineMs -| (now -| start);
             try quicHs.feedPumped(self.ep, pump, dest, @min(remain, 1000), now);
