@@ -453,35 +453,42 @@ pub const Server = struct {
             eng.* = try templatesMod.Engine.init(allocator, io, tCfg);
             templateEngine = eng;
         }
+        errdefer if (templateEngine) |eng| {
+            eng.deinit();
+            allocator.destroy(eng);
+        };
 
         var tlsServer_opt: ?tlsServerMod.Server = null;
         var loadedCertPem: ?[]const u8 = null;
         var loadedKeyPem: ?[]const u8 = null;
+        errdefer if (loadedCertPem) |cert| allocator.free(cert);
+        errdefer if (loadedKeyPem) |key| {
+            std.crypto.secureZero(u8, @constCast(key));
+            allocator.free(key);
+        };
+        errdefer if (tlsServer_opt) |*tls| tls.deinit();
 
         if (effectiveCfg.tls) |*tCfg| {
-            const certOpt = tCfg.certificatePem;
-            const keyOpt = tCfg.privateKeyPem;
-            if (certOpt) |cert| {
-                if (keyOpt) |key| {
-                    if (std.mem.indexOf(u8, cert, "-----BEGIN") != null) {
-                        loadedCertPem = allocator.dupe(u8, cert) catch null;
-                    } else {
-                        loadedCertPem = fsMod.readFileLimited(allocator, cert, 10 * 1024 * 1024) catch null;
-                    }
-                    if (std.mem.indexOf(u8, key, "-----BEGIN") != null) {
-                        loadedKeyPem = allocator.dupe(u8, key) catch null;
-                    } else {
-                        loadedKeyPem = fsMod.readFileLimited(allocator, key, 10 * 1024 * 1024) catch null;
-                    }
-                    if (loadedCertPem != null and loadedKeyPem != null) {
-                        tCfg.certificatePem = loadedCertPem.?;
-                        tCfg.privateKeyPem = loadedKeyPem.?;
-                        // Identity problems surface here at startup; a
-                        // failure leaves TLS disabled (historical leniency).
-                        tlsServer_opt = tlsServerMod.Server.init(allocator, io, tCfg.*) catch null;
-                    }
-                }
+            const hasCert = tCfg.certificatePem != null;
+            const hasKey = tCfg.privateKeyPem != null;
+            if (hasCert != hasKey) return error.TlsIdentityIncomplete;
+            if (!hasCert and tCfg.certSelector == null) return error.TlsIdentityRequired;
+
+            if (tCfg.certificatePem) |cert| {
+                loadedCertPem = if (std.mem.indexOf(u8, cert, "-----BEGIN") != null)
+                    try allocator.dupe(u8, cert)
+                else
+                    try fsMod.readFileLimited(allocator, cert, 10 * 1024 * 1024);
+                tCfg.certificatePem = loadedCertPem.?;
             }
+            if (tCfg.privateKeyPem) |key| {
+                loadedKeyPem = if (std.mem.indexOf(u8, key, "-----BEGIN") != null)
+                    try allocator.dupe(u8, key)
+                else
+                    try fsMod.readFileLimited(allocator, key, 10 * 1024 * 1024);
+                tCfg.privateKeyPem = loadedKeyPem.?;
+            }
+            tlsServer_opt = try tlsServerMod.Server.init(allocator, io, tCfg.*);
         }
 
         var h3Ep_opt: ?quicTransport.Endpoint = null;
@@ -2992,6 +2999,27 @@ test "server default TLS ALPN negotiates HTTP/2 and serves a request" {
     defer response.deinit();
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "server TLS initialization fails instead of silently serving cleartext" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    const result = Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .tls = .{
+            .certificatePem = "-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----",
+            .privateKeyPem = h3TestKeyPem,
+        },
+    });
+    if (result) |serverValue| {
+        var server = serverValue;
+        server.deinit();
+        return error.InvalidTlsIdentityAccepted;
+    } else |_| {}
 }
 
 var gTlsFailedSeen: bool = false;
