@@ -1119,46 +1119,71 @@ pub const Server = struct {
         self.metricsRegistry.connectionOpened();
         defer self.metricsRegistry.connectionClosed();
 
-        // Peek or read initial bytes to check protocol / TLS / HTTP/2 preface
         var peekBuf: [32]u8 = undefined;
-        const nPeek = conn.read(peekBuf[0..]) catch return;
-        if (nPeek == 0) return;
-
-        // Check for TLS Handshake record (ContentType = 0x16, TLS legacy version 0x03, 0x01..0x03)
-        if (self.tlsServer != null) {
-            if (nPeek >= 3 and peekBuf[0] == 0x16 and peekBuf[1] == 0x03) {
-                var tlsConn = self.tlsServer.?.acceptBuffered(conn, peekBuf[0..nPeek]) catch |err| {
-                    var msgBuf: [64]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&msgBuf, "TLS handshake failed: {s}", .{@errorName(err)}) catch "TLS handshake failed";
-                    self.emit(.{ .kind = .tlsHandshakeFailed, .level = .warn, .message = msg });
-                    return;
-                };
-                defer tlsConn.deinit();
-
-                const streamConn = StreamConn{ .tls = &tlsConn };
-                if (self.cfg.http2 and tlsConn.alpn != null and tlsConn.alpn.? == .h2) {
-                    try self.serveHttp2Connection(streamConn, true, "");
-                } else {
-                    try self.serveHttp1Connection(streamConn, true, "");
-                }
-                return;
-            } else if (self.cfg.tls == null or !self.cfg.tls.?.allowPlainHttp) {
-                // Strict HTTPS mode: reject cleartext HTTP on HTTPS port (RFC 9110)
-                const plainConn = StreamConn{ .plain = conn };
-                _ = sendSimpleError(plainConn, 400, "The plain HTTP request was sent to HTTPS port") catch 0;
-                return;
-            }
+        var nPeek: usize = 0;
+        var protocol: InitialProtocol = .needMore;
+        while (protocol == .needMore and nPeek < peekBuf.len) {
+            const n = conn.read(peekBuf[nPeek..]) catch return;
+            if (n == 0) return;
+            nPeek += n;
+            protocol = classifyInitialProtocol(peekBuf[0..nPeek], self.tlsServer != null, self.cfg.http2);
         }
 
-        const h2Preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-        if (self.cfg.http2 and nPeek >= 16 and std.mem.startsWith(u8, peekBuf[0..nPeek], h2Preface[0..16])) {
+        // Check for TLS Handshake record (ContentType = 0x16, TLS legacy version 0x03, 0x01..0x03)
+        if (protocol == .tls) {
+            var tlsConn = self.tlsServer.?.acceptBuffered(conn, peekBuf[0..nPeek]) catch |err| {
+                var msgBuf: [64]u8 = undefined;
+                const msg = std.fmt.bufPrint(&msgBuf, "TLS handshake failed: {s}", .{@errorName(err)}) catch "TLS handshake failed";
+                self.emit(.{ .kind = .tlsHandshakeFailed, .level = .warn, .message = msg });
+                return;
+            };
+            defer tlsConn.deinit();
+
+            const streamConn = StreamConn{ .tls = &tlsConn };
+            if (self.cfg.http2 and tlsConn.alpn != null and tlsConn.alpn.? == .h2) {
+                try self.serveHttp2Connection(streamConn, true, "");
+            } else {
+                try self.serveHttp1Connection(streamConn, true, "");
+            }
+            return;
+        }
+
+        if (protocol == .http2 and (self.tlsServer == null or self.cfg.tls.?.allowPlainHttp)) {
             const streamConn = StreamConn{ .plain = conn };
             try self.serveHttp2Connection(streamConn, false, peekBuf[0..nPeek]);
             return;
         }
 
         const streamConn = StreamConn{ .plain = conn };
+        if (self.tlsServer != null and (self.cfg.tls == null or !self.cfg.tls.?.allowPlainHttp)) {
+            // Strict HTTPS mode: reject cleartext HTTP on HTTPS port (RFC 9110).
+            _ = sendSimpleError(streamConn, 400, "The plain HTTP request was sent to HTTPS port") catch 0;
+            return;
+        }
         try self.serveHttp1Connection(streamConn, false, peekBuf[0..nPeek]);
+    }
+
+    const InitialProtocol = enum { needMore, http1, http2, tls };
+
+    fn classifyInitialProtocol(bytes: []const u8, tlsEnabled: bool, http2Enabled: bool) InitialProtocol {
+        if (bytes.len == 0) return .needMore;
+
+        if (tlsEnabled and bytes[0] == 0x16) {
+            if (bytes.len < 2) return .needMore;
+            if (bytes[1] == 0x03) {
+                if (bytes.len < 3) return .needMore;
+                if (bytes[2] >= 0x01 and bytes[2] <= 0x03) return .tls;
+            }
+        }
+
+        const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+        if (http2Enabled) {
+            const compared = @min(bytes.len, preface.len);
+            if (std.mem.eql(u8, bytes[0..compared], preface[0..compared])) {
+                return if (bytes.len < 16) .needMore else .http2;
+            }
+        }
+        return .http1;
     }
 
     fn serveHttp2Connection(self: *Server, conn: StreamConn, isTlsConn: bool, initial: []const u8) !void {
@@ -1993,6 +2018,60 @@ pub fn reasonFor(status: u16) []const u8 {
 }
 
 // Tests
+
+test "initial protocol classification waits for fragmented TLS and HTTP2 prefixes" {
+    const h2Preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    for (1..16) |len| {
+        try std.testing.expectEqual(Server.InitialProtocol.needMore, Server.classifyInitialProtocol(h2Preface[0..len], false, true));
+    }
+    try std.testing.expectEqual(Server.InitialProtocol.http2, Server.classifyInitialProtocol(h2Preface[0..16], false, true));
+    try std.testing.expectEqual(Server.InitialProtocol.needMore, Server.classifyInitialProtocol(&.{0x16}, true, true));
+    try std.testing.expectEqual(Server.InitialProtocol.needMore, Server.classifyInitialProtocol(&.{ 0x16, 0x03 }, true, true));
+    try std.testing.expectEqual(Server.InitialProtocol.tls, Server.classifyInitialProtocol(&.{ 0x16, 0x03, 0x03 }, true, true));
+    try std.testing.expectEqual(Server.InitialProtocol.http1, Server.classifyInitialProtocol("PO", true, true));
+}
+
+test "fragmented cleartext HTTP2 preface is sniffed before HTTP1 dispatch" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = try Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 1,
+        .initialRequestTimeoutMs = 2_000,
+    });
+    defer srv.deinit();
+    const Runner = struct {
+        fn run(server: *Server) void {
+            server.run();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&srv});
+    defer thread.join();
+
+    var client = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    defer client.close();
+    client.setReadTimeoutMs(2_000);
+    const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    try client.writeAll(preface[0..1]);
+    clock.sleepMillis(50);
+    try client.writeAll(preface[1..]);
+    try client.writeAll(&.{ 0, 0, 0, 4, 0, 0, 0, 0, 0 });
+
+    var serverFrame: [9]u8 = undefined;
+    var received: usize = 0;
+    while (received < serverFrame.len) {
+        const n = try client.read(serverFrame[received..]);
+        if (n == 0) break;
+        received += n;
+    }
+    try std.testing.expectEqual(serverFrame.len, received);
+    try std.testing.expectEqual(@as(u8, 4), serverFrame[3]);
+    try std.testing.expectEqual(@as(u8, 0), serverFrame[4]);
+}
 
 fn helloHandler(ctx: *Context) anyerror!Response {
     if (std.mem.eql(u8, ctx.path, "/hello")) {
