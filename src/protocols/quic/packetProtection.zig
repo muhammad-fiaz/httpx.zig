@@ -12,6 +12,7 @@ const Aes = std.crypto.core.aes;
 pub const Error = error{
     AuthenticationFailed,
     BufferTooSmall,
+    UnsupportedKeyLength,
 };
 
 // Header protection
@@ -105,7 +106,7 @@ pub fn seal(
     key: []const u8,
     iv: *const [12]u8,
     pn: u64,
-) void {
+) Error!void {
     const nonce = buildNonce(iv, pn);
     if (key.len == 16) {
         var k16: [16]u8 = undefined;
@@ -124,7 +125,7 @@ pub fn seal(
         @memcpy(&k32, key[0..32]);
         Aes256Gcm.encrypt(out, tag, plaintext, aad, nonce, k32);
     } else {
-        @panic("unsupported AEAD key length");
+        return Error.UnsupportedKeyLength;
     }
 }
 
@@ -151,7 +152,7 @@ pub fn open(
         Aes256Gcm.decrypt(plaintextOut, ciphertext, tag, aad, nonce, k32) catch
             return Error.AuthenticationFailed;
     } else {
-        return Error.AuthenticationFailed;
+        return Error.UnsupportedKeyLength;
     }
 }
 
@@ -367,7 +368,7 @@ test "payload seal/open roundtrip and tamper detection" {
     var ptBack: [plaintext.len]u8 = undefined;
 
     const aad = [_]u8{ 0xc3, 0x00, 0x00, 0x00, 0x01 };
-    seal(ct[0..], &tag, plaintext, aad[0..], &key, &iv, 2);
+    try seal(ct[0..], &tag, plaintext, aad[0..], &key, &iv, 2);
     try open(ptBack[0..], ct[0..], tag, aad[0..], &key, &iv, 2);
     try std.testing.expectEqualStrings(plaintext, ptBack[0..]);
 
@@ -375,6 +376,17 @@ test "payload seal/open roundtrip and tamper detection" {
     var badAad = aad;
     badAad[4] ^= 1;
     try std.testing.expectError(Error.AuthenticationFailed, open(ptBack[0..], ct[0..], tag, badAad[0..], &key, &iv, 2));
+}
+
+test "payload seal rejects unsupported key length without panicking" {
+    const key: [15]u8 = @splat(0);
+    const iv: [12]u8 = @splat(0);
+    var ciphertext: [1]u8 = undefined;
+    var tag: [16]u8 = undefined;
+    try std.testing.expectError(
+        Error.UnsupportedKeyLength,
+        seal(&ciphertext, &tag, "x", "", &key, &iv, 0),
+    );
 }
 
 test "pn encoding length selection" {
