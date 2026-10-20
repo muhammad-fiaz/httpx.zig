@@ -1,4 +1,4 @@
-//! HTTP/1.1 server: accept loop -> parser -> router dispatch -> writer.
+//! HTTP server: bounded accept loop -> protocol dispatch -> router -> writer.
 //!
 //! Accepted connections run on a fixed worker pool with bounded admission and
 //! queue capacity. A fresh request arena backs each connection so handlers can
@@ -121,16 +121,15 @@ pub const PortStrategy = enum {
     exit,
 };
 
-/// ALPN identifiers this server can actually speak.
-///
-/// `h2` is deliberately absent. `Config.http2` exists and defaults to true,
-/// but there is no HTTP/2 framing behind it, so advertising the identifier
-/// negotiates a protocol we then fail to speak: every browser and a default
-/// `curl` offer `h2`, and the exchange dies right after the handshake. The
-/// list has to come from what is implemented, not from what the config
-/// declares.
+/// ALPN identifiers in server preference order, selected from enabled
+/// protocol handlers when the caller leaves TLS ALPN at its default.
+const alpnH2Http11Http10 = [_]alpnMod.Protocol{ .h2, .@"http/1.1", .@"http/1.0" };
+const alpnH2Http11 = [_]alpnMod.Protocol{ .h2, .@"http/1.1" };
+const alpnH2Http10 = [_]alpnMod.Protocol{ .h2, .@"http/1.0" };
+const alpnH2 = [_]alpnMod.Protocol{.h2};
 const alpnHttp11 = [_]alpnMod.Protocol{.@"http/1.1"};
 const alpnHttp10Http11 = [_]alpnMod.Protocol{ .@"http/1.1", .@"http/1.0" };
+const alpnHttp10 = [_]alpnMod.Protocol{.@"http/1.0"};
 
 pub const Config = struct {
     host: []const u8 = "0.0.0.0",
@@ -191,7 +190,7 @@ pub const Config = struct {
     http10: bool = true,
     /// Enable HTTP/1.1 protocol handling.
     http11: bool = true,
-    /// HTTP/2 cleartext server runtime path (default true: automatically serves H2 preface).
+    /// Enable HTTP/2 over TLS ALPN and cleartext prior-knowledge connections.
     http2: bool = true,
     /// HTTP/3 server runtime path.
     http3: bool = false,
@@ -420,18 +419,22 @@ pub const Server = struct {
             }
         }
 
-        // Correct the TLS ALPN preference to match what we serve.
+        // Correct the default TLS ALPN preference to match enabled TCP
+        // handlers. Explicit caller protocol lists remain authoritative.
         //
         // Done here, on the stored config, rather than at the construction
         // site: certificate reload rebuilds the TLS server from
-        // `self.cfg.tls.?.alpn` and would otherwise fall back to
-        // DEFAULT_TCP_PREFERENCE and reintroduce `h2`.
-        //
-        // Only the default is replaced. An explicitly chosen list is the
-        // caller's decision, including a deliberate `h2`.
+        // `self.cfg.tls.?.alpn`.
         if (effectiveCfg.tls) |*tcfg| {
             if (std.mem.eql(alpnMod.Protocol, tcfg.alpn, &alpnMod.DEFAULT_TCP_PREFERENCE)) {
-                tcfg.alpn = if (effectiveCfg.http10) &alpnHttp10Http11 else &alpnHttp11;
+                tcfg.alpn = if (effectiveCfg.http2) blk: {
+                    if (effectiveCfg.http11) {
+                        break :blk if (effectiveCfg.http10) &alpnH2Http11Http10 else &alpnH2Http11;
+                    }
+                    break :blk if (effectiveCfg.http10) &alpnH2Http10 else &alpnH2;
+                } else if (effectiveCfg.http11) blk: {
+                    break :blk if (effectiveCfg.http10) &alpnHttp10Http11 else &alpnHttp11;
+                } else if (effectiveCfg.http10) &alpnHttp10 else &.{};
             }
         }
 
@@ -2861,6 +2864,55 @@ test "strict HTTPS mode rejects plain HTTP with 400 Bad Request" {
     try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "The plain HTTP request was sent to HTTPS port") != null);
 
     srv.requestShutdown();
+}
+
+test "server default TLS ALPN negotiates HTTP/2 and serves a request" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = try Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 1,
+        .tls = .{
+            .certificatePem = h3TestCertPem,
+            .privateKeyPem = h3TestKeyPem,
+        },
+    });
+    defer srv.deinit();
+    try srv.router.get("/h2-tls", returnOk, .{});
+    try std.testing.expectEqual(alpnMod.Protocol.h2, srv.cfg.tls.?.alpn[0]);
+
+    const Runner = struct {
+        fn run(server: *Server) void {
+            server.run();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&srv});
+    defer thread.join();
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    errdefer sock.close();
+    var tlsClient = try @import("../protocols/tls/tlsClient.zig").Client.init(a, ctx.io, .{});
+    defer tlsClient.deinit();
+    var tlsConn = try tlsClient.connect(&sock, "127.0.0.1", .{
+        .verify = .caBundle,
+        .caPem = h3TestCertPem,
+        .alpn = &.{.h2},
+    });
+    var tlsTransferred = true;
+    defer if (tlsTransferred) tlsConn.deinit();
+
+    const h2 = try @import("../protocols/http2/transport.zig").Client.connectTls(a, &tlsConn);
+    tlsTransferred = false;
+    defer h2.deinit();
+
+    const response = try h2.request("GET", "/h2-tls", &.{}, "https", "127.0.0.1", null, 1024);
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
 }
 
 var gTlsFailedSeen: bool = false;
