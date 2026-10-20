@@ -778,17 +778,16 @@ fn respondWithEmbedded(ctx: *Context, st: *State, asset: @import("../assets/asse
     headers.append(a, .{ .name = "Accept-Ranges", .value = "bytes" }) catch return Allocator.Error.OutOfMemory;
     if (st.cacheControl.len > 0)
         headers.append(a, .{ .name = "Cache-Control", .value = st.cacheControl }) catch return Allocator.Error.OutOfMemory;
-    if (isHead) {
-        const clStr = std.fmt.allocPrint(a, "{d}", .{asset.content.len}) catch return Allocator.Error.OutOfMemory;
-        headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
-    }
-
     // Single range request over the stored bytes (no live-reload injection:
     // ranges address the asset as stored).
     if (ctx.header("Range")) |spec| {
         if (parseRange(spec, asset.content.len)) |r| {
             const len: usize = @intCast(r.end - r.start + 1);
             if (len > st.maxSize) return errText(413, "range too large");
+            if (isHead) {
+                const clStr = std.fmt.allocPrint(a, "{d}", .{len}) catch return Allocator.Error.OutOfMemory;
+                headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
+            }
             const cr = std.fmt.allocPrint(a, "bytes {d}-{d}/{d}", .{ r.start, r.end, asset.content.len }) catch return Allocator.Error.OutOfMemory;
             headers.append(a, .{ .name = "Content-Range", .value = cr }) catch return Allocator.Error.OutOfMemory;
             return .{
@@ -801,6 +800,11 @@ fn respondWithEmbedded(ctx: *Context, st: *State, asset: @import("../assets/asse
         const cr = std.fmt.allocPrint(a, "bytes */{d}", .{asset.content.len}) catch return Allocator.Error.OutOfMemory;
         const hs = a.dupe(routerMod.Header, &.{.{ .name = "Content-Range", .value = cr }}) catch return Allocator.Error.OutOfMemory;
         return .{ .status = 416, .contentType = asset.contentType, .headers = hs };
+    }
+
+    if (isHead) {
+        const clStr = std.fmt.allocPrint(a, "{d}", .{asset.content.len}) catch return Allocator.Error.OutOfMemory;
+        headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
     }
 
     if (st.liveReload and !isHead and std.mem.startsWith(u8, asset.contentType, "text/html")) {
@@ -921,11 +925,6 @@ fn respondWithFile(ctx: *Context, st: *State, file: std.Io.File, relativePath: [
     headers.append(a, .{ .name = "Accept-Ranges", .value = "bytes" }) catch return Allocator.Error.OutOfMemory;
     if (st.cacheControl.len > 0)
         headers.append(a, .{ .name = "Cache-Control", .value = st.cacheControl }) catch return Allocator.Error.OutOfMemory;
-    if (isHead) {
-        const clStr = std.fmt.allocPrint(a, "{d}", .{meta.size}) catch return Allocator.Error.OutOfMemory;
-        headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
-    }
-
     const contentType = mime.fromPath(relativePath);
 
     // Single range request.
@@ -933,14 +932,21 @@ fn respondWithFile(ctx: *Context, st: *State, file: std.Io.File, relativePath: [
         if (parseRange(spec, meta.size)) |r| {
             const len: usize = @intCast(r.end - r.start + 1);
             if (len > st.maxSize) return errText(413, "range too large");
-            const body = a.alloc(u8, len) catch return Allocator.Error.OutOfMemory;
-            readOpenedRange(ctx.io, file, r.start, body) catch return errText(500, "read error");
+            if (isHead) {
+                const clStr = std.fmt.allocPrint(a, "{d}", .{len}) catch return Allocator.Error.OutOfMemory;
+                headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
+            }
+            const body: []const u8 = if (isHead) "" else blk: {
+                const bytes = a.alloc(u8, len) catch return Allocator.Error.OutOfMemory;
+                readOpenedRange(ctx.io, file, r.start, bytes) catch return errText(500, "read error");
+                break :blk bytes;
+            };
             const cr = std.fmt.allocPrint(a, "bytes {d}-{d}/{d}", .{ r.start, r.end, meta.size }) catch return Allocator.Error.OutOfMemory;
             headers.append(a, .{ .name = "Content-Range", .value = cr }) catch return Allocator.Error.OutOfMemory;
             return .{
                 .status = 206,
                 .contentType = contentType,
-                .body = if (isHead) "" else body,
+                .body = body,
                 .headers = headers.items,
             };
         }
@@ -948,6 +954,11 @@ fn respondWithFile(ctx: *Context, st: *State, file: std.Io.File, relativePath: [
         const cr = std.fmt.allocPrint(a, "bytes */{d}", .{meta.size}) catch return Allocator.Error.OutOfMemory;
         const hs = a.dupe(routerMod.Header, &.{.{ .name = "Content-Range", .value = cr }}) catch return Allocator.Error.OutOfMemory;
         return .{ .status = 416, .contentType = contentType, .headers = hs };
+    }
+
+    if (isHead) {
+        const clStr = std.fmt.allocPrint(a, "{d}", .{meta.size}) catch return Allocator.Error.OutOfMemory;
+        headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
     }
 
     if (meta.size > st.maxSize) return errText(413, "file too large");
@@ -1153,6 +1164,25 @@ test "embedded asset serves byte ranges like filesystem files" {
         }
         try std.testing.expect(foundCr);
     }
+    // HEAD with Range reports the selected representation length but no body.
+    {
+        var ctx = Context{
+            .allocator = aa,
+            .method = .HEAD,
+            .headers = &.{.{ .name = "Range", .value = "bytes=0-3" }},
+        };
+        const res = try respondWithEmbedded(&ctx, st, asset);
+        try std.testing.expectEqual(@as(u16, 206), res.status);
+        try std.testing.expectEqual(@as(usize, 0), res.body.len);
+        var foundLength = false;
+        for (res.headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "Content-Length")) {
+                try std.testing.expectEqualStrings("4", h.value);
+                foundLength = true;
+            }
+        }
+        try std.testing.expect(foundLength);
+    }
     // Unsatisfiable range -> 416.
     {
         var ctx = Context{
@@ -1163,6 +1193,43 @@ test "embedded asset serves byte ranges like filesystem files" {
         const res = try respondWithEmbedded(&ctx, st, asset);
         try std.testing.expectEqual(@as(u16, 416), res.status);
     }
+}
+
+test "filesystem HEAD range reports selected length without a response body" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "root", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "root/public.txt", .data = "0123456789abcdef" });
+
+    const rootPath = try tmp.dir.realPathFileAlloc(io, "root", a);
+    defer a.free(rootPath);
+    const st = try State.create(a, .{ .root = rootPath });
+    defer st.destroy();
+    const file = try tmp.dir.openFile(io, "root/public.txt", .{});
+    defer file.close(io);
+    const stat = try file.stat(io);
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var ctx = Context{
+        .allocator = arena.allocator(),
+        .io = io,
+        .method = .HEAD,
+        .headers = &.{.{ .name = "Range", .value = "bytes=0-3" }},
+    };
+    const res = try respondWithFile(&ctx, st, file, "public.txt", fileMeta(stat));
+    try std.testing.expectEqual(@as(u16, 206), res.status);
+    try std.testing.expectEqual(@as(usize, 0), res.body.len);
+    var foundLength = false;
+    for (res.headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "Content-Length")) {
+            try std.testing.expectEqualStrings("4", h.value);
+            foundLength = true;
+        }
+    }
+    try std.testing.expect(foundLength);
 }
 
 test "SPA fallback policy differentiates client routes from assets and API" {
