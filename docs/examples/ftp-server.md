@@ -2,6 +2,8 @@
 
 Demonstrates ftpServer.zig using the canonical HTTPX API.
 
+Server uploads are limited to 16 MiB by default; set `Config.maxUploadSize` to an application-appropriate bound. Active FTP (`PORT`/`EPRT`) is disabled by default because it asks the server to connect to a client-selected address. Set `allowActiveMode = true` only when that behavior is appropriate for the deployment. Passive mode remains available.
+
 ## Complete Example
 
 ```zig

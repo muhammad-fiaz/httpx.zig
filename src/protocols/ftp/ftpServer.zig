@@ -30,6 +30,12 @@ pub const Config = struct {
     password: []const u8 = "anonymous@",
     timeoutMs: u31 = 30_000,
     callbacks: Callbacks = .{},
+    /// Maximum bytes accepted by one STOR transfer.
+    maxUploadSize: usize = 16 * 1024 * 1024,
+    /// Active mode can make the server connect to a client-selected address.
+    /// Disabled by default because the control peer address is not exposed by
+    /// the current cross-platform socket wrapper for destination binding.
+    allowActiveMode: bool = false,
     /// Server certificate chain (PEM) enabling explicit FTPS (`AUTH
     /// TLS`). Both must be set; otherwise `AUTH TLS` is refused.
     certChainPem: ?[]const u8 = null,
@@ -372,6 +378,10 @@ const Session = struct {
     }
 
     fn setPort(self: *Session, arg: []const u8) Error!bool {
+        if (!self.cfg.allowActiveMode) {
+            try self.reply("502 Active FTP disabled");
+            return true;
+        }
         var values: [6]u16 = undefined;
         var it = std.mem.splitScalar(u8, arg, ',');
         var n: usize = 0;
@@ -413,6 +423,10 @@ const Session = struct {
     }
 
     fn setEprt(self: *Session, arg: []const u8) Error!bool {
+        if (!self.cfg.allowActiveMode) {
+            try self.reply("502 Active FTP disabled");
+            return true;
+        }
         if (arg.len < 5) {
             try self.reply("501 Invalid EPRT");
             return true;
@@ -458,8 +472,8 @@ const Session = struct {
     }
 
     /// Heap box for a TLS-wrapped data connection. The TLS connection
-    /// borrows its socket, and `acceptData` returns the channel by value,
-    /// so a stable heap address is the only sound home for the pair (a
+    /// borrows its socket, and the channel is returned by value, so a
+    /// stable heap address is the only sound home for the pair (a
     /// by-value channel would dangle its own borrow on return — a
     /// use-after-free that Debug tolerates but ReleaseFast crashes on).
     const DataTlsBox = struct {
@@ -468,38 +482,48 @@ const Session = struct {
     };
 
     /// An accepted data connection, TLS-wrapped when `PROT P` is active.
-    const DataChannel = union(enum) {
-        plain: tcp.Socket,
-        tls: *DataTlsBox,
+    ///
+    /// The channel owns its resources: exactly one of `plain`/`tls` is
+    /// populated, and `deinit` releases whichever is present exactly
+    /// once. Because ownership is explicit, callers use a single
+    /// `defer data.deinit(...)` and never combine an `errdefer` with an
+    /// explicit close of the same channel. The previous union-by-value
+    /// design paired `errdefer self.closeData(data)` with an explicit
+    /// `self.closeData(data)`, so any error between the two freed the
+    /// TLS box twice.
+    const DataChannel = struct {
+        plain: ?tcp.Socket = null,
+        tls: ?*DataTlsBox = null,
 
-        fn read(self: DataChannel, buf: []u8) Error!usize {
-            return switch (self) {
-                .plain => |s| s.read(buf) catch error.ReadFailed,
-                .tls => |b| b.conn.read(buf) catch error.ReadFailed,
-            };
+        fn read(self: *const DataChannel, buf: []u8) Error!usize {
+            if (self.tls) |b| return b.conn.read(buf) catch error.ReadFailed;
+            if (self.plain) |*s| return s.read(buf) catch error.ReadFailed;
+            return error.ReadFailed;
         }
 
-        fn writeAll(self: DataChannel, bytes: []const u8) Error!void {
-            switch (self) {
-                .plain => |s| s.writeAll(bytes) catch return error.WriteFailed,
-                .tls => |b| b.conn.writeAll(bytes) catch return error.WriteFailed,
+        fn writeAll(self: *const DataChannel, bytes: []const u8) Error!void {
+            if (self.tls) |b| return b.conn.writeAll(bytes) catch error.WriteFailed;
+            if (self.plain) |*s| return s.writeAll(bytes) catch error.WriteFailed;
+            return error.WriteFailed;
+        }
+
+        /// Releases the channel exactly once. Safe to call more than once:
+        /// each resource is taken out of the struct, so a second call is a
+        /// no-op. The TLS box is destroyed only after its connection and
+        /// socket are released.
+        fn deinit(self: *DataChannel, allocator: Allocator) void {
+            if (self.tls) |b| {
+                self.tls = null;
+                b.conn.deinit();
+                b.socket.close();
+                allocator.destroy(b);
+            }
+            if (self.plain) |*s| {
+                self.plain = null;
+                s.close();
             }
         }
     };
-
-    /// Closes a data connection, freeing the TLS box when present.
-    /// Single-shot (not idempotent): call exactly once per accept; use
-    /// `errdefer` for the failure path, never `defer` + explicit close.
-    fn closeData(self: *Session, dc: DataChannel) void {
-        switch (dc) {
-            .plain => |s| s.close(),
-            .tls => |box| {
-                box.conn.deinit();
-                box.socket.close();
-                self.allocator.destroy(box);
-            },
-        }
-    }
 
     fn acceptData(self: *Session) Error!DataChannel {
         const plain = try self.acceptSocket();
@@ -519,6 +543,19 @@ const Session = struct {
             return error.TlsHandshakeFailed;
         };
         return .{ .tls = box };
+    }
+
+    /// True when `count` more bytes would push the transfer past the
+    /// configured upload limit.
+    ///
+    /// A transfer of exactly `maxUploadSize` bytes is accepted; only
+    /// totals strictly greater are rejected. A limit of zero accepts no
+    /// bytes at all. The comparison is written to avoid overflowing
+    /// `usize` when `maxUploadSize` is at its maximum.
+    fn uploadExceedsLimit(limit: usize, current: usize, incoming: usize) bool {
+        if (current > limit) return true;
+        if (incoming > limit - current) return true;
+        return false;
     }
 
     fn acceptSocket(self: *Session) Error!tcp.Socket {
@@ -556,9 +593,10 @@ const Session = struct {
             try self.reply("425 Can't open data connection");
             return true;
         };
-        errdefer self.closeData(data);
-        try data.writeAll(f(self.cfg.callbacks.context, path));
-        self.closeData(data);
+        {
+            defer data.deinit(self.allocator);
+            try data.writeAll(f(self.cfg.callbacks.context, path));
+        }
         try self.reply("226 Transfer complete");
         return true;
     }
@@ -572,9 +610,10 @@ const Session = struct {
             try self.reply("425 Can't open data connection");
             return true;
         };
-        errdefer self.closeData(data);
-        try data.writeAll(f(self.cfg.callbacks.context, path));
-        self.closeData(data);
+        {
+            defer data.deinit(self.allocator);
+            try data.writeAll(f(self.cfg.callbacks.context, path));
+        }
         try self.reply("226 Transfer complete");
         return true;
     }
@@ -588,16 +627,21 @@ const Session = struct {
             try self.reply("425 Can't open data connection");
             return true;
         };
-        errdefer self.closeData(data);
         var bytes: std.ArrayList(u8) = .empty;
         defer bytes.deinit(self.allocator);
-        var b: [16384]u8 = undefined;
-        while (true) {
-            const n = data.read(&b) catch break;
-            if (n == 0) break;
-            bytes.appendSlice(self.allocator, b[0..n]) catch return error.OutOfMemory;
+        {
+            defer data.deinit(self.allocator);
+            var b: [16384]u8 = undefined;
+            while (true) {
+                const n = data.read(&b) catch break;
+                if (n == 0) break;
+                if (uploadExceedsLimit(self.cfg.maxUploadSize, bytes.items.len, n)) {
+                    try self.reply("552 Upload exceeds configured limit");
+                    return true;
+                }
+                bytes.appendSlice(self.allocator, b[0..n]) catch return error.OutOfMemory;
+            }
         }
-        self.closeData(data); // Close data connection before the completion reply.
         try self.reply(if (f(self.cfg.callbacks.context, path, bytes.items)) "226 Transfer complete" else "552 Transfer failed");
         return true;
     }
@@ -605,4 +649,10 @@ const Session = struct {
 
 test "FTP server command line and passive reply framing" {
     try std.testing.expect(std.mem.startsWith(u8, "227 Entering Passive Mode", "227"));
+}
+
+test "FTP server defaults bound uploads and disable active mode" {
+    const config = Config{};
+    try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), config.maxUploadSize);
+    try std.testing.expect(!config.allowActiveMode);
 }

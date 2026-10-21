@@ -31,7 +31,7 @@ return .{
 The standalone `httpx.CookieJar` partitions by domain and path:
 
 1. Cookies marked `Secure` are only emitted when the caller passes `secure = true` (TLS).
-2. Cookies are strictly partitioned by effective domain name and path.
+2. Host-only cookies work without extra configuration. A `Domain` attribute is stored only when `Jar.domainPolicy` approves it. HTTPX does not bundle a Public Suffix List, so applications that enable domain cookies should connect this callback to a current PSL implementation.
 3. Expired cookies are skipped (and dropped by `purgeExpired`).
 
 ## Related

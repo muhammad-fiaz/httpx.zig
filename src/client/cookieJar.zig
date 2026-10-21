@@ -38,6 +38,10 @@ pub const Jar = struct {
     cookies: std.ArrayList(CookieEntry),
     mu: sync.Spinlock = .{},
     maxCookies: usize = 4096,
+    /// Domain cookies need a Public Suffix List decision, which this library
+    /// does not bundle. Applications may provide a policy backed by their
+    /// own current PSL. Without one, Domain attributes are rejected safely.
+    domainPolicy: ?*const fn (requestHost: []const u8, cookieDomain: []const u8) bool = null,
 
     const CookieEntry = struct {
         name: []const u8,
@@ -123,9 +127,13 @@ pub const Jar = struct {
         const d = domain orelse requestHost;
         const p = path orelse "/";
         if (n.len == 0) return;
-        if (!hostOnly and !domainMatches(requestHost, d)) return;
+        if (!hostOnly) {
+            if (!domainMatches(requestHost, d)) return;
+            const policy = self.domainPolicy orelse return;
+            if (!policy(requestHost, d)) return;
+        }
         for (n) |c| if (!parseMod.isTokenChar(c)) return;
-        for (v) |c| if (c < 0x20 or c == 0x7f) return;
+        for (v) |c| if (std.ascii.isControl(c)) return;
         if (maxAgeExpiresMs) |expiry| expiresMs = expiry;
 
         if (expiresMs) |expiry| {
@@ -305,6 +313,7 @@ test "cookie jar set and get" {
 test "cookie jar domain matching" {
     var jar = Jar.init(std.testing.allocator);
     defer jar.deinit();
+    jar.domainPolicy = allowTestDomain;
     jar.setFromHeader("a=1; Domain=.example.com; Path=/", "example.com");
     var buf: [1024]u8 = undefined;
     // Should match subdomain.
@@ -313,6 +322,18 @@ test "cookie jar domain matching" {
     // Should not match different domain.
     const h2 = jar.cookieHeader("evil.com", "/", false, &buf);
     try std.testing.expect(h2 == null);
+}
+
+fn allowTestDomain(_: []const u8, _: []const u8) bool {
+    return true;
+}
+
+test "cookie jar rejects domain cookies without public suffix policy" {
+    var jar = Jar.init(std.testing.allocator);
+    defer jar.deinit();
+    jar.setFromHeader("a=1; Domain=com; Path=/", "com");
+    jar.setFromHeader("b=1; Domain=example.com; Path=/", "example.com");
+    try std.testing.expectEqual(@as(usize, 0), jar.cookies.items.len);
 }
 
 test "cookie jar expiry" {
