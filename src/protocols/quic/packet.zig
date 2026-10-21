@@ -76,6 +76,87 @@ pub fn isLongHeader(firstByte: u8) bool {
 
 pub const ParseResult = struct { header: LongHeader, payloadOffset: usize };
 
+pub const VersionNegotiation = struct {
+    dcid: []const u8,
+    scid: []const u8,
+    /// Raw list of 32-bit versions; use `versionAt` to decode.
+    versions: []const u8,
+
+    pub fn versionAt(self: VersionNegotiation, index: usize) u32 {
+        return std.mem.readInt(u32, self.versions[index * 4 ..][0..4], .big);
+    }
+};
+
+/// Parses a Version Negotiation packet (RFC 9000 Section 17.2.1).
+pub fn parseVersionNegotiation(data: []const u8) HeaderError!VersionNegotiation {
+    if (data.len < 7) return HeaderError.Truncated;
+    if (data[0] & 0x80 == 0) return HeaderError.InvalidPacket;
+    if (std.mem.readInt(u32, data[1..5], .big) != 0) return HeaderError.InvalidPacket;
+    var offset: usize = 5;
+    const dcidLen: usize = data[offset];
+    offset += 1;
+    if (dcidLen > 20) return HeaderError.InvalidPacket;
+    const dcid = try take(data, &offset, dcidLen);
+    if (offset >= data.len) return HeaderError.Truncated;
+    const scidLen: usize = data[offset];
+    offset += 1;
+    if (scidLen > 20) return HeaderError.InvalidPacket;
+    const scid = try take(data, &offset, scidLen);
+    const versions = data[offset..];
+    if (versions.len % 4 != 0) return HeaderError.InvalidPacket;
+    return .{ .dcid = dcid, .scid = scid, .versions = versions };
+}
+
+pub const LongHeaderCids = struct {
+    version: u32,
+    dcid: []const u8,
+    scid: []const u8,
+};
+
+/// Parses just the version and connection IDs from a long header,
+/// including versions this build does not support. Used by servers to
+/// emit Version Negotiation.
+pub fn parseLongHeaderCids(data: []const u8) HeaderError!LongHeaderCids {
+    if (data.len < 7) return HeaderError.Truncated;
+    if (data[0] & 0x80 == 0) return HeaderError.InvalidPacket;
+    const version = std.mem.readInt(u32, data[1..5], .big);
+    if (version == 0) return HeaderError.InvalidPacket;
+    var offset: usize = 5;
+    const dcidLen: usize = data[offset];
+    offset += 1;
+    if (dcidLen > 20) return HeaderError.InvalidPacket;
+    const dcid = try take(data, &offset, dcidLen);
+    if (offset >= data.len) return HeaderError.Truncated;
+    const scidLen: usize = data[offset];
+    offset += 1;
+    if (scidLen > 20) return HeaderError.InvalidPacket;
+    const scid = try take(data, &offset, scidLen);
+    return .{ .version = version, .dcid = dcid, .scid = scid };
+}
+
+/// Writes a Version Negotiation packet. Returns the byte count.
+pub fn writeVersionNegotiation(buf: []u8, dcid: []const u8, scid: []const u8, versions: []const u32) HeaderError!usize {
+    if (dcid.len > 20 or scid.len > 20) return HeaderError.InvalidPacket;
+    const needed = 5 + 1 + dcid.len + 1 + scid.len + versions.len * 4;
+    if (buf.len < needed) return HeaderError.BufferTooSmall;
+    buf[0] = 0x80 | 0x40;
+    std.mem.writeInt(u32, buf[1..5], 0, .big);
+    var pos: usize = 5;
+    buf[pos] = @intCast(dcid.len);
+    pos += 1;
+    @memcpy(buf[pos..][0..dcid.len], dcid);
+    pos += dcid.len;
+    buf[pos] = @intCast(scid.len);
+    pos += 1;
+    @memcpy(buf[pos..][0..scid.len], scid);
+    pos += scid.len;
+    for (versions) |v| {
+        std.mem.writeInt(u32, buf[pos..][0..4], v, .big);
+        pos += 4;
+    }
+    return pos;
+}
+
 fn take(data: []const u8, offset: *usize, length: u64) HeaderError![]const u8 {
     const len = std.math.cast(usize, length) orelse return HeaderError.TooLarge;
     if (offset.* > data.len or len > data.len - offset.*) return HeaderError.Truncated;
@@ -212,6 +293,13 @@ fn varintWidth(value: usize) usize {
     return 8;
 }
 
+/// Number of bytes a QUIC variable-length integer needs for `value`.
+/// Exposed so the connection layer can size the Length field of a long
+/// header before the packet is built.
+pub fn varintLen(value: usize) usize {
+    return varintWidth(value);
+}
+
 pub const ShortBuildInfo = struct {
     keyPhase: bool = false,
     dcid: []const u8,
@@ -308,4 +396,113 @@ test "truncated headers rejected cleanly at every cut" {
             parseLongHeader(buf[0..cut]),
         );
     }
+}
+
+test "version negotiation roundtrip and malformed list rejection" {
+    var buf: [64]u8 = undefined;
+    const versions = [_]u32{ 0x00000001, 0x6B3343CF };
+    const n = try writeVersionNegotiation(buf[0..], &.{ 1, 2, 3, 4 }, &.{ 9, 8 }, &versions);
+    const vn = try parseVersionNegotiation(buf[0..n]);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, vn.dcid);
+    try std.testing.expectEqualSlices(u8, &.{ 9, 8 }, vn.scid);
+    try std.testing.expectEqual(@as(usize, 2), vn.versions.len / 4);
+    try std.testing.expectEqual(@as(u32, 0x6B3343CF), vn.versionAt(1));
+
+    try std.testing.expectError(HeaderError.InvalidPacket, parseVersionNegotiation(buf[0 .. n - 1]));
+}
+
+test "long header CIDs parse without requiring a supported version" {
+    var buf: [64]u8 = undefined;
+    const n = try writeLongHeader(buf[0..], .{
+        .type = .initial,
+        .version = 0xDEADBEEF,
+        .dcid = &.{ 7, 7, 7 },
+        .scid = &.{ 4, 5 },
+        .token = "tok",
+        .pnLen = 1,
+        .protectedPayloadLen = 8,
+    });
+    const cids = try parseLongHeaderCids(buf[0..n]);
+    try std.testing.expectEqual(@as(u32, 0xDEADBEEF), cids.version);
+    try std.testing.expectEqualSlices(u8, &.{ 7, 7, 7 }, cids.dcid);
+    try std.testing.expectEqualSlices(u8, &.{ 4, 5 }, cids.scid);
+}
+
+pub const RetryPacket = struct {
+    version: u32,
+    dcid: []const u8,
+    scid: []const u8,
+    token: []const u8,
+    tag: [16]u8,
+    /// Packet bytes excluding the trailing integrity tag.
+    withoutTag: []const u8,
+};
+
+/// Parses a Retry packet (RFC 9000 Section 17.2.5).
+pub fn parseRetry(data: []const u8) HeaderError!RetryPacket {
+    if (data.len < 5 + 1 + 1 + 16) return HeaderError.Truncated;
+    if (data[0] & 0x80 == 0) return HeaderError.InvalidPacket;
+    const version = std.mem.readInt(u32, data[1..5], .big);
+    if (!Version.isSupported(version)) return HeaderError.UnsupportedVersion;
+    if (LongType.fromWire(version, @truncate((data[0] >> 4) & 0x3)) != .retry) return HeaderError.InvalidPacket;
+    var offset: usize = 5;
+    const dcidLen: usize = data[offset];
+    offset += 1;
+    if (dcidLen > 20) return HeaderError.InvalidPacket;
+    const dcid = try take(data, &offset, dcidLen);
+    if (offset >= data.len) return HeaderError.Truncated;
+    const scidLen: usize = data[offset];
+    offset += 1;
+    if (scidLen > 20) return HeaderError.InvalidPacket;
+    const scid = try take(data, &offset, scidLen);
+    if (data.len < offset + 16) return HeaderError.Truncated;
+    const token = data[offset .. data.len - 16];
+    var tag: [16]u8 = undefined;
+    @memcpy(&tag, data[data.len - 16 ..][0..16]);
+    return .{
+        .version = version,
+        .dcid = dcid,
+        .scid = scid,
+        .token = token,
+        .tag = tag,
+        .withoutTag = data[0 .. data.len - 16],
+    };
+}
+
+/// Writes a Retry packet without its integrity tag. The caller appends
+/// the 16-byte tag computed by `crypto.retryIntegrityTag`.
+pub fn writeRetry(buf: []u8, version: u32, dcid: []const u8, scid: []const u8, token: []const u8) HeaderError!usize {
+    if (dcid.len > 20 or scid.len > 20) return HeaderError.InvalidPacket;
+    if (token.len == 0) return HeaderError.InvalidPacket;
+    const needed = 5 + 1 + dcid.len + 1 + scid.len + token.len;
+    if (buf.len < needed) return HeaderError.BufferTooSmall;
+    buf[0] = 0xF0;
+    std.mem.writeInt(u32, buf[1..5], version, .big);
+    var pos: usize = 5;
+    buf[pos] = @intCast(dcid.len);
+    pos += 1;
+    @memcpy(buf[pos..][0..dcid.len], dcid);
+    pos += dcid.len;
+    buf[pos] = @intCast(scid.len);
+    pos += 1;
+    @memcpy(buf[pos..][0..scid.len], scid);
+    pos += scid.len;
+    @memcpy(buf[pos..][0..token.len], token);
+    pos += token.len;
+    return pos;
+}
+
+test "retry packet parses RFC 9001 Appendix A.4 header and token" {
+    const wire = [_]u8{
+        0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0xf0, 0x67, 0xa5,
+        0x50, 0x2a, 0x42, 0x62, 0xb5, 0x74, 0x6f, 0x6b, 0x65, 0x6e,
+        0x04, 0xa2, 0x65, 0xba, 0x2e, 0xff, 0x4d, 0x82, 0x90, 0x58,
+        0xfb, 0x3f, 0x0f, 0x24, 0x96, 0xba,
+    };
+    const retry = try parseRetry(&wire);
+    try std.testing.expectEqual(@as(u32, 1), retry.version);
+    try std.testing.expectEqual(@as(usize, 0), retry.dcid.len);
+    try std.testing.expectEqualSlices(u8, &.{ 0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5 }, retry.scid);
+    try std.testing.expectEqualStrings("token", retry.token);
+    try std.testing.expectEqual(@as(usize, 20), retry.withoutTag.len);
 }

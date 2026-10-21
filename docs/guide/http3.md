@@ -4,10 +4,10 @@ httpx.zig provides HTTP/3 framing and QPACK primitives (RFC 9114, RFC 9204), a Q
 
 ::: warning Custom Implementation
 Zig's standard library does not provide HTTP/3 or QUIC support. **httpx.zig implements these protocols entirely from scratch**, following RFC 9114, RFC 9204, and RFC 9000 specifications, including:
-- **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
-- **QUIC** transport frame encoding/decoding (RFC 9000), TLS 1.3 handshake, RESET_STREAM/STOP_SENDING, and transport parameters
-- **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling
-- **Limits:** no packet-loss recovery, congestion control, Retry/token round trip, or QUIC version negotiation. Use on reliable paths such as loopback and LAN; lossy network connections may time out.
+- **QPACK** header compression (RFC 9204) with static/dynamic tables, encoder/decoder stream instructions, and blocked-section retry
+- **QUIC** transport frame encoding/decoding (RFC 9000), TLS 1.3 handshake, ACK/loss recovery, NewReno congestion control, flow control, RESET_STREAM/STOP_SENDING, transport parameters, and 0-RTT resumption
+- **HTTP/3** frame types, SETTINGS, GOAWAY, CONNECTION_CLOSE handling, trailers, and precise protocol-error mapping
+- **Limits:** no Retry/token round trip, QUIC version negotiation, HelloRetryRequest handling, key update, connection migration, server push, or datagrams. The high-level paths perform one request per QUIC connection.
 :::
 
 ## Platform Support
@@ -21,13 +21,14 @@ The HTTP/3 runtime has loopback integration coverage on the native test host. Cr
 
 ## Features
 
-- **High-level Client Runtime** - `Client` performs QUIC + TLS 1.3 with ALPN `h3` and certificate verification for supported reliable paths. Loss recovery and congestion control are not implemented.
+- **High-level Client Runtime** - `Client` performs QUIC + TLS 1.3 with ALPN `h3`, certificate verification, QPACK dynamic-table encoding, response trailers, and loss recovery.
 - **High-level Server Runtime** - `httpx.Server` can bind a UDP endpoint when `.http3 = true` and a default certificate/key identity are provided. It routes supported H3 requests through server handlers. The handshake requires that default identity; selector-only TLS configuration does not initialize the H3 endpoint.
 - **Protocol-level Server Runtime** - serve H3 over QUIC directly with `httpx.quic` (Endpoint + Pump + HandshakeDriver) and `httpx.http3` builders; see `examples/http3Client.zig` for a complete loopback server.
+- **Handshake Lifecycle** - the server confirms the handshake after verifying the client Finished and sends `HANDSHAKE_DONE`; the client confirms on that frame or on a 1-RTT acknowledgment. Confirmation discards the Handshake keys on both ends and late Handshake packets are ignored (RFC 9001 Sections 4.1.2 and 4.9.2).
 
 ### Finding the HTTP/3 port
 
-HTTP/3 shares the HTTP/1.1 port number (RFC 9114 Section 3), so a client normally dials the port it already knows. When the UDP bind for that number is refused - Windows keeps separate reserved dynamic ranges for TCP and UDP, so a TCP-chosen ephemeral port can land in a range the UDP stack will not take - the endpoint falls back to an ephemeral port of its own. Read the port the server actually bound rather than assuming:
+HTTP/3 shares the HTTP/1.1 port number (RFC 9114 Section 3), so a client normally dials the port it already knows. When port `0` was requested, the TCP listener picks an ephemeral port, and Windows keeps separate reserved dynamic ranges for TCP and UDP: that TCP-chosen number can land in a UDP exclusion the stack refuses to bind. In that case only, the endpoint falls back to an ephemeral UDP port of its own. Read the port the server actually bound rather than assuming:
 
 ```zig
 const server = try httpx.Server.init(allocator, io, .{
@@ -45,9 +46,11 @@ if (server.http3.portFallback) {
 }
 ```
 
+An explicit nonzero `.port` never falls back: if the UDP bind fails (for example, the port is already in use or falls in a reserved range), `Server.init` returns the bind error and releases the TCP listener, because moving HTTP/3 to an unannounced port would break the shared-port contract.
+
 Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP/3.
-- **QPACK Header Compression** - RFC 9204 static-table encode/decode with encoder/decoder stream prefixes.
-- **QUIC Transport Framing** - STREAM, CRYPTO, ACK, HANDSHAKE_DONE, RESET_STREAM/STOP_SENDING stubs, version negotiation, and transport parameters.
+- **QPACK Header Compression** - RFC 9204 static and dynamic tables with encoder/decoder stream prefixes, insert-count acknowledgments, and blocked-section retry.
+- **QUIC Transport Framing** - STREAM, CRYPTO, ACK, HANDSHAKE_DONE, RESET_STREAM/STOP_SENDING, transport parameters, PTO/loss recovery, and NewReno congestion control.
 - **Variable-Length Integers** - QUIC varint encoding/decoding.
 - **Connection IDs** - Connection ID generation and peer table.
 - **Flow Control** - MAX_DATA and MAX_STREAM_DATA frame handling with connection-level and per-stream flow control windows.
@@ -57,8 +60,9 @@ Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP
 ### Deliberate Current Limits
 
 - One request per QUIC connection (no H3 pooling yet); proxy routes are rejected loudly (`Http3ProxyUnsupported`).
-- Full handshakes only: no PSK resumption or HRR over QUIC yet (both exist on the TCP/TLS paths).
-- No transport-parameter negotiation (both ends run compiled-in defaults), no Retry/token round trip, no loss recovery or congestion control: reliable paths (loopback/LAN) only.
+- 0-RTT resumption works over QUIC, but the QUIC driver does not handle HelloRetryRequest; clients always send an X25519 share.
+- No Retry/token round trip and no QUIC version negotiation: only version 1 is supported.
+- No key update, connection migration, server push, or HTTP/3 datagrams.
 - The client sends buffered request bodies in HTTP/3 DATA frames. Streaming
   uploads and downloads are not provided by this one-shot API.
 

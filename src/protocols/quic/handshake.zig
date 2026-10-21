@@ -8,21 +8,22 @@
 //! with HANDSHAKE_DONE.
 //!
 //! Deliberate scope (documented, not hidden):
-//!   * Full handshakes only — no PSK resumption over QUIC yet (the TLS
-//!     engine supports it on TCP; wiring offer/capture through CRYPTO
-//!     streams is future work).
+//!   * PSK resumption and 0-RTT are supported through the TLS engine's
+//!     session tickets; early data is gated by the configured policy.
 //!   * No HelloRetryRequest handling: our client always offers an x25519
 //!     share, so a conforming server never needs to retry. A foreign HRR
 //!     surfaces as a handshake timeout, never silent corruption.
 //!   * Transport parameters (`quicTransportParameters`, ext 57) are
 //!     exchanged in ClientHello/EncryptedExtensions and applied to
 //!     flow-control windows, stream limits, and connection IDs; absent
-//!     values keep compiled-in defaults. Retry/token and version
-//!     negotiation stay future work.
-//!   * No Retry/token round trip: first flight validates routability on
-//!     loopback; deployments facing the open internet must add Retry.
-//!   * No loss recovery / congestion control: reliable paths only
-//!     (loopback, LAN). Lossy networks will stall to the deadline.
+//!     values keep compiled-in defaults.
+//!   * No Retry/token round trip and no QUIC version negotiation: the
+//!     transport supports version 1 only. Deployments facing the open
+//!     internet should add Retry at the endpoint.
+//!   * ACK tracking, PTO/loss recovery, and NewReno congestion control
+//!     live in `connection.zig`, `lossRecovery.zig`, and
+//!     `congestionControl.zig`; key update and connection migration are
+//!     not wired yet.
 //!
 //! Thread-safety: thread-confined per connection (one driver per side).
 
@@ -179,16 +180,25 @@ pub const Driver = struct {
         // originalDestinationConnectionId: servers echo the DCID the
         // client first used (already installed by acceptInitial).
         if (conn.role == .server) {
+            const odcid = if (conn.origDcidLen > 0) conn.origDcid[0..conn.origDcidLen] else conn.dcid[0..conn.dcidLen];
             var vb: [8]u8 = undefined;
             var n = try quicVarint.encode(&vb, 0x00);
             try out.appendSlice(a, vb[0..n]);
-            n = try quicVarint.encode(&vb, conn.dcidLen);
+            n = try quicVarint.encode(&vb, odcid.len);
             try out.appendSlice(a, vb[0..n]);
-            try out.appendSlice(a, conn.dcid[0..conn.dcidLen]);
+            try out.appendSlice(a, odcid);
+            // retrySourceConnectionId is present only when this server
+            // validated a Retry token; it must equal the Retry SCID.
+            if (conn.retryPending) {
+                n = try quicVarint.encode(&vb, 0x10);
+                try out.appendSlice(a, vb[0..n]);
+                n = try quicVarint.encode(&vb, conn.scidLen);
+                try out.appendSlice(a, vb[0..n]);
+                try out.appendSlice(a, conn.scid[0..conn.scidLen]);
+            }
         }
         return out.toOwnedSlice(a);
     }
-
     /// Applies decoded peer transport parameters to the connection.
     /// Nonzero values override the compiled defaults; absent values
     /// keep them (so unit paths without a TLS exchange keep working).
@@ -197,15 +207,28 @@ pub const Driver = struct {
     fn applyPeerTransportParams(conn: *Connection, tp: []const u8, isServer: bool) connMod.Error!void {
         const p = paramsMod.decode(tp) catch return connMod.Error.TransportParameterError;
         const cids = paramsMod.parseCidParams(tp) catch return connMod.Error.TransportParameterError;
-        if (cids.retrySourceConnectionId != null) return connMod.Error.TransportParameterError;
         if (isServer) {
             // Servers never receive originalDestinationConnectionId
             // (they send it); requiring it here would fail every client.
             if (cids.originalDestinationConnectionId != null) return connMod.Error.TransportParameterError;
-        } else if (cids.originalDestinationConnectionId) |odcid| {
-            // The server echoes the DCID from our Initial; a mismatch
-            // means we are talking to a confused or hostile peer.
-            if (odcid.len != conn.origDcidLen or !std.mem.eql(u8, odcid, conn.origDcid[0..conn.origDcidLen])) {
+            if (cids.retrySourceConnectionId != null) return connMod.Error.TransportParameterError;
+        } else {
+            if (cids.originalDestinationConnectionId) |odcid| {
+                // The server echoes the DCID from our first Initial; a
+                // mismatch means a confused or hostile peer.
+                if (odcid.len != conn.origDcidLen or !std.mem.eql(u8, odcid, conn.origDcid[0..conn.origDcidLen])) {
+                    return connMod.Error.TransportParameterError;
+                }
+            }
+            if (cids.retrySourceConnectionId) |rscid| {
+                if (!conn.retryPending or rscid.len != conn.retryScidLen or
+                    !std.mem.eql(u8, rscid, conn.retryScid[0..conn.retryScidLen]))
+                {
+                    return connMod.Error.TransportParameterError;
+                }
+            } else if (conn.retryPending) {
+                // A Retry was performed, so the server must confirm the
+                // Retry SCID in its transport parameters.
                 return connMod.Error.TransportParameterError;
             }
         }
@@ -394,6 +417,10 @@ pub const Driver = struct {
                     defer a.free(fin);
                     _ = conn.queueCrypto(.handshake, fin) catch return connMod.Error.TlsDriverFailed;
                     try sendQueued(conn, .handshake, nowMs);
+                    // Our Finished completes the client flight: the
+                    // handshake is complete, but confirmation waits for
+                    // HANDSHAKE_DONE or an ACK of a 1-RTT packet.
+                    conn.handshakeComplete = true;
                 },
                 @backingInt(ths.HandshakeType.new_session_ticket) => {
                     if (d.engine.deriveResumptionMaster()) |rm| {
@@ -423,7 +450,15 @@ pub const Driver = struct {
                     return connMod.Error.ProtocolViolation;
                 }
                 d.engine.verifyClientFinished(rec.msg) catch return connMod.Error.TlsDriverFailed;
-                conn.state = .established;
+                // RFC 9001 Section 4.1.2: the server confirms the
+                // handshake once it has sent and verified Finished. This
+                // drops the Handshake keys (Section 4.9.2) and marks the
+                // connection established.
+                conn.handshakeComplete = true;
+                conn.confirmHandshake();
+                // 1-RTT packets may have arrived while the handshake was
+                // still running; they are decryptable now.
+                conn.replayPendingApp(nowMs) catch {};
                 dropFront(&d.incoming, a, rec.msg.len);
 
                 // If ticket keys configured, produce NewSessionTicket for client
@@ -729,6 +764,12 @@ test "live handshake over real udp loopback establishes both ends" {
     // ALPN h3 was negotiated through the real TLS flight.
     try std.testing.expectEqualStrings("h3", cliDrv.engine.negotiatedAlpn.?);
     try std.testing.expectEqualStrings("h3", srvDrv.engine.negotiatedAlpn.?);
+    // RFC 9001 Section 4.9.2: confirmation discarded the Handshake keys
+    // and their recovery state on both ends.
+    try std.testing.expect(cliConn.handshakeConfirmed);
+    try std.testing.expect(srvConn.handshakeConfirmed);
+    try std.testing.expect(cliConn.spaces[1].keysRx == null and cliConn.spaces[1].keysTx == null);
+    try std.testing.expect(srvConn.spaces[1].keysRx == null and srvConn.spaces[1].keysTx == null);
 }
 
 /// Drives a client handshake to completion. `clientPump` must be
@@ -1054,5 +1095,56 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         try std.testing.expectEqual(connMod.State.established, srvConn.state);
         try std.testing.expect(srvConn.earlyDataAccepted);
         try std.testing.expect(cliConn.earlyDataAccepted);
+        // Resumption follows the same lifecycle: Handshake keys and 0-RTT
+        // keys are gone once 1-RTT is confirmed (RFC 9001 4.9.2/4.9.3).
+        try std.testing.expect(cliConn.handshakeConfirmed);
+        try std.testing.expect(srvConn.handshakeConfirmed);
+        try std.testing.expect(cliConn.spaces[1].keysRx == null and cliConn.spaces[1].keysTx == null);
+        try std.testing.expect(srvConn.spaces[1].keysRx == null and srvConn.spaces[1].keysTx == null);
+        try std.testing.expect(cliConn.zeroRttKeysTx == null and cliConn.zeroRttKeysRx == null);
+        try std.testing.expect(srvConn.zeroRttKeysTx == null and srvConn.zeroRttKeysRx == null);
     }
+}
+
+test "the initial keys are discarded once the handshake moves on" {
+    // RFC 9001 Section 4.9.1: a client discards the Initial keys when it
+    // first sends a Handshake packet and a server discards them when it
+    // first processes one. After that no Initial packet may be sent.
+    const a = std.testing.allocator;
+    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    defer cliConn.deinit();
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    defer srvConn.deinit();
+
+    var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
+    defer cliEp.deinit();
+    var srvEp = try transportMod.Endpoint.init(a, ctx.io, srvConn, .{});
+    defer srvEp.deinit();
+    const sport = srvEp.localPort();
+
+    var cliDrv = Driver.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{ .host = "127.0.0.1", .caPem = hsTestCertPem });
+    defer cliDrv.deinit();
+    var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{ .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
+    defer srvDrv.deinit();
+    cliConn.tls = .{ .ctx = &cliDrv, .start = Driver.clientStart, .onData = Driver.onData };
+    srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
+
+    var cliPump: transportMod.Pump = .{};
+    try cliPump.start(&cliEp, a);
+    defer cliPump.stop();
+    var srvPump: transportMod.Pump = .{};
+    try srvPump.start(&srvEp, a);
+    defer srvPump.stop();
+
+    const dest = std.Io.net.IpAddress.parseIp4("127.0.0.1", sport) catch unreachable;
+    try performHandshake(&cliEp, &cliPump, &cliDrv, &srvEp, &srvPump, &srvDrv, dest, 15_000);
+
+    // Neither peer may protect another Initial packet.
+    try std.testing.expect(cliConn.spaces[0].keysTx == null);
+    try std.testing.expect(cliConn.spaces[0].keysRx == null);
+    try std.testing.expect(srvConn.spaces[0].keysTx == null);
+    try std.testing.expect(srvConn.spaces[0].keysRx == null);
 }

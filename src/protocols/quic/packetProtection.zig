@@ -87,11 +87,18 @@ pub fn applyHeaderProtection(
 // Payload protection
 
 /// Nonce = IV with the last 8 bytes XORed with the big-endian packet number.
+///
+/// RFC 9001 Section 5.3: "The nonce is formed by XORing the packet number
+/// (encoded in network byte order) with the IV". The byte order is
+/// explicit here because the native order would be little-endian on x86,
+/// which silently breaks interoperability with every other QUIC
+/// implementation for any packet number above zero.
 pub fn buildNonce(iv: *const [12]u8, pn: u64) [12]u8 {
     var nonce: [12]u8 = iv.*;
-    const be = std.mem.toBytes(pn);
+    var pn_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &pn_bytes, pn, .big);
     for (0..8) |i| {
-        nonce[4 + i] ^= be[i];
+        nonce[4 + i] ^= pn_bytes[i];
     }
     return nonce;
 }
@@ -418,4 +425,26 @@ test "retry integrity tag matches RFC 9001 A.4" {
     retryIntegrityTag(odcid[0..], retryBody[0..], &tag);
     const want = [_]u8{ 0x04, 0xa2, 0x65, 0xba, 0x2e, 0xff, 0x4d, 0x82, 0x90, 0x58, 0xfb, 0x3f, 0x0f, 0x24, 0x96, 0xba };
     try std.testing.expectEqualSlices(u8, &want, &tag);
+}
+
+test "packet number enters the nonce in network byte order" {
+    // RFC 9001 Section 5.3: the nonce is the IV XORed with the packet
+    // number in network byte order. Using the native order produced a
+    // nonce that only matched this implementation, so no other QUIC
+    // stack could decrypt our packets.
+    var iv = @as([12]u8, @splat(0xFA));
+    const n0 = buildNonce(&iv, 0);
+    try std.testing.expectEqualSlices(u8, &iv, &n0);
+
+    const n1 = buildNonce(&iv, 1);
+    try std.testing.expectEqual(@as(u8, 0xFB), n1[11]);
+    try std.testing.expectEqual(@as(u8, 0xFA), n1[10]);
+
+    const n256 = buildNonce(&iv, 256);
+    try std.testing.expectEqual(@as(u8, 0xFA), n256[11]);
+    try std.testing.expectEqual(@as(u8, 0xFB), n256[10]);
+    try std.testing.expectEqual(@as(u8, 0xFA), n256[9]);
+
+    // The same packet number must always produce the same nonce.
+    try std.testing.expectEqualSlices(u8, &n1, &buildNonce(&iv, 1));
 }

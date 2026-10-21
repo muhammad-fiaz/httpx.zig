@@ -3,9 +3,15 @@
 > Status: implemented for reliable paths. The high-level client performs a
 > real QUIC + TLS 1.3 handshake (ALPN `h3`, verified chain) over UDP; the
 > high-level server can serve routes over the same transport. Loopback
-> integration tests cover these paths. Packet-loss recovery, congestion
-> control, Retry/token exchange, and QUIC version negotiation are not
-> implemented, so lossy network paths can stall until timeout.
+> integration tests cover the client/server path, including dynamic QPACK.
+> QUIC ACK tracking, PTO/loss recovery, NewReno congestion control, flow
+> control, transport parameters, and 0-RTT resumption are wired in.
+>
+> Deliberate limits: one HTTP/3 request per QUIC connection (no pooling),
+> no Retry/token exchange, no QUIC version negotiation, no
+> HelloRetryRequest handling in the QUIC driver, no key update or
+> connection migration, no server push/datagrams, and no streaming
+> request/response bodies through the high-level API.
 
 ## Motivation
 
@@ -35,11 +41,10 @@ While HTTP/2 eliminated head-of-line blocking at the application level, TCP head
 
 ## Client Usage Example
 
-Live since the QUIC transport landing: `client.get` with
-`.httpVersion = .http3` performs a real QUIC + TLS 1.3 handshake (ALPN
-`h3`, verified chain) over UDP. Reliable paths (loopback/LAN) — no loss
-recovery yet, so lossy networks stall to the request deadline. Runnable
-end to end in `examples/http3Client.zig`:
+`client.get` with `.httpVersion = .http3` performs a real QUIC + TLS 1.3
+handshake (ALPN `h3`, verified chain) over UDP, with QPACK dynamic-table
+encoding, response trailers, and loss recovery. Runnable end to end in
+`examples/http3Client.zig`:
 
 ```zig
 const std = @import("std");

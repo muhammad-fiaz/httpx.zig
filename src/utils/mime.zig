@@ -57,8 +57,7 @@ pub fn fromPath(path: []const u8) []const u8 {
 
     var lower: [16]u8 = undefined;
     if (ext.len > lower.len) return octetStream;
-    for (ext, 0..) |c, i| lower[i] = std.ascii.toLower(c);
-    const key = lower[0..ext.len];
+    const key = std.ascii.lowerString(&lower, ext);
 
     return mimeMap.get(key) orelse octetStream;
 }

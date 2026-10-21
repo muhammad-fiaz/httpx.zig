@@ -105,7 +105,8 @@ fn connectInternal(
     pos += 1;
     std.mem.writeInt(u16, req[pos..][0..2], destPort, .big);
     pos += 2;
-    if (parseIp4(destHost)) |ip| {
+    const ip4 = addressMod.parseIp4U32(destHost);
+    if (ip4) |ip| {
         std.mem.writeInt(u32, req[pos..][0..4], ip, .big);
         pos += 4;
     } else {
@@ -119,7 +120,7 @@ fn connectInternal(
     pos += id.len;
     req[pos] = 0;
     pos += 1;
-    const useExt = parseIp4(destHost) == null;
+    const useExt = ip4 == null;
     if (useExt) {
         @memcpy(req[pos..][0..destHost.len], destHost);
         pos += destHost.len;
@@ -158,20 +159,6 @@ fn looksLikeIpv6(text: []const u8) bool {
     if (text.len == 0) return false;
     if (text[0] == '[') return true;
     return std.mem.indexOfScalar(u8, text, ':') != null;
-}
-
-fn parseIp4(text: []const u8) ?u32 {
-    var parts: [4]u32 = .{ 0, 0, 0, 0 };
-    var it = std.mem.splitScalar(u8, text, '.');
-    var i: usize = 0;
-    while (it.next()) |p| {
-        if (i >= 4) return null;
-        parts[i] = std.fmt.parseInt(u32, p, 10) catch return null;
-        if (parts[i] > 255) return null;
-        i += 1;
-    }
-    if (i != 4) return null;
-    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
 }
 
 // In-process mock SOCKS4/4a server for deterministic offline testing

@@ -725,7 +725,7 @@ fn parseAttrs(
 ) ParseError!usize {
     var i = start;
     while (i < src.len) {
-        while (i < src.len and isWhitespace(src[i])) : (i += 1) {}
+        while (i < src.len and std.ascii.isWhitespace(src[i])) : (i += 1) {}
         if (i >= src.len) break;
 
         if (src[i] == '>') {
@@ -746,14 +746,14 @@ fn parseAttrs(
         }
         const attrName = src[nameStart..i];
 
-        while (i < src.len and isWhitespace(src[i])) : (i += 1) {}
+        while (i < src.len and std.ascii.isWhitespace(src[i])) : (i += 1) {}
 
         if (i >= src.len or src[i] != '=') {
             try attrs.append(arena, .{ .name = attrName, .value = "" });
             continue;
         }
         i += 1;
-        while (i < src.len and isWhitespace(src[i])) : (i += 1) {}
+        while (i < src.len and std.ascii.isWhitespace(src[i])) : (i += 1) {}
 
         var attrValue: []const u8 = "";
         if (i < src.len and (src[i] == '"' or src[i] == '\'')) {
@@ -765,7 +765,7 @@ fn parseAttrs(
             if (i < src.len) i += 1;
         } else {
             const valStart = i;
-            while (i < src.len and !isWhitespace(src[i]) and src[i] != '>') : (i += 1) {}
+            while (i < src.len and !std.ascii.isWhitespace(src[i]) and src[i] != '>') : (i += 1) {}
             attrValue = src[valStart..i];
         }
         if (attrValue.len > limits.maxAttrValue) return error.InputTooLarge;
@@ -780,17 +780,12 @@ fn isTagNameEnd(c: u8) bool {
 }
 
 fn isAttrNameEnd(c: u8) bool {
-    return c == '=' or c == '>' or c == '/' or isWhitespace(c);
-}
-
-fn isWhitespace(c: u8) bool {
-    return std.ascii.isWhitespace(c);
+    return c == '=' or c == '>' or c == '/' or std.ascii.isWhitespace(c);
 }
 
 fn lowerBuf(arena: Allocator, s: []const u8) Allocator.Error![]u8 {
     const buf = try arena.alloc(u8, s.len);
-    for (buf, 0..) |*b, idx| b.* = std.ascii.toLower(s[idx]);
-    return buf;
+    return std.ascii.lowerString(buf, s);
 }
 
 test "html grammar tokenizes document structure" {
@@ -830,6 +825,18 @@ test "html flags malformed input with error recovery" {
     defer arena.deinit();
     var tree = try parse(arena.allocator(), "<div><span>oops", .{});
     try std.testing.expect(tree.get(0).hasError or t.hasError());
+}
+
+test "html lowercases element names with std.ascii" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const tree = try parse(arena.allocator(), "<DIV CLASS=\"X\">hi</DIV>", .{});
+    var found = false;
+    for (tree.nodes.items) |n| {
+        if (n.kind == .element and std.mem.eql(u8, n.tag, "div")) found = true;
+    }
+    try std.testing.expect(found);
 }
 
 test "html tracks source ranges from syntax nodes" {

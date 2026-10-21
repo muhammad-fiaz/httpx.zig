@@ -154,7 +154,7 @@ fn connectInternal(
     req[pos] = 0x00; // RSV
     pos += 1;
 
-    const ip4 = parseIp4(destHost);
+    const ip4 = addressMod.parseIp4U32(destHost);
     if (ip4) |ip| {
         req[pos] = 0x01; // ATYP IPv4
         pos += 1;
@@ -245,20 +245,6 @@ fn looksLikeIpv6(text: []const u8) bool {
     if (text.len == 0) return false;
     if (text[0] == '[') return true;
     return std.mem.indexOfScalar(u8, text, ':') != null;
-}
-
-fn parseIp4(text: []const u8) ?u32 {
-    var parts: [4]u32 = .{ 0, 0, 0, 0 };
-    var it = std.mem.splitScalar(u8, text, '.');
-    var i: usize = 0;
-    while (it.next()) |p| {
-        if (i >= 4) return null;
-        parts[i] = std.fmt.parseInt(u32, p, 10) catch return null;
-        if (parts[i] > 255) return null;
-        i += 1;
-    }
-    if (i != 4) return null;
-    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
 }
 
 // In-process mock SOCKS5 server for deterministic offline testing
@@ -393,10 +379,12 @@ pub const MockSocksServer = struct {
 };
 
 test "parse dotted quad" {
-    try std.testing.expectEqual(@as(?u32, 0x7F000001), parseIp4("127.0.0.1"));
-    try std.testing.expectEqual(@as(?u32, 0x08080808), parseIp4("8.8.8.8"));
-    try std.testing.expectEqual(@as(?u32, null), parseIp4("example.com"));
-    try std.testing.expectEqual(@as(?u32, null), parseIp4("999.1.1.1"));
+    try std.testing.expectEqual(@as(?u32, 0x7F000001), addressMod.parseIp4U32("127.0.0.1"));
+    try std.testing.expectEqual(@as(?u32, 0x08080808), addressMod.parseIp4U32("8.8.8.8"));
+    try std.testing.expectEqual(@as(?u32, null), addressMod.parseIp4U32("example.com"));
+    try std.testing.expectEqual(@as(?u32, null), addressMod.parseIp4U32("999.1.1.1"));
+    try std.testing.expectEqual(@as(?u32, null), addressMod.parseIp4U32("01.2.3.4"));
+    try std.testing.expectEqual(@as(?u32, null), addressMod.parseIp4U32("1.2.3.4.5"));
 }
 
 test "socks5 mock server no-auth connect and echo" {

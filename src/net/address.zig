@@ -100,66 +100,24 @@ pub const Address = struct {
     }
 
     /// Formats into buf per RFC 5952. Returns formatted slice.
+    ///
+    /// IPv6 text is produced by `std.Io.net.Ip6Address.Unresolved.format`,
+    /// which implements the same RFC 5952 rules as the previous hand-rolled
+    /// formatter (longest zero run of two or more groups compressed, lowercase
+    /// hex, `::ffff:a.b.c.d` for IPv4-mapped addresses).
     pub fn formatBuf(self: *const Address, buf: []u8) []const u8 {
         switch (self.family) {
             .ip4 => return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{
                 self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
             }) catch buf[0..0],
             .ip6 => {
-                // v4-mapped has its own canonical form
-                if (self.isV4Mapped()) {
-                    return std.fmt.bufPrint(buf, "::ffff:{d}.{d}.{d}.{d}", .{
-                        self.bytes[12], self.bytes[13], self.bytes[14], self.bytes[15],
-                    }) catch buf[0..0];
-                }
-                var groups: [8]u16 = undefined;
-                for (0..8) |g| {
-                    groups[g] = (@as(u16, self.bytes[g * 2]) << 8) | self.bytes[g * 2 + 1];
-                }
-                // Longest zero run >= 2 gets compressed (RFC 5952)
-                var bestStart: usize = 8;
-                var bestLen: usize = 0;
-                var i: usize = 0;
-                while (i < 8) {
-                    if (groups[i] == 0) {
-                        var j = i;
-                        while (j < 8 and groups[j] == 0) j += 1;
-                        if (j - i > bestLen) {
-                            bestLen = j - i;
-                            bestStart = i;
-                        }
-                        i = j;
-                    } else i += 1;
-                }
-                if (bestLen < 2) bestStart = 8;
-
-                var pos: usize = 0;
-                var gi: usize = 0;
-                while (gi < 8) {
-                    if (gi == bestStart) {
-                        if (pos < buf.len) {
-                            buf[pos] = ':';
-                            pos += 1;
-                        }
-                        if (pos < buf.len) {
-                            buf[pos] = ':';
-                            pos += 1;
-                        }
-                        gi += bestLen;
-                        continue;
-                    }
-                    if (std.fmt.bufPrint(buf[pos..], "{x}", .{groups[gi]})) |str| {
-                        pos += str.len;
-                    } else |_| break;
-                    if (gi < 7 and gi + 1 != bestStart) {
-                        if (pos < buf.len) {
-                            buf[pos] = ':';
-                            pos += 1;
-                        }
-                    }
-                    gi += 1;
-                }
-                return buf[0..pos];
+                var writer = std.Io.Writer.fixed(buf);
+                const unresolved = net.Ip6Address.Unresolved{
+                    .bytes = self.bytes,
+                    .interface_name = null,
+                };
+                unresolved.format(&writer) catch return buf[0..0];
+                return buf[0..writer.end];
             },
         }
     }
@@ -207,114 +165,63 @@ pub const Address = struct {
 };
 
 /// Parses dotted-quad IPv4 into 4 bytes.
+///
+/// Delegates to `std.Io.net.Ip4Address.parse`, which rejects empty
+/// octets, values above 255, leading zeros, and trailing junk.
 pub fn parseIp4Bytes(text: []const u8) ?[4]u8 {
-    var out: [4]u8 = undefined;
-    var it = std.mem.splitScalar(u8, text, '.');
-    var i: usize = 0;
-    while (it.next()) |part| {
-        if (i >= 4) return null;
-        if (part.len == 0 or part.len > 3) return null;
-        var value: u16 = 0;
-        for (part) |c| {
-            if (c < '0' or c > '9') return null;
-            value = value * 10 + (c - '0');
-        }
-        if (value > 255) return null;
-        out[i] = @intCast(value);
-        i += 1;
-    }
-    if (i != 4) return null;
-    return out;
+    const parsed = net.Ip4Address.parse(text, 0) catch return null;
+    return parsed.bytes;
 }
 
-/// Parses full/compressed IPv6 with optional %zone suffix.
+/// Parses dotted-quad IPv4 into the big-endian `u32` used by SOCKS.
+pub fn parseIp4U32(text: []const u8) ?u32 {
+    const bytes = parseIp4Bytes(text) orelse return null;
+    return std.mem.readInt(u32, &bytes, .big);
+}
+
+/// Parses a full or compressed IPv6 literal with an optional `%zone`
+/// suffix. Numeric zones are stored in `Address.zone`; named zones are
+/// accepted and left for the socket layer to resolve.
+///
+/// Validation and byte assembly are delegated to the standard library.
+/// Only the RFC 4291 embedded-IPv4 tail is translated to two hexadecimal
+/// groups first because `std.Io.net.Ip6Address.parse` handles that form
+/// only for the `::ffff:` prefix.
 fn parseIp6Text(textIn: []const u8) Error!Address {
     var text = textIn;
 
-    // Extract zone
     var zone: u32 = 0;
     if (std.mem.indexOfScalar(u8, text, '%')) |zidx| {
         const zname = text[zidx + 1 ..];
         text = text[0..zidx];
-        // Numeric interface index or name (names resolve at socket layer)
+        if (zname.len == 0) return Error.InvalidAddress;
+        // Numeric interface index; non-numeric names resolve at the socket layer.
         zone = std.fmt.parseInt(u32, zname, 10) catch 0;
     }
+    if (std.mem.indexOfScalar(u8, text, '%') != null) return Error.InvalidAddress;
 
-    // Handle embedded IPv4 tail "::ffff:1.2.3.4"
-    var tailV4: ?[4]u8 = null;
+    var converted: [64]u8 = undefined;
     if (std.mem.lastIndexOfScalar(u8, text, ':')) |lastColon| {
         const tail = text[lastColon + 1 ..];
-        if (std.mem.indexOfScalar(u8, tail, '.') != null) {
-            tailV4 = parseIp4Bytes(tail) orelse return Error.InvalidAddress;
-            text = text[0 .. lastColon + 1]; // keep trailing colon for compression math
+        // `std.Io.net` understands `::ffff:a.b.c.d` directly but not other
+        // IPv4-embedded forms, so translate those to hex groups.
+        if (std.mem.indexOfScalar(u8, tail, '.') != null and
+            !std.ascii.startsWithIgnoreCase(text, "::ffff:"))
+        {
+            const v4 = parseIp4Bytes(tail) orelse return Error.InvalidAddress;
+            const prefix = text[0 .. lastColon + 1];
+            if (prefix.len + 20 > converted.len) return Error.InvalidAddress;
+            @memcpy(converted[0..prefix.len], prefix);
+            const suffix = std.fmt.bufPrint(converted[prefix.len..], "{x}:{x}", .{
+                (@as(u16, v4[0]) << 8) | v4[1],
+                (@as(u16, v4[2]) << 8) | v4[3],
+            }) catch return Error.InvalidAddress;
+            text = converted[0 .. prefix.len + suffix.len];
         }
     }
 
-    // Find "::" compression point
-    const doubleColon = std.mem.indexOf(u8, text, "::");
-    var headGroups: [8]u16 = (@as([8]u16, @splat(0)));
-    var headCount: usize = 0;
-    var tailGroups: [8]u16 = (@as([8]u16, @splat(0)));
-    var tailCount: usize = 0;
-
-    var headPart: []const u8 = "";
-    var tailPart: []const u8 = "";
-    if (doubleColon) |dc| {
-        headPart = text[0..dc];
-        tailPart = text[dc + 2 ..];
-    } else {
-        headPart = text;
-    }
-
-    var fit = std.mem.splitScalar(u8, headPart, ':');
-    while (fit.next()) |g| {
-        if (g.len == 0) continue;
-        if (headCount >= 8) return Error.InvalidAddress;
-        headGroups[headCount] = std.fmt.parseInt(u16, g, 16) catch return Error.InvalidAddress;
-        headCount += 1;
-    }
-
-    if (doubleColon != null) {
-        var tit = std.mem.splitScalar(u8, tailPart, ':');
-        while (tit.next()) |g| {
-            if (g.len == 0) continue;
-            if (tailCount >= 8) return Error.InvalidAddress;
-            tailGroups[tailCount] = std.fmt.parseInt(u16, g, 16) catch return Error.InvalidAddress;
-            tailCount += 1;
-        }
-    } else {
-        // No compression: must have exactly 8 groups (or 6 + v4 tail)
-        if (headCount != 8 and !(tailV4 != null and headCount == 6)) return Error.InvalidAddress;
-    }
-
-    var out = Address{ .family = .ip6, .port = 0 };
-    const totalFromText = headCount + tailCount;
-    const v4Extra: usize = if (tailV4 != null) 2 else 0;
-    const zeros = 8 - totalFromText - v4Extra;
-    if (zeros < 0 or totalFromText + v4Extra > 8) return Error.InvalidAddress;
-
-    var pos: usize = 0;
-    for (headGroups[0..headCount]) |g| {
-        out.bytes[pos * 2] = @intCast(g >> 8);
-        out.bytes[pos * 2 + 1] = @intCast(g & 0xFF);
-        pos += 1;
-    }
-    for (0..@intCast(zeros)) |_| {
-        pos += 1;
-    }
-    for (tailGroups[0..tailCount]) |g| {
-        out.bytes[pos * 2] = @intCast(g >> 8);
-        out.bytes[pos * 2 + 1] = @intCast(g & 0xFF);
-        pos += 1;
-    }
-    if (tailV4) |v4| {
-        out.bytes[pos * 2] = v4[0];
-        out.bytes[pos * 2 + 1] = v4[1];
-        out.bytes[pos * 2 + 2] = v4[2];
-        out.bytes[pos * 2 + 3] = v4[3];
-    }
-    out.zone = zone;
-    return out;
+    const parsed = net.Ip6Address.parse(text, 0) catch return Error.InvalidAddress;
+    return .{ .family = .ip6, .bytes = parsed.bytes, .port = 0, .zone = zone };
 }
 
 // Tests
@@ -341,6 +248,42 @@ test "reject malformed ipv4" {
     try std.testing.expectError(Error.InvalidAddress, a.parseIp("1.2.3.4.5"));
     try std.testing.expectError(Error.InvalidAddress, a.parseIp("a.b.c.d"));
     try std.testing.expectError(Error.InvalidAddress, a.parseIp(""));
+}
+
+test "parse ipv4 into network-order u32" {
+    try std.testing.expectEqual(@as(?u32, 0x7F000001), parseIp4U32("127.0.0.1"));
+    try std.testing.expectEqual(@as(?u32, 0x08080808), parseIp4U32("8.8.8.8"));
+    try std.testing.expectEqual(@as(?u32, null), parseIp4U32("example.com"));
+    try std.testing.expectEqual(@as(?u32, null), parseIp4U32("999.1.1.1"));
+    try std.testing.expectEqual(@as(?u32, null), parseIp4U32("01.2.3.4"));
+    try std.testing.expectEqual(@as(?u32, null), parseIp4U32("1.2.3.4.5"));
+}
+
+test "reject non-canonical and malformed ip literals" {
+    const a = Address{ .family = .ip4, .port = 0 };
+    try std.testing.expectError(Error.InvalidAddress, a.parseIp("01.2.3.4"));
+    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1.2.3.4 "));
+    try std.testing.expectError(Error.InvalidAddress, a.parseIp("999.1.1.1"));
+
+    // Inputs that previously underflowed the compression-width calculation.
+    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1:2:3:4:5:6:7:8:9::"));
+    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1:2:3:4:5:6:7:8::"));
+    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1::2::3"));
+    try std.testing.expectError(Error.InvalidAddress, a.parseIp("1:::2"));
+    try std.testing.expectError(Error.InvalidAddress, a.parseIp("fe80::1%"));
+}
+
+test "parse embedded ipv4 ipv6 tails" {
+    var buf: [64]u8 = undefined;
+    const m = try addrAny.parseIp("::ffff:192.168.1.1");
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 1, 1 }, &m.bytes);
+    try std.testing.expectEqualStrings("::ffff:192.168.1.1", m.formatBuf(&buf));
+
+    const plain = try addrAny.parseIp("::192.168.1.1");
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 192, 168, 1, 1 }, &plain.bytes);
+
+    const full = try addrAny.parseIp("1:2:3:4:5:6:7.8.9.10");
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 7, 8, 9, 10 }, &full.bytes);
 }
 
 test "parse full-form ipv6" {
@@ -385,6 +328,28 @@ test "v4 mapped ipv6" {
     const asV4 = a.toV4MappedView().?;
     try std.testing.expectEqual(Family.ip4, asV4.family);
     try std.testing.expectEqualStrings("192.168.1.1", asV4.formatBuf(&buf));
+}
+
+test "ipv6 text follows RFC 5952 through the standard formatter" {
+    var buf: [64]u8 = undefined;
+    const cases = [_]struct { text: []const u8, want: []const u8 }{
+        // Longest zero run is compressed.
+        .{ .text = "2001:db8:0:0:0:0:0:1", .want = "2001:db8::1" },
+        .{ .text = "2001:0db8:0000:0000:0000:0000:0000:0001", .want = "2001:db8::1" },
+        // A single zero group is never compressed (RFC 5952 Section 4.2.2).
+        .{ .text = "1:0:2:3:4:5:6:7", .want = "1:0:2:3:4:5:6:7" },
+        // All-zero address.
+        .{ .text = "::", .want = "::" },
+        .{ .text = "0:0:0:0:0:0:0:0", .want = "::" },
+        // Trailing zero run.
+        .{ .text = "1:2:3:4:5:6:7:0", .want = "1:2:3:4:5:6:7:0" },
+        // Lowercase hex output.
+        .{ .text = "2001:DB8:ABCD:EF01:2345:6789:ABCD:EF01", .want = "2001:db8:abcd:ef01:2345:6789:abcd:ef01" },
+    };
+    for (cases) |c| {
+        const a = try addrAny.parseIp(c.text);
+        try std.testing.expectEqualStrings(c.want, a.formatBuf(&buf));
+    }
 }
 
 test "host:port splitting" {

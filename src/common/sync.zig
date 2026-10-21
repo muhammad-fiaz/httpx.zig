@@ -61,9 +61,11 @@ pub const Semaphore = struct {
     }
 };
 
-/// One-shot initialization gate (std.once does not exist in 0.16).
-/// `executed()` runs `f` exactly once across all threads; others block
-/// until it completes.
+/// One-shot initialization gate.
+///
+/// Zig 0.17.0 still ships no `std.Once` (checked against the installed
+/// standard library), so this gate is kept. It is a thin spinlock plus a
+/// two-state atomic; the blocked path is the cold one-shot case only.
 pub const Once = struct {
     state: std.atomic.Value(u8) = .init(0), // 0=idle 1=running 2=done
     mu: Spinlock = .{},

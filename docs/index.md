@@ -23,7 +23,7 @@ hero:
 
 features:
   - title: All HTTP Versions
-    details: HTTP/1.0, HTTP/1.1, and HTTP/2 runtimes; HTTP/3 client/server runtime for reliable paths, with QUIC loss recovery and congestion control still unimplemented.
+    details: HTTP/1.0, HTTP/1.1, and HTTP/2 runtimes; HTTP/3 client/server runtime over QUIC with loss recovery, NewReno congestion control, flow control, and 0-RTT resumption.
   - title: Robust Client
     details: Connection pooling, automatic retries, interceptors, typed API, and default-safe chainable config/option overrides.
   - title: Powerful Server
@@ -161,7 +161,7 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN suppor
 - **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
 - **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and connection pooling (RFC 7540)
 - **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
-- **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, version negotiation, and transport parameters
+- **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, ACK/loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, and RFC 9001 handshake confirmation/key discard
 - **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling
 - **Interop note:** strict TLS-in-QUIC server negotiation expectations may vary by endpoint deployment
 :::
@@ -173,7 +173,7 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN suppor
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
 | HTTP/2 | ✅ Full | TCP/TLS | Client + server runtime (ALPN `h2` / h2c) plus framing/HPACK/stream primitives |
-| HTTP/3 | ⚠️ Reliable paths | QUIC/TLS | Client + server runtime (ALPN `h3`); no loss recovery, congestion control, Retry, or version negotiation |
+| HTTP/3 | ✅ Reliable paths | QUIC/TLS | Client + server runtime (ALPN `h3`) with loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, and RFC 9001 handshake confirmation/key discard; no Retry, version negotiation, HelloRetryRequest, key update, or migration |
 
 ## Platform Support
 

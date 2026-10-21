@@ -64,31 +64,10 @@ const probes: []const Probe = &.{
 
 /// Parse a dotted-decimal IPv4 or a colon-hex IPv6 literal into an Address.
 fn parseIpLiteral(ip: []const u8, port: u16, family: addressMod.Family) ?addressMod.Address {
-    var addr = addressMod.Address{ .family = family, .port = port };
-    switch (family) {
-        .ip4 => {
-            var octets: [4]u8 = undefined;
-            var i: usize = 0;
-            var idx: u8 = 0;
-            while (i < ip.len and idx < 4) {
-                var n: u8 = 0;
-                while (i < ip.len and ip[i] != '.') : (i += 1) {
-                    if (ip[i] < '0' or ip[i] > '9') return null;
-                    n = n *% 10 +% (ip[i] - '0');
-                }
-                octets[idx] = n;
-                idx += 1;
-                if (i < ip.len and ip[i] == '.') i += 1;
-            }
-            if (idx != 4) return null;
-            addr.bytes[0..4].* = octets;
-        },
-        .ip6 => {
-            // Use std.Io.net.Ip6Address parsing (Zig 0.16 API).
-            const parsed = std.Io.net.Ip6Address.parse(ip, port) catch return null;
-            addr.bytes = parsed.bytes;
-        },
-    }
+    const scratch = addressMod.Address{ .family = family, .port = port };
+    var addr = scratch.parseIp(ip) catch return null;
+    if (addr.family != family) return null;
+    addr.port = port;
     return addr;
 }
 
@@ -98,13 +77,27 @@ const clock = @import("../common/clock.zig");
 fn probeOne(io: std.Io, probe: Probe, timeoutMs: u32) ?u32 {
     const addr = parseIpLiteral(probe.ip, probe.port, probe.family) orelse return null;
     const t0 = clock.monotonicMillis();
+    const timeout: std.Io.Timeout = .{ .duration = .{
+        .raw = .fromMilliseconds(timeoutMs),
+        .clock = .awake,
+    } };
     const stream = addr.toStd(null).connect(io, .{
         .mode = .stream,
-        .timeout = .{ .duration = .fromMilliseconds(timeoutMs) },
+        .timeout = timeout,
     }) catch return null;
     stream.close(io);
     const elapsed = clock.monotonicMillis() - t0;
     return @intCast(@max(0, elapsed));
+}
+
+test "connectivity probe literals reject malformed input" {
+    try std.testing.expect(parseIpLiteral("999.1.1.1", 53, .ip4) == null);
+    try std.testing.expect(parseIpLiteral("1.2.3", 53, .ip4) == null);
+    try std.testing.expect(parseIpLiteral("1.2.3.4.5", 53, .ip4) == null);
+    const v4 = parseIpLiteral("1.1.1.1", 53, .ip4) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 1, 1 }, v4.bytes[0..4]);
+    const v6 = parseIpLiteral("2606:4700:4700::1111", 53, .ip6) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 53), v6.port);
 }
 
 /// Check whether the internet is reachable.

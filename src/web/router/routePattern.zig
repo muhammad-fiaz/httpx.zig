@@ -79,7 +79,7 @@ pub const Converter = enum {
 pub fn isUint(value: []const u8) bool {
     if (value.len == 0) return false;
     for (value) |c| {
-        if (c < '0' or c > '9') return false;
+        if (!std.ascii.isDigit(c)) return false;
     }
     return true;
 }

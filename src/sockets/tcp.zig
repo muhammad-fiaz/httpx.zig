@@ -28,116 +28,35 @@ const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
 const addressMod = @import("../net/address.zig");
-const sync = @import("../common/sync.zig");
+const sysMod = @import("sys.zig");
 const clock = @import("../common/clock.zig");
 const posix = std.posix;
 const builtin = @import("builtin");
 
 const isWindows = builtin.os.tag == .windows;
 
-// Windows winsock shims
-// All declared inside a comptime block so they compile to nothing on non-Windows.
+// Windows winsock shims.
+//
+// The single platform mapping (extern declarations, constants, sockaddr
+// layouts and the WSAStartup once-guard) lives in `sockets/sys.zig`; this
+// module reuses it instead of redeclaring the ws2_32 ABI. `sys.ws` is an
+// empty struct on non-Windows targets, so the comptime branches below
+// compile to nothing there.
+const ws = sysMod.ws;
 
-const ws = if (isWindows) struct {
-    pub const SOCKET = usize;
-    pub const SOCKET_ERROR: i32 = -1;
-    pub const INVALID_SOCKET: SOCKET = ~@as(usize, 0);
-    pub const AF_INET: i32 = 2;
-    pub const AF_INET6: i32 = 23;
-    pub const SOCK_STREAM: i32 = 1;
-    pub const IPPROTO_TCP: i32 = 6;
-    pub const SO_REUSEADDR: i32 = 4;
-    pub const SOMAXCONN: i32 = 0x7fffffff;
-
-    pub const sockaddrIn = extern struct {
-        family: u16,
-        port: u16, // big-endian
-        addr: [4]u8,
-        zero: [8]u8 = @splat(0),
+/// Winsock last-error mapped onto the client-facing connect taxonomy.
+/// Deliberately does not use `windows.unexpectedStatus()`: that path dumps a
+/// stack trace to stderr and corrupts the test runner's binary protocol.
+fn mapConnectError() ConnectError {
+    return switch (ws.WSAGetLastError()) {
+        ws.WSAECONNREFUSED => ConnectError.ConnectionRefused,
+        ws.WSAEHOSTUNREACH, ws.WSAEHOSTDOWN => ConnectError.HostUnreachable,
+        ws.WSAENETUNREACH => ConnectError.NetworkUnreachable,
+        ws.WSAETIMEDOUT => ConnectError.TimedOut,
+        ws.WSAEACCES => ConnectError.PermissionDenied,
+        else => ConnectError.Unexpected,
     };
-
-    pub const sockaddrIn6 = extern struct {
-        family: u16,
-        port: u16, // big-endian
-        flowinfo: u32 = 0,
-        addr: [16]u8,
-        scopeId: u32 = 0,
-    };
-
-    // Winsock error codes
-    pub const WSAECONNREFUSED: i32 = 10061;
-    pub const WSAEHOSTUNREACH: i32 = 10065;
-    pub const WSAEHOSTDOWN: i32 = 10064;
-    pub const WSAENETUNREACH: i32 = 10051;
-    pub const WSAETIMEDOUT: i32 = 10060;
-    pub const WSAEACCES: i32 = 10013;
-
-    const WSADATA = extern struct {
-        wVersion: u16,
-        wHighVersion: u16,
-        szDescription: [257]u8,
-        szSystemStatus: [129]u8,
-        iMaxSockets: u16,
-        iMaxUdpDg: u16,
-        lpVendorInfo: ?[*:0]u8,
-    };
-
-    const wsCall: std.lang.CallingConvention = if (builtin.os.tag == .windows) std.lang.CallingConvention.winapi else std.lang.CallingConvention.c;
-
-    pub extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSADATA) callconv(wsCall) i32;
-    pub extern "ws2_32" fn WSAGetLastError() callconv(wsCall) i32;
-    pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(wsCall) i32;
-    pub extern "ws2_32" fn socket(af: i32, sockType: i32, protocol: i32) callconv(wsCall) SOCKET;
-    pub extern "ws2_32" fn bind(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn accept(s: SOCKET, addr: ?*anyopaque, addrlen: ?*i32) callconv(wsCall) SOCKET;
-    pub extern "ws2_32" fn getsockname(s: SOCKET, name: *anyopaque, namelen: *i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: i32, flags: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: i32, flags: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn setsockopt(s: SOCKET, level: i32, optname: i32, optval: ?*const anyopaque, optlen: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn shutdown(s: SOCKET, how: i32) callconv(wsCall) i32;
-
-    pub const SOL_SOCKET: i32 = 0xFFFF;
-    pub const SO_RCVTIMEO: i32 = 0x1006;
-    pub const SO_SNDTIMEO: i32 = 0x1007;
-    pub const SO_KEEPALIVE: i32 = 8;
-    pub const SD_SEND: i32 = 1;
-    pub const TCP_NODELAY: i32 = 1;
-    pub const IPPROTO_TCP_OPT: i32 = 6;
-
-    var wsaOnce: sync.Once = .{};
-
-    fn doWsaStartup() void {
-        var data: WSADATA = undefined;
-        _ = WSAStartup(0x0202, &data);
-    }
-
-    pub fn startup() void {
-        // Once-gated: racing threads block until WSAStartup completes,
-        // so nobody observes WSANOTINITIALISED on socket().
-        wsaOnce.call(doWsaStartup);
-    }
-
-    /// Map winsock last-error to ConnectError without calling unexpectedStatus.
-    pub fn mapConnectError() ConnectError {
-        return switch (WSAGetLastError()) {
-            WSAECONNREFUSED => ConnectError.ConnectionRefused,
-            WSAEHOSTUNREACH, WSAEHOSTDOWN => ConnectError.HostUnreachable,
-            WSAENETUNREACH => ConnectError.NetworkUnreachable,
-            WSAETIMEDOUT => ConnectError.TimedOut,
-            WSAEACCES => ConnectError.PermissionDenied,
-            else => ConnectError.Unexpected,
-        };
-    }
-
-    /// Apply 10-second send/receive timeouts (blocking mode).
-    pub fn applyTimeouts(s: SOCKET) void {
-        const ms: u32 = 10_000;
-        _ = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &ms, 4);
-        _ = setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &ms, 4);
-    }
-} else struct {};
+}
 
 // Public API for socket tuning
 
@@ -186,7 +105,7 @@ fn setWriteSocketTimeout(sock: net.Socket.Handle, timeoutMs: u31) void {
 pub fn setNoDelay(sock: net.Socket.Handle) void {
     const one: c_int = 1;
     if (isWindows) {
-        _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.IPPROTO_TCP_OPT, ws.TCP_NODELAY, &one, @sizeOf(c_int));
+        _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.IPPROTO_TCP, ws.TCP_NODELAY, &one, @sizeOf(c_int));
     } else {
         posix.setsockopt(sock, posix.IPPROTO.TCP, 1, std.mem.asBytes(&one)) catch {}; // TCP_NODELAY == 1
     }
@@ -222,18 +141,11 @@ pub fn setKeepAlive(sock: net.Socket.Handle, idleSecs: u32) void {
 pub const UploadStream = struct {
     handle: isize, // SOCKET (winsock) or fd (posix)
 
-    var wsaOnce: sync.Once = .{};
-
-    fn doEnsureWsa() void {
-        var data: ws.WSADATA = undefined;
-        _ = ws.WSAStartup(0x0202, &data);
-    }
-
     pub fn ensureWinsock() void {
         if (!isWindows) return;
-        // Once-gated (see ws.startup): racing threads block until WSAStartup
-        // completes instead of observing WSANOTINITIALISED on socket().
-        wsaOnce.call(doEnsureWsa);
+        // Once-gated (see sys.ws.startup): racing threads block until
+        // WSAStartup completes instead of observing WSANOTINITIALISED.
+        sysMod.init();
     }
 
     /// Connects to an IPv4 literal host. Returns error.ConnectFailed on any
@@ -252,11 +164,11 @@ pub const UploadStream = struct {
             if (ws.connect(h, &addr, @sizeOf(ws.sockaddrIn)) == ws.SOCKET_ERROR) {
                 // Read the error BEFORE closesocket: successful winsock calls
                 // reset the thread's last-error, clobbering the real code.
-                const err = ws.mapConnectError();
+                const err = mapConnectError();
                 _ = ws.closesocket(h);
                 return err;
             }
-            ws.applyTimeouts(h);
+            ws.setTimeouts(h, 10_000);
             return .{ .handle = @intCast(h) };
         } else {
             const fd = std.c.socket(@intCast(posix.AF.INET), @intCast(posix.SOCK.STREAM), @intCast(posix.IPPROTO.TCP));
@@ -901,8 +813,9 @@ pub const Listener = struct {
 
 /// Initializes winsock on Windows (no-op elsewhere). Safe to call repeatedly.
 pub fn initWinsock() void {
-    UploadStream.ensureWinsock();
-    if (isWindows) ws.startup();
+    // `sys.init()` performs the once-gated WSAStartup on Windows and is a
+    // no-op on every other target.
+    sysMod.init();
 }
 
 /// Connect a dummy socket to the listening port to wake any blocked accept()
@@ -993,7 +906,7 @@ fn connectAddressWindows(io: std.Io, addr: *const addressMod.Address) ConnectErr
         .ip4 => {
             const h = ws.socket(ws.AF_INET, ws.SOCK_STREAM, ws.IPPROTO_TCP);
             if (h == ws.INVALID_SOCKET) {
-                return ws.mapConnectError();
+                return mapConnectError();
             }
             var sa = ws.sockaddrIn{
                 .family = @intCast(ws.AF_INET),
@@ -1002,16 +915,16 @@ fn connectAddressWindows(io: std.Io, addr: *const addressMod.Address) ConnectErr
             };
             if (ws.connect(h, &sa, @sizeOf(ws.sockaddrIn)) == ws.SOCKET_ERROR) {
                 // Read the error BEFORE closesocket (see connectIPv4).
-                const err = ws.mapConnectError();
+                const err = mapConnectError();
                 _ = ws.closesocket(h);
                 return err;
             }
-            ws.applyTimeouts(h);
+            ws.setTimeouts(h, 10_000);
             return Socket.fromWinsock(h, io);
         },
         .ip6 => {
             const h = ws.socket(ws.AF_INET6, ws.SOCK_STREAM, ws.IPPROTO_TCP);
-            if (h == ws.INVALID_SOCKET) return ws.mapConnectError();
+            if (h == ws.INVALID_SOCKET) return mapConnectError();
             var sa = ws.sockaddrIn6{
                 .family = @intCast(ws.AF_INET6),
                 .port = std.mem.nativeToBig(u16, addr.port),
@@ -1020,11 +933,11 @@ fn connectAddressWindows(io: std.Io, addr: *const addressMod.Address) ConnectErr
             };
             if (ws.connect(h, &sa, @sizeOf(ws.sockaddrIn6)) == ws.SOCKET_ERROR) {
                 // Read the error BEFORE closesocket (see connectIPv4).
-                const err = ws.mapConnectError();
+                const err = mapConnectError();
                 _ = ws.closesocket(h);
                 return err;
             }
-            ws.applyTimeouts(h);
+            ws.setTimeouts(h, 10_000);
             return Socket.fromWinsock(h, io);
         },
     }

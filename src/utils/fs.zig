@@ -2,6 +2,16 @@
 //!
 //! Provides safe, high-performance, cross-platform file reading, writing,
 //! deletion, and path validation using native platform syscalls.
+//!
+//! Why this module does not use `std.Io.Dir`: Zig 0.17.0 exposes the
+//! filesystem through `std.Io.Dir`, whose every entry point takes an `Io`
+//! parameter. This module's contract is deliberately synchronous and
+//! `Io`-free because it is used from call sites that must not thread an `Io`
+//! through the call chain (TLS material loading during server startup, the
+//! download manager's resume logic, watcher probes). The raw path is kept
+//! small, audited, and free of allocations. The optional `io` parameter of
+//! `statPath` is accepted for call-site compatibility and is currently
+//! unused by the synchronous implementation.
 
 const std = @import("std");
 const builtin = @import("builtin");

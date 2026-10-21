@@ -130,11 +130,8 @@ pub fn generateBoundary(buf: *[32]u8) []const u8 {
     var raw: [16]u8 = @splat(0);
     std.mem.writeInt(usize, raw[0..@sizeOf(usize)], n, .little);
     std.mem.writeInt(usize, raw[@sizeOf(usize)..][0..@sizeOf(usize)], @intFromPtr(buf), .little);
-    const hex = "0123456789abcdef";
-    for (raw, 0..) |b, i| {
-        buf[i * 2] = hex[b >> 4];
-        buf[i * 2 + 1] = hex[b & 15];
-    }
+    const hex = std.fmt.bytesToHex(raw, .lower);
+    @memcpy(buf[0..], &hex);
     return buf[0..];
 }
 
@@ -418,6 +415,17 @@ test "boundary validation" {
     try std.testing.expect(!validateBoundary(&tooLong));
     try std.testing.expect(!validateBoundary("has space"));
     try std.testing.expect(!validateBoundary("has\x00null"));
+}
+
+test "generated boundary is lowercase hex and unique" {
+    var firstBuf: [32]u8 = undefined;
+    var secondBuf: [32]u8 = undefined;
+    const first = generateBoundary(&firstBuf);
+    const second = generateBoundary(&secondBuf);
+    try std.testing.expectEqual(@as(usize, 32), first.len);
+    for (first) |c| try std.testing.expect(std.ascii.isHex(c) and !std.ascii.isUpper(c));
+    try std.testing.expect(!std.mem.eql(u8, first, second));
+    try std.testing.expect(validateBoundary(first));
 }
 
 test "empty parts list" {

@@ -29,6 +29,7 @@ const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
 const mimeMod = @import("../utils/mime.zig");
 const uriMod = @import("../common/uri.zig");
+const parseMod = @import("../common/parse.zig");
 const Method = @import("../common/method.zig").Method;
 const parserMod = @import("../protocols/http1/parser.zig");
 const semanticsMod = @import("../protocols/http1/semantics.zig");
@@ -375,20 +376,7 @@ const Transport = union(enum) {
 
 /// Percent-encodes a query value (RFC 3986 unreserved kept).
 pub fn encodeQueryValue(a: Allocator, s: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(a);
-    const hexd = "0123456789ABCDEF";
-    for (s) |c| {
-        const safe = std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~';
-        if (safe) {
-            try out.append(a, c);
-        } else {
-            try out.append(a, '%');
-            try out.append(a, hexd[c >> 4]);
-            try out.append(a, hexd[c & 15]);
-        }
-    }
-    return out.toOwnedSlice(a);
+    return parseMod.percentEncodeAlloc(a, s);
 }
 
 /// Builds the origin-form request target, preserving a query string already
@@ -652,6 +640,11 @@ fn h3DoRequest(
             a.free(h.value);
         }
         a.free(h3resp.headers);
+        for (h3resp.trailers) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(h3resp.trailers);
         a.free(h3resp.body);
         return Error.OutOfMemory;
     };
@@ -663,9 +656,19 @@ fn h3DoRequest(
             a.free(h.value);
         }
         a.free(outHdrs);
+        for (h3resp.trailers) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(h3resp.trailers);
         a.free(h3resp.body);
         return e;
     };
+    for (h3resp.trailers) |h| {
+        a.free(h.name);
+        a.free(h.value);
+    }
+    a.free(h3resp.trailers);
     a.free(h3resp.headers);
     return .{
         .allocator = a,
@@ -2276,6 +2279,66 @@ fn startTestServer(
     return .{ .srv = srv, .ctx = ctx };
 }
 
+test "HTTP/3 client reaches the built-in server and decodes dynamic QPACK" {
+    const a = std.testing.allocator;
+    const lifecycle = @import("../server/httpServer.zig");
+    const routerNs = @import("../web/router/router.zig");
+
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = lifecycle.Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .http3 = true,
+        .tls = .{
+            .certificatePem = lifecycle.h3TestCertPem,
+            .privateKeyPem = lifecycle.h3TestKeyPem,
+        },
+        .enableDocs = false,
+    }) catch return;
+    defer srv.deinit();
+
+    try srv.router.add(.GET, "/h3", struct {
+        fn h(_: *routerNs.Context) anyerror!routerNs.Response {
+            return .{
+                .status = 200,
+                .body = "h3-server-body",
+                .contentType = "text/plain",
+                .headers = &.{.{ .name = "x-dynamic", .value = "server-value" }},
+            };
+        }
+    }.h, .{});
+
+    const th = std.Thread.spawn(.{}, lifecycle.Server.run, .{&srv}) catch return;
+    var joined = false;
+    defer {
+        srv.requestShutdown();
+        if (!joined) th.join();
+    }
+
+    const port = srv.http3.port() orelse return error.MissingHttp3Port;
+    var client = @import("httpClient.zig").Client.init(a, ctx.io, .{});
+    defer client.deinit();
+
+    var ub: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&ub, "https://127.0.0.1:{d}/h3", .{port});
+    var res = try client.get(url, .{
+        .httpVersion = .http3,
+        .tls = .{ .verify = .caBundle, .caPem = lifecycle.h3TestCertPem },
+        .timeoutMs = 15_000,
+    });
+    defer res.deinit();
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+    try std.testing.expectEqualStrings("h3-server-body", res.body);
+    try std.testing.expectEqualStrings("server-value", res.header("x-dynamic").?);
+    try std.testing.expect(res.version == .http3);
+
+    srv.requestShutdown();
+    th.join();
+    joined = true;
+}
+
 test "keep-alive: second request reuses pooled connection" {
     const a = std.testing.allocator;
     var S = try startTestServer(a, true, "/ka", "hello-keepalive");
@@ -2813,4 +2876,11 @@ test "https auto-enables tls with secure caBundle verification when no explicit 
     const tlsOpts: ?TlsOptions = if (isTls) reqTls orelse TlsOptions{} else null;
     try std.testing.expectEqual(.caBundle, tlsOpts.?.verify);
     try std.testing.expect(!tlsOpts.?.allowTruncation);
+}
+
+test "encodeQueryValue keeps RFC 3986 unreserved characters and uses uppercase hex" {
+    const a = std.testing.allocator;
+    const encoded = try encodeQueryValue(a, "a b+c/d?e=f&g_h.i-j~k");
+    defer a.free(encoded);
+    try std.testing.expectEqualStrings("a%20b%2Bc%2Fd%3Fe%3Df%26g_h.i-j~k", encoded);
 }

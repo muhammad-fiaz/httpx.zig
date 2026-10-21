@@ -697,8 +697,11 @@ fn appendPercentEncoded(out: *std.ArrayList(u8), allocator: Allocator, s: []cons
         if (unreserved) {
             try out.append(allocator, c);
         } else {
-            const hex = "0123456789ABCDEF";
-            try out.appendSlice(allocator, &[_]u8{ '%', hex[c >> 4], hex[c & 15] });
+            try out.appendSlice(allocator, &[_]u8{
+                '%',
+                std.fmt.digitToChar(c >> 4, .upper),
+                std.fmt.digitToChar(c & 15, .upper),
+            });
         }
     }
 }
@@ -716,8 +719,10 @@ fn appendJsonString(out: *std.ArrayList(u8), allocator: Allocator, s: []const u8
             0x0C => try out.appendSlice(allocator, "\\f"),
             else => {
                 if (c < 0x20) {
-                    const hex = "0123456789abcdef";
-                    try out.appendSlice(allocator, &[_]u8{ '\\', 'u', '0', '0', hex[c >> 4], hex[c & 15] });
+                    try out.appendSlice(allocator, &[_]u8{
+                        '\\',                                'u',                                 '0', '0',
+                        std.fmt.digitToChar(c >> 4, .lower), std.fmt.digitToChar(c & 15, .lower),
+                    });
                 } else {
                     try out.append(allocator, c);
                 }
@@ -4258,9 +4263,11 @@ test "Renderer supports extended Jinja filters" {
         .{ .src = "{{ [1]|sum(start=10) }}", .want = "11" },
         .{ .src = "{{ m|tojson }}", .want = "{\"a\": 1}" },
         .{ .src = "{{ \"<b>\"|tojson }}", .want = "\"<b>\"" },
+        .{ .src = "{{ \"a\x01b\"|tojson }}", .want = "\"a\\u0001b\"" },
         .{ .src = "{{ [1,2,1,3]|unique|join(\",\") }}", .want = "1,2,3" },
         .{ .src = "{{ [\"a\",\"A\",\"b\"]|unique|join(\",\") }}", .want = "a,b" },
         .{ .src = "{{ \"a b\"|urlencode }}", .want = "a%20b" },
+        .{ .src = "{{ \"a/b:c d\"|urlencode }}", .want = "a/b:c%20d" },
         .{ .src = "{{ m2|urlencode }}", .want = "a=b%20c" },
         .{ .src = "{{ \"hello cruel world\"|wordcount }}", .want = "3" },
         .{ .src = "{{ \"aa bb cc\"|wordwrap(4) }}", .want = "aa\nbb\ncc" },

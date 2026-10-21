@@ -49,8 +49,42 @@ pub var unknownCount: std.atomic.Value(usize) = .init(0);
 const isWindows = builtin.os.tag == .windows;
 
 pub const ws = if (isWindows) struct {
-    pub const SOCKET: usize = ~@as(usize, 0); // INVALID_SOCKET
+    /// Winsock socket handle type.
+    pub const SOCKET = usize;
+    /// Sentinel value returned by failed winsock calls.
+    pub const INVALID_SOCKET: SOCKET = ~@as(usize, 0);
     pub const SOCKET_ERROR: i32 = -1;
+
+    /// Address family / socket type / protocol constants.
+    pub const AF_INET: i32 = 2;
+    pub const AF_INET6: i32 = 23;
+    pub const SOCK_STREAM: i32 = 1;
+    pub const SOMAXCONN: i32 = 0x7fffffff;
+
+    /// `sockaddr_in` (IPv4) as declared by winsock2.h.
+    pub const sockaddrIn = extern struct {
+        family: u16,
+        port: u16, // network byte order
+        addr: [4]u8,
+        zero: [8]u8 = @splat(0),
+    };
+
+    /// `sockaddr_in6` (IPv6) as declared by ws2ipdef.h.
+    pub const sockaddrIn6 = extern struct {
+        family: u16,
+        port: u16, // network byte order
+        flowinfo: u32 = 0,
+        addr: [16]u8,
+        scopeId: u32 = 0,
+    };
+
+    // Winsock error codes used by connect paths.
+    pub const WSAECONNREFUSED: i32 = 10061;
+    pub const WSAEHOSTUNREACH: i32 = 10065;
+    pub const WSAEHOSTDOWN: i32 = 10064;
+    pub const WSAENETUNREACH: i32 = 10051;
+    pub const WSAETIMEDOUT: i32 = 10060;
+    pub const WSAEACCES: i32 = 10013;
 
     // select() nfds is ignored on Windows; fdSet uses SOCKET.
     pub const FD_SETSIZE = 64;
@@ -88,6 +122,12 @@ pub const ws = if (isWindows) struct {
 
     pub extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSAData) callconv(wsCall) i32;
     pub extern "ws2_32" fn WSAGetLastError() callconv(wsCall) i32;
+    pub extern "ws2_32" fn socket(af: i32, sockType: i32, protocol: i32) callconv(wsCall) SOCKET;
+    pub extern "ws2_32" fn bind(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn accept(s: SOCKET, addr: ?*anyopaque, addrlen: ?*i32) callconv(wsCall) SOCKET;
+    pub extern "ws2_32" fn getsockname(s: SOCKET, name: *anyopaque, namelen: *i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(wsCall) i32;
     pub extern "ws2_32" fn recv(s: usize, buf: [*]u8, len: i32, flags: i32) callconv(wsCall) i32;
     pub extern "ws2_32" fn send(s: usize, buf: [*]const u8, len: i32, flags: i32) callconv(wsCall) i32;
     pub extern "ws2_32" fn shutdown(s: usize, how: i32) callconv(wsCall) i32;
@@ -574,4 +614,34 @@ test "socket option setters execute without panicking" {
     _ = raFn;
     const nbFn = &setNonBlocking;
     _ = nbFn;
+}
+
+test "winsock abi: sockaddr layouts and sentinel values" {
+    if (!isWindows) return error.SkipZigTest;
+    // sockaddr_in: family(2) + port(2) + addr(4) + zero(8)
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(ws.sockaddrIn));
+    // sockaddr_in6: family(2) + port(2) + flowinfo(4) + addr(16) + scope(4)
+    try std.testing.expectEqual(@as(usize, 28), @sizeOf(ws.sockaddrIn6));
+    try std.testing.expectEqual(std.math.maxInt(usize), ws.INVALID_SOCKET);
+    try std.testing.expectEqual(@as(i32, -1), ws.SOCKET_ERROR);
+}
+
+test "winsock abi: connect-relevant codes are distinct and mapped" {
+    if (!isWindows) return error.SkipZigTest;
+    const codes = [_]i32{
+        ws.WSAECONNREFUSED,
+        ws.WSAEHOSTUNREACH,
+        ws.WSAEHOSTDOWN,
+        ws.WSAENETUNREACH,
+        ws.WSAETIMEDOUT,
+        ws.WSAEACCES,
+    };
+    for (codes, 0..) |a, i| {
+        for (codes, 0..) |b, j| {
+            if (i == j) continue;
+            try std.testing.expect(a != b);
+        }
+        // Every connect-relevant code has a named mapping in the taxonomy.
+        try std.testing.expect(ws.map(a) != error.Unknown);
+    }
 }

@@ -23,6 +23,7 @@ const Allocator = std.mem.Allocator;
 const frameMod = @import("frame.zig");
 const qpackMod = @import("qpack.zig");
 const quicVarint = @import("../quic/varint.zig");
+const parseMod = @import("../../common/parse.zig");
 
 pub const H3Error = frameMod.H3Error;
 pub const FieldLine = qpackMod.FieldLine;
@@ -131,6 +132,8 @@ pub const Stream = struct {
     /// QUIC stream FIN observed.
     fin: bool = false,
     failed: bool = false,
+    /// Error code that caused `failed`, for connection-level triage.
+    lastError: ?H3Error = null,
     done: bool = false,
 
     uniKind: UniKind = .undecided,
@@ -245,6 +248,7 @@ pub const Stream = struct {
     fn fail(self: *Stream, code: H3Error) void {
         if (self.failed or self.done) return;
         self.failed = true;
+        self.lastError = code;
         if (self.cbs.onError) |cb| cb(self.cbs.ctx, self.id, code);
     }
 
@@ -520,12 +524,65 @@ pub const Stream = struct {
         self.finishMessage();
     }
 
-    /// True when the fields carry a 1xx informational status.
+    /// True when the fields carry a 1xx informational status (101 is
+    /// prohibited in HTTP/3 and is handled by `validateResponse`).
     fn isInterimStatus(fields: []const FieldLine) bool {
         const status = findField(fields, ":status") orelse return false;
         if (status.len != 3 or status[0] != '1') return false;
         for (status[1..]) |c| {
             if (c < '0' or c > '9') return false;
+        }
+        return true;
+    }
+
+    /// RFC 9110 token; the shared table in `common/parse.zig` is the
+    /// single authoritative definition used by every protocol layer.
+    fn isTokenChar(c: u8) bool {
+        return parseMod.isTokenChar(c);
+    }
+
+    /// RFC 9110 token; HTTP/3 also requires field names to be lowercase.
+    fn isFieldName(name: []const u8) bool {
+        if (name.len == 0) return false;
+        for (name) |c| {
+            if (std.ascii.isUpper(c)) return false;
+            if (!isTokenChar(c)) return false;
+        }
+        return true;
+    }
+
+    /// Field values may not contain CR/LF/NUL or other controls other
+    /// than HTAB, and must not start or end with SP/HTAB (RFC 9114
+    /// Section 4.1.2). obs-text is preserved.
+    fn isFieldValue(value: []const u8) bool {
+        if (value.len > 0) {
+            const first = value[0];
+            const last = value[value.len - 1];
+            if (first == ' ' or first == '\t' or last == ' ' or last == '\t') return false;
+        }
+        for (value) |c| {
+            if (c == 0 or c == '\r' or c == '\n' or c == 0x7F) return false;
+            if (c < 0x20 and c != '\t') return false;
+        }
+        return true;
+    }
+
+    /// URI scheme syntax: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ).
+    fn isScheme(value: []const u8) bool {
+        if (value.len == 0) return false;
+        if (!std.ascii.isAlphabetic(value[0])) return false;
+        for (value[1..]) |c| {
+            if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return false;
+        }
+        return true;
+    }
+
+    /// Pseudo-header payloads are URI/authority syntax, where spaces and
+    /// controls are never legal.
+    fn isPseudoValue(value: []const u8) bool {
+        if (!isFieldValue(value)) return false;
+        for (value) |c| {
+            if (c == ' ' or c == '\t') return false;
         }
         return true;
     }
@@ -541,36 +598,38 @@ pub const Stream = struct {
         var host: ?[]const u8 = null;
         for (fields) |f| {
             if (f.name.len == 0) return .messageError;
-            for (f.name) |c| {
-                if (c >= 'A' and c <= 'Z') return .messageError;
-            }
             if (f.name[0] == ':') {
                 if (seenRegular) return .messageError;
+                if (!isFieldName(f.name[1..])) return .messageError;
                 if (std.mem.eql(u8, f.name, ":method")) {
                     if (method != null or f.value.len == 0) return .messageError;
                     for (f.value) |c| {
-                        if (c <= ' ' or c == 0x7F) return .messageError;
+                        if (!isTokenChar(c)) return .messageError;
                     }
                     method = f.value;
                 } else if (std.mem.eql(u8, f.name, ":scheme")) {
-                    if (scheme != null) return .messageError;
+                    if (scheme != null or !isScheme(f.value)) return .messageError;
                     scheme = f.value;
                 } else if (std.mem.eql(u8, f.name, ":authority")) {
-                    if (authority != null or f.value.len == 0) return .messageError;
+                    if (authority != null or f.value.len == 0 or !isPseudoValue(f.value)) return .messageError;
                     authority = f.value;
                 } else if (std.mem.eql(u8, f.name, ":path")) {
-                    if (path != null or f.value.len == 0) return .messageError;
+                    if (path != null or f.value.len == 0 or !isPseudoValue(f.value)) return .messageError;
                     path = f.value;
                 } else if (std.mem.eql(u8, f.name, ":protocol")) {
-                    if (protocol != null) return .messageError;
+                    if (protocol != null or f.value.len == 0) return .messageError;
+                    for (f.value) |c| {
+                        if (!isTokenChar(c)) return .messageError;
+                    }
                     protocol = f.value;
                 } else {
                     return .messageError; // unknown pseudo-header
                 }
             } else {
                 seenRegular = true;
+                if (!isFieldName(f.name)) return .messageError;
                 if (std.mem.eql(u8, f.name, "host")) {
-                    if (host != null) return .messageError;
+                    if (host != null or !isPseudoValue(f.value)) return .messageError;
                     host = f.value;
                 }
                 if (self.checkRegularHeader(f.name, f.value)) |code| return code;
@@ -601,19 +660,22 @@ pub const Stream = struct {
         var status: ?[]const u8 = null;
         for (fields) |f| {
             if (f.name.len == 0) return .messageError;
-            for (f.name) |c| {
-                if (c >= 'A' and c <= 'Z') return .messageError;
-            }
             if (f.name[0] == ':') {
                 if (seenRegular) return .messageError;
+                if (!isFieldName(f.name[1..])) return .messageError;
                 if (std.mem.eql(u8, f.name, ":status")) {
                     if (status != null) return .messageError;
                     if (f.value.len != 3) return .messageError;
                     for (f.value) |c| {
                         if (c < '0' or c > '9') return .messageError;
                     }
-                    const code = (f.value[0] - '0') * 100 + (f.value[1] - '0') * 10 + (f.value[2] - '0');
+                    const code: u16 = @as(u16, f.value[0] - '0') * 100 +
+                        @as(u16, f.value[1] - '0') * 10 +
+                        @as(u16, f.value[2] - '0');
                     if (code < 100 or code > 999) return .messageError;
+                    // 101 Switching Protocols is not used in HTTP/3
+                    // (RFC 9114 Section 4.1); extended CONNECT replaces it.
+                    if (code == 101) return .messageError;
                     const is1xx = f.value[0] == '1';
                     if (interim != is1xx) return .messageError;
                     status = f.value;
@@ -622,6 +684,7 @@ pub const Stream = struct {
                 }
             } else {
                 seenRegular = true;
+                if (!isFieldName(f.name)) return .messageError;
                 if (self.checkRegularHeader(f.name, f.value)) |code| return code;
             }
         }
@@ -636,15 +699,17 @@ pub const Stream = struct {
         for (fields) |f| {
             if (f.name.len == 0) return .messageError;
             if (f.name[0] == ':') return .messageError; // no pseudos in trailers
-            for (f.name) |c| {
-                if (c >= 'A' and c <= 'Z') return .messageError;
-            }
+            if (!isFieldName(f.name)) return .messageError;
+            // Content-Length describes the message body and must not be
+            // repeated in trailers (RFC 9110 Section 6.5).
+            if (std.mem.eql(u8, f.name, "content-length")) return .messageError;
             if (self.checkRegularHeader(f.name, f.value)) |code| return code;
         }
         return null;
     }
 
     fn checkRegularHeader(_: *Stream, name: []const u8, value: []const u8) ?H3Error {
+        if (!isFieldValue(value)) return .messageError;
         if (std.mem.eql(u8, name, "connection") or
             std.mem.eql(u8, name, "keep-alive") or
             std.mem.eql(u8, name, "proxy-connection") or
@@ -974,6 +1039,69 @@ test "h3stream interim 1xx then final" {
     try std.testing.expectEqual(@as(usize, 1), rec.ends);
 }
 
+test "h3stream response rejects 101 and accepts 404" {
+    const a = std.testing.allocator;
+    var qdec = qpackMod.Decoder.init(a);
+    defer qdec.deinit();
+    var qenc = qpackMod.Encoder.init(a);
+    defer qenc.deinit();
+    var qp = qpackMod.Encoder.init(a);
+    defer qp.deinit();
+
+    {
+        var rec = TestRec{};
+        var s = testBidi(a, &rec, 0, .responseRecv, &qdec, &qenc);
+        defer s.deinit();
+        const section = try testSection(a, &qp, &.{.{ ":status", "101" }});
+        defer a.free(section);
+        const hf = try testFrame(a, 0x1, section);
+        defer a.free(hf);
+        s.feed(hf, true);
+        try std.testing.expectEqual(H3Error.messageError, rec.lastErr.?);
+    }
+    {
+        var rec = TestRec{};
+        var s = testBidi(a, &rec, 0, .responseRecv, &qdec, &qenc);
+        defer s.deinit();
+        const section = try testSection(a, &qp, &.{.{ ":status", "404" }});
+        defer a.free(section);
+        const hf = try testFrame(a, 0x1, section);
+        defer a.free(hf);
+        s.feed(hf, true);
+        try std.testing.expect(rec.lastErr == null);
+        try std.testing.expectEqual(@as(usize, 1), rec.headers);
+        try std.testing.expectEqual(@as(usize, 1), rec.ends);
+    }
+}
+
+test "h3stream trailers reject content-length and malformed values" {
+    const a = std.testing.allocator;
+    var rec = TestRec{};
+    var qdec = qpackMod.Decoder.init(a);
+    defer qdec.deinit();
+    var qenc = qpackMod.Encoder.init(a);
+    defer qenc.deinit();
+    var qp = qpackMod.Encoder.init(a);
+    defer qp.deinit();
+    var s = testBidi(a, &rec, 0, .requestRecv, &qdec, &qenc);
+    defer s.deinit();
+
+    const h1 = try testSection(a, &qp, &.{ .{ ":method", "POST" }, .{ ":scheme", "https" }, .{ ":authority", "x" }, .{ ":path", "/" } });
+    defer a.free(h1);
+    const h2 = try testSection(a, &qp, &.{.{ "content-length", "0" }});
+    defer a.free(h2);
+    const f1 = try testFrame(a, 0x1, h1);
+    defer a.free(f1);
+    const f2 = try testFrame(a, 0x1, h2);
+    defer a.free(f2);
+    var wire = std.ArrayList(u8).empty;
+    defer wire.deinit(a);
+    try wire.appendSlice(a, f1);
+    try wire.appendSlice(a, f2);
+    s.feed(wire.items, true);
+    try std.testing.expectEqual(H3Error.messageError, rec.lastErr.?);
+}
+
 test "h3stream data before headers is malformed" {
     const a = std.testing.allocator;
     var rec = TestRec{};
@@ -1015,6 +1143,21 @@ test "h3stream header validation matrix" {
         .{ .heads = &.{ .{ ":method", "OPTIONS" }, .{ ":scheme", "https" }, .{ ":authority", "x" }, .{ ":path", "*" } }, .ok = true },
         // Minimal valid GET.
         .{ .heads = &.{ .{ ":method", "GET" }, .{ ":scheme", "https" }, .{ ":authority", "x" }, .{ ":path", "/" } }, .ok = true },
+        // Empty scheme is not a valid URI scheme.
+        .{ .heads = &.{ .{ ":method", "GET" }, .{ ":scheme", "" }, .{ ":authority", "x" }, .{ ":path", "/" } }, .ok = false },
+        // Scheme/path/authority may not contain spaces.
+        .{ .heads = &.{ .{ ":method", "GET" }, .{ ":scheme", "ht tps" }, .{ ":authority", "x" }, .{ ":path", "/" } }, .ok = false },
+        .{ .heads = &.{ .{ ":method", "GET" }, .{ ":scheme", "https" }, .{ ":authority", "x y" }, .{ ":path", "/" } }, .ok = false },
+        .{ .heads = &.{ .{ ":method", "GET" }, .{ ":scheme", "https" }, .{ ":authority", "x" }, .{ ":path", "/a b" } }, .ok = false },
+        // Field value leading/trailing whitespace is malformed.
+        .{ .heads = &.{ .{ ":method", "GET" }, .{ ":scheme", "https" }, .{ ":authority", "x" }, .{ ":path", "/" }, .{ "x-pad", " v" } }, .ok = false },
+        .{ .heads = &.{ .{ ":method", "GET" }, .{ ":scheme", "https" }, .{ ":authority", "x" }, .{ ":path", "/" }, .{ "x-pad", "v\t" } }, .ok = false },
+        // Field names cannot contain separators.
+        .{ .heads = &.{ .{ ":method", "GET" }, .{ ":scheme", "https" }, .{ ":authority", "x" }, .{ ":path", "/" }, .{ "x bad", "v" } }, .ok = false },
+        // CR/LF cannot be smuggled through a value.
+        .{ .heads = &.{ .{ ":method", "GET" }, .{ ":scheme", "https" }, .{ ":authority", "x" }, .{ ":path", "/" }, .{ "x-inject", "a\r\nb" } }, .ok = false },
+        // Method syntax is a token.
+        .{ .heads = &.{ .{ ":method", "GE T" }, .{ ":scheme", "https" }, .{ ":authority", "x" }, .{ ":path", "/" } }, .ok = false },
     };
     for (cases) |c| {
         var rec = TestRec{};

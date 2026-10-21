@@ -194,6 +194,14 @@ pub const Config = struct {
     http2: bool = true,
     /// HTTP/3 server runtime path.
     http3: bool = false,
+    /// Require a stateless Retry token before accepting QUIC Initials.
+    /// Off by default so 0-RTT clients are not forced into a round trip;
+    /// enable in production to validate the client address early.
+    http3Retry: bool = false,
+    /// Stable key for Retry tokens across connections. When null each
+    /// connection generates an ephemeral key (valid for its own Retry
+    /// round trip only).
+    http3RetryKey: ?[32]u8 = null,
     /// Automatically watch directory and broadcast changes / hot reload.
     watch: bool = false,
     /// Directory to watch when watch is enabled.
@@ -257,6 +265,158 @@ extern "kernel32" fn SetConsoleCtrlHandler(
     add: std.os.windows.BOOL,
 ) callconv(.winapi) std.os.windows.BOOL;
 
+/// One in-flight HTTP/3 request. Requests are keyed by QUIC stream ID so
+/// multiple request streams can be served concurrently on one connection.
+const H3Request = struct {
+    allocator: Allocator,
+    maxBody: usize,
+    sid: u64 = std.math.maxInt(u64),
+    fields: std.ArrayList(http3Qpack.FieldLine) = .empty,
+    body: std.ArrayList(u8) = .empty,
+    done: bool = false,
+    failed: bool = false,
+    tooLarge: bool = false,
+    h3Error: ?http3Frame.H3Error = null,
+    queued: bool = false,
+
+    fn deinit(self: *H3Request) void {
+        for (self.fields.items) |f| {
+            self.allocator.free(f.name);
+            self.allocator.free(f.value);
+        }
+        self.fields.deinit(self.allocator);
+        self.body.deinit(self.allocator);
+    }
+
+    fn copyFields(self: *H3Request, incoming: []const http3Qpack.FieldLine) void {
+        for (incoming) |f| {
+            const name = self.allocator.dupe(u8, f.name) catch {
+                self.failed = true;
+                return;
+            };
+            const value = self.allocator.dupe(u8, f.value) catch {
+                self.allocator.free(name);
+                self.failed = true;
+                return;
+            };
+            self.fields.append(self.allocator, .{ .name = name, .value = value }) catch {
+                self.allocator.free(name);
+                self.allocator.free(value);
+                self.failed = true;
+                return;
+            };
+        }
+    }
+};
+
+/// Routes QUIC stream events into per-request H3Request state and queues
+/// completed or failed requests for the server loop.
+const H3PumpCtx = struct {
+    allocator: Allocator,
+    maxBody: usize,
+    h3: *http3Conn.Connection,
+    requests: *std.AutoHashMap(u64, *H3Request),
+    ready: *std.ArrayList(u64),
+    lastActivityMs: *u64,
+    err: ?anyerror = null,
+
+    fn getOrCreate(p: *H3PumpCtx, sid: u64) ?*H3Request {
+        if (p.requests.get(sid)) |r| return r;
+        const r = p.allocator.create(H3Request) catch {
+            p.err = error.OutOfMemory;
+            return null;
+        };
+        r.* = .{ .allocator = p.allocator, .maxBody = p.maxBody, .sid = sid };
+        p.requests.put(sid, r) catch {
+            p.allocator.destroy(r);
+            p.err = error.OutOfMemory;
+            return null;
+        };
+        return r;
+    }
+
+    fn queue(p: *H3PumpCtx, r: *H3Request) void {
+        if (r.queued) return;
+        r.queued = true;
+        p.ready.append(p.allocator, r.sid) catch {
+            r.queued = false;
+            p.err = error.OutOfMemory;
+        };
+    }
+
+    fn onStream(ctx: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        p.lastActivityMs.* = @intCast(clock.monotonicMillis());
+        p.h3.feedQuic(sid, data, fin) catch {
+            if (p.h3.takeStreamError()) |se| {
+                if (p.getOrCreate(se.sid)) |r| {
+                    r.failed = true;
+                    r.h3Error = se.code;
+                    p.queue(r);
+                }
+            }
+            if (p.h3.fatalError != null) p.err = error.ProtocolViolation;
+            return;
+        };
+        if (p.h3.takeStreamError()) |se| {
+            if (p.getOrCreate(se.sid)) |r| {
+                r.failed = true;
+                r.h3Error = se.code;
+                p.queue(r);
+            }
+        }
+        p.h3.retryBlockedStreams();
+        if (p.h3.fatalError != null) p.err = error.ProtocolViolation;
+    }
+
+    fn onHeaders(ctx: ?*anyopaque, sid: u64, fields: []const http3Qpack.FieldLine, interim: bool) void {
+        if (interim) return;
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        const r = p.getOrCreate(sid) orelse return;
+        r.copyFields(fields);
+    }
+
+    fn onData(ctx: ?*anyopaque, sid: u64, data: []const u8) void {
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        const r = p.getOrCreate(sid) orelse return;
+        if (data.len > r.maxBody -| r.body.items.len) {
+            r.tooLarge = true;
+            return;
+        }
+        r.body.appendSlice(r.allocator, data) catch {
+            r.failed = true;
+        };
+    }
+
+    fn onTrailers(ctx: ?*anyopaque, sid: u64, fields: []const http3Qpack.FieldLine) void {
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        const r = p.getOrCreate(sid) orelse return;
+        r.copyFields(fields);
+    }
+
+    fn onMessageEnd(ctx: ?*anyopaque, sid: u64) void {
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        const r = p.getOrCreate(sid) orelse return;
+        r.done = true;
+        p.queue(r);
+    }
+
+    fn onH3Error(ctx: ?*anyopaque, sid: u64, code: http3Frame.H3Error) void {
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        const r = p.getOrCreate(sid) orelse return;
+        r.failed = true;
+        r.h3Error = code;
+        p.queue(r);
+    }
+
+    fn onReset(ctx: ?*anyopaque, sid: u64, code: u64) void {
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        p.h3.onQuicReset(sid, code);
+        const r = p.getOrCreate(sid) orelse return;
+        r.failed = true;
+        p.queue(r);
+    }
+};
 pub const Server = struct {
     /// HTTP/3 endpoint information, namespaced so protocol-specific
     /// helpers do not accumulate as flat methods on `Server`.
@@ -266,7 +426,9 @@ pub const Server = struct {
         /// differs only when that UDP bind failed and the endpoint fell
         /// back to an ephemeral port. Prefer this over `localPort()`.
         udpPort: ?u16 = null,
-        /// True when the endpoint could not reuse the TCP port.
+        /// True when the endpoint could not reuse the TCP port. Only
+        /// possible when the caller requested port 0; explicit ports
+        /// fail initialization instead of moving HTTP/3 silently.
         portFallback: bool = false,
 
         pub fn port(self: Http3) ?u16 {
@@ -495,22 +657,28 @@ pub const Server = struct {
         var h3Placeholder_opt: ?*quicConn.Connection = null;
         if (effectiveCfg.http3 and loadedCertPem != null and loadedKeyPem != null) {
             const placeholder = try quicConn.Connection.init(allocator, io, .server, .{});
-            errdefer placeholder.deinit();
+            // Ownership moves to the endpoint/Server on success; the
+            // errdefer covers every failure before that transfer.
+            var placeholderOwned = true;
+            errdefer if (placeholderOwned) placeholder.deinit();
             // RFC 9114 Section 3: HTTP/3 shares the HTTP/1.1 and HTTP/2
             // port number, so the UDP endpoint mirrors the TCP one. That
             // also holds for an ephemeral port, because a caller that asked
             // for port 0 discovers the number with `localPort()` and then
             // dials HTTP/3 on it.
             //
-            // If that bind fails, retry ephemerally rather than refusing to
-            // start. Windows keeps dynamic port ranges for TCP and UDP
-            // separate, so a TCP-chosen ephemeral port can fall inside a
-            // range the UDP stack will not bind. `http3.port()` reports
-            // whichever port was actually taken.
+            // An ephemeral TCP port is not necessarily bindable for UDP:
+            // Windows keeps separate reserved dynamic ranges per protocol,
+            // so the TCP-chosen number can fall inside a UDP exclusion.
+            // When the caller asked for port 0, retry ephemerally and
+            // report the result through `http3.port()`/`portFallback`.
+            //
+            // An explicit port is a promise to callers, so a UDP bind
+            // failure is returned instead of silently moving HTTP/3 to a
+            // port nobody was told about.
             const tcpPort = listener.localPort();
-            var placeholderOwned = true;
-            errdefer if (placeholderOwned) placeholder.deinit();
             const ep = quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = tcpPort }) catch |err| blk: {
+                if (cfg.port != 0) return err;
                 std.log.scoped(.httpx).warn(
                     "HTTP/3 could not bind UDP port {d} ({s}); falling back to an ephemeral port. Clients must use http3.port().",
                     .{ tcpPort, @errorName(err) },
@@ -1446,7 +1614,10 @@ pub const Server = struct {
         const keyPem = self.tlsKeyPemLoaded orelse return error.NoPrivateKey;
 
         const oldConn = ep.conn;
-        const qconn = try quicConn.Connection.init(self.allocator, self.io, .server, .{});
+        const qconn = try quicConn.Connection.init(self.allocator, self.io, .server, .{
+            .retry = self.cfg.http3Retry,
+            .retryKey = self.cfg.http3RetryKey,
+        });
         defer {
             qconn.deinit();
             ep.conn = oldConn;
@@ -1489,187 +1660,231 @@ pub const Server = struct {
             .onData = quicHs.Driver.onData,
         };
 
-        try quicHs.serveHandshake(ep, pump, &drv, 10_000);
-
         var h3 = http3Conn.Connection.init(self.allocator, .server);
         defer h3.deinit();
 
-        const Acc = struct {
-            allocator: Allocator,
-            maxBytes: usize,
-            sid: u64 = std.math.maxInt(u64),
-            buf: std.ArrayList(u8) = .empty,
-            fin: bool = false,
-            tooLarge: bool = false,
-
-            fn onStream(c: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
-                const acc: *@This() = @ptrCast(@alignCast(c.?));
-                if (acc.sid == std.math.maxInt(u64) and sid % 4 == 0) acc.sid = sid;
-                if (sid != acc.sid) return;
-                if (data.len > acc.maxBytes -| acc.buf.items.len) {
-                    acc.tooLarge = true;
-                    return;
-                }
-                acc.buf.appendSlice(acc.allocator, data) catch return;
-                if (fin) acc.fin = true;
+        var requests = std.AutoHashMap(u64, *H3Request).init(self.allocator);
+        defer {
+            var it = requests.valueIterator();
+            while (it.next()) |rp| {
+                rp.*.deinit();
+                self.allocator.destroy(rp.*);
             }
-        };
-
-        const maxH3Overhead = 64 * 1024;
-        const maxH3Request = std.math.add(usize, self.cfg.maxBody, maxH3Overhead) catch std.math.maxInt(usize);
-        var acc = Acc{ .allocator = self.allocator, .maxBytes = maxH3Request };
-        defer acc.buf.deinit(self.allocator);
-        qconn.cbs = .{ .ctx = &acc, .onStreamData = Acc.onStream };
+            requests.deinit();
+        }
+        var ready = std.ArrayList(u64).empty;
+        defer ready.deinit(self.allocator);
 
         const startMs: u64 = @intCast(clock.monotonicMillis());
+        var lastActivityMs: u64 = startMs;
+        var pumpCtx = H3PumpCtx{
+            .allocator = self.allocator,
+            .maxBody = self.cfg.maxBody,
+            .h3 = &h3,
+            .requests = &requests,
+            .ready = &ready,
+            .lastActivityMs = &lastActivityMs,
+        };
+        h3.cbs = .{
+            .ctx = &pumpCtx,
+            .onHeaders = H3PumpCtx.onHeaders,
+            .onData = H3PumpCtx.onData,
+            .onTrailers = H3PumpCtx.onTrailers,
+            .onMessageEnd = H3PumpCtx.onMessageEnd,
+            .onStreamReset = H3PumpCtx.onReset,
+            .onH3Error = H3PumpCtx.onH3Error,
+        };
+        qconn.cbs = .{
+            .ctx = &pumpCtx,
+            .onStreamData = H3PumpCtx.onStream,
+            .onStreamReset = H3PumpCtx.onReset,
+        };
+
+        // The HTTP/3 layer is wired before the handshake runs: a peer may
+        // send request data in the same flight as its Finished, and that
+        // data must not be dropped for want of a reader.
+        try quicHs.serveHandshake(ep, pump, &drv, 10_000);
+
+        // The control stream carries 1-RTT data, so it can only be sent
+        // once the handshake keys are in place.
+        try h3.sendControl(qconn, startMs);
+        try h3.sendQpackPrefixes(qconn, startMs);
+        _ = try ep.flush(null);
+
         while (!self.stopFlag.load(.acquire) and !self.h3Stop.load(.acquire)) {
             const nowMs: u64 = @intCast(clock.monotonicMillis());
-            if (nowMs -| startMs > 10_000) return error.Timeout;
+            // Keep one connection alive for multiplexed requests, but
+            // reclaim it once it has been idle with no active streams.
+            if (requests.count() == 0 and nowMs -| lastActivityMs > 30_000) return error.Timeout;
+            if (nowMs -| startMs > 300_000) return error.Timeout;
             try quicHs.feedPumped(ep, pump, null, 200, nowMs);
-            if (acc.tooLarge) return error.PayloadTooLarge;
-            if (!acc.fin) continue;
-
-            var off: usize = 0;
-            const fr = try http3Frame.parseFrame(acc.buf.items, &off);
-            const fields = try h3.qdec.decodeSectionCounted(fr.payload, 0, null);
-            defer h3.qdec.freeFields(fields);
-
-            var mStr: []const u8 = "GET";
-            var pStr: []const u8 = "/";
-            var arenaH3 = std.heap.ArenaAllocator.init(self.allocator);
-            defer arenaH3.deinit();
-            const a = arenaH3.allocator();
-
-            var reqBodyList = std.ArrayList(u8).empty;
-            while (off < acc.buf.items.len) {
-                if (http3Frame.parseFrame(acc.buf.items, &off)) |dfr| {
-                    if (dfr.frameType == 0x00) {
-                        try reqBodyList.appendSlice(a, dfr.payload);
-                    }
-                } else |_| break;
-            }
-            const reqBody = reqBodyList.items;
-            if (reqBody.len > self.cfg.maxBody) return error.PayloadTooLarge;
-
-            var ctxHdrs = try a.alloc(routerMod.Header, fields.len);
-            var hdrCount: usize = 0;
-            for (fields) |f| {
-                if (std.mem.eql(u8, f.name, ":method")) {
-                    mStr = f.value;
-                } else if (std.mem.eql(u8, f.name, ":path")) {
-                    pStr = f.value;
-                } else if (!std.mem.startsWith(u8, f.name, ":")) {
-                    ctxHdrs[hdrCount] = .{ .name = f.name, .value = f.value };
-                    hdrCount += 1;
-                }
-            }
-
-            const method = Method.fromString(mStr) orelse .GET;
-            var cleanPath = pStr;
-            if (std.mem.indexOfAny(u8, cleanPath, "?#")) |idx| {
-                cleanPath = cleanPath[0..idx];
-            }
-            var queryPart: []const u8 = "";
-            if (std.mem.indexOfScalar(u8, pStr, '?')) |qi| {
-                var q = pStr[qi + 1 ..];
-                if (std.mem.indexOfScalar(u8, q, '#')) |hi| q = q[0..hi];
-                queryPart = q;
-            }
-
-            var ctx = Context{
-                .allocator = a,
-                .io = self.io,
-                .headers = ctxHdrs[0..hdrCount],
-                .path = cleanPath,
-                .query = queryPart,
-                .method = method,
-                .body = reqBody,
-                .isTls = true,
-                .trustForwarded = self.cfg.trustForwardedHeaders,
-            };
-
-            var res = self.router.dispatch(&ctx);
-
-            // The same content coding the HTTP/1 and HTTP/2 paths apply, so one
-            // handler behaves identically across protocol versions.
-            var clientAcceptEncoding: ?[]const u8 = null;
-            for (ctxHdrs[0..hdrCount]) |h| {
-                if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) clientAcceptEncoding = h.value;
-            }
-
-            var codedBody: ?[]u8 = null;
-            defer if (codedBody) |b| a.free(b);
-            var outBody: []const u8 = res.body;
-            var contentEncoding: ?[]const u8 = null;
-            var varyAcceptEncoding = false;
-            if (res.status != 204 and res.status != 304) {
-                const coding = compression.encodeResponseBody(
-                    a,
-                    res.body,
-                    clientAcceptEncoding,
-                    self.cfg.compression,
-                    self.cfg.maxCompressionInput,
-                ) catch |err| switch (err) {
-                    error.NotAcceptable => blk: {
-                        res.status = 406;
-                        res.body = "";
-                        res.contentType = null;
-                        outBody = "";
-                        break :blk null;
-                    },
-                    else => return err,
-                };
-                if (coding) |c| {
-                    outBody = c.body;
-                    codedBody = if (c.contentEncoding != null) @constCast(c.body) else null;
-                    contentEncoding = c.contentEncoding;
-                    varyAcceptEncoding = c.varyAcceptEncoding;
-                }
-            }
-
-            var qenc = http3Qpack.Encoder.init(self.allocator);
-            defer qenc.deinit();
-            var rs = http3Conn.RequestStream{ .id = acc.sid, .allocator = self.allocator, .qpack = &qenc };
-
-            var respHeaders = std.ArrayList(http3Qpack.FieldLine).empty;
-            defer respHeaders.deinit(a);
-            for (res.headers) |h| {
-                try respHeaders.append(a, .{ .name = h.name, .value = h.value });
-            }
-            if (res.contentType) |ct| {
-                try respHeaders.append(a, .{ .name = "content-type", .value = ct });
-            }
-            if (contentEncoding) |ce| {
-                try respHeaders.append(a, .{ .name = "content-encoding", .value = ce });
-            }
-            if (varyAcceptEncoding) try respHeaders.append(a, .{ .name = "vary", .value = "Accept-Encoding" });
-
-            const rhead = try rs.buildResponseHeaders(res.status, respHeaders.items);
-            defer self.allocator.free(rhead);
-            const rdata = try rs.buildData(outBody);
-            defer self.allocator.free(rdata);
-
-            var wire = std.ArrayList(u8).empty;
-            defer wire.deinit(self.allocator);
-            try wire.appendSlice(self.allocator, rhead);
-            try wire.appendSlice(self.allocator, rdata);
-
-            const SendHelper = struct {
-                var sId: u64 = 0;
-                var sData: []const u8 = "";
-                pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) quicConn.Error!void {
-                    quicFrames.encode(payload, gpa, .{ .stream = .{ .id = sId, .offset = 0, .data = sData, .fin = true } }) catch
-                        return quicConn.Error.OutOfMemory;
-                }
-            };
-            SendHelper.sId = acc.sid;
-            SendHelper.sData = wire.items;
-            try qconn.sendFrames(.application, SendHelper.build, 0);
+            if (pumpCtx.err) |e| return e;
+            try h3.pumpQpack(qconn, nowMs);
             _ = try ep.flush(null);
-            return;
+
+            while (ready.items.len > 0) {
+                const sid = ready.orderedRemove(0);
+                const req = requests.get(sid) orelse continue;
+                _ = requests.remove(sid);
+                defer {
+                    req.deinit();
+                    self.allocator.destroy(req);
+                }
+                if (req.tooLarge) {
+                    h3.resetStream(qconn, sid, .requestRejected, nowMs) catch {};
+                    continue;
+                }
+                if (req.failed) {
+                    h3.resetStream(qconn, sid, req.h3Error orelse .generalProtocolError, nowMs) catch {};
+                    continue;
+                }
+                if (!req.done) {
+                    req.queued = false;
+                    continue;
+                }
+                self.dispatchH3Request(&h3, qconn, req) catch |err| {
+                    h3.resetStream(qconn, sid, .internalError, nowMs) catch {};
+                    if (err == error.OutOfMemory) return err;
+                    continue;
+                };
+            }
+            try h3.pumpQpack(qconn, nowMs);
+            _ = try ep.flush(null);
         }
     }
 
+    /// Dispatches one fully received HTTP/3 request and writes its
+    /// response on the same stream. Concurrent requests share `h3` and
+    /// the QUIC connection; QPACK encoding is serialized by the caller.
+    fn dispatchH3Request(
+        self: *Server,
+        h3: *http3Conn.Connection,
+        qconn: *quicConn.Connection,
+        req: *H3Request,
+    ) !void {
+        var arenaH3 = std.heap.ArenaAllocator.init(self.allocator);
+        defer arenaH3.deinit();
+        const a = arenaH3.allocator();
+        const fields = req.fields.items;
+        const reqBody = req.body.items;
+
+        var mStr: []const u8 = "GET";
+        var pStr: []const u8 = "/";
+        var ctxHdrs = try a.alloc(routerMod.Header, fields.len);
+        var hdrCount: usize = 0;
+        for (fields) |f| {
+            if (std.mem.eql(u8, f.name, ":method")) {
+                mStr = f.value;
+            } else if (std.mem.eql(u8, f.name, ":path")) {
+                pStr = f.value;
+            } else if (!std.mem.startsWith(u8, f.name, ":")) {
+                ctxHdrs[hdrCount] = .{ .name = f.name, .value = f.value };
+                hdrCount += 1;
+            }
+        }
+
+        const method = Method.fromString(mStr) orelse .GET;
+        var cleanPath = pStr;
+        if (std.mem.indexOfAny(u8, cleanPath, "?#")) |idx| {
+            cleanPath = cleanPath[0..idx];
+        }
+        var queryPart: []const u8 = "";
+        if (std.mem.indexOfScalar(u8, pStr, '?')) |qi| {
+            var q = pStr[qi + 1 ..];
+            if (std.mem.indexOfScalar(u8, q, '#')) |hi| q = q[0..hi];
+            queryPart = q;
+        }
+
+        var ctx = Context{
+            .allocator = a,
+            .io = self.io,
+            .headers = ctxHdrs[0..hdrCount],
+            .path = cleanPath,
+            .query = queryPart,
+            .method = method,
+            .body = reqBody,
+            .isTls = true,
+            .trustForwarded = self.cfg.trustForwardedHeaders,
+        };
+
+        var res = self.router.dispatch(&ctx);
+
+        // The same content coding the HTTP/1 and HTTP/2 paths apply, so one
+        // handler behaves identically across protocol versions.
+        var clientAcceptEncoding: ?[]const u8 = null;
+        for (ctxHdrs[0..hdrCount]) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) clientAcceptEncoding = h.value;
+        }
+
+        var codedBody: ?[]u8 = null;
+        defer if (codedBody) |b| a.free(b);
+        var outBody: []const u8 = res.body;
+        var contentEncoding: ?[]const u8 = null;
+        var varyAcceptEncoding = false;
+        if (res.status != 204 and res.status != 304) {
+            const coding = compression.encodeResponseBody(
+                a,
+                res.body,
+                clientAcceptEncoding,
+                self.cfg.compression,
+                self.cfg.maxCompressionInput,
+            ) catch |err| switch (err) {
+                error.NotAcceptable => blk: {
+                    res.status = 406;
+                    res.body = "";
+                    res.contentType = null;
+                    outBody = "";
+                    break :blk null;
+                },
+                else => return err,
+            };
+            if (coding) |c| {
+                outBody = c.body;
+                codedBody = if (c.contentEncoding != null) @constCast(c.body) else null;
+                contentEncoding = c.contentEncoding;
+                varyAcceptEncoding = c.varyAcceptEncoding;
+            }
+        }
+
+        var rs = h3.createRequestStream(req.sid);
+
+        var respHeaders = std.ArrayList(http3Qpack.FieldLine).empty;
+        defer respHeaders.deinit(a);
+        // content-length describes the bytes actually sent, so it is
+        // derived after content coding, exactly like the HTTP/1 and
+        // HTTP/2 paths. A peer that only has the stream end as a
+        // delimiter still gets an explicit length.
+        var clBuf: [20]u8 = undefined;
+        const cl = clBuf[0..std.fmt.printInt(&clBuf, outBody.len, 10, .lower, .{})];
+        try respHeaders.append(a, .{ .name = "content-length", .value = cl });
+        for (res.headers) |h| {
+            try respHeaders.append(a, .{ .name = h.name, .value = h.value });
+        }
+        if (res.contentType) |ct| {
+            try respHeaders.append(a, .{ .name = "content-type", .value = ct });
+        }
+        if (contentEncoding) |ce| {
+            try respHeaders.append(a, .{ .name = "content-encoding", .value = ce });
+        }
+        if (varyAcceptEncoding) try respHeaders.append(a, .{ .name = "vary", .value = "Accept-Encoding" });
+
+        const rhead = try rs.buildResponseHeaders(res.status, respHeaders.items);
+        defer self.allocator.free(rhead);
+        const rdata = try rs.buildData(outBody);
+        defer self.allocator.free(rdata);
+
+        var wire = std.ArrayList(u8).empty;
+        defer wire.deinit(self.allocator);
+        try wire.appendSlice(self.allocator, rhead);
+        try wire.appendSlice(self.allocator, rdata);
+
+        // Queue the QPACK encoder instructions the response section
+        // references before the response stream bytes go out.
+        const nowMs: u64 = @intCast(clock.monotonicMillis());
+        try h3.pumpQpack(qconn, nowMs);
+        try h3.sendStreamBytes(qconn, req.sid, wire.items, true, nowMs);
+        try h3.pumpQpack(qconn, nowMs);
+    }
     fn serveHttp1Connection(self: *Server, conn: StreamConn, isTlsConn: bool, initial: []const u8) !void {
         if (!self.cfg.keepAlive) {
             var arenaOne = std.heap.ArenaAllocator.init(self.allocator);
@@ -3291,7 +3506,7 @@ test "port zero allocates ephemeral port; strict rejects occupied port" {
 
 /// Self-signed localhost credential used by the HTTP/3 tests. ECDSA
 /// P-256, valid for the `127.0.0.1` SAN.
-const h3TestCertPem =
+pub const h3TestCertPem =
     \\-----BEGIN CERTIFICATE-----
     \\MIIBmTCCAT+gAwIBAgIURhx0CMJWTUTFJXV9z2OlmW/cNlcwCgYIKoZIzj0EAwIw
     \\FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDkwOTE4MTczOFoXDTM2MDkwNjE4
@@ -3305,7 +3520,7 @@ const h3TestCertPem =
     \\-----END CERTIFICATE-----
 ;
 
-const h3TestKeyPem =
+pub const h3TestKeyPem =
     \\-----BEGIN PRIVATE KEY-----
     \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyp549r9FrXbm02Cn
     \\81gAdAbUzHatPYQWVDIWnQdCMPChRANCAATvUPikzRIA8ryx237GUQRJlf8Qmgod
@@ -3399,6 +3614,41 @@ test "Server shares one port number between HTTP/1.1 and HTTP/3 when the port is
 
     try std.testing.expectEqual(freePort, srv.localPort());
     try std.testing.expectEqual(freePort, srv.http3.port().?);
+}
+
+test "explicit HTTP/3 port conflict fails instead of silently rebinding" {
+    // An explicit port is a promise: if UDP cannot take it, init must fail
+    // (and release the TCP listener), not move HTTP/3 somewhere else.
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var probe = udpMod.UdpSocket.bind(ctx.io, 0) catch return;
+    defer probe.close();
+    const port = switch (probe.socket.address) {
+        .ip4 => |v| v.port,
+        .ip6 => |v| v.port,
+    };
+
+    const addressMod = @import("../net/address.zig");
+    var addr = addressMod.Address.unspecified4(port);
+    var tcpProbe = tcp.Listener.bindAddress(ctx.io, &addr) catch return;
+    tcpProbe.close(ctx.io);
+
+    try std.testing.expectError(error.AddressInUse, Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = port,
+        .portStrategy = .strict,
+        .http3 = true,
+        .tls = .{
+            .certificatePem = h3TestCertPem,
+            .privateKeyPem = h3TestKeyPem,
+        },
+        .enableDocs = false,
+    }));
+
+    var rebound = tcp.Listener.bindAddress(ctx.io, &addr) catch return error.TcpPortLeaked;
+    rebound.close(ctx.io);
 }
 
 test "Server reports no HTTP/3 port when HTTP/3 is disabled" {

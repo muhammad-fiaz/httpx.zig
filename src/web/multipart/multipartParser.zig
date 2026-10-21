@@ -168,7 +168,7 @@ pub const StreamParser = struct {
             switch (self.state) {
                 .preamble => {
                     const delim = self.getDelim();
-                    const pos = indexOf(self.buffer.items, delim) orelse {
+                    const pos = std.mem.indexOf(u8, self.buffer.items, delim) orelse {
                         if (self.buffer.items.len > delim.len) {
                             const drop = self.buffer.items.len - delim.len;
                             self.dropFront(drop);
@@ -254,7 +254,7 @@ pub const StreamParser = struct {
                     var delimSearchBuf: [80]u8 = undefined;
                     const bodyDelim = std.fmt.bufPrint(&delimSearchBuf, "\r\n{s}", .{self.getDelim()}) catch return ParseError.Malformed;
 
-                    if (indexOf(self.buffer.items, bodyDelim)) |pos| {
+                    if (std.mem.indexOf(u8, self.buffer.items, bodyDelim)) |pos| {
                         if (pos > 0) {
                             const data = self.buffer.items[0..pos];
                             self.currentPartSize += data.len;
@@ -330,7 +330,7 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
     var delimBuf: [72 + 4]u8 = undefined;
     const delim = std.fmt.bufPrint(&delimBuf, "--{s}", .{boundary}) catch return ParseError.Malformed;
 
-    const firstPos = indexOf(body, delim) orelse return ParseError.MissingBoundary;
+    const firstPos = std.mem.indexOf(u8, body, delim) orelse return ParseError.MissingBoundary;
 
     var fields: std.ArrayList(Field) = .empty;
     errdefer {
@@ -386,7 +386,7 @@ pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const 
         const dataStart = cursor;
         var searchFrom = dataStart;
         const nextDelimPos = blk: {
-            while (indexOfPos(body, searchFrom, delim)) |pos| {
+            while (std.mem.indexOfPos(u8, body, searchFrom, delim)) |pos| {
                 if (pos >= 2 and body[pos - 1] == '\n' and body[pos - 2] == '\r')
                     break :blk pos - 2;
                 searchFrom = pos + 1;
@@ -466,14 +466,6 @@ pub fn detectSubtype(contentType: []const u8) ?[]const u8 {
 }
 
 // Internal helpers
-
-fn indexOf(haystack: []const u8, needle: []const u8) ?usize {
-    return std.mem.indexOf(u8, haystack, needle);
-}
-
-fn indexOfPos(haystack: []const u8, pos: usize, needle: []const u8) ?usize {
-    return std.mem.indexOfPos(u8, haystack, pos, needle);
-}
 
 fn headerValue(headers: []const u8, name: []const u8) ?[]const u8 {
     var it = std.mem.splitSequence(u8, headers, "\r\n");

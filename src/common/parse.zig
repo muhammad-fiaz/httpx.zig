@@ -21,13 +21,11 @@ pub const TOKEN_CHARS: [256]bool = blk: {
     var table: [256]bool = undefined;
     for (0..256) |i| {
         const c: u8 = @intCast(i);
-        const isAlpha = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
-        const isDigit = (c >= '0' and c <= '9');
         const isSpecial = switch (c) {
             '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
             else => false,
         };
-        table[i] = isAlpha or isDigit or isSpecial;
+        table[i] = std.ascii.isAlphanumeric(c) or isSpecial;
     }
     break :blk table;
 };
@@ -38,10 +36,8 @@ pub const UNRESERVED_CHARS: [256]bool = blk: {
     var table: [256]bool = undefined;
     for (0..256) |i| {
         const c: u8 = @intCast(i);
-        const isAlpha = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
-        const isDigit = (c >= '0' and c <= '9');
         const isPunct = (c == '-' or c == '.' or c == '_' or c == '~');
-        table[i] = isAlpha or isDigit or isPunct;
+        table[i] = std.ascii.isAlphanumeric(c) or isPunct;
     }
     break :blk table;
 };
@@ -50,9 +46,10 @@ pub const UNRESERVED_CHARS: [256]bool = blk: {
 /// Returns 0..15 for valid hex, or 0xFF for invalid.
 pub const HEX_VALUES: [256]u8 = blk: {
     var table: [256]u8 = @splat(0xFF);
-    for ('0'..('9' + 1)) |i| table[i] = @intCast(i - '0');
-    for ('a'..('f' + 1)) |i| table[i] = @intCast(i - 'a' + 10);
-    for ('A'..('F' + 1)) |i| table[i] = @intCast(i - 'A' + 10);
+    for (0..256) |i| {
+        const c: u8 = @intCast(i);
+        table[i] = std.fmt.charToDigit(c, 16) catch continue;
+    }
     break :blk table;
 };
 
@@ -68,7 +65,7 @@ pub inline fn isUnreservedChar(c: u8) bool {
 
 /// True if `c` is a control character (0x00..0x1F or 0x7F).
 pub inline fn isCtl(c: u8) bool {
-    return c <= 0x1F or c == 0x7F;
+    return std.ascii.isControl(c);
 }
 
 /// True if `c` is an HTTP space or horizontal tab (OWS).
@@ -109,6 +106,10 @@ pub inline fn trimOws(s: []const u8) []const u8 {
 
 /// Parses an unsigned integer from ASCII decimal digits without intermediate allocations
 /// or error-handling overhead in the fast path.
+///
+/// Deliberately stricter than `std.fmt.parseInt`: HTTP field values must be
+/// plain digits, while `parseInt` accepts a leading `+`/`-` and ignores `_`
+/// separators, both of which are invalid in a `Content-Length` or chunk size.
 pub fn parseUint(comptime T: type, s: []const u8) ?T {
     if (s.len == 0) return null;
     var result: T = 0;
@@ -139,6 +140,9 @@ pub fn parsePort(s: []const u8) ?u16 {
 }
 
 /// Parses an unsigned integer from ASCII hexadecimal digits (e.g. HTTP chunk sizes).
+///
+/// Kept strict for the same reason as `parseUint`: `std.fmt.parseUnsigned`
+/// accepts `_` separators, which are not valid inside a protocol field.
 pub fn parseHexUint(comptime T: type, s: []const u8) ?T {
     if (s.len == 0) return null;
     var result: T = 0;
@@ -417,6 +421,11 @@ pub const DecodeError = error{
 
 /// Percent-decodes `input` into `buf`. Decoded length is always <= `input.len`.
 /// Returns the decoded slice within `buf`.
+///
+/// Semantics differ from `std.Uri.percentDecodeInPlace`, which decodes in
+/// place and rejects malformed escapes. This variant decodes into a separate
+/// buffer and copies invalid sequences verbatim, which is the lenient
+/// behaviour browsers and proxies apply to request targets.
 pub fn percentDecode(buf: []u8, input: []const u8) DecodeError![]const u8 {
     var out: usize = 0;
     var i: usize = 0;
@@ -523,6 +532,11 @@ const monthNames = [_][]const u8{
 
 /// Parses an IMF-fixdate string (e.g. "Sun, 06 Nov 1994 08:49:37 GMT") to epoch seconds.
 /// Returns null on invalid or malformed format.
+///
+/// The standard library has no HTTP-date parser: `std.time.epoch` converts
+/// epoch days to calendar dates but not the other way round, so both the
+/// IMF-fixdate grammar and the civil-to-epoch conversion below are
+/// implemented here.
 pub fn parseHttpDate(s: []const u8) ?i64 {
     var it = std.mem.tokenizeAny(u8, s, " ,");
     _ = it.next() orelse return null; // Day of week
@@ -541,6 +555,7 @@ pub fn parseHttpDate(s: []const u8) ?i64 {
     }
     const mon = month orelse return null;
     const year = parseUint(i32, yearS) orelse return null;
+    if (year < 0 or year > 9999) return null;
 
     var tit = std.mem.splitScalar(u8, timeS, ':');
     const hh = parseUint(u8, tit.next() orelse return null) orelse return null;
@@ -554,11 +569,7 @@ pub fn parseHttpDate(s: []const u8) ?i64 {
 }
 
 fn daysInMonth(year: i32, month: u4) u16 {
-    return switch (month) {
-        2 => if (@mod(year, 400) == 0 or (@mod(year, 4) == 0 and @mod(year, 100) != 0)) 29 else 28,
-        4, 6, 9, 11 => 30,
-        else => 31,
-    };
+    return std.time.epoch.getDaysInMonth(@intCast(year), @fromBackingInt(@intCast(month)));
 }
 
 fn daysFromCivil(yIn: i32, m: u4, d: u16) i64 {
@@ -711,4 +722,11 @@ test "parseHttpDate IMF-fixdate" {
     try std.testing.expect(ts != null);
     try std.testing.expectEqual(@as(i64, 784111777), ts.?);
     try std.testing.expect(parseHttpDate("invalid date") == null);
+}
+
+test "parseHttpDate validates leap years and four-digit years" {
+    // std.time.epoch supplies the Gregorian leap-year rules.
+    try std.testing.expect(parseHttpDate("Sat, 29 Feb 2000 00:00:00 GMT") != null);
+    try std.testing.expect(parseHttpDate("Thu, 29 Feb 1900 00:00:00 GMT") == null);
+    try std.testing.expect(parseHttpDate("Fri, 01 Jan 10000 00:00:00 GMT") == null);
 }
