@@ -36,6 +36,8 @@ pub const Error = frameMod.Error || hpackMod.Error || streamMod.Stream.RecvError
     CompressionError,
     FrameSizeExceeded,
     StreamClosed,
+    HeaderListTooLarge,
+    MaxConcurrentStreams,
     OutOfMemory,
 };
 
@@ -48,6 +50,9 @@ pub const DEFAULT_MAX_HEADER_LIST: u32 = 64 * 1024;
 /// Independent cap for encoded HEADERS plus CONTINUATION bytes retained
 /// before HPACK decoding. SETTINGS_MAX_HEADER_LIST_SIZE covers decoded size.
 pub const DEFAULT_MAX_HEADER_BLOCK_BYTES: usize = 256 * 1024;
+/// The connection-level flow-control window is fixed at 65535 and is not
+/// affected by SETTINGS_INITIAL_WINDOW_SIZE (RFC 9113 Section 6.9.2).
+pub const DEFAULT_CONNECTION_WINDOW: i64 = 65535;
 
 /// One direction of SETTINGS.
 pub const Settings = struct {
@@ -107,16 +112,28 @@ pub const Session = struct {
     henc: hpackMod.Encoder,
 
     streams: std.AutoHashMap(u31, *Stream),
+    /// Identifiers of streams that were closed and reaped. Keeping them
+    /// lets the session answer a late frame with a stream error instead
+    /// of an idle-stream connection error (RFC 9113 Section 5.1).
+    closedStreams: std.AutoHashMap(u31, void),
+    /// Peer-initiated streams currently open (server role).
     activePeerStreams: usize = 0,
+    /// Locally initiated streams currently open (client role).
+    activeLocalStreams: usize = 0,
 
     localSettings: Settings = .{},
     peerSettings: Settings = .{},
     settingsAcked: bool = false,
+    /// The first frame of a connection must be SETTINGS (RFC 9113 3.4).
+    receivedFirstSettings: bool = false,
+    handshakeStarted: bool = false,
 
-    nextStreamId: u31 = 1,
+    nextStreamId: u32 = 1,
     largestPeerStream: u31 = 0,
+    largestLocalStream: u31 = 0,
 
-    connSendWindow: i64 = 65535,
+    connSendWindow: i64 = DEFAULT_CONNECTION_WINDOW,
+    connRecvWindow: i64 = DEFAULT_CONNECTION_WINDOW,
     connRecvPending: i64 = 0,
 
     goawaySent: bool = false,
@@ -141,7 +158,11 @@ pub const Session = struct {
             .hdec = undefined,
             .henc = undefined,
             .streams = std.AutoHashMap(u31, *Stream).init(allocator),
+            .closedStreams = std.AutoHashMap(u31, void).init(allocator),
         };
+        // A client disables server push: PUSH_PROMISE is not implemented,
+        // so advertising ENABLE_PUSH=0 keeps peers from sending one.
+        if (role == .client) s.localSettings.enablePush = 0;
         s.hdec = hpackMod.Decoder.init(allocator);
         s.hdec.maxHeaderList = s.localSettings.maxHeaderListSize;
         s.hdec.setProtocolMaxSize(s.localSettings.headerTableSize);
@@ -156,6 +177,7 @@ pub const Session = struct {
             self.allocator.destroy(sp.*);
         }
         self.streams.deinit();
+        self.closedStreams.deinit();
         self.hdec.deinit();
         self.henc.deinit();
         self.inbuf.deinit(self.allocator);
@@ -166,6 +188,8 @@ pub const Session = struct {
 
     /// Client: emit magic + initial SETTINGS. Server: initial SETTINGS.
     pub fn startHandshake(self: *Session) !void {
+        if (self.handshakeStarted) return Error.ProtocolViolation;
+        self.handshakeStarted = true;
         if (self.role == .client) {
             try self.outbound.appendSlice(self.allocator, frameMod.CONNECTION_PREFACE);
         }
@@ -173,8 +197,16 @@ pub const Session = struct {
     }
 
     fn sendInitialSettings(self: *Session) !void {
-        const es = self.localSettings.entries();
-        try frameMod.writeSettings(&self.outbound, self.allocator, &es);
+        // A server MUST NOT send ENABLE_PUSH (RFC 9113 Section 6.5.2);
+        // a client sends it to disable server push.
+        var es: [6]frameMod.SettingEntry = undefined;
+        var n: usize = 0;
+        for (self.localSettings.entries()) |e| {
+            if (self.role == .server and e.id == @backingInt(frameMod.SettingsId.enablePush)) continue;
+            es[n] = e;
+            n += 1;
+        }
+        try frameMod.writeSettings(&self.outbound, self.allocator, es[0..n]);
         self.awaitingSettingsAck = true;
     }
 
@@ -214,6 +246,15 @@ pub const Session = struct {
             if (self.inbuf.items.len < total) return;
 
             const payload = self.inbuf.items[9..total];
+
+            // RFC 9113 Section 3.4: the first frame of a connection MUST
+            // be SETTINGS. Anything else is a connection error.
+            if (!self.receivedFirstSettings) {
+                if (hdr.frameType != .settings or hdr.hasAck()) {
+                    return self.connError(.protocolError);
+                }
+                self.receivedFirstSettings = true;
+            }
 
             // Stream-id legality up front.
             switch (hdr.frameType) {
@@ -287,7 +328,6 @@ pub const Session = struct {
             .continuation => |c| try self.handleContinuation(hdr.streamId, c.block, c.endHeaders),
             .data => |d| try self.handleData(hdr.streamId, d.data, d.endStream),
             .rstStream => |r| {
-                if (self.role == .server and hdr.streamId <= self.largestPeerStream) {}
                 if (self.streamPtr(hdr.streamId)) |st| {
                     st.onRecvRst();
                     if (self.cbs.onReset) |cb| cb(self.cbs.ctx, hdr.streamId, r.errorCode);
@@ -300,11 +340,12 @@ pub const Session = struct {
                         }
                     }
                     try self.removeStream(hdr.streamId);
-                } else if (hdr.streamId > self.largestPeerStream) {
-                    // RST_STREAM cannot create a stream. On an idle stream it
-                    // is a connection-level PROTOCOL_ERROR (RFC 9113 5.4.1).
+                } else if (!self.isKnownStreamId(hdr.streamId)) {
+                    // RST_STREAM cannot create a stream. On an idle stream
+                    // it is a connection-level PROTOCOL_ERROR (RFC 9113 5.4.1).
                     return self.connError(.protocolError);
                 }
+                // RST_STREAM for a closed stream is ignored.
             },
             .windowUpdate => |w| try self.handleWindowUpdate(hdr.streamId, w.increment),
             .ping => |p| {
@@ -320,6 +361,15 @@ pub const Session = struct {
                     self.goawayLastStream = @min(previous, g.lastStreamId);
                 } else {
                     self.goawayLastStream = g.lastStreamId;
+                }
+                // Streams above the peer's last-stream-id were not
+                // processed and are considered refused (RFC 9113 6.8).
+                var it = self.streams.valueIterator();
+                while (it.next()) |sp| {
+                    if (sp.*.id > g.lastStreamId) {
+                        sp.*.onRecvRst();
+                        if (self.cbs.onReset) |cb| cb(self.cbs.ctx, sp.*.id, @backingInt(ErrorCode.refusedStream));
+                    }
                 }
                 if (self.cbs.onGoaway) |cb| cb(self.cbs.ctx, g.lastStreamId, g.errorCode, g.debugData);
             },
@@ -343,7 +393,8 @@ pub const Session = struct {
     }
 
     fn applyPeerSettings(self: *Session, entries: []frameMod.SettingEntry) Error!void {
-        var windowDelta: i64 = 0;
+        // Settings are applied in the order they appear; a repeated
+        // identifier replaces the previous value (RFC 9113 Section 6.5.3).
         for (entries) |e| {
             const sid: frameMod.SettingsId = @fromBackingInt(@intCast(e.id));
             if (frameMod.validateSetting(sid, e.value)) |code| {
@@ -354,67 +405,137 @@ pub const Session = struct {
                     self.peerSettings.headerTableSize = e.value;
                     self.henc.applySettingsSize(e.value);
                 },
-                .enablePush => self.peerSettings.enablePush = e.value,
+                .enablePush => {
+                    // A server MUST NOT send ENABLE_PUSH; a client that
+                    // receives it treats it as a connection error.
+                    if (self.role == .client) return self.connError(.protocolError);
+                    self.peerSettings.enablePush = e.value;
+                },
                 .maxConcurrentStreams => self.peerSettings.maxConcurrentStreams = e.value,
                 .initialWindowSize => {
-                    windowDelta = @as(i64, e.value) - self.peerSettings.initialWindowSize;
+                    const delta = @as(i64, e.value) - @as(i64, self.peerSettings.initialWindowSize);
                     self.peerSettings.initialWindowSize = e.value;
+                    if (delta != 0) {
+                        var it = self.streams.valueIterator();
+                        while (it.next()) |sp| {
+                            sp.*.sendWindow += delta;
+                            if (sp.*.sendWindow > frameMod.MAX_WINDOW) {
+                                return self.connError(.flowControlError);
+                            }
+                        }
+                    }
                 },
                 .maxFrameSize => self.peerSettings.maxFrameSize = e.value,
                 .maxHeaderListSize => self.peerSettings.maxHeaderListSize = e.value,
-                _ => {}, // unknown ignored
-            }
-        }
-        if (windowDelta != 0) {
-            var it = self.streams.valueIterator();
-            while (it.next()) |sp| {
-                sp.*.sendWindow += windowDelta;
-                if (sp.*.sendWindow > frameMod.MAX_WINDOW) {
-                    return self.connError(.flowControlError);
-                }
+                _ => {}, // unknown settings are ignored
             }
         }
     }
 
+    /// Kind of header block being processed (RFC 9113 Section 8.3).
+    const HeaderKind = enum { request, response, trailers };
+
+    fn createStream(self: *Session, sid: u31) !*Stream {
+        const s = try self.allocator.create(Stream);
+        errdefer self.allocator.destroy(s);
+        s.* = Stream.init(self.allocator, sid);
+        // Flow-control windows come from the negotiated settings: the send
+        // window follows the peer's INITIAL_WINDOW_SIZE, the receive window
+        // follows ours (RFC 9113 Section 6.9.2).
+        s.sendWindow = @intCast(self.peerSettings.initialWindowSize);
+        s.recvWindow = @intCast(self.localSettings.initialWindowSize);
+        try self.streams.put(sid, s);
+        return s;
+    }
+
     fn handleHeadersStart(self: *Session, sid: u31, block: []const u8, endHeaders: bool, endStream: bool) Error!void {
         if (block.len > self.maxHeaderBlockBytes) return self.connError(.enhanceYourCalm);
-        var st: *Stream = blk: {
-            if (self.streamPtr(sid)) |existing| break :blk existing;
-            if (self.goawayLastStream) |last| {
-                if (sid > last) return Error.StreamClosed;
+
+        var st: *Stream = undefined;
+        // A discarded block is still decoded: the HPACK context is
+        // connection-wide, so skipping the decode would desynchronize it.
+        var discard = false;
+        var refuse: ?ErrorCode = null;
+
+        if (self.streamPtr(sid)) |existing| {
+            st = existing;
+            if (existing.state == .closed) {
+                discard = true;
+                refuse = .streamClosed;
             }
-            // New peer-initiated request stream. Concurrency is enforced
-            // against OUR advertised limit (localSettings), not the peer's.
-            if (self.role == .server) {
-                if (sid <= self.largestPeerStream) return self.connError(.protocolError);
-                if (sid % 2 == 0) return self.connError(.protocolError);
-                if (self.goawaySent) return Error.StreamClosed;
-                if (self.activePeerStreams >= self.localSettings.maxConcurrentStreams) {
-                    return self.connError(.protocolError);
-                }
+        } else {
+            switch (self.role) {
+                .server => {
+                    // Client-initiated streams use odd identifiers.
+                    if (sid % 2 == 0) return self.connError(.protocolError);
+                    if (sid <= self.largestPeerStream) {
+                        // Reusing a lower identifier is a protocol error; a
+                        // frame for an already closed stream is a stream error.
+                        if (!self.closedStreams.contains(sid)) return self.connError(.protocolError);
+                        discard = true;
+                        refuse = .streamClosed;
+                    } else if (self.goawaySent or self.activePeerStreams >= self.localSettings.maxConcurrentStreams) {
+                        // Refuse politely instead of killing the connection.
+                        discard = true;
+                        refuse = .refusedStream;
+                    }
+                    st = try self.createStream(sid);
+                    self.largestPeerStream = @max(self.largestPeerStream, sid);
+                    if (!discard) {
+                        self.activePeerStreams += 1;
+                        st.countedSlot = true;
+                    }
+                },
+                .client => {
+                    // Server-initiated streams require PUSH_PROMISE, which is
+                    // not implemented (we advertise ENABLE_PUSH=0).
+                    if (sid % 2 == 0) return self.connError(.protocolError);
+                    if (!self.closedStreams.contains(sid) and self.streamPtr(sid) == null) {
+                        // A response for a stream this client never opened is
+                        // a protocol error, not a stream error.
+                        return self.connError(.protocolError);
+                    }
+                    discard = true;
+                    refuse = .streamClosed;
+                    st = try self.createStream(sid);
+                },
             }
-            const s = try self.allocator.create(Stream);
-            s.* = Stream.init(self.allocator, sid);
-            s.state = .idle;
-            try self.streams.put(sid, s);
-            if (self.role == .server and sid % 2 == 1) {
-                self.activePeerStreams += 1;
-            }
-            if (sid > self.largestPeerStream) self.largestPeerStream = sid;
-            break :blk s;
+        }
+        st.discardHeaders = discard;
+
+        const kind: HeaderKind = if (st.headersRecv > 0) .trailers else switch (self.role) {
+            .server => .request,
+            .client => .response,
         };
 
         if (endHeaders) {
-            st.onRecvHeaders(endStream) catch |e| switch (e) {
-                error.StreamClosed => return self.connError(.streamClosed),
-                error.ProtocolError => return self.connError(.protocolError),
-            };
-            try self.decodeAndDeliver(st, block);
-            // A fully-received request/response (both sides ended) leaves
-            // no further work: reap now (`st` is dead after this).
-            if (st.state == .closed) self.reapClosedStream(sid);
+            if (!discard) {
+                st.onRecvHeaders(endStream) catch |e| switch (e) {
+                    error.StreamClosed => {
+                        try self.resetStream(sid, .streamClosed);
+                        return;
+                    },
+                    error.ProtocolError => {
+                        try self.resetStream(sid, .protocolError);
+                        return;
+                    },
+                };
+            }
+            try self.decodeAndDeliver(st, block, kind, !discard);
+            if (discard) {
+                if (refuse) |code| try self.resetStream(sid, code);
+                self.removeStream(sid) catch {};
+                return;
+            }
+            // The decode may have reset the stream (malformed header
+            // list); re-resolve it before touching it.
+            if (self.streamPtr(sid)) |after| {
+                after.headersRecv += 1;
+                // A fully-received exchange (both sides ended) leaves no work.
+                if (after.state == .closed) self.reapClosedStream(sid);
+            }
         } else {
-            // Open the stream state now; END_STREAM applies at chain end.
+            // Header block continues in CONTINUATION frames.
             st.headerBlock = .empty;
             st.headerBlock.?.appendSlice(self.allocator, block) catch return Error.OutOfMemory;
             self.continuationSid = sid;
@@ -435,15 +556,36 @@ pub const Session = struct {
         self.continuationSid = null;
         self.continuationStream = null;
 
-        st.onRecvHeaders(endStream) catch |e| switch (e) {
-            error.StreamClosed => return self.connError(.streamClosed),
-            error.ProtocolError => return self.connError(.protocolError),
+        const kind: HeaderKind = if (st.headersRecv > 0) .trailers else switch (self.role) {
+            .server => .request,
+            .client => .response,
         };
-        try self.decodeAndDeliver(st, "");
-        if (st.state == .closed) self.reapClosedStream(sid);
+        const discard = st.discardHeaders;
+
+        if (!discard) {
+            st.onRecvHeaders(endStream) catch |e| switch (e) {
+                error.StreamClosed => {
+                    try self.resetStream(sid, .streamClosed);
+                    return;
+                },
+                error.ProtocolError => {
+                    try self.resetStream(sid, .protocolError);
+                    return;
+                },
+            };
+        }
+        try self.decodeAndDeliver(st, "", kind, !discard);
+        if (discard) {
+            self.removeStream(sid) catch {};
+            return;
+        }
+        if (self.streamPtr(sid)) |after| {
+            after.headersRecv += 1;
+            if (after.state == .closed) self.reapClosedStream(sid);
+        }
     }
 
-    fn decodeAndDeliver(self: *Session, st: *Stream, finalFrag: []const u8) Error!void {
+    fn decodeAndDeliver(self: *Session, st: *Stream, finalFrag: []const u8, kind: HeaderKind, deliver: bool) Error!void {
         // Single-frame HEADERS have no chain buffer; multi-frame chains
         // accumulated their fragments already.
         var owned: ?[]u8 = null;
@@ -470,110 +612,219 @@ pub const Session = struct {
             self.allocator.free(res.fields);
         }
 
-        // Pseudo-header validation (RFC 9113 Section 8.3)
-        if (res.fields.len > 0 and !validatePseudoHeaders(res.fields)) {
-            return self.connError(.protocolError);
+        if (!deliver) return;
+
+        // Malformed header lists are stream errors, not connection errors
+        // (RFC 9113 Section 8.1.1).
+        if (!validateHeaderList(res.fields, kind)) {
+            try self.resetStream(st.id, .protocolError);
+            return;
         }
 
         const endStream = st.endStreamRecv;
         if (self.cbs.onHeaders) |cb| {
-            cb(self.cbs.ctx, st.id, res.fields, endStream) catch return Error.ProtocolViolation;
+            cb(self.cbs.ctx, st.id, res.fields, endStream) catch {
+                try self.resetStream(st.id, .internalError);
+                return;
+            };
         }
         if (endStream) {
             if (self.cbs.onStreamEnd) |cb| {
-                cb(self.cbs.ctx, st.id) catch return Error.ProtocolViolation;
+                cb(self.cbs.ctx, st.id) catch {
+                    try self.resetStream(st.id, .internalError);
+                    return;
+                };
             }
         }
     }
 
-    fn validatePseudoHeaders(fields: []hpackMod.HeaderField) bool {
+    /// Sends RST_STREAM and tears the stream down locally. The connection
+    /// stays usable (RFC 9113 Section 5.4.2).
+    fn resetStream(self: *Session, sid: u31, code: ErrorCode) !void {
+        if (self.streamPtr(sid)) |st| st.onSendRst();
+        try frameMod.writeRstStream(&self.outbound, self.allocator, sid, @backingInt(code));
+        self.reapClosedStream(sid);
+    }
+
+    /// RFC 9110 token characters, the only ones allowed in a field name.
+    fn isTokenChar(c: u8) bool {
+        return switch (c) {
+            '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.' => true,
+            '0'...'9' => true,
+            'A'...'Z' => true,
+            '^', '_', '`', '|', '~' => true,
+            'a'...'z' => true,
+            else => false,
+        };
+    }
+
+    /// RFC 9110 field-value characters: visible ASCII, space, and HTAB.
+    fn isFieldValueChar(c: u8) bool {
+        return c == '\t' or (c >= 0x20 and c != 0x7F);
+    }
+
+    /// Validates one decoded header list against the RFC 9113 rules for
+    /// requests, responses, and trailers.
+    pub fn validateHeaderList(fields: []const hpackMod.HeaderField, kind: HeaderKind) bool {
         var seenMethod = false;
         var seenPath = false;
         var seenScheme = false;
         var seenAuthority = false;
         var seenStatus = false;
+        var seenProtocol = false;
         var seenRegular = false;
+
         for (fields) |f| {
-            // RFC 9113 Section 8.2.1: Header field names MUST be lowercase ASCII.
-            for (f.name) |c| {
-                if (std.ascii.isUpper(c)) return false;
+            if (f.name.len == 0) return false;
+
+            // Field values may not contain NUL, CR, or LF (RFC 9113 8.2.3).
+            for (f.value) |c| {
+                if (!isFieldValueChar(c)) return false;
             }
 
-            // RFC 9113 Section 8.2.2: Connection-specific header fields MUST NOT be sent.
-            if (std.mem.eql(u8, f.name, "connection") or
-                std.mem.eql(u8, f.name, "keep-alive") or
-                std.mem.eql(u8, f.name, "proxy-connection") or
-                std.mem.eql(u8, f.name, "transfer-encoding") or
-                std.mem.eql(u8, f.name, "upgrade"))
-            {
-                return false;
-            }
-            if (std.mem.eql(u8, f.name, "te") and !std.mem.eql(u8, f.value, "trailers")) {
-                return false;
-            }
-
-            const isPseudo = f.name.len > 0 and f.name[0] == ':';
+            const isPseudo = f.name[0] == ':';
             if (isPseudo) {
-                // Pseudo-headers MUST appear before regular header fields.
+                // Pseudo-headers MUST appear before regular header fields
+                // and MUST be lowercase (RFC 9113 Section 8.3).
                 if (seenRegular) return false;
+                for (f.name[1..]) |c| {
+                    if (std.ascii.isUpper(c)) return false;
+                }
+                if (kind == .trailers) return false; // trailers carry no pseudo-headers
                 if (std.mem.eql(u8, f.name, ":method")) {
-                    if (seenMethod or seenStatus) return false;
+                    if (seenMethod) return false;
                     seenMethod = true;
                 } else if (std.mem.eql(u8, f.name, ":path")) {
-                    if (seenPath or seenStatus) return false;
+                    if (seenPath) return false;
                     seenPath = true;
                 } else if (std.mem.eql(u8, f.name, ":scheme")) {
-                    if (seenScheme or seenStatus) return false;
+                    if (seenScheme) return false;
                     seenScheme = true;
                 } else if (std.mem.eql(u8, f.name, ":authority")) {
                     if (seenAuthority) return false;
                     seenAuthority = true;
                 } else if (std.mem.eql(u8, f.name, ":status")) {
-                    if (seenStatus or seenMethod or seenPath or seenScheme) return false;
+                    if (seenStatus) return false;
                     seenStatus = true;
+                } else if (std.mem.eql(u8, f.name, ":protocol")) {
+                    if (seenProtocol) return false;
+                    seenProtocol = true;
                 } else {
-                    return false;
+                    return false; // unknown pseudo-header
                 }
-                // :path, :method, :scheme, :status cannot be empty.
-                if (std.mem.eql(u8, f.name, ":path") or
-                    std.mem.eql(u8, f.name, ":method") or
-                    std.mem.eql(u8, f.name, ":scheme") or
-                    std.mem.eql(u8, f.name, ":status"))
-                {
-                    if (f.value.len == 0) return false;
+                if (f.value.len == 0) return false;
+                if (std.mem.eql(u8, f.name, ":status")) {
+                    if (f.value.len != 3) return false;
+                    for (f.value) |c| {
+                        if (!std.ascii.isDigit(c)) return false;
+                    }
                 }
             } else {
+                // Regular field names: lowercase token characters only.
+                for (f.name) |c| {
+                    if (!isTokenChar(c)) return false;
+                    if (std.ascii.isUpper(c)) return false;
+                }
+                // Connection-specific fields are forbidden (RFC 9113 8.2.2).
+                if (std.mem.eql(u8, f.name, "connection") or
+                    std.mem.eql(u8, f.name, "keep-alive") or
+                    std.mem.eql(u8, f.name, "proxy-connection") or
+                    std.mem.eql(u8, f.name, "transfer-encoding") or
+                    std.mem.eql(u8, f.name, "upgrade"))
+                {
+                    return false;
+                }
+                if (std.mem.eql(u8, f.name, "te") and !std.ascii.eqlIgnoreCase(f.value, "trailers")) {
+                    return false;
+                }
                 seenRegular = true;
             }
+        }
+
+        switch (kind) {
+            .request => {
+                if (!seenMethod) return false;
+                // CONNECT (and extended CONNECT) omit :scheme and :path.
+                if (seenProtocol) {
+                    if (!seenScheme or !seenPath or !seenAuthority) return false;
+                } else {
+                    if (!seenScheme or !seenPath) return false;
+                }
+                if (seenStatus) return false;
+            },
+            .response => {
+                if (!seenStatus) return false;
+                if (seenMethod or seenPath or seenScheme or seenAuthority or seenProtocol) return false;
+            },
+            .trailers => {},
         }
         return true;
     }
 
+    /// True when the identifier belongs to a stream that existed at some
+    /// point (so a frame for it is a stream error, not an idle-stream
+    /// connection error).
+    fn isKnownStreamId(self: *Session, sid: u31) bool {
+        if (self.closedStreams.contains(sid)) return true;
+        if (self.role == .server and sid <= self.largestPeerStream) return true;
+        if (self.role == .client and sid <= self.largestLocalStream) return true;
+        return false;
+    }
+
     fn handleData(self: *Session, sid: u31, data: []const u8, endStream: bool) Error!void {
-        // Connection-level flow control always applies.
+        // Connection-level flow control always applies (RFC 9113 6.9.2).
+        self.connRecvWindow -= @intCast(data.len);
         self.connRecvPending += @intCast(data.len);
-        if (self.connRecvPending > self.localSettings.initialWindowSize) {
+        if (self.connRecvWindow < 0) {
             return self.connError(.flowControlError);
         }
 
-        const st = self.streamPtr(sid) orelse return self.connError(.protocolError);
+        const st = self.streamPtr(sid) orelse {
+            // DATA on an idle stream is a connection error; DATA on a
+            // closed stream is a stream error (RFC 9113 Section 5.1).
+            if (self.isKnownStreamId(sid)) {
+                try self.resetStream(sid, .streamClosed);
+            } else {
+                return self.connError(.protocolError);
+            }
+            try self.maybeEmitWindowUpdates(sid);
+            return;
+        };
         if (!st.state.canRecvData()) {
             if (st.state == .idle) return self.connError(.protocolError);
-            return self.connError(.streamClosed);
+            try self.resetStream(sid, .streamClosed);
+            try self.maybeEmitWindowUpdates(sid);
+            return;
         }
         if (!st.consumeRecv(@intCast(data.len))) {
             return self.connError(.flowControlError);
         }
 
         if (data.len > 0) {
-            if (self.cbs.onData) |cb| cb(self.cbs.ctx, sid, data) catch return Error.ProtocolViolation;
+            if (self.cbs.onData) |cb| {
+                cb(self.cbs.ctx, sid, data) catch {
+                    try self.resetStream(sid, .internalError);
+                    return;
+                };
+            }
         }
         st.onRecvData(endStream) catch |e| switch (e) {
-            error.StreamClosed => return self.connError(.streamClosed),
-            error.ProtocolError => return self.connError(.protocolError),
+            error.StreamClosed => {
+                try self.resetStream(sid, .streamClosed);
+                return;
+            },
+            error.ProtocolError => {
+                try self.resetStream(sid, .protocolError);
+                return;
+            },
         };
         if (endStream) {
-            if (self.cbs.onStreamEnd) |cb| cb(self.cbs.ctx, sid) catch return Error.ProtocolViolation;
+            if (self.cbs.onStreamEnd) |cb| {
+                cb(self.cbs.ctx, sid) catch {
+                    try self.resetStream(sid, .internalError);
+                    return;
+                };
+            }
         }
         // Fully-received streams (both sides ended) are reaped here, so
         // `maybeEmitWindowUpdates` below simply skips the missing entry.
@@ -584,32 +835,48 @@ pub const Session = struct {
 
     /// Sends WINDOW_UPDATEs once >= half the window has been consumed.
     fn maybeEmitWindowUpdates(self: *Session, sid: u31) Error!void {
-        const half: i64 = @divTrunc(@as(i64, self.localSettings.initialWindowSize), 2);
-        if (self.connRecvPending >= half) {
+        const connHalf: i64 = @divTrunc(DEFAULT_CONNECTION_WINDOW, 2);
+        if (self.connRecvPending >= connHalf) {
             const inc: u31 = @intCast(self.connRecvPending);
             try frameMod.writeWindowUpdate(&self.outbound, self.allocator, 0, inc);
+            self.connRecvWindow += @intCast(inc);
             self.connRecvPending = 0;
         }
         if (self.streamPtr(sid)) |st| {
+            const half: i64 = @divTrunc(@as(i64, self.localSettings.initialWindowSize), 2);
             if (st.recvPending >= half and st.state != .closed) {
                 const inc: u31 = @intCast(st.recvPending);
                 try frameMod.writeWindowUpdate(&self.outbound, self.allocator, sid, inc);
                 st.recvPending = 0;
-                st.recvWindow += inc;
+                st.recvWindow += @intCast(inc);
             }
         }
     }
 
     fn handleWindowUpdate(self: *Session, sid: u31, inc: u31) Error!void {
-        if (inc == 0) return self.connError(.protocolError);
+        if (inc == 0) {
+            // A zero increment is a connection error on stream 0 and a
+            // stream error on any other stream (RFC 9113 Section 6.9).
+            if (sid == 0) return self.connError(.protocolError);
+            try self.resetStream(sid, .protocolError);
+            return;
+        }
         const amount: i64 = @intCast(inc);
         if (sid == 0) {
             self.connSendWindow += amount;
             if (self.connSendWindow > frameMod.MAX_WINDOW) return self.connError(.flowControlError);
             return;
         }
-        const st = self.streamPtr(sid) orelse return;
-        if (st.state == .idle) return self.connError(.protocolError);
+        const st = self.streamPtr(sid) orelse {
+            // WINDOW_UPDATE for an idle stream is a connection error; for a
+            // closed stream it is ignored (RFC 9113 Section 5.1).
+            if (self.isKnownStreamId(sid)) return;
+            return self.connError(.protocolError);
+        };
+        if (st.state == .idle) {
+            try self.resetStream(sid, .protocolError);
+            return;
+        }
         if (st.state == .closed) return;
         st.sendWindow += amount;
         if (st.sendWindow > frameMod.MAX_WINDOW) return self.connError(.flowControlError);
@@ -617,12 +884,114 @@ pub const Session = struct {
 
     // -- outbound ----------------------------------------------------------------
 
+    /// Fields whose values must never be placed in the HPACK dynamic
+    /// table: intermediaries and logs must not be able to replay them.
+    const sensitiveNames = [_][]const u8{
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+    };
+
+    fn isSensitive(name: []const u8) bool {
+        for (sensitiveNames) |n| {
+            if (std.ascii.eqlIgnoreCase(n, name)) return true;
+        }
+        return false;
+    }
+
+    /// Connection-specific fields that MUST NOT appear in an HTTP/2
+    /// message (RFC 9113 Section 8.2.2).
+    fn isHopByHop(name: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(name, "connection") or
+            std.ascii.eqlIgnoreCase(name, "keep-alive") or
+            std.ascii.eqlIgnoreCase(name, "proxy-connection") or
+            std.ascii.eqlIgnoreCase(name, "transfer-encoding") or
+            std.ascii.eqlIgnoreCase(name, "upgrade");
+    }
+
+    /// Normalizes outgoing fields for HTTP/2: names are lowercased
+    /// (RFC 9113 Section 8.2.1) and connection-specific fields are
+    /// dropped instead of poisoning the connection.
+    fn normalizeOutgoing(
+        allocator: Allocator,
+        fields: []const hpackMod.HeaderField,
+        allowPseudo: bool,
+    ) ![]hpackMod.HeaderField {
+        var list = std.ArrayList(hpackMod.HeaderField).empty;
+        errdefer {
+            for (list.items) |f| allocator.free(f.name);
+            list.deinit(allocator);
+        }
+        for (fields) |f| {
+            if (f.name.len == 0) continue;
+            if (f.name[0] == ':') {
+                // Pseudo-headers are only allowed where the caller
+                // explicitly supplies them (requests/responses).
+                if (!allowPseudo) continue;
+            } else if (isHopByHop(f.name)) {
+                continue;
+            } else if (std.ascii.eqlIgnoreCase(f.name, "te") and
+                !std.ascii.eqlIgnoreCase(f.value, "trailers"))
+            {
+                continue;
+            }
+            const name = try allocator.dupe(u8, f.name);
+            errdefer allocator.free(name);
+            for (name) |*c| c.* = std.ascii.toLower(c.*);
+            try list.append(allocator, .{ .name = name, .value = f.value });
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
     /// Encodes and sends HEADERS, splitting into CONTINUATIONs as needed.
     pub fn sendHeaders(self: *Session, sid: u31, fields: []const hpackMod.HeaderField, endStream: bool) !void {
+        const st = self.streamPtr(sid);
+        const is_new = st == null;
+
+        if (is_new) {
+            if (self.role != .client) return Error.StreamClosed;
+            if (sid % 2 == 0) return Error.ProtocolViolation;
+            if (sid <= self.largestLocalStream) return Error.ProtocolViolation;
+            if (self.activeLocalStreams >= self.peerSettings.maxConcurrentStreams) {
+                return Error.MaxConcurrentStreams;
+            }
+        }
+
+        // The first HEADERS block on a stream carries the request or
+        // response; later ones are trailers (RFC 9113 Section 8.1).
+        const trailers = st != null and st.?.headersSent > 0;
+        const kind: HeaderKind = if (trailers)
+            .trailers
+        else if (self.role == .client)
+            .request
+        else
+            .response;
+
+        const normalized = try normalizeOutgoing(self.allocator, fields, !trailers);
+        defer {
+            for (normalized) |f| self.allocator.free(f.name);
+            self.allocator.free(normalized);
+        }
+
+        // Validate before encoding: a malformed header list must never
+        // reach the wire (RFC 9113 Section 8.1.1).
+        if (!validateHeaderList(normalized, kind)) return Error.ProtocolViolation;
+
+        // Header list size is bounded by the peer's SETTINGS_MAX_HEADER_LIST_SIZE.
+        var list_size: usize = 0;
+        for (normalized) |f| {
+            list_size += hpackMod.ENTRY_OVERHEAD + f.name.len + f.value.len;
+        }
+        if (list_size > self.peerSettings.maxHeaderListSize) return Error.HeaderListTooLarge;
+
         var block = std.ArrayList(u8).empty;
         defer block.deinit(self.allocator);
-        for (fields) |f| {
-            try self.henc.encode(&block, f.name, f.value, .incremental, false);
+        for (normalized) |f| {
+            // Sensitive values are sent as "never indexed" literals so they
+            // never enter the dynamic table (RFC 7541 Section 6.2.3).
+            const indexing: hpackMod.Indexing = if (isSensitive(f.name)) .never else .incremental;
+            try self.henc.encode(&block, f.name, f.value, indexing, false);
         }
         try self.sendHeaderBlock(sid, block.items, endStream);
     }
@@ -630,13 +999,21 @@ pub const Session = struct {
     pub fn sendHeaderBlock(self: *Session, sid: u31, block: []const u8, endStream: bool) !void {
         const max = @min(@as(usize, self.peerSettings.maxFrameSize), 16384);
         if (self.streamPtr(sid) == null) {
-            const s = try self.allocator.create(Stream);
-            s.* = Stream.init(self.allocator, sid);
-            s.state = .idle;
-            try self.streams.put(sid, s);
+            if (self.role != .client) return Error.StreamClosed;
+            if (sid % 2 == 0) return Error.ProtocolViolation;
+            if (sid <= self.largestLocalStream) return Error.ProtocolViolation;
+            if (self.activeLocalStreams >= self.peerSettings.maxConcurrentStreams) {
+                return Error.MaxConcurrentStreams;
+            }
+            _ = try self.createStream(sid);
+            self.activeLocalStreams += 1;
+            self.streamPtr(sid).?.countedSlot = true;
+            if (sid > self.largestLocalStream) self.largestLocalStream = sid;
+            if (self.nextStreamId <= sid) self.nextStreamId = @as(u32, sid) + 2;
         }
         const st = self.streamPtr(sid).?;
         try st.onSendHeaders(endStream);
+        st.headersSent += 1;
         // Response/trailer HEADERS with END_STREAM on an already
         // half-closed (remote) stream close it fully. The frame writes
         // below only use `sid` (never `st`), so reaping at the end is
@@ -647,7 +1024,7 @@ pub const Session = struct {
         if (endStream) flags |= Flags.END_STREAM;
 
         if (block.len <= max) {
-            if (flags == 0) flags |= Flags.END_HEADERS else flags |= Flags.END_HEADERS;
+            flags |= Flags.END_HEADERS;
             try frameMod.writeHeader(&self.outbound, self.allocator, block.len, .headers, flags, sid);
             try self.outbound.appendSlice(self.allocator, block);
         } else {
@@ -658,7 +1035,9 @@ pub const Session = struct {
                 const frag = block[off..][0..take];
                 off += take;
                 const last = off == block.len;
-                var f2: u8 = flags & Flags.END_STREAM;
+                // END_STREAM belongs to the HEADERS frame only; a
+                // CONTINUATION frame must not carry it.
+                var f2: u8 = if (first) flags else 0;
                 if (last) f2 |= Flags.END_HEADERS;
                 if (first) {
                     try frameMod.writeHeader(&self.outbound, self.allocator, frag.len, .headers, f2, sid);
@@ -678,10 +1057,20 @@ pub const Session = struct {
         const st = self.streamPtr(sid) orelse return Error.StreamClosed;
         if (!st.state.canSendData() or st.endStreamSent) return Error.StreamClosed;
 
+        const max = @min(@as(usize, self.peerSettings.maxFrameSize), 16384);
+
+        // A zero-length DATA frame with END_STREAM closes the send side.
+        if (data.len == 0) {
+            if (!endStream) return 0;
+            try frameMod.writeData(&self.outbound, self.allocator, sid, data, true);
+            st.onSendData(true) catch return Error.StreamClosed;
+            if (st.state == .closed) self.reapClosedStream(sid);
+            return 0;
+        }
+
         const budgetWin = @min(self.connSendWindow, st.sendWindow);
         if (budgetWin <= 0) return 0;
 
-        const max = @min(@as(usize, self.peerSettings.maxFrameSize), 16384);
         const allowed: usize = @min(@as(usize, @intCast(budgetWin)), data.len);
         var sent: usize = 0;
 
@@ -711,10 +1100,13 @@ pub const Session = struct {
 
     pub fn sendWindowUpdate(self: *Session, sid: u31, inc: u31) !void {
         if (inc == 0) return Error.ProtocolViolation;
+        if (inc > frameMod.MAX_WINDOW) return Error.FlowControlError;
         if (sid == 0) {
-            // The connection receive window is represented by pending
-            // consumed bytes; the emitted update replenishes that credit.
-            if (self.connRecvPending < 0 or inc > frameMod.MAX_WINDOW) return Error.FlowControlError;
+            // Connection-level credit: the window is the advertised one,
+            // replenished as bytes are consumed.
+            const next = self.connRecvWindow + @as(i64, inc);
+            if (next > frameMod.MAX_WINDOW) return Error.FlowControlError;
+            self.connRecvWindow = next;
             self.connRecvPending = @max(@as(i64, 0), self.connRecvPending - @as(i64, inc));
             try frameMod.writeWindowUpdate(&self.outbound, self.allocator, 0, inc);
             return;
@@ -739,13 +1131,17 @@ pub const Session = struct {
         self.goawayLastSidSent = 0x7FFFFFFF;
     }
 
-    /// Final GOAWAY with the real last-stream-id.
+    /// Final GOAWAY with the real last-stream-id. The identifier must
+    /// never increase across GOAWAY frames (RFC 9113 Section 6.8).
     pub fn finishGracefulShutdown(self: *Session) !void {
-        const lastSid: u31 = if (self.role == .server)
+        const candidate: u31 = if (self.role == .server)
             self.largestPeerStream
         else
-            self.nextStreamId -| 2;
+            @intCast(@min(self.largestLocalStream, 0x7FFFFFFF));
+        const lastSid: u31 = @min(candidate, self.goawayLastSidSent);
         try frameMod.writeGoaway(&self.outbound, self.allocator, lastSid, 0, "");
+        self.goawaySent = true;
+        self.goawayLastSidSent = lastSid;
     }
 
     pub fn sendConnectionClose(self: *Session, code: ErrorCode, debug: []const u8) !void {
@@ -776,12 +1172,19 @@ pub const Session = struct {
 
     fn removeStream(self: *Session, sid: u31) !void {
         if (self.streams.fetchRemove(sid)) |kv| {
-            if (self.role == .server and sid % 2 == 1 and self.activePeerStreams > 0) {
-                self.activePeerStreams -= 1;
+            if (kv.value.countedSlot) {
+                if (self.role == .server) {
+                    if (self.activePeerStreams > 0) self.activePeerStreams -= 1;
+                } else {
+                    if (self.activeLocalStreams > 0) self.activeLocalStreams -= 1;
+                }
             }
             kv.value.deinit();
             self.allocator.destroy(kv.value);
         }
+        // Remember the identifier so a late frame for it is answered with
+        // a stream error instead of an idle-stream connection error.
+        self.closedStreams.put(sid, {}) catch {};
     }
 
     /// Reaps a stream that reached the fully-closed state (both sides
@@ -800,9 +1203,11 @@ pub const Session = struct {
     pub fn nextClientStreamId(self: *Session) !u31 {
         if (self.role != .client) return Error.ProtocolViolation;
         const id = self.nextStreamId;
+        // The 31-bit identifier space ends at 0x7FFFFFFF; asking for one
+        // more must fail instead of wrapping around.
         if (id > 0x7FFFFFFF) return Error.ProtocolViolation;
-        self.nextStreamId += 2;
-        return id;
+        self.nextStreamId = id + 2;
+        return @intCast(id);
     }
 };
 
@@ -914,41 +1319,62 @@ test "session pair completes request/response exchange" {
     try server.feed(client.outbound.items);
 }
 
-test "validatePseudoHeaders rejects uppercase, forbidden headers and mixed pseudo-headers" {
+test "header list validation rejects uppercase, forbidden headers and mixed pseudo-headers" {
     // Uppercase header name -> rejected
-    var badUpper = [_]hpackMod.HeaderField{
+    const badUpper = [_]hpackMod.HeaderField{
         .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
         .{ .name = "Content-Type", .value = "text/plain" },
     };
-    try std.testing.expect(!Session.validatePseudoHeaders(&badUpper));
+    try std.testing.expect(!Session.validateHeaderList(&badUpper, .request));
 
     // Forbidden 'connection' header -> rejected
-    var badConn = [_]hpackMod.HeaderField{
+    const badConn = [_]hpackMod.HeaderField{
         .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
         .{ .name = "connection", .value = "keep-alive" },
     };
-    try std.testing.expect(!Session.validatePseudoHeaders(&badConn));
+    try std.testing.expect(!Session.validateHeaderList(&badConn, .request));
 
     // Forbidden 'te' header with value other than 'trailers' -> rejected
-    var badTe = [_]hpackMod.HeaderField{
+    const badTe = [_]hpackMod.HeaderField{
         .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
         .{ .name = "te", .value = "gzip" },
     };
-    try std.testing.expect(!Session.validatePseudoHeaders(&badTe));
+    try std.testing.expect(!Session.validateHeaderList(&badTe, .request));
 
     // Valid 'te: trailers' -> accepted
-    var goodTe = [_]hpackMod.HeaderField{
+    const goodTe = [_]hpackMod.HeaderField{
         .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
         .{ .name = "te", .value = "trailers" },
     };
-    try std.testing.expect(Session.validatePseudoHeaders(&goodTe));
+    try std.testing.expect(Session.validateHeaderList(&goodTe, .request));
 
     // Mixed request and response pseudo-headers -> rejected
-    var badMixed = [_]hpackMod.HeaderField{
+    const badMixed = [_]hpackMod.HeaderField{
         .{ .name = ":status", .value = "200" },
         .{ .name = ":method", .value = "GET" },
     };
-    try std.testing.expect(!Session.validatePseudoHeaders(&badMixed));
+    try std.testing.expect(!Session.validateHeaderList(&badMixed, .request));
+    try std.testing.expect(!Session.validateHeaderList(&badMixed, .response));
+
+    // A response must carry :status, a request must carry :method,
+    // :scheme and :path.
+    const respNoStatus = [_]hpackMod.HeaderField{.{ .name = "x", .value = "1" }};
+    try std.testing.expect(!Session.validateHeaderList(&respNoStatus, .response));
+    try std.testing.expect(!Session.validateHeaderList(&respNoStatus, .request));
+
+    // Trailers carry no pseudo-headers at all.
+    const trailerWithPseudo = [_]hpackMod.HeaderField{.{ .name = ":status", .value = "200" }};
+    try std.testing.expect(!Session.validateHeaderList(&trailerWithPseudo, .trailers));
+    const plainTrailer = [_]hpackMod.HeaderField{.{ .name = "x-checksum", .value = "1" }};
+    try std.testing.expect(Session.validateHeaderList(&plainTrailer, .trailers));
 }
 
 test "continued header blocks are rejected before exceeding configured budget" {
@@ -960,4 +1386,426 @@ test "continued header blocks are rejected before exceeding configured budget" {
     try std.testing.expectError(Error.ProtocolViolation, session.handleContinuation(1, "56", true));
     try std.testing.expect(session.closed);
     try std.testing.expect(session.streamPtr(1).?.headerBlock.?.items.len <= 5);
+}
+
+// Protocol-level tests: framing rules, error escalation and flow control.
+
+/// Serializes one frame into `buf` and returns the frame bytes.
+fn buildFrame(buf: []u8, t: frameMod.FrameType, flags: u8, sid: u31, payload: []const u8) []const u8 {
+    var h: frameMod.FrameHeader = .{
+        .length = @intCast(payload.len),
+        .frameType = t,
+        .flags = flags,
+        .streamId = sid,
+    };
+    var hb: [9]u8 = undefined;
+    h.serialize(&hb);
+    @memcpy(buf[0..9], &hb);
+    @memcpy(buf[9..][0..payload.len], payload);
+    return buf[0 .. 9 + payload.len];
+}
+
+/// Client SETTINGS payload (empty).
+const empty_settings = [_]u8{};
+
+/// Builds the client preface plus its SETTINGS frame.
+fn clientHandshake(buf: []u8) []const u8 {
+    @memcpy(buf[0..24], frameMod.CONNECTION_PREFACE);
+    const settings = buildFrame(buf[24..], .settings, 0, 0, &empty_settings);
+    return buf[0 .. 24 + settings.len];
+}
+
+/// HPACK block for a minimal GET request.
+fn requestBlock(allocator: Allocator, path: []const u8) ![]u8 {
+    var enc = hpackMod.Encoder.init(allocator);
+    defer enc.deinit();
+    var block = std.ArrayList(u8).empty;
+    defer block.deinit(allocator);
+    try enc.encode(&block, ":method", "GET", .incremental, false);
+    try enc.encode(&block, ":scheme", "http", .incremental, false);
+    try enc.encode(&block, ":path", path, .incremental, false);
+    try enc.encode(&block, ":authority", "example.test", .incremental, false);
+    return block.toOwnedSlice(allocator);
+}
+
+test "the first frame of a connection must be SETTINGS" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    try client.startHandshake();
+
+    var buf: [64]u8 = undefined;
+    const ping = buildFrame(&buf, .ping, 0, 0, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    try std.testing.expectError(Error.ProtocolViolation, client.feed(ping));
+    try std.testing.expect(client.closed);
+    // A GOAWAY must be queued so the peer learns why.
+    try std.testing.expect(client.outbound.items.len > 0);
+}
+
+test "a client rejects ENABLE_PUSH sent by the server" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    try client.startHandshake();
+
+    var buf: [64]u8 = undefined;
+    var payload: [6]u8 = undefined;
+    frameMod.serializeSetting(&payload, @backingInt(frameMod.SettingsId.enablePush), 1);
+    const settings = buildFrame(&buf, .settings, 0, 0, &payload);
+    try std.testing.expectError(Error.ProtocolViolation, client.feed(settings));
+    try std.testing.expect(client.closed);
+}
+
+test "a server does not advertise ENABLE_PUSH" {
+    const a = std.testing.allocator;
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try server.startHandshake();
+    // The first frame must be SETTINGS; it must not carry ENABLE_PUSH.
+    try std.testing.expect(server.outbound.items.len >= 9);
+    try std.testing.expectEqual(frameMod.FrameType.settings, @field(FrameHeader.parse(server.outbound.items[0..9]), "frameType"));
+    var i: usize = 0;
+    while (i + 6 <= server.outbound.items.len - 9) : (i += 6) {
+        const id = std.mem.readInt(u16, server.outbound.items[9 + i ..][0..2], .big);
+        try std.testing.expect(id != @backingInt(frameMod.SettingsId.enablePush));
+    }
+}
+
+test "settings are applied in order and adjust the stream windows" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    try client.startHandshake();
+
+    // Open a stream so the window adjustment is observable.
+    const fields = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":authority", .value = "example.test" },
+    };
+    try client.sendHeaders(1, &fields, true);
+    const st = client.streamPtr(1).?;
+    try std.testing.expectEqual(@as(i64, 65535), st.sendWindow);
+
+    var buf: [64]u8 = undefined;
+    var payload: [6]u8 = undefined;
+    frameMod.serializeSetting(&payload, @backingInt(frameMod.SettingsId.initialWindowSize), 1000);
+    const settings = buildFrame(&buf, .settings, 0, 0, &payload);
+    try client.feed(settings);
+    try std.testing.expectEqual(@as(i64, 1000), client.streamPtr(1).?.sendWindow);
+}
+
+test "a request over the concurrency limit is refused, not fatal" {
+    const a = std.testing.allocator;
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    server.localSettings.maxConcurrentStreams = 1;
+    try server.startHandshake();
+
+    var buf: [256]u8 = undefined;
+    const handshake = clientHandshake(&buf);
+    try server.feed(handshake);
+    server.outbound.clearRetainingCapacity();
+
+    const block = try requestBlock(a, "/one");
+    defer a.free(block);
+    const first = buildFrame(buf[24..], .headers, 0x04, 1, block);
+    try server.feed(first);
+    server.outbound.clearRetainingCapacity();
+
+    // The second concurrent request exceeds the advertised limit.
+    const second = buildFrame(buf[24..], .headers, 0x04, 3, block);
+    try server.feed(second);
+
+    // The connection survives and an RST_STREAM (REFUSED_STREAM) is sent.
+    try std.testing.expect(!server.closed);
+    try std.testing.expect(server.outbound.items.len >= 9);
+    const hdr = FrameHeader.parse(server.outbound.items[0..9]);
+    try std.testing.expectEqual(FrameType.rstStream, hdr.frameType);
+    try std.testing.expectEqual(@as(u31, 3), hdr.streamId);
+    try std.testing.expectEqual(@as(u32, 7), std.mem.readInt(u32, server.outbound.items[9..13], .big));
+}
+
+test "data on a closed stream is a stream error" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    try client.startHandshake();
+    // The peer SETTINGS frame must be the first inbound frame.
+    {
+        var sbuf: [64]u8 = undefined;
+        const settings = buildFrame(&sbuf, .settings, 0, 0, &empty_settings);
+        try client.feed(settings);
+    }
+
+    const fields = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":authority", .value = "example.test" },
+    };
+    try client.sendHeaders(1, &fields, true);
+    // Reset the stream so a late DATA frame hits a closed stream.
+    try client.sendRstStream(1, .cancel);
+    client.outbound.clearRetainingCapacity();
+
+    var buf: [64]u8 = undefined;
+    const data = buildFrame(&buf, .data, 0, 1, "x");
+    // The frame must not kill the connection.
+    client.feed(data) catch |e| {
+        try std.testing.expect(e == Error.ProtocolViolation);
+    };
+    try std.testing.expect(!client.closed);
+}
+
+test "a zero window update increment is a stream error" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    try client.startHandshake();
+    {
+        var sbuf: [64]u8 = undefined;
+        const settings = buildFrame(&sbuf, .settings, 0, 0, &empty_settings);
+        try client.feed(settings);
+    }
+
+    const fields = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":authority", .value = "example.test" },
+    };
+    try client.sendHeaders(1, &fields, true);
+    client.outbound.clearRetainingCapacity();
+
+    var buf: [64]u8 = undefined;
+    const wu = buildFrame(&buf, .windowUpdate, 0, 1, &[_]u8{ 0, 0, 0, 0 });
+    try client.feed(wu);
+    try std.testing.expect(!client.closed);
+    try std.testing.expect(client.outbound.items.len >= 9);
+    const hdr = FrameHeader.parse(client.outbound.items[0..9]);
+    try std.testing.expectEqual(FrameType.rstStream, hdr.frameType);
+}
+
+test "the sender never exceeds the peer's flow-control window" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    try client.startHandshake();
+
+    const fields = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":authority", .value = "example.test" },
+    };
+    try client.sendHeaders(1, &fields, false);
+
+    // The peer narrows the initial window to 100 bytes.
+    client.peerSettings.initialWindowSize = 100;
+    client.streamPtr(1).?.sendWindow = 100;
+
+    const payload: [500]u8 = @splat(0);
+    const sent = try client.sendData(1, &payload, false);
+    try std.testing.expectEqual(@as(usize, 100), sent);
+    try std.testing.expectEqual(@as(i64, 0), client.streamPtr(1).?.sendWindow);
+    // The connection window is untouched by the stream window.
+    try std.testing.expectEqual(@as(i64, 65535 - 100), client.connSendWindow);
+}
+
+test "the receiver grants credit with WINDOW_UPDATE once half the window is used" {
+    const a = std.testing.allocator;
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try server.startHandshake();
+
+    var buf: [256]u8 = undefined;
+    const handshake = clientHandshake(&buf);
+    try server.feed(handshake);
+    server.outbound.clearRetainingCapacity();
+
+    const block = try requestBlock(a, "/data");
+    defer a.free(block);
+    const headers = buildFrame(buf[24..], .headers, 0x04, 1, block);
+    try server.feed(headers);
+    server.outbound.clearRetainingCapacity();
+
+    // 40000 bytes pass the half-window threshold (32767). They are sent
+    // in frames that respect SETTINGS_MAX_FRAME_SIZE.
+    const payload = try a.alloc(u8, 40000);
+    defer a.free(payload);
+    @memset(payload, 'x');
+    var frame_buf: [16384 + 9]u8 = undefined;
+    var sent: usize = 0;
+    while (sent < payload.len) {
+        const take = @min(@as(usize, 16384), payload.len - sent);
+        const data = buildFrame(&frame_buf, .data, 0, 1, payload[sent..][0..take]);
+        try server.feed(data);
+        sent += take;
+    }
+
+    // A connection-level WINDOW_UPDATE must have been queued.
+    var sawConnUpdate = false;
+    var off: usize = 0;
+    while (off + 9 <= server.outbound.items.len) {
+        const hdr = FrameHeader.parse(server.outbound.items[off..][0..9]);
+        if (hdr.frameType == .windowUpdate and hdr.streamId == 0) sawConnUpdate = true;
+        off += 9 + @as(usize, hdr.length);
+    }
+    try std.testing.expect(sawConnUpdate);
+    try std.testing.expect(!server.closed);
+}
+
+test "an empty DATA frame with END_STREAM closes the send side" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    try client.startHandshake();
+
+    const fields = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":authority", .value = "example.test" },
+    };
+    try client.sendHeaders(1, &fields, false);
+    client.outbound.clearRetainingCapacity();
+
+    const sent = try client.sendData(1, "", true);
+    try std.testing.expectEqual(@as(usize, 0), sent);
+    // A zero-length DATA frame with END_STREAM was written.
+    try std.testing.expect(client.outbound.items.len >= 9);
+    const hdr = FrameHeader.parse(client.outbound.items[0..9]);
+    try std.testing.expectEqual(FrameType.data, hdr.frameType);
+    try std.testing.expectEqual(@as(u24, 0), hdr.length);
+    try std.testing.expect(hdr.flags & Flags.END_STREAM != 0);
+}
+
+test "client stream identifiers never wrap around" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    client.nextStreamId = 0x7FFFFFFF;
+    try std.testing.expectEqual(@as(u31, 0x7FFFFFFF), try client.nextClientStreamId());
+    try std.testing.expectError(Error.ProtocolViolation, client.nextClientStreamId());
+}
+
+test "the GOAWAY last-stream identifier never increases" {
+    const a = std.testing.allocator;
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try server.startHandshake();
+    server.outbound.clearRetainingCapacity();
+
+    try server.beginGracefulShutdown();
+    // A second, lower identifier is allowed; a higher one is not.
+    try server.finishGracefulShutdown();
+    try std.testing.expect(server.outbound.items.len >= 34);
+    const first = FrameHeader.parse(server.outbound.items[0..9]);
+    try std.testing.expectEqual(FrameType.goaway, first.frameType);
+    try std.testing.expectEqual(@as(u31, 0x7FFFFFFF), std.mem.readInt(u32, server.outbound.items[9..13], .big));
+    // The second GOAWAY follows the first one (9-byte header + 8-byte body).
+    const second = FrameHeader.parse(server.outbound.items[17..26]);
+    try std.testing.expectEqual(FrameType.goaway, second.frameType);
+    try std.testing.expectEqual(@as(u31, 0), std.mem.readInt(u32, server.outbound.items[26..30], .big));
+}
+
+test "sensitive headers are never placed in the dynamic table" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    try client.startHandshake();
+    // Only the HEADERS frame must be in the outbound buffer.
+    client.outbound.clearRetainingCapacity();
+
+    const fields = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":authority", .value = "example.test" },
+        .{ .name = "authorization", .value = "Bearer secret-token" },
+    };
+    try client.sendHeaders(1, &fields, true);
+
+    // Decode the emitted block with a fresh decoder: the sensitive value
+    // must not have been indexed.
+    var dec = hpackMod.Decoder.init(a);
+    defer dec.deinit();
+    const res = try dec.decode(client.outbound.items[frameMod.FRAME_HEADER_SIZE..]);
+    defer {
+        for (res.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(res.fields);
+    }
+    try std.testing.expectEqual(@as(usize, 5), res.fields.len);
+    try std.testing.expectEqualStrings("authorization", res.fields[4].name);
+    try std.testing.expectEqualStrings("Bearer secret-token", res.fields[4].value);
+    for (dec.dyn.entries.items) |e| {
+        try std.testing.expect(!std.mem.eql(u8, e.name, "authorization"));
+    }
+}
+
+test "outgoing header names are lowercased and hop-by-hop fields dropped" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    try client.startHandshake();
+    client.outbound.clearRetainingCapacity();
+
+    const fields = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":authority", .value = "example.test" },
+        .{ .name = "User-Agent", .value = "httpx" },
+        .{ .name = "Connection", .value = "close" },
+    };
+    try client.sendHeaders(1, &fields, true);
+
+    var dec = hpackMod.Decoder.init(a);
+    defer dec.deinit();
+    const res = try dec.decode(client.outbound.items[frameMod.FRAME_HEADER_SIZE..]);
+    defer {
+        for (res.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(res.fields);
+    }
+    try std.testing.expectEqual(@as(usize, 5), res.fields.len);
+    try std.testing.expectEqualStrings("user-agent", res.fields[4].name);
+    for (res.fields) |f| {
+        try std.testing.expect(!std.mem.eql(u8, f.name, "connection"));
+    }
+}
+
+test "a malformed request header list is a stream error" {
+    const a = std.testing.allocator;
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try server.startHandshake();
+
+    var buf: [256]u8 = undefined;
+    const handshake = clientHandshake(&buf);
+    try server.feed(handshake);
+    server.outbound.clearRetainingCapacity();
+
+    // A request without :method/:scheme/:path is malformed.
+    var enc = hpackMod.Encoder.init(a);
+    defer enc.deinit();
+    var block = std.ArrayList(u8).empty;
+    defer block.deinit(a);
+    try enc.encode(&block, ":method", "GET", .incremental, false);
+    try enc.encode(&block, "x-custom", "1", .incremental, false);
+
+    const headers = buildFrame(buf[24..], .headers, 0x04, 1, block.items);
+    try server.feed(headers);
+    // The connection survives; the stream is reset.
+    try std.testing.expect(!server.closed);
+    try std.testing.expect(server.outbound.items.len >= 9);
+    const hdr = FrameHeader.parse(server.outbound.items[0..9]);
+    try std.testing.expectEqual(FrameType.rstStream, hdr.frameType);
 }

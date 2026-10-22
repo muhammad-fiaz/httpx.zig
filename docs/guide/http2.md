@@ -1,11 +1,11 @@
 # HTTP/2 Protocol
 
-httpx.zig provides a complete, from-scratch implementation of HTTP/2 (RFC 7540) including HPACK header compression (RFC 7541). This guide covers high-level client/server runtime usage and low-level HTTP/2 protocol features.
+httpx.zig provides a complete, from-scratch implementation of HTTP/2 (RFC 9113) including HPACK header compression (RFC 7541). This guide covers high-level client/server runtime usage and low-level HTTP/2 protocol features.
 
 ::: warning Custom Implementation
-Zig's standard library does not provide HTTP/2 support. **httpx.zig implements HTTP/2 entirely from scratch**, following RFC 7540 and RFC 7541 specifications, including:
+Zig's standard library does not provide HTTP/2 support. **httpx.zig implements HTTP/2 entirely from scratch**, following RFC 9113 and RFC 7541 specifications, including:
 - **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
-- **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and connection pooling (RFC 7540)
+- **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and connection pooling (RFC 9113)
 - **ALPN** negotiation (RFC 7301) for automatic HTTP/2 and HTTP/3 protocol selection with HTTP/1.1 fallback
 :::
 
@@ -27,24 +27,41 @@ HTTP/2 support is validated across Linux, Windows, and macOS targets:
   (default `true`). TLS deployments must configure ALPN to select `h2`; the
   server's default ALPN list does not include HTTP/2.
 - **HPACK Header Compression** - Full RFC 7541 implementation with static and dynamic tables
-- **Stream Multiplexing** - The session tracks HTTP/2 streams, but the
-  high-level client performs one exchange at a time on a connection.
-- **Flow Control** - Per-stream and connection-level flow control with WINDOW_UPDATE
+- **Stream Multiplexing** - The server keeps one state per concurrent stream and
+  answers them independently; the transport client can keep several requests in
+  flight on one connection (`beginRequest` / `awaitResponse`). The high-level
+  `Client` hands out pooled connections exclusively, so it still runs one
+  exchange at a time per connection.
+- **Flow Control** - Per-stream and connection-level flow control with WINDOW_UPDATE.
+  The connection window is the fixed 65535 bytes of RFC 9113 Section 6.9.2;
+  `SETTINGS_INITIAL_WINDOW_SIZE` only affects stream windows.
 - **Stream Priority** - PRIORITY frames are parsed and tolerated; priority-based
   scheduling is not implemented.
 - **Frame Encoding/Decoding** - Core HTTP/2 frame types are encoded and decoded;
   this does not imply complete extension-frame interoperability.
 - **CONTINUATION Frames** - Header blocks exceeding `MAX_FRAME_SIZE` are automatically split across HEADERS + CONTINUATION frames
-- **SETTINGS Enforcement** - Peer `MAX_CONCURRENT_STREAMS`, `MAX_FRAME_SIZE`, and `INITIAL_WINDOW_SIZE` values are parsed and enforced
-- **GOAWAY/RST_STREAM** - Graceful connection shutdown and stream cancellation with proper error codes
-- **HPACK Security** - `Without Indexing` / `Never Indexed` representations for volatile headers like `Authorization` and `Cookie`
+- **SETTINGS Enforcement** - Peer `MAX_CONCURRENT_STREAMS`, `MAX_FRAME_SIZE`, and `INITIAL_WINDOW_SIZE` values are parsed and enforced; repeated settings are applied in order
+- **GOAWAY/RST_STREAM** - Graceful connection shutdown and stream cancellation with proper error codes. A malformed header list is answered with a stream error (`RST_STREAM`), not a connection error.
+- **HPACK Security** - `Without Indexing` / `Never Indexed` representations for volatile headers like `Authorization` and `Cookie`; those values never enter the dynamic table
 - **Trailer Support** - Trailers are parsed by the session layer; the
   one-shot `Client`/`Server` API does not surface them yet (see below)
+- **Strict Header Validation** - Field names are lowercased, connection-specific
+  fields are dropped, and malformed pseudo-header sets are rejected per
+  RFC 9113 Section 8
 - **Connection Preface Timeout** - Detects missing initial SETTINGS frame from peer
 - **ALPN Negotiation** - The client offers `h2` for explicit HTTP/2 requests;
   the server selects it only when configured to do so.
 - **Connection Pooling** - HTTP/1.x keep-alive and HTTP/2 sessions can be
   reused across sequential requests.
+
+### Not implemented
+
+- **Server push** - The client advertises `ENABLE_PUSH=0`; a `PUSH_PROMISE`
+  frame is a connection error (RFC 9113 Section 8.4).
+- **Priority-based scheduling** - `PRIORITY` is accepted and ignored.
+- **Extended CONNECT** (`:protocol`, RFC 8441) is rejected as an unknown
+  pseudo-header.
+
 
 ## High-level Client Usage
 

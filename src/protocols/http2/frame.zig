@@ -358,7 +358,9 @@ pub const Frame = union(enum) {
             .windowUpdate => {
                 if (payload.len != 4) return Error.InvalidPayload;
                 const inc = std.mem.readInt(u32, payload[0..4], .big) & 0x7FFFFFFF;
-                if (inc == 0) return Error.InvalidPayload;
+                // A zero increment is a stream error on a non-zero stream
+                // and a connection error on stream 0 (RFC 9113 Section 6.9).
+                // The session classifies it so the right RST can be sent.
                 return .{ .windowUpdate = .{ .increment = @intCast(inc) } };
             },
             .continuation => {
@@ -381,6 +383,7 @@ pub const Frame = union(enum) {
 // Writers
 
 pub fn writeHeader(out: *std.ArrayList(u8), gpa: Allocator, length: usize, t: FrameType, flags: u8, streamId: u31) !void {
+    if (length > MAX_ALLOWED_FRAME_SIZE) return Error.FrameTooLarge;
     var h: FrameHeader = .{ .length = @intCast(length), .frameType = t, .flags = flags, .streamId = streamId };
     var b: [FRAME_HEADER_SIZE]u8 = undefined;
     h.serialize(&b);
@@ -388,6 +391,7 @@ pub fn writeHeader(out: *std.ArrayList(u8), gpa: Allocator, length: usize, t: Fr
 }
 
 pub fn writeData(out: *std.ArrayList(u8), gpa: Allocator, sid: u31, data: []const u8, endStream: bool) !void {
+    if (data.len > MAX_ALLOWED_FRAME_SIZE) return Error.FrameTooLarge;
     var flags: u8 = 0;
     if (endStream) flags |= END_FLAG;
     try writeHeader(out, gpa, data.len, .data, flags, sid);
@@ -402,6 +406,7 @@ pub fn writeRstStream(out: *std.ArrayList(u8), gpa: Allocator, sid: u31, code: u
 }
 
 pub fn writeSettings(out: *std.ArrayList(u8), gpa: Allocator, entries: []const SettingEntry) !void {
+    if (entries.len > MAX_ALLOWED_FRAME_SIZE / 6) return Error.FrameTooLarge;
     try writeHeader(out, gpa, entries.len * 6, .settings, 0, 0);
     var b: [6]u8 = undefined;
     for (entries) |e| {
@@ -427,6 +432,7 @@ pub fn writeWindowUpdate(out: *std.ArrayList(u8), gpa: Allocator, sid: u31, incr
 }
 
 pub fn writeGoaway(out: *std.ArrayList(u8), gpa: Allocator, lastSid: u31, code: u32, debugData: []const u8) !void {
+    if (debugData.len > MAX_ALLOWED_FRAME_SIZE - 8) return Error.FrameTooLarge;
     try writeHeader(out, gpa, 8 + debugData.len, .goaway, 0, 0);
     var b: [8]u8 = undefined;
     std.mem.writeInt(u32, b[0..4], lastSid, .big);
@@ -442,4 +448,95 @@ pub fn writePriority(out: *std.ArrayList(u8), gpa: Allocator, sid: u31, p: Prior
     b[4] = p.weight;
     try writeHeader(out, gpa, 5, .priority, 0, sid);
     try out.appendSlice(gpa, &b);
+}
+
+// Tests
+
+test "frame header roundtrip keeps type, flags and stream id" {
+    var buf: [FRAME_HEADER_SIZE]u8 = undefined;
+    const hdr = FrameHeader{ .length = 1234, .frameType = .headers, .flags = 0x05, .streamId = 0x7FFFFFFF };
+    hdr.serialize(&buf);
+    const back = FrameHeader.parse(&buf);
+    try std.testing.expectEqual(@as(u24, 1234), back.length);
+    try std.testing.expectEqual(FrameType.headers, back.frameType);
+    try std.testing.expectEqual(@as(u8, 0x05), back.flags);
+    try std.testing.expectEqual(@as(u31, 0x7FFFFFFF), back.streamId);
+}
+
+test "unknown frame flags are stripped for known types only" {
+    var buf: [FRAME_HEADER_SIZE]u8 = undefined;
+    const hdr = FrameHeader{ .length = 0, .frameType = .ping, .flags = 0xFE, .streamId = 0 };
+    hdr.serialize(&buf);
+    const back = FrameHeader.parse(&buf);
+    // Only the ACK bit is meaningful for PING.
+    try std.testing.expectEqual(@as(u8, 0), back.flags);
+
+    const unknown = FrameHeader{ .length = 0, .frameType = @fromBackingInt(@intCast(0x42)), .flags = 0xFE, .streamId = 0 };
+    unknown.serialize(&buf);
+    const backUnknown = FrameHeader.parse(&buf);
+    try std.testing.expectEqual(@as(u8, 0xFE), backUnknown.flags);
+}
+
+test "reserved bit of the stream identifier is ignored" {
+    var buf: [FRAME_HEADER_SIZE]u8 = undefined;
+    const hdr = FrameHeader{ .length = 0, .frameType = .data, .flags = 0, .streamId = 5 };
+    hdr.serialize(&buf);
+    buf[5] |= 0x80; // set the reserved high bit
+    const back = FrameHeader.parse(&buf);
+    try std.testing.expectEqual(@as(u31, 5), back.streamId);
+}
+
+test "frame length beyond the 24-bit maximum is rejected" {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(std.testing.allocator);
+    try std.testing.expectError(Error.FrameTooLarge, writeHeader(&out, std.testing.allocator, MAX_ALLOWED_FRAME_SIZE + 1, .data, 0, 1));
+    // A short DATA frame is legal; the length guard only trips past the
+    // 24-bit maximum, which is covered by writeHeader above.
+    const eight: [8]u8 = @splat(0);
+    try writeData(&out, std.testing.allocator, 1, &eight, false);
+    try std.testing.expectEqual(@as(usize, 9 + 8), out.items.len);
+}
+
+test "malformed payloads are rejected by the frame parser" {
+    const a = std.testing.allocator;
+    const hdr = FrameHeader{ .length = 0, .frameType = .ping, .flags = 0, .streamId = 0 };
+    try std.testing.expectError(Error.InvalidPayload, Frame.parse(hdr, &[_]u8{ 0, 0, 0 }, a));
+
+    const settings = FrameHeader{ .length = 0, .frameType = .settings, .flags = 0, .streamId = 0 };
+    try std.testing.expectError(Error.InvalidPayload, Frame.parse(settings, &[_]u8{ 0, 0, 0, 0, 0 }, a));
+
+    const rst = FrameHeader{ .length = 0, .frameType = .rstStream, .flags = 0, .streamId = 1 };
+    try std.testing.expectError(Error.InvalidPayload, Frame.parse(rst, &[_]u8{ 0, 0, 0 }, a));
+
+    const goaway = FrameHeader{ .length = 0, .frameType = .goaway, .flags = 0, .streamId = 0 };
+    try std.testing.expectError(Error.InvalidPayload, Frame.parse(goaway, &[_]u8{ 0, 0, 0 }, a));
+
+    const data0 = FrameHeader{ .length = 0, .frameType = .data, .flags = 0, .streamId = 0 };
+    try std.testing.expectError(Error.InvalidStreamId, Frame.parse(data0, "", a));
+}
+
+test "padding longer than the payload is a protocol error" {
+    const a = std.testing.allocator;
+    const hdr = FrameHeader{ .length = 3, .frameType = .data, .flags = Flags.PADDED, .streamId = 1 };
+    try std.testing.expectError(Error.ProtocolError, Frame.parse(hdr, &[_]u8{ 0x10, 'a', 'b' }, a));
+}
+
+test "settings payload must be a multiple of six bytes" {
+    const a = std.testing.allocator;
+    const hdr = FrameHeader{ .length = 6, .frameType = .settings, .flags = 0, .streamId = 0 };
+    const f = try Frame.parse(hdr, &[_]u8{ 0, 3, 0, 0, 0, 100 }, a);
+    defer a.free(f.settings);
+    try std.testing.expectEqual(@as(usize, 1), f.settings.len);
+    try std.testing.expectEqual(@as(u16, 3), f.settings[0].id);
+    try std.testing.expectEqual(@as(u32, 100), f.settings[0].value);
+}
+
+test "setting values are validated against the RFC ranges" {
+    try std.testing.expectEqual(@as(?u32, 1), validateSetting(.enablePush, 2));
+    try std.testing.expectEqual(@as(?u32, null), validateSetting(.enablePush, 1));
+    try std.testing.expectEqual(@as(?u32, 3), validateSetting(.initialWindowSize, @intCast(MAX_WINDOW + 1)));
+    try std.testing.expectEqual(@as(?u32, null), validateSetting(.initialWindowSize, @intCast(MAX_WINDOW)));
+    try std.testing.expectEqual(@as(?u32, 1), validateSetting(.maxFrameSize, DEFAULT_MAX_FRAME_SIZE - 1));
+    try std.testing.expectEqual(@as(?u32, 1), validateSetting(.maxFrameSize, @intCast(MAX_ALLOWED_FRAME_SIZE + 1)));
+    try std.testing.expectEqual(@as(?u32, null), validateSetting(.maxFrameSize, DEFAULT_MAX_FRAME_SIZE));
 }

@@ -33,6 +33,13 @@ pub fn maxEncodedLen(len: usize) usize {
     return len * 5 + 1;
 }
 
+/// Upper bound on decoded size for `encodedLen` compressed bytes. The
+/// shortest Huffman code is 5 bits, so each input byte emits at most
+/// ceil(8/5) symbols (the +1 covers a partial final symbol).
+pub fn maxDecodedLen(encodedLen: usize) usize {
+    return encodedLen * 8 / 5 + 1;
+}
+
 /// Encodes `src` into `out`, padding the final byte with EOS MSBs.
 /// Returns bytes written.
 pub fn encode(out: []u8, src: []const u8) Error!usize {

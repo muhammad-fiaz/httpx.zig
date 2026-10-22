@@ -4,6 +4,12 @@
 //! session for BOTH roles. The Session itself is transport-agnostic
 //! (outbound buffer + feed()); this layer only moves bytes.
 //!
+//! The server side is fully multiplexed: every concurrent stream keeps
+//! its own request state, responses are emitted per stream, and a body
+//! larger than the flow-control window is drained as WINDOW_UPDATE
+//! frames arrive. The client keeps a per-stream response registry, so
+//! several requests can be in flight on one connection.
+//!
 //! References:
 //!   - RFC 9113 Section 3.4 — HTTP/2 Connection Preface (h2c)
 //!   - RFC 9113 Section 3.3 — Starting HTTP/2 for Prior Knowledge
@@ -27,13 +33,31 @@ pub const Error = error{
     StreamClosed,
     WindowExhausted,
     ResponseTooLarge,
+    RequestTooLarge,
     OutOfMemory,
-};
+} || sessionMod.Error;
 
 pub const maxResponseBodySize: usize = 64 * 1024 * 1024;
 pub const MAX_REQUEST_BODY_SIZE: usize = 16 * 1024 * 1024;
 
 pub const Header = struct { name: []const u8, value: []const u8 };
+
+/// Byte mover used by the server loop. Keeping it abstract lets the
+/// high-level server reuse the same multiplexing logic over its own
+/// socket wrapper (which adds read/write timeouts).
+pub const ByteStream = struct {
+    ctx: ?*anyopaque = null,
+    readFn: *const fn (ctx: ?*anyopaque, buf: []u8) anyerror!usize,
+    writeAllFn: *const fn (ctx: ?*anyopaque, bytes: []const u8) anyerror!void,
+
+    pub fn read(self: ByteStream, buf: []u8) anyerror!usize {
+        return self.readFn(self.ctx, buf);
+    }
+
+    pub fn writeAll(self: ByteStream, bytes: []const u8) anyerror!void {
+        return self.writeAllFn(self.ctx, bytes);
+    }
+};
 
 /// Transport stream: plain TCP or an established native TLS session.
 /// Both expose read/writeAll/close with identical ownership (the Client
@@ -72,7 +96,21 @@ pub const Stream = union(enum) {
             },
         }
     }
+
+    fn byteStream(self: *Stream) ByteStream {
+        return .{ .ctx = self, .readFn = streamRead, .writeAllFn = streamWriteAll };
+    }
 };
+
+fn streamRead(ctx: ?*anyopaque, buf: []u8) anyerror!usize {
+    const s: *Stream = @ptrCast(@alignCast(ctx.?));
+    return s.read(buf);
+}
+
+fn streamWriteAll(ctx: ?*anyopaque, bytes: []const u8) anyerror!void {
+    const s: *Stream = @ptrCast(@alignCast(ctx.?));
+    return s.writeAll(bytes);
+}
 
 // Client
 
@@ -93,10 +131,68 @@ pub const Response = struct {
     }
 };
 
+/// Per-stream response accumulator. The session callbacks dispatch by
+/// stream id, so several requests may be in flight at once.
+const RequestState = struct {
+    sid: u31,
+    allocator: Allocator,
+    status: u16 = 500,
+    headers: std.ArrayList(Header) = .empty,
+    body: std.ArrayList(u8) = .empty,
+    /// Response fully received (END_STREAM seen).
+    done: bool = false,
+    /// Body exceeded the configured limit.
+    tooLarge: bool = false,
+    /// The peer reset the stream.
+    reset: bool = false,
+    resetCode: u32 = 0,
+    maxBytes: usize,
+
+    fn deinit(self: *RequestState) void {
+        for (self.headers.items) |h| {
+            self.allocator.free(h.name);
+            self.allocator.free(h.value);
+        }
+        self.headers.deinit(self.allocator);
+        self.body.deinit(self.allocator);
+        self.allocator.destroy(self);
+    }
+
+    fn onHeaders(self: *RequestState, flds: []hpack.HeaderField, endStream: bool) !void {
+        for (flds) |f| {
+            if (std.mem.eql(u8, f.name, ":status")) {
+                self.status = std.fmt.parseInt(u16, f.value, 10) catch 500;
+                continue;
+            }
+            if (f.name.len > 0 and f.name[0] == ':') continue;
+            const name = try self.allocator.dupe(u8, f.name);
+            errdefer self.allocator.free(name);
+            const value = try self.allocator.dupe(u8, f.value);
+            errdefer self.allocator.free(value);
+            self.headers.append(self.allocator, .{ .name = name, .value = value }) catch |err| {
+                self.allocator.free(name);
+                self.allocator.free(value);
+                return err;
+            };
+        }
+        if (endStream) self.done = true;
+    }
+
+    fn onData(self: *RequestState, data: []const u8) !void {
+        if (data.len > self.maxBytes -| self.body.items.len) {
+            self.tooLarge = true;
+            return;
+        }
+        try self.body.appendSlice(self.allocator, data);
+    }
+};
+
 pub const Client = struct {
     allocator: Allocator,
     stream: Stream,
     session: *Session,
+    /// In-flight requests keyed by stream id (multiplexing support).
+    pending: std.AutoHashMap(u31, *RequestState),
 
     /// Handshakes (magic + SETTINGS) and flushes over plain TCP.
     pub fn connect(allocator: Allocator, sock: tcp.Socket) !*Client {
@@ -114,32 +210,81 @@ pub const Client = struct {
         errdefer allocator.destroy(c);
 
         const sess = try allocator.create(Session);
-        sess.* = try Session.init(allocator, .client, .{});
         errdefer {
             sess.deinit();
             allocator.destroy(sess);
         }
 
+        c.* = .{
+            .allocator = allocator,
+            .stream = stream,
+            .session = sess,
+            .pending = std.AutoHashMap(u31, *RequestState).init(allocator),
+        };
+        sess.* = try Session.init(allocator, .client, .{});
+        sess.cbs = .{
+            .ctx = c,
+            .onHeaders = clientOnHeaders,
+            .onData = clientOnData,
+            .onStreamEnd = clientOnStreamEnd,
+            .onReset = clientOnReset,
+        };
         try sess.startHandshake();
-        c.* = .{ .allocator = allocator, .stream = stream, .session = sess };
         try c.flush();
         return c;
     }
 
     pub fn deinit(self: *Client) void {
+        var it = self.pending.valueIterator();
+        while (it.next()) |sp| sp.*.deinit();
+        self.pending.deinit();
         self.session.deinit();
         self.allocator.destroy(self.session);
         self.stream.close();
         self.allocator.destroy(self);
     }
 
-    fn pump(self: *Client) Error!void {
+    fn clientOnHeaders(ctx: ?*anyopaque, sid: u31, flds: []hpack.HeaderField, endStream: bool) anyerror!void {
+        const self: *Client = @ptrCast(@alignCast(ctx.?));
+        const st = self.pending.get(sid) orelse return;
+        try st.onHeaders(flds, endStream);
+    }
+
+    fn clientOnData(ctx: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
+        const self: *Client = @ptrCast(@alignCast(ctx.?));
+        const st = self.pending.get(sid) orelse return;
+        try st.onData(data);
+    }
+
+    fn clientOnStreamEnd(ctx: ?*anyopaque, sid: u31) anyerror!void {
+        const self: *Client = @ptrCast(@alignCast(ctx.?));
+        const st = self.pending.get(sid) orelse return;
+        st.done = true;
+    }
+
+    fn clientOnReset(ctx: ?*anyopaque, sid: u31, code: u32) void {
+        const self: *Client = @ptrCast(@alignCast(ctx.?));
+        const st = self.pending.get(sid) orelse return;
+        st.reset = true;
+        st.resetCode = code;
+        st.done = true;
+    }
+
+    /// Reads one chunk from the transport and feeds it to the session.
+    /// Public so callers can drive a connection whose flow-control window
+    /// is exhausted without consuming a response.
+    pub fn pump(self: *Client) Error!void {
         var buf: [16 * 1024]u8 = undefined;
         const n = self.stream.read(&buf) catch return error.ReadFailed;
         if (n == 0) return error.StreamClosed;
         self.session.feed(buf[0..n]) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return error.ProtocolViolation,
+            else => {
+                // A protocol violation queues a GOAWAY: flush it so the
+                // peer learns why the connection ended.
+                self.flush() catch {};
+                return error.ProtocolViolation;
+            },
         };
         try self.flush();
     }
@@ -149,6 +294,122 @@ pub const Client = struct {
             self.stream.writeAll(self.session.outbound.items) catch return error.WriteFailed;
             self.session.outbound.clearRetainingCapacity();
         }
+    }
+
+    /// Starts a request on a fresh stream without waiting for the
+    /// response. Several requests may be in flight at the same time.
+    pub fn beginRequest(
+        self: *Client,
+        method: []const u8,
+        path: []const u8,
+        extra: []const Header,
+        scheme: []const u8,
+        authority: []const u8,
+        reqBody: ?[]const u8,
+        maxBytes: usize,
+    ) !u31 {
+        const a = self.allocator;
+        const sid = try self.session.nextClientStreamId();
+
+        const rstate = try a.create(RequestState);
+        errdefer rstate.deinit();
+        rstate.* = .{
+            .sid = sid,
+            .allocator = a,
+            .maxBytes = @min(maxBytes, maxResponseBodySize),
+        };
+        try self.pending.put(sid, rstate);
+        errdefer _ = self.pending.remove(sid);
+
+        var fields = std.ArrayList(hpack.HeaderField).empty;
+        defer fields.deinit(a);
+        try fields.append(a, .{ .name = ":method", .value = method });
+        try fields.append(a, .{ .name = ":path", .value = path });
+        try fields.append(a, .{ .name = ":scheme", .value = scheme });
+        try fields.append(a, .{ .name = ":authority", .value = authority });
+        for (extra) |h| try fields.append(a, .{ .name = h.name, .value = h.value });
+
+        const toSend = reqBody orelse "";
+        const hasReqBody = toSend.len > 0;
+
+        self.session.sendHeaders(sid, fields.items, !hasReqBody) catch |e| {
+            _ = self.pending.remove(sid);
+            rstate.deinit();
+            return e;
+        };
+        try self.flush();
+        return sid;
+    }
+    /// Sends the remaining request body of a stream started with
+    /// `beginRequest`. Returns true when the body is fully written.
+    pub fn sendRequestBody(self: *Client, sid: u31, body: []const u8, sent: *usize) Error!bool {
+        while (sent.* < body.len) {
+            const n = try self.session.sendData(sid, body[sent.*..], true);
+            sent.* += n;
+            try self.flush();
+            if (n == 0) return false; // flow-control blocked
+            if (self.state(sid)) |st| {
+                if (st.done) return true; // peer answered early
+            }
+        }
+        return true;
+    }
+
+    fn state(self: *Client, sid: u31) ?*RequestState {
+        return self.pending.get(sid);
+    }
+
+    /// Waits until the response for `sid` completes and returns it.
+    pub fn awaitResponse(self: *Client, sid: u31) !Response {
+        const a = self.allocator;
+        while (true) {
+            const st = self.pending.get(sid) orelse return error.StreamClosed;
+            if (st.done) break;
+            if (st.tooLarge) {
+                self.dropStream(sid);
+                return error.ResponseTooLarge;
+            }
+            if (self.session.closed) {
+                self.dropStream(sid);
+                return error.StreamClosed;
+            }
+            if (self.session.goawayReceived) {
+                // The peer will not process streams above its last id.
+                if (self.session.goawayLastStream) |last| {
+                    if (sid > last) {
+                        self.dropStream(sid);
+                        return error.StreamClosed;
+                    }
+                }
+            }
+            try self.pump();
+        }
+
+        const st = self.pending.get(sid) orelse return error.StreamClosed;
+        if (st.tooLarge) {
+            self.dropStream(sid);
+            return error.ResponseTooLarge;
+        }
+        if (st.reset) {
+            self.dropStream(sid);
+            return error.StreamClosed;
+        }
+        const status = st.status;
+        const headers = try st.headers.toOwnedSlice(a);
+        const body = try st.body.toOwnedSlice(a);
+        st.headers = .empty;
+        st.body = .empty;
+        self.dropStream(sid);
+        return .{
+            .status = status,
+            .headers = headers,
+            .body = body,
+            .allocator = a,
+        };
+    }
+
+    fn dropStream(self: *Client, sid: u31) void {
+        if (self.pending.fetchRemove(sid)) |kv| kv.value.deinit();
     }
 
     /// One full request/response exchange on a fresh stream.
@@ -165,127 +426,22 @@ pub const Client = struct {
         reqBody: ?[]const u8,
         maxBytes: usize,
     ) !Response {
-        const a = self.allocator;
-        const sid = try self.session.nextClientStreamId();
-
-        var fields = std.ArrayList(hpack.HeaderField).empty;
-        defer fields.deinit(a);
-        try fields.append(a, .{ .name = ":method", .value = method });
-        try fields.append(a, .{ .name = ":path", .value = path });
-        try fields.append(a, .{ .name = ":scheme", .value = scheme });
-        try fields.append(a, .{ .name = ":authority", .value = authority });
-        for (extra) |h| try fields.append(a, .{ .name = h.name, .value = h.value });
-
-        const toSend = reqBody orelse "";
-        const hasReqBody = toSend.len > 0;
-
-        try self.session.sendHeaders(sid, fields.items, !hasReqBody);
-        try self.flush();
-
-        // Collectors wired through session callbacks.
-        var status: u16 = 500;
-        var headers = std.ArrayList(Header).empty;
-        errdefer {
-            for (headers.items) |h| {
-                a.free(h.name);
-                a.free(h.value);
-            }
-            headers.deinit(a);
-        }
-        var body = std.ArrayList(u8).empty;
-        errdefer body.deinit(a);
-        var done = false;
-        var tooLarge = false;
-
-        const Collector = struct {
-            sid: u31,
-            done: *bool,
-            status: *u16,
-            headers: *std.ArrayList(Header),
-            body: *std.ArrayList(u8),
-            a: Allocator,
-            maxBytes: usize,
-            tooLarge: *bool,
-
-            fn onHeaders(ctx: ?*anyopaque, s: u31, flds: []hpack.HeaderField, endStream: bool) anyerror!void {
-                const selfPtr: *@This() = @ptrCast(@alignCast(ctx.?));
-                if (s != selfPtr.sid) return;
-                for (flds) |f| {
-                    if (std.mem.eql(u8, f.name, ":status")) {
-                        selfPtr.status.* = std.fmt.parseInt(u16, f.value, 10) catch 500;
-                        continue;
-                    }
-                    const name = try selfPtr.a.dupe(u8, f.name);
-                    const value = selfPtr.a.dupe(u8, f.value) catch |err| {
-                        selfPtr.a.free(name);
-                        return err;
-                    };
-                    selfPtr.headers.append(selfPtr.a, .{ .name = name, .value = value }) catch |err| {
-                        selfPtr.a.free(name);
-                        selfPtr.a.free(value);
-                        return err;
-                    };
-                }
-                if (endStream) selfPtr.done.* = true;
-            }
-            fn onData(ctx: ?*anyopaque, s: u31, data: []const u8) anyerror!void {
-                const selfPtr: *@This() = @ptrCast(@alignCast(ctx.?));
-                if (s != selfPtr.sid) return;
-                if (data.len > selfPtr.maxBytes -| selfPtr.body.items.len) {
-                    selfPtr.tooLarge.* = true;
-                    return;
-                }
-                try selfPtr.body.appendSlice(selfPtr.a, data);
-            }
-            fn onEnd(ctx: ?*anyopaque, s: u31) anyerror!void {
-                const selfPtr: *@This() = @ptrCast(@alignCast(ctx.?));
-                if (s != selfPtr.sid) return;
-                selfPtr.done.* = true;
-            }
-        };
-
-        var col = Collector{
-            .sid = sid,
-            .done = &done,
-            .status = &status,
-            .headers = &headers,
-            .body = &body,
-            .a = a,
-            .maxBytes = @min(maxBytes, maxResponseBodySize),
-            .tooLarge = &tooLarge,
-        };
-        self.session.cbs = .{
-            .ctx = &col,
-            .onHeaders = Collector.onHeaders,
-            .onData = Collector.onData,
-            .onStreamEnd = Collector.onEnd,
-        };
-        defer self.session.cbs = .{};
-
-        if (hasReqBody) {
-            var bodySent: usize = 0;
-            while (bodySent < toSend.len) {
-                const sent = try self.session.sendData(sid, toSend[bodySent..], true);
-                bodySent += sent;
-                try self.flush();
-                if (bodySent < toSend.len) {
+        const sid = try self.beginRequest(method, path, extra, scheme, authority, reqBody, maxBytes);
+        if (reqBody) |body| {
+            if (body.len > 0) {
+                var sent: usize = 0;
+                while (true) {
+                    const complete = try self.sendRequestBody(sid, body, &sent);
+                    if (complete) break;
+                    // Flow control blocked: read until the peer opens the
+                    // window (or answers early).
+                    const st = self.state(sid);
+                    if (st != null and st.?.done) break;
                     try self.pump();
                 }
             }
         }
-
-        while (!done and !self.session.closed and !self.session.goawayReceived) {
-            try self.pump();
-            if (tooLarge) return error.ResponseTooLarge;
-        }
-        if (!done) return error.StreamClosed;
-
-        return .{
-            .status = status,
-            .headers = try headers.toOwnedSlice(a),
-            .body = try body.toOwnedSlice(a),
-            .allocator = a,
-        };
+        return self.awaitResponse(sid);
     }
 };
 
@@ -397,63 +553,158 @@ pub const HandlerFn = *const fn (
     body: []const u8,
 ) anyerror!HandlerResponse;
 
-/// Per-stream accumulation; the session serializes callbacks on one
-/// thread, and responses are emitted from the main loop (never reentrant).
-const ServerCtx = struct {
-    arena: Allocator,
-    sid: u31 = 0,
+/// Optional response transformation applied after the handler returns
+/// (content coding, HEAD handling, ...).
+///
+/// The hook may:
+///   * append header fields to `extra` (the strings must stay valid
+///     until the response is written, e.g. connection-lifetime arena),
+///   * return a replacement body allocated with `allocator`; the
+///     transport takes ownership and releases it.
+pub const ResponseHook = *const fn (
+    ctx: ?*anyopaque,
+    allocator: Allocator,
+    resp: *HandlerResponse,
+    method: []const u8,
+    extra: *std.ArrayList(Header),
+) anyerror!?[]u8;
+
+pub const ServerOptions = struct {
+    handler: HandlerFn,
+    handlerCtx: ?*anyopaque = null,
+    /// Maximum accepted request body size.
+    maxBodySize: usize = MAX_REQUEST_BODY_SIZE,
+    /// Optional response transformation.
+    decorate: ?ResponseHook = null,
+};
+
+/// Per-stream server state. One entry per concurrent request.
+const ServerStream = struct {
+    sid: u31,
+    allocator: Allocator,
     method: std.ArrayList(u8) = .empty,
     path: std.ArrayList(u8) = .empty,
     hdrs: std.ArrayList(Header) = .empty,
     body: std.ArrayList(u8) = .empty,
-    dispatched: bool = false,
-    responded: bool = true, // true until HEADERS open a new request
+    /// The initial request header block was received.
+    headersSeen: bool = false,
+    /// The request side ended (END_STREAM).
+    requestEnded: bool = false,
+    /// The request body exceeded `maxBodySize`.
+    tooLarge: bool = false,
+    /// A response is queued (headers sent, body pending).
+    responsePending: bool = false,
+    /// Owned copy of the response body still to be written.
+    respBody: ?[]u8 = null,
+    respOffset: usize = 0,
+    /// The response has no body to send (HEAD, 204, 304).
+    noBody: bool = false,
 
-    fn resetFor(self: *ServerCtx, sid: u31) void {
-        self.sid = sid;
-        self.method.clearRetainingCapacity();
-        self.path.clearRetainingCapacity();
-        self.hdrs.clearRetainingCapacity();
-        self.body.clearRetainingCapacity();
-        self.dispatched = false;
-        self.responded = false;
+    fn deinit(self: *ServerStream) void {
+        self.method.deinit(self.allocator);
+        self.path.deinit(self.allocator);
+        for (self.hdrs.items) |h| {
+            self.allocator.free(h.name);
+            self.allocator.free(h.value);
+        }
+        self.hdrs.deinit(self.allocator);
+        self.body.deinit(self.allocator);
+        if (self.respBody) |b| self.allocator.free(b);
+        self.allocator.destroy(self);
+    }
+};
+
+/// Connection-wide server bookkeeping.
+const ServerCtx = struct {
+    allocator: Allocator,
+    session: *Session,
+    options: ServerOptions,
+    streams: std.AutoHashMap(u31, *ServerStream),
+    /// Streams whose request side completed and need a response.
+    ready: std.ArrayList(u31) = .empty,
+
+    fn deinit(self: *ServerCtx) void {
+        var it = self.streams.valueIterator();
+        while (it.next()) |sp| sp.*.deinit();
+        self.streams.deinit();
+        self.ready.deinit(self.allocator);
+    }
+
+    fn getOrCreate(self: *ServerCtx, sid: u31) !*ServerStream {
+        if (self.streams.get(sid)) |st| return st;
+        const st = try self.allocator.create(ServerStream);
+        st.* = .{ .sid = sid, .allocator = self.allocator };
+        try self.streams.put(sid, st);
+        return st;
+    }
+
+    fn remove(self: *ServerCtx, sid: u31) void {
+        if (self.streams.fetchRemove(sid)) |kv| kv.value.deinit();
     }
 };
 
 fn svrOnHeaders(ctx: ?*anyopaque, sid: u31, flds: []hpack.HeaderField, endStream: bool) anyerror!void {
     const s: *ServerCtx = @ptrCast(@alignCast(ctx.?));
-    s.resetFor(sid);
+    const st = try s.getOrCreate(sid);
+    if (st.headersSeen) {
+        // Trailer block: the transport API has no trailer channel, so the
+        // fields are validated (by the session) and dropped.
+        return;
+    }
+    st.headersSeen = true;
     for (flds) |f| {
         if (std.mem.eql(u8, f.name, ":method")) {
-            try s.method.appendSlice(s.arena, f.value);
+            try st.method.appendSlice(s.allocator, f.value);
         } else if (std.mem.eql(u8, f.name, ":path")) {
-            try s.path.appendSlice(s.arena, f.value);
-        } else if (!std.mem.startsWith(u8, f.name, ":")) {
-            const name = try s.arena.dupe(u8, f.name);
-            errdefer s.arena.free(name);
-            const value = try s.arena.dupe(u8, f.value);
-            s.hdrs.append(s.arena, .{
-                .name = name,
-                .value = value,
-            }) catch return error.OutOfMemory;
+            try st.path.appendSlice(s.allocator, f.value);
+        } else if (f.name.len > 0 and f.name[0] == ':') {
+            // :scheme / :authority are implied by the transport.
+        } else {
+            const name = try s.allocator.dupe(u8, f.name);
+            errdefer s.allocator.free(name);
+            const value = try s.allocator.dupe(u8, f.value);
+            errdefer s.allocator.free(value);
+            st.hdrs.append(s.allocator, .{ .name = name, .value = value }) catch |err| {
+                s.allocator.free(name);
+                s.allocator.free(value);
+                return err;
+            };
         }
     }
-    // A request with no body ends at the HEADERS frame itself.
-    if (endStream) s.dispatched = true;
+    if (endStream) try markReady(s, sid);
 }
 
 fn svrOnData(ctx: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
     const s: *ServerCtx = @ptrCast(@alignCast(ctx.?));
-    if (sid != s.sid) return;
-    if (s.body.items.len > MAX_REQUEST_BODY_SIZE -| data.len)
-        return error.RequestTooLarge;
-    try s.body.appendSlice(s.arena, data);
+    const st = try s.getOrCreate(sid);
+    if (st.tooLarge) return;
+    if (data.len > s.options.maxBodySize -| st.body.items.len) {
+        st.tooLarge = true;
+        st.body.clearRetainingCapacity();
+        return;
+    }
+    try st.body.appendSlice(s.allocator, data);
 }
 
 fn svrOnStreamEnd(ctx: ?*anyopaque, sid: u31) anyerror!void {
     const s: *ServerCtx = @ptrCast(@alignCast(ctx.?));
-    if (sid != s.sid) return;
-    s.dispatched = true;
+    const st = try s.getOrCreate(sid);
+    st.requestEnded = true;
+    try markReady(s, sid);
+}
+
+fn svrOnReset(ctx: ?*anyopaque, sid: u31, _: u32) void {
+    const s: *ServerCtx = @ptrCast(@alignCast(ctx.?));
+    s.remove(sid);
+}
+
+fn markReady(s: *ServerCtx, sid: u31) !void {
+    const st = try s.getOrCreate(sid);
+    if (!st.requestEnded) return;
+    for (s.ready.items) |existing| {
+        if (existing == sid) return;
+    }
+    try s.ready.append(s.allocator, sid);
 }
 
 /// Serves h2 requests on an established native TLS session until
@@ -466,7 +717,7 @@ pub fn serveTlsConnection(
     handlerCtx: ?*anyopaque,
 ) !void {
     var stream = Stream{ .tlsServer = tlsConn };
-    try serveStream(allocator, &stream, handler, handlerCtx);
+    try serveStream(allocator, stream.byteStream(), .{ .handler = handler, .handlerCtx = handlerCtx }, &.{});
 }
 
 /// Serves h2c requests on an accepted socket until close/GOAWAY.
@@ -477,67 +728,176 @@ pub fn serveConnection(
     handlerCtx: ?*anyopaque,
 ) !void {
     var stream = Stream{ .tcp = sock.* };
-    try serveStream(allocator, &stream, handler, handlerCtx);
+    try serveStream(allocator, stream.byteStream(), .{ .handler = handler, .handlerCtx = handlerCtx }, &.{});
 }
 
-fn serveStream(
-    allocator: Allocator,
-    stream: *Stream,
-    handler: HandlerFn,
-    handlerCtx: ?*anyopaque,
-) !void {
-    var arenaState = std.heap.ArenaAllocator.init(allocator);
-    defer arenaState.deinit();
-
+/// Multiplexed HTTP/2 server loop over an abstract byte stream.
+/// `initial` carries bytes already read from the transport (for example
+/// the connection preface sniffed by the HTTP server).
+pub fn serveStream(allocator: Allocator, io: ByteStream, options: ServerOptions, initial: []const u8) !void {
     var session = try Session.init(allocator, .server, .{});
     defer session.deinit();
     try session.startHandshake();
-    stream.writeAll(session.outbound.items) catch return error.WriteFailed;
+    io.writeAll(session.outbound.items) catch return error.WriteFailed;
     session.outbound.clearRetainingCapacity();
 
-    var sc = ServerCtx{ .arena = arenaState.allocator() };
+    var ctx = ServerCtx{
+        .allocator = allocator,
+        .session = &session,
+        .options = options,
+        .streams = std.AutoHashMap(u31, *ServerStream).init(allocator),
+    };
+    defer ctx.deinit();
     session.cbs = .{
-        .ctx = &sc,
+        .ctx = &ctx,
         .onHeaders = svrOnHeaders,
         .onData = svrOnData,
         .onStreamEnd = svrOnStreamEnd,
+        .onReset = svrOnReset,
     };
 
-    var buf: [16 * 1024]u8 = undefined;
-    while (!session.closed and !session.goawayReceived) {
-        const n = stream.read(&buf) catch break;
-        if (n == 0) break;
-        session.feed(buf[0..n]) catch break;
-
-        if (sc.dispatched and !sc.responded) {
-            sc.responded = true;
-            const resp = handler(
-                handlerCtx,
-                sc.method.items,
-                sc.path.items,
-                sc.hdrs.items,
-                sc.body.items,
-            ) catch HandlerResponse{ .status = 500 };
-
-            var outFields = std.ArrayList(hpack.HeaderField).empty;
-            defer outFields.deinit(allocator);
-            var stBuf: [8]u8 = undefined;
-            var clBuf: [8]u8 = undefined;
-            const st = std.fmt.bufPrint(&stBuf, "{d}", .{resp.status}) catch "500";
-            const cl = std.fmt.bufPrint(&clBuf, "{d}", .{resp.body.len}) catch "0";
-            outFields.append(allocator, .{ .name = ":status", .value = st }) catch break;
-            outFields.append(allocator, .{ .name = "content-length", .value = cl }) catch break;
-            for (resp.headers) |h| {
-                outFields.append(allocator, .{ .name = h.name, .value = h.value }) catch break;
+    if (initial.len > 0) {
+        session.feed(initial) catch |err| {
+            if (session.outbound.items.len > 0) {
+                io.writeAll(session.outbound.items) catch {};
+                session.outbound.clearRetainingCapacity();
             }
+            return err;
+        };
+    }
 
-            session.sendHeaders(sc.sid, outFields.items, false) catch break;
-            _ = session.sendData(sc.sid, resp.body, true) catch break;
+    var buf: [16 * 1024]u8 = undefined;
+    while (!session.closed) {
+        // 1. Answer every request whose input side is complete.
+        try dispatchReady(&ctx);
+        // 2. Push out queued response bodies as the windows allow.
+        try drainResponses(&ctx);
+        // 3. Flush control frames (SETTINGS ACK, WINDOW_UPDATE, RST, ...).
+        if (session.outbound.items.len > 0) {
+            io.writeAll(session.outbound.items) catch return error.WriteFailed;
+            session.outbound.clearRetainingCapacity();
+        }
+        // 4. Read more input.
+        const n = io.read(&buf) catch break;
+        if (n == 0) break;
+        session.feed(buf[0..n]) catch |err| {
+            // A protocol violation queues a GOAWAY: send it before the
+            // socket goes away so the peer learns the reason.
+            if (session.outbound.items.len > 0) {
+                io.writeAll(session.outbound.items) catch {};
+                session.outbound.clearRetainingCapacity();
+            }
+            return err;
+        };
+    }
+}
+
+/// Builds and sends the response for every completed request.
+fn dispatchReady(ctx: *ServerCtx) !void {
+    while (ctx.ready.items.len > 0) {
+        const sid = ctx.ready.orderedRemove(0);
+        const st = ctx.streams.get(sid) orelse continue;
+        if (st.responsePending) continue;
+
+        var resp: HandlerResponse = undefined;
+        if (st.tooLarge) {
+            resp = .{ .status = 413 };
+        } else {
+            resp = ctx.options.handler(
+                ctx.options.handlerCtx,
+                st.method.items,
+                st.path.items,
+                st.hdrs.items,
+                st.body.items,
+            ) catch HandlerResponse{ .status = 500 };
         }
 
-        if (session.outbound.items.len > 0) {
-            stream.writeAll(session.outbound.items) catch break;
-            session.outbound.clearRetainingCapacity();
+        const isHead = std.ascii.eqlIgnoreCase(st.method.items, "HEAD");
+
+        var fields = std.ArrayList(hpack.HeaderField).empty;
+        defer fields.deinit(ctx.allocator);
+        var extra = std.ArrayList(Header).empty;
+        defer extra.deinit(ctx.allocator);
+
+        if (ctx.options.decorate) |hook| {
+            const owned = hook(ctx.options.handlerCtx, ctx.allocator, &resp, st.method.items, &extra) catch null;
+            if (owned) |b| {
+                // The transport owns the replacement body.
+                defer ctx.allocator.free(b);
+                resp.body = b;
+            }
+        }
+
+        // The decorator may change the status, so the body rules are
+        // evaluated after it ran.
+        const statusAllowsBody = resp.status != 204 and resp.status != 304 and resp.status >= 200;
+
+        var stBuf: [8]u8 = undefined;
+        const statusStr = std.fmt.bufPrint(&stBuf, "{d}", .{resp.status}) catch "500";
+        try fields.append(ctx.allocator, .{ .name = ":status", .value = statusStr });
+        if (statusAllowsBody) {
+            var clBuf: [20]u8 = undefined;
+            const cl = clBuf[0..std.fmt.printInt(&clBuf, resp.body.len, 10, .lower, .{})];
+            try fields.append(ctx.allocator, .{ .name = "content-length", .value = cl });
+        }
+        for (resp.headers) |h| try appendResponseHeader(ctx, &fields, h);
+        for (extra.items) |h| try appendResponseHeader(ctx, &fields, h);
+
+        const sendBody = statusAllowsBody and !isHead and resp.body.len > 0;
+        if (!sendBody) {
+            // HEAD/204/304: the headers carry the length, the stream ends.
+            try ctx.session.sendHeaders(sid, fields.items, true);
+            st.responsePending = true;
+            st.noBody = true;
+            continue;
+        }
+
+        try ctx.session.sendHeaders(sid, fields.items, false);
+        st.responsePending = true;
+        // The handler's buffer may be arena-backed, so the body is copied
+        // before the handler returns to its caller.
+        const owned = try ctx.allocator.dupe(u8, resp.body);
+        st.respBody = owned;
+        st.respOffset = 0;
+    }
+}
+
+/// Appends one response header, dropping the fields the server owns
+/// (pseudo-headers and content-length are generated above).
+fn appendResponseHeader(ctx: *ServerCtx, fields: *std.ArrayList(hpack.HeaderField), h: Header) !void {
+    if (h.name.len == 0) return;
+    if (h.name[0] == ':') return;
+    if (std.ascii.eqlIgnoreCase(h.name, "content-length")) return;
+    if (std.ascii.eqlIgnoreCase(h.name, "connection")) return;
+    if (std.ascii.eqlIgnoreCase(h.name, "transfer-encoding")) return;
+    if (std.ascii.eqlIgnoreCase(h.name, "keep-alive")) return;
+    if (std.ascii.eqlIgnoreCase(h.name, "upgrade")) return;
+    if (std.ascii.eqlIgnoreCase(h.name, "proxy-connection")) return;
+    try fields.append(ctx.allocator, .{ .name = h.name, .value = h.value });
+}
+
+/// Writes queued response bodies, respecting the flow-control windows.
+fn drainResponses(ctx: *ServerCtx) !void {
+    var it = ctx.streams.valueIterator();
+    while (it.next()) |sp| {
+        const st = sp.*;
+        if (!st.responsePending or st.noBody) continue;
+        const body = st.respBody orelse continue;
+        if (st.respOffset >= body.len) {
+            // Everything was written: the last DATA frame carried
+            // END_STREAM, so the stream is done.
+            ctx.allocator.free(body);
+            st.respBody = null;
+            ctx.remove(st.sid);
+            continue;
+        }
+        const n = try ctx.session.sendData(st.sid, body[st.respOffset..], true);
+        st.respOffset += n;
+        if (n == 0) continue; // window exhausted; wait for WINDOW_UPDATE
+        if (st.respOffset >= body.len) {
+            ctx.allocator.free(body);
+            st.respBody = null;
+            ctx.remove(st.sid);
         }
     }
 }
@@ -714,4 +1074,224 @@ test "http2 over native tls loopback negotiates h2 via alpn" {
 
     thread.join();
     try std.testing.expect(result == null);
+}
+
+test "two requests are multiplexed over one connection" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const Header, _: []const u8) anyerror!HandlerResponse {
+            if (!std.mem.eql(u8, method, "GET")) return .{ .status = 405 };
+            if (std.mem.eql(u8, path, "/slow")) return .{ .status = 200, .body = "slow-response" };
+            if (std.mem.eql(u8, path, "/fast")) return .{ .status = 200, .body = "fast-response" };
+            return .{ .status = 404 };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io: std.Io) void {
+            var conn = lst.accept(io) catch return;
+            defer conn.close();
+            serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    defer thread.join();
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+    var hc = Client.connect(a, sock) catch |err| {
+        sock.close();
+        return err;
+    };
+    defer hc.deinit();
+
+    // Both requests are in flight before either response is read.
+    const slow = try hc.beginRequest("GET", "/slow", &[_]Header{}, "http", "localhost", null, maxResponseBodySize);
+    const fast = try hc.beginRequest("GET", "/fast", &[_]Header{}, "http", "localhost", null, maxResponseBodySize);
+    try std.testing.expect(slow != fast);
+
+    const r1 = try hc.awaitResponse(slow);
+    defer r1.deinit();
+    const r2 = try hc.awaitResponse(fast);
+    defer r2.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), r1.status);
+    try std.testing.expectEqualStrings("slow-response", r1.body);
+    try std.testing.expectEqual(@as(u16, 200), r2.status);
+    try std.testing.expectEqualStrings("fast-response", r2.body);
+}
+
+test "a response larger than the flow-control window is delivered completely" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const payload_len = 200 * 1024;
+    // The response body must stay valid until the transport copied it,
+    // so it lives in a static buffer.
+    const H = struct {
+        var body: [payload_len]u8 = undefined;
+        fn handle(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const Header, _: []const u8) anyerror!HandlerResponse {
+            // A body larger than the 65535-byte window: the server has to
+            // wait for WINDOW_UPDATE frames.
+            @memset(&body, 'z');
+            return .{ .status = 200, .body = &body };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io: std.Io) void {
+            var conn = lst.accept(io) catch return;
+            defer conn.close();
+            serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    defer thread.join();
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+    var hc = Client.connect(a, sock) catch |err| {
+        sock.close();
+        return err;
+    };
+    defer hc.deinit();
+
+    const r = try hc.request("GET", "/big", &[_]Header{}, "http", "localhost", null, maxResponseBodySize);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(u16, 200), r.status);
+    try std.testing.expectEqual(@as(usize, payload_len), r.body.len);
+    for (r.body) |c| try std.testing.expectEqual(@as(u8, 'z'), c);
+}
+
+test "an empty response body ends the stream" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, _: []const u8, path: []const u8, _: []const Header, _: []const u8) anyerror!HandlerResponse {
+            if (std.mem.eql(u8, path, "/empty")) return .{ .status = 204 };
+            return .{ .status = 200, .body = "x" };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io: std.Io) void {
+            var conn = lst.accept(io) catch return;
+            defer conn.close();
+            serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    defer thread.join();
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+    var hc = Client.connect(a, sock) catch |err| {
+        sock.close();
+        return err;
+    };
+    defer hc.deinit();
+
+    const r = try hc.request("GET", "/empty", &[_]Header{}, "http", "localhost", null, maxResponseBodySize);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(u16, 204), r.status);
+    try std.testing.expectEqual(@as(usize, 0), r.body.len);
+}
+
+test "a HEAD request returns the headers without a body" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, method: []const u8, _: []const u8, _: []const Header, _: []const u8) anyerror!HandlerResponse {
+            if (std.mem.eql(u8, method, "HEAD")) return .{ .status = 200, .body = "0123456789" };
+            return .{ .status = 405 };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io: std.Io) void {
+            var conn = lst.accept(io) catch return;
+            defer conn.close();
+            serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    defer thread.join();
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+    var hc = Client.connect(a, sock) catch |err| {
+        sock.close();
+        return err;
+    };
+    defer hc.deinit();
+
+    const r = try hc.request("HEAD", "/doc", &[_]Header{}, "http", "localhost", null, maxResponseBodySize);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(u16, 200), r.status);
+    try std.testing.expectEqual(@as(usize, 0), r.body.len);
+    var sawLength = false;
+    for (r.headers) |h| {
+        if (std.mem.eql(u8, h.name, "content-length")) {
+            sawLength = true;
+            try std.testing.expectEqualStrings("10", h.value);
+        }
+    }
+    try std.testing.expect(sawLength);
+}
+
+test "a request body larger than the flow-control window is sent completely" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const Header, body: []const u8) anyerror!HandlerResponse {
+            return .{ .status = 200, .body = body };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io: std.Io) void {
+            var conn = lst.accept(io) catch return;
+            defer conn.close();
+            serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    defer thread.join();
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+    var hc = Client.connect(a, sock) catch |err| {
+        sock.close();
+        return err;
+    };
+    defer hc.deinit();
+
+    const payload = try a.alloc(u8, 150 * 1024);
+    defer a.free(payload);
+    @memset(payload, 'q');
+
+    const r = try hc.request("POST", "/echo", &[_]Header{}, "http", "localhost", payload, maxResponseBodySize);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, payload.len), r.body.len);
+    for (r.body) |c| try std.testing.expectEqual(@as(u8, 'q'), c);
 }

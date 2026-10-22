@@ -100,6 +100,14 @@ pub const Stream = struct {
     endHeaders: bool = false,
     endStreamSent: bool = false,
     endStreamRecv: bool = false,
+    /// Number of HEADERS blocks sent/received on this stream (initial or trailers).
+    headersSent: u8 = 0,
+    headersRecv: u8 = 0,
+    /// A header block for a closed/refused stream that must still be
+    /// decoded to keep the connection-wide HPACK context synchronized.
+    discardHeaders: bool = false,
+    /// This stream holds one of the connection's concurrency slots.
+    countedSlot: bool = false,
     resetByUs: bool = false,
     resetCode: u32 = 0,
 
@@ -227,11 +235,13 @@ pub const Stream = struct {
         return self.sendWindow >= -MAX_WINDOW_DELTA;
     }
 
+    /// Flow-control credit accounting. Returns false when the peer used
+    /// more than the advertised window (a stream error of type
+    /// FLOW_CONTROL_ERROR, RFC 9113 Section 6.9.1).
     pub fn consumeRecv(self: *Stream, n: i64) bool {
         self.recvWindow -= n;
         self.recvPending += n;
-        // Overflow beyond -(2^31-1) is FLOW_CONTROL_ERROR at the receiver.
-        return self.recvWindow >= -MAX_WINDOW_DELTA;
+        return self.recvWindow >= 0;
     }
 };
 

@@ -1362,13 +1362,29 @@ pub const Server = struct {
     }
 
     fn serveHttp2Connection(self: *Server, conn: StreamConn, isTlsConn: bool, initial: []const u8) !void {
+        const transportMod = @import("../protocols/http2/transport.zig");
+
+        // Per-connection state shared by the request handler and the
+        // response decorator.
+        const H2Ctx = struct {
+            server: *Server,
+            isTls: bool,
+            arena: std.heap.ArenaAllocator,
+        };
+
+        var h2ctx = H2Ctx{
+            .server = self,
+            .isTls = isTlsConn,
+            .arena = std.heap.ArenaAllocator.init(self.allocator),
+        };
+        defer h2ctx.arena.deinit();
+
         const H2Bridge = struct {
-            fn handle(respAlloc: Allocator, ctxPtr: ?*anyopaque, isTlsFlag: bool, mStr: []const u8, pStr: []const u8, hdrs: []const @import("../protocols/http2/transport.zig").Header, bStr: []const u8) anyerror!@import("../protocols/http2/transport.zig").HandlerResponse {
-                const serverPtr: *Server = @ptrCast(@alignCast(ctxPtr.?));
+            fn handle(ctxPtr: ?*anyopaque, mStr: []const u8, pStr: []const u8, hdrs: []const transportMod.Header, bStr: []const u8) anyerror!transportMod.HandlerResponse {
+                const c: *H2Ctx = @ptrCast(@alignCast(ctxPtr.?));
+                const serverPtr = c.server;
                 const method = Method.fromString(mStr) orelse .GET;
-                var arenaH2 = std.heap.ArenaAllocator.init(serverPtr.allocator);
-                defer arenaH2.deinit();
-                const a = arenaH2.allocator();
+                const a = c.arena.allocator();
 
                 var ctxHdrs = try a.alloc(routerMod.Header, hdrs.len);
                 for (hdrs, 0..) |h, i| ctxHdrs[i] = .{ .name = h.name, .value = h.value };
@@ -1392,29 +1408,28 @@ pub const Server = struct {
                     .query = queryPart,
                     .method = method,
                     .body = bStr,
-                    .isTls = isTlsFlag,
+                    .isTls = c.isTls,
                     .trustForwarded = serverPtr.cfg.trustForwardedHeaders,
                 };
 
                 // Full pipeline: match + router/route middleware + 404/405 +
                 // auto-OPTIONS, exactly like HTTP/1.
                 const res = serverPtr.router.dispatch(&ctx);
-                // res borrows from arenaH2 (freed on return) or static data:
-                // duplicate into respAlloc (connection lifetime) so the
-                // caller can send after we return.
-                const outBody = try respAlloc.dupe(u8, res.body);
+                // The response is copied into the connection arena: the
+                // transport sends it after this callback returns.
+                const outBody = try a.dupe(u8, res.body);
                 const extra: usize = if (res.contentType != null) 1 else 0;
-                var outHdrs = try respAlloc.alloc(@import("../protocols/http2/transport.zig").Header, res.headers.len + extra);
+                var outHdrs = try a.alloc(transportMod.Header, res.headers.len + extra);
                 for (res.headers, 0..) |h, i| {
                     outHdrs[i] = .{
-                        .name = try respAlloc.dupe(u8, h.name),
-                        .value = try respAlloc.dupe(u8, h.value),
+                        .name = try a.dupe(u8, h.name),
+                        .value = try a.dupe(u8, h.value),
                     };
                 }
                 if (res.contentType) |ct| {
                     outHdrs[outHdrs.len - 1] = .{
                         .name = "content-type",
-                        .value = try respAlloc.dupe(u8, ct),
+                        .value = try a.dupe(u8, ct),
                     };
                 }
                 return .{
@@ -1423,179 +1438,76 @@ pub const Server = struct {
                     .body = outBody,
                 };
             }
-        };
 
-        // Initialize HTTP/2 session
-        var session = try @import("../protocols/http2/connection.zig").Session.init(self.allocator, .server, .{});
-        session.localSettings.maxHeaderListSize = 64 * 1024;
-        session.hdec.maxHeaderList = 64 * 1024;
-        defer session.deinit();
-        try session.startHandshake();
-        conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
-        conn.writeAll(session.outbound.items) catch return error.WriteFailed;
-        session.outbound.clearRetainingCapacity();
-
-        if (initial.len > 0) {
-            try session.feed(initial);
-        }
-
-        var arenaState = std.heap.ArenaAllocator.init(self.allocator);
-        defer arenaState.deinit();
-        const transportMod = @import("../protocols/http2/transport.zig");
-
-        // ServerCtx accumulates streams
-        var sc = struct {
-            arena: Allocator,
-            sid: u31 = 0,
-            method: std.ArrayList(u8) = .empty,
-            path: std.ArrayList(u8) = .empty,
-            hdrs: std.ArrayList(transportMod.Header) = .empty,
-            body: std.ArrayList(u8) = .empty,
-            bodyTooLarge: bool = false,
-            maxBody: usize,
-            dispatched: bool = false,
-            responded: bool = true,
-
-            fn resetFor(s: *@This(), sid: u31) void {
-                s.sid = sid;
-                s.method.clearRetainingCapacity();
-                s.path.clearRetainingCapacity();
-                s.hdrs.clearRetainingCapacity();
-                s.body.clearRetainingCapacity();
-                s.bodyTooLarge = false;
-                s.dispatched = false;
-                s.responded = false;
-            }
-
-            fn onHeaders(ctxP: ?*anyopaque, sid: u31, flds: []@import("../protocols/http2/hpack.zig").HeaderField, endStream: bool) anyerror!void {
-                const s: *@This() = @ptrCast(@alignCast(ctxP.?));
-                s.resetFor(sid);
-                for (flds) |f| {
-                    if (std.mem.eql(u8, f.name, ":method")) {
-                        try s.method.appendSlice(s.arena, f.value);
-                    } else if (std.mem.eql(u8, f.name, ":path")) {
-                        try s.path.appendSlice(s.arena, f.value);
-                    } else if (!std.mem.startsWith(u8, f.name, ":")) {
-                        const name = try s.arena.dupe(u8, f.name);
-                        const value = try s.arena.dupe(u8, f.value);
-                        try s.hdrs.append(s.arena, .{ .name = name, .value = value });
-                    }
-                }
-                if (endStream) s.dispatched = true;
-            }
-
-            fn onData(ctxP: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
-                const s: *@This() = @ptrCast(@alignCast(ctxP.?));
-                if (sid != s.sid) return;
-                if (data.len > s.maxBody -| s.body.items.len) {
-                    s.bodyTooLarge = true;
-                    return;
-                }
-                try s.body.appendSlice(s.arena, data);
-            }
-
-            fn onStreamEnd(ctxP: ?*anyopaque, sid: u31) anyerror!void {
-                const s: *@This() = @ptrCast(@alignCast(ctxP.?));
-                if (sid == s.sid) s.dispatched = true;
-            }
-        }{ .arena = arenaState.allocator(), .maxBody = self.cfg.maxBody };
-
-        session.cbs = .{
-            .ctx = &sc,
-            .onHeaders = @TypeOf(sc).onHeaders,
-            .onData = @TypeOf(sc).onData,
-            .onStreamEnd = @TypeOf(sc).onStreamEnd,
-        };
-
-        var buf: [16 * 1024]u8 = undefined;
-        while (!session.closed and !session.goawayReceived) {
-            if (session.outbound.items.len > 0) {
-                conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
-                conn.writeAll(session.outbound.items) catch break;
-                session.outbound.clearRetainingCapacity();
-            }
-            if (sc.dispatched and !sc.responded) {
-                sc.responded = true;
-                var resp = if (sc.bodyTooLarge)
-                    transportMod.HandlerResponse{ .status = 413 }
-                else
-                    H2Bridge.handle(arenaState.allocator(), self, isTlsConn, sc.method.items, sc.path.items, sc.hdrs.items, sc.body.items) catch transportMod.HandlerResponse{ .status = 500 };
-
-                // The same content coding the HTTP/1 path applies, so one
-                // handler behaves identically across protocol versions.
-                const isHead = std.ascii.eqlIgnoreCase(sc.method.items, "HEAD");
+            /// Applies the same content coding the HTTP/1 path uses, so
+            /// one handler behaves identically across protocol versions.
+            fn decorate(ctxPtr: ?*anyopaque, allocator: Allocator, resp: *transportMod.HandlerResponse, method: []const u8, extra: *std.ArrayList(transportMod.Header)) anyerror!?[]u8 {
+                const c: *H2Ctx = @ptrCast(@alignCast(ctxPtr.?));
+                const serverPtr = c.server;
+                const isHead = std.ascii.eqlIgnoreCase(method, "HEAD");
                 var clientAcceptEncoding: ?[]const u8 = null;
-                for (sc.hdrs.items) |h| {
+                for (resp.headers) |h| {
                     if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) clientAcceptEncoding = h.value;
                 }
+                if (isHead or resp.status == 204 or resp.status == 304) return null;
 
-                const arena = arenaState.allocator();
-                var codedBody: ?[]u8 = null;
-                defer if (codedBody) |b| arena.free(b);
-                var outBody: []const u8 = resp.body;
-                var contentEncoding: ?[]const u8 = null;
-                var varyAcceptEncoding = false;
-                if (!isHead and resp.status != 204 and resp.status != 304) {
-                    const coding = compression.encodeResponseBody(
-                        arena,
-                        resp.body,
-                        clientAcceptEncoding,
-                        self.cfg.compression,
-                        self.cfg.maxCompressionInput,
-                    ) catch |err| switch (err) {
-                        error.NotAcceptable => blk: {
-                            resp.status = 406;
-                            resp.body = "";
-                            outBody = "";
-                            break :blk null;
-                        },
-                        else => return err,
-                    };
-                    if (coding) |c| {
-                        outBody = c.body;
-                        codedBody = if (c.contentEncoding != null) @constCast(c.body) else null;
-                        contentEncoding = c.contentEncoding;
-                        varyAcceptEncoding = c.varyAcceptEncoding;
-                    }
+                const coding = compression.encodeResponseBody(
+                    allocator,
+                    resp.body,
+                    clientAcceptEncoding,
+                    serverPtr.cfg.compression,
+                    serverPtr.cfg.maxCompressionInput,
+                ) catch |err| switch (err) {
+                    error.NotAcceptable => {
+                        resp.status = 406;
+                        resp.body = "";
+                        resp.headers = &.{};
+                        return null;
+                    },
+                    else => return err,
+                };
+                if (coding.contentEncoding) |ce| {
+                    try extra.append(allocator, .{ .name = "content-encoding", .value = ce });
                 }
-
-                var outFields = std.ArrayList(@import("../protocols/http2/hpack.zig").HeaderField).empty;
-                defer outFields.deinit(self.allocator);
-                var stBuf: [8]u8 = undefined;
-                var clBuf: [20]u8 = undefined;
-                const st = std.fmt.bufPrint(&stBuf, "{d}", .{resp.status}) catch "500";
-                // content-length must describe the bytes actually sent, so it
-                // is derived after coding, never from the handler's body.
-                const cl = clBuf[0..std.fmt.printInt(&clBuf, outBody.len, 10, .lower, .{})];
-                try outFields.append(self.allocator, .{ .name = ":status", .value = st });
-                try outFields.append(self.allocator, .{ .name = "content-length", .value = cl });
-                if (contentEncoding) |ce| {
-                    try outFields.append(self.allocator, .{ .name = "content-encoding", .value = ce });
+                if (coding.varyAcceptEncoding) {
+                    try extra.append(allocator, .{ .name = "vary", .value = "Accept-Encoding" });
                 }
-                if (varyAcceptEncoding) try outFields.append(self.allocator, .{ .name = "vary", .value = "Accept-Encoding" });
-                for (resp.headers) |h| {
-                    try outFields.append(self.allocator, .{ .name = h.name, .value = h.value });
-                }
-
-                try session.sendHeaders(sc.sid, outFields.items, outBody.len == 0);
-                // HEAD responses carry headers (with content-length) but no
-                // DATA frames, mirroring the HTTP/1 transport.
-                if (outBody.len > 0 and !isHead) {
-                    _ = try session.sendData(sc.sid, outBody, true);
-                } else if (isHead and outBody.len > 0) {
-                    _ = try session.sendData(sc.sid, "", true);
-                }
-                if (session.outbound.items.len > 0) {
-                    conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
-                    conn.writeAll(session.outbound.items) catch break;
-                    session.outbound.clearRetainingCapacity();
-                }
+                // Only a coded body is a fresh allocation; the identity
+                // path borrows the handler's buffer.
+                if (coding.contentEncoding == null) return null;
+                return @constCast(coding.body);
             }
-            conn.setReadTimeoutMs(self.cfg.keepAliveIdleTimeoutMs);
-            const n = conn.read(&buf) catch break;
-            if (n == 0) break;
-            session.feed(buf[0..n]) catch break;
-        }
+        };
+
+        // The shared transport implements the multiplexed HTTP/2 server:
+        // one state per concurrent stream, per-stream responses, and
+        // flow-controlled bodies that resume on WINDOW_UPDATE.
+        const H2Io = struct {
+            conn: StreamConn,
+            fn read(ctxPtr: ?*anyopaque, buf: []u8) anyerror!usize {
+                const s: *@This() = @ptrCast(@alignCast(ctxPtr.?));
+                return s.conn.read(buf);
+            }
+            fn writeAll(ctxPtr: ?*anyopaque, bytes: []const u8) anyerror!void {
+                const s: *@This() = @ptrCast(@alignCast(ctxPtr.?));
+                return s.conn.writeAll(bytes);
+            }
+        };
+        var h2io = H2Io{ .conn = conn };
+
+        conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
+        conn.setReadTimeoutMs(self.cfg.keepAliveIdleTimeoutMs);
+
+        try transportMod.serveStream(self.allocator, .{
+            .ctx = &h2io,
+            .readFn = H2Io.read,
+            .writeAllFn = H2Io.writeAll,
+        }, .{
+            .handler = H2Bridge.handle,
+            .handlerCtx = &h2ctx,
+            .maxBodySize = self.cfg.maxBody,
+            .decorate = H2Bridge.decorate,
+        }, initial);
     }
 
     fn runHttp3Loop(self: *Server) void {
