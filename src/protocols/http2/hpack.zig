@@ -29,8 +29,6 @@ pub const Error = pint.Error || huff.Error || error{
 pub const DEFAULT_TABLE_SIZE: usize = 4096;
 /// Per-entry size overhead (RFC 7541 Section 4.1).
 pub const ENTRY_OVERHEAD: usize = 32;
-/// Hard cap on a single name/value length (DoS bound, mirrors nghttp2).
-pub const MAX_STRING_LEN: usize = 65536;
 
 // Static table (RFC 7541 Appendix A) — indices are 1-based on the wire.
 
@@ -177,10 +175,10 @@ pub const Decoder = struct {
     protocolMaxSize: usize = DEFAULT_TABLE_SIZE,
     /// Smallest size the peer advertised since the last header block.
     /// The first table size update of the next block must not exceed it
-    /// (nghttp2 tracks the same minimum).
+    /// (RFC 7541 Section 4.2).
     pendingMinSize: ?usize = null,
-    /// Set when peer shrinks below current max: next block MUST open with
-    /// a table size update (RFC 7541 Section 4.2 via nghttp2 behavior).
+    /// Set when the peer shrinks below the current maximum: the next block
+    /// MUST open with a table size update (RFC 7541 Section 4.2).
     requireSizeUpdate: bool = false,
     maxHeaderList: usize = 0xFFFFFFFF,
 
@@ -221,7 +219,6 @@ pub const Decoder = struct {
         if (offset.* >= data.len) return Error.Truncated;
         const huffmanBit = data[offset.*] & 0x80 != 0;
         const len = try pint.decode(data, offset, 7);
-        if (len > MAX_STRING_LEN) return Error.HeaderTooLarge;
         const rawLen = std.math.cast(usize, len) orelse return Error.HeaderTooLarge;
         if (offset.* > data.len or rawLen > data.len - offset.*) return Error.Truncated;
         const raw = data[offset.*..][0..rawLen];
@@ -260,6 +257,9 @@ pub const Decoder = struct {
         fields: []HeaderField,
         /// Total decompressed list size for SETTINGS_MAX_HEADER_LIST_SIZE checks.
         totalSize: usize,
+        /// The decoded list exceeded the configured budget. Decoding still
+        /// completed so the dynamic table stays synchronized with the peer.
+        tooLarge: bool = false,
     };
 
     /// Decodes one complete header block fragment chain (already assembled).
@@ -274,6 +274,7 @@ pub const Decoder = struct {
         }
 
         var total: usize = 0;
+        var tooLarge = false;
         var offset: usize = 0;
         var atStart = true;
 
@@ -284,8 +285,15 @@ pub const Decoder = struct {
                 // 1xxxxxxx: indexed header field.
                 const idx = try pint.decode(block, &offset, 7);
                 const f = try self.lookup(idx);
-                try appendOwned(&list, self.allocator, f);
-                total = std.math.add(usize, total, ENTRY_OVERHEAD + f.name.len + f.value.len) catch return Error.HeaderTooLarge;
+                total = addSize(total, f) catch blk: {
+                    tooLarge = true;
+                    break :blk std.math.maxInt(usize);
+                };
+                if (!tooLarge and total <= self.maxHeaderList) {
+                    try appendOwned(&list, self.allocator, f);
+                } else {
+                    tooLarge = true;
+                }
                 atStart = false;
             } else if (b & 0xC0 == 0x40) {
                 // 01xxxxxx: literal WITH incremental indexing.
@@ -296,8 +304,15 @@ pub const Decoder = struct {
                     self.allocator.free(f.value);
                 }
                 self.dyn.insert(f.name, f.value) catch return Error.OutOfMemory;
-                try appendDup(&list, self.allocator, f);
-                total = std.math.add(usize, total, ENTRY_OVERHEAD + f.name.len + f.value.len) catch return Error.HeaderTooLarge;
+                total = addSize(total, f) catch blk: {
+                    tooLarge = true;
+                    break :blk std.math.maxInt(usize);
+                };
+                if (!tooLarge and total <= self.maxHeaderList) {
+                    try appendDup(&list, self.allocator, f);
+                } else {
+                    tooLarge = true;
+                }
                 atStart = false;
             } else if (b & 0xE0 == 0x20) {
                 // 001xxxxx: dynamic table size update.
@@ -318,11 +333,17 @@ pub const Decoder = struct {
                     self.allocator.free(f.name);
                     self.allocator.free(f.value);
                 }
-                try appendDup(&list, self.allocator, f);
-                total = std.math.add(usize, total, ENTRY_OVERHEAD + f.name.len + f.value.len) catch return Error.HeaderTooLarge;
+                total = addSize(total, f) catch blk: {
+                    tooLarge = true;
+                    break :blk std.math.maxInt(usize);
+                };
+                if (!tooLarge and total <= self.maxHeaderList) {
+                    try appendDup(&list, self.allocator, f);
+                } else {
+                    tooLarge = true;
+                }
                 atStart = false;
             }
-            if (total > self.maxHeaderList) return Error.HeaderTooLarge;
         }
 
         if (self.requireSizeUpdate) return Error.UnexpectedTableSizeUpdate;
@@ -330,7 +351,12 @@ pub const Decoder = struct {
         return .{
             .fields = try list.toOwnedSlice(self.allocator),
             .totalSize = total,
+            .tooLarge = tooLarge,
         };
+    }
+
+    fn addSize(total: usize, f: HeaderField) !usize {
+        return std.math.add(usize, total, ENTRY_OVERHEAD + f.name.len + f.value.len);
     }
 
     fn readLiteral(self: *Decoder, block: []const u8, offset: *usize, nameIndex: u64) Error!HeaderField {
@@ -382,10 +408,10 @@ pub const Encoder = struct {
     pendingSizeUpdate: ?usize = null,
     /// Smallest size requested since the last block. RFC 7541 Section 4.2
     /// requires signaling the minimum first when a shrink/grow pair lands
-    /// between two header blocks (nghttp2 does the same).
+    /// between two header blocks.
     pendingMinSize: ?usize = null,
 
-    /// Names that nghttp2 avoids indexing (volatile per-request values).
+    /// Volatile per-request values that are poor dynamic-table candidates.
     const noIndexNames = [_][]const u8{
         ":path",             "age",           "content-length", "etag",
         "if-modified-since", "if-none-match", "location",       "set-cookie",
@@ -879,7 +905,48 @@ test "the header list budget is enforced while decoding" {
         0x0d, 'c',  'u', 's', 't', 'o', 'm', '-', 'h', 'e', 'a', 'd',
         'e',  'r',
     };
-    try std.testing.expectError(Error.HeaderTooLarge, d.decode(&block));
+    const res = try d.decode(&block);
+    defer {
+        for (res.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(res.fields);
+    }
+    try std.testing.expect(res.tooLarge);
+    try std.testing.expectEqual(@as(usize, 0), res.fields.len);
+    // The oversized entry was still inserted; skipping it would desync
+    // the connection-wide dynamic table.
+    try std.testing.expectEqual(@as(usize, 1), d.dyn.entries.items.len);
+}
+
+test "an oversized field still populates the dynamic table for later blocks" {
+    const a = std.testing.allocator;
+    var d = Decoder.init(a);
+    defer d.deinit();
+    d.maxHeaderList = 32;
+    const first = [_]u8{
+        0x40, 0x0a, 'c', 'u', 's', 't', 'o', 'm', '-', 'k', 'e', 'y',
+        0x0d, 'c',  'u', 's', 't', 'o', 'm', '-', 'h', 'e', 'a', 'd',
+        'e',  'r',
+    };
+    const r1 = try d.decode(&first);
+    a.free(r1.fields);
+    try std.testing.expect(r1.tooLarge);
+
+    d.maxHeaderList = 100;
+    const r2 = try d.decode(&[_]u8{0xBE});
+    defer {
+        for (r2.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(r2.fields);
+    }
+    try std.testing.expect(!r2.tooLarge);
+    try std.testing.expectEqual(@as(usize, 1), r2.fields.len);
+    try std.testing.expectEqualStrings("custom-key", r2.fields[0].name);
+    try std.testing.expectEqualStrings("custom-header", r2.fields[0].value);
 }
 
 test "huffman encoded strings decode to the exact bytes" {

@@ -300,9 +300,50 @@ pub const Client = struct {
         });
 
         var qextra = std.ArrayList(h3qpack.FieldLine).empty;
-        defer qextra.deinit(a);
-        for (extra) |h| try qextra.append(a, .{ .name = h.name, .value = h.value });
+        defer {
+            for (qextra.items) |f| a.free(f.name);
+            qextra.deinit(a);
+        }
+        const bodyLen: ?u64 = if (body) |b| b.len else null;
+        for (extra) |h| {
+            if (h.name.len == 0 or h.name[0] == ':') continue;
+            if (std.ascii.eqlIgnoreCase(h.name, "connection") or
+                std.ascii.eqlIgnoreCase(h.name, "keep-alive") or
+                std.ascii.eqlIgnoreCase(h.name, "proxy-connection") or
+                std.ascii.eqlIgnoreCase(h.name, "transfer-encoding") or
+                std.ascii.eqlIgnoreCase(h.name, "upgrade"))
+            {
+                continue;
+            }
+            if (std.ascii.eqlIgnoreCase(h.name, "te") and
+                !std.ascii.eqlIgnoreCase(h.value, "trailers"))
+            {
+                continue;
+            }
+            if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
+                const declared = std.fmt.parseInt(u64, h.value, 10) catch return error.ProtocolViolation;
+                if (bodyLen) |actual| {
+                    if (declared != actual) return error.ProtocolViolation;
+                } else if (declared != 0) {
+                    return error.ProtocolViolation;
+                }
+                // The transport emits the authoritative value below.
+                continue;
+            }
+            const lower = try a.alloc(u8, h.name.len);
+            errdefer a.free(lower);
+            for (h.name, 0..) |c, i| lower[i] = std.ascii.toLower(c);
+            try qextra.append(a, .{ .name = lower, .value = h.value });
+        }
+        if (bodyLen) |n| {
+            var clBuf: [20]u8 = undefined;
+            const cl = clBuf[0..std.fmt.printInt(&clBuf, n, 10, .lower, .{})];
+            const name = try a.dupe(u8, "content-length");
+            errdefer a.free(name);
+            try qextra.append(a, .{ .name = name, .value = cl });
+        }
         var rs = self.h3.createRequestStream(sid);
+        if (std.ascii.eqlIgnoreCase(method, "HEAD")) self.h3.markRequestHead(sid);
         const head = try rs.buildRequestHeaders(method, scheme, authority, path, qextra.items);
         defer a.free(head);
 

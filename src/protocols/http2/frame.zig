@@ -1,10 +1,10 @@
 //! HTTP/2 framing layer (RFC 9113 Section 4, Section 6).
 //!
-//! Frame header parse/serialize plus typed payload decoding with the
-//! validation rules nghttp2 enforces: exact payload lengths where fixed,
-//! flag legality, padding bounds, stream-id requirements, SETTINGS value
-//! ranges. Unknown frame types are surfaced to the session (which ignores
-//! them) rather than rejected here.
+//! Frame header parse/serialize plus typed payload decoding with strict
+//! RFC 9113 validation: exact payload lengths where fixed, flag legality,
+//! padding bounds, stream-id requirements, and SETTINGS value ranges.
+//! Unknown frame types are surfaced to the session (which ignores them)
+//! rather than rejected here.
 //!
 //! References:
 //!   - RFC 9113 Section 4 — Frame Format (9-byte header + payload)
@@ -21,6 +21,9 @@ pub const Error = error{
     InvalidFrameType,
     InvalidStreamId,
     InvalidPayload,
+    FrameSizeError,
+    StreamFrameSizeError,
+    StreamProtocolError,
     ProtocolError,
     OutOfMemory,
 };
@@ -62,8 +65,8 @@ pub const MAX_ALLOWED_FRAME_SIZE: usize = 16777215;
 pub const MAX_WINDOW: i64 = 0x7FFFFFFF;
 pub const CONNECTION_PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
-/// Mask of flags valid for each known type; unknown bits are stripped on
-/// receive exactly like nghttp2.
+/// Mask of flags valid for each known type; undefined bits are stripped
+/// on receive.
 pub fn validFlags(t: FrameType) u8 {
     return switch (t) {
         .data => END_FLAG | PADDED_FLAG,
@@ -173,6 +176,9 @@ pub fn serializeSetting(buf: *[6]u8, id: u16, value: u32) void {
 
 pub const Data = struct {
     data: []const u8,
+    /// Payload length counted against flow control: application bytes plus
+    /// the Pad Length field and trailing padding (RFC 9113 Section 6.9.1).
+    flowLen: usize,
     endStream: bool,
 };
 
@@ -183,6 +189,9 @@ pub const Headers = struct {
     exclusive: bool = false,
     streamDep: u31 = 0,
     weight: u8 = 255,
+    /// The HEADERS frame declared itself as its own priority dependency.
+    /// The block still has to reach HPACK before the stream is reset.
+    selfDependency: bool = false,
 };
 
 pub const Priority = struct {
@@ -234,7 +243,7 @@ pub const Frame = union(enum) {
     continuation: Continuation,
     unknown: Unknown,
 
-    /// Parses the payload according to the header. Applies nghttp2's rules:
+    /// Parses the payload according to the header. Applies the RFC 9113 rules:
     ///   DATA/HEADERS/PUSH_PROMISE padding bounds -> PROTOCOL_ERROR
     ///   PRIORITY len==5, RST len==4, SETTINGS len%6==0 & !ACK-with-len,
     ///   PING len==8, GOAWAY len>=8, WINDOW_UPDATE len==4 & inc!=0 checked
@@ -251,16 +260,18 @@ pub const Frame = union(enum) {
         switch (hdr.frameType) {
             .data => {
                 if (hdr.flags & PADDED_FLAG != 0) {
-                    if (payload.len < 1) return Error.InvalidPayload;
+                    if (payload.len < 1) return Error.FrameSizeError;
                     const padLen = payload[0];
                     if (@as(usize, padLen) + 1 > payload.len) return Error.ProtocolError; // pad+field > len
                     return .{ .data = .{
                         .data = payload[1 .. payload.len - padLen],
+                        .flowLen = payload.len,
                         .endStream = hdr.flags & END_FLAG != 0,
                     } };
                 }
                 return .{ .data = .{
                     .data = payload,
+                    .flowLen = payload.len,
                     .endStream = hdr.flags & END_FLAG != 0,
                 } };
             },
@@ -270,17 +281,16 @@ pub const Frame = union(enum) {
                 var dep: u31 = 0;
                 var weight: u8 = 255;
                 if (hdr.flags & PADDED_FLAG != 0) {
-                    if (rest.len < 1) return Error.InvalidPayload;
+                    if (rest.len < 1) return Error.FrameSizeError;
                     const padLen = rest[0];
                     if (@as(usize, padLen) + 1 > rest.len) return Error.ProtocolError;
                     rest = rest[1 .. rest.len - padLen];
                 }
                 if (hdr.flags & PRIORITY_F != 0) {
-                    if (rest.len < 5) return Error.InvalidPayload;
+                    if (rest.len < 5) return Error.FrameSizeError;
                     const raw = std.mem.readInt(u32, rest[0..4], .big);
                     exclusive = raw >> 31 != 0;
                     dep = @intCast(raw & 0x7FFFFFFF);
-                    if (dep == hdr.streamId) return Error.InvalidPayload;
                     weight = rest[4];
                     rest = rest[5..];
                 }
@@ -291,12 +301,13 @@ pub const Frame = union(enum) {
                     .exclusive = exclusive,
                     .streamDep = dep,
                     .weight = weight,
+                    .selfDependency = dep == hdr.streamId,
                 } };
             },
             .priority => {
-                if (payload.len != 5) return Error.InvalidPayload;
+                if (payload.len != 5) return Error.StreamFrameSizeError;
                 const raw = std.mem.readInt(u32, payload[0..4], .big);
-                if ((raw & 0x7FFFFFFF) == hdr.streamId) return Error.InvalidPayload;
+                if ((raw & 0x7FFFFFFF) == hdr.streamId) return Error.StreamProtocolError;
                 return .{ .priority = .{
                     .exclusive = raw >> 31 != 0,
                     .streamDep = @intCast(raw & 0x7FFFFFFF),
@@ -304,15 +315,15 @@ pub const Frame = union(enum) {
                 } };
             },
             .rstStream => {
-                if (payload.len != 4) return Error.InvalidPayload;
+                if (payload.len != 4) return Error.FrameSizeError;
                 return .{ .rstStream = .{ .errorCode = std.mem.readInt(u32, payload[0..4], .big) } };
             },
             .settings => {
                 if (hdr.hasAck()) {
-                    if (payload.len != 0) return Error.InvalidPayload;
+                    if (payload.len != 0) return Error.FrameSizeError;
                     return .{ .settings = &.{} };
                 }
-                if (payload.len % 6 != 0) return Error.InvalidPayload;
+                if (payload.len % 6 != 0) return Error.FrameSizeError;
                 const count = payload.len / 6;
                 const entries = try allocator.alloc(SettingEntry, count);
                 errdefer allocator.free(entries);
@@ -327,12 +338,12 @@ pub const Frame = union(enum) {
             .pushPromise => {
                 var rest = payload;
                 if (hdr.flags & PADDED_FLAG != 0) {
-                    if (rest.len < 1) return Error.InvalidPayload;
+                    if (rest.len < 1) return Error.FrameSizeError;
                     const padLen = rest[0];
                     if (@as(usize, padLen) + 1 > rest.len) return Error.ProtocolError;
                     rest = rest[1 .. rest.len - padLen];
                 }
-                if (rest.len < 4) return Error.InvalidPayload;
+                if (rest.len < 4) return Error.FrameSizeError;
                 const promised = std.mem.readInt(u32, rest[0..4], .big) & 0x7FFFFFFF;
                 if (promised == 0) return Error.InvalidStreamId;
                 return .{ .pushPromise = .{
@@ -342,13 +353,13 @@ pub const Frame = union(enum) {
                 } };
             },
             .ping => {
-                if (payload.len != 8) return Error.InvalidPayload;
+                if (payload.len != 8) return Error.FrameSizeError;
                 var p: Ping = undefined;
                 @memcpy(&p.opaqueData, payload[0..8]);
                 return .{ .ping = p };
             },
             .goaway => {
-                if (payload.len < 8) return Error.InvalidPayload;
+                if (payload.len < 8) return Error.FrameSizeError;
                 return .{ .goaway = .{
                     .lastStreamId = @intCast(std.mem.readInt(u32, payload[0..4], .big) & 0x7FFFFFFF),
                     .errorCode = std.mem.readInt(u32, payload[4..8], .big),
@@ -356,7 +367,7 @@ pub const Frame = union(enum) {
                 } };
             },
             .windowUpdate => {
-                if (payload.len != 4) return Error.InvalidPayload;
+                if (payload.len != 4) return Error.FrameSizeError;
                 const inc = std.mem.readInt(u32, payload[0..4], .big) & 0x7FFFFFFF;
                 // A zero increment is a stream error on a non-zero stream
                 // and a connection error on stream 0 (RFC 9113 Section 6.9).
@@ -500,19 +511,33 @@ test "frame length beyond the 24-bit maximum is rejected" {
 test "malformed payloads are rejected by the frame parser" {
     const a = std.testing.allocator;
     const hdr = FrameHeader{ .length = 0, .frameType = .ping, .flags = 0, .streamId = 0 };
-    try std.testing.expectError(Error.InvalidPayload, Frame.parse(hdr, &[_]u8{ 0, 0, 0 }, a));
+    try std.testing.expectError(Error.FrameSizeError, Frame.parse(hdr, &[_]u8{ 0, 0, 0 }, a));
 
     const settings = FrameHeader{ .length = 0, .frameType = .settings, .flags = 0, .streamId = 0 };
-    try std.testing.expectError(Error.InvalidPayload, Frame.parse(settings, &[_]u8{ 0, 0, 0, 0, 0 }, a));
+    try std.testing.expectError(Error.FrameSizeError, Frame.parse(settings, &[_]u8{ 0, 0, 0, 0, 0 }, a));
 
     const rst = FrameHeader{ .length = 0, .frameType = .rstStream, .flags = 0, .streamId = 1 };
-    try std.testing.expectError(Error.InvalidPayload, Frame.parse(rst, &[_]u8{ 0, 0, 0 }, a));
+    try std.testing.expectError(Error.FrameSizeError, Frame.parse(rst, &[_]u8{ 0, 0, 0 }, a));
 
     const goaway = FrameHeader{ .length = 0, .frameType = .goaway, .flags = 0, .streamId = 0 };
-    try std.testing.expectError(Error.InvalidPayload, Frame.parse(goaway, &[_]u8{ 0, 0, 0 }, a));
+    try std.testing.expectError(Error.FrameSizeError, Frame.parse(goaway, &[_]u8{ 0, 0, 0 }, a));
+
+    const prio = FrameHeader{ .length = 0, .frameType = .priority, .flags = 0, .streamId = 1 };
+    try std.testing.expectError(Error.StreamFrameSizeError, Frame.parse(prio, &[_]u8{ 0, 0, 0 }, a));
+
+    const selfDep: [5]u8 = .{ 0, 0, 0, 1, 16 };
+    try std.testing.expectError(Error.StreamProtocolError, Frame.parse(prio, &selfDep, a));
 
     const data0 = FrameHeader{ .length = 0, .frameType = .data, .flags = 0, .streamId = 0 };
     try std.testing.expectError(Error.InvalidStreamId, Frame.parse(data0, "", a));
+}
+
+test "padded DATA reports padding as flow-controlled bytes" {
+    const a = std.testing.allocator;
+    const hdr = FrameHeader{ .length = 6, .frameType = .data, .flags = Flags.PADDED, .streamId = 1 };
+    const f = try Frame.parse(hdr, &[_]u8{ 2, 'a', 'b', 'c', 0, 0 }, a);
+    try std.testing.expectEqualStrings("abc", f.data.data);
+    try std.testing.expectEqual(@as(usize, 6), f.data.flowLen);
 }
 
 test "padding longer than the payload is a protocol error" {

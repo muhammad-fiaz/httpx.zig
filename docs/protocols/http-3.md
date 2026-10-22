@@ -7,11 +7,12 @@
 > QUIC ACK tracking, PTO/loss recovery, NewReno congestion control, flow
 > control, transport parameters, and 0-RTT resumption are wired in.
 >
-> Deliberate limits: one HTTP/3 request per QUIC connection (no pooling),
-> no Retry/token exchange, no QUIC version negotiation, no
-> HelloRetryRequest handling in the QUIC driver, no key update or
-> connection migration, no server push/datagrams, and no streaming
-> request/response bodies through the high-level API.
+> Deliberate limits: the high-level HTTP/3 client performs one request per
+> QUIC connection (no pooling), and the QUIC driver does not handle
+> HelloRetryRequest or connection migration. There is no server
+> push/datagrams support, and the high-level API buffers request/response
+> bodies rather than streaming them. Retry/token validation, v1/v2 version
+> negotiation, and 1-RTT key updates are implemented.
 
 ## Motivation
 

@@ -155,6 +155,10 @@ pub const Stream = struct {
     // HTTP message validation state.
     contentLength: ?u64 = null,
     bodyReceived: u64 = 0,
+    /// The request method was HEAD, so the response cannot carry content.
+    requestIsHead: bool = false,
+    /// A final response status whose semantics forbid message content.
+    responseBodyForbidden: bool = false,
 
     pub fn init(
         allocator: Allocator,
@@ -496,6 +500,10 @@ pub const Stream = struct {
             return;
         }
         self.httpState = .data;
+        if (self.responseBodyForbidden and payload.len > 0) {
+            self.fail(.messageError);
+            return;
+        }
         if (self.contentLength) |expected| {
             self.bodyReceived +|= payload.len;
             if (self.bodyReceived > expected) {
@@ -515,7 +523,14 @@ pub const Stream = struct {
             self.fail(.messageError);
             return;
         }
-        if (self.contentLength) |expected| {
+        if (self.responseBodyForbidden) {
+            // Content-Length on a HEAD/304 response describes the selected
+            // representation, not bytes on this stream (RFC 9110 8.6).
+            if (self.bodyReceived != 0) {
+                self.fail(.messageError);
+                return;
+            }
+        } else if (self.contentLength) |expected| {
             if (self.bodyReceived != expected) {
                 self.fail(.messageError);
                 return;
@@ -636,6 +651,11 @@ pub const Stream = struct {
             }
         }
         const m = method orelse return .messageError;
+        if (authority != null and host != null and
+            !std.ascii.eqlIgnoreCase(authority.?, host.?))
+        {
+            return .messageError;
+        }
         const isConnect = std.mem.eql(u8, m, "CONNECT");
         if (isConnect) {
             // CONNECT omits :scheme/:path and requires :authority.
@@ -658,6 +678,7 @@ pub const Stream = struct {
     fn validateResponse(self: *Stream, fields: []const FieldLine, interim: bool) ?H3Error {
         var seenRegular = false;
         var status: ?[]const u8 = null;
+        var statusCode: u16 = 0;
         for (fields) |f| {
             if (f.name.len == 0) return .messageError;
             if (f.name[0] == ':') {
@@ -672,13 +693,14 @@ pub const Stream = struct {
                     const code: u16 = @as(u16, f.value[0] - '0') * 100 +
                         @as(u16, f.value[1] - '0') * 10 +
                         @as(u16, f.value[2] - '0');
-                    if (code < 100 or code > 999) return .messageError;
+                    if (code < 100 or code > 599) return .messageError;
                     // 101 Switching Protocols is not used in HTTP/3
                     // (RFC 9114 Section 4.1); extended CONNECT replaces it.
                     if (code == 101) return .messageError;
                     const is1xx = f.value[0] == '1';
                     if (interim != is1xx) return .messageError;
                     status = f.value;
+                    statusCode = code;
                 } else {
                     return .messageError; // unknown pseudo-header
                 }
@@ -689,8 +711,21 @@ pub const Stream = struct {
             }
         }
         if (status == null) return .messageError;
-        if (!interim) {
-            if (self.captureContentLength(fields)) |code| return code;
+        if (interim) {
+            // Informational responses never carry content framing.
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "content-length")) return .messageError;
+            }
+            return null;
+        }
+        if (self.captureContentLength(fields)) |code| return code;
+        self.responseBodyForbidden = self.requestIsHead or
+            statusCode == 204 or statusCode == 205 or statusCode == 304;
+        if (statusCode == 204 and self.contentLength != null) return .messageError;
+        if (statusCode == 205) {
+            if (self.contentLength) |cl| {
+                if (cl != 0) return .messageError;
+            }
         }
         return null;
     }

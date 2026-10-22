@@ -17,13 +17,13 @@
 //!     exchanged in ClientHello/EncryptedExtensions and applied to
 //!     flow-control windows, stream limits, and connection IDs; absent
 //!     values keep compiled-in defaults.
-//!   * No Retry/token round trip and no QUIC version negotiation: the
-//!     transport supports version 1 only. Deployments facing the open
-//!     internet should add Retry at the endpoint.
+//!   * Retry/token validation and QUIC version negotiation (v1 and v2)
+//!     live in `connection.zig`; the TLS driver itself is
+//!     version-independent.
 //!   * ACK tracking, PTO/loss recovery, and NewReno congestion control
 //!     live in `connection.zig`, `lossRecovery.zig`, and
-//!     `congestionControl.zig`; key update and connection migration are
-//!     not wired yet.
+//!     `congestionControl.zig`; key updates are handled there, connection
+//!     migration is not wired yet.
 //!
 //! Thread-safety: thread-confined per connection (one driver per side).
 
@@ -669,7 +669,8 @@ pub fn feedPumped(
         ep.peer = d.from;
         ep.conn.receiveDatagram(d.data, nowMs) catch |e| switch (e) {
             error.Draining => return e,
-            else => {}, // drop bad datagrams, keep going
+            // Drop bad datagrams and keep serving the connection.
+            else => {},
         };
     }
     // Loss and PTO timers fire here so every pump-driven runtime (client
@@ -770,6 +771,46 @@ test "live handshake over real udp loopback establishes both ends" {
     try std.testing.expect(srvConn.handshakeConfirmed);
     try std.testing.expect(cliConn.spaces[1].keysRx == null and cliConn.spaces[1].keysTx == null);
     try std.testing.expect(srvConn.spaces[1].keysRx == null and srvConn.spaces[1].keysTx == null);
+}
+
+test "live retry handshake over real udp loopback establishes both ends" {
+    const a = std.testing.allocator;
+    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    defer cliConn.deinit();
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{ .retry = true });
+    defer srvConn.deinit();
+
+    var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
+    defer cliEp.deinit();
+    var srvEp = try transportMod.Endpoint.init(a, ctx.io, srvConn, .{});
+    defer srvEp.deinit();
+    const sport = srvEp.localPort();
+
+    var cliDrv = Driver.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{ .host = "127.0.0.1", .caPem = hsTestCertPem });
+    defer cliDrv.deinit();
+    var srvDrv = Driver.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{ .certChainPem = hsTestCertPem, .privateKeyPem = hsTestKeyPem });
+    defer srvDrv.deinit();
+    cliConn.tls = .{ .ctx = &cliDrv, .start = Driver.clientStart, .onData = Driver.onData };
+    srvConn.tls = .{ .ctx = &srvDrv, .start = Driver.clientStart, .onData = Driver.onData };
+
+    var cliPump: transportMod.Pump = .{};
+    try cliPump.start(&cliEp, a);
+    defer cliPump.stop();
+    var srvPump: transportMod.Pump = .{};
+    try srvPump.start(&srvEp, a);
+    defer srvPump.stop();
+
+    const dest = std.Io.net.IpAddress.parseIp4("127.0.0.1", sport) catch unreachable;
+    try performHandshake(&cliEp, &cliPump, &cliDrv, &srvEp, &srvPump, &srvDrv, dest, 15_000);
+    try std.testing.expectEqual(connMod.State.established, cliConn.state);
+    try std.testing.expectEqual(connMod.State.established, srvConn.state);
+    try std.testing.expect(cliConn.retryPending);
+    try std.testing.expect(srvConn.addressValidated);
+    try std.testing.expectEqualStrings("h3", cliDrv.engine.negotiatedAlpn.?);
+    try std.testing.expectEqualStrings("h3", srvDrv.engine.negotiatedAlpn.?);
 }
 
 /// Drives a client handshake to completion. `clientPump` must be

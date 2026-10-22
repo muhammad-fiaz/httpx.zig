@@ -1,7 +1,7 @@
-//! HTTP/2 connection engine (RFC 9113), modeled on nghttp2's session
-//! semantics: preface validation, SETTINGS exchange with ACK tracking,
-//! CONTINUATION assembly, complete flow-control accounting, GOAWAY
-//! graceful shutdown, PING keepalive, and strict error escalation.
+//! HTTP/2 connection engine (RFC 9113) with its own session state machine:
+//! preface validation, SETTINGS exchange with ACK tracking, CONTINUATION
+//! assembly, complete flow-control accounting, GOAWAY graceful shutdown,
+//! PING keepalive, and strict error escalation.
 //!
 //! I/O model: feed() accepts arbitrary network chunks; outbound frames
 //! accumulate in `outbound` which the owner flushes to the wire. Protocol
@@ -102,20 +102,17 @@ pub const Session = struct {
     // Inbound reassembly.
     inbuf: std.ArrayList(u8) = .empty,
     prefaceDone: bool = false,
-    prefaceMatched: usize = 0,
     /// When set, ONLY CONTINUATION frames for this stream are legal next.
     continuationSid: ?u31 = null,
     continuationStream: ?*Stream = null,
+    /// Error code to apply after a discarded block's CONTINUATION chain.
+    continuationRefuse: ?ErrorCode = null,
 
     // HPACK contexts (connection-wide).
     hdec: hpackMod.Decoder,
     henc: hpackMod.Encoder,
 
     streams: std.AutoHashMap(u31, *Stream),
-    /// Identifiers of streams that were closed and reaped. Keeping them
-    /// lets the session answer a late frame with a stream error instead
-    /// of an idle-stream connection error (RFC 9113 Section 5.1).
-    closedStreams: std.AutoHashMap(u31, void),
     /// Peer-initiated streams currently open (server role).
     activePeerStreams: usize = 0,
     /// Locally initiated streams currently open (client role).
@@ -158,7 +155,6 @@ pub const Session = struct {
             .hdec = undefined,
             .henc = undefined,
             .streams = std.AutoHashMap(u31, *Stream).init(allocator),
-            .closedStreams = std.AutoHashMap(u31, void).init(allocator),
         };
         // A client disables server push: PUSH_PROMISE is not implemented,
         // so advertising ENABLE_PUSH=0 keeps peers from sending one.
@@ -177,19 +173,19 @@ pub const Session = struct {
             self.allocator.destroy(sp.*);
         }
         self.streams.deinit();
-        self.closedStreams.deinit();
         self.hdec.deinit();
         self.henc.deinit();
         self.inbuf.deinit(self.allocator);
         self.outbound.deinit(self.allocator);
     }
 
-    // -- lifecycle ------------------------------------------------------------
-
     /// Client: emit magic + initial SETTINGS. Server: initial SETTINGS.
     pub fn startHandshake(self: *Session) !void {
         if (self.handshakeStarted) return Error.ProtocolViolation;
         self.handshakeStarted = true;
+        // Reflect any local SETTINGS changed between init and the handshake.
+        self.hdec.maxHeaderList = self.localSettings.maxHeaderListSize;
+        self.hdec.setProtocolMaxSize(self.localSettings.headerTableSize);
         if (self.role == .client) {
             try self.outbound.appendSlice(self.allocator, frameMod.CONNECTION_PREFACE);
         }
@@ -209,8 +205,6 @@ pub const Session = struct {
         try frameMod.writeSettings(&self.outbound, self.allocator, es[0..n]);
         self.awaitingSettingsAck = true;
     }
-
-    // -- inbound ---------------------------------------------------------------
 
     /// Stable stream pointer lookup (map stores heap-allocated streams).
     fn streamPtr(self: *Session, sid: u31) ?*Stream {
@@ -258,7 +252,7 @@ pub const Session = struct {
 
             // Stream-id legality up front.
             switch (hdr.frameType) {
-                .data, .headers, .rstStream, .continuation, .pushPromise => {
+                .data, .headers, .priority, .rstStream, .continuation, .pushPromise => {
                     if (hdr.streamId == 0) return self.connError(.protocolError);
                 },
                 .settings, .ping, .goaway => {
@@ -280,7 +274,19 @@ pub const Session = struct {
                 error.OutOfMemory => return Error.OutOfMemory,
                 // Frame size violations map to FRAME_SIZE_ERROR; all other
                 // parse failures (bad stream id, bad payload) are PROTOCOL_ERROR.
-                error.FrameTooLarge => return self.connError(.frameSizeError),
+                error.FrameTooLarge, error.FrameSizeError => return self.connError(.frameSizeError),
+                error.StreamFrameSizeError => {
+                    if (self.streamPtr(hdr.streamId) != null) {
+                        try self.resetStream(hdr.streamId, .frameSizeError);
+                    }
+                    return self.consumeInvalidFrame(hdr);
+                },
+                error.StreamProtocolError => {
+                    if (self.streamPtr(hdr.streamId) != null) {
+                        try self.resetStream(hdr.streamId, .protocolError);
+                    }
+                    return self.consumeInvalidFrame(hdr);
+                },
                 else => return self.connError(.protocolError),
             };
             defer if (!hdr.hasAck() and parsed == .settings) {
@@ -296,6 +302,12 @@ pub const Session = struct {
 
             if (self.closed) return;
         }
+    }
+
+    fn consumeInvalidFrame(self: *Session, hdr: FrameHeader) Error!void {
+        const n = 9 + @as(usize, hdr.length);
+        std.mem.copyForwards(u8, self.inbuf.items[0 .. self.inbuf.items.len - n], self.inbuf.items[n..]);
+        self.inbuf.shrinkRetainingCapacity(self.inbuf.items.len - n);
     }
 
     fn consumePreface(self: *Session) Error!void {
@@ -324,9 +336,9 @@ pub const Session = struct {
                 try self.applyPeerSettings(entries);
                 try frameMod.writeSettingsAck(&self.outbound, self.allocator);
             },
-            .headers => |h| try self.handleHeadersStart(hdr.streamId, h.block, h.endHeaders, h.endStream),
+            .headers => |h| try self.handleHeadersStart(hdr.streamId, h.block, h.endHeaders, h.endStream, h.selfDependency),
             .continuation => |c| try self.handleContinuation(hdr.streamId, c.block, c.endHeaders),
-            .data => |d| try self.handleData(hdr.streamId, d.data, d.endStream),
+            .data => |d| try self.handleData(hdr.streamId, d.flowLen, d.data, d.endStream),
             .rstStream => |r| {
                 if (self.streamPtr(hdr.streamId)) |st| {
                     st.onRecvRst();
@@ -362,14 +374,22 @@ pub const Session = struct {
                 } else {
                     self.goawayLastStream = g.lastStreamId;
                 }
-                // Streams above the peer's last-stream-id were not
-                // processed and are considered refused (RFC 9113 6.8).
-                var it = self.streams.valueIterator();
-                while (it.next()) |sp| {
-                    if (sp.*.id > g.lastStreamId) {
-                        sp.*.onRecvRst();
-                        if (self.cbs.onReset) |cb| cb(self.cbs.ctx, sp.*.id, @backingInt(ErrorCode.refusedStream));
+                // A GOAWAY from a server only refuses client-initiated
+                // streams above its last-stream-id. Server-local (push)
+                // streams are unaffected; this implementation never opens
+                // them. Collect first because removal invalidates iterators.
+                if (self.role == .client) {
+                    var refused = std.ArrayList(u31).empty;
+                    defer refused.deinit(self.allocator);
+                    var it = self.streams.valueIterator();
+                    while (it.next()) |sp| {
+                        if (sp.*.id > g.lastStreamId) {
+                            sp.*.onRecvRst();
+                            if (self.cbs.onReset) |cb| cb(self.cbs.ctx, sp.*.id, @backingInt(ErrorCode.refusedStream));
+                            refused.append(self.allocator, sp.*.id) catch return Error.OutOfMemory;
+                        }
                     }
+                    for (refused.items) |sid| self.removeStream(sid) catch {};
                 }
                 if (self.cbs.onGoaway) |cb| cb(self.cbs.ctx, g.lastStreamId, g.errorCode, g.debugData);
             },
@@ -448,7 +468,7 @@ pub const Session = struct {
         return s;
     }
 
-    fn handleHeadersStart(self: *Session, sid: u31, block: []const u8, endHeaders: bool, endStream: bool) Error!void {
+    fn handleHeadersStart(self: *Session, sid: u31, block: []const u8, endHeaders: bool, endStream: bool, selfDependency: bool) Error!void {
         if (block.len > self.maxHeaderBlockBytes) return self.connError(.enhanceYourCalm);
 
         var st: *Stream = undefined;
@@ -469,9 +489,8 @@ pub const Session = struct {
                     // Client-initiated streams use odd identifiers.
                     if (sid % 2 == 0) return self.connError(.protocolError);
                     if (sid <= self.largestPeerStream) {
-                        // Reusing a lower identifier is a protocol error; a
-                        // frame for an already closed stream is a stream error.
-                        if (!self.closedStreams.contains(sid)) return self.connError(.protocolError);
+                        // A lower identifier can only refer to a stream that
+                        // already existed, so this is a stream error.
                         discard = true;
                         refuse = .streamClosed;
                     } else if (self.goawaySent or self.activePeerStreams >= self.localSettings.maxConcurrentStreams) {
@@ -490,7 +509,7 @@ pub const Session = struct {
                     // Server-initiated streams require PUSH_PROMISE, which is
                     // not implemented (we advertise ENABLE_PUSH=0).
                     if (sid % 2 == 0) return self.connError(.protocolError);
-                    if (!self.closedStreams.contains(sid) and self.streamPtr(sid) == null) {
+                    if (self.streamPtr(sid) == null and sid > self.largestLocalStream) {
                         // A response for a stream this client never opened is
                         // a protocol error, not a stream error.
                         return self.connError(.protocolError);
@@ -501,6 +520,13 @@ pub const Session = struct {
                 },
             }
         }
+        // A HEADERS priority section that depends on its own stream is a
+        // stream error, but the block must still be decoded first: HPACK
+        // state is connection-wide (RFC 9113 Section 4.3).
+        if (selfDependency) {
+            discard = true;
+            if (refuse == null) refuse = .protocolError;
+        }
         st.discardHeaders = discard;
 
         const kind: HeaderKind = if (st.headersRecv > 0) .trailers else switch (self.role) {
@@ -509,19 +535,7 @@ pub const Session = struct {
         };
 
         if (endHeaders) {
-            if (!discard) {
-                st.onRecvHeaders(endStream) catch |e| switch (e) {
-                    error.StreamClosed => {
-                        try self.resetStream(sid, .streamClosed);
-                        return;
-                    },
-                    error.ProtocolError => {
-                        try self.resetStream(sid, .protocolError);
-                        return;
-                    },
-                };
-            }
-            try self.decodeAndDeliver(st, block, kind, !discard);
+            try self.decodeAndDeliver(st, block, kind, endStream, !discard);
             if (discard) {
                 if (refuse) |code| try self.resetStream(sid, code);
                 self.removeStream(sid) catch {};
@@ -530,7 +544,6 @@ pub const Session = struct {
             // The decode may have reset the stream (malformed header
             // list); re-resolve it before touching it.
             if (self.streamPtr(sid)) |after| {
-                after.headersRecv += 1;
                 // A fully-received exchange (both sides ended) leaves no work.
                 if (after.state == .closed) self.reapClosedStream(sid);
             }
@@ -541,6 +554,7 @@ pub const Session = struct {
             self.continuationSid = sid;
             self.continuationStream = st;
             self.continuationEndStream = endStream;
+            self.continuationRefuse = refuse;
         }
     }
 
@@ -553,8 +567,10 @@ pub const Session = struct {
         if (!endHeaders) return;
 
         const endStream = self.continuationEndStream;
+        const refuse = self.continuationRefuse;
         self.continuationSid = null;
         self.continuationStream = null;
+        self.continuationRefuse = null;
 
         const kind: HeaderKind = if (st.headersRecv > 0) .trailers else switch (self.role) {
             .server => .request,
@@ -562,30 +578,18 @@ pub const Session = struct {
         };
         const discard = st.discardHeaders;
 
-        if (!discard) {
-            st.onRecvHeaders(endStream) catch |e| switch (e) {
-                error.StreamClosed => {
-                    try self.resetStream(sid, .streamClosed);
-                    return;
-                },
-                error.ProtocolError => {
-                    try self.resetStream(sid, .protocolError);
-                    return;
-                },
-            };
-        }
-        try self.decodeAndDeliver(st, "", kind, !discard);
+        try self.decodeAndDeliver(st, "", kind, endStream, !discard);
         if (discard) {
+            if (refuse) |code| try self.resetStream(sid, code);
             self.removeStream(sid) catch {};
             return;
         }
         if (self.streamPtr(sid)) |after| {
-            after.headersRecv += 1;
             if (after.state == .closed) self.reapClosedStream(sid);
         }
     }
 
-    fn decodeAndDeliver(self: *Session, st: *Stream, finalFrag: []const u8, kind: HeaderKind, deliver: bool) Error!void {
+    fn decodeAndDeliver(self: *Session, st: *Stream, finalFrag: []const u8, kind: HeaderKind, endStream: bool, deliver: bool) Error!void {
         // Single-frame HEADERS have no chain buffer; multi-frame chains
         // accumulated their fragments already.
         var owned: ?[]u8 = null;
@@ -612,6 +616,14 @@ pub const Session = struct {
             self.allocator.free(res.fields);
         }
 
+        if (res.tooLarge) {
+            // The block was fully decoded to keep the HPACK context in
+            // sync; the oversized list is rejected as a stream error
+            // (RFC 9113 Section 10.5.1).
+            if (deliver) try self.resetStream(st.id, .enhanceYourCalm);
+            return;
+        }
+
         if (!deliver) return;
 
         // Malformed header lists are stream errors, not connection errors
@@ -621,7 +633,85 @@ pub const Session = struct {
             return;
         }
 
-        const endStream = st.endStreamRecv;
+        if (kind == .response and !st.finalResponse) {
+            const status = parseStatus(res.fields) orelse {
+                try self.resetStream(st.id, .protocolError);
+                return;
+            };
+            if (status < 100 or status > 599 or status == 101) {
+                try self.resetStream(st.id, .protocolError);
+                return;
+            }
+            if (status < 200) {
+                const cl = parseContentLength(res.fields) catch {
+                    try self.resetStream(st.id, .protocolError);
+                    return;
+                };
+                // Informational responses never carry content or END_STREAM;
+                // multiple can precede the final response.
+                if (endStream or cl != null) {
+                    try self.resetStream(st.id, .protocolError);
+                    return;
+                }
+                return;
+            }
+            const cl = parseContentLength(res.fields) catch {
+                try self.resetStream(st.id, .protocolError);
+                return;
+            };
+            if (status == 204 and cl != null) {
+                try self.resetStream(st.id, .protocolError);
+                return;
+            }
+            if (status == 205 and cl != null and cl.? != 0) {
+                try self.resetStream(st.id, .protocolError);
+                return;
+            }
+            st.finalResponse = true;
+            st.responseStatus = status;
+            st.contentLength = cl;
+            st.bodyForbidden = st.requestIsHead or status == 204 or status == 304 or status == 205;
+        } else if (kind == .request) {
+            const method = fieldValue(res.fields, ":method") orelse {
+                try self.resetStream(st.id, .protocolError);
+                return;
+            };
+            if (fieldValue(res.fields, ":protocol") != null) {
+                // We never enable SETTINGS_ENABLE_CONNECT_PROTOCOL.
+                try self.resetStream(st.id, .protocolError);
+                return;
+            }
+            st.requestIsHead = std.mem.eql(u8, method, "HEAD");
+            st.requestIsConnect = std.mem.eql(u8, method, "CONNECT");
+            st.contentLength = parseContentLength(res.fields) catch {
+                try self.resetStream(st.id, .protocolError);
+                return;
+            };
+        } else if (kind == .trailers) {
+            if (!endStream or st.trailersRecv) {
+                try self.resetStream(st.id, .protocolError);
+                return;
+            }
+        }
+
+        if (endStream and !bodyLengthSatisfied(st)) {
+            try self.resetStream(st.id, .protocolError);
+            return;
+        }
+
+        st.onRecvHeaders(endStream) catch |e| switch (e) {
+            error.StreamClosed => {
+                try self.resetStream(st.id, .streamClosed);
+                return;
+            },
+            error.ProtocolError => {
+                try self.resetStream(st.id, .protocolError);
+                return;
+            },
+        };
+        st.headersRecv += 1;
+        if (kind == .trailers) st.trailersRecv = true;
+
         if (self.cbs.onHeaders) |cb| {
             cb(self.cbs.ctx, st.id, res.fields, endStream) catch {
                 try self.resetStream(st.id, .internalError);
@@ -663,6 +753,24 @@ pub const Session = struct {
         return c == '\t' or (c >= 0x20 and c != 0x7F);
     }
 
+    /// An HTTP method is a non-empty token (RFC 9110 Section 9.1).
+    fn isTokenValue(value: []const u8) bool {
+        if (value.len == 0) return false;
+        for (value) |c| {
+            if (!isTokenChar(c)) return false;
+        }
+        return true;
+    }
+
+    /// URI scheme syntax (RFC 3986 Section 3.1).
+    fn isScheme(value: []const u8) bool {
+        if (value.len == 0 or !std.ascii.isAlphabetic(value[0])) return false;
+        for (value[1..]) |c| {
+            if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return false;
+        }
+        return true;
+    }
+
     /// Validates one decoded header list against the RFC 9113 rules for
     /// requests, responses, and trailers.
     pub fn validateHeaderList(fields: []const hpackMod.HeaderField, kind: HeaderKind) bool {
@@ -673,6 +781,11 @@ pub const Session = struct {
         var seenStatus = false;
         var seenProtocol = false;
         var seenRegular = false;
+        var seenHost = false;
+        var methodIsConnect = false;
+        var pathValue: ?[]const u8 = null;
+        var authorityValue: ?[]const u8 = null;
+        var hostValue: ?[]const u8 = null;
 
         for (fields) |f| {
             if (f.name.len == 0) return false;
@@ -680,6 +793,14 @@ pub const Session = struct {
             // Field values may not contain NUL, CR, or LF (RFC 9113 8.2.3).
             for (f.value) |c| {
                 if (!isFieldValueChar(c)) return false;
+            }
+            // Leading/trailing SP or HTAB is malformed in HTTP/2 field
+            // values (RFC 9113 Section 8.2.1).
+            if (f.value.len > 0 and
+                (f.value[0] == ' ' or f.value[0] == '\t' or
+                    f.value[f.value.len - 1] == ' ' or f.value[f.value.len - 1] == '\t'))
+            {
+                return false;
             }
 
             const isPseudo = f.name[0] == ':';
@@ -692,17 +813,22 @@ pub const Session = struct {
                 }
                 if (kind == .trailers) return false; // trailers carry no pseudo-headers
                 if (std.mem.eql(u8, f.name, ":method")) {
-                    if (seenMethod) return false;
+                    if (seenMethod or !isTokenValue(f.value)) return false;
                     seenMethod = true;
+                    methodIsConnect = std.mem.eql(u8, f.value, "CONNECT");
                 } else if (std.mem.eql(u8, f.name, ":path")) {
                     if (seenPath) return false;
                     seenPath = true;
+                    pathValue = f.value;
                 } else if (std.mem.eql(u8, f.name, ":scheme")) {
-                    if (seenScheme) return false;
+                    if (seenScheme or !isScheme(f.value)) return false;
                     seenScheme = true;
                 } else if (std.mem.eql(u8, f.name, ":authority")) {
                     if (seenAuthority) return false;
                     seenAuthority = true;
+                    // Userinfo is not part of :authority (RFC 9113 8.3.1).
+                    if (std.mem.indexOfScalar(u8, f.value, '@') != null) return false;
+                    authorityValue = f.value;
                 } else if (std.mem.eql(u8, f.name, ":status")) {
                     if (seenStatus) return false;
                     seenStatus = true;
@@ -737,6 +863,12 @@ pub const Session = struct {
                 if (std.mem.eql(u8, f.name, "te") and !std.ascii.eqlIgnoreCase(f.value, "trailers")) {
                     return false;
                 }
+                if (std.mem.eql(u8, f.name, "host")) {
+                    if (seenHost) return false;
+                    seenHost = true;
+                    hostValue = f.value;
+                }
+                if (kind == .trailers and std.mem.eql(u8, f.name, "content-length")) return false;
                 seenRegular = true;
             }
         }
@@ -744,13 +876,32 @@ pub const Session = struct {
         switch (kind) {
             .request => {
                 if (!seenMethod) return false;
-                // CONNECT (and extended CONNECT) omit :scheme and :path.
+                if (seenStatus) return false;
+                // :authority and Host must agree when both are present
+                // (RFC 9113 Sections 8.3.1 and 8.3.2).
+                if (authorityValue != null and hostValue != null and
+                    !std.ascii.eqlIgnoreCase(authorityValue.?, hostValue.?))
+                {
+                    return false;
+                }
                 if (seenProtocol) {
+                    // Extended CONNECT requires CONNECT and all four
+                    // pseudo-headers (RFC 8441 Section 4).
+                    if (!methodIsConnect) return false;
                     if (!seenScheme or !seenPath or !seenAuthority) return false;
+                    const path = pathValue.?;
+                    if (path.len == 0 or path[0] != '/') return false;
+                } else if (methodIsConnect) {
+                    // Plain CONNECT uses only :method and :authority.
+                    if (!seenAuthority or seenScheme or seenPath) return false;
                 } else {
                     if (!seenScheme or !seenPath) return false;
+                    // Asterisk-form is the only path not starting with '/'
+                    // (RFC 9113 Section 8.3.1).
+                    const path = pathValue.?;
+                    if (path.len == 0) return false;
+                    if (path[0] != '/' and !std.mem.eql(u8, path, "*")) return false;
                 }
-                if (seenStatus) return false;
             },
             .response => {
                 if (!seenStatus) return false;
@@ -761,20 +912,81 @@ pub const Session = struct {
         return true;
     }
 
+    fn fieldValue(fields: []const hpackMod.HeaderField, name: []const u8) ?[]const u8 {
+        for (fields) |f| {
+            if (std.mem.eql(u8, f.name, name)) return f.value;
+        }
+        return null;
+    }
+
+    const ContentLengthError = error{InvalidContentLength};
+
+    fn parseContentLength(fields: []const hpackMod.HeaderField) ContentLengthError!?u64 {
+        var result: ?u64 = null;
+        for (fields) |f| {
+            if (!std.mem.eql(u8, f.name, "content-length")) continue;
+            if (f.value.len == 0) return error.InvalidContentLength;
+            for (f.value) |c| {
+                if (!std.ascii.isDigit(c)) return error.InvalidContentLength;
+            }
+            const n = std.fmt.parseInt(u64, f.value, 10) catch return error.InvalidContentLength;
+            if (result) |previous| {
+                if (previous != n) return error.InvalidContentLength;
+            }
+            result = n;
+        }
+        return result;
+    }
+
+    fn parseStatus(fields: []const hpackMod.HeaderField) ?u16 {
+        const value = fieldValue(fields, ":status") orelse return null;
+        return std.fmt.parseInt(u16, value, 10) catch null;
+    }
+
+    /// True when the received message body matches its declared framing.
+    fn bodyLengthSatisfied(st: *const Stream) bool {
+        if (st.contentLength) |cl| {
+            if (st.bodyForbidden and (st.requestIsHead or st.responseStatus == 304)) {
+                return st.bodyBytes == 0;
+            }
+            return st.bodyBytes == cl;
+        }
+        return !st.bodyForbidden or st.bodyBytes == 0;
+    }
+
+    /// True when the message body this endpoint sends matches its declared
+    /// framing. HEAD and 304 responses may advertise a representation
+    /// length without sending those bytes.
+    fn outboundBodyLengthSatisfied(st: *const Stream) bool {
+        if (st.sendContentLength) |cl| {
+            if (st.sendBodyForbidden and (st.requestIsHead or st.responseStatus == 304)) {
+                return st.bodyBytesSent == 0;
+            }
+            return st.bodyBytesSent == cl;
+        }
+        return !st.sendBodyForbidden or st.bodyBytesSent == 0;
+    }
+
     /// True when the identifier belongs to a stream that existed at some
     /// point (so a frame for it is a stream error, not an idle-stream
     /// connection error).
     fn isKnownStreamId(self: *Session, sid: u31) bool {
-        if (self.closedStreams.contains(sid)) return true;
-        if (self.role == .server and sid <= self.largestPeerStream) return true;
-        if (self.role == .client and sid <= self.largestLocalStream) return true;
-        return false;
+        // Only identifiers that could have belonged to this endpoint's
+        // peer are "known"; even identifiers were never opened because
+        // server push is disabled (RFC 9113 Section 5.1.1).
+        if (sid % 2 == 0) return false;
+        return switch (self.role) {
+            .server => sid <= self.largestPeerStream,
+            .client => sid <= self.largestLocalStream,
+        };
     }
 
-    fn handleData(self: *Session, sid: u31, data: []const u8, endStream: bool) Error!void {
-        // Connection-level flow control always applies (RFC 9113 6.9.2).
-        self.connRecvWindow -= @intCast(data.len);
-        self.connRecvPending += @intCast(data.len);
+    fn handleData(self: *Session, sid: u31, flowLen: usize, data: []const u8, endStream: bool) Error!void {
+        // Connection-level flow control always applies and counts the whole
+        // payload, including the Pad Length field and trailing padding
+        // (RFC 9113 Sections 6.1 and 6.9.1).
+        self.connRecvWindow -= @intCast(flowLen);
+        self.connRecvPending += @intCast(flowLen);
         if (self.connRecvWindow < 0) {
             return self.connError(.flowControlError);
         }
@@ -796,14 +1008,45 @@ pub const Session = struct {
             try self.maybeEmitWindowUpdates(sid);
             return;
         }
-        if (!st.consumeRecv(@intCast(data.len))) {
-            return self.connError(.flowControlError);
+        if (!st.consumeRecv(@intCast(flowLen))) {
+            try self.resetStream(sid, .flowControlError);
+            try self.maybeEmitWindowUpdates(sid);
+            return;
+        }
+
+        if (self.role == .client and !st.finalResponse) {
+            try self.resetStream(sid, .protocolError);
+            try self.maybeEmitWindowUpdates(sid);
+            return;
+        }
+        if (st.bodyForbidden and data.len > 0) {
+            try self.resetStream(sid, .protocolError);
+            try self.maybeEmitWindowUpdates(sid);
+            return;
+        }
+        st.bodyBytes = std.math.add(u64, st.bodyBytes, data.len) catch {
+            try self.resetStream(sid, .protocolError);
+            try self.maybeEmitWindowUpdates(sid);
+            return;
+        };
+        if (st.contentLength) |cl| {
+            if (st.bodyBytes > cl) {
+                try self.resetStream(sid, .protocolError);
+                try self.maybeEmitWindowUpdates(sid);
+                return;
+            }
+        }
+        if (endStream and !bodyLengthSatisfied(st)) {
+            try self.resetStream(sid, .protocolError);
+            try self.maybeEmitWindowUpdates(sid);
+            return;
         }
 
         if (data.len > 0) {
             if (self.cbs.onData) |cb| {
                 cb(self.cbs.ctx, sid, data) catch {
                     try self.resetStream(sid, .internalError);
+                    try self.maybeEmitWindowUpdates(sid);
                     return;
                 };
             }
@@ -811,10 +1054,12 @@ pub const Session = struct {
         st.onRecvData(endStream) catch |e| switch (e) {
             error.StreamClosed => {
                 try self.resetStream(sid, .streamClosed);
+                try self.maybeEmitWindowUpdates(sid);
                 return;
             },
             error.ProtocolError => {
                 try self.resetStream(sid, .protocolError);
+                try self.maybeEmitWindowUpdates(sid);
                 return;
             },
         };
@@ -822,6 +1067,7 @@ pub const Session = struct {
             if (self.cbs.onStreamEnd) |cb| {
                 cb(self.cbs.ctx, sid) catch {
                     try self.resetStream(sid, .internalError);
+                    try self.maybeEmitWindowUpdates(sid);
                     return;
                 };
             }
@@ -844,7 +1090,7 @@ pub const Session = struct {
         }
         if (self.streamPtr(sid)) |st| {
             const half: i64 = @divTrunc(@as(i64, self.localSettings.initialWindowSize), 2);
-            if (st.recvPending >= half and st.state != .closed) {
+            if (st.recvPending > 0 and st.recvPending >= half and st.state != .closed) {
                 const inc: u31 = @intCast(st.recvPending);
                 try frameMod.writeWindowUpdate(&self.outbound, self.allocator, sid, inc);
                 st.recvPending = 0;
@@ -857,8 +1103,13 @@ pub const Session = struct {
         if (inc == 0) {
             // A zero increment is a connection error on stream 0 and a
             // stream error on any other stream (RFC 9113 Section 6.9).
+            // Idle/closed streams cannot receive RST_STREAM.
             if (sid == 0) return self.connError(.protocolError);
-            try self.resetStream(sid, .protocolError);
+            if (self.streamPtr(sid) != null) {
+                try self.resetStream(sid, .protocolError);
+            } else if (!self.isKnownStreamId(sid)) {
+                return self.connError(.protocolError);
+            }
             return;
         }
         const amount: i64 = @intCast(inc);
@@ -879,10 +1130,14 @@ pub const Session = struct {
         }
         if (st.state == .closed) return;
         st.sendWindow += amount;
-        if (st.sendWindow > frameMod.MAX_WINDOW) return self.connError(.flowControlError);
+        if (st.sendWindow > frameMod.MAX_WINDOW) {
+            // Stream-window overflow is a stream error; a connection
+            // window overflow remains a connection error (RFC 9113
+            // Section 6.9.1).
+            try self.resetStream(sid, .flowControlError);
+            return;
+        }
     }
-
-    // -- outbound ----------------------------------------------------------------
 
     /// Fields whose values must never be placed in the HPACK dynamic
     /// table: intermediaries and logs must not be able to replay them.
@@ -926,9 +1181,10 @@ pub const Session = struct {
         for (fields) |f| {
             if (f.name.len == 0) continue;
             if (f.name[0] == ':') {
-                // Pseudo-headers are only allowed where the caller
-                // explicitly supplies them (requests/responses).
-                if (!allowPseudo) continue;
+                // Pseudo-headers are forbidden in trailers (RFC 9113
+                // Section 8.1); silently dropping one would change the
+                // sender's message.
+                if (!allowPseudo) return Error.ProtocolViolation;
             } else if (isHopByHop(f.name)) {
                 continue;
             } else if (std.ascii.eqlIgnoreCase(f.name, "te") and
@@ -951,6 +1207,7 @@ pub const Session = struct {
 
         if (is_new) {
             if (self.role != .client) return Error.StreamClosed;
+            if (self.goawaySent or self.goawayReceived) return Error.ProtocolViolation;
             if (sid % 2 == 0) return Error.ProtocolViolation;
             if (sid <= self.largestLocalStream) return Error.ProtocolViolation;
             if (self.activeLocalStreams >= self.peerSettings.maxConcurrentStreams) {
@@ -959,14 +1216,22 @@ pub const Session = struct {
         }
 
         // The first HEADERS block on a stream carries the request or
-        // response; later ones are trailers (RFC 9113 Section 8.1).
-        const trailers = st != null and st.?.headersSent > 0;
+        // response; later ones are trailers (RFC 9113 Section 8.1). A
+        // server may emit several 1xx blocks before its final response.
+        const trailers = if (st) |s|
+            if (self.role == .server) s.finalResponseSent else s.headersSent > 0
+        else
+            false;
         const kind: HeaderKind = if (trailers)
             .trailers
         else if (self.role == .client)
             .request
         else
             .response;
+
+        if (trailers and (!endStream or st.?.trailersSent)) {
+            return Error.ProtocolViolation;
+        }
 
         const normalized = try normalizeOutgoing(self.allocator, fields, !trailers);
         defer {
@@ -985,6 +1250,40 @@ pub const Session = struct {
         }
         if (list_size > self.peerSettings.maxHeaderListSize) return Error.HeaderListTooLarge;
 
+        var responseStatus: ?u16 = null;
+        if (self.role == .server and !trailers) {
+            const status = parseStatus(normalized) orelse return Error.ProtocolViolation;
+            if (status < 100 or status > 599 or status == 101) return Error.ProtocolViolation;
+            const cl = parseContentLength(normalized) catch return Error.ProtocolViolation;
+            // Informational responses are interim, never end the stream,
+            // and never carry Content-Length (RFC 9110 Section 8.6).
+            if (status < 200) {
+                if (endStream or cl != null) return Error.ProtocolViolation;
+            } else if (st) |res| {
+                if (status == 204 and cl != null) return Error.ProtocolViolation;
+                if (status == 205 and cl != null and cl.? != 0) return Error.ProtocolViolation;
+                const connectTunnel = res.requestIsConnect and status >= 200 and status < 300;
+                if (connectTunnel and cl != null) return Error.ProtocolViolation;
+                res.sendContentLength = cl;
+                res.sendBodyForbidden = res.requestIsHead or status == 204 or
+                    status == 304 or status == 205 or connectTunnel;
+                res.responseStatus = status;
+                if (endStream and !outboundBodyLengthSatisfied(res)) {
+                    return Error.ProtocolViolation;
+                }
+            }
+            responseStatus = status;
+        }
+
+        var requestContentLength: ?u64 = null;
+        if (self.role == .client and !trailers) {
+            requestContentLength = parseContentLength(normalized) catch return Error.ProtocolViolation;
+            // A request that ends with HEADERS cannot claim a body.
+            if (endStream and requestContentLength != null and requestContentLength.? != 0) {
+                return Error.ProtocolViolation;
+            }
+        }
+
         var block = std.ArrayList(u8).empty;
         defer block.deinit(self.allocator);
         for (normalized) |f| {
@@ -993,13 +1292,43 @@ pub const Session = struct {
             const indexing: hpackMod.Indexing = if (isSensitive(f.name)) .never else .incremental;
             try self.henc.encode(&block, f.name, f.value, indexing, false);
         }
-        try self.sendHeaderBlock(sid, block.items, endStream);
+        if (responseStatus) |status| {
+            if (status >= 200) {
+                if (self.streamPtr(sid)) |res| res.finalResponseSent = true;
+            }
+        }
+        try self.sendHeaderBlockInternal(sid, block.items, endStream, trailers);
+        if (!trailers and self.role == .client) {
+            if (self.streamPtr(sid)) |req| {
+                if (fieldValue(normalized, ":method")) |method| {
+                    req.requestIsHead = std.mem.eql(u8, method, "HEAD");
+                    req.requestIsConnect = std.mem.eql(u8, method, "CONNECT");
+                }
+                req.sendContentLength = requestContentLength;
+            }
+        }
     }
 
     pub fn sendHeaderBlock(self: *Session, sid: u31, block: []const u8, endStream: bool) !void {
-        const max = @min(@as(usize, self.peerSettings.maxFrameSize), 16384);
+        const trailers = if (self.streamPtr(sid)) |st|
+            if (self.role == .server) st.finalResponseSent else st.headersSent > 0
+        else
+            false;
+        try self.sendHeaderBlockInternal(sid, block, endStream, trailers);
+    }
+
+    fn sendHeaderBlockInternal(
+        self: *Session,
+        sid: u31,
+        block: []const u8,
+        endStream: bool,
+        trailers: bool,
+    ) !void {
+        const max = @as(usize, self.peerSettings.maxFrameSize);
         if (self.streamPtr(sid) == null) {
             if (self.role != .client) return Error.StreamClosed;
+            if (trailers) return Error.ProtocolViolation;
+            if (self.goawaySent or self.goawayReceived) return Error.ProtocolViolation;
             if (sid % 2 == 0) return Error.ProtocolViolation;
             if (sid <= self.largestLocalStream) return Error.ProtocolViolation;
             if (self.activeLocalStreams >= self.peerSettings.maxConcurrentStreams) {
@@ -1012,6 +1341,12 @@ pub const Session = struct {
             if (self.nextStreamId <= sid) self.nextStreamId = @as(u32, sid) + 2;
         }
         const st = self.streamPtr(sid).?;
+        if (trailers and (!endStream or st.trailersSent)) {
+            return Error.ProtocolViolation;
+        }
+        if (trailers and !outboundBodyLengthSatisfied(st)) {
+            return Error.ProtocolViolation;
+        }
         try st.onSendHeaders(endStream);
         st.headersSent += 1;
         // Response/trailer HEADERS with END_STREAM on an already
@@ -1048,6 +1383,7 @@ pub const Session = struct {
                 try self.outbound.appendSlice(self.allocator, frag);
             }
         }
+        if (trailers) st.trailersSent = true;
         if (sendClosed) self.reapClosedStream(sid);
     }
 
@@ -1056,12 +1392,19 @@ pub const Session = struct {
     pub fn sendData(self: *Session, sid: u31, data: []const u8, endStream: bool) Error!usize {
         const st = self.streamPtr(sid) orelse return Error.StreamClosed;
         if (!st.state.canSendData() or st.endStreamSent) return Error.StreamClosed;
+        if (st.sendBodyForbidden and data.len > 0) return Error.ProtocolViolation;
+        if (st.sendContentLength) |cl| {
+            const projected = std.math.add(u64, st.bodyBytesSent, data.len) catch
+                return Error.ProtocolViolation;
+            if (projected > cl) return Error.ProtocolViolation;
+        }
 
-        const max = @min(@as(usize, self.peerSettings.maxFrameSize), 16384);
+        const max = @as(usize, self.peerSettings.maxFrameSize);
 
         // A zero-length DATA frame with END_STREAM closes the send side.
         if (data.len == 0) {
             if (!endStream) return 0;
+            if (!outboundBodyLengthSatisfied(st)) return Error.ProtocolViolation;
             try frameMod.writeData(&self.outbound, self.allocator, sid, data, true);
             st.onSendData(true) catch return Error.StreamClosed;
             if (st.state == .closed) self.reapClosedStream(sid);
@@ -1072,6 +1415,15 @@ pub const Session = struct {
         if (budgetWin <= 0) return 0;
 
         const allowed: usize = @min(@as(usize, @intCast(budgetWin)), data.len);
+        // Validate the final length before writing any bytes, but only
+        // when this call can actually carry END_STREAM.
+        if (endStream and allowed == data.len) {
+            if (st.sendContentLength) |cl| {
+                const total = std.math.add(u64, st.bodyBytesSent, data.len) catch
+                    return Error.ProtocolViolation;
+                if (total != cl) return Error.ProtocolViolation;
+            }
+        }
         var sent: usize = 0;
 
         while (sent < allowed) {
@@ -1080,6 +1432,7 @@ pub const Session = struct {
             const fin = endStream and sent + take == data.len;
             frameMod.writeData(&self.outbound, self.allocator, sid, chunk, fin) catch return Error.OutOfMemory;
             sent += take;
+            st.bodyBytesSent += @intCast(take);
             _ = st.creditSend(@intCast(take));
             self.connSendWindow -= @intCast(take);
         }
@@ -1115,6 +1468,9 @@ pub const Session = struct {
             const next = st.recvWindow + @as(i64, inc);
             if (next > frameMod.MAX_WINDOW) return Error.FlowControlError;
             st.recvWindow = next;
+            // Credit already granted through this call must not be granted
+            // again by the automatic half-window replenisher.
+            st.recvPending = @max(@as(i64, 0), st.recvPending - @as(i64, inc));
         }
         try frameMod.writeWindowUpdate(&self.outbound, self.allocator, sid, inc);
     }
@@ -1134,10 +1490,12 @@ pub const Session = struct {
     /// Final GOAWAY with the real last-stream-id. The identifier must
     /// never increase across GOAWAY frames (RFC 9113 Section 6.8).
     pub fn finishGracefulShutdown(self: *Session) !void {
+        // A client's GOAWAY refers to server-initiated (push) streams.
+        // Push is disabled, so its final last-stream-id is zero.
         const candidate: u31 = if (self.role == .server)
             self.largestPeerStream
         else
-            @intCast(@min(self.largestLocalStream, 0x7FFFFFFF));
+            0;
         const lastSid: u31 = @min(candidate, self.goawayLastSidSent);
         try frameMod.writeGoaway(&self.outbound, self.allocator, lastSid, 0, "");
         self.goawaySent = true;
@@ -1145,14 +1503,21 @@ pub const Session = struct {
     }
 
     pub fn sendConnectionClose(self: *Session, code: ErrorCode, debug: []const u8) !void {
-        try frameMod.writeGoaway(&self.outbound, self.allocator, 0x7FFFFFFF, @backingInt(code), debug);
+        const candidate: u31 = if (self.role == .server) self.largestPeerStream else 0;
+        const lastSid = @min(candidate, self.goawayLastSidSent);
+        try frameMod.writeGoaway(&self.outbound, self.allocator, lastSid, @backingInt(code), debug);
+        self.goawaySent = true;
+        self.goawayLastSidSent = lastSid;
     }
 
     /// Queues a fatal GOAWAY then returns the mapped protocol error.
     fn connError(self: *Session, code: ErrorCode) Error {
         if (!self.closed) {
             self.closed = true;
-            const lastSid: u31 = if (self.role == .server) self.largestPeerStream else 0x7FFFFFFF;
+            const candidate: u31 = if (self.role == .server) self.largestPeerStream else 0;
+            // A fatal GOAWAY sent after a graceful GOAWAY must not
+            // increase the advertised last-stream-id (RFC 9113 6.8).
+            const lastSid = @min(candidate, self.goawayLastSidSent);
             frameMod.writeGoaway(
                 &self.outbound,
                 self.allocator,
@@ -1182,9 +1547,6 @@ pub const Session = struct {
             kv.value.deinit();
             self.allocator.destroy(kv.value);
         }
-        // Remember the identifier so a late frame for it is answered with
-        // a stream error instead of an idle-stream connection error.
-        self.closedStreams.put(sid, {}) catch {};
     }
 
     /// Reaps a stream that reached the fully-closed state (both sides
@@ -1212,6 +1574,29 @@ pub const Session = struct {
 };
 
 // Loopback integration test: full client<->server exchange
+
+fn establishTestPair(client: *Session, server: *Session) !void {
+    try client.startHandshake();
+    try server.startHandshake();
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+}
+
+fn hasRstStream(out: []const u8, sid: u31, code: u32) bool {
+    var off: usize = 0;
+    while (off + frameMod.FRAME_HEADER_SIZE <= out.len) {
+        const hdr = FrameHeader.parse(out[off..][0..frameMod.FRAME_HEADER_SIZE]);
+        off += frameMod.FRAME_HEADER_SIZE;
+        if (off + hdr.length > out.len) return false;
+        if (hdr.frameType == .rstStream and hdr.streamId == sid and hdr.length == 4) {
+            if (std.mem.readInt(u32, out[off..][0..4], .big) == code) return true;
+        }
+        off += hdr.length;
+    }
+    return false;
+}
 
 test "session pair completes request/response exchange" {
     const a = std.testing.allocator;
@@ -1319,6 +1704,441 @@ test "session pair completes request/response exchange" {
     try server.feed(client.outbound.items);
 }
 
+test "informational responses are ignored until the final response" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const Capture = struct {
+        var status: u16 = 0;
+        var calls: usize = 0;
+        var body: [8]u8 = undefined;
+        var blen: usize = 0;
+        var ended: bool = false;
+
+        fn onHeaders(_: ?*anyopaque, _: u31, fields: []hpackMod.HeaderField, _: bool) anyerror!void {
+            calls += 1;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, ":status")) {
+                    status = std.fmt.parseInt(u16, f.value, 10) catch 0;
+                }
+            }
+        }
+        fn onData(_: ?*anyopaque, _: u31, data: []const u8) anyerror!void {
+            @memcpy(body[blen..][0..data.len], data);
+            blen += data.len;
+        }
+        fn onEnd(_: ?*anyopaque, _: u31) anyerror!void {
+            ended = true;
+        }
+    };
+    client.cbs = .{
+        .onHeaders = Capture.onHeaders,
+        .onData = Capture.onData,
+        .onStreamEnd = Capture.onEnd,
+    };
+
+    const req = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, req[0..], true);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    const info = [_]hpackMod.HeaderField{.{ .name = ":status", .value = "103" }};
+    try std.testing.expectError(Error.ProtocolViolation, server.sendHeaders(1, info[0..], true));
+    const infoWithLength = [_]hpackMod.HeaderField{
+        .{ .name = ":status", .value = "103" },
+        .{ .name = "content-length", .value = "0" },
+    };
+    try std.testing.expectError(Error.ProtocolViolation, server.sendHeaders(1, infoWithLength[0..], false));
+    try server.sendHeaders(1, info[0..], false);
+
+    const resp = [_]hpackMod.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "2" },
+    };
+    try server.sendHeaders(1, resp[0..], false);
+    _ = try server.sendData(1, "hi", true);
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+
+    try std.testing.expectEqual(@as(usize, 1), Capture.calls);
+    try std.testing.expectEqual(@as(u16, 200), Capture.status);
+    try std.testing.expectEqualStrings("hi", Capture.body[0..Capture.blen]);
+    try std.testing.expect(Capture.ended);
+}
+
+test "outbound trailers require END_STREAM and no pseudo-headers" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const req = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, req[0..], true);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    const resp = [_]hpackMod.HeaderField{.{ .name = ":status", .value = "200" }};
+    try server.sendHeaders(1, resp[0..], false);
+
+    const trailers = [_]hpackMod.HeaderField{.{ .name = "x-checksum", .value = "1" }};
+    try std.testing.expectError(Error.ProtocolViolation, server.sendHeaders(1, trailers[0..], false));
+
+    const pseudoTrailer = [_]hpackMod.HeaderField{.{ .name = ":status", .value = "200" }};
+    try std.testing.expectError(Error.ProtocolViolation, server.sendHeaders(1, pseudoTrailer[0..], true));
+
+    // The rejected blocks never consumed the one allowed trailer section.
+    try server.sendHeaders(1, trailers[0..], true);
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+    try std.testing.expect(!hasRstStream(client.outbound.items, 1, @backingInt(ErrorCode.protocolError)));
+}
+
+test "duplicate outbound trailers are rejected" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const req = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, req[0..], false);
+    const trailers = [_]hpackMod.HeaderField{.{ .name = "x-checksum", .value = "1" }};
+    try client.sendHeaders(1, trailers[0..], true);
+    try std.testing.expectError(Error.ProtocolViolation, client.sendHeaders(1, trailers[0..], true));
+}
+
+test "padding counts against the stream flow-control window" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    client.localSettings.initialWindowSize = 10;
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const req = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, req[0..], true);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    const resp = [_]hpackMod.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "9" },
+    };
+    try server.sendHeaders(1, resp[0..], false);
+
+    // Nine data bytes plus one pad-length byte and one padding byte: the
+    // payload is 11 bytes, one over the advertised stream window.
+    const payload = [_]u8{ 1, 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 0 };
+    try frameMod.writeHeader(&server.outbound, a, payload.len, .data, Flags.PADDED | Flags.END_STREAM, 1);
+    try server.outbound.appendSlice(a, &payload);
+
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+    try std.testing.expect(hasRstStream(client.outbound.items, 1, @backingInt(ErrorCode.flowControlError)));
+}
+
+test "outbound content-length mismatches are rejected before sending" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const req = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, req[0..], true);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    const resp = [_]hpackMod.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "5" },
+    };
+    // A final HEADERS block cannot end the stream while promising a body.
+    try std.testing.expectError(Error.ProtocolViolation, server.sendHeaders(1, resp[0..], true));
+    try server.sendHeaders(1, resp[0..], false);
+    try std.testing.expectError(Error.ProtocolViolation, server.sendData(1, "abc", true));
+    try std.testing.expectError(Error.ProtocolViolation, server.sendData(1, "abcdef", false));
+
+    // None of the rejected bytes were written, so the correct body fits.
+    try std.testing.expectEqual(@as(usize, 5), try server.sendData(1, "abcde", true));
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+    try std.testing.expect(!hasRstStream(client.outbound.items, 1, @backingInt(ErrorCode.protocolError)));
+}
+
+test "outbound requests validate content-length before sending" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const base = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "POST" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    const withBody = base ++ [_]hpackMod.HeaderField{.{ .name = "content-length", .value = "3" }};
+    try std.testing.expectError(Error.ProtocolViolation, client.sendHeaders(1, &withBody, true));
+
+    const invalid = base ++ [_]hpackMod.HeaderField{.{ .name = "content-length", .value = "3x" }};
+    try std.testing.expectError(Error.ProtocolViolation, client.sendHeaders(1, &invalid, false));
+
+    try client.sendHeaders(1, &withBody, false);
+    try std.testing.expectError(Error.ProtocolViolation, client.sendData(1, "abcd", false));
+    try std.testing.expectEqual(@as(usize, 3), try client.sendData(1, "abc", true));
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+    try std.testing.expect(!hasRstStream(server.outbound.items, 1, @backingInt(ErrorCode.protocolError)));
+}
+
+test "a received content-length mismatch resets the stream" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const req = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, req[0..], true);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    const resp = [_]hpackMod.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "5" },
+    };
+    try server.sendHeaders(1, resp[0..], false);
+    // Bypass sendData to exercise the receive-side length check.
+    try frameMod.writeData(&server.outbound, a, 1, "abc", true);
+
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+    try std.testing.expect(hasRstStream(client.outbound.items, 1, @backingInt(ErrorCode.protocolError)));
+}
+
+test "a received GOAWAY refuses only client streams above its last id" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const req = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, req[0..], false);
+    try client.sendHeaders(3, req[0..], false);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    try frameMod.writeGoaway(&server.outbound, a, 1, 0, "");
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+
+    try std.testing.expect(client.streamPtr(1) != null);
+    try std.testing.expect(client.streamPtr(3) == null);
+    try std.testing.expectError(Error.ProtocolViolation, client.sendHeaders(5, req[0..], true));
+}
+
+test "HEAD and 304 responses may declare a content-length without a body" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const headReq = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "HEAD" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, headReq[0..], true);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    const headResp = [_]hpackMod.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "10" },
+    };
+    try server.sendHeaders(1, headResp[0..], true);
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+    try std.testing.expect(!hasRstStream(client.outbound.items, 1, @backingInt(ErrorCode.protocolError)));
+
+    const getReq = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(3, getReq[0..], true);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    const notModified = [_]hpackMod.HeaderField{
+        .{ .name = ":status", .value = "304" },
+        .{ .name = "content-length", .value = "10" },
+    };
+    try server.sendHeaders(3, notModified[0..], true);
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+    try std.testing.expect(!hasRstStream(client.outbound.items, 3, @backingInt(ErrorCode.protocolError)));
+}
+
+test "204 responses must not send content-length" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const req = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, req[0..], true);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    const withLength = [_]hpackMod.HeaderField{
+        .{ .name = ":status", .value = "204" },
+        .{ .name = "content-length", .value = "0" },
+    };
+    try std.testing.expectError(Error.ProtocolViolation, server.sendHeaders(1, withLength[0..], true));
+
+    const resp = [_]hpackMod.HeaderField{.{ .name = ":status", .value = "204" }};
+    try server.sendHeaders(1, resp[0..], true);
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+    try std.testing.expect(!hasRstStream(client.outbound.items, 1, @backingInt(ErrorCode.protocolError)));
+}
+
+test "205 responses allow only a zero content-length" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const req = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, req[0..], true);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    const nonZero = [_]hpackMod.HeaderField{
+        .{ .name = ":status", .value = "205" },
+        .{ .name = "content-length", .value = "1" },
+    };
+    try std.testing.expectError(Error.ProtocolViolation, server.sendHeaders(1, nonZero[0..], true));
+
+    const resp = [_]hpackMod.HeaderField{
+        .{ .name = ":status", .value = "205" },
+        .{ .name = "content-length", .value = "0" },
+    };
+    try server.sendHeaders(1, resp[0..], true);
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+    try std.testing.expect(!hasRstStream(client.outbound.items, 1, @backingInt(ErrorCode.protocolError)));
+}
+
+test "header list validation tracks CONNECT pseudo-header rules" {
+    const connect = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":authority", .value = "example.com:443" },
+    };
+    try std.testing.expect(Session.validateHeaderList(&connect, .request));
+
+    const connectWithPath = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":authority", .value = "example.com:443" },
+        .{ .name = ":path", .value = "/" },
+    };
+    try std.testing.expect(!Session.validateHeaderList(&connectWithPath, .request));
+
+    const extended = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":authority", .value = "example.com:443" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":protocol", .value = "websocket" },
+    };
+    try std.testing.expect(Session.validateHeaderList(&extended, .request));
+
+    const relative = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "relative" },
+    };
+    try std.testing.expect(!Session.validateHeaderList(&relative, .request));
+
+    const asterisk = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "OPTIONS" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "*" },
+    };
+    try std.testing.expect(Session.validateHeaderList(&asterisk, .request));
+}
+
 test "header list validation rejects uppercase, forbidden headers and mixed pseudo-headers" {
     // Uppercase header name -> rejected
     const badUpper = [_]hpackMod.HeaderField{
@@ -1377,12 +2197,36 @@ test "header list validation rejects uppercase, forbidden headers and mixed pseu
     try std.testing.expect(Session.validateHeaderList(&plainTrailer, .trailers));
 }
 
+test "header list validation rejects malformed method, scheme and authority" {
+    const badMethod = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GE T" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
+    };
+    try std.testing.expect(!Session.validateHeaderList(&badMethod, .request));
+
+    const badScheme = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "ht tp" },
+        .{ .name = ":path", .value = "/" },
+    };
+    try std.testing.expect(!Session.validateHeaderList(&badScheme, .request));
+
+    const userinfo = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":authority", .value = "user@example.com" },
+    };
+    try std.testing.expect(!Session.validateHeaderList(&userinfo, .request));
+}
+
 test "continued header blocks are rejected before exceeding configured budget" {
     var session = try Session.init(std.testing.allocator, .server, .{});
     defer session.deinit();
     session.maxHeaderBlockBytes = 5;
 
-    try session.handleHeadersStart(1, "1234", false, false);
+    try session.handleHeadersStart(1, "1234", false, false, false);
     try std.testing.expectError(Error.ProtocolViolation, session.handleContinuation(1, "56", true));
     try std.testing.expect(session.closed);
     try std.testing.expect(session.streamPtr(1).?.headerBlock.?.items.len <= 5);

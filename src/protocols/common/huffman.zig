@@ -10,8 +10,8 @@
 //! may legally terminate only where the unconsumed trailing bits are an
 //! all-ones run shorter than 8 bits — i.e. valid EOS-prefix padding.
 //!
-//! This mirrors the representation nghttp2/nghttp3 generate (mkhufftbl),
-//! derived here from first principles.
+//! The table is derived from RFC 7541 Appendix B and shared by HPACK and
+//! QPACK.
 
 const std = @import("std");
 pub const table = @import("huffmanTable.zig");

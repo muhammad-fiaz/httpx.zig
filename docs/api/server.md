@@ -9,7 +9,7 @@ The `httpx.zig` server module provides a robust HTTP server with middleware supp
 | HTTP/1.0 | ✅ Full | Basic request/response |
 | HTTP/1.1 | ✅ Full | Keep-Alive, chunked transfer, pipelining |
 | HTTP/2 | ✅ Full | High-level server runtime over TCP plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Reliable paths | High-level server runtime over UDP + QUIC/TLS 1.3 with loss recovery, NewReno congestion control, and 0-RTT; one request per connection and no Retry/version negotiation yet |
+| HTTP/3 | ✅ Reliable paths | High-level server runtime over UDP + QUIC/TLS 1.3 with loss recovery, NewReno congestion control, 0-RTT, Retry, and v1/v2 version negotiation; requests multiplex on one active connection, and connection migration is not implemented |
 
 ## Server
 
@@ -83,6 +83,8 @@ defer server.deinit();
 | `http11` | `bool` | `true` | Enable HTTP/1.1 handling. |
 | `http2` | `bool` | `true` | HTTP/2 cleartext/TLS server runtime path. |
 | `http3` | `bool` | `false` | HTTP/3 server runtime path. |
+| `http3Retry` | `bool` | `false` | Require a Retry token before accepting the QUIC Initial, validating the peer address and limiting amplification. |
+| `http3RetryKey` | `?[32]u8` | `null` | HMAC key for Retry tokens; a fresh random key per connection is used when null. |
 | `logging` | `LoggingOptions` | `{}` | Event callback + level (silent by default). |
 | `enableDocs` | `bool` | `true` | Mount `/openapi.json`, `/docs`, `/redoc` by default. |
 | `docs` | `?docs.Config` | `null` | Overrides for docs routes when enabled. |

@@ -38,6 +38,15 @@ pub const RequestStream = struct {
     allocator: Allocator,
     qpack: *qpackMod.Encoder,
 
+    /// QPACK field names must be lowercase (RFC 9114 Section 4.1.2), while
+    /// handler and caller headers commonly use title case.
+    fn encodeField(self: *RequestStream, block: *std.ArrayList(u8), name: []const u8, value: []const u8) !void {
+        const lower = try self.allocator.alloc(u8, name.len);
+        defer self.allocator.free(lower);
+        for (name, 0..) |c, i| lower[i] = std.ascii.toLower(c);
+        try self.qpack.encodeField(block, lower, value);
+    }
+
     /// Builds HEADERS frame payload for a response.
     pub fn buildResponseHeaders(
         self: *RequestStream,
@@ -54,11 +63,11 @@ pub const RequestStream = struct {
         // Status pseudo-header
         var codeBuf: [4]u8 = undefined;
         const codeStr = std.fmt.bufPrint(&codeBuf, "{d}", .{statusCode}) catch "500";
-        try self.qpack.encodeField(&block, ":status", codeStr);
+        try self.encodeField(&block, ":status", codeStr);
 
         for (headers) |h| {
             if (std.mem.startsWith(u8, h.name, ":")) continue; // skip other pseudos
-            try self.qpack.encodeField(&block, h.name, h.value);
+            try self.encodeField(&block, h.name, h.value);
         }
 
         const ric = self.qpack.sectionRic();
@@ -92,13 +101,13 @@ pub const RequestStream = struct {
         var block = std.ArrayList(u8).empty;
         errdefer block.deinit(self.allocator);
         self.qpack.beginSection();
-        try self.qpack.encodeField(&block, ":method", method);
-        try self.qpack.encodeField(&block, ":scheme", scheme);
-        try self.qpack.encodeField(&block, ":authority", authority);
-        try self.qpack.encodeField(&block, ":path", path);
+        try self.encodeField(&block, ":method", method);
+        try self.encodeField(&block, ":scheme", scheme);
+        try self.encodeField(&block, ":authority", authority);
+        try self.encodeField(&block, ":path", path);
         for (headers) |h| {
             if (std.mem.startsWith(u8, h.name, ":")) return error.InvalidHeader;
-            try self.qpack.encodeField(&block, h.name, h.value);
+            try self.encodeField(&block, h.name, h.value);
         }
 
         const ric = self.qpack.sectionRic();
@@ -476,6 +485,12 @@ pub const Connection = struct {
             .allocator = self.allocator,
             .qpack = &self.qenc,
         };
+    }
+
+    /// Records that the request on `streamId` used HEAD, so response
+    /// body-framing rules can be enforced by the stream state machine.
+    pub fn markRequestHead(self: *Connection, streamId: u64) void {
+        if (self.streams.getPtr(streamId)) |st| st.requestIsHead = true;
     }
 
     /// Builds the callback set H3Streams get, forwarding into this

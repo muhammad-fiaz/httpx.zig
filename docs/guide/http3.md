@@ -7,7 +7,7 @@ Zig's standard library does not provide HTTP/3 or QUIC support. **httpx.zig impl
 - **QPACK** header compression (RFC 9204) with static/dynamic tables, encoder/decoder stream instructions, and blocked-section retry
 - **QUIC** transport frame encoding/decoding (RFC 9000), TLS 1.3 handshake, ACK/loss recovery, NewReno congestion control, flow control, RESET_STREAM/STOP_SENDING, transport parameters, and 0-RTT resumption
 - **HTTP/3** frame types, SETTINGS, GOAWAY, CONNECTION_CLOSE handling, trailers, and precise protocol-error mapping
-- **Limits:** no Retry/token round trip, QUIC version negotiation, HelloRetryRequest handling, key update, connection migration, server push, or datagrams. The high-level paths perform one request per QUIC connection.
+- **Limits:** Retry/token validation, QUIC v1/v2 version negotiation, and key updates are implemented; HelloRetryRequest handling, connection migration, server push, and datagrams are not. The high-level HTTP/3 client performs one request per QUIC connection.
 :::
 
 ## Platform Support
@@ -59,10 +59,10 @@ Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP
 
 ### Deliberate Current Limits
 
-- One request per QUIC connection (no H3 pooling yet); proxy routes are rejected loudly (`Http3ProxyUnsupported`).
+- The high-level HTTP/3 client performs one request per QUIC connection (no H3 pooling); proxy routes are rejected loudly (`Http3ProxyUnsupported`).
 - 0-RTT resumption works over QUIC, but the QUIC driver does not handle HelloRetryRequest; clients always send an X25519 share.
-- No Retry/token round trip and no QUIC version negotiation: only version 1 is supported.
-- No key update, connection migration, server push, or HTTP/3 datagrams.
+- Retry/token validation, QUIC v1/v2 version negotiation, and 1-RTT key updates are implemented. Set `.http3Retry = true` on `ServerConfig` to require address validation before the Initial flight; the 3x anti-amplification limit otherwise applies until the client Finished is verified. The high-level client honors Retry automatically and resends the ClientHello under the new Initial keys.
+- No connection migration, server push, or HTTP/3 datagrams.
 - The client sends buffered request bodies in HTTP/3 DATA frames. Streaming
   uploads and downloads are not provided by this one-shot API.
 

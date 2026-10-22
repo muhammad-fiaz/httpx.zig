@@ -2,9 +2,9 @@
 //! buffer, flow-control accounting (stream + connection credit), and
 //! FIN/RESET semantics (RFC 9000 sections 2 and 4).
 //!
-//! Design mirrors ngtcp2Strm's fast path: in-order data is delivered
-//! immediately; out-of-order chunks are buffered until the hole fills.
-//! A cap on buffered gaps guards against hostile senders.
+//! In-order data is delivered immediately; out-of-order chunks are
+//! buffered until the hole fills. A cap on buffered gaps guards against
+//! hostile senders.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

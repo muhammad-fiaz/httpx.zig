@@ -278,12 +278,38 @@ pub fn build(b: *std.Build) void {
         runAllExamples.dependOn(&runExe.step);
     }
 
+    // Interoperability harness binaries. `zig build interop` compiles the Zig
+    // client and servers; tests/interop/run.ps1 drives them against the
+    // independent Python implementations (h2, aioquic).
+    const interopStep = b.step("interop", "Build the HTTP/2 and HTTP/3 interoperability harness");
+    const interopTargets = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "interop-h2-server", .path = "tests/interop/h2_server.zig" },
+        .{ .name = "interop-h3-server", .path = "tests/interop/h3_server.zig" },
+        .{ .name = "interop-client", .path = "tests/interop/client.zig" },
+    };
+    inline for (interopTargets) |interop| {
+        const interopExe = b.addExecutable(.{
+            .name = interop.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(interop.path),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        interopExe.root_module.addImport("httpx", httpxModule);
+        linkPlatformLibs(interopExe, target);
+        const installInterop = b.addInstallArtifact(interopExe, .{});
+        interopStep.dependOn(&installInterop.step);
+    }
+
+    const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/httpx.zig"),
             .target = target,
             .optimize = optimize,
         }),
+        .filters = if (test_filter) |f| &.{f} else &.{},
     });
     tests.root_module.addImport("zstd", zstdDep.module("zstd"));
     tests.root_module.addImport("brotli", brotliDep.module("brotli"));

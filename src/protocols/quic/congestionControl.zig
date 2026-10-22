@@ -1,7 +1,6 @@
-//! NewReno congestion control (RFC 9002 section 7) with constants from
-//! ngtcp2Cc: initial window = min(10*MSS, max(2*MSS, 14720)), minimum
-//! window = 2*MSS, halving on congestion event, additive growth per RTT
-//! in congestion avoidance.
+//! NewReno congestion control (RFC 9002 section 7): initial window =
+//! min(10*MSS, max(2*MSS, 14720)), minimum window = 2*MSS, halving on a
+//! congestion event, and additive growth per RTT in congestion avoidance.
 
 const std = @import("std");
 

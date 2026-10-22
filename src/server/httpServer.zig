@@ -389,9 +389,12 @@ const H3PumpCtx = struct {
     }
 
     fn onTrailers(ctx: ?*anyopaque, sid: u64, fields: []const http3Qpack.FieldLine) void {
-        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
-        const r = p.getOrCreate(sid) orelse return;
-        r.copyFields(fields);
+        _ = ctx;
+        _ = sid;
+        // The request API exposes headers and body only; merging trailers
+        // into the header list would let a trailer override request
+        // metadata. Trailers are still validated by the H3 stream layer.
+        _ = fields;
     }
 
     fn onMessageEnd(ctx: ?*anyopaque, sid: u64) void {
@@ -1383,7 +1386,13 @@ pub const Server = struct {
             fn handle(ctxPtr: ?*anyopaque, mStr: []const u8, pStr: []const u8, hdrs: []const transportMod.Header, bStr: []const u8) anyerror!transportMod.HandlerResponse {
                 const c: *H2Ctx = @ptrCast(@alignCast(ctxPtr.?));
                 const serverPtr = c.server;
-                const method = Method.fromString(mStr) orelse .GET;
+                // The transport consumes each response synchronously before
+                // the next handler call, so one request's allocations can be
+                // reclaimed while the connection stays open.
+                _ = c.arena.reset(.retain_capacity);
+                // Match the HTTP/1 path: unknown methods are not silently
+                // coerced to GET (they would hit unrelated routes).
+                const method = Method.fromString(mStr) orelse return .{ .status = 501, .body = "method not supported" };
                 const a = c.arena.allocator();
 
                 var ctxHdrs = try a.alloc(routerMod.Header, hdrs.len);
@@ -1415,8 +1424,8 @@ pub const Server = struct {
                 // Full pipeline: match + router/route middleware + 404/405 +
                 // auto-OPTIONS, exactly like HTTP/1.
                 const res = serverPtr.router.dispatch(&ctx);
-                // The response is copied into the connection arena: the
-                // transport sends it after this callback returns.
+                // The response is copied into the request arena and the
+                // transport consumes it before this callback can run again.
                 const outBody = try a.dupe(u8, res.body);
                 const extra: usize = if (res.contentType != null) 1 else 0;
                 var outHdrs = try a.alloc(transportMod.Header, res.headers.len + extra);
@@ -1441,12 +1450,12 @@ pub const Server = struct {
 
             /// Applies the same content coding the HTTP/1 path uses, so
             /// one handler behaves identically across protocol versions.
-            fn decorate(ctxPtr: ?*anyopaque, allocator: Allocator, resp: *transportMod.HandlerResponse, method: []const u8, extra: *std.ArrayList(transportMod.Header)) anyerror!?[]u8 {
+            fn decorate(ctxPtr: ?*anyopaque, allocator: Allocator, resp: *transportMod.HandlerResponse, method: []const u8, reqHeaders: []const transportMod.Header, extra: *std.ArrayList(transportMod.Header)) anyerror!?[]u8 {
                 const c: *H2Ctx = @ptrCast(@alignCast(ctxPtr.?));
                 const serverPtr = c.server;
                 const isHead = std.ascii.eqlIgnoreCase(method, "HEAD");
                 var clientAcceptEncoding: ?[]const u8 = null;
-                for (resp.headers) |h| {
+                for (reqHeaders) |h| {
                     if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) clientAcceptEncoding = h.value;
                 }
                 if (isHead or resp.status == 204 or resp.status == 304) return null;
@@ -1631,6 +1640,15 @@ pub const Server = struct {
             if (nowMs -| startMs > 300_000) return error.Timeout;
             try quicHs.feedPumped(ep, pump, null, 200, nowMs);
             if (pumpCtx.err) |e| return e;
+            // A peer CONNECTION_CLOSE leaves the connection draining. Stop
+            // owning the endpoint immediately so the next client's Initial
+            // is not fed into this closed connection and rejected. If this
+            // side initiated the close, flush its CONNECTION_CLOSE first.
+            if (qconn.state == .closing) {
+                _ = ep.flush(null) catch {};
+                return;
+            }
+            if (qconn.state == .draining or qconn.state == .closed) return;
             try h3.pumpQpack(qconn, nowMs);
             _ = try ep.flush(null);
 
@@ -1682,20 +1700,33 @@ pub const Server = struct {
 
         var mStr: []const u8 = "GET";
         var pStr: []const u8 = "/";
-        var ctxHdrs = try a.alloc(routerMod.Header, fields.len);
+        var authorityStr: ?[]const u8 = null;
+        var sawHost = false;
+        var ctxHdrs = try a.alloc(routerMod.Header, fields.len + 1);
         var hdrCount: usize = 0;
         for (fields) |f| {
             if (std.mem.eql(u8, f.name, ":method")) {
                 mStr = f.value;
             } else if (std.mem.eql(u8, f.name, ":path")) {
                 pStr = f.value;
+            } else if (std.mem.eql(u8, f.name, ":authority")) {
+                authorityStr = f.value;
             } else if (!std.mem.startsWith(u8, f.name, ":")) {
+                if (std.mem.eql(u8, f.name, "host")) sawHost = true;
                 ctxHdrs[hdrCount] = .{ .name = f.name, .value = f.value };
                 hdrCount += 1;
             }
         }
+        // HTTP/1-style handlers expect the authority as Host when the
+        // client sent no explicit host field (RFC 9114 Section 4.3.1).
+        if (!sawHost) {
+            if (authorityStr) |authority| {
+                ctxHdrs[hdrCount] = .{ .name = "host", .value = authority };
+                hdrCount += 1;
+            }
+        }
 
-        const method = Method.fromString(mStr) orelse .GET;
+        const knownMethod = Method.fromString(mStr);
         var cleanPath = pStr;
         if (std.mem.indexOfAny(u8, cleanPath, "?#")) |idx| {
             cleanPath = cleanPath[0..idx];
@@ -1713,13 +1744,16 @@ pub const Server = struct {
             .headers = ctxHdrs[0..hdrCount],
             .path = cleanPath,
             .query = queryPart,
-            .method = method,
+            .method = knownMethod orelse .GET,
             .body = reqBody,
             .isTls = true,
             .trustForwarded = self.cfg.trustForwardedHeaders,
         };
 
-        var res = self.router.dispatch(&ctx);
+        var res = if (knownMethod != null)
+            self.router.dispatch(&ctx)
+        else
+            Response{ .status = 501, .body = "method not supported" };
 
         // The same content coding the HTTP/1 and HTTP/2 paths apply, so one
         // handler behaves identically across protocol versions.
@@ -1728,12 +1762,14 @@ pub const Server = struct {
             if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) clientAcceptEncoding = h.value;
         }
 
+        const isHead = std.ascii.eqlIgnoreCase(mStr, "HEAD");
+        const statusAllowsBody = res.status != 204 and res.status != 205 and res.status != 304;
         var codedBody: ?[]u8 = null;
         defer if (codedBody) |b| a.free(b);
         var outBody: []const u8 = res.body;
         var contentEncoding: ?[]const u8 = null;
         var varyAcceptEncoding = false;
-        if (res.status != 204 and res.status != 304) {
+        if (statusAllowsBody and !isHead) {
             const coding = compression.encodeResponseBody(
                 a,
                 res.body,
@@ -1758,18 +1794,30 @@ pub const Server = struct {
             }
         }
 
+        if (res.status < 200 or res.status > 599) res.status = 500;
         var rs = h3.createRequestStream(req.sid);
 
         var respHeaders = std.ArrayList(http3Qpack.FieldLine).empty;
         defer respHeaders.deinit(a);
-        // content-length describes the bytes actually sent, so it is
-        // derived after content coding, exactly like the HTTP/1 and
-        // HTTP/2 paths. A peer that only has the stream end as a
-        // delimiter still gets an explicit length.
-        var clBuf: [20]u8 = undefined;
-        const cl = clBuf[0..std.fmt.printInt(&clBuf, outBody.len, 10, .lower, .{})];
-        try respHeaders.append(a, .{ .name = "content-length", .value = cl });
+        // Content-Length describes the bytes that a GET would send; HEAD
+        // keeps the length but suppresses the DATA frame. 204/205/304
+        // responses carry no content framing.
+        if (statusAllowsBody) {
+            var clBuf: [20]u8 = undefined;
+            const cl = clBuf[0..std.fmt.printInt(&clBuf, outBody.len, 10, .lower, .{})];
+            try respHeaders.append(a, .{ .name = "content-length", .value = cl });
+        }
         for (res.headers) |h| {
+            if (h.name.len == 0 or h.name[0] == ':') continue;
+            if (std.ascii.eqlIgnoreCase(h.name, "content-length") or
+                std.ascii.eqlIgnoreCase(h.name, "connection") or
+                std.ascii.eqlIgnoreCase(h.name, "keep-alive") or
+                std.ascii.eqlIgnoreCase(h.name, "proxy-connection") or
+                std.ascii.eqlIgnoreCase(h.name, "transfer-encoding") or
+                std.ascii.eqlIgnoreCase(h.name, "upgrade"))
+            {
+                continue;
+            }
             try respHeaders.append(a, .{ .name = h.name, .value = h.value });
         }
         if (res.contentType) |ct| {
@@ -1782,13 +1830,16 @@ pub const Server = struct {
 
         const rhead = try rs.buildResponseHeaders(res.status, respHeaders.items);
         defer self.allocator.free(rhead);
-        const rdata = try rs.buildData(outBody);
-        defer self.allocator.free(rdata);
 
         var wire = std.ArrayList(u8).empty;
         defer wire.deinit(self.allocator);
         try wire.appendSlice(self.allocator, rhead);
-        try wire.appendSlice(self.allocator, rdata);
+        const sendBody = statusAllowsBody and !isHead and outBody.len > 0;
+        if (sendBody) {
+            const rdata = try rs.buildData(outBody);
+            defer self.allocator.free(rdata);
+            try wire.appendSlice(self.allocator, rdata);
+        }
 
         // Queue the QPACK encoder instructions the response section
         // references before the response stream bytes go out.

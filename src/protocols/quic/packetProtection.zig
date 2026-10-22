@@ -2,8 +2,8 @@
 //! payload AEAD, nonce construction, packet-number reconstruction, and
 //! Retry integrity.
 //!
-//! Cipher choice here mirrors ngtcp2's structure but uses std.crypto
-//! primitives directly. Vectors come from RFC 9001 Appendix A.
+//! Uses std.crypto primitives directly. Vectors come from RFC 9001
+//! Appendix A.
 
 const std = @import("std");
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;

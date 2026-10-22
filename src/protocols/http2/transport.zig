@@ -133,12 +133,25 @@ pub const Response = struct {
 
 /// Per-stream response accumulator. The session callbacks dispatch by
 /// stream id, so several requests may be in flight at once.
+/// Duplicates a header field into `list`, freeing the copies if either
+/// allocation or the append fails. The caller owns the appended field.
+fn appendCopiedHeader(a: Allocator, list: *std.ArrayList(Header), name: []const u8, value: []const u8) !void {
+    const ownedName = try a.dupe(u8, name);
+    errdefer a.free(ownedName);
+    const ownedValue = try a.dupe(u8, value);
+    errdefer a.free(ownedValue);
+    try list.append(a, .{ .name = ownedName, .value = ownedValue });
+}
+
 const RequestState = struct {
     sid: u31,
     allocator: Allocator,
     status: u16 = 500,
     headers: std.ArrayList(Header) = .empty,
     body: std.ArrayList(u8) = .empty,
+    /// The final response header block was consumed; later blocks are
+    /// trailers and must not be merged into response headers.
+    headersSeen: bool = false,
     /// Response fully received (END_STREAM seen).
     done: bool = false,
     /// Body exceeded the configured limit.
@@ -159,21 +172,26 @@ const RequestState = struct {
     }
 
     fn onHeaders(self: *RequestState, flds: []hpack.HeaderField, endStream: bool) !void {
+        var status: u16 = 0;
         for (flds) |f| {
             if (std.mem.eql(u8, f.name, ":status")) {
-                self.status = std.fmt.parseInt(u16, f.value, 10) catch 500;
-                continue;
+                status = std.fmt.parseInt(u16, f.value, 10) catch 0;
             }
+        }
+        // Informational blocks precede the final response; later blocks
+        // are trailers. Neither may overwrite response headers, in
+        // particular Content-Encoding (RFC 9110 Section 6.5). Trailers
+        // still carry END_STREAM, so they complete the response.
+        if (self.headersSeen) {
+            if (endStream) self.done = true;
+            return;
+        }
+        if (status < 200) return;
+        self.status = status;
+        self.headersSeen = true;
+        for (flds) |f| {
             if (f.name.len > 0 and f.name[0] == ':') continue;
-            const name = try self.allocator.dupe(u8, f.name);
-            errdefer self.allocator.free(name);
-            const value = try self.allocator.dupe(u8, f.value);
-            errdefer self.allocator.free(value);
-            self.headers.append(self.allocator, .{ .name = name, .value = value }) catch |err| {
-                self.allocator.free(name);
-                self.allocator.free(value);
-                return err;
-            };
+            try appendCopiedHeader(self.allocator, &self.headers, f.name, f.value);
         }
         if (endStream) self.done = true;
     }
@@ -186,6 +204,14 @@ const RequestState = struct {
         try self.body.appendSlice(self.allocator, data);
     }
 };
+
+fn parseContentLength(value: []const u8) !u64 {
+    if (value.len == 0) return error.InvalidContentLength;
+    for (value) |c| {
+        if (!std.ascii.isDigit(c)) return error.InvalidContentLength;
+    }
+    return std.fmt.parseInt(u64, value, 10) catch error.InvalidContentLength;
+}
 
 pub const Client = struct {
     allocator: Allocator,
@@ -321,22 +347,49 @@ pub const Client = struct {
         try self.pending.put(sid, rstate);
         errdefer _ = self.pending.remove(sid);
 
+        const isConnect = std.mem.eql(u8, method, "CONNECT");
+        const bodyLen: ?u64 = if (reqBody) |body| body.len else null;
+        var clBuf: [20]u8 = undefined;
+        var clValue: ?[]const u8 = null;
+        if (bodyLen) |n| {
+            clValue = clBuf[0..std.fmt.printInt(&clBuf, n, 10, .lower, .{})];
+        }
+        var explicitZeroLength = false;
+
         var fields = std.ArrayList(hpack.HeaderField).empty;
         defer fields.deinit(a);
         try fields.append(a, .{ .name = ":method", .value = method });
-        try fields.append(a, .{ .name = ":path", .value = path });
-        try fields.append(a, .{ .name = ":scheme", .value = scheme });
+        if (!isConnect) {
+            try fields.append(a, .{ .name = ":path", .value = path });
+            try fields.append(a, .{ .name = ":scheme", .value = scheme });
+        }
         try fields.append(a, .{ .name = ":authority", .value = authority });
-        for (extra) |h| try fields.append(a, .{ .name = h.name, .value = h.value });
+        for (extra) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
+                const declared = parseContentLength(h.value) catch return error.ProtocolViolation;
+                if (bodyLen) |actual| {
+                    if (declared != actual) return error.ProtocolViolation;
+                } else if (declared == 0) {
+                    // A body-less request may explicitly declare zero length,
+                    // but a non-zero declaration would frame a missing body.
+                    explicitZeroLength = true;
+                } else {
+                    return error.ProtocolViolation;
+                }
+                // The transport emits the authoritative value below.
+                continue;
+            }
+            try fields.append(a, .{ .name = h.name, .value = h.value });
+        }
+        if (clValue) |cl| {
+            try fields.append(a, .{ .name = "content-length", .value = cl });
+        } else if (explicitZeroLength) {
+            try fields.append(a, .{ .name = "content-length", .value = "0" });
+        }
 
-        const toSend = reqBody orelse "";
-        const hasReqBody = toSend.len > 0;
+        const hasReqBody = bodyLen != null and bodyLen.? > 0;
 
-        self.session.sendHeaders(sid, fields.items, !hasReqBody) catch |e| {
-            _ = self.pending.remove(sid);
-            rstate.deinit();
-            return e;
-        };
+        try self.session.sendHeaders(sid, fields.items, !hasReqBody);
         try self.flush();
         return sid;
     }
@@ -366,6 +419,7 @@ pub const Client = struct {
             const st = self.pending.get(sid) orelse return error.StreamClosed;
             if (st.done) break;
             if (st.tooLarge) {
+                self.cancelStream(sid);
                 self.dropStream(sid);
                 return error.ResponseTooLarge;
             }
@@ -387,6 +441,7 @@ pub const Client = struct {
 
         const st = self.pending.get(sid) orelse return error.StreamClosed;
         if (st.tooLarge) {
+            self.cancelStream(sid);
             self.dropStream(sid);
             return error.ResponseTooLarge;
         }
@@ -396,6 +451,7 @@ pub const Client = struct {
         }
         const status = st.status;
         const headers = try st.headers.toOwnedSlice(a);
+        errdefer a.free(headers);
         const body = try st.body.toOwnedSlice(a);
         st.headers = .empty;
         st.body = .empty;
@@ -410,6 +466,11 @@ pub const Client = struct {
 
     fn dropStream(self: *Client, sid: u31) void {
         if (self.pending.fetchRemove(sid)) |kv| kv.value.deinit();
+    }
+
+    fn cancelStream(self: *Client, sid: u31) void {
+        self.session.sendRstStream(sid, .cancel) catch return;
+        self.flush() catch {};
     }
 
     /// One full request/response exchange on a fresh stream.
@@ -427,21 +488,44 @@ pub const Client = struct {
         maxBytes: usize,
     ) !Response {
         const sid = try self.beginRequest(method, path, extra, scheme, authority, reqBody, maxBytes);
+        return self.exchange(sid, reqBody) catch |e| {
+            // Every error path abandons this exchange; release the
+            // per-stream buffers even if the failure predates awaitResponse.
+            self.dropStream(sid);
+            return e;
+        };
+    }
+
+    fn exchange(self: *Client, sid: u31, reqBody: ?[]const u8) !Response {
+        var bodyComplete = true;
         if (reqBody) |body| {
             if (body.len > 0) {
                 var sent: usize = 0;
                 while (true) {
                     const complete = try self.sendRequestBody(sid, body, &sent);
-                    if (complete) break;
+                    if (complete) {
+                        bodyComplete = sent == body.len;
+                        break;
+                    }
                     // Flow control blocked: read until the peer opens the
                     // window (or answers early).
                     const st = self.state(sid);
-                    if (st != null and st.?.done) break;
+                    if (st != null and st.?.done) {
+                        bodyComplete = false;
+                        break;
+                    }
                     try self.pump();
                 }
             }
         }
-        return self.awaitResponse(sid);
+        const resp = try self.awaitResponse(sid);
+        if (!bodyComplete) {
+            // The peer answered before consuming the upload. Cancel the
+            // half-closed request side so the stream can be reaped instead
+            // of staying open for the connection lifetime.
+            self.cancelStream(sid);
+        }
+        return resp;
     }
 };
 
@@ -566,6 +650,7 @@ pub const ResponseHook = *const fn (
     allocator: Allocator,
     resp: *HandlerResponse,
     method: []const u8,
+    reqHeaders: []const Header,
     extra: *std.ArrayList(Header),
 ) anyerror!?[]u8;
 
@@ -584,6 +669,9 @@ const ServerStream = struct {
     allocator: Allocator,
     method: std.ArrayList(u8) = .empty,
     path: std.ArrayList(u8) = .empty,
+    /// `:authority`, exposed to handlers as `host` when no host field
+    /// was sent explicitly (RFC 9113 Section 8.3.1).
+    authority: std.ArrayList(u8) = .empty,
     hdrs: std.ArrayList(Header) = .empty,
     body: std.ArrayList(u8) = .empty,
     /// The initial request header block was received.
@@ -597,12 +685,11 @@ const ServerStream = struct {
     /// Owned copy of the response body still to be written.
     respBody: ?[]u8 = null,
     respOffset: usize = 0,
-    /// The response has no body to send (HEAD, 204, 304).
-    noBody: bool = false,
 
     fn deinit(self: *ServerStream) void {
         self.method.deinit(self.allocator);
         self.path.deinit(self.allocator);
+        self.authority.deinit(self.allocator);
         for (self.hdrs.items) |h| {
             self.allocator.free(h.name);
             self.allocator.free(h.value);
@@ -657,19 +744,26 @@ fn svrOnHeaders(ctx: ?*anyopaque, sid: u31, flds: []hpack.HeaderField, endStream
             try st.method.appendSlice(s.allocator, f.value);
         } else if (std.mem.eql(u8, f.name, ":path")) {
             try st.path.appendSlice(s.allocator, f.value);
+        } else if (std.mem.eql(u8, f.name, ":authority")) {
+            try st.authority.appendSlice(s.allocator, f.value);
         } else if (f.name.len > 0 and f.name[0] == ':') {
-            // :scheme / :authority are implied by the transport.
+            // :scheme is implied by the transport.
         } else {
-            const name = try s.allocator.dupe(u8, f.name);
-            errdefer s.allocator.free(name);
-            const value = try s.allocator.dupe(u8, f.value);
-            errdefer s.allocator.free(value);
-            st.hdrs.append(s.allocator, .{ .name = name, .value = value }) catch |err| {
-                s.allocator.free(name);
-                s.allocator.free(value);
-                return err;
-            };
+            try appendCopiedHeader(s.allocator, &st.hdrs, f.name, f.value);
         }
+    }
+    // HTTP/2 carries the request target authority in `:authority`, but
+    // handlers expect HTTP/1-style `host`. Expose it only when the client
+    // did not also send a regular host field.
+    if (st.authority.items.len > 0) {
+        var hasHost = false;
+        for (st.hdrs.items) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "host")) {
+                hasHost = true;
+                break;
+            }
+        }
+        if (!hasHost) try appendCopiedHeader(s.allocator, &st.hdrs, "host", st.authority.items);
     }
     if (endStream) try markReady(s, sid);
 }
@@ -820,7 +914,7 @@ fn dispatchReady(ctx: *ServerCtx) !void {
         defer extra.deinit(ctx.allocator);
 
         if (ctx.options.decorate) |hook| {
-            const owned = hook(ctx.options.handlerCtx, ctx.allocator, &resp, st.method.items, &extra) catch null;
+            const owned = hook(ctx.options.handlerCtx, ctx.allocator, &resp, st.method.items, st.hdrs.items, &extra) catch null;
             if (owned) |b| {
                 // The transport owns the replacement body.
                 defer ctx.allocator.free(b);
@@ -829,8 +923,10 @@ fn dispatchReady(ctx: *ServerCtx) !void {
         }
 
         // The decorator may change the status, so the body rules are
-        // evaluated after it ran.
-        const statusAllowsBody = resp.status != 204 and resp.status != 304 and resp.status >= 200;
+        // evaluated after it ran. A final response cannot be informational
+        // or carry a body for 204/205/304.
+        if (resp.status < 200 or resp.status > 599) resp.status = 500;
+        const statusAllowsBody = resp.status != 204 and resp.status != 205 and resp.status != 304;
 
         var stBuf: [8]u8 = undefined;
         const statusStr = std.fmt.bufPrint(&stBuf, "{d}", .{resp.status}) catch "500";
@@ -845,10 +941,10 @@ fn dispatchReady(ctx: *ServerCtx) !void {
 
         const sendBody = statusAllowsBody and !isHead and resp.body.len > 0;
         if (!sendBody) {
-            // HEAD/204/304: the headers carry the length, the stream ends.
+            // HEAD/204/205/304: the headers carry the length, the stream
+            // ends immediately and needs no body-drain bookkeeping.
             try ctx.session.sendHeaders(sid, fields.items, true);
-            st.responsePending = true;
-            st.noBody = true;
+            ctx.remove(sid);
             continue;
         }
 
@@ -878,26 +974,34 @@ fn appendResponseHeader(ctx: *ServerCtx, fields: *std.ArrayList(hpack.HeaderFiel
 
 /// Writes queued response bodies, respecting the flow-control windows.
 fn drainResponses(ctx: *ServerCtx) !void {
+    // Removing entries while iterating an AutoHashMap invalidates the
+    // iterator, so collect the identifiers first.
+    var ids = std.ArrayList(u31).empty;
+    defer ids.deinit(ctx.allocator);
     var it = ctx.streams.valueIterator();
     while (it.next()) |sp| {
-        const st = sp.*;
-        if (!st.responsePending or st.noBody) continue;
+        if (sp.*.responsePending) {
+            try ids.append(ctx.allocator, sp.*.sid);
+        }
+    }
+    for (ids.items) |sid| {
+        const st = ctx.streams.get(sid) orelse continue;
         const body = st.respBody orelse continue;
         if (st.respOffset >= body.len) {
             // Everything was written: the last DATA frame carried
             // END_STREAM, so the stream is done.
             ctx.allocator.free(body);
             st.respBody = null;
-            ctx.remove(st.sid);
+            ctx.remove(sid);
             continue;
         }
-        const n = try ctx.session.sendData(st.sid, body[st.respOffset..], true);
+        const n = try ctx.session.sendData(sid, body[st.respOffset..], true);
         st.respOffset += n;
         if (n == 0) continue; // window exhausted; wait for WINDOW_UPDATE
         if (st.respOffset >= body.len) {
             ctx.allocator.free(body);
             st.respBody = null;
-            ctx.remove(st.sid);
+            ctx.remove(sid);
         }
     }
 }
@@ -914,9 +1018,16 @@ test "http2 client and server exchange over real tcp (h2c)" {
     const port = l.localPort();
 
     const H = struct {
-        fn handle(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const Header, _: []const u8) anyerror!HandlerResponse {
+        fn handle(_: ?*anyopaque, method: []const u8, path: []const u8, headers: []const Header, _: []const u8) anyerror!HandlerResponse {
             if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/h2")) {
-                return .{ .status = 200, .body = "hello-h2" };
+                // `:authority` is surfaced as `host` for HTTP/1-style
+                // handlers.
+                for (headers) |h| {
+                    if (std.ascii.eqlIgnoreCase(h.name, "host") and std.mem.eql(u8, h.value, "localhost")) {
+                        return .{ .status = 200, .body = "hello-h2" };
+                    }
+                }
+                return .{ .status = 400, .body = "missing-host" };
             }
             return .{ .status = 404, .body = "nope" };
         }
@@ -944,6 +1055,15 @@ test "http2 client and server exchange over real tcp (h2c)" {
 
     try std.testing.expectEqual(@as(u16, 200), r.status);
     try std.testing.expectEqualStrings("hello-h2", r.body);
+
+    // A body-less request may explicitly declare content-length 0, but a
+    // non-zero declaration without a body is rejected before the wire.
+    const cl0 = [_]Header{.{ .name = "content-length", .value = "0" }};
+    const rcl = try hc.request("GET", "/h2", cl0[0..], "http", "localhost", null, maxResponseBodySize);
+    defer rcl.deinit();
+    try std.testing.expectEqual(@as(u16, 200), rcl.status);
+    const cl5 = [_]Header{.{ .name = "content-length", .value = "5" }};
+    try std.testing.expectError(Error.ProtocolViolation, hc.request("GET", "/h2", cl5[0..], "http", "localhost", null, maxResponseBodySize));
 
     // Second request on the SAME connection proves multiplexing-ready reuse.
     const r404 = try hc.request("GET", "/missing", &[_]Header{}, "http", "localhost", null, maxResponseBodySize);
@@ -1294,4 +1414,29 @@ test "a request body larger than the flow-control window is sent completely" {
     defer r.deinit();
     try std.testing.expectEqual(@as(usize, payload.len), r.body.len);
     for (r.body) |c| try std.testing.expectEqual(@as(u8, 'q'), c);
+}
+
+test "response trailers complete the stream without replacing headers" {
+    const a = std.testing.allocator;
+    const st = try a.create(RequestState);
+    st.* = .{ .sid = 1, .allocator = a, .maxBytes = 1024 };
+    defer st.deinit();
+
+    var informational = [_]hpack.HeaderField{.{ .name = ":status", .value = "103" }};
+    try st.onHeaders(&informational, false);
+    try std.testing.expect(!st.headersSeen);
+
+    var final = [_]hpack.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-encoding", .value = "gzip" },
+    };
+    try st.onHeaders(&final, false);
+    try std.testing.expectEqual(@as(u16, 200), st.status);
+    try std.testing.expectEqual(@as(usize, 1), st.headers.items.len);
+
+    var trailers = [_]hpack.HeaderField{.{ .name = "x-checksum", .value = "abc" }};
+    try st.onHeaders(&trailers, true);
+    try std.testing.expect(st.done);
+    try std.testing.expectEqual(@as(usize, 1), st.headers.items.len);
+    try std.testing.expectEqualStrings("gzip", st.headers.items[0].value);
 }

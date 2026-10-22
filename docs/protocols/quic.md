@@ -13,11 +13,10 @@ RFC 9000 defines QUIC, a secure, general-purpose, multiplexed transport protocol
 
 ## Deliberate Limits
 
-* No Retry/token round trip; the server relies on anti-amplification limits instead.
-* No QUIC version negotiation (only version 1) and no compatible-version negotiation.
+* Retry/token validation, QUIC v1/v2 version negotiation, and 1-RTT key updates are implemented; compatible-version negotiation is not.
 * No HelloRetryRequest handling in the QUIC TLS driver.
-* No key update or connection migration yet.
-* One HTTP/3 request per QUIC connection in the high-level client/server paths.
+* No connection migration yet.
+* The high-level HTTP/3 client performs one request per QUIC connection; the server multiplexes requests on its one active connection.
 
 ## QUIC Packet Types
 

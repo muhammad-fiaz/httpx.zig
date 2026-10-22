@@ -1,5 +1,5 @@
-//! ACK range tracking and ACK frame generation (RFC 9000 section 19.3,
-//! structure modeled on ngtcp2Acktr: descending contiguous ranges).
+//! ACK range tracking and ACK frame generation (RFC 9000 section 19.3),
+//! using descending contiguous ranges.
 //!
 //! add(pn) merges adjacent/overlapping blocks; generation walks blocks
 //! producing Largest Acknowledged / First Range / Gap+Range pairs.
@@ -13,7 +13,7 @@ pub const Error = error{
     OutOfMemory,
 };
 
-/// Maximum retained ranges beyond the top block (ngtcp2 uses 32+1).
+/// Maximum retained ranges beyond the top block (32 plus the top block).
 pub const MAX_RANGES = 33;
 
 pub const Block = frames.AckBlock;

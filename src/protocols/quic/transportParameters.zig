@@ -1,5 +1,5 @@
-//! QUIC transport parameters (RFC 9000 section 18), encoding order and
-//! validation rules matching ngtcp2TransportParams.
+//! QUIC transport parameters (RFC 9000 section 18), including encoding
+//! order and validation rules.
 //!
 //! Wire: sequence of {varint id, varint length, opaque value}. Absent
 //! numeric parameters take their defaults; presence-sensitive CIDs are
@@ -69,8 +69,8 @@ inline fn putV(out: *std.ArrayList(u8), gpa: Allocator, v: u64) !void {
 /// RFC 9000 Section 18.2 encodes every numeric transport parameter value as
 /// a variable-length integer, and the value's length is the length of that
 /// varint. A fixed-width integer is not a valid encoding: peers that check
-/// the canonical varint length (ngtcp2, and others) reject the whole
-/// parameter block with TRANSPORT_PARAMETER_ERROR.
+/// the canonical varint length reject the whole parameter block with
+/// TRANSPORT_PARAMETER_ERROR.
 fn putVarintParam(out: *std.ArrayList(u8), gpa: Allocator, id: u64, v: u64) !void {
     var tmp: [8]u8 = undefined;
     const n = varint.encode(tmp[0..], v) catch return error.BufferTooSmall;
@@ -357,9 +357,9 @@ test "unknown parameters are ignored whatever their payload" {
 test "numeric values use the canonical varint encoding" {
     // Regression: the values used to be written as fixed-width big-endian
     // integers. RFC 9000 Section 18.2 encodes them as variable-length
-    // integers, and peers that validate the varint length (ngtcp2 among
-    // them) reject the whole parameter block with
-    // TRANSPORT_PARAMETER_ERROR, which breaks the handshake.
+    // integers, and peers that validate the varint length reject the whole
+    // parameter block with TRANSPORT_PARAMETER_ERROR, which breaks the
+    // handshake.
     var list = std.ArrayList(u8).empty;
     defer list.deinit(std.testing.allocator);
     try encode(&list, std.testing.allocator, .{

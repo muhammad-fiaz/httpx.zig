@@ -13,8 +13,8 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 | HTTP/1.0 | 1.0 | ✅ Full | RFC 1945 | High-level runtime support |
 | HTTP/1.1 | 1.1 | ✅ Full | RFC 9112 | High-level runtime support |
 | HTTP/2 | h2 | ✅ Full | RFC 7540, RFC 7541 | Framing/stream state/flow control/HPACK plus high-level client/server runtimes |
-| HTTP/3 | h3 | ✅ Reliable paths | RFC 9114, RFC 9204 | High-level client/server runtime over QUIC/TLS 1.3 with QPACK dynamic tables, loss recovery, NewReno congestion control, and 0-RTT; no Retry, version negotiation, or H3 pooling |
-| QUIC | v1 | ✅ Primitives | RFC 9000 | Transport/frame coding primitives in the protocol module |
+| HTTP/3 | h3 | ✅ Reliable paths | RFC 9114, RFC 9204 | High-level client/server runtime over QUIC/TLS 1.3 with QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT, Retry/version negotiation, and key updates; no H3 pooling |
+| QUIC | v1, v2 | ✅ Engine | RFC 9000, RFC 9001, RFC 9369 | Connection/stream state, TLS handshake, recovery, congestion control, and UDP endpoint |
 
 ## HTTP/1.1 Parser (`httpx.http1.parser`)
 

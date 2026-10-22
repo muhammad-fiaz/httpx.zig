@@ -492,6 +492,7 @@ fn h3DoRequest(
     port: u16,
     authority: []const u8,
     target: []const u8,
+    reqHeaders: []const writerMod.Header,
     reqBody: ?[]const u8,
 ) Error!Response {
     if (host.len == 0) return Error.InvalidUrl;
@@ -603,16 +604,12 @@ fn h3DoRequest(
 
     var h3c = h3Transport.Client.init(a, &ep);
     defer h3c.deinit();
-    var hasAcceptEncoding = false;
-    for (req.headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) hasAcceptEncoding = true;
-    }
     var conv = std.ArrayList(h3Transport.Header).empty;
     defer conv.deinit(a);
-    for (req.headers) |h| conv.append(a, .{ .name = h.name, .value = h.value }) catch return Error.OutOfMemory;
-    if (!hasAcceptEncoding) {
-        conv.append(a, .{ .name = "accept-encoding", .value = compression.acceptEncodingValue() }) catch return Error.OutOfMemory;
-    }
+    // Reuse the same constructed header list as HTTP/1.1 and HTTP/2 so
+    // authentication, cookies, User-Agent, and inferred Content-Type are
+    // not silently lost on the H3 path.
+    for (reqHeaders) |h| conv.append(a, .{ .name = h.name, .value = h.value }) catch return Error.OutOfMemory;
     const h3respRaw = h3c.request(
         req.method.toString(),
         "https",
@@ -762,6 +759,14 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
     var bodyStripped = false;
     var redirectedHeaders: ?[]Header = null;
     defer if (redirectedHeaders) |headers| a.free(headers);
+    var redirectState = RedirectState{
+        .currentUrl = &currentUrl,
+        .redirects = &redirects,
+        .method = &method,
+        .credentialsStripped = &credentialsStripped,
+        .bodyStripped = &bodyStripped,
+        .redirectedHeaders = &redirectedHeaders,
+    };
 
     while (true) {
         const u = uriMod.parse(currentUrl) catch return Error.InvalidUrl;
@@ -856,7 +861,9 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             // cannot exist, so this is an invalid URL+version pairing.
             if (!isTls) return Error.InvalidUrl;
             if (req.proxy != null) return Error.Http3ProxyUnsupported;
-            return h3DoRequest(a, io, req, tlsOpts, hostCopy[0..hl], port, authorityStr, target, bodyOut);
+            var h3resp = h3DoRequest(a, io, req, tlsOpts, hostCopy[0..hl], port, authorityStr, target, hdrPairs, bodyOut) catch |e| return e;
+            if (try applyRedirect(a, req, &u, &h3resp, &redirectState)) continue;
+            return h3resp;
         }
 
         // HTTP/2 pooled fast path BEFORE any dial: a parked session
@@ -869,11 +876,12 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             if (req.pool) |p| {
                 if (p.acquireH2(hostCopy[0..hl], port, isTls)) |pc| {
                     const scheme: []const u8 = if (isTls) "https" else "http";
-                    const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, scheme, hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
+                    var resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, scheme, authorityStr, bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
                         pc.deinit();
                         return e;
                     };
                     p.releaseH2(hostCopy[0..hl], port, isTls, pc);
+                    if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
                     return resp;
                 }
             }
@@ -1171,7 +1179,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 // wrapTls already closed the socket and freed the box.
                 return Error.ProtocolViolation;
             };
-            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "https", hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
+            var resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "https", authorityStr, bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
                 pc.deinit();
                 return e;
             };
@@ -1187,10 +1195,12 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             if (req.proxy == null) {
                 if (req.pool) |p| {
                     p.releaseH2(hostCopy[0..hl], port, true, pc);
+                    if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
                     return resp;
                 }
             }
             pc.deinit();
+            if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
             return resp;
         }
         if (!isTls and resolvedVer == .http2) {
@@ -1200,17 +1210,19 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 tcpSock.close();
                 return Error.ProtocolViolation;
             };
-            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "http", hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
+            var resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "http", authorityStr, bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
                 pc.deinit();
                 return e;
             };
             if (req.proxy == null) {
                 if (req.pool) |p| {
                     p.releaseH2(hostCopy[0..hl], port, false, pc);
+                    if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
                     return resp;
                 }
             }
             pc.deinit();
+            if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
             return resp;
         }
 
@@ -1283,60 +1295,78 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings }, responseLimit);
         var resp = full.resp;
 
-        if (req.followRedirects and isRedirect(resp.status)) {
-            // Redirect hops are one-shot: never pool the intermediate conn.
-            const loc = resp.header("Location") orelse return resp;
-            if (redirects >= req.maxRedirects) {
-                resp.deinit();
-                return Error.TooManyRedirects;
-            }
-            redirects += 1;
-            const next = resolveLocation(a, currentUrl, loc) catch return resp;
-            const nextUri = uriMod.parse(next) catch {
-                a.free(next);
-                return resp;
-            };
-            if (isSecureDowngrade(u.scheme, nextUri.scheme)) {
-                a.free(next);
-                return resp;
-            }
-            const wasSameOrigin = sameOrigin(&u, &nextUri);
-            var nextMethod = method;
-            var nextBodyStripped = bodyStripped;
-            switch (resp.status) {
-                301, 302 => if (method == .POST) {
-                    nextMethod = .GET;
-                    nextBodyStripped = true;
-                },
-                303 => {
-                    if (method != .HEAD) nextMethod = .GET;
-                    nextBodyStripped = true;
-                },
-                else => {},
-            }
-            const nextCredentialsStripped = credentialsStripped or !wasSameOrigin;
-
-            if (nextCredentialsStripped != credentialsStripped or nextBodyStripped != bodyStripped) {
-                const filtered = filterRedirectHeaders(a, req.headers, nextCredentialsStripped, nextBodyStripped) catch {
-                    a.free(next);
-                    resp.deinit();
-                    return Error.OutOfMemory;
-                };
-                if (redirectedHeaders) |old| a.free(old);
-                redirectedHeaders = filtered;
-            }
-            credentialsStripped = nextCredentialsStripped;
-            bodyStripped = nextBodyStripped;
-            method = nextMethod;
-
-            a.free(currentUrl);
-            currentUrl = next;
-            resp.deinit();
-            continue;
-        }
-
+        if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
         return finishPlain(req.pool, isTls, req.proxy != null, hostCopy[0..hl], port, full, &pooledOut, transport, resp);
     }
+}
+
+const RedirectState = struct {
+    currentUrl: *[]u8,
+    redirects: *u8,
+    method: *Method,
+    credentialsStripped: *bool,
+    bodyStripped: *bool,
+    redirectedHeaders: *?[]Header,
+};
+
+/// Applies one redirect hop to `resp`. Returns true when the caller should
+/// run the next loop iteration; false returns the response unchanged.
+fn applyRedirect(
+    a: Allocator,
+    req: Request,
+    base: *const uriMod.Uri,
+    resp: *Response,
+    state: *RedirectState,
+) Error!bool {
+    if (!req.followRedirects or !isRedirect(resp.status)) return false;
+    const loc = resp.header("Location") orelse return false;
+    if (state.redirects.* >= req.maxRedirects) {
+        resp.deinit();
+        return Error.TooManyRedirects;
+    }
+    state.redirects.* += 1;
+    const next = resolveLocation(a, state.currentUrl.*, loc) catch return false;
+    const nextUri = uriMod.parse(next) catch {
+        a.free(next);
+        return false;
+    };
+    if (isSecureDowngrade(base.scheme, nextUri.scheme)) {
+        a.free(next);
+        return false;
+    }
+    const wasSameOrigin = sameOrigin(base, &nextUri);
+    var nextMethod = state.method.*;
+    var nextBodyStripped = state.bodyStripped.*;
+    switch (resp.status) {
+        301, 302 => if (state.method.* == .POST) {
+            nextMethod = .GET;
+            nextBodyStripped = true;
+        },
+        303 => {
+            if (state.method.* != .HEAD) nextMethod = .GET;
+            nextBodyStripped = true;
+        },
+        else => {},
+    }
+    const nextCredentialsStripped = state.credentialsStripped.* or !wasSameOrigin;
+
+    if (nextCredentialsStripped != state.credentialsStripped.* or nextBodyStripped != state.bodyStripped.*) {
+        const filtered = filterRedirectHeaders(a, req.headers, nextCredentialsStripped, nextBodyStripped) catch {
+            a.free(next);
+            resp.deinit();
+            return Error.OutOfMemory;
+        };
+        if (state.redirectedHeaders.*) |old| a.free(old);
+        state.redirectedHeaders.* = filtered;
+    }
+    state.credentialsStripped.* = nextCredentialsStripped;
+    state.bodyStripped.* = nextBodyStripped;
+    state.method.* = nextMethod;
+
+    a.free(state.currentUrl.*);
+    state.currentUrl.* = next;
+    resp.deinit();
+    return true;
 }
 
 /// Returns the response to the caller; for plain connections with a fully

@@ -1,7 +1,7 @@
 //! Path validation (RFC 9000 section 8.2): PATH_CHALLENGE/PATH_RESPONSE
 //! exchange used for address validation, connection migration, and NAT
-//! rebinding confirmation. Timing model follows ngtcp2Pv: probe timeout
-//! = 3 * PTO base, two probes per round, bounded rounds.
+//! rebinding confirmation. Probe timeout is 3 * PTO base, with two probes
+//! per round and a bounded number of rounds.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

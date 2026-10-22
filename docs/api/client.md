@@ -9,9 +9,9 @@ The `httpx.zig` client provides a high-level HTTP client for making requests ove
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
 | HTTP/2 | ✅ Client Runtime + Primitives | TCP/TLS | High-level client request execution path plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Reliable paths | QUIC/UDP | High-level client runtime over QUIC/TLS 1.3 with ALPN `h3`, QPACK dynamic tables, loss recovery, NewReno congestion control, and 0-RTT resumption; no Retry, version negotiation, or H3 pooling |
+| HTTP/3 | ✅ Reliable paths | QUIC/UDP | High-level client runtime over QUIC/TLS 1.3 with ALPN `h3`, QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT resumption, Retry/version negotiation, and key updates; no H3 pooling |
 
-HTTP/3 runtime mode performs a QUIC TLS 1.3 handshake and verifies the server certificate. Loopback integration is covered, including dynamic QPACK and response trailers. QUIC loss recovery and NewReno congestion control are active; the remaining transport limits are Retry, version negotiation, HelloRetryRequest, key update, and connection migration.
+HTTP/3 runtime mode performs a QUIC TLS 1.3 handshake and verifies the server certificate. Loopback integration is covered, including dynamic QPACK and response trailers. QUIC loss recovery, NewReno congestion control, Retry/version negotiation, and key updates are active; the remaining transport limits are HelloRetryRequest, connection migration, and H3 connection pooling.
 
 The protocol module provides HTTP/2 and HTTP/3 building blocks (HPACK/QPACK, framing, and transport primitives). See [Protocol API](protocol.md) for details.
 

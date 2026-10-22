@@ -38,13 +38,24 @@ HTTP/2 support is validated across Linux, Windows, and macOS targets:
 - **Stream Priority** - PRIORITY frames are parsed and tolerated; priority-based
   scheduling is not implemented.
 - **Frame Encoding/Decoding** - Core HTTP/2 frame types are encoded and decoded;
-  this does not imply complete extension-frame interoperability.
+  this does not imply complete extension-frame interoperability. Fixed-length
+  violations produce connection or stream `FRAME_SIZE_ERROR` as the RFC requires.
 - **CONTINUATION Frames** - Header blocks exceeding `MAX_FRAME_SIZE` are automatically split across HEADERS + CONTINUATION frames
 - **SETTINGS Enforcement** - Peer `MAX_CONCURRENT_STREAMS`, `MAX_FRAME_SIZE`, and `INITIAL_WINDOW_SIZE` values are parsed and enforced; repeated settings are applied in order
-- **GOAWAY/RST_STREAM** - Graceful connection shutdown and stream cancellation with proper error codes. A malformed header list is answered with a stream error (`RST_STREAM`), not a connection error.
+- **GOAWAY/RST_STREAM** - Graceful connection shutdown and stream cancellation
+  with proper error codes. A GOAWAY's last-stream-id never increases, refused
+  client streams are reset, and new streams are blocked once either side sends
+  or receives GOAWAY. A malformed header list is answered with a stream error
+  (`RST_STREAM`), not a connection error.
 - **HPACK Security** - `Without Indexing` / `Never Indexed` representations for volatile headers like `Authorization` and `Cookie`; those values never enter the dynamic table
-- **Trailer Support** - Trailers are parsed by the session layer; the
-  one-shot `Client`/`Server` API does not surface them yet (see below)
+- **Trailer Support** - Trailers are parsed and framed by the session layer;
+  the one-shot `Client`/`Server` API does not surface them to handlers yet
+  (see below)
+- **Message Semantics** - Informational (1xx) responses, `content-length`
+  validation, HEAD/204/205/304 body rules, CONNECT requests, and
+  `END_STREAM`-terminated trailers are enforced in both directions.
+  Request `:authority` is surfaced as `host` when no explicit host field is
+  present; the high-level server answers unsupported methods with `501`.
 - **Strict Header Validation** - Field names are lowercased, connection-specific
   fields are dropped, and malformed pseudo-header sets are rejected per
   RFC 9113 Section 8
@@ -59,8 +70,9 @@ HTTP/2 support is validated across Linux, Windows, and macOS targets:
 - **Server push** - The client advertises `ENABLE_PUSH=0`; a `PUSH_PROMISE`
   frame is a connection error (RFC 9113 Section 8.4).
 - **Priority-based scheduling** - `PRIORITY` is accepted and ignored.
-- **Extended CONNECT** (`:protocol`, RFC 8441) is rejected as an unknown
-  pseudo-header.
+- **Extended CONNECT** (`:protocol`, RFC 8441) is not enabled. The pseudo-header
+  set is validated structurally, then rejected because
+  `SETTINGS_ENABLE_CONNECT_PROTOCOL` is never advertised.
 
 
 ## High-level Client Usage
@@ -332,7 +344,8 @@ std.debug.print("Stream send window: {d}\n", .{stream.sendWindow});
 ### Parsing WINDOW_UPDATE
 
 `WINDOW_UPDATE` bodies decode to `httpx.http2.frame.WindowUpdate{ .increment }`
-(a 31-bit value; zero is a connection error of type `FLOW_CONTROL_ERROR`).
+(a 31-bit value; zero is a connection `PROTOCOL_ERROR` on stream 0 and a stream
+`PROTOCOL_ERROR` otherwise).
 
 ## Error Codes
 
@@ -419,11 +432,15 @@ Using incremental indexing for `Authorization` or `Cookie` headers can pollute t
 
 ## Trailer Support
 
-HTTP/2 trailers (HEADERS after DATA with END_STREAM) are parsed by
-`httpx.http2.Session` like any other header block. The
-high-level `httpx.Server`/`httpx.Client` one-shot API does not yet surface
+HTTP/2 trailers (HEADERS after DATA with `END_STREAM`) are parsed by
+`httpx.http2.Session` like any other header block. They must carry
+`END_STREAM`, appear only once, and may not contain pseudo-headers or
+`content-length`; violations reset the stream. A trailer block without
+`END_STREAM` is a `PROTOCOL_ERROR`, not a second header block.
+
+The high-level `httpx.Server`/`httpx.Client` one-shot API does not yet surface
 trailers — use the `httpx.http2.transport` stream APIs directly if you need
-them (see `examples/http2-client.zig` for the runtime path).
+them (see `examples/http2Multiplex.zig` for the runtime path).
 
 ## Connection Preface Timeout
 

@@ -5,7 +5,7 @@
 //! arrive from the TLS 1.3 handshake layer (see tlsEngine.zig); this
 //! module provides the QUIC-specific label machinery both paths share.
 //!
-//! Constants verified against ngtcp2/lib/ngtcp2Crypto/shared.c.
+//! Constants follow RFC 9001 and RFC 9369.
 
 const std = @import("std");
 const hmac = std.crypto.auth.hmac;

@@ -119,6 +119,9 @@ pub const Config = struct {
     retryDelayMs: u64 = 1000,
     /// HTTP status codes that trigger a retry (502, 503, 504 by default).
     retryStatusCodes: []const u16 = &.{ 502, 503, 504 },
+    /// Retry replay-sensitive methods (POST, PATCH, CONNECT). Keep this
+    /// false unless the server is idempotent or deduplicates requests.
+    retryUnsafeMethods: bool = false,
     /// Default proxy URL (e.g. "socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080", "http://127.0.0.1:8080").
     proxy: ?[]const u8 = null,
     /// Fast boolean toggle to use HTTP/1.0
@@ -939,13 +942,19 @@ pub const Client = struct {
     fn doRequestWithOverride(self: *Client, method: Method, urlOverride: []const u8, opts: anytype) Error!Response {
         var attempt: u32 = 0;
         const maxAttempts = self.config.maxRetries + 1;
+        // RFC 9110 Section 9.2.2: only idempotent methods may be replayed
+        // automatically. POST/PATCH/CONNECT need an explicit opt-in.
+        const canReplay = self.config.retryUnsafeMethods or switch (method) {
+            .GET, .HEAD, .OPTIONS, .TRACE, .PUT, .DELETE => true,
+            .POST, .PATCH, .CONNECT => false,
+        };
         while (attempt < maxAttempts) : (attempt += 1) {
             var result = self.doRequestInner(method, urlOverride, opts) catch |err| {
-                if (attempt + 1 >= maxAttempts) return err;
+                if (!canReplay or attempt + 1 >= maxAttempts) return err;
                 clock.sleepMillis(self.config.retryDelayMs * (attempt + 1));
                 continue;
             };
-            if (self.config.maxRetries > 0 and attempt + 1 < maxAttempts) {
+            if (canReplay and self.config.maxRetries > 0 and attempt + 1 < maxAttempts) {
                 var shouldRetry = false;
                 for (self.config.retryStatusCodes) |code| {
                     if (result.status == code) {

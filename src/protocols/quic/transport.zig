@@ -6,10 +6,10 @@
 //! and flushes queued output datagrams to the last peer address seen.
 //!
 //! Initial-space packets derive their keys from the DCID (RFC 9001 section
-//! 5.2). The QUIC TLS 1.3 handshake is implemented by `handshake.zig`; the
-//! current transport still lacks loss recovery, congestion control, Retry,
-//! and version negotiation, so it is intended for reliable paths such as
-//! loopback and LAN rather than general Internet use.
+//! 5.2). The TLS 1.3 handshake lives in `handshake.zig`; ACK tracking,
+//! PTO/loss recovery, NewReno congestion control, Retry, and version
+//! negotiation live in `connection.zig`. This adapter only owns the UDP
+//! socket and the pump. Connection migration is not implemented.
 //!
 //! References:
 //!   - RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport

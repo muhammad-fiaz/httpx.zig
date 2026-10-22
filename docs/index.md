@@ -173,7 +173,7 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN suppor
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
 | HTTP/2 | ✅ Full | TCP/TLS | Client + server runtime (ALPN `h2` / h2c) plus framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Reliable paths | QUIC/TLS | Client + server runtime (ALPN `h3`) with loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, and RFC 9001 handshake confirmation/key discard; no Retry, version negotiation, HelloRetryRequest, key update, or migration |
+| HTTP/3 | ✅ Reliable paths | QUIC/TLS | Client + server runtime (ALPN `h3`) with loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, RFC 9001 handshake confirmation/key discard, Retry/token validation, v1/v2 version negotiation, and key updates; no HelloRetryRequest, migration, H3 pooling, server push, or datagrams |
 
 ## Platform Support
 
