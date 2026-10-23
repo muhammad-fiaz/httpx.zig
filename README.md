@@ -41,7 +41,7 @@
 > - **HTTP/2** stream multiplexing (the server answers concurrent streams independently, and the transport client keeps several requests in flight per connection), flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, informational (1xx) responses, trailers, content-length/body framing, CONNECT, and HTTP/1.x connection pooling (RFC 9113; the high-level client hands out pooled HTTP/2 connections exclusively, so it runs one exchange at a time per connection)
 > - **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
 > - **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, ACK/loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, and RFC 9001 handshake confirmation/key discard
-> - **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling
+> - **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling (extended CONNECT is not advertised)
 > - **Streaming Downloader & File Manager** with zero-config `loaders.zig` progress bars, dynamic speed & ETA estimation, range-based resumption, atomic updates, and cryptographic verification (SHA-256, SHA-384, SHA-512, MD5, SHA-1)
 > - **Unified DOM Engine & Web Resource Inspector** for HTML5, XML, RSS/Atom/JSON feeds, robots.txt, sitemaps, and CSS selector queries with zero manual per-element memory freeing
 > - **Self-Hosted Interactive Documentation** supporting Swagger UI, ReDoc, Scalar, and GraphiQL with embedded offline assets

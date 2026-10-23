@@ -370,7 +370,10 @@ pub const Session = struct {
             .goaway => |g| {
                 self.goawayReceived = true;
                 if (self.goawayLastStream) |previous| {
-                    self.goawayLastStream = @min(previous, g.lastStreamId);
+                    // RFC 9113 Section 6.8: a later GOAWAY must not raise
+                    // the last stream identifier.
+                    if (g.lastStreamId > previous) return self.connError(.protocolError);
+                    self.goawayLastStream = g.lastStreamId;
                 } else {
                     self.goawayLastStream = g.lastStreamId;
                 }
@@ -606,6 +609,7 @@ pub const Session = struct {
 
         const res = self.hdec.decode(block) catch |e| switch (e) {
             error.HeaderTooLarge => return self.connError(.enhanceYourCalm),
+            error.OutOfMemory => return Error.OutOfMemory,
             else => return self.connError(.compressionError),
         };
         defer {
@@ -667,10 +671,19 @@ pub const Session = struct {
                 try self.resetStream(st.id, .protocolError);
                 return;
             }
+            // A 2xx response to CONNECT is a tunnel and must not carry
+            // Content-Length (RFC 9110 Section 9.3.6).
+            if (st.requestIsConnect and status < 300 and cl != null) {
+                try self.resetStream(st.id, .protocolError);
+                return;
+            }
             st.finalResponse = true;
             st.responseStatus = status;
             st.contentLength = cl;
             st.bodyForbidden = st.requestIsHead or status == 204 or status == 304 or status == 205;
+            // Only a 2xx CONNECT response turns the request half of the
+            // stream into a bidirectional tunnel (RFC 9110 Section 9.3.6).
+            if (st.requestIsConnect and status < 300) st.sendBodyForbidden = false;
         } else if (kind == .request) {
             const method = fieldValue(res.fields, ":method") orelse {
                 try self.resetStream(st.id, .protocolError);
@@ -1266,7 +1279,7 @@ pub const Session = struct {
                 if (connectTunnel and cl != null) return Error.ProtocolViolation;
                 res.sendContentLength = cl;
                 res.sendBodyForbidden = res.requestIsHead or status == 204 or
-                    status == 304 or status == 205 or connectTunnel;
+                    status == 304 or status == 205;
                 res.responseStatus = status;
                 if (endStream and !outboundBodyLengthSatisfied(res)) {
                     return Error.ProtocolViolation;
@@ -1305,6 +1318,9 @@ pub const Session = struct {
                     req.requestIsConnect = std.mem.eql(u8, method, "CONNECT");
                 }
                 req.sendContentLength = requestContentLength;
+                // A CONNECT request carries no content before the tunnel
+                // is established. sendData lifts this after a 2xx response.
+                req.sendBodyForbidden = req.requestIsConnect;
             }
         }
     }
@@ -1392,6 +1408,9 @@ pub const Session = struct {
     pub fn sendData(self: *Session, sid: u31, data: []const u8, endStream: bool) Error!usize {
         const st = self.streamPtr(sid) orelse return Error.StreamClosed;
         if (!st.state.canSendData() or st.endStreamSent) return Error.StreamClosed;
+        // Server DATA is meaningful only after the final response headers
+        // (1xx responses never carry content; RFC 9113 Section 8.1).
+        if (self.role == .server and !st.finalResponseSent) return Error.ProtocolViolation;
         if (st.sendBodyForbidden and data.len > 0) return Error.ProtocolViolation;
         if (st.sendContentLength) |cl| {
             const projected = std.math.add(u64, st.bodyBytesSent, data.len) catch
@@ -1985,6 +2004,82 @@ test "a received GOAWAY refuses only client streams above its last id" {
     try std.testing.expect(client.streamPtr(1) != null);
     try std.testing.expect(client.streamPtr(3) == null);
     try std.testing.expectError(Error.ProtocolViolation, client.sendHeaders(5, req[0..], true));
+}
+
+test "a later GOAWAY with a higher last id is a protocol error" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    try frameMod.writeGoaway(&server.outbound, a, 1, 0, "");
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+    try std.testing.expectEqual(@as(?u31, 1), client.goawayLastStream);
+
+    try frameMod.writeGoaway(&server.outbound, a, 3, 0, "");
+    try std.testing.expectError(Error.ProtocolViolation, client.feed(server.outbound.items));
+}
+
+test "server DATA before the final response headers is rejected" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const req = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, req[0..], true);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    try std.testing.expectError(Error.ProtocolViolation, server.sendData(1, "x", false));
+
+    const info = [_]hpackMod.HeaderField{.{ .name = ":status", .value = "103" }};
+    try server.sendHeaders(1, info[0..], false);
+    try std.testing.expectError(Error.ProtocolViolation, server.sendData(1, "x", false));
+
+    const resp = [_]hpackMod.HeaderField{.{ .name = ":status", .value = "200" }};
+    try server.sendHeaders(1, resp[0..], false);
+    try std.testing.expectEqual(@as(usize, 1), try server.sendData(1, "x", true));
+}
+
+test "2xx CONNECT responses permit tunnel DATA and no content-length" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const connect = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "CONNECT" },
+        .{ .name = ":authority", .value = "example.com:443" },
+    };
+    try client.sendHeaders(1, connect[0..], false);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    // No request content may precede the tunnel response.
+    try std.testing.expectError(Error.ProtocolViolation, client.sendData(1, "pre", false));
+
+    const resp = [_]hpackMod.HeaderField{.{ .name = ":status", .value = "200" }};
+    try server.sendHeaders(1, resp[0..], false);
+    try std.testing.expectEqual(@as(usize, 5), try server.sendData(1, "tunna", true));
+    try client.feed(server.outbound.items);
+    server.outbound.clearRetainingCapacity();
+    try std.testing.expect(!hasRstStream(client.outbound.items, 1, @backingInt(ErrorCode.protocolError)));
+
+    // A successful CONNECT response opens the request half for tunnel bytes.
+    try std.testing.expectEqual(@as(usize, 1), try client.sendData(1, "c", false));
 }
 
 test "HEAD and 304 responses may declare a content-length without a body" {

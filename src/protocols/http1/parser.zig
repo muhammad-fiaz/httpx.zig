@@ -305,7 +305,7 @@ pub const FramingDecision = struct {
     length: usize = 0,
 };
 
-/// Determine body framing per RFC 9112 ï¿½6.3 with smuggling defenses.
+/// Determine body framing per RFC 9112 §6.3 with smuggling defenses.
 /// Requests without CL/TE have no body. Responses may be close-delimited
 /// (framing=none, length=0, caller decides) except 1xx/204/304 and HEAD.
 /// CONNECT 2xx switches to tunnel semantics (pass `connectOk=true`).

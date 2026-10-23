@@ -718,8 +718,8 @@ test "stream frames always carry an explicit offset" {
 }
 
 test "decoder reports a missing off bit" {
-    // A frame without the OFF bit must be recognisable so the receiver
-    // can substitute the stream's current offset.
+    // A frame without OFF must be recognisable; RFC 9000 defines its
+    // stream-data offset as zero.
     var list = std.ArrayList(u8).empty;
     defer list.deinit(std.testing.allocator);
     try list.appendSlice(std.testing.allocator, &.{ 0x0b, 0x00, 0x03 }); // STREAM|FIN|LEN, id 0
@@ -727,6 +727,7 @@ test "decoder reports a missing off bit" {
     var pos: usize = 0;
     const f = try decode(list.items, &pos);
     try std.testing.expect(!f.stream.offPresent);
+    try std.testing.expectEqual(@as(u64, 0), f.stream.offset);
     try std.testing.expectEqualStrings("xyz", f.stream.data);
     try std.testing.expect(f.stream.fin);
 }

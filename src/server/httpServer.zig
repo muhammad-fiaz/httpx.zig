@@ -1662,10 +1662,12 @@ pub const Server = struct {
                 }
                 if (req.tooLarge) {
                     h3.resetStream(qconn, sid, .requestRejected, nowMs) catch {};
+                    h3.discardRequestStream(sid);
                     continue;
                 }
                 if (req.failed) {
                     h3.resetStream(qconn, sid, req.h3Error orelse .generalProtocolError, nowMs) catch {};
+                    h3.discardRequestStream(sid);
                     continue;
                 }
                 if (!req.done) {
@@ -1674,6 +1676,7 @@ pub const Server = struct {
                 }
                 self.dispatchH3Request(&h3, qconn, req) catch |err| {
                     h3.resetStream(qconn, sid, .internalError, nowMs) catch {};
+                    h3.discardRequestStream(sid);
                     if (err == error.OutOfMemory) return err;
                     continue;
                 };
@@ -1762,8 +1765,10 @@ pub const Server = struct {
             if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) clientAcceptEncoding = h.value;
         }
 
-        const isHead = std.ascii.eqlIgnoreCase(mStr, "HEAD");
+        const isHead = std.mem.eql(u8, mStr, "HEAD");
+        const isConnect = std.mem.eql(u8, mStr, "CONNECT");
         const statusAllowsBody = res.status != 204 and res.status != 205 and res.status != 304;
+        const connectTunnel = isConnect and res.status < 300;
         var codedBody: ?[]u8 = null;
         defer if (codedBody) |b| a.free(b);
         var outBody: []const u8 = res.body;
@@ -1801,8 +1806,9 @@ pub const Server = struct {
         defer respHeaders.deinit(a);
         // Content-Length describes the bytes that a GET would send; HEAD
         // keeps the length but suppresses the DATA frame. 204/205/304
-        // responses carry no content framing.
-        if (statusAllowsBody) {
+        // responses carry no content framing, and a successful CONNECT
+        // response is a tunnel without Content-Length.
+        if (statusAllowsBody and !connectTunnel) {
             var clBuf: [20]u8 = undefined;
             const cl = clBuf[0..std.fmt.printInt(&clBuf, outBody.len, 10, .lower, .{})];
             try respHeaders.append(a, .{ .name = "content-length", .value = cl });
@@ -1847,6 +1853,7 @@ pub const Server = struct {
         try h3.pumpQpack(qconn, nowMs);
         try h3.sendStreamBytes(qconn, req.sid, wire.items, true, nowMs);
         try h3.pumpQpack(qconn, nowMs);
+        h3.discardRequestStream(req.sid);
     }
     fn serveHttp1Connection(self: *Server, conn: StreamConn, isTlsConn: bool, initial: []const u8) !void {
         if (!self.cfg.keepAlive) {

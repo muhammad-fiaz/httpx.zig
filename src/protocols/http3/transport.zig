@@ -1,19 +1,21 @@
 //! HTTP/3 client transport over live QUIC (RFC 9114).
 //!
-//! Runs one request/response exchange over an established QUIC
-//! connection. All inbound stream bytes are routed through
+//! Runs request/response exchanges over an established QUIC connection.
+//! All inbound stream bytes are routed through
 //! `connection.Connection`, so control/QPACK streams, SETTINGS,
 //! multi-section responses, trailers, and QPACK blocking are handled by
 //! the same state machine the server uses.
 //!
 //! Scope (documented, not hidden):
-//!   * One request per connection for now (no H3 pooling yet); the
-//!     struct is shaped so pooling can reuse it later.
+//!   * The transport multiplexes requests with `startRequest`/`waitAll`;
+//!     the high-level client still opens one QUIC connection per request
+//!     (no H3 pooling yet).
 //!   * Request bodies are sent as buffered DATA frames; streaming uploads are
 //!     not provided by this one-shot client API.
-//!   * A peer GOAWAY received after the request stream opened does not
-//!     cancel the in-flight exchange; GOAWAY before opening fails the
-//!     request instead of silently retrying on a new connection.
+//!   * A GOAWAY before opening a stream fails new requests. A GOAWAY that
+//!     arrives after streams are open marks every exchange above its
+//!     last-stream identifier as rejected; it is never retried on a new
+//!     connection implicitly.
 //!
 //! Pumping: `request` drives our endpoint and, when `peer` is set, an
 //! in-process peer endpoint too (loopback tests/examples). Against an
@@ -281,6 +283,9 @@ pub const Client = struct {
     ) !u64 {
         const a = self.allocator;
         if (self.responses.count() == 0) self.ioError = null;
+        // RFC 9110 Section 9.3.6: CONNECT requests carry no content before the
+        // tunnel is established.
+        if (std.mem.eql(u8, method, "CONNECT") and body != null and body.?.len != 0) return error.ProtocolViolation;
         self.ep.conn.cbs = .{
             .ctx = self,
             .onStreamData = onQuicStream,
@@ -343,7 +348,8 @@ pub const Client = struct {
             try qextra.append(a, .{ .name = name, .value = cl });
         }
         var rs = self.h3.createRequestStream(sid);
-        if (std.ascii.eqlIgnoreCase(method, "HEAD")) self.h3.markRequestHead(sid);
+        if (std.mem.eql(u8, method, "HEAD")) self.h3.markRequestHead(sid);
+        if (std.mem.eql(u8, method, "CONNECT")) self.h3.markRequestConnect(sid);
         const head = try rs.buildRequestHeaders(method, scheme, authority, path, qextra.items);
         defer a.free(head);
 
@@ -422,6 +428,11 @@ pub const Client = struct {
                 return error.TruncatedResponse;
             }
         }
+        // A response can complete inside a feed that already happened
+        // before this call; drain any decoder acknowledgments it staged
+        // before releasing the request stream state.
+        try self.pumpQpack(@intCast(clockMod.monotonicMillis()));
+        _ = try self.ep.flush(dest);
         return self.toResponse(sid);
     }
 
@@ -475,6 +486,7 @@ pub const Client = struct {
             var r = kv.value;
             r.deinit(self.allocator);
         }
+        self.h3.discardRequestStream(sid);
     }
 
     fn toResponse(self: *Client, sid: u64) !H3Response {
@@ -488,6 +500,7 @@ pub const Client = struct {
         const body = try r.body.toOwnedSlice(a);
         const status = r.status;
         _ = self.responses.remove(sid);
+        self.h3.discardRequestStream(sid);
         return .{
             .status = status,
             .headers = headers,

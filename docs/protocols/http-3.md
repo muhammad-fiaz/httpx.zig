@@ -8,11 +8,13 @@
 > control, transport parameters, and 0-RTT resumption are wired in.
 >
 > Deliberate limits: the high-level HTTP/3 client performs one request per
-> QUIC connection (no pooling), and the QUIC driver does not handle
-> HelloRetryRequest or connection migration. There is no server
-> push/datagrams support, and the high-level API buffers request/response
-> bodies rather than streaming them. Retry/token validation, v1/v2 version
-> negotiation, and 1-RTT key updates are implemented.
+> QUIC connection (no pooling); the lower-level transport exposes
+> `startRequest`/`waitAll` for concurrent multiplexed exchanges. The QUIC
+> driver does not handle HelloRetryRequest or connection migration. There
+> is no server push/datagrams support, extended CONNECT is not advertised
+> or served, and the high-level API buffers request/response bodies rather
+> than streaming them. Retry/token validation, v1/v2 version negotiation,
+> and 1-RTT key updates are implemented.
 
 ## Motivation
 

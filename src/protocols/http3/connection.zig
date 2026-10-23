@@ -101,10 +101,13 @@ pub const RequestStream = struct {
         var block = std.ArrayList(u8).empty;
         errdefer block.deinit(self.allocator);
         self.qpack.beginSection();
+        const isConnect = std.mem.eql(u8, method, "CONNECT");
         try self.encodeField(&block, ":method", method);
-        try self.encodeField(&block, ":scheme", scheme);
+        // Plain CONNECT carries only :method and :authority; :scheme and
+        // :path are required only for non-CONNECT requests (RFC 9114 4.3.1).
+        if (!isConnect) try self.encodeField(&block, ":scheme", scheme);
         try self.encodeField(&block, ":authority", authority);
-        try self.encodeField(&block, ":path", path);
+        if (!isConnect) try self.encodeField(&block, ":path", path);
         for (headers) |h| {
             if (std.mem.startsWith(u8, h.name, ":")) return error.InvalidHeader;
             try self.encodeField(&block, h.name, h.value);
@@ -218,6 +221,10 @@ pub const Connection = struct {
     // GOAWAY and push tracking
     goawaySent: bool = false,
     goawayReceived: bool = false,
+    /// Last identifier this endpoint sent in GOAWAY (stream ID for a
+    /// server, Push ID for a client).
+    goawaySentId: u64 = 0,
+    /// Last identifier carried by the peer's most recent GOAWAY.
     goawayStreamId: u64 = 0,
     maxPushId: u64 = 0,
 
@@ -379,13 +386,14 @@ pub const Connection = struct {
 
     /// Builds a GOAWAY frame (stream ID varint payload).
     pub fn buildGoawayFrame(self: *Connection, streamId: u64) ![]u8 {
+        if (self.goawaySent and streamId > self.goawaySentId) return Error.ProtocolViolation;
         const out = try frameMod.encodeSingleVarintFrame(
             self.allocator,
             @backingInt(frameMod.FrameType.goaway),
             streamId,
         );
         self.goawaySent = true;
-        self.goawayStreamId = streamId;
+        self.goawaySentId = streamId;
         return out;
     }
 
@@ -421,15 +429,14 @@ pub const Connection = struct {
                 };
             },
             0x7 => {
-                if (self.role == .server) {
-                    self.controlError = .frameUnexpected;
-                    return Error.ProtocolViolation;
-                }
                 const sid = frameMod.decodeSingleVarintPayload(payload) catch {
                     self.controlError = .frameError;
                     return Error.ProtocolViolation;
                 };
-                if ((sid & 0x3) != 0) {
+                // A server's GOAWAY carries a client-initiated bidirectional
+                // stream ID (low two bits zero). A client's GOAWAY carries
+                // a Push ID, which has no stream-ID parity (RFC 9114 5.2).
+                if (self.role == .client and (sid & 0x3) != 0) {
                     self.controlError = .idError;
                     return Error.ProtocolViolation;
                 }
@@ -493,6 +500,12 @@ pub const Connection = struct {
         if (self.streams.getPtr(streamId)) |st| st.requestIsHead = true;
     }
 
+    /// Records that the request on `streamId` used CONNECT, so a 2xx
+    /// response is validated as a tunnel (no Content-Length).
+    pub fn markRequestConnect(self: *Connection, streamId: u64) void {
+        if (self.streams.getPtr(streamId)) |st| st.requestIsConnect = true;
+    }
+
     /// Builds the callback set H3Streams get, forwarding into this
     /// connection (which applies control state) and then the runtime.
     fn streamCallbacks(self: *Connection) h3stream.Callbacks {
@@ -554,7 +567,6 @@ pub const Connection = struct {
 
     fn fwdControlFrame(ctx: ?*anyopaque, sid: u64, frameType: u64, payload: []const u8) void {
         const self: *Connection = @ptrCast(@alignCast(ctx.?));
-        const hadGoaway = self.goawayReceived;
         self.processControlFrame(frameType, payload) catch |e| {
             const code: frameMod.H3Error = self.controlError orelse switch (e) {
                 error.InvalidSettings => .settingsError,
@@ -566,7 +578,10 @@ pub const Connection = struct {
             if (self.streams.getPtr(sid)) |stp| stp.failExtern(code);
             return;
         };
-        if (!hadGoaway and self.goawayReceived) {
+        // Notify on every accepted GOAWAY: a graceful shutdown can send a
+        // second, lower last-stream identifier that rejects in-flight
+        // requests the earlier frame still appeared to accept.
+        if (frameType == 0x7) {
             if (self.cbs.onGoaway) |cb| cb(self.cbs.ctx, self.goawayStreamId);
         }
     }
@@ -744,6 +759,15 @@ pub const Connection = struct {
         errdefer st.deinit();
         try self.streams.put(sid, st);
         return sid;
+    }
+
+    /// Drops locally tracked request state for `sid`, e.g. after the
+    /// caller has consumed the response or abandoned the exchange.
+    pub fn discardRequestStream(self: *Connection, sid: u64) void {
+        if (self.streams.fetchRemove(sid)) |kv| {
+            var st = kv.value;
+            st.deinit();
+        }
     }
 
     /// Sends already-built bytes on `sid` at the current send offset.
@@ -1035,6 +1059,14 @@ test "h3conn send path offsets prefixes and goaway gating" {
     try std.testing.expectEqual(@as(usize, 1), rec.goaways);
     try std.testing.expectEqual(@as(u64, 0), rec.lastGoaway);
     try std.testing.expectError(Error.StreamClosed, conn.openRequestStream());
+
+    // A second GOAWAY is surfaced too: the runtime must learn a reduced
+    // last-stream identifier even though GOAWAY was already received.
+    const go2 = try conn.buildGoawayFrame(0);
+    defer a.free(go2);
+    try conn.feedQuic(3, go2, false);
+    try std.testing.expectEqual(@as(usize, 2), rec.goaways);
+    try std.testing.expectEqual(@as(u64, 0), rec.lastGoaway);
 }
 
 test "h3conn reset sends offset and drops the stream" {
@@ -1333,6 +1365,27 @@ test "request stream builds decodable request headers" {
     try std.testing.expectEqualStrings(":path", fields[3].name);
 }
 
+test "request stream omits scheme and path for CONNECT" {
+    const a = std.testing.allocator;
+    var qenc = qpackMod.Encoder.init(a);
+    defer qenc.deinit();
+    var rs = RequestStream{ .id = 0, .allocator = a, .qpack = &qenc };
+    const encoded = try rs.buildRequestHeaders("CONNECT", "https", "example.test:443", "/", &.{});
+    defer a.free(encoded);
+
+    var offset: usize = 0;
+    const frame = try frameMod.parseFrame(encoded, &offset);
+    var dec = qpackMod.Decoder.init(a);
+    defer dec.deinit();
+    const fields = try dec.decodeSectionCounted(frame.payload, 0, null);
+    defer dec.freeFields(fields);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expectEqualStrings(":method", fields[0].name);
+    try std.testing.expectEqualStrings("CONNECT", fields[0].value);
+    try std.testing.expectEqualStrings(":authority", fields[1].name);
+    try std.testing.expectEqualStrings("example.test:443", fields[1].value);
+}
+
 test "connection builds and processes settings" {
     const a = std.testing.allocator;
     var conn = Connection.init(a, .client);
@@ -1408,8 +1461,49 @@ test "http3 goaway validates role and client stream parity" {
     var server = Connection.init(a, .server);
     defer server.deinit();
     try server.processControlFrame(0x4, encoded);
-    try std.testing.expectError(Error.ProtocolViolation, server.processControlFrame(0x7, vb[0..ok]));
-    try std.testing.expectEqual(frameMod.H3Error.frameUnexpected, server.controlError.?);
+    // A client GOAWAY carries a Push ID, not a stream ID; any varint is
+    // valid and the server must accept it (RFC 9114 Section 5.2).
+    const pushId = try varint.encode(&vb, 1);
+    try server.processControlFrame(0x7, vb[0..pushId]);
+    try std.testing.expect(server.goawayReceived);
+    try std.testing.expectEqual(@as(u64, 1), server.goawayStreamId);
+    const higherPushId = try varint.encode(&vb, 5);
+    try std.testing.expectError(Error.ProtocolViolation, server.processControlFrame(0x7, vb[0..higherPushId]));
+    try std.testing.expectEqual(frameMod.H3Error.idError, server.controlError.?);
+}
+
+test "http3 sent and received goaway identifiers are independent" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var client = Connection.init(a, .client);
+    defer client.deinit();
+    try client.processControlFrame(0x4, encoded);
+    var vb: [8]u8 = undefined;
+    const n = try varint.encode(&vb, 0);
+    try client.processControlFrame(0x7, vb[0..n]);
+
+    // Receiving a server GOAWAY must not consume the Push ID space used
+    // for our own GOAWAY frames.
+    const first = try client.buildGoawayFrame(7);
+    defer a.free(first);
+    try std.testing.expectEqual(@as(u8, 0x7), first[first.len - 1]);
+    const second = try client.buildGoawayFrame(3);
+    defer a.free(second);
+    try std.testing.expectError(Error.ProtocolViolation, client.buildGoawayFrame(8));
+    try std.testing.expectEqual(@as(u64, 3), client.goawaySentId);
+}
+
+test "http3 discarding a request stream releases its state" {
+    const a = std.testing.allocator;
+    var conn = Connection.init(a, .client);
+    defer conn.deinit();
+    const sid = try conn.openRequestStream();
+    try std.testing.expect(conn.streams.contains(sid));
+    conn.discardRequestStream(sid);
+    try std.testing.expect(!conn.streams.contains(sid));
 }
 
 test "http3 client rejects server-only control frames" {

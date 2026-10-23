@@ -1,6 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+// Each httpx-rooted compile can use over 1 GiB. Give the build runner a
+// conservative upper bound so it schedules fewer examples concurrently.
+const compileStepMaxRss = 4 * 1024 * 1024 * 1024;
+
 fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     compile.root_module.link_libc = true;
     if (target.result.os.tag == .windows) {
@@ -251,6 +255,7 @@ pub fn build(b: *std.Build) void {
     inline for (examples) |example| {
         const exe = b.addExecutable(.{
             .name = example.name,
+            .max_rss = compileStepMaxRss,
             .root_module = b.createModule(.{
                 .root_source_file = b.path(example.path),
                 .target = target,
@@ -278,32 +283,9 @@ pub fn build(b: *std.Build) void {
         runAllExamples.dependOn(&runExe.step);
     }
 
-    // Interoperability harness binaries. `zig build interop` compiles the Zig
-    // client and servers; tests/interop/run.ps1 drives them against the
-    // independent Python implementations (h2, aioquic).
-    const interopStep = b.step("interop", "Build the HTTP/2 and HTTP/3 interoperability harness");
-    const interopTargets = [_]struct { name: []const u8, path: []const u8 }{
-        .{ .name = "interop-h2-server", .path = "tests/interop/h2_server.zig" },
-        .{ .name = "interop-h3-server", .path = "tests/interop/h3_server.zig" },
-        .{ .name = "interop-client", .path = "tests/interop/client.zig" },
-    };
-    inline for (interopTargets) |interop| {
-        const interopExe = b.addExecutable(.{
-            .name = interop.name,
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(interop.path),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        interopExe.root_module.addImport("httpx", httpxModule);
-        linkPlatformLibs(interopExe, target);
-        const installInterop = b.addInstallArtifact(interopExe, .{});
-        interopStep.dependOn(&installInterop.step);
-    }
-
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
     const tests = b.addTest(.{
+        .max_rss = compileStepMaxRss,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/httpx.zig"),
             .target = target,
@@ -332,6 +314,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const fuzzTests = b.addTest(.{
+        .max_rss = compileStepMaxRss,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/httpx.zig"),
             .target = target,
@@ -359,6 +342,7 @@ pub fn build(b: *std.Build) void {
 
     const benchExe = b.addExecutable(.{
         .name = "benchmark",
+        .max_rss = compileStepMaxRss,
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/main.zig"),
             .target = target,
@@ -390,6 +374,7 @@ pub fn build(b: *std.Build) void {
     const lib = b.addLibrary(.{
         .name = "httpx",
         .linkage = .static,
+        .max_rss = compileStepMaxRss,
         .root_module = librootModule,
     });
     linkPlatformLibs(lib, target);

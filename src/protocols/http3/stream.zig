@@ -143,8 +143,6 @@ pub const Stream = struct {
     blocked: bool = false,
     /// SETTINGS seen on this control stream (SETTINGS-first rule).
     controlSawSettings: bool = false,
-    /// Extended-CONNECT allowed by peer settings (connection sets this).
-    connectAllowed: bool = false,
     /// Decoder-stream acknowledgments staged by dynamic decodes; the
     /// connection layer drains these onto the decoder stream.
     decoderAck: std.ArrayList(u8) = .empty,
@@ -157,6 +155,8 @@ pub const Stream = struct {
     bodyReceived: u64 = 0,
     /// The request method was HEAD, so the response cannot carry content.
     requestIsHead: bool = false,
+    /// The request method was CONNECT, so a 2xx response is a tunnel.
+    requestIsConnect: bool = false,
     /// A final response status whose semantics forbid message content.
     responseBodyForbidden: bool = false,
 
@@ -338,21 +338,25 @@ pub const Stream = struct {
             }
             const payload = self.buf.items[self.off..][0..n];
             self.off += n;
-            if (frameMod.checkFrameAllowed(.control, header.frameType)) |code| {
-                self.fail(code);
-                return;
-            }
             if (header.frameType == 0x4 and self.controlSawSettings) {
                 // Second SETTINGS: connection state rejects it; flag here
                 // so the error surfaces even without the connection layer.
                 self.fail(.settingsError);
                 return;
             }
-            if (header.frameType == 0x4) self.controlSawSettings = true;
-            if (!self.controlSawSettings) {
+            // SETTINGS must be the first frame on the control stream
+            // (RFC 9114 Section 6.2.1). This check precedes frame-type
+            // legality so a first DATA/HEADERS frame reports
+            // H3_MISSING_SETTINGS rather than H3_FRAME_UNEXPECTED.
+            if (!self.controlSawSettings and header.frameType != 0x4) {
                 self.fail(.missingSettings);
                 return;
             }
+            if (frameMod.checkFrameAllowed(.control, header.frameType)) |code| {
+                self.fail(code);
+                return;
+            }
+            if (header.frameType == 0x4) self.controlSawSettings = true;
             if (self.cbs.onControlFrame) |cb| cb(self.cbs.ctx, self.id, header.frameType, payload);
             if (self.failed) return; // connection rejected synchronously
         }
@@ -657,11 +661,14 @@ pub const Stream = struct {
             return .messageError;
         }
         const isConnect = std.mem.eql(u8, m, "CONNECT");
+        self.requestIsConnect = isConnect;
         if (isConnect) {
-            // CONNECT omits :scheme/:path and requires :authority.
+            // Plain CONNECT omits :scheme/:path and requires :authority.
+            // This implementation never advertises ENABLE_CONNECT_PROTOCOL,
+            // so extended CONNECT (:protocol) is rejected.
             if (scheme != null or path != null) return .messageError;
             if (authority == null) return .messageError;
-            if (protocol != null and !self.connectAllowed) return .messageError;
+            if (protocol != null) return .messageError;
         } else {
             if (scheme == null or path == null) return .messageError;
             if (authority == null and host == null) return .messageError;
@@ -727,6 +734,9 @@ pub const Stream = struct {
                 if (cl != 0) return .messageError;
             }
         }
+        // A 2xx response to CONNECT establishes a tunnel; Content-Length
+        // is forbidden and tunnel bytes follow the headers (RFC 9110 9.3.6).
+        if (self.requestIsConnect and statusCode < 300 and self.contentLength != null) return .messageError;
         return null;
     }
 
@@ -929,6 +939,26 @@ test "h3stream control accepts settings then rejects data" {
     try std.testing.expectEqual(H3Error.frameUnexpected, rec.lastErr.?);
 }
 
+test "h3stream control requires SETTINGS before any other frame" {
+    const a = std.testing.allocator;
+    var rec = TestRec{};
+    var qdec = qpackMod.Decoder.init(a);
+    defer qdec.deinit();
+    var qenc = qpackMod.Encoder.init(a);
+    defer qenc.deinit();
+    var s = Stream.init(a, 2, .uni, .server, rec.cbs(), &qdec, &qenc);
+    defer s.deinit();
+
+    const df = try testFrame(a, 0x0, "x");
+    defer a.free(df);
+    var wire = std.ArrayList(u8).empty;
+    defer wire.deinit(a);
+    try wire.append(a, 0x00); // control stream type
+    try wire.appendSlice(a, df);
+    s.feed(wire.items, false);
+    try std.testing.expectEqual(H3Error.missingSettings, rec.lastErr.?);
+}
+
 test "h3stream fragmented uni type then unknown skip" {
     const a = std.testing.allocator;
     var rec = TestRec{};
@@ -1105,6 +1135,49 @@ test "h3stream response rejects 101 and accepts 404" {
         s.feed(hf, true);
         try std.testing.expect(rec.lastErr == null);
         try std.testing.expectEqual(@as(usize, 1), rec.headers);
+        try std.testing.expectEqual(@as(usize, 1), rec.ends);
+    }
+}
+
+test "h3stream CONNECT 2xx response rejects content-length and allows tunnel data" {
+    const a = std.testing.allocator;
+    var qdec = qpackMod.Decoder.init(a);
+    defer qdec.deinit();
+    var qenc = qpackMod.Encoder.init(a);
+    defer qenc.deinit();
+    var qp = qpackMod.Encoder.init(a);
+    defer qp.deinit();
+
+    {
+        var rec = TestRec{};
+        var s = testBidi(a, &rec, 0, .responseRecv, &qdec, &qenc);
+        defer s.deinit();
+        s.requestIsConnect = true;
+        const section = try testSection(a, &qp, &.{ .{ ":status", "200" }, .{ "content-length", "0" } });
+        defer a.free(section);
+        const hf = try testFrame(a, 0x1, section);
+        defer a.free(hf);
+        s.feed(hf, false);
+        try std.testing.expectEqual(H3Error.messageError, rec.lastErr.?);
+    }
+    {
+        var rec = TestRec{};
+        var s = testBidi(a, &rec, 0, .responseRecv, &qdec, &qenc);
+        defer s.deinit();
+        s.requestIsConnect = true;
+        const section = try testSection(a, &qp, &.{.{ ":status", "200" }});
+        defer a.free(section);
+        const hf = try testFrame(a, 0x1, section);
+        defer a.free(hf);
+        const df = try testFrame(a, 0x0, "tunnel");
+        defer a.free(df);
+        var wire = std.ArrayList(u8).empty;
+        defer wire.deinit(a);
+        try wire.appendSlice(a, hf);
+        try wire.appendSlice(a, df);
+        s.feed(wire.items, true);
+        try std.testing.expect(rec.lastErr == null);
+        try std.testing.expectEqual(@as(usize, 6), rec.dataBytes);
         try std.testing.expectEqual(@as(usize, 1), rec.ends);
     }
 }

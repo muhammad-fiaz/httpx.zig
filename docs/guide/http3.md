@@ -62,7 +62,7 @@ Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP
 - The high-level HTTP/3 client performs one request per QUIC connection (no H3 pooling); proxy routes are rejected loudly (`Http3ProxyUnsupported`).
 - 0-RTT resumption works over QUIC, but the QUIC driver does not handle HelloRetryRequest; clients always send an X25519 share.
 - Retry/token validation, QUIC v1/v2 version negotiation, and 1-RTT key updates are implemented. Set `.http3Retry = true` on `ServerConfig` to require address validation before the Initial flight; the 3x anti-amplification limit otherwise applies until the client Finished is verified. The high-level client honors Retry automatically and resends the ClientHello under the new Initial keys.
-- No connection migration, server push, or HTTP/3 datagrams.
+- No connection migration, server push, HTTP/3 datagrams, or extended CONNECT.
 - The client sends buffered request bodies in HTTP/3 DATA frames. Streaming
   uploads and downloads are not provided by this one-shot API.
 

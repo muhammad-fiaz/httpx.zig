@@ -282,14 +282,18 @@ pub const DynTable = struct {
 
     /// Inserts a new entry, evicting oldest entries to stay within maxSize.
     pub fn insert(self: *DynTable, allocator: Allocator, name: []const u8, value: []const u8) !u64 {
+        const total = std.math.add(usize, std.math.add(usize, name.len, value.len) catch return Error.OutOfMemory, ENTRY_OVERHEAD) catch return Error.OutOfMemory;
+        if (total > self.maxSize) return Error.TableCapacityExceeded;
+        const index = self.nextIndex;
+        _ = std.math.add(u64, self.nextIndex, 1) catch return Error.OutOfMemory;
+        // Reserve the entry slot before evicting so a failed allocation
+        // cannot leave the table observably changed.
+        try self.entries.ensureUnusedCapacity(allocator, 1);
+
         const ownedName = try allocator.dupe(u8, name);
         errdefer allocator.free(ownedName);
         const ownedValue = try allocator.dupe(u8, value);
         errdefer allocator.free(ownedValue);
-
-        const total = std.math.add(usize, std.math.add(usize, name.len, value.len) catch return Error.OutOfMemory, ENTRY_OVERHEAD) catch return Error.OutOfMemory;
-        if (total > self.maxSize) return Error.TableCapacityExceeded;
-        const index = self.nextIndex;
 
         // Evict oldest entries until the new one fits.
         while (self.currentSize + total > self.maxSize and self.entries.items.len > 0) {
@@ -300,13 +304,13 @@ pub const DynTable = struct {
             allocator.free(old.value);
         }
 
-        try self.entries.append(allocator, .{
+        self.entries.appendAssumeCapacity(.{
             .name = ownedName,
             .value = ownedValue,
             .totalSize = total,
         });
         self.currentSize += total;
-        self.nextIndex = std.math.add(u64, self.nextIndex, 1) catch return Error.OutOfMemory;
+        self.nextIndex += 1;
         return @intCast(index);
     }
 
@@ -379,16 +383,20 @@ pub const Encoder = struct {
     /// Sizes the dynamic table to the peer's advertised capacity and
     /// queues a Set Capacity instruction for the encoder stream.
     pub fn setMaxTableCapacity(self: *Encoder, capacity: usize) void {
+        var ib: [16]u8 = undefined;
+        const n = encodeInt(&ib, 5, capacity) catch return;
+        ib[0] |= 0x20;
+        // Reserve the encoder-stream bytes before changing the local table:
+        // dropping the instruction after the table was resized would leave
+        // the peer's table out of sync.
+        self.pending.ensureUnusedCapacity(self.allocator, n) catch return;
         if (self.dyn) |*d| d.deinit(self.allocator);
         self.dyn = null;
         self.peerMaxCapacity = capacity;
         if (capacity != 0) {
             self.dyn = DynTable.init(self.allocator, capacity);
         }
-        var ib: [16]u8 = undefined;
-        const n = encodeInt(&ib, 5, capacity) catch return;
-        ib[0] |= 0x20;
-        self.pending.appendSlice(self.allocator, ib[0..n]) catch {};
+        self.pending.appendSliceAssumeCapacity(ib[0..n]);
     }
 
     pub fn setMaxBlockedStreams(self: *Encoder, n: u64) void {
@@ -548,6 +556,30 @@ pub const Encoder = struct {
             ENTRY_OVERHEAD,
         ) catch return null;
         if (total > dt.maxSize) return null;
+
+        // Build the encoder-stream instruction first so an allocation
+        // failure cannot leave the dynamic table ahead of the peer.
+        var ins = std.ArrayList(u8).empty;
+        defer ins.deinit(self.allocator);
+        const max = huff.maxEncodedLen(name.len);
+        const buf = try self.allocator.alloc(u8, max);
+        defer self.allocator.free(buf);
+        const hlen = huff.encode(buf, name) catch null;
+        const useHuff = if (hlen) |hl| hl < name.len else false;
+        const nlen = if (useHuff) hlen.? else name.len;
+        var ib: [16]u8 = undefined;
+        const n = try encodeInt(&ib, 5, nlen);
+        ib[0] |= 0x40;
+        if (useHuff) ib[0] |= 0x20;
+        try ins.appendSlice(self.allocator, ib[0..n]);
+        if (useHuff) {
+            try ins.appendSlice(self.allocator, buf[0..hlen.?]);
+        } else {
+            try ins.appendSlice(self.allocator, name);
+        }
+        try self.emitString(&ins, value, 7);
+        try self.pending.ensureUnusedCapacity(self.allocator, ins.items.len);
+
         while (dt.currentSize + total > dt.maxSize and dt.entries.items.len > 0) {
             const oldestAbs = dt.baseIndex;
             if (oldestAbs >= self.evictBarrier) return null;
@@ -559,24 +591,7 @@ pub const Encoder = struct {
         }
         if (dt.currentSize + total > dt.maxSize) return null;
         const abs = try dt.insert(self.allocator, name, value);
-        // Encoder-stream Insert With Literal Name: 01 | H | len(5+).
-        const max = huff.maxEncodedLen(name.len);
-        const buf = try self.allocator.alloc(u8, max);
-        defer self.allocator.free(buf);
-        const hlen = huff.encode(buf, name) catch null;
-        const useHuff = if (hlen) |hl| hl < name.len else false;
-        const nlen = if (useHuff) hlen.? else name.len;
-        var ib: [16]u8 = undefined;
-        const n = try encodeInt(&ib, 5, nlen);
-        ib[0] |= 0x40;
-        if (useHuff) ib[0] |= 0x20;
-        try self.pending.appendSlice(self.allocator, ib[0..n]);
-        if (useHuff) {
-            try self.pending.appendSlice(self.allocator, buf[0..hlen.?]);
-        } else {
-            try self.pending.appendSlice(self.allocator, name);
-        }
-        try self.emitString(&self.pending, value, 7);
+        self.pending.appendSliceAssumeCapacity(ins.items);
         self.sectionUsedDynamic = true;
         return abs;
     }

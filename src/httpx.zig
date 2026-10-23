@@ -317,6 +317,7 @@ pub const RequestOptions = @import("client/httpClient.zig").RequestOptions;
 pub const ClientResponse = @import("client/requestBuilder.zig").Response;
 pub const Header = @import("client/requestBuilder.zig").Header;
 pub const TlsOptions = @import("client/requestBuilder.zig").TlsOptions;
+pub const sessionPolicyFingerprint = @import("client/requestBuilder.zig").sessionPolicyFingerprint;
 pub const Headers = headers.Headers;
 pub const CookieJar = cookies.Jar;
 pub const ConnectionPool = pool.Pool;

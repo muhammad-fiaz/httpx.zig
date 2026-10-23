@@ -1637,6 +1637,20 @@ pub const Connection = struct {
             return Error.AuthenticationFailed;
         };
 
+        // The server's first authenticated Initial selects the destination
+        // CID the client must use for subsequent packets (RFC 9000 §7.2).
+        // Keep initialDcid unchanged: it remains the input to Initial key
+        // derivation for retransmitted Initial packets.
+        if (self.role == .client and parsed.header.type == .initial) {
+            if (!std.mem.eql(u8, parsed.header.dcid, self.scid[0..self.scidLen])) return;
+            if (sp.highestRxPn < 0) {
+                @memcpy(self.dcid[0..parsed.header.scid.len], parsed.header.scid);
+                self.dcidLen = @intCast(parsed.header.scid.len);
+            } else if (!std.mem.eql(u8, parsed.header.scid, self.dcid[0..self.dcidLen])) {
+                return;
+            }
+        }
+
         if (isZeroRtt) {
             if (self.maxEarlyData > 0) {
                 self.earlyDataBytesReceived +|= ctLen;
@@ -1870,11 +1884,10 @@ pub const Connection = struct {
                         if (self.cbs.onNewStream) |cb| cb(self.cbs.ctx, s.id);
                     }
                     const st = stPtr.?;
-                    // RFC 9000 Section 19.8: a STREAM frame without the
-                    // OFF bit carries the stream's current offset, not
-                    // zero. Using the wrong offset silently misplaces the
-                    // data (and breaks the final-size check).
-                    const off = if (s.offPresent) s.offset else st.currentRecvOffset();
+                    // RFC 9000 Section 19.8: when OFF is absent, stream data
+                    // starts at offset zero. This matters for retransmitted
+                    // first-byte ranges after the receive cursor has advanced.
+                    const off = if (s.offPresent) s.offset else 0;
                     const Sink = struct {
                         cbs: Callbacks,
                         sid: u64,
@@ -1884,7 +1897,7 @@ pub const Connection = struct {
                     };
                     var sink = Sink{ .cbs = self.cbs, .sid = s.id };
                     if (!st.fcAllows(off, s.data.len)) return Error.FlowControlViolation;
-                    _ = st.receive(off, s.data, s.fin, !s.offPresent, &sink) catch |e| switch (e) {
+                    _ = st.receive(off, s.data, s.fin, &sink) catch |e| switch (e) {
                         error.FlowControlViolation => return Error.FlowControlViolation,
                         error.FinalSizeViolation => return Error.ProtocolViolation,
                         error.StreamReset => return,
@@ -1895,6 +1908,12 @@ pub const Connection = struct {
                     if (end > oldEnd) {
                         self.dataReceived +|= end - oldEnd;
                         try self.recvStreamEnd.put(s.id, end);
+                    }
+                    if (st.canReceiveMore() and st.recvMaxOffset < (1 << 30)) {
+                        const raised = @min(st.recvMaxOffset *| 2, 1 << 30);
+                        st.recvMaxOffset = raised;
+                        try self.queueControlFrame(.{ .maxStreamData = .{ .streamId = s.id, .maximum = raised } });
+                        try self.flushControl(.application, nowMs);
                     }
                     if (self.dataReceived > self.maxData) return Error.FlowControlViolation;
                     try self.maybeBumpMaxData();
@@ -2688,6 +2707,8 @@ fn runTlsHandshake(
     defer a.free(s0);
     try std.testing.expect(s0.len > 64);
     try client.receiveDatagram(s0, 200);
+    try std.testing.expectEqual(server.scidLen, client.dcidLen);
+    try std.testing.expectEqualSlices(u8, server.scid[0..server.scidLen], client.dcid[0..client.dcidLen]);
 
     // The client verifies the server Finished and answers with its own
     // Finished; only then may the server confirm and send HANDSHAKE_DONE.
@@ -3531,6 +3552,30 @@ test "stream data blocked raises the stream window" {
     try std.testing.expectEqual(@as(u64, 131070), pair.client.maxStreamData.get(0).?);
 }
 
+test "receive stream window grows and is advertised before its initial limit" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+    pair.client.cc.cwnd = 1 << 20;
+
+    const data = (@as([70_000]u8, @splat(0xEF)));
+    var offset: usize = 0;
+    var now: u64 = 100;
+    while (offset < data.len) {
+        const end = @min(offset + 1200, data.len);
+        try pair.client.sendStreamChecked(0, offset, data[offset..end], end == data.len, now);
+        try pair.pumpCS(a);
+        try pair.pumpSC(a);
+        offset = end;
+        now += 1;
+    }
+
+    const stream = pair.server.streams.get(0) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(stream.recvOffset == data.len);
+    try std.testing.expect(stream.recvMaxOffset >= data.len);
+    try std.testing.expect(pair.client.maxStreamData.get(0).? >= data.len);
+}
+
 test "max streams bumps advertise higher limits" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
@@ -3919,9 +3964,8 @@ test "server discards initial packets below the 1200 byte minimum" {
 
 test "server accepts the initial flight of an independent quic client" {
     // Captured from curl 8.15.0, an independent QUIC client, talking to
-    // this server. The vector pins the wire format: header protection,
-    // packet protection, packet-number encoding, and CRYPTO stream offsets
-    // all have to match.
+    // this server. This vector checks header protection, packet protection,
+    // packet-number encoding, and CRYPTO stream reassembly independently.
     const raw = @embedFile("testdata/interop_client_initial.bin");
 
     const a = std.testing.allocator;
@@ -3945,13 +3989,10 @@ test "server accepts the initial flight of an independent quic client" {
             booted = true;
         }
 
-        // Every datagram must decrypt: this is what the big-endian nonce
-        // (RFC 9001 Section 5.3) is exercised for.
         try conn.receiveDatagram(dgram, 1000 + @as(u64, @intCast(packets)));
     }
 
     try std.testing.expectEqual(@as(usize, 6), packets);
-    // The client's CRYPTO stream was reassembled across the packets.
     try std.testing.expect(conn.cryptoRecvOff[0] > 0);
     try std.testing.expectEqual(@as(i64, 5), conn.spaces[0].highestRxPn);
 }

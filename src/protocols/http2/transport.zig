@@ -236,10 +236,9 @@ pub const Client = struct {
         errdefer allocator.destroy(c);
 
         const sess = try allocator.create(Session);
-        errdefer {
-            sess.deinit();
-            allocator.destroy(sess);
-        }
+        errdefer allocator.destroy(sess);
+        sess.* = try Session.init(allocator, .client, .{});
+        errdefer sess.deinit();
 
         c.* = .{
             .allocator = allocator,
@@ -247,7 +246,7 @@ pub const Client = struct {
             .session = sess,
             .pending = std.AutoHashMap(u31, *RequestState).init(allocator),
         };
-        sess.* = try Session.init(allocator, .client, .{});
+        errdefer c.pending.deinit();
         sess.cbs = .{
             .ctx = c,
             .onHeaders = clientOnHeaders,
@@ -335,6 +334,12 @@ pub const Client = struct {
         maxBytes: usize,
     ) !u31 {
         const a = self.allocator;
+        const isConnect = std.mem.eql(u8, method, "CONNECT");
+        const bodyLen: ?u64 = if (reqBody) |body| body.len else null;
+        // RFC 9110 Section 9.3.6: a client must not send content in a CONNECT
+        // request; any tunnel bytes come after a successful response.
+        if (isConnect and bodyLen != null and bodyLen.? != 0) return error.ProtocolViolation;
+
         const sid = try self.session.nextClientStreamId();
 
         const rstate = try a.create(RequestState);
@@ -347,8 +352,6 @@ pub const Client = struct {
         try self.pending.put(sid, rstate);
         errdefer _ = self.pending.remove(sid);
 
-        const isConnect = std.mem.eql(u8, method, "CONNECT");
-        const bodyLen: ?u64 = if (reqBody) |body| body.len else null;
         var clBuf: [20]u8 = undefined;
         var clValue: ?[]const u8 = null;
         if (bodyLen) |n| {
@@ -906,7 +909,8 @@ fn dispatchReady(ctx: *ServerCtx) !void {
             ) catch HandlerResponse{ .status = 500 };
         }
 
-        const isHead = std.ascii.eqlIgnoreCase(st.method.items, "HEAD");
+        const isHead = std.mem.eql(u8, st.method.items, "HEAD");
+        const isConnect = std.mem.eql(u8, st.method.items, "CONNECT");
 
         var fields = std.ArrayList(hpack.HeaderField).empty;
         defer fields.deinit(ctx.allocator);
@@ -927,11 +931,14 @@ fn dispatchReady(ctx: *ServerCtx) !void {
         // or carry a body for 204/205/304.
         if (resp.status < 200 or resp.status > 599) resp.status = 500;
         const statusAllowsBody = resp.status != 204 and resp.status != 205 and resp.status != 304;
+        // Successful CONNECT establishes a tunnel; a Content-Length on
+        // that response is forbidden (RFC 9110 Section 9.3.6).
+        const connectTunnel = isConnect and resp.status < 300;
 
         var stBuf: [8]u8 = undefined;
         const statusStr = std.fmt.bufPrint(&stBuf, "{d}", .{resp.status}) catch "500";
         try fields.append(ctx.allocator, .{ .name = ":status", .value = statusStr });
-        if (statusAllowsBody) {
+        if (statusAllowsBody and !connectTunnel) {
             var clBuf: [20]u8 = undefined;
             const cl = clBuf[0..std.fmt.printInt(&clBuf, resp.body.len, 10, .lower, .{})];
             try fields.append(ctx.allocator, .{ .name = "content-length", .value = cl });
@@ -1373,6 +1380,85 @@ test "a HEAD request returns the headers without a body" {
         }
     }
     try std.testing.expect(sawLength);
+}
+
+test "a lowercase head method is not treated as HEAD" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, method: []const u8, _: []const u8, _: []const Header, _: []const u8) anyerror!HandlerResponse {
+            if (std.mem.eql(u8, method, "head")) return .{ .status = 200, .body = "lowercase-body" };
+            return .{ .status = 405 };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io: std.Io) void {
+            var conn = lst.accept(io) catch return;
+            defer conn.close();
+            serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    defer thread.join();
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+    var hc = Client.connect(a, sock) catch |err| {
+        sock.close();
+        return err;
+    };
+    defer hc.deinit();
+
+    const r = try hc.request("head", "/doc", &[_]Header{}, "http", "localhost", null, maxResponseBodySize);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(u16, 200), r.status);
+    try std.testing.expectEqualStrings("lowercase-body", r.body);
+}
+
+test "a 2xx CONNECT response is tunneled without content-length" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, method: []const u8, _: []const u8, _: []const Header, _: []const u8) anyerror!HandlerResponse {
+            if (std.mem.eql(u8, method, "CONNECT")) return .{ .status = 200, .body = "tunnel-data" };
+            return .{ .status = 405 };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io: std.Io) void {
+            var conn = lst.accept(io) catch return;
+            defer conn.close();
+            serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    defer thread.join();
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+    var hc = Client.connect(a, sock) catch |err| {
+        sock.close();
+        return err;
+    };
+    defer hc.deinit();
+
+    const r = try hc.request("CONNECT", "/", &[_]Header{}, "http", "localhost", null, maxResponseBodySize);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(u16, 200), r.status);
+    try std.testing.expectEqualStrings("tunnel-data", r.body);
+    for (r.headers) |h| {
+        try std.testing.expect(!std.mem.eql(u8, h.name, "content-length"));
+    }
 }
 
 test "a request body larger than the flow-control window is sent completely" {

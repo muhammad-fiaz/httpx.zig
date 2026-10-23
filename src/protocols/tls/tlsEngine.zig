@@ -16,6 +16,12 @@ const x25519 = std.crypto.dh.X25519;
 /// which OpenSSL 3.5+ and browsers do not speak over TLS.
 const mlKem = std.crypto.kem.ml_kem;
 const MlKem = mlKem.MLKem768;
+const QUIC_CIPHER_SUITES = [_]tls.CipherSuite{.AES_128_GCM_SHA256};
+const TLS_CIPHER_SUITES = [_]tls.CipherSuite{
+    .AES_128_GCM_SHA256,
+    .AES_256_GCM_SHA384,
+    .CHACHA20_POLY1305_SHA256,
+};
 
 // RFC 10024 (X25519MLKEM768) wire sizes. The client share is the ML-KEM
 // encapsulation key followed by the X25519 share; the server share is the
@@ -484,7 +490,7 @@ pub const Engine = struct {
                 try self.io.randomSecure(&r);
                 break :blk r;
             },
-            .cipherSuites = &.{ .AES_128_GCM_SHA256, .AES_256_GCM_SHA384, .CHACHA20_POLY1305_SHA256 },
+            .cipherSuites = if (quicTransportParams != null) &QUIC_CIPHER_SUITES else &TLS_CIPHER_SUITES,
             // Non-null transport parameters mean QUIC, where the hybrid
             // share does not fit one Initial packet.
             .keyShareEntries = try self.buildKeyShares(quicTransportParams == null),
@@ -539,7 +545,7 @@ pub const Engine = struct {
                 try self.io.randomSecure(&r);
                 break :blk r;
             },
-            .cipherSuites = &.{ .AES_128_GCM_SHA256, .AES_256_GCM_SHA384, .CHACHA20_POLY1305_SHA256 },
+            .cipherSuites = if (quicTransportParams != null) &QUIC_CIPHER_SUITES else &TLS_CIPHER_SUITES,
             .keyShareEntries = try self.buildKeyShares(quicTransportParams == null),
             .signatureAlgorithms = if (signatureAlgorithms.len > 0) signatureAlgorithms else &.{
                 .ecdsa_secp256r1_sha256,
@@ -2006,6 +2012,21 @@ test "client produces valid ClientHello" {
     // Body length matches the u24 in header
     const bodyLen: u24 = @as(u24, @intCast(ch[1])) << 16 | @as(u24, @intCast(ch[2])) << 8 | @as(u24, @intCast(ch[3]));
     try std.testing.expectEqual(ch.len - 4, bodyLen);
+}
+
+test "QUIC ClientHello offers only a cipher suite supported by QUIC key derivation" {
+    const a = std.testing.allocator;
+    var engine = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    const ch = try engine.produceClientHello(&.{"h3"}, &.{}, "example.test", "");
+    defer a.free(ch);
+
+    const cipherLenOff = 4 + 2 + 32 + 1;
+    const cipherBytes = std.mem.readInt(u16, ch[cipherLenOff..][0..2], .big);
+    try std.testing.expectEqual(@as(u16, 2), cipherBytes);
+    try std.testing.expectEqual(
+        @as(u16, @intCast(@backingInt(tls.CipherSuite.AES_128_GCM_SHA256))),
+        std.mem.readInt(u16, ch[cipherLenOff + 2 ..][0..2], .big),
+    );
 }
 
 test "handshake engine client-server key exchange" {

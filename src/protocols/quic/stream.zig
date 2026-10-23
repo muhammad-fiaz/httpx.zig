@@ -47,8 +47,7 @@ pub const Stream = struct {
 
     pub const Chunk = struct { offset: u64, data: []u8 };
 
-    /// The stream's current offset (RFC 9000 Section 19.8): the offset a
-    /// STREAM frame without the OFF bit refers to.
+    /// Next contiguous byte offset delivered to the application.
     pub fn currentRecvOffset(self: *const Stream) u64 {
         return self.recvOffset;
     }
@@ -75,12 +74,6 @@ pub const Stream = struct {
         offset: u64,
         data: []const u8,
         fin: bool,
-        /// True when the frame carried no explicit offset, so the offset
-        /// was inferred from the stream's current position (RFC 9000
-        /// Section 19.8). Such a frame that contradicts the recorded
-        /// final size is a retransmission of an earlier frame, not a
-        /// protocol violation.
-        implicit_offset: bool,
         sink: anytype,
     ) Error!usize {
         if (self.resetError != null) return Error.StreamReset;
@@ -92,23 +85,14 @@ pub const Stream = struct {
         // frame must lie entirely at or below that size (RFC 9000 Section
         // 4.5), regardless of whether the duplicate frame repeats FIN.
         if (self.finOffset) |finalSize| {
-            if (end > finalSize) {
-                // An inferred-offset frame that lands past the final size
-                // is a retransmission: drop it silently.
-                if (implicit_offset) return 0;
-                return Error.FinalSizeViolation;
-            }
+            if (end > finalSize) return Error.FinalSizeViolation;
         }
 
         // Final-size consistency (RFC 9000 section 4.5).
         if (fin) {
             if (self.finOffset) |prev| {
-                if (prev != end) {
-                    if (implicit_offset) return 0;
-                    return Error.FinalSizeViolation;
-                }
+                if (prev != end) return Error.FinalSizeViolation;
             } else if (end < self.maxSeenOffset) {
-                if (implicit_offset) return 0;
                 return Error.FinalSizeViolation;
             }
             self.finOffset = end;
@@ -243,8 +227,8 @@ test "in-order delivery passes straight through" {
     defer out.deinit(a);
     var sink = CollectSink{ .list = &out, .gpa = a };
 
-    _ = try st.receive(0, "hello ", false, false, &sink);
-    _ = try st.receive(6, "world", true, false, &sink);
+    _ = try st.receive(0, "hello ", false, &sink);
+    _ = try st.receive(6, "world", true, &sink);
     try std.testing.expectEqualStrings("hello world", out.items);
     try std.testing.expectEqual(@as(u64, 11), st.recvOffset);
 }
@@ -258,13 +242,13 @@ test "out-of-order chunks buffer then flush" {
     defer out.deinit(a);
     var sink = CollectSink{ .list = &out, .gpa = a };
 
-    _ = try st.receive(5, "WORLD", false, false, &sink); // buffered
+    _ = try st.receive(5, "WORLD", false, &sink); // buffered
     try std.testing.expectEqualStrings("", out.items);
-    _ = try st.receive(0, "HELLO", false, false, &sink); // releases both
+    _ = try st.receive(0, "HELLO", false, &sink); // releases both
     try std.testing.expectEqualStrings("HELLOWORLD", out.items);
 
     // Duplicate overlap of delivered prefix is trimmed, not duplicated.
-    _ = try st.receive(3, "LOWO", false, false, &sink);
+    _ = try st.receive(3, "LOWO", false, &sink);
     try std.testing.expectEqualStrings("HELLOWORLD", out.items);
 }
 
@@ -279,8 +263,8 @@ test "flow control violation detected" {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(a);
     var sink = CollectSink{ .list = &out, .gpa = a };
-    try std.testing.expectError(Error.FlowControlViolation, st.receive(5, "123456", false, false, &sink));
-    try std.testing.expectError(Error.FlowControlViolation, st.receive(std.math.maxInt(u64), "x", false, false, &sink));
+    try std.testing.expectError(Error.FlowControlViolation, st.receive(5, "123456", false, &sink));
+    try std.testing.expectError(Error.FlowControlViolation, st.receive(std.math.maxInt(u64), "x", false, &sink));
 }
 
 test "final size mismatch rejected" {
@@ -292,16 +276,16 @@ test "final size mismatch rejected" {
     defer out.deinit(a);
     var sink = CollectSink{ .list = &out, .gpa = a };
 
-    _ = try st.receive(0, "abc", true, false, &sink); // fin@3
-    try std.testing.expectError(Error.FinalSizeViolation, st.receive(2, "xyz", true, false, &sink)); // end=5
-    try std.testing.expectError(Error.FinalSizeViolation, st.receive(3, "x", false, false, &sink)); // extends past fin@3
+    _ = try st.receive(0, "abc", true, &sink); // fin@3
+    try std.testing.expectError(Error.FinalSizeViolation, st.receive(2, "xyz", true, &sink)); // end=5
+    try std.testing.expectError(Error.FinalSizeViolation, st.receive(3, "x", false, &sink)); // extends past fin@3
 
     // FIN below already-seen data also rejected.
     var st2 = Stream.init(a, 1, true, true);
     defer st2.deinit();
     var sink2 = CollectSink{ .list = &out, .gpa = a };
-    _ = try st2.receive(0, "abcdef", false, false, &sink2);
-    try std.testing.expectError(Error.FinalSizeViolation, st2.receive(0, "ab", true, false, &sink2));
+    _ = try st2.receive(0, "abcdef", false, &sink2);
+    try std.testing.expectError(Error.FinalSizeViolation, st2.receive(0, "ab", true, &sink2));
 }
 
 test "reset discards buffered data" {
@@ -313,10 +297,10 @@ test "reset discards buffered data" {
     defer out.deinit(a);
     var sink = CollectSink{ .list = &out, .gpa = a };
 
-    _ = try st.receive(5, "later", false, false, &sink); // buffered
+    _ = try st.receive(5, "later", false, &sink); // buffered
     st.onReset(0x08);
     try std.testing.expectEqual(@as(usize, 0), st.pending.items.len);
-    try std.testing.expectError(Error.StreamReset, st.receive(5, "x", false, false, &sink));
+    try std.testing.expectError(Error.StreamReset, st.receive(5, "x", false, &sink));
 }
 
 test "send allowance respects peer grants and connection budget" {
@@ -329,10 +313,7 @@ test "send allowance respects peer grants and connection budget" {
     try std.testing.expectEqual(@as(u64, 20), st.sendAllowance(20));
 }
 
-test "a stream frame without an offset uses the current stream offset" {
-    // RFC 9000 Section 19.8: a STREAM frame without the OFF bit carries
-    // the stream's current offset. The data must land there, not at
-    // offset zero.
+test "offsetless stream data starts at zero and duplicates are ignored" {
     const a = std.testing.allocator;
     var st = Stream.init(a, 0, true, false);
     defer st.deinit();
@@ -346,20 +327,16 @@ test "a stream frame without an offset uses the current stream offset" {
     var sink = Sink{};
 
     // First chunk at offset 0.
-    _ = try st.receive(0, "abc", false, false, &sink);
+    _ = try st.receive(0, "abc", false, &sink);
     try std.testing.expectEqual(@as(u64, 3), st.recvOffset);
 
-    // A frame without an explicit offset continues at the current offset.
-    _ = try st.receive(st.currentRecvOffset(), "de", false, true, &sink);
-    try std.testing.expectEqual(@as(u64, 5), st.recvOffset);
-    try std.testing.expectEqual(@as(usize, 5), sink.bytes);
+    // A frame without OFF starts at zero, so this repeated prefix is ignored.
+    _ = try st.receive(0, "abc", false, &sink);
+    try std.testing.expectEqual(@as(u64, 3), st.recvOffset);
+    try std.testing.expectEqual(@as(usize, 3), sink.bytes);
 }
 
-test "a late duplicate without an offset is dropped, not a violation" {
-    // A retransmitted frame that omits the OFF bit arrives when the
-    // stream has already moved on. The receiver cannot place it, so it
-    // must treat it as the duplicate it is instead of failing the
-    // connection with a final-size error.
+test "a late duplicate without an offset remains at offset zero" {
     const a = std.testing.allocator;
     var st = Stream.init(a, 0, true, false);
     defer st.deinit();
@@ -372,13 +349,14 @@ test "a late duplicate without an offset is dropped, not a violation" {
     };
     var sink = Sink{};
 
-    _ = try st.receive(0, "0123456789", true, false, &sink);
+    _ = try st.receive(0, "0123456789", true, &sink);
     try std.testing.expectEqual(@as(u64, 10), st.recvOffset);
     try std.testing.expectEqual(@as(usize, 10), sink.bytes);
 
-    // The same data again, this time without an explicit offset: the
-    // receiver infers the current offset, which is past the final size.
-    const delivered = try st.receive(st.currentRecvOffset(), "0123456789", true, true, &sink);
+    // An absent OFF field always means offset zero, so the retransmitted
+    // prefix is recognized as already delivered and does not advance the
+    // stream or violate its final size.
+    const delivered = try st.receive(0, "0123456789", true, &sink);
     try std.testing.expectEqual(@as(usize, 0), delivered);
     try std.testing.expectEqual(@as(usize, 10), sink.bytes);
 }
