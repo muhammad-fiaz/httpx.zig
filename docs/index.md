@@ -40,7 +40,7 @@ features:
 
 ## Latest Benchmark Snapshot
 
-Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-09, httpx v0.2.2, Zig 0.17.0).
+Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-09, httpx v0.2.3, Zig 0.17.0).
 
 | Benchmark | Category | Avg Latency | Throughput | Target |
 | :--- | :--- | :---: | :---: | :---: |
@@ -96,20 +96,20 @@ Detailed methodology and analysis: [Benchmarks Reference](/reference/benchmarks)
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.2)**
+**Latest Release (v0.2.3)**
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
+```
+
+**Previous Release (v0.2.2)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz
 ```
 
-**Previous Release (v0.2.1)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
-```
-
 > [!WARNING]
-> Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.2**.
+> Zig **0.17** is required by **v0.2.3**. Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.3**.
 
 ### Method 2: Zig Fetch (Latest Development Build)
 
@@ -124,7 +124,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz",
     .hash = "<actual-hash-generated-by-zig-fetch>", // Run `zig fetch --save <url>` to generate the hash.
   },
 },

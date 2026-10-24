@@ -167,7 +167,7 @@ fn benchHeadersParse() void {
     headers.append("Content-Type", "application/json") catch {};
     headers.append("Authorization", "Bearer token-xyz-123456789") catch {};
     headers.append("Accept", "application/json, text/plain, */*") catch {};
-    headers.append("User-Agent", "httpx.zig-benchmark/0.2.2") catch {};
+    headers.append("User-Agent", "httpx.zig-benchmark/0.2.3") catch {};
 
     std.mem.doNotOptimizeAway(headers.get("Content-Type").?.len);
     std.mem.doNotOptimizeAway(headers.get("Authorization").?.len);
@@ -189,14 +189,14 @@ fn benchMethodLookup() void {
     for (names) |n| std.mem.doNotOptimizeAway(@backingInt(httpx.Method.fromString(n) orelse .GET));
 }
 
-const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: httpx/0.2.2\r\nAccept: application/json\r\n\r\n";
+const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: httpx/0.2.3\r\nAccept: application/json\r\n\r\n";
 
 fn benchHttp1RequestHead() void {
     const head = httpx.protocols.http1.parser.parseRequestHead(rawReqHead, .{}) catch return;
     std.mem.doNotOptimizeAway(head.method.len + head.path.len);
 }
 
-const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: httpx/0.2.2\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
+const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: httpx/0.2.3\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
 
 fn benchHttp1HeaderBlock() void {
     var fields: [16]httpx.protocols.http1.parser.Field = undefined;

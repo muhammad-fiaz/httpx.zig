@@ -8,13 +8,13 @@ This guide covers all supported installation methods for `httpx.zig`.
 - **Operating System**: Windows, Linux, or macOS
 
 > [!IMPORTANT]
-> `httpx.zig` v0.2.2 requires Zig 0.17.0 or newer. Zig 0.16.0 is not supported by this release.
+> `httpx.zig` v0.2.3 requires Zig 0.17.0 or newer. Zig 0.16.0 is not supported by this release.
 
-::: warning v0.2.2 release and Zig 0.16 deprecation
-`v0.2.2` is the current release and targets Zig `0.17.0+`.
-`v0.2.1` is the previous release.
+::: warning v0.2.3 release and Zig 0.16 deprecation
+`v0.2.3` is the current release and targets Zig `0.17.0+`.
+`v0.2.2` is the previous release.
 Zig `0.16` support is legacy and remains available only through `0.2.1`.
-New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.2**.
+New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.3**.
 :::
 
 ## Platform Support
@@ -53,22 +53,22 @@ zig build -Dtarget=aarch64-macos
 
 ## Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.2)**
+**Latest Release (v0.2.3)**
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
+```
+
+This installs the released package as a dependency in your project's `build.zig.zon`. Use this once the `0.2.3` tag is published.
+
+**Previous Release (v0.2.2)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz
 ```
 
-This installs the released package as a dependency in your project's `build.zig.zon`. Use this once the `0.2.2` tag is published.
-
-**Previous Release (v0.2.1)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
-```
-
 > [!WARNING]
-> Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.2**.
+> Zig **0.17** is required by **v0.2.3**. Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.3**.
 
 ## Method 2: Zig Fetch (Latest Development Build)
 
@@ -86,7 +86,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
     .version = "0.1.0",
     .dependencies = .{
         .httpx = .{
-            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz",
+            .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz",
             // Replace with the real hash below. Never invent one:
             // run `zig fetch --save <url>` and copy the hash it prints.
             .hash = "<actual-hash-generated-by-zig-fetch>",

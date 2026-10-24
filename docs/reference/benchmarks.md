@@ -18,7 +18,7 @@ The harness copies each result into a Markdown table at the end of the run, whic
 
 | Property | Value |
 | :--- | :--- |
-| **HTTPX Version** | `0.2.2` |
+| **HTTPX Version** | `0.2.3` |
 | **Zig Version** | `0.17.0` |
 | **Optimization Mode** | `ReleaseFast` |
 | **Target Architecture** | `x86_64` |
