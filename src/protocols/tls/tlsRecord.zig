@@ -322,3 +322,98 @@ test "wrong sequence number fails nonce authentication" {
     const ok = try decodeRecord(encoded.bytes[0..encoded.len], &out, 7, &key, &iv, .aes128Gcm);
     try std.testing.expectEqualStrings("ordered", ok.plaintext);
 }
+
+test "regression: tls record layer decode boundaries and mutations" {
+    const validRecord = &[_]u8{
+        0x17, 0x03, 0x03, 0x00, 0x11,
+        0xaa, 0x01, 0x02, 0x03, 0x04,
+        0x05, 0x06, 0x07, 0x08, 0x09,
+        0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10,
+    };
+    const validCcs = &[_]u8{ 0x14, 0x03, 0x03, 0x00, 0x01, 0x01 };
+
+    const helper = struct {
+        fn decode(data: []const u8) void {
+            var outBuf: [maxRecordPlaintext + 256]u8 = undefined;
+            const dummyKey = @as([16]u8, @splat(0x42));
+            const dummyIv = @as([12]u8, @splat(0x24));
+            _ = decodeRecord(data, &outBuf, 0, &dummyKey, &dummyIv, .aes128Gcm) catch {};
+        }
+    };
+
+    for (0..validRecord.len + 1) |cut| helper.decode(validRecord[0..cut]);
+    for (0..validCcs.len + 1) |cut| helper.decode(validCcs[0..cut]);
+
+    var prng = std.Random.DefaultPrng.init(0x1234);
+    const rng = prng.random();
+    var buf: [64]u8 = undefined;
+
+    for (0..150) |_| {
+        const len = rng.uintLessThan(usize, buf.len);
+        rng.bytes(buf[0..len]);
+        helper.decode(buf[0..len]);
+    }
+}
+
+test "regression: tls handshake message parsing" {
+    const handshake = @import("tlsHandshake.zig");
+    const nstMsg = &[_]u8{
+        0x04,
+        0x00, 0x00, 0x12,
+        0x00, 0x00, 0x0e, 0x10,
+        0x00, 0x00, 0x00, 0x01,
+        0x02,
+        0xaa, 0xbb,
+        0x00, 0x04,
+        't', 'i', 'c', 'k',
+        0x00, 0x00,
+    };
+
+    const helper = struct {
+        fn parse(data: []const u8) void {
+            var it = handshake.MessageIterator.init(data);
+            while (it.next() catch null) |msg| {
+                switch (msg.msgType) {
+                    .server_hello => _ = handshake.ServerHello.decode(msg.body) catch {},
+                    .new_session_ticket => _ = handshake.NewSessionTicket.decode(msg.body) catch {},
+                    .encrypted_extensions => _ = handshake.EncryptedExtensions.decode(msg.body) catch {},
+                    else => {},
+                }
+            }
+        }
+    };
+
+    for (0..nstMsg.len + 1) |cut| helper.parse(nstMsg[0..cut]);
+
+    var prng = std.Random.DefaultPrng.init(0x5678);
+    const rng = prng.random();
+    var buf: [64]u8 = undefined;
+
+    for (0..100) |_| {
+        const copyLen = @min(nstMsg.len, buf.len);
+        @memcpy(buf[0..copyLen], nstMsg[0..copyLen]);
+        const flips = 1 + rng.uintLessThan(usize, 4);
+        for (0..flips) |_| {
+            const idx = rng.uintLessThan(usize, copyLen);
+            buf[idx] = rng.int(u8);
+        }
+        helper.parse(buf[0..copyLen]);
+    }
+}
+
+test "regression: tls x509 der certificate parsing" {
+    const certMod = @import("certificate.zig");
+    var prng = std.Random.DefaultPrng.init(0x9abc);
+    const rng = prng.random();
+    var derBuf: [128]u8 = undefined;
+
+    for (0..150) |_| {
+        const len = 4 + rng.uintLessThan(usize, derBuf.len - 4);
+        rng.bytes(derBuf[0..len]);
+        derBuf[0] = 0x30;
+        derBuf[1] = 0x82;
+        std.mem.writeInt(u16, derBuf[2..4], @intCast(len - 4), .big);
+        _ = certMod.X509Certificate.parseDer(derBuf[0..len]) catch {};
+    }
+}

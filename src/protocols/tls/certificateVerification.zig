@@ -62,7 +62,7 @@ pub fn verifyServerChain(
         },
     }
     const chain = certMod.CertificateChain{ .certs = ders, .allocator = allocator };
-    const nowSec: i64 = @divFloor(clockMod.millisNow(), 1000);
+    const nowSec: i64 = @divFloor(clockMod.millisNow(io), 1000);
     verifyCertificateChain(chain, &store, host, nowSec) catch |e| switch (e) {
         error.CertificateExpired => return error.CertificateExpired,
         error.CertificateHostMismatch, error.HostnameMismatch => return error.CertificateHostMismatch,

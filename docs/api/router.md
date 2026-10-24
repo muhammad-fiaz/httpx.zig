@@ -38,7 +38,7 @@ All router verb methods take `(path, handler, options)`:
 | `registerStatic(routes)` | Validate at comptime and register static `[]RouteDecl` table |
 | `registerRouteTable(routes)` | Register dynamic `[]RouteDecl` table with runtime conflict validation |
 
-Route options (`httpx.router.RouteOptions`): `.name` (reversing),
+Route options (`httpx.web.router.RouteOptions`): `.name` (reversing),
 `.middleware` (route-level), `.meta` (OpenAPI), `.userData` /
 `.deinitData` (handler state).
 

@@ -75,13 +75,13 @@ try server.use(httpx.middleware.logging);
 For structured server events, configure the server itself:
 
 ```zig
-fn onEvent(event: httpx.ServerEvent) void {
+fn onEvent(event: httpx.logging.ServerEvent) void {
     std.debug.print("{s} {s} {d} {d}ms\n", .{
         event.method, event.path, event.status, event.durationMs,
     });
 }
 
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .logging = .{ .callback = onEvent },
 });
 ```
@@ -97,7 +97,7 @@ Token-bucket style per-key rate limiting (see
 A middleware is a function taking the request context plus the next handler:
 
 ```zig
-fn timing(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response {
+fn timing(ctx: *httpx.web.router.Context, next: httpx.web.router.NextFn) anyerror!httpx.web.router.Response {
     const t0 = std.time.nanoTimestamp();
     const resp = try next(ctx);
     const elapsedMs = @divTrunc(std.time.nanoTimestamp() - t0, 1_000_000);

@@ -22,7 +22,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     // Mount live Prometheus /metrics endpoint
@@ -33,7 +33,7 @@ pub fn main() !void {
     server.run();
 }
 
-fn helloHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn helloHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.text("Hello World!");
 }
 ```

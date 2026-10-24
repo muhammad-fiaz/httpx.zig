@@ -30,7 +30,7 @@ const UserPayload = struct {
     role: []const u8,
 };
 
-fn handleRoot(_: *httpx.Context) anyerror!httpx.Response {
+fn handleRoot(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{
         .status = 200,
         .body = "HTTPX production server running",
@@ -38,7 +38,7 @@ fn handleRoot(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn handleCreateUser(ctx: *httpx.Context) anyerror!httpx.Response {
+fn handleCreateUser(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const payload = try ctx.json(UserPayload);
     const formatted = try std.fmt.allocPrint(
         ctx.allocator,
@@ -64,7 +64,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     // 1. Initialize server with allocator and IO
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -81,7 +81,7 @@ pub fn main() !void {
 
     // 3. Start server background worker
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };

@@ -17,7 +17,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0, // Pick ephemeral port for testing
         .maxConnections = 9,
@@ -26,14 +26,14 @@ pub fn main() !void {
 
     // 1. HTML response
     try server.get("/html", struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             return ctx.html("<!DOCTYPE html><html><body><h1>Hello HTML</h1></body></html>");
         }
     }.handle);
 
     // 2. JSON response
     try server.get("/json", struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             return ctx.renderJson(.{
                 .status = "ok",
                 .version = "1.0.0",
@@ -44,14 +44,14 @@ pub fn main() !void {
 
     // 3. Plain text response
     try server.get("/text", struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             return ctx.text("This is plain text response.");
         }
     }.handle);
 
     // 4. XML response
     try server.get("/xml", struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             return ctx.xml(
                 \\<?xml version="1.0" encoding="UTF-8"?>
                 \\<response>
@@ -64,7 +64,7 @@ pub fn main() !void {
 
     // 5. RSS 2.0 Feed
     try server.get("/rss.xml", struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             return ctx.rss(
                 \\<?xml version="1.0" encoding="UTF-8" ?>
                 \\<rss version="2.0">
@@ -85,7 +85,7 @@ pub fn main() !void {
 
     // 6. Atom Feed
     try server.get("/atom.xml", struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             return ctx.atom(
                 \\<?xml version="1.0" encoding="utf-8"?>
                 \\<feed xmlns="http://www.w3.org/2005/Atom">
@@ -99,7 +99,7 @@ pub fn main() !void {
 
     // 7. robots.txt
     try server.get("/robots.txt", struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             return ctx.robots(
                 \\User-agent: *
                 \\Allow: /
@@ -111,7 +111,7 @@ pub fn main() !void {
 
     // 8. sitemap.xml
     try server.get("/sitemap.xml", struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             return ctx.sitemap(
                 \\<?xml version="1.0" encoding="UTF-8"?>
                 \\<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -126,7 +126,7 @@ pub fn main() !void {
 
     // 9. Binary Octet Stream
     try server.get("/binary", struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             const bytes = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }; // PNG magic bytes
             return ctx.binary(&bytes, "application/octet-stream");
         }
@@ -134,7 +134,7 @@ pub fn main() !void {
 
     // 10. Custom status code and content-type
     try server.get("/custom", struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             return ctx.custom(201, "application/vnd.api+json", "{\"data\":{\"type\":\"item\",\"id\":\"42\"}}");
         }
     }.handle);
@@ -143,7 +143,7 @@ pub fn main() !void {
     std.debug.print("=== Custom HTTP Responses Server running on 127.0.0.1:{d} ===\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };

@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     // Serve files from ./public at /static URL prefix
@@ -29,7 +29,7 @@ pub fn main() !void {
 HTTPX servers feature built-in directory watching, event debouncing, and Server-Sent Events (SSE) live-reload script injection:
  
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .port = 8080,
     .watch = true,
     .watchDir = "./public",

@@ -35,6 +35,7 @@ pub const Cookie = struct {
 
 pub const Jar = struct {
     allocator: Allocator,
+    io: std.Io,
     cookies: std.ArrayList(CookieEntry),
     mu: sync.Spinlock = .{},
     maxCookies: usize = 4096,
@@ -55,10 +56,22 @@ pub const Jar = struct {
         sameSite: Cookie.SameSite,
     };
 
-    pub fn init(allocator: Allocator) Jar {
+    pub const Config = struct {
+        maxCookies: usize = 4096,
+        domainPolicy: ?*const fn (requestHost: []const u8, cookieDomain: []const u8) bool = null,
+    };
+
+    pub fn init(allocator: Allocator, io: std.Io) Jar {
+        return initWithConfig(allocator, io, .{});
+    }
+
+    pub fn initWithConfig(allocator: Allocator, io: std.Io, cfg: Config) Jar {
         return .{
             .allocator = allocator,
+            .io = io,
             .cookies = .empty,
+            .maxCookies = cfg.maxCookies,
+            .domainPolicy = cfg.domainPolicy,
         };
     }
 
@@ -85,7 +98,7 @@ pub const Jar = struct {
         var secure = false;
         var httpOnly = false;
         var sameSite: Cookie.SameSite = .lax;
-        const now = clock.millisNow();
+        const now = clock.millisNow(self.io);
 
         var it = parseMod.ParamIterator.init(setCookie);
         var first = true;
@@ -220,7 +233,7 @@ pub const Jar = struct {
     pub fn cookieHeader(self: *Jar, host: []const u8, path: []const u8, secure: bool, buf: []u8) ?[]const u8 {
         self.mu.lock();
         defer self.mu.unlock();
-        const now = clock.millisNow();
+        const now = clock.millisNow(self.io);
         var pos: usize = 0;
         var wrote = false;
         for (self.cookies.items) |c| {
@@ -245,7 +258,7 @@ pub const Jar = struct {
     pub fn purgeExpired(self: *Jar) void {
         self.mu.lock();
         defer self.mu.unlock();
-        const now = clock.millisNow();
+        const now = clock.millisNow(self.io);
         var i: usize = 0;
         while (i < self.cookies.items.len) {
             const c = &self.cookies.items[i];
@@ -301,7 +314,7 @@ fn pathMatches(requestPath: []const u8, cookiePath: []const u8) bool {
 }
 
 test "cookie jar set and get" {
-    var jar = Jar.init(std.testing.allocator);
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
     defer jar.deinit();
     jar.setFromHeader("session=abc123; Path=/; HttpOnly; SameSite=Lax", "example.com");
     var buf: [1024]u8 = undefined;
@@ -311,7 +324,7 @@ test "cookie jar set and get" {
 }
 
 test "cookie jar domain matching" {
-    var jar = Jar.init(std.testing.allocator);
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
     defer jar.deinit();
     jar.domainPolicy = allowTestDomain;
     jar.setFromHeader("a=1; Domain=.example.com; Path=/", "example.com");
@@ -329,7 +342,7 @@ fn allowTestDomain(_: []const u8, _: []const u8) bool {
 }
 
 test "cookie jar rejects domain cookies without public suffix policy" {
-    var jar = Jar.init(std.testing.allocator);
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
     defer jar.deinit();
     jar.setFromHeader("a=1; Domain=com; Path=/", "com");
     jar.setFromHeader("b=1; Domain=example.com; Path=/", "example.com");
@@ -337,7 +350,7 @@ test "cookie jar rejects domain cookies without public suffix policy" {
 }
 
 test "cookie jar expiry" {
-    var jar = Jar.init(std.testing.allocator);
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
     defer jar.deinit();
     jar.setFromHeader("t=1; Max-Age=0", "example.com");
     // Max-Age=0 means expires immediately (now - 0 = now).
@@ -348,7 +361,7 @@ test "cookie jar expiry" {
 }
 
 test "cookie max-age overrides expires and accepts negative deletion values" {
-    var jar = Jar.init(std.testing.allocator);
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
     defer jar.deinit();
     jar.setFromHeader("session=old", "example.com");
     jar.setFromHeader("session=present; Expires=Sun, 01 Jan 2147483647 00:00:00 GMT; Max-Age=-1", "example.com");
@@ -363,7 +376,7 @@ test "cookie max-age overrides expires and accepts negative deletion values" {
 }
 
 test "cookie allocation failure preserves an existing replacement" {
-    var jar = Jar.init(std.testing.allocator);
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
     defer jar.deinit();
     jar.setFromHeader("session=old", "example.com");
 
@@ -376,7 +389,7 @@ test "cookie allocation failure preserves an existing replacement" {
 }
 
 test "secure cookies require TLS transport" {
-    var jar = Jar.init(std.testing.allocator);
+    var jar = Jar.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io());
     defer jar.deinit();
     jar.setFromHeader("s=topsecret; Path=/; Secure", "example.com");
     var buf: [1024]u8 = undefined;

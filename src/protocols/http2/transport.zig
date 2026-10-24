@@ -25,6 +25,9 @@ const hpack = @import("hpack.zig");
 const tlsClientMod = @import("../tls/tlsClient.zig");
 const tlsServerMod = @import("../tls/tlsServer.zig");
 const tlsSessionMod = @import("../tls/tlsSession.zig");
+const semanticsMod = @import("../http1/semantics.zig");
+pub const BodySource = @import("../../common/bodySource.zig").BodySource;
+pub const SliceReader = @import("../../common/bodySource.zig").SliceReader;
 pub const Error = error{
     ProtocolViolation,
     HandshakeFailed,
@@ -343,12 +346,12 @@ pub const Client = struct {
         const sid = try self.session.nextClientStreamId();
 
         const rstate = try a.create(RequestState);
-        errdefer rstate.deinit();
         rstate.* = .{
             .sid = sid,
             .allocator = a,
             .maxBytes = @min(maxBytes, maxResponseBodySize),
         };
+        errdefer rstate.deinit();
         try self.pending.put(sid, rstate);
         errdefer _ = self.pending.remove(sid);
 
@@ -359,15 +362,29 @@ pub const Client = struct {
         }
         var explicitZeroLength = false;
 
+        var protocolValue: ?[]const u8 = null;
+        for (extra) |h| {
+            if (std.mem.eql(u8, h.name, ":protocol")) {
+                protocolValue = h.value;
+                break;
+            }
+        }
+
         var fields = std.ArrayList(hpack.HeaderField).empty;
         defer fields.deinit(a);
         try fields.append(a, .{ .name = ":method", .value = method });
-        if (!isConnect) {
+        if (protocolValue) |pv| {
+            // RFC 8441 Extended CONNECT: requires :protocol, :scheme, and :path
+            try fields.append(a, .{ .name = ":protocol", .value = pv });
+            try fields.append(a, .{ .name = ":scheme", .value = scheme });
+            try fields.append(a, .{ .name = ":path", .value = path });
+        } else if (!isConnect) {
             try fields.append(a, .{ .name = ":path", .value = path });
             try fields.append(a, .{ .name = ":scheme", .value = scheme });
         }
         try fields.append(a, .{ .name = ":authority", .value = authority });
         for (extra) |h| {
+            if (std.mem.eql(u8, h.name, ":protocol")) continue;
             if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
                 const declared = parseContentLength(h.value) catch return error.ProtocolViolation;
                 if (bodyLen) |actual| {
@@ -406,6 +423,128 @@ pub const Client = struct {
             if (n == 0) return false; // flow-control blocked
             if (self.state(sid)) |st| {
                 if (st.done) return true; // peer answered early
+            }
+        }
+        return true;
+    }
+
+    pub fn beginRequestStreaming(
+        self: *Client,
+        method: []const u8,
+        path: []const u8,
+        extra: []const Header,
+        scheme: []const u8,
+        authority: []const u8,
+        bodySource: BodySource,
+        maxBytes: usize,
+    ) !u31 {
+        const a = self.allocator;
+        const sid = try self.session.nextClientStreamId();
+        const isConnect = std.mem.eql(u8, method, "CONNECT");
+        if (isConnect and bodySource.contentLength != null and bodySource.contentLength.? != 0) {
+            return error.ProtocolViolation;
+        }
+
+        const rstate = try a.create(RequestState);
+        rstate.* = .{
+            .sid = sid,
+            .allocator = a,
+            .maxBytes = @min(maxBytes, maxResponseBodySize),
+        };
+        errdefer rstate.deinit();
+        try self.pending.put(sid, rstate);
+        errdefer _ = self.pending.remove(sid);
+
+        var clBuf: [20]u8 = undefined;
+        var clValue: ?[]const u8 = null;
+        if (bodySource.contentLength) |n| {
+            clValue = clBuf[0..std.fmt.printInt(&clBuf, n, 10, .lower, .{})];
+        }
+
+        var fields = std.ArrayList(hpack.HeaderField).empty;
+        defer fields.deinit(a);
+        try fields.append(a, .{ .name = ":method", .value = method });
+        if (!isConnect) {
+            try fields.append(a, .{ .name = ":path", .value = path });
+            try fields.append(a, .{ .name = ":scheme", .value = scheme });
+        }
+        try fields.append(a, .{ .name = ":authority", .value = authority });
+        for (extra) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "content-length")) {
+                const declared = parseContentLength(h.value) catch return error.ProtocolViolation;
+                if (bodySource.contentLength) |actual| {
+                    if (declared != actual) return error.ProtocolViolation;
+                } else if (declared == 0) {
+                    // OK
+                } else {
+                    return error.ProtocolViolation;
+                }
+                continue;
+            }
+            try fields.append(a, .{ .name = h.name, .value = h.value });
+        }
+        if (clValue) |cl| {
+            try fields.append(a, .{ .name = "content-length", .value = cl });
+        }
+
+        const isKnownZero = bodySource.contentLength != null and bodySource.contentLength.? == 0;
+        try self.session.sendHeaders(sid, fields.items, isKnownZero);
+        try self.flush();
+        return sid;
+    }
+
+    pub fn sendRequestBodyStreaming(self: *Client, sid: u31, bodySource: BodySource) !bool {
+        var bs = bodySource;
+        var readBuf: [16 * 1024]u8 = undefined;
+        var totalSent: u64 = 0;
+
+        while (true) {
+            const n = bs.read(&readBuf) catch |e| switch (e) {
+                error.OutOfMemory => return Error.OutOfMemory,
+                else => return Error.ProtocolViolation,
+            };
+            if (n > 0) {
+                if (bs.contentLength) |expected| {
+                    if (totalSent + n > expected) return Error.ProtocolViolation;
+                }
+                var chunkSent: usize = 0;
+                while (chunkSent < n) {
+                    const sentNow = try self.session.sendData(sid, readBuf[chunkSent..n], false);
+                    chunkSent += sentNow;
+                    try self.flush();
+                    if (sentNow == 0) {
+                        if (self.state(sid)) |st| {
+                            if (st.done) return true;
+                        }
+                        try self.pump();
+                    }
+                }
+                totalSent += n;
+            } else {
+                if (bs.contentLength) |expected| {
+                    if (totalSent != expected) return Error.ProtocolViolation;
+                }
+                const rawTrailers = bs.getTrailers(self.allocator) catch null;
+                defer if (rawTrailers) |t| self.allocator.free(t);
+                if (rawTrailers != null and rawTrailers.?.len > 0) {
+                    var tfields = std.ArrayList(hpack.HeaderField).empty;
+                    defer tfields.deinit(self.allocator);
+                    for (rawTrailers.?) |th| {
+                        if (!semanticsMod.trailerAllowed(th.name)) continue;
+                        try tfields.append(self.allocator, .{ .name = th.name, .value = th.value });
+                    }
+                    if (tfields.items.len > 0) {
+                        try self.session.sendHeaders(sid, tfields.items, true);
+                        try self.flush();
+                    } else {
+                        _ = try self.session.sendData(sid, "", true);
+                        try self.flush();
+                    }
+                } else {
+                    _ = try self.session.sendData(sid, "", true);
+                    try self.flush();
+                }
+                break;
             }
         }
         return true;
@@ -530,6 +669,25 @@ pub const Client = struct {
         }
         return resp;
     }
+
+    pub fn requestStreaming(
+        self: *Client,
+        method: []const u8,
+        path: []const u8,
+        extra: []const Header,
+        scheme: []const u8,
+        authority: []const u8,
+        bodySource: BodySource,
+        maxBytes: usize,
+    ) !Response {
+        const sid = try self.beginRequestStreaming(method, path, extra, scheme, authority, bodySource, maxBytes);
+        const complete = try self.sendRequestBodyStreaming(sid, bodySource);
+        const resp = try self.awaitResponse(sid);
+        if (!complete) {
+            self.cancelStream(sid);
+        }
+        return resp;
+    }
 };
 
 /// Heap box for a TLS-backed H2 session. The TLS connection borrows
@@ -557,7 +715,7 @@ pub const PooledConn = struct {
         const self = try allocator.create(PooledConn);
         errdefer allocator.destroy(self);
         const hc = try Client.connect(allocator, sock);
-        self.* = .{ .allocator = allocator, .tlsBox = null, .client = hc, .createdAtMs = clock.monotonicMillis() };
+        self.* = .{ .allocator = allocator, .tlsBox = null, .client = hc, .createdAtMs = clock.monotonicMillis(sock.io) };
         return self;
     }
 
@@ -572,7 +730,7 @@ pub const PooledConn = struct {
             allocator.destroy(box);
             return err;
         };
-        self.* = .{ .allocator = allocator, .tlsBox = box, .client = hc, .createdAtMs = clock.monotonicMillis() };
+        self.* = .{ .allocator = allocator, .tlsBox = box, .client = hc, .createdAtMs = clock.monotonicMillis(box.sock.io) };
         return self;
     }
 
@@ -606,6 +764,19 @@ pub const PooledConn = struct {
         maxBytes: usize,
     ) !Response {
         return self.client.request(method, path, extra, scheme, authority, reqBody, maxBytes);
+    }
+
+    pub fn requestStreaming(
+        self: *PooledConn,
+        method: []const u8,
+        path: []const u8,
+        extra: []const Header,
+        scheme: []const u8,
+        authority: []const u8,
+        bodySource: BodySource,
+        maxBytes: usize,
+    ) !Response {
+        return self.client.requestStreaming(method, path, extra, scheme, authority, bodySource, maxBytes);
     }
 
     /// Takes ownership of a captured resumption session from the

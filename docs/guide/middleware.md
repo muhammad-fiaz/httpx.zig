@@ -4,7 +4,7 @@ Middleware functions execute before your route handlers. They can modify the req
 
 ## Using Middleware
 
-To add global middleware to the server, use `server.use()`. Middleware functions follow the signature `fn (*httpx.Context, httpx.router.NextFn) anyerror!httpx.Response`.
+To add global middleware to the server, use `server.use()`. Middleware functions follow the signature `fn (*httpx.web.router.Context, httpx.web.router.NextFn) anyerror!httpx.web.router.Response`.
 
 ```zig
 // Add standard CORS middleware
@@ -30,10 +30,10 @@ try server.use(httpx.middleware.recovery);
 
 ## Writing Custom Middleware
 
-A custom middleware is a function that receives the `*httpx.Context` and the `NextFn` callback:
+A custom middleware is a function that receives the `*httpx.web.router.Context` and the `NextFn` callback:
 
 ```zig
-fn banCheckMiddleware(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response {
+fn banCheckMiddleware(ctx: *httpx.web.router.Context, next: httpx.web.router.NextFn) anyerror!httpx.web.router.Response {
     // 1. Pre-processing
     if (ctx.header("X-Ban")) |_| {
         return ctx.textStatus(403, "Forbidden");

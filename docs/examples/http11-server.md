@@ -8,7 +8,7 @@ This example demonstrates starting a dedicated HTTP/1.1 server supporting persis
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn helloHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn helloHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{
         .status = 200,
         .body = "HTTP/1.1 keep-alive response",
@@ -16,7 +16,7 @@ fn helloHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn statusHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn statusHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{
         .status = 200,
         .body = "{\"status\":\"healthy\",\"protocol\":\"HTTP/1.1\"}",
@@ -30,7 +30,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -83,7 +83,7 @@ zig build run-http11-server
 
 ## Key Highlights
 
-1. **Router Registration**: Maps routes with clean value responses (`httpx.Response`).
+1. **Router Registration**: Maps routes with clean value responses (`httpx.web.router.Response`).
 2. **Graceful Shutdown**: Calls `server.start()` and joins the worker thread deterministically without race-prone sleep hacks.
 3. **HTTP/1.1 Concurrency**: Reuses TCP connections efficiently across multiple requests.
 

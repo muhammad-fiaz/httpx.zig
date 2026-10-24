@@ -5,7 +5,7 @@ HTTPX provides high-performance static file serving with automatic MIME detectio
 ## Mounting Static Directories
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
 defer server.deinit();
 
 // Mount public assets directory to /static URL prefix

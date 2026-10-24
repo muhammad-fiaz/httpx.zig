@@ -121,7 +121,7 @@ test "csrf roundtrip and tamper rejection" {
 }
 
 test "rate limiter enforces window" {
-    var rl = RateLimiter.init(std.testing.allocator, .{ .policy = .{ .limit = 3, .windowMs = 1000 } });
+    var rl = RateLimiter.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{ .policy = .{ .limit = 3, .windowMs = 1000 } });
     defer rl.deinit();
 
     try std.testing.expectEqual(@as(?u32, 2), try rl.check("ip:1.2.3.4", 0));
@@ -197,6 +197,85 @@ pub fn loggingMiddleware(ctx: *Context, next: NextFn) anyerror!Response {
     return next(ctx);
 }
 
+pub const CsrfConfig = struct {
+    cookieName: []const u8 = "csrf_token",
+    headerName: []const u8 = "X-CSRF-Token",
+    cookiePath: []const u8 = "/",
+    cookieSameSite: []const u8 = "Lax",
+    cookieSecure: bool = false,
+};
+
+/// Automated CSRF middleware using the double-submit cookie pattern.
+///
+/// For safe methods (GET, HEAD, OPTIONS, TRACE):
+/// - Checks if the CSRF cookie is present; if absent, generates a secure random token
+///   and sets the Set-Cookie response header.
+///
+/// For state-changing methods (POST, PUT, DELETE, PATCH):
+/// - Compares the token from the header (default: "X-CSRF-Token") with the token from the
+///   CSRF cookie using constant-time comparison.
+/// - If either is missing or they do not match, returns 403 Forbidden.
+pub fn csrfMiddleware(ctx: *Context, next: NextFn) anyerror!Response {
+    return csrfMiddlewareConfig(ctx, next, .{});
+}
+
+pub fn csrfMiddlewareConfig(ctx: *Context, next: NextFn, cfg: CsrfConfig) anyerror!Response {
+    const isSafe = switch (ctx.method) {
+        .GET, .HEAD, .OPTIONS, .TRACE => true,
+        else => false,
+    };
+
+    const existingCookie = ctx.cookie(cfg.cookieName);
+
+    if (isSafe) {
+        var resp = try next(ctx);
+        if (existingCookie == null) {
+            var tokenBuf: [CSRF_TOKEN_LEN]u8 = undefined;
+            const token = try generateCsrfTokenSecure(ctx.io, &tokenBuf);
+
+            const setCookieVal = try std.fmt.allocPrint(ctx.allocator, "{s}={s}; Path={s}; SameSite={s}{s}", .{
+                cfg.cookieName,
+                token,
+                cfg.cookiePath,
+                cfg.cookieSameSite,
+                if (cfg.cookieSecure) "; Secure" else "",
+            });
+
+            const extra = try ctx.allocator.alloc(Header, resp.headers.len + 1);
+            @memcpy(extra[0..resp.headers.len], resp.headers);
+            extra[resp.headers.len] = .{ .name = "Set-Cookie", .value = setCookieVal };
+            resp.headers = extra;
+        }
+        return resp;
+    }
+
+    const cookieToken = existingCookie orelse {
+        return Response{
+            .status = 403,
+            .contentType = "text/plain; charset=utf-8",
+            .body = "CSRF Token Missing",
+        };
+    };
+
+    const headerToken = ctx.header(cfg.headerName) orelse {
+        return Response{
+            .status = 403,
+            .contentType = "text/plain; charset=utf-8",
+            .body = "CSRF Header Missing",
+        };
+    };
+
+    if (!verifyCsrfToken(cookieToken, headerToken)) {
+        return Response{
+            .status = 403,
+            .contentType = "text/plain; charset=utf-8",
+            .body = "CSRF Token Mismatch",
+        };
+    }
+
+    return next(ctx);
+}
+
 test "middleware pipeline execution and headers" {
     const a = std.testing.allocator;
     var router = routerMod.Router.init(a);
@@ -246,5 +325,120 @@ test "middleware pipeline execution and headers" {
         var ctx = Context{ .allocator = arena.allocator(), .path = "/fail", .method = .GET };
         const resp = router.dispatch(&ctx);
         try std.testing.expectEqual(@as(u16, 500), resp.status);
+    }
+}
+
+test "csrfMiddleware sets cookie on safe methods and enforces on POST" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var router = routerMod.Router.init(a);
+    defer router.deinit();
+
+    try router.use(csrfMiddleware);
+
+    const handler = struct {
+        fn get(ctx: *Context) anyerror!Response {
+            return ctx.text("form page");
+        }
+        fn submit(ctx: *Context) anyerror!Response {
+            return ctx.text("form submitted");
+        }
+    };
+
+    try router.get("/form", handler.get, .{});
+    try router.post("/form", handler.submit, .{});
+
+    // 1. GET request without cookie: should receive Set-Cookie
+    var cookieToken: [CSRF_TOKEN_LEN]u8 = undefined;
+    {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var ctx = Context{ .allocator = arena.allocator(), .io = io, .path = "/form", .method = .GET };
+        const resp = router.dispatch(&ctx);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expectEqualStrings("form page", resp.body);
+
+        var foundCookie: ?[]const u8 = null;
+        for (resp.headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "Set-Cookie") and std.mem.startsWith(u8, h.value, "csrf_token=")) {
+                foundCookie = h.value;
+                break;
+            }
+        }
+        try std.testing.expect(foundCookie != null);
+        const tokPart = foundCookie.?[11..];
+        const endIdx = std.mem.indexOfScalar(u8, tokPart, ';') orelse tokPart.len;
+        try std.testing.expectEqual(CSRF_TOKEN_LEN, endIdx);
+        @memcpy(&cookieToken, tokPart[0..CSRF_TOKEN_LEN]);
+    }
+
+    // 2. POST without any cookie or header: 403 CSRF Token Missing
+    {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var ctx = Context{ .allocator = arena.allocator(), .io = io, .path = "/form", .method = .POST };
+        const resp = router.dispatch(&ctx);
+        try std.testing.expectEqual(@as(u16, 403), resp.status);
+        try std.testing.expectEqualStrings("CSRF Token Missing", resp.body);
+    }
+
+    // 3. POST with cookie but missing header: 403 CSRF Header Missing
+    {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const cookieHdrVal = try std.fmt.allocPrint(arena.allocator(), "csrf_token={s}", .{&cookieToken});
+        const reqHdrs = [_]Header{.{ .name = "Cookie", .value = cookieHdrVal }};
+        var ctx = Context{
+            .allocator = arena.allocator(),
+            .io = io,
+            .path = "/form",
+            .method = .POST,
+            .headers = &reqHdrs,
+        };
+        const resp = router.dispatch(&ctx);
+        try std.testing.expectEqual(@as(u16, 403), resp.status);
+        try std.testing.expectEqualStrings("CSRF Header Missing", resp.body);
+    }
+
+    // 4. POST with cookie but mismatched header: 403 CSRF Token Mismatch
+    {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const cookieHdrVal = try std.fmt.allocPrint(arena.allocator(), "csrf_token={s}", .{&cookieToken});
+        const reqHdrs = [_]Header{
+            .{ .name = "Cookie", .value = cookieHdrVal },
+            .{ .name = "X-CSRF-Token", .value = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+        };
+        var ctx = Context{
+            .allocator = arena.allocator(),
+            .io = io,
+            .path = "/form",
+            .method = .POST,
+            .headers = &reqHdrs,
+        };
+        const resp = router.dispatch(&ctx);
+        try std.testing.expectEqual(@as(u16, 403), resp.status);
+        try std.testing.expectEqualStrings("CSRF Token Mismatch", resp.body);
+    }
+
+    // 5. POST with matching cookie and header: 200 OK form submitted!
+    {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const cookieHdrVal = try std.fmt.allocPrint(arena.allocator(), "csrf_token={s}", .{&cookieToken});
+        const reqHdrs = [_]Header{
+            .{ .name = "Cookie", .value = cookieHdrVal },
+            .{ .name = "X-CSRF-Token", .value = &cookieToken },
+        };
+        var ctx = Context{
+            .allocator = arena.allocator(),
+            .io = io,
+            .path = "/form",
+            .method = .POST,
+            .headers = &reqHdrs,
+        };
+        const resp = router.dispatch(&ctx);
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expectEqualStrings("form submitted", resp.body);
     }
 }

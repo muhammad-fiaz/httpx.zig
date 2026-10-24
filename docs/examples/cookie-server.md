@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .maxConnections = 5,
@@ -29,7 +29,7 @@ pub fn main() !void {
     std.debug.print("Cookie server running on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };
@@ -49,19 +49,19 @@ pub fn main() !void {
     std.debug.print("Cookie server verification completed successfully.\n", .{});
 }
 
-fn setCookieHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn setCookieHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const name = ctx.queryParam("name") orelse "guest";
     _ = name;
     return .{ .status = 200, .body = "{\"message\":\"Cookie set\"}", .contentType = "application/json" };
 }
 
-fn getCookieHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn getCookieHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const username = ctx.cookie("username") orelse "anonymous";
     _ = username;
     return .{ .status = 200, .body = "{\"username\":\"anonymous\"}", .contentType = "application/json" };
 }
 
-fn clearCookieHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn clearCookieHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{ .status = 200, .body = "{\"message\":\"Cookie cleared\"}", .contentType = "application/json" };
 }
 ```

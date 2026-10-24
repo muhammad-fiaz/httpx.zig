@@ -22,10 +22,10 @@ pub fn main() !void {
     std.debug.print("1. HTTP/3 client configured: protocol={s}\n", .{@tagName(client.config.httpVersion.?)});
 
     // 2. Client & Server HTTP/3 Connection Engines (RFC 9114)
-    var clientConn = httpx.http3.Connection.init(allocator, .client);
+    var clientConn = httpx.protocols.http3.Connection.init(allocator, .client);
     defer clientConn.deinit();
 
-    var serverConn = httpx.http3.Connection.init(allocator, .server);
+    var serverConn = httpx.protocols.http3.Connection.init(allocator, .server);
     defer serverConn.deinit();
 
     // Exchange control stream SETTINGS
@@ -37,7 +37,7 @@ pub fn main() !void {
 
     // Server processes client settings (skip 1-byte stream type prefix)
     var off: usize = 1;
-    const parsed = try httpx.http3.frame.parseFrame(clientCtrl, &off);
+    const parsed = try httpx.protocols.http3.frame.parseFrame(clientCtrl, &off);
     try serverConn.processControlFrame(parsed.frameType, parsed.payload);
 
     std.debug.print("2. HTTP/3 control stream SETTINGS exchanged successfully\n", .{});
@@ -46,7 +46,7 @@ pub fn main() !void {
     const bidiStreamId = clientConn.nextBidiStreamId();
     var reqStream = clientConn.createRequestStream(bidiStreamId);
 
-    const extraHeaders = [_]httpx.http3.qpack.FieldLine{
+    const extraHeaders = [_]httpx.protocols.http3.qpack.FieldLine{
         .{ .name = "user-agent", .value = "httpx.zig-http3" },
         .{ .name = "accept", .value = "application/json" },
     };
@@ -59,7 +59,7 @@ pub fn main() !void {
     // Server response stream
     var respStream = serverConn.createRequestStream(bidiStreamId);
 
-    const respHeaders = [_]httpx.http3.qpack.FieldLine{
+    const respHeaders = [_]httpx.protocols.http3.qpack.FieldLine{
         .{ .name = "content-type", .value = "application/json" },
         .{ .name = "server", .value = "httpx.zig/0.1.0" },
     };
@@ -101,11 +101,11 @@ const demoKeyPem =
 
 /// Live loopback: a real QUIC + TLS 1.3 handshake (ALPN h3, verified
 /// chain) over kernel UDP sockets, then an HTTP/3 GET through the
-/// high-level client against high-level httpx.Server. Always runs (no internet required).
+/// high-level client against high-level httpx.server.Server. Always runs (no internet required).
 fn liveLoopbackDemo(allocator: std.mem.Allocator, io: std.Io) !void {
     std.debug.print("=== HTTP/3 live loopback (QUIC + TLS 1.3 over UDP) ===\n", .{});
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .http3 = true,
@@ -118,7 +118,7 @@ fn liveLoopbackDemo(allocator: std.mem.Allocator, io: std.Io) !void {
     defer server.deinit();
 
     const ApiHandler = struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             const body = try std.fmt.allocPrint(ctx.allocator, "{{\"path\":\"{s}\",\"protocol\":\"HTTP/3\"}}", .{ctx.path});
             return .{
                 .status = 200,
@@ -141,7 +141,7 @@ fn liveLoopbackDemo(allocator: std.mem.Allocator, io: std.Io) !void {
 
     // Wait for the background thread to start the HTTP/3 pump and accept loop
     while (server.h3Pump == null) {
-        httpx.clock.sleepMillis(10);
+        httpx.clock.sleepMillis(io, 10);
     }
 
     var client = httpx.Client.init(allocator, io, .{});

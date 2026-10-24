@@ -24,11 +24,11 @@ const httpx = @import("httpx");
 const io = std.Io.Threaded.global_single_threaded.io();
 
 // Initialize with default config
-var server = try httpx.Server.init(allocator, io, .{});
+var server = try httpx.server.Server.init(allocator, io, .{});
 defer server.deinit();
 
 // Shorthand: explicit allocator + config
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .port = 3000,
     .host = "0.0.0.0",
 });
@@ -41,11 +41,11 @@ const httpx = @import("httpx");
 const io = std.Io.Threaded.global_single_threaded.io();
 
 // Initialize with default config
-var server = try httpx.Server.init(allocator, io, .{});
+var server = try httpx.server.Server.init(allocator, io, .{});
 defer server.deinit();
 
 // Initialize with custom config
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 3000,
     .portStrategy = .incremental,
@@ -138,7 +138,7 @@ const port = server.localPort(); // actual bound port (useful with .port = 0)
 
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
     .http2 = true,
@@ -151,7 +151,7 @@ defer server.deinit();
 
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
     .portStrategy = .incremental,
@@ -220,13 +220,13 @@ HTTPX never prints on its own. Configure the server event callback to
 observe requests (see [Observability: Logging](/observability/logging)):
 
 ```zig
-fn onEvent(event: httpx.ServerEvent) void {
+fn onEvent(event: httpx.logging.ServerEvent) void {
     if (event.kind == .requestCompleted) {
         std.debug.print("{s} {s} {d}\n", .{ event.method, event.path, event.status });
     }
 }
 
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
     .logging = .{ .callback = onEvent },
@@ -264,7 +264,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{});
+    var server = try httpx.server.Server.init(allocator, io, .{});
     defer server.deinit();
 
     // Add middleware
@@ -283,11 +283,11 @@ pub fn main() !void {
     server.run();
 }
 
-fn homePage(ctx: *httpx.Context) anyerror!httpx.Response {
+fn homePage(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.html("<h1>Welcome to httpx.zig!</h1>");
 }
 
-fn listUsers(ctx: *httpx.Context) anyerror!httpx.Response {
+fn listUsers(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJson(.{ .users = &.{} });
 }
 ```
@@ -321,7 +321,7 @@ var router = router_mod.Router.init(allocator);
 defer router.deinit();
 router.setNotFoundHandler(notFound);
 
-fn notFound(ctx: *httpx.Context) anyerror!httpx.Response {
+fn notFound(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.textStatus(404, "Not Found");
 }
 ```
@@ -374,7 +374,7 @@ The `Context` struct is passed to every route handler and middleware.
 ### Example Context Usage
 
 ```zig
-fn getUser(ctx: *httpx.Context) anyerror!httpx.Response {
+fn getUser(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     // Get URL parameter
     const id = ctx.param("id") orelse return ctx.textStatus(400, "Missing user ID");
 
@@ -402,7 +402,7 @@ Handlers are functions that take a `*Context` and return a `!Response`.
 ```zig
 const Handler = *const fn (*Context) anyerror!Response;
 
-fn myHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn myHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJson(.{ .message = "Hello World" });
 }
 ```
@@ -411,22 +411,22 @@ fn myHandler(ctx: *httpx.Context) anyerror!httpx.Response {
 
 ```zig
 // Simple text response
-fn hello(ctx: *httpx.Context) anyerror!httpx.Response {
+fn hello(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.text("Hello, World!");
 }
 
 // JSON response with status
-fn created(ctx: *httpx.Context) anyerror!httpx.Response {
+fn created(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJsonStatus(201, .{ .id = 1, .created = true });
 }
 
 // Redirect
-fn redirectHome(ctx: *httpx.Context) anyerror!httpx.Response {
+fn redirectHome(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.redirect("/", 302);
 }
 
 // Error handling
-fn riskyHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn riskyHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const data = doSomethingRisky() catch |err| {
         return ctx.renderJsonStatus(500, .{
             .error = "Internal Server Error",
@@ -455,7 +455,7 @@ and `examples/staticEmbedded.zig` (single-file embedded mode).
 Handle route-level errors in handlers and return explicit status codes as needed:
 
 ```zig
-fn handler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn handler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const result = riskyOperation() catch |err| switch (err) {
         error.NotFound => return ctx.renderJsonStatus(404, .{ .error = "Not Found" }),
         error.Unauthorized => return ctx.renderJsonStatus(401, .{ .error = "Unauthorized" }),

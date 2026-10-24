@@ -56,7 +56,7 @@ pub fn main() !void {
 HTTPX allows you to attach a GraphQL execution handler and serve GraphiQL interactive IDE:
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
 defer server.deinit();
 
 // GraphQL execution endpoint

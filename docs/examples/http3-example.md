@@ -5,9 +5,9 @@ HTTP/3 and QUIC protocol helpers (QPACK and frame primitives). See
 
 ```zig
 var buf: [8]u8 = undefined;
-const n = try httpx.quic.varint.encode(&buf, 1337);
+const n = try httpx.protocols.quic.varint.encode(&buf, 1337);
 var off: usize = 0;
-const v = try httpx.quic.varint.decode(&buf, &off);
+const v = try httpx.protocols.quic.varint.decode(&buf, &off);
 std.debug.print("h3 varint encoded={d} decoded={d}\n", .{ n, v });
 ```
 

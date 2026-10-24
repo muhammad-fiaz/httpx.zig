@@ -17,7 +17,7 @@ Defaults remain implicit unless you explicitly override fields:
 
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
-const config: httpx.ClientConfig = .{
+const config: httpx.client.Config = .{
     .timeoutMs = 10_000,
     .followRedirects = true,
     .maxRedirects = 5,
@@ -115,10 +115,10 @@ _ = opt_res;
 ## Cookie Jar
 
 Pass cookies per request with the `cookie` option, or keep a standalone
-`httpx.CookieJar` across requests (domain-aware per RFC 6265):
+`httpx.client.CookieJar` across requests (domain-aware per RFC 6265):
 
 ```zig
-var jar = httpx.CookieJar.init(allocator);
+var jar = httpx.client.CookieJar.init(allocator, io);
 defer jar.deinit();
 
 if (loginRes.header("Set-Cookie")) |sc| {
@@ -131,13 +131,13 @@ var profileRes = try client.get("https://example.com/profile", .{ .cookie = cook
 defer profileRes.deinit();
 ```
 
-For top-level convenience in smaller programs, use functions from the root module:
+Use an initialized client for requests and connection reuse:
 
 ```zig
-var res = try httpx.get("https://httpbun.com/get", .{});
+var res = try client.get("https://httpbun.com/get", .{});
 defer res.deinit();
 
-var custom = try httpx.request("https://httpbun.com/headers", .{
+var custom = try client.request("https://httpbun.com/headers", .{
     .method = .GET,
     .timeoutMs = 10_000,
 });
@@ -170,8 +170,8 @@ The second argument to request methods is `RequestOptions`:
 pub const RequestOptions = struct {
     url: []const u8,
     method: ?httpx.Method = null,       // Explicit method for generic request
-    headers: []const httpx.Header = &.{}, // Custom headers
-    query: []const httpx.Header = &.{},   // Optional URL query params
+    headers: []const httpx.client.Header = &.{}, // Custom headers
+    query: []const httpx.client.Header = &.{},   // Optional URL query params
     body: ?[]const u8 = null,           // Raw body
     json: ?[]const u8 = null,           // JSON body
     form: ?[]const u8 = null,           // x-www-form-urlencoded body
@@ -195,7 +195,7 @@ Configure forward proxies when initializing the client:
 
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
-const config: httpx.ClientConfig = .{
+const config: httpx.client.Config = .{
     .proxy = "http://127.0.0.1:8080",
 };
 
@@ -206,7 +206,7 @@ defer client.deinit();
 For SOCKS5h (remote DNS), use a `socks5h://` URL:
 
 ```zig
-const socks_config: httpx.ClientConfig = .{
+const socks_config: httpx.client.Config = .{
     .proxy = "socks5h://127.0.0.1:1080",
 };
 ```

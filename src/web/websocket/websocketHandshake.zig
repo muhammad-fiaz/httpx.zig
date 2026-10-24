@@ -8,6 +8,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const frame = @import("websocketFrame.zig");
+pub const deflate = @import("websocketDeflate.zig");
 const parseMod = @import("../../common/parse.zig");
 
 /// Magic GUID from RFC 6455 section 1.3 used in Sec-WebSocket-Accept.

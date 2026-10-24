@@ -271,11 +271,11 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     const ProfileHandler = struct {
-        fn handle(_: *httpx.Context) anyerror!httpx.Response {
+        fn handle(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
             const username = "Jane Doe";
             var page_buf: [1024]u8 = undefined;
             const html_page = try std.fmt.bufPrint(&page_buf,

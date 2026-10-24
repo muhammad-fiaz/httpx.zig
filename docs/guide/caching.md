@@ -39,7 +39,7 @@ defer res.deinit();
 In server handlers, you can easily attach ETags and cache headers:
 
 ```zig
-fn catalogHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn catalogHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const etag = "\"catalog-v1.4\"";
 
     // Check if client provided matching If-None-Match

@@ -35,7 +35,7 @@ HTTPX server supports on-the-fly response compression based on the client's `Acc
 
 ```zig
 server.get("/large-data", struct {
-    fn handle(ctx: *httpx.Context) !void {
+    fn handle(ctx: *httpx.web.router.Context) !void {
         const accept = ctx.header("Accept-Encoding") orelse "";
         if (std.mem.indexOf(u8, accept, "gzip") != null) {
             ctx.header("Content-Encoding", "gzip");

@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .maxConnections = 5,
@@ -28,7 +28,7 @@ pub fn main() !void {
     std.debug.print("Server running on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };
@@ -48,7 +48,7 @@ pub fn main() !void {
     std.debug.print("Interceptor example verification completed successfully.\n", .{});
 }
 
-fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Request example\"}",

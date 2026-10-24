@@ -29,10 +29,10 @@ pub fn main() !void {
     std.debug.print("1. HTTP/3 client configured: protocol={s}\n", .{@tagName(client.config.httpVersion.?)});
 
     // 2. Client & Server HTTP/3 Connection Engines (RFC 9114)
-    var clientConn = httpx.http3.Connection.init(allocator, .client);
+    var clientConn = httpx.protocols.http3.Connection.init(allocator, .client);
     defer clientConn.deinit();
 
-    var serverConn = httpx.http3.Connection.init(allocator, .server);
+    var serverConn = httpx.protocols.http3.Connection.init(allocator, .server);
     defer serverConn.deinit();
 
     // Exchange control stream SETTINGS
@@ -44,7 +44,7 @@ pub fn main() !void {
 
     // Server processes client settings (skip 1-byte stream type prefix)
     var off: usize = 1;
-    const parsed = try httpx.http3.frame.parseFrame(clientCtrl, &off);
+    const parsed = try httpx.protocols.http3.frame.parseFrame(clientCtrl, &off);
     try serverConn.processControlFrame(parsed.frameType, parsed.payload);
 
     std.debug.print("2. HTTP/3 control stream SETTINGS exchanged successfully\n", .{});
@@ -53,7 +53,7 @@ pub fn main() !void {
     const bidiStreamId = clientConn.nextBidiStreamId();
     var reqStream = clientConn.createRequestStream(bidiStreamId);
 
-    const extraHeaders = [_]httpx.http3.qpack.FieldLine{
+    const extraHeaders = [_]httpx.protocols.http3.qpack.FieldLine{
         .{ .name = "user-agent", .value = "httpx.zig-http3" },
         .{ .name = "accept", .value = "application/json" },
     };
@@ -66,7 +66,7 @@ pub fn main() !void {
     // Server response stream
     var respStream = serverConn.createRequestStream(bidiStreamId);
 
-    const respHeaders = [_]httpx.http3.qpack.FieldLine{
+    const respHeaders = [_]httpx.protocols.http3.qpack.FieldLine{
         .{ .name = "content-type", .value = "application/json" },
         .{ .name = "server", .value = "httpx.zig/0.1.0" },
     };

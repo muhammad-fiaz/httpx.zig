@@ -15,7 +15,7 @@ HTTP security headers instruct modern web browsers to activate built-in defenses
 ## Server Implementation
 
 ```zig
-fn securityHeadersMiddleware(ctx: *httpx.Context) !void {
+fn securityHeadersMiddleware(ctx: *httpx.web.router.Context) !void {
     ctx.header("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
     ctx.header("X-Content-Type-Options", "nosniff");
     ctx.header("X-Frame-Options", "DENY");

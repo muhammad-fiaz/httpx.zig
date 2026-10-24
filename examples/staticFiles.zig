@@ -9,7 +9,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn healthHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn healthHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{ .status = 200, .body = "ok" };
 }
 
@@ -18,8 +18,10 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -49,7 +51,7 @@ pub fn main() !void {
     var urlBuf: [128]u8 = undefined;
     const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/static/index.html", .{port});
 
-    var response = try httpx.get(url, .{});
+    var response = try client.get(url, .{});
     defer response.deinit();
 
     std.debug.print("GET /static/index.html -> {d} ({d} bytes)\n", .{ response.status, response.body.len });

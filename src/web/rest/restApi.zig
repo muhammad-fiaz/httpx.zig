@@ -9,7 +9,7 @@
 //! const CreateUser = struct { name: []const u8, email: []const u8 };
 //! const User = struct { id: u64, name: []const u8, email: []const u8 };
 //!
-//! fn createUser(ctx: *httpx.Context, req: CreateUser) !httpx.ApiResult(User) {
+//! fn createUser(ctx: *httpx.web.router.Context, req: CreateUser) !httpx.ApiResult(User) {
 //!     _ = ctx;
 //!     return .{ .status = .created, .body = .{ .id = 1, .name = req.name, .email = req.email } };
 //! }

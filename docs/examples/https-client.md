@@ -19,7 +19,7 @@ defer dev.deinit();
 Local listener setup with an identity:
 
 ```zig
-var listener = try httpx.tls.Listener.init(allocator, io, .{
+var listener = try httpx.protocols.tls.Listener.init(allocator, io, .{
     .port = 0,
     .defaultIdentity = .{
         .certChainPem = cert,

@@ -7,7 +7,7 @@ Download progress with percentage, speed, ETA, and cancellation. See
 const Observer = struct {
     taskId: u32,
 
-    fn onProgress(info: httpx.ProgressInfo, userData: ?*anyopaque) void {
+    fn onProgress(info: httpx.client.download.ProgressInfo, userData: ?*anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(userData.?));
         const pct = if (info.percentage) |p| p else 0.0;
         std.debug.print("[Task {d}] {d:.1}% ({d} bytes) {d:.0} B/s ETA: {?d}s\n", .{

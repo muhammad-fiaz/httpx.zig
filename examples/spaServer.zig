@@ -10,7 +10,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn apiHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn apiHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJson(.{
         .status = "ok",
         .service = "spa-api",
@@ -25,7 +25,7 @@ pub fn main() !void {
 
     std.debug.print("==> HTTPX SPA Fallback Server Demo\n\n", .{});
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -43,7 +43,7 @@ pub fn main() !void {
     std.debug.print("SPA server listening on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };

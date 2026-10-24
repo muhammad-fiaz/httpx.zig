@@ -4,7 +4,7 @@ QPACK stream instructions, QUIC stream cancellation frames, and transport
 parameters. See `examples/http3Quic.zig`.
 
 ```zig
-var clientConn = httpx.http3.Connection.init(allocator, .client);
+var clientConn = httpx.protocols.http3.Connection.init(allocator, .client);
 defer clientConn.deinit();
 
 const ctrl = try clientConn.buildControlStream();
@@ -17,8 +17,8 @@ const data = try req.buildData(body);
 ```
 
 RESET_STREAM / STOP_SENDING cancellation, GOAWAY, QPACK encoder/decoder
-stream prefixes, and transport parameters live in `httpx.quic.frames`,
-`httpx.quic.params`, and `httpx.http3.connection`.
+stream prefixes, and transport parameters live in `httpx.protocols.quic.frames`,
+`httpx.protocols.quic.transportParameters`, and `httpx.protocols.http3.connection`.
 
 ## Expected Output
 

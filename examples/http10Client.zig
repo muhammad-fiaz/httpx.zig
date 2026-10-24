@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn getHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn getHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{
         .status = 200,
         .body = "{\"protocol\":\"HTTP/1.0\",\"status\":\"ok\"}",
@@ -15,7 +15,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,

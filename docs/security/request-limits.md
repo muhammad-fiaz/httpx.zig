@@ -5,7 +5,7 @@ Prevent denial-of-service (DoS) attacks by enforcing strict limits on request si
 ## Configurable Limits
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .maxBody = 10 * 1024 * 1024, // 10 MB body payload limit
     .maxRequestsPerConn = 1000,  // cap requests per keep-alive connection
 });

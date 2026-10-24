@@ -1,8 +1,7 @@
 # Batch Concurrent Requests
 
-Run requests concurrently with `httpx.getAll(urls)` and
-`httpx.requestAll(reqs)` (or the matching `client.getAll` /
-`client.requestAll` methods on an explicit `Client`).
+Run requests concurrently with `client.getAll(urls)` and
+`client.requestAll(reqs)` on an initialized `Client`.
 See `examples/concurrentDemo.zig`.
 
 ```zig
@@ -10,7 +9,7 @@ const urls = [_][]const u8{
     "https://httpbun.com/get",
     "https://httpbun.com/headers",
 };
-const results = httpx.getAll(urls) catch |err| {
+const results = client.getAll(urls) catch |err| {
     std.debug.print("getAll failed: {s}\n", .{@errorName(err)});
     return;
 };
@@ -19,11 +18,11 @@ defer {
     std.heap.page_allocator.free(results);
 }
 
-const reqs = [_]httpx.RequestOptions{
+const reqs = [_]httpx.client.RequestOptions{
     .{ .method = .GET, .url = "https://httpbun.com/get" },
     .{ .method = .GET, .url = "https://httpbun.com/headers" },
 };
-const batch = httpx.requestAll(reqs) catch |err| {
+const batch = client.requestAll(reqs) catch |err| {
     std.debug.print("requestAll failed: {s}\n", .{@errorName(err)});
     return;
 };
@@ -37,9 +36,8 @@ for (results, 0..) |result, i| {
 }
 ```
 
-Caller ownership: deinit each `Response`, then free the slice with
-`std.heap.page_allocator` for the global helpers (or the client's
-allocator for the `Client` methods).
+Caller ownership: deinit each `Response`, then free the slice with the
+allocator passed to the client.
 
 ## Expected Output
 

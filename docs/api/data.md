@@ -18,7 +18,7 @@ RFC 2046 multipart/form-data builder and parser
 ### Building
 
 ```zig
-var form = httpx.multipart.encoder.Multipart.init(allocator);
+var form = httpx.multipart.encoder.Multipart.init(allocator, .formData);
 defer form.deinit();
 
 try form.field("username", "alice");
@@ -37,7 +37,7 @@ const contentType = form.contentType(&ctBuf);
 
 | Method | Description |
 |--------|-------------|
-| `init(allocator, subtype)` | Create a builder (boundary auto-generated; override with `setBoundary`) |
+| `init(allocator, subtype)` | Create a builder (boundary auto-generated; override with `try setBoundary`) |
 | `field(name, value)` | Append a text form field part |
 | `file(name, data, .{ .filename, .contentType, ... })` | Append a file upload part |
 | `encodeAlloc()` | Finalize and return the complete body (caller owns) |
@@ -111,7 +111,7 @@ Use Zig std JSON facilities (`std.json`) plus httpx conveniences:
 
 ## Cookies
 
-`httpx.cookies` (`Jar` / `Cookie`, incl. `Cookie.SameSite`) is the single
+`httpx.client.cookies` (`Jar` / `Cookie`, incl. `Cookie.SameSite`) is the single
 cookie implementation: the client jar persists cookies across requests and
 redirects, while server handlers read them with `ctx.cookie(name)`.
 `Set-Cookie` parsing, domain/path matching, expiry, `Secure`, `HttpOnly`,

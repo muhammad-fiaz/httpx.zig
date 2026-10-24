@@ -31,6 +31,7 @@ const tcp = @import("../sockets/tcp.zig");
 const sync = @import("../common/sync.zig");
 const clock = @import("../common/clock.zig");
 const h2Transport = @import("../protocols/http2/transport.zig");
+const h3Transport = @import("../protocols/http3/transport.zig");
 
 pub const PoolConfig = struct {
     /// Hard ceiling across all origins.
@@ -73,12 +74,12 @@ pub const Stats = struct {
 };
 
 const ConnKey = struct {
-    host: [64]u8,
-    hostLen: u8,
+    host: [256]u8,
+    hostLen: u16,
     port: u16,
 
     fn init(host: []const u8, port: u16) ?ConnKey {
-        if (host.len == 0 or host.len > 64) return null;
+        if (host.len == 0 or host.len > 255) return null;
         var k = ConnKey{ .host = undefined, .hostLen = @intCast(host.len), .port = port };
         @memcpy(k.host[0..host.len], host);
         return k;
@@ -99,13 +100,13 @@ const IdleConn = struct {
 /// Origin key for a pooled HTTP/2 session. The `tls` bit keeps h2c and
 /// h2-TLS sessions in disjoint lanes (different transports entirely).
 const H2Key = struct {
-    host: [64]u8,
-    hostLen: u8,
+    host: [256]u8,
+    hostLen: u16,
     port: u16,
     tls: bool,
 
     fn init(host: []const u8, port: u16, tls: bool) ?H2Key {
-        if (host.len == 0 or host.len > 64) return null;
+        if (host.len == 0 or host.len > 255) return null;
         var k = H2Key{ .host = undefined, .hostLen = @intCast(host.len), .port = port, .tls = tls };
         @memcpy(k.host[0..host.len], host);
         return k;
@@ -124,6 +125,34 @@ const IdleH2 = struct {
     createdAtMs: i64,
 };
 
+/// Origin key for a pooled HTTP/3 session.
+const H3Key = struct {
+    host: [256]u8,
+    hostLen: u16,
+    port: u16,
+    policy: [32]u8,
+
+    fn init(host: []const u8, port: u16, policy: [32]u8) ?H3Key {
+        if (host.len == 0 or host.len > 255) return null;
+        var k = H3Key{ .host = undefined, .hostLen = @intCast(host.len), .port = port, .policy = policy };
+        @memcpy(k.host[0..host.len], host);
+        return k;
+    }
+
+    fn eql(a: H3Key, b: H3Key) bool {
+        return a.port == b.port and a.hostLen == b.hostLen and
+            std.mem.eql(u8, a.host[0..a.hostLen], b.host[0..b.hostLen]) and
+            std.mem.eql(u8, &a.policy, &b.policy);
+    }
+};
+
+const IdleH3 = struct {
+    client: *h3Transport.PooledConn,
+    key: H3Key,
+    parkedAtMs: i64,
+    createdAtMs: i64,
+};
+
 pub const Pool = struct {
     allocator: Allocator,
     io: std.Io,
@@ -131,6 +160,7 @@ pub const Pool = struct {
     mu: sync.Spinlock = .{},
     idle: std.ArrayList(IdleConn),
     idleH2: std.ArrayList(IdleH2),
+    idleH3: std.ArrayList(IdleH3),
     stats: Stats = .{},
 
     pub fn init(allocator: Allocator, io: std.Io, cfg: PoolConfig) Pool {
@@ -140,6 +170,7 @@ pub const Pool = struct {
             .cfg = cfg,
             .idle = .empty,
             .idleH2 = .empty,
+            .idleH3 = .empty,
         };
     }
 
@@ -147,6 +178,7 @@ pub const Pool = struct {
         self.purge();
         self.idle.deinit(self.allocator);
         self.idleH2.deinit(self.allocator);
+        self.idleH3.deinit(self.allocator);
     }
 
     pub fn statsSnapshot(self: *const Pool) Snapshot {
@@ -156,7 +188,7 @@ pub const Pool = struct {
     pub fn parkedCount(self: *Pool) usize {
         self.mu.lock();
         defer self.mu.unlock();
-        return self.idle.items.len + self.idleH2.items.len;
+        return self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len;
     }
 
     /// Pop a reusable HTTP/2 session for this origin+scheme, or null.
@@ -168,7 +200,7 @@ pub const Pool = struct {
             _ = self.stats.misses.fetchAdd(1, .monotonic);
             return null;
         };
-        const now = clock.monotonicMillis();
+        const now = clock.monotonicMillis(self.io);
         while (true) {
             self.mu.lock();
             self.sweepH2Locked(now);
@@ -210,7 +242,7 @@ pub const Pool = struct {
             client.deinit();
             return;
         }
-        const now = clock.monotonicMillis();
+        const now = clock.monotonicMillis(self.io);
         self.mu.lock();
         defer self.mu.unlock();
         if (!self.canParkH2Locked(key)) {
@@ -228,16 +260,109 @@ pub const Pool = struct {
             return;
         };
         _ = self.stats.released.fetchAdd(1, .monotonic);
-        _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len, .monotonic);
+        _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
     }
 
     fn canParkH2Locked(self: *Pool, key: H2Key) bool {
-        if (self.idle.items.len + self.idleH2.items.len >= self.cfg.maxConnections) return false;
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
         var n: u32 = 0;
         for (self.idleH2.items) |*c| {
             if (c.key.eql(key)) n += 1;
         }
         return n < self.cfg.maxPerHost;
+    }
+
+    /// Pop a reusable HTTP/3 session for this origin and security policy, or null.
+    pub fn acquireH3(self: *Pool, host: []const u8, port: u16, policy: [32]u8) ?*h3Transport.PooledConn {
+        const key = H3Key.init(host, port, policy) orelse {
+            _ = self.stats.misses.fetchAdd(1, .monotonic);
+            return null;
+        };
+        const now = clock.monotonicMillis(self.io);
+        while (true) {
+            self.mu.lock();
+            self.sweepH3Locked(now);
+            const idx: ?usize = blk: {
+                for (self.idleH3.items, 0..) |*c, i| {
+                    if (c.key.eql(key)) break :blk i;
+                }
+                break :blk null;
+            };
+            const i = idx orelse {
+                self.mu.unlock();
+                _ = self.stats.misses.fetchAdd(1, .monotonic);
+                return null;
+            };
+            const entry = self.idleH3.swapRemove(i);
+            _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
+            self.mu.unlock();
+
+            if (entry.client.isReusable()) {
+                _ = self.stats.hits.fetchAdd(1, .monotonic);
+                return entry.client;
+            }
+            entry.client.deinit();
+            _ = self.stats.droppedStale.fetchAdd(1, .monotonic);
+        }
+    }
+
+    /// Return an H3 session for future reuse. Destroyed instead when any
+    /// cap is hit, when expired, or when no longer reusable. Never leaks.
+    pub fn releaseH3(self: *Pool, host: []const u8, port: u16, policy: [32]u8, client: *h3Transport.PooledConn) void {
+        const key = H3Key.init(host, port, policy) orelse {
+            client.deinit();
+            return;
+        };
+        if (!client.isReusable()) {
+            client.deinit();
+            return;
+        }
+        const now = clock.monotonicMillis(self.io);
+        self.mu.lock();
+        defer self.mu.unlock();
+        if (!self.canParkH3Locked(key)) {
+            client.deinit();
+            _ = self.stats.droppedLimit.fetchAdd(1, .monotonic);
+            return;
+        }
+        self.idleH3.append(self.allocator, .{
+            .client = client,
+            .key = key,
+            .parkedAtMs = now,
+            .createdAtMs = client.createdAtMs,
+        }) catch {
+            client.deinit();
+            return;
+        };
+        _ = self.stats.released.fetchAdd(1, .monotonic);
+        _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
+    }
+
+    fn canParkH3Locked(self: *Pool, key: H3Key) bool {
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
+        var n: u32 = 0;
+        for (self.idleH3.items) |*c| {
+            if (c.key.eql(key)) n += 1;
+        }
+        return n < self.cfg.maxPerHost;
+    }
+
+    fn sweepH3Locked(self: *Pool, now: i64) void {
+        var i: usize = 0;
+        while (i < self.idleH3.items.len) {
+            const c = &self.idleH3.items[i];
+            const idleExpired = now - c.parkedAtMs > self.cfg.idleTimeoutMs;
+            const lifeExpired = self.cfg.maxParkedMs != 0 and
+                now - c.createdAtMs > self.cfg.maxParkedMs;
+            if (idleExpired or lifeExpired) {
+                const stale = self.idleH3.swapRemove(i);
+                _ = self.stats.droppedStale.fetchAdd(1, .monotonic);
+                stale.client.deinit();
+                _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
+                continue;
+            }
+            i += 1;
+        }
     }
 
     /// Drop H2 entries expired by idle time or by connection lifetime
@@ -256,7 +381,7 @@ pub const Pool = struct {
                 const stale = self.idleH2.swapRemove(i);
                 _ = self.stats.droppedStale.fetchAdd(1, .monotonic);
                 stale.client.deinit();
-                _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len, .monotonic);
+                _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
                 continue;
             }
             i += 1;
@@ -271,7 +396,7 @@ pub const Pool = struct {
             _ = self.stats.misses.fetchAdd(1, .monotonic);
             return null;
         };
-        const now = clock.monotonicMillis();
+        const now = clock.monotonicMillis(self.io);
         self.mu.lock();
         defer self.mu.unlock();
 
@@ -279,6 +404,7 @@ pub const Pool = struct {
         // ANY origin. Uses non-blocking close here — draining stale sockets
         // under the pool spinlock would stall all borrowers.
         self.sweepH2Locked(now);
+        self.sweepH3Locked(now);
         var i: usize = 0;
         while (i < self.idle.items.len) {
             const c = &self.idle.items[i];
@@ -289,7 +415,7 @@ pub const Pool = struct {
                 const stale = self.idle.swapRemove(i);
                 _ = self.stats.droppedStale.fetchAdd(1, .monotonic);
                 stale.socket.close();
-                _ = self.stats.parkedNow.store(self.idle.items.len, .monotonic);
+                _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
                 continue;
             }
             i += 1;
@@ -309,12 +435,12 @@ pub const Pool = struct {
                 const stale = self.idle.swapRemove(i);
                 _ = self.stats.droppedStale.fetchAdd(1, .monotonic);
                 stale.socket.close();
-                _ = self.stats.parkedNow.store(self.idle.items.len, .monotonic);
+                _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
                 continue; // same index now holds a different entry
             }
             const sock = c.socket;
             _ = self.idle.swapRemove(i);
-            _ = self.stats.parkedNow.store(self.idle.items.len, .monotonic);
+            _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
             _ = self.stats.hits.fetchAdd(1, .monotonic);
             return sock;
         }
@@ -327,7 +453,7 @@ pub const Pool = struct {
         const key = ConnKey.init(host, port) orelse return false;
         self.mu.lock();
         defer self.mu.unlock();
-        if (self.idle.items.len >= self.cfg.maxConnections) return false;
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
         var n: u32 = 0;
         for (self.idle.items) |*c| {
             if (c.key.eql(key)) n += 1;
@@ -342,7 +468,7 @@ pub const Pool = struct {
             socket.drainThenClose();
             return;
         };
-        const now = clock.monotonicMillis();
+        const now = clock.monotonicMillis(self.io);
         self.mu.lock();
         defer self.mu.unlock();
 
@@ -360,11 +486,11 @@ pub const Pool = struct {
             return;
         };
         _ = self.stats.released.fetchAdd(1, .monotonic);
-        _ = self.stats.parkedNow.store(self.idle.items.len, .monotonic);
+        _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
     }
 
     fn canParkLocked(self: *Pool, key: ConnKey) bool {
-        if (self.idle.items.len >= self.cfg.maxConnections) return false;
+        if (self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len >= self.cfg.maxConnections) return false;
         var n: u32 = 0;
         for (self.idle.items) |*c| {
             if (c.key.eql(key)) n += 1;
@@ -380,6 +506,8 @@ pub const Pool = struct {
         self.idle.clearRetainingCapacity();
         const ownedH2 = self.idleH2.toOwnedSlice(self.allocator) catch &.{};
         self.idleH2.clearRetainingCapacity();
+        const ownedH3 = self.idleH3.toOwnedSlice(self.allocator) catch &.{};
+        self.idleH3.clearRetainingCapacity();
         _ = self.stats.parkedNow.store(0, .monotonic);
         self.mu.unlock();
         for (owned) |*c| {
@@ -390,13 +518,18 @@ pub const Pool = struct {
             c.client.deinit();
         }
         if (ownedH2.len > 0) self.allocator.free(ownedH2);
+        for (ownedH3) |*c| {
+            c.client.deinit();
+        }
+        if (ownedH3.len > 0) self.allocator.free(ownedH3);
     }
 
-    /// Drop stale/expired entries opportunistically (plain and H2).
+    /// Drop stale/expired entries opportunistically (plain, H2, and H3).
     pub fn sweepExpired(self: *Pool) void {
-        const now = clock.monotonicMillis();
+        const now = clock.monotonicMillis(self.io);
         self.mu.lock();
         self.sweepH2Locked(now);
+        self.sweepH3Locked(now);
         var i: usize = 0;
         while (i < self.idle.items.len) {
             const c = &self.idle.items[i];
@@ -408,7 +541,7 @@ pub const Pool = struct {
                 _ = self.stats.droppedStale.fetchAdd(1, .monotonic);
                 // Non-blocking close: never drain under the spinlock.
                 stale.socket.close();
-                _ = self.stats.parkedNow.store(self.idle.items.len, .monotonic);
+                _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
             } else {
                 i += 1;
             }
@@ -422,7 +555,7 @@ pub const Pool = struct {
         c.socket.close();
         _ = self.idle.swapRemove(i);
         _ = self.stats.droppedStale.fetchAdd(1, .monotonic);
-        _ = self.stats.parkedNow.store(self.idle.items.len, .monotonic);
+        _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
     }
 };
 

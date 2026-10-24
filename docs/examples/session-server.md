@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .maxConnections = 5,
@@ -29,7 +29,7 @@ pub fn main() !void {
     std.debug.print("Session server running on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };
@@ -49,7 +49,7 @@ pub fn main() !void {
     std.debug.print("Session server verification completed successfully.\n", .{});
 }
 
-fn loginHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn loginHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Logged in\",\"user\":\"alice\"}",
@@ -57,7 +57,7 @@ fn loginHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn dashboardHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn dashboardHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{
         .status = 200,
         .body = "{\"user\":\"alice\",\"page\":\"dashboard\"}",
@@ -65,7 +65,7 @@ fn dashboardHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn logoutHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn logoutHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Logged out\"}",

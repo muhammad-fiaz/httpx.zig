@@ -40,7 +40,7 @@ across Linux, Windows, and macOS.
 The server can require (or optionally accept) client certificates:
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
     .tls = .{
@@ -92,12 +92,12 @@ fresh ECDHE alongside the PSK).
 Server — opt in with ticket keys (stateless; no per-client storage):
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .port = 8443,
     .tls = .{
         .certPem = cert_pem,
         .keyPem = key_pem,
-        .ticketKeys = httpx.tls.TicketKeys.generate(),
+        .ticketKeys = httpx.protocols.tls.TicketKeys.generate(),
         .ticketLifetimeSecs = 7200,
     },
 });
@@ -155,7 +155,7 @@ defer response.deinit();
 
 ## Server TLS Configuration
 
-HTTPX provides first-class native TLS/HTTPS support directly integrated into `httpx.Server`.
+HTTPX provides first-class native TLS/HTTPS support directly integrated into `httpx.server.Server`.
 
 To launch a secure HTTPS server, supply PEM-encoded certificate chain and private key (either as in-memory PEM string or as file path):
 
@@ -163,7 +163,7 @@ To launch a secure HTTPS server, supply PEM-encoded certificate chain and privat
 const certPem = @embedFile("certs/server.crt");
 const keyPem = @embedFile("certs/server.key");
 
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .port = 8443,
     .tls = .{
         .certPem = certPem,
@@ -182,7 +182,7 @@ Handlers can inspect the connection's encryption status via `Context`
 (`ctx.isTls`, `ctx.scheme()`), as in `helloHandler` below:
 
 ```zig
-fn helloHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn helloHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     if (ctx.isTls) return ctx.text("Hello HTTPS!");
     return ctx.text("Hello HTTP!");
 }

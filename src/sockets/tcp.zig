@@ -420,7 +420,7 @@ pub const Socket = struct {
     pub fn setReadTimeoutMs(self: *Socket, timeoutMs: u32) void {
         self.readDeadline = deadlineAfterMs(self.io, timeoutMs);
         self.readInterrupted.store(false, .release);
-        self.readDeadlineMs.store(deadlineTicksNow(timeoutMs), .release);
+        self.readDeadlineMs.store(deadlineTicksNow(self, timeoutMs), .release);
         // An absolute deadline supersedes a rolling inactivity budget.
         self.readInactivityMs.store(0, .release);
         switch (self.inner) {
@@ -439,7 +439,7 @@ pub const Socket = struct {
     pub fn setWriteTimeoutMs(self: *Socket, timeoutMs: u32) void {
         self.writeDeadline = deadlineAfterMs(self.io, timeoutMs);
         self.writeInterrupted.store(false, .release);
-        self.writeDeadlineMs.store(deadlineTicksNow(timeoutMs), .release);
+        self.writeDeadlineMs.store(deadlineTicksNow(self, timeoutMs), .release);
         self.writeInactivityMs.store(0, .release);
         switch (self.inner) {
             .winsock => |s| if (isWindows) {
@@ -523,9 +523,9 @@ pub const Socket = struct {
         return @truncate(@as(u64, @bitCast(ms)));
     }
 
-    fn deadlineTicksNow(timeoutMs: u32) u32 {
+    fn deadlineTicksNow(self: *const Socket, timeoutMs: u32) u32 {
         if (timeoutMs == 0) return 0;
-        return toDeadlineTicks(clock.monotonicMillis() + @as(i64, @intCast(timeoutMs)));
+        return toDeadlineTicks(clock.monotonicMillis(self.io) + @as(i64, @intCast(timeoutMs)));
     }
 
     /// Wrapping comparison: a deadline counts as expired while it lies less
@@ -630,13 +630,35 @@ pub const Socket = struct {
                 }
                 @constCast(&self.writeActive).store(true, .release);
                 defer @constCast(&self.writeActive).store(false, .release);
-                const rc = ws.send(s, data.ptr, @intCast(@min(data.len, 65536)), 0);
+                var rc = ws.send(s, data.ptr, @intCast(@min(data.len, 65536)), 0);
                 if (rc == ws.SOCKET_ERROR) {
-                    return switch (ws.WSAGetLastError()) {
-                        10054, 10053 => WriteError.ConnectionReset, // WSAECONNRESET, WSAECONNABORTED
-                        ws.WSAETIMEDOUT => WriteError.Timeout,
-                        else => WriteError.WriteFailed,
-                    };
+                    const err = ws.WSAGetLastError();
+                    if (err == 10035) { // WSAEWOULDBLOCK
+                        var set = ws.FdSet.zero();
+                        set.add(s);
+                        const ms = remainingTimeoutMs(self.writeDeadline, self.io) orelse 5000;
+                        if (ms == 0) return WriteError.Timeout;
+                        var tv = ws.Timeval{
+                            .sec = @intCast(ms / 1000),
+                            .usec = @intCast((ms % 1000) * 1000),
+                        };
+                        const selRes = ws.select(0, null, &set, null, &tv);
+                        if (selRes <= 0) return WriteError.Timeout;
+                        rc = ws.send(s, data.ptr, @intCast(@min(data.len, 65536)), 0);
+                        if (rc == ws.SOCKET_ERROR) {
+                            return switch (ws.WSAGetLastError()) {
+                                10054, 10053 => WriteError.ConnectionReset,
+                                ws.WSAETIMEDOUT, 10035 => WriteError.Timeout,
+                                else => WriteError.WriteFailed,
+                            };
+                        }
+                    } else {
+                        return switch (err) {
+                            10054, 10053 => WriteError.ConnectionReset, // WSAECONNRESET, WSAECONNABORTED
+                            ws.WSAETIMEDOUT => WriteError.Timeout,
+                            else => WriteError.WriteFailed,
+                        };
+                    }
                 }
                 return @intCast(rc);
             },
@@ -970,7 +992,7 @@ test "deadline ticks stay 32-bit safe and expire only in the past" {
     try std.testing.expect(Socket.deadlineExpired(base + 10_000, deadline));
 
     // A zero timeout keeps the "no deadline" meaning.
-    try std.testing.expectEqual(@as(u32, 0), Socket.deadlineTicksNow(0));
+    try std.testing.expectEqual(@as(u32, 0), Socket.deadlineTicksNow(undefined, 0));
     try std.testing.expect(!Socket.deadlineExpired(base + 1_000_000, 0));
 
     // Wrapping: a deadline recorded just before the 32-bit tick counter wraps

@@ -119,6 +119,9 @@ pub const RequestOptions = struct {
     connection: []const u8 = "",
     /// Emit Transfer-Encoding: chunked instead of Content-Length.
     chunked: bool = false,
+    /// When true, allows a Content-Length header without an in-memory body slice
+    /// (e.g. for streaming request uploads).
+    streamingBody: bool = false,
 };
 
 /// Serializes a complete request with a fully buffered body.
@@ -133,7 +136,7 @@ pub fn buildRequest(
     if (opts.minorVersion > 1) return Error.UnsupportedForVersion;
 
     const bodyLen = if (body) |bytes| bytes.len else 0;
-    try validateFramingHeaders(opts.headers, opts.chunked, bodyLen, false);
+    try validateFramingHeaders(opts.headers, opts.chunked, bodyLen, opts.streamingBody);
 
     const targetForm = @import("semantics.zig").classifyTarget(method, target) orelse
         return Error.InvalidTarget;
@@ -164,7 +167,7 @@ pub fn buildRequest(
     }
 
     const hasBody = bodyLen > 0;
-    if (hasBody or opts.chunked) {
+    if (hasBody or opts.chunked or opts.streamingBody) {
         var declared = false;
         for (opts.headers) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, "content-length")) declared = true;
@@ -172,7 +175,7 @@ pub fn buildRequest(
         if (opts.chunked) {
             if (opts.minorVersion == 0) return Error.UnsupportedForVersion;
             try appendHeader(&out, allocator, "Transfer-Encoding", "chunked");
-        } else if (!declared) {
+        } else if (!declared and !opts.streamingBody) {
             var numBuf: [20]u8 = undefined;
             const n = std.fmt.bufPrint(&numBuf, "{d}", .{body.?.len}) catch unreachable;
             try appendHeader(&out, allocator, "Content-Length", n);
@@ -182,7 +185,7 @@ pub fn buildRequest(
     out.appendSlice(allocator, "\r\n") catch return Error.OutOfMemory;
     if (opts.chunked) {
         if (hasBody) try writeChunk(&out, allocator, body.?);
-        try finishChunked(&out, allocator, &.{});
+        if (!opts.streamingBody) try finishChunked(&out, allocator, &.{});
     } else if (hasBody) {
         out.appendSlice(allocator, body.?) catch return Error.OutOfMemory;
     }

@@ -31,7 +31,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     const QueryType = httpx.graphql.ObjectTypeDef{

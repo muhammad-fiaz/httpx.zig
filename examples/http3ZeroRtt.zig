@@ -37,8 +37,8 @@ const demoKeyPem =
 ;
 
 const DemoServer = struct {
-    ep: httpx.quic.Endpoint = undefined,
-    pump: httpx.quic.Pump = .{},
+    ep: httpx.protocols.quic.Endpoint = undefined,
+    pump: httpx.protocols.quic.Pump = .{},
 
     const Acc = struct {
         sid: u64 = std.math.maxInt(u64),
@@ -54,13 +54,13 @@ const DemoServer = struct {
         if (fin) acc.fin = true;
     }
 
-    fn sendStream(conn: *httpx.quic.Connection, sid: u64, bytes: []const u8) !void {
+    fn sendStream(conn: *httpx.protocols.quic.Connection, sid: u64, bytes: []const u8) !void {
         const B = struct {
             var sId: u64 = 0;
             var sData: []const u8 = "";
-            pub fn build(gpa: std.mem.Allocator, payload: *std.ArrayList(u8)) httpx.quic.connection.Error!void {
-                httpx.quic.frames.encode(payload, gpa, .{ .stream = .{ .id = sId, .offset = 0, .data = sData, .fin = true } }) catch
-                    return httpx.quic.connection.Error.OutOfMemory;
+            pub fn build(gpa: std.mem.Allocator, payload: *std.ArrayList(u8)) httpx.protocols.quic.connection.Error!void {
+                httpx.protocols.quic.frames.encode(payload, gpa, .{ .stream = .{ .id = sId, .offset = 0, .data = sData, .fin = true } }) catch
+                    return httpx.protocols.quic.connection.Error.OutOfMemory;
             }
         };
         B.sId = sid;
@@ -72,10 +72,10 @@ const DemoServer = struct {
         srv: *DemoServer,
         io: std.Io,
         alloc: std.mem.Allocator,
-        tkeys: httpx.tls.session.TicketKeys,
-        rcache: *httpx.tls.session.ReplayCache,
+        tkeys: httpx.protocols.tls.session.TicketKeys,
+        rcache: *httpx.protocols.tls.session.ReplayCache,
     ) !void {
-        var qconn = try httpx.quic.Connection.init(alloc, io, .server, .{});
+        var qconn = try httpx.protocols.quic.Connection.init(alloc, io, .server, .{});
         const prevConn = srv.ep.conn;
         defer {
             qconn.deinit();
@@ -83,7 +83,7 @@ const DemoServer = struct {
         }
         srv.ep.conn = qconn;
 
-        var drv = httpx.quic.HandshakeDriver.initServer(io, alloc, .{
+        var drv = httpx.protocols.quic.HandshakeDriver.initServer(io, alloc, .{
             .certChainPem = demoCertPem,
             .privateKeyPem = demoKeyPem,
             .ticketKeys = tkeys,
@@ -94,26 +94,26 @@ const DemoServer = struct {
 
         qconn.tls = .{
             .ctx = &drv,
-            .start = httpx.quic.HandshakeDriver.clientStart,
-            .onData = httpx.quic.HandshakeDriver.onData,
+            .start = httpx.protocols.quic.HandshakeDriver.clientStart,
+            .onData = httpx.protocols.quic.HandshakeDriver.onData,
         };
-        try httpx.quic.handshake.serveHandshake(&srv.ep, &srv.pump, &drv, 15_000);
+        try httpx.protocols.quic.handshake.serveHandshake(&srv.ep, &srv.pump, &drv, 15_000);
 
-        var h3 = httpx.http3.Connection.init(alloc, .server);
+        var h3 = httpx.protocols.http3.Connection.init(alloc, .server);
         defer h3.deinit();
         var acc = Acc{};
         defer acc.buf.deinit(std.heap.page_allocator);
         qconn.cbs = .{ .ctx = &acc, .onStreamData = onStream };
 
-        const start: u64 = @intCast(httpx.clock.millisNow());
+        const start: u64 = @intCast(httpx.clock.millisNow(io));
         while (true) {
-            const now: u64 = @intCast(httpx.clock.millisNow());
+            const now: u64 = @intCast(httpx.clock.millisNow(io));
             if (now -| start > 15_000) return error.Timeout;
-            try httpx.quic.handshake.feedPumped(&srv.ep, &srv.pump, null, 500, now);
+            try httpx.protocols.quic.handshake.feedPumped(&srv.ep, &srv.pump, null, 500, now);
             if (!acc.fin) continue;
 
             var off: usize = 0;
-            const fr = try httpx.http3.frame.parseFrame(acc.buf.items, &off);
+            const fr = try httpx.protocols.http3.frame.parseFrame(acc.buf.items, &off);
             const fields = try h3.qdec.decodeSectionCounted(fr.payload, 0, null);
             defer h3.qdec.freeFields(fields);
 
@@ -123,9 +123,9 @@ const DemoServer = struct {
             }
 
             const isEarly = std.mem.eql(u8, path, "/early-data");
-            var qenc = httpx.http3.qpack.Encoder.init(alloc);
+            var qenc = httpx.protocols.http3.qpack.Encoder.init(alloc);
             defer qenc.deinit();
-            var rs = httpx.http3.RequestStream{ .id = acc.sid, .allocator = alloc, .qpack = &qenc };
+            var rs = httpx.protocols.http3.RequestStream{ .id = acc.sid, .allocator = alloc, .qpack = &qenc };
 
             const rhead = try rs.buildResponseHeaders(200, &.{});
             defer alloc.free(rhead);
@@ -142,7 +142,7 @@ const DemoServer = struct {
         }
     }
 
-    fn run(srv: *DemoServer, io: std.Io, alloc: std.mem.Allocator, out: *?anyerror, tkeys: httpx.tls.session.TicketKeys, rcache: *httpx.tls.session.ReplayCache) void {
+    fn run(srv: *DemoServer, io: std.Io, alloc: std.mem.Allocator, out: *?anyerror, tkeys: httpx.protocols.tls.session.TicketKeys, rcache: *httpx.protocols.tls.session.ReplayCache) void {
         srv.serveOne(io, alloc, tkeys, rcache) catch |e| {
             out.* = e;
             return;
@@ -166,17 +166,17 @@ pub fn main() !void {
     std.debug.print("=================================================================\n\n", .{});
 
     // 1. Initialize Anti-Replay Cache and Session Ticket Encryption Keys
-    var replayCache = httpx.tls.session.ReplayCache.init(allocator, 1024);
+    var replayCache = httpx.protocols.tls.session.ReplayCache.init(allocator, 1024);
     defer replayCache.deinit();
 
-    const ticketKeys = httpx.tls.session.TicketKeys{ .current = (@as([32]u8, @splat(0x42))) };
+    const ticketKeys = httpx.protocols.tls.session.TicketKeys{ .current = (@as([32]u8, @splat(0x42))) };
 
     // 2. Start Loopback HTTP/3 Server with 0-RTT and Session Resumption
-    var placeholder = try httpx.quic.Connection.init(allocator, io, .server, .{});
+    var placeholder = try httpx.protocols.quic.Connection.init(allocator, io, .server, .{});
     defer placeholder.deinit();
 
     var srv = DemoServer{};
-    srv.ep = try httpx.quic.transport.Endpoint.init(allocator, io, placeholder, .{});
+    srv.ep = try httpx.protocols.quic.transport.Endpoint.init(allocator, io, placeholder, .{});
     const port = srv.ep.localPort();
     defer srv.ep.deinit();
 
@@ -191,11 +191,11 @@ pub fn main() !void {
     defer client.deinit();
 
     var urlBuf: [64]u8 = undefined;
-    const tlsOptions = httpx.TlsOptions{
+    const tlsOptions = httpx.client.tlsOptions{
         .verify = .caBundle,
         .caPem = demoCertPem,
     };
-    const cachePolicy = httpx.sessionPolicyFingerprint(tlsOptions);
+    const cachePolicy = httpx.client.sessionPolicyFingerprint(tlsOptions);
     const url1 = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/initial", .{port});
 
     std.debug.print("Step 1: Sending first request (cold connection, 1-RTT)...\n", .{});
@@ -211,7 +211,7 @@ pub fn main() !void {
     std.debug.print("  -> NewSessionTicket received and cached with maxEarlyData=16384.\n\n", .{});
 
     // Verify session ticket in client cache
-    var cached = client.sessionCache.getWithAlpnPolicy("127.0.0.1", port, @intCast(httpx.clock.millisNow()), "h3", cachePolicy);
+    var cached = client.sessionCache.getWithAlpnPolicy("127.0.0.1", port, @intCast(httpx.clock.millisNow(io)), "h3", cachePolicy);
     if (cached) |*c| {
         defer c.deinit(allocator);
         std.debug.print("Step 2: Verified session cache entry: ALPN='{s}', maxEarlyData={d}\n\n", .{ c.alpn[0..c.alpnLen], c.maxEarlyData });

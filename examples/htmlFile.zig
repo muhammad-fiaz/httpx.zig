@@ -42,7 +42,7 @@ pub fn main() !void {
     const fileBytes = try cwd.readFileAlloc(io, filePath, allocator, .unlimited);
     defer allocator.free(fileBytes);
 
-    var p = httpx.Parser.init(allocator, .{});
+    var p = httpx.parsing.Parser.init(allocator, .{});
     var doc = try p.parseHtml(fileBytes);
     defer doc.deinit();
 

@@ -76,7 +76,7 @@ const clock = @import("../common/clock.zig");
 /// Probe a single endpoint. Returns the latency in ms on success, or null.
 fn probeOne(io: std.Io, probe: Probe, timeoutMs: u32) ?u32 {
     const addr = parseIpLiteral(probe.ip, probe.port, probe.family) orelse return null;
-    const t0 = clock.monotonicMillis();
+    const t0 = clock.monotonicMillis(io);
     const timeout: std.Io.Timeout = .{ .duration = .{
         .raw = .fromMilliseconds(timeoutMs),
         .clock = .awake,
@@ -86,7 +86,7 @@ fn probeOne(io: std.Io, probe: Probe, timeoutMs: u32) ?u32 {
         .timeout = timeout,
     }) catch return null;
     stream.close(io);
-    const elapsed = clock.monotonicMillis() - t0;
+    const elapsed = clock.monotonicMillis(io) - t0;
     return @intCast(@max(0, elapsed));
 }
 

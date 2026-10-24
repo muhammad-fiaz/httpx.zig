@@ -27,7 +27,7 @@ pub fn main() !void {
     ;
 
     const targetFilename = "sample-local-pdf.pdf";
-    const expectedHash = httpx.parseChecksumFile(checksumManifest, targetFilename);
+    const expectedHash = httpx.client.download.parseChecksumFile(checksumManifest, targetFilename);
 
     if (expectedHash) |hash| {
         std.debug.print("Parsed hash for {s}: {s}\n", .{ targetFilename, hash });

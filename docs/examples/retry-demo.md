@@ -22,7 +22,7 @@ pub fn main() !void {
     while (attempts < 3) : (attempts += 1) {
         var response = client.get("https://httpbun.com/get", .{}) catch |err| {
             std.debug.print("Attempt {d} failed: {s}\n", .{ attempts + 1, @errorName(err) });
-            httpx.clock.sleepMillis(1000);
+            httpx.clock.sleepMillis(io, 1000);
             continue;
         };
         defer response.deinit();

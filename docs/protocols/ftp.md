@@ -20,7 +20,7 @@ RFC 959 defines the File Transfer Protocol, separating command and data channels
 ## Example Usage
 
 ```zig
-var client = try httpx.ftp.Client.init(allocator, io, .{
+var client = try httpx.protocols.ftp.Client.init(allocator, io, .{
     .host = "test.rebex.net",
     .port = 21,
     .user = "demo",

@@ -2100,7 +2100,7 @@ test "mutual TLS client certificate round trip" {
 
     const clientCertPem = @embedFile("testdata/localhostCert.pem");
     const clientKeyPem = @embedFile("testdata/localhostKey.pem");
-    const nowSec: i64 = @divFloor(clockMod.millisNow(), 1000);
+    const nowSec: i64 = @divFloor(clockMod.millisNow(io), 1000);
 
     var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
     var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
@@ -2180,7 +2180,7 @@ test "mutual TLS rejects untrusted client certificate" {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     const clientCertPem = @embedFile("testdata/localhostCert.pem");
-    const nowSec: i64 = @divFloor(clockMod.millisNow(), 1000);
+    const nowSec: i64 = @divFloor(clockMod.millisNow(io), 1000);
 
     var chain = try certMod.parseCertificateChainPem(a, clientCertPem);
     defer chain.deinit();

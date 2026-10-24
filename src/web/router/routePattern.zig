@@ -385,7 +385,7 @@ test "shape erases names but keeps converters" {
     try std.testing.expect(!std.mem.eql(u8, try p1.shape(&buf1), s3));
 }
 
-test "fuzz: malformed patterns fail safely" {
+test "regression: malformed patterns fail safely" {
     const bad = [_][]const u8{
         "{}",    "{{id}}",    "{id",   "id}", "{:",   "{foo:unknown}", "{foo:int:int}",
         "{/}",   "{ }",       "{a b}", "{*}", "{**}", "***",           "///",

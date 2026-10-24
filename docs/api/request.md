@@ -34,7 +34,7 @@ pub fn main() !void {
 
 ## Request Options Fields
 
-Matches `httpx.RequestOptions` (`src/client/client.zig`). The client
+Matches `httpx.client.RequestOptions` (`src/client/client.zig`). The client
 accepts these fields directly (plus duck-typed extras such as `multipart`
 handled via `anytype` opts).
 

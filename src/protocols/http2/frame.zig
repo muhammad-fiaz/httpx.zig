@@ -39,15 +39,16 @@ pub const FrameType = enum(u8) {
     goaway = 0x7,
     windowUpdate = 0x8,
     continuation = 0x9,
+    priorityUpdate = 0x10,
     _,
 
     pub fn toString(self: FrameType) []const u8 {
-        if (@backingInt(self) <= 9) return @tagName(self);
+        if (@backingInt(self) <= 9 or @backingInt(self) == 0x10) return @tagName(self);
         return "unknown";
     }
 
     pub fn isKnown(self: FrameType) bool {
-        return @backingInt(self) <= 9;
+        return @backingInt(self) <= 9 or @backingInt(self) == 0x10;
     }
 };
 
@@ -79,6 +80,7 @@ pub fn validFlags(t: FrameType) u8 {
         .goaway => 0,
         .windowUpdate => 0,
         .continuation => END_HEADERS,
+        .priorityUpdate => 0,
         _ => 0xFF, // unknown types: leave untouched
     };
 }
@@ -151,6 +153,7 @@ pub const SettingsId = enum(u16) {
     initialWindowSize = 0x4,
     maxFrameSize = 0x5,
     maxHeaderListSize = 0x6,
+    enableConnectProtocol = 0x8,
     _,
 };
 
@@ -161,6 +164,7 @@ pub const SettingEntry = struct { id: u16, value: u32 };
 pub fn validateSetting(id: SettingsId, value: u32) ?u32 {
     return switch (id) {
         .enablePush => if (value > 1) 1 else null, // PROTOCOL_ERROR
+        .enableConnectProtocol => if (value > 1) 1 else null, // PROTOCOL_ERROR
         .initialWindowSize => if (value > MAX_WINDOW) 3 else null, // FLOW_CONTROL_ERROR
         .maxFrameSize => if (value < DEFAULT_MAX_FRAME_SIZE or value > MAX_ALLOWED_FRAME_SIZE) 1 else null,
         else => null,
@@ -223,6 +227,42 @@ pub const Continuation = struct {
     endHeaders: bool,
 };
 
+pub const PriorityUpdate = struct {
+    prioritizedStreamId: u31,
+    priorityFieldValue: []const u8,
+};
+
+/// RFC 9218: Extensible Prioritization Scheme for HTTP urgency and incremental parameters.
+pub const PriorityValue = struct {
+    urgency: u3 = 3,
+    incremental: bool = false,
+
+    pub fn parse(field: []const u8) PriorityValue {
+        var pv = PriorityValue{};
+        var iter = std.mem.splitScalar(u8, field, ',');
+        while (iter.next()) |rawTok| {
+            const tok = std.mem.trim(u8, rawTok, " \t");
+            if (std.ascii.eqlIgnoreCase(tok, "i")) {
+                pv.incremental = true;
+            } else if (std.ascii.startsWithIgnoreCase(tok, "u=")) {
+                const numStr = tok[2..];
+                if (numStr.len == 1 and numStr[0] >= '0' and numStr[0] <= '7') {
+                    pv.urgency = @intCast(numStr[0] - '0');
+                }
+            }
+        }
+        return pv;
+    }
+
+    pub fn format(self: PriorityValue, out: []u8) ![]const u8 {
+        if (self.incremental) {
+            return std.fmt.bufPrint(out, "u={d}, i", .{self.urgency});
+        } else {
+            return std.fmt.bufPrint(out, "u={d}", .{self.urgency});
+        }
+    }
+};
+
 pub const Unknown = struct {
     frameType: u8,
     flags: u8,
@@ -241,6 +281,7 @@ pub const Frame = union(enum) {
     goaway: Goaway,
     windowUpdate: WindowUpdate,
     continuation: Continuation,
+    priorityUpdate: PriorityUpdate,
     unknown: Unknown,
 
     /// Parses the payload according to the header. Applies the RFC 9113 rules:
@@ -253,7 +294,7 @@ pub const Frame = union(enum) {
         // frames, while request/stream frames require a non-zero identifier.
         switch (hdr.frameType) {
             .data, .headers, .priority, .rstStream, .pushPromise, .continuation => if (hdr.streamId == 0) return Error.InvalidStreamId,
-            .settings, .ping, .goaway => if (hdr.streamId != 0) return Error.InvalidStreamId,
+            .settings, .ping, .goaway, .priorityUpdate => if (hdr.streamId != 0) return Error.InvalidStreamId,
             .windowUpdate => {}, // valid on stream 0 or a non-zero stream
             _ => {},
         }
@@ -380,6 +421,15 @@ pub const Frame = union(enum) {
                     .endHeaders = hdr.flags & END_HEADERS != 0,
                 } };
             },
+            .priorityUpdate => {
+                if (payload.len < 4) return Error.FrameSizeError;
+                const prioritized = std.mem.readInt(u32, payload[0..4], .big) & 0x7FFFFFFF;
+                if (prioritized == 0) return Error.InvalidStreamId;
+                return .{ .priorityUpdate = .{
+                    .prioritizedStreamId = @intCast(prioritized),
+                    .priorityFieldValue = payload[4..],
+                } };
+            },
             // RFC 9113 Section 4.1: extensions and unknown frame types are
             // ignored after their length-delimited payload is consumed.
             _ => return .{ .unknown = .{
@@ -459,6 +509,15 @@ pub fn writePriority(out: *std.ArrayList(u8), gpa: Allocator, sid: u31, p: Prior
     b[4] = p.weight;
     try writeHeader(out, gpa, 5, .priority, 0, sid);
     try out.appendSlice(gpa, &b);
+}
+
+pub fn writePriorityUpdate(out: *std.ArrayList(u8), gpa: Allocator, prioritizedStreamId: u31, priorityFieldValue: []const u8) !void {
+    const len = 4 + priorityFieldValue.len;
+    try writeHeader(out, gpa, len, .priorityUpdate, 0, 0);
+    var streamBuf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &streamBuf, prioritizedStreamId & 0x7FFFFFFF, .big);
+    try out.appendSlice(gpa, &streamBuf);
+    try out.appendSlice(gpa, priorityFieldValue);
 }
 
 // Tests
@@ -564,4 +623,30 @@ test "setting values are validated against the RFC ranges" {
     try std.testing.expectEqual(@as(?u32, 1), validateSetting(.maxFrameSize, DEFAULT_MAX_FRAME_SIZE - 1));
     try std.testing.expectEqual(@as(?u32, 1), validateSetting(.maxFrameSize, @intCast(MAX_ALLOWED_FRAME_SIZE + 1)));
     try std.testing.expectEqual(@as(?u32, null), validateSetting(.maxFrameSize, DEFAULT_MAX_FRAME_SIZE));
+    try std.testing.expectEqual(@as(?u32, 1), validateSetting(.enableConnectProtocol, 2));
+    try std.testing.expectEqual(@as(?u32, null), validateSetting(.enableConnectProtocol, 1));
+}
+
+test "priority update frame roundtrip and PriorityValue parse/format" {
+    const a = std.testing.allocator;
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(a);
+
+    try writePriorityUpdate(&out, a, 5, "u=1, i");
+
+    const hdr = FrameHeader.parse(out.items[0..FRAME_HEADER_SIZE]);
+    try std.testing.expectEqual(FrameType.priorityUpdate, hdr.frameType);
+    try std.testing.expectEqual(@as(u31, 0), hdr.streamId);
+
+    const f = try Frame.parse(hdr, out.items[FRAME_HEADER_SIZE..], a);
+    try std.testing.expectEqual(@as(u31, 5), f.priorityUpdate.prioritizedStreamId);
+    try std.testing.expectEqualStrings("u=1, i", f.priorityUpdate.priorityFieldValue);
+
+    const parsedPv = PriorityValue.parse(f.priorityUpdate.priorityFieldValue);
+    try std.testing.expectEqual(@as(u3, 1), parsedPv.urgency);
+    try std.testing.expect(parsedPv.incremental);
+
+    var formattedBuf: [32]u8 = undefined;
+    const formatted = try parsedPv.format(&formattedBuf);
+    try std.testing.expectEqualStrings("u=1, i", formatted);
 }

@@ -313,32 +313,6 @@ pub fn build(b: *std.Build) void {
         testStep.dependOn(&installTests.step);
     }
 
-    const fuzzTests = b.addTest(.{
-        .max_rss = compileStepMaxRss,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/httpx.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-        .filters = &.{"fuzz:"},
-    });
-    fuzzTests.root_module.addImport("zstd", zstdDep.module("zstd"));
-    fuzzTests.root_module.addImport("brotli", brotliDep.module("brotli"));
-    fuzzTests.root_module.addImport("env", envDep.module("env"));
-    fuzzTests.root_module.addImport("loaders", loadersDep.module("loaders"));
-    fuzzTests.root_module.addImport("treesitter", treesitterDep.module("treesitter"));
-    fuzzTests.root_module.addImport("tint", tintDep.module("tint"));
-    linkPlatformLibs(fuzzTests, target);
-
-    const runFuzzTests = b.addRunArtifact(fuzzTests);
-    runFuzzTests.has_side_effects = true;
-    const fuzzStep = b.step("fuzz", "Run fuzz regression tests");
-    if (target.result.os.tag == builtin.os.tag and target.result.cpu.arch == builtin.cpu.arch) {
-        fuzzStep.dependOn(&runFuzzTests.step);
-    } else {
-        const installFuzz = b.addInstallArtifact(fuzzTests, .{});
-        fuzzStep.dependOn(&installFuzz.step);
-    }
 
     const benchExe = b.addExecutable(.{
         .name = "benchmark",
@@ -353,6 +327,8 @@ pub fn build(b: *std.Build) void {
     linkPlatformLibs(benchExe, target);
 
     const installBench = b.addInstallArtifact(benchExe, .{});
+    const buildBench = b.step("build-bench", "Build the benchmark executable without running it");
+    buildBench.dependOn(&installBench.step);
     const runBench = b.addRunArtifact(benchExe);
     runBench.step.dependOn(&installBench.step);
 

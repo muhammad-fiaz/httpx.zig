@@ -58,6 +58,7 @@ pub const Error = error{
 const NativeConnection = struct {
     socket: *tcp.Socket,
     allocator: Allocator,
+    io: std.Io,
 
     /// Negotiated ALPN protocol, if the server selected one we offered.
     alpn: ?alpnMod.Protocol = null,
@@ -251,7 +252,7 @@ const NativeConnection = struct {
         while (it.next() catch return error.TlsRecordError) |msg| {
             if (msg.msgType != .new_session_ticket) return error.TlsRecordError;
             const nst = handshakeMod.NewSessionTicket.decode(msg.body) catch return error.TlsRecordError;
-            const nowMs: u64 = @intCast(clockMod.millisNow());
+            const nowMs: u64 = @intCast(clockMod.millisNow(self.io));
             var fresh = sessionMod.clientSessionFromTicket(
                 self.allocator,
                 nst,
@@ -319,6 +320,10 @@ pub const Client = struct {
         /// Borrowed pre-parsed CA bundle for the standard transport.
         /// The native transport ignores it (it uses PEM trust instead).
         caBundle: ?*std.crypto.Certificate.Bundle = null,
+        /// Lock paired with `caBundle` when the bundle can be shared or
+        /// mutated by another handshake. Omitted bundles inherit the
+        /// owner's lock automatically.
+        caBundleLock: ?*std.Io.RwLock = null,
         clientCertPem: ?[]const u8 = null,
         clientKeyPem: ?[]const u8 = null,
         alpn: ?[]const alpnMod.Protocol = null,
@@ -472,6 +477,8 @@ pub const Client = struct {
     /// exchange. Returns an owned `Connection` borrowing `socket`.
     pub fn connect(self: *Client, socket: *tcp.Socket, host: []const u8, opts: ConnectOptions) !Connection {
         const a = self.allocator;
+        var temporaryStandardTrust: ?trustStoreMod.TrustStore = null;
+        defer if (temporaryStandardTrust) |*store| store.deinit();
         const verify = opts.verify orelse self.config.verify;
         const caPem = opts.caPem orelse self.config.caPem;
         const alpnList = opts.alpn orelse self.config.alpn;
@@ -515,12 +522,32 @@ pub const Client = struct {
             // winsock-variant sockets cannot provide a handle (fail loudly,
             // never crash in netSocketHandle).
             if (socket.inner != .stream) return error.TlsInitializationFailed;
-            const bundle = opts.caBundle;
+            var bundle = opts.caBundle;
+            var bundleLock = opts.caBundleLock;
+            if (verify == .caBundle and bundle == null) {
+                if (verify == self.config.verify and pemEqual(caPem, self.config.caPem)) {
+                    if (self.trust) |*store| {
+                        bundle = &store.bundle;
+                        bundleLock = &store.lock;
+                    }
+                }
+                if (bundle == null) {
+                    temporaryStandardTrust = trustStoreMod.TrustStore.init(a, self.io);
+                    if (caPem) |pem| {
+                        try temporaryStandardTrust.?.addCertPem(pem);
+                    } else {
+                        try temporaryStandardTrust.?.loadSystemTrust();
+                    }
+                    bundle = &temporaryStandardTrust.?.bundle;
+                    bundleLock = &temporaryStandardTrust.?.lock;
+                }
+            }
             const stdConn = try transportMod.Connection.init(a, .{
                 .socketHandle = socket.netSocketHandle(),
                 .host = host,
                 .verify = verify,
                 .caBundle = bundle,
+                .caBundleLock = bundleLock,
                 .allowTruncation = opts.allowTruncation,
                 .io = self.io,
             });
@@ -584,7 +611,7 @@ pub const Client = struct {
         // SNI only for DNS names; IP literals carry none.
         var probe = addressMod.Address{ .family = .ip4, .port = 0 };
         const sni: ?[]const u8 = if (probe.parseIp(host)) |_| null else |_| host;
-        const nowMs: u64 = @intCast(clockMod.millisNow());
+        const nowMs: u64 = @intCast(clockMod.millisNow(self.io));
 
         // ALPN protocols as wire strings (static storage, no allocation).
         var alpnWireBuf: [8][]const u8 = undefined;
@@ -742,6 +769,7 @@ pub const Client = struct {
         return .{
             .socket = socket,
             .allocator = a,
+            .io = self.io,
             .alpn = alpn,
             .appKeys = apKeys,
             .suite = engine.selectedSuite,
@@ -777,7 +805,7 @@ pub const Client = struct {
         const a = self.allocator;
         if (ders.len == 0) return error.MissingCertificate;
         const chain = certMod.CertificateChain{ .certs = ders, .allocator = a };
-        const nowSec: i64 = @divFloor(clockMod.millisNow(), 1000);
+        const nowSec: i64 = @divFloor(clockMod.millisNow(self.io), 1000);
         verifyMod.verifyCertificateChain(chain, store, host, nowSec) catch |e| switch (e) {
             error.CertificateExpired => return error.CertificateExpired,
             error.CertificateHostMismatch, error.HostnameMismatch => return error.CertificateHostMismatch,
@@ -1122,6 +1150,7 @@ test "captureTicketRecord handles coalesced tickets, last wins" {
     var conn = NativeConnection{
         .socket = undefined,
         .allocator = a,
+        .io = std.Io.Threaded.global_single_threaded.io(),
         .appKeys = undefined,
         .writeBuf = writeBuf,
         .readBuf = readBuf,
@@ -1723,6 +1752,69 @@ test "tls.Client defaults verify and parse trust once" {
     try std.testing.expect(strict.config.verify == .none);
     try std.testing.expect(strict.trust == null);
     try std.testing.expect(strict.config.transport == .auto);
+}
+
+test "standard transport uses the owner's configured CA bundle" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    var server = try serverMod.Server.init(a, ctx.io, .{
+        .certificatePem = testCertPem,
+        .privateKeyPem = testKeyPem,
+    });
+    defer server.deinit();
+
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io: std.Io, srv: *serverMod.Server) void {
+            var sock = lst.accept(io) catch return;
+            defer sock.close();
+            var conn = srv.accept(&sock) catch return;
+            defer conn.deinit();
+            var input: [4]u8 = undefined;
+            var read: usize = 0;
+            while (read < input.len) {
+                const n = conn.read(input[read..]) catch return;
+                if (n == 0) return;
+                read += n;
+            }
+            if (!std.mem.eql(u8, &input, "ping")) return;
+            conn.writeAll("pong") catch {};
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io, &server });
+    defer thread.join();
+
+    var owner = try Client.init(a, ctx.io, .{
+        .verify = .caBundle,
+        .caPem = testCertPem,
+        .alpn = &.{.@"http/1.1"},
+        .transport = .std,
+    });
+    defer owner.deinit();
+
+    var addr = addressMod.Address{ .family = .ip4, .port = 0 };
+    addr = try addr.parseIp("127.0.0.1");
+    addr.port = port;
+    var sock = try tcp.connectAddressStream(ctx.io, &addr);
+    defer sock.close();
+    var conn = try owner.connect(&sock, "localhost", .{});
+    defer conn.deinit();
+    try std.testing.expect(conn.backend == .std);
+
+    try conn.writeAll("ping");
+    var response: [4]u8 = undefined;
+    var received: usize = 0;
+    while (received < response.len) {
+        const n = try conn.read(response[received..]);
+        if (n == 0) return error.UnexpectedEof;
+        received += n;
+    }
+    try std.testing.expectEqualStrings("pong", &response);
 }
 
 test "tls.Client rejects garbage identity at init" {

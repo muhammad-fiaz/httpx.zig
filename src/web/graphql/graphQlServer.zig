@@ -5,7 +5,7 @@
 //! - GET /graphql: GraphQL query string support
 //! - Request validation & security limits (maxBody, depth, complexity)
 //! - CORS, custom headers, and auth context forwarding
-//! - Integration with `httpx.Server` and `httpx.Router`
+//! - Integration with `httpx.server.Server` and `httpx.web.router.Router`
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

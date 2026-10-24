@@ -16,7 +16,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -38,7 +38,9 @@ pub fn main() !void {
     const thread = try server.start();
     defer thread.join();
 
-    var response = try httpx.get("http://127.0.0.1:PORT/static/index.html", .{});
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+    var response = try client.get("http://127.0.0.1:PORT/static/index.html", .{});
     defer response.deinit();
 }
 ```

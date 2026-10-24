@@ -29,14 +29,14 @@ pub fn main() !void {
     const testValues = [_]u62{ 25, 15293, 494878333, 1512888099419124471 };
     std.debug.print("1. QUIC Varint Encoding:\n", .{});
     for (testValues) |val| {
-        const n = try httpx.quic.varint.encode(&varintBuf, val);
+        const n = try httpx.protocols.quic.varint.encode(&varintBuf, val);
         var off: usize = 0;
-        const decodedVal = try httpx.quic.varint.decode(varintBuf[0..n], &off);
+        const decodedVal = try httpx.protocols.quic.varint.decode(varintBuf[0..n], &off);
         std.debug.print("   Value {d} -> encoded {d} bytes, decoded {d}\n", .{ val, n, decodedVal });
     }
 
     // 2. QUIC Frame Construction (RFC 9000 section 12.4) - using clean wrapper
-    var frame = try httpx.quic.encodeFrame(allocator, .{
+    var frame = try httpx.protocols.quic.encodeFrame(allocator, .{
         .stream = .{
             .id = 4,
             .offset = 0,
@@ -48,9 +48,9 @@ pub fn main() !void {
     std.debug.print("2. Encoded QUIC STREAM Frame (Stream 4, FIN=true) -> {d} bytes\n", .{frame.items.len});
 
     // 3. QPACK Dynamic Table Encoding (RFC 9204)
-    var qenc = httpx.http3.qpack.Encoder.init(allocator);
+    var qenc = httpx.protocols.http3.qpack.Encoder.init(allocator);
     defer qenc.deinit();
-    var qdec = httpx.http3.qpack.Decoder.init(allocator);
+    var qdec = httpx.protocols.http3.qpack.Decoder.init(allocator);
     defer qdec.deinit();
 
     var fieldSection = std.ArrayList(u8).empty;
@@ -67,22 +67,22 @@ pub fn main() !void {
     std.debug.print("3. QPACK encoded 5 HTTP/3 headers into {d} bytes\n", .{fieldSection.items.len});
 
     // 4. HTTP/3 Client-Server Connection Lifecycle
-    var clientConn = httpx.http3.Connection.init(allocator, .client);
+    var clientConn = httpx.protocols.http3.Connection.init(allocator, .client);
     defer clientConn.deinit();
-    var serverConn = httpx.http3.Connection.init(allocator, .server);
+    var serverConn = httpx.protocols.http3.Connection.init(allocator, .server);
     defer serverConn.deinit();
 
     const clientCtrl = try clientConn.buildControlStream();
     defer allocator.free(clientCtrl);
 
     var off: usize = 1;
-    const parsedFrame = try httpx.http3.frame.parseFrame(clientCtrl, &off);
+    const parsedFrame = try httpx.protocols.http3.frame.parseFrame(clientCtrl, &off);
     try serverConn.processControlFrame(parsedFrame.frameType, parsedFrame.payload);
 
     const bidiId = clientConn.nextBidiStreamId();
     var reqStream = clientConn.createRequestStream(bidiId);
 
-    const reqHeaders = [_]httpx.http3.qpack.FieldLine{
+    const reqHeaders = [_]httpx.protocols.http3.qpack.FieldLine{
         .{ .name = "user-agent", .value = "httpx-quic-client" },
     };
     const reqBytes = try reqStream.buildRequestHeaders("GET", "https", "quic.example.org", "/", &reqHeaders);

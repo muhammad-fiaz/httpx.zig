@@ -12,7 +12,7 @@ Local TLS listener setup with a self-signed identity. See
 ## Demo Program
 
 ```zig
-var listener = try httpx.tls.Listener.init(allocator, io, .{
+var listener = try httpx.protocols.tls.Listener.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
     .defaultIdentity = .{

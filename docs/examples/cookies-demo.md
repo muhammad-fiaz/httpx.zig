@@ -1,10 +1,10 @@
 # Cookies Demo
 
-Cookie flows with per-request headers and the standalone `httpx.CookieJar`.
+Cookie flows with per-request headers and the standalone `httpx.client.CookieJar`.
 See `examples/cookieServer.zig`.
 
 ```zig
-var jar = httpx.CookieJar.init(allocator);
+var jar = httpx.client.CookieJar.init(allocator, io);
 defer jar.deinit();
 
 // Store a Set-Cookie value received from a login response.

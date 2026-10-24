@@ -5,9 +5,8 @@ parallel client helpers.
 
 ## Parallel Requests
 
-`Client.getAll` / `Client.requestAll` (and the `httpx.getAll` /
-`httpx.requestAll` zero-config helpers) execute multiple requests and wait
-for all to complete:
+`getAll` / `requestAll` on an initialized client execute multiple requests
+and wait for all to complete:
 
 ```zig
 const urls = [_][]const u8{

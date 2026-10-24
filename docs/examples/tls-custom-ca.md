@@ -1,12 +1,12 @@
 # TLS Custom CA Certificate
 
 Demonstrates TLS with self-signed certificates for development and testing,
-using `httpx.tls.Listener` with PEM identity material.
+using `httpx.protocols.tls.Listener` with PEM identity material.
 
 ## Features Demonstrated
 
 - Self-signed certificate PEM blocks
-- `httpx.tls.Listener` with `defaultIdentity`
+- `httpx.protocols.tls.Listener` with `defaultIdentity`
 - Development-only verification bypass via `.tls = .{ .verify = .none }`
 
 ## Demo Program
@@ -15,7 +15,7 @@ using `httpx.tls.Listener` with PEM identity material.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn handler(_: httpx.tls.Request) anyerror!httpx.tls.Response {
+fn handler(_: httpx.protocols.tls.Request) anyerror!httpx.protocols.tls.Response {
     return .{ .status = 200, .body = "Served with custom CA cert" };
 }
 
@@ -26,7 +26,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     // Start a local TLS listener with a self-signed identity.
-    var listener = try httpx.tls.Listener.init(allocator, io, .{
+    var listener = try httpx.protocols.tls.Listener.init(allocator, io, .{
         .port = 0,
         .defaultIdentity = .{
             .certChainPem = @embedFile("cert.pem"),
@@ -67,5 +67,5 @@ zig build run-tls-mtls
 
 1. Generate CA: `openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt -days 365 -subj '/CN=MyCA'`
 2. Embed in Zig: `const caPem = @embedFile("ca.crt");`
-3. Serve via `httpx.tls.Listener` with `defaultIdentity`, and verify with a
+3. Serve via `httpx.protocols.tls.Listener` with `defaultIdentity`, and verify with a
    populated CA bundle (never `.verify = .none` in production).

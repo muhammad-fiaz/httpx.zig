@@ -12,7 +12,7 @@ The zero-output default design guarantees that library internals never clutter c
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn onClientEvent(event: httpx.ClientEvent) void {
+fn onClientEvent(event: httpx.logging.ClientEvent) void {
     switch (event.kind) {
         .requestStarted => std.debug.print("[Client] Starting {s} {s}\n", .{ event.method, event.url }),
         .dnsLookup => std.debug.print("[Client] DNS lookup for {s}\n", .{event.url}),
@@ -54,7 +54,7 @@ Payload fields: `method`, `url`, `status`, `durationMs`, `bytesSent`,
 On the server, events report connection acceptance, request routing, middleware timings, and worker thread status:
 
 ```zig
-fn onServerEvent(event: httpx.ServerEvent) void {
+fn onServerEvent(event: httpx.logging.ServerEvent) void {
     switch (event.kind) {
         .connectionAccepted => std.debug.print("[Server] Accepted connection\n", .{}),
         .requestCompleted => std.debug.print("[Server] {s} {s} -> status {d} in {d}ms\n", .{

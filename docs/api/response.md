@@ -1,6 +1,6 @@
 # API: Response
 
-The `httpx.Response` struct is the canonical response container representing status code, protocol version, response headers, and body payload.
+The `httpx.web.router.Response` struct is the canonical response container representing status code, protocol version, response headers, and body payload.
 
 ## Overview
 

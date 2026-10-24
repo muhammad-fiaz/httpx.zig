@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn okHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn okHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{
         .status = 200,
         .body = "{\"status\":\"ok\"}",
@@ -14,8 +14,10 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -37,9 +39,8 @@ pub fn main() !void {
     const urls = [_][]const u8{ urlGet, urlHeaders, urlIp };
 
     // Run all requests concurrently (array passed directly, no explicit & needed).
-    // Global-batch slices are page_allocator-owned: deinit each response,
-    // then free the slice.
-    const results = httpx.getAll(urls) catch |err| {
+    // Batch results and response bodies are owned by the client allocator.
+    const results = client.getAll(urls) catch |err| {
         std.debug.print("getAll failed: {s}\n", .{@errorName(err)});
         server.requestShutdown();
         thread.join();
@@ -47,7 +48,7 @@ pub fn main() !void {
     };
     defer {
         for (results) |*r| r.deinit();
-        std.heap.page_allocator.free(results);
+        allocator.free(results);
     }
 
     for (results, 0..) |result, i| {
@@ -55,13 +56,13 @@ pub fn main() !void {
     }
 
     // Request with options
-    const reqs = [_]httpx.RequestOptions{
+    const reqs = [_]httpx.client.requestOptions{
         .{ .method = .GET, .url = urlGet },
         .{ .method = .GET, .url = urlHeaders },
         .{ .method = .GET, .url = urlIp },
     };
 
-    const results2 = httpx.requestAll(reqs) catch |err| {
+    const results2 = client.requestAll(reqs) catch |err| {
         std.debug.print("requestAll failed: {s}\n", .{@errorName(err)});
         server.requestShutdown();
         thread.join();
@@ -69,7 +70,7 @@ pub fn main() !void {
     };
     defer {
         for (results2) |*r| r.deinit();
-        std.heap.page_allocator.free(results2);
+        allocator.free(results2);
     }
 
     for (results2) |result| {

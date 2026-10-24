@@ -27,6 +27,7 @@ const acktrMod = @import("ackTracker.zig");
 const lossMod = @import("lossRecovery.zig");
 const ccMod = @import("congestionControl.zig");
 const paramsMod = @import("transportParameters.zig");
+const pathMod = @import("path.zig");
 const qstream = @import("stream.zig");
 const tlsEngine = @import("../tls/tlsEngine.zig");
 const qtls = @import("../tls/quicTls.zig");
@@ -323,6 +324,8 @@ pub const Connection = struct {
     /// Congestion window gating application-space sends (RFC 9002
     /// NewReno). Handshake and control traffic always flows.
     cc: ccMod.NewReno = ccMod.NewReno.init(1200),
+    /// Path validation for address validation, migration and NAT rebinding (RFC 9000 Section 8.2).
+    pathValidator: ?pathMod.PathValidator = null,
     /// ACK-eliciting bytes in flight across all spaces.
     bytesInFlight: usize = 0,
     /// Scratch for ACK range generation (reused per packet, no churn).
@@ -2061,11 +2064,35 @@ pub const Connection = struct {
                 .newToken => {
                     // RFC 9000 section 19.7: store token for future address validation.
                 },
-                .pathResponse => {
-                    // Path response received; path validated.
+                .pathResponse => |p| {
+                    if (self.pathValidator) |*pv| {
+                        _ = pv.onResponse(&p.data);
+                    }
                 },
             }
         }
+    }
+
+    /// Initiates QUIC path validation (RFC 9000 Section 8.2) for connection migration
+    /// or NAT rebinding. Queues PATH_CHALLENGE frames on the wire.
+    pub fn initiatePathValidation(self: *Connection, nowMs: u64, rng: std.Random) Error!void {
+        if (self.pathValidator == null) {
+            self.pathValidator = pathMod.PathValidator.init(100);
+        }
+        self.pathValidator.?.start(nowMs, rng);
+        while (self.pathValidator.?.nextChallenge()) |c| {
+            try self.queueControlFrame(.{ .pathChallenge = .{ .data = c } });
+            self.pathValidator.?.markSent();
+        }
+        self.flushControl(.application, nowMs) catch {};
+    }
+
+    /// Checks whether path validation is currently complete and validated.
+    pub fn isPathValidated(self: *const Connection) bool {
+        if (self.pathValidator) |pv| {
+            return pv.state == .validated;
+        }
+        return false;
     }
 
     /// Raises our receive window once it is more than half consumed,
@@ -4506,4 +4533,271 @@ test "ack delay is measured from the largest acknowledged packet" {
     const f = ack_frame orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 1), f.largestAcknowledged);
     try std.testing.expectEqual(@as(u64, 100_000), f.ackDelay);
+}
+
+test "regression: quic variable-length integer parsing and boundaries" {
+    const seeds = [_][]const u8{
+        &[_]u8{0x25},
+        &[_]u8{ 0x7b, 0xbd },
+        &[_]u8{ 0x9d, 0x7f, 0x3e, 0x7d },
+        &[_]u8{ 0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c },
+    };
+
+    for (seeds) |s| {
+        for (0..s.len + 1) |cut| {
+            var off: usize = 0;
+            _ = varint.decode(s[0..cut], &off) catch {};
+        }
+    }
+
+    var prng = std.Random.DefaultPrng.init(0x9999);
+    const rng = prng.random();
+    var buf: [16]u8 = undefined;
+
+    for (0..200) |_| {
+        const len = rng.uintLessThan(usize, buf.len);
+        rng.bytes(buf[0..len]);
+        var off: usize = 0;
+        _ = varint.decode(buf[0..len], &off) catch {};
+    }
+}
+
+test "regression: quic transport frame decoding and truncation sweeps" {
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(std.testing.allocator);
+
+    try frames.encode(&list, std.testing.allocator, .ping);
+    try list.appendNTimes(std.testing.allocator, 0x00, 4);
+    try frames.encodeAckFromBlocks(&list, std.testing.allocator, 10, 2, &[_]frames.AckBlock{
+        .{ .highest = 10, .len = 3 },
+    }, null);
+    try frames.encode(&list, std.testing.allocator, .{ .resetStream = .{
+        .streamId = 4,
+        .errorCode = 0x01,
+        .finalSize = 1024,
+    } });
+    try frames.encode(&list, std.testing.allocator, .{ .stopSending = .{
+        .streamId = 4,
+        .errorCode = 0x02,
+    } });
+    try frames.encode(&list, std.testing.allocator, .{ .crypto = .{
+        .offset = 0,
+        .data = "client_hello_bytes",
+    } });
+    try frames.encode(&list, std.testing.allocator, .{ .stream = .{
+        .id = 0,
+        .offset = 0,
+        .data = "hello quic",
+        .fin = true,
+    } });
+    try frames.encode(&list, std.testing.allocator, .{ .maxData = .{ .maximum = 1048576 } });
+    try frames.encode(&list, std.testing.allocator, .{ .maxStreamData = .{ .streamId = 0, .maximum = 65536 } });
+    try frames.encode(&list, std.testing.allocator, .handshakeDone);
+    try frames.encode(&list, std.testing.allocator, .{ .connectionClose = .{
+        .errorCode = 0,
+        .triggeringFrameType = 0,
+        .reason = "clean",
+        .application = false,
+    } });
+
+    const encoded = list.items;
+
+    const helper = struct {
+        fn decodeFrames(data: []const u8) void {
+            var pos: usize = 0;
+            while (pos < data.len) {
+                const start = pos;
+                _ = frames.decode(data, &pos) catch break;
+                if (pos <= start) break;
+            }
+        }
+    };
+
+    for (0..encoded.len + 1) |cut| {
+        helper.decodeFrames(encoded[0..cut]);
+    }
+
+    var prng = std.Random.DefaultPrng.init(0xaaaa);
+    const rng = prng.random();
+    var mut: [256]u8 = undefined;
+
+    for (0..150) |_| {
+        const copyLen = @min(encoded.len, mut.len);
+        @memcpy(mut[0..copyLen], encoded[0..copyLen]);
+        const flips = 1 + rng.uintLessThan(usize, 5);
+        for (0..flips) |_| {
+            const idx = rng.uintLessThan(usize, copyLen);
+            mut[idx] = rng.int(u8);
+        }
+        helper.decodeFrames(mut[0..copyLen]);
+    }
+}
+
+test "regression: quic transport parameters decoding and validation" {
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(std.testing.allocator);
+
+    const initialParams = paramsMod.Params{
+        .maxIdleTimeoutMs = 30_000,
+        .maxUdpPayloadSize = 1472,
+        .initialMaxData = 1048576,
+        .initialMaxStreamDataBidiLocal = 65536,
+        .initialMaxStreamDataBidiRemote = 65536,
+        .initialMaxStreamDataUni = 65536,
+        .initialMaxStreamsBidi = 100,
+        .initialMaxStreamsUni = 100,
+        .ackDelayExponent = 3,
+        .maxAckDelayMs = 25,
+        .activeConnectionIdLimit = 4,
+    };
+    try paramsMod.encode(&list, std.testing.allocator, initialParams);
+    const encoded = list.items;
+
+    for (0..encoded.len + 1) |cut| {
+        _ = paramsMod.decode(encoded[0..cut]) catch {};
+    }
+
+    var prng = std.Random.DefaultPrng.init(0xbbbb);
+    const rng = prng.random();
+    var buf: [128]u8 = undefined;
+
+    for (0..150) |_| {
+        const copyLen = @min(encoded.len, buf.len);
+        @memcpy(buf[0..copyLen], encoded[0..copyLen]);
+        const flips = 1 + rng.uintLessThan(usize, 4);
+        for (0..flips) |_| {
+            const idx = rng.uintLessThan(usize, copyLen);
+            buf[idx] = rng.int(u8);
+        }
+        _ = paramsMod.decode(buf[0..copyLen]) catch {};
+    }
+}
+
+test "regression: quic packet header parsing" {
+    var initialHdrBuf: [64]u8 = undefined;
+    const initialLen = packetMod.writeLongHeader(initialHdrBuf[0..], .{
+        .type = .initial,
+        .version = 0x00000001,
+        .dcid = &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .scid = &[_]u8{ 8, 7, 6, 5, 4, 3, 2, 1 },
+        .token = "token123",
+        .pnLen = 2,
+        .protectedPayloadLen = 32,
+    }) catch unreachable;
+
+    var shortHdrBuf: [32]u8 = undefined;
+    const shortLen = packetMod.writeShortHeader(shortHdrBuf[0..], .{
+        .keyPhase = false,
+        .dcid = &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .pnLen = 2,
+    }) catch unreachable;
+
+    const helper = struct {
+        fn parse(data: []const u8) void {
+            if (data.len == 0) return;
+            const first = data[0];
+            if ((first & 0x80) != 0) {
+                _ = packetMod.parseLongHeader(data) catch {};
+            } else {
+                _ = packetMod.parseShortHeader(data, 8) catch {};
+            }
+        }
+    };
+
+    for (0..initialLen + 1) |cut| helper.parse(initialHdrBuf[0..cut]);
+    for (0..shortLen + 1) |cut| helper.parse(shortHdrBuf[0..cut]);
+
+    var prng = std.Random.DefaultPrng.init(0xcccc);
+    const rng = prng.random();
+    var mut: [64]u8 = undefined;
+
+    for (0..150) |_| {
+        const len = 1 + rng.uintLessThan(usize, mut.len);
+        rng.bytes(mut[0..len]);
+        helper.parse(mut[0..len]);
+    }
+}
+
+test "regression: quic connection receiveDatagram state machine under adversarial packets" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const helper = struct {
+        fn feed(in_io: std.Io, data: []const u8) void {
+            const alloc = std.heap.page_allocator;
+            var srv = Connection.init(alloc, in_io, .server, .{
+                .isServer = true,
+                .version = 0x00000001,
+            }) catch return;
+            defer srv.deinit();
+            _ = srv.receiveDatagram(data, 1000) catch {};
+
+            var cli = Connection.init(alloc, in_io, .client, .{
+                .isServer = false,
+                .version = 0x00000001,
+            }) catch return;
+            defer cli.deinit();
+            _ = cli.receiveDatagram(data, 1000) catch {};
+        }
+    };
+
+    var prng = std.Random.DefaultPrng.init(0xdddd);
+    const rng = prng.random();
+
+    var smallInitial: [100]u8 = undefined;
+    rng.bytes(&smallInitial);
+    smallInitial[0] = 0xc0;
+    std.mem.writeInt(u32, smallInitial[1..5], 0x00000001, .big);
+    helper.feed(io, &smallInitial);
+
+    var fullDatagram: [1200]u8 = undefined;
+    @memset(&fullDatagram, 0);
+    fullDatagram[0] = 0xc0;
+    std.mem.writeInt(u32, fullDatagram[1..5], 0x00000001, .big);
+    fullDatagram[5] = 8;
+    @memcpy(fullDatagram[6..14], "dcid1234");
+    fullDatagram[14] = 8;
+    @memcpy(fullDatagram[15..23], "scid1234");
+    fullDatagram[23] = 0;
+    fullDatagram[24] = 0x40;
+    fullDatagram[25] = 0x20;
+
+    helper.feed(io, &fullDatagram);
+
+    for (0..50) |_| {
+        const len = 16 + rng.uintLessThan(usize, fullDatagram.len - 16);
+        const flips = 1 + rng.uintLessThan(usize, 6);
+        for (0..flips) |_| {
+            const idx = rng.uintLessThan(usize, len);
+            fullDatagram[idx] = rng.int(u8);
+        }
+        helper.feed(io, fullDatagram[0..len]);
+    }
+}
+
+test "path validation initiation and response roundtrip" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(12345);
+    const rng = prng.random();
+
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    try std.testing.expect(!pair.client.isPathValidated());
+
+    try pair.client.initiatePathValidation(1000, rng);
+    try std.testing.expect(pair.client.pathValidator != null);
+    try std.testing.expectEqual(pathMod.State.validating, pair.client.pathValidator.?.state);
+    try std.testing.expect(pair.client.outbuf.items.len > 0);
+
+    // Grab the challenge data from pathValidator queue
+    const challengeData = pair.client.pathValidator.?.queue[0].data;
+
+    // Simulate receiving PATH_RESPONSE frame matching the challenge
+    var payload = std.ArrayList(u8).empty;
+    defer payload.deinit(a);
+    try frames.encode(&payload, a, .{ .pathResponse = .{ .data = challengeData } });
+
+    try pair.client.dispatchFrames(&pair.client.spaces[2], payload.items, 1050, false);
+
+    try std.testing.expect(pair.client.isPathValidated());
 }

@@ -6,9 +6,8 @@ pool and queue.
 
 ## Parallel Requests
 
-Execute multiple HTTP requests using `Client.getAll` / `Client.requestAll`
-(or the `httpx.getAll` / `httpx.requestAll` zero-config helpers). They run
-the requests and wait for all to complete:
+Execute multiple HTTP requests using `getAll` / `requestAll` on an initialized
+client. They run the requests and wait for all to complete:
 
 ```zig
 const urls = [_][]const u8{

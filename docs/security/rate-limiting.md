@@ -22,14 +22,16 @@ Incoming Request -> Key Extractor (Remote IP, API Key, User ID)
 
 ```zig
 // 50 requests per 60s window.
-var limiter = httpx.RateLimiter.init(allocator, 50, 60_000);
+var limiter = httpx.RateLimiter.init(allocator, io, .{
+    .policy = .{ .limit = 50, .windowMs = 60_000 },
+});
 defer limiter.deinit();
 
 const RateGate = struct {
     var rl: ?*httpx.RateLimiter = null;
 
-    fn middleware(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response {
-        const now = std.time.milliTimestamp();
+    fn middleware(ctx: *httpx.web.router.Context, next: httpx.web.router.NextFn) anyerror!httpx.web.router.Response {
+        const now = httpx.clock.monotonicMillis(ctx.io);
         var keyBuf: [128]u8 = undefined;
         const key = try std.fmt.bufPrint(&keyBuf, "ip:{s}", .{ctx.remoteAddress() orelse "unknown"});
         const remaining = try rl.?.check(key, now);

@@ -8,13 +8,13 @@ Per-request and client-level TLS options:
 
 ```zig
 // Default: verify against CA bundle with truncation tolerance.
-const strict = httpx.TlsOptions{};
+const strict = httpx.client.TlsOptions{};
 
 // Development only: accept self-signed certificates.
-const dev = httpx.TlsOptions{ .verify = .selfSigned };
+const dev = httpx.client.TlsOptions{ .verify = .selfSigned };
 
 // Tests only: skip verification entirely.
-const insecure = httpx.TlsOptions{ .verify = .none };
+const insecure = httpx.client.TlsOptions{ .verify = .none };
 ```
 
 `VerifyMode` is `.caBundle`, `.selfSigned`, or `.none`.
@@ -22,7 +22,7 @@ const insecure = httpx.TlsOptions{ .verify = .none };
 ## Server config (`ServerConfig`)
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .port = 8443,
     .tls = .{
         .certificatePem = @embedFile("cert.pem"),
@@ -36,7 +36,7 @@ var server = try httpx.Server.init(allocator, io, .{
 ## Listener identity (`Identity`)
 
 ```zig
-var listener = try httpx.tls.Listener.init(allocator, io, .{
+var listener = try httpx.protocols.tls.Listener.init(allocator, io, .{
     .port = 8443,
     .defaultIdentity = .{
         .certChainPem = @embedFile("cert.pem"),

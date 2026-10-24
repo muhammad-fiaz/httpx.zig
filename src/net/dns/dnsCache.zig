@@ -111,7 +111,7 @@ pub const Cache = struct {
     /// Resolve `name` via cache / inflight-join / fresh lookup.
     /// Caller owns returned slices.
     pub fn resolve(self: *Cache, name: []const u8) LookupError![]const []const u8 {
-        const now = clock.monotonicMillis();
+        const now = clock.monotonicMillis(self.io);
 
         self.mu.lock();
         if (self.entries.get(name)) |e| {
@@ -196,7 +196,7 @@ pub const Cache = struct {
                 if (self.entries.count() >= self.cfg.maxEntries) self.evictOneLocked();
                 self.entries.put(nameCopy, .{
                     .addrs = cl,
-                    .expiresAt = clock.monotonicMillis() + self.cfg.ttlMs,
+                    .expiresAt = clock.monotonicMillis(self.io) + self.cfg.ttlMs,
                     .failed = false,
                 }) catch {
                     self.freeAddrs(cl);
@@ -241,7 +241,7 @@ pub const Cache = struct {
         if (self.entries.count() >= self.cfg.maxEntries) self.evictOneLocked();
         self.entries.put(nameOwned, .{
             .addrs = &.{},
-            .expiresAt = clock.monotonicMillis() + self.cfg.negativeTtlMs,
+            .expiresAt = clock.monotonicMillis(self.io) + self.cfg.negativeTtlMs,
             .failed = true,
         }) catch {
             self.allocator.free(nameOwned);
@@ -257,13 +257,27 @@ pub const Cache = struct {
     }
 
     fn evictOneLocked(self: *Cache) void {
-        // Arbitrary victim for v1; LRU upgrade tracked separately.
+        const now = clock.monotonicMillis(self.io);
         var it = self.entries.iterator();
-        if (it.next()) |kv| {
-            const key = kv.key_ptr.*;
-            self.freeAddrs(kv.value_ptr.addrs);
-            _ = self.entries.remove(key);
-            self.allocator.free(key);
+        var victimKey: ?[]const u8 = null;
+        var earliestExp: i64 = std.math.maxInt(i64);
+
+        while (it.next()) |kv| {
+            if (kv.value_ptr.expiresAt <= now) {
+                victimKey = kv.key_ptr.*;
+                break;
+            }
+            if (kv.value_ptr.expiresAt < earliestExp) {
+                earliestExp = kv.value_ptr.expiresAt;
+                victimKey = kv.key_ptr.*;
+            }
+        }
+
+        if (victimKey) |key| {
+            if (self.entries.fetchRemove(key)) |kv| {
+                self.freeAddrs(kv.value.addrs);
+                self.allocator.free(kv.key);
+            }
         }
     }
 
@@ -372,4 +386,74 @@ test "concurrent resolvers coalesce into one lookup" {
     // key invariant is that the resolver was called exactly once.
     try std.testing.expect(s.started >= 1);
     try std.testing.expectEqual(@as(u32, 1), fake.calls.load(.monotonic));
+}
+
+test "dnsCache TTL expiration forces fresh resolution" {
+    var fake = FakeResolver{};
+    var c = Cache.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{ .ttlMs = 1 }, FakeResolver.lookup, &fake);
+    defer c.deinit();
+
+    const r1 = try c.resolve("expire.test");
+    defer freeAll(std.testing.allocator, r1);
+    try std.testing.expectEqual(@as(u32, 1), fake.calls.load(.monotonic));
+
+    // Sleep past the 1ms TTL
+    clock.sleepMillis(c.io, 10);
+
+    const r2 = try c.resolve("expire.test");
+    defer freeAll(std.testing.allocator, r2);
+    try std.testing.expectEqual(@as(u32, 2), fake.calls.load(.monotonic));
+}
+
+test "dnsCache capacity eviction removes oldest entry without leak" {
+    var fake = FakeResolver{};
+    var c = Cache.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{ .maxEntries = 2, .ttlMs = 60_000 }, FakeResolver.lookup, &fake);
+    defer c.deinit();
+
+    const r1 = try c.resolve("host1.test");
+    defer freeAll(std.testing.allocator, r1);
+    const r2 = try c.resolve("host2.test");
+    defer freeAll(std.testing.allocator, r2);
+    try std.testing.expectEqual(@as(usize, 2), c.entries.count());
+
+    // Resolving a 3rd host triggers eviction, maintaining count <= 2
+    const r3 = try c.resolve("host3.test");
+    defer freeAll(std.testing.allocator, r3);
+    try std.testing.expectEqual(@as(usize, 2), c.entries.count());
+}
+
+test "dnsCache negative answer expires and allows subsequent recovery" {
+    const FlakyResolver = struct {
+        shouldFail: bool = true,
+        calls: u32 = 0,
+
+        fn lookup(ctx: ?*anyopaque, _: std.Io, _: []const u8, a: Allocator) LookupError![]const []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.calls += 1;
+            if (self.shouldFail) return error.DnsFailed;
+            const out = try a.alloc([]const u8, 1);
+            out[0] = try a.dupe(u8, "127.0.0.1");
+            return out;
+        }
+    };
+
+    var flaky = FlakyResolver{};
+    var c = Cache.init(std.testing.allocator, std.Io.Threaded.global_single_threaded.io(), .{ .negativeTtlMs = 1 }, FlakyResolver.lookup, &flaky);
+    defer c.deinit();
+
+    try std.testing.expectError(error.DnsFailed, c.resolve("flaky.test"));
+    try std.testing.expectEqual(@as(u32, 1), flaky.calls);
+
+    // Negative cached: second call fails without calling resolver
+    try std.testing.expectError(error.DnsFailed, c.resolve("flaky.test"));
+    try std.testing.expectEqual(@as(u32, 1), flaky.calls);
+
+    // Expire negative entry
+    flaky.shouldFail = false;
+    clock.sleepMillis(c.io, 10);
+
+    const r = try c.resolve("flaky.test");
+    defer freeAll(std.testing.allocator, r);
+    try std.testing.expectEqual(@as(u32, 2), flaky.calls);
+    try std.testing.expectEqualStrings("127.0.0.1", r[0]);
 }

@@ -22,8 +22,8 @@ The HTTP/3 runtime has loopback integration coverage on the native test host. Cr
 ## Features
 
 - **High-level Client Runtime** - `Client` performs QUIC + TLS 1.3 with ALPN `h3`, certificate verification, QPACK dynamic-table encoding, response trailers, and loss recovery.
-- **High-level Server Runtime** - `httpx.Server` can bind a UDP endpoint when `.http3 = true` and a default certificate/key identity are provided. It routes supported H3 requests through server handlers. The handshake requires that default identity; selector-only TLS configuration does not initialize the H3 endpoint.
-- **Protocol-level Server Runtime** - serve H3 over QUIC directly with `httpx.quic` (Endpoint + Pump + HandshakeDriver) and `httpx.http3` builders; see `examples/http3Client.zig` for a complete loopback server.
+- **High-level Server Runtime** - `httpx.server.Server` can bind a UDP endpoint when `.http3 = true` and a default certificate/key identity are provided. It routes supported H3 requests through server handlers. The handshake requires that default identity; selector-only TLS configuration does not initialize the H3 endpoint.
+- **Protocol-level Server Runtime** - serve H3 over QUIC directly with `httpx.protocols.quic` (Endpoint + Pump + HandshakeDriver) and `httpx.protocols.http3` builders; see `examples/http3Client.zig` for a complete loopback server.
 - **Handshake Lifecycle** - the server confirms the handshake after verifying the client Finished and sends `HANDSHAKE_DONE`; the client confirms on that frame or on a 1-RTT acknowledgment. Confirmation discards the Handshake keys on both ends and late Handshake packets are ignored (RFC 9001 Sections 4.1.2 and 4.9.2).
 
 ### Finding the HTTP/3 port
@@ -31,7 +31,7 @@ The HTTP/3 runtime has loopback integration coverage on the native test host. Cr
 HTTP/3 shares the HTTP/1.1 port number (RFC 9114 Section 3), so a client normally dials the port it already knows. When port `0` was requested, the TCP listener picks an ephemeral port, and Windows keeps separate reserved dynamic ranges for TCP and UDP: that TCP-chosen number can land in a UDP exclusion the stack refuses to bind. In that case only, the endpoint falls back to an ephemeral UDP port of its own. Read the port the server actually bound rather than assuming:
 
 ```zig
-const server = try httpx.Server.init(allocator, io, .{
+const server = try httpx.server.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
     .http3 = true,
@@ -89,17 +89,17 @@ A wrong chain fails fast and loudly (`error.TlsCertificateNotVerified`); an ALPN
 An H3 server is one UDP socket plus the protocol pieces (full example in `examples/http3Client.zig`):
 
 ```zig
-var ep = try httpx.quic.transport.Endpoint.init(allocator, io, conn, .{ .port = 8443 });
-var pump = httpx.quic.Pump{};
+var ep = try httpx.protocols.quic.transport.Endpoint.init(allocator, io, conn, .{ .port = 8443 });
+var pump = httpx.protocols.quic.Pump{};
 try pump.start(&ep, allocator);
 defer pump.stop();
-var drv = httpx.quic.HandshakeDriver.initServer(allocator, .{
+var drv = httpx.protocols.quic.HandshakeDriver.initServer(allocator, .{
     .certChainPem = cert_pem,
     .privateKeyPem = key_pem,
 });
 defer drv.deinit();
 conn.tls = .{ .ctx = &drv, .start = ..., .onData = ... };
-try httpx.quic.handshake.serveHandshake(&ep, &pump, &drv, 15_000);
+try httpx.protocols.quic.handshake.serveHandshake(&ep, &pump, &drv, 15_000);
 // ... read request HEADERS on a bidi stream, route, respond ...
 ```
 
@@ -176,11 +176,11 @@ try httpx.qpack.encodeInsertNameRef(true, 17, "POST", &out, allocator);
 
 ```zig
 // Create connection IDs
-var dcid = httpx.quic.ConnectionId{};
+var dcid = httpx.protocols.quic.ConnectionId{};
 dcid.len = 8;
 @memcpy(dcid.data[0..8], &[_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 });
 
-var scid = httpx.quic.ConnectionId{};
+var scid = httpx.protocols.quic.ConnectionId{};
 scid.len = 4;
 @memcpy(scid.data[0..4], &[_]u8{ 0xAA, 0xBB, 0xCC, 0xDD });
 ```
@@ -188,7 +188,7 @@ scid.len = 4;
 ### Long Header (Initial, Handshake, 0-RTT)
 
 ```zig
-const long_header = httpx.quic.LongHeader{
+const long_header = httpx.protocols.quic.LongHeader{
     .packet_type = .initial,
     .version = .v1,
     .dcid = dcid,
@@ -200,14 +200,14 @@ const len = try long_header.encode(&buf);
 std.debug.print("Long header: {d} bytes\n", .{len});
 
 // Decode
-const decoded = try httpx.quic.LongHeader.decode(&buf);
+const decoded = try httpx.protocols.quic.LongHeader.decode(&buf);
 std.debug.print("Packet type: {s}\n", .{@tagName(decoded.header.packet_type)});
 ```
 
 ### Short Header (1-RTT)
 
 ```zig
-const short_header = httpx.quic.ShortHeader{
+const short_header = httpx.protocols.quic.ShortHeader{
     .dcid = dcid,
     .spin_bit = 0,
     .keyPhase = 0,
@@ -234,7 +234,7 @@ const len = try short_header.encode(&buf);
 Carries application data:
 
 ```zig
-const stream_frame = httpx.quic.StreamFrame{
+const stream_frame = httpx.protocols.quic.StreamFrame{
     .streamId = 4, // Client-initiated bidirectional stream
     .offset = 0,
     .data = "Hello, HTTP/3!",
@@ -245,7 +245,7 @@ var buf: [128]u8 = undefined;
 const len = try stream_frame.encode(&buf);
 
 // Decode
-const decoded = try httpx.quic.StreamFrame.decode(buf[0..len]);
+const decoded = try httpx.protocols.quic.StreamFrame.decode(buf[0..len]);
 std.debug.print("Data: {s}\n", .{decoded.frame.data});
 ```
 
@@ -254,7 +254,7 @@ std.debug.print("Data: {s}\n", .{decoded.frame.data});
 Carries TLS handshake data:
 
 ```zig
-const crypto_frame = httpx.quic.CryptoFrame{
+const crypto_frame = httpx.protocols.quic.CryptoFrame{
     .offset = 0,
     .data = &[_]u8{ 0x01, 0x00, 0x00, 0x05, 'h', 'e', 'l', 'l', 'o' },
 };
@@ -268,7 +268,7 @@ const len = try crypto_frame.encode(&buf);
 Acknowledges received packets:
 
 ```zig
-const ack_frame = httpx.quic.AckFrame{
+const ack_frame = httpx.protocols.quic.AckFrame{
     .largestAcknowledged = 42,
     .ackDelay = 100,
     .first_ack_range = 10,
@@ -281,10 +281,10 @@ const len = try ack_frame.encode(&buf);
 
 ### CONNECTION_CLOSE Frame
 
-Terminates a connection (`httpx.quic.frames.Frame.connectionClose`):
+Terminates a connection (`httpx.protocols.quic.frames.Frame.connectionClose`):
 
 ```zig
-const close_frame = httpx.quic.frames.Frame{ .connectionClose = .{
+const close_frame = httpx.protocols.quic.frames.Frame{ .connectionClose = .{
     .errorCode = 0, // NO_ERROR
     .triggering_frame_type = 0,
     .reason = "graceful shutdown",
@@ -328,12 +328,12 @@ QUIC uses a variable-length integer encoding:
 ```zig
 // Encoding
 var buf: [8]u8 = undefined;
-const len = try httpx.quic.varint.encode(&buf, 15293);
+const len = try httpx.protocols.quic.varint.encode(&buf, 15293);
 std.debug.print("Encoded in {d} bytes\n", .{len});
 
 // Decoding
 var offset: usize = 0;
-const value = try httpx.quic.varint.decode(&buf, &offset);
+const value = try httpx.protocols.quic.varint.decode(&buf, &offset);
 std.debug.print("Value: {d}\n", .{value});
 ```
 
@@ -374,7 +374,7 @@ QUIC transport parameters can be encoded:
 ```zig
 var list = std.ArrayList(u8).empty;
 defer list.deinit(allocator);
-try httpx.quic.params.encode(&list, allocator, .{
+try httpx.protocols.quic.transportParameters.encode(&list, allocator, .{
     .maxIdleTimeoutMs = 30000,
     .maxUdpPayloadSize = 1350,
     .initialMaxData = 1048576,
@@ -392,7 +392,7 @@ try httpx.quic.params.encode(&list, allocator, .{
 HTTP/3 uses MAX_DATA and MAX_STREAM_DATA frames for flow control. These are defined as frame types (`maxData = 0x10`, `maxStreamData = 0x11`) and are handled internally by the connection. Flow control limits are configured via transport parameters:
 
 ```zig
-const params = httpx.quic.params.Params{
+const params = httpx.protocols.quic.transportParameters.Params{
     .initialMaxData = 10 * 1024 * 1024,           // 10MB connection-level
     .initialMaxStreamDataBidiLocal = 1024 * 1024,  // 1MB per stream
     .initialMaxStreamDataBidiRemote = 1024 * 1024,
@@ -403,11 +403,11 @@ const params = httpx.quic.params.Params{
 ## GOAWAY and CONNECTION_CLOSE
 
 Both client and server handle incoming GOAWAY gracefully.
-`httpx.quic.frames.Frame` carries both variants as `.connectionClose`:
+`httpx.protocols.quic.frames.Frame` carries both variants as `.connectionClose`:
 
 ```zig
 // Transport close (CONNECTION_CLOSE, type 0x1C)
-const transport_close = httpx.quic.frames.Frame{ .connectionClose = .{
+const transport_close = httpx.protocols.quic.frames.Frame{ .connectionClose = .{
     .errorCode = 0, // NO_ERROR
     .triggering_frame_type = 0,
     .reason = "server shutting down",
@@ -415,7 +415,7 @@ const transport_close = httpx.quic.frames.Frame{ .connectionClose = .{
 } };
 
 // Application close (type 0x1D)
-const app_close = httpx.quic.frames.Frame{ .connectionClose = .{
+const app_close = httpx.protocols.quic.frames.Frame{ .connectionClose = .{
     .errorCode = 0,
     .triggering_frame_type = 0,
     .reason = "graceful shutdown",
@@ -429,14 +429,14 @@ Cancel individual streams without tearing down the connection:
 
 ```zig
 // RESET_STREAM: abruptly terminates a send stream
-const reset = httpx.quic.ResetStreamFrame{
+const reset = httpx.protocols.quic.ResetStreamFrame{
     .streamId = 4,
     .errorCode = 0x06, // application error (user-defined)
     .finalSize = 1024,
 };
 
 // STOP_SENDING: ask the peer to stop sending on a receive stream
-const stop = httpx.quic.StopSendingFrame{
+const stop = httpx.protocols.quic.StopSendingFrame{
     .streamId = 8,
     .errorCode = 0x01, // application error (user-defined)
 };

@@ -12,7 +12,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const sync = @import("../../common/sync.zig");
 
 pub const tls = std.crypto.tls;
 const maxCipher = tls.max_ciphertext_record_len;
@@ -35,6 +34,7 @@ pub const ConnectionOptions = struct {
 };
 
 pub const InitError = error{
+    IoRequired,
     TlsInitializationFailed,
     TlsCaUnavailable,
     OutOfMemory,
@@ -66,34 +66,22 @@ pub const Connection = struct {
     pub const ReadError = error{ ReadFailed, OutOfMemory };
     pub const WriteError = error{WriteFailed};
 
-    var gCaLock: std.Io.RwLock = .init;
-    var gSystemBundle: std.crypto.Certificate.Bundle = .empty;
-    var gSystemBundleLoaded: bool = false;
-    var gSystemBundleLock: sync.Spinlock = .{};
-
-    // Process-lifetime system CA cache. Backed by the untracked page
-    // allocator on purpose: the bundle lives until process exit (freed by
-    // the OS), so routing it through a caller's tracked allocator (e.g. a
-    // DebugAllocator) would report a false leak at shutdown.
-    fn getOrLoadSystemBundle(io: std.Io) !*std.crypto.Certificate.Bundle {
-        gSystemBundleLock.lock();
-        defer gSystemBundleLock.unlock();
-
-        if (!gSystemBundleLoaded) {
-            const now = std.Io.Timestamp.now(io, .awake);
-            gSystemBundle.rescan(std.heap.page_allocator, io, now) catch return error.TlsCaUnavailable;
-            gSystemBundleLoaded = true;
-        }
-        return &gSystemBundle;
-    }
-
     pub const Config = struct {
+        /// Borrowed socket handle. The caller remains responsible for closing
+        /// it after destroying the TLS connection.
         socketHandle: std.Io.net.Socket.Handle,
         host: []const u8 = "",
         verify: VerifyMode = .caBundle,
+        /// Borrowed trust bundle. The TLS client should pass its retained
+        /// allocator-owned store here so system trust is scanned once per
+        /// client. If omitted, roots are scanned into a temporary bundle
+        /// allocated by the caller for this handshake.
         caBundle: ?*std.crypto.Certificate.Bundle = null,
+        /// Synchronizes access to `caBundle` when it is shared. If omitted,
+        /// the lock protects this synchronous handshake only.
+        caBundleLock: ?*std.Io.RwLock = null,
         allowTruncation: bool = false,
-        io: ?std.Io = null,
+        io: std.Io,
     };
 
     /// Handshakes synchronously. Returns a HEAP pointer because tls.Client
@@ -103,21 +91,32 @@ pub const Connection = struct {
         const conf: Config = if (@TypeOf(config) == Config) config else blk: {
             var c = Config{
                 .socketHandle = if (@hasField(@TypeOf(config), "socketHandle")) config.socketHandle else if (@hasField(@TypeOf(config), "socket")) config.socket.netSocketHandle() else undefined,
+                .io = undefined,
             };
             if (@hasField(@TypeOf(config), "host")) c.host = config.host;
             if (@hasField(@TypeOf(config), "verify")) c.verify = config.verify;
             if (@hasField(@TypeOf(config), "caBundle")) c.caBundle = config.caBundle;
+            if (@hasField(@TypeOf(config), "caBundleLock")) c.caBundleLock = config.caBundleLock;
             if (@hasField(@TypeOf(config), "allowTruncation")) c.allowTruncation = config.allowTruncation;
-            if (@hasField(@TypeOf(config), "io")) c.io = config.io;
+            if (@hasField(@TypeOf(config), "io")) {
+                c.io = config.io;
+            } else {
+                return error.IoRequired;
+            }
             break :blk c;
         };
 
-        const io = conf.io orelse std.Io.Threaded.global_single_threaded.io();
-        var activeBundle: ?*std.crypto.Certificate.Bundle = conf.caBundle;
+        const io = conf.io;
+        var localBundle: std.crypto.Certificate.Bundle = .empty;
+        defer localBundle.deinit(allocator);
+        var activeBundle = conf.caBundle;
         if (conf.verify == .caBundle and activeBundle == null) {
-            activeBundle = getOrLoadSystemBundle(io) catch null;
-            if (activeBundle == null) return error.TlsCaUnavailable;
+            const now = std.Io.Timestamp.now(io, .awake);
+            localBundle.rescan(allocator, io, now) catch return error.TlsCaUnavailable;
+            activeBundle = &localBundle;
         }
+        var localCaLock: std.Io.RwLock = .init;
+        const caLock = conf.caBundleLock orelse &localCaLock;
 
         const self = allocator.create(Connection) catch return error.OutOfMemory;
         errdefer allocator.destroy(self);
@@ -178,7 +177,7 @@ pub const Connection = struct {
             .caBundle => .{ .bundle = .{
                 .gpa = allocator,
                 .io = io,
-                .lock = &gCaLock,
+                .lock = caLock,
                 .bundle = activeBundle.?,
             } },
         };
@@ -213,8 +212,6 @@ pub const Connection = struct {
         // In truncation-tolerant mode there is no closeNotify contract;
         // attempting the write against a vanished peer only risks RST noise.
         if (!self.allowTruncation) self.client.end() catch {};
-        var stream = std.Io.net.Stream{ .socket = .{ .handle = self.socketHandle, .address = undefined } };
-        stream.close(self.io);
         allocator.free(self.bufStreamWriter);
         allocator.free(self.bufStreamReader);
         allocator.free(self.bufTlsRead);

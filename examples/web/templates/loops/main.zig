@@ -8,7 +8,7 @@ const Service = struct {
     status: []const u8,
 };
 
-fn loopsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn loopsHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const services = [_]Service{
         .{ .name = "auth-service", .host = "10.0.0.1", .port = 8001, .status = "healthy" },
         .{ .name = "gateway", .host = "10.0.0.2", .port = 8080, .status = "healthy" },
@@ -28,7 +28,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .templates = .{

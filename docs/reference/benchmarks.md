@@ -160,7 +160,7 @@ These are the cheapest operations in the suite, as expected: fixed-size header a
 - **Resumed handshake**: ~2.85 ms per handshake (~350/sec), about 16% faster than a full handshake. The gap is narrower than TLS 1.3 0-RTT would suggest because the benchmark measures a full TCP connect and a PSK resumption over loopback, where connection setup and record-layer work dominate rather than key agreement.
 
 ### End-to-End Loopback Requests
-- **HTTP/1.1 keep-alive GET** (`client_server_get`): ~54.6 µs per request, ~18,310 req/sec, between a live `httpx.Client` and a live `httpx.Server` on `127.0.0.1`, single-threaded and synchronous. In the 2026-10-09 run this row reported 6 failed iterations out of 8000 (the keep-alive reuse race); see the note under the summary table.
+- **HTTP/1.1 keep-alive GET** (`client_server_get`): ~54.6 µs per request, ~18,310 req/sec, between a live `httpx.Client` and a live `httpx.server.Server` on `127.0.0.1`, single-threaded and synchronous. In the 2026-10-09 run this row reported 6 failed iterations out of 8000 (the keep-alive reuse race); see the note under the summary table.
 - **HTTP/2 pooled GET** (`h2_pooled_get`): ~48.7 µs, ~20,524 req/sec. One h2c connection is reused, so a request costs a frame exchange instead of a new connection.
 - **HTTP/3 GET** (`h3_get`): ~206.0 ms per request, ~4 req/sec, because each operation performs a fresh QUIC plus TLS 1.3 handshake rather than reusing a session. This is a deliberate worst case, not a steady-state HTTP/3 number.
 

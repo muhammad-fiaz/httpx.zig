@@ -21,7 +21,7 @@ const MessageResponse = struct {
 };
 
 fn createUser(
-    _: *httpx.Context,
+    _: *httpx.web.router.Context,
     request: CreateUserRequest,
 ) !httpx.ApiResult(UserResponse) {
     return httpx.ApiResult(UserResponse).created(.{
@@ -32,7 +32,7 @@ fn createUser(
 }
 
 fn getUser(
-    ctx: *httpx.Context,
+    ctx: *httpx.web.router.Context,
 ) !httpx.ApiResult(UserResponse) {
     const id = ctx.paramUint("id") orelse 1;
     return httpx.ApiResult(UserResponse).ok(.{
@@ -43,7 +43,7 @@ fn getUser(
 }
 
 fn ping(
-    _: *httpx.Context,
+    _: *httpx.web.router.Context,
 ) !httpx.ApiResult(MessageResponse) {
     return httpx.ApiResult(MessageResponse).ok(.{
         .message = "pong",
@@ -105,7 +105,7 @@ pub fn main() !void {
 
     // Run background server thread for client verification
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };

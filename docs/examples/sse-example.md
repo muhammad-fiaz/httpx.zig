@@ -4,7 +4,7 @@ SSE payloads with `httpx.sse.EventWriter`, parsed back with
 `httpx.sse.EventParser`. See `examples/sseServer.zig`.
 
 ```zig
-fn sseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn sseHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     var out = std.ArrayList(u8).empty;
     var writer = httpx.sse.Writer.EventWriter.init(ctx.allocator);
     try writer.writeEvent(&out, &[_][]const u8{"Connected to SSE live stream"}, "status", 1, 5000);

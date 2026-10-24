@@ -12,9 +12,12 @@ const Allocator = std.mem.Allocator;
 const mimeMod = @import("../../utils/mime.zig");
 const Method = @import("../../common/method.zig").Method;
 const patternMod = @import("routePattern.zig");
+pub const pattern = patternMod;
+pub const metadata = @import("routeMetadata.zig");
 const Pattern = patternMod.Pattern;
 const SegmentKind = patternMod.SegmentKind;
 const parseMod = @import("../../common/parse.zig");
+const multipartServerMod = @import("../multipart/multipartServer.zig");
 
 pub const HandlerFn = *const fn (*Context) anyerror!Response;
 pub const NextFn = *const fn (*Context) anyerror!Response;
@@ -177,6 +180,17 @@ pub const Context = struct {
             if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
         }
         return null;
+    }
+
+    /// Parses the buffered request body as multipart/form-data. The returned
+    /// form must be deinitialized with its own allocator (normally
+    /// `ctx.allocator`).
+    pub fn multipartForm(
+        self: *Context,
+        options: multipartServerMod.Options,
+    ) multipartServerMod.Error!multipartServerMod.Form {
+        const ct = self.header("Content-Type") orelse return error.MissingContentType;
+        return multipartServerMod.parse(self.allocator, self.body, ct, options);
     }
 
     /// Extracts Bearer token from Authorization header if present.

@@ -16,7 +16,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     // Built-in CORS middleware (handles pre-flight + headers)
@@ -26,7 +26,7 @@ pub fn main() !void {
     try server.run();
 }
 
-fn userHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn userHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     _ = ctx;
     return .{ .status = 200, .body = "{\"user\":\"Alice\"}", .contentType = "application/json" };
 }

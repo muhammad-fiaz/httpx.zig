@@ -970,3 +970,71 @@ test "huffman encoded strings decode to the exact bytes" {
     try std.testing.expectEqualStrings(":authority", res.fields[0].name);
     try std.testing.expectEqualStrings("www.example.com", res.fields[0].value);
 }
+
+test "nghttp2 reference multi-block sequential deflate and inflate sequence" {
+    const a = std.testing.allocator;
+    var enc = Encoder.init(a);
+    defer enc.deinit();
+    var dec = Decoder.init(a);
+    defer dec.deinit();
+
+    const Block = struct {
+        fields: []const HeaderField,
+    };
+
+    const b1 = [_]HeaderField{
+        .{ .name = ":path", .value = "/my-example/index.html" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "hello", .value = "world" },
+    };
+    const b2 = [_]HeaderField{
+        .{ .name = ":path", .value = "/script.js" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    const b3 = [_]HeaderField{
+        .{ .name = "cookie", .value = "k1=v1" },
+        .{ .name = "cookie", .value = "k2=v2" },
+        .{ .name = "via", .value = "proxy" },
+    };
+    const b4 = [_]HeaderField{
+        .{ .name = ":path", .value = "/style.css" },
+        .{ .name = "cookie", .value = "k1=v1" },
+        .{ .name = "cookie", .value = "k1=v1" },
+    };
+    const b5 = [_]HeaderField{
+        .{ .name = ":path", .value = "/style.css" },
+        .{ .name = "x-nghttp2", .value = "" },
+    };
+
+    const blocks = [_]Block{
+        .{ .fields = &b1 },
+        .{ .fields = &b2 },
+        .{ .fields = &b3 },
+        .{ .fields = &b4 },
+        .{ .fields = &b5 },
+    };
+
+    for (blocks) |b| {
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(a);
+
+        for (b.fields) |f| {
+            try enc.encode(&out, f.name, f.value, .incremental, false);
+        }
+
+        const res = try dec.decode(out.items);
+        defer {
+            for (res.fields) |f| {
+                a.free(f.name);
+                a.free(f.value);
+            }
+            a.free(res.fields);
+        }
+
+        try std.testing.expectEqual(b.fields.len, res.fields.len);
+        for (b.fields, 0..) |expected, i| {
+            try std.testing.expectEqualStrings(expected.name, res.fields[i].name);
+            try std.testing.expectEqualStrings(expected.value, res.fields[i].value);
+        }
+    }
+}

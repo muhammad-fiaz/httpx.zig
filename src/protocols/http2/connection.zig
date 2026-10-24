@@ -279,13 +279,15 @@ pub const Session = struct {
                     if (self.streamPtr(hdr.streamId) != null) {
                         try self.resetStream(hdr.streamId, .frameSizeError);
                     }
-                    return self.consumeInvalidFrame(hdr);
+                    try self.consumeInvalidFrame(hdr);
+                    continue;
                 },
                 error.StreamProtocolError => {
                     if (self.streamPtr(hdr.streamId) != null) {
                         try self.resetStream(hdr.streamId, .protocolError);
                     }
-                    return self.consumeInvalidFrame(hdr);
+                    try self.consumeInvalidFrame(hdr);
+                    continue;
                 },
                 else => return self.connError(.protocolError),
             };
@@ -399,6 +401,9 @@ pub const Session = struct {
             .priority => {
                 // Priority tolerated and ignored (RFC 9113 Section 5.3, deprecated).
             },
+            .priorityUpdate => {
+                // RFC 9218 PRIORITY_UPDATE frame: priority advisory information received
+            },
             .pushPromise => {
                 // Server receiving PUSH_PROMISE from client is always a
                 // connection error; client may receive it only if push is
@@ -450,6 +455,7 @@ pub const Session = struct {
                 },
                 .maxFrameSize => self.peerSettings.maxFrameSize = e.value,
                 .maxHeaderListSize => self.peerSettings.maxHeaderListSize = e.value,
+                .enableConnectProtocol => {},
                 _ => {}, // unknown settings are ignored
             }
         }
@@ -2747,4 +2753,204 @@ test "a malformed request header list is a stream error" {
     try std.testing.expect(server.outbound.items.len >= 9);
     const hdr = FrameHeader.parse(server.outbound.items[0..9]);
     try std.testing.expectEqual(FrameType.rstStream, hdr.frameType);
+}
+
+test "stream-level frame error consumes frame and continues processing subsequent frames in feed" {
+    const a = std.testing.allocator;
+    var pingReceived = false;
+    const Ctx = struct {
+        ping: *bool,
+        fn onPing(ctxPtr: ?*anyopaque, data: [8]u8) void {
+            _ = data;
+            const c: *@This() = @ptrCast(@alignCast(ctxPtr.?));
+            c.ping.* = true;
+        }
+    };
+    var ctxObj = Ctx{ .ping = &pingReceived };
+    var server = try Session.init(a, .server, .{
+        .ctx = &ctxObj,
+        .onPingAck = Ctx.onPing,
+    });
+    defer server.deinit();
+    try server.startHandshake();
+
+    var buf: [256]u8 = undefined;
+    const handshake = clientHandshake(&buf);
+    try server.feed(handshake);
+    server.outbound.clearRetainingCapacity();
+
+    // Pack two frames in one chunk:
+    // Frame 1: Invalid PRIORITY frame (length 4 instead of 5 -> stream-level FRAME_SIZE_ERROR)
+    // Frame 2: Valid PING frame
+    var chunk: [9 + 4 + 9 + 8]u8 = undefined;
+
+    // Frame 1 header (length 4, type 2 = priority, flags 0, stream 1)
+    chunk[0] = 0x00;
+    chunk[1] = 0x00;
+    chunk[2] = 0x04;
+    chunk[3] = 0x02; // priority
+    chunk[4] = 0x00;
+    chunk[5] = 0x00;
+    chunk[6] = 0x00;
+    chunk[7] = 0x00;
+    chunk[8] = 0x01; // stream 1
+    // 4 payload bytes (invalid: PRIORITY requires exactly 5 bytes)
+    chunk[9] = 0x00;
+    chunk[10] = 0x00;
+    chunk[11] = 0x00;
+    chunk[12] = 0x00;
+
+    // Frame 2 header (length 8, type 6 = ping, flags 0, stream 0)
+    chunk[13] = 0x00;
+    chunk[14] = 0x00;
+    chunk[15] = 0x08;
+    chunk[16] = 0x06; // ping
+    chunk[17] = 0x00;
+    chunk[18] = 0x00;
+    chunk[19] = 0x00;
+    chunk[20] = 0x00;
+    chunk[21] = 0x00; // stream 0
+    // 8 bytes opaque data
+    @memset(chunk[22..30], 0x42);
+
+    try server.feed(&chunk);
+
+    // Connection must not be closed
+    try std.testing.expect(!server.closed);
+
+    // Frame 2 (PING) must have been processed and answered with PING ACK in outbound
+    var foundPingAck = false;
+    var off: usize = 0;
+    while (off + frameMod.FRAME_HEADER_SIZE <= server.outbound.items.len) {
+        const hdr = FrameHeader.parse(server.outbound.items[off..][0..frameMod.FRAME_HEADER_SIZE]);
+        if (hdr.frameType == .ping and hdr.hasAck()) {
+            foundPingAck = true;
+            break;
+        }
+        off += frameMod.FRAME_HEADER_SIZE + @as(usize, hdr.length);
+    }
+    try std.testing.expect(foundPingAck);
+}
+
+test "regression: http2 frame header truncation and boundary parsing" {
+    var prng = std.Random.DefaultPrng.init(0x1337);
+    const rng = prng.random();
+
+    var buf: [64]u8 = undefined;
+    for (0..200) |_| {
+        rng.bytes(&buf);
+        var hdrBytes: [9]u8 = undefined;
+        @memcpy(&hdrBytes, buf[0..9]);
+        const hdr = frameMod.FrameHeader.parse(&hdrBytes);
+        _ = hdr.hasEndStream();
+        _ = hdr.hasEndHeaders();
+        _ = hdr.hasAck();
+
+        const payloadLen = rng.uintAtMost(usize, 32);
+        const parsed = frameMod.Frame.parse(hdr, buf[9 .. 9 + payloadLen], std.heap.page_allocator) catch continue;
+        switch (parsed) {
+            .settings => |entries| std.heap.page_allocator.free(entries),
+            else => {},
+        }
+    }
+}
+
+test "regression: http2 hpack decoder truncation and mutation sweep" {
+    const seeds = [_][]const u8{
+        &[_]u8{ 0x82, 0x84, 0x86, 0x87 },
+        &[_]u8{ 0x40, 0x0a, 'c', 'u', 's', 't', 'o', 'm', '-', 'k', 'e', 'y', 0x05, 'v', 'a', 'l', 'u', 'e' },
+        &[_]u8{ 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff },
+        &[_]u8{ 0x3f, 0xe1, 0x1f, 0x82 },
+        &[_]u8{ 0x00, 0x04, 't', 'e', 's', 't', 0x04, 'd', 'a', 't', 'a' },
+    };
+
+    const helper = struct {
+        fn decode(data: []const u8) void {
+            const a = std.heap.page_allocator;
+            var dec = hpackMod.Decoder.init(a);
+            defer dec.deinit();
+            if (dec.decode(data)) |res| {
+                for (res.fields) |f| {
+                    a.free(f.name);
+                    a.free(f.value);
+                }
+                a.free(res.fields);
+            } else |_| {}
+        }
+    };
+
+    for (seeds) |s| {
+        for (0..s.len + 1) |cut| {
+            helper.decode(s[0..cut]);
+        }
+    }
+
+    var prng = std.Random.DefaultPrng.init(0xC001);
+    const rng = prng.random();
+    var mutBuf: [128]u8 = undefined;
+
+    for (seeds) |s| {
+        for (0..50) |_| {
+            const len = @min(s.len, mutBuf.len);
+            @memcpy(mutBuf[0..len], s[0..len]);
+
+            const flips = 1 + rng.uintLessThan(usize, 3);
+            for (0..flips) |_| {
+                const idx = rng.uintLessThan(usize, len);
+                mutBuf[idx] ^= @as(u8, 1) << @intCast(rng.uintLessThan(u8, 8));
+            }
+            helper.decode(mutBuf[0..len]);
+        }
+    }
+}
+
+test "regression: http2 session feed mutation and frame sequences" {
+    var prng = std.Random.DefaultPrng.init(0xBEEF);
+    const rng = prng.random();
+
+    const validClientHandshake = frameMod.CONNECTION_PREFACE ++ &[_]u8{
+        0x00, 0x00, 0x00,
+        0x04,
+        0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+
+    const validPing = &[_]u8{
+        0x00, 0x00, 0x08,
+        0x06,
+        0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x01, 0x02, 0x03, 0x04,
+        0x05, 0x06, 0x07, 0x08,
+    };
+
+    const helper = struct {
+        fn feed(role: Role, input: []const u8) void {
+            const a = std.heap.page_allocator;
+            var s = Session.init(a, role, .{}) catch return;
+            defer s.deinit();
+            s.startHandshake() catch {};
+            _ = s.feed(input) catch {};
+        }
+    };
+
+    for (0..validClientHandshake.len + 1) |cut| {
+        helper.feed(.server, validClientHandshake[0..cut]);
+    }
+
+    var streamBuf: [256]u8 = undefined;
+    for (0..100) |_| {
+        const copyLen = @min(streamBuf.len, validClientHandshake.len + validPing.len);
+        @memcpy(streamBuf[0..validClientHandshake.len], validClientHandshake);
+        @memcpy(streamBuf[validClientHandshake.len..copyLen], validPing[0 .. copyLen - validClientHandshake.len]);
+
+        const numMutations = 1 + rng.uintLessThan(usize, 4);
+        for (0..numMutations) |_| {
+            const idx = rng.uintLessThan(usize, copyLen);
+            streamBuf[idx] = rng.int(u8);
+        }
+
+        helper.feed(.server, streamBuf[0..copyLen]);
+        helper.feed(.client, streamBuf[0..copyLen]);
+    }
 }

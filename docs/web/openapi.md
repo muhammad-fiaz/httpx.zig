@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .port = 8080,
         .enableDocs = true,
         .docs = .{
@@ -30,7 +30,7 @@ pub fn main() !void {
     server.run();
 }
 
-fn itemsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn itemsHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJson(.{
         .items = [_]struct { id: u32, name: []const u8 }{
             .{ .id = 1, .name = "Widget" },

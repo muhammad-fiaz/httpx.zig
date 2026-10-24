@@ -31,7 +31,7 @@ pub fn main() !void {
 
     var reader = std.Io.Reader.fixed(chunkedHtml);
 
-    var p = httpx.Parser.init(allocator, .{});
+    var p = httpx.parsing.Parser.init(allocator, .{});
     // Parse stream with a 1 MB limit
     var doc = try p.parseStream(&reader, 1024 * 1024);
     defer doc.deinit();

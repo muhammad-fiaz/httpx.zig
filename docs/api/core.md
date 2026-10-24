@@ -41,13 +41,13 @@ See [Client](/api/client) and [Request](/api/request).
 
 ## Server response
 
-Handlers return `httpx.Response` literals or `Context` helpers
+Handlers return `httpx.web.router.Response` literals or `Context` helpers
 (`ctx.html`, `ctx.text`, `ctx.renderJson`, `ctx.redirect`, ...).
 See [Server](/api/server).
 
 ## Headers
 
-`httpx.Headers` (`src/common/headers.zig`) is an ordered multi-map:
+`httpx.headers.Headers` (`src/common/headers.zig`) is an ordered multi-map:
 
 | Method | Description |
 |--------|-------------|

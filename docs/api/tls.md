@@ -61,13 +61,13 @@ tls.zig              -- Client/Server owners, Session, Certificate, TrustStore
 └── errors.zig       -- Unified TLS error set and alert conversion
 ```
 
-The public API is two owners — `httpx.tls.Client` and
-`httpx.tls.Server` — plus value types (`Session`, `Certificate`,
+The public API is two owners — `httpx.protocols.tls.Client` and
+`httpx.protocols.tls.Server` — plus value types (`Session`, `Certificate`,
 `TrustStore`). The handshake engine, records, and transports are
 implementation details selected internally per connection.
 
 ```zig
-var tlsClient = try httpx.tls.Client.init(allocator, io, .{});
+var tlsClient = try httpx.protocols.tls.Client.init(allocator, io, .{});
 defer tlsClient.deinit();
 
 var conn = try tlsClient.connect(&socket, "example.com", .{
@@ -77,7 +77,7 @@ defer conn.deinit();
 ```
 
 ```zig
-var tlsServer = try httpx.tls.Server.init(allocator, io, .{
+var tlsServer = try httpx.protocols.tls.Server.init(allocator, io, .{
     .certificatePem = certPem,
     .privateKeyPem = keyPem,
 });
@@ -161,7 +161,7 @@ both entries):
 
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8443,
     .tls = .{
@@ -172,10 +172,10 @@ var server = try httpx.Server.init(allocator, io, .{
 });
 ```
 
-For a standalone TLS listener, use `httpx.tls.Listener`:
+For a standalone TLS listener, use `httpx.protocols.tls.Listener`:
 
 ```zig
-var listener = try httpx.tls.Listener.init(allocator, io, .{
+var listener = try httpx.protocols.tls.Listener.init(allocator, io, .{
     .port = 8443,
     .defaultIdentity = .{
         .certChainPem = @embedFile("cert.pem"),
@@ -197,21 +197,21 @@ The server automatically loads the certificate chain and private key on the firs
 Client connections flow through the high-level client (`client.get("https://…")`),
 which performs the handshake, ALPN negotiation, hostname verification, and
 record-layer encryption internally. Server connections are accepted by
-`httpx.tls.Listener` / `Server.tls` and dispatched to HTTP/1 or HTTP/2
+`httpx.protocols.tls.Listener` / `Server.tls` and dispatched to HTTP/1 or HTTP/2
 handlers based on the negotiated ALPN protocol.
 
 ### Methods (server side)
 
 | Method | Description |
 |--------|-------------|
-| `httpx.tls.Client.init(allocator, io, .{})` | TLS client owner (trust parsed once) |
+| `httpx.protocols.tls.Client.init(allocator, io, .{})` | TLS client owner (trust parsed once) |
 | `client.connect(&socket, host, .{})` | Handshake; returns an owned `Connection` |
 | `conn.read/writeAll/deinit` | Record I/O and teardown (deinit closes the socket) |
 | `conn.takeCapturedSession()` | Take a captured resumption session, if any |
-| `httpx.tls.Server.init(allocator, io, cfg)` | TLS server owner (identity validated once) |
+| `httpx.protocols.tls.Server.init(allocator, io, cfg)` | TLS server owner (identity validated once) |
 | `server.accept(&socket)` | Accept; returns an owned `Connection` |
 | `server.acceptBuffered(&socket, peeked)` | Accept with pre-read bytes |
-| `httpx.tls.Listener.init(allocator, io, cfg)` | Bind a TLS listener with `defaultIdentity` |
+| `httpx.protocols.tls.Listener.init(allocator, io, cfg)` | Bind a TLS listener with `defaultIdentity` |
 | `listener.run(handler)` | Blocking accept loop |
 | `listener.stop()` | Immediate shutdown |
 | `listener.localPort()` | Actual bound port |

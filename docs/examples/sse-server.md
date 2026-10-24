@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .maxConnections = 5,
@@ -27,7 +27,7 @@ pub fn main() !void {
     std.debug.print("SSE server running on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };
@@ -47,7 +47,7 @@ pub fn main() !void {
     std.debug.print("SSE server verification completed successfully.\n", .{});
 }
 
-fn sseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn sseHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     var out = std.ArrayList(u8).empty;
     var writer = httpx.sse.Writer.EventWriter.init(ctx.allocator);
     try writer.writeEvent(&out, &[_][]const u8{"Connected to SSE live stream"}, "status", 1, 5000);
@@ -57,7 +57,7 @@ fn sseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
         .status = 200,
         .body = out.items,
         .contentType = "text/event-stream; charset=utf-8",
-        .headers = try ctx.allocator.dupe(httpx.router.Header, &[_]httpx.router.Header{
+        .headers = try ctx.allocator.dupe(httpx.web.router.Header, &[_]httpx.web.router.Header{
             .{ .name = "Cache-Control", .value = "no-cache" },
             .{ .name = "Connection", .value = "keep-alive" },
         }),

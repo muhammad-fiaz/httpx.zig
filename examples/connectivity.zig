@@ -1,9 +1,6 @@
 //! Internet connectivity check example.
 //!
-//! Demonstrates all three API surfaces:
-//!   1. Zero-config global:  httpx.isOnline()
-//!   2. Detailed result:     httpx.checkConnectivity(.{})
-//!   3. Client method:       client.isOnline() / client.checkConnectivity(.{})
+//! Demonstrates explicit connectivity probes and the client convenience API.
 //!
 //! Run with: `zig build run-connectivity`
 
@@ -16,9 +13,9 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // 1. Zero-config global (no client, no allocator)
-    std.debug.print("\n=== Zero-config check ===\n", .{});
-    if (httpx.isOnline()) {
+    // 1. Explicit I/O probe
+    std.debug.print("\n=== Connectivity check ===\n", .{});
+    if (httpx.net.connectivity.isOnline(io)) {
         std.debug.print("Internet is available.\n", .{});
     } else {
         std.debug.print("No internet connection detected.\n", .{});
@@ -26,7 +23,7 @@ pub fn main() !void {
 
     // 2. Detailed result
     std.debug.print("\n=== Detailed connectivity probe ===\n", .{});
-    const result = httpx.checkConnectivity(.{ .timeoutMs = 3000 });
+    const result = httpx.net.connectivity.checkConnectivity(io, .{ .timeoutMs = 3000 });
     if (result.online) {
         const famStr: []const u8 = if (result.family) |f| switch (f) {
             .ip4 => "IPv4",

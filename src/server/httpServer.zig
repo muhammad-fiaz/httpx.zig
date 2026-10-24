@@ -17,6 +17,7 @@ const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
 const compression = @import("../compression/codec.zig");
 const parserMod = @import("../protocols/http1/parser.zig");
+const semanticsMod = @import("../protocols/http1/semantics.zig");
 const writerMod = @import("../protocols/http1/writer.zig");
 const routerMod = @import("../web/router/router.zig");
 const Router = routerMod.Router;
@@ -90,7 +91,7 @@ const clock = @import("../common/clock.zig");
 /// values and decides where (if anywhere) they go.
 ///
 /// ```zig
-/// fn onEvent(event: httpx.ServerEvent) void {
+/// fn onEvent(event: httpx.logging.ServerEvent) void {
 ///     if (event.kind == .requestCompleted) {
 ///         std.debug.print("{s} {s} {d} {d}ms\n", .{
 ///             event.method, event.path, event.status, event.durationMs,
@@ -98,7 +99,7 @@ const clock = @import("../common/clock.zig");
 ///     }
 /// }
 ///
-/// var server = try httpx.Server.init(allocator, io, .{
+/// var server = try httpx.server.Server.init(allocator, io, .{
 ///     .logging = .{ .callback = onEvent },
 /// });
 /// ```
@@ -312,6 +313,7 @@ const H3Request = struct {
 /// Routes QUIC stream events into per-request H3Request state and queues
 /// completed or failed requests for the server loop.
 const H3PumpCtx = struct {
+    io: std.Io,
     allocator: Allocator,
     maxBody: usize,
     h3: *http3Conn.Connection,
@@ -346,7 +348,7 @@ const H3PumpCtx = struct {
 
     fn onStream(ctx: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
         const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
-        p.lastActivityMs.* = @intCast(clock.monotonicMillis());
+        p.lastActivityMs.* = @intCast(clock.monotonicMillis(p.io));
         p.h3.feedQuic(sid, data, fin) catch {
             if (p.h3.takeStreamError()) |se| {
                 if (p.getOrCreate(se.sid)) |r| {
@@ -491,7 +493,7 @@ pub const Server = struct {
     const ConnectionPool = @import("../concurrency/workerPool.zig").Pool;
 
     /// Initializes server with explicit allocator, shared IO, and configuration.
-    /// Matches `var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });`
+    /// Matches `var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });`
     pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Server {
         return initInternal(allocator, io, false, null, cfg);
     }
@@ -713,7 +715,7 @@ pub const Server = struct {
             } else .{},
             .h3PlaceholderConn = h3Placeholder_opt,
             .h3Pump = null,
-            .startTimeMs = clock.monotonicMillis(),
+            .startTimeMs = clock.monotonicMillis(io),
         };
         srv.router.templateEngine = templateEngine;
         errdefer {
@@ -840,7 +842,7 @@ pub const Server = struct {
 
     /// Captures a comprehensive runtime snapshot of the server (uptime, throughput, error rate, active connections).
     pub fn snapshot(self: *const Server) metricsMod.ServerSnapshot {
-        const now = clock.monotonicMillis();
+        const now = clock.monotonicMillis(self.io);
         const uptime: u64 = if (self.startTimeMs > 0 and now >= self.startTimeMs)
             @intCast(now - self.startTimeMs)
         else
@@ -1182,7 +1184,7 @@ pub const Server = struct {
             if (self.cfg.maxConnections != 0 and accepted >= self.cfg.maxConnections) break;
             // Yield when paused
             while (self.paused.load(.acquire) and !self.stopFlag.load(.acquire)) {
-                clock.sleepMillis(10);
+                clock.sleepMillis(self.io, 10);
             }
             self.inAccept.store(true, .release);
             var conn = self.listener.accept(self.io) catch {
@@ -1265,11 +1267,11 @@ pub const Server = struct {
 
     fn monitorConnectionDeadlines(server: *Server) void {
         while (!server.deadlineMonitorStop.load(.acquire)) {
-            const now = clock.monotonicMillis();
+            const now = clock.monotonicMillis(server.io);
             server.connsMu.lock();
             for (server.activeConns.items) |socket| socket.closeIfIoDeadlineExpired(now);
             server.connsMu.unlock();
-            clock.sleepMillis(5);
+            clock.sleepMillis(server.io, 5);
         }
     }
 
@@ -1596,9 +1598,10 @@ pub const Server = struct {
         var ready = std.ArrayList(u64).empty;
         defer ready.deinit(self.allocator);
 
-        const startMs: u64 = @intCast(clock.monotonicMillis());
+        const startMs: u64 = @intCast(clock.monotonicMillis(self.io));
         var lastActivityMs: u64 = startMs;
         var pumpCtx = H3PumpCtx{
+            .io = self.io,
             .allocator = self.allocator,
             .maxBody = self.cfg.maxBody,
             .h3 = &h3,
@@ -1633,7 +1636,7 @@ pub const Server = struct {
         _ = try ep.flush(null);
 
         while (!self.stopFlag.load(.acquire) and !self.h3Stop.load(.acquire)) {
-            const nowMs: u64 = @intCast(clock.monotonicMillis());
+            const nowMs: u64 = @intCast(clock.monotonicMillis(self.io));
             // Keep one connection alive for multiplexed requests, but
             // reclaim it once it has been idle with no active streams.
             if (requests.count() == 0 and nowMs -| lastActivityMs > 30_000) return error.Timeout;
@@ -1849,7 +1852,7 @@ pub const Server = struct {
 
         // Queue the QPACK encoder instructions the response section
         // references before the response stream bytes go out.
-        const nowMs: u64 = @intCast(clock.monotonicMillis());
+        const nowMs: u64 = @intCast(clock.monotonicMillis(self.io));
         try h3.pumpQpack(qconn, nowMs);
         try h3.sendStreamBytes(qconn, req.sid, wire.items, true, nowMs);
         try h3.pumpQpack(qconn, nowMs);
@@ -1882,7 +1885,7 @@ pub const Server = struct {
     }
 
     fn serveOneRequestBuffered(self: *Server, conn: StreamConn, arena: Allocator, requestIndex: usize, forceClose: bool, initial: []const u8, isTlsConn: bool) !bool {
-        const t0 = clock.monotonicMillis();
+        const t0 = clock.monotonicMillis(self.io);
         self.metricsRegistry.recordRequest();
         var headBuf: [maxHeadBytes]u8 = undefined;
         var filled: usize = 0;
@@ -1946,6 +1949,10 @@ pub const Server = struct {
             _ = sendSimpleError(conn, 400, "bad headers") catch 0;
             return false;
         };
+        if (!semanticsMod.validRequestTargetAndHost(reqHead.method, reqHead.path, reqHead.minorVersion, fields[0..blk.count])) {
+            _ = sendSimpleError(conn, 400, "invalid request target or Host") catch 0;
+            return false;
+        }
 
         const hdrs = arena.alloc(routerMod.Header, blk.count) catch return false;
         for (fields[0..blk.count], 0..) |f, i| hdrs[i] = .{ .name = f.name, .value = f.value };
@@ -1963,7 +1970,7 @@ pub const Server = struct {
 
         // Body: Content-Length or chunked (both bounded by cfg.maxBody).
         var body: []u8 = "";
-        const framing = parserMod.decideFraming(fields[0..blk.count], false, 0, 0) catch {
+        const framing = parserMod.decideFraming(fields[0..blk.count], false, 0, "") catch {
             _ = sendSimpleError(conn, 400, "invalid message framing") catch 0;
             return false;
         };
@@ -2089,7 +2096,7 @@ pub const Server = struct {
             self.metricsRegistry.recordError();
             return false;
         };
-        const durNs: u64 = @intCast(@max(0, (clock.monotonicMillis() -| t0) * 1_000_000));
+        const durNs: u64 = @intCast(@max(0, (clock.monotonicMillis(self.io) -| t0) * 1_000_000));
         self.metricsRegistry.recordResponseFull(res.status, durNs, bytesOut);
         self.emitAccess(reqHead.method, reqHead.path, res.status, body.len, bytesOut, t0);
         return !clientClose;
@@ -2112,7 +2119,7 @@ pub const Server = struct {
     /// Deliver a requestCompleted event to the application callback.
     /// Secrets never appear here: only method/path/status/timing/byte counts.
     fn emitAccess(self: *Server, method: []const u8, path: []const u8, status: u16, bytesIn: usize, bytesOut: usize, t0: i64) void {
-        const dur = clock.monotonicMillis() -| t0;
+        const dur = clock.monotonicMillis(self.io) -| t0;
         self.emit(.{
             .kind = .requestCompleted,
             .level = .info,
@@ -2277,7 +2284,7 @@ test "fragmented cleartext HTTP2 preface is sniffed before HTTP1 dispatch" {
     client.setReadTimeoutMs(2_000);
     const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
     try client.writeAll(preface[0..1]);
-    clock.sleepMillis(50);
+    clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 50);
     try client.writeAll(preface[1..]);
     try client.writeAll(&.{ 0, 0, 0, 4, 0, 0, 0, 0, 0 });
 
@@ -2318,6 +2325,34 @@ fn helloHandler(ctx: *Context) anyerror!Response {
         };
     }
     return .{ .status = 404, .body = "" };
+}
+
+test "HTTP/1.1 server rejects request without Host before dispatch" {
+    const a = std.testing.allocator;
+    var ioContext = tcp.IoContext.init(a) catch return;
+    defer ioContext.deinit();
+
+    var srv = Server.init(a, ioContext.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+    defer srv.deinit();
+    try srv.router.get("/", helloHandler, .{});
+
+    const Runner = struct {
+        fn run(server: *Server) void {
+            server.run();
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    defer thread.join();
+
+    var client = tcp.connect(ioContext.io, "127.0.0.1", srv.localPort()) catch return;
+    defer client.close();
+    try client.writeAll("GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
+
+    var response: [1024]u8 = undefined;
+    const n = client.read(&response) catch return;
+    try std.testing.expect(std.mem.startsWith(u8, response[0..n], "HTTP/1.1 400 Bad Request"));
+
+    srv.requestShutdown();
 }
 
 test "template route renders through tree-sitter pipeline end to end" {
@@ -2894,7 +2929,7 @@ test "connection limit rejects overload then accepts clients after a stalled upl
     var spins: usize = 0;
     while (spins < 400) : (spins += 1) {
         if (ActiveCount.get(&srv) == 1) break;
-        clock.sleepMillis(5);
+        clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 5);
     }
     try std.testing.expectEqual(@as(usize, 1), ActiveCount.get(&srv));
 
@@ -2919,7 +2954,7 @@ test "connection limit rejects overload then accepts clients after a stalled upl
             released = true;
             break;
         }
-        clock.sleepMillis(5);
+        clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 5);
     }
     try std.testing.expect(released);
 
@@ -3283,7 +3318,7 @@ test "malformed TLS handshake emits tlsHandshakeFailed event" {
     try client.writeAll(&badTls);
 
     // Give server worker moment to process and emit event
-    clock.sleepMillis(50);
+    clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 50);
 
     srv.requestShutdown();
 

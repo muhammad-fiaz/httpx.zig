@@ -42,7 +42,7 @@ try client.addInterceptor(.{
 ## Example: Response Logger
 
 ```zig
-fn logResponse(res: *httpx.Response, ctx: ?*anyopaque) !void {
+fn logResponse(res: *httpx.web.router.Response, ctx: ?*anyopaque) !void {
     std.debug.print("Status: {d}\n", .{res.status.code});
 }
 

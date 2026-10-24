@@ -84,16 +84,16 @@ pub const Pump = struct {
     /// field is never shared across threads. Polls at ~1ms granularity;
     /// never blocks past the deadline.
     pub fn next(self: *Pump, deadlineMs: u64) !?Deliverable {
-        const t0: u64 = @intCast(clockMod.monotonicMillis());
+        const t0: u64 = @intCast(clockMod.monotonicMillis(self.ep.io));
         while (true) {
             if (self.dead.load(.acquire)) return error.PumpStopped;
             self.mu.lock();
             const item = self.queue.pop();
             self.mu.unlock();
             if (item) |q| return .{ .data = q.data, .from = q.from };
-            const now: u64 = @intCast(clockMod.monotonicMillis());
+            const now: u64 = @intCast(clockMod.monotonicMillis(self.ep.io));
             if (now -| t0 >= deadlineMs) return null;
-            clockMod.sleepMillis(1);
+            clockMod.sleepMillis(self.ep.io, 1);
         }
     }
 
@@ -135,11 +135,11 @@ pub const Pump = struct {
                 // Socket closed (stop) or ICMP/transport noise: back off
                 // briefly, then re-check the flag. Never hot-spins: a
                 // persistently failing socket still yields the CPU.
-                clockMod.sleepMillis(1);
+                clockMod.sleepMillis(self.ep.io, 1);
                 continue;
             };
             const owned = self.allocator.dupe(u8, rx.data) catch {
-                clockMod.sleepMillis(1);
+                clockMod.sleepMillis(self.ep.io, 1);
                 continue;
             };
             self.mu.lock();

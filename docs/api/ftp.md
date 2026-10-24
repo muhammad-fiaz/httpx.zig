@@ -1,6 +1,6 @@
 # API: FTP
 
-The `httpx.ftp` namespace provides a robust File Transfer Protocol client and server supporting standard RFC 959 commands, multiline reply parsing, active/passive data transfers (EPSV preferred, PASV fallback), directory navigation, and file transfers with streaming callbacks or high-level downloads.
+The `httpx.protocols.ftp` namespace provides a robust File Transfer Protocol client and server supporting standard RFC 959 commands, multiline reply parsing, active/passive data transfers (EPSV preferred, PASV fallback), directory navigation, and file transfers with streaming callbacks or high-level downloads.
 
 ## Overview
 
@@ -16,7 +16,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = try httpx.ftp.Client.init(allocator, io, .{
+    var client = try httpx.protocols.ftp.Client.init(allocator, io, .{
         .host = "test.rebex.net",
         .port = 21,
         .user = "demo",
@@ -37,10 +37,10 @@ pub fn main() !void {
 
 ## High-Level File Download
 
-For one-shot file downloads with automated progress bars, cryptographic hash verification, and atomic file replacement, use `httpx.ftp.download`:
+For one-shot file downloads with automated progress bars, cryptographic hash verification, and atomic file replacement, use `httpx.client.download.ftpDownload`:
 
 ```zig
-const res = try httpx.ftp.download(allocator, .{
+const res = try httpx.client.download.ftpDownload(io, allocator, .{
     .host = "test.rebex.net",
     .port = 21,
     .user = "demo",
@@ -56,7 +56,7 @@ const res = try httpx.ftp.download(allocator, .{
 
 ## Types and Configuration
 
-### `httpx.ftp.Options`
+### `httpx.protocols.ftp.Options`
 
 ```zig
 pub const Options = struct {
@@ -77,12 +77,12 @@ pub const Options = struct {
 | `password` | `[]const u8` | `"anonymous@"` | FTP password |
 | `secure` | `bool` | `false` | When true, requires TLS encryption |
 
-### `httpx.ftp.Server`
+### `httpx.protocols.ftp.Server`
 
 RFC 959 FTP server implementation built on the shared TCP listener:
 
 ```zig
-var server = try httpx.ftp.Server.init(allocator, io, .{
+var server = try httpx.protocols.ftp.Server.init(allocator, io, .{
     .host = "0.0.0.0",
     .port = 2121,
     .user = "demo",

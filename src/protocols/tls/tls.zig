@@ -29,6 +29,9 @@ const sessionMod = @import("tlsSession.zig");
 const transportMod = @import("tlsTransport.zig");
 const trustStoreMod = @import("trustStore.zig");
 const verifyMod = @import("certificateVerification.zig");
+pub const ocsp = @import("ocsp.zig");
+pub const sct = @import("sct.zig");
+pub const pkcs12 = @import("pkcs12.zig");
 
 /// TLS client owner: configuration, trust and identity, connection factory.
 pub const Client = clientMod.Client;
@@ -108,7 +111,7 @@ pub const Response = struct {
     body: []const u8 = "",
 };
 
-/// High-level TLS server listener backed by httpx.Server.
+/// High-level TLS server listener backed by httpx.server.Server.
 ///
 /// `run` wires `handlerFn` (a `*const fn (Request) anyerror!Response`) to a
 /// wildcard route for every method, so the single handler serves all paths.

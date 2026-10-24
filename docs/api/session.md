@@ -8,7 +8,7 @@ To persist a session across requests, issue a cookie on login and read it
 back on later requests:
 
 ```zig
-fn loginHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn loginHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     _ = ctx;
     return .{
         .status = 200,
@@ -20,7 +20,7 @@ fn loginHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn dashboardHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn dashboardHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const session = ctx.cookie("session") orelse
         return ctx.textStatus(401, "login required");
     _ = session;

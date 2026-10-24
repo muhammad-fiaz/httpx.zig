@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn helloHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn helloHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{
         .status = 200,
         .body = "HTTP/1.1 keep-alive response",
@@ -9,7 +9,7 @@ fn helloHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn statusHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn statusHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{
         .status = 200,
         .body = "{\"status\":\"healthy\",\"protocol\":\"HTTP/1.1\"}",
@@ -23,7 +23,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,

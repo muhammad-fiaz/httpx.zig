@@ -26,7 +26,7 @@ and records automatically; use the API below for custom instrumentation.
 | `render(writer)` / `renderPrometheus(writer)` | Prometheus 0.0.4 text exposition |
 
 Root-level aliases: `httpx.Metrics`, `httpx.MetricsSnapshot`,
-`httpx.ServerSnapshot`, `httpx.ClientSnapshot`, `httpx.Counter`,
+`httpx.metrics.ServerSnapshot`, `httpx.metrics.ClientSnapshot`, `httpx.Counter`,
 `httpx.Gauge`, `httpx.Histogram`.
 
 ## MetricsSnapshot

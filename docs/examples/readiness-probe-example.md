@@ -4,11 +4,11 @@ Liveness/readiness probe routes for Kubernetes checks. Register plain
 routes (see `examples/healthCheck.zig`).
 
 ```zig
-fn healthHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn healthHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJson(.{ .status = "healthy" });
 }
 
-fn readyHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn readyHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJson(.{ .status = "ready" });
 }
 

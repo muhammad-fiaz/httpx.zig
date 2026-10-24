@@ -367,6 +367,10 @@ pub const Encoder = struct {
     /// emitted. Builders read it via `sectionRic` to size the prefix.
     sectionUsedDynamic: bool = false,
 
+    /// Cap on buffered decoder-stream bytes: a peer dripping partial
+    /// bytes forever is a stream error, not unbounded memory.
+    pub const MAX_DECODER_BUF: usize = 64 * 1024;
+
     pub fn init(allocator: Allocator) Encoder {
         return .{ .allocator = allocator };
     }
@@ -668,6 +672,9 @@ pub const Encoder = struct {
     /// then corruption (InvalidInstruction), otherwise it is buffered
     /// until more bytes arrive.
     pub fn readDecoderStream(self: *Encoder, data: []const u8, fin: bool) !void {
+        if (self.decBuf.items.len - self.decOff + data.len > MAX_DECODER_BUF) {
+            return Error.InvalidInstruction;
+        }
         try self.decBuf.appendSlice(self.allocator, data);
         var off: usize = self.decOff;
         const buf = self.decBuf.items;
@@ -681,6 +688,8 @@ pub const Encoder = struct {
                     off = start;
                     break;
                 }
+                self.decOff = off;
+                self.compactDecBuf();
                 return Error.InvalidInstruction;
             };
         }
@@ -696,6 +705,12 @@ pub const Encoder = struct {
             return try decodeInt(buf, off, 6); // Stream Cancellation
         }
         const n = try decodeInt(buf, off, 6); // Insert Count Increment
+        // RFC 9204 Section 3.2.6: Increment of 0 or exceeding known inserts is a decoder stream error.
+        if (n == 0) return Error.InvalidInstruction;
+        const curInserts = self.insertCount();
+        if (curInserts < self.peerKnownInserts or curInserts - self.peerKnownInserts < n) {
+            return Error.InvalidInstruction;
+        }
         self.peerKnownInserts = std.math.add(u64, self.peerKnownInserts, n) catch
             return Error.InvalidInstruction;
         return n;
@@ -997,7 +1012,15 @@ pub const Decoder = struct {
 
     fn decodeSectionInner(self: *Decoder, data: []const u8, base: u64, ric: u64) Error![]FieldLine {
         var results = std.ArrayList(FieldLine).empty;
-        errdefer results.deinit(self.allocator);
+        errdefer {
+            for (results.items) |f| {
+                if (f.allocated) {
+                    self.allocator.free(f.name);
+                    self.allocator.free(f.value);
+                }
+            }
+            results.deinit(self.allocator);
+        }
         var offset: usize = 0;
 
         while (offset < data.len) {
@@ -1433,12 +1456,16 @@ test "qpack decoder stream instructions parse strictly" {
     const a = std.testing.allocator;
     var enc = Encoder.init(a);
     defer enc.deinit();
+    enc.setMaxTableCapacity(4096);
+    _ = try enc.insertDynamic("x-a", "1");
+    _ = try enc.insertDynamic("x-b", "2");
     // SectionAck(4) + StreamCancel(4) + Increment(2): all complete.
     try enc.readDecoderStream(&.{ 0x84, 0x44, 0x02 }, true);
     try std.testing.expectEqual(@as(u64, 2), enc.peerKnownInserts);
-    // Split delivery across calls buffers instead of failing.
-    try enc.readDecoderStream(&.{0x80}, false);
-    try enc.readDecoderStream(&.{0x09}, false);
+    // Split delivery across calls buffers instead of failing:
+    // SectionAck for stream 127: 0xFF (multi-byte prefix) split from 0x00
+    try enc.readDecoderStream(&.{0xFF}, false);
+    try enc.readDecoderStream(&.{0x00}, false);
     // Overflowing increment is corruption, not a split: fatal mid-buffer.
     var bad: [16]u8 = undefined;
     const n = try encodeInt(&bad, 6, std.math.maxInt(u64));
@@ -1577,4 +1604,59 @@ test "qpack rfc9204 B.2 dynamic table and post-base vector" {
     try std.testing.expectEqualStrings("/sample/path", fields[1].value);
     try std.testing.expectEqual(@as(usize, 1), ack.items.len);
     try std.testing.expectEqual(@as(u8, 0x84), ack.items[0]);
+}
+
+test "qpack decoder stream bounded buffer rejection" {
+    const a = std.testing.allocator;
+    var enc = Encoder.init(a);
+    defer enc.deinit();
+    // Feed 65 KiB of incomplete varint bytes (high bit set)
+    const big = try a.alloc(u8, Encoder.MAX_DECODER_BUF + 1);
+    defer a.free(big);
+    @memset(big, 0xBF); // 6-bit prefix with continuation bit
+    try std.testing.expectError(Error.InvalidInstruction, enc.readDecoderStream(big, false));
+}
+
+test "qpack insert count increment zero is rejected" {
+    const a = std.testing.allocator;
+    var enc = Encoder.init(a);
+    defer enc.deinit();
+    // Increment of 0: opcode 0x00
+    try std.testing.expectError(Error.InvalidInstruction, enc.readDecoderStream(&.{0x00}, true));
+}
+
+test "qpack insert count increment exceeding dynamic insertions is rejected" {
+    const a = std.testing.allocator;
+    {
+        var enc = Encoder.init(a);
+        defer enc.deinit();
+        enc.setMaxTableCapacity(4096);
+        _ = try enc.insertDynamic("x-foo", "bar");
+        try std.testing.expectEqual(@as(u64, 1), enc.insertCount());
+        // Increment of 2 exceeds current insert count of 1
+        try std.testing.expectError(Error.InvalidInstruction, enc.readDecoderStream(&.{0x02}, true));
+    }
+    {
+        var enc = Encoder.init(a);
+        defer enc.deinit();
+        enc.setMaxTableCapacity(4096);
+        _ = try enc.insertDynamic("x-foo", "bar");
+        // Valid increment of 1 succeeds
+        try enc.readDecoderStream(&.{0x01}, true);
+        try std.testing.expectEqual(@as(u64, 1), enc.peerKnownInserts);
+        // Further increment of 1 now exceeds (1 - 1 = 0 available)
+        try std.testing.expectError(Error.InvalidInstruction, enc.readDecoderStream(&.{0x01}, true));
+    }
+}
+
+test "qpack decodeSectionInner frees partial allocated fields on error" {
+    const a = std.testing.allocator;
+    var dec = Decoder.init(a);
+    defer dec.deinit();
+    // Section with one valid literal with literal name:
+    // 0010 0000 (0x20, raw name len 4): "test"
+    // value raw len 5: "value"
+    // followed by an invalid continuation byte that causes Truncated error.
+    const malformed = "\x20\x04test\x05value\x20\x04abc";
+    try std.testing.expectError(Error.InvalidInstruction, dec.decodeSection(malformed));
 }

@@ -5,7 +5,7 @@ HTTPX does not provide Unix domain socket (AF_UNIX) listeners or dialing.
 and the client dials TCP. For same-machine IPC, bind to loopback instead:
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
 });

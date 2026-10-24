@@ -18,7 +18,7 @@ pub fn main() !void {
 
     std.debug.print("==> HTTPX Static Site Server Demo\n\n", .{});
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -32,7 +32,7 @@ pub fn main() !void {
     std.debug.print("Static site server listening on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };

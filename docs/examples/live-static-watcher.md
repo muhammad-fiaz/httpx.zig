@@ -17,7 +17,7 @@ Demonstrates liveStaticWatcher.zig using the canonical HTTPX API.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn indexHtmlHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn indexHtmlHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const htmlContent =
         \\<!DOCTYPE html>
         \\<html lang="en">
@@ -40,7 +40,7 @@ fn indexHtmlHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.html(htmlContent);
 }
 
-fn styleCssHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn styleCssHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const css =
         \\body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; }
         \\.container { max-width: 600px; margin: 0 auto; background: #1e293b; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
@@ -56,7 +56,7 @@ fn styleCssHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn appJsHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn appJsHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const js =
         \\async function fetchStatus() {
         \\  const res = await fetch('/api/status');
@@ -71,7 +71,7 @@ fn appJsHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn apiStatusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn apiStatusHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJson(.{
         .status = "healthy",
         .engine = "httpx.zig",
@@ -105,7 +105,7 @@ pub fn main() !void {
     std.debug.print("[INFO] Background file watcher started for '{s}'\n", .{testAsset});
 
     // 3. Initialize server with colored lifecycle logging
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -123,7 +123,7 @@ pub fn main() !void {
     std.debug.print("[INFO] Server running on http://127.0.0.1:{d} (Press CTRL+C to quit)\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };
@@ -166,7 +166,7 @@ pub fn main() !void {
     std.debug.print("[HOT RELOAD] Modifying static file '{s}'...\n", .{testAsset});
     try httpx.fs.writeFile(testAsset, "Updated asset content trigger");
 
-    httpx.clock.sleepMillis(150);
+    httpx.clock.sleepMillis(io, 150);
     while (fileWatcher.next()) |event| {
         std.debug.print("[HOT RELOAD] Event: path='{s}', kind={s}, strategy={s}\n", .{
             event.path,

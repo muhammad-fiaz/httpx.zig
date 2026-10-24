@@ -50,22 +50,21 @@ var client = httpx.Client.init(allocator, io, .{
 });
 defer client.deinit();
 
-// Out-of-the-box convenience (zero initialization needed):
-var response = try httpx.get("https://api.example.com/users");
+// Requests use the initialized client and its allocator/I/O context.
+var response = try client.get("https://api.example.com/users", .{});
 defer response.deinit();
 
-// Dot notation module access:
-var post_res = try httpx.post("https://api.example.com/users", .{ .json = .{ .name = "Alice", .role = "developer" },
+var post_res = try client.post("https://api.example.com/users", .{ .json = .{ .name = "Alice", .role = "developer" },
 });
 defer post_res.deinit();
 ```
 
 `ClientConfig` is an idiomatic Zig struct where omitted fields use standard defaults.
-It matches `httpx.ClientConfig` in `src/client/client.zig` exactly:
+It matches `httpx.client.Config` in `src/client/client.zig` exactly:
 
 ```zig
 const io = std.Io.Threaded.global_single_threaded.io();
-const cfg: httpx.ClientConfig = .{
+const cfg: httpx.client.Config = .{
     .timeoutMs = 10_000,
     .followRedirects = true,
     .maxRedirects = 5,
@@ -188,7 +187,8 @@ All methods are URL-first (`url`, then options):
 |--------|-------------|
 | `fetch(url, options)` | **Primary unified HTTP request operation** |
 | `get(url, options)` | HTTP GET request |
-| `post(url, options)` | HTTP POST request |
+| `post(url, options)` | HTTP POST request (accepts `.body`, `.json`, `.form`) |
+| `postJson(url, payload, options)` | HTTP POST with typed struct or serialized JSON payload |
 | `put(url, options)` | HTTP PUT request |
 | `delete(url, options)` | HTTP DELETE request |
 | `patch(url, options)` | HTTP PATCH request |
@@ -197,6 +197,11 @@ All methods are URL-first (`url`, then options):
 | `connect(url, options)` | HTTP CONNECT request |
 | `options(url, options)` | HTTP OPTIONS request |
 | `request(url, options)` | Generic request (method set via `options.method`) |
+| `requestStream(url, options)` | Streaming request returning incremental `ResponseStream` |
+| `requestBuilder(method, url)` | Start fluent `RequestBuilder` for chained request construction |
+| `builder(method, url)` | Alias for `requestBuilder` |
+| `getBuilder(url)` | Start GET `RequestBuilder` |
+| `postBuilder(url)` | Start POST `RequestBuilder` |
 | `getAll(urls)` | Concurrent GETs; deinit each response, free the slice |
 | `requestAll(reqs)` | Concurrent requests; same ownership |
 | `download(url, options)` | Streaming file download with resume/verify (destination via `options.path`) |
@@ -211,12 +216,12 @@ All methods are URL-first (`url`, then options):
 
 ### Cookie Jar API
 
-The standalone `httpx.CookieJar` keeps cookies across requests
+The standalone `httpx.client.CookieJar` keeps cookies across requests
 (domain-filtered per RFC 6265). Per-request cookies use the `cookie` option.
 
 | Method | Description |
 |--------|-------------|
-| `CookieJar.init(allocator)` / `deinit()` | Lifecycle |
+| `CookieJar.init(allocator, io)` / `deinit()` | Lifecycle |
 | `setFromHeader(setCookie, host)` | Store a `Set-Cookie` value |
 | `cookieHeader(host, path, secure, buf)` | Render the `Cookie` header (`secure` gates `Secure` cookies) |
 | `purgeExpired()` | Drop expired cookies |
@@ -235,7 +240,7 @@ defer client.deinit();
 const response = try client.get("https://api.example.com/users", .{});
 defer response.deinit();
 std.debug.print("Status: {d}\n", .{response.status});
-std.debug.print("Body: {s}\n", .{response.body});
+std.debug.print("Body: {s}\n", .{response.text()});
 
 // POST with JSON
 const json_response = try client.post("https://api.example.com/users", .{
@@ -243,17 +248,26 @@ const json_response = try client.post("https://api.example.com/users", .{
 });
 defer json_response.deinit();
 
+// POST with typed struct
+const User = struct { name: []const u8, role: []const u8 };
+var typed_res = try client.postJson("https://api.example.com/users", User{
+    .name = "John",
+    .role = "engineer",
+}, .{});
+defer typed_res.deinit();
+
 // Custom headers
 const auth_response = try client.get("https://api.example.com/protected", .{
     .headers = &.{
-        .{ "Authorization", "Bearer token123" },
-        .{ "X-Custom-Header", "value" },
+        .{ .name = "Authorization", .value = "Bearer token123" },
+        .{ .name = "X-Custom-Header", .value = "value" },
     },
 });
 defer auth_response.deinit();
 
 // Built-in auth helpers
-const bearer_response = try client.get("https://api.example.com/protected", .{ .headers = &.{.{ "Authorization", "Bearer token123" }, .{ "Accept", "application/json" }},
+const bearer_response = try client.get("https://api.example.com/protected", .{
+    .bearerAuth = "token123",
 });
 defer bearer_response.deinit();
 
@@ -425,58 +439,58 @@ const response = client.get("https://example.com", .{}) catch |err| switch (err)
 };
 ```
 
-## Convenience Functions
+## Request Methods
 
-The root module exposes zero-config convenience helpers for simple requests:
+Use request methods on an initialized client:
 
 ```zig
-var a = try httpx.get("https://example.com", .{});
+var a = try client.get("https://example.com", .{});
 defer a.deinit();
 
-var b = try httpx.post("https://example.com/items", .{ .json = "{\"name\":\"demo\"}",
+var b = try client.post("https://example.com/items", .{ .json = "{\"name\":\"demo\"}",
 });
 defer b.deinit();
 
-var c = try httpx.delete("https://example.com/items/42", .{});
+var c = try client.delete("https://example.com/items/42", .{});
 defer c.deinit();
 
-var d = try httpx.put("https://example.com/items", .{ .json = "{\"name\":\"updated\"}",
+var d = try client.put("https://example.com/items", .{ .json = "{\"name\":\"updated\"}",
 });
 defer d.deinit();
 
-var e = try httpx.patch("https://example.com/items", .{ .json = "{\"name\":\"patched\"}",
+var e = try client.patch("https://example.com/items", .{ .json = "{\"name\":\"patched\"}",
 });
 defer e.deinit();
 
-var f = try httpx.head("https://example.com/items", .{});
+var f = try client.head("https://example.com/items", .{});
 defer f.deinit();
 
-var g = try httpx.options("https://example.com/items", .{});
+var g = try client.options("https://example.com/items", .{});
 defer g.deinit();
 
-var h = try httpx.request("https://example.com/health", .{
+var h = try client.request("https://example.com/health", .{
     .method = .GET,
 });
 defer h.deinit();
 ```
 
-Top-level request functions (all URL-first):
+Client request methods (all URL-first):
 
 | Function | Description |
 |----------|-------------|
-| `httpx.get(url, opts)` | HTTP GET |
-| `httpx.post(url, opts)` | HTTP POST |
-| `httpx.put(url, opts)` | HTTP PUT |
-| `httpx.patch(url, opts)` | HTTP PATCH |
-| `httpx.delete(url, opts)` | HTTP DELETE |
-| `httpx.head(url, opts)` | HTTP HEAD |
-| `httpx.options(url, opts)` | HTTP OPTIONS |
-| `httpx.trace(url, opts)` | HTTP TRACE |
-| `httpx.connect(url, opts)` | HTTP CONNECT |
-| `httpx.fetch(url, opts)` | Unified fetch (any method via `.method`) |
-| `httpx.request(url, opts)` | General HTTP request (any method via `.method`) |
-| `httpx.getAll(&urls)` | Concurrent GET requests |
-| `httpx.requestAll(&requests)` | Concurrent custom requests |
+| `client.get(url, opts)` | HTTP GET |
+| `client.post(url, opts)` | HTTP POST |
+| `client.put(url, opts)` | HTTP PUT |
+| `client.patch(url, opts)` | HTTP PATCH |
+| `client.delete(url, opts)` | HTTP DELETE |
+| `client.head(url, opts)` | HTTP HEAD |
+| `client.options(url, opts)` | HTTP OPTIONS |
+| `client.trace(url, opts)` | HTTP TRACE |
+| `client.connect(url, opts)` | HTTP CONNECT |
+| `client.fetch(url, opts)` | Unified fetch (any method via `.method`) |
+| `client.request(url, opts)` | General HTTP request (any method via `.method`) |
+| `client.getAll(&urls)` | Concurrent GET requests |
+| `client.requestAll(&requests)` | Concurrent custom requests |
 
 ## See Also
 

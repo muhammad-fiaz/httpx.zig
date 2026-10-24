@@ -415,7 +415,7 @@ pub const Server = struct {
         // Skipped under mutual TLS: an abbreviated flight carries no
         // CertificateRequest, so resumed connections would bypass client
         // certificate authentication entirely.
-        const nowMs: u64 = @intCast(clockMod.millisNow());
+        const nowMs: u64 = @intCast(clockMod.millisNow(self.io));
         const fullCh = readBuf[hello.offset..][0 .. 4 + hello.bodyLen];
         if (self.config.clientAuth == .disabled) {
             if (self.config.maxEarlyData > 0) {
@@ -638,7 +638,7 @@ pub const Server = struct {
             const store = if (self.clientTrust) |*s| s else return error.ClientCertificateInvalid;
             // Borrowed view: ownership of the DER bytes stays with `presented`.
             const chain = certMod.CertificateChain{ .certs = presented.ders, .allocator = a };
-            const nowSec: i64 = @divFloor(clockMod.millisNow(), 1000);
+            const nowSec: i64 = @divFloor(clockMod.millisNow(self.io), 1000);
             verifyMod.verifyCertificateChain(chain, store, null, nowSec) catch return error.ClientCertificateInvalid;
             try engine.processClientCertificateVerify(hsBuf.items[sp.cvOff..sp.cvEnd], presented.ders[0]);
         }

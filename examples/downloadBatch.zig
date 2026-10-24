@@ -22,7 +22,7 @@ const DownloadTask = struct {
     }
 };
 
-fn bytesHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn bytesHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const data = try ctx.allocator.alloc(u8, 90);
     @memset(data, 'X');
     return .{
@@ -38,7 +38,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -57,7 +57,7 @@ pub fn main() !void {
         .{ .taskId = 3, .url = sampleUrl, .dest = "downloads/batch_file3.bin" },
     };
 
-    var pool = try httpx.WorkerPool.init(allocator, io, .{
+    var pool = try httpx.concurrency.Pool.init(allocator, io, .{
         .workers = 4,
     });
     defer pool.deinit();

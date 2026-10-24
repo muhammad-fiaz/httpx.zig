@@ -10,7 +10,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 // Server events: method, path, status, durationMs, bytesIn/bytesOut.
-fn onServerEvent(event: httpx.ServerEvent) void {
+fn onServerEvent(event: httpx.logging.ServerEvent) void {
     if (event.kind == .requestCompleted) {
         std.debug.print("[SRV] {s} {s} {d} {d}ms\n", .{
             event.method, event.path, event.status, event.durationMs,
@@ -19,7 +19,7 @@ fn onServerEvent(event: httpx.ServerEvent) void {
 }
 
 // Client events: method, url (credentials redacted), status, durationMs.
-fn onClientEvent(event: httpx.ClientEvent) void {
+fn onClientEvent(event: httpx.logging.ClientEvent) void {
     if (event.kind == .requestCompleted) {
         std.debug.print("[CLI] {s} {s} {d}\n", .{
             event.method, event.url, event.status,
@@ -34,7 +34,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     // Attach to server (omit `.logging` entirely for fully silent operation).
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .logging = .{ .callback = onServerEvent, .level = .info },

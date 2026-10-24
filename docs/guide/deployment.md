@@ -35,7 +35,7 @@ HTTPX is built on standards-based TCP/UDP, TLS, and HTTP abstractions. It runs i
       │ HTTPS (Port 8443 or Port 443 with bind capabilities)
       ▼
 ┌───────────────────────┐
-│ HTTPX (httpx.tls.Listener) │ ── Native Zig TLS 1.3 engine (+ std.crypto.tls HTTPS client)
+│ HTTPX (httpx.protocols.tls.Listener) │ ── Native Zig TLS 1.3 engine (+ std.crypto.tls HTTPS client)
 └───────────────────────┘
 ```
 
@@ -56,7 +56,7 @@ pub fn main() !void {
 
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "0.0.0.0", // Bind all interfaces for containers/VPS
         .port = 8080,      // Unprivileged internal application port
         .keepAlive = true,
@@ -71,11 +71,11 @@ pub fn main() !void {
     server.serve();
 }
 
-fn healthCheck(ctx: *httpx.Context) anyerror!httpx.Response {
+fn healthCheck(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJson(.{ .status = "healthy", .timestamp = std.time.timestamp() });
 }
 
-fn dataHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn dataHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     // When trustForwardedHeaders is true, remoteAddress() reads X-Forwarded-For
     const clientIp = ctx.remoteAddress() orelse "unknown";
     const scheme = ctx.scheme(); // "https" or "http"

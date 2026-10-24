@@ -46,12 +46,12 @@ On the server, HTTPX provides standard authentication middleware and extractor u
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn requireApiKey(ctx: *httpx.Context) !bool {
+fn requireApiKey(ctx: *httpx.web.router.Context) !bool {
     const key = ctx.header("X-API-Key") orelse return false;
     return std.mem.eql(u8, key, "expected-secret-key");
 }
 
-fn secureHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn secureHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     if (!try requireApiKey(ctx)) {
         return ctx.textStatus(401, "Missing or invalid X-API-Key header");
     }
@@ -64,7 +64,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     // Secure endpoint using the check above

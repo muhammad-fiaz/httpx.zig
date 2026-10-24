@@ -1,6 +1,7 @@
 # Concurrent Requests
 
-Execute multiple requests in parallel with `getAll` / `requestAll`.
+Execute multiple requests in parallel with an initialized client's
+`getAll` / `requestAll` methods.
 See `examples/concurrentDemo.zig` and [Batch Concurrent](/examples/batch-concurrent).
 
 ```zig
@@ -8,13 +9,13 @@ const urls = [_][]const u8{
     "https://httpbun.com/get",
     "https://httpbun.com/headers",
 };
-const results = httpx.getAll(urls) catch |err| {
+const results = client.getAll(urls) catch |err| {
     std.debug.print("getAll failed: {s}\n", .{@errorName(err)});
     return;
 };
 defer {
     for (results) |*r| r.deinit();
-    std.heap.page_allocator.free(results);
+    allocator.free(results);
 }
 
 for (results, 0..) |result, i| {

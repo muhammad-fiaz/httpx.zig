@@ -29,7 +29,7 @@ defer resp.deinit();
 ## Server Trace Extractor Middleware
 
 ```zig
-fn traceMiddleware(ctx: *httpx.Context) !void {
+fn traceMiddleware(ctx: *httpx.web.router.Context) !void {
     if (ctx.header("traceparent")) |traceparent| {
         // Store trace ID in context local state for subsequent logs and queries
         ctx.set("traceparent", traceparent);

@@ -18,7 +18,7 @@ const index_html = @embedFile("static/index.html");
 try httpx.assets.registerEmbedded(allocator, "index.html", index_html, null);
 try httpx.assets.registerEmbedded(allocator, "greet.html", "<h1>Hello, {{ name }}!</h1>", null);
 
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .port = 8080,
     // Keep the template engine alive even with no templates/ directory:
     // the loader consults the embedded registry first.
@@ -55,7 +55,7 @@ Serve straight from disk for live iteration. Pair with the file watcher and
 browser live reload:
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
 try server.static("/", "examples/static"); // ETag + conditional GET included
 ```
 

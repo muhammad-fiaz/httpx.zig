@@ -10,11 +10,11 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn listHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn listHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return .{ .status = 200, .body = "[]", .contentType = "application/json" };
 }
 
-fn getHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn getHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const id = ctx.param("id") orelse "0";
     return .{
         .status = 200,
@@ -28,7 +28,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var router = httpx.Router.init(allocator);
+    var router = httpx.web.router.Router.init(allocator);
     defer router.deinit();
     try router.add(.GET, "/widgets", listHandler, .{ .meta = .{
         .summary = "List all widgets",

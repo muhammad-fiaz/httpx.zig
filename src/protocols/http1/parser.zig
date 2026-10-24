@@ -38,6 +38,8 @@ pub const ParseError = error{
     AmbiguousFraming,
     InvalidChunkSize,
     ObsFold,
+    MissingTrailerAllocator,
+    InvalidTrailer,
     OutOfMemory,
 };
 
@@ -233,6 +235,20 @@ pub const Field = struct {
     value: []const u8,
 };
 
+/// Trailer fields that could change message framing or connection semantics
+/// are forbidden by RFC 9110/9112 and must never be exposed as ordinary fields.
+pub fn trailerFieldAllowed(name: []const u8) bool {
+    if (name.len == 0 or name[0] == ':') return false;
+    const prohibited = [_][]const u8{
+        "transfer-encoding", "content-length", "host",   "trailer", "te",
+        "upgrade",           "connection",     "expect",
+    };
+    for (prohibited) |field| {
+        if (std.ascii.eqlIgnoreCase(field, name)) return false;
+    }
+    return true;
+}
+
 pub const HeaderBlockResult = struct { count: usize, end: usize };
 
 /// Parses a header block starting at buf[start..] up to the empty line.
@@ -313,20 +329,21 @@ pub fn decideFraming(
     fields: []const Field,
     isResponse: bool,
     status: u16,
-    methodLen: usize,
+    requestMethod: []const u8,
 ) ParseError!FramingDecision {
     return framingFull(fields, .{
         .isResponse = isResponse,
         .status = status,
-        .methodLen = methodLen,
+        .requestMethod = requestMethod,
     });
 }
 
 pub const FramingContext = struct {
     isResponse: bool = false,
     status: u16 = 0,
-    /// Length of the request method string; 4 => HEAD when isResponse.
-    methodLen: usize = 0,
+    /// Request method associated with a response. Only HEAD changes response
+    /// body framing; method length is insufficient because POST is also 4 bytes.
+    requestMethod: []const u8 = "",
     /// Treat 2xx responses to CONNECT as tunnels.
     connectOk: bool = false,
     /// True for HTTP/1.0 where Transfer-Encoding chunked is forbidden (RFC 9112 smuggling).
@@ -345,7 +362,7 @@ pub fn framingFull(fields: []const Field, ctx: FramingContext) ParseError!Framin
         // HEAD responses never carry a message body. Content-Length remains
         // representation metadata, but must not make the client consume
         // bytes from the connection (RFC 9112 Section 6.3).
-        if (ctx.methodLen == 4) {
+        if (std.ascii.eqlIgnoreCase(ctx.requestMethod, "HEAD")) {
             return .{ .framing = .none, .length = 0 };
         }
         if (ctx.connectOk and ctx.status < 300) {
@@ -419,7 +436,7 @@ pub const ChunkedDecoder = struct {
     /// recent input buffer and are valid only until it is reused.
     /// When set, `trailerAllocator` must be set too (ArrayList is unmanaged).
     trailers: ?*std.ArrayList(Field) = null,
-    trailerAllocator: Allocator = std.heap.page_allocator,
+    trailerAllocator: ?Allocator = null,
     trailersSeen: usize = 0,
 
     totalDecoded: u64 = 0,
@@ -534,8 +551,12 @@ pub const ChunkedDecoder = struct {
                         ParseError.TooManyHeaders => return ParseError.InvalidChunkSize,
                         else => return err,
                     };
+                    for (tfields[0..res.count]) |field| {
+                        if (!trailerFieldAllowed(field.name)) return ParseError.InvalidTrailer;
+                    }
                     if (self.trailers) |list| {
-                        list.appendSlice(self.trailerAllocator, tfields[0..res.count]) catch return ParseError.OutOfMemory;
+                        const allocator = self.trailerAllocator orelse return ParseError.MissingTrailerAllocator;
+                        list.appendSlice(allocator, tfields[0..res.count]) catch return ParseError.OutOfMemory;
                     }
                     self.trailersSeen += res.count;
                     src += res.end;
@@ -662,13 +683,13 @@ test "header block rejects obs-fold and whitespace before colon" {
 test "framing decisions incl smuggling defenses" {
     // CL alone
     const cl = [_]Field{.{ .name = "Content-Length", .value = "10" }};
-    const d1 = try decideFraming(&cl, false, 0, 0);
+    const d1 = try decideFraming(&cl, false, 0, "");
     try std.testing.expectEqual(Framing.contentLength, d1.framing);
     try std.testing.expectEqual(@as(usize, 10), d1.length);
 
     // chunked alone
     const te = [_]Field{.{ .name = "Transfer-Encoding", .value = "chunked" }};
-    const d2 = try decideFraming(&te, false, 0, 0);
+    const d2 = try decideFraming(&te, false, 0, "");
     try std.testing.expectEqual(Framing.chunked, d2.framing);
 
     // CL+TE together -> ambiguous (smuggling defense)
@@ -676,53 +697,56 @@ test "framing decisions incl smuggling defenses" {
         .{ .name = "Content-Length", .value = "10" },
         .{ .name = "Transfer-Encoding", .value = "chunked" },
     };
-    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&both, false, 0, 0));
+    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&both, false, 0, ""));
 
     // TE whose final coding is not chunked -> ambiguous
     const badte = [_]Field{.{ .name = "Transfer-Encoding", .value = "gzip" }};
-    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&badte, false, 0, 0));
+    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&badte, false, 0, ""));
     const gzipchunk = [_]Field{.{ .name = "Transfer-Encoding", .value = "gzip, chunked" }};
-    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&gzipchunk, false, 0, 0));
+    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&gzipchunk, false, 0, ""));
     const repeatedTe = [_]Field{
         .{ .name = "Transfer-Encoding", .value = "chunked" },
         .{ .name = "Transfer-Encoding", .value = "chunked" },
     };
-    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&repeatedTe, false, 0, 0));
+    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&repeatedTe, false, 0, ""));
 
     // conflicting duplicate CL
     const dupcl = [_]Field{
         .{ .name = "Content-Length", .value = "5" },
         .{ .name = "Content-Length", .value = "6" },
     };
-    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&dupcl, false, 0, 0));
+    try std.testing.expectError(ParseError.AmbiguousFraming, decideFraming(&dupcl, false, 0, ""));
 
     // identical duplicate CL allowed (RFC 9112 section 6.3 rule 4)
     const samedup = [_]Field{
         .{ .name = "Content-Length", .value = "5" },
         .{ .name = "content-length", .value = "5" },
     };
-    const d4 = try decideFraming(&samedup, false, 0, 0);
+    const d4 = try decideFraming(&samedup, false, 0, "");
     try std.testing.expectEqual(Framing.contentLength, d4.framing);
 
     // invalid CL forms
-    try std.testing.expectError(ParseError.InvalidContentLength, decideFraming(&.{.{ .name = "Content-Length", .value = "+5" }}, false, 0, 0));
-    try std.testing.expectError(ParseError.InvalidContentLength, decideFraming(&.{.{ .name = "Content-Length", .value = "0x10" }}, false, 0, 0));
-    try std.testing.expectError(ParseError.InvalidContentLength, decideFraming(&.{.{ .name = "Content-Length", .value = "" }}, false, 0, 0));
+    try std.testing.expectError(ParseError.InvalidContentLength, decideFraming(&.{.{ .name = "Content-Length", .value = "+5" }}, false, 0, ""));
+    try std.testing.expectError(ParseError.InvalidContentLength, decideFraming(&.{.{ .name = "Content-Length", .value = "0x10" }}, false, 0, ""));
+    try std.testing.expectError(ParseError.InvalidContentLength, decideFraming(&.{.{ .name = "Content-Length", .value = "" }}, false, 0, ""));
 
     // CONNECT tunnel response
     const conn = try framingFull(&.{}, .{ .isResponse = true, .status = 200, .connectOk = true });
     try std.testing.expectEqual(Framing.tunnel, conn.framing);
 
     // 204 has no body even when CL present
-    const r204 = try framingFull(&cl, .{ .isResponse = true, .status = 204, .methodLen = 4 });
+    const r204 = try framingFull(&cl, .{ .isResponse = true, .status = 204 });
     try std.testing.expectEqual(Framing.none, r204.framing);
 
     const headResponse = [_]Field{
         .{ .name = "Content-Length", .value = "42" },
         .{ .name = "Transfer-Encoding", .value = "chunked" },
     };
-    const rhead = try framingFull(&headResponse, .{ .isResponse = true, .status = 200, .methodLen = 4 });
+    const rhead = try framingFull(&headResponse, .{ .isResponse = true, .status = 200, .requestMethod = "hEaD" });
     try std.testing.expectEqual(Framing.none, rhead.framing);
+    const rpost = try framingFull(&cl, .{ .isResponse = true, .status = 200, .requestMethod = "POST" });
+    try std.testing.expectEqual(Framing.contentLength, rpost.framing);
+    try std.testing.expectEqual(@as(usize, 10), rpost.length);
 }
 
 test "chunked decoder basic and incremental feeding" {
@@ -784,6 +808,23 @@ test "chunked decoder with extensions and trailers" {
     try std.testing.expectEqual(@as(usize, 2), trailerList.items.len);
     try std.testing.expectEqualStrings("X-T", trailerList.items[0].name);
     try std.testing.expectEqualStrings("tv", trailerList.items[0].value);
+}
+
+test "chunked decoder rejects framing-sensitive trailer fields" {
+    const invalid = [_][]const u8{
+        "Content-Length: 0",
+        "Transfer-Encoding: chunked",
+        "Host: attacker.example",
+        "Connection: close",
+    };
+    for (invalid) |field| {
+        const wire = try std.fmt.allocPrint(std.testing.allocator, "0\r\n{s}\r\n\r\n", .{field});
+        defer std.testing.allocator.free(wire);
+        var decoder = ChunkedDecoder.init();
+        var buffer: [128]u8 = undefined;
+        @memcpy(buffer[0..wire.len], wire);
+        try std.testing.expectError(ParseError.InvalidTrailer, decoder.decode(buffer[0..wire.len]));
+    }
 }
 
 test "chunked decoder rejects malformed sizes and terminators" {
@@ -879,4 +920,111 @@ test "lone CR inside header value is rejected" {
 
     const response = "HTTP/1.1 200 OK\rX: y\r\n\r\n";
     try std.testing.expectError(ParseError.MalformedStatusLine, parseResponseHead(response, .{}));
+}
+
+test "regression: truncation sweep over valid messages" {
+    const writer = @import("writer.zig");
+    _ = writer;
+    const seeds = [_][]const u8{
+        "GET / HTTP/1.1\r\nHost: x\r\nUser-Agent: fuzz\r\n\r\n",
+        "POST /upload HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\n\r\nabcd",
+        "GET / HTTP/1.0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc",
+        "HTTP/1.1 204 No Content\r\nServer: s\r\n\r\n",
+        "HTTP/1.0 404 Not Found\r\n\r\nbody-until-close",
+        "CONNECT host:443 HTTP/1.1\r\nHost: host:443\r\n\r\n",
+        "OPTIONS * HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    };
+
+    var chunkBuf: [256]u8 = undefined;
+    for (seeds) |s| {
+        for (0..s.len + 1) |cut| {
+            _ = parseRequestHead(s[0..cut], .{}) catch {};
+            if (s.len >= 5) _ = parseResponseHead(s[0..cut], .{}) catch {};
+        }
+        @memcpy(chunkBuf[0..s.len], s);
+        var dec = ChunkedDecoder.init();
+        _ = dec.decode(chunkBuf[0..s.len]) catch {};
+        for (1..s.len) |cut| {
+            var d = ChunkedDecoder.init();
+            _ = d.decode(chunkBuf[0..cut]) catch {};
+        }
+    }
+}
+
+test "regression: seeded mutation never panics" {
+    const writer = @import("writer.zig");
+    const seeds = [_][]const u8{
+        "GET /path?q=1 HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\nX-A: b\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ndata\r\n0\r\n\r\n",
+        "PUT /x HTTP/1.1\r\nHost: y\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\nX-T: v\r\n\r\n",
+    };
+    var prng = std.Random.DefaultPrng.init(0xF00D);
+    const rng = prng.random();
+
+    var buf: [256]u8 = undefined;
+
+    for (seeds) |seed| {
+        var round: usize = 0;
+        while (round < 400) : (round += 1) {
+            const len = @min(seed.len, buf.len);
+            @memcpy(buf[0..len], seed[0..len]);
+
+            var m: usize = 0;
+            const mutations = 1 + rng.uintLessThan(usize, 4);
+            while (m < mutations) : (m += 1) {
+                const idx = rng.uintLessThan(usize, len);
+                switch (rng.uintLessThan(u8, 4)) {
+                    0 => buf[idx] = rng.int(u8),
+                    1 => buf[idx] ^= @as(u8, 1) << @intCast(rng.uintLessThan(u8, 8)),
+                    2 => buf[idx] = "\r\n\x00: \xff"[rng.uintLessThan(usize, 6)],
+                    else => buf[idx] = rng.uintAtMost(u8, 0x7F),
+                }
+            }
+
+            _ = parseRequestHead(buf[0..len], .{}) catch {};
+            _ = parseResponseHead(buf[0..len], .{}) catch {};
+            var dec = ChunkedDecoder.init();
+            _ = dec.decode(buf[0..len]) catch {};
+
+            const evil = [_]writer.Header{
+                .{ .name = if (len > 0) buf[0..1] else "x", .value = buf[0..@min(len, 16)] },
+            };
+            if (writer.buildResponse(std.heap.page_allocator, 200, "", null, .{ .headers = evil[0..] }, false)) |resp| {
+                try std.testing.expect(std.mem.indexOf(u8, resp, "\r\nEvil") == null);
+                std.heap.page_allocator.free(resp);
+            } else |_| {}
+            if (writer.buildInformational(std.heap.page_allocator, 100, &.{})) |info| {
+                std.heap.page_allocator.free(info);
+            } else |_| {}
+        }
+    }
+}
+
+test "regression: writer rejects smuggled CR/LF across many candidates" {
+    const writer = @import("writer.zig");
+    const candidates = [_][]const u8{
+        "v\r\nEvil: 1",
+        "v\nEvil: 1",
+        "v\rEvil",
+        "v\x00x",
+        "v\x7f",
+        "\r\n\r\nGET / HTTP/1.1",
+    };
+    for (candidates) |cand| {
+        const evilHeaders = [_]writer.Header{
+            .{ .name = "X-N", .value = cand },
+        };
+        if (writer.buildRequest(
+            std.heap.page_allocator,
+            "GET",
+            "/",
+            null,
+            .{ .host = "h", .headers = evilHeaders[0..] },
+        )) |maybe| {
+            std.heap.page_allocator.free(maybe);
+            try std.testing.expect(std.mem.indexOf(u8, maybe, "\r\nEvil") == null);
+            try std.testing.expect(std.mem.indexOf(u8, maybe, "\r\n\r\nEvil") == null);
+        } else |_| {}
+    }
 }

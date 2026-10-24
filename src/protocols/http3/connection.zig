@@ -139,6 +139,41 @@ pub const RequestStream = struct {
         try out.appendSlice(self.allocator, body);
         return out.toOwnedSlice(self.allocator);
     }
+
+    /// Builds trailing HEADERS frame payload for a request or response.
+    /// Trailing headers must not contain pseudo-headers or forbidden fields (RFC 9110 §6.5.1).
+    pub fn buildTrailers(self: *RequestStream, trailers: []const qpackMod.FieldLine) ![]u8 {
+        var block = std.ArrayList(u8).empty;
+        errdefer block.deinit(self.allocator);
+        self.qpack.beginSection();
+        for (trailers) |h| {
+            if (h.name.len == 0) return error.InvalidHeader;
+            if (h.name[0] == ':') return error.InvalidHeader;
+            if (std.ascii.eqlIgnoreCase(h.name, "content-length") or
+                std.ascii.eqlIgnoreCase(h.name, "transfer-encoding") or
+                std.ascii.eqlIgnoreCase(h.name, "host") or
+                std.ascii.eqlIgnoreCase(h.name, "connection"))
+            {
+                return error.InvalidHeader;
+            }
+            try self.encodeField(&block, h.name, h.value);
+        }
+
+        const ric = self.qpack.sectionRic();
+        var prefix = std.ArrayList(u8).empty;
+        defer prefix.deinit(self.allocator);
+        try self.qpack.encodePrefix(&prefix, ric, ric);
+
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        var fh: [16]u8 = undefined;
+        const n = try frameMod.encodeFrameHeader(&fh, @backingInt(frameMod.FrameType.headers), prefix.items.len + block.items.len);
+        try out.appendSlice(self.allocator, fh[0..n]);
+        try out.appendSlice(self.allocator, prefix.items);
+        try out.appendSlice(self.allocator, block.items);
+        block.deinit(self.allocator);
+        return out.toOwnedSlice(self.allocator);
+    }
 };
 
 /// Control stream builder - SETTINGS frame.
@@ -187,7 +222,7 @@ pub const PeerSettings = struct {
     h3Datagram: u64 = 0,
 };
 
-/// Canonical settings type (re-exported as `httpx.http3.Settings`).
+/// Canonical settings type (re-exported as `httpx.protocols.http3.Settings`).
 pub const Settings = PeerSettings;
 
 /// HTTP/3 connection state machine. Manages control stream lifecycle,
@@ -227,6 +262,7 @@ pub const Connection = struct {
     /// Last identifier carried by the peer's most recent GOAWAY.
     goawayStreamId: u64 = 0,
     maxPushId: u64 = 0,
+    maxPushIdReceived: bool = false,
 
     // Stream tracking
     nextBidiId: u64,
@@ -341,7 +377,10 @@ pub const Connection = struct {
 
     /// Processes an incoming SETTINGS frame from the peer's control stream.
     pub fn processPeerSettings(self: *Connection, settingsEntries: []const frameMod.SettingEntry) !void {
-        if (self.settingsReceived) return Error.InvalidSettings;
+        if (self.settingsReceived) {
+            self.controlError = .frameUnexpected;
+            return Error.ProtocolViolation;
+        }
         var seenQpackCapacity = false;
         var seenMaxFieldSection = false;
         var seenBlockedStreams = false;
@@ -415,6 +454,10 @@ pub const Connection = struct {
                 return Error.ProtocolViolation;
             },
             0x4 => {
+                if (self.settingsReceived) {
+                    self.controlError = .frameUnexpected;
+                    return Error.ProtocolViolation;
+                }
                 const entries = frameMod.parseSettingsPayload(payload, self.allocator) catch |e| switch (e) {
                     error.OutOfMemory => return Error.OutOfMemory,
                     else => {
@@ -424,7 +467,9 @@ pub const Connection = struct {
                 };
                 defer self.allocator.free(entries);
                 self.processPeerSettings(entries) catch |e| {
-                    self.controlError = if (e == Error.OutOfMemory) .internalError else .settingsError;
+                    if (self.controlError == null) {
+                        self.controlError = if (e == Error.OutOfMemory) .internalError else .settingsError;
+                    }
                     return e;
                 };
             },
@@ -465,7 +510,39 @@ pub const Connection = struct {
                         self.controlError = .frameError;
                         return Error.ProtocolViolation;
                     };
-                    if (pid > self.maxPushId) self.maxPushId = pid;
+                    if (self.maxPushIdReceived and pid < self.maxPushId) {
+                        self.controlError = .idError;
+                        return Error.ProtocolViolation;
+                    }
+                    self.maxPushId = pid;
+                    self.maxPushIdReceived = true;
+                } else if (frameType == 0x3) {
+                    const pid = frameMod.decodeSingleVarintPayload(payload) catch {
+                        self.controlError = .frameError;
+                        return Error.ProtocolViolation;
+                    };
+                    if (!self.maxPushIdReceived or pid > self.maxPushId) {
+                        self.controlError = .idError;
+                        return Error.ProtocolViolation;
+                    }
+                }
+            },
+            0xF0700, 0xF0701 => {
+                if (self.role == .client) {
+                    self.controlError = .frameUnexpected;
+                    return Error.ProtocolViolation;
+                }
+                if (frameType == 0xF0700) {
+                    var off: usize = 0;
+                    const priElemId = varint.decode(payload, &off) catch {
+                        self.controlError = .frameError;
+                        return Error.ProtocolViolation;
+                    };
+                    // RFC 9218 Section 7.1: Must identify a client-initiated bidirectional stream
+                    if ((priElemId & 0x03) != 0) {
+                        self.controlError = .frameUnexpected;
+                        return Error.ProtocolViolation;
+                    }
                 }
             },
             else => {}, // Unknown control frames are ignored per RFC 9114.
@@ -1435,7 +1512,8 @@ test "http3 control stream rejects request frames and accepts settings" {
     defer a.free(encoded);
     try c.processControlFrame(0x4, encoded);
     try std.testing.expect(c.settingsReceived);
-    try std.testing.expectError(Error.InvalidSettings, c.processControlFrame(0x4, encoded));
+    try std.testing.expectError(Error.ProtocolViolation, c.processControlFrame(0x4, encoded));
+    try std.testing.expectEqual(frameMod.H3Error.frameUnexpected, c.controlError.?);
 }
 
 test "http3 goaway validates role and client stream parity" {
@@ -1539,3 +1617,127 @@ test "connection allocates stream IDs" {
     try std.testing.expectEqual(@as(u64, 1), server.nextBidiStreamId());
     try std.testing.expectEqual(@as(u64, 3), server.nextUniStreamId());
 }
+
+test "http3 connection rejects second SETTINGS frame with frameUnexpected" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var c = Connection.init(a, .client);
+    defer c.deinit();
+    try c.processControlFrame(0x4, encoded);
+    try std.testing.expectError(Error.ProtocolViolation, c.processControlFrame(0x4, encoded));
+    try std.testing.expectEqual(frameMod.H3Error.frameUnexpected, c.controlError.?);
+}
+
+test "http3 connection rejects PRIORITY_UPDATE for client role with frameUnexpected" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var c = Connection.init(a, .client);
+    defer c.deinit();
+    try c.processControlFrame(0x4, encoded);
+
+    var priPayload: [16]u8 = undefined;
+    const n = try varint.encode(&priPayload, 0); // stream 0
+    try std.testing.expectError(Error.ProtocolViolation, c.processControlFrame(0xF0700, priPayload[0..n]));
+    try std.testing.expectEqual(frameMod.H3Error.frameUnexpected, c.controlError.?);
+}
+
+test "http3 connection server rejects PRIORITY_UPDATE with non-client bidi stream ID" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var s = Connection.init(a, .server);
+    defer s.deinit();
+    try s.processControlFrame(0x4, encoded);
+
+    var priPayload: [16]u8 = undefined;
+    // Stream ID 1 (server-initiated bidi, not client-initiated)
+    const n = try varint.encode(&priPayload, 1);
+    try std.testing.expectError(Error.ProtocolViolation, s.processControlFrame(0xF0700, priPayload[0..n]));
+    try std.testing.expectEqual(frameMod.H3Error.frameUnexpected, s.controlError.?);
+
+    // Stream ID 0 (client-initiated bidi) succeeds
+    const n0 = try varint.encode(&priPayload, 0);
+    try s.processControlFrame(0xF0700, priPayload[0..n0]);
+}
+
+test "http3 connection server validates MAX_PUSH_ID monotonicity and CANCEL_PUSH boundary" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var s = Connection.init(a, .server);
+    defer s.deinit();
+    try s.processControlFrame(0x4, encoded);
+
+    var vb: [16]u8 = undefined;
+
+    // CANCEL_PUSH before any MAX_PUSH_ID is received must fail with H3_ID_ERROR
+    const n0 = try varint.encode(&vb, 0);
+    try std.testing.expectError(Error.ProtocolViolation, s.processControlFrame(0x3, vb[0..n0]));
+    try std.testing.expectEqual(frameMod.H3Error.idError, s.controlError.?);
+
+    // Initial MAX_PUSH_ID = 10 succeeds
+    const n10 = try varint.encode(&vb, 10);
+    try s.processControlFrame(0xD, vb[0..n10]);
+    try std.testing.expectEqual(@as(u64, 10), s.maxPushId);
+
+    // CANCEL_PUSH 11 (> 10) must fail with H3_ID_ERROR
+    const n11 = try varint.encode(&vb, 11);
+    try std.testing.expectError(Error.ProtocolViolation, s.processControlFrame(0x3, vb[0..n11]));
+    try std.testing.expectEqual(frameMod.H3Error.idError, s.controlError.?);
+
+    // CANCEL_PUSH 5 (<= 10) succeeds
+    const n5 = try varint.encode(&vb, 5);
+    try s.processControlFrame(0x3, vb[0..n5]);
+
+    // MAX_PUSH_ID 8 (< 10) must fail with H3_ID_ERROR (monotonicity reduction)
+    const n8 = try varint.encode(&vb, 8);
+    try std.testing.expectError(Error.ProtocolViolation, s.processControlFrame(0xD, vb[0..n8]));
+    try std.testing.expectEqual(frameMod.H3Error.idError, s.controlError.?);
+
+    // MAX_PUSH_ID 15 (>= 10) succeeds
+    const n15 = try varint.encode(&vb, 15);
+    try s.processControlFrame(0xD, vb[0..n15]);
+    try std.testing.expectEqual(@as(u64, 15), s.maxPushId);
+}
+
+test "http3 request stream buildTrailers encodes valid trailers and rejects pseudos/forbidden" {
+    const a = std.testing.allocator;
+    var c = Connection.init(a, .client);
+    defer c.deinit();
+
+    var rs = c.createRequestStream(0);
+
+    // Valid trailers
+    const valid = [_]qpackMod.FieldLine{
+        .{ .name = "x-checksum", .value = "abcdef123" },
+        .{ .name = "x-timing", .value = "42ms" },
+    };
+    const frame = try rs.buildTrailers(&valid);
+    defer a.free(frame);
+    try std.testing.expect(frame.len > 0);
+    // Header frame type is 0x1
+    try std.testing.expectEqual(@as(u8, 0x1), frame[0]);
+
+    // Reject pseudo header
+    const pseudo = [_]qpackMod.FieldLine{.{ .name = ":status", .value = "200" }};
+    try std.testing.expectError(error.InvalidHeader, rs.buildTrailers(&pseudo));
+
+    // Reject content-length
+    const forbiddenCl = [_]qpackMod.FieldLine{.{ .name = "content-length", .value = "10" }};
+    try std.testing.expectError(error.InvalidHeader, rs.buildTrailers(&forbiddenCl));
+
+    // Reject host
+    const forbiddenHost = [_]qpackMod.FieldLine{.{ .name = "host", .value = "example.com" }};
+    try std.testing.expectError(error.InvalidHeader, rs.buildTrailers(&forbiddenHost));
+}
+

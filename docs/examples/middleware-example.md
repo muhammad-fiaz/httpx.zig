@@ -6,14 +6,14 @@ Chain middleware for CORS, headers, recovery, and custom request checks.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn auth(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response {
+fn auth(ctx: *httpx.web.router.Context, next: httpx.web.router.NextFn) anyerror!httpx.web.router.Response {
     if (ctx.header("Authorization") == null) {
         return ctx.textStatus(401, "missing auth");
     }
     return next(ctx);
 }
 
-fn secure(ctx: *httpx.Context) anyerror!httpx.Response {
+fn secure(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJson(.{ .message = "secure route" });
 }
 
@@ -23,7 +23,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{});
+    var server = try httpx.server.Server.init(allocator, io, .{});
     defer server.deinit();
 
     try server.use(httpx.middleware.logging);

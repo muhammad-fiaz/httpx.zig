@@ -15,9 +15,9 @@ Demonstrates the custom TLS server implementation built from scratch. Shows TLS 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
-const tls = httpx.tls;
+const tls = httpx.protocols.tls;
 
-fn helloHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn helloHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.text("Hello from TLS server!");
 }
 
@@ -29,7 +29,7 @@ pub fn main() !void {
 
     // Start a local TLS listener with a self-signed identity.
     // (See examples/tlsServer.zig for the runnable version.)
-    var tlsListener = try httpx.tls.Listener.init(allocator, io, .{
+    var tlsListener = try httpx.protocols.tls.Listener.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .defaultIdentity = .{

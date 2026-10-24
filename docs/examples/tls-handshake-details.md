@@ -15,9 +15,9 @@ Demonstrates TLS handshake with detailed information about negotiated protocol, 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
-const tls = httpx.tls;
+const tls = httpx.protocols.tls;
 
-fn handler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn handler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.text("Hello from TLS server!");
 }
 
@@ -28,7 +28,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     // Start a local TLS listener with a self-signed identity.
-    var listener = try httpx.tls.Listener.init(allocator, io, .{
+    var listener = try httpx.protocols.tls.Listener.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .defaultIdentity = .{

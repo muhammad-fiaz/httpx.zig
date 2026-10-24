@@ -91,7 +91,7 @@ const htmlV2 =
 
 var currentVersion = std.atomic.Value(u32).init(1);
 
-fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const v = currentVersion.load(.acquire);
     if (v == 1) {
         return ctx.html(htmlV1);
@@ -100,7 +100,7 @@ fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     }
 }
 
-fn statusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn statusHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJson(.{
         .status = "online",
         .engine = "httpx.zig",
@@ -111,23 +111,23 @@ fn statusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     });
 }
 
-fn xmlHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn xmlHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.xml("<response><status>ok</status><library>httpx.zig</library></response>");
 }
 
-fn rssHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn rssHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.rss("<rss version=\"2.0\"><channel><title>httpx Feed</title></channel></rss>");
 }
 
-fn sitemapHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn sitemapHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.sitemap("<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\"><url><loc>http://127.0.0.1:8089/</loc></url></urlset>");
 }
 
-fn robotsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn robotsHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.robots("User-agent: *\nAllow: /\nSitemap: http://127.0.0.1:8089/sitemap.xml");
 }
 
-fn triggerReloadHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn triggerReloadHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     currentVersion.store(2, .release);
     return ctx.renderJson(.{ .reloaded = true, .version = 2 });
 }
@@ -138,7 +138,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .maxConnections = 5,
@@ -157,7 +157,7 @@ pub fn main() !void {
     std.debug.print("Demo server listening on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };

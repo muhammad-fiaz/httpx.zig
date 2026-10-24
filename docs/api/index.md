@@ -4,16 +4,16 @@ This page maps the explicit public API surface exposed by `httpx.zig`.
 
 ## Root Module (`httpx`)
 
-The root module re-exports core types and convenience helpers so most apps can import only `httpx`.
+The root module re-exports core types and namespaces. HTTP requests require an initialized client.
 
 ### Client Operations (URL-first)
 
-- `httpx.fetch(url, options)` — **primary unified fetch operation** (methods, typed JSON, headers, body)
-- `httpx.get / post / put / patch / delete / head / options / trace / connect / request(url, options)`
-- `httpx.getAll(urls)` — fetch multiple URLs concurrently
-- `httpx.requestAll(requests)` — perform multiple custom requests concurrently
-- `httpx.isOnline() / httpx.checkConnectivity(options)` — stateless connectivity probes
-- Namespaced (not root globals): `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.Download.verifyFile`, `client.fetchSitemap`, `client.resolve`, `client.resolveUrl`
+- `client.fetch(url, options)` — **primary unified fetch operation** (methods, typed JSON, headers, body)
+- `client.get / post / put / patch / delete / head / options / trace / connect / request(url, options)`
+- `client.getAll(urls)` — fetch multiple URLs concurrently
+- `client.requestAll(requests)` — perform multiple custom requests concurrently
+- `client.checkConnectivity(options)` — connectivity probe using client I/O
+- Additional operations: `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.client.download.verifyFile`, `client.fetchSitemap`, `client.resolve`, `client.resolveUrl`
 
 ### Client Lifecycle
 
@@ -22,42 +22,42 @@ The root module re-exports core types and convenience helpers so most apps can i
 
 ### Server Lifecycle
 
-- `httpx.Server.init(allocator, io, config)` — initialize server with allocator, io, and configuration (or `.{}` for defaults)
+- `httpx.server.Server.init(allocator, io, config)` — initialize server with allocator, io, and configuration (or `.{}` for defaults)
 - `server.run()` — blocking loop; `server.start()` — background thread
 - `server.requestShutdown()` / `server.stop()` / `server.pause()` / `server.resumeAccepting()`
 - `server.localPort()` — actual bound port
 
 ### Configuration Types
 
-- `httpx.ClientConfig` — client settings (protocols, timeouts, redirects, retries, pool, proxy, TLS, DNS cache)
-- `httpx.ServerConfig` — server settings (host, port, strategy, body limits, protocols, docs, TLS, watcher, templates, logging)
-- `httpx.RequestOptions` — per-request options (headers, query, body/json/form/text, auth, timeouts, proxy, TLS)
+- Client settings: initialized with `.{}` on `httpx.Client.init` (protocols, timeouts, redirects, retries, pool, proxy, TLS, DNS cache)
+- `httpx.server.Config` — server settings (host, port, strategy, body limits, protocols, docs, TLS, watcher, templates, logging)
+- `httpx.client.requestOptions` — per-request options (headers, query, body/json/form/text, auth, timeouts, proxy, TLS)
 - `httpx.HttpVersion` — protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`)
-- `httpx.PortStrategy` — `.incremental`, `.strict`, `.exit`
-- `httpx.DownloadOptions` / `DownloadResult` / `VerifyOptions` / `UpdateOptions` / `ExistingFilePolicy` / `ProgressMode`
+- `httpx.server.PortStrategy` — `.incremental`, `.strict`, `.exit`
+- `httpx.client.downloadOptions` / `downloadResult` / `verifyOptions` / `updateOptions` / `existingFilePolicy` / `progressMode`
 
 ### Server Types
 
-- `httpx.Server`, `httpx.ServerConfig`, `httpx.Router`, `httpx.Context`, `httpx.Response`
-- `httpx.tls.Listener`, `httpx.tls.ListenerConfig`, `httpx.tls.Request`, `httpx.tls.Response`
+- `httpx.server.Server`, `httpx.server.Config`, `httpx.web.router.Router`, `httpx.web.router.Context`, `httpx.web.router.Response`
+- `httpx.protocols.tls.Listener`, `httpx.protocols.tls.ListenerConfig`, `httpx.protocols.tls.Request`, `httpx.protocols.tls.Response`
 
 ### Concurrency Helpers
 
-- `client.getAll(urls)` / `client.requestAll(reqs)` (+ `httpx.getAll` / `httpx.requestAll`)
-- `httpx.WorkerPool` / `httpx.Queue` (`src/concurrency/`)
+- `client.getAll(urls)` / `client.requestAll(reqs)`
+- `httpx.concurrency.Pool` / `httpx.concurrency.Queue` (`src/concurrency/`)
 
 ### Network Helpers
 
 - `client.resolve(host, options)` / `client.resolveUrl(url, options)`
-- `httpx.resolve.Resolver`, `httpx.dns`, `httpx.socks5`, `httpx.proxy`
-- `httpx.tcp`, `httpx.udp`, `httpx.Address`, `httpx.connectivity`
+- `httpx.net.resolve.Resolver`, `httpx.net.dns`, `httpx.net.socks5`, `httpx.net.proxy`
+- `httpx.tcp`, `httpx.udp`, `httpx.Address`, `httpx.net.connectivity`
 
 ### Utility Aliases
 
 - `httpx.mime.fromPath(path)` — extension-based MIME lookup
-- `httpx.clock.millisNow()` / `sleepMillis(ms)` — monotonic clock helpers
+- `httpx.clock.millisNow(io)` / `sleepMillis(io, ms)` — monotonic clock helpers
 - `httpx.Uri.parse(...)` — RFC 3986 URI parsing
-- `httpx.quic.varint` — QUIC variable-length integers
+- `httpx.protocols.quic.varint` — QUIC variable-length integers
 
 ### DNS Cache
 

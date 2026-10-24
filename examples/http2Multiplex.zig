@@ -17,9 +17,9 @@ fn handle(
     _: ?*anyopaque,
     method: []const u8,
     path: []const u8,
-    _: []const httpx.http2.transport.Header,
+    _: []const httpx.protocols.http2.transport.Header,
     body: []const u8,
-) anyerror!httpx.http2.transport.HandlerResponse {
+) anyerror!httpx.protocols.http2.transport.HandlerResponse {
     if (!std.mem.eql(u8, method, "POST")) {
         return .{ .status = 405, .body = "method not allowed" };
     }
@@ -33,7 +33,7 @@ fn handle(
 fn runServer(lst: *httpx.tcp.Listener, io: std.Io) void {
     var conn = lst.accept(io) catch return;
     defer conn.close();
-    httpx.http2.transport.serveConnection(std.heap.page_allocator, &conn, handle, null) catch {};
+    httpx.protocols.http2.transport.serveConnection(std.heap.page_allocator, &conn, handle, null) catch {};
 }
 
 pub fn main() !void {
@@ -44,15 +44,15 @@ pub fn main() !void {
     std.debug.print("=== HTTP/2 Advanced Protocol & Multiplexing ===\n", .{});
 
     // 1. HPACK Dynamic Table Compression (RFC 7541)
-    var enc = httpx.http2.hpack.Encoder.init(allocator);
+    var enc = httpx.protocols.http2.hpack.Encoder.init(allocator);
     defer enc.deinit();
-    var dec = httpx.http2.hpack.Decoder.init(allocator);
+    var dec = httpx.protocols.http2.hpack.Decoder.init(allocator);
     defer dec.deinit();
 
     var outEncoded = std.ArrayList(u8).empty;
     defer outEncoded.deinit(allocator);
 
-    const testHeaders = [_]httpx.http2.hpack.HeaderField{
+    const testHeaders = [_]httpx.protocols.http2.hpack.HeaderField{
         .{ .name = ":method", .value = "POST" },
         .{ .name = ":scheme", .value = "https" },
         .{ .name = ":path", .value = "/api/v2/stream" },
@@ -93,7 +93,7 @@ pub fn main() !void {
     defer thread.join();
 
     const sock = try httpx.tcp.connect(ctx.io, "127.0.0.1", port);
-    var client = try httpx.http2.transport.Client.connect(allocator, sock);
+    var client = try httpx.protocols.http2.transport.Client.connect(allocator, sock);
     defer client.deinit();
 
     // 3. Multiplexing: all three requests are in flight before any
@@ -102,7 +102,7 @@ pub fn main() !void {
     const paths = [_][]const u8{ "/one", "/two", "/three" };
     var sids: [3]u31 = undefined;
     for (paths, 0..) |path, i| {
-        sids[i] = try client.beginRequest("POST", path, &.{}, "http", "localhost", bodies[i], httpx.http2.transport.maxResponseBodySize);
+        sids[i] = try client.beginRequest("POST", path, &.{}, "http", "localhost", bodies[i], httpx.protocols.http2.transport.maxResponseBodySize);
     }
     std.debug.print("2. Multiplexed streams {d}, {d}, {d} in flight on one connection\n", .{ sids[0], sids[1], sids[2] });
 

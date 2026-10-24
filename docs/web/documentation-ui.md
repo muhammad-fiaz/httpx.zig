@@ -32,7 +32,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .port = 8080,
         .enableDocs = true,
         .docs = .{
@@ -63,7 +63,7 @@ try httpx.docs.mount(allocator, &router, .{ .title = "Store API" }, null);
 individually optional — every option below defaults to enabled:
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .enableDocs = true, // global switch; false disables everything
     .docs = .{
         .openapi = .{ .enabled = true },   // /openapi.json

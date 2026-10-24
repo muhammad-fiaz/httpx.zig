@@ -339,9 +339,8 @@ pub const Stream = struct {
             const payload = self.buf.items[self.off..][0..n];
             self.off += n;
             if (header.frameType == 0x4 and self.controlSawSettings) {
-                // Second SETTINGS: connection state rejects it; flag here
-                // so the error surfaces even without the connection layer.
-                self.fail(.settingsError);
+                // Second SETTINGS: RFC 9114 Section 7.2.4 mandates H3_FRAME_UNEXPECTED.
+                self.fail(.frameUnexpected);
                 return;
             }
             // SETTINGS must be the first frame on the control stream
@@ -368,31 +367,33 @@ pub const Stream = struct {
 
     fn parseQpackEncoder(self: *Stream) void {
         const avail = self.buf.items[self.off..];
-        if (avail.len == 0) {
-            if (self.fin) self.done = true;
-            return;
+        if (avail.len > 0) {
+            self.qdec.readEncoderStream(avail, self.fin) catch {
+                self.fail(.qpackEncoderStreamError);
+                return;
+            };
+            self.off = self.buf.items.len;
         }
-        self.qdec.readEncoderStream(avail, self.fin) catch {
-            self.fail(.qpackEncoderStreamError);
-            return;
-        };
-        // readEncoderStream buffers internally; everything fed is consumed.
-        self.off = self.buf.items.len;
-        if (self.fin) self.done = true;
+        // RFC 9204 Section 4.2: If either the encoder stream or decoder stream is closed,
+        // this MUST be treated as a connection error of type H3_CLOSED_CRITICAL_STREAM.
+        if (self.fin) {
+            self.fail(.closedCriticalStream);
+        }
     }
 
     fn parseQpackDecoder(self: *Stream) void {
         const avail = self.buf.items[self.off..];
-        if (avail.len == 0) {
-            if (self.fin) self.done = true;
-            return;
+        if (avail.len > 0) {
+            self.qenc.readDecoderStream(avail, self.fin) catch {
+                self.fail(.qpackDecoderStreamError);
+                return;
+            };
+            self.off = self.buf.items.len;
         }
-        self.qenc.readDecoderStream(avail, self.fin) catch {
-            self.fail(.qpackDecoderStreamError);
-            return;
-        };
-        self.off = self.buf.items.len;
-        if (self.fin) self.done = true;
+        // RFC 9204 Section 4.2: Closed critical stream on decoder FIN.
+        if (self.fin) {
+            self.fail(.closedCriticalStream);
+        }
     }
 
     fn parseBidi(self: *Stream) void {
@@ -1402,4 +1403,199 @@ test "h3stream check peer stream ids" {
     try std.testing.expect(checkPeerStreamId(.client, 0) != null);
     try std.testing.expect(checkPeerStreamId(.client, 3) == null);
     try std.testing.expect(checkPeerStreamId(.client, 2) != null);
+}
+
+test "h3stream duplicate settings frame rejected with frame unexpected" {
+    const a = std.testing.allocator;
+    var rec = TestRec{};
+    var qdec = qpackMod.Decoder.init(a);
+    defer qdec.deinit();
+    var qenc = qpackMod.Encoder.init(a);
+    defer qenc.deinit();
+    var s = Stream.init(a, 2, .uni, .server, rec.cbs(), &qdec, &qenc);
+    defer s.deinit();
+    // Control stream type 0x00, followed by SETTINGS (type 0x4, len 0), then second SETTINGS (type 0x4, len 0)
+    s.feed(&.{ 0x00, 0x04, 0x00, 0x04, 0x00 }, false);
+    try std.testing.expectEqual(H3Error.frameUnexpected, rec.lastErr.?);
+}
+
+test "h3stream qpack encoder stream fin rejected with closed critical stream" {
+    const a = std.testing.allocator;
+    var rec = TestRec{};
+    var qdec = qpackMod.Decoder.init(a);
+    defer qdec.deinit();
+    var qenc = qpackMod.Encoder.init(a);
+    defer qenc.deinit();
+    var s = Stream.init(a, 2, .uni, .server, rec.cbs(), &qdec, &qenc);
+    defer s.deinit();
+    // QPACK encoder uni stream type 0x02, clean FIN
+    s.feed(&.{0x02}, true);
+    try std.testing.expectEqual(H3Error.closedCriticalStream, rec.lastErr.?);
+}
+
+test "h3stream qpack decoder stream fin rejected with closed critical stream" {
+    const a = std.testing.allocator;
+    var rec = TestRec{};
+    var qdec = qpackMod.Decoder.init(a);
+    defer qdec.deinit();
+    var qenc = qpackMod.Encoder.init(a);
+    defer qenc.deinit();
+    var s = Stream.init(a, 2, .uni, .server, rec.cbs(), &qdec, &qenc);
+    defer s.deinit();
+    // QPACK decoder uni stream type 0x03, clean FIN
+    s.feed(&.{0x03}, true);
+    try std.testing.expectEqual(H3Error.closedCriticalStream, rec.lastErr.?);
+}
+
+test "regression: http3 frame header parsing and truncation sweep" {
+    const seeds = [_][]const u8{
+        &[_]u8{ 0x00, 0x04, 't', 'e', 's', 't' },
+        &[_]u8{ 0x01, 0x06, 0x00, 0x00, 0xd1, 0x82, 0x84, 0x86 },
+        &[_]u8{ 0x04, 0x06, 0x01, 0x00, 0x02, 0x00, 0x07, 0x00 },
+        &[_]u8{ 0x07, 0x01, 0x00 },
+        &[_]u8{ 0x21, 0x02, 0xaa, 0xbb },
+    };
+
+    const helper = struct {
+        fn parse(data: []const u8) void {
+            var off: usize = 0;
+            if (frameMod.parseFrameHeader(data, &off)) |hdr| {
+                const payloadLen = std.math.cast(usize, hdr.length) orelse return;
+                if (off + payloadLen <= data.len) {
+                    _ = frameMod.checkFrameAllowed(.control, hdr.frameType);
+                    _ = frameMod.checkFrameAllowed(.requestBidi, hdr.frameType);
+                }
+            } else |_| {}
+        }
+    };
+
+    for (seeds) |s| {
+        for (0..s.len + 1) |cut| {
+            helper.parse(s[0..cut]);
+        }
+    }
+
+    var prng = std.Random.DefaultPrng.init(0x3333);
+    const rng = prng.random();
+    var mutBuf: [64]u8 = undefined;
+
+    for (0..200) |_| {
+        const len = 1 + rng.uintLessThan(usize, mutBuf.len);
+        rng.bytes(mutBuf[0..len]);
+        helper.parse(mutBuf[0..len]);
+    }
+}
+
+test "regression: qpack instruction streams and section decoding" {
+    const validEncoderStream = &[_]u8{
+        0x3f, 0xbd, 0x01,
+        0xc0, 0x0f, 'w',
+        'w',  'w',  '.',
+        'e',  'x',  'a',
+        'm',  'p',  'l',
+        'e',  '.',  'c',
+        'o',  'm',
+    };
+
+    const validDecoderStream = &[_]u8{ 0x84, 0x02 };
+    const validSection = &[_]u8{ 0x00, 0x00, 0xd1 };
+
+    const helper = struct {
+        fn feedEnc(data: []const u8) void {
+            const a = std.heap.page_allocator;
+            var dec = qpackMod.Decoder.init(a);
+            defer dec.deinit();
+            dec.setMaxTableCapacity(4096);
+            _ = dec.readEncoderStream(data, true) catch {};
+        }
+        fn feedDec(data: []const u8) void {
+            const a = std.heap.page_allocator;
+            var enc = qpackMod.Encoder.init(a);
+            defer enc.deinit();
+            _ = enc.readDecoderStream(data, true) catch {};
+        }
+        fn feedSec(data: []const u8) void {
+            const a = std.heap.page_allocator;
+            var dec = qpackMod.Decoder.init(a);
+            defer dec.deinit();
+            var ack = std.ArrayList(u8).empty;
+            defer ack.deinit(a);
+            if (dec.decodeSectionCounted(data, 0, &ack)) |fields| {
+                dec.freeFields(fields);
+            } else |_| {}
+        }
+    };
+
+    for (0..validEncoderStream.len + 1) |cut| helper.feedEnc(validEncoderStream[0..cut]);
+    for (0..validDecoderStream.len + 1) |cut| helper.feedDec(validDecoderStream[0..cut]);
+    for (0..validSection.len + 1) |cut| helper.feedSec(validSection[0..cut]);
+
+    var prng = std.Random.DefaultPrng.init(0x4444);
+    const rng = prng.random();
+    var buf: [128]u8 = undefined;
+
+    for (0..100) |_| {
+        const len = @min(validEncoderStream.len, buf.len);
+        @memcpy(buf[0..len], validEncoderStream);
+        const flips = 1 + rng.uintLessThan(usize, 3);
+        for (0..flips) |_| {
+            const idx = rng.uintLessThan(usize, len);
+            buf[idx] = rng.int(u8);
+        }
+        helper.feedEnc(buf[0..len]);
+        helper.feedDec(buf[0..len]);
+        helper.feedSec(buf[0..len]);
+    }
+}
+
+test "regression: http3 stream feed state machine under mutations" {
+    var prng = std.Random.DefaultPrng.init(0x5555);
+    const rng = prng.random();
+
+    const controlSeed = &[_]u8{
+        0x00,
+        0x04,
+        0x04,
+        0x01, 0x40, 0x00, 0x00,
+    };
+
+    const requestSeed = &[_]u8{
+        0x01,
+        0x05,
+        0x00, 0x00,
+        0xd1,
+        0xd7,
+        0x51, 0x01, '/',
+    };
+
+    const helper = struct {
+        fn feedStream(mode: StreamMode, data: []const u8) void {
+            const a = std.heap.page_allocator;
+            var enc = qpackMod.Encoder.init(a);
+            defer enc.deinit();
+            var dec = qpackMod.Decoder.init(a);
+            defer dec.deinit();
+
+            var s = Stream.init(a, 0, mode, .server, .{}, &dec, &enc);
+            defer s.deinit();
+
+            s.feed(data, true);
+        }
+    };
+
+    for (0..controlSeed.len + 1) |cut| helper.feedStream(.uni, controlSeed[0..cut]);
+    for (0..requestSeed.len + 1) |cut| helper.feedStream(.requestRecv, requestSeed[0..cut]);
+
+    var mut: [128]u8 = undefined;
+    for (0..100) |_| {
+        const copyLen = @min(controlSeed.len, mut.len);
+        @memcpy(mut[0..copyLen], controlSeed);
+        const flips = 1 + rng.uintLessThan(usize, 4);
+        for (0..flips) |_| {
+            const idx = rng.uintLessThan(usize, copyLen);
+            mut[idx] = rng.int(u8);
+        }
+        helper.feedStream(.uni, mut[0..copyLen]);
+        helper.feedStream(.requestRecv, mut[0..copyLen]);
+    }
 }

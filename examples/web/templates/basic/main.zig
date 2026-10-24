@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn homeHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn homeHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.render("index.html", .{
         .title = "HTTPX Native Templates",
         .message = "Hello from high-performance native Zig templates!",
@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .templates = .{

@@ -96,7 +96,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{ .port = 0 });
+    var server = try httpx.server.Server.init(allocator, io, .{ .port = 0 });
     defer server.deinit();
 
     try server.get("/api", apiHandler);
@@ -107,7 +107,7 @@ pub fn main() !void {
     defer server.requestShutdown();
 }
 
-fn apiHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn apiHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.renderJson(.{ .hello = "world" });
 }
 ```

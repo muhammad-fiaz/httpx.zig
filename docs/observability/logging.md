@@ -11,7 +11,7 @@ HTTPX follows a strict zero-print architecture: the core library never invokes `
 ## Logging Middleware
 
 Attach the built-in logging middleware to your HTTPX server. Middleware has
-the shape `fn (ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response`
+the shape `fn (ctx: *httpx.web.router.Context, next: httpx.web.router.NextFn) anyerror!httpx.web.router.Response`
 and must return the downstream response:
 
 ```zig
@@ -26,7 +26,7 @@ never secrets), set the server logging callback instead; HTTPX emits nothing
 unless you provide one:
 
 ```zig
-fn onEvent(event: httpx.ServerEvent) void {
+fn onEvent(event: httpx.logging.ServerEvent) void {
     if (event.kind == .requestCompleted) {
         std.debug.print("{s} {s} {d} {d}ms\n", .{
             event.method, event.path, event.status, event.durationMs,
@@ -34,7 +34,7 @@ fn onEvent(event: httpx.ServerEvent) void {
     }
 }
 
-var server = try httpx.Server.init(allocator, io, .{
+var server = try httpx.server.Server.init(allocator, io, .{
     .logging = .{ .callback = onEvent },
 });
 ```

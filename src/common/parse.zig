@@ -10,9 +10,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-// ============================================================================
-// 1. ASCII & Character Classification Tables (Comptime O(1))
-// ============================================================================
+// ASCII and character classification tables
 
 /// Lookup table for RFC 7230 / 9110 token characters:
 /// tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
@@ -100,9 +98,7 @@ pub inline fn trimOws(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \t");
 }
 
-// ============================================================================
-// 2. Numeric Parsing Primitives
-// ============================================================================
+// Numeric parsing primitives
 
 /// Parses an unsigned integer from ASCII decimal digits without intermediate allocations
 /// or error-handling overhead in the fast path.
@@ -154,18 +150,14 @@ pub fn parseHexUint(comptime T: type, s: []const u8) ?T {
     return result;
 }
 
-// ============================================================================
-// 3. Fast Method Parsing
-// ============================================================================
+// Fast method parsing
 
 const Method = @import("method.zig").Method;
 
 /// Fast, branch-minimized HTTP method lookup from wire/slice string.
 pub const parseMethod = Method.fromString;
 
-// ============================================================================
-// 4. Authority / Host / Port Parser (Single Authoritative Implementation)
-// ============================================================================
+// Authority, host, and port parser
 
 pub const ParsedAuthority = struct {
     /// Hostname, IPv4 string, or inner unbracketed IPv6 literal.
@@ -207,9 +199,7 @@ pub fn parseAuthority(input: []const u8) ?ParsedAuthority {
     return .{ .host = input, .port = null, .isIpv6 = false };
 }
 
-// ============================================================================
-// 5. Zero-Copy Bounded Byte Cursor
-// ============================================================================
+// Zero-copy bounded byte cursor
 
 pub const ByteCursor = struct {
     data: []const u8,
@@ -276,9 +266,7 @@ pub const ByteCursor = struct {
     }
 };
 
-// ============================================================================
-// 6. Delimited Token & Parameter Iterators
-// ============================================================================
+// Delimited token and parameter iterators
 
 /// Iterates over comma-separated values in HTTP headers (RFC 9110 Section 5.6.1).
 /// Strips leading and trailing OWS and skips empty entries.
@@ -410,9 +398,7 @@ pub fn lookupQuery(query: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-// ============================================================================
-// 7. High-Performance Percent-Encoding and Percent-Decoding
-// ============================================================================
+// Percent-encoding and percent-decoding
 
 pub const DecodeError = error{
     BufferTooSmall,
@@ -521,9 +507,7 @@ pub fn percentEncodeAlloc(allocator: Allocator, input: []const u8) Allocator.Err
     return out;
 }
 
-// ============================================================================
-// 8. HTTP Date Parser (IMF-fixdate, RFC 9110 Section 5.6.7)
-// ============================================================================
+// HTTP date parsing (IMF-fixdate, RFC 9110 Section 5.6.7)
 
 const monthNames = [_][]const u8{
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -582,9 +566,6 @@ fn daysFromCivil(yIn: i32, m: u4, d: u16) i64 {
     return era * 146097 + doe - 719468;
 }
 
-// ============================================================================
-// Unit Tests for Parsing Primitives
-// ============================================================================
 
 test "isTokenChar matches RFC 7230" {
     try std.testing.expect(isTokenChar('a'));

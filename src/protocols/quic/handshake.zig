@@ -294,7 +294,7 @@ pub const Driver = struct {
 
         const ch = if (d.session) |sess| blk: {
             if (d.earlyData and sess.maxEarlyData > 0) {
-                break :blk d.engine.produceClientHelloResumption(&.{"h3"}, &.{}, sniFor(d.host), sess, @intCast(clockMod.millisNow()), tp) catch
+                break :blk d.engine.produceClientHelloResumption(&.{"h3"}, &.{}, sniFor(d.host), sess, @intCast(clockMod.millisNow(d.engine.io)), tp) catch
                     return connMod.Error.TlsDriverFailed;
             } else {
                 break :blk d.engine.produceClientHello(&.{"h3"}, &.{}, sniFor(d.host), tp) catch
@@ -424,7 +424,7 @@ pub const Driver = struct {
                 },
                 @backingInt(ths.HandshakeType.new_session_ticket) => {
                     if (d.engine.deriveResumptionMaster()) |rm| {
-                        var session = d.engine.processNewSessionTicket(rec.msg, rm, d.host, @intCast(clockMod.millisNow())) catch null;
+                        var session = d.engine.processNewSessionTicket(rec.msg, rm, d.host, @intCast(clockMod.millisNow(d.engine.io))) catch null;
                         if (session) |*sess| {
                             if (d.sessionOut) |so| {
                                 so.* = sess.*;
@@ -464,7 +464,7 @@ pub const Driver = struct {
                 // If ticket keys configured, produce NewSessionTicket for client
                 if (d.engine.ticketKeys != null) {
                     if (d.engine.deriveResumptionMaster()) |rm| {
-                        if (d.engine.produceNewSessionTicket(rm, d.engine.selectedSuite, 86400, @intCast(clockMod.millisNow()))) |nstMsg| {
+                        if (d.engine.produceNewSessionTicket(rm, d.engine.selectedSuite, 86400, @intCast(clockMod.millisNow(d.engine.io)))) |nstMsg| {
                             defer a.free(nstMsg);
                             _ = conn.queueCrypto(.application, nstMsg) catch {};
                         } else |_| {}
@@ -539,7 +539,7 @@ pub const Driver = struct {
         defer a.free(localTp);
 
         if (d.engine.ticketKeys != null) {
-            _ = d.engine.selectPsk(chMsg, @intCast(clockMod.millisNow()));
+            _ = d.engine.selectPsk(chMsg, @intCast(clockMod.millisNow(d.engine.io)));
             if (d.engine.earlyDataAccepted and d.engine.clientEarlyTrafficSecret != null) {
                 conn.earlyDataAccepted = true;
                 conn.maxEarlyData = d.engine.maxEarlyData;
@@ -694,10 +694,10 @@ pub fn feedPumped(
 /// NOT stopped here — the caller owns its lifetime (handshake, then
 /// request exchange, then stop).
 pub fn serveHandshake(serverEp: *Endpoint, pump: *transportMod.Pump, driver: ?*Driver, deadlineMs: u64) !void {
-    const start: u64 = @intCast(clockMod.monotonicMillis());
+    const start: u64 = @intCast(clockMod.monotonicMillis(serverEp.io));
     var booted = false;
     while (true) {
-        const now: u64 = @intCast(clockMod.monotonicMillis());
+        const now: u64 = @intCast(clockMod.monotonicMillis(serverEp.io));
         if (now -| start > deadlineMs) return error.HandshakeTimeout;
         // Driver-doomed handshakes fail fast with a mappable error (the
         // precise cause stays on `driver.detail`); only the truly quiet
@@ -831,7 +831,7 @@ pub fn performHandshakeWithEarlyData(
     deadlineMs: u64,
     earlyStream: ?struct { sid: u64, data: []const u8 },
 ) !void {
-    const start: u64 = @intCast(clockMod.monotonicMillis());
+    const start: u64 = @intCast(clockMod.monotonicMillis(clientEp.io));
     try clientEp.conn.startHandshake(start);
     if (earlyStream) |es| {
         if (clientEp.conn.zeroRttKeysTx != null) {
@@ -841,7 +841,7 @@ pub fn performHandshakeWithEarlyData(
     _ = try clientEp.flush(dest);
     var serverBooted = serverEp == null;
     while (true) {
-        const now: u64 = @intCast(clockMod.monotonicMillis());
+        const now: u64 = @intCast(clockMod.monotonicMillis(clientEp.io));
         if (now -| start > deadlineMs) return error.HandshakeTimeout;
         if (clientDriver) |d| {
             if (d.failed) return error.HandshakeFailed;
@@ -1065,7 +1065,7 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         // Pump until the server's post-handshake NewSessionTicket is received
         var tries: usize = 0;
         while (tries < 20 and savedSession.ticket.len == 0) : (tries += 1) {
-            const now2: u64 = @intCast(clockMod.monotonicMillis());
+            const now2: u64 = @intCast(clockMod.monotonicMillis(cliEp.io));
             _ = srvEp.flush(null) catch {};
             try feedPumped(&cliEp, &cliPump, dest, 50, now2);
         }

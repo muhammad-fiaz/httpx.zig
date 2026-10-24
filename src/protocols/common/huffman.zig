@@ -298,7 +298,7 @@ pub const Decoder = struct {
 
     /// Validates stream termination. Empty input is valid per RFC 7541.
     pub fn finish(self: *const Decoder) Error!void {
-        if (self.emittedAny and !self.accepted) return Error.InvalidHuffmanCode;
+        if (!self.accepted) return Error.InvalidHuffmanCode;
     }
 };
 
@@ -398,6 +398,10 @@ test "rejects 8 or more trailing one-bits" {
     buf[0] = 0x0F;
     buf[1] = 0xF0;
     try std.testing.expectError(Error.InvalidHuffmanCode, decode(&out, buf[0..2]));
+
+    // Eight ones in a single byte: padding strictly > 7 bits (RFC 7541 5.2).
+    buf[0] = 0xFF;
+    try std.testing.expectError(Error.InvalidHuffmanCode, decode(&out, buf[0..1]));
 
     // Full EOS-length run: failure node mid-stream.
     @memset(buf[0..4], 0xFF);

@@ -65,7 +65,7 @@ See `examples/websocketServer.zig`, which serves an interactive browser
 WebSocket client and verifies the endpoint:
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{ .port = 0 });
+var server = try httpx.server.Server.init(allocator, io, .{ .port = 0 });
 defer server.deinit();
 
 try server.get("/", htmlHandler); // serves the browser client page

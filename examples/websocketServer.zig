@@ -11,7 +11,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .maxConnections = 5,
@@ -25,7 +25,7 @@ pub fn main() !void {
     std.debug.print("=== WebSocket Server running on http://127.0.0.1:{d} ===\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };
@@ -45,7 +45,7 @@ pub fn main() !void {
     std.debug.print("WebSocket server verification completed successfully.\n", .{});
 }
 
-fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     return ctx.html(
         \\<!DOCTYPE html>
         \\<html lang="en">
@@ -72,14 +72,14 @@ fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     );
 }
 
-fn wsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn wsHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     // If request contains Sec-WebSocket-Key, compute Sec-WebSocket-Accept
     if (ctx.header("sec-websocket-key")) |key| {
         var acceptBuf: [28]u8 = undefined;
         httpx.websocket.computeAccept(key, &acceptBuf);
         return .{
             .status = 101,
-            .headers = try ctx.allocator.dupe(httpx.router.Header, &[_]httpx.router.Header{
+            .headers = try ctx.allocator.dupe(httpx.web.router.Header, &[_]httpx.web.router.Header{
                 .{ .name = "Upgrade", .value = "websocket" },
                 .{ .name = "Connection", .value = "Upgrade" },
                 .{ .name = "Sec-WebSocket-Accept", .value = try ctx.allocator.dupe(u8, &acceptBuf) },

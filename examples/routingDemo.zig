@@ -7,14 +7,14 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn userHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn userHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const id = ctx.paramInt("id") orelse return .{ .status = 400, .body = "bad id" };
     var buf: [32]u8 = undefined;
     const body = try std.fmt.bufPrint(&buf, "user={d}", .{id});
     return .{ .status = 200, .body = try ctx.allocator.dupe(u8, body) };
 }
 
-fn postHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn postHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const P = struct {
         userId: u64,
         postId: u64,
@@ -25,21 +25,21 @@ fn postHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return .{ .status = 200, .body = try ctx.allocator.dupe(u8, body) };
 }
 
-fn slugHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn slugHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const slug = ctx.param("slug") orelse "none";
     var buf: [96]u8 = undefined;
     const body = try std.fmt.bufPrint(&buf, "slug={s}", .{slug});
     return .{ .status = 200, .body = try ctx.allocator.dupe(u8, body) };
 }
 
-fn fileHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn fileHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     const path = ctx.param("path") orelse "none";
     var buf: [128]u8 = undefined;
     const body = try std.fmt.bufPrint(&buf, "file={s}", .{path});
     return .{ .status = 200, .body = try ctx.allocator.dupe(u8, body) };
 }
 
-fn linkHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn linkHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
     _ = ctx;
     return .{ .status = 200, .body = "link ok" };
 }
@@ -58,7 +58,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.Server.init(allocator, io, .{
+    var server = try httpx.server.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -72,7 +72,7 @@ pub fn main() !void {
     try api.get("/users/{userId:int}/posts/{postId:int}", postHandler, .{ .name = "api-post" });
 
     // Mounted sub-router.
-    var blog = httpx.Router.init(allocator);
+    var blog = httpx.web.router.Router.init(allocator);
     defer blog.deinit();
     try blog.get("/{slug:slug}", slugHandler, .{});
     try server.mount("/blog", &blog, .{});
@@ -88,7 +88,7 @@ pub fn main() !void {
 
     const port = server.localPort();
     const Runner = struct {
-        fn run(s: *httpx.Server) void {
+        fn run(s: *httpx.server.Server) void {
             s.run();
         }
     };

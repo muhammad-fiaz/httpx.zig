@@ -139,7 +139,7 @@ pub const ServerEvent = struct {
 /// Example — application-controlled access log:
 ///
 /// ```zig
-/// fn onEvent(event: httpx.ServerEvent) void {
+/// fn onEvent(event: httpx.logging.ServerEvent) void {
 ///     if (event.kind == .requestCompleted) {
 ///         std.debug.print("{s} {s} {d} {d}ms\n", .{
 ///             event.method, event.path, event.status, event.durationMs,
@@ -222,7 +222,7 @@ pub const ClientEvent = struct {
 /// Example — application-controlled request log:
 ///
 /// ```zig
-/// fn onClientEvent(event: httpx.ClientEvent) void {
+/// fn onClientEvent(event: httpx.logging.ClientEvent) void {
 ///     if (event.kind == .requestCompleted) {
 ///         std.debug.print("{s} {d} {d}ms\n", .{
 ///             event.method, event.status, event.durationMs,
@@ -244,7 +244,7 @@ pub const ClientEventCallback = *const fn (event: ClientEvent) void;
 //   var ws = httpx.WriterSink.init(&w, false);
 //   const logger = httpx.Logger.writer(&ws, .info, true);
 //
-//   fn onServerEvent(event: httpx.ServerEvent) void {
+//   fn onServerEvent(event: httpx.logging.ServerEvent) void {
 //       logger.log(event.level, "server", "{s} {s} {d}", .{
 //           event.method, event.path, event.status,
 //       });
