@@ -18,6 +18,7 @@ const Pattern = patternMod.Pattern;
 const SegmentKind = patternMod.SegmentKind;
 const parseMod = @import("../../common/parse.zig");
 const multipartServerMod = @import("../multipart/multipartServer.zig");
+const addressMod = @import("../../net/address.zig");
 
 pub const HandlerFn = *const fn (*Context) anyerror!Response;
 pub const NextFn = *const fn (*Context) anyerror!Response;
@@ -64,6 +65,9 @@ pub const Context = struct {
     isTls: bool = false,
     /// Whether reverse proxy forwarded headers (X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host) are trusted.
     trustForwarded: bool = false,
+    /// Proxy IPs/CIDRs whose entries are skipped when resolving the client
+    /// from an X-Forwarded-For chain.
+    trustedProxies: []const []const u8 = &.{},
 
     /// Invokes the next middleware in the pipeline, or the route handler if at the end.
     /// Order is deterministic: router middleware → route middleware → handler.
@@ -423,16 +427,33 @@ pub const Context = struct {
     }
 
     /// Returns the client's IP address.
-    /// If trustForwarded is true and X-Forwarded-For / X-Real-IP is present, it returns the forwarded client IP.
-    /// Otherwise returns peerAddress if available, or fallback header if no peer address was set.
+    /// Forwarded headers are never consulted unless the caller has explicitly
+    /// opted in via `trustForwarded`; without a peer address the result is null.
+    /// When a trusted-proxy list is configured, the X-Forwarded-For chain is
+    /// walked right-to-left and proxy entries are skipped, so a client cannot
+    /// spoof its address by prepending a value.
     pub fn remoteAddress(self: *const Context) ?[]const u8 {
         if (self.trustForwarded) {
             if (self.header("X-Forwarded-For")) |xff| {
-                if (std.mem.indexOfScalar(u8, xff, ',')) |comma| {
-                    return std.mem.trim(u8, xff[0..comma], " \t");
+                if (self.trustedProxies.len == 0) {
+                    if (std.mem.indexOfScalar(u8, xff, ',')) |comma| {
+                        const first = std.mem.trim(u8, xff[0..comma], " \t");
+                        if (first.len > 0) return first;
+                    }
+                    const trimmed = std.mem.trim(u8, xff, " \t");
+                    if (trimmed.len > 0) return trimmed;
+                } else {
+                    var end = xff.len;
+                    while (end > 0) {
+                        var start = end;
+                        while (start > 0 and xff[start - 1] != ',') start -= 1;
+                        const token = std.mem.trim(u8, xff[start..end], " \t");
+                        end = if (start > 0) start - 1 else 0;
+                        if (token.len == 0) continue;
+                        if (self.isTrustedProxy(token)) continue;
+                        return token;
+                    }
                 }
-                const trimmed = std.mem.trim(u8, xff, " \t");
-                if (trimmed.len > 0) return trimmed;
             }
             if (self.header("X-Real-IP")) |xri| {
                 const trimmed = std.mem.trim(u8, xri, " \t");
@@ -440,14 +461,14 @@ pub const Context = struct {
             }
         }
         if (self.peerAddress.len > 0) return self.peerAddress;
-        // Fallback for standalone/mock tests
-        if (self.header("X-Forwarded-For")) |xff| {
-            if (std.mem.indexOfScalar(u8, xff, ',')) |comma| {
-                return std.mem.trim(u8, xff[0..comma], " \t");
-            }
-            return xff;
-        }
         return null;
+    }
+
+    fn isTrustedProxy(self: *const Context, candidate: []const u8) bool {
+        for (self.trustedProxies) |rule| {
+            if (addressMod.matchesCidr(candidate, rule)) return true;
+        }
+        return false;
     }
 
     /// Returns the authoritative host header.
@@ -1174,6 +1195,7 @@ pub const Router = struct {
                 .peerAddress = ctx.peerAddress,
                 .isTls = ctx.isTls,
                 .trustForwarded = ctx.trustForwarded,
+                .trustedProxies = ctx.trustedProxies,
                 .activeRouter = ctx.activeRouter,
             };
 
@@ -1671,6 +1693,18 @@ test "context trusted proxy and scheme detection" {
         try std.testing.expectEqualStrings("http", ctx.scheme());
         try std.testing.expectEqualStrings("127.0.0.1", ctx.remoteAddress().?);
         try std.testing.expectEqualStrings("internal.local", ctx.host().?);
+    }
+
+    // Untrusted requests without a peer address must not reuse forwarded
+    // headers as a fallback.
+    {
+        var ctx = Context{
+            .allocator = a,
+            .headers = &hdrs,
+            .isTls = false,
+            .trustForwarded = false,
+        };
+        try std.testing.expect(ctx.remoteAddress() == null);
     }
 
     // Case 2: Trusted proxy (trustForwarded = true)
@@ -2415,4 +2449,32 @@ test "registerRouteTable rejects conflicting update without corrupting table" {
     var ctx = Context{ .allocator = a };
     const h = router.match(.GET, "/api/status", &ctx);
     try std.testing.expect(h != null);
+}
+
+test "forwarded client resolution skips trusted proxy hops" {
+    const hdrs = [_]Header{
+        .{ .name = "X-Forwarded-For", .value = "198.51.100.77, 203.0.113.195, 10.0.0.5" },
+    };
+    const proxies = [_][]const u8{ "10.0.0.0/8", "127.0.0.1" };
+
+    var ctx = Context{
+        .allocator = std.testing.allocator,
+        .headers = &hdrs,
+        .peerAddress = "127.0.0.1",
+        .trustForwarded = true,
+        .trustedProxies = &proxies,
+    };
+    try std.testing.expectEqualStrings("203.0.113.195", ctx.remoteAddress().?);
+
+    const all_proxy_hdrs = [_]Header{
+        .{ .name = "X-Forwarded-For", .value = "10.0.0.5, 10.0.0.6" },
+    };
+    var all_proxy = Context{
+        .allocator = std.testing.allocator,
+        .headers = &all_proxy_hdrs,
+        .peerAddress = "127.0.0.1",
+        .trustForwarded = true,
+        .trustedProxies = &proxies,
+    };
+    try std.testing.expectEqualStrings("127.0.0.1", all_proxy.remoteAddress().?);
 }

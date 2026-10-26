@@ -169,7 +169,12 @@ pub const ParsedAuthority = struct {
 };
 
 /// Parses an authority string ("host", "host:port", "[::1]", "[::1]:port").
-/// Returns null if the syntax is malformed (unmatched brackets, invalid port digits, etc.).
+/// Returns null if the syntax is malformed (unmatched brackets, invalid port
+/// digits, empty host, etc.).
+///
+/// IPv6 literals must be bracketed. A bare string with multiple colons is not
+/// an authority: accepting it would let `http://::1/` (invalid per RFC 3986)
+/// reach URL-derived Host and connection fields as if it were a valid host.
 pub fn parseAuthority(input: []const u8) ?ParsedAuthority {
     if (input.len == 0) return null;
 
@@ -177,6 +182,7 @@ pub fn parseAuthority(input: []const u8) ?ParsedAuthority {
         const close = std.mem.indexOfScalar(u8, input, ']') orelse return null;
         if (close < 2) return null; // "[]" minimum invalid
         const inner = input[1..close];
+        if (inner.len == 0) return null;
         const after = input[close + 1 ..];
         if (after.len == 0) {
             return .{ .host = inner, .port = null, .isIpv6 = true };
@@ -186,12 +192,10 @@ pub fn parseAuthority(input: []const u8) ?ParsedAuthority {
         return .{ .host = inner, .port = portVal, .isIpv6 = true };
     }
 
-    // Bare host or host:port
+    // Bare host or host:port. Multiple colons require brackets.
     if (std.mem.lastIndexOfScalar(u8, input, ':')) |colon| {
-        // If there are multiple colons without brackets, this is an unbracketed IPv6 literal
-        if (std.mem.indexOfScalar(u8, input[0..colon], ':') != null) {
-            return .{ .host = input, .port = null, .isIpv6 = true };
-        }
+        if (std.mem.indexOfScalar(u8, input[0..colon], ':') != null) return null;
+        if (colon == 0) return null; // empty host
         const portVal = parsePort(input[colon + 1 ..]) orelse return null;
         return .{ .host = input[0..colon], .port = portVal, .isIpv6 = false };
     }
@@ -566,7 +570,6 @@ fn daysFromCivil(yIn: i32, m: u4, d: u16) i64 {
     return era * 146097 + doe - 719468;
 }
 
-
 test "isTokenChar matches RFC 7230" {
     try std.testing.expect(isTokenChar('a'));
     try std.testing.expect(isTokenChar('Z'));
@@ -628,6 +631,23 @@ test "parseAuthority variations" {
 
     try std.testing.expect(parseAuthority("[::1:bad") == null);
     try std.testing.expect(parseAuthority("host:99999") == null);
+}
+
+test "parseAuthority rejects empty hosts and unbracketed IPv6" {
+    try std.testing.expect(parseAuthority("") == null);
+    try std.testing.expect(parseAuthority(":8080") == null);
+    try std.testing.expect(parseAuthority("[]") == null);
+    try std.testing.expect(parseAuthority("[]:80") == null);
+    try std.testing.expect(parseAuthority("[::1]junk") == null);
+    try std.testing.expect(parseAuthority("[::1]:") == null);
+    try std.testing.expect(parseAuthority("[::1]:abc") == null);
+    // Bare IPv6 has multiple colons and must be bracketed.
+    try std.testing.expect(parseAuthority("::1") == null);
+    try std.testing.expect(parseAuthority("2001:db8::1") == null);
+    // Trailing junk after the port is rejected, not truncated.
+    try std.testing.expect(parseAuthority("example.com:80x") == null);
+    // A single colon with an empty port is not a valid port.
+    try std.testing.expect(parseAuthority("example.com:") == null);
 }
 
 test "ByteCursor reading" {

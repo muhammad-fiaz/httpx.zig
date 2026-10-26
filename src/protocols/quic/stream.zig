@@ -110,8 +110,10 @@ pub const Stream = struct {
         } else if (offset > self.recvOffset) {
             // Out of order: buffer it.
             const copy = try self.allocator.dupe(u8, data);
-            errdefer self.allocator.free(copy);
-            try self.pending.append(self.allocator, .{ .offset = offset, .data = copy });
+            self.pending.append(self.allocator, .{ .offset = offset, .data = copy }) catch |err| {
+                self.allocator.free(copy);
+                return err;
+            };
             std.mem.sort(Chunk, self.pending.items, {}, chunkLess);
             self.rejectOverlaps() catch return Error.OutOfMemory;
             if (self.pending.items.len > MAX_BUFFERED_GAPS) return Error.OutOfMemory;
@@ -250,6 +252,27 @@ test "out-of-order chunks buffer then flush" {
     // Duplicate overlap of delivered prefix is trimmed, not duplicated.
     _ = try st.receive(3, "LOWO", false, &sink);
     try std.testing.expectEqualStrings("HELLOWORLD", out.items);
+}
+
+test "gap limit error leaves buffered chunk owned by stream" {
+    const a = std.testing.allocator;
+    var st = Stream.init(a, 0, true, true);
+    defer st.deinit();
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(a);
+    var sink = CollectSink{ .list = &out, .gpa = a };
+
+    for (0..MAX_BUFFERED_GAPS + 1) |i| {
+        const offset: u64 = @intCast(i * 2 + 1);
+        if (i == MAX_BUFFERED_GAPS) {
+            try std.testing.expectError(Error.OutOfMemory, st.receive(offset, "x", false, &sink));
+        } else {
+            _ = try st.receive(offset, "x", false, &sink);
+        }
+    }
+    // Deinit must free every still-buffered chunk exactly once, including
+    // the chunk whose insertion crossed the configured gap limit.
+    try std.testing.expectEqual(@as(usize, MAX_BUFFERED_GAPS + 1), st.pending.items.len);
 }
 
 test "flow control violation detected" {

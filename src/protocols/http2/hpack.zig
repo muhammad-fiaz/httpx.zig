@@ -100,8 +100,13 @@ pub const staticTable = [_]StaticEntry{
 
 pub const STATIC_TABLE_SIZE = staticTable.len;
 
-fn entrySize(name: []const u8, value: []const u8) usize {
-    return ENTRY_OVERHEAD + name.len + value.len;
+fn checkedEntrySize(nameLen: usize, valueLen: usize) ?usize {
+    const withOverhead = std.math.add(usize, ENTRY_OVERHEAD, nameLen) catch return null;
+    return std.math.add(usize, withOverhead, valueLen) catch return null;
+}
+
+fn entrySize(name: []const u8, value: []const u8) ?usize {
+    return checkedEntrySize(name.len, value.len);
 }
 
 // Dynamic table (shared mechanics for encoder and decoder sides)
@@ -131,10 +136,10 @@ const DynTable = struct {
         self.entries.deinit(self.allocator);
     }
 
-    fn evictFor(self: *DynTable, incoming: usize) void {
-        while (self.size + incoming > self.maxSize and self.entries.items.len > 0) {
+    fn evictFor(self: *DynTable, incoming: ?usize) void {
+        while ((incoming == null or self.size > self.maxSize or incoming.? > self.maxSize - self.size) and self.entries.items.len > 0) {
             const old = self.entries.pop() orelse break;
-            self.size -= entrySize(old.name, old.value);
+            self.size -= entrySize(old.name, old.value) orelse unreachable;
             self.allocator.free(old.name);
             self.allocator.free(old.value);
         }
@@ -143,14 +148,16 @@ const DynTable = struct {
     /// Inserts newest-first. An entry larger than maxSize is dropped
     /// after emptying (per RFC it empties the table but is not stored).
     fn insert(self: *DynTable, name: []const u8, value: []const u8) !void {
-        self.evictFor(entrySize(name, value));
-        if (entrySize(name, value) > self.maxSize) return; // emptied, not stored
+        const size = entrySize(name, value);
+        self.evictFor(size);
+        const entry_bytes = size orelse return;
+        if (entry_bytes > self.maxSize) return; // emptied, not stored
         const ownedName = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(ownedName);
         const ownedValue = try self.allocator.dupe(u8, value);
         errdefer self.allocator.free(ownedValue);
         try self.entries.insert(self.allocator, 0, .{ .name = ownedName, .value = ownedValue });
-        self.size += entrySize(name, value);
+        self.size += entry_bytes;
     }
 
     fn setMaxSize(self: *DynTable, newMax: usize) void {
@@ -823,6 +830,25 @@ test "decode a response with a never-indexed literal (RFC 7541 Section 6.2.3)" {
     try std.testing.expectEqualStrings("custom-value", res.fields[3].value);
     // Only the never-indexed literal must stay out of the dynamic table.
     try std.testing.expectEqual(@as(usize, 3), d.dyn.entries.items.len);
+}
+
+test "dynamic table size arithmetic is checked at usize boundaries" {
+    const a = std.testing.allocator;
+    try std.testing.expectEqual(@as(?usize, null), checkedEntrySize(std.math.maxInt(usize), 0));
+    try std.testing.expectEqual(@as(?usize, null), checkedEntrySize(0, std.math.maxInt(usize)));
+
+    var dyn = DynTable.init(a);
+    defer dyn.deinit();
+    try dyn.entries.append(a, .{
+        .name = try a.dupe(u8, "x"),
+        .value = try a.dupe(u8, "y"),
+    });
+    // This models a legal table close to the maximum representable size on a
+    // 32-bit target. Adding the incoming size would wrap and skip eviction.
+    dyn.maxSize = std.math.maxInt(usize);
+    dyn.size = std.math.maxInt(usize) - 4;
+    dyn.evictFor(10);
+    try std.testing.expectEqual(@as(usize, 0), dyn.entries.items.len);
 }
 
 test "encoder emits a dynamic table size update when the peer shrinks it" {

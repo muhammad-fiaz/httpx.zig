@@ -148,8 +148,8 @@ pub fn connectionDirective(headers: anytype) ConnectionDirective {
         if (!parseMod.eqlIgnoreCase(h.name, "Connection")) continue;
         var it = parseMod.TokenListIterator.init(h.value);
         while (it.next()) |tok| {
-            if (parseMod.eqlIgnoreCase(tok, "keep-alive")) result = .keepAlive;
-            if (parseMod.eqlIgnoreCase(tok, "close")) result = .close;
+            if (parseMod.eqlIgnoreCase(tok, "close")) return .close;
+            if (parseMod.eqlIgnoreCase(tok, "keep-alive") and result == .unspecified) result = .keepAlive;
         }
     }
     return result;
@@ -286,6 +286,14 @@ test "keep-alive decision by version and directives" {
     const keep = [_]F{.{ .name = "Connection", .value = "Upgrade, Keep-Alive" }};
     try std.testing.expect(shouldKeepAlive(.http10, keep[0..]));
     try std.testing.expect(shouldKeepAlive(.http11, keep[0..]));
+
+    const conflicting = [_]F{.{ .name = "Connection", .value = "keep-alive, close" }};
+    try std.testing.expect(!shouldKeepAlive(.http10, conflicting[0..]));
+    const repeated = [_]F{
+        .{ .name = "Connection", .value = "keep-alive" },
+        .{ .name = "connection", .value = "close" },
+    };
+    try std.testing.expect(!shouldKeepAlive(.http10, repeated[0..]));
 }
 
 test "expect and bodyless rules" {

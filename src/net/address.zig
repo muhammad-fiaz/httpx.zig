@@ -164,6 +164,59 @@ pub const Address = struct {
     }
 };
 
+/// Returns true when `peer` is covered by an exact address or CIDR rule.
+/// IPv4-mapped IPv6 peers are normalized so `::ffff:127.0.0.1` matches
+/// `127.0.0.1` and IPv4 prefixes. Invalid rules never match.
+pub fn matchesCidr(peer: []const u8, rule: []const u8) bool {
+    const trimmed = std.mem.trim(u8, rule, " \t");
+    if (trimmed.len == 0) return false;
+
+    const slash = std.mem.indexOfScalar(u8, trimmed, '/');
+    const host = if (slash) |i| trimmed[0..i] else trimmed;
+
+    var dummy = Address{ .family = .ip4, .port = 0 };
+    var peerAddr = dummy.parseIp(std.mem.trim(u8, peer, " \t")) catch
+        return std.ascii.eqlIgnoreCase(peer, trimmed);
+    var ruleAddr = dummy.parseIp(host) catch
+        return std.ascii.eqlIgnoreCase(peer, trimmed);
+
+    if (peerAddr.toV4MappedView()) |v| peerAddr = v;
+    if (ruleAddr.toV4MappedView()) |v| ruleAddr = v;
+    if (peerAddr.family != ruleAddr.family) return false;
+
+    const maxBits: u8 = if (peerAddr.family == .ip4) 32 else 128;
+    const bits: u8 = if (slash) |i|
+        std.fmt.parseInt(u8, trimmed[i + 1 ..], 10) catch return false
+    else
+        maxBits;
+    if (bits > maxBits) return false;
+
+    var i: usize = 0;
+    while (i < bits / 8) : (i += 1) {
+        if (peerAddr.bytes[i] != ruleAddr.bytes[i]) return false;
+    }
+    const rem = bits % 8;
+    if (rem != 0) {
+        const mask: u8 = @truncate(@as(u16, 0xff00) >> @as(u4, @intCast(rem)));
+        if ((peerAddr.bytes[i] & mask) != (ruleAddr.bytes[i] & mask)) return false;
+    }
+    return true;
+}
+
+test "CIDR rules match addresses and normalize v4-mapped peers" {
+    try std.testing.expect(matchesCidr("127.0.0.1", "127.0.0.1"));
+    try std.testing.expect(matchesCidr("127.0.0.1", "127.0.0.0/8"));
+    try std.testing.expect(!matchesCidr("127.0.0.1", "10.0.0.0/8"));
+    try std.testing.expect(matchesCidr("192.168.1.5", "192.168.1.0/24"));
+    try std.testing.expect(!matchesCidr("192.168.2.5", "192.168.1.0/24"));
+    try std.testing.expect(matchesCidr("::ffff:127.0.0.1", "127.0.0.1"));
+    try std.testing.expect(matchesCidr("2001:db8::1", "2001:db8::/32"));
+    try std.testing.expect(!matchesCidr("2001:db9::1", "2001:db8::/32"));
+    try std.testing.expect(matchesCidr("10.1.2.3", "0.0.0.0/0"));
+    try std.testing.expect(!matchesCidr("10.1.2.3", "10.1.2.3/33"));
+    try std.testing.expect(!matchesCidr("10.1.2.3", "not-an-address"));
+}
+
 /// Parses dotted-quad IPv4 into 4 bytes.
 ///
 /// Delegates to `std.Io.net.Ip4Address.parse`, which rejects empty

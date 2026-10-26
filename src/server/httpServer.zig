@@ -33,6 +33,7 @@ const udpMod = @import("../sockets/udp.zig");
 const templatesMod = @import("../web/templates/templates.zig");
 const tlsServerMod = @import("../protocols/tls/tlsServer.zig");
 const fsMod = @import("../utils/fs.zig");
+const addressMod = @import("../net/address.zig");
 const alpnMod = @import("../protocols/tls/alpn.zig");
 const metricsMod = @import("../web/metrics/metricsRegistry.zig");
 const tlsSessionMod = @import("../protocols/tls/tlsSession.zig");
@@ -77,6 +78,13 @@ pub const StreamConn = union(enum) {
         return switch (self) {
             .plain => |p| p.writeAll(bytes),
             .tls => |t| t.writeAll(bytes),
+        };
+    }
+
+    pub fn peerAddress(self: StreamConn) []const u8 {
+        return switch (self) {
+            .plain => |p| p.peerAddress(),
+            .tls => |t| t.socket.peerAddress(),
         };
     }
 };
@@ -180,7 +188,9 @@ pub const Config = struct {
     /// When true, Context.remoteAddress(), Context.scheme(), and Context.host() will parse forwarded headers.
     trustForwardedHeaders: bool = false,
     /// Optional list of trusted proxy IPs/CIDRs (e.g. "127.0.0.1", "::1").
-    /// If non-empty, headers are only trusted if connection originates from one of these addresses.
+    /// If non-empty, headers are only trusted if the connection originates from
+    /// one of these addresses, and matching hops are skipped when resolving
+    /// X-Forwarded-For right-to-left.
     trustedProxies: []const []const u8 = &.{},
     /// Preferred default HTTP version for server handling. When set to a
     /// concrete version it selects exactly that version, overriding the
@@ -508,7 +518,6 @@ pub const Server = struct {
         if (cfg.maxConcurrentConnections == 0 or cfg.maxQueuedConnectionTasks == 0) {
             return error.InvalidConcurrencyLimits;
         }
-        const addressMod = @import("../net/address.zig");
         errdefer if (ownsIo) {
             if (ioThreaded) |th| {
                 th.deinit();
@@ -1053,6 +1062,18 @@ pub const Server = struct {
         }
     }
 
+    /// Forwarded headers are honored only when explicitly enabled and the
+    /// connection came from an allowed proxy (or no proxy list is configured,
+    /// which trusts every peer).
+    fn trustForwardedFor(self: *const Server, peer: []const u8) bool {
+        if (!self.cfg.trustForwardedHeaders) return false;
+        if (self.cfg.trustedProxies.len == 0) return true;
+        for (self.cfg.trustedProxies) |rule| {
+            if (addressMod.matchesCidr(peer, rule)) return true;
+        }
+        return false;
+    }
+
     /// Return the full bound address. Supports IPv4 and IPv6.
     pub fn localAddress(self: *const Server) std.Io.net.IpAddress {
         return self.listener.localAddress();
@@ -1375,6 +1396,12 @@ pub const Server = struct {
             server: *Server,
             isTls: bool,
             arena: std.heap.ArenaAllocator,
+            peerBuf: [64]u8 = undefined,
+            peerLen: usize = 0,
+
+            fn peerSlice(ctxPtr: *const @This()) []const u8 {
+                return ctxPtr.peerBuf[0..ctxPtr.peerLen];
+            }
         };
 
         var h2ctx = H2Ctx{
@@ -1383,6 +1410,9 @@ pub const Server = struct {
             .arena = std.heap.ArenaAllocator.init(self.allocator),
         };
         defer h2ctx.arena.deinit();
+        const peer = conn.peerAddress();
+        @memcpy(h2ctx.peerBuf[0..peer.len], peer);
+        h2ctx.peerLen = peer.len;
 
         const H2Bridge = struct {
             fn handle(ctxPtr: ?*anyopaque, mStr: []const u8, pStr: []const u8, hdrs: []const transportMod.Header, bStr: []const u8) anyerror!transportMod.HandlerResponse {
@@ -1420,7 +1450,9 @@ pub const Server = struct {
                     .method = method,
                     .body = bStr,
                     .isTls = c.isTls,
-                    .trustForwarded = serverPtr.cfg.trustForwardedHeaders,
+                    .peerAddress = c.peerSlice(),
+                    .trustForwarded = serverPtr.trustForwardedFor(c.peerSlice()),
+                    .trustedProxies = serverPtr.cfg.trustedProxies,
                 };
 
                 // Full pipeline: match + router/route middleware + 404/405 +
@@ -1677,7 +1709,9 @@ pub const Server = struct {
                     req.queued = false;
                     continue;
                 }
-                self.dispatchH3Request(&h3, qconn, req) catch |err| {
+                var peerBuf: [64]u8 = undefined;
+                const peer = if (ep.peer) |p| addressMod.Address.fromStd(p).formatBuf(&peerBuf) else "";
+                self.dispatchH3Request(&h3, qconn, req, peer) catch |err| {
                     h3.resetStream(qconn, sid, .internalError, nowMs) catch {};
                     h3.discardRequestStream(sid);
                     if (err == error.OutOfMemory) return err;
@@ -1697,6 +1731,7 @@ pub const Server = struct {
         h3: *http3Conn.Connection,
         qconn: *quicConn.Connection,
         req: *H3Request,
+        peer: []const u8,
     ) !void {
         var arenaH3 = std.heap.ArenaAllocator.init(self.allocator);
         defer arenaH3.deinit();
@@ -1753,7 +1788,9 @@ pub const Server = struct {
             .method = knownMethod orelse .GET,
             .body = reqBody,
             .isTls = true,
-            .trustForwarded = self.cfg.trustForwardedHeaders,
+            .peerAddress = peer,
+            .trustForwarded = self.trustForwardedFor(peer),
+            .trustedProxies = self.cfg.trustedProxies,
         };
 
         var res = if (knownMethod != null)
@@ -1959,18 +1996,14 @@ pub const Server = struct {
 
         // Connection reuse decision (RFC 9112 Section 7): explicit "close" wins;
         // HTTP/1.0 defaults to close unless it requested keep-alive.
-        var clientClose = forceClose or reqHead.minorVersion == 0;
-        var clientKa10 = false;
-        for (hdrs) |h| {
-            if (!std.ascii.eqlIgnoreCase(h.name, "connection")) continue;
-            if (std.ascii.findIgnoreCase(h.value, "close") != null) clientClose = true;
-            if (std.ascii.findIgnoreCase(h.value, "keep-alive") != null) clientKa10 = true;
-        }
-        if (reqHead.minorVersion == 0 and clientKa10) clientClose = false;
+        const clientVersion: semanticsMod.Version = if (reqHead.minorVersion == 0) .http10 else .http11;
+        var clientClose = forceClose or !semanticsMod.shouldKeepAlive(clientVersion, hdrs);
 
         // Body: Content-Length or chunked (both bounded by cfg.maxBody).
         var body: []u8 = "";
-        const framing = parserMod.decideFraming(fields[0..blk.count], false, 0, "") catch {
+        const framing = parserMod.framingFull(fields[0..blk.count], .{
+            .isHttp10 = reqHead.minorVersion == 0,
+        }) catch {
             _ = sendSimpleError(conn, 400, "invalid message framing") catch 0;
             return false;
         };
@@ -2087,7 +2120,9 @@ pub const Server = struct {
             .method = method,
             .body = body,
             .isTls = isTlsConn,
-            .trustForwarded = self.cfg.trustForwardedHeaders,
+            .peerAddress = conn.peerAddress(),
+            .trustForwarded = self.trustForwardedFor(conn.peerAddress()),
+            .trustedProxies = self.cfg.trustedProxies,
         };
         const res: Response = self.router.dispatch(&ctx);
 
@@ -3535,10 +3570,10 @@ pub const h3TestKeyPem =
 
 test "Server high-level HTTP/3 initialization and endpoint lifecycle" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{
+    var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
         .http3 = true,
@@ -3547,7 +3582,7 @@ test "Server high-level HTTP/3 initialization and endpoint lifecycle" {
             .privateKeyPem = h3TestKeyPem,
         },
         .enableDocs = false,
-    }) catch return;
+    });
     defer srv.deinit();
 
     try std.testing.expect(srv.h3Endpoint != null);
@@ -3565,10 +3600,10 @@ test "HTTP/3 endpoint reports the port HTTP/1.1 does not share" {
     // The named accessor is the supported way to find the UDP port, so it
     // must agree with the endpoint even when the two ports diverge.
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{
+    var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
         .http3 = true,
@@ -3577,7 +3612,7 @@ test "HTTP/3 endpoint reports the port HTTP/1.1 does not share" {
             .privateKeyPem = h3TestKeyPem,
         },
         .enableDocs = false,
-    }) catch return;
+    });
     defer srv.deinit();
 
     const reported = srv.http3.port().?;
@@ -3635,7 +3670,6 @@ test "explicit HTTP/3 port conflict fails instead of silently rebinding" {
         .ip6 => |v| v.port,
     };
 
-    const addressMod = @import("../net/address.zig");
     var addr = addressMod.Address.unspecified4(port);
     var tcpProbe = tcp.Listener.bindAddress(ctx.io, &addr) catch return;
     tcpProbe.close(ctx.io);
@@ -3669,4 +3703,129 @@ test "Server reports no HTTP/3 port when HTTP/3 is disabled" {
     defer srv.deinit();
 
     try std.testing.expectEqual(@as(?u16, null), srv.http3.port());
+}
+
+test "trusted proxy rules gate forwarded headers" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .trustForwardedHeaders = true,
+        .trustedProxies = &.{ "10.0.0.0/8", "::1" },
+    }) catch return;
+    defer srv.deinit();
+
+    try std.testing.expect(srv.trustForwardedFor("10.1.2.3"));
+    try std.testing.expect(srv.trustForwardedFor("::1"));
+    try std.testing.expect(!srv.trustForwardedFor("127.0.0.1"));
+    try std.testing.expect(!srv.trustForwardedFor(""));
+
+    // An empty proxy list explicitly trusts every peer.
+    srv.cfg.trustedProxies = &.{};
+    try std.testing.expect(srv.trustForwardedFor("127.0.0.1"));
+
+    srv.cfg.trustForwardedHeaders = false;
+    try std.testing.expect(!srv.trustForwardedFor("127.0.0.1"));
+}
+
+test "direct clients cannot spoof the remote address through forwarded headers" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    const H = struct {
+        fn handle(c: *Context) anyerror!Response {
+            return .{
+                .body = c.remoteAddress() orelse "none",
+                .contentType = "text/plain",
+            };
+        }
+    };
+
+    var srv = Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 2,
+        .trustForwardedHeaders = true,
+        .trustedProxies = &.{"10.0.0.1"},
+    }) catch return;
+    defer srv.deinit();
+    try srv.router.get("/", H.handle, .{});
+
+    const Runner = struct {
+        fn run(s: *Server) void {
+            s.run();
+        }
+    };
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    defer t.join();
+
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    defer client.close();
+    try client.writeAll("GET / HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 203.0.113.9\r\nX-Real-IP: 203.0.113.9\r\nConnection: close\r\n\r\n");
+
+    var buf: [2048]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = client.read(buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "\r\n\r\n127.0.0.1") != null);
+
+    srv.requestShutdown();
+}
+
+test "trusted proxies resolve the rightmost client address" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    const H = struct {
+        fn handle(c: *Context) anyerror!Response {
+            return .{
+                .body = c.remoteAddress() orelse "none",
+                .contentType = "text/plain",
+            };
+        }
+    };
+
+    var srv = Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 2,
+        .trustForwardedHeaders = true,
+        .trustedProxies = &.{"127.0.0.1"},
+    }) catch return;
+    defer srv.deinit();
+    try srv.router.get("/", H.handle, .{});
+
+    const Runner = struct {
+        fn run(s: *Server) void {
+            s.run();
+        }
+    };
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    defer t.join();
+
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    defer client.close();
+    try client.writeAll("GET / HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 203.0.113.9, 198.51.100.7\r\nConnection: close\r\n\r\n");
+
+    var buf: [2048]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = client.read(buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "\r\n\r\n198.51.100.7") != null);
+
+    srv.requestShutdown();
 }

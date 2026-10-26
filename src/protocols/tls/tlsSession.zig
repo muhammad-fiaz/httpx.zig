@@ -316,6 +316,10 @@ pub const ClientSession = struct {
     maxEarlyData: u32 = 0,
     alpn: [16]u8 = (@as([16]u8, @splat(0))),
     alpnLen: u8 = 0,
+    /// QUIC peer transport limits remembered with a ticket, ordered as
+    /// MAX_DATA, bidi-local, bidi-remote, uni, MAX_STREAMS bidi, uni.
+    /// Required to enforce the previous connection's limits during 0-RTT.
+    quicTransportLimits: ?[6]u64 = null,
 
     pub fn deinit(self: *ClientSession, allocator: Allocator) void {
         allocator.free(self.ticket);
@@ -336,6 +340,7 @@ pub const ClientSession = struct {
             .maxEarlyData = self.maxEarlyData,
             .alpn = self.alpn,
             .alpnLen = self.alpnLen,
+            .quicTransportLimits = self.quicTransportLimits,
         };
         errdefer std.crypto.secureZero(u8, &copy.psk);
         copy.ticket = try allocator.dupe(u8, self.ticket);

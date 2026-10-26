@@ -79,7 +79,7 @@ pub const Cubic = struct {
 
     const maxCwndCap: usize = 1 << 30;
     const beta: f64 = 0.7; // RFC 8312 Section 4.5
-    const c: f64 = 0.4;    // RFC 8312 Section 4.1
+    const c: f64 = 0.4; // RFC 8312 Section 4.1
 
     pub fn init(mss: usize) Cubic {
         return .{

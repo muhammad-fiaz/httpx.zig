@@ -23,6 +23,7 @@ const Allocator = std.mem.Allocator;
 const frameMod = @import("frame.zig");
 const hpackMod = @import("hpack.zig");
 const streamMod = @import("stream.zig");
+const http1Semantics = @import("../http1/semantics.zig");
 
 const FrameHeader = frameMod.FrameHeader;
 const FrameType = frameMod.FrameType;
@@ -802,6 +803,7 @@ pub const Session = struct {
         var seenRegular = false;
         var seenHost = false;
         var methodIsConnect = false;
+        var methodIsOptions = false;
         var pathValue: ?[]const u8 = null;
         var authorityValue: ?[]const u8 = null;
         var hostValue: ?[]const u8 = null;
@@ -835,6 +837,7 @@ pub const Session = struct {
                     if (seenMethod or !isTokenValue(f.value)) return false;
                     seenMethod = true;
                     methodIsConnect = std.mem.eql(u8, f.value, "CONNECT");
+                    methodIsOptions = std.mem.eql(u8, f.value, "OPTIONS");
                 } else if (std.mem.eql(u8, f.name, ":path")) {
                     if (seenPath) return false;
                     seenPath = true;
@@ -845,8 +848,10 @@ pub const Session = struct {
                 } else if (std.mem.eql(u8, f.name, ":authority")) {
                     if (seenAuthority) return false;
                     seenAuthority = true;
-                    // Userinfo is not part of :authority (RFC 9113 8.3.1).
-                    if (std.mem.indexOfScalar(u8, f.value, '@') != null) return false;
+                    // Authority syntax is shared with HTTP/1 Host validation;
+                    // reject malformed ports, whitespace, and bad literals
+                    // before the request reaches origin routing.
+                    if (!http1Semantics.validAuthority(f.value)) return false;
                     authorityValue = f.value;
                 } else if (std.mem.eql(u8, f.name, ":status")) {
                     if (seenStatus) return false;
@@ -883,7 +888,7 @@ pub const Session = struct {
                     return false;
                 }
                 if (std.mem.eql(u8, f.name, "host")) {
-                    if (seenHost) return false;
+                    if (seenHost or !http1Semantics.validAuthority(f.value)) return false;
                     seenHost = true;
                     hostValue = f.value;
                 }
@@ -920,6 +925,7 @@ pub const Session = struct {
                     const path = pathValue.?;
                     if (path.len == 0) return false;
                     if (path[0] != '/' and !std.mem.eql(u8, path, "*")) return false;
+                    if (std.mem.eql(u8, path, "*") and !methodIsOptions) return false;
                 }
             },
             .response => {
@@ -1729,6 +1735,43 @@ test "session pair completes request/response exchange" {
     try server.feed(client.outbound.items);
 }
 
+test "response data callback failure resets only the affected stream" {
+    const a = std.testing.allocator;
+    var client = try Session.init(a, .client, .{});
+    defer client.deinit();
+    var server = try Session.init(a, .server, .{});
+    defer server.deinit();
+    try establishTestPair(&client, &server);
+
+    const req = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":scheme", .value = "http" },
+        .{ .name = ":authority", .value = "x" },
+    };
+    try client.sendHeaders(1, &req, true);
+    try server.feed(client.outbound.items);
+    client.outbound.clearRetainingCapacity();
+
+    client.cbs.onData = struct {
+        fn fail(_: ?*anyopaque, _: u31, _: []const u8) anyerror!void {
+            return error.ConsumerFailed;
+        }
+    }.fail;
+
+    const resp = [_]hpackMod.HeaderField{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "1" },
+    };
+    try server.sendHeaders(1, &resp, false);
+    _ = try server.sendData(1, "x", true);
+    try client.feed(server.outbound.items);
+
+    try std.testing.expect(!client.closed);
+    try std.testing.expect(client.streamPtr(1) == null);
+    try std.testing.expect(hasRstStream(client.outbound.items, 1, @backingInt(ErrorCode.internalError)));
+}
+
 test "informational responses are ignored until the final response" {
     const a = std.testing.allocator;
     var client = try Session.init(a, .client, .{});
@@ -2238,6 +2281,14 @@ test "header list validation tracks CONNECT pseudo-header rules" {
         .{ .name = ":path", .value = "*" },
     };
     try std.testing.expect(Session.validateHeaderList(&asterisk, .request));
+
+    const invalidAsterisk = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "*" },
+    };
+    try std.testing.expect(!Session.validateHeaderList(&invalidAsterisk, .request));
 }
 
 test "header list validation rejects uppercase, forbidden headers and mixed pseudo-headers" {
@@ -2298,7 +2349,7 @@ test "header list validation rejects uppercase, forbidden headers and mixed pseu
     try std.testing.expect(Session.validateHeaderList(&plainTrailer, .trailers));
 }
 
-test "header list validation rejects malformed method, scheme and authority" {
+test "header list validation rejects malformed method, scheme, authority and Host" {
     const badMethod = [_]hpackMod.HeaderField{
         .{ .name = ":method", .value = "GE T" },
         .{ .name = ":scheme", .value = "https" },
@@ -2320,6 +2371,22 @@ test "header list validation rejects malformed method, scheme and authority" {
         .{ .name = ":authority", .value = "user@example.com" },
     };
     try std.testing.expect(!Session.validateHeaderList(&userinfo, .request));
+
+    const badAuthority = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = ":authority", .value = "example.com:65536" },
+    };
+    try std.testing.expect(!Session.validateHeaderList(&badAuthority, .request));
+
+    const badHost = [_]hpackMod.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/" },
+        .{ .name = "host", .value = "example.com bad" },
+    };
+    try std.testing.expect(!Session.validateHeaderList(&badHost, .request));
 }
 
 test "continued header blocks are rejected before exceeding configured budget" {
@@ -2910,18 +2977,17 @@ test "regression: http2 session feed mutation and frame sequences" {
 
     const validClientHandshake = frameMod.CONNECTION_PREFACE ++ &[_]u8{
         0x00, 0x00, 0x00,
-        0x04,
-        0x00,
-        0x00, 0x00, 0x00, 0x00,
+        0x04, 0x00, 0x00,
+        0x00, 0x00, 0x00,
     };
 
     const validPing = &[_]u8{
         0x00, 0x00, 0x08,
-        0x06,
-        0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0x01, 0x02, 0x03, 0x04,
-        0x05, 0x06, 0x07, 0x08,
+        0x06, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06,
+        0x07, 0x08,
     };
 
     const helper = struct {

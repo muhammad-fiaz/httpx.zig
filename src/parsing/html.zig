@@ -444,6 +444,7 @@ fn pointForOffsetTs(source: []const u8, offset: usize) ts.Point {
 
 /// Limits for the HTML parser.
 pub const Limits = struct {
+    maxInputSize: usize = 64 * 1024 * 1024,
     maxNodes: u32 = dom.MAX_NODES,
     maxDepth: u32 = dom.MAX_DEPTH,
     maxAttrs: u32 = 256,
@@ -473,6 +474,7 @@ const RAW_TEXT_ELEMENTS = std.StaticStringMap(void).initComptime(.{
 });
 
 pub fn parse(arena: Allocator, htmlSrc: []const u8, limits: Limits) ParseError!Tree {
+    if (htmlSrc.len > limits.maxInputSize) return error.InputTooLarge;
     var tree = try Tree.initCapacity(arena, @min(htmlSrc.len / 16 + 4, limits.maxNodes));
     errdefer tree.deinit(arena);
     const root = try tree.append(arena, .{
@@ -815,6 +817,18 @@ test "html parses nested elements with attributes via syntax tree" {
         if (n.kind == .element and std.mem.eql(u8, n.tag, "br")) foundBr = true;
     }
     try std.testing.expect(foundA and foundBr);
+}
+
+test "html parser enforces configured input size before parsing" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expectError(error.InputTooLarge, parse(arena.allocator(), "<p>x</p>", .{ .maxInputSize = 7 }));
+
+    var arena2 = std.heap.ArenaAllocator.init(a);
+    defer arena2.deinit();
+    const tree = try parse(arena2.allocator(), "<p>x</p>", .{ .maxInputSize = 8 });
+    try std.testing.expectEqual(@as(u32, 3), tree.len());
 }
 
 test "html flags malformed input with error recovery" {

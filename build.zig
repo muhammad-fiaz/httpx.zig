@@ -313,7 +313,6 @@ pub fn build(b: *std.Build) void {
         testStep.dependOn(&installTests.step);
     }
 
-
     const benchExe = b.addExecutable(.{
         .name = "benchmark",
         .max_rss = compileStepMaxRss,

@@ -556,24 +556,21 @@ pub const Client = struct {
 
     /// Waits until the response for `sid` completes and returns it.
     pub fn awaitResponse(self: *Client, sid: u31) !Response {
+        errdefer self.abandonStream(sid);
         const a = self.allocator;
         while (true) {
             const st = self.pending.get(sid) orelse return error.StreamClosed;
             if (st.done) break;
             if (st.tooLarge) {
-                self.cancelStream(sid);
-                self.dropStream(sid);
                 return error.ResponseTooLarge;
             }
             if (self.session.closed) {
-                self.dropStream(sid);
                 return error.StreamClosed;
             }
             if (self.session.goawayReceived) {
                 // The peer will not process streams above its last id.
                 if (self.session.goawayLastStream) |last| {
                     if (sid > last) {
-                        self.dropStream(sid);
                         return error.StreamClosed;
                     }
                 }
@@ -583,12 +580,9 @@ pub const Client = struct {
 
         const st = self.pending.get(sid) orelse return error.StreamClosed;
         if (st.tooLarge) {
-            self.cancelStream(sid);
-            self.dropStream(sid);
             return error.ResponseTooLarge;
         }
         if (st.reset) {
-            self.dropStream(sid);
             return error.StreamClosed;
         }
         const status = st.status;
@@ -608,6 +602,13 @@ pub const Client = struct {
 
     fn dropStream(self: *Client, sid: u31) void {
         if (self.pending.fetchRemove(sid)) |kv| kv.value.deinit();
+    }
+
+    fn abandonStream(self: *Client, sid: u31) void {
+        if (self.pending.contains(sid)) {
+            self.cancelStream(sid);
+            self.dropStream(sid);
+        }
     }
 
     fn cancelStream(self: *Client, sid: u31) void {
@@ -633,7 +634,7 @@ pub const Client = struct {
         return self.exchange(sid, reqBody) catch |e| {
             // Every error path abandons this exchange; release the
             // per-stream buffers even if the failure predates awaitResponse.
-            self.dropStream(sid);
+            self.abandonStream(sid);
             return e;
         };
     }
@@ -681,11 +682,15 @@ pub const Client = struct {
         maxBytes: usize,
     ) !Response {
         const sid = try self.beginRequestStreaming(method, path, extra, scheme, authority, bodySource, maxBytes);
-        const complete = try self.sendRequestBodyStreaming(sid, bodySource);
-        const resp = try self.awaitResponse(sid);
-        if (!complete) {
-            self.cancelStream(sid);
-        }
+        const complete = self.sendRequestBodyStreaming(sid, bodySource) catch |e| {
+            self.abandonStream(sid);
+            return e;
+        };
+        const resp = self.awaitResponse(sid) catch |e| {
+            self.abandonStream(sid);
+            return e;
+        };
+        if (!complete) self.cancelStream(sid);
         return resp;
     }
 };
@@ -1422,6 +1427,58 @@ test "two requests are multiplexed over one connection" {
     try std.testing.expectEqualStrings("slow-response", r1.body);
     try std.testing.expectEqual(@as(u16, 200), r2.status);
     try std.testing.expectEqualStrings("fast-response", r2.body);
+}
+
+test "streaming request drops its stream when the body producer fails" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var l = tcp.Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const H = struct {
+        fn handle(_: ?*anyopaque, _: []const u8, _: []const u8, _: []const Header, _: []const u8) anyerror!HandlerResponse {
+            return .{ .status = 200 };
+        }
+    };
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io: std.Io) void {
+            var conn = lst.accept(io) catch return;
+            defer conn.close();
+            serveConnection(std.heap.page_allocator, &conn, H.handle, null) catch {};
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Acceptor.run, .{ &l, ctx.io }) catch return;
+    defer thread.join();
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+    var hc = Client.connect(a, sock) catch |err| {
+        sock.close();
+        return err;
+    };
+    defer hc.deinit();
+
+    var producerState: u8 = 0;
+    const source = BodySource{
+        .ptr = &producerState,
+        .readFn = struct {
+            fn read(_: *anyopaque, _: []u8) anyerror!usize {
+                return error.TestProducerFailed;
+            }
+        }.read,
+    };
+    try std.testing.expectError(error.ProtocolViolation, hc.requestStreaming(
+        "POST",
+        "/upload",
+        &.{},
+        "http",
+        "localhost",
+        source,
+        maxResponseBodySize,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), hc.pending.count());
 }
 
 test "a response larger than the flow-control window is delivered completely" {

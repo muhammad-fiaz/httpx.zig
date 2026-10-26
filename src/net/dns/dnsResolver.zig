@@ -12,10 +12,13 @@
 //!   - RFC 1034 — Domain Names: Concepts and Facilities
 
 const std = @import("std");
+const builtin = @import("builtin");
 const clock = @import("../../common/clock.zig");
 const Allocator = std.mem.Allocator;
 const net = std.Io.net;
 const udpMod = @import("../../sockets/udp.zig");
+const tcpMod = @import("../../sockets/tcp.zig");
+const addressMod = @import("../address.zig");
 const cacheMod = @import("dnsCache.zig");
 /// DNS response cache: `httpx.dns.Cache` is the one canonical path.
 pub const Cache = cacheMod.Cache;
@@ -50,6 +53,7 @@ pub const Rcode = enum(u4) {
 };
 
 pub const HEADER_SIZE = 12;
+const DNS_QUERY_TIMEOUT_MS: u64 = 5_000;
 
 pub const Flags = packed struct(u16) {
     qr: u1 = 0,
@@ -94,16 +98,23 @@ pub const Header = extern struct {
 /// Encodes a QNAME as length-prefixed labels.
 pub fn encodeName(out: []u8, name: []const u8) !usize {
     var pos: usize = 0;
-    var it = std.mem.splitScalar(u8, name, '.');
+    if (name.len == 0 or std.mem.eql(u8, name, ".")) {
+        if (out.len == 0) return error.NameTooLong;
+        out[0] = 0;
+        return 1;
+    }
+    const trimmed = if (std.mem.endsWith(u8, name, ".")) name[0 .. name.len - 1] else name;
+    var it = std.mem.splitScalar(u8, trimmed, '.');
     while (it.next()) |label| {
-        if (label.len == 0) continue;
-        if (pos + 1 + label.len >= out.len) return error.NameTooLong;
+        if (label.len == 0 or label.len > 63) return error.NameTooLong;
+        const needed = std.math.add(usize, pos, label.len + 1) catch return error.NameTooLong;
+        if (needed >= out.len or needed >= 255) return error.NameTooLong;
         out[pos] = @intCast(label.len);
         pos += 1;
         @memcpy(out[pos..][0..label.len], label);
         pos += label.len;
     }
-    if (pos + 1 > out.len) return error.NameTooLong;
+    if (pos >= out.len or pos >= 255) return error.NameTooLong;
     out[pos] = 0; // root label
     return pos + 1;
 }
@@ -134,7 +145,7 @@ pub fn decodeName(allocator: Allocator, msg: []const u8, offset: *usize, depth: 
     var pos = offset.*;
     var jumped = false;
     var guard: usize = 0;
-    var ptrJumps: u8 = 0;
+    var ptrJumps: usize = 0;
 
     while (true) {
         if (guard > 255) return error.NameLoop;
@@ -152,16 +163,25 @@ pub fn decodeName(allocator: Allocator, msg: []const u8, offset: *usize, depth: 
                 ptrJumps += 1;
                 if (ptrJumps + depth > 10) return error.TooManyPointers;
                 const ptr = (@as(usize, len & 0x3F) << 8) | msg[pos + 1];
+                // RFC 1035 compression pointers refer to a prior occurrence
+                // in the message. Forward/self references are malformed and
+                // can reinterpret arbitrary later packet bytes as a name.
+                if (ptr >= pos) return error.BadPointer;
                 if (!jumped) offset.* = pos + 2;
                 jumped = true;
                 pos = ptr;
                 continue;
             },
-            0x40 => return error.BadLabel, // EDNS extended labels unsupported
+            0x40, 0x80 => return error.BadLabel, // extended/reserved labels unsupported
             else => {},
         }
         if (pos + 1 + len > msg.len) return error.Truncated;
-        if (out.items.len > 0) try out.append(allocator, '.');
+        const separator: usize = @intFromBool(out.items.len > 0);
+        const expandedLen = std.math.add(usize, out.items.len, separator + len) catch return error.NameTooLong;
+        // DNS names are limited to 255 wire octets, which permits at most
+        // 253 bytes of labels plus textual dots (excluding the root octet).
+        if (expandedLen > 253) return error.NameTooLong;
+        if (separator != 0) try out.append(allocator, '.');
         try out.appendSlice(allocator, msg[pos + 1 ..][0..len]);
         if (!jumped) {} // stay in normal flow until terminator or pointer
         pos += 1 + len;
@@ -222,7 +242,10 @@ pub fn parseResponse(allocator: Allocator, msg: []const u8) !Response {
     const rcode: Rcode = @fromBackingInt(@intCast(@as(u4, @truncate(flagsRaw))));
 
     var answers = std.ArrayList(ResourceRecord).empty;
-    errdefer answers.deinit(allocator);
+    errdefer {
+        for (answers.items) |*rr| rr.deinit(allocator);
+        answers.deinit(allocator);
+    }
 
     var offset: usize = HEADER_SIZE;
 
@@ -262,16 +285,20 @@ pub fn parseResponse(allocator: Allocator, msg: []const u8) !Response {
 
         switch (rr.rtype) {
             .a => {
-                if (rdlength == 4) {
-                    @memcpy(rr.addrBytes[0..4], msg[offset..][0..4]);
-                    rr.addrLen = 4;
+                if (rdlength != 4) {
+                    allocator.free(name);
+                    return error.InvalidRecordLength;
                 }
+                @memcpy(rr.addrBytes[0..4], msg[offset..][0..4]);
+                rr.addrLen = 4;
             },
             .aaaa => {
-                if (rdlength == 16) {
-                    @memcpy(rr.addrBytes[0..16], msg[offset..][0..16]);
-                    rr.addrLen = 16;
+                if (rdlength != 16) {
+                    allocator.free(name);
+                    return error.InvalidRecordLength;
                 }
+                @memcpy(rr.addrBytes[0..16], msg[offset..][0..16]);
+                rr.addrLen = 16;
             },
             else => {}, // CNAME etc: skip rdata (could follow pointers)
         }
@@ -319,6 +346,177 @@ test "encode name simple" {
     try std.testing.expectEqualSlices(u8, &.{ 3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 }, buf[0..n]);
 }
 
+test "encode name enforces DNS label and wire length limits" {
+    var buf: [512]u8 = undefined;
+    var longLabel: [64]u8 = @splat('a');
+    try std.testing.expectError(error.NameTooLong, encodeName(&buf, &longLabel));
+    try std.testing.expectError(error.NameTooLong, encodeName(&buf, "a..b"));
+
+    var maxName: [253]u8 = @splat('a');
+    // Label lengths 63.63.63.61 produce the maximum 255-octet wire name.
+    @memset(maxName[63..64], '.');
+    @memset(maxName[127..128], '.');
+    @memset(maxName[191..192], '.');
+    try std.testing.expectEqual(@as(usize, 255), try encodeName(&buf, &maxName));
+    var tooLongName: [255]u8 = @splat('a');
+    @memset(tooLongName[63..64], '.');
+    @memset(tooLongName[127..128], '.');
+    @memset(tooLongName[191..192], '.');
+    try std.testing.expectError(error.NameTooLong, encodeName(&buf, &tooLongName));
+}
+
+test "DNS response question correlation rejects unsolicited packets" {
+    const a = std.testing.allocator;
+    const query = try buildQuery(a, 0x1234, "example.com", .a);
+    defer a.free(query);
+    const response = try a.dupe(u8, query);
+    defer a.free(response);
+    response[2] = 0x81;
+    response[3] = 0x80;
+
+    try validateResponseQuestion(a, response, 0x1234, "EXAMPLE.COM.", .a);
+    try std.testing.expectError(error.InvalidResponse, validateResponseQuestion(a, response, 0x1235, "example.com", .a));
+    try std.testing.expectError(error.InvalidResponse, validateResponseQuestion(a, response, 0x1234, "other.example", .a));
+    try std.testing.expectError(error.InvalidResponse, validateResponseQuestion(a, response, 0x1234, "example.com", .aaaa));
+    response[2] = 0x01; // query packet, not a response
+    try std.testing.expectError(error.InvalidResponse, validateResponseQuestion(a, response, 0x1234, "example.com", .a));
+}
+
+test "DNS rejects reserved labels and malformed address record lengths" {
+    const a = std.testing.allocator;
+    var badLabelOffset: usize = 0;
+    try std.testing.expectError(error.BadLabel, decodeName(a, &.{0x80}, &badLabelOffset, 0));
+
+    const malformed = [_]u8{
+        0x00, 0x01, 0x80, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x03, 1,
+        2,    3,
+    };
+    try std.testing.expectError(error.InvalidRecordLength, parseResponse(a, &malformed));
+}
+
+test "DNS rejects forward and self-referential compression pointers" {
+    const a = std.testing.allocator;
+    var forwardOffset: usize = 0;
+    try std.testing.expectError(error.BadPointer, decodeName(a, &.{ 0xC0, 0x02, 0x00 }, &forwardOffset, 0));
+    var selfOffset: usize = 1;
+    try std.testing.expectError(error.BadPointer, decodeName(a, &.{ 0x00, 0xC0, 0x01 }, &selfOffset, 0));
+}
+
+test "DNS rejects expanded names beyond the wire-format limit" {
+    const a = std.testing.allocator;
+    var msg: [257]u8 = undefined;
+    var pos: usize = 0;
+    for (0..4) |_| {
+        msg[pos] = 63;
+        pos += 1;
+        @memset(msg[pos .. pos + 63], 'a');
+        pos += 63;
+    }
+    msg[pos] = 0;
+    pos += 1;
+    var offset: usize = 0;
+    try std.testing.expectError(error.NameTooLong, decodeName(a, msg[0..pos], &offset, 0));
+}
+
+const DnsTcpTestServer = struct {
+    listener: *tcpMod.Listener,
+    io: std.Io,
+};
+
+const DnsUdpTruncatedServer = struct {
+    socket: *udpMod.UdpSocket,
+};
+
+fn runDnsUdpTruncatedServer(ctx: *DnsUdpTruncatedServer) void {
+    var request: [512]u8 = undefined;
+    const rx = ctx.socket.receive(&request) catch return;
+    if (rx.data.len < HEADER_SIZE or rx.data.len > request.len) return;
+    var response: [512]u8 = undefined;
+    @memcpy(response[0..rx.data.len], rx.data);
+    response[2] = 0x83; // response, recursion available, truncated
+    response[3] = 0x80;
+    ctx.socket.sendTo(&rx.from, response[0..rx.data.len]) catch return;
+}
+
+fn runDnsTcpTestServer(ctx: *DnsTcpTestServer) void {
+    var socket = ctx.listener.accept(ctx.io) catch return;
+    defer socket.close();
+    var requestPrefix: [2]u8 = undefined;
+    readDnsExact(&socket, &requestPrefix) catch return;
+    const requestLen = std.mem.readInt(u16, &requestPrefix, .big);
+    if (requestLen < HEADER_SIZE or requestLen > 512) return;
+    var request: [512]u8 = undefined;
+    readDnsExact(&socket, request[0..requestLen]) catch return;
+    // Echo the query as a successful response with zero answers.
+    request[2] = 0x81;
+    request[3] = 0x80;
+    var responsePrefix: [2]u8 = undefined;
+    std.mem.writeInt(u16, &responsePrefix, requestLen, .big);
+    socket.writeAll(&responsePrefix) catch return;
+    socket.writeAll(request[0..requestLen]) catch return;
+}
+
+test "DNS TCP fallback uses two-byte framing and exact reads" {
+    const a = std.testing.allocator;
+    var ctx = try tcpMod.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcpMod.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    var serverCtx = DnsTcpTestServer{ .listener = &listener, .io = ctx.io };
+    const serverThread = try std.Thread.spawn(.{}, runDnsTcpTestServer, .{&serverCtx});
+
+    const packet = try buildQuery(a, 0xA17C, "example.test", .a);
+    defer a.free(packet);
+    const target = try net.IpAddress.parseIp4("127.0.0.1", listener.localPort());
+    const response = try queryTcp(a, ctx.io, target, packet);
+    defer a.free(response);
+    serverThread.join();
+    try validateResponseQuestion(a, response, 0xA17C, "example.test", .a);
+}
+
+test "DNS retries a truncated UDP response over TCP where timed receive is available" {
+    const a = std.testing.allocator;
+    var ctx = try tcpMod.IoContext.init(a);
+    defer ctx.deinit();
+    const packet = try buildQuery(a, 0xA17C, "example.test", .a);
+    defer a.free(packet);
+
+    if (builtin.os.tag == .windows) {
+        var socket = try udpMod.UdpSocket.bind(ctx.io, 0);
+        defer socket.close();
+        var buf: [16]u8 = undefined;
+        try std.testing.expectError(error.TimeoutUnsupported, socket.receiveTimeout(&buf, .{ .duration = .{
+            .raw = std.Io.Duration.fromMilliseconds(1),
+            .clock = .awake,
+        } }));
+        return;
+    }
+
+    var udp = try udpMod.UdpSocket.bind(ctx.io, 0);
+    defer udp.close();
+    const udpPort = switch (udp.socket.address) {
+        .ip4 => |v| v.port,
+        .ip6 => |v| v.port,
+    };
+    var tcpAddress = addressMod.Address.loopback4(udpPort);
+    var listener = try tcpMod.Listener.bindAddress(ctx.io, &tcpAddress);
+    defer listener.close(ctx.io);
+
+    var udpCtx = DnsUdpTruncatedServer{ .socket = &udp };
+    const udpThread = try std.Thread.spawn(.{}, runDnsUdpTruncatedServer, .{&udpCtx});
+    var tcpCtx = DnsTcpTestServer{ .listener = &listener, .io = ctx.io };
+    const tcpThread = try std.Thread.spawn(.{}, runDnsTcpTestServer, .{&tcpCtx});
+
+    const target = try net.IpAddress.parseIp4("127.0.0.1", udpPort);
+    const response = try queryDns(a, ctx.io, target, packet, 0xA17C, "example.test", .a);
+    defer a.free(response);
+    udpThread.join();
+    tcpThread.join();
+    try validateResponseQuestion(a, response, 0xA17C, "example.test", .a);
+    try std.testing.expectEqual(@as(u8, 0), response[2] & 0x02);
+}
+
 test "query build roundtrip structure" {
     const a = std.testing.allocator;
     const pkt = try buildQuery(a, 0x1234, "example.com", .a);
@@ -351,6 +549,78 @@ fn queryId(io: std.Io) u16 {
     return std.mem.readInt(u16, &raw, .big);
 }
 
+/// Reject unsolicited or mismatched DNS packets before their records can be
+/// used. The source-address check is performed by each UDP caller.
+fn validateResponseQuestion(allocator: Allocator, msg: []const u8, id: u16, name: []const u8, qtype: RecordType) !void {
+    if (msg.len < HEADER_SIZE) return error.Truncated;
+    const hdr = Header.read(msg[0..HEADER_SIZE]);
+    if (hdr.id != id or hdr.qdcount != 1 or (hdr.flags & 0xF800) != 0x8000) return error.InvalidResponse;
+    var offset: usize = HEADER_SIZE;
+    const questionName = try decodeName(allocator, msg, &offset, 0);
+    defer allocator.free(questionName);
+    if (offset + 4 > msg.len) return error.Truncated;
+    const questionType = std.mem.readInt(u16, msg[offset..][0..2], .big);
+    const questionClass = std.mem.readInt(u16, msg[offset + 2 ..][0..2], .big);
+    if (!std.ascii.eqlIgnoreCase(questionName, std.mem.trimEnd(u8, name, ".")) or
+        questionType != @as(u16, @intCast(@backingInt(qtype))) or questionClass != Class.IN)
+        return error.InvalidResponse;
+}
+
+fn readDnsExact(socket: *const tcpMod.Socket, out: []u8) !void {
+    var have: usize = 0;
+    while (have < out.len) {
+        const n = try socket.read(out[have..]);
+        if (n == 0) return error.UnexpectedEof;
+        have += n;
+    }
+}
+
+fn queryTcp(allocator: Allocator, io: std.Io, nsAddr: net.IpAddress, packet: []const u8) ![]u8 {
+    if (packet.len > std.math.maxInt(u16)) return error.QueryTooLarge;
+    var addr = addressMod.Address.fromStd(nsAddr);
+    var socket = try tcpMod.connectAddress(io, &addr);
+    defer socket.close();
+    socket.setReadTimeoutMs(@intCast(DNS_QUERY_TIMEOUT_MS));
+    socket.setWriteTimeoutMs(@intCast(DNS_QUERY_TIMEOUT_MS));
+
+    var prefix: [2]u8 = undefined;
+    std.mem.writeInt(u16, &prefix, @intCast(packet.len), .big);
+    try socket.writeAll(&prefix);
+    try socket.writeAll(packet);
+
+    var responsePrefix: [2]u8 = undefined;
+    try readDnsExact(&socket, &responsePrefix);
+    const responseLen = std.mem.readInt(u16, &responsePrefix, .big);
+    if (responseLen < HEADER_SIZE) return error.Truncated;
+    const response = try allocator.alloc(u8, responseLen);
+    errdefer allocator.free(response);
+    try readDnsExact(&socket, response);
+    return response;
+}
+
+/// Query over UDP first and retry over TCP when the server sets TC. Returns
+/// an owned response packet and validates its endpoint/question on either path.
+fn queryDns(allocator: Allocator, io: std.Io, nsAddr: net.IpAddress, packet: []const u8, id: u16, name: []const u8, qtype: RecordType) ![]u8 {
+    var sock = try udpMod.UdpSocket.bind(io, 0);
+    defer sock.close();
+    try sock.sendTo(&nsAddr, packet);
+
+    var buf: [4096]u8 = undefined;
+    const rx = try sock.receiveTimeout(&buf, .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(DNS_QUERY_TIMEOUT_MS),
+        .clock = .awake,
+    } });
+    if (!std.meta.eql(rx.from, nsAddr)) return error.InvalidResponse;
+    try validateResponseQuestion(allocator, rx.data, id, name, qtype);
+    if (rx.data[2] & 0x02 != 0) {
+        const response = try queryTcp(allocator, io, nsAddr, packet);
+        errdefer allocator.free(response);
+        try validateResponseQuestion(allocator, response, id, name, qtype);
+        return response;
+    }
+    return try allocator.dupe(u8, rx.data);
+}
+
 /// Resolves `name` against the configured nameserver over UDP.
 /// Returns A-record addresses. Caller frees slices and the Response.
 pub fn resolveA(allocator: std.mem.Allocator, io: std.Io, name: []const u8) ![]netMod.IpAddress.Ip4Address {
@@ -359,17 +629,11 @@ pub fn resolveA(allocator: std.mem.Allocator, io: std.Io, name: []const u8) ![]n
     const pkt = try buildQuery(allocator, id, name, .a);
     defer allocator.free(pkt);
 
-    var sock = try udpMod.UdpSocket.bind(io, 0);
-    defer sock.close();
+    const nsAddr = netMod.IpAddress.parseIp4("127.0.0.53", 53) catch return error.Unexpected;
+    const response = try queryDns(allocator, io, nsAddr, pkt, id, name, .a);
+    defer allocator.free(response);
 
-    var nsAddr = netMod.IpAddress.parseIp4("127.0.0.53", 53) catch return error.Unexpected;
-    try sock.sendTo(&nsAddr, pkt);
-
-    var buf: [4096]u8 = undefined;
-    const rx = try sock.receive(&buf);
-    if (rx.data.len < HEADER_SIZE) return error.Truncated;
-
-    const resp = try parseResponse(allocator, rx.data);
+    const resp = try parseResponse(allocator, response);
     defer {
         for (resp.answers) |*r| r.deinit(allocator);
         allocator.free(resp.answers);
@@ -394,21 +658,15 @@ pub fn resolveAAAA(allocator: std.mem.Allocator, io: std.Io, name: []const u8) !
     const pkt = try buildQuery(allocator, id, name, .aaaa);
     defer allocator.free(pkt);
 
-    var sock = try udpMod.UdpSocket.bind(io, 0);
-    defer sock.close();
-
     var nsAddr = netMod.IpAddress.parseIp6("::1", 53) catch blk: {
         // Fall back to the v4 loopback resolver stub if v6 parse unavailable.
         break :blk netMod.IpAddress{ .v6 = .{ .bytes = (@as([15]u8, @splat(0))) ++ [_]u8{1}, .port = 53, .flowLabel = 0, .scopeId = 0 } };
     };
     _ = &nsAddr;
-    try sock.sendTo(&nsAddr, pkt);
+    const response = try queryDns(allocator, io, nsAddr, pkt, id, name, .aaaa);
+    defer allocator.free(response);
 
-    var buf: [4096]u8 = undefined;
-    const rx = try sock.receive(&buf);
-    if (rx.data.len < HEADER_SIZE) return error.Truncated;
-
-    const resp = try parseResponse(allocator, rx.data);
+    const resp = try parseResponse(allocator, response);
     defer {
         for (resp.answers) |*r| r.deinit(allocator);
         allocator.free(resp.answers);

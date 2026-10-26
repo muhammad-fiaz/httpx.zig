@@ -195,11 +195,13 @@ pub const UploadStream = struct {
             const want: usize = @min(data.len - pos, maxSendChunk);
             if (isWindows) {
                 const rc = ws.send(@intCast(self.handle), data.ptr + pos, @intCast(want), 0);
-                if (rc == ws.SOCKET_ERROR) return error.WriteFailed;
+                if (rc <= 0) return error.WriteFailed;
                 pos += @intCast(rc);
             } else {
-                const n = std.c.send(@intCast(self.handle), data.ptr + pos, want, 0);
-                if (n <= 0) return error.WriteFailed;
+                // Use the shared syscall layer so POSIX sends apply its
+                // SIGPIPE-safe flags and consistent EINTR/error handling.
+                const n = sysMod.write(@intCast(self.handle), data[pos .. pos + want]) catch return error.WriteFailed;
+                if (n == 0) return error.WriteFailed;
                 pos += @intCast(n);
             }
         }
@@ -319,6 +321,9 @@ pub const Socket = struct {
     writeActive: std.atomic.Value(bool) = .init(false),
     readInterrupted: std.atomic.Value(bool) = .init(false),
     writeInterrupted: std.atomic.Value(bool) = .init(false),
+    /// Peer IP text captured at accept time. Empty for client sockets.
+    peerAddressBuf: [64]u8 = undefined,
+    peerAddressLen: u8 = 0,
 
     const Inner = union(enum) {
         /// Raw ws232 SOCKET — used on Windows for client connections.
@@ -338,6 +343,51 @@ pub const Socket = struct {
     /// Construct from a net.Stream (non-Windows client connects + all accepts).
     pub fn init(stream: net.Stream, io: std.Io) Socket {
         return .{ .inner = .{ .stream = stream }, .io = io };
+    }
+
+    /// Peer IP as text, or an empty slice when it was not captured.
+    pub fn peerAddress(self: *const Socket) []const u8 {
+        return self.peerAddressBuf[0..self.peerAddressLen];
+    }
+
+    fn setPeerAddress(self: *Socket, addr: addressMod.Address) void {
+        const text = addr.formatBuf(&self.peerAddressBuf);
+        self.peerAddressLen = @intCast(text.len);
+    }
+
+    fn capturePeerAddress(self: *Socket) void {
+        switch (self.inner) {
+            .winsock => {},
+            .stream => |st| {
+                if (!isWindows) {
+                    var storage: posix.sockaddr.storage = undefined;
+                    var len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
+                    posix.getpeername(st.socket.handle, @ptrCast(&storage), &len) catch return;
+                    switch (storage.family) {
+                        posix.AF.INET => {
+                            const in: *const posix.sockaddr.in = @ptrCast(&storage);
+                            var addr = addressMod.Address{
+                                .family = .ip4,
+                                .port = std.mem.bigToNative(u16, in.port),
+                            };
+                            @memcpy(addr.bytes[0..4], std.mem.asBytes(&in.addr)[0..4]);
+                            self.setPeerAddress(addr);
+                        },
+                        posix.AF.INET6 => {
+                            const in6: *const posix.sockaddr.in6 = @ptrCast(&storage);
+                            const addr = addressMod.Address{
+                                .family = .ip6,
+                                .port = std.mem.bigToNative(u16, in6.port),
+                                .bytes = in6.addr,
+                                .zone = in6.scope_id,
+                            };
+                            self.setPeerAddress(addr);
+                        },
+                        else => {},
+                    }
+                }
+            },
+        }
     }
 
     // Atomic once-guard
@@ -803,13 +853,34 @@ pub const Listener = struct {
         return switch (self.inner) {
             .winsock => |s| blk: {
                 if (!isWindows) unreachable;
-                const conn = ws.accept(s, null, null);
+                var native: ws.sockaddrIn6 = undefined;
+                var nativeLen: i32 = @sizeOf(ws.sockaddrIn6);
+                const conn = ws.accept(s, &native, &nativeLen);
                 if (conn == ws.INVALID_SOCKET) return error.AcceptFailed;
-                break :blk Socket.fromWinsock(conn, io);
+                var sock = Socket.fromWinsock(conn, io);
+                if (native.family == @as(u16, @intCast(ws.AF_INET))) {
+                    const in: *const ws.sockaddrIn = @ptrCast(&native);
+                    var addr = addressMod.Address{
+                        .family = .ip4,
+                        .port = std.mem.bigToNative(u16, in.port),
+                    };
+                    addr.bytes[0..4].* = in.addr;
+                    sock.setPeerAddress(addr);
+                } else if (native.family == @as(u16, @intCast(ws.AF_INET6))) {
+                    sock.setPeerAddress(.{
+                        .family = .ip6,
+                        .port = std.mem.bigToNative(u16, native.port),
+                        .bytes = native.addr,
+                        .zone = native.scopeId,
+                    });
+                }
+                break :blk sock;
             },
             .stream => |*server| blk: {
                 const conn = server.accept(io) catch return error.AcceptFailed;
-                break :blk Socket.init(conn, io);
+                var sock = Socket.init(conn, io);
+                sock.capturePeerAddress();
+                break :blk sock;
             },
         };
     }
@@ -1075,4 +1146,29 @@ test "ipv6 loopback echo" {
     var buf: [16]u8 = undefined;
     const n = try s.read(&buf);
     try std.testing.expectEqualStrings("v6", buf[0..n]);
+}
+
+test "accepted sockets capture the peer IP" {
+    var ctx = IoContext.init(std.testing.allocator) catch return;
+    defer ctx.deinit();
+
+    var l = Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const Client = struct {
+        fn run(io: std.Io, p: u16) void {
+            var s = connect(io, "127.0.0.1", p) catch return;
+            s.close();
+        }
+    };
+    const t = std.Thread.spawn(.{}, Client.run, .{ ctx.io, port }) catch return;
+
+    var conn = l.accept(ctx.io) catch {
+        t.join();
+        return;
+    };
+    defer conn.close();
+    try std.testing.expectEqualStrings("127.0.0.1", conn.peerAddress());
+    t.join();
 }

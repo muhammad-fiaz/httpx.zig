@@ -366,6 +366,15 @@ pub const Encoder = struct {
     /// Set while encoding a section whenever a dynamic reference is
     /// emitted. Builders read it via `sectionRic` to size the prefix.
     sectionUsedDynamic: bool = false,
+    sectionMinRef: ?u64 = null,
+    allowBlockingForSection: bool = true,
+    outstanding: std.ArrayList(OutstandingSection) = .empty,
+
+    const OutstandingSection = struct {
+        streamId: u64,
+        minRef: u64,
+        requiredInsertCount: u64,
+    };
 
     /// Cap on buffered decoder-stream bytes: a peer dripping partial
     /// bytes forever is a stream error, not unbounded memory.
@@ -381,6 +390,7 @@ pub const Encoder = struct {
         self.dyn = null;
         self.pending.deinit(self.allocator);
         self.decBuf.deinit(self.allocator);
+        self.outstanding.deinit(self.allocator);
         self.decOff = 0;
     }
 
@@ -407,8 +417,54 @@ pub const Encoder = struct {
         self.peerMaxBlocked = n;
     }
 
+    /// Starts a field section for `streamId`, allowing new references to
+    /// unreceived inserts only if that stream is already blocked or the
+    /// peer's distinct blocked-stream budget has room.
+    pub fn beginSectionForStream(self: *Encoder, streamId: u64) void {
+        self.beginSection();
+        var blockedStreams: u64 = 0;
+        var streamAlreadyBlocked = false;
+        for (self.outstanding.items, 0..) |section, sectionIndex| {
+            if (section.requiredInsertCount <= self.peerKnownInserts) continue;
+            if (section.streamId == streamId) {
+                streamAlreadyBlocked = true;
+            } else {
+                // Outstanding entries are per field section; count each
+                // distinct stream once against the advertised setting.
+                var firstForStream = true;
+                for (self.outstanding.items[0..sectionIndex]) |earlier| {
+                    if (earlier.streamId == section.streamId and earlier.requiredInsertCount > self.peerKnownInserts) {
+                        firstForStream = false;
+                        break;
+                    }
+                }
+                if (firstForStream) blockedStreams += 1;
+            }
+        }
+        self.allowBlockingForSection = streamAlreadyBlocked or blockedStreams < self.peerMaxBlocked;
+    }
+
     pub fn setEvictBarrier(self: *Encoder, absIndex: u64) void {
         self.evictBarrier = absIndex;
+    }
+
+    /// Registers a completed field section that used dynamic references.
+    /// Acknowledgments remove sections in stream order; cancellation removes
+    /// every outstanding section for that stream.
+    pub fn registerSection(self: *Encoder, streamId: u64) !void {
+        const minRef = self.sectionMinRef orelse return;
+        try self.outstanding.append(self.allocator, .{
+            .streamId = streamId,
+            .minRef = minRef,
+            .requiredInsertCount = self.sectionRic(),
+        });
+        self.recomputeEvictBarrier();
+    }
+
+    fn recomputeEvictBarrier(self: *Encoder) void {
+        var barrier = self.insertCount();
+        for (self.outstanding.items) |section| barrier = @min(barrier, section.minRef);
+        self.evictBarrier = barrier;
     }
 
     /// Next absolute dynamic index that will be assigned (= insert
@@ -473,6 +529,7 @@ pub const Encoder = struct {
                 i -= 1;
                 const e = dt.entries.items[i];
                 if (std.mem.eql(u8, e.name, name) and std.mem.eql(u8, e.value, value)) {
+                    if (dt.baseIndex + i >= self.peerKnownInserts and !self.allowBlockingForSection) break;
                     try self.encodeIndexedDynamic(out, dt.baseIndex + i, dt.nextIndex);
                     return;
                 }
@@ -498,6 +555,7 @@ pub const Encoder = struct {
                 i -= 1;
                 const e = dt.entries.items[i];
                 if (std.mem.eql(u8, e.name, name)) {
+                    if (dt.baseIndex + i >= self.peerKnownInserts and !self.allowBlockingForSection) break;
                     const rel = dt.nextIndex - (dt.baseIndex + i) - 1;
                     var ib: [10]u8 = undefined;
                     const n = try encodeInt(&ib, 4, rel);
@@ -505,13 +563,14 @@ pub const Encoder = struct {
                     try out.appendSlice(self.allocator, ib[0..n]);
                     try self.emitString(out, value, 7);
                     self.sectionUsedDynamic = true;
+                    self.sectionMinRef = @min(self.sectionMinRef orelse (dt.baseIndex + i), dt.baseIndex + i);
                     return;
                 }
             }
         }
 
         // No match: insert on first use, else literal without name ref.
-        if (self.dyn != null) {
+        if (self.dyn != null and self.allowBlockingForSection) {
             if (try self.insertDynamic(name, value)) |abs| {
                 try self.encodeIndexedDynamic(out, abs, self.insertCount());
                 return;
@@ -624,6 +683,8 @@ pub const Encoder = struct {
     /// encoding the section's fields, `sectionRic` gives the prefix RIC.
     pub fn beginSection(self: *Encoder) void {
         self.sectionUsedDynamic = false;
+        self.sectionMinRef = null;
+        self.allowBlockingForSection = true;
     }
 
     /// Required Insert Count for the section currently being encoded:
@@ -663,6 +724,7 @@ pub const Encoder = struct {
         ib[0] |= 0x80; // 1 | T=0 (dynamic)
         try out.appendSlice(self.allocator, ib[0..n]);
         self.sectionUsedDynamic = true;
+        self.sectionMinRef = @min(self.sectionMinRef orelse absoluteIndex, absoluteIndex);
     }
 
     /// Processes decoder-stream bytes from the peer: Section
@@ -700,9 +762,24 @@ pub const Encoder = struct {
     fn decodeDecoderOp(self: *Encoder, buf: []const u8, off: *usize) Error!u64 {
         const first = buf[off.*];
         if (first & 0x80 != 0) {
-            return try decodeInt(buf, off, 7); // Section Ack: stream id
+            const streamId = try decodeInt(buf, off, 7);
+            var i: usize = 0;
+            while (i < self.outstanding.items.len and self.outstanding.items[i].streamId != streamId) : (i += 1) {}
+            if (i == self.outstanding.items.len) return Error.InvalidInstruction;
+            const section = self.outstanding.orderedRemove(i);
+            self.peerKnownInserts = @max(self.peerKnownInserts, section.requiredInsertCount);
+            self.recomputeEvictBarrier();
+            return streamId;
         } else if (first & 0xC0 == 0x40) {
-            return try decodeInt(buf, off, 6); // Stream Cancellation
+            const streamId = try decodeInt(buf, off, 6);
+            var i: usize = 0;
+            while (i < self.outstanding.items.len) {
+                if (self.outstanding.items[i].streamId == streamId) {
+                    _ = self.outstanding.orderedRemove(i);
+                } else i += 1;
+            }
+            self.recomputeEvictBarrier();
+            return streamId;
         }
         const n = try decodeInt(buf, off, 6); // Insert Count Increment
         // RFC 9204 Section 3.2.6: Increment of 0 or exceeding known inserts is a decoder stream error.
@@ -743,7 +820,7 @@ pub const Decoder = struct {
     /// Capacity we advertised via SETTINGS. Encoder-stream Set Capacity
     /// above this is a stream error.
     advertisedMax: usize = 0,
-    /// Local MAX_FIELD_SECTION_SIZE enforcement on section bytes.
+    /// Local MAX_FIELD_SECTION_SIZE enforcement on decoded field size.
     maxFieldSectionSize: u64 = 16384,
     /// Buffered encoder-stream bytes with a consume cursor; a trailing
     /// split instruction waits for more bytes instead of erroring.
@@ -1012,6 +1089,7 @@ pub const Decoder = struct {
 
     fn decodeSectionInner(self: *Decoder, data: []const u8, base: u64, ric: u64) Error![]FieldLine {
         var results = std.ArrayList(FieldLine).empty;
+        var fieldSectionSize: u64 = 0;
         errdefer {
             for (results.items) |f| {
                 if (f.allocated) {
@@ -1033,6 +1111,7 @@ pub const Decoder = struct {
                 const rel = try decodeInt(data, &offset, 6);
                 const abs = if (dynRef) try self.baseRelative(base, ric, rel) else rel;
                 const res = if (dynRef) try self.lookupDynamic(abs) else try lookupStatic(abs);
+                try accountFieldSize(&fieldSectionSize, res.name, res.value, self.maxFieldSectionSize);
                 try results.append(self.allocator, .{ .name = res.name, .value = res.value, .allocated = false });
             } else if (first & 0xC0 == 0x40) {
                 // Literal with name reference: 01 | N | T | idx(4+).
@@ -1050,6 +1129,7 @@ pub const Decoder = struct {
                     self.allocator.free(value);
                     return e;
                 };
+                try accountFieldSize(&fieldSectionSize, name, value, self.maxFieldSectionSize);
             } else if (first & 0xF0 == 0x20 or first & 0xF0 == 0x30) {
                 // Literal without name reference: 001 | N | H | len(3+).
                 // (A dynamic-table size update can only appear on the
@@ -1068,12 +1148,14 @@ pub const Decoder = struct {
                     self.allocator.free(value);
                     return e;
                 };
+                try accountFieldSize(&fieldSectionSize, name, value, self.maxFieldSectionSize);
             } else if (first & 0xF0 == 0x10) {
                 // Indexed with post-base index: 0001 | rel(4+).
                 const rel = try decodeInt(data, &offset, 4);
                 const abs = std.math.add(u64, base, rel) catch return Error.InvalidInstruction;
                 if (abs >= ric) return Error.InvalidInstruction;
                 const res = try self.lookupDynamic(abs);
+                try accountFieldSize(&fieldSectionSize, res.name, res.value, self.maxFieldSectionSize);
                 try results.append(self.allocator, .{ .name = res.name, .value = res.value, .allocated = false });
             } else {
                 // Literal with post-base name reference: 000 | N | rel(3+).
@@ -1091,6 +1173,7 @@ pub const Decoder = struct {
                     self.allocator.free(value);
                     return e;
                 };
+                try accountFieldSize(&fieldSectionSize, name, value, self.maxFieldSectionSize);
             }
         }
 
@@ -1128,6 +1211,14 @@ pub const Decoder = struct {
         self.allocator.free(fields);
     }
 };
+
+fn accountFieldSize(total: *u64, name: []const u8, value: []const u8, limit: u64) Error!void {
+    const fieldSize = std.math.add(u64, @intCast(name.len), @intCast(value.len)) catch return Error.InvalidInstruction;
+    const withOverhead = std.math.add(u64, fieldSize, 32) catch return Error.InvalidInstruction;
+    const next = std.math.add(u64, total.*, withOverhead) catch return Error.InvalidInstruction;
+    if (next > limit) return Error.InvalidInstruction;
+    total.* = next;
+}
 
 fn appendOwnedField(
     results: *std.ArrayList(FieldLine),
@@ -1458,12 +1549,22 @@ test "qpack decoder stream instructions parse strictly" {
     defer enc.deinit();
     enc.setMaxTableCapacity(4096);
     _ = try enc.insertDynamic("x-a", "1");
+    enc.sectionUsedDynamic = true;
+    enc.sectionMinRef = 0;
+    try enc.registerSection(4);
     _ = try enc.insertDynamic("x-b", "2");
-    // SectionAck(4) + StreamCancel(4) + Increment(2): all complete.
-    try enc.readDecoderStream(&.{ 0x84, 0x44, 0x02 }, true);
+    enc.sectionUsedDynamic = true;
+    enc.sectionMinRef = 1;
+    try enc.registerSection(4);
+    // SectionAck(4) implies one insert was received; after canceling its
+    // second section, only one additional insert needs an explicit increment.
+    try enc.readDecoderStream(&.{ 0x84, 0x44, 0x01 }, true);
     try std.testing.expectEqual(@as(u64, 2), enc.peerKnownInserts);
     // Split delivery across calls buffers instead of failing:
     // SectionAck for stream 127: 0xFF (multi-byte prefix) split from 0x00
+    enc.sectionUsedDynamic = true;
+    enc.sectionMinRef = 0;
+    try enc.registerSection(127);
     try enc.readDecoderStream(&.{0xFF}, false);
     try enc.readDecoderStream(&.{0x00}, false);
     // Overflowing increment is corruption, not a split: fatal mid-buffer.
@@ -1500,6 +1601,17 @@ test "qpack field section size limit enforced" {
     try std.testing.expectError(Error.InvalidInstruction, dec.decodeSectionCounted(big.items, 0, null));
 }
 
+test "qpack field section limit counts decoded indexed fields" {
+    const a = std.testing.allocator;
+    var dec = Decoder.init(a);
+    defer dec.deinit();
+    dec.setMaxFieldSectionSize(100);
+    // Three references to static-table :method: GET are only three encoded
+    // bytes, but expand to 126 bytes under RFC field-section accounting.
+    const section = [_]u8{ 0x00, 0x00, 0xD1, 0xD1, 0xD1 };
+    try std.testing.expectError(Error.InvalidInstruction, dec.decodeSectionCounted(&section, 0, null));
+}
+
 test "qpack encoder falls back to literal when entries are pinned" {
     const a = std.testing.allocator;
     var enc = Encoder.init(a);
@@ -1529,6 +1641,91 @@ test "qpack encoder falls back to literal when entries are pinned" {
     enc.setEvictBarrier(1);
     const abs = try enc.insertDynamic("c", "3");
     try std.testing.expect(abs != null);
+}
+
+test "qpack acknowledgments and cancellation release dynamic references" {
+    const a = std.testing.allocator;
+    var enc = Encoder.init(a);
+    defer enc.deinit();
+    enc.setMaxTableCapacity(68);
+
+    enc.beginSection();
+    var first = std.ArrayList(u8).empty;
+    defer first.deinit(a);
+    try enc.encodeField(&first, "a", "1");
+    try enc.registerSection(0);
+
+    enc.beginSection();
+    var second = std.ArrayList(u8).empty;
+    defer second.deinit(a);
+    try enc.encodeField(&second, "b", "2");
+    try enc.registerSection(0);
+    try std.testing.expectEqual(@as(u64, 0), enc.evictBarrier);
+
+    // Acknowledging the oldest section unpins entry 0, while the later
+    // section continues pinning entry 1.
+    try enc.readDecoderStream(&.{0x80}, true);
+    try std.testing.expectEqual(@as(u64, 1), enc.evictBarrier);
+    try std.testing.expectEqual(@as(u64, 1), enc.peerKnownInserts);
+    const third = try enc.insertDynamic("c", "3");
+    try std.testing.expect(third != null);
+
+    // Cancellation releases all remaining sections for the stream.
+    try enc.readDecoderStream(&.{0x40}, true);
+    try std.testing.expectEqual(@as(u64, enc.insertCount()), enc.evictBarrier);
+    const fourth = try enc.insertDynamic("d", "4");
+    try std.testing.expect(fourth != null);
+}
+
+test "qpack encoder respects peer blocked stream limit" {
+    const a = std.testing.allocator;
+    var enc = Encoder.init(a);
+    defer enc.deinit();
+    enc.setMaxTableCapacity(1024);
+
+    // The default advertised peer limit is zero: use a literal so no new
+    // stream can block on an insert the peer has not received.
+    enc.beginSectionForStream(8);
+    var zeroLimit = std.ArrayList(u8).empty;
+    defer zeroLimit.deinit(a);
+    try enc.encodeField(&zeroLimit, "x-zero", "blocked");
+    try std.testing.expectEqual(@as(u64, 0), enc.sectionRic());
+
+    enc.setMaxBlockedStreams(1);
+
+    enc.beginSectionForStream(0);
+    var first = std.ArrayList(u8).empty;
+    defer first.deinit(a);
+    try enc.encodeField(&first, "x-first", "one");
+    try std.testing.expectEqual(@as(u64, 1), enc.sectionRic());
+    try enc.registerSection(0);
+
+    // A second stream must not create a second blocked stream while stream
+    // zero is waiting for encoder instructions.
+    enc.beginSectionForStream(4);
+    var second = std.ArrayList(u8).empty;
+    defer second.deinit(a);
+    try enc.encodeField(&second, "x-second", "two");
+    try std.testing.expectEqual(@as(u64, 0), enc.sectionRic());
+    try enc.registerSection(4);
+
+    // Another section on the already-blocked stream does not consume a new
+    // blocked-stream slot and may continue to reference the dynamic table.
+    enc.beginSectionForStream(0);
+    var sameStream = std.ArrayList(u8).empty;
+    defer sameStream.deinit(a);
+    try enc.encodeField(&sameStream, "x-first", "one");
+    try std.testing.expectEqual(@as(u64, 1), enc.sectionRic());
+    try enc.registerSection(0);
+
+    // An Insert Count Increment confirms the first insertion and frees the
+    // blocked slot for a new stream.
+    try enc.readDecoderStream(&.{0x01}, true);
+    enc.beginSectionForStream(4);
+    var afterIncrement = std.ArrayList(u8).empty;
+    defer afterIncrement.deinit(a);
+    try enc.encodeField(&afterIncrement, "x-second", "two");
+    try std.testing.expectEqual(@as(u64, 2), enc.sectionRic());
 }
 
 test "qpack encoder prefix encodes nonzero insert counts" {

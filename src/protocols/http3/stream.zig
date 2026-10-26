@@ -129,6 +129,10 @@ pub const Stream = struct {
     buf: std.ArrayList(u8) = .empty,
     /// Parse cursor: bytes before it are delivered or skipped.
     off: usize = 0,
+    /// Remaining payload bytes in a DATA frame being streamed to callbacks.
+    pendingDataRemaining: u64 = 0,
+    /// Remaining bytes in an unknown frame being skipped incrementally.
+    pendingUnknownRemaining: u64 = 0,
     /// QUIC stream FIN observed.
     fin: bool = false,
     failed: bool = false,
@@ -211,6 +215,7 @@ pub const Stream = struct {
     pub fn onQuicReset(self: *Stream, code: u64) void {
         if (self.failed or self.done) return;
         self.failed = true;
+        self.blocked = false;
         if (self.cbs.onReset) |cb| cb(self.cbs.ctx, self.id, code);
     }
 
@@ -397,7 +402,34 @@ pub const Stream = struct {
     }
 
     fn parseBidi(self: *Stream) void {
-        while (self.off < self.buf.items.len) {
+        while (true) {
+            if (self.pendingUnknownRemaining != 0) {
+                const available = self.buf.items.len - self.off;
+                if (available == 0) {
+                    if (self.fin) self.fail(.frameError);
+                    return;
+                }
+                const take = @min(self.pendingUnknownRemaining, available);
+                self.off += @intCast(take);
+                self.pendingUnknownRemaining -= take;
+                continue;
+            }
+            if (self.pendingDataRemaining != 0) {
+                const available = self.buf.items.len - self.off;
+                if (available == 0) {
+                    if (self.fin) self.fail(.frameError);
+                    return;
+                }
+                const take = @min(self.pendingDataRemaining, available);
+                const n: usize = @intCast(take);
+                const payload = self.buf.items[self.off..][0..n];
+                self.off += n;
+                self.pendingDataRemaining -= take;
+                self.onDataFrame(payload);
+                if (self.failed) return;
+                continue;
+            }
+            if (self.off == self.buf.items.len) break;
             const start = self.off;
             const header = frameMod.parseFrameHeader(self.buf.items, &self.off) catch |e| switch (e) {
                 error.Truncated => {
@@ -410,6 +442,20 @@ pub const Stream = struct {
                     return;
                 },
             };
+            if (frameMod.checkFrameAllowed(.requestBidi, header.frameType)) |code| {
+                self.fail(code);
+                return;
+            }
+            if (header.frameType == 0x0) {
+                self.pendingDataRemaining = header.length;
+                if (header.length == 0) self.onDataFrame(&.{});
+                if (self.failed) return;
+                continue;
+            }
+            if (header.frameType != 0x1) {
+                self.pendingUnknownRemaining = header.length;
+                continue;
+            }
             const n = std.math.cast(usize, header.length) orelse {
                 self.fail(.frameError);
                 return;
@@ -421,10 +467,6 @@ pub const Stream = struct {
             }
             const payload = self.buf.items[self.off..][0..n];
             self.off += n;
-            if (frameMod.checkFrameAllowed(.requestBidi, header.frameType)) |code| {
-                self.fail(code);
-                return;
-            }
             self.dispatchBidiFrame(header.frameType, payload);
             if (self.blocked) {
                 // Parked on a QPACK-blocked section: rewind so the
@@ -1035,6 +1077,60 @@ test "h3stream request headers data fin" {
     try std.testing.expectEqual(@as(usize, 1), rec.ends);
 }
 
+test "h3stream delivers DATA incrementally without buffering its full frame" {
+    const a = std.testing.allocator;
+    var rec = TestRec{};
+    var qdec = qpackMod.Decoder.init(a);
+    defer qdec.deinit();
+    var qenc = qpackMod.Encoder.init(a);
+    defer qenc.deinit();
+    var qencPeer = qpackMod.Encoder.init(a);
+    defer qencPeer.deinit();
+    var s = testBidi(a, &rec, 0, .requestRecv, &qdec, &qenc);
+    defer s.deinit();
+
+    const section = try testSection(a, &qencPeer, &.{
+        .{ ":method", "POST" },
+        .{ ":scheme", "https" },
+        .{ ":authority", "example.com" },
+        .{ ":path", "/" },
+    });
+    defer a.free(section);
+    const hf = try testFrame(a, 0x1, section);
+    defer a.free(hf);
+    var wire = std.ArrayList(u8).empty;
+    defer wire.deinit(a);
+    try wire.appendSlice(a, hf);
+    var unknownHeader: [16]u8 = undefined;
+    const unknownHeaderLen = try frameMod.encodeFrameHeader(&unknownHeader, 0x21, 100);
+    try wire.appendSlice(a, unknownHeader[0..unknownHeaderLen]);
+    try wire.appendSlice(a, "uv");
+    s.feed(wire.items, false);
+    try std.testing.expectEqual(@as(u64, 98), s.pendingUnknownRemaining);
+    try std.testing.expectEqual(@as(usize, 0), s.buf.items.len);
+
+    const unknownTail: [98]u8 = @splat('z');
+    s.feed(&unknownTail, false);
+    try std.testing.expectEqual(@as(u64, 0), s.pendingUnknownRemaining);
+
+    wire.clearRetainingCapacity();
+    var dh: [16]u8 = undefined;
+    const hn = try frameMod.encodeFrameHeader(&dh, 0x0, 100);
+    try wire.appendSlice(a, dh[0..hn]);
+    try wire.appendSlice(a, "ab");
+    s.feed(wire.items, false);
+
+    try std.testing.expectEqual(@as(usize, 2), rec.dataBytes);
+    try std.testing.expectEqual(@as(u64, 98), s.pendingDataRemaining);
+    try std.testing.expectEqual(@as(usize, 0), s.buf.items.len);
+
+    const tail: [98]u8 = @splat('x');
+    s.feed(&tail, true);
+    try std.testing.expectEqual(@as(usize, 100), rec.dataBytes);
+    try std.testing.expectEqual(@as(u64, 0), s.pendingDataRemaining);
+    try std.testing.expect(s.done);
+}
+
 test "h3stream trailers delivered after data" {
     const a = std.testing.allocator;
     var rec = TestRec{};
@@ -1556,16 +1652,22 @@ test "regression: http3 stream feed state machine under mutations" {
         0x00,
         0x04,
         0x04,
-        0x01, 0x40, 0x00, 0x00,
+        0x01,
+        0x40,
+        0x00,
+        0x00,
     };
 
     const requestSeed = &[_]u8{
         0x01,
         0x05,
-        0x00, 0x00,
+        0x00,
+        0x00,
         0xd1,
         0xd7,
-        0x51, 0x01, '/',
+        0x51,
+        0x01,
+        '/',
     };
 
     const helper = struct {

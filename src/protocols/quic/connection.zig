@@ -40,6 +40,7 @@ pub const Error = error{
     ProtocolViolation,
     AuthenticationFailed,
     FlowControlViolation,
+    StreamLimitViolation,
     /// Peer transport parameters were missing, malformed, or
     /// inconsistent (RFC 9000 Section 7.4 / RFC 9001 Section 7.4).
     TransportParameterError,
@@ -287,7 +288,10 @@ pub const Connection = struct {
     /// Fallback per-stream send windows (peer's MAX_STREAM_DATA
     /// entries, once known, take precedence per stream). Seeded from
     /// transport parameters when exchanged, else compiled defaults.
-    sendWindowBidi: u64 = 65536,
+    /// Peer credit for bidirectional streams we initiated.
+    sendWindowBidiLocalInitiated: u64 = 65536,
+    /// Peer credit for bidirectional streams it initiated.
+    sendWindowBidiPeerInitiated: u64 = 65536,
     sendWindowUni: u64 = 65536,
 
     // Connection IDs (RFC 9000 allows CIDs up to 20 bytes).
@@ -813,8 +817,16 @@ pub const Connection = struct {
         nowMs: u64,
     ) Error!void {
         const bidi = (sid & 0x02) == 0;
-        const streamLim = self.maxStreamData.get(sid) orelse
-            (if (bidi) self.sendWindowBidi else self.sendWindowUni);
+        const locallyInitiated = (self.role == .client and (sid & 0x01) == 0) or
+            (self.role == .server and (sid & 0x01) != 0);
+        if (locallyInitiated) {
+            const streamCount = (sid >> 2) + 1;
+            const streamLimit = if (bidi) self.maxStreamsBidiRemote else self.maxStreamsUniRemote;
+            if (streamCount > streamLimit) return Error.StreamLimitViolation;
+        } else if (!bidi or self.streams.get(sid) == null) {
+            return Error.ProtocolViolation;
+        }
+        const streamLim = self.maxStreamData.get(sid) orelse self.initialSendWindowForStream(sid);
         const end = std.math.add(u64, offset, data.len) catch return Error.BufferTooSmall;
         if (end > streamLim) return Error.SendBlocked;
         if (self.dataSent +| data.len > self.maxDataRemote) return Error.SendBlocked;
@@ -840,6 +852,21 @@ pub const Connection = struct {
             else => return Error.ProtocolViolation,
         };
         try self.packetize(.application, &payload, nowMs);
+    }
+
+    fn initialSendWindow(self: *const Connection, bidi: bool, locallyInitiated: bool) u64 {
+        if (!bidi) return self.sendWindowUni;
+        return if (locallyInitiated) self.sendWindowBidiLocalInitiated else self.sendWindowBidiPeerInitiated;
+    }
+
+    /// Returns the initial peer flow-control limit for `sid`, selecting
+    /// bidi-local versus bidi-remote by the stream initiator.
+    pub fn initialSendWindowForStream(self: *const Connection, sid: u64) u64 {
+        const bidi = (sid & 0x02) == 0;
+        const initiatorIsClient = (sid & 0x01) == 0;
+        const locallyInitiated = (self.role == .client and initiatorIsClient) or
+            (self.role == .server and !initiatorIsClient);
+        return self.initialSendWindow(bidi, locallyInitiated);
     }
 
     /// Queues one protected packet into outbuf.
@@ -1879,6 +1906,11 @@ pub const Connection = struct {
                     const initiatorIsSelf = (self.role == .client and initiatorIsClient) or (self.role == .server and !initiatorIsClient);
                     var stPtr = self.streams.get(s.id);
                     if (stPtr == null) {
+                        if (!initiatorIsSelf) {
+                            const streamCount = (s.id >> 2) + 1;
+                            const streamLimit = if (bidi) self.maxStreamsBidiLocal else self.maxStreamsUniLocal;
+                            if (streamCount > streamLimit) return Error.StreamLimitViolation;
+                        }
                         const ns = try self.allocator.create(qstream.Stream);
                         ns.* = qstream.Stream.init(self.allocator, s.id, bidi, initiatorIsSelf);
                         if (self.maxStreamData.get(s.id)) |lim| ns.recvMaxOffset = lim;
@@ -1900,14 +1932,16 @@ pub const Connection = struct {
                     };
                     var sink = Sink{ .cbs = self.cbs, .sid = s.id };
                     if (!st.fcAllows(off, s.data.len)) return Error.FlowControlViolation;
+                    const end = std.math.add(u64, off, s.data.len) catch return Error.FlowControlViolation;
+                    const oldEnd = self.recvStreamEnd.get(s.id) orelse 0;
+                    const newlyAccounted = if (end > oldEnd) end - oldEnd else 0;
+                    if (self.dataReceived +| newlyAccounted > self.maxData) return Error.FlowControlViolation;
                     _ = st.receive(off, s.data, s.fin, &sink) catch |e| switch (e) {
                         error.FlowControlViolation => return Error.FlowControlViolation,
                         error.FinalSizeViolation => return Error.ProtocolViolation,
                         error.StreamReset => return,
                         else => return Error.OutOfMemory,
                     };
-                    const end = off + s.data.len;
-                    const oldEnd = self.recvStreamEnd.get(s.id) orelse 0;
                     if (end > oldEnd) {
                         self.dataReceived +|= end - oldEnd;
                         try self.recvStreamEnd.put(s.id, end);
@@ -1918,7 +1952,6 @@ pub const Connection = struct {
                         try self.queueControlFrame(.{ .maxStreamData = .{ .streamId = s.id, .maximum = raised } });
                         try self.flushControl(.application, nowMs);
                     }
-                    if (self.dataReceived > self.maxData) return Error.FlowControlViolation;
                     try self.maybeBumpMaxData();
                     if (!st.finNotified and st.finOffset != null and st.recvOffset == st.finOffset.?) {
                         st.finNotified = true;
@@ -1954,16 +1987,28 @@ pub const Connection = struct {
                     };
                 },
                 .maxData => |m| {
-                    self.maxDataRemote = m.maximum;
+                    if (m.maximum > self.maxDataRemote) self.maxDataRemote = m.maximum;
                 },
                 .maxStreamData => |m| {
-                    self.maxStreamData.put(m.streamId, m.maximum) catch return Error.OutOfMemory;
+                    const peerInitiated = (self.role == .client and (m.streamId & 1) != 0) or
+                        (self.role == .server and (m.streamId & 1) == 0);
+                    const unidirectional = (m.streamId & 0x02) != 0;
+                    // A peer-initiated unidirectional stream is receive-only
+                    // here and has no send side whose credit can be raised.
+                    if (peerInitiated and unidirectional) return Error.ProtocolViolation;
+                    // Peer-initiated bidirectional streams enter a valid
+                    // state only after a STREAM frame creates receive state.
+                    if (peerInitiated and self.streams.get(m.streamId) == null) return Error.ProtocolViolation;
+                    const bidi = (m.streamId & 0x02) == 0;
+                    const previous = self.maxStreamData.get(m.streamId) orelse
+                        self.initialSendWindow(bidi, !peerInitiated);
+                    if (m.maximum > previous) self.maxStreamData.put(m.streamId, m.maximum) catch return Error.OutOfMemory;
                 },
                 .maxStreams => |m| {
                     if (m.bidi) {
-                        self.maxStreamsBidiRemote = m.maximum;
+                        if (m.maximum > self.maxStreamsBidiRemote) self.maxStreamsBidiRemote = m.maximum;
                     } else {
-                        self.maxStreamsUniRemote = m.maximum;
+                        if (m.maximum > self.maxStreamsUniRemote) self.maxStreamsUniRemote = m.maximum;
                     }
                 },
                 .dataBlocked => {
@@ -3377,6 +3422,11 @@ const CtlPair = struct {
         const secret = (@as([32]u8, @splat(0xA5)));
         try client.installKeys(.application, secret, secret);
         try server.installKeys(.application, secret, secret);
+        // Match an established pair with explicit peer stream credits.
+        client.maxStreamsBidiRemote = 8;
+        client.maxStreamsUniRemote = 8;
+        server.maxStreamsBidiRemote = 8;
+        server.maxStreamsUniRemote = 8;
         server.addressValidated = true;
         return .{ .client = client, .server = server };
     }
@@ -3408,6 +3458,7 @@ const CtlRec = struct {
     closeReasonBuf: [64]u8 = undefined,
     closeReasonLen: usize = 0,
     closeReason: []const u8 = "",
+    streamDataBytes: usize = 0,
 
     fn cbs(self: *CtlRec) Callbacks {
         return .{
@@ -3415,6 +3466,7 @@ const CtlRec = struct {
             .onStreamReset = onReset,
             .onStopSending = onStop,
             .onClose = onClose,
+            .onStreamData = onStreamData,
         };
     }
     fn onReset(ctx: ?*anyopaque, sid: u64, code: u64) void {
@@ -3435,6 +3487,12 @@ const CtlRec = struct {
         @memcpy(r.closeReasonBuf[0..n], reason[0..n]);
         r.closeReasonLen = n;
         r.closeReason = r.closeReasonBuf[0..n];
+    }
+    fn onStreamData(ctx: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
+        _ = sid;
+        _ = fin;
+        const r: *CtlRec = @ptrCast(@alignCast(ctx.?));
+        r.streamDataBytes += data.len;
     }
 };
 
@@ -3519,6 +3577,20 @@ test "send stream checked gates windows and accounts once" {
     try std.testing.expectEqual(@as(u64, 200), pair.client.dataSent);
 }
 
+test "send stream enforces peer stream-count credit" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+    pair.client.maxStreamsBidiRemote = 1;
+
+    // ID 4 is the second locally initiated bidi stream, beyond credit 1.
+    try std.testing.expectError(Error.StreamLimitViolation, pair.client.sendStreamChecked(4, 0, "x", false, 100));
+    try std.testing.expect(pair.client.sendStreamEnd.get(4) == null);
+    const out = try pair.client.takeOutput(a);
+    defer a.free(out);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
 test "data blocked raises window immediately on both ends" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
@@ -3537,6 +3609,8 @@ test "receive flow control violation enforced" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
     defer pair.deinit();
+    var rec = CtlRec{};
+    pair.server.cbs = rec.cbs();
     pair.server.maxData = 10;
 
     const data = (@as([100]u8, @splat(0xCD)));
@@ -3544,6 +3618,59 @@ test "receive flow control violation enforced" {
     const out = try pair.client.takeOutput(a);
     defer a.free(out);
     try std.testing.expectError(Error.FlowControlViolation, pair.server.receiveDatagram(out, 101));
+    try std.testing.expectEqual(@as(usize, 0), rec.streamDataBytes);
+}
+
+test "flow control limit updates never decrease remote send credit" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    try pair.server.queueControlFrame(.{ .maxData = .{ .maximum = 2 << 20 } });
+    try pair.server.queueControlFrame(.{ .maxStreamData = .{ .streamId = 0, .maximum = 131072 } });
+    try pair.server.queueControlFrame(.{ .maxStreams = .{ .maximum = 12, .bidi = true } });
+    try pair.server.flushControl(.application, 100);
+    try pair.pumpSC(a);
+    try std.testing.expectEqual(@as(u64, 2 << 20), pair.client.maxDataRemote);
+    try std.testing.expectEqual(@as(?u64, 131072), pair.client.maxStreamData.get(0));
+    try std.testing.expectEqual(@as(u64, 12), pair.client.maxStreamsBidiRemote);
+
+    try pair.server.queueControlFrame(.{ .maxData = .{ .maximum = 1 << 20 } });
+    try pair.server.queueControlFrame(.{ .maxStreamData = .{ .streamId = 0, .maximum = 65536 } });
+    try pair.server.queueControlFrame(.{ .maxStreams = .{ .maximum = 8, .bidi = true } });
+    try pair.server.flushControl(.application, 200);
+    try pair.pumpSC(a);
+    try std.testing.expectEqual(@as(u64, 2 << 20), pair.client.maxDataRemote);
+    try std.testing.expectEqual(@as(?u64, 131072), pair.client.maxStreamData.get(0));
+    try std.testing.expectEqual(@as(u64, 12), pair.client.maxStreamsBidiRemote);
+}
+
+test "MAX_STREAM_DATA rejects peer-initiated receive-only streams" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    // Stream 3 is server-initiated and unidirectional, so the client has
+    // no send direction on which this MAX_STREAM_DATA could apply.
+    try pair.server.queueControlFrame(.{ .maxStreamData = .{ .streamId = 3, .maximum = 131072 } });
+    try pair.server.flushControl(.application, 100);
+    const wire = try pair.server.takeOutput(a);
+    defer a.free(wire);
+    try std.testing.expectError(Error.ProtocolViolation, pair.client.receiveDatagram(wire, 101));
+}
+
+test "peer STREAM beyond MAX_STREAMS limit is rejected before stream creation" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+    pair.server.maxStreamsBidiLocal = 1;
+
+    // Client-initiated bidirectional stream ID 4 is the second such stream.
+    try sendH3Stream(pair.client, 4, 0, "x", false, 100);
+    const wire = try pair.client.takeOutput(a);
+    defer a.free(wire);
+    try std.testing.expectError(Error.StreamLimitViolation, pair.server.receiveDatagram(wire, 101));
+    try std.testing.expect(pair.server.streams.get(4) == null);
 }
 
 test "connection close roundtrip carries code and reason" {
@@ -4035,6 +4162,7 @@ test "one rtt data that arrives before the handshake is replayed afterwards" {
     defer client.deinit();
     var server = try Connection.init(a, io, .server, .{});
     defer server.deinit();
+    client.maxStreamsBidiRemote = 1;
     server.addressValidated = true;
 
     const secret = @as([32]u8, @splat(0xA5));

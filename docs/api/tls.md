@@ -37,6 +37,7 @@ its own TLS 1.3 handshake paths**, including:
 | Handshake message encryption | -- | ✅ |
 | Cipher suite selection from client list | -- | ✅ |
 | Mutual TLS enforcement | -- | ✅ |
+| Post-handshake `KeyUpdate` | -- | Yes (both roles, RFC 9846 sender cap) |
 | PSK resumption (`psk_dhe_ke` NST tickets) | -- | ✅ (native paths; std HTTPS/1.1 always full handshake) |
 | HelloRetryRequest | -- | ✅ (both sides, single-retry guard) |
 | 0-RTT early data | -- | ❌ intentionally unsupported (replay risk) |
@@ -200,6 +201,12 @@ record-layer encryption internally. Server connections are accepted by
 `httpx.protocols.tls.Listener` / `Server.tls` and dispatched to HTTP/1 or HTTP/2
 handlers based on the negotiated ALPN protocol.
 
+Post-handshake TLS 1.3 `KeyUpdate` records are handled transparently by
+`read`: receive keys rotate, and a peer requesting an update is answered
+automatically. Servers can initiate an update with
+`conn.sendKeyUpdate(true)`; the new keys take effect immediately for
+subsequent records.
+
 ### Methods (server side)
 
 | Method | Description |
@@ -207,6 +214,7 @@ handlers based on the negotiated ALPN protocol.
 | `httpx.protocols.tls.Client.init(allocator, io, .{})` | TLS client owner (trust parsed once) |
 | `client.connect(&socket, host, .{})` | Handshake; returns an owned `Connection` |
 | `conn.read/writeAll/deinit` | Record I/O and teardown (deinit closes the socket) |
+| `conn.sendKeyUpdate(request_update)` | Rotate sending keys; request the peer to rotate its sending keys too |
 | `conn.takeCapturedSession()` | Take a captured resumption session, if any |
 | `httpx.protocols.tls.Server.init(allocator, io, cfg)` | TLS server owner (identity validated once) |
 | `server.accept(&socket)` | Accept; returns an owned `Connection` |

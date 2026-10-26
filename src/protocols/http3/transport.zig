@@ -313,8 +313,7 @@ pub const Client = struct {
             const nowMs: u64 = @intCast(clockMod.monotonicMillis(self.ep.io));
             if (nowMs -| startMs > deadlineMs) return error.Timeout;
 
-            const bidi = (sid & 0x02) == 0;
-            const streamLim = conn.maxStreamData.get(sid) orelse (if (bidi) conn.sendWindowBidi else conn.sendWindowUni);
+            const streamLim = conn.maxStreamData.get(sid) orelse conn.initialSendWindowForStream(sid);
             const streamAvail = if (streamLim > offset.*) streamLim - offset.* else 0;
             const connAvail = if (conn.maxDataRemote > conn.dataSent) conn.maxDataRemote - conn.dataSent else 0;
             const ccLimit = conn.cc.bytesInFlightLimit();
@@ -584,7 +583,12 @@ pub const Client = struct {
             if (r.overflow) return error.ResponseTooLarge;
             if (r.failed) {
                 if (r.resetCode) |_| {
-                    self.h3.resetStream(self.ep.conn, sid, .requestCancelled, @intCast(clockMod.monotonicMillis(self.ep.io))) catch {};
+                    const resetNow: u64 = @intCast(clockMod.monotonicMillis(self.ep.io));
+                    self.h3.resetStream(self.ep.conn, sid, .requestCancelled, resetNow) catch {};
+                    // Cancellation feedback must be sent promptly after the
+                    // local reset so the peer can release QPACK references.
+                    self.h3.pumpQpack(self.ep.conn, resetNow) catch {};
+                    _ = self.ep.flush(dest) catch {};
                 }
                 return error.ProtocolViolation;
             }

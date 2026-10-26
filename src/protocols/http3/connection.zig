@@ -58,7 +58,7 @@ pub const RequestStream = struct {
 
         // Field representations first; the section prefix needs the
         // final Required Insert Count, which is only known afterwards.
-        self.qpack.beginSection();
+        self.qpack.beginSectionForStream(self.id);
 
         // Status pseudo-header
         var codeBuf: [4]u8 = undefined;
@@ -84,7 +84,10 @@ pub const RequestStream = struct {
         try out.appendSlice(self.allocator, prefix.items);
         try out.appendSlice(self.allocator, block.items);
         block.deinit(self.allocator);
-        return out.toOwnedSlice(self.allocator);
+        const frame = try out.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(frame);
+        try self.qpack.registerSection(self.id);
+        return frame;
     }
 
     /// Builds an HTTP/3 request HEADERS frame with the required pseudo
@@ -100,7 +103,7 @@ pub const RequestStream = struct {
     ) ![]u8 {
         var block = std.ArrayList(u8).empty;
         errdefer block.deinit(self.allocator);
-        self.qpack.beginSection();
+        self.qpack.beginSectionForStream(self.id);
         const isConnect = std.mem.eql(u8, method, "CONNECT");
         try self.encodeField(&block, ":method", method);
         // Plain CONNECT carries only :method and :authority; :scheme and
@@ -126,7 +129,10 @@ pub const RequestStream = struct {
         try out.appendSlice(self.allocator, prefix.items);
         try out.appendSlice(self.allocator, block.items);
         block.deinit(self.allocator);
-        return out.toOwnedSlice(self.allocator);
+        const frame = try out.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(frame);
+        try self.qpack.registerSection(self.id);
+        return frame;
     }
 
     /// Builds DATA frame payload.
@@ -145,7 +151,7 @@ pub const RequestStream = struct {
     pub fn buildTrailers(self: *RequestStream, trailers: []const qpackMod.FieldLine) ![]u8 {
         var block = std.ArrayList(u8).empty;
         errdefer block.deinit(self.allocator);
-        self.qpack.beginSection();
+        self.qpack.beginSectionForStream(self.id);
         for (trailers) |h| {
             if (h.name.len == 0) return error.InvalidHeader;
             if (h.name[0] == ':') return error.InvalidHeader;
@@ -172,7 +178,10 @@ pub const RequestStream = struct {
         try out.appendSlice(self.allocator, prefix.items);
         try out.appendSlice(self.allocator, block.items);
         block.deinit(self.allocator);
-        return out.toOwnedSlice(self.allocator);
+        const frame = try out.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(frame);
+        try self.qpack.registerSection(self.id);
+        return frame;
     }
 };
 
@@ -420,6 +429,7 @@ pub const Connection = struct {
             }
         }
         self.qenc.setMaxTableCapacity(std.math.cast(usize, self.peerSettings.qpackMaxTableCapacity) orelse return Error.InvalidSettings);
+        self.qenc.setMaxBlockedStreams(self.peerSettings.qpackBlockedStreams);
         self.settingsReceived = true;
     }
 
@@ -767,7 +777,22 @@ pub const Connection = struct {
     /// Signals a QUIC-level reset received for `sid`. Unknown streams
     /// are ignored (nothing to abandon).
     pub fn onQuicReset(self: *Connection, sid: u64, code: u64) void {
-        if (self.streams.getPtr(sid)) |stp| stp.onQuicReset(code);
+        if (self.streams.getPtr(sid)) |stp| {
+            if (stp.failed or stp.done) return;
+            self.cancelQpackForStream(stp, sid);
+            stp.onQuicReset(code);
+        }
+    }
+
+    fn cancelQpackForStream(self: *Connection, stp: *h3stream.Stream, sid: u64) void {
+        // A canceled request/response may have an outstanding QPACK
+        // section reference even when it is no longer blocked. Tell the
+        // peer encoder to release every reference held for this stream.
+        if (stp.mode != .uni) {
+            self.qdec.cancelSection(&stp.decoderAck, sid) catch {
+                if (self.fatalError == null) self.fatalError = .internalError;
+            };
+        }
     }
 
     /// Retries every section parked on QPACK blocking (call after
@@ -923,7 +948,12 @@ pub const Connection = struct {
     pub fn resetStream(self: *Connection, quic: anytype, sid: u64, code: frameMod.H3Error, nowMs: u64) !void {
         const finalSize = quic.sendStreamEnd.get(sid) orelse 0;
         try quic.sendResetStream(sid, @backingInt(code), finalSize, nowMs);
-        if (self.streams.getPtr(sid)) |stp| stp.failed = true;
+        if (self.streams.getPtr(sid)) |stp| {
+            if (stp.failed or stp.done) return;
+            self.cancelQpackForStream(stp, sid);
+            stp.failed = true;
+            stp.blocked = false;
+        }
     }
 };
 
@@ -1163,6 +1193,9 @@ test "h3conn reset sends offset and drops the stream" {
     try std.testing.expectEqual(sid, mq.resets.items[0].sid);
     try std.testing.expectEqual(@as(u64, 0x10C), mq.resets.items[0].code);
     try std.testing.expectEqual(@as(u64, 100), mq.resets.items[0].finalSize);
+    const decoderInstructions = try conn.drainDecoderAcks();
+    defer a.free(decoderInstructions);
+    try std.testing.expectEqualSlices(u8, &.{0x40}, decoderInstructions);
     // Inbound bytes afterwards are ignored, not delivered.
     try conn.feedQuic(sid, "late", false);
     try std.testing.expectEqual(@as(usize, 0), rec.dataBytes);
@@ -1741,3 +1774,16 @@ test "http3 request stream buildTrailers encodes valid trailers and rejects pseu
     try std.testing.expectError(error.InvalidHeader, rs.buildTrailers(&forbiddenHost));
 }
 
+test "h3conn reset queues QPACK stream cancellation" {
+    const a = std.testing.allocator;
+    var conn = Connection.init(a, .client);
+    defer conn.deinit();
+    const sid = try conn.openRequestStream();
+    conn.onQuicReset(sid, 0);
+    try std.testing.expect(!conn.streams.getPtr(sid).?.blocked);
+    const instructions = try conn.drainDecoderAcks();
+    defer a.free(instructions);
+    try std.testing.expectEqual(@as(usize, 1), instructions.len);
+    // Stream Cancellation has a 6-bit prefix; stream 0 encodes as 0x40.
+    try std.testing.expectEqual(@as(u8, 0x40), instructions[0]);
+}

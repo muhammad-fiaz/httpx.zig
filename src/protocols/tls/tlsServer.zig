@@ -210,7 +210,11 @@ pub const Server = struct {
         leftoverLen: usize = 0,
         leftover: []const u8 = &.{},
 
+        /// Bounded reassembly of post-handshake messages fragmented across records.
+        postHandshake: handshakeMod.MessageReassembler,
+
         pub fn deinit(self: *Connection) void {
+            self.postHandshake.deinit();
             self.allocator.free(self.writeBuf);
             self.allocator.free(self.readBuf);
             if (self.sni) |hostname| self.allocator.free(hostname);
@@ -236,7 +240,11 @@ pub const Server = struct {
         }
 
         /// Read and decrypt one record worth of application data.
-        /// Returns the decrypted plaintext (valid until next readAll call).
+        /// Returns the decrypted plaintext (valid until next read call).
+        ///
+        /// Post-handshake KeyUpdate records are consumed transparently and
+        /// answered when requested. Encrypted close_notify yields
+        /// `error.TlsCloseNotify`; fatal alerts yield `error.TlsFatalAlert`.
         pub fn read(self: *Connection, buf: []u8) Error!usize {
             if (self.leftoverLen > 0) {
                 const n = @min(self.leftoverLen, buf.len);
@@ -248,83 +256,143 @@ pub const Server = struct {
                 return n;
             }
 
-            // Read record header (5 bytes)
-            var hdrBuf: [5]u8 = undefined;
-            var totalRead: usize = 0;
-            while (totalRead < 5) {
-                const n = self.socket.read(hdrBuf[totalRead..]) catch return error.IoError;
-                if (n == 0) return 0; // peer closed
-                totalRead += n;
-            }
+            while (true) {
+                // Read record header (5 bytes)
+                var hdrBuf: [5]u8 = undefined;
+                var totalRead: usize = 0;
+                while (totalRead < 5) {
+                    const n = self.socket.read(hdrBuf[totalRead..]) catch return error.IoError;
+                    if (n == 0) {
+                        // A clean FIN at a record boundary is EOF. A FIN in
+                        // the middle of a record is a truncation attack.
+                        if (totalRead == 0) {
+                            if (self.postHandshake.buffer.items.len != 0) return error.TlsRecordError;
+                            return 0;
+                        }
+                        return error.TlsRecordError;
+                    }
+                    totalRead += n;
+                }
 
-            // TLS 1.3 records use the TLS 1.2 legacy version on the wire.
-            if (hdrBuf[1] != 0x03 or hdrBuf[2] != 0x03) return error.TlsRecordError;
+                // TLS 1.3 records use the TLS 1.2 legacy version on the wire.
+                if (hdrBuf[1] != 0x03 or hdrBuf[2] != 0x03) return error.TlsRecordError;
 
-            const recordLen: usize = (@as(usize, hdrBuf[3]) << 8) | hdrBuf[4];
-            const tagLen = self.appKeys.cipher.tagLen();
-            if (recordLen < tagLen or
-                recordLen > recordMod.maxRecordPlaintext + 1 + tagLen)
-            {
-                return error.TlsRecordError;
-            }
+                const recordLen: usize = (@as(usize, hdrBuf[3]) << 8) | hdrBuf[4];
+                const tagLen = self.appKeys.cipher.tagLen();
+                if (recordLen == 0 or
+                    recordLen > recordMod.maxRecordPlaintext + 1 + tagLen)
+                {
+                    return error.TlsRecordError;
+                }
 
-            // Read record body
-            var wireBuf: [recordMod.maxRecordWire]u8 = undefined;
-            @memcpy(wireBuf[0..5], &hdrBuf);
-            totalRead = 0;
-            while (totalRead < recordLen) {
-                const n = self.socket.read(wireBuf[5 + totalRead ..][0 .. recordLen - totalRead]) catch return error.IoError;
-                if (n == 0) return error.TlsRecordError;
-                totalRead += n;
-            }
+                // Read record body
+                var wireBuf: [recordMod.maxRecordWire]u8 = undefined;
+                @memcpy(wireBuf[0..5], &hdrBuf);
+                totalRead = 0;
+                while (totalRead < recordLen) {
+                    const n = self.socket.read(wireBuf[5 + totalRead ..][0 .. recordLen - totalRead]) catch return error.IoError;
+                    if (n == 0) return error.TlsRecordError;
+                    totalRead += n;
+                }
 
-            // Check content type
-            const contentTypeByte = wireBuf[0];
-            if (contentTypeByte != @backingInt(recordMod.ContentType.application_data)) {
-                if (contentTypeByte == @backingInt(recordMod.ContentType.alert)) {
-                    // Try to decrypt to read alert description
-                    var decryptBuf: [recordMod.maxRecordPlaintext + 1]u8 = undefined;
-                    const result = recordMod.decodeRecord(
-                        wireBuf[0..][0 .. 5 + recordLen],
-                        &decryptBuf,
-                        self.rxSeq,
-                        self.appKeys.clientKeySlice(),
-                        &self.appKeys.clientIv,
-                        self.appKeys.cipher,
-                    ) catch return error.TlsFatalAlert;
-                    if (result.plaintext.len >= 2) {
+                const contentTypeByte = wireBuf[0];
+                if (contentTypeByte == @backingInt(recordMod.ContentType.change_cipher_spec)) {
+                    // Middlebox-compatibility CCS (RFC 8446 Section 5.4).
+                    if (recordLen != 1 or wireBuf[5] != 0x01) return error.TlsRecordError;
+                    continue;
+                }
+                if (contentTypeByte != @backingInt(recordMod.ContentType.application_data) or
+                    recordLen < tagLen)
+                {
+                    return error.TlsRecordError;
+                }
+
+                // Decrypt with the current client-application traffic key.
+                var decryptBuf: [recordMod.maxRecordPlaintext + 1]u8 = undefined;
+                const result = recordMod.decodeRecord(
+                    wireBuf[0..][0 .. 5 + recordLen],
+                    &decryptBuf,
+                    self.rxSeq,
+                    self.appKeys.clientKeySlice(),
+                    &self.appKeys.clientIv,
+                    self.appKeys.cipher,
+                ) catch return error.TlsRecordError;
+                self.rxSeq +%= 1;
+
+                switch (result.contentType) {
+                    .application_data => {},
+                    .handshake => {
+                        try self.processPostHandshakeRecord(result.plaintext, result.plaintext.len);
+                        continue;
+                    },
+                    .alert => {
+                        if (result.plaintext.len != 2) return error.TlsRecordError;
                         const alert = handshakeMod.Alert.decode(.{ result.plaintext[0], result.plaintext[1] });
                         if (alert.description == .closeNotify) return error.TlsCloseNotify;
-                    }
-                    return error.TlsFatalAlert;
+                        return error.TlsFatalAlert;
+                    },
+                    .change_cipher_spec => continue,
+                    else => return error.TlsRecordError,
                 }
-                return error.TlsRecordError;
-            }
 
-            // Decrypt application record
-            var decryptBuf: [recordMod.maxRecordPlaintext + 1]u8 = undefined;
-            const result = recordMod.decodeRecord(
-                wireBuf[0..][0 .. 5 + recordLen],
-                &decryptBuf,
-                self.rxSeq,
-                self.appKeys.clientKeySlice(),
-                &self.appKeys.clientIv,
+                const n = @min(result.plaintext.len, buf.len);
+                @memcpy(buf[0..n], result.plaintext[0..n]);
+                if (n < result.plaintext.len) {
+                    const rest = result.plaintext[n..];
+                    @memcpy(self.leftoverBuf[0..rest.len], rest);
+                    self.leftoverLen = rest.len;
+                    self.leftover = self.leftoverBuf[0..self.leftoverLen];
+                } else {
+                    self.leftoverLen = 0;
+                    self.leftover = &.{};
+                }
+                return n;
+            }
+        }
+
+        fn processPostHandshakeRecord(self: *Connection, plaintext: []const u8, recordPlaintextLen: usize) Error!void {
+            const bufferedBeforeRecord = self.postHandshake.buffer.items.len;
+            self.postHandshake.append(plaintext) catch return error.TlsRecordError;
+            var consumedMessages: usize = 0;
+            while (true) {
+                const maybe_msg = self.postHandshake.next() catch return error.TlsRecordError;
+                const msg = maybe_msg orelse return;
+                defer self.allocator.free(msg.body);
+                consumedMessages += 4 + msg.body.len;
+                const currentRecordBytesConsumed = consumedMessages -| bufferedBeforeRecord;
+                const hasTrailingBytesInRecord = currentRecordBytesConsumed < recordPlaintextLen;
+                switch (msg.msgType) {
+                    .key_update => {
+                        const update = handshakeMod.KeyUpdate.decode(msg.body) catch return error.TlsRecordError;
+                        // RFC 8446 Section 4.6.3: KeyUpdate must be the
+                        // last message in its record.
+                        if (hasTrailingBytesInRecord) return error.TlsRecordError;
+                        self.appKeys.advanceClientReceiveKeys();
+                        self.rxSeq = 0;
+                        if (update.requestUpdate) try self.sendKeyUpdate(false);
+                    },
+                    else => return error.TlsRecordError,
+                }
+            }
+        }
+
+        /// Sends a TLS 1.3 KeyUpdate and rotates this connection's sending
+        /// keys. With `request_update`, the peer must answer with its own
+        /// KeyUpdate, rotating the keys used for its next records.
+        pub fn sendKeyUpdate(self: *Connection, request_update: bool) Error!void {
+            var message: [5]u8 = undefined;
+            (handshakeMod.KeyUpdate{ .requestUpdate = request_update }).encode(&message);
+            const encoded = recordMod.encodeRecord(
+                .handshake,
+                &message,
+                self.txSeq,
+                self.appKeys.serverKeySlice(),
+                &self.appKeys.serverIv,
                 self.appKeys.cipher,
             ) catch return error.TlsRecordError;
-            self.rxSeq +%= 1;
-
-            const n = @min(result.plaintext.len, buf.len);
-            @memcpy(buf[0..n], result.plaintext[0..n]);
-            if (n < result.plaintext.len) {
-                const rest = result.plaintext[n..];
-                @memcpy(self.leftoverBuf[0..rest.len], rest);
-                self.leftoverLen = rest.len;
-                self.leftover = self.leftoverBuf[0..self.leftoverLen];
-            } else {
-                self.leftoverLen = 0;
-                self.leftover = &.{};
-            }
-            return n;
+            self.socket.writeAll(encoded.bytes[0..encoded.len]) catch return error.IoError;
+            if (!self.appKeys.updateServerTrafficKeys()) return error.SequenceOverflow;
+            self.txSeq = 0;
         }
     };
 
@@ -593,6 +661,7 @@ pub const Server = struct {
             .appKeys = apKeys,
             .resumed = engine.resumptionPsk != null,
             .txSeq = apTxSeq,
+            .postHandshake = handshakeMod.MessageReassembler.init(a),
             .writeBuf = writeBuf,
             .readBuf = readBufApp,
         };
@@ -949,6 +1018,76 @@ fn parseAlpnExtension(allocator: Allocator, data: []const u8) !std.ArrayList([]c
 }
 
 // Tests
+
+test "server post-handshake KeyUpdate rotates only the client receive keys" {
+    const a = std.testing.allocator;
+    const keys = engineMod.DerivedKeys{
+        .clientKey = @splat(0x11),
+        .clientIv = @splat(0x22),
+        .serverKey = @splat(0x33),
+        .serverIv = @splat(0x44),
+        .clientTrafficSecret = @splat(0x55),
+        .serverTrafficSecret = @splat(0x66),
+        .cipher = .aes128Gcm,
+        .clientKeyLen = 16,
+        .serverKeyLen = 16,
+    };
+    const oldServerKey = keys.serverKey;
+    const oldServerSecret = keys.serverTrafficSecret;
+    var expectedSecret: [32]u8 = undefined;
+    engineMod.hkdfExpandLabel(keys.clientTrafficSecret, "traffic upd", &expectedSecret);
+    var expectedKey: [32]u8 = undefined;
+    engineMod.hkdfExpandLabel(expectedSecret, "key", expectedKey[0..16]);
+    var expectedIv: [12]u8 = undefined;
+    engineMod.hkdfExpandLabel(expectedSecret, "iv", &expectedIv);
+
+    var conn = Server.Connection{
+        .socket = undefined,
+        .allocator = a,
+        .alpn = null,
+        .sni = null,
+        .appKeys = keys,
+        .txSeq = 5,
+        .rxSeq = 7,
+        .postHandshake = handshakeMod.MessageReassembler.init(a),
+        .writeBuf = try a.alloc(u8, 64),
+        .readBuf = try a.alloc(u8, 64),
+    };
+    defer conn.deinit();
+
+    var update: [5]u8 = undefined;
+    (handshakeMod.KeyUpdate{}).encode(&update);
+    try conn.processPostHandshakeRecord(update[0..3], 3);
+    try std.testing.expectError(
+        error.TlsRecordError,
+        conn.processPostHandshakeRecord(&.{ update[3], update[4], 0x16 }, 3),
+    );
+    try std.testing.expectEqual(@as(u64, 0), conn.appKeys.clientEpoch);
+    conn.postHandshake.reset();
+    try conn.processPostHandshakeRecord(&update, update.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.appKeys.clientEpoch);
+    try std.testing.expectEqual(@as(u64, 0), conn.appKeys.serverEpoch);
+    try std.testing.expectEqualSlices(u8, &expectedSecret, &conn.appKeys.clientTrafficSecret);
+    try std.testing.expectEqualSlices(u8, expectedKey[0..16], conn.appKeys.clientKeySlice());
+    try std.testing.expectEqualSlices(u8, &expectedIv, &conn.appKeys.clientIv);
+    try std.testing.expectEqualSlices(u8, &oldServerKey, &conn.appKeys.serverKey);
+    try std.testing.expectEqualSlices(u8, &oldServerSecret, &conn.appKeys.serverTrafficSecret);
+    try std.testing.expectEqual(@as(u64, 0), conn.rxSeq);
+    try std.testing.expectEqual(@as(u64, 5), conn.txSeq);
+
+    var trailing: [6]u8 = undefined;
+    @memcpy(trailing[0..5], &update);
+    trailing[5] = 0xAA;
+    const epochBefore = conn.appKeys.clientEpoch;
+    const secretBefore = conn.appKeys.clientTrafficSecret;
+    try std.testing.expectError(error.TlsRecordError, conn.processPostHandshakeRecord(&trailing, trailing.len));
+    try std.testing.expectEqual(epochBefore, conn.appKeys.clientEpoch);
+    try std.testing.expectEqualSlices(u8, &secretBefore, &conn.appKeys.clientTrafficSecret);
+
+    // An incomplete handshake header is buffered for the next record.
+    try conn.processPostHandshakeRecord(&.{ 4, 0, 0 }, 3);
+    try std.testing.expectEqual(@as(usize, 4), conn.postHandshake.buffer.items.len);
+}
 
 test "tls server handshake processes client hello" {
     const a = std.testing.allocator;

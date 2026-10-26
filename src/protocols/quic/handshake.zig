@@ -232,20 +232,16 @@ pub const Driver = struct {
                 return connMod.Error.TransportParameterError;
             }
         }
-        if (p.initialMaxData != 0) conn.maxDataRemote = p.initialMaxData;
-        // Our sends: streams we initiate use the peer's "remote" limit,
-        // peer-initiated streams use their "local" limit; take the
-        // tighter nonzero bound so either direction stays legal.
-        var bidi: ?u64 = null;
-        if (p.initialMaxStreamDataBidiLocal != 0) bidi = p.initialMaxStreamDataBidiLocal;
-        if (p.initialMaxStreamDataBidiRemote != 0) {
-            bidi = if (bidi) |b| @min(b, p.initialMaxStreamDataBidiRemote) else p.initialMaxStreamDataBidiRemote;
-        }
-        if (bidi) |b| conn.sendWindowBidi = b;
-        if (p.initialMaxStreamDataUni != 0) conn.sendWindowUni = p.initialMaxStreamDataUni;
-        if (p.initialMaxStreamsBidi != 0) conn.maxStreamsBidiRemote = p.initialMaxStreamsBidi;
-        if (p.initialMaxStreamsUni != 0) conn.maxStreamsUniRemote = p.initialMaxStreamsUni;
-        if (p.maxAckDelayMs != 0) conn.recovery.cfg.maxAckDelayMs = p.maxAckDelayMs;
+        // The decoder supplies RFC defaults for absent numeric parameters;
+        // zero is meaningful credit and must replace compiled or remembered
+        // values (notably after a rejected 0-RTT attempt).
+        conn.maxDataRemote = p.initialMaxData;
+        conn.sendWindowBidiPeerInitiated = p.initialMaxStreamDataBidiLocal;
+        conn.sendWindowBidiLocalInitiated = p.initialMaxStreamDataBidiRemote;
+        conn.sendWindowUni = p.initialMaxStreamDataUni;
+        conn.maxStreamsBidiRemote = p.initialMaxStreamsBidi;
+        conn.maxStreamsUniRemote = p.initialMaxStreamsUni;
+        conn.recovery.cfg.maxAckDelayMs = p.maxAckDelayMs;
         conn.peerParams = p;
     }
 
@@ -294,7 +290,21 @@ pub const Driver = struct {
 
         const ch = if (d.session) |sess| blk: {
             if (d.earlyData and sess.maxEarlyData > 0) {
-                break :blk d.engine.produceClientHelloResumption(&.{"h3"}, &.{}, sniFor(d.host), sess, @intCast(clockMod.millisNow(d.engine.io)), tp) catch
+                var earlySession = sess.*;
+                if (sess.quicTransportLimits) |limits| {
+                    conn.maxDataRemote = limits[0];
+                    conn.sendWindowBidiPeerInitiated = limits[1];
+                    conn.sendWindowBidiLocalInitiated = limits[2];
+                    conn.sendWindowUni = limits[3];
+                    conn.maxStreamsBidiRemote = limits[4];
+                    conn.maxStreamsUniRemote = limits[5];
+                } else {
+                    // QUIC 0-RTT must obey remembered peer transport
+                    // limits. Older TLS-only sessions have no such snapshot;
+                    // keep PSK resumption but omit the early_data offer.
+                    earlySession.maxEarlyData = 0;
+                }
+                break :blk d.engine.produceClientHelloResumption(&.{"h3"}, &.{}, sniFor(d.host), &earlySession, @intCast(clockMod.millisNow(d.engine.io)), tp) catch
                     return connMod.Error.TlsDriverFailed;
             } else {
                 break :blk d.engine.produceClientHello(&.{"h3"}, &.{}, sniFor(d.host), tp) catch
@@ -426,6 +436,16 @@ pub const Driver = struct {
                     if (d.engine.deriveResumptionMaster()) |rm| {
                         var session = d.engine.processNewSessionTicket(rec.msg, rm, d.host, @intCast(clockMod.millisNow(d.engine.io))) catch null;
                         if (session) |*sess| {
+                            if (conn.peerParams) |p| {
+                                sess.quicTransportLimits = .{
+                                    p.initialMaxData,
+                                    p.initialMaxStreamDataBidiLocal,
+                                    p.initialMaxStreamDataBidiRemote,
+                                    p.initialMaxStreamDataUni,
+                                    p.initialMaxStreamsBidi,
+                                    p.initialMaxStreamsUni,
+                                };
+                            }
                             if (d.sessionOut) |so| {
                                 so.* = sess.*;
                             } else {
@@ -926,13 +946,20 @@ test "peer transport parameters apply to connection windows" {
 
     try Driver.applyPeerTransportParams(conn, block.items, false);
     try std.testing.expectEqual(@as(u64, 2 << 20), conn.maxDataRemote);
-    // Bidi send window is the tighter of the peer local/remote limits.
-    try std.testing.expectEqual(@as(u64, 512 << 10), conn.sendWindowBidi);
+    // These limits apply to streams with different initiators.
+    try std.testing.expectEqual(@as(u64, 1 << 20), conn.sendWindowBidiPeerInitiated);
+    try std.testing.expectEqual(@as(u64, 512 << 10), conn.sendWindowBidiLocalInitiated);
     try std.testing.expectEqual(@as(u64, 256 << 10), conn.sendWindowUni);
     try std.testing.expectEqual(@as(u64, 64), conn.maxStreamsBidiRemote);
     try std.testing.expectEqual(@as(u64, 8), conn.maxStreamsUniRemote);
     try std.testing.expectEqual(@as(u64, 42), conn.recovery.cfg.maxAckDelayMs);
     try std.testing.expect(conn.peerParams != null);
+
+    // Our locally initiated stream uses the peer's bidi-remote allowance,
+    // not the larger bidi-local allowance.
+    const oversized = try a.alloc(u8, (512 << 10) + 1);
+    defer a.free(oversized);
+    try std.testing.expectError(connMod.Error.SendBlocked, conn.sendStreamChecked(0, 0, oversized, false, 100));
 
     // The server path takes a block WITHOUT odcid (servers send it,
     // they never receive it) and rejects one that carries it.
@@ -1145,6 +1172,30 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
         try std.testing.expect(cliConn.zeroRttKeysTx == null and cliConn.zeroRttKeysRx == null);
         try std.testing.expect(srvConn.zeroRttKeysTx == null and srvConn.zeroRttKeysRx == null);
     }
+}
+
+test "peer transport parameter defaults replace stale send credit" {
+    const a = std.testing.allocator;
+    var conn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    defer conn.deinit();
+    conn.maxDataRemote = 4096;
+    conn.sendWindowBidiPeerInitiated = 2048;
+    conn.sendWindowBidiLocalInitiated = 2048;
+    conn.sendWindowUni = 1024;
+    conn.maxStreamsBidiRemote = 8;
+    conn.maxStreamsUniRemote = 4;
+
+    var wire = std.ArrayList(u8).empty;
+    defer wire.deinit(a);
+    try paramsMod.encode(&wire, a, .{}); // absent initial limits default to zero
+    try Driver.applyPeerTransportParams(conn, wire.items, false);
+
+    try std.testing.expectEqual(@as(u64, 0), conn.maxDataRemote);
+    try std.testing.expectEqual(@as(u64, 0), conn.sendWindowBidiPeerInitiated);
+    try std.testing.expectEqual(@as(u64, 0), conn.sendWindowBidiLocalInitiated);
+    try std.testing.expectEqual(@as(u64, 0), conn.sendWindowUni);
+    try std.testing.expectEqual(@as(u64, 0), conn.maxStreamsBidiRemote);
+    try std.testing.expectEqual(@as(u64, 0), conn.maxStreamsUniRemote);
 }
 
 test "the initial keys are discarded once the handshake moves on" {

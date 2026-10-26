@@ -77,7 +77,7 @@ defer server.deinit();
 | `keepAlive` | `bool` | `false` | Honor HTTP/1.1 keep-alive on connections. |
 | `allowLfLineEndings` | `bool` | `false` | Accept bare LF line endings when parsing requests. |
 | `trustForwardedHeaders` | `bool` | `false` | Trust `X-Forwarded-*` headers from reverse proxies. |
-| `trustedProxies` | `[]const []const u8` | `&.{}` | IPs/CIDRs allowed to supply forwarded headers. |
+| `trustedProxies` | `[]const []const u8` | `&.{}` | IPs/CIDRs allowed to supply forwarded headers; forwarded chains skip entries matching these rules. Empty trusts every peer when forwarding is enabled. |
 | `httpVersion` | `?HttpVersion` | `null` | Preferred HTTP version enforcement. |
 | `http10` | `bool` | `true` | Enable HTTP/1.0 handling. |
 | `http11` | `bool` | `true` | Enable HTTP/1.1 handling. |
@@ -351,7 +351,7 @@ The `Context` struct is passed to every route handler and middleware.
 | `cookie(name)` | Get request cookie value by name |
 | `bearerToken()` | Parse `Authorization: Bearer <token>` |
 | `basicAuth()` | Parse `Authorization: Basic ...` into username/password |
-| `remoteAddress()` | Peer address (honors trusted `X-Forwarded-*`) |
+| `remoteAddress()` | Peer address (honors `X-Forwarded-*` only from configured trusted proxies) |
 | `scheme()` | `"https"` for TLS, else `"http"` |
 | `host()` | Request host |
 | `json(T)` | Parse request body as typed JSON into `T` |

@@ -4,8 +4,8 @@
 //! client Authorization header generation, and constant-time server verification.
 //!
 //! References:
-//!   - RFC 7616 — HTTP Digest Access Authentication
-//!   - RFC 2617 — HTTP Authentication: Basic and Digest Access Authentication
+//!   - RFC 7616 - HTTP Digest Access Authentication
+//!   - RFC 2617 - HTTP Authentication: Basic and Digest Access Authentication
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -47,7 +47,42 @@ pub const ParseError = error{
     MissingRealm,
     MissingNonce,
     InvalidParameter,
+    UnsupportedQop,
 };
+
+/// Yields comma-separated auth parameters without splitting inside quoted
+/// strings, so list-valued fields such as `qop` stay intact.
+fn nextAuthParam(input: []const u8, pos: *usize) ?[]const u8 {
+    if (pos.* >= input.len) return null;
+    const start = pos.*;
+    var i = start;
+    var quoted = false;
+    var escaped = false;
+    while (i < input.len) : (i += 1) {
+        const c = input[i];
+        if (escaped) {
+            escaped = false;
+        } else if (quoted and c == '\\') {
+            escaped = true;
+        } else if (c == '"') {
+            quoted = !quoted;
+        } else if (c == ',' and !quoted) {
+            pos.* = i + 1;
+            return input[start..i];
+        }
+    }
+    pos.* = input.len;
+    return input[start..];
+}
+
+fn selectQop(value: []const u8) ParseError![]const u8 {
+    var tokens = std.mem.splitScalar(u8, value, ',');
+    while (tokens.next()) |raw| {
+        const token = std.mem.trim(u8, raw, " \t");
+        if (std.ascii.eqlIgnoreCase(token, "auth")) return "auth";
+    }
+    return ParseError.UnsupportedQop;
+}
 
 /// Parses a "WWW-Authenticate: Digest ..." challenge header value.
 pub fn parseChallenge(headerValue: []const u8) ParseError!Challenge {
@@ -61,8 +96,8 @@ pub fn parseChallenge(headerValue: []const u8) ParseError!Challenge {
         .nonce = "",
     };
 
-    var params = std.mem.splitScalar(u8, headerValue[prefix.len..], ',');
-    while (params.next()) |rawParam| {
+    var pos: usize = 0;
+    while (nextAuthParam(headerValue[prefix.len..], &pos)) |rawParam| {
         const p = std.mem.trim(u8, rawParam, " \t\r\n");
         if (p.len == 0) continue;
 
@@ -78,7 +113,7 @@ pub fn parseChallenge(headerValue: []const u8) ParseError!Challenge {
         } else if (std.ascii.eqlIgnoreCase(key, "nonce")) {
             ch.nonce = val;
         } else if (std.ascii.eqlIgnoreCase(key, "qop")) {
-            ch.qop = val;
+            ch.qop = try selectQop(val);
         } else if (std.ascii.eqlIgnoreCase(key, "algorithm")) {
             ch.algorithm = Algorithm.fromString(val) orelse .sha256;
         } else if (std.ascii.eqlIgnoreCase(key, "opaque")) {
@@ -246,6 +281,7 @@ pub fn verifyAuthorization(
     realm: []const u8,
     nonce: []const u8,
     method: []const u8,
+    expectedUri: []const u8,
     headerValue: []const u8,
 ) bool {
     const prefix = "Digest ";
@@ -261,8 +297,8 @@ pub fn verifyAuthorization(
     var cnonce: ?[]const u8 = null;
     var algorithm: Algorithm = .sha256;
 
-    var params = std.mem.splitScalar(u8, headerValue[prefix.len..], ',');
-    while (params.next()) |rawParam| {
+    var pos: usize = 0;
+    while (nextAuthParam(headerValue[prefix.len..], &pos)) |rawParam| {
         const p = std.mem.trim(u8, rawParam, " \t\r\n");
         if (p.len == 0) continue;
         const eq = std.mem.indexOfScalar(u8, p, '=') orelse continue;
@@ -302,9 +338,15 @@ pub fn verifyAuthorization(
     if (!std.mem.eql(u8, u, creds.username)) return false;
     if (!std.mem.eql(u8, r, realm)) return false;
     if (!std.mem.eql(u8, n, nonce)) return false;
+    if (!std.mem.eql(u8, uri, expectedUri)) return false;
 
-    const nc: u32 = if (ncStr) |s| std.fmt.parseInt(u32, s, 16) catch return false else 1;
-    const cn = cnonce orelse "";
+    var nc: u32 = 1;
+    var cn: []const u8 = "";
+    if (qop) |q| {
+        if (!std.ascii.eqlIgnoreCase(q, "auth")) return false;
+        nc = std.fmt.parseInt(u32, ncStr orelse return false, 16) catch return false;
+        cn = cnonce orelse return false;
+    }
 
     var expectedBuf: [64]u8 = undefined;
     const expected = computeResponse(
@@ -338,6 +380,38 @@ test "parse challenge from server" {
     try std.testing.expectEqual(Algorithm.sha256, ch.algorithm);
     try std.testing.expect(ch.qop != null);
     try std.testing.expectEqualStrings("FQhe/qaU925kualBR5QGXYcT1uotWoStrategy", ch.@"opaque".?);
+}
+
+test "digest challenge selects auth from a qop list and rejects unsupported qop" {
+    const ch = try parseChallenge("Digest realm=\"r\", nonce=\"n\", qop=\"auth, auth-int\"");
+    try std.testing.expectEqualStrings("auth", ch.qop.?);
+    try std.testing.expectError(
+        ParseError.UnsupportedQop,
+        parseChallenge("Digest realm=\"r\", nonce=\"n\", qop=\"auth-int\""),
+    );
+}
+
+test "digest verification binds the response to the request target" {
+    const a = std.testing.allocator;
+    const creds = Credentials{ .username = "Mufasa", .password = "Circle of Life" };
+    const ch = Challenge{
+        .realm = "http-auth@example.org",
+        .nonce = "7ypf/xlj9XXHGtFIWSVILQ==",
+        .qop = "auth",
+    };
+    const hdr = try buildAuthorizationHeader(a, creds, ch, "GET", "/dir/index.html", 1, "cnonce");
+    defer a.free(hdr);
+
+    try std.testing.expect(verifyAuthorization(creds, ch.realm, ch.nonce, "GET", "/dir/index.html", hdr));
+    try std.testing.expect(!verifyAuthorization(creds, ch.realm, ch.nonce, "GET", "/admin", hdr));
+
+    const badQop = try std.mem.replaceOwned(u8, a, hdr, "qop=auth", "qop=auth-int");
+    defer a.free(badQop);
+    try std.testing.expect(!verifyAuthorization(creds, ch.realm, ch.nonce, "GET", "/dir/index.html", badQop));
+
+    const noNc = try std.mem.replaceOwned(u8, a, hdr, ", nc=00000001", "");
+    defer a.free(noNc);
+    try std.testing.expect(!verifyAuthorization(creds, ch.realm, ch.nonce, "GET", "/dir/index.html", noNc));
 }
 
 test "rfc 7616 sha-256 test vector calculation" {
@@ -375,10 +449,10 @@ test "rfc 7616 sha-256 test vector calculation" {
     const authHdr = try buildAuthorizationHeader(a, creds, ch, "GET", "/dir/index.html", 1, "f2/wEdfr72guXAm-AipYWhGrNGqKhGvgaP9BiKGUpao=");
     defer a.free(authHdr);
 
-    try std.testing.expect(verifyAuthorization(creds, ch.realm, ch.nonce, "GET", authHdr));
+    try std.testing.expect(verifyAuthorization(creds, ch.realm, ch.nonce, "GET", "/dir/index.html", authHdr));
     // Tampered password fails
     const badCreds = Credentials{ .username = "Mufasa", .password = "Wrong" };
-    try std.testing.expect(!verifyAuthorization(badCreds, ch.realm, ch.nonce, "GET", authHdr));
+    try std.testing.expect(!verifyAuthorization(badCreds, ch.realm, ch.nonce, "GET", "/dir/index.html", authHdr));
 }
 
 test "rfc 2617 md5 test vector calculation" {
@@ -412,5 +486,5 @@ test "rfc 2617 md5 test vector calculation" {
     const authHdr = try buildAuthorizationHeader(a, creds, ch, "GET", "/dir/index.html", 1, "0a4f113b");
     defer a.free(authHdr);
 
-    try std.testing.expect(verifyAuthorization(creds, ch.realm, ch.nonce, "GET", authHdr));
+    try std.testing.expect(verifyAuthorization(creds, ch.realm, ch.nonce, "GET", "/dir/index.html", authHdr));
 }

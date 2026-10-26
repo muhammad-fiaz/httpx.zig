@@ -142,6 +142,20 @@ pub fn buildRequest(
         return Error.InvalidTarget;
     _ = targetForm;
 
+    // HTTP/1.1 requires exactly one Host field. `opts.host` is a shorthand
+    // that emits that field; accepting another Host in `headers` would
+    // serialize an ambiguous authority. When callers provide headers
+    // directly, permit that single Host as the required authority.
+    var hostHeaders: usize = 0;
+    for (opts.headers) |h| {
+        if (!std.ascii.eqlIgnoreCase(h.name, "host")) continue;
+        hostHeaders += 1;
+        if (!semantics.validAuthority(h.value)) return Error.InvalidHeader;
+    }
+    if (hostHeaders > 1 or (opts.host.len > 0 and hostHeaders != 0)) return Error.InvalidHeader;
+    if (opts.minorVersion == 1 and opts.host.len == 0 and hostHeaders != 1) return Error.InvalidHeader;
+    if (opts.host.len > 0 and !semantics.validAuthority(opts.host)) return Error.InvalidHeader;
+
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(allocator);
 
@@ -154,10 +168,6 @@ pub fn buildRequest(
 
     if (opts.host.len > 0) {
         try appendHeader(&out, allocator, "Host", opts.host);
-    } else if (opts.minorVersion >= 1) {
-        // HTTP/1.1 requires Host on non-absolute-form requests.
-        const absolute = std.mem.indexOf(u8, target, "://") != null;
-        if (!absolute) return Error.InvalidHeader;
     }
 
     for (opts.headers) |h| try appendHeader(&out, allocator, h.name, h.value);
@@ -424,6 +434,30 @@ test "request methods and targets validated" {
     const custom = try buildRequest(a, "PROPFIND", "/", null, .{ .host = "x" });
     defer a.free(custom);
     try std.testing.expect(std.mem.startsWith(u8, custom, "PROPFIND / HTTP/1.1"));
+}
+
+test "HTTP/1.1 request emits exactly one Host field" {
+    const a = std.testing.allocator;
+    const supplied = [_]Header{.{ .name = "hOsT", .value = "example.test" }};
+    const req = try buildRequest(a, "GET", "/", null, .{ .headers = &supplied });
+    defer a.free(req);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, req, "hOsT: example.test\r\n"));
+
+    const duplicate = [_]Header{.{ .name = "Host", .value = "other.test" }};
+    try std.testing.expectError(Error.InvalidHeader, buildRequest(a, "GET", "/", null, .{
+        .host = "example.test",
+        .headers = &duplicate,
+    }));
+
+    const repeated = [_]Header{
+        .{ .name = "Host", .value = "one.test" },
+        .{ .name = "host", .value = "two.test" },
+    };
+    try std.testing.expectError(Error.InvalidHeader, buildRequest(a, "GET", "/", null, .{ .headers = &repeated }));
+
+    const malformed = [_]Header{.{ .name = "Host", .value = "example.test:bad" }};
+    try std.testing.expectError(Error.InvalidHeader, buildRequest(a, "GET", "/", null, .{ .headers = &malformed }));
+    try std.testing.expectError(Error.InvalidHeader, buildRequest(a, "GET", "/", null, .{ .host = "bad host" }));
 }
 
 test "request content-length and chunked selection" {

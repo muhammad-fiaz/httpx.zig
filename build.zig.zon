@@ -9,8 +9,8 @@
             .hash = "zstd-0.0.5-biH4jJKuEQCetrZbOjd3uTyQdcMT8BGkkV1HF0jgujkH",
         },
         .brotli = .{
-            .url = "https://github.com/muhammad-fiaz/brotli.zig/archive/refs/tags/0.0.6.tar.gz",
-            .hash = "brotli-0.0.6-utAAyGzyFgAAtCEe0v365xssBjwcEggMY1WfHd4WuA9B",
+            .url = "https://github.com/muhammad-fiaz/brotli.zig/archive/refs/tags/0.0.7.tar.gz",
+            .hash = "brotli-0.0.7-utAAyDzxFgD1JsnjXq6SV1uXaRIOqxZBAHIsc-W1Hb46",
         },
         .loaders = .{
             .url = "https://github.com/muhammad-fiaz/loaders.zig/archive/refs/tags/0.0.7.tar.gz",

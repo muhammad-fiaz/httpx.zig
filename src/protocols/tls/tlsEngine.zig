@@ -141,12 +141,69 @@ pub const DerivedKeys = struct {
     serverKeyLen: u8 = 16,
     serverIv: [12]u8 = undefined,
     cipher: recordMod.RecordCipher = .aes128Gcm,
+    clientTrafficSecret: [32]u8 = undefined,
+    serverTrafficSecret: [32]u8 = undefined,
+    clientEpoch: u64 = 0,
+    serverEpoch: u64 = 0,
+
+    /// RFC 9846 §4.7.3 limits send epochs to 2^48-1.
+    pub const MAX_SEND_EPOCH: u64 = (1 << 48) - 1;
 
     pub fn clientKeySlice(self: *const DerivedKeys) []const u8 {
         return self.clientKey[0..self.clientKeyLen];
     }
     pub fn serverKeySlice(self: *const DerivedKeys) []const u8 {
         return self.serverKey[0..self.serverKeyLen];
+    }
+
+    /// Advances the client-to-server application traffic keys used for
+    /// sending. Returns false without changing key state when the RFC 9846
+    /// sender epoch limit is reached.
+    pub fn updateClientTrafficKeys(self: *DerivedKeys) bool {
+        if (self.clientEpoch >= MAX_SEND_EPOCH) return false;
+        self.deriveNextClientSecret();
+        return true;
+    }
+
+    /// Advances the client-to-server keys used for receiving. RFC 9846
+    /// forbids enforcing the sender cap on a peer, so this never fails.
+    pub fn advanceClientReceiveKeys(self: *DerivedKeys) void {
+        self.deriveNextClientSecret();
+    }
+
+    /// Advances the server-to-client application traffic keys used for
+    /// sending. Returns false without changing key state when the RFC 9846
+    /// sender epoch limit is reached.
+    pub fn updateServerTrafficKeys(self: *DerivedKeys) bool {
+        if (self.serverEpoch >= MAX_SEND_EPOCH) return false;
+        self.deriveNextServerSecret();
+        return true;
+    }
+
+    /// Advances the server-to-client keys used for receiving. RFC 9846
+    /// forbids enforcing the sender cap on a peer, so this never fails.
+    pub fn advanceServerReceiveKeys(self: *DerivedKeys) void {
+        self.deriveNextServerSecret();
+    }
+
+    fn deriveNextClientSecret(self: *DerivedKeys) void {
+        var next: [32]u8 = undefined;
+        hkdfExpandLabel(self.clientTrafficSecret, "traffic upd", &next);
+        std.crypto.secureZero(u8, &self.clientTrafficSecret);
+        self.clientTrafficSecret = next;
+        hkdfExpandLabel(next, "key", self.clientKey[0..self.clientKeyLen]);
+        hkdfExpandLabel(next, "iv", &self.clientIv);
+        self.clientEpoch +|= 1;
+    }
+
+    fn deriveNextServerSecret(self: *DerivedKeys) void {
+        var next: [32]u8 = undefined;
+        hkdfExpandLabel(self.serverTrafficSecret, "traffic upd", &next);
+        std.crypto.secureZero(u8, &self.serverTrafficSecret);
+        self.serverTrafficSecret = next;
+        hkdfExpandLabel(next, "key", self.serverKey[0..self.serverKeyLen]);
+        hkdfExpandLabel(next, "iv", &self.serverIv);
+        self.serverEpoch +|= 1;
     }
 };
 
@@ -1967,6 +2024,8 @@ pub const Engine = struct {
             .serverKeyLen = @intCast(keyLen),
             .serverIv = si,
             .cipher = cipher,
+            .clientTrafficSecret = clientSecret,
+            .serverTrafficSecret = serverSecret,
         };
     }
 };
@@ -2739,4 +2798,44 @@ test "server answers a hybrid-only ClientHello with a hybrid key share" {
     client.localKeypair = xKp;
     try client.processServerHello(sh);
     try std.testing.expectEqualSlices(u8, server.sharedSecret.?.slice(), client.sharedSecret.?.slice());
+}
+
+test "application traffic key updates are directional and capped for sending" {
+    var keys = DerivedKeys{
+        .clientTrafficSecret = @splat(0x11),
+        .serverTrafficSecret = @splat(0x22),
+    };
+    const oldServerKey = keys.serverKey;
+    var expectedClientSecret: [32]u8 = undefined;
+    hkdfExpandLabel(keys.clientTrafficSecret, "traffic upd", &expectedClientSecret);
+    try std.testing.expect(keys.updateClientTrafficKeys());
+    try std.testing.expectEqual(@as(u64, 1), keys.clientEpoch);
+    try std.testing.expectEqualSlices(u8, &expectedClientSecret, &keys.clientTrafficSecret);
+    try std.testing.expectEqualSlices(u8, &oldServerKey, &keys.serverKey);
+
+    const oldClientKey = keys.clientKey;
+    var expectedServerSecret: [32]u8 = undefined;
+    hkdfExpandLabel(keys.serverTrafficSecret, "traffic upd", &expectedServerSecret);
+    try std.testing.expect(keys.updateServerTrafficKeys());
+    try std.testing.expectEqual(@as(u64, 1), keys.serverEpoch);
+    try std.testing.expectEqualSlices(u8, &expectedServerSecret, &keys.serverTrafficSecret);
+    try std.testing.expectEqualSlices(u8, &oldClientKey, &keys.clientKey);
+
+    keys.clientEpoch = DerivedKeys.MAX_SEND_EPOCH;
+    const cappedSecret = keys.clientTrafficSecret;
+    try std.testing.expect(!keys.updateClientTrafficKeys());
+    try std.testing.expectEqualSlices(u8, &cappedSecret, &keys.clientTrafficSecret);
+    try std.testing.expectEqual(@as(u64, DerivedKeys.MAX_SEND_EPOCH), keys.clientEpoch);
+
+    keys.serverEpoch = DerivedKeys.MAX_SEND_EPOCH;
+    const cappedServerSecret = keys.serverTrafficSecret;
+    try std.testing.expect(!keys.updateServerTrafficKeys());
+    try std.testing.expectEqualSlices(u8, &cappedServerSecret, &keys.serverTrafficSecret);
+    try std.testing.expectEqual(@as(u64, DerivedKeys.MAX_SEND_EPOCH), keys.serverEpoch);
+
+    // Receivers must not enforce the peer's sender cap.
+    keys.advanceClientReceiveKeys();
+    try std.testing.expectEqual(@as(u64, DerivedKeys.MAX_SEND_EPOCH + 1), keys.clientEpoch);
+    keys.advanceServerReceiveKeys();
+    try std.testing.expectEqual(@as(u64, DerivedKeys.MAX_SEND_EPOCH + 1), keys.serverEpoch);
 }

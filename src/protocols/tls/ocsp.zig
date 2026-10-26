@@ -150,7 +150,7 @@ pub fn parseOcspResponse(allocator: Allocator, der: []const u8) OcspError!Parsed
     if (statusTl.tag != 0x0A or statusTl.len != 1) return OcspError.InvalidResponseStatus;
     const rawStatus = der[pos];
     pos += 1;
-    const status: OcspResponseStatus = @enumFromInt(rawStatus);
+    const status: OcspResponseStatus = @fromBackingInt(@intCast(rawStatus));
 
     if (status != .successful) {
         return .{
@@ -369,12 +369,21 @@ test "parse revoked ocsp response" {
         0x30, 0x21, // responses SEQUENCE OF
         0x30, 0x1F, // SingleResponse
         0x30, 0x0A, // CertID
-        0x06, 0x01, 0x00,
-        0x04, 0x00,
-        0x04, 0x00,
-        0x02, 0x01, 0x42,
+        0x06, 0x01,
+        0x00, 0x04,
+        0x00, 0x04,
+        0x00, 0x02,
+        0x01, 0x42,
         0x81, 0x00, // [1] IMPLICIT -> revoked status!
-        0x18, 0x0F, '2', '0', '2', '6', '1', '0', '2', '4', '0', '0', '0', '0', '0', '0', 'Z',
+        0x18, 0x0F,
+        '2',  '0',
+        '2',  '6',
+        '1',  '0',
+        '2',  '4',
+        '0',  '0',
+        '0',  '0',
+        '0',  '0',
+        'Z',
     };
 
     var parsed = try parseOcspResponse(a, &der);

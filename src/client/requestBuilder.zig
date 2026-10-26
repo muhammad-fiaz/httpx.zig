@@ -319,7 +319,7 @@ pub const ResponseStream = struct {
         while (true) {
             const n = try self.body.read(&chunkBuf);
             if (n == 0) break;
-            if (list.items.len + n > maxBytes) return Error.ResponseTooLarge;
+            if (n > maxBytes -| list.items.len) return Error.ResponseTooLarge;
             try list.appendSlice(a, chunkBuf[0..n]);
         }
         return list.toOwnedSlice(a);
@@ -919,6 +919,8 @@ const Http1StreamState = struct {
     isTls: bool,
     mode: FramingMode,
     remainingCl: u64 = 0,
+    maxBodySize: u64 = maxResponseBodySize,
+    totalBodyRead: u64 = 0,
     leftover: std.ArrayList(u8),
     leftoverPos: usize = 0,
     chunkDecoder: parserMod.ChunkedDecoder,
@@ -962,6 +964,7 @@ const Http1StreamState = struct {
                     return 0;
                 }
                 self.remainingCl -= n;
+                self.totalBodyRead += n;
                 if (self.remainingCl == 0) {
                     self.done = true;
                     self.reusable = (self.leftoverPos == self.leftover.items.len);
@@ -969,10 +972,22 @@ const Http1StreamState = struct {
                 return n;
             },
             .close => {
-                const n = try self.rawRead(buf);
+                if (self.totalBodyRead == self.maxBodySize) {
+                    var probe: [1]u8 = undefined;
+                    const extra = try self.rawRead(&probe);
+                    if (extra != 0) return Error.ResponseTooLarge;
+                    self.done = true;
+                    self.reusable = false;
+                    return 0;
+                }
+                const remaining = self.maxBodySize - self.totalBodyRead;
+                const readLen = @min(buf.len, std.math.cast(usize, remaining) orelse buf.len);
+                const n = try self.rawRead(buf[0..readLen]);
                 if (n == 0) {
                     self.done = true;
                     self.reusable = false;
+                } else {
+                    self.totalBodyRead += n;
                 }
                 return n;
             },
@@ -1000,6 +1015,11 @@ const Http1StreamState = struct {
                     if (self.wire.items.len > 0) {
                         _ = self.chunkDecoder.decode(self.wire.items) catch |err| switch (err) {
                             error.Incomplete => {},
+                            error.InvalidChunkSize => {
+                                const projected = std.math.add(u64, self.chunkDecoder.totalDecoded, self.chunkDecoder.sizeAcc) catch std.math.maxInt(u64);
+                                if (projected > self.maxBodySize) return Error.ResponseTooLarge;
+                                return Error.MalformedResponse;
+                            },
                             else => return Error.MalformedResponse,
                         };
 
@@ -1131,9 +1151,14 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
 
         var port = u.effectivePort();
         if (port == 0) return Error.InvalidUrl;
+        // DNS names are limited to 253 octets (255 including a trailing dot)
+        // and the pool/host scratch buffers below are sized for that bound.
+        // Rejecting here avoids truncating the name used for DNS and Host.
+        if (u.host.len == 0 or u.host.len > 255) return Error.InvalidUrl;
 
-        var authBuf: [256]u8 = undefined;
-        const authorityStr = u.authority(&authBuf);
+        // Worst case: 255-byte host + "[]" + ":" + five port digits.
+        var authBuf: [320]u8 = undefined;
+        const authorityStr = u.authority(&authBuf) catch return Error.InvalidUrl;
 
         const target = try buildTarget(a, u.path, u.query, req.query);
         defer a.free(target);
@@ -1202,8 +1227,6 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
         defer a.free(raw);
 
         var hostCopy: [256]u8 = undefined;
-        const hostLen = @min(authorityStr.len, 256);
-        @memcpy(hostCopy[0..hostLen], authorityStr[0..hostLen]);
 
         // Strip :port from authority for DNS/connect when present.
         var hostOnly = authorityStr;
@@ -1212,8 +1235,8 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 hostOnly = hostOnly[0..ci];
             port = std.fmt.parseInt(u16, authorityStr[ci + 1 ..], 10) catch port;
         }
-        const hl = @min(hostOnly.len, 256);
-        @memcpy(hostCopy[0..hl], hostOnly[0..hl]);
+        const hl = hostOnly.len;
+        @memcpy(hostCopy[0..hl], hostOnly);
 
         // HTTP/3 leaves TCP entirely: branch to the QUIC path before any
         // TCP dial (dialing just to close the socket would be a visible
@@ -1594,7 +1617,10 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 return Error.ProtocolViolation;
             };
             var resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "http", authorityStr, bodyOut, if (bodyStripped) null else req.bodySource, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
-                tcpSock.close();
+                // `pc` owns tcpSock after wrapPlain succeeds. Dispose through
+                // that owner exactly once; closing the copied handle here as
+                // well makes POSIX close a recycled descriptor on the second
+                // call (notably when a size-limit error aborts the exchange).
                 pc.deinit();
                 return e;
             };
@@ -1788,6 +1814,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 .isResponse = true,
                 .status = respHead.statusCode,
                 .requestMethod = if (method == .HEAD) "HEAD" else "",
+                .isHttp10 = respHead.minorVersion == 0,
             }) catch return Error.MalformedResponse;
 
             const headers = a.alloc(Header, blkHeader.count) catch return Error.OutOfMemory;
@@ -1844,6 +1871,11 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
             }
 
             const state = a.create(Http1StreamState) catch return Error.OutOfMemory;
+            const streamResponseLimit: u64 = @intCast(@min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize));
+            if (framing.framing == .contentLength and framing.length > streamResponseLimit) {
+                a.destroy(state);
+                return Error.ResponseTooLarge;
+            }
             state.* = .{
                 .allocator = a,
                 .transport = transport,
@@ -1859,11 +1891,13 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                     else => .close,
                 },
                 .remainingCl = if (framing.framing == .contentLength) framing.length else 0,
+                .maxBodySize = streamResponseLimit,
                 .leftover = .empty,
                 .chunkDecoder = parserMod.ChunkedDecoder.initWithOptions(.{ .allowLfLineEndings = req.allowLfLineEndings }),
                 .wire = .empty,
                 .decodedBuf = .empty,
             };
+            state.chunkDecoder.maxChunkSize = streamResponseLimit;
             if (acc.items.len > headEnd) {
                 state.leftover.appendSlice(a, acc.items[headEnd..]) catch {
                     a.destroy(state);
@@ -2668,7 +2702,8 @@ fn resolveLocation(a: Allocator, baseUrl: []const u8, loc: []const u8) ![]u8 {
     try out.appendSlice(a, base.scheme);
     try out.appendSlice(a, "://");
     var ab: [512]u8 = undefined;
-    try out.appendSlice(a, base.authority(&ab));
+    const baseAuthority = try base.authority(&ab);
+    try out.appendSlice(a, baseAuthority);
     try out.appendSlice(a, resolvedPath);
     if (query) |q| {
         try out.append(a, '?');
@@ -3738,6 +3773,42 @@ test "requestStream Content-Length reads body incrementally into small caller bu
 
     try std.testing.expectEqual(@as(usize, 10), totalRead);
     try std.testing.expectEqualStrings("0123456789", out[0..10]);
+
+    thread.join();
+    joined = true;
+}
+
+test "requestStream enforces maxResponseSize for Content-Length bodies" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+
+    const ServerWorker = struct {
+        fn run(l: *tcp.Listener, io: std.Io) void {
+            var conn = l.accept(io) catch return;
+            defer conn.close();
+            var reqBuf: [256]u8 = undefined;
+            _ = conn.read(&reqBuf) catch {};
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata") catch {};
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, ServerWorker.run, .{ &listener, ctx.io });
+    var joined = false;
+    defer if (!joined) {
+        releaseAcceptor(&listener, ctx.io);
+        thread.join();
+    };
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/stream-limit", .{listener.localPort()});
+    defer a.free(url);
+    try std.testing.expectError(Error.ResponseTooLarge, requestStream(a, ctx.io, .{
+        .method = .GET,
+        .url = url,
+        .maxResponseSize = 3,
+    }));
 
     thread.join();
     joined = true;

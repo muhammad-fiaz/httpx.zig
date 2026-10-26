@@ -44,6 +44,11 @@ pub const PoolConfig = struct {
     maxParkedMs: i64 = 300_000,
 };
 
+/// Upper bound on expired HTTP/3 sessions detached under the pool lock and
+/// destroyed after unlocking. PooledConn.deinit joins the QUIC pump thread,
+/// so it must never run while `mu` is held.
+const maxInlineReap = 256;
+
 pub const Snapshot = struct {
     hits: u64,
     misses: u64,
@@ -216,7 +221,7 @@ pub const Pool = struct {
                 return null;
             };
             const entry = self.idleH2.swapRemove(i);
-            _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len, .monotonic);
+            _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
             self.mu.unlock();
 
             // Validate outside the spinlock: parked sessions are
@@ -244,8 +249,8 @@ pub const Pool = struct {
         }
         const now = clock.monotonicMillis(self.io);
         self.mu.lock();
-        defer self.mu.unlock();
         if (!self.canParkH2Locked(key)) {
+            self.mu.unlock();
             client.deinit();
             _ = self.stats.droppedLimit.fetchAdd(1, .monotonic);
             return;
@@ -256,11 +261,13 @@ pub const Pool = struct {
             .parkedAtMs = now,
             .createdAtMs = client.createdAtMs,
         }) catch {
+            self.mu.unlock();
             client.deinit();
             return;
         };
         _ = self.stats.released.fetchAdd(1, .monotonic);
         _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
+        self.mu.unlock();
     }
 
     fn canParkH2Locked(self: *Pool, key: H2Key) bool {
@@ -280,22 +287,38 @@ pub const Pool = struct {
         };
         const now = clock.monotonicMillis(self.io);
         while (true) {
+            // Expired H3 sessions must be deinitialised outside the spinlock:
+            // PooledConn.deinit joins the QUIC pump thread. A bounded batch
+            // keeps the stack cost fixed; anything left over is swept on the
+            // next call (the entry is not handed out because isReusable is
+            // checked below only for entries removed by key).
+            var staleBuf: [maxInlineReap]*h3Transport.PooledConn = undefined;
+            var staleCount: usize = 0;
             self.mu.lock();
-            self.sweepH3Locked(now);
+            self.sweepH3Locked(now, &staleBuf, &staleCount);
             const idx: ?usize = blk: {
                 for (self.idleH3.items, 0..) |*c, i| {
-                    if (c.key.eql(key)) break :blk i;
+                    if (!c.key.eql(key)) continue;
+                    // A full reap batch can leave expired entries parked.
+                    // Never hand one out just because its key matches.
+                    const idleExpired = now - c.parkedAtMs > self.cfg.idleTimeoutMs;
+                    const lifeExpired = self.cfg.maxParkedMs != 0 and
+                        now - c.createdAtMs > self.cfg.maxParkedMs;
+                    if (idleExpired or lifeExpired) continue;
+                    break :blk i;
                 }
                 break :blk null;
             };
             const i = idx orelse {
                 self.mu.unlock();
+                self.reapH3(staleBuf[0..staleCount]);
                 _ = self.stats.misses.fetchAdd(1, .monotonic);
                 return null;
             };
             const entry = self.idleH3.swapRemove(i);
             _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
             self.mu.unlock();
+            self.reapH3(staleBuf[0..staleCount]);
 
             if (entry.client.isReusable()) {
                 _ = self.stats.hits.fetchAdd(1, .monotonic);
@@ -319,8 +342,8 @@ pub const Pool = struct {
         }
         const now = clock.monotonicMillis(self.io);
         self.mu.lock();
-        defer self.mu.unlock();
         if (!self.canParkH3Locked(key)) {
+            self.mu.unlock();
             client.deinit();
             _ = self.stats.droppedLimit.fetchAdd(1, .monotonic);
             return;
@@ -331,11 +354,13 @@ pub const Pool = struct {
             .parkedAtMs = now,
             .createdAtMs = client.createdAtMs,
         }) catch {
+            self.mu.unlock();
             client.deinit();
             return;
         };
         _ = self.stats.released.fetchAdd(1, .monotonic);
         _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
+        self.mu.unlock();
     }
 
     fn canParkH3Locked(self: *Pool, key: H3Key) bool {
@@ -347,7 +372,14 @@ pub const Pool = struct {
         return n < self.cfg.maxPerHost;
     }
 
-    fn sweepH3Locked(self: *Pool, now: i64) void {
+    /// Detach expired H3 sessions under the lock. The caller must deinit the
+    /// returned pointers after unlocking (PooledConn.deinit joins a thread).
+    fn sweepH3Locked(
+        self: *Pool,
+        now: i64,
+        staleOut: []*h3Transport.PooledConn,
+        staleCount: *usize,
+    ) void {
         var i: usize = 0;
         while (i < self.idleH3.items.len) {
             const c = &self.idleH3.items[i];
@@ -355,14 +387,28 @@ pub const Pool = struct {
             const lifeExpired = self.cfg.maxParkedMs != 0 and
                 now - c.createdAtMs > self.cfg.maxParkedMs;
             if (idleExpired or lifeExpired) {
+                if (staleCount.* == staleOut.len) {
+                    // Batch full: leave the rest for the next sweep. They
+                    // remain in the list and are never returned because the
+                    // expiry check above runs before key matching.
+                    i += 1;
+                    continue;
+                }
                 const stale = self.idleH3.swapRemove(i);
                 _ = self.stats.droppedStale.fetchAdd(1, .monotonic);
-                stale.client.deinit();
+                staleOut[staleCount.*] = stale.client;
+                staleCount.* += 1;
                 _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
                 continue;
             }
             i += 1;
         }
+    }
+
+    /// Deinitialise detached H3 sessions. Never called while `mu` is held.
+    fn reapH3(self: *Pool, stale: []*h3Transport.PooledConn) void {
+        _ = self;
+        for (stale) |client| client.deinit();
     }
 
     /// Drop H2 entries expired by idle time or by connection lifetime
@@ -397,14 +443,20 @@ pub const Pool = struct {
             return null;
         };
         const now = clock.monotonicMillis(self.io);
+        var staleBuf: [maxInlineReap]*h3Transport.PooledConn = undefined;
+        var staleCount: usize = 0;
         self.mu.lock();
-        defer self.mu.unlock();
+        defer {
+            self.mu.unlock();
+            // H3 teardown joins the pump thread: never under the spinlock.
+            self.reapH3(staleBuf[0..staleCount]);
+        }
 
         // Global lazy sweep (no background thread): drop expired entries for
         // ANY origin. Uses non-blocking close here — draining stale sockets
         // under the pool spinlock would stall all borrowers.
         self.sweepH2Locked(now);
-        self.sweepH3Locked(now);
+        self.sweepH3Locked(now, &staleBuf, &staleCount);
         var i: usize = 0;
         while (i < self.idle.items.len) {
             const c = &self.idle.items[i];
@@ -470,9 +522,12 @@ pub const Pool = struct {
         };
         const now = clock.monotonicMillis(self.io);
         self.mu.lock();
-        defer self.mu.unlock();
 
         if (!self.canParkLocked(key)) {
+            self.mu.unlock();
+            // drainThenClose reads until EOF and may block on a peer that
+            // keeps the socket open. Do it after unlocking so one rejected
+            // connection cannot stall every borrower.
             socket.drainThenClose();
             _ = self.stats.droppedLimit.fetchAdd(1, .monotonic);
             return;
@@ -482,11 +537,13 @@ pub const Pool = struct {
             .key = key,
             .parkedAtMs = now,
         }) catch {
+            self.mu.unlock();
             socket.drainThenClose();
             return;
         };
         _ = self.stats.released.fetchAdd(1, .monotonic);
         _ = self.stats.parkedNow.store(self.idle.items.len + self.idleH2.items.len + self.idleH3.items.len, .monotonic);
+        self.mu.unlock();
     }
 
     fn canParkLocked(self: *Pool, key: ConnKey) bool {
@@ -502,34 +559,42 @@ pub const Pool = struct {
     /// outside the lock so a blocking drain never stalls other borrowers.
     pub fn purge(self: *Pool) void {
         self.mu.lock();
-        const owned = self.idle.toOwnedSlice(self.allocator) catch &.{};
-        self.idle.clearRetainingCapacity();
-        const ownedH2 = self.idleH2.toOwnedSlice(self.allocator) catch &.{};
-        self.idleH2.clearRetainingCapacity();
-        const ownedH3 = self.idleH3.toOwnedSlice(self.allocator) catch &.{};
-        self.idleH3.clearRetainingCapacity();
+        // Move the lists out without allocating. `toOwnedSlice` may need to
+        // shrink its backing allocation and can fail; ignoring that failure
+        // would leave live connections in a list that purge reports empty.
+        const owned = self.idle;
+        const ownedH2 = self.idleH2;
+        const ownedH3 = self.idleH3;
+        self.idle = .empty;
+        self.idleH2 = .empty;
+        self.idleH3 = .empty;
         _ = self.stats.parkedNow.store(0, .monotonic);
         self.mu.unlock();
-        for (owned) |*c| {
+        for (owned.items) |*c| {
             c.socket.drainThenClose();
         }
-        if (owned.len > 0) self.allocator.free(owned);
-        for (ownedH2) |*c| {
+        var plainList = owned;
+        plainList.deinit(self.allocator);
+        for (ownedH2.items) |*c| {
             c.client.deinit();
         }
-        if (ownedH2.len > 0) self.allocator.free(ownedH2);
-        for (ownedH3) |*c| {
+        var h2List = ownedH2;
+        h2List.deinit(self.allocator);
+        for (ownedH3.items) |*c| {
             c.client.deinit();
         }
-        if (ownedH3.len > 0) self.allocator.free(ownedH3);
+        var h3List = ownedH3;
+        h3List.deinit(self.allocator);
     }
 
     /// Drop stale/expired entries opportunistically (plain, H2, and H3).
     pub fn sweepExpired(self: *Pool) void {
         const now = clock.monotonicMillis(self.io);
+        var staleBuf: [maxInlineReap]*h3Transport.PooledConn = undefined;
+        var staleCount: usize = 0;
         self.mu.lock();
         self.sweepH2Locked(now);
-        self.sweepH3Locked(now);
+        self.sweepH3Locked(now, &staleBuf, &staleCount);
         var i: usize = 0;
         while (i < self.idle.items.len) {
             const c = &self.idle.items[i];
@@ -547,6 +612,7 @@ pub const Pool = struct {
             }
         }
         self.mu.unlock();
+        self.reapH3(staleBuf[0..staleCount]);
     }
 
     fn dropAt(self: *Pool, i: usize) void {
@@ -707,4 +773,25 @@ test "lazy sweep evicts expired idle connections without a reaper thread" {
     try std.testing.expect(p.acquire("127.0.0.1", port) == null);
     const st2 = p.statsSnapshot();
     try std.testing.expectEqual(@as(u64, 1), st2.misses);
+}
+
+test "purge detaches and closes parked sockets" {
+    var ctx = tTcp.IoContext.init(std.testing.allocator) catch return;
+    defer ctx.deinit();
+    var l = tTcp.Listener.bind(ctx.io, 0) catch return;
+    const th = spawnEchoServer(&l, ctx.io, 1);
+    defer l.close(ctx.io);
+    defer th.join();
+    defer releaseAcceptor(&l, ctx.io);
+
+    var p = Pool.init(std.testing.allocator, ctx.io, .{});
+    defer p.deinit();
+
+    const port = l.localPort();
+    p.release("127.0.0.1", port, tTcp.connect(ctx.io, "127.0.0.1", port) catch return);
+    try std.testing.expectEqual(@as(usize, 1), p.parkedCount());
+
+    p.purge();
+    try std.testing.expectEqual(@as(usize, 0), p.parkedCount());
+    try std.testing.expectEqual(@as(u64, 0), p.statsSnapshot().parkedNow);
 }

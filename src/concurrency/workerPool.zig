@@ -203,10 +203,12 @@ pub const Pool = struct {
 
     /// Cooperative cancel signal for all queued-but-not-started jobs.
     pub fn cancelQueued(self: *Pool) void {
-        while (self.queue.tryPop()) |job| {
-            if (job.cancel) |flag| flag.store(true, .release);
-            _ = self.stats.cancelled.fetchAdd(1, .monotonic);
-        }
+        _ = self.queue.drain(self, struct {
+            fn cancel(pool: *Pool, job: Job) void {
+                if (job.cancel) |flag| flag.store(true, .release);
+                _ = pool.stats.cancelled.fetchAdd(1, .monotonic);
+            }
+        }.cancel);
     }
 
     pub fn isStarted(self: *Pool) bool {
@@ -364,18 +366,21 @@ test "zero workers auto-configures" {
 
 test "pool cancel queued tasks" {
     const io = std.Io.Threaded.global_single_threaded.io();
-    var p = try Pool.init(std.testing.allocator, io, .{ .workers = 1, .queueCapacity = 16 });
+    var p = try Pool.init(std.testing.allocator, io, .{ .workers = 1, .queueCapacity = 16, .autoStart = false });
     defer p.deinit();
 
-    var cancelFlag = std.atomic.Value(bool).init(false);
-    try p.submit(dummy, null, &cancelFlag);
+    var cancelFlags = [_]std.atomic.Value(bool){
+        .init(false), .init(false), .init(false), .init(false),
+    };
+    for (&cancelFlags) |*flag| try p.submit(dummy, null, flag);
     p.cancelQueued();
-    // Statistics are cumulative: cancellation changes the terminal outcome,
-    // not whether a task was accepted by the pool.
-    try std.testing.expectEqual(@as(usize, 1), p.stats.submitted.load(.monotonic));
-    try std.testing.expectEqual(@as(usize, 1), p.stats.cancelled.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 4), p.stats.submitted.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 4), p.stats.cancelled.load(.monotonic));
+    for (&cancelFlags) |*flag| try std.testing.expect(flag.load(.acquire));
     try p.start();
     p.shutdownDrain();
+    p.join();
+    try std.testing.expectEqual(@as(usize, 0), p.stats.completed.load(.monotonic));
 }
 
 fn dummy(_: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {}

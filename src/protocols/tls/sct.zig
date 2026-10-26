@@ -80,9 +80,9 @@ pub fn parseSct(bytes: []const u8) SctError!SignedCertificateTimestamp {
     pos += extLen;
 
     if (pos + 4 > bytes.len) return SctError.TruncatedData;
-    const hashAlgo: HashAlgorithm = @enumFromInt(bytes[pos]);
+    const hashAlgo: HashAlgorithm = @fromBackingInt(@intCast(bytes[pos]));
     pos += 1;
-    const sigAlgo: SignatureAlgorithm = @enumFromInt(bytes[pos]);
+    const sigAlgo: SignatureAlgorithm = @fromBackingInt(@intCast(bytes[pos]));
     pos += 1;
 
     const sigLen = std.mem.readInt(u16, bytes[pos..][0..2], .big);

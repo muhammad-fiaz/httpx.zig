@@ -127,6 +127,7 @@ pub const ws = if (isWindows) struct {
     pub extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(wsCall) i32;
     pub extern "ws2_32" fn accept(s: SOCKET, addr: ?*anyopaque, addrlen: ?*i32) callconv(wsCall) SOCKET;
     pub extern "ws2_32" fn getsockname(s: SOCKET, name: *anyopaque, namelen: *i32) callconv(wsCall) i32;
+    pub extern "ws2_32" fn getpeername(s: SOCKET, name: *anyopaque, namelen: *i32) callconv(wsCall) i32;
     pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(wsCall) i32;
     pub extern "ws2_32" fn recv(s: usize, buf: [*]u8, len: i32, flags: i32) callconv(wsCall) i32;
     pub extern "ws2_32" fn send(s: usize, buf: [*]const u8, len: i32, flags: i32) callconv(wsCall) i32;

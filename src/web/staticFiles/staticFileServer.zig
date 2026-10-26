@@ -688,6 +688,13 @@ pub const parseHttpDate = parseMod.parseHttpDate;
 
 pub const RangeSpec = struct { start: u64, end: u64 }; // inclusive
 
+fn checkedRangeLength(r: RangeSpec, maxSize: usize) ?usize {
+    const length64 = std.math.add(u64, r.end - r.start, 1) catch return null;
+    const length = std.math.cast(usize, length64) orelse return null;
+    if (length > maxSize) return null;
+    return length;
+}
+
 pub fn parseRange(spec: []const u8, size: u64) ?RangeSpec {
     if (!std.mem.startsWith(u8, spec, "bytes=")) return null;
     if (size == 0) return null;
@@ -930,8 +937,7 @@ fn respondWithFile(ctx: *Context, st: *State, file: std.Io.File, relativePath: [
     // Single range request.
     if (ctx.header("Range")) |spec| {
         if (parseRange(spec, meta.size)) |r| {
-            const len: usize = @intCast(r.end - r.start + 1);
-            if (len > st.maxSize) return errText(413, "range too large");
+            const len = checkedRangeLength(r, st.maxSize) orelse return errText(413, "range too large");
             if (isHead) {
                 const clStr = std.fmt.allocPrint(a, "{d}", .{len}) catch return Allocator.Error.OutOfMemory;
                 headers.append(a, .{ .name = "Content-Length", .value = clStr }) catch return Allocator.Error.OutOfMemory;
@@ -1032,6 +1038,11 @@ test "normalizedRelativePath decodes once and rejects malformed or rooted input"
     try std.testing.expect((try normalizedRelativePath(a, "/bad%2")) == null);
     try std.testing.expect((try normalizedRelativePath(a, "/C:/secret")) == null);
     try std.testing.expect((try normalizedRelativePath(a, "/a%00b")) == null);
+}
+
+test "range response length is checked before conversion and allocation" {
+    try std.testing.expectEqual(@as(?usize, 3), checkedRangeLength(.{ .start = 10, .end = 12 }, 3));
+    try std.testing.expect(checkedRangeLength(.{ .start = 10, .end = 13 }, 3) == null);
 }
 
 test "rooted index and fallback candidates cannot escape the mount" {

@@ -61,6 +61,7 @@ pub fn main() !void {
         .port = 8080,      // Unprivileged internal application port
         .keepAlive = true,
         .trustForwardedHeaders = true, // Trust X-Forwarded-* from Nginx
+        .trustedProxies = &.{"127.0.0.1"}, // Only the local Nginx peer
     });
     defer server.deinit();
 
@@ -76,7 +77,7 @@ fn healthCheck(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Respons
 }
 
 fn dataHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
-    // When trustForwardedHeaders is true, remoteAddress() reads X-Forwarded-For
+    // Forwarded headers are honored only when the peer matches trustedProxies.
     const clientIp = ctx.remoteAddress() orelse "unknown";
     const scheme = ctx.scheme(); // "https" or "http"
     return ctx.renderJson(.{
@@ -196,7 +197,10 @@ server {
 
 Never blindly trust client headers like `X-Forwarded-For` or `X-Forwarded-Proto` without configuration:
 1. When `trustForwardedHeaders: false` (the default), `ctx.remoteAddress()` will report the direct TCP peer address, and `ctx.scheme()` will return `"https"` only if direct TLS was negotiated.
-2. When `trustForwardedHeaders: true`, HTTPX will parse the client IP from the first entry of `X-Forwarded-For` (or `X-Real-IP`), and use `X-Forwarded-Proto` for canonical redirect generation and scheme detection.
+2. When `trustForwardedHeaders: true`, forwarded headers are only honored if the direct peer matches `trustedProxies` (an empty list trusts every peer).
+3. With `trustedProxies` configured, HTTPX walks `X-Forwarded-For` right-to-left and skips proxy addresses, so a client cannot spoof its address by prepending entries. `X-Real-IP` is checked next, and `X-Forwarded-Proto` drives scheme detection and canonical redirects.
+
+Always configure `trustedProxies` in production and make the edge proxy overwrite or sanitize forwarded headers.
 
 ---
 

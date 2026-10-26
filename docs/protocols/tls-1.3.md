@@ -30,6 +30,14 @@ ClientHello (KeyShare, SNI, ALPN) -------->
 [Application Data]                <------->   [Application Data]
 ```
 
+## Key Updates
+
+Both native roles implement post-handshake `KeyUpdate` (RFC 8446 Section
+4.6.3): receive keys rotate on arrival, requested updates are answered
+automatically, and each sending direction enforces the RFC 9846 limit of
+`2^48 - 1` updates. The server exposes `Connection.sendKeyUpdate()` to
+initiate an update; clients handle updates while reading.
+
 ## Related
 
 * [Protocol: TLS 1.2](/protocols/tls-1.2)

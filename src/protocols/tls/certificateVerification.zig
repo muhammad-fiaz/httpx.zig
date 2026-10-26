@@ -110,14 +110,20 @@ pub fn matchDnsPattern(pattern: []const u8, hostname: []const u8) bool {
 pub fn verifyHostname(parsed: Certificate.Parsed, targetHost: []const u8) TlsError!void {
     if (targetHost.len == 0) return TlsError.HostnameMismatch;
 
-    // Split host/port: [v6]:port, host:port (single colon), or bare host.
+    // Split and validate host/port: [v6]:port, host:port (single colon),
+    // or bare host. Do not silently discard malformed suffixes such as
+    // `[::1]attacker` or `example.com:not-a-port` before identity checking.
     var hostOnly = targetHost;
     if (targetHost[0] == '[') {
         const close = std.mem.indexOfScalar(u8, targetHost, ']') orelse return TlsError.HostnameMismatch;
         hostOnly = targetHost[1..close];
+        if (parseIpLiteral(hostOnly) == null) return TlsError.HostnameMismatch;
+        const suffix = targetHost[close + 1 ..];
+        if (suffix.len > 0 and !validPortSuffix(suffix)) return TlsError.HostnameMismatch;
     } else if (std.mem.count(u8, targetHost, ":") == 1) {
         const colon = std.mem.indexOfScalar(u8, targetHost, ':').?;
         hostOnly = targetHost[0..colon];
+        if (!validPortSuffix(targetHost[colon..])) return TlsError.HostnameMismatch;
     }
     if (hostOnly.len == 0) return TlsError.HostnameMismatch;
 
@@ -133,6 +139,13 @@ pub fn verifyHostname(parsed: Certificate.Parsed, targetHost: []const u8) TlsErr
         error.CertificateHostMismatch => return TlsError.CertificateHostMismatch,
         error.CertificateFieldHasInvalidLength => return TlsError.HostnameMismatch,
     };
+}
+
+fn validPortSuffix(suffix: []const u8) bool {
+    if (suffix.len < 2 or suffix[0] != ':') return false;
+    const port = std.fmt.parseInt(u16, suffix[1..], 10) catch return false;
+    _ = port;
+    return true;
 }
 
 /// Parsed IP literal: 4 bytes for IPv4, 16 for IPv6, or null.
@@ -303,7 +316,11 @@ test "self-signed fixture verifies hostname and validity window" {
     // SAN covers 127.0.0.1 and localhost.
     try verifyHostname(leaf.parsed, "127.0.0.1");
     try verifyHostname(leaf.parsed, "localhost");
+    try verifyHostname(leaf.parsed, "localhost:443");
     try std.testing.expectError(TlsError.CertificateHostMismatch, verifyHostname(leaf.parsed, "example.com"));
+    try std.testing.expectError(TlsError.HostnameMismatch, verifyHostname(leaf.parsed, "localhost:not-a-port"));
+    try std.testing.expectError(TlsError.HostnameMismatch, verifyHostname(leaf.parsed, "[::1]attacker"));
+    try std.testing.expectError(TlsError.HostnameMismatch, verifyHostname(leaf.parsed, "[localhost]"));
 
     try std.testing.expect(!leaf.isExpired(1800000000));
     try std.testing.expect(leaf.isExpired(2200000000));
