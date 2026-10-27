@@ -34,40 +34,52 @@
 ## Why httpx.zig
 
 > [!IMPORTANT]
-> Zig's standard library provides `std.http`, an HTTP/1.1 client with TLS and an HTTP/1.1 server. It does not provide ALPN negotiation, HTTP/2, HTTP/3, QUIC, HPACK, or QPACK, and it leaves routing, uploads, downloads, and document parsing to the application. Projects that need those capabilities usually add C libraries, combine several Zig packages, or write the protocol glue themselves.
+> Zig's standard library provides `std.http` for HTTP client and server functionality. Projects that need a broader range of HTTP protocols, networking features, or web framework capabilities may need to integrate additional libraries or implement the missing functionality themselves.
 >
-> httpx.zig provides that missing layer as one native Zig stack. The client, server, TLS 1.3 engine, TLS 1.2 interoperability, HTTP/1.0 through HTTP/3, QUIC, DNS, proxies, connection pooling, cookies, middleware, static files, WebSocket primitives, multipart uploads, and streaming downloads share consistent ownership, error handling, and lifecycle rules.
+> httpx.zig brings these capabilities together in one native Zig library, with support for HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3, alongside networking, TLS integration, DNS, proxies, connection management, cookies, middleware, static-file serving, WebSocket functionality, multipart processing, and streaming downloads.
 >
-> Use httpx.zig for API clients that require HTTP/2 or HTTP/3, services that terminate TLS 1.3 directly, download managers that need resumable ranges and checksum verification, content pipelines that parse HTML, XML, feeds, robots.txt, or sitemaps, and teams that want an integrated server framework instead of a collection of adapters. For small HTTP/1.1 programs, `std.http` remains a good fit. The project is actively developed, and contributions are welcome.
+> The library focuses on a clean, modular API with explicit allocator and I/O ownership, predictable resource lifetimes, and consistent error handling. The client API has been rewritten to remove unnecessary convenience functions, redundant entry points, and duplicate abstractions in favor of a clearer `httpx.Client` workflow. Configuration and environment access are explicit, giving applications greater control over initialization and runtime behavior.
+>
+> Whether you're building an API client, a web service, a download manager, or an application that needs support across multiple HTTP versions, httpx.zig aims to provide a consistent foundation without requiring you to assemble every component separately.
+>
+> For smaller projects that only need the functionality available in Zig's standard library, `std.http` may be sufficient. For a broader HTTP stack and integrated web framework, explore what httpx.zig offers.
+>
+> **Refer to the [documentation](./docs/) for installation, usage examples, API references, supported features, and migration guidance.** Review the breaking changes before upgrading, particularly those affecting client APIs, initialization, allocator and I/O ownership, and configuration.
+>
+> The project is actively developed, and contributions, bug reports, and improvements are welcome.
 
+---
 
-**Similar Zig projects:**
+<details>
+<summary><strong>Similar Zig Projects</strong> (click to expand)</summary>
 
-- For **Env.zig** (.env parsing), check out **[env.zig](https://github.com/muhammad-fiaz/env.zig)**.
-- For **TUI** support, check out **[tui.zig](https://github.com/muhammad-fiaz/tui.zig)**.
-- For **ZON file format** support, check out **[zon.zig](https://github.com/muhammad-fiaz/zon.zig)**.
-- For **Spinners/loading/progress bar** support, check out **[loaders.zig](https://github.com/muhammad-fiaz/loaders.zig)**.
-- For **Terminal colors & text styles** support, check out **[tint.zig](https://github.com/muhammad-fiaz/tint.zig)**.
-- For **MCP** support, check out **[mcp.zig](https://github.com/muhammad-fiaz/mcp.zig)**.
-- For **API framework** support, check out **[api.zig](https://github.com/muhammad-fiaz/api.zig)**.
-- For **Web framework** support, check out **[zix](https://github.com/muhammad-fiaz/zix)**.
-- For **archive/compression** support, check out **[archive.zig](https://github.com/muhammad-fiaz/archive.zig)**.
-- For **compression file format** support, check out **[zigx](https://github.com/muhammad-fiaz/zigx)**.
-- For **CUDA** support, check out **[cuda.zig](https://github.com/muhammad-fiaz/cuda.zig)**.
-- For **Simplified build.zig config** support, check out **[buildx.zig](https://github.com/muhammad-fiaz/buildx.zig)**.
-- For **SQLite (zig-native implementation)** support, check out **[sqlite.zig](https://github.com/muhammad-fiaz/sqlite.zig)**.
-- For **File downloading** support, check out **[downloader.zig](https://github.com/muhammad-fiaz/downloader.zig)**.
-- For **update checker/auto-updater** support, check out **[updater.zig](https://github.com/muhammad-fiaz/updater.zig)**.
-- For **Numerical computing** support, check out **[num.zig](https://github.com/muhammad-fiaz/num.zig)**.
-- For **Logging** support, check out **[logly.zig](https://github.com/muhammad-fiaz/logly.zig)**.
-- For **Data validation and serialization** support, check out **[zigantic](https://github.com/muhammad-fiaz/zigantic)**.
-- For **UUID** support, check out **[uuid.zig](https://github.com/muhammad-fiaz/uuid.zig)**.
-- For **Key-Value database** support, check out **[zkv.zig](https://github.com/muhammad-fiaz/zkv.zig)**.
-- For **Terminal color & text styles** support, check out **[hint.zig](https://github.com/muhammad-fiaz/hint.zig)**.
-- For **Brotli compression** support, check out **[brotli.zig](https://github.com/muhammad-fiaz/brotli.zig)**.
-- For **Zstd compression** support, check out **[zstd.zig](https://github.com/muhammad-fiaz/zstd.zig)**.
-- For **Tree-Sitter** support, check out **[tree-sitter.zig](https://github.com/muhammad-fiaz/tree-sitter.zig)**
-- For **Regex** support, check out **[regex.zig](https://github.com/muhammad-fiaz/regex.zig)**
+- For **environment variables and `.env` parsing**, check out [env.zig](https://github.com/muhammad-fiaz/env.zig).
+- For **TUI (Terminal User Interface)** support, check out [tui.zig](https://github.com/muhammad-fiaz/tui.zig).
+- For **ZON file format** support, check out [zon.zig](https://github.com/muhammad-fiaz/zon.zig).
+- For **spinners, loading indicators, and progress bars**, check out [loaders.zig](https://github.com/muhammad-fiaz/loaders.zig).
+- For **terminal colors and text styling**, check out [tint.zig](https://github.com/muhammad-fiaz/tint.zig).
+- For **Model Context Protocol (MCP)** support, check out [mcp.zig](https://github.com/muhammad-fiaz/mcp.zig).
+- For **API framework** support, check out [api.zig](https://github.com/muhammad-fiaz/api.zig).
+- For **web framework** support, check out [zix](https://github.com/muhammad-fiaz/zix).
+- For **archive handling and compression**, check out [archive.zig](https://github.com/muhammad-fiaz/archive.zig).
+- For **compression file formats**, check out [zigx](https://github.com/muhammad-fiaz/zigx).
+- For **CUDA** support, check out [cuda.zig](https://github.com/muhammad-fiaz/cuda.zig).
+- For **simplified `build.zig` configuration**, check out [buildx.zig](https://github.com/muhammad-fiaz/buildx.zig).
+- For **SQLite with a Zig-native implementation**, check out [sqlite.zig](https://github.com/muhammad-fiaz/sqlite.zig).
+- For **file downloading**, check out [downloader.zig](https://github.com/muhammad-fiaz/downloader.zig).
+- For **update checking and automatic updates**, check out [updater.zig](https://github.com/muhammad-fiaz/updater.zig).
+- For **numerical computing**, check out [num.zig](https://github.com/muhammad-fiaz/num.zig).
+- For **logging**, check out [logly.zig](https://github.com/muhammad-fiaz/logly.zig).
+- For **data validation and serialization**, check out [zigantic](https://github.com/muhammad-fiaz/zigantic).
+- For **UUID** support, check out [uuid.zig](https://github.com/muhammad-fiaz/uuid.zig).
+- For **key-value database** support, check out [zkv.zig](https://github.com/muhammad-fiaz/zkv.zig).
+- For **terminal colors and text styling**, check out [hint.zig](https://github.com/muhammad-fiaz/hint.zig).
+- For **Brotli compression**, check out [brotli.zig](https://github.com/muhammad-fiaz/brotli.zig).
+- For **Zstandard (Zstd) compression**, check out [zstd.zig](https://github.com/muhammad-fiaz/zstd.zig).
+- For **Tree-sitter** integration, check out [tree-sitter.zig](https://github.com/muhammad-fiaz/tree-sitter.zig).
+- For **regular expressions**, check out [regex.zig](https://github.com/muhammad-fiaz/regex.zig).
+
+</details>
 
 ---
 
