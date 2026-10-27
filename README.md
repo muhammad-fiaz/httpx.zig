@@ -1042,6 +1042,151 @@ Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-02).
 
 See [docs/reference/benchmarks.md](docs/reference/benchmarks.md) for full methodology and detailed analysis.
 
+## Examples
+
+The [`examples/`](examples) directory contains runnable examples demonstrating all features of `httpx.zig`.
+
+To run any example:
+```sh
+zig build run-<example-name>
+# Examples:
+#   zig build run-simple-get
+#   zig build run-spa-fallback
+#   zig build run-download
+#   zig build run-rest-api
+```
+
+### Core Client Examples
+- [`simple_get`](examples/simpleGet.zig) — Basic GET requests
+- [`post_json`](examples/postJson.zig) — POST with JSON body
+- [`custom_headers`](examples/customHeaders.zig) — Custom header management
+- [`connection_pool`](examples/connectionPool.zig) — Connection pooling and stats
+- [`redirect`](examples/redirect.zig) — Redirect handling
+- [`http10_client`](examples/http10Client.zig) — HTTP/1.0 client
+- [`http11_client`](examples/http11Client.zig) — HTTP/1.1 client
+- [`tls_get`](examples/tlsGet.zig) — HTTPS client with TLS
+- [`https_client`](examples/httpsClient.zig) — HTTPS client with TLS
+- [`retry_demo`](examples/retryDemo.zig) — Client retries with linear backoff
+- [`concurrent_demo`](examples/concurrentDemo.zig) — Parallel request patterns
+
+<details>
+<summary><strong>Server & Web API Examples</strong> (Click to expand)</summary>
+
+- [`simple_server`](examples/simpleServer.zig) — Minimal HTTP server
+- [`rest_api`](examples/restApi.zig) — Typed REST endpoints with automatic OpenAPI 3.1 & Docs
+- [`custom_responses`](examples/customResponses.zig) — Rich response generation (HTML, JSON, XML, RSS, Atom, robots.txt, sitemap.xml, binary)
+- [`static_files`](examples/staticFiles.zig) — Static file serving with ETag
+- [`health_check`](examples/healthCheck.zig) — Liveness/readiness probes
+- [`streaming`](examples/streaming.zig) — Buffered response reader (plus SSE examples)
+- [`auth_and_errors`](examples/authAndErrors.zig) — Authentication and error handling
+- [`live_static_watcher`](examples/liveStaticWatcher.zig) — Live file watcher and auto-reload
+- [`docs_server`](examples/docsServer.zig) — Swagger UI, ReDoc, Scalar, GraphiQL
+- [`graphql_server`](examples/graphqlServer.zig) — GraphQL server
+- [`spa_fallback`](examples/spaFallback.zig) — SPA with HTML/JS/CSS and client-side routing
+- [`websocket_server`](examples/websocketServer.zig) — WebSocket server
+- [`sse_server`](examples/sseServer.zig) — Server-Sent Events
+- [`session_server`](examples/sessionServer.zig) — Cookie-backed session flow
+- [`metrics_server`](examples/metricsServer.zig) — Prometheus metrics
+- [`interceptor_example`](examples/interceptorExample.zig) — Client request wrappers around a server route
+- [`cookie_server`](examples/cookieServer.zig) — Cookie management
+- [`cors_server`](examples/corsServer.zig) — CORS configuration
+- [`helmet_server`](examples/helmetServer.zig) — Security headers (Helmet)
+- [`rate_limit_server`](examples/rateLimitServer.zig) — Rate limiting
+- [`body_parser_server`](examples/bodyParserServer.zig) — Request body parsing
+- [`custom_server`](examples/customServer.zig) — Request ID and body parsing
+- [`tls_server`](examples/tlsServer.zig) — HTTPS/TLS server with self-signed cert
+- [`ftp_server`](examples/ftpServer.zig) — FTP-like server
+- [`http11_server`](examples/http11Server.zig) — HTTP/1.1 server
+- [`routing_demo`](examples/routingDemo.zig) — Typed routing, groups, mounts, reversing
+- [`static_embedded`](examples/staticEmbedded.zig) — Embedded-asset serving
+- [`browser_demo_server`](examples/browserDemoServer.zig) — Browser demo server
+- [`full_integration`](examples/fullIntegration.zig) — Full client/server integration
+</details>
+
+<details>
+<summary><strong>Download & File Inspection Examples</strong> (Click to expand)</summary>
+
+- [`download`](examples/download.zig) — Download with built-in progress bar and destination inference
+- [`download_batch`](examples/downloadBatch.zig) — Concurrent worker pool batch downloads
+- [`download_resume`](examples/downloadResume.zig) — Range-based resumption
+- [`download_verify`](examples/downloadVerify.zig) — Cryptographic verification (SHA-256, SHA-384, SHA-512, MD5, SHA-1)
+- [`download_checksum_file`](examples/downloadChecksumFile.zig) — Remote checksum file lookup and verification
+- [`download_existing`](examples/downloadExisting.zig) — Existing file policies (fail, overwrite, skip, resume, replace_if_changed)
+- [`download_update`](examples/downloadUpdate.zig) — Atomic self-updates with rollback safety
+- [`download_info`](examples/downloadInfo.zig) — Metadata HEAD inspection without full body download
+- [`download_custom_progress`](examples/downloadCustomProgress.zig) — Custom progress tracking and observers
+- [`ftp_download`](examples/ftpDownload.zig) — Direct FTP file download
+</details>
+
+<details>
+<summary><strong>Parsing & Inspection (DOM Engine) Examples</strong> (Click to expand)</summary>
+
+- [`html_client`](examples/htmlClient.zig) — Client fetch and automatic response.html() parsing
+- [`html_select`](examples/htmlSelect.zig) — CSS selector engine queries (tag, .class, #id, [attr], combinators)
+- [`html_extract`](examples/htmlExtract.zig) — High-level extraction helpers (title, text, links, forms, images)
+- [`html_stream`](examples/htmlStream.zig) — Streaming reader input parsing
+- [`html_file`](examples/htmlFile.zig) — HTML file parsing and node inspection
+- [`html_transform`](examples/htmlTransform.zig) — Structural mutation, attribute updating, and XSS-safe serialization
+- [`parse_html`](examples/parseHtml.zig) — HTML DOM, CSS Selectors, RSS feeds, robots.txt, and sitemaps
+</details>
+
+<details>
+<summary><strong>File Watching, Static Assets & Live Reload Examples</strong> (Click to expand)</summary>
+
+- [`file_watcher`](examples/fileWatcher.zig) — OS-native file monitoring (Windows ReadDirectoryChangesW, Linux inotify, macOS kqueue) with rename pairing and browser live reload
+- [`liveReload`](examples/liveReload.zig) — Live reload dev server with CSS hot reload vs HTML page reload
+- [`static_site`](examples/staticSite.zig) — Static site directory mounting with ETag caching and conditional GET
+- [`spa_server`](examples/spaServer.zig) — Single Page Application server with client-side route fallback
+- [`development_server`](examples/developmentServer.zig) — Unified dev server combining watcher, live reload, and incremental parsing
+- [`static/index.html`](examples/static/index.html) — Main HTML page for SPA example
+- [`static/about.html`](examples/static/about.html) — About page
+- [`static/contact.html`](examples/static/contact.html) — Contact page with form
+- [`static/styles.css`](examples/static/styles.css) — CSS styles
+- [`static/app.js`](examples/static/app.js) — Client-side JavaScript
+</details>
+
+<details>
+<summary><strong>Protocols, Security & Network Transport Examples</strong> (Click to expand)</summary>
+
+- [`http2_client`](examples/http2Client.zig) — HTTP/2 client
+- [`http2_multiplex`](examples/http2Multiplex.zig) — HTTP/2 stream multiplexing
+- [`http2_tls`](examples/http2Tls.zig) — HTTP/2 over TLS with ALPN + chain verification
+- [`http3_client`](examples/http3Client.zig) — HTTP/3 client
+- [`http3_quic`](examples/http3Quic.zig) — HTTP/3 over QUIC
+- [`http3_0rtt`](examples/http3ZeroRtt.zig) — HTTP/3 Zero-RTT connection resumption
+- [`tls12_client`](examples/tls12Client.zig) — TLS 1.2 with self-signed cert
+- [`tls13_client`](examples/tls13Client.zig) — TLS 1.3 with self-signed cert
+- [`tls_mtls`](examples/tlsMtls.zig) — Mutual TLS (mTLS)
+- [`resolve`](examples/resolve.zig) — DNS resolution
+- [`dns_demo`](examples/dnsDemo.zig) — DNS resolution and IP checks
+- [`dns_cache`](examples/dnsCache.zig) — DNS caching
+- [`proxy_demo`](examples/proxyDemo.zig) — HTTP forward proxy
+- [`connectivity`](examples/connectivity.zig) — Online checks and connectivity probes
+- [`compression_demo`](examples/compressionDemo.zig) — gzip/deflate/brotli compression
+- [`ftp_client`](examples/ftpClient.zig) — FTP client
+- [`tcp_local`](examples/tcpLocal.zig) — Local TCP socket server and client communication
+- [`udp_local`](examples/udpLocal.zig) — Local UDP datagram transmission and reception
+</details>
+
+<details>
+<summary><strong>Templates & Website Examples</strong> (Click to expand)</summary>
+
+- [`web/templates/basic`](examples/web/templates/basic/main.zig) — Basic template rendering
+- [`web/templates/inheritance`](examples/web/templates/inheritance/main.zig) — Template inheritance
+- [`web/templates/loops`](examples/web/templates/loops/main.zig) — Template loops
+- [`web/templates/includes`](examples/web/templates/includes/main.zig) — Template includes
+- [`web/templates/liveReload`](examples/web/templates/liveReload/main.zig) — Live-reload templates
+- [`web/templates/jinja`](examples/web/templates/jinja/main.zig) — Flask/Jinja2-style templates (extends, blocks, includes, macros, filters)
+- [`website`](examples/website/main.zig) — Full website with embedded assets
+</details>
+
+<details>
+<summary><strong>Advanced Features</strong> (Click to expand)</summary>
+
+- [`multipart`](examples/multipart.zig) — Multipart form data
+- [`openapi`](examples/openapi.zig) — OpenAPI spec generation
+</details>
+
 ## Contributing
 
 Contributions are welcome! Please:
