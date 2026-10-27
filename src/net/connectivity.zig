@@ -77,10 +77,16 @@ const clock = @import("../common/clock.zig");
 fn probeOne(io: std.Io, probe: Probe, timeoutMs: u32) ?u32 {
     const addr = parseIpLiteral(probe.ip, probe.port, probe.family) orelse return null;
     const t0 = clock.monotonicMillis(io);
-    const timeout: std.Io.Timeout = .{ .duration = .{
-        .raw = .fromMilliseconds(timeoutMs),
-        .clock = .awake,
-    } };
+    const builtin = @import("builtin");
+    const timeout: std.Io.Timeout = if (builtin.os.tag == .windows)
+        .none
+    else
+        .{
+            .duration = .{
+                .raw = .fromMilliseconds(timeoutMs),
+                .clock = .awake,
+            },
+        };
     const stream = addr.toStd(null).connect(io, .{
         .mode = .stream,
         .timeout = timeout,

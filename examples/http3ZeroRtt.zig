@@ -92,18 +92,18 @@ const DemoServer = struct {
         });
         defer drv.deinit();
 
+        var h3 = httpx.http3.Connection.init(alloc, .server);
+        defer h3.deinit();
+        var acc = Acc{};
+        defer acc.buf.deinit(std.heap.page_allocator);
+        qconn.cbs = .{ .ctx = &acc, .onStreamData = onStream };
+
         qconn.tls = .{
             .ctx = &drv,
             .start = httpx.quic.HandshakeDriver.clientStart,
             .onData = httpx.quic.HandshakeDriver.onData,
         };
         try httpx.quic.handshake.serveHandshake(&srv.ep, &srv.pump, &drv, 15_000);
-
-        var h3 = httpx.http3.Connection.init(alloc, .server);
-        defer h3.deinit();
-        var acc = Acc{};
-        defer acc.buf.deinit(std.heap.page_allocator);
-        qconn.cbs = .{ .ctx = &acc, .onStreamData = onStream };
 
         const start: u64 = @intCast(httpx.clock.millisNow(io));
         while (true) {

@@ -701,22 +701,24 @@ fn h3DoRequest(
     var sessionToResume: ?tlsSession.ClientSession = null;
     defer if (sessionToResume) |*s| s.deinit(a);
     const sessionPolicy = sessionPolicyFingerprint(t);
-    if (req.pool) |p| {
-        if (p.acquireH3(host, port, sessionPolicy)) |pooled| {
-            const resp = h3DoPooledRequest(a, pooled, req, authority, target, reqHeaders, reqBody) catch |e| {
-                pooled.deinit();
-                return e;
-            };
-            p.releaseH3(host, port, sessionPolicy, pooled);
-            return resp;
+    const isMethodSafe = req.method == .GET or req.method == .HEAD or req.method == .OPTIONS;
+    const canSendEarlyData = req.earlyData.enabled and (isMethodSafe or req.earlyData.allowUnsafeMethods);
+
+    if (!canSendEarlyData) {
+        if (req.pool) |p| {
+            if (p.acquireH3(host, port, sessionPolicy)) |pooled| {
+                const resp = h3DoPooledRequest(a, pooled, req, authority, target, reqHeaders, reqBody) catch |e| {
+                    pooled.deinit();
+                    return e;
+                };
+                p.releaseH3(host, port, sessionPolicy, pooled);
+                return resp;
+            }
         }
     }
     if (req.sessionCache) |sc| {
         sessionToResume = sc.getWithAlpnPolicy(host, port, nowMs, "h3", sessionPolicy);
     }
-
-    const isMethodSafe = req.method == .GET or req.method == .HEAD or req.method == .OPTIONS;
-    const canSendEarlyData = req.earlyData.enabled and (isMethodSafe or req.earlyData.allowUnsafeMethods);
 
     var capturedSession: tlsSession.ClientSession = .{
         .ticket = "",
@@ -1248,18 +1250,21 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
             if (!isTls) return Error.InvalidUrl;
             if (req.proxy != null) return Error.Http3ProxyUnsupported;
 
-            // Fast path: reuse pooled HTTP/3 session before any DNS or dial
+            // Fast path: reuse pooled HTTP/3 session before any DNS or dial (skip if 0-RTT early data requested)
             const policy = sessionPolicyFingerprint(tlsOpts orelse TlsOptions{});
-            if (req.pool) |p| {
-                if (p.acquireH3(hostCopy[0..hl], port, policy)) |pc| {
-                    var resp = h3DoPooledRequest(a, pc, req, authorityStr, target, hdrPairs, bodyOut) catch |e| {
-                        pc.deinit();
-                        return e;
-                    };
-                    p.releaseH3(hostCopy[0..hl], port, policy, pc);
-                    if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
-                    if (streaming) return try wrapBufferedResponse(a, resp);
-                    return resp;
+            const isEarlyData = req.earlyData.enabled;
+            if (!isEarlyData) {
+                if (req.pool) |p| {
+                    if (p.acquireH3(hostCopy[0..hl], port, policy)) |pc| {
+                        var resp = h3DoPooledRequest(a, pc, req, authorityStr, target, hdrPairs, bodyOut) catch |e| {
+                            pc.deinit();
+                            return e;
+                        };
+                        p.releaseH3(hostCopy[0..hl], port, policy, pc);
+                        if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
+                        if (streaming) return try wrapBufferedResponse(a, resp);
+                        return resp;
+                    }
                 }
             }
 
