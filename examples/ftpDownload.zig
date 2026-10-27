@@ -5,10 +5,11 @@ pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
     std.debug.print("==> Downloading file over FTP with progress and verification...\n", .{});
 
-    const res = httpx.ftp.download(allocator, .{
+    const res = httpx.client.ftpDownload(io, allocator, .{
         .host = "127.0.0.1",
         .port = 21,
         .user = "anonymous",

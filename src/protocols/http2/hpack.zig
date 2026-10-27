@@ -29,8 +29,6 @@ pub const Error = pint.Error || huff.Error || error{
 pub const DEFAULT_TABLE_SIZE: usize = 4096;
 /// Per-entry size overhead (RFC 7541 Section 4.1).
 pub const ENTRY_OVERHEAD: usize = 32;
-/// Hard cap on a single name/value length (DoS bound, mirrors nghttp2).
-pub const MAX_STRING_LEN: usize = 65536;
 
 // Static table (RFC 7541 Appendix A) — indices are 1-based on the wire.
 
@@ -102,8 +100,13 @@ pub const staticTable = [_]StaticEntry{
 
 pub const STATIC_TABLE_SIZE = staticTable.len;
 
-fn entrySize(name: []const u8, value: []const u8) usize {
-    return ENTRY_OVERHEAD + name.len + value.len;
+fn checkedEntrySize(nameLen: usize, valueLen: usize) ?usize {
+    const withOverhead = std.math.add(usize, ENTRY_OVERHEAD, nameLen) catch return null;
+    return std.math.add(usize, withOverhead, valueLen) catch return null;
+}
+
+fn entrySize(name: []const u8, value: []const u8) ?usize {
+    return checkedEntrySize(name.len, value.len);
 }
 
 // Dynamic table (shared mechanics for encoder and decoder sides)
@@ -133,10 +136,10 @@ const DynTable = struct {
         self.entries.deinit(self.allocator);
     }
 
-    fn evictFor(self: *DynTable, incoming: usize) void {
-        while (self.size + incoming > self.maxSize and self.entries.items.len > 0) {
+    fn evictFor(self: *DynTable, incoming: ?usize) void {
+        while ((incoming == null or self.size > self.maxSize or incoming.? > self.maxSize - self.size) and self.entries.items.len > 0) {
             const old = self.entries.pop() orelse break;
-            self.size -= entrySize(old.name, old.value);
+            self.size -= entrySize(old.name, old.value) orelse unreachable;
             self.allocator.free(old.name);
             self.allocator.free(old.value);
         }
@@ -145,14 +148,16 @@ const DynTable = struct {
     /// Inserts newest-first. An entry larger than maxSize is dropped
     /// after emptying (per RFC it empties the table but is not stored).
     fn insert(self: *DynTable, name: []const u8, value: []const u8) !void {
-        self.evictFor(entrySize(name, value));
-        if (entrySize(name, value) > self.maxSize) return; // emptied, not stored
+        const size = entrySize(name, value);
+        self.evictFor(size);
+        const entry_bytes = size orelse return;
+        if (entry_bytes > self.maxSize) return; // emptied, not stored
         const ownedName = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(ownedName);
         const ownedValue = try self.allocator.dupe(u8, value);
         errdefer self.allocator.free(ownedValue);
         try self.entries.insert(self.allocator, 0, .{ .name = ownedName, .value = ownedValue });
-        self.size += entrySize(name, value);
+        self.size += entry_bytes;
     }
 
     fn setMaxSize(self: *DynTable, newMax: usize) void {
@@ -175,8 +180,12 @@ pub const Decoder = struct {
     dyn: DynTable,
     /// Upper bound from SETTINGS_HEADER_TABLE_SIZE the peer may not exceed.
     protocolMaxSize: usize = DEFAULT_TABLE_SIZE,
-    /// Set when peer shrinks below current max: next block MUST open with
-    /// a table size update (RFC 7541 Section 4.2 via nghttp2 behavior).
+    /// Smallest size the peer advertised since the last header block.
+    /// The first table size update of the next block must not exceed it
+    /// (RFC 7541 Section 4.2).
+    pendingMinSize: ?usize = null,
+    /// Set when the peer shrinks below the current maximum: the next block
+    /// MUST open with a table size update (RFC 7541 Section 4.2).
     requireSizeUpdate: bool = false,
     maxHeaderList: usize = 0xFFFFFFFF,
 
@@ -194,6 +203,9 @@ pub const Decoder = struct {
         if (self.dyn.maxSize > sz) {
             self.dyn.setMaxSize(sz);
             self.requireSizeUpdate = true;
+            // A shrink obliges the encoder to signal a size update; the
+            // smallest advertised value bounds the first one.
+            self.pendingMinSize = @min(self.pendingMinSize orelse sz, sz);
         }
     }
 
@@ -214,7 +226,6 @@ pub const Decoder = struct {
         if (offset.* >= data.len) return Error.Truncated;
         const huffmanBit = data[offset.*] & 0x80 != 0;
         const len = try pint.decode(data, offset, 7);
-        if (len > MAX_STRING_LEN) return Error.HeaderTooLarge;
         const rawLen = std.math.cast(usize, len) orelse return Error.HeaderTooLarge;
         if (offset.* > data.len or rawLen > data.len - offset.*) return Error.Truncated;
         const raw = data[offset.*..][0..rawLen];
@@ -222,15 +233,26 @@ pub const Decoder = struct {
         if (!huffmanBit) {
             return .{ .data = @constCast(raw), .owned = false };
         }
-        const cap = huff.maxEncodedLen(@intCast(len));
+        const cap = huff.maxDecodedLen(rawLen);
         const buf = try self.allocator.alloc(u8, cap);
-        errdefer self.allocator.free(buf);
-        const n = huff.decode(buf, raw) catch |e| switch (e) {
-            error.InvalidHuffmanCode => return Error.InvalidHuffmanCode,
-            error.BufferTooSmall => return Error.HeaderTooLarge,
+        const n = huff.decode(buf, raw) catch |e| {
+            self.allocator.free(buf);
+            return switch (e) {
+                error.InvalidHuffmanCode => Error.InvalidHuffmanCode,
+                error.BufferTooSmall => Error.HeaderTooLarge,
+            };
         };
-        // Shrink to exact size (allocators tolerate smaller realloc).
-        const exact = self.allocator.realloc(buf[0..cap], n) catch buf[0..n];
+        // Return an exact allocation. Keeping a shortened slice of the
+        // over-sized buffer would make the eventual free() size mismatch;
+        // on realloc failure, duplicate and release the original.
+        const exact = self.allocator.realloc(buf, n) catch blk: {
+            const copy = self.allocator.dupe(u8, buf[0..n]) catch {
+                self.allocator.free(buf);
+                return Error.OutOfMemory;
+            };
+            self.allocator.free(buf);
+            break :blk copy;
+        };
         return .{ .data = exact, .owned = true };
     }
 
@@ -242,6 +264,9 @@ pub const Decoder = struct {
         fields: []HeaderField,
         /// Total decompressed list size for SETTINGS_MAX_HEADER_LIST_SIZE checks.
         totalSize: usize,
+        /// The decoded list exceeded the configured budget. Decoding still
+        /// completed so the dynamic table stays synchronized with the peer.
+        tooLarge: bool = false,
     };
 
     /// Decodes one complete header block fragment chain (already assembled).
@@ -256,6 +281,7 @@ pub const Decoder = struct {
         }
 
         var total: usize = 0;
+        var tooLarge = false;
         var offset: usize = 0;
         var atStart = true;
 
@@ -266,8 +292,15 @@ pub const Decoder = struct {
                 // 1xxxxxxx: indexed header field.
                 const idx = try pint.decode(block, &offset, 7);
                 const f = try self.lookup(idx);
-                try appendOwned(&list, self.allocator, f);
-                total = std.math.add(usize, total, ENTRY_OVERHEAD + f.name.len + f.value.len) catch return Error.HeaderTooLarge;
+                total = addSize(total, f) catch blk: {
+                    tooLarge = true;
+                    break :blk std.math.maxInt(usize);
+                };
+                if (!tooLarge and total <= self.maxHeaderList) {
+                    try appendOwned(&list, self.allocator, f);
+                } else {
+                    tooLarge = true;
+                }
                 atStart = false;
             } else if (b & 0xC0 == 0x40) {
                 // 01xxxxxx: literal WITH incremental indexing.
@@ -278,16 +311,27 @@ pub const Decoder = struct {
                     self.allocator.free(f.value);
                 }
                 self.dyn.insert(f.name, f.value) catch return Error.OutOfMemory;
-                try appendDup(&list, self.allocator, f);
-                total = std.math.add(usize, total, ENTRY_OVERHEAD + f.name.len + f.value.len) catch return Error.HeaderTooLarge;
+                total = addSize(total, f) catch blk: {
+                    tooLarge = true;
+                    break :blk std.math.maxInt(usize);
+                };
+                if (!tooLarge and total <= self.maxHeaderList) {
+                    try appendDup(&list, self.allocator, f);
+                } else {
+                    tooLarge = true;
+                }
                 atStart = false;
             } else if (b & 0xE0 == 0x20) {
                 // 001xxxxx: dynamic table size update.
                 if (!atStart) return Error.UnexpectedTableSizeUpdate;
                 const sz = try pint.decode(block, &offset, 5);
-                if (sz > self.protocolMaxSize) return Error.InvalidTableSize;
+                // The first update of a block is bounded by the smallest
+                // size the peer advertised; later ones by the final one.
+                const limit = self.pendingMinSize orelse self.protocolMaxSize;
+                if (sz > limit) return Error.InvalidTableSize;
                 self.dyn.setMaxSize(@intCast(sz));
                 self.requireSizeUpdate = false;
+                self.pendingMinSize = null;
             } else {
                 // 0000xxxx / 0001xxxx: literal without indexing / never indexed.
                 const idx = try pint.decode(block, &offset, 4);
@@ -296,11 +340,17 @@ pub const Decoder = struct {
                     self.allocator.free(f.name);
                     self.allocator.free(f.value);
                 }
-                try appendDup(&list, self.allocator, f);
-                total = std.math.add(usize, total, ENTRY_OVERHEAD + f.name.len + f.value.len) catch return Error.HeaderTooLarge;
+                total = addSize(total, f) catch blk: {
+                    tooLarge = true;
+                    break :blk std.math.maxInt(usize);
+                };
+                if (!tooLarge and total <= self.maxHeaderList) {
+                    try appendDup(&list, self.allocator, f);
+                } else {
+                    tooLarge = true;
+                }
                 atStart = false;
             }
-            if (total > self.maxHeaderList) return Error.HeaderTooLarge;
         }
 
         if (self.requireSizeUpdate) return Error.UnexpectedTableSizeUpdate;
@@ -308,7 +358,12 @@ pub const Decoder = struct {
         return .{
             .fields = try list.toOwnedSlice(self.allocator),
             .totalSize = total,
+            .tooLarge = tooLarge,
         };
+    }
+
+    fn addSize(total: usize, f: HeaderField) !usize {
+        return std.math.add(usize, total, ENTRY_OVERHEAD + f.name.len + f.value.len);
     }
 
     fn readLiteral(self: *Decoder, block: []const u8, offset: *usize, nameIndex: u64) Error!HeaderField {
@@ -330,22 +385,16 @@ pub const Decoder = struct {
     }
 };
 
-fn appendOwned(list: *std.ArrayList(HeaderField), gpa: Allocator, f: HeaderField) Error!void {
-    const name = gpa.dupe(u8, f.name) catch return Error.OutOfMemory;
-    errdefer gpa.free(name);
-    try list.append(gpa, .{
-        .name = name,
-        .value = try gpa.dupe(u8, f.value),
-    });
-}
-
 fn appendDup(list: *std.ArrayList(HeaderField), gpa: Allocator, f: HeaderField) Error!void {
     const name = gpa.dupe(u8, f.name) catch return Error.OutOfMemory;
     errdefer gpa.free(name);
-    try list.append(gpa, .{
-        .name = name,
-        .value = try gpa.dupe(u8, f.value),
-    });
+    const value = gpa.dupe(u8, f.value) catch return Error.OutOfMemory;
+    errdefer gpa.free(value);
+    list.append(gpa, .{ .name = name, .value = value }) catch return Error.OutOfMemory;
+}
+
+fn appendOwned(list: *std.ArrayList(HeaderField), gpa: Allocator, f: HeaderField) Error!void {
+    try appendDup(list, gpa, f);
 }
 
 // Encoder
@@ -362,9 +411,14 @@ pub const Indexing = enum {
 pub const Encoder = struct {
     allocator: Allocator,
     dyn: DynTable,
+    /// Final size to signal at the next block start.
     pendingSizeUpdate: ?usize = null,
+    /// Smallest size requested since the last block. RFC 7541 Section 4.2
+    /// requires signaling the minimum first when a shrink/grow pair lands
+    /// between two header blocks.
+    pendingMinSize: ?usize = null,
 
-    /// Names that nghttp2 avoids indexing (volatile per-request values).
+    /// Volatile per-request values that are poor dynamic-table candidates.
     const noIndexNames = [_][]const u8{
         ":path",             "age",           "content-length", "etag",
         "if-modified-since", "if-none-match", "location",       "set-cookie",
@@ -383,6 +437,7 @@ pub const Encoder = struct {
     pub fn applySettingsSize(self: *Encoder, sz: usize) void {
         if (self.dyn.maxSize != sz) {
             self.pendingSizeUpdate = sz;
+            self.pendingMinSize = @min(self.pendingMinSize orelse sz, sz);
         }
         self.dyn.setMaxSize(sz);
     }
@@ -451,14 +506,20 @@ pub const Encoder = struct {
         forceLiteral: bool,
     ) !void {
         if (self.pendingSizeUpdate) |sz| {
+            const min = self.pendingMinSize orelse sz;
             self.pendingSizeUpdate = null;
+            self.pendingMinSize = null;
             var tmp: [10]u8 = undefined;
+            if (min < sz) {
+                const n = try pint.encode(tmp[0..], 5, 0x20, min);
+                try out.appendSlice(self.allocator, tmp[0..n]);
+            }
             const n = try pint.encode(tmp[0..], 5, 0x20, sz);
             try out.appendSlice(self.allocator, tmp[0..n]);
         }
 
-        const name = lowerBuf(self.allocator, nameIn) catch nameIn;
-        defer if (name.ptr != nameIn.ptr) self.allocator.free(name);
+        const name = try lowerBuf(self.allocator, nameIn);
+        defer self.allocator.free(name);
 
         var ib: [10]u8 = undefined;
 
@@ -524,9 +585,7 @@ pub const Encoder = struct {
 };
 
 fn lowerBuf(gpa: Allocator, name: []const u8) ![]u8 {
-    const buf = try gpa.alloc(u8, name.len);
-    for (name, 0..) |c, i| buf[i] = std.ascii.toLower(c);
-    return buf;
+    return std.ascii.allocLowerString(gpa, name);
 }
 
 // Tests
@@ -670,4 +729,336 @@ test "eviction respects max size" {
         try enc.encode(&block, name, "some-value-data", .incremental, false);
     }
     try std.testing.expect(enc.dyn.size <= 200);
+}
+test "decode RFC 7541 C.3.1 first request without Huffman" {
+    // 8286 8441 0f77 7777 2e65 7861 6d70 6c65 2e63 6f6d
+    const block = [_]u8{
+        0x82, 0x86, 0x84, 0x41, 0x0f, 'w', 'w', 'w', '.', 'e', 'x',
+        'a',  'm',  'p',  'l',  'e',  '.', 'c', 'o', 'm',
+    };
+    const a = std.testing.allocator;
+    var d = Decoder.init(a);
+    defer d.deinit();
+    const res = try d.decode(&block);
+    defer {
+        for (res.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(res.fields);
+    }
+    try std.testing.expectEqual(@as(usize, 4), res.fields.len);
+    try std.testing.expectEqualStrings(":method", res.fields[0].name);
+    try std.testing.expectEqualStrings("GET", res.fields[0].value);
+    try std.testing.expectEqualStrings(":scheme", res.fields[1].name);
+    try std.testing.expectEqualStrings("http", res.fields[1].value);
+    try std.testing.expectEqualStrings(":path", res.fields[2].name);
+    try std.testing.expectEqualStrings("/", res.fields[2].value);
+    try std.testing.expectEqualStrings(":authority", res.fields[3].name);
+    try std.testing.expectEqualStrings("www.example.com", res.fields[3].value);
+}
+
+test "decode RFC 7541 C.4.1 first request with Huffman coding" {
+    // 8286 8441 8cf1 e3c2 e5f2 3a6b a0ab 90f4 ff
+    const block = [_]u8{
+        0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a,
+        0x6b, 0xa0, 0xab, 0x90, 0xf4, 0xff,
+    };
+    const a = std.testing.allocator;
+    var d = Decoder.init(a);
+    defer d.deinit();
+    const res = try d.decode(&block);
+    defer {
+        for (res.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(res.fields);
+    }
+    try std.testing.expectEqual(@as(usize, 4), res.fields.len);
+    try std.testing.expectEqualStrings(":method", res.fields[0].name);
+    try std.testing.expectEqualStrings("GET", res.fields[0].value);
+    try std.testing.expectEqualStrings(":scheme", res.fields[1].name);
+    try std.testing.expectEqualStrings("http", res.fields[1].value);
+    try std.testing.expectEqualStrings(":path", res.fields[2].name);
+    try std.testing.expectEqualStrings("/", res.fields[2].value);
+    try std.testing.expectEqualStrings(":authority", res.fields[3].name);
+    try std.testing.expectEqualStrings("www.example.com", res.fields[3].value);
+}
+
+test "decode a response with a never-indexed literal (RFC 7541 Section 6.2.3)" {
+    // :status: 302 (indexed name), cache-control: private (indexed name),
+    // date: Mon, 21 Oct 2013 20:13:21 GMT (indexed name) and a
+    // never-indexed literal with a new name.
+    const block = [_]u8{
+        0x48, 0x03, '3',  '0', '2',
+        0x58, 0x07, 'p',  'r', 'i',
+        'v',  'a',  't',  'e', 0x61,
+        0x1d, 'M',  'o',  'n', ',',
+        ' ',  '2',  '1',  ' ', 'O',
+        'c',  't',  ' ',  '2', '0',
+        '1',  '3',  ' ',  '2', '0',
+        ':',  '1',  '3',  ':', '2',
+        '1',  ' ',  'G',  'M', 'T',
+        0x10, 0x0a, 'c',  'u', 's',
+        't',  'o',  'm',  '-', 'k',
+        'e',  'y',  0x0c, 'c', 'u',
+        's',  't',  'o',  'm', '-',
+        'v',  'a',  'l',  'u', 'e',
+    };
+    const a = std.testing.allocator;
+    var d = Decoder.init(a);
+    defer d.deinit();
+    const res = try d.decode(&block);
+    defer {
+        for (res.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(res.fields);
+    }
+    try std.testing.expectEqual(@as(usize, 4), res.fields.len);
+    try std.testing.expectEqualStrings(":status", res.fields[0].name);
+    try std.testing.expectEqualStrings("302", res.fields[0].value);
+    try std.testing.expectEqualStrings("cache-control", res.fields[1].name);
+    try std.testing.expectEqualStrings("private", res.fields[1].value);
+    try std.testing.expectEqualStrings("date", res.fields[2].name);
+    try std.testing.expectEqualStrings("Mon, 21 Oct 2013 20:13:21 GMT", res.fields[2].value);
+    try std.testing.expectEqualStrings("custom-key", res.fields[3].name);
+    try std.testing.expectEqualStrings("custom-value", res.fields[3].value);
+    // Only the never-indexed literal must stay out of the dynamic table.
+    try std.testing.expectEqual(@as(usize, 3), d.dyn.entries.items.len);
+}
+
+test "dynamic table size arithmetic is checked at usize boundaries" {
+    const a = std.testing.allocator;
+    try std.testing.expectEqual(@as(?usize, null), checkedEntrySize(std.math.maxInt(usize), 0));
+    try std.testing.expectEqual(@as(?usize, null), checkedEntrySize(0, std.math.maxInt(usize)));
+
+    var dyn = DynTable.init(a);
+    defer dyn.deinit();
+    try dyn.entries.append(a, .{
+        .name = try a.dupe(u8, "x"),
+        .value = try a.dupe(u8, "y"),
+    });
+    // This models a legal table close to the maximum representable size on a
+    // 32-bit target. Adding the incoming size would wrap and skip eviction.
+    dyn.maxSize = std.math.maxInt(usize);
+    dyn.size = std.math.maxInt(usize) - 4;
+    dyn.evictFor(10);
+    try std.testing.expectEqual(@as(usize, 0), dyn.entries.items.len);
+}
+
+test "encoder emits a dynamic table size update when the peer shrinks it" {
+    const a = std.testing.allocator;
+    var enc = Encoder.init(a);
+    defer enc.deinit();
+    enc.applySettingsSize(100);
+
+    var block = std.ArrayList(u8).empty;
+    defer block.deinit(a);
+    try enc.encode(&block, "x-test", "1", .incremental, false);
+
+    // The 5-bit prefix marks a dynamic table size update.
+    try std.testing.expectEqual(@as(u8, 0x20), block.items[0] & 0xE0);
+    var off: usize = 0;
+    const size = try pint.decode(block.items, &off, 5);
+    try std.testing.expectEqual(@as(u64, 100), size);
+}
+
+test "encoder signals the smallest table size before the final one" {
+    const a = std.testing.allocator;
+    var enc = Encoder.init(a);
+    defer enc.deinit();
+    // Shrink then grow between two header blocks: the minimum must be
+    // signalled first (RFC 7541 Section 4.2).
+    enc.applySettingsSize(100);
+    enc.applySettingsSize(4096);
+
+    var block = std.ArrayList(u8).empty;
+    defer block.deinit(a);
+    try enc.encode(&block, "x-test", "1", .incremental, false);
+
+    var off: usize = 0;
+    const first = try pint.decode(block.items, &off, 5);
+    const second = try pint.decode(block.items, &off, 5);
+    try std.testing.expectEqual(@as(u64, 100), first);
+    try std.testing.expectEqual(@as(u64, 4096), second);
+}
+
+test "never-indexed literals decode but stay out of the dynamic table" {
+    const a = std.testing.allocator;
+    var d = Decoder.init(a);
+    defer d.deinit();
+    // 0x10 = literal header field never indexed, new name.
+    const block = [_]u8{ 0x10, 0x03, 'a', 'b', 'c', 0x03, 'x', 'y', 'z' };
+    const res = try d.decode(&block);
+    defer {
+        for (res.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(res.fields);
+    }
+    try std.testing.expectEqual(@as(usize, 1), res.fields.len);
+    try std.testing.expectEqualStrings("abc", res.fields[0].name);
+    try std.testing.expectEqualStrings("xyz", res.fields[0].value);
+    try std.testing.expectEqual(@as(usize, 0), d.dyn.entries.items.len);
+}
+
+test "truncated blocks and invalid indices are rejected" {
+    const a = std.testing.allocator;
+    var d = Decoder.init(a);
+    defer d.deinit();
+
+    // Indexed field 0 is invalid.
+    try std.testing.expectError(Error.InvalidIndex, d.decode(&[_]u8{0x80}));
+    // A literal whose string length runs past the block is truncated.
+    try std.testing.expectError(Error.Truncated, d.decode(&[_]u8{ 0x40, 0x05, 'a' }));
+    // An index beyond the dynamic table is invalid.
+    try std.testing.expectError(Error.InvalidIndex, d.decode(&[_]u8{0xfe}));
+}
+
+test "the header list budget is enforced while decoding" {
+    const a = std.testing.allocator;
+    var d = Decoder.init(a);
+    defer d.deinit();
+    d.maxHeaderList = 32;
+    const block = [_]u8{
+        0x40, 0x0a, 'c', 'u', 's', 't', 'o', 'm', '-', 'k', 'e', 'y',
+        0x0d, 'c',  'u', 's', 't', 'o', 'm', '-', 'h', 'e', 'a', 'd',
+        'e',  'r',
+    };
+    const res = try d.decode(&block);
+    defer {
+        for (res.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(res.fields);
+    }
+    try std.testing.expect(res.tooLarge);
+    try std.testing.expectEqual(@as(usize, 0), res.fields.len);
+    // The oversized entry was still inserted; skipping it would desync
+    // the connection-wide dynamic table.
+    try std.testing.expectEqual(@as(usize, 1), d.dyn.entries.items.len);
+}
+
+test "an oversized field still populates the dynamic table for later blocks" {
+    const a = std.testing.allocator;
+    var d = Decoder.init(a);
+    defer d.deinit();
+    d.maxHeaderList = 32;
+    const first = [_]u8{
+        0x40, 0x0a, 'c', 'u', 's', 't', 'o', 'm', '-', 'k', 'e', 'y',
+        0x0d, 'c',  'u', 's', 't', 'o', 'm', '-', 'h', 'e', 'a', 'd',
+        'e',  'r',
+    };
+    const r1 = try d.decode(&first);
+    a.free(r1.fields);
+    try std.testing.expect(r1.tooLarge);
+
+    d.maxHeaderList = 100;
+    const r2 = try d.decode(&[_]u8{0xBE});
+    defer {
+        for (r2.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(r2.fields);
+    }
+    try std.testing.expect(!r2.tooLarge);
+    try std.testing.expectEqual(@as(usize, 1), r2.fields.len);
+    try std.testing.expectEqualStrings("custom-key", r2.fields[0].name);
+    try std.testing.expectEqualStrings("custom-header", r2.fields[0].value);
+}
+
+test "huffman encoded strings decode to the exact bytes" {
+    const a = std.testing.allocator;
+    var d = Decoder.init(a);
+    defer d.deinit();
+    // RFC 7541 C.4.1: ":authority: www.example.com" with Huffman coding.
+    const block = [_]u8{
+        0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab,
+        0x90, 0xf4, 0xff,
+    };
+    const res = try d.decode(&block);
+    defer {
+        for (res.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(res.fields);
+    }
+    try std.testing.expectEqual(@as(usize, 1), res.fields.len);
+    try std.testing.expectEqualStrings(":authority", res.fields[0].name);
+    try std.testing.expectEqualStrings("www.example.com", res.fields[0].value);
+}
+
+test "nghttp2 reference multi-block sequential deflate and inflate sequence" {
+    const a = std.testing.allocator;
+    var enc = Encoder.init(a);
+    defer enc.deinit();
+    var dec = Decoder.init(a);
+    defer dec.deinit();
+
+    const Block = struct {
+        fields: []const HeaderField,
+    };
+
+    const b1 = [_]HeaderField{
+        .{ .name = ":path", .value = "/my-example/index.html" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = "hello", .value = "world" },
+    };
+    const b2 = [_]HeaderField{
+        .{ .name = ":path", .value = "/script.js" },
+        .{ .name = ":scheme", .value = "https" },
+    };
+    const b3 = [_]HeaderField{
+        .{ .name = "cookie", .value = "k1=v1" },
+        .{ .name = "cookie", .value = "k2=v2" },
+        .{ .name = "via", .value = "proxy" },
+    };
+    const b4 = [_]HeaderField{
+        .{ .name = ":path", .value = "/style.css" },
+        .{ .name = "cookie", .value = "k1=v1" },
+        .{ .name = "cookie", .value = "k1=v1" },
+    };
+    const b5 = [_]HeaderField{
+        .{ .name = ":path", .value = "/style.css" },
+        .{ .name = "x-nghttp2", .value = "" },
+    };
+
+    const blocks = [_]Block{
+        .{ .fields = &b1 },
+        .{ .fields = &b2 },
+        .{ .fields = &b3 },
+        .{ .fields = &b4 },
+        .{ .fields = &b5 },
+    };
+
+    for (blocks) |b| {
+        var out = std.ArrayList(u8).empty;
+        defer out.deinit(a);
+
+        for (b.fields) |f| {
+            try enc.encode(&out, f.name, f.value, .incremental, false);
+        }
+
+        const res = try dec.decode(out.items);
+        defer {
+            for (res.fields) |f| {
+                a.free(f.name);
+                a.free(f.value);
+            }
+            a.free(res.fields);
+        }
+
+        try std.testing.expectEqual(b.fields.len, res.fields.len);
+        for (b.fields, 0..) |expected, i| {
+            try std.testing.expectEqualStrings(expected.name, res.fields[i].name);
+            try std.testing.expectEqualStrings(expected.value, res.fields[i].value);
+        }
+    }
 }

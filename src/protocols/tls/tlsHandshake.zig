@@ -19,6 +19,66 @@ pub const NamedGroup = tls.NamedGroup;
 /// Maximum handshake message size we handle.
 pub const maxHandshakeLen = 1 << 14;
 
+/// Bounded storage for an encrypted post-handshake message. A KeyUpdate is
+/// fixed-size, while NewSessionTicket permits a larger (u24) body. Keep a
+/// little framing space while rejecting peer-controlled unbounded growth.
+pub const maxPostHandshakeMessageLen = 1 << 20;
+
+/// Reassembles fragmented handshake messages across TLS records while
+/// allowing multiple complete messages in one record. Storage is bounded;
+/// callers consume complete messages synchronously before appending more.
+pub const MessageReassembler = struct {
+    allocator: Allocator,
+    buffer: std.ArrayList(u8) = .empty,
+
+    pub fn init(allocator: Allocator) MessageReassembler {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *MessageReassembler) void {
+        self.buffer.deinit(self.allocator);
+    }
+
+    pub fn reset(self: *MessageReassembler) void {
+        self.buffer.clearRetainingCapacity();
+    }
+
+    pub fn append(self: *MessageReassembler, fragment: []const u8) !void {
+        if (fragment.len > maxPostHandshakeMessageLen - self.buffer.items.len)
+            return error.MessageTooLarge;
+        try self.buffer.appendSlice(self.allocator, fragment);
+    }
+
+    pub fn hasCompleteMessage(self: *const MessageReassembler) bool {
+        const bytes = self.buffer.items;
+        if (bytes.len < 4) return false;
+        const bodyLen: usize = (@as(usize, bytes[1]) << 16) |
+            (@as(usize, bytes[2]) << 8) | bytes[3];
+        if (bodyLen > maxPostHandshakeMessageLen - 4) return false;
+        return bytes.len >= 4 + bodyLen;
+    }
+
+    /// Returns one complete framed message, removing it from the buffer.
+    /// A partial header/body returns null and remains buffered.
+    pub fn next(self: *MessageReassembler) !?FramedMessage {
+        const bytes = self.buffer.items;
+        if (bytes.len < 4) return null;
+        const bodyLen: usize = (@as(usize, bytes[1]) << 16) |
+            (@as(usize, bytes[2]) << 8) | bytes[3];
+        if (bodyLen > maxPostHandshakeMessageLen - 4) return error.MessageTooLarge;
+        const totalLen = 4 + bodyLen;
+        if (bytes.len < totalLen) return null;
+        const message = FramedMessage{
+            .msgType = @fromBackingInt(@as(u8, @intCast(bytes[0]))),
+            .body = try self.allocator.dupe(u8, bytes[4..totalLen]),
+        };
+        const remain = bytes.len - totalLen;
+        if (remain > 0) std.mem.copyForwards(u8, self.buffer.items[0..remain], self.buffer.items[totalLen..]);
+        self.buffer.items.len = remain;
+        return message;
+    }
+};
+
 /// Transcript hash (SHA-256 for AES-128-GCM-SHA256, SHA-384 for AES-256-GCM-SHA384).
 pub const TranscriptHash = Sha256;
 pub const HashLen = TranscriptHash.digest_length; // 32
@@ -652,6 +712,27 @@ pub const MessageIterator = struct {
     }
 };
 
+/// TLS 1.3 KeyUpdate handshake message (RFC 9846 Section 4.7.3).
+pub const KeyUpdate = struct {
+    requestUpdate: bool = false,
+
+    pub fn decode(body: []const u8) !KeyUpdate {
+        if (body.len != 1 or body[0] > 1) return error.ProtocolViolation;
+        return .{ .requestUpdate = body[0] == 1 };
+    }
+
+    /// Encodes a complete five-byte handshake message.
+    pub fn encode(self: KeyUpdate, out: *[5]u8) void {
+        out.* = .{
+            @intCast(@backingInt(HandshakeType.key_update)),
+            0,
+            0,
+            1,
+            @intFromBool(self.requestUpdate),
+        };
+    }
+};
+
 // EncryptedExtensions (RFC 8446 Section 4.3.1)
 
 pub const EncryptedExtensions = struct {
@@ -1016,6 +1097,36 @@ test "MessageIterator rejects truncated and overrunning frames" {
     var trailing = MessageIterator.init(rec.items);
     _ = (try trailing.next()).?;
     try std.testing.expectError(error.ProtocolViolation, trailing.next());
+}
+
+test "KeyUpdate message validates request byte and encodes framing" {
+    var wire: [5]u8 = undefined;
+    (KeyUpdate{ .requestUpdate = true }).encode(&wire);
+    try std.testing.expectEqual(@as(u8, @intCast(@backingInt(HandshakeType.key_update))), wire[0]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 1, 1 }, wire[1..]);
+    try std.testing.expect((try KeyUpdate.decode(&.{1})).requestUpdate);
+    try std.testing.expect(!(try KeyUpdate.decode(&.{0})).requestUpdate);
+    try std.testing.expectError(error.ProtocolViolation, KeyUpdate.decode(&.{}));
+    try std.testing.expectError(error.ProtocolViolation, KeyUpdate.decode(&.{2}));
+    try std.testing.expectError(error.ProtocolViolation, KeyUpdate.decode(&.{ 1, 0 }));
+}
+
+test "MessageReassembler handles fragmented and coalesced handshake messages" {
+    const a = std.testing.allocator;
+    var reassembler = MessageReassembler.init(a);
+    defer reassembler.deinit();
+    try reassembler.append(&.{ 24, 0, 0 });
+    try std.testing.expect((try reassembler.next()) == null);
+    try reassembler.append(&.{ 1, 1, 24, 0, 0, 0 });
+    const first = (try reassembler.next()).?;
+    defer a.free(first.body);
+    try std.testing.expectEqual(HandshakeType.key_update, first.msgType);
+    try std.testing.expectEqualSlices(u8, &.{1}, first.body);
+    const second = (try reassembler.next()).?;
+    defer a.free(second.body);
+    try std.testing.expectEqual(HandshakeType.key_update, second.msgType);
+    try std.testing.expectEqual(@as(usize, 0), second.body.len);
+    try std.testing.expect((try reassembler.next()) == null);
 }
 
 test "NewSessionTicket decode rejects malformed bodies" {

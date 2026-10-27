@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn getHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn getHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = try std.fmt.allocPrint(ctx.allocator, "{{\"query\":\"{s}\",\"status\":\"ok\"}}", .{ctx.query}),

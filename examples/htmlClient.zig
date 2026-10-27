@@ -10,7 +10,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn htmlHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn htmlHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body =

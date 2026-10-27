@@ -284,17 +284,17 @@ pub const Watcher = struct {
         }
         if (self.config.dirPath.len == 0) return;
         if (builtin.os.tag == .windows) {
-            self.native = windows.Backend.init(self.allocator, self.config.dirPath) catch |err| {
+            self.native = windows.Backend.init(self.allocator, self.config.dirPath, self.config.recursive) catch |err| {
                 self.nativeFailed = true;
                 return err;
             };
         } else if (builtin.os.tag == .linux) {
-            self.native = linux.Backend.init(self.allocator, self.io, self.config.dirPath) catch |err| {
+            self.native = linux.Backend.init(self.allocator, self.io, self.config.dirPath, self.config.recursive) catch |err| {
                 self.nativeFailed = true;
                 return err;
             };
         } else {
-            self.native = macos.Backend.init(self.allocator, self.io, self.config.dirPath) catch |err| {
+            self.native = macos.Backend.init(self.allocator, self.io, self.config.dirPath, self.config.recursive) catch |err| {
                 self.nativeFailed = true;
                 return err;
             };
@@ -318,7 +318,7 @@ pub const Watcher = struct {
     }
 
     fn notifyChangeFull(self: *Watcher, path: []const u8, oldPath: ?[]const u8, kind: WatchEventKind, isDir: bool) void {
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis(self.io);
         if (!self.coalescer.shouldEmit(now, path, kind)) return;
         _ = self._change_count.fetchAdd(1, .release);
 
@@ -330,7 +330,7 @@ pub const Watcher = struct {
             .kind = kind,
             .strategy = ReloadStrategy.forPath(path),
             .isDirectory = isDir,
-            .timestampMs = now,
+            .timestampMs = clock.millisNow(self.io),
         };
 
         if (self.eventQueue.items.len >= 1024) {
@@ -830,7 +830,7 @@ pub const Watcher = struct {
             while (self.running.load(.acquire)) {
                 _ = self.scan() catch false;
                 self.dispatchCallbacks();
-                clock.sleepMillis(self.config.pollIntervalMs);
+                clock.sleepMillis(self.io, self.config.pollIntervalMs);
             }
         }
         self.dispatchCallbacks();
@@ -1041,7 +1041,7 @@ pub const Watcher = struct {
 
     /// Emits a paired rename event. Caller holds the mutex.
     fn emitRenameLocked(self: *Watcher, oldPath: []const u8, newPath: []const u8) void {
-        const now = clock.millisNow();
+        const now = clock.millisNow(self.io);
         _ = self._change_count.fetchAdd(1, .release);
         const ownedPath = self.allocator.dupe(u8, newPath) catch return;
         const ownedOld = self.allocator.dupe(u8, oldPath) catch {
@@ -1185,7 +1185,7 @@ test "scan prunes ignored directories instead of only filtering their files" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
-    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-prune-{d}", .{clock.millisNow()});
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-prune-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     var subbuf: [512]u8 = undefined;
     const keptPath = try std.fmt.bufPrint(&subbuf, "{s}/kept.txt", .{root});
     const modulesPath = try std.fmt.allocPrint(a, "{s}/node_modules", .{root});
@@ -1235,7 +1235,7 @@ test "the initial scan reports nothing to observers" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
-    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-baseline-{d}", .{clock.millisNow()});
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-baseline-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
         cwd.createDir(io, ".zig-cache", .default_dir) catch {};
@@ -1354,7 +1354,7 @@ test "native backend produces real filesystem events" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
-    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-native-{d}", .{clock.millisNow()});
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-native-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
         cwd.createDir(io, ".zig-cache", .default_dir) catch {};
@@ -1382,7 +1382,7 @@ test "native backend produces real filesystem events" {
             }
         }
         _ = watcher.drainNative();
-        clock.sleepMillis(10);
+        clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 10);
     }
     try std.testing.expect(sawKind != null);
 }
@@ -1393,7 +1393,7 @@ test "rename pairing survives atomic save patterns" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
-    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-rename-{d}", .{clock.millisNow()});
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-rename-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
         cwd.createDir(io, ".zig-cache", .default_dir) catch {};
@@ -1414,7 +1414,7 @@ test "rename pairing survives atomic save patterns" {
     var deadline: usize = 0;
     while (watcher.next() == null and deadline < 60) : (deadline += 1) {
         _ = watcher.drainNative();
-        clock.sleepMillis(10);
+        clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 10);
     }
     while (watcher.next()) |_| {}
     {
@@ -1429,7 +1429,7 @@ test "rename pairing survives atomic save patterns" {
             if (e.kind == .renamed) sawRename = true;
         }
         if (sawRename) break;
-        clock.sleepMillis(10);
+        clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 10);
     }
     try std.testing.expect(sawRename);
 }
@@ -1442,7 +1442,7 @@ test "reconcileDir pairs renames from stat-walk diffs" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
-    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-reconcile-{d}", .{clock.millisNow()});
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-reconcile-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
         cwd.createDir(io, ".zig-cache", .default_dir) catch {};
@@ -1571,7 +1571,7 @@ test "stop joins the worker so no callback outlives the watcher" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
-    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-stop-{d}", .{clock.millisNow()});
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-stop-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
         cwd.createDir(io, ".zig-cache", .default_dir) catch {};
@@ -1604,7 +1604,7 @@ test "stop joins the worker so no callback outlives the watcher" {
     try std.testing.expect(watcher.thread == null);
 
     // Nothing may fire after stop() returns.
-    clock.sleepMillis(50);
+    clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 50);
     try std.testing.expectEqual(@as(usize, 0), Counter.afterStop);
 
     watcher.deinit();
@@ -1645,7 +1645,7 @@ test "polling scan detects directory creation and deletion" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
-    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-dir-{d}", .{clock.millisNow()});
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-dir-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
         cwd.createDir(io, ".zig-cache", .default_dir) catch {};
@@ -1702,7 +1702,7 @@ test "polling scan pairs renames when file size and mtime match" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
     var pathBuf: [256]u8 = undefined;
-    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-poll-rename-{d}", .{clock.millisNow()});
+    const root = try std.fmt.bufPrint(&pathBuf, ".zig-cache/watch-poll-rename-{d}", .{clock.millisNow(std.Io.Threaded.global_single_threaded.io())});
     {
         const cwd: std.Io.Dir = .cwd();
         cwd.createDir(io, ".zig-cache", .default_dir) catch {};

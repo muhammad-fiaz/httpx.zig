@@ -1,26 +1,24 @@
-# Simplified API Aliases
+# Explicit Client Request Methods
 
-Concise top-level helpers mirror the client methods, URL-first with no
-allocator needed. See `examples/simpleGet.zig`.
+Use one explicitly initialized client to share its connection pool across
+requests. See `examples/simpleGet.zig`.
 
 ```zig
-var res = try httpx.get("https://httpbun.com/get", .{});
+var res = try client.get("https://httpbun.com/get", .{});
 defer res.deinit();
 
-var post = try httpx.post("https://httpbun.com/post", .{
+var post = try client.post("https://httpbun.com/post", .{
     .json = .{ .name = "Alice" },
 });
 defer post.deinit();
 
-var del = try httpx.delete("https://httpbun.com/delete", .{});
+var del = try client.delete("https://httpbun.com/delete", .{});
 defer del.deinit();
 ```
 
-Available verbs: `fetch`, `get`, `post`, `put`, `patch`, `delete`, `head`,
-`options`, `trace`, `connect`, `request`, plus `getAll` / `requestAll` for
-batches and `isOnline` / `checkConnectivity` probes. Downloads, GraphQL,
-and DNS live on the client namespace (`client.download`,
-`client.graphql`, `client.resolve`, `client.resolveUrl`).
+Available methods include `fetch`, `get`, `post`, `put`, `patch`, `delete`,
+`head`, `options`, `trace`, `connect`, `request`, `getAll` and `requestAll`.
+Downloads, GraphQL, connectivity and DNS are also methods on the client.
 
 ## Expected Output
 

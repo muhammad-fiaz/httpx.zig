@@ -10,9 +10,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-// ============================================================================
-// 1. ASCII & Character Classification Tables (Comptime O(1))
-// ============================================================================
+// ASCII and character classification tables
 
 /// Lookup table for RFC 7230 / 9110 token characters:
 /// tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
@@ -21,13 +19,11 @@ pub const TOKEN_CHARS: [256]bool = blk: {
     var table: [256]bool = undefined;
     for (0..256) |i| {
         const c: u8 = @intCast(i);
-        const isAlpha = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
-        const isDigit = (c >= '0' and c <= '9');
         const isSpecial = switch (c) {
             '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
             else => false,
         };
-        table[i] = isAlpha or isDigit or isSpecial;
+        table[i] = std.ascii.isAlphanumeric(c) or isSpecial;
     }
     break :blk table;
 };
@@ -38,10 +34,8 @@ pub const UNRESERVED_CHARS: [256]bool = blk: {
     var table: [256]bool = undefined;
     for (0..256) |i| {
         const c: u8 = @intCast(i);
-        const isAlpha = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z');
-        const isDigit = (c >= '0' and c <= '9');
         const isPunct = (c == '-' or c == '.' or c == '_' or c == '~');
-        table[i] = isAlpha or isDigit or isPunct;
+        table[i] = std.ascii.isAlphanumeric(c) or isPunct;
     }
     break :blk table;
 };
@@ -50,9 +44,10 @@ pub const UNRESERVED_CHARS: [256]bool = blk: {
 /// Returns 0..15 for valid hex, or 0xFF for invalid.
 pub const HEX_VALUES: [256]u8 = blk: {
     var table: [256]u8 = @splat(0xFF);
-    for ('0'..('9' + 1)) |i| table[i] = @intCast(i - '0');
-    for ('a'..('f' + 1)) |i| table[i] = @intCast(i - 'a' + 10);
-    for ('A'..('F' + 1)) |i| table[i] = @intCast(i - 'A' + 10);
+    for (0..256) |i| {
+        const c: u8 = @intCast(i);
+        table[i] = std.fmt.charToDigit(c, 16) catch continue;
+    }
     break :blk table;
 };
 
@@ -68,7 +63,7 @@ pub inline fn isUnreservedChar(c: u8) bool {
 
 /// True if `c` is a control character (0x00..0x1F or 0x7F).
 pub inline fn isCtl(c: u8) bool {
-    return c <= 0x1F or c == 0x7F;
+    return std.ascii.isControl(c);
 }
 
 /// True if `c` is an HTTP space or horizontal tab (OWS).
@@ -103,12 +98,14 @@ pub inline fn trimOws(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \t");
 }
 
-// ============================================================================
-// 2. Numeric Parsing Primitives
-// ============================================================================
+// Numeric parsing primitives
 
 /// Parses an unsigned integer from ASCII decimal digits without intermediate allocations
 /// or error-handling overhead in the fast path.
+///
+/// Deliberately stricter than `std.fmt.parseInt`: HTTP field values must be
+/// plain digits, while `parseInt` accepts a leading `+`/`-` and ignores `_`
+/// separators, both of which are invalid in a `Content-Length` or chunk size.
 pub fn parseUint(comptime T: type, s: []const u8) ?T {
     if (s.len == 0) return null;
     var result: T = 0;
@@ -139,6 +136,9 @@ pub fn parsePort(s: []const u8) ?u16 {
 }
 
 /// Parses an unsigned integer from ASCII hexadecimal digits (e.g. HTTP chunk sizes).
+///
+/// Kept strict for the same reason as `parseUint`: `std.fmt.parseUnsigned`
+/// accepts `_` separators, which are not valid inside a protocol field.
 pub fn parseHexUint(comptime T: type, s: []const u8) ?T {
     if (s.len == 0) return null;
     var result: T = 0;
@@ -150,18 +150,14 @@ pub fn parseHexUint(comptime T: type, s: []const u8) ?T {
     return result;
 }
 
-// ============================================================================
-// 3. Fast Method Parsing
-// ============================================================================
+// Fast method parsing
 
 const Method = @import("method.zig").Method;
 
 /// Fast, branch-minimized HTTP method lookup from wire/slice string.
 pub const parseMethod = Method.fromString;
 
-// ============================================================================
-// 4. Authority / Host / Port Parser (Single Authoritative Implementation)
-// ============================================================================
+// Authority, host, and port parser
 
 pub const ParsedAuthority = struct {
     /// Hostname, IPv4 string, or inner unbracketed IPv6 literal.
@@ -173,7 +169,12 @@ pub const ParsedAuthority = struct {
 };
 
 /// Parses an authority string ("host", "host:port", "[::1]", "[::1]:port").
-/// Returns null if the syntax is malformed (unmatched brackets, invalid port digits, etc.).
+/// Returns null if the syntax is malformed (unmatched brackets, invalid port
+/// digits, empty host, etc.).
+///
+/// IPv6 literals must be bracketed. A bare string with multiple colons is not
+/// an authority: accepting it would let `http://::1/` (invalid per RFC 3986)
+/// reach URL-derived Host and connection fields as if it were a valid host.
 pub fn parseAuthority(input: []const u8) ?ParsedAuthority {
     if (input.len == 0) return null;
 
@@ -181,6 +182,7 @@ pub fn parseAuthority(input: []const u8) ?ParsedAuthority {
         const close = std.mem.indexOfScalar(u8, input, ']') orelse return null;
         if (close < 2) return null; // "[]" minimum invalid
         const inner = input[1..close];
+        if (inner.len == 0) return null;
         const after = input[close + 1 ..];
         if (after.len == 0) {
             return .{ .host = inner, .port = null, .isIpv6 = true };
@@ -190,12 +192,10 @@ pub fn parseAuthority(input: []const u8) ?ParsedAuthority {
         return .{ .host = inner, .port = portVal, .isIpv6 = true };
     }
 
-    // Bare host or host:port
+    // Bare host or host:port. Multiple colons require brackets.
     if (std.mem.lastIndexOfScalar(u8, input, ':')) |colon| {
-        // If there are multiple colons without brackets, this is an unbracketed IPv6 literal
-        if (std.mem.indexOfScalar(u8, input[0..colon], ':') != null) {
-            return .{ .host = input, .port = null, .isIpv6 = true };
-        }
+        if (std.mem.indexOfScalar(u8, input[0..colon], ':') != null) return null;
+        if (colon == 0) return null; // empty host
         const portVal = parsePort(input[colon + 1 ..]) orelse return null;
         return .{ .host = input[0..colon], .port = portVal, .isIpv6 = false };
     }
@@ -203,9 +203,7 @@ pub fn parseAuthority(input: []const u8) ?ParsedAuthority {
     return .{ .host = input, .port = null, .isIpv6 = false };
 }
 
-// ============================================================================
-// 5. Zero-Copy Bounded Byte Cursor
-// ============================================================================
+// Zero-copy bounded byte cursor
 
 pub const ByteCursor = struct {
     data: []const u8,
@@ -272,9 +270,7 @@ pub const ByteCursor = struct {
     }
 };
 
-// ============================================================================
-// 6. Delimited Token & Parameter Iterators
-// ============================================================================
+// Delimited token and parameter iterators
 
 /// Iterates over comma-separated values in HTTP headers (RFC 9110 Section 5.6.1).
 /// Strips leading and trailing OWS and skips empty entries.
@@ -406,9 +402,7 @@ pub fn lookupQuery(query: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-// ============================================================================
-// 7. High-Performance Percent-Encoding and Percent-Decoding
-// ============================================================================
+// Percent-encoding and percent-decoding
 
 pub const DecodeError = error{
     BufferTooSmall,
@@ -417,6 +411,11 @@ pub const DecodeError = error{
 
 /// Percent-decodes `input` into `buf`. Decoded length is always <= `input.len`.
 /// Returns the decoded slice within `buf`.
+///
+/// Semantics differ from `std.Uri.percentDecodeInPlace`, which decodes in
+/// place and rejects malformed escapes. This variant decodes into a separate
+/// buffer and copies invalid sequences verbatim, which is the lenient
+/// behaviour browsers and proxies apply to request targets.
 pub fn percentDecode(buf: []u8, input: []const u8) DecodeError![]const u8 {
     var out: usize = 0;
     var i: usize = 0;
@@ -512,9 +511,7 @@ pub fn percentEncodeAlloc(allocator: Allocator, input: []const u8) Allocator.Err
     return out;
 }
 
-// ============================================================================
-// 8. HTTP Date Parser (IMF-fixdate, RFC 9110 Section 5.6.7)
-// ============================================================================
+// HTTP date parsing (IMF-fixdate, RFC 9110 Section 5.6.7)
 
 const monthNames = [_][]const u8{
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -523,6 +520,11 @@ const monthNames = [_][]const u8{
 
 /// Parses an IMF-fixdate string (e.g. "Sun, 06 Nov 1994 08:49:37 GMT") to epoch seconds.
 /// Returns null on invalid or malformed format.
+///
+/// The standard library has no HTTP-date parser: `std.time.epoch` converts
+/// epoch days to calendar dates but not the other way round, so both the
+/// IMF-fixdate grammar and the civil-to-epoch conversion below are
+/// implemented here.
 pub fn parseHttpDate(s: []const u8) ?i64 {
     var it = std.mem.tokenizeAny(u8, s, " ,");
     _ = it.next() orelse return null; // Day of week
@@ -541,6 +543,7 @@ pub fn parseHttpDate(s: []const u8) ?i64 {
     }
     const mon = month orelse return null;
     const year = parseUint(i32, yearS) orelse return null;
+    if (year < 0 or year > 9999) return null;
 
     var tit = std.mem.splitScalar(u8, timeS, ':');
     const hh = parseUint(u8, tit.next() orelse return null) orelse return null;
@@ -554,11 +557,7 @@ pub fn parseHttpDate(s: []const u8) ?i64 {
 }
 
 fn daysInMonth(year: i32, month: u4) u16 {
-    return switch (month) {
-        2 => if (@mod(year, 400) == 0 or (@mod(year, 4) == 0 and @mod(year, 100) != 0)) 29 else 28,
-        4, 6, 9, 11 => 30,
-        else => 31,
-    };
+    return std.time.epoch.getDaysInMonth(@intCast(year), @fromBackingInt(@intCast(month)));
 }
 
 fn daysFromCivil(yIn: i32, m: u4, d: u16) i64 {
@@ -570,10 +569,6 @@ fn daysFromCivil(yIn: i32, m: u4, d: u16) i64 {
     const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
     return era * 146097 + doe - 719468;
 }
-
-// ============================================================================
-// Unit Tests for Parsing Primitives
-// ============================================================================
 
 test "isTokenChar matches RFC 7230" {
     try std.testing.expect(isTokenChar('a'));
@@ -636,6 +631,23 @@ test "parseAuthority variations" {
 
     try std.testing.expect(parseAuthority("[::1:bad") == null);
     try std.testing.expect(parseAuthority("host:99999") == null);
+}
+
+test "parseAuthority rejects empty hosts and unbracketed IPv6" {
+    try std.testing.expect(parseAuthority("") == null);
+    try std.testing.expect(parseAuthority(":8080") == null);
+    try std.testing.expect(parseAuthority("[]") == null);
+    try std.testing.expect(parseAuthority("[]:80") == null);
+    try std.testing.expect(parseAuthority("[::1]junk") == null);
+    try std.testing.expect(parseAuthority("[::1]:") == null);
+    try std.testing.expect(parseAuthority("[::1]:abc") == null);
+    // Bare IPv6 has multiple colons and must be bracketed.
+    try std.testing.expect(parseAuthority("::1") == null);
+    try std.testing.expect(parseAuthority("2001:db8::1") == null);
+    // Trailing junk after the port is rejected, not truncated.
+    try std.testing.expect(parseAuthority("example.com:80x") == null);
+    // A single colon with an empty port is not a valid port.
+    try std.testing.expect(parseAuthority("example.com:") == null);
 }
 
 test "ByteCursor reading" {
@@ -711,4 +723,11 @@ test "parseHttpDate IMF-fixdate" {
     try std.testing.expect(ts != null);
     try std.testing.expectEqual(@as(i64, 784111777), ts.?);
     try std.testing.expect(parseHttpDate("invalid date") == null);
+}
+
+test "parseHttpDate validates leap years and four-digit years" {
+    // std.time.epoch supplies the Gregorian leap-year rules.
+    try std.testing.expect(parseHttpDate("Sat, 29 Feb 2000 00:00:00 GMT") != null);
+    try std.testing.expect(parseHttpDate("Thu, 29 Feb 1900 00:00:00 GMT") == null);
+    try std.testing.expect(parseHttpDate("Fri, 01 Jan 10000 00:00:00 GMT") == null);
 }

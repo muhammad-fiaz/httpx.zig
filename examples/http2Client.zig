@@ -7,7 +7,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn h2Handler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn h2Handler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     std.debug.print("HTTP/2 Server received: {s} {s}\n", .{ @tagName(ctx.method), ctx.path });
     return .{
         .status = 200,

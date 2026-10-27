@@ -8,7 +8,7 @@ it is actually implemented:
 - **Downloads**: `.existing = .verifyExisting` skips re-downloads, and
   `.replaceIfChanged` uses conditional headers. See
   `examples/downloadExisting.zig`.
-- **DNS**: client-side cache via `ClientConfig.dnsCache`.
+- **DNS**: client-side cache via `.dnsCache` in the `Client.init` options.
 
 ## Expected Output
 

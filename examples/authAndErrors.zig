@@ -17,7 +17,7 @@ const SecretData = struct {
 };
 
 // 1. Custom 404 HTML handler
-fn customNotFound(ctx: *httpx.Context) anyerror!httpx.Response {
+fn customNotFound(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.htmlStatus(404,
         \\<!DOCTYPE html>
         \\<html>
@@ -31,7 +31,7 @@ fn customNotFound(ctx: *httpx.Context) anyerror!httpx.Response {
 }
 
 // 2. Custom 500 / Exception handler
-fn customErrorHandler(ctx: *httpx.Context, err: anyerror) anyerror!httpx.Response {
+fn customErrorHandler(ctx: *httpx.router.Context, err: anyerror) anyerror!httpx.router.Response {
     return try ctx.renderJsonStatus(500, .{
         .status = 500,
         .errorName = @errorName(err),
@@ -40,12 +40,12 @@ fn customErrorHandler(ctx: *httpx.Context, err: anyerror) anyerror!httpx.Respons
 }
 
 // Public Route
-fn handlePublic(ctx: *httpx.Context) anyerror!httpx.Response {
+fn handlePublic(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.html("<h1>Public Area</h1><p>Welcome to the open web server.</p>");
 }
 
 // Bearer Token Protected Route
-fn handleRestrictedBearer(ctx: *httpx.Context) anyerror!httpx.Response {
+fn handleRestrictedBearer(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const token = ctx.bearerToken() orelse {
         return ctx.htmlStatus(401, "<h1>401 Unauthorized</h1><p>Missing or invalid Bearer token.</p>");
     };
@@ -61,7 +61,7 @@ fn handleRestrictedBearer(ctx: *httpx.Context) anyerror!httpx.Response {
 }
 
 // Basic Auth Protected Route
-fn handleRestrictedBasic(ctx: *httpx.Context) anyerror!httpx.Response {
+fn handleRestrictedBasic(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const creds = ctx.basicAuth() orelse {
         return ctx.htmlStatus(401, "<h1>401 Unauthorized</h1><p>Missing Basic Auth credentials.</p>");
     };
@@ -77,7 +77,7 @@ fn handleRestrictedBasic(ctx: *httpx.Context) anyerror!httpx.Response {
 }
 
 // Route that deliberately throws an error to trigger customErrorHandler
-fn handleFaulty(ctx: *httpx.Context) anyerror!httpx.Response {
+fn handleFaulty(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     _ = ctx;
     return error.DatabaseUnavailable;
 }
@@ -87,6 +87,8 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
 
     // 1. Initialize Server
     var server = try httpx.Server.init(allocator, io, .{
@@ -124,7 +126,7 @@ pub fn main() !void {
     {
         var urlBuf: [128]u8 = undefined;
         const notFoundUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/invalid/path/404", .{port});
-        var resp = try httpx.get(notFoundUrl, .{});
+        var resp = try client.get(notFoundUrl, .{});
         defer resp.deinit();
 
         std.debug.print("1. Custom 404 Response Status: {d}\n", .{resp.status});
@@ -135,7 +137,7 @@ pub fn main() !void {
     {
         var urlBuf: [128]u8 = undefined;
         const faultyUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/v1/faulty", .{port});
-        var resp = try httpx.get(faultyUrl, .{});
+        var resp = try client.get(faultyUrl, .{});
         defer resp.deinit();
 
         std.debug.print("2. Custom 500 Response Status: {d}\n", .{resp.status});
@@ -146,7 +148,7 @@ pub fn main() !void {
     {
         var urlBuf: [128]u8 = undefined;
         const bearerUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/v1/protected/bearer", .{port});
-        var resp = try httpx.get(bearerUrl, .{});
+        var resp = try client.get(bearerUrl, .{});
         defer resp.deinit();
 
         std.debug.print("3. Missing Bearer Token Status: {d}\n", .{resp.status});
@@ -156,7 +158,7 @@ pub fn main() !void {
     {
         var urlBuf: [128]u8 = undefined;
         const bearerUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/v1/protected/bearer", .{port});
-        var resp = try httpx.get(bearerUrl, .{
+        var resp = try client.get(bearerUrl, .{
             .bearerAuth = "secret-token-xyz",
         });
         defer resp.deinit();
@@ -169,7 +171,7 @@ pub fn main() !void {
     {
         var urlBuf: [128]u8 = undefined;
         const basicUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/api/v1/protected/basic", .{port});
-        var resp = try httpx.get(basicUrl, .{
+        var resp = try client.get(basicUrl, .{
             .basicAuth = "admin:pass123",
         });
         defer resp.deinit();

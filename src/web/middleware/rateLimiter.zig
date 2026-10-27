@@ -126,6 +126,7 @@ const BucketEntry = struct {
 /// Production-grade thread-safe rate limiter with multi-dimensional keys and memory bounds.
 pub const RateLimiter = struct {
     allocator: Allocator,
+    io: std.Io,
     defaultPolicy: RateLimitPolicy,
     maxEntries: usize,
     buckets: std.StringHashMap(BucketEntry),
@@ -139,15 +140,16 @@ pub const RateLimiter = struct {
     };
 
     /// Creates a new RateLimiter. `.{}` yields a 100 req/min limiter.
-    pub fn init(allocator: Allocator, config: Config) RateLimiter {
+    pub fn init(allocator: Allocator, io: std.Io, config: Config) RateLimiter {
         var p = config.policy;
         if (p.burst == 0) p.burst = p.limit;
         return .{
             .allocator = allocator,
+            .io = io,
             .defaultPolicy = p,
             .maxEntries = @max(1, config.maxEntries),
             .buckets = std.StringHashMap(BucketEntry).init(allocator),
-            .lastSweepMs = clock.millisNow(),
+            .lastSweepMs = clock.monotonicMillis(io),
         };
     }
 
@@ -357,7 +359,7 @@ pub fn extractKey(
 
 test "rate limiter allows requests within limit and rejects when exceeded" {
     const a = std.testing.allocator;
-    var rl = RateLimiter.init(a, .{ .policy = .{ .limit = 3, .windowMs = 1000 } });
+    var rl = RateLimiter.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .policy = .{ .limit = 3, .windowMs = 1000 } });
     defer rl.deinit();
 
     try std.testing.expectEqual(@as(?u32, 2), try rl.check("user:alice", 0));
@@ -369,7 +371,7 @@ test "rate limiter allows requests within limit and rejects when exceeded" {
 
 test "per-user rate limit isolation: user A blocked does not block user B" {
     const a = std.testing.allocator;
-    var rl = RateLimiter.init(a, .{ .policy = .{ .limit = 2, .windowMs = 1000 } });
+    var rl = RateLimiter.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .policy = .{ .limit = 2, .windowMs = 1000 } });
     defer rl.deinit();
 
     // User A uses both tokens
@@ -386,7 +388,7 @@ test "per-user rate limit isolation: user A blocked does not block user B" {
 
 test "token bucket refilling over time" {
     const a = std.testing.allocator;
-    var rl = RateLimiter.init(a, .{ .policy = .{ .limit = 10, .windowMs = 1000 } });
+    var rl = RateLimiter.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .policy = .{ .limit = 10, .windowMs = 1000 } });
     defer rl.deinit();
 
     // Consume 10 tokens at t=0
@@ -410,7 +412,7 @@ test "token bucket refilling over time" {
 
 test "rate limit 429 response formatting" {
     const a = std.testing.allocator;
-    var rl = RateLimiter.init(a, .{ .policy = .{ .limit = 1, .windowMs = 1000 } });
+    var rl = RateLimiter.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .policy = .{ .limit = 1, .windowMs = 1000 } });
     defer rl.deinit();
 
     _ = try rl.check("ip:1.2.3.4", 0);
@@ -427,7 +429,7 @@ test "rate limit 429 response formatting" {
 
 test "bounded memory and eviction of inactive entries" {
     const a = std.testing.allocator;
-    var rl = RateLimiter.init(a, .{ .policy = .{
+    var rl = RateLimiter.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .policy = .{
         .limit = 10,
         .windowMs = 1000,
         .ttlMs = 500,
@@ -451,7 +453,7 @@ test "bounded memory and eviction of inactive entries" {
 
 test "concurrent requests safety" {
     const a = std.testing.allocator;
-    var rl = RateLimiter.init(a, .{ .policy = .{ .limit = 1000, .windowMs = 10000 } });
+    var rl = RateLimiter.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .policy = .{ .limit = 1000, .windowMs = 10000 } });
     defer rl.deinit();
 
     const Worker = struct {
@@ -462,7 +464,7 @@ test "concurrent requests safety" {
             var keyBuf: [32]u8 = undefined;
             const key = std.fmt.bufPrint(&keyBuf, "thread:{d}", .{self.id}) catch return;
             for (0..50) |_| {
-                _ = self.limiter.check(key, clock.millisNow()) catch {};
+                _ = self.limiter.check(key, clock.monotonicMillis(self.limiter.io)) catch {};
             }
         }
     };

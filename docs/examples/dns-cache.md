@@ -48,10 +48,10 @@ pub fn main() !void {
 
 ## Advanced Direct Cache API
 
-For specialized network applications, the standalone cache in `src/net/dns/cache.zig` can be used directly:
+For specialized network applications, the standalone cache in `src/net/dns/dnsCache.zig` can be used directly:
 
 ```zig
-const cacheMod = @import("httpx").dnsCache; // or @import("src/net/dns/cache.zig")
+const cacheMod = @import("httpx").dnsCache; // or @import("src/net/dns/dnsCache.zig")
 ```
 
 The cache exposes atomic observability counters:

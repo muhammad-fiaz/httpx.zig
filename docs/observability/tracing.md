@@ -18,7 +18,7 @@ const span_id = "00f067aa0ba902b7";
 var trace_hdr_buf: [128]u8 = undefined;
 const trace_hdr = try std.fmt.bufPrint(&trace_hdr_buf, "00-{s}-{s}-01", .{ trace_id, span_id });
 
-const resp = try client.get("https://backend.service/api/query", .{
+var resp = try client.get("https://backend.service/api/query", .{
     .headers = &.{
         .{ .name = "traceparent", .value = trace_hdr },
     },
@@ -29,7 +29,7 @@ defer resp.deinit();
 ## Server Trace Extractor Middleware
 
 ```zig
-fn traceMiddleware(ctx: *httpx.Context) !void {
+fn traceMiddleware(ctx: *httpx.router.Context) !void {
     if (ctx.header("traceparent")) |traceparent| {
         // Store trace ID in context local state for subsequent logs and queries
         ctx.set("traceparent", traceparent);

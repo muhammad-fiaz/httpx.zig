@@ -8,7 +8,7 @@ pub fn main() !void {
     std.debug.print("=== HTTPX Native FTP Client ===\n", .{});
 
     // 1. Configure FTP options
-    const ftpOpts: httpx.ftp.Options = .{
+    const ftpOpts: httpx.protocols.ftp.Options = .{
         .host = "test.rebex.net",
         .port = 21,
         .user = "demo",
@@ -19,7 +19,7 @@ pub fn main() !void {
     std.debug.print("1. FTP client configuration: {s}:{d}\n", .{ ftpOpts.host, ftpOpts.port });
 
     // 2. Connect via TCP.
-    var client = httpx.ftp.Client.connect(allocator, ftpOpts) catch |err| {
+    var client = httpx.protocols.ftp.Client.connect(allocator, ftpOpts) catch |err| {
         std.debug.print("3. FTP connection failed: {s}\n", .{@errorName(err)});
         std.debug.print("   Skipping network tests (server may be unreachable).\n", .{});
         return;
@@ -89,7 +89,7 @@ fn ftpsLoopbackDemo() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.ftp.Server.init(allocator, io, .{
+    var server = try httpx.protocols.ftp.Server.init(allocator, io, .{
         .port = 0,
         .certChainPem = ftpsCertPem,
         .privateKeyPem = ftpsKeyPem,
@@ -102,14 +102,14 @@ fn ftpsLoopbackDemo() !void {
     defer server.deinit();
     const port = server.localPort();
     const Runner = struct {
-        fn run(s: *httpx.ftp.Server) void {
+        fn run(s: *httpx.protocols.ftp.Server) void {
             s.run(1) catch {};
         }
     };
     const th = try std.Thread.spawn(.{}, Runner.run, .{&server});
     defer th.join();
 
-    var client = try httpx.ftp.Client.init(allocator, io, .{
+    var client = try httpx.protocols.ftp.Client.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = port,
         .secure = true,

@@ -40,7 +40,7 @@ Converters validate at match time, so more specific routes win
 deterministically and handlers get real types:
 
 ```zig
-fn getUser(ctx: *httpx.Context) anyerror!httpx.Response {
+fn getUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const id = ctx.paramInt("id") orelse return ctx.textStatus(400, "bad id");
     // ...use id: i64...
 }

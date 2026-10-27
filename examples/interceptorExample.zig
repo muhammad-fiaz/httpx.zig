@@ -41,7 +41,7 @@ pub fn main() !void {
     std.debug.print("Interceptor example verification completed successfully.\n", .{});
 }
 
-fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Request example\"}",

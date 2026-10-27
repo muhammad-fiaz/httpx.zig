@@ -31,23 +31,17 @@
 > [!TIP]
 > If you build with httpx.zig, make sure to give it a star.
 
-> [!NOTE]
-> **Project maturity:** This project is under active development. It provides a comprehensive HTTP client and server implementation with modern protocol, networking, security, and performance features, and contributions are welcome.
+## Why httpx.zig
+
+> [!IMPORTANT]
+> Zig's standard library provides `std.http`, an HTTP/1.1 client with TLS and an HTTP/1.1 server. It does not provide ALPN negotiation, HTTP/2, HTTP/3, QUIC, HPACK, or QPACK, and it leaves routing, uploads, downloads, and document parsing to the application. Projects that need those capabilities usually add C libraries, combine several Zig packages, or write the protocol glue themselves.
 >
-> **Custom HTTP/2, HTTP/3, TLS, Streaming, and Parsing implementation:** Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, ALPN negotiation, OpenAPI documentation UI, full HTML/XML DOM parsing, or built-in progress download engines.
-> httpx.zig implements these subsystems **natively in Zig**, including:
-> - **TLS 1.3 server engine + TLS 1.2/1.3 client** (RFC 5246 / RFC 8446) — a custom server-side TLS 1.3 engine (handshake, X25519 key exchange, ChaCha20-Poly1305 / AES-128-GCM / AES-256-GCM record encryption, ALPN negotiation per RFC 7301 with HTTP/1.1 fallback, X.509 parsing/verification, P-256 ECDSA certificates); the HTTPS *client* transport builds on `std.crypto.tls` (TLS 1.2/1.3) with httpx verification policy (SNI, SAN/hostname checks, system + custom trust stores)
-> - **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
-> - **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and HTTP/1.x connection pooling (RFC 7540; HTTP/2 connections are per-request for now)
-> - **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
-> - **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, version negotiation, and transport parameters
-> - **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling
-> - **Streaming Downloader & File Manager** with zero-config `loaders.zig` progress bars, dynamic speed & ETA estimation, range-based resumption, atomic updates, and cryptographic verification (SHA-256, SHA-384, SHA-512, MD5, SHA-1)
-> - **Unified DOM Engine & Web Resource Inspector** for HTML5, XML, RSS/Atom/JSON feeds, robots.txt, sitemaps, and CSS selector queries with zero manual per-element memory freeing
-> - **Self-Hosted Interactive Documentation** supporting Swagger UI, ReDoc, Scalar, and GraphiQL with embedded offline assets
+> httpx.zig provides that missing layer as one native Zig stack. The client, server, TLS 1.3 engine, TLS 1.2 interoperability, HTTP/1.0 through HTTP/3, QUIC, DNS, proxies, connection pooling, cookies, middleware, static files, WebSocket primitives, multipart uploads, and streaming downloads share consistent ownership, error handling, and lifecycle rules.
+>
+> Use httpx.zig for API clients that require HTTP/2 or HTTP/3, services that terminate TLS 1.3 directly, download managers that need resumable ranges and checksum verification, content pipelines that parse HTML, XML, feeds, robots.txt, or sitemaps, and teams that want an integrated server framework instead of a collection of adapters. For small HTTP/1.1 programs, `std.http` remains a good fit. The project is actively developed, and contributions are welcome.
 
 
-**Related Zig projects:**
+**Similar Zig projects:**
 
 - For **Env.zig** (.env parsing), check out **[env.zig](https://github.com/muhammad-fiaz/env.zig)**.
 - For **TUI** support, check out **[tui.zig](https://github.com/muhammad-fiaz/tui.zig)**.
@@ -73,6 +67,8 @@
 - For **Brotli compression** support, check out **[brotli.zig](https://github.com/muhammad-fiaz/brotli.zig)**.
 - For **Zstd compression** support, check out **[zstd.zig](https://github.com/muhammad-fiaz/zstd.zig)**.
 - For **Tree-Sitter** support, check out **[tree-sitter.zig](https://github.com/muhammad-fiaz/tree-sitter.zig)**
+- For **Regex** support, check out **[regex.zig](https://github.com/muhammad-fiaz/regex.zig)**
+
 ---
 
 <details>
@@ -80,26 +76,27 @@
 
 | Feature | Description |
 |---------|-------------|
-| **Protocol Support** | Full client + server runtime across HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3: HTTP/2 over TCP/TLS with ALPN `h2`, stream multiplexing, flow control, SETTINGS, and trailers; HTTP/3 over QUIC/UDP with native TLS 1.3, ALPN `h3`, QPACK encoder/decoder streams, dynamic table management, request/response streaming, and TLS 1.3 0-RTT early-data resumption. |
+| **Protocol Support** | HTTP/1.0, HTTP/1.1, and HTTP/2 client/server runtimes; HTTP/3 client/server runtime over QUIC/TLS 1.3. QUIC includes ACK tracking, PTO/loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, Retry/token validation, v1/v2 version negotiation, and 1-RTT key updates. HTTP/3 still has no HelloRetryRequest handling or connection migration; the high-level client pools HTTP/3 connections for sequential reuse and does not multiplex concurrent requests over one connection. |
 | **Header Compression** | HPACK (RFC 7541) for HTTP/2; QPACK (RFC 9204) for HTTP/3 with static and dynamic table management. |
+| **Response Compression** | Automatic `Accept-Encoding` negotiation and on-the-fly compression for zstd, Brotli, gzip, and deflate across HTTP/1.1, HTTP/2, and HTTP/3, with configurable codec levels and input bounds. |
 | **HTTP/2 & HTTP/3 ALPN** | Server-side ALPN negotiation during the TLS handshake with graceful HTTP/1.1 fallback; the native client offers ALPN too, so explicit `.http2` over TLS negotiates `h2` end to end, and `.http3` over QUIC negotiates `h3` end to end. |
-| **Stream Multiplexing** | HTTP/2 and HTTP/3 stream state machines with flow control (WINDOW_UPDATE / MAX_STREAM_DATA), SETTINGS enforcement, GOAWAY/RST_STREAM, and trailers. |
-| **Connection Pooling** | Automatic reuse of TCP keep-alive connections, multiplexed HTTP/2 and HTTP/3 connections, and TLS session resumption caching. |
-| **Unified DOM & Web Parsing** | Native parser for HTML5, XML, RSS/Atom/JSON feeds, robots.txt, and sitemaps with zero-leak arena architecture. |
+| **Stream Multiplexing** | HTTP/2 and HTTP/3 stream state machines with flow control (WINDOW_UPDATE / MAX_STREAM_DATA), SETTINGS enforcement, GOAWAY/RST_STREAM, and trailers. The HTTP/2 server keeps one state per concurrent stream; the high-level client serializes per pooled connection. |
+| **Connection Pooling** | TCP keep-alive reuse, HTTP/2 and HTTP/3 connection pooling, transport-level stream multiplexing (the high-level client serializes per pooled connection), and TLS session resumption caching. |
+| **Unified DOM & Web Parsing** | DOM parsing and inspection for HTML, XML, RSS/Atom/JSON feeds, robots.txt, sitemaps, and a documented CSS-selector subset with zero-leak arena architecture. |
 | **Streaming Downloader** | Resumable chunked file downloader powered by `loaders.zig` progress bars, ETA calculation, and hash verification. |
 | **Pattern-based Routing** | Intuitive server routing with typed parameters (`/users/{id:int}`), slugs, catch-alls, groups, mounting, named routes + reversing, 404/405 handling, and OpenAPI integration. |
-| **Middleware Stack** | Built-in middleware for CORS, security headers (Helmet), recovery, logging, rate limiting, and CSRF, plus health endpoints. |
-| **TLS/SSL** | Native TLS 1.3 server engine + native TLS 1.3 client (RFC 8446) plus TLS 1.2/1.3 via the std-based HTTPS/1.1 transport: server ALPN (RFC 7301) with HTTP/1.1 fallback, native client ALPN (`h2` for HTTP/2 over TLS, `h3` for HTTP/3 over QUIC), X25519 ECDHE, AEAD ciphers, X.509 parsing/verification (P-256 ECDSA server certs), system/custom trust stores, hostname checks, mutual TLS enforcement (required/optional client certificates, presented via high-level `.tls = .{ .clientCertPem, .clientKeyPem }`), TLS 1.3 PSK session resumption (`psk_dhe_ke` NST tickets) + HelloRetryRequest, and complete TLS 1.3 0-RTT early data with bounded server-side anti-replay cache (`ReplayCache`) and safe HTTP method policy. |
+| **Middleware Stack** | Built-in middleware for CORS, security headers (Helmet), automated CSRF protection, and recovery; rate limiting, server event callbacks, health endpoints, and CSRF token helpers. |
+| **TLS/SSL** | Native TLS 1.3 server engine + native TLS 1.3 client (RFC 8446) plus TLS 1.2/1.3 via the std-based HTTPS/1.1 transport: server ALPN (RFC 7301) with HTTP/1.1 fallback, native client ALPN (`h2` for HTTP/2 over TLS, `h3` for HTTP/3 over QUIC), X25519MLKEM768/X25519 key exchange, ChaCha20-Poly1305/AES-128-GCM server record ciphers, X.509 parsing/verification (P-256 ECDSA server certs), system/custom trust stores, hostname checks, mutual TLS enforcement (required/optional client certificates, presented via high-level `.tls = .{ .clientCertPem, .clientKeyPem }`), TLS 1.3 PSK session resumption (`psk_dhe_ke` NST tickets) + HelloRetryRequest, and opt-in TLS 1.3 0-RTT early data with bounded server-side anti-replay cache (`ReplayCache`) and safe HTTP method policy. |
 | **Static Files & SPA** | High-performance static file serving with ETag, cache control, conditional GET, MIME detection, and SPA HTML5 fallback. |
 | **Interactive API Docs** | Auto-generated OpenAPI 3.1 specifications with embedded Swagger UI, ReDoc, Scalar, and GraphiQL interfaces. |
 | **Streaming & Realtime** | Chunked transfer responses with optional trailers, Server-Sent Events (SSE), and WebSocket frame support. |
 | **Conditional Requests** | ETag and Last-Modified static file serving with `If-None-Match` revalidation. |
 | **DNS Resolution** | Resolution with caching and concurrent resolver coalescing. |
-| **Cookie APIs** | First-class request/response cookie jar and header helpers for both client and server contexts. |
-| **Security & Hardening** | Security headers (Helmet), CSRF token helpers, and CRLF injection defenses. |
-| **Multipart Form Data** | RFC 2046 streaming multipart body builder and parser for text fields and large file uploads. |
-| **FTP & FTPS** | FTP client and server with PASV/EPSV, directory listing, streaming uploads/downloads, and resumption (explicit FTPS returns a typed error until TLS wiring lands). |
-| **Concurrency & Workers** | Thread-safe bounded `WorkerPool` and parallel client requests (`getAll`, `requestAll`). |
+| **Cookie APIs** | Standalone RFC 6265 cookie jar plus per-request cookie and header helpers for client and server contexts. |
+| **Security & Hardening** | Security headers (Helmet), automated CSRF middleware and token helpers, and CRLF injection defenses. |
+| **Multipart Form Data** | RFC 2046 multipart encoder and parser for text fields and file parts with streaming disk-sink and bounded buffered support. |
+| **FTP & FTPS** | FTP client and server with PASV/EPSV, directory listing, streaming uploads/downloads, and resumption; explicit FTPS (`AUTH TLS`/`PBSZ`/`PROT`) is supported. |
+| **Concurrency & Workers** | Thread-safe bounded `httpx.concurrency.Pool` and parallel client requests (`getAll`, `requestAll`). |
 | **Proxy Support** | Client-side HTTP forward proxy (CONNECT with `Proxy-Authorization` auth, `407` → `error.ProxyAuthRequired`) and SOCKS4/4a plus SOCKS5/SOCKS5h tunneling with remote-DNS delegation. |
 | **Structured Logging** | Zero-allocation level-filtered structured logger supporting custom sinks and terminal formatting. |
 | **Cross-Platform Sockets** | Robust non-blocking Windows socket handling with `WSAEWOULDBLOCK` retry, plus `MSG_NOSIGNAL` on POSIX. |
@@ -160,20 +157,20 @@ zig build -Dtarget=x86-windows
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.2)**
+**Latest Release (v0.2.3)**
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
+```
+
+**Previous Release (v0.2.2)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz
 ```
 
-**Previous Release (v0.2.1)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
-```
-
 > [!WARNING]
-> Zig **0.17** is required by **v0.2.2**. Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.2**.
+> Zig **0.17** is required by **v0.2.3**. Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.3**.
 
 ### Method 2: Zig Fetch (Latest Development Build)
 
@@ -188,7 +185,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz",
         .hash = "...", // Run `zig fetch --save <url>` to generate the hash.
     },
 },
@@ -227,36 +224,116 @@ exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 
 ## Quick Start
 
-### Global Functions (Zero-Config, No Allocator Required)
+Initialize an `httpx.Client` with your allocator and I/O context. The client provides built-in connection pooling, TLS session resumption, and DNS caching:
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
 
 pub fn main() !void {
-    // 1. Primary unified fetch API (supports GET, POST, headers, typed JSON)
-    var resp = try httpx.fetch("https://httpbun.com/get", .{});
-    defer resp.deinit();
-    std.debug.print("GET Status: {d}, Body: {s}\n", .{ resp.status, resp.bytes() });
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
 
-    // 2. POST with strongly typed Zig struct (serialized via std.json)
-    const CreateUser = struct { name: []const u8, email: []const u8 };
-
-    var post = try httpx.fetch("https://httpbun.com/post", .{
-        .method = .POST,
-        .json = CreateUser{ .name = "Alice", .email = "alice@example.com" },
+    // 1. Initialize client
+    var client = httpx.Client.init(allocator, io, .{
+        .timeoutMs = 10_000,
+        .followRedirects = true,
+        .maxRedirects = 5,
+        .dnsCache = .{ .enable = true, .ttlMs = 60_000 },
     });
-    defer post.deinit();
+    defer client.deinit();
 
-    // 3. Strongly typed response decoding (httpbun echoes our JSON under "json")
-    const Echo = struct { json: ?CreateUser = null };
-    const echo = try post.json(Echo);
-    if (echo.json) |user| std.debug.print("User: {s} <{s}>\n", .{ user.name, user.email });
+    // 2. GET request
+    var res = try client.get("https://httpbun.com/get", .{});
+    defer res.deinit();
+    std.debug.print("Status: {d}, Body: {s}\n", .{ res.status, res.text() });
 
-    // 4. Convenience verb shortcuts
-    var del = try httpx.delete("https://httpbun.com/delete", .{});
-    defer del.deinit();
+    // 3. POST with strongly-typed JSON payload
+    const User = struct { name: []const u8, role: []const u8 };
+    var postRes = try client.postJson("https://httpbun.com/post", User{
+        .name = "Alice",
+        .role = "engineer",
+    }, .{});
+    defer postRes.deinit();
 }
+```
+
+### Stateful Client Operations
+
+Execute standard HTTP methods and advanced requests across shared connections:
+
+```zig
+const std = @import("std");
+const httpx = @import("httpx");
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // Initialize stateful client
+    var client = httpx.Client.init(allocator, io, .{
+        .timeoutMs = 10_000,
+        .followRedirects = true,
+        .maxRedirects = 5,
+        .dnsCache = .{ .enable = true, .ttlMs = 60_000 },
+    });
+    defer client.deinit();
+
+    // Standard HTTP methods
+    var getRes = try client.get("https://httpbun.com/get", .{});
+    defer getRes.deinit();
+
+    var postRes = try client.post("https://httpbun.com/post", .{
+        .body = "hello=world",
+        .headers = &.{.{ .name = "content-type", .value = "application/x-www-form-urlencoded" }},
+    });
+    defer postRes.deinit();
+
+    // Strongly-typed JSON serialization & deserialization
+    const CreateUser = struct { name: []const u8, email: []const u8 };
+    var userRes = try client.postJson("https://httpbun.com/post", CreateUser{
+        .name = "Alice",
+        .email = "alice@example.com",
+    }, .{});
+    defer userRes.deinit();
+
+    const Echo = struct { json: ?CreateUser = null };
+    const echo = try userRes.json(Echo);
+    if (echo.json) |user| std.debug.print("Created: {s} <{s}>\n", .{ user.name, user.email });
+
+    // Additional HTTP verbs
+    var putRes = try client.put("https://httpbun.com/put", .{ .body = "updated" });
+    defer putRes.deinit();
+
+    var patchRes = try client.patch("https://httpbun.com/patch", .{ .body = "partial" });
+    defer patchRes.deinit();
+
+    var delRes = try client.delete("https://httpbun.com/delete", .{});
+    defer delRes.deinit();
+}
+```
+
+### 3. Fluent RequestBuilder
+
+For advanced request assembly with headers, query parameters, authorization, and timeouts:
+
+```zig
+var builder = client.requestBuilder(.POST, "https://httpbun.com/post");
+defer builder.deinit();
+
+_ = try builder.header("X-API-Key", "secret-token-123");
+_ = try builder.query("filter", "active");
+_ = builder.timeoutMs(5000);
+_ = builder.bearerAuth("jwt-token-xyz");
+_ = try builder.json(.{ .query = "search term", .page = @as(u32, 1) });
+
+var res = try builder.send();
+defer res.deinit();
+std.debug.print("Response: {d} {s}\n", .{ res.status, res.text() });
 ```
 
 
@@ -323,27 +400,26 @@ pub fn main() !void {
 
 ```zig
 // Parallel requests - getAll (arrays and slices accepted directly).
-// Each Response must be deinited; the slice itself is freed with the
-// caller's allocator (page_allocator for these global helpers).
+// Each Response must be deinited; free the slice with the client's allocator.
 const urls = [_][]const u8{
     "https://httpbun.com/get",
     "https://httpbun.com/headers",
 };
-var results = try httpx.getAll(urls);
+var results = try client.getAll(urls);
 defer {
     for (results) |*r| r.deinit();
-    std.heap.page_allocator.free(results);
+    allocator.free(results);
 }
 
 // Parallel requests - requestAll
-const reqs = [_]httpx.RequestOptions{
+const reqs = .{
     .{ .method = .GET, .url = "https://httpbun.com/get" },
     .{ .method = .GET, .url = "https://httpbun.com/headers" },
 };
-var batch = try httpx.requestAll(reqs);
+var batch = try client.requestAll(reqs);
 defer {
     for (batch) |*r| r.deinit();
-    std.heap.page_allocator.free(batch);
+    allocator.free(batch);
 }
 ```
 
@@ -407,7 +483,7 @@ pub fn main() !void {
     });
 
     // 6. Native FTP Download with progress
-    const ftpRes = try httpx.ftp.download(allocator, .{
+    const ftpRes = try httpx.client.download.ftpDownload(io, allocator, .{
         .host = "ftp.example.com",
         .remotePath = "/pub/archive.tar.gz",
         .destinationPath = "downloads/",
@@ -421,7 +497,7 @@ pub fn main() !void {
 `httpx.zig` includes a comprehensive document parsing, DOM manipulation, and CSS selector inspection engine.
 
 > [!NOTE]
-> HTTPX parses HTML, XML, and templates with Tree-sitter grammars defined in their owning modules (`parsing/html.zig`, `parsing/xml.zig`, `web/templates/parser.zig`); DOM/AST semantics are built directly from those syntax trees. Applications interact exclusively with HTTPX's public APIs (`httpx.Parser`, `response.html()`, `doc.select()`). Tree-sitter is strictly an internal implementation detail and never needs to be imported by application code.
+> HTTPX parses HTML, XML, and templates with Tree-sitter grammars defined in their owning modules (`parsing/html.zig`, `parsing/xml.zig`, `web/templates/parser.zig`); DOM/AST semantics are built directly from those syntax trees. Applications interact exclusively with HTTPX's public APIs (`httpx.parsing.Parser`, `response.html()`, `doc.select()`). Tree-sitter is strictly an internal implementation detail and never needs to be imported by application code.
 
 ```zig
 const std = @import("std");
@@ -434,7 +510,7 @@ pub fn main() !void {
 
 
     // 1. Initialize unified parser with reusable allocator & configuration
-    var p = httpx.Parser.init(allocator, .{});
+    var p = httpx.parsing.Parser.init(allocator, .{});
 
     // 2. Parse HTML directly
     var doc = try p.parseHtml("<html><head><title>My Page</title></head><body><h1 class='title'>Hello</h1><a href='/link'>Click</a></body></html>");
@@ -469,11 +545,11 @@ pub fn main() !void {
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn hello(ctx: *httpx.Context) anyerror!httpx.Response {
+fn hello(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .message = "Hello!" });
 }
 
-fn page(ctx: *httpx.Context) anyerror!httpx.Response {
+fn page(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.html("<h1>Welcome</h1>");
 }
 
@@ -515,7 +591,7 @@ const ItemResponse = struct {
     price: u64,
 };
 
-fn createItem(ctx: *httpx.Context, req: CreateItemRequest) !httpx.ApiResult(ItemResponse) {
+fn createItem(ctx: *httpx.router.Context, req: CreateItemRequest) !httpx.ApiResult(ItemResponse) {
     _ = ctx;
     return .created(.{
         .id = 101,
@@ -524,7 +600,7 @@ fn createItem(ctx: *httpx.Context, req: CreateItemRequest) !httpx.ApiResult(Item
     });
 }
 
-fn getItem(ctx: *httpx.Context, req: struct { id: u64 }) !httpx.ApiResult(ItemResponse) {
+fn getItem(ctx: *httpx.router.Context, req: struct { id: u64 }) !httpx.ApiResult(ItemResponse) {
     _ = ctx;
     return .ok(.{
         .id = req.id,
@@ -726,7 +802,7 @@ The delay between retries increases linearly: `retryDelayMs * (attempt + 1)`.
 ## DNS Resolution
 
 ```zig
-var resolver = httpx.resolve.Resolver.init(allocator, io);
+var resolver = httpx.net.resolve.Resolver.init(allocator, io);
 const addrs = try resolver.lookup("example.com", .{ .port = 443 });
 defer allocator.free(addrs);
 ```
@@ -734,7 +810,7 @@ defer allocator.free(addrs);
 ## Context Methods & Response Types
 
 ```zig
-fn handler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn handler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     // 1. Query parameters & Cookies
     const page = ctx.queryParam("page") orelse "1";
     const token = ctx.cookie("session");
@@ -778,7 +854,7 @@ The `examples/` directory contains runnable examples demonstrating all features 
 - [`dns_demo`](examples/dnsDemo.zig) - DNS resolution and IP checks
 - [`dns_cache`](examples/dnsCache.zig) - DNS caching
 - [`compression_demo`](examples/compressionDemo.zig) - gzip/deflate/brotli compression
-- [`retry_demo`](examples/retryDemo.zig) - Retry with exponential backoff
+- [`retry_demo`](examples/retryDemo.zig) - Client retries with linear backoff
 - [`http11_client`](examples/http11Client.zig) - HTTP/1.1 client
 - [`connectivity`](examples/connectivity.zig) - Online checks and connectivity probes
 - [`browser_demo_server`](examples/browserDemoServer.zig) - Browser demo server
@@ -790,7 +866,7 @@ The `examples/` directory contains runnable examples demonstrating all features 
 - [`custom_responses`](examples/customResponses.zig) - Rich response generation (HTML, JSON, XML, RSS, Atom, robots.txt, sitemap.xml, binary)
 - [`static_files`](examples/staticFiles.zig) - Static file serving with ETag
 - [`health_check`](examples/healthCheck.zig) - Liveness/readiness probes
-- [`streaming`](examples/streaming.zig) - Chunked transfer and SSE
+- [`streaming`](examples/streaming.zig) - Buffered response reader (plus SSE examples)
 - [`auth_and_errors`](examples/authAndErrors.zig) - Authentication and error handling
 - [`live_static_watcher`](examples/liveStaticWatcher.zig) - Live file watcher and auto-reload
 - [`docs_server`](examples/docsServer.zig) - Swagger UI, ReDoc, Scalar, GraphiQL
@@ -798,9 +874,9 @@ The `examples/` directory contains runnable examples demonstrating all features 
 - [`spa_fallback`](examples/spaFallback.zig) - SPA with HTML/JS/CSS and client-side routing
 - [`websocket_server`](examples/websocketServer.zig) - WebSocket server
 - [`sse_server`](examples/sseServer.zig) - Server-Sent Events
-- [`session_server`](examples/sessionServer.zig) - TTL-based session management
+- [`session_server`](examples/sessionServer.zig) - Cookie-backed session flow
 - [`metrics_server`](examples/metricsServer.zig) - Prometheus metrics
-- [`interceptor_example`](examples/interceptorExample.zig) - Request/response interceptors
+- [`interceptor_example`](examples/interceptorExample.zig) - Client request wrappers around a server route
 - [`cookie_server`](examples/cookieServer.zig) - Cookie management
 - [`cors_server`](examples/corsServer.zig) - CORS configuration
 - [`helmet_server`](examples/helmetServer.zig) - Security headers (Helmet)
@@ -836,7 +912,7 @@ The `examples/` directory contains runnable examples demonstrating all features 
 
 **File Watching, Static Assets & Live Reload:**
 - [`file_watcher`](examples/fileWatcher.zig) - OS-native file monitoring (Windows ReadDirectoryChangesW, Linux inotify, macOS kqueue) with rename pairing and browser live reload
-- [`live_reload`](examples/liveReload.zig) - Live reload dev server with CSS hot reload vs HTML page reload
+- [`liveReload`](examples/liveReload.zig) - Live reload dev server with CSS hot reload vs HTML page reload
 - [`static_site`](examples/staticSite.zig) - Static site directory mounting with ETag caching and conditional GET
 - [`spa_server`](examples/spaServer.zig) - Single Page Application server with client-side route fallback
 - [`development_server`](examples/developmentServer.zig) - Unified dev server combining watcher, live reload, and incremental parsing
@@ -854,7 +930,7 @@ The `examples/` directory contains runnable examples demonstrating all features 
 - [`web/templates/inheritance`](examples/web/templates/inheritance/main.zig) - Template inheritance
 - [`web/templates/loops`](examples/web/templates/loops/main.zig) - Template loops
 - [`web/templates/includes`](examples/web/templates/includes/main.zig) - Template includes
-- [`web/templates/live_reload`](examples/web/templates/live_reload/main.zig) - Live-reload templates
+- [`web/templates/liveReload`](examples/web/templates/liveReload/main.zig) - Live-reload templates
 - [`web/templates/jinja`](examples/web/templates/jinja/main.zig) - Flask-style templates (extends, blocks, includes, macros, filters)
 - [`website`](examples/website/main.zig) - Full website with embedded assets
 
@@ -966,6 +1042,151 @@ Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-02).
 
 See [docs/reference/benchmarks.md](docs/reference/benchmarks.md) for full methodology and detailed analysis.
 
+## Examples
+
+The [`examples/`](examples) directory contains runnable examples demonstrating all features of `httpx.zig`.
+
+To run any example:
+```sh
+zig build run-<example-name>
+# Examples:
+#   zig build run-simple-get
+#   zig build run-spa-fallback
+#   zig build run-download
+#   zig build run-rest-api
+```
+
+### Core Client Examples
+- [`simple_get`](examples/simpleGet.zig) — Basic GET requests
+- [`post_json`](examples/postJson.zig) — POST with JSON body
+- [`custom_headers`](examples/customHeaders.zig) — Custom header management
+- [`connection_pool`](examples/connectionPool.zig) — Connection pooling and stats
+- [`redirect`](examples/redirect.zig) — Redirect handling
+- [`http10_client`](examples/http10Client.zig) — HTTP/1.0 client
+- [`http11_client`](examples/http11Client.zig) — HTTP/1.1 client
+- [`tls_get`](examples/tlsGet.zig) — HTTPS client with TLS
+- [`https_client`](examples/httpsClient.zig) — HTTPS client with TLS
+- [`retry_demo`](examples/retryDemo.zig) — Client retries with linear backoff
+- [`concurrent_demo`](examples/concurrentDemo.zig) — Parallel request patterns
+
+<details>
+<summary><strong>Server & Web API Examples</strong> (Click to expand)</summary>
+
+- [`simple_server`](examples/simpleServer.zig) — Minimal HTTP server
+- [`rest_api`](examples/restApi.zig) — Typed REST endpoints with automatic OpenAPI 3.1 & Docs
+- [`custom_responses`](examples/customResponses.zig) — Rich response generation (HTML, JSON, XML, RSS, Atom, robots.txt, sitemap.xml, binary)
+- [`static_files`](examples/staticFiles.zig) — Static file serving with ETag
+- [`health_check`](examples/healthCheck.zig) — Liveness/readiness probes
+- [`streaming`](examples/streaming.zig) — Buffered response reader (plus SSE examples)
+- [`auth_and_errors`](examples/authAndErrors.zig) — Authentication and error handling
+- [`live_static_watcher`](examples/liveStaticWatcher.zig) — Live file watcher and auto-reload
+- [`docs_server`](examples/docsServer.zig) — Swagger UI, ReDoc, Scalar, GraphiQL
+- [`graphql_server`](examples/graphqlServer.zig) — GraphQL server
+- [`spa_fallback`](examples/spaFallback.zig) — SPA with HTML/JS/CSS and client-side routing
+- [`websocket_server`](examples/websocketServer.zig) — WebSocket server
+- [`sse_server`](examples/sseServer.zig) — Server-Sent Events
+- [`session_server`](examples/sessionServer.zig) — Cookie-backed session flow
+- [`metrics_server`](examples/metricsServer.zig) — Prometheus metrics
+- [`interceptor_example`](examples/interceptorExample.zig) — Client request wrappers around a server route
+- [`cookie_server`](examples/cookieServer.zig) — Cookie management
+- [`cors_server`](examples/corsServer.zig) — CORS configuration
+- [`helmet_server`](examples/helmetServer.zig) — Security headers (Helmet)
+- [`rate_limit_server`](examples/rateLimitServer.zig) — Rate limiting
+- [`body_parser_server`](examples/bodyParserServer.zig) — Request body parsing
+- [`custom_server`](examples/customServer.zig) — Request ID and body parsing
+- [`tls_server`](examples/tlsServer.zig) — HTTPS/TLS server with self-signed cert
+- [`ftp_server`](examples/ftpServer.zig) — FTP-like server
+- [`http11_server`](examples/http11Server.zig) — HTTP/1.1 server
+- [`routing_demo`](examples/routingDemo.zig) — Typed routing, groups, mounts, reversing
+- [`static_embedded`](examples/staticEmbedded.zig) — Embedded-asset serving
+- [`browser_demo_server`](examples/browserDemoServer.zig) — Browser demo server
+- [`full_integration`](examples/fullIntegration.zig) — Full client/server integration
+</details>
+
+<details>
+<summary><strong>Download & File Inspection Examples</strong> (Click to expand)</summary>
+
+- [`download`](examples/download.zig) — Download with built-in progress bar and destination inference
+- [`download_batch`](examples/downloadBatch.zig) — Concurrent worker pool batch downloads
+- [`download_resume`](examples/downloadResume.zig) — Range-based resumption
+- [`download_verify`](examples/downloadVerify.zig) — Cryptographic verification (SHA-256, SHA-384, SHA-512, MD5, SHA-1)
+- [`download_checksum_file`](examples/downloadChecksumFile.zig) — Remote checksum file lookup and verification
+- [`download_existing`](examples/downloadExisting.zig) — Existing file policies (fail, overwrite, skip, resume, replace_if_changed)
+- [`download_update`](examples/downloadUpdate.zig) — Atomic self-updates with rollback safety
+- [`download_info`](examples/downloadInfo.zig) — Metadata HEAD inspection without full body download
+- [`download_custom_progress`](examples/downloadCustomProgress.zig) — Custom progress tracking and observers
+- [`ftp_download`](examples/ftpDownload.zig) — Direct FTP file download
+</details>
+
+<details>
+<summary><strong>Parsing & Inspection (DOM Engine) Examples</strong> (Click to expand)</summary>
+
+- [`html_client`](examples/htmlClient.zig) — Client fetch and automatic response.html() parsing
+- [`html_select`](examples/htmlSelect.zig) — CSS selector engine queries (tag, .class, #id, [attr], combinators)
+- [`html_extract`](examples/htmlExtract.zig) — High-level extraction helpers (title, text, links, forms, images)
+- [`html_stream`](examples/htmlStream.zig) — Streaming reader input parsing
+- [`html_file`](examples/htmlFile.zig) — HTML file parsing and node inspection
+- [`html_transform`](examples/htmlTransform.zig) — Structural mutation, attribute updating, and XSS-safe serialization
+- [`parse_html`](examples/parseHtml.zig) — HTML DOM, CSS Selectors, RSS feeds, robots.txt, and sitemaps
+</details>
+
+<details>
+<summary><strong>File Watching, Static Assets & Live Reload Examples</strong> (Click to expand)</summary>
+
+- [`file_watcher`](examples/fileWatcher.zig) — OS-native file monitoring (Windows ReadDirectoryChangesW, Linux inotify, macOS kqueue) with rename pairing and browser live reload
+- [`liveReload`](examples/liveReload.zig) — Live reload dev server with CSS hot reload vs HTML page reload
+- [`static_site`](examples/staticSite.zig) — Static site directory mounting with ETag caching and conditional GET
+- [`spa_server`](examples/spaServer.zig) — Single Page Application server with client-side route fallback
+- [`development_server`](examples/developmentServer.zig) — Unified dev server combining watcher, live reload, and incremental parsing
+- [`static/index.html`](examples/static/index.html) — Main HTML page for SPA example
+- [`static/about.html`](examples/static/about.html) — About page
+- [`static/contact.html`](examples/static/contact.html) — Contact page with form
+- [`static/styles.css`](examples/static/styles.css) — CSS styles
+- [`static/app.js`](examples/static/app.js) — Client-side JavaScript
+</details>
+
+<details>
+<summary><strong>Protocols, Security & Network Transport Examples</strong> (Click to expand)</summary>
+
+- [`http2_client`](examples/http2Client.zig) — HTTP/2 client
+- [`http2_multiplex`](examples/http2Multiplex.zig) — HTTP/2 stream multiplexing
+- [`http2_tls`](examples/http2Tls.zig) — HTTP/2 over TLS with ALPN + chain verification
+- [`http3_client`](examples/http3Client.zig) — HTTP/3 client
+- [`http3_quic`](examples/http3Quic.zig) — HTTP/3 over QUIC
+- [`http3_0rtt`](examples/http3ZeroRtt.zig) — HTTP/3 Zero-RTT connection resumption
+- [`tls12_client`](examples/tls12Client.zig) — TLS 1.2 with self-signed cert
+- [`tls13_client`](examples/tls13Client.zig) — TLS 1.3 with self-signed cert
+- [`tls_mtls`](examples/tlsMtls.zig) — Mutual TLS (mTLS)
+- [`resolve`](examples/resolve.zig) — DNS resolution
+- [`dns_demo`](examples/dnsDemo.zig) — DNS resolution and IP checks
+- [`dns_cache`](examples/dnsCache.zig) — DNS caching
+- [`proxy_demo`](examples/proxyDemo.zig) — HTTP forward proxy
+- [`connectivity`](examples/connectivity.zig) — Online checks and connectivity probes
+- [`compression_demo`](examples/compressionDemo.zig) — gzip/deflate/brotli compression
+- [`ftp_client`](examples/ftpClient.zig) — FTP client
+- [`tcp_local`](examples/tcpLocal.zig) — Local TCP socket server and client communication
+- [`udp_local`](examples/udpLocal.zig) — Local UDP datagram transmission and reception
+</details>
+
+<details>
+<summary><strong>Templates & Website Examples</strong> (Click to expand)</summary>
+
+- [`web/templates/basic`](examples/web/templates/basic/main.zig) — Basic template rendering
+- [`web/templates/inheritance`](examples/web/templates/inheritance/main.zig) — Template inheritance
+- [`web/templates/loops`](examples/web/templates/loops/main.zig) — Template loops
+- [`web/templates/includes`](examples/web/templates/includes/main.zig) — Template includes
+- [`web/templates/liveReload`](examples/web/templates/liveReload/main.zig) — Live-reload templates
+- [`web/templates/jinja`](examples/web/templates/jinja/main.zig) — Flask/Jinja2-style templates (extends, blocks, includes, macros, filters)
+- [`website`](examples/website/main.zig) — Full website with embedded assets
+</details>
+
+<details>
+<summary><strong>Advanced Features</strong> (Click to expand)</summary>
+
+- [`multipart`](examples/multipart.zig) — Multipart form data
+- [`openapi`](examples/openapi.zig) — OpenAPI spec generation
+</details>
+
 ## Contributing
 
 Contributions are welcome! Please:
@@ -982,57 +1203,64 @@ Contributions are welcome! Please:
 httpx.zig/
 ├── src/
 │   ├── httpx.zig                    # Public API entry point & re-exports
-│   ├── client/                      # HTTP client
-│   │   ├── client.zig               # Client struct, connection pooling, retry
-│   │   ├── request.zig              # Raw request API, TLS options, auto-TLS
-│   │   ├── cookies.zig              # Client cookie jar
-│   │   └── download.zig             # File download, resume, verify, batch
+│   ├── client/                      # HTTP client engine
+│   │   ├── httpClient.zig           # Client struct, connection pooling, retry
+│   │   ├── requestBuilder.zig       # Request builder, TLS options, streaming responses
+│   │   ├── connectionPool.zig       # Connection pool manager and stats
+│   │   ├── cookieJar.zig            # RFC 6265 client cookie jar
+│   │   └── downloadManager.zig      # File download, resume, verify, batch
 │   ├── server/
-│   │   └── lifecycle.zig            # Server struct, Config, run/stop/start, Ctrl+C
+│   │   └── httpServer.zig           # Server struct, routing, TLS, run/stop lifecycle
 │   ├── web/
+│   │   ├── app.zig                  # Unified App facade
 │   │   ├── router/                  # Router, Context, Response, pattern matching
-│   │   ├── middleware/              # CORS, Helmet, rate-limit, auth, CSRF, proxy
-│   │   ├── static_files/            # Static file serving, ETag, MIME detection
+│   │   ├── middleware/              # CORS, Helmet, rate-limit, auth, CSRF helpers
+│   │   ├── rest/                    # Type-driven REST API framework & OpenAPI reflection
+│   │   ├── staticFiles/             # Static file serving, ETag, MIME detection
 │   │   ├── spa/                     # SPA HTML5 fallback serving
-│   │   ├── openapi/                 # OpenAPI 3.1 spec generation
+│   │   ├── openApi/                 # OpenAPI 3.1 spec generation
 │   │   ├── docs/                    # Swagger UI, ReDoc, Scalar, GraphiQL
 │   │   ├── graphql/                 # GraphQL schema, resolvers, mount
-│   │   ├── sse/                     # Server-Sent Events writer/parser
-│   │   ├── websocket/               # WebSocket handshake & frames
-│   │   ├── multipart/               # Multipart form encoder/parser
+│   │   ├── sse/                     # Server-Sent Events writer & parser
+│   │   ├── websocket/               # WebSocket handshake & frame handling
+│   │   ├── multipart/               # Multipart form encoder & parser
 │   │   ├── health/                  # Health check endpoints
-│   │   ├── metrics/                 # Metrics registry
+│   │   ├── metrics/                 # Metrics registry & Prometheus exposition
 │   │   ├── auth/                    # Basic & Bearer auth helpers
-│   │   ├── templates/               # Flask-style template engine (Tree-sitter syntax, cached AST)
+│   │   ├── templates/               # Native template engine (cached AST, Jinja syntax)
 │   │   ├── site/                    # File-based website routing
-│   │   ├── watcher/                 # File watcher + browser live-reload client
-│   │   ─   ─   ─   ─   backend.zig          # Watcher facade, index, queue, debounce
-│   │   ─   ─   ─   ─   events.zig           # Event model, classification, coalescing
-│   │   ─   ─   ─   ─   client.zig           # Browser-side SSE live-reload script
-│   │   ─   ─   ─   ─   dependency.zig       # Dependency graph for reload invalidation
-│   │   ─   ─   ─   ─   windows/linux/macos.zig  # Native backends (RDC/inotify/kqueue)
+│   │   └── watcher/                 # File watcher + browser live-reload client
+│   │       ├── watcherBackend.zig   # Watcher facade, debounce, index
+│   │       ├── watcherEvents.zig    # Event model, classification
+│   │       ├── fileWatcher.zig      # Browser-side SSE live-reload script
+│   │       ├── watcherDependency.zig# Dependency graph for invalidation
+│   │       ├── windowsWatcher.zig   # Windows ReadDirectoryChangesW backend
+│   │       ├── linuxWatcher.zig     # Linux inotify backend
+│   │       └── macosWatcher.zig     # macOS kqueue backend
 │   ├── protocols/
-│   │   ├── http1/                   # HTTP/1.x parser & writer
-│   │   ├── http2/                   # HTTP/2 frame, HPACK, transport
-│   │   ├── http3/                   # HTTP/3 frame, connection
-│   │   ├── quic/                    # QUIC varint, packet, crypto
-│   │   ├── tls/                     # TLS 1.3 server engine + native client, QUIC-TLS, ALPN, mTLS
+│   │   ├── http1/                   # HTTP/1.x parser, writer, semantics
+│   │   ├── http2/                   # HTTP/2 frame, HPACK, transport, connection
+│   │   ├── http3/                   # HTTP/3 frame, QPACK, connection, transport
+│   │   ├── quic/                    # QUIC varint, packet, crypto, connection, frames
+│   │   ├── tls/                     # Native TLS 1.3 / 1.2 engine, ALPN, mTLS, certificates
 │   │   ├── ftp/                     # FTP client & server
-│   │   └── common/                  # Shared protocol utilities
+│   │   └── common/                  # Shared protocol utilities (Huffman tables, varints)
 │   ├── net/
-│   │   ├── resolve.zig              # DNS resolver with caching
-│   │   ├── address.zig              # Network address abstraction
-│   │   ├── socks5.zig               # SOCKS5/5h proxy tunneling
-│   │   ├── socks4.zig               # SOCKS4/4a proxy tunneling
+│   │   ├── address.zig              # Network address abstraction (IPv4 + IPv6)
+│   │   ├── connectivity.zig         # Network connectivity probing
+│   │   ├── dns/                     # DNS protocol resolver & cache
+│   │   │   ├── dnsResolver.zig      # DNS resolution logic
+│   │   │   └── dnsCache.zig         # TTL-aware DNS cache
 │   │   ├── proxy.zig                # HTTP proxy support
-│   │   ├── connectivity.zig         # Connectivity probing
-│   │   └── dns/                     # DNS protocol + cache
+│   │   ├── resolve.zig              # Host resolution abstraction
+│   │   ├── socks4.zig               # SOCKS4/4a proxy tunneling
+│   │   └── socks5.zig               # SOCKS5/5h proxy tunneling
 │   ├── sockets/
 │   │   ├── tcp.zig                  # Cross-platform TCP socket (IOCP/epoll)
-│   │   ├── udp.zig                  # UDP socket
+│   │   ├── udp.zig                  # UDP socket wrapper
 │   │   └── sys.zig                  # Raw syscall layer + error mapping
-│   ├── compression/                 # gzip, brotli, zstd, deflate
-│   ├── concurrency/                 # WorkerPool, parallel requests
+│   ├── compression/                 # gzip, brotli, zstd, deflate codecs
+│   ├── concurrency/                 # pool, bounded queue, parallel requests
 │   ├── parsing/                     # HTML/XML DOM, CSS selectors, feeds
 │   │   ├── html.zig                 # HTML5 parser
 │   │   ├── xml.zig                  # XML parser
@@ -1043,15 +1271,15 @@ httpx.zig/
 │   │   ├── feed.zig                 # RSS/Atom/JSON feed parser
 │   │   ├── robots.zig               # robots.txt parser
 │   │   └── sitemap.zig              # Sitemap parser
-│   ├── common/                      # Method, Status, Headers, URI, Logger, clock
+│   ├── common/                      # Method, Status, Headers, URI, Logger, clock, IO
 │   ├── utils/                       # MIME detection (mime.zig), filesystem helpers (fs.zig)
 │   └── assets/                      # Embedded UI assets (Swagger, ReDoc, GraphiQL)
 ├── examples/                        # 80+ runnable examples
-│   ├── simpleGet.zig               # Basic HTTP GET
-│   ├── postJson.zig                # POST with JSON body
-│   ├── simpleServer.zig            # Minimal HTTP server
-│   ├── graphqlServer.zig           # GraphQL + REST + OpenAPI
-│   ├── tlsGet.zig                  # HTTPS with TLS
+│   ├── simpleGet.zig                # Basic HTTP GET
+│   ├── postJson.zig                 # POST with JSON body
+│   ├── simpleServer.zig             # Minimal HTTP server
+│   ├── graphqlServer.zig            # GraphQL + REST + OpenAPI
+│   ├── tlsGet.zig                   # HTTPS with TLS
 │   ├── download.zig                 # File download with progress
 │   └── ...                          # 70+ more (see examples/ dir)
 ├── bench/

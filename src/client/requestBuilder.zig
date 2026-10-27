@@ -29,6 +29,7 @@ const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
 const mimeMod = @import("../utils/mime.zig");
 const uriMod = @import("../common/uri.zig");
+const parseMod = @import("../common/parse.zig");
 const Method = @import("../common/method.zig").Method;
 const parserMod = @import("../protocols/http1/parser.zig");
 const semanticsMod = @import("../protocols/http1/semantics.zig");
@@ -53,6 +54,10 @@ const quicConn = @import("../protocols/quic/connection.zig");
 const quicEp = @import("../protocols/quic/transport.zig");
 const quicHs = @import("../protocols/quic/handshake.zig");
 const h3Transport = @import("../protocols/http3/transport.zig");
+const bodySourceMod = @import("../common/bodySource.zig");
+pub const BodySource = bodySourceMod.BodySource;
+pub const SliceReader = bodySourceMod.SliceReader;
+pub const CallbackReader = bodySourceMod.CallbackReader;
 
 /// Adapter: OS resolver -> string addresses for the single-flight cache.
 pub fn systemLookupStrings(
@@ -93,8 +98,8 @@ pub fn parseAddrString(s: []const u8, port: u16) ?addressMod.Address {
 }
 
 /// TLS verification policy for one request.
-/// Secure by construction: an https:// request WITHOUT `tls` options fails
-/// with TlsConfigRequired instead of silently skipping verification.
+/// Secure by construction: HTTPS defaults to system trust verification and
+/// rejects TLS truncation unless the caller explicitly opts in.
 pub const TlsOptions = struct {
     verify: tlsTransport.VerifyMode = .caBundle,
     /// CA bundle required when verify == .caBundle.
@@ -109,7 +114,7 @@ pub const TlsOptions = struct {
     /// Client private key (PEM, P-256 ECDSA) for `clientCertPem`.
     clientKeyPem: ?[]const u8 = null,
     /// Only safe when the caller validates completeness via framing.
-    allowTruncation: bool = true,
+    allowTruncation: bool = false,
 };
 
 /// Early data (0-RTT) options for TLS 1.3 / QUIC / HTTP/3.
@@ -136,6 +141,9 @@ pub const Request = struct {
     bodyKind: BodyKind = .none,
     /// Raw bytes for any kind; for `form` this is "k=v&k2=v2" already encoded.
     body: []const u8 = "",
+    /// Optional streaming body source. When provided, streams request body
+    /// incrementally without buffering in memory across HTTP/1.1, HTTP/2, and HTTP/3.
+    bodySource: ?BodySource = null,
     followRedirects: bool = true,
     maxRedirects: u8 = 5,
     /// Required for https:// URLs. Absence on an https URL is an error.
@@ -168,6 +176,10 @@ pub const Request = struct {
 
     pub fn text(url: []const u8, bodyText: []const u8) Request {
         return .{ .url = url, .method = .POST, .bodyKind = .raw, .body = bodyText };
+    }
+
+    pub fn stream(url: []const u8, method: Method, source: BodySource) Request {
+        return .{ .url = url, .method = method, .bodySource = source };
     }
 };
 
@@ -267,6 +279,55 @@ pub const Response = struct {
     /// Returns a reader over the body for streaming.
     pub fn reader(self: *const Response) std.Io.Reader {
         return std.Io.Reader.fixed(self.body);
+    }
+};
+
+/// Represents an active, unbuffered streaming response whose body can be consumed incrementally.
+pub const ResponseStream = struct {
+    allocator: Allocator,
+    status: u16,
+    version: HttpVersion = .http11,
+    headers: []Header,
+    body: BodySource,
+
+    pub fn deinit(self: *ResponseStream) void {
+        self.body.close();
+        for (self.headers) |h| {
+            self.allocator.free(h.name);
+            self.allocator.free(h.value);
+        }
+        self.allocator.free(self.headers);
+    }
+
+    pub fn header(self: *const ResponseStream, name: []const u8) ?[]const u8 {
+        for (self.headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
+        }
+        return null;
+    }
+
+    /// Read incremental body chunks into `buf`. Returns 0 on EOF.
+    pub fn read(self: *ResponseStream, buf: []u8) anyerror!usize {
+        return self.body.read(buf);
+    }
+
+    /// Bounded helper to consume remainder of stream into newly allocated slice.
+    pub fn readAllAlloc(self: *ResponseStream, a: Allocator, maxBytes: usize) ![]u8 {
+        var list = std.ArrayList(u8).empty;
+        errdefer list.deinit(a);
+        var chunkBuf: [16 * 1024]u8 = undefined;
+        while (true) {
+            const n = try self.body.read(&chunkBuf);
+            if (n == 0) break;
+            if (n > maxBytes -| list.items.len) return Error.ResponseTooLarge;
+            try list.appendSlice(a, chunkBuf[0..n]);
+        }
+        return list.toOwnedSlice(a);
+    }
+
+    /// Retrieve trailers if available after body EOF.
+    pub fn trailers(self: *ResponseStream, a: Allocator) anyerror!?[]const Header {
+        return self.body.getTrailers(a);
     }
 };
 
@@ -375,20 +436,7 @@ const Transport = union(enum) {
 
 /// Percent-encodes a query value (RFC 3986 unreserved kept).
 pub fn encodeQueryValue(a: Allocator, s: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(a);
-    const hexd = "0123456789ABCDEF";
-    for (s) |c| {
-        const safe = std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~';
-        if (safe) {
-            try out.append(a, c);
-        } else {
-            try out.append(a, '%');
-            try out.append(a, hexd[c >> 4]);
-            try out.append(a, hexd[c & 15]);
-        }
-    }
-    return out.toOwnedSlice(a);
+    return parseMod.percentEncodeAlloc(a, s);
 }
 
 /// Builds the origin-form request target, preserving a query string already
@@ -489,12 +537,102 @@ fn mapNativeTlsError(err: anyerror) Error {
 }
 
 /// One HTTP/3 request/response exchange over live UDP (RFC 9114 over
+/// Runs one HTTP/3 request/response exchange over an established pooled H3 connection.
+fn h3DoPooledRequest(
+    a: Allocator,
+    pc: *h3Transport.PooledConn,
+    req: Request,
+    authority: []const u8,
+    target: []const u8,
+    reqHeaders: []const writerMod.Header,
+    reqBody: ?[]const u8,
+) Error!Response {
+    const deadlineMs = req.timeoutMs orelse 30_000;
+    var conv = std.ArrayList(h3Transport.Header).empty;
+    defer conv.deinit(a);
+    for (reqHeaders) |h| conv.append(a, .{ .name = h.name, .value = h.value }) catch return Error.OutOfMemory;
+    const maxSize = @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize);
+    const h3respRaw = if (req.bodySource) |bs|
+        pc.requestStreaming(
+            req.method.toString(),
+            "https",
+            authority,
+            target,
+            conv.items,
+            bs,
+            deadlineMs,
+            maxSize,
+        ) catch |e| switch (e) {
+            error.OutOfMemory => return Error.OutOfMemory,
+            error.Timeout => return Error.Timeout,
+            error.ResponseTooLarge => return Error.ResponseTooLarge,
+            else => return Error.ProtocolViolation,
+        }
+    else
+        pc.request(
+            req.method.toString(),
+            "https",
+            authority,
+            target,
+            conv.items,
+            reqBody,
+            deadlineMs,
+            maxSize,
+        ) catch |e| switch (e) {
+            error.OutOfMemory => return Error.OutOfMemory,
+            error.Timeout => return Error.Timeout,
+            error.ResponseTooLarge => return Error.ResponseTooLarge,
+            else => return Error.ProtocolViolation,
+        };
+    const h3resp = h3respRaw;
+    var outHdrs = a.alloc(Header, h3resp.headers.len) catch {
+        for (h3resp.headers) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(h3resp.headers);
+        for (h3resp.trailers) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(h3resp.trailers);
+        a.free(h3resp.body);
+        return Error.OutOfMemory;
+    };
+    for (h3resp.headers, 0..) |h, i| outHdrs[i] = .{ .name = h.name, .value = h.value };
+    const decodedBody = decodeResponseBodyLimited(a, outHdrs, h3resp.body, maxSize) catch |e| {
+        for (outHdrs) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(outHdrs);
+        for (h3resp.trailers) |h| {
+            a.free(h.name);
+            a.free(h.value);
+        }
+        a.free(h3resp.trailers);
+        a.free(h3resp.body);
+        return e;
+    };
+    for (h3resp.trailers) |h| {
+        a.free(h.name);
+        a.free(h.value);
+    }
+    a.free(h3resp.trailers);
+    a.free(h3resp.headers);
+    return .{
+        .allocator = a,
+        .status = h3resp.status,
+        .version = .http3,
+        .headers = outHdrs,
+        .body = decodedBody,
+    };
+}
+
+/// One live HTTP/3 client exchange over QUIC (RFC 9114 /
 /// RFC 9000/9001). Resolves the origin, performs the QUIC + TLS 1.3
 /// handshake (ALPN `h3`, chain + hostname verification), runs a single
-/// GET-style exchange, and maps the result onto `Response`.
-///
-/// Fresh connection per call (no H3 pooling yet); proxy routes are
-/// rejected by the caller before reaching here.
+/// exchange, and parks the connection in the pool when available.
 fn h3DoRequest(
     a: Allocator,
     io: std.Io,
@@ -504,6 +642,7 @@ fn h3DoRequest(
     port: u16,
     authority: []const u8,
     target: []const u8,
+    reqHeaders: []const writerMod.Header,
     reqBody: ?[]const u8,
 ) Error!Response {
     if (host.len == 0) return Error.InvalidUrl;
@@ -556,21 +695,30 @@ fn h3DoRequest(
     if (!haveDest) return Error.DnsFailed;
     const dest = destAddr.toStd(null);
 
-    const t = tlsOpts orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true };
-    var conn = quicConn.Connection.init(a, io, .client, .{}) catch return Error.OutOfMemory;
-    defer conn.deinit();
-    var ep = quicEp.Endpoint.init(a, io, conn, .{}) catch return Error.ConnectFailed;
-    defer ep.deinit();
+    const t = tlsOpts orelse TlsOptions{};
 
-    const nowMs: u64 = @intCast(clockMod.millisNow());
+    const nowMs: u64 = @intCast(clockMod.millisNow(io));
     var sessionToResume: ?tlsSession.ClientSession = null;
     defer if (sessionToResume) |*s| s.deinit(a);
-    if (req.sessionCache) |sc| {
-        sessionToResume = sc.getWithAlpn(host, port, nowMs, "h3");
-    }
-
+    const sessionPolicy = sessionPolicyFingerprint(t);
     const isMethodSafe = req.method == .GET or req.method == .HEAD or req.method == .OPTIONS;
     const canSendEarlyData = req.earlyData.enabled and (isMethodSafe or req.earlyData.allowUnsafeMethods);
+
+    if (!canSendEarlyData) {
+        if (req.pool) |p| {
+            if (p.acquireH3(host, port, sessionPolicy)) |pooled| {
+                const resp = h3DoPooledRequest(a, pooled, req, authority, target, reqHeaders, reqBody) catch |e| {
+                    pooled.deinit();
+                    return e;
+                };
+                p.releaseH3(host, port, sessionPolicy, pooled);
+                return resp;
+            }
+        }
+    }
+    if (req.sessionCache) |sc| {
+        sessionToResume = sc.getWithAlpnPolicy(host, port, nowMs, "h3", sessionPolicy);
+    }
 
     var capturedSession: tlsSession.ClientSession = .{
         .ticket = "",
@@ -586,93 +734,39 @@ fn h3DoRequest(
     };
     defer if (capturedSession.ticket.len > 0) capturedSession.deinit(a);
 
-    var driver = quicHs.Driver.initClient(io, a, .{
-        .host = host,
+    var pc = h3Transport.PooledConn.connect(a, io, host, port, dest, .{
         .verify = t.verify,
         .caPem = t.caPem,
         .session = if (sessionToResume) |*s| s else null,
         .earlyData = canSendEarlyData,
         .sessionOut = &capturedSession,
-    });
-    defer driver.deinit();
-    conn.tls = .{ .ctx = &driver, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
-
-    // One pump spans handshake + exchange; stopping joins its reader thread.
-    var pump: quicEp.Pump = .{};
-    pump.start(&ep, a) catch return Error.OutOfMemory;
-    defer pump.stop();
-
-    quicHs.performHandshake(&ep, &pump, &driver, null, null, null, dest, deadlineMs) catch |e| {
-        return mapQuicHandshakeError(e, driver.detail);
+        .timeoutMs = deadlineMs,
+    }) catch |e| switch (e) {
+        error.OutOfMemory => return Error.OutOfMemory,
+        error.Timeout => return Error.Timeout,
+        error.AlpnMismatch => return Error.AlpnNegotiationFailed,
+        error.TlsCertificateNotVerified => return Error.TlsCertificateNotVerified,
+        else => return Error.TlsHandshakeFailed,
     };
 
     if (capturedSession.ticket.len > 0) {
         if (req.sessionCache) |sc| {
-            sc.put(host, port, &capturedSession);
+            sc.putWithPolicy(host, port, &capturedSession, sessionPolicy);
         }
     }
 
-    var h3c = h3Transport.Client.init(a, &ep);
-    defer h3c.deinit();
-    var hasAcceptEncoding = false;
-    for (req.headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) hasAcceptEncoding = true;
-    }
-    var conv = std.ArrayList(h3Transport.Header).empty;
-    defer conv.deinit(a);
-    for (req.headers) |h| conv.append(a, .{ .name = h.name, .value = h.value }) catch return Error.OutOfMemory;
-    if (!hasAcceptEncoding) {
-        conv.append(a, .{ .name = "accept-encoding", .value = compression.acceptEncodingValue() }) catch return Error.OutOfMemory;
-    }
-    const h3respRaw = h3c.request(
-        req.method.toString(),
-        "https",
-        authority,
-        target,
-        conv.items,
-        reqBody,
-        &pump,
-        dest,
-        deadlineMs,
-        @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize),
-    ) catch |e| switch (e) {
-        error.OutOfMemory => return Error.OutOfMemory,
-        error.Timeout => return Error.Timeout,
-        error.ResponseTooLarge => return Error.ResponseTooLarge,
-        else => return Error.ProtocolViolation,
-    };
-    const h3resp = h3respRaw;
-    // Convert header type (same shape, different namespace); the
-    // transport allocator IS `a`, so ownership transfers cleanly, and
-    // decodeResponseBody consumes the body exactly like h2DoRequest.
-    var outHdrs = a.alloc(Header, h3resp.headers.len) catch {
-        for (h3resp.headers) |h| {
-            a.free(h.name);
-            a.free(h.value);
-        }
-        a.free(h3resp.headers);
-        a.free(h3resp.body);
-        return Error.OutOfMemory;
-    };
-    for (h3resp.headers, 0..) |h, i| outHdrs[i] = .{ .name = h.name, .value = h.value };
-    const maxSize = @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize);
-    const decodedBody = decodeResponseBodyLimited(a, outHdrs, h3resp.body, maxSize) catch |e| {
-        for (outHdrs) |h| {
-            a.free(h.name);
-            a.free(h.value);
-        }
-        a.free(outHdrs);
-        a.free(h3resp.body);
+    const resp = h3DoPooledRequest(a, pc, req, authority, target, reqHeaders, reqBody) catch |e| {
+        pc.deinit();
         return e;
     };
-    a.free(h3resp.headers);
-    return .{
-        .allocator = a,
-        .status = h3resp.status,
-        .version = .http3,
-        .headers = outHdrs,
-        .body = decodedBody,
-    };
+
+    if (req.pool) |p| {
+        p.releaseH3(host, port, sessionPolicy, pc);
+    } else {
+        pc.deinit();
+    }
+
+    return resp;
 }
 
 /// Maps QUIC handshake failures onto the request error set, preserving
@@ -702,6 +796,7 @@ fn h2DoRequest(
     scheme: []const u8,
     authority: []const u8,
     reqBody: ?[]const u8,
+    bodySource: ?BodySource,
     maxSize: usize,
 ) Error!Response {
     var hasAcceptEncoding = false;
@@ -712,11 +807,18 @@ fn h2DoRequest(
     defer a.free(conv);
     for (reqHeaders, 0..) |h, i| conv[i] = .{ .name = h.name, .value = h.value };
     if (!hasAcceptEncoding) conv[reqHeaders.len] = .{ .name = "accept-encoding", .value = compression.acceptEncodingValue() };
-    const r = pc.request(method, target, conv, scheme, authority, reqBody, maxSize) catch |e| switch (e) {
-        error.OutOfMemory => return Error.OutOfMemory,
-        error.ResponseTooLarge => return Error.ResponseTooLarge,
-        else => return Error.ProtocolViolation,
-    };
+    const r = if (bodySource) |bs|
+        pc.requestStreaming(method, target, conv, scheme, authority, bs, maxSize) catch |e| switch (e) {
+            error.OutOfMemory => return Error.OutOfMemory,
+            error.ResponseTooLarge => return Error.ResponseTooLarge,
+            else => return Error.ProtocolViolation,
+        }
+    else
+        pc.request(method, target, conv, scheme, authority, reqBody, maxSize) catch |e| switch (e) {
+            error.OutOfMemory => return Error.OutOfMemory,
+            error.ResponseTooLarge => return Error.ResponseTooLarge,
+            else => return Error.ProtocolViolation,
+        };
     // Convert header type (same shape, different namespace); the
     // transport allocator IS `a`, so ownership transfers cleanly.
     var outHdrs = a.alloc(Header, r.headers.len) catch {
@@ -748,7 +850,276 @@ fn h2DoRequest(
     };
 }
 
+const BufferedStreamState = struct {
+    allocator: Allocator,
+    data: []u8,
+    pos: usize = 0,
+
+    fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
+        const self: *BufferedStreamState = @ptrCast(@alignCast(ctx));
+        if (self.pos >= self.data.len) return 0;
+        const available = self.data.len - self.pos;
+        const toCopy = @min(available, buf.len);
+        @memcpy(buf[0..toCopy], self.data[self.pos .. self.pos + toCopy]);
+        self.pos += toCopy;
+        return toCopy;
+    }
+
+    fn reset(ctx: *anyopaque) anyerror!void {
+        const self: *BufferedStreamState = @ptrCast(@alignCast(ctx));
+        self.pos = 0;
+    }
+
+    fn close(ctx: *anyopaque) void {
+        const self: *BufferedStreamState = @ptrCast(@alignCast(ctx));
+        self.allocator.free(self.data);
+        self.allocator.destroy(self);
+    }
+
+    pub fn source(self: *BufferedStreamState) BodySource {
+        return .{
+            .ptr = self,
+            .readFn = read,
+            .contentLength = self.data.len,
+            .trailersFn = null,
+            .resetFn = reset,
+            .closeFn = close,
+        };
+    }
+};
+
+fn wrapBufferedResponse(a: Allocator, resp: Response) Error!ResponseStream {
+    const state = a.create(BufferedStreamState) catch return Error.OutOfMemory;
+    state.* = .{
+        .allocator = a,
+        .data = resp.body,
+        .pos = 0,
+    };
+    return ResponseStream{
+        .allocator = a,
+        .status = resp.status,
+        .version = resp.version,
+        .headers = resp.headers,
+        .body = state.source(),
+    };
+}
+
+const FramingMode = enum {
+    contentLength,
+    chunked,
+    close,
+};
+
+const Http1StreamState = struct {
+    allocator: Allocator,
+    transport: Transport,
+    tlsBox: ?*tlsClientMod.Client.Connection,
+    pool: ?*Pool,
+    host: [256]u8,
+    hostLen: usize,
+    port: u16,
+    isTls: bool,
+    mode: FramingMode,
+    remainingCl: u64 = 0,
+    maxBodySize: u64 = maxResponseBodySize,
+    totalBodyRead: u64 = 0,
+    leftover: std.ArrayList(u8),
+    leftoverPos: usize = 0,
+    chunkDecoder: parserMod.ChunkedDecoder,
+    wire: std.ArrayList(u8),
+    decodedBuf: std.ArrayList(u8),
+    decodedPos: usize = 0,
+    closed: bool = false,
+    done: bool = false,
+    reusable: bool = false,
+
+    fn rawRead(self: *Http1StreamState, buf: []u8) anyerror!usize {
+        if (buf.len == 0) return 0;
+        if (self.leftoverPos < self.leftover.items.len) {
+            const avail = self.leftover.items.len - self.leftoverPos;
+            const toCopy = @min(avail, buf.len);
+            @memcpy(buf[0..toCopy], self.leftover.items[self.leftoverPos .. self.leftoverPos + toCopy]);
+            self.leftoverPos += toCopy;
+            return toCopy;
+        }
+        return self.transport.read(buf);
+    }
+
+    fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
+        const self: *Http1StreamState = @ptrCast(@alignCast(ctx));
+        if (self.closed or self.done) return 0;
+        if (buf.len == 0) return 0;
+
+        switch (self.mode) {
+            .contentLength => {
+                if (self.remainingCl == 0) {
+                    self.done = true;
+                    self.reusable = (self.leftoverPos == self.leftover.items.len);
+                    return 0;
+                }
+                const toRead: usize = @intCast(@min(@as(u64, buf.len), self.remainingCl));
+                const n = try self.rawRead(buf[0..toRead]);
+                if (n == 0) {
+                    if (self.remainingCl > 0) return error.UnexpectedEof;
+                    self.done = true;
+                    self.reusable = (self.leftoverPos == self.leftover.items.len);
+                    return 0;
+                }
+                self.remainingCl -= n;
+                self.totalBodyRead += n;
+                if (self.remainingCl == 0) {
+                    self.done = true;
+                    self.reusable = (self.leftoverPos == self.leftover.items.len);
+                }
+                return n;
+            },
+            .close => {
+                if (self.totalBodyRead == self.maxBodySize) {
+                    var probe: [1]u8 = undefined;
+                    const extra = try self.rawRead(&probe);
+                    if (extra != 0) return Error.ResponseTooLarge;
+                    self.done = true;
+                    self.reusable = false;
+                    return 0;
+                }
+                const remaining = self.maxBodySize - self.totalBodyRead;
+                const readLen = @min(buf.len, std.math.cast(usize, remaining) orelse buf.len);
+                const n = try self.rawRead(buf[0..readLen]);
+                if (n == 0) {
+                    self.done = true;
+                    self.reusable = false;
+                } else {
+                    self.totalBodyRead += n;
+                }
+                return n;
+            },
+            .chunked => {
+                if (self.decodedPos < self.decodedBuf.items.len) {
+                    const avail = self.decodedBuf.items.len - self.decodedPos;
+                    const toCopy = @min(avail, buf.len);
+                    @memcpy(buf[0..toCopy], self.decodedBuf.items[self.decodedPos .. self.decodedPos + toCopy]);
+                    self.decodedPos += toCopy;
+                    if (self.decodedPos == self.decodedBuf.items.len) {
+                        self.decodedBuf.clearRetainingCapacity();
+                        self.decodedPos = 0;
+                    }
+                    return toCopy;
+                }
+
+                if (self.chunkDecoder.isDone()) {
+                    self.done = true;
+                    self.reusable = (self.wire.items.len == 0 and self.leftoverPos == self.leftover.items.len);
+                    return 0;
+                }
+
+                var tempReadBuf: [4096]u8 = undefined;
+                while (true) {
+                    if (self.wire.items.len > 0) {
+                        _ = self.chunkDecoder.decode(self.wire.items) catch |err| switch (err) {
+                            error.Incomplete => {},
+                            error.InvalidChunkSize => {
+                                const projected = std.math.add(u64, self.chunkDecoder.totalDecoded, self.chunkDecoder.sizeAcc) catch std.math.maxInt(u64);
+                                if (projected > self.maxBodySize) return Error.ResponseTooLarge;
+                                return Error.MalformedResponse;
+                            },
+                            else => return Error.MalformedResponse,
+                        };
+
+                        if (self.chunkDecoder.decodedLen > 0) {
+                            try self.decodedBuf.appendSlice(self.allocator, self.wire.items[0..self.chunkDecoder.decodedLen]);
+                        }
+
+                        const consumed = self.chunkDecoder.rawConsumed;
+                        if (consumed > self.wire.items.len) return Error.MalformedResponse;
+                        const pending = self.wire.items.len - consumed;
+                        if (pending > 0) std.mem.copyForwards(u8, self.wire.items[0..pending], self.wire.items[consumed..]);
+                        self.wire.items.len = pending;
+
+                        if (self.decodedBuf.items.len > 0) {
+                            const avail = self.decodedBuf.items.len - self.decodedPos;
+                            const toCopy = @min(avail, buf.len);
+                            @memcpy(buf[0..toCopy], self.decodedBuf.items[self.decodedPos .. self.decodedPos + toCopy]);
+                            self.decodedPos += toCopy;
+                            if (self.decodedPos == self.decodedBuf.items.len) {
+                                self.decodedBuf.clearRetainingCapacity();
+                                self.decodedPos = 0;
+                            }
+                            return toCopy;
+                        }
+
+                        if (self.chunkDecoder.isDone()) {
+                            self.done = true;
+                            self.reusable = (self.wire.items.len == 0 and self.leftoverPos == self.leftover.items.len);
+                            return 0;
+                        }
+                    }
+
+                    const n = try self.rawRead(&tempReadBuf);
+                    if (n == 0) {
+                        if (self.chunkDecoder.isDone()) {
+                            self.done = true;
+                            self.reusable = (self.wire.items.len == 0);
+                            return 0;
+                        }
+                        return error.UnexpectedEof;
+                    }
+                    try self.wire.appendSlice(self.allocator, tempReadBuf[0..n]);
+                }
+            },
+        }
+    }
+
+    fn close(ctx: *anyopaque) void {
+        const self: *Http1StreamState = @ptrCast(@alignCast(ctx));
+        if (self.closed) return;
+        self.closed = true;
+
+        var pooledOut = false;
+        if (self.pool) |p| {
+            if (!self.isTls and self.done and self.reusable) {
+                p.release(self.host[0..self.hostLen], self.port, self.transport.plain);
+                pooledOut = true;
+            }
+        }
+
+        if (!pooledOut) {
+            switch (self.transport) {
+                .plain => |s| s.close(),
+                .tls => {},
+            }
+        }
+        if (self.tlsBox) |b| {
+            b.deinit();
+            self.allocator.destroy(b);
+        }
+
+        self.leftover.deinit(self.allocator);
+        self.wire.deinit(self.allocator);
+        self.decodedBuf.deinit(self.allocator);
+        self.allocator.destroy(self);
+    }
+
+    pub fn source(self: *Http1StreamState) BodySource {
+        return .{
+            .ptr = self,
+            .readFn = read,
+            .contentLength = if (self.mode == .contentLength) self.remainingCl else null,
+            .trailersFn = null,
+            .resetFn = null,
+            .closeFn = close,
+        };
+    }
+};
+
 pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
+    return requestImpl(a, io, req, false);
+}
+
+pub fn requestStream(a: Allocator, io: std.Io, req: Request) Error!ResponseStream {
+    return requestImpl(a, io, req, true);
+}
+
+fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool) if (streaming) Error!ResponseStream else Error!Response {
     var currentUrl: []u8 = try a.dupe(u8, req.url);
     defer a.free(currentUrl);
 
@@ -758,13 +1129,21 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
     var bodyStripped = false;
     var redirectedHeaders: ?[]Header = null;
     defer if (redirectedHeaders) |headers| a.free(headers);
+    var redirectState = RedirectState{
+        .currentUrl = &currentUrl,
+        .redirects = &redirects,
+        .method = &method,
+        .credentialsStripped = &credentialsStripped,
+        .bodyStripped = &bodyStripped,
+        .redirectedHeaders = &redirectedHeaders,
+    };
 
     while (true) {
         const u = uriMod.parse(currentUrl) catch return Error.InvalidUrl;
         const isTls = std.ascii.eqlIgnoreCase(u.scheme, "https");
         if (!isTls and !std.ascii.eqlIgnoreCase(u.scheme, "http")) return Error.InvalidUrl;
         // Auto-enable TLS for HTTPS with safe default verification (.caBundle).
-        var tlsOpts = if (isTls) req.tls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
+        var tlsOpts = if (isTls) req.tls orelse TlsOptions{} else null;
         if (credentialsStripped) {
             if (tlsOpts) |*opts| {
                 opts.clientCertPem = null;
@@ -774,9 +1153,14 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
 
         var port = u.effectivePort();
         if (port == 0) return Error.InvalidUrl;
+        // DNS names are limited to 253 octets (255 including a trailing dot)
+        // and the pool/host scratch buffers below are sized for that bound.
+        // Rejecting here avoids truncating the name used for DNS and Host.
+        if (u.host.len == 0 or u.host.len > 255) return Error.InvalidUrl;
 
-        var authBuf: [256]u8 = undefined;
-        const authorityStr = u.authority(&authBuf);
+        // Worst case: 255-byte host + "[]" + ":" + five port digits.
+        var authBuf: [320]u8 = undefined;
+        const authorityStr = u.authority(&authBuf) catch return Error.InvalidUrl;
 
         const target = try buildTarget(a, u.path, u.query, req.query);
         defer a.free(target);
@@ -806,7 +1190,16 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             a.free(extra);
         }
 
-        var hdrPairs = try a.alloc(writerMod.Header, extra.len);
+        const isChunkedH1 = !bodyStripped and req.bodySource != null and req.bodySource.?.contentLength == null and req.httpVersion != .http10;
+        const hasStreamCl = !bodyStripped and req.bodySource != null and req.bodySource.?.contentLength != null;
+
+        var clBuf: [32]u8 = undefined;
+        var clHdrVal: ?[]const u8 = null;
+        if (hasStreamCl) {
+            clHdrVal = std.fmt.bufPrint(&clBuf, "{d}", .{req.bodySource.?.contentLength.?}) catch null;
+        }
+
+        var hdrPairs = try a.alloc(writerMod.Header, extra.len + @as(usize, if (hasStreamCl and clHdrVal != null) 1 else 0));
         defer a.free(hdrPairs);
         for (extra, 0..) |line, i| {
             const colon = std.mem.indexOfScalar(u8, line, ':') orelse return Error.OutOfMemory;
@@ -815,23 +1208,27 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 .value = std.mem.trim(u8, line[colon + 1 ..], " "),
             };
         }
+        if (hasStreamCl and clHdrVal != null) {
+            hdrPairs[extra.len] = .{ .name = "content-length", .value = clHdrVal.? };
+        }
+
         const raw = writerMod.buildRequest(
             a,
             method.toString(),
             target,
-            bodyOut,
+            if (req.bodySource != null) null else bodyOut,
             .{
                 .minorVersion = if (req.httpVersion == .http10) 0 else 1,
                 .host = authorityStr,
                 .headers = hdrPairs,
                 .connection = if (req.httpVersion == .http10) "close" else "",
+                .chunked = isChunkedH1,
+                .streamingBody = !bodyStripped and req.bodySource != null,
             },
         ) catch return Error.OutOfMemory;
         defer a.free(raw);
 
         var hostCopy: [256]u8 = undefined;
-        const hostLen = @min(authorityStr.len, 256);
-        @memcpy(hostCopy[0..hostLen], authorityStr[0..hostLen]);
 
         // Strip :port from authority for DNS/connect when present.
         var hostOnly = authorityStr;
@@ -840,8 +1237,8 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 hostOnly = hostOnly[0..ci];
             port = std.fmt.parseInt(u16, authorityStr[ci + 1 ..], 10) catch port;
         }
-        const hl = @min(hostOnly.len, 256);
-        @memcpy(hostCopy[0..hl], hostOnly[0..hl]);
+        const hl = hostOnly.len;
+        @memcpy(hostCopy[0..hl], hostOnly);
 
         // HTTP/3 leaves TCP entirely: branch to the QUIC path before any
         // TCP dial (dialing just to close the socket would be a visible
@@ -852,7 +1249,29 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             // cannot exist, so this is an invalid URL+version pairing.
             if (!isTls) return Error.InvalidUrl;
             if (req.proxy != null) return Error.Http3ProxyUnsupported;
-            return h3DoRequest(a, io, req, tlsOpts, hostCopy[0..hl], port, authorityStr, target, bodyOut);
+
+            // Fast path: reuse pooled HTTP/3 session before any DNS or dial (skip if 0-RTT early data requested)
+            const policy = sessionPolicyFingerprint(tlsOpts orelse TlsOptions{});
+            const isEarlyData = req.earlyData.enabled;
+            if (!isEarlyData) {
+                if (req.pool) |p| {
+                    if (p.acquireH3(hostCopy[0..hl], port, policy)) |pc| {
+                        var resp = h3DoPooledRequest(a, pc, req, authorityStr, target, hdrPairs, bodyOut) catch |e| {
+                            pc.deinit();
+                            return e;
+                        };
+                        p.releaseH3(hostCopy[0..hl], port, policy, pc);
+                        if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
+                        if (streaming) return try wrapBufferedResponse(a, resp);
+                        return resp;
+                    }
+                }
+            }
+
+            var h3resp = h3DoRequest(a, io, req, tlsOpts, hostCopy[0..hl], port, authorityStr, target, hdrPairs, bodyOut) catch |e| return e;
+            if (try applyRedirect(a, req, &u, &h3resp, &redirectState)) continue;
+            if (streaming) return try wrapBufferedResponse(a, h3resp);
+            return h3resp;
         }
 
         // HTTP/2 pooled fast path BEFORE any dial: a parked session
@@ -865,11 +1284,13 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             if (req.pool) |p| {
                 if (p.acquireH2(hostCopy[0..hl], port, isTls)) |pc| {
                     const scheme: []const u8 = if (isTls) "https" else "http";
-                    const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, scheme, hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
+                    var resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, scheme, authorityStr, bodyOut, if (bodyStripped) null else req.bodySource, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
                         pc.deinit();
                         return e;
                     };
                     p.releaseH2(hostCopy[0..hl], port, isTls, pc);
+                    if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
+                    if (streaming) return try wrapBufferedResponse(a, resp);
                     return resp;
                 }
             }
@@ -1111,7 +1532,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             // wrapper has no ALPN hook, so explicit h2 uses the native
             // client transport. A server that does not select h2 fails
             // loudly instead of being silently downgraded.
-            const tlsOptsH2 = tlsOpts orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true };
+            const tlsOptsH2 = tlsOpts orelse TlsOptions{};
             // No second acquire here: the pre-dial fast path above already
             // tried. A concurrent park racing our dial simply becomes an
             // extra (correct, capped-at-park) connection — never a leak,
@@ -1127,9 +1548,10 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
             // Resumption offer from the client's session cache (origin
             // lane). The cache hands out an owned duplicate; it is freed
             // once the handshake consumed it.
-            const nowMs: u64 = @intCast(clockMod.millisNow());
+            const nowMs: u64 = @intCast(clockMod.millisNow(io));
+            const sessionPolicy = sessionPolicyFingerprint(tlsOptsH2);
             var offered: ?tlsSession.ClientSession = if (req.sessionCache) |sc|
-                sc.get(hostCopy[0..hl], port, nowMs)
+                sc.getWithAlpnPolicy(hostCopy[0..hl], port, nowMs, "h2", sessionPolicy)
             else
                 null;
             defer if (offered) |*s| s.deinit(a);
@@ -1166,7 +1588,7 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 // wrapTls already closed the socket and freed the box.
                 return Error.ProtocolViolation;
             };
-            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "https", hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
+            var resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "https", authorityStr, bodyOut, if (bodyStripped) null else req.bodySource, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
                 pc.deinit();
                 return e;
             };
@@ -1176,16 +1598,20 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 if (pc.takeSession()) |taken| {
                     var owned = taken;
                     defer owned.deinit(a);
-                    sc.put(hostCopy[0..hl], port, &owned);
+                    sc.putWithPolicy(hostCopy[0..hl], port, &owned, sessionPolicy);
                 }
             }
             if (req.proxy == null) {
                 if (req.pool) |p| {
                     p.releaseH2(hostCopy[0..hl], port, true, pc);
+                    if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
+                    if (streaming) return try wrapBufferedResponse(a, resp);
                     return resp;
                 }
             }
             pc.deinit();
+            if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
+            if (streaming) return try wrapBufferedResponse(a, resp);
             return resp;
         }
         if (!isTls and resolvedVer == .http2) {
@@ -1195,17 +1621,25 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
                 tcpSock.close();
                 return Error.ProtocolViolation;
             };
-            const resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "http", hostCopy[0..hl], bodyOut, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
+            var resp = h2DoRequest(a, pc, method.toString(), target, hdrPairs, "http", authorityStr, bodyOut, if (bodyStripped) null else req.bodySource, @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize)) catch |e| {
+                // `pc` owns tcpSock after wrapPlain succeeds. Dispose through
+                // that owner exactly once; closing the copied handle here as
+                // well makes POSIX close a recycled descriptor on the second
+                // call (notably when a size-limit error aborts the exchange).
                 pc.deinit();
                 return e;
             };
             if (req.proxy == null) {
                 if (req.pool) |p| {
                     p.releaseH2(hostCopy[0..hl], port, false, pc);
+                    if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
+                    if (streaming) return try wrapBufferedResponse(a, resp);
                     return resp;
                 }
             }
             pc.deinit();
+            if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
+            if (streaming) return try wrapBufferedResponse(a, resp);
             return resp;
         }
 
@@ -1273,61 +1707,303 @@ pub fn request(a: Allocator, io: std.Io, req: Request) Error!Response {
         }
 
         transport.writeAll(raw) catch return Error.WriteFailed;
-
-        const responseLimit = @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize);
-        const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings }, responseLimit);
-        var resp = full.resp;
-
-        if (req.followRedirects and isRedirect(resp.status)) {
-            // Redirect hops are one-shot: never pool the intermediate conn.
-            const loc = resp.header("Location") orelse return resp;
-            if (redirects >= req.maxRedirects) {
-                resp.deinit();
-                return Error.TooManyRedirects;
+        if (!bodyStripped and req.bodySource != null) {
+            var bs = req.bodySource.?;
+            if (bs.contentLength) |expected| {
+                var chunkBuf: [16 * 1024]u8 = undefined;
+                var totalWritten: u64 = 0;
+                while (true) {
+                    const n = bs.read(&chunkBuf) catch return Error.WriteFailed;
+                    if (n == 0) break;
+                    totalWritten += n;
+                    if (totalWritten > expected) return Error.ProtocolViolation;
+                    transport.writeAll(chunkBuf[0..n]) catch return Error.WriteFailed;
+                }
+                if (totalWritten != expected) return Error.ProtocolViolation;
+            } else {
+                var chunkBuf: [16 * 1024]u8 = undefined;
+                var hexBuf: [32]u8 = undefined;
+                while (true) {
+                    const n = bs.read(&chunkBuf) catch return Error.WriteFailed;
+                    if (n == 0) break;
+                    const hex = std.fmt.bufPrint(&hexBuf, "{x}\r\n", .{n}) catch unreachable;
+                    transport.writeAll(hex) catch return Error.WriteFailed;
+                    transport.writeAll(chunkBuf[0..n]) catch return Error.WriteFailed;
+                    transport.writeAll("\r\n") catch return Error.WriteFailed;
+                }
+                const rawTrailers = bs.getTrailers(a) catch null;
+                defer if (rawTrailers) |t| a.free(t);
+                if (rawTrailers != null and rawTrailers.?.len > 0) {
+                    transport.writeAll("0\r\n") catch return Error.WriteFailed;
+                    for (rawTrailers.?) |t| {
+                        if (!semanticsMod.trailerAllowed(t.name)) continue;
+                        transport.writeAll(t.name) catch return Error.WriteFailed;
+                        transport.writeAll(": ") catch return Error.WriteFailed;
+                        transport.writeAll(t.value) catch return Error.WriteFailed;
+                        transport.writeAll("\r\n") catch return Error.WriteFailed;
+                    }
+                    transport.writeAll("\r\n") catch return Error.WriteFailed;
+                } else {
+                    transport.writeAll("0\r\n\r\n") catch return Error.WriteFailed;
+                }
             }
-            redirects += 1;
-            const next = resolveLocation(a, currentUrl, loc) catch return resp;
-            const nextUri = uriMod.parse(next) catch {
-                a.free(next);
-                return resp;
-            };
-            const wasSameOrigin = sameOrigin(&u, &nextUri);
-            var nextMethod = method;
-            var nextBodyStripped = bodyStripped;
-            switch (resp.status) {
-                301, 302 => if (method == .POST) {
-                    nextMethod = .GET;
-                    nextBodyStripped = true;
-                },
-                303 => {
-                    if (method != .HEAD) nextMethod = .GET;
-                    nextBodyStripped = true;
-                },
-                else => {},
-            }
-            const nextCredentialsStripped = credentialsStripped or !wasSameOrigin;
-
-            if (nextCredentialsStripped != credentialsStripped or nextBodyStripped != bodyStripped) {
-                const filtered = filterRedirectHeaders(a, req.headers, nextCredentialsStripped, nextBodyStripped) catch {
-                    a.free(next);
-                    resp.deinit();
-                    return Error.OutOfMemory;
-                };
-                if (redirectedHeaders) |old| a.free(old);
-                redirectedHeaders = filtered;
-            }
-            credentialsStripped = nextCredentialsStripped;
-            bodyStripped = nextBodyStripped;
-            method = nextMethod;
-
-            a.free(currentUrl);
-            currentUrl = next;
-            resp.deinit();
-            continue;
         }
 
-        return finishPlain(req.pool, isTls, req.proxy != null, hostCopy[0..hl], port, full, &pooledOut, transport, resp);
+        if (!streaming) {
+            const responseLimit = @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize);
+            const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings }, responseLimit);
+            var resp = full.resp;
+
+            if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
+            return finishPlain(req.pool, isTls, req.proxy != null, hostCopy[0..hl], port, full, &pooledOut, transport, resp);
+        } else {
+            // Streaming response path: parse headers, retain transport for incremental BodySource
+            var acc: std.ArrayList(u8) = .empty;
+            defer acc.deinit(a);
+            var readBuf: [8192]u8 = undefined;
+
+            const parsed = blk: {
+                var interimCount: u8 = 0;
+                while (true) {
+                    var headEnd: usize = 0;
+                    while (true) {
+                        if (std.mem.indexOf(u8, acc.items, "\r\n\r\n")) |idx| {
+                            headEnd = idx + 4;
+                            break;
+                        }
+                        if (req.allowLfLineEndings) {
+                            if (std.mem.indexOf(u8, acc.items, "\n\n")) |idx| {
+                                if (idx == 0 or acc.items[idx - 1] != '\r') {
+                                    headEnd = idx + 2;
+                                    break;
+                                }
+                            }
+                        }
+                        const n = transport.read(readBuf[0..]) catch return Error.ReadFailed;
+                        if (n == 0) return Error.MalformedResponse;
+                        acc.appendSlice(a, readBuf[0..n]) catch return Error.OutOfMemory;
+                        if (acc.items.len > 128 * 1024) return Error.MalformedResponse;
+                    }
+
+                    const optsParser: parserMod.Options = .{ .allowLfLineEndings = req.allowLfLineEndings };
+                    const respHead = parserMod.parseResponseHead(acc.items, optsParser) catch return Error.MalformedResponse;
+                    if (respHead.statusCode < 100 or respHead.statusCode >= 200 or respHead.statusCode == 101) {
+                        break :blk .{ .headEnd = headEnd, .respHead = respHead };
+                    }
+
+                    var interimFields: [parserMod.DEFAULT_MAX_HEADERS]parserMod.Field = undefined;
+                    const interim = parserMod.parseHeaderBlock(acc.items[0..headEnd], respHead.headEnd, interimFields[0..], optsParser) catch
+                        return Error.MalformedResponse;
+                    for (interimFields[0..interim.count]) |field| {
+                        if (std.ascii.eqlIgnoreCase(field.name, "Content-Length") or
+                            std.ascii.eqlIgnoreCase(field.name, "Transfer-Encoding")) return Error.MalformedResponse;
+                    }
+                    interimCount += 1;
+                    if (interimCount > 16) return Error.MalformedResponse;
+
+                    const remaining = acc.items.len - headEnd;
+                    std.mem.copyForwards(u8, acc.items[0..remaining], acc.items[headEnd..]);
+                    acc.items.len = remaining;
+                }
+            };
+
+            const headEnd = parsed.headEnd;
+            const respHead = parsed.respHead;
+            const optsParser: parserMod.Options = .{ .allowLfLineEndings = req.allowLfLineEndings };
+
+            var fields: [parserMod.DEFAULT_MAX_HEADERS]parserMod.Field = undefined;
+            const blkHeader = parserMod.parseHeaderBlock(acc.items[0..headEnd], respHead.headEnd, fields[0..], optsParser) catch
+                return Error.MalformedResponse;
+
+            const framing = parserMod.framingFull(fields[0..blkHeader.count], .{
+                .isResponse = true,
+                .status = respHead.statusCode,
+                .requestMethod = if (method == .HEAD) "HEAD" else "",
+                .isHttp10 = respHead.minorVersion == 0,
+            }) catch return Error.MalformedResponse;
+
+            const headers = a.alloc(Header, blkHeader.count) catch return Error.OutOfMemory;
+            var headerCount: usize = 0;
+            errdefer {
+                for (headers[0..headerCount]) |h| {
+                    a.free(h.name);
+                    a.free(h.value);
+                }
+                a.free(headers);
+            }
+            for (fields[0..blkHeader.count], 0..) |f, i| {
+                const hname = a.dupe(u8, f.name) catch return Error.OutOfMemory;
+                const hvalue = a.dupe(u8, f.value) catch {
+                    a.free(hname);
+                    return Error.OutOfMemory;
+                };
+                headers[i] = .{ .name = hname, .value = hvalue };
+                headerCount += 1;
+            }
+
+            if (req.followRedirects and isRedirect(respHead.statusCode)) {
+                var tempResp = Response{
+                    .allocator = a,
+                    .status = respHead.statusCode,
+                    .version = if (respHead.minorVersion == 0) .http10 else .http11,
+                    .headers = headers,
+                    .body = try a.alloc(u8, 0),
+                };
+                if (try applyRedirect(a, req, &u, &tempResp, &redirectState)) {
+                    continue;
+                }
+                a.free(tempResp.body);
+            }
+
+            const isHead = method == .HEAD;
+            if (isHead or respHead.statusCode < 200 or respHead.statusCode == 101 or respHead.statusCode == 204 or respHead.statusCode == 304 or
+                (framing.framing == .contentLength and framing.length == 0))
+            {
+                if (req.pool) |p| {
+                    const version: semanticsMod.Version = if (respHead.minorVersion == 0) .http10 else .http11;
+                    if (!isTls and req.proxy == null and acc.items.len == headEnd and semanticsMod.shouldKeepAlive(version, headers)) {
+                        p.release(hostCopy[0..hl], port, transport.plain);
+                        pooledOut = true;
+                    }
+                }
+                return ResponseStream{
+                    .allocator = a,
+                    .status = respHead.statusCode,
+                    .version = if (respHead.minorVersion == 0) .http10 else .http11,
+                    .headers = headers,
+                    .body = BodySource.empty(),
+                };
+            }
+
+            const state = a.create(Http1StreamState) catch return Error.OutOfMemory;
+            const streamResponseLimit: u64 = @intCast(@min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize));
+            if (framing.framing == .contentLength and framing.length > streamResponseLimit) {
+                a.destroy(state);
+                return Error.ResponseTooLarge;
+            }
+            state.* = .{
+                .allocator = a,
+                .transport = transport,
+                .tlsBox = tlsBox,
+                .pool = if (req.proxy == null) req.pool else null,
+                .host = hostCopy,
+                .hostLen = hl,
+                .port = port,
+                .isTls = isTls,
+                .mode = switch (framing.framing) {
+                    .chunked => .chunked,
+                    .contentLength => .contentLength,
+                    else => .close,
+                },
+                .remainingCl = if (framing.framing == .contentLength) framing.length else 0,
+                .maxBodySize = streamResponseLimit,
+                .leftover = .empty,
+                .chunkDecoder = parserMod.ChunkedDecoder.initWithOptions(.{ .allowLfLineEndings = req.allowLfLineEndings }),
+                .wire = .empty,
+                .decodedBuf = .empty,
+            };
+            state.chunkDecoder.maxChunkSize = streamResponseLimit;
+            if (acc.items.len > headEnd) {
+                state.leftover.appendSlice(a, acc.items[headEnd..]) catch {
+                    a.destroy(state);
+                    return Error.OutOfMemory;
+                };
+            }
+            pooledOut = true;
+            tlsBox = null;
+
+            return ResponseStream{
+                .allocator = a,
+                .status = respHead.statusCode,
+                .version = if (respHead.minorVersion == 0) .http10 else .http11,
+                .headers = headers,
+                .body = state.source(),
+            };
+        }
     }
+}
+
+const RedirectState = struct {
+    currentUrl: *[]u8,
+    redirects: *u8,
+    method: *Method,
+    credentialsStripped: *bool,
+    bodyStripped: *bool,
+    redirectedHeaders: *?[]Header,
+};
+
+/// Applies one redirect hop to `resp`. Returns true when the caller should
+/// run the next loop iteration; false returns the response unchanged.
+fn applyRedirect(
+    a: Allocator,
+    req: Request,
+    base: *const uriMod.Uri,
+    resp: *Response,
+    state: *RedirectState,
+) Error!bool {
+    if (!req.followRedirects or !isRedirect(resp.status)) return false;
+    const loc = resp.header("Location") orelse return false;
+    if (state.redirects.* >= req.maxRedirects) {
+        resp.deinit();
+        return Error.TooManyRedirects;
+    }
+    state.redirects.* += 1;
+    const next = resolveLocation(a, state.currentUrl.*, loc) catch return false;
+    const nextUri = uriMod.parse(next) catch {
+        a.free(next);
+        return false;
+    };
+    if (isSecureDowngrade(base.scheme, nextUri.scheme)) {
+        a.free(next);
+        return false;
+    }
+    const wasSameOrigin = sameOrigin(base, &nextUri);
+    var nextMethod = state.method.*;
+    var nextBodyStripped = state.bodyStripped.*;
+    switch (resp.status) {
+        301, 302 => if (state.method.* == .POST) {
+            nextMethod = .GET;
+            nextBodyStripped = true;
+        },
+        303 => {
+            if (state.method.* != .HEAD) nextMethod = .GET;
+            nextBodyStripped = true;
+        },
+        else => {},
+    }
+
+    // Never silently replay an un-rewindable body on a redirect (RFC 9110).
+    if (!nextBodyStripped and req.bodySource != null) {
+        if (req.bodySource.?.canReset()) {
+            req.bodySource.?.reset() catch {
+                a.free(next);
+                return false;
+            };
+        } else {
+            a.free(next);
+            return false;
+        }
+    }
+
+    const nextCredentialsStripped = state.credentialsStripped.* or !wasSameOrigin;
+
+    if (nextCredentialsStripped != state.credentialsStripped.* or nextBodyStripped != state.bodyStripped.*) {
+        const filtered = filterRedirectHeaders(a, req.headers, nextCredentialsStripped, nextBodyStripped) catch {
+            a.free(next);
+            resp.deinit();
+            return Error.OutOfMemory;
+        };
+        if (state.redirectedHeaders.*) |old| a.free(old);
+        state.redirectedHeaders.* = filtered;
+    }
+    state.credentialsStripped.* = nextCredentialsStripped;
+    state.bodyStripped.* = nextBodyStripped;
+    state.method.* = nextMethod;
+
+    a.free(state.currentUrl.*);
+    state.currentUrl.* = next;
+    resp.deinit();
+    return true;
 }
 
 /// Returns the response to the caller; for plain connections with a fully
@@ -1656,7 +2332,7 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
     const framing = parserMod.framingFull(fields[0..blk.count], .{
         .isResponse = true,
         .status = respHead.statusCode,
-        .methodLen = if (isHead) 4 else 0,
+        .requestMethod = if (isHead) "HEAD" else "",
     }) catch return Error.MalformedResponse;
 
     const headers = a.alloc(Header, blk.count) catch return Error.OutOfMemory;
@@ -1690,12 +2366,12 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
     }
 
     var body: std.ArrayList(u8) = .empty;
-    errdefer body.deinit(a);
+    defer body.deinit(a);
     if (acc.items.len - headEnd > maxSize) return Error.ResponseTooLarge;
     try body.appendSlice(a, acc.items[headEnd..]);
 
     if (framing.framing == .chunked) {
-        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..], maxSize);
+        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..], maxSize, opts.allowLfLineEndings);
         return .{ .resp = .{
             .allocator = a,
             .status = respHead.statusCode,
@@ -1739,14 +2415,14 @@ fn readFullResponseWithOptions(a: Allocator, conn: anytype, isHead: bool, opts: 
 
 const ChunkedResponseBody = struct { body: []u8, reusable: bool };
 
-fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8, readBuf: []u8, maxSize: usize) Error!ChunkedResponseBody {
+fn readChunkedResponseBody(a: Allocator, conn: anytype, initialWire: []const u8, readBuf: []u8, maxSize: usize, allowLfLineEndings: bool) Error!ChunkedResponseBody {
     var wire: std.ArrayList(u8) = .empty;
     defer wire.deinit(a);
     wire.appendSlice(a, initialWire) catch return Error.OutOfMemory;
 
     var decoded: std.ArrayList(u8) = .empty;
     errdefer decoded.deinit(a);
-    var decoder = parserMod.ChunkedDecoder.init();
+    var decoder = parserMod.ChunkedDecoder.initWithOptions(.{ .allowLfLineEndings = allowLfLineEndings });
 
     while (true) {
         _ = decoder.decode(wire.items) catch |err| switch (err) {
@@ -1808,11 +2484,36 @@ test "chunked client response reads trailers incrementally and ignores marker-li
     var conn = MockConn{ .tail = "\r\nNEXT" };
     const wire = "5\r\n0\r\n\r\n\r\n0\r\nX-Checksum: yes\r\n";
     var readBuf: [8]u8 = undefined;
-    const result = try readChunkedResponseBody(a, &conn, wire, &readBuf, maxResponseBodySize);
+    const result = try readChunkedResponseBody(a, &conn, wire, &readBuf, maxResponseBodySize, false);
     defer a.free(result.body);
     try std.testing.expectEqualStrings("0\r\n\r\n", result.body);
     try std.testing.expectEqual(@as(usize, 1), conn.reads);
     try std.testing.expect(!result.reusable);
+}
+
+test "client chunked response honors strict and lenient LF framing options" {
+    const MockConn = struct {
+        wire: []const u8,
+
+        fn read(self: *@This(), dest: []u8) !usize {
+            const n = @min(dest.len, self.wire.len);
+            @memcpy(dest[0..n], self.wire[0..n]);
+            self.wire = self.wire[n..];
+            return n;
+        }
+    };
+    const a = std.testing.allocator;
+    const response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\na\n0\n\n";
+    var strictConn = MockConn{ .wire = response };
+    try std.testing.expectError(
+        Error.MalformedResponse,
+        readFullResponseWithOptions(a, &strictConn, false, .{}, maxResponseBodySize),
+    );
+
+    var lenientConn = MockConn{ .wire = response };
+    var full = try readFullResponseWithOptions(a, &lenientConn, false, .{ .allowLfLineEndings = true }, maxResponseBodySize);
+    defer full.resp.deinit();
+    try std.testing.expectEqualStrings("a", full.resp.body);
 }
 
 test "client trims content-length response and rejects connection reuse after trailing bytes" {
@@ -1919,6 +2620,32 @@ fn sameOrigin(base: *const uriMod.Uri, target: *const uriMod.Uri) bool {
         base.effectivePort() == target.effectivePort();
 }
 
+fn isSecureDowngrade(fromScheme: []const u8, toScheme: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(fromScheme, "https") and
+        std.ascii.eqlIgnoreCase(toScheme, "http");
+}
+
+/// Resumption authenticates possession of the cached PSK but omits a new
+/// certificate chain. The exact verification policy and client identity
+/// therefore participate in the cache key, so a ticket created under one
+/// policy cannot satisfy a request using another.
+pub fn sessionPolicyFingerprint(opts: TlsOptions) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(std.mem.asBytes(&opts.verify));
+    const bundleAddress: usize = if (opts.caBundle) |bundle| @intFromPtr(bundle) else 0;
+    hash.update(std.mem.asBytes(&bundleAddress));
+    updateSessionPolicyPart(&hash, opts.caPem);
+    updateSessionPolicyPart(&hash, opts.clientCertPem);
+    updateSessionPolicyPart(&hash, opts.clientKeyPem);
+    return hash.finalResult();
+}
+
+fn updateSessionPolicyPart(hash: *std.crypto.hash.sha2.Sha256, part: ?[]const u8) void {
+    const len: u64 = if (part) |bytes| bytes.len else std.math.maxInt(u64);
+    hash.update(std.mem.asBytes(&len));
+    if (part) |bytes| hash.update(bytes);
+}
+
 fn filterRedirectHeaders(a: Allocator, hdrs: []const Header, stripCredentials: bool, stripBody: bool) ![]Header {
     var filtered: std.ArrayList(Header) = .empty;
     errdefer filtered.deinit(a);
@@ -1980,7 +2707,8 @@ fn resolveLocation(a: Allocator, baseUrl: []const u8, loc: []const u8) ![]u8 {
     try out.appendSlice(a, base.scheme);
     try out.appendSlice(a, "://");
     var ab: [512]u8 = undefined;
-    try out.appendSlice(a, base.authority(&ab));
+    const baseAuthority = try base.authority(&ab);
+    try out.appendSlice(a, baseAuthority);
     try out.appendSlice(a, resolvedPath);
     if (query) |q| {
         try out.append(a, '?');
@@ -2178,9 +2906,13 @@ pub fn postMultipartFile(
 
     var bodyBuf: std.Io.Writer.Allocating = .init(a);
     defer bodyBuf.deinit();
-    mpEncoder.encode(&bodyBuf.writer, boundary, &.{
+    const parts = [_]mpEncoder.Part{
         .{ .name = fieldName, .filename = fname, .contentType = mimeMod.octetStream, .data = fileData },
-    }) catch return Error.OutOfMemory;
+    };
+    mpEncoder.encodeParts(&bodyBuf.writer, boundary, &parts) catch |err| switch (err) {
+        error.OutOfMemory => return Error.OutOfMemory,
+        else => return Error.WriteFailed,
+    };
 
     return request(a, io, .{
         .method = .POST,
@@ -2217,6 +2949,72 @@ fn startTestServer(
         }
     }.h, .{});
     return .{ .srv = srv, .ctx = ctx };
+}
+
+test "HTTP/3 client reaches the built-in server and decodes dynamic QPACK" {
+    const a = std.testing.allocator;
+    const lifecycle = @import("../server/httpServer.zig");
+    const routerNs = @import("../web/router/router.zig");
+
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = lifecycle.Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .http3 = true,
+        .tls = .{
+            .certificatePem = lifecycle.h3TestCertPem,
+            .privateKeyPem = lifecycle.h3TestKeyPem,
+        },
+        .enableDocs = false,
+    }) catch return;
+    defer srv.deinit();
+
+    try srv.router.add(.GET, "/h3", struct {
+        fn h(_: *routerNs.Context) anyerror!routerNs.Response {
+            return .{
+                .status = 200,
+                .body = "h3-server-body",
+                .contentType = "text/plain",
+                .headers = &.{.{ .name = "x-dynamic", .value = "server-value" }},
+            };
+        }
+    }.h, .{});
+
+    const th = std.Thread.spawn(.{}, lifecycle.Server.run, .{&srv}) catch return;
+    var joined = false;
+    defer {
+        srv.requestShutdown();
+        if (!joined) th.join();
+    }
+
+    var waitReady: usize = 0;
+    while (!srv.isHttp3Ready()) : (waitReady += 1) {
+        if (waitReady > 500) return error.Http3ServerNotReady;
+        clockMod.sleepMillis(ctx.io, 10);
+    }
+
+    const port = srv.http3.port() orelse return error.MissingHttp3Port;
+    var client = @import("httpClient.zig").Client.init(a, ctx.io, .{});
+    defer client.deinit();
+
+    var ub: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&ub, "https://127.0.0.1:{d}/h3", .{port});
+    var res = try client.get(url, .{
+        .httpVersion = .http3,
+        .tls = .{ .verify = .caBundle, .caPem = lifecycle.h3TestCertPem },
+        .timeoutMs = 30_000,
+    });
+    defer res.deinit();
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+    try std.testing.expectEqualStrings("h3-server-body", res.body);
+    try std.testing.expectEqualStrings("server-value", res.header("x-dynamic").?);
+    try std.testing.expect(res.version == .http3);
+
+    srv.requestShutdown();
+    th.join();
+    joined = true;
 }
 
 test "keep-alive: second request reuses pooled connection" {
@@ -2556,6 +3354,20 @@ test "redirect origin comparison includes scheme host and effective port" {
     try std.testing.expect(!sameOrigin(&base, &otherScheme));
 }
 
+test "HTTPS redirects cannot downgrade to plaintext" {
+    try std.testing.expect(isSecureDowngrade("https", "http"));
+    try std.testing.expect(isSecureDowngrade("HTTPS", "HTTP"));
+    try std.testing.expect(!isSecureDowngrade("http", "https"));
+}
+
+test "TLS session policy fingerprint binds verification and client identity" {
+    const base = sessionPolicyFingerprint(.{});
+    try std.testing.expectEqualSlices(u8, &base, &sessionPolicyFingerprint(.{}));
+    try std.testing.expect(!std.mem.eql(u8, &base, &sessionPolicyFingerprint(.{ .verify = .none })));
+    try std.testing.expect(!std.mem.eql(u8, &base, &sessionPolicyFingerprint(.{ .caPem = "custom ca" })));
+    try std.testing.expect(!std.mem.eql(u8, &base, &sessionPolicyFingerprint(.{ .clientCertPem = "cert" })));
+}
+
 test "cross-origin redirect strips credential options without mutating caller headers" {
     const a = std.testing.allocator;
     var ctx = try tcp.IoContext.init(a);
@@ -2739,6 +3551,376 @@ test "filterRedirectHeaders leaves original authorization data untouched" {
 test "https auto-enables tls with secure caBundle verification when no explicit options provided" {
     const isTls = true;
     const reqTls: ?TlsOptions = null;
-    const tlsOpts: ?TlsOptions = if (isTls) reqTls orelse TlsOptions{ .verify = .caBundle, .allowTruncation = true } else null;
+    const tlsOpts: ?TlsOptions = if (isTls) reqTls orelse TlsOptions{} else null;
     try std.testing.expectEqual(.caBundle, tlsOpts.?.verify);
+    try std.testing.expect(!tlsOpts.?.allowTruncation);
+}
+
+test "encodeQueryValue keeps RFC 3986 unreserved characters and uses uppercase hex" {
+    const a = std.testing.allocator;
+    const encoded = try encodeQueryValue(a, "a b+c/d?e=f&g_h.i-j~k");
+    defer a.free(encoded);
+    try std.testing.expectEqualStrings("a%20b%2Bc%2Fd%3Fe%3Df%26g_h.i-j~k", encoded);
+}
+
+fn releaseAcceptor(l: *tcp.Listener, io: std.Io) void {
+    if (tcp.connect(io, "127.0.0.1", l.localPort())) |s| {
+        var waker = s;
+        waker.close();
+    } else |_| {}
+}
+
+test "requestBuilder HTTP/1.1 streaming upload with Content-Length sends chunks" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+
+    const Capture = struct {
+        bytes: [2048]u8 = undefined,
+        len: usize = 0,
+    };
+    const RawServer = struct {
+        fn run(listenerPtr: *tcp.Listener, capture: *Capture, io: std.Io) void {
+            var conn = listenerPtr.accept(io) catch return;
+            defer conn.close();
+            conn.setReadTimeoutMs(3000);
+            while (capture.len < capture.bytes.len) {
+                const n = conn.read(capture.bytes[capture.len..]) catch return;
+                if (n == 0) break;
+                capture.len += n;
+                if (std.mem.indexOf(u8, capture.bytes[0..capture.len], "streamed payload data here!") != null) break;
+            }
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+        }
+    };
+
+    var capture = Capture{};
+    const thread = try std.Thread.spawn(.{}, RawServer.run, .{ &listener, &capture, ctx.io });
+    defer {
+        releaseAcceptor(&listener, ctx.io);
+        thread.join();
+    }
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/upload", .{listener.localPort()});
+    defer a.free(url);
+
+    var sr = SliceReader.init("streamed payload data here!");
+    var response = try request(a, ctx.io, .{
+        .method = .POST,
+        .url = url,
+        .bodySource = sr.source(),
+    });
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    const reqStr = capture.bytes[0..capture.len];
+    try std.testing.expect(std.mem.startsWith(u8, reqStr, "POST /upload HTTP/1.1\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, reqStr, "content-length: 27\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, reqStr, "streamed payload data here!"));
+}
+
+test "requestBuilder HTTP/1.1 streaming upload chunked with trailers" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+
+    const Capture = struct {
+        bytes: [4096]u8 = undefined,
+        len: usize = 0,
+    };
+    const RawServer = struct {
+        fn run(listenerPtr: *tcp.Listener, capture: *Capture, io: std.Io) void {
+            var conn = listenerPtr.accept(io) catch return;
+            defer conn.close();
+            conn.setReadTimeoutMs(3000);
+            while (capture.len < capture.bytes.len) {
+                const n = conn.read(capture.bytes[capture.len..]) catch return;
+                if (n == 0) break;
+                capture.len += n;
+                if (std.mem.indexOf(u8, capture.bytes[0..capture.len], "x-checksum: sha256-verified\r\n\r\n") != null) break;
+            }
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+        }
+    };
+
+    var capture = Capture{};
+    const thread = try std.Thread.spawn(.{}, RawServer.run, .{ &listener, &capture, ctx.io });
+    defer {
+        releaseAcceptor(&listener, ctx.io);
+        thread.join();
+    }
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/chunked-upload", .{listener.localPort()});
+    defer a.free(url);
+
+    const ChunkedProducer = struct {
+        state: usize = 0,
+        fn readCb(ptr: *anyopaque, buf: []u8) anyerror!usize {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.state == 0) {
+                self.state = 1;
+                @memcpy(buf[0..5], "chunk");
+                return 5;
+            }
+            return 0;
+        }
+        fn trailersCb(_: *anyopaque, alloc: Allocator) anyerror!?[]const @import("../common/headers.zig").Header {
+            const tr = try alloc.alloc(@import("../common/headers.zig").Header, 1);
+            tr[0] = .{ .name = "x-checksum", .value = "sha256-verified" };
+            return tr;
+        }
+    };
+
+    var producer = ChunkedProducer{};
+    const bs = BodySource{
+        .ptr = &producer,
+        .readFn = ChunkedProducer.readCb,
+        .contentLength = null,
+        .trailersFn = ChunkedProducer.trailersCb,
+    };
+
+    var response = try request(a, ctx.io, .{
+        .method = .POST,
+        .url = url,
+        .bodySource = bs,
+    });
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    const reqStr = capture.bytes[0..capture.len];
+    try std.testing.expect(std.mem.indexOf(u8, reqStr, "Transfer-Encoding: chunked\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reqStr, "5\r\nchunk\r\n0\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reqStr, "x-checksum: sha256-verified\r\n\r\n") != null);
+}
+
+test "deadlock regression: request fails before dialing terminates server thread promptly without hanging" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+
+    const ServerWorker = struct {
+        fn run(l: *tcp.Listener, io: std.Io, exited: *std.atomic.Value(bool)) void {
+            defer exited.store(true, .release);
+            var conn = l.accept(io) catch return;
+            defer conn.close();
+            conn.setReadTimeoutMs(1000);
+            var buf: [128]u8 = undefined;
+            _ = conn.read(&buf) catch {};
+        }
+    };
+
+    var serverExited = std.atomic.Value(bool).init(false);
+    const thread = try std.Thread.spawn(.{}, ServerWorker.run, .{ &listener, ctx.io, &serverExited });
+    var joined = false;
+    defer if (!joined) {
+        releaseAcceptor(&listener, ctx.io);
+        thread.join();
+    };
+
+    // A request with an invalid URL scheme fails immediately before dialing
+    const err = request(a, ctx.io, .{
+        .method = .GET,
+        .url = "ftp://invalid-scheme-fails-before-dial",
+    });
+    try std.testing.expectError(Error.InvalidUrl, err);
+
+    // Explicitly wake acceptor and join to prove server terminates immediately
+    releaseAcceptor(&listener, ctx.io);
+    thread.join();
+    joined = true;
+    try std.testing.expect(serverExited.load(.acquire));
+}
+
+test "requestStream Content-Length reads body incrementally into small caller buffers" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+
+    const ServerWorker = struct {
+        fn run(l: *tcp.Listener, io: std.Io) void {
+            var conn = l.accept(io) catch return;
+            defer conn.close();
+            var reqBuf: [256]u8 = undefined;
+            _ = conn.read(&reqBuf) catch {};
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789") catch {};
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, ServerWorker.run, .{ &listener, ctx.io });
+    var joined = false;
+    defer if (!joined) {
+        releaseAcceptor(&listener, ctx.io);
+        thread.join();
+    };
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/stream-cl", .{listener.localPort()});
+    defer a.free(url);
+
+    var resp = try requestStream(a, ctx.io, .{
+        .method = .GET,
+        .url = url,
+    });
+    defer resp.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+
+    var out: [16]u8 = undefined;
+    var totalRead: usize = 0;
+    var chunk: [3]u8 = undefined;
+    while (true) {
+        const n = try resp.read(&chunk);
+        if (n == 0) break;
+        @memcpy(out[totalRead .. totalRead + n], chunk[0..n]);
+        totalRead += n;
+    }
+
+    try std.testing.expectEqual(@as(usize, 10), totalRead);
+    try std.testing.expectEqualStrings("0123456789", out[0..10]);
+
+    thread.join();
+    joined = true;
+}
+
+test "requestStream enforces maxResponseSize for Content-Length bodies" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+
+    const ServerWorker = struct {
+        fn run(l: *tcp.Listener, io: std.Io) void {
+            var conn = l.accept(io) catch return;
+            defer conn.close();
+            var reqBuf: [256]u8 = undefined;
+            _ = conn.read(&reqBuf) catch {};
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata") catch {};
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, ServerWorker.run, .{ &listener, ctx.io });
+    var joined = false;
+    defer if (!joined) {
+        releaseAcceptor(&listener, ctx.io);
+        thread.join();
+    };
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/stream-limit", .{listener.localPort()});
+    defer a.free(url);
+    try std.testing.expectError(Error.ResponseTooLarge, requestStream(a, ctx.io, .{
+        .method = .GET,
+        .url = url,
+        .maxResponseSize = 3,
+    }));
+
+    thread.join();
+    joined = true;
+}
+
+test "requestStream Chunked transfer encoding reads body incrementally into small chunks" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+
+    const ServerWorker = struct {
+        fn run(l: *tcp.Listener, io: std.Io) void {
+            var conn = l.accept(io) catch return;
+            defer conn.close();
+            var reqBuf: [256]u8 = undefined;
+            _ = conn.read(&reqBuf) catch {};
+            conn.writeAll("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n") catch {};
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, ServerWorker.run, .{ &listener, ctx.io });
+    var joined = false;
+    defer if (!joined) {
+        releaseAcceptor(&listener, ctx.io);
+        thread.join();
+    };
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/stream-chunked", .{listener.localPort()});
+    defer a.free(url);
+
+    var resp = try requestStream(a, ctx.io, .{
+        .method = .GET,
+        .url = url,
+    });
+    defer resp.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+
+    var out: [32]u8 = undefined;
+    var totalRead: usize = 0;
+    var chunk: [4]u8 = undefined;
+    while (true) {
+        const n = try resp.read(&chunk);
+        if (n == 0) break;
+        @memcpy(out[totalRead .. totalRead + n], chunk[0..n]);
+        totalRead += n;
+    }
+
+    try std.testing.expectEqual(@as(usize, 11), totalRead);
+    try std.testing.expectEqualStrings("hello world", out[0..11]);
+
+    thread.join();
+    joined = true;
+}
+
+test "requestStream abandoned early does not return dirty socket to pool and terminates cleanly" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+
+    const ServerWorker = struct {
+        fn run(l: *tcp.Listener, io: std.Io) void {
+            var conn = l.accept(io) catch return;
+            defer conn.close();
+            var reqBuf: [256]u8 = undefined;
+            _ = conn.read(&reqBuf) catch {};
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: keep-alive\r\n\r\n0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789") catch {};
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, ServerWorker.run, .{ &listener, ctx.io });
+    var joined = false;
+    defer if (!joined) {
+        releaseAcceptor(&listener, ctx.io);
+        thread.join();
+    };
+
+    var pool = poolNs.Pool.init(a, ctx.io, .{});
+    defer pool.deinit();
+
+    const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/stream-abandon", .{listener.localPort()});
+    defer a.free(url);
+
+    {
+        var resp = try requestStream(a, ctx.io, .{
+            .method = .GET,
+            .url = url,
+            .pool = &pool,
+        });
+        var small: [5]u8 = undefined;
+        const n = try resp.read(&small);
+        try std.testing.expectEqual(@as(usize, 5), n);
+        resp.deinit();
+    }
+
+    try std.testing.expectEqual(@as(?tcp.Socket, null), pool.acquire("127.0.0.1", listener.localPort()));
+
+    thread.join();
+    joined = true;
 }

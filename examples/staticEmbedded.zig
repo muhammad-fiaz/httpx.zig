@@ -15,7 +15,7 @@ const indexHtml = @embedFile("static/index.html");
 const stylesCss = @embedFile("static/styles.css");
 const appJs = @embedFile("static/app.js");
 
-fn hello(ctx: *httpx.Context) anyerror!httpx.Response {
+fn hello(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.render("greet.html", .{ .name = "Embedded" });
 }
 

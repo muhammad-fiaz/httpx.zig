@@ -49,7 +49,7 @@ pub fn main() !void {
     std.debug.print("Custom server verification completed successfully.\n", .{});
 }
 
-fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Custom request/response example\"}",
@@ -57,7 +57,7 @@ fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn echoHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn echoHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (ctx.body.len == 0) {
         return .{ .status = 400, .body = "{\"error\":\"No body\"}", .contentType = "application/json" };
     }

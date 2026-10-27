@@ -1,9 +1,8 @@
 //! HTTP/2 stream state machine (RFC 9113 section 5.1).
 //!
-//! States and the legal frame transitions, with nghttp2's stricter
-//! treatment: frames that arrive in an invalid state generally escalate
-//! to connection errors (STREAM_CLOSED / PROTOCOL_ERROR), matching
-//! production behavior.
+//! States and legal frame transitions with strict error handling: frames
+//! that arrive in an invalid state generally escalate to connection errors
+//! (STREAM_CLOSED / PROTOCOL_ERROR), matching production behavior.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -100,6 +99,40 @@ pub const Stream = struct {
     endHeaders: bool = false,
     endStreamSent: bool = false,
     endStreamRecv: bool = false,
+    /// Number of HEADERS blocks sent/received on this stream (initial or trailers).
+    headersSent: u8 = 0,
+    headersRecv: u8 = 0,
+    /// A final (non-1xx) response has been received (client role).
+    finalResponse: bool = false,
+    /// A final (non-1xx) response has been sent (server role).
+    finalResponseSent: bool = false,
+    /// Final response status code, when applicable.
+    responseStatus: u16 = 0,
+    /// Request method was HEAD, or the peer sent HEAD (response body rules).
+    requestIsHead: bool = false,
+    /// Request method was CONNECT.
+    requestIsConnect: bool = false,
+    /// Declared content length, when the received message carried one.
+    contentLength: ?u64 = null,
+    /// Declared content length for the message this endpoint sends.
+    sendContentLength: ?u64 = null,
+    /// Application DATA bytes received so far.
+    bodyBytes: u64 = 0,
+    /// Application DATA bytes sent so far.
+    bodyBytesSent: u64 = 0,
+    /// This received message must not carry a body (HEAD/204/304/1xx/205).
+    bodyForbidden: bool = false,
+    /// The message this endpoint sends must not carry a body.
+    sendBodyForbidden: bool = false,
+    /// A trailer block has been received.
+    trailersRecv: bool = false,
+    /// A trailer block has been sent.
+    trailersSent: bool = false,
+    /// A header block for a closed/refused stream that must still be
+    /// decoded to keep the connection-wide HPACK context synchronized.
+    discardHeaders: bool = false,
+    /// This stream holds one of the connection's concurrency slots.
+    countedSlot: bool = false,
     resetByUs: bool = false,
     resetCode: u32 = 0,
 
@@ -116,8 +149,6 @@ pub const Stream = struct {
         if (self.headerBlock) |*b| b.deinit(self.allocator);
         if (self.dataBuf) |*b| b.deinit(self.allocator);
     }
-
-    // -- send-side transitions ------------------------------------------------
 
     pub fn onSendHeaders(self: *Stream, endStream: bool) error{InvalidState}!void {
         if (!self.state.canSendHeaders()) return error.InvalidState;
@@ -155,10 +186,8 @@ pub const Stream = struct {
         self.state = .closed;
     }
 
-    // -- receive-side transitions ---------------------------------------------
-
     pub const RecvError = error{
-        StreamClosed, // -> connection STREAM_CLOSED per nghttp2 strictness
+        StreamClosed, // -> connection STREAM_CLOSED under strict handling
         ProtocolError,
     };
 
@@ -227,11 +256,13 @@ pub const Stream = struct {
         return self.sendWindow >= -MAX_WINDOW_DELTA;
     }
 
+    /// Flow-control credit accounting. Returns false when the peer used
+    /// more than the advertised window (a stream error of type
+    /// FLOW_CONTROL_ERROR, RFC 9113 Section 6.9.1).
     pub fn consumeRecv(self: *Stream, n: i64) bool {
         self.recvWindow -= n;
         self.recvPending += n;
-        // Overflow beyond -(2^31-1) is FLOW_CONTROL_ERROR at the receiver.
-        return self.recvWindow >= -MAX_WINDOW_DELTA;
+        return self.recvWindow >= 0;
     }
 };
 

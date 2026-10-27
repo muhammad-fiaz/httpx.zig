@@ -5,7 +5,7 @@ Demonstrates TLS handshake with detailed information about negotiated protocol, 
 ## Features Demonstrated
 
 - TLS handshake execution
-- Protocol negotiation (HTTP/1.1, HTTP/2, HTTP/3)
+- Protocol negotiation over TLS (HTTP/1.1 or HTTP/2)
 - Cipher suite information
 - Key exchange group details
 - HTTP/2 detection via `isHttp2()`
@@ -15,9 +15,9 @@ Demonstrates TLS handshake with detailed information about negotiated protocol, 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
-const tls = httpx.tls;
+const tls = httpx.protocols.tls;
 
-fn handler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn handler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.text("Hello from TLS server!");
 }
 
@@ -38,14 +38,14 @@ pub fn main() !void {
     });
     defer listener.deinit();
     const port = listener.localPort();
-    std.debug.print("TLS listening on {d} (TLS 1.2/1.3, ALPN h2 + http/1.1)\n", .{port});
+    std.debug.print("TLS listening on {d} (TLS 1.3, ALPN h2 + http/1.1)\n", .{port});
 }
 ```
 
 ## Expected Output
 
 ```text
-TLS listening on 54321 (TLS 1.2/1.3, ALPN h2 + http/1.1)
+TLS listening on 54321 (TLS 1.3, ALPN h2 + http/1.1)
 ```
 
 The ephemeral loopback port varies per run; negotiated protocol, cipher suite, and key exchange details vary per handshake and certificate. Requires local `cert.pem`/`key.pem` self-signed identity material; loopback only, no external service.

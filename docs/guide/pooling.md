@@ -40,13 +40,13 @@ defer client.deinit();
 
 ## Pool Key Isolation
 
-Connections are keyed by:
-1. Target Hostname / IP
-2. Target Port
-3. Transport Scheme (`http` vs `https`)
-4. Proxy Configuration (direct vs proxy endpoint)
+Plain-TCP keep-alive connections are keyed by target host and port. HTTP/2
+sessions add a TLS/h2c discriminator, so TLS and cleartext sessions never share
+a lane. HTTP/3 sessions are keyed by host, port, and TLS policy fingerprint.
 
-A connection established for `http://example.com` will never be mistakenly reused for `https://example.com` or through a proxy.
+The high-level client hands out pooled HTTP/2 and HTTP/3 connections
+exclusively, so sequential requests reuse a connection while concurrent
+requests use separate connections rather than sharing one.
 
 ## Related
 

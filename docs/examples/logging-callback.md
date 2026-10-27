@@ -10,7 +10,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 // Server events: method, path, status, durationMs, bytesIn/bytesOut.
-fn onServerEvent(event: httpx.ServerEvent) void {
+fn onServerEvent(event: httpx.logging.ServerEvent) void {
     if (event.kind == .requestCompleted) {
         std.debug.print("[SRV] {s} {s} {d} {d}ms\n", .{
             event.method, event.path, event.status, event.durationMs,
@@ -18,8 +18,8 @@ fn onServerEvent(event: httpx.ServerEvent) void {
     }
 }
 
-// Client events: method, url (credentials redacted), status, durationMs.
-fn onClientEvent(event: httpx.ClientEvent) void {
+// Client events: method, url (credentials redacted), status.
+fn onClientEvent(event: httpx.logging.ClientEvent) void {
     if (event.kind == .requestCompleted) {
         std.debug.print("[CLI] {s} {s} {d}\n", .{
             event.method, event.url, event.status,

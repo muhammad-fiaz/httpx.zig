@@ -12,7 +12,7 @@
 //!   web/        - router, middleware, SSE, WebSocket, docs, SPA, health,
 //!                 metrics, multipart, cookies, auth, static files, openapi
 //!   server/     - server lifecycle, connections, request context
-//!   client/     - request engine, connection pool, cookie jar, zero-config
+//!   client/     - request engine, connection pool, cookie jar
 
 const std = @import("std");
 
@@ -21,7 +21,8 @@ pub const tint = @import("tint");
 pub const loaders = @import("loaders");
 pub const brotli = @import("brotli");
 pub const zstd = @import("zstd");
-pub const env = @import("env");
+pub const env = @import("common/env.zig");
+pub const regex = @import("regex");
 
 // Common primitives
 pub const ioCtx = @import("common/io.zig");
@@ -44,19 +45,23 @@ pub const common = struct {
     pub const httpVersion = @import("common/httpVersion.zig");
     pub const io = @import("common/io.zig");
     pub const parse = @import("common/parse.zig");
+    pub const bodySource = @import("common/bodySource.zig");
+    pub const env = @import("common/env.zig");
+    pub const BodySource = bodySource.BodySource;
+    pub const SliceReader = bodySource.SliceReader;
+    pub const CallbackReader = bodySource.CallbackReader;
 };
+pub const BodySource = common.BodySource;
+pub const SliceReader = common.SliceReader;
+pub const CallbackReader = common.CallbackReader;
 pub const clock = common.clock;
 pub const sync = common.sync;
 pub const concurrency = struct {
     pub const queue = @import("concurrency/queue.zig");
     pub const Queue = @import("concurrency/queue.zig").BoundedQueue;
     pub const workerPool = @import("concurrency/workerPool.zig");
-    pub const WorkerPool = @import("concurrency/workerPool.zig").Pool;
     pub const Pool = @import("concurrency/workerPool.zig").Pool;
 };
-pub const workerPool = concurrency.workerPool;
-pub const WorkerPool = concurrency.WorkerPool;
-pub const Queue = concurrency.Queue;
 pub const logging = @import("common/logging.zig");
 
 // Sockets
@@ -66,117 +71,139 @@ pub const sys = @import("sockets/sys.zig");
 pub const udp = @import("sockets/udp.zig");
 
 // Network layer
-pub const address = @import("net/address.zig");
-pub const dns = @import("net/dns/dnsResolver.zig");
-pub const dnsCache = @import("net/dns/dnsCache.zig");
-pub const resolve = @import("net/resolve.zig");
-pub const connectivity = @import("net/connectivity.zig");
-pub const socks5 = @import("net/socks5.zig");
-pub const socks4 = @import("net/socks4.zig");
-pub const proxy = @import("net/proxy.zig");
+pub const net = struct {
+    pub const address = @import("net/address.zig");
+    pub const dns = @import("net/dns/dnsResolver.zig");
+    pub const dnsCache = @import("net/dns/dnsCache.zig");
+    pub const resolve = @import("net/resolve.zig");
+    pub const connectivity = @import("net/connectivity.zig");
+    pub const socks5 = @import("net/socks5.zig");
+    pub const socks4 = @import("net/socks4.zig");
+    pub const proxy = @import("net/proxy.zig");
+};
 
 // Compression
 pub const compression = @import("compression/codec.zig");
 
-// Protocol engines
-/// Shared low-level protocol primitives (prefix integers, Huffman code).
-pub const proto = struct {
+// Protocol implementations are reachable through one coherent namespace.
+pub const protocols = struct {
     pub const common = struct {
         pub const integer = @import("protocols/common/integer.zig");
         pub const huffman = @import("protocols/common/huffman.zig");
         pub const huffmanTable = @import("protocols/common/huffmanTable.zig");
     };
-};
-pub const http1 = struct {
-    pub const parser = @import("protocols/http1/parser.zig");
-    pub const writer = @import("protocols/http1/writer.zig");
-    pub const semantics = @import("protocols/http1/semantics.zig");
-    pub const fuzz = @import("protocols/http1/fuzz.zig");
-};
-pub const http2 = struct {
-    pub const frame = @import("protocols/http2/frame.zig");
-    pub const hpack = @import("protocols/http2/hpack.zig");
-    pub const stream = @import("protocols/http2/stream.zig");
-    pub const connection = @import("protocols/http2/connection.zig");
-    pub const Session = connection.Session;
-    pub const Stream = stream.Stream;
-    pub const ErrorCode = stream.ErrorCode;
-    pub const Frame = frame.Frame;
-    pub const FrameHeader = frame.FrameHeader;
-    pub const transport = @import("protocols/http2/transport.zig");
-    pub const Client = transport.Client;
-};
-pub const quic = struct {
-    pub const varint = @import("protocols/quic/varint.zig");
-    pub const packet = @import("protocols/quic/packet.zig");
-    pub const crypto = @import("protocols/quic/crypto.zig");
-    pub const packetProtection = @import("protocols/quic/packetProtection.zig");
-    pub const protect = packetProtection;
-    pub const frames = @import("protocols/quic/frames.zig");
-    pub const ackTracker = @import("protocols/quic/ackTracker.zig");
-    pub const acktr = ackTracker;
-    pub const lossRecovery = @import("protocols/quic/lossRecovery.zig");
-    pub const loss = lossRecovery;
-    pub const congestionControl = @import("protocols/quic/congestionControl.zig");
-    pub const cc = congestionControl;
-    pub const transportParameters = @import("protocols/quic/transportParameters.zig");
-    pub const params = transportParameters;
-    pub const stream = @import("protocols/quic/stream.zig");
-    pub const Stream = stream.Stream;
-    pub const connection = @import("protocols/quic/connection.zig");
-    pub const Connection = connection.Connection;
-    pub const connectionId = @import("protocols/quic/connectionId.zig");
-    pub const path = @import("protocols/quic/path.zig");
-    pub const transport = @import("protocols/quic/transport.zig");
-    pub const Endpoint = transport.Endpoint;
-    pub const Pump = transport.Pump;
-    pub const handshake = @import("protocols/quic/handshake.zig");
-    pub const HandshakeDriver = handshake.Driver;
+    pub const http1 = struct {
+        pub const parser = @import("protocols/http1/parser.zig");
+        pub const writer = @import("protocols/http1/writer.zig");
+        pub const semantics = @import("protocols/http1/semantics.zig");
+    };
+    pub const http2 = struct {
+        pub const frame = @import("protocols/http2/frame.zig");
+        pub const hpack = @import("protocols/http2/hpack.zig");
+        pub const stream = @import("protocols/http2/stream.zig");
+        pub const connection = @import("protocols/http2/connection.zig");
+        pub const Session = connection.Session;
+        pub const Stream = stream.Stream;
+        pub const ErrorCode = stream.ErrorCode;
+        pub const Frame = frame.Frame;
+        pub const FrameHeader = frame.FrameHeader;
+        pub const transport = @import("protocols/http2/transport.zig");
+        pub const Client = transport.Client;
+    };
+    pub const http3 = struct {
+        pub const frame = @import("protocols/http3/frame.zig");
+        pub const FrameHeader = frame.FrameHeader;
+        pub const ParsedFrame = frame.ParsedFrame;
+        pub const qpack = @import("protocols/http3/qpack.zig");
+        pub const connection = @import("protocols/http3/connection.zig");
+        pub const Connection = connection.Connection;
+        pub const RequestStream = connection.RequestStream;
+        pub const Settings = connection.Settings;
+        pub const stream = @import("protocols/http3/stream.zig");
+        pub const Stream = stream.Stream;
+        pub const transport = @import("protocols/http3/transport.zig");
+        pub const Client = transport.Client;
+    };
+    pub const quic = struct {
+        pub const varint = @import("protocols/quic/varint.zig");
+        pub const packet = @import("protocols/quic/packet.zig");
+        pub const crypto = @import("protocols/quic/crypto.zig");
+        pub const packetProtection = @import("protocols/quic/packetProtection.zig");
+        pub const frames = @import("protocols/quic/frames.zig");
+        pub const ackTracker = @import("protocols/quic/ackTracker.zig");
+        pub const lossRecovery = @import("protocols/quic/lossRecovery.zig");
+        pub const congestionControl = @import("protocols/quic/congestionControl.zig");
+        pub const transportParameters = @import("protocols/quic/transportParameters.zig");
+        pub const stream = @import("protocols/quic/stream.zig");
+        pub const Stream = stream.Stream;
+        pub const connection = @import("protocols/quic/connection.zig");
+        pub const Connection = connection.Connection;
+        pub const connectionId = @import("protocols/quic/connectionId.zig");
+        pub const path = @import("protocols/quic/path.zig");
+        pub const transport = @import("protocols/quic/transport.zig");
+        pub const Endpoint = transport.Endpoint;
+        pub const Pump = transport.Pump;
+        pub const handshake = @import("protocols/quic/handshake.zig");
+        pub const HandshakeDriver = handshake.Driver;
 
-    pub fn encodeFrame(allocator: std.mem.Allocator, f: frames.Frame) !std.ArrayList(u8) {
-        var out = std.ArrayList(u8).empty;
-        try frames.encode(&out, allocator, f);
-        return out;
-    }
+        pub fn encodeFrame(allocator: std.mem.Allocator, f: frames.Frame) !std.ArrayList(u8) {
+            var out = std.ArrayList(u8).empty;
+            try frames.encode(&out, allocator, f);
+            return out;
+        }
+    };
+    pub const tls = @import("protocols/tls/tls.zig");
+    pub const ftp = struct {
+        const clientModule = @import("protocols/ftp/ftpClient.zig");
+        pub const Client = clientModule.Client;
+        pub const Options = clientModule.Options;
+        pub const Reply = clientModule.Reply;
+        pub const FtpError = clientModule.FtpError;
+        const serverModule = @import("protocols/ftp/ftpServer.zig");
+        pub const Server = serverModule.Server;
+        pub const Config = serverModule.Config;
+        pub const Callbacks = serverModule.Callbacks;
+    };
 };
-pub const http3 = struct {
-    pub const frame = @import("protocols/http3/frame.zig");
-    pub const FrameHeader = frame.FrameHeader;
-    pub const ParsedFrame = frame.ParsedFrame;
-    pub const qpack = @import("protocols/http3/qpack.zig");
-    pub const connection = @import("protocols/http3/connection.zig");
-    pub const Connection = connection.Connection;
-    pub const RequestStream = connection.RequestStream;
-    pub const Settings = connection.Settings;
-    pub const stream = @import("protocols/http3/stream.zig");
-    pub const Stream = stream.Stream;
-    pub const transport = @import("protocols/http3/transport.zig");
-    pub const Client = transport.Client;
-};
-pub const tls = @import("protocols/tls/tls.zig");
+
+// Canonical protocol namespaces directly under root
+pub const http1 = protocols.http1;
+pub const http2 = protocols.http2;
+pub const http3 = protocols.http3;
+pub const quic = protocols.quic;
+pub const tls = protocols.tls;
+
+// Canonical router exports
+pub const router = @import("web/router/router.zig");
+pub const Router = router.Router;
+
+// Canonical root types
+pub const Client = @import("client/httpClient.zig").Client;
+pub const Server = server.Server;
+pub const Response = @import("client/requestBuilder.zig").Response;
+pub const Headers = headers.Headers;
+pub const Method = method.Method;
+pub const Status = status.Status;
+pub const Uri = uri.Uri;
+pub const Downloader = @import("client/downloadManager.zig").Downloader;
+pub const DownloadOptions = @import("client/downloadManager.zig").DownloadOptions;
+pub const DownloadResult = @import("client/downloadManager.zig").DownloadResult;
+pub const DownloadTask = @import("client/downloadManager.zig").DownloadTask;
+pub const download = @import("client/downloadManager.zig");
 
 // Web framework
-pub const router = struct {
-    pub const Router = @import("web/router/router.zig").Router;
-    pub const Context = @import("web/router/router.zig").Context;
-    pub const Response = @import("web/router/router.zig").Response;
-    pub const Header = @import("web/router/router.zig").Header;
-    pub const HandlerFn = @import("web/router/router.zig").HandlerFn;
-    pub const NextFn = @import("web/router/router.zig").NextFn;
-    pub const MiddlewareFn = @import("web/router/router.zig").MiddlewareFn;
-    pub const pattern = @import("web/router/routePattern.zig");
-    pub const metadata = @import("web/router/routeMetadata.zig");
-};
 pub const sse = struct {
-    pub const Writer = @import("web/sse/sseWriter.zig");
-    pub const Parser = @import("web/sse/sseParser.zig");
-    pub const EventWriter = @import("web/sse/sseWriter.zig").EventWriter;
     pub const Event = @import("web/sse/sseParser.zig").Event;
-    pub const EventParser = @import("web/sse/sseParser.zig").EventParser;
+    pub const ParseError = @import("web/sse/sseParser.zig").ParseError;
+    pub const parseAll = @import("web/sse/sseParser.zig").parseAll;
+    pub const freeEvents = @import("web/sse/sseParser.zig").freeEvents;
+    pub const Writer = @import("web/sse/sseWriter.zig").EventWriter;
+    pub const Parser = @import("web/sse/sseParser.zig").EventParser;
 };
 pub const websocket = struct {
     pub const Handshake = @import("web/websocket/websocketHandshake.zig");
     pub const Frame = @import("web/websocket/websocketFrame.zig");
+    pub const deflate = @import("web/websocket/websocketDeflate.zig");
     pub const computeAccept = Handshake.computeAccept;
     pub const buildUpgradeRequest = Handshake.buildUpgradeRequest;
 };
@@ -233,10 +260,12 @@ pub const graphql = @import("web/graphql/graphql.zig");
 pub const auth = struct {
     pub const basic = @import("web/auth/basicAuth.zig");
     pub const bearer = @import("web/auth/bearerAuth.zig");
+    pub const digest = @import("web/auth/digestAuth.zig");
 };
 pub const multipart = struct {
     pub const encoder = @import("web/multipart/multipartEncoder.zig");
     pub const parser = @import("web/multipart/multipartParser.zig");
+    pub const server = @import("web/multipart/multipartServer.zig");
 };
 
 // Middleware
@@ -246,6 +275,7 @@ pub const middleware = struct {
     pub const helmet = sec.securityHeadersMiddleware;
     pub const recovery = sec.recoveryMiddleware;
     pub const logging = sec.loggingMiddleware;
+    pub const csrf = sec.csrfMiddleware;
     pub const RateLimiter = sec.RateLimiter;
     pub const rateLimit = @import("web/middleware/rateLimiter.zig");
     pub const RateLimitPolicy = rateLimit.RateLimitPolicy;
@@ -269,16 +299,10 @@ pub const web = struct {
     pub const TemplateEngine = @import("web/templates/templates.zig").Engine;
     pub const assets = @import("web/assets/assetStore.zig");
     pub const site = @import("web/site/siteServer.zig");
-    pub const sse = struct {
-        pub const Writer = @import("web/sse/sseWriter.zig");
-        pub const Parser = @import("web/sse/sseParser.zig");
-        pub const EventWriter = @import("web/sse/sseWriter.zig").EventWriter;
-        pub const Event = @import("web/sse/sseParser.zig").Event;
-        pub const EventParser = @import("web/sse/sseParser.zig").EventParser;
-    };
     pub const websocket = struct {
         pub const Handshake = @import("web/websocket/websocketHandshake.zig");
         pub const Frame = @import("web/websocket/websocketFrame.zig");
+        pub const deflate = @import("web/websocket/websocketDeflate.zig");
         pub const computeAccept = Handshake.computeAccept;
         pub const buildUpgradeRequest = Handshake.buildUpgradeRequest;
     };
@@ -292,10 +316,12 @@ pub const web = struct {
     pub const auth = struct {
         pub const basic = @import("web/auth/basicAuth.zig");
         pub const bearer = @import("web/auth/bearerAuth.zig");
+        pub const digest = @import("web/auth/digestAuth.zig");
     };
     pub const multipart = struct {
         pub const encoder = @import("web/multipart/multipartEncoder.zig");
         pub const parser = @import("web/multipart/multipartParser.zig");
+        pub const server = @import("web/multipart/multipartServer.zig");
     };
     pub const middleware = struct {
         const sec = @import("web/middleware/securityHeaders.zig");
@@ -303,72 +329,75 @@ pub const web = struct {
         pub const helmet = sec.securityHeadersMiddleware;
         pub const recovery = sec.recoveryMiddleware;
         pub const logging = sec.loggingMiddleware;
+        pub const csrf = sec.csrfMiddleware;
         pub const RateLimiter = sec.RateLimiter;
     };
 };
 
-// Client API (canonical paths live at the root: httpx.Client,
-// httpx.ClientConfig, httpx.RequestOptions, httpx.get, ...).
-pub const cookies = @import("client/cookieJar.zig");
-pub const pool = @import("client/connectionPool.zig");
-pub const Client = @import("client/httpClient.zig").Client;
-pub const ClientConfig = @import("client/httpClient.zig").Config;
-pub const RequestOptions = @import("client/httpClient.zig").RequestOptions;
-pub const ClientResponse = @import("client/requestBuilder.zig").Response;
-pub const Header = @import("client/requestBuilder.zig").Header;
-pub const TlsOptions = @import("client/requestBuilder.zig").TlsOptions;
-pub const Headers = headers.Headers;
-pub const CookieJar = cookies.Jar;
-pub const ConnectionPool = pool.Pool;
-pub const PoolConfig = pool.PoolConfig;
-pub const RequestBuilder = Client.RequestBuilder;
+// Client API. Shallow, concise, camelCase public paths with zero semantic repetition.
+pub const client = struct {
+    const httpClientMod = @import("client/httpClient.zig");
+    const requestBuilderMod = @import("client/requestBuilder.zig");
+    const poolMod = @import("client/connectionPool.zig");
+    const cookieMod = @import("client/cookieJar.zig");
+    const downloadMod = @import("client/downloadManager.zig");
 
-// Zero-config client functions & canonical HTTP verbs
-pub const fetch = @import("client/httpClient.zig").globalFetch;
-pub const request = @import("client/httpClient.zig").globalRequest;
-pub const get = @import("client/httpClient.zig").globalGet;
-pub const post = @import("client/httpClient.zig").globalPost;
-pub const put = @import("client/httpClient.zig").globalPut;
-pub const patch = @import("client/httpClient.zig").globalPatch;
-pub const delete = @import("client/httpClient.zig").globalDelete;
-pub const head = @import("client/httpClient.zig").globalHead;
-pub const options = @import("client/httpClient.zig").globalOptions;
-pub const trace = @import("client/httpClient.zig").globalTrace;
-pub const connect = @import("client/httpClient.zig").globalConnect;
-pub const getAll = @import("client/httpClient.zig").globalGetAll;
-pub const requestAll = @import("client/httpClient.zig").globalRequestAll;
-pub const isOnline = @import("client/httpClient.zig").globalIsOnline;
-pub const checkConnectivity = @import("client/httpClient.zig").globalCheckConnectivity;
-pub const ResolveOptions = @import("client/httpClient.zig").ResolveOptions;
-pub const ResolvedAddresses = @import("client/httpClient.zig").ResolvedAddresses;
-pub const AddressFamilyPreference = @import("client/httpClient.zig").AddressFamilyPreference;
+    // Client errors & resolution
+    pub const Error = httpClientMod.Error;
+    pub const ResolvedAddresses = httpClientMod.ResolvedAddresses;
+    pub const AddressFamilyPreference = httpClientMod.AddressFamilyPreference;
 
-// Download & Progress types
-pub const Download = @import("client/downloadManager.zig");
-pub const DownloadOptions = Download.DownloadOptions;
-pub const DownloadResult = Download.DownloadResult;
-pub const DownloadError = Download.DownloadError;
-pub const DownloadTask = struct { url: []const u8, dest: []const u8 };
-pub const RemoteFileInfo = Download.RemoteFileInfo;
-pub const ProgressInfo = Download.ProgressInfo;
-pub const ProgressState = Download.ProgressState;
-pub const ProgressMode = Download.ProgressMode;
-pub const ExistingFilePolicy = Download.ExistingFilePolicy;
-pub const VerifyOptions = Download.VerifyOptions;
-pub const UpdateOptions = Download.UpdateOptions;
-pub const parseChecksumFile = Download.parseChecksumFile;
-pub const ConnectivityOptions = connectivity.ConnectivityOptions;
-pub const ConnectivityResult = connectivity.ConnectivityResult;
+    // Request construction: httpx.client.requestBuilder
+    pub const requestBuilder = httpClientMod.Client.RequestBuilder;
+    pub const requestPayload = requestBuilderMod.Request;
+
+    // Body sources: httpx.client.bodySource, sliceReader, callbackReader
+    pub const bodySource = requestBuilderMod.BodySource;
+    pub const sliceReader = requestBuilderMod.SliceReader;
+    pub const callbackReader = requestBuilderMod.CallbackReader;
+    pub const header = requestBuilderMod.Header;
+    pub const bodyKind = requestBuilderMod.BodyKind;
+
+    // Connection pool: httpx.client.connectionPool
+    pub const connectionPool = poolMod.Pool;
+    pub const poolStats = poolMod.Stats;
+    pub const poolSnapshot = poolMod.Snapshot;
+
+    // Cookie jar: httpx.client.cookieJar, cookie
+    pub const cookieJar = cookieMod.Jar;
+    pub const cookie = cookieMod.Cookie;
+    pub const sameSite = cookieMod.Cookie.SameSite;
+
+    // Download manager: httpx.client.download
+    pub const Downloader = downloadMod.Downloader;
+    pub const DownloadOptions = downloadMod.DownloadOptions;
+    pub const DownloadResult = downloadMod.DownloadResult;
+    pub const DownloadTask = downloadMod.DownloadTask;
+    pub const DownloadError = downloadMod.DownloadError;
+    pub const download = downloadMod.Downloader;
+    pub const downloadResult = downloadMod.DownloadResult;
+    pub const downloadTask = downloadMod.DownloadTask;
+    pub const downloadError = downloadMod.DownloadError;
+    pub const remoteFileInfo = downloadMod.RemoteFileInfo;
+    pub const progressState = downloadMod.ProgressState;
+    pub const progressInfo = downloadMod.ProgressInfo;
+    pub const progressMode = downloadMod.ProgressMode;
+    pub const checksumAlgorithm = downloadMod.ChecksumAlgorithm;
+    pub const ftpDownload = downloadMod.ftpDownload;
+    pub const parseChecksumFile = downloadMod.parseChecksumFile;
+    pub const lookupFileInfo = downloadMod.lookupFileInfo;
+    pub const updateFile = downloadMod.updateFile;
+
+    // Response streaming: httpx.client.responseStream
+    pub const responseStream = requestBuilderMod.ResponseStream;
+    pub const sessionPolicyFingerprint = requestBuilderMod.sessionPolicyFingerprint;
+
+    // Worker pool: httpx.client.workerPool
+    pub const workerPool = @import("concurrency/workerPool.zig").Pool;
+};
 
 // Parsing & inspection subsystem
 /// Native HTML, XML, RSS/Atom/JSON feeds, robots.txt, and sitemap parsing engine.
-pub const Parser = @import("parsing/document.zig").Parser;
-pub const ParserConfig = @import("parsing/document.zig").ParserConfig;
-pub const Document = @import("parsing/document.zig").Document;
-pub const NodeHandle = @import("parsing/document.zig").NodeHandle;
-pub const NodeList = @import("parsing/document.zig").NodeList;
-pub const ContentKind = @import("parsing/document.zig").ContentKind;
-
 pub const parsing = struct {
     pub const dom = @import("parsing/dom.zig");
     pub const html = @import("parsing/html.zig");
@@ -408,17 +437,9 @@ pub const parsing = struct {
 };
 
 // Server API
-pub const server = @import("server/httpServer.zig");
-pub const Server = server.Server;
-pub const ServerConfig = server.Config;
-pub const PortStrategy = server.PortStrategy;
-pub const StreamConn = server.StreamConn;
-pub const Router = router.Router;
-pub const Context = router.Context;
-pub const Response = router.Response;
+const server = @import("server/httpServer.zig");
 
 // Concurrency & Utilities
-pub const WorkerPoolConfig = @import("concurrency/workerPool.zig").Config;
 const rateLimitMod = @import("web/middleware/rateLimiter.zig");
 pub const RateLimiter = rateLimitMod.RateLimiter;
 pub const RateLimitPolicy = rateLimitMod.RateLimitPolicy;
@@ -441,29 +462,8 @@ pub const ServerEvent = logging.ServerEvent;
 pub const ServerEventKind = logging.ServerEventKind;
 
 // Networking & Protocol Types
-pub const Address = address.Address;
-pub const Uri = uri.Uri;
-pub const Method = method.Method;
-pub const Status = status.Status;
-pub const Http1Parser = http1.parser.Http1Parser;
-pub const ChunkedDecoder = http1.parser.ChunkedDecoder;
-pub const H2Session = http2.connection.Session;
-pub const AlpnProtocol = tls.AlpnProtocol;
-
-// FTP (isolated protocol subsystem)
-pub const ftp = struct {
-    const ftpClientMod = @import("protocols/ftp/ftpClient.zig");
-    pub const Client = ftpClientMod.Client;
-    pub const Options = ftpClientMod.Options;
-    pub const Reply = ftpClientMod.Reply;
-    pub const FtpError = ftpClientMod.FtpError;
-    const ftpServer = @import("protocols/ftp/ftpServer.zig");
-    pub const Server = ftpServer.Server;
-    pub const Config = ftpServer.Config;
-    pub const Callbacks = ftpServer.Callbacks;
-    pub const download = @import("client/downloadManager.zig").ftpDownload;
-    pub const DownloadOptions = @import("client/downloadManager.zig").FtpDownloadOptions;
-};
+pub const Address = net.address.Address;
+// HTTP and TLS implementation types remain in `protocols`.
 
 // Tests
 test {
@@ -487,67 +487,67 @@ test {
     _ = tcp;
     _ = sys;
     _ = udp;
-    _ = address;
-    _ = dns;
-    _ = dnsCache;
-    _ = resolve;
-    _ = socks5;
-    _ = socks4;
-    _ = proxy;
-    _ = connectivity;
+    _ = net.address;
+    _ = net.dns;
+    _ = net.dnsCache;
+    _ = net.resolve;
+    _ = net.socks5;
+    _ = net.socks4;
+    _ = net.proxy;
+    _ = net.connectivity;
     _ = compression;
-    _ = proto.common.integer;
-    _ = proto.common.huffman;
-    _ = proto.common.huffmanTable;
-    _ = http1.parser;
-    _ = http1.writer;
-    _ = http1.semantics;
-    _ = http1.fuzz;
-    _ = http2.frame;
-    _ = http2.hpack;
-    _ = http2.stream;
-    _ = http2.connection;
-    _ = http2.transport;
-    _ = http3.frame;
-    _ = http3.qpack;
-    _ = http3.connection;
-    _ = http3.stream;
-    _ = http3.transport;
-    _ = quic.varint;
-    _ = quic.packet;
-    _ = quic.crypto;
-    _ = quic.protect;
-    _ = quic.frames;
-    _ = quic.acktr;
-    _ = quic.loss;
-    _ = quic.cc;
-    _ = quic.params;
-    _ = quic.stream;
-    _ = quic.connection;
-    _ = quic.connectionId;
-    _ = quic.path;
-    _ = quic.transport;
-    _ = quic.handshake;
-    _ = tls.alpn;
-    _ = tls.certificate;
-    _ = tls.config;
-    _ = tls.engine;
-    _ = tls.errors;
-    _ = tls.handshake;
-    _ = tls.key;
-    _ = tls.quicTls;
-    _ = tls.record;
-    _ = tls.session;
-    _ = tls.transport;
-    _ = tls.trustStore;
-    _ = tls.verify;
-    _ = tls.Client;
-    _ = tls.Server;
-    _ = router.Router;
+    _ = protocols.common.integer;
+    _ = protocols.common.huffman;
+    _ = protocols.common.huffmanTable;
+    _ = protocols.http1.parser;
+    _ = protocols.http1.writer;
+    _ = protocols.http1.semantics;
+    _ = protocols.http2.frame;
+    _ = protocols.http2.hpack;
+    _ = protocols.http2.stream;
+    _ = protocols.http2.connection;
+    _ = protocols.http2.transport;
+    _ = protocols.http3.frame;
+    _ = protocols.http3.qpack;
+    _ = protocols.http3.connection;
+    _ = protocols.http3.stream;
+    _ = protocols.http3.transport;
+    _ = protocols.quic.varint;
+    _ = protocols.quic.packet;
+    _ = protocols.quic.crypto;
+    _ = protocols.quic.packetProtection;
+    _ = protocols.quic.frames;
+    _ = protocols.quic.ackTracker;
+    _ = protocols.quic.lossRecovery;
+    _ = protocols.quic.congestionControl;
+    _ = protocols.quic.transportParameters;
+    _ = protocols.quic.stream;
+    _ = protocols.quic.connection;
+    _ = protocols.quic.connectionId;
+    _ = protocols.quic.path;
+    _ = protocols.quic.transport;
+    _ = protocols.quic.handshake;
+    _ = protocols.tls.alpn;
+    _ = protocols.tls.certificate;
+    _ = protocols.tls.config;
+    _ = protocols.tls.engine;
+    _ = protocols.tls.errors;
+    _ = protocols.tls.handshake;
+    _ = protocols.tls.key;
+    _ = protocols.tls.quicTls;
+    _ = protocols.tls.record;
+    _ = protocols.tls.session;
+    _ = protocols.tls.transport;
+    _ = protocols.tls.trustStore;
+    _ = protocols.tls.verify;
+    _ = protocols.tls.Client;
+    _ = protocols.tls.Server;
+    _ = @import("common/env.zig");
+    _ = router;
     _ = router.pattern;
     _ = router.metadata;
-    _ = sse.Writer;
-    _ = sse.Parser;
+    _ = @import("web/sse/sseWriter.zig");
+    _ = @import("web/sse/sseParser.zig");
     _ = websocket.Handshake;
     _ = websocket.Frame;
     _ = middleware.rateLimit;
@@ -572,8 +572,10 @@ test {
     _ = graphql;
     _ = auth.basic;
     _ = auth.bearer;
+    _ = auth.digest;
     _ = multipart.encoder;
     _ = multipart.parser;
+    _ = multipart.server;
     _ = templates.engine;
     _ = templates.context;
     _ = templates.parser;
@@ -590,14 +592,14 @@ test {
     _ = parsing.robots;
     _ = parsing.sitemap;
     _ = parsing.document;
-    _ = ftp.Client;
-    _ = ftp.Server;
+    _ = protocols.ftp.Client;
+    _ = protocols.ftp.Server;
     _ = server.Server;
-    _ = cookies;
-    _ = pool;
-    _ = Client;
-    _ = ClientResponse;
-    _ = Download;
+    _ = @import("client/cookieJar.zig");
+    _ = @import("client/connectionPool.zig");
+    _ = @import("client/httpClient.zig");
+    _ = @import("client/requestBuilder.zig");
+    _ = @import("client/downloadManager.zig");
 }
 
 test "tint is wired directly and independently of loaders" {
@@ -656,4 +658,51 @@ test "Full template engine integration: variables, loops, conditionals, and raw 
     try testing.expect(std.mem.indexOf(u8, out, "<li>#2: Watcher</li>") != null);
     try testing.expect(std.mem.indexOf(u8, out, "<li>#3: LiveReload</li>") != null);
     try testing.expect(std.mem.indexOf(u8, out, "<small>&copy; 2026 HTTPX</small>") != null);
+}
+
+test "public facade exposes non-redundant canonical namespaces and types" {
+    const testing = std.testing;
+    const a = testing.allocator;
+
+    // Root types
+    try testing.expect(@sizeOf(Client) > 0);
+    try testing.expect(@sizeOf(Server) > 0);
+    try testing.expect(@sizeOf(Response) > 0);
+    try testing.expect(@sizeOf(Headers) > 0);
+    try testing.expect(@sizeOf(Method) > 0);
+    try testing.expect(@sizeOf(Status) > 0);
+    try testing.expect(@sizeOf(Uri) > 0);
+
+    // Shallow, non-redundant camelCase client APIs
+    try testing.expect(@sizeOf(client.requestBuilder) > 0);
+    try testing.expect(@sizeOf(client.connectionPool) > 0);
+    try testing.expect(@sizeOf(client.cookieJar) > 0);
+    try testing.expect(@sizeOf(client.cookie) > 0);
+    try testing.expect(@sizeOf(client.download) > 0);
+    try testing.expect(@sizeOf(client.responseStream) > 0);
+    try testing.expect(@sizeOf(client.workerPool) > 0);
+
+    // Root namespaces
+    try testing.expect(@sizeOf(http1.parser.Options) > 0);
+    try testing.expect(@sizeOf(http2.connection.Session) > 0);
+    try testing.expect(@sizeOf(http3.connection.Connection) > 0);
+    try testing.expect(@sizeOf(quic.connection.Connection) > 0);
+    try testing.expect(@sizeOf(tls.Client) > 0);
+    try testing.expect(@sizeOf(Router) > 0);
+    try testing.expect(@sizeOf(net.address.Address) > 0);
+
+    // Test defaultable options with .{}
+    var hdrs = Headers.init(a);
+    defer hdrs.deinit();
+    try testing.expectEqual(@as(usize, 0), hdrs.entries.items.len);
+
+    // Cookie jar operations via canonical client.cookieJar
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var jar = client.cookieJar.init(a, io);
+    defer jar.deinit();
+    jar.setFromHeader("session=token123; Path=/; HttpOnly", "example.com");
+    var cbuf: [128]u8 = undefined;
+    const cookieHdr = jar.cookieHeader("example.com", "/dashboard", false, &cbuf);
+    try testing.expect(cookieHdr != null);
+    try testing.expectEqualStrings("session=token123", cookieHdr.?);
 }

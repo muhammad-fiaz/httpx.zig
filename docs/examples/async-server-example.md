@@ -1,11 +1,14 @@
 # Async Server Example
 
-Run CPU-bound work off the request path with `httpx.WorkerPool`, and serve
-results from normal handlers. See `examples/concurrentDemo.zig` for parallel
-client requests.
+Run CPU-bound work off the request path with `httpx.concurrency.Pool`, and
+serve results from normal handlers. See `examples/concurrentDemo.zig` for
+parallel client requests.
 
 ```zig
-var pool = try httpx.WorkerPool.init(allocator, io, .{
+var ctx = try httpx.IoContext.init(allocator);
+defer ctx.deinit();
+
+var pool = try httpx.concurrency.Pool.init(allocator, ctx.io, .{
     .workers = 4,
     .queueCapacity = 1024,
     .autoStart = true,
@@ -40,4 +43,4 @@ zig build run-concurrent-demo
 ## What to Verify
 
 - Parallel `getAll` / `requestAll` calls all return 200.
-- `WorkerPool` submits background jobs without stalling request handling.
+- The worker pool submits background jobs without stalling request handling.

@@ -1,26 +1,29 @@
 # Structured Lifecycle Events
 
-HTTPX uses an event-driven observability model for both client requests and server connections. Instead of printing unconditionally to standard output, HTTPX emits structured event payloads to user-defined callback hooks.
+HTTPX uses an event-driven observability model for client requests and server
+connections. Instead of printing unconditionally to standard output, HTTPX
+delivers structured event payloads to user-defined callback hooks.
 
 ## Overview
 
-The zero-output default design guarantees that library internals never clutter console logs or disrupt terminal protocols. When observability is needed, attach an event handler at initialization time.
+The zero-output default design guarantees that library internals never clutter
+console logs or disrupt terminal protocols. When observability is needed,
+attach an event handler at initialization time.
 
-## Client Lifecycle Events
+## Client Request Events
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn onClientEvent(event: httpx.ClientEvent) void {
+fn onClientEvent(event: httpx.logging.ClientEvent) void {
     switch (event.kind) {
-        .requestStarted => std.debug.print("[Client] Starting {s} {s}\n", .{ event.method, event.url }),
-        .dnsLookup => std.debug.print("[Client] DNS lookup for {s}\n", .{event.url}),
-        .tlsHandshake => std.debug.print("[Client] TLS handshake done in {d}ms\n", .{event.durationMs}),
-        .requestCompleted => std.debug.print("[Client] Completed with status {d} in {d}ms\n", .{
-            event.status, event.durationMs,
+        .requestCompleted => std.debug.print("[Client] {s} {s} -> {d}\n", .{
+            event.method, event.url, event.status,
         }),
-        .requestFailed => std.debug.print("[Client] Request failed: {s}\n", .{event.message}),
+        .requestFailed => std.debug.print("[Client] {s} {s} failed: {s}\n", .{
+            event.method, event.url, event.message,
+        }),
         else => {},
     }
 }
@@ -36,44 +39,48 @@ pub fn main() !void {
     });
     defer client.deinit();
 
-    const res = try client.get("https://httpbun.com/get", .{});
+    var res = try client.get("https://httpbun.com/get", .{});
     defer res.deinit();
 }
 ```
 
-Client event kinds: `requestStarted`, `requestCompleted`, `requestFailed`,
-`redirect`, `retry`, `dnsLookup`, `dnsCacheHit`, `connectionEstablished`,
-`connectionReused`, `tlsHandshake`, `timeout`, `cancellation`.
-Payload fields: `method`, `url`, `status`, `durationMs`, `bytesSent`,
-`bytesReceived`, `message` (all borrowed for the callback duration only).
+The client callback currently emits `requestCompleted` with the method, URL,
+and response status, or `requestFailed` with the method, URL, and error name.
+`ClientEventKind` also defines `requestStarted`, `redirect`, `retry`,
+`dnsLookup`, `dnsCacheHit`, `connectionEstablished`, `connectionReused`,
+`tlsHandshake`, `timeout`, and `cancellation`, but the high-level client does
+not currently emit those kinds.
 
----
+Event slices are borrowed for the callback duration only. Copy any value you
+need to retain.
 
-## Server Lifecycle Events
-
-On the server, events report connection acceptance, request routing, middleware timings, and worker thread status:
+## Server Request Events
 
 ```zig
-fn onServerEvent(event: httpx.ServerEvent) void {
+fn onServerEvent(event: httpx.logging.ServerEvent) void {
     switch (event.kind) {
-        .connectionAccepted => std.debug.print("[Server] Accepted connection\n", .{}),
-        .requestCompleted => std.debug.print("[Server] {s} {s} -> status {d} in {d}ms\n", .{
+        .serverStarted => std.debug.print("[Server] listening\n", .{}),
+        .requestCompleted => std.debug.print("[Server] {s} {s} -> {d} in {d}ms\n", .{
             event.method, event.path, event.status, event.durationMs,
         }),
-        .connectionClosed => std.debug.print("[Server] Closed connection\n", .{}),
+        .tlsHandshakeFailed => std.debug.print("[Server] TLS failure: {s}\n", .{
+            event.message,
+        }),
+        .serverStopped => std.debug.print("[Server] stopped\n", .{}),
         else => {},
     }
 }
 ```
 
-Server event kinds: `serverStarted`, `serverStopped`, `connectionAccepted`,
-`connectionClosed`, `requestReceived`, `requestCompleted`, `requestFailed`,
-`handlerError`, `middlewareError`, `workerStarted`, `workerStopped`,
-`routeNotFound`, `methodNotAllowed`, `tlsHandshakeFailed`.
-Payload fields: `method`, `path`, `status`, `durationMs`, `bytesIn`,
-`bytesOut`, `message` (all borrowed for the callback duration only).
+The server callback currently emits `serverStarted`, `serverStopped`,
+`requestCompleted`, and `tlsHandshakeFailed`. `ServerEventKind` also defines
+connection, routing, middleware, handler, and worker kinds for applications
+that need to extend instrumentation, but the high-level server does not emit
+them today.
 
-Attach with `ServerConfig.logging = .{ .callback = &onServerEvent }`.
+Pass `.logging = .{ .callback = &onServerEvent }` in the options passed to
+`httpx.Server.init`. The `.logging.level` field filters events below the
+configured severity.
 
 ## Related
 

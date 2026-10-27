@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn getHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn getHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"status\":\"ok\"}",
@@ -38,7 +38,7 @@ pub fn main() !void {
     while (attempts < 3) : (attempts += 1) {
         var response = client.get(url, .{}) catch |err| {
             std.debug.print("Attempt {d} failed: {s}\n", .{ attempts + 1, @errorName(err) });
-            httpx.clock.sleepMillis(10);
+            httpx.clock.sleepMillis(io, 10);
             continue;
         };
         defer response.deinit();

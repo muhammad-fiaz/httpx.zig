@@ -130,7 +130,7 @@ Passing `.{}` retains the default dual-stack behavior.
 DNS is resolved locally by the client before opening a TCP connection to the destination.
 
 ### HTTP Forward Proxy
-The client connects to the proxy address. For HTTPS connections, HTTP `CONNECT host:port` is sent; the proxy performs DNS resolution for the remote target.
+The client connects to the proxy address and sends HTTP `CONNECT host:port`; the proxy performs DNS resolution for the remote target.
 
 ### SOCKS5 (`socks5://`)
 The destination hostname is resolved **locally** on the client machine. The resulting IP address is sent in the SOCKS5 handshake (`ATYP=0x01` or `0x04`).
@@ -144,8 +144,8 @@ The destination hostname is **not resolved locally**. The unresolved domain name
 
 For specialized applications that require manual DNS message encoding/decoding without an HTTP client:
 
-* **OS Resolver**: `httpx.resolve.Resolver.init(allocator, io)`
-* **RFC 1035 Packet Codec**: `httpx.dns.buildQuery`, `httpx.dns.parseResponse`
-* **Raw UDP Query**: `httpx.dns.resolveA`, `httpx.dns.resolveAAAA`
+* **OS Resolver**: `httpx.net.resolve.Resolver.init(allocator, io)`
+* **RFC 1035 Packet Codec**: `httpx.net.dns.buildQuery`, `httpx.net.dns.parseResponse`
+* **Raw UDP Query**: `httpx.net.dns.resolveA`, `httpx.net.dns.resolveAAAA`
 
 See the [API: DNS](/api/dns) and [Protocol: DNS](/protocols/dns) references for complete signatures.

@@ -4,7 +4,7 @@ const httpx = @import("httpx");
 const DownloadObserver = struct {
     taskId: u32,
 
-    fn onProgress(info: httpx.ProgressInfo, userData: ?*anyopaque) void {
+    fn onProgress(info: httpx.client.progressInfo, userData: ?*anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(userData.?));
         const pct = if (info.percentage) |p| p else 0.0;
         const stateColor: []const u8 = switch (info.state) {
@@ -30,7 +30,7 @@ const DownloadObserver = struct {
     }
 };
 
-fn bytesHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn bytesHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const data = try ctx.allocator.alloc(u8, 90);
     @memset(data, 'X');
     return .{
@@ -40,7 +40,7 @@ fn bytesHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn notFoundHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn notFoundHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 404, .body = "not found" };
 }
 

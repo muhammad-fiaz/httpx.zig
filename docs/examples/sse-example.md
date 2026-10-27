@@ -1,12 +1,12 @@
 # Server-Sent Events (SSE) Example
 
-SSE payloads with `httpx.sse.EventWriter`, parsed back with
-`httpx.sse.EventParser`. See `examples/sseServer.zig`.
+SSE payloads with `httpx.sse.Event.Writer`, parsed back with
+`httpx.sse.Event.Parser`. See `examples/sseServer.zig`.
 
 ```zig
-fn sseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn sseHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     var out = std.ArrayList(u8).empty;
-    var writer = httpx.sse.Writer.EventWriter.init(ctx.allocator);
+    var writer = httpx.sse.Event.Writer.init(ctx.allocator);
     try writer.writeEvent(&out, &[_][]const u8{"Connected to SSE live stream"}, "status", 1, 5000);
     try writer.writeEvent(&out, &[_][]const u8{"First data packet"}, "message", 2, null);
     return .{

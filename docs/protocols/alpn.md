@@ -12,15 +12,14 @@ Protocol Name: 1 octet length prefix + opaque ASCII string
 ```
 
 > **Status:** the server derives its ALPN preference from the protocols it
-> can actually speak, and does not advertise `h2` — HTTP/2 is not
-> implemented, so offering the identifier negotiated a protocol we then
-> failed on. The `h2` entry below lists the identifier as defined by the
-> RFCs, not as something currently served. An explicitly configured `alpn`
-> list is honoured as given.
+> can actually speak. HTTP/2 is served when enabled, so the default TCP
+> preference is `h2 > http/1.1 > http/1.0`; HTTP/3 is QUIC-only and is
+> negotiated as `h3`. An explicitly configured `alpn` list is honoured as
+> given.
 
 ## Supported Identifiers
 
-* `h2`: HTTP/2 over TLS (RFC 7540 / RFC 9113)
+* `h2`: HTTP/2 over TLS (RFC 9113)
 * `http/1.1`: HTTP/1.1 (RFC 9112)
 * `http/1.0`: HTTP/1.0 legacy
 * `h3`: HTTP/3 over QUIC (RFC 9114)
@@ -34,7 +33,7 @@ Protocol Name: 1 octet length prefix + opaque ASCII string
 
 ## Server Preference Order
 
-HTTPX servers negotiate ALPN using the server's preferred order (`h2 > http/1.1 > http/1.0` for TCP transports). If the client does not advertise ALPN, HTTPX safely defaults to `http/1.1`.
+HTTPX servers negotiate ALPN using the server's preferred order (`h2 > http/1.1 > http/1.0` for TCP transports when all three are enabled, and `h3` for QUIC). If the client does not advertise ALPN, HTTPX safely defaults to `http/1.1`.
 
 ## Related
 

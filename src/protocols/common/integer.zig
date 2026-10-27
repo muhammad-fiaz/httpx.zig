@@ -15,8 +15,8 @@ pub const Error = error{
     IntegerOverflow,
 };
 
-/// Maximum bytes a decoded integer may consume (DoS bound; matches the
-/// 62-bit QUIC-style ceiling used by nghttp2/nghttp3).
+/// Maximum bytes a decoded integer may consume (DoS bound for the
+/// 62-bit QUIC varint ceiling).
 pub const maxDecodeBytes: usize = 10;
 
 /// Encodes `value` into `buf` using the low `prefixBits` of buf[0].
@@ -63,7 +63,7 @@ pub fn decode(data: []const u8, offset: *usize, prefixBits: u3) Error!u64 {
     var used: usize = 1;
     while (true) {
         if (offset.* >= data.len) return Error.Truncated;
-        if (used > maxDecodeBytes) return Error.IntegerOverflow;
+        if (used >= maxDecodeBytes) return Error.IntegerOverflow;
         const byte = data[offset.*];
         offset.* += 1;
         used += 1;

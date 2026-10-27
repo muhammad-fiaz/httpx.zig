@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn pdfHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn pdfHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const data = try ctx.allocator.alloc(u8, 2048);
     @memset(data, '%');
     return .{

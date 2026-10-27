@@ -4,7 +4,7 @@ The `httpx.headers` module provides the canonical, case-insensitive HTTP header 
 
 ## Overview
 
-HTTP header names are case-insensitive per RFC 9110. `httpx.Headers` normalizes header lookups while preserving efficient in-place storage.
+HTTP header names are case-insensitive per RFC 9110. `httpx.headers.Headers` normalizes header lookups while preserving efficient in-place storage.
 
 ```zig
 const std = @import("std");
@@ -15,7 +15,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var hdrs = httpx.Headers.init(allocator);
+    var hdrs = httpx.headers.Headers.init(allocator);
     defer hdrs.deinit();
 
     try hdrs.set("Content-Type", "application/json");

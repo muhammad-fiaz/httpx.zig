@@ -9,7 +9,7 @@ servers from abuse, brute-force attempts, and denial of service attacks.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn limitedHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn limitedHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .status = "ok", .data = "sensitive information" });
 }
 
@@ -23,7 +23,9 @@ pub fn main() !void {
     defer server.deinit();
 
     // 10 requests per 60s window, burst up to 10.
-    var limiter = httpx.RateLimiter.init(allocator, 10, 60_000);
+    var limiter = httpx.RateLimiter.init(allocator, io, .{
+        .policy = .{ .limit = 10, .windowMs = 60_000 },
+    });
     defer limiter.deinit();
 
     try server.get("/api/data", limitedHandler);
@@ -39,7 +41,8 @@ dimension (`RateLimitDimension`: `.global`, `.clientIp`, `.userId`,
 `.apiKey`, `.route`, `.userAndRoute`, `.ipAndRoute`, `.custom`).
 
 Configure windows with `RateLimitPolicy` (`.limit`, `.windowMs`, `.burst`,
-`.ttlMs`) via `init(allocator, .{ .policy, .maxEntries })`.
+`.ttlMs`) via `init(allocator, io, .{ .policy, .maxEntries })`. The limiter
+uses this I/O context for its initial sweep timestamp.
 
 ## Rate Limiting Headers
 

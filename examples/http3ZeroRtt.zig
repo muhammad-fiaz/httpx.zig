@@ -92,6 +92,12 @@ const DemoServer = struct {
         });
         defer drv.deinit();
 
+        var h3 = httpx.http3.Connection.init(alloc, .server);
+        defer h3.deinit();
+        var acc = Acc{};
+        defer acc.buf.deinit(std.heap.page_allocator);
+        qconn.cbs = .{ .ctx = &acc, .onStreamData = onStream };
+
         qconn.tls = .{
             .ctx = &drv,
             .start = httpx.quic.HandshakeDriver.clientStart,
@@ -99,15 +105,9 @@ const DemoServer = struct {
         };
         try httpx.quic.handshake.serveHandshake(&srv.ep, &srv.pump, &drv, 15_000);
 
-        var h3 = httpx.http3.Connection.init(alloc, .server);
-        defer h3.deinit();
-        var acc = Acc{};
-        defer acc.buf.deinit(std.heap.page_allocator);
-        qconn.cbs = .{ .ctx = &acc, .onStreamData = onStream };
-
-        const start: u64 = @intCast(httpx.clock.millisNow());
+        const start: u64 = @intCast(httpx.clock.millisNow(io));
         while (true) {
-            const now: u64 = @intCast(httpx.clock.millisNow());
+            const now: u64 = @intCast(httpx.clock.millisNow(io));
             if (now -| start > 15_000) return error.Timeout;
             try httpx.quic.handshake.feedPumped(&srv.ep, &srv.pump, null, 500, now);
             if (!acc.fin) continue;
@@ -191,12 +191,19 @@ pub fn main() !void {
     defer client.deinit();
 
     var urlBuf: [64]u8 = undefined;
+    const cachePolicy = httpx.client.sessionPolicyFingerprint(.{
+        .verify = .caBundle,
+        .caPem = demoCertPem,
+    });
     const url1 = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/initial", .{port});
 
     std.debug.print("Step 1: Sending first request (cold connection, 1-RTT)...\n", .{});
     var res1 = try client.get(url1, .{
         .httpVersion = .http3,
-        .tls = .{ .verify = .caBundle, .caPem = demoCertPem },
+        .tls = .{
+            .verify = .caBundle,
+            .caPem = demoCertPem,
+        },
         .timeoutMs = 15_000,
     });
     defer res1.deinit();
@@ -206,11 +213,12 @@ pub fn main() !void {
     std.debug.print("  -> NewSessionTicket received and cached with maxEarlyData=16384.\n\n", .{});
 
     // Verify session ticket in client cache
-    var cached = client.sessionCache.getWithAlpn("127.0.0.1", port, @intCast(httpx.clock.millisNow()), "h3");
+    var cached = client.sessionCache.getWithAlpnPolicy("127.0.0.1", port, @intCast(httpx.clock.millisNow(io)), "h3", cachePolicy);
     if (cached) |*c| {
         defer c.deinit(allocator);
         std.debug.print("Step 2: Verified session cache entry: ALPN='{s}', maxEarlyData={d}\n\n", .{ c.alpn[0..c.alpnLen], c.maxEarlyData });
     } else {
+        srvThread.join();
         return error.MissingSessionTicket;
     }
 
@@ -219,7 +227,10 @@ pub fn main() !void {
     std.debug.print("Step 3: Sending second request with 0-RTT early data enabled...\n", .{});
     var res2 = try client.get(url2, .{
         .httpVersion = .http3,
-        .tls = .{ .verify = .caBundle, .caPem = demoCertPem },
+        .tls = .{
+            .verify = .caBundle,
+            .caPem = demoCertPem,
+        },
         .earlyData = .{ .enabled = true },
         .timeoutMs = 15_000,
     });

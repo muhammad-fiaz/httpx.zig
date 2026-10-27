@@ -1,6 +1,6 @@
 # HTTP/2 Example
 
-HTTP/2 frame headers and stream multiplexing with `httpx.http2`.
+HTTP/2 frame headers and stream multiplexing with `httpx.protocols.http2`.
 See `examples/http2Client.zig` and `examples/http2Multiplex.zig`.
 
 ```zig

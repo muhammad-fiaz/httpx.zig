@@ -82,6 +82,23 @@ pub fn BoundedQueue(comptime T: type) type {
             return item;
         }
 
+        /// Removes every currently queued item while holding the queue lock.
+        /// The callback runs under that lock and must not call back into this
+        /// queue. Unlike repeated `tryPop`, contention cannot be mistaken for
+        /// an empty queue and leave items behind.
+        pub fn drain(self: *Self, context: anytype, comptime callback: anytype) usize {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            var countDrained: usize = 0;
+            while (self.len != 0) {
+                const item = self.dequeue();
+                callback(context, item);
+                countDrained += 1;
+            }
+            if (countDrained != 0) self.notFull.broadcast(self.io);
+            return countDrained;
+        }
+
         /// Closes the queue and wakes every producer and consumer.
         pub fn close(self: *Self) void {
             self.mutex.lockUncancelable(self.io);

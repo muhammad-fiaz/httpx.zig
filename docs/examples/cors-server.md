@@ -50,11 +50,11 @@ pub fn main() !void {
     std.debug.print("CORS server verification completed successfully.\n", .{});
 }
 
-fn dataHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn dataHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = "{\"data\":\"CORS enabled\"}", .contentType = "application/json" };
 }
 
-fn createHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn createHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 201, .body = "{\"created\":true}", .contentType = "application/json" };
 }
 ```

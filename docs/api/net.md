@@ -84,8 +84,8 @@ const msg = try sock.receive(&buf);
 - `address.parseIp(text)` — IP-literal to `Address`
 - `format` / `formatBuf` / `formatWithPort` / `toString` / `toStd` / `fromStd`
 
-DNS resolution goes through `client.resolve(...)`, `httpx.resolve.Resolver`,
-and the client DNS cache (`ClientConfig.dnsCache`); SOCKS/proxy dialing via
+DNS resolution goes through `client.resolve(...)`, `httpx.net.resolve.Resolver`,
+and the client DNS cache (`.dnsCache` in the `Client.init` options); SOCKS/proxy dialing via
 `httpx.socks5` / `httpx.proxy`; reachability via `httpx.connectivity`.
 
 ## See Also

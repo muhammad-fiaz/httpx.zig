@@ -34,9 +34,10 @@ pub const TargetForm = enum {
 
     pub fn allowsForm(method: []const u8, form: TargetForm) bool {
         return switch (form) {
-            .authority => std.ascii.eqlIgnoreCase(method, "CONNECT"),
-            .asterisk => std.ascii.eqlIgnoreCase(method, "OPTIONS"),
-            else => true,
+            .authority => std.mem.eql(u8, method, "CONNECT"),
+            .asterisk => std.mem.eql(u8, method, "OPTIONS"),
+            .absolute => !std.mem.eql(u8, method, "CONNECT"),
+            .origin => !std.mem.eql(u8, method, "CONNECT"),
         };
     }
 };
@@ -44,7 +45,7 @@ pub const TargetForm = enum {
 fn isTargetChar(c: u8) bool {
     // RFC 3986 pchar + extra safe chars; reject CTL/SP and raw non-ASCII.
     return switch (c) {
-        '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@', '/', '?', '%', '-', '.', '_', '~', '#', '[', ']' => true,
+        '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@', '/', '?', '%', '-', '.', '_', '~', '[', ']' => true,
         else => std.ascii.isAlphanumeric(c),
     };
 }
@@ -60,7 +61,7 @@ pub fn classifyTarget(method: []const u8, target: []const u8) ?TargetForm {
     if (std.mem.eql(u8, target, "*")) {
         return if (TargetForm.allowsForm(method, .asterisk)) .asterisk else null;
     }
-    if (target[0] == '/') return .origin;
+    if (target[0] == '/') return if (TargetForm.allowsForm(method, .origin)) .origin else null;
 
     // scheme://authority[...] — require a known-ish scheme shape.
     if (std.mem.indexOf(u8, target, "://")) |i| {
@@ -71,11 +72,14 @@ pub fn classifyTarget(method: []const u8, target: []const u8) ?TargetForm {
         }
         const rest = target[i + 3 ..];
         if (rest.len == 0) return null;
+        _ = @import("../../common/uri.zig").parse(target) catch return null;
         return if (TargetForm.allowsForm(method, .absolute)) .absolute else null;
     }
 
     // authority-form: host[:port] with no '/' or '?'.
     if (std.mem.indexOfAny(u8, target, "/?#") != null) return null;
+    const authority = parseMod.parseAuthority(target) orelse return null;
+    if (authority.port == null or !validAuthority(target)) return null;
     return if (TargetForm.allowsForm(method, .authority)) .authority else null;
 }
 
@@ -107,6 +111,29 @@ pub fn validAuthority(value: []const u8) bool {
     return true;
 }
 
+/// Validates the request-target form and Host field before an HTTP/1 server
+/// consumes a body or dispatches the request. HTTP/1.1 requires exactly one
+/// Host field; duplicates are rejected for HTTP/1.0 as well because they are
+/// ambiguous to intermediaries.
+pub fn validRequestTargetAndHost(
+    method: []const u8,
+    target: []const u8,
+    minorVersion: u8,
+    fields: []const @import("parser.zig").Field,
+) bool {
+    const form = classifyTarget(method, target) orelse return false;
+    _ = form;
+
+    var hostCount: usize = 0;
+    for (fields) |field| {
+        if (!parseMod.eqlIgnoreCase(field.name, "Host")) continue;
+        hostCount += 1;
+        if (!validAuthority(field.value)) return false;
+    }
+    if (hostCount > 1) return false;
+    return minorVersion != 1 or hostCount == 1;
+}
+
 // Connection persistence (RFC 9110 section 7.6.1 / RFC 9112 section 9.3)
 
 pub const Version = enum { http10, http11 };
@@ -121,8 +148,8 @@ pub fn connectionDirective(headers: anytype) ConnectionDirective {
         if (!parseMod.eqlIgnoreCase(h.name, "Connection")) continue;
         var it = parseMod.TokenListIterator.init(h.value);
         while (it.next()) |tok| {
-            if (parseMod.eqlIgnoreCase(tok, "keep-alive")) result = .keepAlive;
-            if (parseMod.eqlIgnoreCase(tok, "close")) result = .close;
+            if (parseMod.eqlIgnoreCase(tok, "close")) return .close;
+            if (parseMod.eqlIgnoreCase(tok, "keep-alive") and result == .unspecified) result = .keepAlive;
         }
     }
     return result;
@@ -183,15 +210,7 @@ pub fn responseHasBody(methodHead: bool, status: u16) bool {
 
 /// Framing-sensitive fields that MUST NOT appear in trailers.
 pub fn trailerAllowed(name: []const u8) bool {
-    const prohibited = [_][]const u8{
-        "transfer-encoding", "content-length", "host",
-        "trailer",           "te",             "upgrade",
-        "connection",        "expect",
-    };
-    for (prohibited) |p| {
-        if (std.ascii.eqlIgnoreCase(p, name)) return false;
-    }
-    return true;
+    return @import("parser.zig").trailerFieldAllowed(name);
 }
 
 // Tests
@@ -202,9 +221,34 @@ test "target classification" {
     try std.testing.expectEqual(TargetForm.authority, classifyTarget("CONNECT", "example.com:443").?);
     try std.testing.expectEqual(TargetForm.asterisk, classifyTarget("OPTIONS", "*").?);
     try std.testing.expect(classifyTarget("GET", "*") == null);
+    try std.testing.expect(classifyTarget("options", "*") == null);
+    try std.testing.expect(classifyTarget("CONNECT", "https://example.com/") == null);
+    try std.testing.expect(classifyTarget("CONNECT", "example.com") == null);
+    try std.testing.expect(classifyTarget("CONNECT", "/tunnel") == null);
+    try std.testing.expect(classifyTarget("connect", "example.com:443") == null);
     try std.testing.expect(classifyTarget("GET", "example.com:443") == null); // authority only via CONNECT
     try std.testing.expect(classifyTarget("GET", "") == null);
     try std.testing.expect(classifyTarget("GET", "/has space") == null);
+    try std.testing.expect(classifyTarget("GET", "/has#fragment") == null);
+    try std.testing.expect(classifyTarget("GET", "http:///missing-authority") == null);
+    try std.testing.expect(classifyTarget("CONNECT", "host:port") == null);
+}
+
+test "request target and Host validation" {
+    const F = @import("../http1/parser.zig").Field;
+    const valid = [_]F{.{ .name = "Host", .value = "example.com:443" }};
+    try std.testing.expect(validRequestTargetAndHost("GET", "/", 1, valid[0..]));
+    try std.testing.expect(!validRequestTargetAndHost("GET", "/", 1, &[_]F{}));
+    try std.testing.expect(!validRequestTargetAndHost("GET", "/", 1, &.{
+        .{ .name = "Host", .value = "example.com" },
+        .{ .name = "host", .value = "other.example" },
+    }));
+    try std.testing.expect(!validRequestTargetAndHost("GET", "/", 0, &.{
+        .{ .name = "Host", .value = "example.com" },
+        .{ .name = "Host", .value = "other.example" },
+    }));
+    try std.testing.expect(!validRequestTargetAndHost("GET", "/", 1, &.{.{ .name = "Host", .value = "example.com:bad" }}));
+    try std.testing.expect(validRequestTargetAndHost("GET", "/", 0, &[_]F{}));
 }
 
 test "authority validation incl IPv6" {
@@ -242,6 +286,14 @@ test "keep-alive decision by version and directives" {
     const keep = [_]F{.{ .name = "Connection", .value = "Upgrade, Keep-Alive" }};
     try std.testing.expect(shouldKeepAlive(.http10, keep[0..]));
     try std.testing.expect(shouldKeepAlive(.http11, keep[0..]));
+
+    const conflicting = [_]F{.{ .name = "Connection", .value = "keep-alive, close" }};
+    try std.testing.expect(!shouldKeepAlive(.http10, conflicting[0..]));
+    const repeated = [_]F{
+        .{ .name = "Connection", .value = "keep-alive" },
+        .{ .name = "connection", .value = "close" },
+    };
+    try std.testing.expect(!shouldKeepAlive(.http10, repeated[0..]));
 }
 
 test "expect and bodyless rules" {

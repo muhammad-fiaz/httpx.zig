@@ -84,10 +84,24 @@ pub const Node = struct {
         return false;
     }
 
-    pub fn innerHtml(self: *const Node, tree: *const Tree) []const u8 {
-        _ = self;
-        _ = tree;
-        return "";
+    /// Serializes this node's children as an owned HTML fragment.
+    pub fn innerHtml(self: *const Node, allocator: Allocator, tree: *const Tree) ![]u8 {
+        var belongsToTree = false;
+        for (tree.nodes.items) |*candidate| {
+            if (candidate == self) {
+                belongsToTree = true;
+                break;
+            }
+        }
+        if (!belongsToTree) return error.NodeNotInTree;
+        var out = std.Io.Writer.Allocating.init(allocator);
+        errdefer out.deinit();
+        var child = self.firstChild;
+        while (child != NO_NODE) {
+            try tree.serializeToWriter(allocator, child, &out.writer);
+            child = tree.get(child).nextSibling;
+        }
+        return out.toOwnedSlice();
     }
 };
 
@@ -463,4 +477,6 @@ test "tree basic append, walk, mutate, serialize" {
 
     const serialized = try tree.serialize(a, root);
     try std.testing.expectEqualStrings("<div class=\"active\">hello &amp; world</div>", serialized);
+    const inner = try tree.get(elem).innerHtml(a, &tree);
+    try std.testing.expectEqualStrings("hello &amp; world", inner);
 }

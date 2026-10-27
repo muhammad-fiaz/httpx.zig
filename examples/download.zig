@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn bytesHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn bytesHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const data = try ctx.allocator.alloc(u8, 90);
     @memset(data, 'X');
     return .{

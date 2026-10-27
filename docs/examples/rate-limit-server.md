@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var rl = httpx.RateLimiter.init(allocator, .{ .policy = .{ .limit = 10, .windowMs = 1000 } });
+    var rl = httpx.RateLimiter.init(allocator, io, .{ .policy = .{ .limit = 10, .windowMs = 1000 } });
     defer rl.deinit();
 
     var server = try httpx.Server.init(allocator, io, .{
@@ -50,7 +50,7 @@ pub fn main() !void {
     std.debug.print("Rate limit server verification completed successfully.\n", .{});
 }
 
-fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Request successful\"}",

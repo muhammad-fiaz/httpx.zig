@@ -24,7 +24,7 @@ pub fn main() !void {
         \\</div>
     ;
 
-    var p = httpx.Parser.init(allocator, .{});
+    var p = httpx.parsing.Parser.init(allocator, .{});
     var doc = try p.parseHtml(initialHtml);
     defer doc.deinit();
 

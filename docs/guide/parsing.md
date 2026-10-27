@@ -13,7 +13,7 @@ there is no shared wrapper to route through:
 - `src/parsing/xml.zig` - XML grammar
 - `src/parsing/document.zig` - incremental edits, edits and queries over
   whichever grammar the content kind selects
-- `src/web/templates/parser.zig` - the template grammar
+- `src/web/templates/templateParser.zig` - the template grammar
 
 Tree-sitter is intentionally hidden from the public API: user code only
 needs `@import("httpx")`.
@@ -46,7 +46,7 @@ arithmetic expressions, s-expressions, JSON, and an indentation outline
 demo, so HTTPX defines first-class HTML, XML, and template grammars on
 top of the Tree-sitter runtime: `htmlLanguage` in `src/parsing/html.zig`,
 `xmlLanguage` in `src/parsing/xml.zig`, and `templateLanguage` in
-`src/web/templates/parser.zig`. Syntax tokens and ranges come from the
+`src/web/templates/templateParser.zig`. Syntax tokens and ranges come from the
 syntax tree, while tag matching, DOM building, and template nesting/AST
 semantics stay in HTTPX.
 JSON *value* decoding stays on `std.json`; structural consumers are JSON

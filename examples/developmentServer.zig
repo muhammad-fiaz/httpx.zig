@@ -27,11 +27,11 @@ const devTemplate =
     \\</html>
 ;
 
-fn devHtmlHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn devHtmlHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.html(devTemplate);
 }
 
-fn devCssHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn devCssHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "body { margin: 0; background: #0f172a; color: #f8fafc; font-family: system-ui; }",

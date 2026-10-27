@@ -38,15 +38,21 @@ pub const Uri = struct {
     }
 
     /// Reconstructs the authority portion "host[:port]" with brackets for IPv6.
-    pub fn authority(self: *const Uri, buf: []u8) []const u8 {
+    ///
+    /// Returns `error.NoSpaceLeft` instead of truncating or overflowing when
+    /// `buf` cannot hold the result. Callers that build a Host header must not
+    /// fall back to a partial authority: that would silently address a
+    /// different origin.
+    pub fn authority(self: *const Uri, buf: []u8) error{NoSpaceLeft}![]const u8 {
         const needsBrackets = std.mem.indexOfScalar(u8, self.host, ':') != null;
         if (self.port == 0 or self.port == defaultPort(self.scheme)) {
-            if (needsBrackets) return std.fmt.bufPrint(buf, "[{s}]", .{self.host}) catch self.host;
+            if (needsBrackets) return std.fmt.bufPrint(buf, "[{s}]", .{self.host});
+            if (buf.len < self.host.len) return error.NoSpaceLeft;
             @memcpy(buf[0..self.host.len], self.host);
             return buf[0..self.host.len];
         }
-        if (needsBrackets) return std.fmt.bufPrint(buf, "[{s}]:{d}", .{ self.host, self.port }) catch self.host;
-        return std.fmt.bufPrint(buf, "{s}:{d}", .{ self.host, self.port }) catch self.host;
+        if (needsBrackets) return std.fmt.bufPrint(buf, "[{s}]:{d}", .{ self.host, self.port });
+        return std.fmt.bufPrint(buf, "{s}:{d}", .{ self.host, self.port });
     }
 };
 
@@ -64,7 +70,17 @@ pub const QueryIterator = parseMod.QueryIterator;
 pub const lookupQuery = parseMod.lookupQuery;
 
 /// Parses a URI from `input`. The returned Uri references slices of `input`.
+///
+/// Rejects bytes that cannot appear unescaped in a URI (controls, space, DEL)
+/// and malformed schemes. Accepting those would let a caller build a request
+/// line or Host header from data the wire grammar forbids; the HTTP/1 writer
+/// would then reject the request, but failing here keeps the error precise and
+/// stops a redirect target from smuggling separators into URL-derived fields.
 pub fn parse(input: []const u8) !Uri {
+    for (input) |c| {
+        if (c <= 0x20 or c == 0x7F) return error.InvalidUri;
+    }
+
     var uri = Uri{};
     var rest = input;
 
@@ -82,7 +98,9 @@ pub fn parse(input: []const u8) !Uri {
 
     // Scheme
     if (std.mem.indexOf(u8, rest, "://")) |idx| {
-        uri.scheme = rest[0..idx];
+        const scheme = rest[0..idx];
+        if (!validScheme(scheme)) return error.InvalidUri;
+        uri.scheme = scheme;
         rest = rest[idx + 3 ..];
     } else {
         // No scheme — treat entire as path
@@ -97,6 +115,7 @@ pub fn parse(input: []const u8) !Uri {
         authorityEnd = idx;
     }
     const authorityStr = rest[0..authorityEnd];
+    if (authorityStr.len == 0) return error.InvalidUri;
 
     // Userinfo
     var hostAndPort = authorityStr;
@@ -106,6 +125,21 @@ pub fn parse(input: []const u8) !Uri {
     }
 
     const auth = parseMod.parseAuthority(hostAndPort) orelse return error.InvalidUri;
+    if (auth.host.len == 0) return error.InvalidUri;
+    if (auth.isIpv6) {
+        // Validate bracketed literals as actual IPv6 addresses. The generic
+        // authority scanner only checks brackets and ports; without this,
+        // `[example.com]` is later treated as a DNS hostname after losing its
+        // brackets. URI zone identifiers (RFC 6874) remain unsupported here
+        // until the URL-to-resolver path can decode and preserve the zone.
+        if (!validUriIpv6Literal(auth.host)) return error.InvalidUri;
+    } else if (!validRegName(auth.host)) {
+        // Keep the generic authority parser permissive for socket-address
+        // callers, but URL authorities must obey RFC 3986 reg-name syntax.
+        // Percent-encoded names are rejected because URL resolution currently
+        // passes the original host through unchanged instead of decoding it.
+        return error.InvalidUri;
+    }
     uri.host = auth.host;
     if (auth.port) |p| uri.port = p;
 
@@ -114,6 +148,66 @@ pub fn parse(input: []const u8) !Uri {
     if (uri.path.len == 0) uri.path = "/";
 
     return uri;
+}
+
+/// RFC 3986 reg-name = *( unreserved / pct-encoded / sub-delims ).
+fn validRegName(host: []const u8) bool {
+    if (host.len == 0) return false;
+    var i: usize = 0;
+    while (i < host.len) {
+        const c = host[i];
+        if (isUnreservedChar(c)) {
+            i += 1;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+fn isUnreservedChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-' or c == '.' or c == '_' or c == '~';
+}
+
+/// Validates an IPv6 URI literal using Zig's address parsers. Zig's pure
+/// Ip6Address parser accepts dotted IPv4 tails only for IPv4-mapped addresses,
+/// so translate the RFC 4291 tail form to two hex groups before validation.
+/// URI scope identifiers are rejected here; callers that need interface zones
+/// must use the dedicated socket-address API until URL resolution carries the
+/// decoded scope end to end.
+fn validUriIpv6Literal(text: []const u8) bool {
+    if (text.len == 0 or std.mem.indexOfScalar(u8, text, '%') != null) return false;
+    if (std.ascii.startsWithIgnoreCase(text, "::ffff:")) {
+        _ = std.Io.net.Ip6Address.parse(text, 0) catch return false;
+        return true;
+    }
+    if (std.mem.lastIndexOfScalar(u8, text, ':')) |lastColon| {
+        const tail = text[lastColon + 1 ..];
+        if (std.mem.indexOfScalar(u8, tail, '.')) |_| {
+            const v4 = std.Io.net.Ip4Address.parse(tail, 0) catch return false;
+            const prefix = text[0 .. lastColon + 1];
+            var converted: [64]u8 = undefined;
+            if (prefix.len + 20 > converted.len) return false;
+            const suffix = std.fmt.bufPrint(converted[prefix.len..], "{x}:{x}", .{
+                (@as(u16, v4.bytes[0]) << 8) | v4.bytes[1],
+                (@as(u16, v4.bytes[2]) << 8) | v4.bytes[3],
+            }) catch return false;
+            @memcpy(converted[0..prefix.len], prefix);
+            _ = std.Io.net.Ip6Address.parse(converted[0 .. prefix.len + suffix.len], 0) catch return false;
+            return true;
+        }
+    }
+    _ = std.Io.net.Ip6Address.parse(text, 0) catch return false;
+    return true;
+}
+
+/// RFC 3986 Section 3.1: scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ).
+fn validScheme(scheme: []const u8) bool {
+    if (scheme.len == 0 or !std.ascii.isAlphabetic(scheme[0])) return false;
+    for (scheme[1..]) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '-' and c != '.') return false;
+    }
+    return true;
 }
 
 fn isIpv6Literal(host: []const u8) bool {
@@ -206,4 +300,56 @@ test "path traversal detection" {
 
     try std.testing.expect(!hasPathTraversal("safe/path/file.txt"));
     try std.testing.expect(!hasPathTraversal("relative/file.html"));
+}
+
+test "parse rejects URI-unsafe bytes" {
+    // Controls, space, and DEL cannot appear unescaped in a URI. Accepting
+    // them would let URL data smuggle separators into the request line.
+    try std.testing.expectError(error.InvalidUri, parse("http://example.com/a b"));
+    try std.testing.expectError(error.InvalidUri, parse("http://example.com/a\r\nHost: evil"));
+    try std.testing.expectError(error.InvalidUri, parse("http://example.com/a\tb"));
+    try std.testing.expectError(error.InvalidUri, parse("http://example.com/\x00"));
+    try std.testing.expectError(error.InvalidUri, parse("http://example.com/\x7f"));
+}
+
+test "parse rejects malformed scheme and authority" {
+    try std.testing.expectError(error.InvalidUri, parse("1http://example.com/"));
+    try std.testing.expectError(error.InvalidUri, parse("ht tp://example.com/"));
+    try std.testing.expectError(error.InvalidUri, parse("http:///path"));
+    try std.testing.expectError(error.InvalidUri, parse("http://:8080/"));
+    // Bare IPv6 literals are not valid authorities (RFC 3986 requires
+    // brackets); they must not be mistaken for host:port.
+    try std.testing.expectError(error.InvalidUri, parse("http://::1/"));
+    try std.testing.expectError(error.InvalidUri, parse("http://[::1/"));
+    try std.testing.expectError(error.InvalidUri, parse("http://[example.com]/"));
+    try std.testing.expectError(error.InvalidUri, parse("http://[:::1]/"));
+    try std.testing.expectError(error.InvalidUri, parse("http://[fe80::1%25eth0]/"));
+
+    // RFC 4291 permits an IPv4 address in the low 32 bits of an IPv6 literal.
+    try std.testing.expectEqualStrings("::192.0.2.1", (try parse("http://[::192.0.2.1]/")).host);
+    try std.testing.expectEqualStrings("::ffff:192.0.2.1", (try parse("http://[::ffff:192.0.2.1]/")).host);
+}
+
+test "parse rejects malformed reg-name hosts before resolution" {
+    try std.testing.expectError(error.InvalidUri, parse("http://exa[mple.com/"));
+    try std.testing.expectError(error.InvalidUri, parse("http://example.com]/"));
+    try std.testing.expectError(error.InvalidUri, parse("http://example.com\\evil/"));
+    try std.testing.expectError(error.InvalidUri, parse("http://example.com%2f.evil/"));
+    try std.testing.expectEqualStrings("example.com", (try parse("http://example.com/")).host);
+}
+
+test "authority fails instead of truncating" {
+    const uri = try parse("https://example.com:8443/path");
+    var small: [4]u8 = undefined;
+    try std.testing.expectError(error.NoSpaceLeft, uri.authority(&small));
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("example.com:8443", try uri.authority(&buf));
+
+    const v6 = try parse("https://[2001:db8::1]:8443/path");
+    try std.testing.expectEqualStrings("[2001:db8::1]:8443", try v6.authority(&buf));
+
+    // Default ports are omitted.
+    const defaulted = try parse("https://example.com:443/path");
+    try std.testing.expectEqualStrings("example.com", try defaulted.authority(&buf));
 }

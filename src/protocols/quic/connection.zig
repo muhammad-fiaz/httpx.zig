@@ -27,6 +27,7 @@ const acktrMod = @import("ackTracker.zig");
 const lossMod = @import("lossRecovery.zig");
 const ccMod = @import("congestionControl.zig");
 const paramsMod = @import("transportParameters.zig");
+const pathMod = @import("path.zig");
 const qstream = @import("stream.zig");
 const tlsEngine = @import("../tls/tlsEngine.zig");
 const qtls = @import("../tls/quicTls.zig");
@@ -39,6 +40,7 @@ pub const Error = error{
     ProtocolViolation,
     AuthenticationFailed,
     FlowControlViolation,
+    StreamLimitViolation,
     /// Peer transport parameters were missing, malformed, or
     /// inconsistent (RFC 9000 Section 7.4 / RFC 9001 Section 7.4).
     TransportParameterError,
@@ -51,7 +53,70 @@ pub const Error = error{
     Draining,
     TlsDriverFailed,
     BufferTooSmall,
+    InvalidState,
+    UnsupportedVersion,
+    VersionNegotiation,
 };
+
+const ShortPacket = struct {
+    pn: u64,
+    ctLen: usize,
+    aadLen: usize,
+    phase: bool,
+};
+
+/// Unprotects one short-header packet with `keys`. The caller retries
+/// with the next/previous key phase when authentication fails.
+fn openShortProtected(
+    dgram: []const u8,
+    dcidLen: usize,
+    keys: crypto.ProtectionKeys,
+    largestAcked: ?u64,
+    work: *[MAX_DATAGRAM]u8,
+    pt: []u8,
+    phaseOut: *bool,
+) Error!ShortPacket {
+    if (dgram.len > work.len) return Error.ProtocolViolation;
+    @memcpy(work[0..dgram.len], dgram);
+
+    const pnOffset = 1 + dcidLen;
+    if (dgram.len < pnOffset + 20) return Error.ProtocolViolation;
+
+    var sample: [16]u8 = undefined;
+    @memcpy(&sample, work[pnOffset + 4 ..][0..16]);
+    const mask = switch (keys.cipher) {
+        .aes128Gcm, .aes256Gcm => blk: {
+            var hp16: [16]u8 = undefined;
+            @memcpy(&hp16, keys.hp[0..16]);
+            break :blk protect.hpMaskAesCtx(std.crypto.core.aes.Aes128.initEnc(hp16), &sample);
+        },
+        .chacha20Poly1305 => blk: {
+            var hp32: [32]u8 = undefined;
+            @memcpy(&hp32, keys.hp[0..32]);
+            break :blk protect.hpMaskChacha(hp32, &sample);
+        },
+    };
+    work[0] ^= mask[0] & 0x1F;
+    if (work[0] & 0x18 != 0) return Error.ProtocolViolation;
+    phaseOut.* = (work[0] & 0x04) != 0;
+
+    const pnLen: usize = (@as(usize, work[0]) & 0x03) + 1;
+    for (0..pnLen) |i| work[pnOffset + i] ^= mask[1 + i];
+    var pnTrunc: u64 = 0;
+    for (0..pnLen) |i| pnTrunc = (pnTrunc << 8) | work[pnOffset + i];
+
+    const expected: u64 = if (largestAcked) |la| la + 1 else 0;
+    const pn = protect.reconstructPn(expected, pnTrunc, pnLen);
+    const aadLen = pnOffset + pnLen;
+    if (dgram.len < aadLen + 16) return Error.ProtocolViolation;
+    const ctLen = dgram.len - aadLen - 16;
+    if (pt.len < ctLen) return Error.BufferTooSmall;
+
+    protect.openWithKeys(pt[0..ctLen], work[aadLen..][0..ctLen], work[aadLen + ctLen ..][0..16].*, work[0..aadLen], keys, pn) catch
+        return Error.AuthenticationFailed;
+
+    return .{ .pn = pn, .ctLen = ctLen, .aadLen = aadLen, .phase = phaseOut.* };
+}
 
 pub const Role = enum { client, server };
 
@@ -71,6 +136,9 @@ pub const PnSpace = struct {
     keysTx: ?crypto.ProtectionKeys = null,
     /// Highest received PN for duplicate suppression.
     highestRxPn: i64 = -1,
+    /// Once true, the keys are gone and the space can neither send nor
+    /// receive again (RFC 9001 Sections 4.9.1 and 4.9.2).
+    discarded: bool = false,
     gpa: Allocator,
     /// ACK-eliciting packets sent and not yet acknowledged, with their
     /// plaintext payloads retained for probe retransmission.
@@ -135,6 +203,14 @@ pub const Config = struct {
     initialMaxData: u64 = 1 << 20,
     maxUdpPayload: usize = 1472,
     isServer: bool = false,
+    /// Preferred QUIC version for clients (default v1). Servers accept
+    /// either v1 or v2 and adopt the version of the first Initial.
+    version: u32 = 0x00000001,
+    /// Require a Retry token before accepting a server-side Initial.
+    retry: bool = false,
+    /// Stable key for stateless Retry tokens. Generated per connection
+    /// when omitted; production servers should supply a shared key.
+    retryKey: ?[32]u8 = null,
 };
 
 pub const State = enum {
@@ -149,6 +225,12 @@ pub const State = enum {
 pub const MAX_DATAGRAM = 1500;
 pub const MAX_PEER_CONNECTION_IDS = 16;
 const MAX_CRYPTO_SEGMENTS = 1024;
+
+/// Minimum UDP payload size for a datagram that carries an Initial
+/// packet (RFC 9000 Section 14.1). A client MUST pad such datagrams up
+/// to this size, and a server MUST discard Initial packets that arrive
+/// in a smaller datagram.
+pub const MIN_INITIAL_DATAGRAM = 1200;
 
 pub const CidEntry = struct {
     sequence: u64,
@@ -165,14 +247,38 @@ pub const QueuedControl = struct {
     ownedReason: ?[]u8 = null,
 };
 
+/// Encryption level of a packet that is serialized but not yet flushed.
+/// 0-RTT is tracked separately from 1-RTT even though both use the
+/// application packet-number space: rejecting early data must remove
+/// queued 0-RTT packets without touching 1-RTT output.
+pub const QueuedKind = enum { initial, handshake, zero_rtt, application, other };
+
 pub const Connection = struct {
     allocator: Allocator,
+    io: std.Io,
     role: Role,
     cfg: Config,
     cbs: Callbacks = .{},
     tls: TlsDriver = .{},
 
     state: State = .initial,
+    /// TLS has both sent our Finished and verified the peer's Finished
+    /// (RFC 9001 Section 4.1.2).
+    handshakeComplete: bool = false,
+    /// Handshake confirmed: Handshake keys are discarded and no further
+    /// Handshake packet may be sent or accepted (RFC 9001 Section 4.9.2).
+    handshakeConfirmed: bool = false,
+    /// Lowest packet number sent with 1-RTT keys, used for the client's
+    /// optional ACK-based confirmation (RFC 9001 Section 4.1.2).
+    firstAppPnSent: ?u64 = null,
+    version: u32 = 0x00000001,
+    versionNegotiated: ?u32 = null,
+    vnSent: bool = false,
+    retryKey: [32]u8 = undefined,
+    retryToken: std.ArrayList(u8) = .empty,
+    retryOdcid: [20]u8 = undefined,
+    retryOdcidLen: u8 = 0,
+    retryPending: bool = false,
 
     // Flow control.
     maxData: u64 = 1 << 20,
@@ -182,7 +288,10 @@ pub const Connection = struct {
     /// Fallback per-stream send windows (peer's MAX_STREAM_DATA
     /// entries, once known, take precedence per stream). Seeded from
     /// transport parameters when exchanged, else compiled defaults.
-    sendWindowBidi: u64 = 65536,
+    /// Peer credit for bidirectional streams we initiated.
+    sendWindowBidiLocalInitiated: u64 = 65536,
+    /// Peer credit for bidirectional streams it initiated.
+    sendWindowBidiPeerInitiated: u64 = 65536,
     sendWindowUni: u64 = 65536,
 
     // Connection IDs (RFC 9000 allows CIDs up to 20 bytes).
@@ -194,6 +303,14 @@ pub const Connection = struct {
     /// Validates the server's originalDestinationConnectionId.
     origDcid: [20]u8 = undefined,
     origDcidLen: u8 = 0,
+    /// DCID used to derive Initial keys (changes after Retry).
+    initialDcid: [20]u8 = undefined,
+    initialDcidLen: u8 = 0,
+    /// Server SCID received in a Retry packet (client side).
+    retryScid: [20]u8 = undefined,
+    retryScidLen: u8 = 0,
+    /// Client Initial CRYPTO bytes retained for retransmission after Retry.
+    initialCryptoLog: std.ArrayList(u8) = .empty,
 
     // Peer CID table (NEW_CONNECTION_ID entries).
     peerCids: std.ArrayList(CidEntry) = .empty,
@@ -211,6 +328,8 @@ pub const Connection = struct {
     /// Congestion window gating application-space sends (RFC 9002
     /// NewReno). Handshake and control traffic always flows.
     cc: ccMod.NewReno = ccMod.NewReno.init(1200),
+    /// Path validation for address validation, migration and NAT rebinding (RFC 9000 Section 8.2).
+    pathValidator: ?pathMod.PathValidator = null,
     /// ACK-eliciting bytes in flight across all spaces.
     bytesInFlight: usize = 0,
     /// Scratch for ACK range generation (reused per packet, no churn).
@@ -234,6 +353,16 @@ pub const Connection = struct {
 
     // Packet-number spaces.
     spaces: [3]PnSpace = undefined,
+
+    // 1-RTT key update state (RFC 9001 Section 6). Secrets are retained
+    // so either endpoint can rotate independently per direction.
+    appTxSecret: ?[32]u8 = null,
+    appRxSecret: ?[32]u8 = null,
+    keyPhaseTx: bool = false,
+    keyPhaseRx: bool = false,
+    prevAppRxKeys: ?crypto.ProtectionKeys = null,
+    prevKeyPhaseRx: bool = false,
+    rxKeyUpdateAtMs: ?u64 = null,
 
     // 0-RTT early data state
     zeroRttKeysTx: ?crypto.ProtectionKeys = null,
@@ -264,19 +393,47 @@ pub const Connection = struct {
     /// Bytes of the last datagram consumed (coalesced-packet support).
     rxConsumed: usize = 0,
 
+    /// 1-RTT packets that arrived before the handshake completed.
+    ///
+    /// RFC 9001 Section 5.7: 1-RTT packets can arrive before the
+    /// handshake does (a peer that receives the server flight early
+    /// starts sending application data). Such packets cannot be
+    /// decrypted yet, so they are buffered and replayed once the
+    /// application keys are installed.
+    pendingApp: std.ArrayList([]u8) = .empty,
+
     /// Serialized output accumulated by send operations.
     outbuf: std.ArrayList(u8) = .empty,
+    /// Length of every packet queued in `outbuf`, in order. A QUIC
+    /// datagram carries whole packets only (RFC 9000 Section 12.2), so the
+    /// transport layer needs the packet boundaries to coalesce packets
+    /// into datagrams without ever splitting one.
+    outPackets: std.ArrayList(u32) = .empty,
+    /// For each queued packet, whether a following packet may share its
+    /// datagram. Long headers carry a Length field and can be
+    /// concatenated; a short header does not, so it must be the last
+    /// packet in a datagram (RFC 9000 Section 12.2).
+    outPacketChainable: std.ArrayList(bool) = .empty,
+    /// Encryption level of every queued packet. Discarding a packet
+    /// number space (RFC 9001 Sections 4.9.1-4.9.2) must also remove the
+    /// packets of that space that were already protected but not yet
+    /// handed to the transport, or a Handshake ACK could still leave the
+    /// endpoint after the keys are gone.
+    outPacketKinds: std.ArrayList(QueuedKind) = .empty,
 
     /// `io` supplies the entropy for the connection IDs. There is
     /// deliberately no seed parameter: one invites callers to pass a
     /// clock value, and a predictable CID lets an off-path attacker
     /// correlate or hijack a flow (RFC 9000 Section 8.2).
     pub fn init(allocator: Allocator, io: std.Io, role: Role, cfg: Config) !*Connection {
+        if (!packetMod.Version.isSupported(cfg.version)) return Error.UnsupportedVersion;
         const self = try allocator.create(Connection);
         self.* = .{
             .allocator = allocator,
+            .io = io,
             .role = role,
             .cfg = cfg,
+            .version = cfg.version,
         };
         for (0..3) |i| {
             self.spaces[i] = PnSpace.init(allocator, @fromBackingInt(@intCast(i)));
@@ -286,6 +443,13 @@ pub const Connection = struct {
         for (&self.cryptoPending) |*b| b.* = .empty;
         self.outbuf = .empty;
         self.peerCids = .empty;
+        self.retryToken = .empty;
+        self.initialCryptoLog = .empty;
+        self.retryKey = cfg.retryKey orelse blk: {
+            var key: [32]u8 = undefined;
+            try io.randomSecure(&key);
+            break :blk key;
+        };
         self.maxStreamData = std.AutoHashMap(u64, u64).init(allocator);
         self.recvStreamEnd = std.AutoHashMap(u64, u64).init(allocator);
         self.sendStreamEnd = std.AutoHashMap(u64, u64).init(allocator);
@@ -301,12 +465,16 @@ pub const Connection = struct {
             try io.randomSecure(self.dcid[0..self.dcidLen]); // chosen DCID for Initial
             @memcpy(self.origDcid[0..self.dcidLen], self.dcid[0..self.dcidLen]);
             self.origDcidLen = self.dcidLen;
+            @memcpy(self.initialDcid[0..self.dcidLen], self.dcid[0..self.dcidLen]);
+            self.initialDcidLen = self.dcidLen;
         }
         return self;
     }
 
     pub fn deinit(self: *Connection) void {
         for (&self.spaces) |*s| s.deinit();
+        self.clearPendingApp();
+        self.pendingApp.deinit(self.allocator);
         for (&self.cryptoBuf) |*b| b.deinit(self.allocator);
         for (&self.cryptoOut) |*b| b.deinit(self.allocator);
         for (&self.cryptoPending) |*b| {
@@ -314,7 +482,12 @@ pub const Connection = struct {
             b.deinit(self.allocator);
         }
         self.outbuf.deinit(self.allocator);
+        self.outPackets.deinit(self.allocator);
+        self.outPacketChainable.deinit(self.allocator);
+        self.outPacketKinds.deinit(self.allocator);
         self.peerCids.deinit(self.allocator);
+        self.retryToken.deinit(self.allocator);
+        self.initialCryptoLog.deinit(self.allocator);
         self.maxStreamData.deinit();
         self.recvStreamEnd.deinit();
         self.sendStreamEnd.deinit();
@@ -345,7 +518,8 @@ pub const Connection = struct {
 
     /// Installs Initial keys derived from the original DCID.
     pub fn installInitialKeys(self: *Connection) Error!void {
-        const secrets = crypto.initialSecrets(self.dcid[0..self.dcidLen], 0x00000001) catch return Error.TlsDriverFailed;
+        const keyDcid = if (self.initialDcidLen > 0) self.initialDcid[0..self.initialDcidLen] else self.dcid[0..self.dcidLen];
+        const secrets = crypto.initialSecrets(keyDcid, self.version) catch return Error.TlsDriverFailed;
         const sp = &self.spaces[0];
         sp.keysTx = if (self.role == .client)
             crypto.initialProtection(secrets, .client)
@@ -372,6 +546,45 @@ pub const Connection = struct {
         _ = &krx;
         sp.keysTx = ktx;
         sp.keysRx = krx;
+        if (kind == .application) {
+            if (self.role == .client) {
+                // RFC 9001 Section 4.9.3: a client discards 0-RTT keys as
+                // soon as it installs 1-RTT keys. Early data is never sent
+                // under old keys after this point.
+                self.zeroRttKeysTx = null;
+                self.zeroRttKeysRx = null;
+            }
+            self.appTxSecret = txSecret;
+            self.appRxSecret = rxSecret;
+            self.keyPhaseTx = false;
+            self.keyPhaseRx = false;
+            self.prevAppRxKeys = null;
+            self.prevKeyPhaseRx = false;
+            self.rxKeyUpdateAtMs = null;
+        }
+    }
+
+    /// Rotates our sending 1-RTT keys (RFC 9001 Section 6). The peer
+    /// observes the new Key Phase bit and derives the same next secret.
+    pub fn initiateKeyUpdate(self: *Connection) Error!void {
+        if (self.state != .established and self.state != .closing) return Error.InvalidState;
+        const current = self.appTxSecret orelse return Error.TlsDriverFailed;
+        const next = crypto.nextApplicationSecret(current);
+        self.appTxSecret = next;
+        self.spaces[2].keysTx = crypto.deriveProtectionKeys(next);
+        self.keyPhaseTx = !self.keyPhaseTx;
+    }
+
+    pub fn updateKeysForTesting(self: *Connection, secret: [32]u8) void {
+        self.appTxSecret = secret;
+        self.appRxSecret = secret;
+        self.spaces[2].keysTx = crypto.deriveProtectionKeys(secret);
+        self.spaces[2].keysRx = crypto.deriveProtectionKeys(secret);
+        self.keyPhaseTx = false;
+        self.keyPhaseRx = false;
+        self.prevAppRxKeys = null;
+        self.prevKeyPhaseRx = false;
+        self.rxKeyUpdateAtMs = null;
     }
 
     pub fn installZeroRttKeys(self: *Connection, secret: [32]u8, isTx: bool) void {
@@ -386,6 +599,9 @@ pub const Connection = struct {
     pub fn discardZeroRtt(self: *Connection) void {
         self.zeroRttKeysTx = null;
         self.zeroRttKeysRx = null;
+        // RFC 9001 Section 4.9.3: once 0-RTT keys are discarded no 0-RTT
+        // packet may be sent, including one that is already serialized.
+        self.dropQueuedKind(.zero_rtt);
         self.earlyDataRejected = true;
         self.earlyDataAccepted = false;
     }
@@ -397,6 +613,7 @@ pub const Connection = struct {
         const offset = self.cryptoSendOff[idx];
         self.cryptoSendOff[idx] = std.math.add(u64, offset, data.len) catch return Error.BufferTooSmall;
         self.cryptoOut[idx].appendSlice(self.allocator, data) catch return Error.OutOfMemory;
+        if (kind == .initial) self.initialCryptoLog.appendSlice(self.allocator, data) catch return Error.OutOfMemory;
         return offset;
     }
 
@@ -419,9 +636,81 @@ pub const Connection = struct {
         return true;
     }
 
+    /// Discards one packet-number space exactly once.
+    ///
+    /// RFC 9001 Sections 4.9.1 and 4.9.2 require the Initial and Handshake
+    /// keys to be dropped at well-defined points. Once a space is discarded
+    /// it can neither protect nor open another packet, so the retained
+    /// payloads, CRYPTO fragments, ACK timers and loss-recovery bookkeeping
+    /// are released as well. The connection-wide in-flight counter is
+    /// reduced by this space's contribution; without that, discarded
+    /// packets would permanently consume congestion window.
+    fn discardSpace(self: *Connection, idx: usize) void {
+        const sp = &self.spaces[idx];
+        if (sp.discarded) return;
+        sp.discarded = true;
+        // Packets of this space may already be serialized in `outbuf`
+        // (an ACK or probe built before the keys were discarded). They
+        // must never reach the wire, so remove them before dropping the
+        // keys they were protected with.
+        self.dropQueuedKind(switch (idx) {
+            0 => .initial,
+            1 => .handshake,
+            else => .application,
+        });
+        sp.keysTx = null;
+        sp.keysRx = null;
+        for (sp.sentData.items) |p| self.allocator.free(p);
+        sp.sentData.clearRetainingCapacity();
+        sp.sent.clearRetainingCapacity();
+        self.bytesInFlight -|= sp.inFlightBytes;
+        sp.inFlightBytes = 0;
+        sp.inFlightAckEliciting = 0;
+        sp.lastAckElicitingTsMs = null;
+        sp.ackedMax = null;
+        sp.lossTimeMs = null;
+        sp.ackQueued = false;
+        sp.ackElicitingCount = 0;
+        sp.ackDeadlineMs = null;
+        sp.largestRecvTsMs = 0;
+        // Neither outbound CRYPTO data nor inbound fragments can be used
+        // in a discarded space; keeping them would only leak memory.
+        self.cryptoOut[idx].clearRetainingCapacity();
+        self.cryptoBuf[idx].clearRetainingCapacity();
+        for (self.cryptoPending[idx].items) |segment| self.allocator.free(segment.data);
+        self.cryptoPending[idx].clearRetainingCapacity();
+    }
+
+    /// Confirms the handshake and discards the Handshake keys.
+    ///
+    /// RFC 9001 Sections 4.1.2 and 4.9.2: the server confirms the handshake
+    /// when it has sent and verified Finished; the client confirms it when
+    /// it receives HANDSHAKE_DONE (or, optionally, an acknowledgment for a
+    /// 1-RTT packet). Once confirmed no Handshake packet may be sent or
+    /// processed. Idempotent.
+    pub fn confirmHandshake(self: *Connection) void {
+        if (self.handshakeConfirmed) return;
+        self.handshakeConfirmed = true;
+        self.handshakeComplete = true;
+        self.discardSpace(1);
+        // RFC 9001 Section 4.9.3: 0-RTT keys are no longer useful once the
+        // handshake is confirmed. `earlyDataAccepted` is retained for
+        // callers; only the keys are dropped, together with any queued
+        // packet protected with them.
+        self.zeroRttKeysTx = null;
+        self.zeroRttKeysRx = null;
+        self.dropQueuedKind(.zero_rtt);
+        if (self.state == .initial or self.state == .handshake) self.state = .established;
+    }
+
+    /// Discards the Initial packet protection keys.
+    ///
+    /// RFC 9001 Section 4.9.1: a client discards Initial keys when it first
+    /// sends a Handshake packet, and a server discards them when it first
+    /// successfully processes one. Afterwards no Initial packet may be sent,
+    /// so the pending Initial retransmissions are dropped as well.
     pub fn discardInitialKeys(self: *Connection) void {
-        self.spaces[0].keysTx = null;
-        self.spaces[0].keysRx = null;
+        self.discardSpace(0);
     }
 
     // Send path
@@ -528,8 +817,16 @@ pub const Connection = struct {
         nowMs: u64,
     ) Error!void {
         const bidi = (sid & 0x02) == 0;
-        const streamLim = self.maxStreamData.get(sid) orelse
-            (if (bidi) self.sendWindowBidi else self.sendWindowUni);
+        const locallyInitiated = (self.role == .client and (sid & 0x01) == 0) or
+            (self.role == .server and (sid & 0x01) != 0);
+        if (locallyInitiated) {
+            const streamCount = (sid >> 2) + 1;
+            const streamLimit = if (bidi) self.maxStreamsBidiRemote else self.maxStreamsUniRemote;
+            if (streamCount > streamLimit) return Error.StreamLimitViolation;
+        } else if (!bidi or self.streams.get(sid) == null) {
+            return Error.ProtocolViolation;
+        }
+        const streamLim = self.maxStreamData.get(sid) orelse self.initialSendWindowForStream(sid);
         const end = std.math.add(u64, offset, data.len) catch return Error.BufferTooSmall;
         if (end > streamLim) return Error.SendBlocked;
         if (self.dataSent +| data.len > self.maxDataRemote) return Error.SendBlocked;
@@ -555,6 +852,21 @@ pub const Connection = struct {
             else => return Error.ProtocolViolation,
         };
         try self.packetize(.application, &payload, nowMs);
+    }
+
+    fn initialSendWindow(self: *const Connection, bidi: bool, locallyInitiated: bool) u64 {
+        if (!bidi) return self.sendWindowUni;
+        return if (locallyInitiated) self.sendWindowBidiLocalInitiated else self.sendWindowBidiPeerInitiated;
+    }
+
+    /// Returns the initial peer flow-control limit for `sid`, selecting
+    /// bidi-local versus bidi-remote by the stream initiator.
+    pub fn initialSendWindowForStream(self: *const Connection, sid: u64) u64 {
+        const bidi = (sid & 0x02) == 0;
+        const initiatorIsClient = (sid & 0x01) == 0;
+        const locallyInitiated = (self.role == .client and initiatorIsClient) or
+            (self.role == .server and !initiatorIsClient);
+        return self.initialSendWindow(bidi, locallyInitiated);
     }
 
     /// Queues one protected packet into outbuf.
@@ -586,6 +898,7 @@ pub const Connection = struct {
             else => {},
         }
         const sp = &self.spaces[@backingInt(kind)];
+        if (sp.discarded) return Error.TlsDriverFailed;
         const isZeroRtt = (kind == .application and sp.keysTx == null and self.zeroRttKeysTx != null);
         const keys = if (isZeroRtt)
             self.zeroRttKeysTx.?
@@ -599,13 +912,18 @@ pub const Connection = struct {
         }
 
         // Queued ACKs ride first so the peer can release its own
-        // recovery state promptly.
-        if (sp.ackQueued) {
+        // recovery state promptly. ACK frames are forbidden in 0-RTT
+        // (RFC 9000 Table 3); a queued ACK waits for a 1-RTT packet.
+        if (sp.ackQueued and !isZeroRtt) {
             self.ackScratch.clearRetainingCapacity();
             sp.acktr.generateBlocks(&self.ackScratch, self.allocator, 32) catch return Error.OutOfMemory;
             if (self.ackScratch.items.len > 0) {
                 const largest = self.ackScratch.items[0].highest;
-                const delay = nowMs -| sp.largestRecvTsMs;
+                // RFC 9000 Section 19.3: the ACK Delay field counts units
+                // of 2^ack_delay_exponent microseconds. Our transport
+                // parameters advertise the default exponent (3), i.e.
+                // 8 us per unit, so 125 units per millisecond.
+                const delay = (nowMs -| sp.largestRecvTsMs) *| 125;
                 frames.encodeAckFromBlocks(payload, self.allocator, largest, delay, self.ackScratch.items, null) catch |e| switch (e) {
                     error.OutOfMemory => return Error.OutOfMemory,
                     else => return Error.ProtocolViolation,
@@ -621,11 +939,32 @@ pub const Connection = struct {
         var pnBytes: [4]u8 = undefined;
         std.mem.writeInt(u32, &pnBytes, @intCast(pn & 0xFFFFFFFF), .big);
 
+        // Ensure enough ciphertext for the header-protection sample
+        // (sampleOff+16 <= wire) BEFORE the Length field is written.
+        const minPayload = 4 + 16 - pnLen;
+        if (payload.items.len < minPayload) {
+            try payload.appendNTimes(self.allocator, 0x00, minPayload - payload.items.len);
+        }
+
+        // RFC 9000 Section 14.1: a client MUST expand the payload of
+        // every UDP datagram carrying an Initial packet to at least 1200
+        // bytes, and a server MUST do the same for datagrams carrying an
+        // ack-eliciting Initial packet. Peers that enforce the minimum
+        // drop smaller datagrams, so an unpadded flight never completes
+        // the handshake.
+        if (kind == .initial) {
+            const must_pad = switch (self.role) {
+                .client => true,
+                .server => payloadHasAckEliciting(payload.items),
+            };
+            if (must_pad) try self.padInitialPayload(payload, pnLen);
+        }
+
         var buf: [MAX_DATAGRAM]u8 = undefined;
         const hdrLen = if (isZeroRtt)
             packetMod.writeLongHeader(buf[0..], .{
                 .type = .zeroRtt,
-                .version = 0x00000001,
+                .version = self.version,
                 .dcid = self.dcid[0..self.dcidLen],
                 .scid = self.scid[0..self.scidLen],
                 .token = "",
@@ -634,30 +973,23 @@ pub const Connection = struct {
             }) catch return Error.BufferTooSmall
         else if (kind == .application)
             packetMod.writeShortHeader(buf[0..], .{
-                .keyPhase = false,
+                .keyPhase = self.keyPhaseTx,
                 .dcid = self.dcid[0..self.dcidLen],
                 .pnLen = pnLen,
             }) catch return Error.BufferTooSmall
         else
             packetMod.writeLongHeader(buf[0..], .{
                 .type = if (kind == .initial) .initial else .handshake,
-                .version = 0x00000001,
+                .version = self.version,
                 .dcid = self.dcid[0..self.dcidLen],
                 .scid = self.scid[0..self.scidLen],
-                .token = "",
+                .token = if (kind == .initial) self.retryToken.items else "",
                 .pnLen = pnLen,
                 .protectedPayloadLen = payload.items.len + 16,
             }) catch return Error.BufferTooSmall;
 
         const aadLen = hdrLen + pnLen;
         @memcpy(buf[hdrLen..][0..pnLen], pnBytes[4 - pnLen ..]);
-
-        // Ensure enough ciphertext for the header-protection sample
-        // (sampleOff+16 <= wire): pad with PADDING frames if needed.
-        const minPayload = 4 + 16 - pnLen;
-        if (payload.items.len < minPayload) {
-            try payload.appendNTimes(self.allocator, 0x00, minPayload - payload.items.len);
-        }
 
         var ct: [MAX_DATAGRAM]u8 = undefined;
         var tag: [16]u8 = undefined;
@@ -690,7 +1022,14 @@ pub const Connection = struct {
         buf[0] ^= mask[0] & @as(u8, if (kind != .application or isZeroRtt) 0x0F else 0x1F);
         for (0..pnLen) |i| buf[hdrLen + i] ^= mask[1 + i];
 
-        try self.outbuf.appendSlice(self.allocator, buf[0..wireLen]);
+        const queued_kind: QueuedKind = if (isZeroRtt)
+            .zero_rtt
+        else switch (kind) {
+            .initial => .initial,
+            .handshake => .handshake,
+            .application => .application,
+        };
+        try self.queueOutPacket(buf[0..wireLen], kind != .application or isZeroRtt, queued_kind);
         self.bytesSent += wireLen;
         if (payloadHasAckEliciting(payload.items)) {
             sp.sent.append(self.allocator, .{
@@ -710,17 +1049,55 @@ pub const Connection = struct {
             sp.inFlightAckEliciting +|= 1;
             sp.lastAckElicitingTsMs = nowMs;
         }
+        if (kind == .application and !isZeroRtt and self.firstAppPnSent == null) {
+            // RFC 9001 Section 4.1.2: remember the lowest packet number
+            // sent with 1-RTT keys so an acknowledgment of it can confirm
+            // the handshake on the client.
+            self.firstAppPnSent = pn;
+        }
         sp.nextPn += 1;
     }
 
-    /// True when the built payload carries anything beyond ACK, PADDING,
-    /// PING, and CONNECTION_CLOSE (which are never retransmitted).
+    /// Pads the payload of an Initial packet so the resulting UDP
+    /// datagram reaches `MIN_INITIAL_DATAGRAM` bytes (RFC 9000 Section
+    /// 14.1). PADDING frames are the only thing added; they carry no
+    /// information and are never retransmitted on their own.
+    fn padInitialPayload(self: *Connection, payload: *std.ArrayList(u8), pnLen: usize) Error!void {
+        const tokenLen = self.retryToken.items.len;
+        const tokenVarintLen = packetMod.varintLen(tokenLen);
+        const dcidLen = self.dcidLen;
+        const scidLen = self.scidLen;
+
+        var pad: usize = 0;
+        var lenVarintLen: usize = 1;
+        // Two iterations are enough: growing the payload by the missing
+        // bytes can only widen the Length field, never shrink it.
+        var iter: usize = 0;
+        while (iter < 4) : (iter += 1) {
+            const hdrLen = 5 + 1 + dcidLen + 1 + scidLen + tokenVarintLen + tokenLen + lenVarintLen;
+            const wireLen = hdrLen + pnLen + payload.items.len + pad + 16;
+            if (wireLen >= MIN_INITIAL_DATAGRAM) break;
+            pad += MIN_INITIAL_DATAGRAM - wireLen;
+            const lengthValue = payload.items.len + pad + 16 + pnLen;
+            lenVarintLen = packetMod.varintLen(lengthValue);
+        }
+        if (pad == 0) return;
+        if (payload.items.len + pad > MAX_DATAGRAM) return Error.BufferTooSmall;
+        try payload.appendNTimes(self.allocator, 0x00, pad);
+    }
+
+    /// True when the built payload carries a frame that requires the peer
+    /// to acknowledge (RFC 9000 Section 13.2).
+    ///
+    /// Only ACK, PADDING, and CONNECTION_CLOSE are not ack-eliciting;
+    /// PING *is* ack-eliciting, so a packet carrying only PING must still
+    /// be tracked for loss recovery and must arm the PTO.
     fn payloadHasAckEliciting(payload: []const u8) bool {
         var pos: usize = 0;
         while (pos < payload.len) {
             const f = frames.decode(payload, &pos) catch return true;
             switch (f) {
-                .padding, .ping, .ack, .connectionClose => {},
+                .padding, .ack, .connectionClose => {},
                 else => return true,
             }
         }
@@ -811,6 +1188,7 @@ pub const Connection = struct {
     /// event (plus persistent-congestion collapse) and immediate
     /// retransmit of newly declared lost packets.
     fn runLossDetection(self: *Connection, sp: *PnSpace, nowMs: u64) Error!void {
+        if (sp.discarded) return;
         self.recovery.largestAckedPn = sp.ackedMax;
         self.recovery.lossTimeMs = sp.lossTimeMs;
         self.recovery.detectLost(sp.sent.items, nowMs, &self.scratchSent, self.allocator) catch
@@ -830,6 +1208,13 @@ pub const Connection = struct {
     /// tracking entry.
     fn retransmitEntry(self: *Connection, sp: *PnSpace, idx: usize, nowMs: u64) Error!void {
         const stored = sp.sentData.items[idx];
+        // A space whose keys were discarded (the Initial space once the
+        // handshake moved on) can no longer protect anything: drop the
+        // entry instead of failing the connection.
+        if (sp.discarded or sp.keysTx == null) {
+            self.removeSent(sp, idx);
+            return;
+        }
         var rebuilt = std.ArrayList(u8).empty;
         defer rebuilt.deinit(self.allocator);
         var pos: usize = 0;
@@ -839,7 +1224,20 @@ pub const Connection = struct {
             switch (f) {
                 .ack, .padding => {},
                 else => {
-                    frames.encode(&rebuilt, self.allocator, f) catch |e| switch (e) {
+                    // A retransmitted STREAM frame must carry an explicit
+                    // offset: the peer's current offset may have moved on
+                    // since the original frame was sent (RFC 9000 19.8).
+                    const frame: frames.Frame = switch (f) {
+                        .stream => |s| .{ .stream = .{
+                            .id = s.id,
+                            .offset = s.offset,
+                            .offPresent = true,
+                            .data = s.data,
+                            .fin = s.fin,
+                        } },
+                        else => f,
+                    };
+                    frames.encode(&rebuilt, self.allocator, frame) catch |e| switch (e) {
                         error.OutOfMemory => return Error.OutOfMemory,
                         else => return Error.ProtocolViolation,
                     };
@@ -877,15 +1275,31 @@ pub const Connection = struct {
         try self.packetize(kind, &payload, nowMs);
     }
 
+    /// Emits a packet carrying only the ACK that `ackQueued` records.
+    /// `packetize` prepends the queued ACK and pads the payload to the
+    /// minimum needed for header protection.
+    fn sendAckOnly(self: *Connection, kind: SpaceKind, nowMs: u64) Error!void {
+        var payload = std.ArrayList(u8).empty;
+        defer payload.deinit(self.allocator);
+        try self.packetize(kind, &payload, nowMs);
+    }
+
     /// Drives loss and PTO timers; call every pump iteration with the
     /// clock. Retransmits declare themselves through the normal send
-    /// path (fresh packet numbers, re-accounted windows).
+    /// path (fresh packet numbers, re-accounted windows). A pending ACK
+    /// is sent on its own packet instead of waiting for unrelated
+    /// application data, so the peer can retire its recovery state.
     pub fn pollTimeouts(self: *Connection, nowMs: u64) Error!void {
         switch (self.state) {
             .closing, .draining, .closed => return,
             else => {},
         }
+        self.pollAckTimers(nowMs);
         for (&self.spaces, 0..) |*sp, idx| {
+            if (sp.discarded) continue;
+            if (sp.ackQueued and sp.keysTx != null) {
+                try self.sendAckOnly(@fromBackingInt(@intCast(idx)), nowMs);
+            }
             if (sp.lossTimeMs) |lt| {
                 if (nowMs >= lt and sp.sent.items.len > 0) {
                     try self.runLossDetection(sp, nowMs);
@@ -917,26 +1331,268 @@ pub const Connection = struct {
             const slice = dgram[off..];
             if (slice.len < 5) return;
             const first = slice[0];
-            if ((first & 0x80) != 0 and std.mem.readInt(u32, slice[1..5], .big) == 0) {
-                return; // Version negotiation: policy handled above this layer.
-            }
             if ((first & 0x80) != 0) {
+                const peerVersion = std.mem.readInt(u32, slice[1..5], .big);
+                if (peerVersion == 0) {
+                    if (self.role == .client and self.state == .initial) {
+                        try self.handleVersionNegotiation(slice);
+                    }
+                    return;
+                }
+                if (!packetMod.Version.isSupported(peerVersion)) {
+                    if (self.role == .server) try self.sendVersionNegotiation(slice);
+                    return;
+                }
+                const wireType: u2 = @truncate((first >> 4) & 0x3);
+                if (packetMod.LongType.fromWire(peerVersion, wireType) == .retry) {
+                    if (self.role == .client and self.state == .initial) {
+                        try self.handleRetry(slice, nowMs);
+                    }
+                    return;
+                }
+                // RFC 9000 Section 14.1: a server MUST discard an Initial
+                // packet that arrives in a datagram smaller than 1200
+                // bytes. Dropping it here also keeps a spoofed small
+                // Initial from eliciting an amplified server flight. A
+                // client has no such duty: an undersized datagram must
+                // never close the connection (RFC 9000 Section 14).
+                if (self.role == .server and
+                    packetMod.LongType.fromWire(peerVersion, wireType) == .initial and
+                    dgram.len < MIN_INITIAL_DATAGRAM)
+                {
+                    return;
+                }
                 self.rxConsumed = 0;
                 try self.receiveLong(slice, nowMs);
                 if (self.rxConsumed == 0) return;
                 off += self.rxConsumed;
             } else {
+                // A short header must carry the fixed bit (RFC 9000
+                // Section 17.3.1). A datagram can be padded after its last
+                // packet with bytes that are not a packet at all; aioquic
+                // pads the Initial datagram with trailing zeros. Ignore the
+                // remainder instead of failing the whole datagram.
+                if ((first & 0x40) == 0) return;
                 try self.receiveShort(slice, nowMs);
                 off = dgram.len; // short packet spans the rest
             }
         }
     }
 
+    /// Validates a Version Negotiation packet (RFC 9000 Section 6.2).
+    /// Spoofed or malformed responses are ignored; a valid response
+    /// that does not select our current version aborts this attempt so
+    /// the caller can retry with `versionNegotiated`.
+    fn handleVersionNegotiation(self: *Connection, dgram: []const u8) Error!void {
+        const vn = packetMod.parseVersionNegotiation(dgram) catch return;
+        if (!std.mem.eql(u8, vn.dcid, self.scid[0..self.scidLen])) return;
+        if (!std.mem.eql(u8, vn.scid, self.dcid[0..self.dcidLen])) return;
+        for (0..vn.versions.len / 4) |i| {
+            if (vn.versionAt(i) == self.version) return; // spoofed downgrade
+        }
+        var chosen: ?u32 = null;
+        for (0..vn.versions.len / 4) |i| {
+            const v = vn.versionAt(i);
+            if (packetMod.Version.isSupported(v)) {
+                chosen = v;
+                break;
+            }
+        }
+        self.versionNegotiated = chosen;
+        return Error.VersionNegotiation;
+    }
+
+    const RetryTokenInfo = struct { odcid: [20]u8, odcidLen: u8 };
+
+    /// Builds a stateless Retry token bound to the original DCID, the
+    /// QUIC version, and the current time. Layout: version(4) |
+    /// odcidLen(1) | odcid | issuedAt(8) | HMAC-SHA256[:16].
+    fn makeRetryToken(self: *Connection, odcid: []const u8, version: u32, nowMs: u64) Error![64]u8 {
+        var buf: [64]u8 = undefined;
+        std.mem.writeInt(u32, buf[0..4], version, .big);
+        buf[4] = @intCast(odcid.len);
+        @memcpy(buf[5..][0..odcid.len], odcid);
+        const issuedOff = 5 + odcid.len;
+        std.mem.writeInt(u64, buf[issuedOff..][0..8], nowMs, .big);
+        const payloadLen = issuedOff + 8;
+        var mac: [32]u8 = undefined;
+        std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, buf[0..payloadLen], &self.retryKey);
+        @memcpy(buf[payloadLen..][0..16], mac[0..16]);
+        return buf;
+    }
+
+    fn validateRetryToken(self: *Connection, token: []const u8, version: u32, nowMs: u64) ?RetryTokenInfo {
+        if (token.len < 5 + 1 + 8 + 16) return null;
+        const odcidLen: usize = token[4];
+        if (odcidLen == 0 or odcidLen > 20) return null;
+        if (token.len != 5 + odcidLen + 8 + 16) return null;
+        const payloadLen = 5 + odcidLen + 8;
+        var mac: [32]u8 = undefined;
+        std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, token[0..payloadLen], &self.retryKey);
+        if (!std.crypto.timing_safe.eql([16]u8, mac[0..16].*, token[payloadLen..][0..16].*)) return null;
+        if (std.mem.readInt(u32, token[0..4], .big) != version) return null;
+        const issued = std.mem.readInt(u64, token[5 + odcidLen ..][0..8], .big);
+        if (nowMs >= issued and nowMs - issued > 60_000) return null;
+        if (issued > nowMs and issued - nowMs > 5_000) return null;
+        var info: RetryTokenInfo = .{ .odcid = undefined, .odcidLen = @intCast(odcidLen) };
+        @memcpy(info.odcid[0..odcidLen], token[5..][0..odcidLen]);
+        return info;
+    }
+
+    /// Statelessly answers an unsupported-version long header with a
+    /// Version Negotiation packet advertising v1 and v2.
+    fn sendVersionNegotiation(self: *Connection, dgram: []const u8) Error!void {
+        if (self.vnSent) return;
+        const cids = packetMod.parseLongHeaderCids(dgram) catch return;
+        var buf: [128]u8 = undefined;
+        const versions = [_]u32{ 0x00000001, 0x6B3343CF };
+        const n = packetMod.writeVersionNegotiation(buf[0..], cids.scid, cids.dcid, &versions) catch return;
+        if (self.bytesSent + n > self.bytesReceived *| 3) return;
+        try self.queueOutPacket(buf[0..n], false, .other);
+        self.bytesSent += n;
+        self.vnSent = true;
+    }
+
+    /// Client-side Retry processing (RFC 9000 Section 17.2.5): verifies
+    /// the integrity tag against the original DCID, adopts the Retry
+    /// SCID/token, resets the Initial packet-number space, and requeues
+    /// the ClientHello CRYPTO bytes under the new Initial keys.
+    fn handleRetry(self: *Connection, dgram: []const u8, nowMs: u64) Error!void {
+        const retry = packetMod.parseRetry(dgram) catch return;
+        if (retry.version != self.version) return;
+        if (retry.scid.len == 0 or retry.token.len == 0) return;
+        if (!std.mem.eql(u8, retry.dcid, self.scid[0..self.scidLen])) return;
+        if (self.retryPending) return;
+        const expected = crypto.retryIntegrityTag(self.version, self.origDcid[0..self.origDcidLen], retry.withoutTag);
+        if (!std.crypto.timing_safe.eql([16]u8, expected, retry.tag)) return;
+
+        self.retryPending = true;
+        // RFC 9000 Section 17.2.5.2: a client that receives a Retry
+        // discards any 0-RTT packets it sent and MUST NOT send 0-RTT in
+        // response. The request can be replayed once the handshake
+        // completes under the new connection ID.
+        self.discardZeroRtt();
+        @memcpy(self.dcid[0..retry.scid.len], retry.scid);
+        self.dcidLen = @intCast(retry.scid.len);
+        @memcpy(self.initialDcid[0..retry.scid.len], retry.scid);
+        self.initialDcidLen = @intCast(retry.scid.len);
+        @memcpy(self.retryScid[0..retry.scid.len], retry.scid);
+        self.retryScidLen = @intCast(retry.scid.len);
+        self.retryToken.clearRetainingCapacity();
+        self.retryToken.appendSlice(self.allocator, retry.token) catch return Error.OutOfMemory;
+
+        // The first flight was protected with the old Initial keys and is
+        // abandoned by the retry. Release its congestion-window share and
+        // drop any queued Initial packet before replacing the space, or
+        // `bytesInFlight` stays inflated and stale ciphertext is sent.
+        self.bytesInFlight -|= self.spaces[0].inFlightBytes;
+        self.dropQueuedKind(.initial);
+        self.spaces[0].deinit();
+        self.spaces[0] = PnSpace.init(self.allocator, .initial);
+        try self.installInitialKeys();
+
+        self.cryptoOut[0].clearRetainingCapacity();
+        self.cryptoOut[0].appendSlice(self.allocator, self.initialCryptoLog.items) catch return Error.OutOfMemory;
+        self.cryptoSendOff[0] = self.initialCryptoLog.items.len;
+        self.cryptoRecvOff[0] = 0;
+        self.cryptoBuf[0].clearRetainingCapacity();
+        for (self.cryptoPending[0].items) |segment| self.allocator.free(segment.data);
+        self.cryptoPending[0].clearRetainingCapacity();
+
+        // The ClientHello was protected with the abandoned Initial keys.
+        // Requeue it under the Retry SCID's keys so the token round trip
+        // can make progress; the TLS driver is not restarted, because
+        // that would generate a second ClientHello and corrupt the
+        // transcript.
+        try self.flushQueuedCrypto(.initial, nowMs);
+    }
+
+    /// Serializes queued CRYPTO bytes into one packet per chunk. Used when
+    /// Initial keys are replaced (Retry) and no TLS driver callback runs
+    /// to build the replacement flight.
+    fn flushQueuedCrypto(self: *Connection, kind: SpaceKind, nowMs: u64) Error!void {
+        while (self.takeCrypto(kind, MAX_DATAGRAM - 64)) |chunk| {
+            var payload: std.ArrayList(u8) = .empty;
+            defer payload.deinit(self.allocator);
+            frames.encode(&payload, self.allocator, .{ .crypto = .{ .offset = chunk.offset, .data = chunk.data } }) catch |e| switch (e) {
+                error.OutOfMemory => return Error.OutOfMemory,
+                else => return Error.ProtocolViolation,
+            };
+            _ = self.consumeCrypto(kind, chunk.data.len);
+            try self.packetize(kind, &payload, nowMs);
+        }
+    }
+
+    fn sendRetry(self: *Connection, dgram: []const u8, header: packetMod.LongHeader, nowMs: u64) Error!void {
+        if (self.retryPending or self.addressValidated) return;
+        const cids = packetMod.parseLongHeaderCids(dgram) catch return;
+        const token = try self.makeRetryToken(header.dcid, header.version, nowMs);
+        const tokenLen = 5 + header.dcid.len + 8 + 16;
+
+        var newScid: [8]u8 = undefined;
+        self.io.randomSecure(&newScid) catch return;
+        @memcpy(self.scid[0..newScid.len], &newScid);
+        self.scidLen = newScid.len;
+        @memcpy(self.dcid[0..cids.scid.len], cids.scid);
+        self.dcidLen = @intCast(cids.scid.len);
+
+        var buf: [128]u8 = undefined;
+        const n = packetMod.writeRetry(buf[0..], header.version, cids.scid, &newScid, token[0..tokenLen]) catch return;
+        const tag = crypto.retryIntegrityTag(header.version, header.dcid, buf[0..n]);
+        @memcpy(buf[n..][0..16], &tag);
+        const total = n + 16;
+        if (self.bytesSent + total > self.bytesReceived *| 3) return;
+        try self.queueOutPacket(buf[0..total], false, .other);
+        self.bytesSent += total;
+        self.retryPending = true;
+        @memcpy(self.retryOdcid[0..header.dcid.len], header.dcid);
+        self.retryOdcidLen = @intCast(header.dcid.len);
+    }
+
     fn receiveLong(self: *Connection, dgram: []const u8, nowMs: u64) Error!void {
         const parsed = packetMod.parseLongHeader(dgram) catch |e| switch (e) {
-            error.UnsupportedVersion => return, // ignore unknown versions
+            error.UnsupportedVersion => return, // handled in receiveDatagram
             else => return Error.ProtocolViolation,
         };
+
+        // A server adopts the version of the first Initial it accepts.
+        if (self.role == .server and self.state == .initial and parsed.header.version != self.version) {
+            self.version = parsed.header.version;
+            self.spaces[0].keysRx = null;
+            self.spaces[0].keysTx = null;
+            try self.installInitialKeys();
+        }
+
+        if (self.role == .server and parsed.header.type == .initial) {
+            if (self.cfg.retry and !self.addressValidated) {
+                if (parsed.header.token.len == 0) {
+                    try self.sendRetry(dgram, parsed.header, nowMs);
+                    return;
+                }
+                const info = self.validateRetryToken(parsed.header.token, parsed.header.version, nowMs) orelse {
+                    try self.sendRetry(dgram, parsed.header, nowMs);
+                    return;
+                };
+                self.addressValidated = true;
+                @memcpy(self.retryOdcid[0..info.odcidLen], info.odcid[0..info.odcidLen]);
+                self.retryOdcidLen = info.odcidLen;
+                @memcpy(self.origDcid[0..info.odcidLen], info.odcid[0..info.odcidLen]);
+                self.origDcidLen = info.odcidLen;
+            }
+            // Initial keys use the DCID carried in this packet, which is
+            // the Retry SCID after a token round trip.
+            if (self.initialDcidLen != parsed.header.dcid.len or
+                !std.mem.eql(u8, self.initialDcid[0..self.initialDcidLen], parsed.header.dcid))
+            {
+                @memcpy(self.initialDcid[0..parsed.header.dcid.len], parsed.header.dcid);
+                self.initialDcidLen = @intCast(parsed.header.dcid.len);
+                try self.installInitialKeys();
+            }
+            if (parsed.header.scid.len > 0) {
+                @memcpy(self.dcid[0..parsed.header.scid.len], parsed.header.scid);
+                self.dcidLen = @intCast(parsed.header.scid.len);
+            }
+        }
 
         const isZeroRtt = parsed.header.type == .zeroRtt;
         const spIdx: usize = if (isZeroRtt) 2 else switch (parsed.header.type) {
@@ -953,7 +1609,18 @@ pub const Connection = struct {
                 return;
             };
             break :blk zk;
-        } else (sp.keysRx orelse return Error.TlsDriverFailed);
+        } else (sp.keysRx orelse {
+            // A late Initial/Handshake packet can arrive after its keys
+            // were legitimately discarded. RFC 9001 Section 4.9 says to
+            // ignore it; consume the whole packet so a coalesced packet
+            // that follows still parses.
+            if (sp.discarded) {
+                const payloadLen = std.math.cast(usize, parsed.header.length) orelse return;
+                self.rxConsumed = parsed.header.pnOffset + payloadLen;
+                return;
+            }
+            return Error.TlsDriverFailed;
+        });
 
         const pnOffset = parsed.header.pnOffset;
         if (dgram.len > MAX_DATAGRAM) return Error.ProtocolViolation;
@@ -996,8 +1663,23 @@ pub const Connection = struct {
         const ctLen = declaredEnd - aadLen - 16;
 
         var pt: [MAX_DATAGRAM]u8 = undefined;
-        protect.openWithKeys(pt[0..ctLen], work[aadLen..][0..ctLen], work[declaredEnd - 16 ..][0..16].*, work[0..aadLen], keys, pn) catch
+        protect.openWithKeys(pt[0..ctLen], work[aadLen..][0..ctLen], work[declaredEnd - 16 ..][0..16].*, work[0..aadLen], keys, pn) catch {
             return Error.AuthenticationFailed;
+        };
+
+        // The server's first authenticated Initial selects the destination
+        // CID the client must use for subsequent packets (RFC 9000 §7.2).
+        // Keep initialDcid unchanged: it remains the input to Initial key
+        // derivation for retransmitted Initial packets.
+        if (self.role == .client and parsed.header.type == .initial) {
+            if (!std.mem.eql(u8, parsed.header.dcid, self.scid[0..self.scidLen])) return;
+            if (sp.highestRxPn < 0) {
+                @memcpy(self.dcid[0..parsed.header.scid.len], parsed.header.scid);
+                self.dcidLen = @intCast(parsed.header.scid.len);
+            } else if (!std.mem.eql(u8, parsed.header.scid, self.dcid[0..self.dcidLen])) {
+                return;
+            }
+        }
 
         if (isZeroRtt) {
             if (self.maxEarlyData > 0) {
@@ -1008,6 +1690,7 @@ pub const Connection = struct {
             }
         }
 
+        const isNewLargest = sp.largestAcked == null or pn > sp.largestAcked.?;
         sp.highestRxPn = @max(sp.highestRxPn, @as(i64, @intCast(@min(pn, 1 << 62))));
         sp.largestAcked = if (sp.largestAcked) |old| @max(old, pn) else pn;
         sp.acktr.add(pn) catch |e| switch (e) {
@@ -1019,56 +1702,79 @@ pub const Connection = struct {
             },
             error.OutOfMemory => return Error.OutOfMemory,
         };
-        sp.largestRecvTsMs = nowMs;
+        // RFC 9000 Section 19.3: ACK Delay is measured from the receipt
+        // of the largest acknowledged packet, not from the most recent
+        // (possibly older, reordered) packet.
+        if (isNewLargest) sp.largestRecvTsMs = nowMs;
 
         self.rxConsumed = declaredEnd;
         self.rxAckEliciting = false;
-        try self.dispatchFrames(sp, pt[0..ctLen], nowMs);
+        try self.dispatchFrames(sp, pt[0..ctLen], nowMs, isZeroRtt);
         self.afterPacketReceived(sp, pn, nowMs);
+
+        // RFC 9001 Section 4.9.1: a server discards the Initial keys when
+        // it first successfully processes a Handshake packet. Without this
+        // the server keeps retransmitting Initial packets, which peers
+        // treat as a protocol violation.
+        if (self.role == .server and !isZeroRtt and parsed.header.type == .handshake) {
+            self.discardInitialKeys();
+        }
     }
     fn receiveShort(self: *Connection, dgram: []const u8, nowMs: u64) Error!void {
         const sp = &self.spaces[2];
-        const keys = sp.keysRx orelse return Error.TlsDriverFailed;
+        const currentKeys = sp.keysRx orelse {
+            // The handshake is not complete yet, so the application keys
+            // are not installed and the packet cannot be decrypted.
+            // RFC 9001 Section 5.7: buffer it and replay it once the
+            // handshake completes; dropping it would lose the peer's
+            // first request (a peer may start sending 1-RTT data as
+            // soon as it has the handshake keys).
+            const copy = self.allocator.dupe(u8, dgram) catch return Error.OutOfMemory;
+            self.pendingApp.append(self.allocator, copy) catch {
+                self.allocator.free(copy);
+                return Error.OutOfMemory;
+            };
+            self.rxConsumed = dgram.len;
+            return;
+        };
 
         var work: [MAX_DATAGRAM]u8 = undefined;
-        if (dgram.len > work.len) return Error.ProtocolViolation;
-        @memcpy(work[0..dgram.len], dgram);
-
-        const pnOffset = 1 + self.scidLen; // peer uses OUR scid as dcid
-        if (dgram.len < pnOffset + 20) return Error.ProtocolViolation;
-
-        var sample: [16]u8 = undefined;
-        @memcpy(&sample, work[pnOffset + 4 ..][0..16]);
-        const mask = switch (keys.cipher) {
-            .aes128Gcm, .aes256Gcm => blk: {
-                var hp16: [16]u8 = undefined;
-                @memcpy(&hp16, keys.hp[0..16]);
-                break :blk protect.hpMaskAesCtx(std.crypto.core.aes.Aes128.initEnc(hp16), &sample);
-            },
-            .chacha20Poly1305 => blk: {
-                var hp32: [32]u8 = undefined;
-                @memcpy(&hp32, keys.hp[0..32]);
-                break :blk protect.hpMaskChacha(hp32, &sample);
-            },
-        };
-        work[0] ^= mask[0] & 0x1F;
-        if (work[0] & 0x18 != 0) return Error.ProtocolViolation;
-        const pnLen: usize = (@as(usize, work[0]) & 0x03) + 1;
-        for (0..pnLen) |i| work[pnOffset + i] ^= mask[1 + i];
-        var pnTrunc: u64 = 0;
-        for (0..pnLen) |i| pnTrunc = (pnTrunc << 8) | work[pnOffset + i];
-
-        const expected: u64 = if (sp.largestAcked) |la| la + 1 else 0;
-        const pn = protect.reconstructPn(expected, pnTrunc, pnLen);
-
-        const aadLen = pnOffset + pnLen;
-        if (dgram.len < aadLen + 16) return Error.ProtocolViolation;
-        const ctLen = dgram.len - aadLen - 16;
-
         var pt: [MAX_DATAGRAM]u8 = undefined;
-        protect.openWithKeys(pt[0..ctLen], work[aadLen..][0..ctLen], work[aadLen + ctLen ..][0..16].*, work[0..aadLen], keys, pn) catch
-            return Error.AuthenticationFailed;
+        var phase = false;
 
+        // Try the current key phase first. A differing Key Phase bit
+        // means the peer initiated an update (RFC 9001 Section 6.2);
+        // authentication failure falls back to the retained previous
+        // phase for reordered packets from before an update.
+        const opened = openShortProtected(dgram, self.scidLen, currentKeys, sp.largestAcked, &work, &pt, &phase) catch |firstErr| blk: {
+            if (firstErr != Error.AuthenticationFailed and firstErr != Error.ProtocolViolation) return firstErr;
+            if (self.appRxSecret) |secret| {
+                const nextSecret = crypto.nextApplicationSecret(secret);
+                const nextKeys = crypto.deriveProtectionKeys(nextSecret);
+                var nextPhase = false;
+                if (openShortProtected(dgram, self.scidLen, nextKeys, sp.largestAcked, &work, &pt, &nextPhase)) |next| {
+                    self.prevAppRxKeys = sp.keysRx;
+                    self.prevKeyPhaseRx = self.keyPhaseRx;
+                    self.appRxSecret = nextSecret;
+                    sp.keysRx = nextKeys;
+                    self.keyPhaseRx = nextPhase;
+                    self.rxKeyUpdateAtMs = nowMs;
+                    break :blk next;
+                } else |_| {}
+            }
+            if (self.prevAppRxKeys) |prevKeys| {
+                if (phase == self.prevKeyPhaseRx) {
+                    var prevPhase = false;
+                    if (openShortProtected(dgram, self.scidLen, prevKeys, sp.largestAcked, &work, &pt, &prevPhase)) |prev| {
+                        break :blk prev;
+                    } else |_| {}
+                }
+            }
+            return firstErr;
+        };
+
+        const pn = opened.pn;
+        const isNewLargest = sp.largestAcked == null or pn > sp.largestAcked.?;
         sp.highestRxPn = @max(sp.highestRxPn, @as(i64, @intCast(@min(pn, 1 << 62))));
         sp.largestAcked = if (sp.largestAcked) |old| @max(old, pn) else pn;
         sp.acktr.add(pn) catch |e| switch (e) {
@@ -1080,11 +1786,13 @@ pub const Connection = struct {
             },
             error.OutOfMemory => return Error.OutOfMemory,
         };
-        sp.largestRecvTsMs = nowMs;
+        // RFC 9000 Section 19.3: the ACK Delay baseline is the largest
+        // acknowledged packet, not a later reordered one.
+        if (isNewLargest) sp.largestRecvTsMs = nowMs;
 
         self.rxConsumed = dgram.len;
         self.rxAckEliciting = false;
-        try self.dispatchFrames(sp, pt[0..ctLen], nowMs);
+        try self.dispatchFrames(sp, pt[0..opened.ctLen], nowMs, false);
         self.afterPacketReceived(sp, pn, nowMs);
     }
 
@@ -1093,6 +1801,7 @@ pub const Connection = struct {
     /// reordering, or in handshake spaces (latency-sensitive); otherwise
     /// arms the max-ack-delay timer drained by `pollAckTimers`.
     fn afterPacketReceived(self: *Connection, sp: *PnSpace, pn: u64, nowMs: u64) void {
+        if (sp.discarded) return;
         if (!self.rxAckEliciting) return;
         sp.ackElicitingCount += 1;
         const outOfOrder = if (sp.acktr.largestSeen) |ls| pn < ls else false;
@@ -1105,10 +1814,11 @@ pub const Connection = struct {
         }
     }
 
-    /// Arms/drains ACK timers; call every pump iteration with the clock.
-    /// Pure state update: emission happens in `packetize`.
+    /// Arms/drains ACK timers; `pollTimeouts` calls this once per pump
+    /// iteration and then emits any queued ACK in its own packet.
     pub fn pollAckTimers(self: *Connection, nowMs: u64) void {
         for (&self.spaces) |*sp| {
+            if (sp.discarded) continue;
             if (sp.ackQueued) continue;
             if (sp.ackDeadlineMs) |dl| {
                 if (nowMs >= dl) {
@@ -1122,23 +1832,70 @@ pub const Connection = struct {
 
     fn isAckElicitingFrame(f: frames.Frame) bool {
         return switch (f) {
-            .padding, .ping, .ack, .connectionClose => false,
+            .padding, .ack, .connectionClose => false,
             else => true,
         };
     }
 
-    fn dispatchFrames(self: *Connection, sp: *PnSpace, plaintext: []const u8, nowMs: u64) Error!void {
+    /// RFC 9000 Table 3: each frame type is valid only in specific packet
+    /// number spaces. A frame in the wrong space is a PROTOCOL_VIOLATION.
+    fn frameAllowedInSpace(f: frames.Frame, kind: SpaceKind, isZeroRtt: bool) bool {
+        const app = kind == .application;
+        const oneRtt = app and !isZeroRtt;
+        return switch (f) {
+            .padding, .ping => true,
+            .ack, .crypto => oneRtt or !app,
+            .resetStream,
+            .stopSending,
+            .stream,
+            .maxData,
+            .maxStreamData,
+            .maxStreams,
+            .dataBlocked,
+            .streamDataBlocked,
+            .streamsBlocked,
+            .newConnectionId,
+            .retireConnectionId,
+            .pathChallenge,
+            => app,
+            .newToken, .pathResponse, .handshakeDone => oneRtt,
+            // 0x1c (transport) is Initial/Handshake/1-RTT; 0x1d
+            // (application) is 0-RTT/1-RTT.
+            .connectionClose => |c| if (c.application) app else oneRtt or !app,
+        };
+    }
+
+    fn dispatchFrames(
+        self: *Connection,
+        sp: *PnSpace,
+        plaintext: []const u8,
+        nowMs: u64,
+        isZeroRtt: bool,
+    ) Error!void {
         var pos: usize = 0;
         while (pos < plaintext.len) {
             const f = frames.decode(plaintext, &pos) catch |e| switch (e) {
                 error.OutOfMemory => return Error.OutOfMemory,
                 else => return Error.ProtocolViolation,
             };
+            if (!frameAllowedInSpace(f, sp.kind, isZeroRtt)) return Error.ProtocolViolation;
             if (isAckElicitingFrame(f)) self.rxAckEliciting = true;
             switch (f) {
                 .padding, .ping => {},
                 .ack => |a| {
                     try self.onAckFrame(sp, a, nowMs);
+                    // RFC 9001 Section 4.1.2: a client MAY consider the
+                    // handshake confirmed once one of its 1-RTT packets
+                    // has been acknowledged. This matters when
+                    // HANDSHAKE_DONE is lost but the peer already
+                    // processed the client Finished.
+                    if (!isZeroRtt and sp.kind == .application and
+                        self.role == .client and !self.handshakeConfirmed)
+                    {
+                        if (self.firstAppPnSent) |first| {
+                            if (a.largestAcknowledged >= first) self.confirmHandshake();
+                        }
+                    }
                 },
                 .crypto => |c| {
                     try self.receiveCrypto(sp.kind, c.offset, c.data, nowMs);
@@ -1149,6 +1906,11 @@ pub const Connection = struct {
                     const initiatorIsSelf = (self.role == .client and initiatorIsClient) or (self.role == .server and !initiatorIsClient);
                     var stPtr = self.streams.get(s.id);
                     if (stPtr == null) {
+                        if (!initiatorIsSelf) {
+                            const streamCount = (s.id >> 2) + 1;
+                            const streamLimit = if (bidi) self.maxStreamsBidiLocal else self.maxStreamsUniLocal;
+                            if (streamCount > streamLimit) return Error.StreamLimitViolation;
+                        }
                         const ns = try self.allocator.create(qstream.Stream);
                         ns.* = qstream.Stream.init(self.allocator, s.id, bidi, initiatorIsSelf);
                         if (self.maxStreamData.get(s.id)) |lim| ns.recvMaxOffset = lim;
@@ -1157,6 +1919,10 @@ pub const Connection = struct {
                         if (self.cbs.onNewStream) |cb| cb(self.cbs.ctx, s.id);
                     }
                     const st = stPtr.?;
+                    // RFC 9000 Section 19.8: when OFF is absent, stream data
+                    // starts at offset zero. This matters for retransmitted
+                    // first-byte ranges after the receive cursor has advanced.
+                    const off = if (s.offPresent) s.offset else 0;
                     const Sink = struct {
                         cbs: Callbacks,
                         sid: u64,
@@ -1165,20 +1931,27 @@ pub const Connection = struct {
                         }
                     };
                     var sink = Sink{ .cbs = self.cbs, .sid = s.id };
-                    if (!st.fcAllows(s.offset, s.data.len)) return Error.FlowControlViolation;
-                    _ = st.receive(s.offset, s.data, s.fin, &sink) catch |e| switch (e) {
+                    if (!st.fcAllows(off, s.data.len)) return Error.FlowControlViolation;
+                    const end = std.math.add(u64, off, s.data.len) catch return Error.FlowControlViolation;
+                    const oldEnd = self.recvStreamEnd.get(s.id) orelse 0;
+                    const newlyAccounted = if (end > oldEnd) end - oldEnd else 0;
+                    if (self.dataReceived +| newlyAccounted > self.maxData) return Error.FlowControlViolation;
+                    _ = st.receive(off, s.data, s.fin, &sink) catch |e| switch (e) {
                         error.FlowControlViolation => return Error.FlowControlViolation,
                         error.FinalSizeViolation => return Error.ProtocolViolation,
                         error.StreamReset => return,
                         else => return Error.OutOfMemory,
                     };
-                    const end = s.offset + s.data.len;
-                    const oldEnd = self.recvStreamEnd.get(s.id) orelse 0;
                     if (end > oldEnd) {
                         self.dataReceived +|= end - oldEnd;
                         try self.recvStreamEnd.put(s.id, end);
                     }
-                    if (self.dataReceived > self.maxData) return Error.FlowControlViolation;
+                    if (st.canReceiveMore() and st.recvMaxOffset < (1 << 30)) {
+                        const raised = @min(st.recvMaxOffset *| 2, 1 << 30);
+                        st.recvMaxOffset = raised;
+                        try self.queueControlFrame(.{ .maxStreamData = .{ .streamId = s.id, .maximum = raised } });
+                        try self.flushControl(.application, nowMs);
+                    }
                     try self.maybeBumpMaxData();
                     if (!st.finNotified and st.finOffset != null and st.recvOffset == st.finOffset.?) {
                         st.finNotified = true;
@@ -1186,11 +1959,24 @@ pub const Connection = struct {
                     }
                 },
                 .handshakeDone => {
-                    self.state = .established;
+                    // RFC 9000 Section 19.20: only servers send
+                    // HANDSHAKE_DONE; a server receiving one has a
+                    // misbehaving or spoofing peer.
+                    if (self.role == .server) return Error.ProtocolViolation;
+                    // Client confirmation (RFC 9001 Section 4.1.2): drop
+                    // the Handshake keys and open the connection.
+                    self.confirmHandshake();
+                    // Application data can have arrived before the
+                    // handshake completed; it is decryptable now.
+                    self.replayPendingApp(nowMs) catch {};
                     if (self.cbs.onHandshakeDone) |cb| cb(self.cbs.ctx);
                 },
                 .connectionClose => |c| {
                     self.state = .draining;
+                    // Surface the peer's reason: a transport close code is
+                    // the only clue when a handshake or HTTP/3 exchange
+                    // fails against an independent implementation.
+                    std.log.scoped(.httpx).debug("peer closed the connection: code={d} application={} trigger=0x{x} reason={s}", .{ c.errorCode, c.application, c.triggeringFrameType, c.reason });
                     if (self.cbs.onClose) |cb| cb(self.cbs.ctx, c.errorCode, c.reason);
                 },
                 .pathChallenge => |p| {
@@ -1201,16 +1987,28 @@ pub const Connection = struct {
                     };
                 },
                 .maxData => |m| {
-                    self.maxDataRemote = m.maximum;
+                    if (m.maximum > self.maxDataRemote) self.maxDataRemote = m.maximum;
                 },
                 .maxStreamData => |m| {
-                    self.maxStreamData.put(m.streamId, m.maximum) catch return Error.OutOfMemory;
+                    const peerInitiated = (self.role == .client and (m.streamId & 1) != 0) or
+                        (self.role == .server and (m.streamId & 1) == 0);
+                    const unidirectional = (m.streamId & 0x02) != 0;
+                    // A peer-initiated unidirectional stream is receive-only
+                    // here and has no send side whose credit can be raised.
+                    if (peerInitiated and unidirectional) return Error.ProtocolViolation;
+                    // Peer-initiated bidirectional streams enter a valid
+                    // state only after a STREAM frame creates receive state.
+                    if (peerInitiated and self.streams.get(m.streamId) == null) return Error.ProtocolViolation;
+                    const bidi = (m.streamId & 0x02) == 0;
+                    const previous = self.maxStreamData.get(m.streamId) orelse
+                        self.initialSendWindow(bidi, !peerInitiated);
+                    if (m.maximum > previous) self.maxStreamData.put(m.streamId, m.maximum) catch return Error.OutOfMemory;
                 },
                 .maxStreams => |m| {
                     if (m.bidi) {
-                        self.maxStreamsBidiRemote = m.maximum;
+                        if (m.maximum > self.maxStreamsBidiRemote) self.maxStreamsBidiRemote = m.maximum;
                     } else {
-                        self.maxStreamsUniRemote = m.maximum;
+                        if (m.maximum > self.maxStreamsUniRemote) self.maxStreamsUniRemote = m.maximum;
                     }
                 },
                 .dataBlocked => {
@@ -1255,9 +2053,13 @@ pub const Connection = struct {
                     self.flushControl(.application, nowMs) catch {};
                 },
                 .newConnectionId => |n| {
-                    // RFC 9000 section 19.15: store peer's new CID.
+                    // RFC 9000 section 19.15: a NEW_CONNECTION_ID frame
+                    // that repeats a sequence number MAY be treated as a
+                    // protocol violation, but peers retransmit the frame
+                    // in a fresh packet, so the repeat is ignored here
+                    // instead of tearing the connection down.
                     for (self.peerCids.items) |c| {
-                        if (c.sequence == n.sequence) return Error.ProtocolViolation;
+                        if (c.sequence == n.sequence) return;
                     }
                     var entry = CidEntry{
                         .sequence = n.sequence,
@@ -1307,11 +2109,35 @@ pub const Connection = struct {
                 .newToken => {
                     // RFC 9000 section 19.7: store token for future address validation.
                 },
-                .pathResponse => {
-                    // Path response received; path validated.
+                .pathResponse => |p| {
+                    if (self.pathValidator) |*pv| {
+                        _ = pv.onResponse(&p.data);
+                    }
                 },
             }
         }
+    }
+
+    /// Initiates QUIC path validation (RFC 9000 Section 8.2) for connection migration
+    /// or NAT rebinding. Queues PATH_CHALLENGE frames on the wire.
+    pub fn initiatePathValidation(self: *Connection, nowMs: u64, rng: std.Random) Error!void {
+        if (self.pathValidator == null) {
+            self.pathValidator = pathMod.PathValidator.init(100);
+        }
+        self.pathValidator.?.start(nowMs, rng);
+        while (self.pathValidator.?.nextChallenge()) |c| {
+            try self.queueControlFrame(.{ .pathChallenge = .{ .data = c } });
+            self.pathValidator.?.markSent();
+        }
+        self.flushControl(.application, nowMs) catch {};
+    }
+
+    /// Checks whether path validation is currently complete and validated.
+    pub fn isPathValidated(self: *const Connection) bool {
+        if (self.pathValidator) |pv| {
+            return pv.state == .validated;
+        }
+        return false;
     }
 
     /// Raises our receive window once it is more than half consumed,
@@ -1397,14 +2223,120 @@ pub const Connection = struct {
     /// first datagram before processing it.
     pub fn acceptInitial(self: *Connection, clientDcid: []const u8) Error!void {
         if (self.role != .server) return Error.ProtocolViolation;
+        if (clientDcid.len > 20) return Error.ProtocolViolation;
         @memcpy(self.dcid[0..clientDcid.len], clientDcid);
         self.dcidLen = @intCast(clientDcid.len);
+        @memcpy(self.origDcid[0..clientDcid.len], clientDcid);
+        self.origDcidLen = @intCast(clientDcid.len);
+        @memcpy(self.initialDcid[0..clientDcid.len], clientDcid);
+        self.initialDcidLen = @intCast(clientDcid.len);
         self.installInitialKeys() catch return Error.TlsDriverFailed;
     }
 
+    /// Hands the queued packets to the caller. The returned slice holds
+    /// whole packets back to back; use `outPacketLengths` to recover the
+    /// boundaries when splitting them into datagrams.
+    /// Replays the 1-RTT packets that arrived before the handshake
+    /// completed (RFC 9001 Section 5.7). Called once the application
+    /// keys are installed.
+    pub fn replayPendingApp(self: *Connection, nowMs: u64) Error!void {
+        // The buffered datagrams are consumed one by one: clearing the list
+        // first would poison the stored slice headers.
+        while (self.pendingApp.items.len > 0) {
+            const d = self.pendingApp.orderedRemove(0);
+            defer self.allocator.free(d);
+            self.receiveDatagram(d, nowMs) catch {};
+        }
+    }
+
+    /// Discards the buffered 1-RTT packets (connection is going away).
+    pub fn clearPendingApp(self: *Connection) void {
+        for (self.pendingApp.items) |d| self.allocator.free(d);
+        self.pendingApp.clearRetainingCapacity();
+    }
+
     pub fn takeOutput(self: *Connection, gpa: Allocator) ![]u8 {
-        defer self.outbuf = .empty;
+        defer {
+            self.outbuf = .empty;
+            self.outPackets.clearRetainingCapacity();
+            self.outPacketChainable.clearRetainingCapacity();
+            self.outPacketKinds.clearRetainingCapacity();
+        }
         return self.outbuf.toOwnedSlice(gpa);
+    }
+
+    /// Lengths of the packets still queued in `outbuf`, in order.
+    pub fn outPacketLengths(self: *const Connection) []const u32 {
+        return self.outPackets.items;
+    }
+
+    /// For each queued packet, whether another packet may follow it in
+    /// the same datagram. False marks a short-header (1-RTT) packet,
+    /// which has no Length field and must end its datagram
+    /// (RFC 9000 Section 12.2).
+    pub fn outPacketChainableFlags(self: *const Connection) []const bool {
+        return self.outPacketChainable.items;
+    }
+
+    /// Encryption level of each queued packet, in the same order as
+    /// `outPacketLengths`.
+    pub fn outQueuedKinds(self: *const Connection) []const QueuedKind {
+        return self.outPacketKinds.items;
+    }
+
+    /// Discards the bookkeeping for the first `count` queued packets,
+    /// matching output bytes already handed to the transport layer.
+    pub fn dropOutPackets(self: *Connection, count: usize) void {
+        self.outPackets.replaceRange(self.allocator, 0, count, &.{}) catch {};
+        self.outPacketChainable.replaceRange(self.allocator, 0, count, &.{}) catch {};
+        self.outPacketKinds.replaceRange(self.allocator, 0, count, &.{}) catch {};
+    }
+
+    /// Reserves all packet bookkeeping before writing, so a queued packet
+    /// never leaves the three parallel lists inconsistent.
+    fn queueOutPacket(self: *Connection, bytes: []const u8, chainable: bool, kind: QueuedKind) Error!void {
+        try self.outbuf.ensureUnusedCapacity(self.allocator, bytes.len);
+        try self.outPackets.ensureUnusedCapacity(self.allocator, 1);
+        try self.outPacketChainable.ensureUnusedCapacity(self.allocator, 1);
+        try self.outPacketKinds.ensureUnusedCapacity(self.allocator, 1);
+        self.outbuf.appendSliceAssumeCapacity(bytes);
+        // Remember the packet boundary so the transport layer can build
+        // datagrams out of whole packets (RFC 9000 Section 12.2).
+        self.outPackets.appendAssumeCapacity(@intCast(bytes.len));
+        self.outPacketChainable.appendAssumeCapacity(chainable);
+        self.outPacketKinds.appendAssumeCapacity(kind);
+    }
+
+    /// Removes every queued packet of one encryption level from the
+    /// output buffer. Called when a space's keys are discarded: a packet
+    /// protected with those keys must not be flushed afterwards, even if
+    /// it was already serialized (for example a Handshake ACK queued just
+    /// before HANDSHAKE_DONE confirmed the handshake).
+    fn dropQueuedKind(self: *Connection, kind: QueuedKind) void {
+        if (self.outPackets.items.len == 0) return;
+        var read: usize = 0;
+        var write: usize = 0;
+        var kept: usize = 0;
+        for (self.outPackets.items, 0..) |len, i| {
+            const n: usize = len;
+            if (self.outPacketKinds.items[i] == kind) {
+                read += n;
+                continue;
+            }
+            if (write != read) {
+                std.mem.copyForwards(u8, self.outbuf.items[write .. write + n], self.outbuf.items[read .. read + n]);
+            }
+            self.outPackets.items[kept] = len;
+            self.outPacketChainable.items[kept] = self.outPacketChainable.items[i];
+            self.outPacketKinds.items[kept] = self.outPacketKinds.items[i];
+            write += n;
+            read += n;
+            kept += 1;
+        }
+        self.outbuf.shrinkRetainingCapacity(write);
+        self.outPackets.shrinkRetainingCapacity(kept);
+        self.outPacketChainable.shrinkRetainingCapacity(kept);
+        self.outPacketKinds.shrinkRetainingCapacity(kept);
     }
 };
 
@@ -1423,6 +2355,7 @@ const TestDriverCtx = struct {
 
     const clientHello = "TEST-CLIENT-FLIGHT";
     const serverHello = "TEST-SERVER-FLIGHT";
+    const clientFinished = "TEST-CLIENT-FINISHED";
 
     fn transcript() [32]u8 {
         var h = std.crypto.hash.sha2.Sha256.init(.{});
@@ -1448,38 +2381,46 @@ test "loopback connection pair completes protected handshake and stream" {
     defer server.deinit();
 
     const Hs = struct {
-        // Server-side driver: on client flight -> install HS keys, reply.
+        // Server-side driver: ClientHello -> install HS keys and reply;
+        // client Finished -> confirm and send HANDSHAKE_DONE.
         fn serverOnData(ctx: ?*anyopaque, conn: *Connection, data: []const u8, nowMs: u64) Error!void {
             const role: *Role = @ptrCast(@alignCast(ctx.?));
             _ = role;
-            if (!std.mem.eql(u8, data, TestDriverCtx.clientHello)) return;
-
             const t = TestDriverCtx.transcript();
-            const srvTx = crypto.deriveSecret(t, "server in");
-            const srvRx = crypto.deriveSecret(t, "client in");
-            try conn.installKeys(.handshake, srvTx, srvRx);
-            conn.addressValidated = true;
+            if (std.mem.eql(u8, data, TestDriverCtx.clientHello)) {
+                const srvTx = crypto.deriveSecret(t, "server in");
+                const srvRx = crypto.deriveSecret(t, "client in");
+                try conn.installKeys(.handshake, srvTx, srvRx);
+                conn.addressValidated = true;
 
-            // Reply flight in Handshake space.
-            const B = struct {
-                pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
-                    try fe(gpa, payload, .{ .crypto = .{ .offset = 0, .data = TestDriverCtx.serverHello } });
-                }
-            };
-            try conn.sendFrames(.handshake, B.build, nowMs);
+                // Reply flight in Handshake space.
+                const B = struct {
+                    pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
+                        try fe(gpa, payload, .{ .crypto = .{ .offset = 0, .data = TestDriverCtx.serverHello } });
+                    }
+                };
+                try conn.sendFrames(.handshake, B.build, nowMs);
 
-            // Also install app-space keys and confirm the handshake.
-            const appBase = crypto.deriveSecret(t, "quic ap");
-            try conn.installKeys(.application, appBase, appBase);
-            const D = struct {
-                pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
-                    try fe(gpa, payload, .handshakeDone);
-                }
-            };
-            try conn.sendFrames(.application, D.build, nowMs);
+                const appBase = crypto.deriveSecret(t, "quic ap");
+                try conn.installKeys(.application, appBase, appBase);
+                return;
+            }
+            if (std.mem.eql(u8, data, TestDriverCtx.clientFinished)) {
+                // The synthetic Finished stands in for TLS 1.3
+                // verify_data; confirmation itself follows the RFC.
+                conn.handshakeComplete = true;
+                conn.confirmHandshake();
+                const D = struct {
+                    pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
+                        try fe(gpa, payload, .handshakeDone);
+                    }
+                };
+                try conn.sendFrames(.application, D.build, nowMs);
+            }
         }
 
-        // Client-side driver: emit flight, preinstall HS keys symmetrically.
+        // Client-side driver: emit flight, install HS keys, and send a
+        // Finished once the server flight is verified.
         fn clientStart(ctx: ?*anyopaque, conn: *Connection, nowMs: u64) Error!void {
             _ = ctx;
             try conn.installInitialKeys();
@@ -1487,7 +2428,6 @@ test "loopback connection pair completes protected handshake and stream" {
             const cliTx = crypto.deriveSecret(t, "client in");
             const cliRx = crypto.deriveSecret(t, "server in");
             try conn.installKeys(.handshake, cliTx, cliRx);
-            try conn.installKeys(.application, cliRx, cliRx); // mirrored below
 
             const B = struct {
                 pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
@@ -1497,14 +2437,20 @@ test "loopback connection pair completes protected handshake and stream" {
             try conn.sendFrames(.initial, B.build, nowMs);
         }
 
-        fn clientOnData(ctx: ?*anyopaque, conn: *Connection, data: []const u8, _: u64) Error!void {
+        fn clientOnData(ctx: ?*anyopaque, conn: *Connection, data: []const u8, nowMs: u64) Error!void {
             _ = ctx;
-            if (std.mem.eql(u8, data, TestDriverCtx.serverHello)) {
-                // App keys arrive mirrored from server's choice.
-                const t = TestDriverCtx.transcript();
-                const appBase = crypto.deriveSecret(t, "quic ap");
-                conn.installKeys(.application, appBase, appBase) catch return Error.TlsDriverFailed;
-            }
+            if (!std.mem.eql(u8, data, TestDriverCtx.serverHello)) return;
+            // App keys arrive mirrored from the server's choice.
+            const t = TestDriverCtx.transcript();
+            const appBase = crypto.deriveSecret(t, "quic ap");
+            conn.installKeys(.application, appBase, appBase) catch return Error.TlsDriverFailed;
+            conn.handshakeComplete = true;
+            const F = struct {
+                pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
+                    try fe(gpa, payload, .{ .crypto = .{ .offset = 0, .data = TestDriverCtx.clientFinished } });
+                }
+            };
+            try conn.sendFrames(.handshake, F.build, nowMs);
         }
     };
 
@@ -1525,13 +2471,28 @@ test "loopback connection pair completes protected handshake and stream" {
     // Server produced Handshake + Application responses.
     const sOut = try server.takeOutput(a);
     defer a.free(sOut);
-    try std.testing.expect(sOut.len > 64);
+    try std.testing.expect(sOut.len > 0);
 
-    // Client consumes server flight -> installs app keys -> established.
+    // Client consumes the server flight, installs app keys and answers
+    // with its Finished. The server verifies it, confirms the handshake
+    // and returns HANDSHAKE_DONE, which confirms the client.
     client.receiveDatagram(sOut[0..], 200) catch |e| {
         return e;
     };
+    const cFin = try client.takeOutput(a);
+    defer a.free(cFin);
+    try std.testing.expect(cFin.len > 0);
+    try server.receiveDatagram(cFin, 250);
+    const sDone = try server.takeOutput(a);
+    defer a.free(sDone);
+    try std.testing.expect(sDone.len > 0);
+    try client.receiveDatagram(sDone, 260);
     try std.testing.expectEqual(State.established, client.state);
+    try std.testing.expectEqual(State.established, server.state);
+    try std.testing.expect(client.handshakeConfirmed);
+    try std.testing.expect(server.handshakeConfirmed);
+    try std.testing.expect(client.spaces[1].keysRx == null and client.spaces[1].keysTx == null);
+    try std.testing.expect(server.spaces[1].keysRx == null and server.spaces[1].keysTx == null);
 
     // Exchange application STREAM data over 1-RTT (short header).
     const StreamSink = struct {
@@ -1590,6 +2551,8 @@ const TlsHandshakeDriver = struct {
     shared: ?[32]u8 = null,
     hsSecret: ?[32]u8 = null,
     flightDone: bool = false,
+    finishedVerified: bool = false,
+    finishedSent: bool = false,
     sec1: [39]u8 = @splat(0),
 
     fn hashConcat(parts: []const []const u8) [32]u8 {
@@ -1643,8 +2606,33 @@ const TlsHandshakeDriver = struct {
 
     fn serverOnData(ctx: ?*anyopaque, conn: *Connection, data: []const u8, nowMs: u64) Error!void {
         const d: *TlsHandshakeDriver = @ptrCast(@alignCast(ctx.?));
-        if (d.flightDone) return;
+        if (d.finishedVerified) return;
         d.incoming.appendSlice(conn.allocator, data) catch return Error.OutOfMemory;
+        if (d.flightDone) {
+            // Post-flight: only the client's Finished is expected.
+            const frec = takeRecord(&d.incoming) orelse return;
+            if (frec.kind != @backingInt(ths.HandshakeType.finished)) return Error.ProtocolViolation;
+            d.engine.verifyClientFinished(frec.msg) catch return Error.TlsDriverFailed;
+            dropFront(&d.incoming, conn.allocator, frec.msg.len);
+            d.finishedVerified = true;
+            // A verified Finished proves the peer can receive at this
+            // address. Until then the 3x anti-amplification gate stays
+            // active unless a Retry token validated the address earlier.
+            conn.addressValidated = true;
+            // RFC 9001 Section 4.1.2: the server confirms once Finished
+            // is verified, then discards the Handshake keys and tells
+            // the client to do the same with HANDSHAKE_DONE.
+            conn.handshakeComplete = true;
+            conn.confirmHandshake();
+            conn.replayPendingApp(nowMs) catch {};
+            const DoneB = struct {
+                pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
+                    try fe(gpa, payload, .handshakeDone);
+                }
+            };
+            try conn.sendFrames(.application, DoneB.build, nowMs);
+            return;
+        }
         const rec = takeRecord(&d.incoming) orelse return;
         if (rec.kind != @backingInt(ths.HandshakeType.client_hello)) return Error.ProtocolViolation;
         const chMsg = rec.msg;
@@ -1681,20 +2669,20 @@ const TlsHandshakeDriver = struct {
         const ap = qtls.applicationKeys(hs.hsSecret, chSf);
         try conn.installKeys(.application, ap.keys.rxSecret, ap.keys.txSecret);
 
-        // Loopback simplification (documented): an authentic ClientHello
-        // validates return routability, so no Retry token round trip.
-        // Production deployments must gate amplification on Retry/token.
-        conn.addressValidated = true;
-        const DoneB = struct {
-            pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
-                try fe(gpa, payload, .handshakeDone);
-            }
-        };
-        try conn.sendFrames(.application, DoneB.build, nowMs);
+        // Retain the exact peer flight for the caller's comparison, then
+        // consume the hello: `incoming` is reused for the Finished.
+        d.peerFlight.appendSlice(conn.allocator, chMsg) catch return Error.OutOfMemory;
+        dropFront(&d.incoming, conn.allocator, chMsg.len);
+
+        // The ClientHello does not validate the peer address. Keep the
+        // 3x anti-amplification gate active until Finished is verified,
+        // or until a Retry token has already validated the address.
+        // HANDSHAKE_DONE waits for the client Finished: the server has not
+        // confirmed the handshake yet (RFC 9001 Section 4.1.2).
         d.flightDone = true;
     }
 
-    fn clientOnData(ctx: ?*anyopaque, conn: *Connection, data: []const u8, _: u64) Error!void {
+    fn clientOnData(ctx: ?*anyopaque, conn: *Connection, data: []const u8, nowMs: u64) Error!void {
         const d: *TlsHandshakeDriver = @ptrCast(@alignCast(ctx.?));
         d.incoming.appendSlice(conn.allocator, data) catch return Error.OutOfMemory;
         d.peerFlight.appendSlice(conn.allocator, data) catch return Error.OutOfMemory;
@@ -1720,6 +2708,7 @@ const TlsHandshakeDriver = struct {
                     d.engine.processCertificateVerify(rec.msg) catch return Error.TlsDriverFailed;
                 },
                 @backingInt(ths.HandshakeType.finished) => {
+                    if (d.finishedSent) return;
                     // HMAC over the shared transcript: proves both sides
                     // agree on every handshake byte before 1-RTT starts.
                     d.engine.processFinished(rec.msg) catch return Error.TlsDriverFailed;
@@ -1727,6 +2716,14 @@ const TlsHandshakeDriver = struct {
                     const chSf = hashConcat(&.{ d.flight.items, d.peerFlight.items });
                     const ap = qtls.applicationKeys(hsSecret, chSf);
                     try conn.installKeys(.application, ap.keys.txSecret, ap.keys.rxSecret);
+                    // The client's Finished completes the handshake; the
+                    // server confirms it and answers with HANDSHAKE_DONE.
+                    const fin = d.engine.produceClientFinished() catch return Error.TlsDriverFailed;
+                    defer conn.allocator.free(fin);
+                    _ = try conn.queueCrypto(.handshake, fin);
+                    try sendQueued(conn, .handshake, nowMs);
+                    d.finishedSent = true;
+                    conn.handshakeComplete = true;
                 },
                 else => return Error.ProtocolViolation,
             }
@@ -1736,9 +2733,10 @@ const TlsHandshakeDriver = struct {
 };
 
 /// Runs a complete TLS 1.3 handshake between two QUIC Connections through
-/// the TlsHandshakeDriver: Initial + Handshake + 1-RTT keys installed on
-/// both ends, server handshakeDone sent. Shared by the QUIC/TLS and
-/// HTTP/3 loopback tests so the handshake pump has one definition.
+/// the TlsHandshakeDriver: Initial + Handshake + 1-RTT keys installed,
+/// client Finished exchanged, and HANDSHAKE_DONE confirming the client.
+/// Shared by the QUIC/TLS and HTTP/3 loopback tests so the handshake pump
+/// has one definition.
 fn runTlsHandshake(
     a: Allocator,
     client: *Connection,
@@ -1768,15 +2766,34 @@ fn runTlsHandshake(
     try client.startHandshake(50);
     const c0 = try client.takeOutput(a);
     defer a.free(c0);
+
     try std.testing.expect(c0.len >= 64);
 
     try server.acceptInitial(client.dcid[0..8]);
     try server.receiveDatagram(c0, 100);
+    // A ClientHello alone does not validate the source address; the
+    // anti-amplification gate must stay active until Finished.
+    try std.testing.expect(!server.addressValidated);
 
     const s0 = try server.takeOutput(a);
     defer a.free(s0);
     try std.testing.expect(s0.len > 64);
     try client.receiveDatagram(s0, 200);
+    try std.testing.expectEqual(server.scidLen, client.dcidLen);
+    try std.testing.expectEqualSlices(u8, server.scid[0..server.scidLen], client.dcid[0..client.dcidLen]);
+
+    // The client verifies the server Finished and answers with its own
+    // Finished; only then may the server confirm and send HANDSHAKE_DONE.
+    const c1 = try client.takeOutput(a);
+    defer a.free(c1);
+    try std.testing.expect(c1.len > 0);
+    try server.receiveDatagram(c1, 300);
+    try std.testing.expect(server.addressValidated);
+
+    const s1 = try server.takeOutput(a);
+    defer a.free(s1);
+    try std.testing.expect(s1.len > 0);
+    try client.receiveDatagram(s1, 400);
 }
 
 test "quic carries TLS 1.3 handshake end to end" {
@@ -1799,7 +2816,7 @@ test "quic carries TLS 1.3 handshake end to end" {
     try runTlsHandshake(a, client, server, &cliD, &srvD);
 
     // The server saw the exact ClientHello bytes the client sent.
-    try std.testing.expectEqualSlices(u8, cliD.flight.items, srvD.incoming.items);
+    try std.testing.expectEqualSlices(u8, cliD.flight.items, srvD.peerFlight.items);
     // The client saw the exact server flight bytes.
     try std.testing.expectEqualSlices(u8, srvD.flight.items, cliD.peerFlight.items);
 
@@ -1818,6 +2835,15 @@ test "quic carries TLS 1.3 handshake end to end" {
     try std.testing.expect(cliD.engine.apKeys != null);
     try std.testing.expect(srvD.engine.apKeys != null);
     try std.testing.expectEqual(State.established, client.state);
+    try std.testing.expectEqual(State.established, server.state);
+    // Both sides completed the lifecycle: confirmation discarded the
+    // Handshake keys and released their recovery state (RFC 9001 4.9.2).
+    try std.testing.expect(client.handshakeConfirmed);
+    try std.testing.expect(server.handshakeConfirmed);
+    try std.testing.expect(client.spaces[1].keysRx == null and client.spaces[1].keysTx == null);
+    try std.testing.expect(server.spaces[1].keysRx == null and server.spaces[1].keysTx == null);
+    try std.testing.expectEqual(@as(usize, 0), client.spaces[1].inFlightBytes);
+    try std.testing.expectEqual(@as(usize, 0), server.spaces[1].inFlightBytes);
 
     // 1-RTT STREAM data under keys derived from the live handshake.
     const GotSink = struct {
@@ -2396,6 +3422,11 @@ const CtlPair = struct {
         const secret = (@as([32]u8, @splat(0xA5)));
         try client.installKeys(.application, secret, secret);
         try server.installKeys(.application, secret, secret);
+        // Match an established pair with explicit peer stream credits.
+        client.maxStreamsBidiRemote = 8;
+        client.maxStreamsUniRemote = 8;
+        server.maxStreamsBidiRemote = 8;
+        server.maxStreamsUniRemote = 8;
         server.addressValidated = true;
         return .{ .client = client, .server = server };
     }
@@ -2427,6 +3458,7 @@ const CtlRec = struct {
     closeReasonBuf: [64]u8 = undefined,
     closeReasonLen: usize = 0,
     closeReason: []const u8 = "",
+    streamDataBytes: usize = 0,
 
     fn cbs(self: *CtlRec) Callbacks {
         return .{
@@ -2434,6 +3466,7 @@ const CtlRec = struct {
             .onStreamReset = onReset,
             .onStopSending = onStop,
             .onClose = onClose,
+            .onStreamData = onStreamData,
         };
     }
     fn onReset(ctx: ?*anyopaque, sid: u64, code: u64) void {
@@ -2454,6 +3487,12 @@ const CtlRec = struct {
         @memcpy(r.closeReasonBuf[0..n], reason[0..n]);
         r.closeReasonLen = n;
         r.closeReason = r.closeReasonBuf[0..n];
+    }
+    fn onStreamData(ctx: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
+        _ = sid;
+        _ = fin;
+        const r: *CtlRec = @ptrCast(@alignCast(ctx.?));
+        r.streamDataBytes += data.len;
     }
 };
 
@@ -2538,6 +3577,20 @@ test "send stream checked gates windows and accounts once" {
     try std.testing.expectEqual(@as(u64, 200), pair.client.dataSent);
 }
 
+test "send stream enforces peer stream-count credit" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+    pair.client.maxStreamsBidiRemote = 1;
+
+    // ID 4 is the second locally initiated bidi stream, beyond credit 1.
+    try std.testing.expectError(Error.StreamLimitViolation, pair.client.sendStreamChecked(4, 0, "x", false, 100));
+    try std.testing.expect(pair.client.sendStreamEnd.get(4) == null);
+    const out = try pair.client.takeOutput(a);
+    defer a.free(out);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
 test "data blocked raises window immediately on both ends" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
@@ -2556,6 +3609,8 @@ test "receive flow control violation enforced" {
     const a = std.testing.allocator;
     var pair = try CtlPair.init(a);
     defer pair.deinit();
+    var rec = CtlRec{};
+    pair.server.cbs = rec.cbs();
     pair.server.maxData = 10;
 
     const data = (@as([100]u8, @splat(0xCD)));
@@ -2563,6 +3618,59 @@ test "receive flow control violation enforced" {
     const out = try pair.client.takeOutput(a);
     defer a.free(out);
     try std.testing.expectError(Error.FlowControlViolation, pair.server.receiveDatagram(out, 101));
+    try std.testing.expectEqual(@as(usize, 0), rec.streamDataBytes);
+}
+
+test "flow control limit updates never decrease remote send credit" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    try pair.server.queueControlFrame(.{ .maxData = .{ .maximum = 2 << 20 } });
+    try pair.server.queueControlFrame(.{ .maxStreamData = .{ .streamId = 0, .maximum = 131072 } });
+    try pair.server.queueControlFrame(.{ .maxStreams = .{ .maximum = 12, .bidi = true } });
+    try pair.server.flushControl(.application, 100);
+    try pair.pumpSC(a);
+    try std.testing.expectEqual(@as(u64, 2 << 20), pair.client.maxDataRemote);
+    try std.testing.expectEqual(@as(?u64, 131072), pair.client.maxStreamData.get(0));
+    try std.testing.expectEqual(@as(u64, 12), pair.client.maxStreamsBidiRemote);
+
+    try pair.server.queueControlFrame(.{ .maxData = .{ .maximum = 1 << 20 } });
+    try pair.server.queueControlFrame(.{ .maxStreamData = .{ .streamId = 0, .maximum = 65536 } });
+    try pair.server.queueControlFrame(.{ .maxStreams = .{ .maximum = 8, .bidi = true } });
+    try pair.server.flushControl(.application, 200);
+    try pair.pumpSC(a);
+    try std.testing.expectEqual(@as(u64, 2 << 20), pair.client.maxDataRemote);
+    try std.testing.expectEqual(@as(?u64, 131072), pair.client.maxStreamData.get(0));
+    try std.testing.expectEqual(@as(u64, 12), pair.client.maxStreamsBidiRemote);
+}
+
+test "MAX_STREAM_DATA rejects peer-initiated receive-only streams" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    // Stream 3 is server-initiated and unidirectional, so the client has
+    // no send direction on which this MAX_STREAM_DATA could apply.
+    try pair.server.queueControlFrame(.{ .maxStreamData = .{ .streamId = 3, .maximum = 131072 } });
+    try pair.server.flushControl(.application, 100);
+    const wire = try pair.server.takeOutput(a);
+    defer a.free(wire);
+    try std.testing.expectError(Error.ProtocolViolation, pair.client.receiveDatagram(wire, 101));
+}
+
+test "peer STREAM beyond MAX_STREAMS limit is rejected before stream creation" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+    pair.server.maxStreamsBidiLocal = 1;
+
+    // Client-initiated bidirectional stream ID 4 is the second such stream.
+    try sendH3Stream(pair.client, 4, 0, "x", false, 100);
+    const wire = try pair.client.takeOutput(a);
+    defer a.free(wire);
+    try std.testing.expectError(Error.StreamLimitViolation, pair.server.receiveDatagram(wire, 101));
+    try std.testing.expect(pair.server.streams.get(4) == null);
 }
 
 test "connection close roundtrip carries code and reason" {
@@ -2596,6 +3704,30 @@ test "stream data blocked raises the stream window" {
     try std.testing.expectEqual(@as(u64, 131070), st.recvMaxOffset);
     try pair.pumpSC(a);
     try std.testing.expectEqual(@as(u64, 131070), pair.client.maxStreamData.get(0).?);
+}
+
+test "receive stream window grows and is advertised before its initial limit" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+    pair.client.cc.cwnd = 1 << 20;
+
+    const data = (@as([70_000]u8, @splat(0xEF)));
+    var offset: usize = 0;
+    var now: u64 = 100;
+    while (offset < data.len) {
+        const end = @min(offset + 1200, data.len);
+        try pair.client.sendStreamChecked(0, offset, data[offset..end], end == data.len, now);
+        try pair.pumpCS(a);
+        try pair.pumpSC(a);
+        offset = end;
+        now += 1;
+    }
+
+    const stream = pair.server.streams.get(0) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(stream.recvOffset == data.len);
+    try std.testing.expect(stream.recvMaxOffset >= data.len);
+    try std.testing.expect(pair.client.maxStreamData.get(0).? >= data.len);
 }
 
 test "max streams bumps advertise higher limits" {
@@ -2751,10 +3883,21 @@ test "loss declaration halves cwnd and retransmits for real delivery" {
     try std.testing.expect(cwndAfter < cwndBefore);
     // The retransmit completes the stream byte range on the server.
     {
+        // The timer pump may also emit a standalone ACK for the PING that
+        // rode the earlier server packet; each packet becomes its own
+        // datagram because a short header must end the datagram.
+        var lens_buf: [8]u32 = undefined;
+        const lens = pair.client.outPacketLengths();
+        try std.testing.expect(lens.len <= lens_buf.len);
+        @memcpy(lens_buf[0..lens.len], lens);
         const out = try pair.client.takeOutput(a);
         defer a.free(out);
         try std.testing.expect(out.len > 0);
-        try pair.server.receiveDatagram(out, 501);
+        var off: usize = 0;
+        for (lens_buf[0..lens.len]) |len| {
+            try pair.server.receiveDatagram(out[off..][0..len], 501);
+            off += len;
+        }
     }
     const st = pair.server.streams.get(0) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 5), st.recvOffset);
@@ -2799,4 +3942,990 @@ test "out of order receipt acks immediately" {
     // pn 3 arrives below the max seen: gap, ack immediately.
     try pair.server.receiveDatagram(outs[3], 111);
     try std.testing.expect(pair.server.spaces[2].ackQueued);
+}
+
+test "key update rotates the receiving phase and accepts reordered old packets" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+    pair.client.state = .established;
+    pair.server.state = .established;
+
+    try pair.client.queueControlFrame(.ping);
+    try pair.client.flushControl(.application, 100);
+    const old = try pair.client.takeOutput(a);
+    defer a.free(old);
+
+    try pair.client.initiateKeyUpdate();
+    try std.testing.expect(pair.client.keyPhaseTx);
+    try pair.client.queueControlFrame(.ping);
+    try pair.client.flushControl(.application, 101);
+    const first = try pair.client.takeOutput(a);
+    defer a.free(first);
+
+    try pair.server.receiveDatagram(first, 102);
+    try std.testing.expect(pair.server.keyPhaseRx);
+    try std.testing.expect(pair.server.prevAppRxKeys != null);
+
+    // A packet sealed before the update must still open with the
+    // retained previous keys after the receiver has rotated.
+    try pair.server.receiveDatagram(old, 103);
+}
+
+test "server emits version negotiation for unsupported versions" {
+    const a = std.testing.allocator;
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    defer server.deinit();
+
+    var raw: [128]u8 = @splat(0);
+    const dcid = [_]u8{ 1, 2, 3, 4 };
+    const scid = [_]u8{ 9, 8, 7 };
+    const n = try packetMod.writeLongHeader(raw[0..], .{
+        .type = .initial,
+        .version = 0xDEADBEEF,
+        .dcid = &dcid,
+        .scid = &scid,
+        .token = "",
+        .pnLen = 1,
+        .protectedPayloadLen = 20,
+    });
+    try server.receiveDatagram(raw[0..n], 10);
+    const out = try server.takeOutput(a);
+    defer a.free(out);
+    const vn = try packetMod.parseVersionNegotiation(out);
+    try std.testing.expectEqualSlices(u8, &scid, vn.dcid);
+    try std.testing.expectEqualSlices(u8, &dcid, vn.scid);
+    try std.testing.expectEqual(@as(u32, 1), vn.versionAt(0));
+    try std.testing.expectEqual(@as(u32, 0x6B3343CF), vn.versionAt(1));
+}
+
+test "client validates version negotiation and rejects downgrade spoofing" {
+    const a = std.testing.allocator;
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    defer client.deinit();
+    try client.installInitialKeys();
+
+    var buf: [64]u8 = undefined;
+    const n = try packetMod.writeVersionNegotiation(buf[0..], client.scid[0..client.scidLen], client.dcid[0..client.dcidLen], &.{0x6B3343CF});
+    try std.testing.expectError(Error.VersionNegotiation, client.receiveDatagram(buf[0..n], 1));
+    try std.testing.expectEqual(@as(?u32, 0x6B3343CF), client.versionNegotiated);
+
+    client.versionNegotiated = null;
+    var spoof: [64]u8 = undefined;
+    const sn = try packetMod.writeVersionNegotiation(spoof[0..], client.scid[0..client.scidLen], client.dcid[0..client.dcidLen], &.{0x00000001});
+    try client.receiveDatagram(spoof[0..sn], 2);
+    try std.testing.expectEqual(@as(?u32, null), client.versionNegotiated);
+}
+
+test "retry token round trip validates address and reinstalls initial keys" {
+    const a = std.testing.allocator;
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{ .retry = true });
+    defer server.deinit();
+    try client.installInitialKeys();
+    try server.acceptInitial(client.dcid[0..client.dcidLen]);
+    var odcid: [20]u8 = undefined;
+    const odcidLen = client.dcidLen;
+    @memcpy(odcid[0..odcidLen], client.dcid[0..odcidLen]);
+
+    try client.queueControlFrame(.ping);
+    try client.flushControl(.initial, 100);
+    const first = try client.takeOutput(a);
+    defer a.free(first);
+    try server.receiveDatagram(first, 101);
+
+    const retryWire = try server.takeOutput(a);
+    defer a.free(retryWire);
+    try std.testing.expect(retryWire.len > 0);
+    try client.receiveDatagram(retryWire, 102);
+    try std.testing.expect(client.retryPending);
+    try std.testing.expectEqualSlices(u8, odcid[0..odcidLen], client.origDcid[0..client.origDcidLen]);
+    try std.testing.expect(client.retryToken.items.len > 0);
+
+    try client.queueControlFrame(.ping);
+    try client.flushControl(.initial, 103);
+    const second = try client.takeOutput(a);
+    defer a.free(second);
+    try server.receiveDatagram(second, 104);
+    try std.testing.expect(server.addressValidated);
+    try std.testing.expectEqualSlices(u8, odcid[0..odcidLen], server.origDcid[0..server.origDcidLen]);
+    try std.testing.expect(server.retryPending);
+}
+
+test "client pads initial datagrams to the 1200 byte minimum" {
+    // RFC 9000 Section 14.1: a client MUST expand the payload of every
+    // datagram carrying an Initial packet to at least 1200 bytes.
+    const a = std.testing.allocator;
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    defer client.deinit();
+    try client.installInitialKeys();
+
+    // A small ack-eliciting flight (PING) still has to reach 1200 bytes.
+    try client.queueControlFrame(.ping);
+    try client.flushControl(.initial, 100);
+    const dgram = try client.takeOutput(a);
+    defer a.free(dgram);
+    try std.testing.expect(dgram.len >= MIN_INITIAL_DATAGRAM);
+    try std.testing.expect(dgram.len <= MAX_DATAGRAM);
+}
+
+test "server pads ack-eliciting initial datagrams" {
+    // RFC 9000 Section 14.1: a server MUST expand datagrams carrying an
+    // ack-eliciting Initial packet to the minimum size.
+    const a = std.testing.allocator;
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    defer server.deinit();
+    try server.installInitialKeys();
+    // The anti-amplification gate needs a budget: pretend the client
+    // already sent 4 KiB, which the server may answer three times over.
+    server.bytesReceived = 4096;
+
+    // PING is ack-eliciting: the datagram must reach the minimum size.
+    try server.queueControlFrame(.ping);
+    try server.flushControl(.initial, 100);
+    const eliciting = try server.takeOutput(a);
+    defer a.free(eliciting);
+    try std.testing.expect(eliciting.len >= MIN_INITIAL_DATAGRAM);
+}
+
+test "server discards initial packets below the 1200 byte minimum" {
+    // RFC 9000 Section 14.1: a server MUST discard an Initial packet
+    // carried in a datagram below the minimum size. The datagram is
+    // ignored: no error, no state change, no output.
+    const a = std.testing.allocator;
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    defer server.deinit();
+    try client.installInitialKeys();
+    try server.acceptInitial(client.dcid[0..client.dcidLen]);
+    server.bytesReceived = 4096;
+
+    try client.queueControlFrame(.ping);
+    try client.flushControl(.initial, 100);
+    const padded = try client.takeOutput(a);
+    defer a.free(padded);
+    try std.testing.expect(padded.len >= MIN_INITIAL_DATAGRAM);
+
+    const small = padded[0 .. MIN_INITIAL_DATAGRAM - 1];
+    try server.receiveDatagram(small, 101);
+    try std.testing.expectEqual(@as(i64, -1), server.spaces[0].highestRxPn);
+    const out = try server.takeOutput(a);
+    defer a.free(out);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "server accepts the initial flight of an independent quic client" {
+    // Captured from curl 8.15.0, an independent QUIC client, talking to
+    // this server. This vector checks header protection, packet protection,
+    // packet-number encoding, and CRYPTO stream reassembly independently.
+    const raw = @embedFile("testdata/interop_client_initial.bin");
+
+    const a = std.testing.allocator;
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    defer conn.deinit();
+
+    var off: usize = 0;
+    var packets: usize = 0;
+    var booted = false;
+    while (off + 4 <= raw.len) {
+        const len = std.mem.readInt(u32, raw[off..][0..4], .little);
+        off += 4;
+        const dgram = raw[off..][0..len];
+        off += len;
+        packets += 1;
+
+        if (!booted) {
+            const parsed = try packetMod.parseLongHeader(dgram);
+            try std.testing.expectEqual(packetMod.LongType.initial, parsed.header.type);
+            try conn.acceptInitial(parsed.header.dcid);
+            booted = true;
+        }
+
+        try conn.receiveDatagram(dgram, 1000 + @as(u64, @intCast(packets)));
+    }
+
+    try std.testing.expectEqual(@as(usize, 6), packets);
+    try std.testing.expect(conn.cryptoRecvOff[0] > 0);
+    try std.testing.expectEqual(@as(i64, 5), conn.spaces[0].highestRxPn);
+}
+
+test "one rtt data that arrives before the handshake is replayed afterwards" {
+    // RFC 9001 Section 5.7: 1-RTT packets can arrive before the
+    // handshake completes. They must be buffered, not dropped: a peer
+    // that sends its request in the same flight as its Finished would
+    // otherwise lose the request.
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = try Connection.init(a, io, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(a, io, .server, .{});
+    defer server.deinit();
+    client.maxStreamsBidiRemote = 1;
+    server.addressValidated = true;
+
+    const secret = @as([32]u8, @splat(0xA5));
+    try client.installKeys(.application, secret, secret);
+    // The server has no application keys yet: the packet cannot be
+    // decrypted and must be buffered.
+    try std.testing.expect(server.spaces[2].keysRx == null);
+
+    try client.sendStreamChecked(0, 0, "early", false, 100);
+    const early = try client.takeOutput(a);
+    defer a.free(early);
+
+    try server.receiveDatagram(early, 101);
+    try std.testing.expectEqual(@as(usize, 1), server.pendingApp.items.len);
+    try std.testing.expectEqual(@as(u64, 0), server.dataReceived);
+
+    // Once the application keys exist the buffered packet is replayed.
+    try server.installKeys(.application, secret, secret);
+    try server.replayPendingApp(102);
+    try std.testing.expectEqual(@as(usize, 0), server.pendingApp.items.len);
+    try std.testing.expectEqual(@as(u64, 5), server.dataReceived);
+}
+
+test "repeated new connection id sequences are ignored" {
+    // RFC 9000 Section 19.15 lets an endpoint reject a repeated
+    // sequence number, but peers retransmit the frame in a fresh
+    // packet, so the repeat is ignored instead of killing the
+    // connection.
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    const Cid = struct {
+        seq: u64,
+        cid: [4]u8,
+        token: [16]u8,
+    };
+    const one = Cid{ .seq = 1, .cid = .{ 1, 2, 3, 4 }, .token = @splat(0x11) };
+    var payload = std.ArrayList(u8).empty;
+    defer payload.deinit(a);
+    try frames.encode(&payload, a, .{ .newConnectionId = .{
+        .sequence = one.seq,
+        .retirePriorTo = 0,
+        .cid = one.cid[0..],
+        .statelessResetToken = one.token,
+    } });
+
+    // Feed the frame twice: the second copy must not be an error.
+    const sp = &pair.server.spaces[2];
+    try pair.server.dispatchFrames(sp, payload.items, 100, false);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.peerCids.items.len);
+    try pair.server.dispatchFrames(sp, payload.items, 101, false);
+    try std.testing.expectEqual(@as(usize, 1), pair.server.peerCids.items.len);
+}
+
+test "a ping only packet is ack eliciting" {
+    // RFC 9000 Section 13.2: only ACK, PADDING and CONNECTION_CLOSE are
+    // not ack-eliciting. A PING must be tracked for loss recovery and
+    // must arm the PTO.
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    try pair.client.queueControlFrame(.ping);
+    try pair.client.flushControl(.application, 100);
+    const out = try pair.client.takeOutput(a);
+    defer a.free(out);
+    try std.testing.expect(out.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), pair.client.spaces[2].sent.items.len);
+    try std.testing.expect(pair.client.spaces[2].inFlightAckEliciting == 1);
+}
+
+test "a received ping arms an ack for the peer" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+    const sp = &pair.server.spaces[2];
+
+    try pair.client.queueControlFrame(.ping);
+    try pair.client.flushControl(.application, 100);
+    try pair.pumpCS(a);
+    try std.testing.expectEqual(@as(u64, 1), sp.ackElicitingCount);
+    try std.testing.expect(sp.ackDeadlineMs != null);
+    try std.testing.expect(!sp.ackQueued);
+
+    try pair.client.queueControlFrame(.ping);
+    try pair.client.flushControl(.application, 101);
+    try pair.pumpCS(a);
+    try std.testing.expect(sp.ackQueued);
+}
+
+test "max ack delay timer emits a standalone ack packet" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    try pair.client.queueControlFrame(.ping);
+    try pair.client.flushControl(.application, 100);
+    try pair.pumpCS(a);
+    try pair.client.queueControlFrame(.ping);
+    try pair.client.flushControl(.application, 101);
+    try pair.pumpCS(a);
+    try std.testing.expect(pair.server.spaces[2].ackQueued);
+
+    {
+        // No application traffic is pending: the ACK must come from the
+        // timer pump, not ride an unrelated packet.
+        const pre = try pair.server.takeOutput(a);
+        defer a.free(pre);
+        try std.testing.expectEqual(@as(usize, 0), pre.len);
+    }
+    try pair.server.pollTimeouts(5000);
+    try std.testing.expect(!pair.server.spaces[2].ackQueued);
+
+    const ack = try pair.server.takeOutput(a);
+    defer a.free(ack);
+    try std.testing.expect(ack.len > 0);
+    try pair.client.receiveDatagram(ack, 5001);
+    try std.testing.expectEqual(@as(usize, 0), pair.client.spaces[2].sent.items.len);
+}
+
+test "1-rtt packets are never chainable in a datagram" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    try pair.client.sendStreamChecked(0, 0, "a", false, 100);
+    try pair.client.sendStreamChecked(0, 1, "b", false, 101);
+    const flags = pair.client.outPacketChainableFlags();
+    try std.testing.expectEqual(@as(usize, 2), flags.len);
+    try std.testing.expect(!flags[0]);
+    try std.testing.expect(!flags[1]);
+}
+
+test "ack delay is encoded in units of the advertised exponent" {
+    // Our transport parameters advertise the default ack_delay_exponent
+    // of 3, so one millisecond is 125 units (RFC 9000 Section 19.3).
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    try pair.client.sendStreamChecked(0, 0, "x", false, 100);
+    try pair.pumpCS(a);
+    pair.server.spaces[2].ackQueued = true;
+    try pair.server.sendFrames(.application, struct {
+        fn build(gpa: Allocator, payload: *std.ArrayList(u8)) Error!void {
+            _ = gpa;
+            _ = payload;
+        }
+    }.build, 910);
+
+    const out = try pair.server.takeOutput(a);
+    defer a.free(out);
+
+    var work: [MAX_DATAGRAM]u8 = undefined;
+    var pt: [MAX_DATAGRAM]u8 = undefined;
+    var phase: bool = false;
+    const opened = try openShortProtected(
+        out,
+        pair.server.dcidLen,
+        pair.server.spaces[2].keysTx.?,
+        null,
+        &work,
+        &pt,
+        &phase,
+    );
+    var pos: usize = 0;
+    var ack_frame: ?frames.Ack = null;
+    while (pos < opened.ctLen) {
+        const f = try frames.decode(pt[0..opened.ctLen], &pos);
+        if (f == .ack) ack_frame = f.ack;
+    }
+    const f = ack_frame orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0), f.largestAcknowledged);
+    try std.testing.expectEqual(@as(u64, 1250), f.ackDelay);
+}
+
+// Handshake lifecycle (RFC 9001 Section 4.9): discarding a packet number
+// space must drop its keys, recovery state and buffered CRYPTO, and a
+// confirming client/server must silently ignore late packets from it.
+
+test "discarding initial keys releases their in-flight bytes" {
+    const a = std.testing.allocator;
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    defer conn.deinit();
+    try conn.installInitialKeys();
+    try conn.queueControlFrame(.ping);
+    try conn.flushControl(.initial, 100);
+
+    try std.testing.expect(conn.spaces[0].inFlightBytes >= MIN_INITIAL_DATAGRAM);
+    try std.testing.expect(conn.bytesInFlight >= MIN_INITIAL_DATAGRAM);
+
+    conn.discardInitialKeys();
+    try std.testing.expect(conn.spaces[0].discarded);
+    try std.testing.expectEqual(@as(usize, 0), conn.spaces[0].inFlightBytes);
+    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight);
+    try std.testing.expectEqual(@as(usize, 0), conn.spaces[0].sent.items.len);
+    try std.testing.expect(conn.spaces[0].keysTx == null and conn.spaces[0].keysRx == null);
+
+    // Repeated discards are harmless and cannot underflow the counter.
+    conn.discardInitialKeys();
+    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight);
+}
+
+test "handshake confirmation discards keys and ignores late packets" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var sender = try Connection.init(a, io, .client, .{});
+    defer sender.deinit();
+    var receiver = try Connection.init(a, io, .client, .{});
+    defer receiver.deinit();
+    const secret = @as([32]u8, @splat(0x6B));
+    try sender.installKeys(.handshake, secret, secret);
+    try receiver.installKeys(.handshake, secret, secret);
+
+    try sender.queueControlFrame(.ping);
+    try sender.flushControl(.handshake, 100);
+    const first = try sender.takeOutput(a);
+    defer a.free(first);
+    try sender.queueControlFrame(.ping);
+    try sender.flushControl(.handshake, 101);
+    const second = try sender.takeOutput(a);
+    defer a.free(second);
+    try std.testing.expect(sender.bytesInFlight > 0);
+
+    try receiver.receiveDatagram(first, 102);
+    try std.testing.expectEqual(@as(i64, 0), receiver.spaces[1].highestRxPn);
+
+    receiver.confirmHandshake();
+    try std.testing.expect(receiver.handshakeConfirmed);
+    try std.testing.expect(receiver.spaces[1].discarded);
+    try std.testing.expect(receiver.spaces[1].keysRx == null and receiver.spaces[1].keysTx == null);
+    try std.testing.expectEqual(@as(usize, 0), receiver.spaces[1].inFlightBytes);
+    try std.testing.expectEqual(State.established, receiver.state);
+
+    // A reordered packet from the discarded space is dropped without an
+    // error and must not resurrect ACK timers or receive state.
+    try receiver.receiveDatagram(second, 103);
+    try std.testing.expectEqual(@as(i64, 0), receiver.spaces[1].highestRxPn);
+    try receiver.pollTimeouts(5000);
+    const out = try receiver.takeOutput(a);
+    defer a.free(out);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "h3-style client confirms handshake on a 1-rtt acknowledgment" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    try pair.client.queueControlFrame(.ping);
+    try pair.client.flushControl(.application, 100);
+    try std.testing.expectEqual(@as(?u64, 0), pair.client.firstAppPnSent);
+    try pair.pumpCS(a);
+
+    pair.server.spaces[2].ackQueued = true;
+    try pair.server.sendFrames(.application, EmptyBuild.build, 101);
+    try pair.pumpSC(a);
+
+    try std.testing.expect(pair.client.handshakeConfirmed);
+    try std.testing.expect(pair.client.spaces[1].discarded);
+    try std.testing.expectEqual(State.established, pair.client.state);
+}
+
+test "handshake_done confirms clients and is a server protocol violation" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    var payload = std.ArrayList(u8).empty;
+    defer payload.deinit(a);
+    try frames.encode(&payload, a, .handshakeDone);
+
+    try std.testing.expectError(
+        Error.ProtocolViolation,
+        pair.server.dispatchFrames(&pair.server.spaces[2], payload.items, 100, false),
+    );
+    try std.testing.expect(!pair.server.handshakeConfirmed);
+
+    const DoneBuild = struct {
+        pub fn build(gpa: Allocator, out: *std.ArrayList(u8)) Error!void {
+            try fe(gpa, out, .handshakeDone);
+        }
+    };
+    try pair.server.sendFrames(.application, DoneBuild.build, 101);
+    try pair.pumpSC(a);
+    try std.testing.expect(pair.client.handshakeConfirmed);
+    try std.testing.expect(pair.client.spaces[1].discarded);
+    try std.testing.expectEqual(State.established, pair.client.state);
+}
+
+test "frame spaces match RFC 9000 table 3" {
+    const F = frames.Frame;
+    const app_close = F{ .connectionClose = .{
+        .errorCode = 0,
+        .triggeringFrameType = 0,
+        .reason = "",
+        .application = true,
+    } };
+    const transport_close = F{ .connectionClose = .{
+        .errorCode = 0,
+        .triggeringFrameType = 0,
+        .reason = "",
+        .application = false,
+    } };
+    const ping: F = .ping;
+    const crypto_frame: F = .{ .crypto = .{ .offset = 0, .data = "" } };
+    const stream: F = .{ .stream = .{ .id = 0, .offset = 0, .data = "", .fin = false } };
+    const new_cid: F = .{ .newConnectionId = .{
+        .sequence = 0,
+        .retirePriorTo = 0,
+        .cid = "cid",
+        .statelessResetToken = @splat(0),
+    } };
+    const path_response: F = .{ .pathResponse = .{ .data = @splat(0) } };
+    const done: F = .handshakeDone;
+
+    // PING is valid everywhere; STREAM is application-only.
+    for ([_]SpaceKind{ .initial, .handshake, .application }) |k| {
+        try std.testing.expect(Connection.frameAllowedInSpace(ping, k, k == .application));
+    }
+    try std.testing.expect(!Connection.frameAllowedInSpace(stream, .initial, false));
+    try std.testing.expect(!Connection.frameAllowedInSpace(stream, .handshake, false));
+    try std.testing.expect(Connection.frameAllowedInSpace(stream, .application, true));
+
+    // CRYPTO is Initial/Handshake/1-RTT, never 0-RTT.
+    try std.testing.expect(Connection.frameAllowedInSpace(crypto_frame, .initial, false));
+    try std.testing.expect(Connection.frameAllowedInSpace(crypto_frame, .handshake, false));
+    try std.testing.expect(Connection.frameAllowedInSpace(crypto_frame, .application, false));
+    try std.testing.expect(!Connection.frameAllowedInSpace(crypto_frame, .application, true));
+
+    // NEW_CONNECTION_ID may appear in 0-RTT; PATH_RESPONSE may not.
+    try std.testing.expect(Connection.frameAllowedInSpace(new_cid, .application, true));
+    try std.testing.expect(!Connection.frameAllowedInSpace(new_cid, .handshake, false));
+    try std.testing.expect(!Connection.frameAllowedInSpace(path_response, .application, true));
+    try std.testing.expect(Connection.frameAllowedInSpace(path_response, .application, false));
+
+    // HANDSHAKE_DONE is 1-RTT only.
+    try std.testing.expect(!Connection.frameAllowedInSpace(done, .handshake, false));
+    try std.testing.expect(Connection.frameAllowedInSpace(done, .application, false));
+
+    // CONNECTION_CLOSE 0x1c is I/H/1-RTT; the app variant is 0/1-RTT.
+    try std.testing.expect(Connection.frameAllowedInSpace(transport_close, .initial, false));
+    try std.testing.expect(Connection.frameAllowedInSpace(transport_close, .handshake, false));
+    try std.testing.expect(Connection.frameAllowedInSpace(transport_close, .application, false));
+    try std.testing.expect(!Connection.frameAllowedInSpace(transport_close, .application, true));
+    try std.testing.expect(!Connection.frameAllowedInSpace(app_close, .initial, false));
+    try std.testing.expect(!Connection.frameAllowedInSpace(app_close, .handshake, false));
+    try std.testing.expect(Connection.frameAllowedInSpace(app_close, .application, true));
+}
+
+test "a 0-rtt packet may not carry an ack frame" {
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    var payload = std.ArrayList(u8).empty;
+    defer payload.deinit(a);
+    try frames.encodeAckFromBlocks(&payload, a, 0, 0, &.{.{ .highest = 0, .len = 1 }}, null);
+    try std.testing.expectError(
+        Error.ProtocolViolation,
+        pair.client.dispatchFrames(&pair.client.spaces[2], payload.items, 100, true),
+    );
+}
+
+test "confirmed handshake drops queued handshake packets but keeps 1-rtt output" {
+    // RFC 9001 Section 4.9.2: once the handshake is confirmed, no packet
+    // protected with Handshake keys may be sent. An ACK-only packet can
+    // already be serialized when HANDSHAKE_DONE confirms the handshake;
+    // it must be removed from the output queue rather than flushed after
+    // the keys are gone.
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var conn = try Connection.init(a, io, .server, .{});
+    defer conn.deinit();
+    // The peer's address was validated before this point in a real
+    // handshake; without that, server-side amplification limits rightly
+    // refuse to emit the Handshake ACK this test is about.
+    conn.addressValidated = true;
+
+    const hs_secret = @as([32]u8, @splat(0x31));
+    const app_secret = @as([32]u8, @splat(0x32));
+    try conn.installKeys(.handshake, hs_secret, hs_secret);
+    try conn.installKeys(.application, app_secret, app_secret);
+
+    // A pending Handshake ACK is protected and queued before confirmation.
+    try conn.spaces[1].acktr.add(0);
+    conn.spaces[1].ackQueued = true;
+    try conn.sendAckOnly(.handshake, 100);
+    try std.testing.expectEqual(@as(usize, 1), conn.outPacketLengths().len);
+    try std.testing.expectEqual(QueuedKind.handshake, conn.outQueuedKinds()[0]);
+
+    // A 1-RTT packet queued at the same time must survive.
+    try conn.queueControlFrame(.ping);
+    try conn.flushControl(.application, 101);
+    conn.confirmHandshake();
+    try std.testing.expect(conn.spaces[1].discarded);
+    try std.testing.expectEqualSlices(QueuedKind, &.{.application}, conn.outQueuedKinds());
+
+    const out = try conn.takeOutput(a);
+    defer a.free(out);
+    try std.testing.expect(out.len > 0);
+
+    // Timer-driven ACK work for the discarded space must stay silent.
+    // Stay below the 1-RTT PTO so the unacknowledged PING in the
+    // surviving application space does not legitimately probe here.
+    try conn.pollTimeouts(102);
+    const late = try conn.takeOutput(a);
+    defer a.free(late);
+    try std.testing.expectEqual(@as(usize, 0), late.len);
+}
+
+test "discarding initial keys drops a queued initial packet" {
+    // RFC 9001 Section 4.9.1: after the Initial keys are discarded an
+    // Initial packet cannot be protected or sent, even if it was already
+    // serialized.
+    const a = std.testing.allocator;
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    defer conn.deinit();
+    try conn.installInitialKeys();
+
+    try conn.queueControlFrame(.ping);
+    try conn.flushControl(.initial, 100);
+    try std.testing.expectEqual(@as(usize, 1), conn.outPacketLengths().len);
+    try std.testing.expectEqual(QueuedKind.initial, conn.outQueuedKinds()[0]);
+
+    conn.discardInitialKeys();
+    const out = try conn.takeOutput(a);
+    defer a.free(out);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.outPacketLengths().len);
+}
+
+test "rejecting early data drops a queued 0-rtt packet" {
+    // RFC 9001 Section 4.9.3: discarded 0-RTT keys cannot protect a
+    // queued 0-RTT packet, so the packet must not be sent.
+    const a = std.testing.allocator;
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    defer conn.deinit();
+    const secret = @as([32]u8, @splat(0x44));
+    conn.installZeroRttKeys(secret, true);
+
+    try conn.queueControlFrame(.ping);
+    try conn.flushControl(.application, 100);
+    try std.testing.expectEqual(@as(usize, 1), conn.outPacketLengths().len);
+    try std.testing.expectEqual(QueuedKind.zero_rtt, conn.outQueuedKinds()[0]);
+
+    conn.discardZeroRtt();
+    const out = try conn.takeOutput(a);
+    defer a.free(out);
+    try std.testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "ack delay is measured from the largest acknowledged packet" {
+    // RFC 9000 Section 19.3: ACK Delay counts from receipt of the largest
+    // acknowledged packet. A later, reordered packet with a lower number
+    // must not move that baseline and understate the delay.
+    const a = std.testing.allocator;
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    try pair.client.sendStreamChecked(0, 0, "a", false, 100);
+    const p0 = try pair.client.takeOutput(a);
+    defer a.free(p0);
+    try pair.client.sendStreamChecked(0, 1, "b", false, 110);
+    const p1 = try pair.client.takeOutput(a);
+    defer a.free(p1);
+
+    // Packet 1 arrives first at t=200; reordered packet 0 follows at 500.
+    try pair.server.receiveDatagram(p1, 200);
+    try pair.server.receiveDatagram(p0, 500);
+    try std.testing.expect(pair.server.spaces[2].ackQueued);
+
+    try pair.server.sendFrames(.application, EmptyBuild.build, 1000);
+    const out = try pair.server.takeOutput(a);
+    defer a.free(out);
+
+    var work: [MAX_DATAGRAM]u8 = undefined;
+    var pt: [MAX_DATAGRAM]u8 = undefined;
+    var phase: bool = false;
+    const opened = try openShortProtected(
+        out,
+        pair.server.dcidLen,
+        pair.server.spaces[2].keysTx.?,
+        null,
+        &work,
+        &pt,
+        &phase,
+    );
+    var pos: usize = 0;
+    var ack_frame: ?frames.Ack = null;
+    while (pos < opened.ctLen) {
+        const f = try frames.decode(pt[0..opened.ctLen], &pos);
+        if (f == .ack) ack_frame = f.ack;
+    }
+    const f = ack_frame orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 1), f.largestAcknowledged);
+    try std.testing.expectEqual(@as(u64, 100_000), f.ackDelay);
+}
+
+test "regression: quic variable-length integer parsing and boundaries" {
+    const seeds = [_][]const u8{
+        &[_]u8{0x25},
+        &[_]u8{ 0x7b, 0xbd },
+        &[_]u8{ 0x9d, 0x7f, 0x3e, 0x7d },
+        &[_]u8{ 0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c },
+    };
+
+    for (seeds) |s| {
+        for (0..s.len + 1) |cut| {
+            var off: usize = 0;
+            _ = varint.decode(s[0..cut], &off) catch {};
+        }
+    }
+
+    var prng = std.Random.DefaultPrng.init(0x9999);
+    const rng = prng.random();
+    var buf: [16]u8 = undefined;
+
+    for (0..200) |_| {
+        const len = rng.uintLessThan(usize, buf.len);
+        rng.bytes(buf[0..len]);
+        var off: usize = 0;
+        _ = varint.decode(buf[0..len], &off) catch {};
+    }
+}
+
+test "regression: quic transport frame decoding and truncation sweeps" {
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(std.testing.allocator);
+
+    try frames.encode(&list, std.testing.allocator, .ping);
+    try list.appendNTimes(std.testing.allocator, 0x00, 4);
+    try frames.encodeAckFromBlocks(&list, std.testing.allocator, 10, 2, &[_]frames.AckBlock{
+        .{ .highest = 10, .len = 3 },
+    }, null);
+    try frames.encode(&list, std.testing.allocator, .{ .resetStream = .{
+        .streamId = 4,
+        .errorCode = 0x01,
+        .finalSize = 1024,
+    } });
+    try frames.encode(&list, std.testing.allocator, .{ .stopSending = .{
+        .streamId = 4,
+        .errorCode = 0x02,
+    } });
+    try frames.encode(&list, std.testing.allocator, .{ .crypto = .{
+        .offset = 0,
+        .data = "client_hello_bytes",
+    } });
+    try frames.encode(&list, std.testing.allocator, .{ .stream = .{
+        .id = 0,
+        .offset = 0,
+        .data = "hello quic",
+        .fin = true,
+    } });
+    try frames.encode(&list, std.testing.allocator, .{ .maxData = .{ .maximum = 1048576 } });
+    try frames.encode(&list, std.testing.allocator, .{ .maxStreamData = .{ .streamId = 0, .maximum = 65536 } });
+    try frames.encode(&list, std.testing.allocator, .handshakeDone);
+    try frames.encode(&list, std.testing.allocator, .{ .connectionClose = .{
+        .errorCode = 0,
+        .triggeringFrameType = 0,
+        .reason = "clean",
+        .application = false,
+    } });
+
+    const encoded = list.items;
+
+    const helper = struct {
+        fn decodeFrames(data: []const u8) void {
+            var pos: usize = 0;
+            while (pos < data.len) {
+                const start = pos;
+                _ = frames.decode(data, &pos) catch break;
+                if (pos <= start) break;
+            }
+        }
+    };
+
+    for (0..encoded.len + 1) |cut| {
+        helper.decodeFrames(encoded[0..cut]);
+    }
+
+    var prng = std.Random.DefaultPrng.init(0xaaaa);
+    const rng = prng.random();
+    var mut: [256]u8 = undefined;
+
+    for (0..150) |_| {
+        const copyLen = @min(encoded.len, mut.len);
+        @memcpy(mut[0..copyLen], encoded[0..copyLen]);
+        const flips = 1 + rng.uintLessThan(usize, 5);
+        for (0..flips) |_| {
+            const idx = rng.uintLessThan(usize, copyLen);
+            mut[idx] = rng.int(u8);
+        }
+        helper.decodeFrames(mut[0..copyLen]);
+    }
+}
+
+test "regression: quic transport parameters decoding and validation" {
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(std.testing.allocator);
+
+    const initialParams = paramsMod.Params{
+        .maxIdleTimeoutMs = 30_000,
+        .maxUdpPayloadSize = 1472,
+        .initialMaxData = 1048576,
+        .initialMaxStreamDataBidiLocal = 65536,
+        .initialMaxStreamDataBidiRemote = 65536,
+        .initialMaxStreamDataUni = 65536,
+        .initialMaxStreamsBidi = 100,
+        .initialMaxStreamsUni = 100,
+        .ackDelayExponent = 3,
+        .maxAckDelayMs = 25,
+        .activeConnectionIdLimit = 4,
+    };
+    try paramsMod.encode(&list, std.testing.allocator, initialParams);
+    const encoded = list.items;
+
+    for (0..encoded.len + 1) |cut| {
+        _ = paramsMod.decode(encoded[0..cut]) catch {};
+    }
+
+    var prng = std.Random.DefaultPrng.init(0xbbbb);
+    const rng = prng.random();
+    var buf: [128]u8 = undefined;
+
+    for (0..150) |_| {
+        const copyLen = @min(encoded.len, buf.len);
+        @memcpy(buf[0..copyLen], encoded[0..copyLen]);
+        const flips = 1 + rng.uintLessThan(usize, 4);
+        for (0..flips) |_| {
+            const idx = rng.uintLessThan(usize, copyLen);
+            buf[idx] = rng.int(u8);
+        }
+        _ = paramsMod.decode(buf[0..copyLen]) catch {};
+    }
+}
+
+test "regression: quic packet header parsing" {
+    var initialHdrBuf: [64]u8 = undefined;
+    const initialLen = packetMod.writeLongHeader(initialHdrBuf[0..], .{
+        .type = .initial,
+        .version = 0x00000001,
+        .dcid = &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .scid = &[_]u8{ 8, 7, 6, 5, 4, 3, 2, 1 },
+        .token = "token123",
+        .pnLen = 2,
+        .protectedPayloadLen = 32,
+    }) catch unreachable;
+
+    var shortHdrBuf: [32]u8 = undefined;
+    const shortLen = packetMod.writeShortHeader(shortHdrBuf[0..], .{
+        .keyPhase = false,
+        .dcid = &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .pnLen = 2,
+    }) catch unreachable;
+
+    const helper = struct {
+        fn parse(data: []const u8) void {
+            if (data.len == 0) return;
+            const first = data[0];
+            if ((first & 0x80) != 0) {
+                _ = packetMod.parseLongHeader(data) catch {};
+            } else {
+                _ = packetMod.parseShortHeader(data, 8) catch {};
+            }
+        }
+    };
+
+    for (0..initialLen + 1) |cut| helper.parse(initialHdrBuf[0..cut]);
+    for (0..shortLen + 1) |cut| helper.parse(shortHdrBuf[0..cut]);
+
+    var prng = std.Random.DefaultPrng.init(0xcccc);
+    const rng = prng.random();
+    var mut: [64]u8 = undefined;
+
+    for (0..150) |_| {
+        const len = 1 + rng.uintLessThan(usize, mut.len);
+        rng.bytes(mut[0..len]);
+        helper.parse(mut[0..len]);
+    }
+}
+
+test "regression: quic connection receiveDatagram state machine under adversarial packets" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const helper = struct {
+        fn feed(in_io: std.Io, data: []const u8) void {
+            const alloc = std.heap.page_allocator;
+            var srv = Connection.init(alloc, in_io, .server, .{
+                .isServer = true,
+                .version = 0x00000001,
+            }) catch return;
+            defer srv.deinit();
+            _ = srv.receiveDatagram(data, 1000) catch {};
+
+            var cli = Connection.init(alloc, in_io, .client, .{
+                .isServer = false,
+                .version = 0x00000001,
+            }) catch return;
+            defer cli.deinit();
+            _ = cli.receiveDatagram(data, 1000) catch {};
+        }
+    };
+
+    var prng = std.Random.DefaultPrng.init(0xdddd);
+    const rng = prng.random();
+
+    var smallInitial: [100]u8 = undefined;
+    rng.bytes(&smallInitial);
+    smallInitial[0] = 0xc0;
+    std.mem.writeInt(u32, smallInitial[1..5], 0x00000001, .big);
+    helper.feed(io, &smallInitial);
+
+    var fullDatagram: [1200]u8 = undefined;
+    @memset(&fullDatagram, 0);
+    fullDatagram[0] = 0xc0;
+    std.mem.writeInt(u32, fullDatagram[1..5], 0x00000001, .big);
+    fullDatagram[5] = 8;
+    @memcpy(fullDatagram[6..14], "dcid1234");
+    fullDatagram[14] = 8;
+    @memcpy(fullDatagram[15..23], "scid1234");
+    fullDatagram[23] = 0;
+    fullDatagram[24] = 0x40;
+    fullDatagram[25] = 0x20;
+
+    helper.feed(io, &fullDatagram);
+
+    for (0..50) |_| {
+        const len = 16 + rng.uintLessThan(usize, fullDatagram.len - 16);
+        const flips = 1 + rng.uintLessThan(usize, 6);
+        for (0..flips) |_| {
+            const idx = rng.uintLessThan(usize, len);
+            fullDatagram[idx] = rng.int(u8);
+        }
+        helper.feed(io, fullDatagram[0..len]);
+    }
+}
+
+test "path validation initiation and response roundtrip" {
+    const a = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(12345);
+    const rng = prng.random();
+
+    var pair = try CtlPair.init(a);
+    defer pair.deinit();
+
+    try std.testing.expect(!pair.client.isPathValidated());
+
+    try pair.client.initiatePathValidation(1000, rng);
+    try std.testing.expect(pair.client.pathValidator != null);
+    try std.testing.expectEqual(pathMod.State.validating, pair.client.pathValidator.?.state);
+    try std.testing.expect(pair.client.outbuf.items.len > 0);
+
+    // Grab the challenge data from pathValidator queue
+    const challengeData = pair.client.pathValidator.?.queue[0].data;
+
+    // Simulate receiving PATH_RESPONSE frame matching the challenge
+    var payload = std.ArrayList(u8).empty;
+    defer payload.deinit(a);
+    try frames.encode(&payload, a, .{ .pathResponse = .{ .data = challengeData } });
+
+    try pair.client.dispatchFrames(&pair.client.spaces[2], payload.items, 1050, false);
+
+    try std.testing.expect(pair.client.isPathValidated());
 }

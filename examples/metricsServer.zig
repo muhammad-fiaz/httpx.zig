@@ -59,10 +59,10 @@ pub fn main() !void {
     std.debug.print("Metrics server verification completed successfully.\n", .{});
 }
 
-fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = "<h1>Metrics Example</h1>", .contentType = "text/html" };
 }
 
-fn dataHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn dataHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = "{\"data\":\"some value\",\"count\":42}", .contentType = "application/json" };
 }

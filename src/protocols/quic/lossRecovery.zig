@@ -1,8 +1,8 @@
 //! Loss detection and RTT estimation per RFC 9002.
 //!
-//! Constants follow ngtcp2/rcvry.h: kPacketThreshold=3, kTimeThreshold
-//! =9/8, kGranularity=1ms, PTO backoff 2^ptoCount, persistent-congestion
-//! duration = (srtt + max(4*rttvar, granularity) + maxAckDelay) * 3.
+//! Constants follow RFC 9002: packet threshold 3, time threshold 9/8,
+//! granularity 1 ms, PTO backoff 2^ptoCount, and persistent-congestion
+//! duration (srtt + max(4*rttvar, granularity) + maxAckDelay) * 3.
 
 const std = @import("std");
 

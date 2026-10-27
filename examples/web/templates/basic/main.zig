@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn homeHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn homeHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.render("index.html", .{
         .title = "HTTPX Native Templates",
         .message = "Hello from high-performance native Zig templates!",

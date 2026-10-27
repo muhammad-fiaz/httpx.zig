@@ -10,7 +10,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn apiHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn apiHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{
         .status = "ok",
         .service = "spa-api",

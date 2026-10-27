@@ -1,12 +1,37 @@
 # Server-Sent Events (SSE)
 
-HTTPX implements the W3C Server-Sent Events (SSE) specification, enabling persistent, unidirectional event streams from server to browser over standard HTTP/1.1 or HTTP/2.
+HTTPX implements the WHATWG Server-Sent Events format: `httpx.sse.Event.Writer`
+serializes event blocks, and `httpx.sse.Event.Parser` parses an inbound
+`text/event-stream` body.
 
 ## Server SSE Handler
+
+The high-level server buffers each response body, so a route can return a
+finite batch of events in one response:
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
+
+fn liveFeedHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    var out = std.ArrayList(u8).empty;
+    var writer = httpx.sse.Event.Writer.init(ctx.allocator);
+    try writer.writeEvent(&out, &.{"Client connected to live feed"}, "connected", 0, null);
+
+    var count: u32 = 1;
+    while (count <= 10) : (count += 1) {
+        var buf: [64]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "Heartbeat count: {d}", .{count});
+        try writer.writeEvent(&out, &.{msg}, "tick", count, null);
+    }
+
+    return .{
+        .status = 200,
+        .body = out.items,
+        .contentType = "text/event-stream; charset=utf-8",
+        .headers = &.{.{ .name = "Cache-Control", .value = "no-cache" }},
+    };
+}
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -16,31 +41,14 @@ pub fn main() !void {
 
     var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
-
-    server.sse("/api/live-feed", struct {
-        fn handle(stream: *httpx.sse.Writer) !void {
-            try stream.send(.{
-                .event = "connected",
-                .data = "Client connected to live feed",
-            });
-
-            var count: u32 = 0;
-            while (count < 10) : (count += 1) {
-                std.time.sleep(1 * std.time.ns_per_s);
-                var buf: [64]u8 = undefined;
-                const msg = try std.fmt.bufPrint(&buf, "Heartbeat count: {d}", .{count});
-                try stream.send(.{
-                    .id = count,
-                    .event = "tick",
-                    .data = msg,
-                });
-            }
-        }
-    }.handle);
-
-    try server.run();
+    try server.get("/api/live-feed", liveFeedHandler);
+    server.run();
 }
 ```
+
+Long-lived SSE connections require a custom HTTP/1.1 connection loop built
+from the socket and protocol primitives; the router cannot keep a response
+open.
 
 ## Wire Format
 

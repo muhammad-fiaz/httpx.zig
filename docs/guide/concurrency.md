@@ -6,9 +6,8 @@ pool and queue.
 
 ## Parallel Requests
 
-Execute multiple HTTP requests using `Client.getAll` / `Client.requestAll`
-(or the `httpx.getAll` / `httpx.requestAll` zero-config helpers). They run
-the requests and wait for all to complete:
+Execute multiple HTTP requests using `getAll` / `requestAll` on an initialized
+client. They run the requests and wait for all to complete:
 
 ```zig
 const urls = [_][]const u8{
@@ -32,15 +31,16 @@ defer r.deinit();
 
 ## Worker Pool
 
-`httpx.WorkerPool` (`src/concurrency/workerPool.zig`) is a fixed-thread,
-bounded-queue pool with graceful drain:
+`httpx.concurrency.Pool` (`src/concurrency/workerPool.zig`) is a fixed-thread,
+bounded-queue pool with graceful drain. It is also exported as
+`httpx.client.workerPool`:
 
 Pass a live Zig 0.17 `std.Io` to the pool. It backs blocking queue waits and
 must outlive the pool. `submit` applies backpressure when the queue is full;
 `trySubmit` fails immediately with `QueueFull` or `QueueBusy`.
 
 ```zig
-var pool = try httpx.WorkerPool.init(allocator, io, .{
+var pool = try httpx.concurrency.Pool.init(allocator, io, .{
     .workers = 4,
     .queueCapacity = 1024,
     .autoStart = true,
@@ -57,8 +57,9 @@ defer pool.deinit();
 
 ### Queue
 
-`httpx.Queue` (`src/concurrency/queue.zig`) is the thread-safe bounded queue
-used internally by the pool.
+`httpx.concurrency.Queue(T)` (`src/concurrency/queue.zig`) is the generic
+thread-safe bounded queue used internally by the pool. It exposes `push`,
+`tryPush`, `pop`, `tryPop`, `drain`, and `close`.
 
 ## Related
 

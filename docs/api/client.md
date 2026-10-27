@@ -1,6 +1,6 @@
 # Client API
 
-The `httpx.zig` client provides a high-level HTTP client for making requests over HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3. HTTPS is supported via a fully custom TLS 1.2/1.3 implementation built on `std.crypto` primitives (AES-GCM, ChaCha20-Poly1305, X25519, HKDF, SHA-256/384/512) with ALPN negotiation for HTTP/2 and HTTP/3.
+The `httpx.zig` client provides a high-level HTTP client for making requests over HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3. Plain HTTPS/1.1 uses `std.crypto.tls` for TLS 1.2/1.3. Explicit HTTP/2 requests and mutual TLS use the native TLS 1.3 client built on `std.crypto` primitives (AES-GCM, ChaCha20-Poly1305, X25519, HKDF, SHA-256/384/512), including ALPN negotiation. HTTP/3 runs over QUIC with its own TLS 1.3 handshake.
 
 ## Protocol Support
 
@@ -9,26 +9,29 @@ The `httpx.zig` client provides a high-level HTTP client for making requests ove
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
 | HTTP/2 | ✅ Client Runtime + Primitives | TCP/TLS | High-level client request execution path plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Client Runtime + Primitives | QUIC/UDP | High-level client runtime over UDP + QUIC/HTTP3/QPACK primitives (suitable for local/integration endpoints) |
+| HTTP/3 | ✅ Reliable paths | QUIC/UDP | High-level client runtime over QUIC/TLS 1.3 with ALPN `h3`, QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT resumption, Retry/version negotiation, key updates, and pooled connections for sequential reuse |
 
-HTTP/3 runtime mode is available in the high-level client and uses QUIC packet/stream framing primitives directly. Interoperability with endpoints that require full TLS-in-QUIC handshake negotiation may vary depending on deployment expectations.
+HTTP/3 runtime mode performs a QUIC TLS 1.3 handshake and verifies the server certificate. Loopback integration is covered, including dynamic QPACK and response trailers. QUIC loss recovery, NewReno congestion control, Retry/version negotiation, key updates, and connection pooling for sequential requests are active; the remaining transport limits are HelloRetryRequest, connection migration, and concurrent multiplexing over a shared high-level HTTP/3 connection.
 
 The protocol module provides HTTP/2 and HTTP/3 building blocks (HPACK/QPACK, framing, and transport primitives). See [Protocol API](protocol.md) for details.
 
 ## Proxy Modes
 
-`httpx.zig` supports two client proxy modes:
+`httpx.zig` supports HTTP CONNECT and the SOCKS4/SOCKS5 proxy families:
 
 | Kind | Behavior | DNS resolution |
 |------|----------|----------------|
-| `http` | Standard forward proxy or HTTPS CONNECT tunnel | Client resolves the target host unless the proxy protocol performs the tunnel itself |
-| `socks5h` | SOCKS5 proxy with remote host resolution | Proxy resolves the hostname and connects on behalf of the client |
+| `http` | HTTP CONNECT tunnel | Proxy resolves the target host |
+| `socks5` | SOCKS5 | Client resolves the target host |
+| `socks5h` | SOCKS5 with remote host resolution | Proxy resolves the hostname |
+| `socks4` | SOCKS4, IPv4 destinations only | Client resolves the target host |
+| `socks4a` | SOCKS4a with hostnames forwarded unresolved | Proxy resolves the hostname |
 
-Use `socks5h` when you want to avoid local DNS lookups or when the proxy has access to names that are not visible on the client network.
+Use `socks5h` when you want to avoid local DNS lookups or when the proxy has access to names that are not visible on the client network. `https://` proxy URLs are rejected, and HTTP/3 requests cannot use a proxy (`Http3ProxyUnsupported`).
 
 ## Client
 
-The `Client` struct is the main entry point for making requests. It manages connection pooling, cookies, and interceptors.
+The `Client` struct is the main entry point for making requests. It manages connection pooling, DNS caching, and retries.
 
 ### Initialization
 
@@ -50,22 +53,22 @@ var client = httpx.Client.init(allocator, io, .{
 });
 defer client.deinit();
 
-// Out-of-the-box convenience (zero initialization needed):
-var response = try httpx.get("https://api.example.com/users");
+// Requests use the initialized client and its allocator/I/O context.
+var response = try client.get("https://api.example.com/users", .{});
 defer response.deinit();
 
-// Dot notation module access:
-var post_res = try httpx.post("https://api.example.com/users", .{ .json = .{ .name = "Alice", .role = "developer" },
+var post_res = try client.post("https://api.example.com/users", .{ .json = .{ .name = "Alice", .role = "developer" },
 });
 defer post_res.deinit();
 ```
 
-`ClientConfig` is an idiomatic Zig struct where omitted fields use standard defaults.
-It matches `httpx.ClientConfig` in `src/client/client.zig` exactly:
+The client configuration is an idiomatic Zig struct passed to `Client.init`;
+omitted fields use standard defaults. It mirrors `Config` in
+`src/client/httpClient.zig`:
 
 ```zig
 const io = std.Io.Threaded.global_single_threaded.io();
-const cfg: httpx.ClientConfig = .{
+var client = httpx.Client.init(allocator, io, .{
     .timeoutMs = 10_000,
     .followRedirects = true,
     .maxRedirects = 5,
@@ -75,14 +78,25 @@ const cfg: httpx.ClientConfig = .{
     .httpVersion = .http2,
     .pool = .{ .maxConnections = 64, .maxPerHost = 16 },
     .proxy = null,
-    .cookies = true,
-};
-
-var client = httpx.Client.init(allocator, io, cfg);
+});
 defer client.deinit();
+
+// Explicit client environment configuration using httpx.env utils:
+// Applications selectively read terminal/process variables or .env files and pass them into .{}
+var client_with_env = httpx.Client.init(allocator, io, .{
+    .proxy = httpx.env.get("HTTPS_PROXY") orelse httpx.env.get("HTTP_PROXY"),
+    .timeoutMs = httpx.env.getInt(u64, "REQUEST_TIMEOUT_MS") orelse 10_000,
+    .maxRetries = httpx.env.getInt(u32, "MAX_RETRIES") orelse 3,
+});
+defer client_with_env.deinit();
+
+// Explicit .env file loading:
+var envStore = try httpx.env.loadFile(allocator, ".env");
+defer envStore.deinit();
+const apiKey = envStore.get("MY_API_KEY");
 ```
 
-### Configuration (`ClientConfig`)
+### Configuration Fields
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -92,27 +106,33 @@ defer client.deinit();
 | `maxRetries` | `u32` | `0` | Retry attempts for failed requests (`0` = disabled). |
 | `retryDelayMs` | `u64` | `1000` | Base delay between retries in milliseconds. |
 | `retryStatusCodes` | `[]const u16` | `&.{ 502, 503, 504 }` | Status codes that trigger a retry. |
+| `retryUnsafeMethods` | `bool` | `false` | Also retry POST, PATCH, and CONNECT; leave false unless the server deduplicates. |
+| `earlyData` | `EarlyDataOptions` | `{}` | Default 0-RTT early-data settings. |
 | `httpVersion` | `?HttpVersion` | `null` | Preferred HTTP version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`). |
 | `http10` | `bool` | `true` | Fast toggle to enable HTTP/1.0 protocol. |
 | `http11` | `bool` | `true` | Fast toggle to enable HTTP/1.1 protocol. |
 | `http2` | `bool` | `false` | Fast toggle to use HTTP/2 as default protocol. |
 | `http3` | `bool` | `false` | Fast toggle to use HTTP/3 as default protocol. |
-| `cookies` | `bool` | `true` | Enable cookie jar handling. |
 | `pool` | `PoolConfig` | `{}` | Connection pool limits (`maxConnections`, `maxPerHost`, `idleTimeoutMs`, `maxParkedMs`). |
 | `dnsCache` | `DnsCacheOptions` | `{}` | DNS cache settings (`enable`, `ttlMs`, `negativeTtlMs`, `maxEntries`). |
-| `tls` | `?TlsOptions` | `null` | Default TLS options for `https://` requests. |
-| `proxy` | `?[]const u8` | `null` | Default proxy URL (`http://`, `socks5://`, `socks5h://`). |
+| `tls` | `?TlsOptions` | `null` | Default TLS overrides for `https://`; null uses system trust verification. |
+| `proxy` | `?[]const u8` | `null` | Default proxy URL (`http://`, `socks5://`, `socks5h://`, `socks4://`, `socks4a://`). |
 | `maxResponseSize` | `?usize` | `null` | Default maximum response body size. |
 | `allowLfLineEndings` | `bool` | `false` | Accept bare LF line endings from non-compliant peers. |
 | `eventCallback` | `?ClientEventCallback` | `null` | Application callback for client events (silent by default). |
 
 If you do not set a field, the implicit default value is used. `.{}` is the safe default.
 
+HTTPS requests verify the server certificate against system trust roots by
+default, including when `tls` is omitted or null. TLS truncation is rejected
+unless explicitly enabled with `TlsOptions.allowTruncation`; set
+`verify = .none` only for controlled testing or development.
+
 ### Timeouts
 
-The client uses a single uniform timeout model. `ClientConfig.timeoutMs`
-sets the default deadline applied to requests; per-request
-`RequestOptions.timeoutMs` overrides it for that request.
+The client uses a single uniform timeout model. The client configuration's
+`timeoutMs` sets the default deadline applied to requests; per-request
+`timeoutMs` overrides it for that request.
 
 ```zig
 const io = std.Io.Threaded.global_single_threaded.io();
@@ -121,7 +141,7 @@ var client = httpx.Client.init(allocator, io, .{
 });
 defer client.deinit();
 
-const res = try client.get("https://example.com/slow", .{ .timeoutMs = 2_000 });
+var res = try client.get("https://example.com/slow", .{ .timeoutMs = 2_000 });
 defer res.deinit();
 ```
 
@@ -168,7 +188,7 @@ defer parsed.deinit();
 | `jsonAlloc(comptime T: type, allocator: Allocator) !std.json.Parsed(T)` | Parses response body as JSON with explicit allocator and managed lifecycle. |
 | `bytes() []const u8` | Returns response body as a raw byte slice. |
 | `text() []const u8` | Returns response body as a UTF-8 text string. |
-| `writeTo(writer: anytype) !void` | Streams or writes response body directly to any writer (file, stdout, buffer). |
+| `writeTo(writer: anytype) !void` | Writes the buffered body bytes to any writer (file, stdout, buffer). |
 | `header(name: []const u8) ?[]const u8` | Case-insensitive header lookup. |
 | `status u16` | Returns HTTP status code integer. |
 | `isSuccess() bool` | Returns true if status code is in 200..299 range. |
@@ -183,7 +203,8 @@ All methods are URL-first (`url`, then options):
 |--------|-------------|
 | `fetch(url, options)` | **Primary unified HTTP request operation** |
 | `get(url, options)` | HTTP GET request |
-| `post(url, options)` | HTTP POST request |
+| `post(url, options)` | HTTP POST request (accepts `.body`, `.json`, `.form`) |
+| `postJson(url, payload, options)` | HTTP POST with typed struct or serialized JSON payload |
 | `put(url, options)` | HTTP PUT request |
 | `delete(url, options)` | HTTP DELETE request |
 | `patch(url, options)` | HTTP PATCH request |
@@ -192,6 +213,11 @@ All methods are URL-first (`url`, then options):
 | `connect(url, options)` | HTTP CONNECT request |
 | `options(url, options)` | HTTP OPTIONS request |
 | `request(url, options)` | Generic request (method set via `options.method`) |
+| `requestStream(url, options)` | Streaming request returning `ResponseStream` (incremental on HTTP/1.1) |
+| `requestBuilder(method, url)` | Start fluent `RequestBuilder` for chained request construction |
+| `builder(method, url)` | Alias for `requestBuilder` |
+| `getBuilder(url)` | Start GET `RequestBuilder` |
+| `postBuilder(url)` | Start POST `RequestBuilder` |
 | `getAll(urls)` | Concurrent GETs; deinit each response, free the slice |
 | `requestAll(reqs)` | Concurrent requests; same ownership |
 | `download(url, options)` | Streaming file download with resume/verify (destination via `options.path`) |
@@ -206,12 +232,12 @@ All methods are URL-first (`url`, then options):
 
 ### Cookie Jar API
 
-The standalone `httpx.CookieJar` keeps cookies across requests
+The standalone `httpx.client.cookieJar` keeps cookies across requests
 (domain-filtered per RFC 6265). Per-request cookies use the `cookie` option.
 
 | Method | Description |
 |--------|-------------|
-| `CookieJar.init(allocator)` / `deinit()` | Lifecycle |
+| `cookieJar.init(allocator, io)` / `deinit()` | Lifecycle |
 | `setFromHeader(setCookie, host)` | Store a `Set-Cookie` value |
 | `cookieHeader(host, path, secure, buf)` | Render the `Cookie` header (`secure` gates `Secure` cookies) |
 | `purgeExpired()` | Drop expired cookies |
@@ -227,33 +253,42 @@ var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 
 // Simple GET
-const response = try client.get("https://api.example.com/users", .{});
+var response = try client.get("https://api.example.com/users", .{});
 defer response.deinit();
 std.debug.print("Status: {d}\n", .{response.status});
-std.debug.print("Body: {s}\n", .{response.body});
+std.debug.print("Body: {s}\n", .{response.text()});
 
 // POST with JSON
-const json_response = try client.post("https://api.example.com/users", .{
+var json_response = try client.post("https://api.example.com/users", .{
     .json = "{\"name\": \"John\", \"email\": \"john@example.com\"}",
 });
 defer json_response.deinit();
 
+// POST with typed struct
+const User = struct { name: []const u8, role: []const u8 };
+var typed_res = try client.postJson("https://api.example.com/users", User{
+    .name = "John",
+    .role = "engineer",
+}, .{});
+defer typed_res.deinit();
+
 // Custom headers
-const auth_response = try client.get("https://api.example.com/protected", .{
+var auth_response = try client.get("https://api.example.com/protected", .{
     .headers = &.{
-        .{ "Authorization", "Bearer token123" },
-        .{ "X-Custom-Header", "value" },
+        .{ .name = "Authorization", .value = "Bearer token123" },
+        .{ .name = "X-Custom-Header", .value = "value" },
     },
 });
 defer auth_response.deinit();
 
 // Built-in auth helpers
-const bearer_response = try client.get("https://api.example.com/protected", .{ .headers = &.{.{ "Authorization", "Bearer token123" }, .{ "Accept", "application/json" }},
+var bearer_response = try client.get("https://api.example.com/protected", .{
+    .bearerAuth = "token123",
 });
 defer bearer_response.deinit();
 
 // With timeout
-const timeout_response = try client.get("https://slow-api.com/data", .{
+var timeout_response = try client.get("https://slow-api.com/data", .{
     .timeoutMs = 30000, // 30 seconds
 });
 defer timeout_response.deinit();
@@ -270,7 +305,6 @@ For complete copy/paste demos, see these example pages:
 - [Custom Headers](/examples/custom-headers)
 - [Concurrent Requests](/examples/concurrent-requests)
 - [Connection Pool](/examples/connection-pool)
-- [Interceptors](/examples/interceptors)
 - [Cookies Demo](/examples/cookies-demo)
 - [HTTP Auth Helpers](/examples/http-auth-helpers)
 - [Simplified API Aliases](/examples/simplified-api-aliases)
@@ -302,7 +336,7 @@ client-level defaults.
 | `allowLfLineEndings` | `bool` | `false` | Accept bare LF line endings in the response. |
 | `httpVersion` | `?HttpVersion` | `null` | Force a request over a specific protocol runtime. |
 | `http10` / `http11` / `http2` / `http3` | `?bool` | `null` | Per-request protocol toggles. |
-| `tls` | `?TlsOptions` | `null` | Per-request TLS options for `https://`. |
+| `tls` | `?TlsOptions` | `null` | Per-request TLS overrides; null inherits the client default or system trust. |
 | `proxy` | `?[]const u8` | `null` | Per-request proxy URL override. |
 
 Request options are configured directly using struct literals:
@@ -353,7 +387,7 @@ defer resp.deinit();
 ## Response
 
 The `Response` struct contains the server's response
-(`src/client/request.zig`).
+(`src/client/requestBuilder.zig`).
 
 ```zig
 pub const Response = struct {
@@ -384,7 +418,7 @@ pub const Response = struct {
 | `deinit()` | Free response resources |
 | `header(name)` | Get header value by name (case-insensitive) |
 | `text()` / `bytes()` | Get response body bytes |
-| `writeTo(writer)` | Stream body bytes to any writer |
+| `writeTo(writer)` | Write the buffered body bytes to any writer |
 | `contentType()` | Response Content-Type value |
 | `json(T)` | Parse body as JSON into `T` (ignores unknown fields) |
 | `jsonAlloc(T, allocator)` | Parse body as JSON, returning `std.json.Parsed(T)` |
@@ -420,58 +454,58 @@ const response = client.get("https://example.com", .{}) catch |err| switch (err)
 };
 ```
 
-## Convenience Functions
+## Request Methods
 
-The root module exposes zero-config convenience helpers for simple requests:
+Use request methods on an initialized client:
 
 ```zig
-var a = try httpx.get("https://example.com", .{});
+var a = try client.get("https://example.com", .{});
 defer a.deinit();
 
-var b = try httpx.post("https://example.com/items", .{ .json = "{\"name\":\"demo\"}",
+var b = try client.post("https://example.com/items", .{ .json = "{\"name\":\"demo\"}",
 });
 defer b.deinit();
 
-var c = try httpx.delete("https://example.com/items/42", .{});
+var c = try client.delete("https://example.com/items/42", .{});
 defer c.deinit();
 
-var d = try httpx.put("https://example.com/items", .{ .json = "{\"name\":\"updated\"}",
+var d = try client.put("https://example.com/items", .{ .json = "{\"name\":\"updated\"}",
 });
 defer d.deinit();
 
-var e = try httpx.patch("https://example.com/items", .{ .json = "{\"name\":\"patched\"}",
+var e = try client.patch("https://example.com/items", .{ .json = "{\"name\":\"patched\"}",
 });
 defer e.deinit();
 
-var f = try httpx.head("https://example.com/items", .{});
+var f = try client.head("https://example.com/items", .{});
 defer f.deinit();
 
-var g = try httpx.options("https://example.com/items", .{});
+var g = try client.options("https://example.com/items", .{});
 defer g.deinit();
 
-var h = try httpx.request("https://example.com/health", .{
+var h = try client.request("https://example.com/health", .{
     .method = .GET,
 });
 defer h.deinit();
 ```
 
-Top-level request functions (all URL-first):
+Client request methods (all URL-first):
 
 | Function | Description |
 |----------|-------------|
-| `httpx.get(url, opts)` | HTTP GET |
-| `httpx.post(url, opts)` | HTTP POST |
-| `httpx.put(url, opts)` | HTTP PUT |
-| `httpx.patch(url, opts)` | HTTP PATCH |
-| `httpx.delete(url, opts)` | HTTP DELETE |
-| `httpx.head(url, opts)` | HTTP HEAD |
-| `httpx.options(url, opts)` | HTTP OPTIONS |
-| `httpx.trace(url, opts)` | HTTP TRACE |
-| `httpx.connect(url, opts)` | HTTP CONNECT |
-| `httpx.fetch(url, opts)` | Unified fetch (any method via `.method`) |
-| `httpx.request(url, opts)` | General HTTP request (any method via `.method`) |
-| `httpx.getAll(&urls)` | Concurrent GET requests |
-| `httpx.requestAll(&requests)` | Concurrent custom requests |
+| `client.get(url, opts)` | HTTP GET |
+| `client.post(url, opts)` | HTTP POST |
+| `client.put(url, opts)` | HTTP PUT |
+| `client.patch(url, opts)` | HTTP PATCH |
+| `client.delete(url, opts)` | HTTP DELETE |
+| `client.head(url, opts)` | HTTP HEAD |
+| `client.options(url, opts)` | HTTP OPTIONS |
+| `client.trace(url, opts)` | HTTP TRACE |
+| `client.connect(url, opts)` | HTTP CONNECT |
+| `client.fetch(url, opts)` | Unified fetch (any method via `.method`) |
+| `client.request(url, opts)` | General HTTP request (any method via `.method`) |
+| `client.getAll(&urls)` | Concurrent GET requests |
+| `client.requestAll(&requests)` | Concurrent custom requests |
 
 ## See Also
 

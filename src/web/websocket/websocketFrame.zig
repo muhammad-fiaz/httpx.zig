@@ -95,11 +95,12 @@ pub fn parseFrameHeader(buf: []const u8) Error!struct { hdr: FrameHeader, consum
     };
 }
 
-/// Serializes a frame header into out. Returns bytes written.
-pub fn buildFrameHeader(out: []u8, fin: bool, opcode: Opcode, payloadLen: usize, maskKey: ?[4]u8) usize {
+/// Serializes a frame header into out with optional RSV flags (e.g. RSV1 for permessage-deflate). Returns bytes written.
+pub fn buildFrameHeaderWithRsv(out: []u8, fin: bool, rsv1: bool, opcode: Opcode, payloadLen: usize, maskKey: ?[4]u8) usize {
     var pos: usize = 0;
     var b0: u8 = @backingInt(opcode);
     if (fin) b0 |= 0x80;
+    if (rsv1) b0 |= 0x40;
     out[pos] = b0;
     pos += 1;
 
@@ -124,6 +125,11 @@ pub fn buildFrameHeader(out: []u8, fin: bool, opcode: Opcode, payloadLen: usize,
         pos += 4;
     }
     return pos;
+}
+
+/// Serializes a frame header into out. Returns bytes written.
+pub fn buildFrameHeader(out: []u8, fin: bool, opcode: Opcode, payloadLen: usize, maskKey: ?[4]u8) usize {
+    return buildFrameHeaderWithRsv(out, fin, false, opcode, payloadLen, maskKey);
 }
 
 /// Applies XOR masking in place (client->server direction requires it).
@@ -190,4 +196,14 @@ test "extended payload lengths must use canonical WebSocket bounds" {
 
     var highBit64 = [_]u8{ 0x82, 127, 0x80, 0, 0, 0, 0, 0, 0, 0 };
     try std.testing.expectError(Error.ProtocolViolation, parseFrameHeader(&highBit64));
+}
+
+test "frame header with rsv1 for permessage-deflate" {
+    var buf: [16]u8 = undefined;
+    const n = buildFrameHeaderWithRsv(&buf, true, true, .binary, 42, null);
+    const parsed = try parseFrameHeader(buf[0..n]);
+    try std.testing.expect(parsed.hdr.fin);
+    try std.testing.expect(parsed.hdr.rsv1);
+    try std.testing.expectEqual(Opcode.binary, parsed.hdr.opcode);
+    try std.testing.expectEqual(@as(u64, 42), parsed.hdr.payloadLen);
 }

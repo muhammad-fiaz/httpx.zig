@@ -58,6 +58,7 @@ pub const Error = error{
 const NativeConnection = struct {
     socket: *tcp.Socket,
     allocator: Allocator,
+    io: std.Io,
 
     /// Negotiated ALPN protocol, if the server selected one we offered.
     alpn: ?alpnMod.Protocol = null,
@@ -84,6 +85,9 @@ const NativeConnection = struct {
     /// Owned; transfer with `takeCapturedSession`.
     pendingSession: ?sessionMod.ClientSession = null,
 
+    /// Bounded reassembly of post-handshake messages fragmented across records.
+    postHandshake: handshakeMod.MessageReassembler,
+
     /// Sequence numbers for application records.
     txSeq: u64 = 0,
     rxSeq: u64 = 0,
@@ -109,6 +113,7 @@ const NativeConnection = struct {
             self.sessionHost = null;
         }
         if (self.resumptionMaster) |*m| std.crypto.secureZero(u8, m);
+        self.postHandshake.deinit();
         self.allocator.free(self.writeBuf);
         self.allocator.free(self.readBuf);
     }
@@ -143,12 +148,12 @@ const NativeConnection = struct {
 
     /// Read and decrypt one record worth of application data.
     ///
-    /// Post-handshake NewSessionTicket records are consumed transparently:
-    /// the ticket is stored when capture is enabled (RFC 8446 §4.6.1) and
-    /// otherwise discarded; reading continues with the next record either
-    /// way, so callers only ever see application bytes. Other post-handshake
-    /// handshake content (e.g. KeyUpdate, unimplemented) fails loudly
-    /// instead of leaking handshake plaintext as application data.
+    /// Post-handshake NewSessionTicket and KeyUpdate records are consumed
+    /// transparently; tickets are stored when capture is enabled (RFC 8446
+    /// Section 4.6.1). Encrypted alerts are handled here too: close_notify
+    /// reads as EOF, fatal alerts fail. Unsupported post-handshake handshake
+    /// messages fail loudly instead of leaking handshake plaintext as
+    /// application data.
     pub fn read(self: *NativeConnection, buf: []u8) Error!usize {
         if (self.leftoverLen > 0) {
             const n = @min(self.leftoverLen, buf.len);
@@ -165,14 +170,22 @@ const NativeConnection = struct {
             var totalRead: usize = 0;
             while (totalRead < 5) {
                 const n = self.socket.read(hdrBuf[totalRead..]) catch return error.IoError;
-                if (n == 0) return 0; // peer closed
+                if (n == 0) {
+                    // A clean FIN at a record boundary is EOF. A FIN in the
+                    // middle of a record is a truncation attack.
+                    if (totalRead == 0) {
+                        if (self.postHandshake.buffer.items.len != 0) return error.TlsRecordError;
+                        return 0;
+                    }
+                    return error.TlsRecordError;
+                }
                 totalRead += n;
             }
             if (hdrBuf[1] != 0x03 or hdrBuf[2] != 0x03) return error.TlsRecordError;
 
             const recordLen: usize = (@as(usize, hdrBuf[3]) << 8) | hdrBuf[4];
             const tagLen = self.appKeys.cipher.tagLen();
-            if (recordLen < tagLen or
+            if (recordLen == 0 or
                 recordLen > recordMod.maxRecordPlaintext + 1 + tagLen)
             {
                 return error.TlsRecordError;
@@ -188,7 +201,14 @@ const NativeConnection = struct {
             }
 
             const contentTypeByte = wireBuf[0];
-            if (contentTypeByte != @backingInt(recordMod.ContentType.application_data)) {
+            if (contentTypeByte == @backingInt(recordMod.ContentType.change_cipher_spec)) {
+                // Middlebox-compatibility CCS (RFC 8446 Section 5.4).
+                if (recordLen != 1 or wireBuf[5] != 0x01) return error.TlsRecordError;
+                continue;
+            }
+            if (contentTypeByte != @backingInt(recordMod.ContentType.application_data) or
+                recordLen < tagLen)
+            {
                 return error.TlsRecordError;
             }
 
@@ -203,19 +223,20 @@ const NativeConnection = struct {
             ) catch return error.TlsRecordError;
             self.rxSeq +%= 1;
 
-            if (result.contentType == .handshake) {
-                // Post-handshake handshake records this engine accepts are
-                // NewSessionTicket only. A client that does not want to
-                // resume ignores them (RFC 8446 §4.6.1); other handshake
-                // content (e.g. KeyUpdate) is rejected rather than consumed
-                // as application data.
-                if (result.plaintext.len < 1 or
-                    result.plaintext[0] != @backingInt(handshakeMod.HandshakeType.new_session_ticket))
-                {
+            switch (result.contentType) {
+                .application_data => {},
+                .handshake => {
+                    try self.processPostHandshakeRecord(result.plaintext, result.plaintext.len);
+                    continue;
+                },
+                .alert => {
+                    if (result.plaintext.len != 2) return error.TlsRecordError;
+                    const alert = handshakeMod.Alert.decode(.{ result.plaintext[0], result.plaintext[1] });
+                    if (alert.description == .closeNotify) return 0;
                     return error.TlsRecordError;
-                }
-                if (self.captureSession) try self.captureTicketRecord(result.plaintext);
-                continue;
+                },
+                .change_cipher_spec => continue,
+                else => return error.TlsRecordError,
             }
 
             const n = @min(result.plaintext.len, buf.len);
@@ -233,39 +254,68 @@ const NativeConnection = struct {
         }
     }
 
-    /// Captures post-handshake NewSessionTicket messages from one record's
-    /// plaintext, which may hold several concatenated handshake messages
-    /// (RFC 8446 Section 5.1 framing). Each message is dispatched by type
-    /// and declared length; every ticket is captured and the latest one
-    /// replaces any previously captured session. Truncated headers,
-    /// overrunning lengths, trailing garbage, empty records, and
-    /// non-ticket messages fail loudly: a corrupt ticket stream must
-    /// never silently downgrade resumption bookkeeping. A handshake
-    /// message split across records is not reassembled and fails loudly;
-    /// servers emit tickets whole within one record in practice.
-    fn captureTicketRecord(self: *NativeConnection, plaintext: []const u8) Error!void {
+    fn processPostHandshakeRecord(self: *NativeConnection, plaintext: []const u8, recordPlaintextLen: usize) Error!void {
+        const bufferedBeforeRecord = self.postHandshake.buffer.items.len;
+        self.postHandshake.append(plaintext) catch return error.TlsRecordError;
+        var consumedMessages: usize = 0;
+        while (true) {
+            const maybe_msg = self.postHandshake.next() catch return error.TlsRecordError;
+            const msg = maybe_msg orelse return;
+            defer self.allocator.free(msg.body);
+            consumedMessages += 4 + msg.body.len;
+            const currentRecordBytesConsumed = consumedMessages -| bufferedBeforeRecord;
+            const hasTrailingBytesInRecord = currentRecordBytesConsumed < recordPlaintextLen;
+            switch (msg.msgType) {
+                .new_session_ticket => if (self.captureSession) try self.captureTicket(msg.body) else {
+                    _ = handshakeMod.NewSessionTicket.decode(msg.body) catch return error.TlsRecordError;
+                },
+                .key_update => {
+                    const update = handshakeMod.KeyUpdate.decode(msg.body) catch return error.TlsRecordError;
+                    // RFC 8446 Section 4.6.3: KeyUpdate must be the last
+                    // message in its record.
+                    if (hasTrailingBytesInRecord) return error.TlsRecordError;
+                    self.appKeys.advanceServerReceiveKeys();
+                    self.rxSeq = 0;
+                    if (update.requestUpdate) try self.sendKeyUpdate();
+                },
+                else => return error.TlsRecordError,
+            }
+        }
+    }
+
+    fn captureTicket(self: *NativeConnection, body: []const u8) Error!void {
         const master = self.resumptionMaster orelse return error.TlsRecordError;
         const host = self.sessionHost orelse return error.TlsRecordError;
-        var it = handshakeMod.MessageIterator.init(plaintext);
-        var sawTicket = false;
-        while (it.next() catch return error.TlsRecordError) |msg| {
-            if (msg.msgType != .new_session_ticket) return error.TlsRecordError;
-            const nst = handshakeMod.NewSessionTicket.decode(msg.body) catch return error.TlsRecordError;
-            const nowMs: u64 = @intCast(clockMod.millisNow());
-            var fresh = sessionMod.clientSessionFromTicket(
-                self.allocator,
-                nst,
-                master,
-                self.suite,
-                host,
-                nowMs,
-            ) catch return error.TlsRecordError;
-            errdefer fresh.deinit(self.allocator);
-            if (self.pendingSession) |*old| old.deinit(self.allocator);
-            self.pendingSession = fresh;
-            sawTicket = true;
-        }
-        if (!sawTicket) return error.TlsRecordError;
+        const nst = handshakeMod.NewSessionTicket.decode(body) catch return error.TlsRecordError;
+        const nowMs: u64 = @intCast(clockMod.millisNow(self.io));
+        var fresh = sessionMod.clientSessionFromTicket(
+            self.allocator,
+            nst,
+            master,
+            self.suite,
+            host,
+            nowMs,
+        ) catch return error.TlsRecordError;
+        errdefer fresh.deinit(self.allocator);
+        if (self.pendingSession) |*old| old.deinit(self.allocator);
+        self.pendingSession = fresh;
+    }
+
+    fn sendKeyUpdate(self: *NativeConnection) Error!void {
+        if (self.appKeys.clientEpoch >= engineMod.DerivedKeys.MAX_SEND_EPOCH) return error.SequenceOverflow;
+        var message: [5]u8 = undefined;
+        (handshakeMod.KeyUpdate{}).encode(&message);
+        const encoded = recordMod.encodeRecord(
+            .handshake,
+            &message,
+            self.txSeq,
+            self.appKeys.clientKeySlice(),
+            &self.appKeys.clientIv,
+            self.appKeys.cipher,
+        ) catch return error.TlsRecordError;
+        self.socket.writeAll(encoded.bytes[0..encoded.len]) catch return error.IoError;
+        if (!self.appKeys.updateClientTrafficKeys()) return error.SequenceOverflow;
+        self.txSeq = 0;
     }
 };
 
@@ -319,6 +369,10 @@ pub const Client = struct {
         /// Borrowed pre-parsed CA bundle for the standard transport.
         /// The native transport ignores it (it uses PEM trust instead).
         caBundle: ?*std.crypto.Certificate.Bundle = null,
+        /// Lock paired with `caBundle` when the bundle can be shared or
+        /// mutated by another handshake. Omitted bundles inherit the
+        /// owner's lock automatically.
+        caBundleLock: ?*std.Io.RwLock = null,
         clientCertPem: ?[]const u8 = null,
         clientKeyPem: ?[]const u8 = null,
         alpn: ?[]const alpnMod.Protocol = null,
@@ -472,6 +526,8 @@ pub const Client = struct {
     /// exchange. Returns an owned `Connection` borrowing `socket`.
     pub fn connect(self: *Client, socket: *tcp.Socket, host: []const u8, opts: ConnectOptions) !Connection {
         const a = self.allocator;
+        var temporaryStandardTrust: ?trustStoreMod.TrustStore = null;
+        defer if (temporaryStandardTrust) |*store| store.deinit();
         const verify = opts.verify orelse self.config.verify;
         const caPem = opts.caPem orelse self.config.caPem;
         const alpnList = opts.alpn orelse self.config.alpn;
@@ -515,12 +571,32 @@ pub const Client = struct {
             // winsock-variant sockets cannot provide a handle (fail loudly,
             // never crash in netSocketHandle).
             if (socket.inner != .stream) return error.TlsInitializationFailed;
-            const bundle = opts.caBundle;
+            var bundle = opts.caBundle;
+            var bundleLock = opts.caBundleLock;
+            if (verify == .caBundle and bundle == null) {
+                if (verify == self.config.verify and pemEqual(caPem, self.config.caPem)) {
+                    if (self.trust) |*store| {
+                        bundle = &store.bundle;
+                        bundleLock = &store.lock;
+                    }
+                }
+                if (bundle == null) {
+                    temporaryStandardTrust = trustStoreMod.TrustStore.init(a, self.io);
+                    if (caPem) |pem| {
+                        try temporaryStandardTrust.?.addCertPem(pem);
+                    } else {
+                        try temporaryStandardTrust.?.loadSystemTrust();
+                    }
+                    bundle = &temporaryStandardTrust.?.bundle;
+                    bundleLock = &temporaryStandardTrust.?.lock;
+                }
+            }
             const stdConn = try transportMod.Connection.init(a, .{
                 .socketHandle = socket.netSocketHandle(),
                 .host = host,
                 .verify = verify,
                 .caBundle = bundle,
+                .caBundleLock = bundleLock,
                 .allowTruncation = opts.allowTruncation,
                 .io = self.io,
             });
@@ -584,7 +660,7 @@ pub const Client = struct {
         // SNI only for DNS names; IP literals carry none.
         var probe = addressMod.Address{ .family = .ip4, .port = 0 };
         const sni: ?[]const u8 = if (probe.parseIp(host)) |_| null else |_| host;
-        const nowMs: u64 = @intCast(clockMod.millisNow());
+        const nowMs: u64 = @intCast(clockMod.millisNow(self.io));
 
         // ALPN protocols as wire strings (static storage, no allocation).
         var alpnWireBuf: [8][]const u8 = undefined;
@@ -742,6 +818,7 @@ pub const Client = struct {
         return .{
             .socket = socket,
             .allocator = a,
+            .io = self.io,
             .alpn = alpn,
             .appKeys = apKeys,
             .suite = engine.selectedSuite,
@@ -749,6 +826,7 @@ pub const Client = struct {
             .resumptionMaster = resumptionMaster,
             .captureSession = captureSession,
             .sessionHost = hostCopy,
+            .postHandshake = handshakeMod.MessageReassembler.init(a),
             .writeBuf = writeBuf,
             .readBuf = readBufApp,
         };
@@ -777,7 +855,7 @@ pub const Client = struct {
         const a = self.allocator;
         if (ders.len == 0) return error.MissingCertificate;
         const chain = certMod.CertificateChain{ .certs = ders, .allocator = a };
-        const nowSec: i64 = @divFloor(clockMod.millisNow(), 1000);
+        const nowSec: i64 = @divFloor(clockMod.millisNow(self.io), 1000);
         verifyMod.verifyCertificateChain(chain, store, host, nowSec) catch |e| switch (e) {
             error.CertificateExpired => return error.CertificateExpired,
             error.CertificateHostMismatch, error.HostnameMismatch => return error.CertificateHostMismatch,
@@ -1091,7 +1169,98 @@ test "post-handshake NewSessionTicket is discarded when capture is off" {
     try std.testing.expect(result == null);
 }
 
-test "captureTicketRecord handles coalesced tickets, last wins" {
+test "post-handshake KeyUpdate rotates keys in both directions over loopback" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    var server = try serverMod.Server.init(a, ctx.io, .{
+        .certificatePem = testCertPem,
+        .privateKeyPem = testKeyPem,
+    });
+    defer server.deinit();
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io, srv: *serverMod.Server, out: *?anyerror) void {
+            var sock = lst.accept(io2) catch {
+                out.* = error.AcceptFailed;
+                return;
+            };
+            defer sock.close();
+            var conn = srv.accept(&sock) catch |e| {
+                out.* = e;
+                return;
+            };
+            defer conn.deinit();
+
+            // Ask the client to update, then send with our new send keys.
+            conn.sendKeyUpdate(true) catch |e| {
+                out.* = e;
+                return;
+            };
+            conn.writeAll("pong") catch |e| {
+                out.* = e;
+                return;
+            };
+
+            // The client's KeyUpdate answer is consumed transparently before
+            // the application record encrypted under its new keys.
+            var buf: [16]u8 = undefined;
+            const n = conn.read(&buf) catch |e| {
+                out.* = e;
+                return;
+            };
+            if (!std.mem.eql(u8, buf[0..n], "ping")) {
+                out.* = error.BadReply;
+                return;
+            }
+            conn.writeAll("done") catch |e| {
+                out.* = e;
+                return;
+            };
+            out.* = null;
+        }
+    };
+    var result: ?anyerror = error.NotRun;
+    const th = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io, &server, &result });
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", port);
+    errdefer sock.close();
+    var cli = try Client.init(a, ctx.io, .{});
+    defer cli.deinit();
+    var conn = try cli.connect(&sock, "127.0.0.1", .{
+        .verify = .caBundle,
+        .caPem = testCertPem,
+    });
+    defer conn.deinit();
+
+    var pong: [16]u8 = undefined;
+    var got: usize = 0;
+    while (got < "pong".len) {
+        const n = try conn.read(pong[got..]);
+        if (n == 0) break;
+        got += n;
+    }
+    try std.testing.expectEqualStrings("pong", pong[0..got]);
+
+    try conn.writeAll("ping");
+    var done: [16]u8 = undefined;
+    got = 0;
+    while (got < "done".len) {
+        const n = try conn.read(done[got..]);
+        if (n == 0) break;
+        got += n;
+    }
+    try std.testing.expectEqualStrings("done", done[0..got]);
+    sock.close();
+
+    th.join();
+    try std.testing.expect(result == null);
+}
+
+test "processPostHandshakeRecord handles coalesced tickets, last wins" {
     const a = std.testing.allocator;
     const first = handshakeMod.NewSessionTicket{
         .lifetimeSecs = 100,
@@ -1122,16 +1291,18 @@ test "captureTicketRecord handles coalesced tickets, last wins" {
     var conn = NativeConnection{
         .socket = undefined,
         .allocator = a,
+        .io = std.Io.Threaded.global_single_threaded.io(),
         .appKeys = undefined,
         .writeBuf = writeBuf,
         .readBuf = readBuf,
         .resumptionMaster = @as([32]u8, @splat(0x33)),
         .sessionHost = try a.dupe(u8, "example.com"),
         .captureSession = true,
+        .postHandshake = handshakeMod.MessageReassembler.init(a),
     };
     defer conn.deinit();
 
-    try conn.captureTicketRecord(rec.items);
+    try conn.processPostHandshakeRecord(rec.items, rec.items.len);
     var sess = conn.takeCapturedSession().?;
     defer sess.deinit(a);
     // Latest ticket replaces the earlier one.
@@ -1139,20 +1310,27 @@ test "captureTicketRecord handles coalesced tickets, last wins" {
     try std.testing.expectEqual(@as(u32, 200), sess.lifetimeSecs);
 
     // A single ticket still captures.
-    try conn.captureTicketRecord(m1);
+    try conn.processPostHandshakeRecord(m1, m1.len);
     var single = conn.takeCapturedSession().?;
     defer single.deinit(a);
     try std.testing.expectEqualSlices(u8, &@as([8]u8, @splat(0x11)), single.ticket);
 
-    // Empty, truncated, overrunning, and garbage-suffixed records fail loudly.
-    try std.testing.expectError(error.TlsRecordError, conn.captureTicketRecord(&.{}));
-    try std.testing.expectError(error.TlsRecordError, conn.captureTicketRecord(&.{ 4, 0, 0 }));
-    try std.testing.expectError(error.TlsRecordError, conn.captureTicketRecord(&.{ 4, 0, 1, 0 }));
+    // A fragmented handshake frame is retained until its final record.
+    try conn.processPostHandshakeRecord(m1[0..3], 3);
+    try conn.processPostHandshakeRecord(m1[3..], m1.len - 3);
+    var fragmented = conn.takeCapturedSession().?;
+    defer fragmented.deinit(a);
+    try std.testing.expectEqualSlices(u8, &@as([8]u8, @splat(0x11)), fragmented.ticket);
+    try conn.processPostHandshakeRecord(&.{ 4, 0, 1, 0 }, 4);
+    try std.testing.expectEqual(@as(usize, 4), conn.postHandshake.buffer.items.len);
+    conn.postHandshake.reset();
     var dirty = std.ArrayList(u8).empty;
     defer dirty.deinit(a);
     try dirty.appendSlice(a, m1);
     try dirty.append(a, 0xFF);
-    try std.testing.expectError(error.TlsRecordError, conn.captureTicketRecord(dirty.items));
+    try conn.processPostHandshakeRecord(dirty.items, dirty.items.len);
+    try std.testing.expectEqual(@as(usize, 1), conn.postHandshake.buffer.items.len);
+    conn.postHandshake.reset();
 
     // A valid ticket followed by a non-ticket message fails loudly. The
     // valid ticket is still captured (single pass); drain it here.
@@ -1160,7 +1338,7 @@ test "captureTicketRecord handles coalesced tickets, last wins" {
     defer mixed.deinit(a);
     try mixed.appendSlice(a, m1);
     try mixed.appendSlice(a, &.{ 24, 0, 0, 1, 0xAA });
-    try std.testing.expectError(error.TlsRecordError, conn.captureTicketRecord(mixed.items));
+    try std.testing.expectError(error.TlsRecordError, conn.processPostHandshakeRecord(mixed.items, mixed.items.len));
     if (conn.takeCapturedSession()) |s| {
         var leftover = s;
         leftover.deinit(a);
@@ -1168,6 +1346,77 @@ test "captureTicketRecord handles coalesced tickets, last wins" {
 
     // Rejections without any valid ticket leave nothing behind.
     try std.testing.expect(conn.pendingSession == null);
+}
+
+test "post-handshake KeyUpdate must be last and rotates only receive keys" {
+    const a = std.testing.allocator;
+    const keys = engineMod.DerivedKeys{
+        .clientKey = @splat(0x11),
+        .clientIv = @splat(0x22),
+        .serverKey = @splat(0x33),
+        .serverIv = @splat(0x44),
+        .clientTrafficSecret = @splat(0x55),
+        .serverTrafficSecret = @splat(0x66),
+        .cipher = .aes128Gcm,
+        .clientKeyLen = 16,
+        .serverKeyLen = 16,
+    };
+    const oldClientKey = keys.clientKey;
+    const oldClientSecret = keys.clientTrafficSecret;
+    var expectedSecret: [32]u8 = undefined;
+    engineMod.hkdfExpandLabel(keys.serverTrafficSecret, "traffic upd", &expectedSecret);
+    var expectedKey: [32]u8 = undefined;
+    engineMod.hkdfExpandLabel(expectedSecret, "key", expectedKey[0..16]);
+    var expectedIv: [12]u8 = undefined;
+    engineMod.hkdfExpandLabel(expectedSecret, "iv", &expectedIv);
+
+    var conn = NativeConnection{
+        .socket = undefined,
+        .allocator = a,
+        .io = std.Io.Threaded.global_single_threaded.io(),
+        .appKeys = keys,
+        .writeBuf = try a.alloc(u8, 64),
+        .readBuf = try a.alloc(u8, 64),
+        .txSeq = 3,
+        .rxSeq = 9,
+        .postHandshake = handshakeMod.MessageReassembler.init(a),
+    };
+    defer conn.deinit();
+
+    var update: [5]u8 = undefined;
+    (handshakeMod.KeyUpdate{}).encode(&update);
+    try conn.processPostHandshakeRecord(update[0..3], 3);
+    try std.testing.expectError(
+        error.TlsRecordError,
+        conn.processPostHandshakeRecord(&.{ update[3], update[4], 0x16 }, 3),
+    );
+    try std.testing.expectEqual(@as(u64, 0), conn.appKeys.serverEpoch);
+    conn.postHandshake.reset();
+    try conn.processPostHandshakeRecord(&update, update.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.appKeys.serverEpoch);
+    try std.testing.expectEqual(@as(u64, 0), conn.appKeys.clientEpoch);
+    try std.testing.expectEqualSlices(u8, &expectedSecret, &conn.appKeys.serverTrafficSecret);
+    try std.testing.expectEqualSlices(u8, expectedKey[0..16], conn.appKeys.serverKeySlice());
+    try std.testing.expectEqualSlices(u8, &expectedIv, &conn.appKeys.serverIv);
+    try std.testing.expectEqualSlices(u8, &oldClientKey, &conn.appKeys.clientKey);
+    try std.testing.expectEqualSlices(u8, &oldClientSecret, &conn.appKeys.clientTrafficSecret);
+    try std.testing.expectEqual(@as(u64, 0), conn.rxSeq);
+    try std.testing.expectEqual(@as(u64, 3), conn.txSeq);
+
+    // A KeyUpdate with any trailing handshake bytes is invalid and must not
+    // advance the receive epoch.
+    var trailing: [6]u8 = undefined;
+    @memcpy(trailing[0..5], &update);
+    trailing[5] = 0xAA;
+    const epochBefore = conn.appKeys.serverEpoch;
+    const secretBefore = conn.appKeys.serverTrafficSecret;
+    try std.testing.expectError(error.TlsRecordError, conn.processPostHandshakeRecord(&trailing, trailing.len));
+    try std.testing.expectEqual(epochBefore, conn.appKeys.serverEpoch);
+    try std.testing.expectEqualSlices(u8, &secretBefore, &conn.appKeys.serverTrafficSecret);
+
+    // Unknown complete post-handshake messages fail loudly; an empty fragment
+    // is a valid no-op while reassembly waits for the next TLS record.
+    try std.testing.expectError(error.TlsRecordError, conn.processPostHandshakeRecord(&.{ 22, 0, 0, 0 }, 4));
 }
 
 test "tls client retries after hello retry request over loopback" {
@@ -1723,6 +1972,69 @@ test "tls.Client defaults verify and parse trust once" {
     try std.testing.expect(strict.config.verify == .none);
     try std.testing.expect(strict.trust == null);
     try std.testing.expect(strict.config.transport == .auto);
+}
+
+test "standard transport uses the owner's configured CA bundle" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    var server = try serverMod.Server.init(a, ctx.io, .{
+        .certificatePem = testCertPem,
+        .privateKeyPem = testKeyPem,
+    });
+    defer server.deinit();
+
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io: std.Io, srv: *serverMod.Server) void {
+            var sock = lst.accept(io) catch return;
+            defer sock.close();
+            var conn = srv.accept(&sock) catch return;
+            defer conn.deinit();
+            var input: [4]u8 = undefined;
+            var read: usize = 0;
+            while (read < input.len) {
+                const n = conn.read(input[read..]) catch return;
+                if (n == 0) return;
+                read += n;
+            }
+            if (!std.mem.eql(u8, &input, "ping")) return;
+            conn.writeAll("pong") catch {};
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io, &server });
+    defer thread.join();
+
+    var owner = try Client.init(a, ctx.io, .{
+        .verify = .caBundle,
+        .caPem = testCertPem,
+        .alpn = &.{.@"http/1.1"},
+        .transport = .std,
+    });
+    defer owner.deinit();
+
+    var addr = addressMod.Address{ .family = .ip4, .port = 0 };
+    addr = try addr.parseIp("127.0.0.1");
+    addr.port = port;
+    var sock = try tcp.connectAddressStream(ctx.io, &addr);
+    defer sock.close();
+    var conn = try owner.connect(&sock, "localhost", .{});
+    defer conn.deinit();
+    try std.testing.expect(conn.backend == .std);
+
+    try conn.writeAll("ping");
+    var response: [4]u8 = undefined;
+    var received: usize = 0;
+    while (received < response.len) {
+        const n = try conn.read(response[received..]);
+        if (n == 0) return error.UnexpectedEof;
+        received += n;
+    }
+    try std.testing.expectEqualStrings("pong", &response);
 }
 
 test "tls.Client rejects garbage identity at init" {

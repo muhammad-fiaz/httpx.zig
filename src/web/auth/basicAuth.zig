@@ -61,6 +61,9 @@ pub fn encodeHeaderValue(buf: []u8, username: []const u8, password: []const u8) 
 }
 
 /// Constant-time equality for byte slices (length-independent branches).
+///
+/// `std.crypto.timing_safe.eql` only compares fixed-size arrays; credentials
+/// arrive with runtime lengths, so the accumulator loop stays here.
 pub fn ctEql(a: []const u8, b: []const u8) bool {
     if (a.len != b.len) return false;
     var diff: u8 = 0;

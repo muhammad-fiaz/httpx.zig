@@ -7,7 +7,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.ftp.Server.init(allocator, io, .{
+    var server = try httpx.protocols.ftp.Server.init(allocator, io, .{
         .host = "0.0.0.0",
         .port = 0,
         .user = "demo",
@@ -28,7 +28,7 @@ pub fn main() !void {
 
     const ClientThread = struct {
         fn run(serverPort: u16, threadAllocator: std.mem.Allocator) void {
-            var client = httpx.ftp.Client.connect(threadAllocator, .{
+            var client = httpx.protocols.ftp.Client.connect(threadAllocator, .{
                 .host = "127.0.0.1",
                 .port = serverPort,
                 .user = "demo",

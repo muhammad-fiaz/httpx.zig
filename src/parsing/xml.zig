@@ -12,6 +12,56 @@ const ts = @import("treesitter");
 const Tree = dom.Tree;
 const Attribute = dom.Attribute;
 
+/// Decode XML's five predefined entities and numeric character references.
+/// General entities declared in a DTD are intentionally not expanded.
+fn decodeXmlEntities(allocator: Allocator, raw: []const u8) Allocator.Error!?[]const u8 {
+    if (std.mem.indexOfScalar(u8, raw, '&') == null) return raw;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var pos: usize = 0;
+    while (pos < raw.len) {
+        const rel = std.mem.indexOfScalar(u8, raw[pos..], '&') orelse {
+            try out.appendSlice(allocator, raw[pos..]);
+            break;
+        };
+        const start = pos + rel;
+        try out.appendSlice(allocator, raw[pos..start]);
+        const semiRel = std.mem.indexOfScalar(u8, raw[start + 1 ..], ';') orelse return null;
+        const end = start + 1 + semiRel;
+        const name = raw[start + 1 .. end];
+        if (std.mem.eql(u8, name, "amp")) {
+            try out.append(allocator, '&');
+        } else if (std.mem.eql(u8, name, "lt")) {
+            try out.append(allocator, '<');
+        } else if (std.mem.eql(u8, name, "gt")) {
+            try out.append(allocator, '>');
+        } else if (std.mem.eql(u8, name, "apos")) {
+            try out.append(allocator, '\'');
+        } else if (std.mem.eql(u8, name, "quot")) {
+            try out.append(allocator, '"');
+        } else if (name.len >= 2 and name[0] == '#') {
+            const isHex = name.len >= 3 and (name[1] == 'x' or name[1] == 'X');
+            const digits = name[if (isHex) 2 else 1..];
+            const cp = std.fmt.parseInt(u21, digits, if (isHex) 16 else 10) catch return null;
+            if (!isXmlChar(cp)) return null;
+            var encoded: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(cp, &encoded) catch return null;
+            try out.appendSlice(allocator, encoded[0..n]);
+        } else {
+            return null;
+        }
+        pos = end + 1;
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn isXmlChar(cp: u21) bool {
+    return cp == 0x9 or cp == 0xA or cp == 0xD or
+        (cp >= 0x20 and cp <= 0xD7FF) or
+        (cp >= 0xE000 and cp <= 0xFFFD) or
+        (cp >= 0x10000 and cp <= 0x10FFFF);
+}
+
 pub const XmlTree = ts.Tree;
 pub const XmlNode = ts.Node;
 
@@ -363,6 +413,7 @@ pub const ParseError = error{
 
 pub const Options = struct {
     lenient: bool = true,
+    maxInputSize: usize = 64 * 1024 * 1024,
     maxNodes: u32 = dom.MAX_NODES,
     maxDepth: u32 = dom.MAX_DEPTH,
     maxAttrs: u32 = 256,
@@ -370,7 +421,10 @@ pub const Options = struct {
 };
 
 pub fn parse(arena: Allocator, xmlSrc: []const u8, opts: Options) ParseError!Tree {
-    var tree = try Tree.initCapacity(arena, @min(xmlSrc.len / 12 + 4, opts.maxNodes));
+    if (xmlSrc.len > opts.maxInputSize) return error.InputTooLarge;
+    if (opts.maxNodes == 0) return error.TooManyNodes;
+    const capacity = @min(@min(xmlSrc.len / 12 + 4, opts.maxNodes), dom.MAX_NODES);
+    var tree = try Tree.initCapacity(arena, capacity);
     errdefer tree.deinit(arena);
     const root = try tree.append(arena, .{ .kind = .document });
     var p = Parser{
@@ -383,7 +437,10 @@ pub fn parse(arena: Allocator, xmlSrc: []const u8, opts: Options) ParseError!Tre
     var tsTree = try parseXmlTree(arena, xmlSrc);
     defer tsTree.deinit();
     const tokens = try collectXmlTokens(&tsTree, arena);
-    if (tsTree.hasError()) tree.getMut(root).hasError = true;
+    if (tsTree.hasError()) {
+        tree.getMut(root).hasError = true;
+        if (!opts.lenient) return error.MalformedXml;
+    }
     try p.runTokens(tokens);
     return tree;
 }
@@ -400,6 +457,14 @@ const Parser = struct {
             self.openStack.items[self.openStack.items.len - 1]
         else
             0;
+    }
+
+    fn appendNode(self: *Parser, node: dom.Node) ParseError!u32 {
+        if (self.tree.nodes.items.len >= self.opts.maxNodes) return error.TooManyNodes;
+        return self.tree.append(self.arena, node) catch |err| switch (err) {
+            error.TooManyNodes => return error.TooManyNodes,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
     }
 
     fn runTokens(self: *Parser, tokens: []const XmlToken) ParseError!void {
@@ -419,7 +484,7 @@ const Parser = struct {
                         raw[4 .. raw.len - 3]
                     else
                         raw;
-                    const idx = try self.tree.append(self.arena, .{ .kind = .comment, .data = data });
+                    const idx = try self.appendNode(.{ .kind = .comment, .data = data });
                     self.tree.appendChild(self.cur(), idx);
                 },
                 .cdata => {
@@ -428,13 +493,13 @@ const Parser = struct {
                         raw[9 .. raw.len - 3]
                     else
                         raw;
-                    const idx = try self.tree.append(self.arena, .{ .kind = .cdata, .data = data });
+                    const idx = try self.appendNode(.{ .kind = .cdata, .data = data });
                     self.tree.appendChild(self.cur(), idx);
                 },
                 .pi, .doctype => {},
                 .selfcloseTag => {
                     const tag = try self.parseOpenTag(self.src[tok.start..tok.end]);
-                    const nodeIdx = try self.tree.append(self.arena, .{
+                    const nodeIdx = try self.appendNode(.{
                         .kind = .element,
                         .tag = tag.name,
                         .attrs = tag.attrs,
@@ -444,7 +509,7 @@ const Parser = struct {
                 .openTag => {
                     if (self.openStack.items.len >= self.opts.maxDepth) return error.TooDeep;
                     const tag = try self.parseOpenTag(self.src[tok.start..tok.end]);
-                    const nodeIdx = try self.tree.append(self.arena, .{
+                    const nodeIdx = try self.appendNode(.{
                         .kind = .element,
                         .tag = tag.name,
                         .attrs = tag.attrs,
@@ -467,12 +532,40 @@ const Parser = struct {
             try self.appendText(self.src[covered..]);
         }
         if (self.openStack.items.len > 1 and !self.opts.lenient) return error.MalformedXml;
+        var rootElements: usize = 0;
+        var childIdx = self.tree.get(0).firstChild;
+        var invalidDocumentContent = false;
+        while (childIdx != dom.NO_NODE) {
+            const child = self.tree.get(childIdx);
+            switch (child.kind) {
+                .element => rootElements += 1,
+                .text => if (std.mem.trim(u8, child.data, " \t\r\n").len != 0) {
+                    invalidDocumentContent = true;
+                },
+                .cdata => invalidDocumentContent = true,
+                else => {},
+            }
+            childIdx = child.nextSibling;
+        }
+        if (rootElements != 1 or invalidDocumentContent) {
+            if (!self.opts.lenient) return error.MalformedXml;
+            self.tree.getMut(0).hasError = true;
+        }
     }
 
     fn appendText(self: *Parser, raw: []const u8) ParseError!void {
         if (raw.len == 0) return;
-        const idx = try self.tree.append(self.arena, .{ .kind = .text, .data = raw });
+        const value = try self.decodeValue(raw);
+        const idx = try self.appendNode(.{ .kind = .text, .data = value });
         self.tree.appendChild(self.cur(), idx);
+    }
+
+    fn decodeValue(self: *Parser, raw: []const u8) ParseError![]const u8 {
+        const decoded = decodeXmlEntities(self.arena, raw) catch return error.OutOfMemory;
+        if (decoded) |value| return value;
+        if (!self.opts.lenient) return error.MalformedXml;
+        self.tree.getMut(0).hasError = true;
+        return raw;
     }
 
     const OpenTag = struct {
@@ -487,8 +580,9 @@ const Parser = struct {
         var attrs: std.ArrayList(Attribute) = .empty;
         defer attrs.deinit(self.arena);
         var selfClosing = false;
-        _ = try parseAttrs(self.arena, slice, nameEnd, &attrs, &selfClosing, self.opts.maxAttrValue);
+        _ = try parseAttrs(self.arena, slice, nameEnd, &attrs, &selfClosing, self.opts.maxAttrValue, self.opts.maxAttrs);
         if (attrs.items.len > self.opts.maxAttrs) return error.TooManyAttributes;
+        for (attrs.items) |*attr| attr.value = try self.decodeValue(attr.value);
         return .{ .name = name, .attrs = try attrs.toOwnedSlice(self.arena) };
     }
 
@@ -530,12 +624,93 @@ test "xml preserves namespaces and cdata via syntax tree" {
     try std.testing.expect(foundCdata);
 }
 
+test "xml decodes predefined and numeric entities in text and attributes" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const tree = try parse(arena.allocator(), "<r a=\"&lt;&amp;&#x1F600;\">Tom &amp; &#65; &apos;x&apos;</r>", .{ .lenient = false });
+    const element = tree.get(tree.get(0).firstChild);
+    try std.testing.expectEqualStrings("<&😀", element.attr("a").?);
+    const text = tree.get(element.firstChild);
+    try std.testing.expectEqualStrings("Tom & A 'x'", text.data);
+}
+
+test "xml rejects invalid or undeclared entities in strict mode" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expectError(error.MalformedXml, parse(arena.allocator(), "<r>&#0;</r>", .{ .lenient = false }));
+
+    var arena2 = std.heap.ArenaAllocator.init(a);
+    defer arena2.deinit();
+    try std.testing.expectError(error.MalformedXml, parse(arena2.allocator(), "<r>&custom;</r>", .{ .lenient = false }));
+}
+
 test "xml strict mode rejects mismatched tags" {
     const a = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const res = parse(arena.allocator(), "<a><b></a></b>", .{ .lenient = false });
     try std.testing.expectError(error.MalformedXml, res);
+
+    var arena2 = std.heap.ArenaAllocator.init(a);
+    defer arena2.deinit();
+    try std.testing.expectError(error.MalformedXml, parse(arena2.allocator(), "<a", .{ .lenient = false }));
+
+    var arena3 = std.heap.ArenaAllocator.init(a);
+    defer arena3.deinit();
+    try std.testing.expectError(error.MalformedXml, parse(arena3.allocator(), "<a><!-- unclosed", .{ .lenient = false }));
+
+    var arena4 = std.heap.ArenaAllocator.init(a);
+    defer arena4.deinit();
+    try std.testing.expectError(error.MalformedXml, parse(arena4.allocator(), "<a><![CDATA[unclosed</a>", .{ .lenient = false }));
+}
+
+test "xml parser enforces configured node limit" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expectError(error.TooManyNodes, parse(arena.allocator(), "<a>x</a>", .{ .maxNodes = 2 }));
+
+    var arena2 = std.heap.ArenaAllocator.init(a);
+    defer arena2.deinit();
+    const tree = try parse(arena2.allocator(), "<a>x</a>", .{ .maxNodes = 3 });
+    try std.testing.expectEqual(@as(u32, 3), tree.len());
+
+    var arena3 = std.heap.ArenaAllocator.init(a);
+    defer arena3.deinit();
+    try std.testing.expectError(error.TooManyAttributes, parse(arena3.allocator(), "<a x=\"1\" y=\"2\"/>", .{ .maxAttrs = 1 }));
+}
+
+test "xml parser enforces configured input size before parsing" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expectError(error.InputTooLarge, parse(arena.allocator(), "<root/>", .{ .maxInputSize = 6 }));
+
+    var arena2 = std.heap.ArenaAllocator.init(a);
+    defer arena2.deinit();
+    const tree = try parse(arena2.allocator(), "<root/>", .{ .maxInputSize = 7 });
+    try std.testing.expectEqual(@as(u32, 2), tree.len());
+}
+
+test "xml strict mode requires one document element and whitespace outside it" {
+    const a = std.testing.allocator;
+    var validArena = std.heap.ArenaAllocator.init(a);
+    defer validArena.deinit();
+    _ = try parse(validArena.allocator(), "<!--before--><root/> \n<!--after-->", .{ .lenient = false });
+
+    var twoRootsArena = std.heap.ArenaAllocator.init(a);
+    defer twoRootsArena.deinit();
+    try std.testing.expectError(error.MalformedXml, parse(twoRootsArena.allocator(), "<a/><b/>", .{ .lenient = false }));
+
+    var textArena = std.heap.ArenaAllocator.init(a);
+    defer textArena.deinit();
+    try std.testing.expectError(error.MalformedXml, parse(textArena.allocator(), "outside<root/>", .{ .lenient = false }));
+
+    var cdataArena = std.heap.ArenaAllocator.init(a);
+    defer cdataArena.deinit();
+    try std.testing.expectError(error.MalformedXml, parse(cdataArena.allocator(), "<![CDATA[x]]><root/>", .{ .lenient = false }));
 }
 
 fn parseAttrs(
@@ -545,6 +720,7 @@ fn parseAttrs(
     attrs: *std.ArrayList(Attribute),
     selfClosing: *bool,
     maxVal: usize,
+    maxAttrs: u32,
 ) ParseError!usize {
     var i = start;
     while (i < src.len) {
@@ -572,6 +748,7 @@ fn parseAttrs(
 
         while (i < src.len and (src[i] == ' ' or src[i] == '\t')) : (i += 1) {}
         if (i >= src.len or src[i] != '=') {
+            if (attrs.items.len >= maxAttrs) return error.TooManyAttributes;
             try attrs.append(arena, .{ .name = attrName, .value = "" });
             continue;
         }
@@ -592,6 +769,7 @@ fn parseAttrs(
             val = src[vs..i];
         }
         if (val.len > maxVal) return error.InputTooLarge;
+        if (attrs.items.len >= maxAttrs) return error.TooManyAttributes;
         try attrs.append(arena, .{ .name = attrName, .value = val });
     }
     return i;

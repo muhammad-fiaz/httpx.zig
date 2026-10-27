@@ -49,19 +49,19 @@ pub fn main() !void {
     std.debug.print("Cookie server verification completed successfully.\n", .{});
 }
 
-fn setCookieHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn setCookieHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const name = ctx.queryParam("name") orelse "guest";
     _ = name;
     return .{ .status = 200, .body = "{\"message\":\"Cookie set\"}", .contentType = "application/json" };
 }
 
-fn getCookieHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn getCookieHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const username = ctx.cookie("username") orelse "anonymous";
     _ = username;
     return .{ .status = 200, .body = "{\"username\":\"anonymous\"}", .contentType = "application/json" };
 }
 
-fn clearCookieHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn clearCookieHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = "{\"message\":\"Cookie cleared\"}", .contentType = "application/json" };
 }
 ```

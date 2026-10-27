@@ -26,7 +26,7 @@ RFC 4217 defines secure FTP extensions via the `AUTH TLS` command, securing auth
 ## Client Usage
 
 ```zig
-var client = httpx.ftp.Client.init(allocator, io, .{
+var client = httpx.protocols.ftp.Client.init(allocator, io, .{
     .host = "secure.ftp.org",
     .port = 21,
     .user = "user",

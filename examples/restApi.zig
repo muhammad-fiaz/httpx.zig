@@ -21,7 +21,7 @@ const MessageResponse = struct {
 };
 
 fn createUser(
-    _: *httpx.Context,
+    _: *httpx.router.Context,
     request: CreateUserRequest,
 ) !httpx.ApiResult(UserResponse) {
     return httpx.ApiResult(UserResponse).created(.{
@@ -32,7 +32,7 @@ fn createUser(
 }
 
 fn getUser(
-    ctx: *httpx.Context,
+    ctx: *httpx.router.Context,
 ) !httpx.ApiResult(UserResponse) {
     const id = ctx.paramUint("id") orelse 1;
     return httpx.ApiResult(UserResponse).ok(.{
@@ -43,7 +43,7 @@ fn getUser(
 }
 
 fn ping(
-    _: *httpx.Context,
+    _: *httpx.router.Context,
 ) !httpx.ApiResult(MessageResponse) {
     return httpx.ApiResult(MessageResponse).ok(.{
         .message = "pong",

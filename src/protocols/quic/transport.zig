@@ -5,10 +5,11 @@
 //! binds one UDP socket; `pump()` drains the socket into the connection
 //! and flushes queued output datagrams to the last peer address seen.
 //!
-//! Scope note (honest): Initial-space packets are fully specified here —
-//! their keys derive from the DCID alone (RFC 9001 section 5.2), so endpoints can
-//! exchange protected Initial traffic without the TLS 1.3 driver. The
-//! full handshake driver remains the open item tracked separately.
+//! Initial-space packets derive their keys from the DCID (RFC 9001 section
+//! 5.2). The TLS 1.3 handshake lives in `handshake.zig`; ACK tracking,
+//! PTO/loss recovery, NewReno congestion control, Retry, and version
+//! negotiation live in `connection.zig`. This adapter only owns the UDP
+//! socket and the pump. Connection migration is not implemented.
 //!
 //! References:
 //!   - RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport
@@ -83,16 +84,16 @@ pub const Pump = struct {
     /// field is never shared across threads. Polls at ~1ms granularity;
     /// never blocks past the deadline.
     pub fn next(self: *Pump, deadlineMs: u64) !?Deliverable {
-        const t0: u64 = @intCast(clockMod.millisNow());
+        const t0: u64 = @intCast(clockMod.monotonicMillis(self.ep.io));
         while (true) {
             if (self.dead.load(.acquire)) return error.PumpStopped;
             self.mu.lock();
-            const item = self.queue.pop();
+            const item = if (self.queue.items.len > 0) self.queue.orderedRemove(0) else null;
             self.mu.unlock();
             if (item) |q| return .{ .data = q.data, .from = q.from };
-            const now: u64 = @intCast(clockMod.millisNow());
+            const now: u64 = @intCast(clockMod.monotonicMillis(self.ep.io));
             if (now -| t0 >= deadlineMs) return null;
-            clockMod.sleepMillis(1);
+            clockMod.sleepMillis(self.ep.io, 1);
         }
     }
 
@@ -134,11 +135,11 @@ pub const Pump = struct {
                 // Socket closed (stop) or ICMP/transport noise: back off
                 // briefly, then re-check the flag. Never hot-spins: a
                 // persistently failing socket still yields the CPU.
-                clockMod.sleepMillis(1);
+                clockMod.sleepMillis(self.ep.io, 1);
                 continue;
             };
             const owned = self.allocator.dupe(u8, rx.data) catch {
-                clockMod.sleepMillis(1);
+                clockMod.sleepMillis(self.ep.io, 1);
                 continue;
             };
             self.mu.lock();
@@ -219,23 +220,99 @@ pub const Endpoint = struct {
     /// Flushes all currently queued connection output to the peer.
     /// Requires a known destination: either `peer` from prior traffic or
     /// an explicit `dest` for the first flight (client role).
+    ///
+    /// Packets are coalesced into datagrams, never split: a QUIC datagram
+    /// carries whole packets only (RFC 9000 Section 12.2), and cutting a
+    /// packet in half produces a datagram the peer must discard. Only
+    /// long-header packets may be coalesced: a short-header (1-RTT)
+    /// packet has no Length field, so it must be the last packet in the
+    /// datagram (same section).
     pub fn flush(self: *Endpoint, dest: ?std.Io.net.IpAddress) !usize {
         const d = dest orelse self.peer orelse return error.NoRoute;
         var sent: usize = 0;
         while (self.conn.outbuf.items.len > 0) {
-            const take = @min(MAX_DATAGRAM, self.conn.outbuf.items.len);
+            const take = self.nextDatagramSize();
             try self.sock.sendTo(&d, self.conn.outbuf.items[0..take]);
             self.conn.outbuf.replaceRange(self.conn.allocator, 0, take, &.{}) catch
                 return error.OutOfMemory;
+            self.dropSentPackets(take);
             sent += take;
-            // A coalesced burst beyond one datagram needs explicit pacing;
-            // this adapter intentionally stays simple and returns after
-            // draining what fits without blocking.
             if (self.conn.outbuf.items.len == 0) break;
         }
         return sent;
     }
+
+    /// Size of the next datagram: as many queued packets as fit into one
+    /// datagram, but never less than a single whole packet. Stops after a
+    /// short-header packet, which must be the last one in a datagram
+    /// because it carries no Length field (RFC 9000 Section 12.2).
+    fn nextDatagramSize(self: *Endpoint) usize {
+        const peer_max = if (self.conn.peerParams) |p| p.maxUdpPayloadSize else MAX_DATAGRAM;
+        const limit = @min(@min(MAX_DATAGRAM, peer_max), self.conn.outbuf.items.len);
+        return datagramBytes(self.conn.outPacketLengths(), self.conn.outPacketChainableFlags(), limit);
+    }
+
+    /// Drops the packet bookkeeping for the bytes that were just sent.
+    fn dropSentPackets(self: *Endpoint, sent: usize) void {
+        const lengths = self.conn.outPacketLengths();
+        var remaining = sent;
+        var count: usize = 0;
+        for (lengths) |len| {
+            if (remaining < len) break;
+            remaining -= len;
+            count += 1;
+        }
+        if (count == 0) return;
+        self.conn.dropOutPackets(count);
+    }
 };
+
+/// Bytes of the next datagram: coalesce whole queued packets while they
+/// fit and while the current packet may be followed. A short-header
+/// packet reports `chainable = false` and ends the datagram; when the
+/// flags are missing the splitter sends one packet per datagram rather
+/// than risk an unparseable coalescing (RFC 9000 Section 12.2).
+fn datagramBytes(lengths: []const u32, chainable: []const bool, limit: usize) usize {
+    var total: usize = 0;
+    var count: usize = 0;
+    for (lengths, 0..) |len, i| {
+        if (total + len > limit) break;
+        total += len;
+        count += 1;
+        if (i >= chainable.len or !chainable[i]) break;
+    }
+    if (count == 0) {
+        // The first packet does not fit the datagram limit (or the
+        // boundary information is missing): send that packet on its own
+        // rather than splitting it across datagrams.
+        if (lengths.len > 0) return lengths[0];
+        return limit;
+    }
+    return total;
+}
+
+test "quic datagram splitter never coalesces packets after a short header" {
+    const long_then_short = [_]u32{ 61, 57 };
+    const long_flags = [_]bool{ true, false };
+    try std.testing.expectEqual(@as(usize, 118), datagramBytes(&long_then_short, &long_flags, 1200));
+
+    const three_short = [_]u32{ 61, 57, 57 };
+    const short_flags = [_]bool{ false, false, false };
+    try std.testing.expectEqual(@as(usize, 61), datagramBytes(&three_short, &short_flags, 1200));
+
+    const two_short = [_]u32{ 57, 57 };
+    const two_short_flags = [_]bool{ false, false };
+    try std.testing.expectEqual(@as(usize, 57), datagramBytes(&two_short, &two_short_flags, 1200));
+
+    // Long headers may still share a datagram when they fit together.
+    const two_long = [_]u32{ 1201, 694 };
+    const two_long_flags = [_]bool{ true, true };
+    try std.testing.expectEqual(@as(usize, 1201), datagramBytes(&two_long, &two_long_flags, 1500));
+    try std.testing.expectEqual(@as(usize, 1895), datagramBytes(&two_long, &two_long_flags, 2000));
+
+    // Missing flags: one packet per datagram (no unsafe coalescing).
+    try std.testing.expectEqual(@as(usize, 61), datagramBytes(&long_then_short, &.{}, 1200));
+}
 
 test "quic pump rejects a duplicate start without losing its reader" {
     const a = std.testing.allocator;
@@ -309,4 +386,52 @@ test "quic endpoints exchange protected initial packets over real udp" {
     _ = try se.flush(null);
     const gotBack = try ce.pumpIn(1, 200);
     try std.testing.expect(gotBack >= 1);
+}
+
+test "coalesced packets are never split across datagrams" {
+    // A QUIC datagram carries whole packets only (RFC 9000 Section 12.2).
+    // Splitting a packet in half makes the peer discard the datagram.
+    const a = std.testing.allocator;
+    var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var client = try connMod.Connection.init(a, ctx.io, .client, .{});
+    defer client.deinit();
+    var server = try connMod.Connection.init(a, ctx.io, .server, .{});
+    defer server.deinit();
+
+    var clientEp = try Endpoint.init(a, ctx.io, client, .{});
+    defer clientEp.deinit();
+    var serverEp = try Endpoint.init(a, ctx.io, server, .{});
+    defer serverEp.deinit();
+
+    try client.installInitialKeys();
+    try server.acceptInitial(client.dcid[0..client.dcidLen]);
+
+    const PingC = struct {
+        fn build(gpa: Allocator, payload: *std.ArrayList(u8)) connMod.Error!void {
+            @import("../quic/frames.zig").encode(payload, gpa, .ping) catch
+                return connMod.Error.OutOfMemory;
+        }
+    };
+
+    // Two packets in the output buffer: the flush must send them as two
+    // datagrams, not as one datagram with a truncated second packet.
+    try client.sendFrames(.initial, PingC.build, 50);
+    try client.sendFrames(.initial, PingC.build, 51);
+    try std.testing.expectEqual(@as(usize, 2), client.outPackets.items.len);
+
+    const dest = std.Io.net.IpAddress.parseIp4("127.0.0.1", serverEp.localPort()) catch unreachable;
+    const sent = try clientEp.flush(dest);
+    try std.testing.expect(sent > 0);
+
+    // The server must see two datagrams, each carrying a complete packet.
+    var buf: [1500]u8 = undefined;
+    var received: usize = 0;
+    while (received < 2) {
+        const rx = serverEp.sock.receive(&buf) catch break;
+        try server.receiveDatagram(rx.data, 60);
+        received += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), received);
 }

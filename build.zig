@@ -1,6 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+// Each httpx-rooted compile can use over 1 GiB. Give the build runner a
+// conservative upper bound so it schedules fewer examples concurrently.
+const compileStepMaxRss = 4 * 1024 * 1024 * 1024;
+
 fn linkPlatformLibs(compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget) void {
     compile.root_module.link_libc = true;
     if (target.result.os.tag == .windows) {
@@ -129,6 +133,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const regexDep = b.dependency("regex", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // tint is a direct dependency of httpx (terminal colors in logging,
     // download progress), independent of loaders. It must be resolved with
     // the same empty options loaders itself uses (`b.dependency("tint",
@@ -152,6 +161,7 @@ pub fn build(b: *std.Build) void {
     httpxModule.addImport("loaders", loadersDep.module("loaders"));
     httpxModule.addImport("treesitter", treesitterDep.module("treesitter"));
     httpxModule.addImport("tint", tintDep.module("tint"));
+    httpxModule.addImport("regex", regexDep.module("regex"));
 
     const examples = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "simple-get", .path = "examples/simpleGet.zig" },
@@ -240,7 +250,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "template-inheritance", .path = "examples/web/templates/inheritance/main.zig" },
         .{ .name = "template-loops", .path = "examples/web/templates/loops/main.zig" },
         .{ .name = "template-includes", .path = "examples/web/templates/includes/main.zig" },
-        .{ .name = "template-live-reload", .path = "examples/web/templates/live_reload/main.zig" },
+        .{ .name = "template-live-reload", .path = "examples/web/templates/liveReload/main.zig" },
         .{ .name = "template-jinja", .path = "examples/web/templates/jinja/main.zig" },
         .{ .name = "website", .path = "examples/website/main.zig" },
     };
@@ -251,6 +261,7 @@ pub fn build(b: *std.Build) void {
     inline for (examples) |example| {
         const exe = b.addExecutable(.{
             .name = example.name,
+            .max_rss = compileStepMaxRss,
             .root_module = b.createModule(.{
                 .root_source_file = b.path(example.path),
                 .target = target,
@@ -278,12 +289,15 @@ pub fn build(b: *std.Build) void {
         runAllExamples.dependOn(&runExe.step);
     }
 
+    const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
     const tests = b.addTest(.{
+        .max_rss = compileStepMaxRss,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/httpx.zig"),
             .target = target,
             .optimize = optimize,
         }),
+        .filters = if (test_filter) |f| &.{f} else &.{},
     });
     tests.root_module.addImport("zstd", zstdDep.module("zstd"));
     tests.root_module.addImport("brotli", brotliDep.module("brotli"));
@@ -291,6 +305,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("loaders", loadersDep.module("loaders"));
     tests.root_module.addImport("treesitter", treesitterDep.module("treesitter"));
     tests.root_module.addImport("tint", tintDep.module("tint"));
+    tests.root_module.addImport("regex", regexDep.module("regex"));
     linkPlatformLibs(tests, target);
 
     const runTests = b.addRunArtifact(tests);
@@ -307,6 +322,7 @@ pub fn build(b: *std.Build) void {
 
     const benchExe = b.addExecutable(.{
         .name = "benchmark",
+        .max_rss = compileStepMaxRss,
         .root_module = b.createModule(.{
             .root_source_file = b.path("bench/main.zig"),
             .target = target,
@@ -317,6 +333,8 @@ pub fn build(b: *std.Build) void {
     linkPlatformLibs(benchExe, target);
 
     const installBench = b.addInstallArtifact(benchExe, .{});
+    const buildBench = b.step("build-bench", "Build the benchmark executable without running it");
+    buildBench.dependOn(&installBench.step);
     const runBench = b.addRunArtifact(benchExe);
     runBench.step.dependOn(&installBench.step);
 
@@ -334,10 +352,12 @@ pub fn build(b: *std.Build) void {
     librootModule.addImport("loaders", loadersDep.module("loaders"));
     librootModule.addImport("treesitter", treesitterDep.module("treesitter"));
     librootModule.addImport("tint", tintDep.module("tint"));
+    librootModule.addImport("regex", regexDep.module("regex"));
 
     const lib = b.addLibrary(.{
         .name = "httpx",
         .linkage = .static,
+        .max_rss = compileStepMaxRss,
         .root_module = librootModule,
     });
     linkPlatformLibs(lib, target);

@@ -9,7 +9,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "hello, world!",
@@ -17,7 +17,7 @@ fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn jsonHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn jsonHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"ok\":true}",
@@ -25,7 +25,7 @@ fn jsonHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn notFoundHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn notFoundHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 404, .body = "not found" };
 }
 

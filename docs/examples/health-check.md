@@ -15,7 +15,7 @@ Demonstrates healthCheck.zig using the canonical HTTPX API.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn healthzHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn healthzHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = httpx.health.Status.healthy.httpStatus(),
         .body = httpx.health.Status.healthy.jsonBody(),
@@ -23,7 +23,7 @@ fn healthzHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn readyzHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn readyzHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = httpx.health.Status.ready.httpStatus(),
         .body = httpx.health.Status.ready.jsonBody(),

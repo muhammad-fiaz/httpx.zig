@@ -3,11 +3,11 @@
 HTTPX provides high-performance, structured HTML and XML document parsing, DOM manipulation, and CSS selector inspection.
 
 > [!NOTE]
-> HTTPX parses HTML/XML with its native DOM engine (`parsing/html.zig`, `parsing/xml.zig`); Tree-sitter is used for the JSON Feed syntax layer, the template syntax layer, plus the shared incremental-edit vocabulary (`Point`/`SourceRange`/`TextEdit`). Applications normally interact only with HTTPX's HTML/document APIs (`httpx.Parser`, `response.html()`, `doc.select()`). Applications do not need to install or import Tree-sitter directly.
+> HTTPX parses HTML/XML with its bundled DOM engine, built on Tree-sitter grammars in `parsing/html.zig` and `parsing/xml.zig`. Tree-sitter also backs the JSON Feed syntax layer, the template syntax layer, and the shared incremental-edit vocabulary (`Point`/`SourceRange`/`TextEdit`). Applications normally interact only with HTTPX's HTML/document APIs (`httpx.parsing.Parser`, `response.html()`, `doc.select()`). Applications do not need to install or import Tree-sitter directly.
 
 ## Parsing Documents
 
-Parse HTML directly from an HTTP response or from a string using `httpx.Parser`:
+Parse HTML directly from an HTTP response or from a string using `httpx.parsing.Parser`:
 
 ```zig
 const std = @import("std");
@@ -31,7 +31,7 @@ pub fn main() !void {
         \\</html>
     ;
 
-    var parser = httpx.Parser.init(allocator, .{});
+    var parser = httpx.parsing.Parser.init(allocator, .{});
     var doc = try parser.parseHtml(html_content);
     defer doc.deinit();
 
@@ -40,15 +40,19 @@ pub fn main() !void {
     std.debug.print("Title: {s}\n", .{title});
 
     // CSS Selector query
-    const headers = try doc.select("#header");
-    defer allocator.free(headers);
-    for (headers) |h| {
-        std.debug.print("Header text: {s}\n", .{h.text()});
+    var headers = try doc.select("#header");
+    defer headers.deinit();
+    var i: usize = 0;
+    while (i < headers.len()) : (i += 1) {
+        const h = headers.get(i).?;
+        std.debug.print("Header text: {s}\n", .{try h.text()});
     }
 
-    const links = try doc.select("a.link");
-    defer allocator.free(links);
-    for (links) |l| {
+    var links = try doc.select("a.link");
+    defer links.deinit();
+    var j: usize = 0;
+    while (j < links.len()) : (j += 1) {
+        const l = links.get(j).?;
         std.debug.print("Href: {s}\n", .{l.attr("href") orelse ""});
     }
 }

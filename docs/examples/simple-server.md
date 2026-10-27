@@ -8,7 +8,7 @@ Start a minimal server with plain-text and JSON routes.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "hello, world!",
@@ -16,7 +16,7 @@ fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn jsonHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn jsonHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"ok\":true}",

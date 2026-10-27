@@ -2,6 +2,8 @@
 
 Demonstrates ftpServer.zig using the canonical HTTPX API.
 
+Server uploads are limited to 16 MiB by default; set `Config.maxUploadSize` to an application-appropriate bound. Active FTP (`PORT`/`EPRT`) is disabled by default because it asks the server to connect to a client-selected address. Set `allowActiveMode = true` only when that behavior is appropriate for the deployment. Passive mode remains available.
+
 ## Complete Example
 
 ```zig
@@ -14,7 +16,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.ftp.Server.init(allocator, io, .{
+    var server = try httpx.protocols.ftp.Server.init(allocator, io, .{
         .host = "0.0.0.0",
         .port = 0,
         .user = "demo",
@@ -35,7 +37,7 @@ pub fn main() !void {
 
     const ClientThread = struct {
         fn run(serverPort: u16, threadAllocator: std.mem.Allocator) void {
-            var client = httpx.ftp.Client.connect(threadAllocator, .{
+            var client = httpx.protocols.ftp.Client.connect(threadAllocator, .{
                 .host = "127.0.0.1",
                 .port = serverPort,
                 .user = "demo",

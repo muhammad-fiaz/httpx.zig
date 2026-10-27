@@ -79,6 +79,7 @@ pub const Engine = struct {
                 .maxTemplates = config.maxTemplates,
             }),
             .renderer = rendererMod.Renderer{
+                .io = io,
                 .options = .{
                     .maxIncludeDepth = config.maxIncludeDepth,
                     .maxInheritanceDepth = config.maxInheritanceDepth,

@@ -23,15 +23,15 @@ hero:
 
 features:
   - title: All HTTP Versions
-    details: Full HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 client/server runtime support, plus full protocol primitives.
+    details: HTTP/1.0, HTTP/1.1, and HTTP/2 runtimes; HTTP/3 client/server runtime over QUIC with loss recovery, NewReno congestion control, flow control, and 0-RTT resumption.
   - title: Robust Client
-    details: Connection pooling, automatic retries, interceptors, typed API, and default-safe chainable config/option overrides.
+    details: Connection pooling, automatic retries, a typed API, and default-safe chainable config/option overrides.
   - title: Powerful Server
     details: Pattern-based routing, middleware support, context-based handling, ETag-aware static file helpers, and explicit port conflict startup strategies.
   - title: Concurrent
     details: Async task executor and parallel request patterns (all, any, race).
   - title: TLS Security
-    details: Secure connections with TLS 1.2/1.3, custom CAs, and verification policies.
+    details: Native TLS 1.3 server and client paths, TLS 1.2 client interoperability, custom CAs, and verification policies.
   - title: Low-level Control
     details: Direct access to sockets, buffers, protocol parsers, and HPACK/QPACK compression.
   - title: MIME Ready
@@ -40,7 +40,7 @@ features:
 
 ## Latest Benchmark Snapshot
 
-Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-09, httpx v0.2.2, Zig 0.17.0).
+Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-09, httpx v0.2.3, Zig 0.17.0).
 
 | Benchmark | Category | Avg Latency | Throughput | Target |
 | :--- | :--- | :---: | :---: | :---: |
@@ -96,20 +96,20 @@ Detailed methodology and analysis: [Benchmarks Reference](/reference/benchmarks)
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.2)**
+**Latest Release (v0.2.3)**
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
+```
+
+**Previous Release (v0.2.2)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz
 ```
 
-**Previous Release (v0.2.1)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
-```
-
 > [!WARNING]
-> Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.2**.
+> Zig **0.17** is required by **v0.2.3**. Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.3**.
 
 ### Method 2: Zig Fetch (Latest Development Build)
 
@@ -124,7 +124,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz",
     .hash = "<actual-hash-generated-by-zig-fetch>", // Run `zig fetch --save <url>` to generate the hash.
   },
 },
@@ -156,12 +156,12 @@ httpx.zig is built with production-readiness as a core goal. It is still a relat
 For full setup details, including local path dependencies and `build.zig` wiring, see `/guide/installation`.
 
 ::: warning Custom HTTP/2, HTTP/3, and TLS Implementation
-Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN support. **httpx.zig implements these protocols entirely from scratch**, including:
-- **TLS 1.2 and 1.3** with full handshake support (RFC 5246 / RFC 8446) — key exchange: X25519 (TLS 1.2/1.3); AEAD cipher suites: ChaCha20-Poly1305, AES-128-GCM, AES-256-GCM; ALPN negotiation (RFC 7301) for automatic HTTP/2 and HTTP/3 protocol selection with HTTP/1.1 fallback; handshake message encryption (TLS 1.3); X.509 certificate parsing and verification (client-side); custom record-layer encryption/decryption
+Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or an ALPN hook. **httpx.zig implements these protocols entirely from scratch**, including:
+- **TLS 1.3** native server and client handshakes (RFC 8446) with X25519 (including hybrid X25519MLKEM768), AEAD record protection (ChaCha20-Poly1305, AES-128-GCM, AES-256-GCM), ALPN negotiation (RFC 7301), X.509 parsing and verification, mutual TLS, session resumption, HelloRetryRequest, and opt-in 0-RTT. TLS 1.2 is available through the `std.crypto.tls` HTTPS/1.1 client transport.
 - **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
-- **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and connection pooling (RFC 7540)
+- **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and connection pooling (RFC 9113)
 - **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
-- **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, version negotiation, and transport parameters
+- **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, ACK/loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, and RFC 9001 handshake confirmation/key discard
 - **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling
 - **Interop note:** strict TLS-in-QUIC server negotiation expectations may vary by endpoint deployment
 :::
@@ -173,7 +173,7 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or TLS/ALPN suppor
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
 | HTTP/2 | ✅ Full | TCP/TLS | Client + server runtime (ALPN `h2` / h2c) plus framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Full | QUIC/TLS | Client + server runtime (ALPN `h3` over QUIC) plus QPACK/QUIC primitives |
+| HTTP/3 | ✅ Reliable paths | QUIC/TLS | Client + server runtime (ALPN `h3`) with loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, RFC 9001 handshake confirmation/key discard, Retry/token validation, v1/v2 version negotiation, key updates, and connection pooling for sequential reuse; no HelloRetryRequest, migration, server push, or datagrams |
 
 ## Platform Support
 
@@ -199,7 +199,7 @@ for the full list), including:
 - `simpleServer.zig`: basic HTTP server
 - `simpleGet.zig`: basic HTTP client GET
 - `fullIntegration.zig`: end-to-end client + server lifecycle
-- `websocketServer.zig`: WebSocket handshake and frames
+- `websocketServer.zig`: WebSocket handshake response
 - `sseServer.zig`: Server-Sent Events
 - `multipart.zig`: multipart/form-data uploads
 - `metricsServer.zig`: Prometheus exposition and snapshots
@@ -220,7 +220,7 @@ for the full list), including:
 
 ## Configuration
 
-Client configuration lives on `ClientConfig` (timeouts, redirects, retries, TLS verification, keep-alive/pooling).
+Client configuration is passed to `Client.init` (timeouts, redirects, retries, TLS verification, keep-alive/pooling).
 
 For a full explicit export map (root aliases + API groups), see [API Overview](/api/).
 

@@ -73,6 +73,10 @@ pub const Frame = union(enum) {
     stream: struct {
         id: u64,
         offset: u64,
+        /// True when the frame carried the OFF bit. RFC 9000 Section 19.8:
+        /// a STREAM frame without OFF uses the stream's current offset, so
+        /// the receiver substitutes it; the wire offset alone is not enough.
+        offPresent: bool = false,
         data: []const u8,
         fin: bool,
     },
@@ -155,11 +159,13 @@ pub fn decode(data: []const u8, pos: *usize) Error!Frame {
             pos.* += 1;
             const largest = try dv(data, pos);
             const delay = try dv(data, pos);
+            // RFC 9000 Section 19.3: the ACK Range Count comes before the
+            // First ACK Range.
+            const rangeCountRaw = try dv(data, pos);
             const firstRange = try dv(data, pos);
             // Validate: first range must not underflow below zero pn space.
             if (firstRange > largest) return Error.InvalidFrame;
 
-            const rangeCountRaw = try dv(data, pos);
             const rangeCount: usize = @intCast(rangeCountRaw);
             if (rangeCount > 64) return Error.InvalidFrame;
 
@@ -172,9 +178,9 @@ pub fn decode(data: []const u8, pos: *usize) Error!Frame {
                 // block's high edge: curHigh = prevLow - gap - 2
                 if (gap + 2 > prevLow) return Error.InvalidFrame;
                 const curHigh = prevLow - gap - 2;
-                if (len > curHigh + 1) return Error.InvalidFrame;
+                if (len > curHigh) return Error.InvalidFrame;
                 rangesBuf[i] = .{ .gap = gap, .length = len };
-                prevLow = curHigh + 1 - len;
+                prevLow = curHigh - len;
             }
 
             var f = Ack{
@@ -230,7 +236,7 @@ pub fn decode(data: []const u8, pos: *usize) Error!Frame {
             const len: u64 = if (flags.len) try dv(data, pos) else @intCast(data.len - pos.*);
             const d = try take(data, pos, len);
             _ = std.math.add(u64, off, len) catch return Error.InvalidFrame;
-            return .{ .stream = .{ .id = sid, .offset = off, .data = d, .fin = flags.fin } };
+            return .{ .stream = .{ .id = sid, .offset = off, .offPresent = flags.off, .data = d, .fin = flags.fin } };
         },
         0x10 => {
             pos.* += 1;
@@ -355,12 +361,16 @@ pub fn encode(out: *std.ArrayList(u8), gpa: Allocator, f: Frame) !void {
             try out.appendSlice(gpa, t.token);
         },
         .stream => |s| {
-            var t: u8 = 0x08 | 0x02; // LEN always set
+            // The OFF bit is always set. RFC 9000 Section 19.8 lets a
+            // STREAM frame omit it and imply the stream's current offset,
+            // but that makes a late duplicate indistinguishable from new
+            // data at the current offset. Always carrying the explicit
+            // offset keeps retransmissions unambiguous.
+            var t: u8 = 0x08 | 0x02 | 0x04; // STREAM | LEN | OFF
             if (s.fin) t |= 0x01;
-            if (s.offset != 0) t |= 0x04;
             try out.append(gpa, t);
             try putV(out, gpa, s.id);
-            if (s.offset != 0) try putV(out, gpa, s.offset);
+            try putV(out, gpa, s.offset);
             try putV(out, gpa, s.data.len);
             try out.appendSlice(gpa, s.data);
         },
@@ -452,8 +462,10 @@ pub fn encodeAckFromBlocks(
     try out.append(gpa, typeByte);
     try putV(out, gpa, largest);
     try putV(out, gpa, ackDelay);
-    try putV(out, gpa, firstRange);
+    // RFC 9000 Section 19.3: Largest Acknowledged, ACK Delay, ACK Range
+    // Count, First ACK Range, then the ranges.
     try putV(out, gpa, blocks.len - 1);
+    try putV(out, gpa, firstRange);
 
     var prevLow: u64 = top.highest -| (top.len -| 1);
     for (blocks[1..]) |b| {
@@ -550,6 +562,40 @@ test "ack frame roundtrip two blocks with gap" { // Acked packets: {10}, {7,6,5}
     try std.testing.expectEqual(@as(u64, 2), f.ack.ranges()[0].length); // len-1 for 3 pkts
 }
 
+test "ack frame roundtrip three blocks down to packet zero" {
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(std.testing.allocator);
+    const blocks = [_]AckBlock{
+        .{ .highest = 10, .len = 1 },
+        .{ .highest = 7, .len = 3 },
+        .{ .highest = 2, .len = 3 },
+    };
+    try encodeAckFromBlocks(&list, std.testing.allocator, 10, 0, blocks[0..], null);
+
+    var pos: usize = 0;
+    const f = try decode(list.items, &pos);
+    try std.testing.expectEqual(@as(usize, 2), f.ack.ranges().len);
+    try std.testing.expectEqual(@as(u64, 1), f.ack.ranges()[0].gap);
+    try std.testing.expectEqual(@as(u64, 2), f.ack.ranges()[0].length);
+    try std.testing.expectEqual(@as(u64, 1), f.ack.ranges()[1].gap);
+    try std.testing.expectEqual(@as(u64, 2), f.ack.ranges()[1].length);
+}
+
+test "ack rejects a range that extends below packet zero" {
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(std.testing.allocator);
+    try list.append(std.testing.allocator, 0x02);
+    try putV(&list, std.testing.allocator, 5); // largest
+    try putV(&list, std.testing.allocator, 0); // delay
+    try putV(&list, std.testing.allocator, 1); // range count
+    try putV(&list, std.testing.allocator, 0); // firstRange
+    try putV(&list, std.testing.allocator, 0); // gap: next high is packet 3
+    try putV(&list, std.testing.allocator, 4); // len covers packets -1..3
+
+    var pos: usize = 0;
+    try std.testing.expectError(Error.InvalidFrame, decode(list.items, &pos));
+}
+
 test "ack rejects malformed ranges" {
     // Craft ACK whose firstRange exceeds largest.
     var list = std.ArrayList(u8).empty;
@@ -557,8 +603,8 @@ test "ack rejects malformed ranges" {
     try list.append(std.testing.allocator, 0x02);
     try putV(&list, std.testing.allocator, 5); // largest
     try putV(&list, std.testing.allocator, 0); // delay
-    try putV(&list, std.testing.allocator, 10); // firstRange > largest -> invalid
     try putV(&list, std.testing.allocator, 0); // range count
+    try putV(&list, std.testing.allocator, 10); // firstRange > largest -> invalid
 
     var pos: usize = 0;
     try std.testing.expectError(Error.InvalidFrame, decode(list.items, &pos));
@@ -642,4 +688,46 @@ test "padding run decodes as one frame" {
     try std.testing.expectEqual(@as(u64, 7), f.padding);
     const f2 = try decode(list.items, &pos);
     try std.testing.expect(f2 == .ping);
+}
+
+test "stream frames always carry an explicit offset" {
+    // A STREAM frame without the OFF bit implies the stream's current
+    // offset (RFC 9000 Section 19.8), which makes a late duplicate
+    // indistinguishable from new data. The encoder therefore always
+    // writes the offset, and the decoder reports whether it was present.
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(std.testing.allocator);
+    try encode(&list, std.testing.allocator, .{ .stream = .{
+        .id = 0,
+        .offset = 0,
+        .data = "abc",
+        .fin = true,
+    } });
+    // type STREAM|LEN|OFF|FIN, stream id 0, offset 0, length 3
+    try std.testing.expectEqual(@as(u8, 0x0f), list.items[0]);
+    try std.testing.expectEqual(@as(u8, 0x00), list.items[1]);
+    try std.testing.expectEqual(@as(u8, 0x00), list.items[2]);
+    try std.testing.expectEqual(@as(u8, 0x03), list.items[3]);
+
+    var pos: usize = 0;
+    const f = try decode(list.items, &pos);
+    try std.testing.expect(f.stream.offPresent);
+    try std.testing.expectEqual(@as(u64, 0), f.stream.offset);
+    try std.testing.expectEqualStrings("abc", f.stream.data);
+    try std.testing.expect(f.stream.fin);
+}
+
+test "decoder reports a missing off bit" {
+    // A frame without OFF must be recognisable; RFC 9000 defines its
+    // stream-data offset as zero.
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(std.testing.allocator);
+    try list.appendSlice(std.testing.allocator, &.{ 0x0b, 0x00, 0x03 }); // STREAM|FIN|LEN, id 0
+    try list.appendSlice(std.testing.allocator, "xyz");
+    var pos: usize = 0;
+    const f = try decode(list.items, &pos);
+    try std.testing.expect(!f.stream.offPresent);
+    try std.testing.expectEqual(@as(u64, 0), f.stream.offset);
+    try std.testing.expectEqualStrings("xyz", f.stream.data);
+    try std.testing.expect(f.stream.fin);
 }

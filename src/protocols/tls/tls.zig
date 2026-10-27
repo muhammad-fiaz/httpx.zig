@@ -29,6 +29,9 @@ const sessionMod = @import("tlsSession.zig");
 const transportMod = @import("tlsTransport.zig");
 const trustStoreMod = @import("trustStore.zig");
 const verifyMod = @import("certificateVerification.zig");
+pub const ocsp = @import("ocsp.zig");
+pub const sct = @import("sct.zig");
+pub const pkcs12 = @import("pkcs12.zig");
 
 /// TLS client owner: configuration, trust and identity, connection factory.
 pub const Client = clientMod.Client;

@@ -48,11 +48,11 @@ pub fn main() !void {
     std.debug.print("Body parser server verification completed successfully.\n", .{});
 }
 
-fn indexHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = "<h1>POST JSON to /api/parse</h1>", .contentType = "text/html" };
 }
 
-fn parseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn parseHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (ctx.body.len == 0) {
         return .{ .status = 400, .body = "{\"error\":\"No body\"}", .contentType = "application/json" };
     }

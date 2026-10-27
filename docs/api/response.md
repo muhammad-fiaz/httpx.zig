@@ -1,10 +1,13 @@
 # API: Response
 
-The `httpx.Response` struct is the canonical response container representing status code, protocol version, response headers, and body payload.
+The top-level `httpx.Response` struct (defined in `src/client/requestBuilder.zig`) is the buffered response container returned by high-level client requests. It carries the status code, protocol version, headers, and body payload.
+
+> [!NOTE]
+> Server handlers return the separate lightweight `httpx.router.Response` struct, which carries `status`, `body`, `contentType`, and headers borrowed from the request arena.
 
 ## Overview
 
-Every HTTP client request returns an allocated `Response`. Callers own the response and must call `defer resp.deinit()` to release body and header allocations.
+Every buffered HTTP client request returns an allocated `Response`. Callers own the response and must call `defer resp.deinit()` to release body and header allocations.
 
 ```zig
 const std = @import("std");
@@ -19,7 +22,7 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    const resp = try client.get("https://httpbun.com/json", .{});
+    var resp = try client.get("https://httpbun.com/json", .{});
     defer resp.deinit();
 
     std.debug.print("Status: {d}\n", .{resp.status});
@@ -97,10 +100,11 @@ Returns body as bytes.
 `content-type` header value or empty string.
 
 ### `resp.writeTo(writer) !void`
-Streams body bytes to any writer.
+Writes the buffered body bytes to any writer.
 
 ### `resp.reader() std.Io.Reader`
-Reader over the body for streaming.
+Reader over the already-buffered body. Use `client.requestStream` for an
+incremental HTTP/1.1 response.
 
 ### `resp.isSuccess() bool` / `isRedirect()` / `isClientError()` / `isServerError()` / `isInformational()`
 Status-range helpers. Use `resp.status` for the raw code.

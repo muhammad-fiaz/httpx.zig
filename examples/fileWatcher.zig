@@ -46,10 +46,10 @@ pub fn main() !void {
     std.debug.print("Watcher started on '{s}'...\n", .{watchTarget});
 
     // Simulate an editor save
-    httpx.clock.sleepMillis(100);
+    httpx.clock.sleepMillis(io, 100);
     try httpx.fs.writeFile(watchTarget, "Version 2 (Modified)");
 
-    httpx.clock.sleepMillis(200);
+    httpx.clock.sleepMillis(io, 200);
 
     // Consume queued events using next()
     var eventCount: usize = 0;

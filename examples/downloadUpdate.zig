@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn pdfHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn pdfHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const data = try ctx.allocator.alloc(u8, 64 * 1024);
     for (data, 0..) |*b, i| b.* = @truncate(i);
     return .{

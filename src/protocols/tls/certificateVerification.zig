@@ -15,6 +15,7 @@ const certMod = @import("certificate.zig");
 const trustStoreMod = @import("trustStore.zig");
 const transportMod = @import("tlsTransport.zig");
 const clockMod = @import("../../common/clock.zig");
+const addressMod = @import("../../net/address.zig");
 const errorsMod = @import("tlsErrors.zig");
 pub const TlsError = errorsMod.TlsError;
 
@@ -61,7 +62,7 @@ pub fn verifyServerChain(
         },
     }
     const chain = certMod.CertificateChain{ .certs = ders, .allocator = allocator };
-    const nowSec: i64 = @divFloor(clockMod.millisNow(), 1000);
+    const nowSec: i64 = @divFloor(clockMod.millisNow(io), 1000);
     verifyCertificateChain(chain, &store, host, nowSec) catch |e| switch (e) {
         error.CertificateExpired => return error.CertificateExpired,
         error.CertificateHostMismatch, error.HostnameMismatch => return error.CertificateHostMismatch,
@@ -109,14 +110,20 @@ pub fn matchDnsPattern(pattern: []const u8, hostname: []const u8) bool {
 pub fn verifyHostname(parsed: Certificate.Parsed, targetHost: []const u8) TlsError!void {
     if (targetHost.len == 0) return TlsError.HostnameMismatch;
 
-    // Split host/port: [v6]:port, host:port (single colon), or bare host.
+    // Split and validate host/port: [v6]:port, host:port (single colon),
+    // or bare host. Do not silently discard malformed suffixes such as
+    // `[::1]attacker` or `example.com:not-a-port` before identity checking.
     var hostOnly = targetHost;
     if (targetHost[0] == '[') {
         const close = std.mem.indexOfScalar(u8, targetHost, ']') orelse return TlsError.HostnameMismatch;
         hostOnly = targetHost[1..close];
+        if (parseIpLiteral(hostOnly) == null) return TlsError.HostnameMismatch;
+        const suffix = targetHost[close + 1 ..];
+        if (suffix.len > 0 and !validPortSuffix(suffix)) return TlsError.HostnameMismatch;
     } else if (std.mem.count(u8, targetHost, ":") == 1) {
         const colon = std.mem.indexOfScalar(u8, targetHost, ':').?;
         hostOnly = targetHost[0..colon];
+        if (!validPortSuffix(targetHost[colon..])) return TlsError.HostnameMismatch;
     }
     if (hostOnly.len == 0) return TlsError.HostnameMismatch;
 
@@ -134,6 +141,13 @@ pub fn verifyHostname(parsed: Certificate.Parsed, targetHost: []const u8) TlsErr
     };
 }
 
+fn validPortSuffix(suffix: []const u8) bool {
+    if (suffix.len < 2 or suffix[0] != ':') return false;
+    const port = std.fmt.parseInt(u16, suffix[1..], 10) catch return false;
+    _ = port;
+    return true;
+}
+
 /// Parsed IP literal: 4 bytes for IPv4, 16 for IPv6, or null.
 pub const ParsedIp = union(enum) {
     v4: [4]u8,
@@ -141,72 +155,11 @@ pub const ParsedIp = union(enum) {
 };
 
 pub fn parseIpLiteral(text: []const u8) ?ParsedIp {
-    if (parseIpv4(text)) |b| return .{ .v4 = b };
-    if (parseIpv6(text)) |b| return .{ .v6 = b };
-    return null;
-}
-
-fn parseIpv4(text: []const u8) ?[4]u8 {
-    var out: [4]u8 = undefined;
-    var parts: usize = 0;
-    var it = std.mem.splitScalar(u8, text, '.');
-    while (it.next()) |part| {
-        if (parts >= 4 or part.len == 0 or part.len > 3) return null;
-        var v: u16 = 0;
-        for (part) |c| {
-            if (c < '0' or c > '9') return null;
-            v = v * 10 + (c - '0');
-            if (v > 255) return null;
-        }
-        out[parts] = @intCast(v);
-        parts += 1;
-    }
-    if (parts != 4) return null;
-    return out;
-}
-
-fn parseIpv6(text: []const u8) ?[16]u8 {
-    // Split around at most one "::" compression marker.
-    var halves: [2][]const u8 = .{ "", "" };
-    var nHalves: usize = 1;
-    halves[0] = text;
-    if (std.mem.indexOf(u8, text, "::")) |dc| {
-        if (std.mem.indexOfPos(u8, text, dc + 2, "::") != null) return null;
-        halves[0] = text[0..dc];
-        halves[1] = text[dc + 2 ..];
-        nHalves = 2;
-    }
-    var head: [8]u16 = undefined;
-    var headLen: usize = 0;
-    var tail: [8]u16 = undefined;
-    var tailLen: usize = 0;
-    for (halves[0..nHalves], 0..) |half, hi| {
-        if (half.len == 0) continue;
-        var it = std.mem.splitScalar(u8, half, ':');
-        while (it.next()) |g| {
-            if (g.len == 0 or g.len > 4) return null;
-            const v = std.fmt.parseInt(u16, g, 16) catch return null;
-            if (hi == 0) {
-                if (headLen >= 8) return null;
-                head[headLen] = v;
-                headLen += 1;
-            } else {
-                if (tailLen >= 8) return null;
-                tail[tailLen] = v;
-                tailLen += 1;
-            }
-        }
-    }
-    if (nHalves == 1) {
-        if (headLen != 8) return null;
-    } else if (headLen + tailLen >= 8) {
-        return null;
-    }
-    var out: [16]u8 = (@as([16]u8, @splat(0)));
-    for (head[0..headLen], 0..) |g, i| std.mem.writeInt(u16, out[i * 2 ..][0..2], g, .big);
-    const tailOff = 16 - tailLen * 2;
-    for (tail[0..tailLen], 0..) |g, i| std.mem.writeInt(u16, out[tailOff + i * 2 ..][0..2], g, .big);
-    return out;
+    if (addressMod.parseIp4Bytes(text)) |b| return .{ .v4 = b };
+    // Scoped literals are not valid certificate identities.
+    if (std.mem.indexOfScalar(u8, text, '%') != null) return null;
+    const v6 = std.Io.net.Ip6Address.parse(text, 0) catch return null;
+    return .{ .v6 = v6.bytes };
 }
 
 /// True when the certificate's SAN extension carries an iPAddress entry
@@ -342,6 +295,9 @@ test "IP literal parsing covers v4, v6, and garbage" {
     try std.testing.expectEqual(@as(u8, 0x20), full[0]);
     try std.testing.expect(parseIpLiteral(":::") == null);
     try std.testing.expect(parseIpLiteral("1::2::3") == null);
+    try std.testing.expect(parseIpLiteral("fe80::1%eth0") == null);
+    const mapped = parseIpLiteral("::ffff:192.0.2.1").?.v6;
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 1 }, &mapped);
 }
 
 const localhostCertPem = @embedFile("testdata/localhostCert.pem");
@@ -360,7 +316,11 @@ test "self-signed fixture verifies hostname and validity window" {
     // SAN covers 127.0.0.1 and localhost.
     try verifyHostname(leaf.parsed, "127.0.0.1");
     try verifyHostname(leaf.parsed, "localhost");
+    try verifyHostname(leaf.parsed, "localhost:443");
     try std.testing.expectError(TlsError.CertificateHostMismatch, verifyHostname(leaf.parsed, "example.com"));
+    try std.testing.expectError(TlsError.HostnameMismatch, verifyHostname(leaf.parsed, "localhost:not-a-port"));
+    try std.testing.expectError(TlsError.HostnameMismatch, verifyHostname(leaf.parsed, "[::1]attacker"));
+    try std.testing.expectError(TlsError.HostnameMismatch, verifyHostname(leaf.parsed, "[localhost]"));
 
     try std.testing.expect(!leaf.isExpired(1800000000));
     try std.testing.expect(leaf.isExpired(2200000000));

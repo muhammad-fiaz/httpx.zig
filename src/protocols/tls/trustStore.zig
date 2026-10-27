@@ -54,6 +54,8 @@ pub const TrustStore = struct {
 
     /// Automatically scans and populates root certificates from host operating system.
     pub fn loadSystemTrust(self: *TrustStore) TlsError!void {
+        self.lock.lock(self.io) catch return TlsError.IoError;
+        defer self.lock.unlock(self.io);
         if (self.loadedSystem) return;
         const now = std.Io.Timestamp.now(self.io, .awake);
         self.bundle.rescan(self.allocator, self.io, now) catch return TlsError.TlsCaUnavailable;
@@ -64,7 +66,9 @@ pub const TrustStore = struct {
     /// Follows `Bundle.parseCert` semantics: the bytes are appended to the
     /// bundle store and indexed by subject (expired anchors are skipped).
     pub fn addCertDer(self: *TrustStore, derBytes: []const u8) TlsError!void {
-        const nowSec: i64 = @divFloor(clock.millisNow(), 1000);
+        self.lock.lock(self.io) catch return TlsError.IoError;
+        defer self.lock.unlock(self.io);
+        const nowSec: i64 = @divFloor(clock.millisNow(self.io), 1000);
         const start: u32 = @intCast(self.bundle.bytes.items.len);
         self.bundle.bytes.appendSlice(self.allocator, derBytes) catch return TlsError.OutOfMemory;
         errdefer self.bundle.bytes.items.len = start;
@@ -91,6 +95,8 @@ pub const TrustStore = struct {
 
     /// Verifies a parsed peer certificate against the trusted bundle.
     pub fn verify(self: *TrustStore, subject: Certificate.Parsed, nowSec: i64) TlsError!void {
+        self.lock.lockShared(self.io) catch return TlsError.IoError;
+        defer self.lock.unlockShared(self.io);
         self.bundle.verify(subject, nowSec) catch |err| switch (err) {
             error.CertificateExpired => return TlsError.CertificateExpired,
             error.CertificateNotYetValid => return TlsError.CertificateNotYetValid,

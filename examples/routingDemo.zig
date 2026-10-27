@@ -7,14 +7,14 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn userHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn userHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const id = ctx.paramInt("id") orelse return .{ .status = 400, .body = "bad id" };
     var buf: [32]u8 = undefined;
     const body = try std.fmt.bufPrint(&buf, "user={d}", .{id});
     return .{ .status = 200, .body = try ctx.allocator.dupe(u8, body) };
 }
 
-fn postHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn postHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const P = struct {
         userId: u64,
         postId: u64,
@@ -25,21 +25,21 @@ fn postHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return .{ .status = 200, .body = try ctx.allocator.dupe(u8, body) };
 }
 
-fn slugHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn slugHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const slug = ctx.param("slug") orelse "none";
     var buf: [96]u8 = undefined;
     const body = try std.fmt.bufPrint(&buf, "slug={s}", .{slug});
     return .{ .status = 200, .body = try ctx.allocator.dupe(u8, body) };
 }
 
-fn fileHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn fileHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const path = ctx.param("path") orelse "none";
     var buf: [128]u8 = undefined;
     const body = try std.fmt.bufPrint(&buf, "file={s}", .{path});
     return .{ .status = 200, .body = try ctx.allocator.dupe(u8, body) };
 }
 
-fn linkHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn linkHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     _ = ctx;
     return .{ .status = 200, .body = "link ok" };
 }

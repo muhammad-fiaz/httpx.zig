@@ -37,9 +37,10 @@ its own TLS 1.3 handshake paths**, including:
 | Handshake message encryption | -- | ✅ |
 | Cipher suite selection from client list | -- | ✅ |
 | Mutual TLS enforcement | -- | ✅ |
+| Post-handshake `KeyUpdate` | -- | Yes (both roles, RFC 9846 sender cap) |
 | PSK resumption (`psk_dhe_ke` NST tickets) | -- | ✅ (native paths; std HTTPS/1.1 always full handshake) |
 | HelloRetryRequest | -- | ✅ (both sides, single-retry guard) |
-| 0-RTT early data | -- | ❌ intentionally unsupported (replay risk) |
+| 0-RTT early data | -- | Opt-in via `.earlyData = .{ .enabled = true }`; safe methods by default and bounded `ReplayCache` defense |
 
 ## Architecture
 
@@ -87,9 +88,9 @@ var conn = try tlsServer.accept(&socket);
 defer conn.deinit();
 ```
 
-## TlsConfig (Client)
+## TlsOptions (Client)
 
-Per-request and client-level TLS options (`src/client/request.zig`):
+Per-request and client-level TLS options (`src/client/requestBuilder.zig`, `src/client/httpClient.zig`):
 
 ```zig
 pub const TlsOptions = struct {
@@ -98,7 +99,7 @@ pub const TlsOptions = struct {
     caPem: ?[]const u8 = null, // custom CA PEM for the native paths
     clientCertPem: ?[]const u8 = null, // presented when the server asks (native paths)
     clientKeyPem: ?[]const u8 = null, // P-256 ECDSA key for clientCertPem
-    allowTruncation: bool = true,
+    allowTruncation: bool = false,
 };
 ```
 
@@ -133,20 +134,22 @@ var res = try client.get("https://127.0.0.1:8443/", .{
 });
 ```
 
-## ServerConfig
+## Low-Level TLS Server Config
 
-Server identity and ALPN preference (`tls.Server.Config`):
+Server identity and ALPN preference (`httpx.tls.Server.Config`):
 
 ```zig
 pub const Config = struct {
     certificatePem: ?[]const u8 = null, // PEM string or file path
     privateKeyPem: ?[]const u8 = null,  // PEM string or file path
     certSelector: ?CertSelector = null, // SNI selector, falls back to the default identity
-    alpn: []const AlpnProtocol = &.{ .h2, .@"http/1.1" },
+    alpn: []const AlpnProtocol = &httpx.tls.alpn.DEFAULT_TCP_PREFERENCE,
     clientAuth: ClientAuthMode = .disabled, // .disabled / .optional / .required
     clientCaPem: ?[]const u8 = null,        // CA bundle trusted for client chains
     ticketKeys: ?TicketKeys = null,         // stateless resumption keys
     ticketLifetimeSecs: u32 = 7200,
+    maxEarlyData: u32 = 0,                  // 0 disables 0-RTT
+    replayWindowCapacity: u32 = 1024,
     allowPlainHttp: bool = false,
 };
 ```
@@ -154,10 +157,10 @@ pub const Config = struct {
 The identity is parsed and validated once at `Server.init` (fail fast
 at startup); per-connection handshakes reuse it.
 
-## Server Configuration
+## High-Level Server Configuration
 
-Enable TLS on the server via `ServerConfig.tls` (PEM string or file path for
-both entries):
+Enable TLS through `.tls` in the options passed to `httpx.Server.init` (PEM
+string or file path for both entries):
 
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -187,10 +190,10 @@ try listener.run(handler);
 ```
 
 ::: tip ALPN Default
-The server negotiates ALPN from `alpn` (default TCP preference: h2 then http/1.1), so clients negotiate HTTP/2 or HTTP/1.1 automatically.
+The high-level server derives TCP ALPN in preference order from the enabled protocols (`h2`, `http/1.1`, then `http/1.0` when enabled); HTTP/3 uses QUIC.
 :::
 
-The server automatically loads the certificate chain and private key on the first TLS connection. ALPN negotiation selects between HTTP/1.1, HTTP/2, and HTTP/3 based on the client's offer.
+The server automatically loads the certificate chain and private key on the first TLS connection. ALPN negotiation selects HTTP/1.1 or HTTP/2 over TLS; HTTP/3 uses QUIC and negotiates `h3`.
 
 ## Connection
 
@@ -200,6 +203,12 @@ record-layer encryption internally. Server connections are accepted by
 `httpx.tls.Listener` / `Server.tls` and dispatched to HTTP/1 or HTTP/2
 handlers based on the negotiated ALPN protocol.
 
+Post-handshake TLS 1.3 `KeyUpdate` records are handled transparently by
+`read`: receive keys rotate, and a peer requesting an update is answered
+automatically. Servers can initiate an update with
+`conn.sendKeyUpdate(true)`; the new keys take effect immediately for
+subsequent records.
+
 ### Methods (server side)
 
 | Method | Description |
@@ -207,6 +216,7 @@ handlers based on the negotiated ALPN protocol.
 | `httpx.tls.Client.init(allocator, io, .{})` | TLS client owner (trust parsed once) |
 | `client.connect(&socket, host, .{})` | Handshake; returns an owned `Connection` |
 | `conn.read/writeAll/deinit` | Record I/O and teardown (deinit closes the socket) |
+| `conn.sendKeyUpdate(request_update)` | Rotate sending keys; request the peer to rotate its sending keys too |
 | `conn.takeCapturedSession()` | Take a captured resumption session, if any |
 | `httpx.tls.Server.init(allocator, io, cfg)` | TLS server owner (identity validated once) |
 | `server.accept(&socket)` | Accept; returns an owned `Connection` |

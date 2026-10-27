@@ -1,11 +1,11 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn getHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn getHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = "ok-get" };
 }
 
-fn headersHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn headersHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = "ok-headers" };
 }
 

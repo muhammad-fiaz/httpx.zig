@@ -10,11 +10,11 @@ defer server.deinit();
 try server.get("/healthz", healthHandler);
 try server.get("/readyz", readyHandler);
 
-fn healthHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn healthHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .status = "healthy" });
 }
 
-fn readyHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn readyHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .status = "ready" });
 }
 ```

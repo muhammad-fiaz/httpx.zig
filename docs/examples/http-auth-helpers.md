@@ -5,7 +5,7 @@ Bearer and Basic auth on both sides of the wire. See
 
 ```zig
 // Server side: read credentials from the context.
-fn bearerHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn bearerHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const token = ctx.bearerToken() orelse {
         return ctx.textStatus(401, "missing bearer token");
     };
@@ -15,7 +15,7 @@ fn bearerHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.renderJson(.{ .kind = "bearer", .ok = true });
 }
 
-fn basicHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn basicHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const auth = ctx.basicAuth() orelse {
         return ctx.textStatus(401, "missing basic auth");
     };

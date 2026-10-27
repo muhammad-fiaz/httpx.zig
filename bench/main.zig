@@ -67,7 +67,7 @@ fn nowNanos() i128 {
 /// date. Uses the library's wall clock, not the monotonic one the timings
 /// use: `.awake` is a performance counter, so it has no calendar epoch.
 fn runDate(buf: []u8) []const u8 {
-    const epochSecs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@divTrunc(httpx.clock.millisNow(), 1000)) };
+    const epochSecs: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@divTrunc(httpx.clock.millisNow(benchIo), 1000)) };
     const yearDay = epochSecs.getEpochDay().calculateYearDay();
     const md = yearDay.calculateMonthDay();
     return std.fmt.bufPrint(buf, "{d}-{d:0>2}-{d:0>2}", .{
@@ -149,10 +149,10 @@ fn runBench(
 
 // Global benchmark states
 var benchAllocator: std.mem.Allocator = undefined;
-var benchPool: *httpx.WorkerPool = undefined;
+var benchPool: *httpx.concurrency.Pool = undefined;
 var benchQueue: httpx.concurrency.queue.BoundedQueue(usize) = undefined;
-var benchRouter: httpx.router.Router = undefined;
-var benchDnsCache: *httpx.dns.Cache = undefined;
+var benchRouter: httpx.Router = undefined;
+var benchDnsCache: *httpx.net.dns.Cache = undefined;
 
 var sampleCompressRaw: []const u8 = undefined;
 var sampleGzipPayload: []const u8 = undefined;
@@ -161,13 +161,13 @@ var sampleDeflatePayload: []const u8 = undefined;
 // Group 1: Core Operations & Parsing
 
 fn benchHeadersParse() void {
-    var headers = httpx.Headers.init(benchAllocator);
+    var headers = httpx.headers.Headers.init(benchAllocator);
     defer headers.deinit();
 
     headers.append("Content-Type", "application/json") catch {};
     headers.append("Authorization", "Bearer token-xyz-123456789") catch {};
     headers.append("Accept", "application/json, text/plain, */*") catch {};
-    headers.append("User-Agent", "httpx.zig-benchmark/0.2.2") catch {};
+    headers.append("User-Agent", "httpx.zig-benchmark/0.2.3") catch {};
 
     std.mem.doNotOptimizeAway(headers.get("Content-Type").?.len);
     std.mem.doNotOptimizeAway(headers.get("Authorization").?.len);
@@ -189,18 +189,18 @@ fn benchMethodLookup() void {
     for (names) |n| std.mem.doNotOptimizeAway(@backingInt(httpx.Method.fromString(n) orelse .GET));
 }
 
-const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: httpx/0.2.2\r\nAccept: application/json\r\n\r\n";
+const rawReqHead = "GET /api/v1/users?page=1 HTTP/1.1\r\nHost: httpbun.com\r\nUser-Agent: httpx/0.2.3\r\nAccept: application/json\r\n\r\n";
 
 fn benchHttp1RequestHead() void {
-    const head = httpx.http1.parser.parseRequestHead(rawReqHead, .{}) catch return;
+    const head = httpx.protocols.http1.parser.parseRequestHead(rawReqHead, .{}) catch return;
     std.mem.doNotOptimizeAway(head.method.len + head.path.len);
 }
 
-const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: httpx/0.2.2\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
+const rawHdrBlock = "Host: httpbun.com\r\nUser-Agent: httpx/0.2.3\r\nAccept: application/json\r\nAuthorization: Bearer secret-tok\r\nContent-Type: application/json\r\n\r\n";
 
 fn benchHttp1HeaderBlock() void {
-    var fields: [16]httpx.http1.parser.Field = undefined;
-    const n = httpx.http1.parser.parseHeaderBlock(rawHdrBlock, 0, &fields, .{}) catch return;
+    var fields: [16]httpx.protocols.http1.parser.Field = undefined;
+    const n = httpx.protocols.http1.parser.parseHeaderBlock(rawHdrBlock, 0, &fields, .{}) catch return;
     std.mem.doNotOptimizeAway(n);
 }
 
@@ -459,14 +459,14 @@ fn benchLiveReloadInject() void {
     benchAllocator.free(out);
 }
 
-var benchWatcher: ?*httpx.Watcher = null;
+var benchWatcher: ?*httpx.static.Watcher = null;
 
 fn benchWatcherScan() void {
     const w = benchWatcher orelse return;
     _ = w.scan() catch false;
 }
 
-var benchDepGraph: ?*httpx.web.watcherDependency.DependencyGraph = null;
+var benchDepGraph: ?*httpx.static.dependency.DependencyGraph = null;
 
 fn benchWatcherDeps() void {
     const g = benchDepGraph orelse return;
@@ -514,7 +514,7 @@ fn dummyDnsLookup(
     _: std.Io,
     _: []const u8,
     alloc: std.mem.Allocator,
-) httpx.dns.LookupError![]const []const u8 {
+) httpx.net.dns.LookupError![]const []const u8 {
     const list = alloc.alloc([]const u8, 1) catch return error.OutOfMemory;
     list[0] = alloc.dupe(u8, "64.23.183.159") catch return error.OutOfMemory;
     return list;
@@ -532,30 +532,78 @@ fn benchDnsCacheHit() void {
 // Group 9: HTTP/2 & QUIC / HTTP/3 Primitives
 
 fn benchHttp2FrameHeader() void {
-    const header = httpx.http2.FrameHeader{
+    const header = httpx.protocols.http2.FrameHeader{
         .length = 1024,
         .frameType = .data,
         .flags = 0x01,
         .streamId = 1,
     };
-    var serialized: [httpx.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
+    var serialized: [httpx.protocols.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
     header.serialize(&serialized);
-    const parsed = httpx.http2.FrameHeader.parse(&serialized);
+    std.mem.doNotOptimizeAway(&serialized);
+    const parsed = httpx.protocols.http2.FrameHeader.parse(&serialized);
     std.mem.doNotOptimizeAway(parsed.length);
     std.mem.doNotOptimizeAway(parsed.streamId);
+    std.mem.doNotOptimizeAway(parsed.flags);
 }
 
 fn benchHpackIntEncode() void {
     var buf: [16]u8 = undefined;
-    const n = httpx.proto.common.integer.encode(&buf, 5, 0x20, 1337) catch return;
-    std.mem.doNotOptimizeAway(n);
+    const values = [_]u64{ 10, 1337, 65536, 1000000 };
+    for (values) |v| {
+        const n = httpx.protocols.common.integer.encode(&buf, 5, 0x20, v) catch return;
+        std.mem.doNotOptimizeAway(&buf);
+        std.mem.doNotOptimizeAway(n);
+    }
 }
 
 fn benchHpackIntDecode() void {
-    const encoded = [_]u8{ 0x3F, 0x9A, 0x0A };
+    const encodeds = [_][]const u8{
+        &[_]u8{0x0A},
+        &[_]u8{ 0x1F, 0x9A, 0x0A },
+        &[_]u8{ 0x1F, 0xFF, 0x01 },
+    };
+    for (encodeds) |encoded| {
+        var offset: usize = 0;
+        const v = httpx.protocols.common.integer.decode(encoded, &offset, 5) catch return;
+        std.mem.doNotOptimizeAway(v);
+        std.mem.doNotOptimizeAway(offset);
+    }
+}
+
+fn benchQpackIntEncode() void {
+    var buf: [16]u8 = undefined;
+    const values = [_]u64{ 10, 1337, 65536, 1000000 };
+    for (values) |v| {
+        const n = httpx.protocols.http3.qpack.encodeInt(&buf, 6, v) catch return;
+        std.mem.doNotOptimizeAway(&buf);
+        std.mem.doNotOptimizeAway(n);
+    }
+}
+
+fn benchQpackIntDecode() void {
+    const encodeds = [_][]const u8{
+        &[_]u8{0x10},
+        &[_]u8{ 0x3F, 0x82, 0x0A },
+        &[_]u8{ 0x3F, 0xFF, 0x01 },
+    };
+    for (encodeds) |encoded| {
+        var offset: usize = 0;
+        const v = httpx.protocols.http3.qpack.decodeInt(encoded, &offset, 6) catch return;
+        std.mem.doNotOptimizeAway(v);
+        std.mem.doNotOptimizeAway(offset);
+    }
+}
+
+fn benchH3FrameHeader() void {
+    var buf: [16]u8 = undefined;
+    const n = httpx.protocols.http3.frame.encodeFrameHeader(&buf, 0x01, 1024) catch return;
+    std.mem.doNotOptimizeAway(&buf);
+    std.mem.doNotOptimizeAway(n);
     var offset: usize = 0;
-    const v = httpx.proto.common.integer.decode(&encoded, &offset, 5) catch return;
-    std.mem.doNotOptimizeAway(v);
+    const hdr = httpx.protocols.http3.frame.parseFrameHeader(buf[0..n], &offset) catch return;
+    std.mem.doNotOptimizeAway(hdr.frameType);
+    std.mem.doNotOptimizeAway(hdr.length);
 }
 
 fn benchH3VarIntEncode() void {
@@ -563,7 +611,11 @@ fn benchH3VarIntEncode() void {
     // Varying the magnitude keeps the encoder from being folded to a
     // constant and makes the 1/2/4/8-byte branches all get exercised.
     const values = [_]u64{ 25, 15293, 494878333, 1512888099419124471 };
-    for (values) |v| std.mem.doNotOptimizeAway(httpx.quic.varint.encode(&buf, v) catch 0);
+    for (values) |v| {
+        const n = httpx.protocols.quic.varint.encode(&buf, v) catch 0;
+        std.mem.doNotOptimizeAway(&buf);
+        std.mem.doNotOptimizeAway(n);
+    }
 }
 
 fn benchH3VarIntDecode() void {
@@ -575,7 +627,9 @@ fn benchH3VarIntDecode() void {
     };
     for (encodeds) |encoded| {
         var offset: usize = 0;
-        std.mem.doNotOptimizeAway(httpx.quic.varint.decode(encoded, &offset) catch return);
+        const v = httpx.protocols.quic.varint.decode(encoded, &offset) catch return;
+        std.mem.doNotOptimizeAway(v);
+        std.mem.doNotOptimizeAway(offset);
     }
 }
 
@@ -599,7 +653,7 @@ const sampleCertPem =
 ;
 
 fn benchTlsRecordSeal() void {
-    const rec = httpx.tls.record.encodeRecord(
+    const rec = httpx.protocols.tls.record.encodeRecord(
         .application_data,
         &sampleTlsPayload,
         0,
@@ -611,7 +665,7 @@ fn benchTlsRecordSeal() void {
 }
 
 fn benchCertParse() void {
-    var chain = httpx.tls.certificate.parseCertificateChainPem(benchAllocator, sampleCertPem) catch return;
+    var chain = httpx.protocols.tls.certificate.parseCertificateChainPem(benchAllocator, sampleCertPem) catch return;
     defer chain.deinit();
     std.mem.doNotOptimizeAway(chain.count());
 }
@@ -655,7 +709,7 @@ var h2BenchUrl: [64]u8 = undefined;
 var h2BenchUrlSlice: []const u8 = undefined;
 var h2BenchIo: std.Io = undefined;
 
-fn h2BenchHandler(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const httpx.http2.transport.Header, _: []const u8) anyerror!httpx.http2.transport.HandlerResponse {
+fn h2BenchHandler(_: ?*anyopaque, method: []const u8, path: []const u8, _: []const httpx.protocols.http2.transport.Header, _: []const u8) anyerror!httpx.protocols.http2.transport.HandlerResponse {
     if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/ping")) {
         return .{ .status = 200, .body = "pong" };
     }
@@ -671,7 +725,7 @@ fn h2BenchServe() void {
             continue;
         };
         defer conn.close();
-        httpx.http2.transport.serveConnection(benchAllocator, &conn, h2BenchHandler, null) catch {};
+        httpx.protocols.http2.transport.serveConnection(benchAllocator, &conn, h2BenchHandler, null) catch {};
     }
 }
 
@@ -694,8 +748,8 @@ var h3BenchUrlSlice: []const u8 = undefined;
 var h3BenchStop: std.atomic.Value(bool) = .init(false);
 
 const H3BenchServer = struct {
-    ep: httpx.quic.Endpoint = undefined,
-    pump: httpx.quic.Pump = undefined,
+    ep: httpx.protocols.quic.Endpoint = undefined,
+    pump: httpx.protocols.quic.Pump = undefined,
 
     const Acc = struct {
         sid: u64 = std.math.maxInt(u64),
@@ -730,7 +784,7 @@ const H3BenchServer = struct {
             srv.ep.peer = null;
 
             // Allocate a fresh server Connection for this incoming client.
-            const qconn = httpx.quic.Connection.init(alloc, srv.ep.io, .server, .{}) catch continue;
+            const qconn = httpx.protocols.quic.Connection.init(alloc, srv.ep.io, .server, .{}) catch continue;
             srv.ep.conn = qconn;
 
             // Restart pump with the new conn in place BEFORE serveOne so the
@@ -757,13 +811,13 @@ const H3BenchServer = struct {
 
     /// Serve exactly one HTTP/3 request on the already-assigned `srv.ep.conn`.
     /// Ownership of `qconn` stays with `run()`; this function must not deinit it.
-    fn serveOne(srv: *H3BenchServer, qconn: *httpx.quic.Connection) !void {
+    fn serveOne(srv: *H3BenchServer, qconn: *httpx.protocols.quic.Connection) !void {
         const alloc = benchAllocator;
-        var drv = httpx.quic.HandshakeDriver.initServer(srv.ep.io, alloc, .{ .certChainPem = benchCertPem, .privateKeyPem = benchKeyPem });
+        var drv = httpx.protocols.quic.HandshakeDriver.initServer(srv.ep.io, alloc, .{ .certChainPem = benchCertPem, .privateKeyPem = benchKeyPem });
         defer drv.deinit();
-        qconn.tls = .{ .ctx = &drv, .start = httpx.quic.HandshakeDriver.clientStart, .onData = httpx.quic.HandshakeDriver.onData };
-        try httpx.quic.handshake.serveHandshake(&srv.ep, &srv.pump, &drv, 10_000);
-        var h3 = httpx.http3.Connection.init(alloc, .server);
+        qconn.tls = .{ .ctx = &drv, .start = httpx.protocols.quic.HandshakeDriver.clientStart, .onData = httpx.protocols.quic.HandshakeDriver.onData };
+        try httpx.protocols.quic.handshake.serveHandshake(&srv.ep, &srv.pump, &drv, 10_000);
+        var h3 = httpx.protocols.http3.Connection.init(alloc, .server);
         defer h3.deinit();
         var acc = Acc{};
         defer acc.buf.deinit(alloc);
@@ -775,18 +829,18 @@ const H3BenchServer = struct {
             // Use a short 50 ms quantum so the loop stays responsive.
             // PumpStopped means shutdown was signalled — propagate immediately
             // so the server thread exits cleanly rather than burning the timeout.
-            httpx.quic.handshake.feedPumped(&srv.ep, &srv.pump, null, 50, now) catch |e| switch (e) {
+            httpx.protocols.quic.handshake.feedPumped(&srv.ep, &srv.pump, null, 50, now) catch |e| switch (e) {
                 error.PumpStopped => return error.PumpStopped,
                 else => {},
             };
             if (!acc.fin) continue;
             var off: usize = 0;
-            const fr = try httpx.http3.frame.parseFrame(acc.buf.items, &off);
+            const fr = try httpx.protocols.http3.frame.parseFrame(acc.buf.items, &off);
             const fields = try h3.qdec.decodeSectionCounted(fr.payload, 0, null);
             defer h3.qdec.freeFields(fields);
-            var benchQenc = httpx.http3.qpack.Encoder.init(alloc);
+            var benchQenc = httpx.protocols.http3.qpack.Encoder.init(alloc);
             defer benchQenc.deinit();
-            var rs = httpx.http3.RequestStream{ .id = acc.sid, .allocator = alloc, .qpack = &benchQenc };
+            var rs = httpx.protocols.http3.RequestStream{ .id = acc.sid, .allocator = alloc, .qpack = &benchQenc };
             const rhead = try rs.buildResponseHeaders(200, &.{});
             defer alloc.free(rhead);
             const rdata = try rs.buildData("pong");
@@ -801,13 +855,13 @@ const H3BenchServer = struct {
         }
     }
 
-    fn sendH3(conn: *httpx.quic.Connection, sid: u64, bytes: []const u8) !void {
+    fn sendH3(conn: *httpx.protocols.quic.Connection, sid: u64, bytes: []const u8) !void {
         const B = struct {
             var sId: u64 = 0;
             var sData: []const u8 = "";
-            pub fn build(gpa: std.mem.Allocator, payload: *std.ArrayList(u8)) httpx.quic.connection.Error!void {
-                httpx.quic.frames.encode(payload, gpa, .{ .stream = .{ .id = sId, .offset = 0, .data = sData, .fin = true } }) catch
-                    return httpx.quic.connection.Error.OutOfMemory;
+            pub fn build(gpa: std.mem.Allocator, payload: *std.ArrayList(u8)) httpx.protocols.quic.connection.Error!void {
+                httpx.protocols.quic.frames.encode(payload, gpa, .{ .stream = .{ .id = sId, .offset = 0, .data = sData, .fin = true } }) catch
+                    return httpx.protocols.quic.connection.Error.OutOfMemory;
             }
         };
         B.sId = sid;
@@ -847,7 +901,7 @@ var tlsBenchThread: std.Thread = undefined;
 var tlsBenchPort: u16 = 0;
 var tlsBenchStop: std.atomic.Value(bool) = .init(false);
 var tlsBenchIo: std.Io = undefined;
-var tlsBenchSession: ?httpx.tls.Session = null;
+var tlsBenchSession: ?httpx.protocols.tls.Session = null;
 
 fn tlsBenchServe() void {
     while (!tlsBenchStop.load(.acquire)) {
@@ -856,7 +910,7 @@ fn tlsBenchServe() void {
             continue;
         };
         defer sock.close();
-        var srv = httpx.tls.Server.init(benchAllocator, tlsBenchIo, .{
+        var srv = httpx.protocols.tls.Server.init(benchAllocator, tlsBenchIo, .{
             .certificatePem = benchCertPem,
             .privateKeyPem = benchKeyPem,
             .ticketKeys = .{ .current = (@as([32]u8, @splat(0xBE))) },
@@ -870,13 +924,13 @@ fn tlsBenchServe() void {
     }
 }
 
-fn tlsBenchDial(session: ?*const httpx.tls.Session) void {
+fn tlsBenchDial(session: ?*const httpx.protocols.tls.Session) void {
     var sock = httpx.tcp.connect(tlsBenchIo, "127.0.0.1", tlsBenchPort) catch {
         noteFailure();
         return;
     };
     defer sock.close();
-    var cli = httpx.tls.Client.init(benchAllocator, tlsBenchIo, .{}) catch {
+    var cli = httpx.protocols.tls.Client.init(benchAllocator, tlsBenchIo, .{}) catch {
         noteFailure();
         return;
     };
@@ -928,7 +982,7 @@ pub fn main() !void {
     benchIo = io;
 
     // 1. Initialize WorkerPool
-    var pool = try httpx.WorkerPool.init(benchAllocator, io, .{ .workers = 2, .queueCapacity = 256 });
+    var pool = try httpx.concurrency.Pool.init(benchAllocator, io, .{ .workers = 2, .queueCapacity = 256 });
     try pool.start();
     defer pool.deinit();
     benchPool = &pool;
@@ -938,7 +992,7 @@ pub fn main() !void {
     defer benchQueue.deinit();
 
     // 3. Initialize Router with diverse routes
-    benchRouter = httpx.router.Router.init(benchAllocator);
+    benchRouter = httpx.Router.init(benchAllocator);
     defer benchRouter.deinit();
     try benchRouter.get("/", dummyHandler, .{});
     try benchRouter.get("/api/v1/health", dummyHandler, .{});
@@ -952,7 +1006,7 @@ pub fn main() !void {
     try benchRouter.get("/openapi.json", dummyHandler, .{});
 
     // 4. Initialize DNS Cache
-    var dnsCache = httpx.dns.Cache.init(benchAllocator, io, .{}, dummyDnsLookup, null);
+    var dnsCache = httpx.net.dns.Cache.init(benchAllocator, io, .{}, dummyDnsLookup, null);
     defer dnsCache.deinit();
     benchDnsCache = &dnsCache;
     // Prime the cache with an entry
@@ -963,10 +1017,10 @@ pub fn main() !void {
     }
 
     // 5. Initialize watcher + dependency graph for watcher benchmarks.
-    var benchW = try httpx.Watcher.init(benchAllocator, io, .{ .dirPath = "examples/web/templates" });
+    var benchW = try httpx.static.Watcher.init(benchAllocator, io, .{ .dirPath = "examples/web/templates" });
     defer benchW.deinit();
     benchWatcher = benchW;
-    var benchG = httpx.web.watcherDependency.DependencyGraph.init(benchAllocator);
+    var benchG = httpx.static.dependency.DependencyGraph.init(benchAllocator);
     defer benchG.deinit();
     var gi: usize = 0;
     while (gi < 64) : (gi += 1) {
@@ -1041,12 +1095,14 @@ pub fn main() !void {
 
     // 8. HTTP/3 live loopback (fresh QUIC+TLS handshake per op)
     h3BenchIo = io;
-    h3BenchServer.ep = try httpx.quic.transport.Endpoint.init(benchAllocator, io, try httpx.quic.Connection.init(benchAllocator, io, .server, .{}), .{});
+    h3BenchServer.ep = try httpx.protocols.quic.transport.Endpoint.init(benchAllocator, io, try httpx.protocols.quic.Connection.init(benchAllocator, io, .server, .{}), .{});
     const h3port = h3BenchServer.ep.localPort();
     try h3BenchServer.pump.start(&h3BenchServer.ep, benchAllocator);
     h3BenchThread = try std.Thread.spawn(.{}, H3BenchServer.run, .{&h3BenchServer});
     h3BenchUrlSlice = try std.fmt.bufPrint(&h3BenchUrl, "https://127.0.0.1:{d}/ping", .{h3port});
-    h3BenchClient = httpx.Client.init(benchAllocator, io, .{});
+    h3BenchClient = httpx.Client.init(benchAllocator, io, .{
+        .pool = .{ .maxConnections = 0 },
+    });
     defer {
         // Stop flag + pump stop abort in-flight server waits instantly;
         // then join, then release client and endpoint.
@@ -1071,7 +1127,7 @@ pub fn main() !void {
         // Prime the resumption session (full handshake + read captures NST).
         var sock = try httpx.tcp.connect(io, "127.0.0.1", tlsBenchPort);
         defer sock.close();
-        var cli = httpx.tls.Client.init(benchAllocator, io, .{}) catch return error.NoSessionCaptured;
+        var cli = httpx.protocols.tls.Client.init(benchAllocator, io, .{}) catch return error.NoSessionCaptured;
         defer cli.deinit();
         var conn = try cli.connect(&sock, "127.0.0.1", .{
             .verify = .caBundle,
@@ -1184,6 +1240,9 @@ pub fn main() !void {
     runBench("Protocols", "h2_frame_header", "ops/sec", fastCfg, benchHttp2FrameHeader);
     runBench("Protocols", "hpack_int_encode", "ops/sec", fastCfg, benchHpackIntEncode);
     runBench("Protocols", "hpack_int_decode", "ops/sec", fastCfg, benchHpackIntDecode);
+    runBench("Protocols", "qpack_int_encode", "ops/sec", fastCfg, benchQpackIntEncode);
+    runBench("Protocols", "qpack_int_decode", "ops/sec", fastCfg, benchQpackIntDecode);
+    runBench("Protocols", "h3_frame_header", "ops/sec", fastCfg, benchH3FrameHeader);
     runBench("Protocols", "h3_varint_encode", "ops/sec", fastCfg, benchH3VarIntEncode);
     runBench("Protocols", "h3_varint_decode", "ops/sec", fastCfg, benchH3VarIntDecode);
 

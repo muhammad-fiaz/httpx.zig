@@ -16,6 +16,12 @@ const x25519 = std.crypto.dh.X25519;
 /// which OpenSSL 3.5+ and browsers do not speak over TLS.
 const mlKem = std.crypto.kem.ml_kem;
 const MlKem = mlKem.MLKem768;
+const QUIC_CIPHER_SUITES = [_]tls.CipherSuite{.AES_128_GCM_SHA256};
+const TLS_CIPHER_SUITES = [_]tls.CipherSuite{
+    .AES_128_GCM_SHA256,
+    .AES_256_GCM_SHA384,
+    .CHACHA20_POLY1305_SHA256,
+};
 
 // RFC 10024 (X25519MLKEM768) wire sizes. The client share is the ML-KEM
 // encapsulation key followed by the X25519 share; the server share is the
@@ -135,12 +141,69 @@ pub const DerivedKeys = struct {
     serverKeyLen: u8 = 16,
     serverIv: [12]u8 = undefined,
     cipher: recordMod.RecordCipher = .aes128Gcm,
+    clientTrafficSecret: [32]u8 = undefined,
+    serverTrafficSecret: [32]u8 = undefined,
+    clientEpoch: u64 = 0,
+    serverEpoch: u64 = 0,
+
+    /// RFC 9846 §4.7.3 limits send epochs to 2^48-1.
+    pub const MAX_SEND_EPOCH: u64 = (1 << 48) - 1;
 
     pub fn clientKeySlice(self: *const DerivedKeys) []const u8 {
         return self.clientKey[0..self.clientKeyLen];
     }
     pub fn serverKeySlice(self: *const DerivedKeys) []const u8 {
         return self.serverKey[0..self.serverKeyLen];
+    }
+
+    /// Advances the client-to-server application traffic keys used for
+    /// sending. Returns false without changing key state when the RFC 9846
+    /// sender epoch limit is reached.
+    pub fn updateClientTrafficKeys(self: *DerivedKeys) bool {
+        if (self.clientEpoch >= MAX_SEND_EPOCH) return false;
+        self.deriveNextClientSecret();
+        return true;
+    }
+
+    /// Advances the client-to-server keys used for receiving. RFC 9846
+    /// forbids enforcing the sender cap on a peer, so this never fails.
+    pub fn advanceClientReceiveKeys(self: *DerivedKeys) void {
+        self.deriveNextClientSecret();
+    }
+
+    /// Advances the server-to-client application traffic keys used for
+    /// sending. Returns false without changing key state when the RFC 9846
+    /// sender epoch limit is reached.
+    pub fn updateServerTrafficKeys(self: *DerivedKeys) bool {
+        if (self.serverEpoch >= MAX_SEND_EPOCH) return false;
+        self.deriveNextServerSecret();
+        return true;
+    }
+
+    /// Advances the server-to-client keys used for receiving. RFC 9846
+    /// forbids enforcing the sender cap on a peer, so this never fails.
+    pub fn advanceServerReceiveKeys(self: *DerivedKeys) void {
+        self.deriveNextServerSecret();
+    }
+
+    fn deriveNextClientSecret(self: *DerivedKeys) void {
+        var next: [32]u8 = undefined;
+        hkdfExpandLabel(self.clientTrafficSecret, "traffic upd", &next);
+        std.crypto.secureZero(u8, &self.clientTrafficSecret);
+        self.clientTrafficSecret = next;
+        hkdfExpandLabel(next, "key", self.clientKey[0..self.clientKeyLen]);
+        hkdfExpandLabel(next, "iv", &self.clientIv);
+        self.clientEpoch +|= 1;
+    }
+
+    fn deriveNextServerSecret(self: *DerivedKeys) void {
+        var next: [32]u8 = undefined;
+        hkdfExpandLabel(self.serverTrafficSecret, "traffic upd", &next);
+        std.crypto.secureZero(u8, &self.serverTrafficSecret);
+        self.serverTrafficSecret = next;
+        hkdfExpandLabel(next, "key", self.serverKey[0..self.serverKeyLen]);
+        hkdfExpandLabel(next, "iv", &self.serverIv);
+        self.serverEpoch +|= 1;
     }
 };
 
@@ -484,7 +547,7 @@ pub const Engine = struct {
                 try self.io.randomSecure(&r);
                 break :blk r;
             },
-            .cipherSuites = &.{ .AES_128_GCM_SHA256, .AES_256_GCM_SHA384, .CHACHA20_POLY1305_SHA256 },
+            .cipherSuites = if (quicTransportParams != null) &QUIC_CIPHER_SUITES else &TLS_CIPHER_SUITES,
             // Non-null transport parameters mean QUIC, where the hybrid
             // share does not fit one Initial packet.
             .keyShareEntries = try self.buildKeyShares(quicTransportParams == null),
@@ -539,7 +602,7 @@ pub const Engine = struct {
                 try self.io.randomSecure(&r);
                 break :blk r;
             },
-            .cipherSuites = &.{ .AES_128_GCM_SHA256, .AES_256_GCM_SHA384, .CHACHA20_POLY1305_SHA256 },
+            .cipherSuites = if (quicTransportParams != null) &QUIC_CIPHER_SUITES else &TLS_CIPHER_SUITES,
             .keyShareEntries = try self.buildKeyShares(quicTransportParams == null),
             .signatureAlgorithms = if (signatureAlgorithms.len > 0) signatureAlgorithms else &.{
                 .ecdsa_secp256r1_sha256,
@@ -1961,6 +2024,8 @@ pub const Engine = struct {
             .serverKeyLen = @intCast(keyLen),
             .serverIv = si,
             .cipher = cipher,
+            .clientTrafficSecret = clientSecret,
+            .serverTrafficSecret = serverSecret,
         };
     }
 };
@@ -2006,6 +2071,21 @@ test "client produces valid ClientHello" {
     // Body length matches the u24 in header
     const bodyLen: u24 = @as(u24, @intCast(ch[1])) << 16 | @as(u24, @intCast(ch[2])) << 8 | @as(u24, @intCast(ch[3]));
     try std.testing.expectEqual(ch.len - 4, bodyLen);
+}
+
+test "QUIC ClientHello offers only a cipher suite supported by QUIC key derivation" {
+    const a = std.testing.allocator;
+    var engine = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
+    const ch = try engine.produceClientHello(&.{"h3"}, &.{}, "example.test", "");
+    defer a.free(ch);
+
+    const cipherLenOff = 4 + 2 + 32 + 1;
+    const cipherBytes = std.mem.readInt(u16, ch[cipherLenOff..][0..2], .big);
+    try std.testing.expectEqual(@as(u16, 2), cipherBytes);
+    try std.testing.expectEqual(
+        @as(u16, @intCast(@backingInt(tls.CipherSuite.AES_128_GCM_SHA256))),
+        std.mem.readInt(u16, ch[cipherLenOff + 2 ..][0..2], .big),
+    );
 }
 
 test "handshake engine client-server key exchange" {
@@ -2079,7 +2159,7 @@ test "mutual TLS client certificate round trip" {
 
     const clientCertPem = @embedFile("testdata/localhostCert.pem");
     const clientKeyPem = @embedFile("testdata/localhostKey.pem");
-    const nowSec: i64 = @divFloor(clockMod.millisNow(), 1000);
+    const nowSec: i64 = @divFloor(clockMod.millisNow(io), 1000);
 
     var client = Engine.initClient(std.Io.Threaded.global_single_threaded.io(), a, .{});
     var server = Engine.initServer(std.Io.Threaded.global_single_threaded.io(), a, .{});
@@ -2159,7 +2239,7 @@ test "mutual TLS rejects untrusted client certificate" {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     const clientCertPem = @embedFile("testdata/localhostCert.pem");
-    const nowSec: i64 = @divFloor(clockMod.millisNow(), 1000);
+    const nowSec: i64 = @divFloor(clockMod.millisNow(io), 1000);
 
     var chain = try certMod.parseCertificateChainPem(a, clientCertPem);
     defer chain.deinit();
@@ -2718,4 +2798,44 @@ test "server answers a hybrid-only ClientHello with a hybrid key share" {
     client.localKeypair = xKp;
     try client.processServerHello(sh);
     try std.testing.expectEqualSlices(u8, server.sharedSecret.?.slice(), client.sharedSecret.?.slice());
+}
+
+test "application traffic key updates are directional and capped for sending" {
+    var keys = DerivedKeys{
+        .clientTrafficSecret = @splat(0x11),
+        .serverTrafficSecret = @splat(0x22),
+    };
+    const oldServerKey = keys.serverKey;
+    var expectedClientSecret: [32]u8 = undefined;
+    hkdfExpandLabel(keys.clientTrafficSecret, "traffic upd", &expectedClientSecret);
+    try std.testing.expect(keys.updateClientTrafficKeys());
+    try std.testing.expectEqual(@as(u64, 1), keys.clientEpoch);
+    try std.testing.expectEqualSlices(u8, &expectedClientSecret, &keys.clientTrafficSecret);
+    try std.testing.expectEqualSlices(u8, &oldServerKey, &keys.serverKey);
+
+    const oldClientKey = keys.clientKey;
+    var expectedServerSecret: [32]u8 = undefined;
+    hkdfExpandLabel(keys.serverTrafficSecret, "traffic upd", &expectedServerSecret);
+    try std.testing.expect(keys.updateServerTrafficKeys());
+    try std.testing.expectEqual(@as(u64, 1), keys.serverEpoch);
+    try std.testing.expectEqualSlices(u8, &expectedServerSecret, &keys.serverTrafficSecret);
+    try std.testing.expectEqualSlices(u8, &oldClientKey, &keys.clientKey);
+
+    keys.clientEpoch = DerivedKeys.MAX_SEND_EPOCH;
+    const cappedSecret = keys.clientTrafficSecret;
+    try std.testing.expect(!keys.updateClientTrafficKeys());
+    try std.testing.expectEqualSlices(u8, &cappedSecret, &keys.clientTrafficSecret);
+    try std.testing.expectEqual(@as(u64, DerivedKeys.MAX_SEND_EPOCH), keys.clientEpoch);
+
+    keys.serverEpoch = DerivedKeys.MAX_SEND_EPOCH;
+    const cappedServerSecret = keys.serverTrafficSecret;
+    try std.testing.expect(!keys.updateServerTrafficKeys());
+    try std.testing.expectEqualSlices(u8, &cappedServerSecret, &keys.serverTrafficSecret);
+    try std.testing.expectEqual(@as(u64, DerivedKeys.MAX_SEND_EPOCH), keys.serverEpoch);
+
+    // Receivers must not enforce the peer's sender cap.
+    keys.advanceClientReceiveKeys();
+    try std.testing.expectEqual(@as(u64, DerivedKeys.MAX_SEND_EPOCH + 1), keys.clientEpoch);
+    keys.advanceServerReceiveKeys();
+    try std.testing.expectEqual(@as(u64, DerivedKeys.MAX_SEND_EPOCH + 1), keys.serverEpoch);
 }

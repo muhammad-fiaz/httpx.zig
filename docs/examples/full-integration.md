@@ -30,7 +30,7 @@ const UserPayload = struct {
     role: []const u8,
 };
 
-fn handleRoot(_: *httpx.Context) anyerror!httpx.Response {
+fn handleRoot(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "HTTPX production server running",
@@ -38,7 +38,7 @@ fn handleRoot(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn handleCreateUser(ctx: *httpx.Context) anyerror!httpx.Response {
+fn handleCreateUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const payload = try ctx.json(UserPayload);
     const formatted = try std.fmt.allocPrint(
         ctx.allocator,

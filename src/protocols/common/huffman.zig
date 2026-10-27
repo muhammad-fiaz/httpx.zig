@@ -10,8 +10,8 @@
 //! may legally terminate only where the unconsumed trailing bits are an
 //! all-ones run shorter than 8 bits — i.e. valid EOS-prefix padding.
 //!
-//! This mirrors the representation nghttp2/nghttp3 generate (mkhufftbl),
-//! derived here from first principles.
+//! The table is derived from RFC 7541 Appendix B and shared by HPACK and
+//! QPACK.
 
 const std = @import("std");
 pub const table = @import("huffmanTable.zig");
@@ -31,6 +31,13 @@ const symTable = table.symTable;
 /// Upper bound on encoded size for a plaintext of `len` bytes (worst 30 bits per byte).
 pub fn maxEncodedLen(len: usize) usize {
     return len * 5 + 1;
+}
+
+/// Upper bound on decoded size for `encodedLen` compressed bytes. The
+/// shortest Huffman code is 5 bits, so each input byte emits at most
+/// ceil(8/5) symbols (the +1 covers a partial final symbol).
+pub fn maxDecodedLen(encodedLen: usize) usize {
+    return encodedLen * 8 / 5 + 1;
 }
 
 /// Encodes `src` into `out`, padding the final byte with EOS MSBs.
@@ -291,7 +298,7 @@ pub const Decoder = struct {
 
     /// Validates stream termination. Empty input is valid per RFC 7541.
     pub fn finish(self: *const Decoder) Error!void {
-        if (self.emittedAny and !self.accepted) return Error.InvalidHuffmanCode;
+        if (!self.accepted) return Error.InvalidHuffmanCode;
     }
 };
 
@@ -391,6 +398,10 @@ test "rejects 8 or more trailing one-bits" {
     buf[0] = 0x0F;
     buf[1] = 0xF0;
     try std.testing.expectError(Error.InvalidHuffmanCode, decode(&out, buf[0..2]));
+
+    // Eight ones in a single byte: padding strictly > 7 bits (RFC 7541 5.2).
+    buf[0] = 0xFF;
+    try std.testing.expectError(Error.InvalidHuffmanCode, decode(&out, buf[0..1]));
 
     // Full EOS-length run: failure node mid-stream.
     @memset(buf[0..4], 0xFF);

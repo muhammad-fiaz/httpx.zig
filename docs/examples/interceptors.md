@@ -7,14 +7,13 @@ wrappers around the URL-first client calls. See
 a client GET against it.
 
 ```zig
-fn timing(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response {
+fn timing(ctx: *httpx.router.Context, next: httpx.router.NextFn) anyerror!httpx.router.Response {
     const t0 = std.time.nanoTimestamp();
     const resp = try next(ctx);
     return resp;
 }
 
 try server.use(timing);
-try server.use(httpx.middleware.logging);
 ```
 
 ## Expected Output

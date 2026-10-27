@@ -9,7 +9,7 @@ it is actually implemented:
 - **Client downloads**: `.existing = .verifyExisting` skips re-downloads of
   files already on disk, and `.replaceIfChanged` uses conditional headers.
 - **DNS**: the client caches resolutions (`dnsCache: .{ .enable, .ttlMs,
-  .negativeTtlMs, .maxEntries }` in `ClientConfig`).
+  .negativeTtlMs, .maxEntries }` in the `Client.init` options).
 
 See [Static Files](/guide/static-files), [Single File](/guide/single-file),
 and [Client Basics](/guide/client-basics).

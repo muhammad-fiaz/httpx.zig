@@ -1,4 +1,4 @@
-//! HTTP/1.1 server: accept loop -> parser -> router dispatch -> writer.
+//! HTTP server: bounded accept loop -> protocol dispatch -> router -> writer.
 //!
 //! Accepted connections run on a fixed worker pool with bounded admission and
 //! queue capacity. A fresh request arena backs each connection so handlers can
@@ -17,6 +17,7 @@ const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
 const compression = @import("../compression/codec.zig");
 const parserMod = @import("../protocols/http1/parser.zig");
+const semanticsMod = @import("../protocols/http1/semantics.zig");
 const writerMod = @import("../protocols/http1/writer.zig");
 const routerMod = @import("../web/router/router.zig");
 const Router = routerMod.Router;
@@ -32,6 +33,7 @@ const udpMod = @import("../sockets/udp.zig");
 const templatesMod = @import("../web/templates/templates.zig");
 const tlsServerMod = @import("../protocols/tls/tlsServer.zig");
 const fsMod = @import("../utils/fs.zig");
+const addressMod = @import("../net/address.zig");
 const alpnMod = @import("../protocols/tls/alpn.zig");
 const metricsMod = @import("../web/metrics/metricsRegistry.zig");
 const tlsSessionMod = @import("../protocols/tls/tlsSession.zig");
@@ -78,6 +80,13 @@ pub const StreamConn = union(enum) {
             .tls => |t| t.writeAll(bytes),
         };
     }
+
+    pub fn peerAddress(self: StreamConn) []const u8 {
+        return switch (self) {
+            .plain => |p| p.peerAddress(),
+            .tls => |t| t.socket.peerAddress(),
+        };
+    }
 };
 
 const logging = @import("../common/logging.zig");
@@ -90,7 +99,7 @@ const clock = @import("../common/clock.zig");
 /// values and decides where (if anywhere) they go.
 ///
 /// ```zig
-/// fn onEvent(event: httpx.ServerEvent) void {
+/// fn onEvent(event: httpx.logging.ServerEvent) void {
 ///     if (event.kind == .requestCompleted) {
 ///         std.debug.print("{s} {s} {d} {d}ms\n", .{
 ///             event.method, event.path, event.status, event.durationMs,
@@ -121,16 +130,15 @@ pub const PortStrategy = enum {
     exit,
 };
 
-/// ALPN identifiers this server can actually speak.
-///
-/// `h2` is deliberately absent. `Config.http2` exists and defaults to true,
-/// but there is no HTTP/2 framing behind it, so advertising the identifier
-/// negotiates a protocol we then fail to speak: every browser and a default
-/// `curl` offer `h2`, and the exchange dies right after the handshake. The
-/// list has to come from what is implemented, not from what the config
-/// declares.
+/// ALPN identifiers in server preference order, selected from enabled
+/// protocol handlers when the caller leaves TLS ALPN at its default.
+const alpnH2Http11Http10 = [_]alpnMod.Protocol{ .h2, .@"http/1.1", .@"http/1.0" };
+const alpnH2Http11 = [_]alpnMod.Protocol{ .h2, .@"http/1.1" };
+const alpnH2Http10 = [_]alpnMod.Protocol{ .h2, .@"http/1.0" };
+const alpnH2 = [_]alpnMod.Protocol{.h2};
 const alpnHttp11 = [_]alpnMod.Protocol{.@"http/1.1"};
 const alpnHttp10Http11 = [_]alpnMod.Protocol{ .@"http/1.1", .@"http/1.0" };
+const alpnHttp10 = [_]alpnMod.Protocol{.@"http/1.0"};
 
 pub const Config = struct {
     host: []const u8 = "0.0.0.0",
@@ -180,7 +188,9 @@ pub const Config = struct {
     /// When true, Context.remoteAddress(), Context.scheme(), and Context.host() will parse forwarded headers.
     trustForwardedHeaders: bool = false,
     /// Optional list of trusted proxy IPs/CIDRs (e.g. "127.0.0.1", "::1").
-    /// If non-empty, headers are only trusted if connection originates from one of these addresses.
+    /// If non-empty, headers are only trusted if the connection originates from
+    /// one of these addresses, and matching hops are skipped when resolving
+    /// X-Forwarded-For right-to-left.
     trustedProxies: []const []const u8 = &.{},
     /// Preferred default HTTP version for server handling. When set to a
     /// concrete version it selects exactly that version, overriding the
@@ -191,10 +201,18 @@ pub const Config = struct {
     http10: bool = true,
     /// Enable HTTP/1.1 protocol handling.
     http11: bool = true,
-    /// HTTP/2 cleartext server runtime path (default true: automatically serves H2 preface).
+    /// Enable HTTP/2 over TLS ALPN and cleartext prior-knowledge connections.
     http2: bool = true,
     /// HTTP/3 server runtime path.
     http3: bool = false,
+    /// Require a stateless Retry token before accepting QUIC Initials.
+    /// Off by default so 0-RTT clients are not forced into a round trip;
+    /// enable in production to validate the client address early.
+    http3Retry: bool = false,
+    /// Stable key for Retry tokens across connections. When null each
+    /// connection generates an ephemeral key (valid for its own Retry
+    /// round trip only).
+    http3RetryKey: ?[32]u8 = null,
     /// Automatically watch directory and broadcast changes / hot reload.
     watch: bool = false,
     /// Directory to watch when watch is enabled.
@@ -258,6 +276,162 @@ extern "kernel32" fn SetConsoleCtrlHandler(
     add: std.os.windows.BOOL,
 ) callconv(.winapi) std.os.windows.BOOL;
 
+/// One in-flight HTTP/3 request. Requests are keyed by QUIC stream ID so
+/// multiple request streams can be served concurrently on one connection.
+const H3Request = struct {
+    allocator: Allocator,
+    maxBody: usize,
+    sid: u64 = std.math.maxInt(u64),
+    fields: std.ArrayList(http3Qpack.FieldLine) = .empty,
+    body: std.ArrayList(u8) = .empty,
+    done: bool = false,
+    failed: bool = false,
+    tooLarge: bool = false,
+    h3Error: ?http3Frame.H3Error = null,
+    queued: bool = false,
+
+    fn deinit(self: *H3Request) void {
+        for (self.fields.items) |f| {
+            self.allocator.free(f.name);
+            self.allocator.free(f.value);
+        }
+        self.fields.deinit(self.allocator);
+        self.body.deinit(self.allocator);
+    }
+
+    fn copyFields(self: *H3Request, incoming: []const http3Qpack.FieldLine) void {
+        for (incoming) |f| {
+            const name = self.allocator.dupe(u8, f.name) catch {
+                self.failed = true;
+                return;
+            };
+            const value = self.allocator.dupe(u8, f.value) catch {
+                self.allocator.free(name);
+                self.failed = true;
+                return;
+            };
+            self.fields.append(self.allocator, .{ .name = name, .value = value }) catch {
+                self.allocator.free(name);
+                self.allocator.free(value);
+                self.failed = true;
+                return;
+            };
+        }
+    }
+};
+
+/// Routes QUIC stream events into per-request H3Request state and queues
+/// completed or failed requests for the server loop.
+const H3PumpCtx = struct {
+    io: std.Io,
+    allocator: Allocator,
+    maxBody: usize,
+    h3: *http3Conn.Connection,
+    requests: *std.AutoHashMap(u64, *H3Request),
+    ready: *std.ArrayList(u64),
+    lastActivityMs: *u64,
+    err: ?anyerror = null,
+
+    fn getOrCreate(p: *H3PumpCtx, sid: u64) ?*H3Request {
+        if (p.requests.get(sid)) |r| return r;
+        const r = p.allocator.create(H3Request) catch {
+            p.err = error.OutOfMemory;
+            return null;
+        };
+        r.* = .{ .allocator = p.allocator, .maxBody = p.maxBody, .sid = sid };
+        p.requests.put(sid, r) catch {
+            p.allocator.destroy(r);
+            p.err = error.OutOfMemory;
+            return null;
+        };
+        return r;
+    }
+
+    fn queue(p: *H3PumpCtx, r: *H3Request) void {
+        if (r.queued) return;
+        r.queued = true;
+        p.ready.append(p.allocator, r.sid) catch {
+            r.queued = false;
+            p.err = error.OutOfMemory;
+        };
+    }
+
+    fn onStream(ctx: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        p.lastActivityMs.* = @intCast(clock.monotonicMillis(p.io));
+        p.h3.feedQuic(sid, data, fin) catch {
+            if (p.h3.takeStreamError()) |se| {
+                if (p.getOrCreate(se.sid)) |r| {
+                    r.failed = true;
+                    r.h3Error = se.code;
+                    p.queue(r);
+                }
+            }
+            if (p.h3.fatalError != null) p.err = error.ProtocolViolation;
+            return;
+        };
+        if (p.h3.takeStreamError()) |se| {
+            if (p.getOrCreate(se.sid)) |r| {
+                r.failed = true;
+                r.h3Error = se.code;
+                p.queue(r);
+            }
+        }
+        p.h3.retryBlockedStreams();
+        if (p.h3.fatalError != null) p.err = error.ProtocolViolation;
+    }
+
+    fn onHeaders(ctx: ?*anyopaque, sid: u64, fields: []const http3Qpack.FieldLine, interim: bool) void {
+        if (interim) return;
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        const r = p.getOrCreate(sid) orelse return;
+        r.copyFields(fields);
+    }
+
+    fn onData(ctx: ?*anyopaque, sid: u64, data: []const u8) void {
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        const r = p.getOrCreate(sid) orelse return;
+        if (data.len > r.maxBody -| r.body.items.len) {
+            r.tooLarge = true;
+            return;
+        }
+        r.body.appendSlice(r.allocator, data) catch {
+            r.failed = true;
+        };
+    }
+
+    fn onTrailers(ctx: ?*anyopaque, sid: u64, fields: []const http3Qpack.FieldLine) void {
+        _ = ctx;
+        _ = sid;
+        // The request API exposes headers and body only; merging trailers
+        // into the header list would let a trailer override request
+        // metadata. Trailers are still validated by the H3 stream layer.
+        _ = fields;
+    }
+
+    fn onMessageEnd(ctx: ?*anyopaque, sid: u64) void {
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        const r = p.getOrCreate(sid) orelse return;
+        r.done = true;
+        p.queue(r);
+    }
+
+    fn onH3Error(ctx: ?*anyopaque, sid: u64, code: http3Frame.H3Error) void {
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        const r = p.getOrCreate(sid) orelse return;
+        r.failed = true;
+        r.h3Error = code;
+        p.queue(r);
+    }
+
+    fn onReset(ctx: ?*anyopaque, sid: u64, code: u64) void {
+        const p: *H3PumpCtx = @ptrCast(@alignCast(ctx.?));
+        p.h3.onQuicReset(sid, code);
+        const r = p.getOrCreate(sid) orelse return;
+        r.failed = true;
+        p.queue(r);
+    }
+};
 pub const Server = struct {
     /// HTTP/3 endpoint information, namespaced so protocol-specific
     /// helpers do not accumulate as flat methods on `Server`.
@@ -267,7 +441,9 @@ pub const Server = struct {
         /// differs only when that UDP bind failed and the endpoint fell
         /// back to an ephemeral port. Prefer this over `localPort()`.
         udpPort: ?u16 = null,
-        /// True when the endpoint could not reuse the TCP port.
+        /// True when the endpoint could not reuse the TCP port. Only
+        /// possible when the caller requested port 0; explicit ports
+        /// fail initialization instead of moving HTTP/3 silently.
         portFallback: bool = false,
 
         pub fn port(self: Http3) ?u16 {
@@ -316,6 +492,7 @@ pub const Server = struct {
     h3Pump: ?*quicTransport.Pump = null,
     h3Thread: ?std.Thread = null,
     h3Stop: std.atomic.Value(bool) = .init(false),
+    h3Ready: std.atomic.Value(bool) = .init(false),
     metricsRegistry: metricsMod.Registry = .{},
     startTimeMs: i64 = 0,
 
@@ -342,7 +519,6 @@ pub const Server = struct {
         if (cfg.maxConcurrentConnections == 0 or cfg.maxQueuedConnectionTasks == 0) {
             return error.InvalidConcurrencyLimits;
         }
-        const addressMod = @import("../net/address.zig");
         errdefer if (ownsIo) {
             if (ioThreaded) |th| {
                 th.deinit();
@@ -420,18 +596,22 @@ pub const Server = struct {
             }
         }
 
-        // Correct the TLS ALPN preference to match what we serve.
+        // Correct the default TLS ALPN preference to match enabled TCP
+        // handlers. Explicit caller protocol lists remain authoritative.
         //
         // Done here, on the stored config, rather than at the construction
         // site: certificate reload rebuilds the TLS server from
-        // `self.cfg.tls.?.alpn` and would otherwise fall back to
-        // DEFAULT_TCP_PREFERENCE and reintroduce `h2`.
-        //
-        // Only the default is replaced. An explicitly chosen list is the
-        // caller's decision, including a deliberate `h2`.
+        // `self.cfg.tls.?.alpn`.
         if (effectiveCfg.tls) |*tcfg| {
             if (std.mem.eql(alpnMod.Protocol, tcfg.alpn, &alpnMod.DEFAULT_TCP_PREFERENCE)) {
-                tcfg.alpn = if (effectiveCfg.http10) &alpnHttp10Http11 else &alpnHttp11;
+                tcfg.alpn = if (effectiveCfg.http2) blk: {
+                    if (effectiveCfg.http11) {
+                        break :blk if (effectiveCfg.http10) &alpnH2Http11Http10 else &alpnH2Http11;
+                    }
+                    break :blk if (effectiveCfg.http10) &alpnH2Http10 else &alpnH2;
+                } else if (effectiveCfg.http11) blk: {
+                    break :blk if (effectiveCfg.http10) &alpnHttp10Http11 else &alpnHttp11;
+                } else if (effectiveCfg.http10) &alpnHttp10 else &.{};
             }
         }
 
@@ -450,66 +630,79 @@ pub const Server = struct {
             eng.* = try templatesMod.Engine.init(allocator, io, tCfg);
             templateEngine = eng;
         }
+        errdefer if (templateEngine) |eng| {
+            eng.deinit();
+            allocator.destroy(eng);
+        };
 
         var tlsServer_opt: ?tlsServerMod.Server = null;
         var loadedCertPem: ?[]const u8 = null;
         var loadedKeyPem: ?[]const u8 = null;
+        errdefer if (loadedCertPem) |cert| allocator.free(cert);
+        errdefer if (loadedKeyPem) |key| {
+            std.crypto.secureZero(u8, @constCast(key));
+            allocator.free(key);
+        };
+        errdefer if (tlsServer_opt) |*tls| tls.deinit();
 
         if (effectiveCfg.tls) |*tCfg| {
-            const certOpt = tCfg.certificatePem;
-            const keyOpt = tCfg.privateKeyPem;
-            if (certOpt) |cert| {
-                if (keyOpt) |key| {
-                    if (std.mem.indexOf(u8, cert, "-----BEGIN") != null) {
-                        loadedCertPem = allocator.dupe(u8, cert) catch null;
-                    } else {
-                        loadedCertPem = fsMod.readFileLimited(allocator, cert, 10 * 1024 * 1024) catch null;
-                    }
-                    if (std.mem.indexOf(u8, key, "-----BEGIN") != null) {
-                        loadedKeyPem = allocator.dupe(u8, key) catch null;
-                    } else {
-                        loadedKeyPem = fsMod.readFileLimited(allocator, key, 10 * 1024 * 1024) catch null;
-                    }
-                    if (loadedCertPem != null and loadedKeyPem != null) {
-                        tCfg.certificatePem = loadedCertPem.?;
-                        tCfg.privateKeyPem = loadedKeyPem.?;
-                        // Identity problems surface here at startup; a
-                        // failure leaves TLS disabled (historical leniency).
-                        tlsServer_opt = tlsServerMod.Server.init(allocator, io, tCfg.*) catch null;
-                    }
-                }
+            const hasCert = tCfg.certificatePem != null;
+            const hasKey = tCfg.privateKeyPem != null;
+            if (hasCert != hasKey) return error.TlsIdentityIncomplete;
+            if (!hasCert and tCfg.certSelector == null) return error.TlsIdentityRequired;
+
+            if (tCfg.certificatePem) |cert| {
+                loadedCertPem = if (std.mem.indexOf(u8, cert, "-----BEGIN") != null)
+                    try allocator.dupe(u8, cert)
+                else
+                    try fsMod.readFileLimited(allocator, cert, 10 * 1024 * 1024);
+                tCfg.certificatePem = loadedCertPem.?;
             }
+            if (tCfg.privateKeyPem) |key| {
+                loadedKeyPem = if (std.mem.indexOf(u8, key, "-----BEGIN") != null)
+                    try allocator.dupe(u8, key)
+                else
+                    try fsMod.readFileLimited(allocator, key, 10 * 1024 * 1024);
+                tCfg.privateKeyPem = loadedKeyPem.?;
+            }
+            tlsServer_opt = try tlsServerMod.Server.init(allocator, io, tCfg.*);
         }
 
         var h3Ep_opt: ?quicTransport.Endpoint = null;
         var h3Placeholder_opt: ?*quicConn.Connection = null;
         if (effectiveCfg.http3 and loadedCertPem != null and loadedKeyPem != null) {
             const placeholder = try quicConn.Connection.init(allocator, io, .server, .{});
-            errdefer placeholder.deinit();
+            // Ownership moves to the endpoint/Server on success; the
+            // errdefer covers every failure before that transfer.
+            var placeholderOwned = true;
+            errdefer if (placeholderOwned) placeholder.deinit();
             // RFC 9114 Section 3: HTTP/3 shares the HTTP/1.1 and HTTP/2
             // port number, so the UDP endpoint mirrors the TCP one. That
             // also holds for an ephemeral port, because a caller that asked
             // for port 0 discovers the number with `localPort()` and then
             // dials HTTP/3 on it.
             //
-            // If that bind fails, retry ephemerally rather than refusing to
-            // start. Windows keeps dynamic port ranges for TCP and UDP
-            // separate, so a TCP-chosen ephemeral port can fall inside a
-            // range the UDP stack will not bind. `http3.port()` reports
-            // whichever port was actually taken.
+            // An ephemeral TCP port is not necessarily bindable for UDP:
+            // Windows keeps separate reserved dynamic ranges per protocol,
+            // so the TCP-chosen number can fall inside a UDP exclusion.
+            // When the caller asked for port 0, retry ephemerally and
+            // report the result through `http3.port()`/`portFallback`.
+            //
+            // An explicit port is a promise to callers, so a UDP bind
+            // failure is returned instead of silently moving HTTP/3 to a
+            // port nobody was told about.
             const tcpPort = listener.localPort();
             const ep = quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = tcpPort }) catch |err| blk: {
+                if (cfg.port != 0) return err;
                 std.log.scoped(.httpx).warn(
                     "HTTP/3 could not bind UDP port {d} ({s}); falling back to an ephemeral port. Clients must use http3.port().",
                     .{ tcpPort, @errorName(err) },
                 );
-                break :blk quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = 0 }) catch {
-                    placeholder.deinit();
-                    return err;
-                };
+                break :blk quicTransport.Endpoint.init(allocator, io, placeholder, .{ .port = 0 }) catch return err;
             };
             h3Ep_opt = ep;
             h3Placeholder_opt = placeholder;
+            placeholderOwned = false;
         }
 
         var srv = Server{
@@ -532,7 +725,7 @@ pub const Server = struct {
             } else .{},
             .h3PlaceholderConn = h3Placeholder_opt,
             .h3Pump = null,
-            .startTimeMs = clock.millisNow(),
+            .startTimeMs = clock.monotonicMillis(io),
         };
         srv.router.templateEngine = templateEngine;
         errdefer {
@@ -659,7 +852,7 @@ pub const Server = struct {
 
     /// Captures a comprehensive runtime snapshot of the server (uptime, throughput, error rate, active connections).
     pub fn snapshot(self: *const Server) metricsMod.ServerSnapshot {
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis(self.io);
         const uptime: u64 = if (self.startTimeMs > 0 and now >= self.startTimeMs)
             @intCast(now - self.startTimeMs)
         else
@@ -717,6 +910,7 @@ pub const Server = struct {
             s.deinit();
             self.tlsServer = null;
         }
+        self.h3Ready.store(false, .release);
         self.h3Stop.store(true, .release);
         if (self.h3Pump) |p| p.stop();
         if (self.h3Thread) |th| {
@@ -751,6 +945,11 @@ pub const Server = struct {
     /// Returns true if this server has TLS configured and active.
     pub fn isTls(self: *const Server) bool {
         return self.tlsServer != null;
+    }
+
+    /// Returns true when the HTTP/3 background pump and loop are ready to serve incoming connections.
+    pub fn isHttp3Ready(self: *const Server) bool {
+        return self.h3Ready.load(.acquire);
     }
 
     /// Dynamically sets or updates TLS certificates on this server instance.
@@ -821,6 +1020,7 @@ pub const Server = struct {
             self.emit(.{ .kind = .serverStopped, .level = .info, .message = "shutting down" });
         }
         self.stopFlag.store(true, .release);
+        self.h3Ready.store(false, .release);
         self.h3Stop.store(true, .release);
         if (self.h3Pump) |p| p.stop();
 
@@ -868,6 +1068,18 @@ pub const Server = struct {
         if (self.inAccept.load(.acquire)) {
             tcp.wakeListenerPort(self.listener.localPort());
         }
+    }
+
+    /// Forwarded headers are honored only when explicitly enabled and the
+    /// connection came from an allowed proxy (or no proxy list is configured,
+    /// which trusts every peer).
+    fn trustForwardedFor(self: *const Server, peer: []const u8) bool {
+        if (!self.cfg.trustForwardedHeaders) return false;
+        if (self.cfg.trustedProxies.len == 0) return true;
+        for (self.cfg.trustedProxies) |rule| {
+            if (addressMod.matchesCidr(peer, rule)) return true;
+        }
+        return false;
     }
 
     /// Return the full bound address. Supports IPv4 and IPv6.
@@ -1001,7 +1213,7 @@ pub const Server = struct {
             if (self.cfg.maxConnections != 0 and accepted >= self.cfg.maxConnections) break;
             // Yield when paused
             while (self.paused.load(.acquire) and !self.stopFlag.load(.acquire)) {
-                clock.sleepMillis(10);
+                clock.sleepMillis(self.io, 10);
             }
             self.inAccept.store(true, .release);
             var conn = self.listener.accept(self.io) catch {
@@ -1048,6 +1260,7 @@ pub const Server = struct {
             thread.join();
             self.deadlineMonitorThread = null;
         }
+        self.h3Ready.store(false, .release);
         self.h3Stop.store(true, .release);
         if (self.h3Pump) |p| p.stop();
         if (self.h3Thread) |th| {
@@ -1084,11 +1297,11 @@ pub const Server = struct {
 
     fn monitorConnectionDeadlines(server: *Server) void {
         while (!server.deadlineMonitorStop.load(.acquire)) {
-            const now = clock.monotonicMillis();
+            const now = clock.monotonicMillis(server.io);
             server.connsMu.lock();
             for (server.activeConns.items) |socket| socket.closeIfIoDeadlineExpired(now);
             server.connsMu.unlock();
-            clock.sleepMillis(5);
+            clock.sleepMillis(server.io, 5);
         }
     }
 
@@ -1116,56 +1329,112 @@ pub const Server = struct {
         self.metricsRegistry.connectionOpened();
         defer self.metricsRegistry.connectionClosed();
 
-        // Peek or read initial bytes to check protocol / TLS / HTTP/2 preface
         var peekBuf: [32]u8 = undefined;
-        const nPeek = conn.read(peekBuf[0..]) catch return;
-        if (nPeek == 0) return;
-
-        // Check for TLS Handshake record (ContentType = 0x16, TLS legacy version 0x03, 0x01..0x03)
-        if (self.tlsServer != null) {
-            if (nPeek >= 3 and peekBuf[0] == 0x16 and peekBuf[1] == 0x03) {
-                var tlsConn = self.tlsServer.?.acceptBuffered(conn, peekBuf[0..nPeek]) catch |err| {
-                    var msgBuf: [64]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&msgBuf, "TLS handshake failed: {s}", .{@errorName(err)}) catch "TLS handshake failed";
-                    self.emit(.{ .kind = .tlsHandshakeFailed, .level = .warn, .message = msg });
-                    return;
-                };
-                defer tlsConn.deinit();
-
-                const streamConn = StreamConn{ .tls = &tlsConn };
-                if (self.cfg.http2 and tlsConn.alpn != null and tlsConn.alpn.? == .h2) {
-                    try self.serveHttp2Connection(streamConn, true, "");
-                } else {
-                    try self.serveHttp1Connection(streamConn, true, "");
-                }
-                return;
-            } else if (self.cfg.tls == null or !self.cfg.tls.?.allowPlainHttp) {
-                // Strict HTTPS mode: reject cleartext HTTP on HTTPS port (RFC 9110)
-                const plainConn = StreamConn{ .plain = conn };
-                _ = sendSimpleError(plainConn, 400, "The plain HTTP request was sent to HTTPS port") catch 0;
-                return;
-            }
+        var nPeek: usize = 0;
+        var protocol: InitialProtocol = .needMore;
+        while (protocol == .needMore and nPeek < peekBuf.len) {
+            const n = conn.read(peekBuf[nPeek..]) catch return;
+            if (n == 0) return;
+            nPeek += n;
+            protocol = classifyInitialProtocol(peekBuf[0..nPeek], self.tlsServer != null, self.cfg.http2);
         }
 
-        const h2Preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-        if (self.cfg.http2 and nPeek >= 16 and std.mem.startsWith(u8, peekBuf[0..nPeek], h2Preface[0..16])) {
+        // Check for TLS Handshake record (ContentType = 0x16, TLS legacy version 0x03, 0x01..0x03)
+        if (protocol == .tls) {
+            var tlsConn = self.tlsServer.?.acceptBuffered(conn, peekBuf[0..nPeek]) catch |err| {
+                var msgBuf: [64]u8 = undefined;
+                const msg = std.fmt.bufPrint(&msgBuf, "TLS handshake failed: {s}", .{@errorName(err)}) catch "TLS handshake failed";
+                self.emit(.{ .kind = .tlsHandshakeFailed, .level = .warn, .message = msg });
+                return;
+            };
+            defer tlsConn.deinit();
+
+            const streamConn = StreamConn{ .tls = &tlsConn };
+            if (self.cfg.http2 and tlsConn.alpn != null and tlsConn.alpn.? == .h2) {
+                try self.serveHttp2Connection(streamConn, true, "");
+            } else {
+                try self.serveHttp1Connection(streamConn, true, "");
+            }
+            return;
+        }
+
+        if (protocol == .http2 and (self.tlsServer == null or self.cfg.tls.?.allowPlainHttp)) {
             const streamConn = StreamConn{ .plain = conn };
             try self.serveHttp2Connection(streamConn, false, peekBuf[0..nPeek]);
             return;
         }
 
         const streamConn = StreamConn{ .plain = conn };
+        if (self.tlsServer != null and (self.cfg.tls == null or !self.cfg.tls.?.allowPlainHttp)) {
+            // Strict HTTPS mode: reject cleartext HTTP on HTTPS port (RFC 9110).
+            _ = sendSimpleError(streamConn, 400, "The plain HTTP request was sent to HTTPS port") catch 0;
+            return;
+        }
         try self.serveHttp1Connection(streamConn, false, peekBuf[0..nPeek]);
     }
 
+    const InitialProtocol = enum { needMore, http1, http2, tls };
+
+    fn classifyInitialProtocol(bytes: []const u8, tlsEnabled: bool, http2Enabled: bool) InitialProtocol {
+        if (bytes.len == 0) return .needMore;
+
+        if (tlsEnabled and bytes[0] == 0x16) {
+            if (bytes.len < 2) return .needMore;
+            if (bytes[1] == 0x03) {
+                if (bytes.len < 3) return .needMore;
+                if (bytes[2] >= 0x01 and bytes[2] <= 0x03) return .tls;
+            }
+        }
+
+        const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+        if (http2Enabled) {
+            const compared = @min(bytes.len, preface.len);
+            if (std.mem.eql(u8, bytes[0..compared], preface[0..compared])) {
+                return if (bytes.len < 16) .needMore else .http2;
+            }
+        }
+        return .http1;
+    }
+
     fn serveHttp2Connection(self: *Server, conn: StreamConn, isTlsConn: bool, initial: []const u8) !void {
+        const transportMod = @import("../protocols/http2/transport.zig");
+
+        // Per-connection state shared by the request handler and the
+        // response decorator.
+        const H2Ctx = struct {
+            server: *Server,
+            isTls: bool,
+            arena: std.heap.ArenaAllocator,
+            peerBuf: [64]u8 = undefined,
+            peerLen: usize = 0,
+
+            fn peerSlice(ctxPtr: *const @This()) []const u8 {
+                return ctxPtr.peerBuf[0..ctxPtr.peerLen];
+            }
+        };
+
+        var h2ctx = H2Ctx{
+            .server = self,
+            .isTls = isTlsConn,
+            .arena = std.heap.ArenaAllocator.init(self.allocator),
+        };
+        defer h2ctx.arena.deinit();
+        const peer = conn.peerAddress();
+        @memcpy(h2ctx.peerBuf[0..peer.len], peer);
+        h2ctx.peerLen = peer.len;
+
         const H2Bridge = struct {
-            fn handle(respAlloc: Allocator, ctxPtr: ?*anyopaque, isTlsFlag: bool, mStr: []const u8, pStr: []const u8, hdrs: []const @import("../protocols/http2/transport.zig").Header, bStr: []const u8) anyerror!@import("../protocols/http2/transport.zig").HandlerResponse {
-                const serverPtr: *Server = @ptrCast(@alignCast(ctxPtr.?));
-                const method = Method.fromString(mStr) orelse .GET;
-                var arenaH2 = std.heap.ArenaAllocator.init(serverPtr.allocator);
-                defer arenaH2.deinit();
-                const a = arenaH2.allocator();
+            fn handle(ctxPtr: ?*anyopaque, mStr: []const u8, pStr: []const u8, hdrs: []const transportMod.Header, bStr: []const u8) anyerror!transportMod.HandlerResponse {
+                const c: *H2Ctx = @ptrCast(@alignCast(ctxPtr.?));
+                const serverPtr = c.server;
+                // The transport consumes each response synchronously before
+                // the next handler call, so one request's allocations can be
+                // reclaimed while the connection stays open.
+                _ = c.arena.reset(.retain_capacity);
+                // Match the HTTP/1 path: unknown methods are not silently
+                // coerced to GET (they would hit unrelated routes).
+                const method = Method.fromString(mStr) orelse return .{ .status = 501, .body = "method not supported" };
+                const a = c.arena.allocator();
 
                 var ctxHdrs = try a.alloc(routerMod.Header, hdrs.len);
                 for (hdrs, 0..) |h, i| ctxHdrs[i] = .{ .name = h.name, .value = h.value };
@@ -1189,29 +1458,30 @@ pub const Server = struct {
                     .query = queryPart,
                     .method = method,
                     .body = bStr,
-                    .isTls = isTlsFlag,
-                    .trustForwarded = serverPtr.cfg.trustForwardedHeaders,
+                    .isTls = c.isTls,
+                    .peerAddress = c.peerSlice(),
+                    .trustForwarded = serverPtr.trustForwardedFor(c.peerSlice()),
+                    .trustedProxies = serverPtr.cfg.trustedProxies,
                 };
 
                 // Full pipeline: match + router/route middleware + 404/405 +
                 // auto-OPTIONS, exactly like HTTP/1.
                 const res = serverPtr.router.dispatch(&ctx);
-                // res borrows from arenaH2 (freed on return) or static data:
-                // duplicate into respAlloc (connection lifetime) so the
-                // caller can send after we return.
-                const outBody = try respAlloc.dupe(u8, res.body);
+                // The response is copied into the request arena and the
+                // transport consumes it before this callback can run again.
+                const outBody = try a.dupe(u8, res.body);
                 const extra: usize = if (res.contentType != null) 1 else 0;
-                var outHdrs = try respAlloc.alloc(@import("../protocols/http2/transport.zig").Header, res.headers.len + extra);
+                var outHdrs = try a.alloc(transportMod.Header, res.headers.len + extra);
                 for (res.headers, 0..) |h, i| {
                     outHdrs[i] = .{
-                        .name = try respAlloc.dupe(u8, h.name),
-                        .value = try respAlloc.dupe(u8, h.value),
+                        .name = try a.dupe(u8, h.name),
+                        .value = try a.dupe(u8, h.value),
                     };
                 }
                 if (res.contentType) |ct| {
                     outHdrs[outHdrs.len - 1] = .{
                         .name = "content-type",
-                        .value = try respAlloc.dupe(u8, ct),
+                        .value = try a.dupe(u8, ct),
                     };
                 }
                 return .{
@@ -1220,161 +1490,76 @@ pub const Server = struct {
                     .body = outBody,
                 };
             }
-        };
 
-        // Initialize HTTP/2 session
-        var session = try @import("../protocols/http2/connection.zig").Session.init(self.allocator, .server, .{});
-        defer session.deinit();
-        try session.startHandshake();
-        conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
-        conn.writeAll(session.outbound.items) catch return error.WriteFailed;
-        session.outbound.clearRetainingCapacity();
-
-        if (initial.len > 0) {
-            try session.feed(initial);
-        }
-
-        var arenaState = std.heap.ArenaAllocator.init(self.allocator);
-        defer arenaState.deinit();
-        const transportMod = @import("../protocols/http2/transport.zig");
-
-        // ServerCtx accumulates streams
-        var sc = struct {
-            arena: Allocator,
-            sid: u31 = 0,
-            method: std.ArrayList(u8) = .empty,
-            path: std.ArrayList(u8) = .empty,
-            hdrs: std.ArrayList(transportMod.Header) = .empty,
-            body: std.ArrayList(u8) = .empty,
-            dispatched: bool = false,
-            responded: bool = true,
-
-            fn resetFor(s: *@This(), sid: u31) void {
-                s.sid = sid;
-                s.method.clearRetainingCapacity();
-                s.path.clearRetainingCapacity();
-                s.hdrs.clearRetainingCapacity();
-                s.body.clearRetainingCapacity();
-                s.dispatched = false;
-                s.responded = false;
-            }
-
-            fn onHeaders(ctxP: ?*anyopaque, sid: u31, flds: []@import("../protocols/http2/hpack.zig").HeaderField, endStream: bool) anyerror!void {
-                const s: *@This() = @ptrCast(@alignCast(ctxP.?));
-                s.resetFor(sid);
-                for (flds) |f| {
-                    if (std.mem.eql(u8, f.name, ":method")) {
-                        try s.method.appendSlice(s.arena, f.value);
-                    } else if (std.mem.eql(u8, f.name, ":path")) {
-                        try s.path.appendSlice(s.arena, f.value);
-                    } else if (!std.mem.startsWith(u8, f.name, ":")) {
-                        const name = try s.arena.dupe(u8, f.name);
-                        const value = try s.arena.dupe(u8, f.value);
-                        try s.hdrs.append(s.arena, .{ .name = name, .value = value });
-                    }
-                }
-                if (endStream) s.dispatched = true;
-            }
-
-            fn onData(ctxP: ?*anyopaque, sid: u31, data: []const u8) anyerror!void {
-                const s: *@This() = @ptrCast(@alignCast(ctxP.?));
-                if (sid != s.sid) return;
-                try s.body.appendSlice(s.arena, data);
-            }
-        }{ .arena = arenaState.allocator() };
-
-        session.cbs = .{
-            .ctx = &sc,
-            .onHeaders = @TypeOf(sc).onHeaders,
-            .onData = @TypeOf(sc).onData,
-        };
-
-        var buf: [16 * 1024]u8 = undefined;
-        while (!session.closed and !session.goawayReceived) {
-            if (session.outbound.items.len > 0) {
-                conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
-                conn.writeAll(session.outbound.items) catch break;
-                session.outbound.clearRetainingCapacity();
-            }
-            if (sc.dispatched and !sc.responded) {
-                sc.responded = true;
-                var resp = H2Bridge.handle(arenaState.allocator(), self, isTlsConn, sc.method.items, sc.path.items, sc.hdrs.items, sc.body.items) catch transportMod.HandlerResponse{ .status = 500 };
-
-                // The same content coding the HTTP/1 path applies, so one
-                // handler behaves identically across protocol versions.
-                const isHead = std.ascii.eqlIgnoreCase(sc.method.items, "HEAD");
+            /// Applies the same content coding the HTTP/1 path uses, so
+            /// one handler behaves identically across protocol versions.
+            fn decorate(ctxPtr: ?*anyopaque, allocator: Allocator, resp: *transportMod.HandlerResponse, method: []const u8, reqHeaders: []const transportMod.Header, extra: *std.ArrayList(transportMod.Header)) anyerror!?[]u8 {
+                const c: *H2Ctx = @ptrCast(@alignCast(ctxPtr.?));
+                const serverPtr = c.server;
+                const isHead = std.ascii.eqlIgnoreCase(method, "HEAD");
                 var clientAcceptEncoding: ?[]const u8 = null;
-                for (sc.hdrs.items) |h| {
+                for (reqHeaders) |h| {
                     if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) clientAcceptEncoding = h.value;
                 }
+                if (isHead or resp.status == 204 or resp.status == 304) return null;
 
-                const arena = arenaState.allocator();
-                var codedBody: ?[]u8 = null;
-                defer if (codedBody) |b| arena.free(b);
-                var outBody: []const u8 = resp.body;
-                var contentEncoding: ?[]const u8 = null;
-                var varyAcceptEncoding = false;
-                if (!isHead and resp.status != 204 and resp.status != 304) {
-                    const coding = compression.encodeResponseBody(
-                        arena,
-                        resp.body,
-                        clientAcceptEncoding,
-                        self.cfg.compression,
-                        self.cfg.maxCompressionInput,
-                    ) catch |err| switch (err) {
-                        error.NotAcceptable => blk: {
-                            resp.status = 406;
-                            resp.body = "";
-                            outBody = "";
-                            break :blk null;
-                        },
-                        else => return err,
-                    };
-                    if (coding) |c| {
-                        outBody = c.body;
-                        codedBody = if (c.contentEncoding != null) @constCast(c.body) else null;
-                        contentEncoding = c.contentEncoding;
-                        varyAcceptEncoding = c.varyAcceptEncoding;
-                    }
+                const coding = compression.encodeResponseBody(
+                    allocator,
+                    resp.body,
+                    clientAcceptEncoding,
+                    serverPtr.cfg.compression,
+                    serverPtr.cfg.maxCompressionInput,
+                ) catch |err| switch (err) {
+                    error.NotAcceptable => {
+                        resp.status = 406;
+                        resp.body = "";
+                        resp.headers = &.{};
+                        return null;
+                    },
+                    else => return err,
+                };
+                if (coding.contentEncoding) |ce| {
+                    try extra.append(allocator, .{ .name = "content-encoding", .value = ce });
                 }
-
-                var outFields = std.ArrayList(@import("../protocols/http2/hpack.zig").HeaderField).empty;
-                defer outFields.deinit(self.allocator);
-                var stBuf: [8]u8 = undefined;
-                var clBuf: [20]u8 = undefined;
-                const st = std.fmt.bufPrint(&stBuf, "{d}", .{resp.status}) catch "500";
-                // content-length must describe the bytes actually sent, so it
-                // is derived after coding, never from the handler's body.
-                const cl = clBuf[0..std.fmt.printInt(&clBuf, outBody.len, 10, .lower, .{})];
-                try outFields.append(self.allocator, .{ .name = ":status", .value = st });
-                try outFields.append(self.allocator, .{ .name = "content-length", .value = cl });
-                if (contentEncoding) |ce| {
-                    try outFields.append(self.allocator, .{ .name = "content-encoding", .value = ce });
+                if (coding.varyAcceptEncoding) {
+                    try extra.append(allocator, .{ .name = "vary", .value = "Accept-Encoding" });
                 }
-                if (varyAcceptEncoding) try outFields.append(self.allocator, .{ .name = "vary", .value = "Accept-Encoding" });
-                for (resp.headers) |h| {
-                    try outFields.append(self.allocator, .{ .name = h.name, .value = h.value });
-                }
-
-                try session.sendHeaders(sc.sid, outFields.items, outBody.len == 0);
-                // HEAD responses carry headers (with content-length) but no
-                // DATA frames, mirroring the HTTP/1 transport.
-                if (outBody.len > 0 and !isHead) {
-                    _ = try session.sendData(sc.sid, outBody, true);
-                } else if (isHead and outBody.len > 0) {
-                    _ = try session.sendData(sc.sid, "", true);
-                }
-                if (session.outbound.items.len > 0) {
-                    conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
-                    conn.writeAll(session.outbound.items) catch break;
-                    session.outbound.clearRetainingCapacity();
-                }
+                // Only a coded body is a fresh allocation; the identity
+                // path borrows the handler's buffer.
+                if (coding.contentEncoding == null) return null;
+                return @constCast(coding.body);
             }
-            conn.setReadTimeoutMs(self.cfg.keepAliveIdleTimeoutMs);
-            const n = conn.read(&buf) catch break;
-            if (n == 0) break;
-            session.feed(buf[0..n]) catch break;
-        }
+        };
+
+        // The shared transport implements the multiplexed HTTP/2 server:
+        // one state per concurrent stream, per-stream responses, and
+        // flow-controlled bodies that resume on WINDOW_UPDATE.
+        const H2Io = struct {
+            conn: StreamConn,
+            fn read(ctxPtr: ?*anyopaque, buf: []u8) anyerror!usize {
+                const s: *@This() = @ptrCast(@alignCast(ctxPtr.?));
+                return s.conn.read(buf);
+            }
+            fn writeAll(ctxPtr: ?*anyopaque, bytes: []const u8) anyerror!void {
+                const s: *@This() = @ptrCast(@alignCast(ctxPtr.?));
+                return s.conn.writeAll(bytes);
+            }
+        };
+        var h2io = H2Io{ .conn = conn };
+
+        conn.setWriteTimeoutMs(self.cfg.writeTimeoutMs);
+        conn.setReadTimeoutMs(self.cfg.keepAliveIdleTimeoutMs);
+
+        try transportMod.serveStream(self.allocator, .{
+            .ctx = &h2io,
+            .readFn = H2Io.read,
+            .writeAllFn = H2Io.writeAll,
+        }, .{
+            .handler = H2Bridge.handle,
+            .handlerCtx = &h2ctx,
+            .maxBodySize = self.cfg.maxBody,
+            .decorate = H2Bridge.decorate,
+        }, initial);
     }
 
     fn runHttp3Loop(self: *Server) void {
@@ -1393,7 +1578,10 @@ pub const Server = struct {
         const keyPem = self.tlsKeyPemLoaded orelse return error.NoPrivateKey;
 
         const oldConn = ep.conn;
-        const qconn = try quicConn.Connection.init(self.allocator, self.io, .server, .{});
+        const qconn = try quicConn.Connection.init(self.allocator, self.io, .server, .{
+            .retry = self.cfg.http3Retry,
+            .retryKey = self.cfg.http3RetryKey,
+        });
         defer {
             qconn.deinit();
             ep.conn = oldConn;
@@ -1436,177 +1624,288 @@ pub const Server = struct {
             .onData = quicHs.Driver.onData,
         };
 
-        try quicHs.serveHandshake(ep, pump, &drv, 10_000);
-
         var h3 = http3Conn.Connection.init(self.allocator, .server);
         defer h3.deinit();
 
-        const Acc = struct {
-            allocator: Allocator,
-            sid: u64 = std.math.maxInt(u64),
-            buf: std.ArrayList(u8) = .empty,
-            fin: bool = false,
-
-            fn onStream(c: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
-                const acc: *@This() = @ptrCast(@alignCast(c.?));
-                if (acc.sid == std.math.maxInt(u64) and sid % 4 == 0) acc.sid = sid;
-                if (sid != acc.sid) return;
-                acc.buf.appendSlice(acc.allocator, data) catch return;
-                if (fin) acc.fin = true;
+        var requests = std.AutoHashMap(u64, *H3Request).init(self.allocator);
+        defer {
+            var it = requests.valueIterator();
+            while (it.next()) |rp| {
+                rp.*.deinit();
+                self.allocator.destroy(rp.*);
             }
+            requests.deinit();
+        }
+        var ready = std.ArrayList(u64).empty;
+        defer ready.deinit(self.allocator);
+
+        const startMs: u64 = @intCast(clock.monotonicMillis(self.io));
+        var lastActivityMs: u64 = startMs;
+        var pumpCtx = H3PumpCtx{
+            .io = self.io,
+            .allocator = self.allocator,
+            .maxBody = self.cfg.maxBody,
+            .h3 = &h3,
+            .requests = &requests,
+            .ready = &ready,
+            .lastActivityMs = &lastActivityMs,
+        };
+        h3.cbs = .{
+            .ctx = &pumpCtx,
+            .onHeaders = H3PumpCtx.onHeaders,
+            .onData = H3PumpCtx.onData,
+            .onTrailers = H3PumpCtx.onTrailers,
+            .onMessageEnd = H3PumpCtx.onMessageEnd,
+            .onStreamReset = H3PumpCtx.onReset,
+            .onH3Error = H3PumpCtx.onH3Error,
+        };
+        qconn.cbs = .{
+            .ctx = &pumpCtx,
+            .onStreamData = H3PumpCtx.onStream,
+            .onStreamReset = H3PumpCtx.onReset,
         };
 
-        var acc = Acc{ .allocator = self.allocator };
-        defer acc.buf.deinit(self.allocator);
-        qconn.cbs = .{ .ctx = &acc, .onStreamData = Acc.onStream };
+        // The HTTP/3 layer is wired before the handshake runs: a peer may
+        // send request data in the same flight as its Finished, and that
+        // data must not be dropped for want of a reader.
+        self.h3Ready.store(true, .release);
+        defer self.h3Ready.store(false, .release);
+        try quicHs.serveHandshake(ep, pump, &drv, 10_000);
 
-        const startMs: u64 = @intCast(clock.millisNow());
+        // The control stream carries 1-RTT data, so it can only be sent
+        // once the handshake keys are in place.
+        try h3.sendControl(qconn, startMs);
+        try h3.sendQpackPrefixes(qconn, startMs);
+        _ = try ep.flush(null);
+
         while (!self.stopFlag.load(.acquire) and !self.h3Stop.load(.acquire)) {
-            const nowMs: u64 = @intCast(clock.millisNow());
-            if (nowMs -| startMs > 10_000) return error.Timeout;
+            const nowMs: u64 = @intCast(clock.monotonicMillis(self.io));
+            // Keep one connection alive for multiplexed requests, but
+            // reclaim it once it has been idle with no active streams.
+            if (requests.count() == 0 and nowMs -| lastActivityMs > 30_000) return error.Timeout;
+            if (nowMs -| startMs > 300_000) return error.Timeout;
             try quicHs.feedPumped(ep, pump, null, 200, nowMs);
-            if (!acc.fin) continue;
-
-            var off: usize = 0;
-            const fr = try http3Frame.parseFrame(acc.buf.items, &off);
-            const fields = try h3.qdec.decodeSectionCounted(fr.payload, 0, null);
-            defer h3.qdec.freeFields(fields);
-
-            var mStr: []const u8 = "GET";
-            var pStr: []const u8 = "/";
-            var arenaH3 = std.heap.ArenaAllocator.init(self.allocator);
-            defer arenaH3.deinit();
-            const a = arenaH3.allocator();
-
-            var reqBodyList = std.ArrayList(u8).empty;
-            while (off < acc.buf.items.len) {
-                if (http3Frame.parseFrame(acc.buf.items, &off)) |dfr| {
-                    if (dfr.frameType == 0x00) {
-                        try reqBodyList.appendSlice(a, dfr.payload);
-                    }
-                } else |_| break;
+            if (pumpCtx.err) |e| return e;
+            // A peer CONNECTION_CLOSE leaves the connection draining. Stop
+            // owning the endpoint immediately so the next client's Initial
+            // is not fed into this closed connection and rejected. If this
+            // side initiated the close, flush its CONNECTION_CLOSE first.
+            if (qconn.state == .closing) {
+                _ = ep.flush(null) catch {};
+                return;
             }
-            const reqBody = reqBodyList.items;
-
-            var ctxHdrs = try a.alloc(routerMod.Header, fields.len);
-            var hdrCount: usize = 0;
-            for (fields) |f| {
-                if (std.mem.eql(u8, f.name, ":method")) {
-                    mStr = f.value;
-                } else if (std.mem.eql(u8, f.name, ":path")) {
-                    pStr = f.value;
-                } else if (!std.mem.startsWith(u8, f.name, ":")) {
-                    ctxHdrs[hdrCount] = .{ .name = f.name, .value = f.value };
-                    hdrCount += 1;
-                }
-            }
-
-            const method = Method.fromString(mStr) orelse .GET;
-            var cleanPath = pStr;
-            if (std.mem.indexOfAny(u8, cleanPath, "?#")) |idx| {
-                cleanPath = cleanPath[0..idx];
-            }
-            var queryPart: []const u8 = "";
-            if (std.mem.indexOfScalar(u8, pStr, '?')) |qi| {
-                var q = pStr[qi + 1 ..];
-                if (std.mem.indexOfScalar(u8, q, '#')) |hi| q = q[0..hi];
-                queryPart = q;
-            }
-
-            var ctx = Context{
-                .allocator = a,
-                .io = self.io,
-                .headers = ctxHdrs[0..hdrCount],
-                .path = cleanPath,
-                .query = queryPart,
-                .method = method,
-                .body = reqBody,
-                .isTls = true,
-                .trustForwarded = self.cfg.trustForwardedHeaders,
-            };
-
-            var res = self.router.dispatch(&ctx);
-
-            // The same content coding the HTTP/1 and HTTP/2 paths apply, so one
-            // handler behaves identically across protocol versions.
-            var clientAcceptEncoding: ?[]const u8 = null;
-            for (ctxHdrs[0..hdrCount]) |h| {
-                if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) clientAcceptEncoding = h.value;
-            }
-
-            var codedBody: ?[]u8 = null;
-            defer if (codedBody) |b| a.free(b);
-            var outBody: []const u8 = res.body;
-            var contentEncoding: ?[]const u8 = null;
-            var varyAcceptEncoding = false;
-            if (res.status != 204 and res.status != 304) {
-                const coding = compression.encodeResponseBody(
-                    a,
-                    res.body,
-                    clientAcceptEncoding,
-                    self.cfg.compression,
-                    self.cfg.maxCompressionInput,
-                ) catch |err| switch (err) {
-                    error.NotAcceptable => blk: {
-                        res.status = 406;
-                        res.body = "";
-                        res.contentType = null;
-                        outBody = "";
-                        break :blk null;
-                    },
-                    else => return err,
-                };
-                if (coding) |c| {
-                    outBody = c.body;
-                    codedBody = if (c.contentEncoding != null) @constCast(c.body) else null;
-                    contentEncoding = c.contentEncoding;
-                    varyAcceptEncoding = c.varyAcceptEncoding;
-                }
-            }
-
-            var qenc = http3Qpack.Encoder.init(self.allocator);
-            defer qenc.deinit();
-            var rs = http3Conn.RequestStream{ .id = acc.sid, .allocator = self.allocator, .qpack = &qenc };
-
-            var respHeaders = std.ArrayList(http3Qpack.FieldLine).empty;
-            defer respHeaders.deinit(a);
-            for (res.headers) |h| {
-                try respHeaders.append(a, .{ .name = h.name, .value = h.value });
-            }
-            if (res.contentType) |ct| {
-                try respHeaders.append(a, .{ .name = "content-type", .value = ct });
-            }
-            if (contentEncoding) |ce| {
-                try respHeaders.append(a, .{ .name = "content-encoding", .value = ce });
-            }
-            if (varyAcceptEncoding) try respHeaders.append(a, .{ .name = "vary", .value = "Accept-Encoding" });
-
-            const rhead = try rs.buildResponseHeaders(res.status, respHeaders.items);
-            defer self.allocator.free(rhead);
-            const rdata = try rs.buildData(outBody);
-            defer self.allocator.free(rdata);
-
-            var wire = std.ArrayList(u8).empty;
-            defer wire.deinit(self.allocator);
-            try wire.appendSlice(self.allocator, rhead);
-            try wire.appendSlice(self.allocator, rdata);
-
-            const SendHelper = struct {
-                var sId: u64 = 0;
-                var sData: []const u8 = "";
-                pub fn build(gpa: Allocator, payload: *std.ArrayList(u8)) quicConn.Error!void {
-                    quicFrames.encode(payload, gpa, .{ .stream = .{ .id = sId, .offset = 0, .data = sData, .fin = true } }) catch
-                        return quicConn.Error.OutOfMemory;
-                }
-            };
-            SendHelper.sId = acc.sid;
-            SendHelper.sData = wire.items;
-            try qconn.sendFrames(.application, SendHelper.build, 0);
+            if (qconn.state == .draining or qconn.state == .closed) return;
+            try h3.pumpQpack(qconn, nowMs);
             _ = try ep.flush(null);
-            return;
+
+            while (ready.items.len > 0) {
+                const sid = ready.orderedRemove(0);
+                const req = requests.get(sid) orelse continue;
+                _ = requests.remove(sid);
+                defer {
+                    req.deinit();
+                    self.allocator.destroy(req);
+                }
+                if (req.tooLarge) {
+                    h3.resetStream(qconn, sid, .requestRejected, nowMs) catch {};
+                    h3.discardRequestStream(sid);
+                    continue;
+                }
+                if (req.failed) {
+                    h3.resetStream(qconn, sid, req.h3Error orelse .generalProtocolError, nowMs) catch {};
+                    h3.discardRequestStream(sid);
+                    continue;
+                }
+                if (!req.done) {
+                    req.queued = false;
+                    continue;
+                }
+                var peerBuf: [64]u8 = undefined;
+                const peer = if (ep.peer) |p| addressMod.Address.fromStd(p).formatBuf(&peerBuf) else "";
+                self.dispatchH3Request(&h3, qconn, req, peer) catch |err| {
+                    h3.resetStream(qconn, sid, .internalError, nowMs) catch {};
+                    h3.discardRequestStream(sid);
+                    if (err == error.OutOfMemory) return err;
+                    continue;
+                };
+            }
+            try h3.pumpQpack(qconn, nowMs);
+            _ = try ep.flush(null);
         }
     }
 
+    /// Dispatches one fully received HTTP/3 request and writes its
+    /// response on the same stream. Concurrent requests share `h3` and
+    /// the QUIC connection; QPACK encoding is serialized by the caller.
+    fn dispatchH3Request(
+        self: *Server,
+        h3: *http3Conn.Connection,
+        qconn: *quicConn.Connection,
+        req: *H3Request,
+        peer: []const u8,
+    ) !void {
+        var arenaH3 = std.heap.ArenaAllocator.init(self.allocator);
+        defer arenaH3.deinit();
+        const a = arenaH3.allocator();
+        const fields = req.fields.items;
+        const reqBody = req.body.items;
+
+        var mStr: []const u8 = "GET";
+        var pStr: []const u8 = "/";
+        var authorityStr: ?[]const u8 = null;
+        var sawHost = false;
+        var ctxHdrs = try a.alloc(routerMod.Header, fields.len + 1);
+        var hdrCount: usize = 0;
+        for (fields) |f| {
+            if (std.mem.eql(u8, f.name, ":method")) {
+                mStr = f.value;
+            } else if (std.mem.eql(u8, f.name, ":path")) {
+                pStr = f.value;
+            } else if (std.mem.eql(u8, f.name, ":authority")) {
+                authorityStr = f.value;
+            } else if (!std.mem.startsWith(u8, f.name, ":")) {
+                if (std.mem.eql(u8, f.name, "host")) sawHost = true;
+                ctxHdrs[hdrCount] = .{ .name = f.name, .value = f.value };
+                hdrCount += 1;
+            }
+        }
+        // HTTP/1-style handlers expect the authority as Host when the
+        // client sent no explicit host field (RFC 9114 Section 4.3.1).
+        if (!sawHost) {
+            if (authorityStr) |authority| {
+                ctxHdrs[hdrCount] = .{ .name = "host", .value = authority };
+                hdrCount += 1;
+            }
+        }
+
+        const knownMethod = Method.fromString(mStr);
+        var cleanPath = pStr;
+        if (std.mem.indexOfAny(u8, cleanPath, "?#")) |idx| {
+            cleanPath = cleanPath[0..idx];
+        }
+        var queryPart: []const u8 = "";
+        if (std.mem.indexOfScalar(u8, pStr, '?')) |qi| {
+            var q = pStr[qi + 1 ..];
+            if (std.mem.indexOfScalar(u8, q, '#')) |hi| q = q[0..hi];
+            queryPart = q;
+        }
+
+        var ctx = Context{
+            .allocator = a,
+            .io = self.io,
+            .headers = ctxHdrs[0..hdrCount],
+            .path = cleanPath,
+            .query = queryPart,
+            .method = knownMethod orelse .GET,
+            .body = reqBody,
+            .isTls = true,
+            .peerAddress = peer,
+            .trustForwarded = self.trustForwardedFor(peer),
+            .trustedProxies = self.cfg.trustedProxies,
+        };
+
+        var res = if (knownMethod != null)
+            self.router.dispatch(&ctx)
+        else
+            Response{ .status = 501, .body = "method not supported" };
+
+        // The same content coding the HTTP/1 and HTTP/2 paths apply, so one
+        // handler behaves identically across protocol versions.
+        var clientAcceptEncoding: ?[]const u8 = null;
+        for (ctxHdrs[0..hdrCount]) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "accept-encoding")) clientAcceptEncoding = h.value;
+        }
+
+        const isHead = std.mem.eql(u8, mStr, "HEAD");
+        const isConnect = std.mem.eql(u8, mStr, "CONNECT");
+        const statusAllowsBody = res.status != 204 and res.status != 205 and res.status != 304;
+        const connectTunnel = isConnect and res.status < 300;
+        var codedBody: ?[]u8 = null;
+        defer if (codedBody) |b| a.free(b);
+        var outBody: []const u8 = res.body;
+        var contentEncoding: ?[]const u8 = null;
+        var varyAcceptEncoding = false;
+        if (statusAllowsBody and !isHead) {
+            const coding = compression.encodeResponseBody(
+                a,
+                res.body,
+                clientAcceptEncoding,
+                self.cfg.compression,
+                self.cfg.maxCompressionInput,
+            ) catch |err| switch (err) {
+                error.NotAcceptable => blk: {
+                    res.status = 406;
+                    res.body = "";
+                    res.contentType = null;
+                    outBody = "";
+                    break :blk null;
+                },
+                else => return err,
+            };
+            if (coding) |c| {
+                outBody = c.body;
+                codedBody = if (c.contentEncoding != null) @constCast(c.body) else null;
+                contentEncoding = c.contentEncoding;
+                varyAcceptEncoding = c.varyAcceptEncoding;
+            }
+        }
+
+        if (res.status < 200 or res.status > 599) res.status = 500;
+        var rs = h3.createRequestStream(req.sid);
+
+        var respHeaders = std.ArrayList(http3Qpack.FieldLine).empty;
+        defer respHeaders.deinit(a);
+        // Content-Length describes the bytes that a GET would send; HEAD
+        // keeps the length but suppresses the DATA frame. 204/205/304
+        // responses carry no content framing, and a successful CONNECT
+        // response is a tunnel without Content-Length.
+        if (statusAllowsBody and !connectTunnel) {
+            var clBuf: [20]u8 = undefined;
+            const cl = clBuf[0..std.fmt.printInt(&clBuf, outBody.len, 10, .lower, .{})];
+            try respHeaders.append(a, .{ .name = "content-length", .value = cl });
+        }
+        for (res.headers) |h| {
+            if (h.name.len == 0 or h.name[0] == ':') continue;
+            if (std.ascii.eqlIgnoreCase(h.name, "content-length") or
+                std.ascii.eqlIgnoreCase(h.name, "connection") or
+                std.ascii.eqlIgnoreCase(h.name, "keep-alive") or
+                std.ascii.eqlIgnoreCase(h.name, "proxy-connection") or
+                std.ascii.eqlIgnoreCase(h.name, "transfer-encoding") or
+                std.ascii.eqlIgnoreCase(h.name, "upgrade"))
+            {
+                continue;
+            }
+            try respHeaders.append(a, .{ .name = h.name, .value = h.value });
+        }
+        if (res.contentType) |ct| {
+            try respHeaders.append(a, .{ .name = "content-type", .value = ct });
+        }
+        if (contentEncoding) |ce| {
+            try respHeaders.append(a, .{ .name = "content-encoding", .value = ce });
+        }
+        if (varyAcceptEncoding) try respHeaders.append(a, .{ .name = "vary", .value = "Accept-Encoding" });
+
+        const rhead = try rs.buildResponseHeaders(res.status, respHeaders.items);
+        defer self.allocator.free(rhead);
+
+        var wire = std.ArrayList(u8).empty;
+        defer wire.deinit(self.allocator);
+        try wire.appendSlice(self.allocator, rhead);
+        const sendBody = statusAllowsBody and !isHead and outBody.len > 0;
+        if (sendBody) {
+            const rdata = try rs.buildData(outBody);
+            defer self.allocator.free(rdata);
+            try wire.appendSlice(self.allocator, rdata);
+        }
+
+        // Queue the QPACK encoder instructions the response section
+        // references before the response stream bytes go out.
+        const nowMs: u64 = @intCast(clock.monotonicMillis(self.io));
+        try h3.pumpQpack(qconn, nowMs);
+        try h3.sendStreamBytes(qconn, req.sid, wire.items, true, nowMs);
+        try h3.pumpQpack(qconn, nowMs);
+        h3.discardRequestStream(req.sid);
+    }
     fn serveHttp1Connection(self: *Server, conn: StreamConn, isTlsConn: bool, initial: []const u8) !void {
         if (!self.cfg.keepAlive) {
             var arenaOne = std.heap.ArenaAllocator.init(self.allocator);
@@ -1634,7 +1933,7 @@ pub const Server = struct {
     }
 
     fn serveOneRequestBuffered(self: *Server, conn: StreamConn, arena: Allocator, requestIndex: usize, forceClose: bool, initial: []const u8, isTlsConn: bool) !bool {
-        const t0 = clock.millisNow();
+        const t0 = clock.monotonicMillis(self.io);
         self.metricsRegistry.recordRequest();
         var headBuf: [maxHeadBytes]u8 = undefined;
         var filled: usize = 0;
@@ -1698,24 +1997,24 @@ pub const Server = struct {
             _ = sendSimpleError(conn, 400, "bad headers") catch 0;
             return false;
         };
+        if (!semanticsMod.validRequestTargetAndHost(reqHead.method, reqHead.path, reqHead.minorVersion, fields[0..blk.count])) {
+            _ = sendSimpleError(conn, 400, "invalid request target or Host") catch 0;
+            return false;
+        }
 
         const hdrs = arena.alloc(routerMod.Header, blk.count) catch return false;
         for (fields[0..blk.count], 0..) |f, i| hdrs[i] = .{ .name = f.name, .value = f.value };
 
         // Connection reuse decision (RFC 9112 Section 7): explicit "close" wins;
         // HTTP/1.0 defaults to close unless it requested keep-alive.
-        var clientClose = forceClose or reqHead.minorVersion == 0;
-        var clientKa10 = false;
-        for (hdrs) |h| {
-            if (!std.ascii.eqlIgnoreCase(h.name, "connection")) continue;
-            if (std.ascii.findIgnoreCase(h.value, "close") != null) clientClose = true;
-            if (std.ascii.findIgnoreCase(h.value, "keep-alive") != null) clientKa10 = true;
-        }
-        if (reqHead.minorVersion == 0 and clientKa10) clientClose = false;
+        const clientVersion: semanticsMod.Version = if (reqHead.minorVersion == 0) .http10 else .http11;
+        var clientClose = forceClose or !semanticsMod.shouldKeepAlive(clientVersion, hdrs);
 
         // Body: Content-Length or chunked (both bounded by cfg.maxBody).
         var body: []u8 = "";
-        const framing = parserMod.decideFraming(fields[0..blk.count], false, 0, 0) catch {
+        const framing = parserMod.framingFull(fields[0..blk.count], .{
+            .isHttp10 = reqHead.minorVersion == 0,
+        }) catch {
             _ = sendSimpleError(conn, 400, "invalid message framing") catch 0;
             return false;
         };
@@ -1761,7 +2060,9 @@ pub const Server = struct {
                 },
                 .chunked => {
                     // Persistent decoder with bounded retained wire data.
-                    var dec = parserMod.ChunkedDecoder.init();
+                    var dec = parserMod.ChunkedDecoder.initWithOptions(.{
+                        .allowLfLineEndings = self.cfg.allowLfLineEndings,
+                    });
                     var acc: std.ArrayList(u8) = .empty;
                     var raw: std.ArrayList(u8) = .empty;
                     raw.appendSlice(arena, headBuf[blk.end..filled]) catch return false;
@@ -1830,7 +2131,9 @@ pub const Server = struct {
             .method = method,
             .body = body,
             .isTls = isTlsConn,
-            .trustForwarded = self.cfg.trustForwardedHeaders,
+            .peerAddress = conn.peerAddress(),
+            .trustForwarded = self.trustForwardedFor(conn.peerAddress()),
+            .trustedProxies = self.cfg.trustedProxies,
         };
         const res: Response = self.router.dispatch(&ctx);
 
@@ -1839,7 +2142,7 @@ pub const Server = struct {
             self.metricsRegistry.recordError();
             return false;
         };
-        const durNs: u64 = @intCast(@max(0, (clock.millisNow() -| t0) * 1_000_000));
+        const durNs: u64 = @intCast(@max(0, (clock.monotonicMillis(self.io) -| t0) * 1_000_000));
         self.metricsRegistry.recordResponseFull(res.status, durNs, bytesOut);
         self.emitAccess(reqHead.method, reqHead.path, res.status, body.len, bytesOut, t0);
         return !clientClose;
@@ -1862,7 +2165,7 @@ pub const Server = struct {
     /// Deliver a requestCompleted event to the application callback.
     /// Secrets never appear here: only method/path/status/timing/byte counts.
     fn emitAccess(self: *Server, method: []const u8, path: []const u8, status: u16, bytesIn: usize, bytesOut: usize, t0: i64) void {
-        const dur = clock.millisNow() -| t0;
+        const dur = clock.monotonicMillis(self.io) -| t0;
         self.emit(.{
             .kind = .requestCompleted,
             .level = .info,
@@ -1989,6 +2292,60 @@ pub fn reasonFor(status: u16) []const u8 {
 
 // Tests
 
+test "initial protocol classification waits for fragmented TLS and HTTP2 prefixes" {
+    const h2Preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    for (1..16) |len| {
+        try std.testing.expectEqual(Server.InitialProtocol.needMore, Server.classifyInitialProtocol(h2Preface[0..len], false, true));
+    }
+    try std.testing.expectEqual(Server.InitialProtocol.http2, Server.classifyInitialProtocol(h2Preface[0..16], false, true));
+    try std.testing.expectEqual(Server.InitialProtocol.needMore, Server.classifyInitialProtocol(&.{0x16}, true, true));
+    try std.testing.expectEqual(Server.InitialProtocol.needMore, Server.classifyInitialProtocol(&.{ 0x16, 0x03 }, true, true));
+    try std.testing.expectEqual(Server.InitialProtocol.tls, Server.classifyInitialProtocol(&.{ 0x16, 0x03, 0x03 }, true, true));
+    try std.testing.expectEqual(Server.InitialProtocol.http1, Server.classifyInitialProtocol("PO", true, true));
+}
+
+test "fragmented cleartext HTTP2 preface is sniffed before HTTP1 dispatch" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = try Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 1,
+        .initialRequestTimeoutMs = 2_000,
+    });
+    defer srv.deinit();
+    const Runner = struct {
+        fn run(server: *Server) void {
+            server.run();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&srv});
+    defer thread.join();
+
+    var client = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    defer client.close();
+    client.setReadTimeoutMs(2_000);
+    const preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    try client.writeAll(preface[0..1]);
+    clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 50);
+    try client.writeAll(preface[1..]);
+    try client.writeAll(&.{ 0, 0, 0, 4, 0, 0, 0, 0, 0 });
+
+    var serverFrame: [9]u8 = undefined;
+    var received: usize = 0;
+    while (received < serverFrame.len) {
+        const n = try client.read(serverFrame[received..]);
+        if (n == 0) break;
+        received += n;
+    }
+    try std.testing.expectEqual(serverFrame.len, received);
+    try std.testing.expectEqual(@as(u8, 4), serverFrame[3]);
+    try std.testing.expectEqual(@as(u8, 0), serverFrame[4]);
+}
+
 fn helloHandler(ctx: *Context) anyerror!Response {
     if (std.mem.eql(u8, ctx.path, "/hello")) {
         // Issue 47: `Content-Security-Policy-Report-Only` is 35 bytes and
@@ -2014,6 +2371,34 @@ fn helloHandler(ctx: *Context) anyerror!Response {
         };
     }
     return .{ .status = 404, .body = "" };
+}
+
+test "HTTP/1.1 server rejects request without Host before dispatch" {
+    const a = std.testing.allocator;
+    var ioContext = tcp.IoContext.init(a) catch return;
+    defer ioContext.deinit();
+
+    var srv = Server.init(a, ioContext.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+    defer srv.deinit();
+    try srv.router.get("/", helloHandler, .{});
+
+    const Runner = struct {
+        fn run(server: *Server) void {
+            server.run();
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    defer thread.join();
+
+    var client = tcp.connect(ioContext.io, "127.0.0.1", srv.localPort()) catch return;
+    defer client.close();
+    try client.writeAll("GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
+
+    var response: [1024]u8 = undefined;
+    const n = client.read(&response) catch return;
+    try std.testing.expect(std.mem.startsWith(u8, response[0..n], "HTTP/1.1 400 Bad Request"));
+
+    srv.requestShutdown();
 }
 
 test "template route renders through tree-sitter pipeline end to end" {
@@ -2590,7 +2975,7 @@ test "connection limit rejects overload then accepts clients after a stalled upl
     var spins: usize = 0;
     while (spins < 400) : (spins += 1) {
         if (ActiveCount.get(&srv) == 1) break;
-        clock.sleepMillis(5);
+        clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 5);
     }
     try std.testing.expectEqual(@as(usize, 1), ActiveCount.get(&srv));
 
@@ -2615,7 +3000,7 @@ test "connection limit rejects overload then accepts clients after a stalled upl
             released = true;
             break;
         }
-        clock.sleepMillis(5);
+        clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 5);
     }
     try std.testing.expect(released);
 
@@ -2861,6 +3246,76 @@ test "strict HTTPS mode rejects plain HTTP with 400 Bad Request" {
     srv.requestShutdown();
 }
 
+test "server default TLS ALPN negotiates HTTP/2 and serves a request" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = try Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 1,
+        .tls = .{
+            .certificatePem = h3TestCertPem,
+            .privateKeyPem = h3TestKeyPem,
+        },
+    });
+    defer srv.deinit();
+    try srv.router.get("/h2-tls", returnOk, .{});
+    try std.testing.expectEqual(alpnMod.Protocol.h2, srv.cfg.tls.?.alpn[0]);
+
+    const Runner = struct {
+        fn run(server: *Server) void {
+            server.run();
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&srv});
+    defer thread.join();
+
+    var sock = try tcp.connect(ctx.io, "127.0.0.1", srv.localPort());
+    errdefer sock.close();
+    var tlsClient = try @import("../protocols/tls/tlsClient.zig").Client.init(a, ctx.io, .{});
+    defer tlsClient.deinit();
+    var tlsConn = try tlsClient.connect(&sock, "127.0.0.1", .{
+        .verify = .caBundle,
+        .caPem = h3TestCertPem,
+        .alpn = &.{.h2},
+    });
+    var tlsTransferred = true;
+    defer if (tlsTransferred) tlsConn.deinit();
+
+    const h2 = try @import("../protocols/http2/transport.zig").Client.connectTls(a, &tlsConn);
+    tlsTransferred = false;
+    defer h2.deinit();
+
+    const response = try h2.request("GET", "/h2-tls", &.{}, "https", "127.0.0.1", null, 1024);
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "server TLS initialization fails instead of silently serving cleartext" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    const result = Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .tls = .{
+            .certificatePem = "-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----",
+            .privateKeyPem = h3TestKeyPem,
+        },
+    });
+    if (result) |serverValue| {
+        var server = serverValue;
+        server.deinit();
+        return error.InvalidTlsIdentityAccepted;
+    } else |_| {}
+}
+
 var gTlsFailedSeen: bool = false;
 var gTlsFailedMu: sync.Spinlock = .{};
 
@@ -2909,7 +3364,7 @@ test "malformed TLS handshake emits tlsHandshakeFailed event" {
     try client.writeAll(&badTls);
 
     // Give server worker moment to process and emit event
-    clock.sleepMillis(50);
+    clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 50);
 
     srv.requestShutdown();
 
@@ -3102,7 +3557,7 @@ test "port zero allocates ephemeral port; strict rejects occupied port" {
 
 /// Self-signed localhost credential used by the HTTP/3 tests. ECDSA
 /// P-256, valid for the `127.0.0.1` SAN.
-const h3TestCertPem =
+pub const h3TestCertPem =
     \\-----BEGIN CERTIFICATE-----
     \\MIIBmTCCAT+gAwIBAgIURhx0CMJWTUTFJXV9z2OlmW/cNlcwCgYIKoZIzj0EAwIw
     \\FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDkwOTE4MTczOFoXDTM2MDkwNjE4
@@ -3116,7 +3571,7 @@ const h3TestCertPem =
     \\-----END CERTIFICATE-----
 ;
 
-const h3TestKeyPem =
+pub const h3TestKeyPem =
     \\-----BEGIN PRIVATE KEY-----
     \\MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyp549r9FrXbm02Cn
     \\81gAdAbUzHatPYQWVDIWnQdCMPChRANCAATvUPikzRIA8ryx237GUQRJlf8Qmgod
@@ -3126,10 +3581,10 @@ const h3TestKeyPem =
 
 test "Server high-level HTTP/3 initialization and endpoint lifecycle" {
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{
+    var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
         .http3 = true,
@@ -3138,7 +3593,7 @@ test "Server high-level HTTP/3 initialization and endpoint lifecycle" {
             .privateKeyPem = h3TestKeyPem,
         },
         .enableDocs = false,
-    }) catch return;
+    });
     defer srv.deinit();
 
     try std.testing.expect(srv.h3Endpoint != null);
@@ -3156,10 +3611,10 @@ test "HTTP/3 endpoint reports the port HTTP/1.1 does not share" {
     // The named accessor is the supported way to find the UDP port, so it
     // must agree with the endpoint even when the two ports diverge.
     const a = std.testing.allocator;
-    var ctx = tcp.IoContext.init(a) catch return;
+    var ctx = try tcp.IoContext.init(a);
     defer ctx.deinit();
 
-    var srv = Server.init(a, ctx.io, .{
+    var srv = try Server.init(a, ctx.io, .{
         .host = "127.0.0.1",
         .port = 0,
         .http3 = true,
@@ -3168,7 +3623,7 @@ test "HTTP/3 endpoint reports the port HTTP/1.1 does not share" {
             .privateKeyPem = h3TestKeyPem,
         },
         .enableDocs = false,
-    }) catch return;
+    });
     defer srv.deinit();
 
     const reported = srv.http3.port().?;
@@ -3212,6 +3667,40 @@ test "Server shares one port number between HTTP/1.1 and HTTP/3 when the port is
     try std.testing.expectEqual(freePort, srv.http3.port().?);
 }
 
+test "explicit HTTP/3 port conflict fails instead of silently rebinding" {
+    // An explicit port is a promise: if UDP cannot take it, init must fail
+    // (and release the TCP listener), not move HTTP/3 somewhere else.
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var probe = udpMod.UdpSocket.bind(ctx.io, 0) catch return;
+    defer probe.close();
+    const port = switch (probe.socket.address) {
+        .ip4 => |v| v.port,
+        .ip6 => |v| v.port,
+    };
+
+    var addr = addressMod.Address.unspecified4(port);
+    var tcpProbe = tcp.Listener.bindAddress(ctx.io, &addr) catch return;
+    tcpProbe.close(ctx.io);
+
+    try std.testing.expectError(error.AddressInUse, Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = port,
+        .portStrategy = .strict,
+        .http3 = true,
+        .tls = .{
+            .certificatePem = h3TestCertPem,
+            .privateKeyPem = h3TestKeyPem,
+        },
+        .enableDocs = false,
+    }));
+
+    var rebound = tcp.Listener.bindAddress(ctx.io, &addr) catch return error.TcpPortLeaked;
+    rebound.close(ctx.io);
+}
+
 test "Server reports no HTTP/3 port when HTTP/3 is disabled" {
     const a = std.testing.allocator;
     var ctx = tcp.IoContext.init(a) catch return;
@@ -3225,4 +3714,129 @@ test "Server reports no HTTP/3 port when HTTP/3 is disabled" {
     defer srv.deinit();
 
     try std.testing.expectEqual(@as(?u16, null), srv.http3.port());
+}
+
+test "trusted proxy rules gate forwarded headers" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    var srv = Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .trustForwardedHeaders = true,
+        .trustedProxies = &.{ "10.0.0.0/8", "::1" },
+    }) catch return;
+    defer srv.deinit();
+
+    try std.testing.expect(srv.trustForwardedFor("10.1.2.3"));
+    try std.testing.expect(srv.trustForwardedFor("::1"));
+    try std.testing.expect(!srv.trustForwardedFor("127.0.0.1"));
+    try std.testing.expect(!srv.trustForwardedFor(""));
+
+    // An empty proxy list explicitly trusts every peer.
+    srv.cfg.trustedProxies = &.{};
+    try std.testing.expect(srv.trustForwardedFor("127.0.0.1"));
+
+    srv.cfg.trustForwardedHeaders = false;
+    try std.testing.expect(!srv.trustForwardedFor("127.0.0.1"));
+}
+
+test "direct clients cannot spoof the remote address through forwarded headers" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    const H = struct {
+        fn handle(c: *Context) anyerror!Response {
+            return .{
+                .body = c.remoteAddress() orelse "none",
+                .contentType = "text/plain",
+            };
+        }
+    };
+
+    var srv = Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 2,
+        .trustForwardedHeaders = true,
+        .trustedProxies = &.{"10.0.0.1"},
+    }) catch return;
+    defer srv.deinit();
+    try srv.router.get("/", H.handle, .{});
+
+    const Runner = struct {
+        fn run(s: *Server) void {
+            s.run();
+        }
+    };
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    defer t.join();
+
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    defer client.close();
+    try client.writeAll("GET / HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 203.0.113.9\r\nX-Real-IP: 203.0.113.9\r\nConnection: close\r\n\r\n");
+
+    var buf: [2048]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = client.read(buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "\r\n\r\n127.0.0.1") != null);
+
+    srv.requestShutdown();
+}
+
+test "trusted proxies resolve the rightmost client address" {
+    const a = std.testing.allocator;
+    var ctx = tcp.IoContext.init(a) catch return;
+    defer ctx.deinit();
+
+    const H = struct {
+        fn handle(c: *Context) anyerror!Response {
+            return .{
+                .body = c.remoteAddress() orelse "none",
+                .contentType = "text/plain",
+            };
+        }
+    };
+
+    var srv = Server.init(a, ctx.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+        .maxConnections = 2,
+        .trustForwardedHeaders = true,
+        .trustedProxies = &.{"127.0.0.1"},
+    }) catch return;
+    defer srv.deinit();
+    try srv.router.get("/", H.handle, .{});
+
+    const Runner = struct {
+        fn run(s: *Server) void {
+            s.run();
+        }
+    };
+    const t = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    defer t.join();
+
+    var client = tcp.connect(ctx.io, "127.0.0.1", srv.localPort()) catch return;
+    defer client.close();
+    try client.writeAll("GET / HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 203.0.113.9, 198.51.100.7\r\nConnection: close\r\n\r\n");
+
+    var buf: [2048]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = client.read(buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..total], "\r\n\r\n198.51.100.7") != null);
+
+    srv.requestShutdown();
 }

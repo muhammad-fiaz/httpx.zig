@@ -28,7 +28,7 @@ pub fn main() !void {
     server.run();
 }
 
-fn statusHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn statusHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     _ = ctx;
     return .{ .status = 200, .body = "{\"status\":\"ok\"}", .contentType = "application/json" };
 }

@@ -1,5 +1,5 @@
-//! QUIC transport parameters (RFC 9000 section 18), encoding order and
-//! validation rules matching ngtcp2TransportParams.
+//! QUIC transport parameters (RFC 9000 section 18), including encoding
+//! order and validation rules.
 //!
 //! Wire: sequence of {varint id, varint length, opaque value}. Absent
 //! numeric parameters take their defaults; presence-sensitive CIDs are
@@ -64,8 +64,17 @@ inline fn putV(out: *std.ArrayList(u8), gpa: Allocator, v: u64) !void {
     try out.appendSlice(gpa, tmp[0..n]);
 }
 
-fn u64be(v: u64) [8]u8 {
-    return std.mem.toBytes(std.mem.nativeToBig(u64, v));
+/// Encodes a numeric transport parameter.
+///
+/// RFC 9000 Section 18.2 encodes every numeric transport parameter value as
+/// a variable-length integer, and the value's length is the length of that
+/// varint. A fixed-width integer is not a valid encoding: peers that check
+/// the canonical varint length reject the whole parameter block with
+/// TRANSPORT_PARAMETER_ERROR.
+fn putVarintParam(out: *std.ArrayList(u8), gpa: Allocator, id: u64, v: u64) !void {
+    var tmp: [8]u8 = undefined;
+    const n = varint.encode(tmp[0..], v) catch return error.BufferTooSmall;
+    try putParam(out, gpa, id, tmp[0..n]);
 }
 
 /// Encodes the numeric parameter set (CIDs appended separately by the
@@ -76,26 +85,26 @@ pub fn encode(out: *std.ArrayList(u8), gpa: Allocator, p: Params) !void {
     if (p.activeConnectionIdLimit < 2) return Error.InvalidParameter;
     // Only emit non-default values where the spec allows omission.
     if (p.maxIdleTimeoutMs != 0)
-        try putParam(out, gpa, @backingInt(ParamId.maxIdleTimeout), &u64be(p.maxIdleTimeoutMs));
-    try putParam(out, gpa, @backingInt(ParamId.maxUdpPayloadSize), &u64be(p.maxUdpPayloadSize));
+        try putVarintParam(out, gpa, @backingInt(ParamId.maxIdleTimeout), p.maxIdleTimeoutMs);
+    try putVarintParam(out, gpa, @backingInt(ParamId.maxUdpPayloadSize), p.maxUdpPayloadSize);
     if (p.initialMaxData != 0)
-        try putParam(out, gpa, @backingInt(ParamId.initialMaxData), &u64be(p.initialMaxData));
+        try putVarintParam(out, gpa, @backingInt(ParamId.initialMaxData), p.initialMaxData);
     if (p.initialMaxStreamDataBidiLocal != 0)
-        try putParam(out, gpa, @backingInt(ParamId.initialMaxStreamDataBidiLocal), &u64be(p.initialMaxStreamDataBidiLocal));
+        try putVarintParam(out, gpa, @backingInt(ParamId.initialMaxStreamDataBidiLocal), p.initialMaxStreamDataBidiLocal);
     if (p.initialMaxStreamDataBidiRemote != 0)
-        try putParam(out, gpa, @backingInt(ParamId.initialMaxStreamDataBidiRemote), &u64be(p.initialMaxStreamDataBidiRemote));
+        try putVarintParam(out, gpa, @backingInt(ParamId.initialMaxStreamDataBidiRemote), p.initialMaxStreamDataBidiRemote);
     if (p.initialMaxStreamDataUni != 0)
-        try putParam(out, gpa, @backingInt(ParamId.initialMaxStreamDataUni), &u64be(p.initialMaxStreamDataUni));
+        try putVarintParam(out, gpa, @backingInt(ParamId.initialMaxStreamDataUni), p.initialMaxStreamDataUni);
     if (p.initialMaxStreamsBidi != 0)
-        try putParam(out, gpa, @backingInt(ParamId.initialMaxStreamsBidi), &u64be(p.initialMaxStreamsBidi));
+        try putVarintParam(out, gpa, @backingInt(ParamId.initialMaxStreamsBidi), p.initialMaxStreamsBidi);
     if (p.initialMaxStreamsUni != 0)
-        try putParam(out, gpa, @backingInt(ParamId.initialMaxStreamsUni), &u64be(p.initialMaxStreamsUni));
+        try putVarintParam(out, gpa, @backingInt(ParamId.initialMaxStreamsUni), p.initialMaxStreamsUni);
     if (p.ackDelayExponent != 3)
-        try putParam(out, gpa, @backingInt(ParamId.ackDelayExponent), &u64be(p.ackDelayExponent));
+        try putVarintParam(out, gpa, @backingInt(ParamId.ackDelayExponent), p.ackDelayExponent);
     if (p.maxAckDelayMs != 25)
-        try putParam(out, gpa, @backingInt(ParamId.maxAckDelay), &u64be(p.maxAckDelayMs));
+        try putVarintParam(out, gpa, @backingInt(ParamId.maxAckDelay), p.maxAckDelayMs);
     if (p.activeConnectionIdLimit != 2)
-        try putParam(out, gpa, @backingInt(ParamId.activeConnectionIdLimit), &u64be(p.activeConnectionIdLimit));
+        try putVarintParam(out, gpa, @backingInt(ParamId.activeConnectionIdLimit), p.activeConnectionIdLimit);
 }
 
 fn dv(data: []const u8, pos: *usize) Error!u64 {
@@ -131,6 +140,7 @@ pub fn decode(data: []const u8) Error!Params {
                 if (len != 16) return Error.InvalidParameter;
             },
             .maxIdleTimeout, .maxUdpPayloadSize, .initialMaxData, .initialMaxStreamDataBidiLocal, .initialMaxStreamDataBidiRemote, .initialMaxStreamDataUni, .initialMaxStreamsBidi, .initialMaxStreamsUni, .ackDelayExponent, .maxAckDelay, .activeConnectionIdLimit => {
+                // A varint is 1, 2, 4, or 8 bytes long.
                 if (len != 1 and len != 2 and len != 4 and len != 8) return Error.InvalidParameter;
             },
             else => {},
@@ -138,14 +148,18 @@ pub fn decode(data: []const u8) Error!Params {
 
         const valueBe: u64 = switch (id) {
             .originalDestinationConnectionId, .initialSourceConnectionId, .retrySourceConnectionId, .statelessResetToken => 0,
-            else => switch (len) {
-                0 => 0,
-                1 => data[pos],
-                2 => std.mem.readInt(u16, data[pos..][0..2], .big),
-                4 => std.mem.readInt(u32, data[pos..][0..4], .big),
-                8 => std.mem.readInt(u64, data[pos..][0..8], .big),
-                else => return Error.InvalidParameter, // numeric params are pow2-len BE
+            .maxIdleTimeout, .maxUdpPayloadSize, .initialMaxData, .initialMaxStreamDataBidiLocal, .initialMaxStreamDataBidiRemote, .initialMaxStreamDataUni, .initialMaxStreamsBidi, .initialMaxStreamsUni, .ackDelayExponent, .maxAckDelay, .activeConnectionIdLimit => blk: {
+                // Numeric values are QUIC varints (RFC 9000 Section 18.2);
+                // the encoded length must match the varint exactly.
+                var vpos: usize = 0;
+                const v = varint.decode(data[pos..][0..len], &vpos) catch
+                    return Error.InvalidParameter;
+                if (vpos != len) return Error.InvalidParameter;
+                break :blk v;
             },
+            // Unknown parameters are ignored (RFC 9000 Section 18.1), and
+            // their payload is not necessarily a varint.
+            else => 0,
         };
 
         switch (id) {
@@ -277,12 +291,11 @@ test "encoder rejects invalid local transport parameters" {
 
 test "validation bounds reject hostile values" {
     const mk = struct {
+        /// Encodes one numeric parameter with the canonical varint value.
         fn enc(id: u64, v: u64) ![]u8 {
             var list = std.ArrayList(u8).empty;
             errdefer list.deinit(std.testing.allocator);
-            var vb: [8]u8 = undefined;
-            std.mem.writeInt(u64, &vb, v, .big);
-            try putParam(&list, std.testing.allocator, id, vb[0..]);
+            try putVarintParam(&list, std.testing.allocator, id, v);
             return list.toOwnedSlice(std.testing.allocator);
         }
     };
@@ -303,6 +316,102 @@ test "validation bounds reject hostile values" {
     }
     {
         const bad = try mk.enc(@backingInt(ParamId.activeConnectionIdLimit), 1);
+        defer std.testing.allocator.free(bad);
+        try std.testing.expectError(Error.InvalidParameter, decode(bad));
+    }
+}
+
+test "unknown parameters are ignored whatever their payload" {
+    // RFC 9000 Section 18.1: unknown transport parameters are ignored, so
+    // their payload is not necessarily a varint. A peer that sends a
+    // grease parameter must not break the handshake.
+    const mk = struct {
+        fn param(id: u64, bytes: []const u8) ![]u8 {
+            var list = std.ArrayList(u8).empty;
+            errdefer list.deinit(std.testing.allocator);
+            try putParam(&list, std.testing.allocator, id, bytes);
+            return list.toOwnedSlice(std.testing.allocator);
+        }
+    };
+    {
+        // A grease parameter with a three-byte payload.
+        const grease = try mk.param(0x1a1a2a2a2a2a, &.{ 0xDE, 0xAD, 0xBE });
+        defer std.testing.allocator.free(grease);
+        const got = try decode(grease);
+        try std.testing.expectEqual(@as(u64, 65527), got.maxUdpPayloadSize);
+        const cids = try parseCidParams(grease);
+        try std.testing.expect(cids.originalDestinationConnectionId == null);
+    }
+    {
+        // An unknown parameter next to a known one: the known one still
+        // decodes.
+        var list = std.ArrayList(u8).empty;
+        defer list.deinit(std.testing.allocator);
+        try putParam(&list, std.testing.allocator, 0x1a1a2a2a2a2a, &.{ 0x01, 0x02, 0x03 });
+        try putVarintParam(&list, std.testing.allocator, @backingInt(ParamId.maxUdpPayloadSize), 1472);
+        const got = try decode(list.items);
+        try std.testing.expectEqual(@as(u64, 1472), got.maxUdpPayloadSize);
+    }
+}
+
+test "numeric values use the canonical varint encoding" {
+    // Regression: the values used to be written as fixed-width big-endian
+    // integers. RFC 9000 Section 18.2 encodes them as variable-length
+    // integers, and peers that validate the varint length reject the whole
+    // parameter block with TRANSPORT_PARAMETER_ERROR, which breaks the
+    // handshake.
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(std.testing.allocator);
+    try encode(&list, std.testing.allocator, .{
+        .maxIdleTimeoutMs = 30_000,
+        .maxUdpPayloadSize = 1472,
+        .initialMaxData = 1 << 20,
+        .initialMaxStreamsBidi = 128,
+    });
+
+    // id 0x01, length 4, value 30000 as a 4-byte varint.
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x04, 0x80, 0x00, 0x75, 0x30 }, list.items[0..6]);
+    // id 0x03, length 2, value 1472 as a 2-byte varint.
+    try std.testing.expectEqualSlices(u8, &.{ 0x03, 0x02, 0x45, 0xC0 }, list.items[6..10]);
+    // id 0x04, length 4, value 1048576 as a 4-byte varint.
+    try std.testing.expectEqualSlices(u8, &.{ 0x04, 0x04, 0x80, 0x10, 0x00, 0x00 }, list.items[10..16]);
+    // id 0x08, length 2, value 128 as a 2-byte varint.
+    try std.testing.expectEqualSlices(u8, &.{ 0x08, 0x02, 0x40, 0x80 }, list.items[16..20]);
+
+    // The values survive a round trip.
+    const got = try decode(list.items);
+    try std.testing.expectEqual(@as(u64, 30_000), got.maxIdleTimeoutMs);
+    try std.testing.expectEqual(@as(u64, 1472), got.maxUdpPayloadSize);
+    try std.testing.expectEqual(@as(u64, 1 << 20), got.initialMaxData);
+    try std.testing.expectEqual(@as(u64, 128), got.initialMaxStreamsBidi);
+}
+
+test "decoder rejects values whose length does not match the varint" {
+    // A fixed-width integer is not a valid transport parameter value: the
+    // encoded length must equal the length of the varint.
+    const mk = struct {
+        fn enc(id: u64, bytes: []const u8) ![]u8 {
+            var list = std.ArrayList(u8).empty;
+            errdefer list.deinit(std.testing.allocator);
+            try putParam(&list, std.testing.allocator, id, bytes);
+            return list.toOwnedSlice(std.testing.allocator);
+        }
+    };
+    {
+        // 30000 written as a fixed 8-byte integer.
+        const bad = try mk.enc(@backingInt(ParamId.maxIdleTimeout), &.{ 0, 0, 0, 0, 0, 0, 0x75, 0x30 });
+        defer std.testing.allocator.free(bad);
+        try std.testing.expectError(Error.InvalidParameter, decode(bad));
+    }
+    {
+        // A 2-byte varint padded to 4 bytes.
+        const bad = try mk.enc(@backingInt(ParamId.maxUdpPayloadSize), &.{ 0x45, 0xC0, 0, 0 });
+        defer std.testing.allocator.free(bad);
+        try std.testing.expectError(Error.InvalidParameter, decode(bad));
+    }
+    {
+        // A zero-length numeric value.
+        const bad = try mk.enc(@backingInt(ParamId.initialMaxData), &.{});
         defer std.testing.allocator.free(bad);
         try std.testing.expectError(Error.InvalidParameter, decode(bad));
     }

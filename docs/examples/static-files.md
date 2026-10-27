@@ -38,7 +38,9 @@ pub fn main() !void {
     const thread = try server.start();
     defer thread.join();
 
-    var response = try httpx.get("http://127.0.0.1:PORT/static/index.html", .{});
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+    var response = try client.get("http://127.0.0.1:PORT/static/index.html", .{});
     defer response.deinit();
 }
 ```

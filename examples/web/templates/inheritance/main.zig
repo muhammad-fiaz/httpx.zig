@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn inheritanceHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn inheritanceHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.render("index.html", .{
         .title = "HTTPX Inheritance Demo",
         .heading = "Template Inheritance Works!",

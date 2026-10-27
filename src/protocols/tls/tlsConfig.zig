@@ -26,9 +26,23 @@ pub const TlsError = errorsMod.TlsError;
 const fsMod = @import("../../utils/fs.zig");
 
 pub const TlsVersion = enum {
+    /// Deprecated legacy TLS 1.1 (RFC 4346) compatibility mode.
+    /// Insecure and prohibited by RFC 8996; disabled by default.
+    /// Explicit opt-in only. Must NEVER be negotiated for HTTP/2 (RFC 9113) or HTTP/3 (RFC 9114).
+    legacyTls11,
     tls12,
     tls13,
     both,
+
+    /// Returns true if this configuration uses modern secure protocols (TLS 1.2+).
+    pub fn isModern(self: TlsVersion) bool {
+        return self != .legacyTls11;
+    }
+
+    /// Whether this version allows HTTP/2 or HTTP/3 negotiation (RFC 9113 section 9.2).
+    pub fn allowsAlpnH2(self: TlsVersion) bool {
+        return self != .legacyTls11;
+    }
 };
 
 pub const ClientAuthMode = enum {
@@ -39,5 +53,9 @@ pub const ClientAuthMode = enum {
 
 test "TLS version and client-auth enums" {
     try std.testing.expect(TlsVersion.tls12 != TlsVersion.tls13);
+    try std.testing.expect(TlsVersion.legacyTls11 != TlsVersion.tls13);
+    try std.testing.expect(!TlsVersion.legacyTls11.isModern());
+    try std.testing.expect(!TlsVersion.legacyTls11.allowsAlpnH2());
+    try std.testing.expect(TlsVersion.tls13.allowsAlpnH2());
     try std.testing.expect(ClientAuthMode.disabled != ClientAuthMode.required);
 }

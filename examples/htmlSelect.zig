@@ -43,7 +43,7 @@ pub fn main() !void {
         \\</html>
     ;
 
-    var p = httpx.Parser.init(allocator, .{});
+    var p = httpx.parsing.Parser.init(allocator, .{});
     var doc = try p.parseHtml(htmlContent);
     defer doc.deinit();
 

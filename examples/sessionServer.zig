@@ -42,7 +42,7 @@ pub fn main() !void {
     std.debug.print("Session server verification completed successfully.\n", .{});
 }
 
-fn loginHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn loginHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Logged in\",\"user\":\"alice\"}",
@@ -50,7 +50,7 @@ fn loginHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn dashboardHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn dashboardHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"user\":\"alice\",\"page\":\"dashboard\"}",
@@ -58,7 +58,7 @@ fn dashboardHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn logoutHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn logoutHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"message\":\"Logged out\"}",

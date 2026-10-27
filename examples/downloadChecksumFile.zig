@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn pdfHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn pdfHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const data = try ctx.allocator.alloc(u8, 64 * 1024);
     for (data, 0..) |*b, i| b.* = @truncate(i);
     return .{
@@ -40,7 +40,7 @@ pub fn main() !void {
     ;
 
     const targetFilename = "sample-local-pdf.pdf";
-    const expectedHash = httpx.parseChecksumFile(checksumManifest, targetFilename);
+    const expectedHash = httpx.client.parseChecksumFile(checksumManifest, targetFilename);
 
     if (expectedHash) |hash| {
         std.debug.print("Parsed hash for {s}: {s}\n", .{ targetFilename, hash });

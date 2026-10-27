@@ -38,6 +38,14 @@ pub const RequestStream = struct {
     allocator: Allocator,
     qpack: *qpackMod.Encoder,
 
+    /// QPACK field names must be lowercase (RFC 9114 Section 4.1.2), while
+    /// handler and caller headers commonly use title case.
+    fn encodeField(self: *RequestStream, block: *std.ArrayList(u8), name: []const u8, value: []const u8) !void {
+        const lower = try std.ascii.allocLowerString(self.allocator, name);
+        defer self.allocator.free(lower);
+        try self.qpack.encodeField(block, lower, value);
+    }
+
     /// Builds HEADERS frame payload for a response.
     pub fn buildResponseHeaders(
         self: *RequestStream,
@@ -49,16 +57,16 @@ pub const RequestStream = struct {
 
         // Field representations first; the section prefix needs the
         // final Required Insert Count, which is only known afterwards.
-        self.qpack.beginSection();
+        self.qpack.beginSectionForStream(self.id);
 
         // Status pseudo-header
         var codeBuf: [4]u8 = undefined;
         const codeStr = std.fmt.bufPrint(&codeBuf, "{d}", .{statusCode}) catch "500";
-        try self.qpack.encodeField(&block, ":status", codeStr);
+        try self.encodeField(&block, ":status", codeStr);
 
         for (headers) |h| {
             if (std.mem.startsWith(u8, h.name, ":")) continue; // skip other pseudos
-            try self.qpack.encodeField(&block, h.name, h.value);
+            try self.encodeField(&block, h.name, h.value);
         }
 
         const ric = self.qpack.sectionRic();
@@ -75,7 +83,10 @@ pub const RequestStream = struct {
         try out.appendSlice(self.allocator, prefix.items);
         try out.appendSlice(self.allocator, block.items);
         block.deinit(self.allocator);
-        return out.toOwnedSlice(self.allocator);
+        const frame = try out.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(frame);
+        try self.qpack.registerSection(self.id);
+        return frame;
     }
 
     /// Builds an HTTP/3 request HEADERS frame with the required pseudo
@@ -91,14 +102,17 @@ pub const RequestStream = struct {
     ) ![]u8 {
         var block = std.ArrayList(u8).empty;
         errdefer block.deinit(self.allocator);
-        self.qpack.beginSection();
-        try self.qpack.encodeField(&block, ":method", method);
-        try self.qpack.encodeField(&block, ":scheme", scheme);
-        try self.qpack.encodeField(&block, ":authority", authority);
-        try self.qpack.encodeField(&block, ":path", path);
+        self.qpack.beginSectionForStream(self.id);
+        const isConnect = std.mem.eql(u8, method, "CONNECT");
+        try self.encodeField(&block, ":method", method);
+        // Plain CONNECT carries only :method and :authority; :scheme and
+        // :path are required only for non-CONNECT requests (RFC 9114 4.3.1).
+        if (!isConnect) try self.encodeField(&block, ":scheme", scheme);
+        try self.encodeField(&block, ":authority", authority);
+        if (!isConnect) try self.encodeField(&block, ":path", path);
         for (headers) |h| {
             if (std.mem.startsWith(u8, h.name, ":")) return error.InvalidHeader;
-            try self.qpack.encodeField(&block, h.name, h.value);
+            try self.encodeField(&block, h.name, h.value);
         }
 
         const ric = self.qpack.sectionRic();
@@ -114,7 +128,10 @@ pub const RequestStream = struct {
         try out.appendSlice(self.allocator, prefix.items);
         try out.appendSlice(self.allocator, block.items);
         block.deinit(self.allocator);
-        return out.toOwnedSlice(self.allocator);
+        const frame = try out.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(frame);
+        try self.qpack.registerSection(self.id);
+        return frame;
     }
 
     /// Builds DATA frame payload.
@@ -126,6 +143,44 @@ pub const RequestStream = struct {
         try out.appendSlice(self.allocator, fh[0..n]);
         try out.appendSlice(self.allocator, body);
         return out.toOwnedSlice(self.allocator);
+    }
+
+    /// Builds trailing HEADERS frame payload for a request or response.
+    /// Trailing headers must not contain pseudo-headers or forbidden fields (RFC 9110 §6.5.1).
+    pub fn buildTrailers(self: *RequestStream, trailers: []const qpackMod.FieldLine) ![]u8 {
+        var block = std.ArrayList(u8).empty;
+        errdefer block.deinit(self.allocator);
+        self.qpack.beginSectionForStream(self.id);
+        for (trailers) |h| {
+            if (h.name.len == 0) return error.InvalidHeader;
+            if (h.name[0] == ':') return error.InvalidHeader;
+            if (std.ascii.eqlIgnoreCase(h.name, "content-length") or
+                std.ascii.eqlIgnoreCase(h.name, "transfer-encoding") or
+                std.ascii.eqlIgnoreCase(h.name, "host") or
+                std.ascii.eqlIgnoreCase(h.name, "connection"))
+            {
+                return error.InvalidHeader;
+            }
+            try self.encodeField(&block, h.name, h.value);
+        }
+
+        const ric = self.qpack.sectionRic();
+        var prefix = std.ArrayList(u8).empty;
+        defer prefix.deinit(self.allocator);
+        try self.qpack.encodePrefix(&prefix, ric, ric);
+
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(self.allocator);
+        var fh: [16]u8 = undefined;
+        const n = try frameMod.encodeFrameHeader(&fh, @backingInt(frameMod.FrameType.headers), prefix.items.len + block.items.len);
+        try out.appendSlice(self.allocator, fh[0..n]);
+        try out.appendSlice(self.allocator, prefix.items);
+        try out.appendSlice(self.allocator, block.items);
+        block.deinit(self.allocator);
+        const frame = try out.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(frame);
+        try self.qpack.registerSection(self.id);
+        return frame;
     }
 };
 
@@ -196,6 +251,11 @@ pub const Connection = struct {
     settingsSent: bool = false,
     settingsReceived: bool = false,
     controlStreamStarted: bool = false,
+    /// Precise H3 error for the next failed control-frame callback.
+    controlError: ?frameMod.H3Error = null,
+    /// Connection-level protocol failure (control-stream error or QPACK
+    /// blocked-stream limit exceeded). Callers must stop the connection.
+    fatalError: ?frameMod.H3Error = null,
 
     // QPACK state
     qenc: qpackMod.Encoder,
@@ -204,8 +264,13 @@ pub const Connection = struct {
     // GOAWAY and push tracking
     goawaySent: bool = false,
     goawayReceived: bool = false,
+    /// Last identifier this endpoint sent in GOAWAY (stream ID for a
+    /// server, Push ID for a client).
+    goawaySentId: u64 = 0,
+    /// Last identifier carried by the peer's most recent GOAWAY.
     goawayStreamId: u64 = 0,
     maxPushId: u64 = 0,
+    maxPushIdReceived: bool = false,
 
     // Stream tracking
     nextBidiId: u64,
@@ -255,6 +320,13 @@ pub const Connection = struct {
         var self = Connection{
             .allocator = allocator,
             .role = role,
+            // Advertise a useful dynamic QPACK table by default. Zero
+            // would force every peer to static/literal encoding and
+            // leave the dynamic decoder unexercised in production.
+            .localSettings = .{
+                .qpackMaxTableCapacity = 4096,
+                .qpackBlockedStreams = 16,
+            },
             .qenc = qpackMod.Encoder.init(allocator),
             .qdec = qpackMod.Decoder.init(allocator),
             .nextBidiId = initiatorBit,
@@ -313,7 +385,10 @@ pub const Connection = struct {
 
     /// Processes an incoming SETTINGS frame from the peer's control stream.
     pub fn processPeerSettings(self: *Connection, settingsEntries: []const frameMod.SettingEntry) !void {
-        if (self.settingsReceived) return Error.InvalidSettings;
+        if (self.settingsReceived) {
+            self.controlError = .frameUnexpected;
+            return Error.ProtocolViolation;
+        }
         var seenQpackCapacity = false;
         var seenMaxFieldSection = false;
         var seenBlockedStreams = false;
@@ -353,18 +428,20 @@ pub const Connection = struct {
             }
         }
         self.qenc.setMaxTableCapacity(std.math.cast(usize, self.peerSettings.qpackMaxTableCapacity) orelse return Error.InvalidSettings);
+        self.qenc.setMaxBlockedStreams(self.peerSettings.qpackBlockedStreams);
         self.settingsReceived = true;
     }
 
     /// Builds a GOAWAY frame (stream ID varint payload).
     pub fn buildGoawayFrame(self: *Connection, streamId: u64) ![]u8 {
+        if (self.goawaySent and streamId > self.goawaySentId) return Error.ProtocolViolation;
         const out = try frameMod.encodeSingleVarintFrame(
             self.allocator,
             @backingInt(frameMod.FrameType.goaway),
             streamId,
         );
         self.goawaySent = true;
-        self.goawayStreamId = streamId;
+        self.goawaySentId = streamId;
         return out;
     }
 
@@ -375,32 +452,106 @@ pub const Connection = struct {
     /// shape-validated and handled.
     pub fn processControlFrame(self: *Connection, frameType: u64, payload: []const u8) !void {
         self.controlStreamStarted = true;
-        if (!self.settingsReceived and frameType != 0x4) return Error.InvalidSettings;
+        self.controlError = null;
+        if (!self.settingsReceived and frameType != 0x4) {
+            self.controlError = .missingSettings;
+            return Error.InvalidSettings;
+        }
         switch (frameType) {
-            0x0, 0x1, 0x5 => return Error.ProtocolViolation, // DATA, HEADERS, PUSH_PROMISE
+            0x0, 0x1, 0x5 => {
+                self.controlError = .frameUnexpected; // DATA, HEADERS, PUSH_PROMISE
+                return Error.ProtocolViolation;
+            },
             0x4 => {
+                if (self.settingsReceived) {
+                    self.controlError = .frameUnexpected;
+                    return Error.ProtocolViolation;
+                }
                 const entries = frameMod.parseSettingsPayload(payload, self.allocator) catch |e| switch (e) {
                     error.OutOfMemory => return Error.OutOfMemory,
-                    else => return Error.InvalidSettings,
+                    else => {
+                        self.controlError = .settingsError;
+                        return Error.InvalidSettings;
+                    },
                 };
                 defer self.allocator.free(entries);
-                try self.processPeerSettings(entries);
+                self.processPeerSettings(entries) catch |e| {
+                    if (self.controlError == null) {
+                        self.controlError = if (e == Error.OutOfMemory) .internalError else .settingsError;
+                    }
+                    return e;
+                };
             },
             0x7 => {
-                const sid = frameMod.decodeSingleVarintPayload(payload) catch return Error.ProtocolViolation;
-                if (self.goawayReceived and sid > self.goawayStreamId) return Error.ProtocolViolation;
+                const sid = frameMod.decodeSingleVarintPayload(payload) catch {
+                    self.controlError = .frameError;
+                    return Error.ProtocolViolation;
+                };
+                // A server's GOAWAY carries a client-initiated bidirectional
+                // stream ID (low two bits zero). A client's GOAWAY carries
+                // a Push ID, which has no stream-ID parity (RFC 9114 5.2).
+                if (self.role == .client and (sid & 0x3) != 0) {
+                    self.controlError = .idError;
+                    return Error.ProtocolViolation;
+                }
+                if (self.goawayReceived and sid > self.goawayStreamId) {
+                    self.controlError = .idError;
+                    return Error.ProtocolViolation;
+                }
                 self.goawayReceived = true;
                 self.goawayStreamId = sid;
             },
             0x3, 0xD => {
+                if (self.role == .client) {
+                    self.controlError = .frameUnexpected;
+                    return Error.ProtocolViolation;
+                }
                 const entries = frameMod.validateFramePayload(self.allocator, frameType, payload) catch |e| switch (e) {
                     error.OutOfMemory => return Error.OutOfMemory,
-                    else => return Error.ProtocolViolation,
+                    else => {
+                        self.controlError = .frameError;
+                        return Error.ProtocolViolation;
+                    },
                 };
                 self.allocator.free(entries);
                 if (frameType == 0xD) {
-                    const pid = frameMod.decodeSingleVarintPayload(payload) catch return Error.ProtocolViolation;
-                    if (pid > self.maxPushId) self.maxPushId = pid;
+                    const pid = frameMod.decodeSingleVarintPayload(payload) catch {
+                        self.controlError = .frameError;
+                        return Error.ProtocolViolation;
+                    };
+                    if (self.maxPushIdReceived and pid < self.maxPushId) {
+                        self.controlError = .idError;
+                        return Error.ProtocolViolation;
+                    }
+                    self.maxPushId = pid;
+                    self.maxPushIdReceived = true;
+                } else if (frameType == 0x3) {
+                    const pid = frameMod.decodeSingleVarintPayload(payload) catch {
+                        self.controlError = .frameError;
+                        return Error.ProtocolViolation;
+                    };
+                    if (!self.maxPushIdReceived or pid > self.maxPushId) {
+                        self.controlError = .idError;
+                        return Error.ProtocolViolation;
+                    }
+                }
+            },
+            0xF0700, 0xF0701 => {
+                if (self.role == .client) {
+                    self.controlError = .frameUnexpected;
+                    return Error.ProtocolViolation;
+                }
+                if (frameType == 0xF0700) {
+                    var off: usize = 0;
+                    const priElemId = varint.decode(payload, &off) catch {
+                        self.controlError = .frameError;
+                        return Error.ProtocolViolation;
+                    };
+                    // RFC 9218 Section 7.1: Must identify a client-initiated bidirectional stream
+                    if ((priElemId & 0x03) != 0) {
+                        self.controlError = .frameUnexpected;
+                        return Error.ProtocolViolation;
+                    }
                 }
             },
             else => {}, // Unknown control frames are ignored per RFC 9114.
@@ -427,6 +578,18 @@ pub const Connection = struct {
             .allocator = self.allocator,
             .qpack = &self.qenc,
         };
+    }
+
+    /// Records that the request on `streamId` used HEAD, so response
+    /// body-framing rules can be enforced by the stream state machine.
+    pub fn markRequestHead(self: *Connection, streamId: u64) void {
+        if (self.streams.getPtr(streamId)) |st| st.requestIsHead = true;
+    }
+
+    /// Records that the request on `streamId` used CONNECT, so a 2xx
+    /// response is validated as a tunnel (no Content-Length).
+    pub fn markRequestConnect(self: *Connection, streamId: u64) void {
+        if (self.streams.getPtr(streamId)) |st| st.requestIsConnect = true;
     }
 
     /// Builds the callback set H3Streams get, forwarding into this
@@ -472,6 +635,14 @@ pub const Connection = struct {
 
     fn fwdStreamError(ctx: ?*anyopaque, sid: u64, code: frameMod.H3Error) void {
         const self: *Connection = @ptrCast(@alignCast(ctx.?));
+        if (self.streams.getPtr(sid)) |stp| {
+            switch (stp.uniKindKnown() orelse .undecided) {
+                .control, .qpackEncoder, .qpackDecoder => {
+                    if (self.fatalError == null) self.fatalError = code;
+                },
+                else => {},
+            }
+        }
         if (self.cbs.onH3Error) |cb| cb(self.cbs.ctx, sid, code);
     }
 
@@ -482,17 +653,21 @@ pub const Connection = struct {
 
     fn fwdControlFrame(ctx: ?*anyopaque, sid: u64, frameType: u64, payload: []const u8) void {
         const self: *Connection = @ptrCast(@alignCast(ctx.?));
-        const hadGoaway = self.goawayReceived;
         self.processControlFrame(frameType, payload) catch |e| {
-            const code: frameMod.H3Error = switch (e) {
+            const code: frameMod.H3Error = self.controlError orelse switch (e) {
                 error.InvalidSettings => .settingsError,
                 error.OutOfMemory => .internalError,
                 else => .frameUnexpected,
             };
+            self.controlError = null;
+            if (self.fatalError == null) self.fatalError = code;
             if (self.streams.getPtr(sid)) |stp| stp.failExtern(code);
             return;
         };
-        if (!hadGoaway and self.goawayReceived) {
+        // Notify on every accepted GOAWAY: a graceful shutdown can send a
+        // second, lower last-stream identifier that rejects in-flight
+        // requests the earlier frame still appeared to accept.
+        if (frameType == 0x7) {
             if (self.cbs.onGoaway) |cb| cb(self.cbs.ctx, self.goawayStreamId);
         }
     }
@@ -504,6 +679,8 @@ pub const Connection = struct {
     pub fn feedQuic(self: *Connection, sid: u64, data: []const u8, fin: bool) Error!void {
         if (self.streams.getPtr(sid)) |stp| {
             stp.feed(data, fin);
+            self.checkCriticalClosed(sid, fin);
+            self.checkBlockedLimit();
             return;
         }
         if (h3stream.checkPeerStreamId(self.role, sid)) |code| {
@@ -585,19 +762,64 @@ pub const Connection = struct {
                 }
             }
         }
+        self.checkCriticalClosed(sid, fin);
+        self.checkBlockedLimit();
+    }
+
+    fn checkCriticalClosed(self: *Connection, sid: u64, fin: bool) void {
+        if (!fin or self.fatalError != null) return;
+        if (sid == self.controlIn or sid == self.encoderIn or sid == self.decoderIn) {
+            self.fatalError = .closedCriticalStream;
+        }
     }
 
     /// Signals a QUIC-level reset received for `sid`. Unknown streams
     /// are ignored (nothing to abandon).
     pub fn onQuicReset(self: *Connection, sid: u64, code: u64) void {
-        if (self.streams.getPtr(sid)) |stp| stp.onQuicReset(code);
+        if (self.streams.getPtr(sid)) |stp| {
+            if (stp.failed or stp.done) return;
+            self.cancelQpackForStream(stp, sid);
+            stp.onQuicReset(code);
+        }
+    }
+
+    fn cancelQpackForStream(self: *Connection, stp: *h3stream.Stream, sid: u64) void {
+        // A canceled request/response may have an outstanding QPACK
+        // section reference even when it is no longer blocked. Tell the
+        // peer encoder to release every reference held for this stream.
+        if (stp.mode != .uni) {
+            self.qdec.cancelSection(&stp.decoderAck, sid) catch {
+                if (self.fatalError == null) self.fatalError = .internalError;
+            };
+        }
     }
 
     /// Retries every section parked on QPACK blocking (call after
-    /// feeding encoder-stream bytes).
+    /// feeding encoder-stream bytes), then enforces the advertised
+    /// blocked-stream limit.
     pub fn retryBlockedStreams(self: *Connection) void {
         var it = self.streams.valueIterator();
         while (it.next()) |stp| stp.retryBlocked();
+        self.checkBlockedLimit();
+    }
+
+    /// Returns and clears the pending connection-level error, if any.
+    pub fn takeFatalError(self: *Connection) ?frameMod.H3Error {
+        const err = self.fatalError;
+        self.fatalError = null;
+        return err;
+    }
+
+    fn checkBlockedLimit(self: *Connection) void {
+        if (self.fatalError != null) return;
+        var blocked: u64 = 0;
+        var it = self.streams.valueIterator();
+        while (it.next()) |stp| {
+            if (stp.blocked) blocked += 1;
+        }
+        if (blocked > self.localSettings.qpackBlockedStreams) {
+            self.fatalError = .qpackGeneralError;
+        }
     }
 
     /// Concatenates staged decoder-stream acknowledgments from every
@@ -638,6 +860,15 @@ pub const Connection = struct {
         errdefer st.deinit();
         try self.streams.put(sid, st);
         return sid;
+    }
+
+    /// Drops locally tracked request state for `sid`, e.g. after the
+    /// caller has consumed the response or abandoned the exchange.
+    pub fn discardRequestStream(self: *Connection, sid: u64) void {
+        if (self.streams.fetchRemove(sid)) |kv| {
+            var st = kv.value;
+            st.deinit();
+        }
     }
 
     /// Sends already-built bytes on `sid` at the current send offset.
@@ -716,7 +947,12 @@ pub const Connection = struct {
     pub fn resetStream(self: *Connection, quic: anytype, sid: u64, code: frameMod.H3Error, nowMs: u64) !void {
         const finalSize = quic.sendStreamEnd.get(sid) orelse 0;
         try quic.sendResetStream(sid, @backingInt(code), finalSize, nowMs);
-        if (self.streams.getPtr(sid)) |stp| stp.failed = true;
+        if (self.streams.getPtr(sid)) |stp| {
+            if (stp.failed or stp.done) return;
+            self.cancelQpackForStream(stp, sid);
+            stp.failed = true;
+            stp.blocked = false;
+        }
     }
 };
 
@@ -929,6 +1165,14 @@ test "h3conn send path offsets prefixes and goaway gating" {
     try std.testing.expectEqual(@as(usize, 1), rec.goaways);
     try std.testing.expectEqual(@as(u64, 0), rec.lastGoaway);
     try std.testing.expectError(Error.StreamClosed, conn.openRequestStream());
+
+    // A second GOAWAY is surfaced too: the runtime must learn a reduced
+    // last-stream identifier even though GOAWAY was already received.
+    const go2 = try conn.buildGoawayFrame(0);
+    defer a.free(go2);
+    try conn.feedQuic(3, go2, false);
+    try std.testing.expectEqual(@as(usize, 2), rec.goaways);
+    try std.testing.expectEqual(@as(u64, 0), rec.lastGoaway);
 }
 
 test "h3conn reset sends offset and drops the stream" {
@@ -948,6 +1192,9 @@ test "h3conn reset sends offset and drops the stream" {
     try std.testing.expectEqual(sid, mq.resets.items[0].sid);
     try std.testing.expectEqual(@as(u64, 0x10C), mq.resets.items[0].code);
     try std.testing.expectEqual(@as(u64, 100), mq.resets.items[0].finalSize);
+    const decoderInstructions = try conn.drainDecoderAcks();
+    defer a.free(decoderInstructions);
+    try std.testing.expectEqualSlices(u8, &.{0x40}, decoderInstructions);
     // Inbound bytes afterwards are ignored, not delivered.
     try conn.feedQuic(sid, "late", false);
     try std.testing.expectEqual(@as(usize, 0), rec.dataBytes);
@@ -1086,6 +1333,56 @@ test "h3conn blocked streams retry together" {
     try std.testing.expectEqual(@as(usize, 2), rec.headers);
 }
 
+test "h3conn enforces the advertised qpack blocked stream limit" {
+    const a = std.testing.allocator;
+    var conn = Connection.init(a, .server);
+    defer conn.deinit();
+    conn.localSettings.qpackMaxTableCapacity = 4096;
+    conn.localSettings.qpackBlockedStreams = 1;
+    var mq = MockQuic.init(a);
+    defer mq.deinit();
+    try conn.sendControl(&mq, 100);
+
+    var penc = qpackMod.Encoder.init(a);
+    defer penc.deinit();
+    penc.setMaxTableCapacity(4096);
+    penc.beginSection();
+    var fields = std.ArrayList(u8).empty;
+    defer fields.deinit(a);
+    try penc.encodeField(&fields, ":method", "GET");
+    try penc.encodeField(&fields, ":scheme", "https");
+    try penc.encodeField(&fields, ":authority", "example.com");
+    try penc.encodeField(&fields, ":path", "/");
+    try penc.encodeField(&fields, "x-blocked", "1");
+    const ric = penc.sectionRic();
+    var section = std.ArrayList(u8).empty;
+    defer section.deinit(a);
+    try penc.encodePrefix(&section, ric, ric);
+    try section.appendSlice(a, fields.items);
+
+    var hfb: [16]u8 = undefined;
+    const hn = try frameMod.encodeFrameHeader(&hfb, 0x1, section.items.len);
+    var wire = std.ArrayList(u8).empty;
+    defer wire.deinit(a);
+    try wire.appendSlice(a, hfb[0..hn]);
+    try wire.appendSlice(a, section.items);
+
+    try conn.feedQuic(0, wire.items, false);
+    try std.testing.expect(conn.fatalError == null);
+    try conn.feedQuic(4, wire.items, false);
+    try std.testing.expectEqual(frameMod.H3Error.qpackGeneralError, conn.takeFatalError().?);
+}
+
+test "h3conn closing a critical stream is fatal" {
+    const a = std.testing.allocator;
+    var conn = Connection.init(a, .server);
+    defer conn.deinit();
+    const ctrl = try conn.buildControlStream();
+    defer a.free(ctrl);
+    try conn.feedQuic(2, ctrl, true);
+    try std.testing.expectEqual(frameMod.H3Error.closedCriticalStream, conn.takeFatalError().?);
+}
+
 test "settings frame structure" {
     const a = std.testing.allocator;
     const entries = [_]frameMod.SettingEntry{
@@ -1177,6 +1474,27 @@ test "request stream builds decodable request headers" {
     try std.testing.expectEqualStrings(":path", fields[3].name);
 }
 
+test "request stream omits scheme and path for CONNECT" {
+    const a = std.testing.allocator;
+    var qenc = qpackMod.Encoder.init(a);
+    defer qenc.deinit();
+    var rs = RequestStream{ .id = 0, .allocator = a, .qpack = &qenc };
+    const encoded = try rs.buildRequestHeaders("CONNECT", "https", "example.test:443", "/", &.{});
+    defer a.free(encoded);
+
+    var offset: usize = 0;
+    const frame = try frameMod.parseFrame(encoded, &offset);
+    var dec = qpackMod.Decoder.init(a);
+    defer dec.deinit();
+    const fields = try dec.decodeSectionCounted(frame.payload, 0, null);
+    defer dec.freeFields(fields);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expectEqualStrings(":method", fields[0].name);
+    try std.testing.expectEqualStrings("CONNECT", fields[0].value);
+    try std.testing.expectEqualStrings(":authority", fields[1].name);
+    try std.testing.expectEqualStrings("example.test:443", fields[1].value);
+}
+
 test "connection builds and processes settings" {
     const a = std.testing.allocator;
     var conn = Connection.init(a, .client);
@@ -1226,7 +1544,91 @@ test "http3 control stream rejects request frames and accepts settings" {
     defer a.free(encoded);
     try c.processControlFrame(0x4, encoded);
     try std.testing.expect(c.settingsReceived);
-    try std.testing.expectError(Error.InvalidSettings, c.processControlFrame(0x4, encoded));
+    try std.testing.expectError(Error.ProtocolViolation, c.processControlFrame(0x4, encoded));
+    try std.testing.expectEqual(frameMod.H3Error.frameUnexpected, c.controlError.?);
+}
+
+test "http3 goaway validates role and client stream parity" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var vb: [8]u8 = undefined;
+
+    var client = Connection.init(a, .client);
+    defer client.deinit();
+    try client.processControlFrame(0x4, encoded);
+    const bad = try varint.encode(&vb, 1);
+    try std.testing.expectError(Error.ProtocolViolation, client.processControlFrame(0x7, vb[0..bad]));
+    try std.testing.expectEqual(frameMod.H3Error.idError, client.controlError.?);
+    const ok = try varint.encode(&vb, 0);
+    try client.processControlFrame(0x7, vb[0..ok]);
+    try std.testing.expect(client.goawayReceived);
+    const regress = try varint.encode(&vb, 4);
+    try std.testing.expectError(Error.ProtocolViolation, client.processControlFrame(0x7, vb[0..regress]));
+
+    var server = Connection.init(a, .server);
+    defer server.deinit();
+    try server.processControlFrame(0x4, encoded);
+    // A client GOAWAY carries a Push ID, not a stream ID; any varint is
+    // valid and the server must accept it (RFC 9114 Section 5.2).
+    const pushId = try varint.encode(&vb, 1);
+    try server.processControlFrame(0x7, vb[0..pushId]);
+    try std.testing.expect(server.goawayReceived);
+    try std.testing.expectEqual(@as(u64, 1), server.goawayStreamId);
+    const higherPushId = try varint.encode(&vb, 5);
+    try std.testing.expectError(Error.ProtocolViolation, server.processControlFrame(0x7, vb[0..higherPushId]));
+    try std.testing.expectEqual(frameMod.H3Error.idError, server.controlError.?);
+}
+
+test "http3 sent and received goaway identifiers are independent" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var client = Connection.init(a, .client);
+    defer client.deinit();
+    try client.processControlFrame(0x4, encoded);
+    var vb: [8]u8 = undefined;
+    const n = try varint.encode(&vb, 0);
+    try client.processControlFrame(0x7, vb[0..n]);
+
+    // Receiving a server GOAWAY must not consume the Push ID space used
+    // for our own GOAWAY frames.
+    const first = try client.buildGoawayFrame(7);
+    defer a.free(first);
+    try std.testing.expectEqual(@as(u8, 0x7), first[first.len - 1]);
+    const second = try client.buildGoawayFrame(3);
+    defer a.free(second);
+    try std.testing.expectError(Error.ProtocolViolation, client.buildGoawayFrame(8));
+    try std.testing.expectEqual(@as(u64, 3), client.goawaySentId);
+}
+
+test "http3 discarding a request stream releases its state" {
+    const a = std.testing.allocator;
+    var conn = Connection.init(a, .client);
+    defer conn.deinit();
+    const sid = try conn.openRequestStream();
+    try std.testing.expect(conn.streams.contains(sid));
+    conn.discardRequestStream(sid);
+    try std.testing.expect(!conn.streams.contains(sid));
+}
+
+test "http3 client rejects server-only control frames" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var c = Connection.init(a, .client);
+    defer c.deinit();
+    try c.processControlFrame(0x4, encoded);
+    var vb: [8]u8 = undefined;
+    const n = try varint.encode(&vb, 0);
+    try std.testing.expectError(Error.ProtocolViolation, c.processControlFrame(0x3, vb[0..n]));
+    try std.testing.expectEqual(frameMod.H3Error.frameUnexpected, c.controlError.?);
 }
 
 test "connection allocates stream IDs" {
@@ -1246,4 +1648,141 @@ test "connection allocates stream IDs" {
     defer server.deinit();
     try std.testing.expectEqual(@as(u64, 1), server.nextBidiStreamId());
     try std.testing.expectEqual(@as(u64, 3), server.nextUniStreamId());
+}
+
+test "http3 connection rejects second SETTINGS frame with frameUnexpected" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var c = Connection.init(a, .client);
+    defer c.deinit();
+    try c.processControlFrame(0x4, encoded);
+    try std.testing.expectError(Error.ProtocolViolation, c.processControlFrame(0x4, encoded));
+    try std.testing.expectEqual(frameMod.H3Error.frameUnexpected, c.controlError.?);
+}
+
+test "http3 connection rejects PRIORITY_UPDATE for client role with frameUnexpected" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var c = Connection.init(a, .client);
+    defer c.deinit();
+    try c.processControlFrame(0x4, encoded);
+
+    var priPayload: [16]u8 = undefined;
+    const n = try varint.encode(&priPayload, 0); // stream 0
+    try std.testing.expectError(Error.ProtocolViolation, c.processControlFrame(0xF0700, priPayload[0..n]));
+    try std.testing.expectEqual(frameMod.H3Error.frameUnexpected, c.controlError.?);
+}
+
+test "http3 connection server rejects PRIORITY_UPDATE with non-client bidi stream ID" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var s = Connection.init(a, .server);
+    defer s.deinit();
+    try s.processControlFrame(0x4, encoded);
+
+    var priPayload: [16]u8 = undefined;
+    // Stream ID 1 (server-initiated bidi, not client-initiated)
+    const n = try varint.encode(&priPayload, 1);
+    try std.testing.expectError(Error.ProtocolViolation, s.processControlFrame(0xF0700, priPayload[0..n]));
+    try std.testing.expectEqual(frameMod.H3Error.frameUnexpected, s.controlError.?);
+
+    // Stream ID 0 (client-initiated bidi) succeeds
+    const n0 = try varint.encode(&priPayload, 0);
+    try s.processControlFrame(0xF0700, priPayload[0..n0]);
+}
+
+test "http3 connection server validates MAX_PUSH_ID monotonicity and CANCEL_PUSH boundary" {
+    const a = std.testing.allocator;
+    const entries = [_]frameMod.SettingEntry{.{ .id = 0x6, .value = 4096 }};
+    const encoded = try frameMod.buildSettingsPayload(a, &entries);
+    defer a.free(encoded);
+
+    var s = Connection.init(a, .server);
+    defer s.deinit();
+    try s.processControlFrame(0x4, encoded);
+
+    var vb: [16]u8 = undefined;
+
+    // CANCEL_PUSH before any MAX_PUSH_ID is received must fail with H3_ID_ERROR
+    const n0 = try varint.encode(&vb, 0);
+    try std.testing.expectError(Error.ProtocolViolation, s.processControlFrame(0x3, vb[0..n0]));
+    try std.testing.expectEqual(frameMod.H3Error.idError, s.controlError.?);
+
+    // Initial MAX_PUSH_ID = 10 succeeds
+    const n10 = try varint.encode(&vb, 10);
+    try s.processControlFrame(0xD, vb[0..n10]);
+    try std.testing.expectEqual(@as(u64, 10), s.maxPushId);
+
+    // CANCEL_PUSH 11 (> 10) must fail with H3_ID_ERROR
+    const n11 = try varint.encode(&vb, 11);
+    try std.testing.expectError(Error.ProtocolViolation, s.processControlFrame(0x3, vb[0..n11]));
+    try std.testing.expectEqual(frameMod.H3Error.idError, s.controlError.?);
+
+    // CANCEL_PUSH 5 (<= 10) succeeds
+    const n5 = try varint.encode(&vb, 5);
+    try s.processControlFrame(0x3, vb[0..n5]);
+
+    // MAX_PUSH_ID 8 (< 10) must fail with H3_ID_ERROR (monotonicity reduction)
+    const n8 = try varint.encode(&vb, 8);
+    try std.testing.expectError(Error.ProtocolViolation, s.processControlFrame(0xD, vb[0..n8]));
+    try std.testing.expectEqual(frameMod.H3Error.idError, s.controlError.?);
+
+    // MAX_PUSH_ID 15 (>= 10) succeeds
+    const n15 = try varint.encode(&vb, 15);
+    try s.processControlFrame(0xD, vb[0..n15]);
+    try std.testing.expectEqual(@as(u64, 15), s.maxPushId);
+}
+
+test "http3 request stream buildTrailers encodes valid trailers and rejects pseudos/forbidden" {
+    const a = std.testing.allocator;
+    var c = Connection.init(a, .client);
+    defer c.deinit();
+
+    var rs = c.createRequestStream(0);
+
+    // Valid trailers
+    const valid = [_]qpackMod.FieldLine{
+        .{ .name = "x-checksum", .value = "abcdef123" },
+        .{ .name = "x-timing", .value = "42ms" },
+    };
+    const frame = try rs.buildTrailers(&valid);
+    defer a.free(frame);
+    try std.testing.expect(frame.len > 0);
+    // Header frame type is 0x1
+    try std.testing.expectEqual(@as(u8, 0x1), frame[0]);
+
+    // Reject pseudo header
+    const pseudo = [_]qpackMod.FieldLine{.{ .name = ":status", .value = "200" }};
+    try std.testing.expectError(error.InvalidHeader, rs.buildTrailers(&pseudo));
+
+    // Reject content-length
+    const forbiddenCl = [_]qpackMod.FieldLine{.{ .name = "content-length", .value = "10" }};
+    try std.testing.expectError(error.InvalidHeader, rs.buildTrailers(&forbiddenCl));
+
+    // Reject host
+    const forbiddenHost = [_]qpackMod.FieldLine{.{ .name = "host", .value = "example.com" }};
+    try std.testing.expectError(error.InvalidHeader, rs.buildTrailers(&forbiddenHost));
+}
+
+test "h3conn reset queues QPACK stream cancellation" {
+    const a = std.testing.allocator;
+    var conn = Connection.init(a, .client);
+    defer conn.deinit();
+    const sid = try conn.openRequestStream();
+    conn.onQuicReset(sid, 0);
+    try std.testing.expect(!conn.streams.getPtr(sid).?.blocked);
+    const instructions = try conn.drainDecoderAcks();
+    defer a.free(instructions);
+    try std.testing.expectEqual(@as(usize, 1), instructions.len);
+    // Stream Cancellation has a 6-bit prefix; stream 0 encodes as 0x40.
+    try std.testing.expectEqual(@as(u8, 0x40), instructions[0]);
 }

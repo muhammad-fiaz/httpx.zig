@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn headersHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn headersHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(ctx.allocator);
     try out.appendSlice(ctx.allocator, "{\"headers\":{");

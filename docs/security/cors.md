@@ -23,10 +23,10 @@ pub fn main() !void {
     try server.use(httpx.middleware.cors);
 
     try server.get("/api/user", userHandler);
-    try server.run();
+    server.run();
 }
 
-fn userHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn userHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     _ = ctx;
     return .{ .status = 200, .body = "{\"user\":\"Alice\"}", .contentType = "application/json" };
 }

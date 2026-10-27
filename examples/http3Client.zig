@@ -118,7 +118,7 @@ fn liveLoopbackDemo(allocator: std.mem.Allocator, io: std.Io) !void {
     defer server.deinit();
 
     const ApiHandler = struct {
-        fn handle(ctx: *httpx.Context) anyerror!httpx.Response {
+        fn handle(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
             const body = try std.fmt.allocPrint(ctx.allocator, "{{\"path\":\"{s}\",\"protocol\":\"HTTP/3\"}}", .{ctx.path});
             return .{
                 .status = 200,
@@ -141,7 +141,7 @@ fn liveLoopbackDemo(allocator: std.mem.Allocator, io: std.Io) !void {
 
     // Wait for the background thread to start the HTTP/3 pump and accept loop
     while (server.h3Pump == null) {
-        httpx.clock.sleepMillis(10);
+        httpx.clock.sleepMillis(io, 10);
     }
 
     var client = httpx.Client.init(allocator, io, .{});

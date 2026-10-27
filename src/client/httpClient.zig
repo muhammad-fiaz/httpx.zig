@@ -1,10 +1,6 @@
-//! HTTP Client with connection pooling, cookie jar, and zero-config support.
+//! HTTP Client with connection pooling and cookie jar support.
 //!
-//! Zero-config usage:
-//!   const res = try httpx.get("http://example.com", .{});
-//!   defer res.deinit();
-//!
-//! Explicit allocator and io:
+//! Explicit allocator and I/O usage:
 //!   const io = std.Io.Threaded.global_single_threaded.io();
 //!   var client = httpx.Client.init(allocator, io, .{});
 //!   defer client.deinit();
@@ -119,6 +115,9 @@ pub const Config = struct {
     retryDelayMs: u64 = 1000,
     /// HTTP status codes that trigger a retry (502, 503, 504 by default).
     retryStatusCodes: []const u16 = &.{ 502, 503, 504 },
+    /// Retry replay-sensitive methods (POST, PATCH, CONNECT). Keep this
+    /// false unless the server is idempotent or deduplicates requests.
+    retryUnsafeMethods: bool = false,
     /// Default proxy URL (e.g. "socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080", "http://127.0.0.1:8080").
     proxy: ?[]const u8 = null,
     /// Fast boolean toggle to use HTTP/1.0
@@ -180,10 +179,16 @@ pub const RequestOptions = struct {
     proxy: ?[]const u8 = null,
     /// 0-RTT early data options for this request.
     earlyData: ?req.EarlyDataOptions = null,
+    /// Streaming body source for bounded-memory chunked/streamed uploads across HTTP/1.1, HTTP/2, and HTTP/3.
+    bodySource: ?req.BodySource = null,
 };
 
 pub const Response = req.Response;
-pub const Error = req.Error || error{DefaultClientUnavailable};
+pub const ResponseStream = req.ResponseStream;
+pub const Error = req.Error;
+pub const BodySource = req.BodySource;
+pub const SliceReader = req.SliceReader;
+pub const CallbackReader = req.CallbackReader;
 
 fn normalizeHttpVersion(val: anytype) HttpVersion {
     const T = @TypeOf(val);
@@ -376,12 +381,36 @@ pub const Client = struct {
         return self.doRequestWithOverride(m, url, opts);
     }
 
+    /// Streaming request returning an incremental unbuffered `ResponseStream`.
+    pub fn requestStream(self: *Client, url: []const u8, opts: anytype) Error!ResponseStream {
+        const m: Method = extractMethod(opts);
+        return self.doRequestStream(m, url, opts);
+    }
+
+    /// Alias for `requestStream`.
+    pub fn stream(self: *Client, url: []const u8, opts: anytype) Error!ResponseStream {
+        return self.requestStream(url, opts);
+    }
+
+    /// Returns a direct streaming file downloader attached to this client.
+    pub fn downloader(self: *Client) DownloadCore.Downloader {
+        return DownloadCore.Downloader.init(self.allocator, self);
+    }
+
+    /// Convenience batch file download helper: downloads multiple files using this client.
+    pub fn downloadAll(self: *Client, tasks: []const DownloadCore.DownloadTask, opts: DownloadOptions) ![]DownloadResult {
+        var dl = self.downloader();
+        return dl.downloadAll(tasks, opts);
+    }
+
     /// Batch: concurrent array of requests (runs in parallel, reuses pool and dns cache).
     ///
     /// Caller owns the returned slice: deinit each Response, then free the
     /// slice with this client's allocator.
     pub fn requestAll(self: *Client, reqs: anytype) ![]Response {
         const R = @TypeOf(reqs);
+        var owned: ?[]RequestOptions = null;
+        defer if (owned) |buf| self.allocator.free(buf);
         const slice: []const RequestOptions = blk: {
             if (R == []const RequestOptions or R == []RequestOptions) break :blk reqs;
             const info = @typeInfo(R);
@@ -390,7 +419,23 @@ pub const Client = struct {
                 if (info.pointer.size == .one and @typeInfo(info.pointer.child) == .array) break :blk reqs[0..];
             }
             if (info == .array) break :blk reqs[0..];
-            @compileError("requestAll expects a slice or array of RequestOptions");
+            if (info == .@"struct" and info.@"struct".is_tuple) {
+                const buf = try self.allocator.alloc(RequestOptions, info.@"struct".field_names.len);
+                owned = buf;
+                inline for (info.@"struct".field_names, 0..) |name, i| {
+                    const item = @field(reqs, name);
+                    if (@typeInfo(@TypeOf(item)) != .@"struct") @compileError("requestAll tuple entries must be option structs");
+                    if (!@hasField(@TypeOf(item), "url")) @compileError("requestAll tuple entries require a url");
+                    buf[i] = .{ .url = item.url };
+                    inline for (@typeInfo(@TypeOf(item)).@"struct".field_names) |fname| {
+                        if (!@hasField(RequestOptions, fname)) @compileError("unknown request option: " ++ fname);
+                        if (comptime std.mem.eql(u8, fname, "url")) continue;
+                        @field(buf[i], fname) = @field(item, fname);
+                    }
+                }
+                break :blk buf;
+            }
+            @compileError("requestAll expects a slice, array, or tuple of request option structs");
         };
         var out = try self.allocator.alloc(Response, slice.len);
         if (slice.len <= 1) {
@@ -637,6 +682,26 @@ pub const Client = struct {
         return RequestBuilder.init(self, m, url);
     }
 
+    /// Alias for `requestBuilder`.
+    pub fn builder(self: *Client, m: Method, url: []const u8) RequestBuilder {
+        return self.requestBuilder(m, url);
+    }
+
+    /// Alias for `requestBuilder`.
+    pub fn buildRequest(self: *Client, m: Method, url: []const u8) RequestBuilder {
+        return self.requestBuilder(m, url);
+    }
+
+    /// Start a GET RequestBuilder for the given URL.
+    pub fn getBuilder(self: *Client, url: []const u8) RequestBuilder {
+        return self.requestBuilder(.GET, url);
+    }
+
+    /// Start a POST RequestBuilder for the given URL.
+    pub fn postBuilder(self: *Client, url: []const u8) RequestBuilder {
+        return self.requestBuilder(.POST, url);
+    }
+
     pub const RequestBuilder = struct {
         client: *Client,
         method: Method,
@@ -645,9 +710,9 @@ pub const Client = struct {
         queryList: std.ArrayList(req.Header),
         bodyBytes: ?[]const u8 = null,
         jsonAllocated: ?[]u8 = null,
-        timeoutMs: ?u64 = null,
-        bearerAuth: ?[]const u8 = null,
-        basicAuth: ?[]const u8 = null,
+        timeoutMsValue: ?u64 = null,
+        bearerAuthValue: ?[]const u8 = null,
+        basicAuthValue: ?[]const u8 = null,
 
         pub fn init(client: *Client, m: Method, url: []const u8) RequestBuilder {
             return .{
@@ -670,28 +735,53 @@ pub const Client = struct {
             return self;
         }
 
+        pub fn headers(self: *RequestBuilder, hdrs: []const req.Header) !*RequestBuilder {
+            for (hdrs) |h| {
+                _ = try self.header(h.name, h.value);
+            }
+            return self;
+        }
+
         pub fn query(self: *RequestBuilder, name: []const u8, value: []const u8) !*RequestBuilder {
             try self.queryList.append(self.client.allocator, .{ .name = name, .value = value });
             return self;
         }
 
         pub fn timeout(self: *RequestBuilder, ms: u64) *RequestBuilder {
-            self.timeoutMs = ms;
+            self.timeoutMsValue = ms;
             return self;
+        }
+
+        pub fn timeoutMs(self: *RequestBuilder, ms: u64) *RequestBuilder {
+            return self.timeout(ms);
         }
 
         pub fn bearer(self: *RequestBuilder, tok: []const u8) *RequestBuilder {
-            self.bearerAuth = tok;
+            self.bearerAuthValue = tok;
             return self;
         }
 
+        pub fn bearerAuth(self: *RequestBuilder, tok: []const u8) *RequestBuilder {
+            return self.bearer(tok);
+        }
+
         pub fn basic(self: *RequestBuilder, creds: []const u8) *RequestBuilder {
-            self.basicAuth = creds;
+            self.basicAuthValue = creds;
             return self;
+        }
+
+        pub fn basicAuth(self: *RequestBuilder, creds: []const u8) *RequestBuilder {
+            return self.basic(creds);
         }
 
         pub fn body(self: *RequestBuilder, b: []const u8) *RequestBuilder {
             self.bodyBytes = b;
+            return self;
+        }
+
+        pub fn form(self: *RequestBuilder, encoded: []const u8) !*RequestBuilder {
+            self.bodyBytes = encoded;
+            _ = try self.header("content-type", "application/x-www-form-urlencoded");
             return self;
         }
 
@@ -712,9 +802,20 @@ pub const Client = struct {
                 .headers = self.headersList.items,
                 .query = self.queryList.items,
                 .body = self.bodyBytes orelse "",
-                .timeoutMs = self.timeoutMs,
-                .bearerAuth = self.bearerAuth,
-                .basicAuth = self.basicAuth,
+                .timeoutMs = self.timeoutMsValue,
+                .bearerAuth = self.bearerAuthValue,
+                .basicAuth = self.basicAuthValue,
+            });
+        }
+
+        pub fn sendStream(self: *RequestBuilder) !ResponseStream {
+            return self.client.doRequestStream(self.method, self.url, .{
+                .headers = self.headersList.items,
+                .query = self.queryList.items,
+                .body = self.bodyBytes orelse "",
+                .timeoutMs = self.timeoutMsValue,
+                .bearerAuth = self.bearerAuthValue,
+                .basicAuth = self.basicAuthValue,
             });
         }
     };
@@ -936,16 +1037,26 @@ pub const Client = struct {
         return self.doRequestWithOverride(method, url, opts);
     }
 
+    fn doRequestStream(self: *Client, method: Method, urlOverride: []const u8, opts: anytype) Error!ResponseStream {
+        return self.doRequestInner(true, method, urlOverride, opts);
+    }
+
     fn doRequestWithOverride(self: *Client, method: Method, urlOverride: []const u8, opts: anytype) Error!Response {
         var attempt: u32 = 0;
         const maxAttempts = self.config.maxRetries + 1;
+        // RFC 9110 Section 9.2.2: only idempotent methods may be replayed
+        // automatically. POST/PATCH/CONNECT need an explicit opt-in.
+        const canReplay = self.config.retryUnsafeMethods or switch (method) {
+            .GET, .HEAD, .OPTIONS, .TRACE, .PUT, .DELETE => true,
+            .POST, .PATCH, .CONNECT => false,
+        };
         while (attempt < maxAttempts) : (attempt += 1) {
-            var result = self.doRequestInner(method, urlOverride, opts) catch |err| {
-                if (attempt + 1 >= maxAttempts) return err;
-                clock.sleepMillis(self.config.retryDelayMs * (attempt + 1));
+            var result = self.doRequestInner(false, method, urlOverride, opts) catch |err| {
+                if (!canReplay or attempt + 1 >= maxAttempts) return err;
+                clock.sleepMillis(self.io, self.config.retryDelayMs * (attempt + 1));
                 continue;
             };
-            if (self.config.maxRetries > 0 and attempt + 1 < maxAttempts) {
+            if (canReplay and self.config.maxRetries > 0 and attempt + 1 < maxAttempts) {
                 var shouldRetry = false;
                 for (self.config.retryStatusCodes) |code| {
                     if (result.status == code) {
@@ -955,7 +1066,7 @@ pub const Client = struct {
                 }
                 if (shouldRetry) {
                     result.deinit();
-                    clock.sleepMillis(self.config.retryDelayMs * (attempt + 1));
+                    clock.sleepMillis(self.io, self.config.retryDelayMs * (attempt + 1));
                     continue;
                 }
             }
@@ -964,7 +1075,7 @@ pub const Client = struct {
         unreachable;
     }
 
-    fn doRequestInner(self: *Client, method: Method, urlOverride: []const u8, opts: anytype) Error!Response {
+    fn doRequestInner(self: *Client, comptime streaming: bool, method: Method, urlOverride: []const u8, opts: anytype) if (streaming) Error!ResponseStream else Error!Response {
         // Track allocations for header/query string conversions that need freeing.
         var allocatedStrings: std.ArrayList([]u8) = .empty;
         defer {
@@ -1238,7 +1349,50 @@ pub const Client = struct {
                 .contentType = contentTypeVal,
                 .data = mp.data,
             };
-            multipartBuf = mpEncoder.encodeAllocParts(self.allocator, boundary, &.{part}) catch return Error.OutOfMemory;
+            multipartBuf = mpEncoder.encodeAllocParts(self.allocator, boundary, &.{part}) catch |err| switch (err) {
+                error.OutOfMemory => return Error.OutOfMemory,
+                else => return Error.WriteFailed,
+            };
+            if (multipartBuf) |b| {
+                bodyVal = b;
+                bodyKind = .raw;
+                hdrs.append(self.allocator, .{ .name = "Content-Type", .value = ctVal }) catch return Error.OutOfMemory;
+            }
+        }
+
+        // Multi-part form builder support. Parts are encoded before the
+        // transport write; the request engine does not yet support streaming
+        // request bodies, so callers should keep total bodies within the
+        // server/client buffering limits.
+        if (bodyKind == .none and @hasField(@TypeOf(opts), "multipartForm")) {
+            const mf = opts.multipartForm;
+            const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
+
+            var boundaryBuf: [32]u8 = undefined;
+            const boundary: []const u8 = blk: {
+                if (!@hasField(@TypeOf(mf), "boundary")) break :blk mpEncoder.generateBoundary(&boundaryBuf);
+                const raw = mf.boundary;
+                if (@typeInfo(@TypeOf(raw)) == .optional) {
+                    if (raw) |v| break :blk v;
+                    break :blk mpEncoder.generateBoundary(&boundaryBuf);
+                }
+                break :blk raw;
+            };
+
+            const subtype: mpEncoder.Subtype = if (@hasField(@TypeOf(mf), "subtype"))
+                mf.subtype
+            else
+                .formData;
+
+            var ctBuf: [160]u8 = undefined;
+            const ctVal = mpEncoder.contentTypeSubtype(&ctBuf, subtype, boundary);
+            if (ctVal.len == 0) return Error.WriteFailed;
+
+            const parts = mf.parts;
+            multipartBuf = mpEncoder.encodeAllocParts(self.allocator, boundary, parts) catch |err| switch (err) {
+                error.OutOfMemory => return Error.OutOfMemory,
+                else => return Error.WriteFailed,
+            };
             if (multipartBuf) |b| {
                 bodyVal = b;
                 bodyKind = .raw;
@@ -1290,24 +1444,24 @@ pub const Client = struct {
 
         const reqTls: ?req.TlsOptions = blk: {
             if (!@hasField(@TypeOf(opts), "tls")) {
-                // No per-request TLS: use client default, or auto-enable for HTTPS.
+                // No per-request TLS: use the client default, or system trust.
                 if (self.config.tls) |cTls| break :blk cTls;
-                break :blk req.TlsOptions{ .verify = .none, .allowTruncation = true };
+                break :blk req.TlsOptions{};
             }
             const v = opts.tls;
             const T = @TypeOf(v);
             // Untyped null (forwarded absence) inherits the client default.
             if (T == @TypeOf(null)) {
                 if (self.config.tls) |cTls| break :blk cTls;
-                break :blk req.TlsOptions{ .verify = .none, .allowTruncation = true };
+                break :blk req.TlsOptions{};
             }
             if (@typeInfo(T) == .optional) {
                 // Explicit null inherits the client default (null = no override).
-                break :blk v orelse if (self.config.tls) |cTls| cTls else req.TlsOptions{ .verify = .none, .allowTruncation = true };
+                break :blk v orelse if (self.config.tls) |cTls| cTls else req.TlsOptions{};
             } else {
                 // Anonymous struct: merge per field over the client default so
                 // specifying one sub-option keeps the rest.
-                const base = if (self.config.tls) |cTls| cTls else req.TlsOptions{ .verify = .none, .allowTruncation = true };
+                const base = if (self.config.tls) |cTls| cTls else req.TlsOptions{};
                 break :blk req.TlsOptions{
                     .verify = if (@hasField(@TypeOf(v), "verify")) v.verify else base.verify,
                     .caBundle = if (@hasField(@TypeOf(v), "caBundle")) v.caBundle else base.caBundle,
@@ -1347,7 +1501,7 @@ pub const Client = struct {
 
         const targetUrl: []const u8 = urlOverride;
 
-        const result = req.request(self.allocator, self.io, .{
+        const reqArgs: req.Request = .{
             .method = method,
             .url = targetUrl,
             .headers = hdrs.items,
@@ -1403,7 +1557,12 @@ pub const Client = struct {
             .timeoutMs = reqTimeout,
             .maxResponseSize = reqMaxSize,
             .proxy = reqProxy,
-        });
+            .bodySource = if (@hasField(@TypeOf(opts), "bodySource")) opts.bodySource else null,
+        };
+        const result = if (streaming)
+            req.requestStream(self.allocator, self.io, reqArgs)
+        else
+            req.request(self.allocator, self.io, reqArgs);
         if (result) |resp| {
             if (self.config.eventCallback) |cb| cb(.{
                 .kind = .requestCompleted,
@@ -1425,161 +1584,6 @@ pub const Client = struct {
         }
     }
 };
-
-// Default global client (zero-config). Lazily created; never deinit'd
-// (process-lifetime resource, like the standard library's own globals).
-
-var gClient: ?Client = null;
-var gReady = std.atomic.Value(bool).init(false);
-var gMu = sync.Spinlock{};
-
-fn defaultClient() ?*Client {
-    if (gReady.load(.acquire)) return &gClient.?;
-
-    gMu.lock();
-    defer gMu.unlock();
-    if (gReady.load(.monotonic)) return &gClient.?;
-
-    const gpa = std.heap.page_allocator;
-    gClient = Client.init(gpa, std.Io.Threaded.global_single_threaded.io(), .{});
-    gReady.store(true, .release);
-    return &gClient.?;
-}
-
-fn forwardMethod(method: Method, url: []const u8, opts: anytype) Error!Response {
-    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
-    return c.doRequestWithOverride(method, url, opts);
-}
-
-/// Zero-config GET — uses the global client (lazy-initialized).
-///   const res = try httpx.get("https://example.com", .{});
-pub fn globalFetch(url: []const u8, opts: anytype) Error!Response {
-    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
-    return c.fetch(url, opts);
-}
-
-pub fn globalGet(url: []const u8, opts: anytype) Error!Response {
-    return forwardMethod(.GET, url, opts);
-}
-
-pub fn globalPost(url: []const u8, opts: anytype) Error!Response {
-    return forwardMethod(.POST, url, opts);
-}
-
-pub fn globalPut(url: []const u8, opts: anytype) Error!Response {
-    return forwardMethod(.PUT, url, opts);
-}
-
-pub fn globalPatch(url: []const u8, opts: anytype) Error!Response {
-    return forwardMethod(.PATCH, url, opts);
-}
-
-pub fn globalDelete(url: []const u8, opts: anytype) Error!Response {
-    return forwardMethod(.DELETE, url, opts);
-}
-
-pub fn globalHead(url: []const u8, opts: anytype) Error!Response {
-    return forwardMethod(.HEAD, url, opts);
-}
-
-pub fn globalOptions(url: []const u8, opts: anytype) Error!Response {
-    return forwardMethod(.OPTIONS, url, opts);
-}
-
-pub fn globalTrace(url: []const u8, opts: anytype) Error!Response {
-    return forwardMethod(.TRACE, url, opts);
-}
-
-pub fn globalConnect(url: []const u8, opts: anytype) Error!Response {
-    return forwardMethod(.CONNECT, url, opts);
-}
-
-/// Generic zero-config request — specify method in opts.
-pub fn globalRequest(url: []const u8, opts: anytype) Error!Response {
-    const m: Method = extractMethod(opts);
-    return forwardMethod(m, url, opts);
-}
-
-pub fn globalGetAll(urls: anytype) ![]Response {
-    // Slice is page_allocator-owned (see requestAll): deinit each Response,
-    // then std.heap.page_allocator.free(results).
-    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
-    return c.getAll(urls);
-}
-
-pub fn globalRequestAll(reqs: anytype) ![]Response {
-    // Same ownership as globalGetAll.
-    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
-    return c.requestAll(reqs);
-}
-
-pub fn globalDownload(url: []const u8, opts: anytype) DownloadError!DownloadResult {
-    const c = defaultClient() orelse return DownloadError.ConnectionFailed;
-    return c.download(url, opts);
-}
-
-pub fn globalUpdateFile(url: []const u8, opts: anytype) DownloadError!DownloadResult {
-    const c = defaultClient() orelse return DownloadError.ConnectionFailed;
-    return c.updateFile(url, opts);
-}
-
-pub fn globalVerifyFile(path: []const u8, opts: VerifyOptions) DownloadError!void {
-    return DownloadCore.verifyFile(path, opts);
-}
-
-pub fn globalLookupFileInfo(url: []const u8, opts: anytype) DownloadError!RemoteFileInfo {
-    const c = defaultClient() orelse return DownloadError.ConnectionFailed;
-    return c.lookupFileInfo(url, opts);
-}
-
-/// Zero-config global DNS resolution function.
-pub fn globalResolve(host: []const u8, opts: anytype) Error!ResolvedAddresses {
-    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
-    return c.resolve(host, opts);
-}
-
-/// Zero-config global URL hostname resolution function.
-pub fn globalResolveUrl(urlStr: []const u8, opts: anytype) Error!ResolvedAddresses {
-    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
-    return c.resolveUrl(urlStr, opts);
-}
-
-pub fn globalGraphql(url: []const u8, query: []const u8, variables: anytype, opts: anytype) !Response {
-    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
-    return c.graphql(url, query, variables, opts);
-}
-
-pub fn globalFetchSitemap(url: []const u8, opts: anytype) !@import("../parsing/sitemap.zig").Sitemap {
-    const c = defaultClient() orelse return Error.DefaultClientUnavailable;
-    return c.fetchSitemap(url, opts);
-}
-
-/// Returns true if the internet is reachable (zero-config, no client needed).
-///
-/// Uses a short-lived I/O context to probe Cloudflare/Google DNS (port 53).
-/// Works on Windows (Winsock), Linux, and macOS.  IPv4 and IPv6 are both
-/// attempted.
-///
-/// Example:
-/// ```zig
-/// if (!httpx.isOnline()) @panic("No internet connection");
-/// ```
-pub fn globalIsOnline() bool {
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    return connectivity.isOnline(threaded.io());
-}
-
-/// Probes internet connectivity and returns a `ConnectivityResult` (zero-config).
-///
-/// Example:
-/// ```zig
-/// const r = httpx.checkConnectivity(.{ .timeoutMs = 2000 });
-/// if (r.online) std.debug.print("online via {s} ({?d}ms)\n", .{ r.endpointStr(), r.latencyMs });
-/// ```
-pub fn globalCheckConnectivity(opts: ConnectivityOptions) ConnectivityResult {
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    return connectivity.checkConnectivity(threaded.io(), opts);
-}
 
 test "explicit client init/deinit" {
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -1985,6 +1989,46 @@ test "http CONNECT proxy 407 maps to ProxyAuthRequired" {
 
     const err = client.get("http://127.0.0.1:9/needs-auth", .{ .proxy = proxyUrl, .timeoutMs = 10_000 });
     try std.testing.expectError(error.ProxyAuthRequired, err);
+}
+
+test "HTTPS rejects an untrusted server certificate by default" {
+    const a = std.testing.allocator;
+    var ctx = try tcp.IoContext.init(a);
+    defer ctx.deinit();
+
+    const tlsServerMod = @import("../protocols/tls/tlsServer.zig");
+    const certPem = @embedFile("../protocols/tls/testdata/localhostCert.pem");
+    const keyPem = @embedFile("../protocols/tls/testdata/localhostKey.pem");
+    var listener = try tcp.Listener.bind(ctx.io, 0);
+    defer listener.close(ctx.io);
+    const port = listener.localPort();
+
+    const Acceptor = struct {
+        fn run(lst: *tcp.Listener, io2: std.Io, cert: []const u8, key: []const u8) void {
+            var conn = lst.accept(io2) catch return;
+            defer conn.close();
+            var server = tlsServerMod.Server.init(std.heap.page_allocator, io2, .{
+                .certificatePem = cert,
+                .privateKeyPem = key,
+            }) catch return;
+            defer server.deinit();
+            var tlsConn = server.accept(&conn) catch return;
+            defer tlsConn.deinit();
+            var requestByte: [1]u8 = undefined;
+            _ = tlsConn.read(&requestByte) catch {};
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Acceptor.run, .{ &listener, ctx.io, certPem, keyPem });
+    defer thread.join();
+
+    var client = Client.init(a, ctx.io, .{});
+    defer client.deinit();
+    var urlBuf: [96]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "https://localhost:{d}/", .{port});
+    try std.testing.expectError(error.TlsCertificateNotVerified, client.get(url, .{
+        .httpVersion = .http11,
+        .timeoutMs = 5_000,
+    }));
 }
 
 test "client get over https negotiates h2 end to end" {
@@ -2453,12 +2497,10 @@ test "client get over http3 serves loopback over real udp" {
             try conn.sendFrames(.application, B.build, 0);
         }
 
-        fn serveOne(srv: *@This(), deadlineMs: u64) !void {
+        fn serveRequests(srv: *@This(), deadlineMs: u64, targetRequests: usize) !void {
             const alloc = std.testing.allocator;
             var qconn = try quicConn.Connection.init(alloc, std.Io.Threaded.global_single_threaded.io(), .server, .{});
             defer qconn.deinit();
-            // The endpoint's conn pointer follows each fresh connection;
-            // the previous one is already deinited by its own scope.
             srv.ep.conn = qconn;
             var drv = quicHs.Driver.initServer(std.Io.Threaded.global_single_threaded.io(), alloc, .{ .certChainPem = certPem, .privateKeyPem = keyPem });
             defer drv.deinit();
@@ -2470,9 +2512,10 @@ test "client get over http3 serves loopback over real udp" {
             var acc = Acc{};
             defer acc.buf.deinit(alloc);
             qconn.cbs = .{ .ctx = &acc, .onStreamData = onStream };
-            const start: u64 = @intCast(clock.millisNow());
-            while (true) {
-                const now: u64 = @intCast(clock.millisNow());
+            const start: u64 = @intCast(clock.millisNow(srv.ep.io));
+            var served: usize = 0;
+            while (served < targetRequests) {
+                const now: u64 = @intCast(clock.millisNow(srv.ep.io));
                 if (now -| start > deadlineMs) return error.Timeout;
                 try quicHs.feedPumped(&srv.ep, &srv.pump, null, 500, now);
                 if (!acc.fin) continue;
@@ -2511,20 +2554,27 @@ test "client get over http3 serves loopback over real udp" {
                 try wire.appendSlice(alloc, rdata);
                 try sendStream(qconn, acc.sid, wire.items, true);
                 _ = try srv.ep.flush(null);
-                return;
+
+                served += 1;
+                acc.sid = std.math.maxInt(u64);
+                acc.buf.clearRetainingCapacity();
+                acc.fin = false;
             }
         }
 
+        fn serveHandshakeOnly(srv: *@This(), deadlineMs: u64) !void {
+            const alloc = std.testing.allocator;
+            var qconn = try quicConn.Connection.init(alloc, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+            defer qconn.deinit();
+            srv.ep.conn = qconn;
+            var drv = quicHs.Driver.initServer(std.Io.Threaded.global_single_threaded.io(), alloc, .{ .certChainPem = certPem, .privateKeyPem = keyPem });
+            defer drv.deinit();
+            qconn.tls = .{ .ctx = &drv, .start = quicHs.Driver.clientStart, .onData = quicHs.Driver.onData };
+            try quicHs.serveHandshake(&srv.ep, &srv.pump, &drv, deadlineMs);
+        }
+
         fn run(srv: *@This(), out: *?anyerror) void {
-            serveOne(srv, 15_000) catch |e| {
-                out.* = e;
-                return;
-            };
-            serveOne(srv, 15_000) catch |e| {
-                out.* = e;
-                return;
-            };
-            serveOne(srv, 15_000) catch |e| {
+            serveRequests(srv, 15_000, 3) catch |e| {
                 out.* = e;
                 return;
             };
@@ -2532,7 +2582,7 @@ test "client get over http3 serves loopback over real udp" {
             // verification and goes quiet, so the server must time out
             // (never complete). A completed third handshake would mean
             // the client accepted a forged chain — catastrophic.
-            if (serveOne(srv, 5_000)) {
+            if (serveHandshakeOnly(srv, 5_000)) {
                 out.* = error.UnexpectedSuccess;
             } else |e| {
                 out.* = if (e == error.HandshakeTimeout) null else e;
@@ -2592,6 +2642,8 @@ test "client get over http3 serves loopback over real udp" {
     defer uploadResponse.deinit();
     try std.testing.expectEqual(@as(u16, 200), uploadResponse.status);
     try std.testing.expectEqualStrings("body-received", uploadResponse.body);
+    // Verified: requests 2 and 3 hit the pool and reused the established HTTP/3 QUIC connection
+    try std.testing.expectEqual(@as(u64, 2), client.pool.statsSnapshot().hits);
 
     // Untrusted chain fails fast and loudly (no 15s deadline burn: the
     // doomed handshake aborts as soon as the driver rejects the chain).
@@ -2951,9 +3003,9 @@ test "client get over http3 with 0-rtt early data resumes session" {
             var acc = Acc{};
             defer acc.buf.deinit(alloc);
             qconn.cbs = .{ .ctx = &acc, .onStreamData = onStream };
-            const start: u64 = @intCast(clock.millisNow());
+            const start: u64 = @intCast(clock.millisNow(srv.ep.io));
             while (true) {
-                const now: u64 = @intCast(clock.millisNow());
+                const now: u64 = @intCast(clock.millisNow(srv.ep.io));
                 if (now -| start > deadlineMs) return error.Timeout;
                 try quicHs.feedPumped(&srv.ep, &srv.pump, null, 500, now);
                 if (!acc.fin) continue;
@@ -3008,7 +3060,9 @@ test "client get over http3 with 0-rtt early data resumes session" {
     var result: ?anyerror = error.NotRun;
     const th = try std.Thread.spawn(.{}, Server.run, .{ &srv, &result, tk, &replayCache });
 
-    var client = Client.init(a, ctx.io, .{});
+    // Pooling disabled so each get performs a fresh handshake; the
+    // TLS layer verifies 0-RTT tickets across independent sessions.
+    var client = Client.init(a, ctx.io, .{ .pool = .{ .maxConnections = 0 } });
     errdefer client.deinit();
 
     var urlBuf: [64]u8 = undefined;
@@ -3024,7 +3078,8 @@ test "client get over http3 with 0-rtt early data resumes session" {
     try std.testing.expectEqualStrings("initial-1rtt", res1.body);
 
     // Verify session was captured in client session cache
-    var cached = client.sessionCache.getWithAlpn("127.0.0.1", port, @intCast(clock.millisNow()), "h3");
+    const cachePolicy = req.sessionPolicyFingerprint(.{ .verify = .caBundle, .caPem = certPem });
+    var cached = client.sessionCache.getWithAlpnPolicy("127.0.0.1", port, @intCast(clock.millisNow(client.io)), "h3", cachePolicy);
     try std.testing.expect(cached != null);
     if (cached) |*c| {
         c.deinit(a);
@@ -3072,7 +3127,421 @@ test "RequestBuilder fluent API constructs and validates request" {
     try std.testing.expectEqual(@as(usize, 1), builder.queryList.items.len);
     try std.testing.expectEqualStrings("page", builder.queryList.items[0].name);
     try std.testing.expectEqualStrings("2", builder.queryList.items[0].value);
-    try std.testing.expectEqual(@as(?u64, 5000), builder.timeoutMs);
-    try std.testing.expectEqualStrings("my-test-token", builder.bearerAuth.?);
+    try std.testing.expectEqual(@as(?u64, 5000), builder.timeoutMsValue);
+    try std.testing.expectEqualStrings("my-test-token", builder.bearerAuthValue.?);
     try std.testing.expect(std.mem.indexOf(u8, builder.bodyBytes.?, "\"user\":\"Alice\"") != null);
+}
+
+fn releaseAcceptor(l: *tcp.Listener, io: std.Io) void {
+    if (tcp.connect(io, "127.0.0.1", l.localPort())) |s| {
+        var waker = s;
+        waker.close();
+    } else |_| {}
+}
+
+test "Client fetch with bodySource streaming upload" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var listener = try tcp.Listener.bind(io, 0);
+    defer listener.close(io);
+
+    const Capture = struct {
+        bytes: [2048]u8 = undefined,
+        len: usize = 0,
+    };
+    const RawServer = struct {
+        fn run(listenerPtr: *tcp.Listener, capture: *Capture, s_io: std.Io) void {
+            var conn = listenerPtr.accept(s_io) catch return;
+            defer conn.close();
+            conn.setReadTimeoutMs(3000);
+            while (capture.len < capture.bytes.len) {
+                const n = conn.read(capture.bytes[capture.len..]) catch return;
+                if (n == 0) break;
+                capture.len += n;
+                if (std.mem.indexOf(u8, capture.bytes[0..capture.len], "client-streamed-payload") != null) break;
+            }
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nSUCCESS") catch {};
+        }
+    };
+
+    var capture = Capture{};
+    const thread = try std.Thread.spawn(.{}, RawServer.run, .{ &listener, &capture, io });
+    defer {
+        releaseAcceptor(&listener, io);
+        thread.join();
+    }
+
+    var client = Client.init(a, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/stream-test", .{listener.localPort()});
+
+    var sr = SliceReader.init("client-streamed-payload");
+    var res = try client.post(url, .{
+        .bodySource = sr.source(),
+    });
+    defer res.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+    try std.testing.expectEqualStrings("SUCCESS", res.body);
+    const reqStr = capture.bytes[0..capture.len];
+    try std.testing.expect(std.mem.startsWith(u8, reqStr, "POST /stream-test HTTP/1.1\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, reqStr, "client-streamed-payload") != null);
+}
+
+test "Client HTTP method convenience APIs (all 11 methods wire verification)" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var listener = try tcp.Listener.bind(io, 0);
+    const port = listener.localPort();
+
+    const WireCapture = struct {
+        method: [16]u8 = undefined,
+        methodLen: usize = 0,
+        path: [128]u8 = undefined,
+        pathLen: usize = 0,
+        body: [512]u8 = undefined,
+        bodyLen: usize = 0,
+        isJson: bool = false,
+
+        fn methodSlice(self: *const @This()) []const u8 {
+            return self.method[0..self.methodLen];
+        }
+        fn pathSlice(self: *const @This()) []const u8 {
+            return self.path[0..self.pathLen];
+        }
+        fn bodySlice(self: *const @This()) []const u8 {
+            return self.body[0..self.bodyLen];
+        }
+    };
+
+    var captures: [11]WireCapture = undefined;
+    for (&captures) |*c| c.* = .{};
+
+    const MockServer = struct {
+        fn run(l: *tcp.Listener, caps: []WireCapture, s_io: std.Io) void {
+            for (0..caps.len) |i| {
+                var conn = l.accept(s_io) catch return;
+                defer conn.close();
+                conn.setReadTimeoutMs(5000);
+
+                var rawBuf: [2048]u8 = undefined;
+                var totalRead: usize = 0;
+                while (totalRead < rawBuf.len) {
+                    const n = conn.read(rawBuf[totalRead..]) catch break;
+                    if (n == 0) break;
+                    totalRead += n;
+                    if (std.mem.indexOf(u8, rawBuf[0..totalRead], "\r\n\r\n")) |hdrEnd| {
+                        var contentLength: usize = 0;
+                        const hdrSlice = rawBuf[0..hdrEnd];
+                        if (std.mem.indexOf(u8, hdrSlice, "Content-Length: ") orelse std.mem.indexOf(u8, hdrSlice, "content-length: ")) |clIdx| {
+                            const valStart = clIdx + 16;
+                            const lineEnd = std.mem.indexOf(u8, hdrSlice[valStart..], "\r\n") orelse (hdrSlice.len - valStart);
+                            contentLength = std.fmt.parseInt(usize, std.mem.trim(u8, hdrSlice[valStart .. valStart + lineEnd], " \t"), 10) catch 0;
+                        }
+                        const bodyStart = hdrEnd + 4;
+                        const bodyRead = totalRead - bodyStart;
+                        if (bodyRead < contentLength) {
+                            const needed = contentLength - bodyRead;
+                            var extraRead: usize = 0;
+                            while (extraRead < needed and totalRead < rawBuf.len) {
+                                const extra = conn.read(rawBuf[totalRead..]) catch break;
+                                if (extra == 0) break;
+                                totalRead += extra;
+                                extraRead += extra;
+                            }
+                        }
+                        break;
+                    }
+                }
+
+                if (totalRead == 0) continue;
+                var cap = &caps[i];
+                const reqLineEnd = std.mem.indexOf(u8, rawBuf[0..totalRead], "\r\n") orelse continue;
+                var it = std.mem.splitScalar(u8, rawBuf[0..reqLineEnd], ' ');
+                if (it.next()) |m| {
+                    const mlen = @min(m.len, cap.method.len);
+                    @memcpy(cap.method[0..mlen], m[0..mlen]);
+                    cap.methodLen = mlen;
+                }
+                if (it.next()) |p| {
+                    const plen = @min(p.len, cap.path.len);
+                    @memcpy(cap.path[0..plen], p[0..plen]);
+                    cap.pathLen = plen;
+                }
+                if (std.mem.indexOf(u8, rawBuf[0..totalRead], "\r\n\r\n")) |hdrEnd| {
+                    if (std.mem.indexOf(u8, rawBuf[0..hdrEnd], "application/json") != null) cap.isJson = true;
+                    const bodyStart = hdrEnd + 4;
+                    if (bodyStart < totalRead) {
+                        const bslice = rawBuf[bodyStart..totalRead];
+                        const blen = @min(bslice.len, cap.body.len);
+                        @memcpy(cap.body[0..blen], bslice[0..blen]);
+                        cap.bodyLen = blen;
+                    }
+                }
+                conn.writeAll("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}") catch {};
+            }
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, MockServer.run, .{ &listener, &captures, io });
+    defer {
+        releaseAcceptor(&listener, io);
+        thread.join();
+        listener.close(io);
+    }
+
+    var client = Client.init(a, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+
+    // 1. GET
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/get", .{port});
+        var res = try client.get(url, .{});
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+    // 2. HEAD
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/head", .{port});
+        var res = try client.head(url, .{});
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+    // 3. POST
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/post", .{port});
+        var res = try client.post(url, .{ .body = "post-content" });
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+    // 4. POST JSON
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/post-json", .{port});
+        var res = try client.postJson(url, .{ .user = "Alice", .role = "admin" }, .{});
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+    // 5. PUT
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/put", .{port});
+        var res = try client.put(url, .{ .body = "put-content" });
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+    // 6. PATCH
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/patch", .{port});
+        var res = try client.patch(url, .{ .body = "patch-content" });
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+    // 7. DELETE
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/delete", .{port});
+        var res = try client.delete(url, .{});
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+    // 8. OPTIONS
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/options", .{port});
+        var res = try client.options(url, .{});
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+    // 9. TRACE
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/trace", .{port});
+        var res = try client.trace(url, .{});
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+    // 10. Generic request()
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/generic", .{port});
+        var res = try client.request(url, .{ .method = .GET });
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+    // 11. fetch()
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/fetch", .{port});
+        var res = try client.fetch(url, .{ .method = .POST, .body = "fetch-payload" });
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+
+    try std.testing.expectEqualStrings("GET", captures[0].methodSlice());
+    try std.testing.expectEqualStrings("/get", captures[0].pathSlice());
+    try std.testing.expectEqualStrings("HEAD", captures[1].methodSlice());
+    try std.testing.expectEqualStrings("/head", captures[1].pathSlice());
+    try std.testing.expectEqualStrings("POST", captures[2].methodSlice());
+    try std.testing.expectEqualStrings("/post", captures[2].pathSlice());
+    try std.testing.expectEqualStrings("post-content", captures[2].bodySlice());
+    try std.testing.expectEqualStrings("POST", captures[3].methodSlice());
+    try std.testing.expectEqualStrings("/post-json", captures[3].pathSlice());
+    try std.testing.expect(captures[3].isJson);
+    try std.testing.expect(std.mem.indexOf(u8, captures[3].bodySlice(), "\"user\":\"Alice\"") != null);
+    try std.testing.expectEqualStrings("PUT", captures[4].methodSlice());
+    try std.testing.expectEqualStrings("/put", captures[4].pathSlice());
+    try std.testing.expectEqualStrings("PATCH", captures[5].methodSlice());
+    try std.testing.expectEqualStrings("/patch", captures[5].pathSlice());
+    try std.testing.expectEqualStrings("DELETE", captures[6].methodSlice());
+    try std.testing.expectEqualStrings("/delete", captures[6].pathSlice());
+    try std.testing.expectEqualStrings("OPTIONS", captures[7].methodSlice());
+    try std.testing.expectEqualStrings("/options", captures[7].pathSlice());
+    try std.testing.expectEqualStrings("TRACE", captures[8].methodSlice());
+    try std.testing.expectEqualStrings("/trace", captures[8].pathSlice());
+    try std.testing.expectEqualStrings("GET", captures[9].methodSlice());
+    try std.testing.expectEqualStrings("/generic", captures[9].pathSlice());
+    try std.testing.expectEqualStrings("POST", captures[10].methodSlice());
+    try std.testing.expectEqualStrings("/fetch", captures[10].pathSlice());
+    try std.testing.expectEqualStrings("fetch-payload", captures[10].bodySlice());
+}
+
+test "RequestBuilder send() and postBuilder with form payloads" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var listener = try tcp.Listener.bind(io, 0);
+    const port = listener.localPort();
+
+    const Server = struct {
+        fn run(l: *tcp.Listener, s_io: std.Io) void {
+            for (0..2) |_| {
+                var conn = l.accept(s_io) catch return;
+                defer conn.close();
+                conn.setReadTimeoutMs(3000);
+                var buf: [1024]u8 = undefined;
+                _ = conn.read(&buf) catch return;
+                conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+            }
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, Server.run, .{ &listener, io });
+    defer {
+        releaseAcceptor(&listener, io);
+        thread.join();
+        listener.close(io);
+    }
+
+    var client = Client.init(a, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/b-json", .{port});
+        var b = client.requestBuilder(.POST, url);
+        defer b.deinit();
+        _ = try b.header("X-Custom", "active");
+        _ = try b.query("filter", "all");
+        _ = b.timeoutMs(3000);
+        _ = b.bearerAuth("token-xyz");
+        _ = try b.json(.{ .search = "zig" });
+        var res = try b.send();
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+    {
+        const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/b-form", .{port});
+        var b = client.postBuilder(url);
+        defer b.deinit();
+        _ = try b.form("username=user&password=password123");
+        var res = try b.send();
+        defer res.deinit();
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+    }
+}
+
+test "Response inspection and JSON parsing" {
+    const a = std.testing.allocator;
+
+    const StatusResponse = struct {
+        status: []const u8,
+    };
+
+    const hdrs = try a.alloc(req.Header, 1);
+    hdrs[0] = .{
+        .name = try a.dupe(u8, "content-type"),
+        .value = try a.dupe(u8, "application/json"),
+    };
+    const bodyBytes = try a.dupe(u8, "{\"status\":\"ok\"}");
+
+    var resp = Response{
+        .allocator = a,
+        .status = 200,
+        .version = .http11,
+        .headers = hdrs,
+        .body = bodyBytes,
+    };
+    defer resp.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expect(resp.isSuccess());
+    try std.testing.expect(!resp.isClientError());
+    try std.testing.expect(!resp.isServerError());
+    try std.testing.expectEqualStrings("application/json", resp.contentType());
+    try std.testing.expectEqualStrings("application/json", resp.header("content-type").?);
+
+    const parsed = try resp.json(StatusResponse);
+    try std.testing.expectEqualStrings("ok", parsed.status);
+}
+
+test "Client requestStream with BodySource streaming upload" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var listener = try tcp.Listener.bind(io, 0);
+    const port = listener.localPort();
+
+    const StreamServer = struct {
+        fn run(l: *tcp.Listener, s_io: std.Io) void {
+            var conn = l.accept(s_io) catch return;
+            defer conn.close();
+            conn.setReadTimeoutMs(3000);
+
+            var buf: [1024]u8 = undefined;
+            var total: usize = 0;
+            while (total < buf.len) {
+                const n = conn.read(buf[total..]) catch return;
+                if (n == 0) break;
+                total += n;
+                if (std.mem.indexOf(u8, buf[0..total], "streamed-data-payload") != null) break;
+            }
+
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nstream-reply") catch {};
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, StreamServer.run, .{ &listener, io });
+    defer {
+        releaseAcceptor(&listener, io);
+        thread.join();
+        listener.close(io);
+    }
+
+    var client = Client.init(a, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/stream-facade", .{port});
+
+    var reader = SliceReader.init("streamed-data-payload");
+    var res = try client.requestStream(url, .{
+        .method = .POST,
+        .bodySource = reader.source(),
+    });
+    defer res.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), res.status);
+    var replyBuf: [64]u8 = undefined;
+    const n = try res.body.read(&replyBuf);
+    try std.testing.expectEqualStrings("stream-reply", replyBuf[0..n]);
 }

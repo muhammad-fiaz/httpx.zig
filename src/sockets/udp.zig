@@ -9,8 +9,10 @@
 //!   - RFC 9000 Section 9.1 — QUIC Packet Connection (UDP-based)
 
 const std = @import("std");
+const builtin = @import("builtin");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
+const sysMod = @import("sys.zig");
 
 pub const MAX_DATAGRAM: usize = 65527; // max UDP payload (64KiB - 8 header - 20 IP)
 
@@ -61,22 +63,41 @@ pub const UdpSocket = struct {
         return .{ .data = msg.data, .from = msg.from };
     }
 
-    /// Receives one datagram before the supplied Zig 0.17 I/O timeout.
-    /// I/O backends that cannot perform concurrent timed operations return
-    /// `error.TimeoutUnsupported`; callers that require deadlines must handle
-    /// that explicitly rather than assuming socket options apply to std.Io.
+    /// Receives one datagram before the supplied timeout. POSIX uses a
+    /// readiness poll before `std.Io` receive; Windows delegates to its timed
+    /// I/O backend and reports `TimeoutUnsupported` when concurrency is absent.
     pub fn receiveTimeout(
         self: *UdpSocket,
         buffer: []u8,
         timeout: std.Io.Timeout,
     ) !struct { data: []const u8, from: net.IpAddress } {
-        const msg = self.socket.receiveTimeout(self.io, buffer, timeout) catch |err| switch (err) {
-            error.Timeout => return error.Timeout,
-            error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
-            error.ConcurrencyUnavailable => return error.TimeoutUnsupported,
-            else => return error.ReadFailed,
-        };
-        return .{ .data = msg.data, .from = msg.from };
+        if (builtin.os.tag == .windows) {
+            const msg = self.socket.receiveTimeout(self.io, buffer, timeout) catch |err| switch (err) {
+                error.Timeout => return error.Timeout,
+                error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
+                error.ConcurrencyUnavailable => return error.TimeoutUnsupported,
+                else => return error.ReadFailed,
+            };
+            return .{ .data = msg.data, .from = msg.from };
+        }
+
+        const deadline = timeout.toTimestamp(self.io);
+        while (true) {
+            if (deadline) |until| {
+                const ns = until.durationFromNow(self.io).raw.nanoseconds;
+                if (ns <= 0) return error.Timeout;
+                var waitMs = @divTrunc(ns, std.time.ns_per_ms);
+                if (@rem(ns, std.time.ns_per_ms) != 0) waitMs += 1;
+                const boundedMs: u31 = @intCast(@min(waitMs, std.math.maxInt(u31)));
+                const ready = sysMod.waitReadable(self.socket.handle, boundedMs) catch return error.ReadFailed;
+                if (!ready) continue;
+            }
+            const msg = self.socket.receive(self.io, buffer) catch |err| switch (err) {
+                error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
+                else => return error.ReadFailed,
+            };
+            return .{ .data = msg.data, .from = msg.from };
+        }
     }
 };
 
@@ -118,9 +139,9 @@ test "udp receive timeout is bounded or reports unsupported operation" {
     _ = socket.receiveTimeout(&buf, .{ .duration = .{
         .raw = std.Io.Duration.fromMilliseconds(10),
         .clock = .awake,
-    } }) catch |err| switch (err) {
-        error.Timeout, error.TimeoutUnsupported => return,
-        else => return err,
+    } }) catch |err| {
+        try std.testing.expect(err == error.Timeout or err == error.TimeoutUnsupported);
+        return;
     };
     return error.ExpectedTimeout;
 }

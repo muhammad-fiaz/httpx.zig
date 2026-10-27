@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn includesHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn includesHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.render("index.html", .{
         .title = "HTTPX Partials & Includes",
         .message = "Clean, reusable components using {% include %} directives.",

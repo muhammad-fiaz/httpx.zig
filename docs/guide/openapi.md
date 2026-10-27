@@ -28,6 +28,7 @@ pub fn main() !void {
     defer server.deinit();
 
     server.run();
+}
 ```
 
 ## Documentation UIs

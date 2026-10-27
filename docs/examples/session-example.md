@@ -4,7 +4,7 @@ Cookie-backed sessions in handlers. See `examples/sessionServer.zig` for a
 runnable `/login`, `/dashboard`, `/logout` flow.
 
 ```zig
-fn loginHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn loginHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     _ = ctx;
     return .{
         .status = 200,
@@ -16,7 +16,7 @@ fn loginHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn dashboardHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn dashboardHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const session = ctx.cookie("session") orelse
         return ctx.textStatus(401, "login required");
     _ = session;

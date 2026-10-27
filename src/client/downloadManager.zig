@@ -68,6 +68,9 @@ pub const DownloadError = error{
     UnexpectedEof,
 };
 
+/// One remote file and its destination for explicit client-managed batches.
+pub const DownloadTask = struct { url: []const u8, dest: []const u8 };
+
 pub const ProgressState = enum {
     starting,
     downloading,
@@ -528,8 +531,7 @@ const FileOps = struct {
         return true;
     }
 
-    pub fn isDir(path: []const u8) bool {
-        const io: std.Io = std.Io.Threaded.global_single_threaded.io();
+    pub fn isDir(io: std.Io, path: []const u8) bool {
         var dir = std.Io.Dir.cwd().openDir(io, path, .{}) catch return false;
         dir.close(io);
         return true;
@@ -651,6 +653,7 @@ fn baseName(s: []const u8) []const u8 {
 /// Resolves destination path: if destination is a directory or empty, append sanitized filename from URL or header.
 pub fn resolveDestination(
     allocator: Allocator,
+    io: std.Io,
     dest: ?[]const u8,
     url: []const u8,
     contentDisposition: ?[]const u8,
@@ -662,11 +665,7 @@ pub fn resolveDestination(
     } else if (rawDest[rawDest.len - 1] == '/' or rawDest[rawDest.len - 1] == '\\') {
         isDir = true;
     } else {
-        if (serveMod.statPath(undefined, rawDest)) |_| {
-            if (FileOps.isDir(rawDest)) {
-                isDir = true;
-            }
-        }
+        isDir = FileOps.isDir(io, rawDest);
     }
 
     if (!isDir) return allocator.dupe(u8, rawDest);
@@ -724,10 +723,10 @@ pub const Downloader = struct {
         url: []const u8,
         options: DownloadOptions,
     ) DownloadError!DownloadResult {
-        const startTime = clock.millisNow();
+        const startTime = clock.monotonicMillis(self.client.io);
 
         // 1. Resolve destination
-        const dest = resolveDestination(self.allocator, options.path, url, null) catch return DownloadError.OutOfMemory;
+        const dest = resolveDestination(self.allocator, self.client.io, options.path, url, null) catch return DownloadError.OutOfMemory;
         defer self.allocator.free(dest);
 
         // 2. Create parent directories if requested
@@ -745,13 +744,13 @@ pub const Downloader = struct {
             switch (options.existing) {
                 .fail => return DownloadError.DestinationExists,
                 .skip => {
-                    var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.millisNow() - startTime), 200);
+                    var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.monotonicMillis(self.client.io) - startTime), 200);
                     res.skipped = true;
                     return res;
                 },
                 .verifyExisting => {
                     if (verifyFile(dest, options.verify)) |_| {
-                        var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.millisNow() - startTime), 200);
+                        var res = DownloadResult.make(dest, 0, meta.size, @intCast(clock.monotonicMillis(self.client.io) - startTime), 200);
                         res.skipped = true;
                         res.verified = true;
                         return res;
@@ -830,7 +829,7 @@ pub const Downloader = struct {
                     }
                     return err;
                 }
-                clock.sleepMillis(options.retryDelayMs * (@as(u64, 1) << @intCast(@min(attempt, 4))));
+                clock.sleepMillis(self.client.io, options.retryDelayMs * (@as(u64, 1) << @intCast(@min(attempt, 4))));
             }
         }
 
@@ -841,8 +840,26 @@ pub const Downloader = struct {
             }
         }
 
-        result.elapsedMs = @intCast(clock.millisNow() - startTime);
+        result.elapsedMs = @intCast(clock.monotonicMillis(self.client.io) - startTime);
         return result;
+    }
+
+    /// Downloads multiple tasks in a batch using this Downloader.
+    /// Caller owns the returned slice and must free it with this Downloader's allocator.
+    pub fn downloadAll(
+        self: *Downloader,
+        tasks: []const DownloadTask,
+        options: DownloadOptions,
+    ) ![]DownloadResult {
+        var results = try self.allocator.alloc(DownloadResult, tasks.len);
+        errdefer self.allocator.free(results);
+
+        for (tasks, 0..) |t, i| {
+            var opt = options;
+            opt.path = t.dest;
+            results[i] = try self.download(t.url, opt);
+        }
+        return results;
     }
 
     fn performTransfer(
@@ -1105,8 +1122,8 @@ pub const ProgressTracker = struct {
             .url = url,
             .destination = destination,
             .options = options,
-            .startTime = clock.millisNow(),
-            .lastUpdateTime = clock.millisNow(),
+            .startTime = clock.monotonicMillis(io),
+            .lastUpdateTime = clock.monotonicMillis(io),
             .lastBytes = 0,
             .totalBytes = null,
             .bar = null,
@@ -1120,7 +1137,7 @@ pub const ProgressTracker = struct {
 
     pub fn start(self: *ProgressTracker, totalSize: ?u64) void {
         self.totalBytes = totalSize;
-        self.startTime = clock.millisNow();
+        self.startTime = clock.monotonicMillis(self.io);
         self.lastUpdateTime = self.startTime;
 
         const shouldRenderBar = (self.options.progress == .auto and self.isTty) or (self.options.progress == .enabled);
@@ -1171,7 +1188,7 @@ pub const ProgressTracker = struct {
     }
 
     pub fn update(self: *ProgressTracker, downloadedBytes: u64) void {
-        const now = clock.millisNow();
+        const now = clock.monotonicMillis(self.io);
         const elapsedTotalS = @as(f64, @floatFromInt(now - self.startTime)) / 1000.0;
         const speedBps = if (elapsedTotalS > 0.01) @as(f64, @floatFromInt(downloadedBytes)) / elapsedTotalS else 0.0;
 
@@ -1223,7 +1240,7 @@ pub const ProgressTracker = struct {
                 .percentage = 100.0,
                 .speedBps = 0.0,
                 .etaSeconds = 0,
-                .elapsedMs = @intCast(@max(0, clock.millisNow() - self.startTime)),
+                .elapsedMs = @intCast(@max(0, clock.monotonicMillis(self.io) - self.startTime)),
                 .statusCode = 200,
                 .state = .completed,
             }, self.options.userData);
@@ -1241,7 +1258,7 @@ pub const ProgressTracker = struct {
                 .percentage = null,
                 .speedBps = 0.0,
                 .etaSeconds = null,
-                .elapsedMs = @intCast(@max(0, clock.millisNow() - self.startTime)),
+                .elapsedMs = @intCast(@max(0, clock.monotonicMillis(self.io) - self.startTime)),
                 .statusCode = 500,
                 .state = .failed,
             }, self.options.userData);
@@ -1259,7 +1276,7 @@ pub const ProgressTracker = struct {
                 .percentage = null,
                 .speedBps = 0.0,
                 .etaSeconds = null,
-                .elapsedMs = @intCast(@max(0, clock.millisNow() - self.startTime)),
+                .elapsedMs = @intCast(@max(0, clock.monotonicMillis(self.io) - self.startTime)),
                 .statusCode = 499,
                 .state = .cancelled,
             }, self.options.userData);
@@ -1349,14 +1366,15 @@ pub const FtpDownloadOptions = struct {
 
 /// Downloads a file over FTP with progress reporting and checksum verification.
 pub fn ftpDownload(
+    io: std.Io,
     allocator: Allocator,
     options: FtpDownloadOptions,
 ) DownloadError!DownloadResult {
-    const startTime = clock.millisNow();
-    const dest = resolveDestination(allocator, options.destinationPath, options.remotePath, null) catch return DownloadError.OutOfMemory;
+    const startTime = clock.monotonicMillis(io);
+    const dest = resolveDestination(allocator, io, options.destinationPath, options.remotePath, null) catch return DownloadError.OutOfMemory;
     defer allocator.free(dest);
 
-    var ftp = ftpClientMod.Client.connect(allocator, .{
+    var ftp = ftpClientMod.Client.init(allocator, io, .{
         .host = options.host,
         .port = options.port,
         .user = options.user,
@@ -1374,8 +1392,7 @@ pub fn ftpDownload(
 
     const remoteSize = ftp.size(options.remotePath) catch null;
 
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    var tracker = ProgressTracker.init(allocator, threaded.io(), options.remotePath, dest, .{
+    var tracker = ProgressTracker.init(allocator, io, options.remotePath, dest, .{
         .progress = options.progress,
         .verify = options.verify,
     });
@@ -1438,7 +1455,7 @@ pub fn ftpDownload(
         .destination = dest,
         .downloadedBytes = ctx.written,
         .totalBytes = remoteSize,
-        .elapsedMs = @intCast(clock.millisNow() - startTime),
+        .elapsedMs = @intCast(clock.monotonicMillis(io) - startTime),
         .statusCode = 226,
         .verified = true,
         .sha256Hex = hasher.finalSha256Hex(),
@@ -1647,13 +1664,23 @@ test "streaming hasher calculates sha256 and verifies successfully" {
 
 test "resolveDestination handles direct file and directories" {
     const a = std.testing.allocator;
-    const r1 = try resolveDestination(a, "build/out.bin", "http://example.com/file.zip", null);
+    var ioContext = try @import("../sockets/tcp.zig").IoContext.init(a);
+    defer ioContext.deinit();
+    const r1 = try resolveDestination(a, ioContext.io, "build/out.bin", "http://example.com/file.zip", null);
     defer a.free(r1);
     try std.testing.expectEqualStrings("build/out.bin", r1);
 
-    const r2 = try resolveDestination(a, "build/", "http://example.com/data.tar.gz", null);
+    const r2 = try resolveDestination(a, ioContext.io, "build/", "http://example.com/data.tar.gz", null);
     defer a.free(r2);
     try std.testing.expect(std.mem.endsWith(u8, r2, "data.tar.gz"));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const existingDir = try tmp.dir.realPathFileAlloc(ioContext.io, ".", a);
+    defer a.free(existingDir);
+    const r3 = try resolveDestination(a, ioContext.io, existingDir, "http://example.com/existing-dir.bin", null);
+    defer a.free(r3);
+    try std.testing.expect(std.mem.endsWith(u8, r3, "existing-dir.bin"));
 }
 
 test "custom progress callback receives events" {

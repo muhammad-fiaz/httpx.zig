@@ -79,7 +79,7 @@ pub const Converter = enum {
 pub fn isUint(value: []const u8) bool {
     if (value.len == 0) return false;
     for (value) |c| {
-        if (c < '0' or c > '9') return false;
+        if (!std.ascii.isDigit(c)) return false;
     }
     return true;
 }
@@ -385,7 +385,7 @@ test "shape erases names but keeps converters" {
     try std.testing.expect(!std.mem.eql(u8, try p1.shape(&buf1), s3));
 }
 
-test "fuzz: malformed patterns fail safely" {
+test "regression: malformed patterns fail safely" {
     const bad = [_][]const u8{
         "{}",    "{{id}}",    "{id",   "id}", "{:",   "{foo:unknown}", "{foo:int:int}",
         "{/}",   "{ }",       "{a b}", "{*}", "{**}", "***",           "///",

@@ -6,7 +6,7 @@ HTTPX is engineered from the ground up with secure defaults, memory safety, and 
 
 1. **Memory Safety by Construction**: Built in Zig with bounds-checked slices, explicit allocators, and zero use-after-free or buffer overflows.
 2. **Strict Protocol Validation**: HTTP/1.1 and HTTP/2 parsers reject malformed frames, invalid transfer encodings, and request smuggling attempts.
-3. **Transport Encryption**: Strict TLS 1.2 and TLS 1.3 enforcement with SNI, ALPN, and default CA validation.
+3. **Transport Encryption**: Native TLS 1.3 server and client paths, TLS 1.2/1.3 interoperability for HTTPS/1.1, SNI on client paths, ALPN on native TLS 1.3 paths, and default CA validation.
 4. **Path Traversal Defenses**: Static file servers reject all encoded traversal sequences (`../`, `%2e%2e/`, Windows UNC paths).
 5. **Secret Redaction**: Logging mechanisms redact `Authorization`, `Cookie`, and token headers by default.
 
@@ -38,7 +38,7 @@ HTTPX is engineered from the ground up with secure defaults, memory safety, and 
 ## Security Checklist for Production
 
 * [ ] Use TLS 1.3 / HTTPS for all public endpoints.
-* [ ] Configure request size limits (`max_body_size`) to prevent denial-of-service memory exhaustion.
+* [ ] Configure request size limits (`maxBody`) to prevent denial-of-service memory exhaustion.
 * [ ] Attach rate limiting middleware to authentication and API endpoints.
 * [ ] Ensure all cookies specify `Secure`, `HttpOnly`, and `SameSite=Strict`.
 * [ ] Validate and sanitize all user input before routing or template rendering.

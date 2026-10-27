@@ -17,11 +17,11 @@ Demonstrates openapi.zig using the canonical HTTPX API.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn listHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn listHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = "[]", .contentType = "application/json" };
 }
 
-fn getHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn getHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const id = ctx.param("id") orelse "0";
     return .{
         .status = 200,

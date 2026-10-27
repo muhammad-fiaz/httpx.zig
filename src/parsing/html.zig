@@ -444,6 +444,7 @@ fn pointForOffsetTs(source: []const u8, offset: usize) ts.Point {
 
 /// Limits for the HTML parser.
 pub const Limits = struct {
+    maxInputSize: usize = 64 * 1024 * 1024,
     maxNodes: u32 = dom.MAX_NODES,
     maxDepth: u32 = dom.MAX_DEPTH,
     maxAttrs: u32 = 256,
@@ -473,6 +474,7 @@ const RAW_TEXT_ELEMENTS = std.StaticStringMap(void).initComptime(.{
 });
 
 pub fn parse(arena: Allocator, htmlSrc: []const u8, limits: Limits) ParseError!Tree {
+    if (htmlSrc.len > limits.maxInputSize) return error.InputTooLarge;
     var tree = try Tree.initCapacity(arena, @min(htmlSrc.len / 16 + 4, limits.maxNodes));
     errdefer tree.deinit(arena);
     const root = try tree.append(arena, .{
@@ -725,7 +727,7 @@ fn parseAttrs(
 ) ParseError!usize {
     var i = start;
     while (i < src.len) {
-        while (i < src.len and isWhitespace(src[i])) : (i += 1) {}
+        while (i < src.len and std.ascii.isWhitespace(src[i])) : (i += 1) {}
         if (i >= src.len) break;
 
         if (src[i] == '>') {
@@ -746,14 +748,14 @@ fn parseAttrs(
         }
         const attrName = src[nameStart..i];
 
-        while (i < src.len and isWhitespace(src[i])) : (i += 1) {}
+        while (i < src.len and std.ascii.isWhitespace(src[i])) : (i += 1) {}
 
         if (i >= src.len or src[i] != '=') {
             try attrs.append(arena, .{ .name = attrName, .value = "" });
             continue;
         }
         i += 1;
-        while (i < src.len and isWhitespace(src[i])) : (i += 1) {}
+        while (i < src.len and std.ascii.isWhitespace(src[i])) : (i += 1) {}
 
         var attrValue: []const u8 = "";
         if (i < src.len and (src[i] == '"' or src[i] == '\'')) {
@@ -765,7 +767,7 @@ fn parseAttrs(
             if (i < src.len) i += 1;
         } else {
             const valStart = i;
-            while (i < src.len and !isWhitespace(src[i]) and src[i] != '>') : (i += 1) {}
+            while (i < src.len and !std.ascii.isWhitespace(src[i]) and src[i] != '>') : (i += 1) {}
             attrValue = src[valStart..i];
         }
         if (attrValue.len > limits.maxAttrValue) return error.InputTooLarge;
@@ -780,17 +782,11 @@ fn isTagNameEnd(c: u8) bool {
 }
 
 fn isAttrNameEnd(c: u8) bool {
-    return c == '=' or c == '>' or c == '/' or isWhitespace(c);
-}
-
-fn isWhitespace(c: u8) bool {
-    return std.ascii.isWhitespace(c);
+    return c == '=' or c == '>' or c == '/' or std.ascii.isWhitespace(c);
 }
 
 fn lowerBuf(arena: Allocator, s: []const u8) Allocator.Error![]u8 {
-    const buf = try arena.alloc(u8, s.len);
-    for (buf, 0..) |*b, idx| b.* = std.ascii.toLower(s[idx]);
-    return buf;
+    return std.ascii.allocLowerString(arena, s);
 }
 
 test "html grammar tokenizes document structure" {
@@ -822,6 +818,18 @@ test "html parses nested elements with attributes via syntax tree" {
     try std.testing.expect(foundA and foundBr);
 }
 
+test "html parser enforces configured input size before parsing" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    try std.testing.expectError(error.InputTooLarge, parse(arena.allocator(), "<p>x</p>", .{ .maxInputSize = 7 }));
+
+    var arena2 = std.heap.ArenaAllocator.init(a);
+    defer arena2.deinit();
+    const tree = try parse(arena2.allocator(), "<p>x</p>", .{ .maxInputSize = 8 });
+    try std.testing.expectEqual(@as(u32, 3), tree.len());
+}
+
 test "html flags malformed input with error recovery" {
     const a = std.testing.allocator;
     var t = try parseHtmlTree(a, "<div><span>oops");
@@ -830,6 +838,18 @@ test "html flags malformed input with error recovery" {
     defer arena.deinit();
     var tree = try parse(arena.allocator(), "<div><span>oops", .{});
     try std.testing.expect(tree.get(0).hasError or t.hasError());
+}
+
+test "html lowercases element names with std.ascii" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const tree = try parse(arena.allocator(), "<DIV CLASS=\"X\">hi</DIV>", .{});
+    var found = false;
+    for (tree.nodes.items) |n| {
+        if (n.kind == .element and std.mem.eql(u8, n.tag, "div")) found = true;
+    }
+    try std.testing.expect(found);
 }
 
 test "html tracks source ranges from syntax nodes" {

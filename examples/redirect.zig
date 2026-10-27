@@ -1,11 +1,11 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn redirectHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn redirectHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.redirect("/final", 302);
 }
 
-fn finalHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn finalHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "redirected successfully",

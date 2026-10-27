@@ -1,12 +1,12 @@
 # HTTP/2 Protocol
 
-httpx.zig provides a complete, from-scratch implementation of HTTP/2 (RFC 7540) including HPACK header compression (RFC 7541). This guide covers high-level client/server runtime usage and low-level HTTP/2 protocol features.
+httpx.zig provides a complete, from-scratch implementation of HTTP/2 (RFC 9113) including HPACK header compression (RFC 7541). This guide covers high-level client/server runtime usage and low-level HTTP/2 protocol features.
 
 ::: warning Custom Implementation
-Zig's standard library does not provide HTTP/2 support. **httpx.zig implements HTTP/2 entirely from scratch**, following RFC 7540 and RFC 7541 specifications, including:
+Zig's standard library does not provide HTTP/2 support. **httpx.zig implements HTTP/2 entirely from scratch**, following RFC 9113 and RFC 7541 specifications, including:
 - **HPACK** header compression (RFC 7541) with `Without Indexing` / `Never Indexed` security for HTTP/2
-- **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and connection pooling (RFC 7540)
-- **ALPN** negotiation (RFC 7301) for automatic HTTP/2 and HTTP/3 protocol selection with HTTP/1.1 fallback
+- **HTTP/2** stream multiplexing, flow control (WINDOW_UPDATE), SETTINGS enforcement, GOAWAY/RST_STREAM, PRIORITY, CONTINUATION frames, PING, and connection pooling (RFC 9113)
+- **ALPN** negotiation (RFC 7301) selecting HTTP/2 or HTTP/1.1 over TLS, with HTTP/3 negotiated as `h3` over QUIC
 :::
 
 ## Platform Support
@@ -24,31 +24,62 @@ HTTP/2 support is validated across Linux, Windows, and macOS targets:
 - **High-level Client Runtime** - `Client` negotiates HTTP/2 over TLS via ALPN
   when `http2 = true` (default `false`; HTTP/1.x default `true`)
 - **High-level Server Runtime** - `Server` serves HTTP/2 when `http2 = true`
-  (default `true`). TLS deployments must configure ALPN to select `h2`; the
-  server's default ALPN list does not include HTTP/2.
+  (default `true`). TLS deployments derive ALPN from the enabled TCP protocol
+  set: with the default preference, an enabled HTTP/2 handler advertises `h2`
+  before the enabled HTTP/1.x names. An explicitly configured `alpn` list is
+  honoured as given.
 - **HPACK Header Compression** - Full RFC 7541 implementation with static and dynamic tables
-- **Stream Multiplexing** - The session tracks HTTP/2 streams, but the
-  high-level client performs one exchange at a time on a connection.
-- **Flow Control** - Per-stream and connection-level flow control with WINDOW_UPDATE
+- **Stream Multiplexing** - The server keeps one state per concurrent stream and
+  answers them independently; the transport client can keep several requests in
+  flight on one connection (`beginRequest` / `awaitResponse`). The high-level
+  `Client` hands out pooled connections exclusively, so it still runs one
+  exchange at a time per connection.
+- **Flow Control** - Per-stream and connection-level flow control with WINDOW_UPDATE.
+  The connection window is the fixed 65535 bytes of RFC 9113 Section 6.9.2;
+  `SETTINGS_INITIAL_WINDOW_SIZE` only affects stream windows.
 - **Stream Priority** - PRIORITY frames are parsed and tolerated; priority-based
   scheduling is not implemented.
 - **Frame Encoding/Decoding** - Core HTTP/2 frame types are encoded and decoded;
-  this does not imply complete extension-frame interoperability.
+  this does not imply complete extension-frame interoperability. Fixed-length
+  violations produce connection or stream `FRAME_SIZE_ERROR` as the RFC requires.
 - **CONTINUATION Frames** - Header blocks exceeding `MAX_FRAME_SIZE` are automatically split across HEADERS + CONTINUATION frames
-- **SETTINGS Enforcement** - Peer `MAX_CONCURRENT_STREAMS`, `MAX_FRAME_SIZE`, and `INITIAL_WINDOW_SIZE` values are parsed and enforced
-- **GOAWAY/RST_STREAM** - Graceful connection shutdown and stream cancellation with proper error codes
-- **HPACK Security** - `Without Indexing` / `Never Indexed` representations for volatile headers like `Authorization` and `Cookie`
-- **Trailer Support** - Trailers are parsed by the session layer; the
-  one-shot `Client`/`Server` API does not surface them yet (see below)
+- **SETTINGS Enforcement** - Peer `MAX_CONCURRENT_STREAMS`, `MAX_FRAME_SIZE`, and `INITIAL_WINDOW_SIZE` values are parsed and enforced; repeated settings are applied in order
+- **GOAWAY/RST_STREAM** - Graceful connection shutdown and stream cancellation
+  with proper error codes. A GOAWAY's last-stream-id never increases, refused
+  client streams are reset, and new streams are blocked once either side sends
+  or receives GOAWAY. A malformed header list is answered with a stream error
+  (`RST_STREAM`), not a connection error.
+- **HPACK Security** - `Without Indexing` / `Never Indexed` representations for volatile headers like `Authorization` and `Cookie`; those values never enter the dynamic table
+- **Trailer Support** - Trailers are parsed and framed by the session layer;
+  the one-shot `Client`/`Server` API does not surface them to handlers yet
+  (see below)
+- **Message Semantics** - Informational (1xx) responses, `content-length`
+  validation, HEAD/204/205/304 body rules, CONNECT requests, and
+  `END_STREAM`-terminated trailers are enforced in both directions.
+  Request `:authority` is surfaced as `host` when no explicit host field is
+  present; the high-level server answers unsupported methods with `501`.
+- **Strict Header Validation** - Field names are lowercased, connection-specific
+  fields are dropped, and malformed pseudo-header sets are rejected per
+  RFC 9113 Section 8
 - **Connection Preface Timeout** - Detects missing initial SETTINGS frame from peer
 - **ALPN Negotiation** - The client offers `h2` for explicit HTTP/2 requests;
-  the server selects it only when configured to do so.
+  the server selects it when HTTP/2 is enabled and the preference list allows it.
 - **Connection Pooling** - HTTP/1.x keep-alive and HTTP/2 sessions can be
   reused across sequential requests.
 
+### Not implemented
+
+- **Server push** - The client advertises `ENABLE_PUSH=0`; a `PUSH_PROMISE`
+  frame is a connection error (RFC 9113 Section 8.4).
+- **Priority-based scheduling** - `PRIORITY` is accepted and ignored.
+- **Extended CONNECT** (`:protocol`, RFC 8441) is not enabled. The pseudo-header
+  set is validated structurally, then rejected because
+  `SETTINGS_ENABLE_CONNECT_PROTOCOL` is never advertised.
+
+
 ## High-level Client Usage
 
-Enable HTTP/2 in `ClientConfig`:
+Enable HTTP/2 in the `Client.init` options:
 
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -73,7 +104,7 @@ hook) remains the transport for plain HTTPS/1.1 requests.
 
 ## High-level Server Usage
 
-Enable HTTP/2 in `ServerConfig`:
+Enable HTTP/2 in the inline options passed to `httpx.Server.init`:
 
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -85,7 +116,7 @@ var server = try httpx.Server.init(allocator, io, .{
 defer server.deinit();
 
 try server.get("/h2", struct {
-    fn handler(ctx: *httpx.Context) !httpx.Response {
+    fn handler(ctx: *httpx.router.Context) !httpx.router.Response {
         return ctx.text("hello from http2 server runtime");
     }
 }.handler);
@@ -315,7 +346,8 @@ std.debug.print("Stream send window: {d}\n", .{stream.sendWindow});
 ### Parsing WINDOW_UPDATE
 
 `WINDOW_UPDATE` bodies decode to `httpx.http2.frame.WindowUpdate{ .increment }`
-(a 31-bit value; zero is a connection error of type `FLOW_CONTROL_ERROR`).
+(a 31-bit value; zero is a connection `PROTOCOL_ERROR` on stream 0 and a stream
+`PROTOCOL_ERROR` otherwise).
 
 ## Error Codes
 
@@ -374,7 +406,7 @@ try session.sendRstStream(1, .cancel);
 try session.sendConnectionClose(.no_error, "server shutting down");
 ```
 
-`ErrorCode` variants live in `httpx.http2` (`.no_error`,
+`ErrorCode` variants live in `httpx.protocols.http2` (`.no_error`,
 `.protocol_error`, `.cancel`, ...).
 
 ## HPACK Security: Without Indexing / Never Indexed
@@ -402,11 +434,15 @@ Using incremental indexing for `Authorization` or `Cookie` headers can pollute t
 
 ## Trailer Support
 
-HTTP/2 trailers (HEADERS after DATA with END_STREAM) are parsed by
-`httpx.http2.Session` like any other header block. The
-high-level `httpx.Server`/`httpx.Client` one-shot API does not yet surface
+HTTP/2 trailers (HEADERS after DATA with `END_STREAM`) are parsed by
+`httpx.http2.Session` like any other header block. They must carry
+`END_STREAM`, appear only once, and may not contain pseudo-headers or
+`content-length`; violations reset the stream. A trailer block without
+`END_STREAM` is a `PROTOCOL_ERROR`, not a second header block.
+
+The high-level `httpx.Server`/`httpx.Client` one-shot API does not yet surface
 trailers — use the `httpx.http2.transport` stream APIs directly if you need
-them (see `examples/http2-client.zig` for the runtime path).
+them (see `examples/http2Multiplex.zig` for the runtime path).
 
 ## Connection Preface Timeout
 

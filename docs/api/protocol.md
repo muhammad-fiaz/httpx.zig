@@ -12,9 +12,9 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 |----------|---------|--------|-----|-------|
 | HTTP/1.0 | 1.0 | ✅ Full | RFC 1945 | High-level runtime support |
 | HTTP/1.1 | 1.1 | ✅ Full | RFC 9112 | High-level runtime support |
-| HTTP/2 | h2 | ✅ Full | RFC 7540, RFC 7541 | Framing/stream state/flow control/HPACK plus high-level client/server runtimes |
-| HTTP/3 | h3 | ✅ Full | RFC 9114, RFC 9204 | Framing/QPACK/QUIC helpers plus high-level client/server runtimes |
-| QUIC | v1 | ✅ Primitives | RFC 9000 | Transport/frame coding primitives in the protocol module |
+| HTTP/2 | h2 | ✅ Full | RFC 9113, RFC 7541 | Framing/stream state/flow control/HPACK plus high-level client/server runtimes |
+| HTTP/3 | h3 | ✅ Reliable paths | RFC 9114, RFC 9204 | High-level client/server runtime over QUIC/TLS 1.3 with QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT, Retry/version negotiation, key updates, and pooled client connections for sequential reuse |
+| QUIC | v1, v2 | ✅ Engine | RFC 9000, RFC 9001, RFC 9369 | Connection/stream state, TLS handshake, recovery, congestion control, and UDP endpoint |
 
 ## HTTP/1.1 Parser (`httpx.http1.parser`)
 
@@ -22,13 +22,18 @@ Function-style parser over byte buffers:
 
 ```zig
 // Request line + headers.
-const head = try httpx.http1.parser.parseRequestHead(buf);
+const head = try httpx.http1.parser.parseRequestHead(buf, .{});
 // head.method, head.path, head.minorVersion, head.majorVersion, head.headEnd
 var fields: [128]httpx.http1.parser.Field = undefined;
-const blk = try httpx.http1.parser.parseHeaderBlock(buf, head.headEnd, &fields);
+const blk = try httpx.http1.parser.parseHeaderBlock(buf, head.headEnd, &fields, .{});
 
 // Framing decision (none / contentLength / chunked / tunnel).
-const framing = try httpx.http1.parser.decideFraming(fields[0..blk.count], false, 0, 0);
+const framing = try httpx.http1.parser.decideFraming(
+    fields[0..blk.count],
+    false,
+    0,
+    "GET",
+);
 
 // Incremental chunked decoding.
 var dec = httpx.http1.parser.ChunkedDecoder.init();
@@ -40,7 +45,7 @@ while (!dec.isDone()) {
 Limits live in `httpx.http1.parser.Options` (`allowLfLineEndings`); size caps in
 `DEFAULT_MAX_HEADER_BYTES`, `DEFAULT_MAX_BODY_BYTES`, `DEFAULT_MAX_HEADERS`.
 
-## HTTP/2 Support (`httpx.http2`)
+## HTTP/2 Support (`httpx.protocols.http2`)
 
 - HPACK header compression (RFC 7541)
 - Stream state machine and multiplexing
@@ -102,7 +107,7 @@ try sess.sendHeaders(sid, &fields, false);
 _ = try sess.sendData(sid, body, true);
 ```
 
-## HTTP/3 Support (`httpx.http3`)
+## HTTP/3 Support (`httpx.protocols.http3`)
 
 - QPACK header compression (RFC 9204)
 - QUIC transport framing (RFC 9000)
@@ -112,9 +117,12 @@ _ = try sess.sendData(sid, body, true);
 ### Frames (`httpx.http3.frame`)
 
 ```zig
-var off: usize = 0;
-const hdr = try httpx.http3.frame.parseFrameHeader(data, &off); // FrameHeader
-const parsed = try httpx.http3.frame.parseFrame(data, &off);    // ParsedFrame
+var hdr_off: usize = 0;
+const hdr = try httpx.http3.frame.parseFrameHeader(data, &hdr_off); // FrameHeader
+
+var frame_off: usize = 0;
+const parsed = try httpx.http3.frame.parseFrame(data, &frame_off);  // ParsedFrame
+
 var buf: [16]u8 = undefined;
 const n = try httpx.http3.frame.encodeFrameHeader(&buf, 0x01, payload.len);
 // Settings payloads: parseSettingsPayload / buildSettingsPayload.
@@ -129,8 +137,13 @@ const ctrl = try conn.buildControlStream();
 defer allocator.free(ctrl);
 const streamId = conn.nextBidiStreamId();
 var req = conn.createRequestStream(streamId);
-const head = try req.buildRequestHeaders(allocator, &headers, false);
-const data = try req.buildData(body);
+const headers = [_]httpx.http3.qpack.FieldLine{
+    .{ .name = "user-agent", .value = "httpx" },
+};
+const head = try req.buildRequestHeaders("GET", "https", "example.com", "/", &headers);
+defer allocator.free(head);
+const data = try req.buildData("request body");
+defer allocator.free(data);
 ```
 
 ### QPACK (`httpx.http3.qpack`)
@@ -138,11 +151,11 @@ const data = try req.buildData(body);
 Static/dynamic table header compression with encoder/decoder stream
 instructions; see `src/protocols/http3/qpack.zig`.
 
-## QUIC (`httpx.quic`)
+## QUIC (`httpx.protocols.quic`)
 
 Transport coding primitives (RFC 9000): `varint.encode` / `varint.decode`,
 `packet`, `frames` (STREAM, CRYPTO, ACK, RESET_STREAM, STOP_SENDING, ...),
-`connection`, `params` (transport parameters), `stream`, `crypto`,
+`connection`, `transportParameters`, `stream`, `crypto`,
 `connectionId`, `path`, `transport`.
 
 ```zig

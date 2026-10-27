@@ -14,7 +14,6 @@ const Allocator = std.mem.Allocator;
 const contextMod = @import("templateContext.zig");
 const parserMod = @import("templateParser.zig");
 const errMod = @import("templateError.zig");
-const clockMod = @import("../../common/clock.zig");
 
 pub const Value = contextMod.Value;
 pub const Context = contextMod.Context;
@@ -215,7 +214,7 @@ fn filterUpper(allocator: Allocator, value: Value, args: []const Value, kwargs: 
     _ = kwargs;
     _ = args;
     const s = try filterStringValue(allocator, value);
-    for (s) |*c| c.* = std.ascii.toUpper(c.*);
+    _ = std.ascii.upperString(s, s);
     return .{ .string = s };
 }
 
@@ -223,7 +222,7 @@ fn filterLower(allocator: Allocator, value: Value, args: []const Value, kwargs: 
     _ = kwargs;
     _ = args;
     const s = try filterStringValue(allocator, value);
-    for (s) |*c| c.* = std.ascii.toLower(c.*);
+    _ = std.ascii.lowerString(s, s);
     return .{ .string = s };
 }
 
@@ -615,8 +614,7 @@ fn filterReverse(allocator: Allocator, value: Value, args: []const Value, kwargs
     std.mem.reverse(Value, out);
     return .{ .list = out };
 }
-
-// ---------- extended filter helpers ----------
+// Extended filter helpers
 
 fn filterKwarg(kwargs: []const FilterKwarg, name: []const u8) ?Value {
     for (kwargs) |kw| {
@@ -697,8 +695,11 @@ fn appendPercentEncoded(out: *std.ArrayList(u8), allocator: Allocator, s: []cons
         if (unreserved) {
             try out.append(allocator, c);
         } else {
-            const hex = "0123456789ABCDEF";
-            try out.appendSlice(allocator, &[_]u8{ '%', hex[c >> 4], hex[c & 15] });
+            try out.appendSlice(allocator, &[_]u8{
+                '%',
+                std.fmt.digitToChar(c >> 4, .upper),
+                std.fmt.digitToChar(c & 15, .upper),
+            });
         }
     }
 }
@@ -716,8 +717,10 @@ fn appendJsonString(out: *std.ArrayList(u8), allocator: Allocator, s: []const u8
             0x0C => try out.appendSlice(allocator, "\\f"),
             else => {
                 if (c < 0x20) {
-                    const hex = "0123456789abcdef";
-                    try out.appendSlice(allocator, &[_]u8{ '\\', 'u', '0', '0', hex[c >> 4], hex[c & 15] });
+                    try out.appendSlice(allocator, &[_]u8{
+                        '\\',                                'u',                                 '0', '0',
+                        std.fmt.digitToChar(c >> 4, .lower), std.fmt.digitToChar(c & 15, .lower),
+                    });
                 } else {
                     try out.append(allocator, c);
                 }
@@ -1460,29 +1463,6 @@ fn filterPprint(allocator: Allocator, value: Value, args: []const Value, kwargs:
     return .{ .string = try out.toOwnedSlice(allocator) };
 }
 
-fn filterRandom(allocator: Allocator, value: Value, args: []const Value, kwargs: []const FilterKwarg) !Value {
-    _ = allocator;
-    _ = args;
-    _ = kwargs;
-    if (value != .list or value.list.len == 0) return error.RenderError;
-    var h = std.hash.Wyhash.init(
-        @as(u64, @bitCast(clockMod.millisNow())) ^ @as(u64, @intCast(@intFromPtr(value.list.ptr))) ^ @as(u64, @intCast(value.list.len)),
-    );
-    var n: usize = 0;
-    for (value.list) |item| {
-        if (n >= 8) break;
-        h.update(std.mem.asBytes(&@as(u64, @backingInt(item))));
-        n += 1;
-    }
-    var seed = h.final();
-    seed ^= seed << 13;
-    seed ^= seed >> 7;
-    seed ^= seed << 17;
-    if (seed == 0) seed = 0x9E3779B97F4A7C15;
-    const index: usize = @intCast(seed % @as(u64, @intCast(value.list.len)));
-    return value.list[index];
-}
-
 fn filterSelectReject(allocator: Allocator, value: Value, args: []const Value, kwargs: []const FilterKwarg, want: bool) !Value {
     _ = kwargs;
     if (value != .list) return error.RenderError;
@@ -2001,7 +1981,6 @@ pub fn builtinFilter(name: []const u8) ?FilterFn {
     if (std.mem.eql(u8, name, "max")) return filterMax;
     if (std.mem.eql(u8, name, "min")) return filterMin;
     if (std.mem.eql(u8, name, "pprint")) return filterPprint;
-    if (std.mem.eql(u8, name, "random")) return filterRandom;
     if (std.mem.eql(u8, name, "reject")) return filterReject;
     if (std.mem.eql(u8, name, "rejectattr")) return filterRejectattr;
     if (std.mem.eql(u8, name, "select")) return filterSelect;
@@ -2038,6 +2017,7 @@ const MacroTable = struct {
 };
 
 const RenderState = struct {
+    io: ?std.Io = null,
     provider: ?TemplateProvider,
     blockOverrides: []const BlockInfo,
     includeStack: []const []const u8,
@@ -2106,6 +2086,7 @@ pub const Renderer = struct {
     options: RenderOptions = .{},
     filters: ?*const FilterRegistry = null,
     globals: ?*const GlobalMap = null,
+    io: ?std.Io = null,
 
     /// Renders a template AST directly to any writer. This is the single
     /// render entry point; custom filters and globals come from the
@@ -2144,6 +2125,7 @@ pub const Renderer = struct {
             .remaining = self.options.maxOutputBytes,
         };
         const state = RenderState{
+            .io = self.io,
             .provider = provider,
             // Empty seed: each inheritance level appends its own blocks,
             // preserving the full most-derived-first chain for super().
@@ -2912,6 +2894,21 @@ pub const Renderer = struct {
             if (self.eatOp("(")) {
                 try self.parseFilterArgs(&args, &kwargs);
                 if (!self.eatOp(")")) return error.RenderError;
+            }
+            if (std.mem.eql(u8, fname, "random")) {
+                if (val != .list or val.list.len == 0) return error.RenderError;
+                if (val.list.len == 1) return val.list[0];
+                const io = self.state.io orelse return error.RenderError;
+                var randomBytes: [@sizeOf(usize)]u8 = undefined;
+                const listLen = val.list.len;
+                const rejectionThreshold = (0 -% listLen) % listLen;
+                var randomValue: usize = undefined;
+                while (true) {
+                    std.Io.randomSecure(io, &randomBytes) catch return error.RenderError;
+                    randomValue = std.mem.readInt(usize, &randomBytes, .little);
+                    if (randomValue >= rejectionThreshold) break;
+                }
+                return val.list[randomValue % val.list.len];
             }
             const func = self.renderer.lookupFilter(self.state, fname) orelse return error.RenderError;
             return try func(self.state.alloc, val, args.items, kwargs.items);
@@ -4258,9 +4255,11 @@ test "Renderer supports extended Jinja filters" {
         .{ .src = "{{ [1]|sum(start=10) }}", .want = "11" },
         .{ .src = "{{ m|tojson }}", .want = "{\"a\": 1}" },
         .{ .src = "{{ \"<b>\"|tojson }}", .want = "\"<b>\"" },
+        .{ .src = "{{ \"a\x01b\"|tojson }}", .want = "\"a\\u0001b\"" },
         .{ .src = "{{ [1,2,1,3]|unique|join(\",\") }}", .want = "1,2,3" },
         .{ .src = "{{ [\"a\",\"A\",\"b\"]|unique|join(\",\") }}", .want = "a,b" },
         .{ .src = "{{ \"a b\"|urlencode }}", .want = "a%20b" },
+        .{ .src = "{{ \"a/b:c d\"|urlencode }}", .want = "a/b:c%20d" },
         .{ .src = "{{ m2|urlencode }}", .want = "a=b%20c" },
         .{ .src = "{{ \"hello cruel world\"|wordcount }}", .want = "3" },
         .{ .src = "{{ \"aa bb cc\"|wordwrap(4) }}", .want = "aa\nbb\ncc" },
@@ -4296,6 +4295,20 @@ test "Renderer supports extended Jinja filters" {
         }
         try testing.expectEqualStrings(c.want, out);
     }
+}
+
+test "random filter draws from the rendered list using injected IO" {
+    const allocator = std.testing.allocator;
+    var parser = parserMod.Parser.init(allocator, "random.html", "{{ [1,2,3,4]|random }}");
+    var ast = try parser.parse();
+    defer ast.deinit();
+    var ctx = try Context.init(allocator, .{});
+    defer ctx.deinit();
+
+    const renderer = Renderer{ .io = std.Io.Threaded.global_single_threaded.io() };
+    const output = try renderer.renderToString(allocator, &ast, &ctx, null);
+    defer allocator.free(output);
+    try std.testing.expect(output.len == 1 and output[0] >= '1' and output[0] <= '4');
 }
 
 test "Renderer supports extended is-tests" {

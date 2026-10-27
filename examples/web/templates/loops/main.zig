@@ -8,7 +8,7 @@ const Service = struct {
     status: []const u8,
 };
 
-fn loopsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn loopsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const services = [_]Service{
         .{ .name = "auth-service", .host = "10.0.0.1", .port = 8001, .status = "healthy" },
         .{ .name = "gateway", .host = "10.0.0.2", .port = 8080, .status = "healthy" },

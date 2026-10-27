@@ -5,12 +5,12 @@ belongs in middleware. Unmatched routes fall back to 404, customizable with
 `setNotFoundHandler`.
 
 ```zig
-fn accessLog(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response {
+fn accessLog(ctx: *httpx.router.Context, next: httpx.router.NextFn) anyerror!httpx.router.Response {
     std.debug.print("[request] {s} {s}\n", .{ @tagName(ctx.method), ctx.path });
     return next(ctx);
 }
 
-fn notFound(ctx: *httpx.Context) anyerror!httpx.Response {
+fn notFound(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.textStatus(404, "Not Found");
 }
 

@@ -56,14 +56,16 @@ pub const Backend = struct {
     dirs: std.ArrayList(WatchedDir),
     /// path -> index in dirs (owned keys for lookup).
     byPath: std.StringHashMap(usize),
+    recursive: bool = true,
     dirty: bool = false,
 
-    pub fn init(allocator: Allocator, io: std.Io, root: []const u8) !Backend {
+    pub fn init(allocator: Allocator, io: std.Io, root: []const u8, recursive: bool) !Backend {
         var self = Backend{
             .allocator = allocator,
             .io = io,
             .dirs = std.ArrayList(WatchedDir).empty,
             .byPath = std.StringHashMap(usize).init(allocator),
+            .recursive = recursive,
         };
         errdefer self.deinit();
         self.kq = std.c.kqueue();
@@ -132,6 +134,7 @@ pub const Backend = struct {
 
     fn watchRecursive(self: *Backend, root: []const u8) !void {
         self.watchOne(root);
+        if (!self.recursive) return;
         const cwd: std.Io.Dir = .cwd();
         var dir = cwd.openDir(self.io, root, .{ .iterate = true }) catch return;
         defer dir.close(self.io);
@@ -215,6 +218,7 @@ pub const Backend = struct {
     }
 
     fn adoptNewSubdirs(self: *Backend, dirPath: []const u8) void {
+        if (!self.recursive) return;
         const cwd: std.Io.Dir = .cwd();
         var dir = cwd.openDir(self.io, dirPath, .{ .iterate = true }) catch return;
         defer dir.close(self.io);
@@ -233,7 +237,7 @@ test "kqueue backend registers a root" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    var backend = try Backend.init(a, io, ".");
+    var backend = try Backend.init(a, io, ".", true);
     defer backend.deinit();
     try std.testing.expect(backend.dirs.items.len >= 1);
     try std.testing.expect(!backend.dirty);

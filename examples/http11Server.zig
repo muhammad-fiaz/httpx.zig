@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn helloHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn helloHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "HTTP/1.1 keep-alive response",
@@ -9,7 +9,7 @@ fn helloHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn statusHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn statusHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"status\":\"healthy\",\"protocol\":\"HTTP/1.1\"}",

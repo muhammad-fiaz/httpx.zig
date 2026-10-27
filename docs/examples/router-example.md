@@ -6,12 +6,12 @@ Path parameters and multiple methods with route handlers.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn getUser(ctx: *httpx.Context) anyerror!httpx.Response {
+fn getUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const id = ctx.param("id") orelse "unknown";
     return ctx.renderJson(.{ .id = id });
 }
 
-fn createUser(ctx: *httpx.Context) anyerror!httpx.Response {
+fn createUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.textStatus(201, "created");
 }
 

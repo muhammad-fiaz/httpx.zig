@@ -1,6 +1,6 @@
 # Connection Pool API
 
-The `ConnectionPool` (`httpx.pool.Pool`, re-exported as `httpx.ConnectionPool`) reuses plain-TCP keep-alive connections. The `Client` uses it internally, but you can also use it directly.
+The connection pool (`httpx.client.connectionPool`) reuses plain-TCP keep-alive connections, HTTP/2 sessions, and HTTP/3 QUIC sessions. The `Client` uses it internally, but direct use is possible.
 
 ## PoolConfig
 
@@ -23,7 +23,7 @@ pub const PoolConfig = struct {
 ## Pool
 
 ```zig
-var pool = httpx.ConnectionPool.init(allocator, io, .{
+var pool = httpx.client.connectionPool.init(allocator, io, .{
     .maxConnections = 100,
     .maxPerHost = 10,
     .idleTimeoutMs = 30_000,
@@ -35,9 +35,11 @@ defer pool.deinit();
 |--------|-------------|
 | `init(allocator, io, cfg)` | Create a pool |
 | `deinit()` | Purge all parked connections |
-| `acquire(host, port)` | Pop a healthy reusable connection, or `null` on miss |
+| `acquire(host, port)` | Pop a healthy reusable TCP connection, or `null` on miss |
 | `canPark(host, port)` | True when another connection may still be parked for this origin |
-| `release(host, port, socket)` | Return a healthy connection for reuse (drops it when caps hit) |
+| `release(host, port, socket)` | Return a healthy TCP connection for reuse (drops it when caps hit) |
+| `acquireH2(host, port, tls)` / `releaseH2(...)` | Pop or return a reusable HTTP/2 session |
+| `acquireH3(host, port, policy)` / `releaseH3(...)` | Pop or return a reusable HTTP/3 QUIC session |
 | `purge()` | Close everything immediately |
 | `sweepExpired()` | Drop stale/expired entries opportunistically |
 | `parkedCount()` | Number of currently parked connections |
@@ -63,7 +65,7 @@ Use `pool.statsSnapshot()` for observability. `Stats.snapshot()` returns the sam
 ```zig
 const httpx = @import("httpx");
 
-var pool = httpx.ConnectionPool.init(allocator, io, .{
+var pool = httpx.client.connectionPool.init(allocator, io, .{
     .maxConnections = 20,
     .maxPerHost = 5,
     .idleTimeoutMs = 60_000,

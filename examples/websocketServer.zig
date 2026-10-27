@@ -45,7 +45,7 @@ pub fn main() !void {
     std.debug.print("WebSocket server verification completed successfully.\n", .{});
 }
 
-fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.html(
         \\<!DOCTYPE html>
         \\<html lang="en">
@@ -72,7 +72,7 @@ fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     );
 }
 
-fn wsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn wsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     // If request contains Sec-WebSocket-Key, compute Sec-WebSocket-Accept
     if (ctx.header("sec-websocket-key")) |key| {
         var acceptBuf: [28]u8 = undefined;

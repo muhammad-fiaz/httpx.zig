@@ -40,9 +40,9 @@ pub fn main() !void {
     std.debug.print("SSE server verification completed successfully.\n", .{});
 }
 
-fn sseHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn sseHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     var out = std.ArrayList(u8).empty;
-    var writer = httpx.sse.Writer.EventWriter.init(ctx.allocator);
+    var writer = httpx.sse.Event.Writer.init(ctx.allocator);
     try writer.writeEvent(&out, &[_][]const u8{"Connected to SSE live stream"}, "status", 1, 5000);
     try writer.writeEvent(&out, &[_][]const u8{"First data packet"}, "message", 2, null);
 

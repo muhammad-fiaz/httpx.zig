@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn getHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn getHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"url\":\"http://127.0.0.1/get\",\"origin\":\"127.0.0.1\"}",

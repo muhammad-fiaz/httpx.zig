@@ -1,6 +1,6 @@
 # Streaming
 
-Streaming response body through `Response.reader()` with a zero-copy fixed-body reader.
+Read the buffered response body incrementally through `Response.reader()`.
 
 ## Demo Program
 
@@ -54,5 +54,5 @@ zig build run-streaming
 
 ## What to Verify
 
-- Response body streams through `Response.reader()`.
+- The buffered body can be read incrementally through `Response.reader()`.
 - Total byte count matches the requested payload size.

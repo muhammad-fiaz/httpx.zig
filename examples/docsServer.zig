@@ -5,7 +5,7 @@ pub const stdOptions: std.Options = .{
     .unexpectedErrorTracing = false,
 };
 
-fn listItemsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn listItemsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{
         .items = &[_]struct { id: u32, name: []const u8, price: f64 }{
             .{ .id = 101, .name = "Pro Router Widget", .price = 49.99 },
@@ -16,7 +16,7 @@ fn listItemsHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     });
 }
 
-fn getItemHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn getItemHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const itemId = ctx.param("id") orelse "0";
     return ctx.renderJson(.{
         .id = itemId,
@@ -26,7 +26,7 @@ fn getItemHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     });
 }
 
-fn homePageHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn homePageHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     const html =
         \\<!DOCTYPE html>
         \\<html lang="en">

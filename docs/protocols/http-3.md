@@ -1,11 +1,21 @@
 # HTTP/3 Protocol
 
-> Status: live. `client.get(url, .{ .httpVersion = .http3 })` performs a
-> real QUIC + TLS 1.3 handshake (ALPN `h3`, verified chain) over UDP and
-> returns the response — verified over loopback (`run-http3-client`,
-> `566/566` tests). Reliable paths only for now (no loss recovery /
-> congestion control yet); outside its scope it fails loudly, never
-> silently downgraded. See README feature table.
+> Status: implemented for reliable paths. The high-level client performs a
+> real QUIC + TLS 1.3 handshake (ALPN `h3`, verified chain) over UDP; the
+> high-level server can serve routes over the same transport. Loopback
+> integration tests cover the client/server path, including dynamic QPACK.
+> QUIC ACK tracking, PTO/loss recovery, NewReno congestion control, flow
+> control, transport parameters, and 0-RTT resumption are wired in.
+>
+> Deliberate limits: the high-level HTTP/3 client pools connections for
+> sequential reuse but does not multiplex concurrent requests over one
+> connection; the lower-level transport exposes `startRequest`/`waitAll`
+> for concurrent multiplexed exchanges. The QUIC driver does not handle
+> HelloRetryRequest or connection migration. There is no server
+> push/datagrams support, extended CONNECT is not advertised or served,
+> uploads can stream through a body source, and response bodies are
+> buffered by the one-shot API. Retry/token validation, v1/v2 version
+> negotiation, 1-RTT key updates, and connection pooling are implemented.
 
 ## Motivation
 
@@ -30,16 +40,15 @@ While HTTP/2 eliminated head-of-line blocking at the application level, TCP head
 
 1. **Zero Transport Head-of-Line Blocking**: Each stream is delivered independently. Packet loss in stream A has zero impact on stream B.
 2. **0-RTT Handshakes**: Combines transport connection setup and TLS 1.3 encryption keys into a single round trip.
-3. **Connection Migration**: Mobile devices moving between Wi-Fi and Cellular networks maintain downloads seamlessly using 64-bit Connection IDs.
+3. **Connection Migration**: QUIC uses connection IDs so a client can move between networks; HTTPX does not implement migration yet (see limits above).
 4. **QPACK Header Compression (RFC 9204)**: Dynamic table compression designed specifically for out-of-order packet delivery without deadlock.
 
 ## Client Usage Example
 
-Live since the QUIC transport landing: `client.get` with
-`.httpVersion = .http3` performs a real QUIC + TLS 1.3 handshake (ALPN
-`h3`, verified chain) over UDP. Reliable paths (loopback/LAN) — no loss
-recovery yet, so lossy networks stall to the request deadline. Runnable
-end to end in `examples/http3Client.zig`:
+`client.get` with `.httpVersion = .http3` performs a real QUIC + TLS 1.3
+handshake (ALPN `h3`, verified chain) over UDP, with QPACK dynamic-table
+encoding, response trailers, and loss recovery. Runnable end to end in
+`examples/http3Client.zig`:
 
 ```zig
 const std = @import("std");

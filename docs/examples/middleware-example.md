@@ -6,14 +6,14 @@ Chain middleware for CORS, headers, recovery, and custom request checks.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn auth(ctx: *httpx.Context, next: httpx.router.NextFn) anyerror!httpx.Response {
+fn auth(ctx: *httpx.router.Context, next: httpx.router.NextFn) anyerror!httpx.router.Response {
     if (ctx.header("Authorization") == null) {
         return ctx.textStatus(401, "missing auth");
     }
     return next(ctx);
 }
 
-fn secure(ctx: *httpx.Context) anyerror!httpx.Response {
+fn secure(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .message = "secure route" });
 }
 
@@ -26,7 +26,6 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{});
     defer server.deinit();
 
-    try server.use(httpx.middleware.logging);
     try server.use(httpx.middleware.cors);
     try server.use(httpx.middleware.helmet);
     try server.use(auth);
@@ -36,8 +35,9 @@ pub fn main() !void {
 }
 ```
 
-Built-ins: `cors`, `helmet`, `recovery`, `logging`,
-plus `RateLimiter` and CSRF token helpers. See [Middleware](/api/middleware).
+Built-ins: `cors`, `helmet`, `recovery`, and CSRF protection, plus
+`RateLimiter`; server event callbacks handle structured logging. See
+[Middleware](/api/middleware).
 
 ## Expected Output
 

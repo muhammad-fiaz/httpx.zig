@@ -18,7 +18,7 @@ const data = try req.buildData(body);
 
 RESET_STREAM / STOP_SENDING cancellation, GOAWAY, QPACK encoder/decoder
 stream prefixes, and transport parameters live in `httpx.quic.frames`,
-`httpx.quic.params`, and `httpx.http3.connection`.
+`httpx.quic.transportParameters`, and `httpx.http3.connection`.
 
 ## Expected Output
 

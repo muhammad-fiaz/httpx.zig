@@ -1,6 +1,6 @@
 # Response Handling
 
-The `httpx.Response` object is returned by value from client operations. The caller owns the response and must call `defer response.deinit();`.
+The `httpx.router.Response` object is returned by value from client operations. The caller owns the response and must call `defer response.deinit();`.
 
 ```zig
 var response = try client.get("https://httpbun.com/json", .{});

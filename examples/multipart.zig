@@ -5,7 +5,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn postHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn postHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = try std.fmt.allocPrint(ctx.allocator, "{{\"received_bytes\":{d}}}", .{ctx.body.len}),

@@ -25,7 +25,7 @@ Connection: close
 ## Client Usage
 
 ```zig
-const res = try client.get("http://legacy-host.lan/", .{
+var res = try client.get("http://legacy-host.lan/", .{
     .httpVersion = .http10,
 });
 defer res.deinit();

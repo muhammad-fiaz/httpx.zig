@@ -21,7 +21,7 @@ const bodyText = res.text();
 
 ```zig
 // Server: inspect with Context helpers, respond with rich types.
-fn createUser(ctx: *httpx.Context) anyerror!httpx.Response {
+fn createUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const verbose = ctx.queryParam("verbose") orelse "0";
     _ = verbose;
     const auth = ctx.header("Authorization");

@@ -2,8 +2,8 @@
 //! payload AEAD, nonce construction, packet-number reconstruction, and
 //! Retry integrity.
 //!
-//! Cipher choice here mirrors ngtcp2's structure but uses std.crypto
-//! primitives directly. Vectors come from RFC 9001 Appendix A.
+//! Uses std.crypto primitives directly. Vectors come from RFC 9001
+//! Appendix A.
 
 const std = @import("std");
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
@@ -12,6 +12,7 @@ const Aes = std.crypto.core.aes;
 pub const Error = error{
     AuthenticationFailed,
     BufferTooSmall,
+    UnsupportedKeyLength,
 };
 
 // Header protection
@@ -86,11 +87,18 @@ pub fn applyHeaderProtection(
 // Payload protection
 
 /// Nonce = IV with the last 8 bytes XORed with the big-endian packet number.
+///
+/// RFC 9001 Section 5.3: "The nonce is formed by XORing the packet number
+/// (encoded in network byte order) with the IV". The byte order is
+/// explicit here because the native order would be little-endian on x86,
+/// which silently breaks interoperability with every other QUIC
+/// implementation for any packet number above zero.
 pub fn buildNonce(iv: *const [12]u8, pn: u64) [12]u8 {
     var nonce: [12]u8 = iv.*;
-    const be = std.mem.toBytes(pn);
+    var pn_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &pn_bytes, pn, .big);
     for (0..8) |i| {
-        nonce[4 + i] ^= be[i];
+        nonce[4 + i] ^= pn_bytes[i];
     }
     return nonce;
 }
@@ -105,7 +113,7 @@ pub fn seal(
     key: []const u8,
     iv: *const [12]u8,
     pn: u64,
-) void {
+) Error!void {
     const nonce = buildNonce(iv, pn);
     if (key.len == 16) {
         var k16: [16]u8 = undefined;
@@ -124,7 +132,7 @@ pub fn seal(
         @memcpy(&k32, key[0..32]);
         Aes256Gcm.encrypt(out, tag, plaintext, aad, nonce, k32);
     } else {
-        @panic("unsupported AEAD key length");
+        return Error.UnsupportedKeyLength;
     }
 }
 
@@ -151,7 +159,7 @@ pub fn open(
         Aes256Gcm.decrypt(plaintextOut, ciphertext, tag, aad, nonce, k32) catch
             return Error.AuthenticationFailed;
     } else {
-        return Error.AuthenticationFailed;
+        return Error.UnsupportedKeyLength;
     }
 }
 
@@ -367,7 +375,7 @@ test "payload seal/open roundtrip and tamper detection" {
     var ptBack: [plaintext.len]u8 = undefined;
 
     const aad = [_]u8{ 0xc3, 0x00, 0x00, 0x00, 0x01 };
-    seal(ct[0..], &tag, plaintext, aad[0..], &key, &iv, 2);
+    try seal(ct[0..], &tag, plaintext, aad[0..], &key, &iv, 2);
     try open(ptBack[0..], ct[0..], tag, aad[0..], &key, &iv, 2);
     try std.testing.expectEqualStrings(plaintext, ptBack[0..]);
 
@@ -375,6 +383,17 @@ test "payload seal/open roundtrip and tamper detection" {
     var badAad = aad;
     badAad[4] ^= 1;
     try std.testing.expectError(Error.AuthenticationFailed, open(ptBack[0..], ct[0..], tag, badAad[0..], &key, &iv, 2));
+}
+
+test "payload seal rejects unsupported key length without panicking" {
+    const key: [15]u8 = @splat(0);
+    const iv: [12]u8 = @splat(0);
+    var ciphertext: [1]u8 = undefined;
+    var tag: [16]u8 = undefined;
+    try std.testing.expectError(
+        Error.UnsupportedKeyLength,
+        seal(&ciphertext, &tag, "x", "", &key, &iv, 0),
+    );
 }
 
 test "pn encoding length selection" {
@@ -406,4 +425,26 @@ test "retry integrity tag matches RFC 9001 A.4" {
     retryIntegrityTag(odcid[0..], retryBody[0..], &tag);
     const want = [_]u8{ 0x04, 0xa2, 0x65, 0xba, 0x2e, 0xff, 0x4d, 0x82, 0x90, 0x58, 0xfb, 0x3f, 0x0f, 0x24, 0x96, 0xba };
     try std.testing.expectEqualSlices(u8, &want, &tag);
+}
+
+test "packet number enters the nonce in network byte order" {
+    // RFC 9001 Section 5.3: the nonce is the IV XORed with the packet
+    // number in network byte order. Using the native order produced a
+    // nonce that only matched this implementation, so no other QUIC
+    // stack could decrypt our packets.
+    var iv = @as([12]u8, @splat(0xFA));
+    const n0 = buildNonce(&iv, 0);
+    try std.testing.expectEqualSlices(u8, &iv, &n0);
+
+    const n1 = buildNonce(&iv, 1);
+    try std.testing.expectEqual(@as(u8, 0xFB), n1[11]);
+    try std.testing.expectEqual(@as(u8, 0xFA), n1[10]);
+
+    const n256 = buildNonce(&iv, 256);
+    try std.testing.expectEqual(@as(u8, 0xFA), n256[11]);
+    try std.testing.expectEqual(@as(u8, 0xFB), n256[10]);
+    try std.testing.expectEqual(@as(u8, 0xFA), n256[9]);
+
+    // The same packet number must always produce the same nonce.
+    try std.testing.expectEqualSlices(u8, &n1, &buildNonce(&iv, 1));
 }

@@ -49,7 +49,7 @@ When files within `watchDir` are created, modified, deleted, or renamed:
 
 ## Key Capabilities
 
-1. **Zero Memory Copying & Streaming**: Delivers files efficiently using system I/O buffers.
+1. **Bounded File Reads**: Serves files through the response buffer; `HEAD` skips body reads.
 2. **RFC 9110 HEAD Compliance**: Returns accurate `Content-Length`, `ETag`, and `Last-Modified` metadata without buffering unnecessary body payloads.
 3. **Range Support (206)**: Handles `Range: bytes=start-end` for audio/video seeking and resumable downloads; returns `416 Range Not Satisfiable` for invalid bounds.
 4. **Conditional Requests (304)**: Supports `If-None-Match` (strong/weak ETags) and `If-Modified-Since` (IMF-fixdate parsing) for client cache revalidation.

@@ -8,7 +8,7 @@ This example demonstrates starting a dedicated HTTP/1.1 server supporting persis
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn helloHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn helloHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "HTTP/1.1 keep-alive response",
@@ -16,7 +16,7 @@ fn helloHandler(_: *httpx.Context) anyerror!httpx.Response {
     };
 }
 
-fn statusHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn statusHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"status\":\"healthy\",\"protocol\":\"HTTP/1.1\"}",
@@ -83,7 +83,7 @@ zig build run-http11-server
 
 ## Key Highlights
 
-1. **Router Registration**: Maps routes with clean value responses (`httpx.Response`).
+1. **Router Registration**: Maps routes with clean value responses (`httpx.router.Response`).
 2. **Graceful Shutdown**: Calls `server.start()` and joins the worker thread deterministically without race-prone sleep hacks.
 3. **HTTP/1.1 Concurrency**: Reuses TCP connections efficiently across multiple requests.
 

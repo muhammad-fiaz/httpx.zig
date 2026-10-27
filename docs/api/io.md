@@ -1,61 +1,56 @@
-# IO Utilities API
+# I/O Context API
 
-Centralized in `src/io/`.
+`httpx` owns one `std.Io.Threaded` per top-level client, server, or pool and shares it across sockets, TLS, and protocol I/O. The helper lives in `src/common/io.zig`.
 
-## AnyIO
+## IoContext
 
-- `defaultIo()` — returns the appropriate `std.Io` for test or runtime context
-- `sleepMs(ms: u64)` — sleep using the canonical IO
-- `sleepMsI(ms: i64)` — sleep using the canonical IO (signed)
-- `AnyReader` — type-erased reader with `read`, `readByte`, `readNoEof`
-- `AnyWriter` — type-erased writer with `write`, `writeAll`, `print`
-
-## Buffer
-
-Dynamic, growable byte buffer.
-
-- `init(allocator, capacity)` — create buffer
-- `append(bytes)` — append bytes
-- `toOwnedSlice()` — return owned slice
-- `clear()` — reset without deallocating
-- `deinit()` — release memory
-
-## FixedBuffer
-
-Stack-allocated fixed-size buffer with no heap allocation.
+- `init(allocator)` — allocate and initialize a `std.Io.Threaded`, returning an `IoContext`
+- `deinit()` — shut down the threaded backend and release it
+- `io` — the `std.Io` value passed to socket, TLS, and timing APIs
+- `threaded` — the owned `*std.Io.Threaded`
+- `allocator` — the allocator used for the context itself
 
 ```zig
-var buf = FixedBuffer(64){};
+var ctx = try httpx.IoContext.init(allocator);
+defer ctx.deinit();
+
+const io = ctx.io;
 ```
 
-## BufferPool
+Create one context for the lifetime of a `Client`, `Server`, or `Pool`; do not initialize a new `IoContext` per request or per connection. `deinit()` must run only after all operations using `ctx.io` have finished.
 
-Pre-allocated buffer pool with slot-based ownership tracking, acquire/release semantics, and detection of foreign/double-release buffers.
+Root-level aliases: `httpx.IoContext` and `httpx.ioCtx`.
 
-- `init(allocator, config)` — create a pool
-- `acquire()` — get a buffer from the pool
-- `release(buffer)` — return a buffer to the pool
-- `stats()` — get pool statistics (total, available, acquired, leaks, errors)
-- `deinit()` — release all resources
+## Time Helpers
 
-Root-level alias: `httpx.BufferPool`.
+`httpx.clock` wraps the `std.Io` clock:
 
-## Base64
+- `millisNow(io)` — milliseconds since the Unix epoch (`i64`)
+- `monotonicMillis(io)` — monotonic milliseconds (`i64`)
+- `sleepMillis(io, ms)` — sleep on the supplied `std.Io` (returns `void`)
 
-RFC 4648 base64 with standard and URL-safe alphabets.
+```zig
+httpx.clock.sleepMillis(ctx.io, 10);
+```
 
-- `encode(allocator, data)` — encode to base64
-- `decode(allocator, data)` — decode from base64
-- `encodeUrl(allocator, data)` — URL-safe encoding
+## URI and Percent Encoding
 
-## Hex
+`httpx.uri` provides RFC 3986 URI parsing and percent-encoding helpers:
 
-- `encode(allocator, data)` — hex encode
-- `decode(allocator, data)` — hex decode
+- `parse(input)` — parse into a `Uri` whose fields reference `input`
+- `Uri.authority(buf)` — format `host[:port]`, with IPv6 brackets
+- `Uri.effectivePort()` / `defaultPort(scheme)` — resolve the default service port
+- `percentDecode(buf, input)` — decode into a caller buffer; malformed escapes are copied verbatim
+- `percentEncode(buf, input)` — encode into a caller buffer, keeping RFC 3986 unreserved bytes
+- `percentEncodeAlloc(allocator, input)` — encode into an owned slice
+- `hasPathTraversal(decodedPath)` — reject `.`/`..`, NUL, and drive/UNC prefixes
 
-## PercentEncoding
+```zig
+var buf: [64]u8 = undefined;
+const decoded = try httpx.uri.percentDecode(&buf, "hello%20world");
 
-RFC 3986 URL encoding.
+const encoded = try httpx.uri.percentEncodeAlloc(allocator, "hello world");
+defer allocator.free(encoded);
+```
 
-- `encode(allocator, input)` — percent-encode
-- `decode(allocator, input)` — percent-decode
+For Base64 and hexadecimal conversion, use `std.base64` and `std.fmt` directly; `httpx` does not export wrapper types for them.

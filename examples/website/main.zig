@@ -15,11 +15,11 @@ const httpx = @import("httpx");
 
 const embedded = @import("embed_website");
 
-fn health(_: *httpx.Context) anyerror!httpx.Response {
+fn health(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = @constCast("{\"status\":\"ok\"}") };
 }
 
-fn apiUsers(_: *httpx.Context) anyerror!httpx.Response {
+fn apiUsers(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = @constCast("[{\"id\":1}]") };
 }
 

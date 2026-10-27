@@ -13,7 +13,7 @@ const DownloadTask = struct {
     url: []const u8,
     dest: []const u8,
 
-    fn run(ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) void {
+    fn run(ctx: ?*anyopaque, cancel: *std.atomic.Value(bool)) anyerror!void {
         const self: *@This() = @ptrCast(@alignCast(ctx.?));
         const io = std.Io.Threaded.global_single_threaded.io();
         var c = httpx.Client.init(std.heap.smp_allocator, io, .{});
@@ -42,7 +42,10 @@ pub fn main() !void {
         .{ .taskId = 3, .url = sampleUrl, .dest = "downloads/batch_file3.bin" },
     };
 
-    var pool = try httpx.WorkerPool.init(allocator, io, .{
+    var ctx = try httpx.IoContext.init(allocator);
+    defer ctx.deinit();
+
+    var pool = try httpx.concurrency.Pool.init(allocator, ctx.io, .{
         .workers = 4,
     });
     defer pool.deinit();

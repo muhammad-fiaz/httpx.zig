@@ -35,7 +35,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var form = httpx.multipart.encoder.Multipart.init(allocator);
+    var form = httpx.multipart.encoder.Multipart.init(allocator, .formData);
     defer form.deinit();
 
     // Add text fields
@@ -66,7 +66,7 @@ pub fn main() !void {
 
 | Method | Description |
 |--------|-------------|
-| `init(allocator, subtype)` | Create builder (boundary auto-generated; override with `setBoundary`) |
+| `init(allocator, subtype)` | Create builder (boundary auto-generated; override with `try setBoundary`) |
 | `field(name, value)` | Append a text form field |
 | `file(name, data, .{ .filename, .contentType, ... })` | Append a file upload part |
 | `encodeAlloc()` | Finalize and return the complete body (caller owns) |
@@ -129,7 +129,7 @@ bound part counts, header sizes, and body sizes.
 When sending a multipart request with the httpx client:
 
 ```zig
-var form = httpx.multipart.encoder.Multipart.init(allocator);
+var form = httpx.multipart.encoder.Multipart.init(allocator, .formData);
 defer form.deinit();
 try form.field("name", "alice");
 
@@ -165,7 +165,7 @@ defer resp.deinit();
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn uploadHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn uploadHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const ct = ctx.header("Content-Type") orelse
         return ctx.textStatus(400, "Missing Content-Type");
 
@@ -212,14 +212,56 @@ pub fn main() !void {
 at 64 KB automatically, and increases the writability timeout from 5 s to 30 s.
 No application-level changes are required for most users.
 
-For large file data, stream-encode directly into a buffer or writer instead
-of holding two copies: `encode(writer)` writes parts incrementally, and the
-socket layer caps each `send()` at 64 KB — safe on all platforms:
+`Multipart.encode(writer)` writes parts to the supplied writer without first
+allocating a second full encoded body. Each `Part` still borrows a complete
+`[]const u8`, and the HTTP client currently buffers request bodies before
+transport, so this is not end-to-end file streaming. The incremental
+`StreamEncoder` can write caller-provided chunks to a `std.Io.Writer`:
+
+```zig
+const std = @import("std");
+
+var output: std.Io.Writer.Allocating = .init(allocator);
+defer output.deinit();
+const first_chunk = "file bytes 1";
+const second_chunk = "file bytes 2";
+
+var encoder = try httpx.multipart.encoder.StreamEncoder.init(
+    &output.writer,
+    .formData,
+    "upload-boundary",
+);
+try encoder.beginPart("description", .{});
+try encoder.write("large upload");
+try encoder.endPart();
+try encoder.beginPart("file", .{
+    .filename = "big.bin",
+    .contentType = "application/octet-stream",
+});
+try encoder.write(first_chunk);
+try encoder.write(second_chunk);
+try encoder.endPart();
+try encoder.finish();
+```
+
+The writer and boundary slice must remain valid while the encoder is in use.
+The encoder writes each supplied chunk immediately and rejects state misuse or
+boundary collisions. The returned request path still needs transport support
+for streaming bodies before this can avoid whole-body buffering over HTTP.
+
+On the server, `Context.multipartForm(.{})` parses the already-buffered request
+body. Use `StreamParser` directly when the caller has an incremental input
+source; free every returned `partData` slice with the parser allocator, and
+copy `partBegin` metadata before calling `next()` again. To persist a parsed
+file, `httpx.multipart.server.saveFile` takes an explicit `std.Io` and writes
+under a generated basename rather than trusting the client filename.
+
+For currently buffered client uploads, build the body as usual:
 
 ```zig
 const large_bytes: []const u8 = ...; // e.g. @embedFile("big.bin")
 
-var form = httpx.multipart.encoder.Multipart.init(allocator);
+var form = httpx.multipart.encoder.Multipart.init(allocator, .formData);
 defer form.deinit();
 
 try form.field("description", "large upload");
@@ -236,7 +278,7 @@ defer allocator.free(body);
 
 When implementing a server-side chunked upload protocol (e.g. `TUS`), split the
 file yourself at the call site and send each slice as a separate POST request.
-Use `httpx.MultipartMaxChunk` (64 KB) as the slice size:
+A 64 KB slice matches the socket layer's per-send cap:
 
 ```zig
 const chunk_size = 64 * 1024; // 65_536 bytes per request
@@ -250,7 +292,7 @@ while (offset < file_bytes.len) {
     const part_str = try std.fmt.allocPrint(allocator, "{d}", .{part});
     defer allocator.free(part_str);
 
-    var form = httpx.multipart.encoder.Multipart.init(allocator);
+    var form = httpx.multipart.encoder.Multipart.init(allocator, .formData);
     defer form.deinit();
     try form.field("part", part_str);
     try form.file("data", slice, .{ .filename = "chunk.bin" });
@@ -270,6 +312,6 @@ while (offset < file_bytes.len) {
 ```
 
 This pattern sends each chunk as a separate HTTP request, which:
-- Keeps each request body well under the 64 KB socket limit
+- Keeps each application-level chunk at 64 KB; individual socket sends are capped separately
 - Allows for retry of individual failed parts
-- Works reliably on Windows, Linux, and macOS
+- Works on the platforms listed above

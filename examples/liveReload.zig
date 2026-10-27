@@ -10,7 +10,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const htmlContent =
         \\<!DOCTYPE html>
         \\<html>
@@ -27,7 +27,7 @@ fn indexHandler(ctx: *httpx.Context) anyerror!httpx.Response {
     return ctx.html(htmlContent);
 }
 
-fn styleHandler(_: *httpx.Context) anyerror!httpx.Response {
+fn styleHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "body { background: #1e1e2e; color: #cdd6f4; font-family: sans-serif; }",

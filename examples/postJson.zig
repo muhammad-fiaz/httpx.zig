@@ -6,7 +6,7 @@ const CreateUser = struct {
     role: []const u8,
 };
 
-fn postHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn postHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = try std.fmt.allocPrint(ctx.allocator, "{{\"status\":\"created\",\"received\":{s}}}", .{ctx.body}),

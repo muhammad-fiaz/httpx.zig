@@ -61,19 +61,29 @@ const hdr = parsed.hdr; // fin, opcode, masked, payloadLen, maskKey
 
 ## Full Example
 
-See `examples/websocketServer.zig`, which serves an interactive browser
-WebSocket client and verifies the endpoint:
+See `examples/websocketServer.zig`, which computes the accept key and returns
+a `101 Switching Protocols` response from a route:
 
 ```zig
-var server = try httpx.Server.init(allocator, io, .{ .port = 0 });
-defer server.deinit();
-
-try server.get("/", htmlHandler); // serves the browser client page
-
-const thread = try server.start();
-defer thread.join();
-defer server.requestShutdown();
+fn wsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    const key = ctx.header("sec-websocket-key") orelse
+        return ctx.text("WebSocket upgrade required");
+    var accept: [28]u8 = undefined;
+    httpx.websocket.computeAccept(key, &accept);
+    return .{
+        .status = 101,
+        .headers = &.{
+            .{ .name = "Upgrade", .value = "websocket" },
+            .{ .name = "Connection", .value = "Upgrade" },
+            .{ .name = "Sec-WebSocket-Accept", .value = try ctx.allocator.dupe(u8, &accept) },
+        },
+    };
+}
 ```
+
+The high-level server has no post-upgrade frame loop: after the `101` it does
+not take over the socket for WebSocket messages. Use the framing primitives
+with a raw TCP transport for a complete WebSocket session.
 
 ## Types
 

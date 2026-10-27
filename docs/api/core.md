@@ -2,16 +2,16 @@
 
 The core module holds the fundamental types used throughout the library:
 requests, responses, headers, URIs, methods, and status codes
-(`src/common/`, `src/client/request.zig`, `src/web/router/router.zig`).
+(`src/common/`, `src/client/requestBuilder.zig`, `src/web/router/router.zig`).
 
 ## Client request
 
-Requests go through the URL-first client engine — there is no
-request-object-first builder API:
+The high-level client API is URL-first; a fluent `RequestBuilder` is
+available separately for method-chained assembly:
 
 ```zig
 var res = try client.post("https://api.example.com/data", .{
-    .headers = &.{.{ .name = "Authorization", .value = "Bearer token" }},
+    .headers = &.{.{ .name = "Accept", .value = "application/json" }},
     .json = "{\"foo\":\"bar\"}",
     .query = &.{.{ .name = "page", .value = "1" }},
     .bearerAuth = "token",
@@ -24,7 +24,7 @@ See [Client](/api/client) and [Request](/api/request).
 
 ## Client response
 
-`ClientResponse` (`src/client/request.zig`):
+`Response` (`src/client/requestBuilder.zig`):
 
 | Member | Description |
 |--------|-------------|
@@ -34,20 +34,20 @@ See [Client](/api/client) and [Request](/api/request).
 | `deinit()` | Free headers and body |
 | `header(name)` | Header lookup (case-insensitive) |
 | `text()` / `bytes()` | Body bytes |
-| `writeTo(writer)` | Stream the body out |
+| `writeTo(writer)` | Write the buffered body bytes |
 | `contentType()` | Content-Type value |
 | `json(T)` / `jsonAlloc(T, allocator)` | JSON decoding |
 | `isInformational()` / `isSuccess()` / `isRedirect()` | Status class checks |
 
 ## Server response
 
-Handlers return `httpx.Response` literals or `Context` helpers
+Handlers return `httpx.router.Response` literals or `Context` helpers
 (`ctx.html`, `ctx.text`, `ctx.renderJson`, `ctx.redirect`, ...).
 See [Server](/api/server).
 
 ## Headers
 
-`httpx.Headers` (`src/common/headers.zig`) is an ordered multi-map:
+`httpx.headers.Headers` (`src/common/headers.zig`) is an ordered multi-map:
 
 | Method | Description |
 |--------|-------------|

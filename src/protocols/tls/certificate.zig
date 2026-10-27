@@ -23,17 +23,9 @@ pub const X509Certificate = struct {
         // must begin with ASN.1 SEQUENCE (0x30).
         if (derBytes.len < 64 or derBytes[0] != 0x30) return TlsError.InvalidCertificate;
 
-        // Verify outer SEQUENCE length indicator
-        const headerLen: usize = if (derBytes[1] < 0x80)
-            2
-        else if (derBytes[1] == 0x81)
-            3
-        else if (derBytes[1] == 0x82)
-            4
-        else
-            return TlsError.InvalidCertificate;
-
-        if (derBytes.len < headerLen) return TlsError.InvalidCertificate;
+        // Structural ASN.1 / DER validation: ensures all nested elements, lengths,
+        // and offsets are bounded within derBytes to prevent panics in downstream parsers.
+        if (!checkDerStructure(derBytes)) return TlsError.InvalidCertificate;
 
         const cert: Certificate = .{
             .buffer = derBytes,

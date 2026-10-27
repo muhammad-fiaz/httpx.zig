@@ -1,14 +1,14 @@
 # Cookies Guide
 
 HTTPX handles cookies explicitly per request/response, following RFC 6265,
-plus a standalone cookie jar utility (`httpx.CookieJar`).
+plus a standalone cookie jar utility (`httpx.client.cookieJar`).
 
 ## Client-Side Cookies
 
 Pass cookies on individual requests with the `cookie` option:
 
 ```zig
-const res = try client.get("https://example.com/api", .{
+var res = try client.get("https://example.com/api", .{
     .cookie = "theme=dark; lang=en",
 });
 defer res.deinit();
@@ -16,10 +16,10 @@ defer res.deinit();
 
 Read `Set-Cookie` values from any response with `res.header("Set-Cookie")`.
 
-For multi-request flows, keep a `httpx.CookieJar` alongside the client:
+For multi-request flows, keep a `httpx.client.cookieJar` alongside the client:
 
 ```zig
-var jar = httpx.CookieJar.init(allocator);
+var jar = httpx.client.cookieJar.init(allocator, io);
 defer jar.deinit();
 
 // After a login response carrying Set-Cookie:
@@ -43,7 +43,7 @@ Read incoming cookies with `ctx.cookie(name)` and set them via `Set-Cookie`
 response headers:
 
 ```zig
-fn visitHandler(ctx: *httpx.Context) anyerror!httpx.Response {
+fn visitHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (ctx.cookie("session_token")) |token| {
         _ = token;
         return ctx.text("welcome back");

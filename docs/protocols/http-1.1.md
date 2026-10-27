@@ -14,7 +14,7 @@ GET /api/users?page=1 HTTP/1.1
 
 Host: api.example.com
 
-User-Agent: httpx/0.2.2
+User-Agent: httpx/0.2.3
 
 Accept: application/json
 
@@ -54,7 +54,7 @@ Connection: keep-alive
 
 1. **Persistent Connection Pooling**: The HTTPX client retains idle TCP sockets in an internal pool. Sockets are reused automatically bounded by `pool.maxConnections`, `pool.maxPerHost`, and `pool.idleTimeoutMs`.
 2. **Chunked Transfer Encoding**: Allows sending and receiving streaming dynamic payloads of unknown length without pre-computing a `Content-Length` header.
-3. **100 Continue Handling**: The client automatically handles `Expect: 100-continue` for large file uploads, verifying server authorization before transmitting large request bodies.
+3. **100 Continue Handling**: The server recognizes `Expect: 100-continue`, sends the interim response before reading the request body, and answers unsupported expectations with `417 Expectation Failed`.
 4. **Header Normalization**: Headers are parsed case-insensitively while preserving RFC 9110 formatting.
 
 HTTPX currently decodes the `chunked` transfer coding only. It rejects repeated

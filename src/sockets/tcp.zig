@@ -28,116 +28,35 @@ const std = @import("std");
 const net = std.Io.net;
 const Allocator = std.mem.Allocator;
 const addressMod = @import("../net/address.zig");
-const sync = @import("../common/sync.zig");
+const sysMod = @import("sys.zig");
 const clock = @import("../common/clock.zig");
 const posix = std.posix;
 const builtin = @import("builtin");
 
 const isWindows = builtin.os.tag == .windows;
 
-// Windows winsock shims
-// All declared inside a comptime block so they compile to nothing on non-Windows.
+// Windows winsock shims.
+//
+// The single platform mapping (extern declarations, constants, sockaddr
+// layouts and the WSAStartup once-guard) lives in `sockets/sys.zig`; this
+// module reuses it instead of redeclaring the ws2_32 ABI. `sys.ws` is an
+// empty struct on non-Windows targets, so the comptime branches below
+// compile to nothing there.
+const ws = sysMod.ws;
 
-const ws = if (isWindows) struct {
-    pub const SOCKET = usize;
-    pub const SOCKET_ERROR: i32 = -1;
-    pub const INVALID_SOCKET: SOCKET = ~@as(usize, 0);
-    pub const AF_INET: i32 = 2;
-    pub const AF_INET6: i32 = 23;
-    pub const SOCK_STREAM: i32 = 1;
-    pub const IPPROTO_TCP: i32 = 6;
-    pub const SO_REUSEADDR: i32 = 4;
-    pub const SOMAXCONN: i32 = 0x7fffffff;
-
-    pub const sockaddrIn = extern struct {
-        family: u16,
-        port: u16, // big-endian
-        addr: [4]u8,
-        zero: [8]u8 = @splat(0),
+/// Winsock last-error mapped onto the client-facing connect taxonomy.
+/// Deliberately does not use `windows.unexpectedStatus()`: that path dumps a
+/// stack trace to stderr and corrupts the test runner's binary protocol.
+fn mapConnectError() ConnectError {
+    return switch (ws.WSAGetLastError()) {
+        ws.WSAECONNREFUSED => ConnectError.ConnectionRefused,
+        ws.WSAEHOSTUNREACH, ws.WSAEHOSTDOWN => ConnectError.HostUnreachable,
+        ws.WSAENETUNREACH => ConnectError.NetworkUnreachable,
+        ws.WSAETIMEDOUT => ConnectError.TimedOut,
+        ws.WSAEACCES => ConnectError.PermissionDenied,
+        else => ConnectError.Unexpected,
     };
-
-    pub const sockaddrIn6 = extern struct {
-        family: u16,
-        port: u16, // big-endian
-        flowinfo: u32 = 0,
-        addr: [16]u8,
-        scopeId: u32 = 0,
-    };
-
-    // Winsock error codes
-    pub const WSAECONNREFUSED: i32 = 10061;
-    pub const WSAEHOSTUNREACH: i32 = 10065;
-    pub const WSAEHOSTDOWN: i32 = 10064;
-    pub const WSAENETUNREACH: i32 = 10051;
-    pub const WSAETIMEDOUT: i32 = 10060;
-    pub const WSAEACCES: i32 = 10013;
-
-    const WSADATA = extern struct {
-        wVersion: u16,
-        wHighVersion: u16,
-        szDescription: [257]u8,
-        szSystemStatus: [129]u8,
-        iMaxSockets: u16,
-        iMaxUdpDg: u16,
-        lpVendorInfo: ?[*:0]u8,
-    };
-
-    const wsCall: std.lang.CallingConvention = if (builtin.os.tag == .windows) std.lang.CallingConvention.winapi else std.lang.CallingConvention.c;
-
-    pub extern "ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSADATA) callconv(wsCall) i32;
-    pub extern "ws2_32" fn WSAGetLastError() callconv(wsCall) i32;
-    pub extern "ws2_32" fn closesocket(s: SOCKET) callconv(wsCall) i32;
-    pub extern "ws2_32" fn socket(af: i32, sockType: i32, protocol: i32) callconv(wsCall) SOCKET;
-    pub extern "ws2_32" fn bind(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn listen(s: SOCKET, backlog: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn accept(s: SOCKET, addr: ?*anyopaque, addrlen: ?*i32) callconv(wsCall) SOCKET;
-    pub extern "ws2_32" fn getsockname(s: SOCKET, name: *anyopaque, namelen: *i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn connect(s: SOCKET, name: *const anyopaque, namelen: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn send(s: SOCKET, buf: [*]const u8, len: i32, flags: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn recv(s: SOCKET, buf: [*]u8, len: i32, flags: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn setsockopt(s: SOCKET, level: i32, optname: i32, optval: ?*const anyopaque, optlen: i32) callconv(wsCall) i32;
-    pub extern "ws2_32" fn shutdown(s: SOCKET, how: i32) callconv(wsCall) i32;
-
-    pub const SOL_SOCKET: i32 = 0xFFFF;
-    pub const SO_RCVTIMEO: i32 = 0x1006;
-    pub const SO_SNDTIMEO: i32 = 0x1007;
-    pub const SO_KEEPALIVE: i32 = 8;
-    pub const SD_SEND: i32 = 1;
-    pub const TCP_NODELAY: i32 = 1;
-    pub const IPPROTO_TCP_OPT: i32 = 6;
-
-    var wsaOnce: sync.Once = .{};
-
-    fn doWsaStartup() void {
-        var data: WSADATA = undefined;
-        _ = WSAStartup(0x0202, &data);
-    }
-
-    pub fn startup() void {
-        // Once-gated: racing threads block until WSAStartup completes,
-        // so nobody observes WSANOTINITIALISED on socket().
-        wsaOnce.call(doWsaStartup);
-    }
-
-    /// Map winsock last-error to ConnectError without calling unexpectedStatus.
-    pub fn mapConnectError() ConnectError {
-        return switch (WSAGetLastError()) {
-            WSAECONNREFUSED => ConnectError.ConnectionRefused,
-            WSAEHOSTUNREACH, WSAEHOSTDOWN => ConnectError.HostUnreachable,
-            WSAENETUNREACH => ConnectError.NetworkUnreachable,
-            WSAETIMEDOUT => ConnectError.TimedOut,
-            WSAEACCES => ConnectError.PermissionDenied,
-            else => ConnectError.Unexpected,
-        };
-    }
-
-    /// Apply 10-second send/receive timeouts (blocking mode).
-    pub fn applyTimeouts(s: SOCKET) void {
-        const ms: u32 = 10_000;
-        _ = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &ms, 4);
-        _ = setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &ms, 4);
-    }
-} else struct {};
+}
 
 // Public API for socket tuning
 
@@ -186,7 +105,7 @@ fn setWriteSocketTimeout(sock: net.Socket.Handle, timeoutMs: u31) void {
 pub fn setNoDelay(sock: net.Socket.Handle) void {
     const one: c_int = 1;
     if (isWindows) {
-        _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.IPPROTO_TCP_OPT, ws.TCP_NODELAY, &one, @sizeOf(c_int));
+        _ = ws.setsockopt(@intCast(@intFromPtr(sock)), ws.IPPROTO_TCP, ws.TCP_NODELAY, &one, @sizeOf(c_int));
     } else {
         posix.setsockopt(sock, posix.IPPROTO.TCP, 1, std.mem.asBytes(&one)) catch {}; // TCP_NODELAY == 1
     }
@@ -222,18 +141,11 @@ pub fn setKeepAlive(sock: net.Socket.Handle, idleSecs: u32) void {
 pub const UploadStream = struct {
     handle: isize, // SOCKET (winsock) or fd (posix)
 
-    var wsaOnce: sync.Once = .{};
-
-    fn doEnsureWsa() void {
-        var data: ws.WSADATA = undefined;
-        _ = ws.WSAStartup(0x0202, &data);
-    }
-
     pub fn ensureWinsock() void {
         if (!isWindows) return;
-        // Once-gated (see ws.startup): racing threads block until WSAStartup
-        // completes instead of observing WSANOTINITIALISED on socket().
-        wsaOnce.call(doEnsureWsa);
+        // Once-gated (see sys.ws.startup): racing threads block until
+        // WSAStartup completes instead of observing WSANOTINITIALISED.
+        sysMod.init();
     }
 
     /// Connects to an IPv4 literal host. Returns error.ConnectFailed on any
@@ -252,11 +164,11 @@ pub const UploadStream = struct {
             if (ws.connect(h, &addr, @sizeOf(ws.sockaddrIn)) == ws.SOCKET_ERROR) {
                 // Read the error BEFORE closesocket: successful winsock calls
                 // reset the thread's last-error, clobbering the real code.
-                const err = ws.mapConnectError();
+                const err = mapConnectError();
                 _ = ws.closesocket(h);
                 return err;
             }
-            ws.applyTimeouts(h);
+            ws.setTimeouts(h, 10_000);
             return .{ .handle = @intCast(h) };
         } else {
             const fd = std.c.socket(@intCast(posix.AF.INET), @intCast(posix.SOCK.STREAM), @intCast(posix.IPPROTO.TCP));
@@ -283,11 +195,13 @@ pub const UploadStream = struct {
             const want: usize = @min(data.len - pos, maxSendChunk);
             if (isWindows) {
                 const rc = ws.send(@intCast(self.handle), data.ptr + pos, @intCast(want), 0);
-                if (rc == ws.SOCKET_ERROR) return error.WriteFailed;
+                if (rc <= 0) return error.WriteFailed;
                 pos += @intCast(rc);
             } else {
-                const n = std.c.send(@intCast(self.handle), data.ptr + pos, want, 0);
-                if (n <= 0) return error.WriteFailed;
+                // Use the shared syscall layer so POSIX sends apply its
+                // SIGPIPE-safe flags and consistent EINTR/error handling.
+                const n = sysMod.write(@intCast(self.handle), data[pos .. pos + want]) catch return error.WriteFailed;
+                if (n == 0) return error.WriteFailed;
                 pos += @intCast(n);
             }
         }
@@ -407,6 +321,9 @@ pub const Socket = struct {
     writeActive: std.atomic.Value(bool) = .init(false),
     readInterrupted: std.atomic.Value(bool) = .init(false),
     writeInterrupted: std.atomic.Value(bool) = .init(false),
+    /// Peer IP text captured at accept time. Empty for client sockets.
+    peerAddressBuf: [64]u8 = undefined,
+    peerAddressLen: u8 = 0,
 
     const Inner = union(enum) {
         /// Raw ws232 SOCKET — used on Windows for client connections.
@@ -426,6 +343,51 @@ pub const Socket = struct {
     /// Construct from a net.Stream (non-Windows client connects + all accepts).
     pub fn init(stream: net.Stream, io: std.Io) Socket {
         return .{ .inner = .{ .stream = stream }, .io = io };
+    }
+
+    /// Peer IP as text, or an empty slice when it was not captured.
+    pub fn peerAddress(self: *const Socket) []const u8 {
+        return self.peerAddressBuf[0..self.peerAddressLen];
+    }
+
+    fn setPeerAddress(self: *Socket, addr: addressMod.Address) void {
+        const text = addr.formatBuf(&self.peerAddressBuf);
+        self.peerAddressLen = @intCast(text.len);
+    }
+
+    fn capturePeerAddress(self: *Socket) void {
+        switch (self.inner) {
+            .winsock => {},
+            .stream => |st| {
+                if (!isWindows) {
+                    var storage: posix.sockaddr.storage = undefined;
+                    var len: posix.socklen_t = @sizeOf(posix.sockaddr.storage);
+                    posix.getpeername(st.socket.handle, @ptrCast(&storage), &len) catch return;
+                    switch (storage.family) {
+                        posix.AF.INET => {
+                            const in: *const posix.sockaddr.in = @ptrCast(&storage);
+                            var addr = addressMod.Address{
+                                .family = .ip4,
+                                .port = std.mem.bigToNative(u16, in.port),
+                            };
+                            @memcpy(addr.bytes[0..4], std.mem.asBytes(&in.addr)[0..4]);
+                            self.setPeerAddress(addr);
+                        },
+                        posix.AF.INET6 => {
+                            const in6: *const posix.sockaddr.in6 = @ptrCast(&storage);
+                            const addr = addressMod.Address{
+                                .family = .ip6,
+                                .port = std.mem.bigToNative(u16, in6.port),
+                                .bytes = in6.addr,
+                                .zone = in6.scope_id,
+                            };
+                            self.setPeerAddress(addr);
+                        },
+                        else => {},
+                    }
+                }
+            },
+        }
     }
 
     // Atomic once-guard
@@ -508,7 +470,7 @@ pub const Socket = struct {
     pub fn setReadTimeoutMs(self: *Socket, timeoutMs: u32) void {
         self.readDeadline = deadlineAfterMs(self.io, timeoutMs);
         self.readInterrupted.store(false, .release);
-        self.readDeadlineMs.store(deadlineTicksNow(timeoutMs), .release);
+        self.readDeadlineMs.store(deadlineTicksNow(self, timeoutMs), .release);
         // An absolute deadline supersedes a rolling inactivity budget.
         self.readInactivityMs.store(0, .release);
         switch (self.inner) {
@@ -527,7 +489,7 @@ pub const Socket = struct {
     pub fn setWriteTimeoutMs(self: *Socket, timeoutMs: u32) void {
         self.writeDeadline = deadlineAfterMs(self.io, timeoutMs);
         self.writeInterrupted.store(false, .release);
-        self.writeDeadlineMs.store(deadlineTicksNow(timeoutMs), .release);
+        self.writeDeadlineMs.store(deadlineTicksNow(self, timeoutMs), .release);
         self.writeInactivityMs.store(0, .release);
         switch (self.inner) {
             .winsock => |s| if (isWindows) {
@@ -611,9 +573,9 @@ pub const Socket = struct {
         return @truncate(@as(u64, @bitCast(ms)));
     }
 
-    fn deadlineTicksNow(timeoutMs: u32) u32 {
+    fn deadlineTicksNow(self: *const Socket, timeoutMs: u32) u32 {
         if (timeoutMs == 0) return 0;
-        return toDeadlineTicks(clock.monotonicMillis() + @as(i64, @intCast(timeoutMs)));
+        return toDeadlineTicks(clock.monotonicMillis(self.io) + @as(i64, @intCast(timeoutMs)));
     }
 
     /// Wrapping comparison: a deadline counts as expired while it lies less
@@ -718,13 +680,35 @@ pub const Socket = struct {
                 }
                 @constCast(&self.writeActive).store(true, .release);
                 defer @constCast(&self.writeActive).store(false, .release);
-                const rc = ws.send(s, data.ptr, @intCast(@min(data.len, 65536)), 0);
+                var rc = ws.send(s, data.ptr, @intCast(@min(data.len, 65536)), 0);
                 if (rc == ws.SOCKET_ERROR) {
-                    return switch (ws.WSAGetLastError()) {
-                        10054, 10053 => WriteError.ConnectionReset, // WSAECONNRESET, WSAECONNABORTED
-                        ws.WSAETIMEDOUT => WriteError.Timeout,
-                        else => WriteError.WriteFailed,
-                    };
+                    const err = ws.WSAGetLastError();
+                    if (err == 10035) { // WSAEWOULDBLOCK
+                        var set = ws.FdSet.zero();
+                        set.add(s);
+                        const ms = remainingTimeoutMs(self.writeDeadline, self.io) orelse 5000;
+                        if (ms == 0) return WriteError.Timeout;
+                        var tv = ws.Timeval{
+                            .sec = @intCast(ms / 1000),
+                            .usec = @intCast((ms % 1000) * 1000),
+                        };
+                        const selRes = ws.select(0, null, &set, null, &tv);
+                        if (selRes <= 0) return WriteError.Timeout;
+                        rc = ws.send(s, data.ptr, @intCast(@min(data.len, 65536)), 0);
+                        if (rc == ws.SOCKET_ERROR) {
+                            return switch (ws.WSAGetLastError()) {
+                                10054, 10053 => WriteError.ConnectionReset,
+                                ws.WSAETIMEDOUT, 10035 => WriteError.Timeout,
+                                else => WriteError.WriteFailed,
+                            };
+                        }
+                    } else {
+                        return switch (err) {
+                            10054, 10053 => WriteError.ConnectionReset, // WSAECONNRESET, WSAECONNABORTED
+                            ws.WSAETIMEDOUT => WriteError.Timeout,
+                            else => WriteError.WriteFailed,
+                        };
+                    }
                 }
                 return @intCast(rc);
             },
@@ -869,13 +853,34 @@ pub const Listener = struct {
         return switch (self.inner) {
             .winsock => |s| blk: {
                 if (!isWindows) unreachable;
-                const conn = ws.accept(s, null, null);
+                var native: ws.sockaddrIn6 = undefined;
+                var nativeLen: i32 = @sizeOf(ws.sockaddrIn6);
+                const conn = ws.accept(s, &native, &nativeLen);
                 if (conn == ws.INVALID_SOCKET) return error.AcceptFailed;
-                break :blk Socket.fromWinsock(conn, io);
+                var sock = Socket.fromWinsock(conn, io);
+                if (native.family == @as(u16, @intCast(ws.AF_INET))) {
+                    const in: *const ws.sockaddrIn = @ptrCast(&native);
+                    var addr = addressMod.Address{
+                        .family = .ip4,
+                        .port = std.mem.bigToNative(u16, in.port),
+                    };
+                    addr.bytes[0..4].* = in.addr;
+                    sock.setPeerAddress(addr);
+                } else if (native.family == @as(u16, @intCast(ws.AF_INET6))) {
+                    sock.setPeerAddress(.{
+                        .family = .ip6,
+                        .port = std.mem.bigToNative(u16, native.port),
+                        .bytes = native.addr,
+                        .zone = native.scopeId,
+                    });
+                }
+                break :blk sock;
             },
             .stream => |*server| blk: {
                 const conn = server.accept(io) catch return error.AcceptFailed;
-                break :blk Socket.init(conn, io);
+                var sock = Socket.init(conn, io);
+                sock.capturePeerAddress();
+                break :blk sock;
             },
         };
     }
@@ -901,8 +906,9 @@ pub const Listener = struct {
 
 /// Initializes winsock on Windows (no-op elsewhere). Safe to call repeatedly.
 pub fn initWinsock() void {
-    UploadStream.ensureWinsock();
-    if (isWindows) ws.startup();
+    // `sys.init()` performs the once-gated WSAStartup on Windows and is a
+    // no-op on every other target.
+    sysMod.init();
 }
 
 /// Connect a dummy socket to the listening port to wake any blocked accept()
@@ -993,7 +999,7 @@ fn connectAddressWindows(io: std.Io, addr: *const addressMod.Address) ConnectErr
         .ip4 => {
             const h = ws.socket(ws.AF_INET, ws.SOCK_STREAM, ws.IPPROTO_TCP);
             if (h == ws.INVALID_SOCKET) {
-                return ws.mapConnectError();
+                return mapConnectError();
             }
             var sa = ws.sockaddrIn{
                 .family = @intCast(ws.AF_INET),
@@ -1002,16 +1008,16 @@ fn connectAddressWindows(io: std.Io, addr: *const addressMod.Address) ConnectErr
             };
             if (ws.connect(h, &sa, @sizeOf(ws.sockaddrIn)) == ws.SOCKET_ERROR) {
                 // Read the error BEFORE closesocket (see connectIPv4).
-                const err = ws.mapConnectError();
+                const err = mapConnectError();
                 _ = ws.closesocket(h);
                 return err;
             }
-            ws.applyTimeouts(h);
+            ws.setTimeouts(h, 10_000);
             return Socket.fromWinsock(h, io);
         },
         .ip6 => {
             const h = ws.socket(ws.AF_INET6, ws.SOCK_STREAM, ws.IPPROTO_TCP);
-            if (h == ws.INVALID_SOCKET) return ws.mapConnectError();
+            if (h == ws.INVALID_SOCKET) return mapConnectError();
             var sa = ws.sockaddrIn6{
                 .family = @intCast(ws.AF_INET6),
                 .port = std.mem.nativeToBig(u16, addr.port),
@@ -1020,11 +1026,11 @@ fn connectAddressWindows(io: std.Io, addr: *const addressMod.Address) ConnectErr
             };
             if (ws.connect(h, &sa, @sizeOf(ws.sockaddrIn6)) == ws.SOCKET_ERROR) {
                 // Read the error BEFORE closesocket (see connectIPv4).
-                const err = ws.mapConnectError();
+                const err = mapConnectError();
                 _ = ws.closesocket(h);
                 return err;
             }
-            ws.applyTimeouts(h);
+            ws.setTimeouts(h, 10_000);
             return Socket.fromWinsock(h, io);
         },
     }
@@ -1057,7 +1063,7 @@ test "deadline ticks stay 32-bit safe and expire only in the past" {
     try std.testing.expect(Socket.deadlineExpired(base + 10_000, deadline));
 
     // A zero timeout keeps the "no deadline" meaning.
-    try std.testing.expectEqual(@as(u32, 0), Socket.deadlineTicksNow(0));
+    try std.testing.expectEqual(@as(u32, 0), Socket.deadlineTicksNow(undefined, 0));
     try std.testing.expect(!Socket.deadlineExpired(base + 1_000_000, 0));
 
     // Wrapping: a deadline recorded just before the 32-bit tick counter wraps
@@ -1140,4 +1146,29 @@ test "ipv6 loopback echo" {
     var buf: [16]u8 = undefined;
     const n = try s.read(&buf);
     try std.testing.expectEqualStrings("v6", buf[0..n]);
+}
+
+test "accepted sockets capture the peer IP" {
+    var ctx = IoContext.init(std.testing.allocator) catch return;
+    defer ctx.deinit();
+
+    var l = Listener.bind(ctx.io, 0) catch return;
+    defer l.close(ctx.io);
+    const port = l.localPort();
+
+    const Client = struct {
+        fn run(io: std.Io, p: u16) void {
+            var s = connect(io, "127.0.0.1", p) catch return;
+            s.close();
+        }
+    };
+    const t = std.Thread.spawn(.{}, Client.run, .{ ctx.io, port }) catch return;
+
+    var conn = l.accept(ctx.io) catch {
+        t.join();
+        return;
+    };
+    defer conn.close();
+    try std.testing.expectEqualStrings("127.0.0.1", conn.peerAddress());
+    t.join();
 }

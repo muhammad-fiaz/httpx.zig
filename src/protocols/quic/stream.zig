@@ -2,9 +2,9 @@
 //! buffer, flow-control accounting (stream + connection credit), and
 //! FIN/RESET semantics (RFC 9000 sections 2 and 4).
 //!
-//! Design mirrors ngtcp2Strm's fast path: in-order data is delivered
-//! immediately; out-of-order chunks are buffered until the hole fills.
-//! A cap on buffered gaps guards against hostile senders.
+//! In-order data is delivered immediately; out-of-order chunks are
+//! buffered until the hole fills. A cap on buffered gaps guards against
+//! hostile senders.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -46,6 +46,11 @@ pub const Stream = struct {
     finQueued: bool = false,
 
     pub const Chunk = struct { offset: u64, data: []u8 };
+
+    /// Next contiguous byte offset delivered to the application.
+    pub fn currentRecvOffset(self: *const Stream) u64 {
+        return self.recvOffset;
+    }
 
     pub fn init(allocator: Allocator, id: u64, bidi: bool, initiator: bool) Stream {
         return .{ .allocator = allocator, .id = id, .bidi = bidi, .initiator = initiator };
@@ -105,8 +110,10 @@ pub const Stream = struct {
         } else if (offset > self.recvOffset) {
             // Out of order: buffer it.
             const copy = try self.allocator.dupe(u8, data);
-            errdefer self.allocator.free(copy);
-            try self.pending.append(self.allocator, .{ .offset = offset, .data = copy });
+            self.pending.append(self.allocator, .{ .offset = offset, .data = copy }) catch |err| {
+                self.allocator.free(copy);
+                return err;
+            };
             std.mem.sort(Chunk, self.pending.items, {}, chunkLess);
             self.rejectOverlaps() catch return Error.OutOfMemory;
             if (self.pending.items.len > MAX_BUFFERED_GAPS) return Error.OutOfMemory;
@@ -247,6 +254,27 @@ test "out-of-order chunks buffer then flush" {
     try std.testing.expectEqualStrings("HELLOWORLD", out.items);
 }
 
+test "gap limit error leaves buffered chunk owned by stream" {
+    const a = std.testing.allocator;
+    var st = Stream.init(a, 0, true, true);
+    defer st.deinit();
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(a);
+    var sink = CollectSink{ .list = &out, .gpa = a };
+
+    for (0..MAX_BUFFERED_GAPS + 1) |i| {
+        const offset: u64 = @intCast(i * 2 + 1);
+        if (i == MAX_BUFFERED_GAPS) {
+            try std.testing.expectError(Error.OutOfMemory, st.receive(offset, "x", false, &sink));
+        } else {
+            _ = try st.receive(offset, "x", false, &sink);
+        }
+    }
+    // Deinit must free every still-buffered chunk exactly once, including
+    // the chunk whose insertion crossed the configured gap limit.
+    try std.testing.expectEqual(@as(usize, MAX_BUFFERED_GAPS + 1), st.pending.items.len);
+}
+
 test "flow control violation detected" {
     const a = std.testing.allocator;
     var st = Stream.init(a, 0, true, true);
@@ -306,4 +334,52 @@ test "send allowance respects peer grants and connection budget" {
     st.recordSent(30, false);
     try std.testing.expectEqual(@as(u64, 70), st.sendAllowance(1000));
     try std.testing.expectEqual(@as(u64, 20), st.sendAllowance(20));
+}
+
+test "offsetless stream data starts at zero and duplicates are ignored" {
+    const a = std.testing.allocator;
+    var st = Stream.init(a, 0, true, false);
+    defer st.deinit();
+
+    const Sink = struct {
+        bytes: usize = 0,
+        pub fn call(sinkSelf: *@This(), data: []const u8) !void {
+            sinkSelf.bytes += data.len;
+        }
+    };
+    var sink = Sink{};
+
+    // First chunk at offset 0.
+    _ = try st.receive(0, "abc", false, &sink);
+    try std.testing.expectEqual(@as(u64, 3), st.recvOffset);
+
+    // A frame without OFF starts at zero, so this repeated prefix is ignored.
+    _ = try st.receive(0, "abc", false, &sink);
+    try std.testing.expectEqual(@as(u64, 3), st.recvOffset);
+    try std.testing.expectEqual(@as(usize, 3), sink.bytes);
+}
+
+test "a late duplicate without an offset remains at offset zero" {
+    const a = std.testing.allocator;
+    var st = Stream.init(a, 0, true, false);
+    defer st.deinit();
+
+    const Sink = struct {
+        bytes: usize = 0,
+        pub fn call(sinkSelf: *@This(), data: []const u8) !void {
+            sinkSelf.bytes += data.len;
+        }
+    };
+    var sink = Sink{};
+
+    _ = try st.receive(0, "0123456789", true, &sink);
+    try std.testing.expectEqual(@as(u64, 10), st.recvOffset);
+    try std.testing.expectEqual(@as(usize, 10), sink.bytes);
+
+    // An absent OFF field always means offset zero, so the retransmitted
+    // prefix is recognized as already delivered and does not advance the
+    // stream or violate its final size.
+    const delivered = try st.receive(0, "0123456789", true, &sink);
+    try std.testing.expectEqual(@as(usize, 0), delivered);
+    try std.testing.expectEqual(@as(usize, 10), sink.bytes);
 }
