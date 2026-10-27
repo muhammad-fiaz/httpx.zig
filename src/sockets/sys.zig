@@ -295,7 +295,6 @@ pub const posixC = if (!isWindows and builtin.link_libc) struct {
     extern "c" fn select(nfds: c_int, r: ?*FdSet, w: ?*FdSet, e: ?*FdSet, tv: ?*Timeval) c_int;
     extern "c" fn setsockopt(fd: Fd, level: c_int, optname: c_int, optval: ?*const anyopaque, optlen: u32) c_int;
     extern "c" fn fcntl(fd: Fd, cmd: c_int, ...) c_int;
-    extern "c" fn __errno_location() *c_int;
 
     pub const SOL_SOCKET: c_int = 1;
     pub const SO_REUSEADDR: c_int = 2;
@@ -347,7 +346,7 @@ pub const posixC = if (!isWindows and builtin.link_libc) struct {
     }
 
     pub fn getErrno() Error {
-        return mapErrno(__errno_location().*);
+        return mapErrno(std.c._errno().*);
     }
 
     pub fn recvRaw(fd: Fd, buf: []u8) Error!usize {
