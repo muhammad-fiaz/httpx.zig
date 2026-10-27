@@ -31,22 +31,26 @@
 > [!TIP]
 > If you build with httpx.zig, make sure to give it a star.
 
-## Why httpx.zig
+## Why Use httpx.zig?
 
 > [!IMPORTANT]
-> Zig's standard library provides `std.http` for HTTP client and server functionality. Projects that need a broader range of HTTP protocols, networking features, or web framework capabilities may need to integrate additional libraries or implement the missing functionality themselves.
+> - **HTTP/1.0 to HTTP/3:** A unified library for multiple HTTP protocol versions.
+> - **Complete HTTP stack:** Client, server, TLS, DNS, proxies, connection management, and networking.
+> - **User-friendly API:** A clear `httpx.Client` workflow without unnecessary convenience functions or duplicate APIs.
+> - **Explicit resource ownership:** Clear allocator, I/O, memory-management, and resource-lifecycle responsibilities.
+> - **Built-in web framework:** Routing, middleware, authentication, static files, WebSockets, multipart processing, and more.
+> - **Downloads and streaming:** Progress reporting, resumable downloads, checksum verification, and batch operations.
+> - **Additional capabilities:** Compression, HTML/XML parsing, templates, GraphQL, REST, OpenAPI, and other web application features.
+> - **Modular architecture:** Organized components, direct dependency integration, and consistent error handling.
 >
-> httpx.zig brings these capabilities together in one native Zig library, with support for HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3, alongside networking, TLS integration, DNS, proxies, connection management, cookies, middleware, static-file serving, WebSocket functionality, multipart processing, and streaming downloads.
+> httpx.zig brings HTTP clients, servers, networking, and web application functionality together in one native Zig library, with a focus on usability, explicit ownership, and maintainable APIs.
 >
-> The library focuses on a clean, modular API with explicit allocator and I/O ownership, predictable resource lifetimes, and consistent error handling. The client API has been rewritten to remove unnecessary convenience functions, redundant entry points, and duplicate abstractions in favor of a clearer `httpx.Client` workflow. Configuration and environment access are explicit, giving applications greater control over initialization and runtime behavior.
+**Refer to the [documentation](./docs/) for installation instructions, examples, API references, supported features, and migration guidance.**
+
+> [!NOTE]
+> httpx.zig is actively evolving, and breaking API or behavioral changes may occur between releases. If you're using an older version, consider upgrading and review the release notes and documentation before migrating.
 >
-> Whether you're building an API client, a web service, a download manager, or an application that needs support across multiple HTTP versions, httpx.zig aims to provide a consistent foundation without requiring you to assemble every component separately.
->
-> For smaller projects that only need the functionality available in Zig's standard library, `std.http` may be sufficient. For a broader HTTP stack and integrated web framework, explore what httpx.zig offers.
->
-> **Refer to the [documentation](./docs/) for installation, usage examples, API references, supported features, and migration guidance.** Review the breaking changes before upgrading, particularly those affecting client APIs, initialization, allocator and I/O ownership, and configuration.
->
-> The project is actively developed, and contributions, bug reports, and improvements are welcome.
+> **Contributions are welcome!** Bug reports, feature suggestions, documentation improvements, and pull requests are appreciated.
 
 ---
 
