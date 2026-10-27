@@ -41,9 +41,8 @@ pub const RequestStream = struct {
     /// QPACK field names must be lowercase (RFC 9114 Section 4.1.2), while
     /// handler and caller headers commonly use title case.
     fn encodeField(self: *RequestStream, block: *std.ArrayList(u8), name: []const u8, value: []const u8) !void {
-        const lower = try self.allocator.alloc(u8, name.len);
+        const lower = try std.ascii.allocLowerString(self.allocator, name);
         defer self.allocator.free(lower);
-        for (name, 0..) |c, i| lower[i] = std.ascii.toLower(c);
         try self.qpack.encodeField(block, lower, value);
     }
 
@@ -231,7 +230,7 @@ pub const PeerSettings = struct {
     h3Datagram: u64 = 0,
 };
 
-/// Canonical settings type (re-exported as `httpx.protocols.http3.Settings`).
+/// Canonical settings type (re-exported as `httpx.http3.Settings`).
 pub const Settings = PeerSettings;
 
 /// HTTP/3 connection state machine. Manages control stream lifecycle,

@@ -16,7 +16,7 @@ RFC 9000 defines QUIC, a secure, general-purpose, multiplexed transport protocol
 * Retry/token validation, QUIC v1/v2 version negotiation, and 1-RTT key updates are implemented; compatible-version negotiation is not.
 * No HelloRetryRequest handling in the QUIC TLS driver.
 * No connection migration yet.
-* The high-level HTTP/3 client performs one request per QUIC connection; the server multiplexes requests on its one active connection.
+* The high-level HTTP/3 client pools QUIC connections for sequential reuse without multiplexing concurrent requests over one connection; the server multiplexes requests on its active connection.
 
 ## QUIC Packet Types
 

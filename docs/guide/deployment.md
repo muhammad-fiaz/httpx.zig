@@ -25,7 +25,7 @@ HTTPX is built on standards-based TCP/UDP, TLS, and HTTP abstractions. It runs i
       │ HTTP (Port 8080 or Unix Socket)
       ▼
 ┌───────────────┐
-│   HTTPX App   │ ── Dynamic routing, WebSocket, API handlers, SSE
+│   HTTPX App   │ ── Dynamic routing, API handlers, finite SSE batches
 └───────────────┘
 ```
 
@@ -35,7 +35,7 @@ HTTPX is built on standards-based TCP/UDP, TLS, and HTTP abstractions. It runs i
       │ HTTPS (Port 8443 or Port 443 with bind capabilities)
       ▼
 ┌───────────────────────┐
-│ HTTPX (httpx.protocols.tls.Listener) │ ── Native Zig TLS 1.3 engine (+ std.crypto.tls HTTPS client)
+│ HTTPX (httpx.tls.Listener) │ ── Native Zig TLS 1.3 engine (+ std.crypto.tls HTTPS client)
 └───────────────────────┘
 ```
 
@@ -56,7 +56,7 @@ pub fn main() !void {
 
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "0.0.0.0", // Bind all interfaces for containers/VPS
         .port = 8080,      // Unprivileged internal application port
         .keepAlive = true,
@@ -72,11 +72,11 @@ pub fn main() !void {
     server.serve();
 }
 
-fn healthCheck(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn healthCheck(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .status = "healthy", .timestamp = std.time.timestamp() });
 }
 
-fn dataHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn dataHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     // Forwarded headers are honored only when the peer matches trustedProxies.
     const clientIp = ctx.remoteAddress() orelse "unknown";
     const scheme = ctx.scheme(); // "https" or "http"
@@ -115,7 +115,7 @@ upstream httpx_backend {
 server {
     listen 80;
     listen [::]:80;
-    serverName example.com www.example.com;
+    server_name example.com www.example.com;
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -130,7 +130,7 @@ server {
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    serverName example.com www.example.com;
+    server_name example.com www.example.com;
 
     # TLS Certificates
     ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;
@@ -155,7 +155,7 @@ server {
     # Primary Proxy Pass Location
     location / {
         proxy_pass http://httpx_backend;
-        proxy_httpVersion 1.1;
+        proxy_http_version 1.1;
 
         # Forwarded Client Metadata
         proxy_set_header Host $host;
@@ -165,28 +165,10 @@ server {
         proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Forwarded-Port $server_port;
 
-        # WebSocket Upgrade Support
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $http_connection;
-
         # Timeouts
         proxy_connect_timeout 5s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
-    }
-
-    # Server-Sent Events (SSE) Route (Streaming, unbuffered)
-    location /events {
-        proxy_pass http://httpx_backend/events;
-        proxy_httpVersion 1.1;
-        proxy_set_header Connection "";
-
-        # Crucial for SSE: disable Nginx proxy buffering
-        proxy_buffering off;
-        proxy_cache off;
-        chunked_transfer_encoding off;
-
-        proxy_read_timeout 24h;
     }
 }
 ```

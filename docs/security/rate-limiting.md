@@ -30,7 +30,7 @@ defer limiter.deinit();
 const RateGate = struct {
     var rl: ?*httpx.RateLimiter = null;
 
-    fn middleware(ctx: *httpx.web.router.Context, next: httpx.web.router.NextFn) anyerror!httpx.web.router.Response {
+    fn middleware(ctx: *httpx.router.Context, next: httpx.router.NextFn) anyerror!httpx.router.Response {
         const now = httpx.clock.monotonicMillis(ctx.io);
         var keyBuf: [128]u8 = undefined;
         const key = try std.fmt.bufPrint(&keyBuf, "ip:{s}", .{ctx.remoteAddress() orelse "unknown"});

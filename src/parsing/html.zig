@@ -786,8 +786,7 @@ fn isAttrNameEnd(c: u8) bool {
 }
 
 fn lowerBuf(arena: Allocator, s: []const u8) Allocator.Error![]u8 {
-    const buf = try arena.alloc(u8, s.len);
-    return std.ascii.lowerString(buf, s);
+    return std.ascii.allocLowerString(arena, s);
 }
 
 test "html grammar tokenizes document structure" {

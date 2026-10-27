@@ -21,7 +21,8 @@ pub const tint = @import("tint");
 pub const loaders = @import("loaders");
 pub const brotli = @import("brotli");
 pub const zstd = @import("zstd");
-pub const env = @import("env");
+pub const env = @import("common/env.zig");
+pub const regex = @import("regex");
 
 // Common primitives
 pub const ioCtx = @import("common/io.zig");
@@ -45,6 +46,7 @@ pub const common = struct {
     pub const io = @import("common/io.zig");
     pub const parse = @import("common/parse.zig");
     pub const bodySource = @import("common/bodySource.zig");
+    pub const env = @import("common/env.zig");
     pub const BodySource = bodySource.BodySource;
     pub const SliceReader = bodySource.SliceReader;
     pub const CallbackReader = bodySource.CallbackReader;
@@ -171,9 +173,9 @@ pub const http3 = protocols.http3;
 pub const quic = protocols.quic;
 pub const tls = protocols.tls;
 
-// Routing aliases directly under root
-pub const routing = web.router;
-pub const router = web.router;
+// Canonical router exports
+pub const router = @import("web/router/router.zig");
+pub const Router = router.Router;
 
 // Canonical root types
 pub const Client = @import("client/httpClient.zig").Client;
@@ -183,14 +185,20 @@ pub const Headers = headers.Headers;
 pub const Method = method.Method;
 pub const Status = status.Status;
 pub const Uri = uri.Uri;
+pub const Downloader = @import("client/downloadManager.zig").Downloader;
+pub const DownloadOptions = @import("client/downloadManager.zig").DownloadOptions;
+pub const DownloadResult = @import("client/downloadManager.zig").DownloadResult;
+pub const DownloadTask = @import("client/downloadManager.zig").DownloadTask;
+pub const download = @import("client/downloadManager.zig");
 
 // Web framework
 pub const sse = struct {
-    pub const Writer = @import("web/sse/sseWriter.zig");
-    pub const Parser = @import("web/sse/sseParser.zig");
-    pub const EventWriter = @import("web/sse/sseWriter.zig").EventWriter;
     pub const Event = @import("web/sse/sseParser.zig").Event;
-    pub const EventParser = @import("web/sse/sseParser.zig").EventParser;
+    pub const ParseError = @import("web/sse/sseParser.zig").ParseError;
+    pub const parseAll = @import("web/sse/sseParser.zig").parseAll;
+    pub const freeEvents = @import("web/sse/sseParser.zig").freeEvents;
+    pub const Writer = @import("web/sse/sseWriter.zig").EventWriter;
+    pub const Parser = @import("web/sse/sseParser.zig").EventParser;
 };
 pub const websocket = struct {
     pub const Handshake = @import("web/websocket/websocketHandshake.zig");
@@ -268,7 +276,6 @@ pub const middleware = struct {
     pub const recovery = sec.recoveryMiddleware;
     pub const logging = sec.loggingMiddleware;
     pub const csrf = sec.csrfMiddleware;
-    pub const CsrfConfig = sec.CsrfConfig;
     pub const RateLimiter = sec.RateLimiter;
     pub const rateLimit = @import("web/middleware/rateLimiter.zig");
     pub const RateLimitPolicy = rateLimit.RateLimitPolicy;
@@ -292,13 +299,6 @@ pub const web = struct {
     pub const TemplateEngine = @import("web/templates/templates.zig").Engine;
     pub const assets = @import("web/assets/assetStore.zig");
     pub const site = @import("web/site/siteServer.zig");
-    pub const sse = struct {
-        pub const Writer = @import("web/sse/sseWriter.zig");
-        pub const Parser = @import("web/sse/sseParser.zig");
-        pub const EventWriter = @import("web/sse/sseWriter.zig").EventWriter;
-        pub const Event = @import("web/sse/sseParser.zig").Event;
-        pub const EventParser = @import("web/sse/sseParser.zig").EventParser;
-    };
     pub const websocket = struct {
         pub const Handshake = @import("web/websocket/websocketHandshake.zig");
         pub const Frame = @import("web/websocket/websocketFrame.zig");
@@ -330,7 +330,6 @@ pub const web = struct {
         pub const recovery = sec.recoveryMiddleware;
         pub const logging = sec.loggingMiddleware;
         pub const csrf = sec.csrfMiddleware;
-        pub const CsrfConfig = sec.CsrfConfig;
         pub const RateLimiter = sec.RateLimiter;
     };
 };
@@ -345,13 +344,11 @@ pub const client = struct {
 
     // Client errors & resolution
     pub const Error = httpClientMod.Error;
-    pub const ResolveOptions = httpClientMod.ResolveOptions;
     pub const ResolvedAddresses = httpClientMod.ResolvedAddresses;
     pub const AddressFamilyPreference = httpClientMod.AddressFamilyPreference;
 
     // Request construction: httpx.client.requestBuilder
     pub const requestBuilder = httpClientMod.Client.RequestBuilder;
-    pub const requestOptions = httpClientMod.RequestOptions;
     pub const requestPayload = requestBuilderMod.Request;
 
     // Body sources: httpx.client.bodySource, sliceReader, callbackReader
@@ -359,8 +356,6 @@ pub const client = struct {
     pub const sliceReader = requestBuilderMod.SliceReader;
     pub const callbackReader = requestBuilderMod.CallbackReader;
     pub const header = requestBuilderMod.Header;
-    pub const tlsOptions = requestBuilderMod.TlsOptions;
-    pub const earlyDataOptions = requestBuilderMod.EarlyDataOptions;
     pub const bodyKind = requestBuilderMod.BodyKind;
 
     // Connection pool: httpx.client.connectionPool
@@ -374,21 +369,24 @@ pub const client = struct {
     pub const sameSite = cookieMod.Cookie.SameSite;
 
     // Download manager: httpx.client.download
+    pub const Downloader = downloadMod.Downloader;
+    pub const DownloadOptions = downloadMod.DownloadOptions;
+    pub const DownloadResult = downloadMod.DownloadResult;
+    pub const DownloadTask = downloadMod.DownloadTask;
+    pub const DownloadError = downloadMod.DownloadError;
     pub const download = downloadMod.Downloader;
-    pub const downloadOptions = downloadMod.DownloadOptions;
     pub const downloadResult = downloadMod.DownloadResult;
     pub const downloadTask = downloadMod.DownloadTask;
     pub const downloadError = downloadMod.DownloadError;
     pub const remoteFileInfo = downloadMod.RemoteFileInfo;
-    pub const existingFilePolicy = downloadMod.ExistingFilePolicy;
-    pub const verifyOptions = downloadMod.VerifyOptions;
-    pub const updateOptions = downloadMod.UpdateOptions;
     pub const progressState = downloadMod.ProgressState;
     pub const progressInfo = downloadMod.ProgressInfo;
     pub const progressMode = downloadMod.ProgressMode;
     pub const checksumAlgorithm = downloadMod.ChecksumAlgorithm;
     pub const ftpDownload = downloadMod.ftpDownload;
     pub const parseChecksumFile = downloadMod.parseChecksumFile;
+    pub const lookupFileInfo = downloadMod.lookupFileInfo;
+    pub const updateFile = downloadMod.updateFile;
 
     // Response streaming: httpx.client.responseStream
     pub const responseStream = requestBuilderMod.ResponseStream;
@@ -439,7 +437,7 @@ pub const parsing = struct {
 };
 
 // Server API
-pub const server = @import("server/httpServer.zig");
+const server = @import("server/httpServer.zig");
 
 // Concurrency & Utilities
 const rateLimitMod = @import("web/middleware/rateLimiter.zig");
@@ -544,11 +542,12 @@ test {
     _ = protocols.tls.verify;
     _ = protocols.tls.Client;
     _ = protocols.tls.Server;
-    _ = web.router;
-    _ = web.router.pattern;
-    _ = web.router.metadata;
-    _ = sse.Writer;
-    _ = sse.Parser;
+    _ = @import("common/env.zig");
+    _ = router;
+    _ = router.pattern;
+    _ = router.metadata;
+    _ = @import("web/sse/sseWriter.zig");
+    _ = @import("web/sse/sseParser.zig");
     _ = websocket.Handshake;
     _ = websocket.Frame;
     _ = middleware.rateLimit;
@@ -676,12 +675,10 @@ test "public facade exposes non-redundant canonical namespaces and types" {
 
     // Shallow, non-redundant camelCase client APIs
     try testing.expect(@sizeOf(client.requestBuilder) > 0);
-    try testing.expect(@sizeOf(client.requestOptions) > 0);
     try testing.expect(@sizeOf(client.connectionPool) > 0);
     try testing.expect(@sizeOf(client.cookieJar) > 0);
     try testing.expect(@sizeOf(client.cookie) > 0);
     try testing.expect(@sizeOf(client.download) > 0);
-    try testing.expect(@sizeOf(client.downloadOptions) > 0);
     try testing.expect(@sizeOf(client.responseStream) > 0);
     try testing.expect(@sizeOf(client.workerPool) > 0);
 
@@ -691,7 +688,7 @@ test "public facade exposes non-redundant canonical namespaces and types" {
     try testing.expect(@sizeOf(http3.connection.Connection) > 0);
     try testing.expect(@sizeOf(quic.connection.Connection) > 0);
     try testing.expect(@sizeOf(tls.Client) > 0);
-    try testing.expect(@sizeOf(router.Router) > 0);
+    try testing.expect(@sizeOf(Router) > 0);
     try testing.expect(@sizeOf(net.address.Address) > 0);
 
     // Test defaultable options with .{}

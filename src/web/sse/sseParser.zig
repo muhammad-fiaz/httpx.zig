@@ -31,6 +31,9 @@ pub const Event = struct {
     id: ?[]const u8 = null,
     /// Reconnection time in milliseconds from `retry: ...`, or null.
     retryMs: ?u32 = null,
+
+    pub const Writer = @import("sseWriter.zig").EventWriter;
+    pub const Parser = EventParser;
 };
 
 /// Stateful SSE stream parser adhering to the WHATWG event stream processing model.

@@ -40,7 +40,7 @@ Converters validate at match time, so more specific routes win
 deterministically and handlers get real types:
 
 ```zig
-fn getUser(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn getUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const id = ctx.paramInt("id") orelse return ctx.textStatus(400, "bad id");
     // ...use id: i64...
 }
@@ -93,7 +93,7 @@ Missing, unknown, or invalid values are errors — never silent bad URLs.
 When routes and their patterns are known at compile time, `httpx.zig` validates them at **comptime** using Zig's type system:
 
 ```zig
-const staticRoutes = [_]httpx.web.router.RouteDecl{
+const staticRoutes = [_]httpx.router.RouteDecl{
     .{ .method = .GET, .path = "/", .name = "home", .handler = homeHandler },
     .{ .method = .GET, .path = "/users", .name = "users_list", .handler = listUsers },
     .{ .method = .GET, .path = "/users/{id:int}", .name = "user_detail", .handler = getUser },
@@ -160,7 +160,7 @@ plus `queryParam("page")`. Never put query strings in patterns.
 
 ## Trailing slashes and policies
 
-Configured via authoritative `httpx.web.router.TrailingSlash`:
+Configured via authoritative `httpx.router.TrailingSlash`:
 - `.serveBoth` (default): Lenient matching accepts both `/path` and `/path/`.
 - `.redirectSlash`: Permanent 301 redirect to canonical trailing slash `/path/`.
 - `.redirectNoSlash`: Permanent 301 redirect to canonical non-slash `/path`.

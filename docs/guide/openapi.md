@@ -16,7 +16,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .port = 8080,
         .enableDocs = true,
         .docs = .{
@@ -28,6 +28,7 @@ pub fn main() !void {
     defer server.deinit();
 
     server.run();
+}
 ```
 
 ## Documentation UIs

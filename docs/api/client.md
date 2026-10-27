@@ -1,6 +1,6 @@
 # Client API
 
-The `httpx.zig` client provides a high-level HTTP client for making requests over HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3. HTTPS is supported via a fully custom TLS 1.2/1.3 implementation built on `std.crypto` primitives (AES-GCM, ChaCha20-Poly1305, X25519, HKDF, SHA-256/384/512) with ALPN negotiation for HTTP/2 and HTTP/3.
+The `httpx.zig` client provides a high-level HTTP client for making requests over HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3. Plain HTTPS/1.1 uses `std.crypto.tls` for TLS 1.2/1.3. Explicit HTTP/2 requests and mutual TLS use the native TLS 1.3 client built on `std.crypto` primitives (AES-GCM, ChaCha20-Poly1305, X25519, HKDF, SHA-256/384/512), including ALPN negotiation. HTTP/3 runs over QUIC with its own TLS 1.3 handshake.
 
 ## Protocol Support
 
@@ -9,26 +9,29 @@ The `httpx.zig` client provides a high-level HTTP client for making requests ove
 | HTTP/1.0 | ✅ Full | TCP | Legacy support |
 | HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
 | HTTP/2 | ✅ Client Runtime + Primitives | TCP/TLS | High-level client request execution path plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Reliable paths | QUIC/UDP | High-level client runtime over QUIC/TLS 1.3 with ALPN `h3`, QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT resumption, Retry/version negotiation, and key updates; no H3 pooling |
+| HTTP/3 | ✅ Reliable paths | QUIC/UDP | High-level client runtime over QUIC/TLS 1.3 with ALPN `h3`, QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT resumption, Retry/version negotiation, key updates, and pooled connections for sequential reuse |
 
-HTTP/3 runtime mode performs a QUIC TLS 1.3 handshake and verifies the server certificate. Loopback integration is covered, including dynamic QPACK and response trailers. QUIC loss recovery, NewReno congestion control, Retry/version negotiation, and key updates are active; the remaining transport limits are HelloRetryRequest, connection migration, and H3 connection pooling.
+HTTP/3 runtime mode performs a QUIC TLS 1.3 handshake and verifies the server certificate. Loopback integration is covered, including dynamic QPACK and response trailers. QUIC loss recovery, NewReno congestion control, Retry/version negotiation, key updates, and connection pooling for sequential requests are active; the remaining transport limits are HelloRetryRequest, connection migration, and concurrent multiplexing over a shared high-level HTTP/3 connection.
 
 The protocol module provides HTTP/2 and HTTP/3 building blocks (HPACK/QPACK, framing, and transport primitives). See [Protocol API](protocol.md) for details.
 
 ## Proxy Modes
 
-`httpx.zig` supports two client proxy modes:
+`httpx.zig` supports HTTP CONNECT and the SOCKS4/SOCKS5 proxy families:
 
 | Kind | Behavior | DNS resolution |
 |------|----------|----------------|
-| `http` | Standard forward proxy or HTTPS CONNECT tunnel | Client resolves the target host unless the proxy protocol performs the tunnel itself |
-| `socks5h` | SOCKS5 proxy with remote host resolution | Proxy resolves the hostname and connects on behalf of the client |
+| `http` | HTTP CONNECT tunnel | Proxy resolves the target host |
+| `socks5` | SOCKS5 | Client resolves the target host |
+| `socks5h` | SOCKS5 with remote host resolution | Proxy resolves the hostname |
+| `socks4` | SOCKS4, IPv4 destinations only | Client resolves the target host |
+| `socks4a` | SOCKS4a with hostnames forwarded unresolved | Proxy resolves the hostname |
 
-Use `socks5h` when you want to avoid local DNS lookups or when the proxy has access to names that are not visible on the client network.
+Use `socks5h` when you want to avoid local DNS lookups or when the proxy has access to names that are not visible on the client network. `https://` proxy URLs are rejected, and HTTP/3 requests cannot use a proxy (`Http3ProxyUnsupported`).
 
 ## Client
 
-The `Client` struct is the main entry point for making requests. It manages connection pooling, cookies, and interceptors.
+The `Client` struct is the main entry point for making requests. It manages connection pooling, DNS caching, and retries.
 
 ### Initialization
 
@@ -59,12 +62,13 @@ var post_res = try client.post("https://api.example.com/users", .{ .json = .{ .n
 defer post_res.deinit();
 ```
 
-`ClientConfig` is an idiomatic Zig struct where omitted fields use standard defaults.
-It matches `httpx.client.Config` in `src/client/client.zig` exactly:
+The client configuration is an idiomatic Zig struct passed to `Client.init`;
+omitted fields use standard defaults. It mirrors `Config` in
+`src/client/httpClient.zig`:
 
 ```zig
 const io = std.Io.Threaded.global_single_threaded.io();
-const cfg: httpx.client.Config = .{
+var client = httpx.Client.init(allocator, io, .{
     .timeoutMs = 10_000,
     .followRedirects = true,
     .maxRedirects = 5,
@@ -74,14 +78,25 @@ const cfg: httpx.client.Config = .{
     .httpVersion = .http2,
     .pool = .{ .maxConnections = 64, .maxPerHost = 16 },
     .proxy = null,
-    .cookies = true,
-};
-
-var client = httpx.Client.init(allocator, io, cfg);
+});
 defer client.deinit();
+
+// Explicit client environment configuration using httpx.env utils:
+// Applications selectively read terminal/process variables or .env files and pass them into .{}
+var client_with_env = httpx.Client.init(allocator, io, .{
+    .proxy = httpx.env.get("HTTPS_PROXY") orelse httpx.env.get("HTTP_PROXY"),
+    .timeoutMs = httpx.env.getInt(u64, "REQUEST_TIMEOUT_MS") orelse 10_000,
+    .maxRetries = httpx.env.getInt(u32, "MAX_RETRIES") orelse 3,
+});
+defer client_with_env.deinit();
+
+// Explicit .env file loading:
+var envStore = try httpx.env.loadFile(allocator, ".env");
+defer envStore.deinit();
+const apiKey = envStore.get("MY_API_KEY");
 ```
 
-### Configuration (`ClientConfig`)
+### Configuration Fields
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -91,16 +106,17 @@ defer client.deinit();
 | `maxRetries` | `u32` | `0` | Retry attempts for failed requests (`0` = disabled). |
 | `retryDelayMs` | `u64` | `1000` | Base delay between retries in milliseconds. |
 | `retryStatusCodes` | `[]const u16` | `&.{ 502, 503, 504 }` | Status codes that trigger a retry. |
+| `retryUnsafeMethods` | `bool` | `false` | Also retry POST, PATCH, and CONNECT; leave false unless the server deduplicates. |
+| `earlyData` | `EarlyDataOptions` | `{}` | Default 0-RTT early-data settings. |
 | `httpVersion` | `?HttpVersion` | `null` | Preferred HTTP version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`). |
 | `http10` | `bool` | `true` | Fast toggle to enable HTTP/1.0 protocol. |
 | `http11` | `bool` | `true` | Fast toggle to enable HTTP/1.1 protocol. |
 | `http2` | `bool` | `false` | Fast toggle to use HTTP/2 as default protocol. |
 | `http3` | `bool` | `false` | Fast toggle to use HTTP/3 as default protocol. |
-| `cookies` | `bool` | `true` | Enable cookie jar handling. |
 | `pool` | `PoolConfig` | `{}` | Connection pool limits (`maxConnections`, `maxPerHost`, `idleTimeoutMs`, `maxParkedMs`). |
 | `dnsCache` | `DnsCacheOptions` | `{}` | DNS cache settings (`enable`, `ttlMs`, `negativeTtlMs`, `maxEntries`). |
 | `tls` | `?TlsOptions` | `null` | Default TLS overrides for `https://`; null uses system trust verification. |
-| `proxy` | `?[]const u8` | `null` | Default proxy URL (`http://`, `socks5://`, `socks5h://`). |
+| `proxy` | `?[]const u8` | `null` | Default proxy URL (`http://`, `socks5://`, `socks5h://`, `socks4://`, `socks4a://`). |
 | `maxResponseSize` | `?usize` | `null` | Default maximum response body size. |
 | `allowLfLineEndings` | `bool` | `false` | Accept bare LF line endings from non-compliant peers. |
 | `eventCallback` | `?ClientEventCallback` | `null` | Application callback for client events (silent by default). |
@@ -114,9 +130,9 @@ unless explicitly enabled with `TlsOptions.allowTruncation`; set
 
 ### Timeouts
 
-The client uses a single uniform timeout model. `ClientConfig.timeoutMs`
-sets the default deadline applied to requests; per-request
-`RequestOptions.timeoutMs` overrides it for that request.
+The client uses a single uniform timeout model. The client configuration's
+`timeoutMs` sets the default deadline applied to requests; per-request
+`timeoutMs` overrides it for that request.
 
 ```zig
 const io = std.Io.Threaded.global_single_threaded.io();
@@ -125,7 +141,7 @@ var client = httpx.Client.init(allocator, io, .{
 });
 defer client.deinit();
 
-const res = try client.get("https://example.com/slow", .{ .timeoutMs = 2_000 });
+var res = try client.get("https://example.com/slow", .{ .timeoutMs = 2_000 });
 defer res.deinit();
 ```
 
@@ -172,7 +188,7 @@ defer parsed.deinit();
 | `jsonAlloc(comptime T: type, allocator: Allocator) !std.json.Parsed(T)` | Parses response body as JSON with explicit allocator and managed lifecycle. |
 | `bytes() []const u8` | Returns response body as a raw byte slice. |
 | `text() []const u8` | Returns response body as a UTF-8 text string. |
-| `writeTo(writer: anytype) !void` | Streams or writes response body directly to any writer (file, stdout, buffer). |
+| `writeTo(writer: anytype) !void` | Writes the buffered body bytes to any writer (file, stdout, buffer). |
 | `header(name: []const u8) ?[]const u8` | Case-insensitive header lookup. |
 | `status u16` | Returns HTTP status code integer. |
 | `isSuccess() bool` | Returns true if status code is in 200..299 range. |
@@ -197,7 +213,7 @@ All methods are URL-first (`url`, then options):
 | `connect(url, options)` | HTTP CONNECT request |
 | `options(url, options)` | HTTP OPTIONS request |
 | `request(url, options)` | Generic request (method set via `options.method`) |
-| `requestStream(url, options)` | Streaming request returning incremental `ResponseStream` |
+| `requestStream(url, options)` | Streaming request returning `ResponseStream` (incremental on HTTP/1.1) |
 | `requestBuilder(method, url)` | Start fluent `RequestBuilder` for chained request construction |
 | `builder(method, url)` | Alias for `requestBuilder` |
 | `getBuilder(url)` | Start GET `RequestBuilder` |
@@ -216,12 +232,12 @@ All methods are URL-first (`url`, then options):
 
 ### Cookie Jar API
 
-The standalone `httpx.client.CookieJar` keeps cookies across requests
+The standalone `httpx.client.cookieJar` keeps cookies across requests
 (domain-filtered per RFC 6265). Per-request cookies use the `cookie` option.
 
 | Method | Description |
 |--------|-------------|
-| `CookieJar.init(allocator, io)` / `deinit()` | Lifecycle |
+| `cookieJar.init(allocator, io)` / `deinit()` | Lifecycle |
 | `setFromHeader(setCookie, host)` | Store a `Set-Cookie` value |
 | `cookieHeader(host, path, secure, buf)` | Render the `Cookie` header (`secure` gates `Secure` cookies) |
 | `purgeExpired()` | Drop expired cookies |
@@ -237,13 +253,13 @@ var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 
 // Simple GET
-const response = try client.get("https://api.example.com/users", .{});
+var response = try client.get("https://api.example.com/users", .{});
 defer response.deinit();
 std.debug.print("Status: {d}\n", .{response.status});
 std.debug.print("Body: {s}\n", .{response.text()});
 
 // POST with JSON
-const json_response = try client.post("https://api.example.com/users", .{
+var json_response = try client.post("https://api.example.com/users", .{
     .json = "{\"name\": \"John\", \"email\": \"john@example.com\"}",
 });
 defer json_response.deinit();
@@ -257,7 +273,7 @@ var typed_res = try client.postJson("https://api.example.com/users", User{
 defer typed_res.deinit();
 
 // Custom headers
-const auth_response = try client.get("https://api.example.com/protected", .{
+var auth_response = try client.get("https://api.example.com/protected", .{
     .headers = &.{
         .{ .name = "Authorization", .value = "Bearer token123" },
         .{ .name = "X-Custom-Header", .value = "value" },
@@ -266,13 +282,13 @@ const auth_response = try client.get("https://api.example.com/protected", .{
 defer auth_response.deinit();
 
 // Built-in auth helpers
-const bearer_response = try client.get("https://api.example.com/protected", .{
+var bearer_response = try client.get("https://api.example.com/protected", .{
     .bearerAuth = "token123",
 });
 defer bearer_response.deinit();
 
 // With timeout
-const timeout_response = try client.get("https://slow-api.com/data", .{
+var timeout_response = try client.get("https://slow-api.com/data", .{
     .timeoutMs = 30000, // 30 seconds
 });
 defer timeout_response.deinit();
@@ -289,7 +305,6 @@ For complete copy/paste demos, see these example pages:
 - [Custom Headers](/examples/custom-headers)
 - [Concurrent Requests](/examples/concurrent-requests)
 - [Connection Pool](/examples/connection-pool)
-- [Interceptors](/examples/interceptors)
 - [Cookies Demo](/examples/cookies-demo)
 - [HTTP Auth Helpers](/examples/http-auth-helpers)
 - [Simplified API Aliases](/examples/simplified-api-aliases)
@@ -372,7 +387,7 @@ defer resp.deinit();
 ## Response
 
 The `Response` struct contains the server's response
-(`src/client/request.zig`).
+(`src/client/requestBuilder.zig`).
 
 ```zig
 pub const Response = struct {
@@ -403,7 +418,7 @@ pub const Response = struct {
 | `deinit()` | Free response resources |
 | `header(name)` | Get header value by name (case-insensitive) |
 | `text()` / `bytes()` | Get response body bytes |
-| `writeTo(writer)` | Stream body bytes to any writer |
+| `writeTo(writer)` | Write the buffered body bytes to any writer |
 | `contentType()` | Response Content-Type value |
 | `json(T)` | Parse body as JSON into `T` (ignores unknown fields) |
 | `jsonAlloc(T, allocator)` | Parse body as JSON, returning `std.json.Parsed(T)` |

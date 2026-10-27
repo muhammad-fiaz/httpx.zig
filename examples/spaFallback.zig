@@ -7,7 +7,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .maxConnections = 5,
@@ -20,7 +20,7 @@ pub fn main() !void {
     std.debug.print("SPA server running on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.server.Server) void {
+        fn run(s: *httpx.Server) void {
             s.run();
         }
     };
@@ -40,6 +40,6 @@ pub fn main() !void {
     std.debug.print("SPA fallback verification completed successfully.\n", .{});
 }
 
-fn indexHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn indexHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = "<h1>SPA Fallback Example</h1>", .contentType = "text/html" };
 }

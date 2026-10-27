@@ -12,32 +12,37 @@ Zig's standard library does not provide HTTP/2, HTTP/3, or QUIC support. **httpx
 |----------|---------|--------|-----|-------|
 | HTTP/1.0 | 1.0 | ✅ Full | RFC 1945 | High-level runtime support |
 | HTTP/1.1 | 1.1 | ✅ Full | RFC 9112 | High-level runtime support |
-| HTTP/2 | h2 | ✅ Full | RFC 7540, RFC 7541 | Framing/stream state/flow control/HPACK plus high-level client/server runtimes |
-| HTTP/3 | h3 | ✅ Reliable paths | RFC 9114, RFC 9204 | High-level client/server runtime over QUIC/TLS 1.3 with QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT, Retry/version negotiation, and key updates; no H3 pooling |
+| HTTP/2 | h2 | ✅ Full | RFC 9113, RFC 7541 | Framing/stream state/flow control/HPACK plus high-level client/server runtimes |
+| HTTP/3 | h3 | ✅ Reliable paths | RFC 9114, RFC 9204 | High-level client/server runtime over QUIC/TLS 1.3 with QPACK dynamic tables, loss recovery, NewReno congestion control, 0-RTT, Retry/version negotiation, key updates, and pooled client connections for sequential reuse |
 | QUIC | v1, v2 | ✅ Engine | RFC 9000, RFC 9001, RFC 9369 | Connection/stream state, TLS handshake, recovery, congestion control, and UDP endpoint |
 
-## HTTP/1.1 Parser (`httpx.protocols.http1.parser`)
+## HTTP/1.1 Parser (`httpx.http1.parser`)
 
 Function-style parser over byte buffers:
 
 ```zig
 // Request line + headers.
-const head = try httpx.protocols.http1.parser.parseRequestHead(buf);
+const head = try httpx.http1.parser.parseRequestHead(buf, .{});
 // head.method, head.path, head.minorVersion, head.majorVersion, head.headEnd
-var fields: [128]httpx.protocols.http1.parser.Field = undefined;
-const blk = try httpx.protocols.http1.parser.parseHeaderBlock(buf, head.headEnd, &fields);
+var fields: [128]httpx.http1.parser.Field = undefined;
+const blk = try httpx.http1.parser.parseHeaderBlock(buf, head.headEnd, &fields, .{});
 
 // Framing decision (none / contentLength / chunked / tunnel).
-const framing = try httpx.protocols.http1.parser.decideFraming(fields[0..blk.count], false, 0, 0);
+const framing = try httpx.http1.parser.decideFraming(
+    fields[0..blk.count],
+    false,
+    0,
+    "GET",
+);
 
 // Incremental chunked decoding.
-var dec = httpx.protocols.http1.parser.ChunkedDecoder.init();
+var dec = httpx.http1.parser.ChunkedDecoder.init();
 while (!dec.isDone()) {
     _ = try dec.decode(chunk);
 }
 ```
 
-Limits live in `httpx.protocols.http1.parser.Options` (`allowLfLineEndings`); size caps in
+Limits live in `httpx.http1.parser.Options` (`allowLfLineEndings`); size caps in
 `DEFAULT_MAX_HEADER_BYTES`, `DEFAULT_MAX_BODY_BYTES`, `DEFAULT_MAX_HEADERS`.
 
 ## HTTP/2 Support (`httpx.protocols.http2`)
@@ -62,11 +67,11 @@ Limits live in `httpx.protocols.http1.parser.Options` (`allowLfLineEndings`); si
 | WINDOW_UPDATE | 0x8 | Flow control |
 | CONTINUATION | 0x9 | Header continuation |
 
-### Frames (`httpx.protocols.http2.frame`)
+### Frames (`httpx.http2.frame`)
 
 ```zig
-var hdrBuf: [httpx.protocols.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
-const hdr = httpx.protocols.http2.FrameHeader.parse(&hdrBuf);
+var hdrBuf: [httpx.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
+const hdr = httpx.http2.FrameHeader.parse(&hdrBuf);
 var out: [9]u8 = undefined;
 hdr.serialize(&out);
 
@@ -75,26 +80,26 @@ hdr.serialize(&out);
 // writePriority. Union decode via Frame.parse(hdr, payload, allocator).
 ```
 
-### HPACK (`httpx.protocols.http2.hpack`)
+### HPACK (`httpx.http2.hpack`)
 
 ```zig
-var enc = httpx.protocols.http2.hpack.Encoder.init(allocator);
+var enc = httpx.http2.hpack.Encoder.init(allocator);
 defer enc.deinit();
 var out = std.ArrayList(u8).empty;
 defer out.deinit(allocator);
 try enc.encode(&out, ":method", "GET", .incremental, false);
 try enc.encode(&out, ":path", "/", .incremental, false);
 
-var dec = httpx.protocols.http2.hpack.Decoder.init(allocator);
+var dec = httpx.http2.hpack.Decoder.init(allocator);
 defer dec.deinit();
 const res = try dec.decode(out.items);
 // res.fields: []HeaderField{name, value}
 ```
 
-### Session (`httpx.protocols.http2.Session`)
+### Session (`httpx.http2.Session`)
 
 ```zig
-var sess = try httpx.protocols.http2.Session.init(allocator, .client, .{});
+var sess = try httpx.http2.Session.init(allocator, .client, .{});
 defer sess.deinit();
 try sess.startHandshake();
 const sid = try sess.nextClientStreamId();
@@ -109,31 +114,39 @@ _ = try sess.sendData(sid, body, true);
 - Variable-length integer encoding
 - Stream and frame types
 
-### Frames (`httpx.protocols.http3.frame`)
+### Frames (`httpx.http3.frame`)
 
 ```zig
-var off: usize = 0;
-const hdr = try httpx.protocols.http3.frame.parseFrameHeader(data, &off); // FrameHeader
-const parsed = try httpx.protocols.http3.frame.parseFrame(data, &off);    // ParsedFrame
+var hdr_off: usize = 0;
+const hdr = try httpx.http3.frame.parseFrameHeader(data, &hdr_off); // FrameHeader
+
+var frame_off: usize = 0;
+const parsed = try httpx.http3.frame.parseFrame(data, &frame_off);  // ParsedFrame
+
 var buf: [16]u8 = undefined;
-const n = try httpx.protocols.http3.frame.encodeFrameHeader(&buf, 0x01, payload.len);
+const n = try httpx.http3.frame.encodeFrameHeader(&buf, 0x01, payload.len);
 // Settings payloads: parseSettingsPayload / buildSettingsPayload.
 ```
 
-### Connection (`httpx.protocols.http3.Connection`)
+### Connection (`httpx.http3.Connection`)
 
 ```zig
-var conn = httpx.protocols.http3.Connection.init(allocator, .client);
+var conn = httpx.http3.Connection.init(allocator, .client);
 defer conn.deinit();
 const ctrl = try conn.buildControlStream();
 defer allocator.free(ctrl);
 const streamId = conn.nextBidiStreamId();
 var req = conn.createRequestStream(streamId);
-const head = try req.buildRequestHeaders(allocator, &headers, false);
-const data = try req.buildData(body);
+const headers = [_]httpx.http3.qpack.FieldLine{
+    .{ .name = "user-agent", .value = "httpx" },
+};
+const head = try req.buildRequestHeaders("GET", "https", "example.com", "/", &headers);
+defer allocator.free(head);
+const data = try req.buildData("request body");
+defer allocator.free(data);
 ```
 
-### QPACK (`httpx.protocols.http3.qpack`)
+### QPACK (`httpx.http3.qpack`)
 
 Static/dynamic table header compression with encoder/decoder stream
 instructions; see `src/protocols/http3/qpack.zig`.
@@ -142,14 +155,14 @@ instructions; see `src/protocols/http3/qpack.zig`.
 
 Transport coding primitives (RFC 9000): `varint.encode` / `varint.decode`,
 `packet`, `frames` (STREAM, CRYPTO, ACK, RESET_STREAM, STOP_SENDING, ...),
-`connection`, `params` (transport parameters), `stream`, `crypto`,
+`connection`, `transportParameters`, `stream`, `crypto`,
 `connectionId`, `path`, `transport`.
 
 ```zig
 var buf: [8]u8 = undefined;
-const n = try httpx.protocols.quic.varint.encode(&buf, 15293);
+const n = try httpx.quic.varint.encode(&buf, 15293);
 var off: usize = 0;
-const v = try httpx.protocols.quic.varint.decode(&buf, &off);
+const v = try httpx.quic.varint.decode(&buf, &off);
 ```
 
 ## Complete HTTP/2 Example

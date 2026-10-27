@@ -17,7 +17,7 @@ const SecretData = struct {
 };
 
 // 1. Custom 404 HTML handler
-fn customNotFound(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn customNotFound(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.htmlStatus(404,
         \\<!DOCTYPE html>
         \\<html>
@@ -31,7 +31,7 @@ fn customNotFound(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Resp
 }
 
 // 2. Custom 500 / Exception handler
-fn customErrorHandler(ctx: *httpx.web.router.Context, err: anyerror) anyerror!httpx.web.router.Response {
+fn customErrorHandler(ctx: *httpx.router.Context, err: anyerror) anyerror!httpx.router.Response {
     return try ctx.renderJsonStatus(500, .{
         .status = 500,
         .errorName = @errorName(err),
@@ -40,12 +40,12 @@ fn customErrorHandler(ctx: *httpx.web.router.Context, err: anyerror) anyerror!ht
 }
 
 // Public Route
-fn handlePublic(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn handlePublic(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.html("<h1>Public Area</h1><p>Welcome to the open web server.</p>");
 }
 
 // Bearer Token Protected Route
-fn handleRestrictedBearer(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn handleRestrictedBearer(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const token = ctx.bearerToken() orelse {
         return ctx.htmlStatus(401, "<h1>401 Unauthorized</h1><p>Missing or invalid Bearer token.</p>");
     };
@@ -61,7 +61,7 @@ fn handleRestrictedBearer(ctx: *httpx.web.router.Context) anyerror!httpx.web.rou
 }
 
 // Basic Auth Protected Route
-fn handleRestrictedBasic(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn handleRestrictedBasic(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const creds = ctx.basicAuth() orelse {
         return ctx.htmlStatus(401, "<h1>401 Unauthorized</h1><p>Missing Basic Auth credentials.</p>");
     };
@@ -77,7 +77,7 @@ fn handleRestrictedBasic(ctx: *httpx.web.router.Context) anyerror!httpx.web.rout
 }
 
 // Route that deliberately throws an error to trigger customErrorHandler
-fn handleFaulty(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn handleFaulty(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     _ = ctx;
     return error.DatabaseUnavailable;
 }
@@ -91,7 +91,7 @@ pub fn main() !void {
     defer client.deinit();
 
     // 1. Initialize Server
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -111,7 +111,7 @@ pub fn main() !void {
     // Spawn server accept loop on a background thread
     const port = server.localPort();
     const serverThread = try std.Thread.spawn(.{}, (struct {
-        fn run(s: *httpx.server.Server) void {
+        fn run(s: *httpx.Server) void {
             s.run();
         }
     }).run, .{&server});

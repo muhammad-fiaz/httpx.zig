@@ -22,7 +22,7 @@ pub fn main() !void {
     });
     defer client.deinit();
 
-    const resp = try client.get("https://api.ipify.org?format=json", .{});
+    var resp = try client.get("https://api.ipify.org?format=json", .{});
     defer resp.deinit();
 }
 ```
@@ -31,7 +31,7 @@ pub fn main() !void {
 
 | Scheme | Protocol | DNS Resolution | Description |
 |---|---|---|---|
-| `http://` | HTTP CONNECT | Local | Standard HTTP proxy tunnel; `http://user:pass@host:port` sends `Proxy-Authorization: Basic` on CONNECT, `407` surfaces as `error.ProxyAuthRequired` |
+| `http://` | HTTP CONNECT | Proxy | Standard HTTP proxy tunnel; the proxy resolves the target, and `http://user:pass@host:port` sends `Proxy-Authorization: Basic` on CONNECT, `407` surfaces as `error.ProxyAuthRequired` |
 | `socks5://` | SOCKS5 | Local | SOCKS5 protocol with local client DNS resolution |
 | `socks5h://` | SOCKS5H | Remote | SOCKS5 protocol with proxy-side DNS resolution |
 | `socks4://` | SOCKS4 | Local | IPv4 destinations only; USERID informational, no password |

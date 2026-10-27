@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .port = 8080,
         .enableDocs = true,
         .docs = .{
@@ -30,7 +30,7 @@ pub fn main() !void {
     server.run();
 }
 
-fn itemsHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn itemsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{
         .items = [_]struct { id: u32, name: []const u8 }{
             .{ .id = 1, .name = "Widget" },
@@ -42,11 +42,11 @@ fn itemsHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Respon
 
 ## Canonical JSON Specification
 
-Visiting `http://localhost:8080/openapi.json` returns valid OpenAPI 3.1.0 JSON containing:
+Visiting `http://localhost:8080/openapi.json` returns OpenAPI 3.1.0 JSON containing:
 * `openapi`: `"3.1.0"`
 * `info`: Title, version, description
-* `paths`: Discovered routes, methods, and parameter schemas
-* `components`: Reusable schemas and security definitions
+* `paths`: Discovered routes, methods, parameters, request bodies, and responses
+* Per-operation `security` requirements when route metadata declares them
 
 ## Related
 

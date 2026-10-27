@@ -428,9 +428,8 @@ pub const Client = struct {
                 }
                 continue;
             }
-            const lower = try a.alloc(u8, h.name.len);
+            const lower = try std.ascii.allocLowerString(a, h.name);
             errdefer a.free(lower);
-            for (h.name, 0..) |c, i| lower[i] = std.ascii.toLower(c);
             try qextra.append(a, .{ .name = lower, .value = h.value });
         }
         if (bodyLen) |n| {

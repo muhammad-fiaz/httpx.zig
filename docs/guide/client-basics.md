@@ -12,12 +12,12 @@ var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 ```
 
-For more control, use `ClientConfig`.
+For more control, pass a configuration to `Client.init`.
 Defaults remain implicit unless you explicitly override fields:
 
 ```zig
-    const io = std.Io.Threaded.global_single_threaded.io();
-const config: httpx.client.Config = .{
+const io = std.Io.Threaded.global_single_threaded.io();
+var client = httpx.Client.init(allocator, io, .{
     .timeoutMs = 10_000,
     .followRedirects = true,
     .maxRedirects = 5,
@@ -27,9 +27,7 @@ const config: httpx.client.Config = .{
     .http3 = false,
     .maxResponseSize = 32 * 1024 * 1024,
     .pool = .{ .maxConnections = 64, .maxPerHost = 16 },
-};
-
-var client = httpx.Client.init(allocator, io, config);
+});
 defer client.deinit();
 ```
 
@@ -103,22 +101,21 @@ _ = try client.delete("/users/1", .{});
 
 // Short alias for DELETE
 // HEAD
-const head_res = try client.head("/large-file", .{});
+var head_res = try client.head("/large-file", .{});
+defer head_res.deinit();
 
 // OPTIONS
-const opt_res = try client.options("/users", .{});
-
-_ = head_res;
-_ = opt_res;
+var opt_res = try client.options("/users", .{});
+defer opt_res.deinit();
 ```
 
 ## Cookie Jar
 
 Pass cookies per request with the `cookie` option, or keep a standalone
-`httpx.client.CookieJar` across requests (domain-aware per RFC 6265):
+`httpx.client.cookieJar` across requests (domain-aware per RFC 6265):
 
 ```zig
-var jar = httpx.client.CookieJar.init(allocator, io);
+var jar = httpx.client.cookieJar.init(allocator, io);
 defer jar.deinit();
 
 if (loginRes.header("Set-Cookie")) |sc| {
@@ -164,51 +161,30 @@ defer basic_res.deinit();
 
 ## Request Options
 
-The second argument to request methods is `RequestOptions`:
-
-```zig
-pub const RequestOptions = struct {
-    url: []const u8,
-    method: ?httpx.Method = null,       // Explicit method for generic request
-    headers: []const httpx.client.Header = &.{}, // Custom headers
-    query: []const httpx.client.Header = &.{},   // Optional URL query params
-    body: ?[]const u8 = null,           // Raw body
-    json: ?[]const u8 = null,           // JSON body
-    form: ?[]const u8 = null,           // x-www-form-urlencoded body
-    text: ?[]const u8 = null,           // Plain-text body
-    bearerAuth: ?[]const u8 = null,     // Authorization: Bearer <token>
-    basicAuth: ?[]const u8 = null,      // Authorization: Basic ...
-    timeoutMs: ?u64 = null,             // Request-specific timeout
-    followRedirects: ?bool = null,      // Override redirect policy
-    maxRedirects: ?u8 = null,           // Override redirect limit
-    httpVersion: ?httpx.HttpVersion = null, // Optional per-request protocol override
-    proxy: ?[]const u8 = null,          // Per-request proxy URL override
-    tls: ?TlsOptions = null,            // Per-request TLS override
-};
-```
-
-All fields except `url` are optional customizations. Passing `. {}` keeps defaults implicit.
+The second argument to request methods is a duck-typed options struct passed
+inline as `.{}`. Convenience methods supply `url` as their first argument, so
+`.{}` is valid for them. See [API: Request](/api/request) for the accepted
+fields.
 
 ## Proxy Configuration
 
 Configure forward proxies when initializing the client:
 
 ```zig
-    const io = std.Io.Threaded.global_single_threaded.io();
-const config: httpx.client.Config = .{
+const io = std.Io.Threaded.global_single_threaded.io();
+var client = httpx.Client.init(allocator, io, .{
     .proxy = "http://127.0.0.1:8080",
-};
-
-var client = httpx.Client.init(allocator, io, config);
+});
 defer client.deinit();
 ```
 
 For SOCKS5h (remote DNS), use a `socks5h://` URL:
 
 ```zig
-const socks_config: httpx.client.Config = .{
+var client = httpx.Client.init(allocator, io, .{
     .proxy = "socks5h://127.0.0.1:1080",
-};
+});
+defer client.deinit();
 ```
 
 ## Response Handling

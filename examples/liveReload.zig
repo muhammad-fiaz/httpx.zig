@@ -10,7 +10,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn indexHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const htmlContent =
         \\<!DOCTYPE html>
         \\<html>
@@ -27,7 +27,7 @@ fn indexHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Respon
     return ctx.html(htmlContent);
 }
 
-fn styleHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn styleHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "body { background: #1e1e2e; color: #cdd6f4; font-family: sans-serif; }",
@@ -43,7 +43,7 @@ pub fn main() !void {
 
     std.debug.print("==> HTTPX Live Reload Server Demo\n\n", .{});
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -58,7 +58,7 @@ pub fn main() !void {
     std.debug.print("Server listening on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.server.Server) void {
+        fn run(s: *httpx.Server) void {
             s.run();
         }
     };

@@ -28,7 +28,7 @@ pub fn main() !void {
         \\}
     ;
 
-    const response = try client.post("https://api.example.com/graphql", .{
+    var response = try client.post("https://api.example.com/graphql", .{
         .json = .{
             .query = query,
             .variables = .{ .id = 101 },
@@ -53,22 +53,28 @@ pub fn main() !void {
 
 ## Server GraphQL Integration
 
-HTTPX allows you to attach a GraphQL execution handler and serve GraphiQL interactive IDE:
+Mount a GraphQL schema on the router and enable the bundled GraphiQL UI
+through the docs configuration:
 
 ```zig
-var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
+var server = try httpx.Server.init(allocator, io, .{
+    .port = 8080,
+    .enableDocs = true,
+    .docs = .{
+        .graphiql = .{
+            .enabled = true,
+            .route = "/graphiql",
+            .graphqlEndpoint = "/graphql",
+            .title = "HTTPX GraphQL Explorer",
+        },
+    },
+});
 defer server.deinit();
 
-// GraphQL execution endpoint
-server.post("/graphql", graphqlHandler);
+const schema = httpx.graphql.Schema.init(allocator, .{ .query = QueryType });
+try httpx.graphql.mount(&server.router, schema, .{ .endpoint = "/graphql" });
 
-// Interactive GraphiQL IDE
-server.graphiql("/graphiql", .{
-    .endpoint = "/graphql",
-    .title = "HTTPX GraphQL Explorer",
-});
-
-try server.run();
+server.run();
 ```
 
 ## Related

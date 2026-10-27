@@ -4,17 +4,17 @@ Liveness/readiness probe routes for Kubernetes-style checks. Register plain
 routes (see `examples/healthCheck.zig`).
 
 ```zig
-var server = try httpx.server.Server.init(allocator, io, .{ .port = 0 });
+var server = try httpx.Server.init(allocator, io, .{ .port = 0 });
 defer server.deinit();
 
 try server.get("/healthz", healthHandler);
 try server.get("/readyz", readyHandler);
 
-fn healthHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn healthHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .status = "healthy" });
 }
 
-fn readyHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn readyHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .status = "ready" });
 }
 ```

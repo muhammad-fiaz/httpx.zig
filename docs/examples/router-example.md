@@ -6,12 +6,12 @@ Path parameters and multiple methods with route handlers.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn getUser(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn getUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const id = ctx.param("id") orelse "unknown";
     return ctx.renderJson(.{ .id = id });
 }
 
-fn createUser(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn createUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.textStatus(201, "created");
 }
 
@@ -21,7 +21,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{});
+    var server = try httpx.Server.init(allocator, io, .{});
     defer server.deinit();
 
     try server.get("/users/{id}", getUser);

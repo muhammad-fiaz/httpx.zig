@@ -16,7 +16,7 @@ Demonstrates setting up an HTTP server for cloud deployment with TLS configurati
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn indexHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{
         .status = "ok",
         .service = "cloud-https-api",
@@ -24,7 +24,7 @@ fn indexHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Respon
     });
 }
 
-fn healthHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn healthHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .status = "healthy" });
 }
 
@@ -34,7 +34,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 8080,
         .portStrategy = .incremental,
@@ -48,7 +48,6 @@ pub fn main() !void {
     try server.use(httpx.middleware.cors);
     try server.use(httpx.middleware.helmet);
     try server.use(httpx.middleware.recovery);
-    try server.use(httpx.middleware.logging);
 
     try server.get("/health", healthHandler);
     try server.get("/", indexHandler);

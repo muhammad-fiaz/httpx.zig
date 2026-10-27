@@ -28,6 +28,10 @@
             .url = "https://github.com/muhammad-fiaz/env.zig/archive/refs/tags/0.0.3.tar.gz",
             .hash = "env-0.0.3-TMsAe4vyAgCb2xcombEB6bUjfn4ImXz4yKhNzLOP500W",
         },
+        .regex = .{
+            .url = "https://github.com/muhammad-fiaz/regex.zig/archive/refs/tags/0.0.1.tar.gz",
+            .hash = "regex-0.0.1-7f9IuJnPAgAXv6DYNexB6umA6wDtL9EbGzROa5QB04-M",
+        },
     },
     .paths = .{
         "build.zig",

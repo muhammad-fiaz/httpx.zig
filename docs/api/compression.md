@@ -41,10 +41,10 @@ pub fn compress(allocator: Allocator, encoding: Encoding, data: []const u8) ![]u
 
 Compresses data using the specified encoding. The caller owns the returned slice.
 
-## Streaming
+## Incremental Codec APIs
 
 For chunked data, compress or decompress incrementally with the
 `zstd` / `brotli` packages (`httpx.zstd`, `httpx.brotli`). The HTTP
-client and server negotiate `Accept-Encoding` automatically:
-`negotiate()` picks the best match and responses carry
+client and server still buffer complete bodies at their public APIs; they
+negotiate `Accept-Encoding` automatically, and compressed responses carry
 `Content-Encoding` plus `Vary: Accept-Encoding`.

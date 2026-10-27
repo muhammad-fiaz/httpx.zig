@@ -844,6 +844,24 @@ pub const Downloader = struct {
         return result;
     }
 
+    /// Downloads multiple tasks in a batch using this Downloader.
+    /// Caller owns the returned slice and must free it with this Downloader's allocator.
+    pub fn downloadAll(
+        self: *Downloader,
+        tasks: []const DownloadTask,
+        options: DownloadOptions,
+    ) ![]DownloadResult {
+        var results = try self.allocator.alloc(DownloadResult, tasks.len);
+        errdefer self.allocator.free(results);
+
+        for (tasks, 0..) |t, i| {
+            var opt = options;
+            opt.path = t.dest;
+            results[i] = try self.download(t.url, opt);
+        }
+        return results;
+    }
+
     fn performTransfer(
         self: *Downloader,
         url: []const u8,

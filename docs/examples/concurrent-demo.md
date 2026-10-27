@@ -39,7 +39,7 @@ pub fn main() !void {
     }
 
     // Request with options
-    const reqs = [_]httpx.client.RequestOptions{
+    const reqs = .{
         .{ .method = .GET, .url = "https://httpbun.com/get" },
         .{ .method = .GET, .url = "https://httpbun.com/headers" },
         .{ .method = .GET, .url = "https://httpbun.com/ip" },

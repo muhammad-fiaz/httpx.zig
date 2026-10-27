@@ -8,22 +8,12 @@ HTTPX follows a strict zero-print architecture: the core library never invokes `
 2. **Redaction of Secrets**: Sensitive headers (`Authorization`, `Cookie`, `Set-Cookie`, `Proxy-Authorization`) and private keys are never logged by default.
 3. **Plug-and-Play Loggers**: Integrate seamlessly with standard `std.log` or custom structured JSON logging libraries.
 
-## Logging Middleware
+## Server Event Logging
 
-Attach the built-in logging middleware to your HTTPX server. Middleware has
-the shape `fn (ctx: *httpx.web.router.Context, next: httpx.web.router.NextFn) anyerror!httpx.web.router.Response`
-and must return the downstream response:
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-try server.use(httpx.middleware.logging);
-```
-
-For structured production events (method, path, status, duration, bytes —
-never secrets), set the server logging callback instead; HTTPX emits nothing
-unless you provide one:
+The `httpx.middleware.logging` symbol is a pass-through compatibility hook and
+does not emit log output. For structured production events (method, path,
+status, duration, bytes, never secrets), set the server logging callback; HTTPX
+emits nothing unless you provide one:
 
 ```zig
 fn onEvent(event: httpx.logging.ServerEvent) void {
@@ -34,7 +24,7 @@ fn onEvent(event: httpx.logging.ServerEvent) void {
     }
 }
 
-var server = try httpx.server.Server.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .logging = .{ .callback = onEvent },
 });
 ```
@@ -60,4 +50,4 @@ pub fn formatHeaderSafe(name: []const u8, value: []const u8) []const u8 {
 
 * [Observability: Events](/observability/events)
 * [Observability: Metrics](/observability/metrics)
-* [Example: Interceptors](/examples/interceptors)
+* [Example: Retry](/examples/retry-example)

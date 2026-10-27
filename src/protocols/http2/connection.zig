@@ -24,6 +24,7 @@ const frameMod = @import("frame.zig");
 const hpackMod = @import("hpack.zig");
 const streamMod = @import("stream.zig");
 const http1Semantics = @import("../http1/semantics.zig");
+const parseMod = @import("../../common/parse.zig");
 
 const FrameHeader = frameMod.FrameHeader;
 const FrameType = frameMod.FrameType;
@@ -965,7 +966,7 @@ pub const Session = struct {
 
     fn parseStatus(fields: []const hpackMod.HeaderField) ?u16 {
         const value = fieldValue(fields, ":status") orelse return null;
-        return std.fmt.parseInt(u16, value, 10) catch null;
+        return parseMod.parse3DigitStatus(value);
     }
 
     /// True when the received message body matches its declared framing.
@@ -1217,9 +1218,8 @@ pub const Session = struct {
             {
                 continue;
             }
-            const name = try allocator.dupe(u8, f.name);
+            const name = try std.ascii.allocLowerString(allocator, f.name);
             errdefer allocator.free(name);
-            for (name) |*c| c.* = std.ascii.toLower(c.*);
             try list.append(allocator, .{ .name = name, .value = f.value });
         }
         return list.toOwnedSlice(allocator);

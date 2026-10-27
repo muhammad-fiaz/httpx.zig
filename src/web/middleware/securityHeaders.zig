@@ -10,11 +10,14 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const regexMod = @import("regex");
 
 // CORS (Fetch spec / RFC 9110 semantics)
 
 pub const CorsConfig = struct {
     allowedOrigins: []const []const u8 = &.{},
+    /// Optional regex patterns for origins (e.g. "^https://[a-z0-9-]+\\.example\\.com$").
+    allowedOriginPatterns: []const []const u8 = &.{},
     allowAllOrigins: bool = false,
     allowedMethods: []const []const u8 = &.{ "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS" },
     allowedHeaders: []const []const u8 = &.{},
@@ -28,11 +31,25 @@ pub const CorsConfig = struct {
         return true;
     }
 
-    /// Origin check with exact match against the configured list.
+    /// Origin check with exact match or wildcard (*) pattern matching.
     pub fn isOriginAllowed(self: *const CorsConfig, origin: []const u8) bool {
         if (self.allowAllOrigins) return true;
         for (self.allowedOrigins) |o| {
             if (std.ascii.eqlIgnoreCase(o, origin)) return true;
+            if (std.mem.indexOfScalar(u8, o, '*') != null) {
+                if (matchOriginWildcard(o, origin)) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Origin check supporting both static wildcards and regex patterns using the supplied allocator.
+    pub fn isOriginAllowedAlloc(self: *const CorsConfig, allocator: Allocator, origin: []const u8) bool {
+        if (self.isOriginAllowed(origin)) return true;
+        for (self.allowedOriginPatterns) |pattern| {
+            var re = regexMod.compile(allocator, pattern, .{}) catch continue;
+            defer re.deinit();
+            if (re.isMatch(origin, .{})) return true;
         }
         return false;
     }
@@ -44,6 +61,16 @@ pub const CorsConfig = struct {
         return false;
     }
 };
+
+fn matchOriginWildcard(pattern: []const u8, origin: []const u8) bool {
+    const starIdx = std.mem.indexOfScalar(u8, pattern, '*') orelse return std.ascii.eqlIgnoreCase(pattern, origin);
+    const prefix = pattern[0..starIdx];
+    const suffix = pattern[starIdx + 1 ..];
+    if (origin.len < prefix.len + suffix.len) return false;
+    if (!std.ascii.startsWithIgnoreCase(origin, prefix)) return false;
+    if (!std.ascii.endsWithIgnoreCase(origin, suffix)) return false;
+    return true;
+}
 
 // CSRF tokens
 
@@ -104,6 +131,28 @@ test "cors origin matching" {
     try std.testing.expect(!cfg.isOriginAllowed("https://evil.com"));
     try std.testing.expect(cfg.isMethodAllowed("post"));
     try std.testing.expect(!cfg.isMethodAllowed("TRACE"));
+}
+
+test "cors wildcard and regex pattern origin matching" {
+    const a = std.testing.allocator;
+    const cfg = CorsConfig{
+        .allowedOrigins = &.{ "https://*.example.com", "http://localhost:*" },
+        .allowedOriginPatterns = &.{"^https://app-[0-9]+\\.internal\\.net$"},
+    };
+
+    // Wildcard matching in allowedOrigins
+    try std.testing.expect(cfg.isOriginAllowed("https://api.example.com"));
+    try std.testing.expect(cfg.isOriginAllowed("https://admin.dashboard.example.com"));
+    try std.testing.expect(cfg.isOriginAllowed("http://localhost:3000"));
+    try std.testing.expect(cfg.isOriginAllowed("http://localhost:8080"));
+    try std.testing.expect(!cfg.isOriginAllowed("https://evil.com"));
+    try std.testing.expect(!cfg.isOriginAllowed("https://example.org"));
+
+    // Regex pattern matching via isOriginAllowedAlloc
+    try std.testing.expect(cfg.isOriginAllowedAlloc(a, "https://app-42.internal.net"));
+    try std.testing.expect(cfg.isOriginAllowedAlloc(a, "https://app-101.internal.net"));
+    try std.testing.expect(!cfg.isOriginAllowedAlloc(a, "https://app-abc.internal.net"));
+    try std.testing.expect(!cfg.isOriginAllowedAlloc(a, "https://malicious.net"));
 }
 
 test "csrf roundtrip and tamper rejection" {

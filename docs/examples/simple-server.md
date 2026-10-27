@@ -8,7 +8,7 @@ Start a minimal server with plain-text and JSON routes.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn indexHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn indexHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "hello, world!",
@@ -16,7 +16,7 @@ fn indexHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response
     };
 }
 
-fn jsonHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn jsonHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"ok\":true}",
@@ -30,7 +30,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -45,7 +45,7 @@ pub fn main() !void {
     std.debug.print("listening on 127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.server.Server) void {
+        fn run(s: *httpx.Server) void {
             s.run();
         }
     };

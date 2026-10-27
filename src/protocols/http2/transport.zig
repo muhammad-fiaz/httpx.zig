@@ -26,6 +26,7 @@ const tlsClientMod = @import("../tls/tlsClient.zig");
 const tlsServerMod = @import("../tls/tlsServer.zig");
 const tlsSessionMod = @import("../tls/tlsSession.zig");
 const semanticsMod = @import("../http1/semantics.zig");
+const parseMod = @import("../../common/parse.zig");
 pub const BodySource = @import("../../common/bodySource.zig").BodySource;
 pub const SliceReader = @import("../../common/bodySource.zig").SliceReader;
 pub const Error = error{
@@ -178,7 +179,7 @@ const RequestState = struct {
         var status: u16 = 0;
         for (flds) |f| {
             if (std.mem.eql(u8, f.name, ":status")) {
-                status = std.fmt.parseInt(u16, f.value, 10) catch 0;
+                status = parseMod.parse3DigitStatus(f.value) orelse 0;
             }
         }
         // Informational blocks precede the final response; later blocks

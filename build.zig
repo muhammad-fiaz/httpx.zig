@@ -133,6 +133,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const regexDep = b.dependency("regex", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // tint is a direct dependency of httpx (terminal colors in logging,
     // download progress), independent of loaders. It must be resolved with
     // the same empty options loaders itself uses (`b.dependency("tint",
@@ -156,6 +161,7 @@ pub fn build(b: *std.Build) void {
     httpxModule.addImport("loaders", loadersDep.module("loaders"));
     httpxModule.addImport("treesitter", treesitterDep.module("treesitter"));
     httpxModule.addImport("tint", tintDep.module("tint"));
+    httpxModule.addImport("regex", regexDep.module("regex"));
 
     const examples = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "simple-get", .path = "examples/simpleGet.zig" },
@@ -244,7 +250,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "template-inheritance", .path = "examples/web/templates/inheritance/main.zig" },
         .{ .name = "template-loops", .path = "examples/web/templates/loops/main.zig" },
         .{ .name = "template-includes", .path = "examples/web/templates/includes/main.zig" },
-        .{ .name = "template-live-reload", .path = "examples/web/templates/live_reload/main.zig" },
+        .{ .name = "template-live-reload", .path = "examples/web/templates/liveReload/main.zig" },
         .{ .name = "template-jinja", .path = "examples/web/templates/jinja/main.zig" },
         .{ .name = "website", .path = "examples/website/main.zig" },
     };
@@ -299,6 +305,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("loaders", loadersDep.module("loaders"));
     tests.root_module.addImport("treesitter", treesitterDep.module("treesitter"));
     tests.root_module.addImport("tint", tintDep.module("tint"));
+    tests.root_module.addImport("regex", regexDep.module("regex"));
     linkPlatformLibs(tests, target);
 
     const runTests = b.addRunArtifact(tests);
@@ -345,6 +352,7 @@ pub fn build(b: *std.Build) void {
     librootModule.addImport("loaders", loadersDep.module("loaders"));
     librootModule.addImport("treesitter", treesitterDep.module("treesitter"));
     librootModule.addImport("tint", tintDep.module("tint"));
+    librootModule.addImport("regex", regexDep.module("regex"));
 
     const lib = b.addLibrary(.{
         .name = "httpx",

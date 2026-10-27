@@ -40,14 +40,14 @@ across Linux, Windows, and macOS.
 The server can require (or optionally accept) client certificates:
 
 ```zig
-var server = try httpx.server.Server.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
     .tls = .{
-        .certPem = cert_pem,
-        .keyPem = key_pem,
+        .certificatePem = cert_pem,
+        .privateKeyPem = key_pem,
         .clientAuth = .required, // or .optional / .disabled (default)
-        .clientCa = ca_pem,      // PEM bundle trusted for client chains
+        .clientCaPem = ca_pem,      // PEM bundle trusted for client chains
     },
 });
 ```
@@ -57,7 +57,7 @@ observes `error.ClientCertificateRequired` (its native handshake refuses
 to continue cert-less) while the server side only ever sees the
 connection vanish mid-flight (`error.IoError` / `error.TlsHandshakeFailed`)
 — there is no server-side policy error to assert on. Presented chains
-must anchor in `clientCa` with valid signatures
+must anchor in `clientCaPem` with valid signatures
 (`error.ClientCertificateInvalid` otherwise). `.optional` lets cert-less
 clients through while still verifying any presented chain. See
 `[TLS mTLS](/examples/tls-mtls)` for a runnable loopback demo.
@@ -92,12 +92,12 @@ fresh ECDHE alongside the PSK).
 Server — opt in with ticket keys (stateless; no per-client storage):
 
 ```zig
-var server = try httpx.server.Server.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .port = 8443,
     .tls = .{
-        .certPem = cert_pem,
-        .keyPem = key_pem,
-        .ticketKeys = httpx.protocols.tls.TicketKeys.generate(),
+        .certificatePem = cert_pem,
+        .privateKeyPem = key_pem,
+        .ticketKeys = httpx.tls.TicketKeys.generate(io),
         .ticketLifetimeSecs = 7200,
     },
 });
@@ -134,18 +134,17 @@ HTTPS works out of the box with zero configuration:
 var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 
-// Automatically performs TLS 1.3 handshake with SNI and ALPN
-const response = try client.get("https://cloudflare.com", .{});
+// Automatically verifies the chain and hostname with SNI.
+var response = try client.get("https://cloudflare.com", .{});
 defer response.deinit();
 ```
 
 ### Custom CA Bundles & Self-Signed Certs
 For local development or internal PKI:
 ```zig
-const response = try client.get("https://internal.corp", .{
+var response = try client.get("https://internal.corp", .{
     .tls = .{
         .verify = .selfSigned, // Accept self-signed certificates
-        .allowTruncation = true,
     },
 });
 defer response.deinit();
@@ -155,7 +154,7 @@ defer response.deinit();
 
 ## Server TLS Configuration
 
-HTTPX provides first-class native TLS/HTTPS support directly integrated into `httpx.server.Server`.
+HTTPX provides first-class native TLS/HTTPS support directly integrated into `httpx.Server`.
 
 To launch a secure HTTPS server, supply PEM-encoded certificate chain and private key (either as in-memory PEM string or as file path):
 
@@ -163,11 +162,11 @@ To launch a secure HTTPS server, supply PEM-encoded certificate chain and privat
 const certPem = @embedFile("certs/server.crt");
 const keyPem = @embedFile("certs/server.key");
 
-var server = try httpx.server.Server.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .port = 8443,
     .tls = .{
-        .certPem = certPem,
-        .keyPem = keyPem,
+        .certificatePem = certPem,
+        .privateKeyPem = keyPem,
         .allowPlainHttp = false, // strict HTTPS mode (default)
     },
 });
@@ -182,7 +181,7 @@ Handlers can inspect the connection's encryption status via `Context`
 (`ctx.isTls`, `ctx.scheme()`), as in `helloHandler` below:
 
 ```zig
-fn helloHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn helloHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (ctx.isTls) return ctx.text("Hello HTTPS!");
     return ctx.text("Hello HTTP!");
 }

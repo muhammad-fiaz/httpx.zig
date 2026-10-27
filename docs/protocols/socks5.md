@@ -20,7 +20,7 @@ var client = httpx.Client.init(allocator, io, .{
 });
 defer client.deinit();
 
-const res = try client.get("http://example.com", .{});
+var res = try client.get("http://example.com", .{});
 defer res.deinit();
 ```
 

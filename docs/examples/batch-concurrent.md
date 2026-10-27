@@ -18,7 +18,7 @@ defer {
     std.heap.page_allocator.free(results);
 }
 
-const reqs = [_]httpx.client.RequestOptions{
+const reqs = .{
     .{ .method = .GET, .url = "https://httpbun.com/get" },
     .{ .method = .GET, .url = "https://httpbun.com/headers" },
 };

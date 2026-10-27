@@ -107,7 +107,7 @@ const clock = @import("../common/clock.zig");
 ///     }
 /// }
 ///
-/// var server = try httpx.server.Server.init(allocator, io, .{
+/// var server = try httpx.Server.init(allocator, io, .{
 ///     .logging = .{ .callback = onEvent },
 /// });
 /// ```
@@ -503,7 +503,7 @@ pub const Server = struct {
     const ConnectionPool = @import("../concurrency/workerPool.zig").Pool;
 
     /// Initializes server with explicit allocator, shared IO, and configuration.
-    /// Matches `var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });`
+    /// Matches `var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });`
     pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Server {
         return initInternal(allocator, io, false, null, cfg);
     }

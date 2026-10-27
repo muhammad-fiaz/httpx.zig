@@ -31,9 +31,9 @@ fn handle(
     _: ?*anyopaque,
     method: []const u8,
     path: []const u8,
-    _: []const httpx.protocols.http2.transport.Header,
+    _: []const httpx.http2.transport.Header,
     _: []const u8,
-) anyerror!httpx.protocols.http2.transport.HandlerResponse {
+) anyerror!httpx.http2.transport.HandlerResponse {
     if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/secure")) {
         return .{ .status = 200, .body = "secure-h2" };
     }
@@ -43,14 +43,14 @@ fn handle(
 fn runServer(lst: *httpx.tcp.Listener, io: std.Io) void {
     var conn = lst.accept(io) catch return;
     defer conn.close();
-    var srv = httpx.protocols.tls.Server.init(std.heap.page_allocator, io, .{
+    var srv = httpx.tls.Server.init(std.heap.page_allocator, io, .{
         .certificatePem = certPem,
         .privateKeyPem = keyPem,
     }) catch return;
     defer srv.deinit();
     var tlsConn = srv.accept(&conn) catch return;
     defer tlsConn.deinit();
-    httpx.protocols.http2.transport.serveTlsConnection(std.heap.page_allocator, &tlsConn, handle, null) catch return;
+    httpx.http2.transport.serveTlsConnection(std.heap.page_allocator, &tlsConn, handle, null) catch return;
 }
 
 pub fn main() !void {

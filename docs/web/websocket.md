@@ -1,9 +1,10 @@
 # WebSocket Server & Client
 
 HTTPX implements RFC 6455 WebSocket primitives: handshake helpers and frame
-encoding/decoding. Serve upgrade-capable routes from a normal `Server` (see
-`examples/websocketServer.zig`, which serves an interactive browser client
-and verifies the endpoint over HTTP).
+encoding/decoding. A normal `Server` route can compute the accept key and
+return `101 Switching Protocols` (see `examples/websocketServer.zig`). The
+high-level server does not take over the socket after the upgrade, so a full
+session needs the framing primitives over a raw TCP transport.
 
 ## Handshake (`httpx.websocket.Handshake`)
 

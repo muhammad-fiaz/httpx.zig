@@ -52,7 +52,7 @@ const QueryType = httpx.graphql.ObjectTypeDef{
     },
 };
 
-fn helloHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn helloHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{
         .message = "Hello from httpx! Visit /graphiql, /docs, /redoc, or /scalar",
         .status = "operational",
@@ -65,7 +65,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = true,
@@ -98,7 +98,7 @@ pub fn main() !void {
     std.debug.print("GraphQL server listening on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.server.Server) void {
+        fn run(s: *httpx.Server) void {
             s.run();
         }
     };

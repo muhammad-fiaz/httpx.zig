@@ -3,7 +3,7 @@
 HTTP/3 server routes with the high-level server runtime (`.http3 = true`).
 
 ```zig
-var server = try httpx.server.Server.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
     .http3 = true,

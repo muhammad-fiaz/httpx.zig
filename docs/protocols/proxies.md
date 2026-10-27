@@ -29,7 +29,7 @@ var client = httpx.Client.init(allocator, io, .{
 });
 defer client.deinit();
 
-const res = try client.get("https://httpbun.com/get", .{});
+var res = try client.get("https://httpbun.com/get", .{});
 defer res.deinit();
 ```
 

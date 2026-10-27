@@ -18,6 +18,7 @@ const feed = @import("feed.zig");
 const robots = @import("robots.zig");
 const sitemap = @import("sitemap.zig");
 const ts = @import("treesitter");
+const regexMod = @import("regex");
 
 pub const Point = struct {
     row: u32 = 0,
@@ -322,6 +323,39 @@ pub const Document = struct {
         return self.tree.serialize(self.arenaAllocator(), 0);
     }
 
+    /// Finds all non-overlapping matches of a regular expression pattern within the document's text.
+    pub fn findTextRegex(self: *const Document, pattern: []const u8) ![][]const u8 {
+        const al = self.arenaAllocator();
+        const fullText = try self.text();
+        var re = try regexMod.compile(al, pattern, .{});
+        defer re.deinit();
+
+        const matches = try re.findAll(al, fullText, .{});
+        const slices = try al.alloc([]const u8, matches.len);
+        for (matches, 0..) |m, i| {
+            slices[i] = m.slice;
+        }
+        return slices;
+    }
+
+    /// Extracts all document links whose href matches the given regular expression pattern.
+    pub fn extractLinksMatching(self: *const Document, pattern: []const u8) ![]extract.Link {
+        const al = self.arenaAllocator();
+        const allLinks = try self.links();
+        var re = try regexMod.compile(al, pattern, .{});
+        defer re.deinit();
+
+        var matched: std.ArrayList(extract.Link) = .empty;
+        errdefer matched.deinit(al);
+
+        for (allLinks) |link| {
+            if (re.isMatch(link.href, .{})) {
+                try matched.append(al, link);
+            }
+        }
+        return matched.toOwnedSlice(al);
+    }
+
     /// Returns the root NodeHandle of the document.
     pub fn root(self: *const Document) NodeHandle {
         return NodeHandle{
@@ -487,6 +521,39 @@ test "incremental update reparses and reports changed ranges" {
     var paras = try doc.select("p");
     defer paras.deinit();
     try std.testing.expectEqual(@as(usize, 2), paras.len());
+}
+
+test "document regex text search and link extraction" {
+    const a = std.testing.allocator;
+    const htmlSnippet =
+        \\<html>
+        \\<head><title>Test Page</title></head>
+        \\<body>
+        \\  <p>User order #12345 completed, tracking code TRK-9876.</p>
+        \\  <a href="https://example.com/item/100">Item 100</a>
+        \\  <a href="https://example.com/item/200">Item 200</a>
+        \\  <a href="https://other.org/about">About</a>
+        \\</body>
+        \\</html>
+    ;
+
+    var doc = try Parser.init(a, .{}).parseHtml(htmlSnippet);
+    defer doc.deinit();
+
+    // Regex text matching
+    const orderMatches = try doc.findTextRegex("#[0-9]+");
+    try std.testing.expectEqual(@as(usize, 1), orderMatches.len);
+    try std.testing.expectEqualStrings("#12345", orderMatches[0]);
+
+    const trkMatches = try doc.findTextRegex("TRK-[0-9]+");
+    try std.testing.expectEqual(@as(usize, 1), trkMatches.len);
+    try std.testing.expectEqualStrings("TRK-9876", trkMatches[0]);
+
+    // Regex link matching
+    const itemLinks = try doc.extractLinksMatching("^https://example\\.com/item/[0-9]+$");
+    try std.testing.expectEqual(@as(usize, 2), itemLinks.len);
+    try std.testing.expectEqualStrings("https://example.com/item/100", itemLinks[0].href);
+    try std.testing.expectEqualStrings("https://example.com/item/200", itemLinks[1].href);
 }
 
 test "tree-sitter incremental query proves execution" {

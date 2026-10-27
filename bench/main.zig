@@ -151,7 +151,7 @@ fn runBench(
 var benchAllocator: std.mem.Allocator = undefined;
 var benchPool: *httpx.concurrency.Pool = undefined;
 var benchQueue: httpx.concurrency.queue.BoundedQueue(usize) = undefined;
-var benchRouter: httpx.web.router.Router = undefined;
+var benchRouter: httpx.Router = undefined;
 var benchDnsCache: *httpx.net.dns.Cache = undefined;
 
 var sampleCompressRaw: []const u8 = undefined;
@@ -248,8 +248,8 @@ fn benchQueryParamLookup() void {
 
 // Group 2: Routing & Middleware
 
-fn dummyHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
-    return httpx.web.router.Response{
+fn dummyHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return httpx.router.Response{
         .status = 200,
         .body = "{\"status\":\"ok\"}",
         .contentType = "application/json",
@@ -257,7 +257,7 @@ fn dummyHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response
 }
 
 fn benchRouterStaticMatch() void {
-    var ctx = httpx.web.router.Context{
+    var ctx = httpx.router.Context{
         .allocator = benchAllocator,
         .path = "/api/v1/health",
         .method = .GET,
@@ -266,7 +266,7 @@ fn benchRouterStaticMatch() void {
 }
 
 fn benchRouterParamMatch() void {
-    var ctx = httpx.web.router.Context{
+    var ctx = httpx.router.Context{
         .allocator = benchAllocator,
         .path = "/users/42/profile",
         .method = .GET,
@@ -275,7 +275,7 @@ fn benchRouterParamMatch() void {
 }
 
 fn benchRouterDispatch() void {
-    var ctx = httpx.web.router.Context{
+    var ctx = httpx.router.Context{
         .allocator = benchAllocator,
         .path = "/api/v1/health",
         .method = .GET,
@@ -284,7 +284,7 @@ fn benchRouterDispatch() void {
 }
 
 fn benchRouterTypedMatch() void {
-    var ctx = httpx.web.router.Context{
+    var ctx = httpx.router.Context{
         .allocator = benchAllocator,
         .path = "/users/42/posts/99",
         .method = .GET,
@@ -293,7 +293,7 @@ fn benchRouterTypedMatch() void {
 }
 
 fn benchRouterMiss() void {
-    var ctx = httpx.web.router.Context{
+    var ctx = httpx.router.Context{
         .allocator = benchAllocator,
         .path = "/no/such/route",
         .method = .GET,
@@ -466,7 +466,7 @@ fn benchWatcherScan() void {
     _ = w.scan() catch false;
 }
 
-var benchDepGraph: ?*httpx.web.watcherDependency.DependencyGraph = null;
+var benchDepGraph: ?*httpx.static.dependency.DependencyGraph = null;
 
 fn benchWatcherDeps() void {
     const g = benchDepGraph orelse return;
@@ -672,14 +672,14 @@ fn benchCertParse() void {
 
 // Group 11: Loopback End-to-End Client/Server Request
 
-var loopbackServer: *httpx.server.Server = undefined;
+var loopbackServer: *httpx.Server = undefined;
 var loopbackThread: std.Thread = undefined;
 var loopbackClient: httpx.Client = undefined;
 var loopbackUrl: [64]u8 = undefined;
 var loopbackUrlSlice: []const u8 = undefined;
 
-fn loopbackPingHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
-    return httpx.web.router.Response{
+fn loopbackPingHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return httpx.router.Response{
         .status = 200,
         .body = "pong",
         .contentType = "text/plain",
@@ -992,7 +992,7 @@ pub fn main() !void {
     defer benchQueue.deinit();
 
     // 3. Initialize Router with diverse routes
-    benchRouter = httpx.web.router.Router.init(benchAllocator);
+    benchRouter = httpx.Router.init(benchAllocator);
     defer benchRouter.deinit();
     try benchRouter.get("/", dummyHandler, .{});
     try benchRouter.get("/api/v1/health", dummyHandler, .{});
@@ -1020,7 +1020,7 @@ pub fn main() !void {
     var benchW = try httpx.static.Watcher.init(benchAllocator, io, .{ .dirPath = "examples/web/templates" });
     defer benchW.deinit();
     benchWatcher = benchW;
-    var benchG = httpx.web.watcherDependency.DependencyGraph.init(benchAllocator);
+    var benchG = httpx.static.dependency.DependencyGraph.init(benchAllocator);
     defer benchG.deinit();
     var gi: usize = 0;
     while (gi < 64) : (gi += 1) {
@@ -1044,7 +1044,7 @@ pub fn main() !void {
     defer benchAllocator.free(sampleDeflatePayload);
 
     // 6. Initialize Local Loopback Server & Client
-    var srv = try httpx.server.Server.init(benchAllocator, io, .{
+    var srv = try httpx.Server.init(benchAllocator, io, .{
         .port = 0,
         .enableDocs = false,
         .keepAlive = true,
@@ -1053,7 +1053,7 @@ pub fn main() !void {
     try srv.router.get("/ping", loopbackPingHandler, .{});
     loopbackServer = &srv;
 
-    loopbackThread = try std.Thread.spawn(.{}, httpx.server.Server.run, .{&srv});
+    loopbackThread = try std.Thread.spawn(.{}, httpx.Server.run, .{&srv});
     defer {
         loopbackClient.deinit();
         srv.requestShutdown();

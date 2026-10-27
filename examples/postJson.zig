@@ -6,7 +6,7 @@ const CreateUser = struct {
     role: []const u8,
 };
 
-fn postHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn postHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = try std.fmt.allocPrint(ctx.allocator, "{{\"status\":\"created\",\"received\":{s}}}", .{ctx.body}),
@@ -20,7 +20,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,

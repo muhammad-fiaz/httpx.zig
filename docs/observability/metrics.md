@@ -5,7 +5,7 @@ HTTPX includes a thread-safe metrics registry compatible with Prometheus text fo
 ## Metrics Types
 
 * **Counters (`httpx.Counter`)**: Monotonically increasing 64-bit unsigned values (e.g. total requests, bytes sent, error counts).
-* **Gauges (`httpx.Gauge`)**: Instantly varying 64-bit signed values (e.g. active connections, active requests) with underflow-safe atomic operations.
+* **Gauges (`httpx.Gauge`)**: Instantly varying 64-bit unsigned values (e.g. active connections, active requests) with underflow-safe atomic operations.
 * **Histograms (`httpx.Histogram`)**: High-resolution latency tracking using 11 standard Prometheus buckets (`0.005`, `0.01`, `0.025`, `0.05`, `0.1`, `0.25`, `0.5`, `1.0`, `2.5`, `5.0`, `10.0` seconds + `+Inf`), total count, and cumulative sum in seconds with nanosecond precision.
 
 ## Server Live Metrics Endpoint
@@ -22,7 +22,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     // Mount live Prometheus /metrics endpoint
@@ -33,7 +33,7 @@ pub fn main() !void {
     server.run();
 }
 
-fn helloHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn helloHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.text("Hello World!");
 }
 ```

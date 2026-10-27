@@ -15,7 +15,7 @@ const indexHtml = @embedFile("static/index.html");
 const stylesCss = @embedFile("static/styles.css");
 const appJs = @embedFile("static/app.js");
 
-fn hello(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn hello(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.render("greet.html", .{ .name = "Embedded" });
 }
 
@@ -37,7 +37,7 @@ pub fn main() !void {
     // 2. Same server API as filesystem mode; embedded hits resolve first.
     // Explicit .templates keeps the engine alive even without a templates/
     // directory on disk: the loader consults the embedded registry first.
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -52,7 +52,7 @@ pub fn main() !void {
     const port = server.localPort();
 
     const ServerThread = struct {
-        fn run(s: *httpx.server.Server) void {
+        fn run(s: *httpx.Server) void {
             s.run();
         }
     };

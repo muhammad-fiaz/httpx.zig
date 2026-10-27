@@ -27,11 +27,11 @@ const devTemplate =
     \\</html>
 ;
 
-fn devHtmlHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn devHtmlHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.html(devTemplate);
 }
 
-fn devCssHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn devCssHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "body { margin: 0; background: #0f172a; color: #f8fafc; font-family: system-ui; }",
@@ -57,7 +57,7 @@ pub fn main() !void {
     try watcher.start();
 
     // 2. Initialize server
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -72,7 +72,7 @@ pub fn main() !void {
     std.debug.print("Development Server running at http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.server.Server) void {
+        fn run(s: *httpx.Server) void {
             s.run();
         }
     };

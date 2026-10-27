@@ -111,7 +111,7 @@ pub const Response = struct {
     body: []const u8 = "",
 };
 
-/// High-level TLS server listener backed by httpx.server.Server.
+/// High-level TLS server listener backed by httpx.Server.
 ///
 /// `run` wires `handlerFn` (a `*const fn (Request) anyerror!Response`) to a
 /// wildcard route for every method, so the single handler serves all paths.

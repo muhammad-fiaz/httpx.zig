@@ -5,7 +5,7 @@ HTTPX provides high-performance static file serving with automatic MIME detectio
 ## Mounting Static Directories
 
 ```zig
-var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
+var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
 defer server.deinit();
 
 // Mount public assets directory to /static URL prefix
@@ -20,7 +20,7 @@ server.run();
 ## Features
 
 1. **Automatic MIME Types**: Resolves `.html`, `.css`, `.js`, `.png`, `.svg`, `.json`, `.wasm`, and 100+ other extensions.
-2. **Range Requests (206 Partial Content)**: Supports `Range: bytes=0-1023` for media streaming and resumable downloads.
+2. **Range Requests (206 Partial Content)**: Supports `Range: bytes=0-1023` for partial delivery and resumable downloads.
 3. **ETag & 304 Validation**: Automatically calculates ETags based on file modification timestamp and size.
 4. **Directory Traversal Protection**: Rejects paths containing `../` or encoded traversal sequences (`%2e%2e/`).
 

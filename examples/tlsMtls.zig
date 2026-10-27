@@ -30,11 +30,11 @@ const keyPem =
     \\-----END PRIVATE KEY-----
 ;
 
-fn handler(_: httpx.protocols.tls.Request) anyerror!httpx.protocols.tls.Response {
+fn handler(_: httpx.tls.Request) anyerror!httpx.tls.Response {
     return .{ .status = 200, .body = "mutual-hello" };
 }
 
-fn runServer(listener: *httpx.protocols.tls.Listener) void {
+fn runServer(listener: *httpx.tls.Listener) void {
     listener.run(handler) catch |err| std.debug.print("server error: {s}\n", .{@errorName(err)});
 }
 
@@ -44,7 +44,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var listener = try httpx.protocols.tls.Listener.init(allocator, io, .{
+    var listener = try httpx.tls.Listener.init(allocator, io, .{
         .port = 0,
         .defaultIdentity = .{ .certChainPem = certPem, .privateKeyPem = keyPem },
         .clientAuth = .required,

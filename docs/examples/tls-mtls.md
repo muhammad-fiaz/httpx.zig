@@ -37,7 +37,7 @@ request keeps the std transport, which cannot present certificates.
 ## Server Configuration
 
 ```zig
-var listener = try httpx.protocols.tls.Listener.init(allocator, io, .{
+var listener = try httpx.tls.Listener.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
     .defaultIdentity = .{

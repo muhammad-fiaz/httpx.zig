@@ -12,7 +12,7 @@ pub const stdOptions: std.Options = .{
     .unexpected_error_tracing = false,
 };
 
-fn listItemsHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn listItemsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{
         .items = &[_]struct { id: u32, name: []const u8, price: f64 }{
             .{ .id = 101, .name = "Pro Router Widget", .price = 49.99 },
@@ -23,7 +23,7 @@ fn listItemsHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Re
     });
 }
 
-fn getItemHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn getItemHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const itemId = ctx.param("id") orelse "0";
     return ctx.renderJson(.{
         .id = itemId,
@@ -33,7 +33,7 @@ fn getItemHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Resp
     });
 }
 
-fn homePageHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn homePageHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     const html =
         \\<!DOCTYPE html>
         \\<html lang="en">
@@ -82,7 +82,7 @@ pub fn main() !void {
 
     std.debug.print("=== Starting httpx Documentation & API Server ===\n", .{});
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = true,
@@ -108,7 +108,7 @@ pub fn main() !void {
     std.debug.print("[INFO] Server started on http://127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.server.Server) void {
+        fn run(s: *httpx.Server) void {
             s.run();
         }
     };

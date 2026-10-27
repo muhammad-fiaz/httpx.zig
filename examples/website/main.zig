@@ -15,11 +15,11 @@ const httpx = @import("httpx");
 
 const embedded = @import("embed_website");
 
-fn health(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn health(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = @constCast("{\"status\":\"ok\"}") };
 }
 
-fn apiUsers(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn apiUsers(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = @constCast("[{\"id\":1}]") };
 }
 
@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("==> HTTPX website demo ({s} mode)\n", .{if (useFs) "filesystem" else "embedded"});
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -87,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
 
     const port = server.localPort();
     const ServerThread = struct {
-        fn run(s: *httpx.server.Server) void {
+        fn run(s: *httpx.Server) void {
             s.run();
         }
     };

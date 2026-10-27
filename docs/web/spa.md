@@ -16,7 +16,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     // API routes take precedence (register code routes before the SPA mount)
@@ -28,7 +28,7 @@ pub fn main() !void {
     server.run();
 }
 
-fn statusHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn statusHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     _ = ctx;
     return .{ .status = 200, .body = "{\"status\":\"ok\"}", .contentType = "application/json" };
 }

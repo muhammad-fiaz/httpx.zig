@@ -585,9 +585,7 @@ pub const Encoder = struct {
 };
 
 fn lowerBuf(gpa: Allocator, name: []const u8) ![]u8 {
-    const buf = try gpa.alloc(u8, name.len);
-    for (name, 0..) |c, i| buf[i] = std.ascii.toLower(c);
-    return buf;
+    return std.ascii.allocLowerString(gpa, name);
 }
 
 // Tests

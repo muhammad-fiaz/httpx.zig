@@ -7,9 +7,9 @@ The `httpx.zig` server module provides a robust HTTP server with middleware supp
 | Protocol | Status | Features |
 |----------|--------|----------|
 | HTTP/1.0 | ✅ Full | Basic request/response |
-| HTTP/1.1 | ✅ Full | Keep-Alive, chunked transfer, pipelining |
-| HTTP/2 | ✅ Full | High-level server runtime over TCP plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Reliable paths | High-level server runtime over UDP + QUIC/TLS 1.3 with loss recovery, NewReno congestion control, 0-RTT, Retry, and v1/v2 version negotiation; requests multiplex on one active connection, and connection migration is not implemented |
+| HTTP/1.1 | ✅ Full | Keep-Alive, chunked transfer, trailers |
+| HTTP/2 | ✅ Full | High-level server runtime over TCP/TLS plus full framing/HPACK/stream primitives |
+| HTTP/3 | ✅ Reliable paths | High-level server runtime over UDP + QUIC/TLS 1.3 with loss recovery, NewReno congestion control, 0-RTT, Retry, and v1/v2 version negotiation; the high-level client reuses pooled connections sequentially, and connection migration is not implemented |
 
 ## Server
 
@@ -24,38 +24,25 @@ const httpx = @import("httpx");
 const io = std.Io.Threaded.global_single_threaded.io();
 
 // Initialize with default config
-var server = try httpx.server.Server.init(allocator, io, .{});
-defer server.deinit();
-
-// Shorthand: explicit allocator + config
-var server = try httpx.server.Server.init(allocator, io, .{
-    .port = 3000,
-    .host = "0.0.0.0",
-});
-defer server.deinit();
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-const io = std.Io.Threaded.global_single_threaded.io();
-
-// Initialize with default config
-var server = try httpx.server.Server.init(allocator, io, .{});
+var server = try httpx.Server.init(allocator, io, .{});
 defer server.deinit();
 
 // Initialize with custom config
-var server = try httpx.server.Server.init(allocator, io, .{
+var custom_server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 3000,
     .portStrategy = .incremental,
     .maxPortAttempts = 32,
     .maxBody = 1024 * 1024, // 1MB
 });
-defer server.deinit();
+defer custom_server.deinit();
+
+// Initialize with environment variables (PORT, HOST, HTTPX_WORKERS)
+var env_server = try httpx.Server.init(allocator, io, httpx.Server.Config.fromEnv());
+defer env_server.deinit();
 ```
 
-### Configuration (`ServerConfig`)
+### Configuration (inline `.{}` options)
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -75,6 +62,8 @@ defer server.deinit();
 | `keepAliveIdleTimeoutMs` | `u32` | `30000` | Maximum wait for the next request on an HTTP/1 keep-alive connection. Zero disables the deadline. |
 | `maxRequestsPerConn` | `usize` | `1000` | Max requests served per keep-alive connection. |
 | `keepAlive` | `bool` | `false` | Honor HTTP/1.1 keep-alive on connections. |
+| `compression` | `compression.Config` | `{}` | Automatic response compression codec settings for HTTP/1.1, HTTP/2, and HTTP/3. |
+| `maxCompressionInput` | `usize` | `128 KiB` | Largest response body the server will compress automatically. |
 | `allowLfLineEndings` | `bool` | `false` | Accept bare LF line endings when parsing requests. |
 | `trustForwardedHeaders` | `bool` | `false` | Trust `X-Forwarded-*` headers from reverse proxies. |
 | `trustedProxies` | `[]const []const u8` | `&.{}` | IPs/CIDRs allowed to supply forwarded headers; forwarded chains skip entries matching these rules. Empty trusts every peer when forwarding is enabled. |
@@ -91,12 +80,38 @@ defer server.deinit();
 | `docsTitle` | `[]const u8` | `"HTTPX API"` | Title used by the docs UI. |
 | `watch` | `bool` | `false` | Watch a directory and broadcast changes. |
 | `watchDir` | `[]const u8` | `"."` | Directory to watch when `watch` is enabled. |
-| `liveReload` | `bool` | `false` | Enable SSE/WebSocket live-reload endpoints + script injection. |
+| `liveReload` | `bool` | `false` | Enable the SSE live-reload endpoint and script injection. |
 | `liveReloadPath` | `[]const u8` | `"/__httpx_liveReload"` | Mount path for the live-reload endpoint. |
 | `templates` | `?TemplateConfig` | `null` | Template engine config (auto-discovers `templates/` when null). |
 | `tls` | `?tls.Server.Config` | `null` | TLS/HTTPS config (certificate + private key). |
 
-All `ServerConfig` fields are optional customizations. Omitted fields use the built-in defaults; `. {}` is the safe default.
+All server settings are passed inline as the final `.{}` argument to `httpx.Server.init`. Omitted fields use the built-in defaults; `.{}` is the safe default.
+
+### Operational Deployment Environment Configuration
+
+Server configuration remains pure explicit Zig options via `.{}`. If an application wishes to bind ports or hosts from process environment variables or a `.env` file, it selectively uses `httpx.env`:
+
+```zig
+// Read operational deployment values via httpx.env utils:
+var server = try httpx.Server.init(allocator, io, .{
+    .host = httpx.env.get("HOST") orelse "0.0.0.0",
+    .port = httpx.env.getInt(u16, "PORT") orelse 8080,
+    .workerCount = httpx.env.getInt(u16, "WORKERS") orelse 0,
+});
+defer server.deinit();
+
+// Or read from a loaded .env file:
+var envStore = try httpx.env.loadFile(allocator, ".env");
+defer envStore.deinit();
+
+var env_server = try httpx.Server.init(allocator, io, .{
+    .host = envStore.get("HOST") orelse "0.0.0.0",
+    .port = if (envStore.get("PORT")) |p| try std.fmt.parseInt(u16, p, 10) else 8080,
+});
+defer env_server.deinit();
+```
+
+Application routes, middleware composition, handler logic, and internal buffers remain explicit code options configured via `httpx.Server.init`.
 
 ### Connection handling and concurrency
 
@@ -138,7 +153,7 @@ const port = server.localPort(); // actual bound port (useful with .port = 0)
 
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
-var server = try httpx.server.Server.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
     .http2 = true,
@@ -151,7 +166,7 @@ defer server.deinit();
 
 ```zig
     const io = std.Io.Threaded.global_single_threaded.io();
-var server = try httpx.server.Server.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
     .portStrategy = .incremental,
@@ -210,7 +225,7 @@ server.stop();
 Adds a middleware to the global stack.
 
 ```zig
-try server.use(httpx.middleware.logging);
+try server.use(httpx.middleware.helmet);
 try server.use(httpx.middleware.cors);
 ```
 
@@ -226,7 +241,7 @@ fn onEvent(event: httpx.logging.ServerEvent) void {
     }
 }
 
-var server = try httpx.server.Server.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
     .logging = .{ .callback = onEvent },
@@ -264,11 +279,11 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{});
+    var server = try httpx.Server.init(allocator, io, .{});
     defer server.deinit();
 
     // Add middleware
-    try server.use(httpx.middleware.logging);
+    try server.use(httpx.middleware.helmet);
     try server.use(httpx.middleware.cors);
 
     // Register routes
@@ -283,11 +298,11 @@ pub fn main() !void {
     server.run();
 }
 
-fn homePage(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn homePage(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.html("<h1>Welcome to httpx.zig!</h1>");
 }
 
-fn listUsers(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn listUsers(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .users = &.{} });
 }
 ```
@@ -296,10 +311,12 @@ fn listUsers(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response 
 
 ### SSE Responses
 
-Server-Sent Events use `httpx.sse.Writer.EventWriter` over a normal handler response
-(see `examples/sseServer.zig` and [SSE](/web/sse)). There is no
-`ctx.sse(...)` helper; parse inbound streams with `httpx.sse.Parser`
-(`eventType`, `data`, `id`, `retryMs` fields on parsed events).
+Server-Sent Events use `httpx.sse.Event.Writer` over a normal handler response
+(see `examples/sseServer.zig` and [SSE](/api/sse)). The router buffers each
+response, so a handler emits a finite batch of events; long-lived SSE needs a
+custom HTTP/1.1 connection loop. There is no `ctx.sse(...)` helper; parse
+inbound streams with `httpx.sse.Event.Parser` (`eventType`, `data`, `id`,
+`retryMs` fields on parsed events).
 
 ### Route Groups
 
@@ -321,7 +338,7 @@ var router = router_mod.Router.init(allocator);
 defer router.deinit();
 router.setNotFoundHandler(notFound);
 
-fn notFound(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn notFound(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.textStatus(404, "Not Found");
 }
 ```
@@ -374,7 +391,7 @@ The `Context` struct is passed to every route handler and middleware.
 ### Example Context Usage
 
 ```zig
-fn getUser(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn getUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     // Get URL parameter
     const id = ctx.param("id") orelse return ctx.textStatus(400, "Missing user ID");
 
@@ -402,7 +419,7 @@ Handlers are functions that take a `*Context` and return a `!Response`.
 ```zig
 const Handler = *const fn (*Context) anyerror!Response;
 
-fn myHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn myHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .message = "Hello World" });
 }
 ```
@@ -411,22 +428,22 @@ fn myHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response 
 
 ```zig
 // Simple text response
-fn hello(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn hello(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.text("Hello, World!");
 }
 
 // JSON response with status
-fn created(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn created(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJsonStatus(201, .{ .id = 1, .created = true });
 }
 
 // Redirect
-fn redirectHome(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn redirectHome(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.redirect("/", 302);
 }
 
 // Error handling
-fn riskyHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn riskyHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const data = doSomethingRisky() catch |err| {
         return ctx.renderJsonStatus(500, .{
             .error = "Internal Server Error",
@@ -455,7 +472,7 @@ and `examples/staticEmbedded.zig` (single-file embedded mode).
 Handle route-level errors in handlers and return explicit status codes as needed:
 
 ```zig
-fn handler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn handler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const result = riskyOperation() catch |err| switch (err) {
         error.NotFound => return ctx.renderJsonStatus(404, .{ .error = "Not Found" }),
         error.Unauthorized => return ctx.renderJsonStatus(401, .{ .error = "Unauthorized" }),

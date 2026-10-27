@@ -9,7 +9,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn healthHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn healthHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 200, .body = "ok" };
 }
 
@@ -21,7 +21,7 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,

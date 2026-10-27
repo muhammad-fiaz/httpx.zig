@@ -14,7 +14,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     // Serve files from ./public at /static URL prefix
@@ -29,7 +29,7 @@ pub fn main() !void {
 HTTPX servers feature built-in directory watching, event debouncing, and Server-Sent Events (SSE) live-reload script injection:
  
 ```zig
-var server = try httpx.server.Server.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .port = 8080,
     .watch = true,
     .watchDir = "./public",
@@ -49,7 +49,7 @@ When files within `watchDir` are created, modified, deleted, or renamed:
 
 ## Key Capabilities
 
-1. **Zero Memory Copying & Streaming**: Delivers files efficiently using system I/O buffers.
+1. **Bounded File Reads**: Serves files through the response buffer; `HEAD` skips body reads.
 2. **RFC 9110 HEAD Compliance**: Returns accurate `Content-Length`, `ETag`, and `Last-Modified` metadata without buffering unnecessary body payloads.
 3. **Range Support (206)**: Handles `Range: bytes=start-end` for audio/video seeking and resumable downloads; returns `416 Range Not Satisfiable` for invalid bounds.
 4. **Conditional Requests (304)**: Supports `If-None-Match` (strong/weak ETags) and `If-Modified-Since` (IMF-fixdate parsing) for client cache revalidation.

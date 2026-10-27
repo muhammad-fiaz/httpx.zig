@@ -14,7 +14,7 @@ Demonstrates http2Client.zig using the canonical HTTPX API.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn h2Handler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn h2Handler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     std.debug.print("HTTP/2 Server received: {s} {s}\n", .{ @tagName(ctx.method), ctx.path });
     return .{
         .status = 200,
@@ -29,7 +29,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -41,7 +41,7 @@ pub fn main() !void {
     const port = server.localPort();
 
     const ServerWorker = struct {
-        fn run(s: *httpx.server.Server) void {
+        fn run(s: *httpx.Server) void {
             s.run();
         }
     };

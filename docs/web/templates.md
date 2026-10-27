@@ -176,7 +176,7 @@ positional or keyword (`truncate(30, killwords=true)`). Register custom
 filters once on the engine:
 
 ```zig
-fn shout(alloc: std.mem.Allocator, v: httpx.templates.Value, args: []const httpx.templates.Value, kwargs: []const httpx.templates.FilterKwarg) anyerror!httpx.templates.Value {
+fn shout(alloc: std.mem.Allocator, v: httpx.templates.Value, args: []const httpx.templates.Value, kwargs: []const httpx.templates.renderer.FilterKwarg) anyerror!httpx.templates.Value {
     _ = args;
     _ = kwargs;
     const s = try alloc.dupe(u8, v.string);
@@ -271,11 +271,11 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     const ProfileHandler = struct {
-        fn handle(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+        fn handle(_: *httpx.router.Context) anyerror!httpx.router.Response {
             const username = "Jane Doe";
             var page_buf: [1024]u8 = undefined;
             const html_page = try std.fmt.bufPrint(&page_buf,
@@ -331,7 +331,7 @@ chaining through every inheritance level.
 ### Custom filters and globals
 
 ```zig
-fn shout(alloc: std.mem.Allocator, v: httpx.templates.Value, args: []const httpx.templates.Value, kwargs: []const httpx.templates.FilterKwarg) anyerror!httpx.templates.Value {
+fn shout(alloc: std.mem.Allocator, v: httpx.templates.Value, args: []const httpx.templates.Value, kwargs: []const httpx.templates.renderer.FilterKwarg) anyerror!httpx.templates.Value {
     _ = args;
     _ = kwargs;
     const s = try alloc.dupe(u8, v.string);

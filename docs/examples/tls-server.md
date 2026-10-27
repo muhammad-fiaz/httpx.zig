@@ -5,7 +5,7 @@ Demonstrates the custom TLS server implementation built from scratch. Shows TLS 
 ## Features Demonstrated
 
 - TLS server with ECDSA P-256 certificates (custom implementation)
-- ALPN negotiation for protocol selection (h3, h2, http/1.1)
+- ALPN negotiation for protocol selection (h2 or http/1.1 over TLS)
 - TLS client handshake with certificate verification bypass
 - HTTP request/response over TLS 1.3
 - HTTP/2 ALPN detection
@@ -17,7 +17,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 const tls = httpx.protocols.tls;
 
-fn helloHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn helloHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.text("Hello from TLS server!");
 }
 
@@ -29,7 +29,7 @@ pub fn main() !void {
 
     // Start a local TLS listener with a self-signed identity.
     // (See examples/tlsServer.zig for the runnable version.)
-    var tlsListener = try httpx.protocols.tls.Listener.init(allocator, io, .{
+    var tlsListener = try httpx.tls.Listener.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .defaultIdentity = .{
@@ -67,8 +67,8 @@ zig build run-tls-server
 - [x] Server starts with TLS enabled using ECDSA P-256 certificates
 - [x] Certificate and key PEM files are loaded
 - [x] TLS handshake completes successfully (TLS 1.3)
-- [x] ALPN negotiates h3, h2, or http/1.1
+- [x] ALPN negotiates h2 or http/1.1
 - [x] HTTP/2 is detected via ALPN
 - [x] HTTP request over TLS returns 200 OK
-- [x] Supports TLS 1.2 and 1.3 cipher suites
+- [x] Uses TLS 1.3 cipher suites on the native server path
 - [x] Record-level fragmentation works correctly

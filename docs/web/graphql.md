@@ -4,12 +4,6 @@ HTTPX incorporates a high-performance GraphQL implementation in native Zig, incl
 
 ## Server Schema & Execution
 
-Define GraphQL query types and register resolvers:
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
 Define GraphQL object types with resolvers, build a schema, and mount it.
 `mount` registers `GET`/`POST`/`OPTIONS` on the endpoint (default
 `/graphql`); the GraphiQL IDE is served by the docs mount
@@ -31,7 +25,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     const QueryType = httpx.graphql.ObjectTypeDef{
@@ -44,7 +38,7 @@ pub fn main() !void {
     try httpx.graphql.mount(&server.router, schema, .{ .endpoint = "/graphql" });
     defer httpx.graphql.unmount(&server.router, .{ .endpoint = "/graphql" });
 
-    try server.run();
+    server.run();
 }
 ```
 
@@ -65,7 +59,7 @@ const query =
     \\}
 ;
 
-const response = try client.post("https://api.example.com/graphql", .{
+var response = try client.post("https://api.example.com/graphql", .{
     .json = .{
         .query = query,
         .variables = .{ .id = "prod_987" },

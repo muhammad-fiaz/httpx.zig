@@ -4,7 +4,7 @@
 
 ## Overview
 
-`httpx.Metrics` (`src/web/metrics/registry.zig`) uses `std.atomic.Value` for all counters, making it safe to call from multiple threads without locks. `snapshot()` returns a plain `MetricsSnapshot` struct copy, safe to read without synchronization. Servers record automatically into their own registry; the API below is for custom instrumentation.
+`httpx.Metrics` (`src/web/metrics/metricsRegistry.zig`) uses `std.atomic.Value` for all counters, making it safe to call from multiple threads without locks. `snapshot()` returns a plain `MetricsSnapshot` struct copy, safe to read without synchronization. Servers record automatically into their own registry; the API below is for custom instrumentation.
 
 ## Recording events
 
@@ -96,7 +96,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{ .port = 0 });
+    var server = try httpx.Server.init(allocator, io, .{ .port = 0 });
     defer server.deinit();
 
     try server.get("/api", apiHandler);
@@ -107,7 +107,7 @@ pub fn main() !void {
     defer server.requestShutdown();
 }
 
-fn apiHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn apiHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.renderJson(.{ .hello = "world" });
 }
 ```

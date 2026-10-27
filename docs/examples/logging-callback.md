@@ -18,7 +18,7 @@ fn onServerEvent(event: httpx.logging.ServerEvent) void {
     }
 }
 
-// Client events: method, url (credentials redacted), status, durationMs.
+// Client events: method, url (credentials redacted), status.
 fn onClientEvent(event: httpx.logging.ClientEvent) void {
     if (event.kind == .requestCompleted) {
         std.debug.print("[CLI] {s} {s} {d}\n", .{
@@ -34,7 +34,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
 
     // Attach to server (omit `.logging` entirely for fully silent operation).
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .logging = .{ .callback = onServerEvent, .level = .info },

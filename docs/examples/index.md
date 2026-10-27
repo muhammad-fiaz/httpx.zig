@@ -28,7 +28,7 @@ zig build run-http3-client -Dtarget=aarch64-macos
 - [Custom Headers](/examples/custom-headers): Attach auth and custom metadata headers.
 - [Concurrent Requests](/examples/concurrent-requests): Execute multiple requests in parallel.
 - [Connection Pool](/examples/connection-pool): Reuse pooled connections efficiently.
-- [Interceptors](/examples/interceptors): Apply request and response interceptors.
+- [Interceptors](/examples/interceptors): Compose client request wrappers without a built-in interceptor registry.
 - [Cookies Demo](/examples/cookies-demo): Manage cookie jar values in client flows.
 - [Logging Callback](/examples/logging-callback): Set up custom logging functions for both server and client.
 - [Proxy and Reverse Proxy](/examples/proxy-example): Configure client forward proxies, including SOCKS5h tunnels, and register reverse proxy middleware.
@@ -38,8 +38,8 @@ zig build run-http3-client -Dtarget=aarch64-macos
 - [Thread Pool / Async Server](/examples/async-server-example): Start a concurrent HTTP server with thread pool connection dispatching.
 - [Router Example](/examples/router-example): Route params and grouped endpoints.
 - [Middleware Example](/examples/middleware-example): Chain middleware with shared behavior.
-- [Streaming](/examples/streaming): Stream data responses.
-- [SSE Example](/examples/sse-example): Server-Sent Events formatting and streaming from server to client.
+- [Streaming](/examples/streaming): Read a buffered response through `Response.reader()`.
+- [SSE Example](/examples/sse-example): Format and parse Server-Sent Events in a buffered response.
 - [Static Files](/examples/static-files): Serve assets with content types, ETag headers, and conditional GET (`If-None-Match`) support.
 - [Multi Page Website](/examples/multi-page-website): Serve multiple HTML pages.
 - [HTTP/2 Example](/examples/http2-example): HTTP/2 framing and stream primitives.
@@ -53,9 +53,9 @@ zig build run-http3-client -Dtarget=aarch64-macos
 - [TCP Local](/examples/tcp-local): Local TCP listener/client round trip.
 - [UDP Local](/examples/udp-local): Local UDP transport demo.
 - [WebSocket Example](/examples/websocket-example): Read upgrade headers, handshake keys, and process frame inputs.
-- [WebSocket Server](/examples/websocket-server): WebSocket handshake detection, frame encoding/decoding, and bidirectional messaging.
+- [WebSocket Server](/examples/websocket-server): WebSocket handshake response plus frame encoding/decoding primitives.
 - [Multipart Form Data](/examples/multipart-example): Build and parse multipart payloads with text fields and file uploads.
-- [Session Store](/examples/session-example): Set/get session data, evict sessions on TTL, and integrate with servers.
+- [Session Pattern](/examples/session-example): Cookie-backed sessions without a built-in server-side store.
 - [Metrics and Observability](/examples/metrics-example): Aggregate total requests, status codes, latency times, and success rates.
 - [Unix Domain Sockets](/examples/unix-socket-example): Bind servers and connect clients over AF_UNIX sockets.
 - [Health Check Probes](/examples/health-check-example): Configure liveness and readiness probe middlewares.
@@ -72,7 +72,7 @@ zig build run-http3-client -Dtarget=aarch64-macos
 - [Request Response Customization](/examples/request-response-customization): Customize request properties and response headers.
 - [Compression](/examples/compression-example): Gzip, deflate, brotli, and zstd compression/decompression.
 - [HTTP Methods](/examples/http-methods): GET, POST, PUT, DELETE, HEAD, OPTIONS.
-- [Retry](/examples/retry-example): Retry with exponential backoff.
+- [Retry](/examples/retry-example): Retry with linear backoff.
 - [DNS Resolution](/examples/dns-example): DNS cache and resolution.
 - [Redirect](/examples/redirect-example): Redirect following and policy.
 - [Batch Concurrent](/examples/batch-concurrent): Batch concurrent requests.

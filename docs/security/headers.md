@@ -15,15 +15,13 @@ HTTP security headers instruct modern web browsers to activate built-in defenses
 ## Server Implementation
 
 ```zig
-fn securityHeadersMiddleware(ctx: *httpx.web.router.Context) !void {
-    ctx.header("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
-    ctx.header("X-Content-Type-Options", "nosniff");
-    ctx.header("X-Frame-Options", "DENY");
-    ctx.header("Referrer-Policy", "strict-origin-when-cross-origin");
-    ctx.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
-    try ctx.next();
-}
+// Adds X-Content-Type-Options, X-Frame-Options, Referrer-Policy,
+// and Content-Security-Policy.
+try server.use(httpx.middleware.helmet);
 ```
+
+`helmet` does not set `Strict-Transport-Security` or `Permissions-Policy`.
+Add those in a response middleware or on the routes that need them.
 
 ## Related
 

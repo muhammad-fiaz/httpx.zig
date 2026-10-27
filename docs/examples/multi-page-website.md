@@ -5,7 +5,7 @@ Serve a small website with multiple routes and shared assets. See
 single-file).
 
 ```zig
-var server = try httpx.server.Server.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
 });

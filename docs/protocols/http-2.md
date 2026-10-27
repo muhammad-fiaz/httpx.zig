@@ -53,7 +53,7 @@ HTTP/2 uses HPACK compression to drastically reduce header overhead:
 ## Prior Knowledge vs ALPN
 
 HTTPX supports two methods for establishing HTTP/2 connections:
-1. **`h2` via TLS ALPN**: During TLS 1.3/1.2 handshake, the client requests `h2` and the server agrees.
+1. **`h2` via TLS ALPN**: The high-level client uses the native TLS 1.3 transport and requests `h2`; the server agrees or the request fails with `AlpnNegotiationFailed`.
 2. **`h2c` via Prior Knowledge**: On cleartext TCP, the client sends the 24-byte magic connection preface (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`) followed immediately by a `SETTINGS` frame.
 
 ## Message Semantics

@@ -5,7 +5,7 @@ End-to-end HTTP/2 server routes with the high-level server runtime
 and `examples/http2Client.zig` for h2c verification.
 
 ```zig
-var server = try httpx.server.Server.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
     .http2 = true,

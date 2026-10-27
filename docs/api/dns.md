@@ -13,8 +13,8 @@ The DNS subsystem in HTTPX provides high-level client resolution methods, struct
           │                       │
       Normal API            Advanced API
           │                       │
-    client.resolve()      httpx.resolve.Resolver
-          │               httpx.dns.Cache
+    client.resolve()      httpx.net.resolve.Resolver
+          │               httpx.net.dns.Cache
           └───────────┬───────────┘
                       │
               Canonical DNS
@@ -134,7 +134,7 @@ pub const ResolvedAddresses = struct {
 
 ## 3. Client DNS Configuration
 
-Client-wide DNS parameters are configured in `Client.Config.dnsCache` during `Client.init`:
+Client-wide DNS parameters are configured through the `.dnsCache` field passed to `Client.init`:
 
 ```zig
 pub const DnsCacheOptions = struct {
@@ -196,17 +196,17 @@ const hp = addr.formatWithPort(&port_buf); // e.g. "127.0.0.1:443" or "[::1]:443
 
 For applications requiring direct control over low-level resolvers without instantiating an HTTP client:
 
-### `httpx.resolve.Resolver`
+### `httpx.net.resolve.Resolver`
 
 Resolver owning its allocator and IO backend (`std.Io` first, OS fallback):
 
 ```zig
-var resolver = httpx.resolve.Resolver.init(allocator, io);
+var resolver = httpx.net.resolve.Resolver.init(allocator, io);
 const addrs = try resolver.lookup("httpbun.com", 443);
 defer allocator.free(addrs);
 ```
 
-### `httpx.dns` Wire Protocol
+### `httpx.net.dns` Wire Protocol
 
 Low-level RFC 1035 message encoder and decoder for raw DNS packets:
 
@@ -230,7 +230,7 @@ Low-level RFC 1035 message encoder and decoder for raw DNS packets:
 | Connection Type | Resolution Location | Behavior |
 |-----------------|---------------------|----------|
 | Direct | Local | Resolved via client DNS subsystem |
-| HTTP Proxy (`http://`) | Local / Proxy | Proxy connects; TLS uses HTTP `CONNECT` |
+| HTTP Proxy (`http://`) | Remote (Proxy) | Client sends HTTP `CONNECT`; the proxy resolves and connects to the target |
 | SOCKS5 (`socks5://`) | Local | Host resolved locally prior to connection |
 | SOCKS5H (`socks5h://`) | Remote (Proxy) | Unresolved hostname sent to SOCKS5 proxy |
 

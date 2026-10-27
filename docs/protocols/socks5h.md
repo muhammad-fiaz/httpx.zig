@@ -28,7 +28,7 @@ var client = httpx.Client.init(allocator, io, .{
 });
 defer client.deinit();
 
-const res = try client.get("https://check.torproject.org", .{});
+var res = try client.get("https://check.torproject.org", .{});
 defer res.deinit();
 ```
 

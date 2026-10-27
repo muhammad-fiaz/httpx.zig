@@ -214,7 +214,7 @@ fn filterUpper(allocator: Allocator, value: Value, args: []const Value, kwargs: 
     _ = kwargs;
     _ = args;
     const s = try filterStringValue(allocator, value);
-    for (s) |*c| c.* = std.ascii.toUpper(c.*);
+    _ = std.ascii.upperString(s, s);
     return .{ .string = s };
 }
 
@@ -222,7 +222,7 @@ fn filterLower(allocator: Allocator, value: Value, args: []const Value, kwargs: 
     _ = kwargs;
     _ = args;
     const s = try filterStringValue(allocator, value);
-    for (s) |*c| c.* = std.ascii.toLower(c.*);
+    _ = std.ascii.lowerString(s, s);
     return .{ .string = s };
 }
 

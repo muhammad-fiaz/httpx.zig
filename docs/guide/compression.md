@@ -15,12 +15,12 @@ HTTPX incorporates native compression codecs for Gzip, Deflate, Brotli, and Zsta
 
 ## Client Automatic Decompression
 
-When making client requests, HTTPX automatically adds the `Accept-Encoding: gzip, br, zstd` header to request options unless explicitly overridden.
+When making client requests, HTTPX automatically adds the `Accept-Encoding: zstd, br, gzip, deflate` header unless explicitly overridden.
 
-When the server returns `Content-Encoding: gzip` (or `br`, `zstd`), HTTPX decodes the body transparently before returning it to the caller:
+When the server returns `Content-Encoding: zstd`, `br`, `gzip`, or `deflate`, HTTPX decodes the body transparently before returning it to the caller:
 
 ```zig
-const response = try client.get("https://httpbun.com/gzip", .{});
+var response = try client.get("https://httpbun.com/gzip", .{});
 defer response.deinit();
 
 // response.body is already decompressed plaintext bytes
@@ -31,22 +31,17 @@ std.debug.print("Body: {s}\n", .{response.body});
 
 ## Server Response Compression
 
-HTTPX server supports on-the-fly response compression based on the client's `Accept-Encoding` preference:
+The high-level server compresses responses automatically for HTTP/1.1, HTTP/2, and HTTP/3. It parses the request's `Accept-Encoding`, selects `zstd`, `br`, `gzip`, or `deflate`, and sends `Content-Encoding` plus `Vary: Accept-Encoding` only when the coded body is smaller. Handlers do not need to negotiate or encode anything:
 
 ```zig
-server.get("/large-data", struct {
-    fn handle(ctx: *httpx.web.router.Context) !void {
-        const accept = ctx.header("Accept-Encoding") orelse "";
-        if (std.mem.indexOf(u8, accept, "gzip") != null) {
-            ctx.header("Content-Encoding", "gzip");
-            // Compress and write
-        }
-        try ctx.json(large_data_payload);
-    }
-}.handle);
+fn largeDataHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return ctx.renderJson(.{ .items = &.{ "alpha", "beta", "gamma" } });
+}
+
+try server.get("/large-data", largeDataHandler);
 ```
 
-When serving static files via `server.static()`, HTTPX automatically detects pre-compressed `.gz`, `.br`, and `.zst` files and serves them with zero runtime CPU overhead.
+Compression applies to bodies up to `.maxCompressionInput` in the options passed to `httpx.Server.init` (128 KiB by default); larger bodies are sent unchanged to bound per-request memory. Tune codec levels with `.compression` and raise the input limit when large assets should be compressed at the cost of an extra copy. If the client forbids identity and offers no supported coding, the server returns `406 Not Acceptable`.
 
 ## Related
 

@@ -4,12 +4,12 @@ HTTP/2 frame headers and stream multiplexing with `httpx.protocols.http2`.
 See `examples/http2Client.zig` and `examples/http2Multiplex.zig`.
 
 ```zig
-var hdrBuf: [httpx.protocols.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
-const hdr = httpx.protocols.http2.FrameHeader.parse(&hdrBuf);
+var hdrBuf: [httpx.http2.frame.FRAME_HEADER_SIZE]u8 = undefined;
+const hdr = httpx.http2.FrameHeader.parse(&hdrBuf);
 var out: [9]u8 = undefined;
 hdr.serialize(&out);
 
-var sess = try httpx.protocols.http2.Session.init(allocator, .client, .{});
+var sess = try httpx.http2.Session.init(allocator, .client, .{});
 defer sess.deinit();
 try sess.startHandshake();
 const sid = try sess.nextClientStreamId();

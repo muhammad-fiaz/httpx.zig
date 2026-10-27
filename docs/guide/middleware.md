@@ -4,7 +4,7 @@ Middleware functions execute before your route handlers. They can modify the req
 
 ## Using Middleware
 
-To add global middleware to the server, use `server.use()`. Middleware functions follow the signature `fn (*httpx.web.router.Context, httpx.web.router.NextFn) anyerror!httpx.web.router.Response`.
+To add global middleware to the server, use `server.use()`. Middleware functions follow the signature `fn (*httpx.router.Context, httpx.router.NextFn) anyerror!httpx.router.Response`.
 
 ```zig
 // Add standard CORS middleware
@@ -24,16 +24,17 @@ try server.use(httpx.middleware.recovery);
 - **`httpx.middleware.cors`**: Handles preflight `OPTIONS` requests (204 No Content) and injects CORS response headers.
 - **`httpx.middleware.helmet`**: Defensive headers (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Content-Security-Policy`).
 - **`httpx.middleware.recovery`**: Intercepts uncaught handler errors and returns safe HTTP 500 responses without crashing the connection loop.
-- **`httpx.middleware.logging`**: Non-blocking request pass-through and observability hooks.
+- **`httpx.middleware.logging`**: Pass-through compatibility hook; use the server `logging.callback` for structured request events.
+- **`httpx.middleware.csrf`**: Double-submit cookie CSRF protection. Safe methods receive a token cookie when absent; state-changing requests must echo the token in the `X-CSRF-Token` header or receive `403 Forbidden`.
 - **`httpx.RateLimiter`**: Multi-dimensional token bucket rate limiting (by IP, Bearer token, route, or custom key).
-- **`httpx.middleware.generateCsrfToken` / `verifyCsrfToken`**: Double-submit cookie CSRF validation.
+- **`httpx.middleware.generateCsrfToken` / `verifyCsrfToken`**: Low-level helpers. `generateCsrfToken` is test-only; production code should use the middleware, which draws tokens from OS entropy.
 
 ## Writing Custom Middleware
 
-A custom middleware is a function that receives the `*httpx.web.router.Context` and the `NextFn` callback:
+A custom middleware is a function that receives the `*httpx.router.Context` and the `NextFn` callback:
 
 ```zig
-fn banCheckMiddleware(ctx: *httpx.web.router.Context, next: httpx.web.router.NextFn) anyerror!httpx.web.router.Response {
+fn banCheckMiddleware(ctx: *httpx.router.Context, next: httpx.router.NextFn) anyerror!httpx.router.Response {
     // 1. Pre-processing
     if (ctx.header("X-Ban")) |_| {
         return ctx.textStatus(403, "Forbidden");
@@ -64,20 +65,38 @@ try api.get("/users", listUsers, .{ .middleware = &.{auditMw} });
 
 ## Compression
 
-Response compression is available through the `httpx.compression` codec
-(gzip, deflate, brotli, zstd) applied inside handlers. There is no built-in
-compression middleware; negotiate `Accept-Encoding` in the handler and encode
-the body explicitly.
+The server compresses handler responses automatically for HTTP/1.1, HTTP/2,
+and HTTP/3. It parses `Accept-Encoding`, selects `zstd`, `br`, `gzip`, or
+`deflate`, and sends `Content-Encoding` plus `Vary: Accept-Encoding` only when
+the coded body is smaller. Negotiation is driven by `.compression` in the
+options passed to `httpx.Server.init`; bodies larger than `.maxCompressionInput`
+(128 KiB by default) are sent unchanged. Unsupported or forbidden encodings
+produce `406 Not Acceptable`.
+
+The `httpx.compression` codec remains available when a handler needs explicit
+control over compression.
 
 ## Rate Limiting
 
 Use `httpx.RateLimiter` for per-key request-rate enforcement (see
-`src/web/middleware/rateLimit.zig` for `RateLimitPolicy`,
+`src/web/middleware/rateLimiter.zig` for `RateLimitPolicy`,
 `RateLimitResult`, and `RateLimitDimension`).
 
-## CSRF Helpers
+## CSRF Protection
 
-Use `httpx.middleware.generateCsrfToken` / `httpx.middleware.verifyCsrfToken`
-(double-submit cookie pattern) inside handlers for state-changing routes.
-There is no built-in CSRF middleware; GET/HEAD/OPTIONS pass through
-unchallenged by construction.
+Register the built-in middleware globally:
+
+```zig
+try server.use(httpx.middleware.csrf);
+```
+
+Safe methods (`GET`, `HEAD`, `OPTIONS`, `TRACE`) pass through and receive a
+`csrf_token` cookie when one is not already present. `POST`, `PUT`, `PATCH`,
+`DELETE`, and other state-changing methods compare the cookie with the
+`X-CSRF-Token` header using a constant-time check, returning `403 Forbidden`
+when either value is missing or they differ.
+
+Use `httpx.middleware.verifyCsrfToken` for a constant-time comparison in
+custom policies. Avoid `generateCsrfToken` in production: it accepts a
+caller-supplied PRNG and exists for tests. The built-in middleware defines safe
+cookie name, header name, path, `SameSite`, and `Secure` defaults configured via `.{}`.

@@ -392,12 +392,25 @@ pub const Client = struct {
         return self.requestStream(url, opts);
     }
 
+    /// Returns a direct streaming file downloader attached to this client.
+    pub fn downloader(self: *Client) DownloadCore.Downloader {
+        return DownloadCore.Downloader.init(self.allocator, self);
+    }
+
+    /// Convenience batch file download helper: downloads multiple files using this client.
+    pub fn downloadAll(self: *Client, tasks: []const DownloadCore.DownloadTask, opts: DownloadOptions) ![]DownloadResult {
+        var dl = self.downloader();
+        return dl.downloadAll(tasks, opts);
+    }
+
     /// Batch: concurrent array of requests (runs in parallel, reuses pool and dns cache).
     ///
     /// Caller owns the returned slice: deinit each Response, then free the
     /// slice with this client's allocator.
     pub fn requestAll(self: *Client, reqs: anytype) ![]Response {
         const R = @TypeOf(reqs);
+        var owned: ?[]RequestOptions = null;
+        defer if (owned) |buf| self.allocator.free(buf);
         const slice: []const RequestOptions = blk: {
             if (R == []const RequestOptions or R == []RequestOptions) break :blk reqs;
             const info = @typeInfo(R);
@@ -406,7 +419,23 @@ pub const Client = struct {
                 if (info.pointer.size == .one and @typeInfo(info.pointer.child) == .array) break :blk reqs[0..];
             }
             if (info == .array) break :blk reqs[0..];
-            @compileError("requestAll expects a slice or array of RequestOptions");
+            if (info == .@"struct" and info.@"struct".is_tuple) {
+                const buf = try self.allocator.alloc(RequestOptions, info.@"struct".field_names.len);
+                owned = buf;
+                inline for (info.@"struct".field_names, 0..) |name, i| {
+                    const item = @field(reqs, name);
+                    if (@typeInfo(@TypeOf(item)) != .@"struct") @compileError("requestAll tuple entries must be option structs");
+                    if (!@hasField(@TypeOf(item), "url")) @compileError("requestAll tuple entries require a url");
+                    buf[i] = .{ .url = item.url };
+                    inline for (@typeInfo(@TypeOf(item)).@"struct".field_names) |fname| {
+                        if (!@hasField(RequestOptions, fname)) @compileError("unknown request option: " ++ fname);
+                        if (comptime std.mem.eql(u8, fname, "url")) continue;
+                        @field(buf[i], fname) = @field(item, fname);
+                    }
+                }
+                break :blk buf;
+            }
+            @compileError("requestAll expects a slice, array, or tuple of request option structs");
         };
         var out = try self.allocator.alloc(Response, slice.len);
         if (slice.len <= 1) {

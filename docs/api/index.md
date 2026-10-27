@@ -22,24 +22,23 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 ### Server Lifecycle
 
-- `httpx.server.Server.init(allocator, io, config)` — initialize server with allocator, io, and configuration (or `.{}` for defaults)
+- `httpx.Server.init(allocator, io, config)` — initialize server with allocator, io, and configuration (or `.{}` for defaults)
 - `server.run()` — blocking loop; `server.start()` — background thread
 - `server.requestShutdown()` / `server.stop()` / `server.pause()` / `server.resumeAccepting()`
 - `server.localPort()` — actual bound port
 
-### Configuration Types
+### Inline Configuration
 
-- Client settings: initialized with `.{}` on `httpx.Client.init` (protocols, timeouts, redirects, retries, pool, proxy, TLS, DNS cache)
-- `httpx.server.Config` — server settings (host, port, strategy, body limits, protocols, docs, TLS, watcher, templates, logging)
-- `httpx.client.requestOptions` — per-request options (headers, query, body/json/form/text, auth, timeouts, proxy, TLS)
-- `httpx.HttpVersion` — protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`)
-- `httpx.server.PortStrategy` — `.incremental`, `.strict`, `.exit`
-- `httpx.client.downloadOptions` / `downloadResult` / `verifyOptions` / `updateOptions` / `existingFilePolicy` / `progressMode`
+- Client settings: passed as the final `.{}` argument to `httpx.Client.init` (protocols, timeouts, redirects, retries, pool, proxy, TLS, DNS cache)
+- Server settings: passed as the final `.{}` argument to `httpx.Server.init` (host, port, strategy, body limits, protocols, docs, TLS, watcher, templates, logging)
+- Per-request settings: passed as the final `.{}` argument to request methods (headers, query, body/json/form/text, auth, timeouts, proxy, TLS)
+- `httpx.HttpVersion` �?" protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`)
+- `portStrategy` accepts `.incremental`, `.strict`, or `.exit`
 
 ### Server Types
 
-- `httpx.server.Server`, `httpx.server.Config`, `httpx.web.router.Router`, `httpx.web.router.Context`, `httpx.web.router.Response`
-- `httpx.protocols.tls.Listener`, `httpx.protocols.tls.ListenerConfig`, `httpx.protocols.tls.Request`, `httpx.protocols.tls.Response`
+- `httpx.Server`, `httpx.Router`, `httpx.router.Context`, `httpx.router.Response`
+- `httpx.tls.Listener`, `httpx.tls.ListenerConfig`, `httpx.tls.Request`, `httpx.tls.Response`
 
 ### Concurrency Helpers
 
@@ -55,13 +54,13 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 ### Utility Aliases
 
 - `httpx.mime.fromPath(path)` — extension-based MIME lookup
-- `httpx.clock.millisNow(io)` / `sleepMillis(io, ms)` — monotonic clock helpers
+- `httpx.clock.millisNow(io)` / `monotonicMillis(io)` / `sleepMillis(io, ms)` — wall-clock, monotonic, and sleep helpers
 - `httpx.Uri.parse(...)` — RFC 3986 URI parsing
-- `httpx.protocols.quic.varint` — QUIC variable-length integers
+- `httpx.quic.varint` — QUIC variable-length integers
 
 ### DNS Cache
 
-- Client DNS cache via `ClientConfig.dnsCache` (`enable`, `ttlMs`, `negativeTtlMs`, `maxEntries`)
+- Client DNS cache via `.dnsCache` in the `Client.init` options (`enable`, `ttlMs`, `negativeTtlMs`, `maxEntries`)
 
 ### WebSocket
 
@@ -92,8 +91,8 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 ## Customization and Callbacks
 
-- Server event callbacks via `ServerConfig.logging = .{ .callback = onEvent }`
-- Client event callbacks via `ClientConfig.eventCallback`
+- Server event callbacks via `.logging = .{ .callback = onEvent }` in the options passed to `httpx.Server.init`
+- Client event callbacks via `.eventCallback` in the `Client.init` options
 - Response JSON helpers: `Response.json(T)`, `Response.jsonAlloc(T, allocator)`
 - Socket primitives: `httpx.tcp.Socket` / `httpx.tcp.Listener`, `httpx.udp`
 - Custom middleware: `fn (ctx: *Context, next: NextFn) anyerror!Response`

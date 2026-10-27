@@ -17,7 +17,7 @@ Centralized API documentation for all utility modules.
 
 ### Encoding
 
-- `httpx.protocols.quic.varint.encode(buf, value)` / `httpx.protocols.quic.varint.decode(data, offset)` — QUIC variable-length integer encoding
+- `httpx.quic.varint.encode(buf, value)` / `httpx.quic.varint.decode(data, offset)` — QUIC variable-length integer encoding
 
 ### WebSocket
 

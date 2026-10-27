@@ -4,9 +4,9 @@ Production HTTP/2 behavior: SETTINGS enforcement, GOAWAY/RST_STREAM,
 HPACK security, and trailers. See `examples/http2Multiplex.zig`.
 
 ```zig
-var clientSess = try httpx.protocols.http2.Session.init(allocator, .client, .{});
+var clientSess = try httpx.http2.Session.init(allocator, .client, .{});
 defer clientSess.deinit();
-var serverSess = try httpx.protocols.http2.Session.init(allocator, .server, .{});
+var serverSess = try httpx.http2.Session.init(allocator, .server, .{});
 defer serverSess.deinit();
 
 try clientSess.startHandshake();
@@ -20,7 +20,7 @@ _ = try clientSess.sendData(sid, body, true);
 
 GOAWAY/RST_STREAM/WINDOW_UPDATE flow control, PRIORITY/CONTINUATION
 frames, PING, and HPACK `Without Indexing` / `Never Indexed` handling live
-in `httpx.protocols.http2.frame`, `httpx.protocols.http2.stream`, and `httpx.protocols.http2.hpack`.
+in `httpx.http2.frame`, `httpx.http2.stream`, and `httpx.http2.hpack`.
 
 ## Expected Output
 

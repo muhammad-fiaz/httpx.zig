@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn indexHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.render("index.html", .{
         .title = "HTTPX Jinja Demo",
         .heading = "Team Directory",
@@ -19,7 +19,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .templates = .{

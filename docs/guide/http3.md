@@ -7,7 +7,7 @@ Zig's standard library does not provide HTTP/3 or QUIC support. **httpx.zig impl
 - **QPACK** header compression (RFC 9204) with static/dynamic tables, encoder/decoder stream instructions, and blocked-section retry
 - **QUIC** transport frame encoding/decoding (RFC 9000), TLS 1.3 handshake, ACK/loss recovery, NewReno congestion control, flow control, RESET_STREAM/STOP_SENDING, transport parameters, and 0-RTT resumption
 - **HTTP/3** frame types, SETTINGS, GOAWAY, CONNECTION_CLOSE handling, trailers, and precise protocol-error mapping
-- **Limits:** Retry/token validation, QUIC v1/v2 version negotiation, and key updates are implemented; HelloRetryRequest handling, connection migration, server push, and datagrams are not. The high-level HTTP/3 client performs one request per QUIC connection.
+- **Limits:** Retry/token validation, QUIC v1/v2 version negotiation, key updates, and client connection pooling are implemented; HelloRetryRequest handling, connection migration, server push, and datagrams are not. The high-level client reuses pooled HTTP/3 connections sequentially.
 :::
 
 ## Platform Support
@@ -22,7 +22,7 @@ The HTTP/3 runtime has loopback integration coverage on the native test host. Cr
 ## Features
 
 - **High-level Client Runtime** - `Client` performs QUIC + TLS 1.3 with ALPN `h3`, certificate verification, QPACK dynamic-table encoding, response trailers, and loss recovery.
-- **High-level Server Runtime** - `httpx.server.Server` can bind a UDP endpoint when `.http3 = true` and a default certificate/key identity are provided. It routes supported H3 requests through server handlers. The handshake requires that default identity; selector-only TLS configuration does not initialize the H3 endpoint.
+- **High-level Server Runtime** - `httpx.Server` can bind a UDP endpoint when `.http3 = true` and a default certificate/key identity are provided. It routes supported H3 requests through server handlers. The handshake requires that default identity; selector-only TLS configuration does not initialize the H3 endpoint.
 - **Protocol-level Server Runtime** - serve H3 over QUIC directly with `httpx.protocols.quic` (Endpoint + Pump + HandshakeDriver) and `httpx.protocols.http3` builders; see `examples/http3Client.zig` for a complete loopback server.
 - **Handshake Lifecycle** - the server confirms the handshake after verifying the client Finished and sends `HANDSHAKE_DONE`; the client confirms on that frame or on a 1-RTT acknowledgment. Confirmation discards the Handshake keys on both ends and late Handshake packets are ignored (RFC 9001 Sections 4.1.2 and 4.9.2).
 
@@ -31,7 +31,7 @@ The HTTP/3 runtime has loopback integration coverage on the native test host. Cr
 HTTP/3 shares the HTTP/1.1 port number (RFC 9114 Section 3), so a client normally dials the port it already knows. When port `0` was requested, the TCP listener picks an ephemeral port, and Windows keeps separate reserved dynamic ranges for TCP and UDP: that TCP-chosen number can land in a UDP exclusion the stack refuses to bind. In that case only, the endpoint falls back to an ephemeral UDP port of its own. Read the port the server actually bound rather than assuming:
 
 ```zig
-const server = try httpx.server.Server.init(allocator, io, .{
+const server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 0,
     .http3 = true,
@@ -59,12 +59,12 @@ Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP
 
 ### Deliberate Current Limits
 
-- The high-level HTTP/3 client performs one request per QUIC connection (no H3 pooling); proxy routes are rejected loudly (`Http3ProxyUnsupported`).
+- The high-level HTTP/3 client pools QUIC connections for sequential reuse but does not multiplex concurrent requests over one connection; proxy routes are rejected loudly (`Http3ProxyUnsupported`).
 - 0-RTT resumption works over QUIC, but the QUIC driver does not handle HelloRetryRequest; clients always send an X25519 share.
-- Retry/token validation, QUIC v1/v2 version negotiation, and 1-RTT key updates are implemented. Set `.http3Retry = true` on `ServerConfig` to require address validation before the Initial flight; the 3x anti-amplification limit otherwise applies until the client Finished is verified. The high-level client honors Retry automatically and resends the ClientHello under the new Initial keys.
+- Retry/token validation, QUIC v1/v2 version negotiation, and 1-RTT key updates are implemented. Set `.http3Retry = true` in the inline options passed to `httpx.Server.init` to require address validation before the Initial flight; the 3x anti-amplification limit otherwise applies until the client Finished is verified. The high-level client honors Retry automatically and resends the ClientHello under the new Initial keys.
 - No connection migration, server push, HTTP/3 datagrams, or extended CONNECT.
-- The client sends buffered request bodies in HTTP/3 DATA frames. Streaming
-  uploads and downloads are not provided by this one-shot API.
+- Streaming uploads are supported through a request body source. The one-shot
+  API buffers response bodies, so streaming downloads are not provided.
 
 ## High-level Client Usage
 
@@ -80,7 +80,7 @@ defer response.deinit();
 // response.version == .http3, response.status is the u16 code.
 ```
 
-Or as the client default (`.httpVersion = .http3` / `.http3 = true` in `ClientConfig` resolves every request to H3).
+Or as the client default (`.httpVersion = .http3` / `.http3 = true` in the `Client.init` options resolves every request to H3).
 
 A wrong chain fails fast and loudly (`error.TlsCertificateNotVerified`); an ALPN mismatch that is not `h3` fails with `error.AlpnNegotiationFailed`. A quiet peer burns the request deadline, then `error.Timeout`.
 
@@ -89,17 +89,17 @@ A wrong chain fails fast and loudly (`error.TlsCertificateNotVerified`); an ALPN
 An H3 server is one UDP socket plus the protocol pieces (full example in `examples/http3Client.zig`):
 
 ```zig
-var ep = try httpx.protocols.quic.transport.Endpoint.init(allocator, io, conn, .{ .port = 8443 });
-var pump = httpx.protocols.quic.Pump{};
+var ep = try httpx.quic.transport.Endpoint.init(allocator, io, conn, .{ .port = 8443 });
+var pump = httpx.quic.Pump{};
 try pump.start(&ep, allocator);
 defer pump.stop();
-var drv = httpx.protocols.quic.HandshakeDriver.initServer(allocator, .{
+var drv = httpx.quic.HandshakeDriver.initServer(io, allocator, .{
     .certChainPem = cert_pem,
     .privateKeyPem = key_pem,
 });
 defer drv.deinit();
-conn.tls = .{ .ctx = &drv, .start = ..., .onData = ... };
-try httpx.protocols.quic.handshake.serveHandshake(&ep, &pump, &drv, 15_000);
+conn.tls = .{ .ctx = &drv, .onData = httpx.quic.HandshakeDriver.onData };
+try httpx.quic.handshake.serveHandshake(&ep, &pump, &drv, 15_000);
 // ... read request HEADERS on a bidi stream, route, respond ...
 ```
 
@@ -119,28 +119,31 @@ QPACK is designed for HTTP/3's out-of-order delivery:
 ```zig
 const httpx = @import("httpx");
 
-// QPACK has a larger static table
-std.debug.print("QPACK static table: {d} entries\n", .{httpx.qpack.StaticTable.entries.len}); // 99
-std.debug.print("HPACK static table: {d} entries\n", .{httpx.hpack.StaticTable.entries.len}); // 61
+// Both tables are plain arrays; no lookup helpers are exported.
+std.debug.print("QPACK static table: {d} entries\n", .{httpx.http3.qpack.STATIC_TABLE_SIZE}); // 99
+std.debug.print("HPACK static table: {d} entries\n", .{httpx.http2.hpack.STATIC_TABLE_SIZE}); // 61
 
-// Common static table lookups
-const idx = httpx.qpack.StaticTable.findNameValue(":method", "GET");
-if (idx) |index| {
-    std.debug.print("Found :method=GET at index {d}\n", .{index});
+for (httpx.http3.qpack.staticTable, 0..) |entry, index| {
+    if (std.mem.eql(u8, entry.name, ":method") and std.mem.eql(u8, entry.value, "GET")) {
+        std.debug.print("Found :method=GET at index {d}\n", .{index});
+        break;
+    }
 }
 ```
 
 ### QPACK Encoding
 
 ```zig
+const qpack = httpx.http3.qpack;
+
 var gpa: std.heap.DebugAllocator(.{}) = .init;
 defer _ = gpa.deinit();
 const allocator = gpa.allocator();
 
-var ctx = httpx.QpackContext.init(allocator);
-defer ctx.deinit();
+var enc = qpack.Encoder.init(allocator);
+defer enc.deinit();
 
-const headers = [_]httpx.qpack.HeaderEntry{
+const headers = [_]struct { name: []const u8, value: []const u8 }{
     .{ .name = ":method", .value = "GET" },
     .{ .name = ":path", .value = "/api/v3/resources" },
     .{ .name = ":scheme", .value = "https" },
@@ -149,10 +152,26 @@ const headers = [_]httpx.qpack.HeaderEntry{
     .{ .name = "accept-encoding", .value = "gzip, deflate, br" },
 };
 
-const encoded = try httpx.qpack.encodeHeaders(&ctx, &headers, allocator);
-defer allocator.free(encoded);
+var fields: std.ArrayList(u8) = .empty;
+defer fields.deinit(allocator);
 
-std.debug.print("Encoded {d} headers into {d} bytes\n", .{headers.len, encoded.len});
+enc.beginSectionForStream(4); // request stream ID
+for (headers) |h| try enc.encodeField(&fields, h.name, h.value);
+
+var encoded: std.ArrayList(u8) = .empty;
+defer encoded.deinit(allocator);
+
+// The field-section prefix goes before the encoded fields.
+const ric = enc.sectionRic();
+try enc.encodePrefix(&encoded, ric, ric);
+try encoded.appendSlice(allocator, fields.items);
+
+// On the receiving side:
+var dec = qpack.Decoder.init(allocator);
+defer dec.deinit();
+const decoded = try dec.decodeSectionCounted(encoded.items, 4, null);
+defer dec.freeFields(decoded);
+std.debug.print("Encoded {d} headers into {d} bytes\n", .{ decoded.len, encoded.items.len });
 ```
 
 ### QPACK Encoder Stream
@@ -160,14 +179,27 @@ std.debug.print("Encoded {d} headers into {d} bytes\n", .{headers.len, encoded.l
 QPACK uses separate streams for encoder/decoder instructions:
 
 ```zig
-var out = std.ArrayList(u8).empty;
-defer out.deinit(allocator);
+var enc = httpx.http3.qpack.Encoder.init(allocator);
+defer enc.deinit();
 
-// Set Dynamic Table Capacity
-try httpx.qpack.encodeSetCapacity(4096, &out, allocator);
+// Queues a Set Dynamic Table Capacity instruction.
+enc.setMaxTableCapacity(4096);
 
-// Insert With Name Reference (static table, index 17 = :method, value = "POST")
-try httpx.qpack.encodeInsertNameRef(true, 17, "POST", &out, allocator);
+// Encoding a field with the dynamic table active queues an Insert
+// instruction for a name/value pair the table does not already hold.
+var fields: std.ArrayList(u8) = .empty;
+defer fields.deinit(allocator);
+try enc.encodeField(&fields, "x-example", "value");
+
+// Send these bytes on the QPACK encoder unidirectional stream.
+const encoder_bytes = try enc.takeEncoderBytes();
+defer allocator.free(encoder_bytes);
+
+// Peer side: feed them to the Decoder before decoding field sections.
+var dec = httpx.http3.qpack.Decoder.init(allocator);
+defer dec.deinit();
+dec.setMaxTableCapacity(4096);
+try dec.readEncoderStream(encoder_bytes, true);
 ```
 
 ## QUIC Packet Structure
@@ -175,46 +207,43 @@ try httpx.qpack.encodeInsertNameRef(true, 17, "POST", &out, allocator);
 ### Connection IDs
 
 ```zig
-// Create connection IDs
-var dcid = httpx.protocols.quic.ConnectionId{};
-dcid.len = 8;
-@memcpy(dcid.data[0..8], &[_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 });
+// Connection IDs are 0..20 byte slices; there is no ConnectionId wrapper.
+const dcid = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
+const scid = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
 
-var scid = httpx.protocols.quic.ConnectionId{};
-scid.len = 4;
-@memcpy(scid.data[0..4], &[_]u8{ 0xAA, 0xBB, 0xCC, 0xDD });
+// httpx.quic.connectionId.Registry tracks peer-issued CIDs,
+// retirePriorTo, rotation, and RETIRE_CONNECTION_ID generation.
 ```
 
 ### Long Header (Initial, Handshake, 0-RTT)
 
 ```zig
-const long_header = httpx.protocols.quic.LongHeader{
-    .packet_type = .initial,
-    .version = .v1,
-    .dcid = dcid,
-    .scid = scid,
-};
+const packet = httpx.quic.packet;
 
 var buf: [64]u8 = undefined;
-const len = try long_header.encode(&buf);
-std.debug.print("Long header: {d} bytes\n", .{len});
+const len = try packet.writeLongHeader(&buf, .{
+    .type = .initial,
+    .version = @intFromEnum(packet.Version.version1),
+    .dcid = &dcid,
+    .scid = &scid,
+    .pnLen = 1,
+    .protectedPayloadLen = 64,
+});
 
-// Decode
-const decoded = try httpx.protocols.quic.LongHeader.decode(&buf);
-std.debug.print("Packet type: {s}\n", .{@tagName(decoded.header.packet_type)});
+// Parse an UNPROTECTED header.
+const decoded = try packet.parseLongHeader(buf[0..len]);
+std.debug.print("Packet type: {s}\n", .{@tagName(decoded.header.type)});
 ```
 
 ### Short Header (1-RTT)
 
 ```zig
-const short_header = httpx.protocols.quic.ShortHeader{
-    .dcid = dcid,
-    .spin_bit = 0,
-    .keyPhase = 0,
-};
-
 var buf: [32]u8 = undefined;
-const len = try short_header.encode(&buf);
+const len = try packet.writeShortHeader(&buf, .{ .dcid = &dcid, .pnLen = 1 });
+
+buf[len] = 0; // placeholder packet-number byte
+const decoded = try packet.parseShortHeader(buf[0 .. len + 1], dcid.len);
+std.debug.print("Key phase: {}\n", .{decoded.keyPhase});
 ```
 
 ### Packet Types
@@ -225,7 +254,7 @@ const len = try short_header.encode(&buf);
 | 0-RTT | ✅ | Early data |
 | Handshake | ✅ | TLS handshake completion |
 | Retry | ✅ | Address validation |
-| 1-RTT | ❌ (Short) | Application data |
+| 1-RTT | âŒ (Short) | Application data |
 
 ## QUIC Frames
 
@@ -234,19 +263,22 @@ const len = try short_header.encode(&buf);
 Carries application data:
 
 ```zig
-const stream_frame = httpx.protocols.quic.StreamFrame{
-    .streamId = 4, // Client-initiated bidirectional stream
+const frames = httpx.quic.frames;
+
+var encoded = try httpx.quic.encodeFrame(allocator, .{ .stream = .{
+    .id = 4, // client-initiated bidirectional stream
     .offset = 0,
     .data = "Hello, HTTP/3!",
     .fin = false,
-};
+} });
+defer encoded.deinit(allocator);
 
-var buf: [128]u8 = undefined;
-const len = try stream_frame.encode(&buf);
-
-// Decode
-const decoded = try httpx.protocols.quic.StreamFrame.decode(buf[0..len]);
-std.debug.print("Data: {s}\n", .{decoded.frame.data});
+var pos: usize = 0;
+const decoded = try frames.decode(encoded.items, &pos);
+switch (decoded) {
+    .stream => |s| std.debug.print("Data: {s}\n", .{s.data}),
+    else => unreachable,
+}
 ```
 
 ### CRYPTO Frame
@@ -254,39 +286,45 @@ std.debug.print("Data: {s}\n", .{decoded.frame.data});
 Carries TLS handshake data:
 
 ```zig
-const crypto_frame = httpx.protocols.quic.CryptoFrame{
+var encoded = try httpx.quic.encodeFrame(allocator, .{ .crypto = .{
     .offset = 0,
     .data = &[_]u8{ 0x01, 0x00, 0x00, 0x05, 'h', 'e', 'l', 'l', 'o' },
-};
-
-var buf: [64]u8 = undefined;
-const len = try crypto_frame.encode(&buf);
+} });
+defer encoded.deinit(allocator);
 ```
 
 ### ACK Frame
 
 Acknowledges received packets:
 
+ACK frames are built from acknowledged ranges rather than a single flat
+struct:
+
 ```zig
-const ack_frame = httpx.protocols.quic.AckFrame{
-    .largestAcknowledged = 42,
-    .ackDelay = 100,
-    .first_ack_range = 10,
-    .ack_ranges = &.{},
+const blocks = [_]httpx.quic.frames.AckBlock{
+    .{ .highest = 42, .len = 11 }, // acknowledges packets 32..42
 };
 
-var buf: [64]u8 = undefined;
-const len = try ack_frame.encode(&buf);
+var out: std.ArrayList(u8) = .empty;
+defer out.deinit(allocator);
+try httpx.quic.frames.encodeAckFromBlocks(
+    &out,
+    allocator,
+    42,
+    100, // ACK delay
+    &blocks,
+    null, // optional ECN counts
+);
 ```
 
 ### CONNECTION_CLOSE Frame
 
-Terminates a connection (`httpx.protocols.quic.frames.Frame.connectionClose`):
+Terminates a connection (`httpx.quic.frames.Frame.connectionClose`):
 
 ```zig
-const close_frame = httpx.protocols.quic.frames.Frame{ .connectionClose = .{
+const close_frame = httpx.quic.frames.Frame{ .connectionClose = .{
     .errorCode = 0, // NO_ERROR
-    .triggering_frame_type = 0,
+    .triggeringFrameType = 0,
     .reason = "graceful shutdown",
     .application = false, // false = transport close, true = application close
 } };
@@ -328,12 +366,12 @@ QUIC uses a variable-length integer encoding:
 ```zig
 // Encoding
 var buf: [8]u8 = undefined;
-const len = try httpx.protocols.quic.varint.encode(&buf, 15293);
+const len = try httpx.quic.varint.encode(&buf, 15293);
 std.debug.print("Encoded in {d} bytes\n", .{len});
 
 // Decoding
 var offset: usize = 0;
-const value = try httpx.protocols.quic.varint.decode(&buf, &offset);
+const value = try httpx.quic.varint.decode(&buf, &offset);
 std.debug.print("Value: {d}\n", .{value});
 ```
 
@@ -374,7 +412,7 @@ QUIC transport parameters can be encoded:
 ```zig
 var list = std.ArrayList(u8).empty;
 defer list.deinit(allocator);
-try httpx.protocols.quic.transportParameters.encode(&list, allocator, .{
+try httpx.quic.transportParameters.encode(&list, allocator, .{
     .maxIdleTimeoutMs = 30000,
     .maxUdpPayloadSize = 1350,
     .initialMaxData = 1048576,
@@ -392,7 +430,7 @@ try httpx.protocols.quic.transportParameters.encode(&list, allocator, .{
 HTTP/3 uses MAX_DATA and MAX_STREAM_DATA frames for flow control. These are defined as frame types (`maxData = 0x10`, `maxStreamData = 0x11`) and are handled internally by the connection. Flow control limits are configured via transport parameters:
 
 ```zig
-const params = httpx.protocols.quic.transportParameters.Params{
+const params = httpx.quic.transportParameters.Params{
     .initialMaxData = 10 * 1024 * 1024,           // 10MB connection-level
     .initialMaxStreamDataBidiLocal = 1024 * 1024,  // 1MB per stream
     .initialMaxStreamDataBidiRemote = 1024 * 1024,
@@ -403,21 +441,21 @@ const params = httpx.protocols.quic.transportParameters.Params{
 ## GOAWAY and CONNECTION_CLOSE
 
 Both client and server handle incoming GOAWAY gracefully.
-`httpx.protocols.quic.frames.Frame` carries both variants as `.connectionClose`:
+`httpx.quic.frames.Frame` carries both variants as `.connectionClose`:
 
 ```zig
 // Transport close (CONNECTION_CLOSE, type 0x1C)
-const transport_close = httpx.protocols.quic.frames.Frame{ .connectionClose = .{
+const transport_close = httpx.quic.frames.Frame{ .connectionClose = .{
     .errorCode = 0, // NO_ERROR
-    .triggering_frame_type = 0,
+    .triggeringFrameType = 0,
     .reason = "server shutting down",
     .application = false,
 } };
 
 // Application close (type 0x1D)
-const app_close = httpx.protocols.quic.frames.Frame{ .connectionClose = .{
+const app_close = httpx.quic.frames.Frame{ .connectionClose = .{
     .errorCode = 0,
-    .triggering_frame_type = 0,
+    .triggeringFrameType = 0,
     .reason = "graceful shutdown",
     .application = true,
 } };
@@ -429,35 +467,45 @@ Cancel individual streams without tearing down the connection:
 
 ```zig
 // RESET_STREAM: abruptly terminates a send stream
-const reset = httpx.protocols.quic.ResetStreamFrame{
+var reset = try httpx.quic.encodeFrame(allocator, .{ .resetStream = .{
     .streamId = 4,
     .errorCode = 0x06, // application error (user-defined)
     .finalSize = 1024,
-};
+} });
+defer reset.deinit(allocator);
 
 // STOP_SENDING: ask the peer to stop sending on a receive stream
-const stop = httpx.protocols.quic.StopSendingFrame{
+var stop = try httpx.quic.encodeFrame(allocator, .{ .stopSending = .{
     .streamId = 8,
     .errorCode = 0x01, // application error (user-defined)
-};
+} });
+defer stop.deinit(allocator);
 ```
 
 ## QPACK Decoder Stream
 
-Decoder stream instructions can be decoded:
+Decoder-stream instructions (Section Acknowledgment, Stream Cancellation,
+Insert Count Increment) are parsed by the encoder rather than by public
+standalone decoders. Feed decoder-stream bytes as they arrive:
 
 ```zig
-// Section Ack
-const ack = try httpx.qpack.decodeSectionAck(data);
+var enc = httpx.http3.qpack.Encoder.init(allocator);
+defer enc.deinit();
 
-// Stream Cancel
-const cancel = try httpx.qpack.decodeStreamCancel(data);
+// Pass fin = true when these are the stream's final bytes.
+try enc.readDecoderStream(data, true);
+```
 
-// Insert Count Increment
-const increment = try httpx.qpack.decodeInsertCountIncrement(data);
+The decoder emits a Section Acknowledgment into `ackOut` when dynamic
+entries are used:
 
-// Set Capacity
-const capacity = try httpx.qpack.decodeSetCapacity(data);
+```zig
+var ack_bytes: std.ArrayList(u8) = .empty;
+defer ack_bytes.deinit(allocator);
+
+const fields = try dec.decodeSectionCounted(section, streamId, &ack_bytes);
+defer dec.freeFields(fields);
+// Send ack_bytes on the QPACK decoder unidirectional stream.
 ```
 
 ## Running the Example

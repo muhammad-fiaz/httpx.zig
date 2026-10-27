@@ -15,7 +15,7 @@ Demonstrates healthCheck.zig using the canonical HTTPX API.
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn healthzHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn healthzHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = httpx.health.Status.healthy.httpStatus(),
         .body = httpx.health.Status.healthy.jsonBody(),
@@ -23,7 +23,7 @@ fn healthzHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Respon
     };
 }
 
-fn readyzHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn readyzHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = httpx.health.Status.ready.httpStatus(),
         .body = httpx.health.Status.ready.jsonBody(),
@@ -37,7 +37,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -52,7 +52,7 @@ pub fn main() !void {
     std.debug.print("endpoints on 127.0.0.1:{d}\n", .{port});
 
     const ServerThread = struct {
-        fn run(s: *httpx.server.Server) void {
+        fn run(s: *httpx.Server) void {
             s.run();
         }
     };

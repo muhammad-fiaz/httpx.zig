@@ -1,54 +1,47 @@
 # Interceptors
 
-Interceptors are powerful hooks that allow you to safeguard or modify requests and responses globally.
+HTTPX does not expose a client interceptor registry or an `addInterceptor` API.
+Cross-cutting client behavior is composed from per-request options, small
+wrapper functions, and the client event callback.
 
-Common use cases include:
-- Adding authentication tokens to every request.
-- Logging request/response details.
-- Automating error handling or retry logic beyond the built-in policy.
-- Transforming response data.
+## Auth and Header Wrappers
 
-## Setup
-
-Interceptors are defined using the `Interceptor` struct and added to the client.
+Use the built-in request options for standard auth and headers:
 
 ```zig
-pub const Interceptor = struct {
-    request_fn: ?RequestInterceptor = null,
-    response_fn: ?ResponseInterceptor = null,
-    context: ?*anyopaque = null,
-};
-```
-
-## Example: Auth Token Injector
-
-This interceptor adds a Bearer token to every outgoing request.
-
-```zig
-    const io = std.Io.Threaded.global_single_threaded.io();
-fn addAuthToken(req: *httpx.Request, ctx: ?*anyopaque) !void {
-    // In a real app, you might cast ctx to a Config struct
-    try req.headers.set("Authorization", "Bearer my-secret-token");
+fn authedGet(client: *httpx.Client, url: []const u8, token: []const u8) !httpx.Response {
+    return client.get(url, .{
+        .bearerAuth = token,
+        .headers = &.{
+            .{ .name = "X-Request-Source", .value = "my-app" },
+        },
+    });
 }
-
-// Usage
-var client = httpx.Client.init(allocator, io, .{});
-try client.addInterceptor(.{
-    .request_fn = addAuthToken,
-    // response_fn can be null
-});
 ```
 
-## Example: Response Logger
+Wrappers can also translate responses:
 
 ```zig
-fn logResponse(res: *httpx.web.router.Response, ctx: ?*anyopaque) !void {
-    std.debug.print("Status: {d}\n", .{res.status.code});
+fn fetchUserName(client: *httpx.Client, url: []const u8) ![]u8 {
+    var res = try client.get(url, .{});
+    defer res.deinit();
+    return res.allocator.dupe(u8, res.text());
 }
-
-try client.addInterceptor(.{
-    .response_fn = logResponse,
-});
 ```
 
-You can chain multiple interceptors. They will be executed in the order they were added.
+## Logging and Lifecycle Events
+
+Set `eventCallback` in the `Client.init` options to observe completed and
+failed requests without wrapping individual calls. See
+[Structured Lifecycle Events](/observability/events).
+
+## Server-Side Hooks
+
+Server middleware remains the supported way to apply cross-cutting behavior to
+routes. See [Middleware Guide](/guide/middleware) and
+[API: Middleware](/api/middleware).
+
+## Related
+
+* [Example: Interceptors](/examples/interceptors)
+* [Observability: Events](/observability/events)

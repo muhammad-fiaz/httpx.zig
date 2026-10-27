@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn okHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn okHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{
         .status = 200,
         .body = "{\"status\":\"ok\"}",
@@ -17,7 +17,7 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,
@@ -56,7 +56,7 @@ pub fn main() !void {
     }
 
     // Request with options
-    const reqs = [_]httpx.client.requestOptions{
+    const reqs = .{
         .{ .method = .GET, .url = urlGet },
         .{ .method = .GET, .url = urlHeaders },
         .{ .method = .GET, .url = urlIp },

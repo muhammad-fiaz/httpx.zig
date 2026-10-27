@@ -165,7 +165,7 @@ defer resp.deinit();
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn uploadHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn uploadHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const ct = ctx.header("Content-Type") orelse
         return ctx.textStatus(400, "Missing Content-Type");
 
@@ -193,7 +193,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{});
+    var server = try httpx.Server.init(allocator, io, .{});
     defer server.deinit();
 
     try server.post("/upload", uploadHandler);
@@ -278,7 +278,7 @@ defer allocator.free(body);
 
 When implementing a server-side chunked upload protocol (e.g. `TUS`), split the
 file yourself at the call site and send each slice as a separate POST request.
-Use `httpx.MultipartMaxChunk` (64 KB) as the slice size:
+A 64 KB slice matches the socket layer's per-send cap:
 
 ```zig
 const chunk_size = 64 * 1024; // 65_536 bytes per request
@@ -312,6 +312,6 @@ while (offset < file_bytes.len) {
 ```
 
 This pattern sends each chunk as a separate HTTP request, which:
-- Keeps each request body well under the 64 KB socket limit
+- Keeps each application-level chunk at 64 KB; individual socket sends are capped separately
 - Allows for retry of individual failed parts
-- Works reliably on Windows, Linux, and macOS
+- Works on the platforms listed above

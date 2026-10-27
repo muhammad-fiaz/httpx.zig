@@ -24,15 +24,15 @@ pub fn main() !void {
     std.debug.print("=== HTTP/2 Advanced Protocol & Multiplexing ===\n", .{});
 
     // 1. HPACK Dynamic Table Compression (RFC 7541)
-    var enc = httpx.protocols.http2.hpack.Encoder.init(allocator);
+    var enc = httpx.http2.hpack.Encoder.init(allocator);
     defer enc.deinit();
-    var dec = httpx.protocols.http2.hpack.Decoder.init(allocator);
+    var dec = httpx.http2.hpack.Decoder.init(allocator);
     defer dec.deinit();
 
     var outEncoded = std.ArrayList(u8).empty;
     defer outEncoded.deinit(allocator);
 
-    const testHeaders = [_]httpx.protocols.http2.hpack.HeaderField{
+    const testHeaders = [_]httpx.http2.hpack.HeaderField{
         .{ .name = ":method", .value = "POST" },
         .{ .name = ":scheme", .value = "https" },
         .{ .name = ":path", .value = "/api/v2/stream" },
@@ -63,9 +63,9 @@ pub fn main() !void {
     }
 
     // 2. HTTP/2 Session Multiplexing & Frame Processing (RFC 9113)
-    var clientSess = try httpx.protocols.http2.Session.init(allocator, .client, .{});
+    var clientSess = try httpx.http2.Session.init(allocator, .client, .{});
     defer clientSess.deinit();
-    var serverSess = try httpx.protocols.http2.Session.init(allocator, .server, .{});
+    var serverSess = try httpx.http2.Session.init(allocator, .server, .{});
     defer serverSess.deinit();
 
     // Client starts handshake (connection preface + initial settings)

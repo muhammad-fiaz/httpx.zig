@@ -127,7 +127,7 @@ defer formRes.deinit();
 Stream request payloads without buffering the entire body into memory:
 
 ```zig
-var reader = httpx.client.SliceReader.init("streamed-chunk-data");
+var reader = httpx.SliceReader.init("streamed-chunk-data");
 var streamRes = try client.requestStream("https://httpbun.com/post", .{
     .method = .POST,
     .bodySource = reader.source(),

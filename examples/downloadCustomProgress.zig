@@ -30,7 +30,7 @@ const DownloadObserver = struct {
     }
 };
 
-fn bytesHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn bytesHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const data = try ctx.allocator.alloc(u8, 90);
     @memset(data, 'X');
     return .{
@@ -40,7 +40,7 @@ fn bytesHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Respon
     };
 }
 
-fn notFoundHandler(_: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn notFoundHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
     return .{ .status = 404, .body = "not found" };
 }
 
@@ -50,7 +50,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false,

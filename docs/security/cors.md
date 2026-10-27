@@ -16,17 +16,17 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     // Built-in CORS middleware (handles pre-flight + headers)
     try server.use(httpx.middleware.cors);
 
     try server.get("/api/user", userHandler);
-    try server.run();
+    server.run();
 }
 
-fn userHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn userHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     _ = ctx;
     return .{ .status = 200, .body = "{\"user\":\"Alice\"}", .contentType = "application/json" };
 }

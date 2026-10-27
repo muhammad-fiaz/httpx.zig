@@ -1,6 +1,6 @@
 # Authentication Guide
 
-HTTPX provides native, unified authentication primitives for both HTTP client requests and HTTP server middleware, supporting HTTP Basic Auth (RFC 7617), Bearer Tokens (RFC 6750), API keys, and custom authentication schemes.
+HTTPX provides native authentication primitives for client requests and server handlers, supporting HTTP Basic Auth (RFC 7617), Bearer Tokens (RFC 6750), API keys, and custom authentication schemes.
 
 ## Client-Side Authentication
 
@@ -8,7 +8,7 @@ Authentication credentials can be configured per request using the unified reque
 
 ### Basic Authentication
 ```zig
-const response = try client.get("https://api.example.com/protected", .{
+var response = try client.get("https://api.example.com/protected", .{
     .basicAuth = "admin:secret123",
 });
 defer response.deinit();
@@ -17,7 +17,7 @@ Under the hood, HTTPX automatically base64-encodes the `user:pass` pair and inje
 
 ### Bearer Token Authentication
 ```zig
-const response = try client.post("https://api.example.com/v1/orders", .{
+var response = try client.post("https://api.example.com/v1/orders", .{
     .bearerAuth = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
     .json = .{ .item_id = 901, .quantity = 2 },
 });
@@ -28,7 +28,7 @@ This adds `Authorization: Bearer <token>` to the outgoing request.
 ### API Key Authentication
 API keys can be supplied either via custom headers or query parameters:
 ```zig
-const response = try client.get("https://api.example.com/data", .{
+var response = try client.get("https://api.example.com/data", .{
     .headers = &.{
         .{ .name = "X-API-Key", .value = "my-secret-key-xyz" },
     },
@@ -40,18 +40,18 @@ defer response.deinit();
 
 ## Server-Side Authentication
 
-On the server, HTTPX provides standard authentication middleware and extractor utilities.
+On the server, HTTPX provides authentication helpers and request extractors such as `ctx.bearerToken()` and `ctx.basicAuth()`.
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
 
-fn requireApiKey(ctx: *httpx.web.router.Context) !bool {
+fn requireApiKey(ctx: *httpx.router.Context) !bool {
     const key = ctx.header("X-API-Key") orelse return false;
     return std.mem.eql(u8, key, "expected-secret-key");
 }
 
-fn secureHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn secureHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (!try requireApiKey(ctx)) {
         return ctx.textStatus(401, "Missing or invalid X-API-Key header");
     }
@@ -64,13 +64,13 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var server = try httpx.server.Server.init(allocator, io, .{ .port = 8080 });
+    var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
     defer server.deinit();
 
     // Secure endpoint using the check above
     try server.get("/secure/data", secureHandler);
 
-    try server.run();
+    server.run();
 }
 ```
 

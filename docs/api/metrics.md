@@ -2,7 +2,7 @@
 
 Thread-safe, allocation-free request/response metrics using atomic operations.
 
-Located in `src/web/metrics/` (`registry.zig`, `snapshot.zig`).
+Located in `src/web/metrics/` (`metricsRegistry.zig`, `metricsSnapshot.zig`).
 
 ## Registry
 

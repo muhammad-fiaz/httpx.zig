@@ -736,13 +736,7 @@ pub const Stream = struct {
                 if (!isFieldName(f.name[1..])) return .messageError;
                 if (std.mem.eql(u8, f.name, ":status")) {
                     if (status != null) return .messageError;
-                    if (f.value.len != 3) return .messageError;
-                    for (f.value) |c| {
-                        if (c < '0' or c > '9') return .messageError;
-                    }
-                    const code: u16 = @as(u16, f.value[0] - '0') * 100 +
-                        @as(u16, f.value[1] - '0') * 10 +
-                        @as(u16, f.value[2] - '0');
+                    const code = parseMod.parse3DigitStatus(f.value) orelse return .messageError;
                     if (code < 100 or code > 599) return .messageError;
                     // 101 Switching Protocols is not used in HTTP/3
                     // (RFC 9114 Section 4.1); extended CONNECT replaces it.

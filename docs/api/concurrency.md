@@ -20,10 +20,11 @@ defer {
 }
 ```
 
-## WorkerPool
+## Worker Pool
 
-A fixed-thread, bounded-queue pool with graceful drain
-(`src/concurrency/workerPool.zig`).
+`httpx.concurrency.Pool` is a fixed-thread, bounded-queue pool with graceful
+drain (`src/concurrency/workerPool.zig`). The same type is aliased as
+`httpx.client.workerPool`.
 
 The pool borrows a Zig 0.17 `std.Io` value for blocking queue waits. Keep its
 backing I/O context alive until the pool is joined and deinitialized. `submit`
@@ -37,7 +38,7 @@ The pool records aggregate outcomes in `Stats` and does not retain individual
 error values.
 
 ```zig
-var pool = try httpx.WorkerPool.init(allocator, io, .{
+var pool = try httpx.concurrency.Pool.init(allocator, io, .{
     .workers = 4,
     .queueCapacity = 1024,
     .autoStart = true,
@@ -45,7 +46,9 @@ var pool = try httpx.WorkerPool.init(allocator, io, .{
 defer pool.deinit();
 ```
 
-### Configuration (`WorkerPoolConfig`)
+### Configuration
+
+The initializer takes `httpx.concurrency.workerPool.Config`:
 
 ```zig
 pub const Config = struct {
@@ -57,6 +60,13 @@ pub const Config = struct {
 
 ### Queue
 
-`httpx.Queue` (`src/concurrency/queue.zig`) is a thread-safe bounded queue
-used internally by the pool. Its initializer also takes the shared `std.Io`:
-`try httpx.Queue.init(allocator, io, capacity)`.
+`httpx.concurrency.Queue(T)` (`src/concurrency/queue.zig`) is the generic
+thread-safe bounded queue used internally by the pool. Its initializer also
+takes the shared `std.Io`:
+
+```zig
+var queue = try httpx.concurrency.Queue(u32).init(allocator, io, 1024);
+defer queue.deinit();
+try queue.push(42);
+const value = try queue.pop();
+```

@@ -1,6 +1,6 @@
 # HTTP Caching Guide
 
-HTTPX provides standards-compliant HTTP caching (RFC 9111) for client requests and server responses, optimizing latency and bandwidth usage with conditional requests and expiration controls.
+HTTPX supports HTTP cache validation for server responses and static assets, plus explicit conditional requests from clients. It does not include an RFC 9111 client-side response cache.
 
 ## Overview
 
@@ -17,7 +17,7 @@ Key mechanisms supported:
 
 HTTPX does not yet implement an HTTP response cache (RFC 9111 client cache):
 there is no `enable_cache` option on `Client.init` — the client exposes DNS
-caching only (`ClientConfig.dnsCache`). Send conditional headers (`If-None-Match`,
+caching only (`.dnsCache` in the `Client.init` options). Send conditional headers (`If-None-Match`,
 `If-Modified-Since`) explicitly per request and handle `304` responses in the
 caller:
 
@@ -39,7 +39,7 @@ defer res.deinit();
 In server handlers, you can easily attach ETags and cache headers:
 
 ```zig
-fn catalogHandler(ctx: *httpx.web.router.Context) anyerror!httpx.web.router.Response {
+fn catalogHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const etag = "\"catalog-v1.4\"";
 
     // Check if client provided matching If-None-Match
