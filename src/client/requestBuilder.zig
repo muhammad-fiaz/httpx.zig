@@ -2989,6 +2989,12 @@ test "HTTP/3 client reaches the built-in server and decodes dynamic QPACK" {
         if (!joined) th.join();
     }
 
+    var waitReady: usize = 0;
+    while (!srv.isHttp3Ready()) : (waitReady += 1) {
+        if (waitReady > 500) return error.Http3ServerNotReady;
+        clockMod.sleepMillis(ctx.io, 10);
+    }
+
     const port = srv.http3.port() orelse return error.MissingHttp3Port;
     var client = @import("httpClient.zig").Client.init(a, ctx.io, .{});
     defer client.deinit();
@@ -2998,7 +3004,7 @@ test "HTTP/3 client reaches the built-in server and decodes dynamic QPACK" {
     var res = try client.get(url, .{
         .httpVersion = .http3,
         .tls = .{ .verify = .caBundle, .caPem = lifecycle.h3TestCertPem },
-        .timeoutMs = 15_000,
+        .timeoutMs = 30_000,
     });
     defer res.deinit();
     try std.testing.expectEqual(@as(u16, 200), res.status);

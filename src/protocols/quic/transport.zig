@@ -88,7 +88,7 @@ pub const Pump = struct {
         while (true) {
             if (self.dead.load(.acquire)) return error.PumpStopped;
             self.mu.lock();
-            const item = self.queue.pop();
+            const item = if (self.queue.items.len > 0) self.queue.orderedRemove(0) else null;
             self.mu.unlock();
             if (item) |q| return .{ .data = q.data, .from = q.from };
             const now: u64 = @intCast(clockMod.monotonicMillis(self.ep.io));

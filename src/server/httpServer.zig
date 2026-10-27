@@ -492,6 +492,7 @@ pub const Server = struct {
     h3Pump: ?*quicTransport.Pump = null,
     h3Thread: ?std.Thread = null,
     h3Stop: std.atomic.Value(bool) = .init(false),
+    h3Ready: std.atomic.Value(bool) = .init(false),
     metricsRegistry: metricsMod.Registry = .{},
     startTimeMs: i64 = 0,
 
@@ -909,6 +910,7 @@ pub const Server = struct {
             s.deinit();
             self.tlsServer = null;
         }
+        self.h3Ready.store(false, .release);
         self.h3Stop.store(true, .release);
         if (self.h3Pump) |p| p.stop();
         if (self.h3Thread) |th| {
@@ -943,6 +945,11 @@ pub const Server = struct {
     /// Returns true if this server has TLS configured and active.
     pub fn isTls(self: *const Server) bool {
         return self.tlsServer != null;
+    }
+
+    /// Returns true when the HTTP/3 background pump and loop are ready to serve incoming connections.
+    pub fn isHttp3Ready(self: *const Server) bool {
+        return self.h3Ready.load(.acquire);
     }
 
     /// Dynamically sets or updates TLS certificates on this server instance.
@@ -1013,6 +1020,7 @@ pub const Server = struct {
             self.emit(.{ .kind = .serverStopped, .level = .info, .message = "shutting down" });
         }
         self.stopFlag.store(true, .release);
+        self.h3Ready.store(false, .release);
         self.h3Stop.store(true, .release);
         if (self.h3Pump) |p| p.stop();
 
@@ -1252,6 +1260,7 @@ pub const Server = struct {
             thread.join();
             self.deadlineMonitorThread = null;
         }
+        self.h3Ready.store(false, .release);
         self.h3Stop.store(true, .release);
         if (self.h3Pump) |p| p.stop();
         if (self.h3Thread) |th| {
@@ -1659,6 +1668,8 @@ pub const Server = struct {
         // The HTTP/3 layer is wired before the handshake runs: a peer may
         // send request data in the same flight as its Finished, and that
         // data must not be dropped for want of a reader.
+        self.h3Ready.store(true, .release);
+        defer self.h3Ready.store(false, .release);
         try quicHs.serveHandshake(ep, pump, &drv, 10_000);
 
         // The control stream carries 1-RTT data, so it can only be sent

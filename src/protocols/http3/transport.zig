@@ -133,6 +133,24 @@ pub const Client = struct {
         self.h3.deinit();
     }
 
+    pub fn wireCallbacks(self: *Client) void {
+        self.h3.cbs = .{
+            .ctx = self,
+            .onHeaders = onHeaders,
+            .onData = onData,
+            .onTrailers = onTrailers,
+            .onMessageEnd = onMessageEnd,
+            .onStreamReset = onQuicReset,
+            .onH3Error = onH3Error,
+            .onGoaway = onGoaway,
+        };
+        self.ep.conn.cbs = .{
+            .ctx = self,
+            .onStreamData = onQuicStream,
+            .onStreamReset = onQuicReset,
+        };
+    }
+
     fn onQuicStream(ctx: ?*anyopaque, sid: u64, data: []const u8, fin: bool) void {
         const self: *Client = @ptrCast(@alignCast(ctx.?));
         self.h3.feedQuic(sid, data, fin) catch {
@@ -254,16 +272,7 @@ pub const Client = struct {
     /// Sends our control + QPACK unidirectional streams (once per conn).
     fn setupStreams(self: *Client, nowMs: u64) !void {
         if (self.controlDone) return;
-        self.h3.cbs = .{
-            .ctx = self,
-            .onHeaders = onHeaders,
-            .onData = onData,
-            .onTrailers = onTrailers,
-            .onMessageEnd = onMessageEnd,
-            .onStreamReset = onQuicReset,
-            .onH3Error = onH3Error,
-            .onGoaway = onGoaway,
-        };
+        self.wireCallbacks();
         try self.h3.sendControl(self.ep.conn, nowMs);
         try self.h3.sendQpackPrefixes(self.ep.conn, nowMs);
         self.controlDone = true;
@@ -807,12 +816,18 @@ pub const PooledConn = struct {
         self.client.* = Client.init(allocator, &self.ep);
         errdefer self.client.deinit();
 
+        self.client.wireCallbacks();
+
         try self.pump.start(&self.ep, allocator);
         errdefer self.pump.stop();
 
         quicHs.performHandshake(&self.ep, &self.pump, self.driver, null, null, null, dest, opts.timeoutMs) catch |e| {
             return mapHandshakeError(e, self.driver.detail);
         };
+
+        const now0: u64 = @intCast(clockMod.monotonicMillis(io));
+        try self.client.setupStreams(now0);
+        _ = try self.ep.flush(dest);
 
         return self;
     }

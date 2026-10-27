@@ -692,6 +692,14 @@ pub fn feedPumped(
             // Drop bad datagrams and keep serving the connection.
             else => {},
         };
+        while (try pump.next(0)) |extra| {
+            defer pump.allocator.free(extra.data);
+            ep.peer = extra.from;
+            ep.conn.receiveDatagram(extra.data, nowMs) catch |e| switch (e) {
+                error.Draining => return e,
+                else => {},
+            };
+        }
     }
     // Loss and PTO timers fire here so every pump-driven runtime (client
     // transport, server loops, tests) gets retransmission without extra
