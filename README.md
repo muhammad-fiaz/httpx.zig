@@ -994,65 +994,71 @@ zig build test -Dtarget=x86-windows-gnu
 # Compile an example for macOS ARM64
 zig build run-simple-get -Dtarget=aarch64-macos
 ```
-
 ## Performance
 
-Run benchmarks:
+<details>
+<summary><strong>Benchmarks</strong> (click to expand)</summary>
+
+Run the benchmarks with:
 
 ```bash
 zig build bench
 ```
 
-Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-02).
+Benchmark target: `x86_64-windows`, `ReleaseFast`. Measurements recorded on October 2, 2026.
 
-| Benchmark | Category | Avg Latency | Throughput | Target |
-| :--- | :--- | :---: | :---: | :---: |
-| `headers_parse` | Core Operations | 257.49 ns/op | **3883591 ops/sec** | `x86_64-windows` |
-| `uri_parse` | Core Operations | 35.65 ns/op | **28046635 ops/sec** | `x86_64-windows` |
-| `status_lookup` | Core Operations | 2.23 ns/op | **449147518 ops/sec** | `x86_64-windows` |
-| `method_lookup` | Core Operations | 19.74 ns/op | **50650119 ops/sec** | `x86_64-windows` |
-| `http1_request_head` | Core Operations | 24.58 ns/op | **40687786 ops/sec** | `x86_64-windows` |
-| `http1_header_block` | Core Operations | 263.30 ns/op | **3797967 ops/sec** | `x86_64-windows` |
-| `router_static_match` | Routing | 1.02 µs/op | **977952 ops/sec** | `x86_64-windows` |
-| `router_param_match` | Routing | 1.06 µs/op | **944143 ops/sec** | `x86_64-windows` |
-| `router_dispatch` | Routing | 1.03 µs/op | **970782 ops/sec** | `x86_64-windows` |
-| `router_typed_match` | Routing | 1.14 µs/op | **880393 ops/sec** | `x86_64-windows` |
-| `router_miss_404` | Routing | 1.81 µs/op | **550989 ops/sec** | `x86_64-windows` |
-| `router_reverse` | Routing | 68.65 ns/op | **14565687 ops/sec** | `x86_64-windows` |
-| `json_stringify` | Serialization | 245.93 ns/op | **4066174 ops/sec** | `x86_64-windows` |
-| `json_parse` | Serialization | 312.18 ns/op | **3203298 ops/sec** | `x86_64-windows` |
-| `basic_auth_encode` | Security | 24.20 ns/op | **41328974 ops/sec** | `x86_64-windows` |
-| `basic_auth_decode` | Security | 23.31 ns/op | **42897466 ops/sec** | `x86_64-windows` |
-| `bearer_token_parse` | Security | 7.82 ns/op | **127813494 ops/sec** | `x86_64-windows` |
-| `gzip_compress` | Compression | 53.11 µs/op | **18830 ops/sec** | `x86_64-windows` |
-| `gzip_decompress` | Compression | 6.64 µs/op | **150626 ops/sec** | `x86_64-windows` |
-| `deflate_compress` | Compression | 63.54 µs/op | **15737 ops/sec** | `x86_64-windows` |
-| `deflate_decompress` | Compression | 6.48 µs/op | **154405 ops/sec** | `x86_64-windows` |
-| `html_parse` | Parsing | 20.13 µs/op | **49668 ops/sec** | `x86_64-windows` |
-| `template_parse` | Parsing | 2.90 µs/op | **345360 ops/sec** | `x86_64-windows` |
-| `template_render` | Parsing | 1.46 µs/op | **683819 ops/sec** | `x86_64-windows` |
-| `template_incremental` | Parsing | 22.94 µs/op | **43597 ops/sec** | `x86_64-windows` |
-| `json_feed_parse` | Parsing | 3.78 µs/op | **264404 ops/sec** | `x86_64-windows` |
-| `live_reload_inject` | Parsing | 230.33 ns/op | **4341596 ops/sec** | `x86_64-windows` |
+| Benchmark | Category | Average Latency | Throughput | Target |
+| :--- | :--- | ---: | ---: | :--- |
+| `headers_parse` | Core Operations | 257.49 ns/op | **3,883,591 ops/sec** | `x86_64-windows` |
+| `uri_parse` | Core Operations | 35.65 ns/op | **28,046,635 ops/sec** | `x86_64-windows` |
+| `status_lookup` | Core Operations | 2.23 ns/op | **449,147,518 ops/sec** | `x86_64-windows` |
+| `method_lookup` | Core Operations | 19.74 ns/op | **50,650,119 ops/sec** | `x86_64-windows` |
+| `http1_request_head` | Core Operations | 24.58 ns/op | **40,687,786 ops/sec** | `x86_64-windows` |
+| `http1_header_block` | Core Operations | 263.30 ns/op | **3,797,967 ops/sec** | `x86_64-windows` |
+| `router_static_match` | Routing | 1.02 µs/op | **977,952 ops/sec** | `x86_64-windows` |
+| `router_param_match` | Routing | 1.06 µs/op | **944,143 ops/sec** | `x86_64-windows` |
+| `router_dispatch` | Routing | 1.03 µs/op | **970,782 ops/sec** | `x86_64-windows` |
+| `router_typed_match` | Routing | 1.14 µs/op | **880,393 ops/sec** | `x86_64-windows` |
+| `router_miss_404` | Routing | 1.81 µs/op | **550,989 ops/sec** | `x86_64-windows` |
+| `router_reverse` | Routing | 68.65 ns/op | **14,565,687 ops/sec** | `x86_64-windows` |
+| `json_stringify` | Serialization | 245.93 ns/op | **4,066,174 ops/sec** | `x86_64-windows` |
+| `json_parse` | Serialization | 312.18 ns/op | **3,203,298 ops/sec** | `x86_64-windows` |
+| `basic_auth_encode` | Security | 24.20 ns/op | **41,328,974 ops/sec** | `x86_64-windows` |
+| `basic_auth_decode` | Security | 23.31 ns/op | **42,897,466 ops/sec** | `x86_64-windows` |
+| `bearer_token_parse` | Security | 7.82 ns/op | **127,813,494 ops/sec** | `x86_64-windows` |
+| `gzip_compress` | Compression | 53.11 µs/op | **18,830 ops/sec** | `x86_64-windows` |
+| `gzip_decompress` | Compression | 6.64 µs/op | **150,626 ops/sec** | `x86_64-windows` |
+| `deflate_compress` | Compression | 63.54 µs/op | **15,737 ops/sec** | `x86_64-windows` |
+| `deflate_decompress` | Compression | 6.48 µs/op | **154,405 ops/sec** | `x86_64-windows` |
+| `html_parse` | Parsing | 20.13 µs/op | **49,668 ops/sec** | `x86_64-windows` |
+| `template_parse` | Parsing | 2.90 µs/op | **345,360 ops/sec** | `x86_64-windows` |
+| `template_render` | Parsing | 1.46 µs/op | **683,819 ops/sec** | `x86_64-windows` |
+| `template_incremental` | Parsing | 22.94 µs/op | **43,597 ops/sec** | `x86_64-windows` |
+| `json_feed_parse` | Parsing | 3.78 µs/op | **264,404 ops/sec** | `x86_64-windows` |
+| `live_reload_inject` | Parsing | 230.33 ns/op | **4,341,596 ops/sec** | `x86_64-windows` |
 | `watcher_scan` | Watcher | 1.14 ms/op | **879 ops/sec** | `x86_64-windows` |
-| `watcher_deps` | Watcher | 4.21 µs/op | **237375 ops/sec** | `x86_64-windows` |
-| `worker_pool_submit` | Concurrency | 228.54 ns/op | **4375553 ops/sec** | `x86_64-windows` |
-| `concurrency_queue` | Concurrency | 37.93 ns/op | **26365676 ops/sec** | `x86_64-windows` |
-| `dns_cache_hit` | DNS | 48.49 ns/op | **20623531 ops/sec** | `x86_64-windows` |
-| `h2_frame_header` | Protocols | 1.09 ns/op | **921523093 ops/sec** | `x86_64-windows` |
-| `hpack_int_encode` | Protocols | 1.04 ns/op | **963131332 ops/sec** | `x86_64-windows` |
-| `hpack_int_decode` | Protocols | 1.42 ns/op | **704508147 ops/sec** | `x86_64-windows` |
-| `h3_varint_encode` | Protocols | 1.58 ns/op | **632739191 ops/sec** | `x86_64-windows` |
-| `h3_varint_decode` | Protocols | 1.59 ns/op | **627817330 ops/sec** | `x86_64-windows` |
-| `tls_record_seal` | TLS | 1.62 µs/op | **619051 ops/sec** | `x86_64-windows` |
-| `tls_cert_parse` | TLS | 1.07 µs/op | **938620 ops/sec** | `x86_64-windows` |
-| `client_server_get` | Network | 387.84 µs/op | **2578 req/sec** | `x86_64-windows` |
-| `h2_pooled_get` | Network | 55.89 µs/op | **17891 req/sec** | `x86_64-windows` |
+| `watcher_deps` | Watcher | 4.21 µs/op | **237,375 ops/sec** | `x86_64-windows` |
+| `worker_pool_submit` | Concurrency | 228.54 ns/op | **4,375,553 ops/sec** | `x86_64-windows` |
+| `concurrency_queue` | Concurrency | 37.93 ns/op | **26,365,676 ops/sec** | `x86_64-windows` |
+| `dns_cache_hit` | DNS | 48.49 ns/op | **20,623,531 ops/sec** | `x86_64-windows` |
+| `h2_frame_header` | Protocols | 1.09 ns/op | **921,523,093 ops/sec** | `x86_64-windows` |
+| `hpack_int_encode` | Protocols | 1.04 ns/op | **963,131,332 ops/sec** | `x86_64-windows` |
+| `hpack_int_decode` | Protocols | 1.42 ns/op | **704,508,147 ops/sec** | `x86_64-windows` |
+| `h3_varint_encode` | Protocols | 1.58 ns/op | **632,739,191 ops/sec** | `x86_64-windows` |
+| `h3_varint_decode` | Protocols | 1.59 ns/op | **627,817,330 ops/sec** | `x86_64-windows` |
+| `tls_record_seal` | TLS | 1.62 µs/op | **619,051 ops/sec** | `x86_64-windows` |
+| `tls_cert_parse` | TLS | 1.07 µs/op | **938,620 ops/sec** | `x86_64-windows` |
+| `client_server_get` | Network | 387.84 µs/op | **2,578 req/sec** | `x86_64-windows` |
+| `h2_pooled_get` | Network | 55.89 µs/op | **17,891 req/sec** | `x86_64-windows` |
 | `h3_get` | Network | 205.89 ms/op | **4 req/sec** | `x86_64-windows` |
 | `tls_full_handshake` | TLS | 4.35 ms/op | **230 ops/sec** | `x86_64-windows` |
 | `tls_resumed_handshake` | TLS | 2.94 ms/op | **339 ops/sec** | `x86_64-windows` |
 
-See [docs/reference/benchmarks.md](docs/reference/benchmarks.md) for full methodology and detailed analysis.
+For the full benchmark methodology, measurement details, and analysis, see [Benchmark Documentation](docs/reference/benchmarks.md).
+
+**Note:** These are recorded measurements for the specified platform and build mode, not universal performance guarantees. Results may vary with hardware, compiler version, workload, and system configuration.
+
+</details>
 
 ## Examples
 
@@ -1208,102 +1214,97 @@ Contributions are welcome! Please:
 3. Add tests for new functionality
 4. Ensure all tests pass: `zig build test`
 5. Submit a pull request
+<details>
+<summary><strong>Project Structure</strong> (click to expand)</summary>
 
-## Project Structure
-
-```
+```text
 httpx.zig/
 ├── src/
-│   ├── httpx.zig                    # Public API entry point & re-exports
+│   ├── httpx.zig                    # Public API entry point and exports
 │   ├── client/                      # HTTP client engine
-│   │   ├── httpClient.zig           # Client struct, connection pooling, retry
-│   │   ├── requestBuilder.zig       # Request builder, TLS options, streaming responses
-│   │   ├── connectionPool.zig       # Connection pool manager and stats
+│   │   ├── httpClient.zig           # Client, connection pooling, retries
+│   │   ├── requestBuilder.zig       # Request construction and options
+│   │   ├── connectionPool.zig       # Connection pool management and stats
 │   │   ├── cookieJar.zig            # RFC 6265 client cookie jar
-│   │   └── downloadManager.zig      # File download, resume, verify, batch
+│   │   └── downloadManager.zig      # Downloads, resume, verification, batches
 │   ├── server/
-│   │   └── httpServer.zig           # Server struct, routing, TLS, run/stop lifecycle
+│   │   └── httpServer.zig           # Server, routing, TLS, lifecycle
 │   ├── web/
-│   │   ├── app.zig                  # Unified App facade
-│   │   ├── router/                  # Router, Context, Response, pattern matching
-│   │   ├── middleware/              # CORS, Helmet, rate-limit, auth, CSRF helpers
-│   │   ├── rest/                    # Type-driven REST API framework & OpenAPI reflection
-│   │   ├── staticFiles/             # Static file serving, ETag, MIME detection
-│   │   ├── spa/                     # SPA HTML5 fallback serving
-│   │   ├── openApi/                 # OpenAPI 3.1 spec generation
+│   │   ├── app.zig                  # Unified application facade
+│   │   ├── router/                  # Router, context, response, patterns
+│   │   ├── middleware/              # CORS, security, rate limiting, auth, CSRF
+│   │   ├── rest/                    # REST API framework and OpenAPI reflection
+│   │   ├── staticFiles/             # Static files, ETags, MIME detection
+│   │   ├── spa/                     # SPA fallback serving
+│   │   ├── openApi/                 # OpenAPI 3.1 specification generation
 │   │   ├── docs/                    # Swagger UI, ReDoc, Scalar, GraphiQL
-│   │   ├── graphql/                 # GraphQL schema, resolvers, mount
-│   │   ├── sse/                     # Server-Sent Events writer & parser
-│   │   ├── websocket/               # WebSocket handshake & frame handling
-│   │   ├── multipart/               # Multipart form encoder & parser
-│   │   ├── health/                  # Health check endpoints
-│   │   ├── metrics/                 # Metrics registry & Prometheus exposition
-│   │   ├── auth/                    # Basic & Bearer auth helpers
-│   │   ├── templates/               # Native template engine (cached AST, Jinja syntax)
+│   │   ├── graphql/                 # GraphQL schema, resolvers, mounting
+│   │   ├── sse/                     # Server-Sent Events
+│   │   ├── websocket/               # WebSocket handshake and frames
+│   │   ├── multipart/               # Multipart encoding and parsing
+│   │   ├── health/                  # Health-check endpoints
+│   │   ├── metrics/                 # Metrics registry and Prometheus output
+│   │   ├── auth/                    # Basic and Bearer authentication
+│   │   ├── templates/               # Native template engine
 │   │   ├── site/                    # File-based website routing
-│   │   └── watcher/                 # File watcher + browser live-reload client
-│   │       ├── watcherBackend.zig   # Watcher facade, debounce, index
-│   │       ├── watcherEvents.zig    # Event model, classification
-│   │       ├── fileWatcher.zig      # Browser-side SSE live-reload script
+│   │   └── watcher/                 # File watching and browser live reload
+│   │       ├── watcherBackend.zig   # Watcher facade, debounce, indexing
+│   │       ├── watcherEvents.zig    # Event model and classification
+│   │       ├── fileWatcher.zig      # Browser-side live-reload script
 │   │       ├── watcherDependency.zig# Dependency graph for invalidation
-│   │       ├── windowsWatcher.zig   # Windows ReadDirectoryChangesW backend
+│   │       ├── windowsWatcher.zig   # Windows directory-change backend
 │   │       ├── linuxWatcher.zig     # Linux inotify backend
-│   │       └── macosWatcher.zig     # macOS kqueue backend
+│   │       └── macosWatcher.zig     # macOS watcher backend
 │   ├── protocols/
-│   │   ├── http1/                   # HTTP/1.x parser, writer, semantics
-│   │   ├── http2/                   # HTTP/2 frame, HPACK, transport, connection
-│   │   ├── http3/                   # HTTP/3 frame, QPACK, connection, transport
-│   │   ├── quic/                    # QUIC varint, packet, crypto, connection, frames
-│   │   ├── tls/                     # Native TLS 1.3 / 1.2 engine, ALPN, mTLS, certificates
-│   │   ├── ftp/                     # FTP client & server
-│   │   └── common/                  # Shared protocol utilities (Huffman tables, varints)
+│   │   ├── http1/                   # HTTP/1.x parsing, writing, semantics
+│   │   ├── http2/                   # HTTP/2 frames, HPACK, transport
+│   │   ├── http3/                   # HTTP/3 frames, QPACK, transport
+│   │   ├── quic/                    # QUIC packets, crypto, frames, connections
+│   │   ├── tls/                     # TLS, ALPN, mTLS, certificates
+│   │   ├── ftp/                     # FTP client and server
+│   │   └── common/                  # Shared protocol utilities
 │   ├── net/
-│   │   ├── address.zig              # Network address abstraction (IPv4 + IPv6)
-│   │   ├── connectivity.zig         # Network connectivity probing
-│   │   ├── dns/                     # DNS protocol resolver & cache
-│   │   │   ├── dnsResolver.zig      # DNS resolution logic
+│   │   ├── address.zig              # IPv4 and IPv6 address abstraction
+│   │   ├── connectivity.zig         # Connectivity probing
+│   │   ├── dns/                     # DNS resolution and caching
+│   │   │   ├── dnsResolver.zig      # DNS resolution
 │   │   │   └── dnsCache.zig         # TTL-aware DNS cache
 │   │   ├── proxy.zig                # HTTP proxy support
 │   │   ├── resolve.zig              # Host resolution abstraction
-│   │   ├── socks4.zig               # SOCKS4/4a proxy tunneling
-│   │   └── socks5.zig               # SOCKS5/5h proxy tunneling
+│   │   ├── socks4.zig               # SOCKS4/4a tunneling
+│   │   └── socks5.zig               # SOCKS5/5h tunneling
 │   ├── sockets/
-│   │   ├── tcp.zig                  # Cross-platform TCP socket (IOCP/epoll)
+│   │   ├── tcp.zig                  # Cross-platform TCP sockets
 │   │   ├── udp.zig                  # UDP socket wrapper
-│   │   └── sys.zig                  # Raw syscall layer + error mapping
-│   ├── compression/                 # gzip, brotli, zstd, deflate codecs
-│   ├── concurrency/                 # pool, bounded queue, parallel requests
+│   │   └── sys.zig                  # System calls and error mapping
+│   ├── compression/                 # gzip, Brotli, Zstandard, deflate
+│   ├── concurrency/                 # Pools, bounded queues, parallel requests
 │   ├── parsing/                     # HTML/XML DOM, CSS selectors, feeds
-│   │   ├── html.zig                 # HTML5 parser
+│   │   ├── html.zig                 # HTML parser
 │   │   ├── xml.zig                  # XML parser
 │   │   ├── selector.zig             # CSS selector engine
-│   │   ├── dom.zig                  # DOM tree traversal
+│   │   ├── dom.zig                  # DOM traversal
 │   │   ├── document.zig             # Document abstraction
-│   │   ├── extract.zig              # Content extraction
-│   │   ├── feed.zig                 # RSS/Atom/JSON feed parser
+│   │   ├── extract.zig               # Content extraction
+│   │   ├── feed.zig                 # RSS, Atom, JSON feeds
 │   │   ├── robots.zig               # robots.txt parser
 │   │   └── sitemap.zig              # Sitemap parser
-│   ├── common/                      # Method, Status, Headers, URI, Logger, clock, IO
-│   ├── utils/                       # MIME detection (mime.zig), filesystem helpers (fs.zig)
-│   └── assets/                      # Embedded UI assets (Swagger, ReDoc, GraphiQL)
-├── examples/                        # 80+ runnable examples
-│   ├── simpleGet.zig                # Basic HTTP GET
-│   ├── postJson.zig                 # POST with JSON body
-│   ├── simpleServer.zig             # Minimal HTTP server
-│   ├── graphqlServer.zig            # GraphQL + REST + OpenAPI
-│   ├── tlsGet.zig                   # HTTPS with TLS
-│   ├── download.zig                 # File download with progress
-│   └── ...                          # 70+ more (see examples/ dir)
+│   ├── common/                      # Methods, status, headers, URI, I/O
+│   ├── utils/                       # MIME detection and filesystem helpers
+│   └── assets/                      # Embedded UI assets
+├── examples/                        # Runnable usage examples
 ├── bench/
-│   └── main.zig                     # Microbenchmarks
-├── docs/                            # VitePress documentation site
-├── build.zig                        # Build system
+│   └── main.zig                     # Benchmarks
+├── docs/                            # VitePress documentation
+├── build.zig                        # Build configuration
 ├── build.zig.zon                    # Package metadata
 ├── README.md
 ├── SECURITY.md
 ├── LICENSE
 └── CONTRIBUTING.md
 ```
+
+</details>
 
 ## License
 
