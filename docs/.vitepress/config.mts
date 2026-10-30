@@ -71,8 +71,7 @@ export default defineConfig({
     ["meta", { name: "twitter:site", content: "@muhammadfiaz_" }],
     ["meta", { name: "twitter:creator", content: "@muhammadfiaz_" }],
 
-    // Canonical URL
-    ["link", { rel: "canonical", href: SITE_URL }],
+    // Canonical URL is emitted per page in transformPageData below.
 
     // Favicons
     ["link", { rel: "icon", href: "/httpx.zig/favicon.ico" }],
@@ -101,18 +100,13 @@ gtag('js', new Date());
 gtag('config', '${GA_ID}');`,
     ],
 
-    // Google Tag Manager
+    // Google Tag Manager (noscript fallback is injected after <body> in transformHtml)
     ...(GTM_ID
       ? ([
           [
             "script",
             {},
             `(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start': new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0], j=d.createElement(s), dl=l!='dataLayer'?'&l='+l:''; j.async=true; j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl; f.parentNode.insertBefore(j,f);})(window,document,'script','dataLayer','${GTM_ID}');`,
-          ],
-          [
-            "noscript",
-            {},
-            `<iframe src="https://www.googletagmanager.com/ns.html?id=${GTM_ID}" height="0" width="0" style="display:none;visibility:hidden"></iframe>`,
           ],
         ] as [string, Record<string, string>, string][])
       : []),
@@ -143,6 +137,12 @@ gtag('config', '${GA_ID}');`,
       : []),
   ],
 
+  transformHtml(html) {
+    if (!GTM_ID) return html;
+    const noscript = `<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=${GTM_ID}" height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>`;
+    return html.replace(/<body([^>]*)>/, `<body$1>\n    ${noscript}`);
+  },
+
   // No ignoreDeadLinks: every internal link resolves (audited), so any
   // future dead link fails the docs build loudly instead of rotting.
 
@@ -150,17 +150,24 @@ gtag('config', '${GA_ID}');`,
     // Dynamic OG image generation based on page title
     const pageTitle = pageData.title || SITE_NAME;
     const pageDescription = pageData.description || SITE_DESCRIPTION;
-    const normalizedPath = pageData.relativePath
-      .replace(/\.md$/, "")
-      .replace(/(^|\/)index$/, "$1")
-      .replace(/\/$/, "");
-    const canonicalUrl = normalizedPath.length > 0 ? `${SITE_URL}/${normalizedPath}` : SITE_URL;
+    // Resolve the published URL. cleanUrls is disabled, so regular pages end
+    // in `.html` while directory index pages keep their trailing slash.
+    const cleanPath = pageData.relativePath.replace(/\.md$/, "");
+    let canonicalUrl: string;
+    if (cleanPath === "index") {
+      canonicalUrl = `${SITE_URL}/`;
+    } else if (cleanPath.endsWith("/index")) {
+      canonicalUrl = `${SITE_URL}/${cleanPath.slice(0, -"index".length)}`;
+    } else {
+      canonicalUrl = `${SITE_URL}/${cleanPath}.html`;
+    }
 
     pageData.frontmatter.head ??= [];
     pageData.frontmatter.head.push(
       ["link", { rel: "canonical", href: canonicalUrl }],
       ["meta", { property: "og:title", content: `${pageTitle} | ${SITE_NAME}` }],
-      ["meta", { property: "og:url", content: canonicalUrl }]
+      ["meta", { property: "og:url", content: canonicalUrl }],
+      ["meta", { name: "twitter:url", content: canonicalUrl }]
     );
 
     if (pageData.frontmatter.description) {
