@@ -1,5 +1,5 @@
 import { defineConfig } from "vitepress";
-import llmstxt from "vitepress-plugin-llms";
+import llmstxt, { copyOrDownloadAsMarkdownButtons } from "vitepress-plugin-llms";
 
 // Site configuration
 export const SITE_URL = "https://muhammad-fiaz.github.io/httpx.zig";
@@ -35,6 +35,12 @@ export default defineConfig({
 
   vite: {
     plugins: [llmstxt()],
+  },
+
+  markdown: {
+    config(md) {
+      md.use(copyOrDownloadAsMarkdownButtons);
+    },
   },
 
   head: [
@@ -131,7 +137,7 @@ gtag('config', '${GA_ID}');`,
               c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
               t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;
               y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
-            })(window, document, "script", "clarity", "${CLARITY_ID}");`,
+            })(window, document, "clarity", "script", "${CLARITY_ID}");`,
           ],
         ] as [string, Record<string, string>, string][])
       : []),
@@ -559,6 +565,13 @@ gtag('config', '${GA_ID}');`,
 
     search: {
       provider: "local",
+    },
+
+    llms: {
+      copyText: "Copy page",
+      copiedText: "Copied",
+      viewMarkdownText: "View as Markdown",
+      openInAIText: "Open in {provider}",
     },
 
     editLink: {
