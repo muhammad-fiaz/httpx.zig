@@ -13,6 +13,9 @@ export const GTM_ID = "GTM-P4M9T8ZR";
 // Google AdSense Client ID
 export const ADSENSE_CLIENT_ID = "ca-pub-2040560600290490";
 
+// Microsoft Clarity Project ID
+export const CLARITY_ID = "z5vdzih779";
+
 // SEO Keywords
 export const KEYWORDS = "zig, http, https, http3, quic, server, client, networking, library, async, production, connection pooling, middleware, routing, tls, ssl, performance, socks5h, proxy";
 
@@ -123,6 +126,21 @@ gtag('config', '${GA_ID}');`,
         crossorigin: "anonymous",
       },
     ],
+
+    // Microsoft Clarity
+    ...(CLARITY_ID
+      ? ([
+          [
+            "script",
+            {},
+            `(function(c,l,a,r,i,t,y){
+              c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
+              t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;
+              y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
+            })(window, document, "script", "clarity", "${CLARITY_ID}");`,
+          ],
+        ] as [string, Record<string, string>, string][])
+      : []),
   ],
 
   // No ignoreDeadLinks: every internal link resolves (audited), so any
