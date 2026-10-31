@@ -195,8 +195,12 @@ pub fn isInformational(status: u16) bool {
 }
 
 /// Statuses whose responses carry NO body regardless of headers.
+///
+/// 205 Reset Content is terminated by the end of the header section just
+/// like 204 (RFC 9110 Section 15.3.6); emitting a body there would desync
+/// a persistent connection.
 pub fn bodylessStatus(status: u16) bool {
-    return isInformational(status) or status == 204 or status == 304;
+    return isInformational(status) or status == 204 or status == 205 or status == 304;
 }
 
 /// A response to HEAD carries metadata but no payload bytes.

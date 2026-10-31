@@ -25,6 +25,19 @@ pub const UdpSocket = struct {
     /// Binds to 0.0.0.0:port. port=0 lets the OS choose (typical for clients).
     pub fn bind(io: std.Io, port: u16) !UdpSocket {
         const addr = try net.IpAddress.parseIp4("0.0.0.0", port);
+        return bindAddress(io, &addr);
+    }
+
+    /// Binds the IPv6 wildcard address `[::]:port`. Useful for DNS/QUIC
+    /// endpoints that must accept IPv6 peers; separate from `bind` so the
+    /// default remains an IPv4 socket on hosts where IPv6 is unavailable.
+    pub fn bindIp6(io: std.Io, port: u16) !UdpSocket {
+        const addr = try net.IpAddress.parseIp6("::", port);
+        return bindAddress(io, &addr);
+    }
+
+    /// Binds an explicit local address (IPv4 or IPv6).
+    pub fn bindAddress(io: std.Io, addr: *const net.IpAddress) !UdpSocket {
         const sock = try addr.bind(io, .{ .mode = .dgram });
         return .{ .socket = sock, .io = io };
     }
@@ -50,6 +63,11 @@ pub const UdpSocket = struct {
 
     /// Receives one datagram. Returns payload slice (into buffer) and source address.
     ///
+    /// Returns `error.DatagramTruncated` when the datagram was larger than
+    /// `buffer` instead of silently handing callers a partial message. (The
+    /// Linux/POSIX `std.Io` backend reports this via MSG_TRUNC; Windows does
+    /// not expose it and will still report the truncated payload.)
+    ///
     /// NOTE: this blocks indefinitely (socket-level SO_RCVTIMEO does not
     /// constrain `std.Io` datagram receives, and `receiveTimeout` is
     /// unsupported by some `std.Io` backends). Deadline-driven code must
@@ -60,6 +78,7 @@ pub const UdpSocket = struct {
             error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
             else => return error.ReadFailed,
         };
+        if (msg.flags.trunc) return error.DatagramTruncated;
         return .{ .data = msg.data, .from = msg.from };
     }
 
@@ -78,6 +97,7 @@ pub const UdpSocket = struct {
                 error.ConcurrencyUnavailable => return error.TimeoutUnsupported,
                 else => return error.ReadFailed,
             };
+            if (msg.flags.trunc) return error.DatagramTruncated;
             return .{ .data = msg.data, .from = msg.from };
         }
 
@@ -96,6 +116,7 @@ pub const UdpSocket = struct {
                 error.ConnectionResetByPeer, error.PortUnreachable => return error.ConnectionReset,
                 else => return error.ReadFailed,
             };
+            if (msg.flags.trunc) return error.DatagramTruncated;
             return .{ .data = msg.data, .from = msg.from };
         }
     }
@@ -127,6 +148,59 @@ test "udp bind and local datagram echo" {
     var buf: [64]u8 = undefined;
     const rx = b.receive(&buf) catch return;
     try std.testing.expectEqualStrings("ping", rx.data);
+}
+
+test "udp ipv6 bind accepts loopback datagrams" {
+    var ctx = @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator) catch return;
+    defer ctx.deinit();
+
+    var server = UdpSocket.bindIp6(ctx.io, 0) catch |err| switch (err) {
+        error.AddressFamilyUnsupported,
+        error.ProtocolUnsupportedBySystem,
+        error.ProtocolUnsupportedByAddressFamily,
+        error.AddressUnavailable,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+    defer server.close();
+
+    const port = switch (server.socket.address) {
+        .ip4 => |v| v.port,
+        .ip6 => |v| v.port,
+    };
+    try std.testing.expect(server.socket.address == .ip6);
+
+    var client = UdpSocket.bindIp6(ctx.io, 0) catch return;
+    defer client.close();
+    const dest = try net.IpAddress.parseIp6("::1", port);
+    // Hosts without a usable IPv6 loopback may fail at bind/send time;
+    // treat that as a platform skip rather than a product failure.
+    client.sendTo(&dest, "v6-ping") catch return error.SkipZigTest;
+
+    var buf: [64]u8 = undefined;
+    const rx = try server.receive(&buf);
+    try std.testing.expectEqualStrings("v6-ping", rx.data);
+}
+
+test "udp receive rejects a datagram larger than the supplied buffer" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // MSG_TRUNC not surfaced
+    var ctx = @import("../sockets/tcp.zig").IoContext.init(std.testing.allocator) catch return;
+    defer ctx.deinit();
+
+    var server = try UdpSocket.bind(ctx.io, 0);
+    defer server.close();
+    var client = try UdpSocket.bind(ctx.io, 0);
+    defer client.close();
+
+    const port = switch (server.socket.address) {
+        .ip4 => |v| v.port,
+        .ip6 => |v| v.port,
+    };
+    const dest = try net.IpAddress.parseIp4("127.0.0.1", port);
+    try client.sendTo(&dest, "0123456789");
+
+    var small: [4]u8 = undefined;
+    try std.testing.expectError(error.DatagramTruncated, server.receive(&small));
 }
 
 test "udp receive timeout is bounded or reports unsupported operation" {

@@ -523,7 +523,11 @@ pub const Encoder = struct {
 
         var ib: [10]u8 = undefined;
 
-        if (!forceLiteral) {
+        // A sensitive field marked `never` MUST NOT use an indexed
+        // representation even when name+value happen to already be in the
+        // static or dynamic table: reusing the index defeats the "never
+        // indexed" guarantee for intermediaries (RFC 7541 Section 6.2.3).
+        if (!forceLiteral and indexing != .never) {
             if (self.findFullIndex(name, value)) |full| {
                 const n = try pint.encode(ib[0..], 7, 0x80, full);
                 try out.appendSlice(self.allocator, ib[0..n]);
@@ -884,6 +888,50 @@ test "encoder signals the smallest table size before the final one" {
     const second = try pint.decode(block.items, &off, 5);
     try std.testing.expectEqual(@as(u64, 100), first);
     try std.testing.expectEqual(@as(u64, 4096), second);
+}
+
+test "never-indexed encoding never emits an indexed representation" {
+    const a = std.testing.allocator;
+    var enc = Encoder.init(a);
+    defer enc.deinit();
+
+    // First store the secret with incremental indexing so a full match exists.
+    var first = std.ArrayList(u8).empty;
+    defer first.deinit(a);
+    try enc.encode(&first, "authorization", "Bearer secret", .incremental, false);
+    try std.testing.expect(enc.dyn.entries.items.len != 0);
+
+    // Re-encoding it as sensitive must stay literal-never-indexed, not 0x80|idx.
+    var second = std.ArrayList(u8).empty;
+    defer second.deinit(a);
+    try enc.encode(&second, "authorization", "Bearer secret", .never, false);
+    try std.testing.expect(second.items.len > 0);
+    try std.testing.expectEqual(@as(u8, 0x10), second.items[0] & 0xF0);
+
+    var dec = Decoder.init(a);
+    defer dec.deinit();
+    // Feed the first block so the decoder's table matches, then decode the
+    // sensitive block and verify both value and that the table is unchanged.
+    const r1 = try dec.decode(first.items);
+    defer {
+        for (r1.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(r1.fields);
+    }
+    const tableLen = dec.dyn.entries.items.len;
+    const r2 = try dec.decode(second.items);
+    defer {
+        for (r2.fields) |f| {
+            a.free(f.name);
+            a.free(f.value);
+        }
+        a.free(r2.fields);
+    }
+    try std.testing.expectEqualStrings("authorization", r2.fields[0].name);
+    try std.testing.expectEqualStrings("Bearer secret", r2.fields[0].value);
+    try std.testing.expectEqual(tableLen, dec.dyn.entries.items.len);
 }
 
 test "never-indexed literals decode but stay out of the dynamic table" {
