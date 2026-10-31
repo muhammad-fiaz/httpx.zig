@@ -73,9 +73,16 @@ const msg = try sock.receive(&buf);
 | Method | Description |
 |--------|-------------|
 | `bind(io, port)` | Bind `0.0.0.0:port` (`0` = ephemeral) |
+| `bindIp6(io, port)` | Bind `[::]:port` for IPv6 peers |
+| `bindAddress(io, addr)` | Bind an explicit IPv4 or IPv6 `Address` |
 | `sendTo(dest, data)` / `send(data)` | Send (explicit or default destination) |
 | `receive(buffer)` | Receive datagram + source address |
 | `close()` | Close socket |
+
+`receive`/`receiveTimeout` return `error.DatagramTruncated` when a datagram is
+larger than the supplied buffer instead of silently returning a partial
+payload. The POSIX backend reports this via `MSG_TRUNC`; Windows does not
+surface the flag, so truncated datagrams are still returned there.
 
 ## Address Utilities (`httpx.Address`)
 

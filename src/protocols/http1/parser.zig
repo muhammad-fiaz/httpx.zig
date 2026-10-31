@@ -368,9 +368,9 @@ pub const FramingContext = struct {
 
 pub fn framingFull(fields: []const Field, ctx: FramingContext) ParseError!FramingDecision {
     // Responses terminated by head end ignore any framing headers
-    // (RFC 9110 section 6.3: 1xx, 204, 304; HEAD handled via method).
+    // (RFC 9110 section 6.3: 1xx, 204, 205, 304; HEAD handled via method).
     if (ctx.isResponse) {
-        if (ctx.status < 200 or ctx.status == 204 or ctx.status == 304) {
+        if (ctx.status < 200 or ctx.status == 204 or ctx.status == 205 or ctx.status == 304) {
             return .{ .framing = .none, .length = 0 };
         }
         // HEAD responses never carry a message body. Content-Length remains
@@ -427,7 +427,11 @@ fn isChunkedOnly(value: []const u8) bool {
 /// returns the offset of the first byte AFTER the terminating blank line
 /// (pipelined tail), or error.Incomplete while more input is needed.
 pub const ChunkedDecoder = struct {
-    pub const State = enum { size, sizeCr, ext, extCr, data, dataCr, dataLf, trailer, done };
+    /// `extBws` accepts optional bad-whitespace between the size and a
+    /// chunk extension. It only permits `;` (start of extension) or the
+    /// line terminator, so `5 garbage` is rejected instead of being
+    /// silently treated as an extension (RFC 9112 Section 7.1).
+    pub const State = enum { size, sizeCr, extBws, ext, extCr, data, dataCr, dataLf, trailer, done };
 
     state: State = .size,
     remainingInChunk: u64 = 0,
@@ -490,7 +494,7 @@ pub const ChunkedDecoder = struct {
                         ';' => self.state = .ext,
                         '\t', ' ' => {
                             if (self.sizeDigits == 0) return ParseError.InvalidChunkSize;
-                            self.state = .ext;
+                            self.state = .extBws;
                         },
                         '\r' => self.state = .sizeCr,
                         '\n' => {
@@ -508,6 +512,21 @@ pub const ChunkedDecoder = struct {
                     src += 1;
                     if (c != '\n') return ParseError.InvalidChunkSize;
                     try self.endSizeLine();
+                },
+                .extBws => {
+                    const c = buf[src];
+                    src += 1;
+                    switch (c) {
+                        // BWS is only legal leading up to a chunk extension.
+                        ';' => self.state = .ext,
+                        '\t', ' ' => {},
+                        '\r' => self.state = .extCr,
+                        '\n' => {
+                            if (!self.allowLfLineEndings) return ParseError.InvalidChunkSize;
+                            try self.endSizeLine();
+                        },
+                        else => return ParseError.InvalidChunkSize,
+                    }
                 },
                 .ext => {
                     // Skip chunk extensions to EOL; reject raw controls.
@@ -790,6 +809,14 @@ test "framing decisions incl smuggling defenses" {
     const r204 = try framingFull(&cl, .{ .isResponse = true, .status = 204 });
     try std.testing.expectEqual(Framing.none, r204.framing);
 
+    // 205 is likewise terminated by the end of the header section; a stale
+    // or hostile Content-Length must not make the client consume a body.
+    const r205 = try framingFull(&cl, .{ .isResponse = true, .status = 205 });
+    try std.testing.expectEqual(Framing.none, r205.framing);
+    const te205 = [_]Field{.{ .name = "Transfer-Encoding", .value = "chunked" }};
+    const r205te = try framingFull(&te205, .{ .isResponse = true, .status = 205 });
+    try std.testing.expectEqual(Framing.none, r205te.framing);
+
     const headResponse = [_]Field{
         .{ .name = "Content-Length", .value = "42" },
         .{ .name = "Transfer-Encoding", .value = "chunked" },
@@ -860,6 +887,30 @@ test "chunked decoder with extensions and trailers" {
     try std.testing.expectEqual(@as(usize, 2), trailerList.items.len);
     try std.testing.expectEqualStrings("X-T", trailerList.items[0].name);
     try std.testing.expectEqualStrings("tv", trailerList.items[0].value);
+}
+
+test "chunked decoder rejects garbage after the size instead of treating it as an extension" {
+    const malformed = [_][]const u8{
+        "5 garbage\r\nhello\r\n0\r\n\r\n",
+        "5\tgarbage\r\nhello\r\n0\r\n\r\n",
+        "5;ok \r\nhello\r\n0\r\n\r\n", // valid extension structure
+    };
+    // The first two are invalid; the third uses a legal `;ext` and must decode.
+    for (malformed[0..2]) |wire| {
+        var decoder = ChunkedDecoder.init();
+        var buffer: [64]u8 = undefined;
+        @memcpy(buffer[0..wire.len], wire);
+        try std.testing.expectError(ParseError.InvalidChunkSize, decoder.decode(buffer[0..wire.len]));
+    }
+
+    const valid = "5 ;ok\r\nhello\r\n0\r\n\r\n";
+    var decoder = ChunkedDecoder.init();
+    var buffer: [64]u8 = undefined;
+    @memcpy(buffer[0..valid.len], valid);
+    const tail = try decoder.decode(buffer[0..valid.len]);
+    try std.testing.expect(decoder.isDone());
+    try std.testing.expectEqualStrings("hello", buffer[0..5]);
+    try std.testing.expectEqual(valid.len, tail);
 }
 
 test "chunked decoder rejects framing-sensitive trailer fields" {

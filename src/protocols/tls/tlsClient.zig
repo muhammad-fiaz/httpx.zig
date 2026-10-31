@@ -814,7 +814,7 @@ pub const Client = struct {
             null;
         errdefer if (hostCopy) |h| a.free(h);
 
-        const alpn = if (engine.negotiatedAlpn) |wire| alpnMod.Protocol.fromWire(wire) else null;
+        const alpn = try resolveNegotiatedAlpn(alpnList, engine.negotiatedAlpn);
         return .{
             .socket = socket,
             .allocator = a,
@@ -982,6 +982,26 @@ fn testServer(a: Allocator, io: std.Io) !serverMod.Server {
         .certificatePem = testCertPem,
         .privateKeyPem = testKeyPem,
     });
+}
+
+/// Validates the server's ALPN selection against what we actually offered.
+/// RFC 7301 Section 3.1 requires the client to abort the handshake when the
+/// selected protocol was not in its list; accepting it would let a hostile
+/// server steer the client onto an unintended application protocol.
+fn resolveNegotiatedAlpn(offered: []const alpnMod.Protocol, selectedWire: ?[]const u8) !?alpnMod.Protocol {
+    const wire = selectedWire orelse return null;
+    return alpnMod.validateClientSelection(offered, wire) orelse error.TlsHandshakeFailed;
+}
+
+test "client ALPN selection must match the offered list" {
+    const offered = [_]alpnMod.Protocol{ .h2, .@"http/1.1" };
+    try std.testing.expectEqual(alpnMod.Protocol.h2, (try resolveNegotiatedAlpn(&offered, "h2")).?);
+    try std.testing.expectEqual(alpnMod.Protocol.@"http/1.1", (try resolveNegotiatedAlpn(&offered, "http/1.1")).?);
+    // Server offered nothing: legal, caller falls back to HTTP/1.x.
+    try std.testing.expect((try resolveNegotiatedAlpn(&offered, null)) == null);
+    // Selecting an unoffered protocol is a handshake failure.
+    try std.testing.expectError(error.TlsHandshakeFailed, resolveNegotiatedAlpn(&offered, "h3"));
+    try std.testing.expectError(error.TlsHandshakeFailed, resolveNegotiatedAlpn(&offered, "spdy/3"));
 }
 
 test "tls resumption over loopback abbreviates the second handshake" {

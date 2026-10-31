@@ -214,6 +214,7 @@ pub fn reasonPhrase(code: u16) []const u8 {
         201 => "Created",
         202 => "Accepted",
         204 => "No Content",
+        205 => "Reset Content",
         206 => "Partial Content",
         301 => "Moved Permanently",
         302 => "Found",
@@ -293,6 +294,15 @@ pub fn buildResponse(
     if (opts.chunked and metadataOnly) return Error.InvalidHeader;
     if ((statusCode < 200 or statusCode == 204) and containsHeader(opts.headers, "content-length")) return Error.InvalidHeader;
     try validateFramingHeaders(opts.headers, opts.chunked, bodyLen, metadataOnly);
+    // A 205 response has no content; a zero Content-Length is the only
+    // permitted declaration (RFC 9110 Section 15.3.6). A positive length
+    // would promise bytes that this serializer never emits.
+    if (statusCode == 205) {
+        for (opts.headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "content-length") and !std.mem.eql(u8, h.value, "0"))
+                return Error.InvalidHeader;
+        }
+    }
 
     const reason = if (reasonIn.len > 0) reasonIn else reasonPhrase(statusCode);
 
@@ -525,6 +535,29 @@ test "response bodyless statuses and HEAD" {
     defer a.free(ok200);
     try std.testing.expect(std.mem.indexOf(u8, ok200, "Content-Length: 7\r\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, ok200, "\r\n\r\n" ++ b));
+}
+
+test "205 Reset Content never emits a body or a positive length" {
+    const a = std.testing.allocator;
+    const r205 = try buildResponse(a, 205, "", "ignored", .{}, false);
+    defer a.free(r205);
+    try std.testing.expect(std.mem.startsWith(u8, r205, "HTTP/1.1 205 Reset Content\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, r205, "\r\n\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, r205, "ignored") == null);
+    // No framing header is auto-generated for a bodyless status.
+    try std.testing.expect(std.mem.indexOf(u8, r205, "Content-Length") == null);
+    try std.testing.expect(std.mem.indexOf(u8, r205, "Transfer-Encoding") == null);
+
+    // Zero is the only accepted explicit declaration.
+    const zero = [_]Header{.{ .name = "Content-Length", .value = "0" }};
+    const r205zero = try buildResponse(a, 205, "", null, .{ .headers = &zero }, false);
+    defer a.free(r205zero);
+    try std.testing.expect(std.mem.indexOf(u8, r205zero, "Content-Length: 0\r\n") != null);
+
+    const positive = [_]Header{.{ .name = "Content-Length", .value = "1" }};
+    try std.testing.expectError(Error.InvalidHeader, buildResponse(a, 205, "", null, .{ .headers = &positive }, false));
+    // Chunked framing is likewise forbidden on 205.
+    try std.testing.expectError(Error.InvalidHeader, buildResponse(a, 205, "", "x", .{ .chunked = true }, false));
 }
 
 test "informational and connect heads" {
