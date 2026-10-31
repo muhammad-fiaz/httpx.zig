@@ -1,5 +1,5 @@
 import { defineConfig } from "vitepress";
-import llmstxt, { copyOrDownloadAsMarkdownButtons } from "vitepress-plugin-llms";
+import llmstxt from "vitepress-plugin-llms";
 
 // Site configuration
 export const SITE_URL = "https://muhammad-fiaz.github.io/httpx.zig";
@@ -19,6 +19,7 @@ export const CLARITY_ID = "z5vdzih779";
 // SEO Keywords
 export const KEYWORDS = "zig, http, https, http3, quic, server, client, networking, library, async, production, connection pooling, middleware, routing, tls, ssl, performance, socks5h, proxy";
 
+
 export default defineConfig({
   lang: "en-US",
   title: SITE_NAME,
@@ -37,11 +38,6 @@ export default defineConfig({
     plugins: [llmstxt()],
   },
 
-  markdown: {
-    config(md) {
-      md.use(copyOrDownloadAsMarkdownButtons);
-    },
-  },
 
   head: [
     // Primary Meta Tags
@@ -272,37 +268,18 @@ gtag('config', '${GA_ID}');`,
     graph.push(primarySchema);
 
     // 3. BreadcrumbList Schema
-    const breadcrumbs: any[] = [
-      {
-        "@type": "ListItem",
-        "position": 1,
-        "name": "Home",
-        "item": SITE_URL
-      }
+    const breadcrumbs: Record<string, unknown>[] = [
+      { "@type": "ListItem", position: 1, name: "Home", item: `${SITE_URL}/` },
     ];
-
     if (!isHome) {
-      const pathParts = pageData.relativePath.replace(/\.md$/, '').split('/');
-      let currentPath = SITE_URL;
-
-      pathParts.forEach((part: string, index: number) => {
-        currentPath += `/${part}`;
-        // Best effort capitalization
-        const name = part.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
-
-        breadcrumbs.push({
-          "@type": "ListItem",
-          "position": index + 2,
-          "name": name,
-          "item": index === pathParts.length - 1 ? canonicalUrl : currentPath
-        });
+      breadcrumbs.push({
+        "@type": "ListItem",
+        position: 2,
+        name: pageTitle,
+        item: canonicalUrl,
       });
     }
-
-    graph.push({
-      "@type": "BreadcrumbList",
-      "itemListElement": breadcrumbs
-    });
+    graph.push({ "@type": "BreadcrumbList", itemListElement: breadcrumbs });
 
     pageData.frontmatter.head.push([
       "script",
@@ -565,13 +542,6 @@ gtag('config', '${GA_ID}');`,
 
     search: {
       provider: "local",
-    },
-
-    llms: {
-      copyText: "Copy page",
-      copiedText: "Copied",
-      viewMarkdownText: "View as Markdown",
-      openInAIText: "Open in {provider}",
     },
 
     editLink: {
