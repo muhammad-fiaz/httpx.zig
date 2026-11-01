@@ -154,16 +154,16 @@ pub const Parser = struct {
                 self.pos += 1;
             }
             self.currentToken = .{ .kind = .name, .text = self.source[start..self.pos], .pos = start };
-        } else if (c == '-' or (c >= '0' and c <= '9')) {
+        } else if (c == '-' or std.ascii.isDigit(c)) {
             var isFloat = false;
             if (c == '-') self.pos += 1;
-            while (self.pos < self.source.len and (self.source[self.pos] >= '0' and self.source[self.pos] <= '9')) {
+            while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) {
                 self.pos += 1;
             }
             if (self.pos < self.source.len and self.source[self.pos] == '.') {
                 isFloat = true;
                 self.pos += 1;
-                while (self.pos < self.source.len and (self.source[self.pos] >= '0' and self.source[self.pos] <= '9')) {
+                while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) {
                     self.pos += 1;
                 }
             }
@@ -173,7 +173,7 @@ pub const Parser = struct {
                 if (self.pos < self.source.len and (self.source[self.pos] == '+' or self.source[self.pos] == '-')) {
                     self.pos += 1;
                 }
-                while (self.pos < self.source.len and (self.source[self.pos] >= '0' and self.source[self.pos] <= '9')) {
+                while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) {
                     self.pos += 1;
                 }
             }

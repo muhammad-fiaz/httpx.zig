@@ -84,6 +84,7 @@ pub fn classifyTarget(method: []const u8, target: []const u8) ?TargetForm {
 }
 
 const parseMod = @import("../../common/parse.zig");
+const uriMod = @import("../../common/uri.zig");
 
 // Host / authority validation (RFC 9112 section 3.2 + RFC 3986)
 
@@ -122,16 +123,34 @@ pub fn validRequestTargetAndHost(
     fields: []const @import("parser.zig").Field,
 ) bool {
     const form = classifyTarget(method, target) orelse return false;
-    _ = form;
 
     var hostCount: usize = 0;
+    var hostValue: []const u8 = "";
     for (fields) |field| {
         if (!parseMod.eqlIgnoreCase(field.name, "Host")) continue;
         hostCount += 1;
+        hostValue = field.value;
         if (!validAuthority(field.value)) return false;
     }
     if (hostCount > 1) return false;
-    return minorVersion != 1 or hostCount == 1;
+    if (minorVersion == 1 and hostCount != 1) return false;
+
+    // RFC 9112 Section 3.2.2: in absolute-form the request-target authority
+    // is authoritative. A mismatching Host field is a classic host-confusion
+    // vector (one hop routes on the target, another on Host), so reject it.
+    if (form == .absolute and hostCount == 1) {
+        const uri = uriMod.parse(target) catch return false;
+        // RFC 9112 Section 3.2.2: absolute-form must not carry userinfo.
+        // Accepting it would let two hops derive different origins from the
+        // same request line.
+        if (uri.userinfo.len != 0) return false;
+        const hostAuth = parseMod.parseAuthority(hostValue) orelse return false;
+        if (!std.ascii.eqlIgnoreCase(hostAuth.host, uri.host)) return false;
+        const uriPort = uri.effectivePort();
+        const hostPort = hostAuth.port orelse uriMod.defaultPort(uri.scheme);
+        if (uriPort != hostPort) return false;
+    }
+    return true;
 }
 
 // Connection persistence (RFC 9110 section 7.6.1 / RFC 9112 section 9.3)
@@ -253,6 +272,20 @@ test "request target and Host validation" {
     }));
     try std.testing.expect(!validRequestTargetAndHost("GET", "/", 1, &.{.{ .name = "Host", .value = "example.com:bad" }}));
     try std.testing.expect(validRequestTargetAndHost("GET", "/", 0, &[_]F{}));
+
+    // absolute-form: the target authority must agree with Host.
+    const absHost = [_]F{.{ .name = "Host", .value = "example.com" }};
+    try std.testing.expect(validRequestTargetAndHost("GET", "http://example.com/a", 1, absHost[0..]));
+    try std.testing.expect(validRequestTargetAndHost("GET", "http://example.com:80/a", 1, absHost[0..]));
+    try std.testing.expect(!validRequestTargetAndHost("GET", "http://other.example/a", 1, absHost[0..]));
+    try std.testing.expect(!validRequestTargetAndHost("GET", "http://example.com.evil/a", 1, absHost[0..]));
+    try std.testing.expect(!validRequestTargetAndHost("GET", "http://user@example.com/a", 1, absHost[0..]));
+    const absPort = [_]F{.{ .name = "Host", .value = "example.com:8080" }};
+    try std.testing.expect(validRequestTargetAndHost("GET", "http://example.com:8080/a", 1, absPort[0..]));
+    try std.testing.expect(!validRequestTargetAndHost("GET", "http://example.com:9090/a", 1, absPort[0..]));
+    const absIpv6 = [_]F{.{ .name = "Host", .value = "[::1]:8080" }};
+    try std.testing.expect(validRequestTargetAndHost("GET", "http://[::1]:8080/a", 1, absIpv6[0..]));
+    try std.testing.expect(!validRequestTargetAndHost("GET", "http://[::2]:8080/a", 1, absIpv6[0..]));
 }
 
 test "authority validation incl IPv6" {

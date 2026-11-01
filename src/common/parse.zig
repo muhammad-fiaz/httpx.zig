@@ -110,7 +110,7 @@ pub fn parseUint(comptime T: type, s: []const u8) ?T {
     if (s.len == 0) return null;
     var result: T = 0;
     for (s) |c| {
-        if (c < '0' or c > '9') return null;
+        if (!std.ascii.isDigit(c)) return null;
         const digit: T = @intCast(c - '0');
         result = std.math.mul(T, result, 10) catch return null;
         result = std.math.add(T, result, digit) catch return null;
@@ -124,7 +124,7 @@ pub inline fn parse3DigitStatus(s: []const u8) ?u16 {
     const d0 = s[0];
     const d1 = s[1];
     const d2 = s[2];
-    if (d0 < '1' or d0 > '9' or d1 < '0' or d1 > '9' or d2 < '0' or d2 > '9') return null;
+    if (d0 == '0' or !std.ascii.isDigit(d0) or !std.ascii.isDigit(d1) or !std.ascii.isDigit(d2)) return null;
     return (@as(u16, d0 - '0') * 100) + (@as(u16, d1 - '0') * 10) + @as(u16, d2 - '0');
 }
 

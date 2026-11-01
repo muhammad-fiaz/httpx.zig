@@ -43,29 +43,26 @@ pub const Headers = struct {
         try validateValue(value);
         for (self.entries.items) |*h| {
             if (std.ascii.eqlIgnoreCase(h.name, name)) {
-                if (h.value.len == value.len) {
-                    @memcpy(@constCast(h.value), value);
-                    return;
-                }
+                // Allocate before freeing: a failed allocation must leave the
+                // existing entry intact instead of dangling.
+                const fresh = try self.allocator.dupe(u8, value);
                 self.allocator.free(h.value);
-                h.value = try self.allocator.dupe(u8, value);
+                h.value = fresh;
                 return;
             }
         }
-        try self.entries.append(self.allocator, .{
-            .name = try self.allocator.dupe(u8, name),
-            .value = try self.allocator.dupe(u8, value),
-        });
+        try self.append(name, value);
     }
 
     /// Appends a header without replacing duplicates.
     pub fn append(self: *Headers, name: []const u8, value: []const u8) !void {
         try validateName(name);
         try validateValue(value);
-        try self.entries.append(self.allocator, .{
-            .name = try self.allocator.dupe(u8, name),
-            .value = try self.allocator.dupe(u8, value),
-        });
+        const name_copy = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(name_copy);
+        const value_copy = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(value_copy);
+        try self.entries.append(self.allocator, .{ .name = name_copy, .value = value_copy });
     }
 
     /// Case-insensitive lookup; returns first match.
@@ -191,4 +188,22 @@ test "remove header" {
     try std.testing.expect(h.contains("X-Remove-Me"));
     _ = h.remove("x-remove-me");
     try std.testing.expect(!h.contains("X-Remove-Me"));
+}
+
+fn headersAllocationFailureImpl(allocator: Allocator) !void {
+    var h = Headers.init(allocator);
+    defer h.deinit();
+    try h.append("X-One", "1");
+    try h.set("X-One", "one");
+    try h.set("X-Two", "2");
+    try h.set("X-Two", "two");
+    _ = h.remove("X-One");
+    try h.append("X-Three", "3");
+    try std.testing.expectEqual(@as(usize, 2), h.count());
+}
+
+test "header mutations release memory when an allocation fails" {
+    // Exercises every allocation point in append/set/remove and proves the
+    // old value is not freed before its replacement exists.
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, headersAllocationFailureImpl, .{});
 }

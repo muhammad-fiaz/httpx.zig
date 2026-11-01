@@ -634,8 +634,33 @@ pub fn sanitizeFilename(name: []const u8) []const u8 {
     if (s.len == 0 or std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, "..")) {
         return "downloaded_file";
     }
+    // Windows treats these names as devices at any path and with any
+    // extension ("CON", "nul.txt", "COM1"). Creating one fails or writes to
+    // hardware, so an untrusted Content-Disposition must not select them.
+    if (isWindowsReservedName(s)) return "downloaded_file";
 
     return s;
+}
+
+fn isWindowsReservedName(name: []const u8) bool {
+    const stem = if (std.mem.indexOfScalar(u8, name, '.')) |dot| name[0..dot] else name;
+    if (std.ascii.eqlIgnoreCase(stem, "con") or
+        std.ascii.eqlIgnoreCase(stem, "prn") or
+        std.ascii.eqlIgnoreCase(stem, "aux") or
+        std.ascii.eqlIgnoreCase(stem, "nul"))
+    {
+        return true;
+    }
+    if (stem.len == 4) {
+        const prefix = stem[0..3];
+        const digit = stem[3];
+        if (std.ascii.isDigit(digit) and digit != '0' and
+            (std.ascii.eqlIgnoreCase(prefix, "com") or std.ascii.eqlIgnoreCase(prefix, "lpt")))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// Substring after the last `/` or `\`, or the whole input when it holds
@@ -1623,6 +1648,24 @@ test "filename sanitization is identical on every platform" {
     for (cases) |c| {
         try std.testing.expectEqualStrings(c.want, sanitizeFilename(c.in));
     }
+}
+
+test "filename sanitization rejects Windows reserved device names" {
+    // A remote server controls Content-Disposition, so it must not be able
+    // to select a Windows device path. Reserved names are special regardless
+    // of extension and case.
+    const reserved = [_][]const u8{
+        "CON",  "con",      "NUL",  "nul.txt",  "PRN", "AUX",
+        "COM1", "com9.log", "LPT1", "lpt9.dat",
+    };
+    for (reserved) |name| {
+        try std.testing.expectEqualStrings("downloaded_file", sanitizeFilename(name));
+    }
+    // Out-of-range and non-device stems are ordinary files.
+    try std.testing.expectEqualStrings("COM10", sanitizeFilename("COM10"));
+    try std.testing.expectEqualStrings("LPT0.txt", sanitizeFilename("LPT0.txt"));
+    try std.testing.expectEqualStrings("console.log", sanitizeFilename("console.log"));
+    try std.testing.expectEqualStrings("com1x.txt", sanitizeFilename("com1x.txt"));
 }
 
 test "parse checksum file formats" {

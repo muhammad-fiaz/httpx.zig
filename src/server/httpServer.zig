@@ -34,6 +34,7 @@ const templatesMod = @import("../web/templates/templates.zig");
 const tlsServerMod = @import("../protocols/tls/tlsServer.zig");
 const fsMod = @import("../utils/fs.zig");
 const addressMod = @import("../net/address.zig");
+const uriMod = @import("../common/uri.zig");
 const alpnMod = @import("../protocols/tls/alpn.zig");
 const metricsMod = @import("../web/metrics/metricsRegistry.zig");
 const tlsSessionMod = @import("../protocols/tls/tlsSession.zig");
@@ -2110,16 +2111,28 @@ pub const Server = struct {
 
         const isHead = method == .HEAD;
 
+        // RFC 9112 Section 3.2.2: an absolute-form target is accepted for
+        // proxies, but routing must use its path/query rather than treating
+        // "http://host/path" as an origin path (which would never match).
         const rawPath = reqHead.path;
         var cleanPath = rawPath;
-        if (std.mem.indexOfAny(u8, cleanPath, "?#")) |idx| {
-            cleanPath = cleanPath[0..idx];
-        }
         var queryPart: []const u8 = "";
-        if (std.mem.indexOfScalar(u8, rawPath, '?')) |qi| {
-            var q = rawPath[qi + 1 ..];
-            if (std.mem.indexOfScalar(u8, q, '#')) |hi| q = q[0..hi];
-            queryPart = q;
+        if (semanticsMod.classifyTarget(reqHead.method, rawPath) == .absolute) {
+            const abs = uriMod.parse(rawPath) catch {
+                _ = sendSimpleError(conn, 400, "invalid request target") catch 0;
+                return false;
+            };
+            cleanPath = abs.path;
+            queryPart = abs.query;
+        } else {
+            if (std.mem.indexOfAny(u8, cleanPath, "?#")) |idx| {
+                cleanPath = cleanPath[0..idx];
+            }
+            if (std.mem.indexOfScalar(u8, rawPath, '?')) |qi| {
+                var q = rawPath[qi + 1 ..];
+                if (std.mem.indexOfScalar(u8, q, '#')) |hi| q = q[0..hi];
+                queryPart = q;
+            }
         }
 
         var ctx = Context{
@@ -2397,6 +2410,39 @@ test "HTTP/1.1 server rejects request without Host before dispatch" {
     var response: [1024]u8 = undefined;
     const n = client.read(&response) catch return;
     try std.testing.expect(std.mem.startsWith(u8, response[0..n], "HTTP/1.1 400 Bad Request"));
+
+    srv.requestShutdown();
+}
+
+test "HTTP/1.1 absolute-form target routes by its path" {
+    const a = std.testing.allocator;
+    var ioContext = tcp.IoContext.init(a) catch return;
+    defer ioContext.deinit();
+
+    var srv = Server.init(a, ioContext.io, .{ .port = 0, .enableDocs = false, .maxConnections = 1 }) catch return;
+    defer srv.deinit();
+    try srv.router.get("/hello", helloHandler, .{});
+
+    const Runner = struct {
+        fn run(server: *Server) void {
+            server.run();
+        }
+    };
+    const thread = std.Thread.spawn(.{}, Runner.run, .{&srv}) catch return;
+    defer thread.join();
+
+    const port = srv.localPort();
+    const request = try std.fmt.allocPrint(a, "GET http://127.0.0.1:{d}/hello HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nConnection: close\r\n\r\n", .{ port, port });
+    defer a.free(request);
+
+    var client = tcp.connect(ioContext.io, "127.0.0.1", port) catch return;
+    defer client.close();
+    try client.writeAll(request);
+
+    var response: [1024]u8 = undefined;
+    const n = client.read(&response) catch return;
+    try std.testing.expect(std.mem.startsWith(u8, response[0..n], "HTTP/1.1 200 OK"));
+    try std.testing.expect(std.mem.indexOf(u8, response[0..n], "hi from httpx") != null);
 
     srv.requestShutdown();
 }

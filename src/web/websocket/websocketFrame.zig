@@ -56,6 +56,12 @@ pub fn parseFrameHeader(buf: []const u8) Error!struct { hdr: FrameHeader, consum
         .payloadLen = b1 & 0x7F,
     };
 
+    // RSV2/RSV3 have no meaning here: extension negotiation exposes only
+    // permessage-deflate (RSV1). RFC 6455 Section 5.2 requires failing the
+    // connection when an unknown reserved bit is set, otherwise a peer could
+    // smuggle extension semantics this codec silently ignores.
+    if (b0 & 0x30 != 0) return Error.ProtocolViolation;
+
     // Reject reserved opcodes and enforce control-frame wire invariants
     // before any payload allocation or masking work.
     if (@backingInt(hdr.opcode) == 0x3 or @backingInt(hdr.opcode) == 0x4 or
@@ -196,6 +202,17 @@ test "extended payload lengths must use canonical WebSocket bounds" {
 
     var highBit64 = [_]u8{ 0x82, 127, 0x80, 0, 0, 0, 0, 0, 0, 0 };
     try std.testing.expectError(Error.ProtocolViolation, parseFrameHeader(&highBit64));
+}
+
+test "unknown reserved bits are rejected" {
+    // RSV1 alone is legal for permessage-deflate, but RSV2/RSV3 are not
+    // defined by any extension this codec negotiates (RFC 6455 5.2).
+    var rsv2 = [_]u8{ 0xA1, 0x00 };
+    try std.testing.expectError(Error.ProtocolViolation, parseFrameHeader(&rsv2));
+    var rsv3 = [_]u8{ 0x91, 0x00 };
+    try std.testing.expectError(Error.ProtocolViolation, parseFrameHeader(&rsv3));
+    var rsv2and3 = [_]u8{ 0xB1, 0x00 };
+    try std.testing.expectError(Error.ProtocolViolation, parseFrameHeader(&rsv2and3));
 }
 
 test "frame header with rsv1 for permessage-deflate" {

@@ -246,7 +246,7 @@ pub const PriorityValue = struct {
                 pv.incremental = true;
             } else if (std.ascii.startsWithIgnoreCase(tok, "u=")) {
                 const numStr = tok[2..];
-                if (numStr.len == 1 and numStr[0] >= '0' and numStr[0] <= '7') {
+                if (numStr.len == 1 and std.ascii.isDigit(numStr[0]) and numStr[0] < '8') {
                     pv.urgency = @intCast(numStr[0] - '0');
                 }
             }
