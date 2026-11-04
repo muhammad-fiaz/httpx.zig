@@ -1,16 +1,16 @@
 # Multipart Form Data Example
 
-Multipart bodies with `httpx.multipart.stream.encoder.Encoder`, parsed back with
-`httpx.multipart.stream.decoder`. See `examples/multipart.zig`.
+Multipart bodies with `httpx.multipart.Encoder`, parsed back with
+`httpx.multipart.decoder`. See `examples/multipart.zig`.
 
 ```zig
-const fields = [_]httpx.multipart.stream.encoder.FieldValue{
+const fields = [_]httpx.multipart.FieldValue{
     .{ .name = "username", .value = "alice" },
 };
-const files = [_]httpx.multipart.stream.encoder.File{
+const files = [_]httpx.multipart.File{
     .{ .name = "avatar", .data = &.{ 0x89, 0x50, 0x4E, 0x47 }, .filename = "avatar.png", .contentType = "image/png" },
 };
-var encoder = try httpx.multipart.stream.encoder.init(allocator, io, .{
+var encoder = try httpx.multipart.encoder.init(allocator, io, .{
     .subtype = .formData,
     .fields = &fields,
     .files = &files,
@@ -24,7 +24,7 @@ var ctBuf: [128]u8 = undefined;
 const contentType = encoder.contentType(&ctBuf);
 
 // Parse the generated body back.
-var decoder = try httpx.multipart.stream.decoder.init(allocator, io, .{});
+var decoder = try httpx.multipart.decoder.init(allocator, io, .{});
 defer decoder.deinit();
 const fields = try decoder.parse(body, contentType);
 defer decoder.free(fields);
@@ -59,7 +59,7 @@ var res = try client.post("https://example.com/upload", .{
 defer res.deinit();
 ```
 
-Boundary extraction: `httpx.multipart.stream.decoder.extractBoundary(contentType)`.
+Boundary extraction: `httpx.multipart.extractBoundary(contentType)`.
 
 ## Expected Output
 

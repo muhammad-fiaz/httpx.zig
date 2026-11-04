@@ -13,18 +13,18 @@ by static files, embedded assets, templates, and downloads:
 ## Multipart Form Data
 
 RFC 2046 multipart/form-data builder and parser
-(`httpx.multipart.stream.encoder` / `httpx.multipart.stream.decoder`).
+(`httpx.multipart.encoder` / `httpx.multipart.decoder`).
 
 ### Building
 
 ```zig
-const fields = [_]httpx.multipart.stream.encoder.FieldValue{
+const fields = [_]httpx.multipart.FieldValue{
     .{ .name = "username", .value = "alice" },
 };
-const files = [_]httpx.multipart.stream.encoder.File{
+const files = [_]httpx.multipart.File{
     .{ .name = "avatar", .data = png_bytes, .filename = "photo.png", .contentType = "image/png" },
 };
-var encoder = try httpx.multipart.stream.encoder.init(allocator, io, .{
+var encoder = try httpx.multipart.encoder.init(allocator, io, .{
     .fields = &fields,
     .files = &files,
 });
@@ -74,7 +74,7 @@ defer res.deinit();
 ### extractBoundary(contentType)
 
 Extracts the boundary value from a `Content-Type` header via
-`httpx.multipart.stream.decoder.extractBoundary(...)`. Returns `null` if no boundary
+`httpx.multipart.extractBoundary(...)`. Returns `null` if no boundary
 is present. Handles both quoted (`boundary="abc"`) and unquoted
 (`boundary=abc`) forms.
 
@@ -83,7 +83,7 @@ is present. Handles both quoted (`boundary="abc"`) and unquoted
 Parses a complete multipart body:
 
 ```zig
-const parser = httpx.multipart.stream.decoder;
+const parser = httpx.multipart.decoder;
 var decoder = try parser.init(allocator, io, .{});
 defer decoder.deinit();
 const fields = try decoder.parse(body, contentType);

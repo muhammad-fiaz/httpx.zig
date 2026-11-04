@@ -174,18 +174,47 @@ pub const compression = @import("compression/codec.zig");
 /// Multipart encoding and decoding implementation. Client operations also
 /// consume the same encoder internally through `.multipart` request options.
 pub const multipart = struct {
-    pub const stream = struct {
-        pub const encoder = @import("web/multipart/multipartEncoder.zig");
-        pub const decoder = @import("web/multipart/multipartParser.zig");
-    };
-    pub const server = @import("web/multipart/multipartServer.zig");
-    pub const field = @import("web/multipart/multipartParser.zig").Field;
+    const encoderMod = @import("web/multipart/multipartEncoder.zig");
+    const parserMod = @import("web/multipart/multipartParser.zig");
+    const serverMod = @import("web/multipart/multipartServer.zig");
+    const commonMod = @import("web/multipart/multipartCommon.zig");
+
+    // Primary encoder / decoder constructors
+    pub const encoder = encoderMod;
+    pub const decoder = parserMod;
+    pub const Encoder = encoderMod.Encoder;
+    pub const Decoder = parserMod.Decoder;
+    pub const Stream = encoderMod.StreamEncoder;
+
+    // Helper functions
+    pub const extractBoundary = parserMod.extractBoundary;
+    pub const detectSubtype = parserMod.detectSubtype;
+    pub const validateBoundary = commonMod.validateBoundary;
+
+    // Shared types
+    pub const Field = parserMod.Field;
+    pub const Part = encoderMod.Part;
+    pub const File = encoderMod.File;
+    pub const FieldValue = encoderMod.FieldValue;
+    pub const FileOptions = encoderMod.FileOptions;
+    pub const Subtype = encoderMod.Subtype;
+    pub const Limits = parserMod.Limits;
+
+    // Server & boundary namespaces
+    pub const server = serverMod;
+    pub const field = Field;
+    pub const part = Part;
     pub const file = struct {
-        pub const Options = @import("web/multipart/multipartEncoder.zig").FileOptions;
+        pub const Options = FileOptions;
     };
-    pub const part = @import("web/multipart/multipartEncoder.zig").Part;
     pub const boundary = struct {
-        pub const validate = @import("web/multipart/multipartCommon.zig").validateBoundary;
+        pub const validate = commonMod.validateBoundary;
+    };
+
+    // Backward alias for hierarchical path
+    pub const stream = struct {
+        pub const encoder = encoderMod;
+        pub const decoder = parserMod;
     };
 };
 /// Content negotiation and compression codecs used by the client and server.
@@ -389,6 +418,7 @@ pub const client = struct {
     pub const builder = httpClientMod.Client.RequestBuilder;
     pub const request = requestBuilderMod.Request;
     pub const header = requestBuilderMod.Header;
+    pub const multipart = @import("web/multipart/multipartEncoder.zig");
 
     // Body & streaming payload sources: httpx.client.body, httpx.client.stream
     pub const body = requestBuilderMod.BodySource;

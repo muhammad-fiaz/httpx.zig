@@ -23,7 +23,7 @@ Content-Type: image/png
 
 ## Building Multipart Bodies
 
-Use `httpx.multipart.stream.encoder.init` to encode fields and files. The encoder
+Use `httpx.multipart.encoder.init` to encode fields and files. The encoder
 generates a boundary unless one is supplied:
 
 ```zig
@@ -37,14 +37,14 @@ pub fn main() !void {
 
     const io = std.Io.Threaded.global_single_threaded.io();
     const png_data = @embedFile("avatar.png");
-    const fields = [_]httpx.multipart.stream.encoder.FieldValue{
+    const fields = [_]httpx.multipart.FieldValue{
         .{ .name = "username", .value = "alice" },
         .{ .name = "email", .value = "alice@example.com" },
     };
-    const files = [_]httpx.multipart.stream.encoder.File{
+    const files = [_]httpx.multipart.File{
         .{ .name = "avatar", .data = png_data, .filename = "photo.png", .contentType = "image/png" },
     };
-    var encoder = try httpx.multipart.stream.encoder.init(allocator, io, .{
+    var encoder = try httpx.multipart.encoder.init(allocator, io, .{
         .fields = &fields,
         .files = &files,
     });
@@ -78,12 +78,12 @@ The boundary must not contain `--` and should not exceed 70 characters (RFC 2046
 
 ### Extracting the Boundary
 
-Use `httpx.multipart.stream.decoder.extractBoundary` to get the boundary string from
+Use `httpx.multipart.extractBoundary` to get the boundary string from
 a `Content-Type` header:
 
 ```zig
 const contentType = "multipart/form-data; boundary=----WebKitFormBoundary";
-const boundary = httpx.multipart.stream.decoder.extractBoundary(contentType) orelse {
+const boundary = httpx.multipart.extractBoundary(contentType) orelse {
     return error.MissingBoundary;
 };
 // boundary = "----WebKitFormBoundary"
@@ -94,7 +94,7 @@ Returns `null` if no boundary parameter is present. Handles both quoted (`bounda
 ### Parsing Parts
 
 ```zig
-var decoder = try httpx.multipart.stream.decoder.init(allocator, io, .{});
+var decoder = try httpx.multipart.decoder.init(allocator, io, .{});
 defer decoder.deinit();
 const fields = try decoder.parse(body, contentType);
 defer decoder.free(fields);
@@ -171,7 +171,7 @@ fn uploadHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const ct = ctx.header("Content-Type") orelse
         return ctx.textStatus(400, "Missing Content-Type");
 
-    var decoder = try httpx.multipart.stream.decoder.init(ctx.allocator, ctx.io, .{});
+    var decoder = try httpx.multipart.decoder.init(ctx.allocator, ctx.io, .{});
     defer decoder.deinit();
     const fields = try decoder.parse(ctx.body, ct);
     defer decoder.free(fields);
@@ -224,7 +224,7 @@ defer output.deinit();
 const first_chunk = "file bytes 1";
 const second_chunk = "file bytes 2";
 
-var encoder = try httpx.multipart.stream.encoder.StreamEncoder.init(
+var encoder = try httpx.multipart.Stream.init(
     &output.writer,
     .formData,
     "upload-boundary",
@@ -248,7 +248,7 @@ boundary collisions. The returned request path still needs transport support
 for streaming bodies before this can avoid whole-body buffering over HTTP.
 
 On the server, `Context.multipartForm(.{})` parses the already-buffered request
-body. For incremental input, initialize `httpx.multipart.stream.decoder` and
+body. For incremental input, initialize `httpx.multipart.decoder` and
 call `decoder.stream(contentType)`. Each returned `partData` slice is owned by
 the decoder allocator and must be freed after use. Copy `partBegin` metadata
 before calling `next()` again. To persist a parsed file,
