@@ -32,7 +32,7 @@ const mime = @import("../../utils/mime.zig");
 
 pub const Config = struct {
     /// Filesystem root served under `mount`.
-    root: []const u8,
+    root: []const u8 = "public",
     /// URL prefix, e.g. "/assets" or "/".
     mount: []const u8 = "/",
     /// Served when a directory is requested.

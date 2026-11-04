@@ -139,8 +139,22 @@ pub const Rest = struct {
         comptime method: Method,
         path: []const u8,
         comptime handlerFn: anytype,
-        opts: EndpointOptions,
+        opts: anytype,
     ) !void {
+        const endpointOpts: EndpointOptions = blk: {
+            const OptsType = @TypeOf(opts);
+            if (OptsType == EndpointOptions) break :blk opts;
+            var o = EndpointOptions{};
+            const info = @typeInfo(OptsType);
+            if (info == .@"struct") {
+                inline for (info.@"struct".field_names) |fname| {
+                    if (@hasField(EndpointOptions, fname)) {
+                        @field(o, fname) = @field(opts, fname);
+                    }
+                }
+            }
+            break :blk o;
+        };
         const FnType = @TypeOf(handlerFn);
         const fnInfo = @typeInfo(FnType).@"fn";
 
@@ -197,12 +211,12 @@ pub const Rest = struct {
             null;
 
         const meta: metaMod.Metadata = .{
-            .operationId = opts.operationId,
-            .summary = opts.summary,
-            .description = opts.description,
-            .tags = opts.tags,
-            .deprecated = opts.deprecated,
-            .security = opts.security,
+            .operationId = endpointOpts.operationId,
+            .summary = endpointOpts.summary,
+            .description = endpointOpts.description,
+            .tags = endpointOpts.tags,
+            .deprecated = endpointOpts.deprecated,
+            .security = endpointOpts.security,
             .request = requestDesc,
             .responses = &responses,
         };
@@ -242,23 +256,23 @@ pub const Rest = struct {
         try self.router.add(method, path, Wrapper.handle, .{ .meta = meta });
     }
 
-    pub fn get(self: *Rest, path: []const u8, comptime handlerFn: anytype, opts: EndpointOptions) !void {
+    pub fn get(self: *Rest, path: []const u8, comptime handlerFn: anytype, opts: anytype) !void {
         return self.add(.GET, path, handlerFn, opts);
     }
 
-    pub fn post(self: *Rest, path: []const u8, comptime handlerFn: anytype, opts: EndpointOptions) !void {
+    pub fn post(self: *Rest, path: []const u8, comptime handlerFn: anytype, opts: anytype) !void {
         return self.add(.POST, path, handlerFn, opts);
     }
 
-    pub fn put(self: *Rest, path: []const u8, comptime handlerFn: anytype, opts: EndpointOptions) !void {
+    pub fn put(self: *Rest, path: []const u8, comptime handlerFn: anytype, opts: anytype) !void {
         return self.add(.PUT, path, handlerFn, opts);
     }
 
-    pub fn patch(self: *Rest, path: []const u8, comptime handlerFn: anytype, opts: EndpointOptions) !void {
+    pub fn patch(self: *Rest, path: []const u8, comptime handlerFn: anytype, opts: anytype) !void {
         return self.add(.PATCH, path, handlerFn, opts);
     }
 
-    pub fn delete(self: *Rest, path: []const u8, comptime handlerFn: anytype, opts: EndpointOptions) !void {
+    pub fn delete(self: *Rest, path: []const u8, comptime handlerFn: anytype, opts: anytype) !void {
         return self.add(.DELETE, path, handlerFn, opts);
     }
 };

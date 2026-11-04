@@ -208,6 +208,8 @@ pub const RequestOptions = struct {
     /// Optional cooperative cancellation flag. Checked periodically during connection,
     /// reading, writing, and streaming loops.
     cancelFlag: ?*const std.atomic.Value(bool) = null,
+    /// Alias for cancelFlag.
+    cancel: ?*const std.atomic.Value(bool) = null,
 };
 
 pub const Response = req.Response;
@@ -620,6 +622,11 @@ pub const Client = struct {
         }
 
         pub fn cancelFlag(self: *RequestBuilder, flag: *const std.atomic.Value(bool)) *RequestBuilder {
+            self.cancelFlagValue = flag;
+            return self;
+        }
+
+        pub fn cancel(self: *RequestBuilder, flag: *const std.atomic.Value(bool)) *RequestBuilder {
             self.cancelFlagValue = flag;
             return self;
         }
@@ -1201,6 +1208,38 @@ pub const Client = struct {
             var parts: std.ArrayList(mpEncoder.Part) = .empty;
             defer parts.deinit(self.allocator);
 
+            if (@hasField(@TypeOf(mp), "parts")) {
+                for (mp.parts) |p| {
+                    const PT = @TypeOf(p);
+                    const filename: ?[]const u8 = if (@hasField(PT, "filename")) blk: {
+                        const raw = p.filename;
+                        if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
+                        break :blk raw;
+                    } else null;
+                    const content_type: []const u8 = if (@hasField(PT, "contentType")) blk: {
+                        const raw = p.contentType;
+                        if (comptime @typeInfo(@TypeOf(raw)) == .optional) {
+                            if (raw) |val| break :blk val;
+                            if (filename) |fn_str| break :blk mimeMod.fromPath(fn_str);
+                            break :blk mimeMod.octetStream;
+                        }
+                        break :blk raw;
+                    } else if (filename) |fn_str| mimeMod.fromPath(fn_str) else if (@hasField(PT, "value")) "text/plain; charset=utf-8" else mimeMod.octetStream;
+                    const data_val = if (@hasField(PT, "data")) p.data else if (@hasField(PT, "value")) p.value else "";
+                    const part_headers: ?[]const mpEncoder.Header = if (@hasField(PT, "headers")) blk: {
+                        const raw = p.headers;
+                        if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
+                        break :blk raw;
+                    } else null;
+                    try parts.append(self.allocator, .{
+                        .name = p.name,
+                        .filename = filename,
+                        .contentType = content_type,
+                        .data = data_val,
+                        .headers = part_headers,
+                    });
+                }
+            }
             if (@hasField(@TypeOf(mp), "fields")) {
                 for (mp.fields) |field| {
                     const FT = @TypeOf(field);
@@ -1479,7 +1518,15 @@ pub const Client = struct {
             .maxResponseSize = reqMaxSize,
             .proxy = reqProxy,
             .bodySource = extractBodySource(opts),
-            .cancelFlag = if (@hasField(@TypeOf(opts), "cancelFlag")) opts.cancelFlag else null,
+            .cancelFlag = blk: {
+                if (@hasField(@TypeOf(opts), "cancel")) {
+                    if (opts.cancel) |c| break :blk c;
+                }
+                if (@hasField(@TypeOf(opts), "cancelFlag")) {
+                    if (opts.cancelFlag) |cf| break :blk cf;
+                }
+                break :blk null;
+            },
             .quic = self.config.protocols.http3.quic,
         };
         const result = if (streaming)

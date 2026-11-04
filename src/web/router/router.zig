@@ -191,10 +191,24 @@ pub const Context = struct {
     /// `ctx.allocator`).
     pub fn multipartForm(
         self: *Context,
-        options: multipartServerMod.Options,
+        options: anytype,
     ) multipartServerMod.Error!multipartServerMod.Form {
+        const parsedOpts: multipartServerMod.Options = blk: {
+            const OptsType = @TypeOf(options);
+            if (OptsType == multipartServerMod.Options) break :blk options;
+            var o = multipartServerMod.Options{};
+            const info = @typeInfo(OptsType);
+            if (info == .@"struct") {
+                inline for (info.@"struct".field_names) |fname| {
+                    if (@hasField(multipartServerMod.Options, fname)) {
+                        @field(o, fname) = @field(options, fname);
+                    }
+                }
+            }
+            break :blk o;
+        };
         const ct = self.header("Content-Type") orelse return error.MissingContentType;
-        return multipartServerMod.parse(self.allocator, self.io, self.body, ct, options);
+        return multipartServerMod.parse(self.allocator, self.io, self.body, ct, parsedOpts);
     }
 
     /// Extracts Bearer token from Authorization header if present.

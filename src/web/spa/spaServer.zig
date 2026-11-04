@@ -13,7 +13,7 @@ const staticFiles = @import("../staticFiles/staticFileServer.zig");
 
 pub const Config = struct {
     /// The filesystem path to the SPA directory (e.g. "./dist").
-    root: []const u8,
+    root: []const u8 = "dist",
     /// The fallback file for unmatched routes (default: "index.html").
     fallback: []const u8 = "index.html",
     /// URL prefix under which real files are served.

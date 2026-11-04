@@ -39,8 +39,22 @@ pub const App = struct {
     io: std.Io,
     server: Server,
 
-    pub fn init(allocator: Allocator, io: std.Io, config: serverMod.Config) !App {
-        const srv = try Server.init(allocator, io, config);
+    pub fn init(allocator: Allocator, io: std.Io, config: anytype) !App {
+        const srvCfg: serverMod.Config = blk: {
+            const CfgType = @TypeOf(config);
+            if (CfgType == serverMod.Config) break :blk config;
+            var c = serverMod.Config{};
+            const info = @typeInfo(CfgType);
+            if (info == .@"struct") {
+                inline for (info.@"struct".field_names) |fname| {
+                    if (@hasField(serverMod.Config, fname)) {
+                        @field(c, fname) = @field(config, fname);
+                    }
+                }
+            }
+            break :blk c;
+        };
+        const srv = try Server.init(allocator, io, srvCfg);
         return App{
             .allocator = allocator,
             .io = io,
@@ -102,27 +116,27 @@ pub const App = struct {
     }
 
     // Typed REST endpoint registration forwarders
-    pub fn restGet(self: *App, path: []const u8, comptime handlerFn: anytype, opts: restMod.EndpointOptions) !void {
+    pub fn restGet(self: *App, path: []const u8, comptime handlerFn: anytype, opts: anytype) !void {
         var r = self.rest();
         try r.get(path, handlerFn, opts);
     }
 
-    pub fn restPost(self: *App, path: []const u8, comptime handlerFn: anytype, opts: restMod.EndpointOptions) !void {
+    pub fn restPost(self: *App, path: []const u8, comptime handlerFn: anytype, opts: anytype) !void {
         var r = self.rest();
         try r.post(path, handlerFn, opts);
     }
 
-    pub fn restPut(self: *App, path: []const u8, comptime handlerFn: anytype, opts: restMod.EndpointOptions) !void {
+    pub fn restPut(self: *App, path: []const u8, comptime handlerFn: anytype, opts: anytype) !void {
         var r = self.rest();
         try r.put(path, handlerFn, opts);
     }
 
-    pub fn restPatch(self: *App, path: []const u8, comptime handlerFn: anytype, opts: restMod.EndpointOptions) !void {
+    pub fn restPatch(self: *App, path: []const u8, comptime handlerFn: anytype, opts: anytype) !void {
         var r = self.rest();
         try r.patch(path, handlerFn, opts);
     }
 
-    pub fn restDelete(self: *App, path: []const u8, comptime handlerFn: anytype, opts: restMod.EndpointOptions) !void {
+    pub fn restDelete(self: *App, path: []const u8, comptime handlerFn: anytype, opts: anytype) !void {
         var r = self.rest();
         try r.delete(path, handlerFn, opts);
     }
@@ -148,8 +162,33 @@ pub const App = struct {
     }
 
     /// Mount native documentation interfaces (Swagger UI, ReDoc, Scalar, GraphiQL, OpenAPI spec).
-    pub fn docs(self: *App, cfg: docsMod.Config) !void {
-        try docsMod.mount(self.allocator, &self.server.router, cfg, null);
+    pub fn docs(self: *App, cfg: anytype) !void {
+        const docsCfg: docsMod.Config = blk: {
+            const CfgType = @TypeOf(cfg);
+            if (CfgType == docsMod.Config) break :blk cfg;
+            var c = docsMod.Config{};
+            const info = @typeInfo(CfgType);
+            if (info == .@"struct") {
+                inline for (info.@"struct".field_names) |fname| {
+                    if (@hasField(docsMod.Config, fname)) {
+                        const fieldVal = @field(cfg, fname);
+                        const fieldInfo = @typeInfo(@TypeOf(fieldVal));
+                        if (fieldInfo == .@"struct" and @hasField(docsMod.Config, fname)) {
+                            // nested structs like openapi, swagger, redoc, scalar, graphiql
+                            inline for (@typeInfo(@TypeOf(fieldVal)).@"struct".field_names) |subName| {
+                                if (@hasField(@FieldType(docsMod.Config, fname), subName)) {
+                                    @field(@field(c, fname), subName) = @field(fieldVal, subName);
+                                }
+                            }
+                        } else {
+                            @field(c, fname) = fieldVal;
+                        }
+                    }
+                }
+            }
+            break :blk c;
+        };
+        try docsMod.mount(self.allocator, &self.server.router, docsCfg, null);
     }
 
     /// Run the server listen loop.
