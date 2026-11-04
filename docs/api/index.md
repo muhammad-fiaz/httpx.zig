@@ -14,7 +14,7 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 - `client.getAll(urls, options)` — fetch multiple URLs concurrently
 - `client.requestAll(requests, options)` — perform multiple custom requests concurrently
 - `client.checkConnectivity(options)` — connectivity probe using client I/O
-- Additional operations: `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.client.download.verifyFile`, `client.fetchSitemap`, `client.resolve`, `client.resolveUrl`
+- Additional operations: `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.client.download.verifyFile`, `client.sitemap.fetch`, `client.resolve`, `client.resolveUrl`
 
 ### Client Lifecycle
 
@@ -70,7 +70,13 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 ## API Groups
 
+- [Constructors and Options](/api/constructors)
 - [Client API](/api/client)
+- [Authentication API](/api/auth)
+- [Downloads API](/api/downloads)
+- [Parsing API](/api/parsing)
+- [Logging API](/api/logging)
+- [Documentation UI API](/api/ui)
 - [Concurrency API](/api/concurrency)
 - [Core API](/api/core)
 - [DNS API](/api/dns)

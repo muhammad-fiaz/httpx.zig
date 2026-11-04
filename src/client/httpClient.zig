@@ -266,7 +266,78 @@ fn extractMethod(opts: anytype) Method {
     return .GET;
 }
 
+fn fetchForParsing(client: *Client, url: []const u8, opts: anytype) !req.Response {
+    return client.get(url, opts);
+}
+
+pub const DocumentApi = struct {
+    pub fn fetch(self: *DocumentApi, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        const client: *Client = @fieldParentPtr("document", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/document.zig").Document.parse(client.allocator, res.header("content-type"), res.body);
+    }
+};
+
+pub const HtmlApi = struct {
+    pub fn fetch(self: *HtmlApi, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        const client: *Client = @fieldParentPtr("html", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/document.zig").Document.parseHtml(client.allocator, res.body);
+    }
+};
+
+pub const XmlApi = struct {
+    pub fn fetch(self: *XmlApi, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
+        const client: *Client = @fieldParentPtr("xml", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/document.zig").Document.parseXml(client.allocator, res.body);
+    }
+};
+
+pub const FeedApi = struct {
+    pub fn fetch(self: *FeedApi, url: []const u8, opts: anytype) !@import("../parsing/feed.zig").Feed {
+        const client: *Client = @fieldParentPtr("feed", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/feed.zig").parse(client.allocator, res.body, res.header("content-type"));
+    }
+};
+
+pub const RobotsApi = struct {
+    pub fn fetch(self: *RobotsApi, url: []const u8, opts: anytype) !@import("../parsing/robots.zig").RobotsFile {
+        const client: *Client = @fieldParentPtr("robots", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/robots.zig").parse(client.allocator, res.body);
+    }
+};
+
+pub const SitemapApi = struct {
+    pub fn fetch(self: *SitemapApi, url: []const u8, opts: anytype) !@import("../parsing/sitemap.zig").Sitemap {
+        const client: *Client = @fieldParentPtr("sitemap", self);
+        var res = try fetchForParsing(client, url, opts);
+        defer res.deinit();
+        return @import("../parsing/sitemap.zig").parse(client.allocator, res.body);
+    }
+};
+
 pub const Client = struct {
+    pub const Document = DocumentApi;
+    pub const Html = HtmlApi;
+    pub const Xml = XmlApi;
+    pub const Feed = FeedApi;
+    pub const Robots = RobotsApi;
+    pub const Sitemap = SitemapApi;
+
+    document: DocumentApi = .{},
+    html: HtmlApi = .{},
+    xml: XmlApi = .{},
+    feed: FeedApi = .{},
+    robots: RobotsApi = .{},
+    sitemap: SitemapApi = .{},
     allocator: Allocator,
     io: std.Io,
     pool: Pool,
@@ -593,48 +664,6 @@ pub const Client = struct {
         const cfg: @import("../parsing/document.zig").ParserConfig =
             if (@TypeOf(opts) == @import("../parsing/document.zig").ParserConfig) opts else .{};
         return @import("../parsing/document.zig").Parser.init(self.allocator, cfg);
-    }
-
-    /// Fetches a remote URL and parses it as a Document.
-    pub fn fetchDocument(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/document.zig").Document.parse(self.allocator, res.header("content-type"), res.body);
-    }
-
-    /// Fetches a remote URL and parses it as HTML.
-    pub fn fetchHtml(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/document.zig").Document.parseHtml(self.allocator, res.body);
-    }
-
-    /// Fetches a remote URL and parses it as XML.
-    pub fn fetchXml(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/document.zig").Document.parseXml(self.allocator, res.body);
-    }
-
-    /// Fetches a remote RSS/Atom/JSON feed.
-    pub fn fetchFeed(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/feed.zig").Feed {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/feed.zig").parse(self.allocator, res.body, res.header("content-type"));
-    }
-
-    /// Fetches robots.txt from a URL.
-    pub fn fetchRobots(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/robots.zig").RobotsFile {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/robots.zig").parse(self.allocator, res.body);
-    }
-
-    /// Fetches sitemap XML from a URL.
-    pub fn fetchSitemap(self: *Client, url: []const u8, opts: anytype) !@import("../parsing/sitemap.zig").Sitemap {
-        var res = try self.get(url, opts);
-        defer res.deinit();
-        return @import("../parsing/sitemap.zig").parse(self.allocator, res.body);
     }
 
     /// Executes a GraphQL query or mutation against a remote endpoint.

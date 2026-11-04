@@ -1,106 +1,37 @@
-# Interactive Documentation UIs
+# Documentation UIs
 
-HTTPX bundles and serves modern, interactive API documentation user interfaces directly from your server without requiring Node.js or external CDNs: **Swagger UI**, **ReDoc**, **Scalar**, and **GraphiQL**.
+Httpx.zig serves four local documentation interfaces from the embedded
+`src/assets` bundles:
 
-## Single Source of Truth
+| Interface | Default route | Guide |
+|---|---|---|
+| Swagger UI | `/docs` | [Swagger UI](/guide/swagger-ui) |
+| ReDoc | `/redoc` | [ReDoc](/guide/redoc) |
+| Scalar | `/scalar` | [Scalar](/guide/scalar) |
+| GraphiQL | `/graphiql` | [GraphiQL](/guide/graphiql) |
 
-Swagger UI, ReDoc, and Scalar consume the exact same canonical OpenAPI 3.1.0 specification generated from registered routes and served at `/openapi.json`. GraphiQL connects to the configured GraphQL endpoint instead.
+Swagger UI, ReDoc, and Scalar read the generated `/openapi.json` document.
+GraphiQL uses the configured GraphQL endpoint.
 
-```text
-Server Routes + Schema Reflection
-               │
-               ▼
-   /openapi.json (OpenAPI 3.1.0)
-   ┌───────────┼───────────┐
-   ▼           ▼           ▼
-Swagger UI   ReDoc       Scalar
- (/docs)    (/redoc)    (/scalar)
-```
+## Shared configuration
 
-## Mounting Documentation UIs
-
-Documentation routes mount automatically from `Server` config (or manually via
-`httpx.docs.mount`). The REST documentation UIs consume the same canonical `/openapi.json`:
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    var server = try httpx.Server.init(allocator, io, .{
-        .port = 8080,
-        .enableDocs = true,
-        .docs = .{
-            .title = "Store API",
-            .version = "1.0.0",
-            .description = "Production e-commerce API built with HTTPX",
-            .swagger = .{ .enabled = true, .route = "/docs", .title = "Store API - Swagger" },
-            .redoc = .{ .enabled = true, .route = "/redoc", .title = "Store API - ReDoc" },
-            .scalar = .{ .enabled = true, .route = "/scalar", .title = "Store API - Scalar" },
-            .graphiql = .{ .enabled = true, .route = "/graphiql", .graphqlEndpoint = "/graphql", .title = "Store API - GraphiQL" },
-        },
-    });
-    defer server.deinit();
-
-    server.run();
-}
-```
-
-For router-only setups (no `Server`), mount explicitly:
-
-```zig
-try httpx.docs.mount(allocator, &router, .{ .title = "Store API" }, null);
-```
-
-## Enabling and Disabling Docs
-
-`enableDocs` is the global switch for all documentation. Each UI is
-individually optional — every option below defaults to enabled:
+Documentation routes are enabled by `Server.Config.enableDocs` and configured
+with `Server.Config.docs`. Each interface has `enabled`, `route`, and `title`
+fields. GraphiQL also has `graphqlEndpoint`.
 
 ```zig
 var server = try httpx.Server.init(allocator, io, .{
-    .enableDocs = true, // global switch; false disables everything
+    .enableDocs = true,
     .docs = .{
-        .openapi = .{ .enabled = true },   // /openapi.json
-        .swagger = .{ .enabled = false },  // hide Swagger UI
-        .redoc = .{ .enabled = true },     // keep ReDoc
-        .scalar = .{ .enabled = true },    // keep Scalar
-        .graphiql = .{ .enabled = false }, // hide GraphiQL
+        .swagger = .{ .route = "/docs" },
+        .redoc = .{ .route = "/redoc" },
+        .scalar = .{ .route = "/reference" },
+        .graphiql = .{ .route = "/graphiql", .graphqlEndpoint = "/graphql" },
     },
 });
+defer server.deinit();
 ```
 
-Each section also takes its own `route` and `title`. Disabled routes are
-never registered, so they return 404 like any unknown path.
-
-## Features per UI
-
-* **Swagger UI** (`/docs`): Interactive parameter inputs, schema inspection, and live "Try It Out" test requests against the server.
-* **ReDoc** (`/redoc`): Elegant three-panel layout featuring sticky table of contents, code samples, and nested schema browsing.
-* **Scalar** (`/scalar`): Next-generation developer portal with integrated dark mode, multi-language client SDK generation, and instant search.
-* **GraphiQL** (`/graphiql`): Full GraphQL explorer with auto-completion, inline docs introspection, query history, and variable editor.
-
-## Bundled Versions
-
-> [!NOTE]
-> The API documentation interfaces are bundled locally and served by `httpx.zig` — no CDN JavaScript is loaded at runtime. (The ReDoc page template links Google Fonts for typography.)
-
-| Component | Installed version | Upstream source |
-|---|---|---|
-| Swagger UI | 5.33.1 | https://github.com/swagger-api/swagger-ui |
-| ReDoc | 2.5.4 | https://github.com/Redocly/redoc |
-| Scalar (`@scalar/api-reference`) | 1.73.1 | https://github.com/scalar/scalar |
-| GraphiQL | 5.4.0 | https://github.com/graphql/graphiql |
-
-The exact distribution files and download URLs are recorded in `src/assets/<component>/VERSION.txt`, and `src/web/docs/assets.zig` pins the same versions in tests. GraphiQL ships with Monaco editor workers (`editor.worker.js`, `json.worker.js`, `graphql.worker.js`) served under the GraphiQL route; the Swagger UI bundle includes its OAuth2 redirect page (`oauth2-redirect.html` + `oauth2-redirect.js`).
-
-## Related
-
-* [Web: OpenAPI](/web/openapi)
-* [Web: GraphQL](/web/graphql)
-* [Example: Docs Server](/examples/docs-server)
+The bundles are served locally and do not require a CDN. See the
+[Documentation UI API](/api/ui) for configuration types and the individual
+guides for each interface.

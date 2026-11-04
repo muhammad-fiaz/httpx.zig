@@ -21,6 +21,9 @@ The `Server` struct manages the listener, router, and middleware processing.
 const std = @import("std");
 const httpx = @import("httpx");
 
+var gpa: std.heap.DebugAllocator(.{}) = .init;
+defer _ = gpa.deinit();
+const allocator = gpa.allocator();
 const io = std.Io.Threaded.global_single_threaded.io();
 
 // Initialize with default config
@@ -37,8 +40,16 @@ var custom_server = try httpx.Server.init(allocator, io, .{
 });
 defer custom_server.deinit();
 
-// Initialize with environment variables (PORT, HOST, HTTPX_WORKERS)
-var env_server = try httpx.Server.init(allocator, io, httpx.Server.Config.fromEnv());
+// Environment variables are application policy; map them explicitly.
+const port = if (httpx.env.get("PORT")) |value|
+    try std.fmt.parseInt(u16, value, 10)
+else
+    8080;
+var env_server = try httpx.Server.init(allocator, io, .{
+    .host = httpx.env.get("HOST") orelse "0.0.0.0",
+    .port = port,
+    .workerCount = httpx.env.getInt(u16, "HTTPX_WORKERS") orelse 0,
+});
 defer env_server.deinit();
 ```
 

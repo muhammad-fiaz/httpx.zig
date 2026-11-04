@@ -93,6 +93,7 @@ pub const ParserConfig = struct {
     limits: html.Limits = .{},
     detectContentType: bool = true,
 };
+pub const Config = ParserConfig;
 
 pub const NodeList = struct {
     allocator: Allocator,
@@ -117,6 +118,7 @@ pub const NodeList = struct {
         };
     }
 };
+pub const Nodes = NodeList;
 
 pub const NodeHandle = struct {
     tree: *const Tree,
@@ -236,6 +238,8 @@ pub const NodeHandle = struct {
         }
     }
 };
+pub const Handle = NodeHandle;
+pub const Kind = ContentKind;
 
 pub const Document = struct {
     allocator: Allocator,

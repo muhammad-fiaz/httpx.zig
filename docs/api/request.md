@@ -34,15 +34,16 @@ pub fn main() !void {
 
 ## Request Options Fields
 
-Pass these fields inline as the final `.{}` argument to request methods. The
-client accepts duck-typed extras such as `multipart` through `anytype` opts.
-Typed values passed as `.json = value` are serialized by the high-level
-wrappers. The fluent payload type is `httpx.client.requestPayload`.
+Provide these fields in the options value passed to a client request method.
+For JSON requests, pass the value through `.json`; Httpx.zig serializes it
+before sending the request. The client also exposes
+`httpx.client.requestPayload` for callers that need the lower-level request
+builder API.
 
 | Field | Type | Description |
 |---|---|---|
-| `url` | `[]const u8` | Request URL (required) |
-| `method` | `?Method` | Explicit method for generic `request` |
+| `url` | `[]const u8` | Request URL when using `httpx.client.requestPayload`; client convenience methods take the URL as their first argument |
+| `method` | `?Method` | Explicit method for generic `request`; convenience methods choose the method |
 | `headers` | `[]const Header` | Slice of request header name/value pairs |
 | `query` | `[]const Header` | URL query parameters automatically encoded |
 | `body` | `?[]const u8` | Raw payload bytes |

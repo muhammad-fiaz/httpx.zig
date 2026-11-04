@@ -39,25 +39,28 @@ The `Client` struct is the main entry point for making requests. It manages conn
 const std = @import("std");
 const httpx = @import("httpx");
 
+var gpa: std.heap.DebugAllocator(.{}) = .init;
+defer _ = gpa.deinit();
+const allocator = gpa.allocator();
 const io = std.Io.Threaded.global_single_threaded.io();
 
 // Initialize with default configuration (returns Client by value)
 var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 
-// Initialize with custom configuration
-var client = httpx.Client.init(allocator, io, .{
+// Initialize with custom configuration instead
+var custom_client = httpx.Client.init(allocator, io, .{
     .httpVersion = .auto, // or .http10, .http11, .http2, .http3
     .timeoutMs = 10_000,
     .followRedirects = true,
 });
-defer client.deinit();
+defer custom_client.deinit();
 
 // Requests use the initialized client and its allocator/I/O context.
-var response = try client.get("https://api.example.com/users", .{});
+var response = try custom_client.get("https://api.example.com/users", .{});
 defer response.deinit();
 
-var post_res = try client.post("https://api.example.com/users", .{ .json = .{ .name = "Alice", .role = "developer" },
+var post_res = try custom_client.post("https://api.example.com/users", .{ .json = .{ .name = "Alice", .role = "developer" },
 });
 defer post_res.deinit();
 ```
@@ -217,11 +220,16 @@ All methods are URL-first (`url`, then options):
 | `getAll(urls)` | Concurrent GETs; deinit each response, free the slice |
 | `requestAll(reqs)` | Concurrent requests; same ownership |
 | `download(url, options)` | Streaming file download with resume/verify (destination via `options.path`) |
-| `downloadBatch(tasks, options)` | Concurrent downloads |
+| `downloadAll(tasks, options)` | Concurrent downloads |
 | `lookupFileInfo(url, options)` | Remote metadata without body download |
 | `updateFile(url, options)` | Atomic file update with rollback (target via `options.path`) |
 | `graphql(url, query, variables, options)` | GraphQL request |
-| `fetchDocument/fetchHtml/fetchXml/fetchFeed/fetchRobots/fetchSitemap(url, options)` | Fetch + parse documents |
+| `client.document.fetch(url, options)` | Fetch and auto-detect a document |
+| `client.html.fetch(url, options)` | Fetch and parse an HTML document |
+| `client.xml.fetch(url, options)` | Fetch and parse an XML document |
+| `client.feed.fetch(url, options)` | Fetch and parse an RSS, Atom, or JSON feed |
+| `client.robots.fetch(url, options)` | Fetch and parse a `Robots` document |
+| `client.sitemap.fetch(url, options)` | Fetch and parse a `Sitemap` document |
 | `resolve(host, options)` / `resolveUrl(url, options)` | DNS resolution (port via `options.port`) |
 | `close()` | Purge the connection pool |
 | `reset()` | Close + clear DNS cache |

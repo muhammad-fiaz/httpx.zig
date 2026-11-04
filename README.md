@@ -33,20 +33,27 @@
 
 ## Why Use httpx.zig?
 
-> [!IMPORTANT]
-> - **HTTP/1.0 to HTTP/3:** A unified library for multiple HTTP protocol versions.
-> - **Complete HTTP stack:** Client, server, TLS, DNS, proxies, connection management, and networking.
-> - **User-friendly API:** A clear `httpx.Client` workflow without unnecessary convenience functions or duplicate APIs.
-> - **Explicit resource ownership:** Clear allocator, I/O, memory-management, and resource-lifecycle responsibilities.
-> - **Built-in web framework:** Routing, middleware, authentication, static files, WebSockets, multipart processing, and more.
-> - **Downloads and streaming:** Progress reporting, resumable downloads, checksum verification, and batch operations.
-> - **Additional capabilities:** Compression, HTML/XML parsing, templates, GraphQL, REST, OpenAPI, and other web application features.
-> - **Modular architecture:** Organized components, direct dependency integration, and consistent error handling.
->
-> httpx.zig brings HTTP clients, servers, networking, and web application functionality together in one native Zig library, with a focus on usability, explicit ownership, and maintainable APIs.
->
-**Refer to the [documentation](./docs/) for installation instructions, examples, API references, supported features, and migration guidance.**
+**One native Zig library for HTTP, networking, and web applications.**
 
+- **HTTP client and server:** HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 with connection pooling, streaming, lifecycle management, and configurable timeouts.
+- **TLS and secure transport:** TLS 1.2/1.3, ALPN, certificate and hostname verification, custom trust stores, mutual TLS, session resumption, HTTP/2 over TLS, HTTP/3 over QUIC, and FTP/FTPS.
+- **Networking and proxies:** DNS resolution and TTL caching, connectivity checks, HTTP proxies, SOCKS4/4a, SOCKS5/SOCKS5h, remote DNS resolution, and cross-platform TCP/UDP networking.
+- **HTTP client API:** Typed JSON serialization and deserialization, headers, query parameters, cookies, Basic and Bearer authentication, retries, redirects, request configuration, batch operations, request builders, and response streaming.
+- **File transfers and multipart:** Progress-aware downloads, resumable transfers, atomic updates, existing-file policies, size and checksum verification, multipart forms, and bounded streaming uploads.
+- **Built-in web framework:** High-performance routing, typed parameters, route groups, mounts, named routes, reverse routing, 404/405 handling, middleware, CORS, security headers, CSRF protection, rate limiting, health checks, and error recovery.
+- **REST and OpenAPI:** Typed REST handlers, OpenAPI 3.1 generation, and locally served Swagger UI, ReDoc, Scalar, and GraphiQL assets without external CDNs.
+- **Web application capabilities:** GraphQL, static files, ETags, SPA fallback, sessions, WebSockets, Server-Sent Events, templates, and multipart request parsing.
+- **Jinja templating:** Template inheritance, blocks, includes, loops, conditionals, filters, macros, call blocks, caching, and live-reload integration.
+- **Parsing and compression:** HTML/XML DOM parsing, CSS selectors, RSS/Atom/JSON feeds, robots.txt, sitemaps, gzip, deflate, Brotli, Zstandard, MIME detection, and content negotiation.
+- **Observability and development tools:** Prometheus metrics, metric snapshots, structured logging, request events, native file watching, CSS hot reload, and application reload workflows.
+- **Explicit resource management:** Allocator and `std.Io` integration, deterministic cleanup, bounded concurrency, and thread-based server lifecycle management.
+
+httpx.zig brings HTTP, networking, and web development together in one native Zig
+library. Its design emphasizes a consistent API, explicit resource ownership,
+efficient I/O, and modular implementation.
+
+[**Explore the documentation**](./docs/) for installation, guides, API references,
+examples, supported features, and migration instructions.
 > [!NOTE]
 > httpx.zig is actively evolving, and breaking API or behavioral changes may occur between releases. If you're using an older version, consider upgrading and review the release notes and documentation before migrating.
 >
@@ -129,6 +136,17 @@
 
 <br>
 
+## Contents
+
+- [Why Use httpx.zig?](#why-use-httpxzig)
+- [Prerequisites](#prerequisites)
+- [Supported Platforms](#supported-platforms)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Performance](#performance)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Prerequisites
 
 | Requirement | Version | Notes |
@@ -173,20 +191,27 @@ zig build -Dtarget=x86-windows
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.3)**
+**Latest Release (v0.2.4)**
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.4.tar.gz
+```
+
+**Previous Release (v0.2.3, Zig 0.17)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
 ```
 
-**Previous Release (v0.2.2)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz
-```
-
 > [!WARNING]
-> Zig **0.17** is required by **v0.2.3**. Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.3**.
+> **Latest:** httpx.zig **v0.2.4** requires Zig **0.17.0+**.
+> For Zig **0.16.0**, use httpx.zig **v0.2.1**:
+>
+> ```bash
+> zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
+> ```
+>
+> Zig 0.15 support ended with v0.0.7.
 
 ### Method 2: Zig Fetch (Latest Development Build)
 
@@ -201,7 +226,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .dependencies = .{
     .httpx = .{
-        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz",
+        .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.4.tar.gz",
         .hash = "...", // Run `zig fetch --save <url>` to generate the hash.
     },
 },
@@ -240,344 +265,39 @@ exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 
 ## Quick Start
 
-Initialize an `httpx.Client` with your allocator and I/O context. The client provides built-in connection pooling, TLS session resumption, and DNS caching:
+This single program starts an HTTP server and exercises it with the HTTPX client.
+It demonstrates client configuration, HTTP methods, JSON, headers, authentication,
+retries, batch requests, streaming, DNS, GraphQL, and HTML parsing.
+
+Client requests do not use route metadata. The `meta` option shown in server
+examples describes server routes for OpenAPI; client calls pass request options
+such as `.headers`, `.json`, `.query`, `.tls`, and `.timeoutMs`.
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
+const User = struct { name: []const u8, role: []const u8 };
 
-    // 1. Initialize client
-    var client = httpx.Client.init(allocator, io, .{
-        .timeoutMs = 10_000,
-        .followRedirects = true,
-        .maxRedirects = 5,
-        .dnsCache = .{ .enable = true, .ttlMs = 60_000 },
-    });
-    defer client.deinit();
-
-    // 2. GET request
-    var res = try client.get("https://httpbun.com/get", .{});
-    defer res.deinit();
-    std.debug.print("Status: {d}, Body: {s}\n", .{ res.status, res.text() });
-
-    // 3. POST with strongly-typed JSON payload
-    const User = struct { name: []const u8, role: []const u8 };
-    var postRes = try client.post("https://httpbun.com/post", .{
-        .json = User{ .name = "Alice", .role = "engineer" },
-    });
-    defer postRes.deinit();
-}
-```
-
-For a request with an explicit method, use `client.request`. `client.fetch`
-offers a Fetch-style name over the same native transport; it returns the same
-owned `Response` type and does not impose browser-only Fetch behavior.
-
-```zig
-var response = try client.fetch("https://httpbun.com/post", .{
-    .method = .POST,
-    .json = .{ .name = "Alice" },
-});
-defer response.deinit();
-const body = response.text();
-std.debug.print("{s}\n", .{body});
-```
-
-### Stateful Client Operations
-
-Execute standard HTTP methods and advanced requests across shared connections:
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    // Initialize stateful client
-    var client = httpx.Client.init(allocator, io, .{
-        .timeoutMs = 10_000,
-        .followRedirects = true,
-        .maxRedirects = 5,
-        .dnsCache = .{ .enable = true, .ttlMs = 60_000 },
-    });
-    defer client.deinit();
-
-    // Standard HTTP methods
-    var getRes = try client.get("https://httpbun.com/get", .{});
-    defer getRes.deinit();
-
-    var postRes = try client.post("https://httpbun.com/post", .{
-        .body = "hello=world",
-        .headers = &.{.{ .name = "content-type", .value = "application/x-www-form-urlencoded" }},
-    });
-    defer postRes.deinit();
-
-    // Strongly-typed JSON serialization & deserialization
-    const CreateUser = struct { name: []const u8, email: []const u8 };
-    var userRes = try client.post("https://httpbun.com/post", .{
-        .json = CreateUser{ .name = "Alice", .email = "alice@example.com" },
-    });
-    defer userRes.deinit();
-
-    const Echo = struct { json: ?CreateUser = null };
-    const echo = try userRes.json(Echo);
-    if (echo.json) |user| std.debug.print("Created: {s} <{s}>\n", .{ user.name, user.email });
-
-    // Additional HTTP verbs
-    var putRes = try client.put("https://httpbun.com/put", .{ .body = "updated" });
-    defer putRes.deinit();
-
-    var patchRes = try client.patch("https://httpbun.com/patch", .{ .body = "partial" });
-    defer patchRes.deinit();
-
-    var delRes = try client.delete("https://httpbun.com/delete", .{});
-    defer delRes.deinit();
-}
-```
-
-### 3. Fluent RequestBuilder
-
-For advanced request assembly with headers, query parameters, authorization, and timeouts:
-
-```zig
-var builder = client.requestBuilder(.POST, "https://httpbun.com/post");
-defer builder.deinit();
-
-_ = try builder.header("X-API-Key", "secret-token-123");
-_ = try builder.query("filter", "active");
-_ = builder.timeoutMs(5000);
-_ = builder.bearerAuth("jwt-token-xyz");
-_ = try builder.json(.{ .query = "search term", .page = @as(u32, 1) });
-
-var res = try builder.send();
-defer res.deinit();
-std.debug.print("Response: {d} {s}\n", .{ res.status, res.text() });
-```
-
-
- ### Client Usage (Full Config)
-
-HTTPX uses one consistent options-struct rule: fundamental inputs
-(URL, host, source data) and long-lived resources (`allocator`, `io`)
-stay positional; all configuration, behavior, limits, and settings go
-inside the final `.{} ` argument:
-
-```zig
-client.get(url, .{ .timeoutMs = 10_000 });
-client.resolve("httpbun.com", .{ .port = 443 });
-```
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    // Create client with full config (all options use camelCase)
-    var client = httpx.Client.init(allocator, io, .{
-        .timeoutMs = 10_000,
-        .followRedirects = true,
-        .maxRedirects = 5,
-        .maxRetries = 3,
-        .retryDelayMs = 500,
-        .retryStatusCodes = &.{ 502, 503, 504 },
-        .dnsCache = .{ .enable = true, .ttlMs = 60_000 },
-    });
-    defer client.deinit();
-
-    // GET request
-    var response = try client.get("https://httpbun.com/get", .{});
-    defer response.deinit();
-
-    // POST with JSON
-    var post = try client.post("https://httpbun.com/post", .{
-        .json = .{ .name = "John", .role = "engineer" },
-    });
-    defer post.deinit();
-
-    // HTTPS with TLS options
-    var tls_resp = try client.get("https://httpbun.com/get", .{
-        .tls = .{ .verify = .none }, // dev only
-    });
-    defer tls_resp.deinit();
-
-    // Graceful close (purge connection pool)
-    client.close();
-
-    // Full reset (close + clear DNS cache)
-    client.reset();
-}
-```
-
-### Batch Requests
-
-```zig
-// Parallel requests - getAll (arrays and slices accepted directly).
-// Each Response must be deinited; free the slice with the client's allocator.
-const urls = [_][]const u8{
-    "https://httpbun.com/get",
-    "https://httpbun.com/headers",
-};
-var results = try client.getAll(urls, .{});
-defer {
-    for (results) |*r| r.deinit();
-    allocator.free(results);
+fn getHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return ctx.renderJson(.{ .message = "Hello from the HTTPX server" });
 }
 
-// Parallel requests - requestAll
-const reqs = .{
-    .{ .method = .GET, .url = "https://httpbun.com/get" },
-    .{ .method = .GET, .url = "https://httpbun.com/headers" },
-};
-var batch = try client.requestAll(reqs, .{});
-defer {
-    for (batch) |*r| r.deinit();
-    allocator.free(batch);
-}
-```
-
-
-### File Downloads & Progress Reporting
-
-`httpx.zig` includes a streaming download, resume, and file verification subsystem powered by `loaders.zig` for terminal progress bars:
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    var client = httpx.Client.init(allocator, io, .{});
-    defer client.deinit();
-
-    const sampleUrl = "https://ontheline.trincoll.edu/images/bookdown/sample-local-pdf.pdf";
-
-    // 1. Zero-config download with automatic filename & loaders.zig progress bar
-    const res = try client.download(sampleUrl, .{
-        .path = "downloads/",
-        .progress = .auto,
-        .existing = .overwrite,
-        .createDirs = true,
-    });
-    std.debug.print("Downloaded: {s} ({d} bytes)\n", .{ res.destinationPath(), res.downloadedBytes });
-
-    // 2. Download with in-flight cryptographic SHA-256 verification
-    const verifiedRes = try client.download(sampleUrl, .{
-        .path = "downloads/sample.pdf",
-        .verify = .{
-            .sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            .minSize = 100,
-            .maxSize = 50 * 1024 * 1024,
-        },
-        .atomic = true, // downloads to temp file first, renames on valid hash
-    });
-
-    // 3. Inspect remote file metadata without downloading (size, filename, ranges)
-    const fileInfo = try client.lookupFileInfo(sampleUrl, .{});
-    var sizeStrBuf: [32]u8 = undefined;
-    std.debug.print("Remote file: {s}, size: {s}\n", .{ fileInfo.fileName(), fileInfo.formatSize(&sizeStrBuf) });
-
-    // 4. Resume partial download via HTTP Range: bytes=X- (clean non-reserved keyword name)
-    const resumedRes = try client.download(sampleUrl, .{
-        .path = "downloads/sample.pdf",
-        .existing = .resumePartial,
-        .maxRetries = 3,
-    });
-
-    // 5. Safe file updater with rollback backup
-    const updateRes = try client.updateFile(sampleUrl, .{
-        .path = "bin/app.bin",
-        .backupExisting = true,
-        .backupSuffix = ".bak",
-    });
-
-    // 6. Native FTP Download with progress
-    const ftpRes = try httpx.client.download.ftpDownload(io, allocator, .{
-        .host = "ftp.example.com",
-        .remotePath = "/pub/archive.tar.gz",
-        .destinationPath = "downloads/",
-        .progress = .auto,
-    });
-}
-```
-
-### Parsing & Inspection (Internal Tree-sitter & DOM Engine)
-
-`httpx.zig` includes a comprehensive document parsing, DOM manipulation, and CSS selector inspection engine.
-
-> [!NOTE]
-> HTTPX parses HTML, XML, and templates with Tree-sitter grammars defined in their owning modules (`parsing/html.zig`, `parsing/xml.zig`, `web/templates/parser.zig`); DOM/AST semantics are built directly from those syntax trees. Applications interact exclusively with HTTPX's public APIs (`httpx.parsing.Parser`, `response.html()`, `doc.select()`). Tree-sitter is strictly an internal implementation detail and never needs to be imported by application code.
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-
-    // 1. Initialize unified parser with reusable allocator & configuration
-    var p = httpx.parsing.Parser.init(allocator, .{});
-
-    // 2. Parse HTML directly
-    var doc = try p.parseHtml("<html><head><title>My Page</title></head><body><h1 class='title'>Hello</h1><a href='/link'>Click</a></body></html>");
-    defer doc.deinit();
-
-    // Fluent zero-allocator navigation
-    const title = try doc.title();
-    const links = try doc.links();
-    var h1_nodes = try doc.select("h1.title");
-    defer h1_nodes.deinit();
-
-    // 3. Parse RSS / Atom / JSON Feed
-    var feed = try p.parseFeed(xml_feed_str, null);
-    defer feed.deinit();
-
-    // 4. Parse robots.txt
-    var robots = try p.parseRobots("User-agent: *\nDisallow: /admin/\n");
-    defer robots.deinit();
-    const allowed = robots.isAllowed("MyBot", "/public");
-
-    // 5. Parse Sitemap XML
-    var sitemap = try p.parseSitemap(sitemap_xml_str);
-    defer sitemap.deinit();
-}
-```
-
-
-
-### Server
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-fn hello(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .message = "Hello!" });
+fn postHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    const user = try ctx.json(User);
+    return ctx.renderJson(.{ .received = user });
 }
 
-fn page(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.html("<h1>Welcome</h1>");
+fn htmlHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{ .body = "<html><title>HTTPX</title><h1>Hello</h1></html>", .contentType = "text/html" };
+}
+
+fn robotsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return ctx.text("User-agent: *\nAllow: /\n");
+}
+
+fn graphqlHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    return ctx.renderJson(.{ .data = .{ .echo = "Alice" } });
 }
 
 pub fn main() !void {
@@ -589,426 +309,118 @@ pub fn main() !void {
     var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 8080,
-        .portStrategy = .incremental, // auto-increments port (8081, 8082, ...) if 8080 is busy
+        .enableDocs = false,
     });
     defer server.deinit();
 
-    try server.get("/hello", hello);
-    try server.get("/page", page);
-    server.run();
-}
-```
+    try server.router.add(.GET, "/get", getHandler, .{});
+    try server.router.add(.POST, "/post", postHandler, .{});
+    try server.router.add(.PUT, "/post", getHandler, .{});
+    try server.router.add(.PATCH, "/post", getHandler, .{});
+    try server.router.add(.DELETE, "/post", getHandler, .{});
+    try server.router.add(.GET, "/html", htmlHandler, .{});
+    try server.router.add(.GET, "/robots.txt", robotsHandler, .{});
+    try server.router.add(.POST, "/graphql", graphqlHandler, .{});
+    const server_thread = try server.start();
+    defer {
+        server.requestShutdown();
+        server_thread.join();
+    }
 
-### Modern App Facade & Zig-Native REST Framework
-
-`httpx.zig` provides a high-level `App` facade and a type-driven `Rest` subsystem. REST routes automatically bind request payloads, execute typed handlers, serialize response structs to JSON, and derive an OpenAPI 3.1 specification via compile-time reflection.
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-const CreateItemRequest = struct {
-    name: []const u8,
-    price: u64,
-};
-
-const ItemResponse = struct {
-    id: u64,
-    name: []const u8,
-    price: u64,
-};
-
-fn createItem(ctx: *httpx.router.Context, req: CreateItemRequest) !httpx.ApiResult(ItemResponse) {
-    _ = ctx;
-    return .created(.{
-        .id = 101,
-        .name = req.name,
-        .price = req.price,
+    var client = httpx.Client.init(allocator, io, .{
+        .timeoutMs = 10_000,
+        .followRedirects = true,
+        .maxRedirects = 5,
+        .maxRetries = 3,
+        .retryDelayMs = 250,
+        .retryStatusCodes = &.{ 502, 503, 504 },
+        .dnsCache = .{ .enable = true, .ttlMs = 60_000 },
     });
-}
+    defer client.deinit();
 
-fn getItem(ctx: *httpx.router.Context, req: struct { id: u64 }) !httpx.ApiResult(ItemResponse) {
-    _ = ctx;
-    return .ok(.{
-        .id = req.id,
-        .name = "Widget",
-        .price = 499,
+    // GET, response status/headers/body, and query parameters.
+    var get = try client.get("http://127.0.0.1:8080/get?source=readme", .{
+        .headers = &.{.{ .name = "accept", .value = "application/json" }},
     });
-}
+    defer get.deinit();
+    std.debug.print("GET {d}: {s}\n", .{ get.status, get.text() });
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    var app = try httpx.App.init(allocator, io, .{
-        .host = "127.0.0.1",
-        .port = 8080,
+    // POST/PUT/PATCH/DELETE and strongly typed JSON payloads.
+    var post = try client.post("http://127.0.0.1:8080/post", .{
+        .json = User{ .name = "Alice", .role = "engineer" },
     });
-    defer app.deinit();
+    defer post.deinit();
+    const Echo = struct { json: ?User = null };
+    const echoed = try post.json(Echo);
+    if (echoed.json) |user| std.debug.print("JSON user: {s}\n", .{user.name});
+    var put = try client.put("http://127.0.0.1:8080/post", .{ .body = "updated" });
+    defer put.deinit();
+    var patch = try client.patch("http://127.0.0.1:8080/post", .{ .body = "partial" });
+    defer patch.deinit();
+    var del = try client.delete("http://127.0.0.1:8080/post", .{});
+    defer del.deinit();
 
-    // Register typed REST endpoints (drives router + OpenAPI 3.1 schema)
-    try app.restPost("/api/items", createItem);
-    try app.restGet("/api/items/{id}", getItem);
+    // Explicit methods, Fetch-style naming, and streaming responses.
+    var response = try client.request("http://127.0.0.1:8080/get", .{ .method = .GET });
+    defer response.deinit();
+    var fetched = try client.fetch("http://127.0.0.1:8080/get", .{});
+    defer fetched.deinit();
+    var stream = try client.requestStream("http://127.0.0.1:8080/get", .{ .method = .GET });
+    defer stream.deinit();
+    var stream_buffer: [4096]u8 = undefined;
+    while (true) {
+        const n = try stream.read(&stream_buffer);
+        if (n == 0) break;
+    }
 
-    // Mount interactive documentation UIs with local embedded vendor assets
-    try app.docs(.{
-        .openapi = .{ .enabled = true, .path = "/openapi.json", .title = "Items API", .version = "1.0.0" },
-        .swaggerUi = .{ .enabled = true, .path = "/docs" },
-        .redoc = .{ .enabled = true, .path = "/redoc" },
-        .scalar = .{ .enabled = true, .path = "/scalar" },
-    });
+    // Fluent request construction.
+    var builder = client.requestBuilder(.POST, "http://127.0.0.1:8080/post");
+    defer builder.deinit();
+    _ = try builder.header("x-api-key", "secret-token");
+    _ = try builder.query("filter", "active");
+    _ = builder.timeoutMs(5_000);
+    _ = builder.bearerAuth("jwt-token");
+    _ = try builder.json(.{ .query = "search", .page = @as(u32, 1) });
+    var built = try builder.send();
+    defer built.deinit();
 
-    try app.run();
+    // Parallel GETs. Deinit each response, then free the returned slice.
+    const urls = [_][]const u8{ "http://127.0.0.1:8080/get", "http://127.0.0.1:8080/get" };
+    var batch = try client.getAll(urls, .{});
+    defer {
+        for (batch) |*item| item.deinit();
+        allocator.free(batch);
+    }
+
+    // DNS helper.
+    var addresses = try client.resolve("127.0.0.1", .{ .port = 8080 });
+    defer addresses.deinit();
+
+    // Fetch and inspect HTML with the built-in DOM/CSS selector API.
+    var document = try client.html.fetch("http://127.0.0.1:8080/html", .{});
+    defer document.deinit();
+    const title = try document.title();
+    var headings = try document.select("h1");
+    defer headings.deinit();
+    std.debug.print("Title: {s}, headings: {d}\n", .{ title, headings.len() });
+
+    // The same parser supports XML, feeds, robots.txt, and sitemaps.
+    const parser = client.parser(.{});
+    var parsed = try parser.parseHtml("<html><title>Local page</title></html>");
+    defer parsed.deinit();
+    var robots = try client.robots.fetch("http://127.0.0.1:8080/robots.txt", .{});
+    defer robots.deinit();
+
+    // GraphQL serializes the query and variables as JSON.
+    var graph = try client.graphql("http://127.0.0.1:8080/graphql", "query Echo($name: String!) { echo(name: $name) }", .{ .name = "Alice" }, .{});
+    defer graph.deinit();
+
+    // Purge pooled connections, or close and recreate the DNS cache too.
+    client.close();
+    client.reset();
 }
 ```
 
-### TLS Server
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-fn handler(_: httpx.tls.Request) anyerror!httpx.tls.Response {
-    return .{ .body = "Hello over TLS!" };
-}
-
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    var tls_listener = try httpx.tls.Listener.init(allocator, io, .{
-        .port = 8443,
-        .defaultIdentity = .{
-            .certChainPem = @embedFile("cert.pem"),
-            .privateKeyPem = @embedFile("key.pem"),
-        },
-    });
-    defer tls_listener.deinit();
-
-    // Blocking accept loop — use requestShutdown() to break out
-    try tls_listener.run(handler);
-}
-```
-
-## Server Lifecycle
-
-```zig
-// Blocking — runs until requestShutdown() or stop() is called
-server.run();
-
-// Non-blocking — spawns a thread, returns handle for join()
-const thread = try server.start();
-
-// Pause accepting new connections (existing connections continue)
-server.pause();
-
-// Resume accepting new connections
-server.resumeAccepting();
-
-// Graceful shutdown — finishes in-flight requests, then stops
-server.requestShutdown();
-
-// Immediate shutdown — closes listener and all connections now
-server.stop();
-```
-
-## Server Metrics & Prometheus Observability
-
-HTTPX servers feature dynamic Prometheus v0.0.4 text exposition and thread-safe snapshots:
-
-```zig
-// Mount dynamic Prometheus endpoint
-try server.metrics("/metrics");
-
-// Query point-in-time server snapshot (zero-allocation)
-const snap = server.snapshot();
-std.debug.print("Uptime: {d}ms, Requests: {d}, Errors: {d}, Error Rate: {d:.2}%\n", .{
-    snap.uptimeMs,
-    snap.requestsTotal,
-    snap.errorsTotal,
-    snap.errorRate() * 100.0,
-});
-
-// Query point-in-time metrics snapshot
-const m_snap = server.metricsSnapshot();
-std.debug.print("Avg Latency: {d:.3}ms\n", .{m_snap.averageLatencyMs()});
-```
-
-Visiting `/metrics` provides standard Prometheus metrics:
-- `http_requests_total`, `http_responses_total`, `http_errors_total`, `http_timeouts_total`
-- `http_bytesIn_total`, `http_bytesOut_total`
-- `http_active_connections`, `http_active_requests`
-- `http_requests_by_method_total{method="..."}`, `http_responses_by_status_total{status="..."}`
-- `http_request_duration_seconds_bucket{le="..."}`, `_sum`, `_count`
-
-## Live File Watcher & Reload Engine
-
-Native OS events (ReadDirectoryChangesW / inotify / kqueue) with recursive watching and rename pairing. The walk prunes generated trees (`node_modules`, `.git`, `.zig-cache`, `zig-out`, `zig-pkg`, `.cache`, `dist`) at any depth, so watching a repository root does not drown in dependency files.
-
-Each changed file is classified into a reload strategy, and the browser client acts on it over SSE:
-
-| Change | Strategy | Browser behaviour |
-| --- | --- | --- |
-| `.css` | `hotReload` | Stylesheet `<link>`s are cache-busted and refetched in place; no document reload, no lost script state |
-| `.html`, `.htm`, templates, assets | `warmReload` | Document reload |
-| `.json`, `.env`, `.toml`, `.yaml`, `.conf` | `coldReload` | Document reload |
-| `.zig` | `restart` | Document reload |
-
-Setting `liveReload = true` on the server wires it up for you: the SSE endpoint is mounted at `liveReloadPath`, and the client script is injected into every HTML response — handler-written pages, static files, and the site generator alike.
-
-```zig
-var server = try httpx.Server.init(allocator, io, .{
-    .host = "127.0.0.1",
-    .port = 8080,
-    .liveReload = true,      // SSE endpoint + client injection
-    .watch = true,           // watch watchDir
-    .watchDir = "./public",
-});
-```
-
-`onChange` is invoked on the watcher thread with no internal lock held, so a callback may safely call `next()`, `changeCount()`, or `stop()`:
-
-```zig
-var watcher = try httpx.static.Watcher.init(allocator, io, .{
-    .dirPath = "./public",
-    .pollIntervalMs = 50,
-    .onChange = onFileChanged,
-});
-defer watcher.deinit();
-
-try watcher.start();
-```
-
-If you build the page yourself, the same script is available directly:
-
-```zig
-const html = try httpx.static.reload.inject(allocator, body, "/__httpx_liveReload");
-```
-
-## TLS Listener Lifecycle
-
-```zig
-// Blocking accept loop
-try tls_listener.run(handler);
-
-// Graceful shutdown (via the wrapped server)
-tls_listener.server.requestShutdown();
-
-// Immediate shutdown
-tls_listener.stop();
-```
-
-## Client Lifecycle
-
-```zig
-// Graceful close — purges the connection pool
-client.close();
-
-// Full reset — close + clear DNS cache
-client.reset();
-```
-
-## Client Retry
-
-Configure automatic retries for failed or retryable requests:
-
-```zig
-var client = httpx.Client.init(allocator, io, .{
-    .maxRetries = 3,                // retry up to 3 times (4 total attempts)
-    .retryDelayMs = 500,            // base delay between retries
-    .retryStatusCodes = &.{ 502, 503, 504 }, // status codes that trigger retry
-});
-```
-
-The delay between retries increases linearly: `retryDelayMs * (attempt + 1)`.
-
-## DNS Resolution
-
-```zig
-var resolver = httpx.net.resolve.Resolver.init(allocator, io);
-const addrs = try resolver.lookup("example.com", .{ .port = 443 });
-defer allocator.free(addrs);
-```
-
-## Context Methods & Response Types
-
-```zig
-fn handler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    // 1. Query parameters & Cookies
-    const page = ctx.queryParam("page") orelse "1";
-    const token = ctx.cookie("session");
-
-    // 2. Remote address
-    const addr = ctx.remoteAddress() orelse "unknown";
-
-    // 3. Rich Responses
-    if (std.mem.eql(u8, page, "html")) return ctx.html("<h1>Welcome</h1>");
-    if (std.mem.eql(u8, page, "text")) return ctx.text("Plain text response");
-    if (std.mem.eql(u8, page, "xml")) return ctx.xml("<data>sample</data>");
-    if (std.mem.eql(u8, page, "rss")) return ctx.rss("<rss version=\"2.0\"><channel></channel></rss>");
-    if (std.mem.eql(u8, page, "atom")) return ctx.atom("<feed xmlns=\"http://www.w3.org/2005/Atom\"></feed>");
-    if (std.mem.eql(u8, page, "robots")) return ctx.robots("User-agent: *\nAllow: /");
-    if (std.mem.eql(u8, page, "sitemap")) return ctx.sitemap("<urlset></urlset>");
-    if (std.mem.eql(u8, page, "binary")) return ctx.binary(&[_]u8{ 0x01, 0x02, 0x03 }, "application/octet-stream");
-
-    return ctx.renderJson(.{ .page = page, .addr = addr, .token = token });
-}
-```
-
-## Examples
-
-The `examples/` directory contains runnable examples demonstrating all features of `httpx.zig`:
-
-**Client:**
-- [`simple_get`](examples/simpleGet.zig) - Basic GET requests
-- [`post_json`](examples/postJson.zig) - POST with JSON body
-- [`custom_headers`](examples/customHeaders.zig) - Custom header management
-- [`connection_pool`](examples/connectionPool.zig) - Connection pooling and stats
-- [`redirect`](examples/redirect.zig) - Redirect handling
-- [`http10_client`](examples/http10Client.zig) - HTTP/1.0 client
-- [`tls_get`](examples/tlsGet.zig) - HTTPS client with TLS
-- [`https_client`](examples/httpsClient.zig) - HTTPS client with TLS
-- [`tls12_client`](examples/tls12Client.zig) - TLS 1.2 with self-signed cert
-- [`tls13_client`](examples/tls13Client.zig) - TLS 1.3 with self-signed cert
-- [`tls_mtls`](examples/tlsMtls.zig) - Mutual TLS (mTLS)
-- [`resolve`](examples/resolve.zig) - DNS resolution
-- [`concurrent_demo`](examples/concurrentDemo.zig) - Parallel request patterns
-- [`proxy_demo`](examples/proxyDemo.zig) - HTTP forward proxy
-- [`dns_demo`](examples/dnsDemo.zig) - DNS resolution and IP checks
-- [`dns_cache`](examples/dnsCache.zig) - DNS caching
-- [`compression_demo`](examples/compressionDemo.zig) - gzip/deflate/brotli compression
-- [`retry_demo`](examples/retryDemo.zig) - Client retries with linear backoff
-- [`http11_client`](examples/http11Client.zig) - HTTP/1.1 client
-- [`connectivity`](examples/connectivity.zig) - Online checks and connectivity probes
-- [`browser_demo_server`](examples/browserDemoServer.zig) - Browser demo server
-- [`full_integration`](examples/fullIntegration.zig) - Full client/server integration
-
-**Server:**
-- [`simple_server`](examples/simpleServer.zig) - Minimal HTTP server
-- [`rest_api`](examples/restApi.zig) - Typed REST endpoints with automatic OpenAPI 3.1 & Docs
-- [`custom_responses`](examples/customResponses.zig) - Rich response generation (HTML, JSON, XML, RSS, Atom, robots.txt, sitemap.xml, binary)
-- [`static_files`](examples/staticFiles.zig) - Static file serving with ETag
-- [`health_check`](examples/healthCheck.zig) - Liveness/readiness probes
-- [`streaming`](examples/streaming.zig) - Buffered response reader (plus SSE examples)
-- [`auth_and_errors`](examples/authAndErrors.zig) - Authentication and error handling
-- [`live_static_watcher`](examples/liveStaticWatcher.zig) - Live file watcher and auto-reload
-- [`docs_server`](examples/docsServer.zig) - Swagger UI, ReDoc, Scalar, GraphiQL
-- [`graphql_server`](examples/graphqlServer.zig) - GraphQL server
-- [`spa_fallback`](examples/spaFallback.zig) - SPA with HTML/JS/CSS and client-side routing
-- [`websocket_server`](examples/websocketServer.zig) - WebSocket server
-- [`sse_server`](examples/sseServer.zig) - Server-Sent Events
-- [`session_server`](examples/sessionServer.zig) - Cookie-backed session flow
-- [`metrics_server`](examples/metricsServer.zig) - Prometheus metrics
-- [`interceptor_example`](examples/interceptorExample.zig) - Client request wrappers around a server route
-- [`cookie_server`](examples/cookieServer.zig) - Cookie management
-- [`cors_server`](examples/corsServer.zig) - CORS configuration
-- [`helmet_server`](examples/helmetServer.zig) - Security headers (Helmet)
-- [`rate_limit_server`](examples/rateLimitServer.zig) - Rate limiting
-- [`body_parser_server`](examples/bodyParserServer.zig) - Request body parsing
-- [`custom_server`](examples/customServer.zig) - Request ID and body parsing
-- [`tls_server`](examples/tlsServer.zig) - HTTPS/TLS server with self-signed cert
-- [`ftp_server`](examples/ftpServer.zig) - FTP-like server
-- [`http11_server`](examples/http11Server.zig) - HTTP/1.1 server
-- [`routing_demo`](examples/routingDemo.zig) - Typed routing, groups, mounts, reversing
-- [`static_embedded`](examples/staticEmbedded.zig) - Embedded-asset serving
-
-**Download & File Inspection:**
-- [`download`](examples/download.zig) - Download with built-in progress bar and destination inference
-- [`download_batch`](examples/downloadBatch.zig) - Concurrent worker pool batch downloads
-- [`download_resume`](examples/downloadResume.zig) - Range-based resumption
-- [`download_verify`](examples/downloadVerify.zig) - Cryptographic verification (SHA-256, SHA-384, SHA-512, MD5, SHA-1)
-- [`download_checksum_file`](examples/downloadChecksumFile.zig) - Remote checksum file lookup and verification
-- [`download_existing`](examples/downloadExisting.zig) - Existing file policies (fail, overwrite, skip, resume, replace_if_changed)
-- [`download_update`](examples/downloadUpdate.zig) - Atomic self-updates with rollback safety
-- [`download_info`](examples/downloadInfo.zig) - Metadata HEAD inspection without full body download
-- [`download_custom_progress`](examples/downloadCustomProgress.zig) - Custom progress tracking and observers
-- [`ftp_download`](examples/ftpDownload.zig) - Direct FTP file download
-
-**Parsing & Inspection (Internal Tree-sitter & DOM Engine):**
-- [`html_client`](examples/htmlClient.zig) - Client fetch and automatic `response.html()` parsing
-- [`html_select`](examples/htmlSelect.zig) - CSS selector engine queries (`tag`, `.class`, `#id`, `[attr]`, combinators)
-- [`html_extract`](examples/htmlExtract.zig) - High-level extraction helpers (title, text, links, forms, images)
-- [`html_stream`](examples/htmlStream.zig) - Streaming reader input parsing
-- [`html_file`](examples/htmlFile.zig) - HTML file parsing and node inspection
-- [`html_transform`](examples/htmlTransform.zig) - Structural mutation, attribute updating, and XSS-safe serialization
-- [`parse_html`](examples/parseHtml.zig) - HTML DOM, CSS Selectors, RSS feeds, robots.txt, and sitemaps
-
-**File Watching, Static Assets & Live Reload:**
-- [`file_watcher`](examples/fileWatcher.zig) - OS-native file monitoring (Windows ReadDirectoryChangesW, Linux inotify, macOS kqueue) with rename pairing and browser live reload
-- [`liveReload`](examples/liveReload.zig) - Live reload dev server with CSS hot reload vs HTML page reload
-- [`static_site`](examples/staticSite.zig) - Static site directory mounting with ETag caching and conditional GET
-- [`spa_server`](examples/spaServer.zig) - Single Page Application server with client-side route fallback
-- [`development_server`](examples/developmentServer.zig) - Unified dev server combining watcher, live reload, and incremental parsing
-
-
-**Protocol:**
-- [`http2_client`](examples/http2Client.zig) - HTTP/2 client
-- [`http2_multiplex`](examples/http2Multiplex.zig) - HTTP/2 stream multiplexing
-- [`http2_tls`](examples/http2Tls.zig) - HTTP/2 over TLS with ALPN + chain verification
-- [`http3_client`](examples/http3Client.zig) - HTTP/3 client
-- [`http3_quic`](examples/http3Quic.zig) - HTTP/3 over QUIC
-
-**Templates & Website:**
-- [`web/templates/basic`](examples/web/templates/basic/main.zig) - Basic template rendering
-- [`web/templates/inheritance`](examples/web/templates/inheritance/main.zig) - Template inheritance
-- [`web/templates/loops`](examples/web/templates/loops/main.zig) - Template loops
-- [`web/templates/includes`](examples/web/templates/includes/main.zig) - Template includes
-- [`web/templates/liveReload`](examples/web/templates/liveReload/main.zig) - Live-reload templates
-- [`web/templates/jinja`](examples/web/templates/jinja/main.zig) - Flask-style templates (extends, blocks, includes, macros, filters)
-- [`website`](examples/website/main.zig) - Full website with embedded assets
-
-**Advanced:**
-- [`multipart`](examples/multipart.zig) - Multipart form data
-- [`openapi`](examples/openapi.zig) - OpenAPI spec generation
-- [`ftp_client`](examples/ftpClient.zig) - FTP client
-
-
-**Static Assets (for SPA example):**
-- [`static/index.html`](examples/static/index.html) - Main HTML page
-- [`static/about.html`](examples/static/about.html) - About page
-- [`static/contact.html`](examples/static/contact.html) - Contact page with form
-- [`static/styles.css`](examples/static/styles.css) - CSS styles
-- [`static/app.js`](examples/static/app.js) - Client-side JavaScript
-
-To run any example:
-```bash
-zig build run-<example-name>
-# e.g., zig build run-simple-get
-# e.g., zig build run-spa-fallback
-```
-
-
-## Validation Matrix
-
-```bash
-# Host runtime validation
-zig build test
-zig build run-all-examples   # Runs sequentially to prevent parallel compiler OOM
-
-# Cross-target library compile validation
-zig build build-all-examples -Dtarget=x86_64-linux-gnu
-```
-
-To validate Linux runtime behavior, run the cross-compiled artifacts on Linux/WSL (a foreign-target `zig build test` only compiles; it does not execute):
-
-```bash
-zig build test -Dtarget=x86_64-linux-gnu
-zig build run-simple-get -Dtarget=x86_64-linux-gnu
-```
-
-For explicit cross-target compilation:
-
-```bash
-# Compile tests for 32-bit Windows
-zig build test -Dtarget=x86-windows-gnu
-
-# Compile an example for macOS ARM64
-zig build run-simple-get -Dtarget=aarch64-macos
-```
 ## Performance
 
 <details>
@@ -1075,151 +487,6 @@ For the full benchmark methodology, measurement details, and analysis, see [Benc
 
 </details>
 
-## Examples
-
-The [`examples/`](examples) directory contains runnable examples demonstrating all features of `httpx.zig`.
-
-To run any example:
-```sh
-zig build run-<example-name>
-# Examples:
-#   zig build run-simple-get
-#   zig build run-spa-fallback
-#   zig build run-download
-#   zig build run-rest-api
-```
-
-### Core Client Examples
-- [`simple_get`](examples/simpleGet.zig) — Basic GET requests
-- [`post_json`](examples/postJson.zig) — POST with JSON body
-- [`custom_headers`](examples/customHeaders.zig) — Custom header management
-- [`connection_pool`](examples/connectionPool.zig) — Connection pooling and stats
-- [`redirect`](examples/redirect.zig) — Redirect handling
-- [`http10_client`](examples/http10Client.zig) — HTTP/1.0 client
-- [`http11_client`](examples/http11Client.zig) — HTTP/1.1 client
-- [`tls_get`](examples/tlsGet.zig) — HTTPS client with TLS
-- [`https_client`](examples/httpsClient.zig) — HTTPS client with TLS
-- [`retry_demo`](examples/retryDemo.zig) — Client retries with linear backoff
-- [`concurrent_demo`](examples/concurrentDemo.zig) — Parallel request patterns
-
-<details>
-<summary><strong>Server & Web API Examples</strong> (Click to expand)</summary>
-
-- [`simple_server`](examples/simpleServer.zig) — Minimal HTTP server
-- [`rest_api`](examples/restApi.zig) — Typed REST endpoints with automatic OpenAPI 3.1 & Docs
-- [`custom_responses`](examples/customResponses.zig) — Rich response generation (HTML, JSON, XML, RSS, Atom, robots.txt, sitemap.xml, binary)
-- [`static_files`](examples/staticFiles.zig) — Static file serving with ETag
-- [`health_check`](examples/healthCheck.zig) — Liveness/readiness probes
-- [`streaming`](examples/streaming.zig) — Buffered response reader (plus SSE examples)
-- [`auth_and_errors`](examples/authAndErrors.zig) — Authentication and error handling
-- [`live_static_watcher`](examples/liveStaticWatcher.zig) — Live file watcher and auto-reload
-- [`docs_server`](examples/docsServer.zig) — Swagger UI, ReDoc, Scalar, GraphiQL
-- [`graphql_server`](examples/graphqlServer.zig) — GraphQL server
-- [`spa_fallback`](examples/spaFallback.zig) — SPA with HTML/JS/CSS and client-side routing
-- [`websocket_server`](examples/websocketServer.zig) — WebSocket server
-- [`sse_server`](examples/sseServer.zig) — Server-Sent Events
-- [`session_server`](examples/sessionServer.zig) — Cookie-backed session flow
-- [`metrics_server`](examples/metricsServer.zig) — Prometheus metrics
-- [`interceptor_example`](examples/interceptorExample.zig) — Client request wrappers around a server route
-- [`cookie_server`](examples/cookieServer.zig) — Cookie management
-- [`cors_server`](examples/corsServer.zig) — CORS configuration
-- [`helmet_server`](examples/helmetServer.zig) — Security headers (Helmet)
-- [`rate_limit_server`](examples/rateLimitServer.zig) — Rate limiting
-- [`body_parser_server`](examples/bodyParserServer.zig) — Request body parsing
-- [`custom_server`](examples/customServer.zig) — Request ID and body parsing
-- [`tls_server`](examples/tlsServer.zig) — HTTPS/TLS server with self-signed cert
-- [`ftp_server`](examples/ftpServer.zig) — FTP-like server
-- [`http11_server`](examples/http11Server.zig) — HTTP/1.1 server
-- [`routing_demo`](examples/routingDemo.zig) — Typed routing, groups, mounts, reversing
-- [`static_embedded`](examples/staticEmbedded.zig) — Embedded-asset serving
-- [`browser_demo_server`](examples/browserDemoServer.zig) — Browser demo server
-- [`full_integration`](examples/fullIntegration.zig) — Full client/server integration
-</details>
-
-<details>
-<summary><strong>Download & File Inspection Examples</strong> (Click to expand)</summary>
-
-- [`download`](examples/download.zig) — Download with built-in progress bar and destination inference
-- [`download_batch`](examples/downloadBatch.zig) — Concurrent worker pool batch downloads
-- [`download_resume`](examples/downloadResume.zig) — Range-based resumption
-- [`download_verify`](examples/downloadVerify.zig) — Cryptographic verification (SHA-256, SHA-384, SHA-512, MD5, SHA-1)
-- [`download_checksum_file`](examples/downloadChecksumFile.zig) — Remote checksum file lookup and verification
-- [`download_existing`](examples/downloadExisting.zig) — Existing file policies (fail, overwrite, skip, resume, replace_if_changed)
-- [`download_update`](examples/downloadUpdate.zig) — Atomic self-updates with rollback safety
-- [`download_info`](examples/downloadInfo.zig) — Metadata HEAD inspection without full body download
-- [`download_custom_progress`](examples/downloadCustomProgress.zig) — Custom progress tracking and observers
-- [`ftp_download`](examples/ftpDownload.zig) — Direct FTP file download
-</details>
-
-<details>
-<summary><strong>Parsing & Inspection (DOM Engine) Examples</strong> (Click to expand)</summary>
-
-- [`html_client`](examples/htmlClient.zig) — Client fetch and automatic response.html() parsing
-- [`html_select`](examples/htmlSelect.zig) — CSS selector engine queries (tag, .class, #id, [attr], combinators)
-- [`html_extract`](examples/htmlExtract.zig) — High-level extraction helpers (title, text, links, forms, images)
-- [`html_stream`](examples/htmlStream.zig) — Streaming reader input parsing
-- [`html_file`](examples/htmlFile.zig) — HTML file parsing and node inspection
-- [`html_transform`](examples/htmlTransform.zig) — Structural mutation, attribute updating, and XSS-safe serialization
-- [`parse_html`](examples/parseHtml.zig) — HTML DOM, CSS Selectors, RSS feeds, robots.txt, and sitemaps
-</details>
-
-<details>
-<summary><strong>File Watching, Static Assets & Live Reload Examples</strong> (Click to expand)</summary>
-
-- [`file_watcher`](examples/fileWatcher.zig) — OS-native file monitoring (Windows ReadDirectoryChangesW, Linux inotify, macOS kqueue) with rename pairing and browser live reload
-- [`liveReload`](examples/liveReload.zig) — Live reload dev server with CSS hot reload vs HTML page reload
-- [`static_site`](examples/staticSite.zig) — Static site directory mounting with ETag caching and conditional GET
-- [`spa_server`](examples/spaServer.zig) — Single Page Application server with client-side route fallback
-- [`development_server`](examples/developmentServer.zig) — Unified dev server combining watcher, live reload, and incremental parsing
-- [`static/index.html`](examples/static/index.html) — Main HTML page for SPA example
-- [`static/about.html`](examples/static/about.html) — About page
-- [`static/contact.html`](examples/static/contact.html) — Contact page with form
-- [`static/styles.css`](examples/static/styles.css) — CSS styles
-- [`static/app.js`](examples/static/app.js) — Client-side JavaScript
-</details>
-
-<details>
-<summary><strong>Protocols, Security & Network Transport Examples</strong> (Click to expand)</summary>
-
-- [`http2_client`](examples/http2Client.zig) — HTTP/2 client
-- [`http2_multiplex`](examples/http2Multiplex.zig) — HTTP/2 stream multiplexing
-- [`http2_tls`](examples/http2Tls.zig) — HTTP/2 over TLS with ALPN + chain verification
-- [`http3_client`](examples/http3Client.zig) — HTTP/3 client
-- [`http3_quic`](examples/http3Quic.zig) — HTTP/3 over QUIC
-- [`http3_0rtt`](examples/http3ZeroRtt.zig) — HTTP/3 Zero-RTT connection resumption
-- [`tls12_client`](examples/tls12Client.zig) — TLS 1.2 with self-signed cert
-- [`tls13_client`](examples/tls13Client.zig) — TLS 1.3 with self-signed cert
-- [`tls_mtls`](examples/tlsMtls.zig) — Mutual TLS (mTLS)
-- [`resolve`](examples/resolve.zig) — DNS resolution
-- [`dns_demo`](examples/dnsDemo.zig) — DNS resolution and IP checks
-- [`dns_cache`](examples/dnsCache.zig) — DNS caching
-- [`proxy_demo`](examples/proxyDemo.zig) — HTTP forward proxy
-- [`connectivity`](examples/connectivity.zig) — Online checks and connectivity probes
-- [`compression_demo`](examples/compressionDemo.zig) — gzip/deflate/brotli compression
-- [`ftp_client`](examples/ftpClient.zig) — FTP client
-- [`tcp_local`](examples/tcpLocal.zig) — Local TCP socket server and client communication
-- [`udp_local`](examples/udpLocal.zig) — Local UDP datagram transmission and reception
-</details>
-
-<details>
-<summary><strong>Templates & Website Examples</strong> (Click to expand)</summary>
-
-- [`web/templates/basic`](examples/web/templates/basic/main.zig) — Basic template rendering
-- [`web/templates/inheritance`](examples/web/templates/inheritance/main.zig) — Template inheritance
-- [`web/templates/loops`](examples/web/templates/loops/main.zig) — Template loops
-- [`web/templates/includes`](examples/web/templates/includes/main.zig) — Template includes
-- [`web/templates/liveReload`](examples/web/templates/liveReload/main.zig) — Live-reload templates
-- [`web/templates/jinja`](examples/web/templates/jinja/main.zig) — Flask/Jinja2-style templates (extends, blocks, includes, macros, filters)
-- [`website`](examples/website/main.zig) — Full website with embedded assets
-</details>
-
-<details>
-<summary><strong>Advanced Features</strong> (Click to expand)</summary>
-
-- [`multipart`](examples/multipart.zig) — Multipart form data
-- [`openapi`](examples/openapi.zig) — OpenAPI spec generation
-</details>
-
 ## Contributing
 
 Contributions are welcome! Please:
@@ -1229,90 +496,32 @@ Contributions are welcome! Please:
 3. Add tests for new functionality
 4. Ensure all tests pass: `zig build test`
 5. Submit a pull request
+
 <details>
 <summary><strong>Project Structure</strong> (click to expand)</summary>
 
 ```text
 httpx.zig/
 ├── src/
-│   ├── httpx.zig                    # Public API entry point and exports
-│   ├── client/                      # HTTP client engine
-│   │   ├── httpClient.zig           # Client, connection pooling, retries
-│   │   ├── requestBuilder.zig       # Request construction and options
-│   │   ├── connectionPool.zig       # Connection pool management and stats
-│   │   ├── cookieJar.zig            # RFC 6265 client cookie jar
-│   │   └── downloadManager.zig      # Downloads, resume, verification, batches
-│   ├── server/
-│   │   └── httpServer.zig           # Server, routing, TLS, lifecycle
-│   ├── web/
-│   │   ├── app.zig                  # Unified application facade
-│   │   ├── router/                  # Router, context, response, patterns
-│   │   ├── middleware/              # CORS, security, rate limiting, auth, CSRF
-│   │   ├── rest/                    # REST API framework and OpenAPI reflection
-│   │   ├── staticFiles/             # Static files, ETags, MIME detection
-│   │   ├── spa/                     # SPA fallback serving
-│   │   ├── openApi/                 # OpenAPI 3.1 specification generation
-│   │   ├── docs/                    # Swagger UI, ReDoc, Scalar, GraphiQL
-│   │   ├── graphql/                 # GraphQL schema, resolvers, mounting
-│   │   ├── sse/                     # Server-Sent Events
-│   │   ├── websocket/               # WebSocket handshake and frames
-│   │   ├── multipart/               # Multipart encoding and parsing
-│   │   ├── health/                  # Health-check endpoints
-│   │   ├── metrics/                 # Metrics registry and Prometheus output
-│   │   ├── auth/                    # Basic and Bearer authentication
-│   │   ├── templates/               # Native template engine
-│   │   ├── site/                    # File-based website routing
-│   │   └── watcher/                 # File watching and browser live reload
-│   │       ├── watcherBackend.zig   # Watcher facade, debounce, indexing
-│   │       ├── watcherEvents.zig    # Event model and classification
-│   │       ├── fileWatcher.zig      # Browser-side live-reload script
-│   │       ├── watcherDependency.zig# Dependency graph for invalidation
-│   │       ├── windowsWatcher.zig   # Windows directory-change backend
-│   │       ├── linuxWatcher.zig     # Linux inotify backend
-│   │       └── macosWatcher.zig     # macOS watcher backend
-│   ├── protocols/
-│   │   ├── http1/                   # HTTP/1.x parsing, writing, semantics
-│   │   ├── http2/                   # HTTP/2 frames, HPACK, transport
-│   │   ├── http3/                   # HTTP/3 frames, QPACK, transport
-│   │   ├── quic/                    # QUIC packets, crypto, frames, connections
-│   │   ├── tls/                     # TLS, ALPN, mTLS, certificates
-│   │   ├── ftp/                     # FTP client and server
-│   │   └── common/                  # Shared protocol utilities
-│   ├── net/
-│   │   ├── address.zig              # IPv4 and IPv6 address abstraction
-│   │   ├── connectivity.zig         # Connectivity probing
-│   │   ├── dns/                     # DNS resolution and caching
-│   │   │   ├── dnsResolver.zig      # DNS resolution
-│   │   │   └── dnsCache.zig         # TTL-aware DNS cache
-│   │   ├── proxy.zig                # HTTP proxy support
-│   │   ├── resolve.zig              # Host resolution abstraction
-│   │   ├── socks4.zig               # SOCKS4/4a tunneling
-│   │   └── socks5.zig               # SOCKS5/5h tunneling
-│   ├── sockets/
-│   │   ├── tcp.zig                  # Cross-platform TCP sockets
-│   │   ├── udp.zig                  # UDP socket wrapper
-│   │   └── sys.zig                  # System calls and error mapping
-│   ├── compression/                 # gzip, Brotli, Zstandard, deflate
-│   ├── concurrency/                 # Pools, bounded queues, parallel requests
-│   ├── parsing/                     # HTML/XML DOM, CSS selectors, feeds
-│   │   ├── html.zig                 # HTML parser
-│   │   ├── xml.zig                  # XML parser
-│   │   ├── selector.zig             # CSS selector engine
-│   │   ├── dom.zig                  # DOM traversal
-│   │   ├── document.zig             # Document abstraction
-│   │   ├── extract.zig               # Content extraction
-│   │   ├── feed.zig                 # RSS, Atom, JSON feeds
-│   │   ├── robots.zig               # robots.txt parser
-│   │   └── sitemap.zig              # Sitemap parser
-│   ├── common/                      # Methods, status, headers, URI, I/O
-│   ├── utils/                       # MIME detection and filesystem helpers
-│   └── assets/                      # Embedded UI assets
-├── examples/                        # Runnable usage examples
+│   ├── httpx.zig              # Public API exports
+│   ├── client/                # HTTP client, requests, pooling, cookies, downloads
+│   ├── server/                # HTTP server implementation
+│   ├── web/                   # Router, REST, GraphQL, middleware, docs, WebSockets
+│   ├── protocols/             # HTTP/1, HTTP/2, HTTP/3, QUIC, TLS, FTP
+│   ├── net/                   # DNS, proxy, connectivity, address resolution
+│   ├── sockets/               # TCP, UDP, and system socket wrappers
+│   ├── parsing/               # HTML/XML DOM, selectors, feeds, robots, sitemaps
+│   ├── compression/           # Compression implementations
+│   ├── concurrency/           # Pools and bounded concurrent work
+│   ├── common/                # Shared methods, headers, URI, and I/O types
+│   ├── utils/                 # MIME and filesystem utilities
+│   └── assets/                # Embedded web assets
+├── examples/                  # Runnable client, server, protocol, and web examples
 ├── bench/
-│   └── main.zig                     # Benchmarks
-├── docs/                            # VitePress documentation
-├── build.zig                        # Build configuration
-├── build.zig.zon                    # Package metadata
+│   └── main.zig               # Benchmarks
+├── docs/                      # VitePress documentation
+├── build.zig                  # Build configuration
+├── build.zig.zon              # Package metadata
 ├── README.md
 ├── SECURITY.md
 ├── LICENSE
@@ -1324,4 +533,3 @@ httpx.zig/
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
-

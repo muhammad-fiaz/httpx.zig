@@ -1,222 +1,282 @@
-# Basic Requests
+# Client basics
 
-The `httpx.zig` client supports all standard HTTP methods and provides convenient wrappers for common operations.
+`httpx.Client` sends HTTP requests and owns the connection pool, DNS cache,
+and TLS session cache used by those requests. Initialize it with an allocator
+and `std.Io`, then release it with `deinit()`.
 
-## Creating a Client
-
-For simple usage, create a client with the default configuration:
+## Initialize a client
 
 ```zig
-    const io = std.Io.Threaded.global_single_threaded.io();
+const std = @import("std");
+const httpx = @import("httpx");
+
+var gpa: std.heap.DebugAllocator(.{}) = .init;
+defer _ = gpa.deinit();
+
+const allocator = gpa.allocator();
+const io = std.Io.Threaded.global_single_threaded.io();
+
 var client = httpx.Client.init(allocator, io, .{});
 defer client.deinit();
 ```
 
-For more control, pass a configuration to `Client.init`.
-Defaults remain implicit unless you explicitly override fields:
+`Client.init` returns a client value and does not return an error. The
+allocator and I/O value must remain valid until `client.deinit()` completes.
+See the [Client API](/api/client) for the complete configuration table.
+
+## Send a GET request
 
 ```zig
-const io = std.Io.Threaded.global_single_threaded.io();
-var client = httpx.Client.init(allocator, io, .{
-    .timeoutMs = 10_000,
-    .followRedirects = true,
-    .maxRedirects = 5,
-    .maxRetries = 3,
-    .retryDelayMs = 500,
-    .http2 = true,
-    .http3 = false,
-    .maxResponseSize = 32 * 1024 * 1024,
-    .pool = .{ .maxConnections = 64, .maxPerHost = 16 },
-});
-defer client.deinit();
-```
+var response = try client.get("https://example.com/", .{});
+defer response.deinit();
 
-## Protocol Selection
-
-- Set `.http2 = true` to use the high-level HTTP/2 request path.
-- Set `.http3 = true` to use the high-level HTTP/3 request path over UDP + QUIC/HTTP3/QPACK primitives.
-
-## Making Requests
-
-### Generic request method
-
-`client.request(url, options)` sends a request with the method selected by `.method` (GET by default). JSON bodies use Zig's `std.json` serialization and may include headers and query parameters:
-
-```zig
-// Simple GET
-var res = try client.request("https://httpbun.com/get", .{});
-defer res.deinit();
-std.debug.print("Status: {d}, Body: {s}\n", .{ res.status, res.bytes() });
-
-// POST with typed JSON struct
-const CreateUser = struct { name: []const u8, email: []const u8 };
-const User = struct { id: u64, name: []const u8, email: []const u8 };
-
-var post_res = try client.request("https://httpbun.com/post", .{
-    .method = .POST,
-    .json = CreateUser{ .name = "Alice", .email = "alice@example.com" },
-});
-defer post_res.deinit();
-
-// Typed JSON response decoding
-const user = try post_res.json(User);
-std.debug.print("User: {s} ({s})\n", .{ user.name, user.email });
-```
-
-`client.fetch(url, options)` uses the same transport and response ownership
-rules. It provides a Fetch-style name for callers that prefer it; browser-only
-Fetch policies do not apply to this native client.
-
-```zig
-var fetched = try client.fetch("https://httpbun.com/post", .{
-    .method = .POST,
-    .json = .{ .name = "Alice" },
-});
-defer fetched.deinit();
-const result = try fetched.json(struct { json: struct { name: []const u8 } });
-std.debug.print("created {s}\n", .{result.json.name});
-```
-
-### GET with explicit timeout and error handling
-
-For external endpoints, you can specify per-request timeouts:
-
-```zig
-var response = client.request("https://httpbun.com/get", .{
-    .timeoutMs = 10_000,
-}) catch |err| {
-    std.debug.print("request failed: {s}\n", .{@errorName(err)});
+if (!response.isSuccess()) {
+    std.debug.print("request failed with status {d}\n", .{response.status});
     return;
+}
+
+std.debug.print("{s}\n", .{response.text()});
+```
+
+The convenience methods take the URL first and an options value second.
+Responses own their headers and body; call `deinit()` exactly once.
+
+## Send a JSON request
+
+```zig
+const CreateUser = struct {
+    name: []const u8,
+    email: []const u8,
 };
+
+const request_data = CreateUser{
+    .name = "Alice",
+    .email = "alice@example.com",
+};
+
+var response = try client.post("https://api.example.com/users", .{
+    .json = request_data,
+});
 defer response.deinit();
 ```
 
-### HTTP method helpers
+The `json` option accepts a serializable Zig value. Httpx.zig serializes it
+and selects `application/json` unless an explicit `contentType` or header
+overrides it.
 
-For quick requests, convenience methods like `.get()` and `.post()` are also available:
+## Decode a JSON response
 
 ```zig
-var res = try client.get("https://httpbun.com/get", .{});
-defer res.deinit();
+const User = struct {
+    id: u64,
+    name: []const u8,
+};
 
-var post = try client.post("https://httpbun.com/post", .{ .json = .{ .name = "Alice", .role = "admin" },
-});
-defer post.deinit();
+var response = try client.get("https://api.example.com/users/1", .{});
+defer response.deinit();
+
+const user = try response.json(User);
+std.debug.print("{d}: {s}\n", .{ user.id, user.name });
 ```
 
-### Other Methods
+`Response.json(T)` parses using the response allocator and returns a value
+whose borrowed strings remain valid until the response is released. Use
+`jsonAlloc(T, allocator)` when the parsed value needs an independent managed
+lifetime.
 
 ```zig
-// PUT
-_ = try client.put("/users/1", .{ .json = updated_json });
-
-// DELETE
-_ = try client.delete("/users/1", .{});
-
-// Short alias for DELETE
-// HEAD
-var head_res = try client.head("/large-file", .{});
-defer head_res.deinit();
-
-// OPTIONS
-var opt_res = try client.options("/users", .{});
-defer opt_res.deinit();
-```
-
-## Cookie Jar
-
-Pass cookies per request with the `cookie` option, or keep a standalone
-`httpx.client.cookieJar` across requests (domain-aware per RFC 6265):
-
-```zig
-var jar = httpx.client.cookieJar.init(allocator, io);
-defer jar.deinit();
-
-if (loginRes.header("Set-Cookie")) |sc| {
-    jar.setFromHeader(sc, "example.com");
-}
-
-var cookieBuf: [512]u8 = undefined;
-const cookieHeader = jar.cookieHeader("example.com", "/profile", true, &cookieBuf);
-var profileRes = try client.get("https://example.com/profile", .{ .cookie = cookieHeader });
-defer profileRes.deinit();
-```
-
-Use an initialized client for requests and connection reuse:
-
-```zig
-var res = try client.get("https://httpbun.com/get", .{});
-defer res.deinit();
-
-var custom = try client.request("https://httpbun.com/headers", .{
-    .method = .GET,
-    .timeoutMs = 10_000,
-});
-defer custom.deinit();
-```
-
-## Auth Helpers
-
-Use built-in request auth helpers instead of manually building `Authorization` headers:
-
-```zig
-var bearer_res = try client.get("/protected", .{
-    .bearerAuth = "demo-token",
-    .headers = &.{.{ .name = "Accept", .value = "application/json" }},
-});
-defer bearer_res.deinit();
-
-var basic_res = try client.get("/admin", .{
-    .basicAuth = "demo:pass",
-    .headers = &.{.{ .name = "Accept", .value = "application/json" }},
-});
-defer basic_res.deinit();
-```
-
-## Request Options
-
-The second argument to request methods is a duck-typed options struct passed
-inline as `.{}`. Convenience methods supply `url` as their first argument, so
-`.{}` is valid for them. See [API: Request](/api/request) for the accepted
-fields.
-
-## Proxy Configuration
-
-Configure forward proxies when initializing the client:
-
-```zig
-const io = std.Io.Threaded.global_single_threaded.io();
-var client = httpx.Client.init(allocator, io, .{
-    .proxy = "http://127.0.0.1:8080",
-});
-defer client.deinit();
-```
-
-For SOCKS5h (remote DNS), use a `socks5h://` URL:
-
-```zig
-var client = httpx.Client.init(allocator, io, .{
-    .proxy = "socks5h://127.0.0.1:1080",
-});
-defer client.deinit();
-```
-
-## Response Handling
-
-The `Response` object provides helpers to access data:
-
-```zig
-// Check status
-if (response.isSuccess()) { ... }
-
-// Get headers
-if (response.header("Content-Type")) |ct| { ... }
-
-// Parse JSON response into a struct (ignores unknown fields)
-const MyStruct = struct { id: u32, name: []const u8 };
-const data = try response.json(MyStruct);
-
-// Or parse with an explicit allocator (returns std.json.Parsed(T))
-const parsed = try response.jsonAlloc(MyStruct, allocator);
+const parsed = try response.jsonAlloc(User, allocator);
 defer parsed.deinit();
 ```
+
+## Use headers and query parameters
+
+```zig
+var response = try client.get("https://api.example.com/search", .{
+    .headers = &.{
+        .{ .name = "Accept", .value = "application/json" },
+    },
+    .query = &.{
+        .{ .name = "q", .value = "zig networking" },
+        .{ .name = "page", .value = "2" },
+    },
+});
+defer response.deinit();
+```
+
+Query values are encoded and appended to the request URL. Header names are
+sent as supplied.
+
+## Send other HTTP methods
+
+Use the method helpers when the method is known at the call site:
+
+```zig
+var response = try client.put("https://api.example.com/users/1", .{
+    .json = .{ .name = "Alice" },
+});
+defer response.deinit();
+```
+
+```zig
+var response = try client.patch("https://api.example.com/users/1", .{
+    .json = .{ .name = "Alice" },
+});
+defer response.deinit();
+```
+
+```zig
+var response = try client.delete("https://api.example.com/users/1", .{});
+defer response.deinit();
+```
+
+```zig
+var response = try client.head("https://api.example.com/users/1", .{});
+defer response.deinit();
+```
+
+`options`, `trace`, and `connect` are also available. For a method selected
+at runtime, use `request`:
+
+```zig
+var response = try client.request("https://api.example.com/users", .{
+    .method = .OPTIONS,
+});
+defer response.deinit();
+```
+
+## Send text or form data
+
+```zig
+var response = try client.post("https://api.example.com/message", .{
+    .text = "hello from Zig",
+    .contentType = "text/plain; charset=utf-8",
+});
+defer response.deinit();
+```
+
+```zig
+var response = try client.post("https://api.example.com/login", .{
+    .form = "username=alice&password=secret",
+});
+defer response.deinit();
+```
+
+The `form` value must already be URL-encoded. Use `body` for arbitrary
+bytes and set `contentType` when the server requires a specific media type.
+
+## Set authentication
+
+```zig
+var response = try client.get("https://api.example.com/profile", .{
+    .bearerAuth = "token-value",
+});
+defer response.deinit();
+```
+
+```zig
+var response = try client.get("https://api.example.com/admin", .{
+    .basicAuth = "alice:password",
+});
+defer response.deinit();
+```
+
+For cookies, provide a cookie header value directly:
+
+```zig
+var response = try client.get("https://api.example.com/profile", .{
+    .cookie = "session=abc123",
+});
+defer response.deinit();
+```
+
+For persistent, domain-aware cookie handling, use
+`httpx.client.cookieJar`.
+
+## Set timeouts and redirects
+
+```zig
+var response = try client.get("https://api.example.com/report", .{
+    .timeoutMs = 10_000,
+    .followRedirects = true,
+    .maxRedirects = 5,
+});
+defer response.deinit();
+```
+
+Client defaults can be set with `timeoutMs`, `followRedirects`, and
+`maxRedirects` in `Client.init`; request options override those defaults.
+
+## Select an HTTP version
+
+```zig
+var response = try client.get("https://api.example.com/", .{
+    .httpVersion = .http2,
+});
+defer response.deinit();
+```
+
+The supported selection values are `.auto`, `.http10`, `.http11`, `.http2`,
+and `.http3`. Protocol availability also depends on the URL, TLS
+configuration, and the peer.
+
+## Stream a response
+
+Use `requestStream` when the response should be consumed incrementally:
+
+```zig
+var stream = try client.requestStream("https://example.com/large-file", .{});
+defer stream.deinit();
+
+var buffer: [8192]u8 = undefined;
+while (true) {
+    const count = try stream.read(&buffer);
+    if (count == 0) break;
+    try std.fs.File.stdout().writeAll(buffer[0..count]);
+}
+```
+
+The stream owns the connection and response resources until `deinit()`.
+`readAllAlloc(allocator, maxBytes)` is available when a bounded buffered copy
+is preferable.
+
+## Stream an upload
+
+Provide a `httpx.BodySource` through `bodySource` to send a request body
+incrementally. See the [request API](/api/request) and
+[streaming guide](/guide/streaming) for the available reader adapters.
+
+## Handle errors and response data
+
+Request methods return `httpx.client.Error!httpx.Response`. A successful
+transport operation can still return an HTTP error status, so check
+`isSuccess()`, `isClientError()`, or `isServerError()` before decoding an
+application response.
+
+```zig
+var response = client.get("https://api.example.com/", .{}) catch |err| {
+    std.debug.print("transport error: {s}\n", .{@errorName(err)});
+    return;
+};
+defer response.deinit();
+
+if (response.isServerError()) {
+    std.debug.print("server returned {d}\n", .{response.status});
+}
+
+if (response.header("Content-Type")) |content_type| {
+    std.debug.print("content type: {s}\n", .{content_type});
+}
+```
+
+Use `bytes()`, `text()`, `header()`, `json()`, or `jsonAlloc()` according to
+the response format.
+
+## Related documentation
+
+- [Client API](/api/client)
+- [Request API](/api/request)
+- [Response API](/api/response)
+- [Streaming](/guide/streaming)
+- [Authentication](/guide/authentication)
+- [Connection pooling](/guide/pooling)

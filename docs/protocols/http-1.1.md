@@ -14,7 +14,7 @@ GET /api/users?page=1 HTTP/1.1
 
 Host: api.example.com
 
-User-Agent: httpx/0.2.3
+User-Agent: httpx/0.2.4
 
 Accept: application/json
 

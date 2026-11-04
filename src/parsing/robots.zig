@@ -61,6 +61,7 @@ pub const RobotsFile = struct {
         return allowed;
     }
 };
+pub const Robots = RobotsFile;
 
 const regexMod = @import("regex");
 

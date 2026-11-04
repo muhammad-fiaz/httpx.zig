@@ -457,10 +457,10 @@ pub const parsing = struct {
     pub const document = @import("parsing/document.zig");
     pub const Document = document.Document;
     pub const Parser = document.Parser;
-    pub const ParserConfig = document.ParserConfig;
-    pub const NodeHandle = document.NodeHandle;
-    pub const NodeList = document.NodeList;
-    pub const ContentKind = document.ContentKind;
+    pub const Config = document.Config;
+    pub const Handle = document.Handle;
+    pub const Nodes = document.Nodes;
+    pub const Kind = document.Kind;
     pub const Metadata = extract.Metadata;
     pub const Link = extract.Link;
     pub const Form = extract.Form;
@@ -471,13 +471,13 @@ pub const parsing = struct {
     pub const Feed = feed.Feed;
     pub const FeedKind = feed.FeedKind;
     pub const FeedEntry = feed.FeedEntry;
-    pub const RobotsFile = robots.RobotsFile;
+    pub const Robots = robots.Robots;
     pub const Sitemap = sitemap.Sitemap;
     pub const SitemapUrl = sitemap.SitemapUrl;
     pub const ChangeFreq = sitemap.ChangeFreq;
-    pub const ParsedSelector = selector.ParsedSelector;
+    pub const Selector = selector.Selector;
     // Unified Parser constructor with allocator and optional options
-    pub fn init(allocator: std.mem.Allocator, config: document.ParserConfig) document.Parser {
+    pub fn init(allocator: std.mem.Allocator, config: Config) document.Parser {
         return document.Parser.init(allocator, config);
     }
     pub const detectKind = document.detectKind;

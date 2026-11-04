@@ -40,7 +40,7 @@ features:
 
 ## Latest Benchmark Snapshot
 
-Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-09, httpx v0.2.3, Zig 0.17.0).
+Benchmark target: `x86_64-windows`, `ReleaseFast` (measured 2026-10-09, httpx v0.2.4, Zig 0.17.0).
 
 | Benchmark | Category | Avg Latency | Throughput | Target |
 | :--- | :--- | :---: | :---: | :---: |
@@ -96,20 +96,27 @@ Detailed methodology and analysis: [Benchmarks Reference](/reference/benchmarks)
 
 ### Method 1: Zig Fetch (Recommended)
 
-**Latest Release (v0.2.3)**
+**Latest Release (v0.2.4)**
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.4.tar.gz
+```
+
+**Previous Release (v0.2.3, Zig 0.17)**
 
 ```bash
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
 ```
 
-**Previous Release (v0.2.2)**
-
-```bash
-zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.2.tar.gz
-```
-
 > [!WARNING]
-> Zig **0.17** is required by **v0.2.3**. Zig **0.16** is deprecated and supported only by **v0.2.1**, and Zig **0.15** is deprecated and supported only by **v0.0.7**. New projects should use **Zig 0.17.0+** with **httpx.zig v0.2.3**.
+> **Latest:** httpx.zig **v0.2.4** requires Zig **0.17.0+**.
+> For Zig **0.16.0**, use httpx.zig **v0.2.1**:
+>
+> ```bash
+> zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
+> ```
+>
+> Zig 0.15 support ended with v0.0.7.
 
 ### Method 2: Zig Fetch (Latest Development Build)
 
@@ -124,14 +131,14 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```zig
 .dependencies = .{
   .httpx = .{
-    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz",
+    .url = "https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.4.tar.gz",
     .hash = "<actual-hash-generated-by-zig-fetch>", // Run `zig fetch --save <url>` to generate the hash.
   },
 },
 ```
 
-::: tip Release maturity
-httpx.zig is built with production-readiness as a core goal. It is still a relatively new project, so adoption is growing. You can use it in real projects while tracking changelogs between releases.
+::: tip Release status
+This documentation describes the `v0.2.4` package and Zig `0.17.0`. Review the changelog and source when upgrading between releases.
 :::
 
 ::: tip Related Zig Projects
