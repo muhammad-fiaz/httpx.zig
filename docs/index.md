@@ -108,15 +108,10 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
 ```
 
-> [!WARNING]
-> **Latest:** httpx.zig **v0.2.4** requires Zig **0.17.0+**.
-> For Zig **0.16.0**, use httpx.zig **v0.2.1**:
+> [!NOTE]
+> **httpx.zig** requires Zig **0.17.0+**.
 >
-> ```bash
-> zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
-> ```
->
-> Zig 0.15 support ended with v0.0.7.
+> For documentation matching older releases of `httpx.zig`, checkout that release's tag and generate local documentation using `zig build docs`, which emits native HTML documentation into `zig-out/docs/`.
 
 ### Method 2: Zig Fetch (Latest Development Build)
 
@@ -213,7 +208,7 @@ for the full list), including:
 - `sessionServer.zig`: cookie-based session flow
 - `healthCheck.zig`: liveness/readiness probes
 - `proxyDemo.zig`: HTTP proxy and SOCKS5h tunneling
-- `concurrentDemo.zig`: parallel getAll / requestAll
+- `concurrentDemo.zig`: concurrent requests with worker pool
 - `connectionPool.zig`: keep-alive pooling
 - `staticFiles.zig`, `staticSite.zig`, `staticEmbedded.zig`: filesystem, site, and single-file embedded assets
 - `spaServer.zig`, `spaFallback.zig`: single-page applications

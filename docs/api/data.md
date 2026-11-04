@@ -119,11 +119,11 @@ library primitives.
 Use Zig std JSON facilities (`std.json`) plus httpx conveniences:
 
 - Client: `client.request(url, .{ .method = .POST, .json = value })` serializes a struct/value automatically; `Response.json(r)` / `Response.jsonAlloc(r, allocator)` decode with unknown fields ignored.
-- Server: `ctx.json(r)` deserializes the request body into `r`; `ctx.renderJson(value)` / `ctx.renderJsonStatus(code, value)` render any struct/value as `application/json`.
+- Server: `ctx.json(r)` deserializes the request body into `r`; `ctx.json(value)` / `ctx.jsonStatus(code, value)` render any struct/value as `application/json`.
 
 ## Cookies
 
-`httpx.client.cookie` / `httpx.client.cookieJar` (`Cookie` and `Jar`, including
+`httpx.client.cookie` / `httpx.client.jar` (`Cookie` and `Jar`, including
 `Cookie.SameSite`) are the cookie primitives. The jar stores cookies only when
 your code passes `Set-Cookie` values to it; the client does not attach a jar or
 persist cookies across requests automatically. Server handlers read cookies

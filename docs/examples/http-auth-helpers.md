@@ -12,7 +12,7 @@ fn bearerHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (!std.mem.eql(u8, token, "demo-token")) {
         return ctx.textStatus(401, "invalid bearer token");
     }
-    return ctx.renderJson(.{ .kind = "bearer", .ok = true });
+    return ctx.json(.{ .kind = "bearer", .ok = true });
 }
 
 fn basicHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
@@ -22,7 +22,7 @@ fn basicHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (!std.mem.eql(u8, auth.username, "demo")) {
         return ctx.textStatus(401, "invalid basic credentials");
     }
-    return ctx.renderJson(.{ .kind = "basic", .ok = true });
+    return ctx.json(.{ .kind = "basic", .ok = true });
 }
 ```
 

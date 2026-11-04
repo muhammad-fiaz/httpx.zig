@@ -65,7 +65,7 @@ fn appJsHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
 }
 
 fn apiStatusHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .status = "healthy",
         .engine = "httpx.zig",
         .version = "0.1.0",
@@ -159,7 +159,7 @@ pub fn main() !void {
     std.debug.print("[HOT RELOAD] Modifying static file '{s}'...\n", .{testAsset});
     try httpx.fs.writeFile(testAsset, "Updated asset content trigger");
 
-    httpx.clock.sleepMillis(io, 150);
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(150), .awake) catch {};
     while (fileWatcher.next()) |event| {
         std.debug.print("[HOT RELOAD] Event: path='{s}', kind={s}, strategy={s}\n", .{
             event.path,

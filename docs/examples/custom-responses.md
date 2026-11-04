@@ -34,7 +34,7 @@ pub fn main() !void {
     // 2. JSON response
     try server.get("/json", struct {
         fn handle(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-            return ctx.renderJson(.{
+            return ctx.json(.{
                 .status = "ok",
                 .version = "1.0.0",
                 .features = [_][]const u8{ "html", "json", "xml", "rss", "atom", "sitemap", "robots" },

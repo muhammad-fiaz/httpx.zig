@@ -45,7 +45,7 @@ fn logoutHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 
 The client does not retain cookies automatically. Send the session cookie on
 each request with `.cookie`, or keep it in the standalone
-`httpx.client.cookieJar`. Server handlers read it with `ctx.cookie(name)`.
+`httpx.client.jar`. Server handlers read it with `ctx.cookie(name)`.
 
 For CSRF protection on state-changing routes, install
 `httpx.middleware.csrf` rather than calling token helpers directly. See

@@ -17,7 +17,7 @@ defer del.deinit();
 ```
 
 Available methods include `fetch`, `get`, `post`, `put`, `patch`, `delete`,
-`head`, `options`, `trace`, `connect`, `request`, `getAll` and `requestAll`.
+`head`, `options`, `trace`, `connect`, and `request`.
 Downloads, GraphQL, connectivity and DNS are also methods on the client.
 
 ## Expected Output

@@ -108,6 +108,6 @@ pub fn main() !void {
 }
 
 fn apiHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .hello = "world" });
+    return ctx.json(.{ .hello = "world" });
 }
 ```

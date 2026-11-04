@@ -2850,7 +2850,7 @@ pub const Renderer = struct {
         }
 
         /// Exponentiation: right-associative and binding tighter than
-        /// unary sign (Python/Jinja semantics: `-2**2 == -4`,
+        /// unary sign (Jinja semantics: `-2**2 == -4`,
         /// `2**3**2 == 512`). The left operand excludes unary signs;
         /// the right operand allows them (`2**-2 == 0.5`).
         fn parsePow(self: *ExprParser) anyerror!Value {

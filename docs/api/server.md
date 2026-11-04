@@ -322,7 +322,7 @@ fn homePage(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 }
 
 fn listUsers(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .users = &.{} });
+    return ctx.json(.{ .users = &.{} });
 }
 ```
 
@@ -398,7 +398,7 @@ The `Context` struct is passed to every route handler and middleware.
 |--------|-------------|
 | `html(content)` / `htmlStatus(code, content)` | HTML responses |
 | `text(content)` / `textStatus(code, content)` | Plain-text responses |
-| `renderJson(value)` / `renderJsonStatus(code, value)` | JSON responses |
+| `json(value)` / `jsonStatus(code, value)` | JSON responses |
 | `render(name, data)` / `renderStatus(code, name, data)` | Template responses |
 | `xml(content)` / `rss(content)` / `atom(content)` | Feed responses |
 | `robots(content)` / `sitemap(content)` | Crawler responses |
@@ -423,7 +423,7 @@ fn getUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     _ = auth;
 
     // Return JSON response
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .id = id,
         .name = "John Doe",
         .email = "john@example.com",
@@ -439,7 +439,7 @@ Handlers are functions that take a `*Context` and return a `!Response`.
 const Handler = *const fn (*Context) anyerror!Response;
 
 fn myHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .message = "Hello World" });
+    return ctx.json(.{ .message = "Hello World" });
 }
 ```
 
@@ -453,7 +453,7 @@ fn hello(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 
 // JSON response with status
 fn created(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJsonStatus(201, .{ .id = 1, .created = true });
+    return ctx.jsonStatus(201, .{ .id = 1, .created = true });
 }
 
 // Redirect
@@ -464,12 +464,12 @@ fn redirectHome(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 // Error handling
 fn riskyHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const data = doSomethingRisky() catch |err| {
-        return ctx.renderJsonStatus(500, .{
+        return ctx.jsonStatus(500, .{
             .error = "Internal Server Error",
             .message = @errorName(err),
         });
     };
-    return ctx.renderJson(data);
+    return ctx.json(data);
 }
 ```
 
@@ -493,11 +493,11 @@ Handle route-level errors in handlers and return explicit status codes as needed
 ```zig
 fn handler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const result = riskyOperation() catch |err| switch (err) {
-        error.NotFound => return ctx.renderJsonStatus(404, .{ .error = "Not Found" }),
-        error.Unauthorized => return ctx.renderJsonStatus(401, .{ .error = "Unauthorized" }),
-        else => return ctx.renderJsonStatus(500, .{ .error = "Internal Server Error" }),
+        error.NotFound => return ctx.jsonStatus(404, .{ .error = "Not Found" }),
+        error.Unauthorized => return ctx.jsonStatus(401, .{ .error = "Unauthorized" }),
+        else => return ctx.jsonStatus(500, .{ .error = "Internal Server Error" }),
     };
-    return ctx.renderJson(result);
+    return ctx.json(result);
 }
 ```
 

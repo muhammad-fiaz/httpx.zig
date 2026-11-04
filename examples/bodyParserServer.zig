@@ -49,7 +49,7 @@ fn parseHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (ctx.body.len == 0) {
         return .{ .status = 400, .body = "{\"error\":\"No body\"}", .contentType = "application/json" };
     }
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .received = true,
         .length = ctx.body.len,
     });

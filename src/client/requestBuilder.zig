@@ -138,6 +138,8 @@ pub const Request = struct {
     headers: []const Header = &.{},
     /// Appended to the URL path as ?k=v&... (values are percent-encoded).
     query: []const Header = &.{},
+    /// Explicit Content-Type header value (e.g. "application/json", "text/plain").
+    contentType: ?[]const u8 = null,
     bodyKind: BodyKind = .none,
     /// Raw bytes for any kind; for `form` this is "k=v&k2=v2" already encoded.
     body: []const u8 = "",
@@ -1170,7 +1172,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
         const target = try buildTarget(a, u.path, u.query, req.query);
         defer a.free(target);
 
-        const ct: ?[]const u8 = if (bodyStripped) null else switch (req.bodyKind) {
+        const ct: ?[]const u8 = if (bodyStripped) null else if (req.contentType) |c| c else switch (req.bodyKind) {
             .json => "application/json",
             .form => "application/x-www-form-urlencoded",
             else => null,

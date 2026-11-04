@@ -1,6 +1,6 @@
 # Example: Concurrent Demo
 
-Demonstrates concurrentDemo.zig using the canonical HTTPX API.
+Demonstrates concurrentDemo.zig using `httpx.concurrency.Pool` and `httpx.Client`.
 
 ## Complete Example
 
@@ -8,78 +8,83 @@ Demonstrates concurrentDemo.zig using the canonical HTTPX API.
 const std = @import("std");
 const httpx = @import("httpx");
 
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-
-    const urls = [_][]const u8{
-        "https://httpbun.com/get",
-        "https://httpbun.com/headers",
-        "https://httpbun.com/ip",
+fn okHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{
+        .status = 200,
+        .body = "{\"status\":\"ok\"}",
+        .contentType = "application/json",
     };
+}
 
-    // Run all requests concurrently with an initialized client.
+pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
-    var client = httpx.Client.init(allocator, io, .{});
-    defer client.deinit();
-    const results = client.getAll(urls, .{}) catch |err| {
-        std.debug.print("getAll failed: {s}\n", .{@errorName(err)});
-        return;
+
+    var server = try httpx.Server.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .enableDocs = false,
+    });
+    defer server.deinit();
+    try server.router.add(.GET, "/get", okHandler, .{});
+    try server.router.add(.GET, "/headers", okHandler, .{});
+    try server.router.add(.GET, "/ip", okHandler, .{});
+    const port = server.localPort();
+    const thread = try server.start();
+
+    var u1Buf: [64]u8 = undefined;
+    var u2Buf: [64]u8 = undefined;
+    var u3Buf: [64]u8 = undefined;
+    const urlGet = try std.fmt.bufPrint(&u1Buf, "http://127.0.0.1:{d}/get", .{port});
+    const urlHeaders = try std.fmt.bufPrint(&u2Buf, "http://127.0.0.1:{d}/headers", .{port});
+    const urlIp = try std.fmt.bufPrint(&u3Buf, "http://127.0.0.1:{d}/ip", .{port});
+
+    var pool = try httpx.concurrency.Pool.init(allocator, io, .{ .workers = 4 });
+    defer pool.deinit();
+
+    const FetchTask = struct {
+        url: []const u8,
+        status: u16 = 0,
+        bodyLen: usize = 0,
+
+        fn run(ctx: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            const t_io = std.Io.Threaded.global_single_threaded.io();
+            var c = httpx.Client.init(std.heap.smp_allocator, t_io, .{});
+            defer c.deinit();
+
+            var resp = try c.get(self.url, .{});
+            defer resp.deinit();
+            self.status = resp.status;
+            self.bodyLen = resp.body.len;
+        }
     };
-    defer {
-        for (results) |*r| r.deinit();
-        allocator.free(results);
-    }
 
-    for (results, 0..) |result, i| {
-        std.debug.print("Request {d}: status={d} bodyLen={d}\n", .{ i + 1, result.status, result.body.len });
-    }
-
-    // Request with options
-    const reqs = .{
-        .{ .method = .GET, .url = "https://httpbun.com/get" },
-        .{ .method = .GET, .url = "https://httpbun.com/headers" },
-        .{ .method = .GET, .url = "https://httpbun.com/ip" },
+    var tasks = [_]FetchTask{
+        .{ .url = urlGet },
+        .{ .url = urlHeaders },
+        .{ .url = urlIp },
     };
 
-    const results2 = client.requestAll(reqs, .{}) catch |err| {
-        std.debug.print("requestAll failed: {s}\n", .{@errorName(err)});
-        return;
-    };
-    defer {
-        for (results2) |*r| r.deinit();
-        allocator.free(results2);
+    for (&tasks) |*t| {
+        try pool.submit(FetchTask.run, t, null);
+    }
+    pool.shutdownDrain();
+    pool.join();
+
+    for (tasks, 0..) |t, i| {
+        std.debug.print("Request {d}: status={d} bodyLen={d}\n", .{ i + 1, t.status, t.bodyLen });
     }
 
-    for (results2) |result| {
-        std.debug.print("Status: {d}\n", .{result.status});
-    }
+    server.requestShutdown();
+    thread.join();
 }
 ```
 
-## Expected Output
-
-```text
-Request 1: status=200 bodyLen=1234
-Request 2: status=200 bodyLen=567
-Request 3: status=200 bodyLen=89
-Status: 200
-Status: 200
-Status: 200
-```
-
-Status values reflect the live endpoints and body lengths vary per response.
-
-## How to Run
+## Run
 
 ```bash
 zig build run-concurrent-demo
 ```
-
-## Related
-
-* [Getting Started](/guide/getting-started)
-* [All Examples](/examples/)

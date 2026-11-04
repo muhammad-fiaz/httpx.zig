@@ -224,12 +224,36 @@ pub const Context = struct {
         };
     }
 
-    /// Deserializes JSON request body into type `T`.
-    pub fn json(self: *const Context, comptime T: type) !T {
-        const parsed = try std.json.parseFromSlice(T, self.allocator, self.body, .{
-            .ignore_unknown_fields = true,
-        });
-        return parsed.value;
+    /// Unified JSON handler:
+    /// - If `arg` is a `type` (`comptime T: type`), deserializes the request body into `T`.
+    /// - If `arg` is a value/struct, serializes and returns a JSON `Response` (200 OK).
+    pub fn json(self: *const Context, arg: anytype) !if (@TypeOf(arg) == type) arg else Response {
+        if (@TypeOf(arg) == type) {
+            const parsed = try std.json.parseFromSlice(arg, self.allocator, self.body, .{
+                .ignore_unknown_fields = true,
+            });
+            return parsed.value;
+        } else {
+            return self.jsonStatus(200, arg);
+        }
+    }
+
+    /// Renders a JSON response with a custom status code.
+    pub fn jsonStatus(self: *const Context, code: u16, value: anytype) !Response {
+        const T = @TypeOf(value);
+        if (T == []const u8 or T == []u8) {
+            return Response{
+                .status = code,
+                .body = value,
+                .contentType = "application/json",
+            };
+        }
+        const str = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
+        return Response{
+            .status = code,
+            .body = str,
+            .contentType = "application/json",
+        };
     }
 
     /// Renders an HTML response.
@@ -268,29 +292,6 @@ pub const Context = struct {
             return self.htmlStatus(code, bodyStr);
         }
         return error.TemplateEngineNotConfigured;
-    }
-
-    /// Renders a JSON response from a serialized string or struct (200 OK).
-    pub fn renderJson(self: *const Context, value: anytype) !Response {
-        return self.renderJsonStatus(200, value);
-    }
-
-    /// Renders a JSON response with a custom status code.
-    pub fn renderJsonStatus(self: *const Context, code: u16, value: anytype) !Response {
-        const T = @TypeOf(value);
-        if (T == []const u8 or T == []u8) {
-            return Response{
-                .status = code,
-                .body = value,
-                .contentType = "application/json",
-            };
-        }
-        const str = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
-        return Response{
-            .status = code,
-            .body = str,
-            .contentType = "application/json",
-        };
     }
 
     /// Formatted JSON response from a format string and arguments.

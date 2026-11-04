@@ -92,7 +92,7 @@ defer optRes.deinit();
 For advanced request assembly:
 
 ```zig
-var builder = client.requestBuilder(.POST, "https://httpbun.com/post");
+var builder = client.builder(.POST, "https://httpbun.com/post");
 defer builder.deinit();
 
 _ = try builder.header("X-Custom-Header", "Value123");
@@ -111,7 +111,7 @@ defer response.deinit();
 To submit URL-encoded forms with the builder:
 
 ```zig
-var formBuilder = client.requestBuilder(.POST, "https://httpbun.com/post");
+var formBuilder = client.builder(.POST, "https://httpbun.com/post");
 defer formBuilder.deinit();
 
 _ = try formBuilder.form("username=admin&password=secretpassword");
@@ -129,7 +129,8 @@ Stream request payloads without buffering the entire body into memory:
 var reader = httpx.SliceReader.init("streamed-chunk-data");
 var streamRes = try client.requestStream("https://httpbun.com/post", .{
     .method = .POST,
-    .bodySource = reader.source(),
+    .body = reader.source(),
+    .contentType = "application/octet-stream",
 });
 defer streamRes.deinit();
 ```

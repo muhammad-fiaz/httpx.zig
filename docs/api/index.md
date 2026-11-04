@@ -11,8 +11,6 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 - `client.request(url, options)` - generic request; `.method` defaults to GET
 - `client.fetch(url, options)` - Fetch-style convenience using the native client transport
 - `client.get / post / put / patch / delete / head / options / trace / connect / request(url, options)`
-- `client.getAll(urls, options)` — fetch multiple URLs concurrently
-- `client.requestAll(requests, options)` — perform multiple custom requests concurrently
 - `client.checkConnectivity(options)` — connectivity probe using client I/O
 - Additional operations: `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.client.download.verifyFile`, `client.sitemap.fetch`, `client.resolve`, `client.resolveUrl`
 
@@ -43,7 +41,6 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 ### Concurrency Helpers
 
-- `client.getAll(urls, .{})` / `client.requestAll(reqs, .{})`
 - `httpx.concurrency.Pool` / `httpx.concurrency.Queue` (`src/concurrency/`)
 
 ### Network Helpers

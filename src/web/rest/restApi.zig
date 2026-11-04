@@ -224,7 +224,7 @@ pub const Rest = struct {
                 const statusCode: u16 = apiRes.status.code;
 
                 if (apiRes.body) |b| {
-                    var resp = try ctx.renderJsonStatus(statusCode, b);
+                    var resp = try ctx.jsonStatus(statusCode, b);
                     if (apiRes.headers.len > 0) {
                         resp.headers = apiRes.headers;
                     }

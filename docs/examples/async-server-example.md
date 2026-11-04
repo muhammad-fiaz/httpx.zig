@@ -42,5 +42,5 @@ zig build run-concurrent-demo
 
 ## What to Verify
 
-- Parallel `getAll` / `requestAll` calls all return 200.
+- Concurrent request tasks all return 200.
 - The worker pool submits background jobs without stalling request handling.

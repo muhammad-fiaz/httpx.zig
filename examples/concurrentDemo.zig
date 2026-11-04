@@ -36,45 +36,42 @@ pub fn main() !void {
     const urlHeaders = try std.fmt.bufPrint(&u2Buf, "http://127.0.0.1:{d}/headers", .{port});
     const urlIp = try std.fmt.bufPrint(&u3Buf, "http://127.0.0.1:{d}/ip", .{port});
 
-    const urls = [_][]const u8{ urlGet, urlHeaders, urlIp };
+    // Run requests concurrently using httpx.concurrency.Pool
+    var pool = try httpx.concurrency.Pool.init(allocator, io, .{ .workers = 4 });
+    defer pool.deinit();
 
-    // Run all requests concurrently (array passed directly, no explicit & needed).
-    // Batch results and response bodies are owned by the client allocator.
-    const results = client.getAll(urls, .{}) catch |err| {
-        std.debug.print("getAll failed: {s}\n", .{@errorName(err)});
-        server.requestShutdown();
-        thread.join();
-        return;
-    };
-    defer {
-        for (results) |*r| r.deinit();
-        allocator.free(results);
-    }
+    const FetchTask = struct {
+        url: []const u8,
+        status: u16 = 0,
+        bodyLen: usize = 0,
 
-    for (results, 0..) |result, i| {
-        std.debug.print("Request {d}: status={d} bodyLen={d}\n", .{ i + 1, result.status, result.body.len });
-    }
+        fn run(ctx: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            const t_io = std.Io.Threaded.global_single_threaded.io();
+            var c = httpx.Client.init(std.heap.smp_allocator, t_io, .{});
+            defer c.deinit();
 
-    // Request with options
-    const reqs = .{
-        .{ .method = .GET, .url = urlGet },
-        .{ .method = .GET, .url = urlHeaders },
-        .{ .method = .GET, .url = urlIp },
+            var resp = try c.get(self.url, .{});
+            defer resp.deinit();
+            self.status = resp.status;
+            self.bodyLen = resp.body.len;
+        }
     };
 
-    const results2 = client.requestAll(reqs, .{}) catch |err| {
-        std.debug.print("requestAll failed: {s}\n", .{@errorName(err)});
-        server.requestShutdown();
-        thread.join();
-        return;
+    var tasks = [_]FetchTask{
+        .{ .url = urlGet },
+        .{ .url = urlHeaders },
+        .{ .url = urlIp },
     };
-    defer {
-        for (results2) |*r| r.deinit();
-        allocator.free(results2);
-    }
 
-    for (results2) |result| {
-        std.debug.print("Status: {d}\n", .{result.status});
+    for (&tasks) |*t| {
+        try pool.submit(FetchTask.run, t, null);
+    }
+    pool.shutdownDrain();
+    pool.join();
+
+    for (tasks, 0..) |t, i| {
+        std.debug.print("Request {d}: status={d} bodyLen={d}\n", .{ i + 1, t.status, t.bodyLen });
     }
 
     server.requestShutdown();

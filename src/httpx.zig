@@ -385,26 +385,29 @@ pub const client = struct {
     pub const ResolvedAddresses = httpClientMod.ResolvedAddresses;
     pub const AddressFamilyPreference = httpClientMod.AddressFamilyPreference;
 
-    // Request construction: httpx.client.requestBuilder
-    pub const requestBuilder = httpClientMod.Client.RequestBuilder;
-    pub const requestPayload = requestBuilderMod.Request;
-
-    // Body sources: httpx.client.bodySource, sliceReader, callbackReader
-    pub const bodySource = requestBuilderMod.BodySource;
-    pub const sliceReader = requestBuilderMod.SliceReader;
-    pub const callbackReader = requestBuilderMod.CallbackReader;
+    // Request construction: httpx.client.builder, httpx.client.request
+    pub const builder = httpClientMod.Client.RequestBuilder;
+    pub const request = requestBuilderMod.Request;
     pub const header = requestBuilderMod.Header;
+
+    // Body & streaming payload sources: httpx.client.body, httpx.client.stream
+    pub const body = requestBuilderMod.BodySource;
+    pub const bodySource = body;
     pub const bodyKind = requestBuilderMod.BodyKind;
+    pub const stream = requestBuilderMod.ResponseStream;
+    pub const sessionPolicyFingerprint = requestBuilderMod.sessionPolicyFingerprint;
 
-    // Connection pool: httpx.client.connectionPool
-    pub const connectionPool = poolMod.Pool;
-    pub const poolStats = poolMod.Stats;
-    pub const poolSnapshot = poolMod.Snapshot;
+    // Connection pool: httpx.client.pool
+    pub const pool = poolMod.Pool;
+    pub const connection = pool;
 
-    // Cookie jar: httpx.client.cookieJar, cookie
-    pub const cookieJar = cookieMod.Jar;
+    // Cookie jar: httpx.client.jar, httpx.client.cookie
+    pub const jar = cookieMod.Jar;
     pub const cookie = cookieMod.Cookie;
     pub const sameSite = cookieMod.Cookie.SameSite;
+
+    // Concurrency workers: httpx.client.workers
+    pub const workers = @import("concurrency/workerPool.zig").Pool;
 
     // Download manager: httpx.client.download
     pub const Downloader = downloadMod.Downloader;
@@ -412,25 +415,23 @@ pub const client = struct {
     pub const DownloadTask = downloadMod.DownloadTask;
     pub const DownloadError = downloadMod.DownloadError;
     pub const download = downloadMod.Downloader;
-    pub const downloadResult = downloadMod.DownloadResult;
-    pub const downloadTask = downloadMod.DownloadTask;
-    pub const downloadError = downloadMod.DownloadError;
-    pub const remoteFileInfo = downloadMod.RemoteFileInfo;
-    pub const progressState = downloadMod.ProgressState;
-    pub const progressInfo = downloadMod.ProgressInfo;
-    pub const progressMode = downloadMod.ProgressMode;
-    pub const checksumAlgorithm = downloadMod.ChecksumAlgorithm;
+    pub const RemoteFileInfo = downloadMod.RemoteFileInfo;
+    pub const ProgressState = downloadMod.ProgressState;
+    pub const ProgressInfo = downloadMod.ProgressInfo;
+    pub const ProgressMode = downloadMod.ProgressMode;
+    pub const ChecksumAlgorithm = downloadMod.ChecksumAlgorithm;
     pub const ftpDownload = downloadMod.ftpDownload;
     pub const parseChecksumFile = downloadMod.parseChecksumFile;
     pub const lookupFileInfo = downloadMod.lookupFileInfo;
     pub const updateFile = downloadMod.updateFile;
 
-    // Response streaming: httpx.client.responseStream
-    pub const responseStream = requestBuilderMod.ResponseStream;
-    pub const sessionPolicyFingerprint = requestBuilderMod.sessionPolicyFingerprint;
-
-    // Worker pool: httpx.client.workerPool
-    pub const workerPool = @import("concurrency/workerPool.zig").Pool;
+    // Canonical backward aliases
+    pub const requestBuilder = builder;
+    pub const requestPayload = request;
+    pub const connectionPool = pool;
+    pub const cookieJar = jar;
+    pub const responseStream = stream;
+    pub const workerPool = workers;
 };
 
 test "client facade keeps internal option types private" {
@@ -713,14 +714,14 @@ test "public facade exposes non-redundant canonical namespaces and types" {
     try testing.expect(@sizeOf(Status) > 0);
     try testing.expect(@sizeOf(Uri) > 0);
 
-    // Shallow, non-redundant camelCase client APIs
-    try testing.expect(@sizeOf(client.requestBuilder) > 0);
-    try testing.expect(@sizeOf(client.connectionPool) > 0);
-    try testing.expect(@sizeOf(client.cookieJar) > 0);
+    // Shallow, simplified words client APIs
+    try testing.expect(@sizeOf(client.builder) > 0);
+    try testing.expect(@sizeOf(client.pool) > 0);
+    try testing.expect(@sizeOf(client.jar) > 0);
     try testing.expect(@sizeOf(client.cookie) > 0);
     try testing.expect(@sizeOf(client.download) > 0);
-    try testing.expect(@sizeOf(client.responseStream) > 0);
-    try testing.expect(@sizeOf(client.workerPool) > 0);
+    try testing.expect(@sizeOf(client.stream) > 0);
+    try testing.expect(@sizeOf(client.workers) > 0);
 
     // Root namespaces
     try testing.expect(@sizeOf(http1.parser.Options) > 0);
@@ -736,9 +737,9 @@ test "public facade exposes non-redundant canonical namespaces and types" {
     defer hdrs.deinit();
     try testing.expectEqual(@as(usize, 0), hdrs.entries.items.len);
 
-    // Cookie jar operations via canonical client.cookieJar
+    // Cookie jar operations via canonical client.jar
     const io = std.Io.Threaded.global_single_threaded.io();
-    var jar = client.cookieJar.init(a, io);
+    var jar = client.jar.init(a, io);
     defer jar.deinit();
     jar.setFromHeader("session=token123; Path=/; HttpOnly", "example.com");
     var cbuf: [128]u8 = undefined;

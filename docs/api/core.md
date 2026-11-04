@@ -42,7 +42,7 @@ See [Client](/api/client) and [Request](/api/request).
 ## Server response
 
 Handlers return `httpx.router.Response` literals or `Context` helpers
-(`ctx.html`, `ctx.text`, `ctx.renderJson`, `ctx.redirect`, ...).
+(`ctx.html`, `ctx.text`, `ctx.json`, `ctx.redirect`, ...).
 See [Server](/api/server).
 
 ## Headers

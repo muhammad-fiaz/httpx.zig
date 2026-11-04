@@ -11,8 +11,8 @@ set only the fields that need to change.
 | HTTP client | `httpx.Client.init(allocator, io, options)` | `httpx.Client.init(allocator, io, .{})` |
 | HTTP server | `httpx.Server.init(allocator, io, options)` | `httpx.Server.init(allocator, io, .{})` |
 | Document parser | `httpx.parsing.init(allocator, options)` | `httpx.parsing.init(allocator, .{})` |
-| Connection pool | `httpx.client.connectionPool.init(allocator, io, options)` | `...init(allocator, io, .{})` |
-| Cookie jar | `httpx.client.cookieJar.init(allocator, io)` | no options |
+| Connection pool | `httpx.client.pool.init(allocator, io, options)` | `...init(allocator, io, .{})` |
+| Cookie jar | `httpx.client.jar.init(allocator, io)` | no options |
 | Worker pool | `httpx.concurrency.Pool.init(allocator, io, options)` | pass the pool config |
 | Bounded queue | `httpx.concurrency.Queue.init(allocator, io, capacity)` | capacity is required |
 

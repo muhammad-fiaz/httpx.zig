@@ -39,8 +39,8 @@ while (true) {
 }
 ```
 
-For streaming uploads, set `.bodySource` in the operation options to a
-`BodySource`; see
+For streaming uploads, set `.body` in the operation options to a
+`BodySource` (or use `.bodySource`); see
 [Requests](/guide/requests#_4-streaming-uploads).
 
 ## Server-Sent Events (SSE)

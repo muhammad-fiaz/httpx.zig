@@ -184,7 +184,7 @@ fn uploadHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
         }
     }
 
-    return ctx.renderJson(.{ .ok = true, .parts = fields.len });
+    return ctx.json(.{ .ok = true, .parts = fields.len });
 }
 
 pub fn main() !void {

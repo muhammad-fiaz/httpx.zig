@@ -26,7 +26,7 @@ tests, arithmetic (`+ - * / // % **`), comparisons
 `is not`), logic (`and or not`), concatenation (`~`), parentheses,
 ternary (`x if cond else y`), and calls.
 
-Operator precedence follows Jinja/Python: `or` < `and` < `not` <
+Operator precedence follows standard Jinja syntax: `or` < `and` < `not` <
 comparisons/`in`/`is` < `~` < `+ -` < `* / // %` < `**` (right-associative,
 tighter than unary minus, so `-2**2 == -4` and `2**3**2 == 512`).
 

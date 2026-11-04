@@ -1,6 +1,6 @@
 # Connection Pool API
 
-The connection pool (`httpx.client.connectionPool`) reuses plain-TCP keep-alive connections, HTTP/2 sessions, and HTTP/3 QUIC sessions. The `Client` uses it internally, but direct use is possible.
+The connection pool (`httpx.client.pool`) reuses plain-TCP keep-alive connections, HTTP/2 sessions, and HTTP/3 QUIC sessions. The `Client` uses it internally, but direct use is possible.
 
 ## PoolConfig
 
@@ -23,7 +23,7 @@ pub const PoolConfig = struct {
 ## Pool
 
 ```zig
-var pool = httpx.client.connectionPool.init(allocator, io, .{
+var pool = httpx.client.pool.init(allocator, io, .{
     .maxConnections = 100,
     .maxPerHost = 10,
     .idleTimeoutMs = 30_000,
@@ -65,7 +65,7 @@ Use `pool.statsSnapshot()` for observability. `Stats.snapshot()` returns the sam
 ```zig
 const httpx = @import("httpx");
 
-var pool = httpx.client.connectionPool.init(allocator, io, .{
+var pool = httpx.client.pool.init(allocator, io, .{
     .maxConnections = 20,
     .maxPerHost = 5,
     .idleTimeoutMs = 60_000,

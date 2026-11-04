@@ -31,7 +31,7 @@ pub fn main() !void {
 }
 
 fn itemsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .items = [_]struct { id: u32, name: []const u8 }{
             .{ .id = 1, .name = "Widget" },
             .{ .id = 2, .name = "Gadget" },

@@ -10,7 +10,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn limitedHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "ok", .data = "sensitive information" });
+    return ctx.json(.{ .status = "ok", .data = "sensitive information" });
 }
 
 pub fn main() !void {

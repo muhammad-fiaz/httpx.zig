@@ -55,7 +55,7 @@ fn secureHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     if (!try requireApiKey(ctx)) {
         return ctx.textStatus(401, "Missing or invalid X-API-Key header");
     }
-    return ctx.renderJson(.{ .status = "access granted", .data = 42 });
+    return ctx.json(.{ .status = "access granted", .data = 42 });
 }
 
 pub fn main() !void {

@@ -119,7 +119,7 @@ examples, supported features, and migration instructions.
 | **Security & Hardening** | Security headers (Helmet), automated CSRF middleware and token helpers, and CRLF injection defenses. |
 | **Multipart Form Data** | RFC 2046 multipart encoder and parser for text fields and file parts with streaming disk-sink and bounded buffered support. |
 | **FTP & FTPS** | FTP client and server with PASV/EPSV, directory listing, streaming uploads/downloads, and resumption; explicit FTPS (`AUTH TLS`/`PBSZ`/`PROT`) is supported. |
-| **Concurrency & Workers** | Thread-safe bounded `httpx.concurrency.Pool` and parallel client requests (`getAll`, `requestAll`). |
+| **Concurrency & Workers** | Thread-safe bounded `httpx.concurrency.Pool` and concurrent request execution. |
 | **Proxy Support** | Client-side HTTP forward proxy (CONNECT with `Proxy-Authorization` auth, `407` → `error.ProxyAuthRequired`) and SOCKS4/4a plus SOCKS5/SOCKS5h tunneling with remote-DNS delegation. |
 | **Structured Logging** | Zero-allocation level-filtered structured logger supporting custom sinks and terminal formatting. |
 | **Cross-Platform Sockets** | Robust non-blocking Windows socket handling with `WSAEWOULDBLOCK` retry, plus `MSG_NOSIGNAL` on POSIX. |
@@ -155,7 +155,7 @@ examples, supported features, and migration instructions.
 | **Operating System** | Windows 10+, Linux, macOS | Cross-platform networking support |
 
 > [!IMPORTANT]
-> **Zig 0.17.0 is required.** This project targets the stable Zig 0.17.0 release. Please use Zig 0.17.0 for all builds. Zig 0.16.0 is not supported by this release.
+> **Zig 0.17.0 is required.** This project targets the stable Zig 0.17.0 release. Please use Zig 0.17.0 for all builds.
 
 ---
 
@@ -203,15 +203,10 @@ zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
 ```
 
-> [!WARNING]
-> **Latest:** httpx.zig **v0.2.4** requires Zig **0.17.0+**.
-> For Zig **0.16.0**, use httpx.zig **v0.2.1**:
+> [!NOTE]
+> **httpx.zig** requires Zig **0.17.0+**.
 >
-> ```bash
-> zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
-> ```
->
-> Zig 0.15 support ended with v0.0.7.
+> For documentation matching older releases of `httpx.zig`, checkout that release's tag and generate local documentation using `zig build docs`, which emits native HTML documentation into `zig-out/docs/`.
 
 ### Method 2: Zig Fetch (Latest Development Build)
 
@@ -280,12 +275,12 @@ const httpx = @import("httpx");
 const User = struct { name: []const u8, role: []const u8 };
 
 fn getHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .message = "Hello from the HTTPX server" });
+    return ctx.json(.{ .message = "Hello from the HTTPX server" });
 }
 
 fn postHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const user = try ctx.json(User);
-    return ctx.renderJson(.{ .received = user });
+    return ctx.json(.{ .received = user });
 }
 
 fn htmlHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
@@ -297,7 +292,7 @@ fn robotsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 }
 
 fn graphqlHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .data = .{ .echo = "Alice" } });
+    return ctx.json(.{ .data = .{ .echo = "Alice" } });
 }
 
 pub fn main() !void {
@@ -374,7 +369,7 @@ pub fn main() !void {
     }
 
     // Fluent request construction.
-    var builder = client.requestBuilder(.POST, "http://127.0.0.1:8080/post");
+    var builder = client.builder(.POST, "http://127.0.0.1:8080/post");
     defer builder.deinit();
     _ = try builder.header("x-api-key", "secret-token");
     _ = try builder.query("filter", "active");
@@ -384,13 +379,9 @@ pub fn main() !void {
     var built = try builder.send();
     defer built.deinit();
 
-    // Parallel GETs. Deinit each response, then free the returned slice.
-    const urls = [_][]const u8{ "http://127.0.0.1:8080/get", "http://127.0.0.1:8080/get" };
-    var batch = try client.getAll(urls, .{});
-    defer {
-        for (batch) |*item| item.deinit();
-        allocator.free(batch);
-    }
+    // Concurrent requests with thread-safe worker pool.
+    var pool = try httpx.concurrency.Pool.init(allocator, io, .{ .workers = 2 });
+    defer pool.deinit();
 
     // DNS helper.
     var addresses = try client.resolve("127.0.0.1", .{ .port = 8080 });

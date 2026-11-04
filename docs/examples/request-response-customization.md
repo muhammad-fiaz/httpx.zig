@@ -26,7 +26,7 @@ fn createUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     _ = verbose;
     const auth = ctx.header("Authorization");
     _ = auth;
-    return ctx.renderJsonStatus(201, .{ .created = true });
+    return ctx.jsonStatus(201, .{ .created = true });
 }
 ```
 

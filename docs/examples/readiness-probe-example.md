@@ -5,11 +5,11 @@ routes (see `examples/healthCheck.zig`).
 
 ```zig
 fn healthHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "healthy" });
+    return ctx.json(.{ .status = "healthy" });
 }
 
 fn readyHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "ready" });
+    return ctx.json(.{ .status = "ready" });
 }
 
 try server.get("/healthz", healthHandler);

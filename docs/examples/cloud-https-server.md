@@ -17,7 +17,7 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .status = "ok",
         .service = "cloud-https-api",
         .version = "1.0.0",
@@ -25,7 +25,7 @@ fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 }
 
 fn healthHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "healthy" });
+    return ctx.json(.{ .status = "healthy" });
 }
 
 pub fn main() !void {

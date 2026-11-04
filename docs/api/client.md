@@ -217,10 +217,7 @@ All methods are URL-first (`url`, then options):
 | `request(url, options)` | Generic request (method set via `options.method`) |
 | `requestStream(url, options)` | Streaming request returning `ResponseStream` (incremental on HTTP/1.1) |
 | `requestBuilder(method, url)` | Start fluent `RequestBuilder` for chained request construction |
-| `getAll(urls)` | Concurrent GETs; deinit each response, free the slice |
-| `requestAll(reqs)` | Concurrent requests; same ownership |
 | `download(url, options)` | Streaming file download with resume/verify (destination via `options.path`) |
-| `downloadAll(tasks, options)` | Concurrent downloads |
 | `lookupFileInfo(url, options)` | Remote metadata without body download |
 | `updateFile(url, options)` | Atomic file update with rollback (target via `options.path`) |
 | `graphql(url, query, variables, options)` | GraphQL request |
@@ -236,7 +233,7 @@ All methods are URL-first (`url`, then options):
 
 ### Cookie Jar API
 
-The standalone `httpx.client.cookieJar` keeps cookies across requests
+The standalone `httpx.client.jar` keeps cookies across requests
 (domain-filtered per RFC 6265). Per-request cookies use the `cookie` option.
 
 | Method | Description |
@@ -303,7 +300,7 @@ For complete copy/paste demos, see these example pages:
 
 - [Simple Get](/examples/simple-get)
 - [Simple Get Deserialize](/examples/simple-get-deserialize)
-- [JSON API](/examples/json-api-example) - typed `.json` bodies, `Response.json(r)`, server `ctx.json(r)` + `ctx.renderJson(value)`
+- [JSON API](/examples/json-api-example) - typed `.json` bodies, `Response.json(r)`, server `ctx.json(r)` + `ctx.json(value)`
 - [Post JSON](/examples/post-json)
 - [Custom Headers](/examples/custom-headers)
 - [Concurrent Requests](/examples/concurrent-requests)
@@ -506,8 +503,6 @@ Client request methods (all URL-first):
 | `client.connect(url, opts)` | HTTP CONNECT |
 | `client.fetch(url, opts)` | Fetch-style convenience operation using the same native request transport |
 | `client.request(url, opts)` | General HTTP request (any method via `.method`) |
-| `client.getAll(&urls, .{})` | Concurrent GET requests |
-| `client.requestAll(&requests, .{})` | Concurrent custom requests |
 
 ## See Also
 

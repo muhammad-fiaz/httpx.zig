@@ -1,27 +1,59 @@
 # Concurrency & Async Tasks
 
 `httpx.zig` provides explicit primitives for concurrent execution and
-background task management: parallel client helpers plus a bounded worker
-pool and queue.
+background task management using `httpx.concurrency.Pool`.
 
-## Parallel Requests
+## Concurrent Requests with Worker Pool
 
-Execute multiple HTTP requests using `getAll` / `requestAll` on an initialized
-client. They run the requests and wait for all to complete:
+Execute multiple HTTP requests concurrently using `httpx.concurrency.Pool`
+with an initialized client:
 
 ```zig
-const urls = [_][]const u8{
-    "https://httpbun.com/get",
-    "https://httpbun.com/headers",
+const std = @import("std");
+const httpx = @import("httpx");
+
+const FetchTask = struct {
+    url: []const u8,
+    status: u16 = 0,
+    bodyLen: usize = 0,
+
+    fn run(ctx: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        const t_io = std.Io.Threaded.global_single_threaded.io();
+        var client = httpx.Client.init(std.heap.smp_allocator, t_io, .{});
+        defer client.deinit();
+
+        var resp = try client.get(self.url, .{});
+        defer resp.deinit();
+        self.status = resp.status;
+        self.bodyLen = resp.body.len;
+    }
 };
-var results = try client.getAll(urls, .{});
-defer {
-    for (results) |*r| r.deinit();
-    allocator.free(results);
+
+pub fn main() !void {
+    const allocator = std.heap.smp_allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var pool = try httpx.concurrency.Pool.init(allocator, io, .{
+        .workers = 4,
+        .queueCapacity = 1024,
+    });
+    defer pool.deinit();
+
+    var tasks = [_]FetchTask{
+        .{ .url = "https://httpbun.com/get" },
+        .{ .url = "https://httpbun.com/headers" },
+    };
+
+    for (&tasks) |*t| {
+        try pool.submit(FetchTask.run, t, null);
+    }
+    pool.shutdownDrain();
+    pool.join();
 }
 ```
 
-For unreachable or slow hosts, set per-request `timeoutMs` so batch jobs
+For unreachable or slow hosts, set per-request `timeoutMs` so worker tasks
 fail fast instead of waiting on default socket budgets:
 
 ```zig
@@ -33,7 +65,7 @@ defer r.deinit();
 
 `httpx.concurrency.Pool` (`src/concurrency/workerPool.zig`) is a fixed-thread,
 bounded-queue pool with graceful drain. It is also exported as
-`httpx.client.workerPool`:
+`httpx.client.workers`:
 
 Pass a live Zig 0.17 `std.Io` to the pool. It backs blocking queue waits and
 must outlive the pool. `submit` applies backpressure when the queue is full;
@@ -47,21 +79,3 @@ var pool = try httpx.concurrency.Pool.init(allocator, io, .{
 });
 defer pool.deinit();
 ```
-
-### Defaults
-
-- `workers = 0` means "choose a sensible default from the host CPU count"
-  (clamped 1..16).
-- `queueCapacity = 1024` bounds pending tasks before submission fails.
-- `autoStart = true` starts worker threads on the first submitted task.
-
-### Queue
-
-`httpx.concurrency.Queue(T)` (`src/concurrency/queue.zig`) is the generic
-thread-safe bounded queue used internally by the pool. It exposes `push`,
-`tryPush`, `pop`, `tryPop`, `drain`, and `close`.
-
-## Related
-
-- [API: Concurrency](/api/concurrency)
-- [Example: Concurrent Demo](/examples/concurrent-demo)

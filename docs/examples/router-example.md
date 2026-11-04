@@ -8,7 +8,7 @@ const httpx = @import("httpx");
 
 fn getUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const id = ctx.param("id") orelse "unknown";
-    return ctx.renderJson(.{ .id = id });
+    return ctx.json(.{ .id = id });
 }
 
 fn createUser(ctx: *httpx.router.Context) anyerror!httpx.router.Response {

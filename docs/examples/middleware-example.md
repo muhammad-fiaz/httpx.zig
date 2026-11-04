@@ -14,7 +14,7 @@ fn auth(ctx: *httpx.router.Context, next: httpx.router.NextFn) anyerror!httpx.ro
 }
 
 fn secure(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .message = "secure route" });
+    return ctx.json(.{ .message = "secure route" });
 }
 
 pub fn main() !void {

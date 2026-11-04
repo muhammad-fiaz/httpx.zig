@@ -108,7 +108,7 @@ fn indexHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 }
 
 fn statusHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .status = "online",
         .engine = "httpx.zig",
         .protocols = [_][]const u8{ "HTTP/1.1", "HTTP/2", "HTTP/3", "QUIC", "TLS 1.2", "TLS 1.3" },
@@ -136,7 +136,7 @@ fn robotsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 
 fn triggerReloadHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     currentVersion.store(2, .release);
-    return ctx.renderJson(.{ .reloaded = true, .version = 2 });
+    return ctx.json(.{ .reloaded = true, .version = 2 });
 }
 
 pub fn main() !void {

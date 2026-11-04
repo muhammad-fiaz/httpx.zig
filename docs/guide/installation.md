@@ -62,14 +62,10 @@ This installs the latest stable package as a dependency in your project's
 zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.3.tar.gz
 ```
 
-> [!WARNING]
-> Zig `0.16.0` is supported only by the legacy httpx.zig `v0.2.1` release:
+> [!NOTE]
+> **httpx.zig** requires Zig **0.17.0+**.
 >
-> ```bash
-> zig fetch --save https://github.com/muhammad-fiaz/httpx.zig/archive/refs/tags/0.2.1.tar.gz
-> ```
->
-> Zig 0.15 support ended with v0.0.7.
+> For documentation matching older releases of `httpx.zig`, checkout that release's tag and generate local documentation using `zig build docs`, which emits native HTML documentation into `zig-out/docs/`.
 
 ## Method 2: Zig Fetch (Latest Development Build)
 

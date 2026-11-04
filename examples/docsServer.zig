@@ -6,7 +6,7 @@ pub const stdOptions: std.Options = .{
 };
 
 fn listItemsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .items = &[_]struct { id: u32, name: []const u8, price: f64 }{
             .{ .id = 101, .name = "Pro Router Widget", .price = 49.99 },
             .{ .id = 102, .name = "Async SSE Streamer", .price = 19.99 },
@@ -18,7 +18,7 @@ fn listItemsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 
 fn getItemHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     const itemId = ctx.param("id") orelse "0";
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .id = itemId,
         .name = "Queried Item",
         .status = "available",

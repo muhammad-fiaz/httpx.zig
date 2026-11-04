@@ -4,7 +4,7 @@ const httpx = @import("httpx");
 const DownloadObserver = struct {
     taskId: u32,
 
-    fn onProgress(info: httpx.client.progressInfo, userData: ?*anyopaque) void {
+    fn onProgress(info: httpx.client.ProgressInfo, userData: ?*anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(userData.?));
         const pct = if (info.percentage) |p| p else 0.0;
         const stateColor: []const u8 = switch (info.state) {

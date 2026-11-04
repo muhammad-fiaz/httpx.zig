@@ -1,43 +1,48 @@
 # Batch Concurrent Requests
 
-Run requests concurrently with `client.getAll(urls, .{})` and
-`client.requestAll(reqs, .{})` on an initialized `Client`.
+Run requests concurrently using `httpx.concurrency.Pool` with an initialized `Client`.
 See `examples/concurrentDemo.zig`.
 
 ```zig
-const urls = [_][]const u8{
-    "https://httpbun.com/get",
-    "https://httpbun.com/headers",
-};
-const results = client.getAll(urls, .{}) catch |err| {
-    std.debug.print("getAll failed: {s}\n", .{@errorName(err)});
-    return;
-};
-defer {
-    for (results) |*r| r.deinit();
-    std.heap.page_allocator.free(results);
-}
+const std = @import("std");
+const httpx = @import("httpx");
 
-const reqs = .{
-    .{ .method = .GET, .url = "https://httpbun.com/get" },
-    .{ .method = .GET, .url = "https://httpbun.com/headers" },
-};
-const batch = client.requestAll(reqs, .{}) catch |err| {
-    std.debug.print("requestAll failed: {s}\n", .{@errorName(err)});
-    return;
-};
-defer {
-    for (batch) |*r| r.deinit();
-    std.heap.page_allocator.free(batch);
-}
+const FetchTask = struct {
+    url: []const u8,
+    status: u16 = 0,
+    bodyLen: usize = 0,
 
-for (results, 0..) |result, i| {
-    std.debug.print("Request {d}: status={d} bodyLen={d}\n", .{ i + 1, result.status, result.body.len });
+    fn run(ctx: ?*anyopaque, _: *std.atomic.Value(bool)) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        const io = std.Io.Threaded.global_single_threaded.io();
+        var client = httpx.Client.init(std.heap.smp_allocator, io, .{});
+        defer client.deinit();
+
+        var resp = try client.get(self.url, .{});
+        defer resp.deinit();
+        self.status = resp.status;
+        self.bodyLen = resp.body.len;
+    }
+};
+
+var pool = try httpx.concurrency.Pool.init(allocator, io, .{ .workers = 4 });
+defer pool.deinit();
+
+var tasks = [_]FetchTask{
+    .{ .url = "https://httpbun.com/get" },
+    .{ .url = "https://httpbun.com/headers" },
+};
+
+for (&tasks) |*t| {
+    try pool.submit(FetchTask.run, t, null);
+}
+pool.shutdownDrain();
+pool.join();
+
+for (tasks, 0..) |t, i| {
+    std.debug.print("Request {d}: status={d} bodyLen={d}\n", .{ i + 1, t.status, t.bodyLen });
 }
 ```
-
-Caller ownership: deinit each `Response`, then free the slice with the
-allocator passed to the client.
 
 ## Expected Output
 
@@ -47,14 +52,3 @@ Request 2: status=200 bodyLen=567
 ```
 
 Status values reflect the live endpoints and body lengths vary per response.
-
-## Run
-
-```bash
-zig build run-concurrent-demo
-```
-
-## What to Verify
-
-- All parallel requests return 200.
-- No leaks or double frees on batch error paths.

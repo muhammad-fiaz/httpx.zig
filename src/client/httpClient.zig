@@ -155,12 +155,6 @@ pub const Config = struct {
     };
 };
 
-/// Options shared by the batch operations `getAll` and `requestAll`.
-pub const BatchOptions = struct {
-    /// Maximum requests in flight at once. `0` keeps the default (16).
-    maxConcurrent: usize = 16,
-};
-
 /// Options for `Client.isOnline`.
 pub const OnlineOptions = struct {
     /// Milliseconds allowed for each TCP probe.
@@ -264,6 +258,22 @@ fn extractMethod(opts: anytype) Method {
         }
     }
     return .GET;
+}
+
+fn extractBodySource(opts: anytype) ?req.BodySource {
+    const O = @TypeOf(opts);
+    if (@hasField(O, "bodySource")) {
+        const v = opts.bodySource;
+        if (comptime @typeInfo(@TypeOf(v)) == .optional) return v;
+        return v;
+    }
+    if (@hasField(O, "body")) {
+        const v = opts.body;
+        const T = @TypeOf(v);
+        if (T == req.BodySource) return v;
+        if (comptime @typeInfo(T) == .optional and @typeInfo(T).optional.child == req.BodySource) return v;
+    }
+    return null;
 }
 
 fn fetchForParsing(client: *Client, url: []const u8, opts: anytype) !req.Response {
@@ -458,160 +468,6 @@ pub const Client = struct {
         return DownloadCore.Downloader.init(self.allocator, self);
     }
 
-    /// Convenience batch file download helper: downloads multiple files using this client.
-    pub fn downloadAll(self: *Client, tasks: []const DownloadCore.DownloadTask, opts: DownloadOptions) ![]DownloadResult {
-        var dl = self.downloader();
-        return dl.downloadAll(tasks, opts);
-    }
-
-    /// Batch: concurrent array of requests (runs in parallel, reuses pool and dns cache).
-    ///
-    /// Caller owns the returned slice: deinit each Response, then free the
-    /// slice with this client's allocator.
-    pub fn requestAll(self: *Client, reqs: anytype, opts: BatchOptions) ![]Response {
-        const R = @TypeOf(reqs);
-        var owned: ?[]RequestOptions = null;
-        defer if (owned) |buf| self.allocator.free(buf);
-        const slice: []const RequestOptions = blk: {
-            if (R == []const RequestOptions or R == []RequestOptions) break :blk reqs;
-            const info = @typeInfo(R);
-            if (info == .pointer) {
-                if (info.pointer.size == .slice) break :blk reqs;
-                if (info.pointer.size == .one and @typeInfo(info.pointer.child) == .array) break :blk reqs[0..];
-            }
-            if (info == .array) break :blk reqs[0..];
-            if (info == .@"struct" and info.@"struct".is_tuple) {
-                const buf = try self.allocator.alloc(RequestOptions, info.@"struct".field_names.len);
-                owned = buf;
-                inline for (info.@"struct".field_names, 0..) |name, i| {
-                    const item = @field(reqs, name);
-                    if (@typeInfo(@TypeOf(item)) != .@"struct") @compileError("requestAll tuple entries must be option structs");
-                    if (!@hasField(@TypeOf(item), "url")) @compileError("requestAll tuple entries require a url");
-                    buf[i] = .{ .url = item.url };
-                    inline for (@typeInfo(@TypeOf(item)).@"struct".field_names) |fname| {
-                        if (!@hasField(RequestOptions, fname)) @compileError("unknown request option: " ++ fname);
-                        if (comptime std.mem.eql(u8, fname, "url")) continue;
-                        @field(buf[i], fname) = @field(item, fname);
-                    }
-                }
-                break :blk buf;
-            }
-            @compileError("requestAll expects a slice, array, or tuple of request option structs");
-        };
-        var out = try self.allocator.alloc(Response, slice.len);
-        if (slice.len <= 1) {
-            for (slice, 0..) |item, i| {
-                out[i] = self.doRequest(item.method orelse .GET, item.url, item) catch |e| {
-                    // Only entries before i were assigned; later slots are uninitialized.
-                    for (out[0..i]) |*r| r.deinit();
-                    self.allocator.free(out);
-                    return e;
-                };
-            }
-            return out;
-        }
-
-        const TaskCtx = struct {
-            client: *Client,
-            reqs: []const RequestOptions,
-            out: []Response,
-            success: []bool,
-            nextIdx: *std.atomic.Value(usize),
-            errMutex: sync.Spinlock = .{},
-            firstErr: ?anyerror = null,
-
-            fn worker(ctx: *@This()) void {
-                while (true) {
-                    const idx = ctx.nextIdx.fetchAdd(1, .monotonic);
-                    if (idx >= ctx.reqs.len) break;
-                    {
-                        ctx.errMutex.lock();
-                        const hasErr = ctx.firstErr != null;
-                        ctx.errMutex.unlock();
-                        if (hasErr) break;
-                    }
-
-                    const current = ctx.reqs[idx];
-                    const resp = ctx.client.doRequestWithOverride(current.method orelse .GET, current.url, current) catch |e| {
-                        ctx.errMutex.lock();
-                        if (ctx.firstErr == null) ctx.firstErr = e;
-                        ctx.errMutex.unlock();
-                        break;
-                    };
-                    ctx.out[idx] = resp;
-                    ctx.success[idx] = true;
-                }
-            }
-        };
-
-        const success = self.allocator.alloc(bool, slice.len) catch |e| {
-            self.allocator.free(out);
-            return e;
-        };
-        defer self.allocator.free(success);
-        @memset(success, false);
-
-        var nextIdx = std.atomic.Value(usize).init(0);
-        var taskCtx = TaskCtx{
-            .client = self,
-            .reqs = slice,
-            .out = out,
-            .success = success,
-            .nextIdx = &nextIdx,
-        };
-
-        // Keep batch fan-out bounded independently of batch size. A failed
-        // thread spawn leaves its work for the workers that did start (or
-        // the caller below), rather than running an untracked extra worker.
-        const workerLimit = if (opts.maxConcurrent == 0) @as(usize, 16) else opts.maxConcurrent;
-        const workerCount = @min(workerLimit, slice.len);
-        var threads = self.allocator.alloc(std.Thread, workerCount - 1) catch |e| {
-            self.allocator.free(out);
-            return e;
-        };
-        defer self.allocator.free(threads);
-
-        var started: usize = 0;
-        while (started < threads.len) : (started += 1) {
-            threads[started] = std.Thread.spawn(.{}, TaskCtx.worker, .{&taskCtx}) catch break;
-        }
-
-        // Always run one worker on the calling thread; this also covers
-        // batches where every additional thread spawn failed.
-        TaskCtx.worker(&taskCtx);
-
-        for (threads[0..started]) |th| th.join();
-
-        if (taskCtx.firstErr) |e| {
-            for (0..slice.len) |i| {
-                if (success[i]) out[i].deinit();
-            }
-            self.allocator.free(out);
-            return e;
-        }
-        return out;
-    }
-
-    /// Parallel GETs. Ownership: deinit each Response, then free the slice
-    /// with this client's allocator (see requestAll).
-    pub fn getAll(self: *Client, urls: anytype, opts: BatchOptions) ![]Response {
-        const U = @TypeOf(urls);
-        const slice: []const []const u8 = blk: {
-            if (U == []const []const u8 or U == [][]const u8) break :blk urls;
-            const info = @typeInfo(U);
-            if (info == .pointer) {
-                if (info.pointer.size == .slice) break :blk urls;
-                if (info.pointer.size == .one and @typeInfo(info.pointer.child) == .array) break :blk urls[0..];
-            }
-            if (info == .array) break :blk urls[0..];
-            @compileError("getAll expects a slice or array of URL strings");
-        };
-        var reqs = try self.allocator.alloc(RequestOptions, slice.len);
-        defer self.allocator.free(reqs);
-        for (slice, 0..) |url, i| reqs[i] = .{ .url = url };
-        return self.requestAll(reqs, opts);
-    }
-
     fn coerceDownloadOptions(opts: anytype) DownloadOptions {
         if (@TypeOf(opts) == DownloadOptions) return opts;
         var o = DownloadOptions{};
@@ -641,16 +497,6 @@ pub const Client = struct {
         var dl = DownloadCore.Downloader.init(self.allocator, self);
         const downloadOptions = coerceDownloadOptions(opts);
         return dl.download(url, downloadOptions);
-    }
-
-    /// Downloads a batch of files concurrently using the client's internal allocator.
-    pub fn downloadBatch(self: *Client, tasks: []const struct { url: []const u8, dest: []const u8 }, opts: anytype) DownloadError!void {
-        const downloadOptions = coerceDownloadOptions(opts);
-        for (tasks) |t| {
-            var perTask = downloadOptions;
-            perTask.path = t.dest;
-            _ = try self.download(t.url, perTask);
-        }
     }
 
     /// Queries remote file metadata (size, filename, Content-Type, ETag, Range support) without downloading.
@@ -700,8 +546,13 @@ pub const Client = struct {
     }
 
     /// Fluent, type-safe RequestBuilder chained builder.
-    pub fn requestBuilder(self: *Client, m: Method, url: []const u8) RequestBuilder {
+    pub fn builder(self: *Client, m: Method, url: []const u8) RequestBuilder {
         return RequestBuilder.init(self, m, url);
+    }
+
+    /// Alias for builder() matching the canonical RequestBuilder name.
+    pub fn requestBuilder(self: *Client, m: Method, url: []const u8) RequestBuilder {
+        return self.builder(m, url);
     }
 
     pub const RequestBuilder = struct {
@@ -766,6 +617,11 @@ pub const Client = struct {
 
         pub fn body(self: *RequestBuilder, b: []const u8) *RequestBuilder {
             self.bodyBytes = b;
+            return self;
+        }
+
+        pub fn contentType(self: *RequestBuilder, ct: []const u8) !*RequestBuilder {
+            _ = try self.header("content-type", ct);
             return self;
         }
 
@@ -1283,14 +1139,16 @@ pub const Client = struct {
         if (bodyKind == .none and @hasField(@TypeOf(opts), "body")) {
             const v = opts.body;
             const T = @TypeOf(v);
-            if (comptime @typeInfo(T) == .optional) {
-                if (v) |val| {
-                    bodyVal = val;
+            if (T != req.BodySource and (comptime @typeInfo(T) != .optional or @typeInfo(T).optional.child != req.BodySource)) {
+                if (comptime @typeInfo(T) == .optional) {
+                    if (v) |val| {
+                        bodyVal = val;
+                        bodyKind = .raw;
+                    }
+                } else {
+                    bodyVal = v;
                     bodyKind = .raw;
                 }
-            } else {
-                bodyVal = v;
-                bodyKind = .raw;
             }
         }
         if (bodyKind == .none and @hasField(@TypeOf(opts), "text")) {
@@ -1550,7 +1408,7 @@ pub const Client = struct {
             .timeoutMs = reqTimeout,
             .maxResponseSize = reqMaxSize,
             .proxy = reqProxy,
-            .bodySource = if (@hasField(@TypeOf(opts), "bodySource")) opts.bodySource else null,
+            .bodySource = extractBodySource(opts),
             .quic = self.config.protocols.http3.quic,
         };
         const result = if (streaming)
@@ -2947,39 +2805,6 @@ test "client camelCase config options and request options" {
     try std.testing.expectError(Error.ConnectFailed, res3);
 }
 
-test "requestAll error path cleans up without double free" {
-    // Regression test: batch failures previously double-freed the result
-    // buffer (function errdefer + manual cleanup) and segfaulted.
-    const a = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var client = Client.init(a, io, .{ .timeoutMs = 500 });
-    defer client.deinit();
-
-    // Parallel path (len > 1): all targets refused -> firstErr cleanup.
-    const reqs = [_]RequestOptions{
-        .{ .method = .GET, .url = "http://127.0.0.1:1/a" },
-        .{ .method = .GET, .url = "http://127.0.0.1:1/b" },
-        .{ .method = .GET, .url = "http://127.0.0.1:1/c" },
-    };
-    const batch = client.requestAll(reqs, .{});
-    try std.testing.expectError(Error.ConnectFailed, batch);
-
-    // Single path (len == 1): error must free only the assigned prefix.
-    const one = [_]RequestOptions{
-        .{ .method = .GET, .url = "http://127.0.0.1:1/only" },
-    };
-    const single = client.requestAll(one, .{});
-    try std.testing.expectError(Error.ConnectFailed, single);
-
-    // getAll wrapper shares the same cleanup path.
-    const urls = [_][]const u8{
-        "http://127.0.0.1:1/x",
-        "http://127.0.0.1:1/y",
-    };
-    const multi = client.getAll(urls, .{});
-    try std.testing.expectError(Error.ConnectFailed, multi);
-}
-
 test "normalizeMethod enum and string literals" {
     try std.testing.expectEqual(Method.GET, normalizeMethod(.GET));
     try std.testing.expectEqual(Method.GET, normalizeMethod(.get));
@@ -3292,7 +3117,8 @@ test "Client request with bodySource streaming upload" {
 
     var sr = SliceReader.init("client-streamed-payload");
     var res = try client.post(url, .{
-        .bodySource = sr.source(),
+        .body = sr.source(),
+        .contentType = "text/plain",
     });
     defer res.deinit();
 
@@ -3300,6 +3126,7 @@ test "Client request with bodySource streaming upload" {
     try std.testing.expectEqualStrings("SUCCESS", res.body);
     const reqStr = capture.bytes[0..capture.len];
     try std.testing.expect(std.mem.startsWith(u8, reqStr, "POST /stream-test HTTP/1.1\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, reqStr, "Content-Type: text/plain") != null);
     try std.testing.expect(std.mem.indexOf(u8, reqStr, "client-streamed-payload") != null);
 }
 

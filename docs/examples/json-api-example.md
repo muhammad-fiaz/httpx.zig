@@ -20,7 +20,7 @@ if (echo.json) |back| std.debug.print("name={s} role={s}\n", .{ back.name, back.
 ```
 
 Server side, parse request bodies with `ctx.json(T)` and render with
-`ctx.renderJson(value)`.
+`ctx.json(value)`.
 
 ## Expected Output
 

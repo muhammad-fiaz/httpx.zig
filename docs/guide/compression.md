@@ -35,7 +35,7 @@ The high-level server compresses responses automatically for HTTP/1.1, HTTP/2, a
 
 ```zig
 fn largeDataHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .items = &.{ "alpha", "beta", "gamma" } });
+    return ctx.json(.{ .items = &.{ "alpha", "beta", "gamma" } });
 }
 
 try server.get("/large-data", largeDataHandler);

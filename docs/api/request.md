@@ -1,6 +1,6 @@
 # API: Request
 
-HTTPX represents outgoing requests in two forms: the high-level methods accept an inline `.{}` options value, while fluent construction uses `httpx.client.requestBuilder` (payload type `httpx.client.requestPayload`). Incoming server requests are exposed through `httpx.router.Context`, not this request type.
+HTTPX represents outgoing requests in two forms: the high-level methods accept an inline `.{}` options value, while fluent construction uses `httpx.client.builder` (payload type `httpx.client.request`). Incoming server requests are exposed through `httpx.router.Context`, not this request type.
 
 ## Overview
 
@@ -37,12 +37,12 @@ pub fn main() !void {
 Provide these fields in the options value passed to a client request method.
 For JSON requests, pass the value through `.json`; Httpx.zig serializes it
 before sending the request. The client also exposes
-`httpx.client.requestPayload` for callers that need the lower-level request
+`httpx.client.request` for callers that need the lower-level request
 builder API.
 
 | Field | Type | Description |
 |---|---|---|
-| `url` | `[]const u8` | Request URL when using `httpx.client.requestPayload`; client convenience methods take the URL as their first argument |
+| `url` | `[]const u8` | Request URL when using `httpx.client.request`; client convenience methods take the URL as their first argument |
 | `method` | `?Method` | Explicit method for generic `request`; convenience methods choose the method |
 | `headers` | `[]const Header` | Slice of request header name/value pairs |
 | `query` | `[]const Header` | URL query parameters automatically encoded |
@@ -67,7 +67,8 @@ builder API.
 | `http2` | `?bool` | Fast toggle to force HTTP/2 |
 | `http3` | `?bool` | Fast toggle to force HTTP/3 |
 | `earlyData` | inline `.{}` | Per-request 0-RTT settings |
-| `bodySource` | `?httpx.BodySource` | Streaming upload source for HTTP/1.1, HTTP/2, and HTTP/3 |
+| `body` | `[]const u8` or `httpx.BodySource` | Request payload (raw bytes, string, or streaming body adapter) |
+| `contentType` | `?[]const u8` | Request Content-Type header override (e.g. `application/json`) |
 
 ## Related
 

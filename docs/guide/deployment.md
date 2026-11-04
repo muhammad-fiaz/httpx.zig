@@ -73,14 +73,14 @@ pub fn main() !void {
 }
 
 fn healthCheck(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{ .status = "healthy", .timestamp = std.time.timestamp() });
+    return ctx.json(.{ .status = "healthy", .timestamp = std.time.timestamp() });
 }
 
 fn dataHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     // Forwarded headers are honored only when the peer matches trustedProxies.
     const clientIp = ctx.remoteAddress() orelse "unknown";
     const scheme = ctx.scheme(); // "https" or "http"
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .clientIp = clientIp,
         .scheme = scheme,
         .data = "Production payload",

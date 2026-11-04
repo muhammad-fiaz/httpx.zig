@@ -53,7 +53,7 @@ const QueryType = httpx.graphql.ObjectTypeDef{
 };
 
 fn helloHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.renderJson(.{
+    return ctx.json(.{
         .message = "Hello from httpx! Visit /graphiql, /docs, /redoc, or /scalar",
         .status = "operational",
     });
