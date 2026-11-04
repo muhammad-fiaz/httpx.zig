@@ -205,6 +205,9 @@ pub const RequestOptions = struct {
     earlyData: ?req.EarlyDataOptions = null,
     /// Streaming body source for bounded-memory chunked/streamed uploads across HTTP/1.1, HTTP/2, and HTTP/3.
     bodySource: ?req.BodySource = null,
+    /// Optional cooperative cancellation flag. Checked periodically during connection,
+    /// reading, writing, and streaming loops.
+    cancelFlag: ?*const std.atomic.Value(bool) = null,
 };
 
 pub const Response = req.Response;
@@ -566,6 +569,7 @@ pub const Client = struct {
         timeoutMsValue: ?u64 = null,
         bearerAuthValue: ?[]const u8 = null,
         basicAuthValue: ?[]const u8 = null,
+        cancelFlagValue: ?*const std.atomic.Value(bool) = null,
 
         pub fn init(client: *Client, m: Method, url: []const u8) RequestBuilder {
             return .{
@@ -615,6 +619,11 @@ pub const Client = struct {
             return self;
         }
 
+        pub fn cancelFlag(self: *RequestBuilder, flag: *const std.atomic.Value(bool)) *RequestBuilder {
+            self.cancelFlagValue = flag;
+            return self;
+        }
+
         pub fn body(self: *RequestBuilder, b: []const u8) *RequestBuilder {
             self.bodyBytes = b;
             return self;
@@ -651,6 +660,7 @@ pub const Client = struct {
                 .timeoutMs = self.timeoutMsValue,
                 .bearerAuth = self.bearerAuthValue,
                 .basicAuth = self.basicAuthValue,
+                .cancelFlag = self.cancelFlagValue,
             });
         }
 
@@ -662,6 +672,7 @@ pub const Client = struct {
                 .timeoutMs = self.timeoutMsValue,
                 .bearerAuth = self.bearerAuthValue,
                 .basicAuth = self.basicAuthValue,
+                .cancelFlag = self.cancelFlagValue,
             });
         }
     };
@@ -1213,10 +1224,11 @@ pub const Client = struct {
                         const raw = file.contentType;
                         if (comptime @typeInfo(@TypeOf(raw)) == .optional) {
                             if (raw) |value| break :blk value;
+                            if (filename) |fn_str| break :blk mimeMod.fromPath(fn_str);
                             break :blk mimeMod.octetStream;
                         }
                         break :blk raw;
-                    } else mimeMod.octetStream;
+                    } else if (filename) |fn_str| mimeMod.fromPath(fn_str) else mimeMod.octetStream;
                     const part_headers: ?[]const mpEncoder.Header = if (@hasField(FT, "headers")) blk: {
                         const raw = file.headers;
                         if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
@@ -1230,6 +1242,64 @@ pub const Client = struct {
                         .headers = part_headers,
                     });
                 }
+            } else if (@hasField(@TypeOf(mp), "file")) {
+                const file = mp.file;
+                const FT = @TypeOf(file);
+                const filename: ?[]const u8 = if (@hasField(FT, "filename")) blk: {
+                    const raw = file.filename;
+                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
+                    break :blk raw;
+                } else null;
+                const content_type: []const u8 = if (@hasField(FT, "contentType")) blk: {
+                    const raw = file.contentType;
+                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) {
+                        if (raw) |value| break :blk value;
+                        if (filename) |fn_str| break :blk mimeMod.fromPath(fn_str);
+                        break :blk mimeMod.octetStream;
+                    }
+                    break :blk raw;
+                } else if (filename) |fn_str| mimeMod.fromPath(fn_str) else mimeMod.octetStream;
+                const part_headers: ?[]const mpEncoder.Header = if (@hasField(FT, "headers")) blk: {
+                    const raw = file.headers;
+                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
+                    break :blk raw;
+                } else null;
+                try parts.append(self.allocator, .{
+                    .name = if (@hasField(FT, "name")) file.name else "file",
+                    .filename = filename,
+                    .contentType = content_type,
+                    .data = file.data,
+                    .headers = part_headers,
+                });
+            } else if (@hasField(@TypeOf(mp), "data") and @hasField(@TypeOf(mp), "name")) {
+                // Direct single file struct: .multipart = .{ .name = "upload", .filename = "a.txt", .data = "..." }
+                const FT = @TypeOf(mp);
+                const filename: ?[]const u8 = if (@hasField(FT, "filename")) blk: {
+                    const raw = mp.filename;
+                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
+                    break :blk raw;
+                } else null;
+                const content_type: []const u8 = if (@hasField(FT, "contentType")) blk: {
+                    const raw = mp.contentType;
+                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) {
+                        if (raw) |value| break :blk value;
+                        if (filename) |fn_str| break :blk mimeMod.fromPath(fn_str);
+                        break :blk mimeMod.octetStream;
+                    }
+                    break :blk raw;
+                } else if (filename) |fn_str| mimeMod.fromPath(fn_str) else mimeMod.octetStream;
+                const part_headers: ?[]const mpEncoder.Header = if (@hasField(FT, "headers")) blk: {
+                    const raw = mp.headers;
+                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
+                    break :blk raw;
+                } else null;
+                try parts.append(self.allocator, .{
+                    .name = mp.name,
+                    .filename = filename,
+                    .contentType = content_type,
+                    .data = mp.data,
+                    .headers = part_headers,
+                });
             }
 
             var encoder = mpEncoder.init(self.allocator, self.io, .{
@@ -1409,6 +1479,7 @@ pub const Client = struct {
             .maxResponseSize = reqMaxSize,
             .proxy = reqProxy,
             .bodySource = extractBodySource(opts),
+            .cancelFlag = if (@hasField(@TypeOf(opts), "cancelFlag")) opts.cancelFlag else null,
             .quic = self.config.protocols.http3.quic,
         };
         const result = if (streaming)
@@ -3483,4 +3554,69 @@ test "Client requestStream with BodySource streaming upload" {
     var replyBuf: [64]u8 = undefined;
     const n = try res.body.read(&replyBuf);
     try std.testing.expectEqualStrings("stream-reply", replyBuf[0..n]);
+}
+
+test "Client request with cancellation flag aborts cooperatively" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var client = Client.init(a, io, .{});
+    defer client.deinit();
+
+    var cancel = std.atomic.Value(bool).init(true);
+
+    const err = client.get("http://127.0.0.1:9999/test-cancel", .{
+        .cancelFlag = &cancel,
+    });
+    try std.testing.expectError(req.Error.Cancelled, err);
+}
+
+test "Client multipart upload with single file struct and mime detection" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var listener = try tcp.Listener.bind(io, 0);
+    const port = listener.localPort();
+
+    const Server = struct {
+        fn run(l: *tcp.Listener, s_io: std.Io) void {
+            var conn = l.accept(s_io) catch return;
+            defer conn.close();
+
+            var buf: [2048]u8 = undefined;
+            var total: usize = 0;
+            while (total < buf.len) {
+                const n = conn.read(buf[total..]) catch return;
+                if (n == 0) break;
+                total += n;
+                if (std.mem.indexOf(u8, buf[0..total], "hello world content") != null) break;
+            }
+
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+        }
+    };
+
+    const thread = try std.Thread.spawn(.{}, Server.run, .{ &listener, io });
+    defer {
+        releaseAcceptor(&listener, io);
+        thread.join();
+        listener.close(io);
+    }
+
+    var client = Client.init(a, io, .{});
+    defer client.deinit();
+
+    var urlBuf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/upload-single", .{port});
+
+    var resp = try client.post(url, .{
+        .multipart = .{
+            .name = "upload",
+            .filename = "report.json",
+            .data = "hello world content",
+        },
+    });
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expectEqualStrings("OK", resp.body);
 }
