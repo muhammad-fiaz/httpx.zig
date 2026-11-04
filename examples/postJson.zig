@@ -38,9 +38,8 @@ pub fn main() !void {
     var urlBuf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/post", .{port});
 
-    // POST with typed JSON struct using unified fetch
-    var response = try client.fetch(url, .{
-        .method = .POST,
+    // POST with typed JSON struct
+    var response = try client.post(url, .{
         .json = CreateUser{ .name = "Alice", .role = "developer" },
     });
     defer response.deinit();

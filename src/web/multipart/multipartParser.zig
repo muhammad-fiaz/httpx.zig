@@ -102,6 +102,57 @@ pub const Header = struct {
     value: []const u8,
 };
 
+/// Per-decoder resource limits. Input body bytes remain borrowed for the
+/// lifetime of the returned fields; metadata is allocated by the decoder.
+pub const DecoderOptions = struct {
+    limits: Limits = .{},
+};
+
+/// Stateful facade that keeps allocator, I/O context, and limits together.
+/// `parse` returns owned metadata and body slices borrowed from its input.
+pub const Decoder = struct {
+    allocator: Allocator,
+    io: std.Io,
+    limits: Limits,
+
+    pub fn init(allocator: Allocator, io: std.Io, options: DecoderOptions) error{InvalidOptions}!Decoder {
+        if (options.limits.maxBoundaryLen == 0 or options.limits.maxBoundaryLen > 70)
+            return error.InvalidOptions;
+        return .{ .allocator = allocator, .io = io, .limits = options.limits };
+    }
+
+    pub fn deinit(_: *Decoder) void {}
+
+    pub fn parse(self: *Decoder, body: []const u8, content_type: []const u8) ParseError![]Field {
+        const body_boundary = extractBoundary(content_type) orelse return ParseError.MissingBoundary;
+        const subtype = detectSubtype(content_type);
+        const require_form_data = if (subtype) |value| std.ascii.eqlIgnoreCase(value, "form-data") else false;
+        return parseMultipartInternal(self.allocator, body, body_boundary, self.limits, require_form_data);
+    }
+
+    /// Parses a complete body when the boundary is already available.
+    pub fn parseBoundary(self: *Decoder, body: []const u8, boundary: []const u8) ParseError![]Field {
+        return parseMultipart(self.allocator, body, boundary, self.limits);
+    }
+
+    /// Starts incremental parsing using the boundary and subtype from a
+    /// Content-Type value. The returned stream parser is owned by the caller.
+    pub fn stream(self: *Decoder, content_type: []const u8) ParseError!StreamParser {
+        const body_boundary = extractBoundary(content_type) orelse return ParseError.MissingBoundary;
+        const subtype = detectSubtype(content_type);
+        const require_form_data = if (subtype) |value| std.ascii.eqlIgnoreCase(value, "form-data") else false;
+        return StreamParser.initWithSubtype(self.allocator, body_boundary, require_form_data, self.limits);
+    }
+
+    pub fn free(self: *Decoder, fields: []Field) void {
+        freeFieldsAlloc(self.allocator, fields);
+    }
+};
+
+/// Constructs the stateful decoder facade with allocator, I/O context, and
+/// direct options, matching `httpx.multipart.stream.decoder.init(...)`.
+pub const init = Decoder.init;
+
 /// Returns the best available filename, preferring a decoded UTF-8
 /// `filename*` when present.
 pub fn effectiveFilename(field: *const Field) ?[]const u8 {
@@ -142,29 +193,6 @@ pub const ParseError = error{
     OutOfMemory,
 };
 
-// Parser
-
-pub const Parser = struct {
-    allocator: Allocator,
-    limits: Limits,
-
-    pub fn init(allocator: Allocator, limits: Limits) Parser {
-        return .{ .allocator = allocator, .limits = limits };
-    }
-
-    pub fn parse(self: *Parser, body: []const u8, boundary: []const u8) ParseError![]Field {
-        return parseMultipart(self.allocator, body, boundary, self.limits);
-    }
-
-    pub fn parseFormData(self: *Parser, body: []const u8, boundary: []const u8) ParseError![]Field {
-        return parseMultipartInternal(self.allocator, body, boundary, self.limits, true);
-    }
-
-    pub fn parseContentType(self: *Parser, body: []const u8, contentType: []const u8) ParseError![]Field {
-        return parseBody(self.allocator, body, contentType, self.limits);
-    }
-};
-
 /// An incremental parser event. `partBegin` metadata borrows the parser's
 /// scratch arena and remains valid only until the next call to `next()`.
 /// `partData` is an owned allocation from the parser allocator; the caller
@@ -179,6 +207,27 @@ pub const StreamEvent = union(enum) {
     partData: []const u8,
     partEnd,
     done,
+};
+
+const Parser = struct {
+    allocator: Allocator,
+    limits: Limits,
+
+    fn init(allocator: Allocator, limits: Limits) Parser {
+        return .{ .allocator = allocator, .limits = limits };
+    }
+
+    fn parse(self: *Parser, body: []const u8, boundary: []const u8) ParseError![]Field {
+        return parseMultipart(self.allocator, body, boundary, self.limits);
+    }
+
+    fn parseFormData(self: *Parser, body: []const u8, boundary: []const u8) ParseError![]Field {
+        return parseMultipartInternal(self.allocator, body, boundary, self.limits, true);
+    }
+
+    fn parseContentType(self: *Parser, body: []const u8, content_type: []const u8) ParseError![]Field {
+        return parseBody(self.allocator, body, content_type, self.limits);
+    }
 };
 
 pub const StreamParser = struct {
@@ -430,18 +479,18 @@ pub const StreamParser = struct {
 
 /// Parses a full multipart body with default limits. Field names, filenames,
 /// and Content-Type values are owned; release with `freeFields`.
-pub fn parse(allocator: Allocator, body: []const u8, boundary: []const u8) ParseError![]Field {
+fn parse(allocator: Allocator, body: []const u8, boundary: []const u8) ParseError![]Field {
     return parseMultipart(allocator, body, boundary, .{});
 }
 
 /// Parses a complete body and requires `multipart/form-data` part semantics.
-pub fn parseFormData(allocator: Allocator, body: []const u8, boundary: []const u8, limits: Limits) ParseError![]Field {
+fn parseFormData(allocator: Allocator, body: []const u8, boundary: []const u8, limits: Limits) ParseError![]Field {
     return parseMultipartInternal(allocator, body, boundary, limits, true);
 }
 
 /// Extracts the boundary and subtype from a Content-Type header and parses the
 /// body. `multipart/form-data` inputs require a valid name parameter.
-pub fn parseBody(allocator: Allocator, body: []const u8, contentType: []const u8, limits: Limits) ParseError![]Field {
+fn parseBody(allocator: Allocator, body: []const u8, contentType: []const u8, limits: Limits) ParseError![]Field {
     const boundary = extractBoundary(contentType) orelse return ParseError.MissingBoundary;
     const subtype = detectSubtype(contentType);
     const require_form_data = if (subtype) |s| std.ascii.eqlIgnoreCase(s, "form-data") else false;
@@ -450,7 +499,7 @@ pub fn parseBody(allocator: Allocator, body: []const u8, contentType: []const u8
 
 /// Parses with custom allocator and limits. For multipart/form-data use
 /// `parseFormData` or `parseBody` so missing names are rejected.
-pub fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const u8, limits: Limits) ParseError![]Field {
+fn parseMultipart(allocator: Allocator, body: []const u8, boundary: []const u8, limits: Limits) ParseError![]Field {
     return parseMultipartInternal(allocator, body, boundary, limits, false);
 }
 
@@ -552,11 +601,11 @@ fn checkEpilogue(epilogue: []const u8, limits: Limits) ParseError!void {
         return ParseError.EpilogueTooLarge;
 }
 
-pub fn freeFields(allocator: Allocator, fields: []Field) void {
+fn freeFields(allocator: Allocator, fields: []Field) void {
     freeFieldsAlloc(allocator, fields);
 }
 
-pub fn freeFieldsAlloc(allocator: Allocator, fields: []Field) void {
+fn freeFieldsAlloc(allocator: Allocator, fields: []Field) void {
     for (fields) |*f| freeField(allocator, f);
     allocator.free(fields);
 }

@@ -757,6 +757,9 @@ pub const PooledConn = struct {
         earlyData: bool = false,
         sessionOut: ?*tlsSession.ClientSession = null,
         timeoutMs: u64 = 30_000,
+        /// QUIC transport parameters. `.{}` uses the protocol defaults
+        /// supplied by `quic.Connection.Config`.
+        quic: quicConn.Config = .{},
     };
 
     pub fn connect(
@@ -771,7 +774,7 @@ pub const PooledConn = struct {
         const self = try allocator.create(PooledConn);
         errdefer allocator.destroy(self);
 
-        const conn = try quicConn.Connection.init(allocator, io, .client, .{});
+        const conn = try quicConn.Connection.init(allocator, io, opts.quic);
         errdefer conn.deinit();
 
         const ep = try quicEp.Endpoint.init(allocator, io, conn, .{});
@@ -856,6 +859,14 @@ pub const PooledConn = struct {
         }
 
         if (self.conn.state == .closed or self.conn.state == .closing or self.conn.state == .draining) return false;
+        // Do not hand out a session that is within one second of its QUIC
+        // idle timeout: the next pump would transition it to draining
+        // mid-request. The pool's own idle sweep uses the same 30s scale.
+        const idleMs = self.conn.effectiveIdleTimeoutMs();
+        if (idleMs != 0) {
+            const margin = @min(idleMs, 1_000);
+            if (nowMs -| self.conn.lastActivityMs >= idleMs - margin) return false;
+        }
         if (self.client.h3.fatalError != null) return false;
         if (self.client.h3.goawayReceived or self.client.h3.goawaySent) return false;
         if (self.client.ioError != null) return false;

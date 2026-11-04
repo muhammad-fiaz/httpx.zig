@@ -16,6 +16,7 @@ pub const Options = struct {
 };
 
 pub const Error = parser.ParseError || error{
+    InvalidOptions,
     MissingContentType,
     TooManyFields,
     TooManyFiles,
@@ -25,11 +26,12 @@ pub const Error = parser.ParseError || error{
 };
 
 pub const Form = struct {
-    allocator: Allocator,
+    decoder: parser.Decoder,
     fields: []parser.Field,
 
     pub fn deinit(self: *Form) void {
-        parser.freeFieldsAlloc(self.allocator, self.fields);
+        self.decoder.free(self.fields);
+        self.decoder.deinit();
         self.fields = &.{};
     }
 
@@ -90,9 +92,11 @@ pub const Form = struct {
 
 /// Parses a form-data body. The subtype is detected from `contentType`;
 /// `multipart/form-data` requires Content-Disposition names.
-pub fn parse(allocator: Allocator, body: []const u8, contentType: []const u8, options: Options) Error!Form {
-    const fields = try parser.parseBody(allocator, body, contentType, options.limits);
-    errdefer parser.freeFieldsAlloc(allocator, fields);
+pub fn parse(allocator: Allocator, io: std.Io, body: []const u8, contentType: []const u8, options: Options) Error!Form {
+    var decoder = try parser.Decoder.init(allocator, io, .{ .limits = options.limits });
+    errdefer decoder.deinit();
+    const fields = try decoder.parse(body, contentType);
+    errdefer decoder.free(fields);
 
     var field_count: usize = 0;
     var file_count: usize = 0;
@@ -106,10 +110,14 @@ pub fn parse(allocator: Allocator, body: []const u8, contentType: []const u8, op
     if (options.max_fields > 0 and field_count > options.max_fields) return Error.TooManyFields;
     if (options.max_files > 0 and file_count > options.max_files) return Error.TooManyFiles;
 
-    return .{ .allocator = allocator, .fields = fields };
+    return .{ .decoder = decoder, .fields = fields };
 }
 
 pub const SaveOptions = struct {
+    /// Parser-level request and part limits for streamed uploads.
+    limits: parser.Limits = .{},
+    max_fields: usize = 1024,
+    max_files: usize = 64,
     /// Destination directory. Created when `create_dir` is true.
     directory: []const u8 = "uploads",
     /// Prefix for the generated on-disk filename.
@@ -194,8 +202,9 @@ pub fn streamSaveFiles(
     reader: anytype,
     options: SaveOptions,
 ) ![]SavedFile {
-    const boundary = parser.extractBoundary(contentType) orelse return Error.MissingContentType;
-    var sp = try parser.StreamParser.init(allocator, boundary, .{});
+    var decoder = try parser.Decoder.init(allocator, io, .{ .limits = options.limits });
+    defer decoder.deinit();
+    var sp = try decoder.stream(contentType);
     defer sp.deinit();
 
     if (options.create_dir and !std.fs.path.isAbsolute(options.directory)) {
@@ -213,13 +222,18 @@ pub fn streamSaveFiles(
 
     var saved = std.ArrayList(SavedFile).empty;
     errdefer {
-        for (saved.items) |*f| f.deinit(allocator);
+        for (saved.items) |*f| {
+            dir.deleteFile(io, f.filename) catch {};
+            f.deinit(allocator);
+        }
         saved.deinit(allocator);
     }
 
     var currentFile: ?std.Io.File = null;
     var currentBase: ?[]u8 = null;
     var currentSize: usize = 0;
+    var fieldCount: usize = 0;
+    var fileCount: usize = 0;
 
     defer {
         if (currentFile) |cf| {
@@ -253,6 +267,9 @@ pub fn streamSaveFiles(
                     else
                         null;
                     if (suggested) |origName| {
+                        fileCount += 1;
+                        if (options.max_files > 0 and fileCount > options.max_files)
+                            return Error.TooManyFiles;
                         const safe = try common.safeFilename(allocator, origName);
                         defer allocator.free(safe);
 
@@ -263,6 +280,10 @@ pub fn streamSaveFiles(
                         currentFile = f;
                         currentBase = base;
                         currentSize = 0;
+                    } else {
+                        fieldCount += 1;
+                        if (options.max_fields > 0 and fieldCount > options.max_fields)
+                            return Error.TooManyFields;
                     }
                 },
                 .partData => |chunk| {
@@ -277,17 +298,20 @@ pub fn streamSaveFiles(
                 },
                 .partEnd => {
                     if (currentFile) |cf| {
-                        cf.sync(io) catch {};
+                        try cf.sync(io);
                         cf.close(io);
                         currentFile = null;
 
                         const base = currentBase.?;
                         const fullPath = try std.fs.path.join(allocator, &.{ options.directory, base });
-                        try saved.append(allocator, .{
+                        saved.append(allocator, .{
                             .path = fullPath,
                             .filename = base,
                             .size = currentSize,
-                        });
+                        }) catch |err| {
+                            allocator.free(fullPath);
+                            return err;
+                        };
                         currentBase = null;
                         currentSize = 0;
                     }
@@ -314,7 +338,7 @@ test "server form exposes fields and files" {
         "--server-boundary--\r\n";
     const ct = "multipart/form-data; boundary=\"server-boundary\"";
 
-    var form = try parse(std.testing.allocator, body, ct, .{});
+    var form = try parse(std.testing.allocator, std.testing.io, body, ct, .{});
     defer form.deinit();
 
     try std.testing.expectEqualStrings("hello", form.value("title").?);
@@ -329,6 +353,7 @@ test "server form enforces field limits" {
         "--B--\r\n";
     try std.testing.expectError(Error.TooManyFields, parse(
         std.testing.allocator,
+        std.testing.io,
         body,
         "multipart/form-data; boundary=B",
         .{ .max_fields = 1 },
@@ -342,6 +367,7 @@ test "server form enforces file limits" {
         "--B--\r\n";
     try std.testing.expectError(Error.TooManyFiles, parse(
         std.testing.allocator,
+        std.testing.io,
         body,
         "multipart/form-data; boundary=B",
         .{ .max_files = 1 },
@@ -357,13 +383,13 @@ test "saveFile uses a generated safe basename" {
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", a);
     defer a.free(dir_path);
 
-    const fields = try parser.parseMultipart(
-        a,
+    var decoder = try parser.Decoder.init(a, io, .{});
+    defer decoder.deinit();
+    const fields = try decoder.parse(
         "--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"../../secret.txt\"\r\n\r\npayload\r\n--B--\r\n",
         "B",
-        .{},
     );
-    defer parser.freeFieldsAlloc(a, fields);
+    defer decoder.free(fields);
 
     var saved = try saveFile(a, io, &fields[0], .{
         .directory = dir_path,

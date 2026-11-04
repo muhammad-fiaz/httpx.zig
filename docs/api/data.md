@@ -13,49 +13,59 @@ by static files, embedded assets, templates, and downloads:
 ## Multipart Form Data
 
 RFC 2046 multipart/form-data builder and parser
-(`httpx.multipart.encoder` / `httpx.multipart.parser`).
+(`httpx.multipart.stream.encoder` / `httpx.multipart.stream.decoder`).
 
 ### Building
 
 ```zig
-var form = httpx.multipart.encoder.Multipart.init(allocator, .formData);
-defer form.deinit();
-
-try form.field("username", "alice");
-try form.file("avatar", png_bytes, .{
-    .filename = "photo.png",
-    .contentType = "image/png",
+const fields = [_]httpx.multipart.stream.encoder.FieldValue{
+    .{ .name = "username", .value = "alice" },
+};
+const files = [_]httpx.multipart.stream.encoder.File{
+    .{ .name = "avatar", .data = png_bytes, .filename = "photo.png", .contentType = "image/png" },
+};
+var encoder = try httpx.multipart.stream.encoder.init(allocator, io, .{
+    .fields = &fields,
+    .files = &files,
 });
+defer encoder.deinit();
 
-const body = try form.encodeAlloc();
+const body = try encoder.encodeAlloc();
 defer allocator.free(body);
 
 var ctBuf: [128]u8 = undefined;
-const contentType = form.contentType(&ctBuf);
+const contentType = encoder.contentType(&ctBuf);
 // contentType = "multipart/form-data; boundary=..."
 ```
 
 | Method | Description |
 |--------|-------------|
-| `init(allocator, subtype)` | Create a builder (boundary auto-generated; override with `try setBoundary`) |
-| `field(name, value)` | Append a text form field part |
-| `file(name, data, .{ .filename, .contentType, ... })` | Append a file upload part |
-| `encodeAlloc()` | Finalize and return the complete body (caller owns) |
-| `encode(writer)` | Stream-encode into any writer |
-| `contentType(&buf)` | Return the `Content-Type` header value with boundary |
-| `deinit()` | Release builder resources |
+| `init(allocator, io, .{})` | Create an encoder with generated or caller-supplied boundary |
+| `encodeAlloc()` | Return the complete encoded body (caller owns) |
+| `contentType(&buf)` | Return the `Content-Type` header value with the encoder boundary |
+| `deinit()` | Release encoder resources |
 
-The boundary must not contain `--` and should not exceed 70 characters (RFC 2046).
-For a single inline part on a client request, use the `.multipart` request
-option instead:
+Each form field and file is supplied in the initialization options. The boundary
+must follow RFC 2046 syntax and be no longer than 70 characters.
+For client requests, pass fields and files through `.multipart`:
 
 ```zig
+const fileData = "file contents";
+const fields = [_]struct { name: []const u8, value: []const u8 }{
+    .{ .name = "description", .value = "sample" },
+};
+const files = [_]struct {
+    name: []const u8,
+    filename: []const u8,
+    contentType: []const u8,
+    data: []const u8,
+}{
+    .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
+};
 var res = try client.post("https://example.com/upload", .{
     .multipart = .{
-        .name = "upload",
-        .filename = "hello.txt",
-        .contentType = "text/plain",
-        .data = fileData,
+        .fields = &fields,
+        .files = &files,
     },
 });
 defer res.deinit();
@@ -64,26 +74,28 @@ defer res.deinit();
 ### extractBoundary(contentType)
 
 Extracts the boundary value from a `Content-Type` header via
-`httpx.multipart.parser.extractBoundary(...)`. Returns `null` if no boundary
+`httpx.multipart.stream.decoder.extractBoundary(...)`. Returns `null` if no boundary
 is present. Handles both quoted (`boundary="abc"`) and unquoted
 (`boundary=abc`) forms.
 
-### parseMultipart(allocator, body, boundary, limits)
+### Decoder.parse(body, contentType)
 
 Parses a complete multipart body:
 
 ```zig
-const parser = httpx.multipart.parser;
-const boundary = parser.extractBoundary(contentType) orelse return error.MissingBoundary;
-const fields = try parser.parseMultipart(allocator, body, boundary, .{});
-defer parser.freeFieldsAlloc(allocator, fields);
+const parser = httpx.multipart.stream.decoder;
+var decoder = try parser.init(allocator, io, .{});
+defer decoder.deinit();
+const fields = try decoder.parse(body, contentType);
+defer decoder.free(fields);
 for (fields) |part| {
     std.debug.print("{s} ({d} bytes, type={s})\n", .{ part.name, part.data.len, part.contentType });
 }
 ```
 
-Use `httpx.multipart.parser.Limits` (presets `.strict` / `.relaxed`, or
-`Parser.init(allocator, limits)`) to bound parts, header sizes, and body sizes.
+Pass limits through `.limits` in `decoder.init(allocator, io, .{ .limits = .strict })`.
+The decoded metadata is owned by the decoder allocator; part data borrows the
+input body, which must remain alive while the fields are used.
 
 ### Field
 
@@ -106,7 +118,7 @@ library primitives.
 
 Use Zig std JSON facilities (`std.json`) plus httpx conveniences:
 
-- Client: `client.fetch(url, .{ .json = value })` serializes any struct/value automatically; `Response.json(r)` / `Response.jsonAlloc(r, allocator)` decode with unknown fields ignored.
+- Client: `client.request(url, .{ .method = .POST, .json = value })` serializes a struct/value automatically; `Response.json(r)` / `Response.jsonAlloc(r, allocator)` decode with unknown fields ignored.
 - Server: `ctx.json(r)` deserializes the request body into `r`; `ctx.renderJson(value)` / `ctx.renderJsonStatus(code, value)` render any struct/value as `application/json`.
 
 ## Cookies

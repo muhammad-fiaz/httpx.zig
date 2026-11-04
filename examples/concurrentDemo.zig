@@ -40,7 +40,7 @@ pub fn main() !void {
 
     // Run all requests concurrently (array passed directly, no explicit & needed).
     // Batch results and response bodies are owned by the client allocator.
-    const results = client.getAll(urls) catch |err| {
+    const results = client.getAll(urls, .{}) catch |err| {
         std.debug.print("getAll failed: {s}\n", .{@errorName(err)});
         server.requestShutdown();
         thread.join();
@@ -62,7 +62,7 @@ pub fn main() !void {
         .{ .method = .GET, .url = urlIp },
     };
 
-    const results2 = client.requestAll(reqs) catch |err| {
+    const results2 = client.requestAll(reqs, .{}) catch |err| {
         std.debug.print("requestAll failed: {s}\n", .{@errorName(err)});
         server.requestShutdown();
         thread.join();

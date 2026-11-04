@@ -25,7 +25,7 @@ pub fn main() !void {
     const io = std.Io.Threaded.global_single_threaded.io();
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
-    const results = client.getAll(urls) catch |err| {
+    const results = client.getAll(urls, .{}) catch |err| {
         std.debug.print("getAll failed: {s}\n", .{@errorName(err)});
         return;
     };
@@ -45,7 +45,7 @@ pub fn main() !void {
         .{ .method = .GET, .url = "https://httpbun.com/ip" },
     };
 
-    const results2 = client.requestAll(reqs) catch |err| {
+    const results2 = client.requestAll(reqs, .{}) catch |err| {
         std.debug.print("requestAll failed: {s}\n", .{@errorName(err)});
         return;
     };

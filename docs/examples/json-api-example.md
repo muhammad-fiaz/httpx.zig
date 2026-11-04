@@ -7,7 +7,7 @@ Typed JSON over the URL-first client: fetch with `client.fetch`, decode with
 ```zig
 const Posted = struct { name: []const u8, role: []const u8 };
 
-var post = try client.fetch("https://httpbun.com/post", .{
+var post = try client.request("https://httpbun.com/post", .{
     .method = .POST,
     .json = .{ .name = "Alice", .role = "admin" },
 });

@@ -268,12 +268,25 @@ pub fn main() !void {
 
     // 3. POST with strongly-typed JSON payload
     const User = struct { name: []const u8, role: []const u8 };
-    var postRes = try client.postJson("https://httpbun.com/post", User{
-        .name = "Alice",
-        .role = "engineer",
-    }, .{});
+    var postRes = try client.post("https://httpbun.com/post", .{
+        .json = User{ .name = "Alice", .role = "engineer" },
+    });
     defer postRes.deinit();
 }
+```
+
+For a request with an explicit method, use `client.request`. `client.fetch`
+offers a Fetch-style name over the same native transport; it returns the same
+owned `Response` type and does not impose browser-only Fetch behavior.
+
+```zig
+var response = try client.fetch("https://httpbun.com/post", .{
+    .method = .POST,
+    .json = .{ .name = "Alice" },
+});
+defer response.deinit();
+const body = response.text();
+std.debug.print("{s}\n", .{body});
 ```
 
 ### Stateful Client Operations
@@ -311,10 +324,9 @@ pub fn main() !void {
 
     // Strongly-typed JSON serialization & deserialization
     const CreateUser = struct { name: []const u8, email: []const u8 };
-    var userRes = try client.postJson("https://httpbun.com/post", CreateUser{
-        .name = "Alice",
-        .email = "alice@example.com",
-    }, .{});
+    var userRes = try client.post("https://httpbun.com/post", .{
+        .json = CreateUser{ .name = "Alice", .email = "alice@example.com" },
+    });
     defer userRes.deinit();
 
     const Echo = struct { json: ?CreateUser = null };
@@ -387,19 +399,18 @@ pub fn main() !void {
     });
     defer client.deinit();
 
-    // Unified fetch request (GET)
-    var response = try client.fetch("https://httpbun.com/get", .{});
+    // GET request
+    var response = try client.get("https://httpbun.com/get", .{});
     defer response.deinit();
 
-    // Unified fetch request (POST with JSON)
-    var post = try client.fetch("https://httpbun.com/post", .{
-        .method = .POST,
+    // POST with JSON
+    var post = try client.post("https://httpbun.com/post", .{
         .json = .{ .name = "John", .role = "engineer" },
     });
     defer post.deinit();
 
     // HTTPS with TLS options
-    var tls_resp = try client.fetch("https://httpbun.com/get", .{
+    var tls_resp = try client.get("https://httpbun.com/get", .{
         .tls = .{ .verify = .none }, // dev only
     });
     defer tls_resp.deinit();
@@ -421,7 +432,7 @@ const urls = [_][]const u8{
     "https://httpbun.com/get",
     "https://httpbun.com/headers",
 };
-var results = try client.getAll(urls);
+var results = try client.getAll(urls, .{});
 defer {
     for (results) |*r| r.deinit();
     allocator.free(results);
@@ -432,7 +443,7 @@ const reqs = .{
     .{ .method = .GET, .url = "https://httpbun.com/get" },
     .{ .method = .GET, .url = "https://httpbun.com/headers" },
 };
-var batch = try client.requestAll(reqs);
+var batch = try client.requestAll(reqs, .{});
 defer {
     for (batch) |*r| r.deinit();
     allocator.free(batch);

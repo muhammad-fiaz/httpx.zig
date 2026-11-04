@@ -35,10 +35,9 @@ pub fn main() !void {
 
     // POST with serialized JSON
     const User = struct { name: []const u8, role: []const u8 };
-    var postRes = try client.postJson("https://httpbun.com/post", User{
-        .name = "Alice",
-        .role = "engineer",
-    }, .{});
+    var postRes = try client.post("https://httpbun.com/post", .{
+        .json = User{ .name = "Alice", .role = "engineer" },
+    });
     defer postRes.deinit();
 }
 ```
@@ -70,7 +69,7 @@ var postRes = try client.post("https://httpbun.com/post", .{
 });
 defer postRes.deinit();
 
-var jsonRes = try client.postJson("https://httpbun.com/post", .{ .id = 42 }, .{});
+var jsonRes = try client.post("https://httpbun.com/post", .{ .json = .{ .id = 42 } });
 defer jsonRes.deinit();
 
 var putRes = try client.put("https://httpbun.com/put", .{ .body = "updated" });
@@ -112,7 +111,7 @@ defer response.deinit();
 To submit URL-encoded forms with the builder:
 
 ```zig
-var formBuilder = client.postBuilder("https://httpbun.com/post");
+var formBuilder = client.requestBuilder(.POST, "https://httpbun.com/post");
 defer formBuilder.deinit();
 
 _ = try formBuilder.form("username=admin&password=secretpassword");

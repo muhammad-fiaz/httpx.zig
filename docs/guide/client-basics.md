@@ -38,13 +38,13 @@ defer client.deinit();
 
 ## Making Requests
 
-### Primary API: `fetch`
+### Generic request method
 
-`client.fetch(url, options)` is the primary unified HTTP operation. It supports all HTTP methods, strongly typed Zig struct serialization (via `std.json`), headers, and query parameters:
+`client.request(url, options)` sends a request with the method selected by `.method` (GET by default). JSON bodies use Zig's `std.json` serialization and may include headers and query parameters:
 
 ```zig
 // Simple GET
-var res = try client.fetch("https://httpbun.com/get", .{});
+var res = try client.request("https://httpbun.com/get", .{});
 defer res.deinit();
 std.debug.print("Status: {d}, Body: {s}\n", .{ res.status, res.bytes() });
 
@@ -52,7 +52,7 @@ std.debug.print("Status: {d}, Body: {s}\n", .{ res.status, res.bytes() });
 const CreateUser = struct { name: []const u8, email: []const u8 };
 const User = struct { id: u64, name: []const u8, email: []const u8 };
 
-var post_res = try client.fetch("https://httpbun.com/post", .{
+var post_res = try client.request("https://httpbun.com/post", .{
     .method = .POST,
     .json = CreateUser{ .name = "Alice", .email = "alice@example.com" },
 });
@@ -63,12 +63,26 @@ const user = try post_res.json(User);
 std.debug.print("User: {s} ({s})\n", .{ user.name, user.email });
 ```
 
+`client.fetch(url, options)` uses the same transport and response ownership
+rules. It provides a Fetch-style name for callers that prefer it; browser-only
+Fetch policies do not apply to this native client.
+
+```zig
+var fetched = try client.fetch("https://httpbun.com/post", .{
+    .method = .POST,
+    .json = .{ .name = "Alice" },
+});
+defer fetched.deinit();
+const result = try fetched.json(struct { json: struct { name: []const u8 } });
+std.debug.print("created {s}\n", .{result.json.name});
+```
+
 ### GET with explicit timeout and error handling
 
 For external endpoints, you can specify per-request timeouts:
 
 ```zig
-var response = client.fetch("https://httpbun.com/get", .{
+var response = client.request("https://httpbun.com/get", .{
     .timeoutMs = 10_000,
 }) catch |err| {
     std.debug.print("request failed: {s}\n", .{@errorName(err)});
@@ -77,7 +91,7 @@ var response = client.fetch("https://httpbun.com/get", .{
 defer response.deinit();
 ```
 
-### Verb Shortcuts
+### HTTP method helpers
 
 For quick requests, convenience methods like `.get()` and `.post()` are also available:
 

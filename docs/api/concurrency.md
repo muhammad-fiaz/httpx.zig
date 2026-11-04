@@ -13,7 +13,7 @@ const urls = [_][]const u8{
     "https://httpbun.com/get",
     "https://httpbun.com/headers",
 };
-var results = try client.getAll(urls);
+var results = try client.getAll(urls, .{});
 defer {
     for (results) |*r| r.deinit();
     allocator.free(results);

@@ -54,7 +54,9 @@ pub const Error = error{
     TlsDriverFailed,
     BufferTooSmall,
     InvalidState,
+    InvalidConfig,
     UnsupportedVersion,
+    EntropyUnavailable,
     VersionNegotiation,
 };
 
@@ -199,15 +201,36 @@ pub const Callbacks = struct {
 };
 
 pub const Config = struct {
+    /// Effective idle timeout: the smaller of our value and the peer's
+    /// advertised `max_idle_timeout` (RFC 9000 Section 10.1). Zero
+    /// disables idle-timeout enforcement on our side.
     maxIdleTimeoutMs: u64 = 30_000,
+    /// Connection-level receive window advertised in transport
+    /// parameters and enforced against incoming STREAM bytes.
     initialMaxData: u64 = 1 << 20,
+    /// Receive window for bidirectional streams we open. Matches the
+    /// per-stream default in `stream.zig`; RFC 9000 Section 4.1.
+    initialMaxStreamDataBidiLocal: u64 = 65_535,
+    /// Receive window for bidirectional streams the peer opens.
+    initialMaxStreamDataBidiRemote: u64 = 65_535,
+    /// Receive window for unidirectional streams the peer opens.
+    initialMaxStreamDataUni: u64 = 65_535,
+    /// Concurrent bidirectional streams the peer may open.
+    initialMaxStreamsBidi: u64 = 128,
+    /// Concurrent unidirectional streams the peer may open.
+    initialMaxStreamsUni: u64 = 128,
     maxUdpPayload: usize = 1472,
-    isServer: bool = false,
+    /// Local endpoint role. Clients keep the default; servers set
+    /// `.role = .server`. This is part of the options struct so that
+    /// `Connection.init(allocator, io, .{})` is the single constructor.
+    role: Role = .client,
     /// Preferred QUIC version for clients (default v1). Servers accept
     /// either v1 or v2 and adopt the version of the first Initial.
     version: u32 = 0x00000001,
     /// Require a Retry token before accepting a server-side Initial.
     retry: bool = false,
+    /// Advertise the RFC 9000 prohibition on active migration to peers.
+    disableActiveMigration: bool = false,
     /// Stable key for stateless Retry tokens. Generated per connection
     /// when omitted; production servers should supply a shared key.
     retryKey: ?[32]u8 = null,
@@ -224,6 +247,11 @@ pub const State = enum {
 
 pub const MAX_DATAGRAM = 1500;
 pub const MAX_PEER_CONNECTION_IDS = 16;
+/// Largest value representable as a QUIC varint (RFC 9000 Section 16).
+const MAX_VARINT: u64 = (1 << 62) - 1;
+/// Stream IDs carry a 60-bit stream number, so the count of streams is
+/// bounded by 2^60 (RFC 9000 Section 4.6).
+const MAX_STREAM_COUNT: u64 = 1 << 60;
 const MAX_CRYPTO_SEGMENTS = 1024;
 
 /// Minimum UDP payload size for a datagram that carries an Initial
@@ -389,6 +417,10 @@ pub const Connection = struct {
 
     // Timers (ms domain, caller-driven clock).
     lastActivityMs: u64 = 0,
+    /// Tracks RFC 9000 Section 10.1's rule that a send restarts the idle
+    /// timer only if no ACK-eliciting packet was sent since the last
+    /// received packet.
+    ackElicitingSinceReceive: bool = false,
 
     /// Bytes of the last datagram consumed (coalesced-packet support).
     rxConsumed: usize = 0,
@@ -425,8 +457,18 @@ pub const Connection = struct {
     /// deliberately no seed parameter: one invites callers to pass a
     /// clock value, and a predictable CID lets an off-path attacker
     /// correlate or hijack a flow (RFC 9000 Section 8.2).
-    pub fn init(allocator: Allocator, io: std.Io, role: Role, cfg: Config) !*Connection {
+    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !*Connection {
+        const role = cfg.role;
         if (!packetMod.Version.isSupported(cfg.version)) return Error.UnsupportedVersion;
+        if (cfg.maxUdpPayload < MIN_INITIAL_DATAGRAM or cfg.maxUdpPayload > MAX_DATAGRAM)
+            return Error.InvalidConfig;
+        if (cfg.initialMaxData > MAX_VARINT or
+            cfg.initialMaxStreamDataBidiLocal > MAX_VARINT or
+            cfg.initialMaxStreamDataBidiRemote > MAX_VARINT or
+            cfg.initialMaxStreamDataUni > MAX_VARINT)
+            return Error.InvalidConfig;
+        if (cfg.initialMaxStreamsBidi > MAX_STREAM_COUNT or cfg.initialMaxStreamsUni > MAX_STREAM_COUNT)
+            return Error.InvalidConfig;
         const self = try allocator.create(Connection);
         self.* = .{
             .allocator = allocator,
@@ -434,6 +476,9 @@ pub const Connection = struct {
             .role = role,
             .cfg = cfg,
             .version = cfg.version,
+            .maxData = cfg.initialMaxData,
+            .maxStreamsBidiLocal = cfg.initialMaxStreamsBidi,
+            .maxStreamsUniLocal = cfg.initialMaxStreamsUni,
         };
         for (0..3) |i| {
             self.spaces[i] = PnSpace.init(allocator, @fromBackingInt(@intCast(i)));
@@ -1029,9 +1074,18 @@ pub const Connection = struct {
             .handshake => .handshake,
             .application => .application,
         };
+        const ackEliciting = payloadHasAckEliciting(payload.items);
         try self.queueOutPacket(buf[0..wireLen], kind != .application or isZeroRtt, queued_kind);
         self.bytesSent += wireLen;
-        if (payloadHasAckEliciting(payload.items)) {
+        if (ackEliciting) {
+            // RFC 9000 Section 10.1: sending an ACK-eliciting packet
+            // restarts the idle timer only when no such packet has been
+            // sent since the last received packet. Without that guard a
+            // PTO loop could keep an otherwise idle connection alive.
+            if (!self.ackElicitingSinceReceive) {
+                self.lastActivityMs = nowMs;
+                self.ackElicitingSinceReceive = true;
+            }
             sp.sent.append(self.allocator, .{
                 .pn = sp.nextPn,
                 .tsMs = nowMs,
@@ -1284,17 +1338,54 @@ pub const Connection = struct {
         try self.packetize(kind, &payload, nowMs);
     }
 
-    /// Drives loss and PTO timers; call every pump iteration with the
-    /// clock. Retransmits declare themselves through the normal send
-    /// path (fresh packet numbers, re-accounted windows). A pending ACK
-    /// is sent on its own packet instead of waiting for unrelated
-    /// application data, so the peer can retire its recovery state.
+    /// Effective idle timeout in milliseconds (RFC 9000 Section 10.1):
+    /// the minimum of the local and peer values, with zero disabling
+    /// enforcement. A peer that omits the parameter is treated as
+    /// advertising our own value.
+    pub fn effectiveIdleTimeoutMs(self: *const Connection) u64 {
+        const local = self.cfg.maxIdleTimeoutMs;
+        if (local == 0) return 0;
+        const peer = if (self.peerParams) |p| p.maxIdleTimeoutMs else local;
+        if (peer == 0) return 0;
+        return @min(local, peer);
+    }
+
+    /// Drives loss and PTO timers as well as the idle timeout; call every
+    /// pump iteration with the clock. Retransmits declare themselves
+    /// through the normal send path (fresh packet numbers, re-accounted
+    /// windows). A pending ACK is sent on its own packet instead of
+    /// waiting for unrelated application data, so the peer can retire
+    /// its recovery state.
     pub fn pollTimeouts(self: *Connection, nowMs: u64) Error!void {
         switch (self.state) {
             .closing, .draining, .closed => return,
             else => {},
         }
+        // RFC 9000 Section 10.1: a connection that sees no activity for
+        // the effective idle period is silently closed (draining). This
+        // runs before ACK/loss work so an idle connection cannot keep
+        // itself alive with retransmissions.
+        const idleMs = self.effectiveIdleTimeoutMs();
+        if (idleMs != 0 and nowMs -| self.lastActivityMs >= idleMs) {
+            self.state = .draining;
+            if (self.cbs.onClose) |cb| cb(self.cbs.ctx, 0, "idle timeout");
+            return Error.Draining;
+        }
         self.pollAckTimers(nowMs);
+        if (self.pathValidator) |*pv| {
+            if (pv.onTimeoutSecure(nowMs, self.io) catch return Error.EntropyUnavailable) |failed| {
+                if (failed) {
+                    // A migration candidate that does not answer is simply
+                    // discarded; the established path remains usable.
+                    return;
+                }
+                if (pv.nextChallenge()) |challenge| {
+                    try self.queueControlFrame(.{ .pathChallenge = .{ .data = challenge } });
+                    pv.markSent();
+                    try self.flushControl(.application, nowMs);
+                }
+            }
+        }
         for (&self.spaces, 0..) |*sp, idx| {
             if (sp.discarded) continue;
             if (sp.ackQueued and sp.keysTx != null) {
@@ -1325,6 +1416,7 @@ pub const Connection = struct {
         }
         self.bytesReceived += dgram.len;
         self.lastActivityMs = nowMs;
+        self.ackElicitingSinceReceive = false;
 
         var off: usize = 0;
         while (off < dgram.len) {
@@ -1913,6 +2005,16 @@ pub const Connection = struct {
                         }
                         const ns = try self.allocator.create(qstream.Stream);
                         ns.* = qstream.Stream.init(self.allocator, s.id, bidi, initiatorIsSelf);
+                        // Advertise and enforce the matching transport
+                        // parameter window (RFC 9000 Section 4.1): our
+                        // own streams use *_bidi_local, peer streams use
+                        // *_bidi_remote / *_uni.
+                        ns.recvMaxOffset = if (!bidi)
+                            self.cfg.initialMaxStreamDataUni
+                        else if (initiatorIsSelf)
+                            self.cfg.initialMaxStreamDataBidiLocal
+                        else
+                            self.cfg.initialMaxStreamDataBidiRemote;
                         if (self.maxStreamData.get(s.id)) |lim| ns.recvMaxOffset = lim;
                         try self.streams.put(s.id, ns);
                         stPtr = ns;
@@ -2120,16 +2222,19 @@ pub const Connection = struct {
 
     /// Initiates QUIC path validation (RFC 9000 Section 8.2) for connection migration
     /// or NAT rebinding. Queues PATH_CHALLENGE frames on the wire.
-    pub fn initiatePathValidation(self: *Connection, nowMs: u64, rng: std.Random) Error!void {
+    pub fn initiatePathValidation(self: *Connection, nowMs: u64) Error!void {
+        if (self.cfg.disableActiveMigration or
+            (self.peerParams != null and self.peerParams.?.disableActiveMigration))
+            return Error.InvalidState;
         if (self.pathValidator == null) {
             self.pathValidator = pathMod.PathValidator.init(100);
         }
-        self.pathValidator.?.start(nowMs, rng);
-        while (self.pathValidator.?.nextChallenge()) |c| {
+        self.pathValidator.?.startSecure(nowMs, self.io) catch return Error.EntropyUnavailable;
+        if (self.pathValidator.?.nextChallenge()) |c| {
             try self.queueControlFrame(.{ .pathChallenge = .{ .data = c } });
             self.pathValidator.?.markSent();
+            try self.flushControl(.application, nowMs);
         }
-        self.flushControl(.application, nowMs) catch {};
     }
 
     /// Checks whether path validation is currently complete and validated.
@@ -2375,9 +2480,11 @@ fn fe(gpa: Allocator, payload: *std.ArrayList(u8), f: frames.Frame) Error!void {
 test "loopback connection pair completes protected handshake and stream" {
     const a = std.testing.allocator;
 
-    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer client.deinit();
-    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer server.deinit();
 
     const Hs = struct {
@@ -2808,9 +2915,11 @@ test "quic carries TLS 1.3 handshake end to end" {
     defer srvD.incoming.deinit(a);
     defer srvD.peerFlight.deinit(a);
 
-    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer client.deinit();
-    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer server.deinit();
 
     try runTlsHandshake(a, client, server, &cliD, &srvD);
@@ -2972,9 +3081,11 @@ test "http3 request over quic loopback reaches handler and returns response" {
     defer srvD.incoming.deinit(a);
     defer srvD.peerFlight.deinit(a);
 
-    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer client.deinit();
-    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer server.deinit();
     client.cbs = .{ .onStreamData = H3LoopSink.onCliStream };
     server.cbs = .{ .onStreamData = H3LoopSink.onSrvStream };
@@ -3369,9 +3480,79 @@ test "http3 request over quic loopback reaches handler and returns response" {
     }
 }
 
+test "config applies QUIC flow-control and stream limits" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const server = try Connection.init(a, io, .{
+        .role = .server,
+        .initialMaxData = 4096,
+        .initialMaxStreamDataBidiRemote = 2048,
+        .initialMaxStreamsBidi = 3,
+        .initialMaxStreamsUni = 2,
+    });
+    defer server.deinit();
+    try std.testing.expectEqual(@as(u64, 4096), server.maxData);
+    try std.testing.expectEqual(@as(u64, 3), server.maxStreamsBidiLocal);
+    try std.testing.expectEqual(@as(u64, 2), server.maxStreamsUniLocal);
+
+    const client = try Connection.init(a, io, .{});
+    defer client.deinit();
+    const secret = (@as([32]u8, @splat(0x5A)));
+    try client.installKeys(.application, secret, secret);
+    try server.installKeys(.application, secret, secret);
+    client.maxStreamsBidiRemote = 8;
+    server.maxStreamsBidiRemote = 8;
+    server.addressValidated = true;
+
+    try client.sendStreamChecked(0, 0, "abc", false, 900);
+    const out = try client.takeOutput(a);
+    defer a.free(out);
+    try server.receiveDatagram(out, 900);
+    const st = server.streams.get(0) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 2048), st.recvMaxOffset);
+}
+
+test "invalid QUIC configuration is rejected" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try std.testing.expectError(Error.InvalidConfig, Connection.init(a, io, .{ .maxUdpPayload = 1199 }));
+    try std.testing.expectError(Error.InvalidConfig, Connection.init(a, io, .{ .maxUdpPayload = MAX_DATAGRAM + 1 }));
+    try std.testing.expectError(Error.InvalidConfig, Connection.init(a, io, .{ .initialMaxData = MAX_VARINT + 1 }));
+    try std.testing.expectError(Error.InvalidConfig, Connection.init(a, io, .{ .initialMaxStreamsBidi = MAX_STREAM_COUNT + 1 }));
+}
+
+test "idle timeout uses the smaller advertised value and can be disabled" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const conn = try Connection.init(a, io, .{ .maxIdleTimeoutMs = 1000 });
+    defer conn.deinit();
+    conn.lastActivityMs = 100;
+    try conn.pollTimeouts(1099);
+    try std.testing.expectEqual(State.initial, conn.state);
+    try std.testing.expectError(Error.Draining, conn.pollTimeouts(1100));
+    try std.testing.expectEqual(State.draining, conn.state);
+
+    const shorter = try Connection.init(a, io, .{ .maxIdleTimeoutMs = 1000 });
+    defer shorter.deinit();
+    shorter.peerParams = .{ .maxIdleTimeoutMs = 200 };
+    shorter.lastActivityMs = 0;
+    try std.testing.expectEqual(@as(u64, 200), shorter.effectiveIdleTimeoutMs());
+    try std.testing.expectError(Error.Draining, shorter.pollTimeouts(200));
+    try std.testing.expectEqual(State.draining, shorter.state);
+
+    const disabled = try Connection.init(a, io, .{ .maxIdleTimeoutMs = 0 });
+    defer disabled.deinit();
+    disabled.lastActivityMs = 0;
+    try std.testing.expectEqual(@as(u64, 0), disabled.effectiveIdleTimeoutMs());
+    try disabled.pollTimeouts(1_000_000);
+    try std.testing.expectEqual(State.initial, disabled.state);
+}
+
 test "crypto transmit queue preserves offsets across partial drains" {
     const a = std.testing.allocator;
-    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer conn.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), try conn.queueCrypto(.initial, "client-hello"));
@@ -3392,7 +3573,7 @@ test "crypto transmit queue preserves offsets across partial drains" {
 
 test "crypto receive reassembles reordered and overlapping segments" {
     const a = std.testing.allocator;
-    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer conn.deinit();
 
     try conn.receiveCrypto(.initial, 5, " world", 100);
@@ -3413,9 +3594,11 @@ const CtlPair = struct {
     server: *Connection,
 
     fn init(a: Allocator) !CtlPair {
-        const client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+        const client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
         errdefer client.deinit();
-        const server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+        const server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+            .role = .server,
+        });
         errdefer server.deinit();
         // Mirrored 1-RTT secrets (same loopback convention as the
         // handshake tests); CIDs need no alignment for short headers.
@@ -3974,7 +4157,9 @@ test "key update rotates the receiving phase and accepts reordered old packets" 
 
 test "server emits version negotiation for unsupported versions" {
     const a = std.testing.allocator;
-    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer server.deinit();
 
     var raw: [128]u8 = @splat(0);
@@ -4001,7 +4186,7 @@ test "server emits version negotiation for unsupported versions" {
 
 test "client validates version negotiation and rejects downgrade spoofing" {
     const a = std.testing.allocator;
-    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer client.deinit();
     try client.installInitialKeys();
 
@@ -4019,9 +4204,9 @@ test "client validates version negotiation and rejects downgrade spoofing" {
 
 test "retry token round trip validates address and reinstalls initial keys" {
     const a = std.testing.allocator;
-    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer client.deinit();
-    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{ .retry = true });
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server, .retry = true });
     defer server.deinit();
     try client.installInitialKeys();
     try server.acceptInitial(client.dcid[0..client.dcidLen]);
@@ -4057,7 +4242,7 @@ test "client pads initial datagrams to the 1200 byte minimum" {
     // RFC 9000 Section 14.1: a client MUST expand the payload of every
     // datagram carrying an Initial packet to at least 1200 bytes.
     const a = std.testing.allocator;
-    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer client.deinit();
     try client.installInitialKeys();
 
@@ -4074,7 +4259,9 @@ test "server pads ack-eliciting initial datagrams" {
     // RFC 9000 Section 14.1: a server MUST expand datagrams carrying an
     // ack-eliciting Initial packet to the minimum size.
     const a = std.testing.allocator;
-    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer server.deinit();
     try server.installInitialKeys();
     // The anti-amplification gate needs a budget: pretend the client
@@ -4094,9 +4281,11 @@ test "server discards initial packets below the 1200 byte minimum" {
     // carried in a datagram below the minimum size. The datagram is
     // ignored: no error, no state change, no output.
     const a = std.testing.allocator;
-    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var client = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer client.deinit();
-    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var server = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer server.deinit();
     try client.installInitialKeys();
     try server.acceptInitial(client.dcid[0..client.dcidLen]);
@@ -4123,7 +4312,9 @@ test "server accepts the initial flight of an independent quic client" {
     const raw = @embedFile("testdata/interop_client_initial.bin");
 
     const a = std.testing.allocator;
-    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer conn.deinit();
 
     var off: usize = 0;
@@ -4158,9 +4349,11 @@ test "one rtt data that arrives before the handshake is replayed afterwards" {
     // otherwise lose the request.
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    var client = try Connection.init(a, io, .client, .{});
+    var client = try Connection.init(a, io, .{});
     defer client.deinit();
-    var server = try Connection.init(a, io, .server, .{});
+    var server = try Connection.init(a, io, .{
+        .role = .server,
+    });
     defer server.deinit();
     client.maxStreamsBidiRemote = 1;
     server.addressValidated = true;
@@ -4346,7 +4539,7 @@ test "ack delay is encoded in units of the advertised exponent" {
 
 test "discarding initial keys releases their in-flight bytes" {
     const a = std.testing.allocator;
-    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer conn.deinit();
     try conn.installInitialKeys();
     try conn.queueControlFrame(.ping);
@@ -4370,9 +4563,9 @@ test "discarding initial keys releases their in-flight bytes" {
 test "handshake confirmation discards keys and ignores late packets" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    var sender = try Connection.init(a, io, .client, .{});
+    var sender = try Connection.init(a, io, .{});
     defer sender.deinit();
-    var receiver = try Connection.init(a, io, .client, .{});
+    var receiver = try Connection.init(a, io, .{});
     defer receiver.deinit();
     const secret = @as([32]u8, @splat(0x6B));
     try sender.installKeys(.handshake, secret, secret);
@@ -4536,7 +4729,9 @@ test "confirmed handshake drops queued handshake packets but keeps 1-rtt output"
     // the keys are gone.
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    var conn = try Connection.init(a, io, .server, .{});
+    var conn = try Connection.init(a, io, .{
+        .role = .server,
+    });
     defer conn.deinit();
     // The peer's address was validated before this point in a real
     // handshake; without that, server-side amplification limits rightly
@@ -4580,7 +4775,7 @@ test "discarding initial keys drops a queued initial packet" {
     // Initial packet cannot be protected or sent, even if it was already
     // serialized.
     const a = std.testing.allocator;
-    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer conn.deinit();
     try conn.installInitialKeys();
 
@@ -4600,7 +4795,7 @@ test "rejecting early data drops a queued 0-rtt packet" {
     // RFC 9001 Section 4.9.3: discarded 0-RTT keys cannot protect a
     // queued 0-RTT packet, so the packet must not be sent.
     const a = std.testing.allocator;
-    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var conn = try Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer conn.deinit();
     const secret = @as([32]u8, @splat(0x44));
     conn.installZeroRttKeys(secret, true);
@@ -4852,15 +5047,14 @@ test "regression: quic connection receiveDatagram state machine under adversaria
     const helper = struct {
         fn feed(in_io: std.Io, data: []const u8) void {
             const alloc = std.heap.page_allocator;
-            var srv = Connection.init(alloc, in_io, .server, .{
-                .isServer = true,
+            var srv = Connection.init(alloc, in_io, .{
+                .role = .server,
                 .version = 0x00000001,
             }) catch return;
             defer srv.deinit();
             _ = srv.receiveDatagram(data, 1000) catch {};
 
-            var cli = Connection.init(alloc, in_io, .client, .{
-                .isServer = false,
+            var cli = Connection.init(alloc, in_io, .{
                 .version = 0x00000001,
             }) catch return;
             defer cli.deinit();
@@ -4904,15 +5098,13 @@ test "regression: quic connection receiveDatagram state machine under adversaria
 
 test "path validation initiation and response roundtrip" {
     const a = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(12345);
-    const rng = prng.random();
 
     var pair = try CtlPair.init(a);
     defer pair.deinit();
 
     try std.testing.expect(!pair.client.isPathValidated());
 
-    try pair.client.initiatePathValidation(1000, rng);
+    try pair.client.initiatePathValidation(1000);
     try std.testing.expect(pair.client.pathValidator != null);
     try std.testing.expectEqual(pathMod.State.validating, pair.client.pathValidator.?.state);
     try std.testing.expect(pair.client.outbuf.items.len > 0);

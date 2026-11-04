@@ -82,9 +82,6 @@ pub const net = struct {
     pub const proxy = @import("net/proxy.zig");
 };
 
-// Compression
-pub const compression = @import("compression/codec.zig");
-
 // Protocol implementations are reachable through one coherent namespace.
 pub const protocols = struct {
     pub const common = struct {
@@ -172,6 +169,69 @@ pub const http2 = protocols.http2;
 pub const http3 = protocols.http3;
 pub const quic = protocols.quic;
 pub const tls = protocols.tls;
+/// Compression negotiation and codec helpers used by the client and server.
+pub const compression = @import("compression/codec.zig");
+/// Multipart encoding and decoding implementation. Client operations also
+/// consume the same encoder internally through `.multipart` request options.
+pub const multipart = struct {
+    pub const stream = struct {
+        pub const encoder = @import("web/multipart/multipartEncoder.zig");
+        pub const decoder = @import("web/multipart/multipartParser.zig");
+    };
+    pub const server = @import("web/multipart/multipartServer.zig");
+    pub const field = @import("web/multipart/multipartParser.zig").Field;
+    pub const file = struct {
+        pub const Options = @import("web/multipart/multipartEncoder.zig").FileOptions;
+    };
+    pub const part = @import("web/multipart/multipartEncoder.zig").Part;
+    pub const boundary = struct {
+        pub const validate = @import("web/multipart/multipartCommon.zig").validateBoundary;
+    };
+};
+/// Content negotiation and compression codecs used by the client and server.
+/// Authentication helpers shared by client and server integrations.
+pub const auth = struct {
+    pub const basic = @import("web/auth/basicAuth.zig");
+    pub const bearer = @import("web/auth/bearerAuth.zig");
+};
+
+test "client feature facade exports shared codecs auth and multipart paths" {
+    try std.testing.expect(@hasDecl(compression, "compress"));
+    try std.testing.expect(@hasDecl(auth, "basic"));
+    try std.testing.expect(@hasDecl(auth, "bearer"));
+    try std.testing.expect(@hasDecl(multipart.stream, "encoder"));
+    try std.testing.expect(@hasDecl(multipart.stream, "decoder"));
+    try std.testing.expect(@hasDecl(multipart, "field"));
+    try std.testing.expect(@hasDecl(multipart, "file"));
+    try std.testing.expect(@hasDecl(multipart, "part"));
+    try std.testing.expect(@hasDecl(multipart, "boundary"));
+    try std.testing.expect(@hasDecl(multipart, "server"));
+}
+
+test "multipart hierarchical encoder and decoder APIs share implementations" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const fields = [_]multipart.stream.encoder.FieldValue{
+        .{ .name = "key", .value = "value" },
+    };
+    var encoder = try multipart.stream.encoder.init(allocator, io, .{
+        .subtype = .formData,
+        .fields = &fields,
+    });
+    defer encoder.deinit();
+    const wire = try encoder.encodeAlloc();
+    defer allocator.free(wire);
+
+    var decoder = try multipart.stream.decoder.init(allocator, io, .{});
+    defer decoder.deinit();
+    var content_type_buf: [160]u8 = undefined;
+    const content_type = encoder.contentType(&content_type_buf);
+    const decoded = try decoder.parse(wire, content_type);
+    defer decoder.free(decoded);
+    try std.testing.expectEqual(@as(usize, 1), decoded.len);
+    try std.testing.expectEqualStrings("key", decoded[0].name);
+    try std.testing.expectEqualStrings("value", decoded[0].data);
+}
 
 // Canonical router exports
 pub const router = @import("web/router/router.zig");
@@ -186,7 +246,6 @@ pub const Method = method.Method;
 pub const Status = status.Status;
 pub const Uri = uri.Uri;
 pub const Downloader = @import("client/downloadManager.zig").Downloader;
-pub const DownloadOptions = @import("client/downloadManager.zig").DownloadOptions;
 pub const DownloadResult = @import("client/downloadManager.zig").DownloadResult;
 pub const DownloadTask = @import("client/downloadManager.zig").DownloadTask;
 pub const download = @import("client/downloadManager.zig");
@@ -257,17 +316,6 @@ pub const App = app.App;
 pub const openapi = @import("web/openApi/openApiSpec.zig");
 pub const docs = @import("web/docs/docs.zig");
 pub const graphql = @import("web/graphql/graphql.zig");
-pub const auth = struct {
-    pub const basic = @import("web/auth/basicAuth.zig");
-    pub const bearer = @import("web/auth/bearerAuth.zig");
-    pub const digest = @import("web/auth/digestAuth.zig");
-};
-pub const multipart = struct {
-    pub const encoder = @import("web/multipart/multipartEncoder.zig");
-    pub const parser = @import("web/multipart/multipartParser.zig");
-    pub const server = @import("web/multipart/multipartServer.zig");
-};
-
 // Middleware
 pub const middleware = struct {
     const sec = @import("web/middleware/securityHeaders.zig");
@@ -313,16 +361,6 @@ pub const web = struct {
     pub const openapi = @import("web/openApi/openApiSpec.zig");
     pub const docs = @import("web/docs/docs.zig");
     pub const graphql = @import("web/graphql/graphql.zig");
-    pub const auth = struct {
-        pub const basic = @import("web/auth/basicAuth.zig");
-        pub const bearer = @import("web/auth/bearerAuth.zig");
-        pub const digest = @import("web/auth/digestAuth.zig");
-    };
-    pub const multipart = struct {
-        pub const encoder = @import("web/multipart/multipartEncoder.zig");
-        pub const parser = @import("web/multipart/multipartParser.zig");
-        pub const server = @import("web/multipart/multipartServer.zig");
-    };
     pub const middleware = struct {
         const sec = @import("web/middleware/securityHeaders.zig");
         pub const cors = sec.corsMiddleware;
@@ -342,7 +380,7 @@ pub const client = struct {
     const cookieMod = @import("client/cookieJar.zig");
     const downloadMod = @import("client/downloadManager.zig");
 
-    // Client errors & resolution
+    // Client errors and resolution
     pub const Error = httpClientMod.Error;
     pub const ResolvedAddresses = httpClientMod.ResolvedAddresses;
     pub const AddressFamilyPreference = httpClientMod.AddressFamilyPreference;
@@ -370,7 +408,6 @@ pub const client = struct {
 
     // Download manager: httpx.client.download
     pub const Downloader = downloadMod.Downloader;
-    pub const DownloadOptions = downloadMod.DownloadOptions;
     pub const DownloadResult = downloadMod.DownloadResult;
     pub const DownloadTask = downloadMod.DownloadTask;
     pub const DownloadError = downloadMod.DownloadError;
@@ -395,6 +432,16 @@ pub const client = struct {
     // Worker pool: httpx.client.workerPool
     pub const workerPool = @import("concurrency/workerPool.zig").Pool;
 };
+
+test "client facade keeps internal option types private" {
+    try std.testing.expect(!@hasDecl(client, "Config"));
+    try std.testing.expect(!@hasDecl(client, "Protocols"));
+    try std.testing.expect(!@hasDecl(client, "Http3Options"));
+    try std.testing.expect(!@hasDecl(client, "RequestOptions"));
+    try std.testing.expect(!@hasDecl(client, "BatchOptions"));
+    try std.testing.expect(!@hasDecl(client, "OnlineOptions"));
+    try std.testing.expect(!@hasDecl(client, "DownloadOptions"));
+}
 
 // Parsing & inspection subsystem
 /// Native HTML, XML, RSS/Atom/JSON feeds, robots.txt, and sitemap parsing engine.
@@ -495,7 +542,6 @@ test {
     _ = net.socks4;
     _ = net.proxy;
     _ = net.connectivity;
-    _ = compression;
     _ = protocols.common.integer;
     _ = protocols.common.huffman;
     _ = protocols.common.huffmanTable;
@@ -570,12 +616,6 @@ test {
     _ = openapi;
     _ = docs;
     _ = graphql;
-    _ = auth.basic;
-    _ = auth.bearer;
-    _ = auth.digest;
-    _ = multipart.encoder;
-    _ = multipart.parser;
-    _ = multipart.server;
     _ = templates.engine;
     _ = templates.context;
     _ = templates.parser;

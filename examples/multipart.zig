@@ -35,16 +35,25 @@ pub fn main() !void {
     defer client.deinit();
 
     const fileData = "hello, world!";
+    const fields = [_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "note", .value = "greeting" },
+    };
+    const files = [_]struct {
+        name: []const u8,
+        filename: []const u8,
+        contentType: []const u8,
+        data: []const u8,
+    }{
+        .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
+    };
 
     var urlBuf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/post", .{port});
 
     var response = try client.post(url, .{
         .multipart = .{
-            .name = "upload",
-            .filename = "hello.txt",
-            .contentType = "text/plain",
-            .data = fileData,
+            .fields = &fields,
+            .files = &files,
         },
     });
     defer response.deinit();

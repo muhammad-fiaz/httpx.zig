@@ -113,6 +113,7 @@ const apiKey = envStore.get("MY_API_KEY");
 | `http11` | `bool` | `true` | Fast toggle to enable HTTP/1.1 protocol. |
 | `http2` | `bool` | `false` | Fast toggle to use HTTP/2 as default protocol. |
 | `http3` | `bool` | `false` | Fast toggle to use HTTP/3 as default protocol. |
+| `protocols` | `Protocols` | `{}` | Protocol engine tuning. `protocols.http3.quic` exposes QUIC idle timeout, flow-control windows, stream limits, UDP payload, version, Retry, and role. |
 | `pool` | `PoolConfig` | `{}` | Connection pool limits (`maxConnections`, `maxPerHost`, `idleTimeoutMs`, `maxParkedMs`). |
 | `dnsCache` | `DnsCacheOptions` | `{}` | DNS cache settings (`enable`, `ttlMs`, `negativeTtlMs`, `maxEntries`). |
 | `tls` | `?TlsOptions` | `null` | Default TLS overrides for `https://`; null uses system trust verification. |
@@ -151,21 +152,21 @@ defer res.deinit();
 |----------|-------------|
 | `Client.init(allocator, io, config)` | Initialize client with allocator, io, and configuration (or `.{}` for defaults). |
 
-### Primary Unified API: `fetch`
+### Operation Options
 
-`client.fetch(url, options)` is the primary high-level HTTP client operation. It supports all HTTP methods, strongly typed JSON serialization, custom headers, query parameters, timeouts, and body streaming in a single call:
+Every operation takes the URL first and an operation-options struct second. Use
+`.{}` for defaults. The same options work across methods:
 
 ```zig
 // Simple GET
-var res = try client.fetch("https://api.example.com/data", .{});
+var res = try client.get("https://api.example.com/data", .{});
 defer res.deinit();
 
 // POST with strongly typed Zig struct (automatically serialized via std.json)
 const CreateUser = struct { name: []const u8, email: []const u8 };
 const User = struct { id: u64, name: []const u8, email: []const u8 };
 
-var res2 = try client.fetch("https://api.example.com/users", .{
-    .method = .POST,
+var res2 = try client.post("https://api.example.com/users", .{
     .headers = .{ .Authorization = "Bearer secret_token" },
     .json = CreateUser{ .name = "Fiaz", .email = "fiaz@example.com" },
 });
@@ -201,10 +202,8 @@ All methods are URL-first (`url`, then options):
 
 | Method | Description |
 |--------|-------------|
-| `fetch(url, options)` | **Primary unified HTTP request operation** |
 | `get(url, options)` | HTTP GET request |
 | `post(url, options)` | HTTP POST request (accepts `.body`, `.json`, `.form`) |
-| `postJson(url, payload, options)` | HTTP POST with typed struct or serialized JSON payload |
 | `put(url, options)` | HTTP PUT request |
 | `delete(url, options)` | HTTP DELETE request |
 | `patch(url, options)` | HTTP PATCH request |
@@ -215,9 +214,6 @@ All methods are URL-first (`url`, then options):
 | `request(url, options)` | Generic request (method set via `options.method`) |
 | `requestStream(url, options)` | Streaming request returning `ResponseStream` (incremental on HTTP/1.1) |
 | `requestBuilder(method, url)` | Start fluent `RequestBuilder` for chained request construction |
-| `builder(method, url)` | Alias for `requestBuilder` |
-| `getBuilder(url)` | Start GET `RequestBuilder` |
-| `postBuilder(url)` | Start POST `RequestBuilder` |
 | `getAll(urls)` | Concurrent GETs; deinit each response, free the slice |
 | `requestAll(reqs)` | Concurrent requests; same ownership |
 | `download(url, options)` | Streaming file download with resume/verify (destination via `options.path`) |
@@ -266,10 +262,9 @@ defer json_response.deinit();
 
 // POST with typed struct
 const User = struct { name: []const u8, role: []const u8 };
-var typed_res = try client.postJson("https://api.example.com/users", User{
-    .name = "John",
-    .role = "engineer",
-}, .{});
+var typed_res = try client.post("https://api.example.com/users", .{
+    .json = User{ .name = "John", .role = "engineer" },
+});
 defer typed_res.deinit();
 
 // Custom headers
@@ -309,16 +304,15 @@ For complete copy/paste demos, see these example pages:
 - [HTTP Auth Helpers](/examples/http-auth-helpers)
 - [Simplified API Aliases](/examples/simplified-api-aliases)
 
-### Request Options (`RequestOptions`)
+### Per-request options
 
-Per-request overrides for configuration. The client accepts these fields
-directly (plus duck-typed extras such as `multipart` and `graphql`
-handled via `anytype` opts). Unset optional fields fall back to
-client-level defaults.
+Per-request overrides are passed as fields of the options literal on each
+client operation. Zig infers the literal's type from the method. Unset
+optional fields fall back to client-level defaults.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `method` | `?Method` | `null` | Explicit method for generic `request`/`fetch` (wrappers supply their own). |
+| `method` | `?Method` | `null` | Explicit method for generic `request` (verb helpers supply their own). |
 | `headers` | `[]const Header` | `&.{}` | Additional headers (`{ .name, .value }` pairs). |
 | `query` | `[]const Header` | `&.{}` | Percent-encoded query params appended to the URL. |
 | `body` | `?[]const u8` | `null` | Raw request body. |
@@ -339,7 +333,7 @@ client-level defaults.
 | `tls` | `?TlsOptions` | `null` | Per-request TLS overrides; null inherits the client default or system trust. |
 | `proxy` | `?[]const u8` | `null` | Per-request proxy URL override. |
 
-Request options are configured directly using struct literals:
+Pass request fields directly to the operation:
 
 ```zig
 var res = try client.get("/users", .{
@@ -361,10 +355,13 @@ The client assembles the body and sets the `Content-Type` header
 ```zig
 var resp = try client.post("https://example.com/upload", .{
     .multipart = .{
-        .name = "upload",
-        .filename = "data.bin",
-        .contentType = "application/octet-stream",
-        .data = chunk_slice,
+        .fields = &.{.{ .name = "description", .value = "upload" }},
+        .files = &.{.{
+            .name = "upload",
+            .filename = "data.bin",
+            .contentType = "application/octet-stream",
+            .data = chunk_slice,
+        }},
     },
 });
 defer resp.deinit();
@@ -375,13 +372,10 @@ defer resp.deinit();
 > On Windows the Winsock kernel send buffer is typically 8–64 KB. When sending
 > large multipart data as a single body, `winsock.send()` may stall.
 >
-> httpx.zig 0.1.8+ automatically caps each send call to 64 KB, so most uploads
-> now work without application changes. For extra safety — especially for payloads
-> larger than a few hundred KB — build the body with
-> `httpx.multipart.encoder.Multipart` (or post a single part inline with the
-> `.multipart` request option) and issue one request per slice.
-> See the [Multipart Guide](../guide/multipart.md#large-file-uploads--windows-compatibility)
-> for a complete resumable upload example.
+> The client caps individual socket writes, but it currently assembles the full
+> multipart body in memory before sending it. Large uploads therefore use memory
+> proportional to the encoded body. If an application splits a file across
+> requests, it must define the matching server-side reassembly protocol.
 
 
 ## Response
@@ -502,10 +496,10 @@ Client request methods (all URL-first):
 | `client.options(url, opts)` | HTTP OPTIONS |
 | `client.trace(url, opts)` | HTTP TRACE |
 | `client.connect(url, opts)` | HTTP CONNECT |
-| `client.fetch(url, opts)` | Unified fetch (any method via `.method`) |
+| `client.fetch(url, opts)` | Fetch-style convenience operation using the same native request transport |
 | `client.request(url, opts)` | General HTTP request (any method via `.method`) |
-| `client.getAll(&urls)` | Concurrent GET requests |
-| `client.requestAll(&requests)` | Concurrent custom requests |
+| `client.getAll(&urls, .{})` | Concurrent GET requests |
+| `client.requestAll(&requests, .{})` | Concurrent custom requests |
 
 ## See Also
 

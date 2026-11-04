@@ -119,10 +119,12 @@ pub fn main() !void {
 
     // 1. Test POST /users with typed struct
     const postUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/users", .{port});
-    var postResp = try client.postJson(postUrl, CreateUserRequest{
-        .name = "Example Developer",
-        .email = "dev@example.com",
-    }, .{});
+    var postResp = try client.post(postUrl, .{
+        .json = CreateUserRequest{
+            .name = "Example Developer",
+            .email = "dev@example.com",
+        },
+    });
     defer postResp.deinit();
 
     std.debug.print("POST /users status: {d}, body: {s}\n", .{ postResp.status, postResp.body });

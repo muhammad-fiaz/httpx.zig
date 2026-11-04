@@ -214,6 +214,21 @@ pub const Config = struct {
     /// connection generates an ephemeral key (valid for its own Retry
     /// round trip only).
     http3RetryKey: ?[32]u8 = null,
+    /// QUIC idle timeout for HTTP/3 connections (0 disables). The
+    /// effective value is the minimum of this and the peer's advertised
+    /// max_idle_timeout (RFC 9000 Section 10.1).
+    http3MaxIdleTimeoutMs: u64 = 30_000,
+    /// Connection-level QUIC receive window advertised to HTTP/3 clients.
+    http3InitialMaxData: u64 = 1 << 20,
+    /// Per-stream receive windows advertised to HTTP/3 clients.
+    http3InitialMaxStreamDataBidiLocal: u64 = 65_535,
+    http3InitialMaxStreamDataBidiRemote: u64 = 65_535,
+    http3InitialMaxStreamDataUni: u64 = 65_535,
+    /// Concurrent streams a client may open in each direction.
+    http3MaxStreamsBidi: u64 = 128,
+    http3MaxStreamsUni: u64 = 128,
+    /// Advertised max UDP payload size (1200..65527 bytes).
+    http3MaxUdpPayload: usize = 1472,
     /// Automatically watch directory and broadcast changes / hot reload.
     watch: bool = false,
     /// Directory to watch when watch is enabled.
@@ -672,7 +687,9 @@ pub const Server = struct {
         var h3Ep_opt: ?quicTransport.Endpoint = null;
         var h3Placeholder_opt: ?*quicConn.Connection = null;
         if (effectiveCfg.http3 and loadedCertPem != null and loadedKeyPem != null) {
-            const placeholder = try quicConn.Connection.init(allocator, io, .server, .{});
+            const placeholder = try quicConn.Connection.init(allocator, io, .{
+                .role = .server,
+            });
             // Ownership moves to the endpoint/Server on success; the
             // errdefer covers every failure before that transfer.
             var placeholderOwned = true;
@@ -1579,9 +1596,18 @@ pub const Server = struct {
         const keyPem = self.tlsKeyPemLoaded orelse return error.NoPrivateKey;
 
         const oldConn = ep.conn;
-        const qconn = try quicConn.Connection.init(self.allocator, self.io, .server, .{
+        const qconn = try quicConn.Connection.init(self.allocator, self.io, .{
+            .role = .server,
             .retry = self.cfg.http3Retry,
             .retryKey = self.cfg.http3RetryKey,
+            .maxIdleTimeoutMs = self.cfg.http3MaxIdleTimeoutMs,
+            .initialMaxData = self.cfg.http3InitialMaxData,
+            .initialMaxStreamDataBidiLocal = self.cfg.http3InitialMaxStreamDataBidiLocal,
+            .initialMaxStreamDataBidiRemote = self.cfg.http3InitialMaxStreamDataBidiRemote,
+            .initialMaxStreamDataUni = self.cfg.http3InitialMaxStreamDataUni,
+            .initialMaxStreamsBidi = self.cfg.http3MaxStreamsBidi,
+            .initialMaxStreamsUni = self.cfg.http3MaxStreamsUni,
+            .maxUdpPayload = self.cfg.http3MaxUdpPayload,
         });
         defer {
             qconn.deinit();

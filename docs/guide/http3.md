@@ -254,7 +254,7 @@ std.debug.print("Key phase: {}\n", .{decoded.keyPhase});
 | 0-RTT | ✅ | Early data |
 | Handshake | ✅ | TLS handshake completion |
 | Retry | ✅ | Address validation |
-| 1-RTT | âŒ (Short) | Application data |
+| 1-RTT | No (short header) | Application data |
 
 ## QUIC Frames
 
@@ -437,6 +437,40 @@ const params = httpx.quic.transportParameters.Params{
     .initialMaxStreamDataUni = 1024 * 1024,
 };
 ```
+
+The same limits are what the live QUIC connection advertises and
+enforces. They are validated at `Connection.init` (`error.InvalidConfig`
+for impossible windows, too many streams, or a UDP payload outside
+1200–65527 bytes). Protocol defaults are secure and need no manual
+construction.
+
+Client applications tune them through the client initialization options,
+never by constructing a protocol config object of their own:
+
+```zig
+var client = httpx.Client.init(allocator, io, .{
+    .http3 = true,
+    .protocols = .{ .http3 = .{ .quic = .{
+        .maxIdleTimeoutMs = 30_000,
+        .initialMaxData = 10 * 1024 * 1024,
+        .initialMaxStreamsBidi = 128,
+        .maxUdpPayload = 1472,
+    } } },
+});
+defer client.deinit();
+```
+
+Omitting `.protocols` or using `.{}` keeps the secure defaults.
+
+The effective idle timeout is the minimum of the local value and the
+peer's advertised `max_idle_timeout`; zero disables enforcement. When it
+expires, `pollTimeouts` transitions the connection to `.draining` and
+returns `error.Draining`.
+
+On the server these values are exposed as `http3MaxIdleTimeoutMs`,
+`http3InitialMaxData`, `http3InitialMaxStreamDataBidiLocal`,
+`http3InitialMaxStreamDataBidiRemote`, `http3InitialMaxStreamDataUni`,
+`http3MaxStreamsBidi`, `http3MaxStreamsUni`, and `http3MaxUdpPayload`.
 
 ## GOAWAY and CONNECTION_CLOSE
 

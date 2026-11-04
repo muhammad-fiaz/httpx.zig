@@ -74,6 +74,14 @@ defer env_server.deinit();
 | `http3` | `bool` | `false` | HTTP/3 server runtime path. |
 | `http3Retry` | `bool` | `false` | Require a Retry token before accepting the QUIC Initial, validating the peer address and limiting amplification. |
 | `http3RetryKey` | `?[32]u8` | `null` | HMAC key for Retry tokens; a fresh random key per connection is used when null. |
+| `http3MaxIdleTimeoutMs` | `u64` | `30000` | QUIC idle timeout; effective value is the minimum of this and the peer's advertised timeout. Zero disables enforcement. |
+| `http3InitialMaxData` | `u64` | `1048576` | Connection-level QUIC receive window. |
+| `http3InitialMaxStreamDataBidiLocal` | `u64` | `65535` | Receive window for locally initiated bidirectional streams. |
+| `http3InitialMaxStreamDataBidiRemote` | `u64` | `65535` | Receive window for peer-initiated bidirectional streams. |
+| `http3InitialMaxStreamDataUni` | `u64` | `65535` | Receive window for peer-initiated unidirectional streams. |
+| `http3MaxStreamsBidi` | `u64` | `128` | Concurrent bidirectional streams a client may open. |
+| `http3MaxStreamsUni` | `u64` | `128` | Concurrent unidirectional streams a client may open. |
+| `http3MaxUdpPayload` | `usize` | `1472` | Advertised QUIC max UDP payload (validated 1200–65527 bytes). |
 | `logging` | `LoggingOptions` | `{}` | Event callback + level (silent by default). |
 | `enableDocs` | `bool` | `true` | Mount `/openapi.json`, `/docs`, `/redoc` by default. |
 | `docs` | `?docs.Config` | `null` | Overrides for docs routes when enabled. |

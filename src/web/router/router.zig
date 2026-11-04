@@ -194,7 +194,7 @@ pub const Context = struct {
         options: multipartServerMod.Options,
     ) multipartServerMod.Error!multipartServerMod.Form {
         const ct = self.header("Content-Type") orelse return error.MissingContentType;
-        return multipartServerMod.parse(self.allocator, self.body, ct, options);
+        return multipartServerMod.parse(self.allocator, self.io, self.body, ct, options);
     }
 
     /// Extracts Bearer token from Authorization header if present.

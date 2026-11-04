@@ -173,6 +173,9 @@ pub const Request = struct {
     maxResponseSize: ?usize = null,
     /// Optional proxy URL (e.g. "socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080", "http://127.0.0.1:8080").
     proxy: ?[]const u8 = null,
+    /// QUIC transport parameters for HTTP/3 (set from the client-wide
+    /// `protocols.http3.quic` options).
+    quic: quicConn.Config = .{},
 
     pub fn text(url: []const u8, bodyText: []const u8) Request {
         return .{ .url = url, .method = .POST, .bodyKind = .raw, .body = bodyText };
@@ -396,6 +399,7 @@ pub const Error = error{
     Timeout,
     /// HTTP/2 framing/HPACK violation from the peer.
     ProtocolViolation,
+    InvalidRequestBody,
     ConnectFailed,
     /// HTTP proxy replied 407: CONNECT credentials missing or rejected.
     ProxyAuthRequired,
@@ -741,6 +745,7 @@ fn h3DoRequest(
         .earlyData = canSendEarlyData,
         .sessionOut = &capturedSession,
         .timeoutMs = deadlineMs,
+        .quic = req.quic,
     }) catch |e| switch (e) {
         error.OutOfMemory => return Error.OutOfMemory,
         error.Timeout => return Error.Timeout,
@@ -2766,7 +2771,7 @@ fn removeDotSegments(a: Allocator, path: []const u8) ![]u8 {
 
 // Convenience one-shot helpers (all route through request()).
 // NOTE: JSON/form bodies use the canonical `.{.bodyKind/.body}` fields on
-// `Request` (or `Client.RequestOptions.json`) — no postJson/putJson/patchJson
+// `Request.bodyKind`/`Request.body` or the inferred `.json` operation field — no postJson/putJson/patchJson
 // explosion.
 
 pub fn get(a: Allocator, io: std.Io, url: []const u8) Error!Response {

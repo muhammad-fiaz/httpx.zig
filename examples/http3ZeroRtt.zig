@@ -75,7 +75,7 @@ const DemoServer = struct {
         tkeys: httpx.tls.session.TicketKeys,
         rcache: *httpx.tls.session.ReplayCache,
     ) !void {
-        var qconn = try httpx.quic.Connection.init(alloc, io, .server, .{});
+        var qconn = try httpx.quic.Connection.init(alloc, io, .{ .role = .server });
         const prevConn = srv.ep.conn;
         defer {
             qconn.deinit();
@@ -172,7 +172,7 @@ pub fn main() !void {
     const ticketKeys = httpx.tls.session.TicketKeys{ .current = (@as([32]u8, @splat(0x42))) };
 
     // 2. Start Loopback HTTP/3 Server with 0-RTT and Session Resumption
-    var placeholder = try httpx.quic.Connection.init(allocator, io, .server, .{});
+    var placeholder = try httpx.quic.Connection.init(allocator, io, .{ .role = .server });
     defer placeholder.deinit();
 
     var srv = DemoServer{};

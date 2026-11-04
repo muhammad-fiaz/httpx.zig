@@ -19,8 +19,8 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    // Canonical request via fetch
-    var resp = try client.fetch("https://httpbun.com/post", .{
+    // Generic request with an explicit method
+    var resp = try client.request("https://httpbun.com/post", .{
         .method = .POST,
         .headers = &.{
             .{ .name = "Accept", .value = "application/json" },
@@ -42,7 +42,7 @@ wrappers. The fluent payload type is `httpx.client.requestPayload`.
 | Field | Type | Description |
 |---|---|---|
 | `url` | `[]const u8` | Request URL (required) |
-| `method` | `?Method` | Explicit method for generic `request`/`fetch` |
+| `method` | `?Method` | Explicit method for generic `request` |
 | `headers` | `[]const Header` | Slice of request header name/value pairs |
 | `query` | `[]const Header` | URL query parameters automatically encoded |
 | `body` | `?[]const u8` | Raw payload bytes |

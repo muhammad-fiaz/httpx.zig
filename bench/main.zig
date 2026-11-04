@@ -20,6 +20,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const httpx = @import("httpx");
+const authBench = httpx.auth;
+const codec = httpx.compression;
 
 pub const BenchConfig = struct {
     iterations: usize,
@@ -206,8 +208,8 @@ fn benchHttp1HeaderBlock() void {
 
 const sampleAuthority = "api.subdomain.service.internal:8443";
 fn benchAuthorityParse() void {
-    const auth = httpx.parse.parseAuthority(sampleAuthority) orelse return;
-    std.mem.doNotOptimizeAway(auth.host.len + (auth.port orelse 0));
+    const authority = httpx.parse.parseAuthority(sampleAuthority) orelse return;
+    std.mem.doNotOptimizeAway(authority.host.len + (authority.port orelse 0));
 }
 
 const sampleEncoded = "Hello%20World%21%20This%20is%20a%20test%20query%3Dvalue%26foo%3Dbar";
@@ -343,43 +345,43 @@ fn benchJsonParse() void {
 
 fn benchBasicAuthEncode() void {
     var outBuf: [256]u8 = undefined;
-    const n = httpx.auth.basic.encodeHeaderValue(&outBuf, "benchmark_user", "password123!");
+    const n = authBench.basic.encodeHeaderValue(&outBuf, "benchmark_user", "password123!");
     std.mem.doNotOptimizeAway(n);
 }
 
 fn benchBasicAuthDecode() void {
     var decodeBuf: [256]u8 = undefined;
-    const parsed = httpx.auth.basic.parse("Basic YmVuY2htYXJrX3VzZXI6cGFzc3dvcmQxMjMh", &decodeBuf) catch return;
+    const parsed = authBench.basic.parse("Basic YmVuY2htYXJrX3VzZXI6cGFzc3dvcmQxMjMh", &decodeBuf) catch return;
     std.mem.doNotOptimizeAway(parsed.username.len + parsed.password.len);
 }
 
 fn benchBearerTokenParse() void {
     const headerVal = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3j";
-    std.mem.doNotOptimizeAway(httpx.auth.bearer.parseBearer(headerVal).?.len);
+    std.mem.doNotOptimizeAway(authBench.bearer.parseBearer(headerVal).?.len);
 }
 
 // Group 5: Compression & Codecs
 
 fn benchGzipCompress() void {
-    const compressed = httpx.compression.compress(benchAllocator, .gzip, sampleCompressRaw) catch return;
+    const compressed = codec.compress(benchAllocator, .gzip, sampleCompressRaw) catch return;
     defer benchAllocator.free(compressed);
     std.mem.doNotOptimizeAway(compressed.len);
 }
 
 fn benchGzipDecompress() void {
-    const decompressed = httpx.compression.decompress(benchAllocator, .gzip, sampleGzipPayload) catch return;
+    const decompressed = codec.decompress(benchAllocator, .gzip, sampleGzipPayload) catch return;
     defer benchAllocator.free(decompressed);
     std.mem.doNotOptimizeAway(decompressed.len);
 }
 
 fn benchDeflateCompress() void {
-    const compressed = httpx.compression.compress(benchAllocator, .deflate, sampleCompressRaw) catch return;
+    const compressed = codec.compress(benchAllocator, .deflate, sampleCompressRaw) catch return;
     defer benchAllocator.free(compressed);
     std.mem.doNotOptimizeAway(compressed.len);
 }
 
 fn benchDeflateDecompress() void {
-    const decompressed = httpx.compression.decompress(benchAllocator, .deflate, sampleDeflatePayload) catch return;
+    const decompressed = codec.decompress(benchAllocator, .deflate, sampleDeflatePayload) catch return;
     defer benchAllocator.free(decompressed);
     std.mem.doNotOptimizeAway(decompressed.len);
 }
@@ -784,7 +786,7 @@ const H3BenchServer = struct {
             srv.ep.peer = null;
 
             // Allocate a fresh server Connection for this incoming client.
-            const qconn = httpx.protocols.quic.Connection.init(alloc, srv.ep.io, .server, .{}) catch continue;
+            const qconn = httpx.protocols.quic.Connection.init(alloc, srv.ep.io, .{ .role = .server }) catch continue;
             srv.ep.conn = qconn;
 
             // Restart pump with the new conn in place BEFORE serveOne so the
@@ -1038,9 +1040,9 @@ pub fn main() !void {
         try compRaw.appendSlice(benchAllocator, jsonChunk);
     }
     sampleCompressRaw = compRaw.items;
-    sampleGzipPayload = try httpx.compression.compress(benchAllocator, .gzip, sampleCompressRaw);
+    sampleGzipPayload = try codec.compress(benchAllocator, .gzip, sampleCompressRaw);
     defer benchAllocator.free(sampleGzipPayload);
-    sampleDeflatePayload = try httpx.compression.compress(benchAllocator, .deflate, sampleCompressRaw);
+    sampleDeflatePayload = try codec.compress(benchAllocator, .deflate, sampleCompressRaw);
     defer benchAllocator.free(sampleDeflatePayload);
 
     // 6. Initialize Local Loopback Server & Client
@@ -1095,7 +1097,7 @@ pub fn main() !void {
 
     // 8. HTTP/3 live loopback (fresh QUIC+TLS handshake per op)
     h3BenchIo = io;
-    h3BenchServer.ep = try httpx.protocols.quic.transport.Endpoint.init(benchAllocator, io, try httpx.protocols.quic.Connection.init(benchAllocator, io, .server, .{}), .{});
+    h3BenchServer.ep = try httpx.protocols.quic.transport.Endpoint.init(benchAllocator, io, try httpx.protocols.quic.Connection.init(benchAllocator, io, .{ .role = .server }), .{});
     const h3port = h3BenchServer.ep.localPort();
     try h3BenchServer.pump.start(&h3BenchServer.ep, benchAllocator);
     h3BenchThread = try std.Thread.spawn(.{}, H3BenchServer.run, .{&h3BenchServer});

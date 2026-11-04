@@ -9,7 +9,9 @@
 //! 5.2). The TLS 1.3 handshake lives in `handshake.zig`; ACK tracking,
 //! PTO/loss recovery, NewReno congestion control, Retry, and version
 //! negotiation live in `connection.zig`. This adapter only owns the UDP
-//! socket and the pump. Connection migration is not implemented.
+//! socket and the pump. Path validation primitives are available on the
+//! connection, but the endpoint does not yet switch its active peer address
+//! after validation; connection migration is therefore not supported here.
 //!
 //! References:
 //!   - RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport
@@ -163,8 +165,11 @@ pub const MAX_DATAGRAM: usize = 1500;
 pub const Endpoint = struct {
     conn: *Connection,
     sock: udpMod.UdpSocket,
-    /// Last peer address observed (set on first received datagram).
+    /// Active peer address. Once established by an explicit destination or
+    /// the first received datagram, it is pinned until path validation can
+    /// safely promote a candidate address.
     peer: ?std.Io.net.IpAddress = null,
+    candidatePeer: ?std.Io.net.IpAddress = null,
     io: std.Io,
 
     pub const Options = struct {
@@ -196,6 +201,22 @@ pub const Endpoint = struct {
         };
     }
 
+    /// Processes one datagram from a source address. Datagrams from a new
+    /// address are not allowed to replace the active route until migration
+    /// promotion is wired to authenticated PATH_RESPONSE handling.
+    pub fn receiveFrom(self: *Endpoint, data: []const u8, from: std.Io.net.IpAddress, nowMs: u64) !bool {
+        if (self.peer) |active| {
+            if (!active.eql(&from)) {
+                self.candidatePeer = from;
+                return false;
+            }
+        } else {
+            self.peer = from;
+        }
+        try self.conn.receiveDatagram(data, nowMs);
+        return true;
+    }
+
     /// Receives up to `max` datagrams into the connection. Returns the
     /// number processed. Blocks indefinitely when the peer is quiet (see
     /// `UdpSocket.receive`), so only call this where progress is
@@ -208,8 +229,7 @@ pub const Endpoint = struct {
         var n: usize = 0;
         while (n < max) : (n += 1) {
             const rx = self.sock.receive(&buf) catch return n; // closed/err => drained
-            self.peer = rx.from;
-            self.conn.receiveDatagram(rx.data, nowMs) catch |e| switch (e) {
+            _ = self.receiveFrom(rx.data, rx.from, nowMs) catch |e| switch (e) {
                 error.Draining => return error.Draining,
                 else => continue, // drop bad datagrams, keep going
             };
@@ -228,7 +248,14 @@ pub const Endpoint = struct {
     /// packet has no Length field, so it must be the last packet in the
     /// datagram (same section).
     pub fn flush(self: *Endpoint, dest: ?std.Io.net.IpAddress) !usize {
-        const d = dest orelse self.peer orelse return error.NoRoute;
+        if (dest) |requested| {
+            if (self.peer) |active| {
+                if (!active.eql(&requested)) self.candidatePeer = requested;
+            } else {
+                self.peer = requested;
+            }
+        }
+        const d = self.peer orelse return error.NoRoute;
         var sent: usize = 0;
         while (self.conn.outbuf.items.len > 0) {
             const take = self.nextDatagramSize();
@@ -318,7 +345,7 @@ test "quic pump rejects a duplicate start without losing its reader" {
     const a = std.testing.allocator;
     var ctx = try @import("../../sockets/tcp.zig").IoContext.init(a);
     defer ctx.deinit();
-    var conn = try connMod.Connection.init(a, ctx.io, .client, .{});
+    var conn = try connMod.Connection.init(a, ctx.io, .{});
     defer conn.deinit();
     var ep = try Endpoint.init(a, ctx.io, conn, .{});
     defer ep.deinit();
@@ -339,9 +366,11 @@ test "quic endpoints exchange protected initial packets over real udp" {
 
     defer ctx.deinit();
 
-    var client = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var client = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer client.deinit();
-    var server = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var server = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer server.deinit();
 
     // Queue a real Initial-space flight (keys derive from DCID alone, so
@@ -388,6 +417,26 @@ test "quic endpoints exchange protected initial packets over real udp" {
     try std.testing.expect(gotBack >= 1);
 }
 
+test "endpoint does not replace active peer from a new datagram source" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var conn = try connMod.Connection.init(a, io, .{});
+    defer conn.deinit();
+    var ep = try Endpoint.init(a, io, conn, .{});
+    defer ep.deinit();
+
+    const active = std.Io.net.IpAddress.parseIp4("127.0.0.1", 10001) catch unreachable;
+    const candidate = std.Io.net.IpAddress.parseIp4("127.0.0.1", 10002) catch unreachable;
+    const accepted = try ep.receiveFrom("malformed", active, 1);
+    try std.testing.expect(accepted);
+    try std.testing.expect(ep.peer.?.eql(&active));
+
+    const switched = try ep.receiveFrom("malformed", candidate, 2);
+    try std.testing.expect(!switched);
+    try std.testing.expect(ep.peer.?.eql(&active));
+    try std.testing.expect(ep.candidatePeer.?.eql(&candidate));
+}
+
 test "coalesced packets are never split across datagrams" {
     // A QUIC datagram carries whole packets only (RFC 9000 Section 12.2).
     // Splitting a packet in half makes the peer discard the datagram.
@@ -395,9 +444,11 @@ test "coalesced packets are never split across datagrams" {
     var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    var client = try connMod.Connection.init(a, ctx.io, .client, .{});
+    var client = try connMod.Connection.init(a, ctx.io, .{});
     defer client.deinit();
-    var server = try connMod.Connection.init(a, ctx.io, .server, .{});
+    var server = try connMod.Connection.init(a, ctx.io, .{
+        .role = .server,
+    });
     defer server.deinit();
 
     var clientEp = try Endpoint.init(a, ctx.io, client, .{});

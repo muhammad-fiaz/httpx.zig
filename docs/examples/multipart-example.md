@@ -1,29 +1,33 @@
 # Multipart Form Data Example
 
-Multipart bodies with `httpx.multipart.encoder.Multipart`, parsed back with
-`httpx.multipart.parser`. See `examples/multipart.zig`.
+Multipart bodies with `httpx.multipart.stream.encoder.Encoder`, parsed back with
+`httpx.multipart.stream.decoder`. See `examples/multipart.zig`.
 
 ```zig
-var form = httpx.multipart.encoder.Multipart.init(allocator, .formData);
-defer form.deinit();
-
-try form.field("username", "alice");
-try form.file("avatar", &.{ 0x89, 0x50, 0x4E, 0x47 }, .{
-    .filename = "avatar.png",
-    .contentType = "image/png",
+const fields = [_]httpx.multipart.stream.encoder.FieldValue{
+    .{ .name = "username", .value = "alice" },
+};
+const files = [_]httpx.multipart.stream.encoder.File{
+    .{ .name = "avatar", .data = &.{ 0x89, 0x50, 0x4E, 0x47 }, .filename = "avatar.png", .contentType = "image/png" },
+};
+var encoder = try httpx.multipart.stream.encoder.init(allocator, io, .{
+    .subtype = .formData,
+    .fields = &fields,
+    .files = &files,
 });
+defer encoder.deinit();
 
-const body = try form.encodeAlloc();
+const body = try encoder.encodeAlloc();
 defer allocator.free(body);
 
 var ctBuf: [128]u8 = undefined;
-const contentType = form.contentType(&ctBuf);
+const contentType = encoder.contentType(&ctBuf);
 
 // Parse the generated body back.
-const fields = try httpx.multipart.parser.parseMultipart(
-    allocator, body, form.boundary, .{},
-);
-defer httpx.multipart.parser.freeFieldsAlloc(allocator, fields);
+var decoder = try httpx.multipart.stream.decoder.init(allocator, io, .{});
+defer decoder.deinit();
+const fields = try decoder.parse(body, contentType);
+defer decoder.free(fields);
 for (fields) |part| {
     std.debug.print("Part: {s}, Content-Type: {s}, Data Size: {d}\n", .{
         part.name, part.contentType, part.data.len,
@@ -31,21 +35,31 @@ for (fields) |part| {
 }
 ```
 
-Client requests take a single part inline:
+Client requests accept separate field and file slices:
 
 ```zig
+const fileData = "hello, world!";
+const formFields = [_]struct { name: []const u8, value: []const u8 }{
+    .{ .name = "description", .value = "hello" },
+};
+const uploadFiles = [_]struct {
+    name: []const u8,
+    filename: []const u8,
+    contentType: []const u8,
+    data: []const u8,
+}{
+    .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
+};
 var res = try client.post("https://example.com/upload", .{
     .multipart = .{
-        .name = "upload",
-        .filename = "hello.txt",
-        .contentType = "text/plain",
-        .data = fileData,
+        .fields = &formFields,
+        .files = &uploadFiles,
     },
 });
 defer res.deinit();
 ```
 
-Boundary extraction: `httpx.multipart.parser.extractBoundary(contentType)`.
+Boundary extraction: `httpx.multipart.stream.decoder.extractBoundary(contentType)`.
 
 ## Expected Output
 

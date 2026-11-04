@@ -1,7 +1,7 @@
 # Batch Concurrent Requests
 
-Run requests concurrently with `client.getAll(urls)` and
-`client.requestAll(reqs)` on an initialized `Client`.
+Run requests concurrently with `client.getAll(urls, .{})` and
+`client.requestAll(reqs, .{})` on an initialized `Client`.
 See `examples/concurrentDemo.zig`.
 
 ```zig
@@ -9,7 +9,7 @@ const urls = [_][]const u8{
     "https://httpbun.com/get",
     "https://httpbun.com/headers",
 };
-const results = client.getAll(urls) catch |err| {
+const results = client.getAll(urls, .{}) catch |err| {
     std.debug.print("getAll failed: {s}\n", .{@errorName(err)});
     return;
 };
@@ -22,7 +22,7 @@ const reqs = .{
     .{ .method = .GET, .url = "https://httpbun.com/get" },
     .{ .method = .GET, .url = "https://httpbun.com/headers" },
 };
-const batch = client.requestAll(reqs) catch |err| {
+const batch = client.requestAll(reqs, .{}) catch |err| {
     std.debug.print("requestAll failed: {s}\n", .{@errorName(err)});
     return;
 };

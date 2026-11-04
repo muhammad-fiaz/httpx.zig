@@ -8,16 +8,17 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 ### Client Operations (URL-first)
 
-- `client.fetch(url, options)` — **primary unified fetch operation** (methods, typed JSON, headers, body)
+- `client.request(url, options)` - generic request; `.method` defaults to GET
+- `client.fetch(url, options)` - Fetch-style convenience using the native client transport
 - `client.get / post / put / patch / delete / head / options / trace / connect / request(url, options)`
-- `client.getAll(urls)` — fetch multiple URLs concurrently
-- `client.requestAll(requests)` — perform multiple custom requests concurrently
+- `client.getAll(urls, options)` — fetch multiple URLs concurrently
+- `client.requestAll(requests, options)` — perform multiple custom requests concurrently
 - `client.checkConnectivity(options)` — connectivity probe using client I/O
 - Additional operations: `client.download`, `client.graphql`, `client.lookupFileInfo`, `client.updateFile`, `httpx.client.download.verifyFile`, `client.fetchSitemap`, `client.resolve`, `client.resolveUrl`
 
 ### Client Lifecycle
 
-- `httpx.Client.init(allocator, io, config)` — initialize client with allocator, io, and configuration (or `.{}` for defaults)
+- `httpx.Client.init(allocator, io, .{})` - initialize a client with secure defaults and optional client-wide settings
 - `client.close()` — purge the connection pool; `client.reset()` — close + clear DNS cache
 
 ### Server Lifecycle
@@ -32,7 +33,7 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 - Client settings: passed as the final `.{}` argument to `httpx.Client.init` (protocols, timeouts, redirects, retries, pool, proxy, TLS, DNS cache)
 - Server settings: passed as the final `.{}` argument to `httpx.Server.init` (host, port, strategy, body limits, protocols, docs, TLS, watcher, templates, logging)
 - Per-request settings: passed as the final `.{}` argument to request methods (headers, query, body/json/form/text, auth, timeouts, proxy, TLS)
-- `httpx.HttpVersion` �?" protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`)
+- `httpx.HttpVersion` — protocol version (`.auto`, `.http10`, `.http11`, `.http2`, `.http3`)
 - `portStrategy` accepts `.incremental`, `.strict`, or `.exit`
 
 ### Server Types
@@ -42,7 +43,7 @@ The root module re-exports core types and namespaces. HTTP requests require an i
 
 ### Concurrency Helpers
 
-- `client.getAll(urls)` / `client.requestAll(reqs)`
+- `client.getAll(urls, .{})` / `client.requestAll(reqs, .{})`
 - `httpx.concurrency.Pool` / `httpx.concurrency.Queue` (`src/concurrency/`)
 
 ### Network Helpers

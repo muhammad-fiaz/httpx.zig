@@ -158,10 +158,11 @@ pub const Driver = struct {
         const p = paramsMod.Params{
             .maxIdleTimeoutMs = cfg.maxIdleTimeoutMs,
             .maxUdpPayloadSize = @intCast(cfg.maxUdpPayload),
+            .disableActiveMigration = cfg.disableActiveMigration,
             .initialMaxData = cfg.initialMaxData,
-            .initialMaxStreamDataBidiLocal = 65536,
-            .initialMaxStreamDataBidiRemote = 65536,
-            .initialMaxStreamDataUni = 65536,
+            .initialMaxStreamDataBidiLocal = cfg.initialMaxStreamDataBidiLocal,
+            .initialMaxStreamDataBidiRemote = cfg.initialMaxStreamDataBidiRemote,
+            .initialMaxStreamDataUni = cfg.initialMaxStreamDataUni,
             .initialMaxStreamsBidi = conn.maxStreamsBidiLocal,
             .initialMaxStreamsUni = conn.maxStreamsUniLocal,
         };
@@ -686,16 +687,14 @@ pub fn feedPumped(
         // the connection's: the two are independently chosen and mixing
         // them corrupts the heap.
         defer pump.allocator.free(d.data);
-        ep.peer = d.from;
-        ep.conn.receiveDatagram(d.data, nowMs) catch |e| switch (e) {
+        _ = ep.receiveFrom(d.data, d.from, nowMs) catch |e| switch (e) {
             error.Draining => return e,
             // Drop bad datagrams and keep serving the connection.
             else => {},
         };
         while (try pump.next(0)) |extra| {
             defer pump.allocator.free(extra.data);
-            ep.peer = extra.from;
-            ep.conn.receiveDatagram(extra.data, nowMs) catch |e| switch (e) {
+            _ = ep.receiveFrom(extra.data, extra.from, nowMs) catch |e| switch (e) {
                 error.Draining => return e,
                 else => {},
             };
@@ -742,9 +741,8 @@ pub fn serveHandshake(serverEp: *Endpoint, pump: *transportMod.Pump, driver: ?*D
             defer pump.allocator.free(d.data);
             const parsed = packetMod.parseLongHeader(d.data) catch continue;
             if (parsed.header.type != .initial) continue;
-            serverEp.peer = d.from;
             try serverEp.conn.acceptInitial(parsed.header.dcid);
-            serverEp.conn.receiveDatagram(d.data, now) catch continue;
+            _ = serverEp.receiveFrom(d.data, d.from, now) catch continue;
             booted = true;
             continue;
         }
@@ -761,9 +759,11 @@ test "live handshake over real udp loopback establishes both ends" {
     var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer cliConn.deinit();
-    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer srvConn.deinit();
 
     var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -806,9 +806,9 @@ test "live retry handshake over real udp loopback establishes both ends" {
     var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer cliConn.deinit();
-    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{ .retry = true });
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{ .role = .server, .retry = true });
     defer srvConn.deinit();
 
     var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -885,9 +885,8 @@ pub fn performHandshakeWithEarlyData(
                 defer spump.allocator.free(d.data);
                 const parsed = packetMod.parseLongHeader(d.data) catch continue;
                 if (parsed.header.type != .initial) continue;
-                sep.peer = d.from;
                 try sep.conn.acceptInitial(parsed.header.dcid);
-                sep.conn.receiveDatagram(d.data, now) catch continue;
+                _ = sep.receiveFrom(d.data, d.from, now) catch continue;
                 serverBooted = true;
                 continue;
             }
@@ -919,7 +918,7 @@ pub fn performHandshake(
 
 test "peer transport parameters apply to connection windows" {
     const a = std.testing.allocator;
-    var conn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var conn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer conn.deinit();
 
     const putCid = struct {
@@ -1007,7 +1006,9 @@ test "peer transport parameters apply to connection windows" {
 
 test "server closes unknown alpn with no_application_protocol" {
     const a = std.testing.allocator;
-    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer srvConn.deinit();
     // Initial keys + validated address so the close packet can fly.
     try srvConn.installInitialKeys();
@@ -1055,9 +1056,11 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
     var sessionCaptured = false;
 
     {
-        var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+        var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
         defer cliConn.deinit();
-        var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+        var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+            .role = .server,
+        });
         defer srvConn.deinit();
 
         var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -1115,9 +1118,11 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
 
     // 2. Resumed Connection: Client uses savedSession and sends 0-RTT early data
     {
-        var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+        var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
         defer cliConn.deinit();
-        var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+        var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+            .role = .server,
+        });
         defer srvConn.deinit();
 
         var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});
@@ -1184,7 +1189,7 @@ test "live QUIC 0-RTT resumption over real udp loopback sends early data and est
 
 test "peer transport parameter defaults replace stale send credit" {
     const a = std.testing.allocator;
-    var conn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var conn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer conn.deinit();
     conn.maxDataRemote = 4096;
     conn.sendWindowBidiPeerInitiated = 2048;
@@ -1206,6 +1211,26 @@ test "peer transport parameter defaults replace stale send credit" {
     try std.testing.expectEqual(@as(u64, 0), conn.maxStreamsUniRemote);
 }
 
+test "disable active migration is advertised and enforced" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var local = try connMod.Connection.init(a, io, .{ .disableActiveMigration = true });
+    defer local.deinit();
+    const localWire = try Driver.buildLocalTransportParams(a, local);
+    defer a.free(localWire);
+    try std.testing.expect((try paramsMod.decode(localWire)).disableActiveMigration);
+
+    try std.testing.expectError(connMod.Error.InvalidState, local.initiatePathValidation(1000));
+
+    var peerBlocked = try connMod.Connection.init(a, io, .{});
+    defer peerBlocked.deinit();
+    var peerWire = std.ArrayList(u8).empty;
+    defer peerWire.deinit(a);
+    try paramsMod.encode(&peerWire, a, .{ .disableActiveMigration = true });
+    try Driver.applyPeerTransportParams(peerBlocked, peerWire.items, false);
+    try std.testing.expectError(connMod.Error.InvalidState, peerBlocked.initiatePathValidation(1000));
+}
+
 test "the initial keys are discarded once the handshake moves on" {
     // RFC 9001 Section 4.9.1: a client discards the Initial keys when it
     // first sends a Handshake packet and a server discards them when it
@@ -1214,9 +1239,11 @@ test "the initial keys are discarded once the handshake moves on" {
     var ctx = @import("../../sockets/tcp.zig").IoContext.init(a) catch return;
     defer ctx.deinit();
 
-    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .client, .{});
+    var cliConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{});
     defer cliConn.deinit();
-    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .server, .{});
+    var srvConn = try connMod.Connection.init(a, std.Io.Threaded.global_single_threaded.io(), .{
+        .role = .server,
+    });
     defer srvConn.deinit();
 
     var cliEp = try transportMod.Endpoint.init(a, ctx.io, cliConn, .{});

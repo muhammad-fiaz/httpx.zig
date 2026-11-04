@@ -49,6 +49,7 @@ pub const Params = struct {
     initialMaxStreamsUni: u64 = 0,
     ackDelayExponent: u64 = 3,
     maxAckDelayMs: u64 = 25,
+    disableActiveMigration: bool = false,
     activeConnectionIdLimit: u64 = 2,
 };
 
@@ -103,6 +104,8 @@ pub fn encode(out: *std.ArrayList(u8), gpa: Allocator, p: Params) !void {
         try putVarintParam(out, gpa, @backingInt(ParamId.ackDelayExponent), p.ackDelayExponent);
     if (p.maxAckDelayMs != 25)
         try putVarintParam(out, gpa, @backingInt(ParamId.maxAckDelay), p.maxAckDelayMs);
+    if (p.disableActiveMigration)
+        try putParam(out, gpa, @backingInt(ParamId.disableActiveMigration), &.{});
     if (p.activeConnectionIdLimit != 2)
         try putVarintParam(out, gpa, @backingInt(ParamId.activeConnectionIdLimit), p.activeConnectionIdLimit);
 }
@@ -139,6 +142,9 @@ pub fn decode(data: []const u8) Error!Params {
             .statelessResetToken => {
                 if (len != 16) return Error.InvalidParameter;
             },
+            .disableActiveMigration => {
+                if (len != 0) return Error.InvalidParameter;
+            },
             .maxIdleTimeout, .maxUdpPayloadSize, .initialMaxData, .initialMaxStreamDataBidiLocal, .initialMaxStreamDataBidiRemote, .initialMaxStreamDataUni, .initialMaxStreamsBidi, .initialMaxStreamsUni, .ackDelayExponent, .maxAckDelay, .activeConnectionIdLimit => {
                 // A varint is 1, 2, 4, or 8 bytes long.
                 if (len != 1 and len != 2 and len != 4 and len != 8) return Error.InvalidParameter;
@@ -163,6 +169,7 @@ pub fn decode(data: []const u8) Error!Params {
         };
 
         switch (id) {
+            .disableActiveMigration => p.disableActiveMigration = true,
             .maxIdleTimeout => p.maxIdleTimeoutMs = valueBe,
             .maxUdpPayloadSize => {
                 if (valueBe < 1200) return Error.InvalidParameter;
@@ -268,6 +275,19 @@ test "encode/decode roundtrip preserves values" {
     try std.testing.expectEqual(@as(u64, 5), got.ackDelayExponent);
     try std.testing.expectEqual(@as(u64, 40), got.maxAckDelayMs);
     try std.testing.expectEqual(@as(u64, 8), got.activeConnectionIdLimit);
+}
+
+test "disable active migration is an empty presence parameter" {
+    var list = std.ArrayList(u8).empty;
+    defer list.deinit(std.testing.allocator);
+    try encode(&list, std.testing.allocator, .{ .disableActiveMigration = true });
+    try std.testing.expect(std.mem.indexOf(u8, list.items, &.{ 0x0C, 0x00 }) != null);
+    try std.testing.expect((try decode(list.items)).disableActiveMigration);
+
+    var invalid = std.ArrayList(u8).empty;
+    defer invalid.deinit(std.testing.allocator);
+    try putParam(&invalid, std.testing.allocator, 0x0C, &.{0});
+    try std.testing.expectError(Error.InvalidParameter, decode(invalid.items));
 }
 
 test "empty encoding yields all defaults" {

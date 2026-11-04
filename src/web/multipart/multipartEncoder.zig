@@ -1,7 +1,7 @@
 //! Multipart encoding — RFC 2046, RFC 7578, RFC 8187.
 //!
 //! Supports form-data, mixed, related, alternative, and custom subtypes.
-//! Builder API plus a bounded streaming encoder.
+//! Options-based API plus a bounded streaming encoder.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -10,11 +10,13 @@ const common = @import("multipartCommon.zig");
 
 // Subtypes
 
-pub const Subtype = enum {
+pub const Subtype = union(enum) {
     formData,
     mixed,
     related,
     alternative,
+    byteranges,
+    custom: []const u8,
 
     pub fn label(self: Subtype) []const u8 {
         return switch (self) {
@@ -22,6 +24,15 @@ pub const Subtype = enum {
             .mixed => "mixed",
             .related => "related",
             .alternative => "alternative",
+            .byteranges => "byteranges",
+            .custom => |value| value,
+        };
+    }
+
+    pub fn isValid(self: Subtype) bool {
+        return switch (self) {
+            .formData, .mixed, .related, .alternative, .byteranges => true,
+            .custom => |value| common.isToken(value),
         };
     }
 };
@@ -52,83 +63,6 @@ pub const Header = struct {
     value: []const u8,
 };
 
-// Builder
-
-pub const Multipart = struct {
-    allocator: Allocator,
-    parts: std.ArrayList(Part),
-    boundaryBuf: [32]u8,
-    boundary: []const u8,
-    subtype: Subtype,
-
-    pub fn init(allocator: Allocator, subtype: Subtype) Multipart {
-        var mb = Multipart{
-            .allocator = allocator,
-            .parts = .empty,
-            .boundaryBuf = undefined,
-            .boundary = "",
-            .subtype = subtype,
-        };
-        _ = generateBoundary(&mb.boundaryBuf);
-        return mb;
-    }
-
-    pub fn deinit(self: *Multipart) void {
-        self.parts.deinit(self.allocator);
-    }
-
-    pub fn setBoundary(self: *Multipart, boundary: []const u8) EncodeError!void {
-        if (!common.validateBoundary(boundary)) return EncodeError.InvalidBoundary;
-        self.boundary = boundary;
-    }
-
-    pub fn regenerateBoundary(self: *Multipart) []const u8 {
-        self.boundary = "";
-        return generateBoundary(&self.boundaryBuf);
-    }
-
-    pub fn boundaryValue(self: *const Multipart) []const u8 {
-        return if (self.boundary.len > 0) self.boundary else self.boundaryBuf[0..];
-    }
-
-    pub fn field(self: *Multipart, name: []const u8, value: []const u8) EncodeError!void {
-        const part = Part{ .name = name, .data = value };
-        try validatePart(part);
-        self.parts.append(self.allocator, part) catch return EncodeError.OutOfMemory;
-    }
-
-    pub fn file(self: *Multipart, name: []const u8, data: []const u8, opts: FileOptions) EncodeError!void {
-        const part = Part{
-            .name = name,
-            .filename = opts.filename,
-            .filenameStar = opts.filenameStar,
-            .dispositionType = opts.dispositionType orelse "form-data",
-            .contentType = opts.contentType orelse mimeMod.octetStream,
-            .contentTransferEncoding = opts.contentTransferEncoding,
-            .data = data,
-            .headers = opts.headers,
-        };
-        try validatePart(part);
-        self.parts.append(self.allocator, part) catch return EncodeError.OutOfMemory;
-    }
-
-    pub fn contentType(self: *const Multipart, buf: []u8) []const u8 {
-        return contentTypeSubtype(buf, self.subtype, self.boundaryValue());
-    }
-
-    pub fn encode(self: *const Multipart, w: anytype) EncodeError!void {
-        try encodeParts(w, self.boundaryValue(), self.parts.items);
-    }
-
-    pub fn encodeAlloc(self: *const Multipart) EncodeError![]u8 {
-        return encodeAllocParts(self.allocator, self.boundaryValue(), self.parts.items);
-    }
-
-    pub fn boundaryLength(self: *const Multipart) []const u8 {
-        return self.boundaryValue();
-    }
-};
-
 pub const FileOptions = struct {
     filename: ?[]const u8 = null,
     filenameStar: ?FilenameStar = null,
@@ -137,6 +71,91 @@ pub const FileOptions = struct {
     contentTransferEncoding: ?[]const u8 = null,
     headers: ?[]const Header = null,
 };
+
+pub const FieldValue = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+pub const File = struct {
+    name: []const u8,
+    data: []const u8,
+    filename: ?[]const u8 = null,
+    contentType: []const u8 = mimeMod.octetStream,
+    headers: ?[]const Header = null,
+};
+
+pub const EncoderOptions = struct {
+    subtype: Subtype = .formData,
+    boundary: ?[]const u8 = null,
+    fields: []const FieldValue = &.{},
+    files: []const File = &.{},
+};
+
+/// Unified allocator and I/O backed multipart encoder. It borrows the input
+/// field and file slices until `encodeAlloc` completes.
+pub const Encoder = struct {
+    allocator: Allocator,
+    io: std.Io,
+    options: EncoderOptions,
+    generatedBoundary: [32]u8 = undefined,
+    hasGeneratedBoundary: bool = false,
+
+    pub fn init(allocator: Allocator, io: std.Io, options: EncoderOptions) EncodeError!Encoder {
+        if (!options.subtype.isValid()) return EncodeError.InvalidSubtype;
+        if (options.boundary) |boundary_value| {
+            if (!common.validateBoundary(boundary_value)) return EncodeError.InvalidBoundary;
+        }
+        return .{ .allocator = allocator, .io = io, .options = options };
+    }
+
+    pub fn deinit(_: *Encoder) void {}
+
+    pub fn boundary(self: *Encoder) []const u8 {
+        if (self.options.boundary) |value| return value;
+        if (self.hasGeneratedBoundary) return &self.generatedBoundary;
+        self.hasGeneratedBoundary = true;
+        return generateBoundary(&self.generatedBoundary);
+    }
+
+    pub fn contentType(self: *Encoder, buf: []u8) []const u8 {
+        return contentTypeSubtype(buf, self.options.subtype, self.boundary());
+    }
+
+    pub fn encodeAlloc(self: *Encoder) EncodeError![]u8 {
+        var parts: std.ArrayList(Part) = .empty;
+        defer parts.deinit(self.allocator);
+        for (self.options.fields) |field| {
+            try parts.append(self.allocator, .{
+                .name = field.name,
+                .data = field.value,
+                .contentType = "text/plain; charset=utf-8",
+            });
+        }
+        for (self.options.files) |file| {
+            try parts.append(self.allocator, .{
+                .name = file.name,
+                .filename = file.filename,
+                .contentType = file.contentType,
+                .data = file.data,
+                .headers = file.headers,
+            });
+        }
+        return self.encodePartsAlloc(parts.items);
+    }
+
+    /// Encodes caller-built parts with this encoder's boundary and allocator.
+    /// Higher-level APIs can normalize their input while sharing this encoder.
+    pub fn encodePartsAlloc(self: *Encoder, parts: []const Part) EncodeError![]u8 {
+        return encodeAllocParts(self.allocator, self.boundary(), parts);
+    }
+};
+
+/// Constructs the high-level multipart encoder used by direct client options
+/// and explicit streaming callers.
+pub fn init(allocator: Allocator, io: std.Io, options: EncoderOptions) EncodeError!Encoder {
+    return Encoder.init(allocator, io, options);
+}
 
 // Boundary
 
@@ -164,6 +183,7 @@ pub fn contentType(buf: []u8, boundary: []const u8) []const u8 {
 }
 
 pub fn contentTypeSubtype(buf: []u8, subtype: Subtype, boundary: []const u8) []const u8 {
+    if (!subtype.isValid() or !common.validateBoundary(boundary)) return "";
     return std.fmt.bufPrint(buf, "multipart/{s}; boundary=\"{s}\"", .{ subtype.label(), boundary }) catch "";
 }
 
@@ -173,6 +193,7 @@ pub const EncodeError = error{
     WriteFailed,
     OutOfMemory,
     InvalidBoundary,
+    InvalidSubtype,
     InvalidPartName,
     InvalidFilename,
     InvalidValue,
@@ -319,6 +340,7 @@ pub const StreamEncoder = struct {
     const State = enum { idle, part, finished };
 
     pub fn init(writer: *std.Io.Writer, subtype: Subtype, boundary: []const u8) EncodeError!StreamEncoder {
+        if (!subtype.isValid()) return EncodeError.InvalidSubtype;
         if (!common.validateBoundary(boundary)) return EncodeError.InvalidBoundary;
         return .{ .writer = writer, .boundary = boundary, .subtype = subtype };
     }
@@ -495,17 +517,18 @@ test "encodes field and file with canonical framing" {
     try std.testing.expect(std.mem.indexOf(u8, body, "Content-Type: application/x-foo") != null);
 }
 
-test "builder API works" {
-    var form = Multipart.init(std.testing.allocator, .formData);
-    defer form.deinit();
-
-    try form.field("name", "Alice");
-    try form.file("avatar", "png-data", .{
+test "encoder API encodes fields and files" {
+    const fields = [_]FieldValue{.{ .name = "name", .value = "Alice" }};
+    const files = [_]File{.{
+        .name = "avatar",
+        .data = "png-data",
         .filename = "avatar.png",
         .contentType = "image/png",
-    });
+    }};
+    var encoder = try init(std.testing.allocator, std.testing.io, .{ .fields = &fields, .files = &files });
+    defer encoder.deinit();
 
-    const body = try form.encodeAlloc();
+    const body = try encoder.encodeAlloc();
     defer std.testing.allocator.free(body);
 
     try std.testing.expect(std.mem.indexOf(u8, body, "name=\"name\"") != null);
@@ -515,15 +538,25 @@ test "builder API works" {
 }
 
 test "custom subtype works" {
-    var form = Multipart.init(std.testing.allocator, .related);
-    defer form.deinit();
-
-    try form.file("data", "payload", .{ .contentType = "application/json" });
+    const files = [_]File{.{ .name = "data", .data = "payload", .contentType = "application/json" }};
+    var encoder = try init(std.testing.allocator, std.testing.io, .{ .subtype = .related, .files = &files });
+    defer encoder.deinit();
 
     var ctBuf: [128]u8 = undefined;
-    const ct = form.contentType(&ctBuf);
+    const ct = encoder.contentType(&ctBuf);
     try std.testing.expect(std.mem.startsWith(u8, ct, "multipart/related;"));
     try std.testing.expect(std.mem.indexOf(u8, ct, "boundary=\"") != null);
+}
+
+test "custom subtype is emitted as a validated token" {
+    var encoder = try init(std.testing.allocator, std.testing.io, .{ .subtype = .{ .custom = "signed" } });
+    defer encoder.deinit();
+    var ct_buf: [128]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, encoder.contentType(&ct_buf), "multipart/signed;"));
+
+    try std.testing.expectError(EncodeError.InvalidSubtype, init(std.testing.allocator, std.testing.io, .{
+        .subtype = .{ .custom = "signed\r\nX-Injected: yes" },
+    }));
 }
 
 test "filename* RFC 8187 encoding is applied to raw UTF-8" {
@@ -636,16 +669,26 @@ test "empty parts list" {
     try std.testing.expectEqualStrings(expected, body);
 }
 
-test "builder rejects CRLF injection in names and headers" {
-    var form = Multipart.init(std.testing.allocator, .formData);
-    defer form.deinit();
-    try std.testing.expectError(EncodeError.InvalidPartName, form.field("a\r\nX-Evil: 1", "v"));
-    try std.testing.expectError(EncodeError.InvalidFilename, form.file("f", "v", .{
-        .filename = "a\r\nX-Evil: 1",
-    }));
-    try std.testing.expectError(EncodeError.InvalidHeader, form.file("f", "v", .{
-        .headers = &.{.{ .name = "X-Test", .value = "v\r\nX-Evil: 1" }},
-    }));
+test "encoder rejects CRLF injection in names and headers" {
+    {
+        const fields = [_]FieldValue{.{ .name = "a\r\nX-Evil: 1", .value = "v" }};
+        var encoder = try init(std.testing.allocator, std.testing.io, .{ .fields = &fields });
+        defer encoder.deinit();
+        try std.testing.expectError(EncodeError.InvalidPartName, encoder.encodeAlloc());
+    }
+    {
+        const files = [_]File{.{ .name = "f", .data = "v", .filename = "a\r\nX-Evil: 1" }};
+        var encoder = try init(std.testing.allocator, std.testing.io, .{ .files = &files });
+        defer encoder.deinit();
+        try std.testing.expectError(EncodeError.InvalidFilename, encoder.encodeAlloc());
+    }
+    {
+        const headers = [_]Header{.{ .name = "X-Test", .value = "v\r\nX-Evil: 1" }};
+        const files = [_]File{.{ .name = "f", .data = "v", .headers = &headers }};
+        var encoder = try init(std.testing.allocator, std.testing.io, .{ .files = &files });
+        defer encoder.deinit();
+        try std.testing.expectError(EncodeError.InvalidHeader, encoder.encodeAlloc());
+    }
 }
 
 test "encoder quotes name and filename values" {

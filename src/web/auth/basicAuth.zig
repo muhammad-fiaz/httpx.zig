@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const routerMod = @import("../router/router.zig");
 
 pub const Credentials = struct {
     username: []const u8,

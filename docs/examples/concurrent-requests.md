@@ -9,7 +9,7 @@ const urls = [_][]const u8{
     "https://httpbun.com/get",
     "https://httpbun.com/headers",
 };
-const results = client.getAll(urls) catch |err| {
+const results = client.getAll(urls, .{}) catch |err| {
     std.debug.print("getAll failed: {s}\n", .{@errorName(err)});
     return;
 };

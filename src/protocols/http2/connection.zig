@@ -758,16 +758,8 @@ pub const Session = struct {
     }
 
     /// RFC 9110 token characters, the only ones allowed in a field name.
-    fn isTokenChar(c: u8) bool {
-        return switch (c) {
-            '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.' => true,
-            '0'...'9' => true,
-            'A'...'Z' => true,
-            '^', '_', '`', '|', '~' => true,
-            'a'...'z' => true,
-            else => false,
-        };
-    }
+    /// Shared with every other protocol layer via `common/parse.zig`.
+    const isTokenChar = parseMod.isTokenChar;
 
     /// RFC 9110 field-value characters: visible ASCII, space, and HTAB.
     fn isFieldValueChar(c: u8) bool {
