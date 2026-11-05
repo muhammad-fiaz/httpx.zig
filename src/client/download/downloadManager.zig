@@ -22,16 +22,16 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const loaders = @import("loaders");
 const tint = @import("tint");
-const clock = @import("../common/clock.zig");
-const Method = @import("../common/method.zig").Method;
-const Status = @import("../common/status.zig").Status;
-const Header = @import("requestBuilder.zig").Header;
-const Response = @import("requestBuilder.zig").Response;
-const req = @import("requestBuilder.zig");
-const clientNs = @import("httpClient.zig");
+const clock = @import("../../common/clock.zig");
+const Method = @import("../../common/method.zig").Method;
+const Status = @import("../../common/status.zig").Status;
+const Header = @import("../requestBuilder.zig").Header;
+const Response = @import("../requestBuilder.zig").Response;
+const req = @import("../requestBuilder.zig");
+const clientNs = @import("../httpClient.zig");
 const Client = clientNs.Client;
-const ftpClientMod = @import("../protocols/ftp/ftpClient.zig");
-const serveMod = @import("../web/staticFiles/staticFileServer.zig");
+const ftpClientMod = @import("../../protocols/ftp/ftpClient.zig");
+const serveMod = @import("../../web/staticFiles/staticFileServer.zig");
 const cFs = serveMod.cFs;
 
 pub const DownloadError = error{
@@ -1689,7 +1689,7 @@ test "streaming hasher calculates sha256 and verifies successfully" {
 
 test "resolveDestination handles direct file and directories" {
     const a = std.testing.allocator;
-    var ioContext = try @import("../sockets/tcp.zig").IoContext.init(a);
+    var ioContext = try @import("../../sockets/tcp.zig").IoContext.init(a);
     defer ioContext.deinit();
     const r1 = try resolveDestination(a, ioContext.io, "build/out.bin", "http://example.com/file.zip", null);
     defer a.free(r1);

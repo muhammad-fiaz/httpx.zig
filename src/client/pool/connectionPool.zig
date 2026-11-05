@@ -27,11 +27,11 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const tcp = @import("../sockets/tcp.zig");
-const sync = @import("../common/sync.zig");
-const clock = @import("../common/clock.zig");
-const h2Transport = @import("../protocols/http2/transport.zig");
-const h3Transport = @import("../protocols/http3/transport.zig");
+const tcp = @import("../../sockets/tcp.zig");
+const sync = @import("../../common/sync.zig");
+const clock = @import("../../common/clock.zig");
+const h2Transport = @import("../../protocols/http2/transport.zig");
+const h3Transport = @import("../../protocols/http3/transport.zig");
 
 pub const PoolConfig = struct {
     /// Hard ceiling across all origins.

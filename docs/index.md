@@ -209,7 +209,7 @@ for the full list), including:
 - `healthCheck.zig`: liveness/readiness probes
 - `proxyDemo.zig`: HTTP proxy and SOCKS5h tunneling
 - `concurrentDemo.zig`: concurrent requests with worker pool
-- `connectionPool.zig`: keep-alive pooling
+- `client/pool/connectionPool.zig`: keep-alive pooling
 - `staticFiles.zig`, `staticSite.zig`, `staticEmbedded.zig`: filesystem, site, and single-file embedded assets
 - `spaServer.zig`, `spaFallback.zig`: single-page applications
 - `http2Client.zig`, `http2Multiplex.zig`: HTTP/2 and HPACK

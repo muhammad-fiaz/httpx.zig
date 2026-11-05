@@ -293,10 +293,10 @@ pub const Headers = headers.Headers;
 pub const Method = method.Method;
 pub const Status = status.Status;
 pub const Uri = uri.Uri;
-pub const Downloader = @import("client/downloadManager.zig").Downloader;
-pub const DownloadResult = @import("client/downloadManager.zig").DownloadResult;
-pub const DownloadTask = @import("client/downloadManager.zig").DownloadTask;
-pub const download = @import("client/downloadManager.zig");
+pub const Downloader = @import("client/download/downloadManager.zig").Downloader;
+pub const DownloadResult = @import("client/download/downloadManager.zig").DownloadResult;
+pub const DownloadTask = @import("client/download/downloadManager.zig").DownloadTask;
+pub const download = @import("client/download/downloadManager.zig");
 
 // Web framework
 pub const sse = struct {
@@ -428,9 +428,9 @@ pub const web = struct {
 pub const client = struct {
     const httpClientMod = @import("client/httpClient.zig");
     const requestBuilderMod = @import("client/requestBuilder.zig");
-    const poolMod = @import("client/connectionPool.zig");
-    const cookieMod = @import("client/cookieJar.zig");
-    const downloadMod = @import("client/downloadManager.zig");
+    const poolMod = @import("client/pool/connectionPool.zig");
+    const cookieMod = @import("client/cookies/cookieJar.zig");
+    const downloadMod = @import("client/download/downloadManager.zig");
 
     // Client errors and resolution
     pub const Error = httpClientMod.Error;
@@ -687,11 +687,11 @@ test {
     _ = protocols.ftp.Client;
     _ = protocols.ftp.Server;
     _ = server.Server;
-    _ = @import("client/cookieJar.zig");
-    _ = @import("client/connectionPool.zig");
+    _ = @import("client/cookies/cookieJar.zig");
+    _ = @import("client/pool/connectionPool.zig");
     _ = @import("client/httpClient.zig");
     _ = @import("client/requestBuilder.zig");
-    _ = @import("client/downloadManager.zig");
+    _ = @import("client/download/downloadManager.zig");
 }
 
 test "tint is wired directly and independently of loaders" {

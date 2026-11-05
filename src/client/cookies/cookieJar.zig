@@ -15,10 +15,10 @@
 //!   - RFC 7230 Section 4.1.1 — Connection: close
 
 const std = @import("std");
-const clock = @import("../common/clock.zig");
+const clock = @import("../../common/clock.zig");
 const Allocator = std.mem.Allocator;
-const sync = @import("../common/sync.zig");
-const parseMod = @import("../common/parse.zig");
+const sync = @import("../../common/sync.zig");
+const parseMod = @import("../../common/parse.zig");
 
 pub const Cookie = struct {
     name: []const u8,
