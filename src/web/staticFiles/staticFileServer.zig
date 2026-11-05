@@ -2,7 +2,7 @@
 //!
 //! Features
 //!   - directory mounting with index.html resolution
-//!   - MIME detection via utils/mime
+//!   - MIME detection via common/mime
 //!   - strong ETag (mtime+size) and Last-Modified headers
 //!   - If-None-Match / If-Modified-Since -> 304 Not Modified
 //!   - single Range requests -> 206 + Content-Range; unsatisfiable -> 416

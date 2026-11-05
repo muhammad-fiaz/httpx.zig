@@ -17,8 +17,8 @@ registered extension when a media type has aliases (for example, `jpg` for
 
 Use `httpx.mediaType` for canonical values that appear in request and response
 headers, including `applicationJson`, `applicationJsonUtf8`, `formUrlEncoded`,
-`multipartFormData`, `textPlainUtf8`, and `textHtmlUtf8`. The MIME facade exposes
-the same constants for code already using `httpx.mime`.
+`multipartFormData`, `textPlainUtf8`, and `textHtmlUtf8`. The MIME registry
+re-exports the same constants for code using `httpx.mime`.
 
 JSON media-type validation is available as `httpx.json.classifyMediaType` and
 `httpx.mime.isJson`. It validates type and parameter syntax, and distinguishes
