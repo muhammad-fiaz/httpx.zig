@@ -607,9 +607,26 @@ test "graphiql opt-in mounts its page and all worker assets" {
 
     const css = (try invoke(&router, .GET, "/graphiql/graphiql.css", a)).?;
     try std.testing.expectEqual(assets.graphiqlCss.len, css.body.len);
+    try std.testing.expect(std.mem.indexOf(u8, css.body, "codicon-mxdk0fnd.ttf") != null);
 
-    const worker = (try invoke(&router, .GET, "/graphiql/graphql.worker.js", a)).?;
-    try std.testing.expectEqual(assets.graphiqlGraphqlWorkerJs.len, worker.body.len);
+    const font = (try invoke(&router, .GET, "/graphiql/codicon-mxdk0fnd.ttf", a)).?;
+    try std.testing.expectEqualStrings("font/ttf", font.contentType.?);
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x01, 0x00, 0x00 }, font.body[0..4]);
+}
+
+test "graphiql codicon font resolves under a custom mount route" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+    try router.get("/graphql", helloHandler, .{});
+
+    try mount(a, &router, .{ .graphiql = .{ .enabled = true, .route = "/internal/ide", .graphqlEndpoint = "/graphql" } }, null);
+    defer unmount();
+
+    const css = (try invoke(&router, .GET, "/internal/ide/graphiql.css", a)).?;
+    try std.testing.expect(std.mem.indexOf(u8, css.body, "url(\"codicon-mxdk0fnd.ttf\")") != null);
+    const font = (try invoke(&router, .GET, "/internal/ide/codicon-mxdk0fnd.ttf", a)).?;
+    try std.testing.expectEqualStrings("font/ttf", font.contentType.?);
 }
 
 test "all vendored assets serve with correct mime and markers" {
@@ -641,10 +658,10 @@ test "all vendored assets serve with correct mime and markers" {
         .{ .path = "/scalar/standalone.js", .mime = "text/javascript; charset=utf-8", .marker = "api-reference" },
         // GraphiQL UI, stylesheet, and Monaco workers.
         .{ .path = "/graphiql/graphiql.js", .mime = "text/javascript; charset=utf-8", .marker = "renderGraphiQL" },
-        .{ .path = "/graphiql/graphiql.css", .mime = "text/css; charset=utf-8", .marker = ".graphiql-container" },
+        .{ .path = "/graphiql/graphiql.css", .mime = "text/css; charset=utf-8", .marker = ".monaco-editor" },
         .{ .path = "/graphiql/editor.worker.js", .mime = "text/javascript; charset=utf-8" },
         .{ .path = "/graphiql/json.worker.js", .mime = "text/javascript; charset=utf-8" },
-        .{ .path = "/graphiql/graphql.worker.js", .mime = "text/javascript; charset=utf-8" },
+        .{ .path = "/graphiql/codicon-mxdk0fnd.ttf", .mime = "font/ttf" },
     };
     for (cases) |c| {
         const res = (try invoke(&router, .GET, c.path, a)).?;
@@ -664,7 +681,7 @@ test "all vendored assets serve with correct mime and markers" {
     try std.testing.expect(std.mem.indexOf(u8, swaggerPage.body, "oauth2-redirect.html") != null);
     const graphiqlPage = (try invoke(&router, .GET, "/graphiql", a)).?;
     // Workers are lazy-loaded by the bundle at runtime, not linked in the page.
-    for ([_][]const u8{ "editor.worker.js", "json.worker.js", "graphql.worker.js" }) |asset| {
+    for ([_][]const u8{ "editor.worker.js", "json.worker.js" }) |asset| {
         try std.testing.expect(std.mem.indexOf(u8, graphiqlPage.body, asset) == null);
     }
     try std.testing.expect(std.mem.indexOf(u8, graphiqlPage.body, "/graphiql/graphiql.js") != null);

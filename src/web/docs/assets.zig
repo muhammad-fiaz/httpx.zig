@@ -9,10 +9,10 @@
 
 const std = @import("std");
 
-pub const swaggerUiVersion = "5.33.1";
-pub const redocVersion = "2.5.4";
-pub const scalarVersion = "1.73.1";
-pub const graphiqlVersion = "5.4.0";
+pub const swaggerUiVersion = "5.34.1";
+pub const redocVersion = "3.0.1";
+pub const scalarVersion = "1.76.4";
+pub const graphiqlVersion = "6.0.0";
 
 /// A single embedded asset file.
 pub const File = struct {
@@ -61,7 +61,7 @@ pub const graphiqlFiles = [_]File{
     .{ .name = "graphiql.css", .contentType = "text/css; charset=utf-8", .data = graphiqlCss },
     .{ .name = "editor.worker.js", .contentType = "text/javascript; charset=utf-8", .data = graphiqlEditorWorkerJs },
     .{ .name = "json.worker.js", .contentType = "text/javascript; charset=utf-8", .data = graphiqlJsonWorkerJs },
-    .{ .name = "graphql.worker.js", .contentType = "text/javascript; charset=utf-8", .data = graphiqlGraphqlWorkerJs },
+    .{ .name = "codicon-mxdk0fnd.ttf", .contentType = "font/ttf", .data = graphiqlCodiconTtf },
 };
 
 pub const swaggerUiBundleJs = @embedFile("../../assets/swagger-ui/swagger-ui-bundle.js");
@@ -77,7 +77,7 @@ pub const graphiqlJs = @embedFile("../../assets/graphiql/graphiql.js");
 pub const graphiqlCss = @embedFile("../../assets/graphiql/graphiql.css");
 pub const graphiqlEditorWorkerJs = @embedFile("../../assets/graphiql/editor.worker.js");
 pub const graphiqlJsonWorkerJs = @embedFile("../../assets/graphiql/json.worker.js");
-pub const graphiqlGraphqlWorkerJs = @embedFile("../../assets/graphiql/graphql.worker.js");
+pub const graphiqlCodiconTtf = @embedFile("../../assets/graphiql/codicon-mxdk0fnd.ttf");
 
 /// All files belonging to a vendor bundle.
 pub fn files(kind: Kind) []const File {
@@ -124,16 +124,16 @@ test "lookup miss returns null" {
 }
 
 test "vendored versions are the pinned releases" {
-    try std.testing.expectEqualStrings("5.33.1", swaggerUiVersion);
-    try std.testing.expectEqualStrings("2.5.4", redocVersion);
-    try std.testing.expectEqualStrings("1.73.1", scalarVersion);
-    try std.testing.expectEqualStrings("5.4.0", graphiqlVersion);
+    try std.testing.expectEqualStrings("5.34.1", swaggerUiVersion);
+    try std.testing.expectEqualStrings("3.0.1", redocVersion);
+    try std.testing.expectEqualStrings("1.76.4", scalarVersion);
+    try std.testing.expectEqualStrings("6.0.0", graphiqlVersion);
 }
 
 test "bundles carry their version markers" {
     // Guards against silently re-vendoring the wrong release.
-    try std.testing.expect(std.mem.indexOf(u8, swaggerUiBundleJs, "5.33.1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, redocStandaloneJs, "2.5.4") != null);
-    try std.testing.expect(std.mem.indexOf(u8, scalarStandaloneJs, "1.73.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swaggerUiBundleJs, "5.34.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redocStandaloneJs, "3.0.1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scalarStandaloneJs, "1.76.4") != null);
     try std.testing.expect(graphiqlJs.len > 1000);
 }

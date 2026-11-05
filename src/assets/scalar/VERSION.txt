@@ -1,5 +1,5 @@
-@scalar/api-reference 1.73.1 (2026-10-07)
-Source: https://registry.npmjs.org/@scalar/api-reference/-/api-reference-1.73.1.tgz
+@scalar/api-reference 1.76.4
+Source: https://registry.npmjs.org/@scalar/api-reference/-/api-reference-1.76.4.tgz
 File:   dist/browser/standalone.js
 Project: https://github.com/scalar/scalar
 License: MIT

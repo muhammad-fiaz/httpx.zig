@@ -9,6 +9,7 @@
 //! // GET /docs          -> Swagger UI (local assets, no CDN)
 //! // GET /redoc         -> ReDoc (local assets)
 //! // GET /scalar        -> Scalar (opt-in via config)
+//! // GET /graphiql      -> GraphiQL IDE (opt-in via config; local Monaco assets)
 //! ```
 
 pub const openapi = @import("../openApi/openApiSpec.zig");

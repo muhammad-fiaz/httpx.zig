@@ -1,21 +1,22 @@
-GraphiQL 5.4.0 (2026-08-30)
-Source: https://registry.npmjs.org/graphiql/-/graphiql-5.4.0.tgz
+graphiql 6.0.0
+Source: https://registry.npmjs.org/graphiql/-/graphiql-6.0.0.tgz
+Release: https://github.com/graphql/graphiql/releases/tag/graphiql%406.0.0
 Project: https://github.com/graphql/graphiql
-Package: graphiql
-Version: 5.4.0
-Peer Dependencies:
-- react: 19.1.0
-- react-dom: 19.1.0
-- graphql: 16.11.0
-- @graphiql/toolkit: 0.12.1
-- @graphiql/react: 0.39.1
-- monaco-editor: 0.52.2 (must stay < 0.53 per monaco-graphql peer range)
-- monaco-graphql: 1.9.0
+Package: graphiql 6.0.0
+Runtime: react 19.3.1, react-dom 19.3.1, graphql 16.11.x, @graphiql/react ^1.0.0, monaco-editor 0.57.0
 License: MIT
+Built with bun (esbuild IIFE):
+  bun build entry.js --outdir=out --minify --target browser --format iife
+  bun build node_modules/monaco-editor/esm/vs/editor/editor.worker.js --outfile=editor.worker.js --minify --target browser
+  bun build node_modules/monaco-editor/esm/vs/language/json/json.worker.js --outfile=json.worker.js --minify --target browser
 Files vendored:
-- graphiql.js (esbuild IIFE browser bundle, global name GraphiQLBundle; entry exposes window.renderGraphiQL and routes Monaco workers under window.__GRAPHIQL_BASE_PATH__)
-- graphiql.css (GraphiQL 5.4.0 dist/style.css, copied verbatim)
-- editor.worker.js (esbuild IIFE of monaco-editor editor worker)
-- json.worker.js (esbuild IIFE of monaco-editor JSON language worker)
-- graphql.worker.js (esbuild IIFE of monaco-graphql worker)
-Build: esbuild entry.js --bundle --minify --format=iife (main adds --global-name=GraphiQLBundle); CSS and font side-effect imports dropped because graphiql.css is served separately. Rebuild with the pinned versions above to reproduce these files.
+- graphiql.js (IIFE bundle; sets window.renderGraphiQL(element, { endpoint }))
+- graphiql.css (bundle CSS; no Monaco fonts inline)
+- codicon-mxdk0fnd.ttf (Monaco icon font referenced by graphiql.css)
+- editor.worker.js (Monaco editor worker)
+- json.worker.js (Monaco JSON language worker)
+Notes:
+- graphiql 6 no longer depends on monaco-graphql, so graphql.worker.js was dropped.
+- Monaco resolves worker scripts relative to document.baseURI; the served page pins <base>
+  to the GraphiQL route so the workers load from the mounted asset paths.
+Rebuild: install graphiql/react/react-dom/graphql with bun, then run the three bun commands above.
