@@ -16,6 +16,29 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+/// Canonical wire names for commonly shared HTTP fields. Names remain
+/// strings because HTTP field names are extensible and case-insensitive.
+pub const names = struct {
+    pub const accept = "Accept";
+    pub const acceptCharset = "Accept-Charset";
+    pub const acceptEncoding = "Accept-Encoding";
+    pub const acceptLanguage = "Accept-Language";
+    pub const cacheControl = "Cache-Control";
+    pub const contentDisposition = "Content-Disposition";
+    pub const contentEncoding = "Content-Encoding";
+    pub const contentLanguage = "Content-Language";
+    pub const contentLength = "Content-Length";
+    pub const contentRange = "Content-Range";
+    pub const contentTransferEncoding = "Content-Transfer-Encoding";
+    pub const contentType = "Content-Type";
+    pub const etag = "ETag";
+    pub const lastModified = "Last-Modified";
+    pub const location = "Location";
+    pub const trailer = "Trailer";
+    pub const transferEncoding = "Transfer-Encoding";
+    pub const vary = "Vary";
+};
+
 pub const Header = struct {
     name: []const u8,
     value: []const u8,

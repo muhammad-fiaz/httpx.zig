@@ -28,6 +28,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
 const mimeMod = @import("../common/mime.zig");
+const headerName = @import("../common/headers.zig").names;
 const uriMod = @import("../common/uri.zig");
 const parseMod = @import("../common/parse.zig");
 const Method = @import("../common/method.zig").Method;
@@ -1824,8 +1825,8 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                     const interim = parserMod.parseHeaderBlock(acc.items[0..headEnd], respHead.headEnd, interimFields[0..], optsParser) catch
                         return Error.MalformedResponse;
                     for (interimFields[0..interim.count]) |field| {
-                        if (std.ascii.eqlIgnoreCase(field.name, "Content-Length") or
-                            std.ascii.eqlIgnoreCase(field.name, "Transfer-Encoding")) return Error.MalformedResponse;
+                        if (std.ascii.eqlIgnoreCase(field.name, headerName.contentLength) or
+                            std.ascii.eqlIgnoreCase(field.name, headerName.transferEncoding)) return Error.MalformedResponse;
                     }
                     interimCount += 1;
                     if (interimCount > 16) return Error.MalformedResponse;
@@ -1972,7 +1973,7 @@ fn applyRedirect(
     state: *RedirectState,
 ) Error!bool {
     if (!req.followRedirects or !isRedirect(resp.status)) return false;
-    const loc = resp.header("Location") orelse return false;
+    const loc = resp.header(headerName.location) orelse return false;
     if (state.redirects.* >= req.maxRedirects) {
         resp.deinit();
         return Error.TooManyRedirects;
@@ -2250,7 +2251,7 @@ test "client restates every repeated content encoding after decoding" {
 
     const headers = try ownedTestHeaders(a, &.{
         .{ "content-encoding", "gzip" },
-        .{ "Content-Encoding", "br" },
+        .{ headerName.contentEncoding, "br" },
         .{ "content-length", "999" },
         .{ "CONTENT-LENGTH", "1000" },
     });
@@ -2282,7 +2283,7 @@ test "client compression advertisement respects explicit override" {
     try std.testing.expectEqualStrings(aePrefix, defaults[1][0..aePrefix.len]);
     try std.testing.expectEqualStrings(compression.acceptEncodingValue(), defaults[1][aePrefix.len..]);
 
-    const custom = try headerLines(a, &.{.{ .name = "Accept-Encoding", .value = "identity" }}, null);
+    const custom = try headerLines(a, &.{.{ .name = headerName.acceptEncoding, .value = "identity" }}, null);
     defer {
         for (custom) |line| a.free(line);
         a.free(custom);
@@ -2350,8 +2351,8 @@ fn readFullResponseWithOptions(
             const interim = parserMod.parseHeaderBlock(acc.items[0..headEnd], respHead.headEnd, interimFields[0..], optsParser) catch
                 return Error.MalformedResponse;
             for (interimFields[0..interim.count]) |field| {
-                if (std.ascii.eqlIgnoreCase(field.name, "Content-Length") or
-                    std.ascii.eqlIgnoreCase(field.name, "Transfer-Encoding")) return Error.MalformedResponse;
+                if (std.ascii.eqlIgnoreCase(field.name, headerName.contentLength) or
+                    std.ascii.eqlIgnoreCase(field.name, headerName.transferEncoding)) return Error.MalformedResponse;
             }
             interimCount += 1;
             if (interimCount > 16) return Error.MalformedResponse;
@@ -2711,8 +2712,8 @@ fn filterRedirectHeaders(a: Allocator, hdrs: []const Header, stripCredentials: b
             std.ascii.eqlIgnoreCase(h.name, "Cookie") or
             std.ascii.eqlIgnoreCase(h.name, "Proxy-Authorization"))) continue;
         const isContentHeader = h.name.len >= 8 and std.ascii.eqlIgnoreCase(h.name[0..8], "content-");
-        if (stripBody and (isContentHeader or std.ascii.eqlIgnoreCase(h.name, "Transfer-Encoding") or
-            std.ascii.eqlIgnoreCase(h.name, "Trailer") or std.ascii.eqlIgnoreCase(h.name, "Expect"))) continue;
+        if (stripBody and (isContentHeader or std.ascii.eqlIgnoreCase(h.name, headerName.transferEncoding) or
+            std.ascii.eqlIgnoreCase(h.name, headerName.trailer) or std.ascii.eqlIgnoreCase(h.name, "Expect"))) continue;
         try filtered.append(a, h);
     }
     return filtered.toOwnedSlice(a);

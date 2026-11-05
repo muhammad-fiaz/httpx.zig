@@ -18,6 +18,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const semantics = @import("semantics.zig");
+const headerName = @import("../../common/headers.zig").names;
 
 pub const Error = error{
     OutOfMemory,
@@ -184,11 +185,11 @@ pub fn buildRequest(
         }
         if (opts.chunked) {
             if (opts.minorVersion == 0) return Error.UnsupportedForVersion;
-            try appendHeader(&out, allocator, "Transfer-Encoding", "chunked");
+            try appendHeader(&out, allocator, headerName.transferEncoding, "chunked");
         } else if (!declared and !opts.streamingBody) {
             var numBuf: [20]u8 = undefined;
             const n = std.fmt.bufPrint(&numBuf, "{d}", .{body.?.len}) catch unreachable;
-            try appendHeader(&out, allocator, "Content-Length", n);
+            try appendHeader(&out, allocator, headerName.contentLength, n);
         }
     }
 
@@ -327,7 +328,7 @@ pub fn buildResponse(
     if (statusCode >= 200) {
         if (opts.chunked) {
             if (opts.minorVersion == 0) return Error.UnsupportedForVersion;
-            try appendHeader(&out, allocator, "Transfer-Encoding", "chunked");
+            try appendHeader(&out, allocator, headerName.transferEncoding, "chunked");
         } else {
             var declared = false;
             for (opts.headers) |h| {
@@ -336,7 +337,7 @@ pub fn buildResponse(
             if (!declared) {
                 var numBuf: [20]u8 = undefined;
                 const n = std.fmt.bufPrint(&numBuf, "{d}", .{if (wantsBody) body.?.len else 0}) catch unreachable;
-                try appendHeader(&out, allocator, "Content-Length", n);
+                try appendHeader(&out, allocator, headerName.contentLength, n);
             }
         }
     } else {

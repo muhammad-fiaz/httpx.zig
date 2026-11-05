@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const headerName = @import("../../common/headers.zig").names;
 
 pub const ParseError = error{
     Incomplete,
@@ -389,14 +390,14 @@ pub fn framingFull(fields: []const Field, ctx: FramingContext) ParseError!Framin
     var hasTe = false;
 
     for (fields) |f| {
-        if (std.ascii.eqlIgnoreCase(f.name, "Content-Length")) {
+        if (std.ascii.eqlIgnoreCase(f.name, headerName.contentLength)) {
             // Digits only; reject "+5", " 5", "5 ", hex, empty.
             const v = parseMod.parseUint(usize, f.value) orelse return ParseError.InvalidContentLength;
             if (v > ctx.maxBody) return ParseError.InvalidContentLength;
             if (hasCl and cl != v) return ParseError.AmbiguousFraming; // differing duplicates
             hasCl = true;
             cl = v;
-        } else if (std.ascii.eqlIgnoreCase(f.name, "Transfer-Encoding")) {
+        } else if (std.ascii.eqlIgnoreCase(f.name, headerName.transferEncoding)) {
             // Only chunked is implemented. Accepting preceding or repeated
             // transfer codings would expose still-encoded bytes to callers.
             if (hasTe or !isChunkedOnly(f.value)) return ParseError.AmbiguousFraming;
