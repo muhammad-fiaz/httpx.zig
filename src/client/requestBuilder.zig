@@ -1249,7 +1249,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
             };
         }
         if (hasStreamCl and clHdrVal != null) {
-            hdrPairs[extra.len] = .{ .name = "content-length", .value = clHdrVal.? };
+            hdrPairs[extra.len] = .{ .name = "Content-Length", .value = clHdrVal.? };
         }
 
         const raw = writerMod.buildRequest(
@@ -3580,7 +3580,7 @@ test "requestBuilder HTTP/1.1 streaming upload with Content-Length sends chunks"
     try std.testing.expectEqual(@as(u16, 200), response.status);
     const reqStr = capture.bytes[0..capture.len];
     try std.testing.expect(std.mem.startsWith(u8, reqStr, "POST /upload HTTP/1.1\r\n"));
-    try std.testing.expect(std.mem.indexOf(u8, reqStr, "content-length: 27\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reqStr, "Content-Length: 27\r\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, reqStr, "streamed payload data here!"));
 }
 

@@ -242,7 +242,7 @@ is preferable.
 
 ## Stream an upload
 
-Provide a `httpx.BodySource` through `.body` (or `.bodySource`) to send a request body
+Provide a `httpx.BodySource` through `.body` to send a request body
 incrementally. See the [request API](/api/request) and
 [streaming guide](/guide/streaming) for the available reader adapters.
 

@@ -6,6 +6,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const mimeMod = @import("../../common/mime.zig");
+const bodySourceMod = @import("../../common/bodySource.zig");
 const common = @import("multipartCommon.zig");
 
 // Subtypes
@@ -405,6 +406,125 @@ fn encodeAllocParts(allocator: Allocator, boundary: []const u8, parts: []const P
     try encodeParts(&out.writer, boundary, parts);
     return out.toOwnedSlice() catch EncodeError.OutOfMemory;
 }
+
+/// Pull-based multipart body producer for streaming request uploads.
+///
+/// Only the part headers, CRLF separators, and final boundary are copied into
+/// an owned `meta` buffer; payload bytes are referenced in place by the part
+/// slices. Memory use is therefore bounded by header size regardless of body
+/// size, and the source is replayable when the caller keeps the part slices
+/// alive. Calling `deinit` releases the header buffer.
+pub const StreamingBody = struct {
+    allocator: Allocator,
+    meta: []u8,
+    ops: []Op,
+    total: u64,
+    op_index: usize = 0,
+    op_offset: usize = 0,
+
+    const Op = union(enum) {
+        meta: struct { off: usize, len: usize },
+        data: []const u8,
+    };
+
+    pub fn init(allocator: Allocator, boundary: []const u8, parts: []const Part) EncodeError!StreamingBody {
+        if (!common.validateBoundary(boundary)) return EncodeError.InvalidBoundary;
+
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        errdefer out.deinit();
+        var ops: std.ArrayList(Op) = .empty;
+        errdefer ops.deinit(allocator);
+
+        for (parts) |part| {
+            const header_off = out.writer.end;
+            try writePartHeader(&out.writer, boundary, part);
+            const header_len = out.writer.end - header_off;
+            ops.append(allocator, .{ .meta = .{ .off = header_off, .len = header_len } }) catch return EncodeError.OutOfMemory;
+            ops.append(allocator, .{ .data = part.data }) catch return EncodeError.OutOfMemory;
+            const crlf_off = out.writer.end;
+            out.writer.writeAll("\r\n") catch return EncodeError.WriteFailed;
+            ops.append(allocator, .{ .meta = .{ .off = crlf_off, .len = 2 } }) catch return EncodeError.OutOfMemory;
+        }
+
+        const final_off = out.writer.end;
+        writeFinalBoundary(&out.writer, boundary) catch |err| switch (err) {
+            EncodeError.WriteFailed => return EncodeError.WriteFailed,
+            else => return err,
+        };
+        const final_len = out.writer.end - final_off;
+        ops.append(allocator, .{ .meta = .{ .off = final_off, .len = final_len } }) catch return EncodeError.OutOfMemory;
+
+        const meta = out.toOwnedSlice() catch return EncodeError.OutOfMemory;
+        errdefer allocator.free(meta);
+        const owned_ops = ops.toOwnedSlice(allocator) catch return EncodeError.OutOfMemory;
+
+        var total: u64 = @intCast(meta.len);
+        for (parts) |part| total += @intCast(part.data.len);
+        return .{ .allocator = allocator, .meta = meta, .ops = owned_ops, .total = total };
+    }
+
+    pub fn deinit(self: *StreamingBody) void {
+        self.allocator.free(self.meta);
+        self.allocator.free(self.ops);
+        self.* = undefined;
+    }
+
+    pub fn contentLength(self: *const StreamingBody) u64 {
+        return self.total;
+    }
+
+    pub fn reset(self: *StreamingBody) void {
+        self.op_index = 0;
+        self.op_offset = 0;
+    }
+
+    fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
+        const self: *StreamingBody = @ptrCast(@alignCast(ctx));
+        var written: usize = 0;
+        while (written < buf.len and self.op_index < self.ops.len) {
+            switch (self.ops[self.op_index]) {
+                .meta => |m| {
+                    const remaining = m.len - self.op_offset;
+                    const n = @min(remaining, buf.len - written);
+                    @memcpy(buf[written .. written + n], self.meta[m.off + self.op_offset ..][0..n]);
+                    written += n;
+                    self.op_offset += n;
+                    if (self.op_offset == m.len) {
+                        self.op_index += 1;
+                        self.op_offset = 0;
+                    }
+                },
+                .data => |data| {
+                    const remaining = data.len - self.op_offset;
+                    const n = @min(remaining, buf.len - written);
+                    @memcpy(buf[written .. written + n], data[self.op_offset..][0..n]);
+                    written += n;
+                    self.op_offset += n;
+                    if (self.op_offset == data.len) {
+                        self.op_index += 1;
+                        self.op_offset = 0;
+                    }
+                },
+            }
+        }
+        return written;
+    }
+
+    fn resetCb(ctx: *anyopaque) anyerror!void {
+        const self: *StreamingBody = @ptrCast(@alignCast(ctx));
+        self.reset();
+    }
+
+    pub fn source(self: *StreamingBody) bodySourceMod.BodySource {
+        return .{
+            .ptr = self,
+            .readFn = read,
+            .contentLength = self.total,
+            .resetFn = resetCb,
+            .closeFn = null,
+        };
+    }
+};
 
 // Streaming encoder. Callers obtain it with `encoder.stream(writer, .{})`
 // and use the inferred value without naming an implementation type.
@@ -842,4 +962,54 @@ test "stream encoder detects split boundary collision" {
     try enc.beginPart("x", .{});
     try enc.write("abc\r");
     try std.testing.expectError(EncodeError.BoundaryCollision, enc.write("\n--" ++ boundary));
+}
+
+test "streaming body source matches buffered encoder byte-for-byte" {
+    const boundary = "streaming-body-boundary";
+    const parts = [_]Part{
+        .{ .name = "field", .data = "hello", .contentType = mimeMod.textPlainUtf8 },
+        .{ .name = "file", .filename = "data.bin", .data = &.{ 0, 1, 2, 3, 0xFF } },
+        .{ .name = "empty", .data = "" },
+    };
+
+    var reference: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer reference.deinit();
+    try encodeParts(&reference.writer, boundary, &parts);
+
+    var body = try StreamingBody.init(std.testing.allocator, boundary, &parts);
+    defer body.deinit();
+    try std.testing.expectEqual(@as(u64, reference.written().len), body.contentLength());
+
+    const source = body.source();
+    try std.testing.expect(source.canReset());
+
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    var one: [1]u8 = undefined;
+    while (true) {
+        const n = try source.read(&one);
+        if (n == 0) break;
+        try got.appendSlice(std.testing.allocator, one[0..n]);
+    }
+    try std.testing.expectEqualStrings(reference.written(), got.items);
+}
+
+test "streaming body source replays after reset and tolerates large reads" {
+    const boundary = "replay-boundary";
+    const parts = [_]Part{
+        .{ .name = "a", .data = "alpha" },
+        .{ .name = "b", .data = "beta" },
+    };
+    var body = try StreamingBody.init(std.testing.allocator, boundary, &parts);
+    defer body.deinit();
+    const source = body.source();
+
+    var buf: [4096]u8 = undefined;
+    const first = try source.read(&buf);
+    try std.testing.expectEqual(body.contentLength(), @as(u64, first));
+    try std.testing.expectEqual(@as(usize, 0), try source.read(&buf));
+
+    try source.reset();
+    const second = try source.read(&buf);
+    try std.testing.expectEqualStrings(buf[0..first], buf[0..second]);
 }

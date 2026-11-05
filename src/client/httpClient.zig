@@ -214,12 +214,8 @@ pub const RequestOptions = struct {
     query: ?[]const req.Header = null,
     /// Raw body bytes or a streaming [`BodySource`].
     body: ?BodySource = null,
-    /// Explicit alias for `body` when a streaming source is used.
-    bodySource: ?BodySource = null,
     /// Any value serialized as JSON.
     json: ?std.json.Value = null,
-    /// Compile-time-typed JSON payload (serialized from its concrete Zig type).
-    jsonTyped: ?std.json.Value = null,
     /// Form fields as `[]const Header` or a struct literal.
     form: ?[]const req.Header = null,
     /// Plain text body; implies `text/plain; charset=utf-8` unless overridden.
@@ -373,13 +369,19 @@ fn extractMethod(opts: anytype) Method {
     return .GET;
 }
 
+/// True when an optional option is present and carries a value. Used to reject
+/// conflicting body options instead of silently preferring one.
+fn optionPresent(opts: anytype, comptime name: []const u8) bool {
+    if (!@hasField(@TypeOf(opts), name)) return false;
+    const v = @field(opts, name);
+    const T = @TypeOf(v);
+    if (T == @TypeOf(null)) return false;
+    if (comptime @typeInfo(T) == .optional) return v != null;
+    return true;
+}
+
 fn extractBodySource(opts: anytype) ?req.BodySource {
     const O = @TypeOf(opts);
-    if (@hasField(O, "bodySource")) {
-        const v = opts.bodySource;
-        if (comptime @typeInfo(@TypeOf(v)) == .optional) return v;
-        return v;
-    }
     if (@hasField(O, "body")) {
         const v = opts.body;
         const T = @TypeOf(v);
@@ -1105,6 +1107,21 @@ pub const Client = struct {
                     if (std.ascii.eqlIgnoreCase(h.name, "content-type")) userHasContentType = true;
                     hdrs.append(self.allocator, h) catch return Error.OutOfMemory;
                 }
+            } else if (comptime @typeInfo(H) == .pointer and @typeInfo(H).pointer.size == .one and @typeInfo(@typeInfo(H).pointer.child) == .array) {
+                // `&.{ ... }` yields a pointer to an array, not a slice.
+                for (opts.headers[0..]) |h| {
+                    if (std.ascii.eqlIgnoreCase(h.name, "content-type")) userHasContentType = true;
+                    hdrs.append(self.allocator, .{ .name = h.name, .value = h.value }) catch return Error.OutOfMemory;
+                }
+            } else if (comptime @typeInfo(H) == .pointer and @typeInfo(H).pointer.size == .one and
+                @typeInfo(@typeInfo(H).pointer.child) == .@"struct" and
+                @typeInfo(@typeInfo(H).pointer.child).@"struct".is_tuple)
+            {
+                // `&.{ .{ .name = ..., .value = ... } }` is a pointer to a tuple.
+                inline for (opts.headers.*) |h| {
+                    if (std.ascii.eqlIgnoreCase(h.name, "content-type")) userHasContentType = true;
+                    hdrs.append(self.allocator, .{ .name = h.name, .value = h.value }) catch return Error.OutOfMemory;
+                }
             } else if (comptime @typeInfo(H) == .@"struct") {
                 const headersInfo = @typeInfo(H).@"struct";
                 inline for (headersInfo.field_names) |fname| {
@@ -1183,14 +1200,13 @@ pub const Client = struct {
                 if (comptime @typeInfo(T) == .optional) break :blk v != null;
                 break :blk true;
             };
-            const hasJsonTyped = @hasField(@TypeOf(opts), "jsonTyped") and opts.jsonTyped != null;
             const hasForm = blk: {
                 if (!@hasField(@TypeOf(opts), "form")) break :blk false;
                 const v = opts.form;
                 const T = @TypeOf(v);
                 if (comptime @typeInfo(T) == .optional) break :blk v != null else break :blk true;
             };
-            if (ct == null and (hasJson or hasJsonTyped)) ct = mediaTypeMod.applicationJson;
+            if (ct == null and hasJson) ct = mediaTypeMod.applicationJson;
             if (ct == null and hasForm) ct = mediaTypeMod.formUrlEncoded;
             if (ct) |c| {
                 hdrs.append(self.allocator, .{ .name = "Content-Type", .value = c }) catch return Error.OutOfMemory;
@@ -1204,6 +1220,14 @@ pub const Client = struct {
             const Q = @TypeOf(opts.query);
             if (comptime @typeInfo(Q) == .pointer and @typeInfo(Q).pointer.size == .slice) {
                 for (opts.query) |q| queryList.append(self.allocator, q) catch return Error.OutOfMemory;
+            } else if (comptime @typeInfo(Q) == .pointer and @typeInfo(Q).pointer.size == .one and @typeInfo(@typeInfo(Q).pointer.child) == .array) {
+                // `&.{ ... }` yields a pointer to an array, not a slice.
+                for (opts.query[0..]) |q| queryList.append(self.allocator, .{ .name = q.name, .value = q.value }) catch return Error.OutOfMemory;
+            } else if (comptime @typeInfo(Q) == .pointer and @typeInfo(Q).pointer.size == .one and
+                @typeInfo(@typeInfo(Q).pointer.child) == .@"struct" and
+                @typeInfo(@typeInfo(Q).pointer.child).@"struct".is_tuple)
+            {
+                inline for (opts.query.*) |q| queryList.append(self.allocator, .{ .name = q.name, .value = q.value }) catch return Error.OutOfMemory;
             } else if (comptime @typeInfo(Q) == .@"struct") {
                 const queryInfo = @typeInfo(Q).@"struct";
                 inline for (queryInfo.field_names) |fname| {
@@ -1255,6 +1279,21 @@ pub const Client = struct {
                 }
             }
         }
+
+        // Exactly one body-producing option may be supplied. Silently picking
+        // one of several would send a different request than the caller wrote.
+        var bodyOptionCount: usize = 0;
+        if (optionPresent(opts, "json")) bodyOptionCount += 1;
+        if (optionPresent(opts, "form")) bodyOptionCount += 1;
+        if (optionPresent(opts, "body")) bodyOptionCount += 1;
+        if (optionPresent(opts, "text")) bodyOptionCount += 1;
+        if (optionPresent(opts, "multipart")) bodyOptionCount += 1;
+        if (bodyOptionCount > 1) return Error.InvalidRequestBody;
+
+        // A multipart request owns its Content-Type: the generated boundary is
+        // part of the framing, so a manual value would be wrong or duplicated.
+        if (optionPresent(opts, "multipart") and (userHasContentType or optionPresent(opts, "contentType")))
+            return Error.InvalidRequestBody;
 
         // Body handling: support typed json via struct
         var jsonBuf: ?[]u8 = null;
@@ -1324,27 +1363,25 @@ pub const Client = struct {
             }
         }
 
-        const hasMultipart = @hasField(@TypeOf(opts), "multipart");
-        if (hasMultipart and bodyKind != .none)
-            return Error.InvalidRequestBody;
-
-        // Multipart file upload support
-        var multipartBuf: ?[]u8 = null;
-        defer if (multipartBuf) |b| self.allocator.free(b);
-        if (bodyKind == .none and @hasField(@TypeOf(opts), "multipart")) {
-            const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
-            var encoder = mpEncoder.init(self.allocator, self.io, opts.multipart) catch return Error.WriteFailed;
-            defer encoder.deinit();
-            var ctBuf: [160]u8 = undefined;
-            const ctVal = encoder.contentType(&ctBuf);
-            if (ctVal.len == 0) return Error.WriteFailed;
-            multipartBuf = encoder.encodeAlloc() catch |err| switch (err) {
-                error.OutOfMemory => return Error.OutOfMemory,
-                else => return Error.WriteFailed,
-            };
-            if (multipartBuf) |b| {
-                bodyVal = b;
-                bodyKind = .raw;
+        // Multipart upload support. The encoded framing is produced lazily by
+        // a pull-based body source: headers are copied once, payload bytes stay
+        // in the caller's slices, and no full-body buffer is allocated.
+        const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
+        var multipartCtBuf: [192]u8 = undefined;
+        var multipartBody: ?mpEncoder.StreamingBody = null;
+        defer if (multipartBody) |*b| b.deinit();
+        if (comptime @hasField(@TypeOf(opts), "multipart")) {
+            if (optionPresent(opts, "multipart")) {
+                const rawOptions = opts.multipart;
+                const mpOptions = if (comptime @typeInfo(@TypeOf(rawOptions)) == .optional) rawOptions.? else rawOptions;
+                var encoder = mpEncoder.init(self.allocator, self.io, mpOptions) catch return Error.WriteFailed;
+                defer encoder.deinit();
+                const ctVal = encoder.contentType(&multipartCtBuf);
+                if (ctVal.len == 0) return Error.WriteFailed;
+                multipartBody = mpEncoder.StreamingBody.init(self.allocator, encoder.boundary(), encoder.options.parts) catch |err| switch (err) {
+                    error.OutOfMemory => return Error.OutOfMemory,
+                    else => return Error.WriteFailed,
+                };
                 hdrs.append(self.allocator, .{ .name = "Content-Type", .value = ctVal }) catch return Error.OutOfMemory;
             }
         }
@@ -1506,7 +1543,7 @@ pub const Client = struct {
             .timeoutMs = reqTimeout,
             .maxResponseSize = reqMaxSize,
             .proxy = reqProxy,
-            .bodySource = extractBodySource(opts),
+            .bodySource = if (multipartBody) |*b| b.source() else extractBodySource(opts),
             .cancel = extractCancel(opts),
             .quic = self.config.protocols.http3.quic,
         };
@@ -1625,6 +1662,90 @@ test "client multipart sends fields and files through the shared encoder" {
     try std.testing.expect(std.mem.indexOf(u8, request_bytes, "name=\"title\"\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhello") != null);
     try std.testing.expect(std.mem.indexOf(u8, request_bytes, "X-Part-Source: client") != null);
     try std.testing.expect(std.mem.indexOf(u8, request_bytes, "filename=\"a.txt\"") != null);
+}
+
+test "client rejects a manual Content-Type for multipart requests" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var client = Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    try std.testing.expectError(Error.InvalidRequestBody, client.post("http://127.0.0.1:1/", .{
+        .contentType = "multipart/form-data",
+        .multipart = .{ .fields = .{.{ .name = "a", .value = "b" }} },
+    }));
+    try std.testing.expectError(Error.InvalidRequestBody, client.post("http://127.0.0.1:1/", .{
+        .headers = &.{.{ .name = "Content-Type", .value = "multipart/form-data" }},
+        .multipart = .{ .fields = .{.{ .name = "a", .value = "b" }} },
+    }));
+}
+
+test "client streams multipart bodies with an exact Content-Length" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
+    var listener = try tcp.Listener.bind(io, 0);
+    defer listener.close(io);
+
+    const Capture = struct {
+        bytes: [4096]u8 = undefined,
+        len: usize = 0,
+    };
+    const Server = struct {
+        fn run(listener_ptr: *tcp.Listener, capture: *Capture, server_io: std.Io) void {
+            var conn = listener_ptr.accept(server_io) catch return;
+            defer conn.close();
+            conn.setReadTimeoutMs(3000);
+            while (capture.len < capture.bytes.len) {
+                const n = conn.read(capture.bytes[capture.len..]) catch return;
+                if (n == 0) break;
+                capture.len += n;
+                if (std.mem.indexOf(u8, capture.bytes[0..capture.len], "--len-boundary--\r\n") != null) break;
+            }
+            conn.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK") catch {};
+        }
+    };
+
+    const fields = [_]mpEncoder.FieldValue{.{ .name = "title", .value = "hello" }};
+    const files = [_]mpEncoder.File{.{
+        .name = "upload",
+        .filename = "a.bin",
+        .data = "streamed-file-content",
+    }};
+    var reference = try mpEncoder.init(allocator, io, .{
+        .boundary = "len-boundary",
+        .fields = &fields,
+        .files = &files,
+    });
+    defer reference.deinit();
+    const expected = try reference.encodeAlloc();
+    defer allocator.free(expected);
+
+    var capture = Capture{};
+    const thread = try std.Thread.spawn(.{}, Server.run, .{ &listener, &capture, io });
+    defer {
+        releaseAcceptor(&listener, io);
+        thread.join();
+    }
+
+    var client = Client.init(allocator, io, .{});
+    defer client.deinit();
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/multipart", .{listener.localPort()});
+    var response = try client.post(url, .{ .multipart = .{
+        .boundary = "len-boundary",
+        .fields = &fields,
+        .files = &files,
+    } });
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+
+    const request_bytes = capture.bytes[0..capture.len];
+    var cl_buf: [64]u8 = undefined;
+    const cl_header = try std.fmt.bufPrint(&cl_buf, "Content-Length: {d}\r\n", .{expected.len});
+    try std.testing.expect(std.mem.indexOf(u8, request_bytes, cl_header) != null);
+    try std.testing.expect(std.mem.indexOf(u8, request_bytes, "Transfer-Encoding: chunked") == null);
+    try std.testing.expect(std.mem.endsWith(u8, request_bytes, expected));
 }
 
 test "client http3 quic options propagate to a real quic connection" {
@@ -3574,7 +3695,7 @@ test "Client requestStream with BodySource streaming upload" {
     var reader = SliceReader.init("streamed-data-payload");
     var res = try client.requestStream(url, .{
         .method = .POST,
-        .bodySource = reader.source(),
+        .body = reader.source(),
     });
     defer res.deinit();
 
