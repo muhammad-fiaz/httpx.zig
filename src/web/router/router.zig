@@ -190,7 +190,7 @@ pub const Context = struct {
     /// Parses the buffered request body as multipart/form-data. The returned
     /// form must be deinitialized with its own allocator (normally
     /// `ctx.allocator`).
-    pub fn multipartForm(
+    pub fn multipart(
         self: *Context,
         options: anytype,
     ) multipartServerMod.Error!multipartServerMod.Form {

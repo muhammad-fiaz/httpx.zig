@@ -25,11 +25,11 @@ defer client.deinit();
 
 var resp = try client.post("http://localhost:8080/upload", .{
     .multipart = .{
-        .fields = &.{
+        .fields = .{
             .{ .name = "description", .value = "large upload" },
             .{ .name = "category",    .value = "reports" },
         },
-        .files = &.{
+        .files = .{
             .{ .name = "file",  .filename = "data.bin",   .data = bin_bytes },
             .{ .name = "image", .filename = "photo.png",  .data = png_bytes },
             // contentType auto-detected from filename extension when omitted
@@ -44,7 +44,7 @@ defer resp.deinit();
 ```zig
 var resp = try client.post("http://localhost:8080/ingest", .{
     .multipart = .{
-        .parts = &.{
+        .parts = .{
             .{ .name = "meta",   .data = json_meta, .contentType = "application/json" },
             .{ .name = "binary", .data = bin_data,  .filename = "out.bin" },
         },
@@ -91,10 +91,10 @@ The `allocator` and `io` are stored internally after `init`.
 var encoder = try httpx.multipart.encoder.init(allocator, io, .{
     .subtype  = .formData,
     .boundary = null,       // auto-generated
-    .fields   = &.{
+    .fields   = .{
         .{ .name = "username", .value = "alice" },
     },
-    .files = &.{
+    .files = .{
         .{ .name = "avatar", .filename = "photo.png", .data = png_bytes },
     },
 });
@@ -133,13 +133,13 @@ try stream.finish();
 
 ---
 
-## Server-Side Parsing — `ctx.multipartForm`
+## Server-Side Parsing - `ctx.multipart`
 
 Inside a router handler, parse an incoming `multipart/form-data` body:
 
 ```zig
 pub fn handleUpload(ctx: *httpx.Context) !httpx.Response {
-    var form = try ctx.multipartForm(.{
+    var form = try ctx.multipart(.{
         .maxMemoryBytes = 16 * 1024 * 1024, // optional — defaults to 32 MB
     });
     defer form.deinit();
@@ -156,7 +156,7 @@ pub fn handleUpload(ctx: *httpx.Context) !httpx.Response {
 ```
 
 > [!TIP]
-> `ctx.multipartForm(.{})` works with no config — all limits have safe production defaults.
+> `ctx.multipart(.{})` works with no config - all limits have safe production defaults.
 
 ---
 
@@ -202,8 +202,8 @@ while (offset < total_bytes.len) {
         .cancel  = &cancel,
         .headers = &.{ .{ .name = "Content-Range", .value = rangeHeader } },
         .multipart = .{
-            .fields = &.{ .{ .name = "part", .value = "1" } },
-            .files  = &.{ .{ .name = "chunk", .filename = "data.bin", .data = total_bytes[offset..end] } },
+            .fields = .{ .{ .name = "part", .value = "1" } },
+            .files  = .{ .{ .name = "chunk", .filename = "data.bin", .data = total_bytes[offset..end] } },
         },
     });
     defer resp.deinit();

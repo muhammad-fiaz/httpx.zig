@@ -48,22 +48,35 @@ pub const RemoteFileInfo = DownloadCore.RemoteFileInfo;
 const addressMod = @import("../net/address.zig");
 const netResolve = @import("../net/resolve.zig");
 pub const Address = addressMod.Address;
+
+/// Restricts DNS resolution to a particular address family.
 pub const AddressFamilyPreference = enum {
+    /// Return both IPv4 and IPv6 results in resolver order.
     any,
+    /// Return only IPv4 results.
     ipv4,
+    /// Return only IPv6 results.
     ipv6,
 };
+
+/// Options for `Client.resolve` and `Client.resolveUrl`.
 pub const ResolveOptions = struct {
+    /// Address family to keep; defaults to both families.
     family: AddressFamilyPreference = .any,
+    /// Reuse the client DNS cache when an entry is still fresh.
     useCache: bool = true,
+    /// Per-resolution timeout in milliseconds; `null` uses the resolver default.
     timeoutMs: ?u64 = null,
     /// Port stamped onto every returned address. Defaults to 443 (HTTPS).
     port: u16 = 443,
 };
+
+/// Owned list of resolved addresses returned by `Client.resolve`.
 pub const ResolvedAddresses = struct {
     allocator: Allocator,
     items: []addressMod.Address,
 
+    /// Releases the address list. Safe to call more than once.
     pub fn deinit(self: *ResolvedAddresses) void {
         if (self.items.len > 0) {
             self.allocator.free(self.items);
@@ -71,18 +84,22 @@ pub const ResolvedAddresses = struct {
         self.items = &.{};
     }
 
+    /// Borrowed view of every resolved address.
     pub fn slice(self: *const ResolvedAddresses) []const addressMod.Address {
         return self.items;
     }
 
+    /// First resolved address, or `null` when the result is empty.
     pub fn first(self: *const ResolvedAddresses) ?addressMod.Address {
         return if (self.items.len > 0) self.items[0] else null;
     }
 
+    /// Number of resolved addresses.
     pub fn len(self: *const ResolvedAddresses) usize {
         return self.items.len;
     }
 
+    /// Formats the address list as a comma-separated diagnostic string.
     pub fn format(self: ResolvedAddresses, writer: anytype) !void {
         for (self.items, 0..) |item, i| {
             if (i > 0) try writer.writeAll(", ");
@@ -91,13 +108,21 @@ pub const ResolvedAddresses = struct {
     }
 };
 
+/// Client-wide defaults passed to `Client.init`.
+///
+/// Every field has a safe production default, so `.{}` is a complete
+/// configuration. Per-request options always override these values.
 pub const Config = struct {
+    /// Maximum redirect hops followed for one request.
     maxRedirects: u8 = 10,
+    /// Follow 3xx responses automatically.
     followRedirects: bool = true,
+    /// Connection-pool limits and idle policy.
     pool: PoolConfig = .{},
     /// Application-supplied callback for client events (request completed, failed, etc.).
     /// When null (the default), HTTPX produces no output.
     eventCallback: ?logging.ClientEventCallback = null,
+    /// DNS cache controls.
     dnsCache: DnsCacheOptions = .{},
     /// Allow bare LF line endings (instead of strict CRLF) for
     /// non-compliant peers (issue #37). Stripping optional trailing
@@ -122,13 +147,13 @@ pub const Config = struct {
     retryUnsafeMethods: bool = false,
     /// Default proxy URL (e.g. "socks5://127.0.0.1:1080", "socks5h://127.0.0.1:1080", "http://127.0.0.1:8080").
     proxy: ?[]const u8 = null,
-    /// Fast boolean toggle to use HTTP/1.0
+    /// Allow HTTP/1.0 in the automatic protocol selection.
     http10: bool = true,
-    /// Fast boolean toggle to use HTTP/1.1
+    /// Allow HTTP/1.1 in the automatic protocol selection.
     http11: bool = true,
-    /// Fast boolean toggle to use HTTP/2 as default protocol
+    /// Prefer HTTP/2 when the transport supports it.
     http2: bool = false,
-    /// Fast boolean toggle to use HTTP/3 as default protocol
+    /// Prefer HTTP/3 when the transport supports it.
     http3: bool = false,
     /// Default early data options (disabled by default).
     earlyData: req.EarlyDataOptions = .{},
@@ -137,10 +162,13 @@ pub const Config = struct {
     /// engines that are actually used. `.{}` keeps secure defaults.
     protocols: Protocols = .{},
 
+    /// Nested protocol-engine tuning.
     pub const Protocols = struct {
+        /// HTTP/3 transport tuning.
         http3: Http3Options = .{},
     };
 
+    /// HTTP/3 transport tuning.
     pub const Http3Options = struct {
         /// QUIC transport parameters used for new client sessions.
         /// Flow-control windows, stream limits, idle timeout and UDP
@@ -148,10 +176,15 @@ pub const Config = struct {
         quic: quicModule.Config = .{},
     };
 
+    /// DNS cache sizing and TTL controls.
     pub const DnsCacheOptions = struct {
+        /// Enable the in-process DNS cache.
         enable: bool = true,
+        /// Positive-entry time to live in milliseconds.
         ttlMs: i64 = 60_000,
+        /// Negative (NXDOMAIN) entry time to live in milliseconds.
         negativeTtlMs: i64 = 5_000,
+        /// Maximum cached host entries.
         maxEntries: u32 = 1024,
     };
 };
@@ -164,29 +197,126 @@ pub const OnlineOptions = struct {
     maxProbes: u8 = 4,
 };
 
-const requestOptionNames = .{
-    "method",    "headers",         "query",        "body",               "bodySource",
-    "json",      "jsonTyped",       "form",         "text",               "contentType",
-    "multipart", "followRedirects", "maxRedirects", "allowLfLineEndings", "httpVersion",
-    "http10",    "http11",          "http2",        "http3",              "tls",
-    "cookie",    "basicAuth",       "bearerAuth",   "timeoutMs",          "maxResponseSize",
-    "proxy",     "earlyData",       "cancel",
+/// Canonical description of every per-request client option.
+///
+/// Request calls still accept a struct literal (`client.get(url, .{ ... })`)
+/// because payload fields such as `.json`, `.headers`, `.form`, and
+/// `.multipart` deliberately accept several concrete shapes. This type is the
+/// single, compile-time source of truth for the *names* and documented
+/// defaults, and [`validateRequestOptions`] rejects misspelled or unknown
+/// fields at build time — there is no runtime string allowlist.
+pub const RequestOptions = struct {
+    /// HTTP method. Defaults to the verb of the called operation.
+    method: ?Method = null,
+    /// `[]const Header` or a struct whose field names are header names.
+    headers: ?[]const req.Header = null,
+    /// `[]const Header` or a struct whose field names are query keys.
+    query: ?[]const req.Header = null,
+    /// Raw body bytes or a streaming [`BodySource`].
+    body: ?BodySource = null,
+    /// Explicit alias for `body` when a streaming source is used.
+    bodySource: ?BodySource = null,
+    /// Any value serialized as JSON.
+    json: ?std.json.Value = null,
+    /// Compile-time-typed JSON payload (serialized from its concrete Zig type).
+    jsonTyped: ?std.json.Value = null,
+    /// Form fields as `[]const Header` or a struct literal.
+    form: ?[]const req.Header = null,
+    /// Plain text body; implies `text/plain; charset=utf-8` unless overridden.
+    text: ?[]const u8 = null,
+    /// Explicit `Content-Type` override.
+    contentType: ?[]const u8 = null,
+    /// Multipart form data; see [`MultipartOptions`].
+    multipart: ?MultipartOptions = null,
+    /// Redirect policy override.
+    followRedirects: ?bool = null,
+    /// Maximum redirects override.
+    maxRedirects: ?u8 = null,
+    /// Strict CRLF policy override.
+    allowLfLineEndings: ?bool = null,
+    /// Protocol preference override.
+    httpVersion: ?HttpVersion = null,
+    /// Boolean protocol shortcuts (mutually exclusive with `httpVersion`).
+    http10: ?bool = null,
+    http11: ?bool = null,
+    http2: ?bool = null,
+    http3: ?bool = null,
+    /// TLS client options for this request only.
+    tls: ?req.TlsOptions = null,
+    /// Literal `Cookie` header value.
+    cookie: ?[]const u8 = null,
+    /// `user:password` encoded as Basic auth.
+    basicAuth: ?[]const u8 = null,
+    /// Bearer token encoded as `Authorization: Bearer …`.
+    bearerAuth: ?[]const u8 = null,
+    /// Per-request timeout in milliseconds.
+    timeoutMs: ?u64 = null,
+    /// Upper bound on the buffered response body.
+    maxResponseSize: ?usize = null,
+    /// Proxy URL override.
+    proxy: ?[]const u8 = null,
+    /// TLS 1.3 early-data options.
+    earlyData: ?req.EarlyDataOptions = null,
+    /// Cooperative cancellation flag.
+    cancel: ?*const std.atomic.Value(bool) = null,
 };
 
-fn isRequestOption(comptime name: []const u8) bool {
-    inline for (requestOptionNames) |allowed| {
-        if (std.mem.eql(u8, name, allowed)) return true;
+/// Canonical multipart request-option shape. Every member is optional so the
+/// caller can use any of the supported forms: generic `.parts`, the
+/// `.fields` + `.files` shorthand, a single `.file`, or a bare single-part
+/// struct with `.name` and `.data` / `.value`.
+pub const MultipartOptions = struct {
+    /// MIME subtype: `.formData`, `.mixed`, `.related`, `.alternative`,
+    /// `.byteranges`, or `.{ .custom = "signed" }`.
+    subtype: ?@import("../web/multipart/multipartEncoder.zig").Subtype = null,
+    /// Explicit boundary; a cryptographically random one is generated when null.
+    boundary: ?[]const u8 = null,
+    /// Full-control parts: `.parts = .{ .{ .name, .data, … } }`.
+    parts: ?[]const @import("../web/multipart/multipartEncoder.zig").Part = null,
+    /// Text fields: `.fields = .{ .{ .name, .value } }`.
+    fields: ?[]const @import("../web/multipart/multipartEncoder.zig").FieldValue = null,
+    /// File fields: `.files = .{ .{ .name, .filename, .data } }`.
+    files: ?[]const @import("../web/multipart/multipartEncoder.zig").File = null,
+    /// Single file shorthand: `.file = .{ .name, .filename, .data }`.
+    file: ?@import("../web/multipart/multipartEncoder.zig").File = null,
+    /// Bare single-part shorthand: `.name` plus `.data` / `.value`.
+    name: ?[]const u8 = null,
+    /// Optional filename for the bare single-part shorthand.
+    filename: ?[]const u8 = null,
+    /// Optional content type for the bare single-part shorthand.
+    contentType: ?[]const u8 = null,
+    /// Raw bytes for the bare single-part shorthand.
+    data: ?[]const u8 = null,
+    /// Alias for `data` when the bare shorthand carries a text value.
+    value: ?[]const u8 = null,
+};
+
+fn validateNestedOptions(comptime label: []const u8, comptime T: type, comptime Allowed: type) void {
+    const info = @typeInfo(T);
+    if (info == .optional) return validateNestedOptions(label, info.optional.child, Allowed);
+    if (info != .@"struct") return;
+    inline for (info.@"struct".field_names) |name| {
+        if (comptime !@hasField(Allowed, name)) {
+            @compileError("unknown " ++ label ++ " option `." ++ name ++ "`; available options are " ++ @typeName(Allowed));
+        }
     }
-    return false;
 }
 
 fn validateRequestOptions(comptime Options: type) void {
-    const info = @typeInfo(Options);
-    if (info != .@"struct") @compileError("client request options must be a struct literal");
-    inline for (info.@"struct".field_names) |name| {
-        if (comptime !isRequestOption(name)) {
-            @compileError("unknown client request option `." ++ name ++ "`; check its spelling or pass it through headers");
+    if (@typeInfo(Options) != .@"struct") @compileError("client request options must be a struct literal");
+    inline for (@typeInfo(Options).@"struct".field_names) |name| {
+        if (comptime !@hasField(RequestOptions, name)) {
+            @compileError("unknown client request option `." ++ name ++ "`; available options are " ++ @typeName(RequestOptions));
         }
+    }
+    if (@hasField(Options, "tls")) {
+        validateNestedOptions("TLS", @FieldType(Options, "tls"), req.TlsOptions);
+    }
+    if (@hasField(Options, "earlyData")) {
+        validateNestedOptions("early-data", @FieldType(Options, "earlyData"), req.EarlyDataOptions);
+    }
+    if (@hasField(Options, "multipart")) {
+        validateNestedOptions("multipart", @FieldType(Options, "multipart"), MultipartOptions);
     }
 }
 
@@ -273,7 +403,10 @@ fn fetchForParsing(client: *Client, url: []const u8, opts: anytype) !req.Respons
     return client.get(url, opts);
 }
 
+/// `client.document.fetch(...)` — fetches and auto-detects HTML, XML, feed,
+/// robots, or sitemap documents from the response media type.
 pub const DocumentApi = struct {
+    /// Fetches `url` and parses the body using the detected document type.
     pub fn fetch(self: *DocumentApi, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
         const client: *Client = @fieldParentPtr("document", self);
         var res = try fetchForParsing(client, url, opts);
@@ -282,7 +415,9 @@ pub const DocumentApi = struct {
     }
 };
 
+/// `client.html.fetch(...)` — fetches and parses an HTML document.
 pub const HtmlApi = struct {
+    /// Fetches `url` and parses the body as HTML.
     pub fn fetch(self: *HtmlApi, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
         const client: *Client = @fieldParentPtr("html", self);
         var res = try fetchForParsing(client, url, opts);
@@ -291,7 +426,9 @@ pub const HtmlApi = struct {
     }
 };
 
+/// `client.xml.fetch(...)` — fetches and parses an XML document.
 pub const XmlApi = struct {
+    /// Fetches `url` and parses the body as XML.
     pub fn fetch(self: *XmlApi, url: []const u8, opts: anytype) !@import("../parsing/document.zig").Document {
         const client: *Client = @fieldParentPtr("xml", self);
         var res = try fetchForParsing(client, url, opts);
@@ -300,7 +437,9 @@ pub const XmlApi = struct {
     }
 };
 
+/// `client.feed.fetch(...)` — fetches and parses RSS, Atom, or JSON feeds.
 pub const FeedApi = struct {
+    /// Fetches `url` and parses the body as a feed.
     pub fn fetch(self: *FeedApi, url: []const u8, opts: anytype) !@import("../parsing/feed.zig").Feed {
         const client: *Client = @fieldParentPtr("feed", self);
         var res = try fetchForParsing(client, url, opts);
@@ -309,7 +448,9 @@ pub const FeedApi = struct {
     }
 };
 
+/// `client.robots.fetch(...)` — fetches and parses a `robots.txt` file.
 pub const RobotsApi = struct {
+    /// Fetches `url` and parses the body as a robots file.
     pub fn fetch(self: *RobotsApi, url: []const u8, opts: anytype) !@import("../parsing/robots.zig").RobotsFile {
         const client: *Client = @fieldParentPtr("robots", self);
         var res = try fetchForParsing(client, url, opts);
@@ -318,7 +459,9 @@ pub const RobotsApi = struct {
     }
 };
 
+/// `client.sitemap.fetch(...)` — fetches and parses an XML sitemap.
 pub const SitemapApi = struct {
+    /// Fetches `url` and parses the body as a sitemap.
     pub fn fetch(self: *SitemapApi, url: []const u8, opts: anytype) !@import("../parsing/sitemap.zig").Sitemap {
         const client: *Client = @fieldParentPtr("sitemap", self);
         var res = try fetchForParsing(client, url, opts);
@@ -327,6 +470,11 @@ pub const SitemapApi = struct {
     }
 };
 
+/// Pooled HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 client.
+///
+/// The client owns its connection pool, DNS cache, and TLS session cache and
+/// borrows the allocator and `std.Io` supplied to `init`. Request methods take
+/// a `.{}` options literal; unknown option names are rejected at compile time.
 pub const Client = struct {
     pub const Document = DocumentApi;
     pub const Html = HtmlApi;
@@ -351,8 +499,12 @@ pub const Client = struct {
     /// client certificates). Shared across threads; bounded.
     sessionCache: tlsSessionCache.SessionCache,
 
-    /// Initializes client with explicit allocator and shared IO.
-    /// Matches `var client = httpx.Client.init(allocator, io, .{});`
+    /// Creates a client from an explicit allocator, shared I/O, and `.{}` config.
+    ///
+    /// ```zig
+    /// var client = httpx.Client.init(allocator, io, .{});
+    /// defer client.deinit();
+    /// ```
     pub fn init(allocator: Allocator, io: std.Io, config: Config) Client {
         var c = Client{
             .allocator = allocator,
@@ -377,6 +529,7 @@ pub const Client = struct {
         return c;
     }
 
+    /// Releases the DNS cache, connection pool, and TLS session cache.
     pub fn deinit(self: *Client) void {
         if (self.dnsCache) |*cache| cache.deinit();
         self.pool.deinit();
@@ -528,16 +681,15 @@ pub const Client = struct {
         });
     }
 
-    /// Fluent, type-safe RequestBuilder chained builder.
+    /// Starts a fluent `RequestBuilder` for a single request.
     pub fn builder(self: *Client, m: Method, url: []const u8) RequestBuilder {
         return RequestBuilder.init(self, m, url);
     }
 
-    /// Alias for builder() matching the canonical RequestBuilder name.
-    pub fn requestBuilder(self: *Client, m: Method, url: []const u8) RequestBuilder {
-        return self.builder(m, url);
-    }
-
+    /// Fluent request builder returned by `Client.builder`.
+    ///
+    /// Chain setters, then call `send` or `sendStream`. The builder borrows
+    /// header/query/body values; call `deinit` when finished.
     pub const RequestBuilder = struct {
         client: *Client,
         method: Method,
@@ -551,6 +703,7 @@ pub const Client = struct {
         basicAuthValue: ?[]const u8 = null,
         cancelValue: ?*const std.atomic.Value(bool) = null,
 
+        /// Creates a builder for one request on `client`.
         pub fn init(client: *Client, m: Method, url: []const u8) RequestBuilder {
             return .{
                 .client = client,
@@ -561,17 +714,20 @@ pub const Client = struct {
             };
         }
 
+        /// Frees builder-owned header/query lists and encoded JSON.
         pub fn deinit(self: *RequestBuilder) void {
             if (self.jsonAllocated) |j| self.client.allocator.free(j);
             self.headersList.deinit(self.client.allocator);
             self.queryList.deinit(self.client.allocator);
         }
 
+        /// Appends one request header.
         pub fn header(self: *RequestBuilder, name: []const u8, value: []const u8) !*RequestBuilder {
             try self.headersList.append(self.client.allocator, .{ .name = name, .value = value });
             return self;
         }
 
+        /// Appends every header in `hdrs`.
         pub fn headers(self: *RequestBuilder, hdrs: []const req.Header) !*RequestBuilder {
             for (hdrs) |h| {
                 _ = try self.header(h.name, h.value);
@@ -579,47 +735,56 @@ pub const Client = struct {
             return self;
         }
 
+        /// Appends one query parameter.
         pub fn query(self: *RequestBuilder, name: []const u8, value: []const u8) !*RequestBuilder {
             try self.queryList.append(self.client.allocator, .{ .name = name, .value = value });
             return self;
         }
 
+        /// Sets the per-request timeout in milliseconds.
         pub fn timeoutMs(self: *RequestBuilder, ms: u64) *RequestBuilder {
             self.timeoutMsValue = ms;
             return self;
         }
 
+        /// Sets a Bearer token for the `Authorization` header.
         pub fn bearerAuth(self: *RequestBuilder, tok: []const u8) *RequestBuilder {
             self.bearerAuthValue = tok;
             return self;
         }
 
+        /// Sets a `user:password` pair for Basic authentication.
         pub fn basicAuth(self: *RequestBuilder, creds: []const u8) *RequestBuilder {
             self.basicAuthValue = creds;
             return self;
         }
 
+        /// Attaches a cooperative cancellation flag.
         pub fn cancel(self: *RequestBuilder, flag: *const std.atomic.Value(bool)) *RequestBuilder {
             self.cancelValue = flag;
             return self;
         }
 
+        /// Sets raw body bytes.
         pub fn body(self: *RequestBuilder, b: []const u8) *RequestBuilder {
             self.bodyBytes = b;
             return self;
         }
 
+        /// Sets the body and its `Content-Type`.
         pub fn contentType(self: *RequestBuilder, ct: []const u8) !*RequestBuilder {
             _ = try self.header("content-type", ct);
             return self;
         }
 
+        /// Sets a pre-encoded `application/x-www-form-urlencoded` body.
         pub fn form(self: *RequestBuilder, encoded: []const u8) !*RequestBuilder {
             self.bodyBytes = encoded;
             _ = try self.header("content-type", mediaTypeMod.formUrlEncoded);
             return self;
         }
 
+        /// Serializes `value` as JSON and sets `Content-Type: application/json`.
         pub fn json(self: *RequestBuilder, value: anytype) !*RequestBuilder {
             if (self.jsonAllocated) |j| {
                 self.client.allocator.free(j);
@@ -632,6 +797,7 @@ pub const Client = struct {
             return self;
         }
 
+        /// Sends the buffered request and returns the complete response.
         pub fn send(self: *RequestBuilder) !Response {
             return self.client.doRequestWithOverride(self.method, self.url, .{
                 .headers = self.headersList.items,
@@ -644,6 +810,7 @@ pub const Client = struct {
             });
         }
 
+        /// Sends the request and returns an incremental `ResponseStream`.
         pub fn sendStream(self: *RequestBuilder) !ResponseStream {
             return self.client.doRequestStream(self.method, self.url, .{
                 .headers = self.headersList.items,
@@ -1165,165 +1332,13 @@ pub const Client = struct {
         var multipartBuf: ?[]u8 = null;
         defer if (multipartBuf) |b| self.allocator.free(b);
         if (bodyKind == .none and @hasField(@TypeOf(opts), "multipart")) {
-            const mp = opts.multipart;
             const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
-            const boundary_option: ?[]const u8 = blk: {
-                if (@hasField(@TypeOf(mp), "boundary")) {
-                    const raw = mp.boundary;
-                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) {
-                        break :blk raw;
-                    } else {
-                        break :blk raw;
-                    }
-                }
-                break :blk null;
-            };
-            const subtype: mpEncoder.Subtype = if (@hasField(@TypeOf(mp), "subtype")) mp.subtype else .formData;
-            var parts: std.ArrayList(mpEncoder.Part) = .empty;
-            defer parts.deinit(self.allocator);
-
-            if (@hasField(@TypeOf(mp), "parts")) {
-                for (mp.parts) |p| {
-                    const PT = @TypeOf(p);
-                    const filename: ?[]const u8 = if (@hasField(PT, "filename")) blk: {
-                        const raw = p.filename;
-                        if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
-                        break :blk raw;
-                    } else null;
-                    const content_type: []const u8 = if (@hasField(PT, "contentType")) blk: {
-                        const raw = p.contentType;
-                        if (comptime @typeInfo(@TypeOf(raw)) == .optional) {
-                            if (raw) |val| break :blk val;
-                            if (filename) |fn_str| break :blk mimeMod.fromPath(fn_str);
-                            break :blk mimeMod.octetStream;
-                        }
-                        break :blk raw;
-                    } else if (filename) |fn_str| mimeMod.fromPath(fn_str) else if (@hasField(PT, "value")) mediaTypeMod.textPlainUtf8 else mimeMod.octetStream;
-                    const data_val = if (@hasField(PT, "data")) p.data else if (@hasField(PT, "value")) p.value else "";
-                    const part_headers: ?[]const mpEncoder.Header = if (@hasField(PT, "headers")) blk: {
-                        const raw = p.headers;
-                        if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
-                        break :blk raw;
-                    } else null;
-                    try parts.append(self.allocator, .{
-                        .name = p.name,
-                        .filename = filename,
-                        .contentType = content_type,
-                        .data = data_val,
-                        .headers = part_headers,
-                    });
-                }
-            }
-            if (@hasField(@TypeOf(mp), "fields")) {
-                for (mp.fields) |field| {
-                    const FT = @TypeOf(field);
-                    const value = if (@hasField(FT, "value")) field.value else field.data;
-                    try parts.append(self.allocator, .{
-                        .name = field.name,
-                        .data = value,
-                        .contentType = mediaTypeMod.textPlainUtf8,
-                    });
-                }
-            }
-            if (@hasField(@TypeOf(mp), "files")) {
-                for (mp.files) |file| {
-                    const FT = @TypeOf(file);
-                    const filename: ?[]const u8 = if (@hasField(FT, "filename")) blk: {
-                        const raw = file.filename;
-                        if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
-                        break :blk raw;
-                    } else null;
-                    const content_type: []const u8 = if (@hasField(FT, "contentType")) blk: {
-                        const raw = file.contentType;
-                        if (comptime @typeInfo(@TypeOf(raw)) == .optional) {
-                            if (raw) |value| break :blk value;
-                            if (filename) |fn_str| break :blk mimeMod.fromPath(fn_str);
-                            break :blk mimeMod.octetStream;
-                        }
-                        break :blk raw;
-                    } else if (filename) |fn_str| mimeMod.fromPath(fn_str) else mimeMod.octetStream;
-                    const part_headers: ?[]const mpEncoder.Header = if (@hasField(FT, "headers")) blk: {
-                        const raw = file.headers;
-                        if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
-                        break :blk raw;
-                    } else null;
-                    try parts.append(self.allocator, .{
-                        .name = file.name,
-                        .filename = filename,
-                        .contentType = content_type,
-                        .data = file.data,
-                        .headers = part_headers,
-                    });
-                }
-            } else if (@hasField(@TypeOf(mp), "file")) {
-                const file = mp.file;
-                const FT = @TypeOf(file);
-                const filename: ?[]const u8 = if (@hasField(FT, "filename")) blk: {
-                    const raw = file.filename;
-                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
-                    break :blk raw;
-                } else null;
-                const content_type: []const u8 = if (@hasField(FT, "contentType")) blk: {
-                    const raw = file.contentType;
-                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) {
-                        if (raw) |value| break :blk value;
-                        if (filename) |fn_str| break :blk mimeMod.fromPath(fn_str);
-                        break :blk mimeMod.octetStream;
-                    }
-                    break :blk raw;
-                } else if (filename) |fn_str| mimeMod.fromPath(fn_str) else mimeMod.octetStream;
-                const part_headers: ?[]const mpEncoder.Header = if (@hasField(FT, "headers")) blk: {
-                    const raw = file.headers;
-                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
-                    break :blk raw;
-                } else null;
-                try parts.append(self.allocator, .{
-                    .name = if (@hasField(FT, "name")) file.name else "file",
-                    .filename = filename,
-                    .contentType = content_type,
-                    .data = file.data,
-                    .headers = part_headers,
-                });
-            } else if (@hasField(@TypeOf(mp), "data") and @hasField(@TypeOf(mp), "name")) {
-                // Direct single file struct: .multipart = .{ .name = "upload", .filename = "a.txt", .data = "..." }
-                const FT = @TypeOf(mp);
-                const filename: ?[]const u8 = if (@hasField(FT, "filename")) blk: {
-                    const raw = mp.filename;
-                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
-                    break :blk raw;
-                } else null;
-                const content_type: []const u8 = if (@hasField(FT, "contentType")) blk: {
-                    const raw = mp.contentType;
-                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) {
-                        if (raw) |value| break :blk value;
-                        if (filename) |fn_str| break :blk mimeMod.fromPath(fn_str);
-                        break :blk mimeMod.octetStream;
-                    }
-                    break :blk raw;
-                } else if (filename) |fn_str| mimeMod.fromPath(fn_str) else mimeMod.octetStream;
-                const part_headers: ?[]const mpEncoder.Header = if (@hasField(FT, "headers")) blk: {
-                    const raw = mp.headers;
-                    if (comptime @typeInfo(@TypeOf(raw)) == .optional) break :blk raw;
-                    break :blk raw;
-                } else null;
-                try parts.append(self.allocator, .{
-                    .name = mp.name,
-                    .filename = filename,
-                    .contentType = content_type,
-                    .data = mp.data,
-                    .headers = part_headers,
-                });
-            }
-
-            var encoder = mpEncoder.init(self.allocator, self.io, .{
-                .subtype = subtype,
-                .boundary = boundary_option,
-            }) catch return Error.WriteFailed;
+            var encoder = mpEncoder.init(self.allocator, self.io, opts.multipart) catch return Error.WriteFailed;
             defer encoder.deinit();
             var ctBuf: [160]u8 = undefined;
             const ctVal = encoder.contentType(&ctBuf);
             if (ctVal.len == 0) return Error.WriteFailed;
-            multipartBuf = encoder.encodePartsAlloc(parts.items) catch |err| switch (err) {
+            multipartBuf = encoder.encodeAlloc() catch |err| switch (err) {
                 error.OutOfMemory => return Error.OutOfMemory,
                 else => return Error.WriteFailed,
             };
@@ -3129,7 +3144,7 @@ test "RequestBuilder fluent API constructs and validates request" {
     var client = Client.init(a, io, .{});
     defer client.deinit();
 
-    var builder = client.requestBuilder(.POST, "http://127.0.0.1:8080/test");
+    var builder = client.builder(.POST, "http://127.0.0.1:8080/test");
     defer builder.deinit();
 
     _ = try builder.header("X-Custom-Header", "Value123");
@@ -3461,7 +3476,7 @@ test "RequestBuilder send() and form payloads" {
     var urlBuf: [64]u8 = undefined;
     {
         const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/b-json", .{port});
-        var b = client.requestBuilder(.POST, url);
+        var b = client.builder(.POST, url);
         defer b.deinit();
         _ = try b.header("X-Custom", "active");
         _ = try b.query("filter", "all");
@@ -3474,7 +3489,7 @@ test "RequestBuilder send() and form payloads" {
     }
     {
         const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/b-form", .{port});
-        var b = client.requestBuilder(.POST, url);
+        var b = client.builder(.POST, url);
         defer b.deinit();
         _ = try b.form("username=user&password=password123");
         var res = try b.send();
@@ -3635,10 +3650,10 @@ test "Client multipart upload with single file struct and mime detection" {
 }
 
 test "client request option names are validated at compile time" {
-    try std.testing.expect(isRequestOption("method"));
-    try std.testing.expect(isRequestOption("json"));
-    try std.testing.expect(isRequestOption("multipart"));
-    try std.testing.expect(isRequestOption("cancel"));
-    try std.testing.expect(!isRequestOption("timeOutMs"));
-    try std.testing.expect(!isRequestOption("cancelFlag"));
+    try std.testing.expect(@hasField(RequestOptions, "method"));
+    try std.testing.expect(@hasField(RequestOptions, "json"));
+    try std.testing.expect(@hasField(RequestOptions, "multipart"));
+    try std.testing.expect(@hasField(RequestOptions, "cancel"));
+    try std.testing.expect(!@hasField(RequestOptions, "timeOutMs"));
+    try std.testing.expect(!@hasField(RequestOptions, "cancelFlag"));
 }

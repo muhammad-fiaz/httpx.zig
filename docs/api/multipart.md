@@ -41,11 +41,11 @@ defer client.deinit();
 
 var resp = try client.post("http://localhost:8080/upload", .{
     .multipart = .{
-        .fields = &.{
+        .fields = .{
             .{ .name = "description", .value = "large upload" },
             .{ .name = "environment", .value = "production" },
         },
-        .files = &.{
+        .files = .{
             .{ .name = "file", .filename = "data.bin", .data = bytes },
             // contentType auto-detected from filename extension when omitted
             .{ .name = "image", .filename = "photo.png", .data = png_bytes },
@@ -60,7 +60,7 @@ defer resp.deinit();
 ```zig
 var resp = try client.post("http://localhost:8080/ingest", .{
     .multipart = .{
-        .parts = &.{
+        .parts = .{
             .{ .name = "meta",   .data = json_meta, .contentType = "application/json" },
             .{ .name = "binary", .data = bin_data,  .filename = "out.bin" },
         },
@@ -106,10 +106,10 @@ Initialise once; `allocator` and `io` are stored internally.
 var encoder = try httpx.multipart.encoder.init(allocator, io, .{
     .subtype  = .formData, // default
     .boundary = null,      // auto-generated
-    .fields   = &.{
+    .fields   = .{
         .{ .name = "description", .value = "hello" },
     },
-    .files = &.{
+    .files = .{
         .{ .name = "data", .filename = "out.bin", .data = bytes },
     },
 });
@@ -148,13 +148,13 @@ try stream.finish();
 
 ---
 
-## Server-Side — `ctx.multipartForm`
+## Server-Side - `ctx.multipart`
 
 Inside a route handler parse an incoming multipart body:
 
 ```zig
 pub fn handleUpload(ctx: *httpx.Context) !httpx.Response {
-    var form = try ctx.multipartForm(.{
+    var form = try ctx.multipart(.{
         .maxMemoryBytes = 16 * 1024 * 1024, // optional — defaults to 32 MB
     });
     defer form.deinit();
@@ -233,8 +233,8 @@ while (offset < total_bytes.len) {
         .cancel  = &cancel,
         .headers = &.{ .{ .name = "Content-Range", .value = rangeHeader } },
         .multipart = .{
-            .fields = &.{ .{ .name = "part", .value = "1" } },
-            .files  = &.{ .{ .name = "chunk", .filename = "data.bin", .data = total_bytes[offset..end] } },
+            .fields = .{ .{ .name = "part", .value = "1" } },
+            .files  = .{ .{ .name = "chunk", .filename = "data.bin", .data = total_bytes[offset..end] } },
         },
     });
     defer resp.deinit();

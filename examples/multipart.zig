@@ -6,9 +6,11 @@ const std = @import("std");
 const httpx = @import("httpx");
 
 fn postHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
+    var form = try ctx.multipart(.{});
+    defer form.deinit();
     return .{
         .status = 200,
-        .body = try std.fmt.allocPrint(ctx.allocator, "{{\"received_bytes\":{d}}}", .{ctx.body.len}),
+        .body = try std.fmt.allocPrint(ctx.allocator, "{{\"received_bytes\":{d},\"fields\":{d}}}", .{ ctx.body.len, form.fields.len }),
         .contentType = "application/json",
     };
 }
@@ -35,25 +37,18 @@ pub fn main() !void {
     defer client.deinit();
 
     const fileData = "hello, world!";
-    const fields = [_]struct { name: []const u8, value: []const u8 }{
-        .{ .name = "note", .value = "greeting" },
-    };
-    const files = [_]struct {
-        name: []const u8,
-        filename: []const u8,
-        contentType: []const u8,
-        data: []const u8,
-    }{
-        .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
-    };
 
     var urlBuf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/post", .{port});
 
     var response = try client.post(url, .{
         .multipart = .{
-            .fields = &fields,
-            .files = &files,
+            .fields = .{
+                .{ .name = "note", .value = "greeting" },
+            },
+            .files = .{
+                .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
+            },
         },
     });
     defer response.deinit();

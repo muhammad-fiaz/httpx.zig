@@ -288,24 +288,28 @@ Omit `.logging.callback` (the default) for fully silent operation.
 
 ### `httpx.App` — Typed REST
 
-`App` wraps `Server` and registers typed REST endpoints with one object literal per
-route. Every route states its path, its handler, and its metadata; results are built
-with `httpx.Schema(T)` and the route feeds OpenAPI 3.1 automatically.
+`App` wraps `Server` and registers routes with the path as the first argument
+and one `.{}` options literal as the second.
+
+The handler's return type selects the mode automatically:
+
+- `!httpx.Schema(T)` → typed REST endpoint (JSON body decoding plus OpenAPI 3.1).
+- `!httpx.Response` → raw `HandlerFn` route with the same metadata fields.
 
 | Method | Description |
 |--------|-------------|
-| `app.get(.{ .path, .handler, ... })` | Typed GET |
-| `app.post(.{ ... })` | Typed POST — deserializes the JSON body into the handler's request type |
-| `app.put(.{ ... })` / `app.patch(.{ ... })` | Typed PUT / PATCH |
-| `app.delete(.{ ... })` | Typed DELETE |
-| `app.head(...)` / `app.options(...)` | Typed HEAD / OPTIONS |
-| `app.add(.METHOD, path, handler, opts)` | Raw `HandlerFn` route (no schema derivation) |
+| `app.get(path, .{ .handler, ... })` | GET |
+| `app.post(path, .{ .handler, ... })` | POST — typed handlers decode the JSON body |
+| `app.put(path, ...)` / `app.patch(path, ...)` | PUT / PATCH |
+| `app.delete(path, ...)` | DELETE |
+| `app.head(path, ...)` / `app.options(path, ...)` | HEAD / OPTIONS |
+| `app.add(.METHOD, path, .{ .handler, ... })` | Explicit method dispatch |
 
-Options are anonymous struct literals — all fields optional:
+A bare handler is also accepted: `app.get("/ping", ping)`. Options are anonymous
+struct literals — all fields are optional:
 
 ```zig
-try app.post(.{
-    .path = "/users",
+try app.post("/users", .{
     .handler = createUser,
     .operationId = "createUser",
     .summary = "Create a user",
@@ -317,8 +321,8 @@ try app.post(.{
     .names = .{ .user_name = "user-name" }, // JSON wire keys
 });
 
-// Raw handler route
-try app.add(.GET, "/health", healthCheck, .{ .summary = "Liveness" });
+// Raw handler route: same verb, no schema derivation.
+try app.get("/health", .{ .handler = healthCheck, .summary = "Liveness" });
 ```
 
 #### Results: `Schema(T).result(.{ ... })`
@@ -362,8 +366,7 @@ library restricts them to Zig identifier rules. Map Zig fields with `.names`:
 ```zig
 const names = .{ .user_name = "user-name", .context = "@context" };
 
-try app.post(.{
-    .path = "/users",
+try app.post("/users", .{
     .handler = createUser, // fn (ctx, struct { user_name: []const u8, context: []const u8 })
     .names = names,
 });

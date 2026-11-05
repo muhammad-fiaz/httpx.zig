@@ -19,8 +19,7 @@
 //!     });
 //! }
 //!
-//! try app.post(.{
-//!     .path = "/users",
+//! try app.post("/users", .{
 //!     .handler = createUser,
 //!     .summary = "Create a new user",
 //!     .tags = &.{"users"},
@@ -47,8 +46,7 @@
 //! ```zig
 //! const names = .{ .user_name = "user-name", .context = "@context" };
 //!
-//! try app.post(.{
-//!     .path = "/users",
+//! try app.post("/users", .{
 //!     .handler = createUser,
 //!     .names = names,
 //! });
@@ -292,15 +290,32 @@ pub const Rest = struct {
         const namesGiven = comptime isOptions and @hasField(ArgType, "names");
         const names = comptime if (namesGiven) arg.names else .{};
 
-        const endpointOpts: EndpointOptions = comptime blk: {
-            if (isBareFn) break :blk .{};
-            var out: EndpointOptions = .{};
+        const Parsed = struct {
+            endpoint: EndpointOptions = .{},
+            route: routerMod.RouteOptions = .{},
+        };
+        const parsedOptions: Parsed = comptime blk: {
+            var out: Parsed = .{};
+            if (isBareFn) break :blk out;
             for (@typeInfo(ArgType).@"struct".field_names) |fname| {
                 if (std.mem.eql(u8, fname, "handler") or std.mem.eql(u8, fname, "names")) continue;
-                if (@hasField(EndpointOptions, fname)) @field(out, fname) = @field(arg, fname);
+                if (std.mem.eql(u8, fname, "path")) {
+                    @compileError("REST: pass the route path as the second argument, not `.path`");
+                }
+                if (std.mem.eql(u8, fname, "meta")) {
+                    @compileError("REST: metadata is derived from the handler; use `.operationId`, `.summary`, `.tags`, … instead of `.meta`");
+                }
+                if (@hasField(EndpointOptions, fname)) {
+                    @field(out.endpoint, fname) = @field(arg, fname);
+                } else if (@hasField(routerMod.RouteOptions, fname)) {
+                    @field(out.route, fname) = @field(arg, fname);
+                } else {
+                    @compileError("unknown REST route option `." ++ fname ++ "`");
+                }
             }
             break :blk out;
         };
+        const endpointOpts = parsedOptions.endpoint;
 
         const fnInfo = @typeInfo(@TypeOf(handlerFn)).@"fn";
         comptime {
@@ -455,7 +470,9 @@ pub const Rest = struct {
             }
         };
 
-        try self.router.add(method, path, Wrapper.handle, .{ .meta = meta });
+        var routeOpts = parsedOptions.route;
+        routeOpts.meta = meta;
+        try self.router.add(method, path, Wrapper.handle, routeOpts);
     }
 
     /// Typed GET route.
@@ -624,6 +641,44 @@ test "typed REST endpoint: JSON body, Schema result, OpenAPI, key mapping" {
     };
     const deleted = router.dispatch(&ctxDelete);
     try testing.expectEqual(@as(u16, 204), deleted.status);
+}
+
+test "typed REST accepts dynamic JSON for arbitrary string keys" {
+    const testing = std.testing;
+    var router = Router.init(testing.allocator);
+    defer router.deinit();
+    var rest = Rest.init(&router);
+
+    const Handlers = struct {
+        fn echo(ctx: *Context, req: std.json.Value) !Schema(std.json.Value) {
+            _ = ctx;
+            // Keys are read exactly as received; no Zig identifier is required.
+            _ = req.object.get("user-name") orelse return Schema(std.json.Value).ok(req);
+            return Schema(std.json.Value).ok(req);
+        }
+    };
+    try rest.post("/dynamic", .{ .handler = Handlers.echo });
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ctx = Context{
+        .allocator = arena.allocator(),
+        .headers = &.{.{ .name = "Content-Type", .value = "application/json" }},
+        .body =
+        \\{"user-name":"Fiaz","user_name":"Fiaz","user.name":"Fiaz","user name":"Fiaz",
+        \\ "user@email":"fiaz@example.com","user/id":123,"123user":"Fiaz",
+        \\ "@context":"https://schema.org","$schema":"https://example.com/schema",
+        \\ "Content-Type":"application/json","X-API-Key":"secret","HTTP/2":true,
+        \\ "snake_case":true,"camelCase":true,"PascalCase":true}
+        ,
+        .path = "/dynamic",
+        .method = .POST,
+    };
+    const resp = router.dispatch(&ctx);
+    try testing.expectEqual(@as(u16, 200), resp.status);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "\"user-name\":\"Fiaz\"") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "\"@context\":\"https://schema.org\"") != null);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "\"user/id\":123") != null);
 }
 
 test "malformed JSON bodies produce a 400 JSON error envelope" {

@@ -65,9 +65,9 @@ var post_res = try custom_client.post("https://api.example.com/users", .{ .json 
 defer post_res.deinit();
 ```
 
-The client configuration is an idiomatic Zig struct passed to `Client.init`;
-omitted fields use standard defaults. It mirrors `Config` in
-`src/client/httpClient.zig`:
+The client configuration is an inline `.{}` literal passed to `Client.init`.
+There is no exported configuration type to import; every field is documented
+below and omitted fields use production-safe defaults:
 
 ```zig
 const io = std.Io.Threaded.global_single_threaded.io();
@@ -214,7 +214,7 @@ All methods are URL-first (`url`, then options):
 | `options(url, options)` | HTTP OPTIONS request |
 | `request(url, options)` | Generic request (method set via `options.method`) |
 | `requestStream(url, options)` | Streaming request returning `ResponseStream` (incremental on HTTP/1.1) |
-| `requestBuilder(method, url)` | Start fluent `RequestBuilder` for chained request construction |
+| `builder(method, url)` | Start a fluent `RequestBuilder` for chained request construction |
 | `download(url, options)` | Streaming file download with resume/verify (destination via `options.path`) |
 | `lookupFileInfo(url, options)` | Remote metadata without body download |
 | `updateFile(url, options)` | Atomic file update with rollback (target via `options.path`) |
@@ -239,7 +239,7 @@ The standalone `httpx.client.jar` keeps cookies across requests
 
 | Method | Description |
 |--------|-------------|
-| `cookieJar.init(allocator, io)` / `deinit()` | Lifecycle |
+| `jar.init(allocator, io)` / `deinit()` | Lifecycle |
 | `setFromHeader(setCookie, host)` | Store a `Set-Cookie` value |
 | `cookieHeader(host, path, secure, buf)` | Render the `Cookie` header (`secure` gates `Secure` cookies) |
 | `purgeExpired()` | Drop expired cookies |
@@ -361,13 +361,17 @@ The client assembles the body and sets the `Content-Type` header
 ```zig
 var resp = try client.post("https://example.com/upload", .{
     .multipart = .{
-        .fields = &.{.{ .name = "description", .value = "upload" }},
-        .files = &.{.{
-            .name = "upload",
-            .filename = "data.bin",
-            .contentType = "application/octet-stream",
-            .data = chunk_slice,
-        }},
+        .fields = .{
+            .{ .name = "description", .value = "upload" },
+        },
+        .files = .{
+            .{
+                .name = "upload",
+                .filename = "data.bin",
+                .contentType = "application/octet-stream",
+                .data = chunk_slice,
+            },
+        },
     },
 });
 defer resp.deinit();

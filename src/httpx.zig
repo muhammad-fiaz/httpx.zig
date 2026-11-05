@@ -443,14 +443,12 @@ pub const client = struct {
     pub const header = requestBuilderMod.Header;
     // Body & streaming payload sources: httpx.client.body, httpx.client.stream
     pub const body = requestBuilderMod.BodySource;
-    pub const bodySource = body;
     pub const bodyKind = requestBuilderMod.BodyKind;
     pub const stream = requestBuilderMod.ResponseStream;
     pub const sessionPolicyFingerprint = requestBuilderMod.sessionPolicyFingerprint;
 
     // Connection pool: httpx.client.pool
     pub const pool = poolMod.Pool;
-    pub const connection = pool;
 
     // Cookie jar: httpx.client.jar, httpx.client.cookie
     pub const jar = cookieMod.Jar;
@@ -475,24 +473,25 @@ pub const client = struct {
     pub const parseChecksumFile = downloadMod.parseChecksumFile;
     pub const lookupFileInfo = downloadMod.lookupFileInfo;
     pub const updateFile = downloadMod.updateFile;
-
-    // Canonical backward aliases
-    pub const requestBuilder = builder;
-    pub const requestPayload = request;
-    pub const connectionPool = pool;
-    pub const cookieJar = jar;
-    pub const responseStream = stream;
-    pub const workerPool = workers;
 };
 
-test "client facade keeps internal option types private" {
+test "client facade keeps configuration and request option types private" {
     try std.testing.expect(!@hasDecl(client, "Config"));
+    try std.testing.expect(!@hasDecl(client, "RequestOptions"));
+    try std.testing.expect(!@hasDecl(client, "MultipartOptions"));
     try std.testing.expect(!@hasDecl(client, "Protocols"));
     try std.testing.expect(!@hasDecl(client, "Http3Options"));
-    try std.testing.expect(!@hasDecl(client, "RequestOptions"));
     try std.testing.expect(!@hasDecl(client, "BatchOptions"));
     try std.testing.expect(!@hasDecl(client, "OnlineOptions"));
     try std.testing.expect(!@hasDecl(client, "DownloadOptions"));
+    try std.testing.expect(!@hasDecl(client, "requestBuilder"));
+    try std.testing.expect(!@hasDecl(client, "requestPayload"));
+    try std.testing.expect(!@hasDecl(client, "connectionPool"));
+    try std.testing.expect(!@hasDecl(client, "cookieJar"));
+    try std.testing.expect(!@hasDecl(client, "responseStream"));
+    try std.testing.expect(!@hasDecl(client, "workerPool"));
+    try std.testing.expect(!@hasDecl(client, "bodySource"));
+    try std.testing.expect(!@hasDecl(client, "connection"));
 }
 
 // Parsing & inspection subsystem

@@ -128,11 +128,25 @@ pub const EarlyDataOptions = struct {
     allowUnsafeMethods: bool = false,
 };
 
-/// Per-request socket I/O timeout (milliseconds).
+/// A single HTTP header name/value pair.
 pub const Header = struct { name: []const u8, value: []const u8 };
 
-pub const BodyKind = enum { none, raw, json, form };
+/// How a `Request` body is interpreted.
+pub const BodyKind = enum {
+    /// No body.
+    none,
+    /// Raw bytes, sent verbatim.
+    raw,
+    /// Bytes already encoded as JSON.
+    json,
+    /// Bytes already encoded as `application/x-www-form-urlencoded`.
+    form,
+};
 
+/// Low-level single request description used by `httpx.request`.
+///
+/// High-level code normally uses `httpx.Client`, which fills in the pool,
+/// DNS cache, TLS session cache, and defaults before calling the engine.
 pub const Request = struct {
     method: Method = .GET,
     url: []const u8,
@@ -142,6 +156,7 @@ pub const Request = struct {
     query: []const Header = &.{},
     /// Explicit Content-Type header value (e.g. "application/json", "text/plain").
     contentType: ?[]const u8 = null,
+    /// How `body` is interpreted when no `bodySource` is set.
     bodyKind: BodyKind = .none,
     /// Raw bytes for any kind; for `form` this is "k=v&k2=v2" already encoded.
     body: []const u8 = "",
@@ -184,15 +199,18 @@ pub const Request = struct {
     /// writing, reading, and streaming loops.
     cancel: ?*const std.atomic.Value(bool) = null,
 
+    /// Convenience constructor for a `POST` with a raw text body.
     pub fn text(url: []const u8, bodyText: []const u8) Request {
         return .{ .url = url, .method = .POST, .bodyKind = .raw, .body = bodyText };
     }
 
+    /// Convenience constructor for a request with a streaming body source.
     pub fn stream(url: []const u8, method: Method, source: BodySource) Request {
         return .{ .url = url, .method = method, .bodySource = source };
     }
 };
 
+/// Complete buffered response owned by the client allocator.
 pub const Response = struct {
     allocator: Allocator,
     status: u16,
@@ -200,6 +218,7 @@ pub const Response = struct {
     headers: []Header,
     body: []u8,
 
+    /// Releases the headers and body owned by this response.
     pub fn deinit(self: *Response) void {
         for (self.headers) |h| {
             self.allocator.free(h.name);
@@ -209,6 +228,7 @@ pub const Response = struct {
         self.allocator.free(self.body);
     }
 
+    /// Case-insensitive header lookup; returns the first match.
     pub fn header(self: *const Response, name: []const u8) ?[]const u8 {
         for (self.headers) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
@@ -300,6 +320,7 @@ pub const ResponseStream = struct {
     headers: []Header,
     body: BodySource,
 
+    /// Closes the body source and releases the response headers.
     pub fn deinit(self: *ResponseStream) void {
         self.body.close();
         for (self.headers) |h| {
@@ -309,6 +330,7 @@ pub const ResponseStream = struct {
         self.allocator.free(self.headers);
     }
 
+    /// Case-insensitive header lookup; returns the first match.
     pub fn header(self: *const ResponseStream, name: []const u8) ?[]const u8 {
         for (self.headers) |h| {
             if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
@@ -2828,159 +2850,41 @@ fn removeDotSegments(a: Allocator, path: []const u8) ![]u8 {
 // `Request.bodyKind`/`Request.body` or the inferred `.json` operation field — no postJson/putJson/patchJson
 // explosion.
 
+/// One-shot `GET` without a client instance.
 pub fn get(a: Allocator, io: std.Io, url: []const u8) Error!Response {
     return request(a, io, .{ .method = .GET, .url = url });
 }
 
+/// One-shot `POST` with a raw body and explicit content type.
 pub fn post(a: Allocator, io: std.Io, url: []const u8, body: []const u8, contentType: []const u8) Error!Response {
     return request(a, io, .{ .method = .POST, .url = url, .bodyKind = .raw, .body = body, .headers = &.{.{ .name = "Content-Type", .value = contentType }} });
 }
 
+/// One-shot `PUT` with a raw body and explicit content type.
 pub fn put(a: Allocator, io: std.Io, url: []const u8, body: []const u8, contentType: []const u8) Error!Response {
     return request(a, io, .{ .method = .PUT, .url = url, .bodyKind = .raw, .body = body, .headers = &.{.{ .name = "Content-Type", .value = contentType }} });
 }
 
+/// One-shot `PATCH` with a raw body and explicit content type.
 pub fn patch(a: Allocator, io: std.Io, url: []const u8, body: []const u8, contentType: []const u8) Error!Response {
     return request(a, io, .{ .method = .PATCH, .url = url, .bodyKind = .raw, .body = body, .headers = &.{.{ .name = "Content-Type", .value = contentType }} });
 }
 
+/// One-shot `DELETE`.
 pub fn delete(a: Allocator, io: std.Io, url: []const u8) Error!Response {
     return request(a, io, .{ .method = .DELETE, .url = url });
 }
 
+/// One-shot `HEAD`.
 pub fn head(a: Allocator, io: std.Io, url: []const u8) Error!Response {
     return request(a, io, .{ .method = .HEAD, .url = url });
 }
 
+/// One-shot `OPTIONS`.
 pub fn options(a: Allocator, io: std.Io, url: []const u8) Error!Response {
     return request(a, io, .{ .method = .OPTIONS, .url = url });
 }
 
-// Multipart file upload (buffered; files up to maxBufferedUpload)
-
-/// Largest file buffered whole by `postMultipartFile`.
-pub const maxBufferedUpload: usize = 16 * 1024 * 1024;
-
-/// Reads a file using direct OS-level I/O (bypasses std.Io.Threaded whose
-/// internal file-op dispatch can deadlock when interleaved with socket ops
-/// from the same thread).
-fn readFileDirect(a: Allocator, path: []const u8) ![]u8 {
-    if (@import("builtin").os.tag == .windows) {
-        return readFileWindows(a, path);
-    }
-    return readFilePosix(a, path);
-}
-
-fn readFileWindows(a: Allocator, path: []const u8) ![]u8 {
-    const win = std.os.windows;
-    var wideBuf: [win.PATH_MAX_WIDE]u16 = undefined;
-    const wideLen = try std.unicode.utf8ToUtf16Le(&wideBuf, path);
-    const wide = wideBuf[0..wideLen];
-
-    const handle = win.CreateFileW(
-        wide.ptr,
-        win.GENERIC_READ,
-        win.FILE_SHARE_READ,
-        null,
-        win.OPEN_EXISTING,
-        win.FILE_ATTRIBUTE_NORMAL,
-        null,
-    ) catch |e| switch (e) {
-        error.FileNotFound => return error.FileNotFound,
-        else => return error.ReadFailed,
-    };
-    defer win.CloseHandle(handle);
-
-    var sizeLg: win.LARGE_INTEGER = undefined;
-    if (win.kernel32.GetFileSizeEx(handle, &sizeLg) == 0) return error.ReadFailed;
-    const fsize: usize = @intCast(sizeLg.Value);
-    if (fsize > maxBufferedUpload) return error.FileTooLarge;
-
-    const buf = try a.alloc(u8, fsize);
-    errdefer a.free(buf);
-
-    var total: usize = 0;
-    while (total < fsize) {
-        var bytesRead: win.DWORD = 0;
-        const ok = win.ReadFile(handle, buf[total..].ptr, @intCast(@min(fsize - total, 0xFFFF_FFFF)), &bytesRead, null);
-        if (ok == 0) return error.ReadFailed;
-        if (bytesRead == 0) break;
-        total += bytesRead;
-    }
-    if (total != fsize) return error.ReadFailed;
-    return buf;
-}
-
-fn readFilePosix(a: Allocator, path: []const u8) ![]u8 {
-    const posixSys = std.posix;
-    const fd = posixSys.open(path, .{ .ACCMODE = .RDONLY }, 0) catch |e| switch (e) {
-        error.FileNotFound => return error.FileNotFound,
-        else => return error.ReadFailed,
-    };
-    defer posixSys.close(fd);
-    const st = posixSys.fstat(fd) catch return error.ReadFailed;
-    const fsize: usize = @intCast(st.size);
-    if (fsize > maxBufferedUpload) return error.FileTooLarge;
-    const buf = try a.alloc(u8, fsize);
-    errdefer a.free(buf);
-    var total: usize = 0;
-    while (total < fsize) {
-        const n = posixSys.read(fd, buf[total..]) catch return error.ReadFailed;
-        if (n == 0) break;
-        total += n;
-    }
-    if (total != fsize) return error.ReadFailed;
-    return buf;
-}
-
-/// Uploads `filePath` as multipart/form-data via POST to `url`.
-pub fn postMultipartFile(
-    a: Allocator,
-    io: std.Io,
-    url: []const u8,
-    fieldName: []const u8,
-    filePath: []const u8,
-    boundary: []const u8,
-) Error!Response {
-    const fileData = readFileDirect(a, filePath) catch |e| switch (e) {
-        error.FileNotFound => return Error.FileNotFound,
-        error.FileTooLarge => return Error.FileTooLarge,
-        else => return Error.ReadFailed,
-    };
-    defer a.free(fileData);
-
-    const mpEncoder = @import("../web/multipart/multipartEncoder.zig");
-
-    // Content-Type header value.
-    var ctBuf: [128]u8 = undefined;
-    const ct = mpEncoder.contentType(&ctBuf, boundary);
-
-    // Filename from path tail.
-    const fname = if (std.mem.lastIndexOfScalar(u8, filePath, '/')) |ix|
-        filePath[ix + 1 ..]
-    else if (std.mem.lastIndexOfScalar(u8, filePath, '\\')) |bx|
-        filePath[bx + 1 ..]
-    else
-        filePath;
-
-    var bodyBuf: std.Io.Writer.Allocating = .init(a);
-    defer bodyBuf.deinit();
-    const parts = [_]mpEncoder.Part{
-        .{ .name = fieldName, .filename = fname, .contentType = mimeMod.octetStream, .data = fileData },
-    };
-    mpEncoder.encodeParts(&bodyBuf.writer, boundary, &parts) catch |err| switch (err) {
-        error.OutOfMemory => return Error.OutOfMemory,
-        else => return Error.WriteFailed,
-    };
-
-    return request(a, io, .{
-        .method = .POST,
-        .url = url,
-        .bodyKind = .raw,
-        .body = bodyBuf.written(),
-        .headers = &.{.{ .name = "Content-Type", .value = ct }},
-    });
-}
 // Tests
 
 const tTcp = tcp;

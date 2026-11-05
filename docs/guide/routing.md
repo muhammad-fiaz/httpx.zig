@@ -170,20 +170,21 @@ Shared across code-based routing, file-based routing, and website serving.
 
 ## Typed REST Endpoints with `App`
 
-`httpx.App` registers typed endpoints with a single object literal per route and
-returns `httpx.Schema(T)` results:
+`httpx.App` registers routes with the path first and an optional `.{}` options
+literal second. Typed handlers return `httpx.Schema(T)`; raw handlers return
+`httpx.Response` and use the same verbs and metadata fields:
 
 ```zig
 var app = try httpx.App.init(allocator, io, .{ .port = 8080 });
 defer app.deinit();
 
-try app.get(.{ .path = "/users/{id:int}", .handler = getUser, .summary = "Get user by ID", .tags = &.{"users"} });
-try app.post(.{ .path = "/users", .handler = createUser, .summary = "Create user", .tags = &.{"users"} });
-try app.put(.{ .path = "/users/{id:int}", .handler = updateUser, .names = names }); // renamed JSON keys
-try app.delete(.{ .path = "/users/{id:int}", .handler = deleteUser });
+try app.get("/users/{id:int}", .{ .handler = getUser, .summary = "Get user by ID", .tags = &.{"users"} });
+try app.post("/users", .{ .handler = createUser, .summary = "Create user", .tags = &.{"users"} });
+try app.put("/users/{id:int}", .{ .handler = updateUser, .names = names }); // renamed JSON keys
+try app.delete("/users/{id:int}", .{ .handler = deleteUser });
 
-// raw handler: explicit method enum, no schema derivation
-try app.add(.GET, "/health", healthCheck, .{ .summary = "Liveness" });
+// Raw handler: same lowercase verbs, no schema derivation.
+try app.get("/health", .{ .handler = healthCheck, .summary = "Liveness" });
 try app.use(httpx.middleware.cors);
 
 try app.listen();

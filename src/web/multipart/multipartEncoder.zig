@@ -88,28 +88,132 @@ pub const File = struct {
 pub const EncoderOptions = struct {
     subtype: Subtype = .formData,
     boundary: ?[]const u8 = null,
+    /// Generic parts with full control. Either form works at the client:
+    /// `.parts = .{ .{ .name = "meta", .data = json } }` (tuple) or a slice.
+    parts: []const Part = &.{},
     fields: []const FieldValue = &.{},
     files: []const File = &.{},
 };
 
-/// Unified allocator and I/O backed multipart encoder. It borrows the input
-/// field and file slices until `encodeAlloc` completes.
+fn toSubtype(value: anytype) Subtype {
+    if (@TypeOf(value) == Subtype) return value;
+    if (@TypeOf(value) == @TypeOf(null)) return .formData;
+    if (@typeInfo(@TypeOf(value)) == .enum_literal) {
+        const tag = @tagName(value);
+        if (std.mem.eql(u8, tag, "mixed")) return .mixed;
+        if (std.mem.eql(u8, tag, "related")) return .related;
+        if (std.mem.eql(u8, tag, "alternative")) return .alternative;
+        if (std.mem.eql(u8, tag, "byteranges")) return .byteranges;
+        return .formData;
+    }
+    if (@hasField(@TypeOf(value), "custom")) return .{ .custom = value.custom };
+    return .formData;
+}
+
+fn unwrapOptional(comptime T: type, value: T) ?[]const u8 {
+    if (@typeInfo(T) == .optional) return value;
+    return value;
+}
+
+fn partFrom(comptime P: type, p: P) Part {
+    const filename: ?[]const u8 = if (@hasField(P, "filename")) unwrapOptional(@TypeOf(p.filename), p.filename) else null;
+    const content_type: []const u8 = if (@hasField(P, "contentType")) blk: {
+        const raw = unwrapOptional(@TypeOf(p.contentType), p.contentType);
+        break :blk raw orelse if (filename) |f| mimeMod.fromPath(f) else mimeMod.octetStream;
+    } else if (filename) |f| mimeMod.fromPath(f) else mimeMod.octetStream;
+    return .{
+        .name = if (@hasField(P, "name")) p.name else "",
+        .filename = filename,
+        .filenameStar = if (@hasField(P, "filenameStar")) p.filenameStar else null,
+        .dispositionType = if (@hasField(P, "dispositionType")) p.dispositionType else "form-data",
+        .contentType = content_type,
+        .contentTransferEncoding = if (@hasField(P, "contentTransferEncoding")) p.contentTransferEncoding else null,
+        .data = if (@hasField(P, "data")) p.data else if (@hasField(P, "value")) p.value else "",
+        .headers = if (@hasField(P, "headers")) p.headers else null,
+    };
+}
+
+fn fieldPartFrom(comptime F: type, field: F) Part {
+    return .{
+        .name = field.name,
+        .data = if (@hasField(F, "value")) field.value else field.data,
+        .contentType = mimeMod.textPlainUtf8,
+    };
+}
+
+fn filePartFrom(comptime F: type, file: F) Part {
+    return partFrom(F, file);
+}
+
+const ItemKind = enum { part, field, file };
+
+/// Appends tuple or slice items, normalizing each to a `Part`. Tuples are
+/// unrolled at compile time so `.parts = .{ ... }` and `&slice` both work.
+fn appendItems(allocator: Allocator, list: *std.ArrayList(Part), items: anytype, comptime kind: ItemKind) EncodeError!void {
+    const Info = @typeInfo(@TypeOf(items));
+    if (Info == .@"struct" and Info.@"struct".is_tuple) {
+        inline for (items) |item| {
+            try list.append(allocator, switch (kind) {
+                .part => partFrom(@TypeOf(item), item),
+                .field => fieldPartFrom(@TypeOf(item), item),
+                .file => filePartFrom(@TypeOf(item), item),
+            });
+        }
+    } else {
+        for (items) |item| {
+            try list.append(allocator, switch (kind) {
+                .part => partFrom(@TypeOf(item), item),
+                .field => fieldPartFrom(@TypeOf(item), item),
+                .file => filePartFrom(@TypeOf(item), item),
+            });
+        }
+    }
+}
+
+/// Allocator and I/O backed multipart encoder. The allocator and `io` come
+/// from the client/owner that created it, so callers never re-pass them.
+/// Input parts may be slices or `.{}` tuples; the encoder owns the normalized
+/// list until `deinit`.
 pub const Encoder = struct {
     allocator: Allocator,
     io: std.Io,
     options: EncoderOptions,
+    ownedParts: std.ArrayList(Part) = .empty,
     generatedBoundary: [32]u8 = undefined,
     hasGeneratedBoundary: bool = false,
 
-    pub fn init(allocator: Allocator, io: std.Io, options: EncoderOptions) EncodeError!Encoder {
-        if (!options.subtype.isValid()) return EncodeError.InvalidSubtype;
-        if (options.boundary) |boundary_value| {
+    pub fn init(allocator: Allocator, io: std.Io, options: anytype) EncodeError!Encoder {
+        const OptT = @TypeOf(options);
+        if (@typeInfo(OptT) != .@"struct") @compileError("multipart encoder options must be a struct literal");
+
+        var self = Encoder{ .allocator = allocator, .io = io, .options = .{} };
+        errdefer self.ownedParts.deinit(allocator);
+
+        if (@hasField(OptT, "subtype")) self.options.subtype = toSubtype(options.subtype);
+        if (@hasField(OptT, "boundary")) self.options.boundary = unwrapOptional(@TypeOf(options.boundary), options.boundary);
+
+        if (@hasField(OptT, "parts")) try appendItems(allocator, &self.ownedParts, options.parts, .part);
+        if (@hasField(OptT, "fields")) try appendItems(allocator, &self.ownedParts, options.fields, .field);
+        if (@hasField(OptT, "files")) {
+            try appendItems(allocator, &self.ownedParts, options.files, .file);
+        } else if (@hasField(OptT, "file")) {
+            try self.ownedParts.append(allocator, filePartFrom(@TypeOf(options.file), options.file));
+        } else if (@hasField(OptT, "name") and (@hasField(OptT, "data") or @hasField(OptT, "value"))) {
+            // Direct single part: `.{ .name = "upload", .filename = "a.txt", .data = ... }`.
+            try self.ownedParts.append(allocator, partFrom(OptT, options));
+        }
+        self.options.parts = self.ownedParts.items;
+
+        if (!self.options.subtype.isValid()) return EncodeError.InvalidSubtype;
+        if (self.options.boundary) |boundary_value| {
             if (!common.validateBoundary(boundary_value)) return EncodeError.InvalidBoundary;
         }
-        return .{ .allocator = allocator, .io = io, .options = options };
+        return self;
     }
 
-    pub fn deinit(_: *Encoder) void {}
+    pub fn deinit(self: *Encoder) void {
+        self.ownedParts.deinit(self.allocator);
+    }
 
     pub fn boundary(self: *Encoder) []const u8 {
         if (self.options.boundary) |value| return value;
@@ -123,37 +227,13 @@ pub const Encoder = struct {
     }
 
     pub fn encodeAlloc(self: *Encoder) EncodeError![]u8 {
-        var parts: std.ArrayList(Part) = .empty;
-        defer parts.deinit(self.allocator);
-        for (self.options.fields) |field| {
-            try parts.append(self.allocator, .{
-                .name = field.name,
-                .data = field.value,
-                .contentType = mimeMod.textPlainUtf8,
-            });
-        }
-        for (self.options.files) |file| {
-            try parts.append(self.allocator, .{
-                .name = file.name,
-                .filename = file.filename,
-                .contentType = file.contentType,
-                .data = file.data,
-                .headers = file.headers,
-            });
-        }
-        return self.encodePartsAlloc(parts.items);
-    }
-
-    /// Encodes caller-built parts with this encoder's boundary and allocator.
-    /// Higher-level APIs can normalize their input while sharing this encoder.
-    pub fn encodePartsAlloc(self: *Encoder, parts: []const Part) EncodeError![]u8 {
-        return encodeAllocParts(self.allocator, self.boundary(), parts);
+        return encodeAllocParts(self.allocator, self.boundary(), self.options.parts);
     }
 };
 
 /// Constructs the high-level multipart encoder used by direct client options
 /// and explicit streaming callers.
-pub fn init(allocator: Allocator, io: std.Io, options: EncoderOptions) EncodeError!Encoder {
+pub fn init(allocator: Allocator, io: std.Io, options: anytype) EncodeError!Encoder {
     return Encoder.init(allocator, io, options);
 }
 
@@ -305,7 +385,7 @@ pub fn writeFinalBoundary(w: anytype, boundary: []const u8) EncodeError!void {
     w.writeAll("--\r\n") catch return EncodeError.WriteFailed;
 }
 
-pub fn encodeParts(w: anytype, boundary: []const u8, parts: []const Part) EncodeError!void {
+fn encodeParts(w: anytype, boundary: []const u8, parts: []const Part) EncodeError!void {
     if (!common.validateBoundary(boundary)) return EncodeError.InvalidBoundary;
     for (parts) |part| {
         try validatePart(part);
@@ -319,7 +399,7 @@ pub fn encodeParts(w: anytype, boundary: []const u8, parts: []const Part) Encode
     try writeFinalBoundary(w, boundary);
 }
 
-pub fn encodeAllocParts(allocator: Allocator, boundary: []const u8, parts: []const Part) EncodeError![]u8 {
+fn encodeAllocParts(allocator: Allocator, boundary: []const u8, parts: []const Part) EncodeError![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     try encodeParts(&out.writer, boundary, parts);

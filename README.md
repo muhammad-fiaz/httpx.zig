@@ -412,6 +412,71 @@ pub fn main() !void {
 }
 ```
 
+## API Conventions
+
+All client configuration and per-request behavior lives in `.{}` literals
+passed directly to the API. There are no exported `Config`, `RequestOptions`,
+or `MultipartOptions` types to import, and unknown option names are compile
+errors. Nested configuration uses the same literal form
+(`.{ .pool = .{ ... }, .protocols = .{ .http3 = .{ ... } } }`).
+
+```zig
+var client = httpx.Client.init(allocator, io, .{
+    .timeoutMs = 10_000,
+    .followRedirects = true,
+    .pool = .{ .maxConnections = 64, .maxPerHost = 16 },
+    .dnsCache = .{ .enable = true, .ttlMs = 60_000 },
+});
+defer client.deinit();
+
+var res = try client.post("https://example.com/upload", .{
+    .multipart = .{
+        .fields = .{
+            .{ .name = "description", .value = "avatar" },
+        },
+        .files = .{
+            .{ .name = "file", .filename = "avatar.png", .data = png_bytes },
+        },
+    },
+});
+defer res.deinit();
+```
+
+Server routes use lowercase verbs, a positional path, and one options literal.
+The handler's return type selects typed REST (`!httpx.Schema(T)`) or a raw
+`!httpx.Response` route automatically:
+
+```zig
+var app = try httpx.App.init(allocator, io, .{ .port = 8080 });
+defer app.deinit();
+
+try app.post("/users", .{
+    .handler = createUser,
+    .summary = "Create a user",
+    .tags = &.{"users"},
+});
+
+try app.get("/users/{id:int}", .{ .handler = getUser });
+try app.get("/health", .{ .handler = healthCheck, .summary = "Liveness" });
+try app.listen();
+```
+
+REST and GraphQL JSON accepts arbitrary string keys. Use a `.names` rename map
+for typed structs, or `std.json.Value` / `httpx.json.Object` for fully dynamic
+objects:
+
+```zig
+const names = .{ .user_name = "user-name", .context = "@context" };
+try app.post("/users", .{ .handler = createUser, .names = names });
+
+// Dynamic JSON: keys such as "user-name", "user@email", "123user", and
+// "Content-Type" are preserved exactly as received.
+fn echo(ctx: *httpx.Context, body: std.json.Value) !httpx.Schema(std.json.Value) {
+    _ = ctx;
+    return httpx.Schema(std.json.Value).ok(body);
+}
+```
+
 ## Performance
 
 <details>

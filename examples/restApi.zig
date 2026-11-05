@@ -2,11 +2,11 @@
 //!
 //! Demonstrates the whole explicit surface:
 //!
-//! * object/verb registration — `app.post(.{ .path, .handler, … })`
+//! * lowercase verb registration — `app.post("/users", .{ .handler, … })`
 //! * `httpx.Schema(T).result(.{ .status, .body })` responses
 //! * Single-document JSON media types on input (standard and any valid `+json` type)
 //! * JSON keys that are not valid Zig identifiers via a `.names` map
-//! * raw `HandlerFn` routes through `app.add(.METHOD, …)`
+//! * raw `HandlerFn` routes through the same lowercase verbs
 //! * Swagger UI / ReDoc / Scalar / OpenAPI 3.1 output
 
 const std = @import("std");
@@ -102,24 +102,21 @@ pub fn main() !void {
     });
     defer app.deinit();
 
-    try app.post(.{
-        .path = "/users",
+    try app.post("/users", .{
         .handler = createUser,
         .operationId = "createUser",
         .summary = "Create a new user",
         .tags = &.{"users"},
     });
 
-    try app.get(.{
-        .path = "/users/{id:int}",
+    try app.get("/users/{id:int}", .{
         .handler = getUser,
         .operationId = "getUser",
         .summary = "Retrieve a user by ID",
         .tags = &.{"users"},
     });
 
-    try app.put(.{
-        .path = "/users/{id:int}",
+    try app.put("/users/{id:int}", .{
         .handler = updateUser,
         .operationId = "updateUser",
         .summary = "Update a user (wire keys: user-name, @contact)",
@@ -127,24 +124,26 @@ pub fn main() !void {
         .names = wireNames,
     });
 
-    try app.delete(.{
-        .path = "/users/{id:int}",
+    try app.delete("/users/{id:int}", .{
         .handler = deleteUser,
         .operationId = "deleteUser",
         .summary = "Delete a user",
         .tags = &.{"users"},
     });
 
-    try app.get(.{
-        .path = "/ping",
+    try app.get("/ping", .{
         .handler = ping,
         .operationId = "ping",
         .summary = "Service health ping",
         .tags = &.{"system"},
     });
 
-    // Raw handler route: explicit method, no typed schema derivation.
-    try app.add(.GET, "/raw/health", rawHealth, .{ .summary = "Raw handler route", .tags = &.{"system"} });
+    // Raw handler route: same lowercase verb, no typed schema derivation.
+    try app.get("/raw/health", .{
+        .handler = rawHealth,
+        .summary = "Raw handler route",
+        .tags = &.{"system"},
+    });
 
     try app.docs(.{
         .title = "HTTPX Typed REST API",

@@ -1,26 +1,28 @@
 //! Application facade: one object that owns the server, the router, typed REST
 //! registration, and the documentation mounts.
 //!
-//! The route surface is object/verb based and fully explicit — every route
-//! states its path, its handler, and its metadata. Nothing is inferred from a
-//! string verb and nothing is defaulted behind the caller's back:
+//! The route surface uses lowercase HTTP verbs, a positional path, and one
+//! explicit `.{}` options literal. The handler's return type selects the mode
+//! at compile time: `!httpx.Schema(T)` is a typed REST endpoint, while
+//! `!httpx.Response` is a raw route. There is no separate capitalized API.
 //!
 //! ```zig
 //! var app = try httpx.App.init(allocator, io, .{ .host = "127.0.0.1", .port = 8080 });
 //! defer app.deinit();
 //!
-//! try app.post(.{
-//!     .path = "/users",
+//! try app.post("/users", .{
 //!     .handler = createUser,
 //!     .summary = "Create a user",
 //!     .tags = &.{"users"},
 //! });
 //!
-//! try app.get(.{
-//!     .path = "/users/{id:int}",
+//! try app.get("/users/{id:int}", .{
 //!     .handler = getUser,
 //!     .operationId = "getUser",
 //! });
+//!
+//! // A bare handler is also valid.
+//! try app.get("/ping", ping);
 //!
 //! try app.docs(.{
 //!     .title = "Users API",
@@ -32,7 +34,7 @@
 //! try app.listen();
 //! ```
 //!
-//! Handlers return `httpx.Schema(T)`:
+//! Typed handlers return `httpx.Schema(T)`:
 //!
 //! ```zig
 //! fn getUser(ctx: *httpx.Context) !httpx.Schema(User) {
@@ -41,10 +43,10 @@
 //! }
 //! ```
 //!
-//! Raw `HandlerFn` routes keep their place too, with the explicit method enum:
+//! Raw `HandlerFn` routes use the same lowercase verb:
 //!
 //! ```zig
-//! try app.add(.GET, "/health", healthCheck, .{ .summary = "Liveness probe" });
+//! try app.get("/health", .{ .handler = healthCheck, .summary = "Liveness probe" });
 //! ```
 
 const std = @import("std");
@@ -86,6 +88,7 @@ pub const App = struct {
         };
     }
 
+    /// Unmounts documentation and releases the underlying server.
     pub fn deinit(self: *App) void {
         docsMod.unmount();
         self.server.deinit();
@@ -96,78 +99,91 @@ pub const App = struct {
         return restMod.Rest.init(&self.server.router);
     }
 
+    /// Borrowed pointer to the owned server.
     pub fn getServer(self: *App) *serverMod.Server {
         return &self.server;
     }
 
+    /// Borrowed pointer to the server router.
     pub fn getRouter(self: *App) *routerMod.Router {
         return &self.server.router;
     }
 
-    /// Registers a raw `HandlerFn` route with an explicit method and metadata.
+    /// Registers a route for an explicit method.
+    ///
+    /// Both forms are accepted and type-checked at compile time:
     ///
     /// ```zig
-    /// try app.add(.GET, "/health", healthCheck, .{ .summary = "Liveness" });
+    /// try app.add(.GET, "/health", healthCheck);
+    /// try app.add(.GET, "/health", .{ .handler = healthCheck, .summary = "Liveness" });
     /// ```
+    ///
+    /// A handler returning `!httpx.Schema(T)` becomes a typed REST endpoint
+    /// (JSON body handling plus OpenAPI derived from `T`). A handler returning
+    /// `!httpx.Response` stays a raw route and uses the same metadata fields.
     pub fn add(
         self: *App,
         comptime method: Method,
         path: []const u8,
-        handler: routerMod.HandlerFn,
-        comptime opts: anytype,
+        comptime arg: anytype,
     ) !void {
-        try self.server.router.add(method, path, handler, routeOptions(opts));
+        try self.register(method, path, arg);
     }
 
-    /// Shared object/verb registration: `arg` must carry `.path` and `.handler`.
-    fn route(self: *App, comptime method: Method, comptime arg: anytype) !void {
+    /// Registers a GET route. See [`add`] for the two accepted forms.
+    pub fn get(self: *App, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.GET, path, arg);
+    }
+
+    /// Registers a POST route. See [`add`] for the two accepted forms.
+    pub fn post(self: *App, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.POST, path, arg);
+    }
+
+    /// Registers a PUT route. See [`add`] for the two accepted forms.
+    pub fn put(self: *App, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.PUT, path, arg);
+    }
+
+    /// Registers a PATCH route. See [`add`] for the two accepted forms.
+    pub fn patch(self: *App, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.PATCH, path, arg);
+    }
+
+    /// Registers a DELETE route. See [`add`] for the two accepted forms.
+    pub fn delete(self: *App, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.DELETE, path, arg);
+    }
+
+    /// Registers a HEAD route. See [`add`] for the two accepted forms.
+    pub fn head(self: *App, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.HEAD, path, arg);
+    }
+
+    /// Registers an OPTIONS route. See [`add`] for the two accepted forms.
+    pub fn options(self: *App, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.OPTIONS, path, arg);
+    }
+
+    /// Shared typed/raw dispatch. The handler's return type decides which
+    /// registration path is used; there is no separate capitalized API.
+    fn register(self: *App, comptime method: Method, path: []const u8, comptime arg: anytype) !void {
         const ArgType = @TypeOf(arg);
-        if (@typeInfo(ArgType) != .@"struct") {
-            @compileError("route options must be a struct literal with `.path` and `.handler`");
+        const argInfo = @typeInfo(ArgType);
+        const isBareFn = argInfo == .@"fn" or
+            (argInfo == .pointer and @typeInfo(argInfo.pointer.child) == .@"fn");
+        const isOptions = argInfo == .@"struct" and @hasField(ArgType, "handler");
+        if (comptime !isBareFn and !isOptions) {
+            @compileError("route registration expects a handler function or a struct literal with `.handler`");
         }
-        if (!@hasField(ArgType, "path")) {
-            @compileError("route options are missing `.path`");
+
+        const handler = comptime if (isBareFn) arg else arg.handler;
+        if (comptime isTypedHandler(handler)) {
+            var typed = self.rest();
+            try typed.add(method, path, arg);
+        } else {
+            try self.server.router.add(method, path, handler, rawRouteOptions(arg));
         }
-        if (!@hasField(ArgType, "handler")) {
-            @compileError("route options are missing `.handler`");
-        }
-        var typed = self.rest();
-        try typed.add(method, arg.path, arg);
-    }
-
-    /// Typed GET route.
-    pub fn get(self: *App, comptime arg: anytype) !void {
-        try self.route(.GET, arg);
-    }
-
-    /// Typed POST route.
-    pub fn post(self: *App, comptime arg: anytype) !void {
-        try self.route(.POST, arg);
-    }
-
-    /// Typed PUT route.
-    pub fn put(self: *App, comptime arg: anytype) !void {
-        try self.route(.PUT, arg);
-    }
-
-    /// Typed PATCH route.
-    pub fn patch(self: *App, comptime arg: anytype) !void {
-        try self.route(.PATCH, arg);
-    }
-
-    /// Typed DELETE route.
-    pub fn delete(self: *App, comptime arg: anytype) !void {
-        try self.route(.DELETE, arg);
-    }
-
-    /// Typed HEAD route.
-    pub fn head(self: *App, comptime arg: anytype) !void {
-        try self.route(.HEAD, arg);
-    }
-
-    /// Typed OPTIONS route.
-    pub fn options(self: *App, comptime arg: anytype) !void {
-        try self.route(.OPTIONS, arg);
     }
 
     /// Attaches middleware to the pipeline (outermost first).
@@ -236,23 +252,46 @@ pub const App = struct {
     }
 };
 
-/// Converts any route-option struct literal into router options, copying the
-/// fields the caller actually provided. Unknown fields are a compile error so
-/// typos surface at build time instead of silently doing nothing.
-fn routeOptions(comptime opts: anytype) routerMod.RouteOptions {
-    const OptsType = @TypeOf(opts);
-    if (OptsType == routerMod.RouteOptions) return opts;
+/// True when `handler` returns `!httpx.Schema(T)` (typed REST) rather than a
+/// raw `!httpx.Response`.
+fn isTypedHandler(comptime handler: anytype) bool {
+    const HandlerType = @TypeOf(handler);
+    const handlerInfo = @typeInfo(HandlerType);
+    if (handlerInfo != .@"fn") return false;
+    const returnType = handlerInfo.@"fn".return_type orelse return false;
+    const returnInfo = @typeInfo(returnType);
+    if (returnInfo != .error_union) return false;
+    const payload = returnInfo.error_union.payload;
+    if (@typeInfo(payload) != .@"struct") return false;
+    return @hasDecl(payload, "ResponseBody") and @hasField(payload, "body");
+}
+
+/// Converts a raw-route struct literal into router options. Unknown fields are
+/// a compile error so typos surface at build time instead of silently doing
+/// nothing. Typed-only fields (`.names`, `.mediaType`) are rejected here.
+fn rawRouteOptions(comptime arg: anytype) routerMod.RouteOptions {
+    const ArgType = @TypeOf(arg);
+    const info = @typeInfo(ArgType);
+    if (info != .@"struct") return .{};
 
     var out: routerMod.RouteOptions = .{};
-    if (@typeInfo(OptsType) != .@"struct") return out;
-
-    inline for (@typeInfo(OptsType).@"struct".field_names) |fname| {
+    inline for (info.@"struct".field_names) |fname| {
+        if (comptime std.mem.eql(u8, fname, "handler")) continue;
+        if (comptime std.mem.eql(u8, fname, "path")) {
+            @compileError("route: pass the path as the second argument, not `.path`");
+        }
+        if (comptime std.mem.eql(u8, fname, "names")) {
+            @compileError("route: `.names` is only valid for typed `httpx.Schema(T)` handlers");
+        }
+        if (comptime std.mem.eql(u8, fname, "mediaType")) {
+            @compileError("route: `.mediaType` is only valid for typed `httpx.Schema(T)` handlers");
+        }
         if (@hasField(metaMod.Metadata, fname)) {
-            @field(out.meta, fname) = @field(opts, fname);
+            @field(out.meta, fname) = @field(arg, fname);
         } else if (@hasField(routerMod.RouteOptions, fname)) {
-            @field(out, fname) = @field(opts, fname);
+            @field(out, fname) = @field(arg, fname);
         } else {
-            @compileError("unknown route option `.{" ++ fname ++ "}`");
+            @compileError("unknown route option `." ++ fname ++ "`");
         }
     }
     return out;
@@ -289,9 +328,39 @@ test "app facade registers typed REST routes and round-trips JSON" {
     try testing.expect(std.mem.indexOf(u8, resp.body, "\"message\":\"pong\"") != null);
 }
 
-test "raw route options reject unknown fields at compile time" {
+test "raw route options map metadata and router fields" {
     const testing = std.testing;
-    const opts = routeOptions(.{ .summary = "Health", .tags = &.{"system"} });
+    const opts = rawRouteOptions(.{ .handler = struct {
+        fn h(_: *routerMod.Context) anyerror!routerMod.Response {
+            return .{};
+        }
+    }.h, .summary = "Health", .tags = &.{"system"}, .name = "health" });
     try testing.expectEqualStrings("Health", opts.meta.summary);
     try testing.expectEqual(@as(usize, 1), opts.meta.tags.len);
+    try testing.expectEqualStrings("health", opts.name.?);
+}
+
+test "typed and raw handlers share the lowercase verb surface" {
+    const testing = std.testing;
+
+    var router = routerMod.Router.init(testing.allocator);
+    defer router.deinit();
+
+    const Ping = struct { message: []const u8 };
+    const Handlers = struct {
+        fn typed(_: *routerMod.Context) !restMod.Schema(Ping) {
+            return restMod.Schema(Ping).ok(.{ .message = "pong" });
+        }
+        fn raw(_: *routerMod.Context) anyerror!routerMod.Response {
+            return .{ .status = 200, .body = "ok", .contentType = "text/plain" };
+        }
+    };
+
+    var rest = restMod.Rest.init(&router);
+    try rest.get("/typed", .{ .handler = Handlers.typed, .summary = "Typed" });
+    try router.add(.GET, "/raw", Handlers.raw, rawRouteOptions(.{
+        .handler = Handlers.raw,
+        .summary = "Raw",
+    }));
+    try testing.expectEqual(@as(usize, 2), router.entries().len);
 }

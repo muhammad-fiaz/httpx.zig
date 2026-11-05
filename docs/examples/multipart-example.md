@@ -4,16 +4,14 @@ Multipart bodies with `httpx.multipart.encoder`, parsed back with
 `httpx.multipart.decoder`. See `examples/multipart.zig`.
 
 ```zig
-const fields = [_]httpx.multipart.FieldValue{
-    .{ .name = "username", .value = "alice" },
-};
-const files = [_]httpx.multipart.File{
-    .{ .name = "avatar", .data = &.{ 0x89, 0x50, 0x4E, 0x47 }, .filename = "avatar.png", .contentType = "image/png" },
-};
 var encoder = try httpx.multipart.encoder.init(allocator, io, .{
     .subtype = .formData,
-    .fields = &fields,
-    .files = &files,
+    .fields = .{
+        .{ .name = "username", .value = "alice" },
+    },
+    .files = .{
+        .{ .name = "avatar", .data = &.{ 0x89, 0x50, 0x4E, 0x47 }, .filename = "avatar.png", .contentType = "image/png" },
+    },
 });
 defer encoder.deinit();
 
@@ -35,25 +33,18 @@ for (fields) |part| {
 }
 ```
 
-Client requests accept separate field and file slices:
+Client requests use inline `.{}` tuples for fields, files, and generic parts:
 
 ```zig
 const fileData = "hello, world!";
-const formFields = [_]struct { name: []const u8, value: []const u8 }{
-    .{ .name = "description", .value = "hello" },
-};
-const uploadFiles = [_]struct {
-    name: []const u8,
-    filename: []const u8,
-    contentType: []const u8,
-    data: []const u8,
-}{
-    .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
-};
 var res = try client.post("https://example.com/upload", .{
     .multipart = .{
-        .fields = &formFields,
-        .files = &uploadFiles,
+        .fields = .{
+            .{ .name = "description", .value = "hello" },
+        },
+        .files = .{
+            .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
+        },
     },
 });
 defer res.deinit();

@@ -18,15 +18,13 @@ RFC 2046 multipart builder and parser are available at
 ### Building
 
 ```zig
-const fields = [_]httpx.multipart.FieldValue{
-    .{ .name = "username", .value = "alice" },
-};
-const files = [_]httpx.multipart.File{
-    .{ .name = "avatar", .data = png_bytes, .filename = "photo.png", .contentType = "image/png" },
-};
 var encoder = try httpx.multipart.encoder.init(allocator, io, .{
-    .fields = &fields,
-    .files = &files,
+    .fields = .{
+        .{ .name = "username", .value = "alice" },
+    },
+    .files = .{
+        .{ .name = "avatar", .data = png_bytes, .filename = "photo.png", .contentType = "image/png" },
+    },
 });
 defer encoder.deinit();
 
@@ -51,21 +49,14 @@ For client requests, pass fields and files through `.multipart`:
 
 ```zig
 const fileData = "file contents";
-const fields = [_]struct { name: []const u8, value: []const u8 }{
-    .{ .name = "description", .value = "sample" },
-};
-const files = [_]struct {
-    name: []const u8,
-    filename: []const u8,
-    contentType: []const u8,
-    data: []const u8,
-}{
-    .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
-};
 var res = try client.post("https://example.com/upload", .{
     .multipart = .{
-        .fields = &fields,
-        .files = &files,
+        .fields = .{
+            .{ .name = "description", .value = "sample" },
+        },
+        .files = .{
+            .{ .name = "upload", .filename = "hello.txt", .contentType = "text/plain", .data = fileData },
+        },
     },
 });
 defer res.deinit();
