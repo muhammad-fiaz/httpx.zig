@@ -5,6 +5,7 @@
 //! CSS selector querying, tree mutations, incremental parsing, and streaming reader input.
 
 const std = @import("std");
+const jsonMedia = @import("../common/json.zig");
 const Allocator = std.mem.Allocator;
 const dom = @import("dom.zig");
 const Tree = dom.Tree;
@@ -582,7 +583,7 @@ pub fn detectKind(source: []const u8, contentType: ?[]const u8) ContentKind {
         if (std.mem.indexOf(u8, ct, "html") != null) return .html;
         if (std.mem.indexOf(u8, ct, "rss") != null) return .rss;
         if (std.mem.indexOf(u8, ct, "atom") != null) return .atom;
-        if (std.mem.indexOf(u8, ct, "json") != null) return .jsonFeed;
+        if (jsonMedia.isJsonMediaType(ct)) return .jsonFeed;
         if (std.mem.indexOf(u8, ct, "xml") != null) return .xml;
     }
     const trimmed = std.mem.trim(u8, source, " \t\r\n");

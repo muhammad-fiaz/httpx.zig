@@ -4,6 +4,7 @@
 //! with `std.json`; feed semantics (field mapping) stay in HTTPX.
 
 const std = @import("std");
+const jsonMedia = @import("../common/json.zig");
 const Allocator = std.mem.Allocator;
 const dom = @import("dom.zig");
 const xml = @import("xml.zig");
@@ -42,7 +43,7 @@ pub const Feed = struct {
 };
 
 pub fn parse(allocator: Allocator, src: []const u8, contentType: ?[]const u8) !Feed {
-    const isJson = if (contentType) |ct| std.mem.indexOf(u8, ct, "json") != null else std.mem.startsWith(u8, std.mem.trim(u8, src, " \t\r\n"), "{");
+    const isJson = if (contentType) |ct| jsonMedia.isJsonMediaType(ct) else std.mem.startsWith(u8, std.mem.trim(u8, src, " \t\r\n"), "{");
     if (isJson) {
         return parseJsonFeed(allocator, src);
     }
@@ -353,6 +354,14 @@ test "json feed rejects malformed input" {
     try std.testing.expectError(error.InvalidFeed, parse(a, "{bad", "application/json"));
     try std.testing.expectError(error.InvalidFeed, parse(a, "[1, 2]", "application/json"));
     try std.testing.expectError(error.InvalidFeed, parse(a, "{\"a\": }", "application/json"));
+}
+
+test "feed content type uses parsed JSON media types, not substrings" {
+    const a = std.testing.allocator;
+    const rss = "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>RSS</title></channel></rss>";
+    var f = try parse(a, rss, "application/not-json");
+    defer f.deinit();
+    try std.testing.expectEqual(FeedKind.rss, f.kind);
 }
 
 test "json feed surrogate pairs decode to astral characters" {

@@ -28,7 +28,8 @@ const reload = @import("../watcher/fileWatcher.zig");
 const Context = routerMod.Context;
 const Response = routerMod.Response;
 const Method = @import("../../common/method.zig").Method;
-const mime = @import("../../utils/mime.zig");
+const mime = @import("../../common/mime.zig");
+const contentNegotiation = @import("../../common/contentNegotiation.zig");
 
 pub const Config = struct {
     /// Filesystem root served under `mount`.
@@ -737,7 +738,7 @@ pub fn isAssetPath(path: []const u8) bool {
 /// Checks whether the request Accept header permits HTML responses.
 pub fn acceptsHtml(acceptHeader: ?[]const u8) bool {
     const h = acceptHeader orelse return true;
-    return std.mem.indexOf(u8, h, "text/html") != null or std.mem.indexOf(u8, h, "*/*") != null;
+    return contentNegotiation.accepts(h, "text/html");
 }
 
 /// Checks if path starts with any excluded prefix.
@@ -1260,7 +1261,9 @@ test "SPA fallback policy differentiates client routes from assets and API" {
     // Accept headers
     try testing.expect(acceptsHtml(null));
     try testing.expect(acceptsHtml("text/html,application/xhtml+xml"));
+    try testing.expect(acceptsHtml("TEXT/HTML; q=0.8, application/json;q=0.2"));
     try testing.expect(acceptsHtml("*/*"));
+    try testing.expect(!acceptsHtml("text/html;q=0, */*;q=1"));
     try testing.expect(!acceptsHtml("application/json"));
     try testing.expect(!acceptsHtml("image/png"));
 

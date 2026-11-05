@@ -364,6 +364,8 @@ test "accepts JSON media types by rule, not by a fixed list" {
         "text/html; charset=utf-8",
         "application/jsonx",
         "application/jsonx+jsonx",
+        "application/not-json",
+        "text/plain-json",
     };
     for (rejected) |ct| try testing.expect(!isJsonMediaType(ct));
 }
