@@ -229,6 +229,9 @@ All methods are URL-first (`url`, then options):
 | `close()` | Purge the connection pool |
 | `reset()` | Close + clear DNS cache |
 
+Request option names are checked at compile time; misspelled top-level options
+are compile errors. Put custom names in `.headers` or `.query` maps.
+
 ### Cookie Jar API
 
 The standalone `httpx.client.jar` keeps cookies across requests

@@ -164,52 +164,31 @@ pub const OnlineOptions = struct {
     maxProbes: u8 = 4,
 };
 
-pub const RequestOptions = struct {
-    url: []const u8,
-    /// Explicit method for generic `request` (e.g. `.method = .GET` or `.method = .post`); if null, uses the wrapper's method.
-    method: ?Method = null,
-    headers: []const req.Header = &.{},
-    query: []const req.Header = &.{},
-    body: ?[]const u8 = null,
-    /// Serialized JSON bytes; sets Content-Type automatically.
-    json: ?[]const u8 = null,
-    /// Typed JSON value (struct) — will be `json.stringify`ed; takes precedence over `json` string if set.
-    jsonTyped: ?*const anyopaque = null,
-    jsonTypedInfo: ?struct { ptr: *const anyopaque, stringify: *const fn (Allocator, *const anyopaque) anyerror![]u8 } = null,
-    /// Encoded form body; sets Content-Type automatically.
-    form: ?[]const u8 = null,
-    text: ?[]const u8 = null,
-    contentType: ?[]const u8 = null,
-    followRedirects: ?bool = null,
-    maxRedirects: ?u8 = null,
-    /// Allow bare LF line endings for response parsing (issue #37).
-    allowLfLineEndings: bool = false,
-    /// HTTP version selection (auto or explicit). Reuses httpVersion.zig.
-    httpVersion: ?HttpVersion = null,
-    /// Fast boolean toggle to use HTTP/1.0 for this request
-    http10: ?bool = null,
-    /// Fast boolean toggle to use HTTP/1.1 for this request
-    http11: ?bool = null,
-    /// Fast boolean toggle to use HTTP/2 for this request
-    http2: ?bool = null,
-    /// Fast boolean toggle to use HTTP/3 for this request
-    http3: ?bool = null,
-    tls: ?req.TlsOptions = null,
-    cookie: ?[]const u8 = null,
-    basicAuth: ?[]const u8 = null,
-    bearerAuth: ?[]const u8 = null,
-    timeoutMs: ?u64 = null,
-    maxResponseSize: ?usize = null,
-    /// Optional proxy URL for this request.
-    proxy: ?[]const u8 = null,
-    /// 0-RTT early data options for this request.
-    earlyData: ?req.EarlyDataOptions = null,
-    /// Streaming body source for bounded-memory chunked/streamed uploads across HTTP/1.1, HTTP/2, and HTTP/3.
-    bodySource: ?req.BodySource = null,
-    /// Optional cooperative cancellation flag. Checked periodically during connection,
-    /// reading, writing, and streaming loops.
-    cancel: ?*const std.atomic.Value(bool) = null,
+const requestOptionNames = .{
+    "method",    "headers",         "query",        "body",               "bodySource",
+    "json",      "jsonTyped",       "form",         "text",               "contentType",
+    "multipart", "followRedirects", "maxRedirects", "allowLfLineEndings", "httpVersion",
+    "http10",    "http11",          "http2",        "http3",              "tls",
+    "cookie",    "basicAuth",       "bearerAuth",   "timeoutMs",          "maxResponseSize",
+    "proxy",     "earlyData",       "cancel",
 };
+
+fn isRequestOption(comptime name: []const u8) bool {
+    inline for (requestOptionNames) |allowed| {
+        if (std.mem.eql(u8, name, allowed)) return true;
+    }
+    return false;
+}
+
+fn validateRequestOptions(comptime Options: type) void {
+    const info = @typeInfo(Options);
+    if (info != .@"struct") @compileError("client request options must be a struct literal");
+    inline for (info.@"struct".field_names) |name| {
+        if (comptime !isRequestOption(name)) {
+            @compileError("unknown client request option `." ++ name ++ "`; check its spelling or pass it through headers");
+        }
+    }
+}
 
 pub const Response = req.Response;
 pub const ResponseStream = req.ResponseStream;
@@ -938,6 +917,7 @@ pub const Client = struct {
     }
 
     fn doRequestInner(self: *Client, comptime streaming: bool, method: Method, urlOverride: []const u8, opts: anytype) if (streaming) Error!ResponseStream else Error!Response {
+        validateRequestOptions(@TypeOf(opts));
         // Track allocations for header/query string conversions that need freeing.
         var allocatedStrings: std.ArrayList([]u8) = .empty;
         defer {
@@ -3589,7 +3569,7 @@ test "Client requestStream with BodySource streaming upload" {
     try std.testing.expectEqualStrings("stream-reply", replyBuf[0..n]);
 }
 
-test "Client request with cancellation flag aborts cooperatively" {
+test "Client request cancellation option aborts cooperatively" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -3652,4 +3632,13 @@ test "Client multipart upload with single file struct and mime detection" {
     defer resp.deinit();
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expectEqualStrings("OK", resp.body);
+}
+
+test "client request option names are validated at compile time" {
+    try std.testing.expect(isRequestOption("method"));
+    try std.testing.expect(isRequestOption("json"));
+    try std.testing.expect(isRequestOption("multipart"));
+    try std.testing.expect(isRequestOption("cancel"));
+    try std.testing.expect(!isRequestOption("timeOutMs"));
+    try std.testing.expect(!isRequestOption("cancelFlag"));
 }
