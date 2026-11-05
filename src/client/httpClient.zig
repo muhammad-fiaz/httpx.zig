@@ -445,16 +445,6 @@ pub const Client = struct {
         return self.doRequestWithOverride(.OPTIONS, url, opts);
     }
 
-    /// TRACE request.
-    pub fn trace(self: *Client, url: []const u8, opts: anytype) Error!Response {
-        return self.doRequestWithOverride(.TRACE, url, opts);
-    }
-
-    /// CONNECT request.
-    pub fn connect(self: *Client, url: []const u8, opts: anytype) Error!Response {
-        return self.doRequestWithOverride(.CONNECT, url, opts);
-    }
-
     /// Generic request with explicit method in opts (.method = .GET / .POST / ...).
     ///   const res = try client.request("https://example.com/", .{ .method = .GET });
     /// Fetch-style convenience operation backed by the same native request
@@ -3243,7 +3233,7 @@ test "Client request with bodySource streaming upload" {
     try std.testing.expect(std.mem.indexOf(u8, reqStr, "client-streamed-payload") != null);
 }
 
-test "Client HTTP method convenience APIs (all 11 methods wire verification)" {
+test "Client HTTP method conveniences and generic method request" {
     const a = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
 
@@ -3410,7 +3400,7 @@ test "Client HTTP method convenience APIs (all 11 methods wire verification)" {
     // 9. TRACE
     {
         const url = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/trace", .{port});
-        var res = try client.trace(url, .{});
+        var res = try client.request(url, .{ .method = .TRACE });
         defer res.deinit();
         try std.testing.expectEqual(@as(u16, 200), res.status);
     }

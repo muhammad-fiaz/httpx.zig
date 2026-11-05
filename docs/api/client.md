@@ -211,8 +211,6 @@ All methods are URL-first (`url`, then options):
 | `delete(url, options)` | HTTP DELETE request |
 | `patch(url, options)` | HTTP PATCH request |
 | `head(url, options)` | HTTP HEAD request |
-| `trace(url, options)` | HTTP TRACE request |
-| `connect(url, options)` | HTTP CONNECT request |
 | `options(url, options)` | HTTP OPTIONS request |
 | `request(url, options)` | Generic request (method set via `options.method`) |
 | `requestStream(url, options)` | Streaming request returning `ResponseStream` (incremental on HTTP/1.1) |
@@ -499,10 +497,11 @@ Client request methods (all URL-first):
 | `client.delete(url, opts)` | HTTP DELETE |
 | `client.head(url, opts)` | HTTP HEAD |
 | `client.options(url, opts)` | HTTP OPTIONS |
-| `client.trace(url, opts)` | HTTP TRACE |
-| `client.connect(url, opts)` | HTTP CONNECT |
 | `client.fetch(url, opts)` | Fetch-style convenience operation using the same native request transport |
 | `client.request(url, opts)` | General HTTP request (any method via `.method`) |
+
+Use `client.request(url, .{ .method = .TRACE })` or `.CONNECT` for less common
+methods; the core verb conveniences cover ordinary request operations.
 
 ## See Also
 
