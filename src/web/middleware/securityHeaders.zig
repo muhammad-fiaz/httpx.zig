@@ -11,6 +11,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const regexMod = @import("regex");
+const mediaTypeMod = @import("../../common/mediaType.zig");
 
 // CORS (Fetch spec / RFC 9110 semantics)
 
@@ -235,7 +236,7 @@ pub fn recoveryMiddleware(ctx: *Context, next: NextFn) anyerror!Response {
     return next(ctx) catch {
         return Response{
             .status = 500,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
             .body = "Internal Server Error",
         };
     };
@@ -301,7 +302,7 @@ pub fn csrfMiddlewareConfig(ctx: *Context, next: NextFn, cfg: CsrfConfig) anyerr
     const cookieToken = existingCookie orelse {
         return Response{
             .status = 403,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
             .body = "CSRF Token Missing",
         };
     };
@@ -309,7 +310,7 @@ pub fn csrfMiddlewareConfig(ctx: *Context, next: NextFn, cfg: CsrfConfig) anyerr
     const headerToken = ctx.header(cfg.headerName) orelse {
         return Response{
             .status = 403,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
             .body = "CSRF Header Missing",
         };
     };
@@ -317,7 +318,7 @@ pub fn csrfMiddlewareConfig(ctx: *Context, next: NextFn, cfg: CsrfConfig) anyerr
     if (!verifyCsrfToken(cookieToken, headerToken)) {
         return Response{
             .status = 403,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
             .body = "CSRF Token Mismatch",
         };
     }

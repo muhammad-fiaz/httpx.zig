@@ -10,6 +10,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const mimeMod = @import("../../common/mime.zig");
+const mediaTypeMod = @import("../../common/mediaType.zig");
 const Method = @import("../../common/method.zig").Method;
 const patternMod = @import("routePattern.zig");
 pub const pattern = patternMod;
@@ -259,14 +260,14 @@ pub const Context = struct {
             return Response{
                 .status = code,
                 .body = value,
-                .contentType = "application/json",
+                .contentType = mediaTypeMod.applicationJson,
             };
         }
         const str = try std.json.Stringify.valueAlloc(self.allocator, value, .{});
         return Response{
             .status = code,
             .body = str,
-            .contentType = "application/json",
+            .contentType = mediaTypeMod.applicationJson,
         };
     }
 
@@ -282,7 +283,7 @@ pub const Context = struct {
         return .{
             .status = code,
             .body = content,
-            .contentType = "text/html; charset=utf-8",
+            .contentType = mediaTypeMod.textHtmlUtf8,
         };
     }
 
@@ -314,7 +315,7 @@ pub const Context = struct {
         return Response{
             .status = 200,
             .body = str,
-            .contentType = "application/json",
+            .contentType = mediaTypeMod.applicationJson,
         };
     }
 
@@ -330,7 +331,7 @@ pub const Context = struct {
         return .{
             .status = code,
             .body = content,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
         };
     }
 
@@ -511,7 +512,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .contentType = "text/html; charset=utf-8",
+            .contentType = mediaTypeMod.textHtmlUtf8,
         };
     }
 
@@ -519,7 +520,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
         };
     }
 
@@ -527,7 +528,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .contentType = "application/json",
+            .contentType = mediaTypeMod.applicationJson,
         };
     }
 
@@ -559,7 +560,7 @@ pub const Response = struct {
         return .{
             .status = 200,
             .body = content,
-            .contentType = "text/plain; charset=utf-8",
+            .contentType = mediaTypeMod.textPlainUtf8,
         };
     }
 
@@ -1492,11 +1493,11 @@ pub const Router = struct {
 
     pub fn notFoundResponse(self: *Router, ctx: *Context) Response {
         if (self.notFoundHandler) |nf| {
-            return nf(ctx) catch Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
+            return nf(ctx) catch Response{ .status = 404, .body = "Not Found", .contentType = mediaTypeMod.textPlainUtf8 };
         } else if (self.statusHandlers.get(404)) |sh| {
-            return sh(ctx) catch Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
+            return sh(ctx) catch Response{ .status = 404, .body = "Not Found", .contentType = mediaTypeMod.textPlainUtf8 };
         } else {
-            return Response{ .status = 404, .body = "Not Found", .contentType = "text/plain; charset=utf-8" };
+            return Response{ .status = 404, .body = "Not Found", .contentType = mediaTypeMod.textPlainUtf8 };
         }
     }
 
@@ -1530,11 +1531,11 @@ pub const Router = struct {
 
     fn handleError(self: *Router, ctx: *Context, err: anyerror) Response {
         if (self.errorHandler) |eh| {
-            return eh(ctx, err) catch Response{ .status = 500, .body = "Internal Server Error", .contentType = "text/plain; charset=utf-8" };
+            return eh(ctx, err) catch Response{ .status = 500, .body = "Internal Server Error", .contentType = mediaTypeMod.textPlainUtf8 };
         } else if (self.statusHandlers.get(500)) |sh| {
-            return sh(ctx) catch Response{ .status = 500, .body = "Internal Server Error", .contentType = "text/plain; charset=utf-8" };
+            return sh(ctx) catch Response{ .status = 500, .body = "Internal Server Error", .contentType = mediaTypeMod.textPlainUtf8 };
         } else {
-            return Response{ .status = 500, .body = "Internal Server Error", .contentType = "text/plain; charset=utf-8" };
+            return Response{ .status = 500, .body = "Internal Server Error", .contentType = mediaTypeMod.textPlainUtf8 };
         }
     }
 };

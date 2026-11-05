@@ -5,17 +5,18 @@
 //! lookup uses the first registry extension for media types with aliases.
 
 const std = @import("std");
+const mediaTypeConstants = @import("mediaType.zig");
 
 const Entry = struct { extension: []const u8, mediaType: []const u8 };
 
 const entries = [_]Entry{
-    .{ .extension = "html", .mediaType = "text/html; charset=utf-8" },
-    .{ .extension = "htm", .mediaType = "text/html; charset=utf-8" },
+    .{ .extension = "html", .mediaType = mediaTypeConstants.textHtmlUtf8 },
+    .{ .extension = "htm", .mediaType = mediaTypeConstants.textHtmlUtf8 },
     .{ .extension = "css", .mediaType = "text/css; charset=utf-8" },
     .{ .extension = "js", .mediaType = "text/javascript; charset=utf-8" },
     .{ .extension = "mjs", .mediaType = "text/javascript; charset=utf-8" },
-    .{ .extension = "json", .mediaType = "application/json; charset=utf-8" },
-    .{ .extension = "txt", .mediaType = "text/plain; charset=utf-8" },
+    .{ .extension = "json", .mediaType = mediaTypeConstants.applicationJsonUtf8 },
+    .{ .extension = "txt", .mediaType = mediaTypeConstants.textPlainUtf8 },
     .{ .extension = "md", .mediaType = "text/markdown; charset=utf-8" },
     .{ .extension = "xml", .mediaType = "application/xml; charset=utf-8" },
     .{ .extension = "csv", .mediaType = "text/csv; charset=utf-8" },
@@ -44,7 +45,7 @@ const entries = [_]Entry{
     .{ .extension = "zip", .mediaType = "application/zip" },
     .{ .extension = "gz", .mediaType = "application/gzip" },
     .{ .extension = "tar", .mediaType = "application/x-tar" },
-    .{ .extension = "map", .mediaType = "application/json; charset=utf-8" },
+    .{ .extension = "map", .mediaType = mediaTypeConstants.applicationJsonUtf8 },
     .{ .extension = "avifs", .mediaType = "image/avif-sequence" },
     .{ .extension = "jxl", .mediaType = "image/jxl" },
     .{ .extension = "apng", .mediaType = "image/apng" },
@@ -76,7 +77,13 @@ const extensionMap = std.static_string_map.StaticStringMap([]const u8).initCompt
 });
 
 /// Unknown or malformed extensions map to this safe binary media type.
-pub const octetStream = "application/octet-stream";
+pub const octetStream = mediaTypeConstants.octetStream;
+pub const formUrlEncoded = mediaTypeConstants.formUrlEncoded;
+pub const multipartFormData = mediaTypeConstants.multipartFormData;
+pub const textPlain = mediaTypeConstants.textPlain;
+pub const textPlainUtf8 = mediaTypeConstants.textPlainUtf8;
+pub const textHtml = mediaTypeConstants.textHtml;
+pub const textHtmlUtf8 = mediaTypeConstants.textHtmlUtf8;
 
 /// Looks up an extension without a leading dot. Case is ignored.
 pub fn lookupExtension(extension: []const u8) ?[]const u8 {

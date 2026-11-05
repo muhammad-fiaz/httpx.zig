@@ -28,15 +28,16 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const mediaType = @import("mediaType.zig");
 
 pub const Value = std.json.Value;
 pub const Object = std.json.ObjectMap;
 pub const Array = std.json.Array;
 
 /// Canonical request/response media type used when nothing else is asked for.
-pub const applicationJson = "application/json";
+pub const applicationJson = mediaType.applicationJson;
 /// Canonical value, including the charset parameter every JSON body implies.
-pub const applicationJsonUtf8 = "application/json; charset=utf-8";
+pub const applicationJsonUtf8 = mediaType.applicationJsonUtf8;
 
 pub const MediaKind = enum { document, json5, lineDelimited, sequence, unsupported };
 

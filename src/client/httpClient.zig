@@ -17,6 +17,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
 const mimeMod = @import("../common/mime.zig");
+const mediaTypeMod = @import("../common/mediaType.zig");
 const sync = @import("../common/sync.zig");
 const logging = @import("../common/logging.zig");
 const Method = @import("../common/method.zig").Method;
@@ -528,8 +529,8 @@ pub const Client = struct {
         defer self.allocator.free(payloadJson);
 
         const gqlHeaders = [_]req.Header{
-            .{ .name = "content-type", .value = "application/json" },
-            .{ .name = "accept", .value = "application/json" },
+            .{ .name = "content-type", .value = mediaTypeMod.applicationJson },
+            .{ .name = "accept", .value = mediaTypeMod.applicationJson },
         };
         // Caller headers, when present, are the complete set (same replace
         // semantics as every other operation); otherwise the JSON defaults
@@ -636,7 +637,7 @@ pub const Client = struct {
 
         pub fn form(self: *RequestBuilder, encoded: []const u8) !*RequestBuilder {
             self.bodyBytes = encoded;
-            _ = try self.header("content-type", "application/x-www-form-urlencoded");
+            _ = try self.header("content-type", mediaTypeMod.formUrlEncoded);
             return self;
         }
 
@@ -648,7 +649,7 @@ pub const Client = struct {
             const jBytes = try std.json.Stringify.valueAlloc(self.client.allocator, value, .{});
             self.jsonAllocated = jBytes;
             self.bodyBytes = jBytes;
-            _ = try self.header("content-type", "application/json");
+            _ = try self.header("content-type", mediaTypeMod.applicationJson);
             return self;
         }
 
@@ -1042,8 +1043,8 @@ pub const Client = struct {
                 const T = @TypeOf(v);
                 if (comptime @typeInfo(T) == .optional) break :blk v != null else break :blk true;
             };
-            if (ct == null and (hasJson or hasJsonTyped)) ct = "application/json";
-            if (ct == null and hasForm) ct = "application/x-www-form-urlencoded";
+            if (ct == null and (hasJson or hasJsonTyped)) ct = mediaTypeMod.applicationJson;
+            if (ct == null and hasForm) ct = mediaTypeMod.formUrlEncoded;
             if (ct) |c| {
                 hdrs.append(self.allocator, .{ .name = "Content-Type", .value = c }) catch return Error.OutOfMemory;
             }
@@ -1217,7 +1218,7 @@ pub const Client = struct {
                             break :blk mimeMod.octetStream;
                         }
                         break :blk raw;
-                    } else if (filename) |fn_str| mimeMod.fromPath(fn_str) else if (@hasField(PT, "value")) "text/plain; charset=utf-8" else mimeMod.octetStream;
+                    } else if (filename) |fn_str| mimeMod.fromPath(fn_str) else if (@hasField(PT, "value")) mediaTypeMod.textPlainUtf8 else mimeMod.octetStream;
                     const data_val = if (@hasField(PT, "data")) p.data else if (@hasField(PT, "value")) p.value else "";
                     const part_headers: ?[]const mpEncoder.Header = if (@hasField(PT, "headers")) blk: {
                         const raw = p.headers;
@@ -1240,7 +1241,7 @@ pub const Client = struct {
                     try parts.append(self.allocator, .{
                         .name = field.name,
                         .data = value,
-                        .contentType = "text/plain; charset=utf-8",
+                        .contentType = mediaTypeMod.textPlainUtf8,
                     });
                 }
             }

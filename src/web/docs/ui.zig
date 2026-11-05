@@ -23,6 +23,7 @@ const Router = routerMod.Router;
 const Response = routerMod.Response;
 const Context = routerMod.Context;
 const Method = @import("../../common/method.zig").Method;
+const mediaTypeMod = @import("../../common/mediaType.zig");
 const openapi = @import("../openApi/openApiSpec.zig");
 const assets = @import("assets.zig");
 const metaMod = @import("../router/routeMetadata.zig");
@@ -320,27 +321,27 @@ fn openApiHandler(ctx: *Context) anyerror!Response {
         if (st.spec) |old| st.allocator.free(old);
         st.spec = freshSpec;
     } else |_| {}
-    return .{ .status = 200, .contentType = "application/json; charset=utf-8", .body = st.spec.? };
+    return .{ .status = 200, .contentType = mediaTypeMod.applicationJsonUtf8, .body = st.spec.? };
 }
 
 fn swaggerPageHandler(ctx: *Context) anyerror!Response {
     const st = requireState(ctx);
-    return .{ .status = 200, .contentType = "text/html; charset=utf-8", .body = st.swaggerPage.? };
+    return .{ .status = 200, .contentType = mediaTypeMod.textHtmlUtf8, .body = st.swaggerPage.? };
 }
 
 fn redocPageHandler(ctx: *Context) anyerror!Response {
     const st = requireState(ctx);
-    return .{ .status = 200, .contentType = "text/html; charset=utf-8", .body = st.redocPage.? };
+    return .{ .status = 200, .contentType = mediaTypeMod.textHtmlUtf8, .body = st.redocPage.? };
 }
 
 fn scalarPageHandler(ctx: *Context) anyerror!Response {
     const st = requireState(ctx);
-    return .{ .status = 200, .contentType = "text/html; charset=utf-8", .body = st.scalarPage.? };
+    return .{ .status = 200, .contentType = mediaTypeMod.textHtmlUtf8, .body = st.scalarPage.? };
 }
 
 fn graphiqlPageHandler(ctx: *Context) anyerror!Response {
     const st = requireState(ctx);
-    return .{ .status = 200, .contentType = "text/html; charset=utf-8", .body = st.graphiqlPage.? };
+    return .{ .status = 200, .contentType = mediaTypeMod.textHtmlUtf8, .body = st.graphiqlPage.? };
 }
 
 fn swaggerAssetHandler(ctx: *Context) anyerror!Response {
@@ -366,7 +367,7 @@ fn serveAsset(ctx: *Context, kind: assets.Kind, path: []const u8) anyerror!Respo
         break :blk path[idx + 1 ..];
     };
     const f = assets.find(kind, name) orelse
-        return .{ .status = 404, .contentType = "text/plain; charset=utf-8", .body = "not found" };
+        return .{ .status = 404, .contentType = mediaTypeMod.textPlainUtf8, .body = "not found" };
     _ = ctx;
     return .{ .status = 200, .contentType = f.contentType, .body = f.data };
 }

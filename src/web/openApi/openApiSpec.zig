@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const mediaTypeMod = @import("../../common/mediaType.zig");
 const routerMod = @import("../router/router.zig");
 const Context = routerMod.Context;
 const Response = routerMod.Response;
@@ -342,7 +343,7 @@ fn writeBareResponse(j: *std.json.Stringify, status: []const u8, description: []
     if (schema) |s| {
         try j.objectField("content");
         try j.beginObject();
-        try j.objectField("application/json");
+        try j.objectField(mediaTypeMod.applicationJson);
         try j.beginObject();
         try j.objectField("schema");
         try writeSchema(j, s);
@@ -604,7 +605,7 @@ const UserSchema = tmeta.Schema{
 
 fn hMeta(ctx: *Context) anyerror!Response {
     _ = ctx;
-    return .{ .body = "{}", .contentType = "application/json" };
+    return .{ .body = "{}", .contentType = mediaTypeMod.applicationJson };
 }
 
 test "typed converters synthesize path parameters" {

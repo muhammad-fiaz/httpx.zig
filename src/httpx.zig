@@ -45,6 +45,7 @@ pub const common = struct {
     pub const httpVersion = @import("common/httpVersion.zig");
     pub const io = @import("common/io.zig");
     pub const parse = @import("common/parse.zig");
+    pub const mediaType = @import("common/mediaType.zig");
     pub const bodySource = @import("common/bodySource.zig");
     pub const env = @import("common/env.zig");
     pub const json = @import("common/json.zig");
@@ -52,6 +53,7 @@ pub const common = struct {
     pub const SliceReader = bodySource.SliceReader;
     pub const CallbackReader = bodySource.CallbackReader;
 };
+pub const mediaType = common.mediaType;
 pub const BodySource = common.BodySource;
 pub const SliceReader = common.SliceReader;
 pub const CallbackReader = common.CallbackReader;

@@ -184,7 +184,7 @@ fn serveFileHandler(ctx: *Context) anyerror!Response {
 }
 
 fn errText(status: u16, text: []const u8) Response {
-    return .{ .status = status, .contentType = "text/plain; charset=utf-8", .body = text };
+    return .{ .status = status, .contentType = mime.textPlainUtf8, .body = text };
 }
 
 // path resolution

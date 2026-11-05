@@ -8,6 +8,7 @@
 //! `src/assets/<vendor>/VERSION.txt`.
 
 const std = @import("std");
+const mimeMod = @import("../../common/mime.zig");
 
 pub const swaggerUiVersion = "5.34.1";
 pub const redocVersion = "3.0.1";
@@ -42,7 +43,7 @@ pub const swaggerFiles = [_]File{
     .{ .name = "swagger-ui-bundle.js", .contentType = "text/javascript; charset=utf-8", .data = swaggerUiBundleJs },
     .{ .name = "swagger-ui-standalone-preset.js", .contentType = "text/javascript; charset=utf-8", .data = swaggerUiStandalonePresetJs },
     .{ .name = "swagger-ui.css", .contentType = "text/css; charset=utf-8", .data = swaggerUiCss },
-    .{ .name = "oauth2-redirect.html", .contentType = "text/html; charset=utf-8", .data = oauth2RedirectHtml },
+    .{ .name = "oauth2-redirect.html", .contentType = mimeMod.textHtmlUtf8, .data = oauth2RedirectHtml },
     .{ .name = "oauth2-redirect.js", .contentType = "text/javascript; charset=utf-8", .data = oauth2RedirectJs },
     .{ .name = "favicon-16x16.png", .contentType = "image/png", .data = favicon16Png },
     .{ .name = "favicon-32x32.png", .contentType = "image/png", .data = favicon32Png },

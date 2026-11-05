@@ -28,6 +28,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
 const mimeMod = @import("../common/mime.zig");
+const mediaTypeMod = @import("../common/mediaType.zig");
 const headerName = @import("../common/headers.zig").names;
 const uriMod = @import("../common/uri.zig");
 const parseMod = @import("../common/parse.zig");
@@ -1183,8 +1184,8 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
         defer a.free(target);
 
         const ct: ?[]const u8 = if (bodyStripped) null else if (req.contentType) |c| c else switch (req.bodyKind) {
-            .json => "application/json",
-            .form => "application/x-www-form-urlencoded",
+            .json => mediaTypeMod.applicationJson,
+            .form => mediaTypeMod.formUrlEncoded,
             else => null,
         };
         const hasBody = !bodyStripped and (req.body.len > 0 or switch (req.bodyKind) {

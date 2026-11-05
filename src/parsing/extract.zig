@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const mediaTypeMod = @import("../common/mediaType.zig");
 const dom = @import("dom.zig");
 const Tree = dom.Tree;
 const NO_NODE = dom.NO_NODE;
@@ -163,7 +164,7 @@ pub const FormField = struct {
 pub const Form = struct {
     action: []const u8 = "",
     method: []const u8 = "get",
-    enctype: []const u8 = "application/x-www-form-urlencoded",
+    enctype: []const u8 = mediaTypeMod.formUrlEncoded,
     fields: []const FormField = &.{},
 };
 
@@ -179,7 +180,7 @@ pub fn extractForms(tree: *const Tree, allocator: Allocator) ![]Form {
 
         const action = node.attr("action") orelse "";
         const method = node.attr("method") orelse "get";
-        const enctype = node.attr("enctype") orelse "application/x-www-form-urlencoded";
+        const enctype = node.attr("enctype") orelse mediaTypeMod.formUrlEncoded;
 
         var fields: std.ArrayList(FormField) = .empty;
         try extractFormFields(tree, allocator, idx, &fields);

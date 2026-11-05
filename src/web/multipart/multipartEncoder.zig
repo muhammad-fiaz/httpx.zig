@@ -129,7 +129,7 @@ pub const Encoder = struct {
             try parts.append(self.allocator, .{
                 .name = field.name,
                 .data = field.value,
-                .contentType = "text/plain; charset=utf-8",
+                .contentType = mimeMod.textPlainUtf8,
             });
         }
         for (self.options.files) |file| {

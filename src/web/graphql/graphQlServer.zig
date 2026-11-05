@@ -25,6 +25,7 @@ const Context = routerMod.Context;
 const Response = routerMod.Response;
 const schemaMod = @import("graphQlSchema.zig");
 const jsonMod = @import("../../common/json.zig");
+const mediaTypeMod = @import("../../common/mediaType.zig");
 
 pub const Schema = schemaMod.Schema;
 pub const SchemaConfig = schemaMod.SchemaConfig;
@@ -164,7 +165,7 @@ fn handlePost(ctx: *Context) anyerror!Response {
     if (std.mem.eql(u8, mediaType, "application/graphql")) {
         return execute(ctx, st, ctx.body, null, null);
     }
-    if (std.mem.eql(u8, mediaType, "application/x-www-form-urlencoded")) {
+    if (std.mem.eql(u8, mediaType, mediaTypeMod.formUrlEncoded)) {
         const query = try formValue(ctx.allocator, ctx.body, "query");
         const variables = try formValue(ctx.allocator, ctx.body, "variables");
         const operationName = try formValue(ctx.allocator, ctx.body, "operationName");

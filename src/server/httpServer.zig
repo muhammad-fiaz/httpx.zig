@@ -24,6 +24,7 @@ const Router = routerMod.Router;
 const Context = routerMod.Context;
 const Response = routerMod.Response;
 const Method = @import("../common/method.zig").Method;
+const mediaTypeMod = @import("../common/mediaType.zig");
 const docs = @import("../web/docs/docs.zig");
 const httpVersion = @import("../common/httpVersion.zig");
 pub const HttpVersion = httpVersion.HttpVersion;
@@ -2680,7 +2681,7 @@ test "server decodes chunked request body before dispatch" {
 
 fn echoRawHandler(ctx: *Context) anyerror!Response {
     if (ctx.body.len == 0) return .{ .status = 400, .body = "empty" };
-    return .{ .contentType = "application/json", .body = ctx.body };
+    return .{ .contentType = mediaTypeMod.applicationJson, .body = ctx.body };
 }
 
 // Logging verification: callback receives access events; silence when no callback.
@@ -3435,14 +3436,18 @@ test "malformed TLS handshake emits tlsHandshakeFailed event" {
     const badTls = [_]u8{ 0x16, 0x03, 0x01, 0x00, 0x05, 0xde, 0xad, 0xbe, 0xef, 0x00 };
     try client.writeAll(&badTls);
 
-    // Give server worker moment to process and emit event
-    clock.sleepMillis(std.Io.Threaded.global_single_threaded.io(), 50);
+    // Wait for the worker to process the malformed record. A fixed short sleep
+    // makes this event assertion race under load and on slower CI machines.
+    var seen = false;
+    for (0..100) |_| {
+        gTlsFailedMu.lock();
+        seen = gTlsFailedSeen;
+        gTlsFailedMu.unlock();
+        if (seen) break;
+        clock.sleepMillis(ctx.io, 5);
+    }
 
     srv.requestShutdown();
-
-    gTlsFailedMu.lock();
-    const seen = gTlsFailedSeen;
-    gTlsFailedMu.unlock();
     try std.testing.expect(seen);
 }
 

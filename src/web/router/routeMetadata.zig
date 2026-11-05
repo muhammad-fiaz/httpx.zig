@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const mimeMod = @import("../../common/mime.zig");
+const mediaTypeMod = @import("../../common/mediaType.zig");
 
 /// Parameter location.
 pub const Location = enum {
@@ -67,11 +68,11 @@ pub const ContentType = enum {
 
     pub fn mime(self: ContentType) []const u8 {
         return switch (self) {
-            .json => "application/json",
-            .form => "application/x-www-form-urlencoded",
-            .multipart => "multipart/form-data",
-            .textPlain => "text/plain",
-            .html => "text/html",
+            .json => mediaTypeMod.applicationJson,
+            .form => mediaTypeMod.formUrlEncoded,
+            .multipart => mediaTypeMod.multipartFormData,
+            .textPlain => mediaTypeMod.textPlain,
+            .html => mediaTypeMod.textHtml,
             .octetStream => mimeMod.octetStream,
         };
     }
