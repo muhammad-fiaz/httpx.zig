@@ -286,6 +286,94 @@ Omit `.logging.callback` (the default) for fully silent operation.
 | `metrics(path)` | Mount the Prometheus endpoint |
 | `setStatusHandler(code, handler)` | Custom handler per status code |
 
+### `httpx.App` — Typed REST
+
+`App` wraps `Server` and registers typed REST endpoints with one object literal per
+route. Every route states its path, its handler, and its metadata; results are built
+with `httpx.Schema(T)` and the route feeds OpenAPI 3.1 automatically.
+
+| Method | Description |
+|--------|-------------|
+| `app.get(.{ .path, .handler, ... })` | Typed GET |
+| `app.post(.{ ... })` | Typed POST — deserializes the JSON body into the handler's request type |
+| `app.put(.{ ... })` / `app.patch(.{ ... })` | Typed PUT / PATCH |
+| `app.delete(.{ ... })` | Typed DELETE |
+| `app.head(...)` / `app.options(...)` | Typed HEAD / OPTIONS |
+| `app.add(.METHOD, path, handler, opts)` | Raw `HandlerFn` route (no schema derivation) |
+
+Options are anonymous struct literals — all fields optional:
+
+```zig
+try app.post(.{
+    .path = "/users",
+    .handler = createUser,
+    .operationId = "createUser",
+    .summary = "Create a user",
+    .description = "Creates a user and returns the stored record.",
+    .tags = &.{"users"},
+    .deprecated = false,
+    .security = &.{},
+    .mediaType = "application/json; charset=utf-8",
+    .names = .{ .user_name = "user-name" }, // JSON wire keys
+});
+
+// Raw handler route
+try app.add(.GET, "/health", healthCheck, .{ .summary = "Liveness" });
+```
+
+#### Results: `Schema(T).result(.{ ... })`
+
+```zig
+fn createUser(ctx: *httpx.Context, req: CreateUser) !httpx.Schema(User) {
+    _ = ctx;
+    return httpx.Schema(User).result(.{
+        .status = .created,
+        .body = .{ .id = 101, .name = req.name },
+    });
+}
+```
+
+`result` accepts `.status`, `.body`, `.headers`, and `.mediaType`, all optional.
+Shorthands: `.ok(body)`, `.created(body)`, `.accepted(body)`, `.noContent()`,
+`.of(status, body)`. Use `httpx.Schema(void)` (or `httpx.Empty`) for bodiless
+responses.
+
+#### JSON media types
+
+JSON detection is rule-based, so no media type has to be registered with the
+library first. Any subtype ending in the `+json` structured-syntax suffix is
+accepted (`problem+json`, `merge-patch+json`, `json-patch+json`, `vnd.api+json`,
+`hal+json`, `ld+json`, `activity+json`, `schema+json`, `geo+json`, `jrd+json`,
+`webpush-options+json`, `graphql-response+json`, and the `prs.` / `x.` trees),
+as are `application/json`, legacy `text/json` / `application/x-json`, and
+`application/csp-report`. `json5`, NDJSON/JSONL, and JSON text sequences have
+separate classifications because they require different parsers. Parameters
+are validated and ignored for classification; type tokens are case-insensitive.
+The single entry point is `httpx.json.isJsonMediaType`.
+
+A present-but-non-JSON `Content-Type` is `415`; a malformed body is `400` with a
+JSON envelope `{"error": ..., "status": ...}`.
+
+#### Keys that are not Zig identifiers
+
+JSON keys are arbitrary strings and are preserved exactly — nothing in the
+library restricts them to Zig identifier rules. Map Zig fields with `.names`:
+
+```zig
+const names = .{ .user_name = "user-name", .context = "@context" };
+
+try app.post(.{
+    .path = "/users",
+    .handler = createUser, // fn (ctx, struct { user_name: []const u8, context: []const u8 })
+    .names = names,
+});
+```
+
+Requests are decoded with the wire names, responses are encoded with them, and
+the OpenAPI document lists the wire names. For shapes that are not known ahead
+of time use `std.json.Value` or `httpx.json.Object` and read keys dynamically
+(`.get("user-name")`, `.getIgnoreCase("content-type")`).
+
 ### Quick Example
 
 ```zig

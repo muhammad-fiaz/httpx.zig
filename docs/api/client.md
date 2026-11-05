@@ -171,7 +171,7 @@ const User = struct { id: u64, name: []const u8, email: []const u8 };
 
 var res2 = try client.post("https://api.example.com/users", .{
     .headers = .{ .Authorization = "Bearer secret_token" },
-    .json = CreateUser{ .name = "Fiaz", .email = "fiaz@example.com" },
+    .json = CreateUser{ .name = "Example User", .email = "user@example.com" },
 });
 defer res2.deinit();
 

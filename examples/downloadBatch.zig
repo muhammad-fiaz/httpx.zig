@@ -16,7 +16,7 @@ const DownloadTask = struct {
             .path = self.dest,
             .progress = .enabled,
             .existing = .overwrite,
-            .cancelFlag = cancel,
+            .cancel = cancel,
             .createDirs = true,
         });
     }

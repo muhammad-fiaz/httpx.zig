@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const mime = @import("../../utils/mime.zig");
+const mime = @import("../../common/mime.zig");
 const sync = @import("../../common/sync.zig");
 
 /// A single web asset (HTML, template, CSS, JS, image, font, etc.).

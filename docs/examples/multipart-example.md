@@ -1,6 +1,6 @@
 # Multipart Form Data Example
 
-Multipart bodies with `httpx.multipart.Encoder`, parsed back with
+Multipart bodies with `httpx.multipart.encoder`, parsed back with
 `httpx.multipart.decoder`. See `examples/multipart.zig`.
 
 ```zig
@@ -59,7 +59,7 @@ var res = try client.post("https://example.com/upload", .{
 defer res.deinit();
 ```
 
-Boundary extraction: `httpx.multipart.extractBoundary(contentType)`.
+Boundary extraction: `httpx.multipart.Boundary.extract(contentType)`.
 
 ## Expected Output
 

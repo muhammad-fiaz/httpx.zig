@@ -237,7 +237,7 @@ pub const DownloadOptions = struct {
     /// Automatically create missing parent directories for the destination path.
     createDirs: bool = true,
     /// Flag for cooperative cancellation.
-    cancelFlag: ?*const std.atomic.Value(bool) = null,
+    cancel: ?*const std.atomic.Value(bool) = null,
     /// Authentication helpers
     bearerAuth: ?[]const u8 = null,
     basicAuth: ?[]const u8 = null,
@@ -824,7 +824,7 @@ pub const Downloader = struct {
         };
 
         while (attempt <= options.maxRetries) : (attempt += 1) {
-            if (options.cancelFlag) |cf| {
+            if (options.cancel) |cf| {
                 if (cf.load(.acquire)) return DownloadError.Cancelled;
             }
 
@@ -1052,7 +1052,7 @@ pub const Downloader = struct {
         const chunkSize: usize = 32 * 1024;
 
         while (chunkPos < bodyData.len) {
-            if (options.cancelFlag) |cf| {
+            if (options.cancel) |cf| {
                 if (cf.load(.acquire)) {
                     tracker.cancel();
                     return DownloadError.Cancelled;
@@ -1301,7 +1301,7 @@ pub const UpdateOptions = struct {
     progress: ProgressMode = .auto,
     backupExisting: bool = true,
     backupSuffix: []const u8 = ".bak",
-    cancelFlag: ?*const std.atomic.Value(bool) = null,
+    cancel: ?*const std.atomic.Value(bool) = null,
 };
 
 /// Safely updates an existing executable or asset on disk with rollback preservation.
@@ -1324,7 +1324,7 @@ pub fn updateFile(
         .progress = options.progress,
         .atomic = true,
         .existing = .overwrite,
-        .cancelFlag = options.cancelFlag,
+        .cancel = options.cancel,
     });
 
     // 2. Backup existing file if requested
@@ -1368,7 +1368,7 @@ pub const FtpDownloadOptions = struct {
     progress: ProgressMode = .auto,
     existing: ExistingFilePolicy = .overwrite,
     atomic: bool = true,
-    cancelFlag: ?*const std.atomic.Value(bool) = null,
+    cancel: ?*const std.atomic.Value(bool) = null,
 };
 
 /// Downloads a file over FTP with progress reporting and checksum verification.
@@ -1436,7 +1436,7 @@ pub fn ftpDownload(
         .hFile = fileHandle,
         .h = &hasher,
         .t = &tracker,
-        .cancel = options.cancelFlag,
+        .cancel = options.cancel,
     };
 
     ftp.download(options.remotePath, &ctx, Context.sink) catch |e| {

@@ -47,6 +47,7 @@ pub const common = struct {
     pub const parse = @import("common/parse.zig");
     pub const bodySource = @import("common/bodySource.zig");
     pub const env = @import("common/env.zig");
+    pub const json = @import("common/json.zig");
     pub const BodySource = bodySource.BodySource;
     pub const SliceReader = bodySource.SliceReader;
     pub const CallbackReader = bodySource.CallbackReader;
@@ -179,17 +180,16 @@ pub const multipart = struct {
     const serverMod = @import("web/multipart/multipartServer.zig");
     const commonMod = @import("web/multipart/multipartCommon.zig");
 
-    // Primary encoder / decoder constructors
+    /// Small explicit facades over the shared multipart implementations.
     pub const encoder = encoderMod;
-    pub const decoder = parserMod;
-    pub const Encoder = encoderMod.Encoder;
-    pub const Decoder = parserMod.Decoder;
-    pub const Stream = encoderMod.StreamEncoder;
-
-    // Helper functions
-    pub const extractBoundary = parserMod.extractBoundary;
-    pub const detectSubtype = parserMod.detectSubtype;
-    pub const validateBoundary = commonMod.validateBoundary;
+    pub const decoder = struct {
+        pub const Parser = parserMod.Decoder;
+        pub const Field = parserMod.Field;
+        pub const Limits = parserMod.Limits;
+        pub const ParseError = parserMod.ParseError;
+        pub const init = Parser.init;
+        pub const effectiveFilename = parserMod.effectiveFilename;
+    };
 
     // Shared types
     pub const Field = parserMod.Field;
@@ -200,22 +200,22 @@ pub const multipart = struct {
     pub const Subtype = encoderMod.Subtype;
     pub const Limits = parserMod.Limits;
 
-    // Server & boundary namespaces
-    pub const server = serverMod;
-    pub const field = Field;
-    pub const part = Part;
-    pub const file = struct {
-        pub const Options = FileOptions;
-    };
-    pub const boundary = struct {
+    // Boundary utilities under a single clean namespace
+    pub const Boundary = struct {
+        /// Extract the boundary parameter from a Content-Type header value.
+        /// e.g. `"multipart/form-data; boundary=abc"` returns `"abc"`.
+        pub const extract = parserMod.extractBoundary;
+        /// Detect the multipart subtype from a Content-Type header value.
+        /// e.g. `"multipart/form-data; ..."` returns `"form-data"`.
+        pub const subtype = parserMod.detectSubtype;
+        /// Validate that a boundary string conforms to RFC 2046.
         pub const validate = commonMod.validateBoundary;
+        /// Generate a random RFC 2046-compliant boundary string.
+        pub const generate = encoderMod.generateBoundary;
     };
 
-    // Backward alias for hierarchical path
-    pub const stream = struct {
-        pub const encoder = encoderMod;
-        pub const decoder = parserMod;
-    };
+    // Server-side parsing namespace
+    pub const server = serverMod;
 };
 /// Content negotiation and compression codecs used by the client and server.
 /// Authentication helpers shared by client and server integrations.
@@ -228,22 +228,28 @@ test "client feature facade exports shared codecs auth and multipart paths" {
     try std.testing.expect(@hasDecl(compression, "compress"));
     try std.testing.expect(@hasDecl(auth, "basic"));
     try std.testing.expect(@hasDecl(auth, "bearer"));
-    try std.testing.expect(@hasDecl(multipart.stream, "encoder"));
-    try std.testing.expect(@hasDecl(multipart.stream, "decoder"));
-    try std.testing.expect(@hasDecl(multipart, "field"));
-    try std.testing.expect(@hasDecl(multipart, "file"));
-    try std.testing.expect(@hasDecl(multipart, "part"));
-    try std.testing.expect(@hasDecl(multipart, "boundary"));
+    try std.testing.expect(@hasDecl(multipart, "encoder"));
+    try std.testing.expect(@hasDecl(multipart, "decoder"));
+    try std.testing.expect(@hasDecl(multipart, "Field"));
+    try std.testing.expect(@hasDecl(multipart, "File"));
+    try std.testing.expect(@hasDecl(multipart, "Part"));
+    try std.testing.expect(@hasDecl(multipart, "Boundary"));
     try std.testing.expect(@hasDecl(multipart, "server"));
+    try std.testing.expect(!@hasDecl(multipart, "Encoder"));
+    try std.testing.expect(!@hasDecl(multipart, "Decoder"));
+    try std.testing.expect(!@hasDecl(multipart, "stream"));
+    try std.testing.expect(!@hasDecl(multipart.encoder, "StreamEncoder"));
+    try std.testing.expect(!@hasDecl(multipart.decoder, "StreamParser"));
+    try std.testing.expect(!@hasDecl(client, "multipart"));
 }
 
 test "multipart hierarchical encoder and decoder APIs share implementations" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const fields = [_]multipart.stream.encoder.FieldValue{
+    const fields = [_]multipart.encoder.FieldValue{
         .{ .name = "key", .value = "value" },
     };
-    var encoder = try multipart.stream.encoder.init(allocator, io, .{
+    var encoder = try multipart.encoder.init(allocator, io, .{
         .subtype = .formData,
         .fields = &fields,
     });
@@ -251,7 +257,7 @@ test "multipart hierarchical encoder and decoder APIs share implementations" {
     const wire = try encoder.encodeAlloc();
     defer allocator.free(wire);
 
-    var decoder = try multipart.stream.decoder.init(allocator, io, .{});
+    var decoder = try multipart.decoder.init(allocator, io, .{});
     defer decoder.deinit();
     var content_type_buf: [160]u8 = undefined;
     const content_type = encoder.contentType(&content_type_buf);
@@ -260,6 +266,17 @@ test "multipart hierarchical encoder and decoder APIs share implementations" {
     try std.testing.expectEqual(@as(usize, 1), decoded.len);
     try std.testing.expectEqualStrings("key", decoded[0].name);
     try std.testing.expectEqualStrings("value", decoded[0].data);
+
+    var streamed: std.Io.Writer.Allocating = .init(allocator);
+    defer streamed.deinit();
+    var stream = try multipart.encoder.stream(&streamed.writer, .{
+        .boundary = "api-test-boundary",
+    });
+    try stream.beginPart("key", .{ .contentType = "text/plain" });
+    try stream.write("value");
+    try stream.endPart();
+    try stream.finish();
+    try std.testing.expect(streamed.written().len > 0);
 }
 
 // Canonical router exports
@@ -335,11 +352,14 @@ pub const BackendCapabilities = static.BackendCapabilities;
 pub const WatcherStatus = static.WatcherStatus;
 pub const health = @import("web/health/healthEndpoints.zig");
 pub const metrics = @import("web/metrics/metricsRegistry.zig");
-pub const mime = @import("utils/mime.zig");
+pub const mime = @import("common/mime.zig");
 pub const fs = @import("utils/fs.zig");
-pub const rest = @import("web/rest/restApi.zig");
+pub const json = @import("common/json.zig");
+pub const rest = @import("web/rest/api.zig");
 pub const Rest = rest.Rest;
-pub const ApiResult = rest.ApiResult;
+pub const Schema = rest.Schema;
+pub const Empty = rest.Empty;
+pub const JsonSchema = rest.JsonSchema;
 pub const app = @import("web/app.zig");
 pub const App = app.App;
 pub const openapi = @import("web/openApi/openApiSpec.zig");
@@ -385,7 +405,8 @@ pub const web = struct {
     };
     pub const health = @import("web/health/healthEndpoints.zig");
     pub const metrics = @import("web/metrics/metricsRegistry.zig");
-    pub const rest = @import("web/rest/restApi.zig");
+    pub const rest = @import("web/rest/api.zig");
+    pub const json = @import("common/json.zig");
     pub const app = @import("web/app.zig");
     pub const openapi = @import("web/openApi/openApiSpec.zig");
     pub const docs = @import("web/docs/docs.zig");
@@ -418,8 +439,6 @@ pub const client = struct {
     pub const builder = httpClientMod.Client.RequestBuilder;
     pub const request = requestBuilderMod.Request;
     pub const header = requestBuilderMod.Header;
-    pub const multipart = @import("web/multipart/multipartEncoder.zig");
-
     // Body & streaming payload sources: httpx.client.body, httpx.client.stream
     pub const body = requestBuilderMod.BodySource;
     pub const bodySource = body;
@@ -552,6 +571,7 @@ test {
     _ = common.clock;
     _ = common.sync;
     _ = common.io;
+    _ = common.json;
     _ = errors;
     _ = status;
     _ = headers;

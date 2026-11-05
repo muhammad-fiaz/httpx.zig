@@ -31,8 +31,8 @@ const resolvers = struct {
     pub fn getMe(ctx: httpx.graphql.ResolverContext) anyerror!std.json.Value {
         return ctx.value(.{
             .id = "usr_101",
-            .name = "Muhammad Fiaz",
-            .email = "contact@muhammadfiaz.com",
+            .name = "Example User",
+            .email = "user@example.com",
             .role = "administrator",
         });
     }
@@ -139,7 +139,7 @@ pub fn main() !void {
 ```text
 GraphQL server listening on http://127.0.0.1:54321
 GET / -> status=200, body={"message":"Hello from httpx! Visit /graphiql, /docs, /redoc, or /scalar","status":"operational"}
-POST /graphql -> status=200, body={"data":{"me":{"id":"usr_101","name":"Muhammad Fiaz"}}}
+POST /graphql -> status=200, body={"data":{"me":{"id":"usr_101","name":"Example User"}}}
 GraphQL server and client verification completed successfully.
 ```
 

@@ -44,7 +44,7 @@ const DownloadTask = struct {
         _ = try client.download(self.url, .{
             .path = self.dest,
             .progress = .enabled,
-            .cancelFlag = cancel,
+            .cancel = cancel,
         });
     }
 };

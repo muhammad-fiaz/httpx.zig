@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const mimeMod = @import("../../utils/mime.zig");
+const mimeMod = @import("../../common/mime.zig");
 const Method = @import("../../common/method.zig").Method;
 const patternMod = @import("routePattern.zig");
 pub const pattern = patternMod;

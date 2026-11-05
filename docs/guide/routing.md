@@ -168,6 +168,62 @@ Configured via authoritative `httpx.router.TrailingSlash`:
 
 Shared across code-based routing, file-based routing, and website serving.
 
+## Typed REST Endpoints with `App`
+
+`httpx.App` registers typed endpoints with a single object literal per route and
+returns `httpx.Schema(T)` results:
+
+```zig
+var app = try httpx.App.init(allocator, io, .{ .port = 8080 });
+defer app.deinit();
+
+try app.get(.{ .path = "/users/{id:int}", .handler = getUser, .summary = "Get user by ID", .tags = &.{"users"} });
+try app.post(.{ .path = "/users", .handler = createUser, .summary = "Create user", .tags = &.{"users"} });
+try app.put(.{ .path = "/users/{id:int}", .handler = updateUser, .names = names }); // renamed JSON keys
+try app.delete(.{ .path = "/users/{id:int}", .handler = deleteUser });
+
+// raw handler: explicit method enum, no schema derivation
+try app.add(.GET, "/health", healthCheck, .{ .summary = "Liveness" });
+try app.use(httpx.middleware.cors);
+
+try app.listen();
+```
+
+Handler signatures are `(*Context)` or `(*Context, RequestType)`, returning
+`!httpx.Schema(T)`:
+
+```zig
+const names = .{ .user_name = "user-name" };
+
+fn getUser(ctx: *httpx.Context) !httpx.Schema(UserResponse) {
+    const id = ctx.paramUint("id") orelse return error.BadRequest;
+    return httpx.Schema(UserResponse).ok(.{ .id = id, .name = "alice" });
+}
+
+fn createUser(_: *httpx.Context, body: CreateUserRequest) !httpx.Schema(UserResponse) {
+    return httpx.Schema(UserResponse).result(.{
+        .status = .created,
+        .body = .{ .id = 101, .name = body.name },
+    });
+}
+```
+
+Every option is optional; only what you state is used:
+
+```zig
+.{ .path = "/users", .handler = createUser, .operationId = "createUser",
+   .summary = "...", .description = "...", .tags = &.{"users"},
+   .deprecated = false, .security = &.{},
+   .mediaType = "application/vnd.api+json", .names = names }
+```
+
+`.names` maps Zig field names to JSON wire keys, so `user-name`, `@context`,
+`Content-Type`, or `123user` work on typed structs and responses are encoded
+with the same keys. See [Server API](/api/server) for accepted single-document
+JSON media types (`text/json`, `problem+json`, any valid `+json` type, etc.).
+NDJSON, JSONL, JSON5, and JSON text sequences are classified separately and
+are not parsed as single JSON documents by typed REST endpoints.
+
 ## OpenAPI
 
 Typed converters feed OpenAPI generation automatically: `/users/{id:int}`

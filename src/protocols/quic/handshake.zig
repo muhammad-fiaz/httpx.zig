@@ -721,6 +721,14 @@ pub fn feedPumped(
 /// NOT stopped here — the caller owns its lifetime (handshake, then
 /// request exchange, then stop).
 pub fn serveHandshake(serverEp: *Endpoint, pump: *transportMod.Pump, driver: ?*Driver, deadlineMs: u64) !void {
+    // A server may reuse its listening Endpoint while replacing the
+    // per-connection QUIC state. Start the new connection with no route
+    // inherited from the previous peer; after bootstrap, receiveFrom pins
+    // this connection to its first source address.
+    if (serverEp.conn.role == .server and serverEp.conn.state == .initial) {
+        serverEp.peer = null;
+        serverEp.candidatePeer = null;
+    }
     const start: u64 = @intCast(clockMod.monotonicMillis(serverEp.io));
     var booted = false;
     while (true) {

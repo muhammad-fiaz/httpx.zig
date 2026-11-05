@@ -24,8 +24,8 @@ const resolvers = struct {
     pub fn getMe(ctx: httpx.graphql.ResolverContext) anyerror!std.json.Value {
         return ctx.value(.{
             .id = "usr_101",
-            .name = "Muhammad Fiaz",
-            .email = "contact@muhammadfiaz.com",
+            .name = "Example User",
+            .email = "user@example.com",
             .role = "administrator",
         });
     }
@@ -51,6 +51,25 @@ const QueryType = httpx.graphql.ObjectTypeDef{
         .{ .name = "users", .typeName = "User", .isList = true, .description = "List all users in organization", .resolver = resolvers.getUsers },
     },
 };
+
+// A typed REST endpoint next to GraphQL: `httpx.Schema(T)` results plus a key
+// map, so wire keys that are not Zig identifiers work here too.
+const StatusResponse = struct {
+    server_name: []const u8,
+    uptime_s: u64,
+};
+
+const statusNames = .{
+    .server_name = "server-name",
+    .uptime_s = "uptime-seconds",
+};
+
+fn statusHandler(_: *httpx.router.Context) !httpx.Schema(StatusResponse) {
+    return httpx.Schema(StatusResponse).ok(.{
+        .server_name = "httpx",
+        .uptime_s = 42,
+    });
+}
 
 fn helloHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     return ctx.json(.{
@@ -86,6 +105,15 @@ pub fn main() !void {
     // Setup REST route
     try server.get("/", helloHandler);
 
+    // Setup a typed REST route (auto-documented, renamed JSON keys)
+    var rest = httpx.Rest.init(&server.router);
+    try rest.get("/api/status", .{
+        .handler = statusHandler,
+        .summary = "Typed status report",
+        .tags = &.{"system"},
+        .names = statusNames,
+    });
+
     // Setup GraphQL schema and mount endpoint
     const schema = httpx.graphql.Schema.init(allocator, .{
         .query = QueryType,
@@ -115,6 +143,12 @@ pub fn main() !void {
 
     var gqlBuf: [128]u8 = undefined;
     const urlGraphql = try std.fmt.bufPrint(&gqlBuf, "http://127.0.0.1:{d}/graphql", .{port});
+    var statusBuf: [160]u8 = undefined;
+    const urlStatus = try std.fmt.bufPrint(&statusBuf, "http://127.0.0.1:{d}/api/status", .{port});
+    var statusRes = try client.get(urlStatus, .{});
+    std.debug.print("GET /api/status -> status={d}, body={s}\n", .{ statusRes.status, statusRes.body });
+    statusRes.deinit();
+
     var gqlRes = try client.graphql(urlGraphql, "{ me { id name email role } }", null, .{});
     std.debug.print("POST /graphql -> status={d}, body={s}\n", .{ gqlRes.status, gqlRes.body });
     gqlRes.deinit();

@@ -7,7 +7,7 @@
 //! Thread-safety: immutable after registration; safe to read concurrently.
 
 const std = @import("std");
-const mimeMod = @import("../../utils/mime.zig");
+const mimeMod = @import("../../common/mime.zig");
 
 /// Parameter location.
 pub const Location = enum {

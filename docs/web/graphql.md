@@ -15,7 +15,7 @@ const httpx = @import("httpx");
 
 const resolvers = struct {
     pub fn getMe(ctx: httpx.graphql.ResolverContext) anyerror!std.json.Value {
-        return ctx.value(.{ .id = "usr_101", .name = "Muhammad Fiaz" });
+        return ctx.value(.{ .id = "usr_101", .name = "Example User" });
     }
 };
 

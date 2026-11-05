@@ -5,308 +5,257 @@ description: API documentation for RFC 2046 and RFC 7578 multipart/form-data enc
 
 # Multipart API Reference
 
-`httpx.zig` provides a comprehensive, RFC 2046 and RFC 7578 compliant multipart/form-data encoding, streaming, and decoding subsystem under the `httpx.multipart` namespace and via built-in client options.
+`httpx.zig` provides RFC 2046 and RFC 7578 compliant multipart/form-data encoding, streaming, and
+decoding under the `httpx.multipart` namespace and via zero-boilerplate client options.
 
 ## Namespace Overview
-
-Access all multipart primitives through `httpx.multipart`:
 
 ```zig
 const httpx = @import("httpx");
 
-// Core Encoders & Decoders
-const Encoder = httpx.multipart.Encoder;
-const Decoder = httpx.multipart.Decoder;
-const Stream = httpx.multipart.Stream;
-const extractBoundary = httpx.multipart.extractBoundary;
+// Core buffered encoder and decoder
+const encoder = httpx.multipart.encoder;
+const decoder = httpx.multipart.decoder;
 
-// Data Models
-const Part = httpx.multipart.Part;
+// Boundary utilities
+const Boundary = httpx.multipart.Boundary;
+
+// Data types returned by the server-side parser
 const Field = httpx.multipart.Field;
-const File = httpx.multipart.File;
-const FieldValue = httpx.multipart.FieldValue;
-const Subtype = httpx.multipart.Subtype;
-const Limits = httpx.multipart.Limits;
+const File  = httpx.multipart.File;
 ```
 
 ---
 
-## Client-Side Upload Options
+## Client-Side Upload — `.multipart` Option
 
-`httpx.Client` provides native, zero-boilerplate multipart uploads via the `.multipart` configuration option in `post`, `put`, `patch`, and `request`.
+Pass `.multipart` to any `client.post / put / patch / request` call.
+All options work with `.{}` default configs; only override what you need.
+The `allocator` and `io` are taken from the `Client` you initialised — no need to pass them again.
 
-### 1. Anonymous Struct File & Field Slices
-
-```zig
-const fields = [_]struct { name: []const u8, value: []const u8 }{
-    .{ .name = "description", .value = "large upload" },
-    .{ .name = "environment", .value = "production" },
-};
-
-const files = [_]struct {
-    name: []const u8,
-    filename: []const u8,
-    contentType: ?[]const u8,
-    data: []const u8,
-}{
-    .{
-        .name = "file",
-        .filename = "big.bin",
-        .contentType = "application/octet-stream", // Optional; auto-detected if omitted or null
-        .data = large_bytes,
-    },
-};
-
-var resp = try client.post("http://127.0.0.1:8080/upload", .{
-    .multipart = .{
-        .fields = &fields,
-        .files = &files,
-    },
-});
-defer resp.deinit();
-```
-
-### 2. Single-File Upload Convenience
-
-When uploading a single file, pass the struct directly without wrapping in a slice:
+### Fields + Files
 
 ```zig
-var resp = try client.post("http://127.0.0.1:8080/upload-avatar", .{
-    .multipart = .{
-        .name = "avatar",
-        .filename = "profile.png", // Content-Type automatically detected as "image/png"
-        .data = png_bytes,
-    },
-});
-defer resp.deinit();
-```
+var client = httpx.Client.init(allocator, io, .{});
+defer client.deinit();
 
-Or nested under `.file`:
-
-```zig
-var resp = try client.post("http://127.0.0.1:8080/upload-doc", .{
+var resp = try client.post("http://localhost:8080/upload", .{
     .multipart = .{
-        .file = .{
-            .name = "document",
-            .filename = "contract.pdf", // Auto-detected as "application/pdf"
-            .data = pdf_bytes,
+        .fields = &.{
+            .{ .name = "description", .value = "large upload" },
+            .{ .name = "environment", .value = "production" },
+        },
+        .files = &.{
+            .{ .name = "file", .filename = "data.bin", .data = bytes },
+            // contentType auto-detected from filename extension when omitted
+            .{ .name = "image", .filename = "photo.png", .data = png_bytes },
         },
     },
 });
 defer resp.deinit();
 ```
 
-### 3. Cooperative Request Cancellation
+### Generic Parts (full control)
 
-All HTTP client requests, including large multipart transfers, support cooperative cancellation via `cancelFlag: ?*const std.atomic.Value(bool)`.
+```zig
+var resp = try client.post("http://localhost:8080/ingest", .{
+    .multipart = .{
+        .parts = &.{
+            .{ .name = "meta",   .data = json_meta, .contentType = "application/json" },
+            .{ .name = "binary", .data = bin_data,  .filename = "out.bin" },
+        },
+    },
+});
+defer resp.deinit();
+```
+
+### Single-File Shorthand
+
+```zig
+// All fields directly on .multipart
+var resp = try client.post("http://localhost:8080/avatar", .{
+    .multipart = .{ .name = "avatar", .filename = "photo.png", .data = png_bytes },
+});
+defer resp.deinit();
+```
+
+### Cooperative Cancellation
 
 ```zig
 var cancel = std.atomic.Value(bool).init(false);
+// From another thread: cancel.store(true, .release);
 
-// Signal cancellation from another thread, signal handler, or timeout loop:
-// cancel.store(true, .release);
-
-var resp = client.post("http://127.0.0.1:8080/upload", .{
-    .cancelFlag = &cancel,
-    .multipart = .{
-        .name = "payload",
-        .filename = "archive.tar.gz",
-        .data = archive_bytes,
-    },
+var resp = client.post("http://localhost:8080/upload", .{
+    .cancel    = &cancel,
+    .multipart = .{ .name = "payload", .filename = "archive.tar.gz", .data = bytes },
 }) catch |err| switch (err) {
-    error.Cancelled => {
-        // Request connection, transmission, or reading was cancelled cleanly
-        return;
-    },
+    error.Cancelled => return,
     else => return err,
 };
 defer resp.deinit();
 ```
 
-Using the fluent `RequestBuilder`:
+---
+
+## Encoder
+
+`httpx.multipart.encoder` builds a complete multipart body in memory.
+Initialise once; `allocator` and `io` are stored internally.
 
 ```zig
-var builder = client.builder(.POST, "http://127.0.0.1:8080/upload");
-defer builder.deinit();
+var encoder = try httpx.multipart.encoder.init(allocator, io, .{
+    .subtype  = .formData, // default
+    .boundary = null,      // auto-generated
+    .fields   = &.{
+        .{ .name = "description", .value = "hello" },
+    },
+    .files = &.{
+        .{ .name = "data", .filename = "out.bin", .data = bytes },
+    },
+});
+defer encoder.deinit();
 
-_ = builder.cancelFlag(&cancel);
-var resp = try builder.send();
-defer resp.deinit();
+const body = try encoder.encodeAlloc(); // allocates; caller frees
+defer allocator.free(body);
+
+var ctBuf: [160]u8 = undefined;
+const contentType = encoder.contentType(&ctBuf);
+// e.g. "multipart/form-data; boundary=\"abc123\""
 ```
 
 ---
 
-## Core Types
+## Streaming Encoder
 
-### `httpx.multipart.Part`
-
-Represents an individual multipart element for encoding:
+Memory-bounded chunked streaming — no need to buffer the full body:
 
 ```zig
-pub const Part = struct {
-    name: []const u8,
-    data: []const u8,
-    filename: ?[]const u8 = null,
-    contentType: ?[]const u8 = null,
-    headers: ?[]const Header = null,
-};
-```
-
-### `httpx.multipart.Field` & `httpx.multipart.File`
-
-Used for parsed forms:
-
-```zig
-pub const Field = struct {
-    name: []const u8,
-    value: []const u8,
-};
-
-pub const File = struct {
-    name: []const u8,
-    filename: []const u8,
-    contentType: []const u8,
-    data: []const u8,
-    tempPath: ?[]const u8 = null,
-};
-```
-
-### `httpx.multipart.Subtype`
-
-```zig
-pub const Subtype = enum {
-    formData,
-    mixed,
-    related,
-    alternative,
-    parallel,
-    digest,
-};
-```
-
-### `httpx.multipart.Limits`
-
-Controls buffer boundaries and denial-of-service limits:
-
-```zig
-pub const Limits = struct {
-    maxMemoryBytes: usize = 32 * 1024 * 1024,
-    maxFields: usize = 1_000,
-    maxFiles: usize = 100,
-    maxHeaderBytes: usize = 64 * 1024,
-    maxBoundaryBytes: usize = 128,
-};
-```
-
----
-
-## Streaming Encoder API
-
-The `httpx.multipart.Stream` encoder allows writing chunked or direct streams into any writer with bounded memory.
-
-```zig
-const Stream = httpx.multipart.Stream;
-
 var output: std.ArrayList(u8) = .empty;
 defer output.deinit(allocator);
 
-var stream = try Stream.init(
-    &output.writer,
-    .formData,
-    "unique-boundary-marker",
-);
+var stream = try httpx.multipart.encoder.stream(&output.writer, .{
+    .subtype = .formData,
+    .boundary = "my-boundary",
+});
 
-// Stream a text field
-try stream.writeField("username", "alice");
+try stream.beginPart("upload", .{ .filename = "archive.zip", .contentType = "application/zip" });
+try stream.write(chunk1);
+try stream.write(chunk2);
+try stream.endPart();
 
-// Stream a file part
-try stream.beginFile("upload", "archive.zip", "application/zip", null);
-try stream.writeChunk(chunk1);
-try stream.writeChunk(chunk2);
-try stream.endFile();
-
-// Finalize multipart envelope
 try stream.finish();
 ```
 
 ---
 
-## Decoder API
+## Server-Side — `ctx.multipartForm`
 
-### In-Memory Decoding
-
-Parse an encoded multipart body:
+Inside a route handler parse an incoming multipart body:
 
 ```zig
-const Decoder = httpx.multipart.Decoder;
+pub fn handleUpload(ctx: *httpx.Context) !httpx.Response {
+    var form = try ctx.multipartForm(.{
+        .maxMemoryBytes = 16 * 1024 * 1024, // optional — defaults to 32 MB
+    });
+    defer form.deinit();
 
-var decoder = try Decoder.init(allocator, body_bytes, boundary, .{});
+    if (form.getField("username")) |user| {
+        std.debug.print("User: {s}\n", .{user});
+    }
+    if (form.getFile("avatar")) |file| {
+        std.debug.print("Uploaded {s} ({d} bytes)\n", .{ file.filename.?, file.data.len });
+    }
+
+    return ctx.text("Upload received");
+}
+```
+
+---
+
+## Decoder
+
+Parse a raw multipart body manually (outside a route handler):
+
+```zig
+const ct  = req.header("content-type") orelse return error.MissingContentType;
+
+var decoder = try httpx.multipart.decoder.init(allocator, io, .{});
 defer decoder.deinit();
 
-while (try decoder.next()) |part| {
-    if (part.isFile()) {
-        std.debug.print("File: {s} (filename={?s}, type={s}, len={d})\n", .{
-            part.name,
-            part.filename,
-            part.contentType,
-            part.data.len,
-        });
+const fields = try decoder.parse(body_bytes, ct);
+defer decoder.free(fields);
+for (fields) |part| {
+    if (part.filename != null) {
+        std.debug.print("File: {s} ({d} bytes)\n", .{ part.name, part.data.len });
     } else {
         std.debug.print("Field: {s} = {s}\n", .{ part.name, part.data });
     }
 }
 ```
 
-### Extracting Boundaries
+---
 
-Extract the boundary parameter from a `Content-Type` header:
+## Boundary Utilities
+
+All boundary helpers live under `httpx.multipart.Boundary`:
+
+| Function | Description |
+|---|---|
+| `Boundary.extract(contentType)` | Extract boundary from `Content-Type` header value |
+| `Boundary.subtype(contentType)` | Detect multipart subtype (`"form-data"`, `"mixed"`, …) |
+| `Boundary.validate(boundary)` | Validate a boundary per RFC 2046 §5.1.1 |
+| `Boundary.generate(&buf)` | Generate a unique 32-char hex boundary |
 
 ```zig
-if (httpx.multipart.extractBoundary(req.header("content-type").?)) |boundary| {
-    // boundary is now available
+const ct  = req.header("content-type") orelse return error.MissingContentType;
+const bnd = httpx.multipart.Boundary.extract(ct) orelse return error.InvalidBoundary;
+const sub = httpx.multipart.Boundary.subtype(ct); // "form-data", "mixed", ...
+```
+
+---
+
+## Resumable Chunked Upload
+
+```zig
+const chunkSize: usize = 64 * 1024;
+var offset: usize = 0;
+
+while (offset < total_bytes.len) {
+    if (cancel.load(.acquire)) return error.Cancelled;
+    const end = @min(offset + chunkSize, total_bytes.len);
+
+    var rangeBuf: [64]u8 = undefined;
+    const rangeHeader = try std.fmt.bufPrint(
+        &rangeBuf, "bytes {d}-{d}/{d}", .{ offset, end - 1, total_bytes.len },
+    );
+
+    var resp = try client.post("http://localhost:8080/upload-resumable", .{
+        .cancel  = &cancel,
+        .headers = &.{ .{ .name = "Content-Range", .value = rangeHeader } },
+        .multipart = .{
+            .fields = &.{ .{ .name = "part", .value = "1" } },
+            .files  = &.{ .{ .name = "chunk", .filename = "data.bin", .data = total_bytes[offset..end] } },
+        },
+    });
+    defer resp.deinit();
+
+    if (resp.status == 200 or resp.status == 308) offset = end
+    else return error.UploadFailed;
 }
 ```
 
 ---
 
-## Resumable & Chunked Upload Patterns
+## Limits (server-side)
 
-For very large uploads where network interruptions can occur, combine streaming uploads with HTTP Range headers:
+All fields have safe production defaults — `.{}` works out of the box:
 
 ```zig
-// In a chunked resumable upload loop:
-var offset: u64 = resumeOffset;
-while (offset < totalSize) {
-    if (cancelFlag.load(.acquire)) return error.Cancelled;
-
-    const chunkLen = @min(chunkSize, totalSize - offset);
-    const chunkData = fileData[offset .. offset + chunkLen];
-
-    var rangeBuf: [64]u8 = undefined;
-    const rangeHeader = try std.fmt.bufPrint(&rangeBuf, "bytes {d}-{d}/{d}", .{
-        offset,
-        offset + chunkLen - 1,
-        totalSize,
-    });
-
-    var resp = try client.post("http://127.0.0.1:8080/upload-resumable", .{
-        .cancelFlag = &cancelFlag,
-        .headers = &.{
-            .{ .name = "Content-Range", .value = rangeHeader },
-        },
-        .multipart = .{
-            .name = "chunk",
-            .filename = "large_dataset.bin",
-            .data = chunkData,
-        },
-    });
-    defer resp.deinit();
-
-    if (resp.status == 200 or resp.status == 201 or resp.status == 308) {
-        offset += chunkLen;
-    } else {
-        return error.UploadFailed;
-    }
-}
+pub const Limits = struct {
+    maxMemoryBytes: usize = 32 * 1024 * 1024, // 32 MB
+    maxFields: usize = 1_000,
+    maxFiles: usize = 100,
+    maxHeaderBytes: usize = 64 * 1024,
+    maxBoundaryBytes: usize = 128,
+};
 ```
-

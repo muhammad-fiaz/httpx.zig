@@ -181,7 +181,7 @@ pub const Request = struct {
     quic: quicConn.Config = .{},
     /// Optional cooperative cancellation flag. Checked periodically during connection,
     /// writing, reading, and streaming loops.
-    cancelFlag: ?*const std.atomic.Value(bool) = null,
+    cancel: ?*const std.atomic.Value(bool) = null,
 
     pub fn text(url: []const u8, bodyText: []const u8) Request {
         return .{ .url = url, .method = .POST, .bodyKind = .raw, .body = bodyText };
@@ -928,7 +928,7 @@ const Http1StreamState = struct {
     transport: Transport,
     tlsBox: ?*tlsClientMod.Client.Connection,
     pool: ?*Pool,
-    cancelFlag: ?*const std.atomic.Value(bool) = null,
+    cancel: ?*const std.atomic.Value(bool) = null,
     host: [256]u8,
     hostLen: usize,
     port: u16,
@@ -961,7 +961,7 @@ const Http1StreamState = struct {
 
     fn read(ctx: *anyopaque, buf: []u8) anyerror!usize {
         const self: *Http1StreamState = @ptrCast(@alignCast(ctx));
-        if (self.cancelFlag) |cf| {
+        if (self.cancel) |cf| {
             if (cf.load(.acquire)) return Error.Cancelled;
         }
         if (self.closed or self.done) return 0;
@@ -1313,7 +1313,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
             }
         }
 
-        if (req.cancelFlag) |cf| {
+        if (req.cancel) |cf| {
             if (cf.load(.acquire)) return Error.Cancelled;
         }
 
@@ -1734,7 +1734,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 var chunkBuf: [16 * 1024]u8 = undefined;
                 var totalWritten: u64 = 0;
                 while (true) {
-                    if (req.cancelFlag) |cf| {
+                    if (req.cancel) |cf| {
                         if (cf.load(.acquire)) return Error.Cancelled;
                     }
                     const n = bs.read(&chunkBuf) catch return Error.WriteFailed;
@@ -1748,7 +1748,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 var chunkBuf: [16 * 1024]u8 = undefined;
                 var hexBuf: [32]u8 = undefined;
                 while (true) {
-                    if (req.cancelFlag) |cf| {
+                    if (req.cancel) |cf| {
                         if (cf.load(.acquire)) return Error.Cancelled;
                     }
                     const n = bs.read(&chunkBuf) catch return Error.WriteFailed;
@@ -1778,7 +1778,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
 
         if (!streaming) {
             const responseLimit = @min(req.maxResponseSize orelse maxResponseBodySize, maxResponseBodySize);
-            const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings }, responseLimit, req.cancelFlag);
+            const full = try readFullResponseWithOptions(a, transport, method == .HEAD, .{ .allowLfLineEndings = req.allowLfLineEndings }, responseLimit, req.cancel);
             var resp = full.resp;
 
             if (try applyRedirect(a, req, &u, &resp, &redirectState)) continue;
@@ -1806,7 +1806,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                                 }
                             }
                         }
-                        if (req.cancelFlag) |cf| {
+                        if (req.cancel) |cf| {
                             if (cf.load(.acquire)) return Error.Cancelled;
                         }
                         const n = transport.read(readBuf[0..]) catch return Error.ReadFailed;
@@ -1916,7 +1916,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                 .transport = transport,
                 .tlsBox = tlsBox,
                 .pool = if (req.proxy == null) req.pool else null,
-                .cancelFlag = req.cancelFlag,
+                .cancel = req.cancel,
                 .host = hostCopy,
                 .hostLen = hl,
                 .port = port,
@@ -2305,7 +2305,7 @@ fn readFullResponseWithOptions(
     isHead: bool,
     opts: parserMod.Options,
     maxSize: usize,
-    cancelFlag: ?*const std.atomic.Value(bool),
+    cancel: ?*const std.atomic.Value(bool),
 ) Error!FullResponse {
     var acc: std.ArrayList(u8) = .empty;
     defer acc.deinit(a);
@@ -2329,7 +2329,7 @@ fn readFullResponseWithOptions(
                         }
                     }
                 }
-                if (cancelFlag) |cf| {
+                if (cancel) |cf| {
                     if (cf.load(.acquire)) return Error.Cancelled;
                 }
                 const n = conn.read(buf[0..]) catch return Error.ReadFailed;
@@ -2412,7 +2412,7 @@ fn readFullResponseWithOptions(
     try body.appendSlice(a, acc.items[headEnd..]);
 
     if (framing.framing == .chunked) {
-        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..], maxSize, opts.allowLfLineEndings, cancelFlag);
+        const chunkedBody = try readChunkedResponseBody(a, conn, body.items, buf[0..], maxSize, opts.allowLfLineEndings, cancel);
         return .{ .resp = .{
             .allocator = a,
             .status = respHead.statusCode,
@@ -2427,7 +2427,7 @@ fn readFullResponseWithOptions(
         const clen = framing.length;
         if (clen > maxSize) return Error.ResponseTooLarge;
         while (body.items.len < clen) {
-            if (cancelFlag) |cf| {
+            if (cancel) |cf| {
                 if (cf.load(.acquire)) return Error.Cancelled;
             }
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
@@ -2440,7 +2440,7 @@ fn readFullResponseWithOptions(
         body.items.len = clen;
     } else {
         while (true) {
-            if (cancelFlag) |cf| {
+            if (cancel) |cf| {
                 if (cf.load(.acquire)) return Error.Cancelled;
             }
             const n = conn.read(buf[0..]) catch return Error.ReadFailed;
@@ -2469,7 +2469,7 @@ fn readChunkedResponseBody(
     readBuf: []u8,
     maxSize: usize,
     allowLfLineEndings: bool,
-    cancelFlag: ?*const std.atomic.Value(bool),
+    cancel: ?*const std.atomic.Value(bool),
 ) Error!ChunkedResponseBody {
     var wire: std.ArrayList(u8) = .empty;
     defer wire.deinit(a);
@@ -2504,7 +2504,7 @@ fn readChunkedResponseBody(
         if (wire.items.len > maxSize - consumedWire) {
             return Error.ResponseTooLarge;
         }
-        if (cancelFlag) |cf| {
+        if (cancel) |cf| {
             if (cf.load(.acquire)) return Error.Cancelled;
         }
         const n = conn.read(readBuf) catch return Error.ReadFailed;

@@ -12,8 +12,8 @@ by static files, embedded assets, templates, and downloads:
 
 ## Multipart Form Data
 
-RFC 2046 multipart/form-data builder and parser
-(`httpx.multipart.encoder` / `httpx.multipart.decoder`).
+RFC 2046 multipart builder and parser are available at
+`httpx.multipart.encoder` and `httpx.multipart.decoder`.
 
 ### Building
 
@@ -74,7 +74,7 @@ defer res.deinit();
 ### extractBoundary(contentType)
 
 Extracts the boundary value from a `Content-Type` header via
-`httpx.multipart.extractBoundary(...)`. Returns `null` if no boundary
+`httpx.multipart.Boundary.extract(...)`. Returns `null` if no boundary
 is present. Handles both quoted (`boundary="abc"`) and unquoted
 (`boundary=abc`) forms.
 

@@ -16,7 +16,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const tcp = @import("../sockets/tcp.zig");
-const mimeMod = @import("../utils/mime.zig");
+const mimeMod = @import("../common/mime.zig");
 const sync = @import("../common/sync.zig");
 const logging = @import("../common/logging.zig");
 const Method = @import("../common/method.zig").Method;
@@ -207,8 +207,6 @@ pub const RequestOptions = struct {
     bodySource: ?req.BodySource = null,
     /// Optional cooperative cancellation flag. Checked periodically during connection,
     /// reading, writing, and streaming loops.
-    cancelFlag: ?*const std.atomic.Value(bool) = null,
-    /// Alias for cancelFlag.
     cancel: ?*const std.atomic.Value(bool) = null,
 };
 
@@ -277,6 +275,16 @@ fn extractBodySource(opts: anytype) ?req.BodySource {
         const T = @TypeOf(v);
         if (T == req.BodySource) return v;
         if (comptime @typeInfo(T) == .optional and @typeInfo(T).optional.child == req.BodySource) return v;
+    }
+    return null;
+}
+
+fn extractCancel(opts: anytype) ?*const std.atomic.Value(bool) {
+    const O = @TypeOf(opts);
+    if (@hasField(O, "cancel")) {
+        const value = opts.cancel;
+        if (comptime @typeInfo(@TypeOf(value)) == .optional) return value;
+        return value;
     }
     return null;
 }
@@ -571,7 +579,7 @@ pub const Client = struct {
         timeoutMsValue: ?u64 = null,
         bearerAuthValue: ?[]const u8 = null,
         basicAuthValue: ?[]const u8 = null,
-        cancelFlagValue: ?*const std.atomic.Value(bool) = null,
+        cancelValue: ?*const std.atomic.Value(bool) = null,
 
         pub fn init(client: *Client, m: Method, url: []const u8) RequestBuilder {
             return .{
@@ -621,13 +629,8 @@ pub const Client = struct {
             return self;
         }
 
-        pub fn cancelFlag(self: *RequestBuilder, flag: *const std.atomic.Value(bool)) *RequestBuilder {
-            self.cancelFlagValue = flag;
-            return self;
-        }
-
         pub fn cancel(self: *RequestBuilder, flag: *const std.atomic.Value(bool)) *RequestBuilder {
-            self.cancelFlagValue = flag;
+            self.cancelValue = flag;
             return self;
         }
 
@@ -667,7 +670,7 @@ pub const Client = struct {
                 .timeoutMs = self.timeoutMsValue,
                 .bearerAuth = self.bearerAuthValue,
                 .basicAuth = self.basicAuthValue,
-                .cancelFlag = self.cancelFlagValue,
+                .cancel = self.cancelValue,
             });
         }
 
@@ -679,7 +682,7 @@ pub const Client = struct {
                 .timeoutMs = self.timeoutMsValue,
                 .bearerAuth = self.bearerAuthValue,
                 .basicAuth = self.basicAuthValue,
-                .cancelFlag = self.cancelFlagValue,
+                .cancel = self.cancelValue,
             });
         }
     };
@@ -1518,15 +1521,7 @@ pub const Client = struct {
             .maxResponseSize = reqMaxSize,
             .proxy = reqProxy,
             .bodySource = extractBodySource(opts),
-            .cancelFlag = blk: {
-                if (@hasField(@TypeOf(opts), "cancel")) {
-                    if (opts.cancel) |c| break :blk c;
-                }
-                if (@hasField(@TypeOf(opts), "cancelFlag")) {
-                    if (opts.cancelFlag) |cf| break :blk cf;
-                }
-                break :blk null;
-            },
+            .cancel = extractCancel(opts),
             .quic = self.config.protocols.http3.quic,
         };
         const result = if (streaming)
@@ -1810,7 +1805,7 @@ test "client unified request with typed json" {
     const CreateUser = struct { name: []const u8, email: []const u8 };
     const res = client.request("http://127.0.0.1:1/", .{
         .method = .POST,
-        .json = CreateUser{ .name = "Fiaz", .email = "fiaz@example.com" },
+        .json = CreateUser{ .name = "Example User", .email = "user@example.com" },
     });
     try std.testing.expectError(Error.ConnectFailed, res);
 }
@@ -1822,7 +1817,7 @@ test "response bytes and jsonAlloc" {
         .name = try a.dupe(u8, "Content-Type"),
         .value = try a.dupe(u8, "application/json"),
     };
-    const bodyStr = "{\"id\":101,\"name\":\"Fiaz\"}";
+    const bodyStr = "{\"id\":101,\"name\":\"Example User\"}";
     const bodyBytes = try a.dupe(u8, bodyStr);
 
     var resp = Response{
@@ -1840,11 +1835,11 @@ test "response bytes and jsonAlloc" {
     const parsed = try resp.jsonAlloc(User, a);
     defer parsed.deinit();
     try std.testing.expectEqual(@as(u64, 101), parsed.value.id);
-    try std.testing.expectEqualStrings("Fiaz", parsed.value.name);
+    try std.testing.expectEqualStrings("Example User", parsed.value.name);
 
     const userLeaky = try resp.json(User);
     try std.testing.expectEqual(@as(u64, 101), userLeaky.id);
-    try std.testing.expectEqualStrings("Fiaz", userLeaky.name);
+    try std.testing.expectEqualStrings("Example User", userLeaky.name);
 }
 
 test "client request with socks5 proxy connects through mock server" {
@@ -3613,7 +3608,7 @@ test "Client request with cancellation flag aborts cooperatively" {
     var cancel = std.atomic.Value(bool).init(true);
 
     const err = client.get("http://127.0.0.1:9999/test-cancel", .{
-        .cancelFlag = &cancel,
+        .cancel = &cancel,
     });
     try std.testing.expectError(req.Error.Cancelled, err);
 }

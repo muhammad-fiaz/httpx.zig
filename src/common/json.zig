@@ -2,13 +2,10 @@
 //!
 //! Three concerns live here and nowhere else:
 //!
-//! 1. **Media types.** [`isJsonMediaType`] accepts every registered and
-//!    de-facto JSON media type, not just `application/json`: structured
-//!    syntax suffixes (`problem+json`, `vnd.api+json`, `ld+json`, …),
-//!    vendor/personal/experimental trees (`vnd.`, `prs.`, `x.`), the
-//!    newline-delimited families (`ndjson`, `jsonl`, `json-seq`), `json5`,
-//!    legacy `text/json` / `application/x-json`, and `application/csp-report`.
-//!    Parameters (`; charset=utf-8`) and casing never matter.
+//! 1. **Media types.** [`classifyMediaType`] validates Content-Type syntax and
+//!    distinguishes JSON documents, JSON5, line-delimited JSON, and JSON text
+//!    sequences. [`isJsonMediaType`] is intentionally limited to document
+//!    formats that Zig's standard JSON parser can consume as a single value.
 //!
 //! 2. **Arbitrary keys.** [`Object`] helpers read keys that are not valid Zig
 //!    identifiers (`user-name`, `@context`, `Content-Type`, `123user`)
@@ -41,58 +38,98 @@ pub const applicationJson = "application/json";
 /// Canonical value, including the charset parameter every JSON body implies.
 pub const applicationJsonUtf8 = "application/json; charset=utf-8";
 
-/// Formats that carry JSON without a `json` token in the subtype.
-const plainFormats = [_][]const u8{"csp-report"};
+pub const MediaKind = enum { document, json5, lineDelimited, sequence, unsupported };
 
-/// Normalizes a `Content-Type` value: parameters dropped, surrounding
-/// whitespace trimmed, and the rest lowercased into `buf`. Returns `""` when
-/// the value does not fit or is empty.
-pub fn normalize(buf: []u8, contentType: []const u8) []const u8 {
-    const raw = contentType[0..(std.mem.indexOfScalar(u8, contentType, ';') orelse contentType.len)];
-    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
-    if (trimmed.len == 0 or trimmed.len > buf.len) return "";
-    return std.ascii.lowerString(buf, trimmed);
-}
-
-/// True for every JSON media type. Detection is rule-based, not a snapshot of
-/// the registry, so new vendor types work without a table update:
-///
-/// * `<anything>+json` — the structured-syntax suffix (`problem+json`,
-///   `merge-patch+json`, `vnd.api+json`, `hal+json`, `ld+json`, `geo+json`,
-///   `jrd+json`, `webpush-options+json`, `graphql-response+json`, and the
-///   `prs.` / `x.` trees).
-/// * `json` as the subtype, with an optional vendor or transport prefix
-///   (`x-`, `nd`) and an optional version or delimiter suffix
-///   (`json5`, `jsonl`, `json-seq`).
-/// * `csp-report`, which is JSON without a `json` token.
-///
-/// Parameters (`; charset=utf-8`) and casing never matter. Lookalikes such as
-/// `application/jsonx` are rejected.
-pub fn isJsonMediaType(contentType: []const u8) bool {
-    var buf: [96]u8 = undefined;
-    const mt = normalize(&buf, contentType);
-    if (mt.len == 0) return false;
-
-    const slash = std.mem.indexOfScalar(u8, mt, '/') orelse return false;
-    if (slash == 0 or slash + 1 >= mt.len) return false;
-    const sub = mt[slash + 1 ..];
-
-    if (std.mem.endsWith(u8, sub, "+json")) return true;
-    for (plainFormats) |known| {
-        if (std.mem.eql(u8, sub, known)) return true;
-    }
-
-    const rest = if (std.mem.startsWith(u8, sub, "x-")) sub[2..] else sub;
-    const idx = std.mem.indexOf(u8, rest, "json") orelse return false;
-    const prefix = rest[0..idx];
-    const suffix = rest[idx + 4 ..];
-    if (!(prefix.len == 0 or std.mem.eql(u8, prefix, "nd"))) return false;
-    if (suffix.len == 0) return true;
-    return switch (suffix[0]) {
-        '0'...'9', '-', '_', '.' => true,
-        'l' => suffix.len == 1,
+fn isTokenChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or switch (c) {
+        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
         else => false,
     };
+}
+
+fn validParameters(value: []const u8) bool {
+    var i: usize = 0;
+    while (i < value.len) {
+        while (i < value.len and (value[i] == ' ' or value[i] == '\t')) : (i += 1) {}
+        if (i == value.len or value[i] != ';') return false;
+        i += 1;
+        while (i < value.len and (value[i] == ' ' or value[i] == '\t')) : (i += 1) {}
+        const name_start = i;
+        while (i < value.len and isTokenChar(value[i])) : (i += 1) {}
+        if (i == name_start) return false;
+        while (i < value.len and (value[i] == ' ' or value[i] == '\t')) : (i += 1) {}
+        if (i == value.len or value[i] != '=') return false;
+        i += 1;
+        while (i < value.len and (value[i] == ' ' or value[i] == '\t')) : (i += 1) {}
+        if (i == value.len) return false;
+        if (value[i] == '"') {
+            i += 1;
+            var closed = false;
+            while (i < value.len) : (i += 1) {
+                const c = value[i];
+                if (c == '"') {
+                    i += 1;
+                    closed = true;
+                    break;
+                }
+                if (c == '\\') {
+                    i += 1;
+                    if (i == value.len or value[i] < 0x20 or value[i] == 0x7f) return false;
+                } else if ((c < 0x20 and c != '\t') or c == 0x7f) return false;
+            }
+            if (!closed) return false;
+        } else {
+            const start = i;
+            while (i < value.len and isTokenChar(value[i])) : (i += 1) {}
+            if (i == start) return false;
+        }
+        while (i < value.len and (value[i] == ' ' or value[i] == '\t')) : (i += 1) {}
+        if (i < value.len and value[i] != ';') return false;
+    }
+    return true;
+}
+
+/// Normalizes a syntactically valid `Content-Type` to its lowercased
+/// type/subtype. Invalid type tokens or parameters return `""`.
+pub fn normalize(buf: []u8, contentType: []const u8) []const u8 {
+    const value = std.mem.trim(u8, contentType, " \t");
+    var i: usize = 0;
+    while (i < value.len and value[i] != ';') : (i += 1) {}
+    const media = std.mem.trimEnd(u8, value[0..i], " \t");
+    if (media.len == 0 or media.len > buf.len or !validParameters(value[i..])) return "";
+    const slash = std.mem.indexOfScalar(u8, media, '/') orelse return "";
+    if (slash == 0 or slash + 1 >= media.len or std.mem.indexOfScalar(u8, media[slash + 1 ..], '/') != null) return "";
+    for (media, 0..) |c, index| {
+        if (index == slash) continue;
+        if (!isTokenChar(c)) return "";
+    }
+    return std.ascii.lowerString(buf, media);
+}
+
+/// True for a valid single-document JSON media type, including structured
+/// syntax suffixes and legacy aliases. Formats requiring a different parser
+/// are available through `classifyMediaType` but intentionally return false.
+pub fn classifyMediaType(contentType: []const u8) MediaKind {
+    var buf: [96]u8 = undefined;
+    const mt = normalize(&buf, contentType);
+    if (mt.len == 0) return .unsupported;
+
+    const slash = std.mem.indexOfScalar(u8, mt, '/') orelse return .unsupported;
+    if (slash == 0 or slash + 1 >= mt.len) return .unsupported;
+    const sub = mt[slash + 1 ..];
+
+    if (std.mem.eql(u8, mt, "application/json") or std.mem.eql(u8, mt, "text/json") or
+        std.mem.eql(u8, mt, "application/x-json") or std.mem.eql(u8, mt, "application/csp-report") or
+        std.mem.endsWith(u8, sub, "+json")) return .document;
+    if (std.mem.eql(u8, mt, "application/json5") or std.mem.eql(u8, mt, "text/json5")) return .json5;
+    if (std.mem.eql(u8, mt, "application/jsonl") or std.mem.eql(u8, mt, "application/ndjson") or
+        std.mem.eql(u8, mt, "application/x-ndjson") or std.mem.eql(u8, mt, "text/ndjson")) return .lineDelimited;
+    if (std.mem.eql(u8, mt, "application/json-seq") or std.mem.eql(u8, mt, "text/json-seq")) return .sequence;
+    return .unsupported;
+}
+
+pub fn isJsonMediaType(contentType: []const u8) bool {
+    return classifyMediaType(contentType) == .document;
 }
 
 /// Parses a JSON document into a dynamically typed value. The returned value
@@ -331,18 +368,13 @@ pub fn getArray(object: *const Object, key: []const u8) ?Array {
     };
 }
 
-test "accepts JSON media types by rule, not by a fixed list" {
+test "classifies JSON media types precisely and validates Content-Type syntax" {
     const testing = std.testing;
     const accepted = [_][]const u8{
         "application/json",
         "APPLICATION/JSON; charset=utf-8",
         " text/json ",
         "application/x-json",
-        "application/json5",
-        "application/jsonl",
-        "application/ndjson",
-        "application/x-ndjson",
-        "application/json-seq",
         "application/csp-report",
         "application/problem+json",
         "application/vnd.api+json",
@@ -351,6 +383,15 @@ test "accepts JSON media types by rule, not by a fixed list" {
         "application/not-yet-registered+json; charset=utf-8",
     };
     for (accepted) |ct| try testing.expect(isJsonMediaType(ct));
+
+    try testing.expectEqual(MediaKind.json5, classifyMediaType("application/json5"));
+    try testing.expectEqual(MediaKind.lineDelimited, classifyMediaType("application/x-ndjson"));
+    try testing.expectEqual(MediaKind.sequence, classifyMediaType("application/json-seq"));
+    try testing.expect(!isJsonMediaType("application/json5"));
+    try testing.expect(!isJsonMediaType("application/jsonl"));
+    try testing.expect(!isJsonMediaType("application/ndjson"));
+    try testing.expect(!isJsonMediaType("application/x-ndjson"));
+    try testing.expect(!isJsonMediaType("application/json-seq"));
 
     const rejected = [_][]const u8{
         "",
@@ -366,6 +407,11 @@ test "accepts JSON media types by rule, not by a fixed list" {
         "application/jsonx+jsonx",
         "application/not-json",
         "text/plain-json",
+        "application/json/extra",
+        "application /json",
+        "application/json; charset=",
+        "application/json; charset=\"utf-8",
+        "application/json; charset=utf-8 garbage",
     };
     for (rejected) |ct| try testing.expect(!isJsonMediaType(ct));
 }

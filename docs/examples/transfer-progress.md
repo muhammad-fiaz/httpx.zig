@@ -22,7 +22,7 @@ _ = try client.download(url, .{
     .progress = .custom, // .auto / .enabled / .disabled / .quiet
     .onProgress = Observer.onProgress,
     .userData = &observer,
-    .cancelFlag = &cancel, // *const std.atomic.Value(bool), optional
+    .cancel = &cancel, // *const std.atomic.Value(bool), optional
     .createDirs = true,
 });
 ```
@@ -49,4 +49,4 @@ zig build run-download-custom-progress
 ## What to Verify
 
 - Progress callbacks fire with sane percentages and speeds.
-- Cancellation via `cancelFlag` aborts the transfer.
+- Cancellation via `cancel` aborts the transfer.

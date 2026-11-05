@@ -21,6 +21,7 @@
 //!   - IETF Draft draft-ietf-httpapi-ratelimit-headers
 
 const std = @import("std");
+const jsonMod = @import("../../common/json.zig");
 const Allocator = std.mem.Allocator;
 const sync = @import("../../common/sync.zig");
 const clock = @import("../../common/clock.zig");
@@ -91,7 +92,7 @@ pub const RateLimitResult = struct {
         headers[1] = .{ .name = "X-RateLimit-Limit", .value = limitStr };
         headers[2] = .{ .name = "X-RateLimit-Remaining", .value = "0" };
         headers[3] = .{ .name = "X-RateLimit-Reset", .value = resetStr };
-        headers[4] = .{ .name = "Content-Type", .value = "application/json; charset=utf-8" };
+        headers[4] = .{ .name = "Content-Type", .value = jsonMod.applicationJsonUtf8 };
 
         const body = try std.fmt.allocPrint(
             allocator,

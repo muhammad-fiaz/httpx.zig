@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const mimeMod = @import("../../utils/mime.zig");
+const mimeMod = @import("../../common/mime.zig");
 const common = @import("multipartCommon.zig");
 
 // Subtypes
@@ -326,9 +326,10 @@ pub fn encodeAllocParts(allocator: Allocator, boundary: []const u8, parts: []con
     return out.toOwnedSlice() catch EncodeError.OutOfMemory;
 }
 
-// Streaming encoder
+// Streaming encoder. Callers obtain it with `encoder.stream(writer, .{})`
+// and use the inferred value without naming an implementation type.
 
-pub const StreamEncoder = struct {
+const StreamEncoder = struct {
     writer: *std.Io.Writer,
     boundary: []const u8,
     subtype: Subtype,
@@ -430,6 +431,17 @@ pub const StreamEncoder = struct {
         self.tailLen = available;
     }
 };
+
+pub const StreamOptions = struct {
+    subtype: Subtype = .formData,
+    boundary: []const u8,
+};
+
+/// Creates a bounded-memory writer for incremental multipart output.
+/// The writer owns I/O; the returned encoder borrows it until `finish`.
+pub fn stream(writer: *std.Io.Writer, options: StreamOptions) EncodeError!StreamEncoder {
+    return StreamEncoder.init(writer, options.subtype, options.boundary);
+}
 
 // Length math
 

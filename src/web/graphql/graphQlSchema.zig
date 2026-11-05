@@ -88,7 +88,27 @@ pub const Schema = struct {
         };
     }
 
+    /// Executes `query` and returns a JSON response document. When the document
+    /// holds several operations, the first one is used; prefer
+    /// [`executeRequest`] so the client can choose with `operationName`.
     pub fn execute(self: *const Schema, arena: Allocator, query: []const u8, variablesJson: ?[]const u8, userContext: ?*anyopaque) ![]u8 {
+        return self.executeRequest(arena, query, variablesJson, null, userContext);
+    }
+
+    /// Executes `query`, selecting the operation named `operationName`.
+    ///
+    /// JSON keys come from the document and from resolver output unchanged, so
+    /// keys such as `user-name`, `@context` or `Content-Type` are preserved
+    /// exactly as written — GraphQL names are only constrained on the query
+    /// side, never on the JSON payload side.
+    pub fn executeRequest(
+        self: *const Schema,
+        arena: Allocator,
+        query: []const u8,
+        variablesJson: ?[]const u8,
+        operationName: ?[]const u8,
+        userContext: ?*anyopaque,
+    ) ![]u8 {
         var parsedVars: std.json.Value = .null;
         if (variablesJson) |vStr| {
             if (vStr.len > 0 and !std.mem.eql(u8, vStr, "null")) {
@@ -108,14 +128,23 @@ pub const Schema = struct {
 
         const doc = parser.parseDocument() catch return self.formatError(arena, "GraphQL syntax error: failed to parse document");
 
-        // Find query or mutation operation
-        var opDef: ?ast.OperationDefinition = null;
+        // Fragments are collected first: an operation may reference one that is
+        // defined later in the document.
         var fragments = std.StringHashMap(ast.FragmentDefinition).init(arena);
+        var operationCount: usize = 0;
+        var namedOp: ?ast.OperationDefinition = null;
+        var firstOp: ?ast.OperationDefinition = null;
 
         for (doc.definitions) |d| {
             switch (d) {
                 .operation => |op| {
-                    if (opDef == null) opDef = op;
+                    operationCount += 1;
+                    if (firstOp == null) firstOp = op;
+                    if (operationName) |wanted| {
+                        if (op.name) |name| {
+                            if (std.mem.eql(u8, name, wanted)) namedOp = op;
+                        }
+                    }
                 },
                 .fragment => |f| {
                     try fragments.put(f.name, f);
@@ -123,7 +152,17 @@ pub const Schema = struct {
             }
         }
 
-        if (opDef == null) return self.formatError(arena, "No executable operation found in GraphQL request");
+        const opDef: ?ast.OperationDefinition = if (operationName != null) namedOp else firstOp;
+
+        if (opDef == null) {
+            if (operationName) |wanted| {
+                return self.formatError(arena, try std.fmt.allocPrint(arena, "Unknown operationName: {s}", .{wanted}));
+            }
+            return self.formatError(arena, "No executable operation found in GraphQL request");
+        }
+        if (operationName == null and operationCount > 1) {
+            return self.formatError(arena, "operationName is required when a document contains multiple operations");
+        }
 
         const op = opDef.?;
         const targetObj = switch (op.operationType) {
