@@ -15,9 +15,11 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const configCoerce = @import("../common/configCoerce.zig");
 const tcp = @import("../sockets/tcp.zig");
 const mimeMod = @import("../common/mime.zig");
 const mediaTypeMod = @import("../common/mediaType.zig");
+const jsonMod = @import("../common/json.zig");
 const sync = @import("../common/sync.zig");
 const logging = @import("../common/logging.zig");
 const Method = @import("../common/method.zig").Method;
@@ -501,13 +503,15 @@ pub const Client = struct {
     /// client certificates). Shared across threads; bounded.
     sessionCache: tlsSessionCache.SessionCache,
 
-    /// Creates a client from an explicit allocator, shared I/O, and `.{}` config.
+    /// Creates a client from an explicit allocator, shared I/O, and a partial
+    /// or full `.{}` config. Omitted fields keep their declared defaults.
     ///
     /// ```zig
-    /// var client = httpx.Client.init(allocator, io, .{});
+    /// var client = httpx.Client.init(allocator, io, .{ .timeoutMs = 5_000 });
     /// defer client.deinit();
     /// ```
-    pub fn init(allocator: Allocator, io: std.Io, config: Config) Client {
+    pub fn init(allocator: Allocator, io: std.Io, config_in: anytype) Client {
+        const config = configCoerce.to(Config, config_in);
         var c = Client{
             .allocator = allocator,
             .io = io,
@@ -536,6 +540,48 @@ pub const Client = struct {
         if (self.dnsCache) |*cache| cache.deinit();
         self.pool.deinit();
         self.sessionCache.deinit();
+    }
+
+    /// Returns an owned copy of a cached TLS session for `host`/`port`/`alpn`
+    /// created under `tlsOpts` (merged over the client default policy), or
+    /// `null` when no usable session is cached.
+    ///
+    /// ```zig
+    /// if (client.cachedSession("example.com", 443, "h3", .{})) |session| {
+    ///     defer session.deinit(allocator);
+    ///     // ...
+    /// }
+    /// ```
+    pub fn cachedSession(
+        self: *Client,
+        host: []const u8,
+        port: u16,
+        alpn: []const u8,
+        tlsOpts: anytype,
+    ) ?tlsSessionCache.ClientSession {
+        const T = @TypeOf(tlsOpts);
+        const base = self.config.tls orelse req.TlsOptions{};
+        const opts: req.TlsOptions = blk: {
+            if (comptime T == @TypeOf(null)) break :blk base;
+            if (comptime @typeInfo(T) == .optional) break :blk tlsOpts orelse base;
+            if (comptime T == req.TlsOptions) break :blk tlsOpts;
+            break :blk req.TlsOptions{
+                .verify = if (@hasField(T, "verify")) tlsOpts.verify else base.verify,
+                .caBundle = if (@hasField(T, "caBundle")) tlsOpts.caBundle else base.caBundle,
+                .caPem = if (@hasField(T, "caPem")) tlsOpts.caPem else base.caPem,
+                .clientCertPem = if (@hasField(T, "clientCertPem")) tlsOpts.clientCertPem else base.clientCertPem,
+                .clientKeyPem = if (@hasField(T, "clientKeyPem")) tlsOpts.clientKeyPem else base.clientKeyPem,
+                .allowTruncation = if (@hasField(T, "allowTruncation")) tlsOpts.allowTruncation else base.allowTruncation,
+            };
+        };
+        const policy = req.sessionPolicyFingerprint(opts);
+        return self.sessionCache.getWithAlpnPolicy(
+            host,
+            port,
+            @intCast(clock.millisNow(self.io)),
+            alpn,
+            policy,
+        );
     }
 
     /// GET request. `url` is the first argument; `opts` is request options.
@@ -599,11 +645,6 @@ pub const Client = struct {
     pub fn requestStream(self: *Client, url: []const u8, opts: anytype) Error!ResponseStream {
         const m: Method = extractMethod(opts);
         return self.doRequestStream(m, url, opts);
-    }
-
-    /// Returns a direct streaming file downloader attached to this client.
-    pub fn downloader(self: *Client) DownloadCore.Downloader {
-        return DownloadCore.Downloader.init(self.allocator, self);
     }
 
     fn coerceDownloadOptions(opts: anytype) DownloadOptions {
@@ -787,16 +828,23 @@ pub const Client = struct {
         }
 
         /// Serializes `value` as JSON and sets `Content-Type: application/json`.
+        /// Use `httpx.json.mapped(Schema, value)` to apply a declarative schema.
         pub fn json(self: *RequestBuilder, value: anytype) !*RequestBuilder {
             if (self.jsonAllocated) |j| {
                 self.client.allocator.free(j);
                 self.jsonAllocated = null;
             }
-            const jBytes = try std.json.Stringify.valueAlloc(self.client.allocator, value, .{});
+            const jBytes = try req.jsonBody(self.client.allocator, value);
             self.jsonAllocated = jBytes;
             self.bodyBytes = jBytes;
             _ = try self.header("content-type", mediaTypeMod.applicationJson);
             return self;
+        }
+
+        /// Serializes `value` through a declarative schema and sets
+        /// `Content-Type: application/json`.
+        pub fn jsonSchema(self: *RequestBuilder, comptime S: type, value: S.Target) !*RequestBuilder {
+            return self.json(jsonMod.mapped(S, value));
         }
 
         /// Sends the buffered request and returns the complete response.
@@ -1313,7 +1361,10 @@ pub const Client = struct {
                     bodyVal = payload;
                     bodyKind = .json;
                 } else {
-                    jsonBuf = std.json.Stringify.valueAlloc(self.allocator, payload, .{}) catch return Error.OutOfMemory;
+                    jsonBuf = req.jsonBody(self.allocator, payload) catch |err| {
+                        if (err == error.OutOfMemory) return Error.OutOfMemory;
+                        return Error.InvalidJsonBody;
+                    };
                     if (jsonBuf) |b| {
                         bodyVal = b;
                         bodyKind = .json;

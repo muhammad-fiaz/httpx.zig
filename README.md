@@ -324,8 +324,25 @@ pub fn main() !void {
 
     // Register routes before docs so the OpenAPI snapshot includes them.
     try app.get("/health", .{ .handler = health, .summary = "Health check", .tags = &.{"system"} });
-    try app.get("/users/{id:int}", .{ .handler = getUser, .summary = "Get user", .tags = &.{"users"} });
-    try app.post("/users", .{ .handler = createUser, .summary = "Create user", .tags = &.{"users"} });
+    try app.get("/users/{id:int}", .{
+        .handler = getUser,
+        .summary = "Get user",
+        .tags = &.{"users"},
+        .params = &.{
+            .{ .name = "id", .in = .path, .required = true, .schema = httpx.rest.schemaOf(u64) },
+            .{ .name = "expand", .in = .query, .schema = httpx.rest.schemaOf(bool) },
+        },
+        .responses = &.{
+            .{ .status = 200, .description = "User", .schema = httpx.rest.schemaOf(User) },
+            .{ .status = 404, .description = "Not found" },
+        },
+    });
+    try app.post("/users", .{
+        .handler = createUser,
+        .summary = "Create user",
+        .tags = &.{"users"},
+        .request = .{ .content = .json, .description = "User to create" },
+    });
 
     // GraphQL endpoint; GraphiQL UI is served by the docs mount below.
     const graph_schema = httpx.graphql.Schema.init(allocator, io, .{
@@ -342,14 +359,35 @@ pub fn main() !void {
         .version = httpx.version,
         .description = "REST, GraphQL, and OpenAPI in one app",
         .openapi = .{ .enabled = true, .route = "/openapi.json" },
-        .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
-        .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
-        .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar API Reference" },
+        .swagger = .{
+            .enabled = true,
+            .route = "/docs",
+            .title = "Swagger UI",
+            .docExpansion = .full,
+            .displayRequestDuration = true,
+            .filter = true,
+            .persistAuthorization = true,
+        },
+        .redoc = .{
+            .enabled = true,
+            .route = "/redoc",
+            .title = "ReDoc",
+            .hideDownloadButton = true,
+            .requiredPropsFirst = true,
+        },
+        .scalar = .{
+            .enabled = true,
+            .route = "/scalar",
+            .title = "Scalar API Reference",
+            .theme = "default",
+            .showSidebar = true,
+        },
         .graphiql = .{
             .enabled = true,
             .route = "/graphiql",
             .graphqlEndpoint = "/graphql",
             .title = "GraphiQL IDE",
+            .editorTheme = "vs-dark",
         },
     });
 

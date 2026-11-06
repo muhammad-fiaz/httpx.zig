@@ -180,7 +180,7 @@ defer app.deinit();
 
 try app.get("/users/{id:int}", .{ .handler = getUser, .summary = "Get user by ID", .tags = &.{"users"} });
 try app.post("/users", .{ .handler = createUser, .summary = "Create user", .tags = &.{"users"} });
-try app.put("/users/{id:int}", .{ .handler = updateUser, .names = names }); // renamed JSON keys
+try app.put("/users/{id:int}", .{ .handler = updateUser, .schema = UserSchema }); // mapped JSON keys
 try app.delete("/users/{id:int}", .{ .handler = deleteUser });
 
 // Raw handler: same lowercase verbs, no schema derivation.
@@ -194,7 +194,10 @@ Handler signatures are `(*Context)` or `(*Context, RequestType)`, returning
 `!httpx.Schema(T)`:
 
 ```zig
-const names = .{ .user_name = "user-name" };
+const UserSchema = httpx.json.Schema(User, .{
+    .user_name = "user-name",
+    .context = .{ .name = "@context" },
+});
 
 fn getUser(ctx: *httpx.Context) !httpx.Schema(UserResponse) {
     const id = ctx.paramUint("id") orelse return error.BadRequest;
@@ -215,21 +218,34 @@ Every option is optional; only what you state is used:
 .{ .path = "/users", .handler = createUser, .operationId = "createUser",
    .summary = "...", .description = "...", .tags = &.{"users"},
    .deprecated = false, .security = &.{},
-   .mediaType = "application/vnd.api+json", .names = names }
+   .params = &.{
+       .{ .name = "id", .in = .path, .required = true, .schema = httpx.rest.schemaOf(u64) },
+       .{ .name = "expand", .in = .query, .schema = httpx.rest.schemaOf(bool) },
+   },
+   .responses = &.{
+       .{ .status = 200, .description = "User found", .schema = httpx.rest.schemaOf(UserResponse) },
+       .{ .status = 404, .description = "User not found" },
+   },
+   .request = .{ .content = .json, .description = "User payload" },
+   .internal = false,
+   .mediaType = "application/vnd.api+json",
+   .requestSchema = CreateUserSchema, .responseSchema = UserSchema }
 ```
 
-`.names` maps Zig field names to JSON wire keys, so `user-name`, `@context`,
-`Content-Type`, or `123user` work on typed structs and responses are encoded
-with the same keys. See [Server API](/api/server) for accepted single-document
-JSON media types (`text/json`, `problem+json`, any valid `+json` type, etc.).
-NDJSON, JSONL, JSON5, and JSON text sequences are classified separately and
-are not parsed as single JSON documents by typed REST endpoints.
+`.requestSchema` and `.responseSchema` map Zig fields to JSON wire keys, so
+`user-name`, `@context`, `Content-Type`, or `123user` work on typed structs and
+responses are encoded with the same keys. Use the shared `.schema` shorthand
+when the request and response types are identical. See
+[JSON schemas](/api/data#json-schemas) for aliases, emit policies, nested
+schemas, and dynamic values.
 
 ## OpenAPI
 
 Typed converters feed OpenAPI generation automatically: `/users/{id:int}`
 emits `{id, in: path, required: true, schema: {type: integer}}` unless
-`meta.params` documents the parameter explicitly.
+`.params` documents the parameter explicitly. `.responses` replaces the
+response derived from the return type, `.request` documents the JSON body, and
+`.internal = true` keeps infrastructure routes out of the document.
 
 ## WebSocket and SSE
 

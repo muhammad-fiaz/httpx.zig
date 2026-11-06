@@ -4,6 +4,17 @@ Httpx.zig uses explicit allocators and `std.Io`. Configuration is passed as a
 Zig struct literal. Use `.{}` when the type's documented defaults are wanted;
 set only the fields that need to change.
 
+Every initializer and mount accepts a partial literal and completes it into
+the full config type: omitted fields take their declared defaults, nested
+`.{}` configs are expanded recursively, an unknown field is a compile error,
+and omitting a required field (one with no default) is a compile error. A
+named anonymous literal works as well as an inline one:
+
+```zig
+const cfg = .{ .port = 0, .docs = .{ .swagger = .{ .route = "/api-docs" } } };
+var server = try httpx.Server.init(allocator, io, cfg); // full Config
+```
+
 ## Primary constructors
 
 | API | Constructor | Default form |

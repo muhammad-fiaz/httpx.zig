@@ -63,6 +63,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const configCoerce = @import("../common/configCoerce.zig");
 const clientMod = @import("../client/httpClient.zig");
 const serverMod = @import("../server/httpServer.zig");
 const routerMod = @import("router/router.zig");
@@ -386,6 +387,39 @@ test "raw route options map metadata and router fields" {
     try testing.expectEqualStrings("Health", opts.meta.summary);
     try testing.expectEqual(@as(usize, 1), opts.meta.tags.len);
     try testing.expectEqualStrings("health", opts.name.?);
+}
+
+test "partial config literals are completed into full config types" {
+    const testing = std.testing;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // A named anonymous literal (not an inline argument) still becomes a full
+    // Server.Config, including a nested partial docs config.
+    const partial_server = .{
+        .port = 0,
+        .host = "127.0.0.1",
+        .docs = .{ .swagger = .{ .route = "/partial-docs" } },
+        .logging = .{},
+    };
+    const serverCfg = configCoerce.to(serverMod.Config, partial_server);
+    try testing.expectEqual(@as(u16, 0), serverCfg.port);
+    try testing.expectEqualStrings("/partial-docs", serverCfg.docs.?.swagger.route);
+    try testing.expectEqual((serverMod.Config{}).maxBody, serverCfg.maxBody);
+    try testing.expect(serverCfg.docs.?.scalar.enabled);
+
+    const partial_client = .{ .timeoutMs = 77 };
+    var client = clientMod.Client.init(testing.allocator, io, partial_client);
+    defer client.deinit();
+    try testing.expectEqual(@as(?u64, 77), client.config.timeoutMs);
+    try testing.expectEqual((clientMod.Config{}).maxRedirects, client.config.maxRedirects);
+
+    var server = try serverMod.Server.init(testing.allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+        .logging = .{},
+    });
+    defer server.deinit();
+    try testing.expect(server.localPort() > 0);
 }
 
 test "app owns a client and a server from one init" {

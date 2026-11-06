@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const configCoerce = @import("../../common/configCoerce.zig");
 const ast = @import("ast.zig");
 const parserMod = @import("graphQlParser.zig");
 
@@ -51,6 +52,29 @@ pub const Context = struct {
     }
 };
 
+/// One declared field argument. Arguments are part of the type system, not an
+/// afterthought: introspection reports them so every UI can show the argument
+/// list and its input types.
+pub const ArgDef = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+    typeName: []const u8,
+    isList: bool = false,
+    isNonNull: bool = false,
+    /// GraphQL literal, e.g. `"10"` or `"ADMIN"`; null means no default.
+    defaultValue: ?[]const u8 = null,
+};
+
+/// Field of an input object type (no resolver: inputs only carry values).
+pub const InputFieldDef = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+    typeName: []const u8,
+    isList: bool = false,
+    isNonNull: bool = false,
+    defaultValue: ?[]const u8 = null,
+};
+
 pub const FieldDef = struct {
     name: []const u8,
     description: ?[]const u8 = null,
@@ -58,13 +82,43 @@ pub const FieldDef = struct {
     isList: bool = false,
     isNonNull: bool = false,
     resolver: ?FieldResolver = null,
+    args: []const ArgDef = &.{},
 };
 
 pub const ObjectTypeDef = struct {
     name: []const u8,
     description: ?[]const u8 = null,
     fields: []const FieldDef,
+    /// Interface names this object implements, used by introspection.
+    interfaces: []const []const u8 = &.{},
 };
+
+pub const EnumTypeDef = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+    values: []const []const u8,
+};
+
+pub const InputTypeDef = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+    fields: []const InputFieldDef,
+};
+
+pub const InterfaceTypeDef = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+    fields: []const FieldDef,
+};
+
+pub const UnionTypeDef = struct {
+    name: []const u8,
+    description: ?[]const u8 = null,
+    members: []const []const u8,
+};
+
+/// The built-in GraphQL scalars, reported by introspection as `SCALAR`.
+const builtinScalars = [_][]const u8{ "Int", "Float", "String", "Boolean", "ID" };
 
 // Schema-based public API (same style as httpx.json.Schema / httpx.Schema(T)):
 // types come from Zig structs, every field is explicit, and no raw GraphQL
@@ -130,7 +184,11 @@ fn nameOf(comptime t: anytype) []const u8 {
     const T = @TypeOf(t);
     if (T == Scalar) return t.name();
     if (T == ObjectTypeDef) return t.name;
-    @compileError("GraphQL field `.type` expects a scalar kind (.string/.id/...) or a `Type(...)` object definition");
+    if (T == EnumTypeDef) return t.name;
+    if (T == InterfaceTypeDef) return t.name;
+    if (T == UnionTypeDef) return t.name;
+    if (T == InputTypeDef) return t.name;
+    @compileError("GraphQL `.type` expects a scalar kind (.string/.id/...), a `Type(...)` object, an `Enum(...)`, an `Interface(...)`, a `Union(...)`, or an `Input(...)` in an argument");
 }
 
 fn fnChild(comptime F: type) type {
@@ -150,7 +208,8 @@ fn toJsonValue(allocator: Allocator, val: anytype) anyerror!std.json.Value {
         .bool => std.json.Value{ .bool = val },
         .null => .null,
         .void => .null,
-        .@"enum" => std.json.Value{ .integer = @intCast(@backingInt(val)) },
+        // GraphQL enums are wire strings (their tag name), never ordinals.
+        .@"enum" => std.json.Value{ .string = @tagName(val) },
         .optional => if (val) |v| toJsonValue(allocator, v) else std.json.Value.null,
         .pointer => if (info.pointer.size == .slice) blk: {
             if (info.pointer.child == u8) {
@@ -233,14 +292,20 @@ fn toFieldDef(comptime fname: []const u8, comptime entry: anytype) FieldDef {
         }
         return .{ .name = fname, .typeName = entry.name() };
     }
+    if (Entry == ObjectTypeDef or Entry == EnumTypeDef or Entry == InterfaceTypeDef or Entry == UnionTypeDef) {
+        // A type definition used directly as the field type: `.role = RoleEnum`.
+        return .{ .name = fname, .typeName = entry.name };
+    }
     if (@typeInfo(Entry) != .@"struct") {
-        @compileError("GraphQL field `." ++ fname ++ "` must be a scalar kind (.string/.id/...) or a field spec literal");
+        @compileError("GraphQL field `." ++ fname ++ "` must be a scalar kind (.string/.id/...), a type definition, or a field spec literal");
     }
 
     const resolved: ?FieldResolver = if (@hasField(Entry, "resolve")) makeResolverFn(@field(entry, "resolve")) else null;
     if (!@hasField(Entry, "type")) {
-        @compileError("GraphQL field `." ++ fname ++ "` needs `.type` (a scalar kind or a `Type(...)` definition)");
+        @compileError("GraphQL field `." ++ fname ++ "` needs `.type` (a scalar kind, `Type(...)`, `Enum(...)`, `Interface(...)`, or `Union(...)`)");
     }
+
+    const args = comptime if (@hasField(Entry, "args")) buildArgsSuffix(@field(entry, "args"), 0) else [0]ArgDef{};
 
     return .{
         .name = fname,
@@ -249,7 +314,68 @@ fn toFieldDef(comptime fname: []const u8, comptime entry: anytype) FieldDef {
         .isList = if (@hasField(Entry, "list")) entry.list else false,
         .isNonNull = if (@hasField(Entry, "nonNull")) entry.nonNull else false,
         .resolver = resolved,
+        .args = &args,
     };
+}
+
+fn toArgDef(comptime aname: []const u8, comptime entry: anytype) ArgDef {
+    const E = @TypeOf(entry);
+    if (@typeInfo(E) == .@"enum") {
+        if (E != Scalar) {
+            @compileError("GraphQL argument `." ++ aname ++ "` must use an `httpx.graphql.Scalar` kind or a `.type` spec");
+        }
+        return .{ .name = aname, .typeName = entry.name() };
+    }
+    if (E == InputTypeDef or E == EnumTypeDef) {
+        return .{ .name = aname, .typeName = entry.name };
+    }
+    if (@typeInfo(E) != .@"struct" or !@hasField(E, "type")) {
+        @compileError("GraphQL argument `." ++ aname ++ "` must be a scalar kind, an `Input(...)`/`Enum(...)` type, or a spec with `.type`");
+    }
+    return .{
+        .name = aname,
+        .description = if (@hasField(E, "description")) entry.description else null,
+        .typeName = nameOf(@field(entry, "type")),
+        .isList = if (@hasField(E, "list")) entry.list else false,
+        .isNonNull = if (@hasField(E, "nonNull")) entry.nonNull else false,
+        .defaultValue = if (@hasField(E, "default")) entry.default else null,
+    };
+}
+
+fn buildArgsSuffix(comptime spec: anytype, comptime i: usize) [@typeInfo(@TypeOf(spec)).@"struct".field_names.len - i]ArgDef {
+    const names = @typeInfo(@TypeOf(spec)).@"struct".field_names;
+    if (i >= names.len) return .{};
+    return .{toArgDef(names[i], @field(spec, names[i]))} ++ buildArgsSuffix(spec, i + 1);
+}
+
+fn toInputFieldDef(comptime fname: []const u8, comptime entry: anytype) InputFieldDef {
+    const E = @TypeOf(entry);
+    if (@typeInfo(E) == .@"enum") {
+        if (E != Scalar) {
+            @compileError("GraphQL input field `." ++ fname ++ "` must use an `httpx.graphql.Scalar` kind or a `.type` spec");
+        }
+        return .{ .name = fname, .typeName = entry.name() };
+    }
+    if (E == InputTypeDef or E == EnumTypeDef) {
+        return .{ .name = fname, .typeName = entry.name };
+    }
+    if (@typeInfo(E) != .@"struct" or !@hasField(E, "type")) {
+        @compileError("GraphQL input field `." ++ fname ++ "` must be a scalar kind, an `Input(...)`/`Enum(...)` type, or a spec with `.type`");
+    }
+    return .{
+        .name = fname,
+        .description = if (@hasField(E, "description")) entry.description else null,
+        .typeName = nameOf(@field(entry, "type")),
+        .isList = if (@hasField(E, "list")) entry.list else false,
+        .isNonNull = if (@hasField(E, "nonNull")) entry.nonNull else false,
+        .defaultValue = if (@hasField(E, "default")) entry.default else null,
+    };
+}
+
+fn buildInputFieldsSuffix(comptime spec: anytype, comptime i: usize) [@typeInfo(@TypeOf(spec)).@"struct".field_names.len - i]InputFieldDef {
+    const names = @typeInfo(@TypeOf(spec)).@"struct".field_names;
+    if (i >= names.len) return .{};
+    return .{toInputFieldDef(names[i], @field(spec, names[i]))} ++ buildInputFieldsSuffix(spec, i + 1);
 }
 
 // Builds a fields array as a pure comptime value (recursive suffix concat).
@@ -301,10 +427,74 @@ pub fn Mutation(comptime spec: anytype) ObjectTypeDef {
     return rootType("Mutation", spec);
 }
 
+/// String-named object type for schemas assembled from external data: every
+/// field is an explicit [`FieldDef`] whose `typeName` is a plain GraphQL type
+/// name. Typed schemas use [`Type`]; this is the non-typed counterpart.
+pub fn Object(comptime typeName: []const u8, comptime fields: []const FieldDef) ObjectTypeDef {
+    return .{ .name = checkQlName(typeName, "GraphQL type"), .fields = fields };
+}
+
+/// Declares an enum type. Fields reference it exactly like a scalar:
+/// `.type = RoleEnum`; resolvers return a Zig enum and the engine emits its
+/// tag name on the wire.
+pub fn Enum(comptime typeName: []const u8, comptime values: []const []const u8) EnumTypeDef {
+    comptime {
+        _ = checkQlName(typeName, "GraphQL enum");
+        for (values) |value| _ = checkQlName(value, "GraphQL enum value");
+    }
+    return .{ .name = typeName, .values = values };
+}
+
+/// Declares an input object type for field arguments (`ArgDef.typeName`).
+pub fn Input(comptime typeName: []const u8, comptime spec: anytype) InputTypeDef {
+    const fields = buildInputFieldsSuffix(spec, 0);
+    return .{ .name = checkQlName(typeName, "GraphQL input"), .fields = &fields };
+}
+
+/// Declares an interface. Objects opt in with [`implements`].
+pub fn Interface(comptime typeName: []const u8, comptime spec: anytype) InterfaceTypeDef {
+    const fields = buildFieldsSuffix(spec, 0);
+    return .{ .name = checkQlName(typeName, "GraphQL interface"), .fields = &fields };
+}
+
+/// Comptime name list for union members. A `const` result keeps static
+/// storage, so a global type definition may point at it.
+fn objectNames(comptime defs: []const ObjectTypeDef) [defs.len][]const u8 {
+    var out: [defs.len][]const u8 = undefined;
+    for (defs, 0..) |def, i| out[i] = def.name;
+    return out;
+}
+
+fn interfaceNames(comptime ifaces: []const InterfaceTypeDef) [ifaces.len][]const u8 {
+    var out: [ifaces.len][]const u8 = undefined;
+    for (ifaces, 0..) |iface, i| out[i] = iface.name;
+    return out;
+}
+
+/// Declares a union of object types.
+pub fn Union(comptime typeName: []const u8, comptime members: []const ObjectTypeDef) UnionTypeDef {
+    const names = objectNames(members);
+    return .{ .name = checkQlName(typeName, "GraphQL union"), .members = &names };
+}
+
+/// Marks an object type as implementing interfaces:
+/// `const UserType = implements(Type("User", .{ ... }), &.{NodeInterface});`
+pub fn implements(comptime def: ObjectTypeDef, comptime ifaces: []const InterfaceTypeDef) ObjectTypeDef {
+    const names = interfaceNames(ifaces);
+    var out = def;
+    out.interfaces = &names;
+    return out;
+}
+
 pub const SchemaConfig = struct {
     query: ObjectTypeDef,
     mutation: ?ObjectTypeDef = null,
+    /// Object types (including types that implement interfaces).
     types: []const ObjectTypeDef = &.{},
+    enums: []const EnumTypeDef = &.{},
+    inputs: []const InputTypeDef = &.{},
+    interfaces: []const InterfaceTypeDef = &.{},
+    unions: []const UnionTypeDef = &.{},
     maxDepth: usize = 32,
     maxComplexity: usize = 500,
     introspection: bool = true,
@@ -320,7 +510,10 @@ pub const Schema = struct {
     io: std.Io,
     config: SchemaConfig,
 
-    pub fn init(allocator: Allocator, io: std.Io, config: SchemaConfig) Schema {
+    /// Creates a schema from an explicit allocator, shared I/O, and a partial
+    /// or full config literal. Omitted fields keep their declared defaults.
+    pub fn init(allocator: Allocator, io: std.Io, config_in: anytype) Schema {
+        const config = configCoerce.to(SchemaConfig, config_in);
         return Schema{
             .allocator = allocator,
             .io = io,
@@ -471,6 +664,14 @@ pub const Schema = struct {
             if (std.mem.eql(u8, field.name, "__schema")) {
                 return self.resolveSchemaIntrospection(arena, field);
             }
+            if (std.mem.eql(u8, field.name, "__type")) {
+                for (field.arguments) |arg| {
+                    if (!std.mem.eql(u8, arg.name, "name")) continue;
+                    const wanted = self.evaluateValue(arena, arg.value, variables);
+                    if (wanted == .string) return self.formatIntrospectionType(arena, wanted.string);
+                }
+                return .null;
+            }
         }
 
         // Locate field definition in schema
@@ -595,6 +796,40 @@ pub const Schema = struct {
         for (self.config.types) |t| {
             if (std.mem.eql(u8, t.name, name)) return t;
         }
+        // Interface-backed fields execute against the interface's own fields.
+        for (self.config.interfaces) |iface| {
+            if (std.mem.eql(u8, iface.name, name)) {
+                return .{ .name = iface.name, .description = iface.description, .fields = iface.fields };
+            }
+        }
+        return null;
+    }
+
+    fn findInterface(self: *const Schema, name: []const u8) ?InterfaceTypeDef {
+        for (self.config.interfaces) |iface| {
+            if (std.mem.eql(u8, iface.name, name)) return iface;
+        }
+        return null;
+    }
+
+    fn findEnum(self: *const Schema, name: []const u8) ?EnumTypeDef {
+        for (self.config.enums) |enumDef| {
+            if (std.mem.eql(u8, enumDef.name, name)) return enumDef;
+        }
+        return null;
+    }
+
+    fn findInput(self: *const Schema, name: []const u8) ?InputTypeDef {
+        for (self.config.inputs) |inputDef| {
+            if (std.mem.eql(u8, inputDef.name, name)) return inputDef;
+        }
+        return null;
+    }
+
+    fn findUnion(self: *const Schema, name: []const u8) ?UnionTypeDef {
+        for (self.config.unions) |unionDef| {
+            if (std.mem.eql(u8, unionDef.name, name)) return unionDef;
+        }
         return null;
     }
 
@@ -648,77 +883,216 @@ pub const Schema = struct {
         try sObj.put(arena, "directives", std.json.Value{ .array = std.json.Array.init(arena) });
 
         var typesList = std.json.Array.init(arena);
-
-        // Add standard built-in scalar types (Int, Float, String, Boolean, ID)
-        for ([_][]const u8{ "Int", "Float", "String", "Boolean", "ID" }) |scalarName| {
-            var scObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
-            try scObj.put(arena, "kind", std.json.Value{ .string = "SCALAR" });
-            try scObj.put(arena, "name", std.json.Value{ .string = scalarName });
-            try scObj.put(arena, "description", .null);
-            try scObj.put(arena, "fields", .null);
-            try scObj.put(arena, "interfaces", .null);
-            try scObj.put(arena, "possibleTypes", .null);
-            try scObj.put(arena, "enumValues", .null);
-            try scObj.put(arena, "inputFields", .null);
-            try scObj.put(arena, "ofType", .null);
-            try typesList.append(std.json.Value{ .object = scObj });
+        for (builtinScalars) |scalarName| {
+            try typesList.append(try self.formatIntrospectionType(arena, scalarName));
         }
-
-        // Add Query type
-        try typesList.append(try self.formatIntrospectionType(arena, self.config.query));
-
-        // Add Mutation type if present
+        try typesList.append(try self.formatIntrospectionType(arena, self.config.query.name));
         if (self.config.mutation) |m| {
-            try typesList.append(try self.formatIntrospectionType(arena, m));
+            try typesList.append(try self.formatIntrospectionType(arena, m.name));
         }
-
-        // Add user types
         for (self.config.types) |t| {
-            try typesList.append(try self.formatIntrospectionType(arena, t));
+            try typesList.append(try self.formatIntrospectionType(arena, t.name));
+        }
+        for (self.config.enums) |e| {
+            try typesList.append(try self.formatIntrospectionType(arena, e.name));
+        }
+        for (self.config.inputs) |i| {
+            try typesList.append(try self.formatIntrospectionType(arena, i.name));
+        }
+        for (self.config.interfaces) |i| {
+            try typesList.append(try self.formatIntrospectionType(arena, i.name));
+        }
+        for (self.config.unions) |u| {
+            try typesList.append(try self.formatIntrospectionType(arena, u.name));
         }
 
         try sObj.put(arena, "types", std.json.Value{ .array = typesList });
         return std.json.Value{ .object = sObj };
     }
 
-    fn formatIntrospectionType(self: *const Schema, arena: Allocator, obj: ObjectTypeDef) !std.json.Value {
-        _ = self;
-        var tObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
-        try tObj.put(arena, "kind", std.json.Value{ .string = "OBJECT" });
-        try tObj.put(arena, "name", std.json.Value{ .string = obj.name });
-        if (obj.description) |d| {
-            try tObj.put(arena, "description", std.json.Value{ .string = d });
-        } else {
-            try tObj.put(arena, "description", .null);
+    fn isBuiltinScalar(typeName: []const u8) bool {
+        for (builtinScalars) |scalarName| {
+            if (std.mem.eql(u8, scalarName, typeName)) return true;
         }
+        return false;
+    }
 
+    /// Introspection kind for any declared name. Unknown names are reported as
+    /// custom scalars, which is what GraphQL clients expect for `scalar Name`.
+    fn kindOf(self: *const Schema, typeName: []const u8) []const u8 {
+        if (isBuiltinScalar(typeName)) return "SCALAR";
+        if (std.mem.eql(u8, self.config.query.name, typeName)) return "OBJECT";
+        if (self.config.mutation) |m| {
+            if (std.mem.eql(u8, m.name, typeName)) return "OBJECT";
+        }
+        for (self.config.types) |t| {
+            if (std.mem.eql(u8, t.name, typeName)) return "OBJECT";
+        }
+        for (self.config.interfaces) |i| {
+            if (std.mem.eql(u8, i.name, typeName)) return "INTERFACE";
+        }
+        for (self.config.enums) |e| {
+            if (std.mem.eql(u8, e.name, typeName)) return "ENUM";
+        }
+        for (self.config.inputs) |i| {
+            if (std.mem.eql(u8, i.name, typeName)) return "INPUT_OBJECT";
+        }
+        for (self.config.unions) |u| {
+            if (std.mem.eql(u8, u.name, typeName)) return "UNION";
+        }
+        return "SCALAR";
+    }
+
+    fn descriptionOf(self: *const Schema, typeName: []const u8) ?[]const u8 {
+        if (self.findType(typeName)) |t| return t.description;
+        if (self.findEnum(typeName)) |e| return e.description;
+        if (self.findInput(typeName)) |i| return i.description;
+        if (self.findUnion(typeName)) |u| return u.description;
+        return null;
+    }
+
+    /// Bare named-type reference: `kind` reflects the real declared kind, so
+    /// GraphiQL / Scalar / ReDoc render links to the correct type.
+    fn introspectNamedType(self: *const Schema, arena: Allocator, typeName: []const u8) !std.json.Value {
+        var ref = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+        try ref.put(arena, "kind", std.json.Value{ .string = self.kindOf(typeName) });
+        try ref.put(arena, "name", std.json.Value{ .string = typeName });
+        try ref.put(arena, "ofType", .null);
+        return std.json.Value{ .object = ref };
+    }
+
+    /// Full type reference with `LIST` / `NON_NULL` wrappers nested in the
+    /// order GraphQL defines them: `[T!]!` becomes NON_NULL(LIST(NON_NULL(T))).
+    fn introspectTypeRef(self: *const Schema, arena: Allocator, typeName: []const u8, isList: bool, isNonNull: bool) !std.json.Value {
+        var ref = try self.introspectNamedType(arena, typeName);
+        if (isList) {
+            var listObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+            try listObj.put(arena, "kind", std.json.Value{ .string = "LIST" });
+            try listObj.put(arena, "name", .null);
+            try listObj.put(arena, "ofType", ref);
+            ref = std.json.Value{ .object = listObj };
+        }
+        if (isNonNull) {
+            var nnObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+            try nnObj.put(arena, "kind", std.json.Value{ .string = "NON_NULL" });
+            try nnObj.put(arena, "name", .null);
+            try nnObj.put(arena, "ofType", ref);
+            ref = std.json.Value{ .object = nnObj };
+        }
+        return ref;
+    }
+
+    fn formatFieldList(self: *const Schema, arena: Allocator, fields: []const FieldDef) !std.json.Value {
         var fieldsList = std.json.Array.init(arena);
-        for (obj.fields) |f| {
+        for (fields) |f| {
             var fMap = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
             try fMap.put(arena, "name", std.json.Value{ .string = f.name });
-            if (f.description) |fd| {
-                try fMap.put(arena, "description", std.json.Value{ .string = fd });
-            } else {
-                try fMap.put(arena, "description", .null);
-            }
+            const description: std.json.Value = if (f.description) |d| .{ .string = d } else .null;
+            try fMap.put(arena, "description", description);
             try fMap.put(arena, "isDeprecated", std.json.Value{ .bool = false });
             try fMap.put(arena, "deprecationReason", .null);
+            try fMap.put(arena, "type", try self.introspectTypeRef(arena, f.typeName, f.isList, f.isNonNull));
 
-            var typeRef = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
-            try typeRef.put(arena, "kind", std.json.Value{ .string = "SCALAR" });
-            try typeRef.put(arena, "name", std.json.Value{ .string = f.typeName });
-            try typeRef.put(arena, "ofType", .null);
-            try fMap.put(arena, "type", std.json.Value{ .object = typeRef });
-
-            try fMap.put(arena, "args", std.json.Value{ .array = std.json.Array.init(arena) });
+            var argsList = std.json.Array.init(arena);
+            for (f.args) |a| {
+                var aMap = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+                try aMap.put(arena, "name", std.json.Value{ .string = a.name });
+                const argDescription: std.json.Value = if (a.description) |d| .{ .string = d } else .null;
+                try aMap.put(arena, "description", argDescription);
+                try aMap.put(arena, "type", try self.introspectTypeRef(arena, a.typeName, a.isList, a.isNonNull));
+                const defaultValue: std.json.Value = if (a.defaultValue) |d| .{ .string = d } else .null;
+                try aMap.put(arena, "defaultValue", defaultValue);
+                try argsList.append(std.json.Value{ .object = aMap });
+            }
+            try fMap.put(arena, "args", std.json.Value{ .array = argsList });
             try fieldsList.append(std.json.Value{ .object = fMap });
         }
-        try tObj.put(arena, "fields", std.json.Value{ .array = fieldsList });
-        try tObj.put(arena, "interfaces", std.json.Value{ .array = std.json.Array.init(arena) });
+        return std.json.Value{ .array = fieldsList };
+    }
+
+    fn formatInputFieldList(self: *const Schema, arena: Allocator, fields: []const InputFieldDef) !std.json.Value {
+        var list = std.json.Array.init(arena);
+        for (fields) |f| {
+            var fMap = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+            try fMap.put(arena, "name", std.json.Value{ .string = f.name });
+            const description: std.json.Value = if (f.description) |d| .{ .string = d } else .null;
+            try fMap.put(arena, "description", description);
+            try fMap.put(arena, "type", try self.introspectTypeRef(arena, f.typeName, f.isList, f.isNonNull));
+            const defaultValue: std.json.Value = if (f.defaultValue) |d| .{ .string = d } else .null;
+            try fMap.put(arena, "defaultValue", defaultValue);
+            try list.append(std.json.Value{ .object = fMap });
+        }
+        return std.json.Value{ .array = list };
+    }
+
+    fn formatEnumValues(self: *const Schema, arena: Allocator, values: []const []const u8) !std.json.Value {
+        _ = self;
+        var list = std.json.Array.init(arena);
+        for (values) |value| {
+            var vMap = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+            try vMap.put(arena, "name", std.json.Value{ .string = value });
+            try vMap.put(arena, "description", .null);
+            try vMap.put(arena, "isDeprecated", std.json.Value{ .bool = false });
+            try vMap.put(arena, "deprecationReason", .null);
+            try list.append(std.json.Value{ .object = vMap });
+        }
+        return std.json.Value{ .array = list };
+    }
+
+    fn formatNamedRefs(self: *const Schema, arena: Allocator, names: []const []const u8) !std.json.Value {
+        var list = std.json.Array.init(arena);
+        for (names) |name| try list.append(try self.introspectNamedType(arena, name));
+        return std.json.Value{ .array = list };
+    }
+
+    fn formatImplementors(self: *const Schema, arena: Allocator, interfaceName: []const u8) !std.json.Value {
+        var list = std.json.Array.init(arena);
+        for (self.config.types) |t| {
+            for (t.interfaces) |ifaceName| {
+                if (std.mem.eql(u8, ifaceName, interfaceName)) {
+                    try list.append(try self.introspectNamedType(arena, t.name));
+                    break;
+                }
+            }
+        }
+        return std.json.Value{ .array = list };
+    }
+
+    /// Full introspection object for one named type.
+    fn formatIntrospectionType(self: *const Schema, arena: Allocator, typeName: []const u8) !std.json.Value {
+        const kind = self.kindOf(typeName);
+
+        var tObj = std.json.ObjectMap.init(arena, &.{}, &.{}) catch unreachable;
+        try tObj.put(arena, "kind", std.json.Value{ .string = kind });
+        try tObj.put(arena, "name", std.json.Value{ .string = typeName });
+        const description: std.json.Value = if (self.descriptionOf(typeName)) |d| .{ .string = d } else .null;
+        try tObj.put(arena, "description", description);
+        try tObj.put(arena, "ofType", .null);
+        try tObj.put(arena, "fields", .null);
+        try tObj.put(arena, "interfaces", .null);
         try tObj.put(arena, "possibleTypes", .null);
         try tObj.put(arena, "enumValues", .null);
         try tObj.put(arena, "inputFields", .null);
-        try tObj.put(arena, "ofType", .null);
+
+        if (std.mem.eql(u8, kind, "OBJECT")) {
+            const obj = self.findType(typeName) orelse return std.json.Value{ .object = tObj };
+            try tObj.put(arena, "fields", try self.formatFieldList(arena, obj.fields));
+            try tObj.put(arena, "interfaces", try self.formatNamedRefs(arena, obj.interfaces));
+        } else if (std.mem.eql(u8, kind, "INTERFACE")) {
+            const iface = self.findInterface(typeName) orelse return std.json.Value{ .object = tObj };
+            try tObj.put(arena, "fields", try self.formatFieldList(arena, iface.fields));
+            try tObj.put(arena, "interfaces", std.json.Value{ .array = std.json.Array.init(arena) });
+            try tObj.put(arena, "possibleTypes", try self.formatImplementors(arena, typeName));
+        } else if (std.mem.eql(u8, kind, "ENUM")) {
+            const enumDef = self.findEnum(typeName) orelse return std.json.Value{ .object = tObj };
+            try tObj.put(arena, "enumValues", try self.formatEnumValues(arena, enumDef.values));
+        } else if (std.mem.eql(u8, kind, "INPUT_OBJECT")) {
+            const inputDef = self.findInput(typeName) orelse return std.json.Value{ .object = tObj };
+            try tObj.put(arena, "inputFields", try self.formatInputFieldList(arena, inputDef.fields));
+        } else if (std.mem.eql(u8, kind, "UNION")) {
+            const unionDef = self.findUnion(typeName) orelse return std.json.Value{ .object = tObj };
+            try tObj.put(arena, "possibleTypes", try self.formatNamedRefs(arena, unionDef.members));
+        }
 
         return std.json.Value{ .object = tObj };
     }
@@ -823,4 +1197,104 @@ test "graphql typed resolver args and list fields" {
     const res = try schema.execute(arena.allocator(), "{ items(prefix: \"item\") { id label } }", null, null);
     try std.testing.expect(std.mem.indexOf(u8, res, "\"label\":\"item-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, res, "\"label\":\"item-2\"") != null);
+}
+
+// Full type-system fixtures: enum, input object, interface, union, args.
+const AdvancedFixtures = struct {
+    const Role = enum { ADMIN, USER };
+    const RoleEnum = Enum("Role", &.{ "ADMIN", "USER" });
+
+    const UserFilter = Input("UserFilter", .{
+        .role = RoleEnum,
+        .limit = .{ .type = Scalar.int, .nonNull = true },
+    });
+
+    const NodeInterface = Interface("Node", .{ .id = Scalar.id });
+
+    const User = struct { id: u64, name: []const u8, role: Role };
+    const UserType = implements(Type("User", .{
+        .id = Scalar.id,
+        .name = Scalar.string,
+        .role = RoleEnum,
+    }), &.{NodeInterface});
+
+    const SearchResult = Union("SearchResult", &.{UserType});
+
+    const Filter = struct { role: Role, limit: u16 };
+    const Args = struct { filter: Filter, limit: u16 = 10 };
+
+    pub fn getUsers(ctx: *Context, args: Args) ![]const User {
+        _ = ctx;
+        _ = args;
+        return &.{.{ .id = 1, .name = "Alice", .role = .ADMIN }};
+    }
+
+    const UserQuery = Query(.{
+        .users = .{
+            .type = UserType,
+            .list = true,
+            .nonNull = true,
+            .args = .{
+                .filter = .{ .type = UserFilter, .nonNull = true },
+                .limit = .{ .type = Scalar.int, .default = "10" },
+            },
+            .resolve = getUsers,
+        },
+    });
+};
+
+test "graphql enums, inputs, interfaces, unions, and typed introspection" {
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    const schema = Schema.init(a, io, .{
+        .query = AdvancedFixtures.UserQuery,
+        .types = &.{AdvancedFixtures.UserType},
+        .enums = &.{AdvancedFixtures.RoleEnum},
+        .inputs = &.{AdvancedFixtures.UserFilter},
+        .interfaces = &.{AdvancedFixtures.NodeInterface},
+        .unions = &.{AdvancedFixtures.SearchResult},
+    });
+
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Enum output, input-object arguments, and argument defaults.
+    const res = try schema.execute(alloc, "{ users(filter: { role: ADMIN, limit: 1 }) { id name role } }", null, null);
+    try std.testing.expect(std.mem.indexOf(u8, res, "\"role\":\"ADMIN\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res, "\"name\":\"Alice\"") != null);
+
+    // `__type` reports the object, its enum field, and its interface.
+    const userType = try schema.execute(alloc, "{ __type(name: \"User\") { kind name } }", null, null);
+    try std.testing.expect(std.mem.indexOf(u8, userType, "\"kind\":\"OBJECT\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, userType, "\"kind\":\"ENUM\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, userType, "\"name\":\"Role\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, userType, "\"kind\":\"INTERFACE\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, userType, "\"name\":\"Node\"") != null);
+
+    // The `users` field carries `[User!]!` plus its input-object argument and
+    // the declared default, all with the correct nested wrappers.
+    const queryType = try schema.execute(alloc, "{ __type(name: \"Query\") { kind name } }", null, null);
+    try std.testing.expect(std.mem.indexOf(u8, queryType, "\"kind\":\"NON_NULL\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, queryType, "\"kind\":\"LIST\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, queryType, "\"name\":\"filter\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, queryType, "\"kind\":\"INPUT_OBJECT\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, queryType, "\"defaultValue\":\"10\"") != null);
+
+    const inputType = try schema.execute(alloc, "{ __type(name: \"UserFilter\") { kind name } }", null, null);
+    try std.testing.expect(std.mem.indexOf(u8, inputType, "\"kind\":\"INPUT_OBJECT\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, inputType, "\"name\":\"limit\"") != null);
+
+    const unionType = try schema.execute(alloc, "{ __type(name: \"SearchResult\") { kind name } }", null, null);
+    try std.testing.expect(std.mem.indexOf(u8, unionType, "\"kind\":\"UNION\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unionType, "\"possibleTypes\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unionType, "\"name\":\"User\"") != null);
+
+    // `__schema` lists every declared kind so the UIs can show them all.
+    const intro = try schema.execute(alloc, "{ __schema { types { name kind } } }", null, null);
+    try std.testing.expect(std.mem.indexOf(u8, intro, "\"ENUM\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, intro, "\"INPUT_OBJECT\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, intro, "\"INTERFACE\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, intro, "\"UNION\"") != null);
 }

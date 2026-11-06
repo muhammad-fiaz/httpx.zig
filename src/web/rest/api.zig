@@ -75,11 +75,36 @@ const jsonMod = @import("../../common/json.zig");
 const metaMod = @import("../router/routeMetadata.zig");
 
 const MetaSchema = metaMod.Schema;
-const Param = metaMod.Param;
-const Location = metaMod.Location;
+/// Parameter declaration, re-exported so `params` stays explicit and typed.
+pub const Param = metaMod.Param;
 
 /// OpenAPI schema node type, re-exported for custom `responses` declarations.
 pub const JsonSchema = metaMod.Schema;
+
+/// Response declaration, re-exported so `responses` stays explicit and typed.
+pub const ResponseDesc = metaMod.ResponseDesc;
+/// Request-body declaration, re-exported for `request` overrides.
+pub const RequestBody = metaMod.RequestBody;
+
+/// Addressable compile-time schema for `T`, for `Param.schema` and
+/// `ResponseDesc.schema`:
+///
+/// ```zig
+/// .params = &.{.{ .name = "id", .in = .path, .schema = httpx.rest.schemaOf(u64) }},
+/// .responses = &.{.{ .status = 200, .description = "User", .schema = httpx.rest.schemaOf(User) }},
+/// ```
+pub fn schemaOf(comptime T: type) *const MetaSchema {
+    return &struct {
+        const s = typeSchema(T);
+    }.s;
+}
+
+/// `schemaOf` with the same declarative key mapping as `httpx.json.Schema`.
+pub fn schemaOfWith(comptime T: type, comptime spec: anytype) *const MetaSchema {
+    return &struct {
+        const s = typeSchemaWith(T, spec);
+    }.s;
+}
 
 /// Field type of the `body` slot: `void` for bodiless results, `?T` otherwise.
 fn BodyField(comptime T: type) type {
@@ -189,6 +214,52 @@ fn coerceTo(comptime Dest: type, value: anytype) Dest {
     return value;
 }
 
+/// Converts a comptime array of parameter literals into typed `Param` values
+/// stored in an immutable comptime array.
+fn paramList(comptime items: anytype) []const metaMod.Param {
+    const out = comptime blk: {
+        var tmp: [items.len]metaMod.Param = undefined;
+        for (items, 0..) |item, i| {
+            tmp[i] = .{
+                .name = item.name,
+                .in = item.in,
+                .required = if (@hasField(@TypeOf(item), "required")) item.required else false,
+                .description = if (@hasField(@TypeOf(item), "description")) item.description else "",
+                .schema = if (@hasField(@TypeOf(item), "schema")) item.schema else &metaMod.Param.defaultSchema,
+            };
+        }
+        break :blk tmp;
+    };
+    return &out;
+}
+
+/// Converts a comptime array of response literals into typed `ResponseDesc`
+/// values stored in an immutable comptime array.
+fn responseList(comptime items: anytype) []const metaMod.ResponseDesc {
+    const out = comptime blk: {
+        var tmp: [items.len]metaMod.ResponseDesc = undefined;
+        for (items, 0..) |item, i| {
+            tmp[i] = .{
+                .status = item.status,
+                .description = if (@hasField(@TypeOf(item), "description")) item.description else "",
+                .schema = if (@hasField(@TypeOf(item), "schema")) item.schema else null,
+            };
+        }
+        break :blk tmp;
+    };
+    return &out;
+}
+
+/// Coerces a request-body literal onto the typed descriptor.
+fn requestDef(comptime value: anytype) metaMod.RequestBody {
+    return .{
+        .content = value.content,
+        .schema = if (@hasField(@TypeOf(value), "schema")) value.schema else null,
+        .required = if (@hasField(@TypeOf(value), "required")) value.required else true,
+        .description = if (@hasField(@TypeOf(value), "description")) value.description else "",
+    };
+}
+
 fn includedFieldCount(comptime T: type, comptime spec: anytype) usize {
     const st = @typeInfo(T).@"struct";
     var count: usize = 0;
@@ -277,6 +348,17 @@ pub const EndpointOptions = struct {
     tags: []const []const u8 = &.{},
     deprecated: bool = false,
     security: []const metaMod.SecurityReq = &.{},
+    /// Declared parameters in every location: `.path`, `.query`, `.header`,
+    /// `.cookie`. Use [`schemaOf`] for the schema pointer.
+    params: []const metaMod.Param = &.{},
+    /// Explicit response list. Empty derives one response from the handler's
+    /// return type (`200`/`204`, or `201` for POST).
+    responses: []const metaMod.ResponseDesc = &.{},
+    /// Request-body descriptor override. Typed handlers decode JSON only, so
+    /// `.content` must stay `.json`; `description` and `required` are free.
+    request: ?metaMod.RequestBody = null,
+    /// Excludes the route from the generated OpenAPI document.
+    internal: bool = false,
     /// Response media type. JSON by default; set it for vendor JSON types.
     mediaType: []const u8 = jsonMod.applicationJsonUtf8,
 };
@@ -355,7 +437,13 @@ pub const Rest = struct {
                 if (std.mem.eql(u8, fname, "meta")) {
                     @compileError("REST: metadata is derived from the handler; use `.operationId`, `.summary`, `.tags`, … instead of `.meta`");
                 }
-                if (@hasField(EndpointOptions, fname)) {
+                if (std.mem.eql(u8, fname, "params")) {
+                    out.endpoint.params = paramList(arg.params);
+                } else if (std.mem.eql(u8, fname, "responses")) {
+                    out.endpoint.responses = responseList(arg.responses);
+                } else if (std.mem.eql(u8, fname, "request")) {
+                    out.endpoint.request = requestDef(arg.request);
+                } else if (@hasField(EndpointOptions, fname)) {
                     @field(out.endpoint, fname) = @field(arg, fname);
                 } else if (@hasField(routerMod.RouteOptions, fname)) {
                     @field(out.route, fname) = @field(arg, fname);
@@ -392,9 +480,10 @@ pub const Rest = struct {
             if (requestSchemaGiven or responseSchemaGiven) {
                 @compileError("REST raw handlers return Response directly; remove `.schema`, `.requestSchema`, or `.responseSchema`");
             }
-            const responses = [_]metaMod.ResponseDesc{
-                .{ .status = 200, .description = "OK", .schema = null },
-            };
+            const responses: []const metaMod.ResponseDesc = comptime if (endpointOpts.responses.len > 0)
+                endpointOpts.responses
+            else
+                &[_]metaMod.ResponseDesc{.{ .status = 200, .description = "OK", .schema = null }};
             const meta: metaMod.Metadata = .{
                 .operationId = endpointOpts.operationId,
                 .summary = endpointOpts.summary,
@@ -402,8 +491,10 @@ pub const Rest = struct {
                 .tags = endpointOpts.tags,
                 .deprecated = endpointOpts.deprecated,
                 .security = endpointOpts.security,
-                .request = null,
-                .responses = &responses,
+                .params = endpointOpts.params,
+                .request = endpointOpts.request,
+                .responses = responses,
+                .internal = endpointOpts.internal,
             };
             const Wrapper = struct {
                 fn handle(ctx: *Context) anyerror!Response {
@@ -433,7 +524,8 @@ pub const Rest = struct {
         const hasReqBody = comptime fnInfo.param_types.len == 2;
         const InType = comptime if (hasReqBody) (fnInfo.param_types[1] orelse void) else void;
 
-        const responses = comptime blk: {
+        const responses: []const metaMod.ResponseDesc = comptime blk: {
+            if (endpointOpts.responses.len > 0) break :blk endpointOpts.responses;
             if (OutType == void) {
                 const list = [_]metaMod.ResponseDesc{
                     .{
@@ -442,7 +534,7 @@ pub const Rest = struct {
                         .schema = null,
                     },
                 };
-                break :blk list;
+                break :blk &list;
             }
             const payloadSchema = struct {
                 const s = typeSchemaWith(OutType, responseSpec);
@@ -454,10 +546,19 @@ pub const Rest = struct {
                     .schema = &payloadSchema,
                 },
             };
-            break :blk list;
+            break :blk &list;
         };
 
         const requestDesc: ?metaMod.RequestBody = comptime blk: {
+            if (endpointOpts.request) |declared| {
+                if (!hasReqBody or InType == void) {
+                    @compileError("REST `.request` requires a handler that accepts a request body");
+                }
+                if (declared.content != .json) {
+                    @compileError("REST typed handlers decode JSON only; keep `.request.content = .json`");
+                }
+                break :blk declared;
+            }
             if (!hasReqBody or InType == void) break :blk null;
             if (method == .GET or method == .HEAD or method == .DELETE) break :blk null;
             const bodySchema = struct {
@@ -478,8 +579,10 @@ pub const Rest = struct {
             .tags = endpointOpts.tags,
             .deprecated = endpointOpts.deprecated,
             .security = endpointOpts.security,
+            .params = endpointOpts.params,
             .request = requestDesc,
-            .responses = &responses,
+            .responses = responses,
+            .internal = endpointOpts.internal,
         };
 
         const Wrapper = struct {
@@ -632,6 +735,72 @@ test "typeSchema maps Zig types and honours explicit key names" {
 
     const renamed = typeSchemaWith(struct { user_name: []const u8 }, .{ .user_name = "user-name" });
     try testing.expectEqualStrings("user-name", renamed.object[0].name);
+}
+
+test "endpoint options expose params, custom responses, request overrides, and internal routes" {
+    const testing = std.testing;
+    const a = testing.allocator;
+
+    var router = Router.init(a);
+    defer router.deinit();
+    var rest = Rest.init(a, std.Io.Threaded.global_single_threaded.io(), &router);
+
+    const Item = struct { id: u64, name: []const u8 };
+    const CreateItem = struct { name: []const u8 };
+
+    const Handlers = struct {
+        fn getItem(ctx: *Context) !Schema(Item) {
+            const id = ctx.paramUint("id") orelse 0;
+            return Schema(Item).ok(.{ .id = id, .name = "item" });
+        }
+
+        fn createItem(_: *Context, req: CreateItem) !Schema(Item) {
+            return Schema(Item).created(.{ .id = 1, .name = req.name });
+        }
+
+        fn ping(_: *Context) !Schema(void) {
+            return Schema(void).noContent();
+        }
+    };
+
+    try rest.add(.GET, "/items/{id:int}", .{
+        .handler = Handlers.getItem,
+        .operationId = "getItem",
+        .params = &.{
+            .{ .name = "id", .in = .path, .required = true, .schema = schemaOf(u64) },
+            .{ .name = "expand", .in = .query, .schema = schemaOf(bool) },
+            .{ .name = "X-Trace", .in = .header, .schema = schemaOf([]const u8) },
+        },
+        .responses = &.{
+            .{ .status = 200, .description = "Item", .schema = schemaOf(Item) },
+            .{ .status = 404, .description = "Not found" },
+        },
+    });
+    try rest.add(.POST, "/items", .{
+        .handler = Handlers.createItem,
+        .operationId = "createItem",
+        .request = .{ .content = .json, .description = "Item to create", .required = true },
+        .responses = &.{
+            .{ .status = 201, .description = "Created", .schema = schemaOf(Item) },
+            .{ .status = 422, .description = "Invalid item" },
+        },
+    });
+    try rest.add(.GET, "/internal/health", .{
+        .handler = Handlers.ping,
+        .internal = true,
+    });
+
+    const openapi = @import("../openApi/openApiSpec.zig");
+    const spec = try openapi.generate(&router, .{ .title = "Options", .version = "1.0.0" });
+    defer a.free(spec);
+
+    try testing.expect(std.mem.indexOf(u8, spec, "\"in\":\"path\"") != null);
+    try testing.expect(std.mem.indexOf(u8, spec, "\"in\":\"query\"") != null);
+    try testing.expect(std.mem.indexOf(u8, spec, "\"in\":\"header\"") != null);
+    try testing.expect(std.mem.indexOf(u8, spec, "\"404\"") != null);
+    try testing.expect(std.mem.indexOf(u8, spec, "\"422\"") != null);
+    try testing.expect(std.mem.indexOf(u8, spec, "Item to create") != null);
+    try testing.expect(std.mem.indexOf(u8, spec, "/internal/health") == null);
 }
 
 test "typed REST endpoint: JSON body, Schema result, OpenAPI, key mapping" {

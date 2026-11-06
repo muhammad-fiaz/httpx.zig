@@ -19,6 +19,10 @@ var server = try httpx.Server.init(allocator, io, .{
             .enabled = true,
             .route = "/reference",
             .title = "Users API",
+            .theme = "default",
+            .darkMode = false,
+            .hideDownloadButton = true,
+            .showSidebar = true,
         },
     },
 });
@@ -30,6 +34,29 @@ defer server.deinit();
 | `enabled` | `bool` | `true` | Register the page and bundle |
 | `route` | `[]const u8` | `"/scalar"` | Page and asset prefix |
 | `title` | `[]const u8` | `"Scalar API Reference"` | HTML document title |
+| `theme` | `[]const u8` | `"default"` | `default`, `alternate`, `moon`, `purple`, `solarized`, … |
+| `darkMode` | `bool` | `false` | Force the dark palette |
+| `hideModels` | `bool` | `false` | Hide the models section |
+| `hideDownloadButton` | `bool` | `false` | Hide the download button |
+| `hideTestRequestButton` | `bool` | `false` | Hide the “Test request” button |
+| `isEditable` | `bool` | `false` | Allow editing the OpenAPI document |
+| `showSidebar` | `bool` | `true` | Show the sidebar navigation |
+| `rawConfiguration` | `?[]const u8` | `null` | Extra configuration as a JSON object, merged last |
+
+The options are written into the page's `data-configuration` JSON on the
+`#api-reference` element, which is how `standalone.js` reads its
+configuration. `rawConfiguration` covers options that are not modeled as
+fields:
+
+```zig
+.scalar = .{
+    .route = "/reference",
+    .rawConfiguration = "{\"withDefaultFonts\":false,\"defaultOpenAllTags\":true}",
+},
+```
+
+Raw keys are merged last and must form a JSON object, otherwise the mount
+returns `error.InvalidOptionsJson`.
 
 Scalar reads the same `/openapi.json` document as Swagger UI and ReDoc.
 

@@ -7,10 +7,13 @@ Runtime: react 19.3.1, react-dom 19.3.1, graphql 16.11.x, @graphiql/react ^1.0.0
 License: MIT
 Built with bun (esbuild IIFE):
   bun build entry.js --outdir=out --minify --target browser --format iife
+  cp out/entry.js graphiql.js   (bun names the output after entry.js)
   bun build node_modules/monaco-editor/esm/vs/editor/editor.worker.js --outfile=editor.worker.js --minify --target browser
   bun build node_modules/monaco-editor/esm/vs/language/json/json.worker.js --outfile=json.worker.js --minify --target browser
 Files vendored:
-- graphiql.js (IIFE bundle; sets window.renderGraphiQL(element, { endpoint }))
+- graphiql.js (IIFE bundle; sets window.renderGraphiQL(element, options) where options are
+  { endpoint, defaultQuery?, editorTheme?, headers? }; headers is a JSON object merged over
+  Content-Type: application/json for every request)
 - graphiql.css (bundle CSS; no Monaco fonts inline)
 - codicon-mxdk0fnd.ttf (Monaco icon font referenced by graphiql.css)
 - editor.worker.js (Monaco editor worker)

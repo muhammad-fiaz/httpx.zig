@@ -336,6 +336,17 @@ try app.post("/users", .{
     .tags = &.{"users"},
     .deprecated = false,
     .security = &.{},
+    .params = &.{
+        .{ .name = "id", .in = .path, .required = true, .schema = httpx.rest.schemaOf(u64) },
+        .{ .name = "expand", .in = .query, .schema = httpx.rest.schemaOf(bool) },
+        .{ .name = "X-Request-Id", .in = .header, .schema = httpx.rest.schemaOf([]const u8) },
+    },
+    .responses = &.{
+        .{ .status = 201, .description = "Created", .schema = httpx.rest.schemaOf(User) },
+        .{ .status = 422, .description = "Invalid user" },
+    },
+    .request = .{ .content = .json, .description = "User to create", .required = true },
+    .internal = false,
     .mediaType = "application/json; charset=utf-8",
     .requestSchema = CreateUserSchema, // mapped JSON keys
     .responseSchema = UserSchema,
@@ -344,6 +355,45 @@ try app.post("/users", .{
 // Raw handler route: same verb, no schema derivation.
 try app.get("/health", .{ .handler = healthCheck, .summary = "Liveness" });
 ```
+
+#### Parameters and responses
+
+Typed endpoints derive one response from the handler's return type and
+synthesize path parameters from pattern converters (`{id:int}`). State them
+explicitly when the contract is wider than the return type:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `params` | `[]const httpx.rest.Param` | `&.{}` | Path, query, header, and cookie parameters |
+| `responses` | `[]const httpx.rest.ResponseDesc` | Derived | Response list; replaces the derived response |
+| `request` | `?httpx.rest.RequestBody` | Derived | JSON request-body description/required override |
+| `internal` | `bool` | `false` | Exclude the route from OpenAPI |
+| `mediaType` | `[]const u8` | `application/json; charset=utf-8` | Response media type |
+
+`httpx.rest.schemaOf(T)` (and `schemaOfWith(T, spec)` for mapped keys) returns
+the `*const Schema` that `Param.schema` and `ResponseDesc.schema` require, so
+the same Zig types drive OpenAPI and JSON decoding. Explicit path parameters
+replace synthesized ones for the same name; undeclared path parameters stay
+synthesized from the converter.
+
+```zig
+try app.get("/users/{id:int}", .{
+    .handler = getUser,
+    .params = &.{
+        .{ .name = "id", .in = .path, .required = true, .schema = httpx.rest.schemaOf(u64) },
+        .{ .name = "expand", .in = .query, .schema = httpx.rest.schemaOf(bool) },
+    },
+    .responses = &.{
+        .{ .status = 200, .description = "User found", .schema = httpx.rest.schemaOf(User) },
+        .{ .status = 404, .description = "User not found" },
+    },
+});
+```
+
+`.internal = true` keeps infrastructure routes (health probes, docs assets)
+out of the generated document while still serving them. Typed handlers decode
+JSON only, so `.request.content` must stay `.json`; setting `.request` on a
+handler without a request parameter is a compile error.
 
 #### Results: `Schema(T).result(.{ ... })`
 

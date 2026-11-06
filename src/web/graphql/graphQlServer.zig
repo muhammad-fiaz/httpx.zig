@@ -19,6 +19,7 @@
 //! arrives exactly as sent.
 
 const std = @import("std");
+const configCoerce = @import("../../common/configCoerce.zig");
 const Allocator = std.mem.Allocator;
 const routerMod = @import("../router/router.zig");
 const Context = routerMod.Context;
@@ -91,8 +92,9 @@ pub fn mount(
     io: std.Io,
     router: *routerMod.Router,
     schema: Schema,
-    cfg: HandlerConfig,
+    cfg_in: anytype,
 ) !void {
+    const cfg = configCoerce.to(HandlerConfig, cfg_in);
     if (router.hasConflict(.POST, cfg.endpoint) or
         router.hasConflict(.GET, cfg.endpoint) or
         router.hasConflict(.OPTIONS, cfg.endpoint))

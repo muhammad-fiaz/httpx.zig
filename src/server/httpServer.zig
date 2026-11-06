@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const configCoerce = @import("../common/configCoerce.zig");
 const tcp = @import("../sockets/tcp.zig");
 const compression = @import("../compression/codec.zig");
 const parserMod = @import("../protocols/http1/parser.zig");
@@ -528,7 +529,10 @@ pub const Server = struct {
 
     /// Initializes server with explicit allocator, shared IO, and configuration.
     /// Matches `var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });`
-    pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Server {
+    /// Creates a server from an explicit allocator, shared I/O, and a partial
+    /// or full config literal. Omitted fields keep their declared defaults.
+    pub fn init(allocator: Allocator, io: std.Io, config: anytype) !Server {
+        const cfg = configCoerce.to(Config, config);
         return initInternal(allocator, io, false, null, cfg);
     }
 

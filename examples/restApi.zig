@@ -109,6 +109,7 @@ pub fn main() !void {
         .operationId = "createUser",
         .summary = "Create a new user",
         .tags = &.{"users"},
+        .request = .{ .content = .json, .description = "User to create", .required = true },
     });
 
     try app.get("/users/{id:int}", .{
@@ -116,6 +117,17 @@ pub fn main() !void {
         .operationId = "getUser",
         .summary = "Retrieve a user by ID",
         .tags = &.{"users"},
+        // Explicit parameters and responses; path params not listed here are
+        // synthesized from the `{id:int}` converter.
+        .params = &.{
+            .{ .name = "id", .in = .path, .required = true, .schema = httpx.rest.schemaOf(u64) },
+            .{ .name = "expand", .in = .query, .schema = httpx.rest.schemaOf(bool) },
+            .{ .name = "X-Request-Id", .in = .header, .schema = httpx.rest.schemaOf([]const u8) },
+        },
+        .responses = &.{
+            .{ .status = 200, .description = "User found", .schema = httpx.rest.schemaOf(UserResponse) },
+            .{ .status = 404, .description = "User not found" },
+        },
     });
 
     try app.put("/users/{id:int}", .{

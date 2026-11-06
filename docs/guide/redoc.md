@@ -19,6 +19,10 @@ var server = try httpx.Server.init(allocator, io, .{
             .enabled = true,
             .route = "/reference",
             .title = "Users API Reference",
+            .hideDownloadButton = true,
+            .requiredPropsFirst = true,
+            .sortPropsAlphabetically = true,
+            .expandResponses = "200,201",
         },
     },
 });
@@ -30,6 +34,30 @@ defer server.deinit();
 | `enabled` | `bool` | `true` | Register the page and its assets |
 | `route` | `[]const u8` | `"/redoc"` | Page and asset prefix |
 | `title` | `[]const u8` | `"ReDoc"` | HTML document title |
+| `hideHostname` | `bool` | `false` | Hide the API hostname |
+| `hideDownloadButton` | `bool` | `false` | Hide the OpenAPI download button |
+| `hideFab` | `bool` | `false` | Hide the floating action button |
+| `expandResponses` | `[]const u8` | `""` | Status codes expanded by default, e.g. `"200,201"` |
+| `pathInMiddlePanel` | `bool` | `false` | Show the endpoint path in the middle panel |
+| `requiredPropsFirst` | `bool` | `false` | List required properties first |
+| `sortPropsAlphabetically` | `bool` | `false` | Sort properties alphabetically |
+| `noAutoAuth` | `bool` | `false` | Disable automatic auth section |
+| `disableSearch` | `bool` | `false` | Disable the search box |
+| `rawOptions` | `?[]const u8` | `null` | Extra options as a JSON object, merged last |
+
+Options are passed as the second argument of `init(specUrl, options, element)`.
+`rawOptions` is merged last, so it can set any ReDoc option the bundled version
+supports:
+
+```zig
+.redoc = .{
+    .route = "/reference",
+    .rawOptions = "{\"theme\":{\"colors\":{\"primary\":{\"main\":\"#1f6feb\"}}}}",
+},
+```
+
+Raw keys must form a JSON object, otherwise the mount returns
+`error.InvalidOptionsJson`.
 
 ReDoc is read-only. Use Swagger UI when interactive request execution is
 required.

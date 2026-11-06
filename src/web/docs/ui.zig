@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const configCoerce = @import("../../common/configCoerce.zig");
 const routerMod = @import("../router/router.zig");
 const Router = routerMod.Router;
 const Response = routerMod.Response;
@@ -30,29 +31,82 @@ const assets = @import("assets.zig");
 const metaMod = @import("../router/routeMetadata.zig");
 const versionInfo = @import("../../common/version.zig");
 
+/// Operation expansion for Swagger UI: `list`, `full`, or `none`.
+pub const DocExpansion = enum { list, full, none };
+
+/// Swagger UI options. Every field has the vendor default; fields that would
+/// otherwise be hidden in the generated page are explicit here.
 pub const SwaggerConfig = struct {
     enabled: bool = true,
     route: []const u8 = "/docs",
     title: []const u8 = "Swagger UI",
+    docExpansion: DocExpansion = .list,
+    deepLinking: bool = true,
+    displayOperationId: bool = false,
+    displayRequestDuration: bool = false,
+    filter: bool = false,
+    persistAuthorization: bool = false,
+    tryItOutEnabled: bool = false,
+    defaultModelsExpandDepth: i32 = 1,
+    /// OAuth2 redirect URL; null serves `{route}/oauth2-redirect.html`.
+    oauth2RedirectUrl: ?[]const u8 = null,
+    /// Extra Swagger UI options as a JSON object, merged last. Use it for
+    /// vendor options that are not modeled above.
+    rawOptions: ?[]const u8 = null,
 };
 
+/// ReDoc options. Every field maps to the matching `Redoc.init` option.
 pub const RedocConfig = struct {
     enabled: bool = true,
     route: []const u8 = "/redoc",
     title: []const u8 = "ReDoc",
+    hideHostname: bool = false,
+    hideDownloadButton: bool = false,
+    hideFab: bool = false,
+    /// Comma-separated status codes expanded by default, e.g. `"200,201"`.
+    expandResponses: []const u8 = "",
+    pathInMiddlePanel: bool = false,
+    requiredPropsFirst: bool = false,
+    sortPropsAlphabetically: bool = false,
+    noAutoAuth: bool = false,
+    disableSearch: bool = false,
+    /// Extra ReDoc options as a JSON object, merged last.
+    rawOptions: ?[]const u8 = null,
 };
 
+/// Scalar options. Every field is written into the page's
+/// `data-configuration` JSON, so no option is silently dropped.
 pub const ScalarConfig = struct {
     enabled: bool = true,
     route: []const u8 = "/scalar",
     title: []const u8 = "Scalar API Reference",
+    /// `default`, `alternate`, `moon`, `purple`, `solarized`, …
+    theme: []const u8 = "default",
+    darkMode: bool = false,
+    hideModels: bool = false,
+    hideDownloadButton: bool = false,
+    hideTestRequestButton: bool = false,
+    isEditable: bool = false,
+    showSidebar: bool = true,
+    /// Extra Scalar configuration as a JSON object, merged last.
+    rawConfiguration: ?[]const u8 = null,
 };
 
+/// GraphiQL options passed to `window.renderGraphiQL(element, options)`.
 pub const GraphiQLConfig = struct {
     enabled: bool = true,
     route: []const u8 = "/graphiql",
     graphqlEndpoint: []const u8 = "/graphql",
     title: []const u8 = "GraphiQL IDE",
+    /// Query pre-filled in the editor.
+    defaultQuery: []const u8 = "",
+    /// Monaco editor theme, e.g. `"vs-dark"`.
+    editorTheme: []const u8 = "",
+    /// Extra HTTP headers for GraphQL requests, as a JSON object string:
+    /// `"{\"Authorization\":\"Bearer …\"}"`.
+    headers: []const u8 = "",
+    /// Extra GraphiQL options as a JSON object, merged last.
+    rawOptions: ?[]const u8 = null,
 };
 
 pub const OpenApiConfig = struct {
@@ -168,9 +222,10 @@ fn freeState(st: *DocsState) void {
 pub fn mount(
     allocator: Allocator,
     router: *Router,
-    cfg: Config,
+    cfg_in: anytype,
     info: ?openapi.Info,
 ) !void {
+    const cfg = configCoerce.to(Config, cfg_in);
     if (!cfg.enabled) return;
 
     const actualInfo = info orelse openapi.Info{
@@ -247,18 +302,18 @@ pub fn mount(
 
     // Pre-render enabled UI pages once; handlers only borrow.
     if (st.swaggerRoute) |route| {
-        st.swaggerPage = try renderSwaggerPage(allocator, cfg.swagger.title, st.openapiRoute, route);
+        st.swaggerPage = try renderSwaggerPage(allocator, cfg.swagger, st.openapiRoute, route);
     }
     if (st.redocRoute) |route| {
         const script = try joinRoute(allocator, route, "redoc.standalone.js");
-        st.redocPage = try renderRedocPage(allocator, cfg.redoc.title, st.openapiRoute, script);
+        st.redocPage = try renderRedocPage(allocator, cfg.redoc, st.openapiRoute, script);
     }
     if (st.scalarRoute) |route| {
         const script = try joinRoute(allocator, route, "standalone.js");
-        st.scalarPage = try renderScalarPage(allocator, cfg.scalar.title, st.openapiRoute, script);
+        st.scalarPage = try renderScalarPage(allocator, cfg.scalar, st.openapiRoute, script);
     }
     if (st.graphiqlRoute) |route| {
-        st.graphiqlPage = try renderGraphiqlPage(allocator, cfg.graphiql.title, st.graphqlEndpoint.?, route);
+        st.graphiqlPage = try renderGraphiqlPage(allocator, cfg.graphiql, st.graphqlEndpoint.?, route);
     }
 
     const internalMeta: metaMod.Metadata = .{ .internal = true };
@@ -450,13 +505,65 @@ fn escapeInto(w: anytype, s: []const u8) !void {
     }
 }
 
-fn renderSwaggerPage(a: Allocator, title: []const u8, specUrl: []const u8, swaggerRoute: []const u8) ![]u8 {
+/// Serializes `value` as a JSON literal that is safe inside an inline
+/// `<script>`: JSON is valid JavaScript, and `<`, `>`, `&` are escaped so a
+/// string can never terminate the script element.
+fn writeJsonScript(a: Allocator, w: anytype, value: std.json.Value) !void {
+    const bytes = try std.json.Stringify.valueAlloc(a, value, .{});
+    defer a.free(bytes);
+    for (bytes) |c| switch (c) {
+        '<' => try w.writeAll("\\u003c"),
+        '>' => try w.writeAll("\\u003e"),
+        '&' => try w.writeAll("\\u0026"),
+        else => try w.writeByte(c),
+    };
+}
+
+/// Serializes `value` as JSON for an HTML attribute value.
+fn writeJsonAttr(a: Allocator, w: anytype, value: std.json.Value) !void {
+    const bytes = try std.json.Stringify.valueAlloc(a, value, .{});
+    defer a.free(bytes);
+    try escapeInto(w, bytes);
+}
+
+/// Merges a raw JSON object into `target`, so vendor options that are not
+/// modeled as fields stay usable (string-based escape hatch).
+fn mergeOptions(a: Allocator, target: *std.json.ObjectMap, raw: ?[]const u8) !void {
+    const source = raw orelse return;
+    if (source.len == 0) return;
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, source, .{}) catch return error.InvalidOptionsJson;
+    if (parsed != .object) return error.InvalidOptionsJson;
+    var it = parsed.object.iterator();
+    while (it.next()) |entry| try target.put(a, entry.key_ptr.*, entry.value_ptr.*);
+}
+
+fn renderSwaggerPage(a: Allocator, cfg: SwaggerConfig, specUrl: []const u8, swaggerRoute: []const u8) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    const redirect = if (cfg.oauth2RedirectUrl) |url| url else try joinRoute(aa, swaggerRoute, "oauth2-redirect.html");
+    var opts = try std.json.ObjectMap.init(aa, &.{}, &.{});
+    try opts.put(aa, "url", std.json.Value{ .string = specUrl });
+    try opts.put(aa, "dom_id", std.json.Value{ .string = "#swagger-ui" });
+    try opts.put(aa, "layout", std.json.Value{ .string = "StandaloneLayout" });
+    try opts.put(aa, "docExpansion", std.json.Value{ .string = @tagName(cfg.docExpansion) });
+    try opts.put(aa, "deepLinking", std.json.Value{ .bool = cfg.deepLinking });
+    try opts.put(aa, "displayOperationId", std.json.Value{ .bool = cfg.displayOperationId });
+    try opts.put(aa, "displayRequestDuration", std.json.Value{ .bool = cfg.displayRequestDuration });
+    try opts.put(aa, "filter", std.json.Value{ .bool = cfg.filter });
+    try opts.put(aa, "persistAuthorization", std.json.Value{ .bool = cfg.persistAuthorization });
+    try opts.put(aa, "tryItOutEnabled", std.json.Value{ .bool = cfg.tryItOutEnabled });
+    try opts.put(aa, "defaultModelsExpandDepth", std.json.Value{ .integer = cfg.defaultModelsExpandDepth });
+    try opts.put(aa, "oauth2RedirectUrl", std.json.Value{ .string = redirect });
+    try mergeOptions(aa, &opts, cfg.rawOptions);
+
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
     const w = &out.writer;
 
     try w.writeAll("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<title>");
-    try escapeInto(w, title);
+    try escapeInto(w, cfg.title);
     try w.writeAll("</title>\n<link rel=\"stylesheet\" href=\"");
     try escapeInto(w, swaggerRoute);
     try w.writeAll("/swagger-ui.css\">\n<link rel=\"icon\" type=\"image/png\" href=\"");
@@ -465,47 +572,94 @@ fn renderSwaggerPage(a: Allocator, title: []const u8, specUrl: []const u8, swagg
     try escapeInto(w, swaggerRoute);
     try w.writeAll("/swagger-ui-bundle.js\"></script>\n<script src=\"");
     try escapeInto(w, swaggerRoute);
-    try w.writeAll("/swagger-ui-standalone-preset.js\"></script>\n<script>\nwindow.onload = function () {\n  const ui = SwaggerUIBundle({\n    url: '");
-    try escapeInto(w, specUrl);
-    try w.writeAll("',\n    dom_id: '#swagger-ui',\n    deepLinking: true,\n    presets: [\n      SwaggerUIBundle.presets.apis,\n      SwaggerUIStandalonePreset\n    ],\n    plugins: [\n      SwaggerUIBundle.plugins.DownloadUrl\n    ],\n    layout: 'StandaloneLayout',\n    oauth2RedirectUrl: window.location.origin + '");
-    try escapeInto(w, swaggerRoute);
-    try w.writeAll("/oauth2-redirect.html'\n  });\n  window.ui = ui;\n};\n</script>\n</body>\n</html>\n");
+    try w.writeAll("/swagger-ui-standalone-preset.js\"></script>\n<script>\nwindow.onload = function () {\n  const options = ");
+    try writeJsonScript(a, w, std.json.Value{ .object = opts });
+    try w.writeAll(";\n  options.presets = [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset];\n  options.plugins = [SwaggerUIBundle.plugins.DownloadUrl];\n  window.ui = SwaggerUIBundle(options);\n};\n</script>\n</body>\n</html>\n");
     return out.toOwnedSlice();
 }
 
-fn renderRedocPage(a: Allocator, title: []const u8, specUrl: []const u8, scriptUrl: []const u8) ![]u8 {
+fn renderRedocPage(a: Allocator, cfg: RedocConfig, specUrl: []const u8, scriptUrl: []const u8) ![]u8 {
     defer a.free(scriptUrl);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    var opts = try std.json.ObjectMap.init(aa, &.{}, &.{});
+    try opts.put(aa, "hideHostname", std.json.Value{ .bool = cfg.hideHostname });
+    try opts.put(aa, "hideDownloadButton", std.json.Value{ .bool = cfg.hideDownloadButton });
+    try opts.put(aa, "hideFab", std.json.Value{ .bool = cfg.hideFab });
+    try opts.put(aa, "expandResponses", std.json.Value{ .string = cfg.expandResponses });
+    try opts.put(aa, "pathInMiddlePanel", std.json.Value{ .bool = cfg.pathInMiddlePanel });
+    try opts.put(aa, "requiredPropsFirst", std.json.Value{ .bool = cfg.requiredPropsFirst });
+    try opts.put(aa, "sortPropsAlphabetically", std.json.Value{ .bool = cfg.sortPropsAlphabetically });
+    try opts.put(aa, "noAutoAuth", std.json.Value{ .bool = cfg.noAutoAuth });
+    try opts.put(aa, "disableSearch", std.json.Value{ .bool = cfg.disableSearch });
+    try mergeOptions(aa, &opts, cfg.rawOptions);
+
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
     const w = &out.writer;
 
     try w.writeAll("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<title>");
-    try escapeInto(w, title);
+    try escapeInto(w, cfg.title);
     try w.writeAll("</title>\n<style>body { margin: 0; padding: 0; }</style>\n</head>\n<body>\n<div id=\"redoc-container\"></div>\n<script type=\"module\">\n  import { init } from \"");
     try escapeInto(w, scriptUrl);
     try w.writeAll("\";\n  init(\"");
     try escapeInto(w, specUrl);
-    try w.writeAll("\", {}, document.getElementById('redoc-container'));\n</script>\n</body>\n</html>\n");
+    try w.writeAll("\", ");
+    try writeJsonScript(a, w, std.json.Value{ .object = opts });
+    try w.writeAll(", document.getElementById('redoc-container'));\n</script>\n</body>\n</html>\n");
     return out.toOwnedSlice();
 }
 
-fn renderScalarPage(a: Allocator, title: []const u8, specUrl: []const u8, scriptUrl: []const u8) ![]u8 {
+fn renderScalarPage(a: Allocator, cfg: ScalarConfig, specUrl: []const u8, scriptUrl: []const u8) ![]u8 {
     defer a.free(scriptUrl);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    var opts = try std.json.ObjectMap.init(aa, &.{}, &.{});
+    try opts.put(aa, "theme", std.json.Value{ .string = cfg.theme });
+    try opts.put(aa, "darkMode", std.json.Value{ .bool = cfg.darkMode });
+    try opts.put(aa, "hideModels", std.json.Value{ .bool = cfg.hideModels });
+    try opts.put(aa, "hideDownloadButton", std.json.Value{ .bool = cfg.hideDownloadButton });
+    try opts.put(aa, "hideTestRequestButton", std.json.Value{ .bool = cfg.hideTestRequestButton });
+    try opts.put(aa, "isEditable", std.json.Value{ .bool = cfg.isEditable });
+    try opts.put(aa, "showSidebar", std.json.Value{ .bool = cfg.showSidebar });
+    try mergeOptions(aa, &opts, cfg.rawConfiguration);
+
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
     const w = &out.writer;
 
     try w.writeAll("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<title>");
-    try escapeInto(w, title);
+    try escapeInto(w, cfg.title);
     try w.writeAll("</title>\n<style>body { margin: 0; padding: 0; }</style>\n</head>\n<body>\n<script id=\"api-reference\" data-url=\"");
     try escapeInto(w, specUrl);
+    try w.writeAll("\" data-configuration=\"");
+    try writeJsonAttr(a, w, std.json.Value{ .object = opts });
     try w.writeAll("\"></script>\n<script src=\"");
     try escapeInto(w, scriptUrl);
     try w.writeAll("\"></script>\n</body>\n</html>\n");
     return out.toOwnedSlice();
 }
 
-fn renderGraphiqlPage(a: Allocator, title: []const u8, graphqlEndpoint: []const u8, graphiqlRoute: []const u8) ![]u8 {
+fn renderGraphiqlPage(a: Allocator, cfg: GraphiQLConfig, graphqlEndpoint: []const u8, graphiqlRoute: []const u8) ![]u8 {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+
+    var opts = try std.json.ObjectMap.init(aa, &.{}, &.{});
+    try opts.put(aa, "endpoint", std.json.Value{ .string = graphqlEndpoint });
+    if (cfg.defaultQuery.len > 0) try opts.put(aa, "defaultQuery", std.json.Value{ .string = cfg.defaultQuery });
+    if (cfg.editorTheme.len > 0) try opts.put(aa, "editorTheme", std.json.Value{ .string = cfg.editorTheme });
+    if (cfg.headers.len > 0) {
+        const headers = std.json.parseFromSliceLeaky(std.json.Value, aa, cfg.headers, .{}) catch return error.InvalidOptionsJson;
+        if (headers != .object) return error.InvalidOptionsJson;
+        try opts.put(aa, "headers", headers);
+    }
+    try mergeOptions(aa, &opts, cfg.rawOptions);
+
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
     const w = &out.writer;
@@ -514,16 +668,16 @@ fn renderGraphiqlPage(a: Allocator, title: []const u8, graphqlEndpoint: []const 
     try escapeInto(w, graphiqlRoute);
     if (graphiqlRoute.len == 0 or graphiqlRoute[graphiqlRoute.len - 1] != '/') try w.writeByte('/');
     try w.writeAll("\">\n<title>");
-    try escapeInto(w, title);
+    try escapeInto(w, cfg.title);
     try w.writeAll("</title>\n<link rel=\"stylesheet\" href=\"");
     try escapeInto(w, graphiqlRoute);
     try w.writeAll("/graphiql.css\">\n<style>\n  html, body, #graphiql {\n    height: 100%;\n    margin: 0;\n    width: 100%;\n    overflow: hidden;\n  }\n</style>\n</head>\n<body>\n<div id=\"graphiql\"></div>\n<script>\n  window.__GRAPHIQL_BASE_PATH__ = '");
     try escapeInto(w, graphiqlRoute);
     try w.writeAll("';\n</script>\n<script src=\"");
     try escapeInto(w, graphiqlRoute);
-    try w.writeAll("/graphiql.js\"></script>\n<script>\n  window.onload = function() {\n    if (window.renderGraphiQL) {\n      window.renderGraphiQL(document.getElementById('graphiql'), {\n        endpoint: '");
-    try escapeInto(w, graphqlEndpoint);
-    try w.writeAll("'\n      });\n    }\n  };\n</script>\n</body>\n</html>\n");
+    try w.writeAll("/graphiql.js\"></script>\n<script>\n  window.onload = function() {\n    if (window.renderGraphiQL) {\n      window.renderGraphiQL(document.getElementById('graphiql'), ");
+    try writeJsonScript(a, w, std.json.Value{ .object = opts });
+    try w.writeAll(");\n    }\n  };\n</script>\n</body>\n</html>\n");
     return out.toOwnedSlice();
 }
 
@@ -705,6 +859,77 @@ test "graphiql codicon font resolves under a custom mount route" {
     const page = (try invoke(&router, .GET, "/internal/ide", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, page.body, "<base href=\"/internal/ide/\">") != null);
     try std.testing.expect(std.mem.indexOf(u8, page.body, "/internal/ide/graphiql.js") != null);
+}
+
+test "every ui option reaches the rendered page" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+    try router.get("/ping", helloHandler, .{});
+
+    try mount(a, &router, .{
+        .swagger = .{
+            .route = "/api-docs",
+            .docExpansion = .full,
+            .deepLinking = false,
+            .displayOperationId = true,
+            .displayRequestDuration = true,
+            .filter = true,
+            .persistAuthorization = true,
+            .tryItOutEnabled = true,
+            .defaultModelsExpandDepth = 2,
+            .oauth2RedirectUrl = "https://auth.example.com/callback",
+        },
+        .redoc = .{
+            .route = "/reference",
+            .hideHostname = true,
+            .hideDownloadButton = true,
+            .pathInMiddlePanel = true,
+            .expandResponses = "200,201",
+        },
+        .scalar = .{
+            .route = "/scalar-docs",
+            .theme = "moon",
+            .darkMode = true,
+            .hideModels = true,
+        },
+        .graphiql = .{
+            .route = "/ide",
+            .graphqlEndpoint = "/graphql",
+            .defaultQuery = "{ __typename }",
+            .editorTheme = "vs-dark",
+            .headers = "{\"Authorization\":\"Bearer demo\"}",
+        },
+    }, null);
+    defer unmount();
+
+    const swagger = (try invoke(&router, .GET, "/api-docs", a)).?;
+    try std.testing.expect(std.mem.indexOf(u8, swagger.body, "\"docExpansion\":\"full\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swagger.body, "\"deepLinking\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swagger.body, "\"displayOperationId\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swagger.body, "\"displayRequestDuration\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swagger.body, "\"filter\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swagger.body, "\"persistAuthorization\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swagger.body, "\"tryItOutEnabled\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swagger.body, "\"defaultModelsExpandDepth\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, swagger.body, "https://auth.example.com/callback") != null);
+
+    const redoc = (try invoke(&router, .GET, "/reference", a)).?;
+    try std.testing.expect(std.mem.indexOf(u8, redoc.body, "\"hideHostname\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redoc.body, "\"hideDownloadButton\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redoc.body, "\"pathInMiddlePanel\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redoc.body, "\"expandResponses\":\"200,201\"") != null);
+
+    const scalar = (try invoke(&router, .GET, "/scalar-docs", a)).?;
+    try std.testing.expect(std.mem.indexOf(u8, scalar.body, "data-configuration=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scalar.body, "&quot;theme&quot;:&quot;moon&quot;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scalar.body, "&quot;darkMode&quot;:true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, scalar.body, "&quot;hideModels&quot;:true") != null);
+
+    const ide = (try invoke(&router, .GET, "/ide", a)).?;
+    try std.testing.expect(std.mem.indexOf(u8, ide.body, "\"defaultQuery\":\"{ __typename }\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ide.body, "\"editorTheme\":\"vs-dark\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ide.body, "\"Authorization\":\"Bearer demo\"") != null);
 }
 
 test "all documentation pages are self-hosted and offline" {

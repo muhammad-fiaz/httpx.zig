@@ -1,12 +1,12 @@
 //! Example: GraphQL Server with the GraphiQL IDE
 //!
 //! Demonstrates:
-//! - Defining GraphQL types from Zig structs with scalar kinds
+//! - The full type system: objects, enums, input objects, arguments, lists
 //! - Typed resolvers with a shared `httpx.graphql.Context`
 //! - One `httpx.Server.init(allocator, io, …)` owning listener, router, docs
 //! - Typed REST routes through `server.rest()` (no router poking)
 //! - GraphQL mounted with `server.graphql(schema, …)`, torn down by `deinit`
-//! - `httpx.Client.init(allocator, io, …)` for the verification requests
+//! - String queries with typed client decoding via `httpx.graphql.Payload(T)`
 
 const std = @import("std");
 const httpx = @import("httpx");
@@ -17,20 +17,35 @@ const Scalar = httpx.graphql.Scalar;
 /// GraphiQL UI both read it, so the two can never drift apart.
 const graphqlEndpoint = "/graphql";
 
+/// Enum type: resolvers return the Zig enum and the engine emits tag names.
+const Role = enum { ADMIN, USER };
+const RoleEnum = httpx.graphql.Enum("Role", &.{ "ADMIN", "USER" });
+
 // Struct-based type: fields map one-to-one onto the Zig struct.
 const User = struct {
     id: []const u8,
     name: []const u8,
     email: []const u8,
-    role: []const u8,
+    role: Role,
 };
 
 const UserType = httpx.graphql.Type("User", .{
     .id = Scalar.id,
     .name = Scalar.string,
     .email = Scalar.string,
-    .role = Scalar.string,
+    .role = RoleEnum,
 });
+
+/// Input object type used by the `users` field arguments.
+const UserFilter = httpx.graphql.Input("UserFilter", .{
+    .role = RoleEnum,
+});
+
+/// Typed argument struct: decoded from the GraphQL arguments object.
+const UsersArgs = struct {
+    filter: ?struct { role: ?Role = null } = null,
+    limit: u16 = 10,
+};
 
 const resolvers = struct {
     pub fn getMe(ctx: *httpx.graphql.Context) !User {
@@ -39,15 +54,22 @@ const resolvers = struct {
             .id = "usr_101",
             .name = "Example User",
             .email = "user@example.com",
-            .role = "administrator",
+            .role = .ADMIN,
         };
     }
 
-    pub fn getUsers(ctx: *httpx.graphql.Context) ![]const User {
+    pub fn getUsers(ctx: *httpx.graphql.Context, args: UsersArgs) ![]const User {
         _ = ctx;
-        return &.{
-            .{ .id = "1", .name = "Alice Cooper", .email = "alice@example.com", .role = "engineer" },
-            .{ .id = "2", .name = "Bob Dylan", .email = "bob@example.com", .role = "designer" },
+        // Arguments arrive typed: `filter.role` is the Role enum, not a string.
+        const wanted = if (args.filter) |f| f.role orelse .USER else .USER;
+        _ = args.limit;
+        return switch (wanted) {
+            .ADMIN => &.{
+                .{ .id = "1", .name = "Alice Cooper", .email = "alice@example.com", .role = .ADMIN },
+            },
+            .USER => &.{
+                .{ .id = "2", .name = "Bob Dylan", .email = "bob@example.com", .role = .USER },
+            },
         };
     }
 
@@ -61,7 +83,16 @@ const resolvers = struct {
 const QueryRoot = httpx.graphql.Query(.{
     .serverName = .{ .type = Scalar.string, .resolve = resolvers.getServerName },
     .me = .{ .type = UserType, .description = "Current authenticated user", .resolve = resolvers.getMe },
-    .users = .{ .type = UserType, .list = true, .description = "List all users in organization", .resolve = resolvers.getUsers },
+    .users = .{
+        .type = UserType,
+        .list = true,
+        .description = "List users, filtered by role",
+        .args = .{
+            .filter = UserFilter,
+            .limit = .{ .type = Scalar.int, .default = "10" },
+        },
+        .resolve = resolvers.getUsers,
+    },
 });
 
 // A typed REST endpoint next to GraphQL: `httpx.Schema(T)` results plus a key
@@ -110,7 +141,15 @@ pub fn main() !void {
             .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
             .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
             .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar Reference" },
-            .graphiql = .{ .enabled = true, .route = "/graphiql", .graphqlEndpoint = graphqlEndpoint, .title = "GraphiQL IDE" },
+            .graphiql = .{
+                .enabled = true,
+                .route = "/graphiql",
+                .graphqlEndpoint = graphqlEndpoint,
+                .title = "GraphiQL IDE",
+                // Pre-fill the editor and use a dark Monaco theme.
+                .defaultQuery = "{ me { id name role } }",
+                .editorTheme = "vs-dark",
+            },
         },
         .logging = .{},
         .maxConnections = 5,
@@ -130,11 +169,14 @@ pub fn main() !void {
         .schema = StatusSchema,
     });
 
-    // GraphQL schema and endpoint. The mount is owned by the server and
-    // removed by `server.deinit()`.
+    // GraphQL schema and endpoint. Every declared type reaches introspection,
+    // so GraphiQL / ReDoc / Scalar render them. The mount is owned by the
+    // server and removed by `server.deinit()`.
     const schema = httpx.graphql.Schema.init(allocator, io, .{
         .query = QueryRoot,
         .types = &.{UserType},
+        .enums = &.{RoleEnum},
+        .inputs = &.{UserFilter},
         .enableIntrospection = true,
     });
     try server.graphql(schema, .{ .endpoint = graphqlEndpoint });
@@ -166,9 +208,21 @@ pub fn main() !void {
     std.debug.print("GET /api/status -> status={d}, body={s}\n", .{ statusRes.status, statusRes.body });
     statusRes.deinit();
 
-    var gqlRes = try client.graphql(urlGraphql, "{ me { id name email role } }", null, .{});
+    // String query against the typed schema; the response is decoded into a
+    // typed envelope that declares only the fields this query selected.
+    const query =
+        "{ me { id name role } users(filter: { role: ADMIN }, limit: 2) { id name role } }";
+    var gqlRes = try client.graphql(urlGraphql, query, null, .{});
+    defer gqlRes.deinit();
     std.debug.print("POST /graphql -> status={d}, body={s}\n", .{ gqlRes.status, gqlRes.body });
-    gqlRes.deinit();
+
+    const MeQuery = struct {
+        me: struct { id: []const u8, name: []const u8, role: []const u8 },
+    };
+    const payload = try gqlRes.json(httpx.graphql.Payload(MeQuery));
+    if (payload.data) |data| {
+        std.debug.print("typed me -> id={s} name={s} role={s}\n", .{ data.me.id, data.me.name, data.me.role });
+    }
 
     server.requestShutdown();
     t.join();
