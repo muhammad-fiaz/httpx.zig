@@ -948,7 +948,7 @@ pub const Server = struct {
             p.deinit();
             self.h3PlaceholderConn = null;
         }
-        if (self.cfg.enableDocs) docs.unmount();
+        if (self.docsMounted) docs.unmountRouter(&self.router);
         self.router.deinit();
         self.listener.close(self.io);
         self.activeConns.deinit(self.allocator);

@@ -20,6 +20,7 @@ pub const Config = ui.Config;
 pub const Info = openapi.Info;
 pub const mount = ui.mount;
 pub const unmount = ui.unmount;
+pub const unmountRouter = ui.unmountRouter;
 
 test {
     _ = assets;

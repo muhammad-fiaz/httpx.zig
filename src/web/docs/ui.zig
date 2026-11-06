@@ -13,8 +13,9 @@
 //!
 //! Route conflicts are surfaced as Router errors, never silently overwritten.
 //!
-//! Handlers are capture-less fn pointers, so mounted state lives in a single
-//! module-level instance: one docs mount per process. `unmount()` releases it.
+//! Handlers are capture-less fn pointers, so mounted state is carried in
+//! `Context.userData`. Each router mount owns its own state; `unmountRouter`
+//! releases one mount and `unmount` releases every remaining mount.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -82,6 +83,8 @@ const DocsState = struct {
     graphqlEndpoint: ?[]u8 = null,
     title: []u8 = &.{},
     router: *const Router,
+    /// Next mount in the process-wide registry used by `unmount`.
+    next: ?*DocsState = null,
     info: openapi.Info,
     /// Pages are rendered once at mount; handlers hand out borrowed slices
     /// so request handling performs zero dynamic allocation.
@@ -105,7 +108,59 @@ const DocsState = struct {
     }
 };
 
-var gState: ?*DocsState = null;
+var gMounts: ?*DocsState = null;
+
+fn removeRoutes(st: *DocsState) void {
+    const a = st.allocator;
+    const router = @constCast(st.router);
+    if (st.openapiRoute.len > 0) _ = router.remove(.GET, st.openapiRoute);
+    if (st.swaggerRoute) |route| {
+        _ = router.remove(.GET, route);
+        for (assets.swaggerFiles) |f| {
+            const full = joinRoute(a, route, f.name) catch continue;
+            defer a.free(full);
+            _ = router.remove(.GET, full);
+        }
+    }
+    if (st.redocRoute) |route| {
+        _ = router.remove(.GET, route);
+        for (assets.redocFiles) |f| {
+            const full = joinRoute(a, route, f.name) catch continue;
+            defer a.free(full);
+            _ = router.remove(.GET, full);
+        }
+    }
+    if (st.scalarRoute) |route| {
+        _ = router.remove(.GET, route);
+        const full = joinRoute(a, route, "standalone.js") catch null;
+        if (full) |fp| {
+            defer a.free(fp);
+            _ = router.remove(.GET, fp);
+        }
+    }
+    if (st.graphiqlRoute) |route| {
+        _ = router.remove(.GET, route);
+        for (assets.graphiqlFiles) |f| {
+            const full = joinRoute(a, route, f.name) catch continue;
+            defer a.free(full);
+            _ = router.remove(.GET, full);
+        }
+    }
+}
+
+fn freeState(st: *DocsState) void {
+    removeRoutes(st);
+    const a = st.allocator;
+    a.free(st.openapiRoute);
+    if (st.swaggerRoute) |p| a.free(p);
+    if (st.redocRoute) |p| a.free(p);
+    if (st.scalarRoute) |p| a.free(p);
+    if (st.graphiqlRoute) |p| a.free(p);
+    if (st.graphqlEndpoint) |p| a.free(p);
+    a.free(st.title);
+    st.deinitPages();
+    a.destroy(st);
+}
 
 /// Registers documentation routes on `router` and captures the generated
 /// OpenAPI document. The spec reflects routes registered BEFORE this call.
@@ -278,23 +333,31 @@ pub fn mount(
             try router.add(.GET, full, graphiqlAssetHandler, .{ .meta = internalMeta });
         }
     }
-    gState = st;
+    st.next = gMounts;
+    gMounts = st;
 }
 
-/// Frees mounted docs state. Safe to call when nothing is mounted.
+/// Frees the docs state mounted on `router`. Other mounts are untouched.
+pub fn unmountRouter(router: *const Router) void {
+    var link = &gMounts;
+    while (link.*) |st| {
+        if (st.router == router) {
+            link.* = st.next;
+            freeState(st);
+            return;
+        }
+        link = &st.next;
+    }
+}
+
+/// Frees every mounted docs state. Safe to call when nothing is mounted.
 pub fn unmount() void {
-    if (gState) |st| {
-        const a = st.allocator;
-        a.free(st.openapiRoute);
-        if (st.swaggerRoute) |p| a.free(p);
-        if (st.redocRoute) |p| a.free(p);
-        if (st.scalarRoute) |p| a.free(p);
-        if (st.graphiqlRoute) |p| a.free(p);
-        if (st.graphqlEndpoint) |p| a.free(p);
-        a.free(st.title);
-        st.deinitPages();
-        a.destroy(st);
-        gState = null;
+    var current = gMounts;
+    gMounts = null;
+    while (current) |st| {
+        const next = st.next;
+        freeState(st);
+        current = next;
     }
 }
 
@@ -317,10 +380,9 @@ fn requireState(ctx: *Context) *DocsState {
 
 fn openApiHandler(ctx: *Context) anyerror!Response {
     const st = requireState(ctx);
-    if (openapi.generate(st.router, st.info)) |freshSpec| {
-        if (st.spec) |old| st.allocator.free(old);
-        st.spec = freshSpec;
-    } else |_| {}
+    // The document is a snapshot taken at mount time. It is served read-only:
+    // regenerating on each request would free the buffer another in-flight
+    // request may still be writing.
     return .{ .status = 200, .contentType = mediaTypeMod.applicationJsonUtf8, .body = st.spec.? };
 }
 
@@ -701,4 +763,52 @@ test "disabling swagger and redoc leaves scalar and spec" {
     try std.testing.expect((try invoke(&router, .GET, "/redoc", a)) == null);
     try std.testing.expect((try invoke(&router, .GET, "/scalar", a)) != null);
     try std.testing.expect((try invoke(&router, .GET, "/openapi.json", a)) != null);
+}
+
+test "docs mounts are isolated per router and unmount removes routes" {
+    const a = std.testing.allocator;
+    var first = Router.init(a);
+    defer first.deinit();
+    var second = Router.init(a);
+    defer second.deinit();
+
+    try first.get("/first", helloHandler, .{});
+    try second.get("/second", helloHandler, .{});
+
+    try mount(a, &first, .{}, null);
+    try mount(a, &second, .{}, null);
+    defer unmount();
+
+    // Both mounts serve independently.
+    try std.testing.expect((try invoke(&first, .GET, "/openapi.json", a)) != null);
+    const second_spec = (try invoke(&second, .GET, "/openapi.json", a)).?;
+    try std.testing.expect(std.mem.indexOf(u8, second_spec.body, "/second") != null);
+
+    // Unmounting one router leaves the other mount usable and removes only
+    // the first router's docs routes.
+    unmountRouter(&first);
+    try std.testing.expect((try invoke(&first, .GET, "/openapi.json", a)) == null);
+    try std.testing.expect((try invoke(&first, .GET, "/docs", a)) == null);
+    try std.testing.expect((try invoke(&second, .GET, "/openapi.json", a)) != null);
+    try std.testing.expect((try invoke(&second, .GET, "/docs", a)) != null);
+}
+
+test "openapi document is a stable mount-time snapshot" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+    try router.get("/before", helloHandler, .{});
+
+    try mount(a, &router, .{}, null);
+    defer unmount();
+
+    const first = (try invoke(&router, .GET, "/openapi.json", a)).?;
+    const first_copy = try a.dupe(u8, first.body);
+    defer a.free(first_copy);
+
+    // Routes added after mounting are not reflected by the read-only snapshot.
+    try router.get("/after", helloHandler, .{});
+    const second = (try invoke(&router, .GET, "/openapi.json", a)).?;
+    try std.testing.expectEqualStrings(first_copy, second.body);
+    try std.testing.expect(std.mem.indexOf(u8, second.body, "/after") == null);
 }

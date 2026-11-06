@@ -63,6 +63,7 @@ pub const App = struct {
     allocator: Allocator,
     io: std.Io,
     server: serverMod.Server,
+    docsMounted: bool = false,
 
     /// Creates an application. `config` is any struct whose fields match
     /// `httpx.server.Config`; unmatched fields are ignored, so callers can pass
@@ -89,9 +90,10 @@ pub const App = struct {
         };
     }
 
-    /// Unmounts documentation and releases the underlying server.
+    /// Unmounts documentation owned by this application and releases the
+    /// underlying server.
     pub fn deinit(self: *App) void {
-        docsMod.unmount();
+        if (self.docsMounted) docsMod.unmountRouter(&self.server.router);
         self.server.deinit();
     }
 
@@ -245,6 +247,7 @@ pub const App = struct {
             break :blk out;
         };
         try docsMod.mount(self.allocator, &self.server.router, docsCfg, null);
+        self.docsMounted = true;
     }
 
     /// Runs the accept loop until shutdown is requested.
