@@ -481,7 +481,7 @@ pub const Watcher = struct {
 
                         const fullPath = std.Io.Dir.path.join(self.allocator, &.{ self.config.dirPath, entry.path }) catch continue;
 
-                        if (staticMod.statPath(io, fullPath)) |st| {
+                        if (staticMod.statPath(fullPath)) |st| {
                             seen.append(self.allocator, .{
                                 .path = fullPath,
                                 .mtimeNs = st.mtimeNs,
@@ -570,7 +570,7 @@ pub const Watcher = struct {
         var itEntries = self.entries.iterator();
         while (itEntries.next()) |entry| {
             if (seenSet.contains(entry.key_ptr.*)) continue;
-            if (staticMod.statPath(io, entry.key_ptr.*)) |st| {
+            if (staticMod.statPath(entry.key_ptr.*)) |st| {
                 if (entry.value_ptr.mtimeNs != st.mtimeNs or entry.value_ptr.size != st.size) {
                     entry.value_ptr.mtimeNs = st.mtimeNs;
                     entry.value_ptr.size = st.size;
@@ -654,7 +654,7 @@ pub const Watcher = struct {
             if (events.isEditorTempFile(entry.path)) continue;
             if (self.isIgnoredPath(entry.path)) continue;
             const fullPath = std.Io.Dir.path.join(self.allocator, &.{ dir, entry.path }) catch continue;
-            if (staticMod.statPath(io, fullPath)) |st| {
+            if (staticMod.statPath(fullPath)) |st| {
                 seen.append(self.allocator, .{ .path = fullPath, .mtimeNs = st.mtimeNs, .size = st.size }) catch {
                     self.allocator.free(fullPath);
                     continue;
@@ -692,7 +692,7 @@ pub const Watcher = struct {
                     break;
                 }
             }
-            if (!found and staticMod.statPath(io, entry.key_ptr.*) == null) {
+            if (!found and staticMod.statPath(entry.key_ptr.*) == null) {
                 gone.append(self.allocator, entry.key_ptr.*) catch {};
             }
         }
@@ -744,14 +744,13 @@ pub const Watcher = struct {
     /// Stats explicitly registered files living outside the watch root.
     /// Native backends cover the root subtree; these singles are cheap.
     fn pollExternals(self: *Watcher) void {
-        const io = self.io;
         self.mutex.lock();
         defer self.mutex.unlock();
         var it = self.entries.iterator();
         while (it.next()) |entry| {
             const p = entry.key_ptr.*;
             if (self.config.dirPath.len > 0 and std.mem.startsWith(u8, p, self.config.dirPath)) continue;
-            if (staticMod.statPath(io, p)) |st| {
+            if (staticMod.statPath(p)) |st| {
                 if (entry.value_ptr.mtimeNs != st.mtimeNs or entry.value_ptr.size != st.size) {
                     entry.value_ptr.mtimeNs = st.mtimeNs;
                     entry.value_ptr.size = st.size;
@@ -781,7 +780,7 @@ pub const Watcher = struct {
     /// Re-registering refreshes in place without leaking the old key.
     /// Stats before locking (no IO under the spinlock).
     pub fn watchFile(self: *Watcher, path: []const u8) !void {
-        const st = staticMod.statPath(self.io, path) orelse return;
+        const st = staticMod.statPath(path) orelse return;
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.entries.getPtr(path)) |val| {
@@ -1020,7 +1019,7 @@ pub const Watcher = struct {
     /// Stats `path`, emitting created/modified only on real index change.
     /// Caller holds the mutex.
     fn ingestPath(self: *Watcher, path: []const u8, kind: events.WatchEventKind) void {
-        if (staticMod.statPath(self.io, path)) |st| {
+        if (staticMod.statPath(path)) |st| {
             if (self.entries.getPtr(path)) |val| {
                 if (val.mtimeNs == st.mtimeNs and val.size == st.size) return;
                 val.mtimeNs = st.mtimeNs;

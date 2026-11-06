@@ -506,7 +506,7 @@ pub const cFs = struct {
     ) callconv(.winapi) std.os.windows.BOOL;
 };
 
-pub fn statPath(_: ?std.Io, path: []const u8) ?FileMeta {
+pub fn statPath(path: []const u8) ?FileMeta {
     if (cFs.isWin) {
         const h = cFs.openRead(path) orelse return null;
         defer cFs.close(h);
