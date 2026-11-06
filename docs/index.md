@@ -32,8 +32,8 @@ features:
     details: Async task executor and parallel request patterns (all, any, race).
   - title: TLS Security
     details: Native TLS 1.3 server and client paths, TLS 1.2 client interoperability, custom CAs, and verification policies.
-  - title: Low-level Control
-    details: Direct access to sockets, buffers, protocol parsers, and HPACK/QPACK compression.
+  - title: Advanced Protocol Access
+    details: Optional standalone HTTP/1, HTTP/2, HTTP/3, QUIC, and TLS types for protocol work; ordinary client and server code never needs to construct frames or packets.
   - title: MIME Ready
     details: Case-insensitive MIME detection for common web/document/media/font/archive formats with explicit fallback override.
 ---
@@ -168,6 +168,22 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or an ALPN hook. *
 - **Interop note:** strict TLS-in-QUIC server negotiation expectations may vary by endpoint deployment
 :::
 
+## Feature Status
+
+| Area | Status | Notes |
+|------|--------|-------|
+| HTTP client/server, routing, middleware, JSON, REST, multipart, downloads, FTP/FTPS, parsing | Implemented | Covered by module and integration tests |
+| HTTP/3 and QUIC | Implemented for reliable request paths | No HelloRetryRequest, connection migration, server push, or datagrams |
+| Native TLS 1.3 client/server, TLS 1.2 client transport | Implemented | See the protocol and security references for supported extensions |
+| Anything not in the API reference or protocol guide | Unsupported | Examples demonstrate features; they are not features themselves |
+
+::: tip Advanced protocol APIs
+High-level `httpx.Client` and `httpx.Server` manage framing, HPACK/QPACK, QUIC
+packets, TLS records, pooling, and cleanup internally. Use the standalone
+`httpx.http1`, `httpx.http2`, `httpx.http3`, `httpx.quic`, and `httpx.tls`
+types only when you deliberately need protocol-level control.
+:::
+
 ## Protocol Support
 
 | Protocol | Status | Transport | Notes |
@@ -192,7 +208,7 @@ httpx.zig is validated across Linux, Windows, and macOS:
 All examples are runnable from the repo root:
 
 ```bash
-zig build run-all-simple_get
+zig build run-simple-get
 ```
 
 Runnable examples live in `examples/` (see the [README](https://github.com/muhammad-fiaz/httpx.zig#examples)
@@ -209,7 +225,7 @@ for the full list), including:
 - `healthCheck.zig`: liveness/readiness probes
 - `proxyDemo.zig`: HTTP proxy and SOCKS5h tunneling
 - `concurrentDemo.zig`: concurrent requests with worker pool
-- `client/pool/connectionPool.zig`: keep-alive pooling
+- `connectionPool.zig`: keep-alive pooling
 - `staticFiles.zig`, `staticSite.zig`, `staticEmbedded.zig`: filesystem, site, and single-file embedded assets
 - `spaServer.zig`, `spaFallback.zig`: single-page applications
 - `http2Client.zig`, `http2Multiplex.zig`: HTTP/2 and HPACK

@@ -52,6 +52,15 @@ httpx.zig brings HTTP, networking, and web development together in one native Zi
 library. Its design emphasizes a consistent API, explicit resource ownership,
 efficient I/O, and modular implementation.
 
+**Feature status.** HTTP/1.0, HTTP/1.1, and HTTP/2 client/server paths, routing,
+middleware, static files, JSON, REST, multipart, downloads, FTP/FTPS, and the
+parsing subsystem are implemented and covered by the test suite. HTTP/3 and QUIC
+are implemented for reliable request paths with documented limits (no
+HelloRetryRequest, connection migration, server push, or datagrams). Native TLS
+1.3 client/server paths and the TLS 1.2 client transport are available. Anything
+not listed in the API reference or protocol guide is not implemented; examples
+demonstrate capabilities rather than defining them.
+
 [**Explore the documentation**](./docs/) for installation, guides, API references,
 examples, supported features, and migration instructions.
 > [!NOTE]
@@ -267,6 +276,59 @@ retries, batch requests, streaming, DNS, GraphQL, and HTML parsing.
 Client requests do not use route metadata. The `meta` option shown in server
 examples describes server routes for OpenAPI; client calls pass request options
 such as `.headers`, `.json`, `.query`, `.tls`, and `.timeoutMs`.
+
+### Minimal client
+
+```zig
+const std = @import("std");
+const httpx = @import("httpx");
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var client = httpx.Client.init(allocator, io, .{ .timeoutMs = 10_000 });
+    defer client.deinit();
+
+    var response = try client.get("https://example.com", .{});
+    defer response.deinit();
+
+    std.debug.print("{d} {s}\n", .{ response.status, response.text() });
+}
+```
+
+### Minimal server
+
+```zig
+const std = @import("std");
+const httpx = @import("httpx");
+
+fn hello(ctx: *httpx.router.Context) !httpx.router.Response {
+    return ctx.json(.{ .message = "hello" });
+}
+
+pub fn main() !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var app = try httpx.App.init(allocator, io, .{
+        .host = "127.0.0.1",
+        .port = 8080,
+    });
+    defer app.deinit();
+
+    try app.get("/", hello);
+    try app.listen();
+}
+```
+
+### Full integration
+
+The following program starts an HTTP server and exercises it with the HTTPX client.
 
 ```zig
 const std = @import("std");
