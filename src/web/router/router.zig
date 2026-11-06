@@ -18,6 +18,7 @@ pub const metadata = @import("routeMetadata.zig");
 const Pattern = patternMod.Pattern;
 const SegmentKind = patternMod.SegmentKind;
 const parseMod = @import("../../common/parse.zig");
+const jsonMod = @import("../../common/json.zig");
 const multipartServerMod = @import("../multipart/multipartServer.zig");
 const addressMod = @import("../../net/address.zig");
 
@@ -244,13 +245,22 @@ pub const Context = struct {
     /// - If `arg` is a value/struct, serializes and returns a JSON `Response` (200 OK).
     pub fn json(self: *const Context, arg: anytype) !if (@TypeOf(arg) == type) arg else Response {
         if (@TypeOf(arg) == type) {
-            const parsed = try std.json.parseFromSlice(arg, self.allocator, self.body, .{
-                .ignore_unknown_fields = true,
-            });
-            return parsed.value;
+            return jsonMod.decode(arg, self.allocator, self.body);
         } else {
             return self.jsonStatus(200, arg);
         }
+    }
+
+    /// Decodes the request body into `T` using an explicit comptime key map.
+    /// Values borrow `ctx.allocator` (the per-request scratch arena).
+    pub fn jsonNamed(self: *const Context, comptime T: type, comptime names: anytype) !T {
+        return jsonMod.decodeNamed(T, self.allocator, self.body, names);
+    }
+
+    /// Parses the request body as a dynamic JSON value. Key lookup preserves
+    /// arbitrary property names (`user-name`, `@context`, `123user`).
+    pub fn jsonValue(self: *const Context) !jsonMod.Value {
+        return jsonMod.parse(self.allocator, self.body);
     }
 
     /// Renders a JSON response with a custom status code.
@@ -2493,4 +2503,35 @@ test "forwarded client resolution skips trusted proxy hops" {
         .trustedProxies = &proxies,
     };
     try std.testing.expectEqualStrings("127.0.0.1", all_proxy.remoteAddress().?);
+}
+
+test "context JSON helpers decode typed, renamed, and dynamic keys" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var ctx = Context{
+        .allocator = arena.allocator(),
+        .body = "{\"user-name\":\"Fiaz\",\"@context\":\"https://example.com\",\"count\":3}",
+    };
+
+    const Renamed = struct {
+        user_name: []const u8,
+        context: []const u8,
+        count: i64,
+    };
+    const renamed = try ctx.jsonNamed(Renamed, .{
+        .user_name = "user-name",
+        .context = "@context",
+    });
+    try std.testing.expectEqualStrings("Fiaz", renamed.user_name);
+    try std.testing.expectEqualStrings("https://example.com", renamed.context);
+    try std.testing.expectEqual(@as(i64, 3), renamed.count);
+
+    const Typed = struct { count: i64 };
+    const typed = try ctx.json(Typed);
+    try std.testing.expectEqual(@as(i64, 3), typed.count);
+
+    const dynamic = try ctx.jsonValue();
+    try std.testing.expectEqualStrings("Fiaz", jsonMod.getString(&dynamic.object, "user-name").?);
+    try std.testing.expectEqualStrings("https://example.com", jsonMod.getString(&dynamic.object, "@context").?);
 }

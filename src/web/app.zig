@@ -74,9 +74,10 @@ pub const App = struct {
             var cfg = serverMod.Config{};
             if (@typeInfo(CfgType) == .@"struct") {
                 inline for (@typeInfo(CfgType).@"struct".field_names) |fname| {
-                    if (@hasField(serverMod.Config, fname)) {
-                        @field(cfg, fname) = @field(config, fname);
+                    if (comptime !@hasField(serverMod.Config, fname)) {
+                        @compileError("unknown App/server config option `." ++ fname ++ "`");
                     }
+                    @field(cfg, fname) = @field(config, fname);
                 }
             }
             break :blk cfg;
@@ -248,7 +249,13 @@ pub const App = struct {
 
     /// Runs the accept loop until shutdown is requested.
     pub fn listen(self: *App) !void {
-        try self.server.run();
+        self.server.run();
+    }
+
+    /// Requests graceful shutdown of the owned server. Safe to call from
+    /// signal handlers, route handlers, or another thread.
+    pub fn requestShutdown(self: *App) void {
+        self.server.requestShutdown();
     }
 };
 
