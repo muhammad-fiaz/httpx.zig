@@ -26,6 +26,8 @@ const Response = routerMod.Response;
 const Method = @import("../common/method.zig").Method;
 const mediaTypeMod = @import("../common/mediaType.zig");
 const docs = @import("../web/docs/docs.zig");
+const restMod = @import("../web/rest/api.zig");
+const graphqlServerMod = @import("../web/graphql/graphQlServer.zig");
 const httpVersion = @import("../common/httpVersion.zig");
 pub const HttpVersion = httpVersion.HttpVersion;
 const watcherMod = @import("../web/watcher/watcherBackend.zig");
@@ -47,6 +49,7 @@ const http3Frame = @import("../protocols/http3/frame.zig");
 const http3Conn = @import("../protocols/http3/connection.zig");
 const http3Stream = @import("../protocols/http3/stream.zig");
 const http3Qpack = @import("../protocols/http3/qpack.zig");
+const versionInfo = @import("../common/version.zig");
 
 pub const maxHeadBytes = 32 * 1024;
 
@@ -178,7 +181,7 @@ pub const Config = struct {
     enableDocs: bool = true,
     /// Overrides for docs routes when enabled.
     docs: ?docs.Config = null,
-    docsTitle: []const u8 = "HTTPX API",
+    docsTitle: []const u8 = versionInfo.defaultInfo.title,
     logging: LoggingOptions = .{},
     /// HTTP/1.1 persistent connections: honor keep-alive, serve multiple
     /// requests per connection (bounded by maxRequestsPerConn).
@@ -489,6 +492,9 @@ pub const Server = struct {
     ioThreaded: ?*std.Io.Threaded = null,
     paused: std.atomic.Value(bool) = .init(false),
     docsMounted: bool = false,
+    /// True once `graphql()` mounted its routes; `deinit` tears them down.
+    graphqlMounted: bool = false,
+    graphqlCfg: graphqlServerMod.HandlerConfig = .{},
     watcher: ?*watcherMod.Watcher = null,
     sitePtr: ?*anyopaque = null,
     siteReloadFn: ?*const fn (sitePtr: ?*anyopaque, server: *Server) void = null,
@@ -948,6 +954,10 @@ pub const Server = struct {
             p.deinit();
             self.h3PlaceholderConn = null;
         }
+        if (self.graphqlMounted) {
+            graphqlServerMod.unmount(&self.router, self.graphqlCfg);
+            self.graphqlMounted = false;
+        }
         if (self.docsMounted) docs.unmountRouter(&self.router);
         self.router.deinit();
         self.listener.close(self.io);
@@ -959,6 +969,30 @@ pub const Server = struct {
                 self.ioThreaded = null;
             }
         }
+    }
+
+    /// Typed REST controller bound to this server's router, allocator, and
+    /// `std.Io`. Nothing is created implicitly: the controller reuses the
+    /// ownership this server was initialized with.
+    ///
+    /// ```zig
+    /// var rest = server.rest();
+    /// try rest.get("/users/{id:int}", .{ .handler = getUser, .operationId = "getUser" });
+    /// ```
+    pub fn rest(self: *Server) restMod.Rest {
+        return restMod.Rest.init(self.allocator, self.io, &self.router);
+    }
+
+    /// Mounts a GraphQL schema at `cfg.endpoint` (POST, GET, OPTIONS).
+    ///
+    /// The mount reuses this server's allocator and `std.Io` and is removed by
+    /// `deinit`; mounting twice is an error instead of silently replacing the
+    /// first schema.
+    pub fn graphql(self: *Server, schema: graphqlServerMod.Schema, cfg: graphqlServerMod.HandlerConfig) !void {
+        if (self.graphqlMounted) return error.GraphqlAlreadyMounted;
+        try graphqlServerMod.mount(self.allocator, self.io, &self.router, schema, cfg);
+        self.graphqlMounted = true;
+        self.graphqlCfg = cfg;
     }
 
     /// Returns true if this server has TLS configured and active.
@@ -1120,7 +1154,7 @@ pub const Server = struct {
             const dc = self.cfg.docs orelse docs.Config{};
             docs.mount(self.allocator, &self.router, dc, .{
                 .title = self.cfg.docsTitle,
-                .version = @import("../common/version.zig").version,
+                .version = versionInfo.version,
             }) catch {};
         }
 

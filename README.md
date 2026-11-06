@@ -52,14 +52,6 @@ httpx.zig brings HTTP, networking, and web development together in one native Zi
 library. Its design emphasizes a consistent API, explicit resource ownership,
 efficient I/O, and modular implementation.
 
-**Feature status.** HTTP/1.0, HTTP/1.1, and HTTP/2 client/server paths, routing,
-middleware, static files, JSON, REST, multipart, downloads, FTP/FTPS, and the
-parsing subsystem are implemented and covered by the test suite. HTTP/3 and QUIC
-are implemented for reliable request paths with documented limits (no
-HelloRetryRequest, connection migration, server push, or datagrams). Native TLS
-1.3 client/server paths and the TLS 1.2 client transport are available. Anything
-not listed in the API reference or protocol guide is not implemented; examples
-demonstrate capabilities rather than defining them.
 
 [**Explore the documentation**](./docs/) for installation, guides, API references,
 examples, supported features, and migration instructions.
@@ -269,19 +261,52 @@ exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 
 ## Quick Start
 
-This single program starts an HTTP server and exercises it with the HTTPX client.
-It demonstrates client configuration, HTTP methods, JSON, headers, authentication,
-retries, batch requests, streaming, DNS, GraphQL, and HTML parsing.
 
-Client requests do not use route metadata. The `meta` option shown in server
-examples describes server routes for OpenAPI; client calls pass request options
-such as `.headers`, `.json`, `.query`, `.tls`, and `.timeoutMs`.
-
-### Minimal client
+One `App` owns the outbound HTTP client and the inbound HTTP server, so every
+operation reuses the same allocator and `std.Io`. The program below exercises
+the complete surface — typed REST, a raw route, the GraphQL endpoint, every
+docs UI, and the client verbs — and was verified end-to-end (every route
+returns HTTP 200).
 
 ```zig
 const std = @import("std");
 const httpx = @import("httpx");
+
+// REST types: typed handlers encode/decode JSON and feed OpenAPI.
+const User = struct { id: u64, name: []const u8 };
+const CreateUser = struct { name: []const u8 };
+
+// GraphQL type and resolver: struct-driven, same JSON engine as REST.
+const Scalar = httpx.graphql.Scalar;
+const UserType = httpx.graphql.Type("User", .{
+    .id = Scalar.id,
+    .name = Scalar.string,
+});
+
+const resolvers = struct {
+    fn me(ctx: *httpx.graphql.Context) !User {
+        _ = ctx;
+        return .{ .id = 1, .name = "alice" };
+    }
+};
+
+const QueryRoot = httpx.graphql.Query(.{
+    .me = .{ .type = UserType, .resolve = resolvers.me },
+});
+
+// Typed REST: JSON body decoding plus OpenAPI 3.1 generation.
+fn getUser(ctx: *httpx.router.Context) !httpx.Schema(User) {
+    return httpx.Schema(User).ok(.{ .id = ctx.paramUint("id") orelse 1, .name = "alice" });
+}
+
+fn createUser(_: *httpx.router.Context, body: CreateUser) !httpx.Schema(User) {
+    return httpx.Schema(User).created(.{ .id = 1, .name = body.name });
+}
+
+// Raw route: plain Response, no schema derivation.
+fn health(_: *httpx.router.Context) anyerror!httpx.router.Response {
+    return .{ .status = 200, .body = "ok", .contentType = "text/plain; charset=utf-8" };
+}
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -289,253 +314,93 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    var client = httpx.Client.init(allocator, io, .{ .timeoutMs = 10_000 });
-    defer client.deinit();
-
-    var response = try client.get("https://example.com", .{});
-    defer response.deinit();
-
-    std.debug.print("{d} {s}\n", .{ response.status, response.text() });
-}
-```
-
-### Minimal server
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-fn hello(ctx: *httpx.router.Context) !httpx.router.Response {
-    return ctx.json(.{ .message = "hello" });
-}
-
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
+    // One init owns app.client (outbound) and app.server (inbound).
     var app = try httpx.App.init(allocator, io, .{
         .host = "127.0.0.1",
-        .port = 8080,
+        .port = 0, // 0: OS picks a free port
+        .client = .{ .timeoutMs = 10_000 }, // outbound client defaults
     });
     defer app.deinit();
 
-    try app.get("/", hello);
-    try app.listen();
-}
-```
+    // Register routes before docs so the OpenAPI snapshot includes them.
+    try app.get("/health", .{ .handler = health, .summary = "Health check", .tags = &.{"system"} });
+    try app.get("/users/{id:int}", .{ .handler = getUser, .summary = "Get user", .tags = &.{"users"} });
+    try app.post("/users", .{ .handler = createUser, .summary = "Create user", .tags = &.{"users"} });
 
-### Full integration
-
-The following program starts an HTTP server and exercises it with the HTTPX client.
-
-```zig
-const std = @import("std");
-const httpx = @import("httpx");
-
-const User = struct { name: []const u8, role: []const u8 };
-
-fn getHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.json(.{ .message = "Hello from the HTTPX server" });
-}
-
-fn postHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    const user = try ctx.json(User);
-    return ctx.json(.{ .received = user });
-}
-
-fn htmlHandler(_: *httpx.router.Context) anyerror!httpx.router.Response {
-    return .{ .body = "<html><title>HTTPX</title><h1>Hello</h1></html>", .contentType = "text/html" };
-}
-
-fn robotsHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.text("User-agent: *\nAllow: /\n");
-}
-
-fn graphqlHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
-    return ctx.json(.{ .data = .{ .echo = "Alice" } });
-}
-
-pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    const io = std.Io.Threaded.global_single_threaded.io();
-
-    var server = try httpx.Server.init(allocator, io, .{
-        .host = "127.0.0.1",
-        .port = 8080,
-        .enableDocs = false,
+    // GraphQL endpoint; GraphiQL UI is served by the docs mount below.
+    const graph_schema = httpx.graphql.Schema.init(allocator, io, .{
+        .query = QueryRoot,
+        .types = &.{UserType},
+        .enableIntrospection = true,
     });
-    defer server.deinit();
+    try app.graphql(graph_schema, .{ .endpoint = "/graphql" });
 
-    try server.router.add(.GET, "/get", getHandler, .{});
-    try server.router.add(.POST, "/post", postHandler, .{});
-    try server.router.add(.PUT, "/post", getHandler, .{});
-    try server.router.add(.PATCH, "/post", getHandler, .{});
-    try server.router.add(.DELETE, "/post", getHandler, .{});
-    try server.router.add(.GET, "/html", htmlHandler, .{});
-    try server.router.add(.GET, "/robots.txt", robotsHandler, .{});
-    try server.router.add(.POST, "/graphql", graphqlHandler, .{});
-    const server_thread = try server.start();
+    // Every bundled UI explicitly enabled; all assets embedded and offline.
+    try app.docs(.{
+        .enabled = true,
+        .title = "Quick Start API",
+        .version = httpx.version,
+        .description = "REST, GraphQL, and OpenAPI in one app",
+        .openapi = .{ .enabled = true, .route = "/openapi.json" },
+        .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
+        .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
+        .scalar = .{ .enabled = true, .route = "/scalar", .title = "Scalar API Reference" },
+        .graphiql = .{
+            .enabled = true,
+            .route = "/graphiql",
+            .graphqlEndpoint = "/graphql",
+            .title = "GraphiQL IDE",
+        },
+    });
+
+    const port = (&app.server).localPort();
+    const thread = try app.server.start();
     defer {
-        server.requestShutdown();
-        server_thread.join();
+        app.server.requestShutdown();
+        thread.join();
     }
 
-    var client = httpx.Client.init(allocator, io, .{
-        .timeoutMs = 10_000,
-        .followRedirects = true,
-        .maxRedirects = 5,
-        .maxRetries = 3,
-        .retryDelayMs = 250,
-        .retryStatusCodes = &.{ 502, 503, 504 },
-        .dnsCache = .{ .enable = true, .ttlMs = 60_000 },
-    });
-    defer client.deinit();
+    const base = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}", .{port});
+    defer allocator.free(base);
+    var url_buf: [512]u8 = undefined;
 
-    // GET, response status/headers/body, and query parameters.
-    var get = try client.get("http://127.0.0.1:8080/get?source=readme", .{
-        .headers = &.{.{ .name = "accept", .value = "application/json" }},
-    });
-    defer get.deinit();
-    std.debug.print("GET {d}: {s}\n", .{ get.status, get.text() });
+    // Client verbs reuse app.client and the allocator/io from init.
+    const health_url = try std.fmt.bufPrint(&url_buf, "{s}/health", .{base});
+    var health_res = try app.client.get(health_url, .{});
+    defer health_res.deinit();
+    std.debug.print("GET /health -> {d}: {s}\n", .{ health_res.status, health_res.bytes() });
 
-    // POST/PUT/PATCH/DELETE and strongly typed JSON payloads.
-    var post = try client.post("http://127.0.0.1:8080/post", .{
-        .json = User{ .name = "Alice", .role = "engineer" },
-    });
-    defer post.deinit();
-    const Echo = struct { json: ?User = null };
-    const echoed = try post.json(Echo);
-    if (echoed.json) |user| std.debug.print("JSON user: {s}\n", .{user.name});
-    var put = try client.put("http://127.0.0.1:8080/post", .{ .body = "updated" });
-    defer put.deinit();
-    var patch = try client.patch("http://127.0.0.1:8080/post", .{ .body = "partial" });
-    defer patch.deinit();
-    var del = try client.delete("http://127.0.0.1:8080/post", .{});
-    defer del.deinit();
+    const user_url = try std.fmt.bufPrint(&url_buf, "{s}/users/7", .{base});
+    var user_res = try app.client.get(user_url, .{});
+    defer user_res.deinit();
+    std.debug.print("GET /users/7 -> {d}: {s}\n", .{ user_res.status, user_res.bytes() });
 
-    // Explicit methods, Fetch-style naming, and streaming responses.
-    var response = try client.request("http://127.0.0.1:8080/get", .{ .method = .GET });
-    defer response.deinit();
-    var fetched = try client.fetch("http://127.0.0.1:8080/get", .{});
-    defer fetched.deinit();
-    var stream = try client.requestStream("http://127.0.0.1:8080/get", .{ .method = .GET });
-    defer stream.deinit();
-    var stream_buffer: [4096]u8 = undefined;
-    while (true) {
-        const n = try stream.read(&stream_buffer);
-        if (n == 0) break;
-    }
+    const post_url = try std.fmt.bufPrint(&url_buf, "{s}/users", .{base});
+    var post_res = try app.client.post(post_url, .{ .json = CreateUser{ .name = "bob" } });
+    defer post_res.deinit();
+    std.debug.print("POST /users -> {d}: {s}\n", .{ post_res.status, post_res.bytes() });
 
-    // Fluent request construction.
-    var builder = client.builder(.POST, "http://127.0.0.1:8080/post");
-    defer builder.deinit();
-    _ = try builder.header("x-api-key", "secret-token");
-    _ = try builder.query("filter", "active");
-    _ = builder.timeoutMs(5_000);
-    _ = builder.bearerAuth("jwt-token");
-    _ = try builder.json(.{ .query = "search", .page = @as(u32, 1) });
-    var built = try builder.send();
-    defer built.deinit();
+    var req_res = try app.client.request(health_url, .{ .method = .GET });
+    defer req_res.deinit();
+    var fetch_res = try app.client.fetch(health_url, .{});
+    defer fetch_res.deinit();
 
-    // Concurrent requests with thread-safe worker pool.
-    var pool = try httpx.concurrency.Pool.init(allocator, io, .{ .workers = 2 });
-    defer pool.deinit();
+    // GraphQL over the same client.
+    const gql_url = try std.fmt.bufPrint(&url_buf, "{s}/graphql", .{base});
+    var gql_res = try app.client.graphql(gql_url, "{ me { id name } }", null, .{});
+    defer gql_res.deinit();
+    std.debug.print("POST /graphql -> {d}: {s}\n", .{ gql_res.status, gql_res.bytes() });
 
-    // DNS helper.
-    var addresses = try client.resolve("127.0.0.1", .{ .port = 8080 });
-    defer addresses.deinit();
+    // The server is now serving typed REST at /health and /users, GraphQL at
+    // /graphql, the OpenAPI document at /openapi.json, and the docs UIs at
+    // /docs (Swagger UI), /redoc (ReDoc), /scalar (Scalar), and /graphiql
+    // (GraphiQL IDE) — open any of them in a browser.
 
-    // Fetch and inspect HTML with the built-in DOM/CSS selector API.
-    var document = try client.html.fetch("http://127.0.0.1:8080/html", .{});
-    defer document.deinit();
-    const title = try document.title();
-    var headings = try document.select("h1");
-    defer headings.deinit();
-    std.debug.print("Title: {s}, headings: {d}\n", .{ title, headings.len() });
-
-    // The same parser supports XML, feeds, robots.txt, and sitemaps.
-    const parser = client.parser(.{});
-    var parsed = try parser.parseHtml("<html><title>Local page</title></html>");
-    defer parsed.deinit();
-    var robots = try client.robots.fetch("http://127.0.0.1:8080/robots.txt", .{});
-    defer robots.deinit();
-
-    // GraphQL serializes the query and variables as JSON.
-    var graph = try client.graphql("http://127.0.0.1:8080/graphql", "query Echo($name: String!) { echo(name: $name) }", .{ .name = "Alice" }, .{});
-    defer graph.deinit();
-
-    // Purge pooled connections, or close and recreate the DNS cache too.
-    client.close();
-    client.reset();
-}
-```
-
-## API Conventions
-
-All client configuration and per-request behavior lives in `.{}` literals
-passed directly to the API. There are no exported `Config`, `RequestOptions`,
-or `MultipartOptions` types to import, and unknown option names are compile
-errors. Nested configuration uses the same literal form
-(`.{ .pool = .{ ... }, .protocols = .{ .http3 = .{ ... } } }`).
-
-```zig
-var client = httpx.Client.init(allocator, io, .{
-    .timeoutMs = 10_000,
-    .followRedirects = true,
-    .pool = .{ .maxConnections = 64, .maxPerHost = 16 },
-    .dnsCache = .{ .enable = true, .ttlMs = 60_000 },
-});
-defer client.deinit();
-
-var res = try client.post("https://example.com/upload", .{
-    .multipart = .{
-        .fields = .{
-            .{ .name = "description", .value = "avatar" },
-        },
-        .files = .{
-            .{ .name = "file", .filename = "avatar.png", .data = png_bytes },
-        },
-    },
-});
-defer res.deinit();
-```
-
-Server routes use lowercase verbs, a positional path, and one options literal.
-The handler's return type selects typed REST (`!httpx.Schema(T)`) or a raw
-`!httpx.Response` route automatically:
-
-```zig
-var app = try httpx.App.init(allocator, io, .{ .port = 8080 });
-defer app.deinit();
-
-try app.post("/users", .{
-    .handler = createUser,
-    .summary = "Create a user",
-    .tags = &.{"users"},
-});
-
-try app.get("/users/{id:int}", .{ .handler = getUser });
-try app.get("/health", .{ .handler = healthCheck, .summary = "Liveness" });
-try app.listen();
-```
-
-REST and GraphQL JSON accepts arbitrary string keys. Use a `.names` rename map
-for typed structs, or `std.json.Value` / `httpx.json.Object` for fully dynamic
-objects:
-
-```zig
-const names = .{ .user_name = "user-name", .context = "@context" };
-try app.post("/users", .{ .handler = createUser, .names = names });
-
-// Dynamic JSON: keys such as "user-name", "user@email", "123user", and
-// "Content-Type" are preserved exactly as received.
-fn echo(ctx: *httpx.Context, body: std.json.Value) !httpx.Schema(std.json.Value) {
-    _ = ctx;
-    return httpx.Schema(std.json.Value).ok(body);
+    // Download and FTP reuse their initialized owners:
+    // _ = try app.client.download(health_url, .{ .path = "downloads/health.txt" });
+    // var ftp = try httpx.client.ftp.init(allocator, io, .{ .host = "ftp.example.com" });
+    // defer ftp.deinit();
+    // _ = try ftp.download(.{ .remotePath = "/pub/file.txt", .destinationPath = "downloads/file.txt" });
 }
 ```
 

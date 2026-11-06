@@ -71,8 +71,8 @@ var server = try httpx.Server.init(allocator, io, .{
 });
 defer server.deinit();
 
-const schema = httpx.graphql.Schema.init(allocator, .{ .query = QueryType });
-try httpx.graphql.mount(&server.router, schema, .{ .endpoint = "/graphql" });
+const schema = httpx.graphql.Schema.init(allocator, io, .{ .query = QueryType });
+try server.graphql(schema, .{ .endpoint = "/graphql" });
 
 server.run();
 ```

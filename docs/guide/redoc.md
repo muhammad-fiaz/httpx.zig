@@ -37,5 +37,4 @@ required.
 ## Related documentation
 
 - [Documentation UI API](/api/ui)
-- [Documentation UI API](/api/ui)
 - [OpenAPI guide](/guide/openapi)

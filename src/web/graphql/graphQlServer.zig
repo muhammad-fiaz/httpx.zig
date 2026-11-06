@@ -29,10 +29,10 @@ const mediaTypeMod = @import("../../common/mediaType.zig");
 
 pub const Schema = schemaMod.Schema;
 pub const SchemaConfig = schemaMod.SchemaConfig;
-pub const ObjectTypeDef = schemaMod.ObjectTypeDef;
-pub const FieldDef = schemaMod.FieldDef;
-pub const ResolverContext = schemaMod.ResolverContext;
-pub const FieldResolver = schemaMod.FieldResolver;
+pub const Scalar = schemaMod.Scalar;
+pub const Type = schemaMod.Type;
+pub const Query = schemaMod.Query;
+pub const Mutation = schemaMod.Mutation;
 
 /// GraphQL-over-HTTP request payload.
 pub const RequestPayload = struct {
@@ -57,6 +57,10 @@ pub const HandlerConfig = struct {
 };
 
 pub const ServerState = struct {
+    /// Ownership borrowed from the mounter; `unmount` reuses it to release
+    /// the state, so the same allocator that mounted it must still be alive.
+    allocator: Allocator,
+    io: std.Io,
     schema: Schema,
     cfg: HandlerConfig,
 };
@@ -78,7 +82,17 @@ fn getState(ctx: *Context) !*ServerState {
 
 /// Mounts `schema` at `cfg.endpoint` (POST, GET, OPTIONS) atomically: if any
 /// registration fails, the already-added routes are removed again.
-pub fn mount(router: *routerMod.Router, schema: Schema, cfg: HandlerConfig) !void {
+///
+/// The allocator and `std.Io` are explicit: they are the owner's, and are
+/// carried in the mounted state so concurrent executions reuse exactly the
+/// same resources instead of reaching for a process-wide default.
+pub fn mount(
+    allocator: Allocator,
+    io: std.Io,
+    router: *routerMod.Router,
+    schema: Schema,
+    cfg: HandlerConfig,
+) !void {
     if (router.hasConflict(.POST, cfg.endpoint) or
         router.hasConflict(.GET, cfg.endpoint) or
         router.hasConflict(.OPTIONS, cfg.endpoint))
@@ -86,9 +100,9 @@ pub fn mount(router: *routerMod.Router, schema: Schema, cfg: HandlerConfig) !voi
         return error.DuplicateRoute;
     }
 
-    const state = try router.allocator.create(ServerState);
-    state.* = .{ .schema = schema, .cfg = cfg };
-    errdefer router.allocator.destroy(state);
+    const state = try allocator.create(ServerState);
+    state.* = .{ .allocator = allocator, .io = io, .schema = schema, .cfg = cfg };
+    errdefer allocator.destroy(state);
 
     try router.add(.POST, cfg.endpoint, &handlePost, .{ .userData = state });
     errdefer _ = router.remove(.POST, cfg.endpoint);
@@ -111,7 +125,7 @@ pub fn unmount(router: *routerMod.Router, cfg: HandlerConfig) void {
     _ = router.remove(.POST, cfg.endpoint);
     _ = router.remove(.GET, cfg.endpoint);
     _ = router.remove(.OPTIONS, cfg.endpoint);
-    if (state) |mounted| router.allocator.destroy(mounted);
+    if (state) |mounted| mounted.allocator.destroy(mounted);
 }
 
 fn handleOptions(ctx: *Context) anyerror!Response {

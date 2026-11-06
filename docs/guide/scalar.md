@@ -36,5 +36,4 @@ Scalar reads the same `/openapi.json` document as Swagger UI and ReDoc.
 ## Related documentation
 
 - [Documentation UI API](/api/ui)
-- [Documentation UI API](/api/ui)
 - [OpenAPI guide](/guide/openapi)

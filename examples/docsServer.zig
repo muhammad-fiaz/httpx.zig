@@ -81,7 +81,7 @@ pub fn main() !void {
         .enableDocs = true,
         .docs = .{
             .title = "HTTPX Modern API Suite",
-            .version = "0.2.0",
+            .version = httpx.version,
             .description = "Full-featured native HTTP server with OpenAPI & GraphQL documentation.",
             .swagger = .{ .enabled = true, .route = "/docs", .title = "Swagger UI" },
             .redoc = .{ .enabled = true, .route = "/redoc", .title = "ReDoc" },
@@ -118,6 +118,5 @@ pub fn main() !void {
 
     server.requestShutdown();
     t.join();
-    httpx.docs.unmount();
     std.debug.print("Docs server verification completed successfully.\n", .{});
 }

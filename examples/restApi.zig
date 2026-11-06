@@ -44,6 +44,8 @@ const UserWire = struct {
     contact: []const u8,
 };
 
+const UserWireSchema = httpx.json.Schema(UserWire, wireNames);
+
 // Handlers: (ctx) or (ctx, body) -> !httpx.Schema(T)
 
 fn createUser(_: *httpx.router.Context, req: CreateUserRequest) !httpx.Schema(UserResponse) {
@@ -121,7 +123,7 @@ pub fn main() !void {
         .operationId = "updateUser",
         .summary = "Update a user (wire keys: user-name, @contact)",
         .tags = &.{"users"},
-        .names = wireNames,
+        .schema = UserWireSchema,
     });
 
     try app.delete("/users/{id:int}", .{
@@ -156,7 +158,7 @@ pub fn main() !void {
         .graphiql = .{ .enabled = false },
     });
 
-    const port = app.getServer().localPort();
+    const port = app.localPort();
     std.debug.print("listening on http://127.0.0.1:{d}\n", .{port});
     std.debug.print("  OpenAPI: http://127.0.0.1:{d}/openapi.json\n", .{port});
     std.debug.print("  Swagger: http://127.0.0.1:{d}/docs\n", .{port});
@@ -164,14 +166,17 @@ pub fn main() !void {
     std.debug.print("  Scalar:  http://127.0.0.1:{d}/scalar\n", .{port});
 
     const Runner = struct {
-        fn run(server: *httpx.Server) void {
-            server.run();
+        fn run(application: *httpx.App) void {
+            application.listen() catch |err| {
+                std.debug.print("server stopped: {s}\n", .{@errorName(err)});
+            };
         }
     };
-    const thread = try std.Thread.spawn(.{}, Runner.run, .{app.getServer()});
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&app});
 
-    var client = httpx.Client.init(allocator, io, .{});
-    defer client.deinit();
+    // The App already owns a client built from the same allocator and io, so
+    // the demo reuses it instead of creating a second one.
+    const client = &app.client;
 
     var urlBuf: [160]u8 = undefined;
 
@@ -229,7 +234,7 @@ pub fn main() !void {
         std.mem.indexOf(u8, specResp.body, "user-name") != null,
     });
 
-    app.getServer().requestShutdown();
+    app.requestShutdown();
     thread.join();
 
     std.debug.print("=== demo completed ===\n", .{});

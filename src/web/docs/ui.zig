@@ -28,6 +28,7 @@ const mediaTypeMod = @import("../../common/mediaType.zig");
 const openapi = @import("../openApi/openApiSpec.zig");
 const assets = @import("assets.zig");
 const metaMod = @import("../router/routeMetadata.zig");
+const versionInfo = @import("../../common/version.zig");
 
 pub const SwaggerConfig = struct {
     enabled: bool = true,
@@ -62,9 +63,9 @@ pub const OpenApiConfig = struct {
 pub const Config = struct {
     /// Master switch; when false nothing is registered.
     enabled: bool = true,
-    title: []const u8 = "HTTPX API",
-    version: []const u8 = "0.2.0",
-    description: []const u8 = "Fast, modern web framework for Zig with automated OpenAPI & GraphQL documentation.",
+    title: []const u8 = versionInfo.defaultInfo.title,
+    version: []const u8 = versionInfo.version,
+    description: []const u8 = versionInfo.defaultInfo.description,
     openapi: OpenApiConfig = .{},
     swagger: SwaggerConfig = .{},
     redoc: RedocConfig = .{},
@@ -480,11 +481,11 @@ fn renderRedocPage(a: Allocator, title: []const u8, specUrl: []const u8, scriptU
 
     try w.writeAll("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<title>");
     try escapeInto(w, title);
-    try w.writeAll("</title>\n<link href=\"https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700\" rel=\"stylesheet\">\n<style>body { margin: 0; padding: 0; }</style>\n</head>\n<body>\n<div id=\"redoc-container\"></div>\n<script src=\"");
+    try w.writeAll("</title>\n<style>body { margin: 0; padding: 0; }</style>\n</head>\n<body>\n<div id=\"redoc-container\"></div>\n<script type=\"module\">\n  import { init } from \"");
     try escapeInto(w, scriptUrl);
-    try w.writeAll("\"></script>\n<script>\nwindow.onload = function () {\n  Redoc.init('");
+    try w.writeAll("\";\n  init(\"");
     try escapeInto(w, specUrl);
-    try w.writeAll("', {}, document.getElementById('redoc-container'));\n};\n</script>\n</body>\n</html>\n");
+    try w.writeAll("\", {}, document.getElementById('redoc-container'));\n</script>\n</body>\n</html>\n");
     return out.toOwnedSlice();
 }
 
@@ -509,7 +510,10 @@ fn renderGraphiqlPage(a: Allocator, title: []const u8, graphqlEndpoint: []const 
     errdefer out.deinit();
     const w = &out.writer;
 
-    try w.writeAll("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>");
+    try w.writeAll("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<base href=\"");
+    try escapeInto(w, graphiqlRoute);
+    if (graphiqlRoute.len == 0 or graphiqlRoute[graphiqlRoute.len - 1] != '/') try w.writeByte('/');
+    try w.writeAll("\">\n<title>");
     try escapeInto(w, title);
     try w.writeAll("</title>\n<link rel=\"stylesheet\" href=\"");
     try escapeInto(w, graphiqlRoute);
@@ -573,9 +577,13 @@ test "mount registers spec, pages, and local assets" {
     // Unknown asset name does not fall through to any catch-all route.
     try std.testing.expect((try invoke(&router, .GET, "/docs/nonexistent.js", a)) == null);
 
-    // ReDoc page + bundle.
+    // ReDoc page + bundle. The vendor bundle is an ES module, so the page
+    // loads it as one and calls its exported init function.
     const redocPage = (try invoke(&router, .GET, "/redoc", a)).?;
     try std.testing.expect(std.mem.indexOf(u8, redocPage.body, "redoc.standalone.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redocPage.body, "type=\"module\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redocPage.body, "import { init }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, redocPage.body, "fonts.googleapis.com") == null);
     const redocJs = (try invoke(&router, .GET, "/redoc/redoc.standalone.js", a)).?;
     try std.testing.expect(redocJs.body.len == assets.redocStandaloneJs.len);
 
@@ -664,6 +672,7 @@ test "graphiql opt-in mounts its page and all worker assets" {
     try std.testing.expect(std.mem.indexOf(u8, page.body, "id=\"graphiql\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, page.body, "graphiql.js") != null);
     try std.testing.expect(std.mem.indexOf(u8, page.body, "graphiql.css") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page.body, "<base href=\"/graphiql/\">") != null);
 
     const js = (try invoke(&router, .GET, "/graphiql/graphiql.js", a)).?;
     try std.testing.expectEqual(assets.graphiqlJs.len, js.body.len);
@@ -690,6 +699,38 @@ test "graphiql codicon font resolves under a custom mount route" {
     try std.testing.expect(std.mem.indexOf(u8, css.body, "url(\"codicon-mxdk0fnd.ttf\")") != null);
     const font = (try invoke(&router, .GET, "/internal/ide/codicon-mxdk0fnd.ttf", a)).?;
     try std.testing.expectEqualStrings("font/ttf", font.contentType.?);
+
+    // Monaco workers resolve against document.baseURI, so a custom mount must
+    // pin <base> to the custom route rather than the default one.
+    const page = (try invoke(&router, .GET, "/internal/ide", a)).?;
+    try std.testing.expect(std.mem.indexOf(u8, page.body, "<base href=\"/internal/ide/\">") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page.body, "/internal/ide/graphiql.js") != null);
+}
+
+test "all documentation pages are self-hosted and offline" {
+    const a = std.testing.allocator;
+    var router = Router.init(a);
+    defer router.deinit();
+    try router.get("/hello", helloHandler, .{});
+
+    try mount(a, &router, .{}, null);
+    defer unmount();
+
+    const Pages = struct {
+        fn page(r: *Router, path: []const u8, alloc: Allocator) !Response {
+            return (try invoke(r, .GET, path, alloc)).?;
+        }
+    };
+    const pages = [_][]const u8{ "/docs", "/redoc", "/scalar" };
+    for (pages) |path| {
+        const res = try Pages.page(&router, path, a);
+        try std.testing.expectEqual(@as(u16, 200), res.status);
+        // No CDN or external font/script references: every page works from the
+        // embedded bundle routes alone.
+        try std.testing.expect(std.mem.indexOf(u8, res.body, "https://") == null);
+        try std.testing.expect(std.mem.indexOf(u8, res.body, "http://") == null);
+        try std.testing.expect(std.mem.indexOf(u8, res.body, "fonts.googleapis.com") == null);
+    }
 }
 
 test "all vendored assets serve with correct mime and markers" {

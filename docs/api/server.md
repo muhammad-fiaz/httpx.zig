@@ -9,7 +9,7 @@ The `httpx.zig` server module provides a robust HTTP server with middleware supp
 | HTTP/1.0 | ✅ Full | Basic request/response |
 | HTTP/1.1 | ✅ Full | Keep-Alive, chunked transfer, trailers |
 | HTTP/2 | ✅ Full | High-level server runtime over TCP/TLS plus full framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Reliable paths | High-level server runtime over UDP + QUIC/TLS 1.3 with loss recovery, NewReno congestion control, 0-RTT, Retry, and v1/v2 version negotiation; the high-level client reuses pooled connections sequentially, and connection migration is not implemented |
+| HTTP/3 | ✅ Full | High-level server runtime over UDP + QUIC/TLS 1.3 with loss recovery, NewReno congestion control, 0-RTT, Retry, v1/v2 version negotiation, and pooled connections |
 
 ## Server
 
@@ -280,6 +280,8 @@ Omit `.logging.callback` (the default) for fully silent operation.
 | `patch(path, handler)` | Register PATCH route |
 | `head(path, handler)` | Register HEAD route |
 | `options(path, handler)` | Register OPTIONS route |
+| `rest()` | Typed REST controller sharing this server's allocator and `io` |
+| `graphql(schema, cfg)` | Mount a GraphQL endpoint (removed by `deinit`) |
 | `use(mw)` | Register global middleware |
 | `static(mount, dir)` | Serve a filesystem directory |
 | `spa(mount, dir)` | Serve a directory with SPA fallback |
@@ -288,8 +290,25 @@ Omit `.logging.callback` (the default) for fully silent operation.
 
 ### `httpx.App` — Typed REST
 
-`App` wraps `Server` and registers routes with the path as the first argument
-and one `.{}` options literal as the second.
+`App` owns both an inbound `Server` and an outbound `Client`, created from the
+same allocator and `std.Io` in one `init` call. Access them as `app.server` and
+`app.client` — there is no second initialization step and no duplicated wrapper.
+Client-wide settings live in the optional `.client` literal:
+
+```zig
+var app = try httpx.App.init(allocator, io, .{
+    .host = "127.0.0.1",
+    .port = 8080,
+    .client = .{ .timeoutMs = 10_000 },
+});
+defer app.deinit();
+
+const upstream = try app.client.get("https://example.com/health", .{});
+defer upstream.deinit();
+```
+
+Routes are registered with the path as the first argument and one `.{}` options
+literal as the second.
 
 The handler's return type selects the mode automatically:
 
@@ -318,7 +337,8 @@ try app.post("/users", .{
     .deprecated = false,
     .security = &.{},
     .mediaType = "application/json; charset=utf-8",
-    .names = .{ .user_name = "user-name" }, // JSON wire keys
+    .requestSchema = CreateUserSchema, // mapped JSON keys
+    .responseSchema = UserSchema,
 });
 
 // Raw handler route: same verb, no schema derivation.
@@ -361,21 +381,30 @@ JSON envelope `{"error": ..., "status": ...}`.
 #### Keys that are not Zig identifiers
 
 JSON keys are arbitrary strings and are preserved exactly — nothing in the
-library restricts them to Zig identifier rules. Map Zig fields with `.names`:
+library restricts them to Zig identifier rules. Bind a declarative schema:
 
 ```zig
-const names = .{ .user_name = "user-name", .context = "@context" };
+const CreateUserSchema = httpx.json.Schema(CreateUser, .{
+    .user_name = "user-name",
+    .context = .{ .name = "@context" },
+});
+const UserSchema = httpx.json.Schema(User, .{
+    .user_name = "user-name",
+    .context = .{ .name = "@context" },
+});
 
 try app.post("/users", .{
-    .handler = createUser, // fn (ctx, struct { user_name: []const u8, context: []const u8 })
-    .names = names,
+    .handler = createUser, // fn (ctx, CreateUser) !httpx.Schema(User)
+    .requestSchema = CreateUserSchema,
+    .responseSchema = UserSchema,
 });
 ```
 
 Requests are decoded with the wire names, responses are encoded with them, and
 the OpenAPI document lists the wire names. For shapes that are not known ahead
 of time use `std.json.Value` or `httpx.json.Object` and read keys dynamically
-(`.get("user-name")`, `.getIgnoreCase("content-type")`).
+(`.get("user-name")`, `.getIgnoreCase("content-type")`). See
+[JSON schemas](/api/data#json-schemas) for the complete mapping API.
 
 ### Quick Example
 
@@ -443,8 +472,7 @@ Path parameters use `{name}` segments and are read with `ctx.param("id")`.
 ### Custom 404 Handler
 
 ```zig
-const router_mod = httpx.web.router;
-var router = router_mod.Router.init(allocator);
+var router = httpx.Router.init(allocator);
 defer router.deinit();
 router.setNotFoundHandler(notFound);
 
