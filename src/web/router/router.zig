@@ -242,6 +242,10 @@ pub const Context = struct {
 
     /// Unified JSON handler:
     /// - If `arg` is a `type` (`comptime T: type`), deserializes the request body into `T`.
+    ///   Scalars, slices, and nested values borrow `ctx.allocator` (the
+    ///   per-request scratch arena) and stay valid until the request ends.
+    ///   Unknown keys are ignored; use [`jsonNamed`] for non-identifier keys
+    ///   and [`jsonValue`] for arbitrary dynamic objects.
     /// - If `arg` is a value/struct, serializes and returns a JSON `Response` (200 OK).
     pub fn json(self: *const Context, arg: anytype) !if (@TypeOf(arg) == type) arg else Response {
         if (@TypeOf(arg) == type) {

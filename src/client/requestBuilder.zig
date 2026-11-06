@@ -43,6 +43,7 @@ const poolNs = @import("pool/connectionPool.zig");
 const Pool = poolNs.Pool;
 const tlsSession = @import("../protocols/tls/tlsSession.zig");
 const clockMod = @import("../common/clock.zig");
+const jsonMod = @import("../common/json.zig");
 const netResolve = @import("../net/resolve.zig");
 const addressMod = @import("../net/address.zig");
 const compression = @import("../compression/codec.zig");
@@ -217,9 +218,18 @@ pub const Response = struct {
     version: HttpVersion = .http11,
     headers: []Header,
     body: []u8,
+    /// Lazily created arena for values returned by `json`. Released by
+    /// `deinit`; never shared with another response.
+    jsonArena: ?*std.heap.ArenaAllocator = null,
 
-    /// Releases the headers and body owned by this response.
+    /// Releases the headers, body, and any decoded JSON values owned by this
+    /// response.
     pub fn deinit(self: *Response) void {
+        if (self.jsonArena) |arena| {
+            arena.deinit();
+            self.allocator.destroy(arena);
+            self.jsonArena = null;
+        }
         for (self.headers) |h| {
             self.allocator.free(h.name);
             self.allocator.free(h.value);
@@ -236,9 +246,20 @@ pub const Response = struct {
         return null;
     }
 
-    /// Parses the body as JSON into `T` (ignores unknown fields).
+    /// Parses the body as JSON into `T` through the shared JSON decoder.
+    /// Unknown object keys are ignored.
+    ///
+    /// The decoded value is allocated from a lazily created arena owned by the
+    /// response and is valid until `deinit`. Use [`jsonAlloc`] when the value
+    /// must outlive the response or use a caller-owned allocator.
     pub fn json(self: *const Response, comptime T: type) !T {
-        return std.json.parseFromSliceLeaky(T, self.allocator, self.body, .{ .ignore_unknown_fields = true });
+        const target = @constCast(self);
+        if (target.jsonArena == null) {
+            const arena = try self.allocator.create(std.heap.ArenaAllocator);
+            arena.* = std.heap.ArenaAllocator.init(self.allocator);
+            target.jsonArena = arena;
+        }
+        return jsonMod.decode(T, target.jsonArena.?.allocator(), self.body);
     }
 
     /// Parses the body as JSON with an explicit allocator and returns `std.json.Parsed(T)` with managed lifecycle.
@@ -3886,4 +3907,18 @@ test "requestStream abandoned early does not return dirty socket to pool and ter
 
     thread.join();
     joined = true;
+}
+
+test "Response.json owns decoded values until deinit" {
+    const a = std.testing.allocator;
+    var response = Response{
+        .allocator = a,
+        .status = 200,
+        .headers = try a.alloc(Header, 0),
+        .body = try a.dupe(u8, "{\"name\":\"alice\"}"),
+    };
+    const T = struct { name: []const u8 };
+    const decoded = try response.json(T);
+    try std.testing.expectEqualStrings("alice", decoded.name);
+    response.deinit();
 }
