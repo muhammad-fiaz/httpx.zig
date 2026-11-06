@@ -24,6 +24,9 @@ pub const Callbacks = struct {
 };
 
 pub const Config = struct {
+    /// Literal bind address. Supports `0.0.0.0`, `::`, or any IPv4/IPv6
+    /// literal such as `127.0.0.1`. Hostnames are rejected with
+    /// `error.InvalidHost`; resolve them before constructing the server.
     host: []const u8 = "0.0.0.0",
     port: u16 = 2121,
     user: []const u8 = "anonymous",
@@ -62,8 +65,19 @@ pub const Server = struct {
     tlsServer: ?tlsServerMod.Server = null,
 
     pub fn init(allocator: Allocator, io: std.Io, cfg: Config) !Server {
-        if (!std.mem.eql(u8, cfg.host, "0.0.0.0")) return error.ProtocolError;
-        var self = Server{ .allocator = allocator, .io = io, .listener = try tcp.Listener.bind(io, cfg.port), .cfg = cfg };
+        var addr: addressMod.Address = blk: {
+            if (std.mem.eql(u8, cfg.host, "0.0.0.0")) break :blk addressMod.Address.unspecified4(cfg.port);
+            if (std.mem.eql(u8, cfg.host, "::")) break :blk addressMod.Address.unspecified6(cfg.port);
+            var parsed: addressMod.Address = undefined;
+            break :blk parsed.parseIp(cfg.host) catch return error.InvalidHost;
+        };
+        addr.port = cfg.port;
+        var self = Server{
+            .allocator = allocator,
+            .io = io,
+            .listener = try tcp.Listener.bindAddress(io, &addr),
+            .cfg = cfg,
+        };
         errdefer self.deinit();
         if (cfg.secureAvailable()) {
             self.tlsServer = try tlsServerMod.Server.init(allocator, io, .{
@@ -655,4 +669,20 @@ test "FTP server defaults bound uploads and disable active mode" {
     const config = Config{};
     try std.testing.expectEqual(@as(usize, 16 * 1024 * 1024), config.maxUploadSize);
     try std.testing.expect(!config.allowActiveMode);
+}
+
+test "FTP server binds explicit IPv4 loopback literals" {
+    var server = try Server.init(std.testing.allocator, std.testing.io, .{
+        .host = "127.0.0.1",
+        .port = 0,
+    });
+    defer server.deinit();
+    try std.testing.expect(server.localPort() != 0);
+}
+
+test "FTP server rejects hostnames instead of silently binding all interfaces" {
+    try std.testing.expectError(error.InvalidHost, Server.init(std.testing.allocator, std.testing.io, .{
+        .host = "localhost",
+        .port = 0,
+    }));
 }
