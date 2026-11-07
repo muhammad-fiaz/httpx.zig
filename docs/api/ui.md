@@ -17,11 +17,9 @@ server's `Config.docs` field.
 | `scalar` | `ScalarConfig` | `.{}` | Scalar route and options |
 | `graphiql` | `GraphiQLConfig` | `.{}` | GraphiQL route, endpoint, and options |
 
-Each UI struct has `enabled`, `route`, and `title`, the explicit vendor options
-listed below, and a raw JSON passthrough that is merged last, so any option the
-bundled version supports is reachable without a library change. Options are
-serialized into the page as JSON; `<`, `>`, and `&` are escaped inside inline
-scripts, and invalid raw JSON fails the mount with `error.InvalidOptionsJson`.
+Every UI struct has `enabled`, `route`, and `title`, plus explicit, typed
+options. Options are serialized into the page as JSON; `<`, `>`, and `&` are
+escaped inside inline scripts. There is no string-based option passthrough.
 
 ## Swagger UI options (`SwaggerConfig`)
 
@@ -31,15 +29,27 @@ scripts, and invalid raw JSON fails the mount with `error.InvalidOptionsJson`.
 | `route` | `[]const u8` | `"/docs"` | — |
 | `title` | `[]const u8` | `"Swagger UI"` | HTML document title |
 | `docExpansion` | `DocExpansion` | `.list` | `docExpansion` (`list`, `full`, `none`) |
+| `defaultModelRendering` | `DefaultModelRendering` | `.example` | `defaultModelRendering` (`example`, `model`) |
+| `defaultModelsExpandDepth` | `i32` | `1` | `defaultModelsExpandDepth` |
+| `defaultModelExpandDepth` | `i32` | `1` | `defaultModelExpandDepth` |
 | `deepLinking` | `bool` | `true` | `deepLinking` |
 | `displayOperationId` | `bool` | `false` | `displayOperationId` |
 | `displayRequestDuration` | `bool` | `false` | `displayRequestDuration` |
 | `filter` | `bool` | `false` | `filter` |
 | `persistAuthorization` | `bool` | `false` | `persistAuthorization` |
 | `tryItOutEnabled` | `bool` | `false` | `tryItOutEnabled` |
-| `defaultModelsExpandDepth` | `i32` | `1` | `defaultModelsExpandDepth` |
+| `showExtensions` | `bool` | `false` | `showExtensions` |
+| `showCommonExtensions` | `bool` | `false` | `showCommonExtensions` |
+| `showMutatedRequest` | `bool` | `true` | `showMutatedRequest` |
+| `withCredentials` | `bool` | `false` | `withCredentials` |
+| `useUnsafeMarkdown` | `bool` | `false` | `useUnsafeMarkdown` |
+| `requestSnippetsEnabled` | `bool` | `false` | `requestSnippetsEnabled` |
+| `maxDisplayedTags` | `?i32` | `null` | `maxDisplayedTags`; null shows all tags |
+| `validatorUrl` | `?[]const u8` | `null` | `validatorUrl`; null disables validation |
+| `supportedSubmitMethods` | `[]const SubmitMethod` | `&.{}` | `supportedSubmitMethods`; empty enables every method |
 | `oauth2RedirectUrl` | `?[]const u8` | `null` | `oauth2RedirectUrl`; defaults to `{route}/oauth2-redirect.html` |
-| `rawOptions` | `?[]const u8` | `null` | Extra options as a JSON object, merged last |
+
+`SubmitMethod` is `enum { get, put, post, delete, options, head, patch, trace }`.
 
 ## ReDoc options (`RedocConfig`)
 
@@ -51,13 +61,22 @@ scripts, and invalid raw JSON fails the mount with `error.InvalidOptionsJson`.
 | `hideHostname` | `bool` | `false` | `hideHostname` |
 | `hideDownloadButton` | `bool` | `false` | `hideDownloadButton` |
 | `hideFab` | `bool` | `false` | `hideFab` |
+| `hideLoading` | `bool` | `false` | `hideLoading` |
+| `hideLogo` | `bool` | `false` | `hideLogo` |
+| `hideSecuritySection` | `bool` | `false` | `hideSecuritySection` |
 | `expandResponses` | `[]const u8` | `""` | `expandResponses`, e.g. `"200,201"` |
 | `pathInMiddlePanel` | `bool` | `false` | `pathInMiddlePanel` |
 | `requiredPropsFirst` | `bool` | `false` | `requiredPropsFirst` |
 | `sortPropsAlphabetically` | `bool` | `false` | `sortPropsAlphabetically` |
+| `sortEnumValuesAlphabetically` | `bool` | `false` | `sortEnumValuesAlphabetically` |
 | `noAutoAuth` | `bool` | `false` | `noAutoAuth` |
 | `disableSearch` | `bool` | `false` | `disableSearch` |
-| `rawOptions` | `?[]const u8` | `null` | Extra options as a JSON object, merged last |
+| `nativeScrollbars` | `bool` | `false` | `nativeScrollbars` |
+| `onlyRequiredInSamples` | `bool` | `false` | `onlyRequiredInSamples` |
+| `menuToggle` | `bool` | `false` | `menuToggle` |
+| `jsonSampleExpandLevel` | `i32` | `2` | `jsonSampleExpandLevel` |
+| `generatedPayloadSamplesMaxDepth` | `i32` | `10` | `generatedPayloadSamplesMaxDepth` |
+| `scrollYOffset` | `?i32` | `null` | `scrollYOffset`; null uses the vendor default |
 
 ## Scalar options (`ScalarConfig`)
 
@@ -71,9 +90,17 @@ scripts, and invalid raw JSON fails the mount with `error.InvalidOptionsJson`.
 | `hideModels` | `bool` | `false` | `hideModels` |
 | `hideDownloadButton` | `bool` | `false` | `hideDownloadButton` |
 | `hideTestRequestButton` | `bool` | `false` | `hideTestRequestButton` |
+| `hideClientButton` | `bool` | `false` | `hideClientButton` |
 | `isEditable` | `bool` | `false` | `isEditable` |
 | `showSidebar` | `bool` | `true` | `showSidebar` |
-| `rawConfiguration` | `?[]const u8` | `null` | Extra configuration as a JSON object, merged last |
+| `showDeveloperTools` | `bool` | `false` | `showDeveloperTools` |
+| `defaultOpenAllTags` | `bool` | `false` | `defaultOpenAllTags` |
+| `telemetry` | `bool` | `true` | `telemetry` |
+| `persistAuth` | `bool` | `false` | `persistAuth` |
+| `withDefaultFonts` | `bool` | `true` | `withDefaultFonts` |
+| `searchHotKey` | `[]const u8` | `"k"` | `searchHotKey` |
+| `proxyUrl` | `[]const u8` | `""` | `proxyUrl`; empty omits the option |
+| `customCss` | `[]const u8` | `""` | `customCss`; empty omits the option |
 
 ## GraphiQL options (`GraphiQLConfig`)
 
@@ -85,8 +112,12 @@ scripts, and invalid raw JSON fails the mount with `error.InvalidOptionsJson`.
 | `title` | `[]const u8` | `"GraphiQL IDE"` | HTML document title |
 | `defaultQuery` | `[]const u8` | `""` | Query pre-filled in the editor |
 | `editorTheme` | `[]const u8` | `""` | Monaco theme, e.g. `"vs-dark"` |
-| `headers` | `[]const u8` | `""` | Extra request headers as a JSON object |
-| `rawOptions` | `?[]const u8` | `null` | Extra options as a JSON object, merged last |
+| `headers` | `GraphiQLHeaders` | `.{}` | Request headers; flat `authorization`/`cookie`/`accept` fields plus `custom` |
+| `shouldPersistHeaders` | `bool` | `false` | `shouldPersistHeaders` |
+| `inputValueDeprecation` | `bool` | `false` | `inputValueDeprecation` |
+| `schemaDescription` | `bool` | `false` | `schemaDescription` |
+| `docExplorerOpen` | `bool` | `false` | `docExplorerOpen` |
+| `isHeadersEditorEnabled` | `bool` | `true` | `isHeadersEditorEnabled` |
 
 ## Mounting
 
@@ -110,6 +141,8 @@ try httpx.docs.mount(allocator, &router, .{
         .persistAuthorization = true,
         .tryItOutEnabled = true,
         .defaultModelsExpandDepth = 2,
+        .maxDisplayedTags = 10,
+        .supportedSubmitMethods = &.{ .get, .post, .put, .patch, .delete },
     },
     .redoc = .{
         .enabled = true,
@@ -118,6 +151,7 @@ try httpx.docs.mount(allocator, &router, .{
         .hideDownloadButton = true,
         .requiredPropsFirst = true,
         .expandResponses = "200,201",
+        .jsonSampleExpandLevel = 3,
     },
     .scalar = .{
         .enabled = true,
@@ -127,6 +161,7 @@ try httpx.docs.mount(allocator, &router, .{
         .darkMode = false,
         .hideDownloadButton = true,
         .showSidebar = true,
+        .defaultOpenAllTags = true,
     },
     .graphiql = .{
         .enabled = true,
@@ -135,7 +170,8 @@ try httpx.docs.mount(allocator, &router, .{
         .title = "GraphiQL IDE",
         .defaultQuery = "{ __typename }",
         .editorTheme = "vs-dark",
-        .headers = "{\"Authorization\":\"Bearer token\"}",
+        .headers = .{ .authorization = "Bearer token" },
+        .docExplorerOpen = true,
     },
 }, null);
 ```
@@ -144,25 +180,6 @@ The mount registers the OpenAPI document first, then the enabled UI pages
 (`/docs`, `/redoc`, `/scalar`, `/graphiql`), plus the bundled asset paths
 required by those pages. All assets are embedded and served offline; the
 pages never reference a CDN.
-
-## Raw options
-
-Use the raw passthrough for options that are not modeled as fields:
-
-```zig
-.swagger = .{
-    .route = "/docs",
-    .rawOptions = "{\"displayRequestDuration\":true,\"maxDisplayedTags\":5}",
-},
-.scalar = .{
-    .route = "/scalar",
-    .rawConfiguration = "{\"withDefaultFonts\":false}",
-},
-```
-
-Raw keys are merged after the typed fields, so they win on conflict. They must
-be a JSON object; anything else makes the mount return
-`error.InvalidOptionsJson`.
 
 See the individual [Swagger UI](/guide/swagger-ui), [ReDoc](/guide/redoc),
 [Scalar](/guide/scalar), and [GraphiQL](/guide/graphiql) guides for route and

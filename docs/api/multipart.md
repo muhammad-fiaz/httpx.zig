@@ -153,7 +153,7 @@ try stream.finish();
 Inside a route handler parse an incoming multipart body:
 
 ```zig
-pub fn handleUpload(ctx: *httpx.Context) !httpx.Response {
+pub fn handleUpload(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
     var form = try ctx.multipart(.{
         .maxMemoryBytes = 16 * 1024 * 1024, // optional — defaults to 32 MB
     });
@@ -230,11 +230,11 @@ while (offset < total_bytes.len) {
     );
 
     var resp = try client.post("http://localhost:8080/upload-resumable", .{
-        .cancel  = &cancel,
-        .headers = &.{ .{ .name = "Content-Range", .value = rangeHeader } },
+        .cancel = &cancel,
+        .headers = .{ .@"Content-Range" = rangeHeader },
         .multipart = .{
-            .fields = .{ .{ .name = "part", .value = "1" } },
-            .files  = .{ .{ .name = "chunk", .filename = "data.bin", .data = total_bytes[offset..end] } },
+            .fields = &.{.{ .name = "part", .value = "1" }},
+            .files = &.{.{ .name = "chunk", .filename = "data.bin", .data = total_bytes[offset..end] }},
         },
     });
     defer resp.deinit();

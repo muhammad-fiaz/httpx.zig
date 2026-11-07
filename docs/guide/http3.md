@@ -49,22 +49,51 @@ if (server.http3.portFallback) {
 An explicit nonzero `.port` never falls back: if the UDP bind fails (for example, the port is already in use or falls in a reserved range), `Server.init` returns the bind error and releases the TCP listener, because moving HTTP/3 to an unannounced port would break the shared-port contract.
 
 Always prefer `server.http3.port()` over `server.localPort()` when dialling HTTP/3.
-- **QPACK Header Compression** - RFC 9204 static and dynamic tables with encoder/decoder stream prefixes, insert-count acknowledgments, and blocked-section retry.
-- **QUIC Transport Framing** - STREAM, CRYPTO, ACK, HANDSHAKE_DONE, RESET_STREAM/STOP_SENDING, transport parameters, PTO/loss recovery, and NewReno congestion control.
-- **Variable-Length Integers** - QUIC varint encoding/decoding.
-- **Connection IDs** - Connection ID generation and peer table.
-- **Flow Control** - MAX_DATA and MAX_STREAM_DATA frame handling with connection-level and per-stream flow control windows.
-- **GOAWAY and CONNECTION_CLOSE** - Frame codecs present; server-initiated graceful shutdown mid-request is future work.
-- **Stream Cancellation** - RESET_STREAM and STOP_SENDING frame codecs.
 
-### Deliberate Current Limits
+### Connection handling
 
-- The high-level HTTP/3 client pools QUIC connections for sequential reuse but does not multiplex concurrent requests over one connection; proxy routes are rejected loudly (`Http3ProxyUnsupported`).
-- 0-RTT resumption works over QUIC, but the QUIC driver does not handle HelloRetryRequest; clients always send an X25519 share.
-- Retry/token validation, QUIC v1/v2 version negotiation, and 1-RTT key updates are implemented. Set `.http3Retry = true` in the inline options passed to `httpx.Server.init` to require address validation before the Initial flight; the 3x anti-amplification limit otherwise applies until the client Finished is verified. The high-level client honors Retry automatically and resends the ClientHello under the new Initial keys.
-- No connection migration, server push, HTTP/3 datagrams, or extended CONNECT.
-- Streaming uploads are supported through a request body source. The one-shot
-  API buffers response bodies, so streaming downloads are not provided.
+- **QPACK** — RFC 9204 static and dynamic tables with encoder/decoder stream prefixes, insert-count acknowledgments, and blocked-section retry.
+- **QUIC framing** — STREAM, CRYPTO, ACK, HANDSHAKE_DONE, RESET_STREAM/STOP_SENDING, transport parameters, PTO/loss recovery, and NewReno congestion control.
+- **Varints** — QUIC variable-length integer encoding/decoding.
+- **Connection IDs** — generation and peer table.
+- **Flow control** — MAX_DATA and MAX_STREAM_DATA with connection-level and per-stream windows.
+- **GOAWAY / CONNECTION_CLOSE** — graceful shutdown and close handling.
+- **Stream cancellation** — RESET_STREAM and STOP_SENDING codecs.
+
+### Operational Notes
+
+- `Client` pools QUIC connections per origin for sequential reuse. For an independent UDP connection, initialize a second client:
+
+  ```zig
+  var client = httpx.Client.init(allocator, io, .{});
+  defer client.deinit();
+  ```
+
+  Without it, a second request reuses the pooled connection. HTTP/3 over a proxy is rejected: `try client.get("https://example.com/", .{ .httpVersion = .http3, .proxy = "http://127.0.0.1:8080" })` returns `error.Http3ProxyUnsupported`.
+
+- Require QUIC address validation before the Initial flight with one inline field:
+
+  ```zig
+  var server = try httpx.Server.init(allocator, io, .{ .http3Retry = true });
+  defer server.deinit();
+  ```
+
+  Without it, the RFC 9000 Section 8.1 3x anti-amplification limit applies until the client Finished is verified. The client handles Retry automatically: `cliConn.retryPending` is set and the ClientHello is resent under the new Initial keys.
+
+- Stream uploads with a body source and read responses incrementally:
+
+  ```zig
+  var reader = httpx.SliceReader.init("streamed-data-payload");
+  var res = try client.requestStream("https://127.0.0.1:8443/upload", .{
+      .method = .POST,
+      .httpVersion = .http3,
+      .tls = .{ .verify = .caBundle, .caPem = ca_pem },
+      .body = reader.source(),
+  });
+  defer res.deinit();
+  var buf: [64]u8 = undefined;
+  const n = try res.body.read(&buf);
+  ```
 
 ## High-level Client Usage
 

@@ -22,7 +22,7 @@ var server = try httpx.Server.init(allocator, io, .{
             .title = "Users GraphQL",
             .defaultQuery = "{ me { id name } }",
             .editorTheme = "vs-dark",
-            .headers = "{\"Authorization\":\"Bearer token\"}",
+            .headers = .{ .authorization = "Bearer token" },
         },
     },
 });
@@ -37,24 +37,25 @@ defer server.deinit();
 | `title` | `[]const u8` | `"GraphiQL IDE"` | HTML document title |
 | `defaultQuery` | `[]const u8` | `""` | Query pre-filled in the editor |
 | `editorTheme` | `[]const u8` | `""` | Monaco theme, e.g. `"vs-dark"` |
-| `headers` | `[]const u8` | `""` | Extra request headers as a JSON object string |
-| `rawOptions` | `?[]const u8` | `null` | Extra options as a JSON object, merged last |
+| `headers` | `GraphiQLHeaders` | `.{}` | Request headers; flat `authorization`/`cookie`/`accept` fields plus `custom` |
+| `shouldPersistHeaders` | `bool` | `false` | Persist headers across reloads |
+| `inputValueDeprecation` | `bool` | `false` | Show input-value deprecations |
+| `schemaDescription` | `bool` | `false` | Show schema descriptions |
+| `docExplorerOpen` | `bool` | `false` | Open the documentation explorer |
+| `isHeadersEditorEnabled` | `bool` | `true` | Enable the headers editor |
 
 The page calls `window.renderGraphiQL(element, options)` with exactly these
 options; the bundled wrapper sends every request to `graphqlEndpoint` with the
-configured headers merged over `Content-Type: application/json`.
-`rawOptions` is merged last:
+configured headers merged over `Content-Type: application/json`:
 
 ```zig
 .graphiql = .{
     .route = "/graphiql",
     .graphqlEndpoint = "/graphql",
-    .rawOptions = "{\"editorTheme\":\"vs-dark\"}",
+    .editorTheme = "vs-dark",
+    .headers = .{ .authorization = "Bearer token" },
 },
 ```
-
-Raw keys and `headers` must form JSON objects, otherwise the mount returns
-`error.InvalidOptionsJson`.
 
 GraphiQL does not create a GraphQL endpoint. Register the endpoint separately
 with the GraphQL server integration before opening the interface.

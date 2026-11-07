@@ -133,7 +133,7 @@ zig fetch --save git+https://github.com/muhammad-fiaz/httpx.zig.git
 ```
 
 ::: tip Release status
-This documentation describes the `v0.2.4` package and Zig `0.17.0`. Review the changelog and source when upgrading between releases.
+This documentation describes `httpx.zig` `v0.2.4` for Zig `0.17.0`.
 :::
 
 ::: tip Related Zig Projects
@@ -165,33 +165,32 @@ Zig's standard library does not provide HTTP/2, HTTP/3, QUIC, or an ALPN hook. *
 - **QPACK** header compression (RFC 9204) with static/dynamic tables and decoder/encoder stream instructions for HTTP/3
 - **QUIC** transport frame encoding/decoding (RFC 9000) with RESET_STREAM/STOP_SENDING cancellation, ACK/loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, and RFC 9001 handshake confirmation/key discard
 - **HTTP/3** frame types, SETTINGS, GOAWAY, and CONNECTION_CLOSE handling
-- **Interop note:** strict TLS-in-QUIC server negotiation expectations may vary by endpoint deployment
 :::
 
-## Feature Status
+## Capabilities
 
-| Area | Status | Notes |
-|------|--------|-------|
-| HTTP client/server, routing, middleware, JSON, REST, multipart, downloads, FTP/FTPS, parsing | Implemented | Covered by module and integration tests |
-| HTTP/3 and QUIC | Implemented for reliable request paths | No HelloRetryRequest, connection migration, server push, or datagrams |
-| Native TLS 1.3 client/server, TLS 1.2 client transport | Implemented | See the protocol and security references for supported extensions |
-| Anything not in the API reference or protocol guide | Unsupported | Examples demonstrate features; they are not features themselves |
+| Area | Coverage |
+|------|----------|
+| HTTP client and server | HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 with connection pooling, retries, redirects, timeouts, and streaming |
+| Web framework | Routing, middleware, typed REST, GraphQL, multipart, cookies, sessions, authentication, static files, templates, SPA hosting, OpenAPI, and documentation UIs |
+| Protocols | Native HTTP/1.x, HTTP/2 (HPACK), HTTP/3 (QPACK), QUIC, TLS 1.3, TLS 1.2 client transport, FTP, and FTPS |
+| Data and operations | JSON with declarative schemas, HTML/XML/feed parsing, compression, downloads, metrics, health checks, CORS, CSRF, and rate limiting |
 
 ::: tip Advanced protocol APIs
 High-level `httpx.Client` and `httpx.Server` manage framing, HPACK/QPACK, QUIC
 packets, TLS records, pooling, and cleanup internally. Use the standalone
 `httpx.http1`, `httpx.http2`, `httpx.http3`, `httpx.quic`, and `httpx.tls`
-types only when you deliberately need protocol-level control.
+types when you need protocol-level control.
 :::
 
 ## Protocol Support
 
-| Protocol | Status | Transport | Notes |
-|----------|--------|-----------|-------|
-| HTTP/1.0 | ✅ Full | TCP | Legacy support |
-| HTTP/1.1 | ✅ Full | TCP/TLS | Default protocol |
-| HTTP/2 | ✅ Full | TCP/TLS | Client + server runtime (ALPN `h2` / h2c) plus framing/HPACK/stream primitives |
-| HTTP/3 | ✅ Reliable paths | QUIC/TLS | Client + server runtime (ALPN `h3`) with loss recovery, NewReno congestion control, flow control, transport parameters, 0-RTT resumption, RFC 9001 handshake confirmation/key discard, Retry/token validation, v1/v2 version negotiation, key updates, and connection pooling for sequential reuse; no HelloRetryRequest, migration, server push, or datagrams |
+| Protocol | Transport | Capabilities |
+|----------|-----------|--------------|
+| HTTP/1.0 | TCP | Legacy message handling |
+| HTTP/1.1 | TCP/TLS | Default protocol with keep-alive, chunked transfer, and `100-continue` |
+| HTTP/2 | TCP/TLS | Client and server runtime (ALPN `h2` / h2c), multiplexing, HPACK, flow control, and connection pooling |
+| HTTP/3 | QUIC/TLS | Client and server runtime (ALPN `h3`), QPACK, loss recovery, congestion control, flow control, Retry validation, version negotiation, key updates, 0-RTT, and connection pooling |
 
 ## Platform Support
 
@@ -265,11 +264,23 @@ zig build run-simple-get -Dtarget=x86_64-linux-gnu
 For production client code, prefer explicit timeout + error handling so failures surface immediately:
 
 ```zig
-var response = client.get(url, .{ .timeoutMs = 10_000 }) catch |err| {
-  std.debug.print("request failed: {s}\n", .{@errorName(err)});
-  return;
-};
-defer response.deinit();
+fn fetchHealth(allocator: std.mem.Allocator, io: std.Io) !void {
+    var client = httpx.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    var response = client.get("https://api.example.com/health", .{
+        .timeoutMs = 10_000,
+    }) catch |err| {
+        std.debug.print("request failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    defer response.deinit();
+
+    if (!response.isSuccess()) {
+        std.debug.print("unexpected status: {d}\n", .{response.status});
+        return error.HttpStatusError;
+    }
+}
 ```
 
 For detailed target-matrix instructions, see [Installation](/guide/installation#validation-and-target-matrix).

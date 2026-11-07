@@ -55,6 +55,7 @@ pub const Response = struct {
     pub fn text(self: *const Response) []const u8;
     pub fn bytes(self: *const Response) []const u8;
     pub fn json(self: *const Response, comptime T: type) !T;
+    pub fn jsonValue(self: *const Response) !httpx.json.Value;
     pub fn jsonAlloc(self: *const Response, comptime T: type, allocator: Allocator) !std.json.Parsed(T);
     pub fn html(self: *const Response) !httpx.parsing.Document;
     pub fn xml(self: *const Response) !httpx.parsing.Document;
@@ -82,7 +83,14 @@ Performs a case-insensitive lookup across response headers. Returns `null` if th
 Returns the body slice as a string. The slice is valid until `resp.deinit()`.
 
 ### `resp.json(comptime T: type) !T`
-Decodes the response body into the target Zig type `T` using Zig's standard JSON parser.
+Decodes the response body into the target Zig type `T` using the shared decoder.
+Field names are matched exactly, so quoted identifiers such as `@"user-name"`
+map directly to the wire keys. Unknown object keys are ignored. The returned
+value lives in a response-owned arena until `resp.deinit()`.
+
+### `resp.jsonValue() !httpx.json.Value`
+Parses the body into a dynamic JSON value with keys preserved exactly. The value
+lives in the response arena until `resp.deinit()`.
 
 ### `resp.html() !httpx.parsing.Document`
 Parses the body into an HTML/DOM document tree using the native HTML engine. Caller must call `document.deinit()`.

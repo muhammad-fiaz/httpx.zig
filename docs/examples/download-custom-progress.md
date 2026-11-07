@@ -11,8 +11,8 @@ const httpx = @import("httpx");
 const DownloadObserver = struct {
     taskId: u32,
 
-    fn onProgress(info: httpx.client.download.ProgressInfo, userData: ?*anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(userData.?));
+    fn onProgress(info: httpx.client.download.Progress, userData: ?*const anyopaque) void {
+        const self: *const @This() = @ptrCast(@alignCast(userData.?));
         const pct = if (info.percentage) |p| p else 0.0;
         const stateColor: []const u8 = switch (info.state) {
             .completed => "\x1b[32m",
@@ -46,10 +46,6 @@ pub fn main() !void {
     var client = httpx.Client.init(allocator, io, .{});
     defer client.deinit();
 
-    var observer = DownloadObserver{
-        .taskId = 101,
-    };
-
     // 1. Successful download test
     const sampleUrl = "https://httpbun.com/bytes/90";
     std.debug.print("==> Downloading {s} with custom progress callback observer...\n", .{sampleUrl});
@@ -60,7 +56,7 @@ pub fn main() !void {
             .path = "downloads/observed_download.bin",
             .progress = .custom,
             .onProgress = DownloadObserver.onProgress,
-            .userData = &observer,
+            .userData = &.{ .taskId = 101 },
             .createDirs = true,
         },
     ) catch |err| {

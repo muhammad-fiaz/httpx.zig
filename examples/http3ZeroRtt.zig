@@ -125,7 +125,7 @@ const DemoServer = struct {
             const isEarly = std.mem.eql(u8, path, "/early-data");
             var qenc = httpx.http3.qpack.Encoder.init(alloc);
             defer qenc.deinit();
-            var rs = httpx.http3.RequestStream{ .id = acc.sid, .allocator = alloc, .qpack = &qenc };
+            var rs: httpx.http3.RequestStream = .{ .id = acc.sid, .allocator = alloc, .qpack = &qenc };
 
             const rhead = try rs.buildResponseHeaders(200, &.{});
             defer alloc.free(rhead);
@@ -169,13 +169,13 @@ pub fn main() !void {
     var replayCache = httpx.tls.session.ReplayCache.init(allocator, 1024);
     defer replayCache.deinit();
 
-    const ticketKeys = httpx.tls.session.TicketKeys{ .current = (@as([32]u8, @splat(0x42))) };
+    const ticketKeys: httpx.tls.session.TicketKeys = .{ .current = @as([32]u8, @splat(0x42)) };
 
     // 2. Start Loopback HTTP/3 Server with 0-RTT and Session Resumption
     var placeholder = try httpx.quic.Connection.init(allocator, io, .{ .role = .server });
     defer placeholder.deinit();
 
-    var srv = DemoServer{};
+    var srv: DemoServer = .{};
     srv.ep = try httpx.quic.transport.Endpoint.init(allocator, io, placeholder, .{});
     const port = srv.ep.localPort();
     defer srv.ep.deinit();
@@ -191,10 +191,6 @@ pub fn main() !void {
     defer client.deinit();
 
     var urlBuf: [64]u8 = undefined;
-    const cachePolicy = httpx.client.sessionPolicyFingerprint(.{
-        .verify = .caBundle,
-        .caPem = demoCertPem,
-    });
     const url1 = try std.fmt.bufPrint(&urlBuf, "https://127.0.0.1:{d}/initial", .{port});
 
     std.debug.print("Step 1: Sending first request (cold connection, 1-RTT)...\n", .{});
@@ -213,7 +209,10 @@ pub fn main() !void {
     std.debug.print("  -> NewSessionTicket received and cached with maxEarlyData=16384.\n\n", .{});
 
     // Verify session ticket in client cache
-    var cached = client.sessionCache.getWithAlpnPolicy("127.0.0.1", port, @intCast(httpx.clock.millisNow(io)), "h3", cachePolicy);
+    var cached = client.session.cache("127.0.0.1", port, .{
+        .alpn = "h3",
+        .tls = .{ .verify = .caBundle, .caPem = demoCertPem },
+    });
     if (cached) |*c| {
         defer c.deinit(allocator);
         std.debug.print("Step 2: Verified session cache entry: ALPN='{s}', maxEarlyData={d}\n\n", .{ c.alpn[0..c.alpnLen], c.maxEarlyData });

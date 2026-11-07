@@ -105,7 +105,7 @@ pub fn main() !void {
         .enums = &.{RoleEnum},
         .inputs = &.{UserFilter},
         .interfaces = &.{Node},
-        .enableIntrospection = true,
+        .introspection = true,
     });
     try server.graphql(schema, .{ .endpoint = graphqlEndpoint });
 
@@ -152,11 +152,13 @@ if (payload.errors) |errors| {
 }
 ```
 
-Variables may be a typed struct or a raw JSON string:
+Variables may be a typed struct (exact field names, quoted identifiers
+included) or a raw JSON string. Transport options and `.operationName` are
+passed in the same `.{}` literal and are validated at compile time:
 
 ```zig
 const vars = .{ .id = "usr_101" };
-var typed = try client.graphql(url, query, vars, .{});
+var typed = try client.graphql(url, query, vars, .{ .operationName = "GetUser", .timeoutMs = 5_000 });
 defer typed.deinit();
 
 var raw = try client.graphql(url, query, "{\"id\":\"usr_101\"}", .{});

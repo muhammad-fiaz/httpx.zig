@@ -95,8 +95,7 @@ defer env_server.deinit();
 | `http3MaxUdpPayload` | `usize` | `1472` | Advertised QUIC max UDP payload (validated 1200–65527 bytes). |
 | `logging` | `LoggingOptions` | `{}` | Event callback + level (silent by default). |
 | `enableDocs` | `bool` | `true` | Mount `/openapi.json`, `/docs`, `/redoc` by default. |
-| `docs` | `?docs.Config` | `null` | Overrides for docs routes when enabled. |
-| `docsTitle` | `[]const u8` | `"HTTPX API"` | Title used by the docs UI. |
+| `docs` | `?docs.Config` | `null` | Overrides for docs routes when enabled; `docs.title` names the document. |
 | `watch` | `bool` | `false` | Watch a directory and broadcast changes. |
 | `watchDir` | `[]const u8` | `"."` | Directory to watch when `watch` is enabled. |
 | `liveReload` | `bool` | `false` | Enable the SSE live-reload endpoint and script injection. |
@@ -288,22 +287,22 @@ Omit `.logging.callback` (the default) for fully silent operation.
 | `metrics(path)` | Mount the Prometheus endpoint |
 | `setStatusHandler(code, handler)` | Custom handler per status code |
 
-### `httpx.App` — Typed REST
+### `httpx.Server` — Typed REST
 
-`App` owns both an inbound `Server` and an outbound `Client`, created from the
-same allocator and `std.Io` in one `init` call. Access them as `app.server` and
-`app.client` — there is no second initialization step and no duplicated wrapper.
-Client-wide settings live in the optional `.client` literal:
+`httpx.Server` is the inbound owner. Create it and the outbound client
+separately, both from the same allocator and `std.Io`:
 
 ```zig
-var app = try httpx.App.init(allocator, io, .{
+var server = try httpx.Server.init(allocator, io, .{
     .host = "127.0.0.1",
     .port = 8080,
-    .client = .{ .timeoutMs = 10_000 },
 });
-defer app.deinit();
+defer server.deinit();
 
-const upstream = try app.client.get("https://example.com/health", .{});
+var client = httpx.Client.init(allocator, io, .{ .timeoutMs = 10_000 });
+defer client.deinit();
+
+const upstream = try client.get("https://example.com/health", .{});
 defer upstream.deinit();
 ```
 
@@ -313,22 +312,22 @@ literal as the second.
 The handler's return type selects the mode automatically:
 
 - `!httpx.Schema(T)` → typed REST endpoint (JSON body decoding plus OpenAPI 3.1).
-- `!httpx.Response` → raw `HandlerFn` route with the same metadata fields.
+- `!httpx.router.Response` → raw `HandlerFn` route with the same metadata fields.
 
 | Method | Description |
 |--------|-------------|
-| `app.get(path, .{ .handler, ... })` | GET |
-| `app.post(path, .{ .handler, ... })` | POST — typed handlers decode the JSON body |
-| `app.put(path, ...)` / `app.patch(path, ...)` | PUT / PATCH |
-| `app.delete(path, ...)` | DELETE |
-| `app.head(path, ...)` / `app.options(path, ...)` | HEAD / OPTIONS |
-| `app.add(.METHOD, path, .{ .handler, ... })` | Explicit method dispatch |
+| `server.get(path, .{ .handler, ... })` | GET |
+| `server.post(path, .{ .handler, ... })` | POST — typed handlers decode the JSON body |
+| `server.put(path, ...)` / `server.patch(path, ...)` | PUT / PATCH |
+| `server.delete(path, ...)` | DELETE |
+| `server.head(path, ...)` / `server.options(path, ...)` | HEAD / OPTIONS |
+| `server.add(.METHOD, path, .{ .handler, ... })` | Explicit method dispatch |
 
-A bare handler is also accepted: `app.get("/ping", ping)`. Options are anonymous
+A bare handler is also accepted: `server.get("/ping", ping)`. Options are anonymous
 struct literals — all fields are optional:
 
 ```zig
-try app.post("/users", .{
+try server.post("/users", .{
     .handler = createUser,
     .operationId = "createUser",
     .summary = "Create a user",
@@ -348,12 +347,10 @@ try app.post("/users", .{
     .request = .{ .content = .json, .description = "User to create", .required = true },
     .internal = false,
     .mediaType = "application/json; charset=utf-8",
-    .requestSchema = CreateUserSchema, // mapped JSON keys
-    .responseSchema = UserSchema,
 });
 
 // Raw handler route: same verb, no schema derivation.
-try app.get("/health", .{ .handler = healthCheck, .summary = "Liveness" });
+try server.get("/health", .{ .handler = healthCheck, .summary = "Liveness" });
 ```
 
 #### Parameters and responses
@@ -370,14 +367,14 @@ explicitly when the contract is wider than the return type:
 | `internal` | `bool` | `false` | Exclude the route from OpenAPI |
 | `mediaType` | `[]const u8` | `application/json; charset=utf-8` | Response media type |
 
-`httpx.rest.schemaOf(T)` (and `schemaOfWith(T, spec)` for mapped keys) returns
-the `*const Schema` that `Param.schema` and `ResponseDesc.schema` require, so
-the same Zig types drive OpenAPI and JSON decoding. Explicit path parameters
-replace synthesized ones for the same name; undeclared path parameters stay
-synthesized from the converter.
+`httpx.rest.schemaOf(T)` returns the `*const Schema` that `Param.schema` and
+`ResponseDesc.schema` require, so the same Zig types drive OpenAPI and JSON
+decoding. Struct fields use their exact names (quoted identifiers included).
+Explicit path parameters replace synthesized ones for the same name; undeclared
+path parameters stay synthesized from the converter.
 
 ```zig
-try app.get("/users/{id:int}", .{
+try server.get("/users/{id:int}", .{
     .handler = getUser,
     .params = &.{
         .{ .name = "id", .in = .path, .required = true, .schema = httpx.rest.schemaOf(u64) },
@@ -398,7 +395,7 @@ handler without a request parameter is a compile error.
 #### Results: `Schema(T).result(.{ ... })`
 
 ```zig
-fn createUser(ctx: *httpx.Context, req: CreateUser) !httpx.Schema(User) {
+fn createUser(ctx: *httpx.router.Context, req: CreateUser) !httpx.Schema(User) {
     _ = ctx;
     return httpx.Schema(User).result(.{
         .status = .created,
@@ -431,30 +428,29 @@ JSON envelope `{"error": ..., "status": ...}`.
 #### Keys that are not Zig identifiers
 
 JSON keys are arbitrary strings and are preserved exactly — nothing in the
-library restricts them to Zig identifier rules. Bind a declarative schema:
+library restricts them to Zig identifier rules. Declare them as quoted fields:
 
 ```zig
-const CreateUserSchema = httpx.json.Schema(CreateUser, .{
-    .user_name = "user-name",
-    .context = .{ .name = "@context" },
-});
-const UserSchema = httpx.json.Schema(User, .{
-    .user_name = "user-name",
-    .context = .{ .name = "@context" },
-});
+const CreateUser = struct {
+    @"user-name": []const u8,
+    @"@context": []const u8,
+};
+const User = struct {
+    id: u64,
+    @"user-name": []const u8,
+    @"@context": []const u8,
+};
 
-try app.post("/users", .{
+try server.post("/users", .{
     .handler = createUser, // fn (ctx, CreateUser) !httpx.Schema(User)
-    .requestSchema = CreateUserSchema,
-    .responseSchema = UserSchema,
 });
 ```
 
-Requests are decoded with the wire names, responses are encoded with them, and
-the OpenAPI document lists the wire names. For shapes that are not known ahead
-of time use `std.json.Value` or `httpx.json.Object` and read keys dynamically
+Requests are decoded with those exact names, responses are encoded with them,
+and the OpenAPI document lists them. For shapes that are not known ahead of
+time use `std.json.Value` or `httpx.json.Object` and read keys dynamically
 (`.get("user-name")`, `.getIgnoreCase("content-type")`). See
-[JSON schemas](/api/data#json-schemas) for the complete mapping API.
+[JSON typed structs](/api/data#typed-structs).
 
 ### Quick Example
 
@@ -676,3 +672,4 @@ fn handler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
 - [Router API](router.md) - Advanced routing
 - [Protocol API](protocol.md) - HTTP/2, HTTP/3
 - [Server Guide](/guide/getting-started) - Usage guide
+

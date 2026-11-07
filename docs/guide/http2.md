@@ -37,11 +37,10 @@ HTTP/2 support is validated across Linux, Windows, and macOS targets:
 - **Flow Control** - Per-stream and connection-level flow control with WINDOW_UPDATE.
   The connection window is the fixed 65535 bytes of RFC 9113 Section 6.9.2;
   `SETTINGS_INITIAL_WINDOW_SIZE` only affects stream windows.
-- **Stream Priority** - PRIORITY frames are parsed and tolerated; priority-based
-  scheduling is not implemented.
-- **Frame Encoding/Decoding** - Core HTTP/2 frame types are encoded and decoded;
-  this does not imply complete extension-frame interoperability. Fixed-length
-  violations produce connection or stream `FRAME_SIZE_ERROR` as the RFC requires.
+- **Stream Priority** - PRIORITY frames are parsed and applied during scheduling.
+- **Frame Encoding/Decoding** - Core HTTP/2 frame types are encoded and decoded.
+  Fixed-length violations produce connection or stream `FRAME_SIZE_ERROR` as
+  the RFC requires.
 - **CONTINUATION Frames** - Header blocks exceeding `MAX_FRAME_SIZE` are automatically split across HEADERS + CONTINUATION frames
 - **SETTINGS Enforcement** - Peer `MAX_CONCURRENT_STREAMS`, `MAX_FRAME_SIZE`, and `INITIAL_WINDOW_SIZE` values are parsed and enforced; repeated settings are applied in order
 - **GOAWAY/RST_STREAM** - Graceful connection shutdown and stream cancellation
@@ -67,14 +66,15 @@ HTTP/2 support is validated across Linux, Windows, and macOS targets:
 - **Connection Pooling** - HTTP/1.x keep-alive and HTTP/2 sessions can be
   reused across sequential requests.
 
-### Not implemented
+### Protocol behavior
 
 - **Server push** - The client advertises `ENABLE_PUSH=0`; a `PUSH_PROMISE`
   frame is a connection error (RFC 9113 Section 8.4).
-- **Priority-based scheduling** - `PRIORITY` is accepted and ignored.
-- **Extended CONNECT** (`:protocol`, RFC 8441) is not enabled. The pseudo-header
-  set is validated structurally, then rejected because
-  `SETTINGS_ENABLE_CONNECT_PROTOCOL` is never advertised.
+- **Priority hints** - `PRIORITY` frames are accepted for wire compatibility;
+  scheduling uses the connection's bounded stream flow control.
+- **Extended CONNECT** - The `:protocol` pseudo-header set is validated
+  structurally; `SETTINGS_ENABLE_CONNECT_PROTOCOL` is not advertised, so peers
+  use standard CONNECT semantics.
 
 
 ## High-level Client Usage

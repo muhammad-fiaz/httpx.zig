@@ -25,6 +25,7 @@ const hpackMod = @import("hpack.zig");
 const streamMod = @import("stream.zig");
 const http1Semantics = @import("../http1/semantics.zig");
 const parseMod = @import("../../common/parse.zig");
+const versionInfo = @import("../../common/version.zig");
 
 const FrameHeader = frameMod.FrameHeader;
 const FrameType = frameMod.FrameType;
@@ -2764,7 +2765,7 @@ test "outgoing header names are lowercased and hop-by-hop fields dropped" {
         .{ .name = ":scheme", .value = "https" },
         .{ .name = ":path", .value = "/" },
         .{ .name = ":authority", .value = "example.test" },
-        .{ .name = "User-Agent", .value = "httpx" },
+        .{ .name = "User-Agent", .value = versionInfo.userAgent },
         .{ .name = "Connection", .value = "close" },
     };
     try client.sendHeaders(1, &fields, true);

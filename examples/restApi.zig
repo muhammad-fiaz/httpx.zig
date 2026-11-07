@@ -2,10 +2,11 @@
 //!
 //! Demonstrates the whole explicit surface:
 //!
-//! * lowercase verb registration — `app.post("/users", .{ .handler, … })`
+//! * lowercase verb registration — `server.post("/users", .{ .handler, … })`
 //! * `httpx.Schema(T).result(.{ .status, .body })` responses
 //! * Single-document JSON media types on input (standard and any valid `+json` type)
-//! * JSON keys that are not valid Zig identifiers via a `.names` map
+//! * JSON keys that are not valid Zig identifiers via quoted identifiers
+//!   (`@"user-name"`, `@"@contact"`)
 //! * raw `HandlerFn` routes through the same lowercase verbs
 //! * Swagger UI / ReDoc / Scalar / OpenAPI 3.1 output
 
@@ -33,18 +34,11 @@ const MessageResponse = struct {
     message: []const u8,
 };
 
-/// Wire keys that are not valid Zig identifiers.
-const wireNames = .{
-    .user_name = "user-name",
-    .contact = "@contact",
-};
-
+/// Wire keys that are not valid Zig identifiers are written as quoted fields.
 const UserWire = struct {
-    user_name: []const u8,
-    contact: []const u8,
+    @"user-name": []const u8,
+    @"@contact": []const u8,
 };
-
-const UserWireSchema = httpx.json.Schema(UserWire, wireNames);
 
 // Handlers: (ctx) or (ctx, body) -> !httpx.Schema(T)
 
@@ -72,7 +66,7 @@ fn ping(_: *httpx.router.Context) !httpx.Schema(MessageResponse) {
 fn updateUser(_: *httpx.router.Context, req: UserWire) !httpx.Schema(UserWire) {
     return httpx.Schema(UserWire).result(.{
         .status = .accepted,
-        .body = .{ .user_name = req.user_name, .contact = req.contact },
+        .body = .{ .@"user-name" = req.@"user-name", .@"@contact" = req.@"@contact" },
     });
 }
 
@@ -97,14 +91,17 @@ pub fn main() !void {
 
     std.debug.print("=== HTTPX typed REST + OpenAPI demo ===\n", .{});
 
-    var app = try httpx.App.init(allocator, io, .{
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0,
         .enableDocs = false, // documentation is mounted explicitly below
     });
-    defer app.deinit();
+    defer server.deinit();
 
-    try app.post("/users", .{
+    var client = httpx.Client.init(allocator, io, .{ .timeoutMs = 10_000 });
+    defer client.deinit();
+
+    try server.post("/users", .{
         .handler = createUser,
         .operationId = "createUser",
         .summary = "Create a new user",
@@ -112,7 +109,7 @@ pub fn main() !void {
         .request = .{ .content = .json, .description = "User to create", .required = true },
     });
 
-    try app.get("/users/{id:int}", .{
+    try server.get("/users/{id:int}", .{
         .handler = getUser,
         .operationId = "getUser",
         .summary = "Retrieve a user by ID",
@@ -130,22 +127,21 @@ pub fn main() !void {
         },
     });
 
-    try app.put("/users/{id:int}", .{
+    try server.put("/users/{id:int}", .{
         .handler = updateUser,
         .operationId = "updateUser",
         .summary = "Update a user (wire keys: user-name, @contact)",
         .tags = &.{"users"},
-        .schema = UserWireSchema,
     });
 
-    try app.delete("/users/{id:int}", .{
+    try server.delete("/users/{id:int}", .{
         .handler = deleteUser,
         .operationId = "deleteUser",
         .summary = "Delete a user",
         .tags = &.{"users"},
     });
 
-    try app.get("/ping", .{
+    try server.get("/ping", .{
         .handler = ping,
         .operationId = "ping",
         .summary = "Service health ping",
@@ -153,13 +149,13 @@ pub fn main() !void {
     });
 
     // Raw handler route: same lowercase verb, no typed schema derivation.
-    try app.get("/raw/health", .{
+    try server.get("/raw/health", .{
         .handler = rawHealth,
         .summary = "Raw handler route",
         .tags = &.{"system"},
     });
 
-    try app.docs(.{
+    try server.docs(.{
         .title = "HTTPX Typed REST API",
         .version = "1.0.0",
         .description = "Explicit, typed REST endpoints with automated OpenAPI 3.1 documentation.",
@@ -170,7 +166,7 @@ pub fn main() !void {
         .graphiql = .{ .enabled = false },
     });
 
-    const port = app.localPort();
+    const port = server.localPort();
     std.debug.print("listening on http://127.0.0.1:{d}\n", .{port});
     std.debug.print("  OpenAPI: http://127.0.0.1:{d}/openapi.json\n", .{port});
     std.debug.print("  Swagger: http://127.0.0.1:{d}/docs\n", .{port});
@@ -178,24 +174,18 @@ pub fn main() !void {
     std.debug.print("  Scalar:  http://127.0.0.1:{d}/scalar\n", .{port});
 
     const Runner = struct {
-        fn run(application: *httpx.App) void {
-            application.listen() catch |err| {
-                std.debug.print("server stopped: {s}\n", .{@errorName(err)});
-            };
+        fn run(s: *httpx.Server) void {
+            s.run();
         }
     };
-    const thread = try std.Thread.spawn(.{}, Runner.run, .{&app});
-
-    // The App already owns a client built from the same allocator and io, so
-    // the demo reuses it instead of creating a second one.
-    const client = &app.client;
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&server});
 
     var urlBuf: [160]u8 = undefined;
 
     // 1. Typed struct body -> 201 Created.
     const postUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/users", .{port});
     var postResp = try client.post(postUrl, .{
-        .json = CreateUserRequest{ .name = "Example Developer", .email = "dev@example.com" },
+        .json = .{ .name = "Example Developer", .email = "dev@example.com" },
     });
     defer postResp.deinit();
     std.debug.print("POST /users -> {d} {s}\n", .{ postResp.status, postResp.body });
@@ -207,7 +197,7 @@ pub fn main() !void {
     const user = try getResp.json(UserResponse);
     std.debug.print("GET /users/42 -> id={d} name={s}\n", .{ user.id, user.name });
 
-    // 3. Renamed JSON keys plus a vendor JSON media type on input.
+    // 3. Quoted-identifier JSON keys plus a vendor JSON media type on input.
     const putUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/users/42", .{port});
     var putResp = try client.put(putUrl, .{
         .body = "{\"user-name\":\"hari\",\"@contact\":\"hari@example.com\"}",
@@ -240,13 +230,13 @@ pub fn main() !void {
     const specUrl = try std.fmt.bufPrint(&urlBuf, "http://127.0.0.1:{d}/openapi.json", .{port});
     var specResp = try client.get(specUrl, .{});
     defer specResp.deinit();
-    std.debug.print("GET /openapi.json -> {d} ({d} bytes, renamed key documented: {})\n", .{
+    std.debug.print("GET /openapi.json -> {d} ({d} bytes, quoted key documented: {})\n", .{
         specResp.status,
         specResp.body.len,
         std.mem.indexOf(u8, specResp.body, "user-name") != null,
     });
 
-    app.requestShutdown();
+    server.requestShutdown();
     thread.join();
 
     std.debug.print("=== demo completed ===\n", .{});

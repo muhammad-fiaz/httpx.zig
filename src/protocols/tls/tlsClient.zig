@@ -658,8 +658,7 @@ pub const Client = struct {
         defer engine.deinit();
 
         // SNI only for DNS names; IP literals carry none.
-        var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-        const sni: ?[]const u8 = if (probe.parseIp(host)) |_| null else |_| host;
+        const sni: ?[]const u8 = if (addressMod.Address.parseIp(host)) |_| null else |_| host;
         const nowMs: u64 = @intCast(clockMod.millisNow(self.io));
 
         // ALPN protocols as wire strings (static storage, no allocation).
@@ -2037,8 +2036,7 @@ test "standard transport uses the owner's configured CA bundle" {
     });
     defer owner.deinit();
 
-    var addr = addressMod.Address{ .family = .ip4, .port = 0 };
-    addr = try addr.parseIp("127.0.0.1");
+    var addr = try addressMod.Address.parseIp("127.0.0.1");
     addr.port = port;
     var sock = try tcp.connectAddressStream(ctx.io, &addr);
     defer sock.close();

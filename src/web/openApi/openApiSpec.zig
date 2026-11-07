@@ -355,6 +355,11 @@ fn writeBareResponse(j: *std.json.Stringify, status: []const u8, description: []
 
 fn writeSchema(j: *std.json.Stringify, s: *const metaMod.Schema) !void {
     switch (s.*) {
+        .any => {
+            // The empty schema accepts any JSON value (OpenAPI 3.1 / JSON Schema).
+            try j.beginObject();
+            try j.endObject();
+        },
         .string, .integer, .number, .boolean => {
             try j.beginObject();
             try j.objectField("type");

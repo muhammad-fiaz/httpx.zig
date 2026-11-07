@@ -168,46 +168,55 @@ Configured via authoritative `httpx.router.TrailingSlash`:
 
 Shared across code-based routing, file-based routing, and website serving.
 
-## Typed REST Endpoints with `App`
+## Typed REST Endpoints with `Server`
 
-`httpx.App` registers routes with the path first and an optional `.{}` options
+`httpx.Server` registers routes with the path first and an optional `.{}` options
 literal second. Typed handlers return `httpx.Schema(T)`; raw handlers return
-`httpx.Response` and use the same verbs and metadata fields:
+`httpx.router.Response` and use the same verbs and metadata fields:
 
 ```zig
-var app = try httpx.App.init(allocator, io, .{ .port = 8080 });
-defer app.deinit();
+var server = try httpx.Server.init(allocator, io, .{ .port = 8080 });
+defer server.deinit();
 
-try app.get("/users/{id:int}", .{ .handler = getUser, .summary = "Get user by ID", .tags = &.{"users"} });
-try app.post("/users", .{ .handler = createUser, .summary = "Create user", .tags = &.{"users"} });
-try app.put("/users/{id:int}", .{ .handler = updateUser, .schema = UserSchema }); // mapped JSON keys
-try app.delete("/users/{id:int}", .{ .handler = deleteUser });
+try server.get("/users/{id:int}", .{ .handler = getUser, .summary = "Get user by ID", .tags = &.{"users"} });
+try server.post("/users", .{ .handler = createUser, .summary = "Create user", .tags = &.{"users"} });
+try server.put("/users/{id:int}", .{ .handler = updateUser }); // quoted JSON keys live on the struct
+try server.delete("/users/{id:int}", .{ .handler = deleteUser });
 
 // Raw handler: same lowercase verbs, no schema derivation.
-try app.get("/health", .{ .handler = healthCheck, .summary = "Liveness" });
-try app.use(httpx.middleware.cors);
+try server.get("/health", .{ .handler = healthCheck, .summary = "Liveness" });
+try server.use(httpx.middleware.cors);
 
-try app.listen();
+server.run();
 ```
 
 Handler signatures are `(*Context)` or `(*Context, RequestType)`, returning
 `!httpx.Schema(T)`:
 
 ```zig
-const UserSchema = httpx.json.Schema(User, .{
-    .user_name = "user-name",
-    .context = .{ .name = "@context" },
-});
+const User = struct {
+    id: u64,
+    @"user-name": []const u8,
+    @"@context": []const u8,
+};
 
-fn getUser(ctx: *httpx.Context) !httpx.Schema(UserResponse) {
+fn getUser(ctx: *httpx.router.Context) !httpx.Schema(User) {
     const id = ctx.paramUint("id") orelse return error.BadRequest;
-    return httpx.Schema(UserResponse).ok(.{ .id = id, .name = "alice" });
+    return httpx.Schema(User).ok(.{
+        .id = id,
+        .@"user-name" = "alice",
+        .@"@context" = "https://schema.org",
+    });
 }
 
-fn createUser(_: *httpx.Context, body: CreateUserRequest) !httpx.Schema(UserResponse) {
-    return httpx.Schema(UserResponse).result(.{
+fn createUser(_: *httpx.router.Context, body: CreateUserRequest) !httpx.Schema(User) {
+    return httpx.Schema(User).result(.{
         .status = .created,
-        .body = .{ .id = 101, .name = body.name },
+        .body = .{
+            .id = 101,
+            .@"user-name" = body.name,
+            .@"@context" = "https://schema.org",
+        },
     });
 }
 ```
@@ -215,7 +224,7 @@ fn createUser(_: *httpx.Context, body: CreateUserRequest) !httpx.Schema(UserResp
 Every option is optional; only what you state is used:
 
 ```zig
-.{ .path = "/users", .handler = createUser, .operationId = "createUser",
+.{ .handler = createUser, .operationId = "createUser",
    .summary = "...", .description = "...", .tags = &.{"users"},
    .deprecated = false, .security = &.{},
    .params = &.{
@@ -223,21 +232,18 @@ Every option is optional; only what you state is used:
        .{ .name = "expand", .in = .query, .schema = httpx.rest.schemaOf(bool) },
    },
    .responses = &.{
-       .{ .status = 200, .description = "User found", .schema = httpx.rest.schemaOf(UserResponse) },
+       .{ .status = 200, .description = "User found", .schema = httpx.rest.schemaOf(User) },
        .{ .status = 404, .description = "User not found" },
    },
    .request = .{ .content = .json, .description = "User payload" },
    .internal = false,
-   .mediaType = "application/vnd.api+json",
-   .requestSchema = CreateUserSchema, .responseSchema = UserSchema }
+   .mediaType = "application/vnd.api+json" }
 ```
 
-`.requestSchema` and `.responseSchema` map Zig fields to JSON wire keys, so
-`user-name`, `@context`, `Content-Type`, or `123user` work on typed structs and
-responses are encoded with the same keys. Use the shared `.schema` shorthand
-when the request and response types are identical. See
-[JSON schemas](/api/data#json-schemas) for aliases, emit policies, nested
-schemas, and dynamic values.
+JSON keys that are not Zig identifiers are declared with quoted identifiers on
+the request and response structs, so `user-name`, `@context`, `Content-Type`,
+and `123user` are decoded and encoded directly. See
+[JSON typed structs](/api/data#typed-structs) for details.
 
 ## OpenAPI
 
@@ -251,3 +257,4 @@ response derived from the return type, `.request` documents the JSON body, and
 
 WebSocket (`/ws/{roomId}`) and SSE endpoints are plain router routes —
 no separate routing engine exists.
+

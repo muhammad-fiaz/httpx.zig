@@ -35,13 +35,8 @@ pub const Type = schemaMod.Type;
 pub const Query = schemaMod.Query;
 pub const Mutation = schemaMod.Mutation;
 
-/// GraphQL-over-HTTP request payload.
-pub const RequestPayload = struct {
-    query: []const u8 = "",
-    variables: ?std.json.Value = null,
-    operationName: ?[]const u8 = null,
-};
-
+/// GraphQL-over-HTTP request payload. Parsed dynamically from the document so
+/// arbitrary JSON keys in `variables` are preserved exactly.
 pub const HandlerConfig = struct {
     /// Route the endpoint is mounted on.
     endpoint: []const u8 = "/graphql",

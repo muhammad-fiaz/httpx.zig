@@ -7,11 +7,12 @@ in-flight cryptographic hashing, and progress reporting.
 
 | Type | Purpose |
 |---|---|
-| `httpx.client.Downloader` | Download engine bound to client and allocator |
-| `httpx.client.DownloadResult` | Metrics and outcome of a completed download |
-| `httpx.client.DownloadTask` | Task descriptor (`url`, `dest`) |
-| `httpx.client.DownloadError` | Download failure modes |
-| `httpx.client.RemoteFileInfo` | Remote file metadata |
+| `httpx.client.download.Result` | Metrics and outcome of a completed download |
+| `httpx.client.download.Task` | Task descriptor (`url`, `dest`) |
+| `httpx.client.download.Error` | Download failure modes |
+| `httpx.client.download.FileInfo` | Remote file metadata |
+| `httpx.client.download.parseChecksumFile` | Parse a checksum manifest into an expected hash |
+| `httpx.client.download.verifyFile` | Verify a local file against checksum options |
 
 ## Single and Concurrent Downloads
 

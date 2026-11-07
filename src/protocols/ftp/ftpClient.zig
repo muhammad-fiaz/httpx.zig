@@ -249,8 +249,7 @@ pub const Client = struct {
 
         // Connect by attempting IP literal parsing first, then falling back to hostname resolution
         var sock: ?tcp.Socket = null;
-        var holder = addressMod.Address{ .family = .ip4, .port = 0 };
-        if (holder.parseIp(opts.host)) |addr| {
+        if (addressMod.Address.parseIp(opts.host)) |addr| {
             var a = addr;
             a.port = opts.port;
             sock = tcp.connectAddress(io, &a) catch null;
@@ -592,8 +591,7 @@ pub const Client = struct {
 
     fn dataTo(self: *Client, port: u16) FtpError!tcp.Socket {
         const host = self.hostCopy[0..self.hostLen];
-        var holder = addressMod.Address{ .family = .ip4, .port = 0 };
-        if (holder.parseIp(host)) |addr| {
+        if (addressMod.Address.parseIp(host)) |addr| {
             var a = addr;
             a.port = port;
             return tcp.connectAddress(self.ctrl.io, &a) catch FtpError.ConnectFailed;
@@ -614,8 +612,7 @@ pub const Client = struct {
     fn dataToPasv(self: *Client, ip: [4]u8, port: u16) FtpError!tcp.Socket {
         var text: [15]u8 = undefined;
         const host = std.fmt.bufPrint(&text, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] }) catch return FtpError.MalformedPasv;
-        var base = addressMod.Address{ .family = .ip4, .port = 0 };
-        var addr = base.parseIp(host) catch return FtpError.MalformedPasv;
+        var addr = addressMod.Address.parseIp(host) catch return FtpError.MalformedPasv;
         addr.port = port;
         return tcp.connectAddress(self.ctrl.io, &addr) catch FtpError.ConnectFailed;
     }

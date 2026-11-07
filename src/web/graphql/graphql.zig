@@ -7,13 +7,13 @@
 //! - HTTP Endpoint & Handler (server.zig)
 //! - GraphiQL 6.0.0 UI integration via `httpx.docs` or `httpx.graphql.mount`
 //!
-//! Types are schema-based and struct-driven, like `httpx.json.Schema` and
-//! `httpx.Schema(T)`: name a Zig struct, list fields with scalar kinds
-//! (`.id`, `.name = .string`), and bind typed resolvers. Object, enum, input
-//! object, interface, and union types are all declared explicitly, and every
-//! one of them reaches introspection so GraphiQL / ReDoc / Scalar render the
-//! complete schema. `Object(...)` is the string-named counterpart of `Type(...)`
-//! for schemas assembled from external type names.
+//! Types are spec-driven: list every field explicitly with a scalar kind
+//! (`Scalar.id`, `Scalar.string`, …) or a declared object, enum, interface, or
+//! union type, and bind typed resolvers. Object, enum, input object, interface,
+//! and union types are all declared explicitly, and every one of them reaches
+//! introspection so GraphiQL / ReDoc / Scalar render the complete schema.
+//! `Object(...)` is the string-named counterpart of `Type(...)` for schemas
+//! assembled from external type names.
 //!
 //! Client-side decoding is typed too: a string query goes out through
 //! `Client.graphql`, and the response is read with
@@ -34,8 +34,8 @@ pub const Context = schema.Context;
 /// Scalar kinds for field specs: `httpx.graphql.Scalar.string`,
 /// `Scalar.int`, `Scalar.float`, `Scalar.boolean`, `Scalar.id`.
 pub const Scalar = schema.Scalar;
-/// `Type(User, .{ .id = .id, .name = .string })` — an object type from a
-/// named Zig struct.
+/// `Type("User", .{ .id = Scalar.id, .name = Scalar.string })` — an object type
+/// declared from an explicit field spec.
 pub const Type = schema.Type;
 /// Root `Query` object from a resolver spec.
 pub const Query = schema.Query;

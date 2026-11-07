@@ -26,8 +26,9 @@ const Context = routerMod.Context;
 const Response = routerMod.Response;
 const Method = @import("../common/method.zig").Method;
 const mediaTypeMod = @import("../common/mediaType.zig");
-const docs = @import("../web/docs/docs.zig");
+const docsMod = @import("../web/docs/docs.zig");
 const restMod = @import("../web/rest/api.zig");
+const metaMod = @import("../web/router/routeMetadata.zig");
 const graphqlServerMod = @import("../web/graphql/graphQlServer.zig");
 const httpVersion = @import("../common/httpVersion.zig");
 pub const HttpVersion = httpVersion.HttpVersion;
@@ -53,6 +54,48 @@ const http3Qpack = @import("../protocols/http3/qpack.zig");
 const versionInfo = @import("../common/version.zig");
 
 pub const maxHeadBytes = 32 * 1024;
+
+/// True when `handler` returns `!httpx.Schema(T)` (typed REST) rather than a
+/// raw `!httpx.router.Response`.
+fn isTypedHandler(comptime handler: anytype) bool {
+    const HandlerType = @TypeOf(handler);
+    const handlerInfo = @typeInfo(HandlerType);
+    if (handlerInfo != .@"fn") return false;
+    const returnType = handlerInfo.@"fn".return_type orelse return false;
+    const returnInfo = @typeInfo(returnType);
+    if (returnInfo != .error_union) return false;
+    const payload = returnInfo.error_union.payload;
+    if (@typeInfo(payload) != .@"struct") return false;
+    return @hasDecl(payload, "ResponseBody") and @hasField(payload, "body");
+}
+
+/// Converts a raw-route struct literal into router options. Unknown fields are
+/// a compile error so typos surface at build time instead of silently doing
+/// nothing.
+fn rawRouteOptions(comptime arg: anytype) routerMod.RouteOptions {
+    const ArgType = @TypeOf(arg);
+    const info = @typeInfo(ArgType);
+    if (info != .@"struct") return .{};
+
+    var out: routerMod.RouteOptions = .{};
+    inline for (info.@"struct".field_names) |fname| {
+        if (comptime std.mem.eql(u8, fname, "handler")) continue;
+        if (comptime std.mem.eql(u8, fname, "path")) {
+            @compileError("route: pass the path as the second argument, not `.path`");
+        }
+        if (comptime std.mem.eql(u8, fname, "mediaType")) {
+            @compileError("route: `.mediaType` is only valid for typed `httpx.Schema(T)` handlers");
+        }
+        if (@hasField(metaMod.Metadata, fname)) {
+            @field(out.meta, fname) = @field(arg, fname);
+        } else if (@hasField(routerMod.RouteOptions, fname)) {
+            @field(out, fname) = @field(arg, fname);
+        } else {
+            @compileError("unknown route option `." ++ fname ++ "`");
+        }
+    }
+    return out;
+}
 
 /// Unified abstraction over plain TCP sockets and encrypted TLS server connections.
 pub const StreamConn = union(enum) {
@@ -181,8 +224,7 @@ pub const Config = struct {
     /// Mount /openapi.json, /docs (Swagger UI), /redoc by default.
     enableDocs: bool = true,
     /// Overrides for docs routes when enabled.
-    docs: ?docs.Config = null,
-    docsTitle: []const u8 = versionInfo.defaultInfo.title,
+    docs: ?docsMod.Config = null,
     logging: LoggingOptions = .{},
     /// HTTP/1.1 persistent connections: honor keep-alive, serve multiple
     /// requests per connection (bounded by maxRequestsPerConn).
@@ -558,8 +600,7 @@ pub const Server = struct {
         var addr: addressMod.Address = blk: {
             if (std.mem.eql(u8, cfg.host, "0.0.0.0")) break :blk addressMod.Address.unspecified4(cfg.port);
             if (std.mem.eql(u8, cfg.host, "::")) break :blk addressMod.Address.unspecified6(cfg.port);
-            var tmp: addressMod.Address = undefined;
-            break :blk tmp.parseIp(cfg.host) catch addressMod.Address.unspecified4(cfg.port);
+            break :blk addressMod.Address.parseIp(cfg.host) catch addressMod.Address.unspecified4(cfg.port);
         };
         addr.port = cfg.port;
 
@@ -779,37 +820,70 @@ pub const Server = struct {
         return srv;
     }
 
-    pub fn get(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) routerMod.RouteError!void {
-        try self.router.get(path, handler, .{});
+    /// Registers a GET route.
+    ///
+    /// The handler's return type selects typed REST (`!httpx.Schema(T)`) or a
+    /// raw router response (`!httpx.router.Response`) at compile time. Both a bare
+    /// handler and a `.{}` options literal are accepted.
+    pub fn get(self: *Server, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.GET, path, arg);
     }
 
-    pub fn post(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) routerMod.RouteError!void {
-        try self.router.post(path, handler, .{});
+    /// Registers a POST route. See [`get`] for the accepted forms.
+    pub fn post(self: *Server, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.POST, path, arg);
     }
 
-    pub fn put(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) routerMod.RouteError!void {
-        try self.router.put(path, handler, .{});
+    /// Registers a PUT route. See [`get`] for the accepted forms.
+    pub fn put(self: *Server, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.PUT, path, arg);
     }
 
-    pub fn patch(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) routerMod.RouteError!void {
-        try self.router.patch(path, handler, .{});
+    /// Registers a PATCH route. See [`get`] for the accepted forms.
+    pub fn patch(self: *Server, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.PATCH, path, arg);
     }
 
-    pub fn delete(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) routerMod.RouteError!void {
-        try self.router.delete(path, handler, .{});
+    /// Registers a DELETE route. See [`get`] for the accepted forms.
+    pub fn delete(self: *Server, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.DELETE, path, arg);
     }
 
-    pub fn head(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) routerMod.RouteError!void {
-        try self.router.head(path, handler, .{});
+    /// Registers a HEAD route. See [`get`] for the accepted forms.
+    pub fn head(self: *Server, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.HEAD, path, arg);
     }
 
-    pub fn options(self: *Server, path: []const u8, handler: *const fn (*Context) anyerror!Response) routerMod.RouteError!void {
-        try self.router.options(path, handler, .{});
+    /// Registers an OPTIONS route. See [`get`] for the accepted forms.
+    pub fn options(self: *Server, path: []const u8, comptime arg: anytype) !void {
+        try self.register(.OPTIONS, path, arg);
     }
 
-    /// Registers a route with an arbitrary HTTP method.
-    pub fn add(self: *Server, method: Method, path: []const u8, handler: *const fn (*Context) anyerror!Response) routerMod.RouteError!void {
-        try self.router.add(method, path, handler, .{});
+    /// Registers a route for an arbitrary HTTP method. See [`get`].
+    pub fn add(self: *Server, comptime method: Method, path: []const u8, comptime arg: anytype) !void {
+        try self.register(method, path, arg);
+    }
+
+    /// Shared typed/raw dispatch. The handler's return type decides which
+    /// registration path is used; there is no separate capitalized API and no
+    /// duplicated wrapper.
+    fn register(self: *Server, comptime method: Method, path: []const u8, comptime arg: anytype) !void {
+        const ArgType = @TypeOf(arg);
+        const argInfo = @typeInfo(ArgType);
+        const isBareFn = argInfo == .@"fn" or
+            (argInfo == .pointer and @typeInfo(argInfo.pointer.child) == .@"fn");
+        const isOptions = argInfo == .@"struct" and @hasField(ArgType, "handler");
+        if (comptime !isBareFn and !isOptions) {
+            @compileError("route registration expects a handler function or a struct literal with `.handler`");
+        }
+
+        const handler = comptime if (isBareFn) arg else arg.handler;
+        if (comptime isTypedHandler(handler)) {
+            var typed = self.rest();
+            try typed.add(method, path, arg);
+        } else {
+            try self.router.add(method, path, handler, rawRouteOptions(arg));
+        }
     }
 
     /// Creates a prefixed route group on the server router.
@@ -962,7 +1036,7 @@ pub const Server = struct {
             graphqlServerMod.unmount(&self.router, self.graphqlCfg);
             self.graphqlMounted = false;
         }
-        if (self.docsMounted) docs.unmountRouter(&self.router);
+        if (self.docsMounted) docsMod.unmountRouter(&self.router);
         self.router.deinit();
         self.listener.close(self.io);
         self.activeConns.deinit(self.allocator);
@@ -985,6 +1059,33 @@ pub const Server = struct {
     /// ```
     pub fn rest(self: *Server) restMod.Rest {
         return restMod.Rest.init(self.allocator, self.io, &self.router);
+    }
+
+    /// Mounts the documentation UIs and the OpenAPI document on this server.
+    ///
+    /// The server owns the mount and removes it in `deinit`. Calling this
+    /// explicitly suppresses the zero-config mount performed by `run` when
+    /// `Config.enableDocs` is true, so a customized configuration is never
+    /// replaced by the defaults.
+    ///
+    /// ```zig
+    /// try server.docs(.{
+    ///     .title = "Orders API",
+    ///     .version = "1.0.0",
+    ///     .swagger = .{ .route = "/docs" },
+    ///     .redoc = .{ .route = "/redoc" },
+    ///     .scalar = .{ .route = "/scalar" },
+    /// });
+    /// ```
+    pub fn docs(self: *Server, cfg: anytype) !void {
+        if (self.docsMounted) return error.DocsAlreadyMounted;
+        const docsCfg = configCoerce.to(docsMod.Config, cfg);
+        try docsMod.mount(self.allocator, &self.router, docsCfg, .{
+            .title = docsCfg.title,
+            .version = docsCfg.version,
+            .description = docsCfg.description,
+        });
+        self.docsMounted = true;
     }
 
     /// Mounts a GraphQL schema at `cfg.endpoint` (POST, GET, OPTIONS).
@@ -1155,11 +1256,8 @@ pub const Server = struct {
         // making any &srv.router pointer taken inside init a dangling pointer.
         if (self.cfg.enableDocs and !self.docsMounted) {
             self.docsMounted = true;
-            const dc = self.cfg.docs orelse docs.Config{};
-            docs.mount(self.allocator, &self.router, dc, .{
-                .title = self.cfg.docsTitle,
-                .version = versionInfo.version,
-            }) catch {};
+            const dc = self.cfg.docs orelse docsMod.Config{};
+            docsMod.mount(self.allocator, &self.router, dc, null) catch {};
         }
 
         // Out-of-the-box watcher and live-reload integration

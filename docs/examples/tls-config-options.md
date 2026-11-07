@@ -37,6 +37,7 @@ var server = try httpx.Server.init(allocator, io, .{
         .allowPlainHttp = false,
     },
 });
+defer server.deinit();
 ```
 
 ## Listener identity (`Identity`)
@@ -49,6 +50,7 @@ var listener = try httpx.tls.Listener.init(allocator, io, .{
         .privateKeyPem = @embedFile("key.pem"),
     },
 });
+defer listener.deinit();
 ```
 
 ## Expected Output

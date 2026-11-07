@@ -9,11 +9,18 @@ pub fn main() !void {
 
     std.debug.print("==> Downloading file over FTP with progress and verification...\n", .{});
 
-    const res = httpx.client.ftpDownload(io, allocator, .{
+    var ftp = httpx.client.ftp.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 21,
         .user = "anonymous",
         .password = "anonymous@",
+    }) catch |err| {
+        std.debug.print("FTP connection handled: {s}\n", .{@errorName(err)});
+        return;
+    };
+    defer ftp.deinit();
+
+    const res = ftp.download(.{
         .remotePath = "/pub/archive.tar.gz",
         .destinationPath = "downloads/archive.tar.gz",
         .progress = .auto,

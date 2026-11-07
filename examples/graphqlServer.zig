@@ -3,9 +3,11 @@
 //! Demonstrates:
 //! - The full type system: objects, enums, input objects, arguments, lists
 //! - Typed resolvers with a shared `httpx.graphql.Context`
-//! - One `httpx.Server.init(allocator, io, …)` owning listener, router, docs
-//! - Typed REST routes through `server.rest()` (no router poking)
+//! - One `httpx.Server.init(allocator, io, …)` owning the listener, router,
+//!   REST controller, and GraphQL mount
+//! - Typed REST routes through `server.get(...)`
 //! - GraphQL mounted with `server.graphql(schema, …)`, torn down by `deinit`
+//! - Every documentation UI from the single `.docs` config, all served offline
 //! - String queries with typed client decoding via `httpx.graphql.Payload(T)`
 
 const std = @import("std");
@@ -95,23 +97,14 @@ const QueryRoot = httpx.graphql.Query(.{
     },
 });
 
-// A typed REST endpoint next to GraphQL: `httpx.Schema(T)` results plus a key
-// map, so wire keys that are not Zig identifiers work here too.
+// Typed REST endpoint next to GraphQL. Field names are the exact JSON keys.
 const StatusResponse = struct {
-    server_name: []const u8,
-    uptime_s: u64,
+    @"server-name": []const u8,
+    @"uptime-seconds": u64,
 };
 
-const StatusSchema = httpx.json.Schema(StatusResponse, .{
-    .server_name = "server-name",
-    .uptime_s = "uptime-seconds",
-});
-
 fn statusHandler(_: *httpx.router.Context) !httpx.Schema(StatusResponse) {
-    return httpx.Schema(StatusResponse).ok(.{
-        .server_name = httpx.name,
-        .uptime_s = 42,
-    });
+    return httpx.Schema(StatusResponse).ok(.{ .@"server-name" = httpx.name, .@"uptime-seconds" = 42 });
 }
 
 fn helloHandler(ctx: *httpx.router.Context) anyerror!httpx.router.Response {
@@ -159,14 +152,12 @@ pub fn main() !void {
     // Raw route on the same server.
     try server.get("/", helloHandler);
 
-    // Typed REST route (auto-documented, renamed JSON keys). The controller
-    // reuses the server's allocator and io instead of being handed a router.
-    var rest = server.rest();
-    try rest.get("/api/status", .{
+    // Typed REST route (auto-documented, quoted JSON keys). The server's own
+    // typed/raw dispatch reuses its allocator and io.
+    try server.get("/api/status", .{
         .handler = statusHandler,
         .summary = "Typed status report",
         .tags = &.{"system"},
-        .schema = StatusSchema,
     });
 
     // GraphQL schema and endpoint. Every declared type reaches introspection,
@@ -177,7 +168,7 @@ pub fn main() !void {
         .types = &.{UserType},
         .enums = &.{RoleEnum},
         .inputs = &.{UserFilter},
-        .enableIntrospection = true,
+        .introspection = true,
     });
     try server.graphql(schema, .{ .endpoint = graphqlEndpoint });
 

@@ -11,7 +11,7 @@
 //! const CreateUser = struct { name: []const u8, email: []const u8 };
 //! const User = struct { id: u64, name: []const u8, email: []const u8 };
 //!
-//! fn createUser(ctx: *httpx.Context, req: CreateUser) !httpx.Schema(User) {
+//! fn createUser(ctx: *httpx.router.Context, req: CreateUser) !httpx.Schema(User) {
 //!     _ = ctx;
 //!     return httpx.Schema(User).result(.{
 //!         .status = .created,
@@ -40,22 +40,22 @@
 //!
 //! ## Keys that are not Zig identifiers
 //!
-//! JSON keys are arbitrary strings. Attach declarative schemas and both the
-//! decoder and the OpenAPI document use the wire names:
+//! JSON keys are arbitrary strings. Use Zig quoted identifiers so the decoder
+//! and the OpenAPI document use the wire names directly:
 //!
 //! ```zig
-//! const CreateUserSchema = httpx.json.Schema(CreateUser, .{
-//!     .user_name = "user-name",
-//!     .context = .{ .name = "@context" },
-//! });
-//! const UserSchema = httpx.json.Schema(User, .{
-//!     .user_name = "user-name",
-//! });
+//! const CreateUser = struct {
+//!     @"user-name": []const u8,
+//!     @"@context": []const u8,
+//! };
+//! const User = struct {
+//!     id: u64,
+//!     @"user-name": []const u8,
+//! };
 //!
 //! try app.post("/users", .{
 //!     .handler = createUser,
-//!     .requestSchema = CreateUserSchema,
-//!     .responseSchema = UserSchema,
+//!     .summary = "Create a new user",
 //! });
 //! ```
 //!
@@ -96,13 +96,6 @@ pub const RequestBody = metaMod.RequestBody;
 pub fn schemaOf(comptime T: type) *const MetaSchema {
     return &struct {
         const s = typeSchema(T);
-    }.s;
-}
-
-/// `schemaOf` with the same declarative key mapping as `httpx.json.Schema`.
-pub fn schemaOfWith(comptime T: type, comptime spec: anytype) *const MetaSchema {
-    return &struct {
-        const s = typeSchemaWith(T, spec);
     }.s;
 }
 
@@ -260,26 +253,11 @@ fn requestDef(comptime value: anytype) metaMod.RequestBody {
     };
 }
 
-fn includedFieldCount(comptime T: type, comptime spec: anytype) usize {
-    const st = @typeInfo(T).@"struct";
-    var count: usize = 0;
-    inline for (st.field_names) |fname| {
-        if (!jsonMod.fieldIsSkipped(spec, fname)) count += 1;
-    }
-    return count;
-}
-
 const anyJsonSchema: MetaSchema = .{ .any = {} };
 
-/// Compile-time OpenAPI schema for `T` using Zig field names.
+/// Compile-time OpenAPI schema for `T` using its exact Zig field names.
 pub fn typeSchema(comptime T: type) MetaSchema {
-    return typeSchemaWith(T, .{});
-}
-
-/// Compile-time OpenAPI schema for `T` using the same declarative mapping as
-/// `httpx.json.Schema(T, spec)`.
-pub fn typeSchemaWith(comptime T: type, comptime spec: anytype) MetaSchema {
-    // Dynamic JSON is always free-form, regardless of the upstream spec.
+    // Dynamic JSON is always free-form.
     if (comptime T == jsonMod.Value or T == jsonMod.Object) return .{ .any = {} };
     if (comptime T == jsonMod.Array) return .{ .array = &anyJsonSchema };
     const ti = @typeInfo(T);
@@ -288,19 +266,19 @@ pub fn typeSchemaWith(comptime T: type, comptime spec: anytype) MetaSchema {
         .int, .comptime_int => .integer,
         .float, .comptime_float => .number,
         .@"enum" => .string,
-        .optional => |opt| typeSchemaWith(opt.child, spec),
+        .optional => |opt| typeSchema(opt.child),
         .pointer => |ptr| blk: {
             if (ptr.size != .slice) break :blk .string;
             if (ptr.child == u8) break :blk .string;
             const childSchema = comptime struct {
-                const s = typeSchemaWith(ptr.child, spec);
+                const s = typeSchema(ptr.child);
             }.s;
             break :blk .{ .array = &childSchema };
         },
         .array => |arr| blk: {
             if (arr.child == u8) break :blk .string;
             const childSchema = comptime struct {
-                const s = typeSchemaWith(arr.child, spec);
+                const s = typeSchema(arr.child);
             }.s;
             break :blk .{ .array = &childSchema };
         },
@@ -308,27 +286,18 @@ pub fn typeSchemaWith(comptime T: type, comptime spec: anytype) MetaSchema {
             if (st.is_tuple) break :blk .string;
             const fields = comptime struct {
                 const list = inner: {
-                    const count = includedFieldCount(T, spec);
-                    var out: [count]MetaSchema.ObjectField = undefined;
-                    var index: usize = 0;
-                    for (st.field_names, st.field_types) |fname, FType| {
-                        if (jsonMod.fieldIsSkipped(spec, fname)) continue;
+                    var out: [st.field_names.len]MetaSchema.ObjectField = undefined;
+                    for (st.field_names, st.field_types, st.field_attrs, 0..) |fname, FType, fattrs, index| {
                         const optional = @typeInfo(FType) == .optional;
-                        const fieldSchema = if (jsonMod.fieldHasNestedSchema(spec, fname)) nested: {
-                            const Nested = jsonMod.nestedSchemaFor(spec, fname);
-                            break :nested struct {
-                                const s = typeSchemaWith(Nested.Target, Nested.specs);
-                            }.s;
-                        } else struct {
-                            const s = typeSchemaWith(FType, .{});
+                        const fieldSchema = struct {
+                            const s = typeSchema(FType);
                         }.s;
                         out[index] = .{
-                            .name = jsonMod.wireNameFor(spec, fname),
+                            .name = fname,
                             .schema = &fieldSchema,
-                            .required = jsonMod.fieldIsRequired(T, spec, fname),
+                            .required = !optional and fattrs.default_value_ptr == null,
                             .nullable = optional,
                         };
-                        index += 1;
                     }
                     break :inner out;
                 };
@@ -366,10 +335,10 @@ pub const EndpointOptions = struct {
 /// Typed route controller over a router.
 ///
 /// The controller borrows the allocator and `std.Io` of whoever owns the
-/// router (`Server.rest()` and `App.rest()` pass their own). Eligibility is
-/// explicit: no controller, route, or request ever reaches for a hidden
-/// process-wide allocator or event loop. Per-request allocation still comes
-/// from `ctx.allocator`, which is released with the request by the server.
+/// router (`Server.rest()` passes its own). Eligibility is explicit: no
+/// controller, route, or request ever reaches for a hidden process-wide
+/// allocator or event loop. Per-request allocation still comes from
+/// `ctx.allocator`, which is released with the request by the server.
 pub const Rest = struct {
     allocator: Allocator,
     io: std.Io,
@@ -382,9 +351,7 @@ pub const Rest = struct {
     /// Registers a typed route.
     ///
     /// `arg` is either a bare handler (`rest.get("/x", handler)`) or a struct
-    /// literal carrying `.handler` plus any [`EndpointOptions`] field and
-    /// optional `.requestSchema`, `.responseSchema`, or shared `.schema`
-    /// mappings.
+    /// literal carrying `.handler` plus any [`EndpointOptions`] field.
     ///
     /// ```zig
     /// try rest.add(.POST, "/users", .{
@@ -392,8 +359,6 @@ pub const Rest = struct {
     ///     .operationId = "createUser",
     ///     .summary = "Create a user",
     ///     .tags = &.{"users"},
-    ///     .requestSchema = CreateUserSchema,
-    ///     .responseSchema = UserSchema,
     /// });
     /// ```
     pub fn add(
@@ -411,15 +376,6 @@ pub const Rest = struct {
         }
 
         const handlerFn = if (isBareFn) arg else arg.handler;
-        const hasSharedSchema = comptime isOptions and @hasField(ArgType, "schema");
-        const hasRequestSchema = comptime isOptions and @hasField(ArgType, "requestSchema");
-        const hasResponseSchema = comptime isOptions and @hasField(ArgType, "responseSchema");
-        const requestSchemaGiven = comptime hasRequestSchema or hasSharedSchema;
-        const responseSchemaGiven = comptime hasResponseSchema or hasSharedSchema;
-        const requestSchema = comptime if (hasRequestSchema) arg.requestSchema else if (hasSharedSchema) arg.schema else null;
-        const responseSchema = comptime if (hasResponseSchema) arg.responseSchema else if (hasSharedSchema) arg.schema else null;
-        const requestSpec = comptime if (requestSchemaGiven) requestSchema.specs else .{};
-        const responseSpec = comptime if (responseSchemaGiven) responseSchema.specs else .{};
 
         const Parsed = struct {
             endpoint: EndpointOptions = .{},
@@ -429,8 +385,7 @@ pub const Rest = struct {
             var out: Parsed = .{};
             if (isBareFn) break :blk out;
             for (@typeInfo(ArgType).@"struct".field_names) |fname| {
-                if (std.mem.eql(u8, fname, "handler") or std.mem.eql(u8, fname, "schema") or
-                    std.mem.eql(u8, fname, "requestSchema") or std.mem.eql(u8, fname, "responseSchema")) continue;
+                if (std.mem.eql(u8, fname, "handler")) continue;
                 if (std.mem.eql(u8, fname, "path")) {
                     @compileError("REST: pass the route path as the second argument, not `.path`");
                 }
@@ -462,7 +417,7 @@ pub const Rest = struct {
             }
             const first = fnInfo.param_types[0] orelse @compileError("REST handler params cannot be generic");
             if (first != *Context) {
-                @compileError("REST handler's first parameter must be *httpx.Context");
+                @compileError("REST handler's first parameter must be *httpx.router.Context");
             }
         }
 
@@ -475,10 +430,7 @@ pub const Rest = struct {
 
         if (comptime isRaw) {
             if (fnInfo.param_types.len != 1) {
-                @compileError("REST raw handlers must accept only *httpx.Context; parse the body with ctx.jsonValue() or ctx.jsonSchema()");
-            }
-            if (requestSchemaGiven or responseSchemaGiven) {
-                @compileError("REST raw handlers return Response directly; remove `.schema`, `.requestSchema`, or `.responseSchema`");
+                @compileError("REST raw handlers must accept only *httpx.router.Context; parse the body with ctx.jsonValue()");
             }
             const responses: []const metaMod.ResponseDesc = comptime if (endpointOpts.responses.len > 0)
                 endpointOpts.responses
@@ -537,7 +489,7 @@ pub const Rest = struct {
                 break :blk &list;
             }
             const payloadSchema = struct {
-                const s = typeSchemaWith(OutType, responseSpec);
+                const s = typeSchema(OutType);
             }.s;
             const list = [_]metaMod.ResponseDesc{
                 .{
@@ -562,7 +514,7 @@ pub const Rest = struct {
             if (!hasReqBody or InType == void) break :blk null;
             if (method == .GET or method == .HEAD or method == .DELETE) break :blk null;
             const bodySchema = struct {
-                const s = typeSchemaWith(InType, requestSpec);
+                const s = typeSchema(InType);
             }.s;
             break :blk .{
                 .content = .json,
@@ -608,15 +560,8 @@ pub const Rest = struct {
                         return errorResponse(ctx, 400, "Missing JSON request body");
                     }
 
-                    const reqValue: InType = if (comptime requestSchemaGiven) blkReq: {
-                        if (comptime requestSchema.Target != InType) @compileError("REST `.requestSchema` targets a different request type");
-                        break :blkReq requestSchema.decode(ctx.allocator, ctx.body) catch |err| {
-                            return errorResponse(ctx, 400, @errorName(err));
-                        };
-                    } else blkReq: {
-                        break :blkReq jsonMod.decode(InType, ctx.allocator, ctx.body) catch |err| {
-                            return errorResponse(ctx, 400, @errorName(err));
-                        };
+                    const reqValue: InType = jsonMod.decode(InType, ctx.allocator, ctx.body) catch |err| {
+                        return errorResponse(ctx, 400, @errorName(err));
                     };
                     break :blk try handlerFn(ctx, reqValue);
                 } else try handlerFn(ctx);
@@ -634,18 +579,6 @@ pub const Rest = struct {
                 }
 
                 if (apiRes.body) |payload| {
-                    if (comptime responseSchemaGiven) {
-                        if (comptime responseSchema.Target != OutType) @compileError("REST `.responseSchema` targets a different response type");
-                        const encoded = responseSchema.encode(ctx.allocator, payload) catch |err| {
-                            return errorResponse(ctx, 500, @errorName(err));
-                        };
-                        return .{
-                            .status = statusCode,
-                            .headers = apiRes.headers,
-                            .body = encoded,
-                            .contentType = responseType,
-                        };
-                    }
                     var response = try ctx.jsonStatus(statusCode, payload);
                     response.contentType = responseType;
                     if (apiRes.headers.len > 0) response.headers = apiRes.headers;
@@ -714,7 +647,7 @@ fn errorResponse(ctx: *Context, status: u16, message: []const u8) Response {
     };
 }
 
-test "typeSchema maps Zig types and honours explicit key names" {
+test "typeSchema maps Zig types and uses exact field names" {
     const testing = std.testing;
     const Example = struct {
         id: u64,
@@ -733,8 +666,11 @@ test "typeSchema maps Zig types and honours explicit key names" {
     try testing.expectEqualStrings("bio", plain.object[4].name);
     try testing.expect(!plain.object[4].required);
 
-    const renamed = typeSchemaWith(struct { user_name: []const u8 }, .{ .user_name = "user-name" });
-    try testing.expectEqualStrings("user-name", renamed.object[0].name);
+    // Quoted identifiers are ordinary field names: no mapping layer is needed.
+    const Arbitrary = struct { @"user-name": []const u8, @"@context": []const u8 };
+    const arbitrary = typeSchema(Arbitrary);
+    try testing.expectEqualStrings("user-name", arbitrary.object[0].name);
+    try testing.expectEqualStrings("@context", arbitrary.object[1].name);
 }
 
 test "endpoint options expose params, custom responses, request overrides, and internal routes" {
@@ -803,7 +739,7 @@ test "endpoint options expose params, custom responses, request overrides, and i
     try testing.expect(std.mem.indexOf(u8, spec, "/internal/health") == null);
 }
 
-test "typed REST endpoint: JSON body, Schema result, OpenAPI, key mapping" {
+test "typed REST endpoint: JSON body, Schema result, OpenAPI, quoted identifiers" {
     const testing = std.testing;
     const a = testing.allocator;
 
@@ -811,21 +747,21 @@ test "typed REST endpoint: JSON body, Schema result, OpenAPI, key mapping" {
     defer router.deinit();
     var rest = Rest.init(testing.allocator, std.Io.Threaded.global_single_threaded.io(), &router);
 
-    const CreateUserReq = struct { name: []const u8, email: []const u8 };
-    const UserRes = struct { id: u64, name: []const u8, email: []const u8 };
+    const CreateUserReq = struct { @"full-name": []const u8, email: []const u8 };
+    const UserRes = struct { id: u64, @"full-name": []const u8, email: []const u8 };
 
     const Handlers = struct {
         fn createUser(ctx: *Context, req: CreateUserReq) !Schema(UserRes) {
             _ = ctx;
             return Schema(UserRes).result(.{
                 .status = .created,
-                .body = .{ .id = 42, .name = req.name, .email = req.email },
+                .body = .{ .id = 42, .@"full-name" = req.@"full-name", .email = req.email },
             });
         }
 
         fn getUser(ctx: *Context) !Schema(UserRes) {
             _ = ctx;
-            return Schema(UserRes).ok(.{ .id = 42, .name = "Test User", .email = "test@example.com" });
+            return Schema(UserRes).ok(.{ .id = 42, .@"full-name" = "Test User", .email = "test@example.com" });
         }
 
         fn deleteUser(ctx: *Context) !Schema(void) {
@@ -834,15 +770,11 @@ test "typed REST endpoint: JSON body, Schema result, OpenAPI, key mapping" {
         }
     };
 
-    const CreateUserSchema = jsonMod.Schema(CreateUserReq, .{ .name = "full-name" });
-    const UserSchema = jsonMod.Schema(UserRes, .{ .name = "full-name" });
     try rest.add(.POST, "/users", .{
         .handler = Handlers.createUser,
         .operationId = "createUser",
         .summary = "Create user record",
         .tags = &.{"users"},
-        .requestSchema = CreateUserSchema,
-        .responseSchema = UserSchema,
     });
     try rest.add(.GET, "/users/{id:int}", .{
         .handler = Handlers.getUser,
@@ -880,7 +812,7 @@ test "typed REST endpoint: JSON body, Schema result, OpenAPI, key mapping" {
     const unsupported = router.dispatch(&ctxBad);
     try testing.expectEqual(@as(u16, 415), unsupported.status);
 
-    // A vendor JSON media type is accepted, and the rename map is honoured.
+    // A vendor JSON media type is accepted; quoted field names are the wire keys.
     var ctx = Context{
         .allocator = arena.allocator(),
         .headers = &.{.{ .name = "Content-Type", .value = "application/vnd.api+json; charset=utf-8" }},
@@ -983,10 +915,10 @@ test "dynamic JSON request and response types derive a free-form OpenAPI schema"
     };
     try rest.post("/dynamic-openapi", .{ .handler = Handlers.echo });
 
-    try testing.expect(typeSchemaWith(std.json.Value, .{}) == .any);
-    try testing.expect(typeSchemaWith(jsonMod.Object, .{}) == .any);
-    try testing.expect(typeSchemaWith(jsonMod.Array, .{}) == .array);
-    try testing.expect(typeSchemaWith([]const std.json.Value, .{}).array.* == .any);
+    try testing.expect(typeSchema(std.json.Value) == .any);
+    try testing.expect(typeSchema(jsonMod.Object) == .any);
+    try testing.expect(typeSchema(jsonMod.Array) == .array);
+    try testing.expect(typeSchema([]const std.json.Value).array.* == .any);
 
     const openapi = @import("../openApi/openApiSpec.zig");
     const spec = try openapi.generate(&router, .{ .title = "Dynamic", .version = "1.0.0" });

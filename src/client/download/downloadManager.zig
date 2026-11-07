@@ -229,8 +229,8 @@ pub const DownloadOptions = struct {
     existing: ExistingFilePolicy = .overwrite,
     verify: VerifyOptions = .{},
     progress: ProgressMode = .auto,
-    onProgress: ?*const fn (info: ProgressInfo, userData: ?*anyopaque) void = null,
-    userData: ?*anyopaque = null,
+    onProgress: ?*const fn (info: ProgressInfo, userData: ?*const anyopaque) void = null,
+    userData: ?*const anyopaque = null,
     /// Atomically download to a temporary file first, then rename on success and verification pass.
     atomic: bool = true,
     tempSuffix: []const u8 = ".httpx-part",
@@ -1350,9 +1350,12 @@ pub fn updateFile(
     return finalRes;
 }
 
-// FTP Download Helper
+// FTP Download Client
 
-pub const FtpDownloadOptions = struct {
+/// Connection settings for `httpx.client.ftp.Client`. Passed to `init` once;
+/// the allocator and I/O engine live on that owner and are reused by every
+/// download.
+pub const FtpConfig = struct {
     host: []const u8,
     port: u16 = 21,
     user: []const u8 = "anonymous",
@@ -1362,6 +1365,10 @@ pub const FtpDownloadOptions = struct {
     secure: bool = false,
     tlsVerify: ftpClientMod.TlsVerifyMode = .caBundle,
     tlsCaPem: ?[]const u8 = null,
+};
+
+/// Per-transfer options for `httpx.client.ftp.Client.download`.
+pub const FtpRequest = struct {
     remotePath: []const u8,
     destinationPath: []const u8,
     verify: VerifyOptions = .{},
@@ -1371,103 +1378,158 @@ pub const FtpDownloadOptions = struct {
     cancel: ?*const std.atomic.Value(bool) = null,
 };
 
-/// Downloads a file over FTP with progress reporting and checksum verification.
-pub fn ftpDownload(
-    io: std.Io,
-    allocator: Allocator,
-    options: FtpDownloadOptions,
-) DownloadError!DownloadResult {
-    const startTime = clock.monotonicMillis(io);
-    const dest = resolveDestination(allocator, io, options.destinationPath, options.remotePath, null) catch return DownloadError.OutOfMemory;
-    defer allocator.free(dest);
-
-    var ftp = ftpClientMod.Client.init(allocator, io, .{
-        .host = options.host,
-        .port = options.port,
-        .user = options.user,
-        .password = options.password,
-        .secure = options.secure,
-        .tlsVerify = options.tlsVerify,
-        .tlsCaPem = options.tlsCaPem,
-    }) catch return DownloadError.ConnectionFailed;
-    defer ftp.deinit();
-
-    ftp.login(options.user, options.password) catch |err| switch (err) {
-        error.ConnectFailed => return DownloadError.ConnectionFailed,
-        else => return DownloadError.AuthenticationFailed,
-    };
-
-    const remoteSize = ftp.size(options.remotePath) catch null;
-
-    var tracker = ProgressTracker.init(allocator, io, options.remotePath, dest, .{
-        .progress = options.progress,
-        .verify = options.verify,
-    });
-    defer tracker.deinit();
-    tracker.start(remoteSize);
-
-    const tempDest = if (options.atomic) try std.fmt.allocPrint(allocator, "{s}.ftp-part", .{dest}) else try allocator.dupe(u8, dest);
-    defer allocator.free(tempDest);
-
-    const fileHandle = FileOps.createTruncate(tempDest) orelse return DownloadError.FileCreateFailed;
-    defer FileOps.close(fileHandle);
-
-    var hasher = Hasher.init(options.verify);
-
-    const Context = struct {
-        hFile: FileOps.Handle,
-        h: *Hasher,
-        t: *ProgressTracker,
-        written: u64 = 0,
-        cancel: ?*const std.atomic.Value(bool),
-
-        fn sink(ctx: *@This(), chunk: []const u8) ftpClientMod.FtpError!void {
-            if (ctx.cancel) |cf| {
-                if (cf.load(.acquire)) return ftpClientMod.FtpError.ProtocolError;
-            }
-            if (!FileOps.writeAll(ctx.hFile, chunk)) return ftpClientMod.FtpError.WriteFailed;
-            ctx.h.update(chunk);
-            ctx.written += chunk.len;
-            ctx.t.update(ctx.written);
-        }
-    };
-
-    var ctx = Context{
-        .hFile = fileHandle,
-        .h = &hasher,
-        .t = &tracker,
-        .cancel = options.cancel,
-    };
-
-    ftp.download(options.remotePath, &ctx, Context.sink) catch |e| {
-        tracker.fail();
-        if (options.atomic) _ = FileOps.deleteFile(tempDest);
-        if (e == ftpClientMod.FtpError.ConnectFailed) return DownloadError.ConnectionFailed;
-        return DownloadError.HttpError;
-    };
-
-    hasher.verify(options.verify) catch |err| {
-        tracker.fail();
-        if (options.atomic) _ = FileOps.deleteFile(tempDest);
-        return err;
-    };
-
-    tracker.finish();
-
-    if (options.atomic) {
-        if (!FileOps.renameFile(tempDest, dest)) return DownloadError.FileRenameFailed;
-    }
-
-    return .{
-        .destination = dest,
-        .downloadedBytes = ctx.written,
-        .totalBytes = remoteSize,
-        .elapsedMs = @intCast(clock.monotonicMillis(io) - startTime),
-        .statusCode = 226,
-        .verified = true,
-        .sha256Hex = hasher.finalSha256Hex(),
+fn mapFtpError(err: anyerror) DownloadError {
+    return switch (err) {
+        error.OutOfMemory => DownloadError.OutOfMemory,
+        error.ConnectFailed, error.TlsHandshakeFailed, error.CertificateUntrusted, error.CertificateHostMismatch, error.CertificateExpired => DownloadError.ConnectionFailed,
+        error.ProtocolError, error.MalformedReply, error.MalformedPasv => DownloadError.ProtocolViolation,
+        error.ReadFailed => DownloadError.ReadFailed,
+        error.WriteFailed => DownloadError.WriteFailed,
+        error.UnexpectedEof => DownloadError.UnexpectedEof,
+        else => DownloadError.HttpError,
     };
 }
+
+/// Owned FTP/FTPS client. Initialize once with the shared allocator and
+/// `std.Io`, then call `download` for any number of files:
+///
+/// ```zig
+/// var ftp = try httpx.client.ftp.init(allocator, io, .{
+///     .host = "ftp.example.com",
+///     .user = "demo",
+///     .password = "secret",
+/// });
+/// defer ftp.deinit();
+///
+/// const result = try ftp.download(.{
+///     .remotePath = "/pub/archive.tar.gz",
+///     .destinationPath = "downloads/archive.tar.gz",
+///     .verify = .{ .minSize = 1 },
+/// });
+/// ```
+pub const Ftp = struct {
+    /// Connection/link settings given to `init`.
+    pub const Config = FtpConfig;
+    /// Per-transfer options given to `download`.
+    pub const Request = FtpRequest;
+
+    allocator: Allocator,
+    io: std.Io,
+    config: FtpConfig,
+    connection: ftpClientMod.Client,
+
+    /// Opens the control connection and logs in. The connection is reused by
+    /// every subsequent `download` call.
+    pub fn init(allocator: Allocator, io: std.Io, config: FtpConfig) DownloadError!Ftp {
+        var connection = ftpClientMod.Client.init(allocator, io, .{
+            .host = config.host,
+            .port = config.port,
+            .user = config.user,
+            .password = config.password,
+            .secure = config.secure,
+            .tlsVerify = config.tlsVerify,
+            .tlsCaPem = config.tlsCaPem,
+        }) catch |err| return mapFtpError(err);
+        errdefer connection.deinit();
+        connection.login(config.user, config.password) catch |err| return switch (err) {
+            error.OutOfMemory => DownloadError.OutOfMemory,
+            error.ConnectFailed => DownloadError.ConnectionFailed,
+            else => DownloadError.AuthenticationFailed,
+        };
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .config = config,
+            .connection = connection,
+        };
+    }
+
+    /// Sends QUIT and releases the control and data sockets.
+    pub fn deinit(self: *Ftp) void {
+        self.connection.deinit();
+    }
+
+    /// Downloads one remote file with progress reporting and checksum
+    /// verification. Allocator and I/O come from this owner.
+    pub fn download(self: *Ftp, request: FtpRequest) DownloadError!DownloadResult {
+        const startTime = clock.monotonicMillis(self.io);
+        const dest = resolveDestination(self.allocator, self.io, request.destinationPath, request.remotePath, null) catch return DownloadError.OutOfMemory;
+        defer self.allocator.free(dest);
+
+        const remoteSize = self.connection.size(request.remotePath) catch null;
+
+        var tracker = ProgressTracker.init(self.allocator, self.io, request.remotePath, dest, .{
+            .progress = request.progress,
+            .verify = request.verify,
+        });
+        defer tracker.deinit();
+        tracker.start(remoteSize);
+
+        const tempDest = if (request.atomic)
+            try std.fmt.allocPrint(self.allocator, "{s}.ftp-part", .{dest})
+        else
+            try self.allocator.dupe(u8, dest);
+        defer self.allocator.free(tempDest);
+
+        const fileHandle = FileOps.createTruncate(tempDest) orelse return DownloadError.FileCreateFailed;
+        defer FileOps.close(fileHandle);
+
+        var hasher = Hasher.init(request.verify);
+
+        const Context = struct {
+            hFile: FileOps.Handle,
+            h: *Hasher,
+            t: *ProgressTracker,
+            written: u64 = 0,
+            cancel: ?*const std.atomic.Value(bool),
+
+            fn sink(ctx: *@This(), chunk: []const u8) ftpClientMod.FtpError!void {
+                if (ctx.cancel) |cf| {
+                    if (cf.load(.acquire)) return ftpClientMod.FtpError.ProtocolError;
+                }
+                if (!FileOps.writeAll(ctx.hFile, chunk)) return ftpClientMod.FtpError.WriteFailed;
+                ctx.h.update(chunk);
+                ctx.written += chunk.len;
+                ctx.t.update(ctx.written);
+            }
+        };
+
+        var ctx = Context{
+            .hFile = fileHandle,
+            .h = &hasher,
+            .t = &tracker,
+            .cancel = request.cancel,
+        };
+
+        self.connection.download(request.remotePath, &ctx, Context.sink) catch |err| {
+            tracker.fail();
+            if (request.atomic) _ = FileOps.deleteFile(tempDest);
+            return mapFtpError(err);
+        };
+
+        hasher.verify(request.verify) catch |err| {
+            tracker.fail();
+            if (request.atomic) _ = FileOps.deleteFile(tempDest);
+            return err;
+        };
+
+        tracker.finish();
+
+        if (request.atomic) {
+            if (!FileOps.renameFile(tempDest, dest)) return DownloadError.FileRenameFailed;
+        }
+
+        return .{
+            .destination = dest,
+            .downloadedBytes = ctx.written,
+            .totalBytes = remoteSize,
+            .elapsedMs = @intCast(clock.monotonicMillis(self.io) - startTime),
+            .statusCode = 226,
+            .verified = true,
+            .sha256Hex = hasher.finalSha256Hex(),
+        };
+    }
+};
 
 /// Standalone helper to query remote server metadata, size, filename, and headers.
 pub fn lookupFileInfo(
@@ -1710,24 +1772,24 @@ test "resolveDestination handles direct file and directories" {
 
 test "custom progress callback receives events" {
     const CustomState = struct {
-        called: bool = false,
-        total: ?u64 = null,
-        downloaded: u64 = 0,
-        completed: bool = false,
+        called: std.atomic.Value(bool) = .init(false),
+        total: std.atomic.Value(u64) = .init(0),
+        downloaded: std.atomic.Value(u64) = .init(0),
+        completed: std.atomic.Value(bool) = .init(false),
 
-        fn onProgress(info: ProgressInfo, userData: ?*anyopaque) void {
-            const self: *@This() = @ptrCast(@alignCast(userData.?));
-            self.called = true;
-            self.total = info.totalBytes;
-            self.downloaded = info.downloadedBytes;
+        fn onProgress(info: ProgressInfo, userData: ?*const anyopaque) void {
+            const self = @constCast(@as(*const @This(), @ptrCast(@alignCast(userData.?))));
+            self.called.store(true, .release);
+            self.total.store(info.totalBytes orelse 0, .release);
+            self.downloaded.store(info.downloadedBytes, .release);
             if (info.state == .completed) {
-                self.completed = true;
+                self.completed.store(true, .release);
             }
         }
     };
 
     var threaded: std.Io.Threaded = .init_single_threaded;
-    var state = CustomState{};
+    var state: CustomState = .{};
     var tracker = ProgressTracker.init(std.testing.allocator, threaded.io(), "http://example.com/test.bin", "test.bin", .{
         .progress = .custom,
         .onProgress = CustomState.onProgress,
@@ -1736,14 +1798,14 @@ test "custom progress callback receives events" {
     defer tracker.deinit();
 
     tracker.start(1024);
-    try std.testing.expect(state.called);
-    try std.testing.expectEqual(@as(?u64, 1024), state.total);
+    try std.testing.expect(state.called.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1024), state.total.load(.acquire));
 
     tracker.update(512);
-    try std.testing.expectEqual(@as(u64, 512), state.downloaded);
+    try std.testing.expectEqual(@as(u64, 512), state.downloaded.load(.acquire));
 
     tracker.finish();
-    try std.testing.expect(state.completed);
+    try std.testing.expect(state.completed.load(.acquire));
 }
 
 test "existing file policy resume check" {

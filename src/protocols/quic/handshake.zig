@@ -279,8 +279,7 @@ pub const Driver = struct {
     }
 
     fn sniFor(host: []const u8) ?[]const u8 {
-        var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-        return if (probe.parseIp(host)) |_| null else |_| host;
+        return if (addressMod.Address.parseIp(host)) |_| null else |_| host;
     }
 
     pub fn clientStart(ctx: ?*anyopaque, conn: *Connection, nowMs: u64) connMod.Error!void {

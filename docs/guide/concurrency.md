@@ -64,8 +64,7 @@ defer r.deinit();
 ## Worker Pool
 
 `httpx.concurrency.Pool` (`src/concurrency/workerPool.zig`) is a fixed-thread,
-bounded-queue pool with graceful drain. It is also exported as
-`httpx.client.workers`:
+bounded-queue pool with graceful drain:
 
 Pass a live Zig 0.17 `std.Io` to the pool. It backs blocking queue waits and
 must outlive the pool. `submit` applies backpressure when the queue is full;

@@ -33,26 +33,55 @@ const versionInfo = @import("../../common/version.zig");
 
 /// Operation expansion for Swagger UI: `list`, `full`, or `none`.
 pub const DocExpansion = enum { list, full, none };
+pub const DefaultModelRendering = enum { example, model };
+pub const SubmitMethod = enum { get, put, post, delete, options, head, patch, trace };
 
-/// Swagger UI options. Every field has the vendor default; fields that would
-/// otherwise be hidden in the generated page are explicit here.
+/// A single custom HTTP header. Only needed when the built-in header fields on
+/// `GraphiQLHeaders` do not cover the request.
+pub const Header = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// GraphiQL request headers. Common headers use flat fields so the simple case
+/// stays a single `.{ ... }` literal; `custom` is used only for extra headers.
+pub const GraphiQLHeaders = struct {
+    authorization: []const u8 = "",
+    cookie: []const u8 = "",
+    accept: []const u8 = "",
+    custom: []const Header = &.{},
+};
+
+/// Swagger UI options. Every field is explicit and typed; omitted fields use
+/// the vendor defaults documented next to each option.
 pub const SwaggerConfig = struct {
     enabled: bool = true,
     route: []const u8 = "/docs",
     title: []const u8 = "Swagger UI",
     docExpansion: DocExpansion = .list,
+    defaultModelRendering: DefaultModelRendering = .example,
+    defaultModelsExpandDepth: i32 = 1,
+    defaultModelExpandDepth: i32 = 1,
     deepLinking: bool = true,
     displayOperationId: bool = false,
     displayRequestDuration: bool = false,
     filter: bool = false,
     persistAuthorization: bool = false,
     tryItOutEnabled: bool = false,
-    defaultModelsExpandDepth: i32 = 1,
+    showExtensions: bool = false,
+    showCommonExtensions: bool = false,
+    showMutatedRequest: bool = true,
+    withCredentials: bool = false,
+    useUnsafeMarkdown: bool = false,
+    requestSnippetsEnabled: bool = false,
+    /// `null` shows every tag.
+    maxDisplayedTags: ?i32 = null,
+    /// `null` disables the online validator; empty uses the vendor default.
+    validatorUrl: ?[]const u8 = null,
+    /// Methods allowed in "Try it out"; empty means every method.
+    supportedSubmitMethods: []const SubmitMethod = &.{},
     /// OAuth2 redirect URL; null serves `{route}/oauth2-redirect.html`.
     oauth2RedirectUrl: ?[]const u8 = null,
-    /// Extra Swagger UI options as a JSON object, merged last. Use it for
-    /// vendor options that are not modeled above.
-    rawOptions: ?[]const u8 = null,
 };
 
 /// ReDoc options. Every field maps to the matching `Redoc.init` option.
@@ -63,15 +92,25 @@ pub const RedocConfig = struct {
     hideHostname: bool = false,
     hideDownloadButton: bool = false,
     hideFab: bool = false,
+    hideLoading: bool = false,
+    hideLogo: bool = false,
+    hideSecuritySection: bool = false,
     /// Comma-separated status codes expanded by default, e.g. `"200,201"`.
     expandResponses: []const u8 = "",
     pathInMiddlePanel: bool = false,
     requiredPropsFirst: bool = false,
     sortPropsAlphabetically: bool = false,
+    sortEnumValuesAlphabetically: bool = false,
     noAutoAuth: bool = false,
     disableSearch: bool = false,
-    /// Extra ReDoc options as a JSON object, merged last.
-    rawOptions: ?[]const u8 = null,
+    nativeScrollbars: bool = false,
+    onlyRequiredInSamples: bool = false,
+    menuToggle: bool = false,
+    jsonSampleExpandLevel: i32 = 2,
+    generatedPayloadSamplesMaxDepth: i32 = 10,
+    /// Offset in pixels applied to the menu when scrolling; null uses the
+    /// vendor default.
+    scrollYOffset: ?i32 = null,
 };
 
 /// Scalar options. Every field is written into the page's
@@ -86,10 +125,20 @@ pub const ScalarConfig = struct {
     hideModels: bool = false,
     hideDownloadButton: bool = false,
     hideTestRequestButton: bool = false,
+    hideClientButton: bool = false,
     isEditable: bool = false,
     showSidebar: bool = true,
-    /// Extra Scalar configuration as a JSON object, merged last.
-    rawConfiguration: ?[]const u8 = null,
+    showDeveloperTools: bool = false,
+    defaultOpenAllTags: bool = false,
+    telemetry: bool = true,
+    persistAuth: bool = false,
+    withDefaultFonts: bool = true,
+    /// Search hotkey, e.g. `"k"`.
+    searchHotKey: []const u8 = "k",
+    /// Optional proxy URL for "Try it out" requests.
+    proxyUrl: []const u8 = "",
+    /// Optional custom CSS injected into the page.
+    customCss: []const u8 = "",
 };
 
 /// GraphiQL options passed to `window.renderGraphiQL(element, options)`.
@@ -102,11 +151,13 @@ pub const GraphiQLConfig = struct {
     defaultQuery: []const u8 = "",
     /// Monaco editor theme, e.g. `"vs-dark"`.
     editorTheme: []const u8 = "",
-    /// Extra HTTP headers for GraphQL requests, as a JSON object string:
-    /// `"{\"Authorization\":\"Bearer …\"}"`.
-    headers: []const u8 = "",
-    /// Extra GraphiQL options as a JSON object, merged last.
-    rawOptions: ?[]const u8 = null,
+    /// Extra HTTP headers attached to every GraphQL request.
+    headers: GraphiQLHeaders = .{},
+    shouldPersistHeaders: bool = false,
+    inputValueDeprecation: bool = false,
+    schemaDescription: bool = false,
+    docExplorerOpen: bool = false,
+    isHeadersEditorEnabled: bool = true,
 };
 
 pub const OpenApiConfig = struct {
@@ -320,41 +371,7 @@ pub fn mount(
 
     // Roll back partial registration on error so a failed mount leaves no
     // stray docs routes behind (pre-checks make this rare, e.g. OOM only).
-    errdefer {
-        if (cfg.openapi.enabled and st.openapiRoute.len > 0) _ = router.remove(.GET, st.openapiRoute);
-        if (st.swaggerRoute) |route| {
-            _ = router.remove(.GET, route);
-            for (assets.swaggerFiles) |f| {
-                const full = joinRoute(allocator, route, f.name) catch continue;
-                defer allocator.free(full);
-                _ = router.remove(.GET, full);
-            }
-        }
-        if (st.redocRoute) |route| {
-            _ = router.remove(.GET, route);
-            for (assets.redocFiles) |f| {
-                const full = joinRoute(allocator, route, f.name) catch continue;
-                defer allocator.free(full);
-                _ = router.remove(.GET, full);
-            }
-        }
-        if (st.scalarRoute) |route| {
-            _ = router.remove(.GET, route);
-            const full = joinRoute(allocator, route, "standalone.js") catch null;
-            if (full) |fp| {
-                defer allocator.free(fp);
-                _ = router.remove(.GET, fp);
-            }
-        }
-        if (st.graphiqlRoute) |route| {
-            _ = router.remove(.GET, route);
-            for (assets.graphiqlFiles) |f| {
-                const full = joinRoute(allocator, route, f.name) catch continue;
-                defer allocator.free(full);
-                _ = router.remove(.GET, full);
-            }
-        }
-    }
+    errdefer removeRoutes(st);
 
     if (cfg.openapi.enabled and st.openapiRoute.len > 0) {
         try router.add(.GET, st.openapiRoute, openApiHandler, .{ .meta = internalMeta, .userData = st });
@@ -526,17 +543,6 @@ fn writeJsonAttr(a: Allocator, w: anytype, value: std.json.Value) !void {
     try escapeInto(w, bytes);
 }
 
-/// Merges a raw JSON object into `target`, so vendor options that are not
-/// modeled as fields stay usable (string-based escape hatch).
-fn mergeOptions(a: Allocator, target: *std.json.ObjectMap, raw: ?[]const u8) !void {
-    const source = raw orelse return;
-    if (source.len == 0) return;
-    const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, source, .{}) catch return error.InvalidOptionsJson;
-    if (parsed != .object) return error.InvalidOptionsJson;
-    var it = parsed.object.iterator();
-    while (it.next()) |entry| try target.put(a, entry.key_ptr.*, entry.value_ptr.*);
-}
-
 fn renderSwaggerPage(a: Allocator, cfg: SwaggerConfig, specUrl: []const u8, swaggerRoute: []const u8) ![]u8 {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -548,15 +554,31 @@ fn renderSwaggerPage(a: Allocator, cfg: SwaggerConfig, specUrl: []const u8, swag
     try opts.put(aa, "dom_id", std.json.Value{ .string = "#swagger-ui" });
     try opts.put(aa, "layout", std.json.Value{ .string = "StandaloneLayout" });
     try opts.put(aa, "docExpansion", std.json.Value{ .string = @tagName(cfg.docExpansion) });
+    try opts.put(aa, "defaultModelRendering", std.json.Value{ .string = @tagName(cfg.defaultModelRendering) });
+    try opts.put(aa, "defaultModelsExpandDepth", std.json.Value{ .integer = cfg.defaultModelsExpandDepth });
+    try opts.put(aa, "defaultModelExpandDepth", std.json.Value{ .integer = cfg.defaultModelExpandDepth });
     try opts.put(aa, "deepLinking", std.json.Value{ .bool = cfg.deepLinking });
     try opts.put(aa, "displayOperationId", std.json.Value{ .bool = cfg.displayOperationId });
     try opts.put(aa, "displayRequestDuration", std.json.Value{ .bool = cfg.displayRequestDuration });
     try opts.put(aa, "filter", std.json.Value{ .bool = cfg.filter });
     try opts.put(aa, "persistAuthorization", std.json.Value{ .bool = cfg.persistAuthorization });
     try opts.put(aa, "tryItOutEnabled", std.json.Value{ .bool = cfg.tryItOutEnabled });
-    try opts.put(aa, "defaultModelsExpandDepth", std.json.Value{ .integer = cfg.defaultModelsExpandDepth });
+    try opts.put(aa, "showExtensions", std.json.Value{ .bool = cfg.showExtensions });
+    try opts.put(aa, "showCommonExtensions", std.json.Value{ .bool = cfg.showCommonExtensions });
+    try opts.put(aa, "showMutatedRequest", std.json.Value{ .bool = cfg.showMutatedRequest });
+    try opts.put(aa, "withCredentials", std.json.Value{ .bool = cfg.withCredentials });
+    try opts.put(aa, "useUnsafeMarkdown", std.json.Value{ .bool = cfg.useUnsafeMarkdown });
+    try opts.put(aa, "requestSnippetsEnabled", std.json.Value{ .bool = cfg.requestSnippetsEnabled });
+    if (cfg.maxDisplayedTags) |v| try opts.put(aa, "maxDisplayedTags", std.json.Value{ .integer = v });
+    if (cfg.validatorUrl) |v| try opts.put(aa, "validatorUrl", std.json.Value{ .string = v });
+    if (cfg.supportedSubmitMethods.len > 0) {
+        var methods: std.json.Array = .init(aa);
+        for (cfg.supportedSubmitMethods) |method| {
+            try methods.append(.{ .string = @tagName(method) });
+        }
+        try opts.put(aa, "supportedSubmitMethods", .{ .array = methods });
+    }
     try opts.put(aa, "oauth2RedirectUrl", std.json.Value{ .string = redirect });
-    try mergeOptions(aa, &opts, cfg.rawOptions);
 
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
@@ -588,13 +610,22 @@ fn renderRedocPage(a: Allocator, cfg: RedocConfig, specUrl: []const u8, scriptUr
     try opts.put(aa, "hideHostname", std.json.Value{ .bool = cfg.hideHostname });
     try opts.put(aa, "hideDownloadButton", std.json.Value{ .bool = cfg.hideDownloadButton });
     try opts.put(aa, "hideFab", std.json.Value{ .bool = cfg.hideFab });
+    try opts.put(aa, "hideLoading", std.json.Value{ .bool = cfg.hideLoading });
+    try opts.put(aa, "hideLogo", std.json.Value{ .bool = cfg.hideLogo });
+    try opts.put(aa, "hideSecuritySection", std.json.Value{ .bool = cfg.hideSecuritySection });
     try opts.put(aa, "expandResponses", std.json.Value{ .string = cfg.expandResponses });
     try opts.put(aa, "pathInMiddlePanel", std.json.Value{ .bool = cfg.pathInMiddlePanel });
     try opts.put(aa, "requiredPropsFirst", std.json.Value{ .bool = cfg.requiredPropsFirst });
     try opts.put(aa, "sortPropsAlphabetically", std.json.Value{ .bool = cfg.sortPropsAlphabetically });
+    try opts.put(aa, "sortEnumValuesAlphabetically", std.json.Value{ .bool = cfg.sortEnumValuesAlphabetically });
     try opts.put(aa, "noAutoAuth", std.json.Value{ .bool = cfg.noAutoAuth });
     try opts.put(aa, "disableSearch", std.json.Value{ .bool = cfg.disableSearch });
-    try mergeOptions(aa, &opts, cfg.rawOptions);
+    try opts.put(aa, "nativeScrollbars", std.json.Value{ .bool = cfg.nativeScrollbars });
+    try opts.put(aa, "onlyRequiredInSamples", std.json.Value{ .bool = cfg.onlyRequiredInSamples });
+    try opts.put(aa, "menuToggle", std.json.Value{ .bool = cfg.menuToggle });
+    try opts.put(aa, "jsonSampleExpandLevel", std.json.Value{ .integer = cfg.jsonSampleExpandLevel });
+    try opts.put(aa, "generatedPayloadSamplesMaxDepth", std.json.Value{ .integer = cfg.generatedPayloadSamplesMaxDepth });
+    if (cfg.scrollYOffset) |v| try opts.put(aa, "scrollYOffset", std.json.Value{ .integer = v });
 
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
@@ -624,9 +655,17 @@ fn renderScalarPage(a: Allocator, cfg: ScalarConfig, specUrl: []const u8, script
     try opts.put(aa, "hideModels", std.json.Value{ .bool = cfg.hideModels });
     try opts.put(aa, "hideDownloadButton", std.json.Value{ .bool = cfg.hideDownloadButton });
     try opts.put(aa, "hideTestRequestButton", std.json.Value{ .bool = cfg.hideTestRequestButton });
+    try opts.put(aa, "hideClientButton", std.json.Value{ .bool = cfg.hideClientButton });
     try opts.put(aa, "isEditable", std.json.Value{ .bool = cfg.isEditable });
     try opts.put(aa, "showSidebar", std.json.Value{ .bool = cfg.showSidebar });
-    try mergeOptions(aa, &opts, cfg.rawConfiguration);
+    try opts.put(aa, "showDeveloperTools", std.json.Value{ .bool = cfg.showDeveloperTools });
+    try opts.put(aa, "defaultOpenAllTags", std.json.Value{ .bool = cfg.defaultOpenAllTags });
+    try opts.put(aa, "telemetry", std.json.Value{ .bool = cfg.telemetry });
+    try opts.put(aa, "persistAuth", std.json.Value{ .bool = cfg.persistAuth });
+    try opts.put(aa, "withDefaultFonts", std.json.Value{ .bool = cfg.withDefaultFonts });
+    try opts.put(aa, "searchHotKey", std.json.Value{ .string = cfg.searchHotKey });
+    if (cfg.proxyUrl.len > 0) try opts.put(aa, "proxyUrl", std.json.Value{ .string = cfg.proxyUrl });
+    if (cfg.customCss.len > 0) try opts.put(aa, "customCss", std.json.Value{ .string = cfg.customCss });
 
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
@@ -653,12 +692,25 @@ fn renderGraphiqlPage(a: Allocator, cfg: GraphiQLConfig, graphqlEndpoint: []cons
     try opts.put(aa, "endpoint", std.json.Value{ .string = graphqlEndpoint });
     if (cfg.defaultQuery.len > 0) try opts.put(aa, "defaultQuery", std.json.Value{ .string = cfg.defaultQuery });
     if (cfg.editorTheme.len > 0) try opts.put(aa, "editorTheme", std.json.Value{ .string = cfg.editorTheme });
-    if (cfg.headers.len > 0) {
-        const headers = std.json.parseFromSliceLeaky(std.json.Value, aa, cfg.headers, .{}) catch return error.InvalidOptionsJson;
-        if (headers != .object) return error.InvalidOptionsJson;
-        try opts.put(aa, "headers", headers);
+    try opts.put(aa, "shouldPersistHeaders", std.json.Value{ .bool = cfg.shouldPersistHeaders });
+    try opts.put(aa, "inputValueDeprecation", std.json.Value{ .bool = cfg.inputValueDeprecation });
+    try opts.put(aa, "schemaDescription", std.json.Value{ .bool = cfg.schemaDescription });
+    try opts.put(aa, "docExplorerOpen", std.json.Value{ .bool = cfg.docExplorerOpen });
+    try opts.put(aa, "isHeadersEditorEnabled", std.json.Value{ .bool = cfg.isHeadersEditorEnabled });
+    if (cfg.headers.authorization.len > 0 or
+        cfg.headers.cookie.len > 0 or
+        cfg.headers.accept.len > 0 or
+        cfg.headers.custom.len > 0)
+    {
+        var headers = try std.json.ObjectMap.init(aa, &.{}, &.{});
+        if (cfg.headers.authorization.len > 0) try headers.put(aa, "Authorization", .{ .string = cfg.headers.authorization });
+        if (cfg.headers.cookie.len > 0) try headers.put(aa, "Cookie", .{ .string = cfg.headers.cookie });
+        if (cfg.headers.accept.len > 0) try headers.put(aa, "Accept", .{ .string = cfg.headers.accept });
+        for (cfg.headers.custom) |header| {
+            try headers.put(aa, header.name, .{ .string = header.value });
+        }
+        try opts.put(aa, "headers", .{ .object = headers });
     }
-    try mergeOptions(aa, &opts, cfg.rawOptions);
 
     var out: std.Io.Writer.Allocating = .init(a);
     errdefer out.deinit();
@@ -898,7 +950,8 @@ test "every ui option reaches the rendered page" {
             .graphqlEndpoint = "/graphql",
             .defaultQuery = "{ __typename }",
             .editorTheme = "vs-dark",
-            .headers = "{\"Authorization\":\"Bearer demo\"}",
+            .headers = .{ .authorization = "Bearer demo" },
+            .docExplorerOpen = true,
         },
     }, null);
     defer unmount();
@@ -930,6 +983,7 @@ test "every ui option reaches the rendered page" {
     try std.testing.expect(std.mem.indexOf(u8, ide.body, "\"defaultQuery\":\"{ __typename }\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ide.body, "\"editorTheme\":\"vs-dark\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, ide.body, "\"Authorization\":\"Bearer demo\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ide.body, "\"docExplorerOpen\":true") != null);
 }
 
 test "all documentation pages are self-hosted and offline" {

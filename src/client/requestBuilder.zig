@@ -93,8 +93,7 @@ pub fn systemLookupStrings(
 
 /// Parse one cached address string (v4 or v6) into a typed Address.
 pub fn parseAddrString(s: []const u8, port: u16) ?addressMod.Address {
-    var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-    const parsed = probe.parseIp(s) catch return null;
+    const parsed = addressMod.Address.parseIp(s) catch return null;
     var r = parsed;
     r.port = port;
     return r;
@@ -246,20 +245,30 @@ pub const Response = struct {
         return null;
     }
 
-    /// Parses the body as JSON into `T` through the shared JSON decoder.
-    /// Unknown object keys are ignored.
-    ///
-    /// The decoded value is allocated from a lazily created arena owned by the
-    /// response and is valid until `deinit`. Use [`jsonAlloc`] when the value
-    /// must outlive the response or use a caller-owned allocator.
-    pub fn json(self: *const Response, comptime T: type) !T {
+    fn jsonArenaAllocator(self: *const Response) !Allocator {
         const target = @constCast(self);
         if (target.jsonArena == null) {
             const arena = try self.allocator.create(std.heap.ArenaAllocator);
             arena.* = std.heap.ArenaAllocator.init(self.allocator);
             target.jsonArena = arena;
         }
-        return jsonMod.decode(T, target.jsonArena.?.allocator(), self.body);
+        return target.jsonArena.?.allocator();
+    }
+
+    /// Parses the body as JSON into `T` using the exact Zig field names.
+    /// Quoted identifiers such as `@"user-name"` map directly to the wire keys,
+    /// and unknown object keys are ignored.
+    ///
+    /// The decoded value is allocated from a lazily created arena owned by the
+    /// response and is valid until `deinit`. Use [`jsonAlloc`] when the value
+    /// must outlive the response or use a caller-owned allocator.
+    pub fn json(self: *const Response, comptime T: type) !T {
+        return jsonMod.decode(T, try self.jsonArenaAllocator(), self.body);
+    }
+
+    /// Parses the body as a dynamic JSON value owned by the response arena.
+    pub fn jsonValue(self: *const Response) !jsonMod.Value {
+        return jsonMod.parse(try self.jsonArenaAllocator(), self.body);
     }
 
     /// Parses the body as JSON with an explicit allocator and returns `std.json.Parsed(T)` with managed lifecycle.
@@ -416,11 +425,11 @@ pub fn headersFromStruct(allocator: Allocator, value: anytype) ![]Header {
     return list.toOwnedSlice(allocator);
 }
 
-/// Helper: stringify any struct/value to JSON bytes.
+/// Helper: stringify any struct/value to JSON bytes using exact field names.
 pub fn jsonBody(allocator: Allocator, value: anytype) ![]u8 {
     const T = @TypeOf(value);
     if (T == []const u8 or T == []u8) return allocator.dupe(u8, value);
-    return std.json.Stringify.valueAlloc(allocator, value, .{});
+    return jsonMod.encodeAny(allocator, value);
 }
 
 pub const Error = error{
@@ -452,6 +461,10 @@ pub const Error = error{
     /// HTTP/2 framing/HPACK violation from the peer.
     ProtocolViolation,
     InvalidRequestBody,
+    /// A `.json` payload could not be encoded by its schema.
+    InvalidJsonBody,
+    /// GraphQL variables were not valid JSON.
+    InvalidGraphQLVariables,
     ConnectFailed,
     /// HTTP proxy replied 407: CONNECT credentials missing or rejected.
     ProxyAuthRequired,
@@ -706,10 +719,9 @@ fn h3DoRequest(
 
     // Resolve: literal first, then single-flight cache, then OS resolver
     // (IPv4 preferred, mirroring the TCP happy-eyeballs-lite order).
-    var probe = addressMod.Address{ .family = .ip4, .port = 0 };
     var destAddr: addressMod.Address = undefined;
     var haveDest = false;
-    if (probe.parseIp(host)) |direct| {
+    if (addressMod.Address.parseIp(host)) |direct| {
         destAddr = direct;
         destAddr.port = port;
         haveDest = true;
@@ -1374,8 +1386,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                         var targetHost = hostOnly;
                         var localResolvedBuf: [64]u8 = undefined;
                         if (!pInfo.remoteDns) {
-                            var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-                            if (probe.parseIp(hostOnly)) |_| {
+                            if (addressMod.Address.parseIp(hostOnly)) |_| {
                                 targetHost = hostOnly;
                             } else |_| {
                                 const addrs = (netResolve.Resolver.init(a, io)).lookup(hostOnly, .{ .port = port }) catch return Error.ConnectFailed;
@@ -1410,8 +1421,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                         var targetHost = hostOnly;
                         var localResolvedBuf: [64]u8 = undefined;
                         if (!pInfo.remoteDns) {
-                            var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-                            if (probe.parseIp(hostOnly)) |_| {
+                            if (addressMod.Address.parseIp(hostOnly)) |_| {
                                 targetHost = hostOnly;
                             } else |_| {
                                 const addrs = (netResolve.Resolver.init(a, io)).lookup(hostOnly, .{ .port = port }) catch return Error.ConnectFailed;
@@ -1446,8 +1456,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                     },
                     .httpConnect => {
                         var s = if (isTls) blkS: {
-                            var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-                            if (probe.parseIp(pInfo.host)) |parsed| {
+                            if (addressMod.Address.parseIp(pInfo.host)) |parsed| {
                                 var addr = parsed;
                                 addr.port = pInfo.port;
                                 break :blkS tcp.connectAddressStream(io, &addr) catch return Error.ConnectFailed;
@@ -1457,8 +1466,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                             if (addrs.len == 0) return Error.ConnectFailed;
                             break :blkS tcp.connectAddressStream(io, &addrs[0]) catch return Error.ConnectFailed;
                         } else blkS: {
-                            var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-                            if (probe.parseIp(pInfo.host)) |parsed| {
+                            if (addressMod.Address.parseIp(pInfo.host)) |parsed| {
                                 var addr = parsed;
                                 addr.port = pInfo.port;
                                 break :blkS tcp.connectAddress(io, &addr) catch return Error.ConnectFailed;
@@ -1521,8 +1529,7 @@ fn requestImpl(a: Allocator, io: std.Io, req: Request, comptime streaming: bool)
                     if (p.acquire(hostCopy[0..hl], port)) |s| break :blk s;
                 }
             }
-            var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-            if (probe.parseIp(hostOnly)) |direct| {
+            if (addressMod.Address.parseIp(hostOnly)) |direct| {
                 var da = direct;
                 da.port = port;
                 // For TLS, use the AFD-backed stream path (required for

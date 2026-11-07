@@ -107,10 +107,121 @@ library primitives.
 
 ## JSON
 
-Use Zig std JSON facilities (`std.json`) plus httpx conveniences:
+`httpx.json` is the single JSON implementation used by the client, server,
+typed REST endpoints, GraphQL, and parsing. It covers media-type
+classification, dynamic objects, typed decoding, and typed encoding. Unknown
+object keys are always ignored on input.
 
-- Client: `client.request(url, .{ .method = .POST, .json = value })` serializes a struct/value automatically; `Response.json(r)` / `Response.jsonAlloc(r, allocator)` decode with unknown fields ignored.
-- Server: `ctx.json(r)` deserializes the request body into `r`; `ctx.json(value)` / `ctx.jsonStatus(code, value)` render any struct/value as `application/json`.
+### Typed structs
+
+JSON keys are arbitrary strings, and Zig quoted identifiers express them
+directly. There is no mapping layer: the field name *is* the wire key.
+
+```zig
+const User = struct {
+    @"user-name": []const u8,
+    @"user.name": []const u8,
+    @"user name": []const u8,
+    @"user@email": []const u8,
+    @"user/id": u32,
+    @"123user": []const u8,
+    @"@context": []const u8,
+    @"$schema": []const u8,
+    @"Content-Type": []const u8,
+    @"X-API-Key": []const u8,
+    @"HTTP/2": bool,
+};
+
+const user = try httpx.json.decode(User, arena, body);
+const wire = try httpx.json.encode(allocator, user);
+defer allocator.free(wire);
+```
+
+Decoding rules:
+
+- Field names are matched exactly, including header-style and symbol keys.
+- Optional fields accept `null` and absence.
+- Fields with Zig default values are optional on input.
+- Missing required fields return `error.MissingField`.
+- Unknown JSON keys are ignored.
+- Encoding writes the same exact field names.
+
+### Client requests
+
+The `.json` request option accepts any Zig value and serializes it with its
+exact field names:
+
+```zig
+var res = try client.post("https://example.com/users", .{
+    .json = User{
+        .@"user-name" = "Example User",
+        .@"@context" = "https://schema.org",
+    },
+});
+defer res.deinit();
+```
+
+The fluent builder has the same behavior:
+
+```zig
+_ = try client.builder(.POST, url).json(user).send();
+```
+
+### Client responses
+
+`Response.json(T)` decodes with the shared decoder; `jsonValue` returns a
+dynamic object:
+
+```zig
+const user = try res.json(User);
+const dynamic = try res.jsonValue();
+const name = httpx.json.getString(&dynamic.object, "user-name");
+```
+
+Values allocate from a response-owned arena released by `Response.deinit`; they
+remain valid until then. `Response.jsonAlloc(T, allocator)` returns
+`std.json.Parsed(T)` when the value must outlive the response.
+
+### Server requests and responses
+
+```zig
+const user = try ctx.json(User);       // body -> User
+const dynamic = try ctx.jsonValue();    // body -> std.json.Value
+return ctx.json(user);                  // any value -> JSON response
+return ctx.jsonStatus(422, problem);    // explicit status
+```
+
+`ctx.json(T)` decodes the request body into `T`; `ctx.json(value)` and
+`ctx.jsonStatus(code, value)` serialize a response. Values decoded with
+`ctx.json` and `ctx.jsonValue` borrow the per-request arena and are valid until
+the request completes.
+
+### Dynamic keys
+
+`httpx.json.Value`, `.Object`, and `.Array` are `std.json` aliases. Typed
+accessors read arbitrary keys without parsing by hand:
+
+| Helper | Result |
+|--------|--------|
+| `get(object, key)` | Exact-key lookup |
+| `getIgnoreCase(object, key)` | Header-style case-insensitive lookup |
+| `getString`, `getInt`, `getFloat`, `getBool` | Scalar lookup |
+| `getObject`, `getArray` | Nested container lookup |
+
+```zig
+const parsed = try httpx.json.parse(arena, body);
+const headers = parsed.object;
+const apiKey = httpx.json.getString(&headers, "X-API-Key") orelse "";
+```
+
+### Media types
+
+`httpx.json.isJsonMediaType(value)` accepts `application/json`,
+`text/json`, `application/x-json`, `application/csp-report`, and any valid
+`+json` structured-syntax subtype. Parameters are validated, type tokens are
+case-insensitive, and `httpx.json.classifyMediaType` distinguishes JSON5,
+NDJSON/JSONL, and JSON text sequences for callers that provide the matching
+parser.
 
 ## Cookies
 

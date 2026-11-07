@@ -318,6 +318,26 @@ fn validateRequestOptions(comptime Options: type) void {
     }
 }
 
+/// GraphQL options add only `.operationName` to the standard request options.
+const GraphQLOptions = struct {
+    operationName: ?[]const u8 = null,
+};
+
+fn validateGraphQLOptions(comptime Options: type) void {
+    if (@typeInfo(Options) != .@"struct") @compileError("GraphQL options must be a struct literal");
+    inline for (@typeInfo(Options).@"struct".field_names) |name| {
+        if (comptime !@hasField(RequestOptions, name) and !@hasField(GraphQLOptions, name)) {
+            @compileError("unknown GraphQL option `." ++ name ++ "`");
+        }
+    }
+    if (@hasField(Options, "tls")) {
+        validateNestedOptions("TLS", @FieldType(Options, "tls"), req.TlsOptions);
+    }
+    if (@hasField(Options, "earlyData")) {
+        validateNestedOptions("early-data", @FieldType(Options, "earlyData"), req.EarlyDataOptions);
+    }
+}
+
 pub const Response = req.Response;
 pub const ResponseStream = req.ResponseStream;
 pub const Error = req.Error;
@@ -474,6 +494,60 @@ pub const SitemapApi = struct {
     }
 };
 
+/// Client-side TLS 1.3 session cache. Reached as `client.session`, so cached
+/// resumption state is inspected and managed through explicit `.{}` options:
+///
+/// ```zig
+/// if (client.session.cache("example.com", 443, .{ .alpn = "h3" })) |session| {
+///     defer session.deinit(allocator);
+/// }
+/// ```
+pub const Session = struct {
+    sessions: tlsSessionCache.SessionCache,
+    io: std.Io,
+    defaultTls: req.TlsOptions,
+
+    pub const CacheOptions = struct {
+        /// ALPN protocol the cached session must have negotiated.
+        alpn: []const u8 = "h2",
+        /// TLS policy for this lookup; `null` uses the client default policy.
+        tls: ?req.TlsOptions = null,
+    };
+
+    pub fn init(allocator: Allocator, io: std.Io, default_tls: ?req.TlsOptions) Session {
+        return .{
+            .sessions = tlsSessionCache.SessionCache.init(allocator),
+            .io = io,
+            .defaultTls = default_tls orelse .{},
+        };
+    }
+
+    pub fn deinit(self: *Session) void {
+        self.sessions.deinit();
+    }
+
+    /// Returns an owned copy of a cached session for `host`/`port`, or `null`.
+    /// The caller owns the result and releases it with `ClientSession.deinit`.
+    pub fn cache(self: *Session, host: []const u8, port: u16, opts: anytype) ?tlsSessionCache.ClientSession {
+        const options = configCoerce.to(CacheOptions, opts);
+        const tls = options.tls orelse self.defaultTls;
+        return self.sessions.getWithAlpnPolicy(
+            host,
+            port,
+            @intCast(clock.millisNow(self.io)),
+            options.alpn,
+            req.sessionPolicyFingerprint(tls),
+        );
+    }
+
+    /// Stores an owned copy of `session` for later resumption.
+    pub fn store(self: *Session, host: []const u8, port: u16, session: *const tlsSessionCache.ClientSession, opts: anytype) void {
+        const options = configCoerce.to(CacheOptions, opts);
+        const tls = options.tls orelse self.defaultTls;
+        self.sessions.putWithPolicy(host, port, session, req.sessionPolicyFingerprint(tls));
+    }
+};
+
 /// Pooled HTTP/1.0, HTTP/1.1, HTTP/2, and HTTP/3 client.
 ///
 /// The client owns its connection pool, DNS cache, and TLS session cache and
@@ -498,10 +572,9 @@ pub const Client = struct {
     pool: Pool,
     config: Config,
     dnsCache: ?dnsCache.Cache = null,
-    /// Origin-keyed TLS 1.3 session cache for resumption on the native
-    /// TLS paths (H2-TLS always; HTTPS/1.1 when already native via
-    /// client certificates). Shared across threads; bounded.
-    sessionCache: tlsSessionCache.SessionCache,
+    /// Origin-keyed TLS 1.3 session cache for resumption on the native TLS
+    /// paths. Reached as `client.session`.
+    session: Session,
 
     /// Creates a client from an explicit allocator, shared I/O, and a partial
     /// or full `.{}` config. Omitted fields keep their declared defaults.
@@ -517,7 +590,7 @@ pub const Client = struct {
             .io = io,
             .pool = Pool.init(allocator, io, config.pool),
             .config = config,
-            .sessionCache = tlsSessionCache.SessionCache.init(allocator),
+            .session = Session.init(allocator, io, config.tls),
         };
         if (config.dnsCache.enable) {
             c.dnsCache = dnsCache.Cache.init(
@@ -539,49 +612,7 @@ pub const Client = struct {
     pub fn deinit(self: *Client) void {
         if (self.dnsCache) |*cache| cache.deinit();
         self.pool.deinit();
-        self.sessionCache.deinit();
-    }
-
-    /// Returns an owned copy of a cached TLS session for `host`/`port`/`alpn`
-    /// created under `tlsOpts` (merged over the client default policy), or
-    /// `null` when no usable session is cached.
-    ///
-    /// ```zig
-    /// if (client.cachedSession("example.com", 443, "h3", .{})) |session| {
-    ///     defer session.deinit(allocator);
-    ///     // ...
-    /// }
-    /// ```
-    pub fn cachedSession(
-        self: *Client,
-        host: []const u8,
-        port: u16,
-        alpn: []const u8,
-        tlsOpts: anytype,
-    ) ?tlsSessionCache.ClientSession {
-        const T = @TypeOf(tlsOpts);
-        const base = self.config.tls orelse req.TlsOptions{};
-        const opts: req.TlsOptions = blk: {
-            if (comptime T == @TypeOf(null)) break :blk base;
-            if (comptime @typeInfo(T) == .optional) break :blk tlsOpts orelse base;
-            if (comptime T == req.TlsOptions) break :blk tlsOpts;
-            break :blk req.TlsOptions{
-                .verify = if (@hasField(T, "verify")) tlsOpts.verify else base.verify,
-                .caBundle = if (@hasField(T, "caBundle")) tlsOpts.caBundle else base.caBundle,
-                .caPem = if (@hasField(T, "caPem")) tlsOpts.caPem else base.caPem,
-                .clientCertPem = if (@hasField(T, "clientCertPem")) tlsOpts.clientCertPem else base.clientCertPem,
-                .clientKeyPem = if (@hasField(T, "clientKeyPem")) tlsOpts.clientKeyPem else base.clientKeyPem,
-                .allowTruncation = if (@hasField(T, "allowTruncation")) tlsOpts.allowTruncation else base.allowTruncation,
-            };
-        };
-        const policy = req.sessionPolicyFingerprint(opts);
-        return self.sessionCache.getWithAlpnPolicy(
-            host,
-            port,
-            @intCast(clock.millisNow(self.io)),
-            alpn,
-            policy,
-        );
+        self.session.deinit();
     }
 
     /// GET request. `url` is the first argument; `opts` is request options.
@@ -692,15 +723,42 @@ pub const Client = struct {
     }
 
     /// Executes a GraphQL query or mutation against a remote endpoint.
-    /// `opts` may supply `.timeoutMs`, `.bearerAuth`, `.tls`, etc.
+    ///
+    /// `variables` is either `null`, a pre-encoded JSON object string, or any
+    /// Zig value. Struct variables are serialized with their exact field names,
+    /// so quoted identifiers such as `@"user-id"` reach the server unchanged.
+    /// `opts` may supply `.operationName`, `.headers`, `.timeoutMs`,
+    /// `.bearerAuth`, `.tls`, and the other request options.
     pub fn graphql(self: *Client, url: []const u8, queryStr: []const u8, variables: anytype, opts: anytype) !Response {
+        validateGraphQLOptions(@TypeOf(opts));
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const aa = arena.allocator();
+
+        var payload = try std.json.ObjectMap.init(aa, &.{}, &.{});
+        try payload.put(aa, "query", .{ .string = queryStr });
+
         const VarsType = @TypeOf(variables);
-        const payloadJson = if (VarsType == @TypeOf(null))
-            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = queryStr }, .{})
-        else if (VarsType == []const u8 or VarsType == []u8)
-            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = queryStr, .variables = variables }, .{})
-        else
-            try std.json.Stringify.valueAlloc(self.allocator, .{ .query = queryStr, .variables = variables }, .{});
+        if (VarsType != @TypeOf(null)) {
+            const value: std.json.Value = if (VarsType == []const u8 or VarsType == []u8)
+                std.json.parseFromSliceLeaky(std.json.Value, aa, variables, .{}) catch return error.InvalidGraphQLVariables
+            else blk: {
+                const encoded = std.json.Stringify.valueAlloc(aa, variables, .{}) catch return error.OutOfMemory;
+                break :blk std.json.parseFromSliceLeaky(std.json.Value, aa, encoded, .{}) catch return error.InvalidGraphQLVariables;
+            };
+            try payload.put(aa, "variables", value);
+        }
+
+        if (@hasField(@TypeOf(opts), "operationName")) {
+            const raw = opts.operationName;
+            if (@typeInfo(@TypeOf(raw)) == .optional) {
+                if (raw) |name| try payload.put(aa, "operationName", .{ .string = name });
+            } else {
+                try payload.put(aa, "operationName", .{ .string = raw });
+            }
+        }
+
+        const payloadJson = try std.json.Stringify.valueAlloc(self.allocator, std.json.Value{ .object = payload }, .{});
         defer self.allocator.free(payloadJson);
 
         const gqlHeaders = [_]req.Header{
@@ -828,7 +886,7 @@ pub const Client = struct {
         }
 
         /// Serializes `value` as JSON and sets `Content-Type: application/json`.
-        /// Use `httpx.json.mapped(Schema, value)` to apply a declarative schema.
+        /// Field names are the exact Zig names, quoted identifiers included.
         pub fn json(self: *RequestBuilder, value: anytype) !*RequestBuilder {
             if (self.jsonAllocated) |j| {
                 self.client.allocator.free(j);
@@ -839,12 +897,6 @@ pub const Client = struct {
             self.bodyBytes = jBytes;
             _ = try self.header("content-type", mediaTypeMod.applicationJson);
             return self;
-        }
-
-        /// Serializes `value` through a declarative schema and sets
-        /// `Content-Type: application/json`.
-        pub fn jsonSchema(self: *RequestBuilder, comptime S: type, value: S.Target) !*RequestBuilder {
-            return self.json(jsonMod.mapped(S, value));
         }
 
         /// Sends the buffered request and returns the complete response.
@@ -964,8 +1016,7 @@ pub const Client = struct {
         errdefer outList.deinit(self.allocator);
 
         // 1. Literal IP check (no DNS query needed)
-        var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-        if (probe.parseIp(host)) |parsed| {
+        if (addressMod.Address.parseIp(host)) |parsed| {
             var addr = parsed;
             addr.port = resolveOpts.port;
             const matchesFamily = switch (resolveOpts.family) {
@@ -1423,8 +1474,8 @@ pub const Client = struct {
         defer if (multipartBody) |*b| b.deinit();
         if (comptime @hasField(@TypeOf(opts), "multipart")) {
             if (optionPresent(opts, "multipart")) {
-                const rawOptions = opts.multipart;
-                const mpOptions = if (comptime @typeInfo(@TypeOf(rawOptions)) == .optional) rawOptions.? else rawOptions;
+                const mpOptionsArg = opts.multipart;
+                const mpOptions = if (comptime @typeInfo(@TypeOf(mpOptionsArg)) == .optional) mpOptionsArg.? else mpOptionsArg;
                 var encoder = mpEncoder.init(self.allocator, self.io, mpOptions) catch return Error.WriteFailed;
                 defer encoder.deinit();
                 const ctVal = encoder.contentType(&multipartCtBuf);
@@ -1569,7 +1620,7 @@ pub const Client = struct {
             },
             .dnsCache = if (self.dnsCache) |*cache| cache else null,
             .pool = &self.pool,
-            .sessionCache = &self.sessionCache,
+            .sessionCache = &self.session.sessions,
             .earlyData = blk: {
                 if (@hasField(@TypeOf(opts), "earlyData")) {
                     const v = opts.earlyData;
@@ -1895,8 +1946,7 @@ test "struct headers/query string literals serialize as strings on the wire" {
     var client = Client.init(a, io, .{});
     defer client.deinit();
 
-    var addr: addressMod.Address = undefined;
-    addr = try addr.parseIp("127.0.0.1");
+    var addr = try addressMod.Address.parseIp("127.0.0.1");
     addr.port = 0;
     var listener = try tcp.Listener.bindAddress(io, &addr);
     defer listener.close(io);
@@ -3286,8 +3336,10 @@ test "client get over http3 with 0-rtt early data resumes session" {
     try std.testing.expectEqualStrings("initial-1rtt", res1.body);
 
     // Verify session was captured in client session cache
-    const cachePolicy = req.sessionPolicyFingerprint(.{ .verify = .caBundle, .caPem = certPem });
-    var cached = client.sessionCache.getWithAlpnPolicy("127.0.0.1", port, @intCast(clock.millisNow(client.io)), "h3", cachePolicy);
+    var cached = client.session.cache("127.0.0.1", port, .{
+        .alpn = "h3",
+        .tls = .{ .verify = .caBundle, .caPem = certPem },
+    });
     try std.testing.expect(cached != null);
     if (cached) |*c| {
         c.deinit(a);

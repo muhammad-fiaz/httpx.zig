@@ -15,9 +15,6 @@ try server.use(httpx.middleware.recovery);
 try server.use(httpx.middleware.logging);
 ```
 
-The same values are also reachable under `httpx.web.middleware`
-(`cors`, `helmet`, `recovery`, `logging`, `RateLimiter`).
-
 ## Built-in Middleware
 
 ### `cors`

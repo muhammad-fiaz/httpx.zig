@@ -25,7 +25,7 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // Start a local TLS listener with a self-signed identity.
+    // Self-signed identity, explicit allocator and io, one inline .{} config.
     var listener = try httpx.tls.Listener.init(allocator, io, .{
         .port = 0,
         .defaultIdentity = .{
@@ -34,8 +34,16 @@ pub fn main() !void {
         },
     });
     defer listener.deinit();
+    defer listener.stop();
 
     const port = listener.localPort();
+    const Runner = struct {
+        fn run(l: *httpx.tls.Listener) void {
+            l.run(handler) catch {};
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Runner.run, .{&listener});
+    defer thread.join();
 
     // Development-only client bypass for the self-signed chain.
     var client = httpx.Client.init(allocator, io, .{});
@@ -60,7 +68,7 @@ The byte count reflects the `Served with custom CA cert` body and varies with th
 ## Run
 
 ```bash
-zig build run-tls-mtls
+zig build run-tls-server
 ```
 
 ## Production CA Workflow

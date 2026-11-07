@@ -6,8 +6,7 @@ concurrent client operations and background tasks.
 ## Worker Pool & Concurrent Requests
 
 `httpx.concurrency.Pool` is a fixed-thread, bounded-queue pool with graceful
-drain (`src/concurrency/workerPool.zig`). The same type is aliased as
-`httpx.client.workers`.
+drain (`src/concurrency/workerPool.zig`).
 
 Execute multiple requests concurrently across worker threads:
 

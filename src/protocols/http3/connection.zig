@@ -16,6 +16,7 @@ const frameMod = @import("frame.zig");
 const qpackMod = @import("qpack.zig");
 const varint = @import("../quic/varint.zig");
 const h3stream = @import("stream.zig");
+const versionInfo = @import("../../common/version.zig");
 
 pub const CONTROL_STREAM_TYPE: u64 = 0x00;
 pub const PUSH_STREAM_TYPE: u64 = 0x01;
@@ -1459,7 +1460,7 @@ test "request stream builds decodable request headers" {
     var qenc = qpackMod.Encoder.init(a);
     defer qenc.deinit();
     var rs = RequestStream{ .id = 0, .allocator = a, .qpack = &qenc };
-    const headers = [_]qpackMod.FieldLine{.{ .name = "user-agent", .value = "httpx" }};
+    const headers = [_]qpackMod.FieldLine{.{ .name = "user-agent", .value = versionInfo.userAgent }};
     const encoded = try rs.buildRequestHeaders("GET", "https", "example.test", "/", &headers);
     defer a.free(encoded);
 

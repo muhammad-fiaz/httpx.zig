@@ -33,6 +33,9 @@ pub const Schema = union(enum) {
     integer,
     number,
     boolean,
+    /// Free-form JSON: any object, array, scalar, or null. Serialized as the
+    /// empty schema `{}`, which accepts every JSON value.
+    any,
     /// ISO-ish string date; still a string schema with format hint.
     stringFmt: []const u8,
     array: *const Schema,

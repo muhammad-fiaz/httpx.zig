@@ -47,7 +47,7 @@ builder API.
 | `headers` | `[]const Header` | Slice of request header name/value pairs |
 | `query` | `[]const Header` | URL query parameters automatically encoded |
 | `body` | `?[]const u8` | Raw payload bytes |
-| `json` | `?[]const u8` | JSON string body (sets Content-Type) |
+| `json` | any value | Serialized as JSON using exact Zig field names, quoted identifiers included (sets Content-Type) |
 | `form` | `?[]const u8` | Pre-encoded `application/x-www-form-urlencoded` body |
 | `text` | `?[]const u8` | Plain-text body |
 | `contentType` | `?[]const u8` | Explicit Content-Type override |

@@ -40,7 +40,7 @@ pub fn main() !void {
 
     // POST with typed JSON struct
     var response = try client.post(url, .{
-        .json = CreateUser{ .name = "Alice", .role = "developer" },
+        .json = .{ .name = "Alice", .role = "developer" },
     });
     defer response.deinit();
 

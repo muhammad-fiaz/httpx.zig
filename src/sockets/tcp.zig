@@ -1039,8 +1039,7 @@ fn connectAddressWindows(io: std.Io, addr: *const addressMod.Address) ConnectErr
 /// Connect to an IP-literal host string (dotted quad or IPv6 text).
 /// Hostnames require DNS resolution first (see net/dns.zig).
 pub fn connect(io: std.Io, host: []const u8, port: u16) ConnectError!Socket {
-    var holder = addressMod.Address{ .family = .ip4, .port = 0 };
-    var addr = holder.parseIp(host) catch return ConnectError.HostUnreachable;
+    var addr = addressMod.Address.parseIp(host) catch return ConnectError.HostUnreachable;
     addr.port = port;
     return connectAddress(io, &addr);
 }
@@ -1136,8 +1135,7 @@ test "ipv6 loopback echo" {
     const t = Thread.spawn(.{}, Echo6.run, .{ &l, ctx.io }) catch return;
     defer t.join();
 
-    var holder = addressMod.Address{ .family = .ip4, .port = 0 };
-    var dst = holder.parseIp("::1") catch return;
+    var dst = addressMod.Address.parseIp("::1") catch return;
     dst.port = port;
 
     var s = connectAddress(ctx.io, &dst) catch return;

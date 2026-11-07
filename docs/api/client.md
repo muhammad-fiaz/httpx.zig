@@ -171,7 +171,7 @@ const User = struct { id: u64, name: []const u8, email: []const u8 };
 
 var res2 = try client.post("https://api.example.com/users", .{
     .headers = .{ .Authorization = "Bearer secret_token" },
-    .json = CreateUser{ .name = "Example User", .email = "user@example.com" },
+    .json = .{ .name = "Example User", .email = "user@example.com" },
 });
 defer res2.deinit();
 
@@ -343,8 +343,8 @@ Pass request fields directly to the operation:
 
 ```zig
 var res = try client.get("/users", .{
-    .headers = &.{.{ .name = "Accept", .value = "application/json" }},
-    .query = &.{.{ .name = "page", .value = "1" }},
+    .headers = .{ .Accept = "application/json" },
+    .query = .{ .page = "1" },
     .timeoutMs = 10_000,
     .httpVersion = .http2,
     .followRedirects = true,

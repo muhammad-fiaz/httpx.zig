@@ -244,8 +244,8 @@ pub const Context = struct {
     /// - If `arg` is a `type` (`comptime T: type`), deserializes the request body into `T`.
     ///   Scalars, slices, and nested values borrow `ctx.allocator` (the
     ///   per-request scratch arena) and stay valid until the request ends.
-    ///   Unknown keys are ignored; use [`jsonNamed`] for non-identifier keys
-    ///   and [`jsonValue`] for arbitrary dynamic objects.
+    ///   Field names are matched exactly; use Zig quoted identifiers such as
+    ///   `@"user-name"` for arbitrary keys, and [`jsonValue`] for dynamic objects.
     /// - If `arg` is a value/struct, serializes and returns a JSON `Response` (200 OK).
     pub fn json(self: *const Context, arg: anytype) !if (@TypeOf(arg) == type) arg else Response {
         if (@TypeOf(arg) == type) {
@@ -253,12 +253,6 @@ pub const Context = struct {
         } else {
             return self.jsonStatus(200, arg);
         }
-    }
-
-    /// Decodes the request body into `T` using an explicit comptime key map.
-    /// Values borrow `ctx.allocator` (the per-request scratch arena).
-    pub fn jsonNamed(self: *const Context, comptime T: type, comptime names: anytype) !T {
-        return jsonMod.decodeNamed(T, self.allocator, self.body, names);
     }
 
     /// Parses the request body as a dynamic JSON value. Key lookup preserves
@@ -2509,7 +2503,7 @@ test "forwarded client resolution skips trusted proxy hops" {
     try std.testing.expectEqualStrings("127.0.0.1", all_proxy.remoteAddress().?);
 }
 
-test "context JSON helpers decode typed, renamed, and dynamic keys" {
+test "context JSON helpers decode typed and dynamic keys" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -2519,16 +2513,13 @@ test "context JSON helpers decode typed, renamed, and dynamic keys" {
     };
 
     const Renamed = struct {
-        user_name: []const u8,
-        context: []const u8,
+        @"user-name": []const u8,
+        @"@context": []const u8,
         count: i64,
     };
-    const renamed = try ctx.jsonNamed(Renamed, .{
-        .user_name = "user-name",
-        .context = "@context",
-    });
-    try std.testing.expectEqualStrings("Fiaz", renamed.user_name);
-    try std.testing.expectEqualStrings("https://example.com", renamed.context);
+    const renamed = try ctx.json(Renamed);
+    try std.testing.expectEqualStrings("Fiaz", renamed.@"user-name");
+    try std.testing.expectEqualStrings("https://example.com", renamed.@"@context");
     try std.testing.expectEqual(@as(i64, 3), renamed.count);
 
     const Typed = struct { count: i64 };

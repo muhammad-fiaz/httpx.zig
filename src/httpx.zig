@@ -1,6 +1,4 @@
-//! httpx.zig - Batteries-included native Zig networking library.
-//!
-//! One library. One coherent API.
+//! httpx.zig - native Zig networking library: client, server, protocols.
 //!
 //! Layers (bottom -> top):
 //!   common/     - shared primitives (errors, status, headers, URI, methods, logging)
@@ -85,7 +83,7 @@ pub const net = struct {
     pub const proxy = @import("net/proxy.zig");
 };
 
-// Protocol implementations are reachable through one coherent namespace.
+// Protocol implementations.
 pub const protocols = struct {
     pub const common = struct {
         pub const integer = @import("protocols/common/integer.zig");
@@ -172,10 +170,9 @@ pub const http2 = protocols.http2;
 pub const http3 = protocols.http3;
 pub const quic = protocols.quic;
 pub const tls = protocols.tls;
-/// Compression negotiation and codec helpers used by the client and server.
+/// Compression codecs and content negotiation.
 pub const compression = @import("compression/codec.zig");
-/// Multipart encoding and decoding implementation. Client operations also
-/// consume the same encoder internally through `.multipart` request options.
+/// Multipart encoding and decoding.
 pub const multipart = struct {
     const encoderMod = @import("web/multipart/multipartEncoder.zig");
     const parserMod = @import("web/multipart/multipartParser.zig");
@@ -219,8 +216,7 @@ pub const multipart = struct {
     // Server-side parsing namespace
     pub const server = serverMod;
 };
-/// Content negotiation and compression codecs used by the client and server.
-/// Authentication helpers shared by client and server integrations.
+/// Authentication helpers shared by client and server.
 pub const auth = struct {
     pub const basic = @import("web/auth/basicAuth.zig");
     pub const bearer = @import("web/auth/bearerAuth.zig");
@@ -284,19 +280,20 @@ test "multipart hierarchical encoder and decoder APIs share implementations" {
 // Canonical router exports
 pub const router = @import("web/router/router.zig");
 pub const Router = router.Router;
+/// Request context passed to every route handler. Identical to
+/// `httpx.router.Context`; the short `httpx.Context` spelling is kept.
+pub const Context = router.Context;
 
 // Canonical root types
 pub const Client = @import("client/httpClient.zig").Client;
 pub const Server = server.Server;
+/// Client-side HTTP response (what `Client.get` and friends return).
+/// Server handlers return `httpx.router.Response` instead.
 pub const Response = @import("client/requestBuilder.zig").Response;
 pub const Headers = headers.Headers;
 pub const Method = method.Method;
 pub const Status = status.Status;
 pub const Uri = uri.Uri;
-pub const Downloader = @import("client/download/downloadManager.zig").Downloader;
-pub const DownloadResult = @import("client/download/downloadManager.zig").DownloadResult;
-pub const DownloadTask = @import("client/download/downloadManager.zig").DownloadTask;
-pub const download = @import("client/download/downloadManager.zig");
 
 // Web framework
 pub const sse = struct {
@@ -362,8 +359,6 @@ pub const Rest = rest.Rest;
 pub const Schema = rest.Schema;
 pub const Empty = rest.Empty;
 pub const JsonSchema = rest.JsonSchema;
-pub const app = @import("web/app.zig");
-pub const App = app.App;
 pub const openapi = @import("web/openApi/openApiSpec.zig");
 pub const docs = @import("web/docs/docs.zig");
 pub const graphql = @import("web/graphql/graphql.zig");
@@ -383,45 +378,6 @@ pub const middleware = struct {
     pub const generateCsrfToken = sec.generateCsrfToken;
     pub const verifyCsrfToken = sec.verifyCsrfToken;
     pub const CSRF_TOKEN_LEN = sec.CSRF_TOKEN_LEN;
-};
-
-// Web framework facade
-pub const web = struct {
-    pub const router = @import("web/router/router.zig");
-    pub const static = @import("web/staticFiles/staticFileServer.zig");
-    pub const spa = @import("web/spa/spaServer.zig");
-    pub const watcher = @import("web/watcher/watcherBackend.zig");
-    pub const watcherEvents = @import("web/watcher/watcherEvents.zig");
-    pub const watcherDependency = @import("web/watcher/watcherDependency.zig");
-    pub const reload = @import("web/watcher/fileWatcher.zig");
-    pub const templates = @import("web/templates/templates.zig");
-    pub const TemplateEngine = @import("web/templates/templates.zig").Engine;
-    pub const assets = @import("web/assets/assetStore.zig");
-    pub const site = @import("web/site/siteServer.zig");
-    pub const websocket = struct {
-        pub const Handshake = @import("web/websocket/websocketHandshake.zig");
-        pub const Frame = @import("web/websocket/websocketFrame.zig");
-        pub const deflate = @import("web/websocket/websocketDeflate.zig");
-        pub const computeAccept = Handshake.computeAccept;
-        pub const buildUpgradeRequest = Handshake.buildUpgradeRequest;
-    };
-    pub const health = @import("web/health/healthEndpoints.zig");
-    pub const metrics = @import("web/metrics/metricsRegistry.zig");
-    pub const rest = @import("web/rest/api.zig");
-    pub const json = @import("common/json.zig");
-    pub const app = @import("web/app.zig");
-    pub const openapi = @import("web/openApi/openApiSpec.zig");
-    pub const docs = @import("web/docs/docs.zig");
-    pub const graphql = @import("web/graphql/graphql.zig");
-    pub const middleware = struct {
-        const sec = @import("web/middleware/securityHeaders.zig");
-        pub const cors = sec.corsMiddleware;
-        pub const helmet = sec.securityHeadersMiddleware;
-        pub const recovery = sec.recoveryMiddleware;
-        pub const logging = sec.loggingMiddleware;
-        pub const csrf = sec.csrfMiddleware;
-        pub const RateLimiter = sec.RateLimiter;
-    };
 };
 
 // Client API. Shallow, concise, camelCase public paths with zero semantic repetition.
@@ -445,7 +401,6 @@ pub const client = struct {
     pub const body = requestBuilderMod.BodySource;
     pub const bodyKind = requestBuilderMod.BodyKind;
     pub const stream = requestBuilderMod.ResponseStream;
-    pub const sessionPolicyFingerprint = requestBuilderMod.sessionPolicyFingerprint;
 
     // Connection pool: httpx.client.pool
     pub const pool = poolMod.Pool;
@@ -455,24 +410,23 @@ pub const client = struct {
     pub const cookie = cookieMod.Cookie;
     pub const sameSite = cookieMod.Cookie.SameSite;
 
-    // Concurrency workers: httpx.client.workers
-    pub const workers = @import("concurrency/workerPool.zig").Pool;
+    // HTTP download engine: httpx.client.download
+    pub const download = struct {
+        pub const Result = downloadMod.DownloadResult;
+        pub const Task = downloadMod.DownloadTask;
+        pub const Error = downloadMod.DownloadError;
+        pub const FileInfo = downloadMod.RemoteFileInfo;
+        pub const Progress = downloadMod.ProgressInfo;
+        pub const ProgressState = downloadMod.ProgressState;
+        pub const ProgressMode = downloadMod.ProgressMode;
+        pub const ChecksumAlgorithm = downloadMod.ChecksumAlgorithm;
+        pub const ExistingFilePolicy = downloadMod.ExistingFilePolicy;
+        pub const parseChecksumFile = downloadMod.parseChecksumFile;
+        pub const verifyFile = downloadMod.verifyFile;
+    };
 
-    // Download manager: httpx.client.download
-    pub const Downloader = downloadMod.Downloader;
-    pub const DownloadResult = downloadMod.DownloadResult;
-    pub const DownloadTask = downloadMod.DownloadTask;
-    pub const DownloadError = downloadMod.DownloadError;
-    pub const download = downloadMod.Downloader;
-    pub const RemoteFileInfo = downloadMod.RemoteFileInfo;
-    pub const ProgressState = downloadMod.ProgressState;
-    pub const ProgressInfo = downloadMod.ProgressInfo;
-    pub const ProgressMode = downloadMod.ProgressMode;
-    pub const ChecksumAlgorithm = downloadMod.ChecksumAlgorithm;
-    pub const ftpDownload = downloadMod.ftpDownload;
-    pub const parseChecksumFile = downloadMod.parseChecksumFile;
-    pub const lookupFileInfo = downloadMod.lookupFileInfo;
-    pub const updateFile = downloadMod.updateFile;
+    // FTP client: `httpx.client.ftp.init(allocator, io, .{})`
+    pub const ftp = downloadMod.Ftp;
 };
 
 test "client facade keeps configuration and request option types private" {
@@ -495,7 +449,7 @@ test "client facade keeps configuration and request option types private" {
 }
 
 // Parsing & inspection subsystem
-/// Native HTML, XML, RSS/Atom/JSON feeds, robots.txt, and sitemap parsing engine.
+/// HTML, XML, feed, robots, and sitemap parsing.
 pub const parsing = struct {
     pub const dom = @import("parsing/dom.zig");
     pub const html = @import("parsing/html.zig");
@@ -527,7 +481,6 @@ pub const parsing = struct {
     pub const SitemapUrl = sitemap.SitemapUrl;
     pub const ChangeFreq = sitemap.ChangeFreq;
     pub const Selector = selector.Selector;
-    // Unified Parser constructor with allocator and optional options
     pub fn init(allocator: std.mem.Allocator, config: Config) document.Parser {
         return document.Parser.init(allocator, config);
     }
@@ -565,10 +518,7 @@ pub const Address = net.address.Address;
 
 // Tests
 test {
-    // Referencing a module (not just its namespace) is what makes
-    // `zig build test` discover the tests inside it. Each entry below is
-    // a module reachable from the declarations above, so the whole suite
-    // stays one list with no duplicated import paths.
+    // Module references make `zig build test` discover nested tests.
     _ = common.clock;
     _ = common.sync;
     _ = common.io;
@@ -664,7 +614,6 @@ test {
     _ = health;
     _ = metrics;
     _ = rest;
-    _ = app;
     _ = openapi;
     _ = docs;
     _ = graphql;
@@ -696,8 +645,7 @@ test {
 
 test "tint is wired directly and independently of loaders" {
     const testing = std.testing;
-    // The tint package is a direct dependency: this uses its namespaced
-    // API without going through loaders.
+    // `tint` is a direct dependency, used through its namespaced API.
     try testing.expectEqualStrings("\x1b[31m", tint.color.ansi4.red.fg().slice());
     try testing.expectEqualStrings("\x1b[32m", tint.color.ansi4.green.fg().slice());
     try testing.expectEqualStrings("\x1b[0m", tint.ansi.reset.all);
@@ -770,9 +718,15 @@ test "public facade exposes non-redundant canonical namespaces and types" {
     try testing.expect(@sizeOf(client.pool) > 0);
     try testing.expect(@sizeOf(client.jar) > 0);
     try testing.expect(@sizeOf(client.cookie) > 0);
-    try testing.expect(@sizeOf(client.download) > 0);
+    try testing.expect(@sizeOf(client.download.Result) > 0);
+    try testing.expect(@sizeOf(client.download.Task) > 0);
+    try testing.expect(@sizeOf(client.download.Progress) > 0);
     try testing.expect(@sizeOf(client.stream) > 0);
-    try testing.expect(@sizeOf(client.workers) > 0);
+    try testing.expect(@hasDecl(client.download, "parseChecksumFile"));
+    try testing.expect(@hasDecl(client.ftp, "init"));
+    try testing.expect(!@hasDecl(client.ftp, "Client"));
+    try testing.expect(!@hasDecl(client.ftp, "ftpDownload"));
+    try testing.expect(!@hasDecl(client, "Downloader"));
 
     // Root namespaces
     try testing.expect(@sizeOf(http1.parser.Options) > 0);

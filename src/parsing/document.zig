@@ -246,9 +246,14 @@ pub const Document = struct {
     allocator: Allocator,
     arena: std.heap.ArenaAllocator,
     tree: Tree,
+    /// Borrowed source text. `parse*` methods do not copy it, so the caller
+    /// must keep the input alive for the document's lifetime. `parseStream`
+    /// allocates the source inside `arena` and owns it.
     source: []const u8,
     kind: ContentKind,
 
+    /// Releases the DOM arena and every value returned by document methods.
+    /// Borrowed handles and extractor results become invalid.
     pub fn deinit(self: *Document) void {
         self.arena.deinit();
     }
@@ -412,6 +417,8 @@ pub const Parser = struct {
     allocator: Allocator,
     config: ParserConfig,
 
+    /// Creates a stateless parser. The parser itself allocates nothing;
+    /// returned documents own an arena backed by `allocator`.
     pub fn init(allocator: Allocator, config: ParserConfig) Parser {
         return .{
             .allocator = allocator,

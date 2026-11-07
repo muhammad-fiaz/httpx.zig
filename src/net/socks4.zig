@@ -68,8 +68,7 @@ fn connectInternal(
     userId: ?[]const u8,
     isStream: bool,
 ) !tcpMod.Socket {
-    var probe = addressMod.Address{ .family = .ip4, .port = 0 };
-    var sock = if (probe.parseIp(proxyHost)) |parsed| blk: {
+    var sock = if (addressMod.Address.parseIp(proxyHost)) |parsed| blk: {
         var addr = parsed;
         addr.port = proxyPort;
         if (isStream) {

@@ -120,18 +120,18 @@ pub const UnionTypeDef = struct {
 /// The built-in GraphQL scalars, reported by introspection as `SCALAR`.
 const builtinScalars = [_][]const u8{ "Int", "Float", "String", "Boolean", "ID" };
 
-// Schema-based public API (same style as httpx.json.Schema / httpx.Schema(T)):
-// types come from Zig structs, every field is explicit, and no raw GraphQL
-// type-name strings ever appear in user code.
+// Typed public API: types come from Zig structs, every field is explicit, and
+// no raw GraphQL type-name strings ever appear in user code.
 //
 // ```zig
 // const User = struct { id: u64, name: []const u8 };
-// const UserType = httpx.graphql.Type("User", User, .{
-//     .id = scalar.id,
-//     .name = scalar.string,
+// const UserType = httpx.graphql.Type("User", .{
+//     .id = Scalar.id,
+//     .name = Scalar.string,
 // });
 //
 // fn getMe(ctx: *httpx.graphql.Context) !User {
+//     _ = ctx;
 //     return .{ .id = 1, .name = "alice" };
 // }
 //
@@ -393,15 +393,13 @@ fn rootType(comptime typeName: []const u8, comptime spec: anytype) ObjectTypeDef
     return .{ .name = typeName, .fields = &fields };
 }
 
-/// Defines an object type from a Zig struct and a per-field spec. Every
-/// field of the struct must have an explicit entry; spec fields that are not
-/// on the struct are computed fields. Scalars are the enum values themselves,
-/// fully explicit: `Scalar.id`, `Scalar.string`, `Scalar.int`,
-/// `Scalar.float`, `Scalar.boolean`.
+/// Defines an object type from an explicit per-field spec. Every field is
+/// listed with its type; scalars are the enum values themselves, fully
+/// explicit: `Scalar.id`, `Scalar.string`, `Scalar.int`, `Scalar.float`,
+/// `Scalar.boolean`.
 ///
 /// ```zig
-/// const User = struct { id: []const u8, name: []const u8 };
-/// const UserType = httpx.graphql.Type("User", User, .{
+/// const UserType = httpx.graphql.Type("User", .{
 ///     .id = Scalar.id,
 ///     .name = Scalar.string,
 /// });
@@ -498,11 +496,6 @@ pub const SchemaConfig = struct {
     maxDepth: usize = 32,
     maxComplexity: usize = 500,
     introspection: bool = true,
-    enableIntrospection: ?bool = null,
-
-    pub fn isIntrospectionEnabled(self: SchemaConfig) bool {
-        return self.enableIntrospection orelse self.introspection;
-    }
 };
 
 pub const Schema = struct {
@@ -657,7 +650,7 @@ pub const Schema = struct {
         userCtx: ?*anyopaque,
     ) !std.json.Value {
         // Introspection handling
-        if (self.config.isIntrospectionEnabled()) {
+        if (self.config.introspection) {
             if (std.mem.eql(u8, field.name, "__typename")) {
                 return std.json.Value{ .string = objDef.name };
             }

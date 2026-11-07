@@ -67,8 +67,8 @@ pool.join();
 | Option | Type | Default | Purpose |
 |---|---|---:|---|
 | `path` | `[]const u8` | `""` | Destination path or directory |
-| `existing` | `ExistingFilePolicy` | `.overwrite` | Behavior when the destination exists |
-| `progress` | `ProgressMode` | `.auto` | Progress reporting mode |
+| `existing` | `Existing` | `.overwrite` | Behavior when the destination exists |
+| `progress` | `Progress` | `.auto` | Progress reporting mode |
 | `atomic` | `bool` | `true` | Download to a temporary file before replacement |
 | `createDirs` | `bool` | `true` | Create missing parent directories |
 | `maxRetries` | `u32` | `3` | Retry attempts |

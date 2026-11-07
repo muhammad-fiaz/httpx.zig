@@ -17,8 +17,8 @@ GraphiQL uses the configured GraphQL endpoint.
 
 Documentation routes are enabled by `Server.Config.enableDocs` and configured
 with `Server.Config.docs`. Each interface has `enabled`, `route`, and `title`
-fields, its own explicit vendor options, and a raw JSON passthrough
-(`rawOptions`, or `rawConfiguration` for Scalar) merged last.
+fields plus explicit, typed vendor options. Every option is a typed field with
+a declared default; there is no string-based passthrough.
 
 ## Options
 
@@ -54,7 +54,7 @@ var server = try httpx.Server.init(allocator, io, .{
             .graphqlEndpoint = "/graphql",
             .defaultQuery = "{ __typename }",
             .editorTheme = "vs-dark",
-            .headers = "{\"Authorization\":\"Bearer token\"}",
+            .headers = .{ .authorization = "Bearer token" },
         },
     },
 });
@@ -63,14 +63,13 @@ defer server.deinit();
 
 | Interface | Modeled options |
 |---|---|
-| Swagger UI | `docExpansion`, `deepLinking`, `displayOperationId`, `displayRequestDuration`, `filter`, `persistAuthorization`, `tryItOutEnabled`, `defaultModelsExpandDepth`, `oauth2RedirectUrl`, `rawOptions` |
-| ReDoc | `hideHostname`, `hideDownloadButton`, `hideFab`, `expandResponses`, `pathInMiddlePanel`, `requiredPropsFirst`, `sortPropsAlphabetically`, `noAutoAuth`, `disableSearch`, `rawOptions` |
-| Scalar | `theme`, `darkMode`, `hideModels`, `hideDownloadButton`, `hideTestRequestButton`, `isEditable`, `showSidebar`, `rawConfiguration` |
-| GraphiQL | `graphqlEndpoint`, `defaultQuery`, `editorTheme`, `headers`, `rawOptions` |
+| Swagger UI | `docExpansion`, `defaultModelRendering`, `defaultModelsExpandDepth`, `defaultModelExpandDepth`, `deepLinking`, `displayOperationId`, `displayRequestDuration`, `filter`, `persistAuthorization`, `tryItOutEnabled`, `showExtensions`, `showCommonExtensions`, `showMutatedRequest`, `withCredentials`, `useUnsafeMarkdown`, `requestSnippetsEnabled`, `maxDisplayedTags`, `validatorUrl`, `supportedSubmitMethods`, `oauth2RedirectUrl` |
+| ReDoc | `hideHostname`, `hideDownloadButton`, `hideFab`, `hideLoading`, `hideLogo`, `hideSecuritySection`, `expandResponses`, `pathInMiddlePanel`, `requiredPropsFirst`, `sortPropsAlphabetically`, `sortEnumValuesAlphabetically`, `noAutoAuth`, `disableSearch`, `nativeScrollbars`, `onlyRequiredInSamples`, `menuToggle`, `jsonSampleExpandLevel`, `generatedPayloadSamplesMaxDepth`, `scrollYOffset` |
+| Scalar | `theme`, `darkMode`, `hideModels`, `hideDownloadButton`, `hideTestRequestButton`, `hideClientButton`, `isEditable`, `showSidebar`, `showDeveloperTools`, `defaultOpenAllTags`, `telemetry`, `persistAuth`, `withDefaultFonts`, `searchHotKey`, `proxyUrl`, `customCss` |
+| GraphiQL | `graphqlEndpoint`, `defaultQuery`, `editorTheme`, `headers`, `shouldPersistHeaders`, `inputValueDeprecation`, `schemaDescription`, `docExplorerOpen`, `isHeadersEditorEnabled` |
 
 Options are emitted into each page as JSON, so every value reaches the bundled
-UI rather than staying a dead field. Raw JSON must be an object; invalid input
-fails the mount with `error.InvalidOptionsJson`.
+UI rather than staying a dead field.
 
 The bundles are served locally and do not require a CDN. See the
 [Documentation UI API](/api/ui) for configuration types and the individual

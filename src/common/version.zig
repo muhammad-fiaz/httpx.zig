@@ -12,23 +12,18 @@ const std = @import("std");
 
 pub const name = "httpx";
 pub const version = "0.2.4";
-pub const userAgent = "httpx/0.2.4";
+/// Default `User-Agent` value sent by the built-in client.
+pub const userAgent = name ++ "/" ++ version;
 
+/// Default metadata for generated API documentation and the `Server` header.
 pub const Info = struct {
     title: []const u8 = "HTTPX API",
-    version: []const u8 = "0.2.4",
+    version: []const u8 = version,
     description: []const u8 = "Fast, modern web framework for Zig with automated OpenAPI & GraphQL documentation.",
 };
 
 pub const defaultInfo: Info = .{};
 
-/// Server header value, e.g. "httpx/0.2.4".
-pub fn serverToken(buf: []u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ name, version }) catch "";
-}
-
-test "server token format" {
-    var buf: [32]u8 = undefined;
-    try std.testing.expectEqualStrings("httpx/0.2.4", serverToken(&buf));
+test "version identity" {
     try std.testing.expectEqualStrings("httpx/0.2.4", userAgent);
 }

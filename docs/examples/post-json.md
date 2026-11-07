@@ -24,7 +24,7 @@ pub fn main() !void {
 
     var response = try client.post("https://httpbun.com/post", .{
         .method = .POST,
-        .json = CreateUser{ .name = "Alice", .role = "developer" },
+        .json = .{ .name = "Alice", .role = "developer" },
     });
     defer response.deinit();
 

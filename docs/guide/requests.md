@@ -103,6 +103,7 @@ _ = try builder.query("page", "2");
 _ = builder.timeoutMs(5000);
 _ = builder.bearerAuth("bearer-jwt-token");
 _ = try builder.json(.{ .user = "Alice", .active = true });
+_ = try builder.json(user);
 
 var response = try builder.send();
 defer response.deinit();

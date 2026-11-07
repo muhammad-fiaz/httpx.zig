@@ -11,9 +11,9 @@ available separately for method-chained assembly:
 
 ```zig
 var res = try client.post("https://api.example.com/data", .{
-    .headers = &.{.{ .name = "Accept", .value = "application/json" }},
+    .headers = .{ .Accept = "application/json" },
     .json = "{\"foo\":\"bar\"}",
-    .query = &.{.{ .name = "page", .value = "1" }},
+    .query = .{ .page = "1" },
     .bearerAuth = "token",
     .timeoutMs = 10_000,
 });

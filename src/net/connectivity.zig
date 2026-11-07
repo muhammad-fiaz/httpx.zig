@@ -64,8 +64,7 @@ const probes: []const Probe = &.{
 
 /// Parse a dotted-decimal IPv4 or a colon-hex IPv6 literal into an Address.
 fn parseIpLiteral(ip: []const u8, port: u16, family: addressMod.Family) ?addressMod.Address {
-    const scratch = addressMod.Address{ .family = family, .port = port };
-    var addr = scratch.parseIp(ip) catch return null;
+    var addr = addressMod.Address.parseIp(ip) catch return null;
     if (addr.family != family) return null;
     addr.port = port;
     return addr;

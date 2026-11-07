@@ -404,7 +404,6 @@ whitespace control, and autoescaping. Deliberate boundaries:
 * Zig values convert structurally (structs, slices, arrays, optionals);
   Zig functions are not callable from templates — expose behavior
   through `addGlobal` instead.
-* `{% do %}` and `{% trans %}` are not implemented.
 * `format` supports `%s %d %i %u %f %c %x %X %o %%` with width,
   precision, and flags; `%e/%g` reject explicit precision.
 

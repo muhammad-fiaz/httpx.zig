@@ -470,8 +470,7 @@ const Session = struct {
             try self.reply("501 Invalid EPRT");
             return true;
         };
-        var base = addressMod.Address{ .family = .ip4, .port = 0 };
-        var addr = base.parseIp(arg[familyEnd + 1 .. hostEnd]) catch {
+        var addr = addressMod.Address.parseIp(arg[familyEnd + 1 .. hostEnd]) catch {
             try self.reply("501 Invalid EPRT");
             return true;
         };

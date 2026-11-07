@@ -39,24 +39,29 @@ defer server.deinit();
 | `hideModels` | `bool` | `false` | Hide the models section |
 | `hideDownloadButton` | `bool` | `false` | Hide the download button |
 | `hideTestRequestButton` | `bool` | `false` | Hide the “Test request” button |
+| `hideClientButton` | `bool` | `false` | Hide the client button |
 | `isEditable` | `bool` | `false` | Allow editing the OpenAPI document |
 | `showSidebar` | `bool` | `true` | Show the sidebar navigation |
-| `rawConfiguration` | `?[]const u8` | `null` | Extra configuration as a JSON object, merged last |
+| `showDeveloperTools` | `bool` | `false` | Show developer tools |
+| `defaultOpenAllTags` | `bool` | `false` | Expand every tag by default |
+| `telemetry` | `bool` | `true` | Enable anonymous telemetry |
+| `persistAuth` | `bool` | `false` | Persist authentication data |
+| `withDefaultFonts` | `bool` | `true` | Load bundled default fonts |
+| `searchHotKey` | `[]const u8` | `"k"` | Search hotkey |
+| `proxyUrl` | `[]const u8` | `""` | Proxy URL for try-it-out requests |
+| `customCss` | `[]const u8` | `""` | Custom CSS injected into the page |
 
 The options are written into the page's `data-configuration` JSON on the
 `#api-reference` element, which is how `standalone.js` reads its
-configuration. `rawConfiguration` covers options that are not modeled as
-fields:
+configuration:
 
 ```zig
 .scalar = .{
     .route = "/reference",
-    .rawConfiguration = "{\"withDefaultFonts\":false,\"defaultOpenAllTags\":true}",
+    .withDefaultFonts = false,
+    .defaultOpenAllTags = true,
 },
 ```
-
-Raw keys are merged last and must form a JSON object, otherwise the mount
-returns `error.InvalidOptionsJson`.
 
 Scalar reads the same `/openapi.json` document as Swagger UI and ReDoc.
 

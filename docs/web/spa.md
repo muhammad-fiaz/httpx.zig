@@ -50,7 +50,7 @@ HTTPX uses an explicit, controlled SPA fallback policy rather than returning `in
 ## Configuration Options
 
 ```zig
-try httpx.web.spa.register(&server.router, .{
+try httpx.static.spa.register(&server.router, .{
     .root = "./dist",
     .fallback = "index.html",
     .mount = "/",

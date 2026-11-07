@@ -12,19 +12,23 @@
 //!    directly, because JSON keys are arbitrary strings and are preserved
 //!    exactly as received.
 //!
-//! 3. **Explicit key mapping.** [`decodeNamed`] / [`encodeNamed`] take a
-//!    comptime rename map and map Zig fields onto any JSON key:
+//! 3. **Exact struct typing.** [`decode`] and [`encode`] use the Zig field
+//!    names verbatim. Any JSON key is representable as a struct field through
+//!    Zig's quoted identifiers, so no key-mapping layer is needed:
 //!
 //!    ```zig
-//!    const User = struct { user_name: []const u8, context: []const u8 };
-//!    const names = .{ .user_name = "user-name", .context = "@context" };
-//!    const user = try httpx.json.decodeNamed(User, arena, body, names);
-//!    const wire = try httpx.json.encodeNamed(allocator, user, names);
+//!    const User = struct {
+//!        @"user-name": []const u8,
+//!        @"@context": []const u8,
+//!        @"123user": []const u8,
+//!    };
+//!    const user = try httpx.json.decode(User, arena, body);
+//!    const wire = try httpx.json.encode(allocator, user);
 //!    ```
 //!
-//!    Unmapped fields keep their Zig name, optional fields accept `null` and
-//!    absence, and unknown JSON keys are always ignored so a producer can add
-//!    fields without breaking consumers.
+//!    Optional fields accept `null` and absence, fields with Zig defaults are
+//!    optional on input, and unknown JSON keys are ignored so a producer can
+//!    add fields without breaking consumers.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -151,35 +155,23 @@ pub const DecodeError = Allocator.Error || error{
     UnsupportedType,
 };
 
-/// JSON key for a Zig field. `names` is a comptime rename map such as
-/// `.{ .user_name = "user-name", .context = "@context" }`; fields absent from
-/// the map keep their Zig name.
-pub fn keyFor(comptime names: anytype, comptime field: []const u8) []const u8 {
-    if (@typeInfo(@TypeOf(names)) == .@"struct" and @hasField(@TypeOf(names), field)) {
-        return @field(names, field);
-    }
-    return field;
-}
-
-/// True when `names` maps at least one field, used to pick the fast path.
-pub fn hasNames(comptime names: anytype) bool {
-    return @typeInfo(@TypeOf(names)) == .@"struct" and @typeInfo(@TypeOf(names)).@"struct".field_names.len > 0;
-}
-
-/// Decodes a JSON document into `T` using Zig field names.
+/// Decodes a JSON document into `T` using the exact Zig field names.
 pub fn decode(comptime T: type, arena: Allocator, source: []const u8) DecodeError!T {
-    return decodeNamed(T, arena, source, .{});
-}
-
-/// Decodes a JSON document into `T`, mapping fields through `names`.
-pub fn decodeNamed(comptime T: type, arena: Allocator, source: []const u8, comptime names: anytype) DecodeError!T {
     const value = try parse(arena, source);
-    return fromValue(T, arena, value, names);
+    return decodeValue(T, arena, value);
 }
 
-/// Converts an already-parsed JSON value into `T`, mapping fields through `names`.
-pub fn fromValue(comptime T: type, arena: Allocator, value: Value, comptime names: anytype) DecodeError!T {
+fn decodeValue(comptime T: type, arena: Allocator, value: Value) DecodeError!T {
     if (T == Value) return value;
+    // Dynamic containers are returned as-is so callers can keep arbitrary keys.
+    if (T == Object) return switch (value) {
+        .object => |object| object,
+        else => error.UnexpectedToken,
+    };
+    if (T == Array) return switch (value) {
+        .array => |array| array,
+        else => error.UnexpectedToken,
+    };
     return switch (@typeInfo(T)) {
         .bool => switch (value) {
             .bool => |b| b,
@@ -196,7 +188,7 @@ pub fn fromValue(comptime T: type, arena: Allocator, value: Value, comptime name
             .number_string => |s| std.fmt.parseFloat(T, s) catch error.InvalidValue,
             else => error.UnexpectedToken,
         },
-        .optional => |opt| if (value == .null) null else try fromValue(opt.child, arena, value, names),
+        .optional => |opt| if (value == .null) null else try decodeValue(opt.child, arena, value),
         .@"enum" => |en| blk: {
             _ = en;
             const text = switch (value) {
@@ -210,7 +202,6 @@ pub fn fromValue(comptime T: type, arena: Allocator, value: Value, comptime name
             if (ptr.child == u8) {
                 break :blk switch (value) {
                     .string => |s| s,
-                    .null => "",
                     else => error.UnexpectedToken,
                 };
             }
@@ -219,7 +210,7 @@ pub fn fromValue(comptime T: type, arena: Allocator, value: Value, comptime name
                 else => return error.UnexpectedToken,
             };
             const out = try arena.alloc(ptr.child, items.len);
-            for (items, 0..) |item, i| out[i] = try fromValue(ptr.child, arena, item, names);
+            for (items, 0..) |item, i| out[i] = try decodeValue(ptr.child, arena, item);
             break :blk out;
         },
         .array => |arr| blk: {
@@ -230,19 +221,20 @@ pub fn fromValue(comptime T: type, arena: Allocator, value: Value, comptime name
             };
             if (items.len != arr.len) return error.InvalidValue;
             var out: T = undefined;
-            for (items, 0..) |item, i| out[i] = try fromValue(arr.child, arena, item, names);
+            for (items, 0..) |item, i| out[i] = try decodeValue(arr.child, arena, item);
             break :blk out;
         },
         .@"struct" => |st| blk: {
-            const obj = switch (value) {
+            const object = switch (value) {
                 .object => |o| o,
                 else => return error.UnexpectedToken,
             };
             var out: T = undefined;
             inline for (st.field_names, st.field_types, st.field_attrs) |fname, FType, fattrs| {
-                const key = comptime keyFor(names, fname);
-                if (obj.get(key)) |fieldValue| {
-                    @field(out, fname) = try fromValue(FType, arena, fieldValue, names);
+                // `fname` is the exact Zig field name, including quoted
+                // identifiers such as `@"user-name"` or `@"@context"`.
+                if (object.get(fname)) |parsed| {
+                    @field(out, fname) = try decodeValue(FType, arena, parsed);
                 } else if (comptime @typeInfo(FType) == .optional) {
                     @field(out, fname) = null;
                 } else if (fattrs.default_value_ptr != null) {
@@ -258,48 +250,55 @@ pub fn fromValue(comptime T: type, arena: Allocator, value: Value, comptime name
     };
 }
 
-/// Converts any Zig value into a JSON value, mapping fields through `names`.
-pub fn toValue(comptime T: type, arena: Allocator, value: T, comptime names: anytype) DecodeError!Value {
+/// Serializes any Zig value to compact JSON using its exact field names.
+pub fn encode(allocator: Allocator, value: anytype) DecodeError![]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const dynamic = try encodeValueTyped(@TypeOf(value), arena.allocator(), value);
+    return std.json.Stringify.valueAlloc(allocator, dynamic, .{}) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+/// Encodes any Zig value with `std.json`. Kept as the generic escape hatch for
+/// values that do not need the explicit typed conversion used by [`encode`].
+pub fn encodeAny(allocator: Allocator, value: anytype) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, value, .{});
+}
+
+fn encodeValueTyped(comptime T: type, arena: Allocator, value: T) DecodeError!Value {
     if (T == Value) return value;
+    if (T == Object) return .{ .object = value };
+    if (T == Array) return .{ .array = value };
     return switch (@typeInfo(T)) {
         .null => .null,
         .bool => .{ .bool = value },
         .int, .comptime_int => .{ .integer = std.math.cast(i64, value) orelse return error.InvalidValue },
         .float, .comptime_float => .{ .float = @floatCast(value) },
         .@"enum" => .{ .string = @tagName(value) },
-        .optional => if (value) |inner| try toValue(@TypeOf(inner), arena, inner, names) else .null,
+        .optional => if (value) |inner| try encodeValueTyped(@TypeOf(inner), arena, inner) else .null,
         .pointer => |ptr| blk: {
             if (ptr.size != .slice) return error.UnsupportedType;
             if (ptr.child == u8) break :blk .{ .string = value };
             var out: Array = .init(arena);
-            for (value) |item| try out.append(try toValue(ptr.child, arena, item, names));
+            for (value) |item| try out.append(try encodeValueTyped(ptr.child, arena, item));
             break :blk .{ .array = out };
         },
         .array => |arr| blk: {
             if (arr.child == u8) break :blk .{ .string = value[0..] };
             var out: Array = .init(arena);
-            for (value) |item| try out.append(try toValue(arr.child, arena, item, names));
+            for (value) |item| try out.append(try encodeValueTyped(arr.child, arena, item));
             break :blk .{ .array = out };
         },
         .@"struct" => |st| blk: {
             var out: Object = .empty;
             inline for (st.field_names) |fname| {
-                const key = comptime keyFor(names, fname);
-                try out.put(arena, key, try toValue(@TypeOf(@field(value, fname)), arena, @field(value, fname), names));
+                // Exact Zig field name, quoted identifiers included.
+                try out.put(arena, fname, try encodeValueTyped(@TypeOf(@field(value, fname)), arena, @field(value, fname)));
             }
             break :blk .{ .object = out };
         },
         else => error.UnsupportedType,
-    };
-}
-
-/// Serializes any Zig value to compact JSON, mapping fields through `names`.
-pub fn encodeNamed(allocator: Allocator, value: anytype, comptime names: anytype) DecodeError![]u8 {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const dynamic = try toValue(@TypeOf(value), arena.allocator(), value, names);
-    return std.json.Stringify.valueAlloc(allocator, dynamic, .{}) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
     };
 }
 
@@ -454,14 +453,9 @@ test "reads arbitrary JSON keys that are not Zig identifiers" {
     try testing.expectEqualStrings("https://example.com/schema", getString(&obj, "$schema").?);
     try testing.expectEqualStrings("application/json", getString(&obj, "Content-Type").?);
     try testing.expectEqualStrings("secret", getString(&obj, "X-API-Key").?);
-    try testing.expectEqual(true, getBool(&obj, "HTTP/2").?);
-    try testing.expectEqual(true, getBool(&obj, "snake_case").?);
-    try testing.expectEqual(true, getBool(&obj, "camelCase").?);
-    try testing.expectEqual(true, getBool(&obj, "PascalCase").?);
-    try testing.expectEqualStrings("application/json", getIgnoreCase(&obj, "content-type").?.string);
+    try testing.expect(getBool(&obj, "HTTP/2").?);
 
-    // Dynamic object serialization retains arbitrary keys exactly.
-    const encoded = try std.json.Stringify.valueAlloc(testing.allocator, parsed, .{});
+    const encoded = try encode(testing.allocator, obj);
     defer testing.allocator.free(encoded);
     const roundTrip = try parse(arena.allocator(), encoded);
     for ([_][]const u8{ "user-name", "user_name", "user.name", "user name", "user@email", "user/id", "123user", "@context", "$schema", "Content-Type", "X-API-Key", "HTTP/2", "snake_case", "camelCase", "PascalCase" }) |key| {
@@ -472,34 +466,73 @@ test "reads arbitrary JSON keys that are not Zig identifiers" {
     try testing.expect(getIgnoreCase(&obj, "CONTENT-TYPE") != null);
 }
 
-test "decodes and encodes structs through an explicit key map" {
+test "quoted identifiers decode and encode every arbitrary JSON key" {
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     const User = struct {
+        @"user-name": []const u8,
         user_name: []const u8,
-        context: []const u8,
-        user_id: u32,
-        nickname: ?[]const u8 = null,
+        @"user.name": []const u8,
+        @"user name": []const u8,
+        @"user@email": []const u8,
+        @"user/id": u32,
+        @"123user": []const u8,
+        @"@context": []const u8,
+        @"$schema": []const u8,
+        @"Content-Type": []const u8,
+        @"X-API-Key": []const u8,
+        @"HTTP/2": bool,
+        snake_case: bool,
+        camelCase: bool,
+        PascalCase: bool,
     };
-    const names = .{ .user_name = "user-name", .context = "@context", .user_id = "user/id" };
 
     const body =
-        \\{"user-name":"Example User","@context":"https://schema.org","user/id":7,"extra":true}
+        \\{
+        \\  "user-name": "Fiaz",
+        \\  "user_name": "Fiaz",
+        \\  "user.name": "Fiaz",
+        \\  "user name": "Fiaz",
+        \\  "user@email": "fiaz@example.com",
+        \\  "user/id": 123,
+        \\  "123user": "Fiaz",
+        \\  "@context": "https://schema.org",
+        \\  "$schema": "https://example.com/schema",
+        \\  "Content-Type": "application/json",
+        \\  "X-API-Key": "secret",
+        \\  "HTTP/2": true,
+        \\  "snake_case": true,
+        \\  "camelCase": true,
+        \\  "PascalCase": true
+        \\}
     ;
-    const user = try decodeNamed(User, arena.allocator(), body, names);
-    try testing.expectEqualStrings("Example User", user.user_name);
-    try testing.expectEqualStrings("https://schema.org", user.context);
-    try testing.expectEqual(@as(u32, 7), user.user_id);
-    try testing.expect(user.nickname == null);
 
-    const encoded = try encodeNamed(testing.allocator, user, names);
+    const user = try decode(User, arena.allocator(), body);
+    try testing.expectEqualStrings("Fiaz", user.@"user-name");
+    try testing.expectEqualStrings("Fiaz", user.user_name);
+    try testing.expectEqualStrings("Fiaz", user.@"user.name");
+    try testing.expectEqualStrings("Fiaz", user.@"user name");
+    try testing.expectEqualStrings("fiaz@example.com", user.@"user@email");
+    try testing.expectEqual(@as(u32, 123), user.@"user/id");
+    try testing.expectEqualStrings("Fiaz", user.@"123user");
+    try testing.expectEqualStrings("https://schema.org", user.@"@context");
+    try testing.expectEqualStrings("https://example.com/schema", user.@"$schema");
+    try testing.expectEqualStrings("application/json", user.@"Content-Type");
+    try testing.expectEqualStrings("secret", user.@"X-API-Key");
+    try testing.expect(user.@"HTTP/2");
+    try testing.expect(user.snake_case);
+    try testing.expect(user.camelCase);
+    try testing.expect(user.PascalCase);
+
+    // Encoding uses the exact same quoted field names.
+    const encoded = try encode(testing.allocator, user);
     defer testing.allocator.free(encoded);
-    try testing.expect(std.mem.indexOf(u8, encoded, "\"user-name\":\"Example User\"") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded, "\"user-name\":\"Fiaz\"") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded, "\"user/id\":123") != null);
     try testing.expect(std.mem.indexOf(u8, encoded, "\"@context\":\"https://schema.org\"") != null);
-    try testing.expect(std.mem.indexOf(u8, encoded, "\"user/id\":7") != null);
-    try testing.expect(std.mem.indexOf(u8, encoded, "\"nickname\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded, "\"HTTP/2\":true") != null);
 }
 
 test "missing required fields and wrong tokens are reported" {
@@ -538,8 +571,8 @@ test "round-trips nested structures, enums, and slices" {
         .address = .{ .city = "Lahore", .zip = "54000" },
     };
 
-    const encoded = try encodeNamed(arena.allocator(), profile, .{});
-    const decoded = try decodeNamed(Profile, arena.allocator(), encoded, .{});
+    const encoded = try encode(arena.allocator(), profile);
+    const decoded = try decode(Profile, arena.allocator(), encoded);
     try testing.expectEqualStrings("Example User", decoded.name);
     try testing.expectEqual(Role.admin, decoded.role);
     try testing.expect(decoded.active);

@@ -5,8 +5,8 @@ Per-request options on the client and `Context` helpers on the server.
 ```zig
 // Client: headers, query, auth, and JSON bodies in one call.
 var res = try client.post("https://api.example.com/users", .{
-    .headers = &.{.{ .name = "X-Request-Id", .value = "123" }},
-    .query = &.{.{ .name = "verbose", .value = "1" }},
+    .headers = .{ .@"X-Request-Id" = "123" },
+    .query = .{ .verbose = "1" },
     .bearerAuth = "demo-token",
     .json = .{ .name = "Alice", .role = "admin" },
     .timeoutMs = 10_000,

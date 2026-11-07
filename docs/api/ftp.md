@@ -37,14 +37,18 @@ pub fn main() !void {
 
 ## High-Level File Download
 
-For one-shot file downloads with automated progress bars, cryptographic hash verification, and atomic file replacement, use `httpx.client.download.ftpDownload`:
+For file downloads with automated progress bars, cryptographic hash verification, and atomic file replacement, initialize `httpx.client.ftp.Client` once and reuse it:
 
 ```zig
-const res = try httpx.client.download.ftpDownload(io, allocator, .{
+var ftp = try httpx.client.ftp.init(allocator, io, .{
     .host = "test.rebex.net",
     .port = 21,
     .user = "demo",
     .password = "password",
+});
+defer ftp.deinit();
+
+const res = try ftp.download(.{
     .remotePath = "readme.txt",
     .destinationPath = "downloads/readme.txt",
     .progress = .auto,
@@ -53,6 +57,9 @@ const res = try httpx.client.download.ftpDownload(io, allocator, .{
     },
 });
 ```
+
+The allocator and I/O engine are provided only to `Client.init`; every
+`download` call reuses them.
 
 ## Types and Configuration
 

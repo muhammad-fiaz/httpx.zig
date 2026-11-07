@@ -38,29 +38,37 @@ defer server.deinit();
 | `route` | `[]const u8` | `"/docs"` | Page and asset prefix |
 | `title` | `[]const u8` | `"Swagger UI"` | HTML document title |
 | `docExpansion` | `DocExpansion` | `.list` | `list`, `full`, or `none` |
+| `defaultModelRendering` | `DefaultModelRendering` | `.example` | `example` or `model` |
+| `defaultModelsExpandDepth` | `i32` | `1` | Model section depth; `-1` hides it |
+| `defaultModelExpandDepth` | `i32` | `1` | Depth of a single model |
 | `deepLinking` | `bool` | `true` | Update the URL with the active operation |
 | `displayOperationId` | `bool` | `false` | Show `operationId` values |
 | `displayRequestDuration` | `bool` | `false` | Show request timings |
 | `filter` | `bool` | `false` | Show the operation filter box |
 | `persistAuthorization` | `bool` | `false` | Keep auth data across reloads |
 | `tryItOutEnabled` | `bool` | `false` | Expand “Try it out” by default |
-| `defaultModelsExpandDepth` | `i32` | `1` | Model section depth; `-1` hides it |
+| `showExtensions` | `bool` | `false` | Show vendor extensions |
+| `showCommonExtensions` | `bool` | `false` | Show common extensions |
+| `showMutatedRequest` | `bool` | `true` | Show the mutated request |
+| `withCredentials` | `bool` | `false` | Send credentials on try-it-out requests |
+| `useUnsafeMarkdown` | `bool` | `false` | Allow unsafe Markdown rendering |
+| `requestSnippetsEnabled` | `bool` | `false` | Show request snippets |
+| `maxDisplayedTags` | `?i32` | `null` | Maximum tags; null shows all |
+| `validatorUrl` | `?[]const u8` | `null` | Validator URL; null disables it |
+| `supportedSubmitMethods` | `[]const SubmitMethod` | `&.{}` | Methods allowed in try-it-out |
 | `oauth2RedirectUrl` | `?[]const u8` | `null` | Redirect URL; defaults to `{route}/oauth2-redirect.html` |
-| `rawOptions` | `?[]const u8` | `null` | Extra options as a JSON object, merged last |
 
 Every field is serialized into the page's `SwaggerUIBundle` options object, so
-it reaches the bundled UI. `rawOptions` covers vendor options that are not
-modeled as fields:
+it reaches the bundled UI:
 
 ```zig
 .swagger = .{
     .route = "/docs",
-    .rawOptions = "{\"maxDisplayedTags\":5,\"displayRequestDuration\":true}",
+    .maxDisplayedTags = 5,
+    .displayRequestDuration = true,
+    .supportedSubmitMethods = &.{ .get, .post },
 },
 ```
-
-Raw keys are merged last and must form a JSON object, otherwise the mount
-returns `error.InvalidOptionsJson`.
 
 The route must not conflict with an existing router route. Mounting reports a
 duplicate route error instead of replacing an application route.

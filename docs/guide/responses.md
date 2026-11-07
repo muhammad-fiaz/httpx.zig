@@ -22,6 +22,21 @@ const User = struct {
 const user = try response.json(User);
 ```
 
+Use quoted identifiers when JSON keys differ from ordinary Zig names:
+
+```zig
+const User = struct {
+    @"user-name": []const u8,
+    @"@context": []const u8,
+};
+
+const user = try response.json(User);
+```
+
+For dynamic shapes use `response.jsonValue()` and read keys from the returned
+object. All decoded values are owned by the response and released by
+`response.deinit()`. See [JSON typed structs](/api/data#typed-structs).
+
 ## Header Inspection
 
 Headers are queried case-insensitively:

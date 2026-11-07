@@ -105,7 +105,7 @@ pub fn main() !void {
 
     std.debug.print("[integration] Client sending POST {s} with JSON...\n", .{usersUrl});
     var res2 = try client.post(usersUrl, .{
-        .json = UserPayload{
+        .json = .{
             .name = "Alice",
             .role = "Administrator",
         },

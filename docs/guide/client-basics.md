@@ -44,18 +44,8 @@ Responses own their headers and body; call `deinit()` exactly once.
 ## Send a JSON request
 
 ```zig
-const CreateUser = struct {
-    name: []const u8,
-    email: []const u8,
-};
-
-const request_data = CreateUser{
-    .name = "Alice",
-    .email = "alice@example.com",
-};
-
 var response = try client.post("https://api.example.com/users", .{
-    .json = request_data,
+    .json = .{ .name = "Alice", .email = "alice@example.com" },
 });
 defer response.deinit();
 ```

@@ -262,11 +262,11 @@ exe.root_module.addImport("httpx", httpx_dep.module("httpx"));
 ## Quick Start
 
 
-One `App` owns the outbound HTTP client and the inbound HTTP server, so every
-operation reuses the same allocator and `std.Io`. The program below exercises
-the complete surface — typed REST, a raw route, the GraphQL endpoint, every
-docs UI, and the client verbs — and was verified end-to-end (every route
-returns HTTP 200).
+`httpx.Server` serves the inbound side and `httpx.Client` handles outbound
+calls; both are created with the same allocator and `std.Io` and configured
+with a single `.{}` literal. The program below exercises the complete
+surface — typed REST, a raw route, the GraphQL endpoint, every docs UI, and
+the client verbs — and was verified end-to-end (every route returns HTTP 200).
 
 ```zig
 const std = @import("std");
@@ -276,7 +276,7 @@ const httpx = @import("httpx");
 const User = struct { id: u64, name: []const u8 };
 const CreateUser = struct { name: []const u8 };
 
-// GraphQL type and resolver: struct-driven, same JSON engine as REST.
+// GraphQL type and resolver: explicit spec, same JSON engine as REST.
 const Scalar = httpx.graphql.Scalar;
 const UserType = httpx.graphql.Type("User", .{
     .id = Scalar.id,
@@ -314,17 +314,19 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     const io = std.Io.Threaded.global_single_threaded.io();
 
-    // One init owns app.client (outbound) and app.server (inbound).
-    var app = try httpx.App.init(allocator, io, .{
+    // The server owns the listener, router, docs, and GraphQL mount; the
+    // client handles every outbound call. Both take the same allocator/io.
+    var server = try httpx.Server.init(allocator, io, .{
         .host = "127.0.0.1",
         .port = 0, // 0: OS picks a free port
-        .client = .{ .timeoutMs = 10_000 }, // outbound client defaults
     });
-    defer app.deinit();
+    defer server.deinit();
+    var client = httpx.Client.init(allocator, io, .{ .timeoutMs = 10_000 });
+    defer client.deinit();
 
     // Register routes before docs so the OpenAPI snapshot includes them.
-    try app.get("/health", .{ .handler = health, .summary = "Health check", .tags = &.{"system"} });
-    try app.get("/users/{id:int}", .{
+    try server.get("/health", .{ .handler = health, .summary = "Health check", .tags = &.{"system"} });
+    try server.get("/users/{id:int}", .{
         .handler = getUser,
         .summary = "Get user",
         .tags = &.{"users"},
@@ -337,7 +339,7 @@ pub fn main() !void {
             .{ .status = 404, .description = "Not found" },
         },
     });
-    try app.post("/users", .{
+    try server.post("/users", .{
         .handler = createUser,
         .summary = "Create user",
         .tags = &.{"users"},
@@ -348,12 +350,12 @@ pub fn main() !void {
     const graph_schema = httpx.graphql.Schema.init(allocator, io, .{
         .query = QueryRoot,
         .types = &.{UserType},
-        .enableIntrospection = true,
+        .introspection = true,
     });
-    try app.graphql(graph_schema, .{ .endpoint = "/graphql" });
+    try server.graphql(graph_schema, .{ .endpoint = "/graphql" });
 
     // Every bundled UI explicitly enabled; all assets embedded and offline.
-    try app.docs(.{
+    try server.docs(.{
         .enabled = true,
         .title = "Quick Start API",
         .version = httpx.version,
@@ -391,10 +393,10 @@ pub fn main() !void {
         },
     });
 
-    const port = (&app.server).localPort();
-    const thread = try app.server.start();
+    const port = server.localPort();
+    const thread = try server.start();
     defer {
-        app.server.requestShutdown();
+        server.requestShutdown();
         thread.join();
     }
 
@@ -402,30 +404,30 @@ pub fn main() !void {
     defer allocator.free(base);
     var url_buf: [512]u8 = undefined;
 
-    // Client verbs reuse app.client and the allocator/io from init.
+    // Client verbs reuse the same allocator/io as the server.
     const health_url = try std.fmt.bufPrint(&url_buf, "{s}/health", .{base});
-    var health_res = try app.client.get(health_url, .{});
+    var health_res = try client.get(health_url, .{});
     defer health_res.deinit();
     std.debug.print("GET /health -> {d}: {s}\n", .{ health_res.status, health_res.bytes() });
 
     const user_url = try std.fmt.bufPrint(&url_buf, "{s}/users/7", .{base});
-    var user_res = try app.client.get(user_url, .{});
+    var user_res = try client.get(user_url, .{});
     defer user_res.deinit();
     std.debug.print("GET /users/7 -> {d}: {s}\n", .{ user_res.status, user_res.bytes() });
 
     const post_url = try std.fmt.bufPrint(&url_buf, "{s}/users", .{base});
-    var post_res = try app.client.post(post_url, .{ .json = CreateUser{ .name = "bob" } });
+    var post_res = try client.post(post_url, .{ .json = .{ .name = "bob" } });
     defer post_res.deinit();
     std.debug.print("POST /users -> {d}: {s}\n", .{ post_res.status, post_res.bytes() });
 
-    var req_res = try app.client.request(health_url, .{ .method = .GET });
+    var req_res = try client.request(health_url, .{ .method = .GET });
     defer req_res.deinit();
-    var fetch_res = try app.client.fetch(health_url, .{});
+    var fetch_res = try client.fetch(health_url, .{});
     defer fetch_res.deinit();
 
     // GraphQL over the same client.
     const gql_url = try std.fmt.bufPrint(&url_buf, "{s}/graphql", .{base});
-    var gql_res = try app.client.graphql(gql_url, "{ me { id name } }", null, .{});
+    var gql_res = try client.graphql(gql_url, "{ me { id name } }", null, .{});
     defer gql_res.deinit();
     std.debug.print("POST /graphql -> {d}: {s}\n", .{ gql_res.status, gql_res.bytes() });
 
@@ -435,7 +437,7 @@ pub fn main() !void {
     // (GraphiQL IDE) — open any of them in a browser.
 
     // Download and FTP reuse their initialized owners:
-    // _ = try app.client.download(health_url, .{ .path = "downloads/health.txt" });
+    // _ = try client.download(health_url, .{ .path = "downloads/health.txt" });
     // var ftp = try httpx.client.ftp.init(allocator, io, .{ .host = "ftp.example.com" });
     // defer ftp.deinit();
     // _ = try ftp.download(.{ .remotePath = "/pub/file.txt", .destinationPath = "downloads/file.txt" });

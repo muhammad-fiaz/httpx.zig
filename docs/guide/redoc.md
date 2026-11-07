@@ -37,27 +37,32 @@ defer server.deinit();
 | `hideHostname` | `bool` | `false` | Hide the API hostname |
 | `hideDownloadButton` | `bool` | `false` | Hide the OpenAPI download button |
 | `hideFab` | `bool` | `false` | Hide the floating action button |
+| `hideLoading` | `bool` | `false` | Hide the loading indicator |
+| `hideLogo` | `bool` | `false` | Hide the ReDoc logo |
+| `hideSecuritySection` | `bool` | `false` | Hide the security section |
 | `expandResponses` | `[]const u8` | `""` | Status codes expanded by default, e.g. `"200,201"` |
 | `pathInMiddlePanel` | `bool` | `false` | Show the endpoint path in the middle panel |
 | `requiredPropsFirst` | `bool` | `false` | List required properties first |
 | `sortPropsAlphabetically` | `bool` | `false` | Sort properties alphabetically |
+| `sortEnumValuesAlphabetically` | `bool` | `false` | Sort enum values alphabetically |
 | `noAutoAuth` | `bool` | `false` | Disable automatic auth section |
 | `disableSearch` | `bool` | `false` | Disable the search box |
-| `rawOptions` | `?[]const u8` | `null` | Extra options as a JSON object, merged last |
+| `nativeScrollbars` | `bool` | `false` | Use native scrollbars |
+| `onlyRequiredInSamples` | `bool` | `false` | Show only required fields in samples |
+| `menuToggle` | `bool` | `false` | Show the menu toggle |
+| `jsonSampleExpandLevel` | `i32` | `2` | Default JSON sample depth |
+| `generatedPayloadSamplesMaxDepth` | `i32` | `10` | Maximum generated sample depth |
+| `scrollYOffset` | `?i32` | `null` | Scroll offset; null uses the vendor default |
 
-Options are passed as the second argument of `init(specUrl, options, element)`.
-`rawOptions` is merged last, so it can set any ReDoc option the bundled version
-supports:
+Options are passed as the second argument of `init(specUrl, options, element)`:
 
 ```zig
 .redoc = .{
     .route = "/reference",
-    .rawOptions = "{\"theme\":{\"colors\":{\"primary\":{\"main\":\"#1f6feb\"}}}}",
+    .hideDownloadButton = true,
+    .jsonSampleExpandLevel = 3,
 },
 ```
-
-Raw keys must form a JSON object, otherwise the mount returns
-`error.InvalidOptionsJson`.
 
 ReDoc is read-only. Use Swagger UI when interactive request execution is
 required.
