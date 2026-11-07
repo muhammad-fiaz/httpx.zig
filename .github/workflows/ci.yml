@@ -94,6 +94,7 @@ jobs:
         include:
           - { name: aarch64-macos, target: aarch64-macos, os: macos-latest }
           - { name: x86_64-macos, target: x86_64-macos, os: macos-15-intel }
+          - { name: x86-macos, target: x86-macos, os: macos-15-intel }
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
@@ -110,7 +111,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: x86-macos, target: x86-macos }
           - { name: arm-linux-gnueabihf, target: arm-linux-gnueabihf }
           - { name: x86-freestanding, target: x86-freestanding }
     steps:

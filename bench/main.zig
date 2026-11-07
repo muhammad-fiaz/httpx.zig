@@ -1077,7 +1077,7 @@ pub fn main() !void {
     // Each teardown defer is registered only after its setup succeeds,
     // so a fatal setup error exits without joining garbage threads.
     h2BenchIo = io;
-    h2BenchListener = try httpx.socket.tcp.Listener.bind(io, 0);
+    h2BenchListener = try httpx.socket.tcp.init(benchAllocator, io, .{});
     const h2port = h2BenchListener.localPort();
     h2BenchThread = try std.Thread.spawn(.{}, h2BenchServe, .{});
     h2BenchUrlSlice = try std.fmt.bufPrint(&h2BenchUrl, "http://127.0.0.1:{d}/ping", .{h2port});
@@ -1117,7 +1117,7 @@ pub fn main() !void {
 
     // 9. TLS loopback server (tickets enabled) + one captured session
     tlsBenchIo = io;
-    tlsBenchListener = try httpx.socket.tcp.Listener.bind(io, 0);
+    tlsBenchListener = try httpx.socket.tcp.init(benchAllocator, io, .{});
     tlsBenchPort = tlsBenchListener.localPort();
     tlsBenchThread = try std.Thread.spawn(.{}, tlsBenchServe, .{});
     defer {
@@ -1269,38 +1269,32 @@ pub fn main() !void {
     std.debug.print("                         Generated Markdown Table                                \n", .{});
     std.debug.print("=================================================================================\n\n", .{});
 
-    std.debug.print("| Benchmark | Category | Avg Latency | Throughput | Target |\n", .{});
-    std.debug.print("| :--- | :--- | :---: | :---: | :---: |\n", .{});
+    std.debug.print("| Benchmark | Category | Avg Latency | Throughput |\n", .{});
+    std.debug.print("| :--- | :--- | :---: | :---: |\n", .{});
     for (recordedMetrics.items) |m| {
         if (m.avgNs < 1000.0) {
-            std.debug.print("| `{s}` | {s} | {d:.2} ns/op | **{d} {s}** | `{s}-{s}` |\n", .{
+            std.debug.print("| `{s}` | {s} | {d:.2} ns/op | **{d} {s}** |\n", .{
                 m.name,
                 m.category,
                 m.avgNs,
                 m.opsPerSec,
                 m.unit,
-                @tagName(builtin.cpu.arch),
-                @tagName(builtin.os.tag),
             });
         } else if (m.avgNs < 1_000_000.0) {
-            std.debug.print("| `{s}` | {s} | {d:.2} µs/op | **{d} {s}** | `{s}-{s}` |\n", .{
+            std.debug.print("| `{s}` | {s} | {d:.2} µs/op | **{d} {s}** |\n", .{
                 m.name,
                 m.category,
                 m.avgNs / 1000.0,
                 m.opsPerSec,
                 m.unit,
-                @tagName(builtin.cpu.arch),
-                @tagName(builtin.os.tag),
             });
         } else {
-            std.debug.print("| `{s}` | {s} | {d:.2} ms/op | **{d} {s}** | `{s}-{s}` |\n", .{
+            std.debug.print("| `{s}` | {s} | {d:.2} ms/op | **{d} {s}** |\n", .{
                 m.name,
                 m.category,
                 m.avgNs / 1_000_000.0,
                 m.opsPerSec,
                 m.unit,
-                @tagName(builtin.cpu.arch),
-                @tagName(builtin.os.tag),
             });
         }
     }

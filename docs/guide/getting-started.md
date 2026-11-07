@@ -58,7 +58,7 @@ in this guide when migrating from `0.2.3` (or older).
 |--------------|-------|---------|-------|-------|
 | x86_64 (64-bit) | ✅ | ✅ | ✅ | Primary development target |
 | aarch64 (ARM64) | ✅ | ✅ | ✅ | Apple Silicon, AWS Graviton, Raspberry Pi 4+ |
-| x86 (32-bit) | ✅ | ✅ | ❌ | Legacy x86 support on Linux/Windows |
+| x86 (32-bit) | ✅ | ✅ | ✅ | Legacy x86 support on all platforms |
 
 ### Cross-Compilation
 
